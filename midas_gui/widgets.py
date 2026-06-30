@@ -137,7 +137,11 @@ class ImageViewer(QtWidgets.QWidget):
             hi = float(np.percentile(fin, self._vmax.value()))
         else:
             lo, hi = 0.0, 1.0
-        self._iv.setImage(disp.astype(np.float32), autoLevels=False, levels=(lo, hi))
+        # autoRange/autoHistogramRange default to True in pyqtgraph and would reset
+        # the view on every redraw; set_image() handles framing explicitly via its
+        # `autorange` flag, so the zoom/pan is preserved across frames and re-levels.
+        self._iv.setImage(disp.astype(np.float32), autoLevels=False, levels=(lo, hi),
+                          autoRange=False, autoHistogramRange=False)
 
     def _set_cmap(self, name: str):
         try:
