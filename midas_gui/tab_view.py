@@ -23,7 +23,7 @@ from midas_gui.constants import (MATERIALS, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM
                            DEFAULT_NICKEL_H5, H5_EXTS)
 from midas_gui.helpers import (_load_image, _fspin, _NoScrollSpinBox, _browse,
                          is_h5, simulate_rings)
-from midas_gui.widgets import ImageViewer
+from midas_gui.widgets import PickableImageViewer, ProfileViewer
 from midas_gui import style as S
 
 
@@ -46,7 +46,7 @@ class DataViewerTab(QtWidgets.QWidget):
         root = QtWidgets.QHBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 6); root.setSpacing(8)
         scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True); scroll.setFixedWidth(360)
+        scroll.setWidgetResizable(True); scroll.setFixedWidth(468)
         inner = QtWidgets.QWidget(); lv = QtWidgets.QVBoxLayout(inner)
         lv.setContentsMargins(2, 2, 2, 2); lv.setSpacing(8)
         scroll.setWidget(inner)
@@ -181,8 +181,35 @@ class DataViewerTab(QtWidgets.QWidget):
         lv.addStretch(1)
         root.addWidget(scroll)
 
-        self._viewer = ImageViewer(title="")
-        root.addWidget(self._viewer, stretch=1)
+        # Right: image (top) + radial-integration plot (bottom) in a splitter.
+        right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        self._viewer = PickableImageViewer()
+        self._viewer.bcPicked.connect(self._on_bc_picked)
+        self._viewer.ringFitBC.connect(self._on_ring_fit_bc)
+        right.addWidget(self._viewer)
+
+        # Radial integration (azimuthal average around the beam centre).
+        self._profile_view = ProfileViewer()
+        ptb = self._profile_view._toolbar_layout
+        self._rad_r_bin = _fspin(0.1, 20.0, 2, 1.0, "px"); self._rad_r_bin.setFixedWidth(86)
+        self._rad_r_bin.setToolTip("Radial bin size for the azimuthal average.")
+        self._rad_r_bin.valueChanged.connect(self._on_rad_param_changed)
+        self._rad_auto = QtWidgets.QCheckBox("Auto"); self._rad_auto.setChecked(True)
+        self._rad_auto.setToolTip("Recompute the radial integration when the beam "
+                                  "centre or frame changes.")
+        self._rad_btn = QtWidgets.QPushButton("Integrate")
+        self._rad_btn.clicked.connect(self._radial_integrate)
+        ptb.insertWidget(3, self._rad_btn)
+        ptb.insertWidget(3, self._rad_auto)
+        ptb.insertWidget(3, self._rad_r_bin)
+        ptb.insertWidget(3, QtWidgets.QLabel("  R bin:"))
+        right.addWidget(self._profile_view)
+        right.setStretchFactor(0, 3); right.setStretchFactor(1, 1)
+        root.addWidget(right, stretch=1)
+
+        # Recompute rings / radial profile when the beam centre is edited manually.
+        self._bcy.valueChanged.connect(self._on_bc_changed)
+        self._bcz.valueChanged.connect(self._on_bc_changed)
 
         self._on_material(self._mat.currentText())
         # Pre-fill the default test dataset (auto-populates the HDF5 dataset dropdown)
@@ -292,7 +319,7 @@ class DataViewerTab(QtWidgets.QWidget):
                     kind = f"TIFF {arr.shape}"
             self._info_lbl.setText(f"Loaded: {kind}")
             self._setup_navigator()
-            self._set_frame(0)
+            self._set_frame(0, autorange=True)
         except Exception as e:
             import traceback
             QtWidgets.QMessageBox.critical(self, "Load error", traceback.format_exc()[:500])
@@ -369,9 +396,12 @@ class DataViewerTab(QtWidgets.QWidget):
             self._viewer.set_image(self._cur)
             if self._bc_auto.isChecked():
                 NZ, NY = self._cur.shape
-                self._bcy.setValue(NY / 2.0); self._bcz.setValue(NZ / 2.0)
+                for w, v in ((self._bcy, NY / 2.0), (self._bcz, NZ / 2.0)):
+                    w.blockSignals(True); w.setValue(v); w.blockSignals(False)
             if getattr(self, "_rings", None):
                 self._redraw_rings()
+            if self._rad_auto.isChecked():
+                self._radial_integrate()
             self._info_lbl.setText(
                 f"{method.capitalize()} projection (axis {axis}) → {proj.shape}  "
                 f"[{np.nanmin(proj):.3g}, {np.nanmax(proj):.3g}]")
@@ -379,20 +409,24 @@ class DataViewerTab(QtWidgets.QWidget):
             import traceback
             QtWidgets.QMessageBox.critical(self, "Projection error", traceback.format_exc()[:500])
 
-    def _set_frame(self, i: int):
+    def _set_frame(self, i: int, autorange: bool = False):
         if self._nframes == 0:
             return
         i = max(0, min(int(i), self._nframes - 1))
         for w in (self._slider, self._frame_spin):
             w.blockSignals(True); w.setValue(i); w.blockSignals(False)
         self._cur = self._get_frame(i)
-        self._viewer.set_image(self._cur)
+        # autorange only on a fresh load — navigating a stack keeps the zoom/pan.
+        self._viewer.set_image(self._cur, autorange=autorange)
         if self._bc_auto.isChecked():
             NZ, NY = self._cur.shape
-            self._bcy.setValue(NY / 2.0); self._bcz.setValue(NZ / 2.0)
+            for w, v in ((self._bcy, NY / 2.0), (self._bcz, NZ / 2.0)):
+                w.blockSignals(True); w.setValue(v); w.blockSignals(False)
         # redraw existing rings on the new frame
         if self._ring_items or self._label_items:
             self._redraw_rings()
+        if self._rad_auto.isChecked():
+            self._radial_integrate()
 
     # ── Ring simulation ───────────────────────────────────────────
 
@@ -409,6 +443,10 @@ class DataViewerTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.critical(self, "Simulation error", traceback.format_exc()[:500]); return
         self._rings = rings
         self._redraw_rings()
+        if self._rad_auto.isChecked():
+            self._radial_integrate()
+        else:
+            self._refresh_profile_markers()
         lines = [f"{len(rings)} rings  (material: {self._mat.currentText()})",
                  f"{'hkl':>10}  {'2θ(°)':>7}  {'d(Å)':>7}  {'R(px)':>8}"]
         for r in rings:
@@ -459,3 +497,70 @@ class DataViewerTab(QtWidgets.QWidget):
             it.setVisible(vis_r)
         for it in self._label_items:
             it.setVisible(vis_l)
+
+    # ── Beam-centre picking / radial integration ──────────────────
+
+    def _on_bc_picked(self, bc_y, bc_z):
+        """Single-click BC pick from the image (PickableImageViewer)."""
+        self._bc_auto.setChecked(False)
+        self._bcy.setValue(bc_y); self._bcz.setValue(bc_z)   # triggers _on_bc_changed
+
+    def _on_ring_fit_bc(self, bc_y, bc_z, r_px):
+        """BC from a 3+ point circle fit on a ring (PickableImageViewer)."""
+        self._bc_auto.setChecked(False)
+        self._bcy.setValue(bc_y); self._bcz.setValue(bc_z)   # triggers _on_bc_changed
+
+    def _on_bc_changed(self, *_):
+        """Beam centre edited (manually or by a pick) — refresh overlays/plot."""
+        if getattr(self, "_rings", None):
+            self._redraw_rings()
+        if self._rad_auto.isChecked():
+            self._radial_integrate()
+
+    def _on_rad_param_changed(self, *_):
+        if self._rad_auto.isChecked():
+            self._radial_integrate()
+
+    def _refresh_profile_markers(self):
+        rings = getattr(self, "_rings", None)
+        if rings:
+            self._profile_view.set_ring_markers(
+                [r["radius_px"] for r in rings],
+                self._lsd.value(), self._px.value(), self._wl.value())
+        else:
+            self._profile_view.set_ring_markers([])
+
+    def _radial_integrate(self):
+        """Azimuthal average of the current frame about the beam centre."""
+        if self._cur is None:
+            return
+        r_axis, prof = self._radial_profile(
+            self._cur, self._bcy.value(), self._bcz.value(), self._rad_r_bin.value())
+        self._profile_view.set_profile(
+            r_axis, prof, wavelength_A=self._wl.value(),
+            lsd_um=self._lsd.value(), px_um=self._px.value())
+        self._refresh_profile_markers()
+
+    @staticmethod
+    def _radial_profile(img: np.ndarray, bc_y: float, bc_z: float,
+                        r_bin: float = 1.0):
+        """Mean intensity vs radius (px) about (bc_y, bc_z).
+
+        bc_y is the column (Y/x) and bc_z the row (Z/y); image shape is (NZ, NY).
+        Returns (r_axis_px, profile) with NaN in empty bins.
+        """
+        NZ, NY = img.shape
+        zz, yy = np.indices((NZ, NY))
+        r = np.hypot(yy - bc_y, zz - bc_z)
+        r_bin = max(float(r_bin), 1e-6)
+        nbins = max(1, int(r.max() / r_bin) + 1)
+        which = np.minimum((r / r_bin).astype(np.int64), nbins - 1).ravel()
+        vals = img.ravel()
+        good = np.isfinite(vals)
+        sums = np.bincount(which[good], weights=vals[good], minlength=nbins)
+        counts = np.bincount(which[good], minlength=nbins)
+        prof = np.full(nbins, np.nan, dtype=np.float64)
+        nz = counts > 0
+        prof[nz] = sums[nz] / counts[nz]
+        r_axis = (np.arange(nbins) + 0.5) * r_bin
+        return r_axis, prof

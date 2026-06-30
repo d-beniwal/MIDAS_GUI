@@ -60,7 +60,7 @@ class MaskTab(QtWidgets.QWidget):
         root.setContentsMargins(6, 6, 6, 6); root.setSpacing(8)
 
         scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True); scroll.setFixedWidth(360)
+        scroll.setWidgetResizable(True); scroll.setFixedWidth(468)
         inner = QtWidgets.QWidget(); lv = QtWidgets.QVBoxLayout(inner)
         lv.setContentsMargins(2, 2, 2, 2); lv.setSpacing(8)
         scroll.setWidget(inner)

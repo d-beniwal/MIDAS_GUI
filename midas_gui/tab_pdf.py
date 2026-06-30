@@ -41,7 +41,7 @@ class PDFTab(QtWidgets.QWidget):
         root = QtWidgets.QHBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 6); root.setSpacing(8)
         scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True); scroll.setFixedWidth(420)
+        scroll.setWidgetResizable(True); scroll.setFixedWidth(546)
         inner = QtWidgets.QWidget(); lv = QtWidgets.QVBoxLayout(inner); lv.setSpacing(6)
         scroll.setWidget(inner)
 
