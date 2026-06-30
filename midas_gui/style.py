@@ -169,6 +169,30 @@ def stylesheet(checkmark_svg: str, up_arrow_svg: str = "", down_arrow_svg: str =
         background: #1d1d1f; color: #d6d6d6; gridline-color: #3a3a3a;
         border: 1px solid {BORDER}; border-radius: 3px;
     }}
+
+    /* ── Item views (file dialogs, lists, trees) ──────────────────
+       Without explicit colours these inherit the global off-white
+       text on a default light background, making file/folder names
+       invisible until selected — notably in Qt's non-native file
+       dialog on Linux. */
+    QTreeView, QListView, QColumnView, QTableView {{
+        background: #1d1d1f; color: #d6d6d6;
+        alternate-background-color: #242427;
+        selection-background-color: {ACCENT}; selection-color: white;
+        border: 1px solid {BORDER}; outline: 0;
+    }}
+    QTreeView::item, QListView::item, QColumnView::item {{ color: #d6d6d6; }}
+    QTreeView::item:hover, QListView::item:hover, QColumnView::item:hover {{
+        background: #2a2a2d;
+    }}
+    QTreeView::item:selected, QListView::item:selected, QColumnView::item:selected {{
+        background: {ACCENT}; color: white;
+    }}
+    /* The file dialog chrome (labels, side bar, look-in combo). */
+    QFileDialog {{ background: {BG}; }}
+    QFileDialog QLabel, QFileDialog QToolButton, QFileDialog QCheckBox {{
+        color: {TEXT}; background: transparent;
+    }}
     QSlider::groove:horizontal {{ height: 4px; background: #2a2a2d; border-radius: 2px; }}
     QSlider::handle:horizontal {{
         background: {ACCENT}; width: 12px; margin: -5px 0; border-radius: 6px;
