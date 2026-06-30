@@ -1,0 +1,53 @@
+name: midas-gui
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+
+dependencies:
+  # ── Python ───────────────────────────────────────────────────────────────
+  - python=3.12
+
+  # ── PyTorch (CPU build; swap for pytorch-cuda=12.1 for GPU support) ─────
+  - pytorch>=2.0
+  - cpuonly                     # remove this line and add pytorch-cuda=XX.X for GPU
+
+  # ── Scientific stack ─────────────────────────────────────────────────────
+  - numpy>=1.24
+  - scipy>=1.10
+  - h5py>=3.8
+  - tifffile>=2023.1
+
+  # ── GUI ──────────────────────────────────────────────────────────────────
+  - pyqtgraph>=0.13
+  - pip                         # needed to install PyQt5 and MIDAS packages
+
+  - pip:
+    # PyQt5 is more reliably installed via pip than conda on macOS/Linux
+    - "PyQt5>=5.15"
+
+    # ── midas-gui itself ─────────────────────────────────────────────────
+    # Install in editable mode so local edits are reflected immediately.
+    # Replace with `midas-gui` (no -e) once a release is on PyPI/GitHub.
+    - "-e /Users/dbeniwal/ANL-research/github/midas-gui"
+
+    # ── MIDAS analysis backend ───────────────────────────────────────────
+    # These packages are not on PyPI.  Install them from their source trees
+    # in the MIDAS monorepo, or from a private package index if available.
+    #
+    # Option A — editable installs from the MIDAS monorepo (recommended for
+    # developers who have the repo cloned):
+    - "-e /Users/dbeniwal/ANL-research/github/MIDAS/packages/midas_calibrate_v2"
+    - "-e /Users/dbeniwal/ANL-research/github/MIDAS/packages/midas_integrate_v2"
+    #
+    # Option B — install from GitHub (replace <owner> with the actual org/user):
+    # - "midas-calibrate-v2 @ git+https://github.com/<owner>/MIDAS.git#subdirectory=packages/midas_calibrate_v2"
+    # - "midas-integrate-v2 @ git+https://github.com/<owner>/MIDAS.git#subdirectory=packages/midas_integrate_v2"
+    #
+    # Option C — private package index:
+    # - "--index-url https://your-private-pypi.example.com/simple"
+    # - "midas-calibrate-v2>=0.3"
+    # - "midas-integrate-v2>=0.1"
+    # - "midas-calibrate>=0.2"
+    # - "midas-hkls>=0.4"
+    # - "midas-distortion>=0.2"

@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "midas-gui"
+version = "1.0.0"
+description = "PyQt5 GUI for the MIDAS X-ray diffraction analysis suite"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+
+# Core GUI + scientific stack — all available on PyPI / conda-forge.
+# MIDAS analysis packages (midas-calibrate-v2, midas-integrate-v2, …) are
+# NOT on PyPI; install them separately following the instructions in README.md.
+dependencies = [
+    "PyQt5>=5.15",
+    "pyqtgraph>=0.13",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "h5py>=3.8",
+    "tifffile>=2023.1",
+    "torch>=2.0",
+]
+
+[project.optional-dependencies]
+# Install the full MIDAS analysis backend (requires a private/local source —
+# see README.md for how to obtain these packages).
+midas = [
+    "midas-calibrate-v2>=0.3",
+    "midas-integrate-v2>=0.1",
+    "midas-calibrate>=0.2",
+    "midas-hkls>=0.4",
+    "midas-distortion>=0.2",
+]
+# Development extras
+dev = [
+    "pytest>=7",
+    "ruff",
+]
+
+[project.scripts]
+midas-gui = "midas_gui.app:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["midas_gui*"]
+
+[tool.setuptools.package-data]
+midas_gui = ["py.typed"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
