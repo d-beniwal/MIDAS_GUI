@@ -22,7 +22,7 @@ from midas_gui.constants import (MATERIALS, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM
                            DEFAULT_LSD_UM, DEFAULT_BC_Y, DEFAULT_BC_Z,
                            DEFAULT_NICKEL_H5, H5_EXTS)
 from midas_gui.helpers import (_load_image, _fspin, _NoScrollSpinBox, _browse,
-                         is_h5, simulate_rings)
+                         is_h5, simulate_rings, read_geometry)
 from midas_gui.widgets import PickableImageViewer, ProfileViewer
 from midas_gui import style as S
 
@@ -38,6 +38,8 @@ class DataViewerTab(QtWidgets.QWidget):
         self._cur: Optional[np.ndarray] = None     # current 2-D frame
         self._ring_items: list = []
         self._label_items: list = []
+        self._pick_ring_item = None                # arc drawn from a profile click
+        self._picked_r: Optional[float] = None
         self._build_ui()
 
     # ── UI ────────────────────────────────────────────────────────
@@ -121,6 +123,44 @@ class DataViewerTab(QtWidgets.QWidget):
         self._proj_grp.setEnabled(False)
         lv.addWidget(self._proj_grp)
 
+        # ── Calibration card ──
+        calc = S.make_card("Calibration  (optional)")
+        self._calib_ed = QtWidgets.QLineEdit()
+        self._calib_ed.setPlaceholderText("calibration.json / paramstest.txt / .poni…")
+        calc.body.addLayout(_frow(self._calib_ed, self._browse_calib))
+        load_cal = QtWidgets.QPushButton("Load calibration")
+        load_cal.setToolTip("Read BC, Lsd, pixel size and wavelength from a MIDAS paramstest, "
+                            "a pyFAI .poni, or a calibration.json file, and use them for the "
+                            "ring overlay and radial integration.")
+        load_cal.clicked.connect(self._load_calibration)
+        calc.body.addWidget(load_cal)
+        self._calib_lbl = QtWidgets.QLabel("No calibration loaded — using manual geometry / BC.")
+        self._calib_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        self._calib_lbl.setWordWrap(True)
+        calc.body.addWidget(self._calib_lbl)
+        lv.addWidget(calc)
+
+        # ── Intensity range mask card ──
+        imc = S.make_card("Intensity range  (radial integration)")
+        self._imask_on = QtWidgets.QCheckBox("Exclude out-of-range pixels")
+        self._imask_on.setToolTip(
+            "Pixels ≤ min or > max are masked: drawn as a red overlay on the image\n"
+            "and excluded from the radial integration (removes gaps / hot / overflow).")
+        imc.body.addWidget(self._imask_on)
+        self._imask_lo = _fspin(-1e9, 1e9, 1, 0.0)
+        self._imask_lo.setToolTip("Pixels ≤ this value are masked (dead / gap / beam-stop).")
+        self._imask_hi = _fspin(0, 5e9, 0, 1_048_575)
+        self._imask_hi.setToolTip("Pixels > this value are masked (hot / overflow).")
+        imc.body.addLayout(S.Form().row(("pixel ≤", self._imask_lo), ("pixel >", self._imask_hi)))
+        for w in (self._imask_lo, self._imask_hi):
+            w.setEnabled(False)
+        self._imask_on.toggled.connect(
+            lambda c: (self._imask_lo.setEnabled(c), self._imask_hi.setEnabled(c)))
+        self._imask_on.toggled.connect(self._on_imask_changed)
+        self._imask_lo.valueChanged.connect(self._on_imask_changed)
+        self._imask_hi.valueChanged.connect(self._on_imask_changed)
+        lv.addWidget(imc)
+
         # ── Ring simulation card ──
         ring = S.make_card("Ring simulation")
         self._mat = QtWidgets.QComboBox()
@@ -190,6 +230,7 @@ class DataViewerTab(QtWidgets.QWidget):
 
         # Radial integration (azimuthal average around the beam centre).
         self._profile_view = ProfileViewer()
+        self._profile_view.radiusClicked.connect(self._on_radius_clicked)
         ptb = self._profile_view._toolbar_layout
         self._rad_r_bin = _fspin(0.1, 20.0, 2, 1.0, "px"); self._rad_r_bin.setFixedWidth(86)
         self._rad_r_bin.setToolTip("Radial bin size for the azimuthal average.")
@@ -320,6 +361,7 @@ class DataViewerTab(QtWidgets.QWidget):
             self._info_lbl.setText(f"Loaded: {kind}")
             self._setup_navigator()
             self._set_frame(0, autorange=True)
+            self._autofill_imask_max()
         except Exception as e:
             import traceback
             QtWidgets.QMessageBox.critical(self, "Load error", traceback.format_exc()[:500])
@@ -400,6 +442,7 @@ class DataViewerTab(QtWidgets.QWidget):
                     w.blockSignals(True); w.setValue(v); w.blockSignals(False)
             if getattr(self, "_rings", None):
                 self._redraw_rings()
+            self._update_intensity_overlay()
             if self._rad_auto.isChecked():
                 self._radial_integrate()
             self._info_lbl.setText(
@@ -425,6 +468,8 @@ class DataViewerTab(QtWidgets.QWidget):
         # redraw existing rings on the new frame
         if self._ring_items or self._label_items:
             self._redraw_rings()
+        self._redraw_picked_ring()
+        self._update_intensity_overlay()
         if self._rad_auto.isChecked():
             self._radial_integrate()
 
@@ -514,8 +559,30 @@ class DataViewerTab(QtWidgets.QWidget):
         """Beam centre edited (manually or by a pick) — refresh overlays/plot."""
         if getattr(self, "_rings", None):
             self._redraw_rings()
+        self._redraw_picked_ring()
         if self._rad_auto.isChecked():
             self._radial_integrate()
+
+    def _on_radius_clicked(self, r_px: float):
+        """A radius was clicked on the profile — draw its ring on the image."""
+        self._picked_r = float(r_px)
+        self._redraw_picked_ring()
+        self._info_lbl.setText(f"Picked radius: {r_px:.1f} px  (magenta ring)")
+
+    def _redraw_picked_ring(self):
+        """(Re)draw the click-picked ring (magenta) about the current beam centre."""
+        if self._pick_ring_item is not None:
+            self._viewer._iv.removeItem(self._pick_ring_item)
+            self._pick_ring_item = None
+        r = self._picked_r
+        if r is None or self._cur is None:
+            return
+        bc_y, bc_z = self._bcy.value(), self._bcz.value()
+        th = np.linspace(0, 2 * math.pi, 512)
+        self._pick_ring_item = pg.PlotDataItem(
+            bc_y + r * np.cos(th), bc_z + r * np.sin(th),
+            pen=pg.mkPen("#ff30ff", width=1.8))
+        self._viewer._iv.addItem(self._pick_ring_item)
 
     def _on_rad_param_changed(self, *_):
         if self._rad_auto.isChecked():
@@ -535,7 +602,8 @@ class DataViewerTab(QtWidgets.QWidget):
         if self._cur is None:
             return
         r_axis, prof = self._radial_profile(
-            self._cur, self._bcy.value(), self._bcz.value(), self._rad_r_bin.value())
+            self._cur, self._bcy.value(), self._bcz.value(), self._rad_r_bin.value(),
+            mask=self._intensity_bad_mask(self._cur))
         self._profile_view.set_profile(
             r_axis, prof, wavelength_A=self._wl.value(),
             lsd_um=self._lsd.value(), px_um=self._px.value())
@@ -543,11 +611,13 @@ class DataViewerTab(QtWidgets.QWidget):
 
     @staticmethod
     def _radial_profile(img: np.ndarray, bc_y: float, bc_z: float,
-                        r_bin: float = 1.0):
+                        r_bin: float = 1.0, mask: Optional[np.ndarray] = None):
         """Mean intensity vs radius (px) about (bc_y, bc_z).
 
         bc_y is the column (Y/x) and bc_z the row (Z/y); image shape is (NZ, NY).
-        Returns (r_axis_px, profile) with NaN in empty bins.
+        ``mask`` (bool, True = exclude) drops pixels from the average; together with
+        non-finite pixels these are ignored. Returns (r_axis_px, profile), NaN in
+        empty bins.
         """
         NZ, NY = img.shape
         zz, yy = np.indices((NZ, NY))
@@ -557,6 +627,8 @@ class DataViewerTab(QtWidgets.QWidget):
         which = np.minimum((r / r_bin).astype(np.int64), nbins - 1).ravel()
         vals = img.ravel()
         good = np.isfinite(vals)
+        if mask is not None:
+            good &= ~mask.ravel()
         sums = np.bincount(which[good], weights=vals[good], minlength=nbins)
         counts = np.bincount(which[good], minlength=nbins)
         prof = np.full(nbins, np.nan, dtype=np.float64)
@@ -564,3 +636,89 @@ class DataViewerTab(QtWidgets.QWidget):
         prof[nz] = sums[nz] / counts[nz]
         r_axis = (np.arange(nbins) + 0.5) * r_bin
         return r_axis, prof
+
+    # ── Calibration file / intensity mask ─────────────────────────
+
+    def _browse_calib(self):
+        p = _browse(self, "Open calibration file",
+                    "Calibration (*.json *.poni *.txt);;All (*)")
+        if p:
+            self._calib_ed.setText(p)
+            self._load_calibration()
+
+    def _load_calibration(self):
+        """Read geometry (BC, Lsd, pixel size, wavelength) from a MIDAS paramstest,
+        pyFAI .poni, or calibration.json file and apply it to the ring overlay and
+        the radial integration."""
+        path = self._calib_ed.text().strip()
+        if not path or not Path(path).exists():
+            QtWidgets.QMessageBox.warning(self, "No file", "Select a calibration file first.")
+            return
+        try:
+            geo = read_geometry(path)
+            wl, lsd, px = geo["wavelength_A"], geo["Lsd_um"], geo["px_um"]
+            bcy, bcz = geo["BC_y"], geo["BC_z"]
+            if all(v is None for v in geo.values()):
+                self._calib_lbl.setText("No recognised geometry in file.")
+                return
+            self._bc_auto.setChecked(False)   # geometry now comes from the file
+            for w, v in ((self._wl, wl), (self._lsd, lsd), (self._px, px),
+                         (self._bcy, bcy), (self._bcz, bcz)):
+                if v is not None:
+                    w.blockSignals(True); w.setValue(float(v)); w.blockSignals(False)
+            parts = []
+            if lsd is not None: parts.append(f"Lsd={float(lsd)/1000:.2f} mm")
+            if bcy is not None and bcz is not None:
+                parts.append(f"BC=({float(bcy):.1f}, {float(bcz):.1f})")
+            if wl is not None: parts.append(f"λ={float(wl):.5g} Å")
+            if px is not None: parts.append(f"px={float(px):.4g} µm")
+            self._calib_lbl.setText(f"Loaded {Path(path).suffix or 'file'} — " + "  ".join(parts))
+            self._redraw_rings()
+            if self._rad_auto.isChecked():
+                self._radial_integrate()
+            else:
+                self._refresh_profile_markers()
+        except Exception:
+            import traceback
+            QtWidgets.QMessageBox.critical(self, "Calibration load error",
+                                           traceback.format_exc()[:500])
+
+    def _autofill_imask_max(self):
+        """Default the intensity-mask upper bound to the 99.9th percentile of the frame."""
+        if self._cur is None:
+            return
+        fin = self._cur[np.isfinite(self._cur)]
+        if not fin.size:
+            return
+        p999 = float(np.percentile(fin, 99.9))
+        self._imask_hi.blockSignals(True)
+        self._imask_hi.setValue(p999)
+        self._imask_hi.blockSignals(False)
+        if self._imask_on.isChecked():
+            self._update_intensity_overlay()
+            if self._rad_auto.isChecked():
+                self._radial_integrate()
+
+    def _intensity_bad_mask(self, img: np.ndarray) -> Optional[np.ndarray]:
+        """Boolean mask (True = excluded) from the intensity-range controls, or None."""
+        if not self._imask_on.isChecked() or img is None:
+            return None
+        lo, hi = self._imask_lo.value(), self._imask_hi.value()
+        bad = ~np.isfinite(img)
+        if lo > -1e9:
+            bad |= (img <= lo)
+        if hi > 0:
+            bad |= (img > hi)
+        return bad
+
+    def _update_intensity_overlay(self):
+        bad = self._intensity_bad_mask(self._cur)
+        if bad is None or not bad.any():
+            self._viewer.clear_overlay()
+        else:
+            self._viewer.set_mask_overlay(bad)
+
+    def _on_imask_changed(self, *_):
+        self._update_intensity_overlay()
+        if self._rad_auto.isChecked():
+            self._radial_integrate()

@@ -13,7 +13,7 @@ import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
-from midas_gui.constants import _SENTINELS, H5_EXTS
+from midas_gui.constants import _SENTINELS, H5_EXTS, DEFAULT_CALIBRANT_TIF
 from midas_gui.helpers import _load_image, _fspin, _NoScrollSpinBox, _browse, is_h5
 from midas_gui.widgets import ImageViewer
 from midas_gui.workers import MaskComputeWorker
@@ -75,8 +75,7 @@ class MaskTab(QtWidgets.QWidget):
 
         # ── Image ──
         img = S.make_card("Image")
-        self._img_edit = QtWidgets.QLineEdit(
-            "/Users/dbeniwal/ANL-research/github/MIDAS/scratch_gui/test_data_gui/calibrant_ceria.tif")
+        self._img_edit = QtWidgets.QLineEdit(DEFAULT_CALIBRANT_TIF)
         self._img_edit.setPlaceholderText("Select image file…")
         img.body.addLayout(_frow(self._img_edit, self._browse_img))
         self._h5loc_edit = QtWidgets.QLineEdit("exchange/data")

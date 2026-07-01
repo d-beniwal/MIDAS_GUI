@@ -52,3 +52,9 @@ htmlcov/
 # Logs / temp
 *.log
 *.tmp
+
+# Local Claude working context (plans, ported context, notes)
+claude/
+
+# Local test data (synthetic + real calibration frames, ~40 MB)
+test_data/

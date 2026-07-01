@@ -381,7 +381,11 @@ class ProfileViewer(QtWidgets.QWidget):
     """1D radial profile viewer with x-axis unit switching and ring markers.
 
     Optionally shades a ±σ uncertainty band when sigma is supplied.
+    Left-clicking the plot emits ``radiusClicked`` (radius in px), so a caller can
+    draw the matching ring on the image; a marker line shows the picked position.
     """
+
+    radiusClicked = QtCore.pyqtSignal(float)   # picked radius in px
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -393,6 +397,7 @@ class ProfileViewer(QtWidgets.QWidget):
         self._xaxis = QtWidgets.QComboBox()
         self._xaxis.addItems(["R (px)", "2θ (°)", "Q (Å⁻¹)"])
         self._xaxis.currentIndexChanged.connect(self._replot)
+        self._xaxis.currentIndexChanged.connect(self._clear_pick_line)
         bar.addWidget(self._xaxis)
         self._logy = QtWidgets.QCheckBox("Log Y")
         self._logy.toggled.connect(self._replot)
@@ -418,6 +423,10 @@ class ProfileViewer(QtWidgets.QWidget):
         self._curve = self._plot.plot([], [], pen=pg.mkPen("#88ccff", width=2))
         self._ring_lines: list = []
         layout.addWidget(self._plot, stretch=1)
+
+        # Click-to-pick a radius (drawn on the image by the caller).
+        self._pick_line = None
+        self._plot.scene().sigMouseClicked.connect(self._on_plot_clicked)
 
         self._r_px = self._prof = self._sigma = None
         self._wl = self._lsd = self._px = None
@@ -508,6 +517,42 @@ class ProfileViewer(QtWidgets.QWidget):
                 ln = pg.InfiniteLine(pos=x_pos, angle=90, pen=pen, movable=False)
                 self._plot.addItem(ln)
                 self._ring_lines.append(ln)
+
+    def _x_to_r(self, x, idx, lsd, px, wl):
+        """Inverse of _r_to_x: current-axis value → radius in px (None if invalid)."""
+        if idx == 0 or lsd is None or px in (None, 0):
+            return x
+        if idx == 1:                                    # 2θ (deg)
+            return math.tan(math.radians(x)) * lsd / px
+        if idx == 2 and wl:                             # Q (Å⁻¹)
+            s = x * wl / (4 * math.pi)
+            if abs(s) >= 1.0:
+                return None
+            two_theta = 2 * math.asin(s)
+            return math.tan(two_theta) * lsd / px
+        return x
+
+    def _on_plot_clicked(self, event):
+        if event.button() != QtCore.Qt.LeftButton:
+            return
+        vb = self._plot.getPlotItem().getViewBox()
+        if not vb.sceneBoundingRect().contains(event.scenePos()):
+            return
+        x = vb.mapSceneToView(event.scenePos()).x()
+        r = self._x_to_r(x, self._xaxis.currentIndex(), self._lsd, self._px, self._wl)
+        if r is None or r <= 0:
+            return
+        if self._pick_line is None:
+            self._pick_line = pg.InfiniteLine(
+                angle=90, movable=False, pen=pg.mkPen("#ff30ff", width=1.6))
+            self._plot.addItem(self._pick_line)
+        self._pick_line.setPos(x)
+        self.radiusClicked.emit(float(r))
+
+    def _clear_pick_line(self, *_):
+        if self._pick_line is not None:
+            self._plot.removeItem(self._pick_line)
+            self._pick_line = None
 
 
 # ═════════════════════════════════════════════════════════════════════════════

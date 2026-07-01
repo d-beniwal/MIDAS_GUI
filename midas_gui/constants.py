@@ -80,7 +80,7 @@ _LC = {
     "Al2O3": (4.7589, 4.7589, 12.992, 90.0, 90.0, 120.0),
 }
 
-# Default detector parameters — set to the synthetic test_data_gui geometry
+# Default detector parameters — set to the synthetic test_data geometry
 # (Eiger2 500K: 75 µm pixels, λ=0.39 Å, Lsd=121 mm) for easy out-of-the-box testing.
 DEFAULT_WAVELENGTH = 0.39      # Å
 DEFAULT_PIXEL_UM   = 75.0      # µm
@@ -88,9 +88,9 @@ DEFAULT_LSD_UM     = 121_000.0 # µm
 DEFAULT_BC_Y       = 10.0      # px (test data beam centre)
 DEFAULT_BC_Z       = 10.0      # px
 
-# ── Default test-data paths (scratch_gui/test_data_gui) ─────────────────────────
+# ── Default test-data paths (repo-root test_data/, git-ignored) ─────────────────
 from pathlib import Path as _Path
-_TEST_DATA = _Path(__file__).resolve().parent.parent / "test_data_gui"
+_TEST_DATA = _Path(__file__).resolve().parent.parent / "test_data"
 DEFAULT_CALIBRANT_TIF = str(_TEST_DATA / "calibrant_ceria.tif")
 DEFAULT_CALIBRANT_H5  = str(_TEST_DATA / "calibrant_ceria.h5")
 DEFAULT_NICKEL_H5     = str(_TEST_DATA / "nickel_stack.h5")

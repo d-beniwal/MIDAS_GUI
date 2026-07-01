@@ -144,6 +144,93 @@ def simulate_rings(lattice: dict, sg: int, wavelength_A: float, lsd_um: float,
     return out
 
 
+def read_geometry(path: str | Path) -> dict:
+    """Parse beam-centre / distance / pixel / wavelength from a calibration file.
+
+    Supports three formats, auto-detected by extension then content:
+      - MIDAS ``paramstest`` text  (``Lsd``, ``BC y z``, ``Wavelength``, ``px`` — µm/Å)
+      - pyFAI ``.poni``            (SI units: Distance/Poni1/Poni2 in m, Wavelength in m)
+      - calibration ``.json``      (as saved by the Calibrate tab)
+
+    Returns a dict with keys ``wavelength_A``, ``Lsd_um``, ``px_um``, ``BC_y``,
+    ``BC_z`` — any of which may be ``None`` if the file does not carry it.
+    Note: PONI tilts (Rot1/2/3) are ignored — only the beam-centre projection is used.
+    """
+    p = Path(path)
+    text = p.read_text()
+    suf = p.suffix.lower()
+    out = {"wavelength_A": None, "Lsd_um": None, "px_um": None,
+           "BC_y": None, "BC_z": None}
+
+    # ── calibration.json ──
+    if suf == ".json" or text.lstrip().startswith("{"):
+        import json
+        d = json.loads(text)
+        out["wavelength_A"] = d.get("wavelength_A")
+        out["Lsd_um"] = d.get("Lsd")
+        out["px_um"] = d.get("pxY") if d.get("pxY") is not None else d.get("px")
+        out["BC_y"] = d.get("BC_y")
+        out["BC_z"] = d.get("BC_z")
+        return out
+
+    # ── pyFAI .poni ──
+    if suf == ".poni" or "poni_version" in text or "Poni1" in text:
+        vals, det_cfg = {}, {}
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or ":" not in line:
+                continue
+            key, _, val = line.partition(":")
+            key, val = key.strip().lower(), val.strip()
+            if key == "detector_config":
+                try:
+                    import json
+                    det_cfg = json.loads(val)
+                except Exception:
+                    det_cfg = {}
+            else:
+                vals[key] = val
+
+        def _f(k):
+            try:
+                return float(vals[k])
+            except (KeyError, ValueError):
+                return None
+
+        dist, poni1, poni2, wl_m = _f("distance"), _f("poni1"), _f("poni2"), _f("wavelength")
+        px1 = det_cfg.get("pixel1"); px2 = det_cfg.get("pixel2")
+        px1 = float(px1) if px1 is not None else None
+        px2 = float(px2) if px2 is not None else px1
+        out["Lsd_um"] = dist * 1e6 if dist is not None else None
+        out["px_um"] = px1 * 1e6 if px1 is not None else None
+        out["wavelength_A"] = wl_m * 1e10 if wl_m is not None else None
+        # pyFAI axis-1 = slow (rows, Z); axis-2 = fast (cols, Y)
+        if poni1 is not None and px1:
+            out["BC_z"] = poni1 / px1
+        if poni2 is not None and px2:
+            out["BC_y"] = poni2 / px2
+        return out
+
+    # ── MIDAS paramstest key-value text ──
+    for line in text.splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        key = parts[0]
+        try:
+            if key == "Lsd" and len(parts) >= 2:
+                out["Lsd_um"] = float(parts[1])
+            elif key == "BC" and len(parts) >= 3:
+                out["BC_y"], out["BC_z"] = float(parts[1]), float(parts[2])
+            elif key == "Wavelength" and len(parts) >= 2:
+                out["wavelength_A"] = float(parts[1])
+            elif key in ("px", "pxY") and len(parts) >= 2:
+                out["px_um"] = float(parts[1])
+        except ValueError:
+            continue
+    return out
+
+
 def _build_spec(result, r_bin: float, eta_bin: float):
     from midas_calibrate_v2.compat.to_integrate import spec_from_calibration_result
     return spec_from_calibration_result(result, RBinSize=r_bin, EtaBinSize=eta_bin)
