@@ -22,7 +22,8 @@ from midas_gui.constants import (
 from midas_gui.helpers import (
     _load_image, _fspin, _NoScrollSpinBox, _browse, _predict_ring_radii, is_h5)
 from midas_gui.widgets import (
-    PickableImageViewer, ProfileViewer, LogPanel, ResidualBarChart, DistortionTable)
+    PickableImageViewer, ProfileViewer, LogPanel, ResidualBarChart, DistortionTable,
+    FieldSelector)
 from midas_gui.workers import CalibrationWorker, IntegrationWorker, CorrectedRingsWorker
 from midas_gui.dialogs import _SaveParamstestDialog
 from midas_gui import style as S
@@ -39,11 +40,15 @@ class CalibrationTab(QtWidgets.QWidget):
         self._result = None
         self._worker = None
         self._int_worker = None
+        self._calib_cancelled = False
+        self._orphans: list = []       # aborted workers kept alive until they wind down
         self._ring_items: list = []
         self._corrected_ring_items: list = []
         self._corrected_rings_worker = None
         self._calib_result = None
         self._build_ui()
+        if Path(self._img_ed.text().strip() or "x").exists():
+            self._load_img()
 
     def set_mask_from_tab1(self, mask: Optional[np.ndarray]):
         self._mask = mask
@@ -99,24 +104,16 @@ class CalibrationTab(QtWidgets.QWidget):
         files.body.addLayout(ir)
         self._img_ed.textChanged.connect(lambda p: (
             self._img_h5_lbl.setVisible(is_h5(p)), self._img_h5_ed.setVisible(is_h5(p))))
-        self._dark_ed = QtWidgets.QLineEdit(); self._dark_ed.setPlaceholderText("Dark (optional)…")
-        files.body.addLayout(S.Form().row(("Dark:", _frow(self._dark_ed, self._browse_dark))))
-        self._dark_h5_lbl = S.LabelRight("Dataset:")
-        self._dark_h5_ed = QtWidgets.QLineEdit("exchange/data_dark")
-        self._dark_h5_lbl.setVisible(False); self._dark_h5_ed.setVisible(False)
-        dr = QtWidgets.QHBoxLayout(); dr.setSpacing(4); dr.addWidget(self._dark_h5_lbl); dr.addWidget(self._dark_h5_ed, 1)
-        files.body.addLayout(dr)
-        self._dark_ed.textChanged.connect(lambda p: (
-            self._dark_h5_lbl.setVisible(is_h5(p)), self._dark_h5_ed.setVisible(is_h5(p))))
+        self._img_ed.returnPressed.connect(self._load_img)
+        self._img_h5_ed.editingFinished.connect(
+            lambda: self._image is not None and self._load_img())
         self._frame_spin = _NoScrollSpinBox(); self._frame_spin.setRange(0, 99999); self._frame_spin.setValue(0)
+        self._frame_spin.valueChanged.connect(
+            lambda _=0: self._image is not None and self._load_img())
         files.body.addLayout(S.Form().row(("Frame index:", self._frame_spin)))
-        lb = QtWidgets.QPushButton("Load Image"); lb.clicked.connect(self._load_img)
-        ld = QtWidgets.QPushButton("Load Dark"); ld.clicked.connect(self._load_dark)
-        files.body.addLayout(S.button_grid([lb, ld], 2))
         self._mask_file_ed = QtWidgets.QLineEdit(); self._mask_file_ed.setPlaceholderText("Mask file…")
         mr = QtWidgets.QHBoxLayout(); mr.setSpacing(4); mr.addWidget(self._mask_file_ed, 1)
         bm = _br(); bm.clicked.connect(self._browse_mask_file); mr.addWidget(bm)
-        lm = QtWidgets.QPushButton("Load"); lm.setFixedWidth(52); lm.clicked.connect(self._load_mask_file); mr.addWidget(lm)
         files.body.addLayout(S.Form().row(("Mask:", mr)))
         self._mask_lbl = QtWidgets.QLabel("No mask")
         self._mask_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
@@ -128,6 +125,15 @@ class CalibrationTab(QtWidgets.QWidget):
             "Uncheck to ignore the mask (useful for diagnosing whether bad pixels are causing issues).")
         files.body.addWidget(self._use_mask_check)
         lv.addWidget(files)
+
+        # ── Dark / Bright / Background ──
+        fld = S.make_card("Dark / Bright / Background")
+        self._dark_sel = FieldSelector("Dark", default_dataset="exchange/data_dark")
+        self._bright_sel = FieldSelector("Bright", with_mode=True)
+        self._bg_sel = FieldSelector("Background")
+        for w in (self._dark_sel, self._bright_sel, self._bg_sel):
+            fld.body.addWidget(w)
+        lv.addWidget(fld)
 
         # ── Detector & Calibrant ──
         det = S.make_card("Detector & Calibrant")
@@ -250,7 +256,14 @@ class CalibrationTab(QtWidgets.QWidget):
         # ── Run + Save ──
         self._run_btn = S.primary_btn("Run Calibration")
         self._run_btn.clicked.connect(self._run)
-        lv.addWidget(self._run_btn)
+        self._abort_btn = QtWidgets.QPushButton("Abort")
+        self._abort_btn.setEnabled(False)
+        self._abort_btn.setToolTip("Cancel: returns control immediately and discards the "
+                                   "result. The running computation finishes in the background.")
+        self._abort_btn.clicked.connect(self._abort)
+        run_row = QtWidgets.QHBoxLayout(); run_row.setSpacing(6)
+        run_row.addWidget(self._run_btn, 1); run_row.addWidget(self._abort_btn)
+        lv.addLayout(run_row)
         self._prog = QtWidgets.QProgressBar(); self._prog.setRange(0, 0); self._prog.setVisible(False)
         lv.addWidget(self._prog)
         self._save_json_btn = QtWidgets.QPushButton("Save .json"); self._save_json_btn.setEnabled(False)
@@ -320,15 +333,11 @@ class CalibrationTab(QtWidgets.QWidget):
     def _browse_img(self):
         p = _browse(self, "Open Calibrant Image",
                     "Images (*.tif *.tiff *.h5 *.hdf5 *.ge*);;All (*)")
-        if p: self._img_ed.setText(p)
-
-    def _browse_dark(self):
-        p = _browse(self, "Open Dark", "Images (*.tif *.tiff *.h5 *.hdf5 *.ge*);;All (*)")
-        if p: self._dark_ed.setText(p)
+        if p: self._img_ed.setText(p); self._load_img()
 
     def _browse_mask_file(self):
         p = _browse(self, "Open Mask", "TIFF (*.tif *.tiff);;All (*)")
-        if p: self._mask_file_ed.setText(p)
+        if p: self._mask_file_ed.setText(p); self._load_mask_file()
 
     def _load_img(self):
         path = self._img_ed.text().strip()
@@ -388,16 +397,6 @@ class CalibrationTab(QtWidgets.QWidget):
         if self._thr_check.isChecked():
             self._show_calib_image(autorange=False)
 
-    def _load_dark(self):
-        path = self._dark_ed.text().strip()
-        if not path or not Path(path).exists(): return
-        try:
-            data_loc = self._dark_h5_ed.text().strip() or "exchange/data_dark"
-            self._dark = _load_image(path, data_loc=data_loc, frame=self._frame_spin.value())
-            self._log.append(f"Dark loaded: {Path(path).name}  {self._dark.shape}")
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Load error", str(e))
-
     def _load_mask_file(self):
         path = self._mask_file_ed.text().strip()
         if not path or not Path(path).exists(): return
@@ -442,8 +441,23 @@ class CalibrationTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "No image", "Load a calibrant image first."); return
         if self._worker and self._worker.isRunning():
             return
+        self._orphans = [o for o in self._orphans if o.isRunning()]   # drop finished ones
+        # Dark / bright / background fields
+        for sel in (self._dark_sel, self._bright_sel, self._bg_sel):
+            if sel.has_pending():
+                QtWidgets.QMessageBox.warning(
+                    self, "Field not computed",
+                    f"'{sel.title()}' is enabled but not computed. "
+                    "Click 'Compute field' in that box first."); return
+        self._dark = self._dark_sel.get_field()
+        bright = self._bright_sel.get_field()
+        background = self._bg_sel.get_field()
+        bright_mode = self._bright_sel.get_mode()
+
         mode = self._pipeline.currentData()
-        self._run_btn.setEnabled(False); self._prog.setVisible(True)
+        self._calib_cancelled = False
+        self._run_btn.setEnabled(False); self._abort_btn.setEnabled(True)
+        self._prog.setVisible(True)
         self._bot_tabs.setCurrentWidget(self._log)
         self._log.append("─" * 40 + f"\nStarting calibration ({mode})…")
 
@@ -479,15 +493,51 @@ class CalibrationTab(QtWidgets.QWidget):
                 "gap_y": self._pg_y.value(), "gap_z": self._pg_z.value(),
             }
 
-        self._worker = CalibrationWorker(mode, self._calib_image(), self._dark, cfg, parent=self)
+        self._worker = CalibrationWorker(
+            mode, self._calib_image(), self._dark, cfg, parent=self,
+            bright=bright, background=background, bright_mode=bright_mode)
         self._worker.log_line.connect(self._log.append)
         self._worker.finished.connect(self._on_done)
         self._worker.failed.connect(self._on_fail)
         self._worker.start()
 
+    def _abort(self):
+        """Abort the running calibration and free the slot immediately.
+
+        The pipeline is one uninterruptible library call: ``terminate()`` only takes
+        effect when that call next yields, which can be a while.  So rather than
+        block on it (which would leave the worker "running" and prevent a new run),
+        we detach its signals, request termination, orphan the thread (kept alive so
+        the QThread object isn't GC'd while its C thread winds down), and clear
+        ``self._worker`` so the user can start a fresh run right away."""
+        import sys
+        w = self._worker
+        if not (w and w.isRunning()):
+            return
+        self._calib_cancelled = True
+        for sig in (w.log_line, w.finished, w.failed):
+            try:
+                sig.disconnect()
+            except Exception:
+                pass
+        w.requestInterruption()
+        w.terminate()                 # best-effort; may only take effect later
+        self._orphans.append(w)
+        self._worker = None           # free the slot so _run can start again now
+        # The worker redirected sys.stdout/err and its finally never ran — restore them.
+        sys.stdout, sys.stderr = sys.__stdout__, sys.__stderr__
+        self._run_btn.setEnabled(True)
+        self._abort_btn.setEnabled(False); self._abort_btn.setText("Abort")
+        self._prog.setVisible(False)
+        self._log.append("Calibration aborted — you can start a new run now "
+                         "(a background thread may still be winding down).")
+
     def _on_done(self, result):
+        if self._calib_cancelled:
+            return   # user aborted — ignore the late result
         self._result = result
-        self._run_btn.setEnabled(True); self._prog.setVisible(False)
+        self._run_btn.setEnabled(True); self._abort_btn.setEnabled(False)
+        self._prog.setVisible(False)
         self._r_lsd.setText(f"{result.Lsd/1000:.4f} mm")
         self._r_bc.setText(f"({result.BC_y:.2f}, {result.BC_z:.2f}) px")
         s = result.post_residual_strain_uE
@@ -512,7 +562,10 @@ class CalibrationTab(QtWidgets.QWidget):
         self.calibrationDone.emit(result)
 
     def _on_fail(self, msg):
-        self._run_btn.setEnabled(True); self._prog.setVisible(False)
+        if self._calib_cancelled:
+            return   # user aborted — ignore the late failure
+        self._run_btn.setEnabled(True); self._abort_btn.setEnabled(False)
+        self._prog.setVisible(False)
         self._log.append(f"\nERROR:\n{msg[:600]}")
         QtWidgets.QMessageBox.critical(self, "Calibration failed", msg[:400])
 
@@ -618,7 +671,9 @@ class CalibrationTab(QtWidgets.QWidget):
         self._int_worker = IntegrationWorker(
             result, self._calib_image(), self._dark, im_trans,
             r_bin=self._cal_r_bin.value(), eta_bin=self._cal_eta_bin.value(),
-            mask=self._mask if self._use_mask_check.isChecked() else None, parent=self)
+            mask=self._mask if self._use_mask_check.isChecked() else None, parent=self,
+            bright=self._bright_sel.get_field(), background=self._bg_sel.get_field(),
+            bright_mode=self._bright_sel.get_mode())
         self._int_worker.log_line.connect(self._log.append)
         self._int_worker.finished.connect(self._on_int_done)
         self._int_worker.failed.connect(

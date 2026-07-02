@@ -28,6 +28,8 @@ class PDFTab(QtWidgets.QWidget):
         self._worker = None
         self._last = None
         self._build_ui()
+        if Path(self._img_ed.text().strip() or "x").exists():
+            self._load_img()
 
     def set_calibration(self, result):
         self._result = result
@@ -68,8 +70,9 @@ class PDFTab(QtWidgets.QWidget):
         gf.addRow(self._img_h5_lbl, self._img_h5_ed)
         self._img_ed.textChanged.connect(lambda p: (
             self._img_h5_lbl.setVisible(is_h5(p)), self._img_h5_ed.setVisible(is_h5(p))))
-        lb = QtWidgets.QPushButton("Load Image"); lb.clicked.connect(self._load_img)
-        gf.addRow(lb)
+        self._img_ed.returnPressed.connect(self._load_img)
+        self._img_h5_ed.editingFinished.connect(
+            lambda: self._image is not None and self._load_img())
         lv.addWidget(grp_img)
 
         grp_q = QtWidgets.QGroupBox("Q range (Å⁻¹)")
@@ -129,7 +132,7 @@ class PDFTab(QtWidgets.QWidget):
 
     def _browse_img(self):
         p = _browse(self, "Open frame", "Images (*.tif *.tiff *.h5 *.hdf5 *.ge*);;All (*)")
-        if p: self._img_ed.setText(p)
+        if p: self._img_ed.setText(p); self._load_img()
 
     def _load_img(self):
         path = self._img_ed.text().strip()

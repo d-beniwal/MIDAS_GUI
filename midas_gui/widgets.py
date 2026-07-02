@@ -21,7 +21,8 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
 from midas_gui.constants import COLORMAPS, DISTORTION_NAMES
-from midas_gui.helpers import _NoScrollSpinBox, _NoScrollDoubleSpinBox, _fspin, _twocol
+from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollDoubleSpinBox, _fspin, _twocol,
+                               _browse, is_h5, list_h5_datasets)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -696,6 +697,222 @@ class CorrectionFlagsWidget(QtWidgets.QGroupBox):
             from midas_integrate_v2 import SolidAngleCorrection
             sa = SolidAngleCorrection()
         return pol, sa
+
+
+class FieldSelector(QtWidgets.QGroupBox):
+    """Compact reusable dark / bright / background field picker.
+
+    A checkable group; its body is hidden while unchecked so three of these stay
+    compact.  Browsing a file or folder (⋯ menu) auto-computes the field: a single
+    file, a folder / *.tif glob, or an HDF5 dataset averaged over an index range
+    that is clamped to the number of frames available.  The bright variant adds a
+    divide / subtract mode combo.  ``get_field()`` → computed field (or None);
+    ``get_mode()`` → "divide" | "subtract".
+    """
+    fieldReady = QtCore.pyqtSignal()
+
+    def __init__(self, title, parent=None, *, with_mode=False,
+                 default_dataset="exchange/data"):
+        super().__init__(title, parent)
+        self.setCheckable(True)
+        self.setChecked(False)
+        self._with_mode = with_mode
+        self._field = None
+        self._worker = None
+
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(6, 2, 6, 4); outer.setSpacing(2)
+        self._body = QtWidgets.QWidget()
+        self._body.setVisible(False)                       # collapsed until enabled
+        self.toggled.connect(self._body.setVisible)
+        outer.addWidget(self._body)
+        v = QtWidgets.QVBoxLayout(self._body)
+        v.setContentsMargins(0, 0, 0, 0); v.setSpacing(3)
+
+        # Path + browse (file/folder popup menu)
+        self._path_ed = QtWidgets.QLineEdit()
+        self._path_ed.setPlaceholderText("file / folder / .h5")
+        self._path_ed.textChanged.connect(self._on_path_changed)
+        self._path_ed.editingFinished.connect(self._update_frame_limit)
+        browse = QtWidgets.QToolButton()
+        browse.setText("⋯"); browse.setFixedWidth(28)
+        browse.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        menu = QtWidgets.QMenu(browse)
+        menu.addAction("File…", self._browse_file)
+        menu.addAction("Folder…", self._browse_folder)
+        browse.setMenu(menu)
+        pr = QtWidgets.QHBoxLayout(); pr.setSpacing(4)
+        pr.addWidget(self._path_ed); pr.addWidget(browse)
+        v.addLayout(pr)
+
+        # HDF5 dataset dropdown (row hidden unless an HDF5 path is selected)
+        self._ds_row = QtWidgets.QWidget()
+        dr = QtWidgets.QHBoxLayout(self._ds_row); dr.setContentsMargins(0, 0, 0, 0); dr.setSpacing(4)
+        self._ds_combo = QtWidgets.QComboBox()
+        self._ds_combo.setEditable(True); self._ds_combo.setEditText(default_dataset)
+        self._ds_combo.currentIndexChanged.connect(self._update_frame_limit)
+        dr.addWidget(QtWidgets.QLabel("Dataset:")); dr.addWidget(self._ds_combo, 1)
+        self._ds_row.setVisible(False)
+        v.addWidget(self._ds_row)
+
+        # Index range (clamped to available frames) + optional mode, on one row
+        self._start = _NoScrollSpinBox(); self._start.setRange(0, 0); self._start.setFixedWidth(58)
+        self._end = _NoScrollSpinBox(); self._end.setRange(0, 0); self._end.setFixedWidth(58)
+        self._end.setToolTip("Last frame index to average (inclusive).")
+        self._nfr_lbl = QtWidgets.QLabel("")
+        self._nfr_lbl.setStyleSheet("color:#9a9a9a;font-size:10px")
+        ir = QtWidgets.QHBoxLayout(); ir.setSpacing(4)
+        ir.addWidget(QtWidgets.QLabel("avg")); ir.addWidget(self._start)
+        ir.addWidget(QtWidgets.QLabel("–")); ir.addWidget(self._end)
+        ir.addWidget(self._nfr_lbl)
+        if with_mode:
+            self._mode = QtWidgets.QComboBox()
+            self._mode.addItems(["Flat-field divide", "Subtract"])
+            self._mode.setFixedWidth(120)
+            ir.addStretch(1); ir.addWidget(self._mode)
+        else:
+            self._mode = None
+            ir.addStretch(1)
+        v.addLayout(ir)
+
+        # Compute + status
+        self._compute_btn = QtWidgets.QPushButton("Compute field")
+        self._compute_btn.clicked.connect(self._compute)
+        v.addWidget(self._compute_btn)
+        self._status = QtWidgets.QLabel("Not computed.")
+        self._status.setStyleSheet("color:#9a9a9a;font-size:10px"); self._status.setWordWrap(True)
+        v.addWidget(self._status)
+
+    # ── helpers ───────────────────────────────────────────────────
+    def _kind(self) -> str:
+        from pathlib import Path
+        raw = self._path_ed.text().strip()
+        if Path(raw).is_dir() or any(c in raw for c in "*?"):
+            return "folder"
+        if is_h5(raw):
+            return "hdf5"
+        return "file"
+
+    def _dataset(self) -> str:
+        return self._ds_combo.currentText().split("   ")[0].strip() or "exchange/data"
+
+    def _browse_file(self):
+        p = _browse(self, f"Select {self.title()} file",
+                    "Data (*.tif *.tiff *.h5 *.hdf5 *.hdf *.nxs *.ge*);;All (*)")
+        if p:
+            self._path_ed.setText(p); self._update_frame_limit(); self._compute()
+
+    def _browse_folder(self):
+        d = QtWidgets.QFileDialog.getExistingDirectory(self, f"Select {self.title()} folder")
+        if d:
+            self._path_ed.setText(d); self._update_frame_limit(); self._compute()
+
+    def _on_path_changed(self, p: str):
+        from pathlib import Path
+        h5 = is_h5(p)
+        self._ds_row.setVisible(h5)
+        if h5 and Path(p).exists():
+            try:
+                items = list_h5_datasets(p)
+            except Exception:
+                items = []
+            if items:
+                keep = self._ds_combo.currentText().strip()
+                self._ds_combo.blockSignals(True); self._ds_combo.clear()
+                for name, shape in items:
+                    self._ds_combo.addItem(f"{name}   {tuple(shape)}", name)
+                idx = next((i for i in range(self._ds_combo.count())
+                            if self._ds_combo.itemData(i) == keep), -1)
+                if idx < 0:
+                    idx = next((i for i, (n, s) in enumerate(items) if len(s) >= 3), 0)
+                self._ds_combo.setCurrentIndex(idx)
+                self._ds_combo.blockSignals(False)
+        self._update_frame_limit()
+
+    def _count_frames(self) -> int:
+        """Number of frames available in the current source (0 if unknown)."""
+        from pathlib import Path
+        raw = self._path_ed.text().strip()
+        if not raw:
+            return 0
+        kind = self._kind()
+        try:
+            if kind == "hdf5":
+                import h5py
+                if not Path(raw).exists():
+                    return 0
+                with h5py.File(raw, "r") as f:
+                    d = f[self._dataset()]
+                    return int(d.shape[0]) if d.ndim >= 3 else 1
+            if kind == "folder":
+                from midas_gui.helpers import _collect_frame_paths
+                return len(_collect_frame_paths(raw))
+            if not Path(raw).exists():
+                return 0
+            if raw.lower().endswith((".tif", ".tiff")):
+                import tifffile
+                with tifffile.TiffFile(raw) as tf:
+                    return len(tf.pages)
+            return 1
+        except Exception:
+            return 0
+
+    def _update_frame_limit(self):
+        """Clamp the index spinboxes to the frames actually available."""
+        n = self._count_frames()
+        if n <= 0:
+            self._nfr_lbl.setText("")
+            return
+        hi = n - 1
+        self._nfr_lbl.setText(f"/ {hi}")
+        for sp in (self._start, self._end):
+            sp.blockSignals(True); sp.setMaximum(hi); sp.blockSignals(False)
+        # default the end to the last frame (average the whole stack)
+        if self._end.value() == 0 or self._end.value() > hi:
+            self._end.blockSignals(True); self._end.setValue(hi); self._end.blockSignals(False)
+        if self._start.value() > hi:
+            self._start.setValue(hi)
+
+    def _compute(self):
+        raw = self._path_ed.text().strip()
+        if not raw:
+            self._status.setText("Enter a path first."); return
+        from midas_gui.workers import FieldAverageWorker
+        self._compute_btn.setEnabled(False)
+        self._status.setText("Computing…")
+        self._worker = FieldAverageWorker(
+            self._kind(), raw, self._dataset(),
+            self._start.value(), self._end.value(), parent=self)
+        self._worker.finished.connect(self._on_computed)
+        self._worker.failed.connect(self._on_failed)
+        self._worker.start()
+
+    def _on_computed(self, field):
+        self._field = field
+        self._compute_btn.setEnabled(True)
+        self._status.setText(f"Computed — {field.shape}  "
+                             f"[{float(field.min()):.4g}, {float(field.max()):.4g}]")
+        self.fieldReady.emit()
+
+    def _on_failed(self, msg):
+        self._field = None
+        self._compute_btn.setEnabled(True)
+        self._status.setText(f"Failed: {msg.strip().splitlines()[-1][:120]}")
+
+    # ── public API ────────────────────────────────────────────────
+    def is_enabled(self) -> bool:
+        return self.isChecked()
+
+    def has_pending(self) -> bool:
+        return self.isChecked() and self._field is None
+
+    def get_field(self):
+        return self._field if self.isChecked() else None
+
+    def get_mode(self) -> str:
+        if self._mode is None:
+            return "divide"
+        return "divide" if self._mode.currentIndex() == 0 else "subtract"
 
 
 class LossCurveViewer(QtWidgets.QWidget):

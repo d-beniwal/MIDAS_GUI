@@ -16,7 +16,8 @@ from PyQt5 import QtCore
 
 import midas_gui._paths  # noqa: F401  (sys.path setup before MIDAS imports)
 from midas_gui import calib
-from midas_gui.helpers import _LogStream, _load_image, _apply_im_trans, _build_spec, _spec_from_json
+from midas_gui.helpers import (_LogStream, _load_image, _apply_im_trans, _build_spec,
+                               _spec_from_json, average_field, apply_field_corrections)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -162,6 +163,32 @@ def integrate_frame(img_t, spec, geom, kernel, corrections, variance_cfg,
     if return_cake:
         return prof, sigma, cake_np
     return prof, sigma
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Dark / bright / background field averaging
+# ═════════════════════════════════════════════════════════════════════════════
+
+class FieldAverageWorker(QtCore.QThread):
+    """Average a dark/bright/background field off the GUI thread.
+
+    kind ∈ {"file","folder","hdf5"}; index range is inclusive (end=-1 → last).
+    """
+    finished = QtCore.pyqtSignal(object)   # 2-D np.ndarray
+    failed   = QtCore.pyqtSignal(str)
+
+    def __init__(self, kind, path, dataset, idx_start, idx_end, parent=None):
+        super().__init__(parent)
+        self._kind, self._path, self._dataset = kind, path, dataset
+        self._start, self._end = idx_start, idx_end
+
+    def run(self):
+        try:
+            field = average_field(self._kind, self._path, self._dataset,
+                                  self._start, self._end)
+            self.finished.emit(np.asarray(field, dtype=np.float32))
+        except Exception:
+            self.failed.emit(traceback.format_exc())
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -352,12 +379,16 @@ class CalibrationWorker(QtCore.QThread):
     finished = QtCore.pyqtSignal(object)
     failed   = QtCore.pyqtSignal(str)
 
-    def __init__(self, mode, image, dark, cfg, parent=None):
+    def __init__(self, mode, image, dark, cfg, parent=None,
+                 bright=None, background=None, bright_mode="divide"):
         super().__init__(parent)
         self._mode  = mode
         self._image = image
         self._dark  = dark
         self._cfg   = cfg
+        self._bright = bright
+        self._background = background
+        self._bright_mode = bright_mode
 
     def run(self):
         import sys
@@ -365,6 +396,16 @@ class CalibrationWorker(QtCore.QThread):
         sys.stdout = sys.stderr = _LogStream(self.log_line)  # type: ignore
         try:
             image = self._image.astype(np.float32)
+            # Bright/background are applied here; dark stays passed to the pipeline.
+            if self._bright is not None or self._background is not None:
+                image = apply_field_corrections(
+                    image, dark=None, bright=self._bright,
+                    bright_mode=self._bright_mode, background=self._background
+                ).astype(np.float32)
+                self.log_line.emit(
+                    f"[calibrate] applied "
+                    f"{'bright(' + self._bright_mode + ') ' if self._bright is not None else ''}"
+                    f"{'background ' if self._background is not None else ''}correction")
             mask = self._cfg.get("mask")
             if mask is not None:
                 image = image.copy()
@@ -393,11 +434,13 @@ class IntegrationWorker(QtCore.QThread):
     failed   = QtCore.pyqtSignal(str)
 
     def __init__(self, result, image, dark, im_trans, r_bin, eta_bin,
-                 mask=None, parent=None):
+                 mask=None, parent=None, bright=None, background=None,
+                 bright_mode="divide"):
         super().__init__(parent)
         self._result, self._image, self._dark = result, image, dark
         self._im_trans, self._r_bin, self._eta_bin = im_trans, r_bin, eta_bin
         self._mask = mask
+        self._bright, self._background, self._bright_mode = bright, background, bright_mode
 
     def run(self):
         try:
@@ -405,9 +448,16 @@ class IntegrationWorker(QtCore.QThread):
             self.log_line.emit("[integrate] Building spec…")
             spec = _build_spec(self._result, self._r_bin, self._eta_bin)
             img = _apply_im_trans(self._image.astype(np.float32), self._im_trans)
-            if self._dark is not None:
-                dark = _apply_im_trans(self._dark.astype(np.float32), self._im_trans)
-                img = np.clip(img - dark, 0, None)
+            if self._dark is not None or self._bright is not None or self._background is not None:
+                dark = (_apply_im_trans(self._dark.astype(np.float32), self._im_trans)
+                        if self._dark is not None else None)
+                bright = (_apply_im_trans(self._bright.astype(np.float32), self._im_trans)
+                          if self._bright is not None else None)
+                bg = (_apply_im_trans(self._background.astype(np.float32), self._im_trans)
+                      if self._background is not None else None)
+                img = apply_field_corrections(
+                    img, dark=dark, bright=bright,
+                    bright_mode=self._bright_mode, background=bg).astype(np.float32)
             mask_t = None
             if self._mask is not None:
                 mask_t = _apply_im_trans(self._mask.astype(np.float32), self._im_trans)
@@ -440,7 +490,8 @@ class BatchWorker(QtCore.QThread):
 
     def __init__(self, spec, source_cfg, mask, out_dir, fmt, kernel,
                  corrections, variance_cfg, q_cfg=None,
-                 frame_range=None, monitor_file=None, drift_traj=None, parent=None):
+                 frame_range=None, monitor_file=None, drift_traj=None, parent=None,
+                 dark=None, bright=None, background=None, bright_mode="divide"):
         super().__init__(parent)
         self._spec = spec                    # always R-uniform (Q handled by rebinning)
         self._src  = source_cfg
@@ -455,6 +506,9 @@ class BatchWorker(QtCore.QThread):
         self._frame_range = frame_range or (0, None, 1)
         self._monitor_file = monitor_file    # path to text file, one value per line
         self._drift_traj = drift_traj        # DriftTrajectory or None
+        # Dark / bright / background pre-processing (per-frame)
+        self._dark, self._bright, self._background = dark, bright, background
+        self._bright_mode = bright_mode
 
     def _open_source(self):
         from midas_integrate_v2.streaming import TIFFGlobSource, HDF5FrameSource
@@ -544,9 +598,23 @@ class BatchWorker(QtCore.QThread):
                     f"[batch] drift trajectory: {len(self._drift_traj.frame_indices)} knots  "
                     f"Lsd [{self._drift_traj.Lsd_t.min():.0f}, {self._drift_traj.Lsd_t.max():.0f}] µm")
 
+            fields_on = (self._dark is not None or self._bright is not None
+                         or self._background is not None)
+            if fields_on:
+                self.log_line.emit(
+                    f"[batch] field corrections: dark={'y' if self._dark is not None else 'n'} "
+                    f"bright={self._bright_mode if self._bright is not None else 'n'} "
+                    f"background={'y' if self._background is not None else 'n'}")
+
+            aborted = False
             all_profiles, all_sigmas, frame_ids, out_paths = [], [], [], []
             proc_idx = 0  # index into monitor_vals for processed frames only
             for abs_i, (fid, img) in enumerate(source):
+                # Cooperative abort — stop cleanly, keeping frames already done.
+                if self.isInterruptionRequested():
+                    aborted = True
+                    self.log_line.emit(f"[batch] aborted by user after {proc_idx} frame(s)")
+                    break
                 # Apply frame range / stride
                 if abs_i < fr_start:
                     continue
@@ -554,6 +622,11 @@ class BatchWorker(QtCore.QThread):
                     break
                 if (abs_i - fr_start) % fr_stride != 0:
                     continue
+                # Dark / bright / background pre-processing
+                if fields_on:
+                    img = apply_field_corrections(
+                        img, dark=self._dark, bright=self._bright,
+                        bright_mode=self._bright_mode, background=self._background)
 
                 # Per-frame geometry when drift correction is active
                 if self._drift_traj is not None:
@@ -626,6 +699,7 @@ class BatchWorker(QtCore.QThread):
                 "profiles": np.array(all_profiles) if all_profiles else np.array([]),
                 "frame_ids": frame_ids,
                 "out_paths": out_paths,
+                "aborted": aborted,
             })
         except Exception:
             self.failed.emit(traceback.format_exc())

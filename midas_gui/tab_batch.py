@@ -18,7 +18,8 @@ from PyQt5 import QtCore, QtWidgets
 from midas_gui.constants import (KERNELS, OUTPUT_FORMATS, ERROR_MODELS,
                            DEFAULT_NICKEL_DIR, DEFAULT_NICKEL_H5)
 from midas_gui.helpers import _fspin, _browse, _build_spec, _spec_from_json, _NoScrollSpinBox
-from midas_gui.widgets import LogPanel, CorrectionFlagsWidget, WaterfallViewer, StackedProfileViewer
+from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
+                               StackedProfileViewer, FieldSelector)
 from midas_gui.workers import BatchWorker, apply_q_uniform, DriftWorker
 from midas_gui import style as S
 
@@ -28,6 +29,7 @@ class BatchTab(QtWidgets.QWidget):
         super().__init__(parent)
         self._mask: Optional[np.ndarray] = None
         self._worker = None
+        self._orphans: list = []       # aborted workers kept alive until they wind down
         self._drift_worker = None
         self._drift_traj = None
         self._calib_result = None
@@ -93,6 +95,15 @@ class BatchTab(QtWidgets.QWidget):
         data.body.addLayout(S.Form().row(("Dataset:", self._h5_dset)))
         lv.addWidget(data)
 
+        # ── Dark / Bright / Background ──
+        fld = S.make_card("Dark / Bright / Background")
+        self._dark_sel = FieldSelector("Dark", default_dataset="exchange/data_dark")
+        self._bright_sel = FieldSelector("Bright", with_mode=True)
+        self._bg_sel = FieldSelector("Background")
+        for w in (self._dark_sel, self._bright_sel, self._bg_sel):
+            fld.body.addWidget(w)
+        lv.addWidget(fld)
+
         # ── Streaming controls ──
         stream = S.make_card("Streaming controls")
         self._fr_start = _NoScrollSpinBox(); self._fr_start.setRange(0, 999999); self._fr_start.setValue(0)
@@ -112,7 +123,6 @@ class BatchTab(QtWidgets.QWidget):
         self._mask_ed = QtWidgets.QLineEdit(); self._mask_ed.setPlaceholderText("Mask file…")
         mr = QtWidgets.QHBoxLayout(); mr.setSpacing(4); mr.addWidget(self._mask_ed, 1)
         bm = _br(); bm.clicked.connect(self._browse_mask); mr.addWidget(bm)
-        lmb = QtWidgets.QPushButton("Load"); lmb.setFixedWidth(52); lmb.clicked.connect(self._load_mask); mr.addWidget(lmb)
         mask.body.addLayout(mr)
         self._mask_lbl = QtWidgets.QLabel("No mask"); self._mask_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         mask.body.addWidget(self._mask_lbl)
@@ -216,7 +226,13 @@ class BatchTab(QtWidgets.QWidget):
         # ── Run ──
         self._run_btn = S.primary_btn("Start Integration")
         self._run_btn.clicked.connect(self._run)
-        lv.addWidget(self._run_btn)
+        self._abort_btn = QtWidgets.QPushButton("Abort")
+        self._abort_btn.setEnabled(False)
+        self._abort_btn.setToolTip("Stop after the current frame, keeping frames already integrated.")
+        self._abort_btn.clicked.connect(self._abort)
+        run_row = QtWidgets.QHBoxLayout(); run_row.setSpacing(6)
+        run_row.addWidget(self._run_btn, 1); run_row.addWidget(self._abort_btn)
+        lv.addLayout(run_row)
         self._prog = QtWidgets.QProgressBar(); self._prog.setRange(0, 100); self._prog.setVisible(False)
         lv.addWidget(self._prog)
         self._prog_lbl = QtWidgets.QLabel(""); self._prog_lbl.setStyleSheet(f"font-size:10px;color:{S.MUTED}")
@@ -249,7 +265,7 @@ class BatchTab(QtWidgets.QWidget):
 
     def _browse_mask(self):
         p = _browse(self, "Open Mask", "TIFF (*.tif *.tiff);;All (*)")
-        if p: self._mask_ed.setText(p)
+        if p: self._mask_ed.setText(p); self._load_mask()
 
     def _load_mask(self):
         path = self._mask_ed.text().strip()
@@ -280,6 +296,7 @@ class BatchTab(QtWidgets.QWidget):
     def _run(self):
         if self._worker and self._worker.isRunning():
             return
+        self._orphans = [o for o in self._orphans if o.isRunning()]   # drop finished ones
         try:
             spec = self._build_spec()
         except Exception as e:
@@ -310,7 +327,19 @@ class BatchTab(QtWidgets.QWidget):
         q_cfg = ({"QMin": self._q_min.value(), "QMax": self._q_max.value(),
                   "QBinSize": self._q_bin.value()} if self._q_check.isChecked() else None)
 
-        self._run_btn.setEnabled(False)
+        # Dark / bright / background fields
+        for sel in (self._dark_sel, self._bright_sel, self._bg_sel):
+            if sel.has_pending():
+                QtWidgets.QMessageBox.warning(
+                    self, "Field not computed",
+                    f"'{sel.title()}' is enabled but not computed. "
+                    "Click 'Compute field' in that box first."); return
+        dark = self._dark_sel.get_field()
+        bright = self._bright_sel.get_field()
+        background = self._bg_sel.get_field()
+        bright_mode = self._bright_sel.get_mode()
+
+        self._run_btn.setEnabled(False); self._abort_btn.setEnabled(True)
         self._prog.setVisible(True); self._prog.setValue(0)
         self._wf_started = False
         self._view_tabs.setCurrentWidget(self._waterfall)
@@ -339,13 +368,42 @@ class BatchTab(QtWidgets.QWidget):
             spec, src_cfg, self._mask, out_dir, fmt, kernel,
             corrections, variance_cfg, q_cfg=q_cfg,
             frame_range=frame_range, monitor_file=monitor_file,
-            drift_traj=drift_traj, parent=self)
+            drift_traj=drift_traj, parent=self,
+            dark=dark, bright=bright, background=background, bright_mode=bright_mode)
         self._worker.progress.connect(self._on_progress)
         self._worker.frame_done.connect(self._on_frame)
         self._worker.finished.connect(self._on_done)
         self._worker.failed.connect(self._on_fail)
         self._worker.log_line.connect(self._log.append)
         self._worker.start()
+
+    def _abort(self):
+        """Stop the run. First ask the worker to stop cooperatively (clean finish
+        with a summary); if it does not stop quickly, detach + terminate it and free
+        the slot so a new run can start immediately (the orphaned thread winds down
+        on its own). Frames already integrated were written to disk as the run went."""
+        w = self._worker
+        if not (w and w.isRunning()):
+            return
+        self._abort_btn.setEnabled(False)
+        self._abort_btn.setText("Aborting…")
+        self._log.append("[batch] aborting…")
+        QtWidgets.QApplication.processEvents()   # paint the "Aborting…" state
+        w.requestInterruption()
+        if w.wait(1000):
+            return   # stopped cooperatively → _on_done fires and resets the UI
+        self._log.append("[batch] force-terminating worker…")
+        for sig in (w.progress, w.frame_done, w.finished, w.failed, w.log_line):
+            try:
+                sig.disconnect()
+            except Exception:
+                pass
+        w.terminate()
+        self._orphans.append(w)
+        self._worker = None
+        self._reset_run_buttons(); self._prog.setVisible(False)
+        self._log.append("[batch] aborted (background thread winding down). "
+                         "Completed frames were saved.")
 
     def _on_progress(self, done, total):
         self._prog.setValue(int(100 * done / total) if total else 0)
@@ -360,18 +418,24 @@ class BatchTab(QtWidgets.QWidget):
         self._stack_view.add_profile(r_ax, prof)
         self._log.append(f"  frame {fid}: peak={prof.max():.1f}")
 
+    def _reset_run_buttons(self):
+        self._run_btn.setEnabled(True)
+        self._abort_btn.setEnabled(False); self._abort_btn.setText("Abort")
+
     def _on_done(self, data):
-        self._run_btn.setEnabled(True); self._prog.setVisible(False)
+        self._reset_run_buttons(); self._prog.setVisible(False)
         n = data["n"]; out = data.get("out_paths", [])
-        msg = f"Done — {n} frames integrated"
+        aborted = data.get("aborted", False)
+        verb = "aborted after" if aborted else "Done —"
+        msg = f"{verb} {n} frames integrated"
         if out:
             msg += f"\nSaved to: {Path(out[0]).parent}"
         self._log.append(msg)
-        self._prog_lbl.setText(f"Complete: {n} frames")
-        QtWidgets.QMessageBox.information(self, "Done", msg)
+        self._prog_lbl.setText(f"{'Aborted' if aborted else 'Complete'}: {n} frames")
+        QtWidgets.QMessageBox.information(self, "Aborted" if aborted else "Done", msg)
 
     def _on_fail(self, msg):
-        self._run_btn.setEnabled(True); self._prog.setVisible(False)
+        self._reset_run_buttons(); self._prog.setVisible(False)
         self._log.append(f"\nERROR:\n{msg[:600]}")
         QtWidgets.QMessageBox.critical(self, "Integration failed", msg[:400])
 

@@ -45,6 +45,8 @@ class MaskTab(QtWidgets.QWidget):
         self._freeform_line = None       # pg.PlotDataItem — live edge preview
         self._freeform_vdots = None      # pg.ScatterPlotItem — vertex markers
         self._build_ui()
+        if Path(self._img_edit.text().strip() or "x").exists():
+            self._load_image()
 
     def set_calibration(self, result):
         """Receive calibration from Tab 2 — enables geometry-based mask methods."""
@@ -86,8 +88,9 @@ class MaskTab(QtWidgets.QWidget):
         img.body.addLayout(ds)
         self._img_edit.textChanged.connect(lambda p: (
             self._h5loc_lbl.setVisible(is_h5(p)), self._h5loc_edit.setVisible(is_h5(p))))
-        load_btn = QtWidgets.QPushButton("Load Image"); load_btn.clicked.connect(self._load_image)
-        img.body.addWidget(load_btn)
+        self._img_edit.returnPressed.connect(self._load_image)
+        self._h5loc_edit.editingFinished.connect(
+            lambda: self._image is not None and self._load_image())
         lv.addWidget(img)
 
         # ── 1 · Threshold ──
@@ -211,8 +214,6 @@ class MaskTab(QtWidgets.QWidget):
         lrow = QtWidgets.QHBoxLayout(); lrow.setSpacing(4)
         lrow.addWidget(self._load_mask_edit, 1)
         b3 = _br(); b3.clicked.connect(self._browse_load_mask); lrow.addWidget(b3)
-        use_btn = QtWidgets.QPushButton("Use"); use_btn.setFixedWidth(52)
-        use_btn.clicked.connect(self._load_existing_mask); lrow.addWidget(use_btn)
         sl.body.addLayout(lrow)
         lv.addWidget(sl)
 
@@ -283,7 +284,7 @@ class MaskTab(QtWidgets.QWidget):
     def _browse_img(self):
         p = _browse(self, "Open Image",
                     "Images (*.tif *.tiff *.h5 *.hdf5 *.hdf *.nxs *.ge*);;All (*)")
-        if p: self._img_edit.setText(p)
+        if p: self._img_edit.setText(p); self._load_image()
 
     def _browse_save(self):
         p, _ = QtWidgets.QFileDialog.getSaveFileName(
@@ -292,7 +293,7 @@ class MaskTab(QtWidgets.QWidget):
 
     def _browse_load_mask(self):
         p = _browse(self, "Open Mask", "TIFF (*.tif *.tiff);;All (*)")
-        if p: self._load_mask_edit.setText(p)
+        if p: self._load_mask_edit.setText(p); self._load_existing_mask()
 
     def _browse_stack(self):
         d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select stack folder")

@@ -33,6 +33,8 @@ class CorrectionsTab(QtWidgets.QWidget):
         self._gain_map: Optional[np.ndarray] = None
         self._gain_worker = None
         self._build_ui()
+        if Path(self._img_ed.text().strip() or "x").exists():
+            self._load_img()
 
     def set_calibration(self, result):
         self._result = result
@@ -75,8 +77,9 @@ class CorrectionsTab(QtWidgets.QWidget):
         gf.addRow(self._img_h5_lbl, self._img_h5_ed)
         self._img_ed.textChanged.connect(lambda p: (
             self._img_h5_lbl.setVisible(is_h5(p)), self._img_h5_ed.setVisible(is_h5(p))))
-        lb = QtWidgets.QPushButton("Load Image"); lb.clicked.connect(self._load_img)
-        gf.addRow(lb)
+        self._img_ed.returnPressed.connect(self._load_img)
+        self._img_h5_ed.editingFinished.connect(
+            lambda: self._image is not None and self._load_img())
         self._rbin = _fspin(0.1, 20.0, 2, 1.0, "px"); self._ebin = _fspin(0.5, 30.0, 1, 5.0, "°")
         gf.addRow("Bins:", _twocol("R:", self._rbin, "η:", self._ebin))
         lv.addWidget(grp_img)
@@ -132,11 +135,6 @@ class CorrectionsTab(QtWidgets.QWidget):
         self._gain_unity_w = _fspin(0.0, 1.0, 5, 1e-4); self._gain_smooth_w = _fspin(0.0, 1.0, 5, 1e-3)
         gf2.addRow(_twocol("unity_w:", self._gain_unity_w, "smooth_w:", self._gain_smooth_w))
         gv.addLayout(gf2)
-        load_row = QtWidgets.QHBoxLayout(); load_row.setSpacing(4)
-        lb_ref = QtWidgets.QPushButton("Load ref"); lb_ref.clicked.connect(self._load_gain_ref)
-        lb_drift = QtWidgets.QPushButton("Load drift"); lb_drift.clicked.connect(self._load_gain_drift)
-        load_row.addWidget(lb_ref); load_row.addWidget(lb_drift); load_row.addStretch(1)
-        gv.addLayout(load_row)
         self._gain_train_btn = QtWidgets.QPushButton("Train Gain")
         self._gain_train_btn.setEnabled(False)
         self._gain_train_btn.clicked.connect(self._train_gain)
@@ -175,11 +173,11 @@ class CorrectionsTab(QtWidgets.QWidget):
 
     def _browse_gain_ref(self):
         p = _browse(self, "Open reference (clean) frame", "Images (*.tif *.tiff *.h5 *.hdf5);;All (*)")
-        if p: self._gain_ref_ed.setText(p)
+        if p: self._gain_ref_ed.setText(p); self._load_gain_ref()
 
     def _browse_gain_drift(self):
         p = _browse(self, "Open drifted frame", "Images (*.tif *.tiff *.h5 *.hdf5);;All (*)")
-        if p: self._gain_drift_ed.setText(p)
+        if p: self._gain_drift_ed.setText(p); self._load_gain_drift()
 
     def _load_gain_ref(self):
         path = self._gain_ref_ed.text().strip()
@@ -267,7 +265,7 @@ class CorrectionsTab(QtWidgets.QWidget):
 
     def _browse_img(self):
         p = _browse(self, "Open frame", "Images (*.tif *.tiff *.h5 *.hdf5 *.ge*);;All (*)")
-        if p: self._img_ed.setText(p)
+        if p: self._img_ed.setText(p); self._load_img()
 
     def _browse_empty(self):
         p = _browse(self, "Open empty-cell frame", "Images (*.tif *.tiff *.h5 *.hdf5);;All (*)")

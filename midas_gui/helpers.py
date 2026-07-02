@@ -92,6 +92,109 @@ def is_h5(path: str) -> bool:
     return Path(path).suffix.lower() in H5_EXTS
 
 
+# ── Dark / bright / background field building ───────────────────────────────────
+
+def list_h5_datasets(path: str | Path) -> list:
+    """Return [(name, shape), …] for every ≥2-D dataset in an HDF5 file."""
+    import h5py
+    items: list = []
+
+    def _visit(name, obj):
+        if isinstance(obj, h5py.Dataset) and obj.ndim >= 2:
+            items.append((name, tuple(obj.shape)))
+
+    with h5py.File(str(path), "r") as f:
+        f.visititems(_visit)
+    return items
+
+
+def _collect_frame_paths(raw: str) -> list:
+    """Frames from a folder or a *.tif glob (sorted).  Mirrors tab_view logic."""
+    import glob as _glob
+    p = Path(raw)
+    if p.is_dir():
+        out = []
+        for ext in ("*.tif", "*.tiff", "*.h5", "*.hdf5", "*.ge*", "*.cbf", "*.edf"):
+            out.extend(sorted(p.glob(ext)))
+        return [str(x) for x in out]
+    return sorted(_glob.glob(raw))
+
+
+def average_field(kind: str, path: str, dataset: str = "exchange/data",
+                  idx_start: int = 0, idx_end: int = -1) -> np.ndarray:
+    """Build a single 2-D field by averaging over an index range.
+
+    kind:
+      "file"   — a single image file; if it holds a 3-D stack, average [start..end].
+      "folder" — a folder or *.tif glob; average frames [start..end] across files.
+      "hdf5"   — average dataset[start..end+1] if 3-D, else the 2-D dataset.
+
+    idx_end = -1 means "through the last frame" (inclusive).
+    """
+    def _slice(n: int) -> tuple:
+        s = max(0, int(idx_start))
+        e = n - 1 if idx_end is None or int(idx_end) < 0 else min(int(idx_end), n - 1)
+        return s, e
+
+    if kind == "hdf5":
+        import h5py
+        with h5py.File(str(path), "r") as f:
+            dset = f[dataset]
+            if dset.ndim >= 3:
+                s, e = _slice(dset.shape[0])
+                return np.asarray(dset[s:e + 1], dtype=np.float64).mean(axis=0)
+            return np.asarray(dset[...], dtype=np.float64)
+
+    if kind == "folder":
+        paths = _collect_frame_paths(path)
+        if not paths:
+            raise ValueError(f"No frames found for '{path}'")
+        s, e = _slice(len(paths))
+        acc, n = None, 0
+        for p in paths[s:e + 1]:
+            a = _load_image(p).astype(np.float64)
+            a = a[0] if a.ndim == 3 else a       # guard multi-page file in a folder
+            acc = a if acc is None else acc + a
+            n += 1
+        return acc / max(n, 1)
+
+    # single file
+    arr = _load_image(path).astype(np.float64)
+    if arr.ndim >= 3:
+        s, e = _slice(arr.shape[0])
+        return arr[s:e + 1].mean(axis=0)
+    return arr
+
+
+def apply_field_corrections(img: np.ndarray, *, dark=None, bright=None,
+                            bright_mode: str = "divide", background=None,
+                            clip_negative: bool = True) -> np.ndarray:
+    """Apply dark subtraction, bright (flat-field divide OR subtract) and background.
+
+    Order: (img − dark) → bright → (− background) → clip≥0.  For divide mode the
+    flat field is dark-corrected too: out / (bright − dark) × mean(bright − dark).
+    Returns float64.  Any field may be None.
+    """
+    out = np.asarray(img, dtype=np.float64)
+    d = None if dark is None else np.asarray(dark, dtype=np.float64)
+    if d is not None:
+        out = out - d
+    if bright is not None:
+        b = np.asarray(bright, dtype=np.float64)
+        if d is not None:
+            b = b - d
+        if bright_mode == "subtract":
+            out = out - b
+        else:  # flat-field divide, rescaled to preserve counts
+            b = np.clip(b, 1e-9, None)
+            out = out / b * float(np.mean(b))
+    if background is not None:
+        out = out - np.asarray(background, dtype=np.float64)
+    if clip_negative:
+        out = np.clip(out, 0.0, None)
+    return out
+
+
 # ── Ring prediction (calibrant → ring radii in px) ──────────────────────────────
 
 def _predict_ring_radii(result) -> list:

@@ -74,9 +74,11 @@ class DataViewerTab(QtWidgets.QWidget):
         ds_row.addWidget(self._h5_lbl); ds_row.addWidget(self._h5_combo, 1)
         data.body.addLayout(ds_row)
         self._path_ed.textChanged.connect(self._on_path_changed)
-        lb = QtWidgets.QPushButton("Load"); lb.clicked.connect(self._load)
-        ld = QtWidgets.QPushButton("Load folder…"); ld.clicked.connect(self._browse_folder)
-        data.body.addLayout(S.button_grid([lb, ld], 2))
+        self._path_ed.returnPressed.connect(self._load)
+        self._h5_combo.currentIndexChanged.connect(
+            lambda _=0: self._nframes and self._load())
+        ld = QtWidgets.QPushButton("Browse folder…"); ld.clicked.connect(self._browse_folder)
+        data.body.addWidget(ld)
         self._info_lbl = QtWidgets.QLabel("No data loaded.")
         self._info_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px"); self._info_lbl.setWordWrap(True)
         data.body.addWidget(self._info_lbl)
@@ -128,12 +130,7 @@ class DataViewerTab(QtWidgets.QWidget):
         self._calib_ed = QtWidgets.QLineEdit()
         self._calib_ed.setPlaceholderText("calibration.json / paramstest.txt / .poni…")
         calc.body.addLayout(_frow(self._calib_ed, self._browse_calib))
-        load_cal = QtWidgets.QPushButton("Load calibration")
-        load_cal.setToolTip("Read BC, Lsd, pixel size and wavelength from a MIDAS paramstest, "
-                            "a pyFAI .poni, or a calibration.json file, and use them for the "
-                            "ring overlay and radial integration.")
-        load_cal.clicked.connect(self._load_calibration)
-        calc.body.addWidget(load_cal)
+        self._calib_ed.returnPressed.connect(self._load_calibration)
         self._calib_lbl = QtWidgets.QLabel("No calibration loaded — using manual geometry / BC.")
         self._calib_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         self._calib_lbl.setWordWrap(True)
@@ -254,7 +251,10 @@ class DataViewerTab(QtWidgets.QWidget):
 
         self._on_material(self._mat.currentText())
         # Pre-fill the default test dataset (auto-populates the HDF5 dataset dropdown)
+        # and load it if present, so the tab is usable out-of-the-box without a Load button.
         self._path_ed.setText(DEFAULT_NICKEL_H5)
+        if Path(DEFAULT_NICKEL_H5).exists():
+            self._load()
 
     # ── Material dropdown ─────────────────────────────────────────
 
@@ -274,7 +274,7 @@ class DataViewerTab(QtWidgets.QWidget):
         p = _browse(self, "Open data",
                     "Data (*.tif *.tiff *.h5 *.hdf5 *.hdf *.nxs *.ge*);;All (*)")
         if p:
-            self._path_ed.setText(p)
+            self._path_ed.setText(p); self._load()
 
     def _on_path_changed(self, p: str):
         h5 = is_h5(p)
