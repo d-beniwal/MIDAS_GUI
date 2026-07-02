@@ -18,44 +18,50 @@ Dioptas-inspired workflow interface.
 | 7 | **Texture** | Pole-figure integration and stereographic projection |
 | 8 | **Results & Export** | CSV / XYE / FXYE / DAT / HDF5 writers |
 
-## Requirements
+`midas-gui` is packaged like the other MIDAS sub-packages (`packages/midas_*`):
+a standard `pyproject.toml`, a `tests/` suite, and a `release.sh` for cutting
+versioned releases (see [RELEASING.md](RELEASING.md)). It is a front-end for the
+MIDAS analysis backends, which it declares as dependencies.
 
-### Python environment
+## Installation
 
-Create and activate the conda environment (recommended):
+```bash
+pip install midas-gui
+```
+
+This pulls the GUI stack (PyQt5, pyqtgraph, numpy/scipy/h5py/tifffile/torch) and
+the MIDAS analysis backends it drives (`midas-calibrate-v2`, `midas-integrate-v2`,
+`midas-calibrate`, `midas-hkls`, `midas-distortion`) from the same index that
+serves the rest of the MIDAS suite.
+
+Editable / from source:
+
+```bash
+git clone https://github.com/d-beniwal/MIDAS_GUI.git
+cd MIDAS_GUI
+pip install -e ".[dev]"
+```
+
+A conda environment file is also provided:
 
 ```bash
 conda env create -f environment.yml
 conda activate midas-gui
 ```
 
-This installs all dependencies including editable installs of the MIDAS
-analysis packages.  Edit the `pip:` section of `environment.yml` to point
-to your local MIDAS monorepo or a private package index — see the comments
-inside that file.
+### Runtime backend packages
 
-Alternatively, install into an existing environment:
+| Package | Version | Provides |
+|---------|---------|----------|
+| `midas-calibrate-v2` | ≥ 0.3.3 | differentiable calibration + integration specs |
+| `midas-integrate-v2` | ≥ 0.1.0 | integration kernels, corrections, PDF, texture |
+| `midas-calibrate` | ≥ 0.2.7 | v1 calibration / paramstest interop |
+| `midas-hkls` | ≥ 0.4.1 | reflection generation for ring overlays |
+| `midas-distortion` | ≥ 0.2.0 | shared radial-distortion model |
 
-```bash
-pip install -e .
-# Then install the MIDAS backend separately (not on PyPI):
-pip install -e /path/to/MIDAS/packages/midas_calibrate_v2
-pip install -e /path/to/MIDAS/packages/midas_integrate_v2
-# Plus the packages already on PyPI / conda:
-# midas-calibrate, midas-hkls, midas-distortion
-```
-
-### MIDAS backend packages
-
-The following packages are required at runtime but are **not on PyPI**:
-
-| Package | Version | Source |
-|---------|---------|--------|
-| `midas-calibrate-v2` | ≥ 0.3 | MIDAS monorepo `packages/midas_calibrate_v2` |
-| `midas-integrate-v2` | ≥ 0.1 | MIDAS monorepo `packages/midas_integrate_v2` |
-| `midas-calibrate` | ≥ 0.2 | internal / conda channel |
-| `midas-hkls` | ≥ 0.4 | internal / conda channel |
-| `midas-distortion` | ≥ 0.2 | internal / conda channel |
+Once `midas-gui` is on PyPI it can be pulled in through the `midas-suite`
+meta-package as an optional extra — `pip install midas-suite[gui]` — see
+[RELEASING.md](RELEASING.md).
 
 ## Running
 
@@ -70,12 +76,17 @@ python -m midas_gui
 ## Development
 
 ```bash
-# Clone and install in editable mode
-git clone https://github.com/<your-org>/midas-gui.git
-cd midas-gui
+git clone https://github.com/d-beniwal/MIDAS_GUI.git
+cd MIDAS_GUI
 pip install -e ".[dev]"
+
+# Run the (headless) test suite
+QT_QPA_PLATFORM=offscreen pytest -q
 ```
+
+Cutting a release is handled by `./release.sh <version>` — see
+[RELEASING.md](RELEASING.md).
 
 ## License
 
-MIT
+BSD-3-Clause — see [LICENSE](LICENSE).
