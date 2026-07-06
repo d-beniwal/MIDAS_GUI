@@ -36,9 +36,12 @@ midas-gui                              # launch (equivalently: python -m midas_g
 ```
 
 The GUI drives the MIDAS analysis backends (`midas-calibrate-v2`, `midas-integrate-v2`,
-`midas-calibrate`, `midas-hkls`, `midas-distortion`), which are also not on PyPI — point
-the `pip:` section of `environment.yml` at your MIDAS source before creating the
-environment (see the comments in that file).
+`midas-calibrate`, `midas-hkls`, `midas-distortion`). These are all provided by the
+`midas-suite` meta-package — install them with:
+
+```bash
+pip install midas_suite
+```
 
 ## Development
 

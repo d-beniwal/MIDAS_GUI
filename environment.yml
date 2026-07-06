@@ -32,22 +32,7 @@ dependencies:
     - "-e ."
 
     # ── MIDAS analysis backend ───────────────────────────────────────────
-    # These packages are not on PyPI.  Install them from their source trees
-    # in the MIDAS monorepo, or from a private package index if available.
-    #
-    # Option A — editable installs from the MIDAS monorepo (recommended for
-    # developers who have the repo cloned):
-    - "-e /Users/dbeniwal/ANL-research/github/MIDAS/packages/midas_calibrate_v2"
-    - "-e /Users/dbeniwal/ANL-research/github/MIDAS/packages/midas_integrate_v2"
-    #
-    # Option B — install from GitHub (replace <owner> with the actual org/user):
-    # - "midas-calibrate-v2 @ git+https://github.com/<owner>/MIDAS.git#subdirectory=packages/midas_calibrate_v2"
-    # - "midas-integrate-v2 @ git+https://github.com/<owner>/MIDAS.git#subdirectory=packages/midas_integrate_v2"
-    #
-    # Option C — private package index:
-    # - "--index-url https://your-private-pypi.example.com/simple"
-    # - "midas-calibrate-v2>=0.3"
-    # - "midas-integrate-v2>=0.1"
-    # - "midas-calibrate>=0.2"
-    # - "midas-hkls>=0.4"
-    # - "midas-distortion>=0.2"
+    # All MIDAS analysis packages the GUI drives (midas-calibrate-v2,
+    # midas-integrate-v2, midas-calibrate, midas-hkls, midas-distortion) are
+    # provided by the midas-suite meta-package.
+    - "midas_suite"
