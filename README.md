@@ -18,60 +18,27 @@ Dioptas-inspired workflow interface.
 | 7 | **Texture** | Pole-figure integration and stereographic projection |
 | 8 | **Results & Export** | CSV / XYE / FXYE / DAT / HDF5 writers |
 
-`midas-gui` is packaged like the other MIDAS sub-packages (`packages/midas_*`):
-a standard `pyproject.toml`, a `tests/` suite, and a `release.sh` for cutting
-versioned releases (see [RELEASING.md](RELEASING.md)). It is a front-end for the
-MIDAS analysis backends, which it declares as dependencies.
+> **Status:** Tabs **0–4** (Data Viewer, Mask Builder, Calibrate, Calib. Refinement,
+> Batch Integrate) are verified and ready to use. Tabs **5–8** (Corrections, PDF
+> Analysis, Texture, Results & Export) are a **work in progress** and will be updated
+> in the coming weeks.
 
-## Installation
+## Installation & running
 
-```bash
-pip install midas-gui
-```
-
-This pulls the GUI stack (PyQt5, pyqtgraph, numpy/scipy/h5py/tifffile/torch) and
-the MIDAS analysis backends it drives (`midas-calibrate-v2`, `midas-integrate-v2`,
-`midas-calibrate`, `midas-hkls`, `midas-distortion`) from the same index that
-serves the rest of the MIDAS suite.
-
-Editable / from source:
+`midas-gui` is **not on PyPI** — install it from source with conda:
 
 ```bash
 git clone https://github.com/d-beniwal/MIDAS_GUI.git
 cd MIDAS_GUI
-pip install -e ".[dev]"
-```
-
-A conda environment file is also provided:
-
-```bash
-conda env create -f environment.yml
+conda env create -f environment.yml    # creates the 'midas-gui' env and installs the GUI
 conda activate midas-gui
+midas-gui                              # launch (equivalently: python -m midas_gui)
 ```
 
-### Runtime backend packages
-
-| Package | Version | Provides |
-|---------|---------|----------|
-| `midas-calibrate-v2` | ≥ 0.3.3 | differentiable calibration + integration specs |
-| `midas-integrate-v2` | ≥ 0.1.0 | integration kernels, corrections, PDF, texture |
-| `midas-calibrate` | ≥ 0.2.7 | v1 calibration / paramstest interop |
-| `midas-hkls` | ≥ 0.4.1 | reflection generation for ring overlays |
-| `midas-distortion` | ≥ 0.2.0 | shared radial-distortion model |
-
-Once `midas-gui` is on PyPI it can be pulled in through the `midas-suite`
-meta-package as an optional extra — `pip install midas-suite[gui]` — see
-[RELEASING.md](RELEASING.md).
-
-## Running
-
-```bash
-# After installation via environment.yml or pip install -e .
-midas-gui
-
-# Or without installing:
-python -m midas_gui
-```
+The GUI drives the MIDAS analysis backends (`midas-calibrate-v2`, `midas-integrate-v2`,
+`midas-calibrate`, `midas-hkls`, `midas-distortion`), which are also not on PyPI — point
+the `pip:` section of `environment.yml` at your MIDAS source before creating the
+environment (see the comments in that file).
 
 ## Development
 

@@ -27,9 +27,9 @@ dependencies:
     - "PyQt5>=5.15"
 
     # ── midas-gui itself ─────────────────────────────────────────────────
-    # Install in editable mode so local edits are reflected immediately.
-    # Replace with `midas-gui` (no -e) once a release is on PyPI/GitHub.
-    - "-e /Users/dbeniwal/ANL-research/github/midas-gui"
+    # Editable install of this cloned repo (path is relative to the repo root,
+    # where you run `conda env create -f environment.yml`).
+    - "-e ."
 
     # ── MIDAS analysis backend ───────────────────────────────────────────
     # These packages are not on PyPI.  Install them from their source trees
