@@ -36,6 +36,19 @@ def stylesheet(checkmark_svg: str, up_arrow_svg: str = "", down_arrow_svg: str =
     QScrollArea {{ border: none; }}
     QToolTip {{ background: #2d2d30; color: {TEXT}; border: 1px solid {BORDER}; }}
 
+    /* ── Context menus (incl. pyqtgraph right-click plot menus) ───
+       Without an explicit background these inherit the global off-white text on
+       the default light menu background, making entries unreadable until hovered. */
+    QMenu {{
+        background: {PANEL}; color: {TEXT}; border: 1px solid {BORDER};
+    }}
+    QMenu::item {{ padding: 4px 22px; background: transparent; }}
+    QMenu::item:selected {{ background: {ACCENT}; color: white; }}
+    QMenu::item:disabled {{ color: {MUTED}; }}
+    QMenu::separator {{ height: 1px; background: {BORDER}; margin: 3px 6px; }}
+    QMenuBar {{ background: {BG}; color: {TEXT}; }}
+    QMenuBar::item:selected {{ background: {ACCENT}; color: white; }}
+
     /* ── Section cards ─────────────────────────────────────────── */
     QGroupBox {{
         border: 1px solid {BORDER};

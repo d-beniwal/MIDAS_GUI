@@ -14,7 +14,8 @@ import numpy as np
 from PyQt5 import QtCore, QtWidgets
 import pyqtgraph as pg
 
-from midas_gui.helpers import _load_image, _fspin, _twocol, _NoScrollSpinBox, _browse, is_h5
+from midas_gui.helpers import (_load_image, _fspin, _twocol, _NoScrollSpinBox, _browse, is_h5,
+                               _NoScrollComboBox)
 from midas_gui.constants import DEFAULT_CALIBRANT_TIF
 from midas_gui.widgets import LossCurveViewer, LogPanel
 from midas_gui.workers import RefinementWorker, RefineCompareWorker
@@ -135,7 +136,7 @@ class RefinementTab(QtWidgets.QWidget):
         # Reference data / loss
         grp_loss = QtWidgets.QGroupBox("Reference / loss")
         lf = QtWidgets.QVBoxLayout(grp_loss)
-        self._loss_combo = QtWidgets.QComboBox()
+        self._loss_combo = _NoScrollComboBox()
         self._loss_combo.addItem("η-uniformity (rings flat in η)", "eta_uniformity")
         self._loss_combo.setToolTip("Minimise azimuthal intensity variation along each ring.")
         lf.addWidget(self._loss_combo)
@@ -158,7 +159,7 @@ class RefinementTab(QtWidgets.QWidget):
         # Optimizer
         grp_opt = QtWidgets.QGroupBox("Optimizer")
         of = QtWidgets.QFormLayout(grp_opt); of.setSpacing(4)
-        self._opt_combo = QtWidgets.QComboBox(); self._opt_combo.addItems(["adam", "lbfgs"])
+        self._opt_combo = _NoScrollComboBox(); self._opt_combo.addItems(["adam", "lbfgs"])
         self._lr = _fspin(0.001, 10.0, 3, 0.5)
         of.addRow(_twocol("method:", self._opt_combo, "lr:", self._lr))
         self._iters = _NoScrollSpinBox(); self._iters.setRange(5, 2000); self._iters.setValue(80)

@@ -22,7 +22,7 @@ import pyqtgraph as pg
 
 from midas_gui.constants import COLORMAPS, DISTORTION_NAMES
 from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollDoubleSpinBox, _fspin, _twocol,
-                               _browse, is_h5, list_h5_datasets)
+                               _browse, is_h5, list_h5_datasets, _NoScrollComboBox)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -49,7 +49,7 @@ class ImageViewer(QtWidgets.QWidget):
         self._log.toggled.connect(self._redisplay)
         bar.addWidget(self._log)
         bar.addWidget(QtWidgets.QLabel("cmap:"))
-        self._cmap = QtWidgets.QComboBox()
+        self._cmap = _NoScrollComboBox()
         self._cmap.addItems(COLORMAPS)
         self._cmap.currentTextChanged.connect(self._set_cmap)
         self._cmap.setFixedWidth(90)
@@ -395,7 +395,7 @@ class ProfileViewer(QtWidgets.QWidget):
 
         bar = QtWidgets.QHBoxLayout()
         bar.addWidget(QtWidgets.QLabel("X:"))
-        self._xaxis = QtWidgets.QComboBox()
+        self._xaxis = _NoScrollComboBox()
         self._xaxis.addItems(["R (px)", "2θ (°)", "Q (Å⁻¹)"])
         self._xaxis.currentIndexChanged.connect(self._replot)
         self._xaxis.currentIndexChanged.connect(self._clear_pick_line)
@@ -748,7 +748,7 @@ class FieldSelector(QtWidgets.QGroupBox):
         # HDF5 dataset dropdown (row hidden unless an HDF5 path is selected)
         self._ds_row = QtWidgets.QWidget()
         dr = QtWidgets.QHBoxLayout(self._ds_row); dr.setContentsMargins(0, 0, 0, 0); dr.setSpacing(4)
-        self._ds_combo = QtWidgets.QComboBox()
+        self._ds_combo = _NoScrollComboBox()
         self._ds_combo.setEditable(True); self._ds_combo.setEditText(default_dataset)
         self._ds_combo.currentIndexChanged.connect(self._update_frame_limit)
         dr.addWidget(QtWidgets.QLabel("Dataset:")); dr.addWidget(self._ds_combo, 1)
@@ -766,7 +766,7 @@ class FieldSelector(QtWidgets.QGroupBox):
         ir.addWidget(QtWidgets.QLabel("–")); ir.addWidget(self._end)
         ir.addWidget(self._nfr_lbl)
         if with_mode:
-            self._mode = QtWidgets.QComboBox()
+            self._mode = _NoScrollComboBox()
             self._mode.addItems(["Flat-field divide", "Subtract"])
             self._mode.setFixedWidth(120)
             ir.addStretch(1); ir.addWidget(self._mode)
@@ -957,7 +957,7 @@ class WaterfallViewer(QtWidgets.QWidget):
         bar = QtWidgets.QHBoxLayout()
         bar.addWidget(QtWidgets.QLabel("Waterfall (all frames)"))
         bar.addWidget(QtWidgets.QLabel("  cmap:"))
-        self._cmap = QtWidgets.QComboBox(); self._cmap.addItems(COLORMAPS); self._cmap.setFixedWidth(90)
+        self._cmap = _NoScrollComboBox(); self._cmap.addItems(COLORMAPS); self._cmap.setFixedWidth(90)
         self._cmap.currentTextChanged.connect(self._apply_cmap)
         bar.addWidget(self._cmap)
         self._log = QtWidgets.QCheckBox("Log"); self._log.setChecked(True)

@@ -20,7 +20,8 @@ from midas_gui.constants import (
     CALIBRANTS, PIPELINES, _SG, _LC, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM,
     DEFAULT_LSD_UM, DEFAULT_BC_Y, DEFAULT_BC_Z, DEFAULT_CALIBRANT_TIF)
 from midas_gui.helpers import (
-    _load_image, _fspin, _NoScrollSpinBox, _browse, _predict_ring_radii, is_h5)
+    _load_image, _fspin, _NoScrollSpinBox, _browse, _predict_ring_radii, is_h5,
+    _NoScrollComboBox)
 from midas_gui.widgets import (
     PickableImageViewer, ProfileViewer, LogPanel, ResidualBarChart, DistortionTable,
     FieldSelector)
@@ -76,7 +77,7 @@ class CalibrationTab(QtWidgets.QWidget):
 
         # ── Pipeline ──
         pipe = S.make_card("Pipeline")
-        self._pipeline = QtWidgets.QComboBox()
+        self._pipeline = _NoScrollComboBox()
         for label, key, enabled in PIPELINES:
             self._pipeline.addItem(label, key)
             if not enabled:
@@ -138,7 +139,7 @@ class CalibrationTab(QtWidgets.QWidget):
         # ── Detector & Calibrant ──
         det = S.make_card("Detector & Calibrant")
         self._wl = _fspin(0.001, 10.0, 5, DEFAULT_WAVELENGTH, "Å")
-        self._cal = QtWidgets.QComboBox(); self._cal.addItems(CALIBRANTS)
+        self._cal = _NoScrollComboBox(); self._cal.addItems(CALIBRANTS)
         det.body.addLayout(S.Form().row(("λ:", self._wl), ("Calibrant:", self._cal)))
         self._pxY = _fspin(1.0, 5000.0, 2, DEFAULT_PIXEL_UM, "µm")
         self._pxZ_check = QtWidgets.QCheckBox("pxZ")
@@ -224,7 +225,7 @@ class CalibrationTab(QtWidgets.QWidget):
         av = QtWidgets.QVBoxLayout(grp_adv); av.setContentsMargins(8, 6, 8, 6); av.setSpacing(5)
         self._n_iter = _NoScrollSpinBox(); self._n_iter.setRange(1, 20); self._n_iter.setValue(4)
         self._lm_iter = _NoScrollSpinBox(); self._lm_iter.setRange(10, 2000); self._lm_iter.setValue(200)
-        self._device = QtWidgets.QComboBox(); self._device.addItems(["cpu", "cuda"])
+        self._device = _NoScrollComboBox(); self._device.addItems(["cpu", "cuda"])
         av.addLayout(S.Form().row(("E-M iters:", self._n_iter), ("LM iters:", self._lm_iter)))
         self._out_ed = QtWidgets.QLineEdit(); self._out_ed.setPlaceholderText("Output dir…")
         bou = _br(); bou.clicked.connect(lambda: self._out_ed.setText(
@@ -298,8 +299,15 @@ class CalibrationTab(QtWidgets.QWidget):
         ptb = self._prof_view._toolbar_layout
         self._cal_r_bin = _fspin(0.1, 20.0, 2, 1.0, "px"); self._cal_r_bin.setFixedWidth(78)
         self._cal_eta_bin = _fspin(0.5, 30.0, 1, 5.0, "°"); self._cal_eta_bin.setFixedWidth(64)
+        self._cal_azim = _NoScrollComboBox()
+        self._cal_azim.addItem("Pixel-weighted", True)
+        self._cal_azim.addItem("η-bin mean", False)
+        self._cal_azim.setToolTip(
+            "1-D profile from the (η, R) cake: pixel-weighted mean (robust to partial\n"
+            "azimuthal coverage / off-detector beam centre) vs unweighted η-bin mean.")
         reint_btn = QtWidgets.QPushButton("Re-integrate"); reint_btn.clicked.connect(self._reintegrate)
         ptb.insertWidget(3, reint_btn)
+        ptb.insertWidget(3, self._cal_azim)
         ptb.insertWidget(3, self._cal_eta_bin)
         ptb.insertWidget(3, QtWidgets.QLabel("η:"))
         ptb.insertWidget(3, self._cal_r_bin)
@@ -673,7 +681,8 @@ class CalibrationTab(QtWidgets.QWidget):
             r_bin=self._cal_r_bin.value(), eta_bin=self._cal_eta_bin.value(),
             mask=self._mask if self._use_mask_check.isChecked() else None, parent=self,
             bright=self._bright_sel.get_field(), background=self._bg_sel.get_field(),
-            bright_mode=self._bright_sel.get_mode())
+            bright_mode=self._bright_sel.get_mode(),
+            weighted=bool(self._cal_azim.currentData()))
         self._int_worker.log_line.connect(self._log.append)
         self._int_worker.finished.connect(self._on_int_done)
         self._int_worker.failed.connect(

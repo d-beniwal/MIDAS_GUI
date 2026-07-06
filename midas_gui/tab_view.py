@@ -22,7 +22,7 @@ from midas_gui.constants import (MATERIALS, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM
                            DEFAULT_LSD_UM, DEFAULT_BC_Y, DEFAULT_BC_Z,
                            DEFAULT_NICKEL_H5, H5_EXTS)
 from midas_gui.helpers import (_load_image, _fspin, _NoScrollSpinBox, _browse,
-                         is_h5, simulate_rings, read_geometry)
+                         is_h5, simulate_rings, read_geometry, _NoScrollComboBox)
 from midas_gui.widgets import PickableImageViewer, ProfileViewer
 from midas_gui import style as S
 
@@ -66,7 +66,7 @@ class DataViewerTab(QtWidgets.QWidget):
         self._path_ed.setPlaceholderText("file, folder, or *.tif glob…")
         data.body.addLayout(_frow(self._path_ed, self._browse))
         self._h5_lbl = S.LabelRight("Dataset:")
-        self._h5_combo = QtWidgets.QComboBox(); self._h5_combo.setEditable(True)
+        self._h5_combo = _NoScrollComboBox(); self._h5_combo.setEditable(True)
         self._h5_combo.setEditText("exchange/data")
         self._h5_combo.setToolTip("HDF5 datasets in the file (≥2-D). Auto-populated on selection.")
         self._h5_lbl.setVisible(False); self._h5_combo.setVisible(False)
@@ -160,7 +160,7 @@ class DataViewerTab(QtWidgets.QWidget):
 
         # ── Ring simulation card ──
         ring = S.make_card("Ring simulation")
-        self._mat = QtWidgets.QComboBox()
+        self._mat = _NoScrollComboBox()
         for name in MATERIALS:
             self._mat.addItem(name)
         self._mat.addItem("Custom")
@@ -170,17 +170,25 @@ class DataViewerTab(QtWidgets.QWidget):
         self._mat.currentTextChanged.connect(self._on_material)
         ring.body.addLayout(S.Form().row(("Material:", self._mat)))
 
-        self._a = _fspin(0.1, 100.0, 5, 5.4116, "Å"); self._b = _fspin(0.1, 100.0, 5, 5.4116, "Å")
-        self._c = _fspin(0.1, 100.0, 5, 5.4116, "Å")
-        self._al = _fspin(1.0, 179.0, 3, 90.0, "°"); self._be = _fspin(1.0, 179.0, 3, 90.0, "°")
-        self._ga = _fspin(1.0, 179.0, 3, 90.0, "°")
+        _LW, _AW = 78, 66     # compact lattice / angle-SG cell widths
+        self._a = _fspin(0.1, 100.0, 5, 5.4116); self._a.setFixedWidth(_LW)
+        self._b = _fspin(0.1, 100.0, 5, 5.4116); self._b.setFixedWidth(_LW)
+        self._c = _fspin(0.1, 100.0, 5, 5.4116); self._c.setFixedWidth(_LW)
+        self._al = _fspin(1.0, 179.0, 3, 90.0); self._al.setFixedWidth(_AW)
+        self._be = _fspin(1.0, 179.0, 3, 90.0); self._be.setFixedWidth(_AW)
+        self._ga = _fspin(1.0, 179.0, 3, 90.0); self._ga.setFixedWidth(_AW)
         self._sg = _NoScrollSpinBox(); self._sg.setRange(1, 230); self._sg.setValue(225)
+        self._sg.setFixedWidth(_AW)
+        self._cubic = QtWidgets.QCheckBox("Cubic (a=b=c, α=β=γ=90°)")
+        self._cubic.setToolTip("Enter only a — b and c mirror it and all angles are fixed at 90°.")
+        self._cubic.toggled.connect(self._apply_lattice_enabled)
+        self._a.valueChanged.connect(self._on_a_changed)
         latt = S.Form()
-        latt.row(("a:", self._a), ("b:", self._b))
-        latt.row(("c:", self._c), ("SG #:", self._sg))
-        latt.row(("α:", self._al), ("β:", self._be))
-        latt.row(("γ:", self._ga), (None, QtWidgets.QWidget()))
+        latt.row(("a:", self._a), ("b:", self._b), ("c:", self._c))
+        latt.row(("α:", self._al), ("β:", self._be), ("γ:", self._ga))
+        latt.row(("SG #:", self._sg))
         ring.body.addLayout(latt)
+        ring.body.addWidget(self._cubic)
         ring.body.addWidget(S.hline())
 
         self._wl = _fspin(0.001, 10.0, 5, DEFAULT_WAVELENGTH, "Å")
@@ -259,14 +267,36 @@ class DataViewerTab(QtWidgets.QWidget):
     # ── Material dropdown ─────────────────────────────────────────
 
     def _on_material(self, name: str):
-        custom = (name == "Custom")
-        for w in (self._a, self._b, self._c, self._al, self._be, self._ga, self._sg):
-            w.setEnabled(custom)
-        if not custom and name in MATERIALS:
+        if name != "Custom" and name in MATERIALS:
             m = MATERIALS[name]
-            self._a.setValue(m["a"]); self._b.setValue(m["b"]); self._c.setValue(m["c"])
-            self._al.setValue(m["alpha"]); self._be.setValue(m["beta"]); self._ga.setValue(m["gamma"])
+            for w, k in ((self._a, "a"), (self._b, "b"), (self._c, "c"),
+                         (self._al, "alpha"), (self._be, "beta"), (self._ga, "gamma")):
+                w.blockSignals(True); w.setValue(m[k]); w.blockSignals(False)
             self._sg.setValue(m["sg"])
+        self._apply_lattice_enabled()
+
+    def _apply_lattice_enabled(self, *_):
+        """Enable lattice fields only for a custom material; under 'Cubic' only a is
+        editable (b, c mirror a and the angles are fixed at 90°)."""
+        custom = self._mat.currentText() == "Custom"
+        self._cubic.setEnabled(custom)
+        cubic = custom and self._cubic.isChecked()
+        self._a.setEnabled(custom); self._sg.setEnabled(custom)
+        for w in (self._b, self._c, self._al, self._be, self._ga):
+            w.setEnabled(custom and not cubic)
+        if cubic:
+            self._sync_cubic()
+
+    def _sync_cubic(self):
+        v = self._a.value()
+        for w in (self._b, self._c):
+            w.blockSignals(True); w.setValue(v); w.blockSignals(False)
+        for w in (self._al, self._be, self._ga):
+            w.blockSignals(True); w.setValue(90.0); w.blockSignals(False)
+
+    def _on_a_changed(self, *_):
+        if self._cubic.isEnabled() and self._cubic.isChecked():
+            self._sync_cubic()
 
     # ── Loading ───────────────────────────────────────────────────
 
@@ -684,15 +714,15 @@ class DataViewerTab(QtWidgets.QWidget):
                                            traceback.format_exc()[:500])
 
     def _autofill_imask_max(self):
-        """Default the intensity-mask upper bound to the 99.9th percentile of the frame."""
+        """Default the intensity-mask upper bound to max(99.99th percentile, 100000)."""
         if self._cur is None:
             return
         fin = self._cur[np.isfinite(self._cur)]
         if not fin.size:
             return
-        p999 = float(np.percentile(fin, 99.9))
+        hi = max(float(np.percentile(fin, 99.99)), 100_000.0)
         self._imask_hi.blockSignals(True)
-        self._imask_hi.setValue(p999)
+        self._imask_hi.setValue(hi)
         self._imask_hi.blockSignals(False)
         if self._imask_on.isChecked():
             self._update_intensity_overlay()

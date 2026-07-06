@@ -12,7 +12,7 @@ import numpy as np
 from PyQt5 import QtCore, QtWidgets
 import pyqtgraph as pg
 
-from midas_gui.helpers import _load_image, _fspin, _twocol, _browse, is_h5
+from midas_gui.helpers import _load_image, _fspin, _twocol, _browse, is_h5, _NoScrollComboBox
 from midas_gui.constants import DEFAULT_NICKEL_FRAME0
 from midas_gui.widgets import LogPanel
 from midas_gui.workers import PDFWorker
@@ -89,8 +89,8 @@ class PDFTab(QtWidgets.QWidget):
         rf.addRow(_twocol("rmin:", self._rmin, "rmax:", self._rmax))
         self._rstep = _fspin(0.001, 1.0, 3, 0.02)
         rf.addRow("Δr:", self._rstep)
-        self._window = QtWidgets.QComboBox(); self._window.addItems(["lorch", "none"])
-        self._binning = QtWidgets.QComboBox(); self._binning.addItems(["hard", "polygon"])
+        self._window = _NoScrollComboBox(); self._window.addItems(["lorch", "none"])
+        self._binning = _NoScrollComboBox(); self._binning.addItems(["hard", "polygon"])
         rf.addRow(_twocol("window:", self._window, "binning:", self._binning))
         lv.addWidget(grp_r)
 

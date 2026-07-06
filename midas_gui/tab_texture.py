@@ -12,7 +12,8 @@ import numpy as np
 from PyQt5 import QtCore, QtWidgets
 import pyqtgraph as pg
 
-from midas_gui.helpers import _load_image, _fspin, _twocol, _browse, _predict_ring_radii, is_h5
+from midas_gui.helpers import (_load_image, _fspin, _twocol, _browse, _predict_ring_radii,
+                               is_h5, _NoScrollComboBox)
 from midas_gui.constants import DEFAULT_NICKEL_FRAME0
 from midas_gui.widgets import LogPanel
 from midas_gui.workers import PoleFigureWorker
@@ -84,7 +85,7 @@ class TextureTab(QtWidgets.QWidget):
 
         grp_pf = QtWidgets.QGroupBox("Pole-figure parameters")
         pf = QtWidgets.QFormLayout(grp_pf); pf.setSpacing(4)
-        self._ring_combo = QtWidgets.QComboBox()
+        self._ring_combo = _NoScrollComboBox()
         pf.addRow("Ring (hkl):", self._ring_combo)
         self._cap = _fspin(0.5, 50.0, 1, 4.0, "px")
         self._ebin = _fspin(0.5, 10.0, 1, 2.0, "°")

@@ -64,9 +64,38 @@ def build_geom(spec, kernel: str, mask):
     return SubpixelBinGeometry.from_spec(spec, K=K, mask=mask)
 
 
-def _profile_from_cake(cake_np: np.ndarray) -> np.ndarray:
+def _profile_from_cake(cake_np: np.ndarray, count_cake: Optional[np.ndarray] = None) -> np.ndarray:
+    """Collapse an (η, R) cake to a 1-D profile.
+
+    ``count_cake`` None → unweighted mean over η bins (legacy "η-bin mean"): each η
+    bin counts equally.  Fast, but with an off-detector beam centre the partially /
+    unevenly filled η bins bias the result (worse with coarse η bins).
+
+    ``count_cake`` given → pixel-count-weighted azimuthal mean:
+    ``Σ_η(cell_mean · count) / Σ_η(count)``.  Independent of η-bin size and robust
+    to partial azimuthal coverage.
+    """
+    if count_cake is not None:
+        finite = np.isfinite(cake_np)
+        w = np.where(finite, count_cake, 0.0)
+        num = np.sum(np.where(finite, cake_np, 0.0) * w, axis=0)
+        den = np.sum(w, axis=0)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            prof = np.where(den > 0, num / den, np.nan)
+        return np.nan_to_num(prof, nan=0.0)
     prof = np.nanmean(cake_np, axis=0)
     return np.nan_to_num(prof, nan=0.0)
+
+
+def count_cake(geom, kernel: str, NrPixelsZ: int, NrPixelsY: int) -> np.ndarray:
+    """Per-(η,R)-cell pixel count for the plain-kernel geometry — integrate a
+    ones-image without normalisation.  Used to pixel-weight the 1-D profile."""
+    import torch
+    import midas_integrate_v2 as m
+    ones = torch.ones((NrPixelsZ, NrPixelsY), dtype=torch.float64)
+    fn = {"hard": m.integrate_hard, "polygon": m.integrate_polygon}.get(
+        kernel, m.integrate_subpixel)
+    return fn(ones, geom, normalize=False).detach().cpu().numpy()
 
 
 def q_grid_and_r(q_cfg, lsd, px, wl):
@@ -106,7 +135,8 @@ def corrections_counts(spec):
 
 
 def integrate_frame(img_t, spec, geom, kernel, corrections, variance_cfg,
-                    need_sigma: bool, corr_counts=None, return_cake=False):
+                    need_sigma: bool, corr_counts=None, return_cake=False,
+                    weighted: bool = False, cnt_cake=None):
     """Integrate one frame, returning (profile, sigma_or_None) or (profile, sigma, cake).
 
     Routing:
@@ -114,6 +144,12 @@ def integrate_frame(img_t, spec, geom, kernel, corrections, variance_cfg,
         cake (pass corr_counts to avoid recomputing it per frame)
       - variance enabled     → integrate_<kernel>_with_variance (σ from error model)
       - otherwise            → plain kernel integration
+
+    ``weighted`` collapses the (η, R) cake to 1-D with a pixel-count-weighted mean
+    (robust to partial azimuthal coverage / off-detector beam centres) instead of the
+    unweighted η-bin mean.  For the plain / variance paths pass ``cnt_cake`` (from
+    :func:`count_cake`, computed once per geometry); the corrections path reuses its
+    own ``corr_counts``.
 
     When return_cake=True, returns a 3-tuple (prof, sigma, cake_2d) where cake_2d is
     the (n_eta_bins, n_r_bins) normalised cake array.
@@ -128,7 +164,7 @@ def integrate_frame(img_t, spec, geom, kernel, corrections, variance_cfg,
         counts = corr_counts if corr_counts is not None else corrections_counts(spec)
         with np.errstate(invalid="ignore", divide="ignore"):
             norm = np.where(counts > 0.5, int2d / counts, np.nan)
-        prof = _profile_from_cake(norm)
+        prof = _profile_from_cake(norm, count_cake=counts if weighted else None)
         sigma = np.sqrt(np.maximum(prof, 0.0)) if need_sigma else None
         if return_cake:
             return prof, sigma, norm
@@ -143,7 +179,7 @@ def integrate_frame(img_t, spec, geom, kernel, corrections, variance_cfg,
         mean2d, sig2d = fn(img_t, geom, error_model=em)
         mean_np = mean2d.detach().cpu().numpy()
         sig_np  = sig2d.detach().cpu().numpy()
-        prof = _profile_from_cake(mean_np)
+        prof = _profile_from_cake(mean_np, count_cake=cnt_cake if weighted else None)
         # σ of the η-mean: sqrt(Σσ²)/N over valid η bins
         var = np.nansum(sig_np ** 2, axis=0)
         cnt = np.maximum(np.sum(np.isfinite(sig_np), axis=0), 1)
@@ -158,7 +194,7 @@ def integrate_frame(img_t, spec, geom, kernel, corrections, variance_cfg,
     }.get(kernel, m.integrate_subpixel)
     int2d = fn(img_t, geom, normalize=True)
     cake_np = int2d.detach().cpu().numpy()
-    prof = _profile_from_cake(cake_np)
+    prof = _profile_from_cake(cake_np, count_cake=cnt_cake if weighted else None)
     sigma = np.sqrt(np.maximum(prof, 0.0)) if need_sigma else None
     if return_cake:
         return prof, sigma, cake_np
@@ -435,12 +471,13 @@ class IntegrationWorker(QtCore.QThread):
 
     def __init__(self, result, image, dark, im_trans, r_bin, eta_bin,
                  mask=None, parent=None, bright=None, background=None,
-                 bright_mode="divide"):
+                 bright_mode="divide", weighted=True):
         super().__init__(parent)
         self._result, self._image, self._dark = result, image, dark
         self._im_trans, self._r_bin, self._eta_bin = im_trans, r_bin, eta_bin
         self._mask = mask
         self._bright, self._background, self._bright_mode = bright, background, bright_mode
+        self._weighted = weighted
 
     def run(self):
         try:
@@ -463,9 +500,12 @@ class IntegrationWorker(QtCore.QThread):
                 mask_t = _apply_im_trans(self._mask.astype(np.float32), self._im_trans)
             self.log_line.emit("[integrate] Running integration…")
             geom = build_geom(spec, "subpixel2", mask_t)
+            cnt = (count_cake(geom, "subpixel2", spec.NrPixelsZ, spec.NrPixelsY)
+                   if self._weighted else None)
             img_t = torch.from_numpy(img.astype(np.float64))
             prof, _ = integrate_frame(img_t, spec, geom, "subpixel2",
-                                      (None, None), None, need_sigma=False)
+                                      (None, None), None, need_sigma=False,
+                                      weighted=self._weighted, cnt_cake=cnt)
             r_ax = compute_r_axis(spec)
             self.log_line.emit(f"[integrate] Done — {len(prof)} bins, peak={prof.max():.1f}")
             self.finished.emit({
@@ -491,9 +531,11 @@ class BatchWorker(QtCore.QThread):
     def __init__(self, spec, source_cfg, mask, out_dir, fmt, kernel,
                  corrections, variance_cfg, q_cfg=None,
                  frame_range=None, monitor_file=None, drift_traj=None, parent=None,
-                 dark=None, bright=None, background=None, bright_mode="divide"):
+                 dark=None, bright=None, background=None, bright_mode="divide",
+                 weighted=True):
         super().__init__(parent)
         self._spec = spec                    # always R-uniform (Q handled by rebinning)
+        self._weighted = weighted            # pixel-weighted azimuthal mean (vs η-bin mean)
         self._src  = source_cfg
         self._mask = mask
         self._out_dir = Path(out_dir) if out_dir else None
@@ -561,6 +603,9 @@ class BatchWorker(QtCore.QThread):
             need_sigma = True   # xye/fxye require σ; always provide it
             # Precompute the pixel-count cake once for the (unnormalised) corrections path
             corr_counts = corrections_counts(spec) if corr_on else None
+            # Pixel-count cake for the weighted azimuthal mean (plain / variance paths)
+            cnt = (count_cake(geom, self._kernel, spec.NrPixelsZ, spec.NrPixelsY)
+                   if (self._weighted and not corr_on) else None)
             # Q-uniform handled by rebinning the R-uniform profile (kernels lack Q-mode)
             if self._q_cfg:
                 qgrid, r_ax = q_grid_and_r(self._q_cfg, lsd, px, wl)
@@ -634,23 +679,28 @@ class BatchWorker(QtCore.QThread):
                     cur_lsd  = float(cur_spec.Lsd)
                     cur_geom = None if corr_on else build_geom(cur_spec, self._kernel, self._mask)
                     cur_cc   = corrections_counts(cur_spec) if corr_on else None
+                    cur_cnt  = (count_cake(cur_geom, self._kernel, cur_spec.NrPixelsZ,
+                                           cur_spec.NrPixelsY)
+                                if (self._weighted and not corr_on) else None)
                 else:
                     cur_spec = spec
                     cur_lsd  = lsd
                     cur_geom = geom
                     cur_cc   = corr_counts
+                    cur_cnt  = cnt
 
                 img_t = torch.from_numpy(img.astype(np.float64))
                 if want_cake:
                     prof, sigma, cake_2d = integrate_frame(
                         img_t, cur_spec, cur_geom, self._kernel, self._corrections,
                         self._variance_cfg, need_sigma, corr_counts=cur_cc,
-                        return_cake=True)
+                        return_cake=True, weighted=self._weighted, cnt_cake=cur_cnt)
                 else:
                     cake_2d = None
                     prof, sigma = integrate_frame(
                         img_t, cur_spec, cur_geom, self._kernel, self._corrections,
-                        self._variance_cfg, need_sigma, corr_counts=cur_cc)
+                        self._variance_cfg, need_sigma, corr_counts=cur_cc,
+                        weighted=self._weighted, cnt_cake=cur_cnt)
 
                 if sigma is None:
                     sigma = np.sqrt(np.maximum(prof, 0.0))

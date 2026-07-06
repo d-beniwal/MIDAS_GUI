@@ -17,7 +17,8 @@ from PyQt5 import QtCore, QtWidgets
 
 from midas_gui.constants import (KERNELS, OUTPUT_FORMATS, ERROR_MODELS,
                            DEFAULT_NICKEL_DIR, DEFAULT_NICKEL_H5)
-from midas_gui.helpers import _fspin, _browse, _build_spec, _spec_from_json, _NoScrollSpinBox
+from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_file,
+                               _NoScrollSpinBox, _NoScrollComboBox)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, FieldSelector)
 from midas_gui.workers import BatchWorker, apply_q_uniform, DriftWorker
@@ -65,17 +66,21 @@ class BatchTab(QtWidgets.QWidget):
         cal = S.make_card("Calibration source")
         src_row = QtWidgets.QHBoxLayout(); src_row.setSpacing(10)
         self._use_tab2_btn = QtWidgets.QRadioButton("From Tab 2")
-        self._use_json_btn = QtWidgets.QRadioButton("From JSON file")
+        self._use_json_btn = QtWidgets.QRadioButton("From file")
         self._use_tab2_btn.setChecked(True)
         src_row.addWidget(self._use_tab2_btn); src_row.addWidget(self._use_json_btn); src_row.addStretch(1)
         cal.body.addLayout(src_row)
         self._calib_src_lbl = QtWidgets.QLabel("(run Tab 2 first)")
         self._calib_src_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         cal.body.addWidget(self._calib_src_lbl)
-        self._json_ed = QtWidgets.QLineEdit(); self._json_ed.setPlaceholderText("calibration.json…")
+        self._json_ed = QtWidgets.QLineEdit()
+        self._json_ed.setPlaceholderText("calibration.json / paramstest.txt / .poni…")
         jr = QtWidgets.QHBoxLayout(); jr.setSpacing(4); jr.addWidget(self._json_ed, 1)
         bj = _br(); bj.clicked.connect(lambda: self._json_ed.setText(
-            _browse(self, "Open calibration.json", "JSON (*.json);;All (*)") or "")); jr.addWidget(bj)
+            _browse(self, "Open calibration file",
+                    "Calibration (*.json *.txt *.poni);;All (*)") or "")); jr.addWidget(bj)
+        self._json_ed.textChanged.connect(
+            lambda t: self._use_json_btn.setChecked(True) if t.strip() else None)
         cal.body.addLayout(jr)
         lv.addWidget(cal)
 
@@ -130,20 +135,30 @@ class BatchTab(QtWidgets.QWidget):
 
         # ── Integration ──
         integ = S.make_card("Integration")
-        self._kernel = QtWidgets.QComboBox()
+        self._kernel = _NoScrollComboBox()
         for label, key in KERNELS.items():
             self._kernel.addItem(label, key)
         self._r_bin = _fspin(0.1, 20.0, 2, 1.0, "px")
         self._e_bin = _fspin(0.5, 30.0, 1, 5.0, "°")
+        self._azim = _NoScrollComboBox()
+        self._azim.addItem("Pixel-weighted", True)
+        self._azim.addItem("η-bin mean (legacy)", False)
+        self._azim.setToolTip(
+            "How the 2-D (η, R) cake is collapsed to a 1-D profile:\n"
+            "• Pixel-weighted — Σ(mean·count)/Σ(count); robust to partial azimuthal\n"
+            "  coverage / off-detector beam centres and independent of η-bin size.\n"
+            "• η-bin mean — unweighted mean of the per-η-bin means (can distort the\n"
+            "  profile with a coarse η bin when the beam centre is off the detector).")
         intf = S.Form()
         intf.row(("Kernel:", self._kernel))
         intf.row(("R bin:", self._r_bin), ("η bin:", self._e_bin))
+        intf.row(("Azim. avg:", self._azim))
         integ.body.addLayout(intf)
         self._var_check = QtWidgets.QCheckBox("Per-bin variance (σ)")
         self._var_check.setToolTip(
             "Compute per-bin σ via the chosen error model.\n"
             "Mutually exclusive with corrections (corrections win; σ→√I).")
-        self._err_model = QtWidgets.QComboBox(); self._err_model.addItems(ERROR_MODELS); self._err_model.setEnabled(False)
+        self._err_model = _NoScrollComboBox(); self._err_model.addItems(ERROR_MODELS); self._err_model.setEnabled(False)
         self._var_check.toggled.connect(self._err_model.setEnabled)
         vrow = QtWidgets.QHBoxLayout(); vrow.setSpacing(6)
         vrow.addWidget(self._var_check); vrow.addWidget(self._err_model, 1)
@@ -195,7 +210,7 @@ class BatchTab(QtWidgets.QWidget):
             _browse(self, "Open anchor JSON", "JSON (*.json);;All (*)") or ""))
         drow.addWidget(bdrift); drift.body.addLayout(drow)
         df = S.Form()
-        self._drift_param = QtWidgets.QComboBox()
+        self._drift_param = _NoScrollComboBox()
         self._drift_param.addItems(["spline", "linear", "constant"])
         self._drift_knots = _NoScrollSpinBox(); self._drift_knots.setRange(2, 20); self._drift_knots.setValue(5)
         df.row(("Parametrization:", self._drift_param), ("n_knots:", self._drift_knots))
@@ -217,7 +232,7 @@ class BatchTab(QtWidgets.QWidget):
         bou = _br(); bou.clicked.connect(lambda: self._out_ed.setText(
             QtWidgets.QFileDialog.getExistingDirectory(self, "Output directory") or "")); orow.addWidget(bou)
         out.body.addLayout(S.Form().row(("Folder:", orow)))
-        self._fmt = QtWidgets.QComboBox()
+        self._fmt = _NoScrollComboBox()
         for label in OUTPUT_FORMATS:
             self._fmt.addItem(label, OUTPUT_FORMATS[label])
         out.body.addLayout(S.Form().row(("Format:", self._fmt)))
@@ -290,8 +305,8 @@ class BatchTab(QtWidgets.QWidget):
             return _build_spec(self._calib_result, r_bin, e_bin)
         path = self._json_ed.text().strip()
         if not path or not Path(path).exists():
-            raise FileNotFoundError(f"calibration.json not found: {path}")
-        return _spec_from_json(path, r_bin, e_bin)
+            raise FileNotFoundError(f"Calibration file not found: {path}")
+        return spec_from_geometry_file(path, r_bin, e_bin)
 
     def _run(self):
         if self._worker and self._worker.isRunning():
@@ -369,7 +384,8 @@ class BatchTab(QtWidgets.QWidget):
             corrections, variance_cfg, q_cfg=q_cfg,
             frame_range=frame_range, monitor_file=monitor_file,
             drift_traj=drift_traj, parent=self,
-            dark=dark, bright=bright, background=background, bright_mode=bright_mode)
+            dark=dark, bright=bright, background=background, bright_mode=bright_mode,
+            weighted=bool(self._azim.currentData()))
         self._worker.progress.connect(self._on_progress)
         self._worker.frame_done.connect(self._on_frame)
         self._worker.finished.connect(self._on_done)
