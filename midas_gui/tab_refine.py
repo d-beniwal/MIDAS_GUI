@@ -1,23 +1,22 @@
-"""Tab 4 — Calibration Refinement.
+"""Tab 3 — Calibration Refinement.
 
 Refines geometry jointly against the integrated profile (η-uniformity) using the
 differentiable integration path from midas_integrate_v2 — closing the gap between
 Bragg-spot calibration and profile-level accuracy.  Consumes a calibration result
 from Tab 2 and emits a refined result that propagates to the downstream tabs.
+
+Layout: [ Data Loader | Parameters | Loss/comparison/log ].
 """
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
 from PyQt5 import QtCore, QtWidgets
 import pyqtgraph as pg
 
-from midas_gui.helpers import (_load_image, _fspin, _twocol, _NoScrollSpinBox, _browse, is_h5,
-                               _NoScrollComboBox)
-from midas_gui.constants import DEFAULT_CALIBRANT_TIF
-from midas_gui.widgets import LossCurveViewer, LogPanel
+from midas_gui.helpers import _fspin, _twocol, _NoScrollSpinBox, _NoScrollComboBox
+from midas_gui.widgets import LossCurveViewer, LogPanel, DataLoaderPanel
 from midas_gui.workers import RefinementWorker, RefineCompareWorker
 from midas_gui import style as S
 
@@ -29,14 +28,9 @@ class RefinementTab(QtWidgets.QWidget):
         super().__init__(parent)
         self._result = None
         self._orig_result = None         # Tab 2 calibration — kept for before/after comparison
-        self._image: Optional[np.ndarray] = None
-        self._dark: Optional[np.ndarray] = None
-        self._mask: Optional[np.ndarray] = None
         self._worker = None
         self._compare_worker = None
         self._build_ui()
-        if Path(self._img_ed.text().strip() or "x").exists():
-            self._load_img()
 
     def set_calibration(self, result):
         self._result = result
@@ -44,39 +38,31 @@ class RefinementTab(QtWidgets.QWidget):
         self._src_lbl.setText(
             f"From Tab 2: Lsd={result.Lsd/1000:.3f} mm  BC=({result.BC_y:.1f},{result.BC_z:.1f})  "
             f"ty={result.ty:.3f} tz={result.tz:.3f}")
-        self._run_btn.setEnabled(self._image is not None)
+        self._update_run_enabled()
 
     def set_mask_from_tab1(self, mask):
-        self._mask = mask
-        if mask is not None:
-            n_bad = int(mask.astype(bool).sum())
-            pct = 100.0 * n_bad / mask.size
-            self._mask_status_lbl.setText(
-                f"Active: {n_bad:,} bad px ({pct:.2f}% of detector)")
-            self._mask_status_lbl.setStyleSheet(
-                f"color:{S.ACCENT};font-size:10px;font-weight:bold")
-            self._use_mask_check.setEnabled(True)
-            self._use_mask_check.setChecked(True)
-        else:
-            self._mask_status_lbl.setText("No mask loaded")
-            self._mask_status_lbl.setStyleSheet("color:#aaa;font-size:10px")
-            self._use_mask_check.setEnabled(False)
-            self._use_mask_check.setChecked(False)
+        self._loader.set_tab1_mask(mask)
+
+    # ── UI ──────────────────────────────────────────────────────────
 
     def _build_ui(self):
         root = QtWidgets.QHBoxLayout(self)
-        root.setContentsMargins(6, 6, 6, 6); root.setSpacing(8)
+        root.setContentsMargins(6, 6, 6, 6); root.setSpacing(0)
+        split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        split.setChildrenCollapsible(False); split.setHandleWidth(6)
+        root.addWidget(split); self._hsplit = split
+
+        # ── LEFT: data loader ──
+        self._loader = DataLoaderPanel(mode="single")
+        self._loader.setMinimumWidth(200)
+        self._loader.dataChanged.connect(self._update_run_enabled)
+        split.addWidget(self._loader)
+
+        # ── MIDDLE: parameters ──
         scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True); scroll.setFixedWidth(559)
+        scroll.setWidgetResizable(True); scroll.setMinimumWidth(260)
         inner = QtWidgets.QWidget(); lv = QtWidgets.QVBoxLayout(inner); lv.setSpacing(6)
         scroll.setWidget(inner)
-
-        def _br(w=28):
-            b = QtWidgets.QPushButton("…"); b.setFixedWidth(w); return b
-
-        def _frow(ed, slot):
-            r = QtWidgets.QHBoxLayout(); r.setSpacing(3)
-            r.addWidget(ed); b = _br(); b.clicked.connect(slot); r.addWidget(b); return r
 
         # Calibration source
         grp_src = QtWidgets.QGroupBox("Calibration source")
@@ -99,39 +85,6 @@ class RefinementTab(QtWidgets.QWidget):
         reset_btn.clicked.connect(self._reset_to_tab2)
         sv.addWidget(reset_btn)
         lv.addWidget(grp_src)
-
-        # Mask status
-        grp_mask = QtWidgets.QGroupBox("Mask")
-        mv = QtWidgets.QVBoxLayout(grp_mask); mv.setSpacing(4)
-        self._mask_status_lbl = QtWidgets.QLabel("No mask loaded")
-        self._mask_status_lbl.setStyleSheet("color:#aaa;font-size:10px")
-        self._mask_status_lbl.setWordWrap(True)
-        mv.addWidget(self._mask_status_lbl)
-        self._use_mask_check = QtWidgets.QCheckBox("Apply mask to refinement & comparison")
-        self._use_mask_check.setChecked(False)
-        self._use_mask_check.setEnabled(False)
-        self._use_mask_check.setToolTip(
-            "When checked, bad pixels from Tab 1 are excluded from both the\n"
-            "intensity sums and bin counts during refinement. The same mask is\n"
-            "also applied when computing the before/after comparison profiles.\n"
-            "Load a mask in Tab 1 first.")
-        mv.addWidget(self._use_mask_check)
-        lv.addWidget(grp_mask)
-
-        # Image
-        grp_img = QtWidgets.QGroupBox("Frame to refine against")
-        gf = QtWidgets.QFormLayout(grp_img); gf.setSpacing(4)
-        self._img_ed = QtWidgets.QLineEdit(DEFAULT_CALIBRANT_TIF); self._img_ed.setPlaceholderText("Calibrant image…")
-        gf.addRow("Image:", _frow(self._img_ed, self._browse_img))
-        self._img_h5_lbl = QtWidgets.QLabel("  Dataset:"); self._img_h5_ed = QtWidgets.QLineEdit("exchange/data")
-        self._img_h5_lbl.setVisible(False); self._img_h5_ed.setVisible(False)
-        gf.addRow(self._img_h5_lbl, self._img_h5_ed)
-        self._img_ed.textChanged.connect(lambda p: (
-            self._img_h5_lbl.setVisible(is_h5(p)), self._img_h5_ed.setVisible(is_h5(p))))
-        self._img_ed.returnPressed.connect(self._load_img)
-        self._img_h5_ed.editingFinished.connect(
-            lambda: self._image is not None and self._load_img())
-        lv.addWidget(grp_img)
 
         # Reference data / loss
         grp_loss = QtWidgets.QGroupBox("Reference / loss")
@@ -186,15 +139,13 @@ class RefinementTab(QtWidgets.QWidget):
         lv.addWidget(grp_out)
 
         lv.addStretch(1)
-        root.addWidget(scroll)
+        split.addWidget(scroll)
 
-        # Right: loss curve + comparison plots + log
+        # ── RIGHT: loss curve + comparison plots + log ──
         right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-
         self._loss_view = LossCurveViewer(ylabel="η-uniformity loss")
         right.addWidget(self._loss_view)
 
-        # Profile comparison panel — shown after refinement completes
         cmp_panel = QtWidgets.QWidget()
         cmp_v = QtWidgets.QVBoxLayout(cmp_panel)
         cmp_v.setContentsMargins(0, 0, 0, 0); cmp_v.setSpacing(2)
@@ -223,24 +174,16 @@ class RefinementTab(QtWidgets.QWidget):
         self._log = LogPanel()
         right.addWidget(self._log)
         right.setStretchFactor(0, 2); right.setStretchFactor(1, 4); right.setStretchFactor(2, 1)
-        root.addWidget(right, stretch=1)
+        right.setMinimumWidth(320)
+        split.addWidget(right)
+        split.setStretchFactor(0, 0); split.setStretchFactor(1, 0); split.setStretchFactor(2, 1)
+        split.setSizes([286, 361, 950])
 
     # ── actions ────────────────────────────────────────────────────
 
-    def _browse_img(self):
-        p = _browse(self, "Open Image", "Images (*.tif *.tiff *.h5 *.hdf5 *.ge*);;All (*)")
-        if p: self._img_ed.setText(p); self._load_img()
-
-    def _load_img(self):
-        path = self._img_ed.text().strip()
-        if not path or not Path(path).exists():
-            QtWidgets.QMessageBox.warning(self, "Error", "Image not found."); return
-        try:
-            self._image = _load_image(path, data_loc=self._img_h5_ed.text().strip() or "exchange/data")
-            self._log.append(f"Image loaded: {Path(path).name} {self._image.shape}")
-            self._run_btn.setEnabled(self._result is not None)
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Load error", str(e))
+    def _update_run_enabled(self, *_):
+        self._run_btn.setEnabled(
+            self._result is not None and self._loader.current_frame() is not None)
 
     def _refine_names(self):
         names = []
@@ -253,29 +196,34 @@ class RefinementTab(QtWidgets.QWidget):
         return names
 
     def _run(self):
-        if self._result is None or self._image is None:
+        image = self._loader.current_frame()
+        if self._result is None or image is None:
             QtWidgets.QMessageBox.warning(self, "Missing input",
                                           "Need a Tab 2 calibration and a loaded image."); return
         if self._worker and self._worker.isRunning():
             return
+        for sel in self._loader.has_pending_fields():
+            QtWidgets.QMessageBox.warning(
+                self, "Field not computed",
+                f"'{sel.title()}' is enabled but not computed — click 'Compute field'."); return
         names = self._refine_names()
         if not names:
             QtWidgets.QMessageBox.warning(self, "No parameters", "Select at least one parameter."); return
         self._loss_view.reset()
         self._run_btn.setEnabled(False)
         self._prog.setRange(0, self._iters.value()); self._prog.setValue(0); self._prog.setVisible(True)
-        # Pick starting calibration based on radio selection
         start_result = self._result if self._start_refine.isChecked() else self._orig_result
         mode_lbl = "continued" if self._start_refine.isChecked() else "from Tab 2"
-        effective_mask = self._mask if self._use_mask_check.isChecked() else None
-        mask_note = (f"{int(effective_mask.astype(bool).sum()):,} px masked"
-                     if effective_mask is not None else "no mask")
+        mask = self._loader.composite_mask()
+        mask_note = (f"{int(mask.astype(bool).sum()):,} px masked" if mask is not None else "no mask")
         self._log.append("─" * 40 + f"\nRefining {names} ({mode_lbl}, {mask_note})…")
         self._worker = RefinementWorker(
-            start_result, self._image, self._dark, effective_mask, names,
+            start_result, image, self._loader.dark(), mask, names,
             loss_kind=self._loss_combo.currentData(),
             optimizer=self._opt_combo.currentText(), lr=self._lr.value(),
-            iters=self._iters.value(), r_bin=self._rbin.value(), parent=self)
+            iters=self._iters.value(), r_bin=self._rbin.value(), parent=self,
+            bright=self._loader.bright(), background=self._loader.background(),
+            bright_mode=self._loader.bright_mode())
         self._worker.progress.connect(self._on_progress)
         self._worker.log_line.connect(self._log.append)
         self._worker.finished.connect(self._on_done)
@@ -296,13 +244,14 @@ class RefinementTab(QtWidgets.QWidget):
             f"Lsd = {result.Lsd/1000:.4f} mm\nBC = ({result.BC_y:.2f}, {result.BC_z:.2f}) px\n"
             f"ty = {result.ty:.4f}°   tz = {result.tz:.4f}°\nλ = {result.wavelength_A:.5f} Å")
         self._log.append("Refinement complete.")
-        # Spawn comparison integration (before vs after) for the profile plot
-        if self._image is not None and self._orig_result is not None:
-            effective_mask = self._mask if self._use_mask_check.isChecked() else None
+        image = self._loader.current_frame()
+        if image is not None and self._orig_result is not None:
             self._log.append("[compare] Integrating with original + refined geometry…")
             self._compare_worker = RefineCompareWorker(
-                self._orig_result, result, self._image, mask=effective_mask,
-                r_bin=self._rbin.value(), parent=self)
+                self._orig_result, result, image, mask=self._loader.composite_mask(),
+                r_bin=self._rbin.value(), parent=self,
+                dark=self._loader.dark(), bright=self._loader.bright(),
+                background=self._loader.background(), bright_mode=self._loader.bright_mode())
             self._compare_worker.finished.connect(self._on_compare_done)
             self._compare_worker.failed.connect(
                 lambda msg: self._log.append(f"[compare] failed: {msg[:300]}"))

@@ -22,7 +22,8 @@ import pyqtgraph as pg
 
 from midas_gui.constants import COLORMAPS, DISTORTION_NAMES
 from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollDoubleSpinBox, _fspin, _twocol,
-                               _browse, is_h5, list_h5_datasets, _NoScrollComboBox)
+                               _browse, is_h5, list_h5_datasets, _NoScrollComboBox,
+                               _load_image, _collect_frame_paths, apply_field_corrections)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -756,8 +757,8 @@ class FieldSelector(QtWidgets.QGroupBox):
         v.addWidget(self._ds_row)
 
         # Index range (clamped to available frames) + optional mode, on one row
-        self._start = _NoScrollSpinBox(); self._start.setRange(0, 0); self._start.setFixedWidth(58)
-        self._end = _NoScrollSpinBox(); self._end.setRange(0, 0); self._end.setFixedWidth(58)
+        self._start = _NoScrollSpinBox(); self._start.setRange(0, 0); self._start.setFixedWidth(50)
+        self._end = _NoScrollSpinBox(); self._end.setRange(0, 0); self._end.setFixedWidth(50)
         self._end.setToolTip("Last frame index to average (inclusive).")
         self._nfr_lbl = QtWidgets.QLabel("")
         self._nfr_lbl.setStyleSheet("color:#9a9a9a;font-size:10px")
@@ -768,7 +769,7 @@ class FieldSelector(QtWidgets.QGroupBox):
         if with_mode:
             self._mode = _NoScrollComboBox()
             self._mode.addItems(["Flat-field divide", "Subtract"])
-            self._mode.setFixedWidth(120)
+            self._mode.setFixedWidth(104)
             ir.addStretch(1); ir.addWidget(self._mode)
         else:
             self._mode = None
@@ -913,6 +914,439 @@ class FieldSelector(QtWidgets.QGroupBox):
         if self._mode is None:
             return "divide"
         return "divide" if self._mode.currentIndex() == 0 else "subtract"
+
+
+class MaskSelector(QtWidgets.QGroupBox):
+    """Multiple mask sources unioned into one composite mask.
+
+    Rows are mask files/folders plus an optional auto-managed "Tab 1 mask" row
+    (set via :meth:`set_tab1_mask`).  ``composite_mask()`` OR's every source
+    (each loaded → ``!= 0``; a folder OR's all its frames).  Masked pixels are the
+    ones a caller should zero / ignore.
+    """
+    maskChanged = QtCore.pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__("Mask", parent)
+        self._sources: list = []          # dicts: {kind, path, mask(cache), row(QWidget)}
+        self._tab1_mask = None
+        v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(6, 4, 6, 6); v.setSpacing(4)
+        self._list = QtWidgets.QVBoxLayout(); self._list.setSpacing(2)
+        v.addLayout(self._list)
+        row = QtWidgets.QHBoxLayout(); row.setSpacing(4)
+        bf = QtWidgets.QPushButton("Add file…"); bf.clicked.connect(self._add_file)
+        bd = QtWidgets.QPushButton("Add folder…"); bd.clicked.connect(self._add_folder)
+        row.addWidget(bf); row.addWidget(bd)
+        v.addLayout(row)
+        self._status = QtWidgets.QLabel("No mask.")
+        self._status.setStyleSheet("color:#9a9a9a;font-size:10px"); self._status.setWordWrap(True)
+        v.addWidget(self._status)
+
+    def _add_row(self, entry, label):
+        rw = QtWidgets.QWidget()
+        h = QtWidgets.QHBoxLayout(rw); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(4)
+        lbl = QtWidgets.QLabel(label); lbl.setStyleSheet("font-size:10px")
+        x = QtWidgets.QToolButton(); x.setText("✕"); x.setFixedWidth(22)
+        x.clicked.connect(lambda: self._remove(entry))
+        h.addWidget(lbl, 1); h.addWidget(x)
+        entry["row"] = rw
+        self._list.addWidget(rw)
+
+    def _remove(self, entry):
+        if entry in self._sources:
+            self._list.removeWidget(entry["row"]); entry["row"].deleteLater()
+            self._sources.remove(entry)
+            if entry["kind"] == "tab1":
+                self._tab1_mask = None
+            self._refresh(); self.maskChanged.emit()
+
+    def _add_source(self, kind, path):
+        from pathlib import Path
+        entry = {"kind": kind, "path": path, "mask": None, "row": None}
+        self._add_row(entry, f"{kind}: {Path(path).name}")
+        self._sources.append(entry)
+        self._refresh(); self.maskChanged.emit()
+
+    def _add_file(self):
+        p = _browse(self, "Add mask file", "Images (*.tif *.tiff *.h5 *.hdf5);;All (*)")
+        if p:
+            self._add_source("file", p)
+
+    def _add_folder(self):
+        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Add mask folder")
+        if d:
+            self._add_source("folder", d)
+
+    def set_tab1_mask(self, mask):
+        """Add / update / remove the auto-managed Tab-1 mask row."""
+        self._tab1_mask = None if mask is None else (np.asarray(mask) != 0)
+        existing = next((e for e in self._sources if e["kind"] == "tab1"), None)
+        if self._tab1_mask is None:
+            if existing:
+                self._remove(existing)
+            return
+        if existing is None:
+            entry = {"kind": "tab1", "path": None, "mask": None, "row": None}
+            n = int(self._tab1_mask.sum())
+            self._add_row(entry, f"Tab 1 mask ({n:,} px)")
+            self._sources.insert(0, entry)
+        self._refresh(); self.maskChanged.emit()
+
+    def _load_source(self, entry):
+        if entry["kind"] == "tab1":
+            return self._tab1_mask
+        if entry["mask"] is not None:
+            return entry["mask"]
+        try:
+            if entry["kind"] == "folder":
+                acc = None
+                for p in _collect_frame_paths(entry["path"]):
+                    a = _load_image(p); a = a[0] if a.ndim == 3 else a
+                    b = (a != 0)
+                    acc = b if acc is None else (acc | b)
+                m = acc
+            else:
+                a = _load_image(entry["path"]); a = a[0] if a.ndim == 3 else a
+                m = (a != 0)
+            entry["mask"] = m
+            return m
+        except Exception:
+            return None
+
+    def composite_mask(self):
+        """uint8 union of all sources (1 = masked), or None if empty."""
+        out = None
+        for e in self._sources:
+            m = self._load_source(e)
+            if m is None:
+                continue
+            m = np.asarray(m) != 0
+            if out is None:
+                out = m
+            elif out.shape == m.shape:
+                out = out | m
+        return out.astype(np.uint8) if out is not None else None
+
+    def _refresh(self):
+        n = len(self._sources)
+        self._status.setText(f"{n} mask source(s)" if n else "No mask.")
+
+
+class DataLoaderPanel(QtWidgets.QScrollArea):
+    """Left-hand data-loading panel shared by Tabs 0/2/3/4.
+
+    Selects the five inputs — Data, Dark, Bright, Background, Mask — each a single
+    file / a folder / an HDF5 dataset (container dropdown).  ``mode`` tailors the
+    Data card:
+      - ``"stack"``  — frame navigator (Data Viewer);
+      - ``"single"`` — a frame-index spin (Calibrate / Refinement);
+      - ``"stream"`` — frame range + stride, no in-memory load (Batch).
+    Dark/Bright/Background reuse :class:`FieldSelector`; Mask uses
+    :class:`MaskSelector`.  ``corrected(frame)`` applies dark/bright/background.
+    """
+    dataChanged = QtCore.pyqtSignal()     # data loaded, or current frame changed
+    fieldsChanged = QtCore.pyqtSignal()   # dark/bright/background/mask changed
+
+    def __init__(self, parent=None, *, mode="single", data_dataset="exchange/data",
+                 dark_dataset="exchange/data_dark"):
+        super().__init__(parent)
+        from midas_gui import style as S
+        self._mode = mode
+        self._stack = self._paths = self._h5 = None
+        self._nframes = 0
+        self._cur = None
+
+        self.setWidgetResizable(True)
+        inner = QtWidgets.QWidget(); self.setWidget(inner)
+        lv = QtWidgets.QVBoxLayout(inner); lv.setContentsMargins(4, 4, 4, 4); lv.setSpacing(8)
+
+        # Distinct background + accent right border so the data-loader panel stands
+        # out from the middle parameters panel.
+        self.setObjectName("dataLoaderPanel")
+        inner.setObjectName("dataLoaderInner")
+        self.viewport().setObjectName("dataLoaderViewport")
+        self.setStyleSheet(
+            f"#dataLoaderPanel {{ border: none; border-right: 2px solid {S.ACCENT}; }}"
+            f"#dataLoaderViewport, #dataLoaderInner {{ background: #2b2e35; }}")
+
+        # ── Data card ──
+        card = S.make_card("Data")
+        self._path_ed = QtWidgets.QLineEdit()
+        self._path_ed.setPlaceholderText("file / folder / .h5")
+        self._path_ed.textChanged.connect(self._on_path_changed)
+        self._path_ed.returnPressed.connect(self._load)
+        browse = QtWidgets.QToolButton(); browse.setText("⋯"); browse.setFixedWidth(28)
+        browse.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        menu = QtWidgets.QMenu(browse)
+        menu.addAction("File…", self._browse_file)
+        menu.addAction("Folder…", self._browse_folder)
+        browse.setMenu(menu)
+        pr = QtWidgets.QHBoxLayout(); pr.setSpacing(4)
+        pr.addWidget(self._path_ed); pr.addWidget(browse)
+        card.body.addLayout(pr)
+
+        self._ds_row = QtWidgets.QWidget()
+        dr = QtWidgets.QHBoxLayout(self._ds_row); dr.setContentsMargins(0, 0, 0, 0); dr.setSpacing(4)
+        self._ds_combo = _NoScrollComboBox(); self._ds_combo.setEditable(True)
+        self._ds_combo.setEditText(data_dataset)
+        self._ds_combo.currentIndexChanged.connect(lambda _=0: self._load() if self._nframes else None)
+        dr.addWidget(QtWidgets.QLabel("Dataset:")); dr.addWidget(self._ds_combo, 1)
+        self._ds_row.setVisible(False)
+        card.body.addWidget(self._ds_row)
+
+        # Mode-specific frame controls
+        self._frame_spin = _NoScrollSpinBox(); self._frame_spin.setRange(0, 0)
+        if mode == "stack":
+            self._slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+            self._prev_btn = QtWidgets.QPushButton("◀"); self._prev_btn.setFixedWidth(30)
+            self._next_btn = QtWidgets.QPushButton("▶"); self._next_btn.setFixedWidth(30)
+            self._nframes_lbl = QtWidgets.QLabel("/ 0")
+            self._frame_spin.setFixedWidth(64)
+            self._slider.valueChanged.connect(self._set_frame)
+            self._frame_spin.valueChanged.connect(self._set_frame)
+            self._prev_btn.clicked.connect(lambda: self._set_frame(self._frame_spin.value() - 1))
+            self._next_btn.clicked.connect(lambda: self._set_frame(self._frame_spin.value() + 1))
+            nav = QtWidgets.QHBoxLayout(); nav.setSpacing(4)
+            nav.addWidget(self._prev_btn); nav.addWidget(self._slider, 1)
+            nav.addWidget(self._frame_spin); nav.addWidget(self._nframes_lbl); nav.addWidget(self._next_btn)
+            self._nav_row = QtWidgets.QWidget(); self._nav_row.setLayout(nav)
+            self._nav_row.setEnabled(False)
+            card.body.addWidget(self._nav_row)
+        elif mode == "single":
+            self._frame_spin.valueChanged.connect(self._set_frame)
+            fr = QtWidgets.QHBoxLayout(); fr.setSpacing(4)
+            fr.addWidget(QtWidgets.QLabel("Frame:")); fr.addWidget(self._frame_spin); fr.addStretch(1)
+            card.body.addLayout(fr)
+        else:  # stream
+            self._fr_start = _NoScrollSpinBox(); self._fr_start.setRange(0, 999999); self._fr_start.setFixedWidth(64)
+            self._fr_end = _NoScrollSpinBox(); self._fr_end.setRange(0, 999999); self._fr_end.setFixedWidth(64)
+            self._fr_end.setToolTip("Last frame (exclusive). 0 = all frames.")
+            self._fr_stride = _NoScrollSpinBox(); self._fr_stride.setRange(1, 100000); self._fr_stride.setValue(1); self._fr_stride.setFixedWidth(64)
+            sf = S.Form()
+            sf.row(("start:", self._fr_start), ("end(0=all):", self._fr_end))
+            sf.row(("stride:", self._fr_stride))
+            card.body.addLayout(sf)
+
+        self._info = QtWidgets.QLabel("No data loaded.")
+        self._info.setStyleSheet("color:#9a9a9a;font-size:10px"); self._info.setWordWrap(True)
+        card.body.addWidget(self._info)
+        lv.addWidget(card)
+
+        # ── Dark / Bright / Background ──
+        fld = S.make_card("Dark / Bright / Background")
+        self._dark_sel = FieldSelector("Dark", default_dataset=dark_dataset)
+        self._bright_sel = FieldSelector("Bright", with_mode=True)
+        self._bg_sel = FieldSelector("Background")
+        for w in (self._dark_sel, self._bright_sel, self._bg_sel):
+            w.fieldReady.connect(self.fieldsChanged)
+            fld.body.addWidget(w)
+        lv.addWidget(fld)
+
+        # ── Mask ──
+        self._mask_sel = MaskSelector()
+        self._mask_sel.maskChanged.connect(self.fieldsChanged)
+        lv.addWidget(self._mask_sel)
+        lv.addStretch(1)
+
+    # ── data source (path / dataset / loading) ────────────────────
+    def _dataset(self) -> str:
+        return self._ds_combo.currentText().split("   ")[0].strip() or "exchange/data"
+
+    def _browse_file(self):
+        p = _browse(self, "Open data",
+                    "Data (*.tif *.tiff *.h5 *.hdf5 *.hdf *.nxs *.ge*);;All (*)")
+        if p:
+            self._path_ed.setText(p); self._load()
+
+    def _browse_folder(self):
+        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select folder of frames")
+        if d:
+            self._path_ed.setText(d); self._load()
+
+    def _on_path_changed(self, p: str):
+        from pathlib import Path
+        h5 = is_h5(p)
+        self._ds_row.setVisible(h5)
+        if h5 and Path(p).exists():
+            try:
+                items = list_h5_datasets(p)
+            except Exception:
+                items = []
+            if items:
+                keep = self._ds_combo.currentText().strip()
+                self._ds_combo.blockSignals(True); self._ds_combo.clear()
+                for name, shape in items:
+                    self._ds_combo.addItem(f"{name}   {tuple(shape)}", name)
+                idx = next((i for i in range(self._ds_combo.count())
+                            if self._ds_combo.itemData(i) == keep), -1)
+                if idx < 0:
+                    idx = next((i for i, (n, s) in enumerate(items) if len(s) >= 3), 0)
+                self._ds_combo.setCurrentIndex(idx)
+                self._ds_combo.blockSignals(False)
+
+    def _collect_paths(self, raw: str) -> list:
+        return _collect_frame_paths(raw)
+
+    def _load(self):
+        from pathlib import Path
+        raw = self._path_ed.text().strip()
+        if not raw:
+            return
+        if self._mode == "stream":
+            # No in-memory load; just report the source.
+            self._info.setText(f"Source: {raw}")
+            self.dataChanged.emit()
+            return
+        try:
+            self._stack = self._paths = self._h5 = None; self._nframes = 0
+            p = Path(raw)
+            if p.is_dir() or any(ch in raw for ch in "*?"):
+                paths = self._collect_paths(raw)
+                if not paths:
+                    QtWidgets.QMessageBox.warning(self, "Empty", "No frames found."); return
+                self._paths = paths; self._nframes = len(paths)
+                kind = f"folder/glob ({self._nframes} files)"
+            elif is_h5(raw):
+                import h5py
+                dset = self._dataset()
+                with h5py.File(raw, "r") as f:
+                    if dset not in f:
+                        raise KeyError(f"dataset '{dset}' not in file")
+                    shape = f[dset].shape
+                n = shape[0] if len(shape) >= 3 else 1
+                self._h5 = (raw, dset, n); self._nframes = n
+                kind = f"HDF5 [{dset}] {shape}"
+            else:
+                import tifffile
+                arr = np.asarray(tifffile.imread(raw))
+                if arr.ndim >= 3:
+                    self._stack = arr; self._nframes = arr.shape[0]
+                    kind = f"TIFF stack {arr.shape}"
+                else:
+                    self._stack = arr[None, ...]; self._nframes = 1
+                    kind = f"TIFF {arr.shape}"
+            self._info.setText(f"Loaded: {kind}")
+            self._setup_navigator()
+            self._set_frame(0)
+        except Exception:
+            import traceback
+            QtWidgets.QMessageBox.critical(self, "Load error", traceback.format_exc()[:500])
+
+    def _setup_navigator(self):
+        hi = max(0, self._nframes - 1)
+        self._frame_spin.blockSignals(True); self._frame_spin.setRange(0, hi); self._frame_spin.blockSignals(False)
+        if self._mode == "stack":
+            self._nav_row.setEnabled(self._nframes > 1)
+            self._slider.blockSignals(True); self._slider.setRange(0, hi); self._slider.blockSignals(False)
+            self._nframes_lbl.setText(f"/ {hi}")
+
+    def _set_frame(self, i):
+        if self._nframes == 0:
+            return
+        i = max(0, min(int(i), self._nframes - 1))
+        widgets = [self._frame_spin] + ([self._slider] if self._mode == "stack" else [])
+        for w in widgets:
+            w.blockSignals(True); w.setValue(i); w.blockSignals(False)
+        self._cur = self._get_frame(i)
+        self.dataChanged.emit()
+
+    def _get_frame(self, i: int) -> np.ndarray:
+        i = max(0, min(i, self._nframes - 1))
+        if self._stack is not None:
+            return np.asarray(self._stack[i], dtype=np.float32)
+        if self._paths is not None:
+            arr = _load_image(self._paths[i]).astype(np.float32)
+            return arr[0] if arr.ndim == 3 else arr
+        if self._h5 is not None:
+            path, dset, _ = self._h5
+            return _load_image(path, data_loc=dset, frame=i).astype(np.float32)
+        raise RuntimeError("No data loaded")
+
+    def full_stack(self) -> np.ndarray:
+        if self._stack is not None:
+            return np.asarray(self._stack)
+        if self._h5 is not None:
+            import h5py
+            path, dset, _ = self._h5
+            with h5py.File(path, "r") as f:
+                return np.asarray(f[dset][()])
+        if self._paths is not None:
+            frames = [self._get_frame(i) for i in range(self._nframes)]
+            return np.stack(frames, axis=0)
+        raise RuntimeError("No data loaded")
+
+    # ── public API ────────────────────────────────────────────────
+    def set_path(self, path, dataset=None, *, load=True):
+        """Preset the data path (and HDF5 dataset); optionally load immediately."""
+        self._path_ed.setText(str(path))
+        if dataset is not None and is_h5(str(path)):
+            self._ds_combo.setEditText(dataset)
+        if load:
+            from pathlib import Path
+            if self._mode == "stream" or Path(str(path)).exists():
+                self._load()
+
+    def n_frames(self) -> int:
+        return self._nframes
+
+    def frame_index(self) -> int:
+        return self._frame_spin.value()
+
+    def set_frame(self, i, **_):
+        self._set_frame(i)
+
+    def current_frame(self):
+        """Raw (uncorrected) current 2-D frame, or None."""
+        if self._nframes == 0:
+            return None
+        if self._cur is None:
+            self._cur = self._get_frame(self.frame_index())
+        return self._cur
+
+    def source_cfg(self) -> dict:
+        """Streaming source descriptor for BatchWorker (stream mode)."""
+        from pathlib import Path
+        raw = self._path_ed.text().strip()
+        if is_h5(raw):
+            return {"type": "hdf5", "path": raw, "dataset": self._dataset()}
+        return {"type": "tiff_glob", "path": raw}
+
+    def frame_range(self):
+        end = self._fr_end.value() if self._fr_end.value() > 0 else None
+        return (self._fr_start.value(), end, max(1, self._fr_stride.value()))
+
+    def dark(self):
+        return self._dark_sel.get_field()
+
+    def bright(self):
+        return self._bright_sel.get_field()
+
+    def background(self):
+        return self._bg_sel.get_field()
+
+    def bright_mode(self) -> str:
+        return self._bright_sel.get_mode()
+
+    def has_pending_fields(self):
+        return [s for s in (self._dark_sel, self._bright_sel, self._bg_sel) if s.has_pending()]
+
+    def composite_mask(self):
+        return self._mask_sel.composite_mask()
+
+    def set_tab1_mask(self, mask):
+        self._mask_sel.set_tab1_mask(mask)
+
+    def corrected(self, frame):
+        """Apply dark/bright/background to a raw frame (mask handled separately)."""
+        if frame is None:
+            return None
+        d, b, g = self.dark(), self.bright(), self.background()
+        if d is None and b is None and g is None:
+            return np.asarray(frame, dtype=np.float32)
+        return apply_field_corrections(frame, dark=d, bright=b,
+                                       bright_mode=self.bright_mode(),
+                                       background=g).astype(np.float32)
 
 
 class LossCurveViewer(QtWidgets.QWidget):

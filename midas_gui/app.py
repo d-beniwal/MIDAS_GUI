@@ -76,7 +76,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"MIDAS GUI v{__version__}")
-        self.resize(1240, 900)
+        self.resize(1600, 950)
         self._build_ui()
 
     def _build_ui(self):
@@ -135,8 +135,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Mask propagation
         _connect(self._mask_tab, "maskReady",
-                 (self._cal_tab, self._batch_tab, self._refine_tab, self._corr_tab,
-                  self._pdf_tab, self._tex_tab, self._export_tab), "set_mask_from_tab1")
+                 (self._view_tab, self._cal_tab, self._batch_tab, self._refine_tab,
+                  self._corr_tab, self._pdf_tab, self._tex_tab, self._export_tab),
+                 "set_mask_from_tab1")
         # Calibration propagation (Tab 2 result → consumers)
         _connect(self._cal_tab, "calibrationDone",
                  (self._batch_tab, self._mask_tab, self._refine_tab, self._corr_tab,

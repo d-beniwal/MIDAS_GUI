@@ -535,6 +535,7 @@ def _fspin(lo, hi, dec, val, suf=""):
     s.setStepType(QtWidgets.QAbstractSpinBox.AdaptiveDecimalStepType)
     if suf:
         s.setSuffix(f"  {suf}")
+    s.setMaximumWidth(104)   # keep numeric fields compact (don't stretch to fill forms)
     return s
 
 

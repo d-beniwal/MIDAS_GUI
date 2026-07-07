@@ -9,7 +9,6 @@ This tab is purely for inspection — it produces no shared state for other tabs
 """
 from __future__ import annotations
 
-import glob as _glob
 import math
 from pathlib import Path
 from typing import Optional
@@ -20,35 +19,47 @@ import pyqtgraph as pg
 
 from midas_gui.constants import (MATERIALS, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM,
                            DEFAULT_LSD_UM, DEFAULT_BC_Y, DEFAULT_BC_Z,
-                           DEFAULT_NICKEL_H5, H5_EXTS)
-from midas_gui.helpers import (_load_image, _fspin, _NoScrollSpinBox, _browse,
-                         is_h5, simulate_rings, read_geometry, _NoScrollComboBox)
-from midas_gui.widgets import PickableImageViewer, ProfileViewer
+                           DEFAULT_NICKEL_H5)
+from midas_gui.helpers import (_fspin, _NoScrollSpinBox, _browse,
+                         simulate_rings, read_geometry, _NoScrollComboBox)
+from midas_gui.widgets import PickableImageViewer, ProfileViewer, DataLoaderPanel
 from midas_gui import style as S
 
 
 class DataViewerTab(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        # Frame storage modes (exactly one active):
-        self._stack: Optional[np.ndarray] = None   # in-memory 3-D stack
-        self._paths: Optional[list] = None         # on-demand file list
-        self._h5: Optional[tuple] = None           # (path, dataset, nframes)
-        self._nframes = 0
-        self._cur: Optional[np.ndarray] = None     # current 2-D frame
+        self._cur: Optional[np.ndarray] = None     # current 2-D frame (corrected, for display)
+        self._disp_shape = None                    # last displayed shape (fresh-load detection)
         self._ring_items: list = []
         self._label_items: list = []
         self._pick_ring_item = None                # arc drawn from a profile click
         self._picked_r: Optional[float] = None
         self._build_ui()
+        self._loader.set_path(DEFAULT_NICKEL_H5, dataset="exchange/data")
+
+    def set_mask_from_tab1(self, mask):
+        self._loader.set_tab1_mask(mask)
 
     # ── UI ────────────────────────────────────────────────────────
 
     def _build_ui(self):
         root = QtWidgets.QHBoxLayout(self)
-        root.setContentsMargins(6, 6, 6, 6); root.setSpacing(8)
+        root.setContentsMargins(6, 6, 6, 6); root.setSpacing(0)
+        split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        split.setChildrenCollapsible(False); split.setHandleWidth(6)
+        root.addWidget(split); self._hsplit = split
+
+        # ── LEFT: data loader (stack mode) ──
+        self._loader = DataLoaderPanel(mode="stack")
+        self._loader.setMinimumWidth(200)
+        self._loader.dataChanged.connect(self._on_loader_data)
+        self._loader.fieldsChanged.connect(self._on_fields_changed)
+        split.addWidget(self._loader)
+
+        # ── MIDDLE: parameters ──
         scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True); scroll.setFixedWidth(468)
+        scroll.setWidgetResizable(True); scroll.setMinimumWidth(260)
         inner = QtWidgets.QWidget(); lv = QtWidgets.QVBoxLayout(inner)
         lv.setContentsMargins(2, 2, 2, 2); lv.setSpacing(8)
         scroll.setWidget(inner)
@@ -60,47 +71,8 @@ class DataViewerTab(QtWidgets.QWidget):
             r = QtWidgets.QHBoxLayout(); r.setSpacing(4)
             r.addWidget(ed); b = _br(); b.clicked.connect(slot); r.addWidget(b); return r
 
-        # ── Data card ──
-        data = S.make_card("Data")
-        self._path_ed = QtWidgets.QLineEdit()
-        self._path_ed.setPlaceholderText("file, folder, or *.tif glob…")
-        data.body.addLayout(_frow(self._path_ed, self._browse))
-        self._h5_lbl = S.LabelRight("Dataset:")
-        self._h5_combo = _NoScrollComboBox(); self._h5_combo.setEditable(True)
-        self._h5_combo.setEditText("exchange/data")
-        self._h5_combo.setToolTip("HDF5 datasets in the file (≥2-D). Auto-populated on selection.")
-        self._h5_lbl.setVisible(False); self._h5_combo.setVisible(False)
-        ds_row = QtWidgets.QHBoxLayout(); ds_row.setSpacing(4)
-        ds_row.addWidget(self._h5_lbl); ds_row.addWidget(self._h5_combo, 1)
-        data.body.addLayout(ds_row)
-        self._path_ed.textChanged.connect(self._on_path_changed)
-        self._path_ed.returnPressed.connect(self._load)
-        self._h5_combo.currentIndexChanged.connect(
-            lambda _=0: self._nframes and self._load())
-        ld = QtWidgets.QPushButton("Browse folder…"); ld.clicked.connect(self._browse_folder)
-        data.body.addWidget(ld)
-        self._info_lbl = QtWidgets.QLabel("No data loaded.")
+        self._info_lbl = QtWidgets.QLabel("")
         self._info_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px"); self._info_lbl.setWordWrap(True)
-        data.body.addWidget(self._info_lbl)
-        lv.addWidget(data)
-
-        # ── Frame navigator card ──
-        self._nav_grp = S.make_card("Frame navigator")
-        nv = QtWidgets.QHBoxLayout(); nv.setSpacing(4)
-        self._prev_btn = QtWidgets.QPushButton("◀"); self._prev_btn.setFixedWidth(32)
-        self._prev_btn.clicked.connect(lambda: self._set_frame(self._frame_spin.value() - 1))
-        self._slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self._slider.valueChanged.connect(self._set_frame)
-        self._frame_spin = _NoScrollSpinBox(); self._frame_spin.setFixedWidth(64)
-        self._frame_spin.valueChanged.connect(self._set_frame)
-        self._next_btn = QtWidgets.QPushButton("▶"); self._next_btn.setFixedWidth(32)
-        self._next_btn.clicked.connect(lambda: self._set_frame(self._frame_spin.value() + 1))
-        self._nframes_lbl = QtWidgets.QLabel("/ 0")
-        nv.addWidget(self._prev_btn); nv.addWidget(self._slider, 1)
-        nv.addWidget(self._frame_spin); nv.addWidget(self._nframes_lbl); nv.addWidget(self._next_btn)
-        self._nav_grp.body.addLayout(nv)
-        self._nav_grp.setEnabled(False)
-        lv.addWidget(self._nav_grp)
 
         # ── Projection card ──
         self._proj_grp = S.make_card("Projection")
@@ -120,8 +92,9 @@ class DataViewerTab(QtWidgets.QWidget):
         self._proj_btn = QtWidgets.QPushButton("Project stack")
         self._proj_btn.clicked.connect(self._project)
         self._frame_btn = QtWidgets.QPushButton("Back to frames")
-        self._frame_btn.clicked.connect(lambda: self._set_frame(self._frame_spin.value()))
+        self._frame_btn.clicked.connect(self._on_loader_data)
         self._proj_grp.body.addLayout(S.button_grid([self._proj_btn, self._frame_btn], 2))
+        self._proj_grp.body.addWidget(self._info_lbl)
         self._proj_grp.setEnabled(False)
         lv.addWidget(self._proj_grp)
 
@@ -161,6 +134,7 @@ class DataViewerTab(QtWidgets.QWidget):
         # ── Ring simulation card ──
         ring = S.make_card("Ring simulation")
         self._mat = _NoScrollComboBox()
+        self._mat.setMaximumWidth(150)
         for name in MATERIALS:
             self._mat.addItem(name)
         self._mat.addItem("Custom")
@@ -224,7 +198,7 @@ class DataViewerTab(QtWidgets.QWidget):
         ring.body.addWidget(self._ring_info)
         lv.addWidget(ring)
         lv.addStretch(1)
-        root.addWidget(scroll)
+        split.addWidget(scroll)
 
         # Right: image (top) + radial-integration plot (bottom) in a splitter.
         right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
@@ -251,18 +225,16 @@ class DataViewerTab(QtWidgets.QWidget):
         ptb.insertWidget(3, QtWidgets.QLabel("  R bin:"))
         right.addWidget(self._profile_view)
         right.setStretchFactor(0, 3); right.setStretchFactor(1, 1)
-        root.addWidget(right, stretch=1)
+        right.setMinimumWidth(320)
+        split.addWidget(right)
+        split.setStretchFactor(0, 0); split.setStretchFactor(1, 0); split.setStretchFactor(2, 1)
+        split.setSizes([286, 361, 950])
 
         # Recompute rings / radial profile when the beam centre is edited manually.
         self._bcy.valueChanged.connect(self._on_bc_changed)
         self._bcz.valueChanged.connect(self._on_bc_changed)
 
         self._on_material(self._mat.currentText())
-        # Pre-fill the default test dataset (auto-populates the HDF5 dataset dropdown)
-        # and load it if present, so the tab is usable out-of-the-box without a Load button.
-        self._path_ed.setText(DEFAULT_NICKEL_H5)
-        if Path(DEFAULT_NICKEL_H5).exists():
-            self._load()
 
     # ── Material dropdown ─────────────────────────────────────────
 
@@ -300,161 +272,51 @@ class DataViewerTab(QtWidgets.QWidget):
 
     # ── Loading ───────────────────────────────────────────────────
 
-    def _browse(self):
-        p = _browse(self, "Open data",
-                    "Data (*.tif *.tiff *.h5 *.hdf5 *.hdf *.nxs *.ge*);;All (*)")
-        if p:
-            self._path_ed.setText(p); self._load()
-
-    def _on_path_changed(self, p: str):
-        h5 = is_h5(p)
-        self._h5_lbl.setVisible(h5); self._h5_combo.setVisible(h5)
-        if h5 and Path(p).exists():
-            self._populate_h5_datasets(p)
-
-    def _populate_h5_datasets(self, path: str):
-        """List all ≥2-D datasets in the file into the dataset combo."""
-        try:
-            import h5py
-            items = []
-
-            def visit(name, obj):
-                if isinstance(obj, h5py.Dataset) and obj.ndim >= 2:
-                    items.append((name, obj.shape))
-
-            with h5py.File(path, "r") as f:
-                f.visititems(visit)
-            if not items:
-                return
-            keep = self._h5_combo.currentText().strip()
-            self._h5_combo.blockSignals(True)
-            self._h5_combo.clear()
-            for name, shape in items:
-                self._h5_combo.addItem(f"{name}   {tuple(shape)}", name)
-            # Restore a sensible selection: prior text if still present, else first 3-D
-            idx = next((i for i in range(self._h5_combo.count())
-                        if self._h5_combo.itemData(i) == keep), -1)
-            if idx < 0:
-                idx = next((i for i, (n, s) in enumerate(items) if len(s) >= 3), 0)
-            self._h5_combo.setCurrentIndex(idx)
-            self._h5_combo.blockSignals(False)
-            self._info_lbl.setText(f"HDF5: {len(items)} dataset(s) found — pick one and Load.")
-        except Exception as e:
-            self._info_lbl.setText(f"Could not list HDF5 datasets: {e}")
-
-    def _h5_dataset(self) -> str:
-        """Current dataset path. List items read 'name   (shape)'; manual entries
-        are just 'name' — splitting on the separator handles both."""
-        return self._h5_combo.currentText().split("   ")[0].strip() or "exchange/data"
-
-    def _browse_folder(self):
-        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select folder of frames")
-        if d:
-            self._path_ed.setText(d); self._load()
-
-    def _reset_storage(self):
-        self._stack = self._paths = self._h5 = None
-        self._nframes = 0
-
-    def _load(self):
-        raw = self._path_ed.text().strip()
-        if not raw:
+    def _on_loader_data(self):
+        """Data loaded or frame changed in the loader — refresh the display,
+        applying dark/bright/background corrections."""
+        raw = self._loader.current_frame()
+        if raw is None:
             return
-        try:
-            self._reset_storage()
-            p = Path(raw)
-            if p.is_dir() or any(ch in raw for ch in "*?"):
-                paths = self._collect_paths(raw)
-                if not paths:
-                    QtWidgets.QMessageBox.warning(self, "Empty", "No frames found."); return
-                self._paths = paths; self._nframes = len(paths)
-                kind = f"folder/glob ({self._nframes} files)"
-            elif is_h5(raw):
-                import h5py
-                dset = self._h5_dataset()
-                with h5py.File(raw, "r") as f:
-                    if dset not in f:
-                        raise KeyError(f"dataset '{dset}' not in file")
-                    shape = f[dset].shape
-                n = shape[0] if len(shape) >= 3 else 1
-                self._h5 = (raw, dset, n); self._nframes = n
-                kind = f"HDF5 [{dset}] {shape}"
-            else:
-                import tifffile
-                arr = np.asarray(tifffile.imread(raw))
-                if arr.ndim >= 3:
-                    self._stack = arr; self._nframes = arr.shape[0]
-                    kind = f"TIFF stack {arr.shape}"
-                else:
-                    self._stack = arr[None, ...]; self._nframes = 1
-                    kind = f"TIFF {arr.shape}"
-            self._info_lbl.setText(f"Loaded: {kind}")
-            self._setup_navigator()
-            self._set_frame(0, autorange=True)
+        self._proj_grp.setEnabled(self._loader.n_frames() > 1)
+        fresh = (self._disp_shape != raw.shape)
+        self._disp_shape = raw.shape
+        self._cur = self._loader.corrected(raw)
+        self._viewer.set_image(self._cur, autorange=fresh)
+        if fresh:
             self._autofill_imask_max()
-        except Exception as e:
-            import traceback
-            QtWidgets.QMessageBox.critical(self, "Load error", traceback.format_exc()[:500])
+        if self._bc_auto.isChecked():
+            NZ, NY = self._cur.shape
+            for w, v in ((self._bcy, NY / 2.0), (self._bcz, NZ / 2.0)):
+                w.blockSignals(True); w.setValue(v); w.blockSignals(False)
+        if self._ring_items or self._label_items:
+            self._redraw_rings()
+        self._redraw_picked_ring()
+        self._update_intensity_overlay()
+        if self._rad_auto.isChecked():
+            self._radial_integrate()
 
-    def _collect_paths(self, raw: str) -> list:
-        p = Path(raw)
-        if p.is_dir():
-            out = []
-            for ext in ("*.tif", "*.tiff", "*.h5", "*.hdf5", "*.ge*", "*.cbf", "*.edf"):
-                out.extend(sorted(p.glob(ext)))
-            return [str(x) for x in out]
-        return sorted(_glob.glob(raw))
-
-    def _setup_navigator(self):
-        multi = self._nframes > 1
-        self._nav_grp.setEnabled(multi)
-        self._proj_grp.setEnabled(multi)
-        for w in (self._slider, self._frame_spin):
-            w.blockSignals(True)
-        self._slider.setRange(0, max(0, self._nframes - 1))
-        self._frame_spin.setRange(0, max(0, self._nframes - 1))
-        self._nframes_lbl.setText(f"/ {self._nframes - 1}")
-        for w in (self._slider, self._frame_spin):
-            w.blockSignals(False)
-
-    def _get_frame(self, i: int) -> np.ndarray:
-        i = max(0, min(i, self._nframes - 1))
-        if self._stack is not None:
-            return np.asarray(self._stack[i], dtype=np.float32)
-        if self._paths is not None:
-            arr = _load_image(self._paths[i]).astype(np.float32)
-            return arr[0] if arr.ndim == 3 else arr   # guard multi-page file in a folder
-        if self._h5 is not None:
-            path, dset, _ = self._h5
-            return _load_image(path, data_loc=dset, frame=i).astype(np.float32)
-        raise RuntimeError("No data loaded")
-
-    def _full_stack(self) -> np.ndarray:
-        """Return the full N-D stack for projection (loads on demand)."""
-        if self._stack is not None:
-            return np.asarray(self._stack)
-        if self._h5 is not None:
-            import h5py
-            path, dset, _ = self._h5
-            with h5py.File(path, "r") as f:
-                return np.asarray(f[dset][()])
-        if self._paths is not None:
-            frames = []
-            for i in range(self._nframes):
-                a = _load_image(self._paths[i]).astype(np.float32)
-                frames.append(a[0] if a.ndim == 3 else a)
-            return np.stack(frames, axis=0)
-        raise RuntimeError("No data loaded")
+    def _on_fields_changed(self):
+        """Dark/bright/background/mask changed — recompute the corrected image and
+        refresh the overlay + radial integration (no autorange, no autofill)."""
+        raw = self._loader.current_frame()
+        if raw is None:
+            return
+        self._cur = self._loader.corrected(raw)
+        self._viewer.set_image(self._cur, autorange=False)
+        self._update_intensity_overlay()
+        if self._rad_auto.isChecked():
+            self._radial_integrate()
 
     def _project(self):
-        if self._nframes <= 1:
+        if self._loader.n_frames() <= 1:
             QtWidgets.QMessageBox.warning(self, "No stack", "Projection needs a stack."); return
         method = next(m for m, b in self._proj_method.items() if b.isChecked())
         axis = self._proj_axis.value()
         try:
             self._info_lbl.setText("Loading stack for projection…")
             QtWidgets.QApplication.processEvents()
-            data = self._full_stack()
+            data = self._loader.full_stack()
             if axis >= data.ndim:
                 QtWidgets.QMessageBox.critical(
                     self, "Bad axis", f"Axis {axis} invalid for {data.ndim}-D data."); return
@@ -464,7 +326,7 @@ class DataViewerTab(QtWidgets.QWidget):
                 QtWidgets.QMessageBox.critical(
                     self, "Not 2-D", f"Result is {proj.ndim}-D after projecting axis {axis}. "
                     "Pick an axis that leaves a 2-D image."); return
-            self._cur = proj.astype(np.float32)
+            self._cur = self._loader.corrected(proj.astype(np.float32))
             self._viewer.set_image(self._cur)
             if self._bc_auto.isChecked():
                 NZ, NY = self._cur.shape
@@ -481,27 +343,6 @@ class DataViewerTab(QtWidgets.QWidget):
         except Exception:
             import traceback
             QtWidgets.QMessageBox.critical(self, "Projection error", traceback.format_exc()[:500])
-
-    def _set_frame(self, i: int, autorange: bool = False):
-        if self._nframes == 0:
-            return
-        i = max(0, min(int(i), self._nframes - 1))
-        for w in (self._slider, self._frame_spin):
-            w.blockSignals(True); w.setValue(i); w.blockSignals(False)
-        self._cur = self._get_frame(i)
-        # autorange only on a fresh load — navigating a stack keeps the zoom/pan.
-        self._viewer.set_image(self._cur, autorange=autorange)
-        if self._bc_auto.isChecked():
-            NZ, NY = self._cur.shape
-            for w, v in ((self._bcy, NY / 2.0), (self._bcz, NZ / 2.0)):
-                w.blockSignals(True); w.setValue(v); w.blockSignals(False)
-        # redraw existing rings on the new frame
-        if self._ring_items or self._label_items:
-            self._redraw_rings()
-        self._redraw_picked_ring()
-        self._update_intensity_overlay()
-        if self._rad_auto.isChecked():
-            self._radial_integrate()
 
     # ── Ring simulation ───────────────────────────────────────────
 
@@ -633,7 +474,7 @@ class DataViewerTab(QtWidgets.QWidget):
             return
         r_axis, prof = self._radial_profile(
             self._cur, self._bcy.value(), self._bcz.value(), self._rad_r_bin.value(),
-            mask=self._intensity_bad_mask(self._cur))
+            mask=self._combined_bad_mask(self._cur))
         self._profile_view.set_profile(
             r_axis, prof, wavelength_A=self._wl.value(),
             lsd_um=self._lsd.value(), px_um=self._px.value())
@@ -741,8 +582,26 @@ class DataViewerTab(QtWidgets.QWidget):
             bad |= (img > hi)
         return bad
 
+    def _combined_bad_mask(self, img):
+        """Union of the intensity-range mask and the loader's composite mask files."""
+        if img is None:
+            return None
+        parts = []
+        im = self._intensity_bad_mask(img)
+        if im is not None:
+            parts.append(im)
+        cm = self._loader.composite_mask()
+        if cm is not None and cm.shape == img.shape:
+            parts.append(cm != 0)
+        if not parts:
+            return None
+        out = parts[0]
+        for p in parts[1:]:
+            out = out | p
+        return out
+
     def _update_intensity_overlay(self):
-        bad = self._intensity_bad_mask(self._cur)
+        bad = self._combined_bad_mask(self._cur)
         if bad is None or not bad.any():
             self._viewer.clear_overlay()
         else:

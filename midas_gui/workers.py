@@ -813,13 +813,15 @@ class RefinementWorker(QtCore.QThread):
 
     def __init__(self, result, image, dark, mask, refine_names, *,
                  loss_kind="eta_uniformity", optimizer="adam", lr=0.5,
-                 iters=100, r_bin=2.0, eta_bin=5.0, parent=None):
+                 iters=100, r_bin=2.0, eta_bin=5.0, parent=None,
+                 bright=None, background=None, bright_mode="divide"):
         super().__init__(parent)
         self._result, self._image, self._dark, self._mask = result, image, dark, mask
         self._names = refine_names
         self._loss_kind, self._optimizer = loss_kind, optimizer
         self._lr, self._iters = lr, iters
         self._r_bin, self._eta_bin = r_bin, eta_bin
+        self._bright, self._background, self._bright_mode = bright, background, bright_mode
 
     # Typical step per parameter — used to scale the optimiser's search space so
     # every coordinate is O(1) (Nelder-Mead is scale-sensitive).
@@ -847,8 +849,10 @@ class RefinementWorker(QtCore.QThread):
 
             spec = _build_spec(self._result, self._r_bin, self._eta_bin)
             img = self._image.astype(np.float64)
-            if self._dark is not None:
-                img = np.clip(img - self._dark.astype(np.float64), 0, None)
+            if self._dark is not None or self._bright is not None or self._background is not None:
+                img = apply_field_corrections(
+                    img, dark=self._dark, bright=self._bright,
+                    bright_mode=self._bright_mode, background=self._background)
             # Prepare mask tensor once — passed to the geometry builder each iteration
             # so masked pixels are excluded from both intensity sums AND bin counts.
             # Zeroing in the image alone is not enough: HardBinGeometry still counts
@@ -1003,7 +1007,8 @@ class RefineCompareWorker(QtCore.QThread):
     failed   = QtCore.pyqtSignal(str)
 
     def __init__(self, orig_result, refined_result, image, mask=None,
-                 r_bin=2.0, eta_bin=5.0, parent=None):
+                 r_bin=2.0, eta_bin=5.0, parent=None,
+                 dark=None, bright=None, background=None, bright_mode="divide"):
         super().__init__(parent)
         self._orig = orig_result
         self._refined = refined_result
@@ -1011,12 +1016,19 @@ class RefineCompareWorker(QtCore.QThread):
         self._mask = mask
         self._r_bin = r_bin
         self._eta_bin = eta_bin
+        self._dark, self._bright, self._background = dark, bright, background
+        self._bright_mode = bright_mode
 
     def run(self):
         try:
             import torch
             mask_t = torch.from_numpy(self._mask.astype(np.float32)) if self._mask is not None else None
-            img_t = torch.from_numpy(self._image.astype(np.float64))
+            img = self._image.astype(np.float64)
+            if self._dark is not None or self._bright is not None or self._background is not None:
+                img = apply_field_corrections(
+                    img, dark=self._dark, bright=self._bright,
+                    bright_mode=self._bright_mode, background=self._background)
+            img_t = torch.from_numpy(img)
             profiles, r_axes = [], []
             for res in (self._orig, self._refined):
                 spec = _build_spec(res, self._r_bin, self._eta_bin)

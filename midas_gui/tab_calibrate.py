@@ -20,11 +20,10 @@ from midas_gui.constants import (
     CALIBRANTS, PIPELINES, _SG, _LC, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM,
     DEFAULT_LSD_UM, DEFAULT_BC_Y, DEFAULT_BC_Z, DEFAULT_CALIBRANT_TIF)
 from midas_gui.helpers import (
-    _load_image, _fspin, _NoScrollSpinBox, _browse, _predict_ring_radii, is_h5,
-    _NoScrollComboBox)
+    _fspin, _NoScrollSpinBox, _predict_ring_radii, _NoScrollComboBox)
 from midas_gui.widgets import (
     PickableImageViewer, ProfileViewer, LogPanel, ResidualBarChart, DistortionTable,
-    FieldSelector)
+    DataLoaderPanel)
 from midas_gui.workers import CalibrationWorker, IntegrationWorker, CorrectedRingsWorker
 from midas_gui.dialogs import _SaveParamstestDialog
 from midas_gui import style as S
@@ -48,32 +47,35 @@ class CalibrationTab(QtWidgets.QWidget):
         self._corrected_rings_worker = None
         self._calib_result = None
         self._build_ui()
-        if Path(self._img_ed.text().strip() or "x").exists():
-            self._load_img()
+        self._loader.set_path(DEFAULT_CALIBRANT_TIF)
 
     def set_mask_from_tab1(self, mask: Optional[np.ndarray]):
-        self._mask = mask
-        self._mask_lbl.setText(f"Mask from Tab 1: {int(mask.sum()):,} bad px"
-                               if mask is not None else "No mask")
+        self._loader.set_tab1_mask(mask)
 
     # ── UI ────────────────────────────────────────────────────────
 
     def _build_ui(self):
         root = QtWidgets.QHBoxLayout(self)
-        root.setContentsMargins(6, 6, 6, 6); root.setSpacing(8)
+        root.setContentsMargins(6, 6, 6, 6); root.setSpacing(0)
+        split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        split.setChildrenCollapsible(False); split.setHandleWidth(6)
+        root.addWidget(split); self._hsplit = split
 
+        # ── LEFT: data loader ──
+        self._loader = DataLoaderPanel(mode="single")
+        self._loader.setMinimumWidth(200)
+        self._loader.dataChanged.connect(self._on_loader_data)
+        split.addWidget(self._loader)
+
+        # ── MIDDLE: parameters ──
         scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True); scroll.setFixedWidth(484)
+        scroll.setWidgetResizable(True); scroll.setMinimumWidth(260)
         inner = QtWidgets.QWidget()
         lv = QtWidgets.QVBoxLayout(inner); lv.setContentsMargins(2, 2, 2, 2); lv.setSpacing(8)
         scroll.setWidget(inner)
 
         def _br(w=30):
             b = QtWidgets.QPushButton("…"); b.setFixedWidth(w); return b
-
-        def _frow(ed, slot):
-            r = QtWidgets.QHBoxLayout(); r.setSpacing(4)
-            r.addWidget(ed); b = _br(); b.clicked.connect(slot); r.addWidget(b); return r
 
         # ── Pipeline ──
         pipe = S.make_card("Pipeline")
@@ -93,53 +95,10 @@ class CalibrationTab(QtWidgets.QWidget):
         pipe.body.addWidget(guide)
         lv.addWidget(pipe)
 
-        # ── Files ──
-        files = S.make_card("Files")
-        self._img_ed = QtWidgets.QLineEdit(); self._img_ed.setPlaceholderText("Calibrant image…")
-        self._img_ed.setText(DEFAULT_CALIBRANT_TIF)
-        files.body.addLayout(S.Form().row(("Image:", _frow(self._img_ed, self._browse_img))))
-        self._img_h5_lbl = S.LabelRight("Dataset:")
-        self._img_h5_ed = QtWidgets.QLineEdit("exchange/data")
-        self._img_h5_lbl.setVisible(False); self._img_h5_ed.setVisible(False)
-        ir = QtWidgets.QHBoxLayout(); ir.setSpacing(4); ir.addWidget(self._img_h5_lbl); ir.addWidget(self._img_h5_ed, 1)
-        files.body.addLayout(ir)
-        self._img_ed.textChanged.connect(lambda p: (
-            self._img_h5_lbl.setVisible(is_h5(p)), self._img_h5_ed.setVisible(is_h5(p))))
-        self._img_ed.returnPressed.connect(self._load_img)
-        self._img_h5_ed.editingFinished.connect(
-            lambda: self._image is not None and self._load_img())
-        self._frame_spin = _NoScrollSpinBox(); self._frame_spin.setRange(0, 99999); self._frame_spin.setValue(0)
-        self._frame_spin.valueChanged.connect(
-            lambda _=0: self._image is not None and self._load_img())
-        files.body.addLayout(S.Form().row(("Frame index:", self._frame_spin)))
-        self._mask_file_ed = QtWidgets.QLineEdit(); self._mask_file_ed.setPlaceholderText("Mask file…")
-        mr = QtWidgets.QHBoxLayout(); mr.setSpacing(4); mr.addWidget(self._mask_file_ed, 1)
-        bm = _br(); bm.clicked.connect(self._browse_mask_file); mr.addWidget(bm)
-        files.body.addLayout(S.Form().row(("Mask:", mr)))
-        self._mask_lbl = QtWidgets.QLabel("No mask")
-        self._mask_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
-        files.body.addWidget(self._mask_lbl)
-        self._use_mask_check = QtWidgets.QCheckBox("Apply mask to calibration & integration")
-        self._use_mask_check.setChecked(True)
-        self._use_mask_check.setToolTip(
-            "When checked, the mask from Tab 1 is applied before calibration and integration.\n"
-            "Uncheck to ignore the mask (useful for diagnosing whether bad pixels are causing issues).")
-        files.body.addWidget(self._use_mask_check)
-        lv.addWidget(files)
-
-        # ── Dark / Bright / Background ──
-        fld = S.make_card("Dark / Bright / Background")
-        self._dark_sel = FieldSelector("Dark", default_dataset="exchange/data_dark")
-        self._bright_sel = FieldSelector("Bright", with_mode=True)
-        self._bg_sel = FieldSelector("Background")
-        for w in (self._dark_sel, self._bright_sel, self._bg_sel):
-            fld.body.addWidget(w)
-        lv.addWidget(fld)
-
         # ── Detector & Calibrant ──
         det = S.make_card("Detector & Calibrant")
         self._wl = _fspin(0.001, 10.0, 5, DEFAULT_WAVELENGTH, "Å")
-        self._cal = _NoScrollComboBox(); self._cal.addItems(CALIBRANTS)
+        self._cal = _NoScrollComboBox(); self._cal.addItems(CALIBRANTS); self._cal.setMaximumWidth(150)
         det.body.addLayout(S.Form().row(("λ:", self._wl), ("Calibrant:", self._cal)))
         self._pxY = _fspin(1.0, 5000.0, 2, DEFAULT_PIXEL_UM, "µm")
         self._pxZ_check = QtWidgets.QCheckBox("pxZ")
@@ -274,7 +233,7 @@ class CalibrationTab(QtWidgets.QWidget):
         lv.addLayout(S.button_grid([self._save_json_btn, self._save_ps_btn], 2))
 
         lv.addStretch(1)
-        root.addWidget(scroll)
+        split.addWidget(scroll)
 
         # Right: image + bottom tabs
         right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
@@ -334,39 +293,28 @@ class CalibrationTab(QtWidgets.QWidget):
         right.addWidget(bot)
         right.setStretchFactor(0, 3); right.setStretchFactor(1, 1)
         self._bot_tabs = bot
-        root.addWidget(right, stretch=1)
+        right.setMinimumWidth(320)
+        split.addWidget(right)
+        split.setStretchFactor(0, 0); split.setStretchFactor(1, 0); split.setStretchFactor(2, 1)
+        split.setSizes([286, 361, 950])
 
-    # ── File loaders ──────────────────────────────────────────────
+    # ── Data (from the loader panel) ──────────────────────────────
 
-    def _browse_img(self):
-        p = _browse(self, "Open Calibrant Image",
-                    "Images (*.tif *.tiff *.h5 *.hdf5 *.ge*);;All (*)")
-        if p: self._img_ed.setText(p); self._load_img()
-
-    def _browse_mask_file(self):
-        p = _browse(self, "Open Mask", "TIFF (*.tif *.tiff);;All (*)")
-        if p: self._mask_file_ed.setText(p); self._load_mask_file()
-
-    def _load_img(self):
-        path = self._img_ed.text().strip()
-        if not path or not Path(path).exists():
-            QtWidgets.QMessageBox.warning(self, "Error", "Image file not found."); return
-        try:
-            data_loc = self._img_h5_ed.text().strip() or "exchange/data"
-            self._image = _load_image(path, data_loc=data_loc, frame=self._frame_spin.value())
-            # Initialise the threshold slider range from the loaded image
-            lo, hi = float(np.nanmin(self._image)), float(np.nanmax(self._image))
-            for w in (self._thr_min, self._thr_max, self._thr_slider):
-                w.blockSignals(True)
-            self._thr_min.setValue(max(0.0, lo)); self._thr_max.setValue(hi)
-            self._thr_slider.setValue(0)   # bottom = no pixels removed
-            for w in (self._thr_min, self._thr_max, self._thr_slider):
-                w.blockSignals(False)
-            self._update_threshold_label()
-            self._show_calib_image(autorange=True)
-            self._log.append(f"Image loaded: {Path(path).name}  {self._image.shape}")
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Load error", str(e))
+    def _on_loader_data(self):
+        """New frame / data from the loader — refresh the calibration image, the
+        threshold-slider range, and the display."""
+        self._image = self._loader.current_frame()
+        if self._image is None:
+            return
+        lo, hi = float(np.nanmin(self._image)), float(np.nanmax(self._image))
+        for w in (self._thr_min, self._thr_max, self._thr_slider):
+            w.blockSignals(True)
+        self._thr_min.setValue(max(0.0, lo)); self._thr_max.setValue(hi)
+        self._thr_slider.setValue(0)
+        for w in (self._thr_min, self._thr_max, self._thr_slider):
+            w.blockSignals(False)
+        self._update_threshold_label()
+        self._show_calib_image(autorange=True)
 
     # ── Threshold (calibration image only) ────────────────────────
 
@@ -405,17 +353,6 @@ class CalibrationTab(QtWidgets.QWidget):
         if self._thr_check.isChecked():
             self._show_calib_image(autorange=False)
 
-    def _load_mask_file(self):
-        path = self._mask_file_ed.text().strip()
-        if not path or not Path(path).exists(): return
-        try:
-            import tifffile
-            self._mask = (tifffile.imread(path) != 0).astype(np.uint8)
-            self._mask_lbl.setText(f"File: {int(self._mask.sum()):,} bad px")
-            self._log.append(f"Mask loaded: {Path(path).name}")
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Load error", str(e))
-
     # ── Seed from picks ───────────────────────────────────────────
 
     def _on_bc_picked(self, bc_y, bc_z):
@@ -445,22 +382,22 @@ class CalibrationTab(QtWidgets.QWidget):
         }
 
     def _run(self):
+        self._image = self._loader.current_frame()
         if self._image is None:
             QtWidgets.QMessageBox.warning(self, "No image", "Load a calibrant image first."); return
         if self._worker and self._worker.isRunning():
             return
         self._orphans = [o for o in self._orphans if o.isRunning()]   # drop finished ones
-        # Dark / bright / background fields
-        for sel in (self._dark_sel, self._bright_sel, self._bg_sel):
-            if sel.has_pending():
-                QtWidgets.QMessageBox.warning(
-                    self, "Field not computed",
-                    f"'{sel.title()}' is enabled but not computed. "
-                    "Click 'Compute field' in that box first."); return
-        self._dark = self._dark_sel.get_field()
-        bright = self._bright_sel.get_field()
-        background = self._bg_sel.get_field()
-        bright_mode = self._bright_sel.get_mode()
+        # Dark / bright / background fields (from the loader)
+        for sel in self._loader.has_pending_fields():
+            QtWidgets.QMessageBox.warning(
+                self, "Field not computed",
+                f"'{sel.title()}' is enabled but not computed. "
+                "Click 'Compute field' in that box first."); return
+        self._dark = self._loader.dark()
+        bright = self._loader.bright()
+        background = self._loader.background()
+        bright_mode = self._loader.bright_mode()
 
         mode = self._pipeline.currentData()
         self._calib_cancelled = False
@@ -486,7 +423,7 @@ class CalibrationTab(QtWidgets.QWidget):
             "build_residual_corr": self._build_rc.isChecked(),
             "output_dir": self._out_ed.text().strip() or None,
             "im_trans": trans,
-            "mask": self._mask if self._use_mask_check.isChecked() else None,
+            "mask": self._loader.composite_mask(),
         }
         if self._manual_seed_check.isChecked():
             cfg["manual_seed"] = {
@@ -677,11 +614,11 @@ class CalibrationTab(QtWidgets.QWidget):
             (self._flip_y.isChecked(), 1), (self._flip_z.isChecked(), 2),
             (self._transp.isChecked(), 3)] if flag)
         self._int_worker = IntegrationWorker(
-            result, self._calib_image(), self._dark, im_trans,
+            result, self._calib_image(), self._loader.dark(), im_trans,
             r_bin=self._cal_r_bin.value(), eta_bin=self._cal_eta_bin.value(),
-            mask=self._mask if self._use_mask_check.isChecked() else None, parent=self,
-            bright=self._bright_sel.get_field(), background=self._bg_sel.get_field(),
-            bright_mode=self._bright_sel.get_mode(),
+            mask=self._loader.composite_mask(), parent=self,
+            bright=self._loader.bright(), background=self._loader.background(),
+            bright_mode=self._loader.bright_mode(),
             weighted=bool(self._cal_azim.currentData()))
         self._int_worker.log_line.connect(self._log.append)
         self._int_worker.finished.connect(self._on_int_done)

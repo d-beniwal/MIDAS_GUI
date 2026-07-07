@@ -16,11 +16,11 @@ import numpy as np
 from PyQt5 import QtCore, QtWidgets
 
 from midas_gui.constants import (KERNELS, OUTPUT_FORMATS, ERROR_MODELS,
-                           DEFAULT_NICKEL_DIR, DEFAULT_NICKEL_H5)
+                           DEFAULT_NICKEL_DIR)
 from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_file,
                                _NoScrollSpinBox, _NoScrollComboBox)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
-                               StackedProfileViewer, FieldSelector)
+                               StackedProfileViewer, DataLoaderPanel)
 from midas_gui.workers import BatchWorker, apply_q_uniform, DriftWorker
 from midas_gui import style as S
 
@@ -28,7 +28,6 @@ from midas_gui import style as S
 class BatchTab(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._mask: Optional[np.ndarray] = None
         self._worker = None
         self._orphans: list = []       # aborted workers kept alive until they wind down
         self._drift_worker = None
@@ -36,6 +35,7 @@ class BatchTab(QtWidgets.QWidget):
         self._calib_result = None
         self._wf_started = False
         self._build_ui()
+        self._loader.set_path(DEFAULT_NICKEL_DIR)
 
     def set_calibration(self, result):
         self._calib_result = result
@@ -45,16 +45,23 @@ class BatchTab(QtWidgets.QWidget):
         self._use_tab2_btn.setChecked(True)
 
     def set_mask_from_tab1(self, mask):
-        self._mask = mask
-        if mask is not None:
-            self._mask_lbl.setText(f"From Tab 1: {int(mask.sum()):,} bad px")
+        self._loader.set_tab1_mask(mask)
 
     def _build_ui(self):
         root = QtWidgets.QHBoxLayout(self)
-        root.setContentsMargins(6, 6, 6, 6); root.setSpacing(8)
+        root.setContentsMargins(6, 6, 6, 6); root.setSpacing(0)
+        split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        split.setChildrenCollapsible(False); split.setHandleWidth(6)
+        root.addWidget(split); self._hsplit = split
 
+        # ── LEFT: data loader (streaming source + dark/bright/bg + mask) ──
+        self._loader = DataLoaderPanel(mode="stream")
+        self._loader.setMinimumWidth(200)
+        split.addWidget(self._loader)
+
+        # ── MIDDLE: parameters ──
         scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True); scroll.setFixedWidth(484)
+        scroll.setWidgetResizable(True); scroll.setMinimumWidth(260)
         inner = QtWidgets.QWidget()
         lv = QtWidgets.QVBoxLayout(inner); lv.setContentsMargins(2, 2, 2, 2); lv.setSpacing(8)
         scroll.setWidget(inner)
@@ -83,55 +90,6 @@ class BatchTab(QtWidgets.QWidget):
             lambda t: self._use_json_btn.setChecked(True) if t.strip() else None)
         cal.body.addLayout(jr)
         lv.addWidget(cal)
-
-        # ── Data files ──
-        data = S.make_card("Data files")
-        self._tiff_rb = QtWidgets.QRadioButton("TIFF"); self._tiff_rb.setChecked(True)
-        self._tiff_ed = QtWidgets.QLineEdit(DEFAULT_NICKEL_DIR); self._tiff_ed.setPlaceholderText("folder or *.tif glob")
-        tr = QtWidgets.QHBoxLayout(); tr.setSpacing(4); tr.addWidget(self._tiff_ed, 1)
-        bt = _br(); bt.clicked.connect(self._browse_tiff); tr.addWidget(bt)
-        data.body.addLayout(S.Form().row((self._tiff_rb, tr)))
-        self._hdf5_rb = QtWidgets.QRadioButton("HDF5")
-        self._h5_ed = QtWidgets.QLineEdit(DEFAULT_NICKEL_H5); self._h5_ed.setPlaceholderText("file.h5")
-        hr = QtWidgets.QHBoxLayout(); hr.setSpacing(4); hr.addWidget(self._h5_ed, 1)
-        bh = _br(); bh.clicked.connect(self._browse_h5); hr.addWidget(bh)
-        data.body.addLayout(S.Form().row((self._hdf5_rb, hr)))
-        self._h5_dset = QtWidgets.QLineEdit("exchange/data")
-        data.body.addLayout(S.Form().row(("Dataset:", self._h5_dset)))
-        lv.addWidget(data)
-
-        # ── Dark / Bright / Background ──
-        fld = S.make_card("Dark / Bright / Background")
-        self._dark_sel = FieldSelector("Dark", default_dataset="exchange/data_dark")
-        self._bright_sel = FieldSelector("Bright", with_mode=True)
-        self._bg_sel = FieldSelector("Background")
-        for w in (self._dark_sel, self._bright_sel, self._bg_sel):
-            fld.body.addWidget(w)
-        lv.addWidget(fld)
-
-        # ── Streaming controls ──
-        stream = S.make_card("Streaming controls")
-        self._fr_start = _NoScrollSpinBox(); self._fr_start.setRange(0, 999999); self._fr_start.setValue(0)
-        self._fr_start.setToolTip("First frame index to process (0-based, inclusive)")
-        self._fr_end = _NoScrollSpinBox(); self._fr_end.setRange(0, 999999); self._fr_end.setValue(0)
-        self._fr_end.setToolTip("Last frame index (exclusive). 0 = process all frames.")
-        self._fr_stride = _NoScrollSpinBox(); self._fr_stride.setRange(1, 100); self._fr_stride.setValue(1)
-        self._fr_stride.setToolTip("Process every Nth frame. 1 = all, 2 = every other, etc.")
-        sf = S.Form()
-        sf.row(("Start frame:", self._fr_start), ("End (0=all):", self._fr_end))
-        sf.row(("Stride:", self._fr_stride))
-        stream.body.addLayout(sf)
-        lv.addWidget(stream)
-
-        # ── Mask ──
-        mask = S.make_card("Mask (optional)")
-        self._mask_ed = QtWidgets.QLineEdit(); self._mask_ed.setPlaceholderText("Mask file…")
-        mr = QtWidgets.QHBoxLayout(); mr.setSpacing(4); mr.addWidget(self._mask_ed, 1)
-        bm = _br(); bm.clicked.connect(self._browse_mask); mr.addWidget(bm)
-        mask.body.addLayout(mr)
-        self._mask_lbl = QtWidgets.QLabel("No mask"); self._mask_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
-        mask.body.addWidget(self._mask_lbl)
-        lv.addWidget(mask)
 
         # ── Integration ──
         integ = S.make_card("Integration")
@@ -253,7 +211,7 @@ class BatchTab(QtWidgets.QWidget):
         self._prog_lbl = QtWidgets.QLabel(""); self._prog_lbl.setStyleSheet(f"font-size:10px;color:{S.MUTED}")
         lv.addWidget(self._prog_lbl)
         lv.addStretch(1)
-        root.addWidget(scroll)
+        split.addWidget(scroll)
 
         # Right: waterfall / stacked-profiles tabs + log
         right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
@@ -266,32 +224,10 @@ class BatchTab(QtWidgets.QWidget):
         self._log = LogPanel()
         right.addWidget(self._log)
         right.setStretchFactor(0, 4); right.setStretchFactor(1, 1)
-        root.addWidget(right, stretch=1)
-
-    # ── File browsing ─────────────────────────────────────────────
-
-    def _browse_tiff(self):
-        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select TIFF folder")
-        if d: self._tiff_ed.setText(str(d))
-
-    def _browse_h5(self):
-        p = _browse(self, "Open HDF5", "HDF5 (*.h5 *.hdf5 *.hdf *.nxs);;All (*)")
-        if p: self._h5_ed.setText(p)
-
-    def _browse_mask(self):
-        p = _browse(self, "Open Mask", "TIFF (*.tif *.tiff);;All (*)")
-        if p: self._mask_ed.setText(p); self._load_mask()
-
-    def _load_mask(self):
-        path = self._mask_ed.text().strip()
-        if not path or not Path(path).exists(): return
-        try:
-            import tifffile
-            self._mask = (tifffile.imread(path) != 0).astype(np.uint8)
-            self._mask_lbl.setText(f"File: {int(self._mask.sum()):,} bad px")
-            self._log.append(f"Mask loaded: {Path(path).name}")
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Load error", str(e))
+        right.setMinimumWidth(320)
+        split.addWidget(right)
+        split.setStretchFactor(0, 0); split.setStretchFactor(1, 0); split.setStretchFactor(2, 1)
+        split.setSizes([286, 361, 950])
 
     # ── Run ────────────────────────────────────────────────────────
 
@@ -317,17 +253,9 @@ class BatchTab(QtWidgets.QWidget):
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Calibration error", str(e)); return
 
-        if self._tiff_rb.isChecked():
-            path = self._tiff_ed.text().strip()
-            if not path:
-                QtWidgets.QMessageBox.warning(self, "No data", "Specify TIFF folder/glob."); return
-            src_cfg = {"type": "tiff_glob", "path": path}
-        else:
-            path = self._h5_ed.text().strip()
-            if not path or not Path(path).exists():
-                QtWidgets.QMessageBox.warning(self, "No data", "Specify HDF5 file."); return
-            src_cfg = {"type": "hdf5", "path": path,
-                       "dataset": self._h5_dset.text().strip() or "frames"}
+        src_cfg = self._loader.source_cfg()
+        if not src_cfg.get("path"):
+            QtWidgets.QMessageBox.warning(self, "No data", "Select a data folder/glob or HDF5 file."); return
 
         kernel = self._kernel.currentData()
         corrections = self._corr_widget.build_corrections()
@@ -342,17 +270,16 @@ class BatchTab(QtWidgets.QWidget):
         q_cfg = ({"QMin": self._q_min.value(), "QMax": self._q_max.value(),
                   "QBinSize": self._q_bin.value()} if self._q_check.isChecked() else None)
 
-        # Dark / bright / background fields
-        for sel in (self._dark_sel, self._bright_sel, self._bg_sel):
-            if sel.has_pending():
-                QtWidgets.QMessageBox.warning(
-                    self, "Field not computed",
-                    f"'{sel.title()}' is enabled but not computed. "
-                    "Click 'Compute field' in that box first."); return
-        dark = self._dark_sel.get_field()
-        bright = self._bright_sel.get_field()
-        background = self._bg_sel.get_field()
-        bright_mode = self._bright_sel.get_mode()
+        # Dark / bright / background fields (from the loader)
+        for sel in self._loader.has_pending_fields():
+            QtWidgets.QMessageBox.warning(
+                self, "Field not computed",
+                f"'{sel.title()}' is enabled but not computed. "
+                "Click 'Compute field' in that box first."); return
+        dark = self._loader.dark()
+        bright = self._loader.bright()
+        background = self._loader.background()
+        bright_mode = self._loader.bright_mode()
 
         self._run_btn.setEnabled(False); self._abort_btn.setEnabled(True)
         self._prog.setVisible(True); self._prog.setValue(0)
@@ -360,11 +287,8 @@ class BatchTab(QtWidgets.QWidget):
         self._view_tabs.setCurrentWidget(self._waterfall)
         self._log.append("─" * 40 + "\nStarting batch integration…")
 
-        # Frame range
-        fr_start = self._fr_start.value()
-        fr_end = self._fr_end.value() if self._fr_end.value() > 0 else None
-        fr_stride = max(1, self._fr_stride.value())
-        frame_range = (fr_start, fr_end, fr_stride)
+        # Frame range (from the loader)
+        frame_range = self._loader.frame_range()
 
         # Monitor normalisation file
         monitor_file = self._mon_ed.text().strip() or None
@@ -380,7 +304,7 @@ class BatchTab(QtWidgets.QWidget):
             drift_traj = self._drift_traj
 
         self._worker = BatchWorker(
-            spec, src_cfg, self._mask, out_dir, fmt, kernel,
+            spec, src_cfg, self._loader.composite_mask(), out_dir, fmt, kernel,
             corrections, variance_cfg, q_cfg=q_cfg,
             frame_range=frame_range, monitor_file=monitor_file,
             drift_traj=drift_traj, parent=self,

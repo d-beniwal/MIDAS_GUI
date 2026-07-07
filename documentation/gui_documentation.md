@@ -3,7 +3,7 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-07-06
+**Last updated:** 2026-07-07
 
 > **Maintenance:** keep this document in sync with the code — whenever the workflow
 > or a tab's controls change, update the relevant section here in the same change.
@@ -73,8 +73,32 @@ midas_gui/
 └── tab_*.py          one module per tab
 ```
 
-**Layout pattern.** Every tab has a fixed-width scrollable left control panel and a
-right display area (image viewer, plots, and/or a log panel).
+**Layout pattern.** The four analysis tabs — **0 Data Viewer, 2 Calibrate, 3 Calib.
+Refinement, 4 Batch Integrate** — use a **three-panel layout**:
+
+```
+[ Data Loader | Parameters | Display / results ]
+```
+
+- **Data Loader (left).** A shared `DataLoaderPanel` for selecting the five inputs —
+  **Data, Dark, Bright, Background, Mask** — each as a single file, a folder, or an
+  HDF5 dataset (a container dropdown appears for HDF5). Frame controls live here too
+  (Tab 0 navigator, Tab 2/3 frame index, Tab 4 frame range + stride).
+- **Parameters (middle).** The tab's analysis controls.
+- **Display / results (right).** Image viewer, plots, and/or a log panel.
+
+The three panels are separated by **draggable splitter handles** — drag the
+`Data Loader | Parameters` and `Parameters | Display` boundaries to rebalance widths
+to taste. Each panel has a minimum width; drag past it and the panel shows a scrollbar
+rather than clipping its controls.
+
+The remaining tabs (1, 5–8) keep the classic two-panel layout.
+
+**Corrections & mask (all four analysis tabs).** Dark is averaged then subtracted;
+Bright is averaged then flat-field **divided** or **subtracted** (your choice);
+Background is averaged then subtracted; every enabled Mask source (files/folders plus
+the auto-added "Tab 1 mask") is **unioned** into one composite mask that zeroes/ignores
+those pixels. Correction order: `(img − dark)` → bright → `− background` → clip ≥ 0.
 
 ---
 
@@ -112,17 +136,12 @@ so the app is usable immediately after checkout.
 **Purpose:** inspect detector frames and do a quick geometry-free radial integration.
 Produces no shared state for other tabs.
 
-### Data card
-| Field | Description |
-|---|---|
-| Path field | File, folder, or glob (e.g. `frames/*.tif`). Selecting via browse — or pressing Enter — **loads immediately** (no separate Load button). |
-| `…` button | Browse for a file. |
-| Browse folder… | Browse for a folder of frames (loads immediately). |
-| Dataset (HDF5) | Auto-populated dropdown of every ≥2-D dataset with its shape; changing it reloads. |
-
-### Frame navigator
-Appears for a multi-frame stack — slider, spin box, or ◀/▶. **Zoom/pan is preserved
-as you step through frames** (the view only auto-frames on a fresh load).
+### Data Loader panel (left)
+Data, Dark, Bright, Background and Mask are all selected in the shared **Data Loader
+panel** (see §1): each accepts a file / folder / HDF5-dataset. The **Data** card here
+holds the **frame navigator** (slider, spin box, ◀/▶); **zoom/pan is preserved** as you
+step through frames (the view only auto-frames on a fresh load). Dark/bright/background
+and the composite mask are applied to the displayed image and to the radial integration.
 
 ### Projection card
 Collapse a stack to one image: **Max** (hot-pixel hunting), **Sum** (long-exposure
@@ -208,17 +227,13 @@ Save the combined mask as TIFF (0 = good, 1 = bad); loading a TIFF applies immed
 **Purpose:** determine detector geometry (Lsd, BC, tilts, distortion, wavelength) from
 a calibrant pattern.
 
-### Files
-Load a TIFF/HDF5 calibrant (browse or Enter loads immediately; the HDF5 dataset field
-and Frame index reload on change). A mask file can be loaded here too.
-
-### Dark / Bright / Background
-A card with three **field selectors**. Each builds one 2-D field from a **single file,
-a folder/glob, or an HDF5 dataset** (with a container dropdown), averaged over a chosen
-**index range** (clamped to the frames available). The group is compact — each field's
-body is hidden until its checkbox is ticked. The **Bright** field has a mode:
-**Flat-field divide** or **Subtract**. Correction order: `(img − dark)` → bright
-divide/subtract → `− background` → clip ≥ 0.
+### Data Loader panel (left)
+The calibrant frame (Data + Frame index), Dark, Bright, Background and Mask are selected
+in the shared **Data Loader panel** (see §1). Each Dark/Bright/Background field is
+averaged over a chosen index range; Bright offers **Flat-field divide** or **Subtract**;
+all mask sources (plus the auto-added Tab 1 mask) are unioned. Dark is passed to the
+calibration pipeline; bright/background are applied to the calibrant before calibration
+and post-calibration integration.
 
 ### Pipeline selector
 One-shot (default) · First-time · Four-stage · Bayesian (Laplace σ) · Joint-cake.
@@ -259,11 +274,12 @@ criterion (rings should be azimuthally uniform). Uses a **derivative-free Nelder
 optimiser (the differentiable integrator returns NaN geometry gradients at the
 beam-centre singularity on this build).
 
-Controls: calibration source (Tab 2 result or JSON), sample frame (auto-loads on
-browse), parameters to refine (BC_y, BC_z, Lsd, ty, tz), max iterations (500),
-tolerance (1e-6). **Run Refinement** shows a live loss curve; **Apply** broadcasts the
-refined geometry downstream. If Apply is never clicked, the Tab 2 result flows through
-unchanged.
+The sample frame and Dark/Bright/Background/Mask are selected in the shared **Data Loader
+panel** (see §1) — the refinement runs on the corrected image. Middle-panel controls:
+calibration source (Tab 2 result, or start-from/continue radios), parameters to refine
+(BC_y, BC_z, Lsd, ty, tz), optimiser + iterations. **Run Refinement** shows a live loss
+curve; **Apply** broadcasts the refined geometry downstream. If Apply is never clicked,
+the Tab 2 result flows through unchanged.
 
 ---
 
@@ -272,22 +288,16 @@ unchanged.
 **Purpose:** integrate a stack of frames into 1-D profiles using the calibrated
 geometry and optional corrections.
 
-### Calibration source
+### Data Loader panel (left)
+The streaming **Data** source (folder/glob or HDF5 dataset) with **frame range + stride**,
+plus Dark/Bright/Background and Mask, are selected in the shared **Data Loader panel**
+(see §1). Dark/bright/background are applied per frame; all mask sources are unioned.
+
+### Calibration source (middle)
 - **From Tab 2** — the calibration (or refined) result.
 - **From file** — a **calibration `.json`, MIDAS `paramstest.txt`, or pyFAI `.poni`**
   (auto-detected; both GUI and MIDAS-pipeline json key styles supported). Entering a
   path auto-selects this option.
-
-### Data files
-TIFF folder/glob or HDF5 (with dataset). **Streaming controls**: start / end (0 = all)
-/ stride.
-
-### Dark / Bright / Background
-Same three field selectors as the Calibrate tab (file/folder/HDF5, index-range average,
-bright divide or subtract), applied per frame.
-
-### Mask
-Load a mask TIFF (browse loads immediately) or use the Tab 1 mask.
 
 ### Integration
 | Field | Description |
