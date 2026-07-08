@@ -16,7 +16,7 @@ from PyQt5 import QtCore, QtWidgets
 import pyqtgraph as pg
 
 from midas_gui.helpers import _load_image, _fspin, _twocol, _browse, is_h5, _NoScrollComboBox
-from midas_gui.constants import DEFAULT_NICKEL_FRAME0
+from midas_gui.constants import DEFAULT_NICKEL_FRAME0, DEFAULT_PDF_IQ_FILE
 from midas_gui.widgets import LogPanel
 from midas_gui.workers import PDFWorker
 from midas_gui import style as S
@@ -33,6 +33,9 @@ class PDFTab(QtWidgets.QWidget):
         self._build_ui()
         if Path(self._img_ed.text().strip() or "x").exists():
             self._load_img()
+        # Default to the ready real I(Q) file when it exists (quick PDF test).
+        if Path(DEFAULT_PDF_IQ_FILE).exists():
+            self._source.setCurrentIndex(self._source.findData("file"))
         self._on_source_changed()
         self._on_refine_toggled()
 
@@ -125,7 +128,8 @@ class PDFTab(QtWidgets.QWidget):
         # I(Q) file (file mode) --------------------------------------------------
         self._grp_file = QtWidgets.QGroupBox("I(Q) file")
         ff = QtWidgets.QFormLayout(self._grp_file); ff.setSpacing(4)
-        self._iq_ed = QtWidgets.QLineEdit("")
+        self._iq_ed = QtWidgets.QLineEdit(
+            DEFAULT_PDF_IQ_FILE if Path(DEFAULT_PDF_IQ_FILE).exists() else "")
         self._iq_ed.setPlaceholderText("Q,I,σ text/CSV (2- or 3-column)…")
         self._iq_ed.textChanged.connect(lambda _: self._update_run_enabled())
         ff.addRow("File:", _frow(self._iq_ed, self._browse_iq))

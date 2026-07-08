@@ -21,7 +21,7 @@ from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_
                                _NoScrollSpinBox, _NoScrollComboBox)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, DataLoaderPanel)
-from midas_gui.workers import BatchWorker, apply_q_uniform, DriftWorker
+from midas_gui.workers import BatchWorker, apply_q_uniform, DriftWorker, FolderMonitorWorker
 from midas_gui import style as S
 
 
@@ -34,7 +34,12 @@ class BatchTab(QtWidgets.QWidget):
         self._drift_traj = None
         self._calib_result = None
         self._wf_started = False
+        self._monitor_worker = None
+        self._integrated_fids: set = set()   # frame ids already displayed (batch + monitor)
+        self._geom_cache = None              # cached integration context (detector map)
+        self._geom_sig = None                # signature the cached context was built for
         self._build_ui()
+        self._loader.monitorToggled.connect(self._toggle_monitor)
         self._loader.set_path(DEFAULT_NICKEL_DIR)
 
     def set_calibration(self, result):
@@ -247,6 +252,10 @@ class BatchTab(QtWidgets.QWidget):
     def _run(self):
         if self._worker and self._worker.isRunning():
             return
+        # A fresh batch run resets the display; stop any active monitor first.
+        if self._loader.is_monitoring():
+            self._stop_monitor()
+            self._loader.set_monitor_active(False)
         self._orphans = [o for o in self._orphans if o.isRunning()]   # drop finished ones
         try:
             spec = self._build_spec()
@@ -284,6 +293,7 @@ class BatchTab(QtWidgets.QWidget):
         self._run_btn.setEnabled(False); self._abort_btn.setEnabled(True)
         self._prog.setVisible(True); self._prog.setValue(0)
         self._wf_started = False
+        self._integrated_fids = set()
         self._view_tabs.setCurrentWidget(self._waterfall)
         self._log.append("─" * 40 + "\nStarting batch integration…")
 
@@ -303,18 +313,23 @@ class BatchTab(QtWidgets.QWidget):
                     "Click 'Fit trajectory' first."); return
             drift_traj = self._drift_traj
 
+        weighted = bool(self._azim.currentData())
+        sig = self._integration_signature(src_cfg, kernel, corrections, weighted)
+        context = self._geom_cache if (sig == self._geom_sig and
+                                       self._geom_cache is not None) else None
         self._worker = BatchWorker(
             spec, src_cfg, self._loader.composite_mask(), out_dir, fmt, kernel,
             corrections, variance_cfg, q_cfg=q_cfg,
             frame_range=frame_range, monitor_file=monitor_file,
             drift_traj=drift_traj, parent=self,
             dark=dark, bright=bright, background=background, bright_mode=bright_mode,
-            weighted=bool(self._azim.currentData()))
+            weighted=weighted, context=context)
         self._worker.progress.connect(self._on_progress)
         self._worker.frame_done.connect(self._on_frame)
         self._worker.finished.connect(self._on_done)
         self._worker.failed.connect(self._on_fail)
         self._worker.log_line.connect(self._log.append)
+        self._worker.geom_ready.connect(lambda ctx, s=sig: self._cache_geom(s, ctx))
         self._worker.start()
 
     def _abort(self):
@@ -355,7 +370,8 @@ class BatchTab(QtWidgets.QWidget):
             self._stack_view.reset(r_ax)
             self._wf_started = True
         self._waterfall.add_profile(prof)
-        self._stack_view.add_profile(r_ax, prof)
+        self._stack_view.add_profile(r_ax, prof, label=fid)
+        self._integrated_fids.add(str(fid))
         self._log.append(f"  frame {fid}: peak={prof.max():.1f}")
 
     def _reset_run_buttons(self):
@@ -378,6 +394,112 @@ class BatchTab(QtWidgets.QWidget):
         self._reset_run_buttons(); self._prog.setVisible(False)
         self._log.append(f"\nERROR:\n{msg[:600]}")
         QtWidgets.QMessageBox.critical(self, "Integration failed", msg[:400])
+
+    # ── Folder monitoring (live new-file integration) ──────────────
+
+    def _integration_signature(self, src_cfg, kernel, corrections, weighted):
+        """Signature identifying a reusable detector map for the current settings."""
+        if self._use_tab2_btn.isChecked():
+            calib = ("tab2", id(self._calib_result))
+        else:
+            calib = ("file", self._json_ed.text().strip())
+        mask = self._loader.composite_mask()
+        mask_id = None if mask is None else (tuple(mask.shape), int(np.count_nonzero(mask)))
+        pol, sa = corrections
+        return (calib, kernel, round(self._r_bin.value(), 4), round(self._e_bin.value(), 4),
+                bool(weighted), pol is not None, sa is not None, mask_id,
+                src_cfg.get("path"), src_cfg.get("type"), src_cfg.get("dataset"))
+
+    def _cache_geom(self, sig, ctx):
+        self._geom_cache = ctx
+        self._geom_sig = sig
+
+    def _toggle_monitor(self, on):
+        if on:
+            self._start_monitor()
+        else:
+            self._stop_monitor()
+
+    def _start_monitor(self):
+        if self._monitor_worker and self._monitor_worker.isRunning():
+            return
+        if self._worker and self._worker.isRunning():
+            QtWidgets.QMessageBox.warning(
+                self, "Busy", "Wait for the batch run to finish (or Abort) before monitoring.")
+            self._loader.set_monitor_active(False); return
+        src_cfg = self._loader.source_cfg()
+        if src_cfg.get("type") != "tiff_glob" or not src_cfg.get("path"):
+            QtWidgets.QMessageBox.warning(
+                self, "Folder needed",
+                "MONITOR watches a folder/glob of TIFF frames — select a folder "
+                "as the data source (HDF5 sources are not monitored).")
+            self._loader.set_monitor_active(False); return
+        try:
+            spec = self._build_spec()
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Calibration error", str(e))
+            self._loader.set_monitor_active(False); return
+        for sel in self._loader.has_pending_fields():
+            QtWidgets.QMessageBox.warning(
+                self, "Field not computed",
+                f"'{sel.title()}' is enabled but not computed. Click 'Compute field' first.")
+            self._loader.set_monitor_active(False); return
+
+        kernel = self._kernel.currentData()
+        corrections = self._corr_widget.build_corrections()
+        variance_cfg = ({"error_model": self._err_model.currentText()}
+                        if self._var_check.isChecked() else None)
+        if variance_cfg and self._corr_widget.any_enabled():
+            variance_cfg = None
+        q_cfg = ({"QMin": self._q_min.value(), "QMax": self._q_max.value(),
+                  "QBinSize": self._q_bin.value()} if self._q_check.isChecked() else None)
+        weighted = bool(self._azim.currentData())
+        dark = self._loader.dark(); bright = self._loader.bright()
+        background = self._loader.background(); bmode = self._loader.bright_mode()
+        out_dir = self._out_ed.text().strip() or None
+        fmt = self._fmt.currentData()
+
+        sig = self._integration_signature(src_cfg, kernel, corrections, weighted)
+        context = self._geom_cache if (sig == self._geom_sig and
+                                       self._geom_cache is not None) else None
+
+        self._monitor_worker = FolderMonitorWorker(
+            spec, src_cfg["path"], self._loader.composite_mask(), kernel, corrections,
+            variance_cfg, q_cfg=q_cfg, dark=dark, bright=bright, background=background,
+            bright_mode=bmode, weighted=weighted, seen=set(self._integrated_fids),
+            context=context, out_dir=out_dir, fmt=fmt, parent=self)
+        self._monitor_worker.frame_done.connect(self._on_frame)
+        self._monitor_worker.new_count.connect(self._on_monitor_count)
+        self._monitor_worker.log_line.connect(self._log.append)
+        self._monitor_worker.failed.connect(self._on_monitor_fail)
+        self._monitor_worker.geom_ready.connect(lambda ctx, s=sig: self._cache_geom(s, ctx))
+        self._view_tabs.setCurrentWidget(self._stack_view)
+        self._log.append("─" * 40 + "\nMONITOR active — watching the folder for new frames…")
+        self._monitor_worker.start()
+
+    def _stop_monitor(self):
+        w = self._monitor_worker
+        if w and w.isRunning():
+            w.requestInterruption()
+            if not w.wait(1500):
+                for s in (w.frame_done, w.new_count, w.status, w.log_line,
+                          w.failed, w.geom_ready):
+                    try:
+                        s.disconnect()
+                    except Exception:
+                        pass
+                w.terminate(); self._orphans.append(w)
+            self._log.append("[monitor] stopped.")
+        self._monitor_worker = None
+
+    def _on_monitor_count(self, n):
+        self._prog_lbl.setText(f"Monitoring — {n} new frame(s) integrated")
+
+    def _on_monitor_fail(self, msg):
+        self._loader.set_monitor_active(False)
+        self._monitor_worker = None
+        self._log.append(f"\n[monitor] ERROR:\n{msg[:600]}")
+        QtWidgets.QMessageBox.critical(self, "Monitor failed", msg[:400])
 
     # ── Drift correction ───────────────────────────────────────────
 

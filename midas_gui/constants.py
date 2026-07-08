@@ -97,6 +97,9 @@ DEFAULT_NICKEL_H5     = str(_TEST_DATA / "nickel_stack.h5")
 DEFAULT_NICKEL_DIR    = str(_TEST_DATA / "nickel_tifs")
 DEFAULT_NICKEL_FRAME0 = str(_TEST_DATA / "nickel_tifs" / "nickel_000.tif")
 DEFAULT_CALIB_FILE    = str(_TEST_DATA / "calibration_synthetic.json")
+# Real pre-integrated I(Q) data for the PDF tab (test_data/pdf_real/, git-ignored).
+DEFAULT_PDF_IQ_FILE   = str(_TEST_DATA / "pdf_real" / "iq_Nickel.csv")
+DEFAULT_PDF_CALIB     = str(_TEST_DATA / "pdf_real" / "calibration_ceo2.txt")
 
 
 # ── Materials database for ring simulation (Tab 0) ──────────────────────────────

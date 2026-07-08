@@ -1047,6 +1047,7 @@ class DataLoaderPanel(QtWidgets.QScrollArea):
     """
     dataChanged = QtCore.pyqtSignal()     # data loaded, or current frame changed
     fieldsChanged = QtCore.pyqtSignal()   # dark/bright/background/mask changed
+    monitorToggled = QtCore.pyqtSignal(bool)  # MONITOR button toggled (stream mode)
 
     def __init__(self, parent=None, *, mode="single", data_dataset="exchange/data",
                  dark_dataset="exchange/data_dark"):
@@ -1148,6 +1149,20 @@ class DataLoaderPanel(QtWidgets.QScrollArea):
         self._mask_sel.maskChanged.connect(self.fieldsChanged)
         lv.addWidget(self._mask_sel)
         lv.addStretch(1)
+
+        # ── MONITOR button (stream mode only) — pinned to the bottom ──
+        self._monitor_btn = None
+        if mode == "stream":
+            self._monitor_btn = QtWidgets.QPushButton("●  MONITOR")
+            self._monitor_btn.setCheckable(True)
+            self._monitor_btn.setMinimumHeight(30)
+            self._monitor_btn.setToolTip(
+                "Watch the data folder for new frames and integrate them "
+                "automatically as they appear, reusing the detector map (no full "
+                "re-run). Turns green while active.")
+            self._monitor_btn.toggled.connect(self._on_monitor_toggled)
+            self._apply_monitor_style(False)
+            lv.addWidget(self._monitor_btn)
 
     # ── data source (path / dataset / loading) ────────────────────
     def _dataset(self) -> str:
@@ -1348,6 +1363,36 @@ class DataLoaderPanel(QtWidgets.QScrollArea):
                                        bright_mode=self.bright_mode(),
                                        background=g).astype(np.float32)
 
+    # ── MONITOR button (stream mode) ───────────────────────────────
+    def _apply_monitor_style(self, active: bool):
+        from midas_gui import style as S
+        if active:
+            self._monitor_btn.setText("●  MONITORING")
+            self._monitor_btn.setStyleSheet(
+                "QPushButton { background:#2e7d32; color:white; font-weight:bold; "
+                "border:1px solid #1b5e20; border-radius:4px; padding:4px; }")
+        else:
+            self._monitor_btn.setText("●  MONITOR")
+            self._monitor_btn.setStyleSheet(
+                "QPushButton { background:#3a3d44; color:#ddd; font-weight:bold; "
+                f"border:1px solid {S.ACCENT}; border-radius:4px; padding:4px; }}")
+
+    def _on_monitor_toggled(self, on: bool):
+        self._apply_monitor_style(on)
+        self.monitorToggled.emit(on)
+
+    def set_monitor_active(self, on: bool):
+        """Force the MONITOR button state without re-emitting (tab-driven revert)."""
+        if self._monitor_btn is None:
+            return
+        self._monitor_btn.blockSignals(True)
+        self._monitor_btn.setChecked(on)
+        self._monitor_btn.blockSignals(False)
+        self._apply_monitor_style(on)
+
+    def is_monitoring(self) -> bool:
+        return bool(self._monitor_btn and self._monitor_btn.isChecked())
+
 
 class LossCurveViewer(QtWidgets.QWidget):
     """Live loss-vs-iteration plot for optimisation tabs (refinement, learnable, PDF)."""
@@ -1496,6 +1541,11 @@ class StackedProfileViewer(QtWidgets.QWidget):
         self._spacing.setFixedWidth(100)
         self._spacing.valueChanged.connect(self._restack)
         bar.addWidget(self._spacing)
+        self._legend_chk = QtWidgets.QCheckBox("Legend")
+        self._legend_chk.setChecked(True)
+        self._legend_chk.setToolTip("Show a legend mapping each curve to its source file.")
+        self._legend_chk.toggled.connect(self._toggle_legend)
+        bar.addWidget(self._legend_chk)
         bar.addStretch(1)
         self._stat = QtWidgets.QLabel("")
         self._stat.setStyleSheet("color:#aaa;font-size:10px")
@@ -1506,6 +1556,8 @@ class StackedProfileViewer(QtWidgets.QWidget):
         self._plot.showGrid(x=True, y=True, alpha=0.15)
         self._plot.setLabel("bottom", "R (px)")
         self._plot.setLabel("left", "Intensity + offset")
+        self._legend = self._plot.addLegend(offset=(10, 10),
+                                            labelTextSize="8pt")
         layout.addWidget(self._plot, stretch=1)
 
         self._r_axes: list = []
@@ -1521,11 +1573,15 @@ class StackedProfileViewer(QtWidgets.QWidget):
         for c in self._curves:
             self._plot.removeItem(c)
         self._curves.clear()
-        self._plot.clear()
+        if self._legend is not None:
+            self._legend.clear()
         self._stat.setText("")
 
-    def add_profile(self, r_axis, profile):
-        """Append one frame's 1-D profile; draws it at its stacked offset."""
+    def add_profile(self, r_axis, profile, label=None):
+        """Append one frame's 1-D profile; draws it at its stacked offset.
+
+        ``label`` (the source file id) is shown in the legend if given.
+        """
         r = np.asarray(r_axis, dtype=float)
         p = np.asarray(profile, dtype=float)
         i = len(self._profiles)
@@ -1533,10 +1589,15 @@ class StackedProfileViewer(QtWidgets.QWidget):
         self._profiles.append(p)
         offset = i * float(self._spacing.value())
         curve = self._plot.plot(r, p + offset,
-                                pen=pg.mkPen(_frame_color(i), width=1.0))
+                                pen=pg.mkPen(_frame_color(i), width=1.0),
+                                name=(str(label) if label else None))
         self._curves.append(curve)
         n = len(self._profiles)
         self._stat.setText(f"{n} frame{'s' if n != 1 else ''}")
+
+    def _toggle_legend(self, on: bool):
+        if self._legend is not None:
+            self._legend.setVisible(on)
 
     # ── internal ─────────────────────────────────────────────────────
 

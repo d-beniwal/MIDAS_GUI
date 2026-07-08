@@ -334,9 +334,24 @@ is then integrated with its own geometry.
 frames (keeping frames already written); if it does not stop promptly it force-terminates
 and frees the slot. Completed frames' output files are preserved.
 
+### Live folder monitoring (MONITOR)
+The **MONITOR** button at the bottom of the left Data Loader panel (folder/glob sources
+only) starts a live watch: while active it turns **green** and the GUI polls the data
+folder for **new** TIFF frames, integrating each one **as it appears** and adding it to
+the display. It does **not** re-run the whole batch — it reuses the already-built
+**detector map** (the binning geometry / pixel-count cakes; reused from a prior *Start
+Integration* run when the calibration, kernel, bins, mask and folder are unchanged, or
+built once on first use) and integrates **only the new files** (tracked by frame id, so
+frames already shown are skipped). New frames honour the current kernel, corrections,
+Dark/Bright/Background, mask and Q-uniform settings, and are saved to the output folder
+when a 1-D format is selected. Click MONITOR again to stop; starting a fresh *Start
+Integration* also stops it. (Distinct from **Monitor normalisation** above, which divides
+profiles by a scalar file.)
+
 ### Output formats
 CSV (R,I,σ) · XYE (2θ) · FXYE (centideg) · DAT (Q) · HDF5 (full stack) · 2D-CSV (η×R
-cake). Right panel: live **Waterfall** and **Stacked profiles**.
+cake). Right panel: live **Waterfall** and **Stacked profiles** — the latter now shows a
+**legend mapping each curve to its source file** (toggle with the *Legend* checkbox).
 
 ---
 
@@ -416,9 +431,12 @@ distribution whose *peak area = coordination number*. g/T/R all need ρ₀.
   binning, Poisson σ) and mapped to Q, exactly as before. Uses the Tab 2
   calibration (λ, geometry) and any Tab 1 mask.
 - **Load I(Q) file** — a pre-integrated 2- or 3-column `Q, I, σ` text/CSV
-  (comment/header lines tolerated). Ready known-answer examples ship in
-  `test_data/pdf_synth/` (`nickel_iq.csv` → Ni, first peak 2.49 Å; `ceo2_iq.csv`
-  → Ce:1,O:2, first peak 2.34 Å) — see that folder's `README.md` for settings.
+  (comment/header lines tolerated). The tab **opens on this source by default**,
+  pointed at real data in `test_data/pdf_real/` (`iq_Nickel.csv`; also CeO₂, IPA,
+  Kapton at λ 0.1839) — just press **Compute G(r)** for the Ni PDF (first peak
+  ~2.49 Å). Synthetic known-answer examples are in `test_data/pdf_synth/`
+  (`nickel_iq.csv`, `ceo2_iq.csv`). See each folder's `README.md` for per-sample
+  composition / ρ₀ / Q-range settings.
 
 **Calibration.** The geometry/wavelength comes from Tab 2 automatically, or use
 **Load calibration file…** to read a MIDAS `paramstest.txt`, a `.json`, or a pyFAI

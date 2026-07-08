@@ -201,6 +201,55 @@ def integrate_frame(img_t, spec, geom, kernel, corrections, variance_cfg,
     return prof, sigma
 
 
+def build_integration_context(spec, kernel: str, mask, corrections, weighted: bool) -> dict:
+    """Build the one-time integration setup (the "detector map") for a spec.
+
+    Returns everything the per-frame integration needs — the binning geometry,
+    radial axis, pixel-count cakes, η axis and lengths — so it can be built once
+    and reused across many frames (a batch run *or* live folder monitoring).
+    """
+    spec.validate()
+    lsd, px, wl = float(spec.Lsd), float(spec.pxY), float(spec.Wavelength)
+    pol, sa = corrections
+    corr_on = pol is not None or sa is not None
+    geom = None if corr_on else build_geom(spec, kernel, mask)
+    r_ax = compute_r_axis(spec)
+    corr_counts = corrections_counts(spec) if corr_on else None
+    cnt = (count_cake(geom, kernel, spec.NrPixelsZ, spec.NrPixelsY)
+           if (weighted and not corr_on) else None)
+    n_eta = spec.n_eta_bins
+    eta_ax = float(spec.EtaMin) + float(spec.EtaBinSize) * (np.arange(n_eta) + 0.5)
+    return {"spec": spec, "geom": geom, "r_ax": r_ax, "corr_counts": corr_counts,
+            "cnt": cnt, "eta_ax": eta_ax, "lsd": lsd, "px": px, "wl": wl,
+            "corr_on": corr_on}
+
+
+def write_profile(base, fmt, r_px, prof, sigma, lsd, px, wl,
+                  cake_2d=None, eta_axis=None):
+    """Write one integrated profile in the requested 1-D/2-D format."""
+    import midas_integrate_v2 as m
+    two_theta, two_theta_cd, q = axis_conversions(r_px, lsd, px, wl)
+    sig = sigma if sigma is not None else np.sqrt(np.maximum(prof, 0.0))
+    if fmt == "csv":
+        m.write_csv(str(base) + ".csv", r_axis=r_px, intensity=prof, sigma=sig)
+    elif fmt == "xye":
+        m.write_xye(str(base) + ".xye", r_axis=two_theta, intensity=prof, sigma=sig)
+    elif fmt == "fxye":
+        m.write_fxye(str(base) + ".fxye", r_axis=two_theta_cd, intensity=prof, sigma=sig)
+    elif fmt == "dat":
+        m.write_dat(str(base) + ".dat", q_axis_invA=q, intensity=prof, sigma=sig)
+    elif fmt == "2d_csv" and cake_2d is not None:
+        out_path = str(base) + "_cake.csv"
+        n_eta, n_r = cake_2d.shape
+        eta_vals = eta_axis if eta_axis is not None else np.arange(n_eta, dtype=float)
+        header = "eta\\R(px)," + ",".join(f"{r:.4f}" for r in r_px)
+        rows = [f"{eta_vals[k]:.4f}," + ",".join(f"{v:.6g}" for v in cake_2d[k])
+                for k in range(n_eta)]
+        with open(out_path, "w") as fh:
+            fh.write(header + "\n")
+            fh.write("\n".join(rows) + "\n")
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  Dark / bright / background field averaging
 # ═════════════════════════════════════════════════════════════════════════════
@@ -527,13 +576,15 @@ class BatchWorker(QtCore.QThread):
     finished   = QtCore.pyqtSignal(dict)
     failed     = QtCore.pyqtSignal(str)
     log_line   = QtCore.pyqtSignal(str)
+    geom_ready = QtCore.pyqtSignal(object)   # integration context (for reuse/caching)
 
     def __init__(self, spec, source_cfg, mask, out_dir, fmt, kernel,
                  corrections, variance_cfg, q_cfg=None,
                  frame_range=None, monitor_file=None, drift_traj=None, parent=None,
                  dark=None, bright=None, background=None, bright_mode="divide",
-                 weighted=True):
+                 weighted=True, context=None):
         super().__init__(parent)
+        self._context = context              # prebuilt integration context or None
         self._spec = spec                    # always R-uniform (Q handled by rebinning)
         self._weighted = weighted            # pixel-weighted azimuthal mean (vs η-bin mean)
         self._src  = source_cfg
@@ -563,28 +614,8 @@ class BatchWorker(QtCore.QThread):
 
     def _write_one(self, base: Path, fmt, r_px, prof, sigma, lsd, px, wl,
                    cake_2d=None, eta_axis=None):
-        import midas_integrate_v2 as m
-        two_theta, two_theta_cd, q = axis_conversions(r_px, lsd, px, wl)
-        sig = sigma if sigma is not None else np.sqrt(np.maximum(prof, 0.0))
-        if fmt == "csv":
-            m.write_csv(str(base) + ".csv", r_axis=r_px, intensity=prof, sigma=sig)
-        elif fmt == "xye":
-            m.write_xye(str(base) + ".xye", r_axis=two_theta, intensity=prof, sigma=sig)
-        elif fmt == "fxye":
-            m.write_fxye(str(base) + ".fxye", r_axis=two_theta_cd, intensity=prof, sigma=sig)
-        elif fmt == "dat":
-            m.write_dat(str(base) + ".dat", q_axis_invA=q, intensity=prof, sigma=sig)
-        elif fmt == "2d_csv" and cake_2d is not None:
-            # Save (n_eta, n_r) cake: first row = R(px) header, first col = η(deg) labels
-            out_path = str(base) + "_cake.csv"
-            n_eta, n_r = cake_2d.shape
-            eta_vals = eta_axis if eta_axis is not None else np.arange(n_eta, dtype=float)
-            header = "eta\\R(px)," + ",".join(f"{r:.4f}" for r in r_px)
-            rows = [f"{eta_vals[k]:.4f}," + ",".join(f"{v:.6g}" for v in cake_2d[k])
-                    for k in range(n_eta)]
-            with open(out_path, "w") as fh:
-                fh.write(header + "\n")
-                fh.write("\n".join(rows) + "\n")
+        write_profile(base, fmt, r_px, prof, sigma, lsd, px, wl,
+                      cake_2d=cake_2d, eta_axis=eta_axis)
 
     def run(self):
         try:
@@ -594,25 +625,22 @@ class BatchWorker(QtCore.QThread):
             spec.validate()
             lsd = float(spec.Lsd); px = float(spec.pxY); wl = float(spec.Wavelength)
 
-            self.log_line.emit("[batch] Building geometry (one-time)…")
-            pol, sa = self._corrections
-            corr_on = pol is not None or sa is not None
+            if self._context is not None:
+                self.log_line.emit("[batch] Reusing existing detector map…")
+                ctx = self._context
+            else:
+                self.log_line.emit("[batch] Building geometry (one-time)…")
+                ctx = build_integration_context(spec, self._kernel, self._mask,
+                                                self._corrections, self._weighted)
+            self.geom_ready.emit(ctx)
+            geom = ctx["geom"]; corr_on = ctx["corr_on"]
+            corr_counts = ctx["corr_counts"]; cnt = ctx["cnt"]
+            r_ax = ctx["r_ax"]; eta_ax = ctx["eta_ax"]
             want_cake = (self._fmt == "2d_csv")
-            geom = None if corr_on else build_geom(spec, self._kernel, self._mask)
-            r_ax = compute_r_axis(spec)
             need_sigma = True   # xye/fxye require σ; always provide it
-            # Precompute the pixel-count cake once for the (unnormalised) corrections path
-            corr_counts = corrections_counts(spec) if corr_on else None
-            # Pixel-count cake for the weighted azimuthal mean (plain / variance paths)
-            cnt = (count_cake(geom, self._kernel, spec.NrPixelsZ, spec.NrPixelsY)
-                   if (self._weighted and not corr_on) else None)
             # Q-uniform handled by rebinning the R-uniform profile (kernels lack Q-mode)
             if self._q_cfg:
                 qgrid, r_ax = q_grid_and_r(self._q_cfg, lsd, px, wl)
-
-            # η axis for 2D-CSV column labels
-            n_eta = spec.n_eta_bins
-            eta_ax = float(spec.EtaMin) + float(spec.EtaBinSize) * (np.arange(n_eta) + 0.5)
 
             # Frame range / stride
             fr_start, fr_end, fr_stride = self._frame_range
@@ -751,6 +779,137 @@ class BatchWorker(QtCore.QThread):
                 "out_paths": out_paths,
                 "aborted": aborted,
             })
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
+def _list_tiff_files(path: str) -> list:
+    """Files a TIFFGlobSource would see for ``path`` (glob, folder, or file)."""
+    p = Path(path)
+    if any(ch in str(path) for ch in "*?"):
+        from glob import glob as _glob
+        return sorted(_glob(str(path)))
+    if p.is_dir():
+        return sorted(str(x) for x in p.glob("*.tif")) + \
+               sorted(str(x) for x in p.glob("*.tiff"))
+    if p.is_file():
+        return [str(p)]
+    return []
+
+
+class FolderMonitorWorker(QtCore.QThread):
+    """Watch a folder for new TIFF frames and integrate only the new ones.
+
+    Builds the integration context (the detector map) once — or reuses one passed
+    in — then polls the folder; any file whose frame-id (filename stem) is not yet
+    in ``seen`` is integrated with that same geometry and emitted via
+    ``frame_done``.  Runs until the thread is interruption-requested.
+    """
+    frame_done = QtCore.pyqtSignal(str, object, object, object)  # fid, r_axis, prof, sigma
+    new_count  = QtCore.pyqtSignal(int)     # cumulative new frames integrated
+    status     = QtCore.pyqtSignal(str)
+    geom_ready = QtCore.pyqtSignal(object)  # integration context (for caching)
+    log_line   = QtCore.pyqtSignal(str)
+    failed     = QtCore.pyqtSignal(str)
+
+    def __init__(self, spec, folder, mask, kernel, corrections, variance_cfg,
+                 q_cfg=None, dark=None, bright=None, background=None,
+                 bright_mode="divide", weighted=True, seen=None, context=None,
+                 out_dir=None, fmt="csv", poll_interval=1.0, parent=None):
+        super().__init__(parent)
+        self._spec = spec
+        self._folder = folder
+        self._mask = mask
+        self._kernel = kernel
+        self._corrections = corrections
+        self._variance_cfg = variance_cfg
+        self._q_cfg = q_cfg
+        self._dark, self._bright, self._background = dark, bright, background
+        self._bright_mode = bright_mode
+        self._weighted = weighted
+        self._seen = set(seen or [])
+        self._context = context
+        self._out_dir = Path(out_dir) if out_dir else None
+        self._fmt = fmt
+        self._poll_ms = int(max(0.2, poll_interval) * 1000)
+
+    def run(self):
+        try:
+            import torch
+            import tifffile
+            spec = self._spec
+            if self._context is not None:
+                self.log_line.emit("[monitor] reusing existing detector map")
+                ctx = self._context
+            else:
+                self.log_line.emit("[monitor] building detector map (one-time)…")
+                ctx = build_integration_context(spec, self._kernel, self._mask,
+                                                self._corrections, self._weighted)
+            self.geom_ready.emit(ctx)
+            geom = ctx["geom"]; corr_counts = ctx["corr_counts"]; cnt = ctx["cnt"]
+            lsd, px, wl = ctx["lsd"], ctx["px"], ctx["wl"]
+            r_ax = ctx["r_ax"]
+            qgrid = None
+            if self._q_cfg:
+                qgrid, r_ax = q_grid_and_r(self._q_cfg, lsd, px, wl)
+            fields_on = (self._dark is not None or self._bright is not None
+                         or self._background is not None)
+            can_save = self._out_dir is not None and self._fmt in (
+                "csv", "xye", "fxye", "dat")
+            if self._out_dir is not None and not can_save:
+                self.log_line.emit(f"[monitor] note: '{self._fmt}' not saved "
+                                   "incrementally; new frames are displayed only.")
+
+            self.status.emit("monitoring")
+            self.log_line.emit(f"[monitor] watching {self._folder}")
+            count = 0
+            while not self.isInterruptionRequested():
+                try:
+                    files = _list_tiff_files(self._folder)
+                except Exception as e:
+                    self.log_line.emit(f"[monitor] scan error: {e}")
+                    files = []
+                for f in files:
+                    if self.isInterruptionRequested():
+                        break
+                    fid = Path(f).stem
+                    if fid in self._seen:
+                        continue
+                    try:
+                        img = np.asarray(tifffile.imread(f), dtype=np.float64)
+                    except Exception as e:
+                        # file may still be mid-write; retry on the next poll
+                        self.log_line.emit(f"[monitor] skip {fid} (not ready: {e})")
+                        continue
+                    if fields_on:
+                        img = apply_field_corrections(
+                            img, dark=self._dark, bright=self._bright,
+                            bright_mode=self._bright_mode, background=self._background)
+                    img_t = torch.from_numpy(img)
+                    prof, sigma = integrate_frame(
+                        img_t, spec, geom, self._kernel, self._corrections,
+                        self._variance_cfg, True, corr_counts=corr_counts,
+                        weighted=self._weighted, cnt_cake=cnt)
+                    if sigma is None:
+                        sigma = np.sqrt(np.maximum(prof, 0.0))
+                    if self._q_cfg:
+                        prof, sigma = rebin_R_to_Q(compute_r_axis(spec), prof, sigma,
+                                                   qgrid, lsd, px, wl)
+                    self._seen.add(fid)
+                    count += 1
+                    self.frame_done.emit(fid, r_ax, prof, sigma)
+                    self.new_count.emit(count)
+                    self.log_line.emit(f"[monitor] +{fid}: peak={prof.max():.1f}")
+                    if can_save:
+                        self._out_dir.mkdir(parents=True, exist_ok=True)
+                        write_profile(self._out_dir / fid, self._fmt, r_ax, prof,
+                                      sigma, lsd, px, wl)
+                # responsive sleep
+                slept = 0
+                while slept < self._poll_ms and not self.isInterruptionRequested():
+                    self.msleep(100); slept += 100
+            self.status.emit("stopped")
+            self.log_line.emit(f"[monitor] stopped — {count} new frame(s) integrated")
         except Exception:
             self.failed.emit(traceback.format_exc())
 
