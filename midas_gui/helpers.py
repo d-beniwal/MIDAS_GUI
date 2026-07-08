@@ -373,10 +373,14 @@ def _spec_from_result_ns(r_bin, eta_bin, **fields):
     return spec_from_calibration_result(ns, RBinSize=float(r_bin), EtaBinSize=float(eta_bin))
 
 
-def spec_from_geometry_file(path: str, r_bin: float, eta_bin: float):
-    """Build an IntegrationSpec from a MIDAS paramstest, a pyFAI ``.poni``, or a
-    calibration ``.json`` (either the GUI's bare-key json or the MIDAS-pipeline
-    ``*_um/_px/_deg`` json).  Auto-detected by extension then content.
+def geometry_fields_from_file(path: str) -> dict:
+    """Parse a MIDAS paramstest, a pyFAI ``.poni``, or a calibration ``.json``
+    into a normalized full-geometry dict (auto-detected by extension then content).
+
+    Returns keys ``NrPixelsY, NrPixelsZ, pxY, pxZ, Lsd`` (µm), ``BC_y, BC_z`` (px),
+    ``tx, ty, tz`` (deg), ``wavelength_A`` (Å), ``distortion`` (dict).  ``pxZ``
+    defaults to ``pxY`` and tilts default to 0 when absent.  Raises ``ValueError``
+    if a required key is missing.
 
     PONI tilts (Rot1/2/3) are not mapped to MIDAS ty/tz/tx — only the beam-centre
     translation is used (consistent with MIDAS's own ``poni_to_bc``).
@@ -385,6 +389,13 @@ def spec_from_geometry_file(path: str, r_bin: float, eta_bin: float):
     p = Path(path)
     text = p.read_text()
     suf = p.suffix.lower()
+
+    def _norm(fields):
+        fields["pxZ"] = fields.get("pxZ") or fields["pxY"]
+        for t in ("tx", "ty", "tz"):
+            fields[t] = fields.get(t) or 0.0
+        fields["distortion"] = fields.get("distortion") or {}
+        return fields
 
     # ── calibration.json (GUI bare keys OR pipeline *_um/_px/_deg keys) ──
     if suf == ".json" or text.lstrip().startswith("{"):
@@ -406,7 +417,7 @@ def spec_from_geometry_file(path: str, r_bin: float, eta_bin: float):
                                "wavelength_A") if fields[k] is None]
         if missing:
             raise ValueError(f"calibration json missing keys: {', '.join(missing)}")
-        return _spec_from_result_ns(r_bin, eta_bin, **fields)
+        return _norm(fields)
 
     # ── pyFAI .poni ──
     if suf == ".poni" or "poni_version" in text or "Poni1" in text:
@@ -441,10 +452,10 @@ def spec_from_geometry_file(path: str, r_bin: float, eta_bin: float):
         pxZ_um, pxY_um = float(px1) * 1e6, float(px2) * 1e6      # axis1=slow=Z, axis2=fast=Y
         NrPixelsZ, NrPixelsY = int(shape[0]), int(shape[1])
         bc_y, bc_z = poni_to_bc(float(poni1), float(poni2), pxY_um, pxZ_um)
-        return _spec_from_result_ns(
-            r_bin, eta_bin, NrPixelsY=NrPixelsY, NrPixelsZ=NrPixelsZ,
-            pxY=pxY_um, pxZ=pxZ_um, Lsd=float(dist_m) * 1e6, BC_y=bc_y, BC_z=bc_z,
-            tx=0.0, ty=0.0, tz=0.0, wavelength_A=float(wl_m) * 1e10, distortion={})
+        return _norm(dict(
+            NrPixelsY=NrPixelsY, NrPixelsZ=NrPixelsZ, pxY=pxY_um, pxZ=pxZ_um,
+            Lsd=float(dist_m) * 1e6, BC_y=bc_y, BC_z=bc_z,
+            tx=0.0, ty=0.0, tz=0.0, wavelength_A=float(wl_m) * 1e10, distortion={}))
 
     # ── MIDAS paramstest ──
     kv, p_vals = {}, {}
@@ -479,10 +490,33 @@ def spec_from_geometry_file(path: str, r_bin: float, eta_bin: float):
     if missing:
         raise ValueError(f"paramstest missing keys: {', '.join(missing)}")
     dist = {v2: p_vals[p1] for p1, v2 in _PARAMSTEST_DISTORTION.items() if p1 in p_vals}
-    return _spec_from_result_ns(
-        r_bin, eta_bin, NrPixelsY=NY, NrPixelsZ=NZ, pxY=kv["pxY"], pxZ=kv["pxY"],
+    return _norm(dict(
+        NrPixelsY=NY, NrPixelsZ=NZ, pxY=kv["pxY"], pxZ=kv["pxY"],
         Lsd=kv["Lsd"], BC_y=kv["BC_y"], BC_z=kv["BC_z"], tx=kv.get("tx"), ty=kv.get("ty"),
-        tz=kv.get("tz"), wavelength_A=kv["wavelength_A"], distortion=dist)
+        tz=kv.get("tz"), wavelength_A=kv["wavelength_A"], distortion=dist))
+
+
+def spec_from_geometry_file(path: str, r_bin: float, eta_bin: float):
+    """Build an IntegrationSpec from a MIDAS paramstest, a pyFAI ``.poni``, or a
+    calibration ``.json``.  Thin wrapper over :func:`geometry_fields_from_file`."""
+    return _spec_from_result_ns(r_bin, eta_bin, **geometry_fields_from_file(path))
+
+
+def result_ns_from_geometry_file(path: str):
+    """Build a duck-typed calibration *result* (SimpleNamespace) from a paramstest,
+    ``.poni`` or ``.json`` geometry file — carries the attributes
+    ``spec_from_calibration_result`` / the tabs' ``set_calibration`` expect
+    (``wavelength_A, Lsd, BC_y, BC_z, pxY, pxZ, NrPixelsY, NrPixelsZ, tx, ty, tz,
+    distortion``)."""
+    from types import SimpleNamespace
+    f = geometry_fields_from_file(path)
+    return SimpleNamespace(
+        NrPixelsY=int(f["NrPixelsY"]), NrPixelsZ=int(f["NrPixelsZ"]),
+        pxY=float(f["pxY"]), pxZ=float(f["pxZ"]),
+        Lsd=float(f["Lsd"]), BC_y=float(f["BC_y"]), BC_z=float(f["BC_z"]),
+        tx=float(f["tx"]), ty=float(f["ty"]), tz=float(f["tz"]),
+        wavelength_A=float(f["wavelength_A"]), distortion=f["distortion"],
+        residual_corr_bin_path=None)
 
 
 # ── Log stream (redirect verbose stdout to a Qt signal) ─────────────────────────

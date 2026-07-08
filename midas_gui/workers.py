@@ -1169,8 +1169,52 @@ class CorrectionPreviewWorker(QtCore.QThread):
 #  Tab 6 — PDF analysis (image → I(Q) → G(r))
 # ═════════════════════════════════════════════════════════════════════════════
 
+def _to_np(x):
+    """torch tensor or numpy → contiguous float numpy array."""
+    if x is None:
+        return None
+    return np.asarray(x.detach().cpu().numpy() if hasattr(x, "detach") else x,
+                      dtype=np.float64)
+
+
+def _load_iq_file(path: str):
+    """Load a pre-integrated I(Q) file → (Q, I, sigma_or_None).
+
+    Tolerates comma- or whitespace-separated 2- or 3-column data with a leading
+    comment/header line (``#`` comments skipped; a non-numeric first row is too).
+    """
+    with open(path, "r") as fh:
+        first = ""
+        for line in fh:
+            s = line.strip()
+            if s and not s.startswith("#"):
+                first = s
+                break
+    delim = "," if "," in first else None
+    try:
+        float(first.split(delim)[0] if delim else first.split()[0])
+        skip = 0
+    except ValueError:
+        skip = 1
+    arr = np.loadtxt(path, delimiter=delim, comments="#", skiprows=skip)
+    arr = np.atleast_2d(arr)
+    if arr.shape[1] < 2:
+        raise ValueError(f"I(Q) file needs ≥2 columns (Q, I); got {arr.shape[1]}.")
+    q = arr[:, 0].astype(np.float64)
+    intensity = arr[:, 1].astype(np.float64)
+    sigma = arr[:, 2].astype(np.float64) if arr.shape[1] >= 3 else None
+    return q, intensity, sigma
+
+
 class PDFWorker(QtCore.QThread):
-    """Compute I(Q), an estimated background, and the pair-distribution G(r)."""
+    """Polyatomic total-scattering PDF: I(Q) → Faber-Ziman S(Q) → G(r).
+
+    Uses the ``midas_pdf`` backend (via :mod:`midas_gui.pdf_backend`): real
+    composition-weighted normalization, Compton subtraction, end-to-end σ
+    propagation, and optional differentiable scale/background refinement.
+    I(Q) comes either from integrating a detector frame or from a pre-integrated
+    ``Q,I,σ`` file.
+    """
     log_line = QtCore.pyqtSignal(str)
     finished = QtCore.pyqtSignal(object)
     failed   = QtCore.pyqtSignal(str)
@@ -1180,50 +1224,117 @@ class PDFWorker(QtCore.QThread):
         self._result, self._image, self._dark, self._mask = result, image, dark, mask
         self._cfg = cfg
 
+    def _acquire_iq(self, c):
+        """Return (q, I, sigma_I) either from the frame or a Q,I,σ file."""
+        if c.get("iq_source", "image") == "file":
+            path = c.get("iq_file", "")
+            if not path or not Path(path).exists():
+                raise FileNotFoundError(f"I(Q) file not found: {path!r}")
+            self.log_line.emit(f"[pdf] loading I(Q) from {Path(path).name}")
+            q, I, sig = _load_iq_file(path)
+            return q, I, sig
+
+        # image mode — integrate the frame (with Poisson variance for σ_I)
+        import torch
+        if self._result is None or self._image is None:
+            raise ValueError("Image mode needs a calibration and a loaded frame.")
+        spec = _build_spec(self._result, 1.0, c.get("eta_bin", 5.0))
+        img = self._image.astype(np.float64)
+        if self._dark is not None:
+            img = np.clip(img - self._dark.astype(np.float64), 0, None)
+        if self._mask is not None:
+            img = img.copy(); img[self._mask.astype(bool)] = 0.0
+        img_t = torch.from_numpy(img)
+        lsd, px, wl = float(spec.Lsd), float(spec.pxY), float(spec.Wavelength)
+        kernel = c.get("binning", "hard")
+        self.log_line.emit(f"[pdf] integrating frame ({kernel} binning)…")
+        geom = build_geom(spec, kernel, None)
+        prof, sigma = integrate_frame(img_t, spec, geom, kernel, (None, None),
+                                      {"error_model": "poisson"}, need_sigma=True)
+        r_ax = compute_r_axis(spec)
+        _, _, q = axis_conversions(r_ax, lsd, px, wl)
+        return np.asarray(q, dtype=np.float64), prof.astype(np.float64), sigma.astype(np.float64)
+
     def run(self):
         try:
-            import torch
-            import midas_integrate_v2 as m
+            import midas_gui.pdf_backend as pdf
             c = self._cfg
-            spec = _build_spec(self._result, 1.0, c.get("eta_bin", 5.0))
-            img = self._image.astype(np.float64)
-            if self._dark is not None:
-                img = np.clip(img - self._dark.astype(np.float64), 0, None)
-            if self._mask is not None:
-                img = img.copy(); img[self._mask.astype(bool)] = 0.0
-            img_t = torch.from_numpy(img)
-            lsd, px, wl = float(spec.Lsd), float(spec.pxY), float(spec.Wavelength)
+            wl = float(c["wavelength"])
+            rho0 = float(c.get("rho0") or 0.0)
+            compton = bool(c.get("compton", True))
+            window = c.get("window", "lorch")
+            q_min, q_max = float(c["q_min"]), float(c["q_max"])
 
-            # I(Q): hard-binned 1-D profile mapped to Q
-            geom = build_geom(spec, "hard", None)
-            prof, _ = integrate_frame(img_t, spec, geom, "hard", (None, None), None,
-                                      need_sigma=False)
-            r_ax = compute_r_axis(spec)
-            _, _, q = axis_conversions(r_ax, lsd, px, wl)
-            bg = m.pdf.estimate_background(prof, window=c.get("bg_window", 51),
-                                          percentile=c.get("bg_percentile", 10.0))
-            bg = np.asarray(bg.detach() if hasattr(bg, "detach") else bg)
+            q, I, sig = self._acquire_iq(c)
 
-            # F(Q) = Q·(I(Q)/bg(Q) − 1)  — reduced structure factor (no form-factor,
-            # composition-free approximation; useful for visualising ring positions)
-            with np.errstate(divide="ignore", invalid="ignore"):
-                Fq = q * np.where(bg > 1e-3 * bg.max(), prof / bg - 1.0, 0.0)
-            Fq = np.nan_to_num(Fq, nan=0.0)
+            # trim to [q_min, q_max]
+            sel = (q >= q_min) & (q <= q_max) & np.isfinite(I)
+            if sel.sum() < 8:
+                raise ValueError(f"Too few I(Q) points in [{q_min}, {q_max}] Å⁻¹.")
+            q, I = q[sel], I[sel]
+            sig = sig[sel] if sig is not None else None
 
-            # G(r) via the full PDF pipeline
-            self.log_line.emit("[pdf] computing G(r)…")
-            r_grid = torch.from_numpy(np.arange(c["r_min"], c["r_max"], c["r_step"]))
-            gr_out = m.pdf.integrate_to_Gr_with_variance(
-                img_t, spec, r_grid, binning=c.get("binning", "hard"),
-                Q_min=c["q_min"], Q_max=c["q_max"], Q_step=c["q_step"],
-                window=c.get("window", "lorch"))
-            r_np = np.asarray(gr_out[0])
-            gr_np = np.asarray(gr_out[1].detach() if hasattr(gr_out[1], "detach") else gr_out[1])
-            sig_np = np.asarray(gr_out[2].detach() if hasattr(gr_out[2], "detach") else gr_out[2])
+            comp = pdf.Composition(_parse_composition(c["composition"]),
+                                   number_density=(rho0 or None))
+            self.log_line.emit(
+                f"[pdf] composition={comp.as_dict()}  ρ₀={rho0 or '—'}  "
+                f"λ={wl:.5f} Å  compton={'on' if compton else 'off'}")
+
+            r = np.arange(c["r_min"], c["r_max"], c["r_step"], dtype=np.float64)
+
+            background = None
+            scale = 1.0
+            bg_coef = None
+            refine_loss = None
+
+            if c.get("refine"):
+                if rho0 <= 0:
+                    raise ValueError("Refinement needs a number density ρ₀ > 0.")
+                steps = int(c.get("refine_steps", 120))
+                self.log_line.emit(f"[pdf] refining normalization "
+                                   f"(bg_order={c.get('bg_order', 0)}, steps={steps})…")
+                res = pdf.refine_normalization(
+                    q, I, comp, r, wavelength_A=wl, number_density=rho0,
+                    sigma_intensity=sig, compton=compton, q_max=q_max, window=window,
+                    r_min_phys=float(c.get("r_min_phys", 1.5)),
+                    bg_order=int(c.get("bg_order", 0)), steps=steps)
+                S = res.S; G = res.G; sigma_G = res.sigma_G
+                background = _to_np(res.background)
+                scale = float(res.scale)
+                bg_coef = [float(x) for x in (res.bg_coef or [])]
+                refine_loss = float(res.history[-1]) if res.history else None
+                self.log_line.emit(
+                    f"[pdf] refined: scale={scale:.4g}  loss={refine_loss:.4g}")
+            else:
+                G, sigma_G, S = pdf.i_of_q_to_Gr(
+                    q, I, comp, r, wavelength_A=wl, sigma_intensity=sig,
+                    compton=compton, q_max=q_max, window=window)
+
+            # true reduced structure function F(Q) = Q·(S−1)
+            Fq, _ = pdf.structure_function_F(q, S)
+
+            S_np = _to_np(S); G_np = _to_np(G); sigG_np = _to_np(sigma_G)
+            Fq_np = _to_np(Fq)
+
+            # output-function family (needs ρ₀ for g/T/R)
+            out_fn = c.get("output_fn", "G")
+            fam_y, fam_sig = G_np, sigG_np
+            if out_fn != "G" and rho0 > 0:
+                fn = {"g": pdf.pair_distribution_g,
+                      "T": pdf.total_correlation_T,
+                      "R": pdf.radial_distribution_R}[out_fn]
+                y, ys = fn(r, G, number_density=rho0, sigma_G=sigma_G)
+                fam_y, fam_sig = _to_np(y), _to_np(ys)
+            elif out_fn != "G":
+                self.log_line.emit(f"[pdf] {out_fn}(r) needs ρ₀>0 — showing G(r).")
+                out_fn = "G"
 
             self.finished.emit({
-                "q": q, "Iq": prof, "background": bg, "Fq": Fq,
-                "r": r_np, "Gr": gr_np, "sigma_Gr": sig_np,
+                "q": q, "Iq": I, "background": background,
+                "S": S_np, "Fq": Fq_np,
+                "r": r, "Gr": G_np, "sigma_Gr": sigG_np,
+                "Gr_family": {"name": out_fn, "y": fam_y, "sigma": fam_sig},
+                "scale": scale, "bg_coef": bg_coef, "refine_loss": refine_loss,
             })
         except Exception:
             self.failed.emit(traceback.format_exc())

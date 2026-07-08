@@ -97,6 +97,14 @@ class CalibrationTab(QtWidgets.QWidget):
 
         # ── Detector & Calibrant ──
         det = S.make_card("Detector & Calibrant")
+        self._load_calib_btn = QtWidgets.QPushButton("Load calibration file…")
+        self._load_calib_btn.setToolTip(
+            "Load geometry from a MIDAS paramstest (.txt), a calibration .json, "
+            "or a pyFAI .poni — sets λ, pixel size, and the seed BC + Lsd.")
+        self._load_calib_btn.clicked.connect(self._load_calib_file)
+        _lrow = QtWidgets.QHBoxLayout(); _lrow.setSpacing(4)
+        _lrow.addWidget(self._load_calib_btn); _lrow.addStretch(1)
+        det.body.addLayout(_lrow)
         self._wl = _fspin(0.001, 10.0, 5, DEFAULT_WAVELENGTH, "Å")
         self._cal = _NoScrollComboBox(); self._cal.addItems(CALIBRANTS); self._cal.setMaximumWidth(150)
         det.body.addLayout(S.Form().row(("λ:", self._wl), ("Calibrant:", self._cal)))
@@ -354,6 +362,35 @@ class CalibrationTab(QtWidgets.QWidget):
             self._show_calib_image(autorange=False)
 
     # ── Seed from picks ───────────────────────────────────────────
+
+    def _load_calib_file(self):
+        """Load geometry from a paramstest/.json/.poni into the seed + detector fields."""
+        from midas_gui.helpers import geometry_fields_from_file
+        from midas_gui.constants import DEFAULT_CALIB_FILE
+        start = DEFAULT_CALIB_FILE if Path(DEFAULT_CALIB_FILE).exists() else ""
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Load calibration file", start,
+            "Calibration (*.json *.txt *.poni);;All files (*)")
+        if not path:
+            return
+        try:
+            g = geometry_fields_from_file(path)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Load failed", str(e)); return
+        self._wl.setValue(float(g["wavelength_A"]))
+        self._pxY.setValue(float(g["pxY"]))
+        if abs(float(g["pxZ"]) - float(g["pxY"])) > 1e-9:
+            self._pxZ_check.setChecked(True); self._pxZ_spin.setValue(float(g["pxZ"]))
+        else:
+            self._pxZ_check.setChecked(False)
+        self._manual_seed_check.setChecked(True)
+        self._seed_bcy.setValue(float(g["BC_y"]))
+        self._seed_bcz.setValue(float(g["BC_z"]))
+        self._seed_lsd.setValue(float(g["Lsd"]))
+        self._seed_note.setText(
+            f"Loaded {Path(path).name}: λ={g['wavelength_A']:.5f} Å, px={g['pxY']:.2f} µm, "
+            f"BC=({g['BC_y']:.2f}, {g['BC_z']:.2f}), Lsd={g['Lsd']/1000:.3f} mm.")
+        self._log.append(f"Calibration file loaded: {path}")
 
     def _on_bc_picked(self, bc_y, bc_z):
         self._manual_seed_check.setChecked(True)

@@ -96,6 +96,7 @@ DEFAULT_CALIBRANT_H5  = str(_TEST_DATA / "calibrant_ceria.h5")
 DEFAULT_NICKEL_H5     = str(_TEST_DATA / "nickel_stack.h5")
 DEFAULT_NICKEL_DIR    = str(_TEST_DATA / "nickel_tifs")
 DEFAULT_NICKEL_FRAME0 = str(_TEST_DATA / "nickel_tifs" / "nickel_000.tif")
+DEFAULT_CALIB_FILE    = str(_TEST_DATA / "calibration_synthetic.json")
 
 
 # ── Materials database for ring simulation (Tab 0) ──────────────────────────────

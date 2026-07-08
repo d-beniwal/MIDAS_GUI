@@ -235,6 +235,15 @@ all mask sources (plus the auto-added Tab 1 mask) are unioned. Dark is passed to
 calibration pipeline; bright/background are applied to the calibrant before calibration
 and post-calibration integration.
 
+### Detector, seed & Load calibration file
+The **Detector & Calibrant** card sets λ, pixel size(s) and detector transforms; the
+**Initial seed** card sets the LM starting point (BC_y, BC_z, Lsd). **Load calibration
+file…** (top of the Detector card) reads a MIDAS **paramstest `.txt`**, a calibration
+**`.json`**, or a pyFAI **`.poni`** (auto-detected) and fills λ, pixel size, and the
+seed BC + Lsd — a fast way to start from a previous calibration or a known geometry.
+(The synthetic test data ships `test_data/calibration_synthetic.{json,txt,poni}` as a
+ready example.)
+
 ### Pipeline selector
 One-shot (default) · First-time · Four-stage · Bayesian (Laplace σ) · Joint-cake.
 *For trustworthy tilt/strain, prefer Four-stage or First-time — One-shot/Bayesian can
@@ -347,10 +356,140 @@ a drifted frame, learn a spatial gain map `g_i = 1 + scale·r_i` by minimising
 
 ## 9. Tab 6 — PDF Analysis  *(work in progress)*
 
-Compute G(r) from one calibrated frame: image → I(Q) + background → F(Q) → G(r).
-Controls: Qmin/Qmax/ΔQ, rmin/rmax/Δr, window (Lorch/none), binning (hard/polygon).
-Right panel: I(Q)+background, F(Q) = Q·(I/bg−1), and G(r). **Save G(r)** writes a
-three-column `r, G(r), σ` file (diffpy-CMI / PDFgui / RMCProfile compatible).
+Polyatomic **total-scattering** reduction: I(Q) → Faber-Ziman structure function
+S(Q) → pair-distribution G(r), powered by the `midas_pdf` backend (real
+composition-weighted normalization, Compton subtraction, end-to-end σ
+propagation, and optional differentiable scale/background refinement). This
+replaces the earlier monoatomic, composition-free `F(Q)=Q·(I/bg−1)` approximation.
+
+### Background — what I(Q), S(Q) and G(r) mean
+
+PDF analysis is three transforms that move from *what the detector measured* to
+*where the atoms are*. They are exactly the three stacked plots (top → bottom).
+
+- **I(Q) — measured scattered intensity.** Intensity vs. momentum transfer
+  `Q = 4π·sin(θ)/λ` (Å⁻¹), a wavelength-independent rescaling of the angle 2θ;
+  high Q = wide angle = fine spatial detail. Obtained by azimuthally integrating
+  the detector rings to a 1-D curve. I(Q) is **not** pure structure — it mixes the
+  interference (coherent) signal with big smooth backgrounds: per-atom
+  self-scattering (form factors `⟨f²⟩`) and inelastic **Compton** scattering.
+
+- **S(Q) — structure function.** I(Q) with the self-scattering and Compton removed
+  and normalized away (the **Faber-Ziman** step), leaving only interference:
+  `S(Q) = [I_coh − (⟨f²⟩ − ⟨f⟩²)] / ⟨f⟩²`, where `⟨f⟩, ⟨f²⟩` are
+  composition-weighted atomic form factors (hence the **Composition** input). S(Q)
+  oscillates about **1** and → 1 at high Q where correlations wash out (the dashed
+  guide line). `F(Q) = Q·[S(Q)−1]` is the same thing re-weighted by Q to emphasize
+  the structurally rich high-Q oscillations.
+
+- **G(r) — reduced pair distribution function.** The real-space answer: a
+  histogram of interatomic distances, via a sine Fourier transform
+  `G(r) = (2/π)·∫ Q·[S(Q)−1]·sin(Qr) dQ`. A **peak at r** means many atom pairs are
+  separated by that distance; the **first peak is the nearest-neighbour bond**
+  (Ni ≈ 2.49 Å, CeO₂ Ce–O ≈ 2.34 Å), later peaks are further coordination shells.
+  Below the first bond `G(r) = −4πρ₀r` (nothing can be closer) — a constraint that
+  needs the number density **ρ₀**. Because it uses *total* scattering (Bragg **and**
+  diffuse), the PDF captures local structure even in disordered / nanoscale /
+  amorphous materials, unlike a Bragg-only Rietveld fit.
+
+```
+ detector image / I(Q) file
+        │  azimuthal integration
+        ▼
+     I(Q)   raw intensity = interference + form factors + Compton      (top plot)
+        │  subtract Compton, subtract Laue (⟨f²⟩−⟨f⟩²), divide by ⟨f⟩²  (needs composition)
+        ▼
+     S(Q)   pure interference, oscillates about 1                      (middle plot)
+        │  Fourier sine transform over [Qmin, Qmax] with a window (Lorch)
+        ▼
+     G(r)   interatomic distances; peaks = coordination shells         (bottom plot)
+```
+
+The **±1σ band** on G(r) is the counting uncertainty σ propagated from I(Q) through
+every step, so real peaks can be told from noise. The **G/g/T/R** family (Output
+selector) is the same information re-weighted: **G** oscillates about 0 (refinement
+standard); **g** → 1 at large r; **T** is the total correlation; **R** is the radial
+distribution whose *peak area = coordination number*. g/T/R all need ρ₀.
+
+**I(Q) source** (choose one):
+- **Integrate detector frame** — a calibrated frame is integrated (hard/polygon
+  binning, Poisson σ) and mapped to Q, exactly as before. Uses the Tab 2
+  calibration (λ, geometry) and any Tab 1 mask.
+- **Load I(Q) file** — a pre-integrated 2- or 3-column `Q, I, σ` text/CSV
+  (comment/header lines tolerated). Ready known-answer examples ship in
+  `test_data/pdf_synth/` (`nickel_iq.csv` → Ni, first peak 2.49 Å; `ceo2_iq.csv`
+  → Ce:1,O:2, first peak 2.34 Å) — see that folder's `README.md` for settings.
+
+**Calibration.** The geometry/wavelength comes from Tab 2 automatically, or use
+**Load calibration file…** to read a MIDAS `paramstest.txt`, a `.json`, or a pyFAI
+`.poni` (auto-detected). This is required for *Integrate detector frame* and also
+sets λ used by *Load I(Q) file* mode.
+
+**Sample.** Composition (e.g. `Ni` or `C:3,H:8,O:1`; ions like `Ni2+` allowed),
+number density ρ₀ (atoms/Å³; needed for refinement and for g/T/R), wavelength λ
+(auto-filled from calibration), and a **Compton subtraction** toggle.
+
+**Normalization.** Optional **Refine scale + background** (L-BFGS) — reveals a
+background polynomial degree (0–3), a low-r cutoff `r_min` (Å), and an iteration
+count. Refinement requires ρ₀ > 0. It fits scale and a smooth b(Q) against two
+model-free constraints: high-Q ⟨S⟩→1 and G(r)=−4πρ₀r below `r_min`.
+
+**Output.** Bottom-plot convention family — **G(r)** (reduced PDF), **g(r)**
+(pair distribution), **T(r)** (total correlation), or **R(r)** (radial
+distribution, whose peak integral is the coordination number); g/T/R need ρ₀.
+Middle plot toggles between **S(Q)** (with the S=1 guide) and the true reduced
+structure function **F(Q)=Q(S−1)**.
+
+Right panel: I(Q) (+ refined background overlay), S(Q)/F(Q), and the selected
+G/g/T/R with a shaded **±1σ** band. **Save G(r)** writes a three-column
+`r, G(r), σ` file (diffpy-CMI / PDFgui / RMCProfile compatible); **Save S(Q)**
+writes `Q, S(Q)`.
+
+### Functions behind the tab
+
+The tab is a thin UI over a background worker and the `midas_pdf` backend.
+
+**UI — `PDFTab` (`midas_gui/tab_pdf.py`)**
+
+| Method | Role |
+|--------|------|
+| `_build_ui` | Builds the I(Q)-source / Sample / Normalization / Output groups and the three stacked plots. |
+| `set_calibration(result, source)` | Receives a Tab-2 result (or a loaded geometry) → sets λ and enables Compute. |
+| `_load_calib_file` | Loads a `paramstest`/`.json`/`.poni` → builds a calibration result → `set_calibration`. |
+| `_load_img` | Loads a detector frame for *Integrate detector frame* mode. |
+| `_run` | Validates inputs, assembles the `cfg` dict, and starts a `PDFWorker`. |
+| `_on_done` / `_redraw_mid` / `_redraw_bottom` | Draw I(Q)+bg, the S(Q)↔F(Q) toggle, and the G/g/T/R curve with its ±1σ band. |
+| `_save_gr_file` / `_save_sq_file` | Export `r,G,σ` and `Q,S`. |
+
+**Worker — `PDFWorker` (`midas_gui/workers.py`)** runs off the GUI thread:
+
+| Function | Role |
+|----------|------|
+| `_acquire_iq` | Produces `(q, I, σ)` — either by integrating the frame (image mode) or by reading a file (`_load_iq_file`, tolerant of comma/space and 2- or 3-columns). |
+| `run` | Trims to `[Qmin,Qmax]`, builds `Composition`, calls the reduction (plain or refine), computes `F(Q)` and the G/g/T/R family, emits the result dict. |
+
+Image-mode integration reuses the shared core `_build_spec`, `build_geom`,
+`integrate_frame`, `axis_conversions` (same path as the other tabs); geometry-file
+parsing uses `geometry_fields_from_file` / `result_ns_from_geometry_file`
+(`midas_gui/helpers.py`).
+
+**Reduction — `midas_pdf` via `midas_gui/pdf_backend.py`** (re-exported symbols):
+
+| Function | Does | Maps to plot |
+|----------|------|--------------|
+| `Composition(fractions, number_density)` | Composition layer: `⟨f⟩, ⟨f²⟩` form-factor averages, Laue term `⟨f²⟩−⟨f⟩²`, and per-atom Compton. | — |
+| `faber_ziman_S(I, q, comp, …)` | I(Q) → S(Q) with σ (subtract Compton/Laue, divide by `⟨f⟩²`). | S(Q) |
+| `structure_function_F(q, S)` | `F(Q) = Q·(S−1)`. | F(Q) |
+| `fourier_sine_transform(q, S, r, window)` | S(Q) → G(r) with σ (Lorch / none window). | G(r) |
+| `i_of_q_to_Gr(q, I, comp, r, …)` | End-to-end I(Q) → G(r) (composes the two above); the default Compute path. | S(Q) + G(r) |
+| `refine_normalization(q, I, comp, r, …)` | L-BFGS fit of scale + background polynomial against high-Q ⟨S⟩→1 and low-r `G=−4πρ₀r`. | refined S(Q)/G(r) + bg |
+| `pair_distribution_g` / `total_correlation_T` / `radial_distribution_R` | Convention family from G(r) + ρ₀. | g/T/R |
+
+> **Packaging note.** `midas_pdf` is currently **vendored** in
+> `midas_gui/_vendor/` and loaded through `midas_gui/pdf_backend.py`, which also
+> installs a small `midas_hkls.absorption` compatibility shim for
+> `midas-hkls < 0.5.0`. Once `midas-pdf` is published and `midas-hkls>=0.5.0` is
+> available the vendored copy and the shim are removed.
 
 ---
 

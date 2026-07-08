@@ -54,6 +54,20 @@ Issues = "https://github.com/d-beniwal/MIDAS_GUI/issues"
 where = ["."]
 include = ["midas_gui*"]
 
+# Ship the vendored midas_pdf tree (Python + data/*.json) as package data of
+# midas_gui. It is imported as top-level `midas_pdf` via midas_gui/pdf_backend.py.
+# FUTURE: once `midas-pdf` is published and `midas-hkls>=0.5.0` (with the
+# `absorption` submodule) is a dependency, add `midas-pdf` to [project]
+# dependencies, delete midas_gui/_vendor/, and drop this package-data block —
+# the shim in pdf_backend.py then no-ops against the real submodule.
+[tool.setuptools.package-data]
+"midas_gui" = [
+    "_vendor/VENDORED.md",
+    "_vendor/**/*.py",
+    "_vendor/**/*.json",
+    "_vendor/**/*",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra -q"
