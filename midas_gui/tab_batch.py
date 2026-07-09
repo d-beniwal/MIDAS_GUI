@@ -211,6 +211,13 @@ class BatchTab(QtWidgets.QWidget):
         run_row = QtWidgets.QHBoxLayout(); run_row.setSpacing(6)
         run_row.addWidget(self._run_btn, 1); run_row.addWidget(self._abort_btn)
         lv.addLayout(run_row)
+        self._clear_btn = QtWidgets.QPushButton("Clear results")
+        self._clear_btn.setToolTip(
+            "Remove the integrated profiles/plots computed this session for the "
+            "current data so a fresh integration can start. Does NOT delete raw "
+            "data or any files on disk.")
+        self._clear_btn.clicked.connect(self._clear_results)
+        lv.addWidget(self._clear_btn)
         self._prog = QtWidgets.QProgressBar(); self._prog.setRange(0, 100); self._prog.setVisible(False)
         lv.addWidget(self._prog)
         self._prog_lbl = QtWidgets.QLabel(""); self._prog_lbl.setStyleSheet(f"font-size:10px;color:{S.MUTED}")
@@ -394,6 +401,26 @@ class BatchTab(QtWidgets.QWidget):
         self._reset_run_buttons(); self._prog.setVisible(False)
         self._log.append(f"\nERROR:\n{msg[:600]}")
         QtWidgets.QMessageBox.critical(self, "Integration failed", msg[:400])
+
+    def _clear_results(self):
+        """Clear this session's computed profiles/plots for the current data so a
+        fresh integration can start. Only in-session results are cleared — no raw
+        data or files on disk are touched."""
+        if self._worker and self._worker.isRunning():
+            QtWidgets.QMessageBox.warning(
+                self, "Run in progress",
+                "Abort the running integration before clearing results.")
+            return
+        if self._loader.is_monitoring():
+            self._stop_monitor()
+            self._loader.set_monitor_active(False)
+        self._waterfall.reset()
+        self._stack_view.reset()
+        self._integrated_fids = set()
+        self._wf_started = False
+        self._prog.setVisible(False); self._prog.setValue(0)
+        self._prog_lbl.setText("")
+        self._log.append("Cleared session results — raw data untouched.")
 
     # ── Folder monitoring (live new-file integration) ──────────────
 

@@ -1458,10 +1458,11 @@ class WaterfallViewer(QtWidgets.QWidget):
         self._r_axis = None
         self._apply_cmap(COLORMAPS[0])
 
-    def reset(self, r_axis):
-        """Start a new scan; r_axis is the radial bin-centre array (px)."""
+    def reset(self, r_axis=None):
+        """Start a new scan (r_axis = radial bin-centre array in px), or clear
+        the view entirely when called with no axis."""
         self._rows = []
-        self._r_axis = np.asarray(r_axis, dtype=float)
+        self._r_axis = None if r_axis is None else np.asarray(r_axis, dtype=float)
         self._img.clear()
         self._stat.setText("")
 
@@ -1541,12 +1542,28 @@ class StackedProfileViewer(QtWidgets.QWidget):
         self._spacing.setFixedWidth(100)
         self._spacing.valueChanged.connect(self._restack)
         bar.addWidget(self._spacing)
+        self._labels_chk = QtWidgets.QCheckBox("Labels")
+        self._labels_chk.setChecked(True)
+        self._labels_chk.setToolTip("Show each file's name just below its curve (left edge).")
+        self._labels_chk.toggled.connect(self._toggle_labels)
+        bar.addWidget(self._labels_chk)
         self._legend_chk = QtWidgets.QCheckBox("Legend")
-        self._legend_chk.setChecked(True)
-        self._legend_chk.setToolTip("Show a legend mapping each curve to its source file.")
+        self._legend_chk.setChecked(False)
+        self._legend_chk.setToolTip("Show a corner legend mapping each curve to its source file.")
         self._legend_chk.toggled.connect(self._toggle_legend)
         bar.addWidget(self._legend_chk)
         bar.addStretch(1)
+
+        # Top-right controls: line width and label font size.
+        def _tbtn(txt, tip, slot):
+            b = QtWidgets.QToolButton(); b.setText(txt); b.setToolTip(tip)
+            b.setAutoRaise(True); b.clicked.connect(slot); return b
+        bar.addWidget(QtWidgets.QLabel("line"))
+        bar.addWidget(_tbtn("−", "Thinner lines", lambda: self._adjust_linewidth(-0.5)))
+        bar.addWidget(_tbtn("+", "Thicker lines", lambda: self._adjust_linewidth(0.5)))
+        bar.addWidget(QtWidgets.QLabel(" font"))
+        bar.addWidget(_tbtn("A−", "Smaller labels", lambda: self._adjust_fontsize(-1)))
+        bar.addWidget(_tbtn("A+", "Larger labels", lambda: self._adjust_fontsize(1)))
         self._stat = QtWidgets.QLabel("")
         self._stat.setStyleSheet("color:#aaa;font-size:10px")
         bar.addWidget(self._stat)
@@ -1558,21 +1575,28 @@ class StackedProfileViewer(QtWidgets.QWidget):
         self._plot.setLabel("left", "Intensity + offset")
         self._legend = self._plot.addLegend(offset=(10, 10),
                                             labelTextSize="8pt")
+        self._legend.setVisible(False)
         layout.addWidget(self._plot, stretch=1)
 
         self._r_axes: list = []
         self._profiles: list = []
         self._curves: list = []
+        self._labels: list = []          # inline pg.TextItem per curve
+        self._linewidth = 1.0
+        self._fontsize = 8
 
     # ── public API ───────────────────────────────────────────────────
 
     def reset(self, r_axis=None):
-        """Clear all stored profiles and curves."""
+        """Clear all stored profiles, curves and inline labels."""
         self._r_axes.clear()
         self._profiles.clear()
         for c in self._curves:
             self._plot.removeItem(c)
         self._curves.clear()
+        for ti in self._labels:
+            self._plot.removeItem(ti)
+        self._labels.clear()
         if self._legend is not None:
             self._legend.clear()
         self._stat.setText("")
@@ -1580,18 +1604,28 @@ class StackedProfileViewer(QtWidgets.QWidget):
     def add_profile(self, r_axis, profile, label=None):
         """Append one frame's 1-D profile; draws it at its stacked offset.
 
-        ``label`` (the source file id) is shown in the legend if given.
+        ``label`` (the source file id) is shown in the corner legend and as an
+        inline tag just below the curve's left-most point.
         """
         r = np.asarray(r_axis, dtype=float)
         p = np.asarray(profile, dtype=float)
         i = len(self._profiles)
         self._r_axes.append(r)
         self._profiles.append(p)
+        color = _frame_color(i)
         offset = i * float(self._spacing.value())
         curve = self._plot.plot(r, p + offset,
-                                pen=pg.mkPen(_frame_color(i), width=1.0),
+                                pen=pg.mkPen(color, width=self._linewidth),
                                 name=(str(label) if label else None))
         self._curves.append(curve)
+        # Inline label just below the line's left-most point.
+        ti = pg.TextItem(str(label) if label else f"#{i}", color=color, anchor=(0, 0))
+        f = QtGui.QFont(); f.setPointSize(self._fontsize); ti.setFont(f)
+        if r.size:
+            ti.setPos(float(r[0]), float(p[0] + offset))
+        ti.setVisible(self._labels_chk.isChecked())
+        self._plot.addItem(ti)
+        self._labels.append(ti)
         n = len(self._profiles)
         self._stat.setText(f"{n} frame{'s' if n != 1 else ''}")
 
@@ -1599,14 +1633,31 @@ class StackedProfileViewer(QtWidgets.QWidget):
         if self._legend is not None:
             self._legend.setVisible(on)
 
+    def _toggle_labels(self, on: bool):
+        for ti in self._labels:
+            ti.setVisible(on)
+
+    def _adjust_linewidth(self, delta: float):
+        self._linewidth = min(8.0, max(0.5, self._linewidth + delta))
+        for i, curve in enumerate(self._curves):
+            curve.setPen(pg.mkPen(_frame_color(i), width=self._linewidth))
+
+    def _adjust_fontsize(self, delta: int):
+        self._fontsize = min(24, max(5, self._fontsize + delta))
+        f = QtGui.QFont(); f.setPointSize(self._fontsize)
+        for ti in self._labels:
+            ti.setFont(f)
+
     # ── internal ─────────────────────────────────────────────────────
 
     def _restack(self, _=None):
-        """Re-apply Y offsets to all existing curves when spacing changes."""
+        """Re-apply Y offsets to all curves + inline labels when spacing changes."""
         spacing = float(self._spacing.value())
         for i, (curve, r, p) in enumerate(
                 zip(self._curves, self._r_axes, self._profiles)):
             curve.setData(r, p + i * spacing)
+            if i < len(self._labels) and r.size:
+                self._labels[i].setPos(float(r[0]), float(p[0] + i * spacing))
         if self._curves:
             self._plot.autoRange()
 

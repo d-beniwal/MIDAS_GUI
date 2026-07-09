@@ -329,10 +329,13 @@ Per-frame geometry interpolated from an anchor JSON (`{frame_idx: {Lsd, BC_y, BC
 with spline/linear/constant parametrization; **Fit trajectory** builds it. Each frame
 is then integrated with its own geometry.
 
-### Run / Abort
+### Run / Abort / Clear
 **Start Integration** / **Abort**. Abort first asks the worker to stop cleanly between
 frames (keeping frames already written); if it does not stop promptly it force-terminates
-and frees the slot. Completed frames' output files are preserved.
+and frees the slot. Completed frames' output files are preserved. **Clear results** removes
+the profiles/plots computed **this session** for the current data (waterfall, stacked
+profiles, and the integrated-frame tracking) so a fresh integration can start — it stops
+any active monitor but does **not** delete raw data or any files already written to disk.
 
 ### Live folder monitoring (MONITOR)
 The **MONITOR** button at the bottom of the left Data Loader panel (folder/glob sources
@@ -350,8 +353,13 @@ profiles by a scalar file.)
 
 ### Output formats
 CSV (R,I,σ) · XYE (2θ) · FXYE (centideg) · DAT (Q) · HDF5 (full stack) · 2D-CSV (η×R
-cake). Right panel: live **Waterfall** and **Stacked profiles** — the latter now shows a
-**legend mapping each curve to its source file** (toggle with the *Legend* checkbox).
+cake). Right panel: live **Waterfall** and **Stacked profiles**.
+
+The **Stacked profiles** view tags each curve with its **source file name inline, just
+below the curve at its left edge**, so lines are easy to identify (toggle with the
+*Labels* checkbox; an optional corner *Legend* is also available). Top-right toolbar
+controls adjust the **line width** (`line −/+`) of all curves and the **label font size**
+(`font A−/A+`); the *spacing* box shifts successive curves vertically (0 = overlay).
 
 ---
 
