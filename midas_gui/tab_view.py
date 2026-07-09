@@ -27,6 +27,8 @@ from midas_gui import style as S
 
 
 class DataViewerTab(QtWidgets.QWidget):
+    pushGeometry = QtCore.pyqtSignal(dict)   # λ/px/Lsd/BC → Calibrate tab
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._cur: Optional[np.ndarray] = None     # current 2-D frame (corrected, for display)
@@ -40,6 +42,16 @@ class DataViewerTab(QtWidgets.QWidget):
 
     def set_mask_from_tab1(self, mask):
         self._loader.set_tab1_mask(mask)
+
+    def get_geometry(self) -> dict:
+        """Current manual geometry — λ (Å), pixel (µm), Lsd (µm), beam centre (px)."""
+        return {
+            "wavelength_A": self._wl.value(),
+            "pxY": self._px.value(),
+            "Lsd": self._lsd.value(),
+            "BC_y": self._bcy.value(),
+            "BC_z": self._bcz.value(),
+        }
 
     # ── UI ────────────────────────────────────────────────────────
 
@@ -181,6 +193,15 @@ class DataViewerTab(QtWidgets.QWidget):
         self._bcy.setEnabled(False); self._bcz.setEnabled(False)
         self._bc_auto.toggled.connect(lambda c: (self._bcy.setEnabled(not c), self._bcz.setEnabled(not c)))
         ring.body.addLayout(S.Form().row(("BC_y:", self._bcy), ("BC_z:", self._bcz)))
+
+        # Send λ / pixel / Lsd / beam-centre to the Calibrate tab (seed values).
+        self._to_calib_btn = QtWidgets.QPushButton("→ Send geometry to Calibrate")
+        self._to_calib_btn.setToolTip(
+            "Copy λ, pixel size, Lsd and beam centre from here into the Calibrate "
+            "tab's detector + seed fields.")
+        self._to_calib_btn.clicked.connect(
+            lambda: self.pushGeometry.emit(self.get_geometry()))
+        ring.body.addWidget(self._to_calib_btn)
 
         ctl = QtWidgets.QHBoxLayout()
         self._show_rings = QtWidgets.QCheckBox("Show rings"); self._show_rings.setChecked(True)

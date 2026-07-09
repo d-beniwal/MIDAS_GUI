@@ -354,26 +354,35 @@ class MaskComputeWorker(QtCore.QThread):
                 frames = [_load_image(p).astype(np.float32) for p in self._stack_paths]
                 stack = np.stack(frames, axis=0)
 
-            # Build median / stack-max for the statistical method
+            # Statistical auto-mask: spatial outlier and temporal constancy are
+            # now independently selectable (either one, or both).
             if stat:
-                if stack is not None:
-                    self.progress.emit("Computing temporal median…")
-                    med = np.median(stack, axis=0); stackmax = stack.max(axis=0)
-                    # Temporal constancy: catches constant-value modules spatial methods miss
-                    frozen_frac = stat.get("frozen_frac", 0.0)
-                    if frozen_frac > 0 and stack.shape[0] >= 2:
+                do_spatial = bool(stat.get("spatial", True))
+                do_temporal = bool(stat.get("temporal", False))
+                # Temporal constancy: catches constant-value modules spatial methods miss
+                if do_temporal:
+                    if stack is not None and stack.shape[0] >= 2:
                         self.progress.emit("Temporal constancy check…")
-                        fmask, finfo = temporal_constancy_mask(stack, frozen_frac)
+                        fmask, finfo = temporal_constancy_mask(
+                            stack, stat.get("frozen_frac", 0.05))
                         combined |= fmask
                         parts.append(finfo)
-                else:
-                    med = self._image; stackmax = self._image
-                self.progress.emit("Statistical outlier detection…")
-                mask, info = spatial_outlier_mask(
-                    med, stackmax, stat["k_sigma"], stat["hot_factor"],
-                    stat["dead_factor"], stat.get("overflow"))
-                combined |= mask
-                parts.append(f"stat({info})")
+                    else:
+                        self.progress.emit(
+                            "[temporal] skipped — needs a stack of ≥2 frames")
+                # Spatial outlier: temporal median if a stack is present, else the frame
+                if do_spatial:
+                    if stack is not None:
+                        self.progress.emit("Computing temporal median…")
+                        med = np.median(stack, axis=0); stackmax = stack.max(axis=0)
+                    else:
+                        med = self._image; stackmax = self._image
+                    self.progress.emit("Statistical spatial-outlier detection…")
+                    mask, info = spatial_outlier_mask(
+                        med, stackmax, stat["k_sigma"], stat["hot_factor"],
+                        stat["dead_factor"], stat.get("overflow"))
+                    combined |= mask
+                    parts.append(f"spatial({info})")
 
             # Cosmic-ray rejection (temporal σ-clip along the frame axis)
             if cosmic_ray:

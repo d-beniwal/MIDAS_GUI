@@ -147,6 +147,16 @@ class MainWindow(QtWidgets.QMainWindow):
                  (self._batch_tab, self._mask_tab, self._corr_tab, self._pdf_tab,
                   self._tex_tab, self._export_tab), "set_calibration")
 
+        # Geometry hand-off between Data Viewer (Tab 0) and Calibrate (Tab 2):
+        #   Data Viewer "→ Send geometry to Calibrate" pushes its values;
+        #   Calibrate "← Data Viewer" pulls them. Both land in Calibrate.apply_geometry.
+        try:
+            self._view_tab.pushGeometry.connect(self._cal_tab.apply_geometry)
+            self._cal_tab.pullGeometry.connect(
+                lambda: self._cal_tab.apply_geometry(self._view_tab.get_geometry()))
+        except Exception:
+            _log(f"Geometry hand-off wiring failed:\n{traceback.format_exc()}")
+
         self.statusBar().showMessage(
             "Tip: mask → calibrate → (refine) → batch integrate")
 

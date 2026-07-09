@@ -31,6 +31,7 @@ from midas_gui import style as S
 
 class CalibrationTab(QtWidgets.QWidget):
     calibrationDone = QtCore.pyqtSignal(object)   # AutoCalibrationResult
+    pullGeometry = QtCore.pyqtSignal()            # request geometry from Data Viewer
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -102,8 +103,14 @@ class CalibrationTab(QtWidgets.QWidget):
             "Load geometry from a MIDAS paramstest (.txt), a calibration .json, "
             "or a pyFAI .poni — sets λ, pixel size, and the seed BC + Lsd.")
         self._load_calib_btn.clicked.connect(self._load_calib_file)
+        self._from_view_btn = QtWidgets.QPushButton("← Data Viewer")
+        self._from_view_btn.setToolTip(
+            "Pull λ, pixel size, Lsd and beam centre from the Data Viewer tab "
+            "into the detector + seed fields here.")
+        self._from_view_btn.clicked.connect(self.pullGeometry.emit)
         _lrow = QtWidgets.QHBoxLayout(); _lrow.setSpacing(4)
-        _lrow.addWidget(self._load_calib_btn); _lrow.addStretch(1)
+        _lrow.addWidget(self._load_calib_btn); _lrow.addWidget(self._from_view_btn)
+        _lrow.addStretch(1)
         det.body.addLayout(_lrow)
         self._wl = _fspin(0.001, 10.0, 5, DEFAULT_WAVELENGTH, "Å")
         self._cal = _NoScrollComboBox(); self._cal.addItems(CALIBRANTS); self._cal.setMaximumWidth(150)
@@ -391,6 +398,28 @@ class CalibrationTab(QtWidgets.QWidget):
             f"Loaded {Path(path).name}: λ={g['wavelength_A']:.5f} Å, px={g['pxY']:.2f} µm, "
             f"BC=({g['BC_y']:.2f}, {g['BC_z']:.2f}), Lsd={g['Lsd']/1000:.3f} mm.")
         self._log.append(f"Calibration file loaded: {path}")
+
+    def apply_geometry(self, g: dict):
+        """Set λ / pixel size / seed BC + Lsd from a geometry dict (Data Viewer)."""
+        if not g:
+            return
+        if g.get("wavelength_A"):
+            self._wl.setValue(float(g["wavelength_A"]))
+        if g.get("pxY"):
+            self._pxY.setValue(float(g["pxY"]))
+        self._manual_seed_check.setChecked(True)
+        if g.get("BC_y") is not None:
+            self._seed_bcy.setValue(float(g["BC_y"]))
+        if g.get("BC_z") is not None:
+            self._seed_bcz.setValue(float(g["BC_z"]))
+        if g.get("Lsd"):
+            self._seed_lsd.setValue(float(g["Lsd"]))
+        self._seed_note.setText(
+            f"Geometry from Data Viewer: λ={g.get('wavelength_A', 0):.5f} Å, "
+            f"px={g.get('pxY', 0):.2f} µm, "
+            f"BC=({g.get('BC_y', 0):.2f}, {g.get('BC_z', 0):.2f}), "
+            f"Lsd={g.get('Lsd', 0)/1000:.3f} mm.")
+        self._log.append("Geometry pulled from Data Viewer tab.")
 
     def _on_bc_picked(self, bc_y, bc_z):
         self._manual_seed_check.setChecked(True)

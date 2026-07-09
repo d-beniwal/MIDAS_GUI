@@ -91,9 +91,16 @@ Each method is described below with its exact algorithm and parameters.
 
 ### 2.1 Statistical auto mask
 
-Implemented in two functions, both OR'd in when the "statistical" method is
-enabled: `spatial_outlier_mask()` (always) and `temporal_constancy_mask()`
-(only if a stack is available and `frozen_frac > 0`).
+Two **independently selectable** components, each backed by its own function and
+each OR'd in only when its checkbox is ticked (either one, or both):
+`spatial_outlier_mask()` (the *Spatial outlier* checkbox) and
+`temporal_constancy_mask()` (the *Temporal constancy* checkbox). The UI passes
+`stat = {"spatial": bool, "temporal": bool, k_sigma, hot_factor, dead_factor,
+frozen_frac, overflow}`; `MaskComputeWorker` runs `spatial_outlier_mask` iff
+`stat["spatial"]`, and `temporal_constancy_mask` iff `stat["temporal"]` (the
+latter additionally needs a stack of ≥2 frames, else it is skipped with a note).
+All σ / K_σ / n_σ fields in the Mask tab are unbounded (max ≈ 1e9), so any
+threshold is accepted.
 
 #### 2.1.1 Spatial outlier detection — `spatial_outlier_mask()`
 
@@ -157,7 +164,8 @@ Parameter: `frozen_frac` (e.g. 0.05 → flag pixels whose temporal std is below 
 of the typical). Requires ≥2 frames; `frozen_frac = 0` disables it.
 
 Together, **statistical auto mask = spatial-outlier (bright/dark/saturated by
-local robust Z) ∪ temporal-constancy (frozen pixels)**.
+local robust Z) and/or temporal-constancy (frozen pixels)** — each toggled
+independently, so you can run either alone or union both.
 
 ### 2.2 Spatial spike rejection
 

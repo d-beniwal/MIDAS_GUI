@@ -169,6 +169,9 @@ Overlays simulated Debye-Scherrer rings to check geometry.
 - Geometry: λ, max 2θ, Lsd, pixel size, and beam centre (auto = image centre, or
   manual BC_y/BC_z).
 - **Show rings / Labels** toggles; **Simulate rings** draws the overlay + hkl table.
+- **→ Send geometry to Calibrate** copies λ, pixel size, Lsd and beam centre into the
+  Calibrate tab's detector + seed fields (the Calibrate tab has a matching
+  **← Data Viewer** button that pulls the same values).
 
 ### Beam-centre picking (on the image)
 The image viewer has **Pick BC** (single click sets the beam centre) and **Pick Ring**
@@ -195,10 +198,17 @@ immediately.
 (e.g. 1,048,575 for uint20 Eiger, 4,294,967,295 for uint32).
 
 ### Section 2 · Statistical auto-mask
-Robust spatial-outlier detection (5×5 median residual → 15×15 local MAD → Z-score →
-hot/dead/saturated gates). Uses a **temporal median** over a stack folder when
-provided (much cleaner reference). Controls: `K_σ` (6.0), `Hot` (1.5), `Dead` (0.5),
-`Frozen` temporal-constancy fraction (0.05, needs ≥2 frames), stack folder + stride.
+Two **independently selectable** methods — enable either or both:
+- **Spatial outlier** — robust local-anomaly detection (5×5 median residual → 15×15
+  local MAD → Z-score → hot/dead/saturated gates). Uses a **temporal median** over the
+  stack folder when provided (cleaner reference), else the single frame. Controls:
+  `K_σ` (6.0), `Hot` (1.5), `Dead` (0.5).
+- **Temporal constancy** — flags frozen pixels whose frame-to-frame std is below
+  `Frozen × Q75(std)` (0.05); needs a stack of ≥2 frames.
+
+A shared **stack folder + stride** feeds both (the temporal median for spatial, the
+frame stack for temporal constancy). *All σ / K_σ / n_σ fields in this tab accept any
+value — there is no upper limit.*
 
 ### Section 3 · Spatial spike rejection
 Laplacian high-pass single-pixel-spike detector; `n_σ` threshold (5.0).
@@ -242,7 +252,8 @@ file…** (top of the Detector card) reads a MIDAS **paramstest `.txt`**, a cali
 **`.json`**, or a pyFAI **`.poni`** (auto-detected) and fills λ, pixel size, and the
 seed BC + Lsd — a fast way to start from a previous calibration or a known geometry.
 (The synthetic test data ships `test_data/calibration_synthetic.{json,txt,poni}` as a
-ready example.)
+ready example.) **← Data Viewer** (next to *Load calibration file…*) pulls λ, pixel
+size, Lsd and beam centre straight from the Data Viewer tab into the same fields.
 
 ### Pipeline selector
 One-shot (default) · First-time · Four-stage · Bayesian (Laplace σ) · Joint-cake.

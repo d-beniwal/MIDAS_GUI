@@ -102,34 +102,58 @@ class MaskTab(QtWidgets.QWidget):
         thr.body.addLayout(S.Form().row(("pixel ≤", self._lower), ("pixel >", self._upper)))
         lv.addWidget(thr)
 
-        # ── 2 · Statistical auto-mask ──
+        # ── 2 · Statistical auto-mask (spatial + temporal, independent) ──
         auto = S.make_card("2 · Statistical auto-mask")
-        self._auto_check = QtWidgets.QCheckBox("Enable  (spatial outlier — numpy/scipy)")
-        self._auto_check.setToolTip(
+        self._spatial_check = QtWidgets.QCheckBox("Spatial outlier  (local robust Z-score)")
+        self._spatial_check.setToolTip(
             "Flags pixels whose local Z-score exceeds K_σ AND whose intensity\n"
-            "passes the hot/dead magnitude gate. No MIDAS geometry required.")
-        auto.body.addWidget(self._auto_check)
+            "passes the hot/dead magnitude gate. Uses the single image, or the\n"
+            "temporal median if a stack is given. No MIDAS geometry required.")
+        self._temporal_check = QtWidgets.QCheckBox("Temporal constancy  (frozen pixels)")
+        self._temporal_check.setToolTip(
+            "Flags pixels whose frame-to-frame std < Frozen × Q75(std):\n"
+            "constant-value regions (dead modules, stuck pixels).\n"
+            "Requires a stack of ≥2 frames.")
+        auto.body.addWidget(self._spatial_check)
+        auto.body.addWidget(self._temporal_check)
+
         self._auto_widget = QtWidgets.QWidget()
         awf = QtWidgets.QVBoxLayout(self._auto_widget); awf.setContentsMargins(0, 0, 0, 0); awf.setSpacing(5)
-        self._k_sigma = _fspin(1.0, 20.0, 1, 6.0)
+        self._k_sigma = _fspin(0.0, 1e9, 1, 6.0)
         self._hot_factor = _fspin(0.1, 10.0, 2, 1.5)
         self._dead_factor = _fspin(0.0, 1.0, 2, 0.5)
         self._frozen_frac = _fspin(0.0, 1.0, 3, 0.05)
         self._frozen_frac.setToolTip(
             "Temporal constancy: flag pixels whose frame-to-frame std < this × Q75(std).\n"
-            "Catches constant-value regions (dead modules, stuck pixels).\n"
-            "0 = disabled. Requires a stack of ≥2 frames.")
-        f1 = S.Form(); f1.row(("K_σ:", self._k_sigma), ("Hot:", self._hot_factor))
-        f1.row(("Dead:", self._dead_factor), ("Frozen:", self._frozen_frac))
-        awf.addLayout(f1)
+            "Catches constant-value regions (dead modules, stuck pixels).")
+        # spatial-only parameters
+        self._spatial_params = QtWidgets.QWidget()
+        spv = QtWidgets.QVBoxLayout(self._spatial_params); spv.setContentsMargins(0, 0, 0, 0); spv.setSpacing(4)
+        sf = S.Form(); sf.row(("K_σ:", self._k_sigma), ("Hot:", self._hot_factor)); sf.row(("Dead:", self._dead_factor))
+        spv.addLayout(sf)
+        awf.addWidget(self._spatial_params)
+        # temporal-only parameter
+        self._temporal_params = QtWidgets.QWidget()
+        tpv = QtWidgets.QVBoxLayout(self._temporal_params); tpv.setContentsMargins(0, 0, 0, 0); tpv.setSpacing(4)
+        tpv.addLayout(S.Form().row(("Frozen:", self._frozen_frac)))
+        awf.addWidget(self._temporal_params)
+        # shared stack source (temporal median for spatial; frame stack for temporal)
         self._stack_ed = QtWidgets.QLineEdit()
         self._stack_ed.setPlaceholderText("stack folder / *.tif  (blank = single image)")
-        awf.addWidget(QtWidgets.QLabel("Stack (optional — temporal median):"))
+        awf.addWidget(QtWidgets.QLabel("Stack (temporal median / temporal constancy):"))
         awf.addLayout(_frow(self._stack_ed, self._browse_stack))
         self._stride_spin = _NoScrollSpinBox(); self._stride_spin.setRange(1, 100); self._stride_spin.setValue(1)
         awf.addLayout(S.Form().row(("Stride:", self._stride_spin)))
         self._auto_widget.setVisible(False)
-        self._auto_check.toggled.connect(self._auto_widget.setVisible)
+
+        def _update_auto_visibility(_=0):
+            sp, tp = self._spatial_check.isChecked(), self._temporal_check.isChecked()
+            self._spatial_params.setVisible(sp)
+            self._temporal_params.setVisible(tp)
+            self._auto_widget.setVisible(sp or tp)
+        self._spatial_check.toggled.connect(_update_auto_visibility)
+        self._temporal_check.toggled.connect(_update_auto_visibility)
+        _update_auto_visibility()
         auto.body.addWidget(self._auto_widget)
         self._stat_prog = QtWidgets.QLabel("")
         self._stat_prog.setStyleSheet("color:#7fb8ff;font-size:10px"); self._stat_prog.setWordWrap(True)
@@ -142,7 +166,7 @@ class MaskTab(QtWidgets.QWidget):
         self._spike_check.setToolTip(
             "Flags isolated single-pixel spikes via a Laplacian high-pass + robust σ.")
         spike.body.addWidget(self._spike_check)
-        self._spike_sigma = _fspin(1.0, 20.0, 1, 5.0)
+        self._spike_sigma = _fspin(0.0, 1e9, 1, 5.0)
         spike.body.addLayout(S.Form().row(("n_σ:", self._spike_sigma)))
         lv.addWidget(spike)
 
@@ -156,7 +180,7 @@ class MaskTab(QtWidgets.QWidget):
             "Requires a stack of ≥3 frames in the same folder as section 2.\n"
             "Uses the stack folder specified in section 2 above.")
         cosmic.body.addWidget(self._cosmic_check)
-        self._cosmic_sigma = _fspin(1.0, 20.0, 1, 5.0)
+        self._cosmic_sigma = _fspin(0.0, 1e9, 1, 5.0)
         self._cosmic_sigma.setToolTip("n_σ threshold — pixels deviating more than\n"
                                       "this many MAD-σ from the temporal median are flagged.")
         cosmic.body.addLayout(S.Form().row(("n_σ:", self._cosmic_sigma)))
@@ -177,7 +201,7 @@ class MaskTab(QtWidgets.QWidget):
         self._geom_group.body.addWidget(self._geom_note)
         self._azim_check = QtWidgets.QCheckBox("Azimuthal σ-clip")
         self._azim_check.setToolTip("Per-(R,η) ring-uniformity outlier clip (needs geometry).")
-        self._azim_sigma = _fspin(1.0, 20.0, 1, 5.0)
+        self._azim_sigma = _fspin(0.0, 1e9, 1, 5.0)
         self._geom_group.body.addLayout(S.Form().row(("Azimuthal n_σ:", self._azim_sigma)))
         self._geom_group.body.addWidget(self._azim_check)
         self._learn_check = QtWidgets.QCheckBox("Learnable mask")
@@ -338,8 +362,10 @@ class MaskTab(QtWidgets.QWidget):
         self._thresh_mask = thresh_mask
 
         methods = {}
-        if self._auto_check.isChecked():
+        if self._spatial_check.isChecked() or self._temporal_check.isChecked():
             methods["stat"] = {
+                "spatial": self._spatial_check.isChecked(),
+                "temporal": self._temporal_check.isChecked(),
                 "k_sigma": self._k_sigma.value(),
                 "hot_factor": self._hot_factor.value(),
                 "dead_factor": self._dead_factor.value(),
