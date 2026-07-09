@@ -285,6 +285,9 @@ class BatchTab(QtWidgets.QWidget):
         fmt = self._fmt.currentData()
         q_cfg = ({"QMin": self._q_min.value(), "QMax": self._q_max.value(),
                   "QBinSize": self._q_bin.value()} if self._q_check.isChecked() else None)
+        self._stack_view.set_axis_context(
+            float(spec.Lsd), float(spec.pxY), float(spec.Wavelength),
+            "Q" if q_cfg else "R")
 
         # Dark / bright / background fields (from the loader)
         for sel in self._loader.has_pending_fields():
@@ -480,6 +483,9 @@ class BatchTab(QtWidgets.QWidget):
             variance_cfg = None
         q_cfg = ({"QMin": self._q_min.value(), "QMax": self._q_max.value(),
                   "QBinSize": self._q_bin.value()} if self._q_check.isChecked() else None)
+        self._stack_view.set_axis_context(
+            float(spec.Lsd), float(spec.pxY), float(spec.Wavelength),
+            "Q" if q_cfg else "R")
         weighted = bool(self._azim.currentData())
         dark = self._loader.dark(); bright = self._loader.bright()
         background = self._loader.background(); bmode = self._loader.bright_mode()

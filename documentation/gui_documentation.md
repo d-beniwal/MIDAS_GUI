@@ -366,11 +366,22 @@ profiles by a scalar file.)
 CSV (R,I,σ) · XYE (2θ) · FXYE (centideg) · DAT (Q) · HDF5 (full stack) · 2D-CSV (η×R
 cake). Right panel: live **Waterfall** and **Stacked profiles**.
 
-The **Stacked profiles** view tags each curve with its **source file name inline, just
-below the curve at its left edge**, so lines are easy to identify (toggle with the
-*Labels* checkbox; an optional corner *Legend* is also available). Top-right toolbar
-controls adjust the **line width** (`line −/+`) of all curves and the **label font size**
-(`font A−/A+`); the *spacing* box shifts successive curves vertically (0 = overlay).
+The **Stacked profiles** view is a publication-quality plot: each curve tags its
+**source file name inline, just below the curve at its left edge** (toggle with the
+*Labels* checkbox; an optional corner *Legend* is also available). A **theme** selector
+switches between two saved presets:
+- **White (publication)** *(default)* — white background, **point + line** markers, a
+  colour-blind-friendly categorical palette (matplotlib *tab10*), a boxed frame and a
+  light grid — ready to drop into a paper.
+- **Dark** — the classic on-screen look (dark background, line-only, vivid
+  golden-angle colours).
+
+An **x** selector plots the axis in **R (px)**, **2θ (°)** or **Q (Å⁻¹)** (converted
+from the run's calibration). The **Grid** checkbox (off by default) toggles the
+horizontal + vertical grid. The *spacing* box shifts successive curves vertically
+(0 = overlay). Top-right controls adjust the **line width** (`− line +`), **symbol
+size** (`− sym +`, for the point+line markers — also turns markers on if a line-only
+theme is active) and **label font size** (`− font +`).
 
 ---
 

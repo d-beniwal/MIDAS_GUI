@@ -1525,6 +1525,22 @@ class StackedProfileViewer(QtWidgets.QWidget):
     all frames for a direct comparison.
     """
 
+    # Publication-quality categorical palette (matplotlib tab10 order) — dark,
+    # print-friendly colours that read well on a white background.
+    _PUB_PALETTE = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e",
+                    "#8c564b", "#e377c2", "#17becf", "#bcbd22", "#7f7f7f"]
+
+    # Two saved plot configurations. "White (publication)" is the default; "Dark"
+    # preserves the original on-screen look.
+    _THEMES = {
+        "White (publication)": dict(
+            bg="white", fg="#111111", grid_alpha=0.20, symbols=True,
+            symbol_size=5, line_width=1.5, box=True, palette="pub"),
+        "Dark": dict(
+            bg="#111111", fg="#c8c8c8", grid_alpha=0.15, symbols=False,
+            symbol_size=5, line_width=1.0, box=False, palette="hue"),
+    }
+
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QtWidgets.QVBoxLayout(self)
@@ -1532,16 +1548,32 @@ class StackedProfileViewer(QtWidgets.QWidget):
 
         # Toolbar
         bar = QtWidgets.QHBoxLayout()
-        bar.addWidget(QtWidgets.QLabel("Stacked profiles  spacing:"))
+        bar.addWidget(QtWidgets.QLabel("spacing:"))
         self._spacing = _NoScrollDoubleSpinBox()
         self._spacing.setRange(0.0, 1e9)
         self._spacing.setValue(500.0)
         self._spacing.setDecimals(0)
         self._spacing.setSingleStep(100.0)
         self._spacing.setSuffix("  cts")
-        self._spacing.setFixedWidth(100)
+        self._spacing.setFixedWidth(90)
         self._spacing.valueChanged.connect(self._restack)
         bar.addWidget(self._spacing)
+        bar.addWidget(QtWidgets.QLabel("x:"))
+        self._xunit_combo = _NoScrollComboBox()
+        self._xunit_combo.addItem("R (px)", "R")
+        self._xunit_combo.addItem("2θ (°)", "2th")
+        self._xunit_combo.addItem("Q (Å⁻¹)", "Q")
+        self._xunit_combo.setToolTip("Plot the x-axis in R (px), 2θ (deg) or Q (Å⁻¹). "
+                                     "Needs the run's calibration for the conversion.")
+        self._xunit_combo.currentIndexChanged.connect(self._on_xunit_changed)
+        bar.addWidget(self._xunit_combo)
+        bar.addWidget(QtWidgets.QLabel("theme:"))
+        self._theme_combo = _NoScrollComboBox()
+        self._theme_combo.addItems(list(self._THEMES.keys()))
+        self._theme_combo.setToolTip("Plot appearance preset "
+                                     "(White = publication point+line, Dark = classic).")
+        self._theme_combo.currentTextChanged.connect(self._apply_theme)
+        bar.addWidget(self._theme_combo)
         self._labels_chk = QtWidgets.QCheckBox("Labels")
         self._labels_chk.setChecked(True)
         self._labels_chk.setToolTip("Show each file's name just below its curve (left edge).")
@@ -1552,38 +1584,63 @@ class StackedProfileViewer(QtWidgets.QWidget):
         self._legend_chk.setToolTip("Show a corner legend mapping each curve to its source file.")
         self._legend_chk.toggled.connect(self._toggle_legend)
         bar.addWidget(self._legend_chk)
+        self._grid_chk = QtWidgets.QCheckBox("Grid")
+        self._grid_chk.setChecked(False)
+        self._grid_chk.setToolTip("Show the horizontal + vertical grid.")
+        self._grid_chk.toggled.connect(self._toggle_grid)
+        bar.addWidget(self._grid_chk)
         bar.addStretch(1)
 
-        # Top-right controls: line width and label font size.
+        # Top-right controls: line width / symbol size / label font, each as
+        # [−] label [+], groups separated by a vertical bar.
         def _tbtn(txt, tip, slot):
             b = QtWidgets.QToolButton(); b.setText(txt); b.setToolTip(tip)
             b.setAutoRaise(True); b.clicked.connect(slot); return b
-        bar.addWidget(QtWidgets.QLabel("line"))
-        bar.addWidget(_tbtn("−", "Thinner lines", lambda: self._adjust_linewidth(-0.5)))
-        bar.addWidget(_tbtn("+", "Thicker lines", lambda: self._adjust_linewidth(0.5)))
-        bar.addWidget(QtWidgets.QLabel(" font"))
-        bar.addWidget(_tbtn("A−", "Smaller labels", lambda: self._adjust_fontsize(-1)))
-        bar.addWidget(_tbtn("A+", "Larger labels", lambda: self._adjust_fontsize(1)))
+
+        def _sep():
+            s = QtWidgets.QLabel("|"); s.setStyleSheet("color:#888;")
+            return s
+
+        def _group(label, tip_minus, on_minus, tip_plus, on_plus):
+            bar.addWidget(_tbtn("−", tip_minus, on_minus))
+            bar.addWidget(QtWidgets.QLabel(label))
+            bar.addWidget(_tbtn("+", tip_plus, on_plus))
+
+        _group("line", "Thinner lines", lambda: self._adjust_linewidth(-0.5),
+               "Thicker lines", lambda: self._adjust_linewidth(0.5))
+        bar.addWidget(_sep())
+        _group("sym", "Smaller symbols", lambda: self._adjust_symbolsize(-1),
+               "Larger symbols", lambda: self._adjust_symbolsize(1))
+        bar.addWidget(_sep())
+        _group("font", "Smaller labels", lambda: self._adjust_fontsize(-1),
+               "Larger labels", lambda: self._adjust_fontsize(1))
         self._stat = QtWidgets.QLabel("")
         self._stat.setStyleSheet("color:#aaa;font-size:10px")
         bar.addWidget(self._stat)
         layout.addLayout(bar)
 
-        self._plot = pg.PlotWidget(background="#111111")
-        self._plot.showGrid(x=True, y=True, alpha=0.15)
-        self._plot.setLabel("bottom", "R (px)")
-        self._plot.setLabel("left", "Intensity + offset")
-        self._legend = self._plot.addLegend(offset=(10, 10),
-                                            labelTextSize="8pt")
-        self._legend.setVisible(False)
-        layout.addWidget(self._plot, stretch=1)
-
-        self._r_axes: list = []
+        self._r_axes: list = []          # native x per curve (R px, or Q if Q-uniform)
         self._profiles: list = []
         self._curves: list = []
         self._labels: list = []          # inline pg.TextItem per curve
-        self._linewidth = 1.0
-        self._fontsize = 8
+        self._fontsize = 9
+        # Axis conversion context (from the run's calibration).
+        self._lsd = self._px = self._wl = None
+        self._native_unit = "R"          # unit the stored x arrays are already in
+
+        self._plot = pg.PlotWidget()
+        self._plot.setLabel("bottom", "R (px)")
+        self._plot.setLabel("left", "Intensity + offset")
+        self._legend = self._plot.addLegend(offset=(10, 10), labelTextSize="8pt")
+        self._legend.setVisible(False)
+        layout.addWidget(self._plot, stretch=1)
+
+        # Default theme = white publication.
+        self._theme = "White (publication)"
+        self._theme_cfg = self._THEMES[self._theme]
+        self._linewidth = self._theme_cfg["line_width"]
+        self._symbol_size = self._theme_cfg["symbol_size"]
+        self._apply_theme(self._theme)
 
     # ── public API ───────────────────────────────────────────────────
 
@@ -1612,22 +1669,123 @@ class StackedProfileViewer(QtWidgets.QWidget):
         i = len(self._profiles)
         self._r_axes.append(r)
         self._profiles.append(p)
-        color = _frame_color(i)
+        color = self._curve_color(i)
         offset = i * float(self._spacing.value())
-        curve = self._plot.plot(r, p + offset,
-                                pen=pg.mkPen(color, width=self._linewidth),
-                                name=(str(label) if label else None))
+        xd = self._x_display(r)
+        curve = self._plot.plot(xd, p + offset, name=(str(label) if label else None))
+        self._style_curve(curve, i)
         self._curves.append(curve)
         # Inline label just below the line's left-most point.
         ti = pg.TextItem(str(label) if label else f"#{i}", color=color, anchor=(0, 0))
         f = QtGui.QFont(); f.setPointSize(self._fontsize); ti.setFont(f)
-        if r.size:
-            ti.setPos(float(r[0]), float(p[0] + offset))
+        if xd.size:
+            ti.setPos(float(xd[0]), float(p[0] + offset))
         ti.setVisible(self._labels_chk.isChecked())
         self._plot.addItem(ti)
         self._labels.append(ti)
         n = len(self._profiles)
         self._stat.setText(f"{n} frame{'s' if n != 1 else ''}")
+
+    # ── x-axis units (R / 2θ / Q) ─────────────────────────────────────
+
+    def set_axis_context(self, lsd_um, px_um, wavelength_A, native_unit="R"):
+        """Provide the run's geometry so the x-axis can be shown in R / 2θ / Q.
+
+        ``native_unit`` is the unit the profiles arrive in ("R" px, or "Q" when
+        Q-uniform binning is active)."""
+        self._lsd, self._px, self._wl = lsd_um, px_um, wavelength_A
+        self._native_unit = native_unit if native_unit in ("R", "Q") else "R"
+        self._restack()
+        self._plot.setLabel("bottom", self._xlabel(),
+                            **{"color": self._theme_cfg["fg"], "font-size": "11pt"})
+
+    def _x_display(self, x_native):
+        """Convert a native x array to the currently-selected unit."""
+        x = np.asarray(x_native, dtype=float)
+        unit = self._xunit_combo.currentData()
+        if unit == self._native_unit or None in (self._lsd, self._px, self._wl):
+            return x
+        lsd, px, wl = float(self._lsd), float(self._px), float(self._wl)
+        # native → 2θ (deg)
+        if self._native_unit == "Q":
+            tth = 2.0 * np.degrees(np.arcsin(np.clip(x * wl / (4 * math.pi), -1, 1)))
+        else:  # R px
+            tth = np.degrees(np.arctan(x * px / lsd))
+        if unit == "2th":
+            return tth
+        if unit == "Q":
+            return 4 * math.pi * np.sin(np.radians(tth) / 2) / wl
+        # unit == "R"
+        return lsd * np.tan(np.radians(tth)) / px
+
+    def _xlabel(self) -> str:
+        return {"R": "R (px)", "2th": "2θ (°)", "Q": "Q (Å⁻¹)"}[
+            self._xunit_combo.currentData()]
+
+    def _on_xunit_changed(self, _=0):
+        self._restack()
+        self._plot.setLabel("bottom", self._xlabel(),
+                            **{"color": self._theme_cfg["fg"], "font-size": "11pt"})
+
+    def _toggle_grid(self, on: bool):
+        self._plot.showGrid(x=on, y=on, alpha=self._theme_cfg["grid_alpha"])
+
+    # ── theme + styling ───────────────────────────────────────────────
+
+    def _curve_color(self, i: int):
+        """Per-curve colour for the active theme."""
+        if self._theme_cfg["palette"] == "pub":
+            return self._PUB_PALETTE[i % len(self._PUB_PALETTE)]
+        return _frame_color(i)
+
+    def _style_curve(self, curve, i: int):
+        """Apply the active theme's pen + point/line style to one curve."""
+        col = self._curve_color(i)
+        curve.setPen(pg.mkPen(col, width=self._linewidth))
+        if self._theme_cfg["symbols"]:
+            curve.setSymbol("o")
+            curve.setSymbolSize(self._symbol_size)
+            curve.setSymbolBrush(pg.mkBrush(col))
+            curve.setSymbolPen(pg.mkPen(col))
+        else:
+            curve.setSymbol(None)
+
+    def _apply_theme(self, name: str):
+        cfg = self._THEMES.get(name)
+        if cfg is None:
+            return
+        self._theme = name
+        self._theme_cfg = cfg
+        self._linewidth = cfg["line_width"]
+        self._symbol_size = cfg["symbol_size"]
+        self._plot.setBackground(cfg["bg"])
+        pen = pg.mkPen(cfg["fg"], width=1)
+        for ax_name in ("bottom", "left", "top", "right"):
+            ax = self._plot.getAxis(ax_name)
+            ax.setPen(pen); ax.setTextPen(pen)
+        # Box frame (all four spines) for the publication theme.
+        self._plot.showAxis("top", cfg["box"]); self._plot.showAxis("right", cfg["box"])
+        if cfg["box"]:
+            for ax_name in ("top", "right"):
+                self._plot.getAxis(ax_name).setStyle(showValues=False)
+        grid_on = self._grid_chk.isChecked()
+        self._plot.showGrid(x=grid_on, y=grid_on, alpha=cfg["grid_alpha"])
+        lbl = {"color": cfg["fg"], "font-size": "11pt"}
+        self._plot.setLabel("bottom", self._xlabel(), **lbl)
+        self._plot.setLabel("left", "Intensity + offset", **lbl)
+        try:
+            self._legend.setLabelTextColor(cfg["fg"])
+        except Exception:
+            pass
+        # Restyle existing curves + inline labels.
+        for i, curve in enumerate(self._curves):
+            self._style_curve(curve, i)
+        for i, ti in enumerate(self._labels):
+            ti.setColor(self._curve_color(i))
+        if self._theme_combo.currentText() != name:
+            self._theme_combo.blockSignals(True)
+            self._theme_combo.setCurrentText(name)
+            self._theme_combo.blockSignals(False)
 
     def _toggle_legend(self, on: bool):
         if self._legend is not None:
@@ -1640,7 +1798,16 @@ class StackedProfileViewer(QtWidgets.QWidget):
     def _adjust_linewidth(self, delta: float):
         self._linewidth = min(8.0, max(0.5, self._linewidth + delta))
         for i, curve in enumerate(self._curves):
-            curve.setPen(pg.mkPen(_frame_color(i), width=self._linewidth))
+            self._style_curve(curve, i)
+
+    def _adjust_symbolsize(self, delta: int):
+        """Grow/shrink the point markers (point+line themes). Also turns markers
+        on if the current theme was line-only, so the control always has effect."""
+        self._symbol_size = min(20, max(1, self._symbol_size + delta))
+        if not self._theme_cfg.get("symbols"):
+            self._theme_cfg = dict(self._theme_cfg, symbols=True)
+        for i, curve in enumerate(self._curves):
+            self._style_curve(curve, i)
 
     def _adjust_fontsize(self, delta: int):
         self._fontsize = min(24, max(5, self._fontsize + delta))
@@ -1651,13 +1818,14 @@ class StackedProfileViewer(QtWidgets.QWidget):
     # ── internal ─────────────────────────────────────────────────────
 
     def _restack(self, _=None):
-        """Re-apply Y offsets to all curves + inline labels when spacing changes."""
+        """Redraw all curves + inline labels (offsets, spacing, x-unit)."""
         spacing = float(self._spacing.value())
         for i, (curve, r, p) in enumerate(
                 zip(self._curves, self._r_axes, self._profiles)):
-            curve.setData(r, p + i * spacing)
-            if i < len(self._labels) and r.size:
-                self._labels[i].setPos(float(r[0]), float(p[0] + i * spacing))
+            xd = self._x_display(r)
+            curve.setData(xd, p + i * spacing)
+            if i < len(self._labels) and xd.size:
+                self._labels[i].setPos(float(xd[0]), float(p[0] + i * spacing))
         if self._curves:
             self._plot.autoRange()
 
