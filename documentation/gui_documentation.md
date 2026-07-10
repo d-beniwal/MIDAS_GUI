@@ -206,9 +206,11 @@ Two **independently selectable** methods — enable either or both:
 - **Temporal constancy** — flags frozen pixels whose frame-to-frame std is below
   `Frozen × Q75(std)` (0.05); needs a stack of ≥2 frames.
 
-A shared **stack folder + stride** feeds both (the temporal median for spatial, the
-frame stack for temporal constancy). *All σ / K_σ / n_σ fields in this tab accept any
-value — there is no upper limit.*
+A shared **stack source + stride** feeds both (the temporal median for spatial, the
+frame stack for temporal constancy). The stack can be a **folder / `*.tif` glob**, or a
+**single HDF5 file whose 3-D dataset is a time sequence of images** — for an `.h5` a
+**Dataset** selector appears (auto-populated, 3-D datasets preferred). *All σ / K_σ /
+n_σ fields in this tab accept any value — there is no upper limit.*
 
 ### Section 3 · Spatial spike rejection
 Laplacian high-pass single-pixel-spike detector; `n_σ` threshold (5.0).
@@ -364,7 +366,9 @@ profiles by a scalar file.)
 
 ### Output formats
 CSV (R,I,σ) · XYE (2θ) · FXYE (centideg) · DAT (Q) · HDF5 (full stack) · 2D-CSV (η×R
-cake). Right panel: live **Waterfall** and **Stacked profiles**.
+cake). Right panel: live **Waterfall** and **Stacked profiles** — both have an **x**
+selector to show the axis in **R (px) / 2θ (°) / Q (Å⁻¹)** (converted from the run's
+calibration).
 
 The **Stacked profiles** view is a publication-quality plot: each curve tags its
 **source file name inline, just below the curve at its left edge** (toggle with the

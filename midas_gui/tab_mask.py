@@ -14,7 +14,8 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
 from midas_gui.constants import _SENTINELS, H5_EXTS, DEFAULT_CALIBRANT_TIF
-from midas_gui.helpers import _load_image, _fspin, _NoScrollSpinBox, _browse, is_h5
+from midas_gui.helpers import (_load_image, _fspin, _NoScrollSpinBox, _browse, is_h5,
+                               _NoScrollComboBox, list_h5_datasets)
 from midas_gui.widgets import ImageViewer
 from midas_gui.workers import MaskComputeWorker
 from midas_gui import style as S
@@ -137,11 +138,32 @@ class MaskTab(QtWidgets.QWidget):
         tpv = QtWidgets.QVBoxLayout(self._temporal_params); tpv.setContentsMargins(0, 0, 0, 0); tpv.setSpacing(4)
         tpv.addLayout(S.Form().row(("Frozen:", self._frozen_frac)))
         awf.addWidget(self._temporal_params)
-        # shared stack source (temporal median for spatial; frame stack for temporal)
+        # Shared stack source (temporal median for spatial; frame stack for temporal).
+        # Accepts a folder / *.tif glob, OR a single HDF5 file whose 3-D dataset is a
+        # time sequence of images.
         self._stack_ed = QtWidgets.QLineEdit()
-        self._stack_ed.setPlaceholderText("stack folder / *.tif  (blank = single image)")
+        self._stack_ed.setPlaceholderText(
+            "folder / *.tif / .h5 (3-D dataset)   (blank = single image)")
+        self._stack_ed.textChanged.connect(self._on_stack_path_changed)
         awf.addWidget(QtWidgets.QLabel("Stack (temporal median / temporal constancy):"))
-        awf.addLayout(_frow(self._stack_ed, self._browse_stack))
+        _sbrowse = QtWidgets.QToolButton(); _sbrowse.setText("⋯"); _sbrowse.setFixedWidth(28)
+        _sbrowse.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        _smenu = QtWidgets.QMenu(_sbrowse)
+        _smenu.addAction("Folder…", self._browse_stack_folder)
+        _smenu.addAction("File (TIFF / HDF5)…", self._browse_stack_file)
+        _sbrowse.setMenu(_smenu)
+        _srow = QtWidgets.QHBoxLayout(); _srow.setSpacing(4)
+        _srow.addWidget(self._stack_ed); _srow.addWidget(_sbrowse)
+        awf.addLayout(_srow)
+        # HDF5 dataset selector — shown only for a single .h5 file.
+        self._stack_ds_row = QtWidgets.QWidget()
+        _dsl = QtWidgets.QHBoxLayout(self._stack_ds_row)
+        _dsl.setContentsMargins(0, 0, 0, 0); _dsl.setSpacing(4)
+        self._stack_ds_combo = _NoScrollComboBox(); self._stack_ds_combo.setEditable(True)
+        self._stack_ds_combo.setEditText("exchange/data")
+        _dsl.addWidget(QtWidgets.QLabel("Dataset:")); _dsl.addWidget(self._stack_ds_combo, 1)
+        self._stack_ds_row.setVisible(False)
+        awf.addWidget(self._stack_ds_row)
         self._stride_spin = _NoScrollSpinBox(); self._stride_spin.setRange(1, 100); self._stride_spin.setValue(1)
         awf.addLayout(S.Form().row(("Stride:", self._stride_spin)))
         self._auto_widget.setVisible(False)
@@ -319,9 +341,39 @@ class MaskTab(QtWidgets.QWidget):
         p = _browse(self, "Open Mask", "TIFF (*.tif *.tiff);;All (*)")
         if p: self._load_mask_edit.setText(p); self._load_existing_mask()
 
-    def _browse_stack(self):
+    def _browse_stack_folder(self):
         d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select stack folder")
         if d: self._stack_ed.setText(d)
+
+    def _browse_stack_file(self):
+        p = _browse(self, "Select stack file (TIFF stack or HDF5)",
+                    "Stacks (*.h5 *.hdf5 *.nxs *.tif *.tiff);;All (*)")
+        if p: self._stack_ed.setText(p)
+
+    def _on_stack_path_changed(self, txt: str):
+        """Show the dataset selector + list datasets when the stack is an HDF5 file."""
+        h5 = is_h5(txt) and Path(txt).is_file()
+        self._stack_ds_row.setVisible(h5)
+        if not h5:
+            return
+        try:
+            items = list_h5_datasets(txt)
+        except Exception:
+            items = []
+        if not items:
+            return
+        keep = self._stack_ds_combo.currentText().split("   ")[0].strip()
+        self._stack_ds_combo.blockSignals(True)
+        self._stack_ds_combo.clear()
+        for name, shape in items:
+            self._stack_ds_combo.addItem(f"{name}   {tuple(shape)}", name)
+        # prefer a 3-D dataset (time sequence); keep the prior choice if still present
+        idx = next((i for i, (n, s) in enumerate(items) if len(s) >= 3), 0)
+        for i in range(self._stack_ds_combo.count()):
+            if self._stack_ds_combo.itemData(i) == keep:
+                idx = i; break
+        self._stack_ds_combo.setCurrentIndex(idx)
+        self._stack_ds_combo.blockSignals(False)
 
     def _load_image(self):
         path = self._img_edit.text().strip()
@@ -388,14 +440,27 @@ class MaskTab(QtWidgets.QWidget):
             self._set_mask(thresh_mask); return
 
         self._stat_prog.setText("Computing mask…")
+        stack_paths, stack_hdf5 = self._stack_source()
         self._mask_worker = MaskComputeWorker(
             self._image, thresh_mask, methods,
-            stack_paths=self._collect_stack_paths(),
+            stack_paths=stack_paths, stack_hdf5=stack_hdf5,
             calib_result=self._calib_result, parent=self)
         self._mask_worker.progress.connect(self._stat_prog.setText)
         self._mask_worker.finished.connect(self._on_mask_done)
         self._mask_worker.failed.connect(self._on_stat_fail)
         self._mask_worker.start()
+
+    def _stack_source(self):
+        """Resolve the stack source → (paths_list, hdf5_tuple).
+
+        A single HDF5 file with a 3-D dataset returns ``([], (path, dataset, stride))``;
+        a folder / glob / TIFF returns ``(paths_list, None)`` (each file = one frame)."""
+        raw = self._stack_ed.text().strip()
+        stride = max(1, self._stride_spin.value())
+        if raw and is_h5(raw) and Path(raw).is_file():
+            dset = self._stack_ds_combo.currentText().split("   ")[0].strip() or "exchange/data"
+            return [], (raw, dset, stride)
+        return self._collect_stack_paths(), None
 
     def _collect_stack_paths(self) -> list:
         raw = self._stack_ed.text().strip()

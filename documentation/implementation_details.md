@@ -85,7 +85,13 @@ combined |= learnable_mask          (needs geometry; trained)
 
 A method contributes only if enabled; the geometry-based ones additionally
 require a calibration result. Temporal methods (statistical median, cosmic-ray)
-load the frame **stack** once (`_load_image` over `stack_paths`) and share it.
+load the frame **stack** once and share it. The stack source is either a set of
+frame files (`_load_image` over `stack_paths`, one image per file) **or a single
+HDF5 file whose 3-D `(time, y, x)` dataset is the sequence** — passed as
+`stack_hdf5 = (path, dataset, stride)` and read with `f[dataset][::stride]`
+(strided slicing, so large sequences aren't fully materialised). The Mask tab's
+stack field takes a folder / `*.tif` glob or an `.h5` file; for `.h5` a **Dataset**
+selector appears (auto-populated from the file, 3-D datasets preferred).
 
 Each method is described below with its exact algorithm and parameters.
 
@@ -161,7 +167,9 @@ Algorithm:
    typical is flagged.
 
 Parameter: `frozen_frac` (e.g. 0.05 → flag pixels whose temporal std is below 5 %
-of the typical). Requires ≥2 frames; `frozen_frac = 0` disables it.
+of the typical). Requires ≥2 frames; `frozen_frac = 0` disables it. The frame
+stack may come from a folder of images **or from a single HDF5 file with a 3-D
+`(time, y, x)` dataset** (see the orchestration note above).
 
 Together, **statistical auto mask = spatial-outlier (bright/dark/saturated by
 local robust Z) and/or temporal-constancy (frozen pixels)** — each toggled

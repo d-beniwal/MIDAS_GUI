@@ -330,12 +330,13 @@ class MaskComputeWorker(QtCore.QThread):
     failed   = QtCore.pyqtSignal(str)
 
     def __init__(self, image, base_mask, methods, *, stack_paths=None,
-                 calib_result=None, parent=None):
+                 stack_hdf5=None, calib_result=None, parent=None):
         super().__init__(parent)
         self._image = image
         self._base = base_mask
         self._methods = methods          # dict of {name: params or False}
         self._stack_paths = stack_paths
+        self._stack_hdf5 = stack_hdf5    # (path, dataset, stride) for a 3-D HDF5 stack
         self._result = calib_result
 
     def run(self):
@@ -347,12 +348,33 @@ class MaskComputeWorker(QtCore.QThread):
 
             stat = self._methods.get("stat")
             cosmic_ray = self._methods.get("cosmic_ray")
-            # Load the frame stack once if any temporal method needs it
+            # Load the frame stack once if any temporal method needs it — either a
+            # single HDF5 file with a 3-D (time, y, x) dataset, or a set of frame files.
             stack = None
-            if (stat or cosmic_ray) and self._stack_paths:
-                self.progress.emit(f"Loading {len(self._stack_paths)} frames…")
-                frames = [_load_image(p).astype(np.float32) for p in self._stack_paths]
-                stack = np.stack(frames, axis=0)
+            if stat or cosmic_ray:
+                if self._stack_hdf5:
+                    import h5py
+                    path, dset, stride = self._stack_hdf5
+                    stride = max(1, int(stride))
+                    self.progress.emit(f"Loading HDF5 stack '{dset}' (stride {stride})…")
+                    with h5py.File(path, "r") as f:
+                        if dset not in f:
+                            raise KeyError(f"dataset '{dset}' not in {path}")
+                        ds = f[dset]
+                        if ds.ndim == 3:
+                            stack = np.asarray(ds[::stride], dtype=np.float32)
+                        elif ds.ndim == 2:
+                            stack = np.asarray(ds[()], dtype=np.float32)[None, ...]
+                        else:
+                            raise ValueError(
+                                f"HDF5 dataset '{dset}' is {ds.ndim}-D; need a 2-D image "
+                                "or a 3-D (time, y, x) sequence.")
+                    self.progress.emit(f"HDF5 stack: {stack.shape[0]} frame(s) "
+                                       f"of {stack.shape[1]}×{stack.shape[2]}")
+                elif self._stack_paths:
+                    self.progress.emit(f"Loading {len(self._stack_paths)} frames…")
+                    frames = [_load_image(p).astype(np.float32) for p in self._stack_paths]
+                    stack = np.stack(frames, axis=0)
 
             # Statistical auto-mask: spatial outlier and temporal constancy are
             # now independently selectable (either one, or both).

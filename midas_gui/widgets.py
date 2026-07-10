@@ -1422,11 +1422,58 @@ class LossCurveViewer(QtWidgets.QWidget):
         self._curve.setData(self._xs, self._ys)
 
 
+def _convert_radial(x, lsd, px, wl, native, target):
+    """Convert a radial axis between R (px), 2θ (deg) and Q (Å⁻¹).
+
+    ``native`` is the unit ``x`` is already in ("R" or "Q"); returns ``x`` unchanged
+    if the target matches or the geometry (lsd/px/wl) is missing.
+    """
+    x = np.asarray(x, dtype=float)
+    if target == native or None in (lsd, px, wl):
+        return x
+    lsd, px, wl = float(lsd), float(px), float(wl)
+    if native == "Q":
+        tth = 2.0 * np.degrees(np.arcsin(np.clip(x * wl / (4 * math.pi), -1, 1)))
+    else:  # R px
+        tth = np.degrees(np.arctan(x * px / lsd))
+    if target == "2th":
+        return tth
+    if target == "Q":
+        return 4 * math.pi * np.sin(np.radians(tth) / 2) / wl
+    return lsd * np.tan(np.radians(tth)) / px   # target == "R"
+
+
+_XUNIT_LABEL = {"R": "R (px)", "2th": "2θ (°)", "Q": "Q (Å⁻¹)"}
+
+
+class _UnitAxis(pg.AxisItem):
+    """Bottom axis that relabels R-pixel tick positions in a chosen radial unit.
+
+    The image/curves stay in their native coordinates; only the tick *labels* are
+    converted, so the axis is exact (no resampling) even for a nonlinear unit."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self._convert = None
+
+    def set_convert(self, fn):
+        self._convert = fn
+        self.picture = None
+        self.update()
+
+    def tickStrings(self, values, scale, spacing):
+        if self._convert is None or not len(values):
+            return super().tickStrings(values, scale, spacing)
+        conv = self._convert(np.asarray(values, dtype=float))
+        return [f"{v:.4g}" for v in conv]
+
+
 class WaterfallViewer(QtWidgets.QWidget):
     """2-D waterfall of 1-D profiles: x = R (px), y = frame index, colour = intensity.
 
     Rows are appended incrementally as frames are integrated, so the user watches
-    every frame's radial integration stack up live.
+    every frame's radial integration stack up live.  The x-axis can be shown in
+    R / 2θ / Q (tick labels converted from the run's calibration).
     """
 
     def __init__(self, parent=None):
@@ -1442,12 +1489,22 @@ class WaterfallViewer(QtWidgets.QWidget):
         self._log = QtWidgets.QCheckBox("Log"); self._log.setChecked(True)
         self._log.toggled.connect(self._redraw)
         bar.addWidget(self._log)
+        bar.addWidget(QtWidgets.QLabel("  x:"))
+        self._xunit_combo = _NoScrollComboBox()
+        self._xunit_combo.addItem("R (px)", "R")
+        self._xunit_combo.addItem("2θ (°)", "2th")
+        self._xunit_combo.addItem("Q (Å⁻¹)", "Q")
+        self._xunit_combo.setToolTip("Label the x-axis in R (px), 2θ (deg) or Q (Å⁻¹). "
+                                     "Needs the run's calibration for the conversion.")
+        self._xunit_combo.currentIndexChanged.connect(self._on_xunit_changed)
+        bar.addWidget(self._xunit_combo)
         bar.addStretch(1)
         self._stat = QtWidgets.QLabel(""); self._stat.setStyleSheet("color:#aaa;font-size:10px")
         bar.addWidget(self._stat)
         layout.addLayout(bar)
 
-        self._plot = pg.PlotWidget(background="k")
+        self._xaxis = _UnitAxis(orientation="bottom")
+        self._plot = pg.PlotWidget(background="k", axisItems={"bottom": self._xaxis})
         self._plot.setLabel("left", "frame #")
         self._plot.setLabel("bottom", "R (px)")
         self._img = pg.ImageItem()
@@ -1456,7 +1513,28 @@ class WaterfallViewer(QtWidgets.QWidget):
 
         self._rows: list = []
         self._r_axis = None
+        # Axis conversion context (from the run's calibration).
+        self._lsd = self._px = self._wl = None
+        self._native_unit = "R"
         self._apply_cmap(COLORMAPS[0])
+
+    # ── x-axis units (R / 2θ / Q) ─────────────────────────────────────
+
+    def set_axis_context(self, lsd_um, px_um, wavelength_A, native_unit="R"):
+        """Provide the run's geometry so the x-axis can be labelled in R / 2θ / Q."""
+        self._lsd, self._px, self._wl = lsd_um, px_um, wavelength_A
+        self._native_unit = native_unit if native_unit in ("R", "Q") else "R"
+        self._refresh_xaxis()
+
+    def _refresh_xaxis(self):
+        target = self._xunit_combo.currentData()
+        self._xaxis.set_convert(
+            lambda vals: _convert_radial(vals, self._lsd, self._px, self._wl,
+                                         self._native_unit, target))
+        self._plot.setLabel("bottom", _XUNIT_LABEL[target])
+
+    def _on_xunit_changed(self, _=0):
+        self._refresh_xaxis()
 
     def reset(self, r_axis=None):
         """Start a new scan (r_axis = radial bin-centre array in px), or clear
@@ -1701,26 +1779,11 @@ class StackedProfileViewer(QtWidgets.QWidget):
 
     def _x_display(self, x_native):
         """Convert a native x array to the currently-selected unit."""
-        x = np.asarray(x_native, dtype=float)
-        unit = self._xunit_combo.currentData()
-        if unit == self._native_unit or None in (self._lsd, self._px, self._wl):
-            return x
-        lsd, px, wl = float(self._lsd), float(self._px), float(self._wl)
-        # native → 2θ (deg)
-        if self._native_unit == "Q":
-            tth = 2.0 * np.degrees(np.arcsin(np.clip(x * wl / (4 * math.pi), -1, 1)))
-        else:  # R px
-            tth = np.degrees(np.arctan(x * px / lsd))
-        if unit == "2th":
-            return tth
-        if unit == "Q":
-            return 4 * math.pi * np.sin(np.radians(tth) / 2) / wl
-        # unit == "R"
-        return lsd * np.tan(np.radians(tth)) / px
+        return _convert_radial(x_native, self._lsd, self._px, self._wl,
+                               self._native_unit, self._xunit_combo.currentData())
 
     def _xlabel(self) -> str:
-        return {"R": "R (px)", "2th": "2θ (°)", "Q": "Q (Å⁻¹)"}[
-            self._xunit_combo.currentData()]
+        return _XUNIT_LABEL[self._xunit_combo.currentData()]
 
     def _on_xunit_changed(self, _=0):
         self._restack()
