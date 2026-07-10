@@ -573,6 +573,34 @@ def _fspin(lo, hi, dec, val, suf=""):
     return s
 
 
+def make_kedge_label(wl_spin, text="λ:", parent=None):
+    """A clickable, form-label-sized 'λ' that pops a K-edge foil menu.
+
+    Occupies the same space as the ordinary field label (no extra widget), and
+    selecting an entry sets ``wl_spin`` to that element's K-edge wavelength.
+    """
+    from PyQt5 import QtWidgets, QtGui
+    from midas_gui.constants import K_EDGE_FOILS, HC_KEV_A
+    btn = QtWidgets.QToolButton(parent)
+    btn.setText(text)
+    btn.setAutoRaise(True)
+    btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+    btn.setToolTip("Click to set λ from a common K-edge foil energy.")
+    btn.setCursor(QtCore.Qt.PointingHandCursor)
+    btn.setStyleSheet(
+        "QToolButton { border: none; padding: 0 2px; color: #4da3ff; }"
+        "QToolButton::menu-indicator { image: none; }")
+    f = btn.font(); f.setUnderline(True); btn.setFont(f)
+    menu = QtWidgets.QMenu(btn)
+    for sym, keV in K_EDGE_FOILS:
+        lam = HC_KEV_A / keV
+        act = menu.addAction(f"{sym}   {keV:.2f} keV · {lam:.5f} Å")
+        act.triggered.connect(
+            lambda _checked=False, l=lam: wl_spin.setValue(float(l)))
+    btn.setMenu(menu)
+    return btn
+
+
 # ── Layout helpers ──────────────────────────────────────────────────────────────
 
 def _twocol(lbl1, w1, lbl2, w2):

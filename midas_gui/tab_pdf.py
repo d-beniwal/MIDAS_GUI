@@ -15,7 +15,8 @@ import numpy as np
 from PyQt5 import QtCore, QtWidgets
 import pyqtgraph as pg
 
-from midas_gui.helpers import _load_image, _fspin, _twocol, _browse, is_h5, _NoScrollComboBox
+from midas_gui.helpers import (_load_image, _fspin, _twocol, _browse, is_h5,
+                               _NoScrollComboBox, make_kedge_label)
 from midas_gui.constants import DEFAULT_NICKEL_FRAME0, DEFAULT_PDF_IQ_FILE
 from midas_gui.widgets import LogPanel
 from midas_gui.workers import PDFWorker
@@ -146,7 +147,8 @@ class PDFTab(QtWidgets.QWidget):
                               "(needed for refine and g/T/R).")
         self._wl = _fspin(0.0, 5.0, 5, 0.1839)
         self._wl.setToolTip("X-ray wavelength (Å). Auto-filled from Tab 2 calibration.")
-        sf.addRow(_twocol("ρ₀ (at/Å³):", self._rho0, "λ (Å):", self._wl))
+        sf.addRow(_twocol("ρ₀ (at/Å³):", self._rho0,
+                          make_kedge_label(self._wl, "λ (Å):"), self._wl))
         self._compton = QtWidgets.QCheckBox("Subtract Compton (incoherent) scattering")
         self._compton.setChecked(True)
         sf.addRow(self._compton)

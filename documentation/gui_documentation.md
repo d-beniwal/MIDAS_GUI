@@ -167,7 +167,10 @@ Overlays simulated Debye-Scherrer rings to check geometry.
   crystals (b, c mirror a; angles fixed at 90°). Lattice fields are editable only for
   Custom.
 - Geometry: λ, max 2θ, Lsd, pixel size, and beam centre (auto = image centre, or
-  manual BC_y/BC_z).
+  manual BC_y/BC_z). The **λ** label is clickable (underlined) — click it for a
+  menu of common K-edge foils (Pr, Sm, Yb, Lu, Hf, Ta, W, Re, Pt, Au, Pb, Bi) that
+  sets λ to that element's K absorption-edge wavelength. The same clickable-λ menu
+  is on the Calibrate and PDF tabs.
 - **Show rings / Labels** toggles; **Simulate rings** draws the overlay + hkl table.
 - **→ Send geometry to Calibrate** copies λ, pixel size, Lsd and beam centre into the
   Calibrate tab's detector + seed fields (the Calibrate tab has a matching

@@ -20,7 +20,8 @@ from midas_gui.constants import (
     CALIBRANTS, PIPELINES, _SG, _LC, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM,
     DEFAULT_LSD_UM, DEFAULT_BC_Y, DEFAULT_BC_Z, DEFAULT_CALIBRANT_TIF)
 from midas_gui.helpers import (
-    _fspin, _NoScrollSpinBox, _predict_ring_radii, _NoScrollComboBox)
+    _fspin, _NoScrollSpinBox, _predict_ring_radii, _NoScrollComboBox,
+    make_kedge_label)
 from midas_gui.widgets import (
     PickableImageViewer, ProfileViewer, LogPanel, ResidualBarChart, DistortionTable,
     DataLoaderPanel)
@@ -114,7 +115,8 @@ class CalibrationTab(QtWidgets.QWidget):
         det.body.addLayout(_lrow)
         self._wl = _fspin(0.001, 10.0, 5, DEFAULT_WAVELENGTH, "Å")
         self._cal = _NoScrollComboBox(); self._cal.addItems(CALIBRANTS); self._cal.setMaximumWidth(150)
-        det.body.addLayout(S.Form().row(("λ:", self._wl), ("Calibrant:", self._cal)))
+        det.body.addLayout(S.Form().row(
+            (make_kedge_label(self._wl, "λ:"), self._wl), ("Calibrant:", self._cal)))
         self._pxY = _fspin(1.0, 5000.0, 2, DEFAULT_PIXEL_UM, "µm")
         self._pxZ_check = QtWidgets.QCheckBox("pxZ")
         self._pxZ_spin = _fspin(1.0, 5000.0, 2, DEFAULT_PIXEL_UM, "µm"); self._pxZ_spin.setEnabled(False)

@@ -88,6 +88,18 @@ DEFAULT_LSD_UM     = 121_000.0 # µm
 DEFAULT_BC_Y       = 10.0      # px (test data beam centre)
 DEFAULT_BC_Z       = 10.0      # px
 
+# Photon energy ↔ wavelength: λ(Å) = HC_KEV_A / E(keV)
+HC_KEV_A = 12.398420
+
+# Common K-edge foil energies (element symbol, K absorption-edge energy in keV).
+# Selecting one sets the wavelength to the edge (λ = HC_KEV_A / E). Ordered by
+# increasing energy / decreasing wavelength.
+K_EDGE_FOILS = [
+    ("Pr", 41.991), ("Sm", 46.834), ("Yb", 61.332), ("Lu", 63.314),
+    ("Hf", 65.351), ("Ta", 67.416), ("W", 69.525),  ("Re", 71.676),
+    ("Pt", 78.395), ("Au", 80.725), ("Pb", 88.005), ("Bi", 90.526),
+]
+
 # ── Default test-data paths (repo-root test_data/, git-ignored) ─────────────────
 from pathlib import Path as _Path
 _TEST_DATA = _Path(__file__).resolve().parent.parent / "test_data"
