@@ -21,7 +21,7 @@ from midas_gui.constants import (
     DEFAULT_LSD_UM, DEFAULT_BC_Y, DEFAULT_BC_Z, DEFAULT_CALIBRANT_TIF)
 from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _predict_ring_radii, _NoScrollComboBox,
-    make_kedge_label)
+    make_kedge_label, make_pixel_label)
 from midas_gui.widgets import (
     PickableImageViewer, ProfileViewer, LogPanel, ResidualBarChart, DistortionTable,
     DataLoaderPanel)
@@ -123,7 +123,8 @@ class CalibrationTab(QtWidgets.QWidget):
         self._pxZ_check.toggled.connect(self._pxZ_spin.setEnabled)
         prow = QtWidgets.QHBoxLayout(); prow.setSpacing(4)
         prow.addWidget(self._pxY, 1); prow.addWidget(self._pxZ_check); prow.addWidget(self._pxZ_spin, 1)
-        det.body.addLayout(S.Form().row(("Pixel:", prow)))
+        det.body.addLayout(S.Form().row(
+            (make_pixel_label(self._pxY, "Pixel:", also=self._pxZ_spin), prow)))
         self._flip_y = QtWidgets.QCheckBox("Flip Y"); self._flip_z = QtWidgets.QCheckBox("Flip Z")
         self._transp = QtWidgets.QCheckBox("Transpose")
         tb2 = QtWidgets.QHBoxLayout(); tb2.setSpacing(8)

@@ -173,7 +173,9 @@ Overlays simulated Debye-Scherrer rings to check geometry.
   manual BC_y/BC_z). The **λ** label is clickable (underlined) — click it for a
   menu of common K-edge foils (Pr, Sm, Yb, Lu, Hf, Ta, W, Re, Pt, Au, Pb, Bi) that
   sets λ to that element's K absorption-edge wavelength. The same clickable-λ menu
-  is on the Calibrate and PDF tabs.
+  is on the Calibrate and PDF tabs. The **px** label is likewise clickable — a menu
+  of common detectors (GE 200 µm, Varex 150 µm, Pilatus 172 µm, Eiger 75 µm) sets
+  the pixel size (also on the Calibrate tab, where it sets both pxY and pxZ).
 - **Show rings / Labels** toggles; **Simulate rings** draws the overlay + hkl table.
 - **→ Send geometry to Calibrate** copies λ, pixel size, Lsd and beam centre into the
   Calibrate tab's detector + seed fields (the Calibrate tab has a matching

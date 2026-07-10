@@ -22,7 +22,7 @@ from midas_gui.constants import (MATERIALS, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM
                            DEFAULT_NICKEL_H5)
 from midas_gui.helpers import (_fspin, _NoScrollSpinBox, _browse,
                          simulate_rings, read_geometry, _NoScrollComboBox,
-                         make_kedge_label)
+                         make_kedge_label, make_pixel_label)
 from midas_gui.widgets import PickableImageViewer, ProfileViewer, DataLoaderPanel
 from midas_gui import style as S
 
@@ -201,7 +201,7 @@ class DataViewerTab(QtWidgets.QWidget):
         self._max2t = _fspin(1.0, 90.0, 1, 25.0, "°")
         geo = S.Form()
         geo.row((make_kedge_label(self._wl, "λ:"), self._wl), ("max 2θ:", self._max2t))
-        geo.row(("Lsd:", self._lsd), ("px:", self._px))
+        geo.row(("Lsd:", self._lsd), (make_pixel_label(self._px, "px:"), self._px))
         ring.body.addLayout(geo)
 
         self._bc_auto = QtWidgets.QCheckBox("Beam centre = image centre"); self._bc_auto.setChecked(True)

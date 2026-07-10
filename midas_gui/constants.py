@@ -91,6 +91,11 @@ DEFAULT_BC_Z       = 10.0      # px
 # Photon energy ↔ wavelength: λ(Å) = HC_KEV_A / E(keV)
 HC_KEV_A = 12.398420
 
+# Common detector pixel sizes (label, pixel size in µm) for the clickable "px" menu.
+PIXEL_PRESETS = [
+    ("GE", 200.0), ("Varex", 150.0), ("Pilatus", 172.0), ("Eiger", 75.0),
+]
+
 # Common K-edge foil energies (element symbol, K absorption-edge energy in keV).
 # Selecting one sets the wavelength to the edge (λ = HC_KEV_A / E). Ordered by
 # increasing energy / decreasing wavelength.

@@ -573,31 +573,58 @@ def _fspin(lo, hi, dec, val, suf=""):
     return s
 
 
-def make_kedge_label(wl_spin, text="λ:", parent=None):
-    """A clickable, form-label-sized 'λ' that pops a K-edge foil menu.
+def _clickable_menu_label(text, entries, parent=None):
+    """A clickable, form-label-sized widget with a popup menu.
 
-    Occupies the same space as the ordinary field label (no extra widget), and
-    selecting an entry sets ``wl_spin`` to that element's K-edge wavelength.
+    Looks like a field label (underlined, accent colour) but occupies the same
+    space and pops a menu on click. ``entries`` is a list of ``(label, callback)``;
+    the callback runs when its item is chosen.
     """
-    from PyQt5 import QtWidgets, QtGui
-    from midas_gui.constants import K_EDGE_FOILS, HC_KEV_A
+    from PyQt5 import QtWidgets
     btn = QtWidgets.QToolButton(parent)
     btn.setText(text)
     btn.setAutoRaise(True)
     btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
-    btn.setToolTip("Click to set λ from a common K-edge foil energy.")
     btn.setCursor(QtCore.Qt.PointingHandCursor)
     btn.setStyleSheet(
         "QToolButton { border: none; padding: 0 2px; color: #4da3ff; }"
         "QToolButton::menu-indicator { image: none; }")
     f = btn.font(); f.setUnderline(True); btn.setFont(f)
     menu = QtWidgets.QMenu(btn)
-    for sym, keV in K_EDGE_FOILS:
-        lam = HC_KEV_A / keV
-        act = menu.addAction(f"{sym}   {keV:.2f} keV · {lam:.5f} Å")
-        act.triggered.connect(
-            lambda _checked=False, l=lam: wl_spin.setValue(float(l)))
+    for label, cb in entries:
+        act = menu.addAction(label)
+        act.triggered.connect(lambda _checked=False, c=cb: c())
     btn.setMenu(menu)
+    return btn
+
+
+def make_kedge_label(wl_spin, text="λ:", parent=None):
+    """A clickable 'λ' label that pops a K-edge foil menu; selecting an entry sets
+    ``wl_spin`` to that element's K-edge wavelength."""
+    from midas_gui.constants import K_EDGE_FOILS, HC_KEV_A
+    entries = [(f"{sym}   {keV:.2f} keV · {HC_KEV_A / keV:.5f} Å",
+                (lambda l=HC_KEV_A / keV: wl_spin.setValue(float(l))))
+               for sym, keV in K_EDGE_FOILS]
+    btn = _clickable_menu_label(text, entries, parent)
+    btn.setToolTip("Click to set λ from a common K-edge foil energy.")
+    return btn
+
+
+def make_pixel_label(px_spin, text="px:", also=None, parent=None):
+    """A clickable pixel-size label that pops a common-detector menu; selecting an
+    entry sets ``px_spin`` (and ``also``, if given) to that detector's pixel size."""
+    from midas_gui.constants import PIXEL_PRESETS
+
+    def _setter(um):
+        def _apply():
+            px_spin.setValue(float(um))
+            if also is not None:
+                also.setValue(float(um))
+        return _apply
+
+    entries = [(f"{name}  ({um:g} µm)", _setter(um)) for name, um in PIXEL_PRESETS]
+    btn = _clickable_menu_label(text, entries, parent)
+    btn.setToolTip("Click to set the pixel size from a common detector.")
     return btn
 
 
