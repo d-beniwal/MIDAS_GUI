@@ -146,6 +146,9 @@ and the composite mask are applied to the displayed image and to the radial inte
 ### Projection card
 Collapse a stack to one image: **Max** (hot-pixel hunting), **Sum** (long-exposure
 equivalent), or **Average** (noise reduction), along a chosen axis (0 = across frames).
+**Skip frames** (default 1) ignores that many leading frames before projecting (e.g. 1
+drops the first frame, 4 drops the first four) — useful when the opening frames are
+detector warm-up / shutter-transient exposures.
 
 ### Calibration card (optional)
 Load geometry from a **calibration `.json`, a MIDAS `paramstest.txt`, or a pyFAI

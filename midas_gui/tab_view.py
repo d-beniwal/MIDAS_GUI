@@ -100,7 +100,14 @@ class DataViewerTab(QtWidgets.QWidget):
         self._proj_grp.body.addLayout(m_row)
         self._proj_axis = _NoScrollSpinBox(); self._proj_axis.setRange(0, 5); self._proj_axis.setValue(0)
         self._proj_axis.setToolTip("Axis to collapse. 0 = across the stack of frames.")
-        ax = S.Form(); ax.row(("Axis (0=frames):", self._proj_axis))
+        self._proj_axis.setFixedWidth(56)
+        self._proj_skip = _NoScrollSpinBox(); self._proj_skip.setRange(0, 1000000); self._proj_skip.setValue(1)
+        self._proj_skip.setFixedWidth(72)
+        self._proj_skip.setToolTip(
+            "Ignore this many leading frames before projecting\n"
+            "(1 = skip the first frame, 4 = skip the first four).")
+        ax = S.Form()
+        ax.row(("Axis (0=frames):", self._proj_axis), ("Skip frames:", self._proj_skip))
         self._proj_grp.body.addLayout(ax)
         self._proj_btn = QtWidgets.QPushButton("Project stack")
         self._proj_btn.clicked.connect(self._project)
@@ -132,9 +139,16 @@ class DataViewerTab(QtWidgets.QWidget):
         imc.body.addWidget(self._imask_on)
         self._imask_lo = _fspin(-1e9, 1e9, 1, 0.0)
         self._imask_lo.setToolTip("Pixels ≤ this value are masked (dead / gap / beam-stop).")
+        self._imask_lo.setFixedWidth(84)
         self._imask_hi = _fspin(0, 5e9, 0, 1_048_575)
         self._imask_hi.setToolTip("Pixels > this value are masked (hot / overflow).")
-        imc.body.addLayout(S.Form().row(("pixel ≤", self._imask_lo), ("pixel >", self._imask_hi)))
+        self._imask_hi.setFixedWidth(84)
+        _imr = QtWidgets.QHBoxLayout(); _imr.setSpacing(3); _imr.setContentsMargins(0, 0, 0, 0)
+        _imr.addWidget(QtWidgets.QLabel("pixel ≤")); _imr.addWidget(self._imask_lo)
+        _imr.addSpacing(8)
+        _imr.addWidget(QtWidgets.QLabel("pixel >")); _imr.addWidget(self._imask_hi)
+        _imr.addStretch(1)
+        imc.body.addLayout(_imr)
         for w in (self._imask_lo, self._imask_hi):
             w.setEnabled(False)
         self._imask_on.toggled.connect(
@@ -180,6 +194,9 @@ class DataViewerTab(QtWidgets.QWidget):
 
         self._wl = _fspin(0.001, 10.0, 5, DEFAULT_WAVELENGTH, "Å")
         self._lsd = _fspin(1e3, 1e8, 1, DEFAULT_LSD_UM, "µm")
+        self._lsd.setLocale(QtCore.QLocale(QtCore.QLocale.English, QtCore.QLocale.UnitedStates))
+        self._lsd.setGroupSeparatorShown(True)   # show "121,000.0" thousands separators
+        self._lsd.setFixedWidth(150)
         self._px = _fspin(1.0, 5000.0, 2, DEFAULT_PIXEL_UM, "µm")
         self._max2t = _fspin(1.0, 90.0, 1, 25.0, "°")
         geo = S.Form()
@@ -335,6 +352,7 @@ class DataViewerTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "No stack", "Projection needs a stack."); return
         method = next(m for m, b in self._proj_method.items() if b.isChecked())
         axis = self._proj_axis.value()
+        skip = self._proj_skip.value()
         try:
             self._info_lbl.setText("Loading stack for projection…")
             QtWidgets.QApplication.processEvents()
@@ -342,6 +360,14 @@ class DataViewerTab(QtWidgets.QWidget):
             if axis >= data.ndim:
                 QtWidgets.QMessageBox.critical(
                     self, "Bad axis", f"Axis {axis} invalid for {data.ndim}-D data."); return
+            # Drop the first `skip` frames along the stack (frame) axis.
+            if skip > 0:
+                if skip >= data.shape[0]:
+                    QtWidgets.QMessageBox.warning(
+                        self, "Too many skipped",
+                        f"Skip frames ({skip}) ≥ stack size ({data.shape[0]}). "
+                        "Reduce the skip count."); return
+                data = data[skip:]
             fn = {"max": np.max, "sum": np.sum, "average": np.mean}[method]
             proj = np.squeeze(fn(data, axis=axis))
             if proj.ndim != 2:
@@ -360,7 +386,8 @@ class DataViewerTab(QtWidgets.QWidget):
             if self._rad_auto.isChecked():
                 self._radial_integrate()
             self._info_lbl.setText(
-                f"{method.capitalize()} projection (axis {axis}) → {proj.shape}  "
+                f"{method.capitalize()} projection (axis {axis}"
+                f"{f', skipped {skip}' if skip else ''}) → {proj.shape}  "
                 f"[{np.nanmin(proj):.3g}, {np.nanmax(proj):.3g}]")
         except Exception:
             import traceback
