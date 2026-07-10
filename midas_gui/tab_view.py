@@ -38,7 +38,10 @@ class DataViewerTab(QtWidgets.QWidget):
         self._label_items: list = []
         self._pick_ring_item = None                # arc drawn from a profile click
         self._picked_r: Optional[float] = None
+        self._is_projection = False                # showing a projected stack?
         self._build_ui()
+        if self._loader.stats_panel is not None:
+            self._loader.stats_panel.scopeChanged.connect(self._update_stats)
         self._loader.set_path(DEFAULT_NICKEL_H5, dataset="exchange/data")
 
     def set_mask_from_tab1(self, mask):
@@ -318,6 +321,9 @@ class DataViewerTab(QtWidgets.QWidget):
         if raw is None:
             return
         self._proj_grp.setEnabled(self._loader.n_frames() > 1)
+        self._is_projection = False
+        if self._loader.stats_panel is not None:
+            self._loader.stats_panel.set_scope_enabled(True)
         fresh = (self._disp_shape != raw.shape)
         self._disp_shape = raw.shape
         self._cur = self._loader.corrected(raw)
@@ -332,6 +338,7 @@ class DataViewerTab(QtWidgets.QWidget):
             self._redraw_rings()
         self._redraw_picked_ring()
         self._update_intensity_overlay()
+        self._update_stats()
         if self._rad_auto.isChecked():
             self._radial_integrate()
 
@@ -344,6 +351,7 @@ class DataViewerTab(QtWidgets.QWidget):
         self._cur = self._loader.corrected(raw)
         self._viewer.set_image(self._cur, autorange=False)
         self._update_intensity_overlay()
+        self._update_stats()
         if self._rad_auto.isChecked():
             self._radial_integrate()
 
@@ -375,6 +383,9 @@ class DataViewerTab(QtWidgets.QWidget):
                     self, "Not 2-D", f"Result is {proj.ndim}-D after projecting axis {axis}. "
                     "Pick an axis that leaves a 2-D image."); return
             self._cur = self._loader.corrected(proj.astype(np.float32))
+            self._is_projection = True
+            if self._loader.stats_panel is not None:
+                self._loader.stats_panel.set_scope_enabled(False)
             self._viewer.set_image(self._cur)
             if self._bc_auto.isChecked():
                 NZ, NY = self._cur.shape
@@ -383,6 +394,7 @@ class DataViewerTab(QtWidgets.QWidget):
             if getattr(self, "_rings", None):
                 self._redraw_rings()
             self._update_intensity_overlay()
+            self._update_stats()
             if self._rad_auto.isChecked():
                 self._radial_integrate()
             self._info_lbl.setText(
@@ -658,5 +670,54 @@ class DataViewerTab(QtWidgets.QWidget):
 
     def _on_imask_changed(self, *_):
         self._update_intensity_overlay()
+        self._update_stats()
         if self._rad_auto.isChecked():
             self._radial_integrate()
+
+    # ── intensity statistics (left panel) ─────────────────────────────
+    def _update_stats(self, *_):
+        """Recompute the intensity-stats panel for the current scope/state."""
+        sp = getattr(self._loader, "stats_panel", None)
+        if sp is None:
+            return
+        try:
+            if self._is_projection:
+                img = self._cur
+                if img is None:
+                    return
+                sp.set_data(self._unmasked_values(img), scope="Projected stack")
+            elif sp.scope() == "all":
+                vals, n = self._all_frame_values()
+                sp.set_data(vals, scope=f"All frames ({n})")
+            else:
+                img = self._cur
+                if img is None:
+                    return
+                sp.set_data(self._unmasked_values(img),
+                            scope=f"Frame {self._loader.frame_index()}")
+        except Exception:
+            import traceback
+            traceback.print_exc()
+
+    def _unmasked_values(self, img):
+        """1-D array of an image's pixels, excluding intensity-range + file masks."""
+        bad = self._combined_bad_mask(img)
+        return img[~bad] if bad is not None else np.asarray(img).ravel()
+
+    def _all_frame_values(self):
+        """Combined unmasked pixel values across all frames (corrections applied)."""
+        stack = np.asarray(self._loader.full_stack())
+        if stack.ndim == 2:
+            stack = stack[None, ...]
+        corr = np.asarray(self._loader.corrected(stack), dtype=np.float32)
+        bad = ~np.isfinite(corr)
+        if self._imask_on.isChecked():
+            lo, hi = self._imask_lo.value(), self._imask_hi.value()
+            if lo > -1e9:
+                bad |= (corr <= lo)
+            if hi > 0:
+                bad |= (corr > hi)
+        cm = self._loader.composite_mask()
+        if cm is not None and cm.shape == corr.shape[1:]:
+            bad |= (cm != 0)[None, :, :]
+        return corr[~bad], corr.shape[0]

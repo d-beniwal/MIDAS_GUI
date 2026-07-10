@@ -1033,6 +1033,117 @@ class MaskSelector(QtWidgets.QGroupBox):
         self._status.setText(f"{n} mask source(s)" if n else "No mask.")
 
 
+class IntensityStatsPanel(QtWidgets.QGroupBox):
+    """Compact intensity-distribution readout + histogram for the Data Viewer.
+
+    Display-only: the owning tab feeds it the (already corrected + masked) pixel
+    values via :meth:`set_data`.  A scope selector (Current frame / All frames)
+    emits :data:`scopeChanged` so the tab can recompute the right pixel set.
+    """
+    scopeChanged = QtCore.pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__("Intensity statistics", parent)
+        v = QtWidgets.QVBoxLayout(self); v.setContentsMargins(6, 3, 6, 4); v.setSpacing(3)
+
+        top = QtWidgets.QHBoxLayout(); top.setSpacing(6)
+        self._scope = _NoScrollComboBox()
+        self._scope.addItem("Current frame", "current")
+        self._scope.addItem("All frames", "all")
+        self._scope.setToolTip("Statistics for the selected frame, or combined over "
+                               "all frames in the stack/folder.")
+        self._scope.currentIndexChanged.connect(lambda _=0: self.scopeChanged.emit())
+        top.addWidget(self._scope, 1)
+        self._logchk = QtWidgets.QCheckBox("log y"); self._logchk.setChecked(True)
+        self._logchk.toggled.connect(self._redraw_hist)
+        top.addWidget(self._logchk)
+        v.addLayout(top)
+
+        self._plot = pg.PlotWidget(background="#2b2e35")
+        self._plot.setMaximumHeight(130); self._plot.setMinimumHeight(90)
+        self._plot.setLabel("bottom", "intensity", **{"color": "#d0d0d0", "font-size": "9pt"})
+        self._plot.setLabel("left", "log(count+1)", **{"color": "#d0d0d0", "font-size": "9pt"})
+        for ax in ("bottom", "left"):
+            self._plot.getAxis(ax).setTextPen("#c8c8c8")
+            self._plot.getAxis(ax).setPen("#8a8a8a")
+        self._curve = self._plot.plot(
+            [], [], stepMode="center", fillLevel=0,
+            brush=(90, 140, 220, 150), pen=pg.mkPen("#6ea8ff"))
+        v.addWidget(self._plot)
+
+        self._text = QtWidgets.QPlainTextEdit()
+        self._text.setReadOnly(True)
+        self._text.setFont(QtGui.QFont("Monospace", 8))
+        self._text.setFixedHeight(120)
+        self._text.setStyleSheet(
+            "QPlainTextEdit { background:#23252b; color:#d6d6d6; border:1px solid #444; }")
+        v.addWidget(self._text)
+        self._hist = None
+
+    def scope(self) -> str:
+        return self._scope.currentData()
+
+    def set_scope_enabled(self, on: bool):
+        self._scope.setEnabled(on)
+
+    def set_data(self, values, scope: str = ""):
+        vals = np.asarray(values, dtype=np.float64).ravel()
+        vals = vals[np.isfinite(vals)]
+        if vals.size == 0:
+            self._text.setPlainText(f"{scope}\n(no pixels)")
+            self._hist = None; self._curve.setData([], [])
+            return
+        n = vals.size
+        p70, p90, p99, p999, p9999 = np.percentile(vals, [70, 90, 99, 99.9, 99.99])
+
+        def g(x):
+            return f"{x:.6g}"
+
+        def cnt(p):
+            return int(np.count_nonzero(vals > p))
+        lines = [
+            scope,
+            f"N      = {n:,}",
+            f"p70    = {g(p70):<10} (>: {cnt(p70):,})",
+            f"p90    = {g(p90):<10} (>: {cnt(p90):,})",
+            f"p99    = {g(p99):<10} (>: {cnt(p99):,})",
+            f"p99.9  = {g(p999):<10} (>: {cnt(p999):,})",
+            f"p99.99 = {g(p9999):<10} (>: {cnt(p9999):,})",
+        ]
+        self._text.setPlainText("\n".join(lines))
+
+        # Histogram over the FULL intensity range so high-intensity pixels appear.
+        vmin, vmax = float(vals.min()), float(vals.max())
+        if vmax <= vmin:
+            vmax = vmin + 1.0
+        v_hist = vals
+        if vals.size > 50_000_000:      # bound time only on very large stacks
+            v_hist = vals[np.random.default_rng(0).integers(0, vals.size, 50_000_000)]
+        counts, edges = np.histogram(v_hist, bins=256, range=(vmin, vmax))
+        self._hist = (counts, edges)
+        self._redraw_hist()
+
+    def _redraw_hist(self, *_):
+        if self._hist is None:
+            self._curve.setData([], []); return
+        counts, edges = self._hist
+        y = counts.astype(float)
+        log = self._logchk.isChecked()
+        if log:
+            y = np.log10(y + 1.0)
+        self._curve.setData(edges, y)
+        self._plot.setLabel("left", "log(count+1)" if log else "count",
+                            **{"color": "#d0d0d0", "font-size": "9pt"})
+        # Fixed lower-left corner (x=0, y=-2); rescale to (0..xmax, -2..ymax) on refresh.
+        xmax = float(edges[-1]) if edges.size else 1.0
+        ymax = float(y.max()) if y.size else 1.0
+        ymax = ymax * 1.08 if ymax > 0 else 1.0
+        vb = self._plot.getViewBox()
+        vb.setLimits(xMin=0.0, yMin=-2.0)
+        vb.setXRange(0.0, max(xmax, 1.0), padding=0)
+        vb.setYRange(-2.0, ymax, padding=0)
+
+
 class DataLoaderPanel(QtWidgets.QScrollArea):
     """Left-hand data-loading panel shared by Tabs 0/2/3/4.
 
@@ -1148,7 +1259,13 @@ class DataLoaderPanel(QtWidgets.QScrollArea):
         self._mask_sel = MaskSelector()
         self._mask_sel.maskChanged.connect(self.fieldsChanged)
         lv.addWidget(self._mask_sel)
+
+        # Intensity statistics + histogram, pinned to the bottom (Data Viewer only).
+        self.stats_panel = None
         lv.addStretch(1)
+        if mode == "stack":
+            self.stats_panel = IntensityStatsPanel()
+            lv.addWidget(self.stats_panel)
 
         # ── MONITOR button (stream mode only) — pinned to the bottom ──
         self._monitor_btn = None

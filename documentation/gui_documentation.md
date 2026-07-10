@@ -186,6 +186,19 @@ The image viewer has **Pick BC** (single click sets the beam centre) and **Pick 
 (click ≥3 points on a ring; a circle fit estimates the beam centre). Either updates
 BC_y/BC_z and re-runs the overlay + radial integration.
 
+### Intensity statistics (left panel, bottom)
+Pinned to the bottom of the Data-Loader panel: a **histogram** of the intensity
+distribution (full range, log-y toggle) with a **textbox** beneath it reporting
+N (pixel count) and the **p70 / p90 / p99 / p99.9 / p99.99** percentiles — each with
+the **number of pixels above** that value. The histogram's lower-left corner is fixed
+at x = 0, y = −2 and both axes rescale to `(0, xmax)` / `(−2, ymax)` on every refresh
+(frame change, scope change, projection, new data). It reflects the **corrected**
+image (dark / bright / background) with masked pixels (file masks + the
+intensity-range mask) excluded, and updates live as any of those change. A scope
+selector switches between the **current frame** (per the slider) and **All frames**
+(combined over the whole stack/folder). When a **Projection** is active the panel
+shows the projected image's statistics (the scope selector is disabled).
+
 ### Radial integration plot (bottom-right)
 Below the image is a live **azimuthal average about the beam centre** (`R bin`,
 `Integrate`, and an `Auto` toggle that recomputes on frame/BC/mask change). It is a
