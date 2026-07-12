@@ -191,6 +191,43 @@ class MainWindow(QtWidgets.QMainWindow):
             self, "Config reloaded",
             "Config re-read from disk. Restart the GUI for changes to take full effect.")
 
+    # ── clean shutdown ─────────────────────────────────────────────
+    def _stop_all_workers(self):
+        """Interruption-request + bounded-wait every background QThread on every
+        tab (and any parked orphans), so nothing is left running at teardown — a
+        live QThread at interpreter exit is a common hard-crash cause."""
+        tab_attrs = ("_view_tab", "_mask_tab", "_cal_tab", "_refine_tab",
+                     "_batch_tab", "_corr_tab", "_pdf_tab", "_tex_tab", "_export_tab")
+        threads = []
+        for a in tab_attrs:
+            tab = getattr(self, a, None)
+            if tab is None:
+                continue
+            for val in list(vars(tab).values()):
+                if isinstance(val, QtCore.QThread):
+                    threads.append(val)
+                elif isinstance(val, list):
+                    threads.extend(x for x in val if isinstance(x, QtCore.QThread))
+        for th in threads:                       # ask everyone to stop first
+            try:
+                if th.isRunning():
+                    th.requestInterruption()
+            except Exception:
+                pass
+        for th in threads:                       # then bounded wait
+            try:
+                if th.isRunning():
+                    th.wait(2000)
+            except Exception:
+                pass
+
+    def closeEvent(self, event):
+        try:
+            self._stop_all_workers()
+        except Exception:
+            _log(f"Worker shutdown on close failed:\n{traceback.format_exc()}")
+        super().closeEvent(event)
+
 
 def main():
     _install_diagnostics()

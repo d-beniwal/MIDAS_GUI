@@ -24,6 +24,7 @@ from midas_gui.helpers import (_fspin, _NoScrollSpinBox, _browse,
                          simulate_rings, read_geometry, _NoScrollComboBox,
                          make_kedge_label, make_pixel_label)
 from midas_gui.widgets import PickableImageViewer, ProfileViewer, DataLoaderPanel
+from midas_gui.workers import ProjectionWorker
 from midas_gui import style as S
 
 
@@ -39,6 +40,7 @@ class DataViewerTab(QtWidgets.QWidget):
         self._pick_ring_item = None                # arc drawn from a profile click
         self._picked_r: Optional[float] = None
         self._is_projection = False                # showing a projected stack?
+        self._proj_worker = None
         self._build_ui()
         if self._loader.stats_panel is not None:
             self._loader.stats_panel.scopeChanged.connect(self._update_stats)
@@ -358,52 +360,45 @@ class DataViewerTab(QtWidgets.QWidget):
     def _project(self):
         if self._loader.n_frames() <= 1:
             QtWidgets.QMessageBox.warning(self, "No stack", "Projection needs a stack."); return
+        if self._proj_worker and self._proj_worker.isRunning():
+            return
         method = next(m for m, b in self._proj_method.items() if b.isChecked())
         axis = self._proj_axis.value()
         skip = self._proj_skip.value()
-        try:
-            self._info_lbl.setText("Loading stack for projection…")
-            QtWidgets.QApplication.processEvents()
-            data = self._loader.full_stack()
-            if axis >= data.ndim:
-                QtWidgets.QMessageBox.critical(
-                    self, "Bad axis", f"Axis {axis} invalid for {data.ndim}-D data."); return
-            # Drop the first `skip` frames along the stack (frame) axis.
-            if skip > 0:
-                if skip >= data.shape[0]:
-                    QtWidgets.QMessageBox.warning(
-                        self, "Too many skipped",
-                        f"Skip frames ({skip}) ≥ stack size ({data.shape[0]}). "
-                        "Reduce the skip count."); return
-                data = data[skip:]
-            fn = {"max": np.max, "sum": np.sum, "average": np.mean}[method]
-            proj = np.squeeze(fn(data, axis=axis))
-            if proj.ndim != 2:
-                QtWidgets.QMessageBox.critical(
-                    self, "Not 2-D", f"Result is {proj.ndim}-D after projecting axis {axis}. "
-                    "Pick an axis that leaves a 2-D image."); return
-            self._cur = self._loader.corrected(proj.astype(np.float32))
-            self._is_projection = True
-            if self._loader.stats_panel is not None:
-                self._loader.stats_panel.set_scope_enabled(False)
-            self._viewer.set_image(self._cur)
-            if self._bc_auto.isChecked():
-                NZ, NY = self._cur.shape
-                for w, v in ((self._bcy, NY / 2.0), (self._bcz, NZ / 2.0)):
-                    w.blockSignals(True); w.setValue(v); w.blockSignals(False)
-            if getattr(self, "_rings", None):
-                self._redraw_rings()
-            self._update_intensity_overlay()
-            self._update_stats()
-            if self._rad_auto.isChecked():
-                self._radial_integrate()
-            self._info_lbl.setText(
-                f"{method.capitalize()} projection (axis {axis}"
-                f"{f', skipped {skip}' if skip else ''}) → {proj.shape}  "
-                f"[{np.nanmin(proj):.3g}, {np.nanmax(proj):.3g}]")
-        except Exception:
-            import traceback
-            QtWidgets.QMessageBox.critical(self, "Projection error", traceback.format_exc()[:500])
+        self._info_lbl.setText("Projecting stack…")
+        self._proj_btn.setEnabled(False)
+        self._proj_worker = ProjectionWorker(
+            self._loader.full_stack, method, axis, skip,
+            dark=self._loader.dark(), bright=self._loader.bright(),
+            background=self._loader.background(), bright_mode=self._loader.bright_mode(),
+            parent=self)
+        self._proj_worker.finished.connect(self._on_projection_done)
+        self._proj_worker.failed.connect(self._on_projection_fail)
+        self._proj_worker.start()
+
+    def _on_projection_done(self, img, info):
+        self._proj_btn.setEnabled(True)
+        self._cur = img
+        self._is_projection = True
+        if self._loader.stats_panel is not None:
+            self._loader.stats_panel.set_scope_enabled(False)
+        self._viewer.set_image(self._cur)
+        if self._bc_auto.isChecked():
+            NZ, NY = self._cur.shape
+            for w, v in ((self._bcy, NY / 2.0), (self._bcz, NZ / 2.0)):
+                w.blockSignals(True); w.setValue(v); w.blockSignals(False)
+        if getattr(self, "_rings", None):
+            self._redraw_rings()
+        self._update_intensity_overlay()
+        self._update_stats()
+        if self._rad_auto.isChecked():
+            self._radial_integrate()
+        self._info_lbl.setText(info)
+
+    def _on_projection_fail(self, msg):
+        self._proj_btn.setEnabled(True)
+        self._info_lbl.setText("Projection failed.")
+        QtWidgets.QMessageBox.critical(self, "Projection error", msg[:500])
 
     # ── Ring simulation ───────────────────────────────────────────
 

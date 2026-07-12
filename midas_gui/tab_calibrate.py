@@ -521,13 +521,13 @@ class CalibrationTab(QtWidgets.QWidget):
     def _abort(self):
         """Abort the running calibration and free the slot immediately.
 
-        The pipeline is one uninterruptible library call: ``terminate()`` only takes
-        effect when that call next yields, which can be a while.  So rather than
-        block on it (which would leave the worker "running" and prevent a new run),
-        we detach its signals, request termination, orphan the thread (kept alive so
-        the QThread object isn't GC'd while its C thread winds down), and clear
-        ``self._worker`` so the user can start a fresh run right away."""
-        import sys
+        The pipeline is one uninterruptible library call, so we cannot stop it
+        cleanly mid-flight — and ``terminate()`` on a thread inside native
+        torch/scipy code can corrupt the interpreter.  So we *detach* instead:
+        disconnect the worker's signals (its result is discarded), orphan the thread
+        (kept alive so its QObject isn't GC'd while the C thread winds down on its
+        own), and clear ``self._worker`` so a fresh run can start right away. The
+        worker restores stdout/stderr itself, guarded so it won't clobber a new run."""
         w = self._worker
         if not (w and w.isRunning()):
             return
@@ -537,12 +537,9 @@ class CalibrationTab(QtWidgets.QWidget):
                 sig.disconnect()
             except Exception:
                 pass
-        w.requestInterruption()
-        w.terminate()                 # best-effort; may only take effect later
+        w.requestInterruption()       # honoured if/when the library call yields
         self._orphans.append(w)
         self._worker = None           # free the slot so _run can start again now
-        # The worker redirected sys.stdout/err and its finally never ran — restore them.
-        sys.stdout, sys.stderr = sys.__stdout__, sys.__stderr__
         self._run_btn.setEnabled(True)
         self._abort_btn.setEnabled(False); self._abort_btn.setText("Abort")
         self._prog.setVisible(False)

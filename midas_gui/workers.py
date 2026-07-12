@@ -490,6 +490,53 @@ class MaskComputeWorker(QtCore.QThread):
 #  Calibration worker (pipeline-aware)
 # ═════════════════════════════════════════════════════════════════════════════
 
+class ProjectionWorker(QtCore.QThread):
+    """Load a frame stack and reduce it (max/sum/average) off the GUI thread.
+
+    Loading a multi-GB stack + the reduction can take seconds-to-minutes; doing it
+    here keeps the Data Viewer responsive. Field corrections (dark/bright/background)
+    are captured on the GUI thread and applied to the projected image.
+    """
+    finished = QtCore.pyqtSignal(object, str)   # corrected 2-D image, info string
+    failed   = QtCore.pyqtSignal(str)
+
+    def __init__(self, full_stack_fn, method, axis, skip, *, dark=None, bright=None,
+                 background=None, bright_mode="divide", parent=None):
+        super().__init__(parent)
+        self._full_stack = full_stack_fn
+        self._method, self._axis, self._skip = method, axis, skip
+        self._dark, self._bright, self._background = dark, bright, background
+        self._bright_mode = bright_mode
+
+    def run(self):
+        try:
+            data = np.asarray(self._full_stack())
+            if self._axis >= data.ndim:
+                raise ValueError(f"Axis {self._axis} invalid for {data.ndim}-D data.")
+            if self._skip > 0:
+                if self._skip >= data.shape[0]:
+                    raise ValueError(f"Skip frames ({self._skip}) ≥ stack size "
+                                     f"({data.shape[0]}).")
+                data = data[self._skip:]
+            fn = {"max": np.max, "sum": np.sum, "average": np.mean}[self._method]
+            proj = np.squeeze(fn(data, axis=self._axis))
+            if proj.ndim != 2:
+                raise ValueError(f"Result is {proj.ndim}-D after projecting axis "
+                                 f"{self._axis}; pick an axis that leaves a 2-D image.")
+            if self._dark is not None or self._bright is not None or self._background is not None:
+                out = apply_field_corrections(
+                    proj, dark=self._dark, bright=self._bright,
+                    bright_mode=self._bright_mode, background=self._background).astype(np.float32)
+            else:
+                out = proj.astype(np.float32)
+            info = (f"{self._method.capitalize()} projection (axis {self._axis}"
+                    f"{f', skipped {self._skip}' if self._skip else ''}) → {proj.shape}  "
+                    f"[{np.nanmin(proj):.3g}, {np.nanmax(proj):.3g}]")
+            self.finished.emit(out, info)
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
 class CalibrationWorker(QtCore.QThread):
     log_line = QtCore.pyqtSignal(str)
     finished = QtCore.pyqtSignal(object)
@@ -509,7 +556,8 @@ class CalibrationWorker(QtCore.QThread):
     def run(self):
         import sys
         old_out, old_err = sys.stdout, sys.stderr
-        sys.stdout = sys.stderr = _LogStream(self.log_line)  # type: ignore
+        stream = _LogStream(self.log_line)  # type: ignore
+        sys.stdout = sys.stderr = stream
         try:
             image = self._image.astype(np.float32)
             # Bright/background are applied here; dark stays passed to the pipeline.
@@ -537,7 +585,12 @@ class CalibrationWorker(QtCore.QThread):
         except Exception:
             self.failed.emit(traceback.format_exc())
         finally:
-            sys.stdout, sys.stderr = old_out, old_err
+            # Only restore if we're still the active redirect — a newer run (after
+            # an abort) may already have installed its own stream; don't clobber it.
+            if sys.stdout is stream:
+                sys.stdout = old_out
+            if sys.stderr is stream:
+                sys.stderr = old_err
 
 
 # ═════════════════════════════════════════════════════════════════════════════

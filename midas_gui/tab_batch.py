@@ -362,23 +362,22 @@ class BatchTab(QtWidgets.QWidget):
             return
         self._abort_btn.setEnabled(False)
         self._abort_btn.setText("Aborting…")
-        self._log.append("[batch] aborting…")
-        QtWidgets.QApplication.processEvents()   # paint the "Aborting…" state
+        self._log.append("[batch] aborting after the current frame…")
         w.requestInterruption()
-        if w.wait(1000):
+        if w.wait(3000):
             return   # stopped cooperatively → _on_done fires and resets the UI
-        self._log.append("[batch] force-terminating worker…")
+        # Still inside a long frame — detach and let it wind down on its own.
+        # (No terminate(): killing a thread inside torch/numpy can crash the app.)
         for sig in (w.progress, w.frame_done, w.finished, w.failed, w.log_line):
             try:
                 sig.disconnect()
             except Exception:
                 pass
-        w.terminate()
         self._orphans.append(w)
         self._worker = None
         self._reset_run_buttons(); self._prog.setVisible(False)
-        self._log.append("[batch] aborted (background thread winding down). "
-                         "Completed frames were saved.")
+        self._log.append("[batch] aborted (a background thread is finishing the "
+                         "current frame). Completed frames were saved.")
 
     def _on_progress(self, done, total):
         self._prog.setValue(int(100 * done / total) if total else 0)
@@ -525,14 +524,16 @@ class BatchTab(QtWidgets.QWidget):
         w = self._monitor_worker
         if w and w.isRunning():
             w.requestInterruption()
-            if not w.wait(1500):
+            if not w.wait(3000):
+                # Detach + orphan rather than terminate() (which can crash the app
+                # if the thread is inside a native integration call).
                 for s in (w.frame_done, w.new_count, w.status, w.log_line,
                           w.failed, w.geom_ready):
                     try:
                         s.disconnect()
                     except Exception:
                         pass
-                w.terminate(); self._orphans.append(w)
+                self._orphans.append(w)
             self._log.append("[monitor] stopped.")
         self._monitor_worker = None
 
