@@ -14,7 +14,7 @@ from typing import Optional
 import numpy as np
 from PyQt5 import QtCore, QtWidgets
 
-from midas_gui.constants import _SENTINELS, _LATT, H5_EXTS
+from midas_gui.constants import _SENTINELS, _LATT, H5_EXTS, _V2_TO_V1
 
 # checkmark SVG written to a temp file so the QSS image: property can use it
 import tempfile as _tf
@@ -345,14 +345,36 @@ def _spec_from_json(path: str, r_bin: float, eta_bin: float):
     return spec_from_calibration_json(path, RBinSize=r_bin, EtaBinSize=eta_bin)
 
 
-# v1 paramstest distortion index (p#) → v2 harmonic name.  Inverse of the map
-# used in tab_calibrate._save_paramstest to write paramstest from a v2 result.
-_PARAMSTEST_DISTORTION = {
-    "p2": "iso_R2", "p5": "iso_R4", "p4": "iso_R6",
-    "p7": "a1", "p8": "phi1", "p0": "a2", "p6": "phi2",
-    "p9": "a3", "p10": "phi3", "p1": "a4", "p3": "phi4",
-    "p11": "a5", "p12": "phi5", "p13": "a6", "p14": "phi6",
-}
+# v1 paramstest index (p#) → v2 harmonic name — the inverse of the single source
+# of truth ``constants._V2_TO_V1`` (avoids a hand-maintained second copy).
+_PARAMSTEST_DISTORTION = {v1: v2 for v2, v1 in _V2_TO_V1.items()}
+
+
+def write_standalone_paramstest(result, path, *, extra=None):
+    """Write a v1 ``paramstest.txt`` from an AutoCalibrationResult (no geometry
+    dependency on a live pipeline). Single implementation shared by the Calibrate
+    and Export tabs. ``extra`` merges extra key/values into ``params.extra``."""
+    import math
+    from midas_calibrate.params import CalibrationParams
+    from midas_gui.constants import _SG, _LC
+    cal = getattr(result, "_calibrant_name", "CeO2")
+    NY, NZ = result.NrPixelsY, result.NrPixelsZ
+    pxY = float(result.pxY); pxZ = float(result.pxZ) if result.pxZ else pxY
+    RhoD = math.sqrt(max(result.BC_y, NY - result.BC_y) ** 2 +
+                     max(result.BC_z, NZ - result.BC_z) ** 2)
+    p = CalibrationParams(
+        NrPixelsY=NY, NrPixelsZ=NZ, pxY=pxY, pxZ=pxZ, Lsd=result.Lsd,
+        BC_y=result.BC_y, BC_z=result.BC_z, tx=result.tx, ty=result.ty, tz=result.tz,
+        Wavelength=result.wavelength_A, SpaceGroup=_SG.get(cal, 225),
+        LatticeConstant=_LC.get(cal, _LC["CeO2"]), RhoD=RhoD, MaxRingRad=RhoD * 0.97)
+    for v2n, v1n in _V2_TO_V1.items():
+        val = (result.distortion or {}).get(v2n)
+        if val is not None:
+            setattr(p, v1n, float(val))
+    for k, v in (extra or {}).items():
+        p.extra[k] = v
+    p.write(str(path))
+    return p
 
 
 def _spec_from_result_ns(r_bin, eta_bin, **fields):

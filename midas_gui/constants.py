@@ -70,20 +70,22 @@ DISTORTION_NAMES = [
 
 # Lattice + space group per built-in calibrant.
 # _LATT used for ring prediction; _SG / _LC used for paramstest export.
+# Calibrant lattice constants — kept numerically identical to the matching
+# MATERIALS entries below (single set of values per phase; do not let them drift).
 _LATT = {
-    "CeO2":  dict(a=5.4116, b=5.4116, c=5.4116, alpha=90, beta=90, gamma=90,  sg=225),
-    "LaB6":  dict(a=4.1569, b=4.1569, c=4.1569, alpha=90, beta=90, gamma=90,  sg=221),
-    "Si":    dict(a=5.4310, b=5.4310, c=5.4310, alpha=90, beta=90, gamma=90,  sg=227),
-    "Al2O3": dict(a=4.7589, b=4.7589, c=12.992, alpha=90, beta=90, gamma=120, sg=167),
+    "CeO2":  dict(a=5.4116,  b=5.4116,  c=5.4116,  alpha=90, beta=90, gamma=90,  sg=225),
+    "LaB6":  dict(a=4.15692, b=4.15692, c=4.15692, alpha=90, beta=90, gamma=90,  sg=221),
+    "Si":    dict(a=5.43102, b=5.43102, c=5.43102, alpha=90, beta=90, gamma=90,  sg=227),
+    "Al2O3": dict(a=4.7589,  b=4.7589,  c=12.992,  alpha=90, beta=90, gamma=120, sg=167),
 }
 
 _SG = {"CeO2": 225, "LaB6": 221, "Si": 227, "Al2O3": 167}
 
 _LC = {
-    "CeO2":  (5.4116, 5.4116, 5.4116, 90.0, 90.0,  90.0),
-    "LaB6":  (4.1569, 4.1569, 4.1569, 90.0, 90.0,  90.0),
-    "Si":    (5.4310, 5.4310, 5.4310, 90.0, 90.0,  90.0),
-    "Al2O3": (4.7589, 4.7589, 12.992, 90.0, 90.0, 120.0),
+    "CeO2":  (5.4116,  5.4116,  5.4116,  90.0, 90.0,  90.0),
+    "LaB6":  (4.15692, 4.15692, 4.15692, 90.0, 90.0,  90.0),
+    "Si":    (5.43102, 5.43102, 5.43102, 90.0, 90.0,  90.0),
+    "Al2O3": (4.7589,  4.7589,  12.992,  90.0, 90.0, 120.0),
 }
 
 # Default detector parameters — set to the synthetic test_data geometry

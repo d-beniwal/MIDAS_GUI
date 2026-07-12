@@ -749,37 +749,15 @@ class CalibrationTab(QtWidgets.QWidget):
                 mode = "from template"
             else:
                 from midas_calibrate.params import CalibrationParams
+                from midas_gui.helpers import write_standalone_paramstest
                 result = self._result
-                cal_name = getattr(result, "_calibrant_name", "CeO2")
-                _V2V1 = {
-                    "iso_R2": "p2", "iso_R4": "p5", "iso_R6": "p4",
-                    "a1": "p7", "phi1": "p8", "a2": "p0", "phi2": "p6",
-                    "a3": "p9", "phi3": "p10", "a4": "p1", "phi4": "p3",
-                    "a5": "p11", "phi5": "p12", "a6": "p13", "phi6": "p14",
-                }
-                NY, NZ = result.NrPixelsY, result.NrPixelsZ
-                pxY = float(result.pxY)
-                pxZ = float(result.pxZ) if result.pxZ else pxY
-                RhoD = math.sqrt(max(result.BC_y, NY - result.BC_y) ** 2 +
-                                 max(result.BC_z, NZ - result.BC_z) ** 2)
-                p = CalibrationParams(
-                    NrPixelsY=NY, NrPixelsZ=NZ, pxY=pxY, pxZ=pxZ,
-                    Lsd=result.Lsd, BC_y=result.BC_y, BC_z=result.BC_z,
-                    tx=result.tx, ty=result.ty, tz=result.tz,
-                    Wavelength=result.wavelength_A,
-                    SpaceGroup=_SG.get(cal_name, 225),
-                    LatticeConstant=_LC.get(cal_name, _LC["CeO2"]),
-                    RhoD=RhoD, MaxRingRad=RhoD * 0.97)
-                for v2n, v1n in _V2V1.items():
-                    val = (result.distortion or {}).get(v2n)
-                    if val is not None:
-                        setattr(p, v1n, float(val))
+                extra = {}
                 rcm = getattr(result, "residual_corr_bin_path", None)
                 if rcm and getattr(result, "residual_corr_map", None) is not None:
-                    p.extra["ResidualCorrectionMap"] = rcm
+                    extra["ResidualCorrectionMap"] = rcm
                 if ps_path:
-                    p.extra["PanelShiftsFile"] = str(ps_path)
-                p.write(out_path)
+                    extra["PanelShiftsFile"] = str(ps_path)
+                write_standalone_paramstest(result, out_path, extra=extra)
                 mode = "standalone"
             self._log.append(f"paramstest.txt saved ({mode}): {out_path}")
             # Save companion panel_shifts.txt if calibration refined panel shifts

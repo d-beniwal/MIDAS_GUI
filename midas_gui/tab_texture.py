@@ -14,7 +14,7 @@ import pyqtgraph as pg
 
 from midas_gui.helpers import (_load_image, _fspin, _twocol, _browse, _predict_ring_radii,
                                is_h5, _NoScrollComboBox)
-from midas_gui.constants import DEFAULT_NICKEL_FRAME0
+from midas_gui.constants import DEFAULT_NICKEL_FRAME0, DEFAULT_COLORMAP
 from midas_gui.widgets import LogPanel
 from midas_gui.workers import PoleFigureWorker
 from midas_gui import style as S
@@ -111,9 +111,12 @@ class TextureTab(QtWidgets.QWidget):
         self._pf_img = pg.ImageItem()
         self._pf_view.addItem(self._pf_img)
         try:
-            self._pf_img.setColorMap(pg.colormap.get("inferno"))
+            self._pf_img.setColorMap(pg.colormap.get(DEFAULT_COLORMAP))
         except Exception:
-            pass
+            try:
+                self._pf_img.setColorMap(pg.colormap.get("inferno"))
+            except Exception:
+                pass
         right.addWidget(self._pf_view)
         # I(eta)
         self._eta_view = pg.PlotWidget(background="k")

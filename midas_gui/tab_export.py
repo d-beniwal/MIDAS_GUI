@@ -143,24 +143,5 @@ class ExportTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.critical(self, "Export failed", traceback.format_exc()[:500])
 
     def _write_paramstest(self, path):
-        import math
-        from midas_calibrate.params import CalibrationParams
-        from midas_gui.constants import _SG, _LC
-        r = self._result
-        cal = getattr(r, "_calibrant_name", "CeO2")
-        _V2V1 = {"iso_R2": "p2", "iso_R4": "p5", "iso_R6": "p4", "a1": "p7", "phi1": "p8",
-                 "a2": "p0", "phi2": "p6", "a3": "p9", "phi3": "p10", "a4": "p1", "phi4": "p3",
-                 "a5": "p11", "phi5": "p12", "a6": "p13", "phi6": "p14"}
-        NY, NZ = r.NrPixelsY, r.NrPixelsZ
-        pxY = float(r.pxY); pxZ = float(r.pxZ) if r.pxZ else pxY
-        RhoD = math.sqrt(max(r.BC_y, NY - r.BC_y) ** 2 + max(r.BC_z, NZ - r.BC_z) ** 2)
-        p = CalibrationParams(
-            NrPixelsY=NY, NrPixelsZ=NZ, pxY=pxY, pxZ=pxZ, Lsd=r.Lsd,
-            BC_y=r.BC_y, BC_z=r.BC_z, tx=r.tx, ty=r.ty, tz=r.tz,
-            Wavelength=r.wavelength_A, SpaceGroup=_SG.get(cal, 225),
-            LatticeConstant=_LC.get(cal, _LC["CeO2"]), RhoD=RhoD, MaxRingRad=RhoD * 0.97)
-        for v2n, v1n in _V2V1.items():
-            val = (r.distortion or {}).get(v2n)
-            if val is not None:
-                setattr(p, v1n, float(val))
-        p.write(str(path))
+        from midas_gui.helpers import write_standalone_paramstest
+        write_standalone_paramstest(self._result, path)
