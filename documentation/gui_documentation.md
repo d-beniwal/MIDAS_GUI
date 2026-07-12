@@ -30,6 +30,7 @@
 11. [Tab 8 — Results & Export](#11-tab-8--results--export)
 12. [Common UI Conventions](#12-common-ui-conventions)
 13. [Packaging, Deployment & Diagnostics](#13-packaging-deployment--diagnostics)
+14. [Configuration & Defaults](#14-configuration--defaults)
 
 ---
 
@@ -618,5 +619,62 @@ that fails becomes an error placeholder instead of taking the window down. If th
 ever "pops up and dies" (typically on Windows), send that log file.
 
 ---
+
+## 14. Configuration & Defaults
+
+Every default in the GUI — detector geometry, data/output paths, ring-simulation
+**materials**, **calibrants**, the **pixel-preset** and **K-edge** menus, and the
+calibration / integration **algorithms** — can be set **without editing code**, via a
+single per-user JSON config that overrides the shipped built-in defaults.
+
+### Where it lives
+One per-user file, auto-located per OS:
+`~/.config/midas_gui/config.json` (Linux),
+`~/Library/Application Support/midas_gui/config.json` (macOS),
+`%APPDATA%\midas_gui\config.json` (Windows). If it's absent, the shipped built-in
+defaults are used. Sharing between machines/users is done by exporting/importing a
+JSON file (below) — copy it wherever you like.
+
+### Editing — Settings ▸ Preferences…
+The **Settings** menu opens **Preferences…**, a dialog whose tabs are **pre-filled
+with the full shipped defaults** so you edit from a complete starting point:
+- **Geometry** — λ, pixel size, Lsd, beam centre.
+- **Paths** — default data / calibration / output files & folders.
+- **Materials** / **Calibrants** — add / remove / modify (name + lattice + SG).
+- **Menus** — the pixel-size presets and K-edge foils.
+- **Algorithms** — default calibration pipeline, integration kernel, output format,
+  error model, colormap/theme.
+
+Buttons: **Save as my defaults** (write your config), **Save current GUI state**
+(capture the Data Viewer's live λ/pixel/Lsd/BC into the fields), **Save config to
+JSON…** / **Load config (JSON)…** (export/import a config to share), and **Reset to
+shipped defaults** (delete your config). Also on the menu: **Open config folder** and
+**Reload config**. Saving writes your per-user file; **changes take effect on the
+next launch**.
+
+### File format
+```json
+{
+  "geometry": { "wavelength_A": 0.39, "pixel_um": 75.0, "lsd_um": 121000.0,
+                "bc_y": 10.0, "bc_z": 10.0,
+                "pixel_presets": [["Eiger", 75.0], ["Pilatus", 172.0]],
+                "k_edge_foils": [["Au", 80.725], ["Pb", 88.005]] },
+  "materials":  { "Ni (FCC)": {"a":3.5238,"b":3.5238,"c":3.5238,"alpha":90,"beta":90,"gamma":90,"sg":225} },
+  "calibrants": { "CeO2": {"a":5.4116,"b":5.4116,"c":5.4116,"alpha":90,"beta":90,"gamma":90,"sg":225} },
+  "paths": { "nickel_h5": "/data/mygroup/sample.h5", "calib_file": "/data/mygroup/calibration.json" },
+  "ui": { "calibration_pipeline": "one_shot", "integration_kernel": "subpixel2",
+          "output_format": "csv", "azimuthal_method": "poisson", "plot_theme": "hot" }
+}
+```
+- When a **list section is present it fully replaces** that built-in list — so
+  `materials`, `calibrants`, `pixel_presets` and `k_edge_foils` in the file are your
+  complete lists. (The Preferences dialog pre-fills them with the shipped entries, so
+  you always start from the full set; use **Reset to shipped defaults** to get them
+  back.) `sg` is the space-group number.
+- Geometry scalars, `paths` and `ui` are simple overrides; any section or key may be
+  omitted. A malformed config is ignored (built-ins are used) rather than blocking
+  startup.
+- A minimal template lives at `documentation/config.example.json`; the step-by-step
+  guide is `documentation/config_gui.md`.
 
 *For bugs or questions, see the MIDAS GUI repository.*

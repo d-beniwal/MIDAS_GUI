@@ -16,7 +16,8 @@ import numpy as np
 from PyQt5 import QtCore, QtWidgets
 
 from midas_gui.constants import (KERNELS, OUTPUT_FORMATS, ERROR_MODELS,
-                           DEFAULT_NICKEL_DIR)
+                           DEFAULT_NICKEL_DIR, DEFAULT_KERNEL,
+                           DEFAULT_OUTPUT_FORMAT, DEFAULT_ERROR_MODEL)
 from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_file,
                                _NoScrollSpinBox, _NoScrollComboBox)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
@@ -101,6 +102,9 @@ class BatchTab(QtWidgets.QWidget):
         self._kernel = _NoScrollComboBox()
         for label, key in KERNELS.items():
             self._kernel.addItem(label, key)
+        _ki = self._kernel.findData(DEFAULT_KERNEL)
+        if _ki >= 0:
+            self._kernel.setCurrentIndex(_ki)
         self._r_bin = _fspin(0.1, 20.0, 2, 1.0, "px")
         self._e_bin = _fspin(0.5, 30.0, 1, 5.0, "°")
         self._azim = _NoScrollComboBox()
@@ -122,6 +126,8 @@ class BatchTab(QtWidgets.QWidget):
             "Compute per-bin σ via the chosen error model.\n"
             "Mutually exclusive with corrections (corrections win; σ→√I).")
         self._err_model = _NoScrollComboBox(); self._err_model.addItems(ERROR_MODELS); self._err_model.setEnabled(False)
+        if DEFAULT_ERROR_MODEL in ERROR_MODELS:
+            self._err_model.setCurrentText(DEFAULT_ERROR_MODEL)
         self._var_check.toggled.connect(self._err_model.setEnabled)
         vrow = QtWidgets.QHBoxLayout(); vrow.setSpacing(6)
         vrow.addWidget(self._var_check); vrow.addWidget(self._err_model, 1)
@@ -198,6 +204,9 @@ class BatchTab(QtWidgets.QWidget):
         self._fmt = _NoScrollComboBox()
         for label in OUTPUT_FORMATS:
             self._fmt.addItem(label, OUTPUT_FORMATS[label])
+        _fi = self._fmt.findData(DEFAULT_OUTPUT_FORMAT)
+        if _fi >= 0:
+            self._fmt.setCurrentIndex(_fi)
         out.body.addLayout(S.Form().row(("Format:", self._fmt)))
         lv.addWidget(out)
 

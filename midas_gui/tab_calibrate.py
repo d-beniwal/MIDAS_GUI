@@ -17,7 +17,7 @@ from PyQt5 import QtCore, QtWidgets
 import pyqtgraph as pg
 
 from midas_gui.constants import (
-    CALIBRANTS, PIPELINES, _SG, _LC, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM,
+    CALIBRANTS, PIPELINES, DEFAULT_PIPELINE, _SG, _LC, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM,
     DEFAULT_LSD_UM, DEFAULT_BC_Y, DEFAULT_BC_Z, DEFAULT_CALIBRANT_TIF)
 from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _predict_ring_radii, _NoScrollComboBox,
@@ -86,6 +86,9 @@ class CalibrationTab(QtWidgets.QWidget):
             self._pipeline.addItem(label, key)
             if not enabled:
                 self._pipeline.model().item(self._pipeline.count() - 1).setEnabled(False)
+        _pi = self._pipeline.findData(DEFAULT_PIPELINE)
+        if _pi >= 0 and self._pipeline.model().item(_pi).isEnabled():
+            self._pipeline.setCurrentIndex(_pi)
         self._pipeline.setToolTip(
             "Lsd & beam-centre are recovered well by every pipeline.\n"
             "For trustworthy TILTS / strain, prefer Four-stage or First-time —\n"

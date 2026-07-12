@@ -157,8 +157,39 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             _log(f"Geometry hand-off wiring failed:\n{traceback.format_exc()}")
 
+        self._build_menu()
         self.statusBar().showMessage(
             "Tip: mask → calibrate → (refine) → batch integrate")
+
+    def _build_menu(self):
+        """Settings menu: preferences, open config folder, reload."""
+        m = self.menuBar().addMenu("&Settings")
+        act_pref = m.addAction("Preferences…")
+        act_pref.triggered.connect(self._open_preferences)
+        act_open = m.addAction("Open config folder")
+        act_open.triggered.connect(self._open_config_folder)
+        act_reload = m.addAction("Reload config")
+        act_reload.triggered.connect(self._reload_config)
+
+    def _open_preferences(self):
+        try:
+            from midas_gui.prefs_dialog import PreferencesDialog
+            PreferencesDialog(self).exec_()
+        except Exception:
+            _log(f"Preferences dialog failed:\n{traceback.format_exc()}")
+
+    def _open_config_folder(self):
+        from midas_gui import settings
+        folder = settings.user_config_path().parent
+        folder.mkdir(parents=True, exist_ok=True)
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(folder)))
+
+    def _reload_config(self):
+        from midas_gui import settings
+        settings.reload()
+        QtWidgets.QMessageBox.information(
+            self, "Config reloaded",
+            "Config re-read from disk. Restart the GUI for changes to take full effect.")
 
 
 def main():

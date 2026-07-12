@@ -1,0 +1,21 @@
+{
+  "geometry": {
+    "wavelength_A": 0.39,
+    "pixel_um": 75.0,
+    "lsd_um": 121000.0,
+    "bc_y": 10.0,
+    "bc_z": 10.0
+  },
+  "paths": {
+    "nickel_h5": "",
+    "nickel_dir": "",
+    "calib_file": ""
+  },
+  "ui": {
+    "calibration_pipeline": "one_shot",
+    "integration_kernel": "subpixel2",
+    "output_format": "csv",
+    "azimuthal_method": "poisson",
+    "plot_theme": "hot"
+  }
+}

@@ -20,7 +20,10 @@ import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
-from midas_gui.constants import COLORMAPS, DISTORTION_NAMES
+from midas_gui.constants import COLORMAPS, DISTORTION_NAMES, DEFAULT_COLORMAP
+
+# Default colormap: the configured one if it's a known option, else the first.
+_DEFAULT_CMAP = DEFAULT_COLORMAP if DEFAULT_COLORMAP in COLORMAPS else COLORMAPS[0]
 from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollDoubleSpinBox, _fspin, _twocol,
                                _browse, is_h5, list_h5_datasets, _NoScrollComboBox,
                                _load_image, _collect_frame_paths, apply_field_corrections)
@@ -52,6 +55,7 @@ class ImageViewer(QtWidgets.QWidget):
         bar.addWidget(QtWidgets.QLabel("cmap:"))
         self._cmap = _NoScrollComboBox()
         self._cmap.addItems(COLORMAPS)
+        self._cmap.setCurrentText(_DEFAULT_CMAP)
         self._cmap.currentTextChanged.connect(self._set_cmap)
         self._cmap.setFixedWidth(90)
         bar.addWidget(self._cmap)
@@ -97,7 +101,7 @@ class ImageViewer(QtWidgets.QWidget):
         layout.addWidget(self._coord_bar)
 
         self._data: Optional[np.ndarray] = None
-        self._set_cmap(COLORMAPS[0])
+        self._set_cmap(_DEFAULT_CMAP)
 
     def set_image(self, data: np.ndarray, autorange: bool = True):
         self._data = data.astype(np.float32)
@@ -1601,6 +1605,7 @@ class WaterfallViewer(QtWidgets.QWidget):
         bar.addWidget(QtWidgets.QLabel("Waterfall (all frames)"))
         bar.addWidget(QtWidgets.QLabel("  cmap:"))
         self._cmap = _NoScrollComboBox(); self._cmap.addItems(COLORMAPS); self._cmap.setFixedWidth(90)
+        self._cmap.setCurrentText(_DEFAULT_CMAP)
         self._cmap.currentTextChanged.connect(self._apply_cmap)
         bar.addWidget(self._cmap)
         self._log = QtWidgets.QCheckBox("Log"); self._log.setChecked(True)
@@ -1633,7 +1638,7 @@ class WaterfallViewer(QtWidgets.QWidget):
         # Axis conversion context (from the run's calibration).
         self._lsd = self._px = self._wl = None
         self._native_unit = "R"
-        self._apply_cmap(COLORMAPS[0])
+        self._apply_cmap(_DEFAULT_CMAP)
 
     # ── x-axis units (R / 2θ / Q) ─────────────────────────────────────
 

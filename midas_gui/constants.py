@@ -1,6 +1,12 @@
 """Shared constants: calibrants, colormaps, dtype sentinels, distortion mapping,
-lattice / space-group tables, and output-format lists."""
+lattice / space-group tables, and output-format lists.
+
+Built-in values below are the shipped defaults; a per-user / per-group config
+(JSON) is overlaid onto them at the bottom of this module — see
+:mod:`midas_gui.settings`."""
 from __future__ import annotations
+
+import os
 
 CALIBRANTS = ["CeO2", "LaB6", "Si", "Al2O3"]
 COLORMAPS  = ["hot", "gray", "viridis", "inferno", "plasma", "turbo"]
@@ -137,3 +143,160 @@ MATERIALS = {
     "W (BCC)":           dict(a=3.16525, b=3.16525, c=3.16525, alpha=90, beta=90, gamma=90, sg=229),
     "Ti (HCP)":          dict(a=2.9508, b=2.9508, c=4.6855,  alpha=90, beta=90, gamma=120, sg=194),
 }
+
+
+# ── UI / algorithm defaults (overridable) — first option of each list ───────────
+DEFAULT_KERNEL        = "subpixel2"   # key in KERNELS (integration algorithm)
+DEFAULT_PIPELINE      = "one_shot"    # key in PIPELINES (calibration algorithm)
+DEFAULT_OUTPUT_FORMAT = "csv"         # key in OUTPUT_FORMATS
+DEFAULT_ERROR_MODEL   = "poisson"     # value in ERROR_MODELS
+DEFAULT_COLORMAP      = "hot"         # value in COLORMAPS
+
+
+# ── User / group config overlay ─────────────────────────────────────────────────
+def _coerce_material(d: dict) -> dict:
+    """Validate + normalise a material dict (raises on missing/invalid keys)."""
+    m = {k: float(d[k]) for k in ("a", "b", "c", "alpha", "beta", "gamma")}
+    m["sg"] = int(d["sg"])
+    return m
+
+
+def _apply(cfg: dict) -> None:
+    """Overlay a user/group config dict onto this module's defaults.
+
+    Every domain is individually guarded so a single bad entry is skipped rather
+    than breaking startup (this runs on every import of ``constants``).
+    """
+    if not cfg:
+        return
+    g = globals()
+
+    def _set_num(section, key, target, cast=float):
+        try:
+            if section.get(key) is not None:
+                g[target] = cast(section[key])
+        except Exception:
+            pass
+
+    # geometry scalars
+    geo = cfg.get("geometry", {}) or {}
+    _set_num(geo, "wavelength_A", "DEFAULT_WAVELENGTH")
+    _set_num(geo, "pixel_um", "DEFAULT_PIXEL_UM")
+    _set_num(geo, "lsd_um", "DEFAULT_LSD_UM")
+    _set_num(geo, "bc_y", "DEFAULT_BC_Y")
+    _set_num(geo, "bc_z", "DEFAULT_BC_Z")
+
+    # pixel presets / K-edge foils — replace wholesale if provided (per-entry guard)
+    def _pairs(items):
+        out = []
+        for it in items or []:
+            try:
+                out.append((str(it[0]), float(it[1])))
+            except Exception:
+                pass
+        return out
+    if isinstance(geo.get("pixel_presets"), list):
+        pp = _pairs(geo["pixel_presets"])
+        if pp:
+            g["PIXEL_PRESETS"] = pp
+    if isinstance(geo.get("k_edge_foils"), list):
+        ke = _pairs(geo["k_edge_foils"])
+        if ke:
+            g["K_EDGE_FOILS"] = ke
+
+    # default paths (expand ~ and $VARS)
+    _pmap = {
+        "calibrant_tif": "DEFAULT_CALIBRANT_TIF", "calibrant_h5": "DEFAULT_CALIBRANT_H5",
+        "nickel_h5": "DEFAULT_NICKEL_H5", "nickel_dir": "DEFAULT_NICKEL_DIR",
+        "nickel_frame0": "DEFAULT_NICKEL_FRAME0", "calib_file": "DEFAULT_CALIB_FILE",
+        "pdf_iq_file": "DEFAULT_PDF_IQ_FILE", "pdf_calib": "DEFAULT_PDF_CALIB",
+    }
+    paths = cfg.get("paths", {}) or {}
+    for key, target in _pmap.items():
+        try:
+            v = paths.get(key)
+            if v:
+                g[target] = os.path.expandvars(os.path.expanduser(str(v)))
+        except Exception:
+            pass
+
+    # materials — the config's list REPLACES the built-in list when present
+    # (so the Preferences dialog, pre-filled with the shipped list, can add /
+    # remove / modify).  Guard: a non-empty but fully-unparseable list is ignored.
+    if isinstance(cfg.get("materials"), dict):
+        parsed = {}
+        for name, d in cfg["materials"].items():
+            try:
+                parsed[str(name)] = _coerce_material(d)
+            except Exception:
+                pass
+        if parsed or cfg["materials"] == {}:
+            MATERIALS.clear(); MATERIALS.update(parsed)
+
+    # calibrants — likewise replace the CALIBRANTS dropdown list when present;
+    # _LATT/_SG/_LC are updated (not cleared) so lookups by name still resolve.
+    if isinstance(cfg.get("calibrants"), dict):
+        names = []
+        for name, d in cfg["calibrants"].items():
+            try:
+                m = _coerce_material(d); nm = str(name)
+                _LATT[nm] = dict(m)
+                _SG[nm] = m["sg"]
+                _LC[nm] = (m["a"], m["b"], m["c"], m["alpha"], m["beta"], m["gamma"])
+                names.append(nm)
+            except Exception:
+                pass
+        if names or cfg["calibrants"] == {}:
+            CALIBRANTS[:] = names
+
+    # UI / algorithm defaults
+    ui = cfg.get("ui", {}) or {}
+    for key, target in (("integration_kernel", "DEFAULT_KERNEL"),
+                        ("calibration_pipeline", "DEFAULT_PIPELINE"),
+                        ("output_format", "DEFAULT_OUTPUT_FORMAT"),
+                        ("azimuthal_method", "DEFAULT_ERROR_MODEL"),
+                        ("plot_theme", "DEFAULT_COLORMAP")):
+        try:
+            if ui.get(key):
+                g[target] = str(ui[key])
+        except Exception:
+            pass
+
+
+# Pristine snapshot of the shipped defaults (captured BEFORE any overlay), so the
+# GUI can always offer / restore the built-in values regardless of the user config.
+import copy as _copy
+
+_SHIPPED = {
+    "geometry": {
+        "wavelength_A": DEFAULT_WAVELENGTH, "pixel_um": DEFAULT_PIXEL_UM,
+        "lsd_um": DEFAULT_LSD_UM, "bc_y": DEFAULT_BC_Y, "bc_z": DEFAULT_BC_Z,
+        "pixel_presets": [list(p) for p in PIXEL_PRESETS],
+        "k_edge_foils": [list(k) for k in K_EDGE_FOILS],
+    },
+    "materials": {n: dict(m) for n, m in MATERIALS.items()},
+    "calibrants": {n: dict(_LATT[n]) for n in CALIBRANTS if n in _LATT},
+    "paths": {
+        "calibrant_tif": DEFAULT_CALIBRANT_TIF, "calibrant_h5": DEFAULT_CALIBRANT_H5,
+        "nickel_h5": DEFAULT_NICKEL_H5, "nickel_dir": DEFAULT_NICKEL_DIR,
+        "nickel_frame0": DEFAULT_NICKEL_FRAME0, "calib_file": DEFAULT_CALIB_FILE,
+        "pdf_iq_file": DEFAULT_PDF_IQ_FILE, "pdf_calib": DEFAULT_PDF_CALIB,
+    },
+    "ui": {
+        "integration_kernel": DEFAULT_KERNEL, "calibration_pipeline": DEFAULT_PIPELINE,
+        "output_format": DEFAULT_OUTPUT_FORMAT, "azimuthal_method": DEFAULT_ERROR_MODEL,
+        "plot_theme": DEFAULT_COLORMAP,
+    },
+}
+
+
+def shipped_defaults() -> dict:
+    """Return a deep copy of the pristine shipped defaults (pre-overlay)."""
+    return _copy.deepcopy(_SHIPPED)
+
+
+try:
+    from midas_gui import settings as _settings
+    _apply(_settings.load_config())
+except Exception:
+    pass
