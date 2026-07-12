@@ -41,6 +41,11 @@ class DataViewerTab(QtWidgets.QWidget):
         self._picked_r: Optional[float] = None
         self._is_projection = False                # showing a projected stack?
         self._proj_worker = None
+        self._rad_grid_cache = None                # (key, which, nbins, r_axis)
+        # Debounce the frame slider: coalesce rapid ticks into one heavy refresh.
+        self._refresh_timer = QtCore.QTimer(self)
+        self._refresh_timer.setSingleShot(True); self._refresh_timer.setInterval(60)
+        self._refresh_timer.timeout.connect(self._on_loader_data)
         self._build_ui()
         if self._loader.stats_panel is not None:
             self._loader.stats_panel.scopeChanged.connect(self._update_stats)
@@ -71,7 +76,7 @@ class DataViewerTab(QtWidgets.QWidget):
         # ── LEFT: data loader (stack mode) ──
         self._loader = DataLoaderPanel(mode="stack")
         self._loader.setMinimumWidth(200)
-        self._loader.dataChanged.connect(self._on_loader_data)
+        self._loader.dataChanged.connect(lambda: self._refresh_timer.start())
         self._loader.fieldsChanged.connect(self._on_fields_changed)
         split.addWidget(self._loader)
 
@@ -340,7 +345,11 @@ class DataViewerTab(QtWidgets.QWidget):
             self._redraw_rings()
         self._redraw_picked_ring()
         self._update_intensity_overlay()
-        self._update_stats()
+        # "All frames" stats don't depend on the current frame — skip on frame change
+        # (avoids re-reading + re-correcting the whole stack on every slider tick).
+        sp = self._loader.stats_panel
+        if sp is None or sp.scope() != "all":
+            self._update_stats()
         if self._rad_auto.isChecked():
             self._radial_integrate()
 
@@ -536,22 +545,35 @@ class DataViewerTab(QtWidgets.QWidget):
             lsd_um=self._lsd.value(), px_um=self._px.value())
         self._refresh_profile_markers()
 
-    @staticmethod
-    def _radial_profile(img: np.ndarray, bc_y: float, bc_z: float,
-                        r_bin: float = 1.0, mask: Optional[np.ndarray] = None):
-        """Mean intensity vs radius (px) about (bc_y, bc_z).
+    def _radial_grid(self, shape, bc_y, bc_z, r_bin):
+        """Cached per-pixel radial bin index + axis, keyed on (shape, BC, r_bin).
 
-        bc_y is the column (Y/x) and bc_z the row (Z/y); image shape is (NZ, NY).
-        ``mask`` (bool, True = exclude) drops pixels from the average; together with
-        non-finite pixels these are ignored. Returns (r_axis_px, profile), NaN in
-        empty bins.
-        """
-        NZ, NY = img.shape
+        The pixel→radius grid only changes when the shape / beam centre / bin size
+        change — not frame-to-frame — so scrubbing frames reuses it (one bincount
+        instead of rebuilding indices+hypot each tick)."""
+        r_bin = max(float(r_bin), 1e-6)
+        key = (tuple(shape), round(float(bc_y), 4), round(float(bc_z), 4), round(r_bin, 6))
+        cache = self._rad_grid_cache
+        if cache is not None and cache[0] == key:
+            return cache[1], cache[2], cache[3]
+        NZ, NY = shape
         zz, yy = np.indices((NZ, NY))
         r = np.hypot(yy - bc_y, zz - bc_z)
-        r_bin = max(float(r_bin), 1e-6)
         nbins = max(1, int(r.max() / r_bin) + 1)
         which = np.minimum((r / r_bin).astype(np.int64), nbins - 1).ravel()
+        r_axis = (np.arange(nbins) + 0.5) * r_bin
+        self._rad_grid_cache = (key, which, nbins, r_axis)
+        return which, nbins, r_axis
+
+    def _radial_profile(self, img: np.ndarray, bc_y: float, bc_z: float,
+                        r_bin: float = 1.0, mask: Optional[np.ndarray] = None):
+        """Mean intensity vs radius (px) about (bc_y, bc_z), using the cached grid.
+
+        bc_y is the column (Y/x) and bc_z the row (Z/y); image shape is (NZ, NY).
+        ``mask`` (bool, True = exclude) drops pixels; non-finite pixels are ignored.
+        Returns (r_axis_px, profile), NaN in empty bins.
+        """
+        which, nbins, r_axis = self._radial_grid(img.shape, bc_y, bc_z, r_bin)
         vals = img.ravel()
         good = np.isfinite(vals)
         if mask is not None:
@@ -561,7 +583,6 @@ class DataViewerTab(QtWidgets.QWidget):
         prof = np.full(nbins, np.nan, dtype=np.float64)
         nz = counts > 0
         prof[nz] = sums[nz] / counts[nz]
-        r_axis = (np.arange(nbins) + 0.5) * r_bin
         return r_axis, prof
 
     # ── Calibration file / intensity mask ─────────────────────────

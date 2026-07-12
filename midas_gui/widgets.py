@@ -1633,8 +1633,14 @@ class WaterfallViewer(QtWidgets.QWidget):
         self._plot.addItem(self._img)
         layout.addWidget(self._plot, stretch=1)
 
-        self._rows: list = []
+        # Rows are written into a growing pre-allocated buffer (no per-frame vstack),
+        # and redraws are throttled so a fast/large scan stays O(N) not O(N²).
+        self._buf = None            # (capacity, n_r) float64
+        self._nrows = 0
         self._r_axis = None
+        self._redraw_timer = QtCore.QTimer(self)
+        self._redraw_timer.setSingleShot(True); self._redraw_timer.setInterval(100)
+        self._redraw_timer.timeout.connect(self._redraw)
         # Axis conversion context (from the run's calibration).
         self._lsd = self._px = self._wl = None
         self._native_unit = "R"
@@ -1661,33 +1667,45 @@ class WaterfallViewer(QtWidgets.QWidget):
     def reset(self, r_axis=None):
         """Start a new scan (r_axis = radial bin-centre array in px), or clear
         the view entirely when called with no axis."""
-        self._rows = []
+        self._buf = None
+        self._nrows = 0
         self._r_axis = None if r_axis is None else np.asarray(r_axis, dtype=float)
         self._img.clear()
         self._stat.setText("")
 
     def add_profile(self, profile):
-        """Append one frame's 1-D profile as the next waterfall row."""
-        self._rows.append(np.asarray(profile, dtype=float))
-        self._redraw()
-        self._stat.setText(f"{len(self._rows)} frames")
+        """Append one frame's 1-D profile as the next waterfall row (buffered;
+        the image redraw is coalesced on a timer)."""
+        p = np.asarray(profile, dtype=np.float64)
+        if self._buf is None:
+            self._buf = np.empty((16, p.size), dtype=np.float64)
+        elif self._nrows >= self._buf.shape[0]:
+            self._buf = np.vstack([self._buf, np.empty_like(self._buf)])  # grow ×2
+        if p.size != self._buf.shape[1]:                 # profile length changed → reset buffer
+            self._buf = np.empty((max(16, self._nrows + 1), p.size), dtype=np.float64)
+            self._nrows = 0
+        self._buf[self._nrows] = p
+        self._nrows += 1
+        self._stat.setText(f"{self._nrows} frames")
+        if not self._redraw_timer.isActive():
+            self._redraw_timer.start()
 
     def _redraw(self):
-        if not self._rows or self._r_axis is None:
+        if self._buf is None or self._nrows == 0 or self._r_axis is None:
             return
-        arr = np.vstack(self._rows)                       # (n_frames, n_r)
-        if self._log.isChecked():
-            disp = np.log10(np.clip(arr, 1e-6, None))
-        else:
-            disp = arr
+        arr = self._buf[:self._nrows]                     # (n_frames, n_r) view — no copy
+        disp = np.log10(np.clip(arr, 1e-6, None)) if self._log.isChecked() else arr
+        # Level from a strided sample (fast + stable) rather than sorting every pixel.
         fin = disp[np.isfinite(disp)]
+        if fin.size > 200_000:
+            fin = fin[:: fin.size // 200_000]
         lo, hi = (float(np.percentile(fin, 1)), float(np.percentile(fin, 99))) if fin.size else (0.0, 1.0)
         if hi <= lo:
             hi = lo + 1.0
         # ImageItem (col-major): pass (n_r, n_frames) so x=R, y=frame
         self._img.setImage(disp.T, autoLevels=False, levels=(lo, hi))
         r0, r1 = float(self._r_axis[0]), float(self._r_axis[-1])
-        self._img.setRect(QtCore.QRectF(r0, 0.0, r1 - r0, arr.shape[0]))
+        self._img.setRect(QtCore.QRectF(r0, 0.0, r1 - r0, self._nrows))
 
     def _apply_cmap(self, name: str):
         try:
