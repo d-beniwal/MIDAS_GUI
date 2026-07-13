@@ -206,6 +206,9 @@ class MainWindow(QtWidgets.QMainWindow):
         m = self.menuBar().addMenu("&Settings")
         act_pref = m.addAction("Preferences…")
         act_pref.triggered.connect(self._open_preferences)
+        act_scale = m.addAction("Interface scaling…")
+        act_scale.triggered.connect(self._open_scaling)
+        m.addSeparator()
         act_open = m.addAction("Open config folder")
         act_open.triggered.connect(self._open_config_folder)
         act_reload = m.addAction("Reload config")
@@ -217,6 +220,54 @@ class MainWindow(QtWidgets.QMainWindow):
             PreferencesDialog(self).exec_()
         except Exception:
             _log(f"Preferences dialog failed:\n{traceback.format_exc()}")
+
+    def _open_scaling(self):
+        """Quick interface-scale picker (whole-app zoom for HiDPI / 4K monitors).
+        Persists ui.ui_scale and offers to relaunch so the new scale takes effect."""
+        from midas_gui import settings
+        cur = float(getattr(C, "DEFAULT_UI_SCALE", 1.0) or 1.0)
+        val, ok = QtWidgets.QInputDialog.getDouble(
+            self, "Interface scaling",
+            "Whole-interface scale (layout + fonts).\n"
+            "1.0 ≈ 1080p,  ~1.5 ≈ 1440p,  ~2.0 ≈ 4K.\nApplies after a restart.",
+            cur, 0.5, 4.0, 2)
+        if not ok or abs(val - cur) < 1e-6:
+            return
+        try:
+            cfg = settings.load_config()
+            cfg.setdefault("ui", {})["ui_scale"] = float(val)
+            settings.save_user_config(cfg)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Save failed", str(e)); return
+        self._offer_restart(f"Interface scale set to {val:g}×.")
+
+    def _offer_restart(self, msg):
+        """Ask to relaunch now so a startup-only setting (e.g. UI scale) applies."""
+        if QtWidgets.QMessageBox.question(
+                self, "Restart to apply",
+                f"{msg}\n\nRestart the GUI now to apply?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.Yes) == QtWidgets.QMessageBox.Yes:
+            self.restart_app()
+
+    def restart_app(self):
+        """Relaunch a fresh instance (which re-reads the scale) and close this one.
+        Uses QProcess so the new process is detached from this one."""
+        try:
+            self._stop_all_workers()
+        except Exception:
+            pass
+        import os
+        prog = sys.executable
+        if os.path.basename(sys.argv[0] or "") == "__main__.py":
+            args = ["-m", "midas_gui", *sys.argv[1:]]
+        else:
+            args = list(sys.argv)
+        try:
+            QtCore.QProcess.startDetached(prog, args)
+        except Exception:
+            _log(f"Restart failed:\n{traceback.format_exc()}")
+        QtWidgets.QApplication.quit()
 
     def _open_config_folder(self):
         from midas_gui import settings
@@ -270,8 +321,29 @@ class MainWindow(QtWidgets.QMainWindow):
         super().closeEvent(event)
 
 
+def _apply_ui_scale():
+    """Set Qt's whole-application scale factor from the configured ui.ui_scale BEFORE
+    the QApplication is created, so layout + fonts scale uniformly on HiDPI / 4K
+    screens. Must run before any QApplication instance exists."""
+    import os
+    try:
+        scale = float(getattr(C, "DEFAULT_UI_SCALE", 1.0) or 1.0)
+    except Exception:
+        scale = 1.0
+    scale = min(4.0, max(0.5, scale))
+    # In-app setting is authoritative (overwrites any inherited value on restart).
+    os.environ["QT_SCALE_FACTOR"] = f"{scale:.4g}"
+    _log(f"UI scale (QT_SCALE_FACTOR) = {scale:.4g}")
+
+
 def main():
     _install_diagnostics()
+    _apply_ui_scale()   # must precede QApplication construction
+    # Crisper icons/pixmaps at non-unit scales (attribute set before QApplication).
+    try:
+        QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
+    except Exception:
+        pass
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     app.setApplicationName("MIDAS GUI")
     app.setStyle("Fusion")

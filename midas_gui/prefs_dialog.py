@@ -60,6 +60,7 @@ def _effective_cfg() -> dict:
             "integration_kernel": C.DEFAULT_KERNEL, "calibration_pipeline": C.DEFAULT_PIPELINE,
             "output_format": C.DEFAULT_OUTPUT_FORMAT, "azimuthal_method": C.DEFAULT_ERROR_MODEL,
             "plot_theme": C.DEFAULT_COLORMAP, "visible_tabs": list(C.DEFAULT_VISIBLE_TABS),
+            "ui_scale": C.DEFAULT_UI_SCALE,
         },
     }
 
@@ -86,6 +87,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         self._build_menus_tab()
         self._build_algorithms_tab()
         self._build_tabs_tab()
+        self._build_display_tab()
 
         # action row
         arow = QtWidgets.QHBoxLayout()
@@ -217,6 +219,36 @@ class PreferencesDialog(QtWidgets.QDialog):
         v.addStretch(1)
         self._tabs.addTab(w, "Tabs")
 
+    def _build_display_tab(self):
+        w = QtWidgets.QWidget(); v = QtWidgets.QVBoxLayout(w)
+        v.addWidget(QtWidgets.QLabel(
+            "Interface scale — a whole-application zoom for the layout AND fonts, for "
+            "use on HiDPI / 4K monitors where the default looks too small."))
+        form = QtWidgets.QFormLayout()
+        self._ui_scale = QtWidgets.QDoubleSpinBox()
+        self._ui_scale.setRange(0.5, 4.0); self._ui_scale.setSingleStep(0.05)
+        self._ui_scale.setDecimals(2); self._ui_scale.setSuffix("  ×")
+        self._ui_scale.setFixedWidth(110)
+        form.addRow("Interface scale:", self._ui_scale)
+        v.addLayout(form)
+        presets = QtWidgets.QHBoxLayout(); presets.setSpacing(6)
+        presets.addWidget(QtWidgets.QLabel("Presets:"))
+        for label, val in (("100% (1080p)", 1.0), ("125%", 1.25),
+                           ("150% (1440p)", 1.5), ("200% (4K)", 2.0)):
+            b = QtWidgets.QPushButton(label)
+            b.clicked.connect(lambda _=0, x=val: self._ui_scale.setValue(x))
+            presets.addWidget(b)
+        presets.addStretch(1)
+        v.addLayout(presets)
+        note = QtWidgets.QLabel(
+            "Applied via Qt's QT_SCALE_FACTOR, so the whole layout scales uniformly. "
+            "Takes effect after a restart — use “Save as my defaults”, then relaunch "
+            "(you'll be offered a restart if the scale changed).")
+        note.setWordWrap(True); note.setStyleSheet("color:#aaa;font-size:10px")
+        v.addWidget(note)
+        v.addStretch(1)
+        self._tabs.addTab(w, "Display")
+
     # ── table helpers ──────────────────────────────────────────────────
     def _add_row(self, table, headers, values=None):
         r = table.rowCount(); table.insertRow(r)
@@ -296,6 +328,10 @@ class PreferencesDialog(QtWidgets.QDialog):
             for name, cb in self._tab_checks.items():
                 if cb.isEnabled():           # skip the always-on (disabled) boxes
                     cb.setChecked(name in vis)
+        try:
+            self._ui_scale.setValue(float(ui.get("ui_scale", 1.0) or 1.0))
+        except Exception:
+            self._ui_scale.setValue(1.0)
 
     @staticmethod
     def _select(combo, value, by_data=False):
@@ -331,6 +367,7 @@ class PreferencesDialog(QtWidgets.QDialog):
                 "plot_theme": self._ui_cmap.currentText(),
                 "visible_tabs": [name for name, cb in self._tab_checks.items()
                                  if cb.isChecked()],
+                "ui_scale": round(self._ui_scale.value(), 3),
             },
         }
 
@@ -418,6 +455,15 @@ class PreferencesDialog(QtWidgets.QDialog):
             pass
         note = ("Tab visibility applied now; restart the GUI for other changes to apply."
                 if applied_live else "Restart the GUI to apply.")
+        # If the interface scale changed, offer an immediate relaunch (it's a
+        # startup-only setting — QT_SCALE_FACTOR is read before the QApplication).
+        scale_changed = abs(float(cfg["ui"].get("ui_scale", 1.0))
+                            - float(getattr(C, "DEFAULT_UI_SCALE", 1.0) or 1.0)) > 1e-6
+        if scale_changed and self._mw is not None and hasattr(self._mw, "restart_app"):
+            self.accept()
+            self._mw._offer_restart(
+                f"Saved. Interface scale set to {cfg['ui']['ui_scale']:g}×.")
+            return
         QtWidgets.QMessageBox.information(
             self, "Saved", f"Saved as your defaults:\n{path}\n\n{note}")
         self.accept()

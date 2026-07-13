@@ -23,6 +23,7 @@ Without editing any code:
 | **Default paths** | default data / calibration / output files & folders |
 | **Algorithms** | default calibration pipeline, integration kernel, output format, error model, colormap |
 | **Visible tabs** | which optional tabs are shown (Data Viewer, Mask, Calibrate, Batch are always on) |
+| **Interface scale** | whole-application zoom (layout + fonts) for HiDPI / 4K monitors |
 
 ## 2. How it works
 
@@ -65,6 +66,10 @@ writes it. **Settings ▸ Open config folder** jumps straight to it.
    - **Tabs** — tick which optional tabs are visible. Data Viewer, Mask, Calibrate
      and Batch Integrate are always on (locked). This setting **applies immediately**
      on Save — no restart needed (unlike the others).
+   - **Display** — the **interface scale** (whole-app zoom for HiDPI / 4K screens):
+     pick a value or preset (100 % ≈ 1080p, 150 % ≈ 1440p, 200 % ≈ 4K). It applies
+     after a restart; you're offered one on Save when it changes. A quick picker is
+     also on **Settings ▸ Interface scaling…**.
 4. Handy buttons (top of the dialog):
    - **Save current GUI state** — copies the Data Viewer's *current* λ / pixel / Lsd
      / beam centre into the Geometry fields (set a system up once, then capture it).
@@ -111,7 +116,8 @@ is convenient for a few scalar overrides.
     "calibration_pipeline": "one_shot", "integration_kernel": "subpixel2",
     "output_format": "csv", "azimuthal_method": "poisson", "plot_theme": "hot",
     "visible_tabs": ["Calib. Refinement", "Corrections", "PDF Analysis",
-                     "Texture", "Pump Probe", "Results & Export"]
+                     "Texture", "Pump Probe", "Results & Export"],
+    "ui_scale": 1.0
   }
 }
 ```
@@ -134,6 +140,8 @@ is convenient for a few scalar overrides.
   `Corrections`, `PDF Analysis`, `Texture`, `Pump Probe`, `Results & Export`); the
   four always-on tabs are implicit. Omit to show all. Unlike the rest, this one
   applies immediately (no restart).
+  `ui_scale` = whole-interface zoom (0.5–4.0) applied at startup via `QT_SCALE_FACTOR`
+  (~1.5 for 1440p, ~2.0 for 4K); takes effect on restart.
 
 > **Important — lists replace.** If you include `materials`, `calibrants`,
 > `pixel_presets`, or `k_edge_foils`, that section becomes your **complete** list

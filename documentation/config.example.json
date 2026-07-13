@@ -18,6 +18,7 @@
     "azimuthal_method": "poisson",
     "plot_theme": "hot",
     "visible_tabs": ["Calib. Refinement", "Corrections", "PDF Analysis",
-                     "Texture", "Pump Probe", "Results & Export"]
+                     "Texture", "Pump Probe", "Results & Export"],
+    "ui_scale": 1.0
   }
 }

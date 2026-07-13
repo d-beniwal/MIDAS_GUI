@@ -717,6 +717,11 @@ with the full shipped defaults** so you edit from a complete starting point:
 - **Tabs** — which tabs are visible. Data Viewer, Mask Builder, Calibrate and Batch
   Integrate are always shown (their boxes are locked on); tick/untick the rest. **Tab
   visibility applies immediately** on save (no restart), unlike the other settings.
+- **Display** — the **interface scale**, a whole-application zoom (layout *and* fonts)
+  for HiDPI / 4K monitors where the default looks too small. Pick a value or a preset
+  (100 % ≈ 1080p, 150 % ≈ 1440p, 200 % ≈ 4K); it applies after a restart (you're
+  offered one on save). Also reachable from **Settings ▸ Interface scaling…**. It is
+  implemented with Qt's `QT_SCALE_FACTOR`, so the whole layout scales uniformly.
 
 Buttons: **Save as my defaults** (write your config), **Save current GUI state**
 (capture the Data Viewer's live λ/pixel/Lsd/BC into the fields), **Save config to
@@ -738,11 +743,15 @@ next launch**.
   "ui": { "calibration_pipeline": "one_shot", "integration_kernel": "subpixel2",
           "output_format": "csv", "azimuthal_method": "poisson", "plot_theme": "hot",
           "visible_tabs": ["Calib. Refinement", "Corrections", "PDF Analysis",
-                           "Texture", "Pump Probe", "Results & Export"] }
+                           "Texture", "Pump Probe", "Results & Export"],
+          "ui_scale": 1.0 }
 }
 ```
 - `ui.visible_tabs` lists the **optional** tabs to show (the four always-on tabs are
   implicit). Omit it to show them all. Edit it from **Preferences ▸ Tabs**.
+- `ui.ui_scale` is the whole-interface zoom (0.5–4.0) applied at startup via
+  `QT_SCALE_FACTOR`; ~1.5 for 1440p, ~2.0 for 4K. Edit it from **Preferences ▸
+  Display** or **Settings ▸ Interface scaling…** (takes effect on restart).
 - When a **list section is present it fully replaces** that built-in list — so
   `materials`, `calibrants`, `pixel_presets` and `k_edge_foils` in the file are your
   complete lists. (The Preferences dialog pre-fills them with the shipped entries, so

@@ -154,6 +154,11 @@ DEFAULT_OUTPUT_FORMAT = "csv"         # key in OUTPUT_FORMATS
 DEFAULT_ERROR_MODEL   = "poisson"     # value in ERROR_MODELS
 DEFAULT_COLORMAP      = "hot"         # value in COLORMAPS
 
+# Interface scale (whole-app zoom for HiDPI / 4K monitors). Applied at startup via
+# Qt's QT_SCALE_FACTOR, so the entire layout + fonts scale uniformly. 1.0 suits a
+# 1080p display; try ~1.5 for 1440p and ~2.0 for 4K. Overridable via ui.ui_scale.
+DEFAULT_UI_SCALE      = 1.0           # multiplier, clamped to [0.5, 4.0] at startup
+
 # ── Modular tabs ────────────────────────────────────────────────────────────────
 # ALWAYS_TABS are pinned (cannot be hidden); OPTIONAL_TABS can be toggled from
 # Preferences. Names must match the base tab labels used in app.py. DEFAULT_VISIBLE_TABS
@@ -286,6 +291,12 @@ def _apply(cfg: dict) -> None:
             g["DEFAULT_VISIBLE_TABS"] = [str(x) for x in ui["visible_tabs"]]
     except Exception:
         pass
+    # interface scale (float multiplier)
+    try:
+        if ui.get("ui_scale") is not None:
+            g["DEFAULT_UI_SCALE"] = float(ui["ui_scale"])
+    except Exception:
+        pass
 
 
 # Pristine snapshot of the shipped defaults (captured BEFORE any overlay), so the
@@ -311,6 +322,7 @@ _SHIPPED = {
         "integration_kernel": DEFAULT_KERNEL, "calibration_pipeline": DEFAULT_PIPELINE,
         "output_format": DEFAULT_OUTPUT_FORMAT, "azimuthal_method": DEFAULT_ERROR_MODEL,
         "plot_theme": DEFAULT_COLORMAP, "visible_tabs": list(DEFAULT_VISIBLE_TABS),
+        "ui_scale": DEFAULT_UI_SCALE,
     },
 }
 
