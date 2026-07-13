@@ -96,6 +96,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Clickable px label with detector pixel-size menu | `3248638` |
 | Per-user JSON configuration system + Preferences dialog | `d30be2c` |
 | Modular tab visibility (show/hide optional tabs) | `590b410` |
+| User-adjustable interface scaling (HiDPI / 4K, QT_SCALE_FACTOR) | `d5fafd8` |
 
 ### Stability / performance / consistency (review-driven, phases 1–3)
 | Change | Commit |
@@ -113,6 +114,7 @@ Dates are commit dates (YYYY-MM-DD).
 | README/environment install via `pip install midas_suite` | `aceb40f` |
 | implementation_details.md/.pdf added | `524f5f1` |
 | config_gui.md + config.example.json added | `d30be2c` |
+| development_history.md/.pdf added | `6d6f3fb` |
 
 ---
 
@@ -337,6 +339,26 @@ wiring in `app.py`/`workers.py`; to remove **only modular tabs**, revert the
 A full `git revert 590b410` removes both features together. Depends on `aa9395e`
 (DataLoaderPanel), `1149afc` (build_integration_context), `2385f75`
 (`_convert_radial`/`_UnitAxis`), `d30be2c` (config/prefs).
+
+### `6d6f3fb` — docs: add development_history.md/.pdf (2026-07-13)
+**Effect:** Added this per-commit change log + change→commit index + rollback guide.
+**Files:** `documentation/development_history.md`, `documentation/development_history.pdf`.
+**Roll back:** docs only.
+
+### `d5fafd8` — UI scaling: user-adjustable whole-interface zoom (HiDPI / 4K) (2026-07-13)
+**Effect:** Whole-application scale (layout + fonts) for HiDPI / 4K monitors.
+`constants.DEFAULT_UI_SCALE` (config `ui.ui_scale`); `app.main()` applies it via
+`QT_SCALE_FACTOR` **before** the QApplication is created (so fixed widths, splitters,
+pyqtgraph and stylesheet px all scale uniformly) + `AA_UseHighDpiPixmaps`. Manual
+control in **Preferences ▸ Display** (spin + 100/125/150/200 % presets) and
+**Settings ▸ Interface scaling…**; both persist `ui.ui_scale` and offer an immediate
+self-restart (`MainWindow.restart_app` via `QProcess`) since the factor is read only
+at startup.
+**Files:** `constants.py`, `app.py`, `prefs_dialog.py`, docs (`gui_documentation`,
+`config_gui`, `config.example.json`).
+**Roll back:** `git revert d5fafd8`. Self-contained (depends only on the config
+system `d30be2c`); reverting removes the scale control and the app renders at 1.0×.
+To keep the feature but disable it, set `ui.ui_scale` to 1.0.
 
 ---
 
