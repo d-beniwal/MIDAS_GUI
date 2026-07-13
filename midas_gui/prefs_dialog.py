@@ -59,7 +59,7 @@ def _effective_cfg() -> dict:
         "ui": {
             "integration_kernel": C.DEFAULT_KERNEL, "calibration_pipeline": C.DEFAULT_PIPELINE,
             "output_format": C.DEFAULT_OUTPUT_FORMAT, "azimuthal_method": C.DEFAULT_ERROR_MODEL,
-            "plot_theme": C.DEFAULT_COLORMAP,
+            "plot_theme": C.DEFAULT_COLORMAP, "visible_tabs": list(C.DEFAULT_VISIBLE_TABS),
         },
     }
 
@@ -85,6 +85,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         self._cal_table = self._build_table_tab("Calibrants", _MAT_HEADERS)
         self._build_menus_tab()
         self._build_algorithms_tab()
+        self._build_tabs_tab()
 
         # action row
         arow = QtWidgets.QHBoxLayout()
@@ -201,6 +202,21 @@ class PreferencesDialog(QtWidgets.QDialog):
         f.addRow("Colormap / theme:", self._ui_cmap)
         self._tabs.addTab(w, "Algorithms")
 
+    def _build_tabs_tab(self):
+        w = QtWidgets.QWidget(); v = QtWidgets.QVBoxLayout(w)
+        v.addWidget(QtWidgets.QLabel(
+            "Choose which tabs are visible. Data Viewer, Mask, Calibrate and Batch "
+            "Integrate are always shown. Changes apply immediately."))
+        self._tab_checks = {}
+        for name in C.ALWAYS_TABS:
+            cb = QtWidgets.QCheckBox(name); cb.setChecked(True); cb.setEnabled(False)
+            v.addWidget(cb); self._tab_checks[name] = cb
+        for name in C.OPTIONAL_TABS:
+            cb = QtWidgets.QCheckBox(name)
+            v.addWidget(cb); self._tab_checks[name] = cb
+        v.addStretch(1)
+        self._tabs.addTab(w, "Tabs")
+
     # ── table helpers ──────────────────────────────────────────────────
     def _add_row(self, table, headers, values=None):
         r = table.rowCount(); table.insertRow(r)
@@ -274,6 +290,12 @@ class PreferencesDialog(QtWidgets.QDialog):
         self._select(self._ui_fmt, ui.get("output_format"), by_data=True)
         self._select(self._ui_err, ui.get("azimuthal_method"))
         self._select(self._ui_cmap, ui.get("plot_theme"))
+        visible = ui.get("visible_tabs")
+        if isinstance(visible, list):
+            vis = set(visible)
+            for name, cb in self._tab_checks.items():
+                if cb.isEnabled():           # skip the always-on (disabled) boxes
+                    cb.setChecked(name in vis)
 
     @staticmethod
     def _select(combo, value, by_data=False):
@@ -307,6 +329,8 @@ class PreferencesDialog(QtWidgets.QDialog):
                 "output_format": self._ui_fmt.currentData(),
                 "azimuthal_method": self._ui_err.currentText(),
                 "plot_theme": self._ui_cmap.currentText(),
+                "visible_tabs": [name for name, cb in self._tab_checks.items()
+                                 if cb.isChecked()],
             },
         }
 
@@ -378,10 +402,22 @@ class PreferencesDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.critical(self, "Reset failed", str(e))
 
     def _save(self):
+        cfg = self._assemble()
         try:
-            path = settings.save_user_config(self._assemble())
+            path = settings.save_user_config(cfg)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Save failed", str(e)); return
+        # Tab visibility can apply live (all tabs already exist); other settings
+        # (baked into widgets at construction) still need a restart.
+        applied_live = False
+        try:
+            if self._mw is not None and hasattr(self._mw, "apply_tab_visibility"):
+                self._mw.apply_tab_visibility(cfg["ui"]["visible_tabs"])
+                applied_live = True
+        except Exception:
+            pass
+        note = ("Tab visibility applied now; restart the GUI for other changes to apply."
+                if applied_live else "Restart the GUI to apply.")
         QtWidgets.QMessageBox.information(
-            self, "Saved", f"Saved as your defaults:\n{path}\n\nRestart the GUI to apply.")
+            self, "Saved", f"Saved as your defaults:\n{path}\n\n{note}")
         self.accept()

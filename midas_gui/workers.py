@@ -867,6 +867,131 @@ class BatchWorker(QtCore.QThread):
             self.failed.emit(traceback.format_exc())
 
 
+class PumpProbeWorker(QtCore.QThread):
+    """Integrate a pooled set of time-resolved (TR-XRD) frames with the MIDAS engine
+    (identical primitives to BatchWorker), then group by pump-probe delay and
+    reference-subtract to ΔI(q, delay).
+
+    ``frames`` is a list of ``(path, delay, fshw)`` — one entry per raw detector
+    image, with the delay already parsed (and sign-normalised) from the filename.
+    """
+    progress = QtCore.pyqtSignal(int, int)
+    log_line = QtCore.pyqtSignal(str)
+    finished = QtCore.pyqtSignal(dict)
+    failed   = QtCore.pyqtSignal(str)
+
+    def __init__(self, spec, frames, mask, kernel, corrections, weighted=True,
+                 q_cfg=None, ref_delays=None, norm_range=None, context=None,
+                 dark=None, bright=None, background=None, bright_mode="divide",
+                 parent=None):
+        super().__init__(parent)
+        self._spec = spec
+        self._frames = frames                 # [(path, delay, fshw), …]
+        self._mask = mask
+        self._kernel = kernel
+        self._corrections = corrections       # (pol, sa)
+        self._weighted = weighted
+        self._q_cfg = q_cfg                    # {"QMin","QMax","QBinSize"} or None
+        self._ref_delays = ref_delays          # explicit reference-delay set or None
+        self._norm_range = norm_range          # (qmin, qmax) per-pattern norm window or None
+        self._context = context
+        self._dark, self._bright, self._background = dark, bright, background
+        self._bright_mode = bright_mode
+
+    def run(self):
+        try:
+            import torch
+            spec = self._spec
+            spec.validate()
+            lsd = float(spec.Lsd); px = float(spec.pxY); wl = float(spec.Wavelength)
+
+            if self._context is not None:
+                self.log_line.emit("[pump] Reusing existing detector map…")
+                ctx = self._context
+            else:
+                self.log_line.emit("[pump] Building geometry (one-time)…")
+                ctx = build_integration_context(spec, self._kernel, self._mask,
+                                                self._corrections, self._weighted)
+            geom = ctx["geom"]; corr_counts = ctx["corr_counts"]; cnt = ctx["cnt"]
+            r_ax = ctx["r_ax"]
+
+            if self._q_cfg:
+                qgrid, r_ax = q_grid_and_r(self._q_cfg, lsd, px, wl)
+            two_theta, _, q_ax = axis_conversions(r_ax, lsd, px, wl)
+
+            fields_on = (self._dark is not None or self._bright is not None
+                         or self._background is not None)
+            total = len(self._frames)
+            self.log_line.emit(
+                f"[pump] {total} frames | kernel={self._kernel} | "
+                f"corrections={'on' if ctx['corr_on'] else 'off'} | "
+                f"q_uniform={'on' if self._q_cfg else 'off'} | "
+                f"fields={'on' if fields_on else 'off'}")
+
+            profiles, delays = [], []
+            for i, (path, delay, _fshw) in enumerate(self._frames):
+                if self.isInterruptionRequested():
+                    self.log_line.emit(f"[pump] aborted after {i} frame(s)")
+                    break
+                img = _load_image(path)
+                if fields_on:
+                    img = apply_field_corrections(
+                        img, dark=self._dark, bright=self._bright,
+                        bright_mode=self._bright_mode, background=self._background)
+                img_t = torch.from_numpy(img.astype(np.float64))
+                prof, _ = integrate_frame(
+                    img_t, spec, geom, self._kernel, self._corrections,
+                    None, False, corr_counts=corr_counts,
+                    weighted=self._weighted, cnt_cake=cnt)
+                if self._q_cfg:
+                    prof, _ = rebin_R_to_Q(compute_r_axis(spec), prof, None,
+                                           qgrid, lsd, px, wl)
+                if self._norm_range is not None:
+                    prof = self._normalize(prof, q_ax, self._norm_range)
+                profiles.append(prof); delays.append(float(delay))
+                self.progress.emit(i + 1, total)
+
+            if not profiles:
+                raise RuntimeError("No frames were integrated.")
+
+            result = self._group_and_difference(
+                np.asarray(profiles), np.asarray(delays), self._ref_delays)
+            result.update({"r_axis_px": r_ax, "q_axis": q_ax, "tth_axis": two_theta,
+                           "lsd": lsd, "px": px, "wl": wl})
+            self.finished.emit(result)
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+    @staticmethod
+    def _normalize(prof, q_ax, norm_range):
+        """Divide a profile by its mean intensity in a q-window (per-pattern norm)."""
+        lo, hi = float(norm_range[0]), float(norm_range[1])
+        sel = (q_ax >= lo) & (q_ax <= hi)
+        denom = float(np.mean(prof[sel])) if np.any(sel) else 0.0
+        return prof / denom if denom else prof
+
+    @staticmethod
+    def _group_and_difference(profiles, delays, ref_delays):
+        """Average repeats per delay → I_by_delay; subtract the reference (mean over
+        ``ref_delays`` if given, else all negative delays, else the earliest delay)
+        → ΔI(q, delay). Returns a dict of stacked arrays keyed by delay order."""
+        uniq = sorted(set(delays.tolist()))
+        I_by = np.array([profiles[delays == d].mean(axis=0) for d in uniq])
+        if ref_delays:
+            ref_set = [d for d in uniq if d in set(ref_delays)]
+        else:
+            ref_set = [d for d in uniq if d < 0]
+        if not ref_set:
+            ref_set = [uniq[0]]
+        ref_idx = [uniq.index(d) for d in ref_set]
+        reference = I_by[ref_idx].mean(axis=0)
+        dI = I_by - reference
+        n_per = [int(np.count_nonzero(delays == d)) for d in uniq]
+        return {"delays": uniq, "I_by_delay": I_by, "reference": reference,
+                "dI": dI, "ref_delays": ref_set, "n_per_delay": n_per,
+                "n": int(profiles.shape[0])}
+
+
 def _list_tiff_files(path: str) -> list:
     """Files a TIFFGlobSource would see for ``path`` (glob, folder, or file)."""
     p = Path(path)

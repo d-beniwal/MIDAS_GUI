@@ -19,34 +19,43 @@
 
 1. [Overview and Architecture](#1-overview-and-architecture)
 2. [Getting Started](#2-getting-started)
-3. [Tab 0 — Data Viewer](#3-tab-0--data-viewer)
-4. [Tab 1 — Mask Builder](#4-tab-1--mask-builder)
-5. [Tab 2 — Calibrate](#5-tab-2--calibrate)
-6. [Tab 3 — Calibration Refinement](#6-tab-3--calibration-refinement)
-7. [Tab 4 — Batch Integrate](#7-tab-4--batch-integrate)
-8. [Tab 5 — Corrections & Physics](#8-tab-5--corrections--physics)
-9. [Tab 6 — PDF Analysis](#9-tab-6--pdf-analysis)
-10. [Tab 7 — Texture / Pole Figure](#10-tab-7--texture--pole-figure)
-11. [Tab 8 — Results & Export](#11-tab-8--results--export)
-12. [Common UI Conventions](#12-common-ui-conventions)
-13. [Packaging, Deployment & Diagnostics](#13-packaging-deployment--diagnostics)
-14. [Configuration & Defaults](#14-configuration--defaults)
+3. [Data Viewer](#3-tab-0--data-viewer)
+4. [Mask Builder](#4-tab-1--mask-builder)
+5. [Calibrate](#5-tab-2--calibrate)
+6. [Calibration Refinement](#6-tab-3--calibration-refinement)
+7. [Batch Integrate](#7-tab-4--batch-integrate)
+8. [Corrections & Physics](#8-tab-5--corrections--physics)
+9. [PDF Analysis](#9-tab-6--pdf-analysis)
+10. [Texture / Pole Figure](#10-tab-7--texture--pole-figure)
+11. [Pump Probe (time-resolved / TR-XRD)](#11-pump-probe-time-resolved--tr-xrd)
+12. [Results & Export](#12-results--export)
+13. [Common UI Conventions](#13-common-ui-conventions)
+14. [Packaging, Deployment & Diagnostics](#14-packaging-deployment--diagnostics)
+15. [Configuration & Defaults](#15-configuration--defaults)
 
 ---
 
 ## 1. Overview and Architecture
 
-The MIDAS GUI is a 9-tab PyQt5 desktop application that exposes the scientific
-capability of the `midas_calibrate_v2` and `midas_integrate_v2` packages through a
-structured workflow. The intended order of use is:
+The MIDAS GUI is a modular PyQt5 desktop application (up to 10 tabs) that exposes the
+scientific capability of the `midas_calibrate_v2` and `midas_integrate_v2` packages
+through a structured workflow. The intended order of use is:
 
 ```
 Data Viewer (inspect) → Mask Builder → Calibrate → [Refine] → Batch Integrate
                                                               → Corrections preview
                                                               → PDF Analysis
                                                               → Texture / Pole Figure
+                                                              → Pump Probe (TR-XRD)
                                                               → Results & Export
 ```
+
+**Modular tabs.** Data Viewer, Mask Builder, Calibrate and Batch Integrate are always
+shown; the remaining tabs (Calibration Refinement, Corrections, PDF Analysis, Texture,
+Pump Probe, Results & Export) are optional and can be shown/hidden from **Settings ▸
+Preferences ▸ Tabs**. The choice is saved per-user (`ui.visible_tabs`) and applies
+immediately — see §15. Hidden tabs are only removed from the tab bar; they stay
+constructed, so cross-tab wiring and state are preserved.
 
 **Cross-tab shared state.** When Tab 2 (Calibrate) produces a result it is
 automatically propagated to all downstream tabs. When Tab 1 (Mask Builder) computes
@@ -577,7 +586,67 @@ format.
 
 ---
 
-## 11. Tab 8 — Results & Export  *(work in progress)*
+## 11. Pump Probe (time-resolved / TR-XRD)
+
+Analyses time-resolved (pump-probe) diffraction the way the TRR group does: a folder of
+raw detector frames is pooled by a filename prefix, the pump-probe **delay** is parsed
+from each name, every frame is integrated to I(q) with the **MIDAS engine** (the same
+core as Batch Integrate, driven by a calibration), repeats at each delay are averaged,
+and a reference (mean of the pre-time-zero / negative delays) is subtracted to give
+**ΔI(q, delay)**.
+
+**File-naming / pooling.** Frames follow `PREFIX-<fshw>fshw<delay>delay<id>.tif`, where
+`PREFIX` (e.g. `Ex01_Sa01_Sc17` = Experiment / Sample / Scan) is one opaque grouping key.
+**Scan folder** globs `PREFIX*.tif` in the loaded folder, parses `fshw` and `delay`
+(seconds) from each name, and reports how many frames and unique delays were found. The
+delay sign is flipped on load so positive delay = after the pump.
+
+The tab uses the same three-panel layout as Batch Integrate: **data loader** (left),
+**settings** (middle), **plots** (right).
+
+**Left — data loader** (the shared loader panel, as on Calibrate / Batch):
+- **Data** — the folder of raw frames (defaults to the shipped TRR data). An index
+  range / stride can subset the pooled frames.
+- **Dark / Bright / Background** — per-frame field corrections (compute each field, then
+  it is applied to every frame before integration).
+- **Mask** — a mask file and/or the mask from the Mask Builder tab.
+
+**Middle — settings.**
+- **Calibration source** — *From Tab 2* (the live calibration) or *From file*
+  (`calibration.json` / `paramstest.txt` / `.poni`). Same convention as Batch Integrate.
+  For the shipped TRR test data the field defaults to a ready MIDAS `paramstest`
+  (`Ex01_Sa01_Sc17_midas.txt`, converted from the dataset's pyFAI/Fit2D geometry), so
+  the tab integrates out of the box.
+- **Data pooling (TRR)** — the pooling **prefix** + **Scan folder** (the folder itself
+  comes from the loader on the left).
+- **Integration** — kernel, R/η bins, the plot axis (Q / 2θ / R), and optional
+  Q-uniform binning. Identical engine and options to Batch Integrate.
+- **Physics corrections** — polarization / solid-angle.
+- **Pump-probe options** — the reference-delay set (defaults to all negative delays;
+  multi-select to override), optional per-pattern normalization over a q-window, the ΔI
+  colour range (auto or fixed ±) and the diverging colormap.
+
+**Views (right panel).**
+1. **ΔI heatmap** — ΔI as a function of q (or 2θ / R) versus delay, diverging colour
+   centred at zero, with the reference lineout beside it (shared radial axis).
+2. **ΔI vs q** — one curve per delay, coloured along a rainbow by delay order.
+3. **Kinetics** — ΔI versus delay for user-defined q-bands (**Add band** over a q range);
+   x-axis in real delay (linear) or rank.
+4. **Mean patterns** — the averaged I(q) at each delay plus the reference, for a
+   signal-level / stability check.
+
+All views use a publication-style white theme with labelled axes and legends. A toolbar
+above the plots sets the **draw** mode (lines / lines+points / points) and the **line**,
+**point (sym)** and **font** sizes (the −/+ groups), as on the Batch Integrate tab. Pan
+and zoom are bounded to the data so you cannot lose the plot area.
+
+Integration runs off the GUI thread (`PumpProbeWorker`) with a progress bar and
+**Abort**. There is no peak fitting — peak position / width / area are read from the
+plots, matching the reference workflow.
+
+---
+
+## 12. Results & Export  *(work in progress)*
 
 Session summary + one-click export. Checkboxes select which products (calibration.json,
 paramstest.txt, mask.tif, integrated profiles, G(r), pole figures, session log) to copy
@@ -586,7 +655,7 @@ fraction, correction flags) can be copied to the clipboard for a Methods section
 
 ---
 
-## 12. Common UI Conventions
+## 13. Common UI Conventions
 
 - **Browse = load.** Selecting a file/folder (or pressing Enter in a path field) loads
   it immediately; there are no separate "Load" buttons. HDF5 dataset / frame-index
@@ -598,7 +667,7 @@ fraction, correction flags) can be copied to the clipboard for a Methods section
 
 ---
 
-## 13. Packaging, Deployment & Diagnostics
+## 14. Packaging, Deployment & Diagnostics
 
 **Packaging.** `midas-gui` is a MIDAS-style package: `pyproject.toml` (BSD-3-Clause),
 a `tests/` smoke suite, and `release.sh` for cutting versioned releases (see
@@ -620,12 +689,13 @@ ever "pops up and dies" (typically on Windows), send that log file.
 
 ---
 
-## 14. Configuration & Defaults
+## 15. Configuration & Defaults
 
 Every default in the GUI — detector geometry, data/output paths, ring-simulation
-**materials**, **calibrants**, the **pixel-preset** and **K-edge** menus, and the
-calibration / integration **algorithms** — can be set **without editing code**, via a
-single per-user JSON config that overrides the shipped built-in defaults.
+**materials**, **calibrants**, the **pixel-preset** and **K-edge** menus, the
+calibration / integration **algorithms**, and **which tabs are visible** — can be set
+**without editing code**, via a single per-user JSON config that overrides the shipped
+built-in defaults.
 
 ### Where it lives
 One per-user file, auto-located per OS:
@@ -644,6 +714,9 @@ with the full shipped defaults** so you edit from a complete starting point:
 - **Menus** — the pixel-size presets and K-edge foils.
 - **Algorithms** — default calibration pipeline, integration kernel, output format,
   error model, colormap/theme.
+- **Tabs** — which tabs are visible. Data Viewer, Mask Builder, Calibrate and Batch
+  Integrate are always shown (their boxes are locked on); tick/untick the rest. **Tab
+  visibility applies immediately** on save (no restart), unlike the other settings.
 
 Buttons: **Save as my defaults** (write your config), **Save current GUI state**
 (capture the Data Viewer's live λ/pixel/Lsd/BC into the fields), **Save config to
@@ -663,9 +736,13 @@ next launch**.
   "calibrants": { "CeO2": {"a":5.4116,"b":5.4116,"c":5.4116,"alpha":90,"beta":90,"gamma":90,"sg":225} },
   "paths": { "nickel_h5": "/data/mygroup/sample.h5", "calib_file": "/data/mygroup/calibration.json" },
   "ui": { "calibration_pipeline": "one_shot", "integration_kernel": "subpixel2",
-          "output_format": "csv", "azimuthal_method": "poisson", "plot_theme": "hot" }
+          "output_format": "csv", "azimuthal_method": "poisson", "plot_theme": "hot",
+          "visible_tabs": ["Calib. Refinement", "Corrections", "PDF Analysis",
+                           "Texture", "Pump Probe", "Results & Export"] }
 }
 ```
+- `ui.visible_tabs` lists the **optional** tabs to show (the four always-on tabs are
+  implicit). Omit it to show them all. Edit it from **Preferences ▸ Tabs**.
 - When a **list section is present it fully replaces** that built-in list — so
   `materials`, `calibrants`, `pixel_presets` and `k_edge_foils` in the file are your
   complete lists. (The Preferences dialog pre-fills them with the shipped entries, so

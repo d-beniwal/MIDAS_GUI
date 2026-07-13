@@ -65,7 +65,9 @@ from midas_gui.tab_refine import RefinementTab
 from midas_gui.tab_corrections import CorrectionsTab
 from midas_gui.tab_pdf import PDFTab
 from midas_gui.tab_texture import TextureTab
+from midas_gui.tab_pumpprobe import PumpProbeTab
 from midas_gui.tab_export import ExportTab
+from midas_gui import constants as C
 
 _CHECKMARK_SVG = _make_checkmark_svg()
 _ARROW_UP_SVG = _make_arrow_svg("up")
@@ -107,17 +109,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self._corr_tab   = _tab(CorrectionsTab,  "Corrections")
         self._pdf_tab    = _tab(PDFTab,          "PDF Analysis")
         self._tex_tab    = _tab(TextureTab,      "Texture")
+        self._pump_tab   = _tab(PumpProbeTab,    "Pump Probe")
         self._export_tab = _tab(ExportTab,       "Results & Export")
 
-        tabs.addTab(self._view_tab,   "⓪  Data Viewer")
-        tabs.addTab(self._mask_tab,   "①  Mask Builder")
-        tabs.addTab(self._cal_tab,    "②  Calibrate")
-        tabs.addTab(self._refine_tab, "③  Calib. Refinement")
-        tabs.addTab(self._batch_tab,  "④  Batch Integrate")
-        tabs.addTab(self._corr_tab,   "⑤  Corrections")
-        tabs.addTab(self._pdf_tab,    "⑥  PDF Analysis")
-        tabs.addTab(self._tex_tab,    "⑦  Texture")
-        tabs.addTab(self._export_tab, "⑧  Results & Export")
+        # All tabs are always CONSTRUCTED (cross-tab wiring below relies on the
+        # attributes existing); modular visibility only controls which are ADDED to
+        # the QTabWidget. `always` tabs are pinned; the rest are toggled from
+        # Preferences (see apply_tab_visibility / constants.DEFAULT_VISIBLE_TABS).
+        self._tabs = tabs
+        self._tab_specs = [
+            (self._view_tab,   "Data Viewer",       True),
+            (self._mask_tab,   "Mask Builder",      True),
+            (self._cal_tab,    "Calibrate",         True),
+            (self._refine_tab, "Calib. Refinement", False),
+            (self._batch_tab,  "Batch Integrate",   True),
+            (self._corr_tab,   "Corrections",       False),
+            (self._pdf_tab,    "PDF Analysis",      False),
+            (self._tex_tab,    "Texture",           False),
+            (self._pump_tab,   "Pump Probe",        False),
+            (self._export_tab, "Results & Export",  False),
+        ]
+        self.apply_tab_visibility()
 
         # Wire cross-tab signals defensively (skip any placeholder tab).
         def _connect(src, signal_name, targets, slot_name):
@@ -136,16 +148,18 @@ class MainWindow(QtWidgets.QMainWindow):
         # Mask propagation
         _connect(self._mask_tab, "maskReady",
                  (self._view_tab, self._cal_tab, self._batch_tab, self._refine_tab,
-                  self._corr_tab, self._pdf_tab, self._tex_tab, self._export_tab),
+                  self._corr_tab, self._pdf_tab, self._tex_tab, self._pump_tab,
+                  self._export_tab),
                  "set_mask_from_tab1")
         # Calibration propagation (Tab 2 result → consumers)
         _connect(self._cal_tab, "calibrationDone",
                  (self._batch_tab, self._mask_tab, self._refine_tab, self._corr_tab,
-                  self._pdf_tab, self._tex_tab, self._export_tab), "set_calibration")
+                  self._pdf_tab, self._tex_tab, self._pump_tab, self._export_tab),
+                 "set_calibration")
         # Refined geometry (Tab 4) re-broadcasts to the calibration consumers
         _connect(self._refine_tab, "refinedResult",
                  (self._batch_tab, self._mask_tab, self._corr_tab, self._pdf_tab,
-                  self._tex_tab, self._export_tab), "set_calibration")
+                  self._tex_tab, self._pump_tab, self._export_tab), "set_calibration")
 
         # Geometry hand-off between Data Viewer (Tab 0) and Calibrate (Tab 2):
         #   Data Viewer "→ Send geometry to Calibrate" pushes its values;
@@ -160,6 +174,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_menu()
         self.statusBar().showMessage(
             "Tip: mask → calibrate → (refine) → batch integrate")
+
+    # ── modular tab visibility ─────────────────────────────────────
+    _NUMERALS = "⓪①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭"
+
+    def apply_tab_visibility(self, visible=None):
+        """Rebuild the tab bar from ``self._tab_specs``, showing every pinned tab
+        plus the optional tabs named in ``visible`` (default:
+        ``constants.DEFAULT_VISIBLE_TABS``). Numerals are renumbered so they stay
+        contiguous. All tab widgets already exist, so this applies live (no
+        restart) and preserves each tab's in-memory state."""
+        if visible is None:
+            visible = getattr(C, "DEFAULT_VISIBLE_TABS", None) or []
+        visible = set(visible)
+        current = self._tabs.currentWidget()
+        self._tabs.clear()
+        i = 0
+        for widget, name, always in self._tab_specs:
+            if not (always or name in visible):
+                continue
+            prefix = self._NUMERALS[i] if i < len(self._NUMERALS) else str(i)
+            self._tabs.addTab(widget, f"{prefix}  {name}")
+            i += 1
+        # keep the previously-selected tab focused if it is still shown
+        idx = self._tabs.indexOf(current) if current is not None else -1
+        if idx >= 0:
+            self._tabs.setCurrentIndex(idx)
 
     def _build_menu(self):
         """Settings menu: preferences, open config folder, reload."""
@@ -197,7 +237,8 @@ class MainWindow(QtWidgets.QMainWindow):
         tab (and any parked orphans), so nothing is left running at teardown — a
         live QThread at interpreter exit is a common hard-crash cause."""
         tab_attrs = ("_view_tab", "_mask_tab", "_cal_tab", "_refine_tab",
-                     "_batch_tab", "_corr_tab", "_pdf_tab", "_tex_tab", "_export_tab")
+                     "_batch_tab", "_corr_tab", "_pdf_tab", "_tex_tab",
+                     "_pump_tab", "_export_tab")
         threads = []
         for a in tab_attrs:
             tab = getattr(self, a, None)

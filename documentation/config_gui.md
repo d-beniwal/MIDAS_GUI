@@ -3,7 +3,7 @@
 **A step-by-step guide to setting up your own defaults, paths, materials and
 algorithms.**
 
-Focused how-to companion to the main `gui_documentation.md` (§14). Everything is
+Focused how-to companion to the main `gui_documentation.md` (§15). Everything is
 stored in **one per-user JSON config** that overrides the shipped built-in
 defaults. You can manage it entirely from the **Preferences dialog**, or edit /
 share the JSON file directly.
@@ -22,6 +22,7 @@ Without editing any code:
 | **Calibrants** | the calibrant list on the Calibrate tab |
 | **Default paths** | default data / calibration / output files & folders |
 | **Algorithms** | default calibration pipeline, integration kernel, output format, error model, colormap |
+| **Visible tabs** | which optional tabs are shown (Data Viewer, Mask, Calibrate, Batch are always on) |
 
 ## 2. How it works
 
@@ -61,6 +62,9 @@ writes it. **Settings ▸ Open config folder** jumps straight to it.
    - **Menus** — the pixel-size presets (label + µm) and K-edge foils (element + keV).
    - **Algorithms** — default calibration pipeline, integration kernel, output
      format, error model, and colormap/theme.
+   - **Tabs** — tick which optional tabs are visible. Data Viewer, Mask, Calibrate
+     and Batch Integrate are always on (locked). This setting **applies immediately**
+     on Save — no restart needed (unlike the others).
 4. Handy buttons (top of the dialog):
    - **Save current GUI state** — copies the Data Viewer's *current* λ / pixel / Lsd
      / beam centre into the Geometry fields (set a system up once, then capture it).
@@ -105,7 +109,9 @@ is convenient for a few scalar overrides.
   },
   "ui": {
     "calibration_pipeline": "one_shot", "integration_kernel": "subpixel2",
-    "output_format": "csv", "azimuthal_method": "poisson", "plot_theme": "hot"
+    "output_format": "csv", "azimuthal_method": "poisson", "plot_theme": "hot",
+    "visible_tabs": ["Calib. Refinement", "Corrections", "PDF Analysis",
+                     "Texture", "Pump Probe", "Results & Export"]
   }
 }
 ```
@@ -124,6 +130,10 @@ is convenient for a few scalar overrides.
   `output_format` ∈ `csv | xye | fxye | dat | h5 | 2d_csv`;
   `azimuthal_method` (error model) ∈ `poisson | azimuthal | hybrid`;
   `plot_theme` (colormap) ∈ `hot | gray | viridis | inferno | plasma | turbo`.
+  `visible_tabs` = the list of **optional** tabs to show (`Calib. Refinement`,
+  `Corrections`, `PDF Analysis`, `Texture`, `Pump Probe`, `Results & Export`); the
+  four always-on tabs are implicit. Omit to show all. Unlike the rest, this one
+  applies immediately (no restart).
 
 > **Important — lists replace.** If you include `materials`, `calibrants`,
 > `pixel_presets`, or `k_edge_foils`, that section becomes your **complete** list

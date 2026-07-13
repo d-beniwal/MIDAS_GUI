@@ -154,6 +154,23 @@ DEFAULT_OUTPUT_FORMAT = "csv"         # key in OUTPUT_FORMATS
 DEFAULT_ERROR_MODEL   = "poisson"     # value in ERROR_MODELS
 DEFAULT_COLORMAP      = "hot"         # value in COLORMAPS
 
+# ── Modular tabs ────────────────────────────────────────────────────────────────
+# ALWAYS_TABS are pinned (cannot be hidden); OPTIONAL_TABS can be toggled from
+# Preferences. Names must match the base tab labels used in app.py. DEFAULT_VISIBLE_TABS
+# is the subset of OPTIONAL_TABS shown at startup (all optional tabs ship enabled);
+# it is overridable via the per-user config key ``ui.visible_tabs``.
+ALWAYS_TABS = ["Data Viewer", "Mask Builder", "Calibrate", "Batch Integrate"]
+OPTIONAL_TABS = ["Calib. Refinement", "Corrections", "PDF Analysis", "Texture",
+                 "Pump Probe", "Results & Export"]
+DEFAULT_VISIBLE_TABS = list(OPTIONAL_TABS)
+
+# ── Pump Probe (TR-XRD) defaults — TRR-group time-resolved test data ────────────
+DEFAULT_TRXRD_DIR    = str(_TEST_DATA / "TRXRDPython" / "testdata" / "detimages")
+DEFAULT_TRXRD_PREFIX = "Ex01_Sa01_Sc17"
+# MIDAS calibration for the TRR Pilatus2M data (converted from its pyFAI/Fit2D
+# geometry). Used as the default "From file" calibration in the Pump Probe tab.
+DEFAULT_TRXRD_CALIB  = str(_TEST_DATA / "TRXRDPython" / "testdata" / "Ex01_Sa01_Sc17_midas.txt")
+
 
 # ── User / group config overlay ─────────────────────────────────────────────────
 def _coerce_material(d: dict) -> dict:
@@ -263,6 +280,12 @@ def _apply(cfg: dict) -> None:
                 g[target] = str(ui[key])
         except Exception:
             pass
+    # visible optional tabs — replace wholesale if a list is provided
+    try:
+        if isinstance(ui.get("visible_tabs"), list):
+            g["DEFAULT_VISIBLE_TABS"] = [str(x) for x in ui["visible_tabs"]]
+    except Exception:
+        pass
 
 
 # Pristine snapshot of the shipped defaults (captured BEFORE any overlay), so the
@@ -287,7 +310,7 @@ _SHIPPED = {
     "ui": {
         "integration_kernel": DEFAULT_KERNEL, "calibration_pipeline": DEFAULT_PIPELINE,
         "output_format": DEFAULT_OUTPUT_FORMAT, "azimuthal_method": DEFAULT_ERROR_MODEL,
-        "plot_theme": DEFAULT_COLORMAP,
+        "plot_theme": DEFAULT_COLORMAP, "visible_tabs": list(DEFAULT_VISIBLE_TABS),
     },
 }
 
