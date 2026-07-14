@@ -248,7 +248,7 @@ class DataViewerTab(QtWidgets.QWidget):
         ring.body.addWidget(self._sim_btn)
         self._ring_info = QtWidgets.QPlainTextEdit(); self._ring_info.setReadOnly(True)
         self._ring_info.setMaximumHeight(140)
-        self._ring_info.setStyleSheet("font-family:monospace;font-size:10px")
+        self._ring_info.setStyleSheet(f"font-family:{S.MONO_CSS};font-size:10px")
         ring.body.addWidget(self._ring_info)
         lv.addWidget(ring)
         lv.addStretch(1)

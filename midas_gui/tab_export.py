@@ -63,7 +63,7 @@ class ExportTab(QtWidgets.QWidget):
         right = QtWidgets.QWidget(); rv = QtWidgets.QVBoxLayout(right)
         rv.addWidget(QtWidgets.QLabel("<b>Session summary</b>"))
         self._summary = QtWidgets.QPlainTextEdit(); self._summary.setReadOnly(True)
-        self._summary.setStyleSheet("font-family:monospace;font-size:11px")
+        self._summary.setStyleSheet(f"font-family:{S.MONO_CSS};font-size:11px")
         rv.addWidget(self._summary)
         copy_btn = QtWidgets.QPushButton("Copy summary to clipboard")
         copy_btn.clicked.connect(lambda: QtWidgets.QApplication.clipboard().setText(self._summary.toPlainText()))

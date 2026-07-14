@@ -23,6 +23,12 @@ HOVER     = "#adadad"
 ACCENT    = "#ff7800"   # orange accent (selected / checked / primary)
 ACCENT_D  = "#b15000"
 
+# Fixed-width font stack. Naming real per-platform families (rather than the generic
+# "monospace" / QFont("Monospace")) lets Qt resolve immediately, avoiding the
+# "qt.qpa.fonts: Populating font family aliases" startup warning on macOS/Windows.
+MONO_FAMILIES = ["Menlo", "Consolas", "DejaVu Sans Mono", "Courier New"]
+MONO_CSS = ", ".join(f'"{f}"' if " " in f else f for f in MONO_FAMILIES)
+
 
 def stylesheet(checkmark_svg: str, up_arrow_svg: str = "", down_arrow_svg: str = "") -> str:
     """Return the full application QSS.

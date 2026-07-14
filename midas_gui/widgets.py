@@ -27,6 +27,23 @@ _DEFAULT_CMAP = DEFAULT_COLORMAP if DEFAULT_COLORMAP in COLORMAPS else COLORMAPS
 from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollDoubleSpinBox, _fspin, _twocol,
                                _browse, is_h5, list_h5_datasets, _NoScrollComboBox,
                                _load_image, _collect_frame_paths, apply_field_corrections)
+from midas_gui import style as S
+
+
+def _mono_font(size: int) -> QtGui.QFont:
+    """A fixed-width font at ``size`` pt using the real-family stack in style.py.
+
+    Naming concrete families (Menlo/Consolas/…) instead of ``QFont("Monospace")``
+    avoids Qt scanning and building font-family aliases at startup (the
+    "qt.qpa.fonts: Populating font family aliases" warning) on macOS/Windows."""
+    f = QtGui.QFont()
+    try:
+        f.setFamilies(S.MONO_FAMILIES)
+    except Exception:
+        f.setFamily(S.MONO_FAMILIES[0])
+    f.setStyleHint(QtGui.QFont.Monospace)
+    f.setPointSize(size)
+    return f
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -96,7 +113,7 @@ class ImageViewer(QtWidgets.QWidget):
         # Bottom status bar — pixel coordinates and raw value on hover
         self._coord_bar = QtWidgets.QLabel("Move cursor over image to inspect pixel values")
         self._coord_bar.setStyleSheet(
-            "color:#dddddd; background:#1a1a1a; font-family:monospace;"
+            f"color:#dddddd; background:#1a1a1a; font-family:{S.MONO_CSS};"
             "font-size:12px; padding:2px 6px; border-top:1px solid #444;")
         layout.addWidget(self._coord_bar)
 
@@ -1077,7 +1094,7 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
 
         self._text = QtWidgets.QPlainTextEdit()
         self._text.setReadOnly(True)
-        self._text.setFont(QtGui.QFont("Monospace", 8))
+        self._text.setFont(_mono_font(8))
         self._text.setFixedHeight(120)
         self._text.setStyleSheet(
             "QPlainTextEdit { background:#23252b; color:#d6d6d6; border:1px solid #444; }")
@@ -2038,7 +2055,7 @@ class LogPanel(QtWidgets.QPlainTextEdit):
         super().__init__(parent)
         self.setReadOnly(True)
         self.setMaximumBlockCount(1000)
-        self.setFont(QtGui.QFont("Monospace", 9))
+        self.setFont(_mono_font(9))
         self.setMaximumHeight(120)
 
     def append(self, line: str):
