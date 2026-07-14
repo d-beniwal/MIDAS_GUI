@@ -23,8 +23,7 @@ from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _predict_ring_radii, _NoScrollComboBox,
     make_kedge_label, make_pixel_label)
 from midas_gui.widgets import (
-    PickableImageViewer, ProfileViewer, LogPanel, ResidualBarChart, DistortionTable,
-    DataLoaderPanel)
+    PickableImageViewer, ProfileViewer, LogPanel, ResidualBarChart, DataLoaderPanel)
 from midas_gui.workers import CalibrationWorker, IntegrationWorker, CorrectedRingsWorker
 from midas_gui.dialogs import _SaveParamstestDialog
 from midas_gui import style as S
@@ -298,10 +297,11 @@ class CalibrationTab(QtWidgets.QWidget):
         self._resid_chart = ResidualBarChart()
         bot.addTab(self._resid_chart, "Ring Residuals")
         # Results tab: the full parameter set exactly as written to paramstest.txt,
-        # laid out across several columns (the panel is wide but short), plus a
-        # named-distortion table and a button to push the geometry to the Data Viewer.
+        # laid out across several columns (the panel is wide but short) as plain text —
+        # including the distortion coefficients (no table) — plus a button to push the
+        # geometry to the Data Viewer.
         res_w = QtWidgets.QWidget(); rl = QtWidgets.QVBoxLayout(res_w)
-        rl.setContentsMargins(8, 6, 8, 6); rl.setSpacing(6)
+        rl.setContentsMargins(10, 8, 10, 8); rl.setSpacing(8)
         hdr = QtWidgets.QHBoxLayout()
         hdr.addWidget(QtWidgets.QLabel("<b>Calibration parameters</b> "
                                        "(as written to <code>paramstest.txt</code>)"))
@@ -316,19 +316,14 @@ class CalibrationTab(QtWidgets.QWidget):
         rl.addLayout(hdr)
 
         self._param_grid = QtWidgets.QGridLayout()
-        self._param_grid.setHorizontalSpacing(18); self._param_grid.setVerticalSpacing(3)
+        self._param_grid.setHorizontalSpacing(28); self._param_grid.setVerticalSpacing(9)
         _pg_host = QtWidgets.QWidget(); _pg_host.setLayout(self._param_grid)
         rl.addWidget(_pg_host)
 
         self._r_diag = QtWidgets.QLabel("Run a calibration to see the parameters.")
-        self._r_diag.setStyleSheet(f"color:{S.MUTED};font-size:11px")
+        self._r_diag.setStyleSheet(f"color:{S.MUTED};font-size:12px")
         self._r_diag.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         rl.addWidget(self._r_diag)
-
-        rl.addWidget(S.hline())
-        rl.addWidget(QtWidgets.QLabel("Distortion coefficients (named):"))
-        self._dist_table = DistortionTable()
-        rl.addWidget(self._dist_table)
         rl.addStretch(1)
         bot.addTab(res_w, "Results")
         self._log = LogPanel()
@@ -592,25 +587,30 @@ class CalibrationTab(QtWidgets.QWidget):
         return pairs
 
     def _populate_param_grid(self, pairs, ncols=3):
-        """Lay (key, value) pairs into ``ncols`` columns, filled column-major so each
-        column reads top-to-bottom in file order."""
+        """Lay (key, value) pairs into ``ncols`` columns as plain text, filled
+        column-major so each column reads top-to-bottom in file order. The paramstest
+        distortion slots p0–p14 are relabelled with their coefficient names
+        (iso_R2, a1, …) so the distortion reads clearly without a separate table."""
         import math
         from midas_gui.widgets import _mono_font
+        from midas_gui.helpers import _PARAMSTEST_DISTORTION   # p#-slot → v2 name
         grid = self._param_grid
         while grid.count():                       # clear previous run
             item = grid.takeAt(0)
             w = item.widget()
             if w is not None:
                 w.deleteLater()
-        mono = _mono_font(10)
+        mono = _mono_font(12)
+        klbl = "font-weight:600; font-size:12px;"
         n = len(pairs); nrows = max(1, math.ceil(n / ncols))
         for idx, (key, val) in enumerate(pairs):
             col, row = idx // nrows, idx % nrows
-            k = QtWidgets.QLabel(f"{key}:"); k.setStyleSheet("font-weight:600;")
+            label = _PARAMSTEST_DISTORTION.get(key, key)   # name distortion slots
+            k = QtWidgets.QLabel(f"{label}:"); k.setStyleSheet(klbl)
             v = QtWidgets.QLabel(val); v.setFont(mono)
             v.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-            grid.addWidget(k, row, col * 2, QtCore.Qt.AlignRight)
-            grid.addWidget(v, row, col * 2 + 1)
+            grid.addWidget(k, row, col * 2, QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            grid.addWidget(v, row, col * 2 + 1, QtCore.Qt.AlignVCenter)
         grid.setColumnStretch(ncols * 2 + 1, 1)
 
     def _send_to_viewer(self):
@@ -641,7 +641,6 @@ class CalibrationTab(QtWidgets.QWidget):
         strain_txt = f"{s:.1f} µε" if s else "n/a"
         self._r_diag.setText(f"Post-refine strain: {strain_txt}    ·    "
                              f"timing: seed={seed_s:.1f} s, refine={ref_s:.1f} s")
-        self._dist_table.set_distortion(result.distortion or {})
         self._to_view_btn.setEnabled(True)
         self._save_json_btn.setEnabled(True)
         self._save_ps_btn.setEnabled(True)
