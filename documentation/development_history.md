@@ -70,6 +70,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Calibration input accepts paramstest/poni/json | `41f28f5` |
 | Load-calibration-file (geometry + λ) helpers | `b381d8d` |
 | Multi-column paramstest results readout + Send-to-Data-Viewer button | `455ca4e` |
+| Calibrate Results all-text (drop distortion table; named distortion, bigger font) | `3a6ecb9` |
 
 ### Batch Integrate (Tab 4)
 | Change | Commit |
@@ -463,6 +464,16 @@ and the CPU-only torch install note. Verified end-to-end: fresh env resolves cle
 **Roll back:** `git revert 68313f8` (returns to ranged deps; a fresh env would again risk
 the NumPy-2/torch mismatch). To move forward to a NumPy-2 stack instead, bump torch>=2.3
 and the backends to their numba-0.66 releases together.
+
+### `3a6ecb9` — Calibrate Results: all-text multi-column readout (drop distortion table) (2026-07-14)
+**Effect:** The Calibrate **Results** tab is now entirely text. Removed the distortion
+`QTableWidget`; the distortion coefficients appear in the same multi-column parameter
+grid, with the paramstest `p0–p14` slots relabelled to their names (iso_R2, a1, phi1, …)
+via `helpers._PARAMSTEST_DISTORTION`. Larger font (12 pt) and roomier row/column spacing
+for readability. Removed the `DistortionTable` import + `set_distortion` call.
+**Files:** `tab_calibrate.py`, `documentation/gui_documentation.md`.
+**Roll back:** `git revert 3a6ecb9` (restores the named-distortion table widget below the
+grid). `DistortionTable` still exists in `widgets.py` (used only here), so a revert is clean.
 
 ---
 
