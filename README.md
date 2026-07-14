@@ -36,12 +36,13 @@ midas-gui                              # launch (equivalently: python -m midas_g
 ```
 
 The GUI drives the MIDAS analysis backends (`midas-calibrate-v2`, `midas-integrate-v2`,
-`midas-calibrate`, `midas-hkls`, `midas-distortion`). These are all provided by the
-`midas-suite` meta-package — install them with:
+`midas-calibrate`, `midas-hkls`, `midas-distortion`). **These are installed
+automatically** by `conda env create` above — they are declared in `pyproject.toml`, so
+the editable `-e .` install pulls them in. No separate step is needed.
 
-```bash
-pip install midas_suite
-```
+> Do **not** `pip install midas_suite` into this environment: the meta-package pulls
+> extra components the GUI never uses (e.g. `midas-index`, whose current sdist fails to
+> build against `scikit-build-core>=0.8`) and that will abort the install.
 
 ## Development
 
