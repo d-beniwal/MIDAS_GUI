@@ -98,6 +98,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Modular tab visibility (show/hide optional tabs) | `590b410` |
 | User-adjustable interface scaling (HiDPI / 4K, QT_SCALE_FACTOR) | `d5fafd8` |
 | Lsd displayed in mm (calculations & calibration files stay in µm) | `c4e1c12` |
+| Fix "Populating font family aliases" warning (real fixed-width fonts) | `d6df1f8` |
 
 ### Stability / performance / consistency (review-driven, phases 1–3)
 | Change | Commit |
@@ -371,6 +372,17 @@ config key stays `lsd_um` (µm); calibration-file writers (`paramstest.txt`,
 **Files:** `tab_view.py`, `tab_calibrate.py`, `prefs_dialog.py`, `tab_batch.py`, docs.
 **Roll back:** `git revert c4e1c12` to return every Lsd field to a µm display. Purely
 a display-layer change — no stored/file/calculation values are affected either way.
+
+### `d6df1f8` — Fix "Populating font family aliases" startup warning (2026-07-13)
+**Effect:** Removed the `qt.qpa.fonts: Populating font family aliases` warning (and its
+~40 ms startup cost) that Qt emitted because the code named the nonexistent family
+"Monospace" — both via `QFont("Monospace", …)` and the CSS generic
+`font-family:monospace`. Now names real per-platform families
+(Menlo/Consolas/DejaVu Sans Mono/Courier New) via `style.MONO_FAMILIES` / `MONO_CSS`
+and `widgets._mono_font()` (QFont `setFamilies` + Monospace style hint).
+**Files:** `style.py`, `widgets.py`, `tab_export.py`, `tab_view.py`.
+**Roll back:** `git revert d6df1f8` (cosmetic; only affects fixed-width font selection
+and re-introduces the harmless warning).
 
 ---
 
