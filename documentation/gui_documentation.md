@@ -53,7 +53,9 @@ Data Viewer (inspect) → Mask Builder → Calibrate → [Refine] → Batch Inte
 **Modular tabs.** Data Viewer, Mask Builder, Calibrate and Batch Integrate are always
 shown; the remaining tabs (Calibration Refinement, Corrections, PDF Analysis, Texture,
 Pump Probe, Results & Export) are optional and can be shown/hidden from **Settings ▸
-Preferences ▸ Tabs**. The choice is saved per-user (`ui.visible_tabs`) and applies
+Preferences ▸ Tabs**. By default only **Calib. Refinement** and **Pump Probe** are
+shown; Corrections, PDF Analysis, Texture and Results & Export ship **hidden** — turn
+them on when you need them. The choice is saved per-user (`ui.visible_tabs`) and applies
 immediately — see §15. Hidden tabs are only removed from the tab bar; they stay
 constructed, so cross-tab wiring and state are preserved.
 
@@ -752,13 +754,14 @@ next launch**.
   "paths": { "nickel_h5": "/data/mygroup/sample.h5", "calib_file": "/data/mygroup/calibration.json" },
   "ui": { "calibration_pipeline": "one_shot", "integration_kernel": "subpixel2",
           "output_format": "csv", "azimuthal_method": "poisson", "plot_theme": "hot",
-          "visible_tabs": ["Calib. Refinement", "Corrections", "PDF Analysis",
-                           "Texture", "Pump Probe", "Results & Export"],
+          "visible_tabs": ["Calib. Refinement", "Pump Probe"],
           "ui_scale": 1.0 }
 }
 ```
 - `ui.visible_tabs` lists the **optional** tabs to show (the four always-on tabs are
-  implicit). Omit it to show them all. Edit it from **Preferences ▸ Tabs**.
+  implicit). The shipped default is `["Calib. Refinement", "Pump Probe"]` — Corrections,
+  PDF Analysis, Texture and Results & Export are hidden until you add them. Edit it from
+  **Preferences ▸ Tabs**.
 - `ui.ui_scale` is the whole-interface zoom (0.5–4.0) applied at startup via
   `QT_SCALE_FACTOR`; ~1.5 for 1440p, ~2.0 for 4K. Edit it from **Preferences ▸
   Display** or **Settings ▸ Interface scaling…** (takes effect on restart).

@@ -56,5 +56,18 @@ htmlcov/
 # Local Claude working context (plans, ported context, notes)
 claude/
 
-# Local test data (synthetic + real calibration frames, ~40 MB)
-test_data/
+# ── Shipped sample data ──────────────────────────────────────────────────────
+# test_data/ ships with the repo so the GUI works out of the box. Re-include its
+# data files despite the global *.tif/*.h5/... ignores above (order matters — these
+# negations come last). Generated outputs and scratch files stay ignored.
+!test_data/**/*.tif
+!test_data/**/*.tiff
+!test_data/**/*.h5
+!test_data/**/*.hdf5
+!test_data/**/*.json
+!test_data/**/*.csv
+!test_data/**/*.txt
+!test_data/**/*.py
+!test_data/**/*.png
+test_data/output/
+test_data/out_temp.txt

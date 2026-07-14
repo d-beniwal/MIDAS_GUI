@@ -115,8 +115,7 @@ is convenient for a few scalar overrides.
   "ui": {
     "calibration_pipeline": "one_shot", "integration_kernel": "subpixel2",
     "output_format": "csv", "azimuthal_method": "poisson", "plot_theme": "hot",
-    "visible_tabs": ["Calib. Refinement", "Corrections", "PDF Analysis",
-                     "Texture", "Pump Probe", "Results & Export"],
+    "visible_tabs": ["Calib. Refinement", "Pump Probe"],
     "ui_scale": 1.0
   }
 }
@@ -136,10 +135,11 @@ is convenient for a few scalar overrides.
   `output_format` ∈ `csv | xye | fxye | dat | h5 | 2d_csv`;
   `azimuthal_method` (error model) ∈ `poisson | azimuthal | hybrid`;
   `plot_theme` (colormap) ∈ `hot | gray | viridis | inferno | plasma | turbo`.
-  `visible_tabs` = the list of **optional** tabs to show (`Calib. Refinement`,
+  `visible_tabs` = the list of **optional** tabs to show (any of `Calib. Refinement`,
   `Corrections`, `PDF Analysis`, `Texture`, `Pump Probe`, `Results & Export`); the
-  four always-on tabs are implicit. Omit to show all. Unlike the rest, this one
-  applies immediately (no restart).
+  four always-on tabs are implicit. The shipped default is
+  `["Calib. Refinement", "Pump Probe"]` (the other four ship hidden). Unlike the rest,
+  this one applies immediately (no restart).
   `ui_scale` = whole-interface zoom (0.5–4.0) applied at startup via `QT_SCALE_FACTOR`
   (~1.5 for 1440p, ~2.0 for 4K); takes effect on restart.
 

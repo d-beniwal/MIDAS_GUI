@@ -17,8 +17,7 @@
     "output_format": "csv",
     "azimuthal_method": "poisson",
     "plot_theme": "hot",
-    "visible_tabs": ["Calib. Refinement", "Corrections", "PDF Analysis",
-                     "Texture", "Pump Probe", "Results & Export"],
+    "visible_tabs": ["Calib. Refinement", "Pump Probe"],
     "ui_scale": 1.0
   }
 }

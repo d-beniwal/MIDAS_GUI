@@ -26,21 +26,22 @@ def test_version_matches_pyproject():
 
 
 def test_app_builds_offscreen():
-    """The 10-tab MainWindow constructs headless when the full stack is present."""
+    """MainWindow constructs headless with the always-on + default-visible tabs."""
     QtWidgets = pytest.importorskip("PyQt5.QtWidgets")
     try:
         import midas_gui.app as app_mod
+        import midas_gui.constants as C
     except Exception as exc:  # MIDAS backends absent → nothing to test here
         pytest.skip(f"midas_gui.app needs the full MIDAS stack: {exc}")
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     win = app_mod.MainWindow()
-    # 4 always-on + 6 optional (all shipped visible), incl. the Pump Probe tab.
-    assert win.centralWidget().count() == 10
+    # 4 always-on + the default-visible optional tabs.
+    assert win.centralWidget().count() == len(C.ALWAYS_TABS) + len(C.DEFAULT_VISIBLE_TABS)
 
 
 def test_tab_visibility_toggle():
-    """Hiding every optional tab leaves exactly the four always-on tabs; restoring
-    the shipped set brings them all back. All tabs stay constructed (live apply)."""
+    """Hiding every optional tab leaves exactly the four always-on tabs; showing all
+    optional tabs brings the full set. All tabs stay constructed (live apply)."""
     QtWidgets = pytest.importorskip("PyQt5.QtWidgets")
     try:
         import midas_gui.app as app_mod
@@ -51,7 +52,7 @@ def test_tab_visibility_toggle():
     win = app_mod.MainWindow()
     win.apply_tab_visibility([])
     assert win.centralWidget().count() == len(C.ALWAYS_TABS)
-    win.apply_tab_visibility(C.DEFAULT_VISIBLE_TABS)
+    win.apply_tab_visibility(C.OPTIONAL_TABS)
     assert win.centralWidget().count() == len(C.ALWAYS_TABS) + len(C.OPTIONAL_TABS)
 
 

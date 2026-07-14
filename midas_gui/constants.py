@@ -167,7 +167,9 @@ DEFAULT_UI_SCALE      = 1.0           # multiplier, clamped to [0.5, 4.0] at sta
 ALWAYS_TABS = ["Data Viewer", "Mask Builder", "Calibrate", "Batch Integrate"]
 OPTIONAL_TABS = ["Calib. Refinement", "Corrections", "PDF Analysis", "Texture",
                  "Pump Probe", "Results & Export"]
-DEFAULT_VISIBLE_TABS = list(OPTIONAL_TABS)
+# Optional tabs shown by default. Corrections / PDF Analysis / Texture / Results &
+# Export ship hidden (turn them on in Settings ▸ Preferences ▸ Tabs).
+DEFAULT_VISIBLE_TABS = ["Calib. Refinement", "Pump Probe"]
 
 # ── Pump Probe (TR-XRD) defaults — TRR-group time-resolved test data ────────────
 DEFAULT_TRXRD_DIR    = str(_TEST_DATA / "TRXRDPython" / "testdata" / "detimages")
