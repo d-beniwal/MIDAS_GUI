@@ -170,7 +170,8 @@ class CalibrationTab(QtWidgets.QWidget):
         seed.body.addWidget(self._manual_seed_check)
         self._seed_bcy = _fspin(-99999, 99999, 2, DEFAULT_BC_Y, "px")
         self._seed_bcz = _fspin(-99999, 99999, 2, DEFAULT_BC_Z, "px")
-        self._seed_lsd = _fspin(1e3, 1e8, 1, DEFAULT_LSD_UM, "µm")
+        # Lsd shown/entered in mm; calculations & files use µm.
+        self._seed_lsd = _fspin(0.001, 1e5, 4, DEFAULT_LSD_UM / 1000.0, " mm")
         for w in (self._seed_bcy, self._seed_bcz, self._seed_lsd):
             w.setEnabled(False)
         for sig in (self._seed_bcy, self._seed_bcz, self._seed_lsd):
@@ -399,7 +400,7 @@ class CalibrationTab(QtWidgets.QWidget):
         self._manual_seed_check.setChecked(True)
         self._seed_bcy.setValue(float(g["BC_y"]))
         self._seed_bcz.setValue(float(g["BC_z"]))
-        self._seed_lsd.setValue(float(g["Lsd"]))
+        self._seed_lsd.setValue(float(g["Lsd"]) / 1000.0)   # µm → mm display
         self._seed_note.setText(
             f"Loaded {Path(path).name}: λ={g['wavelength_A']:.5f} Å, px={g['pxY']:.2f} µm, "
             f"BC=({g['BC_y']:.2f}, {g['BC_z']:.2f}), Lsd={g['Lsd']/1000:.3f} mm.")
@@ -419,7 +420,7 @@ class CalibrationTab(QtWidgets.QWidget):
         if g.get("BC_z") is not None:
             self._seed_bcz.setValue(float(g["BC_z"]))
         if g.get("Lsd"):
-            self._seed_lsd.setValue(float(g["Lsd"]))
+            self._seed_lsd.setValue(float(g["Lsd"]) / 1000.0)   # µm → mm display
         self._seed_note.setText(
             f"Geometry from Data Viewer: λ={g.get('wavelength_A', 0):.5f} Å, "
             f"px={g.get('pxY', 0):.2f} µm, "
@@ -501,7 +502,7 @@ class CalibrationTab(QtWidgets.QWidget):
             cfg["manual_seed"] = {
                 "BC_y": self._seed_bcy.value(),
                 "BC_z": self._seed_bcz.value(),
-                "Lsd":  self._seed_lsd.value(),
+                "Lsd":  self._seed_lsd.value() * 1000.0,   # mm display → µm
             }
         if self._panel_grp.isChecked():
             cfg["panel_layout"] = {

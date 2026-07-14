@@ -664,6 +664,10 @@ fraction, correction flags) can be copied to the clipboard for a Methods section
   values change only by clicking/typing; the wheel scrolls the panel instead.
 - **Readable right-click menus.** pyqtgraph plot context menus use the dark theme.
 - **Dark theme, orange accent** (Dioptas-inspired); off-white text, light input fields.
+- **Sample-to-detector distance is entered/shown in mm** (Data Viewer, Calibrate seed,
+  Preferences ▸ Geometry). Internally — all calculations — and in written calibration
+  files (`paramstest.txt`, `calibration.json`) it is always in **microns**; the mm↔µm
+  conversion happens only at the display boundary. The config key remains `lsd_um` (µm).
 
 ---
 

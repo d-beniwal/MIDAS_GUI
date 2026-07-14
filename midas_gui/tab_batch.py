@@ -595,7 +595,7 @@ class BatchTab(QtWidgets.QWidget):
     def _on_drift_done(self, traj):
         self._drift_traj = traj
         self._drift_fit_btn.setEnabled(True)
-        Lsd_range = f"{traj.Lsd_t.min():.0f}–{traj.Lsd_t.max():.0f} µm"
+        Lsd_range = f"{traj.Lsd_t.min()/1000:.3f}–{traj.Lsd_t.max()/1000:.3f} mm"
         self._drift_status_lbl.setText(f"Trajectory ready: Lsd {Lsd_range}  ({len(traj.frame_indices)} knots)")
         self._log.append(f"[drift] trajectory fitted  Lsd {Lsd_range}")
 

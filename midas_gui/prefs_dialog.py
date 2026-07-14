@@ -126,7 +126,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         self._g_bcz = QtWidgets.QLineEdit()
         f.addRow("Wavelength λ (Å):", self._g_wl)
         f.addRow("Pixel size (µm):", self._g_px)
-        f.addRow("Lsd (µm):", self._g_lsd)
+        f.addRow("Lsd (mm):", self._g_lsd)
         f.addRow("Beam centre y (px):", self._g_bcy)
         f.addRow("Beam centre z (px):", self._g_bcz)
         self._tabs.addTab(w, "Geometry")
@@ -294,7 +294,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         geo = cfg.get("geometry", {})
         self._g_wl.setText(str(geo.get("wavelength_A", "")))
         self._g_px.setText(str(geo.get("pixel_um", "")))
-        self._g_lsd.setText(str(geo.get("lsd_um", "")))
+        self._g_lsd.setText(self._um_to_mm_text(geo.get("lsd_um", "")))   # store µm, show mm
         self._g_bcy.setText(str(geo.get("bc_y", "")))
         self._g_bcz.setText(str(geo.get("bc_z", "")))
         paths = cfg.get("paths", {})
@@ -334,6 +334,16 @@ class PreferencesDialog(QtWidgets.QDialog):
             self._ui_scale.setValue(1.0)
 
     @staticmethod
+    def _um_to_mm_text(um) -> str:
+        """Format a µm value as a mm string for display (blank passes through)."""
+        if um in (None, ""):
+            return ""
+        try:
+            return f"{float(um) / 1000.0:g}"
+        except (TypeError, ValueError):
+            return ""
+
+    @staticmethod
     def _select(combo, value, by_data=False):
         if value is None:
             return
@@ -351,6 +361,8 @@ class PreferencesDialog(QtWidgets.QDialog):
             v = num(ed)
             if v is not None:
                 geo[key] = v
+        if geo.get("lsd_um") is not None:
+            geo["lsd_um"] *= 1000.0          # mm display → µm stored
         geo["pixel_presets"] = self._pairs(self._px_table)
         geo["k_edge_foils"] = self._pairs(self._ke_table)
         paths = {k: ed.text().strip() for k, ed in self._paths.items() if ed.text().strip()}
@@ -389,7 +401,7 @@ class PreferencesDialog(QtWidgets.QDialog):
             return
         self._g_wl.setText(str(g.get("wavelength_A", "")))
         self._g_px.setText(str(g.get("pxY", "")))
-        self._g_lsd.setText(str(g.get("Lsd", "")))
+        self._g_lsd.setText(self._um_to_mm_text(g.get("Lsd", "")))   # µm → mm display
         self._g_bcy.setText(str(g.get("BC_y", "")))
         self._g_bcz.setText(str(g.get("BC_z", "")))
 

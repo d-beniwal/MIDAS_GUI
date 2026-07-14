@@ -55,14 +55,20 @@ class DataViewerTab(QtWidgets.QWidget):
         self._loader.set_tab1_mask(mask)
 
     def get_geometry(self) -> dict:
-        """Current manual geometry — λ (Å), pixel (µm), Lsd (µm), beam centre (px)."""
+        """Current manual geometry — λ (Å), pixel (µm), Lsd (µm), beam centre (px).
+
+        Lsd is entered in mm (display) but always returned/used in µm."""
         return {
             "wavelength_A": self._wl.value(),
             "pxY": self._px.value(),
-            "Lsd": self._lsd.value(),
+            "Lsd": self._lsd_um(),
             "BC_y": self._bcy.value(),
             "BC_z": self._bcz.value(),
         }
+
+    def _lsd_um(self) -> float:
+        """Lsd in µm (internal unit) from the mm display field."""
+        return self._lsd.value() * 1000.0
 
     # ── UI ────────────────────────────────────────────────────────
 
@@ -203,10 +209,9 @@ class DataViewerTab(QtWidgets.QWidget):
         ring.body.addWidget(S.hline())
 
         self._wl = _fspin(0.001, 10.0, 5, DEFAULT_WAVELENGTH, "Å")
-        self._lsd = _fspin(1e3, 1e8, 1, DEFAULT_LSD_UM, "µm")
-        self._lsd.setLocale(QtCore.QLocale(QtCore.QLocale.English, QtCore.QLocale.UnitedStates))
-        self._lsd.setGroupSeparatorShown(True)   # show "121,000.0" thousands separators
-        self._lsd.setFixedWidth(150)
+        # Lsd is shown/entered in mm (calculations & files still use µm).
+        self._lsd = _fspin(0.001, 1e5, 4, DEFAULT_LSD_UM / 1000.0, " mm")
+        self._lsd.setFixedWidth(120)
         self._px = _fspin(1.0, 5000.0, 2, DEFAULT_PIXEL_UM, "µm")
         self._max2t = _fspin(1.0, 90.0, 1, 25.0, "°")
         geo = S.Form()
@@ -418,7 +423,7 @@ class DataViewerTab(QtWidgets.QWidget):
             lattice = dict(a=self._a.value(), b=self._b.value(), c=self._c.value(),
                            alpha=self._al.value(), beta=self._be.value(), gamma=self._ga.value())
             rings = simulate_rings(lattice, self._sg.value(), self._wl.value(),
-                                   self._lsd.value(), self._px.value(), self._max2t.value())
+                                   self._lsd_um(), self._px.value(), self._max2t.value())
         except Exception as e:
             import traceback
             QtWidgets.QMessageBox.critical(self, "Simulation error", traceback.format_exc()[:500]); return
@@ -529,7 +534,7 @@ class DataViewerTab(QtWidgets.QWidget):
         if rings:
             self._profile_view.set_ring_markers(
                 [r["radius_px"] for r in rings],
-                self._lsd.value(), self._px.value(), self._wl.value())
+                self._lsd_um(), self._px.value(), self._wl.value())
         else:
             self._profile_view.set_ring_markers([])
 
@@ -542,7 +547,7 @@ class DataViewerTab(QtWidgets.QWidget):
             mask=self._combined_bad_mask(self._cur))
         self._profile_view.set_profile(
             r_axis, prof, wavelength_A=self._wl.value(),
-            lsd_um=self._lsd.value(), px_um=self._px.value())
+            lsd_um=self._lsd_um(), px_um=self._px.value())
         self._refresh_profile_markers()
 
     def _radial_grid(self, shape, bc_y, bc_z, r_bin):
@@ -610,7 +615,9 @@ class DataViewerTab(QtWidgets.QWidget):
                 self._calib_lbl.setText("No recognised geometry in file.")
                 return
             self._bc_auto.setChecked(False)   # geometry now comes from the file
-            for w, v in ((self._wl, wl), (self._lsd, lsd), (self._px, px),
+            # Lsd arrives in µm; the field displays mm.
+            lsd_mm = (lsd / 1000.0) if lsd is not None else None
+            for w, v in ((self._wl, wl), (self._lsd, lsd_mm), (self._px, px),
                          (self._bcy, bcy), (self._bcz, bcz)):
                 if v is not None:
                     w.blockSignals(True); w.setValue(float(v)); w.blockSignals(False)
