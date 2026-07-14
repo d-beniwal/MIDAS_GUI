@@ -36,7 +36,7 @@ dependencies = [
     "torch>=2.1",
     "midas-calibrate-v2>=0.3.3",
     "midas-integrate-v2>=0.1.0",
-    "midas-calibrate>=0.2.7",
+    "midas-calibrate>=0.2.3",
     "midas-hkls>=0.4.1",
     "midas-distortion>=0.2.0",
 ]

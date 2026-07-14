@@ -1,41 +1,51 @@
 name: midas-gui
+
+# Fully pinned to a verified-working set (matches the versions in the user's base
+# Anaconda where the GUI + all MIDAS workflows run cleanly). The key compatibility
+# constraint: numba 0.59.x requires NumPy < 2.1 and torch 2.4.0 targets NumPy 1.x, so
+# numpy is pinned to 1.26.4 and the MIDAS backends to their NumPy-1-era releases. Do
+# NOT bump numpy to 2.x here without also moving torch to >=2.3 and the backends to
+# their newer (numba 0.66 / NumPy-2) releases — mixing the two families breaks
+# `torch.from_numpy` ("Numpy is not available").
+
 channels:
-  - pytorch
   - conda-forge
   - defaults
 
 dependencies:
-  # ── Python ───────────────────────────────────────────────────────────────
   - python=3.12
 
-  # ── PyTorch (CPU build; swap for pytorch-cuda=12.1 for GPU support) ─────
-  - pytorch>=2.0
-  - cpuonly                     # remove this line and add pytorch-cuda=XX.X for GPU
+  # ── Scientific stack (pinned) ───────────────────────────────────────────────
+  - numpy=1.26.4
+  - scipy=1.13.1
+  - h5py=3.11.0
+  - tifffile=2023.4.12
 
-  # ── Scientific stack ─────────────────────────────────────────────────────
-  - numpy>=1.24
-  - scipy>=1.10
-  - h5py>=3.8
-  - tifffile>=2023.1
-
-  # ── GUI ──────────────────────────────────────────────────────────────────
-  - pyqtgraph>=0.13
-  - matplotlib-base>=3.5        # supplies pyqtgraph's named colormaps (hot/viridis/…)
-  - pip                         # needed to install PyQt5 and MIDAS packages
+  # ── GUI (pinned) ────────────────────────────────────────────────────────────
+  - pyqtgraph=0.14.0
+  - matplotlib-base=3.8.4        # supplies pyqtgraph's named colormaps (hot/viridis/…)
+  - pip
 
   - pip:
-    # PyQt5 is more reliably installed via pip than conda on macOS/Linux
-    - "PyQt5>=5.15"
+    # Qt bindings
+    - "PyQt5==5.15.10"
 
-    # ── midas-gui itself + its MIDAS backends ────────────────────────────
-    # Editable install of this cloned repo (path is relative to the repo root,
-    # where you run `conda env create -f environment.yml`). This pulls exactly the
-    # MIDAS analysis packages the GUI imports — midas-calibrate-v2, midas-integrate-v2,
-    # midas-calibrate, midas-hkls, midas-distortion — declared in pyproject.toml.
-    #
-    # NOTE: do NOT add the `midas_suite` meta-package here. It drags in extra packages
-    # the GUI never uses (midas-index/stress/params/…), and midas-index currently ships
-    # only an sdist that fails to build against scikit-build-core>=0.8, which aborts the
-    # whole env creation. If you separately need the full suite, install it in another
-    # environment.
+    # PyTorch — CPU build via pip (matches base; conda has no 2.4.0 build for arm64).
+    # 2.4.0 works with NumPy 1.26. On Linux/Windows this pulls the default PyPI wheel;
+    # for a smaller CPU-only download there you may instead use the CPU index:
+    #   pip install torch==2.4.0 --index-url https://download.pytorch.org/whl/cpu
+    - "torch==2.4.0"
+    - "numba==0.59.1"            # NumPy-1.x compatible JIT (pin: newer numba needs NumPy>=2.1)
+
+    # ── MIDAS analysis backends (pinned to the NumPy-1-era releases) ────────────
+    - "midas-calibrate-v2==0.3.3"
+    - "midas-integrate-v2==0.1.0"
+    - "midas-calibrate==0.2.3"
+    - "midas-hkls==0.4.1"
+    - "midas-distortion==0.2.0"
+
+    # ── midas-gui itself (editable install of this cloned repo) ─────────────────
+    # Pulls no extra backends — the pinned ones above already satisfy pyproject.toml.
+    # Do NOT add the `midas_suite` meta-package: it drags in midas-index, whose sdist
+    # fails to build against scikit-build-core>=0.8 and aborts env creation.
     - "-e ."
