@@ -145,7 +145,9 @@ so the app is usable immediately after checkout.
 
 ## 3. Tab 0 — Data Viewer
 
-**Purpose:** inspect detector frames and do a quick geometry-free radial integration.
+**Purpose:** inspect detector frames and do a quick radial integration — geometry-free
+(circle binning) by default, or a full tilt/distortion-aware integration when a
+calibration file is loaded.
 Produces no shared state for other tabs.
 
 ### Data Loader panel (left)
@@ -166,6 +168,14 @@ detector warm-up / shutter-transient exposures.
 Load geometry from a **calibration `.json`, a MIDAS `paramstest.txt`, or a pyFAI
 `.poni`** (auto-detected). It fills BC, Lsd, pixel size and wavelength, unchecks
 "Beam centre = image centre", and refreshes the overlay and radial plot.
+
+When a calibration file carries the **full geometry (tilts + distortion)**, the radial
+integration switches from simple concentric-circle binning to a **proper MIDAS-engine
+integration** that maps every pixel through the calibrated tilts and distortion (the
+same core as Batch Integrate) — so ring positions/intensities are geometry-correct, not
+just distance-from-beam-centre. The card's status line reports which mode is active. The
+binning geometry is built once and reused across frames (a fast `hard` kernel keeps the
+preview responsive); without a full-geometry file, the fast circle binning is used.
 
 ### Intensity range card (radial integration)
 | Field | Description |

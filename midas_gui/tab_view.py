@@ -21,10 +21,11 @@ from midas_gui.constants import (MATERIALS, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM
                            DEFAULT_LSD_UM, DEFAULT_BC_Y, DEFAULT_BC_Z,
                            DEFAULT_NICKEL_H5)
 from midas_gui.helpers import (_fspin, _NoScrollSpinBox, _browse,
-                         simulate_rings, read_geometry, _NoScrollComboBox,
+                         simulate_rings, read_geometry, geometry_fields_from_file,
+                         _spec_from_result_ns, _NoScrollComboBox,
                          make_kedge_label, make_pixel_label)
 from midas_gui.widgets import PickableImageViewer, ProfileViewer, DataLoaderPanel
-from midas_gui.workers import ProjectionWorker
+from midas_gui.workers import ProjectionWorker, build_integration_context, integrate_frame
 from midas_gui import style as S
 
 
@@ -42,6 +43,11 @@ class DataViewerTab(QtWidgets.QWidget):
         self._is_projection = False                # showing a projected stack?
         self._proj_worker = None
         self._rad_grid_cache = None                # (key, which, nbins, r_axis)
+        # Full calibration geometry (tilts + distortion) from a loaded calibration
+        # file → proper MIDAS-engine radial integration; None = simple circle binning.
+        self._calib_geom = None                    # geometry dict, or None
+        self._calib_ctx = None                     # cached (spec, integration context)
+        self._calib_ctx_sig = None                 # signature the context was built for
         # Debounce the frame slider: coalesce rapid ticks into one heavy refresh.
         self._refresh_timer = QtCore.QTimer(self)
         self._refresh_timer.setSingleShot(True); self._refresh_timer.setInterval(60)
@@ -555,16 +561,72 @@ class DataViewerTab(QtWidgets.QWidget):
             self._profile_view.set_ring_markers([])
 
     def _radial_integrate(self):
-        """Azimuthal average of the current frame about the beam centre."""
+        """Azimuthal average of the current frame.
+
+        With a loaded calibration file the full geometry (tilts + distortion) is used
+        via the MIDAS integration engine; otherwise a fast circle-binning about the
+        beam centre is used."""
         if self._cur is None:
             return
-        r_axis, prof = self._radial_profile(
-            self._cur, self._bcy.value(), self._bcz.value(), self._rad_r_bin.value(),
-            mask=self._combined_bad_mask(self._cur))
+        if self._calib_geom is not None:
+            try:
+                r_axis, prof = self._midas_radial(self._cur)
+            except Exception:
+                import traceback
+                self._calib_lbl.setText(
+                    "Full-geometry integration failed — using circle binning. "
+                    "See error log.")
+                self._log_error(traceback.format_exc())
+                r_axis, prof = self._radial_profile(
+                    self._cur, self._bcy.value(), self._bcz.value(),
+                    self._rad_r_bin.value(), mask=self._combined_bad_mask(self._cur))
+        else:
+            r_axis, prof = self._radial_profile(
+                self._cur, self._bcy.value(), self._bcz.value(), self._rad_r_bin.value(),
+                mask=self._combined_bad_mask(self._cur))
         self._profile_view.set_profile(
             r_axis, prof, wavelength_A=self._wl.value(),
             lsd_um=self._lsd_um(), px_um=self._px.value())
         self._refresh_profile_markers()
+
+    def _midas_radial(self, img):
+        """Radial profile via the MIDAS engine, honouring the loaded calibration's
+        tilts + distortion (not just concentric circles). The binning geometry is
+        built once per (geometry, R-bin, image shape, static mask) and reused across
+        frames; only the per-frame integration runs on a frame change."""
+        import torch
+        g = self._calib_geom
+        r_bin = max(float(self._rad_r_bin.value()), 0.1)
+        eta_bin = 5.0
+        nz, ny = img.shape
+        mask = self._loader.composite_mask()   # static (file + Tab-1) mask; not per-frame
+        mask_fp = None if mask is None else (tuple(mask.shape), int(np.count_nonzero(mask)))
+        sig = (id(g), round(r_bin, 4), (nz, ny), mask_fp)
+        if self._calib_ctx is None or self._calib_ctx_sig != sig:
+            spec = _spec_from_result_ns(
+                r_bin, eta_bin, NrPixelsY=ny, NrPixelsZ=nz,
+                pxY=g["pxY"], pxZ=g.get("pxZ") or g["pxY"], Lsd=g["Lsd"],
+                BC_y=g["BC_y"], BC_z=g["BC_z"], tx=g.get("tx") or 0.0,
+                ty=g.get("ty") or 0.0, tz=g.get("tz") or 0.0,
+                wavelength_A=g["wavelength_A"], distortion=g.get("distortion") or {})
+            # "hard" kernel keeps the interactive preview fast; the geometry (tilts +
+            # distortion) is what makes the integration proper, not the sub-pixel kernel.
+            ctx = build_integration_context(spec, "hard", mask, (None, None), weighted=True)
+            self._calib_ctx = (spec, ctx); self._calib_ctx_sig = sig
+        spec, ctx = self._calib_ctx
+        img_t = torch.from_numpy(np.ascontiguousarray(img, dtype=np.float64))
+        prof, _ = integrate_frame(
+            img_t, spec, ctx["geom"], "hard", (None, None), None, False,
+            corr_counts=ctx["corr_counts"], weighted=True, cnt_cake=ctx["cnt"])
+        return ctx["r_ax"], prof
+
+    def _log_error(self, text):
+        """Append a traceback to the crash log (no LogPanel on this tab)."""
+        try:
+            from midas_gui.app import _log
+            _log(text)
+        except Exception:
+            pass
 
     def _radial_grid(self, shape, bc_y, bc_z, r_bin):
         """Cached per-pixel radial bin index + axis, keyed on (shape, BC, r_bin).
@@ -643,7 +705,24 @@ class DataViewerTab(QtWidgets.QWidget):
                 parts.append(f"BC=({float(bcy):.1f}, {float(bcz):.1f})")
             if wl is not None: parts.append(f"λ={float(wl):.5g} Å")
             if px is not None: parts.append(f"px={float(px):.4g} µm")
-            self._calib_lbl.setText(f"Loaded {Path(path).suffix or 'file'} — " + "  ".join(parts))
+            # Capture the FULL geometry (tilts + distortion) so radial integration
+            # goes through the MIDAS engine instead of concentric-circle binning.
+            # Fall back to scalar/circle mode if the file lacks full geometry.
+            self._calib_ctx = self._calib_ctx_sig = None
+            try:
+                self._calib_geom = geometry_fields_from_file(path)
+                d = self._calib_geom
+                tilt = any(abs(float(d.get(k) or 0.0)) > 1e-9 for k in ("tx", "ty", "tz"))
+                mode = ("full integration: tilts"
+                        + ("+distortion" if d.get("distortion") else "")
+                        if (tilt or d.get("distortion"))
+                        else "full integration (geometry-correct)")
+            except Exception:
+                self._calib_geom = None
+                mode = "scalar geometry (circle binning)"
+            self._calib_lbl.setText(
+                f"Loaded {Path(path).suffix or 'file'} — " + "  ".join(parts)
+                + f"  ·  {mode}")
             self._redraw_rings()
             if self._rad_auto.isChecked():
                 self._radial_integrate()
