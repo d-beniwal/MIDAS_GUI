@@ -56,6 +56,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Compact 3-per-row lattice + cubic quick-set; mask default max(99.99pct,1e5) | `41f28f5` |
 | Projection Skip-frames field; compact geometry/intensity fields; Lsd separators | `108ea7d` |
 | Intensity-statistics panel + histogram (bottom of loader) | `2b7a695` |
+| Tilt/distortion-aware radial integration when a calibration is loaded | `df544d2` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -489,6 +490,20 @@ of the shipped ceria runs end-to-end (numpy 1.26.4 + torch 2.4.0).
 **Files:** `calib.py`, `environment.yml`.
 **Roll back:** `git revert b1642fa` (reintroduces the TypeError on backends lacking the
 BC-seed args, and removes the scikit-image pin).
+
+### `df544d2` — Data Viewer: tilt/distortion-aware radial integration (2026-07-14)
+**Effect:** When a loaded calibration file carries the full geometry (tilts + distortion),
+the Data Viewer's radial integration goes through the MIDAS engine
+(`build_integration_context` + `integrate_frame`) instead of concentric-circle binning,
+so pixels map through the calibrated tilts/distortion. `_load_calibration` now also reads
+the full geometry via `geometry_fields_from_file` (falls back to scalar/circle mode if
+absent) and shows the active mode. `_midas_radial` caches the binning geometry per
+(geometry, R-bin, image shape, static mask) and reuses it across frames (fast `hard`
+kernel; loader's static composite mask so the cache holds); `_radial_integrate` branches
+to it with a guarded fallback to circle binning on error.
+**Files:** `tab_view.py`, `documentation/gui_documentation.md`.
+**Roll back:** `git revert df544d2` (reverts to circle-only radial integration in the
+Data Viewer). Self-contained; the MIDAS-engine primitives it reuses are unchanged.
 
 ---
 
