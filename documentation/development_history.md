@@ -44,6 +44,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Startup crash diagnostics + robust launcher (Windows) | `916ece2` |
 | MIDAS-style packaging (LICENSE, pyproject, release.sh, smoke tests) | `e862135` |
 | Ship test_data sample data in the repo (fresh clone works out of the box) | `7e157e0` |
+| Drop midas_suite from env (unblock conda env create; backends via -e .) | `72a1770` |
 
 ### Data Viewer (Tab 0)
 | Change | Commit |
@@ -430,9 +431,18 @@ the tabs becoming placeholders and disappear with this fix.
 `tests/test_smoke.py`.
 **Roll back:** `git revert 6332b3d` (reintroduces the crash on matplotlib-less envs).
 
----
-
-## Rollback recipes (common intents)
+### `72a1770` — env: drop midas_suite (unblocks `conda env create`) (2026-07-14)
+**Effect:** `conda env create -f environment.yml` was aborting because the pip section's
+`midas_suite` meta-package pulls `midas-index 0.7.3`, whose sdist fails to build against
+`scikit-build-core>=0.8` (`Use cmake.version instead of cmake.minimum-version`). The GUI
+never uses midas_suite's extras; the backends it actually imports
+(midas-calibrate-v2/-integrate-v2/-calibrate/-hkls/-distortion) are declared in
+`pyproject.toml` and pulled by the editable `-e .` install. Removed the redundant
+`midas_suite` line; README updated. (Unrelated to the repo: the `libarchive.19.dylib` /
+conda-libmamba-solver errors in that log are a broken base-Anaconda mamba, worked around
+with `--solver=classic`.)
+**Files:** `environment.yml`, `README.md`.
+**Roll back:** `git revert 72a1770` (re-adds midas_suite and its build failure).
 
 - **Undo the Pump Probe tab only:** `git revert 590b410` removes Pump Probe *and*
   modular tabs. To drop Pump Probe alone, hand-remove `midas_gui/tab_pumpprobe.py`,
