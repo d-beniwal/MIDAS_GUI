@@ -20,6 +20,9 @@ dependencies:
   - scipy=1.13.1
   - h5py=3.11.0
   - tifffile=2023.4.12
+  - scikit-image=0.23.2          # used by midas-calibrate-v2's auto_seed_calibrant
+                                 # (better ring seeding; without it calibration falls
+                                 # back to a coarser arc seed)
 
   # ── GUI (pinned) ────────────────────────────────────────────────────────────
   - pyqtgraph=0.14.0

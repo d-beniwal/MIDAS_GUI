@@ -29,6 +29,27 @@ import midas_gui._paths  # noqa: F401  (sys.path setup must run before MIDAS imp
 from midas_gui.constants import _SG, _LC, DISTORTION_NAMES, DEFAULT_LSD_UM
 
 
+def _supported_kwargs(fn, kwargs: dict) -> dict:
+    """Drop kwargs the callable ``fn`` doesn't accept, so the GUI stays compatible
+    across MIDAS-backend versions whose signatures differ (e.g. midas-calibrate-v2
+    0.3.3 has no ``initial_BC_y`` / ``initial_BC_z`` beam-centre seed). If ``fn``
+    takes ``**kwargs`` nothing is dropped. Dropped names are logged to stdout (which
+    the calibration worker relays to the GUI log)."""
+    import inspect
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return dict(kwargs)
+    if any(p.kind == p.VAR_KEYWORD for p in params.values()):
+        return dict(kwargs)
+    out = {k: v for k, v in kwargs.items() if k in params}
+    dropped = [k for k in kwargs if k not in params]
+    if dropped:
+        print(f"[calib] note: {getattr(fn, '__name__', 'callable')}() does not accept "
+              f"{', '.join(dropped)} in this backend version — ignoring.")
+    return out
+
+
 # ── Seed ────────────────────────────────────────────────────────────────────────
 
 def make_seed_safe(image: np.ndarray, wavelength: float, pxY: float,
@@ -259,7 +280,7 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
             kwargs["initial_BC_y"] = manual["BC_y"]
             kwargs["initial_BC_z"] = manual["BC_z"]
             kwargs["initial_Lsd"]  = manual["Lsd"]
-        return calibrate(image, **kwargs)
+        return calibrate(image, **_supported_kwargs(calibrate, kwargs))
 
     if mode == "first_time":
         from midas_calibrate_v2.pipelines import first_time_calibrate
