@@ -45,6 +45,7 @@ Dates are commit dates (YYYY-MM-DD).
 | MIDAS-style packaging (LICENSE, pyproject, release.sh, smoke tests) | `e862135` |
 | Ship test_data sample data in the repo (fresh clone works out of the box) | `7e157e0` |
 | Drop midas_suite from env (unblock conda env create; backends via -e .) | `72a1770` |
+| Pin environment.yml to verified NumPy-1 set + README recreate steps | `68313f8` |
 
 ### Data Viewer (Tab 0)
 | Change | Commit |
@@ -443,6 +444,29 @@ conda-libmamba-solver errors in that log are a broken base-Anaconda mamba, worke
 with `--solver=classic`.)
 **Files:** `environment.yml`, `README.md`.
 **Roll back:** `git revert 72a1770` (re-adds midas_suite and its build failure).
+
+### `68313f8` — Pin environment.yml to a verified NumPy-1 set + README recreate steps (2026-07-14)
+**Effect:** Makes `conda env create` reproduce a known-good environment. Fresh installs
+previously pulled the newest backends (numba 0.66 → NumPy 2.x) against conda torch 2.2.2,
+which can't interop with NumPy 2 (`torch.from_numpy: Numpy is not available`). Pinned
+every package to the versions from the user's working base Anaconda — the **NumPy-1
+family**: numpy=1.26.4, scipy=1.13.1, h5py=3.11.0, tifffile=2023.4.12, pyqtgraph=0.14.0,
+matplotlib-base=3.8.4 (conda); PyQt5==5.15.10, torch==2.4.0, numba==0.59.1, and the
+NumPy-1-era MIDAS backends (calibrate-v2 0.3.3, integrate-v2 0.1.0, calibrate 0.2.3,
+hkls 0.4.1, distortion 0.2.0) via pip; then `-e .`. Dropped the conda pytorch/cpuonly
+lines + pytorch channel (torch now via pip). `pyproject.toml`: lowered `midas-calibrate`
+floor 0.2.7 → 0.2.3 so the proven base version satisfies `-e .`. README gains a
+"Recreating the environment" section (remove + create), a conda-solver/libarchive note,
+and the CPU-only torch install note. Verified end-to-end: fresh env resolves clean; GUI
++ a real nickel-frame integration run (numpy 1.26.4 + torch 2.4.0).
+**Files:** `environment.yml`, `pyproject.toml`, `README.md`.
+**Roll back:** `git revert 68313f8` (returns to ranged deps; a fresh env would again risk
+the NumPy-2/torch mismatch). To move forward to a NumPy-2 stack instead, bump torch>=2.3
+and the backends to their numba-0.66 releases together.
+
+---
+
+## Rollback recipes (common intents)
 
 - **Undo the Pump Probe tab only:** `git revert 590b410` removes Pump Probe *and*
   modular tabs. To drop Pump Probe alone, hand-remove `midas_gui/tab_pumpprobe.py`,
