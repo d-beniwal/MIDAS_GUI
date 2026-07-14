@@ -71,6 +71,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Load-calibration-file (geometry + λ) helpers | `b381d8d` |
 | Multi-column paramstest results readout + Send-to-Data-Viewer button | `455ca4e` |
 | Calibrate Results all-text (drop distortion table; named distortion, bigger font) | `3a6ecb9` |
+| Fix calibrate() initial_BC_y TypeError (kwargs filter) + pin scikit-image | `b1642fa` |
 
 ### Batch Integrate (Tab 4)
 | Change | Commit |
@@ -474,6 +475,20 @@ for readability. Removed the `DistortionTable` import + `set_distortion` call.
 **Files:** `tab_calibrate.py`, `documentation/gui_documentation.md`.
 **Roll back:** `git revert 3a6ecb9` (restores the named-distortion table widget below the
 grid). `DistortionTable` still exists in `widgets.py` (used only here), so a revert is clean.
+
+### `b1642fa` — Fix calibration TypeError (initial_BC_y) + add scikit-image (2026-07-14)
+**Effect:** Fixes calibration failing with `calibrate() got an unexpected keyword
+argument 'initial_BC_y'` on the pinned (base-matching) midas-calibrate-v2 0.3.3, whose
+`calibrate()` has no beam-centre seed parameter (only newer backends add it). New
+`calib._supported_kwargs(fn, kwargs)` filters kwargs to the installed callable's
+signature (keeps `initial_Lsd`, drops the unsupported `initial_BC_y/z`, logs it), so the
+GUI tolerates backend-version signature drift. Also pins **scikit-image=0.23.2** in
+`environment.yml` — midas-calibrate-v2's `auto_seed_calibrant` needs it; without it,
+seeding degrades to the coarse arc fallback. Verified: manual-seed one_shot calibration
+of the shipped ceria runs end-to-end (numpy 1.26.4 + torch 2.4.0).
+**Files:** `calib.py`, `environment.yml`.
+**Roll back:** `git revert b1642fa` (reintroduces the TypeError on backends lacking the
+BC-seed args, and removes the scikit-image pin).
 
 ---
 
