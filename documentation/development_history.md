@@ -97,6 +97,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Per-user JSON configuration system + Preferences dialog | `d30be2c` |
 | Modular tab visibility (show/hide optional tabs) | `590b410` |
 | User-adjustable interface scaling (HiDPI / 4K, QT_SCALE_FACTOR) | `d5fafd8` |
+| Lsd displayed in mm (calculations & calibration files stay in µm) | `c4e1c12` |
 
 ### Stability / performance / consistency (review-driven, phases 1–3)
 | Change | Commit |
@@ -359,6 +360,17 @@ at startup.
 **Roll back:** `git revert d5fafd8`. Self-contained (depends only on the config
 system `d30be2c`); reverting removes the scale control and the app renders at 1.0×.
 To keep the feature but disable it, set `ui.ui_scale` to 1.0.
+
+### `c4e1c12` — Display Lsd in mm (calculations & files stay in µm) (2026-07-13)
+**Effect:** The sample-to-detector distance is entered/shown in **mm** in the Data
+Viewer, the Calibrate seed, and Preferences ▸ Geometry; conversion to/from µm happens
+only at the display boundary (`DataViewerTab._lsd_um()`, ×1000 on read, ÷1000 on set).
+`get_geometry`/`apply_geometry`/`manual_seed`/prefs `_assemble` still emit µm; the
+config key stays `lsd_um` (µm); calibration-file writers (`paramstest.txt`,
+`calibration.json`) are unchanged (always µm). Batch drift-status label → mm.
+**Files:** `tab_view.py`, `tab_calibrate.py`, `prefs_dialog.py`, `tab_batch.py`, docs.
+**Roll back:** `git revert c4e1c12` to return every Lsd field to a µm display. Purely
+a display-layer change — no stored/file/calculation values are affected either way.
 
 ---
 
