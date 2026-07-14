@@ -43,6 +43,7 @@ Dates are commit dates (YYYY-MM-DD).
 | `launch.py` standalone launcher | `2e9f419` |
 | Startup crash diagnostics + robust launcher (Windows) | `916ece2` |
 | MIDAS-style packaging (LICENSE, pyproject, release.sh, smoke tests) | `e862135` |
+| Ship test_data sample data in the repo (fresh clone works out of the box) | `7e157e0` |
 
 ### Data Viewer (Tab 0)
 | Change | Commit |
@@ -98,6 +99,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Per-user JSON configuration system + Preferences dialog | `d30be2c` |
 | Modular tab visibility (show/hide optional tabs) | `590b410` |
 | User-adjustable interface scaling (HiDPI / 4K, QT_SCALE_FACTOR) | `d5fafd8` |
+| Default optional tabs reduced (Corrections/PDF/Texture/Export hidden) | `7e157e0` |
 | Lsd displayed in mm (calculations & calibration files stay in µm) | `c4e1c12` |
 | Fix "Populating font family aliases" warning (real fixed-width fonts) | `d6df1f8` |
 
@@ -398,6 +400,19 @@ calibrated λ/pixel/Lsd/beam-centre into the Data Viewer through new
 **Files:** `tab_calibrate.py`, `tab_view.py`, `app.py`, docs.
 **Roll back:** `git revert 455ca4e`. Self-contained; depends on the mm-display change
 (`c4e1c12`) for the Viewer Lsd conversion.
+
+### `7e157e0` — Ship test_data; hide four optional tabs by default (2026-07-14)
+**Effect:** (1) `test_data/` sample data (calibrant_ceria.tif/h5, nickel_stack.h5,
+nickel_tifs/, make_test_data.py) is now committed so the GUI's default paths work on a
+fresh clone — `.gitignore` re-includes it past the global `*.tif`/`*.h5` ignores via
+trailing negations, while `test_data/output/`, `out_temp.txt` and `.DS_Store` stay
+ignored. (2) `DEFAULT_VISIBLE_TABS = ["Calib. Refinement", "Pump Probe"]` — Corrections,
+PDF Analysis, Texture and Results & Export ship hidden (enable in Preferences ▸ Tabs).
+**Files:** `.gitignore`, `test_data/**` (added), `constants.py`, `config.example.json`,
+`tests/test_smoke.py`, docs.
+**Roll back:** `git revert 7e157e0` restores the all-optional-tabs default and removes
+the shipped data + re-ignores `test_data/`. Note: a per-user config with its own
+`ui.visible_tabs` overrides the shipped default regardless.
 
 ---
 
