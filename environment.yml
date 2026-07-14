@@ -20,6 +20,7 @@ dependencies:
 
   # ── GUI ──────────────────────────────────────────────────────────────────
   - pyqtgraph>=0.13
+  - matplotlib-base>=3.5        # supplies pyqtgraph's named colormaps (hot/viridis/…)
   - pip                         # needed to install PyQt5 and MIDAS packages
 
   - pip:

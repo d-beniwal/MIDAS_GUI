@@ -65,6 +65,32 @@ def test_trr_filename_parser():
     assert parse_trr_filename("not_a_trr_frame.tif", "Ex01") is None
 
 
+def test_colormap_resolves_without_matplotlib():
+    """`_resolve_cmap` must never return None even when matplotlib (which supplies
+    'hot'/'viridis'/… to pyqtgraph) is unavailable — passing None into pyqtgraph is
+    what crashed viewer construction on fresh Linux/Windows envs. A valid ColorMap
+    here is exactly what keeps ImageViewer/WaterfallViewer building."""
+    pytest.importorskip("PyQt5.QtWidgets")
+    try:
+        import pyqtgraph as pg
+        import midas_gui.widgets as W
+    except Exception as exc:
+        pytest.skip(f"GUI stack unavailable: {exc}")
+    orig_get, orig_mpl = pg.colormap.get, pg.colormap.getFromMatplotlib
+    try:
+        # Simulate no matplotlib: only pyqtgraph-native (CET-*) names resolve.
+        pg.colormap.get = lambda name, source=None: (
+            orig_get(name) if (source is None and str(name).startswith("CET-")) else None)
+        def _no_mpl(name):
+            raise ImportError("no matplotlib")
+        pg.colormap.getFromMatplotlib = _no_mpl
+        cm = W._resolve_cmap("hot")            # 'hot' unavailable without matplotlib
+        assert cm is not None
+        assert cm.getLookupTable(0.0, 1.0, 8) is not None   # usable ColorMap
+    finally:
+        pg.colormap.get, pg.colormap.getFromMatplotlib = orig_get, orig_mpl
+
+
 def test_pumpprobe_grouping():
     """Repeats average per delay and the reference (negative delays) subtracts to ΔI."""
     import numpy as np

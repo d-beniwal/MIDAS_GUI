@@ -46,6 +46,30 @@ def _mono_font(size: int) -> QtGui.QFont:
     return f
 
 
+def _resolve_cmap(name):
+    """Return a pyqtgraph ColorMap for ``name`` — never None.
+
+    The GUI's colormaps (hot / viridis / inferno / plasma / turbo / gray) are
+    matplotlib maps: ``pg.colormap.get(name)`` returns None when matplotlib is not
+    installed, and passing that None into pyqtgraph crashes viewer construction (see
+    the Linux/Windows fresh-env bug). Fall back through matplotlib, then a
+    pyqtgraph-native map, then a plain grayscale ramp, so a missing matplotlib can
+    never take the tabs down."""
+    for attempt in (
+        lambda: pg.colormap.get(name),
+        lambda: pg.colormap.get(name, source="matplotlib"),
+        lambda: pg.colormap.getFromMatplotlib(name),
+        lambda: pg.colormap.get("CET-L9"),   # native — no matplotlib needed
+    ):
+        try:
+            cm = attempt()
+        except Exception:
+            cm = None
+        if cm is not None:
+            return cm
+    return pg.ColorMap([0.0, 1.0], [(0, 0, 0, 255), (255, 255, 255, 255)])
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  ImageViewer
 # ═════════════════════════════════════════════════════════════════════════════
@@ -167,14 +191,7 @@ class ImageViewer(QtWidgets.QWidget):
                           autoRange=False, autoHistogramRange=False)
 
     def _set_cmap(self, name: str):
-        try:
-            cmap = pg.colormap.get(name)
-        except Exception:
-            try:
-                cmap = pg.colormap.getFromMatplotlib(name)
-            except Exception:
-                return
-        self._iv.setColorMap(cmap)
+        self._iv.setColorMap(_resolve_cmap(name))
 
     def _mouse(self, evt):
         pos = evt[0]
@@ -1725,14 +1742,7 @@ class WaterfallViewer(QtWidgets.QWidget):
         self._img.setRect(QtCore.QRectF(r0, 0.0, r1 - r0, self._nrows))
 
     def _apply_cmap(self, name: str):
-        try:
-            cmap = pg.colormap.get(name)
-        except Exception:
-            try:
-                cmap = pg.colormap.getFromMatplotlib(name)
-            except Exception:
-                return
-        self._img.setLookupTable(cmap.getLookupTable(0.0, 1.0, 256))
+        self._img.setLookupTable(_resolve_cmap(name).getLookupTable(0.0, 1.0, 256))
 
 
 def _frame_color(i: int) -> tuple:

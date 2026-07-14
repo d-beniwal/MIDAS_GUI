@@ -110,13 +110,8 @@ class TextureTab(QtWidgets.QWidget):
         self._pf_view.setTitle("Pole figure")
         self._pf_img = pg.ImageItem()
         self._pf_view.addItem(self._pf_img)
-        try:
-            self._pf_img.setColorMap(pg.colormap.get(DEFAULT_COLORMAP))
-        except Exception:
-            try:
-                self._pf_img.setColorMap(pg.colormap.get("inferno"))
-            except Exception:
-                pass
+        from midas_gui.widgets import _resolve_cmap
+        self._pf_img.setColorMap(_resolve_cmap(DEFAULT_COLORMAP))
         right.addWidget(self._pf_view)
         # I(eta)
         self._eta_view = pg.PlotWidget(background="k")
