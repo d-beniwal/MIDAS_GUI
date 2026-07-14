@@ -102,6 +102,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Default optional tabs reduced (Corrections/PDF/Texture/Export hidden) | `7e157e0` |
 | Lsd displayed in mm (calculations & calibration files stay in µm) | `c4e1c12` |
 | Fix "Populating font family aliases" warning (real fixed-width fonts) | `d6df1f8` |
+| Fix fresh-env launch crash — colormap resolution without matplotlib | `6332b3d` |
 
 ### Stability / performance / consistency (review-driven, phases 1–3)
 | Change | Commit |
@@ -413,6 +414,21 @@ PDF Analysis, Texture and Results & Export ship hidden (enable in Preferences �
 **Roll back:** `git revert 7e157e0` restores the all-optional-tabs default and removes
 the shipped data + re-ignores `test_data/`. Note: a per-user config with its own
 `ui.visible_tabs` overrides the shipped default regardless.
+
+### `6332b3d` — Fix launch crash on fresh Linux/Windows (colormap w/o matplotlib) (2026-07-14)
+**Effect:** Fixes the GUI failing to start on a clean env where every always-on tab's
+image viewer crashed with `'NoneType' object has no attribute 'getColors'`. Cause:
+`DEFAULT_COLORMAP` "hot" (and the whole `COLORMAPS` list) are matplotlib colormaps;
+`pg.colormap.get("hot")` returns None without matplotlib, and that None was passed into
+pyqtgraph. New `widgets._resolve_cmap()` resolves native → matplotlib → native fallback
+→ grayscale ramp and never returns None (used by ImageViewer, WaterfallViewer, Texture);
+matplotlib added as a declared dependency (`pyproject` + `environment.yml`
+matplotlib-base) so the named maps actually resolve. The downstream "Geometry hand-off
+wiring failed / QWidget has no attribute pushGeometry" log lines were only a symptom of
+the tabs becoming placeholders and disappear with this fix.
+**Files:** `widgets.py`, `tab_texture.py`, `pyproject.toml`, `environment.yml`,
+`tests/test_smoke.py`.
+**Roll back:** `git revert 6332b3d` (reintroduces the crash on matplotlib-less envs).
 
 ---
 
