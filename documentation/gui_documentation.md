@@ -312,8 +312,14 @@ call, so abort hard-terminates the worker thread rather than waiting).
 
 ### Results (right panel, bottom tabs)
 Radial Profile (with ring markers and an **Azim. avg** selector — see Tab 4), Ring
-Residuals bar chart, Results (Lsd/BC/strain + distortion table), and Log. Integration
-runs automatically after calibration.
+Residuals bar chart, **Results**, and Log. Integration runs automatically after
+calibration. The **Results** tab shows the *complete* parameter set exactly as it is
+written to `paramstest.txt` (Lsd, BC, tx/ty/tz, the p0–p14 distortion slots, Parallax,
+Wavelength, px, NrPixelsY/Z, RhoD, SpaceGroup, LatticeConstant), laid out across
+several **columns** so the wide-but-short panel stays readable; a named-distortion
+table and a strain/timing line sit below. **→ Send to Data Viewer** replaces the Data
+Viewer tab's geometry fields (λ, pixel size, Lsd, beam centre) with these calibrated
+values — the reverse of the Data Viewer's "→ Send geometry to Calibrate".
 
 ### Export
 **Save calibration.json** and **Save paramstest.txt** (standalone or from a template).

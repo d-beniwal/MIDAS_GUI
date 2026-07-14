@@ -70,6 +70,22 @@ class DataViewerTab(QtWidgets.QWidget):
         """Lsd in µm (internal unit) from the mm display field."""
         return self._lsd.value() * 1000.0
 
+    def set_geometry(self, g: dict):
+        """Replace the manual-geometry fields from a geometry dict (e.g. the Calibrate
+        tab's result). Values are µm/Å/px; the Lsd field displays mm."""
+        if not g:
+            return
+        # (widget, dict key, µm→display scale)
+        for w, key, scale in ((self._wl, "wavelength_A", 1.0), (self._px, "pxY", 1.0),
+                              (self._lsd, "Lsd", 0.001), (self._bcy, "BC_y", 1.0),
+                              (self._bcz, "BC_z", 1.0)):
+            v = g.get(key)
+            if v is not None:
+                w.blockSignals(True); w.setValue(float(v) * scale); w.blockSignals(False)
+        if g.get("BC_y") is not None or g.get("BC_z") is not None:
+            self._bc_auto.setChecked(False)   # use the supplied beam centre
+        self._redraw_rings()
+
     # ── UI ────────────────────────────────────────────────────────
 
     def _build_ui(self):

@@ -168,6 +168,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._view_tab.pushGeometry.connect(self._cal_tab.apply_geometry)
             self._cal_tab.pullGeometry.connect(
                 lambda: self._cal_tab.apply_geometry(self._view_tab.get_geometry()))
+            # Calibrate → Data Viewer: push calibrated geometry into the Viewer fields.
+            self._cal_tab.sendGeometryToViewer.connect(self._view_tab.set_geometry)
         except Exception:
             _log(f"Geometry hand-off wiring failed:\n{traceback.format_exc()}")
 
