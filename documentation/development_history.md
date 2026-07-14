@@ -66,6 +66,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Abort buttons; dark/bright/background field correction; auto-load on browse | `7d010d7` |
 | Calibration input accepts paramstest/poni/json | `41f28f5` |
 | Load-calibration-file (geometry + λ) helpers | `b381d8d` |
+| Multi-column paramstest results readout + Send-to-Data-Viewer button | `455ca4e` |
 
 ### Batch Integrate (Tab 4)
 | Change | Commit |
@@ -383,6 +384,20 @@ and `widgets._mono_font()` (QFont `setFamilies` + Monospace style hint).
 **Files:** `style.py`, `widgets.py`, `tab_export.py`, `tab_view.py`.
 **Roll back:** `git revert d6df1f8` (cosmetic; only affects fixed-width font selection
 and re-introduces the harmless warning).
+
+### `455ca4e` — Calibrate: multi-column results readout + Send-to-Data-Viewer (2026-07-13)
+**Effect:** (1) The Calibrate **Results** tab shows the full parameter set exactly as
+written to `paramstest.txt` (Lsd, BC, tx/ty/tz, p0–p14, Parallax, Wavelength, px,
+NrPixelsY/Z, RhoD, SpaceGroup, LatticeConstant) in a 3-column, column-major grid
+(`_paramstest_pairs` via the shared writer + `_populate_param_grid`), with a
+strain/timing line and the named-distortion table below. (2) New **→ Send to Data
+Viewer** button (`sendGeometryToViewer` signal + `_send_to_viewer`) pushes the
+calibrated λ/pixel/Lsd/beam-centre into the Data Viewer through new
+`DataViewerTab.set_geometry` (µm internal, Lsd shown mm, auto-BC off); wired in
+`app.py` as the reverse of the Viewer→Calibrate hand-off.
+**Files:** `tab_calibrate.py`, `tab_view.py`, `app.py`, docs.
+**Roll back:** `git revert 455ca4e`. Self-contained; depends on the mm-display change
+(`c4e1c12`) for the Viewer Lsd conversion.
 
 ---
 
