@@ -24,25 +24,28 @@ classifiers = [
 ]
 
 # Core GUI + scientific stack plus the MIDAS analysis backends the GUI drives.
-# Floors match the midas-suite meta-package (packages/midas_suite/pyproject.toml).
+# Pinned to the exact versions of the verified-working environment (see
+# environment.yml). The compatibility constraint carries over: numpy is held at
+# the 1.26 line because numba 0.59.x needs NumPy < 2.1 and torch 2.4.0 targets
+# NumPy 1.x — bumping numpy to 2.x requires moving torch/numba/backends together.
 dependencies = [
-    "PyQt5>=5.15",
-    "pyqtgraph>=0.13",
-    "matplotlib>=3.5",
-    "numpy>=1.22",
-    "scipy>=1.9",
-    "h5py>=3.0",
-    "tifffile>=2022.0",
-    "torch>=2.1",
-    "midas-calibrate-v2>=0.3.3",
-    "midas-integrate-v2>=0.1.0",
-    "midas-calibrate>=0.2.3",
-    "midas-hkls>=0.4.1",
-    "midas-distortion>=0.2.0",
+    "PyQt5==5.15.10",
+    "pyqtgraph==0.14.0",
+    "matplotlib==3.8.4",
+    "numpy==1.26.4",
+    "scipy==1.13.1",
+    "h5py==3.11.0",
+    "tifffile==2023.4.12",
+    "torch==2.4.0",
+    "midas-calibrate-v2==0.5.2",
+    "midas-integrate-v2==0.3.1",
+    "midas-calibrate==0.2.7",
+    "midas-hkls==0.5.0",
+    "midas-distortion==0.2.0",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "build", "twine"]
+dev = ["pytest==9.1.1", "build", "twine"]
 
 [project.scripts]
 midas-gui = "midas_gui.app:main"
