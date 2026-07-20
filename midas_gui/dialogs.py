@@ -3,6 +3,76 @@ from __future__ import annotations
 
 from PyQt5 import QtWidgets
 
+from .constants import DISTORTION_NAMES, DISTORTION_ISO, DISTORTION_PRESETS
+
+
+class DistortionRefineDialog(QtWidgets.QDialog):
+    """Pick which of the 15 distortion coefficients to refine.
+
+    Coefficients are grouped by η-fold (isotropic radial + folds 1..6).  Named
+    preset buttons auto-select a coefficient set (see
+    :data:`midas_gui.constants.DISTORTION_PRESETS`).  ``selected()`` returns the
+    set of checked v2 coefficient names.
+    """
+
+    def __init__(self, selected=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Distortion parameters to refine")
+        self.setMinimumWidth(360)
+        selected = set(selected or [])
+
+        layout = QtWidgets.QVBoxLayout(self)
+        info = QtWidgets.QLabel(
+            "Choose which distortion harmonics the calibration refines.  Use a "
+            "preset to select a whole η-fold ladder, or tick coefficients "
+            "individually.")
+        info.setWordWrap(True)
+        info.setStyleSheet("color:#bbb;font-size:11px;padding-bottom:6px;")
+        layout.addWidget(info)
+
+        # ── Preset buttons ──
+        preset_row = QtWidgets.QHBoxLayout(); preset_row.setSpacing(4)
+        preset_row.addWidget(QtWidgets.QLabel("Mode:"))
+        for name, coeffs in DISTORTION_PRESETS.items():
+            b = QtWidgets.QPushButton(name)
+            b.setToolTip(f"Select: {', '.join(coeffs) if coeffs else '(none)'}")
+            b.clicked.connect(lambda _=0, c=coeffs: self._apply_preset(c))
+            preset_row.addWidget(b)
+        preset_row.addStretch(1)
+        layout.addLayout(preset_row)
+
+        # ── Per-coefficient checkboxes grouped by η-fold ──
+        self._boxes: dict = {}
+        grid = QtWidgets.QGridLayout(); grid.setSpacing(4)
+        groups = [("Isotropic (fold 0)", DISTORTION_ISO)]
+        groups += [(f"Fold {k}", [f"a{k}", f"phi{k}"]) for k in range(1, 7)]
+        for r, (title, names) in enumerate(groups):
+            lbl = QtWidgets.QLabel(f"<b>{title}</b>")
+            grid.addWidget(lbl, r, 0)
+            col = 1
+            for nm in names:
+                cb = QtWidgets.QCheckBox(nm)
+                cb.setChecked(nm in selected)
+                self._boxes[nm] = cb
+                grid.addWidget(cb, r, col)
+                col += 1
+        layout.addLayout(grid)
+
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def _apply_preset(self, coeffs):
+        want = set(coeffs)
+        for nm, cb in self._boxes.items():
+            cb.setChecked(nm in want)
+
+    def selected(self) -> set:
+        """Set of checked coefficient names (v2 harmonic names)."""
+        return {nm for nm, cb in self._boxes.items() if cb.isChecked()}
+
 
 class _SaveParamstestDialog(QtWidgets.QDialog):
     """Single dialog exposing output path + optional template path.

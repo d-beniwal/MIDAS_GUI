@@ -68,6 +68,21 @@ DISTORTION_NAMES = [
     "a4", "phi4", "a5", "phi5", "a6", "phi6",
 ]
 
+# Isotropic radial coefficients (η-fold 0) and the per-fold amp/phase pairs.
+DISTORTION_ISO = ["iso_R2", "iso_R4", "iso_R6"]
+def _fold(k):  # η-fold k (1..6) → its amplitude/phase pair
+    return [f"a{k}", f"phi{k}"]
+
+# Named distortion-refinement "modes": each selects a set of the 15 coefficients.
+# Grouped by η-fold, matching how MIDAS names harmonics (bic_search ladder).
+DISTORTION_PRESETS = {
+    "None": [],
+    "Isotropic only": list(DISTORTION_ISO),
+    "Iso + up to 2-fold": DISTORTION_ISO + _fold(1) + _fold(2),
+    "Iso + up to 4-fold": DISTORTION_ISO + _fold(1) + _fold(2) + _fold(3) + _fold(4),
+    "All (15)": list(DISTORTION_NAMES),
+}
+
 # Lattice + space group per built-in calibrant.
 # _LATT used for ring prediction; _SG / _LC used for paramstest export.
 # Calibrant lattice constants — kept numerically identical to the matching

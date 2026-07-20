@@ -303,13 +303,25 @@ and post-calibration integration.
 
 ### Detector, seed & Load calibration file
 The **Detector & Calibrant** card sets λ, pixel size(s) and detector transforms; the
-**Initial seed** card sets the LM starting point (BC_y, BC_z, Lsd). **Load calibration
-file…** (top of the Detector card) reads a MIDAS **paramstest `.txt`**, a calibration
-**`.json`**, or a pyFAI **`.poni`** (auto-detected) and fills λ, pixel size, and the
-seed BC + Lsd — a fast way to start from a previous calibration or a known geometry.
-(The synthetic test data ships `test_data/calibration_synthetic.{json,txt,poni}` as a
-ready example.) **← Data Viewer** (next to *Load calibration file…*) pulls λ, pixel
-size, Lsd and beam centre straight from the Data Viewer tab into the same fields.
+**Initial seed** card sets the LM starting point (BC_y, BC_z, Lsd, **and tilts
+tx/ty/tz**). **Load calibration file…** (top of the Detector card) reads a MIDAS
+**paramstest `.txt`**, a calibration **`.json`**, or a pyFAI **`.poni`** (auto-detected)
+and fills λ, pixel size, and the seed BC + Lsd — a fast way to start from a previous
+calibration or a known geometry. (The synthetic test data ships
+`test_data/calibration_synthetic.{json,txt,poni}` as a ready example.) **← Data Viewer**
+(next to *Load calibration file…*) pulls λ, pixel size, Lsd and beam centre straight from
+the Data Viewer tab into the same fields. A **Feed result back to seed** checkbox (on by
+default) copies the optimized BC / Lsd / tilts / distortion of each run back into the
+seed fields, so a follow-up run starts from the previous solution. *Seed tilts are
+honoured by the Four-stage / advanced pipelines; the One-shot / First-time paths seed
+tilts only if the installed backend exposes initial-tilt options.*
+
+### Average frames
+For a multi-frame source (HDF5 / folder), **Average frames into a single image** builds
+the mean of a frame range and calibrates on that. **start** / **end (0 = all)** select
+the range and **skip** uses every Nth frame while averaging (e.g. skip = 2 averages
+every other frame). The card is disabled for single-frame sources; the preview updates
+live as the options change.
 
 ### Pipeline selector
 One-shot (default) · First-time · Four-stage · Bayesian (Laplace σ) · Joint-cake.
@@ -317,9 +329,14 @@ One-shot (default) · First-time · Four-stage · Bayesian (Laplace σ) · Joint
 report a spurious self-compensated tilt on weakly-tilted data.*
 
 ### Refine flags
-Which parameters vary: Lsd, BC, ty, tz, tx, Wavelength, Distortion (15 coeffs),
-plus a "Residual map" build toggle. Advanced (E-M / LM iters, device, output dir) and
-Multi-panel detector groups are collapsible.
+Which parameters vary: Lsd, BC, ty, tz, tx, Wavelength, plus a "Residual map" build
+toggle. The **Distortion (n/15)** checkbox has a companion **…** button that opens a
+per-coefficient dialog: the 15 distortion coefficients are grouped by η-fold (isotropic
+radial + folds 1–6), and named **preset modes** (None · Isotropic only · Iso + up to
+2-fold · Iso + up to 4-fold · All (15)) auto-select whole ladders. The checkbox label
+shows how many coefficients are selected. *Per-coefficient control applies to the
+Four-stage / advanced pipelines; the One-shot path refines all-or-none.* Advanced
+(E-M / LM iters, device, output dir) and Multi-panel detector groups are collapsible.
 
 ### Live threshold slider
 Zeroes calibration-image pixels below the slider value (background suppression for
@@ -341,9 +358,12 @@ written to `paramstest.txt` (Lsd, BC, tx/ty/tz, the distortion coefficients, Par
 Wavelength, px, NrPixelsY/Z, RhoD, SpaceGroup, LatticeConstant) as **plain text laid out
 in multiple columns** so the wide-but-short panel stays readable — no table widget. The
 distortion `p0–p14` slots are labelled with their coefficient names (iso_R2, a1, phi1,
-…). A strain/timing line sits below. **→ Send to Data Viewer** replaces the Data
-Viewer tab's geometry fields (λ, pixel size, Lsd, beam centre) with these calibrated
-values — the reverse of the Data Viewer's "→ Send geometry to Calibrate".
+…). A strain/timing line sits below. **→ Send to Data Viewer** pushes the *full*
+calibrated geometry (λ, pixel size, Lsd, beam centre, **tilts and distortion**) into the
+Data Viewer tab — where it drives the tilt/distortion-aware radial integration, not just
+circle binning — the reverse of the Data Viewer's "→ Send geometry to Calibrate". The
+bottom tab area is fully resizable (drag the horizontal splitter) and the Log fills its
+tab.
 
 ### Export
 **Save calibration.json** and **Save paramstest.txt** (standalone or from a template).

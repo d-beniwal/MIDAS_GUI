@@ -1490,6 +1490,26 @@ class DataLoaderPanel(QtWidgets.QWidget):
             return np.stack(frames, axis=0)
         raise RuntimeError("No data loaded")
 
+    def average_frames(self, start=0, end=None, step=1):
+        """Mean of frames ``start:end:step`` (end None/<=0 = all), streamed one
+        frame at a time so large folders / HDF5 stacks stay memory-safe.
+
+        Returns a float32 2-D array, or None if no data / no frames selected.
+        """
+        if self._nframes == 0:
+            return None
+        end = self._nframes if (end is None or end <= 0) else min(int(end), self._nframes)
+        start = max(0, int(start))
+        step = max(1, int(step))
+        acc, n = None, 0
+        for i in range(start, end, step):
+            a = self._get_frame(i).astype(np.float64)
+            acc = a if acc is None else acc + a
+            n += 1
+        if n == 0:
+            return None
+        return (acc / n).astype(np.float32)
+
     # ── public API ────────────────────────────────────────────────
     def set_path(self, path, dataset=None, *, load=True):
         """Preset the data path (and HDF5 dataset); optionally load immediately."""

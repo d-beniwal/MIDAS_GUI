@@ -18,14 +18,15 @@ import pyqtgraph as pg
 
 from midas_gui.constants import (
     CALIBRANTS, PIPELINES, DEFAULT_PIPELINE, _SG, _LC, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM,
-    DEFAULT_LSD_UM, DEFAULT_BC_Y, DEFAULT_BC_Z, DEFAULT_CALIBRANT_TIF)
+    DEFAULT_LSD_UM, DEFAULT_BC_Y, DEFAULT_BC_Z, DEFAULT_CALIBRANT_TIF,
+    DISTORTION_NAMES)
 from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _predict_ring_radii, _NoScrollComboBox,
     make_kedge_label, make_pixel_label)
 from midas_gui.widgets import (
     PickableImageViewer, ProfileViewer, LogPanel, ResidualBarChart, DataLoaderPanel)
 from midas_gui.workers import CalibrationWorker, IntegrationWorker, CorrectedRingsWorker
-from midas_gui.dialogs import _SaveParamstestDialog
+from midas_gui.dialogs import _SaveParamstestDialog, DistortionRefineDialog
 from midas_gui import style as S
 
 
@@ -48,6 +49,8 @@ class CalibrationTab(QtWidgets.QWidget):
         self._corrected_ring_items: list = []
         self._corrected_rings_worker = None
         self._calib_result = None
+        self._dist_coeffs = set(DISTORTION_NAMES)   # distortion coeffs to refine
+        self._seed_dist: dict = {}                  # seed distortion carried from a result
         self._build_ui()
         self._loader.set_path(DEFAULT_CALIBRANT_TIF)
 
@@ -161,6 +164,32 @@ class CalibrationTab(QtWidgets.QWidget):
         self._thr_max.valueChanged.connect(self._on_threshold_changed)
         lv.addWidget(thr)
 
+        # ── Average frames (hdf5 / folder) ──
+        avgc = S.make_card("Average frames")
+        self._avg_check = QtWidgets.QCheckBox("Average frames into a single image")
+        self._avg_check.setToolTip(
+            "Average a range of frames (with an optional skip/stride) into one "
+            "image used for calibration. Requires a multi-frame source.")
+        avgc.body.addWidget(self._avg_check)
+        self._avg_start = _NoScrollSpinBox(); self._avg_start.setRange(0, 999999)
+        self._avg_end = _NoScrollSpinBox(); self._avg_end.setRange(0, 999999)
+        self._avg_end.setToolTip("Last frame (exclusive). 0 = all frames.")
+        self._avg_step = _NoScrollSpinBox(); self._avg_step.setRange(1, 100000); self._avg_step.setValue(1)
+        self._avg_step.setToolTip("Skip: use every Nth frame while averaging.")
+        for w in (self._avg_start, self._avg_end, self._avg_step):
+            w.setEnabled(False)
+        afm = S.Form(); afm.row(("start:", self._avg_start), ("end(0=all):", self._avg_end))
+        afm.row(("skip:", self._avg_step))
+        avgc.body.addLayout(afm)
+        self._avg_note = QtWidgets.QLabel("")
+        self._avg_note.setStyleSheet("color:#9a9a9a;font-size:10px"); self._avg_note.setWordWrap(True)
+        avgc.body.addWidget(self._avg_note)
+        self._avg_card = avgc
+        self._avg_check.toggled.connect(self._on_avg_toggled)
+        for w in (self._avg_start, self._avg_end, self._avg_step):
+            w.valueChanged.connect(self._on_avg_changed)
+        lv.addWidget(avgc)
+
         # ── Initial seed ──
         seed = S.make_card("Initial seed  (Pick tools on image)")
         self._manual_seed_check = QtWidgets.QCheckBox("Use manual seed")
@@ -172,12 +201,26 @@ class CalibrationTab(QtWidgets.QWidget):
         self._seed_bcz = _fspin(-99999, 99999, 2, DEFAULT_BC_Z, "px")
         # Lsd shown/entered in mm; calculations & files use µm.
         self._seed_lsd = _fspin(0.001, 1e5, 4, DEFAULT_LSD_UM / 1000.0, " mm")
-        for w in (self._seed_bcy, self._seed_bcz, self._seed_lsd):
+        # Seed tilts (deg). Honoured by the four-stage / advanced pipelines; the
+        # one-shot / first-time paths seed tilts only if the installed backend
+        # exposes initial-tilt kwargs (otherwise they start at 0).
+        self._seed_tx = _fspin(-10, 10, 4, 0.0, "°")
+        self._seed_ty = _fspin(-10, 10, 4, 0.0, "°")
+        self._seed_tz = _fspin(-10, 10, 4, 0.0, "°")
+        self._seed_tilts = (self._seed_tx, self._seed_ty, self._seed_tz)
+        for w in (self._seed_bcy, self._seed_bcz, self._seed_lsd, *self._seed_tilts):
             w.setEnabled(False)
-        for sig in (self._seed_bcy, self._seed_bcz, self._seed_lsd):
+        for sig in (self._seed_bcy, self._seed_bcz, self._seed_lsd, *self._seed_tilts):
             self._manual_seed_check.toggled.connect(sig.setEnabled)
         sfm = S.Form(); sfm.row(("BC_y:", self._seed_bcy), ("BC_z:", self._seed_bcz)); sfm.row(("Lsd:", self._seed_lsd))
+        sfm.row(("tx:", self._seed_tx), ("ty:", self._seed_ty)); sfm.row(("tz:", self._seed_tz))
         seed.body.addLayout(sfm)
+        self._feedback_check = QtWidgets.QCheckBox("Feed result back to seed")
+        self._feedback_check.setChecked(True)
+        self._feedback_check.setToolTip(
+            "After a calibration, copy the optimized BC / Lsd / tilts / distortion "
+            "back into these seed fields so the next run starts from them.")
+        seed.body.addWidget(self._feedback_check)
         self._seed_note = QtWidgets.QLabel("")
         self._seed_note.setStyleSheet(f"color:{S.ACCENT};font-size:10px"); self._seed_note.setWordWrap(True)
         seed.body.addWidget(self._seed_note)
@@ -192,13 +235,24 @@ class CalibrationTab(QtWidgets.QWidget):
         self._ref_tz = QtWidgets.QCheckBox("tz"); self._ref_tz.setChecked(True)
         self._ref_tx = QtWidgets.QCheckBox("tx")
         self._ref_wl = QtWidgets.QCheckBox("Wavelength")
-        self._ref_dist = QtWidgets.QCheckBox("Distortion (15)"); self._ref_dist.setChecked(True)
+        self._ref_dist = QtWidgets.QCheckBox("Distortion"); self._ref_dist.setChecked(True)
         self._build_rc = QtWidgets.QCheckBox("Residual map"); self._build_rc.setChecked(True)
         for i, w in enumerate((self._ref_lsd, self._ref_bc, self._ref_ty, self._ref_tz,
-                               self._ref_tx, self._ref_wl, self._ref_dist, self._build_rc)):
+                               self._ref_tx, self._ref_wl)):
             rfl.addWidget(w, i // 2, i % 2)
+        # Distortion gets a companion "…" button opening the per-coefficient dialog.
+        self._dist_btn = QtWidgets.QToolButton(); self._dist_btn.setText("…")
+        self._dist_btn.setToolTip("Choose which distortion coefficients to refine "
+                                  "(η-fold presets available).")
+        self._dist_btn.clicked.connect(self._edit_distortion_coeffs)
+        drow = QtWidgets.QHBoxLayout(); drow.setSpacing(4)
+        drow.addWidget(self._ref_dist); drow.addWidget(self._dist_btn); drow.addStretch(1)
+        rfl.addLayout(drow, 3, 0)
+        rfl.addWidget(self._build_rc, 3, 1)
+        self._ref_dist.toggled.connect(lambda _=0: self._update_dist_label())
         refc.body.addLayout(rfl)
         lv.addWidget(refc)
+        self._update_dist_label()
 
         # ── Advanced ──
         grp_adv = QtWidgets.QGroupBox("Advanced")
@@ -275,7 +329,7 @@ class CalibrationTab(QtWidgets.QWidget):
         tb.addWidget(self._corr_status)
         right.addWidget(self._img_view)
 
-        bot = QtWidgets.QTabWidget(); bot.setMaximumHeight(310)
+        bot = QtWidgets.QTabWidget()
         self._prof_view = ProfileViewer()
         ptb = self._prof_view._toolbar_layout
         self._cal_r_bin = _fspin(0.1, 20.0, 2, 1.0, "px"); self._cal_r_bin.setFixedWidth(78)
@@ -328,8 +382,12 @@ class CalibrationTab(QtWidgets.QWidget):
         bot.addTab(res_w, "Results")
         self._log = LogPanel()
         bot.addTab(self._log, "Log")
+        # Let the Log text fill its whole tab page (no small 120px cap here).
+        self._log.setMaximumHeight(16_777_215)
         right.addWidget(bot)
+        right.setChildrenCollapsible(False)
         right.setStretchFactor(0, 3); right.setStretchFactor(1, 1)
+        right.setSizes([680, 320])
         self._bot_tabs = bot
         right.setMinimumWidth(320)
         split.addWidget(right)
@@ -341,7 +399,8 @@ class CalibrationTab(QtWidgets.QWidget):
     def _on_loader_data(self):
         """New frame / data from the loader — refresh the calibration image, the
         threshold-slider range, and the display."""
-        self._image = self._loader.current_frame()
+        self._sync_avg_controls()
+        self._image = self._source_image()
         if self._image is None:
             return
         lo, hi = float(np.nanmin(self._image)), float(np.nanmax(self._image))
@@ -375,6 +434,88 @@ class CalibrationTab(QtWidgets.QWidget):
             out[self._image < thr] = 0.0
             return out
         return self._image
+
+    # ── Average frames ────────────────────────────────────────────
+
+    def _source_image(self):
+        """Base image for calibration: averaged frames if enabled, else current."""
+        if self._avg_check.isChecked() and self._loader.n_frames() > 1:
+            avg = self._loader.average_frames(
+                self._avg_start.value(), self._avg_end.value(), self._avg_step.value())
+            if avg is not None:
+                return avg
+        return self._loader.current_frame()
+
+    def _sync_avg_controls(self):
+        """Enable/disable the averaging card and clamp spin ranges to the source."""
+        n = self._loader.n_frames()
+        multi = n > 1
+        self._avg_card.setEnabled(multi)
+        if not multi and self._avg_check.isChecked():
+            self._avg_check.blockSignals(True); self._avg_check.setChecked(False)
+            self._avg_check.blockSignals(False)
+        hi = max(0, n)
+        for w in (self._avg_start, self._avg_end):
+            w.blockSignals(True); w.setRange(0, hi); w.blockSignals(False)
+        self._update_avg_note()
+
+    def _update_avg_note(self):
+        n = self._loader.n_frames()
+        if n <= 1:
+            self._avg_note.setText("Single-frame source — averaging unavailable.")
+            return
+        start = self._avg_start.value()
+        end = self._avg_end.value() or n
+        end = min(end, n)
+        step = max(1, self._avg_step.value())
+        cnt = len(range(max(0, start), end, step))
+        self._avg_note.setText(f"{cnt} of {n} frames averaged (start={start}, "
+                               f"end={end}, skip={step}).")
+
+    def _on_avg_toggled(self, on):
+        for w in (self._avg_start, self._avg_end, self._avg_step):
+            w.setEnabled(on)
+        self._update_avg_note()
+        self._image = self._source_image()
+        if self._image is not None:
+            self._show_calib_image(autorange=False)
+
+    def _on_avg_changed(self, *_):
+        self._update_avg_note()
+        if self._avg_check.isChecked():
+            self._image = self._source_image()
+            if self._image is not None:
+                self._show_calib_image(autorange=False)
+
+    # ── Distortion coefficient selection ──────────────────────────
+
+    def _edit_distortion_coeffs(self):
+        dlg = DistortionRefineDialog(self._dist_coeffs, self)
+        if dlg.exec_():
+            self._dist_coeffs = dlg.selected()
+            if self._dist_coeffs and not self._ref_dist.isChecked():
+                self._ref_dist.setChecked(True)
+            self._update_dist_label()
+
+    def _update_dist_label(self):
+        n = len(self._dist_coeffs) if self._ref_dist.isChecked() else 0
+        self._ref_dist.setText(f"Distortion ({n}/15)")
+
+    # ── Seed feedback from a result ───────────────────────────────
+
+    def _seed_from_result(self, result):
+        """Copy optimized geometry from a result into the seed fields."""
+        self._manual_seed_check.setChecked(True)
+        self._seed_bcy.setValue(float(result.BC_y))
+        self._seed_bcz.setValue(float(result.BC_z))
+        self._seed_lsd.setValue(float(result.Lsd) / 1000.0)   # µm → mm
+        self._seed_tx.setValue(float(getattr(result, "tx", 0.0) or 0.0))
+        self._seed_ty.setValue(float(getattr(result, "ty", 0.0) or 0.0))
+        self._seed_tz.setValue(float(getattr(result, "tz", 0.0) or 0.0))
+        if getattr(result, "wavelength_A", None):
+            self._wl.setValue(float(result.wavelength_A))
+        self._seed_dist = dict(getattr(result, "distortion", {}) or {})
+        self._seed_note.setText("Seed updated from the last calibration result.")
 
     def _show_calib_image(self, autorange: bool = False):
         if self._image is not None:
@@ -460,6 +601,7 @@ class CalibrationTab(QtWidgets.QWidget):
     # ── Run ────────────────────────────────────────────────────────
 
     def _refine_flags(self) -> dict:
+        coeffs = set(self._dist_coeffs) if self._ref_dist.isChecked() else set()
         return {
             "Lsd": self._ref_lsd.isChecked(),
             "BC": self._ref_bc.isChecked(),
@@ -467,11 +609,12 @@ class CalibrationTab(QtWidgets.QWidget):
             "tz": self._ref_tz.isChecked(),
             "tx": self._ref_tx.isChecked(),
             "Wavelength": self._ref_wl.isChecked(),
-            "Distortion": self._ref_dist.isChecked(),
+            "Distortion": self._ref_dist.isChecked(),   # legacy/back-compat
+            "distortion_coeffs": coeffs,
         }
 
     def _run(self):
-        self._image = self._loader.current_frame()
+        self._image = self._source_image()
         if self._image is None:
             QtWidgets.QMessageBox.warning(self, "No image", "Load a calibrant image first."); return
         if self._worker and self._worker.isRunning():
@@ -519,6 +662,10 @@ class CalibrationTab(QtWidgets.QWidget):
                 "BC_y": self._seed_bcy.value(),
                 "BC_z": self._seed_bcz.value(),
                 "Lsd":  self._seed_lsd.value() * 1000.0,   # mm display → µm
+                "tx": self._seed_tx.value(),
+                "ty": self._seed_ty.value(),
+                "tz": self._seed_tz.value(),
+                "distortion": dict(self._seed_dist),
             }
         if self._panel_grp.isChecked():
             cfg["panel_layout"] = {
@@ -621,13 +768,26 @@ class CalibrationTab(QtWidgets.QWidget):
             return
         self.sendGeometryToViewer.emit({
             "wavelength_A": float(r.wavelength_A), "pxY": float(r.pxY),
-            "Lsd": float(r.Lsd), "BC_y": float(r.BC_y), "BC_z": float(r.BC_z)})
-        self._log.append("Sent calibrated geometry to the Data Viewer.")
+            "pxZ": float(getattr(r, "pxZ", r.pxY) or r.pxY),
+            "Lsd": float(r.Lsd), "BC_y": float(r.BC_y), "BC_z": float(r.BC_z),
+            "tx": float(getattr(r, "tx", 0.0) or 0.0),
+            "ty": float(getattr(r, "ty", 0.0) or 0.0),
+            "tz": float(getattr(r, "tz", 0.0) or 0.0),
+            "NrPixelsY": int(getattr(r, "NrPixelsY", 0) or 0),
+            "NrPixelsZ": int(getattr(r, "NrPixelsZ", 0) or 0),
+            "distortion": dict(getattr(r, "distortion", {}) or {})})
+        self._log.append("Sent calibrated geometry (incl. tilts + distortion) "
+                         "to the Data Viewer.")
 
     def _on_done(self, result):
         if self._calib_cancelled:
             return   # user aborted — ignore the late result
         self._result = result
+        if self._feedback_check.isChecked():
+            try:
+                self._seed_from_result(result)
+            except Exception:
+                pass   # feedback is best-effort; never block the result display
         self._run_btn.setEnabled(True); self._abort_btn.setEnabled(False)
         self._prog.setVisible(False)
         try:

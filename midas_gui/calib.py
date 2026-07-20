@@ -26,7 +26,7 @@ from typing import Optional
 import numpy as np
 
 import midas_gui._paths  # noqa: F401  (sys.path setup must run before MIDAS imports)
-from midas_gui.constants import _SG, _LC, DISTORTION_NAMES, DEFAULT_LSD_UM
+from midas_gui.constants import _SG, _LC, _V2_TO_V1, DISTORTION_NAMES, DEFAULT_LSD_UM
 
 
 def _supported_kwargs(fn, kwargs: dict) -> dict:
@@ -68,13 +68,38 @@ def make_seed_safe(image: np.ndarray, wavelength: float, pxY: float,
         return None
 
 
+def _distortion_coeffs(refine: dict) -> set:
+    """Resolve which distortion coefficients (v2 names) to refine.
+
+    Prefers the per-coefficient ``distortion_coeffs`` set; falls back to the
+    legacy single ``Distortion`` bool (all-or-nothing) for callers that predate
+    the per-coefficient dialog.
+    """
+    coeffs = refine.get("distortion_coeffs")
+    if coeffs is not None:
+        return set(coeffs)
+    return set(DISTORTION_NAMES) if bool(refine.get("Distortion", True)) else set()
+
+
+def _manual_seed_dict(manual: dict) -> dict:
+    """Seed dict from a GUI manual_seed: BC/Lsd plus optional tilts + distortion."""
+    seed = {"BC_y": manual["BC_y"], "BC_z": manual["BC_z"], "Lsd": manual["Lsd"]}
+    for k in ("tx", "ty", "tz"):
+        if manual.get(k) is not None:
+            seed[k] = float(manual[k])
+    if manual.get("distortion"):
+        seed["distortion"] = dict(manual["distortion"])
+    return seed
+
+
 def _refine_dict(refine: dict) -> dict:
     """Translate the GUI refine flags into a v1 ``Refine`` dict.
 
-    GUI flags: Lsd, BC, ty, tz, tx, Wavelength, Distortion.
-    The 15 distortion coefficients (p0..p14) share the single Distortion flag.
+    GUI flags: Lsd, BC, ty, tz, tx, Wavelength, plus distortion selection
+    (``distortion_coeffs`` set of v2 harmonic names, or the legacy ``Distortion``
+    bool).  Each selected v2 coefficient maps to its v1 ``p0..p14`` slot.
     """
-    dist = bool(refine.get("Distortion", True))
+    coeffs = _distortion_coeffs(refine)
     d = {
         "Lsd":        bool(refine.get("Lsd", True)),
         "BC":         bool(refine.get("BC", True)),
@@ -84,7 +109,11 @@ def _refine_dict(refine: dict) -> dict:
         "Parallax":   False,
     }
     for i in range(15):
-        d[f"p{i}"] = dist
+        d[f"p{i}"] = False
+    for name in coeffs:
+        slot = _V2_TO_V1.get(name)
+        if slot is not None:
+            d[slot] = True
     return d
 
 
@@ -106,15 +135,25 @@ def build_v1_params(seed, *, wavelength, pxY, pxZ, calibrant, NY, NZ,
         max_ring_px = rho_px * 0.97
     a, b, c, alpha, beta, gamma = _LC.get(calibrant, _LC["CeO2"])
 
+    # Optional seed tilts (default 0) and distortion coefficients (v2 harmonic
+    # names → v1 p-slots) carried in from a prior calibration result.
+    tx = float(seed.get("tx", 0.0)); ty = float(seed.get("ty", 0.0))
+    tz = float(seed.get("tz", 0.0))
+    p_seed = {f"p{i}": 0.0 for i in range(15)}
+    for name, val in (seed.get("distortion") or {}).items():
+        slot = _V2_TO_V1.get(name)
+        if slot is not None:
+            p_seed[slot] = float(val)
+
     v1 = CalibrationParams(
         NrPixelsY=NY, NrPixelsZ=NZ, pxY=pxY, pxZ=pxZ,
-        Lsd=lsd, BC_y=bc_y, BC_z=bc_z, tx=0.0, ty=0.0, tz=0.0,
+        Lsd=lsd, BC_y=bc_y, BC_z=bc_z, tx=tx, ty=ty, tz=tz,
         Wavelength=wavelength,
         SpaceGroup=_SG.get(calibrant, 225),
         LatticeConstant=(a, b, c, alpha, beta, gamma),
         RhoD=rho_px * pxY, MaxRingRad=max_ring_px, MinRingRad=min_ring_px,
         nIterations=n_iter, Refine=_refine_dict(refine),
-        Device=device, Dtype="fp64",
+        Device=device, Dtype="fp64", **p_seed,
     )
     v1.validate()
     return v1
@@ -242,8 +281,7 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
             # refined panel shifts; normalize_result detects the FourStageResult
             # via its .stage2 attribute and handles it correctly.
             if manual:
-                seed = {"BC_y": manual["BC_y"], "BC_z": manual["BC_z"],
-                        "Lsd": manual["Lsd"]}
+                seed = _manual_seed_dict(manual)
             else:
                 s = make_seed_safe(image, wavelength, pxY, calibrant)
                 if s is None:
@@ -269,7 +307,7 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
             build_residual_corr=bool(cfg.get("build_residual_corr", True)),
             n_iter=n_iter, lm_max_iter=lm_iter, device=device, verbose=True,
             refine_tilts=bool(refine.get("ty", True) or refine.get("tz", True)),
-            refine_distortion=bool(refine.get("Distortion", True)),
+            refine_distortion=bool(_distortion_coeffs(refine)),
         )
         if pxZ:
             kwargs["pxZ"] = pxZ
@@ -280,6 +318,11 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
             kwargs["initial_BC_y"] = manual["BC_y"]
             kwargs["initial_BC_z"] = manual["BC_z"]
             kwargs["initial_Lsd"]  = manual["Lsd"]
+            # Seed tilts only if the installed calibrate() exposes them
+            # (_supported_kwargs drops any it does not accept).
+            for k in ("tx", "ty", "tz"):
+                if manual.get(k) is not None:
+                    kwargs[f"initial_{k}"] = float(manual[k])
         return calibrate(image, **_supported_kwargs(calibrate, kwargs))
 
     if mode == "first_time":
@@ -300,7 +343,7 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
     if mode == "four_stage":
         from midas_calibrate_v2.pipelines import autocalibrate_four_stage
         if manual:
-            seed = {"BC_y": manual["BC_y"], "BC_z": manual["BC_z"], "Lsd": manual["Lsd"]}
+            seed = _manual_seed_dict(manual)
         else:
             s = make_seed_safe(image, wavelength, pxY, calibrant)
             if s is None:
@@ -339,7 +382,7 @@ def _seed_and_v1(image, wavelength, pxY, pxZ, calibrant, NY, NZ,
                  refine, n_iter, device, manual):
     """Seed (manual or auto) → build_v1_params. Shared by advanced pipelines."""
     if manual:
-        seed = {"BC_y": manual["BC_y"], "BC_z": manual["BC_z"], "Lsd": manual["Lsd"]}
+        seed = _manual_seed_dict(manual)
     else:
         s = make_seed_safe(image, wavelength, pxY, calibrant)
         if s is None:
