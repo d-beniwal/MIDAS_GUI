@@ -1098,7 +1098,8 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
         v.addLayout(top)
 
         self._plot = pg.PlotWidget(background="#2b2e35")
-        self._plot.setMaximumHeight(130); self._plot.setMinimumHeight(90)
+        # Min height only (no max) so the splitter above can grow the histogram.
+        self._plot.setMinimumHeight(90)
         self._plot.setLabel("bottom", "intensity", **{"color": "#d0d0d0", "font-size": "9pt"})
         self._plot.setLabel("left", "log(count+1)", **{"color": "#d0d0d0", "font-size": "9pt"})
         for ax in ("bottom", "left"):
@@ -1112,11 +1113,30 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
         self._text = QtWidgets.QPlainTextEdit()
         self._text.setReadOnly(True)
         self._text.setFont(_mono_font(8))
-        self._text.setFixedHeight(120)
+        # The readout is a fixed, short list of lines — show it in full (no inner
+        # scrollbar) and let its height track the content. That leaves the plot as
+        # the only flexible child, so the splitter above resizes the plot while the
+        # whole panel (plot + text) moves as a unit.
+        self._text.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
+        self._text.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self._text.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self._text.setSizePolicy(QtWidgets.QSizePolicy.Preferred,
+                                 QtWidgets.QSizePolicy.Fixed)
         self._text.setStyleSheet(
             "QPlainTextEdit { background:#23252b; color:#d6d6d6; border:1px solid #444; }")
         v.addWidget(self._text)
+        self._fit_text_height()
         self._hist = None
+
+    def _fit_text_height(self):
+        """Size the readout box to fit exactly its current line count."""
+        fm = self._text.fontMetrics()
+        n = max(1, self._text.document().blockCount())
+        m = self._text.contentsMargins()
+        doc_m = int(self._text.document().documentMargin()) * 2
+        fr = self._text.frameWidth() * 2
+        self._text.setFixedHeight(
+            n * fm.lineSpacing() + doc_m + fr + m.top() + m.bottom() + 4)
 
     def scope(self) -> str:
         return self._scope.currentData()
@@ -1129,6 +1149,7 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
         vals = vals[np.isfinite(vals)]
         if vals.size == 0:
             self._text.setPlainText(f"{scope}\n(no pixels)")
+            self._fit_text_height()
             self._hist = None; self._curve.setData([], [])
             return
         n = vals.size
@@ -1149,6 +1170,7 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
             f"p99.99 = {g(p9999):<10} (>: {cnt(p9999):,})",
         ]
         self._text.setPlainText("\n".join(lines))
+        self._fit_text_height()
 
         # Histogram over the FULL intensity range so high-intensity pixels appear.
         vmin, vmax = float(vals.min()), float(vals.max())
@@ -1182,7 +1204,7 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
         vb.setYRange(-2.0, ymax, padding=0)
 
 
-class DataLoaderPanel(QtWidgets.QScrollArea):
+class DataLoaderPanel(QtWidgets.QWidget):
     """Left-hand data-loading panel shared by Tabs 0/2/3/4.
 
     Selects the five inputs — Data, Dark, Bright, Background, Mask — each a single
@@ -1207,17 +1229,23 @@ class DataLoaderPanel(QtWidgets.QScrollArea):
         self._nframes = 0
         self._cur = None
 
-        self.setWidgetResizable(True)
-        inner = QtWidgets.QWidget(); self.setWidget(inner)
+        # The cards live inside a scroll area; the stats panel (stack mode) sits
+        # below it in a draggable vertical splitter (see the end of __init__).
+        self._scroll = QtWidgets.QScrollArea(self)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        inner = QtWidgets.QWidget(); self._scroll.setWidget(inner)
         lv = QtWidgets.QVBoxLayout(inner); lv.setContentsMargins(4, 4, 4, 4); lv.setSpacing(8)
 
         # Distinct background + accent right border so the data-loader panel stands
         # out from the middle parameters panel.
         self.setObjectName("dataLoaderPanel")
         inner.setObjectName("dataLoaderInner")
-        self.viewport().setObjectName("dataLoaderViewport")
+        self._scroll.setObjectName("dataLoaderScroll")
+        self._scroll.viewport().setObjectName("dataLoaderViewport")
         self.setStyleSheet(
             f"#dataLoaderPanel {{ border: none; border-right: 2px solid {S.ACCENT}; }}"
+            f"#dataLoaderScroll {{ border: none; }}"
             f"#dataLoaderViewport, #dataLoaderInner {{ background: #2b2e35; }}")
 
         # ── Data card ──
@@ -1298,12 +1326,12 @@ class DataLoaderPanel(QtWidgets.QScrollArea):
         self._mask_sel.maskChanged.connect(self.fieldsChanged)
         lv.addWidget(self._mask_sel)
 
-        # Intensity statistics + histogram, pinned to the bottom (Data Viewer only).
+        # Intensity statistics + histogram (Data Viewer only). Created here but
+        # placed in a draggable splitter below, not in the scrolling card column.
         self.stats_panel = None
         lv.addStretch(1)
         if mode == "stack":
             self.stats_panel = IntensityStatsPanel()
-            lv.addWidget(self.stats_panel)
 
         # ── MONITOR button (stream mode only) — pinned to the bottom ──
         self._monitor_btn = None
@@ -1318,6 +1346,22 @@ class DataLoaderPanel(QtWidgets.QScrollArea):
             self._monitor_btn.toggled.connect(self._on_monitor_toggled)
             self._apply_monitor_style(False)
             lv.addWidget(self._monitor_btn)
+
+        # ── Outer layout: scroll on top, optional draggable stats panel below ──
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(0)
+        if self.stats_panel is not None:
+            self._left_split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+            self._left_split.setChildrenCollapsible(False)
+            self._left_split.setHandleWidth(6)
+            self._left_split.addWidget(self._scroll)
+            self._left_split.addWidget(self.stats_panel)
+            self._left_split.setStretchFactor(0, 3)
+            self._left_split.setStretchFactor(1, 1)
+            self._left_split.setSizes([560, 320])
+            outer.addWidget(self._left_split)
+        else:
+            outer.addWidget(self._scroll)
 
     # ── data source (path / dataset / loading) ────────────────────
     def _dataset(self) -> str:

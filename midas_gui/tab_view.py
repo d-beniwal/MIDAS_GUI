@@ -48,6 +48,7 @@ class DataViewerTab(QtWidgets.QWidget):
         self._calib_geom = None                    # geometry dict, or None
         self._calib_ctx = None                     # cached (spec, integration context)
         self._calib_ctx_sig = None                 # signature the context was built for
+        self._topn_items: list = []                # scatter overlays for Top-N pixels
         # Debounce the frame slider: coalesce rapid ticks into one heavy refresh.
         self._refresh_timer = QtCore.QTimer(self)
         self._refresh_timer.setSingleShot(True); self._refresh_timer.setInterval(60)
@@ -90,7 +91,51 @@ class DataViewerTab(QtWidgets.QWidget):
                 w.blockSignals(True); w.setValue(float(v) * scale); w.blockSignals(False)
         if g.get("BC_y") is not None or g.get("BC_z") is not None:
             self._bc_auto.setChecked(False)   # use the supplied beam centre
+        # If tilts / distortion / detector size accompany the geometry (e.g. a
+        # calibration result sent from the Calibrate tab), capture the FULL
+        # geometry so radial integration goes through the MIDAS engine (tilts +
+        # distortion), not concentric-circle binning.
+        has_full = any(g.get(k) not in (None, 0, 0.0) for k in ("tx", "ty", "tz")) \
+            or bool(g.get("distortion")) \
+            or (g.get("NrPixelsY") and g.get("NrPixelsZ"))
+        if has_full:
+            self._apply_full_geometry_dict(g)
         self._redraw_rings()
+        if self._rad_auto.isChecked():
+            self._radial_integrate()
+        else:
+            self._refresh_profile_markers()
+
+    def _apply_full_geometry_dict(self, g: dict):
+        """Build ``self._calib_geom`` from a full geometry dict (tilts/distortion/
+        detector size) so the tilt/distortion-aware radial engine is used."""
+        px = float(g.get("pxY") or 0.0)
+        geom = {
+            "wavelength_A": g.get("wavelength_A"),
+            "Lsd": g.get("Lsd"), "BC_y": g.get("BC_y"), "BC_z": g.get("BC_z"),
+            "tx": float(g.get("tx", 0.0) or 0.0),
+            "ty": float(g.get("ty", 0.0) or 0.0),
+            "tz": float(g.get("tz", 0.0) or 0.0),
+            "pxY": px, "pxZ": float(g.get("pxZ") or px),
+            "NrPixelsY": g.get("NrPixelsY"), "NrPixelsZ": g.get("NrPixelsZ"),
+            "distortion": dict(g.get("distortion") or {}),
+        }
+        # Need the detector size for the integration grid; fall back to the
+        # current image shape if the sender did not supply it.
+        if not (geom["NrPixelsY"] and geom["NrPixelsZ"]) and self._cur is not None:
+            nz, ny = self._cur.shape
+            geom["NrPixelsY"], geom["NrPixelsZ"] = ny, nz
+        required = ("wavelength_A", "Lsd", "BC_y", "BC_z", "pxY",
+                    "NrPixelsY", "NrPixelsZ")
+        if any(not geom.get(k) for k in required):
+            return   # incomplete — keep circle binning
+        self._calib_geom = geom
+        self._calib_ctx = self._calib_ctx_sig = None
+        tilt = any(abs(geom[k]) > 1e-9 for k in ("tx", "ty", "tz"))
+        mode = ("full integration: tilts"
+                + ("+distortion" if geom["distortion"] else "")
+                if (tilt or geom["distortion"]) else "full integration")
+        self._calib_lbl.setText(f"Geometry from Calibrate tab  ·  {mode}")
 
     # ── UI ────────────────────────────────────────────────────────
 
@@ -281,6 +326,21 @@ class DataViewerTab(QtWidgets.QWidget):
         self._viewer = PickableImageViewer()
         self._viewer.bcPicked.connect(self._on_bc_picked)
         self._viewer.ringFitBC.connect(self._on_ring_fit_bc)
+        # Top-N brightest-pixel locator (toggle on the image toolbar).
+        vtb = self._viewer._toolbar_layout
+        self._topn_btn = QtWidgets.QPushButton("Top-N pixels"); self._topn_btn.setCheckable(True)
+        self._topn_btn.setToolTip(
+            "Mark the N highest-intensity pixels on the image (crosshair + circle) "
+            "and show their statistics. Click again to turn off.")
+        self._topn_spin = _NoScrollSpinBox(); self._topn_spin.setRange(1, 100000)
+        self._topn_spin.setValue(20); self._topn_spin.setFixedWidth(70)
+        self._topn_spin.setToolTip("Number of highest-intensity pixels to mark.")
+        vtb.addWidget(self._topn_btn)
+        vtb.addWidget(QtWidgets.QLabel("N:"))
+        vtb.addWidget(self._topn_spin)
+        self._topn_btn.toggled.connect(self._on_topn_toggled)
+        self._topn_spin.valueChanged.connect(
+            lambda *_: self._show_topn() if self._topn_btn.isChecked() else None)
         right.addWidget(self._viewer)
 
         # Radial integration (azimuthal average around the beam centre).
@@ -375,7 +435,9 @@ class DataViewerTab(QtWidgets.QWidget):
         # "All frames" stats don't depend on the current frame — skip on frame change
         # (avoids re-reading + re-correcting the whole stack on every slider tick).
         sp = self._loader.stats_panel
-        if sp is None or sp.scope() != "all":
+        if getattr(self, "_topn_btn", None) is not None and self._topn_btn.isChecked():
+            self._show_topn()   # re-locate brightest pixels + refresh their stats
+        elif sp is None or sp.scope() != "all":
             self._update_stats()
         if self._rad_auto.isChecked():
             self._radial_integrate()
@@ -389,7 +451,10 @@ class DataViewerTab(QtWidgets.QWidget):
         self._cur = self._loader.corrected(raw)
         self._viewer.set_image(self._cur, autorange=False)
         self._update_intensity_overlay()
-        self._update_stats()
+        if getattr(self, "_topn_btn", None) is not None and self._topn_btn.isChecked():
+            self._show_topn()
+        else:
+            self._update_stats()
         if self._rad_auto.isChecked():
             self._radial_integrate()
 
@@ -592,15 +657,22 @@ class DataViewerTab(QtWidgets.QWidget):
     def _midas_radial(self, img):
         """Radial profile via the MIDAS engine, honouring the loaded calibration's
         tilts + distortion (not just concentric circles). The binning geometry is
-        built once per (geometry, R-bin, image shape, static mask) and reused across
+        built once per (geometry, R-bin, image shape, mask) and reused across
         frames; only the per-frame integration runs on a frame change."""
         import torch
         g = self._calib_geom
         r_bin = max(float(self._rad_r_bin.value()), 0.1)
         eta_bin = 5.0
         nz, ny = img.shape
-        mask = self._loader.composite_mask()   # static (file + Tab-1) mask; not per-frame
-        mask_fp = None if mask is None else (tuple(mask.shape), int(np.count_nonzero(mask)))
+        # Union of the static (file + Tab-1) mask with the per-frame intensity-range
+        # mask, so out-of-range pixels are excluded from the integration too — this
+        # matches the circle-binning fallback below.
+        mask = self._combined_bad_mask(img)
+        mask = None if mask is None else np.ascontiguousarray(mask, dtype=bool)
+        # Fingerprint the mask by its *content* (not just its nonzero count) so the
+        # cached binning context is rebuilt whenever the mask actually changes
+        # (e.g. when the intensity-range thresholds are edited).
+        mask_fp = None if mask is None else hash(mask.tobytes())
         sig = (id(g), round(r_bin, 4), (nz, ny), mask_fp)
         if self._calib_ctx is None or self._calib_ctx_sig != sig:
             spec = _spec_from_result_ns(
@@ -788,9 +860,61 @@ class DataViewerTab(QtWidgets.QWidget):
 
     def _on_imask_changed(self, *_):
         self._update_intensity_overlay()
-        self._update_stats()
+        if getattr(self, "_topn_btn", None) is not None and self._topn_btn.isChecked():
+            self._show_topn()   # re-rank excluding the updated intensity mask
+        else:
+            self._update_stats()
         if self._rad_auto.isChecked():
             self._radial_integrate()
+
+    # ── Top-N brightest pixels ────────────────────────────────────────
+    def _on_topn_toggled(self, on):
+        if on:
+            self._show_topn()
+        else:
+            self._clear_topn()
+            self._update_stats()   # restore the normal stats readout
+
+    def _clear_topn(self):
+        for it in self._topn_items:
+            self._viewer._iv.removeItem(it)
+        self._topn_items.clear()
+
+    def _show_topn(self):
+        """Mark the N highest-intensity pixels and show their stats."""
+        self._clear_topn()
+        img = self._cur
+        if img is None:
+            return
+        flat = np.nan_to_num(np.asarray(img, dtype=np.float64),
+                             nan=-np.inf, posinf=-np.inf).ravel()
+        # Exclude masked pixels (mask file + intensity-range mask) so they can
+        # never rank in the Top-N or skew its statistics/plot.
+        bad = self._combined_bad_mask(img)
+        n_valid = flat.size
+        if bad is not None:
+            bad_flat = np.asarray(bad).ravel()
+            flat[bad_flat] = -np.inf
+            n_valid = int(np.count_nonzero(~bad_flat))
+        n = min(int(self._topn_spin.value()), n_valid)
+        if n <= 0:
+            return
+        idx = np.argpartition(flat, -n)[-n:]
+        rows, cols = np.unravel_index(idx, img.shape)   # rows=Z, cols=Y
+        # Image is displayed transposed, so plot (x=col=Y, y=row=Z); +0.5 centres.
+        x = cols.astype(float) + 0.5
+        y = rows.astype(float) + 0.5
+        circ = pg.ScatterPlotItem(x=x, y=y, symbol="o", size=26,
+                                  pen=pg.mkPen("#00cfff", width=1.5),
+                                  brush=pg.mkBrush(0, 207, 255, 60))
+        cross = pg.ScatterPlotItem(x=x, y=y, symbol="+", size=10,
+                                   pen=pg.mkPen("#00cfff", width=1.5),
+                                   brush=pg.mkBrush(0, 0, 0, 0))
+        for it in (circ, cross):
+            self._viewer._iv.addItem(it); self._topn_items.append(it)
+        sp = getattr(self._loader, "stats_panel", None)
+        if sp is not None:
+            sp.set_data(flat[idx], scope=f"Top {n} pixels")
 
     # ── intensity statistics (left panel) ─────────────────────────────
     def _update_stats(self, *_):
@@ -798,6 +922,8 @@ class DataViewerTab(QtWidgets.QWidget):
         sp = getattr(self._loader, "stats_panel", None)
         if sp is None:
             return
+        if getattr(self, "_topn_btn", None) is not None and self._topn_btn.isChecked():
+            return   # Top-N owns the stats panel while active
         try:
             if self._is_projection:
                 img = self._cur

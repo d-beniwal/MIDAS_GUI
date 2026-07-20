@@ -3,7 +3,7 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-07-07
+**Last updated:** 2026-07-19
 
 > **Maintenance:** keep this document in sync with the code — whenever the workflow
 > or a tab's controls change, update the relevant section here in the same change.
@@ -208,18 +208,29 @@ The image viewer has **Pick BC** (single click sets the beam centre) and **Pick 
 (click ≥3 points on a ring; a circle fit estimates the beam centre). Either updates
 BC_y/BC_z and re-runs the overlay + radial integration.
 
+### Top-N brightest pixels (image toolbar)
+A **Top-N pixels** toggle button (with an **N** spin box) sits on the image toolbar.
+When on, the **N highest-intensity pixels** of the current frame are marked with a
+crosshair inside a translucent circle (cyan) centred on each pixel, and the Intensity
+statistics panel switches to show the statistics of just those N pixels ("Top N
+pixels"). It follows frame changes while active. Clicking the button again removes the
+markers and restores the normal statistics. Useful for quickly locating saturation /
+hot pixels.
+
 ### Intensity statistics (left panel, bottom)
-Pinned to the bottom of the Data-Loader panel: a **histogram** of the intensity
-distribution (full range, log-y toggle) with a **textbox** beneath it reporting
-N (pixel count) and the **p70 / p90 / p99 / p99.9 / p99.99** percentiles — each with
-the **number of pixels above** that value. The histogram's lower-left corner is fixed
-at x = 0, y = −2 and both axes rescale to `(0, xmax)` / `(−2, ymax)` on every refresh
-(frame change, scope change, projection, new data). It reflects the **corrected**
-image (dark / bright / background) with masked pixels (file masks + the
-intensity-range mask) excluded, and updates live as any of those change. A scope
-selector switches between the **current frame** (per the slider) and **All frames**
-(combined over the whole stack/folder). When a **Projection** is active the panel
-shows the projected image's statistics (the scope selector is disabled).
+At the bottom of the Data-Loader panel, in a **draggable pane** below the loader
+cards — grab the splitter handle above the panel to make the statistics area taller or
+shorter. It holds a **histogram** of the intensity distribution (full range, log-y
+toggle) with a **textbox** beneath it reporting N (pixel count) and the
+**p70 / p90 / p99 / p99.9 / p99.99** percentiles — each with the **number of pixels
+above** that value. The histogram's lower-left corner is fixed at x = 0, y = −2 and both
+axes rescale to `(0, xmax)` / `(−2, ymax)` on every refresh (frame change, scope change,
+projection, new data). It reflects the **corrected** image (dark / bright / background)
+with masked pixels (file masks + the intensity-range mask) excluded, and updates live as
+any of those change. A scope selector switches between the **current frame** (per the
+slider) and **All frames** (combined over the whole stack/folder). When a **Projection**
+is active the panel shows the projected image's statistics (the scope selector is
+disabled); when **Top-N pixels** is active it shows those pixels' statistics.
 
 ### Radial integration plot (bottom-right)
 Below the image is a live **azimuthal average about the beam centre** (`R bin`,
