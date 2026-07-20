@@ -19,6 +19,7 @@ from midas_gui.constants import (KERNELS, OUTPUT_FORMATS, ERROR_MODELS,
                            DEFAULT_NICKEL_DIR, DEFAULT_KERNEL,
                            DEFAULT_OUTPUT_FORMAT, DEFAULT_ERROR_MODEL)
 from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_file,
+                               geometry_fields_from_file,
                                _NoScrollSpinBox, _NoScrollComboBox)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, DataLoaderPanel)
@@ -49,6 +50,81 @@ class BatchTab(QtWidgets.QWidget):
             f"From Tab 2: Lsd={result.Lsd/1000:.3f} mm  "
             f"λ={result.wavelength_A:.5f} Å  {result.NrPixelsY}×{result.NrPixelsZ} px")
         self._use_tab2_btn.setChecked(True)
+        self._refresh_calib_values()
+
+    def _calib_fields_in_use(self):
+        """Resolve the geometry currently selected (Tab-2 result or file), as a
+        dict of display fields — or (None, note) if unavailable."""
+        if self._use_json_btn.isChecked() or self._calib_result is None:
+            path = self._json_ed.text().strip()
+            if not path:
+                return None, "No calibration file selected."
+            if not Path(path).exists():
+                return None, "Calibration file not found."
+            try:
+                return geometry_fields_from_file(path), f"From file: {Path(path).name}"
+            except Exception as e:
+                return None, f"Unreadable calibration file: {e}"
+        r = self._calib_result
+        fields = {
+            "wavelength_A": getattr(r, "wavelength_A", None),
+            "Lsd": getattr(r, "Lsd", None),
+            "BC_y": getattr(r, "BC_y", None), "BC_z": getattr(r, "BC_z", None),
+            "tx": getattr(r, "tx", 0.0), "ty": getattr(r, "ty", 0.0),
+            "tz": getattr(r, "tz", 0.0),
+            "pxY": getattr(r, "pxY", None), "pxZ": getattr(r, "pxZ", None),
+            "NrPixelsY": getattr(r, "NrPixelsY", None),
+            "NrPixelsZ": getattr(r, "NrPixelsZ", None),
+            "distortion": getattr(r, "distortion", {}) or {},
+        }
+        return fields, "From Tab 2 calibration."
+
+    def _refresh_calib_values(self):
+        """Populate the read-only calibration-values grid from the active source."""
+        grid = self._calib_grid
+        while grid.count():
+            it = grid.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.deleteLater()
+        fields, note = self._calib_fields_in_use()
+        self._calib_val_note.setText(note)
+        if not fields:
+            return
+
+        def _num(v, fmt):
+            return "—" if v is None else format(float(v), fmt)
+
+        lsd = fields.get("Lsd")
+        pxY = fields.get("pxY"); pxZ = fields.get("pxZ") or pxY
+        dist = fields.get("distortion") or {}
+        n_dist = sum(1 for v in dist.values() if abs(float(v)) > 1e-12)
+        rows = [
+            ("λ (Å)", _num(fields.get("wavelength_A"), ".5f")),
+            ("Lsd (mm)", "—" if lsd is None else format(float(lsd) / 1000.0, ".3f")),
+            ("BC_y (px)", _num(fields.get("BC_y"), ".2f")),
+            ("BC_z (px)", _num(fields.get("BC_z"), ".2f")),
+            ("tx (°)", _num(fields.get("tx"), ".4f")),
+            ("ty (°)", _num(fields.get("ty"), ".4f")),
+            ("tz (°)", _num(fields.get("tz"), ".4f")),
+            ("pxY (µm)", _num(pxY, ".3f")),
+            ("pxZ (µm)", _num(pxZ, ".3f")),
+            ("Detector", f"{fields.get('NrPixelsY') or '—'} × {fields.get('NrPixelsZ') or '—'}"),
+            ("Distortion", f"{n_dist} non-zero coeff" + ("s" if n_dist != 1 else "")),
+        ]
+        # Two columns of key/value pairs.
+        ncols = 2
+        per = (len(rows) + ncols - 1) // ncols
+        for i, (k, v) in enumerate(rows):
+            col, row = divmod(i, per)
+            kl = QtWidgets.QLabel(k + ":")
+            kl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+            vl = QtWidgets.QLabel(v)
+            vl.setStyleSheet(f"font-family:{S.MONO_CSS};font-size:10px")
+            vl.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+            grid.addWidget(kl, row, col * 2, QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            grid.addWidget(vl, row, col * 2 + 1, QtCore.Qt.AlignVCenter)
+        grid.setColumnStretch(ncols * 2 + 1, 1)
 
     def set_mask_from_tab1(self, mask):
         self._loader.set_tab1_mask(mask)
@@ -94,8 +170,23 @@ class BatchTab(QtWidgets.QWidget):
                     "Calibration (*.json *.txt *.poni);;All (*)") or "")); jr.addWidget(bj)
         self._json_ed.textChanged.connect(
             lambda t: self._use_json_btn.setChecked(True) if t.strip() else None)
+        self._json_ed.textChanged.connect(lambda *_: self._refresh_calib_values())
         cal.body.addLayout(jr)
         lv.addWidget(cal)
+
+        # ── Calibration values (read-only, in use) ──
+        valcard = S.make_card("Calibration values")
+        self._calib_grid = QtWidgets.QGridLayout()
+        self._calib_grid.setHorizontalSpacing(18); self._calib_grid.setVerticalSpacing(4)
+        _cv_host = QtWidgets.QWidget(); _cv_host.setLayout(self._calib_grid)
+        valcard.body.addWidget(_cv_host)
+        self._calib_val_note = QtWidgets.QLabel("No calibration loaded yet.")
+        self._calib_val_note.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        self._calib_val_note.setWordWrap(True)
+        valcard.body.addWidget(self._calib_val_note)
+        lv.addWidget(valcard)
+        self._use_tab2_btn.toggled.connect(lambda *_: self._refresh_calib_values())
+        self._use_json_btn.toggled.connect(lambda *_: self._refresh_calib_values())
 
         # ── Integration ──
         integ = S.make_card("Integration")
@@ -243,12 +334,14 @@ class BatchTab(QtWidgets.QWidget):
         self._view_tabs.addTab(self._stack_view, "Stacked profiles")
         right.addWidget(self._view_tabs)
         self._log = LogPanel()
+        self._log.setMaximumHeight(16_777_215)   # let the splitter size it
         right.addWidget(self._log)
         right.setStretchFactor(0, 4); right.setStretchFactor(1, 1)
         right.setMinimumWidth(320)
         split.addWidget(right)
         split.setStretchFactor(0, 0); split.setStretchFactor(1, 0); split.setStretchFactor(2, 1)
         split.setSizes([286, 361, 950])
+        self._refresh_calib_values()
 
     # ── Run ────────────────────────────────────────────────────────
 

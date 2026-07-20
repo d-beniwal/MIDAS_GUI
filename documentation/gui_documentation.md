@@ -402,6 +402,14 @@ plus Dark/Bright/Background and Mask, are selected in the shared **Data Loader p
   (auto-detected; both GUI and MIDAS-pipeline json key styles supported). Entering a
   path auto-selects this option.
 
+### Calibration values (middle, read-only)
+A **Calibration values** card shows the geometry actually in use — λ, Lsd (mm),
+BC_y/BC_z (px), tilts tx/ty/tz (°), pixel sizes, detector size, and a distortion summary
+(number of non-zero coefficients). It repopulates whenever a calibration arrives from
+Tab 2 (or Tab 3 refinement, or the Data Viewer via Tab 2) **and** when a calibration
+file path is entered, parsing the file directly so you can confirm the numbers before
+running. A note line reports the active source (or any file-read error).
+
 ### Integration
 | Field | Description |
 |---|---|
