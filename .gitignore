@@ -55,6 +55,8 @@ htmlcov/
 
 # Local Claude working context (plans, ported context, notes)
 claude/
+.context/
+CLAUDE.md
 
 # ── Shipped sample data ──────────────────────────────────────────────────────
 # test_data/ ships with the repo so the GUI works out of the box. Re-include its
@@ -71,3 +73,17 @@ claude/
 !test_data/**/*.png
 test_data/output/
 test_data/out_temp.txt
+# Large local-only sample sets kept out of git (directory-level ignore overrides
+# the *.tif/*.txt/... re-includes above; a whole ignored dir cannot be re-included).
+/test_data/17BM/
+/test_data/test_s25ide/
+
+# ── Pump Probe (TR-XRD) local test data ──────────────────────────────────────
+# Large local-only asset (~1.2 GB of detector frames + masks + MIDAS param file)
+# that the Pump Probe tab defaults to. Kept out of git entirely (unlike test_data/,
+# which ships with the repo). The negations above only re-include test_data/**.
+/test_data_pump_probe/
+
+# Internal-only documentation (kept local, not published to GitHub)
+documentation/pdf_calculation_explained.md
+documentation/pdf_calculation_explained.pdf
