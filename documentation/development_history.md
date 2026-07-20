@@ -62,6 +62,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Batch read-only "Calibration values" card | `b6f1681` |
 | Pump Probe publication plotting, delay colour-bar, default detector mask | `49623ae` |
 | Gitignore local context, internal docs, large sample sets | `b251ca8` |
+| Live Data card: in-tab EPICS PVA stream via pvapy, reload button | `1769f69` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -562,6 +563,19 @@ calculation write-up, and the large local sample dirs (`test_data/17BM/`,
 re-includes.
 **Files:** `.gitignore`.
 **Roll back:** `git revert b251ca8`.
+
+### `1769f69` — Data Viewer: live PV stream (Live Data card) (2026-07-20)
+**Effect:** Subscribes to an EPICS PVA image PV via `pvapy` and pushes frames straight
+through the existing image/corrections/ring/radial-integration pipeline — no separate
+viewer window. "Live Data" is a collapsible card (own title-bar checkbox) above the
+Data card; unchecking stops an active stream. Data card gets a small ⟳ reload button
+to restore the static file/folder/HDF5 source after stopping a stream. `pvapy==5.4.1`
+is now a required, pinned dependency (chosen over latest to avoid upgrading the
+numpy/pyqtgraph pins). `MainWindow` calls a generic `tab.shutdown()` hook on close so
+a live stream stops cleanly on app exit.
+**Files:** `widgets.py`, `tab_view.py`, `app.py`, `pyproject.toml`, `environment.yml`,
+`documentation/gui_documentation.md`, `tests/test_live_stream.py`.
+**Roll back:** `git revert 1769f69`.
 
 ---
 
