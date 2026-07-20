@@ -57,6 +57,11 @@ Dates are commit dates (YYYY-MM-DD).
 | Projection Skip-frames field; compact geometry/intensity fields; Lsd separators | `108ea7d` |
 | Intensity-statistics panel + histogram (bottom of loader) | `2b7a695` |
 | Tilt/distortion-aware radial integration when a calibration is loaded | `df544d2` |
+| Data Viewer Top-N brightest pixels + mask-aware stats + full-geometry receive | `bc86d74` |
+| Calibrate per-coefficient distortion, frame averaging, seed feedback | `b0a5cc3` |
+| Batch read-only "Calibration values" card | `b6f1681` |
+| Pump Probe publication plotting, delay colour-bar, default detector mask | `49623ae` |
+| Gitignore local context, internal docs, large sample sets | `b251ca8` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -504,6 +509,59 @@ to it with a guarded fallback to circle binning on error.
 **Files:** `tab_view.py`, `documentation/gui_documentation.md`.
 **Roll back:** `git revert df544d2` (reverts to circle-only radial integration in the
 Data Viewer). Self-contained; the MIDAS-engine primitives it reuses are unchanged.
+
+### `bc86d74` — Data Viewer: Top-N pixels + mask-aware stats + full-geometry receive (2026-07-19)
+**Effect:** Adds a "Top-N pixels" toolbar toggle that marks the N brightest pixels
+(crosshair + circle) and feeds their values to the intensity-statistics panel, re-ranking
+live on frame/mask changes. Masked pixels (mask file + intensity-range mask) are excluded
+from the Top-N ranking and its stats/histogram. `_midas_radial` now unions the static mask
+with the per-frame intensity-range mask and fingerprints the mask by content so the cached
+binning context rebuilds when the mask changes. The tab also accepts a *full* geometry dict
+(tilts + distortion + detector size) from Calibrate and routes integration through the MIDAS
+engine when it arrives. The stats panel readout box auto-sizes to its content (no inner
+scrollbar) with the histogram as the single flexible child; `DataLoaderPanel` is now a
+`QWidget` hosting a scroll area + stats panel in a draggable vertical splitter.
+**Files:** `tab_view.py`, `widgets.py`, `documentation/gui_documentation.md`.
+**Roll back:** `git revert bc86d74`.
+
+### `b0a5cc3` — Calibrate: per-coefficient distortion, frame averaging, seed feedback (2026-07-19)
+**Effect:** Adds `DistortionRefineDialog` (behind the "…" next to the Distortion checkbox)
+to pick any of the 15 harmonics or use η-fold presets; `calib.py` maps each selected v2
+harmonic to its v1 p-slot (via `DISTORTION_ISO`/`DISTORTION_PRESETS` in constants). Adds an
+"Average frames" card (start:end:skip, streamed via `DataLoaderPanel.average_frames`), seed
+tilts (tx/ty/tz) carried into the v1 params, a "Feed result back to seed" option, and a
+"→ Send to Data Viewer" that now sends the full geometry (tilts + distortion + detector
+size). Drops the 310px bottom-panel cap and adds a non-collapsible splitter.
+**Files:** `calib.py`, `tab_calibrate.py`, `dialogs.py`, `constants.py`, `widgets.py`,
+`documentation/gui_documentation.md`.
+**Roll back:** `git revert b0a5cc3`.
+
+### `b6f1681` — Batch: read-only "Calibration values" card (2026-07-19)
+**Effect:** Adds a Calibration values card to the Batch parameter column showing the
+geometry actually driving integration (λ, Lsd, BC, tilts, pixel sizes, detector size,
+non-zero distortion count), resolved from the live Tab-2 result or a calibration file and
+refreshed on source/path change. Also lets the Log panel fill its splitter space.
+**Files:** `tab_batch.py`, `documentation/gui_documentation.md`.
+**Roll back:** `git revert b6f1681`.
+
+### `49623ae` — Pump Probe: publication plotting, delay colour-bar, default mask (2026-07-19)
+**Effect:** Publication-quality plot defaults (clean 2.0px lines, 13pt fonts, dashed grid,
+refactored `_rainbow_cmap`); a continuous delay→colour bar (`GradientLegend`) replaces the
+many-row legend past a threshold, with left/right legend anchoring; a log-delay x-axis
+option for kinetics; and a default detector mask wired via new
+`DataLoaderPanel.add_mask_file` / `MaskSelector.add_file_source`. TR-XRD defaults now point
+at a local-only `test_data_pump_probe/` folder kept out of git.
+**Files:** `tab_pumpprobe.py`, `constants.py`, `widgets.py`,
+`documentation/gui_documentation.md`.
+**Roll back:** `git revert 49623ae`.
+
+### `b251ca8` — chore: gitignore context, internal docs, large sample sets (2026-07-19)
+**Effect:** Ignores the local `.context/` scaffold and `CLAUDE.md`, the internal-only PDF
+calculation write-up, and the large local sample dirs (`test_data/17BM/`,
+`test_data/test_s25ide/`) via directory-level ignores that override the `test_data/**`
+re-includes.
+**Files:** `.gitignore`.
+**Roll back:** `git revert b251ca8`.
 
 ---
 
