@@ -3,7 +3,7 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-07-19
+**Last updated:** 2026-07-20
 
 > **Maintenance:** keep this document in sync with the code — whenever the workflow
 > or a tab's controls change, update the relevant section here in the same change.
@@ -202,6 +202,36 @@ Overlays simulated Debye-Scherrer rings to check geometry.
 - **→ Send geometry to Calibrate** copies λ, pixel size, Lsd and beam centre into the
   Calibrate tab's detector + seed fields (the Calibrate tab has a matching
   **← Data Viewer** button that pulls the same values).
+
+### Live Data card *(experimental)*
+Sits **above the Data card**, collapsed by default behind its own title-bar
+checkbox — check it to reveal the live-PV controls, uncheck to hide them
+again (unchecking also stops an active stream, so a hidden card can never be
+left silently connected). Subscribes directly to an EPICS PVA detector-image
+PV (NTNDArray) and renders each frame **inline in the Data Viewer's own image
+pane** — the same view used for files/folders/HDF5 stacks. Because it feeds
+the normal frame pipeline, all existing Data Viewer analysis keeps working
+live: dark/bright/background/mask corrections, the intensity-range mask,
+beam-centre picking, and the radial integration plot all update as new
+frames arrive.
+- **Dependency:** `pvapy` (the EPICS pvAccess client library) is a required,
+  pinned dependency (`pyproject.toml` / `environment.yml`), installed
+  automatically with the rest of the GUI's stack — no separate extra to
+  install. If somehow missing from the active environment, **Start** shows an
+  install hint instead of failing outright.
+- **Live PV** field (e.g. `20IDFF:Pva1:Image`), **Start** / **Stop** buttons,
+  and a status line (stopped / waiting for PV / connected / streaming with
+  frame id / error). GUI updates are throttled to the tab's existing ~16 fps
+  debounce, so a fast PV update rate doesn't overwhelm the interface.
+- **Stopping live streaming does not auto-reload the previous file/folder/HDF5
+  source** — the Data card below gets a small **⟳ Reload** button next to its
+  path field for exactly this: click it after Stop to restore the static data
+  that was loaded before streaming started.
+- **Ring overlay is static while streaming**: rings drawn by "Simulate rings"
+  (Ring simulation card) keep rendering on top of each new live frame at their
+  already-computed geometry — they are **not** recomputed per frame. Click
+  "Simulate rings" again to refresh them. **Stop** leaves the last received
+  frame on screen. Closing midas-gui also stops any running stream.
 
 ### Beam-centre picking (on the image)
 The image viewer has **Pick BC** (single click sets the beam centre) and **Pick Ring**

@@ -42,6 +42,13 @@ dependencies = [
     "midas-calibrate==0.2.7",
     "midas-hkls==0.5.0",
     "midas-distortion==0.2.0",
+    # pvapy backs the Data Viewer's "Live Data" card (subscribes to an EPICS
+    # PVA image PV and renders frames directly in the Data Viewer's own image
+    # pane — rings/radial-integration/corrections all work live). Pinned to
+    # 5.4.1, NOT latest: 5.5.0+ requires numpy>=2.0, which would upgrade the
+    # numpy==1.26.4 pin above and break numba/torch compatibility. 5.4.1
+    # declares numpy<2.0,>=1.26, already satisfied by the pin above.
+    "pvapy==5.4.1",
 ]
 
 [project.optional-dependencies]

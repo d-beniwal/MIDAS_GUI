@@ -61,6 +61,10 @@ class DataViewerTab(QtWidgets.QWidget):
     def set_mask_from_tab1(self, mask):
         self._loader.set_tab1_mask(mask)
 
+    def shutdown(self):
+        """Called by MainWindow on app close to stop any live PV stream."""
+        self._loader.stop_live()
+
     def get_geometry(self) -> dict:
         """Current manual geometry — λ (Å), pixel (µm), Lsd (µm), beam centre (px).
 
@@ -147,7 +151,7 @@ class DataViewerTab(QtWidgets.QWidget):
         root.addWidget(split); self._hsplit = split
 
         # ── LEFT: data loader (stack mode) ──
-        self._loader = DataLoaderPanel(mode="stack")
+        self._loader = DataLoaderPanel(mode="stack", allow_live=True)
         self._loader.setMinimumWidth(200)
         self._loader.dataChanged.connect(lambda: self._refresh_timer.start())
         self._loader.fieldsChanged.connect(self._on_fields_changed)

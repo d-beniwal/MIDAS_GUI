@@ -40,6 +40,14 @@ dependencies:
     - "torch==2.4.0"
     - "numba==0.59.1"            # NumPy-1.x compatible JIT (pin: newer numba needs NumPy>=2.1)
 
+    # pvapy backs the Data Viewer's "Live Data" card (subscribes to an EPICS PVA
+    # image PV and renders frames straight in the Data Viewer's own image pane).
+    # Pinned to 5.4.1, NOT latest: 5.5.0+ requires numpy>=2.0, which would
+    # silently upgrade the numpy==1.26.4 pin above and break numba/torch
+    # compatibility (see the file-top warning). 5.4.1 declares numpy<2.0,>=1.26,
+    # already satisfied by the pin, so nothing else here moves.
+    - "pvapy==5.4.1"
+
     # ── MIDAS analysis backends (exact verified-working versions; still NumPy-1
     #    compatible against numpy 1.26.4 + numba 0.59.1) ──────────────────────────
     - "midas-calibrate-v2==0.5.2"

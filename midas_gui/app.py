@@ -314,6 +314,16 @@ class MainWindow(QtWidgets.QMainWindow):
                     th.wait(2000)
             except Exception:
                 pass
+        for a in tab_attrs:                      # then any tab-level explicit shutdown
+            tab = getattr(self, a, None)
+            if tab is None:
+                continue
+            fn = getattr(tab, "shutdown", None)
+            if callable(fn):
+                try:
+                    fn()
+                except Exception:
+                    pass
 
     def closeEvent(self, event):
         try:

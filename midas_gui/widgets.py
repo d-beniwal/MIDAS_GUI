@@ -1216,6 +1216,68 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
         vb.setYRange(-2.0, ymax, padding=0)
 
 
+class PvaLiveSource(QtCore.QObject):
+    """Subscribes to an EPICS PVA image PV (NTNDArray) and emits decoded
+    numpy frames.
+
+    pvapy's ``Channel.monitor()`` delivers callbacks on its own internal
+    thread; this class never touches Qt widgets directly, only emits
+    signals — Qt auto-queues those onto the receiving (GUI) thread."""
+
+    frameReady = QtCore.pyqtSignal(np.ndarray, int)      # image, uniqueId
+    connectionChanged = QtCore.pyqtSignal(bool)
+    error = QtCore.pyqtSignal(str)
+
+    _REQUEST = "field(value,dimension,uniqueId,attribute,codec,uncompressedSize)"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._channel = None
+        self._AdImageUtility = None
+
+    def start(self, pv_name: str) -> bool:
+        self.stop()
+        try:
+            import pvapy as pva
+            from pvapy.utility.adImageUtility import AdImageUtility
+        except ImportError as e:
+            self.error.emit(f"pvapy not installed: {e}")
+            return False
+        self._AdImageUtility = AdImageUtility
+        try:
+            self._channel = pva.Channel(pv_name)
+            self._channel.setConnectionCallback(self._on_connection)
+            self._channel.monitor(self._on_value, self._REQUEST)
+        except Exception as e:
+            self.error.emit(str(e))
+            self._channel = None
+            return False
+        return True
+
+    def _on_connection(self, is_connected):
+        self.connectionChanged.emit(bool(is_connected))
+
+    def _on_value(self, pv_object):
+        try:
+            image_id, image, *_ = self._AdImageUtility.reshapeNtNdArray(pv_object)
+        except Exception as e:
+            self.error.emit(f"Frame decode failed: {e}")
+            return
+        if image is not None:
+            self.frameReady.emit(np.asarray(image, dtype=np.float32), int(image_id))
+
+    def stop(self):
+        if self._channel is not None:
+            try:
+                self._channel.stopMonitor()
+            except Exception:
+                pass
+            self._channel = None
+
+    def is_active(self) -> bool:
+        return self._channel is not None
+
+
 class DataLoaderPanel(QtWidgets.QWidget):
     """Left-hand data-loading panel shared by Tabs 0/2/3/4.
 
@@ -1233,13 +1295,14 @@ class DataLoaderPanel(QtWidgets.QWidget):
     monitorToggled = QtCore.pyqtSignal(bool)  # MONITOR button toggled (stream mode)
 
     def __init__(self, parent=None, *, mode="single", data_dataset="exchange/data",
-                 dark_dataset="exchange/data_dark"):
+                 dark_dataset="exchange/data_dark", allow_live=False):
         super().__init__(parent)
         from midas_gui import style as S
         self._mode = mode
         self._stack = self._paths = self._h5 = None
         self._nframes = 0
         self._cur = None
+        self._live_src: Optional[PvaLiveSource] = None
 
         # The cards live inside a scroll area; the stats panel (stack mode) sits
         # below it in a draggable vertical splitter (see the end of __init__).
@@ -1260,6 +1323,37 @@ class DataLoaderPanel(QtWidgets.QWidget):
             f"#dataLoaderScroll {{ border: none; }}"
             f"#dataLoaderViewport, #dataLoaderInner {{ background: #2b2e35; }}")
 
+        # ── Live Data card (collapsible via its own checkbox; above Data) ──
+        if allow_live:
+            live_card = S.make_card("Live Data")
+            live_card.setCheckable(True)
+            live_card.setChecked(False)
+            self._live_content = QtWidgets.QWidget()
+            lvbox = QtWidgets.QVBoxLayout(self._live_content)
+            lvbox.setContentsMargins(0, 4, 0, 0); lvbox.setSpacing(4)
+            pv_row = QtWidgets.QHBoxLayout(); pv_row.setSpacing(4)
+            pv_row.addWidget(QtWidgets.QLabel("Live PV:"))
+            self._pv_ed = QtWidgets.QLineEdit()
+            self._pv_ed.setPlaceholderText("20IDFF:Pva1:Image")
+            pv_row.addWidget(self._pv_ed, 1)
+            lvbox.addLayout(pv_row)
+            btn_row = QtWidgets.QHBoxLayout(); btn_row.setSpacing(4)
+            self._live_start_btn = QtWidgets.QPushButton("Start")
+            self._live_stop_btn = QtWidgets.QPushButton("Stop")
+            self._live_stop_btn.setEnabled(False)
+            self._live_start_btn.clicked.connect(self._start_live)
+            self._live_stop_btn.clicked.connect(self.stop_live)
+            btn_row.addWidget(self._live_start_btn); btn_row.addWidget(self._live_stop_btn)
+            lvbox.addLayout(btn_row)
+            self._live_status_lbl = QtWidgets.QLabel("Stopped.")
+            self._live_status_lbl.setWordWrap(True)
+            self._live_status_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+            lvbox.addWidget(self._live_status_lbl)
+            self._live_content.setVisible(False)
+            live_card.body.addWidget(self._live_content)
+            live_card.toggled.connect(self._on_live_card_toggled)
+            lv.addWidget(live_card)
+
         # ── Data card ──
         card = S.make_card("Data")
         self._path_ed = QtWidgets.QLineEdit()
@@ -1274,6 +1368,13 @@ class DataLoaderPanel(QtWidgets.QWidget):
         browse.setMenu(menu)
         pr = QtWidgets.QHBoxLayout(); pr.setSpacing(4)
         pr.addWidget(self._path_ed); pr.addWidget(browse)
+        if allow_live:
+            reload_btn = QtWidgets.QToolButton(); reload_btn.setText("⟳"); reload_btn.setFixedWidth(28)
+            reload_btn.setToolTip(
+                "Reload the current Data path/folder/dataset — use this after "
+                "stopping a live PV stream to restore the static data.")
+            reload_btn.clicked.connect(self._load)
+            pr.addWidget(reload_btn)
         card.body.addLayout(pr)
 
         self._ds_row = QtWidgets.QWidget()
@@ -1488,6 +1589,74 @@ class DataLoaderPanel(QtWidgets.QWidget):
             path, dset, _ = self._h5
             return _load_image(path, data_loc=dset, frame=i).astype(np.float32)
         raise RuntimeError("No data loaded")
+
+    # ── live PV stream (Live Data card, allow_live=True only) ───────
+    def _on_live_card_toggled(self, checked):
+        """The Live Data card's own checkbox collapses/expands its controls.
+        Unchecking also stops any active stream — a hidden stream with no
+        visible Stop button would otherwise be un-turn-offable."""
+        self._live_content.setVisible(checked)
+        if not checked:
+            self.stop_live()
+
+    def _start_live(self):
+        try:
+            import pvapy  # noqa: F401
+        except ImportError:
+            QtWidgets.QMessageBox.warning(
+                self, "pvapy not installed",
+                "pvapy is a required dependency but isn't importable in this "
+                "environment.\nReinstall it with:  pip install pvapy==5.4.1")
+            return
+        pv = self._pv_ed.text().strip()
+        if not pv:
+            QtWidgets.QMessageBox.warning(self, "No PV", "Enter a PV name first.")
+            return
+        if self._live_src is None:
+            self._live_src = PvaLiveSource(self)
+            self._live_src.frameReady.connect(self._on_live_frame)
+            self._live_src.connectionChanged.connect(self._on_live_connection)
+            self._live_src.error.connect(self._on_live_error)
+        self._stack = self._paths = self._h5 = None
+        self._nframes = 0
+        if not self._live_src.start(pv):
+            return
+        self._live_start_btn.setEnabled(False)
+        self._live_stop_btn.setEnabled(True)
+        self._pv_ed.setEnabled(False)
+        self._live_status_lbl.setText("Waiting for PV…")
+
+    def _on_live_frame(self, image, image_id):
+        self._nframes = 1
+        self._cur = image
+        self._setup_navigator()
+        self._live_status_lbl.setText(f"Streaming — frame id {image_id}.")
+        self._info.setText(
+            f"Live: {self._pv_ed.text().strip()}  (id {image_id}, shape {image.shape})")
+        self.dataChanged.emit()
+
+    def _on_live_connection(self, is_connected):
+        if self._live_src is not None and self._live_src.is_active():
+            self._live_status_lbl.setText(
+                "Connected — waiting for first frame…" if is_connected
+                else "PV not connected.")
+
+    def _on_live_error(self, msg):
+        self._live_status_lbl.setText(f"Error: {msg}")
+        self.stop_live()
+
+    def stop_live(self):
+        """Stop any active live PV stream. No-op on a panel built without
+        allow_live, or if never started; safe to call from app shutdown."""
+        live_src = getattr(self, "_live_src", None)
+        if live_src is not None:
+            live_src.stop()
+        start_btn = getattr(self, "_live_start_btn", None)
+        if start_btn is not None:
+            start_btn.setEnabled(True)
+            self._live_stop_btn.setEnabled(False)
+            self._pv_ed.setEnabled(True)
+            self._live_status_lbl.setText("Stopped.")
 
     def full_stack(self) -> np.ndarray:
         if self._stack is not None:
