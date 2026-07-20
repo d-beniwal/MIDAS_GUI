@@ -663,11 +663,15 @@ The tab uses the same three-panel layout as Batch Integrate: **data loader** (le
 **settings** (middle), **plots** (right).
 
 **Left — data loader** (the shared loader panel, as on Calibrate / Batch):
-- **Data** — the folder of raw frames (defaults to the shipped TRR data). An index
-  range / stride can subset the pooled frames.
+- **Data** — the folder of raw frames. Defaults to the bundled TRR test set in
+  `test_data_pump_probe/detimages/` (125 Pilatus2M frames; a large, git-ignored local
+  asset), so the tab is populated on open. An index range / stride can subset the pooled
+  frames.
 - **Dark / Bright / Background** — per-frame field corrections (compute each field, then
   it is applied to every frame before integration).
-- **Mask** — a mask file and/or the mask from the Mask Builder tab.
+- **Mask** — a mask file and/or the mask from the Mask Builder tab. For the TRR data the
+  tab pre-loads `invert_mask.tif` (0 = valid pixel, 1 = bad pixel / module gap), which
+  matches MIDAS's convention that non-zero pixels are masked out.
 
 **Middle — settings.**
 - **Calibration source** — *From Tab 2* (the live calibration) or *From file*
@@ -684,19 +688,28 @@ The tab uses the same three-panel layout as Batch Integrate: **data loader** (le
   multi-select to override), optional per-pattern normalization over a q-window, the ΔI
   colour range (auto or fixed ±) and the diverging colormap.
 
-**Views (right panel).**
-1. **ΔI heatmap** — ΔI as a function of q (or 2θ / R) versus delay, diverging colour
-   centred at zero, with the reference lineout beside it (shared radial axis).
-2. **ΔI vs q** — one curve per delay, coloured along a rainbow by delay order.
+**Views (right panel).** Every axis shows **real physical values**, not indices — the
+radial axis is in Q (Å⁻¹), 2θ (°) or R (px) per the plot-axis selector, and delays are in
+seconds.
+1. **ΔI heatmap** — ΔI over the radial axis (a true, continuous Q/2θ/R axis) versus
+   delay, diverging colour centred at zero, with a labelled ΔI colour-bar and the
+   reference I(q) lineout beside it (shared radial axis). Delays span several decades and
+   are irregular, so they are laid out as columns labelled with their real delay values.
+2. **ΔI vs q** — one curve per delay, coloured along a rainbow by delay. With ≤ 8 delays
+   each curve is named in the legend; with more, a continuous **delay colour-bar**
+   (min → max, in seconds) replaces the legend.
 3. **Kinetics** — ΔI versus delay for user-defined q-bands (**Add band** over a q range);
-   x-axis in real delay (linear) or rank.
-4. **Mean patterns** — the averaged I(q) at each delay plus the reference, for a
-   signal-level / stability check.
+   x-axis as real delay (**linear**), **log** (post-t₀ delays, natural for the decade-wide
+   delay range), or **rank**.
+4. **Mean patterns** — the averaged I(q) at each delay plus the dashed reference, with an
+   optional **±1σ band** (spread of I(q) across delays) and a **Log Y** toggle to reveal
+   weak features across the full dynamic range; a signal-level / stability check.
 
-All views use a publication-style white theme with labelled axes and legends. A toolbar
-above the plots sets the **draw** mode (lines / lines+points / points) and the **line**,
-**point (sym)** and **font** sizes (the −/+ groups), as on the Batch Integrate tab. Pan
-and zoom are bounded to the data so you cannot lose the plot area.
+All views use a publication-style white theme with large, clearly-labelled axes, readable
+legends and a subtle grid. A toolbar above the plots sets the **draw** mode (lines /
+lines+points / points) and the **line**, **point (sym)** and **font** sizes (the −/+
+groups), as on the Batch Integrate tab. Pan and zoom are bounded to the data so you cannot
+lose the plot area.
 
 Integration runs off the GUI thread (`PumpProbeWorker`) with a progress bar and
 **Abort**. There is no peak fitting — peak position / width / area are read from the

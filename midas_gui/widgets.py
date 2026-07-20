@@ -1006,6 +1006,18 @@ class MaskSelector(QtWidgets.QGroupBox):
         self._sources.append(entry)
         self._refresh(); self.maskChanged.emit()
 
+    def add_file_source(self, path):
+        """Programmatically add a mask *file* row (e.g. a tab's default mask).
+
+        No-op on a blank path or one already present, so callers can wire a default
+        idempotently without duplicating the row."""
+        path = str(path or "").strip()
+        if not path:
+            return
+        if any(e["kind"] == "file" and e["path"] == path for e in self._sources):
+            return
+        self._add_source("file", path)
+
     def _add_file(self):
         p = _browse(self, "Add mask file", "Images (*.tif *.tiff *.h5 *.hdf5);;All (*)")
         if p:
@@ -1570,6 +1582,10 @@ class DataLoaderPanel(QtWidgets.QWidget):
 
     def set_tab1_mask(self, mask):
         self._mask_sel.set_tab1_mask(mask)
+
+    def add_mask_file(self, path):
+        """Add a mask file to the mask selector (idempotent) — for wiring a tab default."""
+        self._mask_sel.add_file_source(path)
 
     def corrected(self, frame):
         """Apply dark/bright/background to a raw frame (mask handled separately)."""

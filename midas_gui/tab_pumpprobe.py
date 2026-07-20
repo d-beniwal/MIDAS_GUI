@@ -28,7 +28,8 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
 from midas_gui.constants import (KERNELS, DEFAULT_KERNEL, DEFAULT_TRXRD_DIR,
-                                 DEFAULT_TRXRD_PREFIX, DEFAULT_TRXRD_CALIB)
+                                 DEFAULT_TRXRD_PREFIX, DEFAULT_TRXRD_CALIB,
+                                 DEFAULT_TRXRD_MASK)
 from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_file,
                                _NoScrollComboBox)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, DataLoaderPanel,
@@ -78,16 +79,22 @@ def _diverging_cmap(name="bwr"):
                        [(0, 0, 255, 255), (255, 255, 255, 255), (255, 0, 0, 255)])
 
 
-def _rainbow_colors(n):
-    n = max(1, int(n))
-    cm = None
+def _rainbow_cmap():
+    """The perceptually-ordered colormap used to colour per-delay curves (also the
+    source of the delay gradient legend), or None if none is available."""
     for cand in ("CET-R4", "turbo"):
         try:
             cm = pg.colormap.get(cand)
             if cm is not None:
-                break
+                return cm
         except Exception:
-            cm = None
+            pass
+    return None
+
+
+def _rainbow_colors(n):
+    n = max(1, int(n))
+    cm = _rainbow_cmap()
     if cm is not None:
         return [cm.map(i / max(1, n - 1), mode="qcolor") for i in range(n)]
     import colorsys
@@ -120,10 +127,11 @@ class PumpProbeTab(QtWidgets.QWidget):
         self._data = None                   # last finished() payload
         self._bands = []                    # [(q_lo, q_hi)] kinetics q-bands
         # Shared plot-style state (draw mode + sizes), like the Batch tab.
-        self._draw_mode = "line+sym"        # "line" | "line+sym" | "sym"
-        self._line_width = 1.5
-        self._symbol_size = 6
-        self._font_size = 10
+        # Publication-quality defaults: large readable labels, bold-ish lines.
+        self._draw_mode = "line"            # "line" | "line+sym" | "sym"
+        self._line_width = 2.0
+        self._symbol_size = 7
+        self._font_size = 13
         self._plot_meta = {}                # plot -> {title, xlabel, ylabel}
         self._lines_curves = []             # [(curve, color)] for ΔI vs q
         self._kin_curves = []               # [(curve, color)] for kinetics
@@ -131,6 +139,9 @@ class PumpProbeTab(QtWidgets.QWidget):
         self._build_ui()
         # Default the data loader to the shipped TRR folder + auto-scan if present.
         self._loader.set_path(DEFAULT_TRXRD_DIR)
+        # Default detector mask (0 = valid, 1 = bad pixel / module gap).
+        if Path(DEFAULT_TRXRD_MASK).exists():
+            self._loader.add_mask_file(DEFAULT_TRXRD_MASK)
         if Path(DEFAULT_TRXRD_DIR).is_dir():
             self._scan()
 
@@ -335,7 +346,7 @@ class PumpProbeTab(QtWidgets.QWidget):
         self._draw_combo.addItem("Lines", "line")
         self._draw_combo.addItem("Lines + points", "line+sym")
         self._draw_combo.addItem("Points", "sym")
-        self._draw_combo.setCurrentIndex(1)   # line+sym
+        self._draw_combo.setCurrentIndex(0)   # lines (clean for many-curve overlays)
         self._draw_combo.setToolTip("Draw the ΔI-vs-q / kinetics / mean-pattern curves "
                                     "as lines, lines+points, or points only.")
         self._draw_combo.currentIndexChanged.connect(self._on_draw_mode)
@@ -389,13 +400,68 @@ class PumpProbeTab(QtWidgets.QWidget):
     def _add_legend(self, plot):
         lg = plot.addLegend(offset=(-8, 8), labelTextColor=_FG)
         try:
-            lg.setBrush(pg.mkBrush(255, 255, 255, 200))
-            lg.setPen(pg.mkPen("#cccccc"))
+            lg.setBrush(pg.mkBrush(255, 255, 255, 210))
+            lg.setPen(pg.mkPen("#bbbbbb"))
             lg.setLabelTextSize(f"{self._font_size}pt")
         except Exception:
             pass
         self._legends.append(lg)
         return lg
+
+    @staticmethod
+    def _grid(plot):
+        """Subtle dashed grid — publication-style, low-contrast so data stays dominant."""
+        plot.showGrid(x=True, y=True, alpha=0.18)
+
+    # Legend readability threshold: above this many delays the per-curve legend is
+    # replaced by a continuous delay colour-bar (25 legend rows are unreadable).
+    _MAX_LEGEND_ITEMS = 8
+
+    def _delay_colorbar(self, plot, delays):
+        """Show a vertical delay→colour scale (GradientLegend) on ``plot`` for the
+        rainbow per-delay curves, labelled with real delay values. Created lazily and
+        cached on ``self._delay_bars[plot]``; hidden when a named legend is used."""
+        bars = getattr(self, "_delay_bars", None)
+        if bars is None:
+            bars = self._delay_bars = {}
+        bar = bars.get(plot)
+        if bar is None:
+            try:
+                bar = pg.GradientLegend(size=(18, 160), offset=(-18, 30))
+                bar.setParentItem(plot.getPlotItem())
+                cm = _rainbow_cmap()
+                if cm is not None:
+                    bar.setColorMap(cm)
+            except Exception:
+                bars[plot] = None
+                return
+            bars[plot] = bar
+        if bar is None or not len(delays):
+            return
+        d0, d1 = float(min(delays)), float(max(delays))
+        dm = 0.5 * (d0 + d1)
+        # GradientLegend labels: {text: 0..1 position}, min at bottom → max at top.
+        bar.setLabels({f"{d1:.2g} s": 1.0, f"{dm:.2g} s": 0.5, f"{d0:.2g} s": 0.0})
+        bar.setVisible(True)
+
+    def _hide_delay_colorbar(self, plot):
+        bar = getattr(self, "_delay_bars", {}).get(plot)
+        if bar is not None:
+            bar.setVisible(False)
+
+    @staticmethod
+    def _place_legend(legend, *, left):
+        """Anchor a legend top-left or top-right (top-left keeps it clear of the
+        right-hand delay colour-bar)."""
+        if legend is None:
+            return
+        try:
+            if left:
+                legend.anchor(itemPos=(0, 0), parentPos=(0, 0), offset=(12, 10))
+            else:
+                legend.anchor(itemPos=(1, 0), parentPos=(1, 0), offset=(-12, 10))
+        except Exception:
+            pass
 
     # ── plot view builders ─────────────────────────────────────────
     def _build_heatmap_view(self):
@@ -424,8 +490,9 @@ class PumpProbeTab(QtWidgets.QWidget):
 
     def _build_lines_view(self):
         self._lines_plot = pg.PlotWidget(background="w")
+        self._grid(self._lines_plot)
         self._chrome(self._lines_plot, title="ΔI vs q (one curve per delay)",
-                     xlabel="Q (Å⁻¹)", ylabel="ΔI")
+                     xlabel="Q (Å⁻¹)", ylabel="ΔI (a.u.)")
         self._lines_legend = self._add_legend(self._lines_plot)
         self._views.addTab(self._lines_plot, "ΔI vs q")
 
@@ -442,24 +509,42 @@ class PumpProbeTab(QtWidgets.QWidget):
         ctl.addWidget(QtWidgets.QLabel("x:"))
         self._kin_xmode = _NoScrollComboBox()
         self._kin_xmode.addItem("Delay (linear)", "linear")
+        self._kin_xmode.addItem("Delay (log)", "log")
         self._kin_xmode.addItem("Delay (rank)", "rank")
         self._kin_xmode.currentIndexChanged.connect(self._replot_kinetics)
         ctl.addWidget(self._kin_xmode); ctl.addStretch(1)
         v.addLayout(ctl)
         self._kin_plot = pg.PlotWidget(background="w")
+        self._grid(self._kin_plot)
         self._chrome(self._kin_plot, title="Kinetics — ΔI vs delay",
-                     xlabel="delay (s)", ylabel="ΔI (band mean)")
+                     xlabel="delay (s)", ylabel="ΔI (band mean, a.u.)")
         self._kin_legend = self._add_legend(self._kin_plot)
         v.addWidget(self._kin_plot)
         self._views.addTab(w, "Kinetics")
 
     def _build_means_view(self):
+        w = QtWidgets.QWidget(); v = QtWidgets.QVBoxLayout(w)
+        v.setContentsMargins(0, 0, 0, 0); v.setSpacing(2)
+        ctl = QtWidgets.QHBoxLayout(); ctl.setSpacing(10)
+        self._means_band = QtWidgets.QCheckBox("±1σ band"); self._means_band.setChecked(True)
+        self._means_band.setToolTip("Shade ±1 standard deviation of I(q) across all delays "
+                                    "around the reference pattern.")
+        self._means_band.toggled.connect(self._replot_means)
+        self._means_logy = QtWidgets.QCheckBox("Log Y (intensity)")
+        self._means_logy.setToolTip("Log-scale the intensity axis to reveal weak features "
+                                    "across the full dynamic range.")
+        self._means_logy.toggled.connect(self._replot_means)
+        ctl.addWidget(self._means_band); ctl.addWidget(self._means_logy); ctl.addStretch(1)
+        v.addLayout(ctl)
         self._means_plot = pg.PlotWidget(background="w")
+        self._grid(self._means_plot)
         self._chrome(self._means_plot, title="Mean pattern per delay + reference",
-                     xlabel="Q (Å⁻¹)", ylabel="I")
+                     xlabel="Q (Å⁻¹)", ylabel="I (a.u.)")
         self._means_legend = self._add_legend(self._means_plot)
         self._means_ref_curve = None
-        self._views.addTab(self._means_plot, "Mean patterns")
+        self._means_band_items = []          # [PlotDataItem|FillBetweenItem] to clear on replot
+        v.addWidget(self._means_plot)
+        self._views.addTab(w, "Mean patterns")
 
     # ── data folder scan ───────────────────────────────────────────
     def _folder(self) -> str:
@@ -603,6 +688,17 @@ class PumpProbeTab(QtWidgets.QWidget):
         return max(1e-9, self._vrange.value())
 
     @staticmethod
+    def _reset_limits(vb):
+        """Clear pan/zoom limits back to pyqtgraph's wide finite sentinels.
+
+        Must use ±1e307 (the ViewBox default) rather than ``None``: in log mode
+        ``_effectiveLimits`` does arithmetic on the stored pan limits, so a ``None``
+        there raises. Called before switching a plot's log mode / autorange."""
+        LIM = 1e307
+        vb.setLimits(xMin=-LIM, xMax=LIM, yMin=-LIM, yMax=LIM,
+                     maxXRange=LIM, maxYRange=LIM)
+
+    @staticmethod
     def _bound(plot, xmin, xmax, ymin, ymax, *, bound_y=True):
         """Constrain pan/zoom to the data extent (+ small margin) and set the initial
         view there, so zooming out never leaves the plot area behind."""
@@ -635,22 +731,25 @@ class PumpProbeTab(QtWidgets.QWidget):
 
     def _replot_heatmap(self):
         d = self._data
-        rad, rad_label = self._radial_axis()
-        delays = d["delays"]; dI = d["dI"]           # (n_delay, n_r)
-        n_d, n_r = len(delays), len(rad)
+        rad_label = self._axis.currentText()             # "Q (Å⁻¹)" / "2θ (°)" / "R (px)"
+        target = self._axis.currentData()
+        delays = d["delays"]; dI = d["dI"]               # (n_delay, n_r)
+        r_px = np.asarray(d["r_axis_px"], dtype=float)   # uniform native radial grid
+        n_d, n_r = len(delays), len(r_px)
+        r0, r1 = float(r_px[0]), float(r_px[-1])
         v = self._vrange_value()
         cm = _diverging_cmap(self._cmap.currentText())
-        # image: x = delay index, y = radial index
+        # image: x = delay column index (delays are irregular); y = radial in real R-px
         self._hm_img.setImage(dI, autoLevels=False, levels=(-v, v))
         try:
             self._hm_img.setColorMap(cm)
         except Exception:
             self._hm_img.setLookupTable(cm.getLookupTable(0.0, 1.0, 256))
-        self._hm_img.setRect(QtCore.QRectF(0, 0, n_d, n_r))
+        self._hm_img.setRect(QtCore.QRectF(0.0, r0, float(n_d), r1 - r0))
         # colour bar (create lazily), with readable black chrome + a ΔI label
         if self._hm_bar is None:
             try:
-                self._hm_bar = pg.ColorBarItem(values=(-v, v), colorMap=cm, label="ΔI")
+                self._hm_bar = pg.ColorBarItem(values=(-v, v), colorMap=cm, label="ΔI (a.u.)")
                 self._hm_bar.setImageItem(self._hm_img, insert_in=self._hm_plot.getPlotItem())
             except Exception:
                 self._hm_bar = None
@@ -660,18 +759,26 @@ class PumpProbeTab(QtWidgets.QWidget):
             except Exception:
                 pass
         self._style_colorbar()
-        # axis titles + ticks (thinned; delays/radials are unevenly spaced → index axis)
+        # axis titles + ticks. x: real delay values on discrete columns (delays span
+        # ~5 decades incl. sign-flipped negatives → not uniformly mappable). y: a true
+        # continuous R-px axis whose tick labels are converted to the chosen unit
+        # (exact, no resampling — same pattern as the Data Viewer waterfall).
         self._chrome(self._hm_plot, ylabel=rad_label)
         self._hm_plot.getAxis("bottom").setTicks([_thin_ticks(delays, 8)])
-        self._hm_yaxis.set_convert(None)
-        self._hm_yaxis.setTicks([_thin_ticks(rad, 8)])
-        self._bound(self._hm_plot, 0, n_d, 0, n_r)
-        # reference pattern I(q) beside the map (shared radial y-axis)
+        if target == "R":
+            self._hm_yaxis.set_convert(None)
+        else:
+            lsd, px, wl = d["lsd"], d["px"], d["wl"]
+            self._hm_yaxis.set_convert(
+                lambda vals, l=lsd, p=px, w=wl, t=target:
+                    _convert_radial(vals, l, p, w, "R", t))
+        self._hm_yaxis.setTicks(None)
+        self._bound(self._hm_plot, 0, n_d, r0, r1)
+        # reference pattern I(q) beside the map (shared radial y-axis, now in R-px)
         ref = d["reference"]
-        yv = np.arange(n_r) + 0.5
-        self._ref_curve.setData(ref, yv)
+        self._ref_curve.setData(np.asarray(ref, dtype=float), r_px)
         rmin, rmax = float(np.nanmin(ref)), float(np.nanmax(ref))
-        self._bound(self._ref_plot, rmin, rmax, 0, n_r, bound_y=False)
+        self._bound(self._ref_plot, rmin, rmax, r0, r1, bound_y=False)
 
     def _clear_curves(self, plot, store, legend):
         for c, _ in store:
@@ -686,10 +793,16 @@ class PumpProbeTab(QtWidgets.QWidget):
         rad, rad_label = self._radial_axis()
         delays = d["delays"]; dI = d["dI"]
         colors = _rainbow_colors(len(delays))
+        named = len(delays) <= self._MAX_LEGEND_ITEMS      # else use the colour-bar
         for i, dl in enumerate(delays):
-            curve = self._lines_plot.plot(rad, dI[i], name=f"{dl:.3g} s")
+            curve = self._lines_plot.plot(rad, dI[i], name=(f"{dl:.3g} s" if named else None))
             self._style_line_curve(curve, colors[i])
             self._lines_curves.append((curve, colors[i]))
+        self._lines_legend.setVisible(named)               # empty legend box → hide it
+        if named:
+            self._hide_delay_colorbar(self._lines_plot)
+        else:
+            self._delay_colorbar(self._lines_plot, delays)
         self._chrome(self._lines_plot, xlabel=rad_label)
         self._bound(self._lines_plot, float(np.min(rad)), float(np.max(rad)),
                     float(np.nanmin(dI)), float(np.nanmax(dI)))
@@ -702,10 +815,19 @@ class PumpProbeTab(QtWidgets.QWidget):
         delays = np.asarray(d["delays"], dtype=float)
         q = d["q_axis"]; dI = d["dI"]
         mode = self._kin_xmode.currentData()
+        # Reset any log/limit state carried over from a previous x-mode before re-binding.
+        vb = self._kin_plot.getViewBox()
+        self._reset_limits(vb)
+        self._kin_plot.setLogMode(x=(mode == "log"))
         if mode == "rank":
             x = np.arange(len(delays), dtype=float)
             self._kin_plot.getAxis("bottom").setTicks([_thin_ticks(delays, 8)])
             self._chrome(self._kin_plot, xlabel="delay (rank)")
+        elif mode == "log":
+            # Only positive (post-t0) delays survive a log axis; pre-t0 points drop out.
+            x = delays
+            self._kin_plot.getAxis("bottom").setTicks(None)
+            self._chrome(self._kin_plot, xlabel="delay (s, log)")
         else:
             x = delays
             self._kin_plot.getAxis("bottom").setTicks(None)
@@ -720,32 +842,70 @@ class PumpProbeTab(QtWidgets.QWidget):
             curve = self._kin_plot.plot(x, trace, name=f"q {lo:.3g}–{hi:.3g}")
             self._style_line_curve(curve, colors[j])
             self._kin_curves.append((curve, colors[j]))
-        if len(x) and ys:
+        if mode == "log":
+            vb.enableAutoRange()                 # log coords — let the view fit the data
+        elif len(x) and ys:
             allv = np.concatenate(ys)
             self._bound(self._kin_plot, float(np.min(x)), float(np.max(x)),
                         float(np.nanmin(allv)), float(np.nanmax(allv)))
 
     def _replot_means(self):
+        if self._data is None:
+            return
         d = self._data
         self._clear_curves(self._means_plot, self._means_curves, self._means_legend)
+        for it in getattr(self, "_means_band_items", []):
+            self._means_plot.removeItem(it)
+        self._means_band_items = []
         if self._means_ref_curve is not None:
             self._means_plot.removeItem(self._means_ref_curve)
             self._means_ref_curve = None
         rad, rad_label = self._radial_axis()
-        delays = d["delays"]; I_by = d["I_by_delay"]
+        rad = np.asarray(rad, dtype=float)
+        delays = d["delays"]; I_by = np.asarray(d["I_by_delay"], dtype=float)
+        ref = np.asarray(d["reference"], dtype=float)
+        log_y = self._means_logy.isChecked()
+        vb = self._means_plot.getViewBox()
+        self._reset_limits(vb)
+        self._means_plot.setLogMode(y=log_y)
+
+        # ±1σ band across delays, drawn first so curves sit on top.
+        if self._means_band.isChecked() and len(delays) > 1:
+            mean_I = np.nanmean(I_by, axis=0); std_I = np.nanstd(I_by, axis=0)
+            c_lo = self._means_plot.plot(rad, mean_I - std_I, pen=None)
+            c_hi = self._means_plot.plot(rad, mean_I + std_I, pen=None)
+            band = pg.FillBetweenItem(c_lo, c_hi, brush=pg.mkBrush(120, 120, 120, 55))
+            self._means_plot.addItem(band)
+            self._means_band_items += [c_lo, c_hi, band]
+            proxy = self._means_plot.plot([], [], name="±1σ across delays",
+                                          pen=pg.mkPen(150, 150, 150, 220, width=6))
+            self._means_band_items.append(proxy)
+
+        named = len(delays) <= self._MAX_LEGEND_ITEMS
         colors = _rainbow_colors(len(delays))
         for i, dl in enumerate(delays):
-            curve = self._means_plot.plot(rad, I_by[i], name=f"{dl:.3g} s")
+            curve = self._means_plot.plot(rad, I_by[i], name=(f"{dl:.3g} s" if named else None))
             self._style_line_curve(curve, colors[i])
             self._means_curves.append((curve, colors[i]))
+        if named:
+            self._hide_delay_colorbar(self._means_plot)
+            self._place_legend(self._means_legend, left=False)
+        else:
+            self._delay_colorbar(self._means_plot, delays)
+            self._place_legend(self._means_legend, left=True)   # clear of the colour-bar
         self._means_ref_curve = self._means_plot.plot(
-            rad, d["reference"], name="reference",
-            pen=pg.mkPen("#000000", width=max(1.5, self._line_width),
+            rad, ref, name="reference",
+            pen=pg.mkPen("#000000", width=max(2.0, self._line_width),
                          style=QtCore.Qt.DashLine))
         self._chrome(self._means_plot, xlabel=rad_label)
-        lo = min(float(np.nanmin(I_by)), float(np.nanmin(d["reference"])))
-        hi = max(float(np.nanmax(I_by)), float(np.nanmax(d["reference"])))
-        self._bound(self._means_plot, float(np.min(rad)), float(np.max(rad)), lo, hi)
+        lo = min(float(np.nanmin(I_by)), float(np.nanmin(ref)))
+        hi = max(float(np.nanmax(I_by)), float(np.nanmax(ref)))
+        if log_y:
+            self._bound(self._means_plot, float(np.min(rad)), float(np.max(rad)),
+                        lo, hi, bound_y=False)
+            vb.enableAutoRange(axis=vb.YAxis)
+        else:
+            self._bound(self._means_plot, float(np.min(rad)), float(np.max(rad)), lo, hi)
 
     # ── style controls (draw mode / line / symbol / font) ──────────
     def _style_line_curve(self, curve, color):
@@ -775,7 +935,7 @@ class PumpProbeTab(QtWidgets.QWidget):
                 pen = pg.mkPen(_FG)
                 ax.setPen(pen); ax.setTextPen(pen)
                 tf = QtGui.QFont(); tf.setPointSize(self._font_size); ax.setStyle(tickFont=tf)
-                ax.setLabel("ΔI", color=_FG)
+                ax.setLabel("ΔI (a.u.)", color=_FG)
         except Exception:
             pass
 

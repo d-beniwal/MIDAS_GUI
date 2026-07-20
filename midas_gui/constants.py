@@ -187,11 +187,19 @@ OPTIONAL_TABS = ["Calib. Refinement", "Corrections", "PDF Analysis", "Texture",
 DEFAULT_VISIBLE_TABS = ["Calib. Refinement", "Pump Probe"]
 
 # ── Pump Probe (TR-XRD) defaults — TRR-group time-resolved test data ────────────
-DEFAULT_TRXRD_DIR    = str(_TEST_DATA / "TRXRDPython" / "testdata" / "detimages")
+# The frames (~1.2 GB) live in a local-only, git-ignored folder at the repo root
+# (test_data_pump_probe/) rather than the committed test_data/ so the large detector
+# stack never enters git. See .gitignore and documentation/gui_documentation.md.
+_TEST_DATA_PP        = _Path(__file__).resolve().parent.parent / "test_data_pump_probe"
+DEFAULT_TRXRD_DIR    = str(_TEST_DATA_PP / "detimages")
 DEFAULT_TRXRD_PREFIX = "Ex01_Sa01_Sc17"
 # MIDAS calibration for the TRR Pilatus2M data (converted from its pyFAI/Fit2D
 # geometry). Used as the default "From file" calibration in the Pump Probe tab.
-DEFAULT_TRXRD_CALIB  = str(_TEST_DATA / "TRXRDPython" / "testdata" / "Ex01_Sa01_Sc17_midas.txt")
+DEFAULT_TRXRD_CALIB  = str(_TEST_DATA_PP / "Ex01_Sa01_Sc17_midas.txt")
+# Default detector mask for the TRR data: 0 = valid pixel, 1 = bad pixel / module gap
+# (MIDAS convention → non-zero is masked). invert_mask.tif matches this; its sibling
+# mask_2021_dec.tif is the inverse (1 = valid) and must not be used as-is.
+DEFAULT_TRXRD_MASK   = str(_TEST_DATA_PP / "invert_mask.tif")
 
 
 # ── User / group config overlay ─────────────────────────────────────────────────
