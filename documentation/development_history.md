@@ -114,6 +114,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Lsd displayed in mm (calculations & calibration files stay in µm) | `c4e1c12` |
 | Fix "Populating font family aliases" warning (real fixed-width fonts) | `d6df1f8` |
 | Fix fresh-env launch crash — colormap resolution without matplotlib | `6332b3d` |
+| Fix native Bus-error crash on Run Calibration — cap BLAS/OMP thread pools | `0b4326d` |
 
 ### Stability / performance / consistency (review-driven, phases 1–3)
 | Change | Commit |
@@ -576,6 +577,25 @@ a live stream stops cleanly on app exit.
 **Files:** `widgets.py`, `tab_view.py`, `app.py`, `pyproject.toml`, `environment.yml`,
 `documentation/gui_documentation.md`, `tests/test_live_stream.py`.
 **Roll back:** `git revert 1769f69`.
+
+### `0b4326d` — Fix: cap native thread pools to prevent calibration crash (2026-07-22)
+**Effect:** Clicking "Run Calibration" crashed the app outright — a native, uncatchable
+`Bus error`, not a Python exception. Root cause: `CalibrationWorker` (a `QThread`) triggers
+a multi-threaded `numpy.linalg.inv()` deep inside `midas-calibrate-v2`'s HKL/ring generation
+(likely surfaced by the recent 0.3.3 → 0.5.2 bump); running from a `QThread` while the Qt
+event loop is alive, that races against PyTorch's own OpenMP pool and corrupts memory.
+Reproduced deterministically at two call sites (`numpy.linalg.inv` during ring generation,
+`scipy.ndimage.median_filter` during seeding); both disappear once native thread pools are
+capped to 1. Every heavy operation in this app runs inside a `QThread` (17 worker classes in
+`workers.py`), so the fix caps `OPENBLAS_NUM_THREADS` / `OMP_NUM_THREADS` / `MKL_NUM_THREADS`
+/ `VECLIB_MAXIMUM_THREADS` / `NUMEXPR_NUM_THREADS` to 1 process-wide via `os.environ.setdefault`
+in `_paths.py` — already home to the sibling `KMP_DUPLICATE_LIB_OK` workaround for the same
+underlying duplicate-OpenMP-runtime issue — rather than patching each worker individually.
+Verified: offscreen run of the full calibration pipeline to convergence with no crash;
+`pytest` 15/15 green.
+**Files:** `midas_gui/_paths.py`.
+**Roll back:** `git revert 0b4326d` (restores multi-threaded BLAS; calibration/other workers
+become exposed to this native-crash class again on macOS).
 
 ---
 
