@@ -576,6 +576,7 @@ class ProfileViewer(QtWidgets.QWidget):
             self._band.setVisible(False)
 
         fin = y[np.isfinite(y)]
+        ymin = ymax = None
         if fin.size:
             if self._manual_ymin is not None:
                 ymin = self._manual_ymin
@@ -589,6 +590,10 @@ class ProfileViewer(QtWidgets.QWidget):
         if x_arr.size:
             self._plot.setXRange(float(x_arr.min()), float(x_arr.max()), padding=0.02)
         self._stat.setText(f"{len(self._r_px)} bins | max={np.nanmax(self._prof):.1f}")
+        if x_arr.size and ymin is not None:
+            self._suspend_yrange_track = True
+            self._apply_view_limits(float(x_arr.min()), float(x_arr.max()), ymin, ymax)
+            self._suspend_yrange_track = False
 
         # Ring markers redrawn LAST (after setXRange) so they always appear
         for ln in self._ring_lines:
@@ -648,6 +653,23 @@ class ProfileViewer(QtWidgets.QWidget):
         if self._suspend_yrange_track:
             return
         self._manual_ymin = float(yrange[0])
+
+    def _apply_view_limits(self, xmin, xmax, ymin, ymax):
+        """Bound pan/zoom to the current profile (+ margin) so the user can't
+        scroll/zoom arbitrarily far away from where the data actually is."""
+        if not all(math.isfinite(v) for v in (xmin, xmax, ymin, ymax)):
+            return
+        if xmax <= xmin:
+            xmax = xmin + 1.0
+        if ymax <= ymin:
+            ymax = ymin + 1.0
+        xpad = 0.15 * (xmax - xmin)
+        ypad = 0.25 * (ymax - ymin)
+        vb = self._plot.getPlotItem().getViewBox()
+        vb.setLimits(xMin=xmin - xpad, xMax=xmax + xpad,
+                     yMin=ymin - ypad, yMax=ymax + ypad,
+                     maxXRange=(xmax - xmin) + 2 * xpad,
+                     maxYRange=(ymax - ymin) + 2 * ypad)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

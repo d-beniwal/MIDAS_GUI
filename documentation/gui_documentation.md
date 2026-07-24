@@ -3,7 +3,7 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-07-24 (image-viewer zoom/pan fix)
+**Last updated:** 2026-07-24 (image-viewer + radial-profile zoom/pan fix)
 
 > **Maintenance:** keep this document in sync with the code — whenever the workflow
 > or a tab's controls change, update the relevant section here in the same change.
@@ -289,8 +289,11 @@ radius on the plot draws the matching ring (magenta) on the image.** Axis units 
 between R (px) / 2θ / Q. The Y-axis lower bound defaults to **0.9x the current data
 minimum**; once you manually change the Y range (drag, wheel-zoom, or the axis
 context menu), that range is kept for the rest of the session instead of being
-recomputed on every update. The splitter handle above this panel (between it and the
-image view) is wider than a default Qt splitter, to make it easier to grab.
+recomputed on every update. **Pan and zoom are bounded to the current profile** (a
+margin around the data's X/Y extent) so you cannot drag or scroll off into empty
+space; this recomputes on every new profile / axis-unit switch. The splitter handle
+above this panel (between it and the image view) is wider than a default Qt
+splitter, to make it easier to grab.
 
 ---
 
