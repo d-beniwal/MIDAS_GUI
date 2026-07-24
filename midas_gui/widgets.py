@@ -125,7 +125,12 @@ class ImageViewer(QtWidgets.QWidget):
         # Crosshair
         self._vl = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("y", width=1))
         self._hl = pg.InfiniteLine(angle=0,  movable=False, pen=pg.mkPen("y", width=1))
-        self._iv.addItem(self._vl); self._iv.addItem(self._hl)
+        # ignoreBounds: without it, this item's position (which follows the
+        # mouse every frame) feeds pyqtgraph's auto-range bounds calculation,
+        # so once continuous auto-range is enabled (e.g. via the "A" button)
+        # the view range keeps re-fitting itself to wherever the cursor is.
+        self._iv.addItem(self._vl, ignoreBounds=True)
+        self._iv.addItem(self._hl, ignoreBounds=True)
         self._mouse_proxy = pg.SignalProxy(
             self._iv.scene.sigMouseMoved, rateLimit=60, slot=self._mouse)
 
@@ -150,11 +155,29 @@ class ImageViewer(QtWidgets.QWidget):
     def set_image(self, data: np.ndarray, autorange: bool = True):
         self._data = data.astype(np.float32)
         self._redisplay()
+        self._apply_view_limits(data.shape[1], data.shape[0])
         if autorange:
             self._iv.getView().getViewBox().autoRange()
         self._coord_bar.setText(
             f"Image {data.shape[1]}×{data.shape[0]} px  |  "
             "Move cursor over image to inspect pixel values")
+
+    def _apply_view_limits(self, w: int, h: int):
+        """Bound pan/zoom to a sane region around the image so the user can't
+        scroll/zoom out into an empty void or lose the image off-screen."""
+        if w <= 0 or h <= 0:
+            return
+        span = max(w, h)
+        pad = span * 0.5
+        vb = self._iv.getView().getViewBox()
+        vb.setLimits(
+            xMin=-pad, xMax=w + pad,
+            yMin=-pad, yMax=h + pad,
+            minXRange=max(span * 0.01, 2.0),
+            minYRange=max(span * 0.01, 2.0),
+            maxXRange=w + 2 * pad,
+            maxYRange=h + 2 * pad,
+        )
 
     def set_mask_overlay(self, mask: Optional[np.ndarray]):
         if mask is None:

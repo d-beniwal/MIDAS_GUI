@@ -3,7 +3,7 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-07-24
+**Last updated:** 2026-07-24 (image-viewer zoom/pan fix)
 
 > **Maintenance:** keep this document in sync with the code — whenever the workflow
 > or a tab's controls change, update the relevant section here in the same change.
@@ -156,6 +156,10 @@ panel** (see §1): each accepts a file / folder / HDF5-dataset. The **Data** car
 holds the **frame navigator** (slider, spin box, ◀/▶); **zoom/pan is preserved** as you
 step through frames (the view only auto-frames on a fresh load). Dark/bright/background
 and the composite mask are applied to the displayed image and to the radial integration.
+**Pan and zoom are bounded to the image** (roughly half an image-width of margin on each
+side) so scrolling/dragging cannot wander off into empty space or zoom out indefinitely;
+the bottom-left **A** (auto-range) button re-fits the image without leaving zoom "stuck"
+tracking the mouse.
 
 ### Projection card
 Collapse a stack to one image: **Max** (hot-pixel hunting), **Sum** (long-exposure
