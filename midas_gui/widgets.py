@@ -474,7 +474,9 @@ class ProfileViewer(QtWidgets.QWidget):
         self._plot.setLabel("left", "Mean intensity")
         self._plot.setLabel("bottom", "R (px)")
         self._plot.showGrid(x=True, y=True, alpha=0.2)
-        self._plot.setLimits(yMin=-1000)
+        self._manual_ymin: Optional[float] = None
+        self._suspend_yrange_track = False
+        self._plot.getPlotItem().getViewBox().sigYRangeChanged.connect(self._on_yrange_changed)
         self._band_lo = pg.PlotDataItem([], [], pen=None)
         self._band_hi = pg.PlotDataItem([], [], pen=None)
         self._band = pg.FillBetweenItem(self._band_lo, self._band_hi,
@@ -537,10 +539,8 @@ class ProfileViewer(QtWidgets.QWidget):
         if log:
             y = np.where(y > 0, np.log10(np.maximum(y, 1e-30)), np.nan)
             self._plot.setLabel("left", "log₁₀(intensity)")
-            self._plot.setLimits(yMin=1)
         else:
             self._plot.setLabel("left", "Mean intensity")
-            self._plot.setLimits(yMin=-1000)
         self._curve.setData(x, y)
 
         # Uncertainty band (linear scale only)
@@ -554,9 +554,14 @@ class ProfileViewer(QtWidgets.QWidget):
 
         fin = y[np.isfinite(y)]
         if fin.size:
-            ymin = float(min(-1000 if not log else 1, fin.min()))
+            if self._manual_ymin is not None:
+                ymin = self._manual_ymin
+            else:
+                ymin = float(fin.min() * 0.9) if not log else 1.0
             ymax = float(fin.max()) * 1.05
+            self._suspend_yrange_track = True
             self._plot.setYRange(ymin, ymax, padding=0)
+            self._suspend_yrange_track = False
         x_arr = np.asarray(x)
         if x_arr.size:
             self._plot.setXRange(float(x_arr.min()), float(x_arr.max()), padding=0.02)
@@ -614,6 +619,12 @@ class ProfileViewer(QtWidgets.QWidget):
         if self._pick_line is not None:
             self._plot.removeItem(self._pick_line)
             self._pick_line = None
+
+    def _on_yrange_changed(self, _vb, yrange):
+        """User zoomed/panned/entered a Y range — remember it for this session."""
+        if self._suspend_yrange_track:
+            return
+        self._manual_ymin = float(yrange[0])
 
 
 # ═════════════════════════════════════════════════════════════════════════════
