@@ -223,10 +223,13 @@ frames arrive.
   automatically with the rest of the GUI's stack — no separate extra to
   install. If somehow missing from the active environment, **Start** shows an
   install hint instead of failing outright.
-- **Live PV** field (e.g. `20IDFF:Pva1:Image`), **Start** / **Stop** buttons,
-  and a status line (stopped / waiting for PV / connected / streaming with
-  frame id / error). GUI updates are throttled to the tab's existing ~16 fps
-  debounce, so a fast PV update rate doesn't overwhelm the interface.
+- **Live PV** field is an editable dropdown: pick a known device by name (the
+  list comes from **Preferences ▸ Devices**, see below) to fill in its full PV
+  automatically, or type any other PV by hand (placeholder shows an example,
+  `20IDFF:Pva1:Image`). **Start** / **Stop** buttons and a status line (stopped
+  / waiting for PV / connected / streaming with frame id / error). GUI updates
+  are throttled to the tab's existing ~16 fps debounce, so a fast PV update
+  rate doesn't overwhelm the interface.
 - **Stopping live streaming does not auto-reload the previous file/folder/HDF5
   source** — the Data card below gets a small **⟳ Reload** button next to its
   path field for exactly this: click it after Stop to restore the static data
@@ -833,6 +836,11 @@ with the full shipped defaults** so you edit from a complete starting point:
 - **Geometry** — λ, pixel size, Lsd, beam centre.
 - **Paths** — default data / calibration / output files & folders.
 - **Materials** / **Calibrants** — add / remove / modify (name + lattice + SG).
+- **Devices** — the detector devices offered in the Data Viewer's **Live Data**
+  PV dropdown (name, prefix, PVA suffix). The live PV is built as
+  `prefix + PVA suffix`. Ships pre-filled with the 20-ID-D detectors
+  (`oryx20idd`, `s20idPil`, `pg4`, `gh1s`, `s20varex1`), all with PVA suffix
+  `Pva1:Image`; add / remove / edit rows for your own beamline's devices.
 - **Menus** — the pixel-size presets and K-edge foils.
 - **Algorithms** — default calibration pipeline, integration kernel, output format,
   error model, colormap/theme.
@@ -861,6 +869,7 @@ next launch**.
                 "k_edge_foils": [["Au", 80.725], ["Pb", 88.005]] },
   "materials":  { "Ni (FCC)": {"a":3.5238,"b":3.5238,"c":3.5238,"alpha":90,"beta":90,"gamma":90,"sg":225} },
   "calibrants": { "CeO2": {"a":5.4116,"b":5.4116,"c":5.4116,"alpha":90,"beta":90,"gamma":90,"sg":225} },
+  "devices": [ {"name": "s20varex1", "prefix": "20IDFF:", "pva_suffix": "Pva1:Image"} ],
   "paths": { "nickel_h5": "/data/mygroup/sample.h5", "calib_file": "/data/mygroup/calibration.json" },
   "ui": { "calibration_pipeline": "one_shot", "integration_kernel": "subpixel2",
           "output_format": "csv", "azimuthal_method": "poisson", "plot_theme": "hot",
@@ -876,10 +885,10 @@ next launch**.
   `QT_SCALE_FACTOR`; ~1.5 for 1440p, ~2.0 for 4K. Edit it from **Preferences ▸
   Display** or **Settings ▸ Interface scaling…** (takes effect on restart).
 - When a **list section is present it fully replaces** that built-in list — so
-  `materials`, `calibrants`, `pixel_presets` and `k_edge_foils` in the file are your
-  complete lists. (The Preferences dialog pre-fills them with the shipped entries, so
-  you always start from the full set; use **Reset to shipped defaults** to get them
-  back.) `sg` is the space-group number.
+  `materials`, `calibrants`, `devices`, `pixel_presets` and `k_edge_foils` in the file
+  are your complete lists. (The Preferences dialog pre-fills them with the shipped
+  entries, so you always start from the full set; use **Reset to shipped defaults** to
+  get them back.) `sg` is the space-group number.
 - Geometry scalars, `paths` and `ui` are simple overrides; any section or key may be
   omitted. A malformed config is ignored (built-ins are used) rather than blocking
   startup.

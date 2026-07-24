@@ -27,6 +27,7 @@ _PATH_ROWS = [
     ("pdf_calib", "PDF calibration:", "file"),
 ]
 _MAT_HEADERS = ["name", "a", "b", "c", "α", "β", "γ", "SG"]
+_DEV_HEADERS = ["name", "prefix", "PVA suffix"]
 
 
 def _effective_cfg() -> dict:
@@ -50,6 +51,7 @@ def _effective_cfg() -> dict:
         },
         "materials": mats,
         "calibrants": cals,
+        "devices": [dict(d) for d in C.DEVICES],
         "paths": {
             "calibrant_tif": C.DEFAULT_CALIBRANT_TIF, "calibrant_h5": C.DEFAULT_CALIBRANT_H5,
             "nickel_h5": C.DEFAULT_NICKEL_H5, "nickel_dir": C.DEFAULT_NICKEL_DIR,
@@ -84,6 +86,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         self._build_paths_tab()
         self._mat_table = self._build_table_tab("Materials", _MAT_HEADERS)
         self._cal_table = self._build_table_tab("Calibrants", _MAT_HEADERS)
+        self._build_devices_tab()
         self._build_menus_tab()
         self._build_algorithms_tab()
         self._build_tabs_tab()
@@ -157,6 +160,26 @@ class PreferencesDialog(QtWidgets.QDialog):
         v.addLayout(br)
         self._tabs.addTab(w, title)
         return table
+
+    def _build_devices_tab(self):
+        w = QtWidgets.QWidget(); v = QtWidgets.QVBoxLayout(w)
+        v.addWidget(QtWidgets.QLabel(
+            "Devices offered in the Data Viewer's Live Data PV dropdown. The live "
+            "PV is built as prefix + PVA suffix, e.g. 20IDFF: + Pva1:Image → "
+            "20IDFF:Pva1:Image. You can still type any other PV by hand there."))
+        table = QtWidgets.QTableWidget(0, len(_DEV_HEADERS))
+        table.setHorizontalHeaderLabels(_DEV_HEADERS)
+        table.setColumnWidth(0, 150)
+        v.addWidget(table, 1)
+        br = QtWidgets.QHBoxLayout()
+        add = QtWidgets.QPushButton("Add")
+        add.clicked.connect(lambda: self._add_row(table, _DEV_HEADERS))
+        rem = QtWidgets.QPushButton("Remove selected")
+        rem.clicked.connect(lambda: self._remove_rows(table))
+        br.addWidget(add); br.addWidget(rem); br.addStretch(1)
+        v.addLayout(br)
+        self._tabs.addTab(w, "Devices")
+        self._dev_table = table
 
     def _build_menus_tab(self):
         w = QtWidgets.QWidget(); v = QtWidgets.QVBoxLayout(w)
@@ -277,6 +300,17 @@ class PreferencesDialog(QtWidgets.QDialog):
                 pass
         return out
 
+    def _device_list(self, table):
+        out = []
+        for r in range(table.rowCount()):
+            def cell(c):
+                it = table.item(r, c); return it.text().strip() if it else ""
+            name = cell(0)
+            if not name:
+                continue
+            out.append({"name": name, "prefix": cell(1), "pva_suffix": cell(2)})
+        return out
+
     def _pairs(self, table):
         out = []
         for r in range(table.rowCount()):
@@ -310,6 +344,10 @@ class PreferencesDialog(QtWidgets.QDialog):
             self._add_row(self._cal_table, _MAT_HEADERS,
                           [name, m.get("a"), m.get("b"), m.get("c"),
                            m.get("alpha"), m.get("beta"), m.get("gamma"), m.get("sg")])
+        self._dev_table.setRowCount(0)
+        for d in cfg.get("devices", []) or []:
+            self._add_row(self._dev_table, _DEV_HEADERS,
+                          [d.get("name", ""), d.get("prefix", ""), d.get("pva_suffix", "")])
         self._px_table.setRowCount(0)
         for p in geo.get("pixel_presets", []) or []:
             self._add_row(self._px_table, ["label", "µm"], list(p))
@@ -370,6 +408,7 @@ class PreferencesDialog(QtWidgets.QDialog):
             "geometry": geo,
             "materials": self._mat_dict(self._mat_table),
             "calibrants": self._mat_dict(self._cal_table),
+            "devices": self._device_list(self._dev_table),
             "paths": paths,
             "ui": {
                 "calibration_pipeline": self._ui_pipe.currentData(),
@@ -417,7 +456,7 @@ class PreferencesDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.critical(self, "Load failed", str(e)); return
         # merge over the effective snapshot so missing sections keep sensible values
         base = _effective_cfg()
-        for k in ("geometry", "materials", "calibrants", "paths", "ui"):
+        for k in ("geometry", "materials", "calibrants", "devices", "paths", "ui"):
             if k in cfg:
                 base[k] = cfg[k]
         self._populate(base)

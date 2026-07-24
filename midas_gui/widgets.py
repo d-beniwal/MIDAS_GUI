@@ -20,7 +20,7 @@ import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
-from midas_gui.constants import COLORMAPS, DISTORTION_NAMES, DEFAULT_COLORMAP
+from midas_gui.constants import COLORMAPS, DISTORTION_NAMES, DEFAULT_COLORMAP, DEVICES
 
 # Default colormap: the configured one if it's a known option, else the first.
 _DEFAULT_CMAP = DEFAULT_COLORMAP if DEFAULT_COLORMAP in COLORMAPS else COLORMAPS[0]
@@ -1365,8 +1365,16 @@ class DataLoaderPanel(QtWidgets.QWidget):
             lvbox.setContentsMargins(0, 4, 0, 0); lvbox.setSpacing(4)
             pv_row = QtWidgets.QHBoxLayout(); pv_row.setSpacing(4)
             pv_row.addWidget(QtWidgets.QLabel("Live PV:"))
-            self._pv_ed = QtWidgets.QLineEdit()
-            self._pv_ed.setPlaceholderText("20IDFF:Pva1:Image")
+            self._pv_ed = _NoScrollComboBox()
+            self._pv_ed.setEditable(True)
+            self._pv_ed.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
+            self._pv_ed.lineEdit().setPlaceholderText("e.g. 20IDFF:Pva1:Image")
+            for d in DEVICES:
+                full_pv = f"{d.get('prefix', '')}{d.get('pva_suffix', '')}"
+                self._pv_ed.addItem(d.get("name", ""), full_pv)
+            self._pv_ed.setCurrentIndex(-1)
+            self._pv_ed.setEditText("")
+            self._pv_ed.activated.connect(self._on_pv_device_picked)
             pv_row.addWidget(self._pv_ed, 1)
             lvbox.addLayout(pv_row)
             btn_row = QtWidgets.QHBoxLayout(); btn_row.setSpacing(4)
@@ -1631,6 +1639,14 @@ class DataLoaderPanel(QtWidgets.QWidget):
         if not checked:
             self.stop_live()
 
+    def _on_pv_device_picked(self, index):
+        """Selecting a known device by name fills in its full live PV
+        (prefix + PVA suffix); typing a PV by hand is untouched (this only
+        fires on an explicit dropdown pick, not on text edits)."""
+        pv = self._pv_ed.itemData(index)
+        if pv:
+            self._pv_ed.setEditText(pv)
+
     def _start_live(self):
         try:
             import pvapy  # noqa: F401
@@ -1640,7 +1656,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
                 "pvapy is a required dependency but isn't importable in this "
                 "environment.\nReinstall it with:  pip install pvapy==5.4.1")
             return
-        pv = self._pv_ed.text().strip()
+        pv = self._pv_ed.currentText().strip()
         if not pv:
             QtWidgets.QMessageBox.warning(self, "No PV", "Enter a PV name first.")
             return
@@ -1664,7 +1680,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._setup_navigator()
         self._live_status_lbl.setText(f"Streaming — frame id {image_id}.")
         self._info.setText(
-            f"Live: {self._pv_ed.text().strip()}  (id {image_id}, shape {image.shape})")
+            f"Live: {self._pv_ed.currentText().strip()}  (id {image_id}, shape {image.shape})")
         self.dataChanged.emit()
 
     def _on_live_connection(self, is_connected):

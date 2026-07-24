@@ -186,6 +186,21 @@ OPTIONAL_TABS = ["Calib. Refinement", "Corrections", "PDF Analysis", "Texture",
 # Export ship hidden (turn them on in Settings ▸ Preferences ▸ Tabs).
 DEFAULT_VISIBLE_TABS = ["Calib. Refinement", "Pump Probe"]
 
+# ── Beamline devices (Data Viewer ▸ Live Data PV dropdown) ──────────────────────
+# Default detector devices for 20-ID-D, extracted from the beamline's area-detector
+# device-generation blueprint (20-ID-D `make_det(...)` calls). ``pva_suffix`` is the
+# PVA image plugin every one of them exposes for live access; the full live PV is
+# `prefix + pva_suffix`. Overridable via the per-user config key "devices"
+# (Preferences ▸ Devices).
+DEFAULT_DEVICES = [
+    {"name": "oryx20idd",  "prefix": "20iddOR1:", "pva_suffix": "Pva1:Image"},
+    {"name": "s20idPil",   "prefix": "20idPil",   "pva_suffix": "Pva1:Image"},
+    {"name": "pg4",        "prefix": "1idPG4:",   "pva_suffix": "Pva1:Image"},
+    {"name": "gh1s",       "prefix": "20idGH1s:", "pva_suffix": "Pva1:Image"},
+    {"name": "s20varex1",  "prefix": "20IDFF:",   "pva_suffix": "Pva1:Image"},
+]
+DEVICES = [dict(d) for d in DEFAULT_DEVICES]
+
 # ── Pump Probe (TR-XRD) defaults — TRR-group time-resolved test data ────────────
 # The frames (~1.2 GB) live in a local-only, git-ignored folder at the repo root
 # (test_data_pump_probe/) rather than the committed test_data/ so the large detector
@@ -298,6 +313,23 @@ def _apply(cfg: dict) -> None:
         if names or cfg["calibrants"] == {}:
             CALIBRANTS[:] = names
 
+    # devices — the config's list REPLACES the built-in list when present (same
+    # pattern as materials/calibrants), so Preferences ▸ Devices, pre-filled with
+    # the shipped list, can add / remove / modify.
+    if isinstance(cfg.get("devices"), list):
+        parsed = []
+        for d in cfg["devices"]:
+            try:
+                name = str(d.get("name", "")).strip()
+                if name:
+                    parsed.append({"name": name,
+                                    "prefix": str(d.get("prefix", "")).strip(),
+                                    "pva_suffix": str(d.get("pva_suffix", "")).strip()})
+            except Exception:
+                pass
+        if parsed or cfg["devices"] == []:
+            DEVICES[:] = parsed
+
     # UI / algorithm defaults
     ui = cfg.get("ui", {}) or {}
     for key, target in (("integration_kernel", "DEFAULT_KERNEL"),
@@ -337,6 +369,7 @@ _SHIPPED = {
     },
     "materials": {n: dict(m) for n, m in MATERIALS.items()},
     "calibrants": {n: dict(_LATT[n]) for n in CALIBRANTS if n in _LATT},
+    "devices": [dict(d) for d in DEFAULT_DEVICES],
     "paths": {
         "calibrant_tif": DEFAULT_CALIBRANT_TIF, "calibrant_h5": DEFAULT_CALIBRANT_H5,
         "nickel_h5": DEFAULT_NICKEL_H5, "nickel_dir": DEFAULT_NICKEL_DIR,

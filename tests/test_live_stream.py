@@ -30,7 +30,7 @@ def test_empty_pv_warns_and_does_not_start(monkeypatch):
         W.QtWidgets.QMessageBox, "warning",
         lambda *a, **k: warned.setdefault("called", True))
     panel = W.DataLoaderPanel(mode="stack", allow_live=True)
-    panel._pv_ed.setText("")
+    panel._pv_ed.setEditText("")
     panel._start_live()
     assert warned.get("called") is True
     assert panel._live_src is None or not panel._live_src.is_active()
