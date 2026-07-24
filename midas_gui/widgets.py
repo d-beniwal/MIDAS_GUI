@@ -103,12 +103,12 @@ class ImageViewer(QtWidgets.QWidget):
         bar.addWidget(QtWidgets.QLabel("vmin%:"))
         self._vmin = _NoScrollSpinBox()
         self._vmin.setRange(0, 99); self._vmin.setValue(30); self._vmin.setFixedWidth(45)
-        self._vmin.valueChanged.connect(self._redisplay)
+        self._vmin.valueChanged.connect(self._on_percentile_changed)
         bar.addWidget(self._vmin)
         bar.addWidget(QtWidgets.QLabel("vmax%:"))
         self._vmax = _NoScrollSpinBox()
         self._vmax.setRange(1, 100); self._vmax.setValue(99); self._vmax.setFixedWidth(45)
-        self._vmax.valueChanged.connect(self._redisplay)
+        self._vmax.valueChanged.connect(self._on_percentile_changed)
         bar.addWidget(self._vmax)
         bar.addStretch(1)
         self._toolbar_layout = bar   # exposed so subclasses can append widgets
@@ -142,6 +142,9 @@ class ImageViewer(QtWidgets.QWidget):
         layout.addWidget(self._coord_bar)
 
         self._data: Optional[np.ndarray] = None
+        self._manual_levels: Optional[tuple] = None
+        self._suspend_level_track = False
+        self._iv.getHistogramWidget().sigLevelsChanged.connect(self._on_hist_levels_changed)
         self._set_cmap(_DEFAULT_CMAP)
 
     def set_image(self, data: np.ndarray, autorange: bool = True):
@@ -178,17 +181,35 @@ class ImageViewer(QtWidgets.QWidget):
             disp = np.log10(np.clip(d, 1e-10, None)).T
         else:
             disp = d.T
-        fin = disp[np.isfinite(disp)]
-        if fin.size:
-            lo = float(np.percentile(fin, self._vmin.value()))
-            hi = float(np.percentile(fin, self._vmax.value()))
+        if self._manual_levels is not None:
+            lo, hi = self._manual_levels
         else:
-            lo, hi = 0.0, 1.0
+            fin = disp[np.isfinite(disp)]
+            if fin.size:
+                lo = float(np.percentile(fin, self._vmin.value()))
+                hi = float(np.percentile(fin, self._vmax.value()))
+            else:
+                lo, hi = 0.0, 1.0
         # autoRange/autoHistogramRange default to True in pyqtgraph and would reset
         # the view on every redraw; set_image() handles framing explicitly via its
         # `autorange` flag, so the zoom/pan is preserved across frames and re-levels.
+        # Levels are likewise pinned to `lo`/`hi` rather than pyqtgraph's autoLevels
+        # so a manual histogram drag survives subsequent live frames.
+        self._suspend_level_track = True
         self._iv.setImage(disp.astype(np.float32), autoLevels=False, levels=(lo, hi),
                           autoRange=False, autoHistogramRange=False)
+        self._suspend_level_track = False
+
+    def _on_hist_levels_changed(self, *_args):
+        """User dragged the histogram LUT region — remember it across future frames."""
+        if self._suspend_level_track:
+            return
+        self._manual_levels = tuple(self._iv.getHistogramWidget().getLevels())
+
+    def _on_percentile_changed(self, *_args):
+        """User edited vmin%/vmax% — that's an explicit request to go back to auto levels."""
+        self._manual_levels = None
+        self._redisplay()
 
     def _set_cmap(self, name: str):
         self._iv.setColorMap(_resolve_cmap(name))
