@@ -69,6 +69,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Simulate rings is now a live toggle (auto-recomputes on param change) | `ecf6d01` |
 | Live PV field becomes a device dropdown (Preferences ▸ Devices) | `aa82cb6` |
 | Fix image-view autorange drift; bound pan/zoom to image | `c156c62` |
+| Radial profile plot: bound pan/zoom to the data extent | `cde4bb2` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -687,6 +688,21 @@ to the image size.
 **Files:** `widgets.py` (`ImageViewer.set_image`, new `_apply_view_limits`).
 **Roll back:** `git revert c156c62` (crosshair can drift the view again under
 continuous auto-range; pan/zoom become unbounded again).
+
+### `cde4bb2` — Radial profile plot: bound pan/zoom to the data extent (2026-07-24)
+**Effect:** Same class of issue as `c156c62`, applied to the shared
+`ProfileViewer` (the radial-integration plot on the Data Viewer and Calibrate
+tabs): it had no `ViewBox` limits, so the plot could be scrolled/dragged
+arbitrarily far from the actual profile. `_replot()` now calls a new
+`_apply_view_limits(xmin, xmax, ymin, ymax)` on every redraw — computed from
+the current profile's X range (in whichever unit is selected: R (px) / 2θ /
+Q) and Y range (respecting the existing sticky-manual-Y-min behavior) plus a
+margin (15% X, 25% Y), via `ViewBox.setLimits(...)`. Recomputing per-replot
+means the bound tracks new profiles and axis-unit switches automatically.
+**Files:** `widgets.py` (`ProfileViewer._replot`, new
+`ProfileViewer._apply_view_limits`).
+**Roll back:** `git revert cde4bb2` (radial profile pan/zoom becomes
+unbounded again).
 
 ---
 
