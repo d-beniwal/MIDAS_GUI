@@ -63,6 +63,10 @@ Dates are commit dates (YYYY-MM-DD).
 | Pump Probe publication plotting, delay colour-bar, default detector mask | `49623ae` |
 | Gitignore local context, internal docs, large sample sets | `b251ca8` |
 | Live Data card: in-tab EPICS PVA stream via pvapy, reload button | `1769f69` |
+| Live viewer: manual colormap/level changes now survive new frames | `234ded9` |
+| Wider image/radial-plot splitter handle | `69f470c` |
+| Radial profile: Y-min defaults to 0.9x data min, manual Y-range sticks | `96f8add` |
+| Simulate rings is now a live toggle (auto-recomputes on param change) | `ecf6d01` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -79,6 +83,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Multi-column paramstest results readout + Send-to-Data-Viewer button | `455ca4e` |
 | Calibrate Results all-text (drop distortion table; named distortion, bigger font) | `3a6ecb9` |
 | Fix calibrate() initial_BC_y TypeError (kwargs filter) + pin scikit-image | `b1642fa` |
+| Pick-Ring fit overlay recolored blue (was same amber as simulated rings) | `3eb4a44` |
 
 ### Batch Integrate (Tab 4)
 | Change | Commit |
@@ -596,6 +601,53 @@ Verified: offscreen run of the full calibration pipeline to convergence with no 
 **Files:** `midas_gui/_paths.py`.
 **Roll back:** `git revert 0b4326d` (restores multi-threaded BLAS; calibration/other workers
 become exposed to this native-crash class again on macOS).
+
+### `234ded9` — Live viewer: preserve manual colormap/level changes across frames (2026-07-24)
+**Effect:** `ImageViewer._redisplay` recomputed vmin%/vmax% percentile levels on every
+incoming frame (live or otherwise), silently overwriting a level range the user had
+dragged on the pyqtgraph histogram mid-acquisition. Now tracks manual histogram edits
+via `sigLevelsChanged` (guarded against feedback from our own programmatic `setImage`
+calls with a suspend flag) and keeps pinning to the last manual levels until the user
+explicitly changes the vmin%/vmax% spin boxes, which resets back to auto.
+**Files:** `widgets.py`.
+**Roll back:** `git revert 234ded9`.
+
+### `69f470c` — Data Viewer: widen the image/radial-plot splitter handle (2026-07-24)
+**Effect:** The vertical splitter between the image view and the radial-integration
+panel had no explicit handle width (unlike the outer horizontal splitter), making it
+thin and hard to grab. Set `setHandleWidth(8)` to match.
+**Files:** `tab_view.py`.
+**Roll back:** `git revert 69f470c`.
+
+### `96f8add` — Radial profile: stop forcing Y-axis min to -1000 on every update (2026-07-24)
+**Effect:** `ProfileViewer._replot` unconditionally called `setYRange()` with a
+hardcoded -1000 floor on every redraw, clobbering any manual Y-range the user set.
+The auto lower bound is now `0.9 * current data minimum`; once the user manually
+changes the Y range (drag, wheel-zoom, or the axis context menu's numeric entry —
+detected via `sigYRangeChanged` with the same suspend-flag pattern as `234ded9`),
+that value is kept for the rest of the session instead of being recomputed.
+Also dropped the hardcoded `setLimits(yMin=-1000/1)` hard floors.
+**Files:** `widgets.py`.
+**Roll back:** `git revert 96f8add`.
+
+### `3eb4a44` — Calibrate: recolor Pick-Ring fit overlay to blue (2026-07-24)
+**Effect:** `PickableImageViewer`'s Pick-Ring points, fitted circle, and fitted-center
+marker used the same amber (`#f0c060`) as the Data Viewer's Simulate-rings overlay,
+making the two indistinguishable when both were visible on the same image. Pick-Ring's
+fit overlay is now blue (`#2a7fd4`); the separate Pick-BC "+" click marker (already
+`#00aaff`) and Simulate-rings amber were left unchanged.
+**Files:** `widgets.py`.
+**Roll back:** `git revert 3eb4a44`.
+
+### `ecf6d01` — Data Viewer: make Simulate rings a live toggle instead of one-shot (2026-07-24)
+**Effect:** "Simulate rings" is now a checkable toggle rather than a single-click
+action. While on, it resimulates automatically whenever material, lattice constants,
+space group, or geometry (wavelength/Lsd/pixel size/max 2θ) change — mirroring the
+existing `_rad_auto`-style "recompute on change" idiom already used for radial
+integration. Beam-centre edits still just reposition the existing rings (unchanged;
+ring radii don't depend on BC), so no wiring was added there.
+**Files:** `tab_view.py`.
+**Roll back:** `git revert ecf6d01`.
 
 ---
 

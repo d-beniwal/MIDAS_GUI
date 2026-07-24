@@ -3,7 +3,7 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-07-20
+**Last updated:** 2026-07-24
 
 > **Maintenance:** keep this document in sync with the code — whenever the workflow
 > or a tab's controls change, update the relevant section here in the same change.
@@ -198,7 +198,11 @@ Overlays simulated Debye-Scherrer rings to check geometry.
   is on the Calibrate and PDF tabs. The **px** label is likewise clickable — a menu
   of common detectors (GE 200 µm, Varex 150 µm, Pilatus 172 µm, Eiger 75 µm) sets
   the pixel size (also on the Calibrate tab, where it sets both pxY and pxZ).
-- **Show rings / Labels** toggles; **Simulate rings** draws the overlay + hkl table.
+- **Show rings / Labels** toggles; **Simulate rings** is a **live toggle** (not a
+  one-shot click) — while on, the overlay + hkl table recompute automatically
+  whenever material, lattice constants, space group, or geometry (λ/Lsd/px/max 2θ)
+  change. Beam-centre edits still just reposition the existing rings (their radii
+  don't depend on BC).
 - **→ Send geometry to Calibrate** copies λ, pixel size, Lsd and beam centre into the
   Calibrate tab's detector + seed fields (the Calibrate tab has a matching
   **← Data Viewer** button that pulls the same values).
@@ -227,16 +231,24 @@ frames arrive.
   source** — the Data card below gets a small **⟳ Reload** button next to its
   path field for exactly this: click it after Stop to restore the static data
   that was loaded before streaming started.
-- **Ring overlay is static while streaming**: rings drawn by "Simulate rings"
-  (Ring simulation card) keep rendering on top of each new live frame at their
-  already-computed geometry — they are **not** recomputed per frame. Click
-  "Simulate rings" again to refresh them. **Stop** leaves the last received
-  frame on screen. Closing midas-gui also stops any running stream.
+- **Ring overlay is static per-frame while streaming**: rings drawn by "Simulate
+  rings" (Ring simulation card) keep rendering on top of each new live frame at
+  their already-computed geometry — arrival of a new frame does **not** by itself
+  trigger a recompute (ring radii don't depend on frame data). With Simulate
+  rings' live toggle on, changing a material/lattice/geometry field still
+  recomputes and redraws immediately. **Stop** leaves the last received frame on
+  screen. Closing midas-gui also stops any running stream.
+- **Colormap/level changes persist across frames**: dragging the histogram's
+  level range (or the cmap dropdown) is remembered and reapplied to every new
+  incoming frame instead of being reset to the vmin%/vmax% percentile defaults;
+  editing vmin%/vmax% explicitly switches back to auto-levels.
 
 ### Beam-centre picking (on the image)
 The image viewer has **Pick BC** (single click sets the beam centre) and **Pick Ring**
 (click ≥3 points on a ring; a circle fit estimates the beam centre). Either updates
-BC_y/BC_z and re-runs the overlay + radial integration.
+BC_y/BC_z and re-runs the overlay + radial integration. Pick Ring's picked points and
+fitted circle are drawn in **blue**, distinct from the **amber** Simulate-rings overlay
+so the two aren't confused when both are visible on the same image.
 
 ### Top-N brightest pixels (image toolbar)
 A **Top-N pixels** toggle button (with an **N** spin box) sits on the image toolbar.
@@ -267,7 +279,11 @@ Below the image is a live **azimuthal average about the beam centre** (`R bin`,
 `Integrate`, and an `Auto` toggle that recomputes on frame/BC/mask change). It is a
 simple geometry-free radial average (flat detector, no tilt/distortion). **Clicking a
 radius on the plot draws the matching ring (magenta) on the image.** Axis units switch
-between R (px) / 2θ / Q.
+between R (px) / 2θ / Q. The Y-axis lower bound defaults to **0.9x the current data
+minimum**; once you manually change the Y range (drag, wheel-zoom, or the axis
+context menu), that range is kept for the rest of the session instead of being
+recomputed on every update. The splitter handle above this panel (between it and the
+image view) is wider than a default Qt splitter, to make it easier to grab.
 
 ---
 
@@ -373,7 +389,8 @@ Zeroes calibration-image pixels below the slider value (background suppression f
 ring-finding); the preview updates instantly.
 
 ### Pick BC / Pick Ring
-Click the image to seed the beam centre (single click) or fit a ring (≥3 clicks).
+Click the image to seed the beam centre (single click) or fit a ring (≥3 clicks); the
+Pick Ring points/fit are drawn in blue, distinct from the amber Simulate-rings overlay.
 
 ### Run / Abort
 **Run Calibration** launches the worker; **Abort** terminates it and frees the slot so
