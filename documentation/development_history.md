@@ -67,6 +67,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Wider image/radial-plot splitter handle | `69f470c` |
 | Radial profile: Y-min defaults to 0.9x data min, manual Y-range sticks | `96f8add` |
 | Simulate rings is now a live toggle (auto-recomputes on param change) | `ecf6d01` |
+| Live PV field becomes a device dropdown (Preferences ▸ Devices) | `aa82cb6` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -120,6 +121,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Fix "Populating font family aliases" warning (real fixed-width fonts) | `d6df1f8` |
 | Fix fresh-env launch crash — colormap resolution without matplotlib | `6332b3d` |
 | Fix native Bus-error crash on Run Calibration — cap BLAS/OMP thread pools | `0b4326d` |
+| Preferences ▸ Devices tab; Live PV field becomes a device dropdown | `aa82cb6` |
 
 ### Stability / performance / consistency (review-driven, phases 1–3)
 | Change | Commit |
@@ -648,6 +650,23 @@ integration. Beam-centre edits still just reposition the existing rings (unchang
 ring radii don't depend on BC), so no wiring was added there.
 **Files:** `tab_view.py`.
 **Roll back:** `git revert ecf6d01`.
+
+### `aa82cb6` — Preferences: add Devices tab; Data Viewer Live PV becomes a device dropdown (2026-07-24)
+**Effect:** New **Preferences ▸ Devices** tab (add/remove/edit rows of name +
+prefix + PVA suffix), following the existing Materials/Calibrants table-tab
+pattern; persisted as a new `"devices"` list in the JSON config (replaces
+wholesale when present, same as materials/calibrants). Ships pre-filled with
+the 20-ID-D detectors extracted from the beamline's `make_det(...)`
+blueprint — `oryx20idd` (`20iddOR1:`), `s20idPil` (`20idPil`), `pg4`
+(`1idPG4:`), `gh1s` (`20idGH1s:`), `s20varex1` (`20IDFF:`) — all with PVA
+suffix `Pva1:Image`. The Data Viewer's Live Data "Live PV" field is now an
+editable combo box (`_NoScrollComboBox`) populated from this list: picking a
+device by name fills in its full PV (`prefix + PVA suffix`); typing any other
+PV by hand still works unchanged, with the same example placeholder text.
+**Files:** `constants.py`, `prefs_dialog.py`, `widgets.py`,
+`tests/test_live_stream.py`.
+**Roll back:** `git revert aa82cb6` (Devices tab and the Live PV dropdown both
+go; the Live PV field reverts to a plain text box).
 
 ---
 
