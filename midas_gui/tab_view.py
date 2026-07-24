@@ -327,6 +327,7 @@ class DataViewerTab(QtWidgets.QWidget):
 
         # Right: image (top) + radial-integration plot (bottom) in a splitter.
         right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        right.setHandleWidth(8)
         self._viewer = PickableImageViewer()
         self._viewer.bcPicked.connect(self._on_bc_picked)
         self._viewer.ringFitBC.connect(self._on_ring_fit_bc)
