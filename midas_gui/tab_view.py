@@ -315,8 +315,17 @@ class DataViewerTab(QtWidgets.QWidget):
         ctl.addWidget(self._show_rings); ctl.addWidget(self._show_labels); ctl.addStretch(1)
         ring.body.addLayout(ctl)
         self._sim_btn = S.primary_btn("Simulate rings")
-        self._sim_btn.clicked.connect(self._simulate)
+        self._sim_btn.setCheckable(True)
+        self._sim_btn.setToolTip(
+            "Toggle live ring simulation — while on, rings recompute automatically "
+            "whenever material, lattice, or geometry parameters change.")
+        self._sim_btn.toggled.connect(self._on_sim_toggled)
         ring.body.addWidget(self._sim_btn)
+        for w in (self._a, self._b, self._c, self._al, self._be, self._ga, self._sg,
+                  self._wl, self._lsd, self._px, self._max2t):
+            w.valueChanged.connect(self._on_sim_param_changed)
+        self._mat.currentTextChanged.connect(self._on_sim_param_changed)
+        self._cubic.toggled.connect(self._on_sim_param_changed)
         self._ring_info = QtWidgets.QPlainTextEdit(); self._ring_info.setReadOnly(True)
         self._ring_info.setMaximumHeight(140)
         self._ring_info.setStyleSheet(f"font-family:{S.MONO_CSS};font-size:10px")
@@ -507,6 +516,17 @@ class DataViewerTab(QtWidgets.QWidget):
         QtWidgets.QMessageBox.critical(self, "Projection error", msg[:500])
 
     # ── Ring simulation ───────────────────────────────────────────
+
+    def _on_sim_toggled(self, checked: bool):
+        """"Simulate rings" is now a live mode, not a one-shot action."""
+        self._sim_btn.setText("Simulate rings (live)" if checked else "Simulate rings")
+        if checked:
+            self._simulate()
+
+    def _on_sim_param_changed(self, *_):
+        """Material/lattice/geometry field edited — resimulate while live mode is on."""
+        if self._sim_btn.isChecked() and self._cur is not None:
+            self._simulate()
 
     def _simulate(self):
         if self._cur is None:
