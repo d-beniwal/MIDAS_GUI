@@ -68,6 +68,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Radial profile: Y-min defaults to 0.9x data min, manual Y-range sticks | `96f8add` |
 | Simulate rings is now a live toggle (auto-recomputes on param change) | `ecf6d01` |
 | Live PV field becomes a device dropdown (Preferences ▸ Devices) | `aa82cb6` |
+| Fix image-view autorange drift; bound pan/zoom to image | `c156c62` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -667,6 +668,25 @@ PV by hand still works unchanged, with the same example placeholder text.
 `tests/test_live_stream.py`.
 **Roll back:** `git revert aa82cb6` (Devices tab and the Live PV dropdown both
 go; the Live PV field reverts to a plain text box).
+
+### `c156c62` — Fix image-view autorange drift; bound pan/zoom to image (2026-07-24)
+**Effect:** Two bugs in the shared `ImageViewer` (Data Viewer / Mask Builder /
+Calibrate all use it): (1) the crosshair `InfiniteLine`s were added to the
+pyqtgraph `ViewBox` without `ignoreBounds=True`, so their position — which
+follows the mouse on every hover event — fed the auto-range bounds
+calculation. Once the bottom-left **A** (auto-range) button enabled
+*continuous* auto-range, the view kept re-fitting itself to wherever the
+cursor was, and only a right-click ▸ View All (which disables continuous
+auto-range as a side effect) made it static again. Fixed by excluding the
+crosshairs from bounds via `ignoreBounds=True`. (2) Pan/zoom had no limits,
+so scroll/drag could wander arbitrarily far from the image or zoom out
+indefinitely into empty space. Added `ViewBox.setLimits()` (computed from the
+image shape in `set_image()`): pan is bounded to roughly half an
+image-width/height of margin past each edge, and min/max zoom range are tied
+to the image size.
+**Files:** `widgets.py` (`ImageViewer.set_image`, new `_apply_view_limits`).
+**Roll back:** `git revert c156c62` (crosshair can drift the view again under
+continuous auto-range; pan/zoom become unbounded again).
 
 ---
 
