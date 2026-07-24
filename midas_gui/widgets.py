@@ -351,8 +351,8 @@ class PickableImageViewer(ImageViewer):
         self._ring_pts.append((x, y))
         dot = pg.ScatterPlotItem(
             [x], [y], symbol="o", size=10,
-            pen=pg.mkPen("#f0c060", width=1.5),
-            brush=pg.mkBrush(240, 192, 96, 180))
+            pen=pg.mkPen("#2a7fd4", width=1.5),
+            brush=pg.mkBrush(42, 127, 212, 180))
         self._iv.addItem(dot)
         self._ring_pt_items.append(dot)
         self._undo_btn.setEnabled(True)
@@ -400,7 +400,7 @@ class PickableImageViewer(ImageViewer):
         cx, cy, r = fit
         th  = np.linspace(0, 2 * math.pi, 512)
         xs  = cx + r * np.cos(th);  ys = cy + r * np.sin(th)
-        pen = pg.mkPen("#f0c060", width=1.5, style=QtCore.Qt.DashLine)
+        pen = pg.mkPen("#2a7fd4", width=1.5, style=QtCore.Qt.DashLine)
         if self._ring_fit_item is not None:
             self._iv.removeItem(self._ring_fit_item)
         self._ring_fit_item = pg.PlotDataItem(xs, ys, pen=pen)
@@ -409,7 +409,7 @@ class PickableImageViewer(ImageViewer):
             self._iv.removeItem(self._ring_fit_center)
         self._ring_fit_center = pg.ScatterPlotItem(
             [cx], [cy], symbol="+", size=18,
-            pen=pg.mkPen("#f0c060", width=2.5), brush=pg.mkBrush(0, 0, 0, 0))
+            pen=pg.mkPen("#2a7fd4", width=2.5), brush=pg.mkBrush(0, 0, 0, 0))
         self._iv.addItem(self._ring_fit_center)
         self._pick_status.setText(
             f"{n} pts | fit: BC=({cx:.1f}, {cy:.1f})  R={r:.1f} px → seed updated")
