@@ -70,6 +70,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Live PV field becomes a device dropdown (Preferences ▸ Devices) | `aa82cb6` |
 | Fix image-view autorange drift; bound pan/zoom to image | `c156c62` |
 | Radial profile plot: bound pan/zoom to the data extent | `cde4bb2` |
+| Ring simulation ty/tz tilt fields; configurable spin-box step sizes | `5b8e3b3` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -87,6 +88,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Calibrate Results all-text (drop distortion table; named distortion, bigger font) | `3a6ecb9` |
 | Fix calibrate() initial_BC_y TypeError (kwargs filter) + pin scikit-image | `b1642fa` |
 | Pick-Ring fit overlay recolored blue (was same amber as simulated rings) | `3eb4a44` |
+| "Corrected" rings drawn synchronously from fitted ty/tz (drop background worker) | `5b8e3b3` |
 
 ### Batch Integrate (Tab 4)
 | Change | Commit |
@@ -117,6 +119,8 @@ Dates are commit dates (YYYY-MM-DD).
 | Clickable px label with detector pixel-size menu | `3248638` |
 | Per-user JSON configuration system + Preferences dialog | `d30be2c` |
 | Modular tab visibility (show/hide optional tabs) | `590b410` |
+| Multi-profile config (Preferences ▸ Profile row) | `5b8e3b3` |
+| File ▸ Save/Load GUI State (all 10 tabs, with mask/calibration sidecars) | `5b8e3b3` |
 | User-adjustable interface scaling (HiDPI / 4K, QT_SCALE_FACTOR) | `d5fafd8` |
 | Default optional tabs reduced (Corrections/PDF/Texture/Export hidden) | `7e157e0` |
 | Lsd displayed in mm (calculations & calibration files stay in µm) | `c4e1c12` |
@@ -703,6 +707,54 @@ means the bound tracks new profiles and axis-unit switches automatically.
 `ProfileViewer._apply_view_limits`).
 **Roll back:** `git revert cde4bb2` (radial profile pan/zoom becomes
 unbounded again).
+
+### `5b8e3b3` — User profiles, full GUI state save/load, Calibrate tilt-ring rework (2026-07-27)
+**Effect:** Three pieces of work landed in one commit:
+1. **User profiles.** `settings.py` now keeps one config file per named
+   profile under `<config dir>/profiles/<name>.json` (`profile_meta.json`
+   tracks which is active), transparently migrating an existing single
+   `config.json` into a profile named "Default" the first time it runs — no
+   data lost, no explicit migration step. `load_config()`/
+   `save_user_config()`/`reset_user_config()`/`user_config_path()` keep their
+   existing signatures and now resolve to the active profile, so every
+   existing call site (`constants.py`, `prefs_dialog.py`, `app.py`) needed no
+   changes. New `constants.reload_from_config()` resets every `DEFAULT_*`
+   global to its shipped value then re-applies the active profile's config on
+   top (a plain re-`_apply` alone would leave a previous profile's override in
+   place if the new profile doesn't mention that key). Preferences gets a
+   **Profile row** — combo + New…/Duplicate…/Rename…/Delete — wired to this API.
+2. **Full GUI state save/load.** New **File** menu, **Save GUI State…**
+   (`Ctrl+S`) / **Load GUI State…** (`Ctrl+O`), dumps/restores every tab's
+   fields to one JSON file via new `widgets_to_dict()`/`apply_dict_to_widgets()`
+   dispatch helpers (`helpers.py`) and a `get_state()`/`set_state()` pair added
+   to all 10 tabs plus the shared `DataLoaderPanel`/`FieldSelector`/
+   `MaskSelector`/`CorrectionFlagsWidget` widgets. Loading a state re-triggers
+   each tab's own file-loading for path-backed fields (images, masks,
+   dark/bright/background, HDF5 datasets) but deliberately does **not**
+   re-run long pipelines (Fit, Batch Integrate, PDF transform, Refinement) —
+   those need one manual click of the tab's own action button afterward.
+   `MaskTab`/`CalibrationTab` additionally write small sidecar files
+   (`<stem>_mask.tif`, `<stem>_calibration.json`) next to the state file so an
+   in-progress mask or fit result that hasn't been exported anywhere else
+   isn't silently lost.
+3. **Calibrate tilt-ring rework** (previously uncommitted, folded in here):
+   the "Corrected" ring overlay is now drawn synchronously from the fitted
+   ty/tz tilt (`_draw_corrected_rings`) instead of a background
+   `CorrectedRingsWorker` forward-model thread (removed from `workers.py`).
+   Data Viewer gained matching `ty`/`tz` tilt fields for its ring simulation,
+   and every Ring-simulation spin-box's step size (λ, max 2θ, Lsd, pixel,
+   BC, tilt) is now configurable via Preferences ▸ Data Viewer / the
+   `viewer_steps` config key instead of hardcoded.
+**Files:** `settings.py`, `constants.py`, `prefs_dialog.py`, `helpers.py`,
+`widgets.py`, `app.py`, `tab_view.py`, `tab_calibrate.py`, `tab_mask.py`,
+`tab_batch.py`, `tab_refine.py`, `tab_pumpprobe.py`, `tab_corrections.py`,
+`tab_pdf.py`, `tab_texture.py`, `tab_export.py`, `workers.py`,
+`tests/test_config.py`, `documentation/gui_documentation.md`.
+**Roll back:** `git revert 5b8e3b3` — reverts all three pieces together (they
+share edits in `tab_view.py`/`tab_calibrate.py`, so a partial revert needs a
+hand-picked patch, not a plain `git checkout <path>`). Existing single-profile
+configs are unaffected either way since `profiles/Default.json` is a copy,
+not a move, of the original `config.json`.
 
 ---
 
