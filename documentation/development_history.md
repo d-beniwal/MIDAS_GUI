@@ -71,6 +71,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Fix image-view autorange drift; bound pan/zoom to image | `c156c62` |
 | Radial profile plot: bound pan/zoom to the data extent | `cde4bb2` |
 | Ring simulation ty/tz tilt fields; configurable spin-box step sizes | `5b8e3b3` |
+| Tilt-aware profile w/o calibration file; ring 2θ-cutoff/thickness/live-button fixes; save-calibration buttons; radial-plot X-floor + zoom persistence | `e14c1ea` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -755,6 +756,74 @@ share edits in `tab_view.py`/`tab_calibrate.py`, so a partial revert needs a
 hand-picked patch, not a plain `git checkout <path>`). Existing single-profile
 configs are unaffected either way since `profiles/Default.json` is a copy,
 not a move, of the original `config.json`.
+
+### `e14c1ea` — Data Viewer: tilt-aware profile, ring fixes, calibration export, plot zoom persistence (2026-07-28)
+**Effect:** Seven requested fixes/features plus two follow-up plot bugs found
+while testing them, all in the Data Viewer tab:
+1. **Tilt-corrected radial profile without a calibration file.** New
+   `DataViewerTab._effective_calib_geom()` returns `self._calib_geom` if a
+   calibration is loaded, otherwise synthesizes a geometry from the
+   Ring-simulation card's own `ty`/`tz`/BC/Lsd/pixel fields whenever they're
+   non-zero. `_radial_integrate()`/`_midas_radial()` route through this
+   instead of only checking `_calib_geom`, so the profile's R/2θ/Q axis stays
+   tilt-consistent with the already-correct 2D ring overlay even before any
+   calibration file is loaded. `_midas_radial`'s integration-context cache key
+   changed from `id(g)` to a value tuple (the synthesized geometry is a fresh
+   dict each call, so `id()` never hit the cache).
+2. **Ring 2θ-range cutoff bug.** `_redraw_rings` capped ring radius at the
+   image's pixel diagonal (`math.hypot(NY, NZ)`), silently dropping any ring
+   past that regardless of the configured "max 2θ" — for far-detector/
+   fine-pixel geometries this fell around 35-40°. Replaced with a bare
+   `rad > 0 and math.isfinite(rad)` guard; pyqtgraph's ViewBox already clips
+   anything drawn outside the visible image.
+3. **Configurable ring thickness.** New `DEFAULT_RING_WIDTH = 2.0` constant
+   and a spin box in the Ring-simulation card, wired into `_redraw_rings`'s
+   pen width and into `_state_widgets()` (round-trips through Save/Load GUI
+   State).
+4. **"Simulate rings" turns green while live.** New
+   `QPushButton#primary:checked` rule in `style.py` — confirmed via grep that
+   the Data Viewer's live-toggle button is the only checkable `primary_btn`
+   in the app, so this can't affect any other tab.
+5. **Save calibration from the Data Viewer.** Three new buttons (Save JSON /
+   Save params (.txt) / Save PONI) export whichever geometry is currently in
+   effect (`_export_geom()`, mirroring `_effective_calib_geom()`). JSON uses
+   the same bare-key shape `geometry_fields_from_file()` reads back; `.txt`
+   reuses the existing `write_standalone_paramstest()`; `.poni` uses a new
+   `helpers.write_poni()` that inverts the existing PONI reader's convention
+   (`Poni1/2 = BC_y/z * pxY/Z`, `Distance = Lsd`, SI units) — tx/ty/tz tilts
+   have no PONI Rot1-3 equivalent and are documented as dropped on export,
+   matching the reader's existing documented limitation.
+6. **`Ctrl+S` overwrites a loaded/saved GUI-state file.** `MainWindow` tracks
+   `_gui_state_path`, set on every successful save or load; a plain `Ctrl+S`
+   now writes straight to that path with no dialog once one exists. New
+   `Ctrl+Shift+S` ("Save GUI State As…") always prompts, and becomes the new
+   target for subsequent plain saves.
+7. **Radial-profile X-axis floors at 0.** Both `ProfileViewer._replot`'s
+   `setXRange` call and `_apply_view_limits`'s pan/zoom `xMin` bound now clamp
+   to `max(0.0, ...)`.
+
+Testing these surfaced two more bugs in `ProfileViewer`, fixed in the same
+commit:
+- **Y-range could get permanently stuck.** The old `_manual_ymin` latch
+  recorded *any* Y-range-changed signal, including ones pyqtgraph fires
+  internally (e.g. autorange during `curve.setData()`) well before the
+  method's own suspend-flag window started — once latched, every future
+  replot used that stale value regardless of new data. Fixed by wrapping the
+  entire `_replot()` body (curve/band updates, limit-setting, everything) in
+  one suspend flag, so only genuine mouse-driven pan/zoom is ever recorded.
+- **Zoom reset on every parameter change.** Replaced the unconditional
+  `setXRange`/`setYRange` calls with tracked `_user_xrange`/`_user_yrange`:
+  the plot still auto-fits fresh data when the user hasn't manually zoomed,
+  but a manual zoom/pan is now restored after every replot instead of being
+  wiped by the next profile update. The remembered range is only dropped
+  when it would be meaningless in the new context — switching the R/2θ/Q
+  axis unit clears the X range, toggling Log Y clears the Y range.
+**Files:** `midas_gui/app.py`, `midas_gui/constants.py`, `midas_gui/helpers.py`,
+`midas_gui/style.py`, `midas_gui/tab_view.py`, `midas_gui/widgets.py`,
+`documentation/gui_documentation.md`.
+**Roll back:** `git revert e14c1ea`. All pieces are additive/isolated (new
+widgets, a new geometry-resolution helper, a new writer function, and a
+`ProfileViewer` range-tracking rewrite) — no other commit builds on this one.
 
 ---
 
