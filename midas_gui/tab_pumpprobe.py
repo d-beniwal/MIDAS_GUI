@@ -31,7 +31,7 @@ from midas_gui.constants import (KERNELS, DEFAULT_KERNEL, DEFAULT_TRXRD_DIR,
                                  DEFAULT_TRXRD_PREFIX, DEFAULT_TRXRD_CALIB,
                                  DEFAULT_TRXRD_MASK)
 from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_file,
-                               _NoScrollComboBox)
+                               _NoScrollComboBox, widgets_to_dict, apply_dict_to_widgets)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, DataLoaderPanel,
                                _convert_radial, _UnitAxis)
 from midas_gui.workers import PumpProbeWorker
@@ -158,6 +158,48 @@ class PumpProbeTab(QtWidgets.QWidget):
 
     def set_mask_from_tab1(self, mask):
         self._loader.set_tab1_mask(mask)
+
+    # ── GUI state (Save/Load GUI State) ─────────────────────────────
+    def _state_widgets(self) -> dict:
+        return {
+            "use_tab2_btn": self._use_tab2_btn,
+            "use_file_btn": self._use_file_btn,
+            "calib_ed": self._calib_ed,
+            "prefix_ed": self._prefix_ed,
+            "kernel": self._kernel,
+            "r_bin": self._r_bin,
+            "e_bin": self._e_bin,
+            "axis": self._axis,
+            "q_check": self._q_check,
+            "q_min": self._q_min,
+            "q_max": self._q_max,
+            "q_bin": self._q_bin,
+            "norm_check": self._norm_check,
+            "norm_lo": self._norm_lo,
+            "norm_hi": self._norm_hi,
+            "auto_v": self._auto_v,
+            "vrange": self._vrange,
+            "cmap": self._cmap,
+            "draw_combo": self._draw_combo,
+            "kin_lo": self._kin_lo,
+            "kin_hi": self._kin_hi,
+            "kin_xmode": self._kin_xmode,
+            "means_band": self._means_band,
+            "means_logy": self._means_logy,
+        }
+
+    def get_state(self) -> dict:
+        return {
+            "fields": widgets_to_dict(self._state_widgets()),
+            "corr": self._corr_widget.get_state(),
+            "loader": self._loader.get_state(),
+        }
+
+    def set_state(self, state: dict):
+        self._loader.set_state(state.get("loader") or {})
+        apply_dict_to_widgets(self._state_widgets(), state.get("fields", {}))
+        self._corr_widget.set_state(state.get("corr") or {})
+        self._scan()
 
     # ── UI ─────────────────────────────────────────────────────────
     def _build_ui(self):

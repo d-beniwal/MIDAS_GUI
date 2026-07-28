@@ -13,7 +13,8 @@ import numpy as np
 from PyQt5 import QtCore, QtWidgets
 import pyqtgraph as pg
 
-from midas_gui.helpers import _load_image, _fspin, _twocol, _browse, is_h5
+from midas_gui.helpers import (_load_image, _fspin, _twocol, _browse, is_h5,
+                               widgets_to_dict, apply_dict_to_widgets)
 from midas_gui.constants import DEFAULT_NICKEL_FRAME0
 from midas_gui.widgets import LogPanel
 from midas_gui.workers import CorrectionPreviewWorker, LearnableGainWorker
@@ -45,6 +46,47 @@ class CorrectionsTab(QtWidgets.QWidget):
 
     def set_mask_from_tab1(self, mask):
         self._mask = mask
+
+    # ── GUI state (Save/Load GUI State) ─────────────────────────────
+    def _state_widgets(self) -> dict:
+        return {
+            "img_ed": self._img_ed,
+            "img_h5_ed": self._img_h5_ed,
+            "rbin": self._rbin, "ebin": self._ebin,
+            "pol_chk": self._pol_chk,
+            "pol_frac": self._pol_frac, "pol_plane": self._pol_plane,
+            "sa_chk": self._sa_chk,
+            "empty_chk": self._empty_chk,
+            "empty_ed": self._empty_ed,
+            "empty_scale": self._empty_scale,
+            "abs_chk": self._abs_chk,
+            "abs_mu": self._abs_mu,
+            "comp_chk": self._comp_chk,
+            "comp_comp": self._comp_comp,
+            "comp_scale": self._comp_scale,
+            "gain_ref_ed": self._gain_ref_ed,
+            "gain_drift_ed": self._gain_drift_ed,
+            "gain_nsteps": self._gain_nsteps,
+            "gain_lr": self._gain_lr,
+            "gain_unity_w": self._gain_unity_w,
+            "gain_smooth_w": self._gain_smooth_w,
+        }
+
+    def get_state(self) -> dict:
+        return {"fields": widgets_to_dict(self._state_widgets())}
+
+    def set_state(self, state: dict):
+        fields = state.get("fields", {})
+        apply_dict_to_widgets(self._state_widgets(), fields)
+        img_path = fields.get("img_ed")
+        if img_path and Path(img_path).exists():
+            self._load_img()
+        ref_path = fields.get("gain_ref_ed")
+        if ref_path and Path(ref_path).exists():
+            self._load_gain_ref()
+        drift_path = fields.get("gain_drift_ed")
+        if drift_path and Path(drift_path).exists():
+            self._load_gain_drift()
 
     def _build_ui(self):
         root = QtWidgets.QHBoxLayout(self)

@@ -19,11 +19,14 @@ import pyqtgraph as pg
 
 from midas_gui.constants import (MATERIALS, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM,
                            DEFAULT_LSD_UM, DEFAULT_BC_Y, DEFAULT_BC_Z,
-                           DEFAULT_NICKEL_H5)
+                           DEFAULT_NICKEL_H5, DEFAULT_STEP_WAVELENGTH,
+                           DEFAULT_STEP_TWO_THETA, DEFAULT_STEP_LSD_MM,
+                           DEFAULT_STEP_PIXEL, DEFAULT_STEP_BC, DEFAULT_STEP_TILT)
 from midas_gui.helpers import (_fspin, _NoScrollSpinBox, _browse,
                          simulate_rings, read_geometry, geometry_fields_from_file,
                          _spec_from_result_ns, _NoScrollComboBox,
-                         make_kedge_label, make_pixel_label)
+                         make_kedge_label, make_pixel_label, tilted_ring_xy,
+                         widgets_to_dict, apply_dict_to_widgets)
 from midas_gui.widgets import PickableImageViewer, ProfileViewer, DataLoaderPanel
 from midas_gui.workers import ProjectionWorker, build_integration_context, integrate_frame
 from midas_gui import style as S
@@ -75,6 +78,8 @@ class DataViewerTab(QtWidgets.QWidget):
             "Lsd": self._lsd_um(),
             "BC_y": self._bcy.value(),
             "BC_z": self._bcz.value(),
+            "ty": self._ty.value(),
+            "tz": self._tz.value(),
         }
 
     def _lsd_um(self) -> float:
@@ -89,7 +94,8 @@ class DataViewerTab(QtWidgets.QWidget):
         # (widget, dict key, µm→display scale)
         for w, key, scale in ((self._wl, "wavelength_A", 1.0), (self._px, "pxY", 1.0),
                               (self._lsd, "Lsd", 0.001), (self._bcy, "BC_y", 1.0),
-                              (self._bcz, "BC_z", 1.0)):
+                              (self._bcz, "BC_z", 1.0), (self._ty, "ty", 1.0),
+                              (self._tz, "tz", 1.0)):
             v = g.get(key)
             if v is not None:
                 w.blockSignals(True); w.setValue(float(v) * scale); w.blockSignals(False)
@@ -140,6 +146,59 @@ class DataViewerTab(QtWidgets.QWidget):
                 + ("+distortion" if geom["distortion"] else "")
                 if (tilt or geom["distortion"]) else "full integration")
         self._calib_lbl.setText(f"Geometry from Calibrate tab  ·  {mode}")
+
+    # ── GUI state (Save/Load GUI State) ─────────────────────────────
+    def _state_widgets(self) -> dict:
+        return {
+            "proj_axis": self._proj_axis,
+            "proj_skip": self._proj_skip,
+            "calib_ed": self._calib_ed,
+            "imask_on": self._imask_on,
+            "imask_lo": self._imask_lo,
+            "imask_hi": self._imask_hi,
+            "mat": self._mat,
+            "a": self._a, "b": self._b, "c": self._c,
+            "al": self._al, "be": self._be, "ga": self._ga,
+            "sg": self._sg,
+            "cubic": self._cubic,
+            "wl": self._wl,
+            "lsd": self._lsd,
+            "px": self._px,
+            "max2t": self._max2t,
+            "bc_auto": self._bc_auto,
+            "bcy": self._bcy,
+            "bcz": self._bcz,
+            "ty": self._ty,
+            "tz": self._tz,
+            "show_rings": self._show_rings,
+            "show_labels": self._show_labels,
+            "topn_spin": self._topn_spin,
+            "rad_r_bin": self._rad_r_bin,
+            "rad_auto": self._rad_auto,
+        }
+
+    def get_state(self) -> dict:
+        return {"fields": widgets_to_dict(self._state_widgets()),
+                "loader": self._loader.get_state()}
+
+    def set_state(self, state: dict):
+        """Restores the loader (which re-triggers its own data reload) and any
+        calibration file (re-triggering ``_load_calibration``) *before* applying
+        the saved field values, so an explicitly saved value always wins over
+        whatever a re-triggered load computed as a default."""
+        self._loader.set_state(state.get("loader") or {})
+        fields = state.get("fields", {})
+        calib_path = fields.get("calib_ed")
+        if calib_path:
+            self._calib_ed.setText(calib_path)
+            if Path(calib_path).exists():
+                self._load_calibration()
+        apply_dict_to_widgets(self._state_widgets(), fields)
+        self._redraw_rings()
+        if self._rad_auto.isChecked():
+            self._radial_integrate()
+        else:
+            self._refresh_profile_markers()
 
     # ── UI ────────────────────────────────────────────────────────
 
@@ -279,12 +338,12 @@ class DataViewerTab(QtWidgets.QWidget):
         ring.body.addWidget(self._cubic)
         ring.body.addWidget(S.hline())
 
-        self._wl = _fspin(0.001, 10.0, 5, DEFAULT_WAVELENGTH, "Å")
+        self._wl = _fspin(0.001, 10.0, 5, DEFAULT_WAVELENGTH, "Å", step=DEFAULT_STEP_WAVELENGTH)
         # Lsd is shown/entered in mm (calculations & files still use µm).
-        self._lsd = _fspin(0.001, 1e5, 4, DEFAULT_LSD_UM / 1000.0, " mm")
+        self._lsd = _fspin(0.001, 1e5, 4, DEFAULT_LSD_UM / 1000.0, " mm", step=DEFAULT_STEP_LSD_MM)
         self._lsd.setFixedWidth(120)
-        self._px = _fspin(1.0, 5000.0, 2, DEFAULT_PIXEL_UM, "µm")
-        self._max2t = _fspin(1.0, 90.0, 1, 25.0, "°")
+        self._px = _fspin(1.0, 5000.0, 2, DEFAULT_PIXEL_UM, "µm", step=DEFAULT_STEP_PIXEL)
+        self._max2t = _fspin(1.0, 90.0, 1, 25.0, "°", step=DEFAULT_STEP_TWO_THETA)
         geo = S.Form()
         geo.row((make_kedge_label(self._wl, "λ:"), self._wl), ("max 2θ:", self._max2t))
         geo.row(("Lsd:", self._lsd), (make_pixel_label(self._px, "px:"), self._px))
@@ -292,11 +351,17 @@ class DataViewerTab(QtWidgets.QWidget):
 
         self._bc_auto = QtWidgets.QCheckBox("Beam centre = image centre"); self._bc_auto.setChecked(True)
         ring.body.addWidget(self._bc_auto)
-        self._bcy = _fspin(-1e5, 1e5, 2, DEFAULT_BC_Y, "px")
-        self._bcz = _fspin(-1e5, 1e5, 2, DEFAULT_BC_Z, "px")
+        self._bcy = _fspin(-1e5, 1e5, 2, DEFAULT_BC_Y, "px", step=DEFAULT_STEP_BC)
+        self._bcz = _fspin(-1e5, 1e5, 2, DEFAULT_BC_Z, "px", step=DEFAULT_STEP_BC)
         self._bcy.setEnabled(False); self._bcz.setEnabled(False)
         self._bc_auto.toggled.connect(lambda c: (self._bcy.setEnabled(not c), self._bcz.setEnabled(not c)))
         ring.body.addLayout(S.Form().row(("BC_y:", self._bcy), ("BC_z:", self._bcz)))
+
+        self._ty = _fspin(-10.0, 10.0, 4, 0.0, "°", step=DEFAULT_STEP_TILT)
+        self._tz = _fspin(-10.0, 10.0, 4, 0.0, "°", step=DEFAULT_STEP_TILT)
+        self._ty.setToolTip("Detector tilt about the Y axis — bends the simulated rings.")
+        self._tz.setToolTip("Detector tilt about the Z axis — bends the simulated rings.")
+        ring.body.addLayout(S.Form().row(("ty:", self._ty), ("tz:", self._tz)))
 
         # Send λ / pixel / Lsd / beam-centre to the Calibrate tab (seed values).
         self._to_calib_btn = QtWidgets.QPushButton("→ Send geometry to Calibrate")
@@ -383,6 +448,8 @@ class DataViewerTab(QtWidgets.QWidget):
         # Recompute rings / radial profile when the beam centre is edited manually.
         self._bcy.valueChanged.connect(self._on_bc_changed)
         self._bcz.valueChanged.connect(self._on_bc_changed)
+        self._ty.valueChanged.connect(self._on_bc_changed)
+        self._tz.valueChanged.connect(self._on_bc_changed)
 
         self._on_material(self._mat.currentText())
 
@@ -564,6 +631,9 @@ class DataViewerTab(QtWidgets.QWidget):
         if not rings or self._cur is None:
             return
         bc_y, bc_z = self._bcy.value(), self._bcz.value()
+        ty, tz = self._ty.value(), self._tz.value()
+        tilted = abs(ty) > 1e-9 or abs(tz) > 1e-9
+        px = self._px.value()
         NZ, NY = self._cur.shape
         max_r = math.hypot(NY, NZ)
         th = np.linspace(0, 2 * math.pi, 400)
@@ -574,12 +644,19 @@ class DataViewerTab(QtWidgets.QWidget):
             rad = r["radius_px"]
             if not (0 < rad < max_r):
                 continue
-            item = pg.PlotDataItem(bc_y + rad * np.cos(th), bc_z + rad * np.sin(th), pen=pen)
+            if tilted:
+                ys, zs = tilted_ring_xy(r["two_theta_deg"], 0.0, ty, tz,
+                                         self._lsd_um(), bc_y, bc_z, px, px)
+                label_y, label_z = ys[len(ys) // 2], zs[len(zs) // 2]
+            else:
+                ys = bc_y + rad * np.cos(th); zs = bc_z + rad * np.sin(th)
+                label_y, label_z = bc_y, bc_z - rad
+            item = pg.PlotDataItem(ys, zs, pen=pen)
             item.setVisible(vis_r)
             self._viewer._iv.addItem(item); self._ring_items.append(item)
             h, k, l = r["hkl"]
             txt = pg.TextItem(f"{h}{k}{l}", color="#f0c060", anchor=(0.5, 1.0))
-            txt.setPos(bc_y, bc_z - rad)
+            txt.setPos(label_y, label_z)
             txt.setVisible(vis_l)
             self._viewer._iv.addItem(txt); self._label_items.append(txt)
         # beam-centre marker

@@ -15,7 +15,8 @@ import pyqtgraph as pg
 
 from midas_gui.constants import _SENTINELS, H5_EXTS, DEFAULT_CALIBRANT_TIF
 from midas_gui.helpers import (_load_image, _fspin, _NoScrollSpinBox, _browse, is_h5,
-                               _NoScrollComboBox, list_h5_datasets)
+                               _NoScrollComboBox, list_h5_datasets,
+                               widgets_to_dict, apply_dict_to_widgets)
 from midas_gui.widgets import ImageViewer
 from midas_gui.workers import MaskComputeWorker
 from midas_gui import style as S
@@ -81,16 +82,18 @@ class MaskTab(QtWidgets.QWidget):
         self._img_edit = QtWidgets.QLineEdit(DEFAULT_CALIBRANT_TIF)
         self._img_edit.setPlaceholderText("Select image file…")
         img.body.addLayout(_frow(self._img_edit, self._browse_img))
-        self._h5loc_edit = QtWidgets.QLineEdit("exchange/data")
+        self._h5loc_edit = _NoScrollComboBox(); self._h5loc_edit.setEditable(True)
+        self._h5loc_edit.setEditText("exchange/data")
         self._h5loc_lbl = S.LabelRight("Dataset:")
         self._h5loc_lbl.setVisible(False); self._h5loc_edit.setVisible(False)
         ds = QtWidgets.QHBoxLayout(); ds.setSpacing(4)
         ds.addWidget(self._h5loc_lbl); ds.addWidget(self._h5loc_edit, 1)
         img.body.addLayout(ds)
-        self._img_edit.textChanged.connect(lambda p: (
-            self._h5loc_lbl.setVisible(is_h5(p)), self._h5loc_edit.setVisible(is_h5(p))))
+        self._img_edit.textChanged.connect(self._on_img_path_changed)
         self._img_edit.returnPressed.connect(self._load_image)
-        self._h5loc_edit.editingFinished.connect(
+        self._h5loc_edit.currentIndexChanged.connect(
+            lambda _=0: self._image is not None and self._load_image())
+        self._h5loc_edit.lineEdit().editingFinished.connect(
             lambda: self._image is not None and self._load_image())
         lv.addWidget(img)
 
@@ -350,6 +353,30 @@ class MaskTab(QtWidgets.QWidget):
                     "Stacks (*.h5 *.hdf5 *.nxs *.tif *.tiff);;All (*)")
         if p: self._stack_ed.setText(p)
 
+    def _on_img_path_changed(self, txt: str):
+        """Show the dataset selector + list datasets when the image is HDF5."""
+        h5 = is_h5(txt) and Path(txt).is_file()
+        self._h5loc_lbl.setVisible(h5); self._h5loc_edit.setVisible(h5)
+        if not h5:
+            return
+        try:
+            items = list_h5_datasets(txt)
+        except Exception:
+            items = []
+        if not items:
+            return
+        keep = self._h5loc_edit.currentText().split("   ")[0].strip()
+        self._h5loc_edit.blockSignals(True)
+        self._h5loc_edit.clear()
+        for name, shape in items:
+            self._h5loc_edit.addItem(f"{name}   {tuple(shape)}", name)
+        idx = next((i for i, (n, s) in enumerate(items) if len(s) >= 2), 0)
+        for i in range(self._h5loc_edit.count()):
+            if self._h5loc_edit.itemData(i) == keep:
+                idx = i; break
+        self._h5loc_edit.setCurrentIndex(idx)
+        self._h5loc_edit.blockSignals(False)
+
     def _on_stack_path_changed(self, txt: str):
         """Show the dataset selector + list datasets when the stack is an HDF5 file."""
         h5 = is_h5(txt) and Path(txt).is_file()
@@ -380,7 +407,7 @@ class MaskTab(QtWidgets.QWidget):
         if not path or not Path(path).exists():
             QtWidgets.QMessageBox.warning(self, "Error", "File not found."); return
         try:
-            data_loc = self._h5loc_edit.text().strip() or "exchange/data"
+            data_loc = self._h5loc_edit.currentText().split("   ")[0].strip() or "exchange/data"
             import tifffile
             raw = tifffile.imread(path) if Path(path).suffix.lower() in (".tif", ".tiff") \
                   else _load_image(path, data_loc=data_loc)
@@ -806,3 +833,70 @@ class MaskTab(QtWidgets.QWidget):
 
     def get_mask(self) -> Optional[np.ndarray]:
         return self._mask
+
+    # ── GUI state (Save/Load GUI State) ─────────────────────────────
+    def _state_widgets(self) -> dict:
+        return {
+            "img_path": self._img_edit,
+            "h5_dataset": self._h5loc_edit,
+            "lower": self._lower,
+            "upper": self._upper,
+            "spatial_check": self._spatial_check,
+            "temporal_check": self._temporal_check,
+            "k_sigma": self._k_sigma,
+            "hot_factor": self._hot_factor,
+            "dead_factor": self._dead_factor,
+            "frozen_frac": self._frozen_frac,
+            "stack_ed": self._stack_ed,
+            "stack_ds_combo": self._stack_ds_combo,
+            "stride_spin": self._stride_spin,
+            "spike_check": self._spike_check,
+            "spike_sigma": self._spike_sigma,
+            "cosmic_check": self._cosmic_check,
+            "cosmic_sigma": self._cosmic_sigma,
+            "azim_check": self._azim_check,
+            "azim_sigma": self._azim_sigma,
+            "learn_check": self._learn_check,
+            "learn_steps": self._learn_steps,
+            "learn_lr": self._learn_lr,
+            "learn_sparsity": self._learn_sparsity,
+            "save_edit": self._save_edit,
+            "load_mask_edit": self._load_mask_edit,
+            "show_overlay_check": self._show_overlay_check,
+            "draw_check": self._draw_check,
+        }
+
+    def get_state(self, sidecar_stem: Optional[str] = None) -> dict:
+        """``sidecar_stem`` (if given) is the state file's path without its
+        extension. A mask that's been drawn/computed but not yet exported via
+        the Save button is auto-exported to ``<sidecar_stem>_mask.tif`` so it
+        isn't silently lost."""
+        state = {"fields": widgets_to_dict(self._state_widgets())}
+        if self._mask is not None and sidecar_stem:
+            try:
+                import tifffile
+                tifffile.imwrite(f"{sidecar_stem}_mask.tif", self._mask)
+            except Exception:
+                pass
+        return state
+
+    def set_state(self, state: dict, sidecar_stem: Optional[str] = None) -> None:
+        # Load the image *before* applying the saved fields — `_load_image()`
+        # auto-picks a dtype-based threshold sentinel, which must not clobber
+        # an explicitly saved lower/upper threshold applied afterwards.
+        fields = state.get("fields", {})
+        img_path = fields.get("img_path")
+        if img_path:
+            self._img_edit.setText(img_path)
+            if Path(img_path).exists():
+                self._load_image()
+        apply_dict_to_widgets(self._state_widgets(), fields)
+        if sidecar_stem:
+            mask_path = Path(f"{sidecar_stem}_mask.tif")
+            if mask_path.is_file():
+                try:
+                    import tifffile
+                    raw = tifffile.imread(str(mask_path))
+                    self._set_mask((raw != 0).astype(np.uint8))
+                except Exception:
+                    pass

@@ -22,10 +22,11 @@ from midas_gui.constants import (
     DISTORTION_NAMES)
 from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _predict_ring_radii, _NoScrollComboBox,
-    make_kedge_label, make_pixel_label)
+    make_kedge_label, make_pixel_label, tilted_ring_xy,
+    widgets_to_dict, apply_dict_to_widgets)
 from midas_gui.widgets import (
     PickableImageViewer, ProfileViewer, LogPanel, ResidualBarChart, DataLoaderPanel)
-from midas_gui.workers import CalibrationWorker, IntegrationWorker, CorrectedRingsWorker
+from midas_gui.workers import CalibrationWorker, IntegrationWorker
 from midas_gui.dialogs import _SaveParamstestDialog, DistortionRefineDialog
 from midas_gui import style as S
 
@@ -47,7 +48,6 @@ class CalibrationTab(QtWidgets.QWidget):
         self._orphans: list = []       # aborted workers kept alive until they wind down
         self._ring_items: list = []
         self._corrected_ring_items: list = []
-        self._corrected_rings_worker = None
         self._calib_result = None
         self._dist_coeffs = set(DISTORTION_NAMES)   # distortion coeffs to refine
         self._seed_dist: dict = {}                  # seed distortion carried from a result
@@ -321,7 +321,7 @@ class CalibrationTab(QtWidgets.QWidget):
         self._show_rings_check.toggled.connect(self._on_show_rings_toggled)
         tb.addWidget(self._show_rings_check)
         self._corrected_check = QtWidgets.QCheckBox("Corrected")
-        self._corrected_check.setToolTip("Draw rings using the full forward model (tilts + distortion, cyan).")
+        self._corrected_check.setToolTip("Redraw the rings reflecting the fitted tilt correction.")
         self._corrected_check.toggled.connect(self._on_corrected_rings_toggled)
         tb.addWidget(self._corrected_check)
         self._corr_status = QtWidgets.QLabel("")
@@ -578,11 +578,16 @@ class CalibrationTab(QtWidgets.QWidget):
             self._seed_bcz.setValue(float(g["BC_z"]))
         if g.get("Lsd"):
             self._seed_lsd.setValue(float(g["Lsd"]) / 1000.0)   # µm → mm display
+        if g.get("ty") is not None:
+            self._seed_ty.setValue(float(g["ty"]))
+        if g.get("tz") is not None:
+            self._seed_tz.setValue(float(g["tz"]))
         self._seed_note.setText(
             f"Geometry from Data Viewer: λ={g.get('wavelength_A', 0):.5f} Å, "
             f"px={g.get('pxY', 0):.2f} µm, "
             f"BC=({g.get('BC_y', 0):.2f}, {g.get('BC_z', 0):.2f}), "
-            f"Lsd={g.get('Lsd', 0)/1000:.3f} mm.")
+            f"Lsd={g.get('Lsd', 0)/1000:.3f} mm, "
+            f"ty={g.get('ty', 0):.3f}°, tz={g.get('tz', 0):.3f}°.")
         self._log.append("Geometry pulled from Data Viewer tab.")
 
     def _on_bc_picked(self, bc_y, bc_z):
@@ -849,7 +854,7 @@ class CalibrationTab(QtWidgets.QWidget):
         bc.setVisible(visible)
         self._img_view._iv.addItem(bc); self._ring_items.append(bc)
         if self._corrected_check.isChecked():
-            self._start_corrected_rings(radii)
+            self._draw_corrected_rings(radii)
 
     def _on_show_rings_toggled(self, visible):
         active = (self._corrected_ring_items
@@ -869,7 +874,7 @@ class CalibrationTab(QtWidgets.QWidget):
                 for item in self._corrected_ring_items:
                     item.setVisible(vis)
             else:
-                self._start_corrected_rings(_predict_ring_radii(self._calib_result))
+                self._draw_corrected_rings(_predict_ring_radii(self._calib_result))
         else:
             for item in self._corrected_ring_items:
                 item.setVisible(False)
@@ -883,38 +888,31 @@ class CalibrationTab(QtWidgets.QWidget):
             self._img_view._iv.removeItem(item)
         self._corrected_ring_items.clear()
 
-    def _start_corrected_rings(self, radii_px):
-        if self._corrected_rings_worker and self._corrected_rings_worker.isRunning():
+    def _draw_corrected_rings(self, radii_px):
+        if self._calib_result is None:
             return
-        self._corr_status.setText("Computing corrected rings…")
-        self._corrected_check.setEnabled(False)
-        self._corrected_rings_worker = CorrectedRingsWorker(
-            self._calib_result, radii_px, parent=self)
-        self._corrected_rings_worker.finished.connect(self._on_corrected_rings_done)
-        self._corrected_rings_worker.failed.connect(self._on_corrected_rings_failed)
-        self._corrected_rings_worker.start()
-
-    def _on_corrected_rings_done(self, ring_data):
-        self._corrected_check.setEnabled(True)
+        result = self._calib_result
         self._clear_corrected_rings()
         vis = self._show_rings_check.isChecked()
-        for pts in ring_data:
-            if pts is None:
+        pen = pg.mkPen("lime", width=1.2)
+        n = 0
+        for r in radii_px:
+            try:
+                two_theta_deg = math.degrees(math.atan(r * result.pxY / result.Lsd))
+                ys, zs = tilted_ring_xy(two_theta_deg, result.tx, result.ty, result.tz,
+                                        result.Lsd, result.BC_y, result.BC_z,
+                                        result.pxY, result.pxZ)
+            except Exception:
+                import traceback
+                self._log.append(f"Corrected ring error:\n{traceback.format_exc()[:300]}")
                 continue
-            xs, ys = pts
-            item = pg.ScatterPlotItem(xs, ys, symbol="o", size=2,
-                                      pen=pg.mkPen(None), brush=pg.mkBrush("#00cfff"))
+            item = pg.PlotDataItem(ys, zs, pen=pen)
             item.setVisible(vis)
             self._img_view._iv.addItem(item); self._corrected_ring_items.append(item)
-        n = sum(1 for r in ring_data if r is not None)
-        self._corr_status.setText(f"Corrected rings: {n} shown (cyan)")
+            n += 1
+        self._corr_status.setText(f"Corrected rings: {n} shown")
         for item in self._ring_items:
             item.setVisible(False)
-
-    def _on_corrected_rings_failed(self, msg):
-        self._corrected_check.setEnabled(True); self._corrected_check.setChecked(False)
-        self._corr_status.setText("Failed — see log")
-        self._log.append(f"Corrected rings error:\n{msg[:300]}")
 
     # ── Integration / residual chart ───────────────────────────────
 
@@ -1023,3 +1021,80 @@ class CalibrationTab(QtWidgets.QWidget):
 
     def get_result(self):
         return self._result
+
+    # ── GUI state (Save/Load GUI State) ─────────────────────────────
+    def _state_widgets(self) -> dict:
+        return {
+            "pipeline": self._pipeline,
+            "wl": self._wl,
+            "cal": self._cal,
+            "pxY": self._pxY,
+            "pxZ_check": self._pxZ_check,
+            "pxZ_spin": self._pxZ_spin,
+            "flip_y": self._flip_y,
+            "flip_z": self._flip_z,
+            "transp": self._transp,
+            "thr_check": self._thr_check,
+            "thr_min": self._thr_min,
+            "thr_max": self._thr_max,
+            "avg_check": self._avg_check,
+            "avg_start": self._avg_start,
+            "avg_end": self._avg_end,
+            "avg_step": self._avg_step,
+            "manual_seed_check": self._manual_seed_check,
+            "seed_bcy": self._seed_bcy,
+            "seed_bcz": self._seed_bcz,
+            "seed_lsd": self._seed_lsd,
+            "seed_tx": self._seed_tx,
+            "seed_ty": self._seed_ty,
+            "seed_tz": self._seed_tz,
+            "feedback_check": self._feedback_check,
+            "ref_lsd": self._ref_lsd,
+            "ref_bc": self._ref_bc,
+            "ref_ty": self._ref_ty,
+            "ref_tz": self._ref_tz,
+            "ref_tx": self._ref_tx,
+            "ref_wl": self._ref_wl,
+            "ref_dist": self._ref_dist,
+            "build_rc": self._build_rc,
+            "n_iter": self._n_iter,
+            "lm_iter": self._lm_iter,
+            "device": self._device,
+            "out_ed": self._out_ed,
+            "pn_y": self._pn_y,
+            "pn_z": self._pn_z,
+            "ps_y": self._ps_y,
+            "ps_z": self._ps_z,
+            "pg_y": self._pg_y,
+            "pg_z": self._pg_z,
+            "show_rings_check": self._show_rings_check,
+            "corrected_check": self._corrected_check,
+            "cal_r_bin": self._cal_r_bin,
+            "cal_eta_bin": self._cal_eta_bin,
+            "cal_azim": self._cal_azim,
+        }
+
+    def get_state(self, sidecar_stem: Optional[str] = None) -> dict:
+        """``sidecar_stem`` (if given) is the state file's path without its
+        extension. A fitted result that hasn't been exported via "Save JSON" is
+        written to ``<sidecar_stem>_calibration.json`` for the record and to
+        reseed the geometry fields on load — but is NOT reconstructed into a
+        live ``self._result`` object (there is no loader for that; re-running
+        Fit with the restored seed fields reproduces it)."""
+        state = {"fields": widgets_to_dict(self._state_widgets()),
+                 "loader": self._loader.get_state()}
+        if self._result is not None and sidecar_stem:
+            try:
+                import json
+                d = {k: v for k, v in vars(self._result).items()
+                     if not k.startswith("_") and not hasattr(v, "numpy")}
+                d.pop("residual_corr_map", None); d.pop("iter_history", None)
+                Path(f"{sidecar_stem}_calibration.json").write_text(
+                    json.dumps(d, indent=2, default=str))
+            except Exception:
+                pass
+        return state
+
+    def set_state(self, state: dict, sidecar_stem: Optional[str] = None) -> None:
+        apply_dict_to_widgets(self._state_widgets(), state.get("fields", {}))
+        self._loader.set_state(state.get("loader") or {})

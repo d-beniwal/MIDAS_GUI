@@ -20,7 +20,8 @@ from midas_gui.constants import (KERNELS, OUTPUT_FORMATS, ERROR_MODELS,
                            DEFAULT_OUTPUT_FORMAT, DEFAULT_ERROR_MODEL)
 from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_file,
                                geometry_fields_from_file,
-                               _NoScrollSpinBox, _NoScrollComboBox)
+                               _NoScrollSpinBox, _NoScrollComboBox,
+                               widgets_to_dict, apply_dict_to_widgets)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, DataLoaderPanel)
 from midas_gui.workers import BatchWorker, apply_q_uniform, DriftWorker, FolderMonitorWorker
@@ -128,6 +129,45 @@ class BatchTab(QtWidgets.QWidget):
 
     def set_mask_from_tab1(self, mask):
         self._loader.set_tab1_mask(mask)
+
+    # ── GUI state (Save/Load GUI State) ─────────────────────────────
+    def _state_widgets(self) -> dict:
+        return {
+            "use_tab2_btn": self._use_tab2_btn,
+            "use_json_btn": self._use_json_btn,
+            "json_ed": self._json_ed,
+            "kernel": self._kernel,
+            "r_bin": self._r_bin,
+            "e_bin": self._e_bin,
+            "azim": self._azim,
+            "var_check": self._var_check,
+            "err_model": self._err_model,
+            "q_check": self._q_check,
+            "q_min": self._q_min,
+            "q_max": self._q_max,
+            "q_bin": self._q_bin,
+            "mon_ed": self._mon_ed,
+            "drift_chk": self._drift_chk,
+            "drift_anchor_ed": self._drift_anchor_ed,
+            "drift_param": self._drift_param,
+            "drift_knots": self._drift_knots,
+            "drift_bayesian": self._drift_bayesian,
+            "out_ed": self._out_ed,
+            "fmt": self._fmt,
+        }
+
+    def get_state(self) -> dict:
+        return {
+            "fields": widgets_to_dict(self._state_widgets()),
+            "corr": self._corr_widget.get_state(),
+            "loader": self._loader.get_state(),
+        }
+
+    def set_state(self, state: dict):
+        self._loader.set_state(state.get("loader") or {})
+        apply_dict_to_widgets(self._state_widgets(), state.get("fields", {}))
+        self._corr_widget.set_state(state.get("corr") or {})
+        self._refresh_calib_values()
 
     def _build_ui(self):
         root = QtWidgets.QHBoxLayout(self)

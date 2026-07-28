@@ -1124,45 +1124,6 @@ class FolderMonitorWorker(QtCore.QThread):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  Corrected-ring worker (forward model: tilts + distortion)
-# ═════════════════════════════════════════════════════════════════════════════
-
-class CorrectedRingsWorker(QtCore.QThread):
-    finished = QtCore.pyqtSignal(object)   # list of (xs, ys) arrays, one per ring
-    failed   = QtCore.pyqtSignal(str)
-
-    def __init__(self, result, radii_px, parent=None):
-        super().__init__(parent)
-        self._result = result
-        self._radii_px = radii_px
-
-    def run(self):
-        try:
-            import torch
-            from midas_calibrate_v2.compat.to_integrate import spec_from_calibration_result
-            from midas_integrate_v2.forward.pixels import pixel_to_REta_from_spec
-
-            spec = spec_from_calibration_result(self._result, RBinSize=1.0)
-            NY, NZ = spec.NrPixelsY, spec.NrPixelsZ
-            step = max(2, min(NY, NZ) // 600)
-            ys = torch.arange(0, NY, step, dtype=torch.float64)
-            zs = torch.arange(0, NZ, step, dtype=torch.float64)
-            Z_grid, Y_grid = torch.meshgrid(zs, ys, indexing="ij")
-            with torch.no_grad():
-                out   = pixel_to_REta_from_spec(Y_grid, Z_grid, spec)
-                R_arr = out.R_px.numpy()
-            Y_arr = Y_grid.numpy(); Z_arr = Z_grid.numpy()
-            tol = step * 1.5
-            ring_data = []
-            for R_pred in self._radii_px:
-                msk = np.abs(R_arr - R_pred) < tol
-                ring_data.append((Y_arr[msk], Z_arr[msk]) if msk.any() else None)
-            self.finished.emit(ring_data)
-        except Exception:
-            self.failed.emit(traceback.format_exc())
-
-
-# ═════════════════════════════════════════════════════════════════════════════
 #  Tab 4 — Calibration refinement (autograd against integrated profile)
 # ═════════════════════════════════════════════════════════════════════════════
 

@@ -15,7 +15,8 @@ import numpy as np
 from PyQt5 import QtCore, QtWidgets
 import pyqtgraph as pg
 
-from midas_gui.helpers import _fspin, _twocol, _NoScrollSpinBox, _NoScrollComboBox
+from midas_gui.helpers import (_fspin, _twocol, _NoScrollSpinBox, _NoScrollComboBox,
+                               widgets_to_dict, apply_dict_to_widgets)
 from midas_gui.widgets import LossCurveViewer, LogPanel, DataLoaderPanel
 from midas_gui.workers import RefinementWorker, RefineCompareWorker
 from midas_gui import style as S
@@ -42,6 +43,29 @@ class RefinementTab(QtWidgets.QWidget):
 
     def set_mask_from_tab1(self, mask):
         self._loader.set_tab1_mask(mask)
+
+    # ── GUI state (Save/Load GUI State) ─────────────────────────────
+    def _state_widgets(self) -> dict:
+        return {
+            "start_tab2": self._start_tab2,
+            "start_refine": self._start_refine,
+            "loss_combo": self._loss_combo,
+            "p_bcy": self._p_bcy, "p_bcz": self._p_bcz, "p_lsd": self._p_lsd,
+            "p_ty": self._p_ty, "p_tz": self._p_tz, "p_wl": self._p_wl,
+            "opt_combo": self._opt_combo,
+            "lr": self._lr,
+            "iters": self._iters,
+            "rbin": self._rbin,
+        }
+
+    def get_state(self) -> dict:
+        return {"fields": widgets_to_dict(self._state_widgets()),
+                "loader": self._loader.get_state()}
+
+    def set_state(self, state: dict):
+        self._loader.set_state(state.get("loader") or {})
+        apply_dict_to_widgets(self._state_widgets(), state.get("fields", {}))
+        self._update_run_enabled()
 
     # ── UI ──────────────────────────────────────────────────────────
 

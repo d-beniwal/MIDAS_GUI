@@ -247,6 +247,50 @@ def simulate_rings(lattice: dict, sg: int, wavelength_A: float, lsd_um: float,
     return out
 
 
+def _tilt_matrix_np(tx_deg: float, ty_deg: float, tz_deg: float) -> np.ndarray:
+    """Pure-numpy ``Rx(tx) @ Ry(ty) @ Rz(tz)`` (degrees), matching the rotation
+    convention of ``midas_calibrate_v2.forward.geometry.build_tilt_matrix``."""
+    tx, ty, tz = math.radians(tx_deg), math.radians(ty_deg), math.radians(tz_deg)
+    cx, sx = math.cos(tx), math.sin(tx)
+    cy, sy = math.cos(ty), math.sin(ty)
+    cz, sz = math.cos(tz), math.sin(tz)
+    Rx = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]])
+    Ry = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]])
+    Rz = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]])
+    return Rx @ Ry @ Rz
+
+
+def tilted_ring_xy(two_theta_deg: float, tx: float, ty: float, tz: float,
+                    Lsd_um: float, bc_y: float, bc_z: float,
+                    pxY_um: float, pxZ_um: float, n: int = 400):
+    """Forward-project a diffraction ring at ``two_theta_deg`` through the tilt
+    geometry (tx/ty/tz, degrees) onto detector pixel coordinates.
+
+    Returns ``(Y_px, Z_px)`` arrays of length ``n`` tracing the ring. Reduces
+    exactly to the plain circle ``bc + r*(sin η, cos η)`` when tx=ty=tz=0, since
+    it inverts the same ray/tilt-plane geometry as
+    ``midas_integrate_v2.forward.pixels.pixel_to_REta_from_spec``.
+    """
+    eta = np.linspace(0.0, 2.0 * math.pi, n, endpoint=False)
+    tt = math.radians(two_theta_deg)
+    u = np.stack([
+        np.full_like(eta, math.cos(tt)),
+        -math.sin(tt) * np.sin(eta),
+        math.sin(tt) * np.cos(eta),
+    ], axis=1)                                       # (n, 3) unit ray directions
+    TRs = _tilt_matrix_np(tx, ty, tz)
+    n_hat = TRs[:, 0]
+    denom = u @ n_hat
+    denom = np.where(np.abs(denom) < 1e-12, 1e-12, denom)
+    t = Lsd_um * TRs[0, 0] / denom
+    off = t[:, None] * u - np.array([Lsd_um, 0.0, 0.0])
+    Yc = off @ TRs[:, 1]
+    Zc = off @ TRs[:, 2]
+    Y_px = bc_y - Yc / pxY_um
+    Z_px = bc_z + Zc / pxZ_um
+    return Y_px, Z_px
+
+
 def read_geometry(path: str | Path) -> dict:
     """Parse beam-centre / distance / pixel / wavelength from a calibration file.
 
@@ -557,6 +601,55 @@ class _LogStream(io.TextIOBase):
         pass
 
 
+# ── GUI-state serialization (Save/Load GUI State) ────────────────────────────────
+
+def widgets_to_dict(widgets: dict) -> dict:
+    """Snapshot a ``{key: widget}`` map into a plain JSON-able dict, by widget type:
+    spin boxes → ``.value()``, combo boxes → current text, line edits → ``.text()``,
+    checkable buttons → ``.isChecked()``. Unrecognized widget types are skipped."""
+    out = {}
+    for key, w in widgets.items():
+        if isinstance(w, QtWidgets.QAbstractSpinBox):
+            out[key] = w.value()
+        elif isinstance(w, QtWidgets.QComboBox):
+            out[key] = w.currentText()
+        elif isinstance(w, QtWidgets.QLineEdit):
+            out[key] = w.text()
+        elif isinstance(w, QtWidgets.QAbstractButton):
+            out[key] = w.isChecked()
+    return out
+
+
+def apply_dict_to_widgets(widgets: dict, data: dict) -> None:
+    """Inverse of :func:`widgets_to_dict`. Restores each field in its own
+    try/except (a stale or missing key can't abort the rest of the restore) and
+    blocks signals around each set, same convention as ``set_geometry``. Combo
+    boxes are matched by text; a value no longer present in the list is left
+    untouched rather than raising."""
+    for key, w in widgets.items():
+        if key not in data:
+            continue
+        val = data[key]
+        w.blockSignals(True)
+        try:
+            if isinstance(w, QtWidgets.QAbstractSpinBox):
+                w.setValue(val)
+            elif isinstance(w, QtWidgets.QComboBox):
+                idx = w.findText(str(val))
+                if idx >= 0:
+                    w.setCurrentIndex(idx)
+                elif w.isEditable():
+                    w.setEditText(str(val))
+            elif isinstance(w, QtWidgets.QLineEdit):
+                w.setText(str(val))
+            elif isinstance(w, QtWidgets.QAbstractButton):
+                w.setChecked(bool(val))
+        except Exception:
+            pass
+        finally:
+            w.blockSignals(False)
+
+
 # ── No-scroll spinboxes (prevent accidental wheel value changes) ────────────────
 
 class _NoScrollSpinBox(QtWidgets.QSpinBox):
@@ -585,10 +678,16 @@ class _NoScrollComboBox(QtWidgets.QComboBox):
         e.ignore()
 
 
-def _fspin(lo, hi, dec, val, suf=""):
+def _fspin(lo, hi, dec, val, suf="", step=None):
+    """``step`` (if given) fixes the up/down-arrow increment; omit it to keep the
+    default adaptive-decimal stepping used everywhere else in the GUI."""
     s = _NoScrollDoubleSpinBox()
     s.setRange(lo, hi); s.setDecimals(dec); s.setValue(val)
-    s.setStepType(QtWidgets.QAbstractSpinBox.AdaptiveDecimalStepType)
+    if step is None:
+        s.setStepType(QtWidgets.QAbstractSpinBox.AdaptiveDecimalStepType)
+    else:
+        s.setStepType(QtWidgets.QAbstractSpinBox.DefaultStepType)
+        s.setSingleStep(step)
     if suf:
         s.setSuffix(f"  {suf}")
     s.setMaximumWidth(104)   # keep numeric fields compact (don't stretch to fill forms)

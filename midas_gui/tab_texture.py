@@ -13,7 +13,8 @@ from PyQt5 import QtCore, QtWidgets
 import pyqtgraph as pg
 
 from midas_gui.helpers import (_load_image, _fspin, _twocol, _browse, _predict_ring_radii,
-                               is_h5, _NoScrollComboBox)
+                               is_h5, _NoScrollComboBox,
+                               widgets_to_dict, apply_dict_to_widgets)
 from midas_gui.constants import DEFAULT_NICKEL_FRAME0, DEFAULT_COLORMAP
 from midas_gui.widgets import LogPanel
 from midas_gui.workers import PoleFigureWorker
@@ -46,6 +47,27 @@ class TextureTab(QtWidgets.QWidget):
 
     def set_mask_from_tab1(self, mask):
         self._mask = mask
+
+    # ── GUI state (Save/Load GUI State) ─────────────────────────────
+    def _state_widgets(self) -> dict:
+        return {
+            "img_ed": self._img_ed,
+            "img_h5_ed": self._img_h5_ed,
+            "ring_combo": self._ring_combo,
+            "cap": self._cap,
+            "ebin": self._ebin,
+            "chi": self._chi, "phi": self._phi,
+        }
+
+    def get_state(self) -> dict:
+        return {"fields": widgets_to_dict(self._state_widgets())}
+
+    def set_state(self, state: dict):
+        fields = state.get("fields", {})
+        apply_dict_to_widgets(self._state_widgets(), fields)
+        img_path = fields.get("img_ed")
+        if img_path and Path(img_path).exists():
+            self._load_img()
 
     def _build_ui(self):
         root = QtWidgets.QHBoxLayout(self)

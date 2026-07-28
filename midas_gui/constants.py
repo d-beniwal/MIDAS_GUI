@@ -111,6 +111,16 @@ DEFAULT_LSD_UM     = 121_000.0 # µm
 DEFAULT_BC_Y       = 10.0      # px (test data beam centre)
 DEFAULT_BC_Z       = 10.0      # px
 
+# Data Viewer ▸ Ring simulation card: spin-box step size (up/down-arrow increment)
+# per field. Overridable via the per-user config key "viewer_steps"
+# (Preferences ▸ Data Viewer).
+DEFAULT_STEP_WAVELENGTH = 0.01   # Å      (λ)
+DEFAULT_STEP_TWO_THETA  = 1.0    # deg    (max 2θ)
+DEFAULT_STEP_LSD_MM     = 1.0    # mm     (Lsd)
+DEFAULT_STEP_PIXEL      = 0.1    # µm     (pixel size)
+DEFAULT_STEP_BC         = 1.0    # px     (BC_y / BC_z)
+DEFAULT_STEP_TILT       = 0.1    # deg    (ty / tz)
+
 # Photon energy ↔ wavelength: λ(Å) = HC_KEV_A / E(keV)
 HC_KEV_A = 12.398420
 
@@ -250,6 +260,15 @@ def _apply(cfg: dict) -> None:
     _set_num(geo, "bc_y", "DEFAULT_BC_Y")
     _set_num(geo, "bc_z", "DEFAULT_BC_Z")
 
+    # Data Viewer spin-box step sizes
+    steps = cfg.get("viewer_steps", {}) or {}
+    _set_num(steps, "wavelength", "DEFAULT_STEP_WAVELENGTH")
+    _set_num(steps, "two_theta", "DEFAULT_STEP_TWO_THETA")
+    _set_num(steps, "lsd_mm", "DEFAULT_STEP_LSD_MM")
+    _set_num(steps, "pixel", "DEFAULT_STEP_PIXEL")
+    _set_num(steps, "bc", "DEFAULT_STEP_BC")
+    _set_num(steps, "tilt", "DEFAULT_STEP_TILT")
+
     # pixel presets / K-edge foils — replace wholesale if provided (per-entry guard)
     def _pairs(items):
         out = []
@@ -367,6 +386,11 @@ _SHIPPED = {
         "pixel_presets": [list(p) for p in PIXEL_PRESETS],
         "k_edge_foils": [list(k) for k in K_EDGE_FOILS],
     },
+    "viewer_steps": {
+        "wavelength": DEFAULT_STEP_WAVELENGTH, "two_theta": DEFAULT_STEP_TWO_THETA,
+        "lsd_mm": DEFAULT_STEP_LSD_MM, "pixel": DEFAULT_STEP_PIXEL,
+        "bc": DEFAULT_STEP_BC, "tilt": DEFAULT_STEP_TILT,
+    },
     "materials": {n: dict(m) for n, m in MATERIALS.items()},
     "calibrants": {n: dict(_LATT[n]) for n in CALIBRANTS if n in _LATT},
     "devices": [dict(d) for d in DEFAULT_DEVICES],
@@ -390,8 +414,26 @@ def shipped_defaults() -> dict:
     return _copy.deepcopy(_SHIPPED)
 
 
+def reload_from_config() -> None:
+    """Reset every overlay-able global to its shipped default, then re-apply the
+    (possibly just-switched-to) active profile's config on top.
+
+    Plain re-running :func:`_apply` on a new config is not enough on its own:
+    ``_apply`` only *overlays* keys that are present, so a value the previous
+    profile overrode but the new profile doesn't mention would otherwise keep
+    the old profile's value instead of reverting to the shipped default. Used
+    by Preferences ▸ Profile switching (and by the "Reload config" menu item)
+    to refresh live ``DEFAULT_*`` globals without requiring a restart.
+    """
+    _apply(shipped_defaults())
+    try:
+        from midas_gui import settings as _settings
+        _apply(_settings.load_config(force=True))
+    except Exception:
+        pass
+
+
 try:
-    from midas_gui import settings as _settings
-    _apply(_settings.load_config())
+    reload_from_config()
 except Exception:
     pass

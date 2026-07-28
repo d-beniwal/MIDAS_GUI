@@ -49,6 +49,11 @@ def _effective_cfg() -> dict:
             "pixel_presets": [list(p) for p in C.PIXEL_PRESETS],
             "k_edge_foils": [list(k) for k in C.K_EDGE_FOILS],
         },
+        "viewer_steps": {
+            "wavelength": C.DEFAULT_STEP_WAVELENGTH, "two_theta": C.DEFAULT_STEP_TWO_THETA,
+            "lsd_mm": C.DEFAULT_STEP_LSD_MM, "pixel": C.DEFAULT_STEP_PIXEL,
+            "bc": C.DEFAULT_STEP_BC, "tilt": C.DEFAULT_STEP_TILT,
+        },
         "materials": mats,
         "calibrants": cals,
         "devices": [dict(d) for d in C.DEVICES],
@@ -81,8 +86,24 @@ class PreferencesDialog(QtWidgets.QDialog):
         info.setWordWrap(True); info.setStyleSheet("color:#aaa;font-size:11px")
         root.addWidget(info)
 
+        # ── profile selector ─────────────────────────────────────────────
+        prow = QtWidgets.QHBoxLayout()
+        prow.addWidget(QtWidgets.QLabel("Profile:"))
+        self._profile_combo = QtWidgets.QComboBox()
+        self._profile_combo.activated.connect(self._on_profile_switch)
+        prow.addWidget(self._profile_combo, 1)
+        for label, slot in (
+            ("New…", self._new_profile), ("Duplicate…", self._duplicate_profile),
+            ("Rename…", self._rename_profile), ("Delete", self._delete_profile),
+        ):
+            b = QtWidgets.QPushButton(label); b.clicked.connect(slot)
+            prow.addWidget(b)
+        root.addLayout(prow)
+        self._refresh_profile_combo()
+
         self._tabs = QtWidgets.QTabWidget(); root.addWidget(self._tabs, 1)
         self._build_geometry_tab()
+        self._build_viewer_steps_tab()
         self._build_paths_tab()
         self._mat_table = self._build_table_tab("Materials", _MAT_HEADERS)
         self._cal_table = self._build_table_tab("Calibrants", _MAT_HEADERS)
@@ -95,7 +116,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         # action row
         arow = QtWidgets.QHBoxLayout()
         for label, tip, slot in (
-            ("Save current GUI state", "Copy the Data Viewer's live λ / pixel / Lsd / "
+            ("Copy from Data Viewer", "Copy the Data Viewer's live λ / pixel / Lsd / "
              "beam centre into the geometry fields.", self._capture_state),
             ("Load config (JSON)…", "Load a JSON config file into this form.",
              self._load_json),
@@ -109,9 +130,10 @@ class PreferencesDialog(QtWidgets.QDialog):
         arow.addStretch(1)
         root.addLayout(arow)
 
-        loc = QtWidgets.QLabel(f"Local config: {settings.user_config_path()}")
-        loc.setStyleSheet("color:#888;font-size:10px"); loc.setWordWrap(True)
-        root.addWidget(loc)
+        self._loc_label = QtWidgets.QLabel()
+        self._loc_label.setStyleSheet("color:#888;font-size:10px"); self._loc_label.setWordWrap(True)
+        root.addWidget(self._loc_label)
+        self._update_profile_label()
 
         bb = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Save | QtWidgets.QDialogButtonBox.Cancel)
@@ -133,6 +155,34 @@ class PreferencesDialog(QtWidgets.QDialog):
         f.addRow("Beam centre y (px):", self._g_bcy)
         f.addRow("Beam centre z (px):", self._g_bcz)
         self._tabs.addTab(w, "Geometry")
+
+    def _build_viewer_steps_tab(self):
+        w = QtWidgets.QWidget(); v = QtWidgets.QVBoxLayout(w)
+        v.addWidget(QtWidgets.QLabel(
+            "Amount each field changes per click of its up/down arrows, in the "
+            "Data Viewer's Ring simulation card."))
+        f = QtWidgets.QFormLayout()
+
+        def step_spin(dec, lo=1e-6, hi=1e6):
+            s = QtWidgets.QDoubleSpinBox()
+            s.setRange(lo, hi); s.setDecimals(dec); s.setFixedWidth(110)
+            return s
+
+        self._st_wl   = step_spin(5)
+        self._st_2t   = step_spin(3)
+        self._st_lsd  = step_spin(4)
+        self._st_px   = step_spin(3)
+        self._st_bc   = step_spin(3)
+        self._st_tilt = step_spin(4)
+        f.addRow("λ step (Å):", self._st_wl)
+        f.addRow("max 2θ step (°):", self._st_2t)
+        f.addRow("Lsd step (mm):", self._st_lsd)
+        f.addRow("Pixel size step (µm):", self._st_px)
+        f.addRow("BC_y / BC_z step (px):", self._st_bc)
+        f.addRow("ty / tz step (°):", self._st_tilt)
+        v.addLayout(f)
+        v.addStretch(1)
+        self._tabs.addTab(w, "Data Viewer")
 
     def _build_paths_tab(self):
         w = QtWidgets.QWidget(); f = QtWidgets.QFormLayout(w)
@@ -331,6 +381,13 @@ class PreferencesDialog(QtWidgets.QDialog):
         self._g_lsd.setText(self._um_to_mm_text(geo.get("lsd_um", "")))   # store µm, show mm
         self._g_bcy.setText(str(geo.get("bc_y", "")))
         self._g_bcz.setText(str(geo.get("bc_z", "")))
+        steps = cfg.get("viewer_steps", {}) or {}
+        self._st_wl.setValue(float(steps.get("wavelength", C.DEFAULT_STEP_WAVELENGTH) or C.DEFAULT_STEP_WAVELENGTH))
+        self._st_2t.setValue(float(steps.get("two_theta", C.DEFAULT_STEP_TWO_THETA) or C.DEFAULT_STEP_TWO_THETA))
+        self._st_lsd.setValue(float(steps.get("lsd_mm", C.DEFAULT_STEP_LSD_MM) or C.DEFAULT_STEP_LSD_MM))
+        self._st_px.setValue(float(steps.get("pixel", C.DEFAULT_STEP_PIXEL) or C.DEFAULT_STEP_PIXEL))
+        self._st_bc.setValue(float(steps.get("bc", C.DEFAULT_STEP_BC) or C.DEFAULT_STEP_BC))
+        self._st_tilt.setValue(float(steps.get("tilt", C.DEFAULT_STEP_TILT) or C.DEFAULT_STEP_TILT))
         paths = cfg.get("paths", {})
         for key, ed in self._paths.items():
             ed.setText(str(paths.get(key, "") or ""))
@@ -403,9 +460,15 @@ class PreferencesDialog(QtWidgets.QDialog):
             geo["lsd_um"] *= 1000.0          # mm display → µm stored
         geo["pixel_presets"] = self._pairs(self._px_table)
         geo["k_edge_foils"] = self._pairs(self._ke_table)
+        viewer_steps = {
+            "wavelength": self._st_wl.value(), "two_theta": self._st_2t.value(),
+            "lsd_mm": self._st_lsd.value(), "pixel": self._st_px.value(),
+            "bc": self._st_bc.value(), "tilt": self._st_tilt.value(),
+        }
         paths = {k: ed.text().strip() for k, ed in self._paths.items() if ed.text().strip()}
         return {
             "geometry": geo,
+            "viewer_steps": viewer_steps,
             "materials": self._mat_dict(self._mat_table),
             "calibrants": self._mat_dict(self._cal_table),
             "devices": self._device_list(self._dev_table),
@@ -430,6 +493,108 @@ class PreferencesDialog(QtWidgets.QDialog):
             p, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select file")
         if p:
             edit.setText(p)
+
+    # ── profile management ────────────────────────────────────────────
+    def _update_profile_label(self):
+        self._loc_label.setText(
+            f"Profile '{settings.active_profile()}': {settings.user_config_path()}")
+
+    def _refresh_profile_combo(self):
+        self._profile_combo.blockSignals(True)
+        self._profile_combo.clear()
+        self._profile_combo.addItems(settings.list_profiles())
+        idx = self._profile_combo.findText(settings.active_profile())
+        if idx >= 0:
+            self._profile_combo.setCurrentIndex(idx)
+        self._profile_combo.blockSignals(False)
+
+    def _reload_after_profile_change(self):
+        """Common tail for every profile-management action: refresh live
+        constants, repopulate the form, sync the combo/label, and nudge tab
+        visibility live (other settings still need a restart)."""
+        C.reload_from_config()
+        self._populate(_effective_cfg())
+        self._refresh_profile_combo()
+        self._update_profile_label()
+        try:
+            if self._mw is not None and hasattr(self._mw, "apply_tab_visibility"):
+                self._mw.apply_tab_visibility()
+        except Exception:
+            pass
+
+    def _on_profile_switch(self, idx: int):
+        name = self._profile_combo.itemText(idx)
+        if name == settings.active_profile():
+            return
+        if QtWidgets.QMessageBox.question(
+                self, "Switch profile",
+                f"Switch to profile '{name}'? Any unsaved edits in this dialog "
+                "will be discarded.",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.Yes) != QtWidgets.QMessageBox.Yes:
+            self._refresh_profile_combo()
+            return
+        try:
+            settings.set_active_profile(name)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Switch failed", str(e))
+            self._refresh_profile_combo()
+            return
+        self._reload_after_profile_change()
+        QtWidgets.QMessageBox.information(
+            self, "Profile switched",
+            f"Now using profile '{name}'. Most values apply immediately; a few "
+            "(e.g. spin-box step sizes) only take effect after a restart.")
+
+    def _new_profile(self):
+        name, ok = QtWidgets.QInputDialog.getText(self, "New profile", "Profile name:")
+        if not ok or not name.strip():
+            return
+        try:
+            settings.create_profile(name.strip(), seed_cfg=C.shipped_defaults())
+            settings.set_active_profile(name.strip())
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Create failed", str(e)); return
+        self._reload_after_profile_change()
+
+    def _duplicate_profile(self):
+        base = self._profile_combo.currentText()
+        name, ok = QtWidgets.QInputDialog.getText(
+            self, "Duplicate profile",
+            f"New profile name (copies the current form, based on '{base}'):")
+        if not ok or not name.strip():
+            return
+        try:
+            settings.create_profile(name.strip(), seed_cfg=self._assemble())
+            settings.set_active_profile(name.strip())
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Duplicate failed", str(e)); return
+        self._reload_after_profile_change()
+
+    def _rename_profile(self):
+        old = self._profile_combo.currentText()
+        new, ok = QtWidgets.QInputDialog.getText(self, "Rename profile", "New name:", text=old)
+        if not ok or not new.strip() or new.strip() == old:
+            return
+        try:
+            settings.rename_profile(old, new.strip())
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Rename failed", str(e)); return
+        self._refresh_profile_combo()
+        self._update_profile_label()
+
+    def _delete_profile(self):
+        name = self._profile_combo.currentText()
+        if QtWidgets.QMessageBox.question(
+                self, "Delete profile", f"Delete profile '{name}'? This cannot be undone.",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No) != QtWidgets.QMessageBox.Yes:
+            return
+        try:
+            settings.delete_profile(name)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Delete failed", str(e)); return
+        self._reload_after_profile_change()
 
     def _capture_state(self):
         try:
@@ -456,7 +621,7 @@ class PreferencesDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.critical(self, "Load failed", str(e)); return
         # merge over the effective snapshot so missing sections keep sensible values
         base = _effective_cfg()
-        for k in ("geometry", "materials", "calibrants", "devices", "paths", "ui"):
+        for k in ("geometry", "viewer_steps", "materials", "calibrants", "devices", "paths", "ui"):
             if k in cfg:
                 base[k] = cfg[k]
         self._populate(base)

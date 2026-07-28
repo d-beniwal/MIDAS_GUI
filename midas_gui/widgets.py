@@ -814,6 +814,27 @@ class CorrectionFlagsWidget(QtWidgets.QGroupBox):
             sa = SolidAngleCorrection()
         return pol, sa
 
+    # ── GUI state (Save/Load GUI State) ─────────────────────────────
+    def get_state(self) -> dict:
+        return {
+            "polar_check": self.polar_check.isChecked(),
+            "pol_fraction": self.pol_fraction.value(),
+            "pol_plane": self.pol_plane.value(),
+            "solid_check": self.solid_check.isChecked(),
+        }
+
+    def set_state(self, state: dict):
+        if not state:
+            return
+        if "pol_fraction" in state:
+            self.pol_fraction.setValue(float(state["pol_fraction"]))
+        if "pol_plane" in state:
+            self.pol_plane.setValue(float(state["pol_plane"]))
+        if "polar_check" in state:
+            self.polar_check.setChecked(bool(state["polar_check"]))
+        if "solid_check" in state:
+            self.solid_check.setChecked(bool(state["solid_check"]))
+
 
 class FieldSelector(QtWidgets.QGroupBox):
     """Compact reusable dark / bright / background field picker.
@@ -1030,6 +1051,46 @@ class FieldSelector(QtWidgets.QGroupBox):
             return "divide"
         return "divide" if self._mode.currentIndex() == 0 else "subtract"
 
+    # ── GUI state (Save/Load GUI State) ─────────────────────────────
+    def get_state(self) -> dict:
+        st = {
+            "checked": self.isChecked(),
+            "path": self._path_ed.text(),
+            "dataset": self._ds_combo.currentText(),
+            "start": self._start.value(),
+            "end": self._end.value(),
+        }
+        if self._mode is not None:
+            st["mode"] = self._mode.currentIndex()
+        return st
+
+    def set_state(self, state: dict):
+        """Restore path/range/mode and re-compute the field if it was enabled —
+        the "auto re-trigger this tab's own load pipeline" behavior applied to
+        dark/bright/background fields specifically."""
+        if not state:
+            return
+        path = state.get("path", "")
+        if path:
+            self._path_ed.setText(path)
+        ds = state.get("dataset")
+        if ds:
+            self._ds_combo.setEditText(ds)
+        self._update_frame_limit()
+        # Widen the range if needed so a saved value isn't silently clamped to 0
+        # when the file couldn't be probed yet (e.g. path not found at restore time).
+        hi = max(self._start.maximum(), int(state.get("start", 0)), int(state.get("end", 0)))
+        self._start.setMaximum(hi); self._end.setMaximum(hi)
+        if "start" in state:
+            self._start.setValue(int(state["start"]))
+        if "end" in state:
+            self._end.setValue(int(state["end"]))
+        if self._mode is not None and "mode" in state:
+            self._mode.setCurrentIndex(int(state["mode"]))
+        self.setChecked(bool(state.get("checked", False)))
+        if self.isChecked() and path:
+            self._compute()
+
 
 class MaskSelector(QtWidgets.QGroupBox):
     """Multiple mask sources unioned into one composite mask.
@@ -1158,6 +1219,23 @@ class MaskSelector(QtWidgets.QGroupBox):
     def _refresh(self):
         n = len(self._sources)
         self._status.setText(f"{n} mask source(s)" if n else "No mask.")
+
+    # ── GUI state (Save/Load GUI State) ─────────────────────────────
+    def get_state(self) -> dict:
+        """Serializes file/folder sources only — the "tab1" source is owned
+        and re-supplied at runtime by the tab via :meth:`set_tab1_mask`."""
+        return {"sources": [{"kind": e["kind"], "path": e["path"]}
+                             for e in self._sources if e["kind"] != "tab1"]}
+
+    def set_state(self, state: dict):
+        if not state:
+            return
+        for e in [e for e in self._sources if e["kind"] != "tab1"]:
+            self._remove(e)
+        for s in state.get("sources", []):
+            kind, path = s.get("kind"), s.get("path")
+            if kind and path:
+                self._add_source(kind, path)
 
 
 class IntensityStatsPanel(QtWidgets.QGroupBox):
@@ -1889,6 +1967,53 @@ class DataLoaderPanel(QtWidgets.QWidget):
 
     def is_monitoring(self) -> bool:
         return bool(self._monitor_btn and self._monitor_btn.isChecked())
+
+    # ── GUI state (Save/Load GUI State) ─────────────────────────────
+    def get_state(self) -> dict:
+        st = {
+            "path": self._path_ed.text(),
+            "dataset": self._ds_combo.currentText(),
+            "dark": self._dark_sel.get_state(),
+            "bright": self._bright_sel.get_state(),
+            "background": self._bg_sel.get_state(),
+            "mask": self._mask_sel.get_state(),
+        }
+        if self._mode == "stream":
+            st["fr_start"] = self._fr_start.value()
+            st["fr_end"] = self._fr_end.value()
+            st["fr_stride"] = self._fr_stride.value()
+        else:
+            st["frame_index"] = self._frame_spin.value()
+        if getattr(self, "_pv_ed", None) is not None:
+            st["live_pv"] = self._pv_ed.currentText()
+        return st
+
+    def set_state(self, state: dict):
+        """Restores path/frame/field/mask sub-state, re-triggering the panel's own
+        load pipeline via :meth:`set_path` — the one central place that implements
+        "auto re-load path-backed data" for every tab that embeds this panel. A
+        saved live-PV name is restored into the field but a live connection is
+        never auto-started (that's a stateful, non-idempotent action)."""
+        if not state:
+            return
+        path = state.get("path", "")
+        if path:
+            self.set_path(path, dataset=state.get("dataset"), load=True)
+        if self._mode == "stream":
+            if "fr_start" in state:
+                self._fr_start.setValue(int(state["fr_start"]))
+            if "fr_end" in state:
+                self._fr_end.setValue(int(state["fr_end"]))
+            if "fr_stride" in state:
+                self._fr_stride.setValue(int(state["fr_stride"]))
+        elif "frame_index" in state and self._nframes:
+            self.set_frame(int(state["frame_index"]))
+        self._dark_sel.set_state(state.get("dark") or {})
+        self._bright_sel.set_state(state.get("bright") or {})
+        self._bg_sel.set_state(state.get("background") or {})
+        self._mask_sel.set_state(state.get("mask") or {})
+        if getattr(self, "_pv_ed", None) is not None and state.get("live_pv"):
+            self._pv_ed.setEditText(state["live_pv"])
 
 
 class LossCurveViewer(QtWidgets.QWidget):

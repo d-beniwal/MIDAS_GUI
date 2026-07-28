@@ -12,7 +12,8 @@ def test_user_config_path_per_platform(monkeypatch):
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setenv("XDG_CONFIG_HOME", "/tmp/xdg_home_test")
     p = settings.user_config_path()
-    assert p.name == "config.json" and p.parent.name == "midas_gui"
+    # active profile's file, under <config dir>/profiles/
+    assert p.name == "Default.json" and p.parent.name == "profiles"
     assert str(p).startswith("/tmp/xdg_home_test")
 
 
@@ -22,8 +23,10 @@ def test_save_reload_reset_roundtrip(tmp_path, monkeypatch):
     settings.save_user_config({"geometry": {"wavelength_A": 0.271}})
     assert cfgfile.is_file()
     assert settings.reload()["geometry"]["wavelength_A"] == 0.271
+    # reset writes an empty overlay rather than deleting the profile's file, so
+    # the profile itself stays discoverable via list_profiles().
     settings.reset_user_config()
-    assert not cfgfile.is_file()
+    assert cfgfile.is_file()
     assert settings.reload() == {}
 
 

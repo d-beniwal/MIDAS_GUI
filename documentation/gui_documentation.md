@@ -3,7 +3,10 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-07-24 (image-viewer + radial-profile zoom/pan fix)
+**Last updated:** 2026-07-27 (User profiles in Preferences — create/switch/rename/
+duplicate/delete named default sets; File ▸ Save/Load GUI State — capture and
+restore every tab's live fields, with sidecar files for in-progress mask/
+calibration data)
 
 > **Maintenance:** keep this document in sync with the code — whenever the workflow
 > or a tab's controls change, update the relevant section here in the same change.
@@ -32,6 +35,7 @@
 13. [Common UI Conventions](#13-common-ui-conventions)
 14. [Packaging, Deployment & Diagnostics](#14-packaging-deployment--diagnostics)
 15. [Configuration & Defaults](#15-configuration--defaults)
+16. [File ▸ Save/Load GUI State](#16-file--saveload-gui-state)
 
 ---
 
@@ -202,11 +206,21 @@ Overlays simulated Debye-Scherrer rings to check geometry.
   is on the Calibrate and PDF tabs. The **px** label is likewise clickable — a menu
   of common detectors (GE 200 µm, Varex 150 µm, Pilatus 172 µm, Eiger 75 µm) sets
   the pixel size (also on the Calibrate tab, where it sets both pxY and pxZ).
+- Every field in this card steps by a fixed amount per up/down-arrow click
+  (λ 0.01 Å, max 2θ 1°, Lsd 1 mm, pixel 0.1 µm, BC_y/BC_z 1 px, ty/tz 0.1°) —
+  customizable from **Settings ▸ Preferences ▸ Data Viewer**.
+- **ty / tz** (detector tilt about the Y/Z axes, degrees) sit right below
+  BC_y/BC_z — when non-zero, the simulated rings are forward-projected through
+  the tilt geometry instead of drawn as plain circles, so the overlay shows the
+  same non-circular ring shape a tilted detector actually produces. Leaving
+  both at 0° reproduces the previous plain-circle rendering exactly. (Rotation
+  about the beam axis, `tx`, leaves a full ring's shape unchanged, so it isn't
+  exposed here.)
 - **Show rings / Labels** toggles; **Simulate rings** is a **live toggle** (not a
   one-shot click) — while on, the overlay + hkl table recompute automatically
   whenever material, lattice constants, space group, or geometry (λ/Lsd/px/max 2θ)
-  change. Beam-centre edits still just reposition the existing rings (their radii
-  don't depend on BC).
+  change. Beam-centre and ty/tz edits still just reposition the existing rings
+  (their 2θ values don't depend on BC or tilt).
 - **→ Send geometry to Calibrate** copies λ, pixel size, Lsd and beam centre into the
   Calibrate tab's detector + seed fields (the Calibrate tab has a matching
   **← Data Viewer** button that pulls the same values).
@@ -301,7 +315,10 @@ splitter, to make it easier to grab.
 
 **Purpose:** identify and exclude bad pixels. The final mask is a uint8 array
 (1 = bad) broadcast to Tabs 2, 3, 4, 5. Browsing an image or a mask loads it
-immediately.
+immediately. Pointing the **Image** field at an `.h5` file reveals a **Dataset**
+dropdown (auto-populated with the file's datasets and shapes, preferring a
+≥2-D dataset) — the same pattern used by the Stack field below it and by the
+Data Loader panels elsewhere in the app.
 
 ### Section 1 · Threshold mask (always applied)
 `pixel ≤ lower | pixel > upper`. The upper bound auto-fills from the data type on load
@@ -365,8 +382,9 @@ tx/ty/tz**). **Load calibration file…** (top of the Detector card) reads a MID
 and fills λ, pixel size, and the seed BC + Lsd — a fast way to start from a previous
 calibration or a known geometry. (The synthetic test data ships
 `test_data/calibration_synthetic.{json,txt,poni}` as a ready example.) **← Data Viewer**
-(next to *Load calibration file…*) pulls λ, pixel size, Lsd and beam centre straight from
-the Data Viewer tab into the same fields. A **Feed result back to seed** checkbox (on by
+(next to *Load calibration file…*) pulls λ, pixel size, Lsd, beam centre and the Data
+Viewer's ty/tz tilt fields straight from the Data Viewer tab into the same fields (BC
+and Lsd land in the seed card; ty/tz land in the seed tilt fields). A **Feed result back to seed** checkbox (on by
 default) copies the optimized BC / Lsd / tilts / distortion of each run back into the
 seed fields, so a follow-up run starts from the previous solution. *Seed tilts are
 honoured by the Four-stage / advanced pipelines; the One-shot / First-time paths seed
@@ -401,6 +419,14 @@ ring-finding); the preview updates instantly.
 ### Pick BC / Pick Ring
 Click the image to seed the beam centre (single click) or fit a ring (≥3 clicks); the
 Pick Ring points/fit are drawn in blue, distinct from the amber Simulate-rings overlay.
+
+### Predicted-ring overlay (image toolbar)
+After a run, the calibrant's predicted ring radii are drawn in **lime** with a
+red/yellow beam-centre marker. **Show rings** toggles the overlay; **Corrected**
+redraws the same lime rings reshaped through the fitted tilt (tx/ty/tz) instead
+of as plain circles, so you can see how much the geometry actually deviates
+from an untilted detector — the rings still look like the same thin curves,
+just bent, rather than a separate scattered point-cloud.
 
 ### Run / Abort
 **Run Calibration** launches the worker; **Abort** terminates it and frees the slot so
@@ -837,10 +863,33 @@ One per-user file, auto-located per OS:
 defaults are used. Sharing between machines/users is done by exporting/importing a
 JSON file (below) — copy it wherever you like.
 
+### Profiles — Settings ▸ Preferences… ▸ Profile row
+The top of the Preferences dialog has a **Profile** row —
+`Profile: [combo ▼]  [New…] [Duplicate…] [Rename…] [Delete]` — for keeping several
+independent sets of defaults (e.g. one per beamline) and switching between them:
+- Each profile is its own config file under `<config dir>/profiles/<name>.json`; the
+  active one is remembered in `<config dir>/profile_meta.json`. Existing single-config
+  installs are migrated transparently into a profile named **Default** the first time
+  this runs — no data is lost.
+- **New…** seeds a blank profile from the shipped built-in defaults.
+- **Duplicate…** seeds a new profile from whatever is currently shown in the dialog
+  (including unsaved edits), then switches to it.
+- **Rename… / Delete** — Delete refuses to remove the last remaining profile; deleting
+  the active profile switches to another one first.
+- Switching profiles (via the combo) prompts to confirm if the dialog has unsaved
+  edits, then reloads the dialog's fields and the live `DEFAULT_*` globals from the
+  new profile — most values apply immediately; a few (e.g. viewer step sizes set at
+  widget-construction time) need a restart, and you're offered one.
+- The "Local config: …" label under the row becomes **"Profile '\<name\>': \<path\>"**
+  so you always know which file you're editing.
+
 ### Editing — Settings ▸ Preferences…
 The **Settings** menu opens **Preferences…**, a dialog whose tabs are **pre-filled
 with the full shipped defaults** so you edit from a complete starting point:
 - **Geometry** — λ, pixel size, Lsd, beam centre.
+- **Data Viewer** — the up/down-arrow step size for each field in the Data Viewer's
+  Ring simulation card (λ, max 2θ, Lsd, pixel size, BC_y/BC_z, ty/tz). Shipped
+  defaults: 0.01 Å, 1°, 1 mm, 0.1 µm, 1 px, 0.1° respectively.
 - **Paths** — default data / calibration / output files & folders.
 - **Materials** / **Calibrants** — add / remove / modify (name + lattice + SG).
 - **Devices** — the detector devices offered in the Data Viewer's **Live Data**
@@ -874,6 +923,8 @@ next launch**.
                 "bc_y": 10.0, "bc_z": 10.0,
                 "pixel_presets": [["Eiger", 75.0], ["Pilatus", 172.0]],
                 "k_edge_foils": [["Au", 80.725], ["Pb", 88.005]] },
+  "viewer_steps": { "wavelength": 0.01, "two_theta": 1.0, "lsd_mm": 1.0,
+                    "pixel": 0.1, "bc": 1.0, "tilt": 0.1 },
   "materials":  { "Ni (FCC)": {"a":3.5238,"b":3.5238,"c":3.5238,"alpha":90,"beta":90,"gamma":90,"sg":225} },
   "calibrants": { "CeO2": {"a":5.4116,"b":5.4116,"c":5.4116,"alpha":90,"beta":90,"gamma":90,"sg":225} },
   "devices": [ {"name": "s20varex1", "prefix": "20IDFF:", "pva_suffix": "Pva1:Image"} ],
@@ -901,5 +952,49 @@ next launch**.
   startup.
 - A minimal template lives at `documentation/config.example.json`; the step-by-step
   guide is `documentation/config_gui.md`.
+
+---
+
+## 16. File ▸ Save/Load GUI State
+
+Beyond a saved **profile** of defaults (§15), the **File** menu can capture the
+**live, in-progress state of every tab** — every field you've typed or picked, across
+all 10 tabs — to one JSON file, so a session can be closed and resumed later exactly
+where it left off.
+
+- **File ▸ Save GUI State…** (`Ctrl+S`) — pick a destination (default
+  `midas_session.json`) and every tab's current fields are written to it. A completion
+  dialog lists which tabs (if any) failed to save.
+- **File ▸ Load GUI State…** (`Ctrl+O`) — asks for confirmation (loading overwrites
+  every tab's current values), then pick a previously saved file. A completion dialog
+  reports any tabs present in the file that no longer exist, or that failed to restore.
+  The tab that was active at save time is re-selected.
+
+### What is restored automatically
+Every field (text boxes, spin boxes, checkboxes, combo/dropdown selections) in every
+tab is restored as typed. In addition, **path-backed data is reloaded from disk**, the
+same way it loads when you type/browse to a path by hand — images, masks-by-path,
+dark/bright/background frames, and HDF5 datasets all re-read their file automatically
+after a state load (guarded so a moved/deleted file is skipped quietly rather than
+popping a warning).
+
+### What is *not* re-run
+Loading a state **does not re-run any long-running pipeline** — Calibrate's Fit,
+Batch Integrate, the PDF transform, and Calibration Refinement all keep their inputs
+restored but require **one manual click of the tab's own Run/Fit button** to reproduce
+their result. This keeps a load fast and avoids silently kicking off a multi-minute
+job in the background.
+
+### Sidecar files for in-progress derived data
+Two tabs can hold computed data that hasn't been exported to a file of its own yet —
+a drawn/computed **mask** (Mask Builder) and a just-fit **calibration result**
+(Calibrate). Saving a GUI state writes small sidecar files next to it so this
+in-progress work isn't silently lost:
+- `<state file stem>_mask.tif` — the current in-memory mask, if any; reloaded
+  automatically on the next Load.
+- `<state file stem>_calibration.json` — the last fit result's flattened fields, kept
+  for the record and to reseed the manual/seed geometry fields. This does **not**
+  reconstruct the in-memory fitted result object (it isn't a plain, re-loadable
+  structure) — re-run **Fit** after loading to reproduce it.
 
 *For bugs or questions, see the MIDAS GUI repository.*

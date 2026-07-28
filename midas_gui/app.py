@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import faulthandler
+import inspect
+import json
 import sys
 import traceback
 from datetime import datetime
@@ -173,6 +175,7 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             _log(f"Geometry hand-off wiring failed:\n{traceback.format_exc()}")
 
+        self._build_file_menu()
         self._build_menu()
         self.statusBar().showMessage(
             "Tip: mask → calibrate → (refine) → batch integrate")
@@ -202,6 +205,125 @@ class MainWindow(QtWidgets.QMainWindow):
         idx = self._tabs.indexOf(current) if current is not None else -1
         if idx >= 0:
             self._tabs.setCurrentIndex(idx)
+
+    # ── File menu: Save/Load GUI State ──────────────────────────────
+    def _build_file_menu(self):
+        m = self.menuBar().addMenu("&File")
+        act_save = m.addAction("Save GUI State…")
+        act_save.setShortcut(QtGui.QKeySequence("Ctrl+S"))
+        act_save.triggered.connect(self._save_gui_state_dialog)
+        act_load = m.addAction("Load GUI State…")
+        act_load.setShortcut(QtGui.QKeySequence("Ctrl+O"))
+        act_load.triggered.connect(self._load_gui_state_dialog)
+
+    def _save_gui_state_dialog(self):
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save GUI State", "midas_session.json", "JSON (*.json)")
+        if not path:
+            return
+        self.save_gui_state(path)
+
+    def _load_gui_state_dialog(self):
+        if QtWidgets.QMessageBox.question(
+                self, "Load GUI State",
+                "Loading a saved session will overwrite the current values in "
+                "every tab. Continue?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No) != QtWidgets.QMessageBox.Yes:
+            return
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Load GUI State", "", "JSON (*.json);;All files (*)")
+        if not path:
+            return
+        self.load_gui_state(path)
+
+    @staticmethod
+    def _accepts_sidecar_stem(fn) -> bool:
+        try:
+            return "sidecar_stem" in inspect.signature(fn).parameters
+        except (TypeError, ValueError):
+            return False
+
+    def save_gui_state(self, path):
+        """Dump every tab's ``get_state()`` into one JSON file. Tabs that hold
+        derived data not yet exported to a file of its own (MaskTab, CalibrationTab)
+        write small sidecars named after ``path`` so nothing in-progress is lost."""
+        stem = str(Path(path).with_suffix(""))
+        current = self._tabs.currentWidget()
+        state = {"__midas_gui_state__": True, "version": 1, "tabs": {}}
+        for widget, name, _always in self._tab_specs:
+            if widget is current:
+                state["active_tab"] = name
+        errors = []
+        for widget, name, _always in self._tab_specs:
+            get_state = getattr(widget, "get_state", None)
+            if get_state is None:
+                continue
+            try:
+                if self._accepts_sidecar_stem(get_state):
+                    state["tabs"][name] = get_state(sidecar_stem=stem)
+                else:
+                    state["tabs"][name] = get_state()
+            except Exception:
+                _log(f"Save GUI state failed for tab '{name}':\n{traceback.format_exc()}")
+                errors.append(name)
+        try:
+            Path(path).write_text(json.dumps(state, indent=2))
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Save failed", str(e))
+            return
+        msg = f"Saved GUI state to:\n{path}"
+        if errors:
+            msg += "\n\nThe following tabs could not be saved:\n" + "\n".join(errors)
+        QtWidgets.QMessageBox.information(self, "Save GUI State", msg)
+
+    def load_gui_state(self, path):
+        """Restore every tab's fields from a file written by :meth:`save_gui_state`.
+        Path-backed fields (images, masks, dark/bright/background, HDF5 datasets)
+        are re-loaded automatically; long-running pipelines (Fit, Batch Integrate,
+        PDF transform, Refinement) are not re-run — their inputs are restored so a
+        single click of the tab's own Run/Fit button reproduces the result."""
+        try:
+            data = json.loads(Path(path).read_text())
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Load failed", str(e))
+            return
+        if not data.get("__midas_gui_state__"):
+            QtWidgets.QMessageBox.critical(
+                self, "Load failed", "This file is not a MIDAS GUI state file.")
+            return
+        stem = str(Path(path).with_suffix(""))
+        name_to_widget = {name: widget for widget, name, _always in self._tab_specs}
+        errors, skipped = [], []
+        for name, tstate in data.get("tabs", {}).items():
+            widget = name_to_widget.get(name)
+            set_state = getattr(widget, "set_state", None) if widget is not None else None
+            if set_state is None:
+                skipped.append(name)
+                continue
+            try:
+                if self._accepts_sidecar_stem(set_state):
+                    set_state(tstate, sidecar_stem=stem)
+                else:
+                    set_state(tstate)
+            except Exception:
+                _log(f"Load GUI state failed for tab '{name}':\n{traceback.format_exc()}")
+                errors.append(name)
+        active = data.get("active_tab")
+        widget = name_to_widget.get(active) if active else None
+        idx = self._tabs.indexOf(widget) if widget is not None else -1
+        if idx >= 0:
+            self._tabs.setCurrentIndex(idx)
+        msg = (f"Loaded GUI state from:\n{path}\n\n"
+               "Path-backed fields (images, masks, dark/bright/background) were "
+               "reloaded. Fit / Batch Integrate / PDF transform / Refinement "
+               "results are not recomputed — re-run each tab's own action to "
+               "reproduce them.")
+        if skipped:
+            msg += "\n\nTabs in the file no longer present:\n" + "\n".join(skipped)
+        if errors:
+            msg += "\n\nThe following tabs failed to restore:\n" + "\n".join(errors)
+        QtWidgets.QMessageBox.information(self, "Load GUI State", msg)
 
     def _build_menu(self):
         """Settings menu: preferences, open config folder, reload."""

@@ -16,7 +16,8 @@ from PyQt5 import QtCore, QtWidgets
 import pyqtgraph as pg
 
 from midas_gui.helpers import (_load_image, _fspin, _twocol, _browse, is_h5,
-                               _NoScrollComboBox, make_kedge_label)
+                               _NoScrollComboBox, make_kedge_label,
+                               widgets_to_dict, apply_dict_to_widgets)
 from midas_gui.constants import DEFAULT_NICKEL_FRAME0, DEFAULT_PDF_IQ_FILE
 from midas_gui.widgets import LogPanel
 from midas_gui.workers import PDFWorker
@@ -68,6 +69,43 @@ class PDFTab(QtWidgets.QWidget):
 
     def set_mask_from_tab1(self, mask):
         self._mask = mask
+
+    # ── GUI state (Save/Load GUI State) ─────────────────────────────
+    def _state_widgets(self) -> dict:
+        return {
+            "source": self._source,
+            "img_ed": self._img_ed,
+            "img_h5_ed": self._img_h5_ed,
+            "iq_ed": self._iq_ed,
+            "comp_ed": self._comp_ed,
+            "rho0": self._rho0,
+            "wl": self._wl,
+            "compton": self._compton,
+            "refine": self._refine,
+            "bg_order": self._bg_order,
+            "r_min_phys": self._r_min_phys,
+            "steps": self._steps,
+            "qmin": self._qmin, "qmax": self._qmax,
+            "rmin": self._rmin, "rmax": self._rmax,
+            "rstep": self._rstep,
+            "window": self._window,
+            "binning": self._binning,
+            "out_fn": self._out_fn,
+            "mid_fn": self._mid_fn,
+        }
+
+    def get_state(self) -> dict:
+        return {"fields": widgets_to_dict(self._state_widgets())}
+
+    def set_state(self, state: dict):
+        fields = state.get("fields", {})
+        apply_dict_to_widgets(self._state_widgets(), fields)
+        self._on_source_changed()
+        self._on_refine_toggled()
+        img_path = fields.get("img_ed")
+        if img_path and Path(img_path).exists():
+            self._load_img()
+        self._update_run_enabled()
 
     # ── UI ───────────────────────────────────────────────────────────────────
     def _build_ui(self):

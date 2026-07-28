@@ -13,6 +13,7 @@ import numpy as np
 from PyQt5 import QtCore, QtWidgets
 
 from midas_gui import style as S
+from midas_gui.helpers import widgets_to_dict, apply_dict_to_widgets
 
 
 class ExportTab(QtWidgets.QWidget):
@@ -29,6 +30,22 @@ class ExportTab(QtWidgets.QWidget):
     def set_mask_from_tab1(self, mask):
         self._mask = mask
         self._refresh()
+
+    # ── GUI state (Save/Load GUI State) ─────────────────────────────
+    def _state_widgets(self) -> dict:
+        return {
+            "chk_json": self._chk_json,
+            "chk_ps": self._chk_ps,
+            "chk_mask": self._chk_mask,
+            "chk_log": self._chk_log,
+            "out_ed": self._out_ed,
+        }
+
+    def get_state(self) -> dict:
+        return {"fields": widgets_to_dict(self._state_widgets())}
+
+    def set_state(self, state: dict):
+        apply_dict_to_widgets(self._state_widgets(), state.get("fields", {}))
 
     def _build_ui(self):
         root = QtWidgets.QHBoxLayout(self)
