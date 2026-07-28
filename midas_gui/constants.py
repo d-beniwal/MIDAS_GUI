@@ -110,6 +110,7 @@ DEFAULT_PIXEL_UM   = 75.0      # µm
 DEFAULT_LSD_UM     = 121_000.0 # µm
 DEFAULT_BC_Y       = 10.0      # px (test data beam centre)
 DEFAULT_BC_Z       = 10.0      # px
+DEFAULT_RING_WIDTH = 2.0       # px (simulated-ring pen width on the image)
 
 # Data Viewer ▸ Ring simulation card: spin-box step size (up/down-arrow increment)
 # per field. Overridable via the per-user config key "viewer_steps"

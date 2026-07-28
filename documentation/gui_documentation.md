@@ -3,10 +3,11 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-07-27 (User profiles in Preferences — create/switch/rename/
-duplicate/delete named default sets; File ▸ Save/Load GUI State — capture and
-restore every tab's live fields, with sidecar files for in-progress mask/
-calibration data)
+**Last updated:** 2026-07-28 (Data Viewer: tilt-aware radial profile without a
+calibration file, ring 2θ-range/thickness/live-button fixes, Save calibration as
+JSON/params/PONI, radial-plot X-axis floored at 0 and zoom preserved across
+parameter changes, Ctrl+S overwrites the loaded/saved session file with a new
+Ctrl+Shift+S "Save As")
 
 > **Maintenance:** keep this document in sync with the code — whenever the workflow
 > or a tab's controls change, update the relevant section here in the same change.
@@ -183,7 +184,21 @@ integration** that maps every pixel through the calibrated tilts and distortion 
 same core as Batch Integrate) — so ring positions/intensities are geometry-correct, not
 just distance-from-beam-centre. The card's status line reports which mode is active. The
 binning geometry is built once and reused across frames (a fast `hard` kernel keeps the
-preview responsive); without a full-geometry file, the fast circle binning is used.
+preview responsive); without a full-geometry file, the fast circle binning is used. If no
+calibration file is loaded but the Ring-simulation card's **ty/tz** tilt fields are
+non-zero, the radial integration still runs the tilt-aware MIDAS engine using a geometry
+built live from those fields (BC, Lsd, pixel size, wavelength) — so dialing in tilts here
+without a calibration file already produces a tilt-corrected profile, not just a
+tilt-shaped ring overlay.
+
+**Save JSON / Save params (.txt) / Save PONI** (below the loader) export whatever
+geometry is currently in effect — the loaded calibration file if any, otherwise the
+one synthesized from the Ring-simulation widgets above — as a calibration file you can
+reload here, on the Calibrate tab, or in Batch Integrate. **Save params (.txt)** writes
+a standalone MIDAS `paramstest.txt`; **Save PONI** writes a pyFAI `.poni` (note: PONI's
+Rot1–3 convention cannot represent MIDAS's tx/ty/tz tilts, so tilts are **not** included
+in a `.poni` export — use JSON or `.txt` to keep them). Clicking any of the three before
+an image is loaded warns instead of writing a file (there is no detector size to write).
 
 ### Intensity range card (radial integration)
 | Field | Description |
@@ -216,11 +231,16 @@ Overlays simulated Debye-Scherrer rings to check geometry.
   both at 0° reproduces the previous plain-circle rendering exactly. (Rotation
   about the beam axis, `tx`, leaves a full ring's shape unchanged, so it isn't
   exposed here.)
+- **Ring thickness** spin box (0.5–10 px) sets the line width of the simulated-ring
+  overlay on the image; redraws immediately as you change it.
 - **Show rings / Labels** toggles; **Simulate rings** is a **live toggle** (not a
-  one-shot click) — while on, the overlay + hkl table recompute automatically
-  whenever material, lattice constants, space group, or geometry (λ/Lsd/px/max 2θ)
-  change. Beam-centre and ty/tz edits still just reposition the existing rings
-  (their 2θ values don't depend on BC or tilt).
+  one-shot click) — while on, the button turns **green** as a visual cue, and the
+  overlay + hkl table recompute automatically whenever material, lattice constants,
+  space group, or geometry (λ/Lsd/px/max 2θ) change. Beam-centre and ty/tz edits
+  still just reposition the existing rings (their 2θ values don't depend on BC or
+  tilt). Rings are drawn out to the full **max 2θ** you set, regardless of how far
+  that places them from the beam centre (rings landing off-canvas simply aren't
+  visible — they aren't silently dropped at some fixed pixel-radius cutoff).
 - **→ Send geometry to Calibrate** copies λ, pixel size, Lsd and beam centre into the
   Calibrate tab's detector + seed fields (the Calibrate tab has a matching
   **← Data Viewer** button that pulls the same values).
@@ -297,17 +317,26 @@ disabled); when **Top-N pixels** is active it shows those pixels' statistics.
 
 ### Radial integration plot (bottom-right)
 Below the image is a live **azimuthal average about the beam centre** (`R bin`,
-`Integrate`, and an `Auto` toggle that recomputes on frame/BC/mask change). It is a
-simple geometry-free radial average (flat detector, no tilt/distortion). **Clicking a
-radius on the plot draws the matching ring (magenta) on the image.** Axis units switch
-between R (px) / 2θ / Q. The Y-axis lower bound defaults to **0.9x the current data
-minimum**; once you manually change the Y range (drag, wheel-zoom, or the axis
-context menu), that range is kept for the rest of the session instead of being
-recomputed on every update. **Pan and zoom are bounded to the current profile** (a
-margin around the data's X/Y extent) so you cannot drag or scroll off into empty
-space; this recomputes on every new profile / axis-unit switch. The splitter handle
-above this panel (between it and the image view) is wider than a default Qt
-splitter, to make it easier to grab.
+`Integrate`, and an `Auto` toggle that recomputes on frame/BC/mask change) — geometry-free
+circle binning by default, or the tilt/distortion-aware MIDAS engine when a full
+geometry is in effect (a loaded calibration file, or non-zero ty/tz in the
+Ring-simulation card — see the Calibration card above). Peak/ring markers overlaid on
+the plot use the ring's true 2θ, so they line up with the profile in either mode.
+**Clicking a radius on the plot draws the matching ring (magenta) on the image.** Axis
+units switch between R (px) / 2θ / Q; the **X-axis lower bound defaults to 0**.
+
+**The default view always auto-fits the current profile's X/Y extent** — it never gets
+stuck showing a stale or unrelated range from an earlier profile. If you manually
+zoom or pan (drag, wheel-zoom, box-zoom, or the axis context menu), that exact view is
+**preserved across parameter changes** (new frame, changed BC/tilt/Lsd, etc.) instead of
+snapping back to full range every time the profile updates — the curve redraws in
+place under your current zoom. A manual zoom is only cleared when it would no longer
+make sense: switching the X-axis unit (R/2θ/Q) drops the remembered X range, and
+toggling **Log Y** drops the remembered Y range (both because the old numbers belong to
+a different scale). **Pan and zoom are always bounded to the current profile's extent**
+(a margin around its X/Y range) so you cannot drag or scroll off into empty space. The
+splitter handle above this panel (between it and the image view) is wider than a
+default Qt splitter, to make it easier to grab.
 
 ---
 
@@ -962,9 +991,12 @@ Beyond a saved **profile** of defaults (§15), the **File** menu can capture the
 all 10 tabs — to one JSON file, so a session can be closed and resumed later exactly
 where it left off.
 
-- **File ▸ Save GUI State…** (`Ctrl+S`) — pick a destination (default
-  `midas_session.json`) and every tab's current fields are written to it. A completion
-  dialog lists which tabs (if any) failed to save.
+- **File ▸ Save GUI State…** (`Ctrl+S`) — the first time in a session, prompts for a
+  destination (default `midas_session.json`); every subsequent `Ctrl+S` **silently
+  overwrites that same file** (no dialog) as long as the session hasn't loaded/saved
+  a different file since. **File ▸ Save GUI State As…** (`Ctrl+Shift+S`) always prompts
+  for a destination, and makes *that* file the target for future plain `Ctrl+S`. Either
+  way, a completion dialog lists which tabs (if any) failed to save.
 - **File ▸ Load GUI State…** (`Ctrl+O`) — asks for confirmation (loading overwrites
   every tab's current values), then pick a previously saved file. A completion dialog
   reports any tabs present in the file that no longer exist, or that failed to restore.

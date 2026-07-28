@@ -81,6 +81,7 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle(f"MIDAS GUI v{__version__}")
         self.resize(1600, 950)
+        self._gui_state_path: Optional[str] = None   # last loaded/saved GUI-state path
         self._build_ui()
 
     def _build_ui(self):
@@ -212,13 +213,25 @@ class MainWindow(QtWidgets.QMainWindow):
         act_save = m.addAction("Save GUI State…")
         act_save.setShortcut(QtGui.QKeySequence("Ctrl+S"))
         act_save.triggered.connect(self._save_gui_state_dialog)
+        act_save_as = m.addAction("Save GUI State As…")
+        act_save_as.setShortcut(QtGui.QKeySequence("Ctrl+Shift+S"))
+        act_save_as.triggered.connect(self._save_gui_state_as_dialog)
         act_load = m.addAction("Load GUI State…")
         act_load.setShortcut(QtGui.QKeySequence("Ctrl+O"))
         act_load.triggered.connect(self._load_gui_state_dialog)
 
     def _save_gui_state_dialog(self):
+        """Ctrl+S: overwrite the file this session last loaded/saved from, if
+        any; otherwise fall back to a Save-As prompt (first save)."""
+        if self._gui_state_path:
+            self.save_gui_state(self._gui_state_path)
+            return
+        self._save_gui_state_as_dialog()
+
+    def _save_gui_state_as_dialog(self):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save GUI State", "midas_session.json", "JSON (*.json)")
+            self, "Save GUI State", self._gui_state_path or "midas_session.json",
+            "JSON (*.json)")
         if not path:
             return
         self.save_gui_state(path)
@@ -272,6 +285,7 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Save failed", str(e))
             return
+        self._gui_state_path = path
         msg = f"Saved GUI state to:\n{path}"
         if errors:
             msg += "\n\nThe following tabs could not be saved:\n" + "\n".join(errors)
@@ -292,6 +306,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(
                 self, "Load failed", "This file is not a MIDAS GUI state file.")
             return
+        self._gui_state_path = path
         stem = str(Path(path).with_suffix(""))
         name_to_widget = {name: widget for widget, name, _always in self._tab_specs}
         errors, skipped = [], []

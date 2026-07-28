@@ -96,6 +96,10 @@ def stylesheet(checkmark_svg: str, up_arrow_svg: str = "", down_arrow_svg: str =
     }}
     QPushButton#primary:hover {{ border: 1px solid {HOVER}; }}
     QPushButton#primary:disabled {{ background: #555; color: {MUTED}; border-color: #4a4a4a; }}
+    QPushButton#primary:checked {{
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #3fae4a, stop:1 #2e8a38);
+        border: 1px solid #256e2c;
+    }}
 
     /* ── Inputs (light fields) ────────────────────────────────── */
     QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QPlainTextEdit, QTextEdit {{

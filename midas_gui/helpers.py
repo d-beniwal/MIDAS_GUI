@@ -379,6 +379,42 @@ def read_geometry(path: str | Path) -> dict:
     return out
 
 
+def write_poni(geom: dict, path: str | Path) -> None:
+    """Write a pyFAI ``.poni`` file from a normalized geometry dict (the same
+    shape ``geometry_fields_from_file``/``get_geometry`` produce: ``Lsd``,
+    ``BC_y``, ``BC_z``, ``pxY``, ``pxZ`` in µm/px, ``wavelength_A`` in Å).
+
+    Inverts the MIDAS convention used by ``read_geometry``/
+    ``geometry_fields_from_file`` (``BC_y = Poni1/pxY``, ``BC_z = Poni2/pxZ``).
+    MIDAS ``tx``/``ty``/``tz`` tilts have no equivalent in PONI's Rot1-3
+    convention and are **not** exported (Rot1/2/3 are written as 0.0) —
+    matching the existing reader's documented limitation.
+    """
+    px_y_um = float(geom["pxY"])
+    px_z_um = float(geom.get("pxZ") or geom["pxY"])
+    px1_m, px2_m = px_y_um * 1e-6, px_z_um * 1e-6
+    distance_m = float(geom["Lsd"]) * 1e-6
+    poni1 = float(geom["BC_y"]) * px1_m
+    poni2 = float(geom["BC_z"]) * px2_m
+    wavelength_m = float(geom["wavelength_A"]) * 1e-10
+    ny, nz = geom.get("NrPixelsY"), geom.get("NrPixelsZ")
+    max_shape = f"[{int(nz)}, {int(ny)}]" if (ny and nz) else "null"
+    lines = [
+        "# MIDAS GUI — Data Viewer calibration export",
+        "poni_version: 2.1",
+        "Detector: Detector",
+        f'Detector_config: {{"pixel1": {px1_m!r}, "pixel2": {px2_m!r}, "max_shape": {max_shape}}}',
+        f"Distance: {distance_m!r}",
+        f"Poni1: {poni1!r}",
+        f"Poni2: {poni2!r}",
+        "Rot1: 0.0",
+        "Rot2: 0.0",
+        "Rot3: 0.0",
+        f"Wavelength: {wavelength_m!r}",
+    ]
+    Path(path).write_text("\n".join(lines) + "\n")
+
+
 def _build_spec(result, r_bin: float, eta_bin: float):
     from midas_calibrate_v2.compat.to_integrate import spec_from_calibration_result
     return spec_from_calibration_result(result, RBinSize=r_bin, EtaBinSize=eta_bin)

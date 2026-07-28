@@ -18,7 +18,7 @@ from PyQt5 import QtCore, QtWidgets
 import pyqtgraph as pg
 
 from midas_gui.constants import (MATERIALS, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM,
-                           DEFAULT_LSD_UM, DEFAULT_BC_Y, DEFAULT_BC_Z,
+                           DEFAULT_LSD_UM, DEFAULT_BC_Y, DEFAULT_BC_Z, DEFAULT_RING_WIDTH,
                            DEFAULT_NICKEL_H5, DEFAULT_STEP_WAVELENGTH,
                            DEFAULT_STEP_TWO_THETA, DEFAULT_STEP_LSD_MM,
                            DEFAULT_STEP_PIXEL, DEFAULT_STEP_BC, DEFAULT_STEP_TILT)
@@ -26,7 +26,8 @@ from midas_gui.helpers import (_fspin, _NoScrollSpinBox, _browse,
                          simulate_rings, read_geometry, geometry_fields_from_file,
                          _spec_from_result_ns, _NoScrollComboBox,
                          make_kedge_label, make_pixel_label, tilted_ring_xy,
-                         widgets_to_dict, apply_dict_to_widgets)
+                         widgets_to_dict, apply_dict_to_widgets,
+                         write_poni, write_standalone_paramstest)
 from midas_gui.widgets import PickableImageViewer, ProfileViewer, DataLoaderPanel
 from midas_gui.workers import ProjectionWorker, build_integration_context, integrate_frame
 from midas_gui import style as S
@@ -172,6 +173,7 @@ class DataViewerTab(QtWidgets.QWidget):
             "tz": self._tz,
             "show_rings": self._show_rings,
             "show_labels": self._show_labels,
+            "ring_width": self._ring_width,
             "topn_spin": self._topn_spin,
             "rad_r_bin": self._rad_r_bin,
             "rad_auto": self._rad_auto,
@@ -274,6 +276,25 @@ class DataViewerTab(QtWidgets.QWidget):
         self._calib_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         self._calib_lbl.setWordWrap(True)
         calc.body.addWidget(self._calib_lbl)
+        save_row = QtWidgets.QHBoxLayout(); save_row.setSpacing(4)
+        self._save_json_btn = QtWidgets.QPushButton("Save JSON")
+        self._save_json_btn.setToolTip(
+            "Save the current geometry (manual fields, or the loaded calibration's\n"
+            "full geometry) as a calibration.json.")
+        self._save_json_btn.clicked.connect(lambda: self._save_calibration("json"))
+        self._save_params_btn = QtWidgets.QPushButton("Save params (.txt)")
+        self._save_params_btn.setToolTip(
+            "Save the current geometry as a MIDAS parameter file (paramstest.txt).")
+        self._save_params_btn.clicked.connect(lambda: self._save_calibration("paramstest"))
+        self._save_poni_btn = QtWidgets.QPushButton("Save PONI")
+        self._save_poni_btn.setToolTip(
+            "Save the current geometry as a pyFAI .poni file.\n"
+            "Note: ty/tz tilts have no PONI equivalent and are not exported.")
+        self._save_poni_btn.clicked.connect(lambda: self._save_calibration("poni"))
+        save_row.addWidget(self._save_json_btn)
+        save_row.addWidget(self._save_params_btn)
+        save_row.addWidget(self._save_poni_btn)
+        calc.body.addLayout(save_row)
         lv.addWidget(calc)
 
         # ── Intensity range mask card ──
@@ -379,6 +400,10 @@ class DataViewerTab(QtWidgets.QWidget):
         self._show_labels.toggled.connect(self._set_rings_visible)
         ctl.addWidget(self._show_rings); ctl.addWidget(self._show_labels); ctl.addStretch(1)
         ring.body.addLayout(ctl)
+        self._ring_width = _fspin(0.5, 10.0, 1, DEFAULT_RING_WIDTH, "px")
+        self._ring_width.setToolTip("Line thickness of the simulated rings on the image.")
+        self._ring_width.valueChanged.connect(self._redraw_rings)
+        ring.body.addLayout(S.Form().row(("Ring thickness:", self._ring_width)))
         self._sim_btn = S.primary_btn("Simulate rings")
         self._sim_btn.setCheckable(True)
         self._sim_btn.setToolTip(
@@ -634,15 +659,16 @@ class DataViewerTab(QtWidgets.QWidget):
         ty, tz = self._ty.value(), self._tz.value()
         tilted = abs(ty) > 1e-9 or abs(tz) > 1e-9
         px = self._px.value()
-        NZ, NY = self._cur.shape
-        max_r = math.hypot(NY, NZ)
         th = np.linspace(0, 2 * math.pi, 400)
-        pen = pg.mkPen("#f0c060", width=1.3, style=QtCore.Qt.DotLine)
+        pen = pg.mkPen("#f0c060", width=self._ring_width.value(), style=QtCore.Qt.DotLine)
         vis_r = self._show_rings.isChecked()
         vis_l = self._show_labels.isChecked() and vis_r
         for r in rings:
             rad = r["radius_px"]
-            if not (0 < rad < max_r):
+            # Only drop non-physical radii — the ViewBox already clips rings
+            # that extend past the visible image, so there's no need to cap
+            # at the image diagonal (that silently hid high-2theta rings).
+            if not (rad > 0 and math.isfinite(rad)):
                 continue
             if tilted:
                 ys, zs = tilted_ring_xy(r["two_theta_deg"], 0.0, ty, tz,
@@ -727,17 +753,41 @@ class DataViewerTab(QtWidgets.QWidget):
         else:
             self._profile_view.set_ring_markers([])
 
+    def _effective_calib_geom(self) -> Optional[dict]:
+        """Geometry used for radial integration: the loaded calibration's full
+        geometry if present, otherwise one synthesized from the Ring-simulation
+        widgets when a tilt is set — so the profile stays tilt-consistent with
+        the on-image ring overlay even without a loaded calibration file."""
+        if self._calib_geom is not None:
+            return self._calib_geom
+        ty, tz = self._ty.value(), self._tz.value()
+        if abs(ty) < 1e-9 and abs(tz) < 1e-9:
+            return None
+        if self._cur is None:
+            return None
+        nz, ny = self._cur.shape
+        px = self._px.value()
+        return {
+            "wavelength_A": self._wl.value(), "Lsd": self._lsd_um(),
+            "BC_y": self._bcy.value(), "BC_z": self._bcz.value(),
+            "tx": 0.0, "ty": ty, "tz": tz,
+            "pxY": px, "pxZ": px,
+            "NrPixelsY": ny, "NrPixelsZ": nz, "distortion": {},
+        }
+
     def _radial_integrate(self):
         """Azimuthal average of the current frame.
 
-        With a loaded calibration file the full geometry (tilts + distortion) is used
-        via the MIDAS integration engine; otherwise a fast circle-binning about the
-        beam centre is used."""
+        With a loaded calibration file, or a tilt dialled into the Ring-simulation
+        card, the full geometry (tilts + distortion) is used via the MIDAS
+        integration engine; otherwise a fast circle-binning about the beam centre
+        is used."""
         if self._cur is None:
             return
-        if self._calib_geom is not None:
+        geom = self._effective_calib_geom()
+        if geom is not None:
             try:
-                r_axis, prof = self._midas_radial(self._cur)
+                r_axis, prof = self._midas_radial(self._cur, geom)
             except Exception:
                 import traceback
                 self._calib_lbl.setText(
@@ -756,13 +806,15 @@ class DataViewerTab(QtWidgets.QWidget):
             lsd_um=self._lsd_um(), px_um=self._px.value())
         self._refresh_profile_markers()
 
-    def _midas_radial(self, img):
-        """Radial profile via the MIDAS engine, honouring the loaded calibration's
-        tilts + distortion (not just concentric circles). The binning geometry is
-        built once per (geometry, R-bin, image shape, mask) and reused across
-        frames; only the per-frame integration runs on a frame change."""
+    def _midas_radial(self, img, g):
+        """Radial profile via the MIDAS engine, honouring the given geometry's
+        tilts + distortion (not just concentric circles). ``g`` is either the
+        loaded calibration's geometry or one synthesized from the live Ring-sim
+        widgets (see ``_effective_calib_geom``). The binning geometry is built
+        once per (geometry, R-bin, image shape, mask) and reused across frames;
+        only the per-frame integration runs on a frame change."""
+        import json
         import torch
-        g = self._calib_geom
         r_bin = max(float(self._rad_r_bin.value()), 0.1)
         eta_bin = 5.0
         nz, ny = img.shape
@@ -775,7 +827,15 @@ class DataViewerTab(QtWidgets.QWidget):
         # cached binning context is rebuilt whenever the mask actually changes
         # (e.g. when the intensity-range thresholds are edited).
         mask_fp = None if mask is None else hash(mask.tobytes())
-        sig = (id(g), round(r_bin, 4), (nz, ny), mask_fp)
+        # Value-based signature (not id(g)) — a synthesized geometry is a fresh
+        # dict on every call, so identity would defeat the cache entirely.
+        sig = (round(float(g["Lsd"]), 3), round(float(g["BC_y"]), 3),
+               round(float(g["BC_z"]), 3), round(float(g.get("tx") or 0.0), 4),
+               round(float(g.get("ty") or 0.0), 4), round(float(g.get("tz") or 0.0), 4),
+               round(float(g["pxY"]), 4), round(float(g.get("pxZ") or g["pxY"]), 4),
+               round(float(g["wavelength_A"]), 6), g.get("NrPixelsY"), g.get("NrPixelsZ"),
+               round(r_bin, 4), (nz, ny), mask_fp,
+               json.dumps(g.get("distortion") or {}, sort_keys=True))
         if self._calib_ctx is None or self._calib_ctx_sig != sig:
             spec = _spec_from_result_ns(
                 r_bin, eta_bin, NrPixelsY=ny, NrPixelsZ=nz,
@@ -906,6 +966,64 @@ class DataViewerTab(QtWidgets.QWidget):
             import traceback
             QtWidgets.QMessageBox.critical(self, "Calibration load error",
                                            traceback.format_exc()[:500])
+
+    def _export_geom(self) -> Optional[dict]:
+        """Full geometry dict for calibration export: the loaded calibration's
+        geometry if present (carries tilts/distortion/detector size from the
+        file), otherwise one built from the current manual / Ring-simulation
+        fields (tx=0, distortion empty)."""
+        if self._calib_geom is not None:
+            return dict(self._calib_geom)
+        if self._cur is None:
+            return None
+        nz, ny = self._cur.shape
+        px = self._px.value()
+        return {
+            "wavelength_A": self._wl.value(), "Lsd": self._lsd_um(),
+            "BC_y": self._bcy.value(), "BC_z": self._bcz.value(),
+            "tx": 0.0, "ty": self._ty.value(), "tz": self._tz.value(),
+            "pxY": px, "pxZ": px, "NrPixelsY": ny, "NrPixelsZ": nz,
+            "distortion": {},
+        }
+
+    def _save_calibration(self, kind: str):
+        """Save the current geometry (see ``_export_geom``) as a calibration
+        file — JSON (GUI bare-key format), MIDAS paramstest.txt, or pyFAI .poni."""
+        geom = self._export_geom()
+        if geom is None:
+            QtWidgets.QMessageBox.warning(self, "No geometry", "Load data first.")
+            return
+        specs = {
+            "json": ("Save calibration.json", "calibration.json", "JSON (*.json)"),
+            "paramstest": ("Save MIDAS parameter file", "paramstest.txt", "Text (*.txt)"),
+            "poni": ("Save calibration.poni", "calibration.poni", "PONI (*.poni)"),
+        }
+        title, default_name, filt = specs[kind]
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, title, default_name, filt)
+        if not path:
+            return
+        try:
+            if kind == "json":
+                import json
+                Path(path).write_text(json.dumps(geom, indent=2, default=str))
+            elif kind == "paramstest":
+                from types import SimpleNamespace
+                ns = SimpleNamespace(
+                    NrPixelsY=int(geom["NrPixelsY"]), NrPixelsZ=int(geom["NrPixelsZ"]),
+                    pxY=float(geom["pxY"]), pxZ=float(geom.get("pxZ") or geom["pxY"]),
+                    Lsd=float(geom["Lsd"]), BC_y=float(geom["BC_y"]), BC_z=float(geom["BC_z"]),
+                    tx=float(geom.get("tx") or 0.0), ty=float(geom.get("ty") or 0.0),
+                    tz=float(geom.get("tz") or 0.0), wavelength_A=float(geom["wavelength_A"]),
+                    distortion=geom.get("distortion") or {},
+                    _calibrant_name=self._mat.currentText())
+                write_standalone_paramstest(ns, path)
+            elif kind == "poni":
+                write_poni(geom, path)
+        except Exception:
+            import traceback
+            QtWidgets.QMessageBox.critical(self, "Save failed", traceback.format_exc()[:500])
+            return
+        QtWidgets.QMessageBox.information(self, "Saved", f"Calibration saved to:\n{path}")
 
     def _autofill_imask_max(self):
         """Default the intensity-mask upper bound to max(99.99th percentile, 100000)."""

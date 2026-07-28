@@ -480,11 +480,10 @@ class ProfileViewer(QtWidgets.QWidget):
         bar.addWidget(QtWidgets.QLabel("X:"))
         self._xaxis = _NoScrollComboBox()
         self._xaxis.addItems(["R (px)", "2θ (°)", "Q (Å⁻¹)"])
-        self._xaxis.currentIndexChanged.connect(self._replot)
-        self._xaxis.currentIndexChanged.connect(self._clear_pick_line)
+        self._xaxis.currentIndexChanged.connect(self._on_xaxis_changed)
         bar.addWidget(self._xaxis)
         self._logy = QtWidgets.QCheckBox("Log Y")
-        self._logy.toggled.connect(self._replot)
+        self._logy.toggled.connect(self._on_logy_toggled)
         bar.addWidget(self._logy)
         bar.addStretch(1)
         self._stat = QtWidgets.QLabel("")
@@ -497,9 +496,12 @@ class ProfileViewer(QtWidgets.QWidget):
         self._plot.setLabel("left", "Mean intensity")
         self._plot.setLabel("bottom", "R (px)")
         self._plot.showGrid(x=True, y=True, alpha=0.2)
-        self._manual_ymin: Optional[float] = None
-        self._suspend_yrange_track = False
-        self._plot.getPlotItem().getViewBox().sigYRangeChanged.connect(self._on_yrange_changed)
+        self._user_xrange: Optional[tuple] = None
+        self._user_yrange: Optional[tuple] = None
+        self._suspend_range_track = False
+        vb0 = self._plot.getPlotItem().getViewBox()
+        vb0.sigXRangeChanged.connect(self._on_xrange_changed)
+        vb0.sigYRangeChanged.connect(self._on_yrange_changed)
         self._band_lo = pg.PlotDataItem([], [], pen=None)
         self._band_hi = pg.PlotDataItem([], [], pen=None)
         self._band = pg.FillBetweenItem(self._band_lo, self._band_hi,
@@ -546,6 +548,18 @@ class ProfileViewer(QtWidgets.QWidget):
             return 4 * math.pi * math.sin(two_theta / 2) / wl
         return r_px
 
+    def _on_xaxis_changed(self, *_):
+        """Switching R/2θ/Q changes the X scale entirely — a remembered X zoom
+        from the old unit is meaningless in the new one, so drop it."""
+        self._user_xrange = None
+        self._clear_pick_line()
+        self._replot()
+
+    def _on_logy_toggled(self, *_):
+        """Log/linear Y have unrelated scales — drop any remembered Y zoom."""
+        self._user_yrange = None
+        self._replot()
+
     def _replot(self):
         if self._r_px is None:
             return
@@ -564,53 +578,67 @@ class ProfileViewer(QtWidgets.QWidget):
             self._plot.setLabel("left", "log₁₀(intensity)")
         else:
             self._plot.setLabel("left", "Mean intensity")
-        self._curve.setData(x, y)
 
-        # Uncertainty band (linear scale only)
-        if self._sigma is not None and not log:
-            self._band_lo.setData(x, self._prof - self._sigma)
-            self._band_hi.setData(x, self._prof + self._sigma)
-            self._band.setCurves(self._band_lo, self._band_hi)
-            self._band.setVisible(True)
-        else:
-            self._band.setVisible(False)
+        # Everything below can trigger incidental view-range signals (pyqtgraph
+        # autorange on setData, setLimits() clamping the current view, etc.) —
+        # suspend user-zoom tracking for all of it so only genuine mouse-driven
+        # pan/zoom ever gets remembered as "the user zoomed".
+        self._suspend_range_track = True
+        try:
+            self._curve.setData(x, y)
 
-        fin = y[np.isfinite(y)]
-        ymin = ymax = None
-        if fin.size:
-            if self._manual_ymin is not None:
-                ymin = self._manual_ymin
+            # Uncertainty band (linear scale only)
+            if self._sigma is not None and not log:
+                self._band_lo.setData(x, self._prof - self._sigma)
+                self._band_hi.setData(x, self._prof + self._sigma)
+                self._band.setCurves(self._band_lo, self._band_hi)
+                self._band.setVisible(True)
             else:
-                ymin = float(fin.min() * 0.9) if not log else 1.0
-            ymax = float(fin.max()) * 1.05
-            self._suspend_yrange_track = True
-            self._plot.setYRange(ymin, ymax, padding=0)
-            self._suspend_yrange_track = False
-        x_arr = np.asarray(x)
-        if x_arr.size:
-            self._plot.setXRange(float(x_arr.min()), float(x_arr.max()), padding=0.02)
-        self._stat.setText(f"{len(self._r_px)} bins | max={np.nanmax(self._prof):.1f}")
-        if x_arr.size and ymin is not None:
-            self._suspend_yrange_track = True
-            self._apply_view_limits(float(x_arr.min()), float(x_arr.max()), ymin, ymax)
-            self._suspend_yrange_track = False
+                self._band.setVisible(False)
 
-        # Ring markers redrawn LAST (after setXRange) so they always appear
-        for ln in self._ring_lines:
-            self._plot.removeItem(ln)
-        self._ring_lines.clear()
-        if self._ring_radii_px:
-            pen = pg.mkPen("#f0c060", width=1.5, style=QtCore.Qt.DotLine)
-            lsd = self._ring_lsd or self._lsd
-            px  = self._ring_px  or self._px
-            wl  = self._ring_wl  or self._wl
-            for r in self._ring_radii_px:
-                x_pos = self._r_to_x(r, idx, lsd, px, wl)
-                if x_pos is None:
-                    continue
-                ln = pg.InfiniteLine(pos=x_pos, angle=90, pen=pen, movable=False)
-                self._plot.addItem(ln)
-                self._ring_lines.append(ln)
+            fin = y[np.isfinite(y)]
+            ymin = ymax = None
+            if fin.size:
+                ymin = float(fin.min() * 0.9) if not log else 1.0
+                ymax = float(fin.max()) * 1.05
+
+            x_arr = np.asarray(x)
+            xmin = max(0.0, float(x_arr.min())) if x_arr.size else None
+            xmax = float(x_arr.max()) if x_arr.size else None
+
+            if xmin is not None and ymin is not None:
+                self._apply_view_limits(xmin, xmax, ymin, ymax)
+
+            if self._user_xrange is not None:
+                self._plot.setXRange(*self._user_xrange, padding=0)
+            elif xmin is not None:
+                self._plot.setXRange(xmin, xmax, padding=0.02)
+
+            if self._user_yrange is not None:
+                self._plot.setYRange(*self._user_yrange, padding=0)
+            elif ymin is not None:
+                self._plot.setYRange(ymin, ymax, padding=0)
+
+            self._stat.setText(f"{len(self._r_px)} bins | max={np.nanmax(self._prof):.1f}")
+
+            # Ring markers redrawn LAST (after setXRange) so they always appear
+            for ln in self._ring_lines:
+                self._plot.removeItem(ln)
+            self._ring_lines.clear()
+            if self._ring_radii_px:
+                pen = pg.mkPen("#f0c060", width=1.5, style=QtCore.Qt.DotLine)
+                lsd = self._ring_lsd or self._lsd
+                px  = self._ring_px  or self._px
+                wl  = self._ring_wl  or self._wl
+                for r in self._ring_radii_px:
+                    x_pos = self._r_to_x(r, idx, lsd, px, wl)
+                    if x_pos is None:
+                        continue
+                    ln = pg.InfiniteLine(pos=x_pos, angle=90, pen=pen, movable=False)
+                    self._plot.addItem(ln)
+                    self._ring_lines.append(ln)
+        finally:
+            self._suspend_range_track = False
 
     def _x_to_r(self, x, idx, lsd, px, wl):
         """Inverse of _r_to_x: current-axis value → radius in px (None if invalid)."""
@@ -648,11 +676,18 @@ class ProfileViewer(QtWidgets.QWidget):
             self._plot.removeItem(self._pick_line)
             self._pick_line = None
 
-    def _on_yrange_changed(self, _vb, yrange):
-        """User zoomed/panned/entered a Y range — remember it for this session."""
-        if self._suspend_yrange_track:
+    def _on_xrange_changed(self, _vb, xrange):
+        """User zoomed/panned the X axis — remember it so a later replot (e.g.
+        from a parameter change) doesn't reset the view back to full range."""
+        if self._suspend_range_track:
             return
-        self._manual_ymin = float(yrange[0])
+        self._user_xrange = (float(xrange[0]), float(xrange[1]))
+
+    def _on_yrange_changed(self, _vb, yrange):
+        """User zoomed/panned the Y axis — remember it (see _on_xrange_changed)."""
+        if self._suspend_range_track:
+            return
+        self._user_yrange = (float(yrange[0]), float(yrange[1]))
 
     def _apply_view_limits(self, xmin, xmax, ymin, ymax):
         """Bound pan/zoom to the current profile (+ margin) so the user can't
@@ -666,7 +701,7 @@ class ProfileViewer(QtWidgets.QWidget):
         xpad = 0.15 * (xmax - xmin)
         ypad = 0.25 * (ymax - ymin)
         vb = self._plot.getPlotItem().getViewBox()
-        vb.setLimits(xMin=xmin - xpad, xMax=xmax + xpad,
+        vb.setLimits(xMin=max(0.0, xmin - xpad), xMax=xmax + xpad,
                      yMin=ymin - ypad, yMax=ymax + ypad,
                      maxXRange=(xmax - xmin) + 2 * xpad,
                      maxYRange=(ymax - ymin) + 2 * ypad)
