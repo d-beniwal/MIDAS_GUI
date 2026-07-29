@@ -72,6 +72,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Radial profile plot: bound pan/zoom to the data extent | `cde4bb2` |
 | Ring simulation ty/tz tilt fields; configurable spin-box step sizes | `5b8e3b3` |
 | Tilt-aware profile w/o calibration file; ring 2θ-cutoff/thickness/live-button fixes; save-calibration buttons; radial-plot X-floor + zoom persistence | `e14c1ea` |
+| Native-menu-backed A/M manual axis limits (radial plot + histogram); Top-N "I >" intensity floor | `3c15ae7` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -824,6 +825,49 @@ commit:
 **Roll back:** `git revert e14c1ea`. All pieces are additive/isolated (new
 widgets, a new geometry-resolution helper, a new writer function, and a
 `ProfileViewer` range-tracking rewrite) — no other commit builds on this one.
+
+---
+
+### `3c15ae7` — Data Viewer: native-menu-backed manual axis limits, Top-N intensity floor (2026-07-29)
+**Effect:** Reworks the radial-integration plot's and intensity-histogram's
+Auto/Manual toggle to defer axis-value entry to pyqtgraph's own existing
+right-click axis "Manual" min/max fields, instead of a separate custom field
+row (an earlier same-day attempt at this feature used custom fields and was
+corrected):
+1. New `_add_auto_manual_buttons(plot_widget, on_auto, on_manual)` in
+   `widgets.py` hides pyqtgraph's native auto-range corner button and
+   replaces it with a small "A"/"M" `QPushButton` pair in the same spot,
+   wired to `clicked` (not `toggled`) so that **reclicking the already-active
+   button** still fires its handler — "A" re-fits immediately to current
+   data, "M" snaps back to the held manual range, discarding any pan/zoom
+   drift in either mode.
+2. New `_install_manual_axis_capture(plot_widget, callback)` hooks each
+   axis's native `ViewBoxMenu` `minText`/`maxText` `editingFinished` signals
+   (pyqtgraph already applies the typed value to the view itself) and
+   mirrors the committed range into a `self._manual_range` tuple tracked
+   independently of `ViewBox.state['targetRange']` (which changes on drag/
+   pan too, not just explicit edits — needed for reclick-to-reset to mean
+   something different from "wherever the mouse left it").
+3. `ProfileViewer`/`IntensityStatsPanel` `_replot`/`_redraw_hist` skip their
+   auto-fit/clamp logic entirely while `_manual_mode` is set and call the new
+   `_apply_manual_range()` instead (clears any `setLimits()` pan/zoom bound,
+   then `setXRange`/`setYRange` with `padding=0` from the held tuple) — this
+   is what makes an exact typed value (e.g. `0`) survive every live-
+   acquisition redraw instead of being clamped/padded by that frame's own
+   `_apply_view_limits()` recompute.
+4. Top-N pixel marking (`DataViewerTab._show_topn`, `tab_view.py`) gains an
+   "I >" checkbox + threshold field next to the N spin box, matching the
+   existing `_imask_on`/`_fspin` convention; pixels at/below the threshold
+   are excluded from ranking before `argpartition`, so fewer than N (or zero)
+   markers show when fewer pixels clear the floor.
+5. Unrelated: `constants.DEFAULT_DEVICES` PVA device name/prefix updates
+   (`oryx20idd`→`20iddNF`, `20iddOR1:`→`20idOR1:`, `20idPil`→`20idPil:`,
+   `gh1s`→`20iddTomo`, `s20varex1`→`20iddFF`), bundled into this commit at
+   the user's request.
+**Files:** `midas_gui/constants.py`, `midas_gui/tab_view.py`,
+`midas_gui/widgets.py`, `documentation/gui_documentation.md`.
+**Roll back:** `git revert 3c15ae7`. Self-contained — no later commit
+depends on the new helpers or the Top-N threshold field.
 
 ---
 
