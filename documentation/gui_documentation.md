@@ -3,11 +3,9 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-07-28 (Data Viewer: tilt-aware radial profile without a
-calibration file, ring 2θ-range/thickness/live-button fixes, Save calibration as
-JSON/params/PONI, radial-plot X-axis floored at 0 and zoom preserved across
-parameter changes, Ctrl+S overwrites the loaded/saved session file with a new
-Ctrl+Shift+S "Save As")
+**Last updated:** 2026-07-29 (Data Viewer: Auto/Manual "A"/"M" axis-limit toggle
+on the radial-integration plot and the Intensity statistics histogram, Top-N
+pixels "I >" intensity-threshold field)
 
 > **Maintenance:** keep this document in sync with the code — whenever the workflow
 > or a tab's controls change, update the relevant section here in the same change.
@@ -300,6 +298,13 @@ pixels"). It follows frame changes while active. Clicking the button again remov
 markers and restores the normal statistics. Useful for quickly locating saturation /
 hot pixels.
 
+An **I >** checkbox next to the N spin box enables an optional intensity floor
+(a field to its right, editable once the checkbox is on): when set, pixels at
+or below that value are excluded from ranking entirely — never marked, never
+counted toward N — so a low-signal frame can't be forced to mark N pixels that
+aren't actually meaningful. If fewer than N pixels clear the threshold, fewer
+than N markers are drawn (down to none).
+
 ### Intensity statistics (left panel, bottom)
 At the bottom of the Data-Loader panel, in a **draggable pane** below the loader
 cards — grab the splitter handle above the panel to make the statistics area taller or
@@ -314,6 +319,15 @@ any of those change. A scope selector switches between the **current frame** (pe
 slider) and **All frames** (combined over the whole stack/folder). When a **Projection**
 is active the panel shows the projected image's statistics (the scope selector is
 disabled); when **Top-N pixels** is active it shows those pixels' statistics.
+
+A small **"A"/"M"** button pair sits in the histogram's bottom-left corner
+(replacing pyqtgraph's native auto-range corner button), same control as on the
+radial-integration plot below — see **Manual axis limits (A/M toggle)** under
+that section for the full behavior (native right-click "Manual" min/max
+fields, persistence across live updates, reclick-to-reset). In **Manual**,
+the histogram holds those limits instead of auto-rescaling to
+`(0, xmax)` / `(−2, ymax)` on every refresh (new frame, scope change,
+Top-N toggle).
 
 ### Radial integration plot (bottom-right)
 Below the image is a live **azimuthal average about the beam centre** (`R bin`,
@@ -337,6 +351,26 @@ a different scale). **Pan and zoom are always bounded to the current profile's e
 (a margin around its X/Y range) so you cannot drag or scroll off into empty space. The
 splitter handle above this panel (between it and the image view) is wider than a
 default Qt splitter, to make it easier to grab.
+
+#### Manual axis limits (A/M toggle)
+A small **"A"/"M"** button pair sits in the plot's bottom-left corner, in the
+spot pyqtgraph's native auto-range button normally occupies (that native
+button is hidden in favor of this pair). **A** (default) is the auto-fit
+behavior described above. **M** switches to **Manual**, which holds exactly
+the limits set via each axis's own **native right-click menu** — right-click
+the plot, open **X axis** or **Y axis**, pick **Manual**, and type a min/max
+(this is stock pyqtgraph, not a MIDAS-specific control). Once **M** is
+active, the plot's axes show **exactly** those typed values (e.g. entering
+`0` shows `0`, not a padded/rounded value) and hold them through every
+live-acquisition redraw — Manual mode stops the plot from re-fitting or
+re-clamping its range on each new frame, and editing the min/max fields
+again takes effect immediately, live acquisition or not. Switching to **A**
+does not discard the typed values — clicking **M** again restores exactly
+what was last entered. **Reclicking the already-active button resets the
+view to that mode's default**: **A** forces an immediate re-fit to the
+current profile (discarding any manual pan/zoom drift), and **M** snaps
+the view back to the held manual limits (discarding any drift from panning
+around while still in Manual).
 
 ---
 

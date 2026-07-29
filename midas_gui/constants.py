@@ -204,11 +204,11 @@ DEFAULT_VISIBLE_TABS = ["Calib. Refinement", "Pump Probe"]
 # `prefix + pva_suffix`. Overridable via the per-user config key "devices"
 # (Preferences ▸ Devices).
 DEFAULT_DEVICES = [
-    {"name": "oryx20idd",  "prefix": "20iddOR1:", "pva_suffix": "Pva1:Image"},
-    {"name": "s20idPil",   "prefix": "20idPil",   "pva_suffix": "Pva1:Image"},
+    {"name": "20iddNF",    "prefix": "20idOR1:",  "pva_suffix": "Pva1:Image"},
+    {"name": "s20idPil",   "prefix": "20idPil:",  "pva_suffix": "Pva1:Image"},
     {"name": "pg4",        "prefix": "1idPG4:",   "pva_suffix": "Pva1:Image"},
-    {"name": "gh1s",       "prefix": "20idGH1s:", "pva_suffix": "Pva1:Image"},
-    {"name": "s20varex1",  "prefix": "20IDFF:",   "pva_suffix": "Pva1:Image"},
+    {"name": "20iddTomo",  "prefix": "20idGH1s:", "pva_suffix": "Pva1:Image"},
+    {"name": "20iddFF",    "prefix": "20IDFF:",   "pva_suffix": "Pva1:Image"},
 ]
 DEVICES = [dict(d) for d in DEFAULT_DEVICES]
 

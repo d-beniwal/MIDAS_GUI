@@ -439,11 +439,25 @@ class DataViewerTab(QtWidgets.QWidget):
         self._topn_spin = _NoScrollSpinBox(); self._topn_spin.setRange(1, 100000)
         self._topn_spin.setValue(20); self._topn_spin.setFixedWidth(70)
         self._topn_spin.setToolTip("Number of highest-intensity pixels to mark.")
+        self._topn_thresh_on = QtWidgets.QCheckBox("I >")
+        self._topn_thresh_on.setToolTip(
+            "Only consider pixels above this intensity for Top-N — pixels at or "
+            "below it are excluded from ranking and never marked.")
+        self._topn_thresh = _fspin(-1e9, 1e9, 1, 0.0)
+        self._topn_thresh.setFixedWidth(84)
+        self._topn_thresh.setEnabled(False)
         vtb.addWidget(self._topn_btn)
         vtb.addWidget(QtWidgets.QLabel("N:"))
         vtb.addWidget(self._topn_spin)
+        vtb.addWidget(self._topn_thresh_on)
+        vtb.addWidget(self._topn_thresh)
         self._topn_btn.toggled.connect(self._on_topn_toggled)
         self._topn_spin.valueChanged.connect(
+            lambda *_: self._show_topn() if self._topn_btn.isChecked() else None)
+        self._topn_thresh_on.toggled.connect(self._topn_thresh.setEnabled)
+        self._topn_thresh_on.toggled.connect(
+            lambda *_: self._show_topn() if self._topn_btn.isChecked() else None)
+        self._topn_thresh.valueChanged.connect(
             lambda *_: self._show_topn() if self._topn_btn.isChecked() else None)
         right.addWidget(self._viewer)
 
@@ -1111,11 +1125,13 @@ class DataViewerTab(QtWidgets.QWidget):
         # Exclude masked pixels (mask file + intensity-range mask) so they can
         # never rank in the Top-N or skew its statistics/plot.
         bad = self._combined_bad_mask(img)
-        n_valid = flat.size
         if bad is not None:
-            bad_flat = np.asarray(bad).ravel()
-            flat[bad_flat] = -np.inf
-            n_valid = int(np.count_nonzero(~bad_flat))
+            flat[np.asarray(bad).ravel()] = -np.inf
+        # Optional intensity floor: pixels at/below it are excluded from ranking
+        # (and so never marked), regardless of whether they'd otherwise be Top-N.
+        if self._topn_thresh_on.isChecked():
+            flat[flat <= self._topn_thresh.value()] = -np.inf
+        n_valid = int(np.count_nonzero(np.isfinite(flat)))
         n = min(int(self._topn_spin.value()), n_valid)
         if n <= 0:
             return

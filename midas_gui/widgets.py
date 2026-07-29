@@ -457,6 +457,85 @@ class PickableImageViewer(ImageViewer):
         return (cx, cy, math.sqrt(r2)) if r2 > 0 else None
 
 
+def _add_auto_manual_buttons(plot_widget: "pg.PlotWidget", on_auto, on_manual):
+    """Replace a PlotWidget's native "A" auto-range corner button with a small
+    "A"/"M" (Auto/Manual) pair in the same bottom-left spot.
+
+    ``on_auto``/``on_manual`` fire on *every* click of the respective button,
+    including a reclick of whichever one is already active — a QButtonGroup
+    blocks the checked button from being unchecked by its own click, but
+    ``clicked`` still fires, so callers use a reclick to mean "reset the view
+    to this mode's defaults now" (re-fit for Auto, snap back to the held
+    range for Manual).
+
+    Returns the ``(auto_button, manual_button)`` pair.
+    """
+    plot_widget.getPlotItem().hideButtons()
+    grp = QtWidgets.QButtonGroup(plot_widget)
+    grp.setExclusive(True)
+    btn_a = QtWidgets.QPushButton("A", plot_widget)
+    btn_m = QtWidgets.QPushButton("M", plot_widget)
+    for b in (btn_a, btn_m):
+        b.setCheckable(True)
+        b.setFixedSize(18, 18)
+        b.setStyleSheet(
+            "QPushButton { font-size:9px; padding:0; background:#333; color:#ccc; "
+            "border:1px solid #555; } "
+            "QPushButton:checked { background:#4a7; color:#000; }")
+        grp.addButton(b)
+    btn_a.setToolTip("Auto-range: fit the view to the data automatically.\n"
+                     "Click again to re-fit right now.")
+    btn_m.setToolTip("Manual: hold the axis limits set via each axis's "
+                     "right-click menu (“Manual” + min/max), even "
+                     "during live acquisition.\nClick again to snap back to "
+                     "those exact values.")
+    btn_a.setChecked(True)
+    btn_a.clicked.connect(on_auto)
+    btn_m.clicked.connect(on_manual)
+
+    def _reposition(*_):
+        margin = 3
+        y = plot_widget.height() - margin - btn_a.height()
+        btn_a.move(margin, y)
+        btn_m.move(margin + btn_a.width() + 2, y)
+        btn_a.raise_(); btn_m.raise_()
+
+    class _ResizeFilter(QtCore.QObject):
+        def eventFilter(self, obj, ev):
+            if ev.type() in (QtCore.QEvent.Resize, QtCore.QEvent.Show):
+                _reposition()
+            return False
+
+    rf = _ResizeFilter(plot_widget)
+    plot_widget.installEventFilter(rf)
+    plot_widget._auto_manual_resize_filter = rf   # keep alive (else GC'd)
+    _reposition()
+    return btn_a, btn_m
+
+
+def _install_manual_axis_capture(plot_widget: "pg.PlotWidget", callback):
+    """Call ``callback(xmin, xmax, ymin, ymax)`` with the ViewBox's current
+    view range whenever the user commits a value into the PlotWidget's own
+    native right-click "X axis" / "Y axis" > Manual min/max fields.
+
+    pyqtgraph already applies a typed value to the view itself (see
+    ``ViewBoxMenu.xRangeTextChanged``/``yRangeTextChanged``); this just lets a
+    caller mirror the result, e.g. to remember it as the range an Auto/Manual
+    toggle button pair (see :func:`_add_auto_manual_buttons`) should hold and
+    restore.
+    """
+    vb = plot_widget.getViewBox()
+
+    def _captured(*_):
+        (xmin, xmax), (ymin, ymax) = vb.viewRange()
+        callback(xmin, xmax, ymin, ymax)
+
+    for axis in (0, 1):
+        ctrl = vb.menu.ctrl[axis]
+        ctrl.minText.editingFinished.connect(_captured)
+        ctrl.maxText.editingFinished.connect(_captured)
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  ProfileViewer
 # ═════════════════════════════════════════════════════════════════════════════
@@ -492,6 +571,12 @@ class ProfileViewer(QtWidgets.QWidget):
         self._toolbar_layout = bar   # exposed for external widget insertion
         layout.addLayout(bar)
 
+        # Manual axis limits (see the "A"/"M" buttons added over the plot's
+        # bottom-left corner, below) reuse the axis's own native right-click
+        # "Manual" min/max fields rather than a separate row of spin boxes.
+        self._manual_mode = False
+        self._manual_range: Optional[tuple] = None   # (xmin, xmax, ymin, ymax)
+
         self._plot = pg.PlotWidget(background="k")
         self._plot.setLabel("left", "Mean intensity")
         self._plot.setLabel("bottom", "R (px)")
@@ -511,6 +596,10 @@ class ProfileViewer(QtWidgets.QWidget):
         self._curve = self._plot.plot([], [], pen=pg.mkPen("#88ccff", width=2))
         self._ring_lines: list = []
         layout.addWidget(self._plot, stretch=1)
+
+        self._btn_auto, self._btn_manual = _add_auto_manual_buttons(
+            self._plot, self._on_auto_clicked, self._on_manual_clicked)
+        _install_manual_axis_capture(self._plot, self._on_manual_range_edited)
 
         # Click-to-pick a radius (drawn on the image by the caller).
         self._pick_line = None
@@ -560,6 +649,43 @@ class ProfileViewer(QtWidgets.QWidget):
         self._user_yrange = None
         self._replot()
 
+    def _on_manual_range_edited(self, xmin, xmax, ymin, ymax):
+        """The user set exact limits via an axis's native right-click
+        "Manual" min/max fields (pyqtgraph already applied it to the view) —
+        remember it as the held manual range: what "M" reapplies on a
+        reclick, and what every live-acquisition redraw holds to while
+        Manual is active."""
+        self._manual_range = (xmin, xmax, ymin, ymax)
+        if self._manual_mode:
+            self._apply_manual_range()
+
+    def _on_manual_clicked(self):
+        """"M" clicked — switch to Manual, or (on a reclick) snap back to the
+        exact limits held from the axes' native "Manual" min/max fields."""
+        if self._manual_range is None:
+            (xmin, xmax), (ymin, ymax) = self._plot.getViewBox().viewRange()
+            self._manual_range = (xmin, xmax, ymin, ymax)
+        self._manual_mode = True
+        self._apply_manual_range()
+
+    def _on_auto_clicked(self):
+        """"A" clicked — switch to Auto, or (on a reclick) force an
+        immediate re-fit to the current profile."""
+        self._manual_mode = False
+        self._user_xrange = self._user_yrange = None
+        self._replot()
+
+    def _apply_manual_range(self):
+        """Force the exact held manual limits, unclamped by any pan/zoom bound."""
+        if self._manual_range is None:
+            return
+        xmin, xmax, ymin, ymax = self._manual_range
+        vb = self._plot.getPlotItem().getViewBox()
+        vb.setLimits(xMin=None, xMax=None, yMin=None, yMax=None,
+                     maxXRange=None, maxYRange=None)
+        self._plot.setXRange(xmin, xmax, padding=0)
+        self._plot.setYRange(ymin, ymax, padding=0)
+
     def _replot(self):
         if self._r_px is None:
             return
@@ -606,18 +732,24 @@ class ProfileViewer(QtWidgets.QWidget):
             xmin = max(0.0, float(x_arr.min())) if x_arr.size else None
             xmax = float(x_arr.max()) if x_arr.size else None
 
-            if xmin is not None and ymin is not None:
-                self._apply_view_limits(xmin, xmax, ymin, ymax)
+            if self._manual_mode:
+                # Manual mode is authoritative: never touch pan/zoom bounds or
+                # the view range from the data here — just hold the user's
+                # entered limits, even across live-acquisition redraws.
+                self._apply_manual_range()
+            else:
+                if xmin is not None and ymin is not None:
+                    self._apply_view_limits(xmin, xmax, ymin, ymax)
 
-            if self._user_xrange is not None:
-                self._plot.setXRange(*self._user_xrange, padding=0)
-            elif xmin is not None:
-                self._plot.setXRange(xmin, xmax, padding=0.02)
+                if self._user_xrange is not None:
+                    self._plot.setXRange(*self._user_xrange, padding=0)
+                elif xmin is not None:
+                    self._plot.setXRange(xmin, xmax, padding=0.02)
 
-            if self._user_yrange is not None:
-                self._plot.setYRange(*self._user_yrange, padding=0)
-            elif ymin is not None:
-                self._plot.setYRange(ymin, ymax, padding=0)
+                if self._user_yrange is not None:
+                    self._plot.setYRange(*self._user_yrange, padding=0)
+                elif ymin is not None:
+                    self._plot.setYRange(ymin, ymax, padding=0)
 
             self._stat.setText(f"{len(self._r_px)} bins | max={np.nanmax(self._prof):.1f}")
 
@@ -1312,6 +1444,14 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
             brush=(90, 140, 220, 150), pen=pg.mkPen("#6ea8ff"))
         v.addWidget(self._plot)
 
+        # Manual axis limits reuse the axis's own native right-click "Manual"
+        # min/max fields rather than a separate row of spin boxes.
+        self._manual_mode = False
+        self._manual_range: Optional[tuple] = None   # (xmin, xmax, ymin, ymax)
+        self._btn_auto, self._btn_manual = _add_auto_manual_buttons(
+            self._plot, self._on_auto_clicked, self._on_manual_clicked)
+        _install_manual_axis_capture(self._plot, self._on_manual_range_edited)
+
         self._text = QtWidgets.QPlainTextEdit()
         self._text.setReadOnly(True)
         self._text.setFont(_mono_font(8))
@@ -1345,6 +1485,42 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
 
     def set_scope_enabled(self, on: bool):
         self._scope.setEnabled(on)
+
+    def _on_manual_range_edited(self, xmin, xmax, ymin, ymax):
+        """The user set exact limits via an axis's native right-click
+        "Manual" min/max fields (pyqtgraph already applied it to the view) —
+        remember it as the held manual range: what "M" reapplies on a
+        reclick, and what every live-acquisition redraw holds to while
+        Manual is active."""
+        self._manual_range = (xmin, xmax, ymin, ymax)
+        if self._manual_mode:
+            self._apply_manual_range()
+
+    def _on_manual_clicked(self):
+        """"M" clicked — switch to Manual, or (on a reclick) snap back to the
+        exact limits held from the axes' native "Manual" min/max fields."""
+        if self._manual_range is None:
+            (xmin, xmax), (ymin, ymax) = self._plot.getViewBox().viewRange()
+            self._manual_range = (xmin, xmax, ymin, ymax)
+        self._manual_mode = True
+        self._apply_manual_range()
+
+    def _on_auto_clicked(self):
+        """"A" clicked — switch to Auto, or (on a reclick) force an
+        immediate re-fit of the histogram."""
+        self._manual_mode = False
+        self._redraw_hist()
+
+    def _apply_manual_range(self):
+        """Force the exact held manual limits, unclamped by any pan/zoom bound."""
+        if self._manual_range is None:
+            return
+        xmin, xmax, ymin, ymax = self._manual_range
+        vb = self._plot.getViewBox()
+        vb.setLimits(xMin=None, xMax=None, yMin=None, yMax=None,
+                     maxXRange=None, maxYRange=None)
+        vb.setXRange(xmin, xmax, padding=0)
+        vb.setYRange(ymin, ymax, padding=0)
 
     def set_data(self, values, scope: str = ""):
         vals = np.asarray(values, dtype=np.float64).ravel()
@@ -1396,6 +1572,11 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
         self._curve.setData(edges, y)
         self._plot.setLabel("left", "log(count+1)" if log else "count",
                             **{"color": "#d0d0d0", "font-size": "9pt"})
+        if self._manual_mode:
+            # Manual mode is authoritative — hold the user's limits regardless
+            # of how the histogram data changed (e.g. a new live frame).
+            self._apply_manual_range()
+            return
         # Fixed lower-left corner (x=0, y=-2); rescale to (0..xmax, -2..ymax) on refresh.
         xmax = float(edges[-1]) if edges.size else 1.0
         ymax = float(y.max()) if y.size else 1.0
