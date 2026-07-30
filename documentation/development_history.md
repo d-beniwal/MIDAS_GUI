@@ -81,6 +81,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Fix: cap live buffer to 100 frames (memory bound) | `839770d` |
 | Fix: "All frames" stats computed off the GUI thread | `08392c6` |
 | Fix: debounce intensity-mask pixel≤/pixel> spinbox edits | `57ced2f` |
+| Fix: warn when composite mask silently drops a shape-mismatched source | `81b8ea8` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -1052,6 +1053,21 @@ doing potentially expensive recomputation while the user was still mid-edit.
 **Files:** `midas_gui/tab_view.py`.
 **Roll back:** `git revert 57ced2f`. Self-contained — restores the direct
 `valueChanged.connect(self._on_imask_changed)` wiring.
+
+### `81b8ea8` — Data Viewer: warn when composite mask drops a source (2026-07-30)
+**Effect:** `MaskSelector.composite_mask()` OR's every enabled mask source
+together, but silently skipped any source that failed to load or whose
+shape didn't match the union built so far — a user could enable a mask
+file believing it was in effect while it was quietly excluded.
+1. `composite_mask()` now collects the label (and, for shape mismatches,
+   the offending shape) of every dropped source into `self._mask_warning`.
+2. `_refresh()` shows the warning in the existing status label (amber
+   `#e0a030`) alongside the normal source count; mutating the source list
+   (add/remove/toggle/`set_tab1_mask`) clears the stale warning until the
+   next `composite_mask()` call recomputes it.
+**Files:** `midas_gui/widgets.py`.
+**Roll back:** `git revert 81b8ea8`. Self-contained — restores the silent
+drop and the plain "N mask source(s)" status text.
 
 ---
 

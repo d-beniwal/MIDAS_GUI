@@ -11,7 +11,9 @@ simulation's Simulate button and now syncs ty/tz on load; Intensity range
 card's title bar is now the on/off checkbox; Mask rows — including the
 "Tab 1 mask" from the Mask Builder tab — get a checkbox to include/exclude
 without deleting, and the Tab 1 mask row always stays at the top of the list;
-Live Data "Use Buffer" N field capped at 100 frames to bound memory use)
+Live Data "Use Buffer" N field capped at 100 frames to bound memory use;
+Mask status line turns amber and names any source dropped for a load
+failure or shape mismatch, instead of silently ignoring it)
 
 > **Maintenance:** keep this document in sync with the code — whenever the workflow
 > or a tab's controls change, update the relevant section here in the same change.
@@ -125,6 +127,10 @@ bright → `− background` → clip ≥ 0.
 Each Mask row has its own **checkbox** to include/exclude it from the union without
 deleting it (the **✕** button still removes the row entirely). The "Tab 1 mask" row is
 always kept at the **top** of the list when other mask sources are present.
+
+If a checked mask source fails to load, or its shape doesn't match the other sources
+already unioned, it's dropped from the composite and the status line under the mask
+list turns amber and names the source and the reason — it is never silently ignored.
 
 ---
 
