@@ -312,7 +312,7 @@ class BatchTab(QtWidgets.QWidget):
         df = S.Form()
         self._drift_param = _NoScrollComboBox()
         self._drift_param.addItems(["spline", "linear", "constant"])
-        self._drift_knots = _NoScrollSpinBox(); self._drift_knots.setRange(2, 20); self._drift_knots.setValue(5)
+        self._drift_knots = _NoScrollSpinBox(); self._drift_knots.setRange(2, 1_000_000); self._drift_knots.setValue(5)
         df.row(("Parametrization:", self._drift_param), ("n_knots:", self._drift_knots))
         drift.body.addLayout(df)
         self._drift_bayesian = QtWidgets.QCheckBox("Bayesian σ estimate"); self._drift_bayesian.setChecked(True)

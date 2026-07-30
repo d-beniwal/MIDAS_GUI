@@ -3,9 +3,13 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-07-29 (Data Viewer: Auto/Manual "A"/"M" axis-limit toggle
-on the radial-integration plot and the Intensity statistics histogram, Top-N
-pixels "I >" intensity-threshold field)
+**Last updated:** 2026-07-29 (removed the ±10° hard cap on the Data Viewer's
+ty/tz tilt fields and the Calibrate tab's seed tx/ty/tz fields — both now
+accept the full ±180° angle range like other angle fields; also widened
+several other non-data-derived numeric caps — calibration iteration counts,
+multi-panel geometry, correction scale/absorption factors, and
+learnable-mask/gain-training/refinement hyperparameters — that had no
+physical or data-derived justification for their prior bounds)
 
 > **Maintenance:** keep this document in sync with the code — whenever the workflow
 > or a tab's controls change, update the relevant section here in the same change.

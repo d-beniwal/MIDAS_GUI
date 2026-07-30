@@ -124,9 +124,9 @@ class MaskTab(QtWidgets.QWidget):
         self._auto_widget = QtWidgets.QWidget()
         awf = QtWidgets.QVBoxLayout(self._auto_widget); awf.setContentsMargins(0, 0, 0, 0); awf.setSpacing(5)
         self._k_sigma = _fspin(0.0, 1e9, 1, 6.0)
-        self._hot_factor = _fspin(0.1, 10.0, 2, 1.5)
-        self._dead_factor = _fspin(0.0, 1.0, 2, 0.5)
-        self._frozen_frac = _fspin(0.0, 1.0, 3, 0.05)
+        self._hot_factor = _fspin(0.0, 1e9, 2, 1.5)
+        self._dead_factor = _fspin(0.0, 1e9, 2, 0.5)
+        self._frozen_frac = _fspin(0.0, 1e9, 3, 0.05)
         self._frozen_frac.setToolTip(
             "Temporal constancy: flag pixels whose frame-to-frame std < this × Q75(std).\n"
             "Catches constant-value regions (dead modules, stuck pixels).")
@@ -167,7 +167,7 @@ class MaskTab(QtWidgets.QWidget):
         _dsl.addWidget(QtWidgets.QLabel("Dataset:")); _dsl.addWidget(self._stack_ds_combo, 1)
         self._stack_ds_row.setVisible(False)
         awf.addWidget(self._stack_ds_row)
-        self._stride_spin = _NoScrollSpinBox(); self._stride_spin.setRange(1, 100); self._stride_spin.setValue(1)
+        self._stride_spin = _NoScrollSpinBox(); self._stride_spin.setRange(1, 1_000_000); self._stride_spin.setValue(1)
         awf.addLayout(S.Form().row(("Stride:", self._stride_spin)))
         self._auto_widget.setVisible(False)
 
@@ -233,9 +233,9 @@ class MaskTab(QtWidgets.QWidget):
         self._learn_check.setToolTip(
             "Differentiable per-pixel weights optimised against ring η-uniformity.")
         self._geom_group.body.addWidget(self._learn_check)
-        self._learn_steps = _NoScrollSpinBox(); self._learn_steps.setRange(50, 2000); self._learn_steps.setValue(300)
-        self._learn_lr = _fspin(0.01, 5.0, 2, 0.5)
-        self._learn_sparsity = _fspin(0.0, 1.0, 5, 1e-4)
+        self._learn_steps = _NoScrollSpinBox(); self._learn_steps.setRange(1, 1_000_000); self._learn_steps.setValue(300)
+        self._learn_lr = _fspin(0.0, 1e6, 2, 0.5)
+        self._learn_sparsity = _fspin(0.0, 1e6, 5, 1e-4)
         lf = S.Form()
         lf.row(("steps:", self._learn_steps), ("lr:", self._learn_lr))
         lf.row(("sparsity:", self._learn_sparsity), (None, QtWidgets.QWidget()))
