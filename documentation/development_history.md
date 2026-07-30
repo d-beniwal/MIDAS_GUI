@@ -79,6 +79,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Fix: lock live ring buffer against GUI/worker-thread race | `a88ba1f` |
 | Fix: refresh-timer starvation during fast live streaming | `2cfd9cd` |
 | Fix: cap live buffer to 100 frames (memory bound) | `839770d` |
+| Fix: "All frames" stats computed off the GUI thread | `08392c6` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -1014,6 +1015,25 @@ the cap.
 **Files:** `midas_gui/widgets.py`, `documentation/gui_documentation.md`.
 **Roll back:** `git revert 839770d`. Self-contained — restores the old
 range only.
+
+### `08392c6` — Data Viewer: move "All frames" stats computation off the GUI thread (2026-07-30)
+**Effect:** `_all_frame_values()` (reached from `_update_stats()` when the
+stats scope is "All frames") read the entire stack/live buffer and applied
+field corrections synchronously on the GUI thread — unlike every other heavy
+operation in this file, which already runs in a background `QThread`. For a
+large HDF5/folder stack, or a full live ring buffer, this could visibly
+freeze the UI.
+1. Added `AllFrameStatsWorker` (`workers.py`), following the same pattern as
+   `ProjectionWorker`: GUI-derived inputs (dark/bright/background arrays,
+   composite mask, intensity-range thresholds) are snapshotted on the GUI
+   thread before the worker starts, so `run()` only touches numpy data.
+2. `_update_stats_all_frames()` (`tab_view.py`, replaces `_all_frame_values()`)
+   launches the worker and, if a new request arrives while one is already
+   running, coalesces it into a single re-run afterward via
+   `_stats_all_frames_dirty` instead of queuing redundant work.
+**Files:** `midas_gui/tab_view.py`, `midas_gui/workers.py`.
+**Roll back:** `git revert 08392c6`. Self-contained — no later commit
+depends on `AllFrameStatsWorker` or the removal of `_all_frame_values()`.
 
 ---
 
