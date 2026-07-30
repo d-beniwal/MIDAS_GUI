@@ -1267,9 +1267,11 @@ class MaskSelector(QtWidgets.QGroupBox):
     """Multiple mask sources unioned into one composite mask.
 
     Rows are mask files/folders plus an optional auto-managed "Tab 1 mask" row
-    (set via :meth:`set_tab1_mask`).  ``composite_mask()`` OR's every source
-    (each loaded → ``!= 0``; a folder OR's all its frames).  Masked pixels are the
-    ones a caller should zero / ignore.
+    (set via :meth:`set_tab1_mask`), always kept at the top of the list.  Each
+    row has a checkbox to include/exclude it from the union without deleting
+    it.  ``composite_mask()`` OR's every *checked* source (each loaded → ``!=
+    0``; a folder OR's all its frames).  Masked pixels are the ones a caller
+    should zero / ignore.
     """
     maskChanged = QtCore.pyqtSignal()
 
@@ -1290,15 +1292,28 @@ class MaskSelector(QtWidgets.QGroupBox):
         self._status.setStyleSheet("color:#9a9a9a;font-size:10px"); self._status.setWordWrap(True)
         v.addWidget(self._status)
 
-    def _add_row(self, entry, label):
+    def _add_row(self, entry, label, at_top=False):
         rw = QtWidgets.QWidget()
         h = QtWidgets.QHBoxLayout(rw); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(4)
+        chk = QtWidgets.QCheckBox()
+        chk.setChecked(entry.get("enabled", True))
+        chk.setToolTip("Include this mask in the composite (unchecking keeps it in the "
+                        "list without deleting it).")
+        chk.toggled.connect(lambda checked, e=entry: self._on_enabled_toggled(e, checked))
         lbl = QtWidgets.QLabel(label); lbl.setStyleSheet("font-size:10px")
         x = QtWidgets.QToolButton(); x.setText("✕"); x.setFixedWidth(22)
         x.clicked.connect(lambda: self._remove(entry))
-        h.addWidget(lbl, 1); h.addWidget(x)
+        h.addWidget(chk); h.addWidget(lbl, 1); h.addWidget(x)
         entry["row"] = rw
-        self._list.addWidget(rw)
+        entry["checkbox"] = chk
+        if at_top:
+            self._list.insertWidget(0, rw)
+        else:
+            self._list.addWidget(rw)
+
+    def _on_enabled_toggled(self, entry, checked):
+        entry["enabled"] = checked
+        self._refresh(); self.maskChanged.emit()
 
     def _remove(self, entry):
         if entry in self._sources:
@@ -1308,9 +1323,9 @@ class MaskSelector(QtWidgets.QGroupBox):
                 self._tab1_mask = None
             self._refresh(); self.maskChanged.emit()
 
-    def _add_source(self, kind, path):
+    def _add_source(self, kind, path, enabled=True):
         from pathlib import Path
-        entry = {"kind": kind, "path": path, "mask": None, "row": None}
+        entry = {"kind": kind, "path": path, "mask": None, "row": None, "enabled": enabled}
         self._add_row(entry, f"{kind}: {Path(path).name}")
         self._sources.append(entry)
         self._refresh(); self.maskChanged.emit()
@@ -1346,9 +1361,9 @@ class MaskSelector(QtWidgets.QGroupBox):
                 self._remove(existing)
             return
         if existing is None:
-            entry = {"kind": "tab1", "path": None, "mask": None, "row": None}
+            entry = {"kind": "tab1", "path": None, "mask": None, "row": None, "enabled": True}
             n = int(self._tab1_mask.sum())
-            self._add_row(entry, f"Tab 1 mask ({n:,} px)")
+            self._add_row(entry, f"Tab 1 mask ({n:,} px)", at_top=True)
             self._sources.insert(0, entry)
         self._refresh(); self.maskChanged.emit()
 
@@ -1374,9 +1389,11 @@ class MaskSelector(QtWidgets.QGroupBox):
             return None
 
     def composite_mask(self):
-        """uint8 union of all sources (1 = masked), or None if empty."""
+        """uint8 union of all *enabled* sources (1 = masked), or None if empty."""
         out = None
         for e in self._sources:
+            if not e.get("enabled", True):
+                continue
             m = self._load_source(e)
             if m is None:
                 continue
@@ -1395,7 +1412,8 @@ class MaskSelector(QtWidgets.QGroupBox):
     def get_state(self) -> dict:
         """Serializes file/folder sources only — the "tab1" source is owned
         and re-supplied at runtime by the tab via :meth:`set_tab1_mask`."""
-        return {"sources": [{"kind": e["kind"], "path": e["path"]}
+        return {"sources": [{"kind": e["kind"], "path": e["path"],
+                              "enabled": e.get("enabled", True)}
                              for e in self._sources if e["kind"] != "tab1"]}
 
     def set_state(self, state: dict):
@@ -1406,7 +1424,7 @@ class MaskSelector(QtWidgets.QGroupBox):
         for s in state.get("sources", []):
             kind, path = s.get("kind"), s.get("path")
             if kind and path:
-                self._add_source(kind, path)
+                self._add_source(kind, path, enabled=s.get("enabled", True))
 
 
 class IntensityStatsPanel(QtWidgets.QGroupBox):

@@ -363,44 +363,13 @@ class DataViewerTab(QtWidgets.QWidget):
         self._proj_grp.setEnabled(False)
         lv.addWidget(self._proj_grp)
 
-        # ── Calibration card ──
-        calc = S.make_card("Calibration  (optional)")
-        self._calib_ed = QtWidgets.QLineEdit()
-        self._calib_ed.setPlaceholderText("calibration.json / paramstest.txt / .poni…")
-        calc.body.addLayout(_frow(self._calib_ed, self._browse_calib))
-        self._calib_ed.returnPressed.connect(self._load_calibration)
-        self._calib_lbl = QtWidgets.QLabel("No calibration loaded — using manual geometry / BC.")
-        self._calib_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
-        self._calib_lbl.setWordWrap(True)
-        calc.body.addWidget(self._calib_lbl)
-        save_row = QtWidgets.QHBoxLayout(); save_row.setSpacing(4)
-        self._save_json_btn = QtWidgets.QPushButton("Save JSON")
-        self._save_json_btn.setToolTip(
-            "Save the current geometry (manual fields, or the loaded calibration's\n"
-            "full geometry) as a calibration.json.")
-        self._save_json_btn.clicked.connect(lambda: self._save_calibration("json"))
-        self._save_params_btn = QtWidgets.QPushButton("Save params (.txt)")
-        self._save_params_btn.setToolTip(
-            "Save the current geometry as a MIDAS parameter file (paramstest.txt).")
-        self._save_params_btn.clicked.connect(lambda: self._save_calibration("paramstest"))
-        self._save_poni_btn = QtWidgets.QPushButton("Save PONI")
-        self._save_poni_btn.setToolTip(
-            "Save the current geometry as a pyFAI .poni file.\n"
-            "Note: ty/tz tilts have no PONI equivalent and are not exported.")
-        self._save_poni_btn.clicked.connect(lambda: self._save_calibration("poni"))
-        save_row.addWidget(self._save_json_btn)
-        save_row.addWidget(self._save_params_btn)
-        save_row.addWidget(self._save_poni_btn)
-        calc.body.addLayout(save_row)
-        lv.addWidget(calc)
-
         # ── Intensity range mask card ──
-        imc = S.make_card("Intensity range  (radial integration)")
-        self._imask_on = QtWidgets.QCheckBox("Exclude out-of-range pixels")
-        self._imask_on.setToolTip(
+        imc = S.make_card("Exclude out-of-range pixels")
+        imc.setCheckable(True); imc.setChecked(False)
+        imc.setToolTip(
             "Pixels ≤ min or > max are masked: drawn as a red overlay on the image\n"
             "and excluded from the radial integration (removes gaps / hot / overflow).")
-        imc.body.addWidget(self._imask_on)
+        self._imask_on = imc
         self._imask_lo = _fspin(-1e9, 1e9, 1, 0.0)
         self._imask_lo.setToolTip("Pixels ≤ this value are masked (dead / gap / beam-stop).")
         self._imask_lo.setFixedWidth(84)
@@ -494,6 +463,37 @@ class DataViewerTab(QtWidgets.QWidget):
         self._ring_info.setStyleSheet(f"font-family:{S.MONO_CSS};font-size:10px")
         ring.body.addWidget(self._ring_info)
         lv.addWidget(ring)
+
+        # ── Calibration card ──
+        calc = S.make_card("Load calibration (optional)")
+        self._calib_ed = QtWidgets.QLineEdit()
+        self._calib_ed.setPlaceholderText("calibration.json / paramstest.txt / .poni…")
+        calc.body.addLayout(_frow(self._calib_ed, self._browse_calib))
+        self._calib_ed.returnPressed.connect(self._load_calibration)
+        self._calib_lbl = QtWidgets.QLabel("No calibration loaded — using manual geometry / BC.")
+        self._calib_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        self._calib_lbl.setWordWrap(True)
+        calc.body.addWidget(self._calib_lbl)
+        save_row = QtWidgets.QHBoxLayout(); save_row.setSpacing(4)
+        self._save_json_btn = QtWidgets.QPushButton("Save JSON")
+        self._save_json_btn.setToolTip(
+            "Save the current geometry (manual fields, or the loaded calibration's\n"
+            "full geometry) as a calibration.json.")
+        self._save_json_btn.clicked.connect(lambda: self._save_calibration("json"))
+        self._save_params_btn = QtWidgets.QPushButton("Save params (.txt)")
+        self._save_params_btn.setToolTip(
+            "Save the current geometry as a MIDAS parameter file (paramstest.txt).")
+        self._save_params_btn.clicked.connect(lambda: self._save_calibration("paramstest"))
+        self._save_poni_btn = QtWidgets.QPushButton("Save PONI")
+        self._save_poni_btn.setToolTip(
+            "Save the current geometry as a pyFAI .poni file.\n"
+            "Note: ty/tz tilts have no PONI equivalent and are not exported.")
+        self._save_poni_btn.clicked.connect(lambda: self._save_calibration("poni"))
+        save_row.addWidget(self._save_json_btn)
+        save_row.addWidget(self._save_params_btn)
+        save_row.addWidget(self._save_poni_btn)
+        calc.body.addLayout(save_row)
+        lv.addWidget(calc)
         lv.addStretch(1)
         split.addWidget(scroll)
 
@@ -1139,6 +1139,10 @@ class DataViewerTab(QtWidgets.QWidget):
             try:
                 self._calib_geom = geometry_fields_from_file(path)
                 d = self._calib_geom
+                for w, key in ((self._ty, "ty"), (self._tz, "tz")):
+                    v = d.get(key)
+                    if v is not None:
+                        w.blockSignals(True); w.setValue(float(v)); w.blockSignals(False)
                 tilt = any(abs(float(d.get(k) or 0.0)) > 1e-9 for k in ("tx", "ty", "tz"))
                 mode = ("full integration: tilts"
                         + ("+distortion" if d.get("distortion") else "")

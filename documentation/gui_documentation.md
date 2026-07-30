@@ -3,11 +3,11 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-07-29 (Data Viewer Ring simulation card reworked to
-support multiple materials at once — per-material checkbox row with a color
-swatch and a clickable name that opens a Material dialog for lattice/SG/preset
-editing and renaming; lattice fields now show 3 decimals and angle fields 2
-decimals, down from 5/3)
+**Last updated:** 2026-07-30 (Data Viewer: Load-calibration card renamed/moved
+below Ring simulation's Simulate button and now syncs ty/tz on load; Intensity
+range card's title bar is now the on/off checkbox; Mask rows — including the
+"Tab 1 mask" from the Mask Builder tab — get a checkbox to include/exclude
+without deleting, and the Tab 1 mask row always stays at the top of the list)
 
 > **Maintenance:** keep this document in sync with the code — whenever the workflow
 > or a tab's controls change, update the relevant section here in the same change.
@@ -113,9 +113,14 @@ The remaining tabs (1, 5–8) keep the classic two-panel layout.
 
 **Corrections & mask (all four analysis tabs).** Dark is averaged then subtracted;
 Bright is averaged then flat-field **divided** or **subtracted** (your choice);
-Background is averaged then subtracted; every enabled Mask source (files/folders plus
-the auto-added "Tab 1 mask") is **unioned** into one composite mask that zeroes/ignores
-those pixels. Correction order: `(img − dark)` → bright → `− background` → clip ≥ 0.
+Background is averaged then subtracted; every **checked** Mask source (files/folders plus
+the auto-added "Tab 1 mask", populated from the Mask Builder tab) is **unioned** into one
+composite mask that zeroes/ignores those pixels. Correction order: `(img − dark)` →
+bright → `− background` → clip ≥ 0.
+
+Each Mask row has its own **checkbox** to include/exclude it from the union without
+deleting it (the **✕** button still removes the row entirely). The "Tab 1 mask" row is
+always kept at the **top** of the list when other mask sources are present.
 
 ---
 
@@ -173,37 +178,13 @@ equivalent), or **Average** (noise reduction), along a chosen axis (0 = across f
 drops the first frame, 4 drops the first four) — useful when the opening frames are
 detector warm-up / shutter-transient exposures.
 
-### Calibration card (optional)
-Load geometry from a **calibration `.json`, a MIDAS `paramstest.txt`, or a pyFAI
-`.poni`** (auto-detected). It fills BC, Lsd, pixel size and wavelength, unchecks
-"Beam centre = image centre", and refreshes the overlay and radial plot.
-
-When a calibration file carries the **full geometry (tilts + distortion)**, the radial
-integration switches from simple concentric-circle binning to a **proper MIDAS-engine
-integration** that maps every pixel through the calibrated tilts and distortion (the
-same core as Batch Integrate) — so ring positions/intensities are geometry-correct, not
-just distance-from-beam-centre. The card's status line reports which mode is active. The
-binning geometry is built once and reused across frames (a fast `hard` kernel keeps the
-preview responsive); without a full-geometry file, the fast circle binning is used. If no
-calibration file is loaded but the Ring-simulation card's **ty/tz** tilt fields are
-non-zero, the radial integration still runs the tilt-aware MIDAS engine using a geometry
-built live from those fields (BC, Lsd, pixel size, wavelength) — so dialing in tilts here
-without a calibration file already produces a tilt-corrected profile, not just a
-tilt-shaped ring overlay.
-
-**Save JSON / Save params (.txt) / Save PONI** (below the loader) export whatever
-geometry is currently in effect — the loaded calibration file if any, otherwise the
-one synthesized from the Ring-simulation widgets above — as a calibration file you can
-reload here, on the Calibrate tab, or in Batch Integrate. **Save params (.txt)** writes
-a standalone MIDAS `paramstest.txt`; **Save PONI** writes a pyFAI `.poni` (note: PONI's
-Rot1–3 convention cannot represent MIDAS's tx/ty/tz tilts, so tilts are **not** included
-in a `.poni` export — use JSON or `.txt` to keep them). Clicking any of the three before
-an image is loaded warns instead of writing a file (there is no detector size to write).
-
 ### Intensity range card (radial integration)
+The card's **title bar is itself the on/off checkbox** ("Exclude out-of-range
+pixels") rather than a separate checkbox line inside the card.
+
 | Field | Description |
 |---|---|
-| Exclude out-of-range pixels | When on, pixels ≤ min or > max are drawn as a red overlay and excluded from the radial integration (removes gaps / hot / overflow). |
+| Exclude out-of-range pixels (title checkbox) | When on, pixels ≤ min or > max are drawn as a red overlay and excluded from the radial integration (removes gaps / hot / overflow). |
 | pixel ≤ / pixel > | Lower / upper bounds. On load, the upper bound auto-fills to **max(99.99th percentile, 100000)**. |
 
 ### Ring simulation card
@@ -260,6 +241,35 @@ its own lattice, visibility, and ring color.
 - **→ Send geometry to Calibrate** copies λ, pixel size, Lsd and beam centre into the
   Calibrate tab's detector + seed fields (the Calibrate tab has a matching
   **← Data Viewer** button that pulls the same values).
+
+### Load calibration card (optional)
+Sits directly below the Ring simulation card's **Simulate rings (live)** button.
+Load geometry from a **calibration `.json`, a MIDAS `paramstest.txt`, or a pyFAI
+`.poni`** (auto-detected). It fills **BC, Lsd, pixel size, wavelength, and the
+Ring-simulation card's ty/tz tilt fields**, unchecks "Beam centre = image
+centre", and refreshes the overlay and radial plot.
+
+When a calibration file carries the **full geometry (tilts + distortion)**, the radial
+integration switches from simple concentric-circle binning to a **proper MIDAS-engine
+integration** that maps every pixel through the calibrated tilts and distortion (the
+same core as Batch Integrate) — so ring positions/intensities are geometry-correct, not
+just distance-from-beam-centre. The card's status line reports which mode is active. The
+binning geometry is built once and reused across frames (a fast `hard` kernel keeps the
+preview responsive); without a full-geometry file, the fast circle binning is used. If no
+calibration file is loaded but the Ring-simulation card's **ty/tz** tilt fields are
+non-zero, the radial integration still runs the tilt-aware MIDAS engine using a geometry
+built live from those fields (BC, Lsd, pixel size, wavelength) — so dialing in tilts here
+without a calibration file already produces a tilt-corrected profile, not just a
+tilt-shaped ring overlay.
+
+**Save JSON / Save params (.txt) / Save PONI** (below the loader) export whatever
+geometry is currently in effect — the loaded calibration file if any, otherwise the
+one synthesized from the Ring-simulation widgets above — as a calibration file you can
+reload here, on the Calibrate tab, or in Batch Integrate. **Save params (.txt)** writes
+a standalone MIDAS `paramstest.txt`; **Save PONI** writes a pyFAI `.poni` (note: PONI's
+Rot1–3 convention cannot represent MIDAS's tx/ty/tz tilts, so tilts are **not** included
+in a `.poni` export — use JSON or `.txt` to keep them). Clicking any of the three before
+an image is loaded warns instead of writing a file (there is no detector size to write).
 
 ### Live Data card *(experimental)*
 Sits **above the Data card**, collapsed by default behind its own title-bar
@@ -352,7 +362,7 @@ Below the image is a live **azimuthal average about the beam centre** (`R bin`,
 `Integrate`, and an `Auto` toggle that recomputes on frame/BC/mask change) — geometry-free
 circle binning by default, or the tilt/distortion-aware MIDAS engine when a full
 geometry is in effect (a loaded calibration file, or non-zero ty/tz in the
-Ring-simulation card — see the Calibration card above). Peak/ring markers overlaid on
+Ring-simulation card — see the Load calibration card above). Peak/ring markers overlaid on
 the plot use the ring's true 2θ, so they line up with the profile in either mode.
 **Clicking a radius on the plot draws the matching ring (magenta) on the image.** Axis
 units switch between R (px) / 2θ / Q; the **X-axis lower bound defaults to 0**.
