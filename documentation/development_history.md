@@ -73,6 +73,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Ring simulation ty/tz tilt fields; configurable spin-box step sizes | `5b8e3b3` |
 | Tilt-aware profile w/o calibration file; ring 2θ-cutoff/thickness/live-button fixes; save-calibration buttons; radial-plot X-floor + zoom persistence | `e14c1ea` |
 | Native-menu-backed A/M manual axis limits (radial plot + histogram); Top-N "I >" intensity floor | `3c15ae7` |
+| Multi-material ring simulation (per-row checkbox/color/name, Material dialog) | `0e9ed21` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -894,6 +895,40 @@ first added) and were clamping legitimate inputs; raised them:
 `documentation/gui_documentation.md`.
 **Roll back:** `git revert 53f8f19`. Self-contained — no later commit
 depends on the widened ranges.
+
+### `0e9ed21` — Data Viewer: support multiple ring-simulation materials at once (2026-07-29)
+**Effect:** Ring simulation card holds a list of materials instead of one,
+so a sample phase can be overlaid on a calibrant (or any N materials) at
+the same time:
+1. New `MaterialDialog` (factored out of the old inline lattice fields)
+   edits one material's name/preset/lattice/space-group/cubic-checkbox.
+   Opened by clicking a material row's underlined name button.
+2. Each material row is a checkbox (show/hide that material's rings),
+   a clickable color swatch (`QColorDialog`, drives that material's ring
+   lines + hkl labels on both the image overlay and radial-profile plot),
+   the clickable name, and a **✕** delete button (disabled when it's the
+   last remaining row). **+ Add material** appends a new row with the next
+   color from a 10-entry cycling palette (`_MATERIAL_COLORS`); a single
+   default **Ni (FCC)** row is seeded at startup, matching prior behavior.
+3. Geometry fields (λ, max 2θ, Lsd, pixel size, beam centre) stay shared
+   across all materials — only lattice/SG/color/visibility are per-material.
+4. `_simulate()` now loops materials, simulating rings per enabled one and
+   collecting per-material errors instead of aborting on the first
+   exception; `_redraw_rings()`/`_refresh_profile_markers()` draw each
+   material's rings in its own color.
+5. `ProfileViewer.set_ring_markers()` (`widgets.py`) takes a list of
+   `{"radii": [...], "color": "#hex"}` groups instead of a flat radii list,
+   so the radial-profile plot can show multiple colored ring sets;
+   `tab_calibrate.py` updated to pass its single ring set as a one-entry
+   group list.
+6. `DataViewerTab.get_state()`/`set_state()` persist/restore the materials
+   list (replacing the old single-material `mat`/`a..sg`/`cubic` state
+   fields) so GUI-state save/load round-trips multi-material setups.
+**Files:** `midas_gui/tab_view.py`, `midas_gui/tab_calibrate.py`,
+`midas_gui/widgets.py`, `documentation/gui_documentation.md`.
+**Roll back:** `git revert 0e9ed21`. Self-contained — no later commit
+depends on the multi-material materials list or the `set_ring_markers()`
+groups signature.
 
 ---
 
