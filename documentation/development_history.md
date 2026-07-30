@@ -130,6 +130,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Fix fresh-env launch crash — colormap resolution without matplotlib | `6332b3d` |
 | Fix native Bus-error crash on Run Calibration — cap BLAS/OMP thread pools | `0b4326d` |
 | Preferences ▸ Devices tab; Live PV field becomes a device dropdown | `aa82cb6` |
+| Widen non-data-derived numeric field caps (tilts to ±180°, iteration/geometry/hyperparameter fields to effectively unbounded) across Data Viewer/Calibrate/Corrections/Mask/Refine/Batch | `53f8f19` |
 
 ### Stability / performance / consistency (review-driven, phases 1–3)
 | Change | Commit |
@@ -868,6 +869,31 @@ corrected):
 `midas_gui/widgets.py`, `documentation/gui_documentation.md`.
 **Roll back:** `git revert 3c15ae7`. Self-contained — no later commit
 depends on the new helpers or the Top-N threshold field.
+
+### `53f8f19` — Widen non-data-derived numeric caps across tabs (2026-07-29)
+**Effect:** Several `QSpinBox`/`QDoubleSpinBox` range caps had no physical or
+data-derived justification (arbitrary round numbers picked when the field was
+first added) and were clamping legitimate inputs; raised them:
+1. Data Viewer's simulated-ring `ty`/`tz` tilt fields and Calibrate's seed
+   `tx`/`ty`/`tz` fields: `±10°` → `±180°`, matching the full range other
+   angle fields in the app already allow.
+2. Data Viewer max-2θ: `1–90°` → `0.001–180°`.
+3. Calibrate E-M/LM iteration counts and multi-panel geometry (panel counts,
+   size, gap): capped at 20/2000/50/10000/1000 → `1_000_000`.
+4. Corrections empty-frame/Compton scale, absorption μR, gain-training steps/
+   lr/unity-weight/smooth-weight: capped at 1–20 → effectively unbounded
+   (`1e6`–`1e9`).
+5. Mask hot/dead factor, frozen-fraction, stride, and learnable-mask steps/
+   lr/sparsity: capped at 1–2000 → effectively unbounded.
+6. Refine optimizer lr and iteration count: capped at 10/2000 → effectively
+   unbounded.
+7. Batch drift `n_knots`: capped at 20 → `1_000_000`.
+**Files:** `midas_gui/tab_batch.py`, `midas_gui/tab_calibrate.py`,
+`midas_gui/tab_corrections.py`, `midas_gui/tab_mask.py`,
+`midas_gui/tab_refine.py`, `midas_gui/tab_view.py`,
+`documentation/gui_documentation.md`.
+**Roll back:** `git revert 53f8f19`. Self-contained — no later commit
+depends on the widened ranges.
 
 ---
 
