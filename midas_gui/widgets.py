@@ -14,6 +14,7 @@ pyqtgraph rules (see context/design_rules.md) preserved:
 from __future__ import annotations
 
 import math
+from collections import deque
 from typing import Optional
 
 import numpy as np
@@ -1696,6 +1697,13 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._nframes = 0
         self._cur = None
         self._live_src: Optional[PvaLiveSource] = None
+        self._buffer = None            # deque(maxlen=N) once "Use Buffer" is on
+        self._buffer_active = False    # "Use Buffer" checked
+        self._buffer_frozen = False    # True once frame arrival has paused
+        self._buffer_stall_timer = QtCore.QTimer(self)
+        self._buffer_stall_timer.setSingleShot(True)
+        self._buffer_stall_timer.setInterval(2000)
+        self._buffer_stall_timer.timeout.connect(self._on_buffer_stalled)
 
         # The cards live inside a scroll area; the stats panel (stack mode) sits
         # below it in a draggable vertical splitter (see the end of __init__).
@@ -1746,6 +1754,25 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._live_stop_btn.clicked.connect(self.stop_live)
             btn_row.addWidget(self._live_start_btn); btn_row.addWidget(self._live_stop_btn)
             lvbox.addLayout(btn_row)
+            buf_row = QtWidgets.QHBoxLayout(); buf_row.setSpacing(4)
+            buf_row.addWidget(QtWidgets.QLabel("N:"))
+            self._buffer_n_spin = _NoScrollSpinBox()
+            self._buffer_n_spin.setRange(2, 2000)
+            self._buffer_n_spin.setValue(20)
+            self._buffer_n_spin.setFixedWidth(64)
+            self._buffer_n_spin.setToolTip(
+                "Number of most-recent live frames to keep in the ring buffer.")
+            buf_row.addWidget(self._buffer_n_spin)
+            self._buffer_btn = QtWidgets.QPushButton("Use Buffer")
+            self._buffer_btn.setCheckable(True)
+            self._buffer_btn.setToolTip(
+                "Capture the last N live frames into memory. Turns yellow while "
+                "filling, green once frame arrival pauses — the buffered frames "
+                "then act as a normal stack (scrubbable, projectable).")
+            self._buffer_btn.toggled.connect(self._on_buffer_toggled)
+            buf_row.addWidget(self._buffer_btn, 1)
+            lvbox.addLayout(buf_row)
+            self._apply_buffer_style("off")
             self._live_status_lbl = QtWidgets.QLabel("Stopped.")
             self._live_status_lbl.setWordWrap(True)
             self._live_status_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
@@ -1928,6 +1955,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
             return
         try:
             self._stack = self._paths = self._h5 = None; self._nframes = 0
+            self._reset_buffer()
             p = Path(raw)
             if p.is_dir() or any(ch in raw for ch in "*?"):
                 paths = self._collect_paths(raw)
@@ -1981,6 +2009,8 @@ class DataLoaderPanel(QtWidgets.QWidget):
 
     def _get_frame(self, i: int) -> np.ndarray:
         i = max(0, min(i, self._nframes - 1))
+        if self._buffer_frozen and self._buffer:
+            return np.asarray(list(self._buffer)[i], dtype=np.float32)
         if self._stack is not None:
             return np.asarray(self._stack[i], dtype=np.float32)
         if self._paths is not None:
@@ -2028,6 +2058,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._live_src.error.connect(self._on_live_error)
         self._stack = self._paths = self._h5 = None
         self._nframes = 0
+        self._reset_buffer()
         if not self._live_src.start(pv):
             return
         self._live_start_btn.setEnabled(False)
@@ -2039,7 +2070,14 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._nframes = 1
         self._cur = image
         self._setup_navigator()
-        self._live_status_lbl.setText(f"Streaming — frame id {image_id}.")
+        status = f"Streaming — frame id {image_id}."
+        if self._buffer_active:
+            self._buffer.append(image)
+            self._buffer_frozen = False
+            self._apply_buffer_style("filling")
+            self._buffer_stall_timer.start()
+            status += f"  Buffering ({len(self._buffer)}/{self._buffer.maxlen})."
+        self._live_status_lbl.setText(status)
         self._info.setText(
             f"Live: {self._pv_ed.currentText().strip()}  (id {image_id}, shape {image.shape})")
         self.dataChanged.emit()
@@ -2066,8 +2104,78 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._live_stop_btn.setEnabled(False)
             self._pv_ed.setEnabled(True)
             self._live_status_lbl.setText("Stopped.")
+        if self._buffer_active and not self._buffer_frozen:
+            self._on_buffer_stalled()
+
+    # ── live buffer ("Use Buffer" — last-N-frames ring buffer) ─────
+    def _on_buffer_toggled(self, checked):
+        if checked:
+            n = self._buffer_n_spin.value()
+            self._buffer = deque(maxlen=n)
+            self._buffer_active = True
+            self._buffer_frozen = False
+            self._buffer_n_spin.setEnabled(False)
+            self._apply_buffer_style("filling")
+            self._buffer_stall_timer.start()
+        else:
+            self._reset_buffer()
+
+    def _on_buffer_stalled(self):
+        """No new live frame for the stall interval — freeze the ring buffer
+        into a usable stack (same shape of API as a loaded HDF5/folder stack)."""
+        if not self._buffer_active or not self._buffer:
+            return
+        self._buffer_frozen = True
+        self._nframes = len(self._buffer)
+        self._setup_navigator()
+        self._apply_buffer_style("ready")
+        self._live_status_lbl.setText(f"Streaming paused — buffer ready ({self._nframes} frames).")
+        self._set_frame(self._nframes - 1)
+
+    def _reset_buffer(self):
+        """Turn buffering off and discard it — used by the toggle-off click and
+        by starting a new stream / loading static data (unrelated data)."""
+        self._buffer_stall_timer.stop()
+        was_stack = self._buffer_frozen
+        self._buffer = None
+        self._buffer_active = False
+        self._buffer_frozen = False
+        btn = getattr(self, "_buffer_btn", None)
+        if btn is not None:
+            self._buffer_n_spin.setEnabled(True)
+            btn.blockSignals(True); btn.setChecked(False); btn.blockSignals(False)
+            self._apply_buffer_style("off")
+        if was_stack:
+            self._nframes = 1 if self._cur is not None else 0
+            self._setup_navigator()
+            self.dataChanged.emit()
+
+    def _apply_buffer_style(self, state: str):
+        btn = getattr(self, "_buffer_btn", None)
+        if btn is None:
+            return
+        if state == "filling":
+            n = len(self._buffer) if self._buffer is not None else 0
+            cap = self._buffer.maxlen if self._buffer is not None else 0
+            btn.setText(f"Buffering… ({n}/{cap})")
+            btn.setStyleSheet(
+                "QPushButton { background:#f9a825; color:#000; font-weight:bold; "
+                "border:1px solid #c17900; border-radius:4px; padding:4px; }")
+        elif state == "ready":
+            n = len(self._buffer) if self._buffer is not None else 0
+            btn.setText(f"Buffer Ready ({n})")
+            btn.setStyleSheet(
+                "QPushButton { background:#2e7d32; color:white; font-weight:bold; "
+                "border:1px solid #1b5e20; border-radius:4px; padding:4px; }")
+        else:
+            btn.setText("Use Buffer")
+            btn.setStyleSheet(
+                "QPushButton { background:#3a3d44; color:#ddd; font-weight:bold; "
+                f"border:1px solid {S.ACCENT}; border-radius:4px; padding:4px; }}")
 
     def full_stack(self) -> np.ndarray:
+        if self._buffer_frozen and self._buffer:
+            return np.stack([np.asarray(f, dtype=np.float32) for f in self._buffer], axis=0)
         if self._stack is not None:
             return np.asarray(self._stack)
         if self._h5 is not None:

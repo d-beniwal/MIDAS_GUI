@@ -3,9 +3,12 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-07-30 (Data Viewer: Load-calibration card renamed/moved
-below Ring simulation's Simulate button and now syncs ty/tz on load; Intensity
-range card's title bar is now the on/off checkbox; Mask rows — including the
+**Last updated:** 2026-07-30 (Data Viewer: Live Data card gets a "Use Buffer"
+last-N-frames ring buffer — yellow while filling, green once streaming pauses,
+at which point Projection and the rest of the stack analysis work on it like
+a loaded HDF5/folder stack; Load-calibration card renamed/moved below Ring
+simulation's Simulate button and now syncs ty/tz on load; Intensity range
+card's title bar is now the on/off checkbox; Mask rows — including the
 "Tab 1 mask" from the Mask Builder tab — get a checkbox to include/exclude
 without deleting, and the Tab 1 mask row always stays at the top of the list)
 
@@ -294,6 +297,19 @@ frames arrive.
   / waiting for PV / connected / streaming with frame id / error). GUI updates
   are throttled to the tab's existing ~16 fps debounce, so a fast PV update
   rate doesn't overwhelm the interface.
+- **Use Buffer** captures the last **N** live frames (N field next to it) into
+  an in-memory ring buffer, so Projection and every other stack-based analysis
+  become available on live data. Click it to arm: it turns **yellow** and its
+  label counts up (`Buffering… (7/20)`) while frames keep streaming in — the
+  live single-frame view is unaffected during this. When no new frame arrives
+  for ~2 s (streaming paused, or **Stop** clicked), it turns **green**
+  (`Buffer Ready (20)`) and the buffered frames become a normal navigable
+  stack: the frame slider/spin/prev-next enable, and **Project stack** runs
+  max/sum/average over the buffered frames exactly as it would for a loaded
+  HDF5 file or folder. If new frames resume arriving, it flips back to yellow
+  and keeps rolling (oldest frame dropped once past N). Click it again to turn
+  buffering off and discard the buffer. Starting a new stream or loading
+  static data always clears any existing buffer.
 - **Stopping live streaming does not auto-reload the previous file/folder/HDF5
   source** — the Data card below gets a small **⟳ Reload** button next to its
   path field for exactly this: click it after Stop to restore the static data
