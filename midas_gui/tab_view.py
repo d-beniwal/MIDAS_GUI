@@ -30,7 +30,8 @@ from midas_gui.helpers import (_fspin, _NoScrollSpinBox, _browse,
                          widgets_to_dict, apply_dict_to_widgets,
                          write_poni, write_standalone_paramstest)
 from midas_gui.widgets import PickableImageViewer, ProfileViewer, DataLoaderPanel
-from midas_gui.workers import ProjectionWorker, build_integration_context, integrate_frame
+from midas_gui.workers import (ProjectionWorker, AllFrameStatsWorker,
+                               build_integration_context, integrate_frame)
 from midas_gui import style as S
 
 # Default ring colors assigned to new materials, cycled by row count. First
@@ -143,6 +144,8 @@ class DataViewerTab(QtWidgets.QWidget):
         self._picked_r: Optional[float] = None
         self._is_projection = False                # showing a projected stack?
         self._proj_worker = None
+        self._stats_worker = None                  # AllFrameStatsWorker for "All frames" scope
+        self._stats_all_frames_dirty = False        # a request arrived while one was running
         self._rad_grid_cache = None                # (key, which, nbins, r_axis)
         # Full calibration geometry (tilts + distortion) from a loaded calibration
         # file → proper MIDAS-engine radial integration; None = simple circle binning.
@@ -1363,8 +1366,7 @@ class DataViewerTab(QtWidgets.QWidget):
                     return
                 sp.set_data(self._unmasked_values(img), scope="Projected stack")
             elif sp.scope() == "all":
-                vals, n = self._all_frame_values()
-                sp.set_data(vals, scope=f"All frames ({n})")
+                self._update_stats_all_frames()
             else:
                 img = self._cur
                 if img is None:
@@ -1380,20 +1382,36 @@ class DataViewerTab(QtWidgets.QWidget):
         bad = self._combined_bad_mask(img)
         return img[~bad] if bad is not None else np.asarray(img).ravel()
 
-    def _all_frame_values(self):
-        """Combined unmasked pixel values across all frames (corrections applied)."""
-        stack = np.asarray(self._loader.full_stack())
-        if stack.ndim == 2:
-            stack = stack[None, ...]
-        corr = np.asarray(self._loader.corrected(stack), dtype=np.float32)
-        bad = ~np.isfinite(corr)
-        if self._imask_on.isChecked():
-            lo, hi = self._imask_lo.value(), self._imask_hi.value()
-            if lo > -1e9:
-                bad |= (corr <= lo)
-            if hi > 0:
-                bad |= (corr > hi)
-        cm = self._loader.composite_mask()
-        if cm is not None and cm.shape == corr.shape[1:]:
-            bad |= (cm != 0)[None, :, :]
-        return corr[~bad], corr.shape[0]
+    def _update_stats_all_frames(self):
+        """Kick off (or flag for re-run) a background computation of the "All
+        frames" stats scope. Reading + correcting an entire stack/live buffer
+        synchronously here would freeze the UI for large data, unlike the
+        per-frame scope which already has a corrected frame in hand."""
+        if self._stats_worker is not None and self._stats_worker.isRunning():
+            self._stats_all_frames_dirty = True
+            return
+        self._stats_all_frames_dirty = False
+        self._stats_worker = AllFrameStatsWorker(
+            self._loader.full_stack,
+            dark=self._loader.dark(), bright=self._loader.bright(),
+            background=self._loader.background(), bright_mode=self._loader.bright_mode(),
+            composite_mask=self._loader.composite_mask(),
+            imask_on=self._imask_on.isChecked(),
+            imask_lo=self._imask_lo.value(), imask_hi=self._imask_hi.value(),
+            parent=self)
+        self._stats_worker.finished.connect(self._on_all_frame_stats_done)
+        self._stats_worker.failed.connect(self._on_all_frame_stats_fail)
+        self._stats_worker.start()
+
+    def _on_all_frame_stats_done(self, vals, n):
+        sp = getattr(self._loader, "stats_panel", None)
+        if sp is not None and sp.scope() == "all" and not self._is_projection:
+            sp.set_data(vals, scope=f"All frames ({n})")
+        if self._stats_all_frames_dirty:
+            self._update_stats_all_frames()
+
+    def _on_all_frame_stats_fail(self, msg):
+        print(msg)   # background stats readout — mirror the try/except's
+                      # silent-to-the-user, printed-to-console handling.
+        if self._stats_all_frames_dirty:
+            self._update_stats_all_frames()

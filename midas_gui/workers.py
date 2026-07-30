@@ -537,6 +537,54 @@ class ProjectionWorker(QtCore.QThread):
             self.failed.emit(traceback.format_exc())
 
 
+class AllFrameStatsWorker(QtCore.QThread):
+    """Compute unmasked pixel values across an entire stack off the GUI thread.
+
+    The "All frames" intensity-stats scope needs to read + correct the whole
+    stack (or live ring buffer), which can take seconds for a large stack —
+    doing it synchronously on the GUI thread would freeze the UI. All
+    GUI-derived inputs (dark/bright/background arrays, mask, intensity-range
+    thresholds) are captured by the caller before construction so run() only
+    touches numpy data, never Qt widgets.
+    """
+    finished = QtCore.pyqtSignal(object, int)   # unmasked values, n frames
+    failed   = QtCore.pyqtSignal(str)
+
+    def __init__(self, full_stack_fn, *, dark=None, bright=None, background=None,
+                 bright_mode="divide", composite_mask=None,
+                 imask_on=False, imask_lo=0.0, imask_hi=0.0, parent=None):
+        super().__init__(parent)
+        self._full_stack = full_stack_fn
+        self._dark, self._bright, self._background = dark, bright, background
+        self._bright_mode = bright_mode
+        self._composite_mask = composite_mask
+        self._imask_on, self._imask_lo, self._imask_hi = imask_on, imask_lo, imask_hi
+
+    def run(self):
+        try:
+            stack = np.asarray(self._full_stack())
+            if stack.ndim == 2:
+                stack = stack[None, ...]
+            if self._dark is None and self._bright is None and self._background is None:
+                corr = stack.astype(np.float32)
+            else:
+                corr = apply_field_corrections(
+                    stack, dark=self._dark, bright=self._bright,
+                    bright_mode=self._bright_mode, background=self._background).astype(np.float32)
+            bad = ~np.isfinite(corr)
+            if self._imask_on:
+                if self._imask_lo > -1e9:
+                    bad |= (corr <= self._imask_lo)
+                if self._imask_hi > 0:
+                    bad |= (corr > self._imask_hi)
+            cm = self._composite_mask
+            if cm is not None and cm.shape == corr.shape[1:]:
+                bad |= (cm != 0)[None, :, :]
+            self.finished.emit(corr[~bad], corr.shape[0])
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
 class CalibrationWorker(QtCore.QThread):
     log_line = QtCore.pyqtSignal(str)
     finished = QtCore.pyqtSignal(object)
