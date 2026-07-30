@@ -76,6 +76,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Multi-material ring simulation (per-row checkbox/color/name, Material dialog) | `0e9ed21` |
 | Load-calibration card moved below Simulate button; loads now sync ty/tz too; Intensity-range title bar is the on/off checkbox | `05ce224` |
 | Live Data "Use Buffer" last-N-frames ring buffer (Projection/stack analysis on live data) | `911f8ac` |
+| Fix: lock live ring buffer against GUI/worker-thread race | `a88ba1f` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -972,6 +973,20 @@ stacks:
 **Roll back:** `git revert 911f8ac`. Self-contained — no later commit
 depends on the ring-buffer fields or `_get_frame()`/`full_stack()` buffer
 branch.
+
+### `a88ba1f` — Data Viewer: fix live ring-buffer race between GUI and worker threads (2026-07-30)
+**Effect:** `_on_live_frame()` appends to the "Use Buffer" ring buffer
+(`DataLoaderPanel._buffer`, `widgets.py`) on the GUI thread while background
+`QThread`s (e.g. `ProjectionWorker.run()`, reached via `full_stack()`) read
+the same `deque` with no synchronization — a live frame arriving mid-read
+could raise "deque mutated during iteration" or hand analysis a torn frame
+set. Added a `threading.Lock` (`_buffer_lock`) guarding every read/write of
+`self._buffer` and the `_buffer_frozen` flag checked alongside it, in
+`_get_frame()`, `full_stack()`, `_on_live_frame()`, `_on_buffer_toggled()`,
+`_on_buffer_stalled()`, and `_reset_buffer()`.
+**Files:** `midas_gui/widgets.py`.
+**Roll back:** `git revert a88ba1f`. Self-contained — the lock only wraps
+existing buffer accesses, no signature/state-shape changes.
 
 ---
 
