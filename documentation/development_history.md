@@ -80,6 +80,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Fix: refresh-timer starvation during fast live streaming | `2cfd9cd` |
 | Fix: cap live buffer to 100 frames (memory bound) | `839770d` |
 | Fix: "All frames" stats computed off the GUI thread | `08392c6` |
+| Fix: debounce intensity-mask pixel≤/pixel> spinbox edits | `57ced2f` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -1034,6 +1035,23 @@ freeze the UI.
 **Files:** `midas_gui/tab_view.py`, `midas_gui/workers.py`.
 **Roll back:** `git revert 08392c6`. Self-contained — no later commit
 depends on `AllFrameStatsWorker` or the removal of `_all_frame_values()`.
+
+### `57ced2f` — Data Viewer: debounce intensity-mask spinbox edits (2026-07-30)
+**Effect:** The intensity-mask "pixel ≤" / "pixel >" spinboxes triggered
+`_update_stats()` / `_radial_integrate()` (and Top-N re-ranking, if active)
+on every `valueChanged` signal — i.e. once per keystroke or arrow-click —
+doing potentially expensive recomputation while the user was still mid-edit.
+1. Added `_imask_debounce_timer`, a single-shot `QTimer` (120ms), alongside
+   the existing `_refresh_timer` in `__init__`.
+2. `_imask_lo`/`_imask_hi` now connect to a new `_on_imask_value_changed()`,
+   which updates the (cheap) mask overlay immediately for visual feedback
+   but only (re)starts the debounce timer for the heavier recompute; the
+   timer's `timeout` fires the existing `_on_imask_changed()` once edits
+   settle. The on/off toggle (`_imask_on`) is unaffected — it still calls
+   `_on_imask_changed()` directly.
+**Files:** `midas_gui/tab_view.py`.
+**Roll back:** `git revert 57ced2f`. Self-contained — restores the direct
+`valueChanged.connect(self._on_imask_changed)` wiring.
 
 ---
 
