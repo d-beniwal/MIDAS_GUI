@@ -14,6 +14,7 @@ pyqtgraph rules (see context/design_rules.md) preserved:
 from __future__ import annotations
 
 import math
+import threading
 from collections import deque
 from typing import Optional
 
@@ -1698,6 +1699,11 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._cur = None
         self._live_src: Optional[PvaLiveSource] = None
         self._buffer = None            # deque(maxlen=N) once "Use Buffer" is on
+        # Guards all reads/writes of self._buffer: it's appended to from the GUI
+        # thread (_on_live_frame) but read from background QThreads (e.g.
+        # ProjectionWorker.run() via full_stack()) while streaming may still be
+        # live, so a plain deque is not safe to share across threads here.
+        self._buffer_lock = threading.Lock()
         self._buffer_active = False    # "Use Buffer" checked
         self._buffer_frozen = False    # True once frame arrival has paused
         self._buffer_stall_timer = QtCore.QTimer(self)
@@ -2009,8 +2015,10 @@ class DataLoaderPanel(QtWidgets.QWidget):
 
     def _get_frame(self, i: int) -> np.ndarray:
         i = max(0, min(i, self._nframes - 1))
-        if self._buffer_frozen and self._buffer:
-            return np.asarray(list(self._buffer)[i], dtype=np.float32)
+        with self._buffer_lock:
+            frame = list(self._buffer)[i] if (self._buffer_frozen and self._buffer) else None
+        if frame is not None:
+            return np.asarray(frame, dtype=np.float32)
         if self._stack is not None:
             return np.asarray(self._stack[i], dtype=np.float32)
         if self._paths is not None:
@@ -2072,11 +2080,13 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._setup_navigator()
         status = f"Streaming — frame id {image_id}."
         if self._buffer_active:
-            self._buffer.append(image)
+            with self._buffer_lock:
+                self._buffer.append(image)
+                n, cap = len(self._buffer), self._buffer.maxlen
             self._buffer_frozen = False
             self._apply_buffer_style("filling")
             self._buffer_stall_timer.start()
-            status += f"  Buffering ({len(self._buffer)}/{self._buffer.maxlen})."
+            status += f"  Buffering ({n}/{cap})."
         self._live_status_lbl.setText(status)
         self._info.setText(
             f"Live: {self._pv_ed.currentText().strip()}  (id {image_id}, shape {image.shape})")
@@ -2111,9 +2121,10 @@ class DataLoaderPanel(QtWidgets.QWidget):
     def _on_buffer_toggled(self, checked):
         if checked:
             n = self._buffer_n_spin.value()
-            self._buffer = deque(maxlen=n)
+            with self._buffer_lock:
+                self._buffer = deque(maxlen=n)
+                self._buffer_frozen = False
             self._buffer_active = True
-            self._buffer_frozen = False
             self._buffer_n_spin.setEnabled(False)
             self._apply_buffer_style("filling")
             self._buffer_stall_timer.start()
@@ -2125,8 +2136,10 @@ class DataLoaderPanel(QtWidgets.QWidget):
         into a usable stack (same shape of API as a loaded HDF5/folder stack)."""
         if not self._buffer_active or not self._buffer:
             return
-        self._buffer_frozen = True
-        self._nframes = len(self._buffer)
+        with self._buffer_lock:
+            self._buffer_frozen = True
+            n = len(self._buffer)
+        self._nframes = n
         self._setup_navigator()
         self._apply_buffer_style("ready")
         self._live_status_lbl.setText(f"Streaming paused — buffer ready ({self._nframes} frames).")
@@ -2137,9 +2150,10 @@ class DataLoaderPanel(QtWidgets.QWidget):
         by starting a new stream / loading static data (unrelated data)."""
         self._buffer_stall_timer.stop()
         was_stack = self._buffer_frozen
-        self._buffer = None
+        with self._buffer_lock:
+            self._buffer = None
+            self._buffer_frozen = False
         self._buffer_active = False
-        self._buffer_frozen = False
         btn = getattr(self, "_buffer_btn", None)
         if btn is not None:
             self._buffer_n_spin.setEnabled(True)
@@ -2174,8 +2188,10 @@ class DataLoaderPanel(QtWidgets.QWidget):
                 f"border:1px solid {S.ACCENT}; border-radius:4px; padding:4px; }}")
 
     def full_stack(self) -> np.ndarray:
-        if self._buffer_frozen and self._buffer:
-            return np.stack([np.asarray(f, dtype=np.float32) for f in self._buffer], axis=0)
+        with self._buffer_lock:
+            frames = list(self._buffer) if (self._buffer_frozen and self._buffer) else None
+        if frames is not None:
+            return np.stack([np.asarray(f, dtype=np.float32) for f in frames], axis=0)
         if self._stack is not None:
             return np.asarray(self._stack)
         if self._h5 is not None:
