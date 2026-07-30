@@ -3,13 +3,11 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-07-29 (removed the ±10° hard cap on the Data Viewer's
-ty/tz tilt fields and the Calibrate tab's seed tx/ty/tz fields — both now
-accept the full ±180° angle range like other angle fields; also widened
-several other non-data-derived numeric caps — calibration iteration counts,
-multi-panel geometry, correction scale/absorption factors, and
-learnable-mask/gain-training/refinement hyperparameters — that had no
-physical or data-derived justification for their prior bounds)
+**Last updated:** 2026-07-29 (Data Viewer Ring simulation card reworked to
+support multiple materials at once — per-material checkbox row with a color
+swatch and a clickable name that opens a Material dialog for lattice/SG/preset
+editing and renaming; lattice fields now show 3 decimals and angle fields 2
+decimals, down from 5/3)
 
 > **Maintenance:** keep this document in sync with the code — whenever the workflow
 > or a tab's controls change, update the relevant section here in the same change.
@@ -209,14 +207,30 @@ an image is loaded warns instead of writing a file (there is no detector size to
 | pixel ≤ / pixel > | Lower / upper bounds. On load, the upper bound auto-fills to **max(99.99th percentile, 100000)**. |
 
 ### Ring simulation card
-Overlays simulated Debye-Scherrer rings to check geometry.
-- **Material** dropdown (CeO₂, LaB₆, Si, Al₂O₃, Cu, Ni, FCC-γFe, BCC-αFe, Au, Ag, Pt,
-  W, Ti) or **Custom**.
-- Lattice entry is compact: **a, b, c** on one row and **α, β, γ** on the next, plus
-  **SG #**. A **Cubic (a=b=c, α=β=γ=90°)** checkbox lets you enter only `a` for cubic
-  crystals (b, c mirror a; angles fixed at 90°). Lattice fields are editable only for
-  Custom.
-- Geometry: λ, max 2θ, Lsd, pixel size, and beam centre (auto = image centre, or
+Overlays simulated Debye-Scherrer rings to check geometry. Supports **multiple
+materials at once** — e.g. a sample phase overlaid on a calibrant — each with
+its own lattice, visibility, and ring color.
+- **Material rows**: one row per material, each with a **checkbox** (show/hide
+  that material's rings on both the image and the radial-integration plot), a
+  **color swatch** button (click to open a color picker; the chosen color
+  drives that material's ring lines and hkl labels on both plots), and the
+  **material name** as a clickable (underlined) button. A **✕** button deletes
+  the row — disabled when only one material remains, since at least one row
+  is always kept. **+ Add material** appends a new row (default name
+  `Material N`, generic cubic lattice, next color from a 10-color palette
+  cycled by row order). A single default **Ni (FCC)** row is present at
+  startup, matching the pre-multi-material behavior.
+- Clicking a material's name opens a **Material dialog**: an editable **Name**
+  field, the **Preset** dropdown (CeO₂, LaB₆, Si, Al₂O₃, Cu, Ni, FCC-γFe,
+  BCC-αFe, Au, Ag, Pt, W, Ti, or **Custom**), lattice **a, b, c** (3 decimals)
+  on one row and **α, β, γ** (2 decimals) on the next, plus **SG #**, and a
+  **Cubic (a=b=c, α=β=γ=90°)** checkbox that lets you enter only `a` for cubic
+  crystals (b, c mirror a; angles fixed at 90°). Lattice fields are editable
+  only for Custom. OK applies the name/lattice/preset back to that material's
+  row (renaming here updates the row's displayed name); Cancel discards edits.
+- Geometry (λ, max 2θ, Lsd, pixel size, beam centre) is shared across all
+  materials — only the lattice/space-group/color/visibility are per-material.
+  Beam centre (auto = image centre, or
   manual BC_y/BC_z). The **λ** label is clickable (underlined) — click it for a
   menu of common K-edge foils (Pr, Sm, Yb, Lu, Hf, Ta, W, Re, Pt, Au, Pb, Bi) that
   sets λ to that element's K absorption-edge wavelength. The same clickable-λ menu

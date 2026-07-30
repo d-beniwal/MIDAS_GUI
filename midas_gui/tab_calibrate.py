@@ -946,7 +946,8 @@ class CalibrationTab(QtWidgets.QWidget):
         if self._result:
             radii = _predict_ring_radii(self._result)
             self._prof_view.set_ring_markers(
-                radii, data["lsd_um"], data["px_um"], data["wavelength_A"])
+                [{"radii": radii, "color": "#f0c060"}],
+                data["lsd_um"], data["px_um"], data["wavelength_A"])
             self._resid_chart.set_data(data["r_axis_px"], data["profile"], radii)
 
     # ── Save ───────────────────────────────────────────────────────

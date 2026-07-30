@@ -1,9 +1,10 @@
 """Tab 0 — Data Viewer.
 
 Plot single/stacked TIFF, HDF5 (2-D or 3-D), or a folder/glob of frames, with a
-frame navigator for stacks.  Define a material (dropdown of common calibrants and
-metals) or a custom lattice + space group + wavelength + Lsd + pixel size, and
-overlay the simulated Debye-Scherrer ring positions on the image.
+frame navigator for stacks.  Define one or more materials (each a dropdown-preset
+or custom lattice + space group, independently toggled and colored) alongside a
+shared wavelength + Lsd + pixel size, and overlay the simulated Debye-Scherrer
+ring positions from every enabled material on the image and radial profile.
 
 This tab is purely for inspection — it produces no shared state for other tabs.
 """
@@ -14,7 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
 from midas_gui.constants import (MATERIALS, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM,
@@ -31,6 +32,102 @@ from midas_gui.helpers import (_fspin, _NoScrollSpinBox, _browse,
 from midas_gui.widgets import PickableImageViewer, ProfileViewer, DataLoaderPanel
 from midas_gui.workers import ProjectionWorker, build_integration_context, integrate_frame
 from midas_gui import style as S
+
+# Default ring colors assigned to new materials, cycled by row count. First
+# entry matches the single hardcoded ring color the old single-material UI used.
+_MATERIAL_COLORS = ("#f0c060", "#4fc3f7", "#ab47bc", "#66bb6a", "#ef5350",
+                     "#ffca28", "#26a69a", "#ec407a", "#7e57c2", "#8d6e63")
+
+
+class MaterialDialog(QtWidgets.QDialog):
+    """Edit one ring-simulation material: name, preset, lattice, space group."""
+
+    def __init__(self, material: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Material")
+        v = QtWidgets.QVBoxLayout(self)
+
+        self._name = QtWidgets.QLineEdit(material["name"])
+        v.addLayout(S.Form().row(("Name:", self._name)))
+
+        self._preset = _NoScrollComboBox()
+        for name in MATERIALS:
+            self._preset.addItem(name)
+        self._preset.addItem("Custom")
+        idx = self._preset.findText(material.get("preset", "Custom"))
+        self._preset.setCurrentIndex(idx if idx >= 0 else self._preset.findText("Custom"))
+        self._preset.currentTextChanged.connect(self._on_preset)
+        v.addLayout(S.Form().row(("Preset:", self._preset)))
+
+        _LW, _AW = 78, 66     # compact lattice / angle-SG cell widths
+        self._a = _fspin(0.1, 100.0, 3, material["a"]); self._a.setFixedWidth(_LW)
+        self._b = _fspin(0.1, 100.0, 3, material["b"]); self._b.setFixedWidth(_LW)
+        self._c = _fspin(0.1, 100.0, 3, material["c"]); self._c.setFixedWidth(_LW)
+        self._al = _fspin(1.0, 179.0, 2, material["alpha"]); self._al.setFixedWidth(_AW)
+        self._be = _fspin(1.0, 179.0, 2, material["beta"]); self._be.setFixedWidth(_AW)
+        self._ga = _fspin(1.0, 179.0, 2, material["gamma"]); self._ga.setFixedWidth(_AW)
+        self._sg = _NoScrollSpinBox(); self._sg.setRange(1, 230); self._sg.setValue(material["sg"])
+        self._sg.setFixedWidth(_AW)
+        self._cubic = QtWidgets.QCheckBox("Cubic (a=b=c, α=β=γ=90°)")
+        self._cubic.setToolTip("Enter only a — b and c mirror it and all angles are fixed at 90°.")
+        self._cubic.setChecked(bool(material.get("cubic", False)))
+        self._cubic.toggled.connect(self._apply_lattice_enabled)
+        self._a.valueChanged.connect(self._on_a_changed)
+        latt = S.Form()
+        latt.row(("a:", self._a), ("b:", self._b), ("c:", self._c))
+        latt.row(("α:", self._al), ("β:", self._be), ("γ:", self._ga))
+        latt.row(("SG #:", self._sg))
+        v.addLayout(latt)
+        v.addWidget(self._cubic)
+        self._apply_lattice_enabled()
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        v.addWidget(buttons)
+
+    def _on_preset(self, name: str):
+        if name != "Custom" and name in MATERIALS:
+            m = MATERIALS[name]
+            for w, k in ((self._a, "a"), (self._b, "b"), (self._c, "c"),
+                         (self._al, "alpha"), (self._be, "beta"), (self._ga, "gamma")):
+                w.blockSignals(True); w.setValue(m[k]); w.blockSignals(False)
+            self._sg.setValue(m["sg"])
+        self._apply_lattice_enabled()
+
+    def _apply_lattice_enabled(self, *_):
+        """Enable lattice fields only for a custom material; under 'Cubic' only a is
+        editable (b, c mirror a and the angles are fixed at 90°)."""
+        custom = self._preset.currentText() == "Custom"
+        self._cubic.setEnabled(custom)
+        cubic = custom and self._cubic.isChecked()
+        self._a.setEnabled(custom); self._sg.setEnabled(custom)
+        for w in (self._b, self._c, self._al, self._be, self._ga):
+            w.setEnabled(custom and not cubic)
+        if cubic:
+            self._sync_cubic()
+
+    def _sync_cubic(self):
+        v = self._a.value()
+        for w in (self._b, self._c):
+            w.blockSignals(True); w.setValue(v); w.blockSignals(False)
+        for w in (self._al, self._be, self._ga):
+            w.blockSignals(True); w.setValue(90.0); w.blockSignals(False)
+
+    def _on_a_changed(self, *_):
+        if self._cubic.isEnabled() and self._cubic.isChecked():
+            self._sync_cubic()
+
+    def apply_to(self, material: dict):
+        """Write the dialog's current values back into ``material``."""
+        material["name"] = self._name.text().strip() or material["name"]
+        material["preset"] = self._preset.currentText()
+        material["a"] = self._a.value(); material["b"] = self._b.value(); material["c"] = self._c.value()
+        material["alpha"] = self._al.value(); material["beta"] = self._be.value()
+        material["gamma"] = self._ga.value()
+        material["sg"] = self._sg.value()
+        material["cubic"] = self._cubic.isChecked()
 
 
 class DataViewerTab(QtWidgets.QWidget):
@@ -157,11 +254,6 @@ class DataViewerTab(QtWidgets.QWidget):
             "imask_on": self._imask_on,
             "imask_lo": self._imask_lo,
             "imask_hi": self._imask_hi,
-            "mat": self._mat,
-            "a": self._a, "b": self._b, "c": self._c,
-            "al": self._al, "be": self._be, "ga": self._ga,
-            "sg": self._sg,
-            "cubic": self._cubic,
             "wl": self._wl,
             "lsd": self._lsd,
             "px": self._px,
@@ -180,8 +272,10 @@ class DataViewerTab(QtWidgets.QWidget):
         }
 
     def get_state(self) -> dict:
-        return {"fields": widgets_to_dict(self._state_widgets()),
-                "loader": self._loader.get_state()}
+        fields = widgets_to_dict(self._state_widgets())
+        fields["materials"] = [{k: v for k, v in m.items() if not k.startswith("_")}
+                                for m in self._materials]
+        return {"fields": fields, "loader": self._loader.get_state()}
 
     def set_state(self, state: dict):
         """Restores the loader (which re-triggers its own data reload) and any
@@ -195,6 +289,9 @@ class DataViewerTab(QtWidgets.QWidget):
             self._calib_ed.setText(calib_path)
             if Path(calib_path).exists():
                 self._load_calibration()
+        materials = fields.get("materials")
+        if materials:
+            self._set_materials(materials)
         apply_dict_to_widgets(self._state_widgets(), fields)
         self._redraw_rings()
         if self._rad_auto.isChecked():
@@ -327,36 +424,15 @@ class DataViewerTab(QtWidgets.QWidget):
 
         # ── Ring simulation card ──
         ring = S.make_card("Ring simulation")
-        self._mat = _NoScrollComboBox()
-        self._mat.setMaximumWidth(150)
-        for name in MATERIALS:
-            self._mat.addItem(name)
-        self._mat.addItem("Custom")
-        ni_idx = self._mat.findText("Ni (FCC)")
-        if ni_idx >= 0:
-            self._mat.setCurrentIndex(ni_idx)
-        self._mat.currentTextChanged.connect(self._on_material)
-        ring.body.addLayout(S.Form().row(("Material:", self._mat)))
-
-        _LW, _AW = 78, 66     # compact lattice / angle-SG cell widths
-        self._a = _fspin(0.1, 100.0, 5, 5.4116); self._a.setFixedWidth(_LW)
-        self._b = _fspin(0.1, 100.0, 5, 5.4116); self._b.setFixedWidth(_LW)
-        self._c = _fspin(0.1, 100.0, 5, 5.4116); self._c.setFixedWidth(_LW)
-        self._al = _fspin(1.0, 179.0, 3, 90.0); self._al.setFixedWidth(_AW)
-        self._be = _fspin(1.0, 179.0, 3, 90.0); self._be.setFixedWidth(_AW)
-        self._ga = _fspin(1.0, 179.0, 3, 90.0); self._ga.setFixedWidth(_AW)
-        self._sg = _NoScrollSpinBox(); self._sg.setRange(1, 230); self._sg.setValue(225)
-        self._sg.setFixedWidth(_AW)
-        self._cubic = QtWidgets.QCheckBox("Cubic (a=b=c, α=β=γ=90°)")
-        self._cubic.setToolTip("Enter only a — b and c mirror it and all angles are fixed at 90°.")
-        self._cubic.toggled.connect(self._apply_lattice_enabled)
-        self._a.valueChanged.connect(self._on_a_changed)
-        latt = S.Form()
-        latt.row(("a:", self._a), ("b:", self._b), ("c:", self._c))
-        latt.row(("α:", self._al), ("β:", self._be), ("γ:", self._ga))
-        latt.row(("SG #:", self._sg))
-        ring.body.addLayout(latt)
-        ring.body.addWidget(self._cubic)
+        self._materials: list = []
+        self._materials_box = QtWidgets.QVBoxLayout()
+        self._materials_box.setSpacing(3)
+        ring.body.addLayout(self._materials_box)
+        self._add_material("Ni (FCC)")
+        add_mat_btn = QtWidgets.QPushButton("+ Add material")
+        add_mat_btn.setToolTip("Overlay rings from another material simultaneously.")
+        add_mat_btn.clicked.connect(lambda: self._add_material())
+        ring.body.addWidget(add_mat_btn)
         ring.body.addWidget(S.hline())
 
         self._wl = _fspin(0.001, 10.0, 5, DEFAULT_WAVELENGTH, "Å", step=DEFAULT_STEP_WAVELENGTH)
@@ -411,11 +487,8 @@ class DataViewerTab(QtWidgets.QWidget):
             "whenever material, lattice, or geometry parameters change.")
         self._sim_btn.toggled.connect(self._on_sim_toggled)
         ring.body.addWidget(self._sim_btn)
-        for w in (self._a, self._b, self._c, self._al, self._be, self._ga, self._sg,
-                  self._wl, self._lsd, self._px, self._max2t):
+        for w in (self._wl, self._lsd, self._px, self._max2t):
             w.valueChanged.connect(self._on_sim_param_changed)
-        self._mat.currentTextChanged.connect(self._on_sim_param_changed)
-        self._cubic.toggled.connect(self._on_sim_param_changed)
         self._ring_info = QtWidgets.QPlainTextEdit(); self._ring_info.setReadOnly(True)
         self._ring_info.setMaximumHeight(140)
         self._ring_info.setStyleSheet(f"font-family:{S.MONO_CSS};font-size:10px")
@@ -490,41 +563,129 @@ class DataViewerTab(QtWidgets.QWidget):
         self._ty.valueChanged.connect(self._on_bc_changed)
         self._tz.valueChanged.connect(self._on_bc_changed)
 
-        self._on_material(self._mat.currentText())
+    # ── Materials list ───────────────────────────────────────────
 
-    # ── Material dropdown ─────────────────────────────────────────
+    @staticmethod
+    def _swatch_style(color: str) -> str:
+        return f"background-color:{color}; border:1px solid #555; border-radius:2px;"
 
-    def _on_material(self, name: str):
-        if name != "Custom" and name in MATERIALS:
-            m = MATERIALS[name]
-            for w, k in ((self._a, "a"), (self._b, "b"), (self._c, "c"),
-                         (self._al, "alpha"), (self._be, "beta"), (self._ga, "gamma")):
-                w.blockSignals(True); w.setValue(m[k]); w.blockSignals(False)
-            self._sg.setValue(m["sg"])
-        self._apply_lattice_enabled()
+    def _new_material_defaults(self, name: Optional[str] = None) -> dict:
+        if name is None:
+            name = f"Material {len(self._materials) + 1}"
+        base = MATERIALS.get(name)
+        if base is not None:
+            m = dict(a=base["a"], b=base["b"], c=base["c"],
+                      alpha=base["alpha"], beta=base["beta"], gamma=base["gamma"],
+                      sg=base["sg"])
+            preset = name
+        else:
+            m = dict(a=5.4116, b=5.4116, c=5.4116, alpha=90.0, beta=90.0, gamma=90.0, sg=225)
+            preset = "Custom"
+        m.update(name=name, preset=preset, enabled=True, cubic=False,
+                  color=_MATERIAL_COLORS[len(self._materials) % len(_MATERIAL_COLORS)])
+        return m
 
-    def _apply_lattice_enabled(self, *_):
-        """Enable lattice fields only for a custom material; under 'Cubic' only a is
-        editable (b, c mirror a and the angles are fixed at 90°)."""
-        custom = self._mat.currentText() == "Custom"
-        self._cubic.setEnabled(custom)
-        cubic = custom and self._cubic.isChecked()
-        self._a.setEnabled(custom); self._sg.setEnabled(custom)
-        for w in (self._b, self._c, self._al, self._be, self._ga):
-            w.setEnabled(custom and not cubic)
-        if cubic:
-            self._sync_cubic()
+    def _build_material_row(self, material: dict) -> QtWidgets.QWidget:
+        row = QtWidgets.QWidget()
+        h = QtWidgets.QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0); h.setSpacing(4)
+        chk = QtWidgets.QCheckBox()
+        chk.setChecked(material["enabled"])
+        chk.setToolTip("Show this material's rings")
+        chk.toggled.connect(lambda checked, m=material: self._on_material_enabled(m, checked))
+        swatch = QtWidgets.QPushButton()
+        swatch.setFixedSize(18, 18)
+        swatch.setToolTip("Ring color for this material (image + integration plot)")
+        swatch.setStyleSheet(self._swatch_style(material["color"]))
+        swatch.clicked.connect(lambda _, m=material, sw=swatch: self._pick_material_color(m, sw))
+        name_btn = QtWidgets.QPushButton(material["name"])
+        name_btn.setFlat(True)
+        name_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        name_btn.setStyleSheet(
+            "QPushButton{text-align:left; color:#8ecdf7; text-decoration:underline; "
+            "border:none; padding:0;}")
+        name_btn.setToolTip("Edit this material's lattice, space group, and name")
+        name_btn.clicked.connect(lambda _, m=material, nb=name_btn: self._edit_material(m, nb))
+        del_btn = QtWidgets.QPushButton("✕")
+        del_btn.setFixedSize(20, 20)
+        del_btn.setToolTip("Remove this material")
+        del_btn.clicked.connect(lambda _, m=material, r=row: self._delete_material(m, r))
+        h.addWidget(chk); h.addWidget(swatch); h.addWidget(name_btn, 1); h.addWidget(del_btn)
+        row._del_btn = del_btn
+        return row
 
-    def _sync_cubic(self):
-        v = self._a.value()
-        for w in (self._b, self._c):
-            w.blockSignals(True); w.setValue(v); w.blockSignals(False)
-        for w in (self._al, self._be, self._ga):
-            w.blockSignals(True); w.setValue(90.0); w.blockSignals(False)
+    def _update_material_delete_buttons(self):
+        many = len(self._materials) > 1
+        for i in range(self._materials_box.count()):
+            item = self._materials_box.itemAt(i)
+            row = item.widget() if item is not None else None
+            if row is not None:
+                row._del_btn.setEnabled(many)
 
-    def _on_a_changed(self, *_):
-        if self._cubic.isEnabled() and self._cubic.isChecked():
-            self._sync_cubic()
+    def _add_material(self, name: Optional[str] = None):
+        material = self._new_material_defaults(name)
+        self._materials.append(material)
+        self._materials_box.addWidget(self._build_material_row(material))
+        self._update_material_delete_buttons()
+        self._on_sim_param_changed()
+
+    def _set_materials(self, materials: list):
+        """Replace the whole materials list (e.g. from a loaded GUI state)."""
+        for i in reversed(range(self._materials_box.count())):
+            item = self._materials_box.takeAt(i)
+            w = item.widget() if item is not None else None
+            if w is not None:
+                w.deleteLater()
+        self._materials = []
+        for md in materials:
+            m = dict(md)
+            m.setdefault("preset", "Custom")
+            m.setdefault("cubic", False)
+            m.setdefault("enabled", True)
+            m.setdefault("color", _MATERIAL_COLORS[len(self._materials) % len(_MATERIAL_COLORS)])
+            self._materials.append(m)
+            self._materials_box.addWidget(self._build_material_row(m))
+        if not self._materials:
+            self._add_material("Ni (FCC)")
+        self._update_material_delete_buttons()
+
+    def _on_material_enabled(self, material: dict, checked: bool):
+        material["enabled"] = checked
+        self._on_sim_param_changed()
+
+    def _pick_material_color(self, material: dict, swatch_btn: QtWidgets.QPushButton):
+        col = QtWidgets.QColorDialog.getColor(QtGui.QColor(material["color"]), self, "Ring color")
+        if not col.isValid():
+            return
+        material["color"] = col.name()
+        swatch_btn.setStyleSheet(self._swatch_style(material["color"]))
+        self._redraw_rings()
+        self._refresh_profile_markers()
+
+    def _edit_material(self, material: dict, name_btn: QtWidgets.QPushButton):
+        dlg = MaterialDialog(material, self)
+        if dlg.exec_() == QtWidgets.QDialog.Accepted:
+            dlg.apply_to(material)
+            name_btn.setText(material["name"])
+            self._on_sim_param_changed()
+
+    def _delete_material(self, material: dict, row: QtWidgets.QWidget):
+        if len(self._materials) <= 1:
+            return
+        self._materials.remove(material)
+        self._materials_box.removeWidget(row)
+        row.deleteLater()
+        self._update_material_delete_buttons()
+        self._on_sim_param_changed()
+
+    def _any_material_rings(self) -> bool:
+        return any(m.get("_rings") for m in self._materials)
+
+    def _primary_material_name(self) -> str:
+        for m in self._materials:
+            if m["enabled"]:
+                return m["name"]
+        return self._materials[0]["name"] if self._materials else "Custom"
 
     # ── Loading ───────────────────────────────────────────────────
 
@@ -608,7 +769,7 @@ class DataViewerTab(QtWidgets.QWidget):
             NZ, NY = self._cur.shape
             for w, v in ((self._bcy, NY / 2.0), (self._bcz, NZ / 2.0)):
                 w.blockSignals(True); w.setValue(v); w.blockSignals(False)
-        if getattr(self, "_rings", None):
+        if self._any_material_rings():
             self._redraw_rings()
         self._update_intensity_overlay()
         self._update_stats()
@@ -630,34 +791,52 @@ class DataViewerTab(QtWidgets.QWidget):
             self._simulate()
 
     def _on_sim_param_changed(self, *_):
-        """Material/lattice/geometry field edited — resimulate while live mode is on."""
-        if self._sim_btn.isChecked() and self._cur is not None:
+        """Material/lattice/geometry field edited — resimulate while live mode is on.
+
+        Guarded with ``getattr`` because materials are seeded (via
+        ``_add_material``) before ``self._sim_btn`` exists during ``_build_ui``."""
+        sim_btn = getattr(self, "_sim_btn", None)
+        if sim_btn is not None and sim_btn.isChecked() and self._cur is not None:
             self._simulate()
 
     def _simulate(self):
         if self._cur is None:
             QtWidgets.QMessageBox.warning(self, "No image", "Load data first."); return
-        try:
-            lattice = dict(a=self._a.value(), b=self._b.value(), c=self._c.value(),
-                           alpha=self._al.value(), beta=self._be.value(), gamma=self._ga.value())
-            rings = simulate_rings(lattice, self._sg.value(), self._wl.value(),
-                                   self._lsd_um(), self._px.value(), self._max2t.value())
-        except Exception as e:
-            import traceback
-            QtWidgets.QMessageBox.critical(self, "Simulation error", traceback.format_exc()[:500]); return
-        self._rings = rings
+        lines, errors, any_rings = [], [], False
+        for m in self._materials:
+            m["_rings"] = []
+            if not m["enabled"]:
+                continue
+            try:
+                lattice = dict(a=m["a"], b=m["b"], c=m["c"],
+                               alpha=m["alpha"], beta=m["beta"], gamma=m["gamma"])
+                rings = simulate_rings(lattice, m["sg"], self._wl.value(),
+                                       self._lsd_um(), self._px.value(), self._max2t.value())
+            except Exception:
+                import traceback
+                errors.append(f"{m['name']}: {traceback.format_exc().splitlines()[-1]}")
+                continue
+            m["_rings"] = rings
+            any_rings = True
+            lines.append(f"{m['name']}: {len(rings)} rings")
+            lines.append(f"{'hkl':>10}  {'2θ(°)':>7}  {'d(Å)':>7}  {'R(px)':>8}")
+            for r in rings:
+                h, k, l = r["hkl"]
+                lines.append(f"{str((h,k,l)):>10}  {r['two_theta_deg']:7.3f}  "
+                             f"{r['d_spacing']:7.4f}  {r['radius_px']:8.1f}")
+            lines.append("")
         self._redraw_rings()
         if self._rad_auto.isChecked():
             self._radial_integrate()
         else:
             self._refresh_profile_markers()
-        lines = [f"{len(rings)} rings  (material: {self._mat.currentText()})",
-                 f"{'hkl':>10}  {'2θ(°)':>7}  {'d(Å)':>7}  {'R(px)':>8}"]
-        for r in rings:
-            h, k, l = r["hkl"]
-            lines.append(f"{str((h,k,l)):>10}  {r['two_theta_deg']:7.3f}  "
-                         f"{r['d_spacing']:7.4f}  {r['radius_px']:8.1f}")
-        self._ring_info.setPlainText("\n".join(lines))
+        if errors:
+            lines.append("Errors:"); lines.extend(errors)
+        if not any_rings and not errors:
+            lines = ["No enabled materials."]
+        self._ring_info.setPlainText("\n".join(lines).rstrip())
+        if errors and not any_rings:
+            QtWidgets.QMessageBox.critical(self, "Simulation error", "\n".join(errors)[:500])
 
     def _clear_rings(self):
         for it in self._ring_items + self._label_items:
@@ -666,39 +845,42 @@ class DataViewerTab(QtWidgets.QWidget):
 
     def _redraw_rings(self):
         self._clear_rings()
-        rings = getattr(self, "_rings", None)
-        if not rings or self._cur is None:
+        if self._cur is None or not self._any_material_rings():
             return
         bc_y, bc_z = self._bcy.value(), self._bcz.value()
         ty, tz = self._ty.value(), self._tz.value()
         tilted = abs(ty) > 1e-9 or abs(tz) > 1e-9
         px = self._px.value()
         th = np.linspace(0, 2 * math.pi, 400)
-        pen = pg.mkPen("#f0c060", width=self._ring_width.value(), style=QtCore.Qt.DotLine)
         vis_r = self._show_rings.isChecked()
         vis_l = self._show_labels.isChecked() and vis_r
-        for r in rings:
-            rad = r["radius_px"]
-            # Only drop non-physical radii — the ViewBox already clips rings
-            # that extend past the visible image, so there's no need to cap
-            # at the image diagonal (that silently hid high-2theta rings).
-            if not (rad > 0 and math.isfinite(rad)):
+        for m in self._materials:
+            rings = m.get("_rings")
+            if not m["enabled"] or not rings:
                 continue
-            if tilted:
-                ys, zs = tilted_ring_xy(r["two_theta_deg"], 0.0, ty, tz,
-                                         self._lsd_um(), bc_y, bc_z, px, px)
-                label_y, label_z = ys[len(ys) // 2], zs[len(zs) // 2]
-            else:
-                ys = bc_y + rad * np.cos(th); zs = bc_z + rad * np.sin(th)
-                label_y, label_z = bc_y, bc_z - rad
-            item = pg.PlotDataItem(ys, zs, pen=pen)
-            item.setVisible(vis_r)
-            self._viewer._iv.addItem(item); self._ring_items.append(item)
-            h, k, l = r["hkl"]
-            txt = pg.TextItem(f"{h}{k}{l}", color="#f0c060", anchor=(0.5, 1.0))
-            txt.setPos(label_y, label_z)
-            txt.setVisible(vis_l)
-            self._viewer._iv.addItem(txt); self._label_items.append(txt)
+            pen = pg.mkPen(m["color"], width=self._ring_width.value(), style=QtCore.Qt.DotLine)
+            for r in rings:
+                rad = r["radius_px"]
+                # Only drop non-physical radii — the ViewBox already clips rings
+                # that extend past the visible image, so there's no need to cap
+                # at the image diagonal (that silently hid high-2theta rings).
+                if not (rad > 0 and math.isfinite(rad)):
+                    continue
+                if tilted:
+                    ys, zs = tilted_ring_xy(r["two_theta_deg"], 0.0, ty, tz,
+                                             self._lsd_um(), bc_y, bc_z, px, px)
+                    label_y, label_z = ys[len(ys) // 2], zs[len(zs) // 2]
+                else:
+                    ys = bc_y + rad * np.cos(th); zs = bc_z + rad * np.sin(th)
+                    label_y, label_z = bc_y, bc_z - rad
+                item = pg.PlotDataItem(ys, zs, pen=pen)
+                item.setVisible(vis_r)
+                self._viewer._iv.addItem(item); self._ring_items.append(item)
+                h, k, l = r["hkl"]
+                txt = pg.TextItem(f"{h}{k}{l}", color=m["color"], anchor=(0.5, 1.0))
+                txt.setPos(label_y, label_z)
+                txt.setVisible(vis_l)
+                self._viewer._iv.addItem(txt); self._label_items.append(txt)
         # beam-centre marker
         bc = pg.ScatterPlotItem([bc_y], [bc_z], symbol="+", size=16,
                                 pen=pg.mkPen("#00cfff", width=2), brush=pg.mkBrush(0, 0, 0, 0))
@@ -727,7 +909,7 @@ class DataViewerTab(QtWidgets.QWidget):
 
     def _on_bc_changed(self, *_):
         """Beam centre edited (manually or by a pick) — refresh overlays/plot."""
-        if getattr(self, "_rings", None):
+        if self._any_material_rings():
             self._redraw_rings()
         self._redraw_picked_ring()
         if self._rad_auto.isChecked():
@@ -759,13 +941,10 @@ class DataViewerTab(QtWidgets.QWidget):
             self._radial_integrate()
 
     def _refresh_profile_markers(self):
-        rings = getattr(self, "_rings", None)
-        if rings:
-            self._profile_view.set_ring_markers(
-                [r["radius_px"] for r in rings],
-                self._lsd_um(), self._px.value(), self._wl.value())
-        else:
-            self._profile_view.set_ring_markers([])
+        groups = [{"radii": [r["radius_px"] for r in m["_rings"]], "color": m["color"]}
+                  for m in self._materials if m["enabled"] and m.get("_rings")]
+        self._profile_view.set_ring_markers(
+            groups, self._lsd_um(), self._px.value(), self._wl.value())
 
     def _effective_calib_geom(self) -> Optional[dict]:
         """Geometry used for radial integration: the loaded calibration's full
@@ -1029,7 +1208,7 @@ class DataViewerTab(QtWidgets.QWidget):
                     tx=float(geom.get("tx") or 0.0), ty=float(geom.get("ty") or 0.0),
                     tz=float(geom.get("tz") or 0.0), wavelength_A=float(geom["wavelength_A"]),
                     distortion=geom.get("distortion") or {},
-                    _calibrant_name=self._mat.currentText())
+                    _calibrant_name=self._primary_material_name())
                 write_standalone_paramstest(ns, path)
             elif kind == "poni":
                 write_poni(geom, path)

@@ -607,7 +607,7 @@ class ProfileViewer(QtWidgets.QWidget):
 
         self._r_px = self._prof = self._sigma = None
         self._wl = self._lsd = self._px = None
-        self._ring_radii_px: list = []
+        self._ring_groups: list = []   # [{"radii": [...], "color": "#hex"}, ...]
         self._ring_lsd = self._ring_px = self._ring_wl = None
 
     def set_profile(self, r_px, profile, *, sigma=None, wavelength_A=None,
@@ -620,8 +620,10 @@ class ProfileViewer(QtWidgets.QWidget):
         self._px     = px_um
         self._replot()
 
-    def set_ring_markers(self, radii_px, lsd_um=None, px_um=None, wl=None):
-        self._ring_radii_px = list(radii_px)
+    def set_ring_markers(self, groups, lsd_um=None, px_um=None, wl=None):
+        """``groups``: list of ``{"radii": [r_px, ...], "color": "#rrggbb"}`` —
+        one entry per material, each drawn in its own color."""
+        self._ring_groups = list(groups)
         self._ring_lsd = lsd_um
         self._ring_px  = px_um
         self._ring_wl  = wl
@@ -757,18 +759,20 @@ class ProfileViewer(QtWidgets.QWidget):
             for ln in self._ring_lines:
                 self._plot.removeItem(ln)
             self._ring_lines.clear()
-            if self._ring_radii_px:
-                pen = pg.mkPen("#f0c060", width=1.5, style=QtCore.Qt.DotLine)
+            if self._ring_groups:
                 lsd = self._ring_lsd or self._lsd
                 px  = self._ring_px  or self._px
                 wl  = self._ring_wl  or self._wl
-                for r in self._ring_radii_px:
-                    x_pos = self._r_to_x(r, idx, lsd, px, wl)
-                    if x_pos is None:
-                        continue
-                    ln = pg.InfiniteLine(pos=x_pos, angle=90, pen=pen, movable=False)
-                    self._plot.addItem(ln)
-                    self._ring_lines.append(ln)
+                for group in self._ring_groups:
+                    pen = pg.mkPen(group.get("color", "#f0c060"), width=1.5,
+                                    style=QtCore.Qt.DotLine)
+                    for r in group.get("radii", []):
+                        x_pos = self._r_to_x(r, idx, lsd, px, wl)
+                        if x_pos is None:
+                            continue
+                        ln = pg.InfiniteLine(pos=x_pos, angle=90, pen=pen, movable=False)
+                        self._plot.addItem(ln)
+                        self._ring_lines.append(ln)
         finally:
             self._suspend_range_track = False
 
