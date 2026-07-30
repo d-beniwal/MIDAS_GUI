@@ -150,7 +150,12 @@ class DataViewerTab(QtWidgets.QWidget):
         self._calib_ctx = None                     # cached (spec, integration context)
         self._calib_ctx_sig = None                 # signature the context was built for
         self._topn_items: list = []                # scatter overlays for Top-N pixels
-        # Debounce the frame slider: coalesce rapid ticks into one heavy refresh.
+        # Throttle rapid dataChanged bursts (slider drag, fast live streaming)
+        # into one heavy refresh per interval. A single-shot QTimer is used as
+        # a throttle, not a trailing-edge debounce: _on_data_changed() below
+        # only (re)starts it while idle, so once armed it fires on schedule
+        # instead of being restarted indefinitely and starved by a continuous
+        # stream of events (e.g. live frames arriving faster than every 60ms).
         self._refresh_timer = QtCore.QTimer(self)
         self._refresh_timer.setSingleShot(True); self._refresh_timer.setInterval(60)
         self._refresh_timer.timeout.connect(self._on_loader_data)
@@ -311,7 +316,7 @@ class DataViewerTab(QtWidgets.QWidget):
         # ── LEFT: data loader (stack mode) ──
         self._loader = DataLoaderPanel(mode="stack", allow_live=True)
         self._loader.setMinimumWidth(200)
-        self._loader.dataChanged.connect(lambda: self._refresh_timer.start())
+        self._loader.dataChanged.connect(self._on_data_changed)
         self._loader.fieldsChanged.connect(self._on_fields_changed)
         split.addWidget(self._loader)
 
@@ -688,6 +693,14 @@ class DataViewerTab(QtWidgets.QWidget):
         return self._materials[0]["name"] if self._materials else "Custom"
 
     # ── Loading ───────────────────────────────────────────────────
+
+    def _on_data_changed(self):
+        """Loader's dataChanged fired — throttle into at most one refresh per
+        interval instead of restarting (and so indefinitely deferring) the
+        timer on every event, which would starve the display during a fast
+        continuous burst (e.g. live streaming faster than the timer interval)."""
+        if not self._refresh_timer.isActive():
+            self._refresh_timer.start()
 
     def _on_loader_data(self):
         """Data loaded or frame changed in the loader — refresh the display,
