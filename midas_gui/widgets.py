@@ -1281,6 +1281,7 @@ class MaskSelector(QtWidgets.QGroupBox):
         super().__init__("Mask", parent)
         self._sources: list = []          # dicts: {kind, path, mask(cache), row(QWidget)}
         self._tab1_mask = None
+        self._mask_warning = None         # set by composite_mask() when a source is dropped
         v = QtWidgets.QVBoxLayout(self)
         v.setContentsMargins(6, 4, 6, 6); v.setSpacing(4)
         self._list = QtWidgets.QVBoxLayout(); self._list.setSpacing(2)
@@ -1315,6 +1316,7 @@ class MaskSelector(QtWidgets.QGroupBox):
 
     def _on_enabled_toggled(self, entry, checked):
         entry["enabled"] = checked
+        self._mask_warning = None  # stale vs. the change just made; composite_mask() recomputes it
         self._refresh(); self.maskChanged.emit()
 
     def _remove(self, entry):
@@ -1323,6 +1325,7 @@ class MaskSelector(QtWidgets.QGroupBox):
             self._sources.remove(entry)
             if entry["kind"] == "tab1":
                 self._tab1_mask = None
+            self._mask_warning = None
             self._refresh(); self.maskChanged.emit()
 
     def _add_source(self, kind, path, enabled=True):
@@ -1330,6 +1333,7 @@ class MaskSelector(QtWidgets.QGroupBox):
         entry = {"kind": kind, "path": path, "mask": None, "row": None, "enabled": enabled}
         self._add_row(entry, f"{kind}: {Path(path).name}")
         self._sources.append(entry)
+        self._mask_warning = None
         self._refresh(); self.maskChanged.emit()
 
     def add_file_source(self, path):
@@ -1367,6 +1371,7 @@ class MaskSelector(QtWidgets.QGroupBox):
             n = int(self._tab1_mask.sum())
             self._add_row(entry, f"Tab 1 mask ({n:,} px)", at_top=True)
             self._sources.insert(0, entry)
+        self._mask_warning = None
         self._refresh(); self.maskChanged.emit()
 
     def _load_source(self, entry):
@@ -1390,25 +1395,53 @@ class MaskSelector(QtWidgets.QGroupBox):
         except Exception:
             return None
 
+    @staticmethod
+    def _source_label(entry):
+        if entry["kind"] == "tab1":
+            return "Tab 1 mask"
+        from pathlib import Path
+        return f"{entry['kind']}: {Path(entry['path']).name}"
+
     def composite_mask(self):
-        """uint8 union of all *enabled* sources (1 = masked), or None if empty."""
+        """uint8 union of all *enabled* sources (1 = masked), or None if empty.
+
+        A source is dropped (and flagged in the status label via _refresh())
+        if it fails to load, or if its shape doesn't match the first
+        successfully-loaded source's shape — previously this happened
+        silently, which could make analysis quietly ignore a mask the user
+        believed was active.
+        """
         out = None
+        dropped = []
         for e in self._sources:
             if not e.get("enabled", True):
                 continue
             m = self._load_source(e)
             if m is None:
+                dropped.append(self._source_label(e))
                 continue
             m = np.asarray(m) != 0
             if out is None:
                 out = m
             elif out.shape == m.shape:
                 out = out | m
+            else:
+                dropped.append(f"{self._source_label(e)} (shape {m.shape} != {out.shape})")
+        self._mask_warning = (
+            f"Skipped {len(dropped)} source(s): " + "; ".join(dropped)
+        ) if dropped else None
+        self._refresh()
         return out.astype(np.uint8) if out is not None else None
 
     def _refresh(self):
         n = len(self._sources)
-        self._status.setText(f"{n} mask source(s)" if n else "No mask.")
+        if self._mask_warning:
+            self._status.setText(
+                (f"{n} mask source(s). " if n else "") + self._mask_warning)
+            self._status.setStyleSheet("color:#e0a030;font-size:10px")
+        else:
+            self._status.setText(f"{n} mask source(s)" if n else "No mask.")
+            self._status.setStyleSheet("color:#9a9a9a;font-size:10px")
 
     # ── GUI state (Save/Load GUI State) ─────────────────────────────
     def get_state(self) -> dict:
