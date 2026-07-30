@@ -74,6 +74,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Tilt-aware profile w/o calibration file; ring 2θ-cutoff/thickness/live-button fixes; save-calibration buttons; radial-plot X-floor + zoom persistence | `e14c1ea` |
 | Native-menu-backed A/M manual axis limits (radial plot + histogram); Top-N "I >" intensity floor | `3c15ae7` |
 | Multi-material ring simulation (per-row checkbox/color/name, Material dialog) | `0e9ed21` |
+| Load-calibration card moved below Simulate button; loads now sync ty/tz too; Intensity-range title bar is the on/off checkbox | `05ce224` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -895,6 +896,25 @@ first added) and were clamping legitimate inputs; raised them:
 `documentation/gui_documentation.md`.
 **Roll back:** `git revert 53f8f19`. Self-contained — no later commit
 depends on the widened ranges.
+
+### `05ce224` — Data Viewer: mask enable checkboxes, calibration card reposition + ty/tz sync, intensity-range title checkbox (2026-07-30)
+**Effect:** Three independent Data Viewer tweaks:
+1. `MaskSelector` (`widgets.py`) rows gain a checkbox to include/exclude a
+   mask from the composite without deleting it; `composite_mask()` now OR's
+   only *checked* sources. The "Tab 1 mask" row (auto-populated from the
+   Mask Builder tab) is always inserted/kept at the top of the list.
+   `get_state()`/`set_state()` persist each source's `enabled` flag.
+2. The Load calibration card moved below the Ring simulation card's
+   Simulate button, and loading a calibration file now also fills the
+   Ring-simulation card's ty/tz tilt fields (previously only λ/Lsd/px/BC).
+3. The Intensity range card's title bar is now the on/off checkbox itself
+   ("Exclude out-of-range pixels") instead of a separate checkbox line
+   inside the card.
+**Files:** `midas_gui/tab_view.py`, `midas_gui/widgets.py`,
+`documentation/gui_documentation.md`.
+**Roll back:** `git revert 05ce224`. Self-contained — no later commit
+depends on the mask `enabled` flag, the card reposition, or the title-bar
+checkbox.
 
 ### `0e9ed21` — Data Viewer: support multiple ring-simulation materials at once (2026-07-29)
 **Effect:** Ring simulation card holds a list of materials instead of one,
