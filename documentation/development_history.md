@@ -75,6 +75,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Native-menu-backed A/M manual axis limits (radial plot + histogram); Top-N "I >" intensity floor | `3c15ae7` |
 | Multi-material ring simulation (per-row checkbox/color/name, Material dialog) | `0e9ed21` |
 | Load-calibration card moved below Simulate button; loads now sync ty/tz too; Intensity-range title bar is the on/off checkbox | `05ce224` |
+| Live Data "Use Buffer" last-N-frames ring buffer (Projection/stack analysis on live data) | `911f8ac` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -949,6 +950,28 @@ the same time:
 **Roll back:** `git revert 0e9ed21`. Self-contained — no later commit
 depends on the multi-material materials list or the `set_ring_markers()`
 groups signature.
+
+### `911f8ac` — Data Viewer: Live Data "Use Buffer" ring buffer for stack analysis on live streams (2026-07-30)
+**Effect:** Live Data card gains a **Use Buffer** toggle + **N** spin box
+(`DataLoaderPanel`, `widgets.py`) that captures the last N live frames into
+an in-memory `deque` ring buffer, so Projection and every other stack-based
+analysis become usable on live data instead of only on loaded HDF5/folder
+stacks:
+1. Clicking **Use Buffer** arms it: turns yellow (`Buffering… (n/N)`) and
+   appends each incoming live frame to the buffer as it streams.
+2. When no new frame arrives for ~2 s (streaming paused, or **Stop**
+   clicked), a single-shot `QTimer` (`_buffer_stall_timer`) freezes the
+   buffer into a navigable stack: `_nframes`/`_setup_navigator()` update so
+   the frame slider/spin/prev-next and **Project stack** work exactly as
+   they would on a loaded stack; the button turns green (`Buffer Ready (N)`).
+3. `_get_frame()`/`full_stack()` read from the frozen buffer when active,
+   otherwise fall through to the existing stack/paths/h5 sources unchanged.
+4. Starting a new live stream or loading static data calls `_reset_buffer()`,
+   discarding any existing buffer and turning the toggle off.
+**Files:** `midas_gui/widgets.py`, `documentation/gui_documentation.md`.
+**Roll back:** `git revert 911f8ac`. Self-contained — no later commit
+depends on the ring-buffer fields or `_get_frame()`/`full_stack()` buffer
+branch.
 
 ---
 
