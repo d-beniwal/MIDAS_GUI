@@ -77,6 +77,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Load-calibration card moved below Simulate button; loads now sync ty/tz too; Intensity-range title bar is the on/off checkbox | `05ce224` |
 | Live Data "Use Buffer" last-N-frames ring buffer (Projection/stack analysis on live data) | `911f8ac` |
 | Fix: lock live ring buffer against GUI/worker-thread race | `a88ba1f` |
+| Fix: refresh-timer starvation during fast live streaming | `2cfd9cd` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -987,6 +988,21 @@ set. Added a `threading.Lock` (`_buffer_lock`) guarding every read/write of
 **Files:** `midas_gui/widgets.py`.
 **Roll back:** `git revert a88ba1f`. Self-contained — the lock only wraps
 existing buffer accesses, no signature/state-shape changes.
+
+### `2cfd9cd` — Data Viewer: fix refresh-timer starvation during fast live streaming (2026-07-30)
+**Effect:** `dataChanged` was connected to `self._refresh_timer.start()`
+directly. `QTimer.start()` on an already-armed `setSingleShot(True)` timer
+restarts its countdown rather than queuing a fire, so a continuous burst of
+events faster than the 60ms interval (e.g. live frames streaming quickly)
+could defer the refresh indefinitely — the displayed image/stats/rings would
+appear frozen mid-burst even though data kept arriving. Added
+`_on_data_changed()`, connected to `dataChanged` in place of the old lambda,
+which only calls `._refresh_timer.start()` while the timer is idle
+(`not isActive()`), turning it into a throttle (fires at least once per
+interval) instead of a restart-on-every-event debounce that can starve.
+**Files:** `midas_gui/tab_view.py`.
+**Roll back:** `git revert 2cfd9cd`. Self-contained — restores the direct
+lambda connection.
 
 ---
 
