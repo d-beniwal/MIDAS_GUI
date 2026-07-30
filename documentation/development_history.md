@@ -78,6 +78,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Live Data "Use Buffer" last-N-frames ring buffer (Projection/stack analysis on live data) | `911f8ac` |
 | Fix: lock live ring buffer against GUI/worker-thread race | `a88ba1f` |
 | Fix: refresh-timer starvation during fast live streaming | `2cfd9cd` |
+| Fix: cap live buffer to 100 frames (memory bound) | `839770d` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -1003,6 +1004,16 @@ interval) instead of a restart-on-every-event debounce that can starve.
 **Files:** `midas_gui/tab_view.py`.
 **Roll back:** `git revert 2cfd9cd`. Self-contained — restores the direct
 lambda connection.
+
+### `839770d` — Data Viewer: cap live buffer ("Use Buffer") to 100 frames (2026-07-30)
+**Effect:** The ring-buffer **N** spinbox (`widgets.py`) allowed up to 2000
+frames, each stored as a full float32 array — for a large-format detector
+this could allocate tens of GB with no warning. Lowered `setRange(2, 2000)`
+to `setRange(2, 100)`; tooltip and `gui_documentation.md` updated to note
+the cap.
+**Files:** `midas_gui/widgets.py`, `documentation/gui_documentation.md`.
+**Roll back:** `git revert 839770d`. Self-contained — restores the old
+range only.
 
 ---
 
