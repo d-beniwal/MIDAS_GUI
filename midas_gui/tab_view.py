@@ -162,6 +162,15 @@ class DataViewerTab(QtWidgets.QWidget):
         self._refresh_timer = QtCore.QTimer(self)
         self._refresh_timer.setSingleShot(True); self._refresh_timer.setInterval(60)
         self._refresh_timer.timeout.connect(self._on_loader_data)
+        # Debounce the intensity-mask lo/hi spinboxes: a bounded human gesture
+        # (typing a value, holding the spin arrows), so restarting on every
+        # valueChanged and only recomputing once input settles is correct
+        # here (unlike _refresh_timer above, which must guarantee periodic
+        # firing against a continuous external stream).
+        self._imask_debounce_timer = QtCore.QTimer(self)
+        self._imask_debounce_timer.setSingleShot(True)
+        self._imask_debounce_timer.setInterval(120)
+        self._imask_debounce_timer.timeout.connect(self._on_imask_changed)
         self._build_ui()
         if self._loader.stats_panel is not None:
             self._loader.stats_panel.scopeChanged.connect(self._update_stats)
@@ -395,8 +404,8 @@ class DataViewerTab(QtWidgets.QWidget):
         self._imask_on.toggled.connect(
             lambda c: (self._imask_lo.setEnabled(c), self._imask_hi.setEnabled(c)))
         self._imask_on.toggled.connect(self._on_imask_changed)
-        self._imask_lo.valueChanged.connect(self._on_imask_changed)
-        self._imask_hi.valueChanged.connect(self._on_imask_changed)
+        self._imask_lo.valueChanged.connect(self._on_imask_value_changed)
+        self._imask_hi.valueChanged.connect(self._on_imask_value_changed)
         lv.addWidget(imc)
 
         # ── Ring simulation card ──
@@ -1299,6 +1308,13 @@ class DataViewerTab(QtWidgets.QWidget):
             self._update_stats()
         if self._rad_auto.isChecked():
             self._radial_integrate()
+
+    def _on_imask_value_changed(self, *_):
+        """Spinbox valueChanged fires on every keystroke/arrow-click; give
+        immediate visual feedback but debounce the heavier stats/radial
+        recompute until the value settles."""
+        self._update_intensity_overlay()
+        self._imask_debounce_timer.start()
 
     # ── Top-N brightest pixels ────────────────────────────────────────
     def _on_topn_toggled(self, on):
