@@ -10,7 +10,8 @@ a loaded HDF5/folder stack; Load-calibration card renamed/moved below Ring
 simulation's Simulate button and now syncs ty/tz on load; Intensity range
 card's title bar is now the on/off checkbox; Mask rows — including the
 "Tab 1 mask" from the Mask Builder tab — get a checkbox to include/exclude
-without deleting, and the Tab 1 mask row always stays at the top of the list)
+without deleting, and the Tab 1 mask row always stays at the top of the list;
+Live Data "Use Buffer" N field capped at 100 frames to bound memory use)
 
 > **Maintenance:** keep this document in sync with the code — whenever the workflow
 > or a tab's controls change, update the relevant section here in the same change.
@@ -297,7 +298,8 @@ frames arrive.
   / waiting for PV / connected / streaming with frame id / error). GUI updates
   are throttled to the tab's existing ~16 fps debounce, so a fast PV update
   rate doesn't overwhelm the interface.
-- **Use Buffer** captures the last **N** live frames (N field next to it) into
+- **Use Buffer** captures the last **N** live frames (N field next to it,
+  2–100 — capped to bound memory use for large-format detectors) into
   an in-memory ring buffer, so Projection and every other stack-based analysis
   become available on live data. Click it to arm: it turns **yellow** and its
   label counts up (`Buffering… (7/20)`) while frames keep streaming in — the

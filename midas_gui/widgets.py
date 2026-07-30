@@ -1763,11 +1763,12 @@ class DataLoaderPanel(QtWidgets.QWidget):
             buf_row = QtWidgets.QHBoxLayout(); buf_row.setSpacing(4)
             buf_row.addWidget(QtWidgets.QLabel("N:"))
             self._buffer_n_spin = _NoScrollSpinBox()
-            self._buffer_n_spin.setRange(2, 2000)
+            self._buffer_n_spin.setRange(2, 100)
             self._buffer_n_spin.setValue(20)
             self._buffer_n_spin.setFixedWidth(64)
             self._buffer_n_spin.setToolTip(
-                "Number of most-recent live frames to keep in the ring buffer.")
+                "Number of most-recent live frames to keep in the ring buffer "
+                "(max 100, to bound memory use for large-format detectors).")
             buf_row.addWidget(self._buffer_n_spin)
             self._buffer_btn = QtWidgets.QPushButton("Use Buffer")
             self._buffer_btn.setCheckable(True)
