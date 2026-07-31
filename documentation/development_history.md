@@ -85,6 +85,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Sim Detector: hardware-free fake PVA stream in the Live Data dropdown | `3d96cb1` |
 | Image viewer: persist manual color-scale window (incl. histogram zoom) across live frames | `3b12fbf` |
 | Fix: "Use Buffer" state now carries into Start instead of resetting | `f3a1b91` |
+| Unrestrict λ/Lsd/pixel-size ranges; tighten decimals; Rings/Labels/thickness on one row | `2525277` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -1142,6 +1143,21 @@ new stream without user intervention.
 **Files:** `midas_gui/widgets.py`, `documentation/gui_documentation.md`.
 **Roll back:** `git revert f3a1b91`. Self-contained — restores the
 unconditional `_reset_buffer()` call on Start.
+
+---
+
+### `2525277` — Data Viewer: unrestrict wavelength/Lsd/pixel-size ranges, tighten ring row (2026-07-31)
+**Effect:** Ring simulation card's λ/Lsd/pixel-size spin boxes were capped at
+arbitrary limits (pixel size 1–5000 µm, λ 0.001–10 Å, Lsd 0.001–100000 mm);
+they now accept any positive value (λ 0.0001–1e6 Å, Lsd 0.001–1e6 mm, pixel
+0.1–1e6 µm). Display precision was also tightened per field: λ 5→4 decimals,
+Lsd 4→3, pixel size/BC_y/BC_z 2→1, ty/tz tilts 4→2. "Show rings" was renamed
+**Rings** and, together with **Labels** and a shrunk ring-thickness field
+(max width 60px), now sits on one row instead of thickness alone on the row
+below.
+**Files:** `midas_gui/tab_view.py`, `documentation/gui_documentation.md`.
+**Roll back:** `git revert 2525277`. Self-contained — restores the previous
+ranges/decimals and the two-row Rings/Labels + Ring-thickness layout.
 
 ---
 
