@@ -519,7 +519,8 @@ class CalibrationTab(QtWidgets.QWidget):
 
     def _show_calib_image(self, autorange: bool = False):
         if self._image is not None:
-            self._img_view.set_image(self._calib_image(), autorange=autorange)
+            self._img_view.set_image(self._calib_image(), autorange=autorange,
+                                      reset_levels=autorange)
 
     def _on_threshold_toggled(self, on: bool):
         for w in (self._thr_min, self._thr_max, self._thr_slider, self._thr_val):

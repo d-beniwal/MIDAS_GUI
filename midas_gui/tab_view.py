@@ -730,7 +730,8 @@ class DataViewerTab(QtWidgets.QWidget):
         fresh = (self._disp_shape != raw.shape)
         self._disp_shape = raw.shape
         self._cur = self._loader.corrected(raw)
-        self._viewer.set_image(self._cur, autorange=fresh)
+        is_live = self._loader.is_live_frame_update()
+        self._viewer.set_image(self._cur, autorange=fresh, reset_levels=not is_live)
         if fresh:
             self._autofill_imask_max()
         if self._bc_auto.isChecked():

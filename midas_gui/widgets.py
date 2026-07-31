@@ -94,7 +94,7 @@ class ImageViewer(QtWidgets.QWidget):
             bar.addWidget(QtWidgets.QLabel(f"<b>{title}</b>"))
         self._log = QtWidgets.QCheckBox("Log")
         self._log.setChecked(True)
-        self._log.toggled.connect(self._redisplay)
+        self._log.toggled.connect(self._on_log_toggled)
         bar.addWidget(self._log)
         bar.addWidget(QtWidgets.QLabel("cmap:"))
         self._cmap = _NoScrollComboBox()
@@ -151,12 +151,22 @@ class ImageViewer(QtWidgets.QWidget):
 
         self._data: Optional[np.ndarray] = None
         self._manual_levels: Optional[tuple] = None
+        self._manual_hist_range: Optional[tuple] = None
         self._suspend_level_track = False
+        self._suspend_hist_range_track = False
         self._iv.getHistogramWidget().sigLevelsChanged.connect(self._on_hist_levels_changed)
+        self._iv.getHistogramWidget().item.vb.sigRangeChanged.connect(self._on_hist_range_changed)
         self._set_cmap(_DEFAULT_CMAP)
 
-    def set_image(self, data: np.ndarray, autorange: bool = True):
+    def set_image(self, data: np.ndarray, autorange: bool = True, reset_levels: bool = True):
+        """`reset_levels`: drop any manual color-scale/histogram-zoom window and
+        go back to the vmin%/vmax% percentile auto-levels. Pass False for a
+        live-streaming frame update, where the window should stay put across
+        incoming frames until the user chooses to move it."""
         self._data = data.astype(np.float32)
+        if reset_levels:
+            self._manual_levels = None
+            self._manual_hist_range = None
         self._redisplay()
         self._apply_view_limits(data.shape[1], data.shape[0])
         if autorange:
@@ -222,9 +232,16 @@ class ImageViewer(QtWidgets.QWidget):
         # Levels are likewise pinned to `lo`/`hi` rather than pyqtgraph's autoLevels
         # so a manual histogram drag survives subsequent live frames.
         self._suspend_level_track = True
+        self._suspend_hist_range_track = True
         self._iv.setImage(disp.astype(np.float32), autoLevels=False, levels=(lo, hi),
                           autoRange=False, autoHistogramRange=False)
+        if self._manual_hist_range is None:
+            # Zoom the colorbar/histogram's own axis to the percentile window by
+            # default (bad pixels can otherwise stretch the full-range histogram
+            # down to an unreadable sliver); a manual zoom/pan overrides this.
+            self._iv.getHistogramWidget().item.setHistogramRange(lo, hi, padding=0.1)
         self._suspend_level_track = False
+        self._suspend_hist_range_track = False
 
     def _on_hist_levels_changed(self, *_args):
         """User dragged the histogram LUT region — remember it across future frames."""
@@ -232,9 +249,44 @@ class ImageViewer(QtWidgets.QWidget):
             return
         self._manual_levels = tuple(self._iv.getHistogramWidget().getLevels())
 
+    def _on_hist_range_changed(self, *_args):
+        """User zoomed/panned the histogram's own axis — remember it across frames."""
+        if self._suspend_hist_range_track:
+            return
+        self._manual_hist_range = tuple(self._iv.getHistogramWidget().item.getHistogramRange())
+
     def _on_percentile_changed(self, *_args):
         """User edited vmin%/vmax% — that's an explicit request to go back to auto levels."""
         self._manual_levels = None
+        self._manual_hist_range = None
+        self._redisplay()
+
+    def _on_log_toggled(self, checked: bool):
+        """Log/linear toggled — convert manual levels along with the display,
+        so a manually-set color window keeps pointing at the same underlying
+        data instead of the same raw numbers reinterpreted in the other scale
+        (e.g. a log-space level of 2.0 becoming a linear level of 2.0 instead
+        of 100.0)."""
+        def convert(lo, hi):
+            if checked:   # was linear, now log
+                return (float(np.log10(max(lo, 1e-10))), float(np.log10(max(hi, 1e-10))))
+            else:         # was log, now linear
+                # A manual level can sit anywhere in a histogram view that was
+                # itself dragged out to values far beyond any real data (e.g.
+                # hi=400) — clamp before 10**x since float exponentiation
+                # raises OverflowError rather than saturating at inf.
+                lo = min(max(lo, -300.0), 300.0)
+                hi = min(max(hi, -300.0), 300.0)
+                return (float(10 ** lo), float(10 ** hi))
+        if self._manual_levels is not None:
+            self._manual_levels = convert(*self._manual_levels)
+        # Don't carry a manually-panned/zoomed histogram window through the
+        # same nonlinear transform: containment of the levels is preserved
+        # mathematically, but they can end up squeezed into an imperceptible
+        # sliver of the transformed window. Drop the pin instead so
+        # _redisplay() reframes the view tightly around the (converted)
+        # levels, same as it does for a fresh percentile-based window.
+        self._manual_hist_range = None
         self._redisplay()
 
     def _set_cmap(self, name: str):
@@ -1740,6 +1792,10 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._buffer_lock = threading.Lock()
         self._buffer_active = False    # "Use Buffer" checked
         self._buffer_frozen = False    # True once frame arrival has paused
+        # True only for the dataChanged emitted from a live PVA frame arriving —
+        # lets viewers keep a manual color-scale window fixed across live frames
+        # while still auto-resetting it for an actual new load/frame-navigation.
+        self._live_frame_update = False
         self._buffer_stall_timer = QtCore.QTimer(self)
         self._buffer_stall_timer.setSingleShot(True)
         self._buffer_stall_timer.setInterval(2000)
@@ -1992,6 +2048,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
         if self._mode == "stream":
             # No in-memory load; just report the source.
             self._info.setText(f"Source: {raw}")
+            self._live_frame_update = False
             self.dataChanged.emit()
             return
         try:
@@ -2046,6 +2103,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
         for w in widgets:
             w.blockSignals(True); w.setValue(i); w.blockSignals(False)
         self._cur = self._get_frame(i)
+        self._live_frame_update = False
         self.dataChanged.emit()
 
     def _get_frame(self, i: int) -> np.ndarray:
@@ -2136,6 +2194,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._live_status_lbl.setText(status)
         self._info.setText(
             f"Live: {self._pv_ed.currentText().strip()}  (id {image_id}, shape {image.shape})")
+        self._live_frame_update = True
         self.dataChanged.emit()
 
     def _on_live_connection(self, is_connected):
@@ -2208,6 +2267,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
         if was_stack:
             self._nframes = 1 if self._cur is not None else 0
             self._setup_navigator()
+            self._live_frame_update = False
             self.dataChanged.emit()
 
     def _apply_buffer_style(self, state: str):
@@ -2297,6 +2357,13 @@ class DataLoaderPanel(QtWidgets.QWidget):
         if self._cur is None:
             self._cur = self._get_frame(self.frame_index())
         return self._cur
+
+    def is_live_frame_update(self) -> bool:
+        """True if the most recent dataChanged came from a live PVA frame
+        arriving (as opposed to a new load, frame-navigation, or buffer
+        reset) — callers use this to keep a manual color-scale window fixed
+        across live frames while still auto-resetting it on genuinely new data."""
+        return self._live_frame_update
 
     def source_cfg(self) -> dict:
         """Streaming source descriptor for BatchWorker (stream mode)."""

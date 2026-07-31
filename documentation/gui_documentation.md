@@ -16,7 +16,16 @@ Mask status line turns amber and names any source dropped for a load
 failure or shape mismatch, instead of silently ignoring it; Live Data PV
 dropdown gains a built-in **Sim Detector** entry — a hardware-free fake PVA
 stream shaped like an Eiger2 500K with 0-60000 counts, for exercising Live
-Data without a real beamline connection, see `midas_gui/sim_detector.py`)
+Data without a real beamline connection, see `midas_gui/sim_detector.py`;
+image viewer colorbar/histogram now defaults its own zoom to the vmin%/vmax%
+percentile window instead of the full data range, converts a manual
+level/zoom window between Log and Linear scale on toggle, auto-resets to the
+percentile defaults whenever new data is loaded — except frame-to-frame
+updates within an active live stream, which keep a manual window fixed — and
+always reframes its own visible window tightly around the (converted) levels
+on a Log/Linear toggle, instead of carrying a manually zoomed/panned window
+through the nonlinear conversion, which could leave the sliders squeezed
+into a barely-visible sliver of the window)
 
 > **Maintenance:** keep this document in sync with the code — whenever the workflow
 > or a tab's controls change, update the relevant section here in the same change.
@@ -343,10 +352,12 @@ frames arrive.
   rings' live toggle on, changing a material/lattice/geometry field still
   recomputes and redraws immediately. **Stop** leaves the last received frame on
   screen. Closing midas-gui also stops any running stream.
-- **Colormap/level changes persist across frames**: dragging the histogram's
-  level range (or the cmap dropdown) is remembered and reapplied to every new
-  incoming frame instead of being reset to the vmin%/vmax% percentile defaults;
-  editing vmin%/vmax% explicitly switches back to auto-levels.
+- **Colormap/level changes persist across live frames**: dragging the histogram's
+  level range or its own zoom (or the cmap dropdown) is remembered and reapplied
+  to every new incoming live frame instead of being reset to the vmin%/vmax%
+  percentile defaults. Editing vmin%/vmax%, toggling Log/Linear, or loading a
+  new file/frame/dataset switches back to auto-levels — see §13 for the general
+  rule shared by every image viewer in the app.
 
 ### Beam-centre picking (on the image)
 The image viewer has **Pick BC** (single click sets the beam centre) and **Pick Ring**
@@ -951,6 +962,22 @@ fraction, correction flags) can be copied to the clipboard for a Methods section
   Preferences ▸ Geometry). Internally — all calculations — and in written calibration
   files (`paramstest.txt`, `calibration.json`) it is always in **microns**; the mm↔µm
   conversion happens only at the display boundary. The config key remains `lsd_um` (µm).
+- **Image viewer color scale (Log/cmap/vmin%/vmax%)**, shared by the Data Viewer,
+  Calibrate, and Mask Builder image viewers: the colorbar's own zoom defaults to the
+  vmin%/vmax% percentile window rather than the full data range, which a single bad
+  pixel can otherwise stretch into an unreadable sliver. Dragging the LUT region or
+  zooming/panning the histogram's own axis is remembered and reapplied on redraw
+  instead of resetting to the percentile defaults, and toggling Log/Linear converts a
+  manually-set window into the other scale so it keeps pointing at the same data
+  (rather than the same raw numbers) — and always reframes the histogram's own
+  visible window tightly around the converted levels rather than carrying a
+  manually zoomed/panned window through the same nonlinear conversion, which
+  would otherwise leave the sliders technically in range but squeezed into a
+  barely-visible sliver of the window. Loading new data — a new file, a different
+  frame/dataset, a projection, or a correction/mask change — resets to the percentile
+  defaults; only frame-to-frame updates within an active live stream (Data Viewer's
+  Live Data card) keep a manual window fixed, matching the live-streaming behavior
+  described in §3.
 
 ---
 
