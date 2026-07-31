@@ -3,7 +3,9 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-07-31 (Data Viewer: radial-integration plot gains a "?"
+**Last updated:** 2026-07-31 (Data Viewer: pixel-size field now accepts a
+second decimal place, needed for near-field detectors' finer pixel pitches;
+radial-integration plot gains a "?"
 help button explaining the R-bin calculation; ring-width field widened
 60->80px; Live Data card gets a "Use Buffer"
 last-N-frames ring buffer — yellow while filling, green once streaming pauses,
@@ -32,7 +34,8 @@ carries over into **Start** instead of being silently reset — if buffering
 is already armed when Start is clicked, it re-arms with a fresh buffer for
 the new stream rather than turning back off; Ring simulation card's λ/Lsd/pixel
 size fields now accept any positive value (no more 1–5000 µm pixel-size cap
-etc.) and display λ to 4 decimals, Lsd to 3, pixel size/BC_y/BC_z to 1, and
+etc.) and display λ to 4 decimals, Lsd to 3, pixel size to 2 (needed for
+near-field detectors' sub-µm-precision pixel pitches), BC_y/BC_z to 1, and
 ty/tz to 2; "Show rings" renamed **Rings** and moved onto the same row as
 **Labels** and a shrunk ring-thickness field; Exclude-out-of-range-pixels
 controls moved from their own left-panel card into the radial-integration

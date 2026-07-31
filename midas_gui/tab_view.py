@@ -430,7 +430,7 @@ class DataViewerTab(QtWidgets.QWidget):
         # Lsd is shown/entered in mm (calculations & files still use µm).
         self._lsd = _fspin(0.001, 1e6, 3, DEFAULT_LSD_UM / 1000.0, " mm", step=DEFAULT_STEP_LSD_MM)
         self._lsd.setFixedWidth(120)
-        self._px = _fspin(0.1, 1e6, 1, DEFAULT_PIXEL_UM, "µm", step=DEFAULT_STEP_PIXEL)
+        self._px = _fspin(0.1, 1e6, 2, DEFAULT_PIXEL_UM, "µm", step=DEFAULT_STEP_PIXEL)
         self._max2t = _fspin(0.001, 180.0, 1, 25.0, "°", step=DEFAULT_STEP_TWO_THETA)
         geo = S.Form()
         geo.row((make_kedge_label(self._wl, "λ:"), self._wl), ("max 2θ:", self._max2t))
