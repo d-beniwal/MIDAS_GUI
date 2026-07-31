@@ -465,7 +465,7 @@ class DataViewerTab(QtWidgets.QWidget):
         self._show_labels.toggled.connect(self._set_rings_visible)
         self._ring_width = _fspin(0.5, 10.0, 1, DEFAULT_RING_WIDTH, "px")
         self._ring_width.setToolTip("Line thickness of the simulated rings on the image.")
-        self._ring_width.setMaximumWidth(60)
+        self._ring_width.setMaximumWidth(80)
         self._ring_width.valueChanged.connect(self._redraw_rings)
         ctl.addWidget(self._show_rings); ctl.addWidget(self._show_labels)
         ctl.addSpacing(8)
@@ -574,6 +574,16 @@ class DataViewerTab(QtWidgets.QWidget):
         ptb.insertWidget(3, self._rad_auto)
         ptb.insertWidget(3, self._rad_r_bin)
         ptb.insertWidget(3, QtWidgets.QLabel("  R bin:"))
+        self._radial_help_btn = QtWidgets.QToolButton()
+        self._radial_help_btn.setText("?")
+        self._radial_help_btn.setFixedSize(18, 18)
+        self._radial_help_btn.setToolTip("How is this profile calculated?")
+        self._radial_help_btn.setStyleSheet(
+            "QToolButton { border-radius: 9px; border: 1px solid #777; "
+            "background: #333; color: #ddd; font-weight: bold; }"
+            "QToolButton:hover { background: #444; }")
+        self._radial_help_btn.clicked.connect(self._show_radial_help)
+        ptb.insertWidget(ptb.indexOf(self._rad_btn) + 1, self._radial_help_btn)
         right.addWidget(self._profile_view)
         right.setStretchFactor(0, 3); right.setStretchFactor(1, 1)
         right.setMinimumWidth(320)
@@ -1000,6 +1010,27 @@ class DataViewerTab(QtWidgets.QWidget):
             "pxY": px, "pxZ": px,
             "NrPixelsY": ny, "NrPixelsZ": nz, "distortion": {},
         }
+
+    def _show_radial_help(self):
+        """Explain how the radial-integration plot's profile is computed."""
+        QtWidgets.QMessageBox.information(
+            self, "Radial integration — how it's calculated",
+            "The plot shows intensity vs. radius: the azimuthal (angular) average "
+            "of the image about the beam centre, grouped into rings of width "
+            "\"R bin\".\n\n"
+            "• Calibration loaded, or a tilt (ty/tz) set on the Ring-simulation "
+            "card: the full MIDAS geometry engine is used. Pixels are binned into "
+            "(η, R) cells honouring detector tilt and distortion, and each R-bin's "
+            "value is a pixel-count-weighted mean across η — "
+            "Σ(cell_mean·count) / Σ(count) — robust to partial or uneven azimuthal "
+            "coverage.\n\n"
+            "• Otherwise: a fast circle-binning fallback is used. Pixels are "
+            "grouped purely by distance from the beam centre (BC_y, BC_z) into "
+            "R-bins, and each bin's value is Σintensity / Σpixels — a plain "
+            "per-bin mean, with no tilt correction.\n\n"
+            "If full-geometry integration fails, the plot automatically falls "
+            "back to circle binning and a warning is shown above the "
+            "calibration card.")
 
     def _radial_integrate(self):
         """Azimuthal average of the current frame.
