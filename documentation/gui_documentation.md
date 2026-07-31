@@ -34,7 +34,16 @@ the new stream rather than turning back off; Ring simulation card's λ/Lsd/pixel
 size fields now accept any positive value (no more 1–5000 µm pixel-size cap
 etc.) and display λ to 4 decimals, Lsd to 3, pixel size/BC_y/BC_z to 1, and
 ty/tz to 2; "Show rings" renamed **Rings** and moved onto the same row as
-**Labels** and a shrunk ring-thickness field)
+**Labels** and a shrunk ring-thickness field; Exclude-out-of-range-pixels
+controls moved from their own left-panel card into the radial-integration
+plot's own toolbar (right end of the `X` / `Log Y` / `R bin` / `Auto` /
+`Integrate` row), with the `R bin` field narrowed and the `N bins | max=...`
+stats printout removed from that row to make space; Load calibration card
+renamed **Load/save calibration**; Exclude-range controls further refined —
+moved to sit pinned at the far right of the toolbar row, the `<`/`>` bound
+fields widened (56px → 112px) and switched from float to integer spin boxes
+(no decimal display), and the lower-bound comparison changed from `<=` to a
+strict `<` — a pixel exactly equal to the lower bound is no longer masked)
 
 > **Maintenance:** keep this document in sync with the code — whenever the workflow
 > or a tab's controls change, update the relevant section here in the same change.
@@ -209,14 +218,16 @@ equivalent), or **Average** (noise reduction), along a chosen axis (0 = across f
 drops the first frame, 4 drops the first four) — useful when the opening frames are
 detector warm-up / shutter-transient exposures.
 
-### Intensity range card (radial integration)
-The card's **title bar is itself the on/off checkbox** ("Exclude out-of-range
-pixels") rather than a separate checkbox line inside the card.
+### Exclude-out-of-range-pixels controls (radial-plot toolbar)
+These controls used to be their own left-panel card; they now live at the **far
+right** of the **radial integration plot's toolbar** (see below), past the `X`,
+`Log Y`, `R bin`, `Auto`, `Integrate` controls, so there's no separate card here
+anymore.
 
 | Field | Description |
 |---|---|
-| Exclude out-of-range pixels (title checkbox) | When on, pixels ≤ min or > max are drawn as a red overlay and excluded from the radial integration (removes gaps / hot / overflow). |
-| pixel ≤ / pixel > | Lower / upper bounds. On load, the upper bound auto-fills to **max(99.99th percentile, 100000)**. |
+| Exclude range (checkbox) | When on, pixels < min or > max are drawn as a red overlay and excluded from the radial integration (removes gaps / hot / overflow). |
+| < / > | Lower / upper bounds, entered as **whole-pixel-count integers** (no decimals). On load, the upper bound auto-fills to **max(99.99th percentile, 100000)**. |
 
 ### Ring simulation card
 Overlays simulated Debye-Scherrer rings to check geometry. Supports **multiple
@@ -274,7 +285,7 @@ its own lattice, visibility, and ring color.
   Calibrate tab's detector + seed fields (the Calibrate tab has a matching
   **← Data Viewer** button that pulls the same values).
 
-### Load calibration card (optional)
+### Load/save calibration card (optional)
 Sits directly below the Ring simulation card's **Simulate rings (live)** button.
 Load geometry from a **calibration `.json`, a MIDAS `paramstest.txt`, or a pyFAI
 `.poni`** (auto-detected). It fills **BC, Lsd, pixel size, wavelength, and the
@@ -424,12 +435,16 @@ Below the image is a live **azimuthal average about the beam centre** (`R bin`,
 `Integrate`, and an `Auto` toggle that recomputes on frame/BC/mask change) — geometry-free
 circle binning by default, or the tilt/distortion-aware MIDAS engine when a full
 geometry is in effect (a loaded calibration file, or non-zero ty/tz in the
-Ring-simulation card — see the Load calibration card above). Peak/ring markers overlaid on
+Ring-simulation card — see the Load/save calibration card above). Peak/ring markers overlaid on
 the plot use the ring's true 2θ, so they line up with the profile in either mode.
 **Clicking a radius on the plot draws the matching ring (magenta) on the image.** Axis
 units switch between R (px) / 2θ / Q; the **X-axis lower bound defaults to 0**. A small
 circular **"?"** button next to the `Radial` control opens a message box explaining how
 the profile is computed (full-geometry (η, R) binning vs. the circle-binning fallback).
+The **Exclude range** checkbox and its `<` / `>` integer bounds (see previous
+section) sit pinned to the far right end of this same toolbar row — the `R bin`
+field was narrowed and the `N bins | max=...` stats printout that used to occupy
+that space was removed to fit them.
 
 **The default view always auto-fits the current profile's X/Y extent** — it never gets
 stuck showing a stale or unrelated range from an earlier profile. If you manually

@@ -39,6 +39,12 @@ from midas_gui import style as S
 _MATERIAL_COLORS = ("#f0c060", "#4fc3f7", "#ab47bc", "#66bb6a", "#ef5350",
                      "#ffca28", "#26a69a", "#ec407a", "#7e57c2", "#8d6e63")
 
+# Bounds for the intensity-mask pixel-< / pixel-> spin boxes (integer counts).
+# Upper bound covers common 32-bit-detector overflow/dead-pixel sentinels
+# (e.g. 2**32-1 = 4294967295), which a plain 32-bit QSpinBox cannot hold.
+_IMASK_MIN = -1_000_000_000
+_IMASK_MAX = 5_000_000_000
+
 
 class MaterialDialog(QtWidgets.QDialog):
     """Edit one ring-simulation material: name, preset, lattice, space group."""
@@ -383,25 +389,22 @@ class DataViewerTab(QtWidgets.QWidget):
         self._proj_grp.setEnabled(False)
         lv.addWidget(self._proj_grp)
 
-        # ── Intensity range mask card ──
-        imc = S.make_card("Exclude out-of-range pixels")
-        imc.setCheckable(True); imc.setChecked(False)
-        imc.setToolTip(
-            "Pixels ≤ min or > max are masked: drawn as a red overlay on the image\n"
+        # ── Intensity range mask (compact — lives in the radial-plot toolbar,
+        # see below where self._profile_view is built) ──
+        self._imask_on = QtWidgets.QCheckBox("Exclude range")
+        self._imask_on.setToolTip(
+            "Pixels < min or > max are masked: drawn as a red overlay on the image\n"
             "and excluded from the radial integration (removes gaps / hot / overflow).")
-        self._imask_on = imc
-        self._imask_lo = _fspin(-1e9, 1e9, 1, 0.0)
-        self._imask_lo.setToolTip("Pixels ≤ this value are masked (dead / gap / beam-stop).")
-        self._imask_lo.setFixedWidth(84)
-        self._imask_hi = _fspin(0, 5e9, 0, 1_048_575)
+        # Plain QSpinBox is 32-bit-int limited (overflows on detector sentinel
+        # values like 2**32-1 for dead/overflow pixels), so these stay double
+        # spin boxes with decimals=0 — displays/steps as a whole number with no
+        # decimal point, but the range comfortably covers such sentinels.
+        self._imask_lo = _fspin(_IMASK_MIN, _IMASK_MAX, 0, 0.0)
+        self._imask_lo.setToolTip("Pixels < this value are masked (dead / gap / beam-stop).")
+        self._imask_lo.setFixedWidth(112)
+        self._imask_hi = _fspin(0, _IMASK_MAX, 0, 1_048_575)
         self._imask_hi.setToolTip("Pixels > this value are masked (hot / overflow).")
-        self._imask_hi.setFixedWidth(84)
-        _imr = QtWidgets.QHBoxLayout(); _imr.setSpacing(3); _imr.setContentsMargins(0, 0, 0, 0)
-        _imr.addWidget(QtWidgets.QLabel("pixel ≤")); _imr.addWidget(self._imask_lo)
-        _imr.addSpacing(8)
-        _imr.addWidget(QtWidgets.QLabel("pixel >")); _imr.addWidget(self._imask_hi)
-        _imr.addStretch(1)
-        imc.body.addLayout(_imr)
+        self._imask_hi.setFixedWidth(112)
         for w in (self._imask_lo, self._imask_hi):
             w.setEnabled(False)
         self._imask_on.toggled.connect(
@@ -409,7 +412,6 @@ class DataViewerTab(QtWidgets.QWidget):
         self._imask_on.toggled.connect(self._on_imask_changed)
         self._imask_lo.valueChanged.connect(self._on_imask_value_changed)
         self._imask_hi.valueChanged.connect(self._on_imask_value_changed)
-        lv.addWidget(imc)
 
         # ── Ring simulation card ──
         ring = S.make_card("Ring simulation")
@@ -489,7 +491,7 @@ class DataViewerTab(QtWidgets.QWidget):
         lv.addWidget(ring)
 
         # ── Calibration card ──
-        calc = S.make_card("Load calibration (optional)")
+        calc = S.make_card("Load/save calibration (optional)")
         self._calib_ed = QtWidgets.QLineEdit()
         self._calib_ed.setPlaceholderText("calibration.json / paramstest.txt / .poni…")
         calc.body.addLayout(_frow(self._calib_ed, self._browse_calib))
@@ -562,7 +564,7 @@ class DataViewerTab(QtWidgets.QWidget):
         self._profile_view = ProfileViewer()
         self._profile_view.radiusClicked.connect(self._on_radius_clicked)
         ptb = self._profile_view._toolbar_layout
-        self._rad_r_bin = _fspin(0.1, 20.0, 2, 1.0, "px"); self._rad_r_bin.setFixedWidth(86)
+        self._rad_r_bin = _fspin(0.1, 20.0, 2, 1.0, "px"); self._rad_r_bin.setFixedWidth(56)
         self._rad_r_bin.setToolTip("Radial bin size for the azimuthal average.")
         self._rad_r_bin.valueChanged.connect(self._on_rad_param_changed)
         self._rad_auto = QtWidgets.QCheckBox("Auto"); self._rad_auto.setChecked(True)
@@ -584,6 +586,16 @@ class DataViewerTab(QtWidgets.QWidget):
             "QToolButton:hover { background: #444; }")
         self._radial_help_btn.clicked.connect(self._show_radial_help)
         ptb.insertWidget(ptb.indexOf(self._rad_btn) + 1, self._radial_help_btn)
+        # Exclude-out-of-range-pixels controls (moved here from the left panel
+        # to share this row; the bins/max stats printout is hidden to make room).
+        # Appended after everything else (including the row's stretch) so the
+        # group sits pinned to the far right of the toolbar.
+        self._profile_view._stat.hide()
+        ptb.addWidget(self._imask_on)
+        ptb.addWidget(QtWidgets.QLabel(" <"))
+        ptb.addWidget(self._imask_lo)
+        ptb.addWidget(QtWidgets.QLabel(">"))
+        ptb.addWidget(self._imask_hi)
         right.addWidget(self._profile_view)
         right.setStretchFactor(0, 3); right.setStretchFactor(1, 1)
         right.setMinimumWidth(320)
@@ -1293,7 +1305,7 @@ class DataViewerTab(QtWidgets.QWidget):
         fin = self._cur[np.isfinite(self._cur)]
         if not fin.size:
             return
-        hi = max(float(np.percentile(fin, 99.99)), 100_000.0)
+        hi = max(int(round(np.percentile(fin, 99.99))), 100_000)
         self._imask_hi.blockSignals(True)
         self._imask_hi.setValue(hi)
         self._imask_hi.blockSignals(False)
@@ -1308,8 +1320,8 @@ class DataViewerTab(QtWidgets.QWidget):
             return None
         lo, hi = self._imask_lo.value(), self._imask_hi.value()
         bad = ~np.isfinite(img)
-        if lo > -1e9:
-            bad |= (img <= lo)
+        if lo > _IMASK_MIN:
+            bad |= (img < lo)
         if hi > 0:
             bad |= (img > hi)
         return bad
