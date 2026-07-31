@@ -2170,7 +2170,15 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._live_src.error.connect(self._on_live_error)
         self._stack = self._paths = self._h5 = None
         self._nframes = 0
-        self._reset_buffer()
+        if self._buffer_active:
+            n = self._buffer_n_spin.value()
+            with self._buffer_lock:
+                self._buffer = deque(maxlen=n)
+                self._buffer_frozen = False
+            self._apply_buffer_style("filling")
+            self._buffer_stall_timer.start()
+        else:
+            self._reset_buffer()
         if not self._live_src.start(pv):
             return
         self._live_start_btn.setEnabled(False)

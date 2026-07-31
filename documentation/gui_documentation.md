@@ -3,7 +3,7 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-07-30 (Data Viewer: Live Data card gets a "Use Buffer"
+**Last updated:** 2026-07-31 (Data Viewer: Live Data card gets a "Use Buffer"
 last-N-frames ring buffer — yellow while filling, green once streaming pauses,
 at which point Projection and the rest of the stack analysis work on it like
 a loaded HDF5/folder stack; Load-calibration card renamed/moved below Ring
@@ -25,7 +25,10 @@ updates within an active live stream, which keep a manual window fixed — and
 always reframes its own visible window tightly around the (converted) levels
 on a Log/Linear toggle, instead of carrying a manually zoomed/panned window
 through the nonlinear conversion, which could leave the sliders squeezed
-into a barely-visible sliver of the window)
+into a barely-visible sliver of the window; Live Data "Use Buffer" now
+carries over into **Start** instead of being silently reset — if buffering
+is already armed when Start is clicked, it re-arms with a fresh buffer for
+the new stream rather than turning back off)
 
 > **Maintenance:** keep this document in sync with the code — whenever the workflow
 > or a tab's controls change, update the relevant section here in the same change.
@@ -339,8 +342,11 @@ frames arrive.
   max/sum/average over the buffered frames exactly as it would for a loaded
   HDF5 file or folder. If new frames resume arriving, it flips back to yellow
   and keeps rolling (oldest frame dropped once past N). Click it again to turn
-  buffering off and discard the buffer. Starting a new stream or loading
-  static data always clears any existing buffer.
+  buffering off and discard the buffer. If **Use Buffer** is already armed
+  (yellow or green) when **Start** is clicked, buffering carries over into the
+  new stream — it re-arms with a fresh empty buffer rather than turning off,
+  so you don't need to click **Use Buffer** again after Start. Loading static
+  data always clears any existing buffer.
 - **Stopping live streaming does not auto-reload the previous file/folder/HDF5
   source** — the Data card below gets a small **⟳ Reload** button next to its
   path field for exactly this: click it after Stop to restore the static data
