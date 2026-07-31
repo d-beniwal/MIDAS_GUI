@@ -28,7 +28,11 @@ through the nonlinear conversion, which could leave the sliders squeezed
 into a barely-visible sliver of the window; Live Data "Use Buffer" now
 carries over into **Start** instead of being silently reset — if buffering
 is already armed when Start is clicked, it re-arms with a fresh buffer for
-the new stream rather than turning back off)
+the new stream rather than turning back off; Ring simulation card's λ/Lsd/pixel
+size fields now accept any positive value (no more 1–5000 µm pixel-size cap
+etc.) and display λ to 4 decimals, Lsd to 3, pixel size/BC_y/BC_z to 1, and
+ty/tz to 2; "Show rings" renamed **Rings** and moved onto the same row as
+**Labels** and a shrunk ring-thickness field)
 
 > **Maintenance:** keep this document in sync with the code — whenever the workflow
 > or a tab's controls change, update the relevant section here in the same change.
@@ -253,9 +257,10 @@ its own lattice, visibility, and ring color.
   both at 0° reproduces the previous plain-circle rendering exactly. (Rotation
   about the beam axis, `tx`, leaves a full ring's shape unchanged, so it isn't
   exposed here.)
-- **Ring thickness** spin box (0.5–10 px) sets the line width of the simulated-ring
-  overlay on the image; redraws immediately as you change it.
-- **Show rings / Labels** toggles; **Simulate rings** is a **live toggle** (not a
+- **Rings / Labels** toggles sit on one row together with a compact **thickness**
+  spin box (0.5–10 px) that sets the line width of the simulated-ring overlay on
+  the image; redraws immediately as you change it.
+- **Simulate rings** is a **live toggle** (not a
   one-shot click) — while on, the button turns **green** as a visual cue, and the
   overlay + hkl table recompute automatically whenever material, lattice constants,
   space group, or geometry (λ/Lsd/px/max 2θ) change. Beam-centre and ty/tz edits
