@@ -87,6 +87,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Fix: "Use Buffer" state now carries into Start instead of resetting | `f3a1b91` |
 | Unrestrict λ/Lsd/pixel-size ranges; tighten decimals; Rings/Labels/thickness on one row | `2525277` |
 | "?" help button explaining radial-integration (R-bin) calculation | `b7a1518` |
+| Exclude-range controls moved into radial-plot toolbar; int-safe pixel bounds | `de15d57` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -1174,6 +1175,24 @@ a warning above the calibration card. Also widens the ring-width spinbox
 **Files:** `midas_gui/tab_view.py`.
 **Roll back:** `git revert b7a1518`. Self-contained — removes the help button
 and reverts the ring-width spinbox to 60px.
+
+---
+
+### `de15d57` — Data Viewer: move exclude-range controls into radial-plot toolbar, int-safe bounds (2026-07-31)
+**Effect:** The "Exclude out-of-range pixels" controls leave their own
+left-panel card and move into the radial-integration plot's toolbar, pinned
+at the far right (past `X`/`Log Y`/`R bin`/`Auto`/`Integrate`); the `R bin`
+field is narrowed and the `N bins | max=...` stats printout is hidden to make
+room. The pixel-`<`/`>` bound spin boxes widen 84px→112px and switch to
+integer display (no decimals), with range extended to -1e9..5e9 so 32-bit
+detector overflow sentinels (e.g. `2**32-1`) fit without a plain `QSpinBox`'s
+int32 overflow. The lower-bound comparison changes from `<=` to `<` (a pixel
+exactly at the bound is no longer masked). "Load calibration" card renamed
+**Load/save calibration**.
+**Files:** `midas_gui/tab_view.py`, `documentation/gui_documentation.md`.
+**Roll back:** `git revert de15d57`. Self-contained — restores the separate
+"Exclude out-of-range pixels" card, the float spin boxes, and the `<=` bound
+comparison.
 
 ---
 
