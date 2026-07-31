@@ -82,6 +82,8 @@ Dates are commit dates (YYYY-MM-DD).
 | Fix: "All frames" stats computed off the GUI thread | `08392c6` |
 | Fix: debounce intensity-mask pixel≤/pixel> spinbox edits | `57ced2f` |
 | Fix: warn when composite mask silently drops a shape-mismatched source | `81b8ea8` |
+| Sim Detector: hardware-free fake PVA stream in the Live Data dropdown | `3d96cb1` |
+| Image viewer: persist manual color-scale window (incl. histogram zoom) across live frames | `3b12fbf` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -1068,6 +1070,61 @@ file believing it was in effect while it was quietly excluded.
 **Files:** `midas_gui/widgets.py`.
 **Roll back:** `git revert 81b8ea8`. Self-contained — restores the silent
 drop and the plain "N mask source(s)" status text.
+
+### `3d96cb1` — Data Viewer: add hardware-free Sim Detector for Live Data testing (2026-07-31)
+**Effect:** Testing the Live Data card required a real EPICS PVA detector
+stream from beamline hardware — no way to exercise it standalone.
+1. New `midas_gui/sim_detector.py`: `SimDetectorServer` runs a real
+   `pvapy.PvaServer` publishing genuine NTNDArray frames (same plumbing a
+   real detector's PVA image plugin uses via `AdImageUtility`), so it's
+   indistinguishable from a real stream to `PvaLiveSource`. Defaults to an
+   Eiger2 500K shape (1030×514 px, matching the repo's existing
+   `DEFAULT_PIXEL_UM` comment), counts in `[0, 60000]`, 5 Hz — all
+   constructor parameters. `ensure_running()`/`stop_all()` give a
+   process-wide registry keyed by channel name.
+2. `constants.DEFAULT_DEVICES` gains a "Sim Detector" entry (PV
+   `midasSim:Pva1:Image`); the config-overlay system only round-trips
+   `name`/`prefix`/`pva_suffix` for devices, so the sim device is
+   identified purely by its resolved PV string, not a custom marker key.
+3. `DataLoaderPanel._start_live()` (`widgets.py`) lazily starts the sim
+   server via `ensure_running()` the first time that PV is connected to.
+4. `DataViewerTab.shutdown()` (`tab_view.py`) calls `sim_detector.stop_all()`
+   alongside the existing `stop_live()`.
+**Files:** `midas_gui/sim_detector.py` (new), `midas_gui/constants.py`,
+`midas_gui/widgets.py`, `midas_gui/tab_view.py`.
+**Roll back:** `git revert 3d96cb1`. Self-contained — removes the sim
+device/file and its two call sites; no later commit depends on it.
+
+### `3b12fbf` — Image viewer: persist manual color-scale window across live frames (2026-07-31)
+**Effect:** `234ded9` (2026-07-29) made a manually-dragged histogram LUT
+level range survive across incoming frames, but two gaps remained: the
+histogram's own zoom/pan window still reset on every redraw, and toggling
+Log/Linear reinterpreted a manual level's raw numbers in the new scale
+instead of converting them — both made a deliberately-set color window jump
+around unexpectedly.
+1. `ImageViewer` gains `_manual_hist_range` (mirrors `_manual_levels` but
+   for the histogram's own axis zoom) and `_suspend_hist_range_track`,
+   tracked via a new `sigRangeChanged` connection and `_on_hist_range_changed()`.
+2. `set_image()` gains a `reset_levels` flag: `True` (default) drops both
+   manual windows and returns to the vmin%/vmax% percentile defaults;
+   `False` — passed for a live-streaming frame update — leaves them in
+   place. `DataLoaderPanel.is_live_frame_update()` reports whether the most
+   recent `dataChanged` came from a live PVA frame, so `tab_view.py` and
+   `tab_calibrate.py` can pass the right value.
+3. `_redisplay()` now also re-zooms the histogram to the percentile window
+   by default (`setHistogramRange(lo, hi, padding=0.1)`) so a single bad
+   pixel can't stretch it into an unreadable sliver.
+4. New `_on_log_toggled()` converts `_manual_levels` through log10/10**x
+   when the Log checkbox flips (clamped to ±300 before exponentiating, since
+   a manual level can sit far outside real data range and float `10**x`
+   raises `OverflowError` rather than saturating), and drops
+   `_manual_hist_range` so the view reframes tightly around the converted
+   levels instead of carrying a now-mismatched zoom through the transform.
+**Files:** `midas_gui/widgets.py`, `midas_gui/tab_view.py`,
+`midas_gui/tab_calibrate.py`.
+**Roll back:** `git revert 3b12fbf`. Self-contained — restores the
+pre-`234ded9`-successor behavior (LUT levels still persist per `234ded9`,
+but histogram zoom resets and Log/Linear toggle no longer converts levels).
 
 ---
 
