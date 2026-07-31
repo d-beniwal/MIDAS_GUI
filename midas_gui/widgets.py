@@ -23,6 +23,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
 from midas_gui.constants import COLORMAPS, DISTORTION_NAMES, DEFAULT_COLORMAP, DEVICES
+from midas_gui.sim_detector import DEFAULT_CHANNEL_NAME as _SIM_CHANNEL_NAME
 
 # Default colormap: the configured one if it's a known option, else the first.
 _DEFAULT_CMAP = DEFAULT_COLORMAP if DEFAULT_COLORMAP in COLORMAPS else COLORMAPS[0]
@@ -2093,6 +2094,17 @@ class DataLoaderPanel(QtWidgets.QWidget):
         if not pv:
             QtWidgets.QMessageBox.warning(self, "No PV", "Enter a PV name first.")
             return
+        if pv == _SIM_CHANNEL_NAME:
+            # Fake Eiger-500K-shaped stream, no beamline hardware needed — see
+            # midas_gui.sim_detector. Started lazily on first connect and left
+            # running (harmless in-process thread) until app shutdown.
+            from midas_gui import sim_detector
+            try:
+                sim_detector.ensure_running(pv)
+            except Exception as e:
+                QtWidgets.QMessageBox.warning(
+                    self, "Sim Detector failed to start", str(e))
+                return
         if self._live_src is None:
             self._live_src = PvaLiveSource(self)
             self._live_src.frameReady.connect(self._on_live_frame)

@@ -180,8 +180,11 @@ class DataViewerTab(QtWidgets.QWidget):
         self._loader.set_tab1_mask(mask)
 
     def shutdown(self):
-        """Called by MainWindow on app close to stop any live PV stream."""
+        """Called by MainWindow on app close to stop any live PV stream
+        (and the Sim Detector server, if it was ever started)."""
         self._loader.stop_live()
+        from midas_gui import sim_detector
+        sim_detector.stop_all()
 
     def get_geometry(self) -> dict:
         """Current manual geometry — λ (Å), pixel (µm), Lsd (µm), beam centre (px).

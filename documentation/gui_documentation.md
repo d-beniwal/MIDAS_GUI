@@ -13,7 +13,10 @@ card's title bar is now the on/off checkbox; Mask rows — including the
 without deleting, and the Tab 1 mask row always stays at the top of the list;
 Live Data "Use Buffer" N field capped at 100 frames to bound memory use;
 Mask status line turns amber and names any source dropped for a load
-failure or shape mismatch, instead of silently ignoring it)
+failure or shape mismatch, instead of silently ignoring it; Live Data PV
+dropdown gains a built-in **Sim Detector** entry — a hardware-free fake PVA
+stream shaped like an Eiger2 500K with 0-60000 counts, for exercising Live
+Data without a real beamline connection, see `midas_gui/sim_detector.py`)
 
 > **Maintenance:** keep this document in sync with the code — whenever the workflow
 > or a tab's controls change, update the relevant section here in the same change.
@@ -304,6 +307,17 @@ frames arrive.
   / waiting for PV / connected / streaming with frame id / error). GUI updates
   are throttled to the tab's existing ~16 fps debounce, so a fast PV update
   rate doesn't overwhelm the interface.
+- **Sim Detector** is a built-in dropdown entry (PV `midasSim:Pva1:Image`) for
+  exercising Live Data with **no beamline hardware**: picking it and clicking
+  **Start** lazily launches an in-process fake PVA server
+  (`midas_gui/sim_detector.py`) that streams random frames shaped like a
+  DECTRIS Eiger2 500K (1030×514 px) with counts in `[0, 60000]`, at 5 Hz by
+  default — real `PvaLiveSource` code path, so it's indistinguishable from a
+  real detector's stream. The rate, frame size and intensity range are
+  constructor parameters in that file for anyone who wants a different fake
+  stream. The simulator keeps running (harmless background thread) across
+  repeated Start/Stop until the app closes, at which point it's stopped
+  automatically.
 - **Use Buffer** captures the last **N** live frames (N field next to it,
   2–100 — capped to bound memory use for large-format detectors) into
   an in-memory ring buffer, so Projection and every other stack-based analysis
@@ -1010,8 +1024,10 @@ with the full shipped defaults** so you edit from a complete starting point:
 - **Devices** — the detector devices offered in the Data Viewer's **Live Data**
   PV dropdown (name, prefix, PVA suffix). The live PV is built as
   `prefix + PVA suffix`. Ships pre-filled with the 20-ID-D detectors
-  (`oryx20idd`, `s20idPil`, `pg4`, `gh1s`, `s20varex1`), all with PVA suffix
-  `Pva1:Image`; add / remove / edit rows for your own beamline's devices.
+  (`20iddNF`, `s20idPil`, `pg4`, `20iddTomo`, `20iddFF`), all with PVA suffix
+  `Pva1:Image`, plus a built-in **Sim Detector** entry (`midasSim:` prefix)
+  for hardware-free testing — see the Live Data card section above; add /
+  remove / edit rows for your own beamline's devices.
 - **Menus** — the pixel-size presets and K-edge foils.
 - **Algorithms** — default calibration pipeline, integration kernel, output format,
   error model, colormap/theme.

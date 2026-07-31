@@ -203,12 +203,18 @@ DEFAULT_VISIBLE_TABS = ["Calib. Refinement", "Pump Probe"]
 # PVA image plugin every one of them exposes for live access; the full live PV is
 # `prefix + pva_suffix`. Overridable via the per-user config key "devices"
 # (Preferences ▸ Devices).
+#
+# "Sim Detector" is not a real beamline device: its PV (midasSim:Pva1:Image) is
+# recognized by DataLoaderPanel._start_live (widgets.py), which lazily spins up
+# an in-process midas_gui.sim_detector.SimDetectorServer on first connect — a
+# fake Eiger2-500K-shaped PVA stream for exercising Live Data with no hardware.
 DEFAULT_DEVICES = [
-    {"name": "20iddNF",    "prefix": "20idOR1:",  "pva_suffix": "Pva1:Image"},
-    {"name": "s20idPil",   "prefix": "20idPil:",  "pva_suffix": "Pva1:Image"},
-    {"name": "pg4",        "prefix": "1idPG4:",   "pva_suffix": "Pva1:Image"},
-    {"name": "20iddTomo",  "prefix": "20idGH1s:", "pva_suffix": "Pva1:Image"},
-    {"name": "20iddFF",    "prefix": "20IDFF:",   "pva_suffix": "Pva1:Image"},
+    {"name": "20iddNF",       "prefix": "20idOR1:",  "pva_suffix": "Pva1:Image"},
+    {"name": "s20idPil",      "prefix": "20idPil:",  "pva_suffix": "Pva1:Image"},
+    {"name": "pg4",           "prefix": "1idPG4:",   "pva_suffix": "Pva1:Image"},
+    {"name": "20iddTomo",     "prefix": "20idGH1s:", "pva_suffix": "Pva1:Image"},
+    {"name": "20iddFF",       "prefix": "20IDFF:",   "pva_suffix": "Pva1:Image"},
+    {"name": "Sim Detector",  "prefix": "midasSim:", "pva_suffix": "Pva1:Image"},
 ]
 DEVICES = [dict(d) for d in DEFAULT_DEVICES]
 
