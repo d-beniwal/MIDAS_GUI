@@ -86,6 +86,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Image viewer: persist manual color-scale window (incl. histogram zoom) across live frames | `3b12fbf` |
 | Fix: "Use Buffer" state now carries into Start instead of resetting | `f3a1b91` |
 | Unrestrict λ/Lsd/pixel-size ranges; tighten decimals; Rings/Labels/thickness on one row | `2525277` |
+| "?" help button explaining radial-integration (R-bin) calculation | `b7a1518` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -1158,6 +1159,21 @@ below.
 **Files:** `midas_gui/tab_view.py`, `documentation/gui_documentation.md`.
 **Roll back:** `git revert 2525277`. Self-contained — restores the previous
 ranges/decimals and the two-row Rings/Labels + Ring-thickness layout.
+
+---
+
+### `b7a1518` — Data Viewer: add "?" help button explaining radial-integration calculation (2026-07-31)
+**Effect:** A small circular **"?"** button now sits next to the radial-profile
+toolbar's `Radial` control; clicking it opens a message box explaining how the
+R-bin profile is computed — full-geometry (η, R) binning (pixel-count-weighted
+mean across η) when a calibration is loaded or a tilt is set, versus the
+circle-binning fallback (plain per-bin mean, no tilt correction) otherwise,
+and that a failed full-geometry integration falls back to circle binning with
+a warning above the calibration card. Also widens the ring-width spinbox
+(60px → 80px) so its value isn't clipped.
+**Files:** `midas_gui/tab_view.py`.
+**Roll back:** `git revert b7a1518`. Self-contained — removes the help button
+and reverts the ring-width spinbox to 60px.
 
 ---
 
