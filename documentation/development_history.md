@@ -88,6 +88,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Unrestrict λ/Lsd/pixel-size ranges; tighten decimals; Rings/Labels/thickness on one row | `2525277` |
 | "?" help button explaining radial-integration (R-bin) calculation | `b7a1518` |
 | Exclude-range controls moved into radial-plot toolbar; int-safe pixel bounds | `de15d57` |
+| Pixel-size field allows a second decimal place (near-field detectors) | `1d45c40` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -1193,6 +1194,18 @@ exactly at the bound is no longer masked). "Load calibration" card renamed
 **Roll back:** `git revert de15d57`. Self-contained — restores the separate
 "Exclude out-of-range pixels" card, the float spin boxes, and the `<=` bound
 comparison.
+
+---
+
+### `1d45c40` — Data Viewer: pixel-size field allows a second decimal place (2026-07-31)
+**Effect:** The Data Viewer's pixel-size spin box (Ring simulation card) goes
+from 1 decimal to 2, so pitches like `0.65` µm can be entered exactly instead
+of rounding to `0.7`. Needed for near-field detector geometries, which use
+much finer pixel pitches than typical far-field panels. Step size (0.1 µm)
+is unchanged.
+**Files:** `midas_gui/tab_view.py`, `documentation/gui_documentation.md`.
+**Roll back:** `git revert 1d45c40`. Self-contained — returns the field to 1
+decimal.
 
 ---
 
