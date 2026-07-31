@@ -3,7 +3,9 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-07-31 (Data Viewer: Live Data card gets a "Use Buffer"
+**Last updated:** 2026-07-31 (Data Viewer: radial-integration plot gains a "?"
+help button explaining the R-bin calculation; ring-width field widened
+60->80px; Live Data card gets a "Use Buffer"
 last-N-frames ring buffer — yellow while filling, green once streaming pauses,
 at which point Projection and the rest of the stack analysis work on it like
 a loaded HDF5/folder stack; Load-calibration card renamed/moved below Ring
@@ -425,7 +427,9 @@ geometry is in effect (a loaded calibration file, or non-zero ty/tz in the
 Ring-simulation card — see the Load calibration card above). Peak/ring markers overlaid on
 the plot use the ring's true 2θ, so they line up with the profile in either mode.
 **Clicking a radius on the plot draws the matching ring (magenta) on the image.** Axis
-units switch between R (px) / 2θ / Q; the **X-axis lower bound defaults to 0**.
+units switch between R (px) / 2θ / Q; the **X-axis lower bound defaults to 0**. A small
+circular **"?"** button next to the `Radial` control opens a message box explaining how
+the profile is computed (full-geometry (η, R) binning vs. the circle-binning fallback).
 
 **The default view always auto-fits the current profile's X/Y extent** — it never gets
 stuck showing a stale or unrelated range from an earlier profile. If you manually
