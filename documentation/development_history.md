@@ -84,6 +84,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Fix: warn when composite mask silently drops a shape-mismatched source | `81b8ea8` |
 | Sim Detector: hardware-free fake PVA stream in the Live Data dropdown | `3d96cb1` |
 | Image viewer: persist manual color-scale window (incl. histogram zoom) across live frames | `3b12fbf` |
+| Fix: "Use Buffer" state now carries into Start instead of resetting | `f3a1b91` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -1125,6 +1126,22 @@ around unexpectedly.
 **Roll back:** `git revert 3b12fbf`. Self-contained — restores the
 pre-`234ded9`-successor behavior (LUT levels still persist per `234ded9`,
 but histogram zoom resets and Log/Linear toggle no longer converts levels).
+
+---
+
+### `f3a1b91` — Data Viewer: preserve armed "Use Buffer" state when Start is clicked (2026-07-31)
+**Effect:** `_start_live()` unconditionally called `_reset_buffer()`, which
+discarded the buffer and flipped the **Use Buffer** button back to its
+off/gray state even if the user had already armed it (yellow
+`Buffering…`/green `Buffer Ready`) before clicking **Start**. That forced a
+redundant second click on **Use Buffer** after every Start. `_start_live()`
+now only calls `_reset_buffer()` when `_buffer_active` is `False`; when it's
+already `True`, it re-arms a fresh empty deque (same as `_on_buffer_toggled`'s
+checked branch) and restyles to `"filling"`, so buffering continues into the
+new stream without user intervention.
+**Files:** `midas_gui/widgets.py`, `documentation/gui_documentation.md`.
+**Roll back:** `git revert f3a1b91`. Self-contained — restores the
+unconditional `_reset_buffer()` call on Start.
 
 ---
 
