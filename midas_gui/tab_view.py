@@ -29,7 +29,8 @@ from midas_gui.helpers import (_fspin, _NoScrollSpinBox, _browse,
                          make_kedge_label, make_pixel_label, tilted_ring_xy,
                          widgets_to_dict, apply_dict_to_widgets,
                          write_poni, write_standalone_paramstest)
-from midas_gui.widgets import PickableImageViewer, ProfileViewer, DataLoaderPanel
+from midas_gui.widgets import ProfileViewer, DataLoaderPanel
+from midas_gui.roi_tools import ROIImageViewer
 from midas_gui.workers import (ProjectionWorker, AllFrameStatsWorker,
                                build_integration_context, integrate_frame)
 from midas_gui import style as S
@@ -526,7 +527,7 @@ class DataViewerTab(QtWidgets.QWidget):
         # Right: image (top) + radial-integration plot (bottom) in a splitter.
         right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         right.setHandleWidth(8)
-        self._viewer = PickableImageViewer()
+        self._viewer = ROIImageViewer()
         self._viewer.bcPicked.connect(self._on_bc_picked)
         self._viewer.ringFitBC.connect(self._on_ring_fit_bc)
         # Top-N brightest-pixel locator (toggle on the image toolbar).

@@ -3,7 +3,14 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-07-31 (Data Viewer: pixel-size field now accepts a
+**Last updated:** 2026-08-01 (Data Viewer: image toolbar gains a Box/Circle/Line
+ROI tool — click-drag draws a shape, opening a small floating, freely-draggable
+stats popup next to it, color/label-matched to the shape; box/circle popups show
+full intensity statistics, line popups show a flippable intensity-vs-distance
+profile; popups stay live-linked to their shape as it's dragged/resized but not
+to its screen position; multiple ROIs supported, session-only, removable via
+the popup's close button, a shape's right-click menu, or Clear ROIs) (2026-07-31,
+Data Viewer: pixel-size field now accepts a
 second decimal place, needed for near-field detectors' finer pixel pitches;
 radial-integration plot gains a "?"
 help button explaining the R-bin calculation; ring-width field widened
@@ -408,6 +415,46 @@ or below that value are excluded from ranking entirely — never marked, never
 counted toward N — so a low-signal frame can't be forced to mark N pixels that
 aren't actually meaningful. If fewer than N pixels clear the threshold, fewer
 than N markers are drawn (down to none).
+
+### Region-of-interest (ROI) tool (image toolbar)
+A **ROI: Box / Circle / Line** row sits on the image toolbar, alongside a
+**Clear ROIs** button. Click one of Box/Circle/Line to arm it, then
+click-drag on the image to draw the shape (a drag shorter than a few pixels
+is treated as a cancelled attempt — the mode stays armed so you can retry).
+Arming a shape mode automatically disarms Pick BC/Pick Ring and vice versa,
+since they all read the same click-drag. Drawing a shape opens a small
+**floating stats popup** next to it and un-arms the button (one-shot, like
+Pick BC).
+
+Each ROI gets its own color (cycled from a fixed palette) shared by the
+on-image shape, its on-image label, and its popup's title/label field, so
+multiple simultaneous ROIs stay easy to tell apart. The label is editable —
+typing a new name in the popup updates the on-image label to match.
+
+- **Box / Circle** popups show the same full intensity-statistics readout as
+  the Intensity statistics panel below (N, percentiles p70/90/99/99.9/99.99,
+  histogram) but scoped to just the pixels inside the shape.
+- **Line** popups show a live **intensity-vs-distance profile** along the
+  line (distance measured from one endpoint), plus N/min/max/mean of the
+  sampled values. A small arrow drawn at the line's positive end shows which
+  direction distance = 0 → increasing runs; a **Flip direction** button in
+  the popup reverses it.
+
+Dragging or resizing a shape (or right-click → drag a handle) recomputes its
+popup immediately, and every popup also refreshes automatically on frame
+navigation, new live-streamed frames, and dark/bright/background/mask
+correction changes — the same as the rest of the tab's live readouts.
+
+A popup's on-screen **position is independent of the shape's position**: it
+opens next to its shape once, at creation time (placed on whichever monitor
+the shape is on, useful for multi-detector/multi-screen setups), and after
+that it's a normal free-floating window you can drag anywhere — moving it
+never repositions again on its own, only its contents stay live.
+
+Closing a popup (its window close button) removes its shape from the image;
+right-clicking a shape and choosing **Remove ROI** closes its popup too.
+**Clear ROIs** removes every ROI and popup at once. ROIs are session-only —
+they are not saved with the rest of the tab's state.
 
 ### Intensity statistics (left panel, bottom)
 At the bottom of the Data-Loader panel, in a **draggable pane** below the loader
