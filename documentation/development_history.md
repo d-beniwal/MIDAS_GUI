@@ -89,6 +89,7 @@ Dates are commit dates (YYYY-MM-DD).
 | "?" help button explaining radial-integration (R-bin) calculation | `b7a1518` |
 | Exclude-range controls moved into radial-plot toolbar; int-safe pixel bounds | `de15d57` |
 | Pixel-size field allows a second decimal place (near-field detectors) | `1d45c40` |
+| Box/Circle/Line ROI tool with live floating stats popups | `ecfbf36` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -1206,6 +1207,31 @@ is unchanged.
 **Files:** `midas_gui/tab_view.py`, `documentation/gui_documentation.md`.
 **Roll back:** `git revert 1d45c40`. Self-contained — returns the field to 1
 decimal.
+
+---
+
+### `ecfbf36` — Data Viewer: add Box/Circle/Line ROI tool with live floating stats popups (2026-08-01)
+**Effect:** A new **ROI: Box / Circle / Line** row on the image toolbar
+(alongside **Clear ROIs**) shares the same click-drag gesture as Pick
+BC/Pick Ring — arming one disarms the others. Click a shape button, then
+click-drag on the image to draw it (drags shorter than a few pixels are
+treated as a cancelled attempt, mode stays armed). Drawing a shape opens a
+small floating, freely-draggable stats popup next to it, color/label-matched
+to the shape (color cycled from a fixed palette, shared by the on-image
+shape, its label, and the popup). Box/Circle popups show the full intensity
+statistics readout (N, percentiles, histogram) scoped to the enclosed
+pixels; Line popups show a live intensity-vs-distance profile with a
+direction arrow and a Flip-direction button. Popups recompute on
+drag/resize and on every frame-navigation/live-frame/correction-change
+refresh, but their on-screen position is independent of the shape — set
+once at creation (monitor-aware), never moved automatically afterward.
+Closing a popup, right-click → Remove ROI, or Clear ROIs removes a shape;
+ROIs are session-only (not saved with tab state).
+**Files:** `midas_gui/roi_tools.py` (new — `ROIImageViewer`, `ROIStatsPopup`),
+`midas_gui/tab_view.py` (Data Viewer's image viewer switched from
+`PickableImageViewer` to `ROIImageViewer`), `documentation/gui_documentation.md`.
+**Roll back:** `git revert ecfbf36`. Self-contained — restores the plain
+`PickableImageViewer` (no ROI tool) and deletes `roi_tools.py`.
 
 ---
 
