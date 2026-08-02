@@ -3,13 +3,16 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-01 (Data Viewer: image toolbar gains a Box/Circle/Line
+**Last updated:** 2026-08-01 (Data Viewer: image toolbar gains a Box/Line
 ROI tool — click-drag draws a shape, opening a small floating, freely-draggable
-stats popup next to it, color/label-matched to the shape; box/circle popups show
-full intensity statistics, line popups show a flippable intensity-vs-distance
-profile; popups stay live-linked to their shape as it's dragged/resized but not
-to its screen position; multiple ROIs supported, session-only, removable via
-the popup's close button, a shape's right-click menu, or Clear ROIs) (2026-07-31,
+stats popup next to it, color/label-matched to the shape; box popups show a
+linear/log intensity histogram plus a zoomed-in crop of the region, line popups
+show a flippable intensity-vs-distance profile; popups stay live-linked to
+their shape as it's dragged/resized but not to its screen position; multiple
+ROIs supported, session-only, removable via the popup's close button, a
+shape's right-click menu, or Clear ROIs (which also resets ROI numbering back
+to 1); Pick BC/Pick Ring's shared Clear button now also removes the Pick BC
+crosshair marker, not just Pick Ring's points) (2026-07-31,
 Data Viewer: pixel-size field now accepts a
 second decimal place, needed for near-field detectors' finer pixel pitches;
 radial-integration plot gains a "?"
@@ -398,7 +401,9 @@ The image viewer has **Pick BC** (single click sets the beam centre) and **Pick 
 (click ≥3 points on a ring; a circle fit estimates the beam centre). Either updates
 BC_y/BC_z and re-runs the overlay + radial integration. Pick Ring's picked points and
 fitted circle are drawn in **blue**, distinct from the **amber** Simulate-rings overlay
-so the two aren't confused when both are visible on the same image.
+so the two aren't confused when both are visible on the same image. **Clear** removes
+all of it at once — Pick Ring's points/fit **and** the Pick BC crosshair marker,
+regardless of which tool left it on screen.
 
 ### Top-N brightest pixels (image toolbar)
 A **Top-N pixels** toggle button (with an **N** spin box) sits on the image toolbar.
@@ -417,23 +422,24 @@ aren't actually meaningful. If fewer than N pixels clear the threshold, fewer
 than N markers are drawn (down to none).
 
 ### Region-of-interest (ROI) tool (image toolbar)
-A **ROI: Box / Circle / Line** row sits on the image toolbar, alongside a
-**Clear ROIs** button. Click one of Box/Circle/Line to arm it, then
-click-drag on the image to draw the shape (a drag shorter than a few pixels
-is treated as a cancelled attempt — the mode stays armed so you can retry).
-Arming a shape mode automatically disarms Pick BC/Pick Ring and vice versa,
-since they all read the same click-drag. Drawing a shape opens a small
-**floating stats popup** next to it and un-arms the button (one-shot, like
-Pick BC).
+A **ROI: Box / Line** row sits on the image toolbar, alongside a
+**Clear ROIs** button. Click Box or Line to arm it, then click-drag on the
+image to draw the shape (a drag shorter than a few pixels is treated as a
+cancelled attempt — the mode stays armed so you can retry). Arming a shape
+mode automatically disarms Pick BC/Pick Ring and vice versa, since they all
+read the same click-drag. Drawing a shape opens a small **floating stats
+popup** next to it and un-arms the button (one-shot, like Pick BC).
 
 Each ROI gets its own color (cycled from a fixed palette) shared by the
 on-image shape, its on-image label, and its popup's title/label field, so
 multiple simultaneous ROIs stay easy to tell apart. The label is editable —
-typing a new name in the popup updates the on-image label to match.
+typing a new name in the popup updates the on-image label to match. New
+ROIs are numbered "ROI 1", "ROI 2", ... in creation order; **Clear ROIs**
+resets that counter, so the next ROI drawn after a clear starts back at 1.
 
-- **Box / Circle** popups show the same full intensity-statistics readout as
-  the Intensity statistics panel below (N, percentiles p70/90/99/99.9/99.99,
-  histogram) but scoped to just the pixels inside the shape.
+- **Box** popups show a linear/log intensity histogram of the pixels inside
+  the box, plus a zoomed-in crop of the boxed region rendered with the
+  tab's current colormap.
 - **Line** popups show a live **intensity-vs-distance profile** along the
   line (distance measured from one endpoint), plus N/min/max/mean of the
   sampled values. A small arrow drawn at the line's positive end shows which

@@ -1,9 +1,9 @@
 """Region-of-interest (ROI) drawing + live stats popups for the Data Viewer.
 
-Draw a box, circle, or line on the image; a small floating, user-draggable
-popup shows live intensity statistics (box/circle) or an intensity profile
-(line) for that region, updating as the shape is dragged/resized or as new
-frames arrive. Multiple simultaneous ROIs are distinguished by a shared
+Draw a box or line on the image; a small floating, user-draggable popup
+shows live intensity statistics (box) or an intensity profile (line) for
+that region, updating as the shape is dragged/resized or as new frames
+arrive. Multiple simultaneous ROIs are distinguished by a shared
 shape/popup color and label.
 """
 from __future__ import annotations
@@ -15,7 +15,7 @@ import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
-from midas_gui.widgets import PickableImageViewer, IntensityStatsPanel, _mono_font
+from midas_gui.widgets import PickableImageViewer, _mono_font, _resolve_cmap
 
 # Cycled per new ROI — same palette convention as tab_view._MATERIAL_COLORS
 # (duplicated here rather than imported, to avoid a tab_view <-> roi_tools
@@ -45,18 +45,20 @@ def _raster_roi_mask(roi, imgitem, shape) -> np.ndarray:
 
 
 class ROIStatsPopup(QtWidgets.QDialog):
-    """Non-modal, freely-draggable floating stats window for one ROI.
+    """Non-modal, freely-draggable floating window for one ROI.
 
-    Box/circle show full intensity statistics (via an embedded
-    IntensityStatsPanel); a line shows an intensity-vs-distance profile
-    plot with a flip-direction control.
+    A box shows a linear/log intensity histogram plus a zoomed-in crop of
+    the ROI region; a line shows an intensity-vs-distance profile plot
+    with a flip-direction control.
     """
     removed = QtCore.pyqtSignal()
     labelChanged = QtCore.pyqtSignal(str)
     flipRequested = QtCore.pyqtSignal()
 
     def __init__(self, kind: str, color: str, label: str, parent=None):
-        super().__init__(parent, QtCore.Qt.Tool)
+        # Qt.Window (not Qt.Tool): a Tool-flagged window is treated as a
+        # macOS utility panel and auto-hides whenever the app loses focus.
+        super().__init__(parent, QtCore.Qt.Window)
         self._kind = kind
         self.setModal(False)
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose, False)
@@ -78,7 +80,7 @@ class ROIStatsPopup(QtWidgets.QDialog):
 
         if kind == "line":
             self._plot = pg.PlotWidget(background="#2b2e35")
-            self._plot.setMinimumSize(280, 160)
+            self._plot.setMinimumSize(110, 65)
             self._plot.setLabel("bottom", "distance (px)", **{"color": "#d0d0d0", "font-size": "9pt"})
             self._plot.setLabel("left", "intensity", **{"color": "#d0d0d0", "font-size": "9pt"})
             for ax in ("bottom", "left"):
@@ -100,15 +102,55 @@ class ROIStatsPopup(QtWidgets.QDialog):
             self._stats_lbl.setFont(_mono_font(9))
             self._stats_lbl.setStyleSheet("color:#d6d6d6;")
             v.addWidget(self._stats_lbl)
-            self._panel = None
+            self._hist_plot = None
         else:
-            self._panel = IntensityStatsPanel()
-            self._panel.set_scope_enabled(False)
-            v.addWidget(self._panel)
-            self._curve = None
-            self._stats_lbl = None
+            row = QtWidgets.QHBoxLayout(); row.setSpacing(6)
 
-        self.resize(self.sizeHint())
+            hist_col = QtWidgets.QVBoxLayout(); hist_col.setSpacing(2)
+            self._hist_plot = pg.PlotWidget(background="#2b2e35")
+            self._hist_plot.setMinimumSize(85, 55)
+            self._hist_plot.setLabel("bottom", "intensity", **{"color": "#d0d0d0", "font-size": "9pt"})
+            self._hist_plot.setLabel("left", "count", **{"color": "#d0d0d0", "font-size": "9pt"})
+            for ax in ("bottom", "left"):
+                self._hist_plot.getAxis(ax).setTextPen("#c8c8c8")
+                self._hist_plot.getAxis(ax).setPen("#8a8a8a")
+            self._curve = self._hist_plot.plot(
+                [], [], stepMode="center", fillLevel=0,
+                brush=(90, 140, 220, 150), pen=pg.mkPen(color))
+            hist_col.addWidget(self._hist_plot)
+
+            self._logy_chk = QtWidgets.QCheckBox("log y")   # linear by default
+            self._logy_chk.toggled.connect(self._redraw_hist)
+            hist_col.addWidget(self._logy_chk)
+            row.addLayout(hist_col, 1)
+
+            crop_view = pg.PlotWidget(background="#2b2e35")
+            crop_view.setFixedSize(110, 110)
+            crop_view.showAxis("bottom", False); crop_view.showAxis("left", False)
+            crop_view.setMouseEnabled(x=False, y=False)
+            self._crop_vb = crop_view.getViewBox()
+            self._crop_vb.setAspectLocked(True)
+            self._crop_vb.setMenuEnabled(False)
+            # Match the main image viewer's convention (pg.ImageView calls
+            # view.invertY() so row 0 sits at the top / origin top-left);
+            # this plain PlotWidget defaults to Y-up, which flipped the crop
+            # vertically relative to what's drawn in the data viewer.
+            self._crop_vb.invertY(True)
+            self._crop_img = pg.ImageItem()
+            crop_view.addItem(self._crop_img)
+            row.addWidget(crop_view)
+
+            v.addLayout(row)
+            self._stats_lbl = None
+            self._hist_cache = None
+
+        # pyqtgraph's PlotWidget reports a large default sizeHint regardless
+        # of setMinimumSize() above, so self.sizeHint() alone would still
+        # size this popup at its old, much larger footprint. Shrink to ~50%
+        # of that natural size instead, floored at what the layout actually
+        # needs (crop view + our reduced plot minimums) so nothing clips.
+        target = self.sizeHint() * 0.5
+        self.resize(target.expandedTo(self.minimumSizeHint()))
 
     def _on_label_edited(self, text: str):
         self.setWindowTitle(text)
@@ -120,9 +162,39 @@ class ROIStatsPopup(QtWidgets.QDialog):
         self._label_ed.blockSignals(False)
         self.setWindowTitle(text)
 
-    def set_area_stats(self, values: np.ndarray, scope: str):
-        if self._panel is not None:
-            self._panel.set_data(values, scope=scope)
+    def set_area_data(self, values: np.ndarray, crop: Optional[np.ndarray],
+                       cmap_name: str, log: bool):
+        if self._hist_plot is None:
+            return
+        vals = np.asarray(values, dtype=np.float64).ravel()
+        vals = vals[np.isfinite(vals)]
+        if vals.size:
+            vmin, vmax = float(vals.min()), float(vals.max())
+            if vmax <= vmin:
+                vmax = vmin + 1.0
+            self._hist_cache = np.histogram(vals, bins=128, range=(vmin, vmax))
+        else:
+            self._hist_cache = None
+        self._redraw_hist()
+
+        if crop is not None and crop.size:
+            disp = np.log10(np.clip(crop, 1e-10, None)) if log else crop
+            self._crop_img.setImage(disp.astype(np.float32), autoLevels=True)
+            self._crop_img.setColorMap(_resolve_cmap(cmap_name))
+            self._crop_vb.autoRange()
+
+    def _redraw_hist(self, *_):
+        if self._hist_cache is None:
+            self._curve.setData([], [])
+            return
+        counts, edges = self._hist_cache
+        y = counts.astype(float)
+        log = self._logy_chk.isChecked()
+        if log:
+            y = np.log10(y + 1.0)
+        self._curve.setData(edges, y)
+        self._hist_plot.setLabel("left", "log(count+1)" if log else "count",
+                                 **{"color": "#d0d0d0", "font-size": "9pt"})
 
     def set_line_profile(self, dist: np.ndarray, vals: np.ndarray):
         if self._curve is None:
@@ -141,13 +213,12 @@ class ROIStatsPopup(QtWidgets.QDialog):
 
 
 class ROIImageViewer(PickableImageViewer):
-    """PickableImageViewer + draw-a-box/circle/line ROI tool with live,
+    """PickableImageViewer + draw-a-box/line ROI tool with live,
     freely-positioned stats popups. Used only by the Data Viewer tab (kept
     out of the shared PickableImageViewer base so other tabs, e.g.
     Calibrate, aren't affected)."""
 
     PICK_ROI_BOX    = 10
-    PICK_ROI_CIRCLE = 11
     PICK_ROI_LINE   = 12
 
     def __init__(self, parent=None):
@@ -160,16 +231,20 @@ class ROIImageViewer(PickableImageViewer):
 
         _BTN = ("QPushButton{padding:2px 8px;border-radius:3px}"
                 "QPushButton:checked{background:#2a7fd4;color:white;font-weight:bold}")
-        roi_bar = QtWidgets.QHBoxLayout()
-        roi_bar.setSpacing(4)
-        roi_bar.addWidget(QtWidgets.QLabel("ROI:"))
+        # Appended onto the existing Pick BC/Pick Ring row (rather than a new
+        # row of our own) — its trailing stretch pins these to the right edge,
+        # separated from the pick tools by a vline.
+        pick_bar = self.layout().itemAt(1).layout()
+        sep = QtWidgets.QFrame()
+        sep.setFrameShape(QtWidgets.QFrame.VLine)
+        sep.setFrameShadow(QtWidgets.QFrame.Sunken)
+        pick_bar.addWidget(sep)
+        pick_bar.addWidget(QtWidgets.QLabel("ROI:"))
 
         self._roi_box_btn = QtWidgets.QPushButton("Box")
-        self._roi_circle_btn = QtWidgets.QPushButton("Circle")
         self._roi_line_btn = QtWidgets.QPushButton("Line")
         self._roi_mode_btns = {
             self._roi_box_btn: ("box", self.PICK_ROI_BOX),
-            self._roi_circle_btn: ("circle", self.PICK_ROI_CIRCLE),
             self._roi_line_btn: ("line", self.PICK_ROI_LINE),
         }
         for btn, (kind, mode) in self._roi_mode_btns.items():
@@ -177,14 +252,12 @@ class ROIImageViewer(PickableImageViewer):
             btn.setStyleSheet(_BTN)
             btn.setToolTip(f"Click, then drag on the image to draw a {kind} ROI.")
             btn.toggled.connect(lambda on, k=kind, m=mode: self._on_roi_mode_toggled(on, k, m))
-            roi_bar.addWidget(btn)
+            pick_bar.addWidget(btn)
 
         self._roi_clear_btn = QtWidgets.QPushButton("Clear ROIs")
         self._roi_clear_btn.setToolTip("Remove all ROIs and their popups.")
         self._roi_clear_btn.clicked.connect(self._clear_all_rois)
-        roi_bar.addWidget(self._roi_clear_btn)
-        roi_bar.addStretch(1)
-        self.layout().insertLayout(2, roi_bar)  # after main toolbar + pick bar
+        pick_bar.addWidget(self._roi_clear_btn)
 
         self._iv.ui.graphicsView.viewport().installEventFilter(self)
 
@@ -272,10 +345,6 @@ class ROIImageViewer(PickableImageViewer):
             pos = (min(x0, x1), min(y0, y1))
             size = (max(abs(x1 - x0), 1e-3), max(abs(y1 - y0), 1e-3))
             roi = pg.RectROI(pos, size, pen=pen, rotatable=False)
-        elif kind == "circle":
-            d = max(abs(x1 - x0), abs(y1 - y0), 1e-3)
-            pos = (min(x0, x1), min(y0, y1))
-            roi = pg.CircleROI(pos, (d, d), pen=pen)
         else:  # line
             roi = pg.LineSegmentROI([(x0, y0), (x1, y1)], pen=pen)
 
@@ -328,7 +397,8 @@ class ROIImageViewer(PickableImageViewer):
         global_pt = QtCore.QPoint(global_pt.x() + 16, global_pt.y())
 
         screen = QtWidgets.QApplication.screenAt(global_pt) or QtWidgets.QApplication.primaryScreen()
-        popup.adjustSize()
+        # Not popup.adjustSize(): that resets to the popup's natural (large)
+        # sizeHint(), undoing the ~50% shrink applied in ROIStatsPopup.__init__.
         if screen is not None:
             avail = screen.availableGeometry()
             x = min(max(global_pt.x(), avail.left()), avail.right() - popup.width())
@@ -374,7 +444,13 @@ class ROIImageViewer(PickableImageViewer):
             self._update_line_arrow(entry)
         else:
             mask = _raster_roi_mask(roi, imgitem, self._data.shape)
-            entry["popup"].set_area_stats(self._data[mask], scope=entry["label"])
+            try:
+                crop = roi.getArrayRegion(self._data.T, imgitem)
+            except Exception:
+                crop = None
+            entry["popup"].set_area_data(
+                self._data[mask], crop,
+                cmap_name=self._cmap.currentText(), log=self._log.isChecked())
 
     def _update_line_arrow(self, entry: dict):
         arrow = entry["arrow"]
@@ -384,12 +460,16 @@ class ROIImageViewer(PickableImageViewer):
         if len(pts) < 2:
             return
         p0, p1 = (pts[1], pts[0]) if entry["flipped"] else (pts[0], pts[1])
-        scene_p0 = entry["roi"].mapToScene(p0)
-        scene_p1 = entry["roi"].mapToScene(p1)
-        dx, dy = scene_p1.x() - scene_p0.x(), scene_p1.y() - scene_p0.y()
+        # mapToParent (not mapToScene): `arrow` lives in the ViewBox's own
+        # coordinate frame (added via self._iv.addItem), same as `roi` and
+        # `label_item` — mapping to scene coordinates here placed the arrow
+        # far from the line.
+        view_p0 = entry["roi"].mapToParent(p0)
+        view_p1 = entry["roi"].mapToParent(p1)
+        dx, dy = view_p1.x() - view_p0.x(), view_p1.y() - view_p0.y()
         angle = 180.0 - math.degrees(math.atan2(dy, dx))
         arrow.setStyle(angle=angle)
-        arrow.setPos(scene_p1)
+        arrow.setPos(view_p1)
 
     def _refresh_all_roi_stats(self):
         for entry in self._roi_entries:
@@ -417,6 +497,7 @@ class ROIImageViewer(PickableImageViewer):
     def _clear_all_rois(self):
         for entry in list(self._roi_entries):
             self._remove_roi(entry)
+        self._roi_counter = 0
 
     # ── frame refresh hook ───────────────────────────────────────
 

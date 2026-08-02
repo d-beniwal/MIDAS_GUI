@@ -424,6 +424,7 @@ class PickableImageViewer(ImageViewer):
             [x], [y], symbol="+", size=20,
             pen=pg.mkPen("#00aaff", width=2.5), brush=pg.mkBrush(0, 0, 0, 0))
         self._iv.addItem(self._bc_click_item)
+        self._clear_ring_btn.setEnabled(True)
 
     def _add_ring_point(self, x: float, y: float):
         self._ring_pts.append((x, y))
@@ -456,11 +457,15 @@ class PickableImageViewer(ImageViewer):
             if item is not None:
                 self._iv.removeItem(item)
         self._ring_fit_item = self._ring_fit_center = None
+        if self._bc_click_item is not None:
+            self._iv.removeItem(self._bc_click_item)
+            self._bc_click_item = None
         self._undo_btn.setEnabled(False)
         self._clear_ring_btn.setEnabled(False)
         self._pick_status.setText(
             "Click on a ring to pick points (need ≥3)"
-            if self._pick_mode == self.PICK_RING else "")
+            if self._pick_mode == self.PICK_RING else
+            "Click image to set BC" if self._pick_mode == self.PICK_BC else "")
 
     def _update_ring_fit(self):
         n = len(self._ring_pts)
