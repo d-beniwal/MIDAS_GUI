@@ -3,7 +3,9 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-01 (Data Viewer: line ROI is now drawn as a single
+**Last updated:** 2026-08-01 (Data Viewer: box-ROI popup's zoomed crop image
+is no longer fixed-size — it now resizes along with the popup window) (2026-08-01,
+Data Viewer: line ROI is now drawn as a single
 arrow shape — shaft and head recomputed together from the two endpoints on
 every drag — replacing the separate arrowhead overlay item that could rotate
 oddly as the endpoint moved) (2026-08-01,
@@ -443,7 +445,9 @@ resets that counter, so the next ROI drawn after a clear starts back at 1.
 
 - **Box** popups show a linear/log intensity histogram of the pixels inside
   the box, plus a zoomed-in crop of the boxed region rendered with the
-  tab's current colormap.
+  tab's current colormap. The crop image is not fixed-size — dragging the
+  popup window's edge to resize it grows or shrinks the crop image along
+  with the histogram.
 - **Line** popups show a live **intensity-vs-distance profile** along the
   line (distance measured from one endpoint), plus N/min/max/mean of the
   sampled values. The line itself is drawn as a single arrow (shaft + head

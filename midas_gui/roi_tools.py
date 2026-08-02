@@ -157,7 +157,9 @@ class ROIStatsPopup(QtWidgets.QDialog):
             row.addLayout(hist_col, 1)
 
             crop_view = pg.PlotWidget(background="#2b2e35")
-            crop_view.setFixedSize(110, 110)
+            crop_view.setMinimumSize(90, 90)
+            crop_view.setSizePolicy(QtWidgets.QSizePolicy.Expanding,
+                                     QtWidgets.QSizePolicy.Expanding)
             crop_view.showAxis("bottom", False); crop_view.showAxis("left", False)
             crop_view.setMouseEnabled(x=False, y=False)
             self._crop_vb = crop_view.getViewBox()
@@ -170,7 +172,11 @@ class ROIStatsPopup(QtWidgets.QDialog):
             self._crop_vb.invertY(True)
             self._crop_img = pg.ImageItem()
             crop_view.addItem(self._crop_img)
-            row.addWidget(crop_view)
+            # Stretch factor matches hist_col's so dragging the popup's edge
+            # to resize it (a plain QDialog, resizable by default) grows the
+            # crop image along with the histogram instead of leaving it
+            # pinned at its old fixed 110x110 footprint.
+            row.addWidget(crop_view, 1)
 
             v.addLayout(row)
             self._stats_lbl = None
