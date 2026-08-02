@@ -92,6 +92,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Box/Circle/Line ROI tool with live floating stats popups | `ecfbf36` |
 | ROI tool drops Circle (Box/Line only); Clear ROIs resets numbering; Pick Clear also removes BC marker | `d5654c1` |
 | Line ROI drawn as single arrow shape (no separate arrowhead item) | `bb78c9a` |
+| Box-ROI popup's zoomed crop image resizes with the popup window | `786c94c` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -1265,6 +1266,19 @@ drawn a second time underneath the arrow.
 **Files:** `midas_gui/roi_tools.py`, `documentation/gui_documentation.md`.
 **Roll back:** `git revert bb78c9a`. Self-contained — restores the
 `pg.ArrowItem`-based line-direction indicator.
+
+---
+
+### `786c94c` — Data Viewer: box-ROI popup's zoomed crop image now resizes with the popup (2026-08-01)
+**Effect:** The **Box** ROI popup's zoomed crop `PlotWidget` was
+`setFixedSize(110, 110)`; it now has a 90x90 minimum size with an Expanding
+size policy and the same layout stretch factor as the histogram column, so
+dragging the popup dialog's edge to resize it grows or shrinks the crop
+image along with the histogram instead of leaving it pinned at its old
+fixed footprint.
+**Files:** `midas_gui/roi_tools.py`, `documentation/gui_documentation.md`.
+**Roll back:** `git revert 786c94c`. Self-contained — restores the fixed
+110x110 crop image size.
 
 ---
 
