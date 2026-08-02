@@ -90,6 +90,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Exclude-range controls moved into radial-plot toolbar; int-safe pixel bounds | `de15d57` |
 | Pixel-size field allows a second decimal place (near-field detectors) | `1d45c40` |
 | Box/Circle/Line ROI tool with live floating stats popups | `ecfbf36` |
+| ROI tool drops Circle (Box/Line only); Clear ROIs resets numbering; Pick Clear also removes BC marker | `d5654c1` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -1232,6 +1233,22 @@ ROIs are session-only (not saved with tab state).
 `PickableImageViewer` to `ROIImageViewer`), `documentation/gui_documentation.md`.
 **Roll back:** `git revert ecfbf36`. Self-contained — restores the plain
 `PickableImageViewer` (no ROI tool) and deletes `roi_tools.py`.
+
+---
+
+### `d5654c1` — Data Viewer: ROI tool drops Circle, Clear ROIs resets numbering, Pick Clear also removes BC marker (2026-08-01)
+**Effect:** Three follow-ups to the `ecfbf36` ROI tool: (1) the Circle option
+is removed from the **ROI:** row — only Box and Line remain; (2) **Clear
+ROIs** now resets the ROI counter, so the next ROI drawn after a clear
+starts back at "ROI 1" instead of continuing the prior session's numbering;
+(3) the **Clear** button shared by **Pick BC**/**Pick Ring** now also
+removes the Pick BC crosshair marker — previously it only cleared Pick
+Ring's points/fit-circle, and stayed disabled if only a BC point (no ring
+points) had been picked, so a lone BC marker couldn't be cleared at all.
+**Files:** `midas_gui/roi_tools.py`, `midas_gui/widgets.py`,
+`documentation/gui_documentation.md`.
+**Roll back:** `git revert d5654c1`. Self-contained — restores the Circle
+ROI option and the old Clear behavior (ring points only).
 
 ---
 
