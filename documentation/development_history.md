@@ -91,6 +91,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Pixel-size field allows a second decimal place (near-field detectors) | `1d45c40` |
 | Box/Circle/Line ROI tool with live floating stats popups | `ecfbf36` |
 | ROI tool drops Circle (Box/Line only); Clear ROIs resets numbering; Pick Clear also removes BC marker | `d5654c1` |
+| Line ROI drawn as single arrow shape (no separate arrowhead item) | `bb78c9a` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -1249,6 +1250,21 @@ points) had been picked, so a lone BC marker couldn't be cleared at all.
 `documentation/gui_documentation.md`.
 **Roll back:** `git revert d5654c1`. Self-contained — restores the Circle
 ROI option and the old Clear behavior (ring points only).
+
+---
+
+### `bb78c9a` — Data Viewer: line ROI drawn as single arrow shape, no separate arrowhead item (2026-08-01)
+**Effect:** A line ROI's shaft and arrowhead are now built as one
+`QPainterPath` (`_build_arrow_path`) recomputed from the two endpoints on
+every drag, instead of a plain shaft line plus a separately positioned/
+rotated `pg.ArrowItem`. The old approach could show the arrowhead at an odd
+angle as the endpoint moved; the new path always points cleanly from one
+endpoint to the other, with the head size held constant in screen pixels.
+The ROI's own connecting line is hidden (`roi.setPen(None)`) so it isn't
+drawn a second time underneath the arrow.
+**Files:** `midas_gui/roi_tools.py`, `documentation/gui_documentation.md`.
+**Roll back:** `git revert bb78c9a`. Self-contained — restores the
+`pg.ArrowItem`-based line-direction indicator.
 
 ---
 
