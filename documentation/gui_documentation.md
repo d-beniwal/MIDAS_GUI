@@ -3,7 +3,11 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-01 (Data Viewer: image toolbar gains a Box/Line
+**Last updated:** 2026-08-01 (Data Viewer: line ROI is now drawn as a single
+arrow shape — shaft and head recomputed together from the two endpoints on
+every drag — replacing the separate arrowhead overlay item that could rotate
+oddly as the endpoint moved) (2026-08-01,
+Data Viewer: image toolbar gains a Box/Line
 ROI tool — click-drag draws a shape, opening a small floating, freely-draggable
 stats popup next to it, color/label-matched to the shape; box popups show a
 linear/log intensity histogram plus a zoomed-in crop of the region, line popups
@@ -442,9 +446,10 @@ resets that counter, so the next ROI drawn after a clear starts back at 1.
   tab's current colormap.
 - **Line** popups show a live **intensity-vs-distance profile** along the
   line (distance measured from one endpoint), plus N/min/max/mean of the
-  sampled values. A small arrow drawn at the line's positive end shows which
-  direction distance = 0 → increasing runs; a **Flip direction** button in
-  the popup reverses it.
+  sampled values. The line itself is drawn as a single arrow (shaft + head
+  in one shape, recomputed from the two endpoints on every drag) pointing
+  toward the end where distance = 0 → increasing runs; a **Flip direction**
+  button in the popup reverses it.
 
 Dragging or resizing a shape (or right-click → drag a handle) recomputes its
 popup immediately, and every popup also refreshes automatically on frame

@@ -26,6 +26,38 @@ _ROI_COLORS = ("#f0c060", "#4fc3f7", "#ab47bc", "#66bb6a", "#ef5350",
 _MIN_DRAG_PX = 6  # widget-space drag distance below which a draw attempt is cancelled
 
 
+_ARROW_HEAD_LEN_PX = 16    # arrowhead size in constant screen pixels
+_ARROW_HEAD_WIDTH_PX = 10
+
+
+def _build_arrow_path(p0: QtCore.QPointF, p1: QtCore.QPointF,
+                       head_len: float, head_width: float) -> QtGui.QPainterPath:
+    """Single path (shaft + filled head, both from p0/p1 directly) so the
+    whole line renders as one arrow rather than a shaft plus a separately
+    positioned/rotated arrowhead item."""
+    path = QtGui.QPainterPath()
+    dx, dy = p1.x() - p0.x(), p1.y() - p0.y()
+    length = math.hypot(dx, dy)
+    if length < 1e-9:
+        path.moveTo(p0)
+        return path
+    ux, uy = dx / length, dy / length     # unit vector along the shaft
+    px, py = -uy, ux                      # unit vector perpendicular to it
+    hl = min(head_len, length * 0.8)      # don't let the head outgrow a short line
+    base = QtCore.QPointF(p1.x() - ux * hl, p1.y() - uy * hl)
+    left = QtCore.QPointF(base.x() + px * head_width / 2, base.y() + py * head_width / 2)
+    right = QtCore.QPointF(base.x() - px * head_width / 2, base.y() - py * head_width / 2)
+
+    path.moveTo(p0)
+    path.lineTo(base)
+    path.moveTo(left)
+    path.lineTo(p1)
+    path.lineTo(right)
+    path.lineTo(left)
+    path.closeSubpath()
+    return path
+
+
 def _raster_roi_mask(roi, imgitem, shape) -> np.ndarray:
     """Boolean mask (matching `shape`, e.g. (NZ, NY)) of pixels inside a
     pyqtgraph ROI (any shape). Standalone port of MaskTab._raster_roi."""
@@ -368,9 +400,15 @@ class ROIImageViewer(PickableImageViewer):
 
         arrow = None
         if kind == "line":
-            arrow = pg.ArrowItem(angle=0, brush=color, pen=pg.mkPen(color))
+            # The whole line is drawn as a single arrow shape (see
+            # _update_line_arrow / _build_arrow_path) — hide the ROI's own
+            # connecting line so it isn't drawn a second time underneath.
+            roi.setPen(pg.mkPen(None))
+            arrow = QtWidgets.QGraphicsPathItem()
+            arrow.setPen(pg.mkPen(color, width=2))
+            arrow.setBrush(pg.mkBrush(color))
             arrow.setZValue(21)
-            self._iv.addItem(arrow)
+            self._iv.addItem(arrow, ignoreBounds=True)
 
         popup = ROIStatsPopup(kind, color, label, parent=self)
         entry = {
@@ -466,10 +504,12 @@ class ROIImageViewer(PickableImageViewer):
         # far from the line.
         view_p0 = entry["roi"].mapToParent(p0)
         view_p1 = entry["roi"].mapToParent(p1)
-        dx, dy = view_p1.x() - view_p0.x(), view_p1.y() - view_p0.y()
-        angle = 180.0 - math.degrees(math.atan2(dy, dx))
-        arrow.setStyle(angle=angle)
-        arrow.setPos(view_p1)
+        vb = self._iv.getView().getViewBox()
+        px_size = vb.viewPixelSize()[0] or 1.0
+        arrow.setPath(_build_arrow_path(
+            view_p0, view_p1,
+            head_len=_ARROW_HEAD_LEN_PX * px_size,
+            head_width=_ARROW_HEAD_WIDTH_PX * px_size))
 
     def _refresh_all_roi_stats(self):
         for entry in self._roi_entries:
