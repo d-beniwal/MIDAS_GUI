@@ -3,7 +3,12 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-01 (Data Viewer: box-ROI popup's zoomed crop image
+**Last updated:** 2026-08-03 (Data Viewer/Calibrate/PDF: the clickable λ
+label's popup menu gains an **Energy (keV)** entry box that converts to
+wavelength on Enter, ahead of the existing K-edge foil menu; Data Viewer's
+Projection card drops the **Axis** field (always 0, i.e. across frames) and
+adds an **N frames** field capping how many frames after Skip frames are
+included, 0 = all remaining) (2026-08-01, Data Viewer: box-ROI popup's zoomed crop image
 is no longer fixed-size — it now resizes along with the popup window) (2026-08-01,
 Data Viewer: line ROI is now drawn as a single
 arrow shape — shaft and head recomputed together from the two endpoints on
@@ -232,10 +237,12 @@ tracking the mouse.
 
 ### Projection card
 Collapse a stack to one image: **Max** (hot-pixel hunting), **Sum** (long-exposure
-equivalent), or **Average** (noise reduction), along a chosen axis (0 = across frames).
+equivalent), or **Average** (noise reduction), always across the stack of frames.
 **Skip frames** (default 1) ignores that many leading frames before projecting (e.g. 1
 drops the first frame, 4 drops the first four) — useful when the opening frames are
-detector warm-up / shutter-transient exposures.
+detector warm-up / shutter-transient exposures. **N frames** caps how many frames
+(after Skip frames) are included in the projection; **0** (default) uses every
+remaining frame in the stack.
 
 ### Exclude-out-of-range-pixels controls (radial-plot toolbar)
 These controls used to be their own left-panel card; they now live at the **far
@@ -273,10 +280,12 @@ its own lattice, visibility, and ring color.
 - Geometry (λ, max 2θ, Lsd, pixel size, beam centre) is shared across all
   materials — only the lattice/space-group/color/visibility are per-material.
   Beam centre (auto = image centre, or
-  manual BC_y/BC_z). The **λ** label is clickable (underlined) — click it for a
-  menu of common K-edge foils (Pr, Sm, Yb, Lu, Hf, Ta, W, Re, Pt, Au, Pb, Bi) that
-  sets λ to that element's K absorption-edge wavelength. The same clickable-λ menu
-  is on the Calibrate and PDF tabs. The **px** label is likewise clickable — a menu
+  manual BC_y/BC_z). The **λ** label is clickable (underlined) — click it to open a
+  menu with an **Energy (keV)** entry box at the top (type a photon energy and press
+  Enter, or click **↵**, to convert it to wavelength via λ = 12.398420 / E) followed
+  by a menu of common K-edge foils (Pr, Sm, Yb, Lu, Hf, Ta, W, Re, Pt, Au, Pb, Bi)
+  that set λ directly to that element's K absorption-edge wavelength. The same
+  clickable-λ menu is on the Calibrate and PDF tabs. The **px** label is likewise clickable — a menu
   of common detectors (GE 200 µm, Varex 150 µm, Pilatus 172 µm, Eiger 75 µm) sets
   the pixel size (also on the Calibrate tab, where it sets both pxY and pxZ).
 - Every field in this card steps by a fixed amount per up/down-arrow click

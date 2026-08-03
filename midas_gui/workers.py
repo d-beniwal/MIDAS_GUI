@@ -500,11 +500,11 @@ class ProjectionWorker(QtCore.QThread):
     finished = QtCore.pyqtSignal(object, str)   # corrected 2-D image, info string
     failed   = QtCore.pyqtSignal(str)
 
-    def __init__(self, full_stack_fn, method, axis, skip, *, dark=None, bright=None,
+    def __init__(self, full_stack_fn, method, axis, skip, nframes=0, *, dark=None, bright=None,
                  background=None, bright_mode="divide", parent=None):
         super().__init__(parent)
         self._full_stack = full_stack_fn
-        self._method, self._axis, self._skip = method, axis, skip
+        self._method, self._axis, self._skip, self._nframes = method, axis, skip, nframes
         self._dark, self._bright, self._background = dark, bright, background
         self._bright_mode = bright_mode
 
@@ -518,6 +518,9 @@ class ProjectionWorker(QtCore.QThread):
                     raise ValueError(f"Skip frames ({self._skip}) ≥ stack size "
                                      f"({data.shape[0]}).")
                 data = data[self._skip:]
+            if self._nframes and self._nframes > 0:
+                data = data[:self._nframes]
+            n_used = data.shape[self._axis]
             fn = {"max": np.max, "sum": np.sum, "average": np.mean}[self._method]
             proj = np.squeeze(fn(data, axis=self._axis))
             if proj.ndim != 2:
@@ -529,7 +532,7 @@ class ProjectionWorker(QtCore.QThread):
                     bright_mode=self._bright_mode, background=self._background).astype(np.float32)
             else:
                 out = proj.astype(np.float32)
-            info = (f"{self._method.capitalize()} projection (axis {self._axis}"
+            info = (f"{self._method.capitalize()} projection ({n_used} frames"
                     f"{f', skipped {self._skip}' if self._skip else ''}) → {proj.shape}  "
                     f"[{np.nanmin(proj):.3g}, {np.nanmax(proj):.3g}]")
             self.finished.emit(out, info)

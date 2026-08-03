@@ -756,14 +756,57 @@ def _clickable_menu_label(text, entries, parent=None):
 
 
 def make_kedge_label(wl_spin, text="λ:", parent=None):
-    """A clickable 'λ' label that pops a K-edge foil menu; selecting an entry sets
-    ``wl_spin`` to that element's K-edge wavelength."""
+    """A clickable 'λ' label that pops a menu to either type a photon energy
+    (keV, auto-converted to wavelength) or pick a common K-edge foil energy."""
     from midas_gui.constants import K_EDGE_FOILS, HC_KEV_A
+
+    btn = QtWidgets.QToolButton(parent)
+    btn.setText(text)
+    btn.setAutoRaise(True)
+    btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+    btn.setCursor(QtCore.Qt.PointingHandCursor)
+    btn.setStyleSheet(
+        "QToolButton { border: none; padding: 0 2px; color: #4da3ff; }"
+        "QToolButton::menu-indicator { image: none; }")
+    f = btn.font(); f.setUnderline(True); btn.setFont(f)
+
+    menu = QtWidgets.QMenu(btn)
+
+    energy_row = QtWidgets.QWidget(menu)
+    row = QtWidgets.QHBoxLayout(energy_row)
+    row.setContentsMargins(8, 4, 8, 4)
+    row.addWidget(QtWidgets.QLabel("Energy:"))
+    cur_wl = wl_spin.value()
+    energy_spin = _fspin(0.1, 999.0, 3, HC_KEV_A / cur_wl if cur_wl > 0 else 10.0, "keV")
+    row.addWidget(energy_spin)
+
+    def _apply_energy():
+        keV = energy_spin.value()
+        if keV > 0:
+            wl_spin.setValue(float(HC_KEV_A / keV))
+        menu.close()
+
+    energy_spin.lineEdit().returnPressed.connect(_apply_energy)
+    apply_btn = QtWidgets.QToolButton()
+    apply_btn.setText("↵")
+    apply_btn.setToolTip("Apply energy → wavelength")
+    apply_btn.clicked.connect(_apply_energy)
+    row.addWidget(apply_btn)
+
+    energy_action = QtWidgets.QWidgetAction(menu)
+    energy_action.setDefaultWidget(energy_row)
+    menu.addAction(energy_action)
+    menu.addSeparator()
+
     entries = [(f"{sym}   {keV:.2f} keV · {HC_KEV_A / keV:.5f} Å",
                 (lambda l=HC_KEV_A / keV: wl_spin.setValue(float(l))))
                for sym, keV in K_EDGE_FOILS]
-    btn = _clickable_menu_label(text, entries, parent)
-    btn.setToolTip("Click to set λ from a common K-edge foil energy.")
+    for label, cb in entries:
+        act = menu.addAction(label)
+        act.triggered.connect(lambda _checked=False, c=cb: c())
+
+    btn.setMenu(menu)
+    btn.setToolTip("Click to enter a photon energy (keV) or pick a common K-edge foil energy.")
     return btn
 
 

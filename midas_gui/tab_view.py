@@ -275,8 +275,8 @@ class DataViewerTab(QtWidgets.QWidget):
     # ── GUI state (Save/Load GUI State) ─────────────────────────────
     def _state_widgets(self) -> dict:
         return {
-            "proj_axis": self._proj_axis,
             "proj_skip": self._proj_skip,
+            "proj_nframes": self._proj_nframes,
             "calib_ed": self._calib_ed,
             "imask_on": self._imask_on,
             "imask_lo": self._imask_lo,
@@ -370,16 +370,19 @@ class DataViewerTab(QtWidgets.QWidget):
         self._proj_method["max"].setChecked(True)
         m_row.addStretch(1)
         self._proj_grp.body.addLayout(m_row)
-        self._proj_axis = _NoScrollSpinBox(); self._proj_axis.setRange(0, 5); self._proj_axis.setValue(0)
-        self._proj_axis.setToolTip("Axis to collapse. 0 = across the stack of frames.")
-        self._proj_axis.setFixedWidth(56)
         self._proj_skip = _NoScrollSpinBox(); self._proj_skip.setRange(0, 1000000); self._proj_skip.setValue(1)
         self._proj_skip.setFixedWidth(72)
         self._proj_skip.setToolTip(
             "Ignore this many leading frames before projecting\n"
             "(1 = skip the first frame, 4 = skip the first four).")
+        self._proj_nframes = _NoScrollSpinBox(); self._proj_nframes.setRange(0, 1000000)
+        self._proj_nframes.setValue(0)
+        self._proj_nframes.setFixedWidth(72)
+        self._proj_nframes.setToolTip(
+            "Number of frames to project after Skip frames\n"
+            "(0 = use all remaining frames).")
         ax = S.Form()
-        ax.row(("Axis (0=frames):", self._proj_axis), ("Skip frames:", self._proj_skip))
+        ax.row(("Skip frames:", self._proj_skip), ("N frames:", self._proj_nframes))
         self._proj_grp.body.addLayout(ax)
         self._proj_btn = QtWidgets.QPushButton("Project stack")
         self._proj_btn.clicked.connect(self._project)
@@ -801,12 +804,12 @@ class DataViewerTab(QtWidgets.QWidget):
         if self._proj_worker and self._proj_worker.isRunning():
             return
         method = next(m for m, b in self._proj_method.items() if b.isChecked())
-        axis = self._proj_axis.value()
         skip = self._proj_skip.value()
+        nframes = self._proj_nframes.value()
         self._info_lbl.setText("Projecting stack…")
         self._proj_btn.setEnabled(False)
         self._proj_worker = ProjectionWorker(
-            self._loader.full_stack, method, axis, skip,
+            self._loader.full_stack, method, 0, skip, nframes,
             dark=self._loader.dark(), bright=self._loader.bright(),
             background=self._loader.background(), bright_mode=self._loader.bright_mode(),
             parent=self)
