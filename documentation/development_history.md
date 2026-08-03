@@ -1282,6 +1282,25 @@ fixed footprint.
 
 ---
 
+### `468b417` — Data Viewer: Projection card gains N-frames cap; λ menu gains energy-to-wavelength entry (2026-08-03)
+**Effect:** The Projection card's **Axis** field (always 0, i.e. across the
+stack of frames) is removed; a new **N frames** field caps how many frames
+after **Skip frames** are included in the Max/Sum/Average projection (0 =
+use all remaining frames) — `ProjectionWorker` gains an `nframes` param and
+slices `data[:nframes]` after the skip slice, and its info string now
+reports the frame count used instead of the (always-0) axis. The clickable
+**λ** label's popup menu (`make_kedge_label`, used on Data Viewer/Calibrate/
+PDF) is rebuilt as a `QToolButton` + `QMenu` with an **Energy (keV)**
+`QWidgetAction` row at the top — typing a value and pressing Enter (or
+clicking **↵**) sets λ = 12.398420/E — followed by the existing K-edge foil
+list, instead of the plain label-with-menu built by `_clickable_menu_label`.
+**Files:** `midas_gui/helpers.py`, `midas_gui/tab_view.py`,
+`midas_gui/workers.py`, `documentation/gui_documentation.md`.
+**Roll back:** `git revert 468b417`. Self-contained — restores the Axis
+spinbox (dropping N frames) and the plain K-edge-only λ menu.
+
+---
+
 ## Rollback recipes (common intents)
 
 - **Undo the Pump Probe tab only:** `git revert 590b410` removes Pump Probe *and*
