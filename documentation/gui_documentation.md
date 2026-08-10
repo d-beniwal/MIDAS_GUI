@@ -3,14 +3,18 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-09 (Cross-tab data sharing: every Data Loader
+**Last updated:** 2026-08-10 (Preferences ▸ Profile ships three bundled
+beamline device presets — **20-ID-D**, **20-ID-E**, **1-ID-E** — so the Data
+Viewer's Live Data PV dropdown can be switched to a beamline's detectors
+without hand-editing Preferences ▸ Devices).
+
+**Previously:** 2026-08-09 (Cross-tab data sharing: every Data Loader
 panel's Data browse button, plus Mask Builder's Image/Stack browse buttons,
 gain an **Import from…** menu to pull a file/folder/buffer already loaded in
 another tab; **Use Buffer** gets a 💾 button to save the buffer to an HDF5
 file (`buffer/data`); Data Viewer's **Project stack** button turns green while
 a projection is displayed; ROI popups are now always-on-top and can be
-minimized to a ribbon on the image viewer's left edge).
-**Previously:** 2026-08-09 (Data Viewer: new B-PILOT auto-start bridge —
+minimized to a ribbon on the image viewer's left edge) (2026-08-09, Data Viewer: new B-PILOT auto-start bridge —
 a local-socket server lets the separate B-PILOT plan-runner GUI trigger
 Live Data on a scan's detector with no clicks in MIDAS GUI; see the Live
 Data card section) (2026-08-03, Data Viewer/Calibrate/PDF: the clickable λ
@@ -1196,6 +1200,12 @@ independent sets of defaults (e.g. one per beamline) and switching between them:
   active one is remembered in `<config dir>/profile_meta.json`. Existing single-config
   installs are migrated transparently into a profile named **Default** the first time
   this runs — no data is lost.
+- Three beamline device presets ship bundled and appear in the combo alongside
+  **Default**: **20-ID-D**, **20-ID-E**, **1-ID-E** — each differs only in its
+  **Devices** list (below), so picking one just swaps the Live Data PV dropdown's
+  detectors for that beamline's. They're seeded once, the first time the app runs
+  on a machine; deleting one doesn't bring it back. Fresh installs still start on
+  **Default** (same detectors as 20-ID-D) so existing setups are unaffected.
 - **New…** seeds a blank profile from the shipped built-in defaults.
 - **Duplicate…** seeds a new profile from whatever is currently shown in the dialog
   (including unsaved edits), then switches to it.
@@ -1219,11 +1229,20 @@ with the full shipped defaults** so you edit from a complete starting point:
 - **Materials** / **Calibrants** — add / remove / modify (name + lattice + SG).
 - **Devices** — the detector devices offered in the Data Viewer's **Live Data**
   PV dropdown (name, prefix, PVA suffix). The live PV is built as
-  `prefix + PVA suffix`. Ships pre-filled with the 20-ID-D detectors
-  (`20iddNF`, `s20idPil`, `pg4`, `20iddTomo`, `20iddFF`), all with PVA suffix
-  `Pva1:Image`, plus a built-in **Sim Detector** entry (`midasSim:` prefix)
-  for hardware-free testing — see the Live Data card section above; add /
-  remove / edit rows for your own beamline's devices.
+  `prefix + PVA suffix`. All PVA suffixes are `Pva1:Image`, plus a built-in
+  **Sim Detector** entry (`midasSim:` prefix) for hardware-free testing — see
+  the Live Data card section above; add / remove / edit rows for your own
+  beamline's devices, or switch to one of the bundled beamline **Profiles**
+  above instead of hand-editing:
+  - **20-ID-D** — `20iddNF` (`20idOR1:`), `s20idPil` (`20idPil:`), `pg4`
+    (`1idPG4:`), `20iddTomo` (`20idGH1s:`), `20iddFF` (`20IDFF:`).
+  - **20-ID-E** — `pimega` (`PITEC:D:RAD1_5Mh:`), `spl1` (`20idsp1:`),
+    `s20varex2` (`20idVarex2:`), `pg6` (`20idPG6s:`), `gh2` (`20idGH2S:`).
+  - **1-ID-E** — `ge1`–`ge5` (`GE1:`–`GE5:`), `pixirad` (`s1_pixirad2:`),
+    `gh1` (`1idGH1:`), `pg1` (`1idPG1:`), `pg5` (`1idSP5:`), `s1varex1`
+    (`1idVarex1:`). Names match each detector's variable name in B-PILOT
+    (`mpe_bluesky/instrument/devices/`), the beamline's Bluesky/ophyd device
+    definitions, so entries are traceable back to source.
 - **Menus** — the pixel-size presets and K-edge foils.
 - **Algorithms** — default calibration pipeline, integration kernel, output format,
   error model, colormap/theme.

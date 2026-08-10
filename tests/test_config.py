@@ -17,6 +17,37 @@ def test_user_config_path_per_platform(monkeypatch):
     assert str(p).startswith("/tmp/xdg_home_test")
 
 
+def test_bundled_beamline_profiles_seeded(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    names = settings.list_profiles()
+    assert set(names) == {"Default", "20-ID-D", "20-ID-E", "1-ID-E"}
+    assert settings.active_profile() == "Default"  # unseeded fresh install stays on Default
+
+    d_names = [d["name"] for d in settings.read_json(settings.profile_path("20-ID-D"))["devices"]]
+    assert d_names == ["20iddNF", "s20idPil", "pg4", "20iddTomo", "20iddFF", "Sim Detector"]
+
+    e_devices = {d["name"]: d["prefix"]
+                 for d in settings.read_json(settings.profile_path("20-ID-E"))["devices"]}
+    assert e_devices == {
+        "pimega": "PITEC:D:RAD1_5Mh:", "spl1": "20idsp1:", "s20varex2": "20idVarex2:",
+        "pg6": "20idPG6s:", "gh2": "20idGH2S:", "Sim Detector": "midasSim:",
+    }
+
+    one_devices = {d["name"]: d["prefix"]
+                   for d in settings.read_json(settings.profile_path("1-ID-E"))["devices"]}
+    assert one_devices == {
+        "ge1": "GE1:", "ge2": "GE2:", "ge3": "GE3:", "ge4": "GE4:", "ge5": "GE5:",
+        "pixirad": "s1_pixirad2:", "gh1": "1idGH1:", "pg1": "1idPG1:", "pg5": "1idSP5:",
+        "s1varex1": "1idVarex1:", "Sim Detector": "midasSim:",
+    }
+
+    # A bundled profile a user deletes must not be silently resurrected.
+    settings.delete_profile("20-ID-E")
+    assert "20-ID-E" not in settings.list_profiles()
+
+
 def test_save_reload_reset_roundtrip(tmp_path, monkeypatch):
     cfgfile = tmp_path / "midas_gui" / "config.json"
     monkeypatch.setattr(settings, "user_config_path", lambda: cfgfile)

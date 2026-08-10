@@ -15,14 +15,19 @@ Profiles let a user keep several named sets of defaults (e.g. per beamline) and
 switch between them from Preferences ▸ Profile. On disk::
 
     <config dir>/
-        profile_meta.json      {"active": "<name>"}
+        profile_meta.json      {"active": "<name>", "bundled_seeded": ["..."]}
         profiles/
             Default.json
+            20-ID-D.json, 20-ID-E.json, 1-ID-E.json   (bundled beamline profiles)
             <name>.json ...
 
 A user upgrading from a version with no profile support has their old single
 ``config.json`` transparently migrated into ``profiles/Default.json`` the first
-time this module touches the filesystem — see :func:`_ensure_profiles`.
+time this module touches the filesystem — see :func:`_ensure_profiles`. That
+same function also seeds the bundled beamline profiles in
+:data:`BUNDLED_PROFILES` (each supplying its own beamline-specific ``devices``
+list, e.g. for the Data Viewer's Live Data PV dropdown) the first time it ever
+runs on a given machine; deleting a bundled profile does not bring it back.
 
 Sharing between users is done by exporting/importing a JSON file
 (Preferences ▸ Save/Load config), not by any shared-file mechanism here.
@@ -43,6 +48,52 @@ META_FILENAME = "profile_meta.json"
 DEFAULT_PROFILE = "Default"
 
 _cache: Optional[dict] = None
+
+
+def _pva(name: str, prefix: str) -> dict:
+    return {"name": name, "prefix": prefix, "pva_suffix": "Pva1:Image"}
+
+
+# Bundled per-beamline device lists (Data Viewer ▸ Live Data PV dropdown), seeded
+# once per machine by :func:`_ensure_profiles` so a user can switch beamlines from
+# Preferences ▸ Profile instead of hand-editing devices. Extracted from each
+# beamline's B-PILOT area-detector blueprint (``instrument/devices/<bl>_devices/
+# *_area_detectors.py``, the ``make_det(...)`` calls with ``pva1_exists=True``).
+# This module intentionally has no package imports (see module docstring), so
+# these lists are independent literals rather than a shared reference with
+# ``constants.DEFAULT_DEVICES`` — keep 20-ID-D's list here in sync with that one
+# if it ever changes.
+BUNDLED_PROFILES = {
+    "20-ID-D": {"devices": [
+        _pva("20iddNF", "20idOR1:"),
+        _pva("s20idPil", "20idPil:"),
+        _pva("pg4", "1idPG4:"),
+        _pva("20iddTomo", "20idGH1s:"),
+        _pva("20iddFF", "20IDFF:"),
+        _pva("Sim Detector", "midasSim:"),
+    ]},
+    "20-ID-E": {"devices": [
+        _pva("pimega", "PITEC:D:RAD1_5Mh:"),
+        _pva("spl1", "20idsp1:"),
+        _pva("s20varex2", "20idVarex2:"),
+        _pva("pg6", "20idPG6s:"),
+        _pva("gh2", "20idGH2S:"),
+        _pva("Sim Detector", "midasSim:"),
+    ]},
+    "1-ID-E": {"devices": [
+        _pva("ge1", "GE1:"),
+        _pva("ge2", "GE2:"),
+        _pva("ge3", "GE3:"),
+        _pva("ge4", "GE4:"),
+        _pva("ge5", "GE5:"),
+        _pva("pixirad", "s1_pixirad2:"),
+        _pva("gh1", "1idGH1:"),
+        _pva("pg1", "1idPG1:"),
+        _pva("pg5", "1idSP5:"),
+        _pva("s1varex1", "1idVarex1:"),
+        _pva("Sim Detector", "midasSim:"),
+    ]},
+}
 
 
 # ── location ─────────────────────────────────────────────────────────────────
@@ -88,7 +139,8 @@ def _write_json(path: Path, data: dict) -> None:
 def _ensure_profiles() -> None:
     """Idempotent, cheap-to-repeat setup: make sure ``profiles/`` and the meta
     file exist, migrating a pre-existing single ``config.json`` into a
-    ``Default`` profile the first time this runs."""
+    ``Default`` profile the first time this runs, then seeding any
+    not-yet-seen :data:`BUNDLED_PROFILES` (per-beamline device presets)."""
     pdir = _profiles_dir()
     legacy = _config_base_dir() / CONFIG_FILENAME
     if not pdir.is_dir():
@@ -100,11 +152,25 @@ def _ensure_profiles() -> None:
         _write_json(pdir / f"{DEFAULT_PROFILE}.json", {})
 
     meta = _meta_path()
+    meta_data = read_json(meta)
+    seeded = set(meta_data.get("bundled_seeded", []))
+    to_seed = [n for n in BUNDLED_PROFILES if n not in seeded]
+    if to_seed:
+        for name in to_seed:
+            path = pdir / f"{name}.json"
+            if not path.is_file():
+                _write_json(path, dict(BUNDLED_PROFILES[name]))
+            seeded.add(name)
+        meta_data["bundled_seeded"] = sorted(seeded)
+        _write_json(meta, meta_data)
+
     names = _profile_names()
+    fallback = DEFAULT_PROFILE if DEFAULT_PROFILE in names else (names[0] if names else DEFAULT_PROFILE)
     if not meta.is_file():
-        _write_json(meta, {"active": names[0] if names else DEFAULT_PROFILE})
-    elif read_json(meta).get("active") not in names:
-        _write_json(meta, {"active": names[0] if names else DEFAULT_PROFILE})
+        _write_json(meta, {"active": fallback})
+    elif meta_data.get("active") not in names:
+        meta_data["active"] = fallback
+        _write_json(meta, meta_data)
 
 
 def _profile_names() -> list:
