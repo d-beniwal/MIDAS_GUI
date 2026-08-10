@@ -30,7 +30,7 @@ from midas_gui.helpers import (_fspin, _NoScrollSpinBox, _browse,
                          widgets_to_dict, apply_dict_to_widgets,
                          write_poni, write_standalone_paramstest)
 from midas_gui.widgets import ProfileViewer, DataLoaderPanel
-from midas_gui.roi_tools import ROIImageViewer
+from midas_gui.roi_tools import ROIImageViewer, ROIRibbon
 from midas_gui.workers import (ProjectionWorker, AllFrameStatsWorker,
                                build_integration_context, integrate_frame)
 from midas_gui import style as S
@@ -396,6 +396,7 @@ class DataViewerTab(QtWidgets.QWidget):
         self._proj_grp.body.addLayout(S.button_grid([self._proj_btn, self._frame_btn], 2))
         self._proj_grp.body.addWidget(self._info_lbl)
         self._proj_grp.setEnabled(False)
+        self._apply_project_style(False)
         lv.addWidget(self._proj_grp)
 
         # ── Intensity range mask (compact — lives in the radial-plot toolbar,
@@ -567,7 +568,17 @@ class DataViewerTab(QtWidgets.QWidget):
             lambda *_: self._show_topn() if self._topn_btn.isChecked() else None)
         self._topn_thresh.valueChanged.connect(
             lambda *_: self._show_topn() if self._topn_btn.isChecked() else None)
-        right.addWidget(self._viewer)
+        # ROI popups are always-on-top (roi_tools.ROIStatsPopup) so they don't
+        # get buried behind the main window; minimizing one tucks it into this
+        # ribbon on the viewer's left edge instead of just closing it.
+        self._roi_ribbon = ROIRibbon()
+        self._viewer.set_ribbon(self._roi_ribbon)
+        viewer_container = QtWidgets.QWidget()
+        vc_layout = QtWidgets.QHBoxLayout(viewer_container)
+        vc_layout.setContentsMargins(0, 0, 0, 0); vc_layout.setSpacing(0)
+        vc_layout.addWidget(self._roi_ribbon)
+        vc_layout.addWidget(self._viewer, 1)
+        right.addWidget(viewer_container)
 
         # Radial integration (azimuthal average around the beam centre).
         self._profile_view = ProfileViewer()
@@ -760,6 +771,7 @@ class DataViewerTab(QtWidgets.QWidget):
             return
         self._proj_grp.setEnabled(self._loader.n_frames() > 1)
         self._is_projection = False
+        self._apply_project_style(False)
         if self._loader.stats_panel is not None:
             self._loader.stats_panel.set_scope_enabled(True)
         fresh = (self._disp_shape != raw.shape)
@@ -803,6 +815,17 @@ class DataViewerTab(QtWidgets.QWidget):
         if self._rad_auto.isChecked():
             self._radial_integrate()
 
+    def _apply_project_style(self, active: bool):
+        """Green highlight on "Project stack" while a projection is being
+        displayed, mirroring the "Use Buffer" ready-state precedent in
+        widgets.py's DataLoaderPanel._apply_buffer_style."""
+        if active:
+            self._proj_btn.setStyleSheet(
+                "QPushButton { background:#2e7d32; color:white; font-weight:bold; "
+                "border:1px solid #1b5e20; border-radius:4px; padding:4px; }")
+        else:
+            self._proj_btn.setStyleSheet("")
+
     def _project(self):
         if self._loader.n_frames() <= 1:
             QtWidgets.QMessageBox.warning(self, "No stack", "Projection needs a stack."); return
@@ -826,6 +849,7 @@ class DataViewerTab(QtWidgets.QWidget):
         self._proj_btn.setEnabled(True)
         self._cur = img
         self._is_projection = True
+        self._apply_project_style(True)
         if self._loader.stats_panel is not None:
             self._loader.stats_panel.set_scope_enabled(False)
         self._viewer.set_image(self._cur)

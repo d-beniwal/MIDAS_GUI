@@ -148,6 +148,30 @@ class MainWindow(QtWidgets.QMainWindow):
         ]
         self.apply_tab_visibility()
 
+        # Cross-tab data sharing: every tab's DataLoaderPanel (plus Mask Builder's
+        # bespoke loader) registers itself so any other tab's "Import from…" menu
+        # can pull its currently-loaded file/folder/buffer. Defensive `getattr`
+        # guards mirror `_connect()` below, in case a tab failed to build.
+        from midas_gui.data_bridge import DataSourceRegistry
+        self._data_registry = registry = DataSourceRegistry()
+        for tab, label in (
+            (self._view_tab, "Data Viewer"), (self._cal_tab, "Calibrate"),
+            (self._refine_tab, "Calib. Refinement"), (self._batch_tab, "Batch Integrate"),
+            (self._pump_tab, "Pump Probe"),
+        ):
+            loader = getattr(tab, "_loader", None)
+            if loader is not None:
+                try:
+                    loader.bind_registry(registry, label)
+                except Exception:
+                    _log(f"Registry bind failed for {label}:\n{traceback.format_exc()}")
+        bind_mask = getattr(self._mask_tab, "bind_registry", None)
+        if bind_mask is not None:
+            try:
+                bind_mask(registry)
+            except Exception:
+                _log(f"Registry bind failed for Mask Builder:\n{traceback.format_exc()}")
+
         # Wire cross-tab signals defensively (skip any placeholder tab).
         def _connect(src, signal_name, targets, slot_name):
             sig = getattr(src, signal_name, None)

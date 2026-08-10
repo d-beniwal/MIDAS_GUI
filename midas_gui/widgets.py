@@ -29,7 +29,8 @@ from midas_gui.sim_detector import DEFAULT_CHANNEL_NAME as _SIM_CHANNEL_NAME
 _DEFAULT_CMAP = DEFAULT_COLORMAP if DEFAULT_COLORMAP in COLORMAPS else COLORMAPS[0]
 from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollDoubleSpinBox, _fspin, _twocol,
                                _browse, is_h5, list_h5_datasets, _NoScrollComboBox,
-                               _load_image, _collect_frame_paths, apply_field_corrections)
+                               _load_image, _collect_frame_paths, apply_field_corrections,
+                               new_temp_h5_path, save_stack_h5)
 from midas_gui import style as S
 
 
@@ -1087,6 +1088,9 @@ class FieldSelector(QtWidgets.QGroupBox):
         self._with_mode = with_mode
         self._field = None
         self._worker = None
+        self._registry = None          # DataSourceRegistry, set by set_registry()
+        self._exclude_label = None     # owning panel's registry label — skip its own entry
+        self._buffer_snapshot_file = None   # temp .h5 from importing another tab's buffer
 
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(6, 2, 6, 4); outer.setSpacing(2)
@@ -1108,6 +1112,9 @@ class FieldSelector(QtWidgets.QGroupBox):
         menu = QtWidgets.QMenu(browse)
         menu.addAction("File…", self._browse_file)
         menu.addAction("Folder…", self._browse_folder)
+        menu.addSeparator()
+        self._import_menu = menu.addMenu("Import from…")
+        self._import_menu.aboutToShow.connect(self._populate_import_menu)
         browse.setMenu(menu)
         pr = QtWidgets.QHBoxLayout(); pr.setSpacing(4)
         pr.addWidget(self._path_ed); pr.addWidget(browse)
@@ -1174,6 +1181,86 @@ class FieldSelector(QtWidgets.QGroupBox):
         d = QtWidgets.QFileDialog.getExistingDirectory(self, f"Select {self.title()} folder")
         if d:
             self._path_ed.setText(d); self._update_frame_limit(); self._compute()
+
+    # ── cross-tab import (data_bridge.DataSourceRegistry) ───────────
+    def _field_kind(self) -> str:
+        """This selector's type ("dark"/"bright"/"background"), derived from
+        its title — used to tag its own descriptor and to filter which
+        registry entries its "Import from…" menu offers."""
+        return self.title().strip().lower()
+
+    def set_registry(self, registry, *, exclude_label=None):
+        """Let this selector's "Import from…" menu offer the same-type field
+        (e.g. Dark ↔ Dark) currently loaded in any *other* tab bound to
+        `registry` — the same registry the Data card's own menu uses.
+        `exclude_label` is the owning panel's own registry label, so a
+        selector doesn't offer to import its own current value."""
+        self._registry = registry
+        self._exclude_label = exclude_label
+
+    def describe_source(self, label: str):
+        """Export this field as an importable source of type `_field_kind()`
+        (if enabled and pointing at a path) — mirrors
+        DataLoaderPanel.describe_source() so another tab's same-type selector
+        can pull it via the registry."""
+        if not self.isChecked():
+            return None
+        raw = self._path_ed.text().strip()
+        if not raw:
+            return None
+        return {"kind": "path", "path": raw,
+                "dataset": self._dataset() if is_h5(raw) else None,
+                "field": self._field_kind(), "label": label}
+
+    def _populate_import_menu(self):
+        menu = self._import_menu
+        menu.clear()
+        sources = (self._registry.available(field=self._field_kind())
+                   if self._registry is not None else [])
+        sources = [d for d in sources if d.get("label") != self._exclude_label]
+        if not sources:
+            menu.addAction("(nothing loaded elsewhere)").setEnabled(False)
+            return
+        for desc in sources:
+            if desc["kind"] == "buffer":
+                n = len(desc["provider"]._buffer) if desc["provider"]._buffer else 0
+                text = f"{desc['label']}: Buffer ({n} frames)"
+            else:
+                text = f"{desc['label']}: {desc['path']}"
+            menu.addAction(text, lambda d=desc: self._apply_imported_source(d))
+
+    def _apply_imported_source(self, desc: dict):
+        if desc["kind"] == "buffer":
+            self._import_buffer(desc["provider"])
+            return
+        self._path_ed.setText(desc["path"])
+        if desc.get("dataset"):
+            self._ds_combo.setEditText(desc["dataset"])
+        self._update_frame_limit()
+        self._compute()
+
+    def _import_buffer(self, provider) -> None:
+        """Snapshot another panel's frozen ring buffer to a temp HDF5 file
+        and point at that, exactly like the Data card's buffer import."""
+        with provider._buffer_lock:
+            frames = list(provider._buffer) if (provider._buffer_frozen and provider._buffer) else None
+        if not frames:
+            QtWidgets.QMessageBox.warning(self, "No buffer", "Source buffer is empty.")
+            return
+        old = self._buffer_snapshot_file
+        path = new_temp_h5_path()
+        save_stack_h5(path, frames, dataset="buffer/data")
+        self._buffer_snapshot_file = path
+        self._path_ed.setText(path)
+        self._ds_combo.setEditText("buffer/data")
+        self._update_frame_limit()
+        self._compute()
+        if old is not None:
+            import os
+            try:
+                os.unlink(old)
+            except OSError:
+                pass
 
     def _on_path_changed(self, p: str):
         from pathlib import Path
@@ -1779,6 +1866,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
     dataChanged = QtCore.pyqtSignal()     # data loaded, or current frame changed
     fieldsChanged = QtCore.pyqtSignal()   # dark/bright/background/mask changed
     monitorToggled = QtCore.pyqtSignal(bool)  # MONITOR button toggled (stream mode)
+    bufferInvalidated = QtCore.pyqtSignal()   # this panel's own buffer was reset
 
     def __init__(self, parent=None, *, mode="single", data_dataset="exchange/data",
                  dark_dataset="exchange/data_dark", allow_live=False):
@@ -1789,6 +1877,10 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._nframes = 0
         self._cur = None
         self._live_src: Optional[PvaLiveSource] = None
+        self._registry = None          # DataSourceRegistry, set by bind_registry()
+        self._registry_label = ""      # this panel's own label in the registry
+        self._external = None          # another DataLoaderPanel this one delegates to, or None
+        self._buffer_snapshot_file = None  # temp .h5 path from importing an external buffer (stream mode)
         self._buffer = None            # deque(maxlen=N) once "Use Buffer" is on
         # Guards all reads/writes of self._buffer: it's appended to from the GUI
         # thread (_on_live_frame) but read from background QThreads (e.g.
@@ -1874,6 +1966,14 @@ class DataLoaderPanel(QtWidgets.QWidget):
                 "then act as a normal stack (scrubbable, projectable).")
             self._buffer_btn.toggled.connect(self._on_buffer_toggled)
             buf_row.addWidget(self._buffer_btn, 1)
+            self._buffer_save_btn = QtWidgets.QToolButton()
+            self._buffer_save_btn.setText("\U0001F4BE")  # 💾
+            self._buffer_save_btn.setFixedWidth(28)
+            self._buffer_save_btn.setToolTip(
+                "Save the buffered frames to an HDF5 file (dataset 'buffer/data').")
+            self._buffer_save_btn.setEnabled(False)
+            self._buffer_save_btn.clicked.connect(self._on_save_buffer)
+            buf_row.addWidget(self._buffer_save_btn)
             lvbox.addLayout(buf_row)
             self._apply_buffer_style("off")
             self._live_status_lbl = QtWidgets.QLabel("Stopped.")
@@ -1896,6 +1996,9 @@ class DataLoaderPanel(QtWidgets.QWidget):
         menu = QtWidgets.QMenu(browse)
         menu.addAction("File…", self._browse_file)
         menu.addAction("Folder…", self._browse_folder)
+        menu.addSeparator()
+        self._import_menu = menu.addMenu("Import from…")
+        self._import_menu.aboutToShow.connect(self._populate_import_menu)
         browse.setMenu(menu)
         pr = QtWidgets.QHBoxLayout(); pr.setSpacing(4)
         pr.addWidget(self._path_ed); pr.addWidget(browse)
@@ -2046,8 +2149,129 @@ class DataLoaderPanel(QtWidgets.QWidget):
     def _collect_paths(self, raw: str) -> list:
         return _collect_frame_paths(raw)
 
+    # ── cross-tab data sharing (data_bridge.DataSourceRegistry) ─────
+    def bind_registry(self, registry, label: str):
+        """Register this panel as an importable data source under `label`
+        (e.g. "Data Viewer"), and gain an "Import from…" menu listing every
+        other bound panel's currently-loaded data."""
+        self._registry = registry
+        self._registry_label = label
+        registry.register(label, self)
+        for sel in (self._dark_sel, self._bright_sel, self._bg_sel):
+            sel.set_registry(registry, exclude_label=label)
+
+    def _describe_data_field(self):
+        """Live snapshot of this panel's own Data (field="data"), or None if
+        nothing is loaded."""
+        if self._buffer_frozen and self._buffer:
+            return {"kind": "buffer", "provider": self, "field": "data",
+                    "label": self._registry_label}
+        raw = self._path_ed.text().strip()
+        if not raw:
+            return None
+        return {"kind": "path", "path": raw, "dataset": self._dataset() if is_h5(raw) else None,
+                "field": "data", "label": self._registry_label}
+
+    def describe_source(self):
+        """Live snapshot of what this panel currently offers other panels —
+        its main Data (if loaded) plus any of its own Dark/Bright/Background
+        fields that are enabled and point at a path — called by the registry
+        right before an "Import from…" menu is shown. Each entry is tagged
+        with a `field` so importers only see sources of their own type."""
+        out = []
+        data = self._describe_data_field()
+        if data is not None:
+            out.append(data)
+        for sel in (self._dark_sel, self._bright_sel, self._bg_sel):
+            d = sel.describe_source(self._registry_label)
+            if d is not None:
+                out.append(d)
+        return out
+
+    def _populate_import_menu(self):
+        menu = self._import_menu
+        menu.clear()
+        if self._registry is None:
+            menu.addAction("(no other tabs loaded)").setEnabled(False)
+            return
+        sources = self._registry.available(exclude=self, field="data")
+        if not sources:
+            menu.addAction("(nothing loaded elsewhere)").setEnabled(False)
+            return
+        for desc in sources:
+            if desc["kind"] == "buffer":
+                n = len(desc["provider"]._buffer) if desc["provider"]._buffer else 0
+                text = f"{desc['label']}: Buffer ({n} frames)"
+            else:
+                text = f"{desc['label']}: {desc['path']}"
+            menu.addAction(text, lambda d=desc: self._apply_imported_source(d))
+
+    def _apply_imported_source(self, desc: dict):
+        if desc["kind"] == "path":
+            self._clear_external()
+            self.set_path(desc["path"], dataset=desc.get("dataset"))
+            return
+        if self._mode == "stream":
+            self._import_buffer_via_tempfile(desc["provider"])
+        else:
+            self.use_external_buffer(desc["provider"])
+
+    def use_external_buffer(self, provider) -> None:
+        """Delegate this panel's data entirely to `provider` (another
+        DataLoaderPanel with a frozen, non-empty buffer) with no copying —
+        `_get_frame`/`full_stack` forward to it as long as `self._external`
+        is set."""
+        self._clear_external()
+        self._stack = self._paths = self._h5 = None
+        self._reset_buffer()
+        self._external = provider
+        provider.bufferInvalidated.connect(self._on_external_invalidated)
+        self._nframes = provider.n_frames()
+        self._setup_navigator()
+        self._info.setText(f"Imported: {provider._registry_label} buffer ({self._nframes} frames)")
+        self._set_frame(self._nframes - 1)
+
+    def _clear_external(self):
+        if self._external is not None:
+            try:
+                self._external.bufferInvalidated.disconnect(self._on_external_invalidated)
+            except Exception:
+                pass
+            self._external = None
+
+    def _on_external_invalidated(self):
+        self._clear_external()
+        self._nframes = 0
+        self._cur = None
+        self._setup_navigator()
+        self._info.setText("Source buffer was reset.")
+        self.dataChanged.emit()
+
+    def _import_buffer_via_tempfile(self, provider) -> None:
+        """Stream-mode panels never hold frames in memory (`source_cfg()` just
+        reports a path/dataset for BatchWorker to stream itself), so importing
+        another panel's live buffer means snapshotting it to a real HDF5 file
+        once and pointing at that, exactly like any other HDF5 source."""
+        with provider._buffer_lock:
+            frames = list(provider._buffer) if (provider._buffer_frozen and provider._buffer) else None
+        if not frames:
+            QtWidgets.QMessageBox.warning(self, "No buffer", "Source buffer is empty.")
+            return
+        old = self._buffer_snapshot_file
+        path = new_temp_h5_path()
+        save_stack_h5(path, frames, dataset="buffer/data")
+        self._buffer_snapshot_file = path
+        self.set_path(path, dataset="buffer/data")
+        if old is not None:
+            import os
+            try:
+                os.unlink(old)
+            except OSError:
+                pass
+
     def _load(self):
         from pathlib import Path
+        self._clear_external()
         raw = self._path_ed.text().strip()
         if not raw:
             return
@@ -2113,6 +2337,8 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self.dataChanged.emit()
 
     def _get_frame(self, i: int) -> np.ndarray:
+        if self._external is not None:
+            return self._external._get_frame(i)
         i = max(0, min(i, self._nframes - 1))
         with self._buffer_lock:
             frame = list(self._buffer)[i] if (self._buffer_frozen and self._buffer) else None
@@ -2301,6 +2527,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._setup_navigator()
             self._live_frame_update = False
             self.dataChanged.emit()
+            self.bufferInvalidated.emit()
 
     def _apply_buffer_style(self, state: str):
         btn = getattr(self, "_buffer_btn", None)
@@ -2324,8 +2551,28 @@ class DataLoaderPanel(QtWidgets.QWidget):
             btn.setStyleSheet(
                 "QPushButton { background:#3a3d44; color:#ddd; font-weight:bold; "
                 f"border:1px solid {S.ACCENT}; border-radius:4px; padding:4px; }}")
+        save_btn = getattr(self, "_buffer_save_btn", None)
+        if save_btn is not None:
+            save_btn.setEnabled(state == "ready")
+
+    def _on_save_buffer(self):
+        with self._buffer_lock:
+            frames = list(self._buffer) if (self._buffer_frozen and self._buffer) else None
+        if not frames:
+            QtWidgets.QMessageBox.warning(self, "No buffer", "No frozen buffer to save.")
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save buffer to HDF5", "", "HDF5 (*.h5 *.hdf5)")
+        if not path:
+            return
+        try:
+            save_stack_h5(path, frames, dataset="buffer/data")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Save error", str(e))
 
     def full_stack(self) -> np.ndarray:
+        if self._external is not None:
+            return self._external.full_stack()
         with self._buffer_lock:
             frames = list(self._buffer) if (self._buffer_frozen and self._buffer) else None
         if frames is not None:

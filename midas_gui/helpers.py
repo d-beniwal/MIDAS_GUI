@@ -92,6 +92,22 @@ def is_h5(path: str) -> bool:
     return Path(path).suffix.lower() in H5_EXTS
 
 
+def new_temp_h5_path(prefix: str = "midas_buffer_") -> str:
+    """Fresh temp .h5 path, auto-deleted at process exit."""
+    f = _tf.NamedTemporaryFile(prefix=prefix, suffix=".h5", delete=False)
+    f.close()
+    _atexit.register(lambda p=f.name: _os.path.exists(p) and _os.unlink(p))
+    return f.name
+
+
+def save_stack_h5(path: str, frames, dataset: str = "buffer/data") -> None:
+    """Write a sequence of 2-D frames as one (N,H,W) float32 dataset in `path`."""
+    import h5py
+    arr = np.stack([np.asarray(f, dtype=np.float32) for f in frames], axis=0)
+    with h5py.File(path, "w") as f:
+        f.create_dataset(dataset, data=arr)
+
+
 # ── Dark / bright / background field building ───────────────────────────────────
 
 def list_h5_datasets(path: str | Path) -> list:

@@ -86,11 +86,14 @@ class ROIStatsPopup(QtWidgets.QDialog):
     removed = QtCore.pyqtSignal()
     labelChanged = QtCore.pyqtSignal(str)
     flipRequested = QtCore.pyqtSignal()
+    minimizeRequested = QtCore.pyqtSignal()
 
     def __init__(self, kind: str, color: str, label: str, parent=None):
         # Qt.Window (not Qt.Tool): a Tool-flagged window is treated as a
         # macOS utility panel and auto-hides whenever the app loses focus.
-        super().__init__(parent, QtCore.Qt.Window)
+        # WindowStaysOnTopHint keeps it above every desktop window (not just
+        # this app's) while open — otherwise clicking anywhere else buries it.
+        super().__init__(parent, QtCore.Qt.Window | QtCore.Qt.WindowStaysOnTopHint)
         self._kind = kind
         self.setModal(False)
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose, False)
@@ -108,6 +111,10 @@ class ROIStatsPopup(QtWidgets.QDialog):
         self._label_ed.setStyleSheet(f"font-weight:bold; color:{color};")
         self._label_ed.textEdited.connect(self._on_label_edited)
         head.addWidget(self._label_ed, 1)
+        min_btn = QtWidgets.QToolButton(); min_btn.setText("–"); min_btn.setFixedWidth(20)
+        min_btn.setToolTip("Minimize to the ROI ribbon")
+        min_btn.clicked.connect(self.minimizeRequested.emit)
+        head.addWidget(min_btn)
         v.addLayout(head)
 
         if kind == "line":
@@ -250,6 +257,83 @@ class ROIStatsPopup(QtWidgets.QDialog):
         super().closeEvent(event)
 
 
+class _VerticalLabel(QtWidgets.QWidget):
+    """Small bottom-anchored widget that paints `text` rotated 90° so it
+    reads bottom-to-top, matching the ribbon's vertical orientation."""
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(parent)
+        self._text = text
+        self.setFixedHeight(64)
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.setPen(QtGui.QColor("#f5f5f5"))
+        font = painter.font()
+        font.setBold(True)
+        # The app's global stylesheet sets font-size in px (style.py), which
+        # makes QFont.pointSize() come back -1 — bumping *that* produced an
+        # illegible ~1pt font. Force an explicit pixel size instead.
+        font.setPixelSize(14)
+        painter.setFont(font)
+        painter.translate(0, self.height())
+        painter.rotate(-90)
+        painter.drawText(QtCore.QRect(0, 0, self.height(), self.width()),
+                          QtCore.Qt.AlignCenter, self._text)
+        painter.end()
+
+
+class ROIRibbon(QtWidgets.QWidget):
+    """Fixed-width vertical strip of small colored buttons, one per minimized
+    ROI popup. Lives to the left of the image viewer (see tab_view.py) so an
+    always-on-top popup that's in the way can be tucked away without losing
+    it — clicking its ribbon entry restores it.
+
+    Visually set off from the viewer (background tint + right border) so the
+    strip reads as its own zone. Entries stack from the bottom upward — the
+    first ROI minimized lands just above the "ROIs" caption, later ones pile
+    on top of it — with unused space collapsing to the top via a stretch."""
+
+    restoreRequested = QtCore.pyqtSignal(object)   # emits the ROIStatsPopup
+
+    _ENTRY_INSERT_INDEX = 1   # right after the top stretch — newest entry highest
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedWidth(26)
+        self.setObjectName("roiRibbon")
+        self.setStyleSheet(
+            "QWidget#roiRibbon { background-color: #1c1c1c; "
+            "border-right: 1px solid #444; }")
+        self._layout = QtWidgets.QVBoxLayout(self)
+        self._layout.setContentsMargins(2, 4, 2, 0); self._layout.setSpacing(2)
+        self._layout.addStretch(1)
+        self._layout.addWidget(_VerticalLabel("ROIs"))
+        self._layout.addSpacing(8)   # offset of the caption from the bottom edge
+        self._buttons: dict = {}   # popup -> QToolButton
+
+    def add_entry(self, popup, label: str, color: str):
+        btn = QtWidgets.QToolButton()
+        btn.setFixedSize(22, 22)
+        btn.setToolTip(label)
+        btn.setStyleSheet(
+            f"QToolButton {{ background:{color}; border:1px solid #1a1a1a; border-radius:3px; }}")
+        btn.clicked.connect(lambda: self.restoreRequested.emit(popup))
+        self._layout.insertWidget(self._ENTRY_INSERT_INDEX, btn)
+        self._buttons[popup] = btn
+
+    def remove_entry(self, popup):
+        btn = self._buttons.pop(popup, None)
+        if btn is not None:
+            self._layout.removeWidget(btn)
+            btn.deleteLater()
+
+    def update_label(self, popup, label: str):
+        btn = self._buttons.get(popup)
+        if btn is not None:
+            btn.setToolTip(label)
+
+
 class ROIImageViewer(PickableImageViewer):
     """PickableImageViewer + draw-a-box/line ROI tool with live,
     freely-positioned stats popups. Used only by the Data Viewer tab (kept
@@ -263,6 +347,7 @@ class ROIImageViewer(PickableImageViewer):
         super().__init__(parent)
         self._roi_entries: list = []
         self._roi_counter = 0
+        self._ribbon: Optional["ROIRibbon"] = None
         self._rubber_band: Optional[QtWidgets.QRubberBand] = None
         self._drag_origin: Optional[QtCore.QPoint] = None
         self._roi_draw_kind: Optional[str] = None
@@ -298,6 +383,12 @@ class ROIImageViewer(PickableImageViewer):
         pick_bar.addWidget(self._roi_clear_btn)
 
         self._iv.ui.graphicsView.viewport().installEventFilter(self)
+
+    def set_ribbon(self, ribbon: "ROIRibbon"):
+        """Wire this viewer's minimized-ROI entries into `ribbon` (created and
+        placed alongside the viewer by tab_view.py)."""
+        self._ribbon = ribbon
+        ribbon.restoreRequested.connect(self._on_roi_restore)
 
     # ── mode arming ──────────────────────────────────────────────
 
@@ -420,13 +511,14 @@ class ROIImageViewer(PickableImageViewer):
         entry = {
             "kind": kind, "roi": roi, "color": color, "label": label,
             "label_item": label_item, "arrow": arrow, "popup": popup,
-            "flipped": False, "removing": False,
+            "flipped": False, "removing": False, "minimized": False,
         }
         self._roi_entries.append(entry)
 
         popup.removed.connect(lambda e=entry: self._remove_roi(e))
         popup.labelChanged.connect(lambda text, e=entry: self._on_roi_label_changed(e, text))
         popup.flipRequested.connect(lambda e=entry: self._on_roi_flip(e))
+        popup.minimizeRequested.connect(lambda e=entry: self._on_roi_minimize(e))
         roi.sigRegionChanged.connect(lambda *_: self._on_roi_geom_changed(entry))
 
         self._position_popup_near(popup, roi)
@@ -458,6 +550,26 @@ class ROIImageViewer(PickableImageViewer):
     def _on_roi_label_changed(self, entry: dict, text: str):
         entry["label"] = text
         entry["label_item"].setText(text)
+        if entry["minimized"] and self._ribbon is not None:
+            self._ribbon.update_label(entry["popup"], text)
+
+    def _on_roi_minimize(self, entry: dict):
+        if entry["minimized"] or self._ribbon is None:
+            return
+        entry["minimized"] = True
+        entry["popup"].hide()
+        self._ribbon.add_entry(entry["popup"], entry["label"], entry["color"])
+
+    def _on_roi_restore(self, popup):
+        for entry in self._roi_entries:
+            if entry["popup"] is popup:
+                entry["minimized"] = False
+                if self._ribbon is not None:
+                    self._ribbon.remove_entry(popup)
+                popup.show()
+                popup.raise_()
+                popup.activateWindow()
+                return
 
     def _on_roi_flip(self, entry: dict):
         entry["flipped"] = not entry["flipped"]
@@ -533,6 +645,8 @@ class ROIImageViewer(PickableImageViewer):
         if entry.get("removing") or entry not in self._roi_entries:
             return
         entry["removing"] = True
+        if entry["minimized"] and self._ribbon is not None:
+            self._ribbon.remove_entry(entry["popup"])
         self._iv.removeItem(entry["roi"])
         self._iv.removeItem(entry["label_item"])
         if entry["arrow"] is not None:

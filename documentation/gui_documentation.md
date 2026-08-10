@@ -3,11 +3,17 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-09 (Data Viewer: new B-PILOT auto-start bridge —
+**Last updated:** 2026-08-09 (Cross-tab data sharing: every Data Loader
+panel's Data browse button, plus Mask Builder's Image/Stack browse buttons,
+gain an **Import from…** menu to pull a file/folder/buffer already loaded in
+another tab; **Use Buffer** gets a 💾 button to save the buffer to an HDF5
+file (`buffer/data`); Data Viewer's **Project stack** button turns green while
+a projection is displayed; ROI popups are now always-on-top and can be
+minimized to a ribbon on the image viewer's left edge).
+**Previously:** 2026-08-09 (Data Viewer: new B-PILOT auto-start bridge —
 a local-socket server lets the separate B-PILOT plan-runner GUI trigger
 Live Data on a scan's detector with no clicks in MIDAS GUI; see the Live
-Data card section).
-**Previously:** 2026-08-03 (Data Viewer/Calibrate/PDF: the clickable λ
+Data card section) (2026-08-03, Data Viewer/Calibrate/PDF: the clickable λ
 label's popup menu gains an **Energy (keV)** entry box that converts to
 wavelength on Enter, ahead of the existing K-edge foil menu; Data Viewer's
 Projection card drops the **Axis** field (always 0, i.e. across frames) and
@@ -133,6 +139,25 @@ automatically propagated to all downstream tabs. When Tab 1 (Mask Builder) compu
 a mask it is sent to the consuming tabs. Tab 3 (Refinement), if applied, re-broadcasts
 the refined geometry. No manual copying is needed.
 
+**Cross-tab data import ("Import from…").** Every Data Loader panel's **Data**
+browse button (Data Viewer, Calibrate, Calib. Refinement, Batch Integrate, Pump
+Probe), plus Mask Builder's **Image** and **Stack** browse buttons, carry an
+**Import from…** submenu listing whatever's currently loaded in every *other*
+tab — a file/folder path, or, if that tab's Live Data **Use Buffer** ring
+buffer is frozen (green), a **Buffer (N frames)** entry. The menu is built
+fresh each time it's opened, so it always reflects what's loaded right now.
+Picking a path just loads it like a normal browse. Picking a **buffer**:
+- In a tab that keeps a live in-memory stack (Data Viewer, Calibrate,
+  Refinement), the picking tab **delegates** to the source's buffer directly —
+  no copy is made, so it always reflects the source buffer's current
+  contents, and if the source buffer is later reset, the delegating tab clears
+  itself and shows "Source buffer was reset" rather than showing stale data.
+- In a tab that only ever reads from a file/HDF5 path (Batch Integrate, Pump
+  Probe, and Mask Builder's Stack field), the buffer is instead **snapshotted
+  once** to a temporary HDF5 file (dataset `buffer/data`) and that path is
+  loaded — later changes to the source buffer are not reflected until you
+  re-pick the entry.
+
 **All heavy computation runs off the GUI thread.** Every operation that touches a
 MIDAS package (calibration, integration, mask training, PDF transform, gain training,
 field averaging, drift fitting) runs in a background `QThread` worker; the GUI stays
@@ -246,7 +271,10 @@ equivalent), or **Average** (noise reduction), always across the stack of frames
 drops the first frame, 4 drops the first four) — useful when the opening frames are
 detector warm-up / shutter-transient exposures. **N frames** caps how many frames
 (after Skip frames) are included in the projection; **0** (default) uses every
-remaining frame in the stack.
+remaining frame in the stack. While a projection is being displayed, **Project
+stack** stays highlighted **green** so it's obvious the image on screen is a
+projection rather than a live frame; **Back to frames** (or loading new data)
+reverts it to its normal styling.
 
 ### Exclude-out-of-range-pixels controls (radial-plot toolbar)
 These controls used to be their own left-panel card; they now live at the **far
@@ -396,7 +424,11 @@ frames arrive.
   (yellow or green) when **Start** is clicked, buffering carries over into the
   new stream — it re-arms with a fresh empty buffer rather than turning off,
   so you don't need to click **Use Buffer** again after Start. Loading static
-  data always clears any existing buffer.
+  data always clears any existing buffer. A small **💾** button next to **Use
+  Buffer** enables once the buffer is frozen (green) — click it to save the
+  buffered frames to an HDF5 file you choose, written as a `(N,H,W)` dataset
+  named `buffer/data`. The same buffer is also what **Import from…** offers to
+  other tabs — see **Cross-tab data import** in §1.
 - **Stopping live streaming does not auto-reload the previous file/folder/HDF5
   source** — the Data card below gets a small **⟳ Reload** button next to its
   path field for exactly this: click it after Stop to restore the static data
@@ -493,6 +525,18 @@ right-clicking a shape and choosing **Remove ROI** closes its popup too.
 **Clear ROIs** removes every ROI and popup at once. ROIs are session-only —
 they are not saved with the rest of the tab's state.
 
+**Always on top, minimize to ribbon.** ROI popups stay **above every other
+window** (not just above the main midas-gui window) so clicking elsewhere in
+the GUI, or in another application, never buries one behind something else.
+A small **"–"** button in each popup's header minimizes it: the popup hides
+and a small colored square button, color-matched to its ROI, appears on a
+narrow **ribbon** along the left edge of the image viewer. Clicking a ribbon
+button restores that popup (shows it, raises it, gives it focus) and removes
+the ribbon entry. A minimized ROI's shape stays on the image and its stats
+keep updating live in the background exactly as if the popup were open —
+minimizing only hides the window. Removing a minimized ROI (right-click →
+**Remove ROI**, or **Clear ROIs**) also removes its ribbon entry.
+
 ### Intensity statistics (left panel, bottom)
 At the bottom of the Data-Loader panel, in a **draggable pane** below the loader
 cards — grab the splitter handle above the panel to make the statistics area taller or
@@ -575,7 +619,13 @@ around while still in Manual).
 immediately. Pointing the **Image** field at an `.h5` file reveals a **Dataset**
 dropdown (auto-populated with the file's datasets and shapes, preferring a
 ≥2-D dataset) — the same pattern used by the Stack field below it and by the
-Data Loader panels elsewhere in the app.
+Data Loader panels elsewhere in the app. The **Image** field's browse button
+also has an **Import from…** submenu of whatever file/folder is currently
+loaded in another tab (see **Cross-tab data import** in §1); the **Stack**
+field's browse menu additionally lists any other tab's frozen (green) Live
+Data buffer as a **Buffer (N frames)** entry — picking one snapshots that
+buffer to a temporary HDF5 file and feeds it into the auto-mask stack exactly
+like a browsed folder/file would.
 
 ### Section 1 · Threshold mask (always applied)
 `pixel ≤ lower | pixel > upper`. The upper bound auto-fills from the data type on load

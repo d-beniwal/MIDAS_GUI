@@ -16,7 +16,8 @@ import pyqtgraph as pg
 from midas_gui.constants import _SENTINELS, H5_EXTS, DEFAULT_CALIBRANT_TIF
 from midas_gui.helpers import (_load_image, _fspin, _NoScrollSpinBox, _browse, is_h5,
                                _NoScrollComboBox, list_h5_datasets,
-                               widgets_to_dict, apply_dict_to_widgets)
+                               widgets_to_dict, apply_dict_to_widgets,
+                               new_temp_h5_path, save_stack_h5)
 from midas_gui.widgets import ImageViewer
 from midas_gui.workers import MaskComputeWorker
 from midas_gui import style as S
@@ -46,9 +47,26 @@ class MaskTab(QtWidgets.QWidget):
         self._freeform_pts: list = []    # [(x, y)] image-coord vertices
         self._freeform_line = None       # pg.PlotDataItem — live edge preview
         self._freeform_vdots = None      # pg.ScatterPlotItem — vertex markers
+        self._registry = None            # DataSourceRegistry, set by bind_registry()
+        self._stack_snapshot_file = None  # temp .h5 from importing another tab's buffer
         self._build_ui()
         if Path(self._img_edit.text().strip() or "x").exists():
             self._load_image()
+
+    def bind_registry(self, registry):
+        """Register this tab as an importable ("path" kind only — Mask Builder
+        has no in-memory buffer of its own) data source, and let its Image /
+        Stack browse menus pull data loaded in other tabs."""
+        self._registry = registry
+        registry.register("Mask Builder", self)
+
+    def describe_source(self):
+        raw = self._img_edit.text().strip()
+        if not raw:
+            return None
+        return {"kind": "path", "path": raw,
+                "dataset": self._h5loc_edit.currentText().strip() if is_h5(raw) else None,
+                "field": "data", "label": "Mask Builder"}
 
     def set_calibration(self, result):
         """Receive calibration from Tab 2 — enables geometry-based mask methods."""
@@ -81,7 +99,17 @@ class MaskTab(QtWidgets.QWidget):
         img = S.make_card("Image")
         self._img_edit = QtWidgets.QLineEdit(DEFAULT_CALIBRANT_TIF)
         self._img_edit.setPlaceholderText("Select image file…")
-        img.body.addLayout(_frow(self._img_edit, self._browse_img))
+        _img_browse = QtWidgets.QToolButton(); _img_browse.setText("⋯"); _img_browse.setFixedWidth(30)
+        _img_browse.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self._img_menu = QtWidgets.QMenu(_img_browse)
+        self._img_menu.addAction("File…", self._browse_img)
+        self._img_menu.addSeparator()
+        self._img_import_menu = self._img_menu.addMenu("Import from…")
+        self._img_import_menu.aboutToShow.connect(self._populate_mask_image_import_menu)
+        _img_browse.setMenu(self._img_menu)
+        _img_row = QtWidgets.QHBoxLayout(); _img_row.setSpacing(4)
+        _img_row.addWidget(self._img_edit); _img_row.addWidget(_img_browse)
+        img.body.addLayout(_img_row)
         self._h5loc_edit = _NoScrollComboBox(); self._h5loc_edit.setEditable(True)
         self._h5loc_edit.setEditText("exchange/data")
         self._h5loc_lbl = S.LabelRight("Dataset:")
@@ -151,10 +179,10 @@ class MaskTab(QtWidgets.QWidget):
         awf.addWidget(QtWidgets.QLabel("Stack (temporal median / temporal constancy):"))
         _sbrowse = QtWidgets.QToolButton(); _sbrowse.setText("⋯"); _sbrowse.setFixedWidth(28)
         _sbrowse.setPopupMode(QtWidgets.QToolButton.InstantPopup)
-        _smenu = QtWidgets.QMenu(_sbrowse)
-        _smenu.addAction("Folder…", self._browse_stack_folder)
-        _smenu.addAction("File (TIFF / HDF5)…", self._browse_stack_file)
-        _sbrowse.setMenu(_smenu)
+        self._stack_menu = QtWidgets.QMenu(_sbrowse)
+        self._stack_menu.aboutToShow.connect(self._populate_stack_menu)
+        _sbrowse.setMenu(self._stack_menu)
+        self._populate_stack_menu()
         _srow = QtWidgets.QHBoxLayout(); _srow.setSpacing(4)
         _srow.addWidget(self._stack_ed); _srow.addWidget(_sbrowse)
         awf.addLayout(_srow)
@@ -352,6 +380,65 @@ class MaskTab(QtWidgets.QWidget):
         p = _browse(self, "Select stack file (TIFF stack or HDF5)",
                     "Stacks (*.h5 *.hdf5 *.nxs *.tif *.tiff);;All (*)")
         if p: self._stack_ed.setText(p)
+
+    # ── cross-tab data sharing (data_bridge.DataSourceRegistry) ─────
+    def _populate_stack_menu(self):
+        menu = self._stack_menu
+        menu.clear()
+        menu.addAction("Folder…", self._browse_stack_folder)
+        menu.addAction("File (TIFF / HDF5)…", self._browse_stack_file)
+        if self._registry is None:
+            return
+        buffers = self._registry.available(exclude=self, kind="buffer", field="data")
+        if not buffers:
+            return
+        menu.addSeparator()
+        for desc in buffers:
+            n = len(desc["provider"]._buffer) if desc["provider"]._buffer else 0
+            menu.addAction(f"Buffer: {desc['label']} ({n} frames)",
+                            lambda d=desc: self._use_buffer_stack(d["provider"]))
+
+    def _use_buffer_stack(self, provider):
+        """Materialize another tab's ring buffer to a temp HDF5 file and point
+        the Stack field at it — `MaskComputeWorker` only ever takes file paths
+        / HDF5 tuples, never a raw array, so this reuses the existing stack
+        loading path unchanged."""
+        with provider._buffer_lock:
+            frames = list(provider._buffer) if (provider._buffer_frozen and provider._buffer) else None
+        if not frames:
+            QtWidgets.QMessageBox.warning(self, "No buffer", "Source buffer is empty.")
+            return
+        old = self._stack_snapshot_file
+        path = new_temp_h5_path()
+        save_stack_h5(path, frames, dataset="buffer/data")
+        self._stack_snapshot_file = path
+        self._stack_ed.setText(path)
+        if old is not None:
+            import os
+            try:
+                os.unlink(old)
+            except OSError:
+                pass
+
+    def _populate_mask_image_import_menu(self):
+        menu = self._img_import_menu
+        menu.clear()
+        if self._registry is None:
+            menu.addAction("(no other tabs loaded)").setEnabled(False)
+            return
+        sources = self._registry.available(exclude=self, kind="path", field="data")
+        if not sources:
+            menu.addAction("(nothing loaded elsewhere)").setEnabled(False)
+            return
+        for desc in sources:
+            menu.addAction(f"{desc['label']}: {desc['path']}",
+                            lambda d=desc: self._apply_imported_image_source(d))
+
+    def _apply_imported_image_source(self, desc: dict):
+        self._img_edit.setText(desc["path"])
+        if desc.get("dataset") and is_h5(desc["path"]):
+            self._h5loc_edit.setEditText(desc["dataset"])
+        self._load_image()
 
     def _on_img_path_changed(self, txt: str):
         """Show the dataset selector + list datasets when the image is HDF5."""
