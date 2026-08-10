@@ -95,12 +95,14 @@ Dates are commit dates (YYYY-MM-DD).
 | Box-ROI popup's zoomed crop image resizes with the popup window | `786c94c` |
 | Projection N-frames cap; λ menu gains energy-to-wavelength entry | `468b417` |
 | B-PILOT bridge: local-socket server auto-starts Live Data on scan dispatch | `c336778` |
+| ROI popups always-on-top + minimize-to-ribbon; Project-stack button green highlight | `6c79f13` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
 |--------|--------|
 | Unbounded σ fields; independent spatial/temporal auto-mask; Viewer↔Calibrate geometry hand-off | `10df828` |
 | Temporal-constancy accepts a 3-D HDF5 (time,y,x) stack | `2385f75` |
+| Image/Stack browse gains "Import from…" (other tabs' loaded path/buffer) | `6c79f13` |
 
 ### Calibrate (Tab 2) / Refinement (Tab 3)
 | Change | Commit |
@@ -153,6 +155,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Fix native Bus-error crash on Run Calibration — cap BLAS/OMP thread pools | `0b4326d` |
 | Preferences ▸ Devices tab; Live PV field becomes a device dropdown | `aa82cb6` |
 | Widen non-data-derived numeric field caps (tilts to ±180°, iteration/geometry/hyperparameter fields to effectively unbounded) across Data Viewer/Calibrate/Corrections/Mask/Refine/Batch | `53f8f19` |
+| Cross-tab DataSourceRegistry + "Import from…" menus (Data/Dark/Bright/Background) + buffer-save button | `6c79f13` |
 
 ### Stability / performance / consistency (review-driven, phases 1–3)
 | Change | Commit |
@@ -1324,6 +1327,42 @@ ignored. A stale socket file from a prior unclean shutdown is removed before
 `tests/test_bridge_server.py` (new), `documentation/gui_documentation.md`.
 **Roll back:** `git revert c336778`. Self-contained — removes the bridge
 server and the two `start_live_pv` methods; no other code calls them.
+
+---
+
+### `6c79f13` — Cross-tab data sharing; ROI popups always-on-top/minimizable; Project-stack highlight (2026-08-10)
+**Effect:** New `midas_gui/data_bridge.py` `DataSourceRegistry`, owned by
+`MainWindow`, is bound by every Data Loader panel (Data Viewer, Calibrate,
+Calib. Refinement, Batch Integrate, Pump Probe) and by Mask Builder. Each
+gains an **Import from…** submenu on its Data/Image/Stack browse button,
+built fresh on open, listing whatever's currently loaded in every *other*
+bound tab: a file/folder path, or (if that tab's Live Data **Use Buffer**
+ring buffer is frozen) a **Buffer (N frames)** entry. Picking a path loads
+it like a normal browse. Picking a buffer either **delegates** live — no
+copy, tracks the source buffer, clears itself if the source resets
+(`DataLoaderPanel.use_external_buffer`/`bufferInvalidated`) — for panels
+that keep an in-memory stack, or **snapshots once** to a temp HDF5 file
+(new `helpers.new_temp_h5_path`/`save_stack_h5`, dataset `buffer/data`) for
+panels that only ever read paths (Batch Integrate, Pump Probe stream mode,
+Mask Builder's Stack field). `FieldSelector` (Dark/Bright/Background) gets
+the same menu, scoped to its own field type via a new `field` tag on each
+registry descriptor. `DataLoaderPanel`'s **Use Buffer** row also gains a
+💾 button to save the frozen buffer to a user-chosen HDF5 file.
+Unrelated, bundled from the same session: `ROIStatsPopup` is now
+`WindowStaysOnTopHint` (so it can't get buried behind other windows) and
+gains a "–" minimize button that hides the popup and adds an entry to a new
+`ROIRibbon` strip along the image viewer's left edge (`roi_tools.py`,
+wired in `tab_view.py`'s `set_ribbon`); clicking the ribbon entry restores
+it. Data Viewer's **Project stack** button turns green while a projection
+is displayed (`_apply_project_style`), reverting on **Back to frames** or
+new data.
+**Files:** `midas_gui/data_bridge.py` (new), `midas_gui/app.py`,
+`midas_gui/helpers.py`, `midas_gui/roi_tools.py`, `midas_gui/tab_mask.py`,
+`midas_gui/tab_view.py`, `midas_gui/widgets.py`,
+`documentation/gui_documentation.md`.
+**Roll back:** `git revert 6c79f13`. Self-contained — removes the registry,
+all "Import from…" menus, the buffer-save button, ROI always-on-top/
+minimize-to-ribbon, and the Project-stack green highlight.
 
 ---
 
