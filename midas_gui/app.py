@@ -59,6 +59,7 @@ def _install_diagnostics() -> None:
 
 from midas_gui.helpers import _make_checkmark_svg, _make_arrow_svg
 from midas_gui import style as S
+from midas_gui import bridge_server
 from midas_gui.tab_view import DataViewerTab
 from midas_gui.tab_mask import MaskTab
 from midas_gui.tab_calibrate import CalibrationTab
@@ -83,6 +84,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(1600, 950)
         self._gui_state_path: Optional[str] = None   # last loaded/saved GUI-state path
         self._build_ui()
+        # Lets B-PILOT (a separate Bluesky plan-runner GUI) auto-start Live
+        # Data on a detector's PVA channel when it launches a scan — no-op
+        # if B-PILOT never connects. See midas_gui/bridge_server.py.
+        self._bridge_server = bridge_server.BridgeServer(
+            self._resolve_and_start_live, log_fn=_log)
+        self._bridge_server.start()
+
+    def _resolve_and_start_live(self, prefix: str) -> None:
+        pv = bridge_server.resolve_pv(prefix, C.DEVICES)
+        if pv is None:
+            _log(f"MIDAS bridge: no DEVICES entry for prefix {prefix!r}")
+            return
+        self._view_tab.start_live_pv(pv)
 
     def _build_ui(self):
         tabs = QtWidgets.QTabWidget()
@@ -467,6 +481,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._stop_all_workers()
         except Exception:
             _log(f"Worker shutdown on close failed:\n{traceback.format_exc()}")
+        try:
+            self._bridge_server.stop()
+        except Exception:
+            _log(f"Bridge server shutdown failed:\n{traceback.format_exc()}")
         super().closeEvent(event)
 
 

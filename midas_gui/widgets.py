@@ -1830,6 +1830,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
             live_card = S.make_card("Live Data")
             live_card.setCheckable(True)
             live_card.setChecked(False)
+            self._live_card = live_card
             self._live_content = QtWidgets.QWidget()
             lvbox = QtWidgets.QVBoxLayout(self._live_content)
             lvbox.setContentsMargins(0, 4, 0, 0); lvbox.setSpacing(4)
@@ -2190,6 +2191,24 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._live_stop_btn.setEnabled(True)
         self._pv_ed.setEnabled(False)
         self._live_status_lbl.setText("Waiting for PV…")
+
+    def start_live_pv(self, pv: str) -> bool:
+        """Programmatic equivalent of picking `pv` in the Live PV combo and
+        clicking Start — used by the MIDAS-bridge QLocalServer (app.py) so
+        another app can trigger Live Data with no clicks in this GUI."""
+        if getattr(self, "_pv_ed", None) is None:
+            return False  # panel built without allow_live
+        if self._live_src is not None and self._live_src.is_active() \
+                and self._pv_ed.currentText().strip() == pv:
+            return True  # already streaming this exact PV
+        if self._live_src is not None and self._live_src.is_active():
+            self.stop_live()
+        live_card = getattr(self, "_live_card", None)
+        if live_card is not None:
+            live_card.setChecked(True)  # expand if collapsed
+        self._pv_ed.setEditText(pv)
+        self._start_live()
+        return self._live_src is not None and self._live_src.is_active()
 
     def _on_live_frame(self, image, image_id):
         self._nframes = 1

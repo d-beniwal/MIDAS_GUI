@@ -186,6 +186,11 @@ class DataViewerTab(QtWidgets.QWidget):
     def set_mask_from_tab1(self, mask):
         self._loader.set_tab1_mask(mask)
 
+    def start_live_pv(self, pv: str) -> bool:
+        """Programmatic equivalent of picking `pv` in the Live Data card and
+        clicking Start — used by the MIDAS-bridge QLocalServer (app.py)."""
+        return self._loader.start_live_pv(pv)
+
     def shutdown(self):
         """Called by MainWindow on app close to stop any live PV stream
         (and the Sim Detector server, if it was ever started)."""

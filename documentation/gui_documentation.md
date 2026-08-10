@@ -3,7 +3,11 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-03 (Data Viewer/Calibrate/PDF: the clickable λ
+**Last updated:** 2026-08-09 (Data Viewer: new B-PILOT auto-start bridge —
+a local-socket server lets the separate B-PILOT plan-runner GUI trigger
+Live Data on a scan's detector with no clicks in MIDAS GUI; see the Live
+Data card section).
+**Previously:** 2026-08-03 (Data Viewer/Calibrate/PDF: the clickable λ
 label's popup menu gains an **Energy (keV)** entry box that converts to
 wavelength on Enter, ahead of the existing K-edge foil menu; Data Viewer's
 Projection card drops the **Axis** field (always 0, i.e. across frames) and
@@ -410,6 +414,15 @@ frames arrive.
   percentile defaults. Editing vmin%/vmax%, toggling Log/Linear, or loading a
   new file/frame/dataset switches back to auto-levels — see §13 for the general
   rule shared by every image viewer in the app.
+- **B-PILOT auto-start bridge**: on launch, MIDAS GUI opens a local-socket
+  server (`midas_gui/bridge_server.py`) that lets **B-PILOT** (a separate
+  Bluesky plan-runner GUI) trigger Live Data with no clicks here — when
+  B-PILOT dispatches a scan on a known detector, it sends a `{"type":
+  "live_pv", "prefix": ...}` message; MIDAS GUI resolves the prefix against
+  **Preferences ▸ Devices** and, if it matches, checks/expands the Live Data
+  card, fills in the PV and clicks **Start** automatically (switching PVs
+  first if a different stream is already running). No-op — and silent in the
+  log only — if B-PILOT never connects or the prefix isn't a known device.
 
 ### Beam-centre picking (on the image)
 The image viewer has **Pick BC** (single click sets the beam centre) and **Pick Ring**
