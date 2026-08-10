@@ -25,14 +25,22 @@ dependencies:
                                  # back to a coarser arc seed)
 
   # ── GUI (pinned) ────────────────────────────────────────────────────────────
+  # Qt bindings: conda-forge, NOT pip. The pip PyQt5 wheel bundles its own Qt5
+  # libs but dlopens xcb-side system libraries (e.g. libxcb-cursor.so.0,
+  # required since PyQt5-Qt5 5.15.9+) at runtime instead of vendoring them —
+  # on a beamline workstation this produced a silent hang at startup (no
+  # error, Ctrl+C unresponsive — a native deadlock inside Qt's xcb platform
+  # plugin, not a Python exception) even though it worked fine on other
+  # machines. conda-forge's pyqt/qt build vendors a self-consistent
+  # libxcb/xcb-util-cursor/libxkbcommon-x11 stack inside the env instead.
+  # Same root cause + fix as B-PILOT's bpilot_mpe_dev.yml (2026-08-10).
+  - pyqt=5
+  - qt=5
   - pyqtgraph=0.14.0
   - matplotlib-base=3.8.4        # supplies pyqtgraph's named colormaps (hot/viridis/…)
   - pip
 
   - pip:
-    # Qt bindings
-    - "PyQt5==5.15.10"
-
     # PyTorch — CPU build via pip (matches base; conda has no 2.4.0 build for arm64).
     # 2.4.0 works with NumPy 1.26. On Linux/Windows this pulls the default PyPI wheel;
     # for a smaller CPU-only download there you may instead use the CPU index:
@@ -68,8 +76,10 @@ dependencies:
     - "hdf5plugin==7.0.0"
     - "psutil==7.2.2"
 
-    # ── midas-gui itself (editable install of this cloned repo) ─────────────────
-    # Pulls no extra backends — the pinned ones above already satisfy pyproject.toml.
-    # Do NOT add the `midas_suite` meta-package: it drags in midas-index, whose sdist
-    # fails to build against scikit-build-core>=0.8 and aborts env creation.
-    - "-e ."
+    # midas-gui itself is NOT pip-installed here on purpose: `launch.py` imports
+    # `midas_gui` directly off its own directory (no install needed), and
+    # pyproject.toml's own dependency list still pip-pins `PyQt5==5.15.10` —
+    # running `pip install -e .` in this env would re-check that pin against the
+    # conda-forge `pyqt` above and could reinstall the pip PyQt5 wheel over it,
+    # undoing the fix above. If an editable install is ever needed again, install
+    # it with `pip install --no-deps -e .` to avoid re-triggering that pin.
