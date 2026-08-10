@@ -46,6 +46,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Ship test_data sample data in the repo (fresh clone works out of the box) | `7e157e0` |
 | Drop midas_suite from env (unblock conda env create; backends via -e .) | `72a1770` |
 | Pin environment.yml to verified NumPy-1 set + README recreate steps | `68313f8` |
+| Upgrade midas-hkls/midas-calibrate-v2; midas-pdf switched vendored→PyPI | `acb43c1` |
 
 ### Data Viewer (Tab 0)
 | Change | Commit |
@@ -129,6 +130,7 @@ Dates are commit dates (YYYY-MM-DD).
 |--------|--------|
 | Polyatomic midas_pdf reduction pipeline + vendored midas_pdf + calibration loading | `b381d8d` |
 | Defaults to real I(Q) test data | `1149afc` |
+| midas_pdf switched from vendored copy to the real PyPI package | `acb43c1` |
 
 ### Pump Probe (TR-XRD) tab
 | Change | Commit |
@@ -1363,6 +1365,33 @@ new data.
 **Roll back:** `git revert 6c79f13`. Self-contained — removes the registry,
 all "Import from…" menus, the buffer-save button, ROI always-on-top/
 minimize-to-ribbon, and the Project-stack green highlight.
+
+---
+
+### `acb43c1` — Dependencies: upgrade midas-hkls/midas-calibrate-v2, switch midas-pdf to PyPI (2026-08-10)
+**Effect:** `midas-hkls` 0.5.0→0.7.0, `midas-calibrate-v2` 0.5.2→0.5.3.
+`midas_pdf` is now the real PyPI package (`midas-pdf==0.1.1`) instead of the
+vendored `midas_gui/_vendor/` copy, so `pdf_backend.py` drops the
+`midas_hkls.absorption` compatibility shim (needed only while `midas-hkls`
+lacked that submodule) and the vendored-path `sys.path` insert, replacing
+both with a plain `import midas_pdf`. `midas_gui/_vendor/` and its
+package-data block in `pyproject.toml` are removed entirely. Transitive
+MIDAS deps pulled in by `midas-calibrate-v2`/`midas-pdf` but not imported
+directly (`midas-integrate`, `midas-peakfit`, `midas-zipper`, `hdf5plugin`,
+`psutil`) and previously-implicit deps (`numba`, `scikit-image`) are now
+pinned explicitly in `pyproject.toml`'s `dependencies`, so a plain
+`pip install .` reproduces the verified-working set without relying on
+`environment.yml` or another package's `install_requires`. Verified via an
+isolated venv: pytest 25/25 green plus a full synthetic-image E2E smoke test
+(auto-seed → one_shot calibration → integration → PDF G(r)) through the
+GUI's own code paths.
+**Files:** `environment.yml`, `pyproject.toml`, `midas_gui/pdf_backend.py`,
+`documentation/gui_documentation.md`; deletes all of `midas_gui/_vendor/`.
+**Roll back:** `git revert acb43c1`. Restores the vendored `midas_pdf` tree,
+the `midas_hkls.absorption` shim, and the prior dependency pins — but note
+`midas-hkls`/`midas-calibrate-v2` would need re-pinning to their older
+verified versions too if reverting for compatibility reasons, not just to
+undo the vendoring.
 
 ---
 
