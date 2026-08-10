@@ -50,11 +50,23 @@ dependencies:
 
     # ── MIDAS analysis backends (exact verified-working versions; still NumPy-1
     #    compatible against numpy 1.26.4 + numba 0.59.1) ──────────────────────────
-    - "midas-calibrate-v2==0.5.2"
+    - "midas-calibrate-v2==0.5.3"
     - "midas-integrate-v2==0.3.1"
     - "midas-calibrate==0.2.7"
-    - "midas-hkls==0.5.0"
+    - "midas-hkls==0.7.0"
     - "midas-distortion==0.2.0"
+    - "midas-pdf==0.1.1"          # public PyPI package (replaces the old midas_gui/_vendor
+                                  # copy — see pdf_backend.py); Faber-Ziman PDF reduction
+                                  # used by the PDF tab
+
+    # ── Transitive MIDAS deps pinned explicitly (pulled in by midas-calibrate-v2 /
+    #    midas-pdf but not imported by midas_gui directly) — pinned for reproducible,
+    #    verified-working installs rather than leaving them to float ──────────────
+    - "midas-integrate==0.4.2"
+    - "midas-peakfit==0.5.0"
+    - "midas-zipper==0.1.5"
+    - "hdf5plugin==7.0.0"
+    - "psutil==7.2.2"
 
     # ── midas-gui itself (editable install of this cloned repo) ─────────────────
     # Pulls no extra backends — the pinned ones above already satisfy pyproject.toml.

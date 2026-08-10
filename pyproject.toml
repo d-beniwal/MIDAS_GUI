@@ -28,6 +28,12 @@ classifiers = [
 # environment.yml). The compatibility constraint carries over: numpy is held at
 # the 1.26 line because numba 0.59.x needs NumPy < 2.1 and torch 2.4.0 targets
 # NumPy 1.x — bumping numpy to 2.x requires moving torch/numba/backends together.
+#
+# This list is deliberately fully pinned, including packages midas_gui never
+# imports directly (numba, scikit-image, and the "transitive MIDAS deps" block
+# below): a plain `pip install .` must reproduce the exact verified-working set
+# on its own, without relying on environment.yml or on another package's
+# install_requires happening to pull the right version.
 dependencies = [
     "PyQt5==5.15.10",
     "pyqtgraph==0.14.0",
@@ -37,11 +43,27 @@ dependencies = [
     "h5py==3.11.0",
     "tifffile==2023.4.12",
     "torch==2.4.0",
-    "midas-calibrate-v2==0.5.2",
+    "numba==0.59.1",              # NumPy-1.x compatible JIT (newer numba needs NumPy>=2.1);
+                                  # required by midas-integrate / midas-zipper, not imported
+                                  # directly by midas_gui.
+    "scikit-image==0.23.2",       # optional dep of midas-calibrate-v2's auto_seed_calibrant
+                                  # (better ring seeding); not declared by that package's own
+                                  # metadata (soft/try-except import), so midas_gui must pin
+                                  # it explicitly or seeding silently falls back to a coarser
+                                  # arc seed.
+    "midas-calibrate-v2==0.5.3",
     "midas-integrate-v2==0.3.1",
     "midas-calibrate==0.2.7",
-    "midas-hkls==0.5.0",
+    "midas-hkls==0.7.0",
     "midas-distortion==0.2.0",
+    "midas-pdf==0.1.1",           # public PyPI package used by the PDF tab (pdf_backend.py)
+    # ── Transitive MIDAS deps pinned explicitly (pulled in by midas-calibrate-v2 /
+    #    midas-pdf but not imported by midas_gui directly) ─────────────────────────
+    "midas-integrate==0.4.2",
+    "midas-peakfit==0.5.0",
+    "midas-zipper==0.1.5",
+    "hdf5plugin==7.0.0",
+    "psutil==7.2.2",
     # pvapy backs the Data Viewer's "Live Data" card (subscribes to an EPICS
     # PVA image PV and renders frames directly in the Data Viewer's own image
     # pane — rings/radial-integration/corrections all work live). Pinned to
@@ -64,20 +86,6 @@ Issues = "https://github.com/d-beniwal/MIDAS_GUI/issues"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["midas_gui*"]
-
-# Ship the vendored midas_pdf tree (Python + data/*.json) as package data of
-# midas_gui. It is imported as top-level `midas_pdf` via midas_gui/pdf_backend.py.
-# FUTURE: once `midas-pdf` is published and `midas-hkls>=0.5.0` (with the
-# `absorption` submodule) is a dependency, add `midas-pdf` to [project]
-# dependencies, delete midas_gui/_vendor/, and drop this package-data block —
-# the shim in pdf_backend.py then no-ops against the real submodule.
-[tool.setuptools.package-data]
-"midas_gui" = [
-    "_vendor/VENDORED.md",
-    "_vendor/**/*.py",
-    "_vendor/**/*.json",
-    "_vendor/**/*",
-]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

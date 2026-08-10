@@ -1016,11 +1016,13 @@ parsing uses `geometry_fields_from_file` / `result_ns_from_geometry_file`
 | `refine_normalization(q, I, comp, r, …)` | L-BFGS fit of scale + background polynomial against high-Q ⟨S⟩→1 and low-r `G=−4πρ₀r`. | refined S(Q)/G(r) + bg |
 | `pair_distribution_g` / `total_correlation_T` / `radial_distribution_R` | Convention family from G(r) + ρ₀. | g/T/R |
 
-> **Packaging note.** `midas_pdf` is currently **vendored** in
-> `midas_gui/_vendor/` and loaded through `midas_gui/pdf_backend.py`, which also
-> installs a small `midas_hkls.absorption` compatibility shim for
-> `midas-hkls < 0.5.0`. Once `midas-pdf` is published and `midas-hkls>=0.5.0` is
-> available the vendored copy and the shim are removed.
+> **Packaging note.** `midas_pdf` is the public PyPI package (pinned in
+> `environment.yml` / `pyproject.toml`), imported directly through
+> `midas_gui/pdf_backend.py`. Earlier versions of the GUI carried a vendored
+> copy under `midas_gui/_vendor/` plus a `midas_hkls.absorption` compatibility
+> shim, needed before `midas-pdf` was published and while `midas-hkls` was
+> pinned below the release that added `absorption`; both were retired once
+> `midas-hkls>=0.5.0` and `midas-pdf` were available.
 
 ---
 
