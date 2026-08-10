@@ -1395,6 +1395,41 @@ undo the vendoring.
 
 ---
 
+### `3058b0c` — Bundle 20-ID-D/20-ID-E/1-ID-E beamline device profiles (2026-08-10)
+**Effect:** The Live Data PV dropdown's device list was hardcoded for
+20-ID-D. Ships three bundled `Preferences ▸ Profile` presets —
+**20-ID-D**, **20-ID-E**, **1-ID-E** — so switching beamlines is a
+dropdown pick, reusing the existing per-user Profile system
+(`constants._apply()` already replaces `DEVICES` wholesale when a
+profile's JSON has a `"devices"` key) with **zero changes** to
+`prefs_dialog.py` or `widgets.py`. `settings.py` gains a
+`BUNDLED_PROFILES` literal (one device list per beamline, each entry
+`{"name", "prefix", "pva_suffix": "Pva1:Image"}`) and `_ensure_profiles()`
+seeds any not-yet-seen bundled profile once per machine, tracked in a new
+`profile_meta.json` key `"bundled_seeded"` so a profile a user later
+deletes isn't silently recreated. 20-ID-D's list is unchanged (already
+confirmed working on the beamline); 20-ID-E (`pimega`, `spl1`,
+`s20varex2`, `pg6`, `gh2`) and 1-ID-E (`ge1`-`ge5`, `pixirad`, `gh1`,
+`pg1`, `pg5`, `s1varex1`) were extracted from B-PILOT's
+`instrument/devices/{s20ide,s1id}_devices/*_area_detectors.py`
+`make_det(...)` blueprints — every device with `pva1_exists=True`. All
+three profiles also carry a `Sim Detector` entry for hardware-free
+testing. Device names use B-PILOT's raw variable names (per user
+decision) rather than invented descriptive labels, so entries stay
+traceable back to source. Verified: new `test_bundled_beamline_profiles_seeded`
+plus the full suite (26/26) pass; fresh installs still default to
+`Default` (same devices as 20-ID-D); an isolated-HOME subprocess check
+confirmed switching the active profile to each of the three beamlines
+drives `constants.DEVICES` correctly with no other code changes.
+**Files:** `midas_gui/settings.py`, `tests/test_config.py`,
+`documentation/gui_documentation.md`.
+**Roll back:** `git revert 3058b0c`. Self-contained — removes the three
+bundled profiles and their seeding logic; any profile files a user already
+has on disk from this feature are untouched by the revert itself (delete
+them by hand from `<config dir>/profiles/` if desired).
+
+---
+
 ## Rollback recipes (common intents)
 
 - **Undo the Pump Probe tab only:** `git revert 590b410` removes Pump Probe *and*
