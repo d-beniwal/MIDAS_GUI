@@ -47,6 +47,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Drop midas_suite from env (unblock conda env create; backends via -e .) | `72a1770` |
 | Pin environment.yml to verified NumPy-1 set + README recreate steps | `68313f8` |
 | Upgrade midas-hkls/midas-calibrate-v2; midas-pdf switched vendored→PyPI | `acb43c1` |
+| PyQt5 moved pip→conda-forge (fixes beamline silent startup hang) | `97ae1ea` |
 
 ### Data Viewer (Tab 0)
 | Change | Commit |
@@ -1427,6 +1428,36 @@ drives `constants.DEVICES` correctly with no other code changes.
 bundled profiles and their seeding logic; any profile files a user already
 has on disk from this feature are untouched by the revert itself (delete
 them by hand from `<config dir>/profiles/` if desired).
+
+---
+
+### `97ae1ea` — Dependencies: switch PyQt5 to conda-forge (fixes silent startup hang) (2026-08-10)
+**Effect:** `environment.yml` pip-installed `PyQt5==5.15.10`. That wheel
+bundles its own Qt5 libs but `dlopen`s xcb-side system libraries (e.g.
+`libxcb-cursor.so.0`, required since PyQt5-Qt5 5.15.9+) at runtime instead
+of vendoring them. On a beamline workstation this produced a silent
+startup hang: `python launch.py` never returned to the shell prompt, no
+traceback, `~/midas_gui_error.log` stopped right after the "starting" /
+UI-scale lines (i.e. past `_install_diagnostics()` but before
+`app.exec_()`), and Ctrl+C did nothing — the signature of a native
+deadlock inside Qt's xcb platform plugin, not a catchable Python
+exception, so `launch.py`'s own crash-diagnostics wrapper couldn't see it.
+Same failure class B-PILOT hit and fixed the same way
+(`bpilot_mpe_dev.yml`, 2026-08-10): moved Qt bindings to conda-forge's
+`pyqt=5`/`qt=5`, which vendor a self-consistent
+`libxcb`/`xcb-util-cursor`/`libxkbcommon-x11` stack inside the env instead
+of relying on the OS. Also drops the `-e .` editable install from
+`environment.yml`: it wasn't needed (`launch.py` imports `midas_gui`
+straight off its own directory, no install required), and leaving it in
+would have reintroduced the bug — `pyproject.toml` still pip-pins
+`PyQt5==5.15.10`, so `pip install -e .` in this env would re-check that
+pin against the new conda-forge `pyqt` and could reinstall the pip wheel
+over it.
+**Files:** `environment.yml`.
+**Roll back:** `git revert 97ae1ea`. Restores the pip `PyQt5==5.15.10` pin
+and the `-e .` editable install — only do this if conda-forge's `pyqt`/`qt`
+turn out to be unavailable or broken on a target machine, since the pip
+wheel is what caused the original hang.
 
 ---
 
