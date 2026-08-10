@@ -93,6 +93,8 @@ Dates are commit dates (YYYY-MM-DD).
 | ROI tool drops Circle (Box/Line only); Clear ROIs resets numbering; Pick Clear also removes BC marker | `d5654c1` |
 | Line ROI drawn as single arrow shape (no separate arrowhead item) | `bb78c9a` |
 | Box-ROI popup's zoomed crop image resizes with the popup window | `786c94c` |
+| Projection N-frames cap; λ menu gains energy-to-wavelength entry | `468b417` |
+| B-PILOT bridge: local-socket server auto-starts Live Data on scan dispatch | `c336778` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -1298,6 +1300,30 @@ list, instead of the plain label-with-menu built by `_clickable_menu_label`.
 `midas_gui/workers.py`, `documentation/gui_documentation.md`.
 **Roll back:** `git revert 468b417`. Self-contained — restores the Axis
 spinbox (dropping N frames) and the plain K-edge-only λ menu.
+
+---
+
+### `c336778` — Data Viewer: B-PILOT bridge auto-starts Live Data on scan dispatch (2026-08-09)
+**Effect:** New `midas_gui/bridge_server.py` opens a `QLocalServer`
+(`BridgeServer`, socket name `midas_gui_live_bridge_v1`) on app launch —
+`MainWindow.__init__` starts it and `closeEvent` stops it. B-PILOT (a
+separate Bluesky plan-runner GUI) connects as a `QLocalSocket` and sends one
+JSON line per scan dispatch, e.g. `{"type": "live_pv", "version": 1,
+"prefix": "20IDFF:"}`; `MainWindow._resolve_and_start_live` resolves the
+prefix against `constants.DEVICES` (`bridge_server.resolve_pv`, matching
+`prefix` + that device's `pva_suffix`) and, on a match, calls the new
+`DataViewerTab.start_live_pv` / `DataLoaderPanel.start_live_pv`, which check/
+expand the Live Data card, switch streams if a different PV is already
+running, fill in the PV combo, and click **Start** — no manual clicks needed
+in MIDAS GUI. Unmatched prefixes or a B-PILOT that never connects are a
+silent no-op (logged, not raised). Malformed/wrong-version messages are
+ignored. A stale socket file from a prior unclean shutdown is removed before
+`listen()` so restarts don't fail with "address already in use".
+**Files:** `midas_gui/bridge_server.py` (new), `midas_gui/app.py`,
+`midas_gui/tab_view.py`, `midas_gui/widgets.py`,
+`tests/test_bridge_server.py` (new), `documentation/gui_documentation.md`.
+**Roll back:** `git revert c336778`. Self-contained — removes the bridge
+server and the two `start_live_pv` methods; no other code calls them.
 
 ---
 
