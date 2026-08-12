@@ -107,6 +107,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Image/Stack browse gains "Import from…" (other tabs' loaded path/buffer) | `6c79f13` |
 | Stack browse menu gains "Files (multi-select)…" for hand-picked temporal stacks | `cc63d5a` |
 | "5 · Post-processing" card: configurable bad-pixel dilation (px) | `429d41a` |
+| Dilation switched from 4-connected to 8-neighbor full-block growth | `188ea77` |
 
 ### Calibrate (Tab 2) / Refinement (Tab 3)
 | Change | Commit |
@@ -1536,6 +1537,25 @@ from growth at dilation=5.
 **Files:** `midas_gui/tab_mask.py`, `documentation/gui_documentation.md`.
 **Roll back:** `git revert 429d41a`. Self-contained — removes the
 Post-processing card and the dilation step in `_set_mask()`.
+
+---
+
+### `188ea77` — Mask tab: switch dilation to 8-neighbor (full-block) growth (2026-08-12)
+**Effect:** `_set_mask()`'s `binary_dilation` call now passes an explicit
+3×3 full structuring element (`np.ones((3,3), dtype=bool)`) instead of
+relying on scipy's default 4-connected (diamond) structure. With
+`iterations=N`, this changes the growth semantics from "N rings of
+4-connected neighbors" to "the full (2N+1)×(2N+1) square centered on each
+bad pixel" — dilation=1 now marks the entire 3×3 block around a bad pixel,
+dilation=2 the entire 5×5 block, matching the requested 8-neighbor
+behavior instead of the original commit's 4-connected one. Hand-drawn
+shapes are still never grown (same insertion point as `429d41a`).
+Verified with a targeted offscreen script asserting exact pixel counts
+(9 at dilation=1, 25 at dilation=2 on an isolated bad pixel) and that a
+hand-drawn pixel outside the dilation radius is unaffected.
+**Files:** `midas_gui/tab_mask.py`, `documentation/gui_documentation.md`.
+**Roll back:** `git revert 188ea77`. Self-contained — restores the
+4-connected `binary_dilation` default from `429d41a`.
 
 ---
 
