@@ -49,6 +49,7 @@ class MaskTab(QtWidgets.QWidget):
         self._freeform_vdots = None      # pg.ScatterPlotItem — vertex markers
         self._registry = None            # DataSourceRegistry, set by bind_registry()
         self._stack_snapshot_file = None  # temp .h5 from importing another tab's buffer
+        self._stack_files: Optional[list] = None  # explicit multi-select stack files, or None
         self._build_ui()
         if Path(self._img_edit.text().strip() or "x").exists():
             self._load_image()
@@ -381,12 +382,24 @@ class MaskTab(QtWidgets.QWidget):
                     "Stacks (*.h5 *.hdf5 *.nxs *.tif *.tiff);;All (*)")
         if p: self._stack_ed.setText(p)
 
+    def _browse_stack_files(self):
+        files, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self, "Select stack files (multi-select)", "",
+            "Stack frames (*.tif *.tiff *.h5 *.hdf5 *.ge*);;All (*)")
+        if not files:
+            return
+        files = sorted(files)   # deterministic frame order regardless of click order
+        self._stack_ed.setText(f"{len(files)} files selected")
+        self._stack_ed.setToolTip("\n".join(files))
+        self._stack_files = files
+
     # ── cross-tab data sharing (data_bridge.DataSourceRegistry) ─────
     def _populate_stack_menu(self):
         menu = self._stack_menu
         menu.clear()
         menu.addAction("Folder…", self._browse_stack_folder)
         menu.addAction("File (TIFF / HDF5)…", self._browse_stack_file)
+        menu.addAction("Files (multi-select)…", self._browse_stack_files)
         if self._registry is None:
             return
         buffers = self._registry.available(exclude=self, kind="buffer", field="data")
@@ -466,6 +479,8 @@ class MaskTab(QtWidgets.QWidget):
 
     def _on_stack_path_changed(self, txt: str):
         """Show the dataset selector + list datasets when the stack is an HDF5 file."""
+        self._stack_files = None
+        self._stack_ed.setToolTip("")
         h5 = is_h5(txt) and Path(txt).is_file()
         self._stack_ds_row.setVisible(h5)
         if not h5:
@@ -577,6 +592,9 @@ class MaskTab(QtWidgets.QWidget):
         return self._collect_stack_paths(), None
 
     def _collect_stack_paths(self) -> list:
+        stride = max(1, self._stride_spin.value())
+        if self._stack_files:
+            return self._stack_files[::stride]
         raw = self._stack_ed.text().strip()
         if not raw:
             return []
@@ -591,7 +609,6 @@ class MaskTab(QtWidgets.QWidget):
             paths = [p]
         else:
             return []
-        stride = max(1, self._stride_spin.value())
         return [str(x) for x in paths[::stride]]
 
     def _on_mask_done(self, mask: np.ndarray):
@@ -959,6 +976,8 @@ class MaskTab(QtWidgets.QWidget):
         the Save button is auto-exported to ``<sidecar_stem>_mask.tif`` so it
         isn't silently lost."""
         state = {"fields": widgets_to_dict(self._state_widgets())}
+        if self._stack_files:
+            state["stack_files"] = self._stack_files
         if self._mask is not None and sidecar_stem:
             try:
                 import tifffile
@@ -978,6 +997,7 @@ class MaskTab(QtWidgets.QWidget):
             if Path(img_path).exists():
                 self._load_image()
         apply_dict_to_widgets(self._state_widgets(), fields)
+        self._stack_files = list(state["stack_files"]) if state.get("stack_files") else None
         if sidecar_stem:
             mask_path = Path(f"{sidecar_stem}_mask.tif")
             if mask_path.is_file():

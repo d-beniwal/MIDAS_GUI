@@ -3,14 +3,16 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-12 (Tab 6 — PDF Analysis rebuilt for the full
+**Last updated:** 2026-08-12 (Tab 1 — Mask Builder: Stack browse menu gains a
+**Files (multi-select)…** entry so the temporal stack can be built from an
+explicit, hand-picked set of files instead of only a whole folder/glob).
+
+**Previously:** (2026-08-12, Tab 6 — PDF Analysis rebuilt for the full
 ROADMAP Stage 2-3 workflow: empty-cell/Paalman-Pings background subtraction,
 detector-efficiency correction, absolute normalization, differentiable
 multiple scattering, a fluorescence diagnostic, CIF-driven structure
 refinement, and Δ-PDF significance testing, backed by a dedicated
-`test_data/test_pdf/` dataset).
-
-**Previously:** (2026-08-10, Preferences ▸ Profile ships three bundled
+`test_data/test_pdf/` dataset) (2026-08-10, Preferences ▸ Profile ships three bundled
 beamline device presets — **20-ID-D**, **20-ID-E**, **1-ID-E** — so the Data
 Viewer's Live Data PV dropdown can be switched to a beamline's detectors
 without hand-editing Preferences ▸ Devices) (2026-08-09, Cross-tab data sharing: every Data Loader
@@ -634,7 +636,13 @@ loaded in another tab (see **Cross-tab data import** in §1); the **Stack**
 field's browse menu additionally lists any other tab's frozen (green) Live
 Data buffer as a **Buffer (N frames)** entry — picking one snapshots that
 buffer to a temporary HDF5 file and feeds it into the auto-mask stack exactly
-like a browsed folder/file would.
+like a browsed folder/file would. The Stack browse menu also has a
+**Files (multi-select)…** entry that opens a multi-select file dialog so the
+temporal stack can be built from an explicit, hand-picked set of files
+(e.g. frames scattered across a directory or spread across multiple
+directories) instead of only a whole folder or a single glob pattern — the
+field then shows "N files selected" (hover for the full file list) and the
+stride still applies to the chosen list.
 
 ### Section 1 · Threshold mask (always applied)
 `pixel ≤ lower | pixel > upper`. The upper bound auto-fills from the data type on load
@@ -650,10 +658,11 @@ Two **independently selectable** methods — enable either or both:
   `Frozen × Q75(std)` (0.05); needs a stack of ≥2 frames.
 
 A shared **stack source + stride** feeds both (the temporal median for spatial, the
-frame stack for temporal constancy). The stack can be a **folder / `*.tif` glob**, or a
-**single HDF5 file whose 3-D dataset is a time sequence of images** — for an `.h5` a
-**Dataset** selector appears (auto-populated, 3-D datasets preferred). *All σ / K_σ /
-n_σ fields in this tab accept any value — there is no upper limit.*
+frame stack for temporal constancy). The stack can be a **folder / `*.tif` glob**, an
+explicit **multi-select file list** (via the browse menu's Files (multi-select)…
+entry), or a **single HDF5 file whose 3-D dataset is a time sequence of images** — for
+an `.h5` a **Dataset** selector appears (auto-populated, 3-D datasets preferred). *All
+σ / K_σ / n_σ fields in this tab accept any value — there is no upper limit.*
 
 ### Section 3 · Spatial spike rejection
 Laplacian high-pass single-pixel-spike detector; `n_σ` threshold (5.0).
