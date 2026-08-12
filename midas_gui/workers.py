@@ -1586,6 +1586,72 @@ def _load_iq_file(path: str):
     return q, intensity, sigma
 
 
+def _fit_subtraction_scale(I_meas, I_empty, q, comp, wavelength_A, q_min, q_max):
+    """Least-squares empty-cell scale ``s`` (and offset ``c``).
+
+    Away from Bragg peaks / at high Q the sample's own scattering tends to
+    its self-scattering baseline ``⟨f²⟩+Compton`` (S(Q)→1), so
+    ``I_meas - s·I_empty - c`` is fit to that baseline over
+    ``[q_min, q_max]`` via ``np.linalg.lstsq``. Returns ``(s, c)``.
+    """
+    sel = (q >= q_min) & (q <= q_max)
+    if sel.sum() < 4:
+        raise ValueError(
+            f"Too few points in fit window [{q_min}, {q_max}] to fit background scale.")
+    f2, _ = comp.form_factor_averages(q[sel], wavelength_A=wavelength_A, anomalous=True)
+    inc = comp.compton(q[sel], wavelength_A=wavelength_A)
+    baseline = _to_np(f2) + _to_np(inc)
+    target = I_meas[sel] - baseline
+    A = np.column_stack([I_empty[sel], np.ones(int(sel.sum()))])
+    (s, c), *_ = np.linalg.lstsq(A, target, rcond=None)
+    return float(s), float(c)
+
+
+def _absolute_normalize(I, q, comp, wavelength_A, q_window, anomalous=True):
+    """Anchor the mean intensity over ``q_window`` to ``⟨f²⟩+⟨S_inc⟩``.
+
+    Returns ``(I_normalized, K)`` with the scalar gain ``K`` so σ propagates
+    as ``sigma*K`` (never an elementwise ratio, which blows up near I≈0).
+    """
+    q_lo, q_hi = q_window
+    sel = (q >= q_lo) & (q <= q_hi)
+    if sel.sum() < 4:
+        raise ValueError(f"Too few points in normalization window [{q_lo}, {q_hi}].")
+    f2, _ = comp.form_factor_averages(q[sel], wavelength_A=wavelength_A, anomalous=anomalous)
+    inc = comp.compton(q[sel], wavelength_A=wavelength_A)
+    baseline = _to_np(f2) + _to_np(inc)
+    K = float(np.mean(baseline) / np.mean(I[sel]))
+    return I * K, K
+
+
+def _flatten_sq_tail(q, S, window, poly_deg=3, mad_k=3.0, n_iter=3):
+    """PDFgetX3-style iterative MAD-clipped polynomial baseline flatten.
+
+    Fits a degree-``poly_deg`` polynomial to ``S(Q)`` over ``window``,
+    iteratively re-fitting after dropping points whose residual exceeds
+    ``mad_k`` scaled MADs (Bragg peaks), then subtracts the fitted drift
+    (recentring on 1) over the *full* Q range. Display-only — never fed back
+    into G(r). Returns ``(S_flat, poly_coeffs)``.
+    """
+    q_lo, q_hi = window
+    sel = (q >= q_lo) & (q <= q_hi)
+    if sel.sum() < poly_deg + 2:
+        raise ValueError("Too few points in tail-flatten window for the requested polynomial degree.")
+    qs, Ss = q[sel], S[sel]
+    poly = np.polyfit(qs, Ss, poly_deg)
+    for _ in range(max(1, int(n_iter))):
+        fit = np.polyval(poly, qs)
+        resid = Ss - fit
+        mad = np.median(np.abs(resid - np.median(resid))) or 1e-12
+        keep = np.abs(resid - np.median(resid)) <= mad_k * 1.4826 * mad
+        if keep.sum() < poly_deg + 2:
+            break
+        poly = np.polyfit(qs[keep], Ss[keep], poly_deg)
+    baseline_full = np.polyval(poly, q)
+    S_flat = S - baseline_full + 1.0
+    return S_flat, poly
+
+
 class PDFWorker(QtCore.QThread):
     """Polyatomic total-scattering PDF: I(Q) → Faber-Ziman S(Q) → G(r).
 
@@ -1637,6 +1703,7 @@ class PDFWorker(QtCore.QThread):
 
     def run(self):
         try:
+            import torch
             import midas_gui.pdf_backend as pdf
             c = self._cfg
             wl = float(c["wavelength"])
@@ -1661,6 +1728,120 @@ class PDFWorker(QtCore.QThread):
                 f"λ={wl:.5f} Å  compton={'on' if compton else 'off'}")
 
             r = np.arange(c["r_min"], c["r_max"], c["r_step"], dtype=np.float64)
+
+            # ── Stage 2-3, step 1: empty-cell / background subtraction ──────────
+            bg_scale_used = None
+            if c.get("bg_enabled"):
+                bg_cfg = c.get("bg") or {}
+                bg_path = bg_cfg.get("iq_file", "")
+                if not bg_path or not Path(bg_path).exists():
+                    raise FileNotFoundError(f"Empty-cell I(Q) file not found: {bg_path!r}")
+                q_bg, I_bg, sig_bg = _load_iq_file(bg_path)
+                if q_bg.shape != q.shape or not np.allclose(q_bg, q):
+                    sig_bg_interp = (np.interp(q, q_bg, sig_bg) if sig_bg is not None else None)
+                    I_bg = np.interp(q, q_bg, I_bg)
+                    sig_bg = sig_bg_interp
+
+                # physical/fit transmission scale s (attenuator ratio, or a
+                # least-squares high-Q fit) — this is independent of whether
+                # the Q-dependent Paalman-Pings correction is layered on top.
+                mode = bg_cfg.get("mode", "manual")
+                if mode == "fit":
+                    fit_q = bg_cfg.get("fit_q") or (q_max * 0.7, q_max)
+                    s_manual, _off = _fit_subtraction_scale(
+                        I, I_bg, q, comp, wl, float(fit_q[0]), float(fit_q[1]))
+                else:
+                    s_manual = float(bg_cfg.get("scale", 1.0))
+
+                if bg_cfg.get("paalman_pings"):
+                    pp = pdf.paalman_pings_cylinder_in_cylinder(
+                        q, wavelength_A=wl,
+                        mu_sample_um=float(bg_cfg["mu_sample_um"]),
+                        mu_container_um=float(bg_cfg["mu_container_um"]),
+                        R_sample_um=float(bg_cfg["r_sample_um"]),
+                        R_container_um=float(bg_cfg["r_container_um"]))
+                    # I_sample = [I_meas - (A_c_sc/A_c_c)·s·I_empty] / A_s_sc
+                    scale_arr = (_to_np(pp["A_c_sc"]) / _to_np(pp["A_c_c"])) * s_manual
+                    denom = _to_np(pp["A_s_sc"])
+                    self.log_line.emit(
+                        f"[pdf] Paalman-Pings empty-cell subtraction "
+                        f"(s={s_manual:.4g}, median A_c_sc/A_c_c={np.median(scale_arr / s_manual):.4g})")
+                else:
+                    scale_arr = s_manual
+                    denom = 1.0
+                    self.log_line.emit(
+                        f"[pdf] empty-cell subtraction (mode={mode}, s={s_manual:.4g})")
+
+                I = (I - scale_arr * I_bg) / denom
+                bg_scale_used = float(np.median(np.atleast_1d(scale_arr)))
+
+                if sig is not None and sig_bg is not None:
+                    sig = np.sqrt(sig ** 2 + (scale_arr * sig_bg) ** 2) / denom
+
+            # ── Stage 2-3, step 2: detector efficiency ───────────────────────────
+            if c.get("det_eff_enabled"):
+                de_cfg = c.get("det_eff") or {}
+                I_t, sig_t = pdf.apply_detector_efficiency(
+                    torch.as_tensor(I, dtype=torch.float64),
+                    torch.as_tensor(q, dtype=torch.float64),
+                    wavelength_A=wl,
+                    material=de_cfg.get("material", "Si"),
+                    thickness_um=float(de_cfg.get("thickness_um", 500.0)),
+                    density_g_cm3=de_cfg.get("density_g_cm3"),
+                    sigma=(torch.as_tensor(sig, dtype=torch.float64) if sig is not None else None))
+                I = _to_np(I_t)
+                if sig_t is not None:
+                    sig = _to_np(sig_t)
+                self.log_line.emit(
+                    f"[pdf] detector efficiency correction applied "
+                    f"(material={de_cfg.get('material', 'Si')}, "
+                    f"thickness={de_cfg.get('thickness_um', 500.0)} µm)")
+
+            # ── Stage 2-3, step 3: absolute normalization ────────────────────────
+            if c.get("absnorm_enabled"):
+                an_cfg = c.get("absnorm") or {}
+                q_win = an_cfg.get("q_window") or (q_max * 0.7, q_max)
+                I, K = _absolute_normalize(
+                    I, q, comp, wl, (float(q_win[0]), float(q_win[1])),
+                    anomalous=bool(an_cfg.get("anomalous", True)))
+                if sig is not None:
+                    sig = sig * K
+                self.log_line.emit(f"[pdf] absolute normalization K={K:.4g}")
+
+            # ── Stage 2-3, step 4: differentiable multiple scattering ───────────
+            ms_beta_median = None
+            if c.get("ms_enabled"):
+                ms_cfg = c.get("ms") or {}
+                mu_um = ms_cfg.get("mu_um")
+                if mu_um is None:
+                    comp_dict = _parse_composition(c["composition"])
+                    if len(comp_dict) == 1:
+                        material = next(iter(comp_dict))
+                        mu_um = pdf.linear_attenuation_um(
+                            material, wl, density_g_cm3=ms_cfg.get("density_g_cm3"))
+                    else:
+                        density = ms_cfg.get("density_g_cm3")
+                        if density is None:
+                            raise ValueError(
+                                "Multiple scattering: a compound sample needs an explicit "
+                                "density (g/cm³) to auto-estimate μ, or set μ manually.")
+                        mu_um = pdf.linear_attenuation_um(
+                            comp_dict, wl, density_g_cm3=float(density))
+                else:
+                    mu_um = float(mu_um)
+                R_um = float(ms_cfg.get("r_um", 500.0))
+                tau = pdf.cylinder_effective_tau(mu_um, R_um)
+                ms = pdf.slab_transport_ms(
+                    comp, wavelength_A=wl, tau=tau,
+                    albedo=float(ms_cfg.get("albedo", 0.9)),
+                    q_max=float(ms_cfg.get("q_max", q_max)),
+                    n_mu=int(ms_cfg.get("n_mu", 32)), n_tau=int(ms_cfg.get("n_tau", 100)))
+                ms_bg = _to_np(pdf.ms_background_on_grid(q, I, ms))
+                I = I - ms_bg
+                ms_beta_median = float(np.median(_to_np(ms["beta"])))
+                self.log_line.emit(
+                    f"[pdf] multiple-scattering correction: τ={tau:.4g}, "
+                    f"median β={ms_beta_median:.4g}")
 
             background = None
             scale = 1.0
@@ -1696,6 +1877,18 @@ class PDFWorker(QtCore.QThread):
             S_np = _to_np(S); G_np = _to_np(G); sigG_np = _to_np(sigma_G)
             Fq_np = _to_np(Fq)
 
+            # ── Stage 2-3, step 5: display-only S(Q) tail-flatten ────────────────
+            S_flat_np = None
+            if c.get("tail_flatten_enabled"):
+                tf_cfg = c.get("tail_flatten") or {}
+                window = tf_cfg.get("window") or (q_max * 0.6, q_max)
+                S_flat_np, _poly = _flatten_sq_tail(
+                    q, S_np, (float(window[0]), float(window[1])),
+                    poly_deg=int(tf_cfg.get("poly_deg", 3)),
+                    mad_k=float(tf_cfg.get("mad_k", 3.0)),
+                    n_iter=int(tf_cfg.get("n_iter", 3)))
+                self.log_line.emit("[pdf] tail-flattened S(Q) computed for display")
+
             # output-function family (needs ρ₀ for g/T/R)
             out_fn = c.get("output_fn", "G")
             fam_y, fam_sig = G_np, sigG_np
@@ -1711,10 +1904,101 @@ class PDFWorker(QtCore.QThread):
 
             self.finished.emit({
                 "q": q, "Iq": I, "background": background,
-                "S": S_np, "Fq": Fq_np,
+                "S": S_np, "S_flat": S_flat_np, "Fq": Fq_np,
                 "r": r, "Gr": G_np, "sigma_Gr": sigG_np,
                 "Gr_family": {"name": out_fn, "y": fam_y, "sigma": fam_sig},
                 "scale": scale, "bg_coef": bg_coef, "refine_loss": refine_loss,
+                "bg_scale_used": bg_scale_used, "ms_beta_median": ms_beta_median,
+            })
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
+class PDFStructureFitWorker(QtCore.QThread):
+    """CIF-driven small-box structure refinement (PDFfit-style) against a
+    previously computed G(r) snapshot.
+
+    Fits lattice scale ``a``, isotropic ADP ``u_iso``, and an overall
+    ``scale`` by autograd (differentiable ``pdffit_gr``), with
+    Hessian-derived uncertainties from ``midas_pdf.refine_structure``.
+    """
+    log_line = QtCore.pyqtSignal(str)
+    finished = QtCore.pyqtSignal(object)
+    failed   = QtCore.pyqtSignal(str)
+
+    def __init__(self, r, G, sigma_G, cfg, parent=None):
+        super().__init__(parent)
+        self._r, self._G, self._sigma_G = r, G, sigma_G
+        self._cfg = cfg
+
+    def _build_crystal_tensor(self, pdf, c):
+        if c.get("crystal_source", "cif") == "cif":
+            path = c.get("cif_path", "")
+            if not path or not Path(path).exists():
+                raise FileNotFoundError(f"CIF file not found: {path!r}")
+            crystal = pdf.read_cif_to_crystal(path)
+        else:
+            a, b, cc, alpha, beta, gamma = [float(x) for x in c["manual_lattice"]]
+            lattice = pdf.Lattice(a=a, b=b, c=cc, alpha=alpha, beta=beta, gamma=gamma)
+            sg = pdf.SpaceGroup.from_number(int(c["space_group_number"]))
+            atoms = [
+                pdf.Atom(element=at["element"],
+                        fract=(float(at["x"]), float(at["y"]), float(at["z"])),
+                        occupancy=float(at.get("occupancy", 1.0)),
+                        B_iso=float(at.get("B_iso", 0.0)))
+                for at in c["manual_atoms"]
+            ]
+            crystal = pdf.Crystal(lattice=lattice, space_group=sg, atoms=atoms)
+        return crystal.to_torch()
+
+    def run(self):
+        try:
+            import midas_gui.pdf_backend as pdf
+            c = self._cfg
+
+            crystal_t = self._build_crystal_tensor(pdf, c)
+            r_max = float(c.get("r_max", 10.0))
+            pairs = pdf.build_pair_list(crystal_t, r_max=r_max)
+
+            fit_lo = float(c.get("fit_r_min", 1.5))
+            fit_hi = float(c.get("fit_r_max", r_max))
+            sel = (self._r >= fit_lo) & (self._r <= fit_hi)
+            if sel.sum() < 8:
+                raise ValueError(f"Too few G(r) points in fit range [{fit_lo}, {fit_hi}] Å.")
+            r_fit = self._r[sel]
+            G_obs = self._G[sel]
+            sigma_inflate = float(c.get("sigma_inflate", 1.0))
+            sig_fit = (self._sigma_G[sel] * sigma_inflate
+                      if self._sigma_G is not None else None)
+
+            init_a = c.get("init_a")
+            init_a = float(init_a) if init_a is not None else None
+            bg_order = c.get("bg_order")
+            bg_order = int(bg_order) if bg_order is not None else None
+            steps = int(c.get("steps", 120))
+
+            self.log_line.emit(
+                f"[pdf-fit] refining structure over r∈[{fit_lo},{fit_hi}] Å "
+                f"({int(sel.sum())} pts, {steps} steps)…")
+
+            res = pdf.refine_structure(
+                crystal_t, r_fit, G_obs, pairs, sigma_obs=sig_fit,
+                init_a=init_a, init_u_iso=float(c.get("init_u_iso", 0.005)),
+                init_scale=float(c.get("init_scale", 1.0)),
+                bg_order=bg_order, steps=steps, lr=float(c.get("lr", 0.05)),
+                n_posterior_samples=int(c.get("n_posterior_samples", 0)))
+
+            self.log_line.emit(
+                f"[pdf-fit] done: fitted={res['fitted']}  "
+                f"chi2_reduced={float(res['chi2_reduced']):.4g}")
+
+            self.finished.emit({
+                "fitted": res["fitted"], "uncertainty": res["uncertainty"],
+                "chi2_reduced": float(res["chi2_reduced"]), "history": res["history"],
+                "r_fit": r_fit, "G_obs": _to_np(G_obs), "G_calc": _to_np(res["G_calc"]),
+                "sigma_fit": _to_np(sig_fit) if sig_fit is not None else None,
+                "posterior": res["posterior"],
+                "cov": _to_np(res["cov"]) if res.get("cov") is not None else None,
             })
         except Exception:
             self.failed.emit(traceback.format_exc())

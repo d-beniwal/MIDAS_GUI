@@ -3,12 +3,17 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-10 (Preferences ▸ Profile ships three bundled
+**Last updated:** 2026-08-12 (Tab 6 — PDF Analysis rebuilt for the full
+ROADMAP Stage 2-3 workflow: empty-cell/Paalman-Pings background subtraction,
+detector-efficiency correction, absolute normalization, differentiable
+multiple scattering, a fluorescence diagnostic, CIF-driven structure
+refinement, and Δ-PDF significance testing, backed by a dedicated
+`test_data/test_pdf/` dataset).
+
+**Previously:** (2026-08-10, Preferences ▸ Profile ships three bundled
 beamline device presets — **20-ID-D**, **20-ID-E**, **1-ID-E** — so the Data
 Viewer's Live Data PV dropdown can be switched to a beamline's detectors
-without hand-editing Preferences ▸ Devices).
-
-**Previously:** 2026-08-09 (Cross-tab data sharing: every Data Loader
+without hand-editing Preferences ▸ Devices) (2026-08-09, Cross-tab data sharing: every Data Loader
 panel's Data browse button, plus Mask Builder's Image/Stack browse buttons,
 gain an **Import from…** menu to pull a file/folder/buffer already loaded in
 another tab; **Use Buffer** gets a 💾 button to save the buffer to an HDF5
@@ -886,13 +891,26 @@ a drifted frame, learn a spatial gain map `g_i = 1 + scale·r_i` by minimising
 
 ---
 
-## 9. Tab 6 — PDF Analysis  *(work in progress)*
+## 9. Tab 6 — PDF Analysis
 
-Polyatomic **total-scattering** reduction: I(Q) → Faber-Ziman structure function
-S(Q) → pair-distribution G(r), powered by the `midas_pdf` backend (real
-composition-weighted normalization, Compton subtraction, end-to-end σ
-propagation, and optional differentiable scale/background refinement). This
-replaces the earlier monoatomic, composition-free `F(Q)=Q·(I/bg−1)` approximation.
+Polyatomic **total-scattering** workflow, powered by the `midas_pdf` backend:
+I(Q) → Faber-Ziman structure function S(Q) → pair-distribution G(r) (Stage 1:
+real composition-weighted normalization, Compton subtraction, end-to-end σ
+propagation, optional differentiable scale/background refinement) **plus** a
+full Stage 2-3 corrections/analysis surface — empty-cell/Paalman-Pings
+absorption subtraction, detector-efficiency correction, absolute (electron-unit)
+normalization, differentiable multiple-scattering correction, a fluorescence
+diagnostic, CIF-driven small-box structure refinement (PDFfit-style,
+error-aware), and Δ-PDF significance testing between two saved reductions. The
+tab is organized as a **4-tab left panel** (Data & Reduction / Corrections /
+Structure Fit / Δ-PDF) driving a **4-tab right panel** (Reduction / Structure
+Fit / Δ-PDF / Log).
+
+Ships with a dedicated, ready-to-run dataset at `test_data/test_pdf/` (real
+beamline frames + pre-integrated I(Q) for Ni/CeO₂/IPA/Kapton/air-scatter, a
+rasterized beamstop mask, a MIDAS calibration file, and an authored `Ni.cif`)
+— kept out of git via `.gitignore` (~320 MB raw frames) but present on this
+machine, so the tab opens ready to run against real data with no setup.
 
 ### Background — what I(Q), S(Q) and G(r) mean
 
@@ -943,17 +961,19 @@ selector) is the same information re-weighted: **G** oscillates about 0 (refinem
 standard); **g** → 1 at large r; **T** is the total correlation; **R** is the radial
 distribution whose *peak area = coordination number*. g/T/R all need ρ₀.
 
+### Left tab 1 — Data & Reduction
+
 **I(Q) source** (choose one):
 - **Integrate detector frame** — a calibrated frame is integrated (hard/polygon
-  binning, Poisson σ) and mapped to Q, exactly as before. Uses the Tab 2
-  calibration (λ, geometry) and any Tab 1 mask.
+  binning, Poisson σ) and mapped to Q. Uses the Tab 2 calibration (λ, geometry)
+  and an optional local **Mask** (`.tif`, nonzero = masked — same convention as
+  Tab 1, loaded independently so this tab needs no cross-tab wiring to run).
 - **Load I(Q) file** — a pre-integrated 2- or 3-column `Q, I, σ` text/CSV
   (comment/header lines tolerated). The tab **opens on this source by default**,
-  pointed at real data in `test_data/pdf_real/` (`iq_Nickel.csv`; also CeO₂, IPA,
-  Kapton at λ 0.1839) — just press **Compute G(r)** for the Ni PDF (first peak
-  ~2.49 Å). Synthetic known-answer examples are in `test_data/pdf_synth/`
-  (`nickel_iq.csv`, `ceo2_iq.csv`). See each folder's `README.md` for per-sample
-  composition / ρ₀ / Q-range settings.
+  pointed at `test_data/test_pdf/iq/04_iq_Nickel.csv` — just press
+  **Compute G(r)** for the Ni PDF (first shell ≈ 2.5 Å). The same folder also
+  has CeO₂, IPA, Kapton (container), and air-scatter I(Q) at λ 0.1839 Å for use
+  as backgrounds or empty-cell references (see Corrections, below).
 
 **Calibration.** The geometry/wavelength comes from Tab 2 automatically, or use
 **Load calibration file…** to read a MIDAS `paramstest.txt`, a `.json`, or a pyFAI
@@ -964,44 +984,128 @@ sets λ used by *Load I(Q) file* mode.
 number density ρ₀ (atoms/Å³; needed for refinement and for g/T/R), wavelength λ
 (auto-filled from calibration), and a **Compton subtraction** toggle.
 
+**Background subtraction (empty-cell).** Optional. Loads a second I(Q) file
+(e.g. the Kapton or air-scatter references) and subtracts it from the sample:
+**Manual scale** (a fixed transmission factor `s`, `I_corr = I − s·I_empty`) or
+**Fit high-Q** (least-squares `s` over a chosen high-Q window). Enabling
+**Paalman-Pings cylinder-in-cylinder correction** replaces the flat scale with
+the Q-dependent self-/container-absorption ratio, using sample/container linear
+attenuation μ (1/µm) and cylinder radii; **Estimate μ from composition** fills μ
+from the sample/container composition, λ, and container density automatically.
+
 **Normalization.** Optional **Refine scale + background** (L-BFGS) — reveals a
 background polynomial degree (0–3), a low-r cutoff `r_min` (Å), and an iteration
 count. Refinement requires ρ₀ > 0. It fits scale and a smooth b(Q) against two
 model-free constraints: high-Q ⟨S⟩→1 and G(r)=−4πρ₀r below `r_min`.
 
-**Output.** Bottom-plot convention family — **G(r)** (reduced PDF), **g(r)**
-(pair distribution), **T(r)** (total correlation), or **R(r)** (radial
-distribution, whose peak integral is the coordination number); g/T/R need ρ₀.
-Middle plot toggles between **S(Q)** (with the S=1 guide) and the true reduced
-structure function **F(Q)=Q(S−1)**.
+**Q range / r range + FT / Output.** Unchanged from Stage 1: Qmin/Qmax trim,
+rmin/rmax/Δr + window (Lorch/none) + binning (hard/polygon), and the bottom-plot
+convention family — **G(r)** (reduced PDF), **g(r)** (pair distribution),
+**T(r)** (total correlation), or **R(r)** (radial distribution, peak integral =
+coordination number); g/T/R need ρ₀. Middle plot toggles between **S(Q)**
+(with the S=1 guide) and **F(Q)=Q(S−1)**.
 
-Right panel: I(Q) (+ refined background overlay), S(Q)/F(Q), and the selected
-G/g/T/R with a shaded **±1σ** band. **Save G(r)** writes a three-column
-`r, G(r), σ` file (diffpy-CMI / PDFgui / RMCProfile compatible); **Save S(Q)**
-writes `Q, S(Q)`.
+**Save G(r)** writes a three-column `r, G(r), σ` file (diffpy-CMI / PDFgui /
+RMCProfile compatible); **Save S(Q)** writes `Q, S(Q)`.
+
+### Left tab 2 — Corrections
+
+All four stages are opt-in checkboxes; leaving all off reproduces Stage-1
+behavior exactly.
+
+- **Detector efficiency** — divides I(Q) by the sensor's quantum efficiency
+  `η(Q)` for a given material/thickness (e.g. 500 µm Si), computed from the
+  photoelectric absorption at each Q's implied path length. At hard X-ray
+  energies a thin high-Z-poor sensor can be only a few percent efficient, so
+  this legitimately amplifies I(Q) severalfold — that is physically expected,
+  not a bug.
+- **Multiple scattering** — differentiable cylinder-transport correction
+  (`slab_transport_ms`/`ms_background_on_grid`): given an effective optical
+  depth τ (from μ × R, μ either auto-estimated from composition/density or set
+  manually), a single-scattering albedo, and a Q grid, computes and subtracts
+  an MS background before normalization. The Log reports the median MS
+  fraction β.
+- **Absolute (electron-unit) normalization** — anchors the mean I(Q) over a
+  high-Q window to the composition's `⟨f²⟩+⟨S_inc⟩` baseline, putting I(Q) on
+  an absolute per-electron scale (needed before meaningfully comparing
+  intensities across samples/geometries).
+- **S(Q) tail-flatten** — a **display-only** PDFgetX3-style iterative
+  MAD-clipped polynomial baseline flatten over a high-Q window; toggled on the
+  Reduction plot via **Show tail-flattened S(Q)**. It never feeds back into
+  G(r) — the reduction always uses the un-flattened S(Q).
+- **Fluorescence diagnostic** — **Check fluorescence** reports which
+  sample/container element K/L emission lines fall near the incident energy
+  (a source of spurious background near an absorption edge), via
+  `expected_fluorescence` / `fluorescence_report_sample_and_container`.
+
+### Left tab 3 — Structure Fit
+
+CIF-driven (or manually-specified lattice + atom table) small-box structure
+refinement against the observed G(r), in the style of PDFfit/PDFgui:
+
+- **Crystal** — load a `.cif` (e.g. `test_data/test_pdf/structures/Ni.cif`,
+  authored FCC Ni, space group Fm-3m #225, a=3.524 Å) or build one manually
+  (lattice a/b/c/α/β/γ, space-group number, an atom table with add/remove rows).
+- **Fit range + parameters** — pair-list cutoff (`build_pair_list` r_max), the
+  `[fit rmin, fit rmax]` window actually fit, a **σ inflate** factor (real
+  beamline G(r) is often dominated by shape-mismatch systematics rather than
+  counting noise, so σ can be scaled up before fitting — exposed as a tunable,
+  not hardcoded), initial guesses for lattice constant / isotropic ADP (u_iso)
+  / scale, an optional background polynomial order, and optimizer steps/lr/
+  posterior-sample count.
+- **Run structure fit** calls `refine_structure` (gradient-based, PyTorch) and
+  reports fitted values ± uncertainty, χ²/ndof, and observed/model/residual
+  curves on the right panel's **Structure Fit** tab.
+
+### Left tab 4 — Δ-PDF
+
+Significance testing between two saved G(r) snapshots (e.g. before/after a
+correction, or two temperatures): **Save current result as State A/B** each
+capture `(r, G, σ)` from the last Compute; **Compute ΔG(r) = B − A** calls
+`delta_pdf`/`significant_mask` and plots ΔG(r) with an n·σ band, marking points
+that exceed the chosen threshold as a red scatter overlay — a fast way to see
+*where* two reductions genuinely differ vs. where the difference is just noise.
+
+### Right panel
+
+- **Reduction** — I(Q) (+ background overlay), S(Q)/F(Q) (with the
+  tail-flatten toggle), and the selected G/g/T/R with a shaded **±1σ** band —
+  same three-stacked-plot layout as Stage 1.
+- **Structure Fit** — observed G(r) (±1σ band) with the fitted model overlaid,
+  a `(obs−calc)/σ` residual sub-plot, and a fitted-parameter table with χ²/ndof.
+- **Δ-PDF** — ΔG(r) with its uncertainty band and significant-point scatter,
+  plus an "N/Ntotal points > nσ" summary label.
+- **Log** — shared run log for reduction, corrections, structure fit, and
+  Δ-PDF, in the same `LogPanel` used elsewhere.
 
 ### Functions behind the tab
 
-The tab is a thin UI over a background worker and the `midas_pdf` backend.
+The tab is a thin UI over two background workers and the `midas_pdf` backend.
 
 **UI — `PDFTab` (`midas_gui/tab_pdf.py`)**
 
 | Method | Role |
 |--------|------|
-| `_build_ui` | Builds the I(Q)-source / Sample / Normalization / Output groups and the three stacked plots. |
+| `_build_ui` | Builds the 4-tab left panel and 4-tab right panel described above. |
 | `set_calibration(result, source)` | Receives a Tab-2 result (or a loaded geometry) → sets λ and enables Compute. |
 | `_load_calib_file` | Loads a `paramstest`/`.json`/`.poni` → builds a calibration result → `set_calibration`. |
-| `_load_img` | Loads a detector frame for *Integrate detector frame* mode. |
-| `_run` | Validates inputs, assembles the `cfg` dict, and starts a `PDFWorker`. |
-| `_on_done` / `_redraw_mid` / `_redraw_bottom` | Draw I(Q)+bg, the S(Q)↔F(Q) toggle, and the G/g/T/R curve with its ±1σ band. |
+| `_load_img` / `_load_mask` | Loads a detector frame / local `.tif` mask for *Integrate detector frame* mode. |
+| `_estimate_mu` | Fills sample/container μ (1/µm) from composition + λ (+ container density) for the Paalman-Pings correction. |
+| `_check_fluorescence` | Calls `fluorescence_report_sample_and_container` and reports the result in the Log + a message box. |
+| `_run` | Validates inputs, assembles the full Stage-1 + Stage-2/3 `cfg` dict, and starts a `PDFWorker`. |
+| `_on_done` / `_redraw_mid` / `_redraw_bottom` | Draw I(Q)+bg, the S(Q)↔F(Q) toggle (incl. tail-flattened), and the G/g/T/R curve with its ±1σ band. |
+| `_collect_fit_cfg` / `_run_structure_fit` / `_on_fit_done` / `_redraw_fit` | Build the CIF/manual crystal + fit-parameter `cfg`, run `PDFStructureFitWorker`, and draw the observed/model/residual plots + parameter table. |
+| `_save_state` / `_run_delta_pdf` / `_redraw_delta_pdf` | Snapshot `(r, G, σ)` into State A/B and compute/plot `delta_pdf`/`significant_mask`. |
 | `_save_gr_file` / `_save_sq_file` | Export `r,G,σ` and `Q,S`. |
 
-**Worker — `PDFWorker` (`midas_gui/workers.py`)** runs off the GUI thread:
+**Workers — `midas_gui/workers.py`** run off the GUI thread:
 
-| Function | Role |
+| Worker / function | Role |
 |----------|------|
-| `_acquire_iq` | Produces `(q, I, σ)` — either by integrating the frame (image mode) or by reading a file (`_load_iq_file`, tolerant of comma/space and 2- or 3-columns). |
-| `run` | Trims to `[Qmin,Qmax]`, builds `Composition`, calls the reduction (plain or refine), computes `F(Q)` and the G/g/T/R family, emits the result dict. |
+| `PDFWorker._acquire_iq` | Produces `(q, I, σ)` — either by integrating the frame (image mode) or by reading a file (`_load_iq_file`, tolerant of comma/space and 2- or 3-columns). |
+| `PDFWorker.run` | Trims to `[Qmin,Qmax]`, builds `Composition`, then runs the opt-in Stage 2-3 stages in order — background subtraction (manual or fit-scale, optional Paalman-Pings), detector efficiency, absolute normalization, multiple scattering — before the existing refine/non-refine normalization, then an optional display-only S(Q) tail-flatten; emits `q,Iq,background,S,S_flat,Fq,r,Gr,sigma_Gr,Gr_family,scale,bg_coef,refine_loss,bg_scale_used,ms_beta_median`. |
+| `_fit_subtraction_scale` / `_absolute_normalize` / `_flatten_sq_tail` | Hand-written recipe helpers (numpy-only, not part of `midas_pdf` itself) for the fit-scale empty-cell mode, absolute normalization, and the tail-flatten display transform. |
+| `PDFStructureFitWorker.run` | Builds a `Crystal` (from CIF via `read_cif_to_crystal`, or manually from `Lattice`/`SpaceGroup.from_number`/`Atom`), builds the pair list (`build_pair_list`), masks `(r,G,σ)` to the fit window (with `sigma_inflate`), calls `refine_structure`, and emits `fitted,uncertainty,chi2_reduced,history,r_fit,G_obs,G_calc,sigma_fit,posterior,cov`. |
 
 Image-mode integration reuses the shared core `_build_spec`, `build_geom`,
 `integrate_frame`, `axis_conversions` (same path as the other tabs); geometry-file
@@ -1019,6 +1123,12 @@ parsing uses `geometry_fields_from_file` / `result_ns_from_geometry_file`
 | `i_of_q_to_Gr(q, I, comp, r, …)` | End-to-end I(Q) → G(r) (composes the two above); the default Compute path. | S(Q) + G(r) |
 | `refine_normalization(q, I, comp, r, …)` | L-BFGS fit of scale + background polynomial against high-Q ⟨S⟩→1 and low-r `G=−4πρ₀r`. | refined S(Q)/G(r) + bg |
 | `pair_distribution_g` / `total_correlation_T` / `radial_distribution_R` | Convention family from G(r) + ρ₀. | g/T/R |
+| `paalman_pings_cylinder_in_cylinder` / `paalman_pings_cell_only` | Q-dependent self-/container-absorption correction for empty-cell subtraction. | background |
+| `apply_detector_efficiency` / `detector_efficiency` / `linear_attenuation_um` | Detector-efficiency correction + the μ used by it and by Paalman-Pings/MS. | I(Q) |
+| `cylinder_effective_tau` / `slab_transport_ms` / `ms_background_on_grid` | Differentiable cylinder multiple-scattering transport → MS background. | I(Q) |
+| `expected_fluorescence` / `fluorescence_report_sample_and_container` | Predicted fluorescence emission lines near the incident energy. | diagnostic only |
+| `read_cif_to_crystal` / `build_pair_list` / `refine_structure` | CIF loading, pair-list construction, and the gradient-based small-box structure fit. | Structure Fit tab |
+| `delta_pdf` / `significant_mask` | Difference + σ-significance test between two G(r) snapshots — **require `torch.Tensor` inputs**, not numpy arrays. | Δ-PDF tab |
 
 > **Packaging note.** `midas_pdf` is the public PyPI package (pinned in
 > `environment.yml` / `pyproject.toml`), imported directly through
@@ -1026,7 +1136,10 @@ parsing uses `geometry_fields_from_file` / `result_ns_from_geometry_file`
 > copy under `midas_gui/_vendor/` plus a `midas_hkls.absorption` compatibility
 > shim, needed before `midas-pdf` was published and while `midas-hkls` was
 > pinned below the release that added `absorption`; both were retired once
-> `midas-hkls>=0.5.0` and `midas-pdf` were available.
+> `midas-hkls>=0.5.0` and `midas-pdf` were available. Deliberately **not**
+> re-exported (out of scope, see `.context/ROADMAP.md`): the Bayesian SVI/NUTS
+> posterior path, RMC big-box refinement, and the non-differentiable
+> Monte-Carlo multiple-scattering variants.
 
 ---
 

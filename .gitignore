@@ -77,6 +77,11 @@ test_data/out_temp.txt
 # the *.tif/*.txt/... re-includes above; a whole ignored dir cannot be re-included).
 /test_data/17BM/
 /test_data/test_s25ide/
+# PDF tab test data: 5 raw .vrx.h5 detector frames (~320 MB) + calibration +
+# pre-integrated I(Q) — too large to ship in the repo; kept local-only like
+# test_data_pump_probe/ below. tab_pdf.py's DEFAULT_PDF_* constants point
+# here, so the PDF tab just won't have data preloaded on a fresh checkout.
+/test_data/test_pdf/
 
 # ── Pump Probe (TR-XRD) local test data ──────────────────────────────────────
 # Large local-only asset (~1.2 GB of detector frames + masks + MIDAS param file)

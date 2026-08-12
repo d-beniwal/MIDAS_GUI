@@ -148,9 +148,16 @@ DEFAULT_NICKEL_H5     = str(_TEST_DATA / "nickel_stack.h5")
 DEFAULT_NICKEL_DIR    = str(_TEST_DATA / "nickel_tifs")
 DEFAULT_NICKEL_FRAME0 = str(_TEST_DATA / "nickel_tifs" / "nickel_000.tif")
 DEFAULT_CALIB_FILE    = str(_TEST_DATA / "calibration_synthetic.json")
-# Real pre-integrated I(Q) data for the PDF tab (test_data/pdf_real/, git-ignored).
-DEFAULT_PDF_IQ_FILE   = str(_TEST_DATA / "pdf_real" / "iq_Nickel.csv")
-DEFAULT_PDF_CALIB     = str(_TEST_DATA / "pdf_real" / "calibration_ceo2.txt")
+# Real PDF workflow test data (test_data/test_pdf/, git-ignored — ~320 MB of
+# raw beamline frames). Absent on a fresh checkout; the PDF tab just starts
+# with nothing preloaded until a user points it elsewhere.
+DEFAULT_PDF_DIR       = str(_TEST_DATA / "test_pdf")
+DEFAULT_PDF_IQ_FILE   = str(_TEST_DATA / "test_pdf" / "iq" / "04_iq_Nickel.csv")
+DEFAULT_PDF_CALIB     = str(_TEST_DATA / "test_pdf" / "calibration" / "03_ceo2_v1_params.txt")
+DEFAULT_PDF_RAW_FRAME = str(_TEST_DATA / "test_pdf" / "raw" / "Nickel_004526.vrx.h5")
+DEFAULT_PDF_MASK      = str(_TEST_DATA / "test_pdf" / "calibration" / "mask_pdf.tif")
+DEFAULT_PDF_EMPTY_IQ  = str(_TEST_DATA / "test_pdf" / "iq" / "04_iq_airscatter.csv")
+DEFAULT_PDF_CIF       = str(_TEST_DATA / "test_pdf" / "structures" / "Ni.cif")
 
 
 # ── Materials database for ring simulation (Tab 0) ──────────────────────────────
@@ -300,6 +307,8 @@ def _apply(cfg: dict) -> None:
         "nickel_h5": "DEFAULT_NICKEL_H5", "nickel_dir": "DEFAULT_NICKEL_DIR",
         "nickel_frame0": "DEFAULT_NICKEL_FRAME0", "calib_file": "DEFAULT_CALIB_FILE",
         "pdf_iq_file": "DEFAULT_PDF_IQ_FILE", "pdf_calib": "DEFAULT_PDF_CALIB",
+        "pdf_raw_frame": "DEFAULT_PDF_RAW_FRAME", "pdf_mask": "DEFAULT_PDF_MASK",
+        "pdf_empty_iq": "DEFAULT_PDF_EMPTY_IQ", "pdf_cif": "DEFAULT_PDF_CIF",
     }
     paths = cfg.get("paths", {}) or {}
     for key, target in _pmap.items():
@@ -406,6 +415,8 @@ _SHIPPED = {
         "nickel_h5": DEFAULT_NICKEL_H5, "nickel_dir": DEFAULT_NICKEL_DIR,
         "nickel_frame0": DEFAULT_NICKEL_FRAME0, "calib_file": DEFAULT_CALIB_FILE,
         "pdf_iq_file": DEFAULT_PDF_IQ_FILE, "pdf_calib": DEFAULT_PDF_CALIB,
+        "pdf_raw_frame": DEFAULT_PDF_RAW_FRAME, "pdf_mask": DEFAULT_PDF_MASK,
+        "pdf_empty_iq": DEFAULT_PDF_EMPTY_IQ, "pdf_cif": DEFAULT_PDF_CIF,
     },
     "ui": {
         "integration_kernel": DEFAULT_KERNEL, "calibration_pipeline": DEFAULT_PIPELINE,
