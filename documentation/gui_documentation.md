@@ -3,11 +3,14 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-12 (Tab 1 — Mask Builder: Stack browse menu gains a
-**Files (multi-select)…** entry so the temporal stack can be built from an
-explicit, hand-picked set of files instead of only a whole folder/glob).
+**Last updated:** 2026-08-12 (Tab 1 — Mask Builder gains a **5 · Post-processing**
+card with a **Dilation (px)** control that grows bad-pixel regions from the
+threshold/statistical/loaded mask by N pixels before combining with hand-drawn
+shapes).
 
-**Previously:** (2026-08-12, Tab 6 — PDF Analysis rebuilt for the full
+**Previously:** (2026-08-12, Tab 1 — Mask Builder: Stack browse menu gains a
+**Files (multi-select)…** entry so the temporal stack can be built from an
+explicit, hand-picked set of files instead of only a whole folder/glob) (2026-08-12, Tab 6 — PDF Analysis rebuilt for the full
 ROADMAP Stage 2-3 workflow: empty-cell/Paalman-Pings background subtraction,
 detector-efficiency correction, absolute normalization, differentiable
 multiple scattering, a fluorescence diagnostic, CIF-driven structure
@@ -675,6 +678,14 @@ Per-pixel temporal σ-clip across a ≥3-frame stack; anomalies OR'd across fram
 - **Azimuthal σ-clip** — flags (R, η) cells deviating from the azimuthal mean.
 - **Learnable mask** — differentiable per-pixel mask trained against an η-uniformity
   loss (`steps`, `lr`, `sparsity`).
+
+### Section 5 · Post-processing
+**Dilation (px)** (default 0) grows every bad pixel from Sections 1-4 (and a
+mask loaded via **Save / Load**) by N pixels of 4-connected morphological
+dilation: 1 marks all pixels directly touching a bad pixel as bad, 2 adds one
+further ring around that, and so on. Applied once, on **Compute Mask** /
+mask load, before hand-drawn shapes are combined in — hand-drawn regions are
+never grown by this control.
 
 ### Draw mask tools
 Interactive rectangle / oval / circle / polygon / annulus / point tools, live-draggable;

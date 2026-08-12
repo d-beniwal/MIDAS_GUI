@@ -271,6 +271,19 @@ class MaskTab(QtWidgets.QWidget):
         self._geom_group.body.addLayout(lf)
         lv.addWidget(self._geom_group)
 
+        # ── 5 · Post-processing ──
+        post = S.make_card("5 · Post-processing")
+        self._dilation_spin = _NoScrollSpinBox()
+        self._dilation_spin.setRange(0, 50)
+        self._dilation_spin.setValue(0)
+        self._dilation_spin.setToolTip(
+            "Grow bad-pixel regions by N pixels (morphological dilation).\n"
+            "0 = no growth. 1 = mark all 4-connected neighbors of each bad pixel.\n"
+            "2 = one further ring around that, etc. Applied to the computed mask\n"
+            "(threshold/statistical/loaded) before combining with hand-drawn shapes.")
+        post.body.addLayout(S.Form().row(("Dilation (px):", self._dilation_spin)))
+        lv.addWidget(post)
+
         # ── Compute + stats ──
         compute_btn = S.primary_btn("Compute Mask")
         compute_btn.clicked.connect(self._compute)
@@ -620,8 +633,17 @@ class MaskTab(QtWidgets.QWidget):
             self, "Mask error", f"Statistical outlier mask failed:\n\n{msg[:500]}")
 
     def _set_mask(self, mask):
-        """Set the *computed* mask (threshold/stat/loaded) and refresh the final mask."""
-        self._computed_mask = None if mask is None else mask.astype(bool)
+        """Set the *computed* mask (threshold/stat/loaded), apply pixel dilation,
+        and refresh the final mask."""
+        if mask is None:
+            self._computed_mask = None
+        else:
+            m = mask.astype(bool)
+            n = self._dilation_spin.value()
+            if n > 0:
+                from scipy.ndimage import binary_dilation
+                m = binary_dilation(m, iterations=n)
+            self._computed_mask = m
         self._emit_final()
 
     def _emit_final(self):
@@ -964,6 +986,7 @@ class MaskTab(QtWidgets.QWidget):
             "learn_steps": self._learn_steps,
             "learn_lr": self._learn_lr,
             "learn_sparsity": self._learn_sparsity,
+            "dilation_spin": self._dilation_spin,
             "save_edit": self._save_edit,
             "load_mask_edit": self._load_mask_edit,
             "show_overlay_check": self._show_overlay_check,
