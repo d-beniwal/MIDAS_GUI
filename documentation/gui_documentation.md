@@ -3,12 +3,14 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-12 (Tab 1 — Mask Builder gains a **5 · Post-processing**
+**Last updated:** 2026-08-12 (Tab 1 — Mask Builder's **Dilation (px)** control
+switched from 4-connected to 8-neighbor dilation: N=1 now grows a bad pixel to
+the full surrounding 3×3 block, N=2 to the full 5×5 block, etc.).
+
+**Previously:** (2026-08-12, Tab 1 — Mask Builder gains a **5 · Post-processing**
 card with a **Dilation (px)** control that grows bad-pixel regions from the
 threshold/statistical/loaded mask by N pixels before combining with hand-drawn
-shapes).
-
-**Previously:** (2026-08-12, Tab 1 — Mask Builder: Stack browse menu gains a
+shapes) (2026-08-12, Tab 1 — Mask Builder: Stack browse menu gains a
 **Files (multi-select)…** entry so the temporal stack can be built from an
 explicit, hand-picked set of files instead of only a whole folder/glob) (2026-08-12, Tab 6 — PDF Analysis rebuilt for the full
 ROADMAP Stage 2-3 workflow: empty-cell/Paalman-Pings background subtraction,
@@ -681,11 +683,11 @@ Per-pixel temporal σ-clip across a ≥3-frame stack; anomalies OR'd across fram
 
 ### Section 5 · Post-processing
 **Dilation (px)** (default 0) grows every bad pixel from Sections 1-4 (and a
-mask loaded via **Save / Load**) by N pixels of 4-connected morphological
-dilation: 1 marks all pixels directly touching a bad pixel as bad, 2 adds one
-further ring around that, and so on. Applied once, on **Compute Mask** /
-mask load, before hand-drawn shapes are combined in — hand-drawn regions are
-never grown by this control.
+mask loaded via **Save / Load**) using 8-neighbor morphological dilation: at
+N=1 the full 3×3 block around each bad pixel becomes bad, at N=2 the full
+5×5 block, and so on (a (2N+1)×(2N+1) square centered on each pixel).
+Applied once, on **Compute Mask** / mask load, before hand-drawn shapes are
+combined in — hand-drawn regions are never grown by this control.
 
 ### Draw mask tools
 Interactive rectangle / oval / circle / polygon / annulus / point tools, live-draggable;

@@ -277,10 +277,11 @@ class MaskTab(QtWidgets.QWidget):
         self._dilation_spin.setRange(0, 50)
         self._dilation_spin.setValue(0)
         self._dilation_spin.setToolTip(
-            "Grow bad-pixel regions by N pixels (morphological dilation).\n"
-            "0 = no growth. 1 = mark all 4-connected neighbors of each bad pixel.\n"
-            "2 = one further ring around that, etc. Applied to the computed mask\n"
-            "(threshold/statistical/loaded) before combining with hand-drawn shapes.")
+            "Grow bad-pixel regions by N pixels (8-neighbor morphological dilation).\n"
+            "0 = no growth. 1 = the full 3×3 block around each bad pixel becomes bad.\n"
+            "2 = the full 5×5 block, etc. (N → a (2N+1)×(2N+1) square per pixel).\n"
+            "Applied to the computed mask (threshold/statistical/loaded) before\n"
+            "combining with hand-drawn shapes.")
         post.body.addLayout(S.Form().row(("Dilation (px):", self._dilation_spin)))
         lv.addWidget(post)
 
@@ -642,7 +643,7 @@ class MaskTab(QtWidgets.QWidget):
             n = self._dilation_spin.value()
             if n > 0:
                 from scipy.ndimage import binary_dilation
-                m = binary_dilation(m, iterations=n)
+                m = binary_dilation(m, structure=np.ones((3, 3), dtype=bool), iterations=n)
             self._computed_mask = m
         self._emit_final()
 
