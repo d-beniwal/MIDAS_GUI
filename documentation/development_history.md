@@ -132,6 +132,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Polyatomic midas_pdf reduction pipeline + vendored midas_pdf + calibration loading | `b381d8d` |
 | Defaults to real I(Q) test data | `1149afc` |
 | midas_pdf switched from vendored copy to the real PyPI package | `acb43c1` |
+| Rebuilt for full Stage 2-3 workflow (absorption/efficiency/normalization/multiple-scattering/fluorescence/structure-fit/Δ-PDF), new 4-tab layout | `23cd55e` |
 
 ### Pump Probe (TR-XRD) tab
 | Change | Commit |
@@ -1458,6 +1459,36 @@ over it.
 and the `-e .` editable install — only do this if conda-forge's `pyqt`/`qt`
 turn out to be unavailable or broken on a target machine, since the pip
 wheel is what caused the original hang.
+
+---
+
+### `23cd55e` — PDF: rebuild tab for full Stage 2-3 workflow (2026-08-12)
+**Effect:** The PDF tab moves from Stage-1-only (composition-weighted
+Faber-Ziman S(Q)→G(r)) to the full Stage 2-3 workflow: background/
+Paalman-Pings empty-cell absorption subtraction, detector-efficiency
+correction, absolute normalization, differentiable multiple scattering,
+a fluorescence diagnostic, CIF-driven structure refinement, and Δ-PDF
+significance testing, behind a new 4-tab left/right panel layout.
+Deliberately scoped to exclude Bayesian SVI/NUTS, RMC, SAXS/SANS joint
+refinement, multi-phase/core-shell, anisotropic ADP, and directional
+strain-PDF (kept out of `pdf_backend.py`'s re-exports on purpose). Ships
+a dedicated `test_data/test_pdf/` dataset (raw Varex frames, calibration,
+a rasterized mask, pre-integrated I(Q) for Ni/CeO₂/IPA/Kapton/air-scatter,
+and an authored `Ni.cif`), gitignored like `test_data_pump_probe/`
+(~320 MB) so `constants.py`'s `DEFAULT_PDF_*` point to local-only data —
+a fresh checkout elsewhere just won't have the tab preloaded. Every
+optional stage uses an explicit `QCheckBox` "Enable" toggle rather than a
+checkable `QGroupBox`, since `widgets_to_dict`/`apply_dict_to_widgets`
+(`helpers.py`) don't persist `QGroupBox` checked state. Verified via
+26/26 offscreen pytest plus a manual functional pass through the actual
+`PDFTab` widgets, including a structure fit recovering `a=3.5247 Å` vs.
+expected `3.524 Å`.
+**Files:** `midas_gui/constants.py`, `midas_gui/pdf_backend.py`,
+`midas_gui/tab_pdf.py`, `midas_gui/workers.py`, `.gitignore`,
+`documentation/gui_documentation.md`.
+**Roll back:** `git revert 23cd55e`. Self-contained — returns the PDF tab
+to the Stage-1-only pipeline from `b381d8d`; any `test_data/test_pdf/`
+already on disk is untouched by the revert itself.
 
 ---
 
