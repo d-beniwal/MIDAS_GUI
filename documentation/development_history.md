@@ -105,6 +105,8 @@ Dates are commit dates (YYYY-MM-DD).
 | Unbounded σ fields; independent spatial/temporal auto-mask; Viewer↔Calibrate geometry hand-off | `10df828` |
 | Temporal-constancy accepts a 3-D HDF5 (time,y,x) stack | `2385f75` |
 | Image/Stack browse gains "Import from…" (other tabs' loaded path/buffer) | `6c79f13` |
+| Stack browse menu gains "Files (multi-select)…" for hand-picked temporal stacks | `cc63d5a` |
+| "5 · Post-processing" card: configurable bad-pixel dilation (px) | `429d41a` |
 
 ### Calibrate (Tab 2) / Refinement (Tab 3)
 | Change | Commit |
@@ -1489,6 +1491,51 @@ expected `3.524 Å`.
 **Roll back:** `git revert 23cd55e`. Self-contained — returns the PDF tab
 to the Stage-1-only pipeline from `b381d8d`; any `test_data/test_pdf/`
 already on disk is untouched by the revert itself.
+
+---
+
+### `cc63d5a` — Mask tab: allow multi-file selection for stack source (2026-08-12)
+**Effect:** The Stack browse menu gains a "Files (multi-select)…" entry
+(`_browse_stack_files`) that opens a multi-select `QFileDialog`, letting
+users hand-pick exactly which frames feed the temporal-stack methods
+(spatial-outlier temporal median, temporal constancy, cosmic-ray
+rejection) instead of only a whole folder or a single file/glob. The
+chosen list (sorted for a deterministic frame order) is stored in a new
+`self._stack_files` attribute that takes priority in
+`_collect_stack_paths()`; the stride spinner still applies to it. Picking
+Folder/File or typing a path clears `_stack_files` via the existing
+`_on_stack_path_changed` handler, so the two input modes can't conflict.
+Persisted across GUI-state save/load. Verified via a full offscreen
+pytest run (pre-existing `test_app_builds_offscreen` flakiness and a
+full-suite-only pyqtgraph teardown segfault in the unrelated PDF tab both
+reproduce identically on unmodified `main`, confirming neither is caused
+by this change).
+**Files:** `midas_gui/tab_mask.py`, `documentation/gui_documentation.md`.
+**Roll back:** `git revert cc63d5a`. Self-contained — the "Files
+(multi-select)…" menu entry and `_stack_files` state disappear; stack
+input reverts to folder/file/glob only.
+
+---
+
+### `429d41a` — Mask tab: add configurable bad-pixel dilation (2026-08-12)
+**Effect:** A new "5 · Post-processing" card adds a **Dilation (px)**
+spin box (default 0, range 0-50). `_set_mask()` — the single point all
+mask-producing paths (threshold-only short-circuit, `MaskComputeWorker`
+result, mask loaded from disk) converge through before merging with
+hand-drawn shapes — now runs `scipy.ndimage.binary_dilation` with
+`iterations=N` on the *computed* mask when N > 0, before it's OR'd with
+`self._drawn_mask` in `_emit_final()`. The default 4-connected structuring
+element with N iterations gives exactly the requested semantics:
+dilation=1 marks every pixel directly touching a bad pixel, dilation=2
+adds one further ring, etc.; hand-drawn shapes are never grown. `scipy`
+was already a pinned dependency and `scipy.ndimage` already used the same
+way in `workers.py`. Persisted via `_state_widgets()`. Verified with a
+targeted script instantiating `MaskTab` offscreen and asserting exact
+pixel counts at dilation 0/1/2 plus that a hand-drawn pixel is excluded
+from growth at dilation=5.
+**Files:** `midas_gui/tab_mask.py`, `documentation/gui_documentation.md`.
+**Roll back:** `git revert 429d41a`. Self-contained — removes the
+Post-processing card and the dilation step in `_set_mask()`.
 
 ---
 
