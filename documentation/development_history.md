@@ -1617,6 +1617,66 @@ translucent/larger text styling, drops mask-awareness from ROI stats
 (`ROIImageViewer.set_bad_mask`/the `tab_view.py` wiring), and restores the
 `QRubberBand.Line` drag preview.
 
+### `a1a0b09` — Data Viewer: ROI usability follow-ups (2026-08-13)
+**Effect:** Real-usage follow-up fixes on top of `b2616c6`, all in
+`roi_tools.py` plus one existing shared panel in `widgets.py`:
+1. Fixed the OS-level minimize "pops back open" glitch:
+   `_reject_native_minimize()` previously called `setWindowState` (clear
+   `Qt.WindowMinimized`) *before* `hide()`, which asks the OS to reverse
+   the minimize and starts a native un-minimize animation that `hide()`
+   can lose a race against — once the animation completed the popup ended
+   up visible again despite the ribbon entry already existing (fixed by
+   the user clicking minimize a second time). Now `hide()` runs first
+   (unconditionally takes the window off-screen) and the state bit is
+   cleared afterward (invisible, since the window is already hidden); a
+   `changeEvent` `isVisible()` guard and a defensive state-clear before
+   `_on_roi_restore`'s `show()` round it out. Native minimize/animation
+   behavior can't be exercised under offscreen QPA — flagged for a real
+   windowed manual check.
+2. Box ROI `(x, y)`/`w = `/`h = ` on-image annotations
+   (`_update_roi_annotations`) now use `round(...)` instead of `f"{v:.1f}"`
+   — whole pixels only, no fractional-pixel values.
+3. Line ROIs get a new `length_item` `pg.TextItem` (created in
+   `_register_roi`, alongside the existing arrow), positioned at the
+   line's midpoint and retexted (`f"{round(length)} px"`) on every
+   `sigRegionChanged` inside `_update_line_arrow`.
+4. Fixed the line-ROI "ROI N" label always appearing at the image's
+   top-left corner: `pg.LineSegmentROI.pos()` is always `(0, 0)` (its
+   geometry lives in `listPoints()`, a local-frame handle list, not an
+   item-level offset the way `RectROI` works) — `_on_roi_geom_changed`'s
+   generic `entry["label_item"].setPos(entry["roi"].pos())` therefore
+   parked every line label at the origin. Box ROIs keep that path
+   unchanged; line ROIs now get their label positioned inside
+   `_update_line_arrow` instead, reusing the already-computed,
+   flip-aware `view_p0` (the line's actual mapped-to-parent start point).
+5. New shared `_apply_view_limits(plot_widget, xmin, xmax, ymin, ymax,
+   clamp_xmin_zero=, clamp_ymin_zero=)` helper (same formula as
+   `ProfileViewer._apply_view_limits` in `widgets.py`, the radial-
+   integration plot) applied to the box-ROI histogram (`_redraw_hist`)
+   and the line-ROI profile plot (`set_line_profile`), so neither can be
+   zoomed/panned arbitrarily far from the current data. `widgets.py`'s
+   `IntensityStatsPanel._redraw_hist` — which already had a partial,
+   pan-only version (`xMin`/`yMin` only) — was brought to parity with
+   `xMax`/`maxXRange`/`maxYRange`.
+6. Gitignored `test_data_gitignore/` (large local-only functional-test
+   dataset the user keeps on disk for manual GUI testing but never wants
+   pushed).
+Verified with targeted offscreen scripts (line label anchored at the true
+start point and swapping correctly on flip, length text/position matching
+a known line geometry, box coord rounding) plus the full `pytest` suite —
+no new failures beyond the same two known pre-existing issues logged in
+`.context/STATE.md` (`test_app_builds_offscreen` config flakiness, and a
+full-suite-only pyqtgraph teardown segfault in `tab_pdf.py`), both
+reproduced identically and unchanged.
+**Files:** `midas_gui/roi_tools.py`, `midas_gui/widgets.py`, `.gitignore`,
+`documentation/gui_documentation.md`.
+**Roll back:** `git revert a1a0b09`. Self-contained — restores the old
+minimize-then-hide ordering (glitch returns), the one-decimal box
+annotations, drops the line-length text item, restores the old
+`roi.pos()`-based line-label positioning (top-left-corner bug returns),
+drops the popup-plot/Intensity-histogram zoom-out caps, and un-ignores
+`test_data_gitignore/`.
+
 ---
 
 ## Rollback recipes (common intents)
