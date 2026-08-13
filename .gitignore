@@ -89,6 +89,9 @@ test_data/out_temp.txt
 # which ships with the repo). The negations above only re-include test_data/**.
 /test_data_pump_probe/
 
+# Large local-only functional-test dataset (kept out of git entirely).
+/test_data_gitignore/
+
 # Internal-only documentation (kept local, not published to GitHub)
 documentation/pdf_calculation_explained.md
 documentation/pdf_calculation_explained.pdf

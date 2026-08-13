@@ -1784,7 +1784,11 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
         ymax = float(y.max()) if y.size else 1.0
         ymax = ymax * 1.08 if ymax > 0 else 1.0
         vb = self._plot.getViewBox()
-        vb.setLimits(xMin=0.0, yMin=-2.0)
+        # xMax/maxXRange/maxYRange cap zoom-out at the natural full-data
+        # view (same intent as ProfileViewer._apply_view_limits above) so
+        # the histogram can't be zoomed out until it's lost in empty space.
+        vb.setLimits(xMin=0.0, xMax=max(xmax, 1.0), yMin=-2.0, yMax=ymax,
+                     maxXRange=max(xmax, 1.0), maxYRange=ymax + 2.0)
         vb.setXRange(0.0, max(xmax, 1.0), padding=0)
         vb.setYRange(-2.0, ymax, padding=0)
 

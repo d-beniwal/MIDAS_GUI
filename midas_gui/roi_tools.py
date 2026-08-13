@@ -75,6 +75,29 @@ def _make_roi_text_item(text: str, color: str, anchor=(0, 0)) -> pg.TextItem:
     return item
 
 
+def _apply_view_limits(plot_widget: pg.PlotWidget, xmin: float, xmax: float,
+                        ymin: float, ymax: float,
+                        clamp_xmin_zero: bool = False,
+                        clamp_ymin_zero: bool = False) -> None:
+    """Bound pan/zoom to (xmin..xmax, ymin..ymax) + a margin, so the user
+    can't zoom/pan arbitrarily far from the current data and lose track of
+    the plot. Same formula as ProfileViewer._apply_view_limits in
+    widgets.py (the Data Viewer's radial-integration plot)."""
+    if not all(math.isfinite(v) for v in (xmin, xmax, ymin, ymax)):
+        return
+    if xmax <= xmin:
+        xmax = xmin + 1.0
+    if ymax <= ymin:
+        ymax = ymin + 1.0
+    xpad = 0.15 * (xmax - xmin)
+    ypad = 0.25 * (ymax - ymin)
+    x_lo = max(0.0, xmin - xpad) if clamp_xmin_zero else xmin - xpad
+    y_lo = max(0.0, ymin - ypad) if clamp_ymin_zero else ymin - ypad
+    plot_widget.getViewBox().setLimits(
+        xMin=x_lo, xMax=xmax + xpad, yMin=y_lo, yMax=ymax + ypad,
+        maxXRange=(xmax - xmin) + 2 * xpad, maxYRange=(ymax - ymin) + 2 * ypad)
+
+
 def _raster_roi_mask(roi, imgitem, shape) -> np.ndarray:
     """Boolean mask (matching `shape`, e.g. (NZ, NY)) of pixels inside a
     pyqtgraph ROI (any shape). Standalone port of MaskTab._raster_roi."""
@@ -265,6 +288,10 @@ class ROIStatsPopup(QtWidgets.QDialog):
         self._curve.setData(edges, y)
         self._hist_plot.setLabel("left", "log(count+1)" if log else "count",
                                  **{"color": "#d0d0d0", "font-size": "9pt"})
+        if edges.size:
+            _apply_view_limits(self._hist_plot, float(edges[0]), float(edges[-1]),
+                                0.0, float(y.max()) if y.size else 1.0,
+                                clamp_ymin_zero=True)
 
     def set_line_profile(self, dist: np.ndarray, vals: np.ndarray):
         if self._curve is None:
@@ -278,6 +305,9 @@ class ROIStatsPopup(QtWidgets.QDialog):
             self._stats_lbl.setText(
                 f"N = {vals.size:,}    min = {np.nanmin(vals):.6g}    "
                 f"max = {np.nanmax(vals):.6g}    mean = {np.nanmean(vals):.6g}")
+            _apply_view_limits(self._plot, float(dist.min()), float(dist.max()),
+                                float(np.nanmin(vals)), float(np.nanmax(vals)),
+                                clamp_xmin_zero=True)
 
     def closeEvent(self, event):
         self.removed.emit()
@@ -291,13 +321,21 @@ class ROIStatsPopup(QtWidgets.QDialog):
         # before it starts, so a brief native minimize animation before this
         # callback restores + hides the window is expected on some platforms.
         if event.type() == QtCore.QEvent.WindowStateChange:
-            if bool(self.windowState() & QtCore.Qt.WindowMinimized):
+            if bool(self.windowState() & QtCore.Qt.WindowMinimized) and self.isVisible():
                 QtCore.QTimer.singleShot(0, self._reject_native_minimize)
         super().changeEvent(event)
 
     def _reject_native_minimize(self):
-        self.setWindowState(self.windowState() & ~QtCore.Qt.WindowMinimized)
+        # Hide first, *then* clear the Minimized bit — asking the OS to
+        # reverse the minimize (setWindowState) before hiding starts a
+        # native un-minimize animation that hide() can lose a race against
+        # (the window ends up visible again once the animation completes).
+        # Hiding first takes the window off-screen unconditionally; clearing
+        # the bit afterward is invisible (already hidden) and just keeps a
+        # later show() from the ribbon from coming back up still-minimized.
         self.hide()
+        if self.windowState() & QtCore.Qt.WindowMinimized:
+            self.setWindowState(self.windowState() & ~QtCore.Qt.WindowMinimized)
         self.minimizeRequested.emit()
 
 
@@ -580,6 +618,7 @@ class ROIImageViewer(PickableImageViewer):
         self._iv.addItem(label_item)
 
         arrow = None
+        length_item = None
         if kind == "line":
             # The whole line is drawn as a single arrow shape (see
             # _update_line_arrow / _build_arrow_path) — hide the ROI's own
@@ -590,6 +629,9 @@ class ROIImageViewer(PickableImageViewer):
             arrow.setBrush(pg.mkBrush(color))
             arrow.setZValue(21)
             self._iv.addItem(arrow, ignoreBounds=True)
+            length_item = _make_roi_text_item("", color, anchor=(0.5, 1))
+            length_item.setZValue(21)
+            self._iv.addItem(length_item)
 
         coord_item = width_item = height_item = None
         if kind == "box":
@@ -605,7 +647,7 @@ class ROIImageViewer(PickableImageViewer):
             "kind": kind, "roi": roi, "color": color, "label": label,
             "label_item": label_item, "arrow": arrow, "popup": popup,
             "coord_item": coord_item, "width_item": width_item,
-            "height_item": height_item,
+            "height_item": height_item, "length_item": length_item,
             "flipped": False, "removing": False, "minimized": False,
         }
         self._roi_entries.append(entry)
@@ -640,9 +682,11 @@ class ROIImageViewer(PickableImageViewer):
         popup.move(global_pt)
 
     def _on_roi_geom_changed(self, entry: dict):
-        label_item = entry["label_item"]
-        label_item.setPos(entry["roi"].pos())
         if entry["kind"] == "box":
+            # roi.pos() is the box's actual top-left corner in parent
+            # (view) coordinates. For a line ROI it isn't — see
+            # _update_line_arrow, which positions that label instead.
+            entry["label_item"].setPos(entry["roi"].pos())
             self._update_roi_annotations(entry)
         self._refresh_roi_stats(entry)
 
@@ -656,15 +700,15 @@ class ROIImageViewer(PickableImageViewer):
         x0, y0, w, h = pos.x(), pos.y(), size.x(), size.y()
 
         coord_item = entry["coord_item"]
-        coord_item.setText(f"({x0:.1f}, {y0:.1f})")
+        coord_item.setText(f"({round(x0)}, {round(y0)})")
         coord_item.setPos(x0, y0)
 
         width_item = entry["width_item"]
-        width_item.setText(f"w = {w:.1f}")
+        width_item.setText(f"w = {round(w)}")
         width_item.setPos(x0 + w / 2.0, y0 + h)
 
         height_item = entry["height_item"]
-        height_item.setText(f"h = {h:.1f}")
+        height_item.setText(f"h = {round(h)}")
         height_item.setPos(x0 + w, y0 + h / 2.0)
 
     def _on_roi_label_changed(self, entry: dict, text: str):
@@ -686,6 +730,7 @@ class ROIImageViewer(PickableImageViewer):
                 entry["minimized"] = False
                 if self._ribbon is not None:
                     self._ribbon.remove_entry(popup)
+                popup.setWindowState(popup.windowState() & ~QtCore.Qt.WindowMinimized)
                 popup.show()
                 popup.raise_()
                 popup.activateWindow()
@@ -768,6 +813,20 @@ class ROIImageViewer(PickableImageViewer):
             head_len=_ARROW_HEAD_LEN_PX * px_size,
             head_width=_ARROW_HEAD_WIDTH_PX * px_size))
 
+        length_item = entry["length_item"]
+        if length_item is not None:
+            length = math.hypot(view_p1.x() - view_p0.x(), view_p1.y() - view_p0.y())
+            length_item.setText(f"{round(length)} px")
+            length_item.setPos((view_p0.x() + view_p1.x()) / 2.0,
+                                (view_p0.y() + view_p1.y()) / 2.0)
+
+        # roi.pos() is (0, 0) for a LineSegmentROI regardless of where the
+        # line was drawn — its geometry all lives in the handle points
+        # (listPoints(), local frame) instead. Anchor the label at the
+        # line's actual (post-flip) start point rather than roi.pos(),
+        # which put every line ROI's label at the image's top-left corner.
+        entry["label_item"].setPos(view_p0)
+
     def _refresh_all_roi_stats(self):
         for entry in self._roi_entries:
             self._refresh_roi_stats(entry)
@@ -797,7 +856,7 @@ class ROIImageViewer(PickableImageViewer):
         self._iv.removeItem(entry["label_item"])
         if entry["arrow"] is not None:
             self._iv.removeItem(entry["arrow"])
-        for key in ("coord_item", "width_item", "height_item"):
+        for key in ("coord_item", "width_item", "height_item", "length_item"):
             item = entry.get(key)
             if item is not None:
                 self._iv.removeItem(item)

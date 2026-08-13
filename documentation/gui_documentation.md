@@ -3,15 +3,22 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-13 (Data Viewer ROI tool: OS-level window minimize
+**Last updated:** 2026-08-13 (Data Viewer ROI tool usability follow-ups: fixed
+an OS-level minimize glitch where a popup would pop back open needing a
+second click; box ROI `(x, y)`/`w = `/`h = ` annotations are now whole
+pixels, not fractional; line ROIs now show their length in pixels at the
+line's midpoint, and their "ROI N" label is anchored at the line's actual
+start point instead of the image's top-left corner; and the box/line popup
+plots plus the Intensity statistics histogram now cap zoom-out/pan at the
+current data range, matching the radial-integration plot).
+
+**Previously:** (2026-08-13, Data Viewer ROI tool: OS-level window minimize
 now tucks a popup into the ribbon (the old custom "–" button is gone); box
 ROIs show live `(x, y)` / `w = ` / `h = ` annotations on the image; all
 on-image ROI text gets a translucent background and a ~20% larger font;
 popup stats/crop images now respect the active bad-pixel mask (excluded from
 histograms/line stats, marked bright red on the crop); and the line-ROI drag
-preview is a true diagonal line instead of a box).
-
-**Previously:** (2026-08-12, Tab 1 — Mask Builder's **Dilation (px)** control
+preview is a true diagonal line instead of a box) (2026-08-12, Tab 1 — Mask Builder's **Dilation (px)** control
 switched from 4-connected to 8-neighbor dilation: N=1 now grows a bad pixel to
 the full surrounding 3×3 block, N=2 to the full 5×5 block, etc.)
 (2026-08-12, Tab 1 — Mask Builder gains a **5 · Post-processing**
@@ -529,9 +536,14 @@ default.
 
 A **box** ROI additionally shows its pixel geometry directly on the image,
 in the ROI's color, updating live while it's dragged or resized: the
-top-left corner's `(x, y)` coordinate next to that corner, `w = ...` below
-the bottom edge, and `h = ...` to the right of the right edge. Line ROIs
-show only the "ROI N" label.
+top-left corner's `(x, y)` coordinate (rounded to the nearest whole pixel)
+next to that corner, `w = ...` below the bottom edge, and `h = ...` to the
+right of the right edge (also rounded to whole pixels — no fractional-pixel
+values are shown). A **line** ROI shows its length in pixels (`NN px`,
+rounded) at the line's midpoint. Every ROI's editable "ROI N" label is
+anchored at the shape's actual position — for a line, that's its current
+start point (the end where distance = 0 in the popup's profile, swapping
+ends when **Flip direction** is used), not a fixed image corner.
 
 - **Box** popups show a linear/log intensity histogram of the pixels inside
   the box, plus a zoomed-in crop of the boxed region rendered with the
@@ -549,6 +561,12 @@ show only the "ROI N" label.
   button in the popup reverses it. Masked pixels along the line are excluded
   from min/max/mean (shown as gaps in the profile); a line drawn entirely
   over masked pixels shows "(all pixels masked)" instead of the stats.
+
+Both the box's histogram and the line's intensity-vs-distance profile cap
+how far you can zoom or pan out — the same range-limiting used on the tab's
+radial-integration plot — so scrolling/dragging the plot can't lose the
+data in an empty view; the limit is recomputed from the current data range
+each time the popup refreshes.
 
 Dragging or resizing a shape (or right-click → drag a handle) recomputes its
 popup immediately, and every popup also refreshes automatically on frame
@@ -588,7 +606,9 @@ toggle) with a **textbox** beneath it reporting N (pixel count) and the
 **p70 / p90 / p99 / p99.9 / p99.99** percentiles — each with the **number of pixels
 above** that value. The histogram's lower-left corner is fixed at x = 0, y = −2 and both
 axes rescale to `(0, xmax)` / `(−2, ymax)` on every refresh (frame change, scope change,
-projection, new data). It reflects the **corrected** image (dark / bright / background)
+projection, new data); zooming/panning is capped at that same range (as with the ROI
+popup plots and the radial-integration plot), so it can't be scrolled out until the
+distribution is lost in empty space. It reflects the **corrected** image (dark / bright / background)
 with masked pixels (file masks + the intensity-range mask) excluded, and updates live as
 any of those change. A scope selector switches between the **current frame** (per the
 slider) and **All frames** (combined over the whole stack/folder). When a **Projection**
