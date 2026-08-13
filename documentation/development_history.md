@@ -98,6 +98,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Projection N-frames cap; λ menu gains energy-to-wavelength entry | `468b417` |
 | B-PILOT bridge: local-socket server auto-starts Live Data on scan dispatch | `c336778` |
 | ROI popups always-on-top + minimize-to-ribbon; Project-stack button green highlight | `6c79f13` |
+| ROI/histogram axis label font size bumped 9pt -> 12pt (readability) | `1181b58` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -1676,6 +1677,16 @@ annotations, drops the line-length text item, restores the old
 `roi.pos()`-based line-label positioning (top-left-corner bug returns),
 drops the popup-plot/Intensity-histogram zoom-out caps, and un-ignores
 `test_data_gitignore/`.
+
+### `1181b58` — Data Viewer: bump ROI/histogram axis label font size (9pt -> 12pt) (2026-08-13)
+**Effect:** Readability tweak — the axis labels ("distance (px)"/"intensity"
+on the ROI stats popup's line-profile plot, "intensity"/"count" or
+"log(count+1)" on the ROI popup's histogram, and "intensity"/"log(count+1)"
+on `IntensityStatsPanel`'s histogram) go from 9pt to 12pt. No layout,
+behavior, or data changes.
+**Files:** `midas_gui/roi_tools.py`, `midas_gui/widgets.py`.
+**Roll back:** `git revert 1181b58`. Self-contained — restores the 9pt
+axis label font size.
 
 ---
 
