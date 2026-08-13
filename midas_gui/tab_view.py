@@ -1381,8 +1381,10 @@ class DataViewerTab(QtWidgets.QWidget):
         bad = self._combined_bad_mask(self._cur)
         if bad is None or not bad.any():
             self._viewer.clear_overlay()
+            self._viewer.set_bad_mask(None)
         else:
             self._viewer.set_mask_overlay(bad)
+            self._viewer.set_bad_mask(bad)
 
     def _on_imask_changed(self, *_):
         self._update_intensity_overlay()

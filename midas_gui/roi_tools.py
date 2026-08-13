@@ -58,6 +58,23 @@ def _build_arrow_path(p0: QtCore.QPointF, p1: QtCore.QPointF,
     return path
 
 
+def _make_roi_text_item(text: str, color: str, anchor=(0, 0)) -> pg.TextItem:
+    """pg.TextItem styled for legibility over arbitrary image content: a
+    translucent background box (pyqtgraph draws this for free behind the
+    text via `fill=`) and a font ~20% larger than the app's default."""
+    item = pg.TextItem(text=text, color=color, anchor=anchor,
+                        fill=(0, 0, 0, 160), border=None)
+    font = QtGui.QFont()
+    base = font.pointSize()
+    if base <= 0:
+        base = font.pixelSize()
+    if base <= 0:
+        base = 10
+    font.setPointSize(round(base * 1.2))
+    item.setFont(font)
+    return item
+
+
 def _raster_roi_mask(roi, imgitem, shape) -> np.ndarray:
     """Boolean mask (matching `shape`, e.g. (NZ, NY)) of pixels inside a
     pyqtgraph ROI (any shape). Standalone port of MaskTab._raster_roi."""
@@ -111,10 +128,6 @@ class ROIStatsPopup(QtWidgets.QDialog):
         self._label_ed.setStyleSheet(f"font-weight:bold; color:{color};")
         self._label_ed.textEdited.connect(self._on_label_edited)
         head.addWidget(self._label_ed, 1)
-        min_btn = QtWidgets.QToolButton(); min_btn.setText("–"); min_btn.setFixedWidth(20)
-        min_btn.setToolTip("Minimize to the ROI ribbon")
-        min_btn.clicked.connect(self.minimizeRequested.emit)
-        head.addWidget(min_btn)
         v.addLayout(head)
 
         if kind == "line":
@@ -179,6 +192,9 @@ class ROIStatsPopup(QtWidgets.QDialog):
             self._crop_vb.invertY(True)
             self._crop_img = pg.ImageItem()
             crop_view.addItem(self._crop_img)
+            self._bad_overlay = pg.ImageItem()
+            self._bad_overlay.setZValue(5)
+            crop_view.addItem(self._bad_overlay)
             # Stretch factor matches hist_col's so dragging the popup's edge
             # to resize it (a plain QDialog, resizable by default) grows the
             # crop image along with the histogram instead of leaving it
@@ -208,7 +224,7 @@ class ROIStatsPopup(QtWidgets.QDialog):
         self.setWindowTitle(text)
 
     def set_area_data(self, values: np.ndarray, crop: Optional[np.ndarray],
-                       cmap_name: str, log: bool):
+                       cmap_name: str, log: bool, bad_crop: Optional[np.ndarray] = None):
         if self._hist_plot is None:
             return
         vals = np.asarray(values, dtype=np.float64).ravel()
@@ -228,6 +244,15 @@ class ROIStatsPopup(QtWidgets.QDialog):
             self._crop_img.setColorMap(_resolve_cmap(cmap_name))
             self._crop_vb.autoRange()
 
+        if bad_crop is not None and bad_crop.size:
+            bad = bad_crop > 0.5
+            rgba = np.zeros(bad_crop.shape + (4,), dtype=np.uint8)
+            rgba[bad, 0] = 220
+            rgba[bad, 3] = 180
+            self._bad_overlay.setImage(rgba)
+        else:
+            self._bad_overlay.setImage(np.zeros((1, 1, 4), dtype=np.uint8))
+
     def _redraw_hist(self, *_):
         if self._hist_cache is None:
             self._curve.setData([], [])
@@ -245,16 +270,35 @@ class ROIStatsPopup(QtWidgets.QDialog):
         if self._curve is None:
             return
         self._curve.setData(dist, vals)
-        if vals.size:
+        if not vals.size:
+            self._stats_lbl.setText("(no samples)")
+        elif not np.isfinite(vals).any():
+            self._stats_lbl.setText(f"N = {vals.size:,}    (all pixels masked)")
+        else:
             self._stats_lbl.setText(
                 f"N = {vals.size:,}    min = {np.nanmin(vals):.6g}    "
                 f"max = {np.nanmax(vals):.6g}    mean = {np.nanmean(vals):.6g}")
-        else:
-            self._stats_lbl.setText("(no samples)")
 
     def closeEvent(self, event):
         self.removed.emit()
         super().closeEvent(event)
+
+    def changeEvent(self, event):
+        # Route the OS-level (title-bar/traffic-light) minimize into the same
+        # "tuck into the ROI ribbon" behavior as the old custom minimize
+        # button, instead of letting the window actually minimize to the
+        # dock/taskbar. There's no Qt hook to pre-empt the native minimize
+        # before it starts, so a brief native minimize animation before this
+        # callback restores + hides the window is expected on some platforms.
+        if event.type() == QtCore.QEvent.WindowStateChange:
+            if bool(self.windowState() & QtCore.Qt.WindowMinimized):
+                QtCore.QTimer.singleShot(0, self._reject_native_minimize)
+        super().changeEvent(event)
+
+    def _reject_native_minimize(self):
+        self.setWindowState(self.windowState() & ~QtCore.Qt.WindowMinimized)
+        self.hide()
+        self.minimizeRequested.emit()
 
 
 class _VerticalLabel(QtWidgets.QWidget):
@@ -349,8 +393,10 @@ class ROIImageViewer(PickableImageViewer):
         self._roi_counter = 0
         self._ribbon: Optional["ROIRibbon"] = None
         self._rubber_band: Optional[QtWidgets.QRubberBand] = None
+        self._line_preview: Optional[QtWidgets.QGraphicsLineItem] = None
         self._drag_origin: Optional[QtCore.QPoint] = None
         self._roi_draw_kind: Optional[str] = None
+        self._bad_mask: Optional[np.ndarray] = None
 
         _BTN = ("QPushButton{padding:2px 8px;border-radius:3px}"
                 "QPushButton:checked{background:#2a7fd4;color:white;font-weight:bold}")
@@ -407,6 +453,18 @@ class ROIImageViewer(PickableImageViewer):
             if btn.isChecked():
                 btn.blockSignals(True); btn.setChecked(False); btn.blockSignals(False)
         self._roi_draw_kind = None
+        self._abort_roi_drag()
+
+    def _abort_roi_drag(self):
+        """Clean up whichever drag-preview item is live, if a draw mode is
+        turned off mid-drag (e.g. another pick tool armed while dragging)."""
+        if self._rubber_band is not None:
+            self._rubber_band.hide()
+            self._rubber_band = None
+        if self._line_preview is not None:
+            self._iv.removeItem(self._line_preview)
+            self._line_preview = None
+        self._drag_origin = None
 
     def _on_roi_mode_toggled(self, checked: bool, kind: str, mode: int):
         if checked:
@@ -432,20 +490,43 @@ class ROIImageViewer(PickableImageViewer):
             et = event.type()
             if et == QtCore.QEvent.MouseButtonPress and event.button() == QtCore.Qt.LeftButton:
                 self._drag_origin = event.pos()
-                shape = (QtWidgets.QRubberBand.Line if self._roi_draw_kind == "line"
-                         else QtWidgets.QRubberBand.Rectangle)
-                self._rubber_band = QtWidgets.QRubberBand(shape, obj)
-                self._rubber_band.setGeometry(QtCore.QRect(self._drag_origin, QtCore.QSize()))
-                self._rubber_band.show()
+                if self._roi_draw_kind == "line":
+                    # A QRubberBand can only ever paint an axis-aligned box
+                    # (its `.Line` shape only changes the pen style, not the
+                    # geometry it's constrained to), which made a diagonal
+                    # line-drag look like a rectangle until mouse-up. A real
+                    # QGraphicsLineItem dropped straight into the ViewBox
+                    # (same pattern as the persistent arrow overlay below)
+                    # draws the true diagonal while dragging.
+                    color = _ROI_COLORS[self._roi_counter % len(_ROI_COLORS)]
+                    self._line_preview = QtWidgets.QGraphicsLineItem()
+                    self._line_preview.setPen(pg.mkPen(color, width=2))
+                    self._line_preview.setZValue(25)
+                    self._iv.addItem(self._line_preview, ignoreBounds=True)
+                    p0, _ = self._map_drag_to_view(self._drag_origin, self._drag_origin)
+                    self._line_preview.setLine(QtCore.QLineF(p0, p0))
+                else:
+                    self._rubber_band = QtWidgets.QRubberBand(QtWidgets.QRubberBand.Rectangle, obj)
+                    self._rubber_band.setGeometry(QtCore.QRect(self._drag_origin, QtCore.QSize()))
+                    self._rubber_band.show()
                 return True
-            if et == QtCore.QEvent.MouseMove and self._rubber_band is not None:
-                self._rubber_band.setGeometry(
-                    QtCore.QRect(self._drag_origin, event.pos()).normalized())
+            if et == QtCore.QEvent.MouseMove and self._drag_origin is not None:
+                if self._line_preview is not None:
+                    p0, p1 = self._map_drag_to_view(self._drag_origin, event.pos())
+                    self._line_preview.setLine(QtCore.QLineF(p0, p1))
+                elif self._rubber_band is not None:
+                    self._rubber_band.setGeometry(
+                        QtCore.QRect(self._drag_origin, event.pos()).normalized())
                 return True
-            if et == QtCore.QEvent.MouseButtonRelease and self._rubber_band is not None:
+            if et == QtCore.QEvent.MouseButtonRelease and self._drag_origin is not None and (
+                    self._rubber_band is not None or self._line_preview is not None):
                 geom = QtCore.QRect(self._drag_origin, event.pos()).normalized()
-                self._rubber_band.hide()
-                self._rubber_band = None
+                if self._rubber_band is not None:
+                    self._rubber_band.hide()
+                    self._rubber_band = None
+                if self._line_preview is not None:
+                    self._iv.removeItem(self._line_preview)
+                    self._line_preview = None
                 kind = self._roi_draw_kind
                 start, end = self._drag_origin, event.pos()
                 self._drag_origin = None
@@ -461,11 +542,14 @@ class ROIImageViewer(PickableImageViewer):
                 return True
         return super().eventFilter(obj, event)
 
-    def _finish_roi_draw(self, viewport, kind: str, start: QtCore.QPoint, end: QtCore.QPoint):
+    def _map_drag_to_view(self, start: QtCore.QPoint, end: QtCore.QPoint):
         vb = self._iv.getView().getViewBox()
         view = self._iv.ui.graphicsView
-        p0 = vb.mapSceneToView(view.mapToScene(start))
-        p1 = vb.mapSceneToView(view.mapToScene(end))
+        return (vb.mapSceneToView(view.mapToScene(start)),
+                vb.mapSceneToView(view.mapToScene(end)))
+
+    def _finish_roi_draw(self, viewport, kind: str, start: QtCore.QPoint, end: QtCore.QPoint):
+        p0, p1 = self._map_drag_to_view(start, end)
         x0, y0, x1, y1 = p0.x(), p0.y(), p1.x(), p1.y()
         color = _ROI_COLORS[self._roi_counter % len(_ROI_COLORS)]
         pen = pg.mkPen(color, width=2)
@@ -490,7 +574,7 @@ class ROIImageViewer(PickableImageViewer):
         self._iv.addItem(roi)
 
         anchor = roi.pos()
-        label_item = pg.TextItem(text=label, color=color, anchor=(0, 1))
+        label_item = _make_roi_text_item(label, color, anchor=(0, 1))
         label_item.setPos(anchor)
         label_item.setZValue(21)
         self._iv.addItem(label_item)
@@ -507,13 +591,26 @@ class ROIImageViewer(PickableImageViewer):
             arrow.setZValue(21)
             self._iv.addItem(arrow, ignoreBounds=True)
 
+        coord_item = width_item = height_item = None
+        if kind == "box":
+            coord_item = _make_roi_text_item("", color, anchor=(1, 1))
+            width_item = _make_roi_text_item("", color, anchor=(0.5, 0))
+            height_item = _make_roi_text_item("", color, anchor=(0, 0.5))
+            for item in (coord_item, width_item, height_item):
+                item.setZValue(21)
+                self._iv.addItem(item)
+
         popup = ROIStatsPopup(kind, color, label, parent=self)
         entry = {
             "kind": kind, "roi": roi, "color": color, "label": label,
             "label_item": label_item, "arrow": arrow, "popup": popup,
+            "coord_item": coord_item, "width_item": width_item,
+            "height_item": height_item,
             "flipped": False, "removing": False, "minimized": False,
         }
         self._roi_entries.append(entry)
+        if kind == "box":
+            self._update_roi_annotations(entry)
 
         popup.removed.connect(lambda e=entry: self._remove_roi(e))
         popup.labelChanged.connect(lambda text, e=entry: self._on_roi_label_changed(e, text))
@@ -545,7 +642,30 @@ class ROIImageViewer(PickableImageViewer):
     def _on_roi_geom_changed(self, entry: dict):
         label_item = entry["label_item"]
         label_item.setPos(entry["roi"].pos())
+        if entry["kind"] == "box":
+            self._update_roi_annotations(entry)
         self._refresh_roi_stats(entry)
+
+    def _update_roi_annotations(self, entry: dict):
+        """Position/text the top-left-corner coordinate, width, and height
+        labels for a box ROI against its current geometry. Called on both
+        creation and every move/resize (sigRegionChanged fires on resize
+        too, not just drag-move)."""
+        roi = entry["roi"]
+        pos, size = roi.pos(), roi.size()
+        x0, y0, w, h = pos.x(), pos.y(), size.x(), size.y()
+
+        coord_item = entry["coord_item"]
+        coord_item.setText(f"({x0:.1f}, {y0:.1f})")
+        coord_item.setPos(x0, y0)
+
+        width_item = entry["width_item"]
+        width_item.setText(f"w = {w:.1f}")
+        width_item.setPos(x0 + w / 2.0, y0 + h)
+
+        height_item = entry["height_item"]
+        height_item.setText(f"h = {h:.1f}")
+        height_item.setPos(x0 + w, y0 + h / 2.0)
 
     def _on_roi_label_changed(self, entry: dict, text: str):
         entry["label"] = text
@@ -593,6 +713,16 @@ class ROIImageViewer(PickableImageViewer):
             if vals is None:
                 return
             vals = np.asarray(vals).ravel()
+            bad = self._bad_mask
+            if bad is not None and bad.shape == self._data.shape:
+                try:
+                    bad_vals = np.asarray(roi.getArrayRegion(
+                        bad.astype(np.float32).T, imgitem, order=0)).ravel()
+                    if bad_vals.shape == vals.shape:
+                        vals = vals.copy()
+                        vals[bad_vals > 0.5] = np.nan
+                except Exception:
+                    pass
             if entry["flipped"]:
                 vals = vals[::-1]
             dist = np.arange(vals.size, dtype=float)
@@ -600,12 +730,21 @@ class ROIImageViewer(PickableImageViewer):
             self._update_line_arrow(entry)
         else:
             mask = _raster_roi_mask(roi, imgitem, self._data.shape)
+            bad = self._bad_mask
+            shape_ok = bad is not None and bad.shape == self._data.shape
+            good_mask = (mask & ~bad) if shape_ok else mask
             try:
                 crop = roi.getArrayRegion(self._data.T, imgitem)
             except Exception:
                 crop = None
+            bad_crop = None
+            if crop is not None and shape_ok:
+                try:
+                    bad_crop = roi.getArrayRegion(bad.astype(np.float32).T, imgitem, order=0)
+                except Exception:
+                    bad_crop = None
             entry["popup"].set_area_data(
-                self._data[mask], crop,
+                self._data[good_mask], crop, bad_crop=bad_crop,
                 cmap_name=self._cmap.currentText(), log=self._log.isChecked())
 
     def _update_line_arrow(self, entry: dict):
@@ -633,6 +772,13 @@ class ROIImageViewer(PickableImageViewer):
         for entry in self._roi_entries:
             self._refresh_roi_stats(entry)
 
+    def set_bad_mask(self, mask: Optional[np.ndarray]):
+        """Bad-pixel mask (True = excluded), same (NZ, NY) orientation as
+        self._data, currently active in the main viewer — excluded from ROI
+        stats and shown in translucent red on the popup's crop image."""
+        self._bad_mask = mask
+        self._refresh_all_roi_stats()
+
     # ── removal ───────────────────────────────────────────────────
 
     def _remove_roi_by_item(self, roi):
@@ -651,6 +797,10 @@ class ROIImageViewer(PickableImageViewer):
         self._iv.removeItem(entry["label_item"])
         if entry["arrow"] is not None:
             self._iv.removeItem(entry["arrow"])
+        for key in ("coord_item", "width_item", "height_item"):
+            item = entry.get(key)
+            if item is not None:
+                self._iv.removeItem(item)
         entry["popup"].close()
         self._roi_entries.remove(entry)
 

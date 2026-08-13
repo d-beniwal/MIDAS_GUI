@@ -3,11 +3,18 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-12 (Tab 1 — Mask Builder's **Dilation (px)** control
-switched from 4-connected to 8-neighbor dilation: N=1 now grows a bad pixel to
-the full surrounding 3×3 block, N=2 to the full 5×5 block, etc.).
+**Last updated:** 2026-08-13 (Data Viewer ROI tool: OS-level window minimize
+now tucks a popup into the ribbon (the old custom "–" button is gone); box
+ROIs show live `(x, y)` / `w = ` / `h = ` annotations on the image; all
+on-image ROI text gets a translucent background and a ~20% larger font;
+popup stats/crop images now respect the active bad-pixel mask (excluded from
+histograms/line stats, marked bright red on the crop); and the line-ROI drag
+preview is a true diagonal line instead of a box).
 
-**Previously:** (2026-08-12, Tab 1 — Mask Builder gains a **5 · Post-processing**
+**Previously:** (2026-08-12, Tab 1 — Mask Builder's **Dilation (px)** control
+switched from 4-connected to 8-neighbor dilation: N=1 now grows a bad pixel to
+the full surrounding 3×3 block, N=2 to the full 5×5 block, etc.)
+(2026-08-12, Tab 1 — Mask Builder gains a **5 · Post-processing**
 card with a **Dilation (px)** control that grows bad-pixel regions from the
 threshold/statistical/loaded mask by N pixels before combining with hand-drawn
 shapes) (2026-08-12, Tab 1 — Mask Builder: Stack browse menu gains a
@@ -504,7 +511,10 @@ image to draw the shape (a drag shorter than a few pixels is treated as a
 cancelled attempt — the mode stays armed so you can retry). Arming a shape
 mode automatically disarms Pick BC/Pick Ring and vice versa, since they all
 read the same click-drag. Drawing a shape opens a small **floating stats
-popup** next to it and un-arms the button (one-shot, like Pick BC).
+popup** next to it and un-arms the button (one-shot, like Pick BC). While
+dragging out a **line** ROI, the live preview is a true diagonal line
+(previously it looked like a rectangle until the mouse was released); a
+**box** ROI's drag preview is unchanged.
 
 Each ROI gets its own color (cycled from a fixed palette) shared by the
 on-image shape, its on-image label, and its popup's title/label field, so
@@ -512,18 +522,33 @@ multiple simultaneous ROIs stay easy to tell apart. The label is editable —
 typing a new name in the popup updates the on-image label to match. New
 ROIs are numbered "ROI 1", "ROI 2", ... in creation order; **Clear ROIs**
 resets that counter, so the next ROI drawn after a clear starts back at 1.
+All on-image ROI text (the "ROI N" label, and a box's corner/width/height
+annotations below) is drawn with a translucent dark background so it stays
+legible over bright image content, in a font ~20% larger than the app
+default.
+
+A **box** ROI additionally shows its pixel geometry directly on the image,
+in the ROI's color, updating live while it's dragged or resized: the
+top-left corner's `(x, y)` coordinate next to that corner, `w = ...` below
+the bottom edge, and `h = ...` to the right of the right edge. Line ROIs
+show only the "ROI N" label.
 
 - **Box** popups show a linear/log intensity histogram of the pixels inside
   the box, plus a zoomed-in crop of the boxed region rendered with the
   tab's current colormap. The crop image is not fixed-size — dragging the
   popup window's edge to resize it grows or shrinks the crop image along
-  with the histogram.
+  with the histogram. When a bad-pixel mask is active (composite mask file
+  or the intensity-exclude controls), masked pixels are excluded from the
+  histogram/stats and are marked in translucent bright red on the crop
+  image, matching the main viewer's bad-pixel overlay convention.
 - **Line** popups show a live **intensity-vs-distance profile** along the
   line (distance measured from one endpoint), plus N/min/max/mean of the
   sampled values. The line itself is drawn as a single arrow (shaft + head
   in one shape, recomputed from the two endpoints on every drag) pointing
   toward the end where distance = 0 → increasing runs; a **Flip direction**
-  button in the popup reverses it.
+  button in the popup reverses it. Masked pixels along the line are excluded
+  from min/max/mean (shown as gaps in the profile); a line drawn entirely
+  over masked pixels shows "(all pixels masked)" instead of the stats.
 
 Dragging or resizing a shape (or right-click → drag a handle) recomputes its
 popup immediately, and every popup also refreshes automatically on frame
@@ -544,12 +569,14 @@ they are not saved with the rest of the tab's state.
 **Always on top, minimize to ribbon.** ROI popups stay **above every other
 window** (not just above the main midas-gui window) so clicking elsewhere in
 the GUI, or in another application, never buries one behind something else.
-A small **"–"** button in each popup's header minimizes it: the popup hides
-and a small colored square button, color-matched to its ROI, appears on a
-narrow **ribbon** along the left edge of the image viewer. Clicking a ribbon
-button restores that popup (shows it, raises it, gives it focus) and removes
-the ribbon entry. A minimized ROI's shape stays on the image and its stats
-keep updating live in the background exactly as if the popup were open —
+Minimizing a popup with the window's own **OS-level minimize button** (the
+title bar/traffic-light control) doesn't send it to the dock/taskbar as a
+normal window minimize would — instead the popup hides and a small colored
+square button, color-matched to its ROI, appears on a narrow **ribbon**
+along the left edge of the image viewer. Clicking a ribbon button restores
+that popup (shows it, raises it, gives it focus) and removes the ribbon
+entry. A minimized ROI's shape stays on the image and its stats keep
+updating live in the background exactly as if the popup were open —
 minimizing only hides the window. Removing a minimized ROI (right-click →
 **Remove ROI**, or **Clear ROIs**) also removes its ribbon entry.
 
