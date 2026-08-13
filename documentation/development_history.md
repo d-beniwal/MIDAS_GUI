@@ -1559,6 +1559,66 @@ hand-drawn pixel outside the dilation radius is unaffected.
 
 ---
 
+### `b2616c6` — Data Viewer: ROI tool usability improvements (2026-08-13)
+**Effect:** Five rough edges in `roi_tools.py`'s ROI drawing/popup tooling,
+all requested together as a Data Viewer ROI cleanup pass:
+1. `ROIStatsPopup`'s custom "–" minimize `QToolButton` is removed; a new
+   `changeEvent`/`_reject_native_minimize` pair intercepts the OS-level
+   (title-bar) minimize via `QEvent.WindowStateChange` +
+   `Qt.WindowMinimized`, deferred through `QTimer.singleShot(0, ...)` to
+   avoid re-entering Qt's window-state machinery, and routes it into the
+   same "tuck into the `ROIRibbon`" behavior the old button had.
+2. Box ROIs get three new `pg.TextItem`s (`coord_item`/`width_item`/
+   `height_item`) showing the top-left `(x, y)` corner, `w = `, and
+   `h = ` in the ROI's color, repositioned/retexted on every
+   `sigRegionChanged` (move *and* resize) via a new
+   `_update_roi_annotations()`. Line ROIs are unaffected.
+3. New shared `_make_roi_text_item()` helper gives every on-image ROI
+   text item (the existing "ROI N" label included) a translucent
+   background via `pg.TextItem(fill=...)` and a font ~20% larger than
+   the app default (`QFont.pointSize()`, confirmed reliable for
+   `pg.TextItem`'s internal `QGraphicsTextItem` — unlike real `QWidget`s
+   under this app's QSS stylesheet, which report -1 there).
+4. `ROIImageViewer.set_bad_mask()` (wired from `tab_view.py`'s existing
+   `_update_intensity_overlay()` — the sole choke point already covering
+   initial load, live frames, mask toggle, threshold edits, and
+   autofill) feeds the active bad-pixel mask into `_refresh_roi_stats()`:
+   box-ROI histogram/crop stats now exclude bad pixels (intersected at
+   full resolution) and the popup's crop image gains a `_bad_overlay`
+   `pg.ImageItem` marking them translucent red, matching the main
+   viewer's `set_mask_overlay()` convention; line-ROI stats null out
+   masked samples (`set_line_profile` shows "(all pixels masked)" if
+   every sample is excluded, instead of raw NaNs).
+5. Dragging a new line ROI previously rendered as a `QRubberBand.Line`,
+   which can only paint an axis-aligned bounding box (the `.Line` shape
+   only changes pen style, not the geometry it's constrained to) —
+   replaced with a real `QGraphicsLineItem` dropped into the ViewBox via
+   `self._iv.addItem(..., ignoreBounds=True)`, the same pattern already
+   used for the line-ROI's persistent arrow overlay, so the live preview
+   is a true diagonal. A shared `_map_drag_to_view()` helper replaces the
+   old inline scene-mapping in `_finish_roi_draw`; a new
+   `_abort_roi_drag()` cleans up whichever preview item is live if a
+   draw mode is turned off mid-drag. Box-mode's `QRubberBand` is
+   unchanged. Verified with targeted offscreen scripts: box annotation
+   text/position at known geometry, bad-mask-aware histogram/crop-overlay
+   shape, an all-masked line producing the new stats string, and a
+   simulated line drag producing a `QGraphicsLineItem` with non-degenerate
+   dx/dy (a true diagonal) that's cleaned up on release. Full `pytest`
+   suite: 24/24 pass excluding the two known pre-existing, unrelated
+   issues already logged in `.context/STATE.md`
+   (`test_smoke.py::test_app_builds_offscreen` config flakiness and a
+   full-suite-only pyqtgraph teardown segfault in `tab_pdf.py`), both of
+   which reproduced identically and unchanged in this session.
+**Files:** `midas_gui/roi_tools.py`, `midas_gui/tab_view.py`,
+`documentation/gui_documentation.md`.
+**Roll back:** `git revert b2616c6`. Self-contained — restores the custom
+minimize button, drops the corner/width/height annotations and
+translucent/larger text styling, drops mask-awareness from ROI stats
+(`ROIImageViewer.set_bad_mask`/the `tab_view.py` wiring), and restores the
+`QRubberBand.Line` drag preview.
+
+---
+
 ## Rollback recipes (common intents)
 
 - **Undo the Pump Probe tab only:** `git revert 590b410` removes Pump Probe *and*
