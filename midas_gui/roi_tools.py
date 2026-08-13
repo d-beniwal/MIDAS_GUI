@@ -156,8 +156,8 @@ class ROIStatsPopup(QtWidgets.QDialog):
         if kind == "line":
             self._plot = pg.PlotWidget(background="#2b2e35")
             self._plot.setMinimumSize(110, 65)
-            self._plot.setLabel("bottom", "distance (px)", **{"color": "#d0d0d0", "font-size": "9pt"})
-            self._plot.setLabel("left", "intensity", **{"color": "#d0d0d0", "font-size": "9pt"})
+            self._plot.setLabel("bottom", "distance (px)", **{"color": "#d0d0d0", "font-size": "12pt"})
+            self._plot.setLabel("left", "intensity", **{"color": "#d0d0d0", "font-size": "12pt"})
             for ax in ("bottom", "left"):
                 self._plot.getAxis(ax).setTextPen("#c8c8c8")
                 self._plot.getAxis(ax).setPen("#8a8a8a")
@@ -184,8 +184,8 @@ class ROIStatsPopup(QtWidgets.QDialog):
             hist_col = QtWidgets.QVBoxLayout(); hist_col.setSpacing(2)
             self._hist_plot = pg.PlotWidget(background="#2b2e35")
             self._hist_plot.setMinimumSize(85, 55)
-            self._hist_plot.setLabel("bottom", "intensity", **{"color": "#d0d0d0", "font-size": "9pt"})
-            self._hist_plot.setLabel("left", "count", **{"color": "#d0d0d0", "font-size": "9pt"})
+            self._hist_plot.setLabel("bottom", "intensity", **{"color": "#d0d0d0", "font-size": "12pt"})
+            self._hist_plot.setLabel("left", "count", **{"color": "#d0d0d0", "font-size": "12pt"})
             for ax in ("bottom", "left"):
                 self._hist_plot.getAxis(ax).setTextPen("#c8c8c8")
                 self._hist_plot.getAxis(ax).setPen("#8a8a8a")
@@ -287,7 +287,7 @@ class ROIStatsPopup(QtWidgets.QDialog):
             y = np.log10(y + 1.0)
         self._curve.setData(edges, y)
         self._hist_plot.setLabel("left", "log(count+1)" if log else "count",
-                                 **{"color": "#d0d0d0", "font-size": "9pt"})
+                                 **{"color": "#d0d0d0", "font-size": "12pt"})
         if edges.size:
             _apply_view_limits(self._hist_plot, float(edges[0]), float(edges[-1]),
                                 0.0, float(y.max()) if y.size else 1.0,

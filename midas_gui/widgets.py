@@ -1636,8 +1636,8 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
         self._plot = pg.PlotWidget(background="#2b2e35")
         # Min height only (no max) so the splitter above can grow the histogram.
         self._plot.setMinimumHeight(90)
-        self._plot.setLabel("bottom", "intensity", **{"color": "#d0d0d0", "font-size": "9pt"})
-        self._plot.setLabel("left", "log(count+1)", **{"color": "#d0d0d0", "font-size": "9pt"})
+        self._plot.setLabel("bottom", "intensity", **{"color": "#d0d0d0", "font-size": "12pt"})
+        self._plot.setLabel("left", "log(count+1)", **{"color": "#d0d0d0", "font-size": "12pt"})
         for ax in ("bottom", "left"):
             self._plot.getAxis(ax).setTextPen("#c8c8c8")
             self._plot.getAxis(ax).setPen("#8a8a8a")
@@ -1773,7 +1773,7 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
             y = np.log10(y + 1.0)
         self._curve.setData(edges, y)
         self._plot.setLabel("left", "log(count+1)" if log else "count",
-                            **{"color": "#d0d0d0", "font-size": "9pt"})
+                            **{"color": "#d0d0d0", "font-size": "12pt"})
         if self._manual_mode:
             # Manual mode is authoritative — hold the user's limits regardless
             # of how the histogram data changed (e.g. a new live frame).
