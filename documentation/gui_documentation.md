@@ -3,16 +3,26 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-13 (Data Viewer ROI tool usability follow-ups: fixed
+**Last updated:** 2026-08-16 (Tab 2 — Calibrate: two fixes. (1) Picking a
+strict subset of distortion coefficients (the "…" dialog) now genuinely
+restricts the LM fit to just those coefficients on every pipeline, including
+One-shot — which previously silently refined all 15 regardless of the
+selection — and the Results tab now lists only the coefficients actually
+selected for that run instead of always showing all 15 (saved
+paramstest.txt/.json exports are unaffected — they still carry every slot's
+real, possibly held-fixed, value). (2) Selecting/changing a Dark, Bright, or
+Background field now immediately updates the image preview to the corrected
+frame — it previously kept showing the raw, uncorrected image until the next
+full data load).
+
+**Previously:** (2026-08-13, Data Viewer ROI tool usability follow-ups: fixed
 an OS-level minimize glitch where a popup would pop back open needing a
 second click; box ROI `(x, y)`/`w = `/`h = ` annotations are now whole
 pixels, not fractional; line ROIs now show their length in pixels at the
 line's midpoint, and their "ROI N" label is anchored at the line's actual
 start point instead of the image's top-left corner; and the box/line popup
 plots plus the Intensity statistics histogram now cap zoom-out/pan at the
-current data range, matching the radial-integration plot).
-
-**Previously:** (2026-08-13, Data Viewer ROI tool: OS-level window minimize
+current data range, matching the radial-integration plot) (2026-08-13, Data Viewer ROI tool: OS-level window minimize
 now tucks a popup into the ribbon (the old custom "–" button is gone); box
 ROIs show live `(x, y)` / `w = ` / `h = ` annotations on the image; all
 on-image ROI text gets a translucent background and a ~20% larger font;
@@ -757,7 +767,9 @@ in the shared **Data Loader panel** (see §1). Each Dark/Bright/Background field
 averaged over a chosen index range; Bright offers **Flat-field divide** or **Subtract**;
 all mask sources (plus the auto-added Tab 1 mask) are unioned. Dark is passed to the
 calibration pipeline; bright/background are applied to the calibrant before calibration
-and post-calibration integration.
+and post-calibration integration. The image preview updates live to show the
+dark/bright/background-corrected frame as soon as a field is picked or changed (the raw
+frame still feeds the actual calibration run, which applies these corrections itself).
 
 ### Detector, seed & Load calibration file
 The **Detector & Calibrant** card sets λ, pixel size(s) and detector transforms; the
@@ -793,9 +805,12 @@ toggle. The **Distortion (n/15)** checkbox has a companion **…** button that o
 per-coefficient dialog: the 15 distortion coefficients are grouped by η-fold (isotropic
 radial + folds 1–6), and named **preset modes** (None · Isotropic only · Iso + up to
 2-fold · Iso + up to 4-fold · All (15)) auto-select whole ladders. The checkbox label
-shows how many coefficients are selected. *Per-coefficient control applies to the
-Four-stage / advanced pipelines; the One-shot path refines all-or-none.* Advanced
-(E-M / LM iters, device, output dir) and Multi-panel detector groups are collapsible.
+shows how many coefficients are selected. Picking a strict subset genuinely restricts
+which coefficients the LM fit refines — including on the One-shot pipeline, which
+transparently switches to a lower-level routine for a partial selection (its own
+backend otherwise only supports all-15-or-none); picking "All (15)" or leaving
+Distortion unchecked runs the normal One-shot path unchanged. Advanced (E-M / LM
+iters, device, output dir) and Multi-panel detector groups are collapsible.
 
 ### Live threshold slider
 Zeroes calibration-image pixels below the slider value (background suppression for
@@ -821,12 +836,15 @@ call, so abort hard-terminates the worker thread rather than waiting).
 ### Results (right panel, bottom tabs)
 Radial Profile (with ring markers and an **Azim. avg** selector — see Tab 4), Ring
 Residuals bar chart, **Results**, and Log. Integration runs automatically after
-calibration. The **Results** tab shows the *complete* parameter set exactly as it is
-written to `paramstest.txt` (Lsd, BC, tx/ty/tz, the distortion coefficients, Parallax,
-Wavelength, px, NrPixelsY/Z, RhoD, SpaceGroup, LatticeConstant) as **plain text laid out
-in multiple columns** so the wide-but-short panel stays readable — no table widget. The
-distortion `p0–p14` slots are labelled with their coefficient names (iso_R2, a1, phi1,
-…). A strain/timing line sits below. **→ Send to Data Viewer** pushes the *full*
+calibration. The **Results** tab shows the parameter set exactly as it is written to
+`paramstest.txt` (Lsd, BC, tx/ty/tz, the distortion coefficients, Parallax, Wavelength,
+px, NrPixelsY/Z, RhoD, SpaceGroup, LatticeConstant) as **plain text laid out in multiple
+columns** so the wide-but-short panel stays readable — no table widget. The distortion
+`p0–p14` slots are labelled with their coefficient names (iso_R2, a1, phi1, …), and only
+the coefficients actually selected for that run are listed (not all 15), so the display
+matches what you asked to refine; the saved `paramstest.txt`/`.json` exports still carry
+every slot's real value, including any held-fixed value carried over from a prior
+calibration. A strain/timing line sits below. **→ Send to Data Viewer** pushes the *full*
 calibrated geometry (λ, pixel size, Lsd, beam centre, **tilts and distortion**) into the
 Data Viewer tab — where it drives the tilt/distortion-aware radial integration, not just
 circle binning — the reverse of the Data Viewer's "→ Send geometry to Calibrate". The

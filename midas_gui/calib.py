@@ -200,7 +200,19 @@ def normalize_result(raw, mode: str, *, NY, NZ, pxY, pxZ, wavelength):
     attribute on the raw result.
     """
     # one_shot+panel_layout was re-routed through four_stage to expose unpacked
-    effective_mode = "four_stage" if (mode == "one_shot" and hasattr(raw, "stage2")) else mode
+    if mode == "one_shot" and hasattr(raw, "stage2"):
+        effective_mode = "four_stage"
+    elif mode == "one_shot" and hasattr(raw, "unpacked"):
+        # Partial distortion-coefficient refinement re-routed run_pipeline
+        # through pipelines.single.autocalibrate (see run_pipeline) — a
+        # CalibrationResult, not AutoCalibrationResult; normalize like
+        # first_time's pv.unpacked case.
+        return _auto_result_from_unpacked(
+            raw.unpacked, NY=NY, NZ=NZ, pxY=pxY, pxZ=pxZ, wavelength=wavelength,
+            strain=raw.post_residual_strain_uE, residual_map=raw.residual_corr_map,
+            residual_bin_path=getattr(raw, "_residual_bin_path", None))
+    else:
+        effective_mode = mode
 
     if effective_mode == "one_shot":
         return raw   # calibrate() already returns AutoCalibrationResult, no panel data
@@ -299,6 +311,45 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
             from midas_calibrate_v2.pipelines import autocalibrate_four_stage
             return autocalibrate_four_stage(v1, img, dark=dark, device=device,
                                             panel_layout=panel_layout, verbose=True)
+
+        coeffs = _distortion_coeffs(refine)
+        if refine.get("Distortion", True) and coeffs and coeffs != set(DISTORTION_NAMES):
+            # midas_calibrate_v2.calibrate() only exposes an all-or-nothing
+            # refine_distortion bool (every p-slot gets the same flag) — route
+            # through the same lower-level single-pass routine four_stage /
+            # bayesian / joint already use (build_v1_params' per-p# Refine
+            # dict) so the LM fit actually restricts itself to the selected
+            # coefficients instead of silently widening the selection to all 15.
+            if manual:
+                seed = _manual_seed_dict(manual)
+            else:
+                s = make_seed_safe(image, wavelength, pxY, calibrant)
+                if s is None:
+                    raise RuntimeError(
+                        "Auto-seed failed for partial distortion refinement "
+                        "(one_shot). Enable manual seed (Pick BC / Pick Ring + "
+                        "Lsd) and retry.")
+                seed = {"BC_y": s.BC_y, "BC_z": s.BC_z, "Lsd": s.Lsd_um}
+            v1 = build_v1_params(
+                seed, wavelength=wavelength, pxY=pxY, pxZ=pxZ, calibrant=calibrant,
+                NY=NY, NZ=NZ, refine=refine, n_iter=n_iter, device=device)
+            img = image.astype(np.float32)
+            if im_trans:
+                from midas_gui.helpers import _apply_im_trans
+                img = _apply_im_trans(img, im_trans)
+            bin_path = None
+            if cfg.get("output_dir"):
+                from pathlib import Path
+                out = Path(cfg["output_dir"]); out.mkdir(parents=True, exist_ok=True)
+                bin_path = str(out / "residual_corr.bin")
+            from midas_calibrate_v2.pipelines.single import autocalibrate
+            raw = autocalibrate(
+                v1, img, dark=dark, n_iter=n_iter, lm_max_iter=lm_iter,
+                device=device, verbose=True,
+                build_residual_corr=bool(cfg.get("build_residual_corr", True)),
+                residual_corr_path=bin_path)
+            raw._residual_bin_path = bin_path   # no .bin field on CalibrationResult
+            return raw
 
         from midas_calibrate_v2 import calibrate
         kwargs = dict(
