@@ -88,6 +88,39 @@ def _apply_im_trans(image: np.ndarray, codes: tuple) -> np.ndarray:
     return np.ascontiguousarray(image)
 
 
+def im_trans_codes_from_checkboxes(flip_y, flip_z, transp) -> list:
+    """Ordered MIDAS ``ImTransOpt`` codes from the 3 Transforms checkboxes.
+
+    Fixed composition order (flips, then transpose) — matches
+    ``_apply_im_trans`` and is what every tab's "Transforms:" row emits.
+    """
+    codes = []
+    if flip_y.isChecked(): codes.append(1)
+    if flip_z.isChecked(): codes.append(2)
+    if transp.isChecked(): codes.append(3)
+    return codes
+
+
+def parse_im_trans(text: str) -> list:
+    """Ordered ``ImTransOpt`` codes from a MIDAS paramstest's text.
+
+    ``ImTransOpt`` is a repeatable key — one line per transform op, applied
+    in file order. A lone ``ImTransOpt 0`` is MIDAS's explicit no-op and is
+    dropped.
+    """
+    codes = []
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == "ImTransOpt":
+            try:
+                c = int(float(parts[1]))
+            except ValueError:
+                continue
+            if c != 0:
+                codes.append(c)
+    return codes
+
+
 def is_h5(path: str) -> bool:
     return Path(path).suffix.lower() in H5_EXTS
 
@@ -316,14 +349,16 @@ def read_geometry(path: str | Path) -> dict:
       - calibration ``.json``      (as saved by the Calibrate tab)
 
     Returns a dict with keys ``wavelength_A``, ``Lsd_um``, ``px_um``, ``BC_y``,
-    ``BC_z`` — any of which may be ``None`` if the file does not carry it.
+    ``BC_z``, ``im_trans`` — any of which may be ``None``/``[]`` if the file
+    does not carry it. ``im_trans`` is the ordered list of MIDAS
+    ``ImTransOpt`` codes (1=flipY, 2=flipZ, 3=transpose).
     Note: PONI tilts (Rot1/2/3) are ignored — only the beam-centre projection is used.
     """
     p = Path(path)
     text = p.read_text()
     suf = p.suffix.lower()
     out = {"wavelength_A": None, "Lsd_um": None, "px_um": None,
-           "BC_y": None, "BC_z": None}
+           "BC_y": None, "BC_z": None, "im_trans": []}
 
     # ── calibration.json ──
     if suf == ".json" or text.lstrip().startswith("{"):
@@ -334,6 +369,7 @@ def read_geometry(path: str | Path) -> dict:
         out["px_um"] = d.get("pxY") if d.get("pxY") is not None else d.get("px")
         out["BC_y"] = d.get("BC_y")
         out["BC_z"] = d.get("BC_z")
+        out["im_trans"] = list(d.get("im_trans") or [])
         return out
 
     # ── pyFAI .poni ──
@@ -392,6 +428,7 @@ def read_geometry(path: str | Path) -> dict:
                 out["px_um"] = float(parts[1])
         except ValueError:
             continue
+    out["im_trans"] = parse_im_trans(text)
     return out
 
 
@@ -470,6 +507,11 @@ def write_standalone_paramstest(result, path, *, extra=None):
     for k, v in (extra or {}).items():
         p.extra[k] = v
     p.write(str(path))
+    im_trans = getattr(result, "im_trans", None)
+    if im_trans:
+        with open(path, "a") as f:
+            for code in im_trans:
+                f.write(f"ImTransOpt {int(code)}\n")
     return p
 
 
@@ -496,9 +538,10 @@ def geometry_fields_from_file(path: str) -> dict:
     into a normalized full-geometry dict (auto-detected by extension then content).
 
     Returns keys ``NrPixelsY, NrPixelsZ, pxY, pxZ, Lsd`` (µm), ``BC_y, BC_z`` (px),
-    ``tx, ty, tz`` (deg), ``wavelength_A`` (Å), ``distortion`` (dict).  ``pxZ``
-    defaults to ``pxY`` and tilts default to 0 when absent.  Raises ``ValueError``
-    if a required key is missing.
+    ``tx, ty, tz`` (deg), ``wavelength_A`` (Å), ``distortion`` (dict), ``im_trans``
+    (ordered list of MIDAS ``ImTransOpt`` codes).  ``pxZ`` defaults to ``pxY``
+    and tilts default to 0 when absent.  Raises ``ValueError`` if a required
+    key is missing.
 
     PONI tilts (Rot1/2/3) are not mapped to MIDAS ty/tz/tx — only the beam-centre
     translation is used (consistent with MIDAS's own ``poni_to_bc``).
@@ -513,6 +556,7 @@ def geometry_fields_from_file(path: str) -> dict:
         for t in ("tx", "ty", "tz"):
             fields[t] = fields.get(t) or 0.0
         fields["distortion"] = fields.get("distortion") or {}
+        fields["im_trans"] = list(fields.get("im_trans") or [])
         return fields
 
     # ── calibration.json (GUI bare keys OR pipeline *_um/_px/_deg keys) ──
@@ -530,7 +574,8 @@ def geometry_fields_from_file(path: str) -> dict:
             pxY=g("pxY", "pxY_um"), pxZ=g("pxZ", "pxZ_um"),
             Lsd=g("Lsd", "Lsd_um"), BC_y=g("BC_y", "BC_y_px"), BC_z=g("BC_z", "BC_z_px"),
             tx=g("tx", "tx_deg"), ty=g("ty", "ty_deg"), tz=g("tz", "tz_deg"),
-            wavelength_A=g("wavelength_A", "Wavelength"), distortion=c.get("distortion", {}))
+            wavelength_A=g("wavelength_A", "Wavelength"), distortion=c.get("distortion", {}),
+            im_trans=c.get("im_trans", []))
         missing = [k for k in ("NrPixelsY", "NrPixelsZ", "pxY", "Lsd", "BC_y", "BC_z",
                                "wavelength_A") if fields[k] is None]
         if missing:
@@ -611,7 +656,8 @@ def geometry_fields_from_file(path: str) -> dict:
     return _norm(dict(
         NrPixelsY=NY, NrPixelsZ=NZ, pxY=kv["pxY"], pxZ=kv["pxY"],
         Lsd=kv["Lsd"], BC_y=kv["BC_y"], BC_z=kv["BC_z"], tx=kv.get("tx"), ty=kv.get("ty"),
-        tz=kv.get("tz"), wavelength_A=kv["wavelength_A"], distortion=dist))
+        tz=kv.get("tz"), wavelength_A=kv["wavelength_A"], distortion=dist,
+        im_trans=parse_im_trans(text)))
 
 
 def spec_from_geometry_file(path: str, r_bin: float, eta_bin: float):

@@ -330,7 +330,7 @@ class MaskComputeWorker(QtCore.QThread):
     failed   = QtCore.pyqtSignal(str)
 
     def __init__(self, image, base_mask, methods, *, stack_paths=None,
-                 stack_hdf5=None, calib_result=None, parent=None):
+                 stack_hdf5=None, calib_result=None, im_trans=None, parent=None):
         super().__init__(parent)
         self._image = image
         self._base = base_mask
@@ -338,6 +338,7 @@ class MaskComputeWorker(QtCore.QThread):
         self._stack_paths = stack_paths
         self._stack_hdf5 = stack_hdf5    # (path, dataset, stride) for a 3-D HDF5 stack
         self._result = calib_result
+        self._im_trans = tuple(im_trans or ())   # applied per-frame to the stack source
 
     def run(self):
         try:
@@ -369,11 +370,15 @@ class MaskComputeWorker(QtCore.QThread):
                             raise ValueError(
                                 f"HDF5 dataset '{dset}' is {ds.ndim}-D; need a 2-D image "
                                 "or a 3-D (time, y, x) sequence.")
+                    if self._im_trans:
+                        stack = np.stack(
+                            [_apply_im_trans(f, self._im_trans) for f in stack], axis=0)
                     self.progress.emit(f"HDF5 stack: {stack.shape[0]} frame(s) "
                                        f"of {stack.shape[1]}×{stack.shape[2]}")
                 elif self._stack_paths:
                     self.progress.emit(f"Loading {len(self._stack_paths)} frames…")
-                    frames = [_load_image(p).astype(np.float32) for p in self._stack_paths]
+                    frames = [_apply_im_trans(_load_image(p).astype(np.float32), self._im_trans)
+                              for p in self._stack_paths]
                     stack = np.stack(frames, axis=0)
 
             # Statistical auto-mask: spatial outlier and temporal constancy are

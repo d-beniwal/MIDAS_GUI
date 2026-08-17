@@ -28,7 +28,8 @@ from midas_gui.helpers import (_fspin, _NoScrollSpinBox, _browse,
                          _spec_from_result_ns, _NoScrollComboBox,
                          make_kedge_label, make_pixel_label, tilted_ring_xy,
                          widgets_to_dict, apply_dict_to_widgets,
-                         write_poni, write_standalone_paramstest)
+                         write_poni, write_standalone_paramstest,
+                         _apply_im_trans, im_trans_codes_from_checkboxes)
 from midas_gui.widgets import ProfileViewer, DataLoaderPanel
 from midas_gui.roi_tools import ROIImageViewer, ROIRibbon
 from midas_gui.workers import (ProjectionWorker, AllFrameStatsWorker,
@@ -150,6 +151,7 @@ class DataViewerTab(QtWidgets.QWidget):
         self._pick_ring_item = None                # arc drawn from a profile click
         self._picked_r: Optional[float] = None
         self._is_projection = False                # showing a projected stack?
+        self._proj_raw: Optional[np.ndarray] = None  # projection output before ImTransOpt
         self._proj_worker = None
         self._stats_worker = None                  # AllFrameStatsWorker for "All frames" scope
         self._stats_all_frames_dirty = False        # a request arrived while one was running
@@ -210,7 +212,22 @@ class DataViewerTab(QtWidgets.QWidget):
             "BC_z": self._bcz.value(),
             "ty": self._ty.value(),
             "tz": self._tz.value(),
+            "im_trans": self._im_trans_codes(),
         }
+
+    def _im_trans_codes(self) -> list:
+        """Ordered MIDAS ImTransOpt codes from the Transforms checkboxes."""
+        return im_trans_codes_from_checkboxes(self._flip_y, self._flip_z, self._transp)
+
+    def _on_im_trans_changed(self):
+        """Transform checkbox toggled — re-apply to the current frame + refresh."""
+        if self._is_projection and getattr(self, "_proj_raw", None) is not None:
+            self._cur = _apply_im_trans(self._proj_raw, self._im_trans_codes())
+            self._viewer.set_image(self._cur, autorange=False)
+            if self._rad_auto.isChecked():
+                self._radial_integrate()
+        elif self._loader.current_frame() is not None:
+            self._on_fields_changed()
 
     def _lsd_um(self) -> float:
         """Lsd in µm (internal unit) from the mm display field."""
@@ -231,6 +248,11 @@ class DataViewerTab(QtWidgets.QWidget):
                 w.blockSignals(True); w.setValue(float(v) * scale); w.blockSignals(False)
         if g.get("BC_y") is not None or g.get("BC_z") is not None:
             self._bc_auto.setChecked(False)   # use the supplied beam centre
+        if g.get("im_trans") is not None:
+            im_trans = g["im_trans"] or []
+            self._flip_y.setChecked(1 in im_trans)
+            self._flip_z.setChecked(2 in im_trans)
+            self._transp.setChecked(3 in im_trans)
         # If tilts / distortion / detector size accompany the geometry (e.g. a
         # calibration result sent from the Calibrate tab), capture the FULL
         # geometry so radial integration goes through the MIDAS engine (tilts +
@@ -259,6 +281,7 @@ class DataViewerTab(QtWidgets.QWidget):
             "pxY": px, "pxZ": float(g.get("pxZ") or px),
             "NrPixelsY": g.get("NrPixelsY"), "NrPixelsZ": g.get("NrPixelsZ"),
             "distortion": dict(g.get("distortion") or {}),
+            "im_trans": list(g.get("im_trans") or []),
         }
         # Need the detector size for the integration grid; fall back to the
         # current image shape if the sender did not supply it.
@@ -295,6 +318,9 @@ class DataViewerTab(QtWidgets.QWidget):
             "bcz": self._bcz,
             "ty": self._ty,
             "tz": self._tz,
+            "flip_y": self._flip_y,
+            "flip_z": self._flip_z,
+            "transp": self._transp,
             "show_rings": self._show_rings,
             "show_labels": self._show_labels,
             "ring_width": self._ring_width,
@@ -446,6 +472,18 @@ class DataViewerTab(QtWidgets.QWidget):
         geo.row((make_kedge_label(self._wl, "λ:"), self._wl), ("max 2θ:", self._max2t))
         geo.row(("Lsd:", self._lsd), (make_pixel_label(self._px, "px:"), self._px))
         ring.body.addLayout(geo)
+
+        self._flip_y = QtWidgets.QCheckBox("Flip Y"); self._flip_z = QtWidgets.QCheckBox("Flip Z")
+        self._transp = QtWidgets.QCheckBox("Transpose")
+        self._flip_y.setToolTip(
+            "MIDAS ImTransOpt image transform, applied to the raw detector\n"
+            "image before display/integration and saved into calibration files.")
+        tb_trans = QtWidgets.QHBoxLayout(); tb_trans.setSpacing(8)
+        tb_trans.addWidget(self._flip_y); tb_trans.addWidget(self._flip_z)
+        tb_trans.addWidget(self._transp); tb_trans.addStretch(1)
+        ring.body.addWidget(S.LabelRight("Transforms:")); ring.body.addLayout(tb_trans)
+        for cb in (self._flip_y, self._flip_z, self._transp):
+            cb.toggled.connect(self._on_im_trans_changed)
 
         self._bc_auto = QtWidgets.QCheckBox("Beam centre = image centre"); self._bc_auto.setChecked(True)
         ring.body.addWidget(self._bc_auto)
@@ -771,12 +809,13 @@ class DataViewerTab(QtWidgets.QWidget):
             return
         self._proj_grp.setEnabled(self._loader.n_frames() > 1)
         self._is_projection = False
+        self._proj_raw = None
         self._apply_project_style(False)
         if self._loader.stats_panel is not None:
             self._loader.stats_panel.set_scope_enabled(True)
         fresh = (self._disp_shape != raw.shape)
         self._disp_shape = raw.shape
-        self._cur = self._loader.corrected(raw)
+        self._cur = _apply_im_trans(self._loader.corrected(raw), self._im_trans_codes())
         is_live = self._loader.is_live_frame_update()
         self._viewer.set_image(self._cur, autorange=fresh, reset_levels=not is_live)
         if fresh:
@@ -805,7 +844,7 @@ class DataViewerTab(QtWidgets.QWidget):
         raw = self._loader.current_frame()
         if raw is None:
             return
-        self._cur = self._loader.corrected(raw)
+        self._cur = _apply_im_trans(self._loader.corrected(raw), self._im_trans_codes())
         self._viewer.set_image(self._cur, autorange=False)
         self._update_intensity_overlay()
         if getattr(self, "_topn_btn", None) is not None and self._topn_btn.isChecked():
@@ -847,7 +886,8 @@ class DataViewerTab(QtWidgets.QWidget):
 
     def _on_projection_done(self, img, info):
         self._proj_btn.setEnabled(True)
-        self._cur = img
+        self._proj_raw = img
+        self._cur = _apply_im_trans(img, self._im_trans_codes())
         self._is_projection = True
         self._apply_project_style(True)
         if self._loader.stats_panel is not None:
@@ -1225,7 +1265,7 @@ class DataViewerTab(QtWidgets.QWidget):
             geo = read_geometry(path)
             wl, lsd, px = geo["wavelength_A"], geo["Lsd_um"], geo["px_um"]
             bcy, bcz = geo["BC_y"], geo["BC_z"]
-            if all(v is None for v in geo.values()):
+            if all(v is None for k, v in geo.items() if k != "im_trans"):
                 self._calib_lbl.setText("No recognised geometry in file.")
                 return
             self._bc_auto.setChecked(False)   # geometry now comes from the file
@@ -1235,6 +1275,10 @@ class DataViewerTab(QtWidgets.QWidget):
                          (self._bcy, bcy), (self._bcz, bcz)):
                 if v is not None:
                     w.blockSignals(True); w.setValue(float(v)); w.blockSignals(False)
+            im_trans = geo.get("im_trans") or []
+            self._flip_y.setChecked(1 in im_trans)
+            self._flip_z.setChecked(2 in im_trans)
+            self._transp.setChecked(3 in im_trans)
             parts = []
             if lsd is not None: parts.append(f"Lsd={float(lsd)/1000:.2f} mm")
             if bcy is not None and bcz is not None:
@@ -1279,7 +1323,9 @@ class DataViewerTab(QtWidgets.QWidget):
         file), otherwise one built from the current manual / Ring-simulation
         fields (tx=0, distortion empty)."""
         if self._calib_geom is not None:
-            return dict(self._calib_geom)
+            geom = dict(self._calib_geom)
+            geom["im_trans"] = self._im_trans_codes()   # current checkboxes win
+            return geom
         if self._cur is None:
             return None
         nz, ny = self._cur.shape
@@ -1289,7 +1335,7 @@ class DataViewerTab(QtWidgets.QWidget):
             "BC_y": self._bcy.value(), "BC_z": self._bcz.value(),
             "tx": 0.0, "ty": self._ty.value(), "tz": self._tz.value(),
             "pxY": px, "pxZ": px, "NrPixelsY": ny, "NrPixelsZ": nz,
-            "distortion": {},
+            "distortion": {}, "im_trans": self._im_trans_codes(),
         }
 
     def _save_calibration(self, kind: str):
@@ -1321,6 +1367,7 @@ class DataViewerTab(QtWidgets.QWidget):
                     tx=float(geom.get("tx") or 0.0), ty=float(geom.get("ty") or 0.0),
                     tz=float(geom.get("tz") or 0.0), wavelength_A=float(geom["wavelength_A"]),
                     distortion=geom.get("distortion") or {},
+                    im_trans=list(geom.get("im_trans") or []),
                     _calibrant_name=self._primary_material_name())
                 write_standalone_paramstest(ns, path)
             elif kind == "poni":

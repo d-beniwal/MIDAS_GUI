@@ -3,7 +3,15 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-16 (Tab 2 — Calibrate: two fixes. (1) Picking a
+**Last updated:** 2026-08-17 (Data Viewer, Mask Builder, and Calibrate tabs all
+gain matching **Transforms: Flip Y / Flip Z / Transpose** checkboxes applying
+MIDAS's `ImTransOpt` image transform to the raw detector frame before
+display/masking/calibration; the Calibrate tab's existing transform controls
+now round-trip through saved/loaded `paramstest.txt` and `calibration.json`
+files instead of being in-memory-only, and geometry hand-offs between the
+three tabs keep the Transforms state in sync.)
+
+**Previously:** (2026-08-16, Tab 2 — Calibrate: two fixes. (1) Picking a
 strict subset of distortion coefficients (the "…" dialog) now genuinely
 restricts the LM fit to just those coefficients on every pipeline, including
 One-shot — which previously silently refined all 15 regardless of the
@@ -370,6 +378,17 @@ its own lattice, visibility, and ring color.
   both at 0° reproduces the previous plain-circle rendering exactly. (Rotation
   about the beam axis, `tx`, leaves a full ring's shape unchanged, so it isn't
   exposed here.)
+- **Transforms: Flip Y / Flip Z / Transpose** apply MIDAS's `ImTransOpt` image
+  transform to the raw detector frame — before display, ring overlay, and
+  radial integration — in that fixed order (flips, then transpose). Use this
+  when the detector's raw pixel orientation doesn't match the geometry model
+  (e.g. the beam centre would otherwise land on the wrong side of the image).
+  Toggling refreshes the current frame (or the active projection)
+  immediately. The same three checkboxes appear on the Mask Builder and
+  Calibrate tabs and stay in sync whenever geometry is pushed/pulled between
+  tabs; saved/loaded calibration files (`.json`/`.txt`) round-trip the codes
+  as MIDAS's repeatable `ImTransOpt <code>` paramstest key (1=Flip Y,
+  2=Flip Z, 3=Transpose).
 - **Rings / Labels** toggles sit on one row together with a compact **thickness**
   spin box (0.5–10 px) that sets the line width of the simulated-ring overlay on
   the image; redraws immediately as you change it.
@@ -388,8 +407,9 @@ its own lattice, visibility, and ring color.
 ### Load/save calibration card (optional)
 Sits directly below the Ring simulation card's **Simulate rings (live)** button.
 Load geometry from a **calibration `.json`, a MIDAS `paramstest.txt`, or a pyFAI
-`.poni`** (auto-detected). It fills **BC, Lsd, pixel size, wavelength, and the
-Ring-simulation card's ty/tz tilt fields**, unchecks "Beam centre = image
+`.poni`** (auto-detected). It fills **BC, Lsd, pixel size, wavelength, the
+Ring-simulation card's ty/tz tilt fields, and the Transforms checkboxes**
+(from any `ImTransOpt` lines in the file), unchecks "Beam centre = image
 centre", and refreshes the overlay and radial plot.
 
 When a calibration file carries the **full geometry (tilts + distortion)**, the radial
@@ -706,6 +726,14 @@ directories) instead of only a whole folder or a single glob pattern — the
 field then shows "N files selected" (hover for the full file list) and the
 stride still applies to the chosen list.
 
+**Transforms: Flip Y / Flip Z / Transpose** (below the Image field) apply
+MIDAS's `ImTransOpt` image transform to every frame this tab loads — the
+single preview image and every frame of the Section 2 statistical stack
+source alike — before any masking runs, in the fixed Flip Y → Flip Z →
+Transpose order. Receiving a calibration from Tab 2 (Section 4) pre-checks
+these to match the Calibrate tab's own Transforms state (still overridable
+here). Same codes/semantics as the Data Viewer and Calibrate tabs.
+
 ### Section 1 · Threshold mask (always applied)
 `pixel ≤ lower | pixel > upper`. The upper bound auto-fills from the data type on load
 (e.g. 1,048,575 for uint20 Eiger, 4,294,967,295 for uint32).
@@ -772,16 +800,20 @@ dark/bright/background-corrected frame as soon as a field is picked or changed (
 frame still feeds the actual calibration run, which applies these corrections itself).
 
 ### Detector, seed & Load calibration file
-The **Detector & Calibrant** card sets λ, pixel size(s) and detector transforms; the
-**Initial seed** card sets the LM starting point (BC_y, BC_z, Lsd, **and tilts
-tx/ty/tz**). **Load calibration file…** (top of the Detector card) reads a MIDAS
+The **Detector & Calibrant** card sets λ, pixel size(s) and detector transforms
+(**Flip Y / Flip Z / Transpose** — MIDAS's `ImTransOpt`, applied to the calibrant/
+dark/bright/background image before calibration and integration, in that fixed
+order); the **Initial seed** card sets the LM starting point (BC_y, BC_z, Lsd, **and
+tilts tx/ty/tz**). **Load calibration file…** (top of the Detector card) reads a MIDAS
 **paramstest `.txt`**, a calibration **`.json`**, or a pyFAI **`.poni`** (auto-detected)
-and fills λ, pixel size, and the seed BC + Lsd — a fast way to start from a previous
-calibration or a known geometry. (The synthetic test data ships
+and fills λ, pixel size, the seed BC + Lsd, and the Transforms checkboxes from any
+`ImTransOpt` lines — a fast way to start from a previous calibration or a known
+geometry. (The synthetic test data ships
 `test_data/calibration_synthetic.{json,txt,poni}` as a ready example.) **← Data Viewer**
-(next to *Load calibration file…*) pulls λ, pixel size, Lsd, beam centre and the Data
-Viewer's ty/tz tilt fields straight from the Data Viewer tab into the same fields (BC
-and Lsd land in the seed card; ty/tz land in the seed tilt fields). A **Feed result back to seed** checkbox (on by
+(next to *Load calibration file…*) pulls λ, pixel size, Lsd, beam centre, the Data
+Viewer's ty/tz tilt fields, and its Transforms state straight from the Data Viewer tab
+into the same fields (BC and Lsd land in the seed card; ty/tz land in the seed tilt
+fields). A **Feed result back to seed** checkbox (on by
 default) copies the optimized BC / Lsd / tilts / distortion of each run back into the
 seed fields, so a follow-up run starts from the previous solution. *Seed tilts are
 honoured by the Four-stage / advanced pipelines; the One-shot / First-time paths seed
@@ -838,7 +870,8 @@ Radial Profile (with ring markers and an **Azim. avg** selector — see Tab 4), 
 Residuals bar chart, **Results**, and Log. Integration runs automatically after
 calibration. The **Results** tab shows the parameter set exactly as it is written to
 `paramstest.txt` (Lsd, BC, tx/ty/tz, the distortion coefficients, Parallax, Wavelength,
-px, NrPixelsY/Z, RhoD, SpaceGroup, LatticeConstant) as **plain text laid out in multiple
+px, NrPixelsY/Z, RhoD, SpaceGroup, LatticeConstant, and any `ImTransOpt` codes from the
+Transforms checkboxes) as **plain text laid out in multiple
 columns** so the wide-but-short panel stays readable — no table widget. The distortion
 `p0–p14` slots are labelled with their coefficient names (iso_R2, a1, phi1, …), and only
 the coefficients actually selected for that run are listed (not all 15), so the display
@@ -853,6 +886,9 @@ tab.
 
 ### Export
 **Save calibration.json** and **Save paramstest.txt** (standalone or from a template).
+Both carry the Transforms checkboxes' `ImTransOpt` codes (one `ImTransOpt <code>` line
+per checked transform in the `.txt`; an `im_trans` list in the `.json`), so reloading
+either file elsewhere restores the same detector orientation.
 
 ---
 

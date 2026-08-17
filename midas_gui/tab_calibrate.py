@@ -23,7 +23,7 @@ from midas_gui.constants import (
 from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _predict_ring_radii, _NoScrollComboBox,
     make_kedge_label, make_pixel_label, tilted_ring_xy,
-    widgets_to_dict, apply_dict_to_widgets)
+    widgets_to_dict, apply_dict_to_widgets, im_trans_codes_from_checkboxes)
 from midas_gui.widgets import (
     PickableImageViewer, ProfileViewer, LogPanel, ResidualBarChart, DataLoaderPanel)
 from midas_gui.workers import CalibrationWorker, IntegrationWorker
@@ -578,10 +578,19 @@ class CalibrationTab(QtWidgets.QWidget):
         self._seed_bcy.setValue(float(g["BC_y"]))
         self._seed_bcz.setValue(float(g["BC_z"]))
         self._seed_lsd.setValue(float(g["Lsd"]) / 1000.0)   # µm → mm display
+        im_trans = g.get("im_trans") or []
+        self._flip_y.setChecked(1 in im_trans)
+        self._flip_z.setChecked(2 in im_trans)
+        self._transp.setChecked(3 in im_trans)
         self._seed_note.setText(
             f"Loaded {Path(path).name}: λ={g['wavelength_A']:.5f} Å, px={g['pxY']:.2f} µm, "
             f"BC=({g['BC_y']:.2f}, {g['BC_z']:.2f}), Lsd={g['Lsd']/1000:.3f} mm.")
         self._log.append(f"Calibration file loaded: {path}")
+        if im_trans and im_trans != [c for c in (1, 2, 3) if c in im_trans]:
+            self._log.append(
+                f"Note: ImTransOpt order in file ({im_trans}) differs from the "
+                "fixed Flip Y → Flip Z → Transpose order used here; checkboxes "
+                "were set but may not exactly reproduce the file's composition.")
 
     def apply_geometry(self, g: dict):
         """Set λ / pixel size / seed BC + Lsd from a geometry dict (Data Viewer)."""
@@ -600,6 +609,11 @@ class CalibrationTab(QtWidgets.QWidget):
             self._seed_lsd.setValue(float(g["Lsd"]) / 1000.0)   # µm → mm display
         if g.get("ty") is not None:
             self._seed_ty.setValue(float(g["ty"]))
+        if g.get("im_trans") is not None:
+            im_trans = g["im_trans"] or []
+            self._flip_y.setChecked(1 in im_trans)
+            self._flip_z.setChecked(2 in im_trans)
+            self._transp.setChecked(3 in im_trans)
         if g.get("tz") is not None:
             self._seed_tz.setValue(float(g["tz"]))
         self._seed_note.setText(
@@ -663,10 +677,7 @@ class CalibrationTab(QtWidgets.QWidget):
         self._bot_tabs.setCurrentWidget(self._log)
         self._log.append("─" * 40 + f"\nStarting calibration ({mode})…")
 
-        trans = []
-        if self._flip_y.isChecked(): trans.append(1)
-        if self._flip_z.isChecked(): trans.append(2)
-        if self._transp.isChecked(): trans.append(3)
+        trans = im_trans_codes_from_checkboxes(self._flip_y, self._flip_z, self._transp)
 
         cfg = {
             "wavelength": self._wl.value(),
@@ -820,6 +831,8 @@ class CalibrationTab(QtWidgets.QWidget):
     def _on_done(self, result):
         if self._calib_cancelled:
             return   # user aborted — ignore the late result
+        result.im_trans = im_trans_codes_from_checkboxes(
+            self._flip_y, self._flip_z, self._transp)
         self._result = result
         if self._feedback_check.isChecked():
             try:
@@ -953,9 +966,8 @@ class CalibrationTab(QtWidgets.QWidget):
     def _run_integration(self, result):
         if self._int_worker and self._int_worker.isRunning():
             return
-        im_trans = tuple(t for flag, t in [
-            (self._flip_y.isChecked(), 1), (self._flip_z.isChecked(), 2),
-            (self._transp.isChecked(), 3)] if flag)
+        im_trans = tuple(im_trans_codes_from_checkboxes(
+            self._flip_y, self._flip_z, self._transp))
         self._int_worker = IntegrationWorker(
             result, self._calib_image(), self._loader.dark(), im_trans,
             r_bin=self._cal_r_bin.value(), eta_bin=self._cal_eta_bin.value(),
@@ -1021,6 +1033,11 @@ class CalibrationTab(QtWidgets.QWidget):
                 if ps_path:
                     with open(out_path, "a") as _f:
                         _f.write(f"PanelShiftsFile {ps_path}\n")
+                im_trans = getattr(self._result, "im_trans", None)
+                if im_trans:
+                    with open(out_path, "a") as _f:
+                        for code in im_trans:
+                            _f.write(f"ImTransOpt {int(code)}\n")
                 mode = "from template"
             else:
                 from midas_calibrate.params import CalibrationParams
