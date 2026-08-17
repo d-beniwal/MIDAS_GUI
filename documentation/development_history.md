@@ -99,6 +99,7 @@ Dates are commit dates (YYYY-MM-DD).
 | B-PILOT bridge: local-socket server auto-starts Live Data on scan dispatch | `c336778` |
 | ROI popups always-on-top + minimize-to-ribbon; Project-stack button green highlight | `6c79f13` |
 | ROI/histogram axis label font size bumped 9pt -> 12pt (readability) | `1181b58` |
+| Transforms: Flip Y/Flip Z/Transpose checkboxes (MIDAS ImTransOpt); saved/loaded calibration files round-trip it | `068bd0d` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -109,6 +110,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Stack browse menu gains "Files (multi-select)…" for hand-picked temporal stacks | `cc63d5a` |
 | "5 · Post-processing" card: configurable bad-pixel dilation (px) | `429d41a` |
 | Dilation switched from 4-connected to 8-neighbor full-block growth | `188ea77` |
+| Transforms: Flip Y/Flip Z/Transpose checkboxes (MIDAS ImTransOpt), applied to the single image and the stack source alike; synced from an incoming Calibrate result | `068bd0d` |
 
 ### Calibrate (Tab 2) / Refinement (Tab 3)
 | Change | Commit |
@@ -122,6 +124,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Pick-Ring fit overlay recolored blue (was same amber as simulated rings) | `3eb4a44` |
 | "Corrected" rings drawn synchronously from fitted ty/tz (drop background worker) | `5b8e3b3` |
 | One-shot honors partial distortion-coefficient selection; live dark/bright/bg preview | `cc6e90e` |
+| Existing Transforms checkboxes now round-trip through saved/loaded paramstest.txt + calibration.json (previously in-memory only) | `068bd0d` |
 
 ### Batch Integrate (Tab 4)
 | Change | Commit |
@@ -1732,6 +1735,84 @@ calibration run or a Data Loader field pick in this suite).
 **Roll back:** `git revert cc6e90e`. Self-contained — restores One-shot's
 all-or-none distortion refinement, the always-show-all-15 Results grid, and
 the raw (uncorrected) calibration preview until the next full data load.
+
+---
+
+### `068bd0d` — Add MIDAS ImTransOpt (image flip/transpose) support to Data Viewer + Mask tabs, persist in calibration files (2026-08-17)
+**Effect:** MIDAS's `ImTransOpt` image-transform parameter (repeatable
+integer code in `.txt` parameter files — `1`=flip-Y, `2`=flip-Z,
+`3`=transpose, applied in file order, interpreted *before* geometry/BC/Lsd)
+was previously only half-wired in: the Calibrate tab had three checkboxes
+("Flip Y" / "Flip Z" / "Transpose") that built an in-memory codes list
+applied to the calibration image/dark/bright/background via the shared
+`_apply_im_trans()`, but the codes were never written to or read back from
+any saved calibration file, and the Data Viewer and Mask Builder tabs had
+no transform controls at all.
+1. **`midas_gui/helpers.py`**: added `parse_im_trans(text)` (reads
+   repeatable `ImTransOpt <code>` lines from a paramstest, dropping an
+   explicit `0` no-op) and `im_trans_codes_from_checkboxes(flip_y, flip_z,
+   transp)` (the fixed flips-then-transpose ordering, shared by all three
+   tabs — replaces two previously-duplicated implementations in
+   `tab_calibrate.py`). `read_geometry()` and `geometry_fields_from_file()`
+   both now return an `im_trans` key (`[]` if absent) for all three
+   supported formats (paramstest, `.json`, `.poni` — the latter always
+   `[]`, no pyFAI equivalent). `write_standalone_paramstest()` now appends
+   one `ImTransOpt <code>` line per code from `getattr(result, "im_trans",
+   None)` after the main file write (same append-after-write pattern
+   already used for `PanelShiftsFile`).
+2. **Data Viewer** (`tab_view.py`): new "Transforms:" checkbox row in the
+   Ring-simulation/geometry card. Applied at all three points the tab
+   computes its current working frame (`_on_loader_data`,
+   `_on_fields_changed`, `_on_projection_done` — the latter caches the
+   untransformed projection output in a new `self._proj_raw` so toggling a
+   checkbox mid-projection recomputes from the untransformed source instead
+   of compounding transforms onto an already-transformed image).
+   `get_geometry()`/`set_geometry()` (the Data Viewer <-> Calibrate
+   push/pull) and `_export_geom()`/`_save_calibration()` (JSON/paramstest
+   export) all carry `im_trans` now; `_load_calibration()` restores the
+   checkboxes from a loaded file's `ImTransOpt`/`im_trans`.
+3. **Mask Builder** (`tab_mask.py`): same "Transforms:" row under the
+   Image card, applied in the single-image `_load_image()` and passed into
+   `MaskComputeWorker` (new `im_trans` constructor kwarg) for its
+   multi-file and HDF5 stack-source loading (`midas_gui/workers.py`,
+   applied per-frame in both branches). `set_calibration()` (the Calibrate
+   -> Mask hand-off) pre-checks Mask's boxes to match the incoming
+   `result.im_trans` (still user-overridable).
+4. **Calibrate tab** (`tab_calibrate.py`): the two duplicated
+   checkbox-to-codes blocks now call the shared helper;
+   `result.im_trans` is set when a run completes (`_on_done`) so it
+   flows into `_save_json()` (already dumps all non-underscore
+   `vars(result)`, so no change needed there), `_save_paramstest()`'s
+   standalone path (via the `write_standalone_paramstest()` change above)
+   and its template path (`ff_paramstest_from_auto_result()` is external
+   and untouched — `ImTransOpt` lines are appended manually afterward, the
+   same way `PanelShiftsFile` already was), and the on-screen paramstest
+   preview grid (`_paramstest_pairs()`, unchanged — it already renders
+   whatever `write_standalone_paramstest()` produces). `_load_calib_file()`
+   and `apply_geometry()` (Data Viewer -> Calibrate) restore the
+   checkboxes from a loaded/pushed `im_trans`, logging a note if a file's
+   `ImTransOpt` order doesn't match the fixed checkbox order (only matters
+   when transpose is combined with a flip, since flips commute with each
+   other but not with transpose — no real example file in the MIDAS repo
+   does this).
+5. All three tabs' `_state_widgets()` (Save/Load GUI State) gained
+   `flip_y`/`flip_z`/`transp` entries (Calibrate already had them).
+**Verified:** new `tests/test_im_trans.py` (19 cases — parsing, write/read
+round-trip, the checkbox-to-codes helper for all 8 combinations,
+`_apply_im_trans` composition order) plus targeted offscreen scripts
+confirming Data Viewer/Mask checkbox toggles actually flip/transpose the
+loaded array, and a full Calibrate-tab save-paramstest -> reload ->
+checkbox-state round trip. Full `pytest` suite: 43 passed, 2 deselected
+(the same pre-existing `test_app_builds_offscreen` config flakiness and
+full-suite-only `tab_pdf.py` pyqtgraph-teardown segfault logged in
+`.context/STATE.md`, both reconfirmed identical on unmodified `main`
+before this change).
+**Files:** `midas_gui/helpers.py`, `midas_gui/tab_calibrate.py`,
+`midas_gui/tab_view.py`, `midas_gui/tab_mask.py`, `midas_gui/workers.py`,
+`tests/test_im_trans.py`, `documentation/gui_documentation.md`.
+**Roll back:** `git revert 068bd0d`. Self-contained — restores the
+Calibrate-tab-only, in-memory-only `ImTransOpt` behavior and removes the
+Data Viewer/Mask transform controls.
 
 ---
 
