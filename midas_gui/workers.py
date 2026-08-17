@@ -630,7 +630,20 @@ class CalibrationWorker(QtCore.QThread):
             if mask is not None:
                 image = image.copy()
                 image[mask.astype(bool)] = 0.0   # zero sentinels before calibration
-            raw = calib.run_pipeline(self._mode, image, self._dark, self._cfg)
+            # Apply the Transforms checkboxes here, once, so the array handed to
+            # the pipeline matches what's displayed/picked in the GUI (same
+            # coordinate space as the seed BC). Clear cfg["im_trans"] afterwards
+            # so calib.run_pipeline's own internal per-branch transform (needed
+            # only when a caller hands it a raw image) doesn't double-apply it.
+            im_trans = tuple(self._cfg.get("im_trans", ()))
+            dark = self._dark
+            if im_trans:
+                image = _apply_im_trans(image, im_trans)
+                if dark is not None:
+                    dark = _apply_im_trans(dark.astype(np.float32), im_trans)
+                self._cfg = dict(self._cfg)
+                self._cfg["im_trans"] = ()
+            raw = calib.run_pipeline(self._mode, image, dark, self._cfg)
             NZ, NY = image.shape
             result = calib.normalize_result(
                 raw, self._mode, NY=NY, NZ=NZ,

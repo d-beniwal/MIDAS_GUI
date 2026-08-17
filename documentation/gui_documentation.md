@@ -3,7 +3,20 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-17 (Data Viewer, Mask Builder, and Calibrate tabs all
+**Last updated:** 2026-08-17 (Tab 2 — Calibrate: the **Transforms: Flip Y /
+Flip Z / Transpose** checkboxes now actually do something — toggling one
+live-updates the image preview and Pick BC/Pick Ring clicks land in that same
+transformed space, matching Data Viewer/Mask Builder; the calibration run
+itself now applies the identical transform to the calibrant image and Dark
+right before the pipeline call, fixing a real bug where several pipeline
+modes (Four-stage, Bayesian, Joint-cake, panel-layout, partial
+distortion-coefficient selection) silently transformed the image internally
+while the seed beam centre and detector dimensions stayed untransformed;
+**→ Send to Data Viewer** now carries the Transforms state too. Also: the
+Average frames card's **skip** (stride) control was removed — **start**/
+**end (0=all)** remain.)
+
+**Previously:** (2026-08-17, Data Viewer, Mask Builder, and Calibrate tabs all
 gain matching **Transforms: Flip Y / Flip Z / Transpose** checkboxes applying
 MIDAS's `ImTransOpt` image transform to the raw detector frame before
 display/masking/calibration; the Calibrate tab's existing transform controls
@@ -801,10 +814,15 @@ frame still feeds the actual calibration run, which applies these corrections it
 
 ### Detector, seed & Load calibration file
 The **Detector & Calibrant** card sets λ, pixel size(s) and detector transforms
-(**Flip Y / Flip Z / Transpose** — MIDAS's `ImTransOpt`, applied to the calibrant/
-dark/bright/background image before calibration and integration, in that fixed
-order); the **Initial seed** card sets the LM starting point (BC_y, BC_z, Lsd, **and
-tilts tx/ty/tz**). **Load calibration file…** (top of the Detector card) reads a MIDAS
+(**Flip Y / Flip Z / Transpose** — MIDAS's `ImTransOpt`, in that fixed order).
+Toggling a Transforms checkbox live-updates the image preview immediately, the
+same way Data Viewer and Mask Builder do; Pick BC / Pick Ring clicks are read
+straight off that (transformed) preview, so the seed beam centre always lands
+in the same coordinate space the fit will actually run in. The calibration run
+itself applies the identical transform (to the calibrant image and to Dark) right
+before handing the array to the pipeline, so a Flip/Transpose selection is now
+honoured by every pipeline mode, not just the display; the **Initial seed** card
+sets the LM starting point (BC_y, BC_z, Lsd, **and tilts tx/ty/tz**). **Load calibration file…** (top of the Detector card) reads a MIDAS
 **paramstest `.txt`**, a calibration **`.json`**, or a pyFAI **`.poni`** (auto-detected)
 and fills λ, pixel size, the seed BC + Lsd, and the Transforms checkboxes from any
 `ImTransOpt` lines — a fast way to start from a previous calibration or a known
@@ -822,8 +840,7 @@ tilts only if the installed backend exposes initial-tilt options.*
 ### Average frames
 For a multi-frame source (HDF5 / folder), **Average frames into a single image** builds
 the mean of a frame range and calibrates on that. **start** / **end (0 = all)** select
-the range and **skip** uses every Nth frame while averaging (e.g. skip = 2 averages
-every other frame). The card is disabled for single-frame sources; the preview updates
+the range. The card is disabled for single-frame sources; the preview updates
 live as the options change.
 
 ### Pipeline selector
@@ -878,9 +895,10 @@ the coefficients actually selected for that run are listed (not all 15), so the 
 matches what you asked to refine; the saved `paramstest.txt`/`.json` exports still carry
 every slot's real value, including any held-fixed value carried over from a prior
 calibration. A strain/timing line sits below. **→ Send to Data Viewer** pushes the *full*
-calibrated geometry (λ, pixel size, Lsd, beam centre, **tilts and distortion**) into the
-Data Viewer tab — where it drives the tilt/distortion-aware radial integration, not just
-circle binning — the reverse of the Data Viewer's "→ Send geometry to Calibrate". The
+calibrated geometry (λ, pixel size, Lsd, beam centre, **tilts, distortion, and the
+Transforms state**) into the Data Viewer tab — where it drives the tilt/distortion-aware
+radial integration, not just circle binning, and sets Data Viewer's own Flip/Transpose
+checkboxes to match — the reverse of the Data Viewer's "→ Send geometry to Calibrate". The
 bottom tab area is fully resizable (drag the horizontal splitter) and the Log fills its
 tab.
 

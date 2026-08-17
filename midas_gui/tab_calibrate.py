@@ -23,7 +23,8 @@ from midas_gui.constants import (
 from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _predict_ring_radii, _NoScrollComboBox,
     make_kedge_label, make_pixel_label, tilted_ring_xy,
-    widgets_to_dict, apply_dict_to_widgets, im_trans_codes_from_checkboxes)
+    widgets_to_dict, apply_dict_to_widgets, im_trans_codes_from_checkboxes,
+    _apply_im_trans)
 from midas_gui.widgets import (
     PickableImageViewer, ProfileViewer, LogPanel, ResidualBarChart, DataLoaderPanel)
 from midas_gui.workers import CalibrationWorker, IntegrationWorker
@@ -135,6 +136,8 @@ class CalibrationTab(QtWidgets.QWidget):
             (make_pixel_label(self._pxY, "Pixel:", also=self._pxZ_spin), prow)))
         self._flip_y = QtWidgets.QCheckBox("Flip Y"); self._flip_z = QtWidgets.QCheckBox("Flip Z")
         self._transp = QtWidgets.QCheckBox("Transpose")
+        for cb in (self._flip_y, self._flip_z, self._transp):
+            cb.toggled.connect(self._on_im_trans_changed)
         tb2 = QtWidgets.QHBoxLayout(); tb2.setSpacing(8)
         tb2.addWidget(self._flip_y); tb2.addWidget(self._flip_z); tb2.addWidget(self._transp); tb2.addStretch(1)
         det.body.addWidget(S.LabelRight("Transforms:")); det.body.addLayout(tb2)
@@ -170,25 +173,22 @@ class CalibrationTab(QtWidgets.QWidget):
         avgc = S.make_card("Average frames")
         self._avg_check = QtWidgets.QCheckBox("Average frames into a single image")
         self._avg_check.setToolTip(
-            "Average a range of frames (with an optional skip/stride) into one "
-            "image used for calibration. Requires a multi-frame source.")
+            "Average a range of frames into one image used for calibration. "
+            "Requires a multi-frame source.")
         avgc.body.addWidget(self._avg_check)
         self._avg_start = _NoScrollSpinBox(); self._avg_start.setRange(0, 999999)
         self._avg_end = _NoScrollSpinBox(); self._avg_end.setRange(0, 999999)
         self._avg_end.setToolTip("Last frame (exclusive). 0 = all frames.")
-        self._avg_step = _NoScrollSpinBox(); self._avg_step.setRange(1, 100000); self._avg_step.setValue(1)
-        self._avg_step.setToolTip("Skip: use every Nth frame while averaging.")
-        for w in (self._avg_start, self._avg_end, self._avg_step):
+        for w in (self._avg_start, self._avg_end):
             w.setEnabled(False)
         afm = S.Form(); afm.row(("start:", self._avg_start), ("end(0=all):", self._avg_end))
-        afm.row(("skip:", self._avg_step))
         avgc.body.addLayout(afm)
         self._avg_note = QtWidgets.QLabel("")
         self._avg_note.setStyleSheet("color:#9a9a9a;font-size:10px"); self._avg_note.setWordWrap(True)
         avgc.body.addWidget(self._avg_note)
         self._avg_card = avgc
         self._avg_check.toggled.connect(self._on_avg_toggled)
-        for w in (self._avg_start, self._avg_end, self._avg_step):
+        for w in (self._avg_start, self._avg_end):
             w.valueChanged.connect(self._on_avg_changed)
         lv.addWidget(avgc)
 
@@ -451,14 +451,16 @@ class CalibrationTab(QtWidgets.QWidget):
     def _source_image(self):
         """Base image for calibration: averaged frames if enabled, else current.
 
-        Deliberately raw (uncorrected) — this feeds both the on-screen preview
-        (via ``_show_calib_image``, which applies dark/bright/background itself
-        for display only) and the actual pipeline run, where ``CalibrationWorker``
-        applies bright/background and the backend subtracts dark internally.
-        Pre-correcting here would double-apply them for the real run."""
+        Deliberately raw (uncorrected, untransformed) — this feeds both the
+        on-screen preview (via ``_show_calib_image``, which applies dark/
+        bright/background and the Transforms checkboxes for display only) and
+        the actual pipeline run, where ``CalibrationWorker`` applies bright/
+        background, the same transform, and the backend subtracts dark
+        internally. Pre-correcting here would double-apply them for the real
+        run."""
         if self._avg_check.isChecked() and self._loader.n_frames() > 1:
             avg = self._loader.average_frames(
-                self._avg_start.value(), self._avg_end.value(), self._avg_step.value())
+                self._avg_start.value(), self._avg_end.value())
             if avg is not None:
                 return avg
         return self._loader.current_frame()
@@ -484,13 +486,12 @@ class CalibrationTab(QtWidgets.QWidget):
         start = self._avg_start.value()
         end = self._avg_end.value() or n
         end = min(end, n)
-        step = max(1, self._avg_step.value())
-        cnt = len(range(max(0, start), end, step))
+        cnt = len(range(max(0, start), end))
         self._avg_note.setText(f"{cnt} of {n} frames averaged (start={start}, "
-                               f"end={end}, skip={step}).")
+                               f"end={end}).")
 
     def _on_avg_toggled(self, on):
-        for w in (self._avg_start, self._avg_end, self._avg_step):
+        for w in (self._avg_start, self._avg_end):
             w.setEnabled(on)
         self._update_avg_note()
         self._image = self._source_image()
@@ -534,12 +535,26 @@ class CalibrationTab(QtWidgets.QWidget):
         self._seed_dist = dict(getattr(result, "distortion", {}) or {})
         self._seed_note.setText("Seed updated from the last calibration result.")
 
-    def _show_calib_image(self, autorange: bool = False):
-        """Render the preview, dark/bright/background-corrected for display only
-        (``self._image``/``_calib_image()`` stay raw — see ``_source_image``)."""
+    def _im_trans_codes(self) -> list:
+        """Ordered MIDAS ImTransOpt codes from the Transforms checkboxes."""
+        return im_trans_codes_from_checkboxes(self._flip_y, self._flip_z, self._transp)
+
+    def _on_im_trans_changed(self, *_):
+        """Transform checkbox toggled — refresh the preview to match. Beam-center
+        and ring-fit picks are read straight off the displayed array, so once it's
+        transformed here, picks land in transformed-pixel space automatically."""
         if self._image is not None:
-            self._img_view.set_image(self._loader.corrected(self._calib_image()),
-                                      autorange=autorange, reset_levels=autorange)
+            self._show_calib_image(autorange=False)
+
+    def _show_calib_image(self, autorange: bool = False):
+        """Render the preview: dark/bright/background-corrected and Transforms-
+        applied for display only (``self._image``/``_calib_image()`` stay raw —
+        see ``_source_image``). ``CalibrationWorker`` applies the same transform
+        to the array actually fed to the calibration pipeline."""
+        if self._image is not None:
+            img = self._loader.corrected(self._calib_image())
+            img = _apply_im_trans(img, self._im_trans_codes())
+            self._img_view.set_image(img, autorange=autorange, reset_levels=autorange)
 
     def _on_threshold_toggled(self, on: bool):
         for w in (self._thr_min, self._thr_max, self._thr_slider, self._thr_val):
@@ -824,7 +839,8 @@ class CalibrationTab(QtWidgets.QWidget):
             "tz": float(getattr(r, "tz", 0.0) or 0.0),
             "NrPixelsY": int(getattr(r, "NrPixelsY", 0) or 0),
             "NrPixelsZ": int(getattr(r, "NrPixelsZ", 0) or 0),
-            "distortion": dict(getattr(r, "distortion", {}) or {})})
+            "distortion": dict(getattr(r, "distortion", {}) or {}),
+            "im_trans": list(getattr(r, "im_trans", []) or [])})
         self._log.append("Sent calibrated geometry (incl. tilts + distortion) "
                          "to the Data Viewer.")
 
@@ -1092,7 +1108,6 @@ class CalibrationTab(QtWidgets.QWidget):
             "avg_check": self._avg_check,
             "avg_start": self._avg_start,
             "avg_end": self._avg_end,
-            "avg_step": self._avg_step,
             "manual_seed_check": self._manual_seed_check,
             "seed_bcy": self._seed_bcy,
             "seed_bcz": self._seed_bcz,
