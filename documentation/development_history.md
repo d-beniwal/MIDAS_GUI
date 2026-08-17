@@ -121,6 +121,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Fix calibrate() initial_BC_y TypeError (kwargs filter) + pin scikit-image | `b1642fa` |
 | Pick-Ring fit overlay recolored blue (was same amber as simulated rings) | `3eb4a44` |
 | "Corrected" rings drawn synchronously from fitted ty/tz (drop background worker) | `5b8e3b3` |
+| One-shot honors partial distortion-coefficient selection; live dark/bright/bg preview | `cc6e90e` |
 
 ### Batch Integrate (Tab 4)
 | Change | Commit |
@@ -1687,6 +1688,50 @@ behavior, or data changes.
 **Files:** `midas_gui/roi_tools.py`, `midas_gui/widgets.py`.
 **Roll back:** `git revert 1181b58`. Self-contained — restores the 9pt
 axis label font size.
+
+### `cc6e90e` — Calibrate tab: honor partial distortion-coefficient selection, live-update dark/bright/background preview (2026-08-16)
+**Effect:** Two Calibrate-tab (Tab 2) fixes:
+1. The **Distortion (n/15)** "…" per-coefficient dialog previously only
+   affected the Four-stage/advanced pipelines — One-shot silently ignored a
+   partial selection and refined all 15 coefficients regardless. `calib.py`'s
+   `run_pipeline()` now detects a strict subset selection on the `one_shot`
+   path and routes it through `midas_calibrate_v2.pipelines.single.
+   autocalibrate` (the same lower-level, per-p# `Refine`-dict routine the
+   other pipelines already use) instead of the high-level `calibrate()`,
+   which only exposes an all-or-nothing `refine_distortion` bool.
+   `normalize_result()` gained a matching branch (`raw.unpacked` present but
+   no `raw.stage2`) to normalize the resulting `CalibrationResult` the same
+   way `first_time`'s `pv.unpacked` case already does. Selecting "All (15)"
+   or leaving Distortion unchecked still runs the normal One-shot path.
+2. The Results tab's parameter grid now lists only the distortion
+   coefficients actually selected for the run that produced the displayed
+   result (`_last_dist_coeffs`, captured when the run starts), instead of
+   always showing all 15 `p0-p14` slots — so the display matches what was
+   asked to refine. The saved `paramstest.txt`/`.json` exports are
+   unaffected and still carry every slot's real value (including any
+   legitimately held-fixed nonzero value carried over from a prior
+   calibration).
+3. Unrelated same-commit fix: picking or changing a Dark, Bright, or
+   Background field in the shared Data Loader panel now immediately
+   refreshes the calibration image preview to the corrected frame
+   (`DataLoaderPanel.fieldsChanged` wired to a new `_on_fields_changed`,
+   mirroring the Data Viewer tab) — it previously kept showing the raw,
+   uncorrected frame until the next full data load. The raw image
+   (`self._image`) is untouched; only the on-screen render changes, since
+   `CalibrationWorker` still needs the raw frame for the actual pipeline
+   run (it and the backend apply bright/background/dark themselves).
+Verified via the full `pytest` suite — no new failures beyond the same two
+known pre-existing issues logged in `.context/STATE.md`
+(`test_app_builds_offscreen` config flakiness, and a full-suite-only
+pyqtgraph teardown segfault in `tab_pdf.py`), both reproduced identically
+and unchanged. No dedicated automated test covers the LM-fit coefficient
+routing or the live preview refresh (no offscreen harness drives an actual
+calibration run or a Data Loader field pick in this suite).
+**Files:** `midas_gui/calib.py`, `midas_gui/tab_calibrate.py`,
+`documentation/gui_documentation.md`.
+**Roll back:** `git revert cc6e90e`. Self-contained — restores One-shot's
+all-or-none distortion refinement, the always-show-all-15 Results grid, and
+the raw (uncorrected) calibration preview until the next full data load.
 
 ---
 
