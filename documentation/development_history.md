@@ -125,6 +125,7 @@ Dates are commit dates (YYYY-MM-DD).
 | "Corrected" rings drawn synchronously from fitted ty/tz (drop background worker) | `5b8e3b3` |
 | One-shot honors partial distortion-coefficient selection; live dark/bright/bg preview | `cc6e90e` |
 | Existing Transforms checkboxes now round-trip through saved/loaded paramstest.txt + calibration.json (previously in-memory only) | `068bd0d` |
+| Transforms checkboxes now live-update the preview and drive the actual calibration run (all pipeline modes); Send-to-Data-Viewer carries Transforms; Average frames drops the skip/stride control | `73a7a2a` |
 
 ### Batch Integrate (Tab 4)
 | Change | Commit |
@@ -1813,6 +1814,53 @@ before this change).
 **Roll back:** `git revert 068bd0d`. Self-contained — restores the
 Calibrate-tab-only, in-memory-only `ImTransOpt` behavior and removes the
 Data Viewer/Mask transform controls.
+
+---
+
+### `73a7a2a` — Calibrate tab: Transforms checkboxes now live-update preview and drive the actual calibration run (2026-08-17)
+**Effect:** `068bd0d` made the Calibrate tab's Transforms checkboxes
+round-trip through saved/loaded calibration files, but toggling one still
+did nothing to the on-screen preview or the actual calibration run — the
+displayed/picked-on image and the array handed to the pipeline stayed
+untransformed regardless of the checkboxes. Two fixes:
+1. **Live preview + picks.** The three checkboxes now call
+   `_on_im_trans_changed()` on toggle, which re-renders `_show_calib_image()`
+   through the same `_apply_im_trans()` helper Data Viewer/Mask use. Since
+   Pick BC / Pick Ring read coordinates straight off the displayed
+   `PickableImageViewer` array, picks now automatically land in the
+   transformed coordinate space instead of the untransformed one — matching
+   Data Viewer and Mask Builder's behavior.
+2. **Actual calibration run.** `CalibrationWorker.run()` previously passed
+   `cfg["im_trans"]` straight to `calib.run_pipeline()`, which only applies
+   it internally on some code paths — Four-stage, Bayesian, Joint-cake,
+   panel-layout, and partial-distortion-coefficient runs (`cc6e90e`) all
+   silently ignored it, so the fitted beam centre/detector dimensions never
+   matched a transformed image. The worker now applies `_apply_im_trans()`
+   to the calibrant image and to Dark itself, once, right before the
+   pipeline call, then clears `cfg["im_trans"]` so `run_pipeline`'s own
+   internal transform (meant for callers handing it a raw image directly)
+   doesn't double-apply it.
+3. **Send to Data Viewer** now also carries `im_trans` in the geometry dict
+   handed to Data Viewer, so its own Flip/Transpose checkboxes sync to
+   match the calibration that produced the sent geometry (previously only
+   λ/pixel size/Lsd/BC/tilts/distortion made the trip).
+4. Unrelated same-commit cleanup: the Average frames card's **skip**
+   (stride) spinbox was removed — it added a rarely-used degree of freedom
+   that made the averaged-frame count harder to reason about; **start**/
+   **end (0=all)** remain.
+**Verified:** full `pytest` suite — 43 passed, 2 deselected (the same two
+pre-existing issues logged in `.context/STATE.md`:
+`test_app_builds_offscreen` config flakiness and the full-suite-only
+`tab_pdf.py` pyqtgraph-teardown segfault). No dedicated automated test
+covers the live preview refresh or the worker's transform-before-pipeline
+change (no offscreen harness drives an actual calibration run in this
+suite).
+**Files:** `midas_gui/tab_calibrate.py`, `midas_gui/workers.py`,
+`documentation/gui_documentation.md`.
+**Roll back:** `git revert 73a7a2a`. Self-contained — restores the
+untransformed live preview/picks, `run_pipeline`'s own (partial) internal
+transform handling, the Send-to-Data-Viewer payload without `im_trans`, and
+the Average frames skip/stride control.
 
 ---
 
