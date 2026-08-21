@@ -48,6 +48,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Pin environment.yml to verified NumPy-1 set + README recreate steps | `68313f8` |
 | Upgrade midas-hkls/midas-calibrate-v2; midas-pdf switched vendored→PyPI | `acb43c1` |
 | PyQt5 moved pip→conda-forge (fixes beamline silent startup hang) | `97ae1ea` |
+| Add pip `requirements.txt` mirroring `environment.yml` + README pip path | `683d150` |
 
 ### Data Viewer (Tab 0)
 | Change | Commit |
@@ -1861,6 +1862,30 @@ suite).
 untransformed live preview/picks, `run_pipeline`'s own (partial) internal
 transform handling, the Send-to-Data-Viewer payload without `im_trans`, and
 the Average frames skip/stride control.
+
+---
+
+### `683d150` — Add pip requirements.txt mirroring environment.yml + README pip install path (2026-08-21)
+**Effect:** `midas-gui` previously only documented a conda install path
+(`environment.yml`); users without conda had no supported way to reproduce
+the pinned dependency set with plain pip. Added `requirements.txt` at the
+repo root, generated from `environment.yml`'s pinned versions (matches the
+same versions already declared in `pyproject.toml`'s `dependencies`), and a
+new "Alternative: pip only (no conda)" section in the README with the
+`venv` + `pip install -r requirements.txt` commands. Carried over both of
+`environment.yml`'s load-bearing warnings as comments: the numpy 1.26.4 /
+numba 0.59.1 / torch 2.4.0 NumPy-1 compatibility pin, and the PyQt5 pip
+wheel's known xcb-library silent-startup-hang risk on Linux (with the
+`apt install libxcb-cursor0` workaround) versus conda-forge's self-contained
+Qt build.
+**Verified:** `pip install -r requirements.txt` was not run against a fresh
+environment in this session (no isolated network/venv sandbox available
+here); version pins were cross-checked line-by-line against `environment.yml`
+and `pyproject.toml`'s `dependencies` list instead, which already match.
+**Files:** `requirements.txt` (new), `README.md`.
+**Roll back:** `git revert 683d150`. Purely additive/documentation — safe to
+revert standalone; removes the pip install path and leaves conda as the only
+documented route.
 
 ---
 
