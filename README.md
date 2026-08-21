@@ -59,6 +59,25 @@ python launch.py
 > CPU-only install, after the environment is created run:
 > `pip install torch==2.4.0 --index-url https://download.pytorch.org/whl/cpu`
 
+**Alternative: pip only (no conda).** `requirements.txt` mirrors
+`environment.yml`'s pinned versions for a plain `venv` + pip workflow:
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate      # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+python launch.py
+```
+
+> **PyQt5 note:** `environment.yml` installs Qt bindings from conda-forge
+> instead of pip's `PyQt5` wheel because the pip wheel has caused a silent
+> startup hang on at least one Linux beamline workstation (missing
+> `libxcb-cursor.so.0` and related xcb system libraries that conda-forge's
+> build vendors but the pip wheel dlopens from the system instead). If
+> `python launch.py` hangs at startup with the pip install above, either use
+> the conda path instead or install the missing system libraries (e.g. on
+> Debian/Ubuntu: `apt install libxcb-cursor0`).
+
 The app auto-loads bundled synthetic test data (`test_data/`) on startup when
 present, so it's immediately usable after checkout — no dataset of your own
 required to explore the tabs.

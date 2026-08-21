@@ -1,0 +1,63 @@
+# Pip requirements for midas-gui, generated from environment.yml.
+#
+# Fully pinned to the verified-working set. The key compatibility constraint:
+# numba 0.59.x requires NumPy < 2.1 and torch 2.4.0 targets NumPy 1.x, so numpy
+# is pinned to 1.26.4 and the MIDAS backends to their NumPy-1-era releases. Do
+# NOT bump numpy to 2.x here without also moving torch to >=2.3 and the
+# backends to their newer (numba 0.66 / NumPy-2) releases — mixing the two
+# families breaks `torch.from_numpy` ("Numpy is not available").
+#
+# NOTE on PyQt5: environment.yml installs Qt bindings from conda-forge (not
+# pip) because the pip PyQt5 wheel bundles its own Qt5 libs but dlopens
+# xcb-side system libraries (e.g. libxcb-cursor.so.0, required since
+# PyQt5-Qt5 5.15.9+) at runtime instead of vendoring them. On at least one
+# beamline Linux workstation this caused a silent startup hang (no error,
+# unresponsive to Ctrl+C — a native deadlock inside Qt's xcb platform plugin).
+# If you hit that with the pip wheel below, use a conda/mamba env with
+# environment.yml instead, or `apt install` the missing libxcb/xcb-util-cursor/
+# libxkbcommon-x11 system libraries.
+
+# ── Scientific stack ────────────────────────────────────────────────────────
+numpy==1.26.4
+scipy==1.13.1
+h5py==3.11.0
+tifffile==2023.4.12
+scikit-image==0.23.2          # used by midas-calibrate-v2's auto_seed_calibrant
+                               # (better ring seeding; without it calibration
+                               # falls back to a coarser arc seed)
+
+# ── GUI ──────────────────────────────────────────────────────────────────────
+PyQt5==5.15.10
+pyqtgraph==0.14.0
+matplotlib==3.8.4             # supplies pyqtgraph's named colormaps (hot/viridis/…)
+
+# ── PyTorch — CPU build. 2.4.0 works with NumPy 1.26. On Linux/Windows this
+#    pulls the default PyPI wheel; for a smaller CPU-only download there, use
+#    instead: pip install torch==2.4.0 --index-url https://download.pytorch.org/whl/cpu
+torch==2.4.0
+numba==0.59.1                 # NumPy-1.x compatible JIT (pin: newer numba needs NumPy>=2.1)
+
+# pvapy backs the Data Viewer's "Live Data" card (subscribes to an EPICS PVA
+# image PV and renders frames straight in the Data Viewer's own image pane).
+# Pinned to 5.4.1, NOT latest: 5.5.0+ requires numpy>=2.0, which would
+# silently upgrade the numpy==1.26.4 pin above and break numba/torch
+# compatibility. 5.4.1 declares numpy<2.0,>=1.26, already satisfied above.
+pvapy==5.4.1
+
+# ── MIDAS analysis backends (exact verified-working versions; still NumPy-1
+#    compatible against numpy 1.26.4 + numba 0.59.1) ─────────────────────────
+midas-calibrate-v2==0.5.3
+midas-integrate-v2==0.3.1
+midas-calibrate==0.2.7
+midas-hkls==0.7.0
+midas-distortion==0.2.0
+midas-pdf==0.1.1               # Faber-Ziman PDF reduction used by the PDF tab
+
+# ── Transitive MIDAS deps pinned explicitly (pulled in by midas-calibrate-v2 /
+#    midas-pdf but not imported by midas_gui directly) — pinned for
+#    reproducible, verified-working installs rather than leaving them to float ─
+midas-integrate==0.4.2
+midas-peakfit==0.5.0
+midas-zipper==0.1.5
+hdf5plugin==7.0.0
+psutil==7.2.2
