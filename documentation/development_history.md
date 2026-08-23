@@ -104,6 +104,7 @@ Dates are commit dates (YYYY-MM-DD).
 | ROI/histogram axis label font size bumped 9pt -> 12pt (readability) | `1181b58` |
 | Transforms: Flip Y/Flip Z/Transpose checkboxes (MIDAS ImTransOpt); saved/loaded calibration files round-trip it | `068bd0d` |
 | Image origin flipped to bottom-left `(0,0)` (MIDAS convention); ROI box-corner annotations now label the bottom-left corner | `246dba7` |
+| Hydra-mode ribbon scaffold (Single detector/Hydra); ring-sim/calibration/radial logic extracted into DetectorGeometryCard | `3d2d99d` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -1986,6 +1987,46 @@ pre-existing `test_app_builds_offscreen` flakiness, unrelated).
 **Files:** `midas_gui/constants.py`.
 **Roll back:** `git revert 3b785c9`. Self-contained — restores the stale
 repo-root paths (breaking default-data preload again).
+
+---
+
+### `3d2d99d` — Data Viewer: add Hydra-mode ribbon scaffold; extract DetectorGeometryCard (2026-08-23)
+**Effect:** First step of the Hydra (4-panel GE detector) viewer feature.
+Added a leftmost vertical mode ribbon (`HydraModeRibbon`,
+`hydra_widgets.py`) to the Data Viewer tab with two exclusive modes:
+**Single detector** (today's existing view — now "page 0" of a new
+`QStackedWidget`, behavior unchanged) and **Hydra** (a placeholder "coming
+soon" page). Also extracted the ring-simulation, calibration load/save, and
+radial-integration logic (~700 lines: materials list, `MaterialDialog`,
+tilted-ring drawing, beam-centre pick/ring-fit handling, the MIDAS-engine
+and circle-binning radial integration paths, calibration file read/write)
+out of `DataViewerTab` into a new reusable `DetectorGeometryCard` widget
+(`hydra_geometry_card.py`). The card is bindable rather than
+hard-wired — `set_viewer`/`set_profile_view`/`set_image_source`/
+`set_radial_controls` let it attach to whichever image viewer, radial plot,
+and frame source it should currently act on, and `set_viewer` cleanly
+clears its overlays off a previous viewer before attaching to a new one —
+so the same class can later be instantiated once per Hydra panel (ge1-4 +
+composite) without duplicating this logic five times. `DataViewerTab` keeps
+its external API (`get_geometry`/`set_geometry`/`pushGeometry`) as thin
+delegates to the card, so `app.py`'s Data-Viewer-to-Calibrate geometry
+hand-off wiring needed no changes. Saved-GUI-state JSON shape is unchanged
+(the card's fields are merged into the same flat `fields` dict Save/Load
+GUI State already used) for backward compatibility with existing saved
+sessions.
+**Verified:** the extraction (page 0) was checked against the pre-refactor
+code with an offscreen pixel-diff of the rendered tab (ring simulation +
+calibration load + radial integration all exercised) — only a 6px-wide
+cosmetic sliver at the very left edge differs (a margin artifact from the
+new ribbon itself, not a content regression); full pytest re-run (same
+single pre-existing, unrelated `test_smoke.py` `visible_tabs` flake). The
+Hydra page itself is not yet functional — no visual/behavioral change there
+beyond the placeholder label.
+**Files:** `midas_gui/tab_view.py`, `midas_gui/hydra_geometry_card.py` (new),
+`midas_gui/hydra_widgets.py` (new), `documentation/gui_documentation.md`.
+**Roll back:** `git revert 3d2d99d`. Self-contained — restores the
+single-page Data Viewer tab with the ring-sim/calibration/radial logic
+inline.
 
 ---
 
