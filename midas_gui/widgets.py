@@ -124,6 +124,12 @@ class ImageViewer(QtWidgets.QWidget):
         vb = self._iv.getView().getViewBox()
         vb.setMouseEnabled(x=True, y=True)
         vb.setMouseMode(pg.ViewBox.PanMode)
+        # pg.ImageView.__init__ calls view.invertY() internally, putting
+        # pixel row 0 at the top of the screen. MIDAS convention places
+        # detector (0,0) at the bottom-left, so the on-screen image matches
+        # the physical world view of the detector looking downstream from
+        # the sample along the beam. Override that default here.
+        vb.invertY(False)
         layout.addWidget(self._iv, stretch=1)
 
         # Crosshair

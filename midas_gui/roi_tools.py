@@ -208,11 +208,13 @@ class ROIStatsPopup(QtWidgets.QDialog):
             self._crop_vb = crop_view.getViewBox()
             self._crop_vb.setAspectLocked(True)
             self._crop_vb.setMenuEnabled(False)
-            # Match the main image viewer's convention (pg.ImageView calls
-            # view.invertY() so row 0 sits at the top / origin top-left);
-            # this plain PlotWidget defaults to Y-up, which flipped the crop
-            # vertically relative to what's drawn in the data viewer.
-            self._crop_vb.invertY(True)
+            # Match the main image viewer's convention (ImageViewer.__init__
+            # overrides pg.ImageView's default invertY so row 0 sits at the
+            # bottom / origin bottom-left, per MIDAS convention); this plain
+            # PlotWidget already defaults to that same Y-up orientation, but
+            # keep the call explicit so the intent doesn't depend on pyqtgraph's
+            # own default staying what it is today.
+            self._crop_vb.invertY(False)
             self._crop_img = pg.ImageItem()
             crop_view.addItem(self._crop_img)
             self._bad_overlay = pg.ImageItem()
@@ -683,18 +685,20 @@ class ROIImageViewer(PickableImageViewer):
 
     def _on_roi_geom_changed(self, entry: dict):
         if entry["kind"] == "box":
-            # roi.pos() is the box's actual top-left corner in parent
-            # (view) coordinates. For a line ROI it isn't — see
+            # roi.pos() is the box's corner at minimum (x, y) in parent
+            # (view) coordinates — the visual bottom-left corner under the
+            # bottom-left-origin convention. For a line ROI it isn't — see
             # _update_line_arrow, which positions that label instead.
             entry["label_item"].setPos(entry["roi"].pos())
             self._update_roi_annotations(entry)
         self._refresh_roi_stats(entry)
 
     def _update_roi_annotations(self, entry: dict):
-        """Position/text the top-left-corner coordinate, width, and height
-        labels for a box ROI against its current geometry. Called on both
-        creation and every move/resize (sigRegionChanged fires on resize
-        too, not just drag-move)."""
+        """Position/text the origin-corner (minimum x, y — the visual
+        bottom-left corner) coordinate, width, and height labels for a box
+        ROI against its current geometry. Called on both creation and every
+        move/resize (sigRegionChanged fires on resize too, not just
+        drag-move)."""
         roi = entry["roi"]
         pos, size = roi.pos(), roi.size()
         x0, y0, w, h = pos.x(), pos.y(), size.x(), size.y()

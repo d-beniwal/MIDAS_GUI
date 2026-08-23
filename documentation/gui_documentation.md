@@ -3,7 +3,17 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-17 (Tab 2 — Calibrate: the **Transforms: Flip Y /
+**Last updated:** 2026-08-23 (All detector-image viewers — Data Viewer, Mask
+Builder, Calibrate — now draw pixel `(0, 0)` at the **bottom-left** corner
+instead of the top-left, matching MIDAS's convention that the on-screen
+image match the physical world view of the detector when looking downstream
+from the sample along the beam direction. This is a display-only rendering
+change (`pg.ImageView`'s own default `invertY()` is overridden); it is
+independent of the **Transforms** checkboxes and the `ImTransOpt` data
+transform, which are unchanged. The Data Viewer ROI tool's box annotations
+now label the bottom-left corner (was top-left).)
+
+**Previously:** (2026-08-17, Tab 2 — Calibrate: the **Transforms: Flip Y /
 Flip Z / Transpose** checkboxes now actually do something — toggling one
 live-updates the image preview and Pick BC/Pick Ring clicks land in that same
 transformed space, matching Data Viewer/Mask Builder; the calibration run
@@ -14,9 +24,7 @@ distortion-coefficient selection) silently transformed the image internally
 while the seed beam centre and detector dimensions stayed untransformed;
 **→ Send to Data Viewer** now carries the Transforms state too. Also: the
 Average frames card's **skip** (stride) control was removed — **start**/
-**end (0=all)** remain.)
-
-**Previously:** (2026-08-17, Data Viewer, Mask Builder, and Calibrate tabs all
+**end (0=all)** remain.) (2026-08-17, Data Viewer, Mask Builder, and Calibrate tabs all
 gain matching **Transforms: Flip Y / Flip Z / Transpose** checkboxes applying
 MIDAS's `ImTransOpt` image transform to the raw detector frame before
 display/masking/calibration; the Calibrate tab's existing transform controls
@@ -239,6 +247,18 @@ midas_gui/
 ├── dialogs.py        save dialogs
 └── tab_*.py          one module per tab
 ```
+
+**Image orientation.** Every detector-image viewer (Data Viewer, Mask
+Builder, Calibrate) draws pixel `(0, 0)` at the **bottom-left** corner,
+matching MIDAS's own convention: the on-screen image then matches the
+physical world view of the detector when looking downstream from the
+sample along the beam direction. This is a display-only convention,
+separate from the **Transforms** (Flip Y / Flip Z / Transpose) checkboxes
+found in Data Viewer, Mask Builder, and Calibrate — those still flip or
+transpose the underlying pixel *data* itself (persisted as MIDAS's
+`ImTransOpt` in saved calibration files) to correct a detector's raw
+readout orientation, independent of which corner the GUI renders as the
+origin.
 
 **Layout pattern.** The four analysis tabs — **0 Data Viewer, 2 Calibrate, 3 Calib.
 Refinement, 4 Batch Integrate** — use a **three-panel layout**:
@@ -579,7 +599,7 @@ default.
 
 A **box** ROI additionally shows its pixel geometry directly on the image,
 in the ROI's color, updating live while it's dragged or resized: the
-top-left corner's `(x, y)` coordinate (rounded to the nearest whole pixel)
+bottom-left corner's `(x, y)` coordinate (rounded to the nearest whole pixel)
 next to that corner, `w = ...` below the bottom edge, and `h = ...` to the
 right of the right edge (also rounded to whole pixels — no fractional-pixel
 values are shown). A **line** ROI shows its length in pixels (`NN px`,
