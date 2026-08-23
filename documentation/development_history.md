@@ -195,6 +195,7 @@ Dates are commit dates (YYYY-MM-DD).
 | implementation_details.md/.pdf added | `524f5f1` |
 | config_gui.md + config.example.json added | `d30be2c` |
 | development_history.md/.pdf added | `6d6f3fb` |
+| Commit `.context/` (was gitignored, contradicting standing policy) | `778a2f3` |
 
 ---
 
@@ -2078,6 +2079,24 @@ pre-existing, unrelated `test_smoke.py` flake.
 **Roll back:** `git revert dd44f38`. Self-contained — no other code
 references `hydra.py` yet (the Hydra page UI that will consume it lands in
 a follow-up commit).
+
+---
+
+### `778a2f3` — Commit .context/ per global policy (2026-08-23)
+**Effect:** `.context/` (STATE/DECISIONS/ARCHITECTURE/DOMAIN/ROADMAP + the
+midas_pdf reference stack) had been listed in `.gitignore` since this repo's
+early history, contradicting the standing global-CLAUDE.md rule that this
+folder always travels with the repo (so accumulated project knowledge/
+decisions survive across machines and clones). Removed the `.gitignore`
+rule and committed the folder as-is. Also formalized
+`/test_data/s1ide/` (real, local-only CeO2 Hydra calibration data, used
+read-only this session with explicit user approval for the Hydra
+compositing verification — see `dd44f38`) as gitignored, matching how it
+had already been treated all along (never committed, never a pytest
+dependency).
+**Files:** `.gitignore`, `.context/*` (new).
+**Roll back:** `git revert 778a2f3`. Self-contained, though reverting would
+re-orphan `.context/` from version control going forward.
 
 ---
 
