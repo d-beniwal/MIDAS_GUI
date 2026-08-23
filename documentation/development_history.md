@@ -105,6 +105,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Transforms: Flip Y/Flip Z/Transpose checkboxes (MIDAS ImTransOpt); saved/loaded calibration files round-trip it | `068bd0d` |
 | Image origin flipped to bottom-left `(0,0)` (MIDAS convention); ROI box-corner annotations now label the bottom-left corner | `246dba7` |
 | Hydra-mode ribbon scaffold (Single detector/Hydra); ring-sim/calibration/radial logic extracted into DetectorGeometryCard | `3d2d99d` |
+| Hydra geometry-compositing engine (`hydra.py`) + sibling auto-discovery + tests | `dd44f38` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -2027,6 +2028,56 @@ beyond the placeholder label.
 **Roll back:** `git revert 3d2d99d`. Self-contained — restores the
 single-page Data Viewer tab with the ring-sim/calibration/radial logic
 inline.
+
+---
+
+### `dd44f38` — Hydra: geometry-compositing engine + sibling auto-discovery + tests (2026-08-23)
+**Effect:** Adds `midas_gui/hydra.py`, the windmill-compositing math for the
+1-ID-E Hydra detector (4x GE panels): `compute_inv_coords`/
+`remap_to_composite`/`composite`/`autopick_big_det_size`/`DetectorState`/
+`build_windmill_composite`, ported from a sibling project's own port of
+JSP's `multidet.py`. `DetectorState.load_from_geometry_dict` consumes this
+repo's own `helpers.geometry_fields_from_file` (already used by the
+Calibrate/Data-Viewer calibration-load UI) instead of a bespoke per-panel
+parser — the ported files' bundled param-file parser was intentionally not
+carried over. Bundled default geometry
+(`hydra_default_geometry/ps_ge{1..4}.txt`, a generic 1-ID-E-style example
+windmill layout) seeds a panel with no calibration loaded yet. Adds
+`helpers.hydra_panel_index`/`hydra_siblings` — given any one GE panel's file
+path, finds the other 3 by substituting the `geN` token (handles both a
+`geN/` folder segment and a `.geN.` filename infix, this beamline's actual
+naming convention). Fixed a latent staleness bug in
+`build_windmill_composite`'s `BigDetSize` cache (found during testing): it
+was keyed only by which panel numbers were present, so it kept returning a
+stale canvas size after a panel's geometry changed (e.g. a new calibration
+file) for the same panel set — now keyed by each panel's actual
+BC/tx/px/size too.
+**Verified:** cross-checked against real local (uncommitted, gitignored)
+`test_data/s1ide` CeO2 Hydra data — the composite matches the reference
+project's own reported result (6656px canvas, 0% NaN, correct pinwheel
+arrangement), and rendering with the real fitted per-panel calibration
+shows Debye-Scherrer rings stitching into continuous arcs across all 4
+panel boundaries — the physically-grounded confirmation that no
+chirality/mirroring error exists. This resolved an open question from the
+reference project (whose own custom viewer needed an X-mirror for its
+composite) — this codebase's `pg.ImageView`-based viewers need no such
+correction; full reasoning in `.context/DECISIONS.md`. Added a committed
+synthetic fixture (`test_data/gui_synthetic/hydra/`, 4 small 256x256 panels
+with a known idealized geometry, tx values deliberately not exact multiples
+of 90° so a sign error can't alias one panel's marker onto another's) and
+two new permanent test files: `tests/test_hydra_geometry.py` (12 tests:
+sibling discovery, `DetectorState`, bundled-default parsing, an
+independently-hand-derived-math marker-position check) and
+`tests/test_hydra_chirality.py` (the same marker check rendered through the
+real `ROIImageViewer` via `widget.grab()` — a permanent regression guard,
+not just a one-off manual check). Full pytest suite: same single
+pre-existing, unrelated `test_smoke.py` flake.
+**Files:** `midas_gui/hydra.py` (new), `midas_gui/hydra_default_geometry/*`
+(new), `midas_gui/helpers.py`, `test_data/gui_synthetic/hydra/*` (new),
+`tests/test_hydra_geometry.py` (new), `tests/test_hydra_chirality.py` (new).
+**Roll back:** `git revert dd44f38`. Self-contained — no other code
+references `hydra.py` yet (the Hydra page UI that will consume it lands in
+a follow-up commit).
 
 ---
 
