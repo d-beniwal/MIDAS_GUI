@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import math
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -86,6 +87,36 @@ def _apply_im_trans(image: np.ndarray, codes: tuple) -> np.ndarray:
         elif c == 3:
             image = image.T
     return np.ascontiguousarray(image)
+
+
+# ── Hydra (4-panel GE detector) sibling-file auto-discovery ────────────────────
+
+_HYDRA_PANEL_RE = re.compile(r"\bge([1-4])\b", re.IGNORECASE)
+
+
+def hydra_panel_index(path: str) -> Optional[int]:
+    """Return the Hydra panel number (1-4) encoded in `path`, or None.
+
+    Matches a `geN` token as a whole word, e.g. the `ge1` folder or the
+    `.ge1.` filename infix used by this beamline's naming convention (both
+    can appear in the same path, e.g. `.../ge1/scan_002020.ge1.h5`)."""
+    m = _HYDRA_PANEL_RE.search(Path(path).as_posix())
+    return int(m.group(1)) if m else None
+
+
+def hydra_siblings(path: str) -> dict:
+    """Find the sibling ge1-ge4 files for `path` by substituting every
+    `geN` token with `geM`. Returns only paths that exist on disk (may be
+    fewer than 4 — e.g. a shot that wasn't saved for every panel)."""
+    n = hydra_panel_index(path)
+    if n is None:
+        return {}
+    out = {}
+    for m in range(1, 5):
+        cand = _HYDRA_PANEL_RE.sub(f"ge{m}", path)
+        if Path(cand).exists():
+            out[m] = cand
+    return out
 
 
 def im_trans_codes_from_checkboxes(flip_y, flip_z, transp) -> list:

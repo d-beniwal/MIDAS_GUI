@@ -1,0 +1,11 @@
+Wavelength 1.0
+SpaceGroup 225
+Lsd 1000000.0
+BC 128.0 128.0
+px 200.0
+NrPixelsY 256
+NrPixelsZ 256
+tx 195.0
+ty 0.0
+tz 0.0
+ImTransOpt 0
