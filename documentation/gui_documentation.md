@@ -1314,9 +1314,9 @@ The tab uses the same three-panel layout as Batch Integrate: **data loader** (le
 
 **Left — data loader** (the shared loader panel, as on Calibrate / Batch):
 - **Data** — the folder of raw frames. Defaults to the bundled TRR test set in
-  `test_data_pump_probe/detimages/` (125 Pilatus2M frames; a large, git-ignored local
-  asset), so the tab is populated on open. An index range / stride can subset the pooled
-  frames.
+  `test_data/trr_s7id/pump_probe_BTO/detimages/` (125 Pilatus2M frames; a large,
+  git-ignored local asset), so the tab is populated on open. An index range / stride
+  can subset the pooled frames.
 - **Dark / Bright / Background** — per-frame field corrections (compute each field, then
   it is applied to every frame before integration).
 - **Mask** — a mask file and/or the mask from the Mask Builder tab. For the TRR data the

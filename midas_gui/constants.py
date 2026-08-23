@@ -226,10 +226,10 @@ DEFAULT_DEVICES = [
 DEVICES = [dict(d) for d in DEFAULT_DEVICES]
 
 # ── Pump Probe (TR-XRD) defaults — TRR-group time-resolved test data ────────────
-# The frames (~1.2 GB) live in a local-only, git-ignored folder at the repo root
-# (test_data_pump_probe/) rather than the committed test_data/ so the large detector
-# stack never enters git. See .gitignore and documentation/gui_documentation.md.
-_TEST_DATA_PP        = _Path(__file__).resolve().parent.parent / "test_data_pump_probe"
+# The frames (~1.2 GB) live in a local-only, git-ignored folder under test_data/
+# (test_data/trr_s7id/pump_probe_BTO/) so the large detector stack never enters
+# git. See .gitignore and documentation/gui_documentation.md.
+_TEST_DATA_PP        = _TEST_DATA / "trr_s7id" / "pump_probe_BTO"
 DEFAULT_TRXRD_DIR    = str(_TEST_DATA_PP / "detimages")
 DEFAULT_TRXRD_PREFIX = "Ex01_Sa01_Sc17"
 # MIDAS calibration for the TRR Pilatus2M data (converted from its pyFAI/Fit2D

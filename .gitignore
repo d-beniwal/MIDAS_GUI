@@ -59,38 +59,30 @@ claude/
 CLAUDE.md
 
 # ── Shipped sample data ──────────────────────────────────────────────────────
-# test_data/ ships with the repo so the GUI works out of the box. Re-include its
-# data files despite the global *.tif/*.h5/... ignores above (order matters — these
-# negations come last). Generated outputs and scratch files stay ignored.
-!test_data/**/*.tif
-!test_data/**/*.tiff
-!test_data/**/*.h5
-!test_data/**/*.hdf5
-!test_data/**/*.json
-!test_data/**/*.csv
-!test_data/**/*.txt
-!test_data/**/*.py
-!test_data/**/*.png
+# Only test_data/gui_synthetic/ ships with the repo so the GUI works out of the
+# box. Re-include its data files despite the global *.tif/*.h5/... ignores above
+# (order matters — these negations come last). Everything else under test_data/
+# is a local-only dataset and stays ignored.
+!test_data/gui_synthetic/**/*.tif
+!test_data/gui_synthetic/**/*.tiff
+!test_data/gui_synthetic/**/*.h5
+!test_data/gui_synthetic/**/*.hdf5
+!test_data/gui_synthetic/**/*.json
+!test_data/gui_synthetic/**/*.csv
+!test_data/gui_synthetic/**/*.txt
+!test_data/gui_synthetic/**/*.py
+!test_data/gui_synthetic/**/*.png
 test_data/output/
 test_data/out_temp.txt
 # Large local-only sample sets kept out of git (directory-level ignore overrides
 # the *.tif/*.txt/... re-includes above; a whole ignored dir cannot be re-included).
-/test_data/17BM/
-/test_data/test_s25ide/
+/test_data/s17bm/
+/test_data/trr_s25ide/
+/test_data/trr_s7id/
 # PDF tab test data: 5 raw .vrx.h5 detector frames (~320 MB) + calibration +
-# pre-integrated I(Q) — too large to ship in the repo; kept local-only like
-# test_data_pump_probe/ below. tab_pdf.py's DEFAULT_PDF_* constants point
-# here, so the PDF tab just won't have data preloaded on a fresh checkout.
+# pre-integrated I(Q) — too large to ship in the repo. tab_pdf.py's DEFAULT_PDF_*
+# constants point here, so the PDF tab just won't have data preloaded on a fresh checkout.
 /test_data/test_pdf/
-
-# ── Pump Probe (TR-XRD) local test data ──────────────────────────────────────
-# Large local-only asset (~1.2 GB of detector frames + masks + MIDAS param file)
-# that the Pump Probe tab defaults to. Kept out of git entirely (unlike test_data/,
-# which ships with the repo). The negations above only re-include test_data/**.
-/test_data_pump_probe/
-
-# Large local-only functional-test dataset (kept out of git entirely).
-/test_data_gitignore/
 
 # Internal-only documentation (kept local, not published to GitHub)
 documentation/pdf_calculation_explained.md
