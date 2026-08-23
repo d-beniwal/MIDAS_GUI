@@ -3,9 +3,16 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-23 (Tab 0 — Data Viewer: added a leftmost **mode
-ribbon** (Single detector / Hydra) — Hydra mode is a placeholder so far, the
-existing single-detector view is unchanged and still the default.)
+**Last updated:** 2026-08-23 (Tab 0 — Data Viewer: the **Hydra** mode
+ribbon entry is now functional — 4-panel GE detector loading, ge1-4/
+composite image toolbar, independent per-panel beam-centre/ring
+calibration, and a geometry-based windmill composite. Single detector mode
+is unchanged and still the default. A multi-curve radial plot and
+dark/bright/mask corrections for Hydra frames are still planned follow-ups.)
+
+**Previously:** (2026-08-23, Tab 0 — Data Viewer: added a leftmost **mode
+ribbon** (Single detector / Hydra) — Hydra mode was a placeholder at that
+point.)
 
 **Previously:** (2026-08-23, All detector-image viewers — Data Viewer, Mask
 Builder, Calibrate — now draw pixel `(0, 0)` at the **bottom-left** corner
@@ -341,11 +348,55 @@ Produces no shared state for other tabs.
 ### Mode ribbon (leftmost strip)
 A narrow vertical strip at the very left edge of the tab switches between
 **Single detector** (the view described below — unchanged) and **Hydra**
-(a 4-panel GE detector view, under construction). The two modes are
-independent: switching does not share data or geometry between them. Hydra
-mode is currently a placeholder; it will gain its own image toolbar
-(ge1/ge2/ge3/ge4/composite), per-panel beam-centre/ring calibration, and a
-multi-curve radial-integration plot in a follow-up update.
+(the 1-ID-E 4-panel GE detector view). The two modes are independent:
+switching does not share data or geometry between them.
+
+### Hydra mode (4-panel GE detector)
+
+**Purpose:** inspect and calibrate the 1-ID-E Hydra detector — 4 separate GE
+panels arranged in a "windmill" layout around a shared beam axis, each with
+its own independent beam-centre/tilt calibration, composited into one
+registered image for a full-coverage view.
+
+- **Hydra data (left panel)**: point the path field at **any one** of the 4
+  GE panel files (a `.geN.h5`/`.tif` or a `geN/` folder — matching this
+  beamline's own naming convention) and the other 3 panels are found
+  automatically. Small `ge1 ge2 ge3 ge4` status labels turn green as each
+  panel is located (grayed out if not found — the view still works with as
+  few as 2 panels present). A frame slider/spinbox navigates a shared frame
+  index across all panels (they're synchronized frames of the same scan).
+- **Image toolbar**: five buttons — **GE1 / GE2 / GE3 / GE4 / Composite** —
+  select what's shown in the image viewer below. GE1-4 show that panel's own
+  raw frame; **Composite** shows all currently-available panels remapped
+  (via each panel's own beam-centre + tilt) into one shared, registered
+  canvas — a geometry-based "windmill" composite, not a raw mosaic.
+- **Per-panel geometry card (middle panel)**: switching the image-toolbar
+  button swaps which panel's **Ring simulation + Load/save calibration**
+  card is shown — identical in every way to the single-detector tab's own
+  card (materials list, beam-centre pick/ring-fit, tilt fields, calibration
+  file load/save), just bound to that one panel. Loading a calibration file
+  (or picking/editing a beam centre) on a GE1-4 card takes effect
+  immediately: it's used for that panel's own ring overlay/radial
+  integration, and — since the Composite view depends on every panel's
+  geometry — the composite is automatically rebuilt the next time it's
+  shown. Panels with no calibration loaded yet use a bundled default
+  1-ID-E-style geometry (an example windmill layout, not your
+  instrument's real calibration — load a real per-panel file to override).
+  The **Composite**'s own geometry card is separate from the 4 panels': its
+  beam centre is automatically seeded at the composite canvas's own centre
+  the first time a given canvas size is built, so ring simulation/radial
+  integration on the Composite view work immediately with no extra setup
+  (though it can still be hand-edited like any other card).
+- **Radial integration plot (bottom right)**: shows the azimuthal profile of
+  whichever panel/Composite is currently selected, via the same R-bin/Auto/
+  Integrate controls as the single-detector tab — one shared setting across
+  all 5 views rather than a separate control per panel.
+- **Not yet supported in Hydra mode** (present in Single detector mode):
+  dark/bright/background correction, the intensity-range exclude mask, and
+  Top-N brightest-pixel — Hydra frames are shown raw. A multi-curve plot
+  (all 4 panels' profiles on one graph, plus a toggleable summed
+  "composite" curve) is a planned follow-up to the current single-curve
+  plot described above.
 
 ### Data Loader panel (left)
 Data, Dark, Bright, Background and Mask are all selected in the shared **Data Loader

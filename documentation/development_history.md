@@ -106,6 +106,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Image origin flipped to bottom-left `(0,0)` (MIDAS convention); ROI box-corner annotations now label the bottom-left corner | `246dba7` |
 | Hydra-mode ribbon scaffold (Single detector/Hydra); ring-sim/calibration/radial logic extracted into DetectorGeometryCard | `3d2d99d` |
 | Hydra geometry-compositing engine (`hydra.py`) + sibling auto-discovery + tests | `dd44f38` |
+| Hydra loader/toolbar/per-panel calibration UI + composite wired into the tab | `1cc4dab` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -2097,6 +2098,50 @@ dependency).
 **Files:** `.gitignore`, `.context/*` (new).
 **Roll back:** `git revert 778a2f3`. Self-contained, though reverting would
 re-orphan `.context/` from version control going forward.
+
+---
+
+### `1cc4dab` — Hydra: wire loader/toolbar/per-panel calibration UI + composite into the tab (2026-08-23)
+**Effect:** Replaces the Hydra page placeholder (from `3d2d99d`) with a
+working `HydraViewerPage`. New `HydraLoaderPanel` (one path field
+auto-discovers all 4 GE panels via `helpers.hydra_siblings`, plus a shared
+frame navigator) and `HydraDetectorToolbar` (ge1-4/composite buttons,
+enabling only buttons for panels actually found) in `hydra_widgets.py`.
+`HydraViewerPage` (`hydra_page.py`) owns one `hydra.DetectorState` and one
+`DetectorGeometryCard` per panel, plus a `DetectorGeometryCard` for the
+composite. Switching the toolbar rebinds the shared `ROIImageViewer`/
+`ProfileViewer` to the newly-active card (via `set_viewer`/
+`set_profile_view` — exactly what the `3d2d99d` extraction was built to
+support) and displays that panel's raw frame or the geometry-based
+composite. Loading a calibration file (or editing/picking BC) on a ge-card
+now syncs into its `DetectorState` and invalidates the composite so it
+rebuilds with the new geometry; the composite's own card auto-seeds its
+beam centre at the canvas centre (`BigDetSize/2`) the first time a given
+canvas size appears, so it has a working ring overlay for free. Added
+`DetectorGeometryCard.geometryChanged` signal + `get_full_geometry()`
+accessor for this syncing. `DataViewerTab.get_state()`/`set_state()` now
+folds in `HydraViewerPage`'s own state (loader path, active panel, every
+card's fields/materials).
+**Scope cuts for this version** (documented, not oversights): radial
+integration reuses the existing single-curve `ProfileViewer` (shows
+whichever panel/composite is active, one shared R-bin/Auto/Integrate
+control set across all 5 cards) rather than the eventual 4-curves +
+toggleable-composite plot; no dark/bright/mask corrections for Hydra frames
+yet (raw frames only).
+**Verified:** end-to-end with the synthetic fixture
+(`test_data/gui_synthetic/hydra/`) — loading matched per-panel calibration
+into all 4 cards rebuilds the composite at the expected canvas size with
+the composite card's BC correctly auto-seeded at centre; every ge1-4/
+composite button displays the right frame with independent ring simulation
+and radial integration; an offscreen screenshot confirms the full page
+renders and functions together. New `tests/test_hydra_ui.py` (4 tests).
+Full pytest suite: same single pre-existing, unrelated `test_smoke.py`
+flake.
+**Files:** `midas_gui/hydra_page.py` (new), `midas_gui/hydra_widgets.py`,
+`midas_gui/hydra_geometry_card.py`, `midas_gui/tab_view.py`,
+`tests/test_hydra_ui.py` (new).
+**Roll back:** `git revert 1cc4dab`. Self-contained back to the `3d2d99d`
+placeholder state.
 
 ---
 
