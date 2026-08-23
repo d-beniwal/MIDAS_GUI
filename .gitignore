@@ -55,7 +55,6 @@ htmlcov/
 
 # Local Claude working context (plans, ported context, notes)
 claude/
-.context/
 CLAUDE.md
 
 # ── Shipped sample data ──────────────────────────────────────────────────────
@@ -83,6 +82,7 @@ test_data/out_temp.txt
 # pre-integrated I(Q) — too large to ship in the repo. tab_pdf.py's DEFAULT_PDF_*
 # constants point here, so the PDF tab just won't have data preloaded on a fresh checkout.
 /test_data/test_pdf/
+/test_data/s1ide/
 
 # Internal-only documentation (kept local, not published to GitHub)
 documentation/pdf_calculation_explained.md
