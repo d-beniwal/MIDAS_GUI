@@ -49,6 +49,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Upgrade midas-hkls/midas-calibrate-v2; midas-pdf switched vendored→PyPI | `acb43c1` |
 | PyQt5 moved pip→conda-forge (fixes beamline silent startup hang) | `97ae1ea` |
 | Add pip `requirements.txt` mirroring `environment.yml` + README pip path | `683d150` |
+| Reorganize `test_data/` into per-dataset subfolders (`gui_synthetic/`, `s17bm/`, `trr_s25ide/`, `trr_s7id/`) | `c8d98f1` |
 
 ### Data Viewer (Tab 0)
 | Change | Commit |
@@ -101,6 +102,7 @@ Dates are commit dates (YYYY-MM-DD).
 | ROI popups always-on-top + minimize-to-ribbon; Project-stack button green highlight | `6c79f13` |
 | ROI/histogram axis label font size bumped 9pt -> 12pt (readability) | `1181b58` |
 | Transforms: Flip Y/Flip Z/Transpose checkboxes (MIDAS ImTransOpt); saved/loaded calibration files round-trip it | `068bd0d` |
+| Image origin flipped to bottom-left `(0,0)` (MIDAS convention); ROI box-corner annotations now label the bottom-left corner | `246dba7` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -112,6 +114,7 @@ Dates are commit dates (YYYY-MM-DD).
 | "5 · Post-processing" card: configurable bad-pixel dilation (px) | `429d41a` |
 | Dilation switched from 4-connected to 8-neighbor full-block growth | `188ea77` |
 | Transforms: Flip Y/Flip Z/Transpose checkboxes (MIDAS ImTransOpt), applied to the single image and the stack source alike; synced from an incoming Calibrate result | `068bd0d` |
+| Image origin flipped to bottom-left `(0,0)` (MIDAS convention) | `246dba7` |
 
 ### Calibrate (Tab 2) / Refinement (Tab 3)
 | Change | Commit |
@@ -127,6 +130,7 @@ Dates are commit dates (YYYY-MM-DD).
 | One-shot honors partial distortion-coefficient selection; live dark/bright/bg preview | `cc6e90e` |
 | Existing Transforms checkboxes now round-trip through saved/loaded paramstest.txt + calibration.json (previously in-memory only) | `068bd0d` |
 | Transforms checkboxes now live-update the preview and drive the actual calibration run (all pipeline modes); Send-to-Data-Viewer carries Transforms; Average frames drops the skip/stride control | `73a7a2a` |
+| Image origin flipped to bottom-left `(0,0)` (MIDAS convention) | `246dba7` |
 
 ### Batch Integrate (Tab 4)
 | Change | Commit |
@@ -1886,6 +1890,71 @@ and `pyproject.toml`'s `dependencies` list instead, which already match.
 **Roll back:** `git revert 683d150`. Purely additive/documentation — safe to
 revert standalone; removes the pip install path and leaves conda as the only
 documented route.
+
+---
+
+### `c8d98f1` — Test data: reorganize test_data/ into per-dataset subfolders (2026-08-23)
+**Effect:** `test_data/` mixed the shipped synthetic sample set with several
+local-only large datasets scattered across differently-named top-level dirs
+(`17BM/`, `test_s25ide/`, and the sibling `test_data_pump_probe/` outside
+`test_data/` entirely), making it unclear from the name alone which folders
+ship with the repo and which are git-ignored local assets. Renamed the
+shipped synthetic data (`calibrant_ceria.*`, `nickel_stack.h5`,
+`nickel_tifs/`, `make_test_data.py`) into `test_data/gui_synthetic/`, and the
+large local-only sets into `test_data/s17bm/`, `test_data/trr_s25ide/`, and
+`test_data/trr_s7id/` (the latter absorbing what was `test_data_pump_probe/`
+at the repo root). `.gitignore`'s shipped-data re-includes now scope to
+`test_data/gui_synthetic/**` only, so every other `test_data/` subfolder
+stays git-ignored by default; the standalone `/test_data_pump_probe/` and
+`/test_data_gitignore/` ignore rules were removed since those paths no
+longer exist. `constants.py`'s Pump Probe tab default path
+(`DEFAULT_TRXRD_DIR`) and `gui_documentation.md`'s reference to it were
+updated to `test_data/trr_s7id/pump_probe_BTO/detimages/`.
+**Verified:** offscreen 9-tab app build + full pytest suite still pass
+(same pre-existing `test_app_builds_offscreen` config flakiness as noted in
+`.context/STATE.md`, unrelated to this change); confirmed no other source
+file referenced the old `test_data_pump_probe/`, `test_data/17BM/`, or
+`test_data/test_s25ide/` paths before renaming.
+**Files:** `.gitignore`, `midas_gui/constants.py`,
+`documentation/gui_documentation.md`, `test_data/**` (renames only, no
+content changes).
+**Roll back:** `git revert c8d98f1`. Self-contained rename/path change —
+restores the old top-level `test_data_pump_probe/`, `test_data/17BM/`, and
+`test_data/test_s25ide/` layout and the matching `.gitignore`/`constants.py`
+paths.
+
+---
+
+### `246dba7` — Viewers: flip detector-image origin to bottom-left (0,0), per MIDAS convention (2026-08-23)
+**Effect:** Every `pg.ImageView`-based viewer (Data Viewer, Mask Builder,
+Calibrate) was drawing pixel `(0, 0)` at the top-left, because
+`pg.ImageView.__init__` calls `view.invertY()` internally. MIDAS's own
+convention places detector `(0, 0)` at the bottom-left, so the on-screen
+image now matches the physical world view of the detector looking
+downstream from the sample along the beam. Fixed with a single
+`vb.invertY(False)` override in `ImageViewer.__init__` (`widgets.py`), which
+propagates to `PickableImageViewer`/`ROIImageViewer` since both subclass it
+— covering all three viewers in one place. `roi_tools.py`'s ROI crop-preview
+popup (`ROIStatsPopup`) and the Data Viewer box-ROI corner-coordinate
+annotation/docstrings were updated in lockstep, since both were explicitly
+compensating for (or documenting) the old top-left-origin default. This is a
+pure display-orientation flip: it does not change click-to-pixel math
+(`mapSceneToView`/`mapFromScene` are invert-aware), Calibrate's ring/tilt
+geometry math, or the separate `ImTransOpt` data-level transform (the
+Transforms: Flip Y/Flip Z/Transpose checkboxes), which still operate on the
+underlying pixel data independent of which corner is rendered as the
+origin.
+**Verified:** confirmed via an offscreen render-and-inspect-pixmap script
+(not just coordinate round-trips, which can't prove the visual direction)
+across all three viewers plus the ROI crop popup, and a full pytest re-run
+(44 passed, 1 known pre-existing failure per `.context/STATE.md`). Not yet
+confirmed with a real windowed manual pass — recommended as a follow-up,
+especially Calibrate's ring overlay and the Data Viewer's ROI crop popup.
+**Files:** `midas_gui/widgets.py`, `midas_gui/roi_tools.py`,
+`documentation/gui_documentation.md`.
+**Roll back:** `git revert 246dba7`. Self-contained — restores the
+top-left-origin display convention and the matching ROI-popup/box-corner-
+annotation compensation.
 
 ---
 
