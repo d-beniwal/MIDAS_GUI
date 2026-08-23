@@ -3,7 +3,11 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-23 (All detector-image viewers — Data Viewer, Mask
+**Last updated:** 2026-08-23 (Tab 0 — Data Viewer: added a leftmost **mode
+ribbon** (Single detector / Hydra) — Hydra mode is a placeholder so far, the
+existing single-detector view is unchanged and still the default.)
+
+**Previously:** (2026-08-23, All detector-image viewers — Data Viewer, Mask
 Builder, Calibrate — now draw pixel `(0, 0)` at the **bottom-left** corner
 instead of the top-left, matching MIDAS's convention that the on-screen
 image match the physical world view of the detector when looking downstream
@@ -333,6 +337,15 @@ so the app is usable immediately after checkout.
 (circle binning) by default, or a full tilt/distortion-aware integration when a
 calibration file is loaded.
 Produces no shared state for other tabs.
+
+### Mode ribbon (leftmost strip)
+A narrow vertical strip at the very left edge of the tab switches between
+**Single detector** (the view described below — unchanged) and **Hydra**
+(a 4-panel GE detector view, under construction). The two modes are
+independent: switching does not share data or geometry between them. Hydra
+mode is currently a placeholder; it will gain its own image toolbar
+(ge1/ge2/ge3/ge4/composite), per-panel beam-centre/ring calibration, and a
+multi-curve radial-integration plot in a follow-up update.
 
 ### Data Loader panel (left)
 Data, Dark, Bright, Background and Mask are all selected in the shared **Data Loader
