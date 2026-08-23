@@ -24,6 +24,7 @@ from midas_gui.widgets import ProfileViewer, DataLoaderPanel
 from midas_gui.roi_tools import ROIImageViewer, ROIRibbon
 from midas_gui.hydra_widgets import HydraModeRibbon
 from midas_gui.hydra_geometry_card import DetectorGeometryCard
+from midas_gui.hydra_page import HydraViewerPage
 from midas_gui.workers import ProjectionWorker, AllFrameStatsWorker
 from midas_gui import style as S
 
@@ -136,14 +137,17 @@ class DataViewerTab(QtWidgets.QWidget):
         fields = widgets_to_dict(self._state_widgets())
         fields["materials"] = self._geom_card.materials_state()
         return {"fields": fields, "loader": self._loader.get_state(),
-                "hydra": {"active_mode": self._mode_ribbon.mode()}}
+                "hydra": {"active_mode": self._mode_ribbon.mode(),
+                          "page": self._hydra_page.get_state()}}
 
     def set_state(self, state: dict):
         """Restores the loader (which re-triggers its own data reload) and any
         calibration file (re-triggering the card's own calibration load) *before*
         applying the saved field values, so an explicitly saved value always wins
         over whatever a re-triggered load computed as a default."""
-        self._mode_ribbon.set_mode((state.get("hydra") or {}).get("active_mode", "single"))
+        hydra_state = state.get("hydra") or {}
+        self._mode_ribbon.set_mode(hydra_state.get("active_mode", "single"))
+        self._hydra_page.set_state(hydra_state.get("page") or {})
         self._loader.set_state(state.get("loader") or {})
         fields = state.get("fields", {})
         calib_path = fields.get("calib_ed")
@@ -356,13 +360,8 @@ class DataViewerTab(QtWidgets.QWidget):
         split.setStretchFactor(0, 0); split.setStretchFactor(1, 0); split.setStretchFactor(2, 1)
         split.setSizes([286, 361, 950])
 
-        # Page 1: Hydra (4-panel GE detector) view — built out in later phases.
-        self._hydra_page = QtWidgets.QWidget()
-        hydra_placeholder = QtWidgets.QVBoxLayout(self._hydra_page)
-        hydra_lbl = QtWidgets.QLabel("Hydra detector view — coming soon.")
-        hydra_lbl.setAlignment(QtCore.Qt.AlignCenter)
-        hydra_lbl.setStyleSheet(f"color:{S.MUTED}")
-        hydra_placeholder.addWidget(hydra_lbl)
+        # Page 1: Hydra (4-panel GE detector) view.
+        self._hydra_page = HydraViewerPage()
         self._mode_stack.addWidget(self._hydra_page)
 
     # ── Loading ───────────────────────────────────────────────────

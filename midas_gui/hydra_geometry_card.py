@@ -153,6 +153,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
 
     pushGeometry = QtCore.pyqtSignal(dict)    # "-> Send geometry to Calibrate" clicked
     imTransChanged = QtCore.pyqtSignal()      # a Flip Y/Flip Z/Transpose checkbox toggled
+    geometryChanged = QtCore.pyqtSignal()     # BC/tilt/calibration changed (edit, pick, or file load)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -277,6 +278,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             self.radial_integrate()
         else:
             self._refresh_profile_markers()
+        self.geometryChanged.emit()
 
     # ── Public geometry API (mirrors the pre-extraction DataViewerTab API) ──
 
@@ -782,6 +784,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             self._redraw_rings()
         self._redraw_picked_ring()
         self._maybe_auto_radial()
+        self.geometryChanged.emit()
 
     def on_radius_clicked(self, r_px: float):
         """A radius was clicked on the profile — draw its ring on the image.
@@ -1042,6 +1045,14 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             import traceback
             QtWidgets.QMessageBox.critical(self, "Calibration load error",
                                            traceback.format_exc()[:500])
+
+    def get_full_geometry(self) -> Optional[dict]:
+        """Public alias for ``_export_geom`` — the best-available full
+        geometry (NrPixelsY/Z, pxY/Z, Lsd, BC, tx/ty/tz, distortion,
+        im_trans), in the same dict shape ``helpers.geometry_fields_from_file``
+        returns. Used by an owner (e.g. the Hydra page) to sync this card's
+        geometry into a ``hydra.DetectorState``."""
+        return self._export_geom()
 
     def _export_geom(self) -> Optional[dict]:
         """Full geometry dict for calibration export: the loaded calibration's

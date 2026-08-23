@@ -2,13 +2,20 @@
 
 ``HydraModeRibbon`` is the leftmost strip of the whole Data Viewer tab —
 it switches the tab between the existing single-detector view and the new
-Hydra view. Later Hydra-mode widgets (the per-panel image toolbar, loader,
-and multi-curve profile viewer) are added to this module as the feature is
-built out phase by phase.
+Hydra view. ``HydraLoaderPanel`` and ``HydraDetectorToolbar`` are the
+Hydra page's own loader and image-toolbar widgets. A multi-curve profile
+viewer is added to this module in a later phase.
 """
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Optional
+
 from PyQt5 import QtCore, QtGui, QtWidgets
+
+from midas_gui.helpers import _browse, _NoScrollSpinBox, hydra_siblings
+from midas_gui import hydra
+from midas_gui import style as S
 
 
 class _VerticalToggleButton(QtWidgets.QAbstractButton):
@@ -99,3 +106,215 @@ class HydraModeRibbon(QtWidgets.QWidget):
 
     def set_mode(self, mode: str):
         (self._hydra_btn if mode == "hydra" else self._single_btn).setChecked(True)
+
+
+class HydraLoaderPanel(QtWidgets.QWidget):
+    """Left-hand loader for the Hydra page. One path field — point it at any
+    single GE panel's file — auto-discovers the other panels via
+    ``helpers.hydra_siblings``, plus a frame navigator shared across all
+    panels (they are synchronized frames of the same scan)."""
+
+    siblingsChanged = QtCore.pyqtSignal(dict)   # {panel_num: path}, may be {}
+    frameChanged = QtCore.pyqtSignal(int)
+
+    #: Dataset key fixed for v1 — every bundled/real Hydra HDF5 file used so
+    #: far shares this convention (see hydra_default_geometry's callers).
+    DATASET = "exchange/data"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._siblings: dict = {}
+        self._n_frames = 1
+        self._frame = 0
+        self._build_ui()
+
+    def _build_ui(self):
+        lv = QtWidgets.QVBoxLayout(self)
+        lv.setContentsMargins(0, 0, 0, 0)
+        card = S.make_card("Hydra data")
+
+        self._path_ed = QtWidgets.QLineEdit()
+        self._path_ed.setPlaceholderText("Any one ge1-ge4 panel file…")
+        self._path_ed.returnPressed.connect(
+            lambda: self._set_path(self._path_ed.text().strip()))
+        row = QtWidgets.QHBoxLayout(); row.setSpacing(4)
+        row.addWidget(self._path_ed)
+        browse_btn = QtWidgets.QPushButton("…"); browse_btn.setFixedWidth(30)
+        browse_btn.clicked.connect(self._browse)
+        row.addWidget(browse_btn)
+        card.body.addLayout(row)
+
+        self._status_lbls = {}
+        status_row = QtWidgets.QHBoxLayout(); status_row.setSpacing(6)
+        for n in (1, 2, 3, 4):
+            lbl = QtWidgets.QLabel(f"ge{n}")
+            lbl.setStyleSheet(self._status_style(False))
+            status_row.addWidget(lbl)
+            self._status_lbls[n] = lbl
+        status_row.addStretch(1)
+        card.body.addLayout(status_row)
+
+        nav_row = QtWidgets.QHBoxLayout(); nav_row.setSpacing(4)
+        self._prev_btn = QtWidgets.QPushButton("◀"); self._prev_btn.setFixedWidth(28)
+        self._next_btn = QtWidgets.QPushButton("▶"); self._next_btn.setFixedWidth(28)
+        self._frame_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self._frame_spin = _NoScrollSpinBox(); self._frame_spin.setFixedWidth(60)
+        self._prev_btn.clicked.connect(lambda: self._set_frame(self._frame - 1))
+        self._next_btn.clicked.connect(lambda: self._set_frame(self._frame + 1))
+        self._frame_slider.valueChanged.connect(
+            lambda v: self._set_frame(v, from_widget="slider"))
+        self._frame_spin.valueChanged.connect(
+            lambda v: self._set_frame(v, from_widget="spin"))
+        nav_row.addWidget(self._prev_btn)
+        nav_row.addWidget(self._frame_slider, 1)
+        nav_row.addWidget(self._frame_spin)
+        nav_row.addWidget(self._next_btn)
+        card.body.addLayout(nav_row)
+        self._set_nav_enabled(False)
+
+        self._info_lbl = QtWidgets.QLabel("")
+        self._info_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        self._info_lbl.setWordWrap(True)
+        card.body.addWidget(self._info_lbl)
+
+        lv.addWidget(card)
+        lv.addStretch(1)
+
+    @staticmethod
+    def _status_style(found: bool) -> str:
+        color = "#66bb6a" if found else "#666"
+        weight = "bold" if found else "normal"
+        return f"color:{color}; font-weight:{weight};"
+
+    def _set_nav_enabled(self, enabled: bool):
+        for w in (self._prev_btn, self._next_btn, self._frame_slider, self._frame_spin):
+            w.setEnabled(enabled)
+
+    def _browse(self):
+        p = _browse(self, "Open a Hydra GE panel file",
+                   "Data (*.tif *.tiff *.h5 *.hdf5 *.hdf *.nxs *.ge*);;All (*)")
+        if p:
+            self._set_path(p)
+
+    def _set_path(self, path: str):
+        if not path:
+            return
+        self._path_ed.setText(path)
+        siblings = hydra_siblings(path)
+        self._siblings = siblings
+        for n, lbl in self._status_lbls.items():
+            lbl.setStyleSheet(self._status_style(n in siblings))
+        if len(siblings) < 2:
+            self._info_lbl.setText(
+                "Fewer than 2 Hydra panels found next to this file — check the path.")
+            self._set_nav_enabled(False)
+            self._n_frames = 1
+            self.siblingsChanged.emit({})
+            return
+        try:
+            first_path = next(iter(siblings.values()))
+            self._n_frames = hydra.n_frames_in(first_path, self.DATASET)
+        except Exception as exc:
+            self._info_lbl.setText(f"Could not read frame count: {exc}")
+            self._n_frames = 1
+        self._frame_slider.blockSignals(True)
+        self._frame_slider.setRange(0, max(0, self._n_frames - 1))
+        self._frame_slider.blockSignals(False)
+        self._frame_spin.blockSignals(True)
+        self._frame_spin.setRange(0, max(0, self._n_frames - 1))
+        self._frame_spin.blockSignals(False)
+        self._frame = 0
+        self._set_nav_enabled(self._n_frames > 1)
+        self._info_lbl.setText(f"Found {len(siblings)}/4 panels  ·  {self._n_frames} frame(s)")
+        self.siblingsChanged.emit(siblings)
+        self.frameChanged.emit(0)
+
+    def _set_frame(self, i: int, from_widget: Optional[str] = None):
+        i = max(0, min(int(i), max(0, self._n_frames - 1)))
+        changed = (i != self._frame)
+        self._frame = i
+        if from_widget != "slider":
+            self._frame_slider.blockSignals(True); self._frame_slider.setValue(i)
+            self._frame_slider.blockSignals(False)
+        if from_widget != "spin":
+            self._frame_spin.blockSignals(True); self._frame_spin.setValue(i)
+            self._frame_spin.blockSignals(False)
+        if changed:
+            self.frameChanged.emit(i)
+
+    # ── Public accessors ─────────────────────────────────────────
+    def siblings(self) -> dict:
+        return dict(self._siblings)
+
+    def frame_index(self) -> int:
+        return self._frame
+
+    def dataset(self) -> str:
+        return self.DATASET
+
+    def set_path(self, path: str):
+        """Programmatic equivalent of typing a path and pressing Enter —
+        used by Save/Load GUI State restore."""
+        self._set_path(path)
+
+    def current_path(self) -> str:
+        return self._path_ed.text().strip()
+
+
+class HydraDetectorToolbar(QtWidgets.QWidget):
+    """Row of 5 exclusive buttons above the Hydra image viewer: ge1-ge4 show
+    that panel's own raw frame; composite shows the geometry-based windmill
+    composite of every currently-available panel."""
+
+    panelChanged = QtCore.pyqtSignal(str)   # "ge1".."ge4" | "composite"
+
+    _KEYS = ("ge1", "ge2", "ge3", "ge4", "composite")
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(4)
+        self._buttons = {}
+        self._group = QtWidgets.QButtonGroup(self)
+        self._group.setExclusive(True)
+        for key in self._KEYS:
+            label = "Composite" if key == "composite" else key.upper()
+            btn = QtWidgets.QPushButton(label)
+            btn.setCheckable(True)
+            btn.toggled.connect(lambda checked, k=key: self._on_toggled(k, checked))
+            layout.addWidget(btn)
+            self._group.addButton(btn)
+            self._buttons[key] = btn
+        layout.addStretch(1)
+        self._buttons["ge1"].setChecked(True)
+
+    def _on_toggled(self, key: str, checked: bool):
+        if checked:
+            self.panelChanged.emit(key)
+
+    def set_available(self, panel_numbers):
+        """Enable only the ge-buttons for panels actually found, and
+        Composite iff at least 2 panels are available. If the currently
+        selected button just became disabled, falls back to the first
+        enabled one (emitting panelChanged)."""
+        panel_numbers = set(panel_numbers)
+        for n in (1, 2, 3, 4):
+            self._buttons[f"ge{n}"].setEnabled(n in panel_numbers)
+        self._buttons["composite"].setEnabled(len(panel_numbers) >= 2)
+        cur = self.current()
+        if not self._buttons[cur].isEnabled():
+            for key in self._KEYS:
+                if self._buttons[key].isEnabled():
+                    self._buttons[key].setChecked(True)
+                    break
+
+    def current(self) -> str:
+        for key, btn in self._buttons.items():
+            if btn.isChecked():
+                return key
+        return "ge1"
+
+    def set_current(self, key: str):
+        if key in self._buttons and self._buttons[key].isEnabled():
+            self._buttons[key].setChecked(True)
