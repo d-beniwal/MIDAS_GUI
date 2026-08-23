@@ -1,52 +1,48 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-23 (Hydra detector-view feature in progress — engine done, UI in progress)_
+_Last updated: 2026-08-23 (Hydra detector-view feature — phases 1-4 done, 5-6 remain)_
 
 ## Now working on
 
 Building a Hydra (4-panel GE detector) mode into the Data Viewer tab.
 Approved plan at implementation time: `/Users/dbeniwal/.claude/plans/rosy-wiggling-wind.md`
-(7 phases). Done so far, all committed to `main`:
-- **Phase 1** (`3d2d99d`, folded together with 1.5): leftmost `HydraModeRibbon`
-  (Single detector / Hydra) + `QStackedWidget`; Hydra page is still a
-  placeholder.
-- **Phase 1.5** (same commit): extracted ~700 lines of ring-simulation/
-  calibration-load-save/radial-integration logic out of `DataViewerTab` into
-  a reusable `DetectorGeometryCard` (`hydra_geometry_card.py`), bindable via
-  `set_viewer`/`set_profile_view`/`set_image_source`/`set_radial_controls` —
-  verified behavior-identical via offscreen pixel-diff before any
-  Hydra-specific code was added.
-- **Phase 2, engine half** (`dd44f38`): `midas_gui/hydra.py` (windmill
-  compositing math, ported), `helpers.hydra_siblings`/`hydra_panel_index`
-  (sibling auto-discovery), bundled default geometry
-  (`hydra_default_geometry/ps_ge{1..4}.txt`), a committed synthetic test
-  fixture (`test_data/gui_synthetic/hydra/`), and two new test files
-  (`test_hydra_geometry.py`, `test_hydra_chirality.py` — 13 tests total).
-  **Resolved the chirality/X-mirror open question**: verified (real local
-  s1ide data + the new synthetic-marker tests) that this codebase's
-  `pg.ImageView`-based viewers need NO X-mirror correction, unlike the
-  reference project's own custom viewer. Full reasoning in DECISIONS.md.
+(7 phases). **Phases 1 through 4 are done and committed to `main`**:
+- **Phase 1+1.5** (`3d2d99d`): leftmost `HydraModeRibbon` + `QStackedWidget`;
+  extracted ~700 lines of ring-sim/calibration/radial-integration logic out
+  of `DataViewerTab` into a reusable `DetectorGeometryCard`
+  (`hydra_geometry_card.py`), bindable via `set_viewer`/`set_profile_view`/
+  `set_image_source`/`set_radial_controls`/`geometryChanged`.
+- **Phase 2, engine** (`dd44f38`): `midas_gui/hydra.py` (windmill compositing
+  math), `helpers.hydra_siblings`/`hydra_panel_index`, bundled default
+  geometry, synthetic test fixture (`test_data/gui_synthetic/hydra/`),
+  `test_hydra_geometry.py`/`test_hydra_chirality.py` (13 tests). **Resolved
+  the chirality/X-mirror question** — no correction needed in this
+  codebase; full reasoning in DECISIONS.md.
+- **Phase 2 UI + Phase 3 + Phase 4** (`1cc4dab`): `HydraLoaderPanel` +
+  `HydraDetectorToolbar` (`hydra_widgets.py`) and `HydraViewerPage`
+  (`hydra_page.py`, new) — the full working Hydra page: sibling
+  auto-discovery, ge1-4/composite toolbar, one `DetectorGeometryCard` per
+  panel + one for the composite (each independently calibratable), composite
+  auto-rebuild on geometry change, composite ring overlay auto-seeded at
+  canvas centre. `test_hydra_ui.py` (4 tests). Verified end-to-end
+  (screenshots + tests) with the synthetic fixture.
 
-## Next steps (remaining phases, not yet started)
+## Next steps (remaining phases)
 
-- **Phase 2, UI half**: build `HydraLoaderPanel` (single "any geX file" path
-  field + sibling-status + frame navigator) and wire the ge1/ge2/ge3/ge4/
-  composite toolbar buttons to display each raw panel (no compositing yet)
-  in the shared `ROIImageViewer`, replacing the current placeholder Hydra
-  page in `tab_view.py`.
-- **Phase 3**: wire each of 5 `DetectorGeometryCard` instances (ge1-4 +
-  composite) to a `hydra.DetectorState`; middle-panel card swaps on toolbar
-  click; per-panel calibration-file loading feeds `DetectorState` geometry.
-- **Phase 4**: composite button (`build_windmill_composite`) + composite
-  ring overlay (centered at canvas/2) — the compositing math itself is
-  already built/verified; this phase is UI wiring only.
 - **Phase 5**: `HydraProfileViewer` — 4 independent per-panel radial
   profiles + a toggleable summed/resampled "composite" curve (approach
   confirmed with user: NaN-aware `nansum` after resampling each panel's own
   profile onto a shared 2θ axis, NOT integrating the composited image).
-- **Phase 6**: docs + a real windowed manual pass (both modes, save/load
-  state round-trip, mode switching mid-session).
+  Currently the Hydra page reuses the single-curve `ProfileViewer` (shows
+  whichever panel/composite is active) as a documented v1 scope cut.
+- **Phase 6**: a real windowed manual pass (both modes, save/load state
+  round-trip, mode switching mid-session) — everything so far is verified
+  via offscreen tests/screenshots only, not a live windowed session.
+- Documented-but-deferred scope cuts (not oversights, call out before
+  considering the feature "done"): no dark/bright/background correction or
+  intensity-range mask for Hydra frames; no Top-N brightest-pixel in Hydra
+  mode.
 
 ## Open questions / blockers
 
@@ -79,10 +75,11 @@ Approved plan at implementation time: `/Users/dbeniwal/.claude/plans/rosy-wiggli
 
 ## Recent changes (last 3-5 sessions, dated; drop the oldest as it grows)
 
-- 2026-08-23 (`3b785c9`, `85069ed`, `3d2d99d`, `f3c7ffa`, `dd44f38`,
-  `8554114`, pushed to `main` as of this session): Hydra detector-view
-  feature, phases 1/1.5/2-engine (see "Now working on" above), plus an
-  unrelated stale-test-data-path fix. Full detail in `DECISIONS.md`.
+- 2026-08-23 (`3b785c9`..`25a8eac`, 12 commits, on `main` as of this
+  session — not yet confirmed pushed to origin): Hydra detector-view
+  feature, phases 1 through 4 (see "Now working on" above), plus an
+  unrelated stale-test-data-path fix (`3b785c9`) and committing `.context/`
+  which had been gitignored (`778a2f3`). Full detail in `DECISIONS.md`.
 - 2026-08-23 (`c8d98f1`, `246dba7`, `328674d`): `test_data/` reorganized
   into per-dataset subfolders; detector-image origin flipped to
   **bottom-left `(0,0)`** across every `pg.ImageView`-based viewer — see
