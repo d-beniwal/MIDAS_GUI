@@ -142,12 +142,15 @@ K_EDGE_FOILS = [
 # ── Default test-data paths (repo-root test_data/, git-ignored) ─────────────────
 from pathlib import Path as _Path
 _TEST_DATA = _Path(__file__).resolve().parent.parent / "test_data"
-DEFAULT_CALIBRANT_TIF = str(_TEST_DATA / "calibrant_ceria.tif")
-DEFAULT_CALIBRANT_H5  = str(_TEST_DATA / "calibrant_ceria.h5")
-DEFAULT_NICKEL_H5     = str(_TEST_DATA / "nickel_stack.h5")
-DEFAULT_NICKEL_DIR    = str(_TEST_DATA / "nickel_tifs")
-DEFAULT_NICKEL_FRAME0 = str(_TEST_DATA / "nickel_tifs" / "nickel_000.tif")
-DEFAULT_CALIB_FILE    = str(_TEST_DATA / "calibration_synthetic.json")
+# Synthetic GUI fixtures live under test_data/gui_synthetic/ (moved there by the
+# 2026-08-23 per-dataset reorg — these six defaults must track that subfolder).
+_GUI_SYNTH = _TEST_DATA / "gui_synthetic"
+DEFAULT_CALIBRANT_TIF = str(_GUI_SYNTH / "calibrant_ceria.tif")
+DEFAULT_CALIBRANT_H5  = str(_GUI_SYNTH / "calibrant_ceria.h5")
+DEFAULT_NICKEL_H5     = str(_GUI_SYNTH / "nickel_stack.h5")
+DEFAULT_NICKEL_DIR    = str(_GUI_SYNTH / "nickel_tifs")
+DEFAULT_NICKEL_FRAME0 = str(_GUI_SYNTH / "nickel_tifs" / "nickel_000.tif")
+DEFAULT_CALIB_FILE    = str(_GUI_SYNTH / "calibration_synthetic.json")
 # Real PDF workflow test data (test_data/test_pdf/, git-ignored — ~320 MB of
 # raw beamline frames). Absent on a fresh checkout; the PDF tab just starts
 # with nothing preloaded until a user points it elsewhere.
