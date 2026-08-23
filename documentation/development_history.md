@@ -50,6 +50,7 @@ Dates are commit dates (YYYY-MM-DD).
 | PyQt5 moved pip→conda-forge (fixes beamline silent startup hang) | `97ae1ea` |
 | Add pip `requirements.txt` mirroring `environment.yml` + README pip path | `683d150` |
 | Reorganize `test_data/` into per-dataset subfolders (`gui_synthetic/`, `s17bm/`, `trr_s25ide/`, `trr_s7id/`) | `c8d98f1` |
+| Fix stale `DEFAULT_*` test-data paths after the `gui_synthetic/` reorg | `3b785c9` |
 
 ### Data Viewer (Tab 0)
 | Change | Commit |
@@ -1955,6 +1956,36 @@ especially Calibrate's ring overlay and the Data Viewer's ROI crop popup.
 **Roll back:** `git revert 246dba7`. Self-contained — restores the
 top-left-origin display convention and the matching ROI-popup/box-corner-
 annotation compensation.
+
+---
+
+### `3b785c9` — Fix stale DEFAULT_* test-data paths after gui_synthetic/ reorg (2026-08-23)
+**Effect:** The `246dba7`/`c8d98f1` reorg session moved `calibrant_ceria.tif`,
+`calibrant_ceria.h5`, `nickel_stack.h5`, `nickel_tifs/`, and
+`calibration_synthetic.json` into `test_data/gui_synthetic/`, but
+`constants.py`'s six `DEFAULT_*` constants (`DEFAULT_CALIBRANT_TIF`,
+`DEFAULT_CALIBRANT_H5`, `DEFAULT_NICKEL_H5`, `DEFAULT_NICKEL_DIR`,
+`DEFAULT_NICKEL_FRAME0`, `DEFAULT_CALIB_FILE`) still pointed at the old
+repo-root locations — silently breaking every tab's default-data preload on
+a fresh checkout (Data Viewer, Calibrate, Mask Builder, Batch Integrate,
+Corrections, PDF, Texture all reference one or more of these). Added a
+`_GUI_SYNTH = _TEST_DATA / "gui_synthetic"` base and repointed the six
+constants at it. Found while verifying the new Hydra-mode
+`DetectorGeometryCard` extraction (see the following commit) — unrelated to
+that work, fixed as its own commit per project convention.
+**Note:** a locally-*cached* profile (e.g. `~/Library/Application
+Support/midas_gui/profiles/<name>.json`, seeded from the old shipped
+defaults before this fix) can still override these with the stale paths at
+runtime via `constants.reload_from_config()`'s config-overlay step — that's
+local machine state, not a repo file, and isn't touched by this commit. A
+user hitting this after upgrading should reset/re-seed that profile (or
+manually fix its `paths` section) to pick up the corrected defaults.
+**Verified:** confirmed all six paths resolve and exist under
+`test_data/gui_synthetic/` with the fix; full pytest re-run (same single
+pre-existing `test_app_builds_offscreen` flakiness, unrelated).
+**Files:** `midas_gui/constants.py`.
+**Roll back:** `git revert 3b785c9`. Self-contained — restores the stale
+repo-root paths (breaking default-data preload again).
 
 ---
 
