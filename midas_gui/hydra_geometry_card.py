@@ -301,6 +301,35 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         """Lsd in µm (internal unit) from the mm display field."""
         return self._lsd.value() * 1000.0
 
+    # ── Shared-field sync (Hydra: λ / max 2θ / px mirrored across panels) ──
+
+    def get_shared_fields(self) -> dict:
+        """λ, max 2θ, and pixel size — the 3 fields an owner (the Hydra page)
+        may mirror across several cards, since the same X-ray beam and GE
+        detector model make them physically identical for every panel."""
+        return {
+            "wavelength_A": self._wl.value(),
+            "max2theta": self._max2t.value(),
+            "pxY": self._px.value(),
+        }
+
+    def apply_shared_fields(self, fields: dict):
+        """Apply a shared-field dict from another card without re-emitting
+        this card's own change signals (the owner already knows it's
+        propagating a sync) — then refresh exactly as ``_on_sim_param_changed``
+        would for a direct edit: resimulate if live ring simulation is on
+        (ring radii themselves depend on λ/px/max2θ, not just their on-image
+        position), otherwise redraw/reintegrate with the new values."""
+        for w, key in ((self._wl, "wavelength_A"), (self._max2t, "max2theta"),
+                       (self._px, "pxY")):
+            v = fields.get(key)
+            if v is not None:
+                w.blockSignals(True); w.setValue(float(v)); w.blockSignals(False)
+        if self._sim_btn.isChecked() and self._image_provider() is not None:
+            self._simulate()
+        else:
+            self._after_geometry_change()
+
     def set_geometry(self, g: dict):
         """Replace the manual-geometry fields from a geometry dict (e.g. the Calibrate
         tab's result). Values are µm/Å/px; the Lsd field displays mm."""
@@ -667,10 +696,22 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         """Material/lattice/geometry field edited — resimulate while live mode is on.
 
         Guarded with ``getattr`` because materials are seeded (via
-        ``_add_material``) before ``self._sim_btn`` exists during ``_build_ui``."""
+        ``_add_material``) before ``self._sim_btn`` exists during ``_build_ui``.
+
+        λ/Lsd/px/max2θ feed the radial-integration geometry
+        (``_effective_calib_geom``) and any already-simulated rings even
+        when live ring simulation is off — without this else-branch, editing
+        them silently left the profile/rings stale until something else
+        (e.g. a beam-centre edit) happened to refresh them. Mirrors
+        ``_on_bc_changed``'s tail."""
         sim_btn = getattr(self, "_sim_btn", None)
         if sim_btn is not None and sim_btn.isChecked() and self._image_provider() is not None:
             self._simulate()
+        else:
+            if self._any_material_rings():
+                self._redraw_rings()
+            self._maybe_auto_radial()
+            self.geometryChanged.emit()
 
     def _simulate(self):
         img = self._image_provider()
@@ -824,9 +865,25 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         """Geometry used for radial integration: the loaded calibration's full
         geometry if present, otherwise one synthesized from the Ring-simulation
         widgets when a tilt is set — so the profile stays tilt-consistent with
-        the on-image ring overlay even without a loaded calibration file."""
+        the on-image ring overlay even without a loaded calibration file.
+
+        When a calibration is loaded, `self._calib_geom` is a snapshot frozen
+        at load time (see `_apply_full_geometry_dict`) — it must NOT be
+        returned verbatim, or a later edit to the live wavelength/Lsd/BC/tilt
+        widgets (typed, picked, or shared-field-synced) would move the rings
+        (which always read the live widgets) without moving the radial
+        profile. `tx`/`distortion`/`NrPixelsY`/`NrPixelsZ` have no live
+        widget equivalent, so those alone come from the frozen snapshot."""
         if self._calib_geom is not None:
-            return self._calib_geom
+            geom = dict(self._calib_geom)
+            px = self._px.value()
+            geom.update({
+                "wavelength_A": self._wl.value(), "Lsd": self._lsd_um(),
+                "BC_y": self._bcy.value(), "BC_z": self._bcz.value(),
+                "ty": self._ty.value(), "tz": self._tz.value(),
+                "pxY": px, "pxZ": px,
+            })
+            return geom
         ty, tz = self._ty.value(), self._tz.value()
         if abs(ty) < 1e-9 and abs(tz) < 1e-9:
             return None

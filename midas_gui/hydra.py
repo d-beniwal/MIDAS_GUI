@@ -24,7 +24,8 @@ from typing import Optional
 import numpy as np
 from scipy.ndimage import map_coordinates
 
-from midas_gui.helpers import _load_image, _apply_im_trans, geometry_fields_from_file
+from midas_gui.helpers import (_load_image, _apply_im_trans, geometry_fields_from_file,
+                         apply_field_corrections)
 
 _GEOMETRY_DIR = Path(__file__).parent / "hydra_default_geometry"
 
@@ -38,7 +39,28 @@ def compute_inv_coords(bc_y: float, bc_z: float, tx_deg: float,
     """Inverse-mapping coordinate grids: for each composite output pixel,
     the detector pixel that should be sampled — a rigid rotation by
     ``tx_deg`` about the panel's own beam centre, re-anchored to the
-    composite canvas centre."""
+    composite canvas centre, plus a mirror about the composite's vertical
+    axis (see below).
+
+    Rotation direction is COUNTERCLOCKWISE by ``tx_deg`` (in this app's
+    Y-right/Z-up, bottom-left-origin display convention). A same-day session
+    briefly "corrected" this to clockwise (negating ``tx_deg`` here) based on
+    a plausible-looking but wrong argument that the physical Tx sign implied
+    it; that version was reverted after a real windowed comparison against
+    `test_data/s1ide` (real CeO2 Hydra data) showed it visibly mis-rotates
+    the composite relative to the known-correct reference arrangement — see
+    the 2026-08-23 "Hydra composite rotation direction: reverted back to
+    counterclockwise" DECISIONS.md entry.
+
+    **Vertical-axis mirror**: a real windowed comparison (same session as
+    the rotation-direction revert, next DECISIONS.md entry) found the
+    composite still didn't match the known-correct reference until the
+    whole canvas was additionally mirrored left-right (ge2/ge4 land on the
+    wrong side of the canvas otherwise). Implemented here as ``half - Yo``
+    instead of ``Yo - half`` for ``Y_lab`` — mirrors the output canvas
+    without touching the per-panel rotation math above, and without
+    affecting any other viewer (this coordinate map is only ever used by
+    the windmill-composite build, not the per-panel ge1-4 raw displays)."""
     bds = int(big_det_size)
     half = bds * 0.5
     tx_rad = math.radians(tx_deg)
@@ -48,7 +70,7 @@ def compute_inv_coords(bc_y: float, bc_z: float, tx_deg: float,
     zo = np.arange(bds, dtype=np.float32)
     Yo, Zo = np.meshgrid(yo, zo)
 
-    Y_lab = (Yo - half) * px
+    Y_lab = (half - Yo) * px
     Z_lab = (Zo - half) * px
     Y_det = Y_lab * c + Z_lab * s
     Z_det = -Y_lab * s + Z_lab * c
@@ -114,6 +136,10 @@ class DetectorState:
     ny: int = 2048
     nz: int = 2048
     im_trans_opts: list = field(default_factory=list)
+    dark: Optional[np.ndarray] = None
+    bright: Optional[np.ndarray] = None
+    bright_mode: str = "divide"
+    background: Optional[np.ndarray] = None
     _inv_coords: Optional[tuple] = None
     _inv_cache_key: tuple = ()
 
@@ -148,6 +174,12 @@ class DetectorState:
     def get_remapped_frame(self, frame_idx: int, dataset: str,
                            big_det_size: int) -> np.ndarray:
         img = _load_image(self.data_file, dataset, frame_idx)
+        if self.dark is not None or self.bright is not None or self.background is not None:
+            # Same order as the single-detector tab (DataLoaderPanel.corrected,
+            # then _apply_im_trans) — correction on the raw frame, before ImTransOpt.
+            img = apply_field_corrections(img, dark=self.dark, bright=self.bright,
+                                          bright_mode=self.bright_mode,
+                                          background=self.background)
         img = _apply_im_trans(img, tuple(self.im_trans_opts))
         rows, cols = self.get_inv_coords(big_det_size)
         return remap_to_composite(img, rows, cols)

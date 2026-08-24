@@ -111,6 +111,30 @@ def test_detector_state_load_default():
     assert st.px == 200.0
 
 
+def test_detector_state_dark_correction_applied_before_remap(tmp_path):
+    """get_remapped_frame applies dark/bright/background correction to the
+    raw frame before the compositing remap runs — same order as the
+    single-detector tab's DataLoaderPanel.corrected() -> _apply_im_trans."""
+    import h5py
+
+    st = hydra.DetectorState(bc_y=64.0, bc_z=64.0, tx=0.0, px=200.0, ny=128, nz=128)
+    data = np.full((1, 128, 128), 100.0, dtype=np.float32)
+    path = tmp_path / "panel.ge1.h5"
+    with h5py.File(path, "w") as f:
+        f.create_dataset("exchange/data", data=data)
+    st.data_file = str(path)
+    big = 256
+
+    plain = st.get_remapped_frame(0, "exchange/data", big)
+
+    st.dark = np.full((128, 128), 30.0, dtype=np.float32)
+    corrected = st.get_remapped_frame(0, "exchange/data", big)
+
+    valid = np.isfinite(plain) & np.isfinite(corrected)
+    assert valid.sum() > 1000   # sanity: not a degenerate/empty overlap
+    assert np.allclose(corrected[valid], plain[valid] - 30.0, atol=1e-3)
+
+
 # ── autopick_big_det_size ────────────────────────────────────────────────
 
 def test_autopick_big_det_size_rounds_up_to_256():
@@ -126,9 +150,18 @@ def test_autopick_big_det_size_rounds_up_to_256():
 def _expected_composite_xy(bc_y, bc_z, tx_deg, px, big_det_size, y_pix0, z_pix0):
     """Independent (hand-derived) forward map: given a raw-pixel marker
     position, where should it land on the composite canvas? This is the
-    analytic inverse of hydra.compute_inv_coords's rotation — typed out
-    separately here rather than calling that function, so a sign error in
-    the module under test would show up as a mismatch."""
+    analytic inverse of hydra.compute_inv_coords's rotation + vertical-axis
+    mirror — typed out separately here rather than calling that function,
+    so a sign error in the module under test would show up as a mismatch.
+
+    Forward (panel -> composite) is a rotation by ``tx_deg`` COUNTERCLOCKWISE
+    (see the 2026-08-23 "Hydra composite rotation direction: reverted back to
+    counterclockwise" DECISIONS.md entry) — negating the angle before the
+    analytic inverse below is the independently-typed equivalent of that
+    same convention — followed by a mirror about the composite's vertical
+    axis (``half - Y_lab/px`` instead of ``Y_lab/px + half``, see the
+    2026-08-24 "Hydra composite needs a vertical-axis mirror too"
+    DECISIONS.md entry)."""
     half = big_det_size * 0.5
     tx = math.radians(tx_deg)
     c, s = math.cos(tx), math.sin(tx)
@@ -136,7 +169,7 @@ def _expected_composite_xy(bc_y, bc_z, tx_deg, px, big_det_size, y_pix0, z_pix0)
     Z_det = px * (z_pix0 - bc_z)
     Y_lab = Y_det * c - Z_det * s
     Z_lab = Y_det * s + Z_det * c
-    return Y_lab / px + half, Z_lab / px + half
+    return half - Y_lab / px, Z_lab / px + half
 
 
 def test_windmill_composite_places_markers_at_predicted_positions(fixture_available):

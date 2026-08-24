@@ -7,15 +7,23 @@ convention interacted with the compositing math. This codebase's viewers
 only ever apply `invertY(False)` (see the 2026-08-23 origin-flip decision in
 .context/DECISIONS.md) — whether an analogous mirror is needed here was an
 open question, resolved by manual verification (see the 2026-08-23 "Hydra
-composite needs no chirality/X-mirror correction" entry in DECISIONS.md).
+composite needs no chirality/X-mirror correction" entry in DECISIONS.md):
+no X-mirror is needed. A later same-day session briefly flipped the
+rotation *direction* (CCW -> CW by `tx`) based on a plausible-looking but
+wrong argument, then reverted it after a real windowed comparison against
+`test_data/s1ide` showed the original CCW convention was the one that
+actually matched the known-correct arrangement — see the "Hydra composite
+rotation direction: reverted back to counterclockwise" DECISIONS.md entry.
+Ring continuity / self-consistency checks (this test included) cannot tell
+CW from CCW apart on their own; only a real look at real data can.
 
-This test is the permanent, automated guard for that conclusion: it renders
-the synthetic marker fixture through the REAL display pipeline (an actual
-ROIImageViewer, via widget.grab() — not just a raw numpy array check, which
-can't prove on-screen direction) and confirms each panel's marker appears
-where an independently hand-derived rotation predicts, not at the position
-a sign-flipped ("wrong chirality") rotation would predict. The fixture's tx
-values are deliberately not exact multiples of 90 deg (see
+This test is the permanent, automated guard for internal self-consistency:
+it renders the synthetic marker fixture through the REAL display pipeline
+(an actual ROIImageViewer, via widget.grab() — not just a raw numpy array
+check, which can't prove on-screen direction) and confirms each panel's
+marker appears where an independently hand-derived rotation predicts, not
+at the position a sign-flipped ("wrong chirality") rotation would predict.
+The fixture's tx values are deliberately not exact multiples of 90 deg (see
 make_hydra_test_data.py) so a sign error can't alias one panel's correct
 marker onto another panel's, which would let a real bug slip past silently.
 """
@@ -43,8 +51,14 @@ _SEPARATION_MIN_PX = 20.0   # correct vs. wrong-sign predicted positions must
 
 def _expected_xy(bc_y, bc_z, tx_deg, px, big_det_size, y_pix0, z_pix0):
     """Hand-derived analytic inverse of hydra.compute_inv_coords's rotation
-    (typed out independently here, not calling that function) — see
-    tests/test_hydra_geometry.py for the same derivation."""
+    + vertical-axis mirror (typed out independently here, not calling that
+    function) — see tests/test_hydra_geometry.py for the same derivation.
+
+    Forward (panel -> composite) is a rotation by ``tx_deg`` COUNTERCLOCKWISE
+    — negating the angle here is the independently-typed equivalent of that
+    convention — followed by a mirror about the composite's vertical axis
+    (``half - Y_lab/px`` instead of ``Y_lab/px + half``, see the 2026-08-24
+    "Hydra composite needs a vertical-axis mirror too" DECISIONS.md entry)."""
     half = big_det_size * 0.5
     tx = math.radians(tx_deg)
     c, s = math.cos(tx), math.sin(tx)
@@ -52,7 +66,7 @@ def _expected_xy(bc_y, bc_z, tx_deg, px, big_det_size, y_pix0, z_pix0):
     Z_det = px * (z_pix0 - bc_z)
     Y_lab = Y_det * c - Z_det * s
     Z_lab = Y_det * s + Z_det * c
-    return Y_lab / px + half, Z_lab / px + half
+    return half - Y_lab / px, Z_lab / px + half
 
 
 @pytest.fixture(scope="module")

@@ -17,7 +17,9 @@ import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
-from midas_gui.helpers import _browse, _NoScrollSpinBox, _NoScrollComboBox, hydra_siblings
+from midas_gui.helpers import (_browse, _NoScrollSpinBox, _NoScrollComboBox, hydra_siblings,
+                         is_h5, list_h5_datasets)
+from midas_gui.workers import FieldAverageWorker
 from midas_gui import hydra
 from midas_gui import style as S
 from midas_gui.widgets import _convert_radial, _XUNIT_LABEL
@@ -113,6 +115,245 @@ class HydraModeRibbon(QtWidgets.QWidget):
         (self._hydra_btn if mode == "hydra" else self._single_btn).setChecked(True)
 
 
+class HydraFieldSelector(QtWidgets.QGroupBox):
+    """Sibling-aware dark / bright / background field picker for Hydra mode.
+
+    Same role as ``widgets.FieldSelector`` (single-detector tab), but one
+    path is entered for any *one* ge panel's field file and the other 3 are
+    auto-discovered via ``helpers.hydra_siblings`` — exactly like
+    ``HydraLoaderPanel``'s own main data path — then each panel's field is
+    averaged independently (``workers.FieldAverageWorker``, one per panel).
+    """
+    #: emitted whenever any panel's field finishes computing, or the
+    #: checkbox is toggled (turning correction on/off is itself a change).
+    fieldsReady = QtCore.pyqtSignal()
+
+    def __init__(self, title, parent=None, *, with_mode=False,
+                 default_dataset="exchange/data"):
+        super().__init__(title, parent)
+        self.setCheckable(True)
+        self.setChecked(False)
+        self._default_dataset = default_dataset
+        self._fields: dict = {}          # panel -> np.ndarray
+        self._sibling_paths: dict = {}   # panel -> path
+        self._workers: dict = {}         # panel -> FieldAverageWorker (kept alive)
+        self._pending: set = set()
+
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(6, 2, 6, 4); outer.setSpacing(2)
+        self._body = QtWidgets.QWidget()
+        self._body.setVisible(False)
+        self.toggled.connect(self._body.setVisible)
+        self.toggled.connect(lambda *_: self.fieldsReady.emit())
+        outer.addWidget(self._body)
+        v = QtWidgets.QVBoxLayout(self._body)
+        v.setContentsMargins(0, 0, 0, 0); v.setSpacing(3)
+
+        self._path_ed = QtWidgets.QLineEdit()
+        self._path_ed.setPlaceholderText("Any one ge1-ge4 panel file…")
+        self._path_ed.editingFinished.connect(lambda: self._set_path(self._path_ed.text().strip()))
+        browse = QtWidgets.QToolButton()
+        browse.setText("⋯"); browse.setFixedWidth(28)
+        browse.clicked.connect(self._browse_file)
+        pr = QtWidgets.QHBoxLayout(); pr.setSpacing(4)
+        pr.addWidget(self._path_ed); pr.addWidget(browse)
+        v.addLayout(pr)
+
+        self._status_lbls = {}
+        status_row = QtWidgets.QHBoxLayout(); status_row.setSpacing(6)
+        for n in (1, 2, 3, 4):
+            lbl = QtWidgets.QLabel(f"ge{n}")
+            lbl.setStyleSheet(self._status_style("none"))
+            status_row.addWidget(lbl)
+            self._status_lbls[n] = lbl
+        status_row.addStretch(1)
+        v.addLayout(status_row)
+
+        self._ds_row = QtWidgets.QWidget()
+        dr = QtWidgets.QHBoxLayout(self._ds_row); dr.setContentsMargins(0, 0, 0, 0); dr.setSpacing(4)
+        self._ds_combo = _NoScrollComboBox()
+        self._ds_combo.setEditable(True); self._ds_combo.setEditText(default_dataset)
+        self._ds_combo.currentIndexChanged.connect(self._update_frame_limit)
+        dr.addWidget(QtWidgets.QLabel("Dataset:")); dr.addWidget(self._ds_combo, 1)
+        self._ds_row.setVisible(False)
+        v.addWidget(self._ds_row)
+
+        self._start = _NoScrollSpinBox(); self._start.setRange(0, 0); self._start.setFixedWidth(50)
+        self._end = _NoScrollSpinBox(); self._end.setRange(0, 0); self._end.setFixedWidth(50)
+        self._end.setToolTip("Last frame index to average (inclusive), applied to every panel.")
+        self._nfr_lbl = QtWidgets.QLabel("")
+        self._nfr_lbl.setStyleSheet("color:#9a9a9a;font-size:10px")
+        ir = QtWidgets.QHBoxLayout(); ir.setSpacing(4)
+        ir.addWidget(QtWidgets.QLabel("avg")); ir.addWidget(self._start)
+        ir.addWidget(QtWidgets.QLabel("–")); ir.addWidget(self._end)
+        ir.addWidget(self._nfr_lbl)
+        if with_mode:
+            self._mode_combo = _NoScrollComboBox()
+            self._mode_combo.addItems(["Flat-field divide", "Subtract"])
+            self._mode_combo.setFixedWidth(104)
+            ir.addStretch(1); ir.addWidget(self._mode_combo)
+        else:
+            self._mode_combo = None
+            ir.addStretch(1)
+        v.addLayout(ir)
+
+        self._compute_btn = QtWidgets.QPushButton("Compute field")
+        self._compute_btn.clicked.connect(self._compute_all)
+        v.addWidget(self._compute_btn)
+        self._status = QtWidgets.QLabel("Not computed.")
+        self._status.setStyleSheet("color:#9a9a9a;font-size:10px"); self._status.setWordWrap(True)
+        v.addWidget(self._status)
+
+    @staticmethod
+    def _status_style(state: str) -> str:
+        color = {"found": "#8899aa", "done": "#66bb6a", "error": "#ef5350", "none": "#555"}[state]
+        weight = "bold" if state in ("done", "error") else "normal"
+        return f"color:{color}; font-weight:{weight};"
+
+    def _kind_of(self, path: str) -> str:
+        if Path(path).is_dir() or any(c in path for c in "*?"):
+            return "folder"
+        if is_h5(path):
+            return "hdf5"
+        return "file"
+
+    def _dataset(self) -> str:
+        return self._ds_combo.currentText().split("   ")[0].strip() or self._default_dataset
+
+    def _browse_file(self):
+        p = _browse(self, f"Select {self.title()} file",
+                   "Data (*.tif *.tiff *.h5 *.hdf5 *.hdf *.nxs *.ge*);;All (*)")
+        if p:
+            self._set_path(p)
+
+    def _set_path(self, path: str):
+        if not path:
+            return
+        self._path_ed.setText(path)
+        self._sibling_paths = hydra_siblings(path)
+        for n, lbl in self._status_lbls.items():
+            lbl.setStyleSheet(self._status_style("found" if n in self._sibling_paths else "none"))
+        self._fields = {}
+        h5 = is_h5(path)
+        self._ds_row.setVisible(h5)
+        if h5 and Path(path).exists():
+            try:
+                items = list_h5_datasets(path)
+            except Exception:
+                items = []
+            if items:
+                keep = self._ds_combo.currentText().strip()
+                self._ds_combo.blockSignals(True); self._ds_combo.clear()
+                for name, shape in items:
+                    self._ds_combo.addItem(f"{name}   {tuple(shape)}", name)
+                idx = next((i for i in range(self._ds_combo.count())
+                            if self._ds_combo.itemData(i) == keep), -1)
+                if idx < 0:
+                    idx = next((i for i, (n, s) in enumerate(items) if len(s) >= 3), 0)
+                self._ds_combo.setCurrentIndex(idx)
+                self._ds_combo.blockSignals(False)
+        self._update_frame_limit()
+        if not self._sibling_paths:
+            self._status.setText("File not found on disk.")
+        else:
+            self._status.setText(f"Found {len(self._sibling_paths)}/4 panel(s) — not computed.")
+
+    def _count_frames(self, path: str) -> int:
+        if not path:
+            return 0
+        try:
+            kind = self._kind_of(path)
+            if kind == "hdf5":
+                import h5py
+                if not Path(path).exists():
+                    return 0
+                with h5py.File(path, "r") as f:
+                    d = f[self._dataset()]
+                    return int(d.shape[0]) if d.ndim >= 3 else 1
+            if kind == "folder":
+                from midas_gui.helpers import _collect_frame_paths
+                return len(_collect_frame_paths(path))
+            if not Path(path).exists():
+                return 0
+            if path.lower().endswith((".tif", ".tiff")):
+                import tifffile
+                with tifffile.TiffFile(path) as tf:
+                    return len(tf.pages)
+            return 1
+        except Exception:
+            return 0
+
+    def _update_frame_limit(self, *_):
+        """Clamp the avg-range spinboxes to the (first found panel's) frame
+        count — every panel of a synchronized Hydra scan has the same
+        number of frames, so one reference path is enough."""
+        ref = next(iter(self._sibling_paths.values()), self._path_ed.text().strip())
+        n = self._count_frames(ref)
+        if n <= 0:
+            self._nfr_lbl.setText("")
+            return
+        hi = n - 1
+        self._nfr_lbl.setText(f"/ {hi}")
+        for sp in (self._start, self._end):
+            sp.blockSignals(True); sp.setMaximum(hi); sp.blockSignals(False)
+        if self._end.value() == 0 or self._end.value() > hi:
+            self._end.blockSignals(True); self._end.setValue(hi); self._end.blockSignals(False)
+        if self._start.value() > hi:
+            self._start.setValue(hi)
+
+    def _compute_all(self):
+        if not self._sibling_paths:
+            self._status.setText("Enter a path first."); return
+        self._fields = {}
+        self._pending = set(self._sibling_paths)
+        self._compute_btn.setEnabled(False)
+        self._status.setText("Computing…")
+        self._workers = {}
+        for n, path in self._sibling_paths.items():
+            w = FieldAverageWorker(self._kind_of(path), path, self._dataset(),
+                                   self._start.value(), self._end.value(), parent=self)
+            w.finished.connect(lambda field, n=n: self._on_one_computed(n, field))
+            w.failed.connect(lambda err, n=n: self._on_one_failed(n, err))
+            self._workers[n] = w
+            w.start()
+
+    def _on_one_computed(self, n: int, field):
+        self._fields[n] = field
+        self._pending.discard(n)
+        self._status_lbls[n].setStyleSheet(self._status_style("done"))
+        if not self._pending:
+            self._compute_btn.setEnabled(True)
+            self._status.setText(f"Computed {len(self._fields)}/{len(self._sibling_paths)} panel(s) "
+                                 f"— {field.shape} [{float(field.min()):.4g}, {float(field.max()):.4g}]")
+        self.fieldsReady.emit()
+
+    def _on_one_failed(self, n: int, err: str):
+        self._pending.discard(n)
+        self._status_lbls[n].setStyleSheet(self._status_style("error"))
+        if not self._pending:
+            self._compute_btn.setEnabled(True)
+        last = err.strip().splitlines()[-1] if err and err.strip() else "error"
+        self._status.setText(f"ge{n} failed: {last}")
+
+    # ── Public accessors ─────────────────────────────────────────
+
+    def field(self, n: int) -> Optional[np.ndarray]:
+        return self._fields.get(n) if self.isChecked() else None
+
+    def mode(self) -> str:
+        if self._mode_combo is None:
+            return "divide"
+        return "divide" if self._mode_combo.currentIndex() == 0 else "subtract"
+
+    def set_path(self, path: str):
+        """Programmatic equivalent of typing a path and pressing Enter —
+        used by Save/Load GUI State restore."""
+        self._set_path(path)
+
+    def current_path(self) -> str:
+        return self._path_ed.text().strip()
+
+
 class HydraLoaderPanel(QtWidgets.QWidget):
     """Left-hand loader for the Hydra page. One path field — point it at any
     single GE panel's file — auto-discovers the other panels via
@@ -121,6 +362,7 @@ class HydraLoaderPanel(QtWidgets.QWidget):
 
     siblingsChanged = QtCore.pyqtSignal(dict)   # {panel_num: path}, may be {}
     frameChanged = QtCore.pyqtSignal(int)
+    fieldsChanged = QtCore.pyqtSignal()         # dark/bright/background changed (any panel)
 
     #: Dataset key fixed for v1 — every bundled/real Hydra HDF5 file used so
     #: far shares this convention (see hydra_default_geometry's callers).
@@ -183,6 +425,17 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         card.body.addWidget(self._info_lbl)
 
         lv.addWidget(card)
+
+        # ── Dark / Bright / Background (sibling-aware, one pick per field) ──
+        fld = S.make_card("Dark / Bright / Background")
+        self._dark_sel = HydraFieldSelector("Dark", default_dataset="exchange/data_dark")
+        self._bright_sel = HydraFieldSelector("Bright", with_mode=True)
+        self._bg_sel = HydraFieldSelector("Background")
+        for w in (self._dark_sel, self._bright_sel, self._bg_sel):
+            w.fieldsReady.connect(self.fieldsChanged)
+            fld.body.addWidget(w)
+        lv.addWidget(fld)
+
         lv.addStretch(1)
 
     @staticmethod
@@ -264,6 +517,18 @@ class HydraLoaderPanel(QtWidgets.QWidget):
 
     def current_path(self) -> str:
         return self._path_ed.text().strip()
+
+    def dark(self, n: int) -> Optional[np.ndarray]:
+        return self._dark_sel.field(n)
+
+    def bright(self, n: int) -> Optional[np.ndarray]:
+        return self._bright_sel.field(n)
+
+    def background(self, n: int) -> Optional[np.ndarray]:
+        return self._bg_sel.field(n)
+
+    def bright_mode(self) -> str:
+        return self._bright_sel.mode()
 
 
 class HydraDetectorToolbar(QtWidgets.QWidget):

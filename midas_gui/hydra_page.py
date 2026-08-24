@@ -31,7 +31,7 @@ import numpy as np
 from PyQt5 import QtCore, QtWidgets
 
 from midas_gui import hydra
-from midas_gui.helpers import (_load_image, _apply_im_trans, _fspin,
+from midas_gui.helpers import (_load_image, _apply_im_trans, _fspin, apply_field_corrections,
                          geometry_fields_from_file, widgets_to_dict, apply_dict_to_widgets)
 from midas_gui.hydra_geometry_card import DetectorGeometryCard
 from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar, HydraProfileViewer
@@ -72,6 +72,7 @@ class HydraViewerPage(QtWidgets.QWidget):
         self._composite_seeded_size: Optional[int] = None
         self._disp_key = None                    # (shape, active key) — fresh-display detection
         self._active_card: Optional[DetectorGeometryCard] = None
+        self._syncing_shared = False             # re-entrancy guard for _sync_shared_fields
         self._build_ui()
         self._on_panel_changed(self._toolbar.current())
 
@@ -89,6 +90,7 @@ class HydraViewerPage(QtWidgets.QWidget):
         self._loader.setMinimumWidth(200)
         self._loader.siblingsChanged.connect(self._on_siblings_changed)
         self._loader.frameChanged.connect(self._on_frame_changed)
+        self._loader.fieldsChanged.connect(self._on_fields_changed)
         split.addWidget(self._loader)
 
         # ── MIDDLE: one geometry card per panel + one for the composite ──
@@ -123,8 +125,10 @@ class HydraViewerPage(QtWidgets.QWidget):
                 # explicitly avoids). Leaving its profile/radial-control
                 # bindings unset makes its own radial_integrate() a no-op;
                 # its ring-simulation/BC fields are still fully functional
-                # for the on-image ring overlay.
-                pass
+                # for the on-image ring overlay. λ/max2θ/px are still kept
+                # in sync with the ge1-4 cards (see _sync_shared_fields) —
+                # same beam/detector model, so its ring radii should match.
+                card.geometryChanged.connect(self._on_composite_geometry_changed)
             else:
                 # Every ge-card's own curve is bound once, permanently —
                 # unlike the viewer (only one image shown at a time), all 4
@@ -202,14 +206,30 @@ class HydraViewerPage(QtWidgets.QWidget):
             fields = geometry_fields_from_file(str(hydra.default_param_file(n)))
             self._cards[f"ge{n}"].set_geometry(fields)
 
+    def _apply_field_selectors(self, n: int, st: hydra.DetectorState):
+        """Pull this panel's dark/bright/background arrays (if the
+        corresponding HydraFieldSelector is checked and has computed one)
+        out of the loader and onto its DetectorState."""
+        st.dark = self._loader.dark(n)
+        st.bright = self._loader.bright(n)
+        st.bright_mode = self._loader.bright_mode()
+        st.background = self._loader.background(n)
+
     def _load_panel_frame(self, n: int) -> Optional[np.ndarray]:
         path = self._loader.siblings().get(n)
         st = self._states.get(n)
         if path is None or st is None:
             return None
         st.data_file = path
+        self._apply_field_selectors(n, st)
         try:
             img = _load_image(path, self._loader.dataset(), self._loader.frame_index())
+            if st.dark is not None or st.bright is not None or st.background is not None:
+                # Same order as the single-detector tab: correction on the
+                # raw frame, before ImTransOpt (tab_view.py's _on_loader_data).
+                img = apply_field_corrections(img, dark=st.dark, bright=st.bright,
+                                              bright_mode=st.bright_mode,
+                                              background=st.background)
             img = _apply_im_trans(img, tuple(st.im_trans_opts))
         except Exception:
             return None
@@ -226,6 +246,7 @@ class HydraViewerPage(QtWidgets.QWidget):
             return
         for n, p in active.items():
             self._states[n].data_file = p
+            self._apply_field_selectors(n, self._states[n])
         try:
             comp, big_det_size = hydra.build_windmill_composite(
                 active, self._loader.frame_index(), self._loader.dataset(),
@@ -271,6 +292,8 @@ class HydraViewerPage(QtWidgets.QWidget):
 
     def _on_siblings_changed(self, siblings: dict):
         self._ensure_states_for_siblings(siblings)
+        if siblings:
+            self._sync_shared_fields(f"ge{min(siblings)}")
         self._toolbar.set_available(siblings.keys())
         self._composite_img = None
         self._composite_seeded_size = None
@@ -278,6 +301,13 @@ class HydraViewerPage(QtWidgets.QWidget):
         self._refresh_profile_curves()
 
     def _on_frame_changed(self, _idx: int):
+        self._composite_img = None
+        self._refresh_display()
+        self._refresh_profile_curves()
+
+    def _on_fields_changed(self):
+        """Dark/bright/background changed (any panel) — recompute the
+        corrected frames/composite and refresh, same as a frame change."""
         self._composite_img = None
         self._refresh_display()
         self._refresh_profile_curves()
@@ -295,14 +325,18 @@ class HydraViewerPage(QtWidgets.QWidget):
         self._refresh_display()
 
     def _on_card_geometry_changed(self, n: int):
-        """A ge1-4 card's geometry changed (BC edit/pick or calibration
-        file load) — sync it into the matching DetectorState, force the
-        composite (which depends on every panel's geometry) to rebuild, and
-        refresh the derived Composite curve (that panel's own curve already
-        refreshed itself via the card's normal geometry-change handling)."""
+        """A ge1-4 card's geometry changed (BC edit/pick, calibration file
+        load, or a shared-field edit) — mirror λ/max2θ/px onto the other
+        panels + composite, sync the full geometry into the matching
+        DetectorState, force the composite (which depends on every panel's
+        geometry) to rebuild, and refresh the derived Composite curve (that
+        panel's own curve already refreshed itself via the card's normal
+        geometry-change handling)."""
         card = self._cards.get(f"ge{n}")
         if card is None:
             return
+        if not self._syncing_shared:
+            self._sync_shared_fields(f"ge{n}")
         fields = card.get_full_geometry()
         if fields is None:
             return
@@ -312,6 +346,36 @@ class HydraViewerPage(QtWidgets.QWidget):
         if self._toolbar.current() == "composite":
             self._refresh_display()
         self._refresh_composite_curve()
+
+    def _on_composite_geometry_changed(self):
+        """The Composite card's own geometry changed — only λ/max2θ/px are
+        mirrored back out to ge1-4 (its Lsd/BC/tx stay independent, seeded
+        once from the panels — see _reseed_composite_card_if_needed)."""
+        if not self._syncing_shared:
+            self._sync_shared_fields("composite")
+
+    _SHARED_FIELD_KEYS = ("ge1", "ge2", "ge3", "ge4", "composite")
+
+    def _sync_shared_fields(self, source_key: str):
+        """Mirror λ/max2θ/px from the card at `source_key` onto every other
+        card (ge1-4 + composite) — see DetectorGeometryCard.get_shared_fields/
+        apply_shared_fields. Guarded by `_syncing_shared` so applying the
+        value to a sibling (which itself emits geometryChanged) doesn't
+        recurse into another sync."""
+        src = self._cards.get(source_key)
+        if src is None:
+            return
+        shared = src.get_shared_fields()
+        self._syncing_shared = True
+        try:
+            for key in self._SHARED_FIELD_KEYS:
+                if key == source_key:
+                    continue
+                card = self._cards.get(key)
+                if card is not None:
+                    card.apply_shared_fields(shared)
+        finally:
+            self._syncing_shared = False
 
     def _refresh_profile_curves(self, force: bool = False):
         """(Re)load every available panel's frame and — if Auto is on (or

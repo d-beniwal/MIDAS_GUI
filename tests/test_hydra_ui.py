@@ -8,10 +8,12 @@ from __future__ import annotations
 import gc
 from pathlib import Path
 
+import numpy as np
 import pytest
 from PyQt5 import QtWidgets
 
 from midas_gui.helpers import geometry_fields_from_file
+from midas_gui.hydra_widgets import HydraFieldSelector
 from midas_gui.tab_view import DataViewerTab
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "test_data" / "gui_synthetic" / "hydra"
@@ -43,6 +45,42 @@ def fixture_available():
         pytest.skip("test_data/gui_synthetic/hydra/ fixture not present — "
                     "run make_hydra_test_data.py")
     return FIXTURE_DIR
+
+
+def test_hydra_field_selector_sibling_discovery_and_compute(app, tmp_path):
+    """HydraFieldSelector (Dark/Bright/Background) auto-discovers sibling
+    panel files the same way the main Hydra data path does, and computes
+    each panel's field independently. A standalone QGroupBox (no
+    pg.ImageView/ViewBox), so it doesn't add to the pyqtgraph-teardown
+    -crash risk the other, heavier tests in this file are mindful of."""
+    import h5py
+
+    for n in (1, 2, 3, 4):
+        d = tmp_path / f"ge{n}"
+        d.mkdir()
+        data = np.full((1, 8, 8), float(n) * 10.0, dtype=np.float32)
+        with h5py.File(d / f"dark.ge{n}.h5", "w") as f:
+            f.create_dataset("exchange/data", data=data)
+
+    sel = HydraFieldSelector("Dark", default_dataset="exchange/data")
+    sel.setChecked(True)
+    sel._set_path(str(tmp_path / "ge1" / "dark.ge1.h5"))
+    assert sorted(sel._sibling_paths.keys()) == [1, 2, 3, 4]
+    assert sel.field(1) is None   # not computed yet
+
+    sel._compute_all()
+    for w in list(sel._workers.values()):
+        w.wait()
+    for _ in range(20):
+        app.processEvents()
+
+    for n in (1, 2, 3, 4):
+        field = sel.field(n)
+        assert field is not None
+        assert np.allclose(field, float(n) * 10.0)
+
+    sel.setChecked(False)
+    assert sel.field(1) is None   # unchecked -> no correction, even though computed
 
 
 def test_mode_ribbon_switches_pages(app):
@@ -78,6 +116,22 @@ def test_hydra_page_loads_siblings_and_shows_panels(app, fixture_available):
 
 
 def test_hydra_composite_builds_with_matched_calibration(app, fixture_available):
+    """Also covers two geometry-edit regression guards on this same
+    DataViewerTab/Hydra page, rather than building a fresh one each,  to
+    avoid piling up extra pyqtgraph ViewBox/ImageView instances in this
+    process (see the 2026-08-23 pyqtgraph-teardown-crash DECISIONS.md
+    entry on keeping the count of Hydra-page instances built across this
+    file down):
+
+    1. A beam-centre edit on a panel that already has a full geometry
+       loaded (every bundled default does, since tx != 0) must move that
+       panel's radial profile, not just its ring overlay — see the
+       _effective_calib_geom live-value-override fix in
+       hydra_geometry_card.py.
+    2. λ/max2θ/px edited on one ge card mirror onto ge1-4 and the Composite
+       card — see DetectorGeometryCard.get_shared_fields/apply_shared_fields
+       and HydraViewerPage._sync_shared_fields.
+    """
     tab = DataViewerTab()
     tab._mode_ribbon.set_mode("hydra")
     hp = tab._hydra_page
@@ -96,6 +150,38 @@ def test_hydra_composite_builds_with_matched_calibration(app, fixture_available)
     # composite card auto-seeded at the canvas centre
     assert hp._cards["composite"]._bcy.value() == pytest.approx(256.0)
     assert hp._cards["composite"]._bcz.value() == pytest.approx(256.0)
+
+    # (1) beam-centre edit -> radial profile
+    card = hp._cards["ge1"]
+    assert card._calib_geom is not None   # full geometry (tx != 0) — the bug's precondition
+    before = hp._profile_view.get_native("ge1")
+    assert before is not None
+    r_before, prof_before = np.asarray(before[0]), np.asarray(before[1])
+
+    card._bc_auto.setChecked(False)
+    card._bcy.setValue(card._bcy.value() + 50.0)
+    app.processEvents()
+
+    after = hp._profile_view.get_native("ge1")
+    r_after, prof_after = np.asarray(after[0]), np.asarray(after[1])
+    assert r_before.shape != r_after.shape or not np.allclose(
+        np.nan_to_num(prof_before), np.nan_to_num(prof_after))
+
+    # (2) shared λ/max2θ/px sync across ge1-4 + composite
+    src = hp._cards["ge2"]
+    new_wl = src._wl.value() + 0.01
+    new_px = src._px.value() + 5.0
+    new_max2t = src._max2t.value() + 2.0
+    src._wl.setValue(new_wl)
+    src._px.setValue(new_px)
+    src._max2t.setValue(new_max2t)
+    app.processEvents()
+
+    for key in ("ge1", "ge3", "ge4", "composite"):
+        c = hp._cards[key]
+        assert c._wl.value() == pytest.approx(new_wl)
+        assert c._px.value() == pytest.approx(new_px)
+        assert c._max2t.value() == pytest.approx(new_max2t)
 
 
 def test_hydra_profile_plot_shows_all_four_curves_plus_composite(app, fixture_available):
@@ -170,3 +256,5 @@ def test_hydra_state_round_trips(app, fixture_available):
     app.processEvents()
     assert tab2._mode_ribbon.mode() == "hydra"
     assert tab2._hydra_page._toolbar.current() == "ge3"
+
+

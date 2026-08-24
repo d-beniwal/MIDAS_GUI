@@ -227,7 +227,15 @@ class ImageViewer(QtWidgets.QWidget):
         if self._manual_levels is not None:
             lo, hi = self._manual_levels
         else:
-            fin = disp[np.isfinite(disp)]
+            # Exclude exact-zero pixels from the percentile calc — on a
+            # mostly-empty canvas (e.g. the Hydra composite's unfilled
+            # BigDet background) they'd otherwise dominate and skew the
+            # auto-level window. Masked on the raw (pre-log) data, since
+            # log10(0) isn't 0. Falls back to the unfiltered set if the
+            # whole frame is exactly zero (nothing loaded yet).
+            nonzero = d.T != 0
+            candidates = disp[np.isfinite(disp) & nonzero]
+            fin = candidates if candidates.size else disp[np.isfinite(disp)]
             if fin.size:
                 lo = float(np.percentile(fin, self._vmin.value()))
                 hi = float(np.percentile(fin, self._vmax.value()))

@@ -3,6 +3,202 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-08-24 — Hydra composite needs a vertical-axis mirror too (partially reopens the "no chirality/X-mirror correction" entry further below)
+
+After the rotation-direction revert (entry directly below) still didn't
+fully match, the user identified the remaining discrepancy precisely: a
+plain left-right mirror of the *whole finished composite* makes it match
+reality, and named which panels swap sides — ge4 should be on the right,
+ge2 on the left (the composite as built was putting them the other way
+round).
+
+**This does re-open the earlier "no chirality/X-mirror correction needed"
+conclusion** (further below) — that entry checked ring continuity and
+overall render plausibility with real data, which (as the rotation-
+direction entry already noted) a pure mirror combined with a compensating
+rotation-direction error can pass just as easily as no error at all.
+Neither ring continuity nor "does it look like a plausible windmill" can
+distinguish "correct" from "mirrored + counter-rotated" — only knowing
+which physical panel should be on which side of a real detector can, which
+is exactly what the user supplied here.
+
+**Fix**: `hydra.py::compute_inv_coords` now computes `Y_lab = (half - Yo) *
+px` instead of `Y_lab = (Yo - half) * px` — mirrors the composite canvas
+about its vertical axis, independent of the rotation-by-`tx` logic. Verified
+against the real `park_may26_bc` calibration + `park_may26/ge{1..4}` frames:
+per-panel single-detector composites now centroid at `ge1`/`ge4` on the
+right half of the canvas and `ge2`/`ge3` on the left (previously the
+reverse for ge2/ge4), matching the user's stated correct arrangement.
+
+**Scope of the fix**: this coordinate map (`compute_inv_coords` via
+`DetectorState.get_inv_coords`/`get_remapped_frame`) is used *only* by
+`build_windmill_composite` — not by the per-panel ge1-4 raw-frame displays
+or their ring overlays (those live in `hydra_geometry_card.py`/
+`hydra_page.py` and don't go through this code path), so this mirror only
+affects the Composite view, as intended.
+
+Both independently hand-derived test formulas
+(`tests/test_hydra_chirality.py::_expected_xy`,
+`tests/test_hydra_geometry.py::_expected_composite_xy`) updated to invert
+the same mirror (`half - Y_lab/px` instead of `Y_lab/px + half`). Full
+Hydra geometry/chirality suite (14 tests) passes after the change.
+
+## 2026-08-23 — Hydra composite rotation direction: reverted back to counterclockwise (supersedes the "clockwise, not CCW" entry below — that fix was itself wrong)
+
+The user did the real windowed comparison against `test_data/s1ide` that
+the prior entry (below) flagged as still needed, using the real per-panel
+fitted calibration (`park_may26_bc/refined_MIDAS_params_ge{1..4}_Tx_cake.txt`)
+and a known-correct reference composite image for the same data. The
+earlier same-day "clockwise" fix (`tx_rad = math.radians(-tx_deg)` in
+`hydra.py::compute_inv_coords`) was **wrong** — it visibly mis-rotates the
+composite (panel sectors and each panel's identical local shadow-marker
+land at the wrong azimuth) relative to the reference. Reverted to the
+original `tx_rad = math.radians(tx_deg)` (counterclockwise), which was
+correct all along.
+
+**How this was diagnosed** (pixel forensics alone was a dead end — see
+below — the fix came from reproducing the bug with real code + real data
+and testing sign hypotheses against a known-correct reference image):
+1. Built the composite with `hydra.build_windmill_composite` using the
+   actual `park_may26_bc` calibration files and the real `park_may26/ge{1..4}`
+   HDF5 frames — this reproduced the user's "current (wrong)" screenshot
+   pixel-for-pixel in structure, confirming the bug lived in this
+   codebase's math, not in how the screenshot was captured.
+2. Every panel's raw frame carries an identical small dark shadow feature
+   (a fixed local fiducial/support-arm shadow, same raw pixel location on
+   every panel — same idea as the synthetic test fixture's marker) that
+   necessarily renders *radial* from the shared beam centre regardless of
+   whether `tx`'s sign is right or wrong (a pure rotation about the centre
+   always keeps a "points at my own BC" feature pointing at the composite
+   centre) — this makes ring continuity *and* "does the marker point at
+   the centre" both blind to a global direction error, exactly as the
+   entry below already suspected. What *does* differ between a correct and
+   backwards sign is **which azimuth** each panel (and its marker) ends up
+   at.
+3. Recomputed the composite with `tx_rad = math.radians(tx_deg)` (i.e.
+   undoing the clockwise change) using the same real data — the result
+   matched the known-correct reference image closely (each panel's marker
+   lands at the same near-cardinal azimuth, same "hook" orientation, same
+   overall windmill arrangement), while the clockwise version reproduced
+   the wrong one. This was a direct empirical test (render + compare), not
+   inference from the marker-radial argument in point 2, which is
+   necessarily inconclusive on its own.
+4. Reverted `hydra.py::compute_inv_coords` and the two independently
+   hand-derived test formulas that had been flipped to match the wrong
+   convention (`tests/test_hydra_geometry.py::_expected_composite_xy`,
+   `tests/test_hydra_chirality.py::_expected_xy`) back to counterclockwise.
+   Full Hydra test suite re-run clean after the revert.
+
+**Lesson**: the earlier "clockwise" conclusion was reached from a
+plausible-sounding argument (nominal physical Tx values matching the
+bundled defaults) without actually rendering and comparing against a
+known-correct reference — exactly the kind of "looks right on paper" bug
+a real look at real data catches and paper reasoning does not. Don't trust
+a sign-convention conclusion for this rotation without a render-and-compare
+check against known-correct output.
+
+## 2026-08-23 — Five Hydra bugs found in the real windowed (Phase 6) pass, fixed
+
+The first real windowed manual review of Hydra mode (the one item STATE.md
+had flagged as still outstanding) surfaced 5 real bugs that offscreen
+tests/screenshots never exercised:
+
+1. **λ/max 2θ/px now mirrored across ge1-4 + the Composite card.**
+   `DetectorGeometryCard` gained `get_shared_fields()`/`apply_shared_fields()`;
+   `HydraViewerPage._sync_shared_fields()` mirrors whichever card's value
+   changed onto the other 4, guarded by a `_syncing_shared` re-entrancy
+   flag so applying to a sibling (which itself emits `geometryChanged`)
+   doesn't recurse. Composite is included (not just ge1-4) since it's the
+   same beam/pixel size, so its own ring radii would otherwise silently go
+   stale relative to the per-panel views.
+2. **Dark/bright/background correction added for Hydra**, closing the
+   scope cut noted in `hydra_page.py`'s original module docstring. New
+   `HydraFieldSelector` (`hydra_widgets.py`) mirrors the single-detector
+   tab's `FieldSelector`/`DataLoaderPanel.corrected()` machinery
+   (`helpers.apply_field_corrections`/`average_field`,
+   `workers.FieldAverageWorker` reused as-is) but auto-discovers the other
+   3 panels' field files via `helpers.hydra_siblings` — the same function
+   the main "Hydra data" path already used — rather than requiring 4
+   separate picks.
+3. **Composite rotation direction fixed: clockwise, not counterclockwise.**
+   See the dedicated entry below — this is the one that reversed a
+   conclusion from an earlier session's chirality verification, so it gets
+   its own writeup.
+4. **Stale radial-integration geometry fixed.**
+   `_effective_calib_geom()` was returning `self._calib_geom` (a snapshot
+   frozen at calibration-load time) verbatim, so once a full geometry was
+   loaded, later edits to the live BC/λ/Lsd/px/tilt widgets moved the ring
+   overlay (which always reads the live widgets) but not the radial
+   profile. Latent in the single-detector tab too, but only guaranteed to
+   bite in Hydra because every bundled default `ps_ge{1..4}.txt` already
+   carries a non-zero `tx`, so `_apply_full_geometry_dict`'s "has_full"
+   gate — and therefore this bug — is live from the very first frame,
+   unlike the single-detector tab's usual all-manual starting state. Fixed
+   by having `_effective_calib_geom()` return a copy with
+   wavelength/Lsd/BC/pxY/pxZ/ty/tz always overridden from the live widgets
+   (only `tx`/`distortion`/`NrPixelsY/Z` — which have no live widget — come
+   from the frozen snapshot). Related: `_on_sim_param_changed()` only
+   redrew/reintegrated when "Simulate rings (live)" was checked; gave it
+   the same always-refresh tail `_on_bc_changed()` already had, since λ/
+   Lsd/px/max2θ feed the same geometry regardless of that toggle — needed
+   for issue 1's cross-card sync to be visible at all when live-sim is off.
+5. **vmin% percentile now excludes exact-zero pixels**
+   (`widgets.py::ImageViewer._redisplay`). On the Hydra composite's mostly
+   -empty `BigDet` canvas (see `hydra.composite`'s NaN→0 fill for the max
+   op) those zeros dominated the percentile and washed out the auto-level
+   window; masked on the raw data (not the log-transformed display array,
+   since `log10(0) != 0`), with a fallback to the unfiltered set if the
+   whole frame is exactly zero. Single fix point in the `ImageViewer` base
+   class — benefits every viewer in the app, not just Hydra's.
+
+New/expanded regression coverage in `tests/test_hydra_ui.py`: a beam-centre
+-edit-updates-profile check and a shared-field-sync check were folded into
+the existing `test_hydra_composite_builds_with_matched_calibration` test
+(rather than each getting its own `DataViewerTab`) specifically to avoid
+pushing the file over the pyqtgraph-teardown-crash threshold described in
+the entry directly below — adding even one more heavy Hydra-page test
+function to this file flipped the crash from "never observed in 3 runs" to
+"reliably crashes," and folding into an existing test brought it back to
+"occasional, as before." If more Hydra-UI coverage is needed later, prefer
+extending an existing test over adding a new one, or address the pyqtgraph
+issue at its root (see that entry's suggestions) first.
+
+## 2026-08-23 — Hydra composite rotation direction: clockwise, not CCW (supersedes the chirality entry below for direction, not for the X-mirror conclusion)
+
+Issue 3 above, isolated: `hydra.py::compute_inv_coords`'s inverse-mapping
+rotation implemented `world→panel = R(-tx)`, i.e. forward `panel→world`
+placement was `R(+tx)` — **counterclockwise** by `tx`, in this app's
+Y-right/Z-up, bottom-left-origin display convention (that convention makes
+CCW visually match standard CCW with no extra mirroring — see the
+origin-flip entry below). The user's nominal physical Tx values (GE1 297,
+GE2 27, GE3 117, GE4 207) match the bundled default files' `tx` almost
+exactly, confirming `tx` *is* the intended physical angle — only the
+rotation **direction** was backwards. Fixed with a one-line change:
+`tx_rad = math.radians(-tx_deg)` (was `math.radians(tx_deg)`).
+
+**Why the prior "no chirality/X-mirror correction needed" verification
+(entry below) didn't catch this**: that check confirmed *self-consistency*
+— real fitted-calibration Debye-Scherrer rings stitched into continuous,
+correctly-curving arcs across all four panel boundaries, and the composite
+rendered through the real viewer pipeline looked right. But ring
+continuity for circularly-symmetric data centred on a shared beam centre is
+a weak test against a *globally consistent* direction error: reflecting/
+rotating all 4 panels the same wrong way can still produce locally
+plausible, continuous-looking arcs, especially when each panel's own tilt
+(ty/tz) was fit independently without reference to absolute world
+orientation. It takes someone who knows what the physical detector
+actually looks like — which is exactly what a real windowed Phase 6 pass
+provides and an offscreen ring-continuity check cannot — to catch an
+overall-orientation bug like this. Verified two ways: `tests/
+test_hydra_geometry.py::_expected_composite_xy` and `tests/
+test_hydra_chirality.py::_expected_xy` each independently hand-derive the
+same rotation (typed out separately, not calling `compute_inv_coords`) —
+both updated to negate `tx_deg` the same way, and both still pass,
+confirming production code and an independently-typed formula agree on the
+corrected direction. **Still recommended**: a real windowed comparison
+against `test_data/s1ide` (real CeO2 Hydra data) against known physical
+detector orientation, before fully closing out Phase 6.
+
 ## 2026-08-23 — Rare pyqtgraph teardown crash under a large test suite; mitigated, not fixed
 
 While adding `tests/test_hydra_ui.py` (each test builds a full
@@ -39,6 +235,12 @@ own code.
   already confirmed to make it worse.
 
 ## 2026-08-23 — Hydra composite needs no chirality/X-mirror correction in this codebase
+
+**Superseded in part** by the "Hydra composite rotation direction" entry
+above (same date): the X-mirror conclusion below still holds, but the
+rotation *direction* this entry validated as self-consistent (CCW) turned
+out to be physically backwards (should be CW) — see that entry for why a
+ring-continuity check couldn't tell the two apart.
 
 While porting the Hydra (4-panel GE detector) windmill-compositing engine
 (`midas_gui/hydra.py`, ported from `midas_saxs_waxs/midas-gui-swaxs`'s
