@@ -332,9 +332,61 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Open Project failed", str(e))
             return
         self._set_project_path(path)
+        self._offer_populate_from_project(path)
 
     def _close_project(self):
         self._set_project_path(None)
+
+    def _offer_populate_from_project(self, path) -> None:
+        """After a successful File > Open Project…, offer to populate the
+        Calibrate / Batch Integrate tabs from the project's recorded
+        attempts — opening a project previously only wired it up for
+        *future* logging and left every tab's fields exactly as they were,
+        which meant "Open Project" didn't actually let you pick up a saved
+        project's data paths/geometry/settings."""
+        try:
+            panels = {}
+            for panel_key in project.discover_panels(path):
+                calib = project.list_attempts(path, panel_key, "calib")
+                integrate = project.list_attempts(path, panel_key, "integrate")
+                if calib or integrate:
+                    panels[panel_key] = {"calib": calib, "integrate": integrate}
+        except Exception:
+            _log(f"Reading project attempts failed:\n{traceback.format_exc()}")
+            return
+        if not panels:
+            return
+
+        from midas_gui.dialogs import ProjectLoadDialog
+        dlg = ProjectLoadDialog(panels, self)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+
+        try:
+            calib_attempts = {k: project.read_attempt(path, ref)
+                               for k, ref in dlg.calib_selection().items()}
+            integrate_attempts = {k: project.read_attempt(path, ref)
+                                   for k, ref in dlg.integrate_selection().items()}
+            if calib_attempts:
+                self._cal_tab.apply_project_calibration(calib_attempts)
+            if integrate_attempts:
+                self._batch_tab.apply_project_integration(integrate_attempts)
+        except Exception:
+            _log(f"Populate from project failed:\n{traceback.format_exc()}")
+            QtWidgets.QMessageBox.critical(
+                self, "Populate from project failed",
+                f"Could not populate the GUI from this project's records.\n"
+                f"See the error log:\n{_LOG_FILE}")
+            return
+
+        msg = []
+        if calib_attempts:
+            msg.append("Calibrate: " + ", ".join(sorted(calib_attempts)))
+        if integrate_attempts:
+            msg.append("Batch Integrate: " + ", ".join(sorted(integrate_attempts)))
+        QtWidgets.QMessageBox.information(
+            self, "Populate from project",
+            "Populated from this project's recorded attempts:\n\n" + "\n".join(msg))
 
     def _save_gui_state_dialog(self):
         """Ctrl+S: overwrite the file this session last loaded/saved from, if

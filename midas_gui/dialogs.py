@@ -5,6 +5,9 @@ from PyQt5 import QtWidgets
 
 from .constants import DISTORTION_NAMES, DISTORTION_ISO, DISTORTION_PRESETS
 
+_PANEL_LABELS = {"single": "Single detector", "ge1": "ge1", "ge2": "ge2",
+                 "ge3": "ge3", "ge4": "ge4"}
+
 
 class DistortionRefineDialog(QtWidgets.QDialog):
     """Pick which of the 15 distortion coefficients to refine.
@@ -149,3 +152,87 @@ class _SaveParamstestDialog(QtWidgets.QDialog):
 
     def template_path(self) -> str:
         return self._tmpl_edit.text().strip()
+
+
+class ProjectLoadDialog(QtWidgets.QDialog):
+    """Shown right after File → Open Project…: lets the user choose which of
+    the project's recorded attempts to populate into the Calibrate / Batch
+    Integrate tabs, per panel (single-detector, or each present Hydra GE
+    panel), rather than silently leaving the GUI untouched.
+
+    One row per panel; each of the two "populate ___ from" checkboxes is
+    paired with an attempt picker (defaulting to the latest) and disabled
+    if that panel has no attempts of that kind. ``calib_selection()`` /
+    ``integrate_selection()`` return ``{panel_key: attempt_ref}`` for the
+    checked rows only.
+    """
+
+    def __init__(self, panels: dict, parent=None):
+        """``panels`` is ``{panel_key: {"calib": [attempts], "integrate": [attempts]}}``,
+        each attempt list as returned by ``project.list_attempts`` (newest first)."""
+        super().__init__(parent)
+        self.setWindowTitle("Populate GUI from project")
+        self.setMinimumWidth(560)
+        self._rows: dict = {}   # panel_key -> {"calib": (check, combo, refs), "integrate": (...)}
+
+        layout = QtWidgets.QVBoxLayout(self)
+        info = QtWidgets.QLabel(
+            "This project has recorded calibration/integration attempts. Choose "
+            "which ones to load into the Calibrate and Batch Integrate tabs so "
+            "you can pick up where this project left off. Leave a box unchecked "
+            "to leave that tab as-is.")
+        info.setWordWrap(True)
+        info.setStyleSheet("color:#bbb;font-size:11px;padding-bottom:8px;")
+        layout.addWidget(info)
+
+        grid = QtWidgets.QGridLayout(); grid.setHorizontalSpacing(12); grid.setVerticalSpacing(6)
+        grid.addWidget(QtWidgets.QLabel("<b>Panel</b>"), 0, 0)
+        grid.addWidget(QtWidgets.QLabel("<b>Calibrate</b>"), 0, 1)
+        grid.addWidget(QtWidgets.QLabel("<b>Batch Integrate</b>"), 0, 2)
+
+        for r, panel_key in enumerate(panels, start=1):
+            entry = panels[panel_key]
+            grid.addWidget(QtWidgets.QLabel(_PANEL_LABELS.get(panel_key, panel_key)), r, 0)
+            self._rows[panel_key] = {}
+            for col, kind in ((1, "calib"), (2, "integrate")):
+                attempts = entry.get(kind) or []
+                cell = QtWidgets.QHBoxLayout(); cell.setSpacing(4)
+                check = QtWidgets.QCheckBox()
+                combo = QtWidgets.QComboBox()
+                for a in attempts:
+                    combo.addItem(f"{a['name']}  ({a['timestamp_utc'][:19]})", a["ref"])
+                has_attempts = bool(attempts)
+                check.setChecked(has_attempts)
+                check.setEnabled(has_attempts)
+                combo.setEnabled(has_attempts)
+                if not has_attempts:
+                    combo.addItem("(none recorded)")
+                cell.addWidget(check); cell.addWidget(combo, 1)
+                w = QtWidgets.QWidget(); w.setLayout(cell)
+                grid.addWidget(w, r, col)
+                self._rows[panel_key][kind] = (check, combo)
+        layout.addLayout(grid)
+
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        btns.button(QtWidgets.QDialogButtonBox.Ok).setText("Populate")
+        btns.button(QtWidgets.QDialogButtonBox.Cancel).setText("Skip")
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def _selection(self, kind: str) -> dict:
+        out = {}
+        for panel_key, kinds in self._rows.items():
+            check, combo = kinds[kind]
+            if check.isChecked() and combo.isEnabled():
+                out[panel_key] = combo.currentData()
+        return out
+
+    def calib_selection(self) -> dict:
+        """``{panel_key: attempt_ref}`` for every checked Calibrate row."""
+        return self._selection("calib")
+
+    def integrate_selection(self) -> dict:
+        """``{panel_key: attempt_ref}`` for every checked Batch Integrate row."""
+        return self._selection("integrate")

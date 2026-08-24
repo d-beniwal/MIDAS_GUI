@@ -228,6 +228,157 @@ def append_calibration_attempt(project_path, panel_key, *, cfg, result, loader_s
     return f"/{panel_key}/calib/{name}"
 
 
+_PANEL_ORDER = ("single", "ge1", "ge2", "ge3", "ge4")
+
+
+def discover_panels(project_path) -> list:
+    """Which of the canonical panel groups (single-detector or the 4 Hydra
+    GE panels) exist in this project file, in canonical order."""
+    with h5py.File(str(project_path), "r") as f:
+        return [p for p in _PANEL_ORDER if p in f]
+
+
+def list_attempts(project_path, panel_key: str, kind: str) -> list:
+    """Attempts recorded under ``<panel_key>/<kind>`` (``kind`` is ``"calib"``
+    or ``"integrate"``), newest first. Each entry is enough to populate a
+    picker without parsing the (possibly large) ``metadata`` JSON blob."""
+    with h5py.File(str(project_path), "r") as f:
+        grp = f.get(f"{panel_key}/{kind}")
+        if grp is None:
+            return []
+        names = sorted((k for k in grp.keys() if k.startswith("attempt_")), reverse=True)
+        return [{"name": n, "ref": f"/{panel_key}/{kind}/{n}",
+                 "timestamp_utc": grp[n].attrs.get("timestamp_utc", "")}
+                for n in names]
+
+
+def read_attempt(project_path, ref: str) -> dict:
+    """Parsed ``metadata`` JSON for one attempt, given a ref such as
+    ``/ge1/calib/attempt_0003`` (as returned by ``append_*_attempt`` /
+    ``list_attempts``)."""
+    with h5py.File(str(project_path), "r") as f:
+        return json.loads(f[ref.lstrip("/")]["metadata"][()])
+
+
+def calib_attempt_gui_fields(meta: dict) -> dict:
+    """Map a parsed calibration-attempt ``metadata`` dict to the
+    widget-keyed field dict consumed by ``CalibrationTab``/
+    ``HydraCalibrationPage``/``HydraCalibPanelCard``'s own
+    ``_state_widgets()``/``state_widgets()`` (applied via
+    ``helpers.apply_dict_to_widgets``). The single-detector tab, the Hydra
+    page's shared "recipe" fields, and one Hydra panel card's seed fields are
+    three different (non-overlapping) subsets of the same widget-key
+    vocabulary, so one dict can be handed to all three — each just ignores
+    the keys it doesn't define."""
+    cfg = meta.get("cfg") or {}
+    result = meta.get("result") or {}
+    refine = cfg.get("refine") or {}
+    im_trans = set(cfg.get("im_trans") or [])
+    fields = {
+        "wl": cfg.get("wavelength"),
+        "cal": cfg.get("calibrant"),
+        "pxY": cfg.get("pxY"),
+        "flip_y": 1 in im_trans, "flip_z": 2 in im_trans, "transp": 3 in im_trans,
+        "manual_seed_check": True,
+        "seed_bcy": result.get("BC_y"), "seed_bcz": result.get("BC_z"),
+        "seed_tx": result.get("tx", 0.0), "seed_ty": result.get("ty", 0.0),
+        "seed_tz": result.get("tz", 0.0),
+        "ref_lsd": refine.get("Lsd"), "ref_bc": refine.get("BC"),
+        "ref_ty": refine.get("ty"), "ref_tz": refine.get("tz"), "ref_tx": refine.get("tx"),
+        "ref_wl": refine.get("Wavelength"), "ref_dist": refine.get("Distortion"),
+        "build_rc": cfg.get("build_residual_corr"),
+        "n_iter": cfg.get("n_iter"), "lm_iter": cfg.get("lm_max_iter"),
+        "device": cfg.get("device"),
+    }
+    lsd = result.get("Lsd")
+    if lsd is not None:
+        fields["seed_lsd"] = float(lsd) / 1000.0   # µm (stored) -> mm (display)
+    pxZ = cfg.get("pxZ")
+    if pxZ is not None:
+        fields["pxZ_check"] = True
+        fields["pxZ_spin"] = pxZ
+    return {k: v for k, v in fields.items() if v is not None}
+
+
+def calib_attempt_loader_state(meta: dict) -> dict:
+    """The subset of a calibration attempt's ``loader_state`` that
+    ``DataLoaderPanel.set_state()`` understands (single-detector mode)."""
+    ls = meta.get("loader_state") or {}
+    out = {}
+    if ls.get("path"):
+        out["path"] = ls["path"]
+    if ls.get("dataset"):
+        out["dataset"] = ls["dataset"]
+    if ls.get("frame_index") is not None:
+        out["frame_index"] = ls["frame_index"]
+    return out
+
+
+def integrate_attempt_gui_fields(meta: dict) -> dict:
+    """Map a parsed integration-attempt ``metadata`` dict to the
+    widget-keyed field dict consumed by ``BatchTab``/``HydraBatchPage``'s
+    ``_state_widgets()`` (applied via ``helpers.apply_dict_to_widgets``).
+    Combo-box fields (kernel, output format) are stored by their short key
+    but the widgets are populated by their display label, so both are
+    translated via ``constants.KERNELS``/``constants.OUTPUT_FORMATS``."""
+    from midas_gui.constants import KERNELS, OUTPUT_FORMATS
+
+    inputs = meta.get("inputs") or {}
+    fields = {}
+    kernel_label = {v: k for k, v in KERNELS.items()}.get(inputs.get("kernel"))
+    if kernel_label:
+        fields["kernel"] = kernel_label
+    fmt_label = {v: k for k, v in OUTPUT_FORMATS.items()}.get(inputs.get("fmt"))
+    if fmt_label:
+        fields["fmt"] = fmt_label
+    if inputs.get("monitor_file"):
+        fields["mon_ed"] = inputs["monitor_file"]
+    q_cfg = inputs.get("q_cfg")
+    if q_cfg:
+        fields["q_check"] = True
+        if q_cfg.get("QMin") is not None:
+            fields["q_min"] = q_cfg["QMin"]
+        if q_cfg.get("QMax") is not None:
+            fields["q_max"] = q_cfg["QMax"]
+        if q_cfg.get("QBinSize") is not None:
+            fields["q_bin"] = q_cfg["QBinSize"]
+    return fields
+
+
+def integrate_attempt_loader_state(meta: dict) -> dict:
+    """The subset of an integration attempt's ``inputs`` that
+    ``DataLoaderPanel.set_state()`` (stream mode) understands: path/dataset
+    plus the frame range as ``fr_start``/``fr_end``/``fr_stride``."""
+    inputs = meta.get("inputs") or {}
+    src = inputs.get("src_cfg") or {}
+    out = {}
+    if src.get("path"):
+        out["path"] = src["path"]
+    if src.get("dataset"):
+        out["dataset"] = src["dataset"]
+    frame_range = inputs.get("frame_range")
+    if frame_range:
+        start, end, stride = (list(frame_range) + [None, None, None])[:3]
+        if start is not None:
+            out["fr_start"] = start
+        out["fr_end"] = end if end is not None else 0
+        if stride is not None:
+            out["fr_stride"] = stride
+    return out
+
+
+def calibration_namespace(calibration_snapshot: dict):
+    """Turn a stored ``calibration_snapshot`` (or a calibration attempt's
+    ``result`` dict) into a duck-typed object with the attributes
+    ``BatchTab.set_calibration``/``HydraBatchPanelCard.set_calibration`` and
+    the integration-spec builders expect — mirrors
+    ``helpers.result_ns_from_geometry_file``'s shape."""
+    from types import SimpleNamespace
+    snap = dict(calibration_snapshot or {})
+    snap.setdefault("residual_corr_bin_path", None)
+    return SimpleNamespace(**snap)
+
+
 def append_integration_attempt(project_path, panel_key, *, inputs, finished_payload,
                                 calibration_snapshot=None, calib_attempt_ref=None,
                                 mask=None, dark=None, bright=None, background=None,

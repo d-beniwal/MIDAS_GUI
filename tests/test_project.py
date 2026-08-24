@@ -213,6 +213,166 @@ def test_batch_tab_logs_to_project_with_calibration_snapshot(app, tmp_path):
         assert att["results/profiles"].shape == (3, 20)
 
 
+def test_discover_list_and_read_attempt(tmp_path):
+    path = str(tmp_path / "proj.h5")
+    project.create_project(path)
+    project.append_calibration_attempt(
+        path, "ge1", cfg={"mode": "one_shot", "calibrant": "CeO2"},
+        result=_fake_result(), loader_state={"path": "/x/ge1.h5"})
+    project.append_calibration_attempt(
+        path, "ge1", cfg={"mode": "one_shot", "calibrant": "CeO2"},
+        result=_fake_result(BC_y=999.0), loader_state={"path": "/x/ge1.h5"})
+
+    assert project.discover_panels(path) == ["ge1"]
+
+    attempts = project.list_attempts(path, "ge1", "calib")
+    assert [a["name"] for a in attempts] == ["attempt_0002", "attempt_0001"]  # newest first
+    assert project.list_attempts(path, "ge1", "integrate") == []
+    assert project.list_attempts(path, "single", "calib") == []
+
+    meta = project.read_attempt(path, attempts[0]["ref"])
+    assert meta["result"]["BC_y"] == pytest.approx(999.0)
+
+
+def test_calib_attempt_gui_fields_and_loader_state():
+    meta = {
+        "cfg": {"wavelength": 0.1729, "calibrant": "CeO2", "pxY": 200.0, "pxZ": 150.0,
+                "refine": {"Lsd": True, "BC": True, "ty": False, "tz": False, "tx": False,
+                           "Wavelength": False, "Distortion": False},
+                "n_iter": 4, "lm_max_iter": 200, "device": "cpu",
+                "build_residual_corr": False, "im_trans": [1, 3]},
+        "result": {"BC_y": 1024.0, "BC_z": 1025.0, "Lsd": 200000.0, "tx": 0.1, "ty": 0.2, "tz": 0.3},
+        "loader_state": {"path": "/data/ge1.h5", "dataset": "exchange/data", "frame_index": 3},
+    }
+    fields = project.calib_attempt_gui_fields(meta)
+    assert fields["wl"] == 0.1729
+    assert fields["cal"] == "CeO2"
+    assert fields["seed_bcy"] == 1024.0 and fields["seed_bcz"] == 1025.0
+    assert fields["seed_lsd"] == pytest.approx(200.0)   # µm -> mm
+    assert fields["manual_seed_check"] is True
+    assert fields["flip_y"] is True and fields["transp"] is True and fields["flip_z"] is False
+    assert fields["ref_lsd"] is True and fields["ref_bc"] is True and fields["ref_ty"] is False
+    assert fields["pxZ_check"] is True and fields["pxZ_spin"] == 150.0
+
+    loader = project.calib_attempt_loader_state(meta)
+    assert loader == {"path": "/data/ge1.h5", "dataset": "exchange/data", "frame_index": 3}
+
+
+def test_integrate_attempt_gui_fields_and_loader_state():
+    meta = {
+        "inputs": {
+            "src_cfg": {"type": "hdf5", "path": "/data/ge1.h5", "dataset": "exchange/data"},
+            "kernel": "subpixel4", "fmt": "xye", "frame_range": [0, 20, 1],
+            "monitor_file": "/data/monitor.csv",
+            "q_cfg": {"QMin": 0.5, "QMax": 8.0, "QBinSize": 0.01},
+        },
+    }
+    fields = project.integrate_attempt_gui_fields(meta)
+    assert fields["kernel"] == "Subpixel K=4"
+    assert fields["fmt"] == "XYE  (2θ, I, σ)"
+    assert fields["mon_ed"] == "/data/monitor.csv"
+    assert fields["q_check"] is True
+    assert fields["q_min"] == 0.5 and fields["q_max"] == 8.0 and fields["q_bin"] == 0.01
+
+    loader = project.integrate_attempt_loader_state(meta)
+    assert loader == {"path": "/data/ge1.h5", "dataset": "exchange/data",
+                       "fr_start": 0, "fr_end": 20, "fr_stride": 1}
+
+    # Unbounded frame range (end=None) maps to fr_end=0 ("all"), not a bare None
+    # that would crash DataLoaderPanel.set_state's int(state["fr_end"]).
+    meta["inputs"]["frame_range"] = [0, None, 1]
+    assert project.integrate_attempt_loader_state(meta)["fr_end"] == 0
+
+
+def test_calibration_namespace_has_expected_attributes():
+    ns = project.calibration_namespace(
+        {"Lsd": 200000.0, "wavelength_A": 0.1729, "BC_y": 1024.0, "BC_z": 1024.0,
+         "NrPixelsY": 2048, "NrPixelsZ": 2048})
+    assert ns.Lsd == 200000.0
+    assert ns.wavelength_A == 0.1729
+    assert ns.residual_corr_bin_path is None
+
+
+def test_apply_project_calibration_and_integration_hydra(app, tmp_path):
+    """End-to-end: a project with only Hydra ge1/ge2 attempts populates the
+    Calibrate tab's Hydra page (mode switch + shared recipe + per-panel seed)
+    and the Batch Integrate tab's Hydra page (mode switch + a live,
+    immediately-usable calibration per panel) — this is the "Open Project…
+    should let me pick up where I left off" behavior."""
+    from midas_gui.tab_calibrate import CalibrationTab
+    from midas_gui.tab_batch import BatchTab
+
+    proj_path = str(tmp_path / "proj.h5")
+    project.create_project(proj_path)
+    data_paths = {}
+    for panel, bc in (("ge1", 1024.0), ("ge2", 1030.0)):
+        data_path = tmp_path / f"{panel}.h5"
+        data_path.write_bytes(b"")   # only needs to exist for the anchor-path exists() gate
+        data_paths[panel] = str(data_path)
+        calib_result = _fake_result(BC_y=bc)
+        calib_ref = project.append_calibration_attempt(
+            proj_path, panel,
+            cfg={"wavelength": 0.1729, "calibrant": "CeO2", "pxY": 200.0,
+                 "refine": {"Lsd": True, "BC": True}, "n_iter": 4,
+                 "lm_max_iter": 200, "device": "cpu"},
+            result=calib_result, loader_state={"path": data_paths[panel],
+                                                "dataset": "exchange/data"})
+        project.append_integration_attempt(
+            proj_path, panel,
+            inputs={"src_cfg": {"type": "hdf5", "path": data_paths[panel],
+                                 "dataset": "exchange/data"},
+                    "kernel": "subpixel2", "fmt": "csv", "frame_range": [0, None, 1]},
+            finished_payload={"n": 10, "aborted": False},
+            calibration_snapshot={"Lsd": calib_result.Lsd, "wavelength_A": 0.1729,
+                                   "BC_y": bc, "BC_z": 1024.0,
+                                   "NrPixelsY": 2048, "NrPixelsZ": 2048},
+            calib_attempt_ref=calib_ref)
+
+    calib_attempts = {p: project.read_attempt(proj_path, project.list_attempts(proj_path, p, "calib")[0]["ref"])
+                       for p in ("ge1", "ge2")}
+    integrate_attempts = {p: project.read_attempt(proj_path, project.list_attempts(proj_path, p, "integrate")[0]["ref"])
+                           for p in ("ge1", "ge2")}
+
+    cal_tab = CalibrationTab()
+    cal_tab.apply_project_calibration(calib_attempts)
+    assert cal_tab._mode_ribbon.mode() == "hydra"
+    assert cal_tab._hydra_page._cards[1]._seed_bcy.value() == pytest.approx(1024.0)
+    assert cal_tab._hydra_page._cards[2]._seed_bcy.value() == pytest.approx(1030.0)
+    assert cal_tab._hydra_page._cards[1]._manual_seed_check.isChecked()
+    assert cal_tab._hydra_page._wl.value() == pytest.approx(0.1729)
+
+    batch_tab = BatchTab()
+    batch_tab.apply_project_integration(integrate_attempts)
+    assert batch_tab._mode_ribbon.mode() == "hydra"
+    hp = batch_tab._hydra_page
+    assert hp._loader.current_path() == data_paths["ge1"]
+    assert hp._kernel.currentText() == "Subpixel K=2 (default)"
+    assert hp._cards[1].result.BC_y == pytest.approx(1024.0)
+    assert hp._cards[2].result.BC_y == pytest.approx(1030.0)
+    assert hp._cards[1]._use_calib_btn.isChecked()
+
+
+def test_apply_project_calibration_single_detector(app, tmp_path):
+    from midas_gui.tab_calibrate import CalibrationTab
+
+    proj_path = str(tmp_path / "proj.h5")
+    project.create_project(proj_path)
+    project.append_calibration_attempt(
+        proj_path, "single",
+        cfg={"wavelength": 0.15359, "calibrant": "LaB6", "pxY": 200.0,
+             "refine": {"Lsd": True}, "n_iter": 4, "lm_max_iter": 200, "device": "cpu"},
+        result=_fake_result(BC_y=1111.0),
+        loader_state={"path": "/data/single.h5", "dataset": "exchange/data", "frame_index": 2})
+
+    meta = project.read_attempt(proj_path, project.list_attempts(proj_path, "single", "calib")[0]["ref"])
+    cal_tab = CalibrationTab()
+    cal_tab.apply_project_calibration({"single": meta})
+    assert cal_tab._mode_ribbon.mode() == "single"
+    assert cal_tab._seed_bcy.value() == pytest.approx(1111.0)
+    assert cal_tab._cal.currentText() == "LaB6"
+    assert cal_tab._manual_seed_check.isChecked()
+
+
 def test_hash_paths_in_adds_hash_for_existing_files(tmp_path):
     f = tmp_path / "data.bin"
     f.write_bytes(b"abc123")

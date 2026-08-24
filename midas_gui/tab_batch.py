@@ -143,6 +143,47 @@ class BatchTab(QtWidgets.QWidget):
             self._ensure_hydra_page().set_state(page_state)
         self._mode_ribbon.set_mode(hydra_state.get("active_mode", "single"))
 
+    # ── File > Open Project… ─────────────────────────────────────────
+    def apply_project_integration(self, attempts: dict) -> None:
+        """``attempts`` maps panel key (``"single"`` or ``"ge1"``..``"ge4"``)
+        to that panel's integration-attempt metadata (``project.read_attempt``)
+        — called after File > Open Project… when the user opts to populate
+        this tab. Unlike plain GUI-state load, this also installs the
+        recorded ``calibration_snapshot`` as a live, usable calibration (via
+        ``set_calibration``/``set_panel_calibration``) so Run works
+        immediately, without needing Tab 2 re-run first."""
+        if not attempts:
+            return
+        single_meta = attempts.get("single")
+        hydra_metas = {k: v for k, v in attempts.items() if k != "single"}
+        state = {}
+        if single_meta is not None:
+            state["fields"] = project.integrate_attempt_gui_fields(single_meta)
+            state["loader"] = project.integrate_attempt_loader_state(single_meta)
+        if hydra_metas:
+            shared_fields, loader_state, anchor_path = {}, {}, None
+            for panel_key, meta in sorted(hydra_metas.items()):
+                shared_fields = project.integrate_attempt_gui_fields(meta)
+                loader_state = project.integrate_attempt_loader_state(meta)
+                if anchor_path is None:
+                    anchor_path = loader_state.get("path")
+            state["hydra"] = {"active_mode": "hydra",
+                               "page": {"fields": shared_fields, "loader": loader_state,
+                                        "anchor_path": anchor_path}}
+        elif single_meta is not None:
+            state["hydra"] = {"active_mode": "single"}
+        self.set_state(state)
+
+        if single_meta is not None:
+            snap = single_meta.get("calibration_snapshot")
+            if snap:
+                self.set_calibration(project.calibration_namespace(snap))
+        for panel_key, meta in hydra_metas.items():
+            snap = meta.get("calibration_snapshot")
+            if snap:
+                self._ensure_hydra_page().set_panel_calibration(
+                    int(panel_key[2:]), project.calibration_namespace(snap))
+
     def shutdown(self):
         """Interrupt + bounded-wait every Hydra-page worker on app close —
         this tab's own workers are already covered by MainWindow's generic

@@ -1203,3 +1203,36 @@ class CalibrationTab(QtWidgets.QWidget):
         hydra_state = state.get("hydra") or {}
         self._mode_ribbon.set_mode(hydra_state.get("active_mode", "single"))
         self._hydra_page.set_state(hydra_state.get("page") or {})
+
+    # ── File > Open Project… ─────────────────────────────────────────
+    def apply_project_calibration(self, attempts: dict) -> None:
+        """``attempts`` maps panel key (``"single"`` or ``"ge1"``..``"ge4"``)
+        to that panel's calibration-attempt metadata (``project.read_attempt``)
+        — called after File > Open Project… when the user opts to populate
+        this tab. Reuses ``set_state()``'s existing field-restore machinery
+        (widget keys are shared across the single-detector tab, the Hydra
+        page's shared recipe, and a Hydra panel card's seed fields — see
+        ``project.calib_attempt_gui_fields``), and switches the mode ribbon
+        to match what was found."""
+        if not attempts:
+            return
+        single_meta = attempts.get("single")
+        hydra_metas = {k: v for k, v in attempts.items() if k != "single"}
+        state = {}
+        if single_meta is not None:
+            state["fields"] = project.calib_attempt_gui_fields(single_meta)
+            state["loader"] = project.calib_attempt_loader_state(single_meta)
+        if hydra_metas:
+            cards, page_fields, anchor_path = {}, {}, None
+            for panel_key, meta in sorted(hydra_metas.items()):
+                fields = project.calib_attempt_gui_fields(meta)
+                cards[int(panel_key[2:])] = fields
+                page_fields = fields   # same recipe on every panel; last one wins
+                if anchor_path is None:
+                    anchor_path = project.calib_attempt_loader_state(meta).get("path")
+            state["hydra"] = {"active_mode": "hydra",
+                               "page": {"fields": page_fields, "cards": cards,
+                                        "anchor_path": anchor_path}}
+        elif single_meta is not None:
+            state["hydra"] = {"active_mode": "single"}
+        self.set_state(state)
