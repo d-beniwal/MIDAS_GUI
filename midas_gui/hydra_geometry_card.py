@@ -196,7 +196,11 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         """Bind (or rebind) the image viewer this card draws rings on and
         receives beam-centre picks from. Clears this card's overlays off the
         previous viewer first, so switching the active panel in Hydra mode
-        never leaves stale rings behind on a viewer another card now owns."""
+        never leaves stale rings behind on a viewer another card now owns.
+        Also clears the viewer's own in-progress Pick BC/Pick Ring click
+        state (it's a single viewer shared by all panels) so points picked
+        while this panel was active can never leak into another panel's
+        circle fit."""
         old = self._viewer
         if old is not None:
             try:
@@ -211,6 +215,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
                 old._iv.removeItem(it)
             if self._pick_ring_item is not None:
                 old._iv.removeItem(self._pick_ring_item)
+            old._clear_ring_points()
         self._ring_items = []; self._label_items = []; self._pick_ring_item = None
         self._viewer = viewer
         if viewer is not None:

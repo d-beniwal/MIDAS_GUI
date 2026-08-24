@@ -115,6 +115,34 @@ def test_hydra_page_loads_siblings_and_shows_panels(app, fixture_available):
         assert hp._active_card is hp._cards[key]
 
 
+def test_hydra_pick_ring_points_dont_leak_across_panels(app, fixture_available):
+    """Pick BC/Pick Ring state (PickableImageViewer._ring_pts etc.) lives on
+    the single ROIImageViewer shared by all 5 panel cards, not per-panel.
+    Switching the active panel must clear any in-progress picks so points
+    clicked while ge1 was active can never end up mixed into ge2's circle
+    fit (regression for cross-panel point leakage)."""
+    tab = DataViewerTab()
+    tab._mode_ribbon.set_mode("hydra")
+    hp = tab._hydra_page
+    hp._loader.set_path(str(fixture_available / "ge1" / "panel.ge1.h5"))
+    app.processEvents()
+
+    viewer = hp._viewer
+    assert hp._toolbar.current() == "ge1"
+    viewer._add_ring_point(10.0, 10.0)
+    viewer._add_ring_point(20.0, 10.0)
+    assert len(viewer._ring_pts) == 2
+
+    hp._toolbar.set_current("ge2")
+    app.processEvents()
+    assert viewer._ring_pts == []   # ge1's partial pick doesn't survive the switch
+
+    viewer._add_ring_point(5.0, 5.0)
+    viewer._add_ring_point(5.0, 15.0)
+    viewer._add_ring_point(15.0, 5.0)
+    assert len(viewer._ring_pts) == 3   # only ge2's own points, none from ge1
+
+
 def test_hydra_composite_builds_with_matched_calibration(app, fixture_available):
     """Also covers two geometry-edit regression guards on this same
     DataViewerTab/Hydra page, rather than building a fresh one each,  to
