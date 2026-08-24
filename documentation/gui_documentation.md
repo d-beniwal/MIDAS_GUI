@@ -3,12 +3,17 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-23 (Tab 0 — Data Viewer: the **Hydra** mode
-ribbon entry is now functional — 4-panel GE detector loading, ge1-4/
+**Last updated:** 2026-08-23 (Tab 0 — Data Viewer, Hydra mode: the radial
+plot now shows all 4 panels' profiles at once (fixed colors, independent
+per-panel calibration) plus a toggleable summed **Composite** curve,
+replacing the earlier single-curve placeholder. Dark/bright/mask
+corrections for Hydra frames are still a planned follow-up.)
+
+**Previously:** (2026-08-23, Tab 0 — Data Viewer: the **Hydra** mode
+ribbon entry became functional — 4-panel GE detector loading, ge1-4/
 composite image toolbar, independent per-panel beam-centre/ring
 calibration, and a geometry-based windmill composite. Single detector mode
-is unchanged and still the default. A multi-curve radial plot and
-dark/bright/mask corrections for Hydra frames are still planned follow-ups.)
+unchanged and still the default.)
 
 **Previously:** (2026-08-23, Tab 0 — Data Viewer: added a leftmost **mode
 ribbon** (Single detector / Hydra) — Hydra mode was a placeholder at that
@@ -387,16 +392,22 @@ registered image for a full-coverage view.
   the first time a given canvas size is built, so ring simulation/radial
   integration on the Composite view work immediately with no extra setup
   (though it can still be hand-edited like any other card).
-- **Radial integration plot (bottom right)**: shows the azimuthal profile of
-  whichever panel/Composite is currently selected, via the same R-bin/Auto/
-  Integrate controls as the single-detector tab — one shared setting across
-  all 5 views rather than a separate control per panel.
+- **Radial integration plot (bottom right)**: shows **all 4 panels' own
+  azimuthal profiles at once** — GE1-4 in fixed colors, computed
+  independently from each panel's own beam centre/geometry — plus a
+  toggleable **Composite** curve (white, dashed). Checkboxes above the plot
+  show/hide each curve individually. The R-bin/Auto/Integrate controls are
+  shared across all 5 views (one setting, not a separate control per
+  panel); **Integrate** recomputes every curve immediately regardless of
+  Auto. The X-axis unit selector (R/2θ/Q) applies to all curves at once.
+  The **Composite** curve is the sum of the 4 panels' own profiles — each
+  resampled onto a shared 2θ axis first, then added together — **not** a
+  radial integration of the composited image itself (which would
+  double-count any panel overlap and mix registration error into the
+  profile).
 - **Not yet supported in Hydra mode** (present in Single detector mode):
   dark/bright/background correction, the intensity-range exclude mask, and
-  Top-N brightest-pixel — Hydra frames are shown raw. A multi-curve plot
-  (all 4 panels' profiles on one graph, plus a toggleable summed
-  "composite" curve) is a planned follow-up to the current single-curve
-  plot described above.
+  Top-N brightest-pixel — Hydra frames are shown raw.
 
 ### Data Loader panel (left)
 Data, Dark, Bright, Background and Mask are all selected in the shared **Data Loader

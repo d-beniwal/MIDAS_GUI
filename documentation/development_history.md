@@ -107,6 +107,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Hydra-mode ribbon scaffold (Single detector/Hydra); ring-sim/calibration/radial logic extracted into DetectorGeometryCard | `3d2d99d` |
 | Hydra geometry-compositing engine (`hydra.py`) + sibling auto-discovery + tests | `dd44f38` |
 | Hydra loader/toolbar/per-panel calibration UI + composite wired into the tab | `1cc4dab` |
+| Hydra multi-curve radial profile plot (4 panels + toggleable composite curve) | `8707372` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -2142,6 +2143,55 @@ flake.
 `tests/test_hydra_ui.py` (new).
 **Roll back:** `git revert 1cc4dab`. Self-contained back to the `3d2d99d`
 placeholder state.
+
+---
+
+### `8707372` — Hydra: multi-curve radial profile plot with toggleable composite curve (2026-08-23)
+**Effect:** Adds `HydraProfileViewer` (`hydra_widgets.py`): one fixed-color
+curve per Hydra panel (ge1-4) plus a toggleable "Composite" curve, sharing
+an R/2θ/Q axis-unit selector and Log-Y toggle — replacing the single-curve
+`ProfileViewer` placeholder from `1cc4dab`. Each ge-card's own
+`DetectorGeometryCard.set_profile_view` is now bound once, permanently, via
+a small `_ProfileSinkAdapter` (`hydra_page.py`) into that panel's named
+curve on the shared plot, since (unlike the image viewer) all 4 profiles
+need to stay live regardless of which panel is currently active in the
+toolbar. The **Composite** curve is deliberately *not* the composite card's
+own `radial_integrate()` (which would integrate the already-composited
+image, double-counting any panel overlap and mixing registration error
+into the profile — exactly the approach the plan review flagged and the
+user asked to avoid). Instead
+`HydraViewerPage._refresh_composite_curve` converts each available panel's
+own profile to a shared 2θ axis, resamples all onto one common grid, and
+takes a NaN-aware `nansum`, then round-trips through the normal
+`set_curve(r_px, ...)` API using one contributing panel's geometry as a
+consistent reference axis (so X-axis unit switching still works). The
+composite card's own profile/radial-control bindings are deliberately left
+unset so it can never write into that same curve slot. New
+`_refresh_profile_curves()`/`_refresh_composite_curve()` orchestration:
+frame/sibling-list changes reload+reintegrate every available panel (not
+just the active one); "Integrate" force-refreshes all of them regardless
+of Auto; R-bin edits refresh the derived Composite curve after each card's
+own pre-existing auto-radial wiring runs.
+**Also found and documented** (not silently worked around): adding these
+tests exposed a rare, pre-existing pyqtgraph interpreter-crash risk
+(`Segmentation fault`/`Bus error` in pyqtgraph's own global ViewBox/
+WidgetGroup teardown internals) that surfaces more easily under a large
+test suite with many `ImageView`/`ViewBox` instances. An autouse
+`app.processEvents()` teardown fixture in `tests/test_hydra_ui.py`
+measurably reduced (did not guarantee-eliminate) it; `gc.collect()` there
+made it *worse*. Full detail — including what not to try next — in
+`.context/DECISIONS.md`.
+**Verified:** end-to-end with the synthetic fixture — all 4 curves populate
+independently, the Composite toggle correctly shows/hides and recomputes,
+the Integrate button refreshes everything with Auto off; an offscreen
+screenshot confirms the legend/colors/curves render correctly together.
+2 new tests in `tests/test_hydra_ui.py` (6 total in that file). Full pytest
+suite: 3 consecutive clean runs post-mitigation, same single pre-existing
+`test_smoke.py` flake each time.
+**Files:** `midas_gui/hydra_widgets.py`, `midas_gui/hydra_page.py`,
+`tests/test_hydra_ui.py`, `.context/DECISIONS.md`.
+**Roll back:** `git revert 8707372`. Self-contained back to the `1cc4dab`
+single-curve-plot state.
 
 ---
 
