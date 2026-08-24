@@ -1,136 +1,102 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-24 (Phase 6 continues: a 6th bug, Pick BC/Pick Ring point leakage across panels, found + fixed: `eadb14d` + docs `875d3ed`; pushed to `origin`)_
+_Last updated: 2026-08-24 (Calibrate tab split into Single-detector/Hydra modes, + bundled Data Viewer Hydra refinements — committed `93dafa2` + docs `c23151f`; not yet pushed)_
 
 ## Now working on
 
-Hydra (4-panel GE detector) mode, Data Viewer tab. Phases 1-5 (engine, UI,
-per-panel calibration, radial profiles) landed on `main` in a prior session
-(`3b785c9`..`1d8c6e5`). **Phase 6 (the real windowed manual pass) started
-2026-08-23 and immediately found 5 real bugs** that offscreen tests never
-caught — all 5 are now fixed and committed (`0aa5feb`):
-1. λ/max 2θ/px now shared (mirrored) across ge1-4 + Composite cards
-   (`DetectorGeometryCard.get_shared_fields`/`apply_shared_fields`,
-   `HydraViewerPage._sync_shared_fields`).
-2. Dark/bright/background correction added for Hydra (was a documented
-   scope cut) — new `HydraFieldSelector` (`hydra_widgets.py`), sibling
-   -aware like the main data path, reuses `helpers.apply_field_corrections`/
-   `workers.FieldAverageWorker` as-is.
-3. Composite windmill orientation — two rounds of fixes:
-   a. Rotation direction was originally "fixed" to clockwise this session,
-      but that was **wrong** — reverted back to counterclockwise (the
-      original, pre-session convention was correct all along).
-   b. Even after (a), the composite still had ge2/ge4 on the wrong sides
-      (left/right swapped) — the user identified this precisely from the
-      physical layout. Fixed by adding a vertical-axis mirror to the
-      composite canvas (`hydra.py::compute_inv_coords`: `Y_lab = (half -
-      Yo) * px` instead of `(Yo - half) * px`) — independent of the
-      rotation-direction logic, and scoped to the composite build only
-      (doesn't touch per-panel ge1-4 raw displays).
-   Both confirmed by rebuilding the composite from the real
-   `park_may26_bc` calibration + real `park_may26/ge{1..4}` frames and
-   checking panel placement/orientation directly (pixel forensics on
-   screenshots alone was inconclusive for either; render-and-compare with
-   real code + real data, plus the user's own knowledge of the physical
-   layout, is what actually resolved both). See DECISIONS.md's "reverted
-   back to counterclockwise" and "needs a vertical-axis mirror too"
-   entries.
-4. Stale radial-integration geometry fixed: a BC/λ/Lsd/px/tilt edit after a
-   full geometry (tilts) was loaded now actually moves the radial profile,
-   not just the ring overlay (`_effective_calib_geom` was returning a
-   frozen snapshot).
-5. vmin% percentile auto-level now excludes exact-zero pixels app-wide
-   (`widgets.py::ImageViewer._redisplay`) — fixes a washed-out Composite
-   view (mostly-empty canvas dominated the percentile).
+**Calibrate tab (Tab 2) split into Single-detector / Hydra modes** (`93dafa2`),
+mirroring the Data Viewer tab's existing split (`HydraModeRibbon` reused as-is).
+New files: `hydra_calib_widgets.py` (`HydraCalibPanelCard` — one GE panel's
+Transforms + seed + fitted result/rings/residuals/results-grid, all
+genuinely independent per panel) and `hydra_calib_page.py`
+(`HydraCalibrationPage` — shared Pipeline/Detector&Calibrant/Threshold/
+Average-frames/Refine-parameters/Advanced cards applied to all 4 panels'
+fits, a `HydraLoaderPanel` reused verbatim, a shared image viewer + ge1-4
+toolbar (no Composite — calibration is inherently per-panel), and bottom
+tabs: shared multi-curve Radial Profile, per-panel Ring Residuals/Results
+that switch with the active panel, shared Log prefixed `[ge{n}]`). Supports
+**Sequential** (one panel at a time, full log capture) or **Parallel** (all
+present panels fit at once) runs, plus a **← Data Viewer** import of the
+Hydra Data Viewer page's loaded panels + fitted geometry
+(`HydraViewerPage.export_for_calibration`/`DataViewerTab.get_hydra_export`),
+and a **→ Send to Data Viewer** push per panel
+(`DataViewerTab.set_hydra_panel_geometry`). `CalibrationWorker` gained a
+`capture_stdout: bool = True` flag so Parallel mode's several concurrent
+workers don't race on the process-global `sys.stdout`/`sys.stderr` redirect
+(Sequential keeps `True`). `helpers.source_kind`/`helpers.paramstest_pairs`
+promoted out of per-tab private methods to be shared.
 
-Full reasoning for all 5 in DECISIONS.md's "Five Hydra bugs found in the
-real windowed (Phase 6) pass" entry (+ the two newer entries for bug 3's
-corrections). `test_hydra_chirality.py` and `test_hydra_geometry.py`'s
-hand-derived formulas updated to match both the reverted (counterclockwise)
-rotation and the new vertical-axis mirror. All 14 hydra geometry/chirality
-tests pass; the known pyqtgraph teardown crash (see below) still
-occasionally reproduces when the whole `test_hydra_*.py` battery runs in
-one process — unchanged risk profile, not worsened.
+**Same commit also bundled Data Viewer Hydra-page refinements** that had
+accumulated uncommitted earlier in this session (STATE.md had drifted out of
+sync with the actual working tree — caught and reconciled before this
+commit, see DECISIONS.md's pre-commit sanity-check note): Transforms (Flip
+Y/Flip Z/Transpose[/Rotate]) extracted into its own boxed Transforms card
+shared by every `DetectorGeometryCard`; a per-panel-only Rotate field on
+Hydra ge1-4 (`hydra.apply_panel_rotation`, excluded from the Composite);
+a per-panel Projection card (Max/Sum/Average stack reduction, new
+`ProjectionWorker` usage in `HydraLoaderPanel`); a fix for Flip Y/Flip
+Z/Transpose not refreshing the displayed Hydra image; the Hydra radial plot's
+pan/zoom now bounded to the visible curves' data extent; and the Material
+dialog's Preset dropdown also fills the Name field.
 
-**6th bug found continuing the manual pass, now fixed (`eadb14d`):** the
-single `ROIImageViewer` shared by all 5 panel cards keeps Pick BC/Pick Ring
-click state (`_ring_pts`) on the viewer itself, not per-card.
-`DetectorGeometryCard.bind_viewer()` cleared each card's own ring/label
-overlay items on rebind but not the viewer's in-progress pick points, so
-points picked on one panel could leak into another panel's circle fit
-after switching. Fixed by clearing the viewer's pick state in
-`bind_viewer()` too; new regression test
-`test_hydra_pick_ring_points_dont_leak_across_panels` in
-`tests/test_hydra_ui.py`.
+New test `tests/test_hydra_calib_ui.py` (2 test functions, each building
+exactly ONE `HydraCalibrationPage` — building one per test function
+reliably segfaulted the file via the known pyqtgraph-teardown crash, see
+below): pick-state cross-panel isolation (same shape as `eadb14d`), and
+Sequential/Parallel run orchestration + Results/Ring-Residuals panel
+switching, both using a stubbed `CalibrationWorker`/`IntegrationWorker`
+(the synthetic Hydra fixture's `ps_ge{1..4}.txt` files share one nominal
+BC and don't carry enough rings for a real fit to converge — a pre-existing
+fixture characteristic, not a bug in this page).
+
+Full test suite run clean apart from the pre-existing
+`test_app_builds_offscreen` "visible_tabs" flake and the known pyqtgraph
+interpreter-teardown noise at process exit (both pre-existing, non-blocking
+— see DECISIONS.md).
 
 ## Next steps
 
-- Composite orientation (rotation direction + left/right mirror) is now
-  user-confirmed correct against real `test_data/s1ide` data.
-- Rest of Phase 6: continue the real windowed manual pass — actually
-  exercising Pick BC/Pick Ring with real mouse clicks on a real Hydra panel
-  (interactive mouse picking can't be exercised headlessly; the leakage bug
-  above was found by code inspection during this pass, not yet by a live
-  click-through), and general layout/usability at a real window size, now
-  including the new Dark/Bright/Background card and shared-field behavior.
-- Remaining documented scope cut: no intensity-range mask or Top-N
-  brightest-pixel in Hydra mode (dark/bright/background is no longer a
-  cut — see above).
-- A rare, pre-existing pyqtgraph interpreter-crash risk under a large test
-  suite (many `ImageView`/`ViewBox` instances) — see DECISIONS.md if
-  `pytest` ever segfaults/bus-errors again; do not reach for `gc.collect()`,
-  already confirmed to make it worse. New tests were folded into existing
-  ones specifically to avoid raising this risk further.
+- Committed (`93dafa2` + docs `c23151f`) but **not yet pushed to `origin`**.
+- Not yet exercised with a live windowed pass (Pick BC/Pick Ring mouse
+  clicks, real calibration convergence on real Hydra data e.g.
+  `test_data/s1ide`) — only offscreen/stubbed-worker tests so far. Given
+  Phase 6's experience with the Data Viewer's Hydra page (5 real bugs found
+  only by a real windowed pass), treat this page as similarly unverified
+  until someone actually runs it.
+- Per-panel masks are NOT wired into Hydra calibration (`cfg["mask"] = None`
+  always) — an explicit scope cut, not yet raised with the user.
 
 ## Open questions / blockers
 
-- None currently blocking. `test_smoke.py::test_app_builds_offscreen`'s
-  known local-config flakiness (`visible_tabs` double-counting) reproduced
-  again this session on unmodified `main` — confirmed pre-existing,
-  unrelated (same as prior sessions).
-- **Found and fixed this session** (`3b785c9`, separate commit): six
-  `DEFAULT_*` test-data paths in `constants.py` were stale after the
-  2026-08-23 `gui_synthetic/` reorg (pointed at the old repo-root
-  locations) — silently broke every tab's default-data preload. Fixed to
-  point at `test_data/gui_synthetic/`.
-- **Found, NOT fixed (local machine state, out of repo scope)**: the
-  locally-active "1-ID-E" profile at `~/Library/Application
-  Support/midas_gui/profiles/1-ID-E.json` has the same stale paths baked in
-  from before the reorg (seeded at some point before `3b785c9`). It
-  overrides the now-fixed shipped defaults at runtime via
-  `constants.reload_from_config()`. Needs a manual reset/edit of that local
-  profile file to actually see the fix take effect on this machine — not
-  something to fix via a repo commit.
+- None currently blocking.
+- A rare, pre-existing pyqtgraph interpreter-crash risk under a large test
+  suite (many `ImageView`/`ViewBox` instances) — see DECISIONS.md if
+  `pytest` ever segfaults/bus-errors again; do not reach for `gc.collect()`,
+  already confirmed to make it worse. This session's new page adds to the
+  per-`MainWindow`-build widget count (see above) — if the full-suite crash
+  rate becomes a real nuisance, DECISIONS.md's pyqtgraph entry suggests
+  running Hydra UI tests in a separate pytest process as the next lever.
 - **`.context/` is `.gitignore`d in this repo** (`.gitignore:58`), which
   contradicts the global CLAUDE.md instruction that `.context/` should
-  always be committed. Not touched — flagged for the user to decide whether
-  to change (pre-existing repo state, not caused by this session).
-- `test_data/s1ide/` (real CeO2 Hydra data, gitignored, not created by this
-  assistant) is now confirmed useful and actively used read-only for Hydra
-  compositing verification (user approved this use). Still never committed
-  or treated as a pytest dependency — only `test_data/gui_synthetic/hydra/`
-  is.
+  always be committed. Not touched — flagged for the user to decide.
 
 ## Recent changes (last 3-5 sessions, dated; drop the oldest as it grows)
 
-- 2026-08-24 (`eadb14d` + docs `875d3ed`): Hydra Phase 6, 6th bug — Pick
-  BC/Pick Ring point leakage across panels (shared viewer's pick state not
-  cleared on panel switch). See "Now working on" above.
-- 2026-08-24 (`0aa5feb` + docs `8d5ed5a`): Hydra Phase 6 manual pass found
-  and fixed 5 bugs — shared λ/max2θ/px, dark/bright/background correction,
-  composite orientation (rotation direction reverted CW->CCW, plus an
-  added vertical-axis mirror to fix ge2/ge4 left/right swap), stale
-  radial-integration geometry, and zero-excluded vmin% percentile. See
-  "Now working on" above + DECISIONS.md.
-- 2026-08-23 (`3b785c9`..`1d8c6e5`, 14 commits, on `main`): Hydra
-  detector-view feature, phases 1 through 5, plus an unrelated
-  stale-test-data-path fix (`3b785c9`) and committing `.context/` which
-  had been gitignored (`778a2f3`). Full detail in `DECISIONS.md`.
-- 2026-08-23 (`c8d98f1`, `246dba7`, `328674d`): `test_data/` reorganized
-  into per-dataset subfolders; detector-image origin flipped to
-  **bottom-left `(0,0)`** across every `pg.ImageView`-based viewer — see
-  `DECISIONS.md` for full detail (superseded here to keep this file short).
+- 2026-08-24 (`93dafa2` + docs `c23151f`): Calibrate tab split into
+  Single-detector/Hydra modes, + bundled Data Viewer Hydra refinements
+  (Transforms card extraction, per-panel Rotate, per-panel Projection,
+  bounded radial-plot pan/zoom, Preset-fills-Name) — see "Now working on".
+- 2026-08-24 (`eadb14d` + docs `875d3ed`): Data Viewer Hydra Phase 6, 6th
+  bug — Pick BC/Pick Ring point leakage across panels (shared viewer's pick
+  state not cleared on panel switch).
+- 2026-08-24 (`0aa5feb` + docs `8d5ed5a`): Data Viewer Hydra Phase 6 manual
+  pass found and fixed 5 bugs — shared λ/max2θ/px, dark/bright/background
+  correction, composite orientation (rotation direction + vertical mirror),
+  stale radial-integration geometry, zero-excluded vmin% percentile.
+- 2026-08-23 (`3b785c9`..`1d8c6e5`, 14 commits, on `main`): Data Viewer
+  Hydra detector-view feature, phases 1-5, plus an unrelated
+  stale-test-data-path fix and committing `.context/`.
 
 ## Standing rules (from memory)
 
