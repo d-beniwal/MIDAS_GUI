@@ -3,6 +3,82 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-08-24 — Calibrate tab Hydra split: field-sharing boundary, and CalibrationWorker's stdout capture made optional for Parallel mode
+
+Split the Calibrate tab into Single-detector/Hydra modes (mirroring the
+Data Viewer tab's split), so each of the 1-ID-E Hydra rig's 4 GE panels can
+be fit from one calibrant dataset. Two decisions worth recording:
+
+**Field-sharing boundary** (confirmed with the user before implementing):
+wavelength, pixel size, calibrant, pipeline choice, and refine-parameter
+selection (including which distortion coefficients) are shared across all
+4 panels — one "recipe" — since it's the same beam and the same choice of
+what to refine. Transforms (Flip Y/Flip Z/Transpose) and the initial seed
+(BC/Lsd/tx/ty/tz) are independent per panel, since each GE module is a
+physically separate detector with its own mounting orientation and beam
+centre. This mirrors the Data Viewer Hydra page's existing λ/max2θ/pixel
+-shared-but-BC/Lsd/tilt-independent split (`DetectorGeometryCard.get_shared_fields`/
+`apply_shared_fields`), just drawn for a fitting UI instead of a viewing
+one. No "Multi-panel detector" (tiled sub-panel rigid-shift refinement)
+group in Hydra mode — that feature is about tiles *inside* one monolithic
+detector's readout, not 4 separate physical detectors. No "Composite"
+option in the image-panel toolbar — calibration is inherently per-panel;
+the windmill composite stays a Data-Viewer-only visualization.
+
+**`CalibrationWorker.run()`'s stdout capture had to become optional.**
+Found during design (before any code was run): the worker redirects the
+*process-global* `sys.stdout`/`sys.stderr` to a `_LogStream` for the
+duration of the pipeline call, restoring it afterward. That's safe with
+today's only caller (one worker at a time, single-detector tab). But the
+user explicitly asked for a **Parallel** run mode — several
+`CalibrationWorker`s racing on the same global `sys.stdout` would
+misattribute or lose log lines, and there's no clean way to make Python's
+process-wide `sys.stdout` swap thread-local (the underlying pipeline just
+calls plain `print()`). Rather than silently serializing "Parallel" mode
+(defeating its purpose) or shipping the race, `CalibrationWorker` gained a
+`capture_stdout: bool = True` constructor flag. **Sequential** mode passes
+`True` (one worker active at a time, unchanged/safe). **Parallel** mode
+passes `False`: each worker's fine-grained `print()` output goes to the
+real console instead of the Log tab, but the coarser `log_line`/`finished`/
+`failed` Qt signals — which don't touch global state — are untouched, so
+the Log tab still shows each panel's start/finish/error lines. This
+trade-off is stated in the Hydra page's "Run mode" combo tooltip and in
+`CalibrationWorker`'s own docstring/comment, not just here.
+
+**Verification**: offscreen tests (`tests/test_hydra_calib_ui.py`) stub out
+`CalibrationWorker`/`IntegrationWorker` entirely rather than running a real
+fit — the synthetic Hydra fixture's `ps_ge{1..4}.txt` files share one
+nominal BC/Lsd and don't carry enough calibrant rings within the default
+pipeline's window for a real `one_shot` fit to converge (`RuntimeError:
+Only 2 simulated rings under 28.0°`), verified by calling
+`midas_gui.calib.run_pipeline` directly with the same image/cfg outside any
+GUI code — a pre-existing fixture/data characteristic (it was built for
+geometry/composite display tests, not fit convergence), not a bug in this
+page. The tests instead verify the GUI's own sequencing/routing: Sequential
+produces independent per-panel results, Parallel starts all 4 workers
+up-front, and Results/Ring-Residuals correctly switch with the active
+panel. Also folded into just 2 test functions sharing one
+`HydraCalibrationPage` each (not one page per test) — a first pass with one
+page per test function reproduced the pyqtgraph-teardown segfault described
+in the entry below, same category, made more likely here because this page
+alone builds 6 pyqtgraph widgets (1 `PickableImageViewer` + 4
+`ResidualBarChart` + 1 `HydraProfileViewer`).
+
+**A mid-edit bug worth flagging for future sessions**: while hoisting
+`CalibrationTab._paramstest_pairs` into `helpers.paramstest_pairs`, an
+`Edit` whose `old_string` ended at `p.write(str(path))` (believed to be
+`write_standalone_paramstest`'s last line, from an earlier truncated read)
+actually split that function in half — its real tail (writing
+`ImTransOpt` lines and `return p`) got stranded as dead code after the
+newly-inserted function's `return pairs`. This silently broke `ImTransOpt`
+round-tripping (`write_standalone_paramstest` stopped writing those lines
+and stopped returning `p`) with no import error or syntax error — caught
+only by running the full test suite (`tests/test_im_trans.py`), not by
+`ast.parse` or an offscreen smoke import. Lesson: when relocating a
+function by matching on its last line, re-read the surrounding lines after
+the edit (or match through to the next `def`/blank-line boundary) rather
+than trusting an earlier read's apparent end-of-function.
+
 ## 2026-08-24 — Hydra composite needs a vertical-axis mirror too (partially reopens the "no chirality/X-mirror correction" entry further below)
 
 After the rotation-direction revert (entry directly below) still didn't

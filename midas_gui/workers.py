@@ -599,7 +599,8 @@ class CalibrationWorker(QtCore.QThread):
     failed   = QtCore.pyqtSignal(str)
 
     def __init__(self, mode, image, dark, cfg, parent=None,
-                 bright=None, background=None, bright_mode="divide"):
+                 bright=None, background=None, bright_mode="divide",
+                 capture_stdout=True):
         super().__init__(parent)
         self._mode  = mode
         self._image = image
@@ -608,12 +609,21 @@ class CalibrationWorker(QtCore.QThread):
         self._bright = bright
         self._background = background
         self._bright_mode = bright_mode
+        # sys.stdout/stderr are process-global, not per-thread — safe to
+        # redirect only when a single CalibrationWorker runs at a time (the
+        # single-detector tab, and Hydra's Sequential mode). Hydra's
+        # Parallel mode runs several of these concurrently and must NOT
+        # redirect (they'd race on the same global); it passes False here
+        # and relies on the coarser finished/failed/log_line signals for
+        # per-panel status instead of captured print() output.
+        self._capture_stdout = capture_stdout
 
     def run(self):
         import sys
         old_out, old_err = sys.stdout, sys.stderr
-        stream = _LogStream(self.log_line)  # type: ignore
-        sys.stdout = sys.stderr = stream
+        stream = _LogStream(self.log_line) if self._capture_stdout else None  # type: ignore
+        if stream is not None:
+            sys.stdout = sys.stderr = stream
         try:
             image = self._image.astype(np.float32)
             # Bright/background are applied here; dark stays passed to the pipeline.

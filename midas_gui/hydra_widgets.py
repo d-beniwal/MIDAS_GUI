@@ -18,8 +18,8 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
 from midas_gui.helpers import (_browse, _NoScrollSpinBox, _NoScrollComboBox, hydra_siblings,
-                         is_h5, list_h5_datasets)
-from midas_gui.workers import FieldAverageWorker
+                         is_h5, list_h5_datasets, source_kind)
+from midas_gui.workers import FieldAverageWorker, ProjectionWorker
 from midas_gui import hydra
 from midas_gui import style as S
 from midas_gui.widgets import _convert_radial, _XUNIT_LABEL
@@ -211,11 +211,7 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
         return f"color:{color}; font-weight:{weight};"
 
     def _kind_of(self, path: str) -> str:
-        if Path(path).is_dir() or any(c in path for c in "*?"):
-            return "folder"
-        if is_h5(path):
-            return "hdf5"
-        return "file"
+        return source_kind(path)
 
     def _dataset(self) -> str:
         return self._ds_combo.currentText().split("   ")[0].strip() or self._default_dataset
@@ -363,6 +359,7 @@ class HydraLoaderPanel(QtWidgets.QWidget):
     siblingsChanged = QtCore.pyqtSignal(dict)   # {panel_num: path}, may be {}
     frameChanged = QtCore.pyqtSignal(int)
     fieldsChanged = QtCore.pyqtSignal()         # dark/bright/background changed (any panel)
+    projectionChanged = QtCore.pyqtSignal()     # projection turned on/off or (re)computed
 
     #: Dataset key fixed for v1 — every bundled/real Hydra HDF5 file used so
     #: far shares this convention (see hydra_default_geometry's callers).
@@ -373,6 +370,11 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         self._siblings: dict = {}
         self._n_frames = 1
         self._frame = 0
+        self._is_projection = False
+        self._proj_raw: dict = {}        # panel -> corrected+projected 2-D array
+        self._proj_workers: dict = {}    # panel -> ProjectionWorker (kept alive)
+        self._proj_pending: set = set()
+        self._proj_errors: dict = {}
         self._build_ui()
 
     def _build_ui(self):
@@ -436,6 +438,49 @@ class HydraLoaderPanel(QtWidgets.QWidget):
             fld.body.addWidget(w)
         lv.addWidget(fld)
 
+        # ── Projection (stack max/sum/average, all panels + composite) ──
+        # Built here (owns the projection logic/state) but NOT added to this
+        # panel's own layout — HydraViewerPage places this card at the top
+        # of the middle panel instead (see projection_card()), mirroring
+        # where the single-detector tab's Projection card sits.
+        proj = S.make_card("Projection")
+        m_row = QtWidgets.QHBoxLayout(); m_row.setSpacing(8)
+        m_row.addWidget(S.LabelRight("Method:"))
+        self._proj_method = {}
+        for meth in ("max", "sum", "average"):
+            rb = QtWidgets.QRadioButton(meth.capitalize()); m_row.addWidget(rb)
+            self._proj_method[meth] = rb
+        self._proj_method["max"].setChecked(True)
+        m_row.addStretch(1)
+        proj.body.addLayout(m_row)
+        self._proj_skip = _NoScrollSpinBox(); self._proj_skip.setRange(0, 1000000)
+        self._proj_skip.setValue(0); self._proj_skip.setFixedWidth(72)
+        self._proj_skip.setToolTip(
+            "Ignore this many leading frames (of every panel) before projecting.")
+        self._proj_nframes = _NoScrollSpinBox(); self._proj_nframes.setRange(0, 1000000)
+        self._proj_nframes.setValue(0); self._proj_nframes.setFixedWidth(72)
+        self._proj_nframes.setToolTip(
+            "Number of frames to project after Skip frames\n"
+            "(0 = use all remaining frames).")
+        skip_row = S.Form()
+        skip_row.row(("Skip frames:", self._proj_skip), ("N frames:", self._proj_nframes))
+        proj.body.addLayout(skip_row)
+        self._proj_btn = QtWidgets.QPushButton("Project stack")
+        self._proj_btn.setToolTip(
+            "Projects every currently-found panel's own frame stack and shows\n"
+            "the result in place of the current frame, for that panel AND the\n"
+            "Composite view, until 'Back to frames' is clicked.")
+        self._proj_btn.clicked.connect(self._project_all)
+        self._proj_frame_btn = QtWidgets.QPushButton("Back to frames")
+        self._proj_frame_btn.clicked.connect(self._back_to_frames)
+        proj.body.addLayout(S.button_grid([self._proj_btn, self._proj_frame_btn], 2))
+        self._proj_info = QtWidgets.QLabel("")
+        self._proj_info.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        self._proj_info.setWordWrap(True)
+        proj.body.addWidget(self._proj_info)
+        proj.setEnabled(False)
+        self._proj_grp = proj
+
         lv.addStretch(1)
 
     @staticmethod
@@ -457,6 +502,7 @@ class HydraLoaderPanel(QtWidgets.QWidget):
     def _set_path(self, path: str):
         if not path:
             return
+        self._clear_projection(emit=False)
         self._path_ed.setText(path)
         siblings = hydra_siblings(path)
         self._siblings = siblings
@@ -467,6 +513,7 @@ class HydraLoaderPanel(QtWidgets.QWidget):
                 "Fewer than 2 Hydra panels found next to this file — check the path.")
             self._set_nav_enabled(False)
             self._n_frames = 1
+            self._proj_grp.setEnabled(False)
             self.siblingsChanged.emit({})
             return
         try:
@@ -483,11 +530,14 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         self._frame_spin.blockSignals(False)
         self._frame = 0
         self._set_nav_enabled(self._n_frames > 1)
+        self._proj_grp.setEnabled(self._n_frames > 1)
         self._info_lbl.setText(f"Found {len(siblings)}/4 panels  ·  {self._n_frames} frame(s)")
         self.siblingsChanged.emit(siblings)
         self.frameChanged.emit(0)
 
     def _set_frame(self, i: int, from_widget: Optional[str] = None):
+        if self._is_projection:
+            self._clear_projection()
         i = max(0, min(int(i), max(0, self._n_frames - 1)))
         changed = (i != self._frame)
         self._frame = i
@@ -500,9 +550,100 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         if changed:
             self.frameChanged.emit(i)
 
+    # ── Projection (stack max/sum/average, all panels + composite) ─
+
+    def _apply_project_style(self, active: bool):
+        """Green highlight on "Project stack" while a projection is being
+        displayed — mirrors the single-detector tab's
+        DataViewerTab._apply_project_style."""
+        if active:
+            self._proj_btn.setStyleSheet(
+                "QPushButton { background:#2e7d32; color:white; font-weight:bold; "
+                "border:1px solid #1b5e20; border-radius:4px; padding:4px; }")
+        else:
+            self._proj_btn.setStyleSheet("")
+
+    def _project_all(self):
+        if not self._siblings or self._n_frames <= 1:
+            QtWidgets.QMessageBox.warning(self, "No stack", "Projection needs a stack.")
+            return
+        if self._proj_pending:
+            return
+        method = next(m for m, b in self._proj_method.items() if b.isChecked())
+        skip = self._proj_skip.value()
+        nframes = self._proj_nframes.value()
+        self._proj_raw = {}
+        self._proj_errors = {}
+        self._proj_pending = set(self._siblings)
+        self._proj_btn.setEnabled(False)
+        self._proj_info.setText("Projecting stacks…")
+        self._proj_workers = {}
+        for n, path in self._siblings.items():
+            w = ProjectionWorker(
+                lambda p=path: hydra.load_full_stack(p, self.DATASET), method, 0, skip, nframes,
+                dark=self.dark(n), bright=self.bright(n), background=self.background(n),
+                bright_mode=self.bright_mode(), parent=self)
+            w.finished.connect(lambda img, info, n=n: self._on_one_projected(n, img, info))
+            w.failed.connect(lambda err, n=n: self._on_one_projection_failed(n, err))
+            self._proj_workers[n] = w
+            w.start()
+
+    def _on_one_projected(self, n: int, img, info: str):
+        self._proj_raw[n] = img
+        self._proj_pending.discard(n)
+        if not self._proj_pending:
+            self._finish_projection()
+
+    def _on_one_projection_failed(self, n: int, err: str):
+        self._proj_errors[n] = err.strip().splitlines()[-1] if err and err.strip() else "error"
+        self._proj_pending.discard(n)
+        if not self._proj_pending:
+            self._finish_projection()
+
+    def _finish_projection(self):
+        self._proj_btn.setEnabled(True)
+        self._is_projection = bool(self._proj_raw)
+        self._apply_project_style(self._is_projection)
+        ok = ", ".join(f"ge{n}" for n in sorted(self._proj_raw))
+        msg = f"Projected {len(self._proj_raw)}/{len(self._siblings)} panel(s)"
+        if ok:
+            msg += f" ({ok})"
+        if self._proj_errors:
+            errs = "; ".join(f"ge{n}: {e}" for n, e in sorted(self._proj_errors.items()))
+            msg += f"  — failed: {errs}"
+        self._proj_info.setText(msg)
+        self.projectionChanged.emit()
+
+    def _back_to_frames(self):
+        self._clear_projection()
+
+    def _clear_projection(self, emit: bool = True):
+        was_on = self._is_projection or bool(self._proj_raw)
+        self._is_projection = False
+        self._proj_raw = {}
+        self._proj_errors = {}
+        self._apply_project_style(False)
+        if emit and was_on:
+            self.projectionChanged.emit()
+
+    def is_projection(self) -> bool:
+        return self._is_projection
+
+    def projected(self, n: int) -> Optional[np.ndarray]:
+        return self._proj_raw.get(n) if self._is_projection else None
+
+    def projection_card(self) -> QtWidgets.QGroupBox:
+        """The "Projection" card — owned/built here, but placed by
+        ``HydraViewerPage`` at the top of the middle panel instead of this
+        loader panel's own (left-side) layout."""
+        return self._proj_grp
+
     # ── Public accessors ─────────────────────────────────────────
     def siblings(self) -> dict:
         return dict(self._siblings)
+
+    def n_frames(self) -> int:
+        return self._n_frames
 
     def frame_index(self) -> int:
         return self._frame
@@ -540,15 +681,16 @@ class HydraDetectorToolbar(QtWidgets.QWidget):
 
     _KEYS = ("ge1", "ge2", "ge3", "ge4", "composite")
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, include_composite: bool = True):
         super().__init__(parent)
+        self._keys = self._KEYS if include_composite else self._KEYS[:-1]
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(4, 2, 4, 2)
         layout.setSpacing(4)
         self._buttons = {}
         self._group = QtWidgets.QButtonGroup(self)
         self._group.setExclusive(True)
-        for key in self._KEYS:
+        for key in self._keys:
             label = "Composite" if key == "composite" else key.upper()
             btn = QtWidgets.QPushButton(label)
             btn.setCheckable(True)
@@ -571,10 +713,11 @@ class HydraDetectorToolbar(QtWidgets.QWidget):
         panel_numbers = set(panel_numbers)
         for n in (1, 2, 3, 4):
             self._buttons[f"ge{n}"].setEnabled(n in panel_numbers)
-        self._buttons["composite"].setEnabled(len(panel_numbers) >= 2)
+        if "composite" in self._buttons:
+            self._buttons["composite"].setEnabled(len(panel_numbers) >= 2)
         cur = self.current()
         if not self._buttons[cur].isEnabled():
-            for key in self._KEYS:
+            for key in self._keys:
                 if self._buttons[key].isEnabled():
                     self._buttons[key].setChecked(True)
                     break
@@ -690,6 +833,7 @@ class HydraProfileViewer(QtWidgets.QWidget):
         log = self._logy.isChecked()
         self._plot.setLabel("bottom", _XUNIT_LABEL[target])
         self._plot.setLabel("left", "log₁₀(intensity)" if log else "Mean intensity")
+        xs, ys = [], []
         for key, curve in self._curves.items():
             visible = self._checks[key].isChecked()
             data = self._native.get(key)
@@ -702,6 +846,32 @@ class HydraProfileViewer(QtWidgets.QWidget):
             if log:
                 y = np.where(y > 0, np.log10(np.maximum(y, 1e-30)), np.nan)
             curve.setData(x, y)
+            xs.append(np.asarray(x)); ys.append(np.asarray(y))
+        if xs:
+            all_x = np.concatenate(xs); all_y = np.concatenate(ys)
+            fin = np.isfinite(all_x) & np.isfinite(all_y)
+            if fin.any():
+                self._apply_view_limits(float(all_x[fin].min()), float(all_x[fin].max()),
+                                        float(all_y[fin].min()), float(all_y[fin].max()))
+
+    def _apply_view_limits(self, xmin, xmax, ymin, ymax):
+        """Bound pan/zoom to the currently-visible curves' combined data
+        (+ margin), same intent as the single-detector radial plot's
+        ``ProfileViewer._apply_view_limits`` — stops the user scrolling/
+        zooming arbitrarily far from where the data actually is."""
+        if not all(math.isfinite(v) for v in (xmin, xmax, ymin, ymax)):
+            return
+        if xmax <= xmin:
+            xmax = xmin + 1.0
+        if ymax <= ymin:
+            ymax = ymin + 1.0
+        xpad = 0.15 * (xmax - xmin)
+        ypad = 0.25 * (ymax - ymin)
+        vb = self._plot.getPlotItem().getViewBox()
+        vb.setLimits(xMin=max(0.0, xmin - xpad), xMax=xmax + xpad,
+                     yMin=ymin - ypad, yMax=ymax + ypad,
+                     maxXRange=(xmax - xmin) + 2 * xpad,
+                     maxYRange=(ymax - ymin) + 2 * ypad)
 
     def composite_visible(self) -> bool:
         return self._checks["composite"].isChecked()

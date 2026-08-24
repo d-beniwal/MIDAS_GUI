@@ -118,6 +118,18 @@ class DataViewerTab(QtWidgets.QWidget):
         Delegates to the extracted ``DetectorGeometryCard``."""
         self._geom_card.set_geometry(g)
 
+    def get_hydra_export(self) -> dict:
+        """Hydra page's anchor path + each present panel's geometry — for the
+        Calibrate tab's Hydra "← Data Viewer" import."""
+        return self._hydra_page.export_for_calibration()
+
+    def set_hydra_panel_geometry(self, n: int, g: dict):
+        """Push a calibrated geometry into one Hydra panel's card (the
+        Calibrate tab's Hydra "→ Send to Data Viewer")."""
+        card = self._hydra_page._cards.get(f"ge{n}")
+        if card is not None:
+            card.set_geometry(g)
+
     # ── GUI state (Save/Load GUI State) ─────────────────────────────
     def _state_widgets(self) -> dict:
         widgets = {

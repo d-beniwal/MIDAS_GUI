@@ -96,6 +96,7 @@ class MaterialDialog(QtWidgets.QDialog):
                          (self._al, "alpha"), (self._be, "beta"), (self._ga, "gamma")):
                 w.blockSignals(True); w.setValue(m[k]); w.blockSignals(False)
             self._sg.setValue(m["sg"])
+            self._name.setText(name)
         self._apply_lattice_enabled()
 
     def _apply_lattice_enabled(self, *_):
@@ -155,8 +156,9 @@ class DetectorGeometryCard(QtWidgets.QWidget):
     imTransChanged = QtCore.pyqtSignal()      # a Flip Y/Flip Z/Transpose checkbox toggled
     geometryChanged = QtCore.pyqtSignal()     # BC/tilt/calibration changed (edit, pick, or file load)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, show_rotate: bool = False):
         super().__init__(parent)
+        self._show_rotate = show_rotate
         self._materials: list = []
         self._ring_items: list = []
         self._label_items: list = []
@@ -237,6 +239,12 @@ class DetectorGeometryCard(QtWidgets.QWidget):
     def im_trans_codes(self) -> list:
         """Ordered MIDAS ImTransOpt codes from the Transforms checkboxes."""
         return im_trans_codes_from_checkboxes(self._flip_y, self._flip_z, self._transp)
+
+    def rotate_deg(self) -> float:
+        """Per-panel-only clockwise display rotation (degrees) — deliberately
+        NOT part of im_trans_codes()/get_geometry(), so it never reaches
+        DetectorState/composite geometry or calibration-file export."""
+        return self._rotate.value() if self._rotate is not None else 0.0
 
     def any_material_rings(self) -> bool:
         return self._any_material_rings()
@@ -395,7 +403,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
     # ── GUI state ────────────────────────────────────────────────
 
     def state_widgets(self) -> dict:
-        return {
+        d = {
             "calib_ed": self._calib_ed,
             "wl": self._wl,
             "lsd": self._lsd,
@@ -413,6 +421,9 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             "show_labels": self._show_labels,
             "ring_width": self._ring_width,
         }
+        if self._rotate is not None:
+            d["rotate"] = self._rotate
+        return d
 
     def materials_state(self) -> list:
         return [{k: v for k, v in m.items() if not k.startswith("_")}
@@ -470,10 +481,24 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             "image before display/integration and saved into calibration files.")
         tb_trans = QtWidgets.QHBoxLayout(); tb_trans.setSpacing(8)
         tb_trans.addWidget(self._flip_y); tb_trans.addWidget(self._flip_z)
-        tb_trans.addWidget(self._transp); tb_trans.addStretch(1)
-        ring.body.addWidget(S.LabelRight("Transforms:")); ring.body.addLayout(tb_trans)
+        tb_trans.addWidget(self._transp)
+        if self._show_rotate:
+            self._rotate = _fspin(-360.0, 360.0, 2, 0.0, "°")
+            self._rotate.setFixedWidth(76)
+            self._rotate.setToolTip(
+                "Clockwise rotation applied to this panel's own raw display/\n"
+                "radial-integration image only — NOT applied to the Composite view.")
+            tb_trans.addWidget(QtWidgets.QLabel("Rotate:"))
+            tb_trans.addWidget(self._rotate)
+        else:
+            self._rotate = None
+        tb_trans.addStretch(1)
+        trans_card = S.make_card("Transforms")
+        trans_card.body.addLayout(tb_trans)
         for cb in (self._flip_y, self._flip_z, self._transp):
             cb.toggled.connect(self.imTransChanged.emit)
+        if self._rotate is not None:
+            self._rotate.valueChanged.connect(self.imTransChanged.emit)
 
         self._bc_auto = QtWidgets.QCheckBox("Beam centre = image centre"); self._bc_auto.setChecked(True)
         ring.body.addWidget(self._bc_auto)
@@ -527,6 +552,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         self._ring_info.setStyleSheet(f"font-family:{S.MONO_CSS};font-size:10px")
         ring.body.addWidget(self._ring_info)
         lv.addWidget(ring)
+        lv.addWidget(trans_card)
 
         # ── Calibration card ──
         calc = S.make_card("Load/save calibration (optional)")

@@ -79,6 +79,36 @@ def compute_inv_coords(bc_y: float, bc_z: float, tx_deg: float,
     return z_pix.astype(np.float32), y_pix.astype(np.float32)
 
 
+def apply_panel_rotation(image: np.ndarray, angle_deg: float) -> np.ndarray:
+    """Per-panel-only clockwise rotation (degrees) for Hydra's raw ge1-4
+    display/radial-integration image — deliberately separate from
+    ``_apply_im_trans``/``im_trans_opts`` and never used by the composite
+    build (``DetectorState.get_remapped_frame`` never calls this), unlike
+    the unrelated composite-only ``tx`` panel-placement angle used by
+    ``compute_inv_coords`` above.
+
+    Positive ``angle_deg`` rotates clockwise on screen — verified against
+    this app's actual display convention (row increases upward, column
+    increases rightward; see ``widgets.ImageViewer``'s ``invertY(False)``),
+    not assumed, given this exact class of CW/CCW mistake previously bit
+    the composite's own rotation (see DECISIONS.md)."""
+    if not angle_deg:
+        return image
+    from scipy.ndimage import rotate
+    return rotate(image, angle_deg, reshape=False, order=1,
+                  mode="constant", cval=0.0).astype(np.float32)
+
+
+def load_full_stack(path: str, dataset: str) -> np.ndarray:
+    """Read an entire Hydra panel file's frame stack (fixed HDF5 dataset
+    convention, see ``HydraLoaderPanel.DATASET``) for stack projection —
+    the single-detector tab's ``DataLoaderPanel.full_stack`` equivalent,
+    simplified since Hydra only ever uses this one format."""
+    import h5py
+    with h5py.File(str(path), "r") as f:
+        return np.asarray(f[dataset][()], dtype=np.float32)
+
+
 def remap_to_composite(image: np.ndarray, row_coords: np.ndarray,
                        col_coords: np.ndarray, cval: float = np.nan) -> np.ndarray:
     return map_coordinates(image, [row_coords, col_coords],
@@ -140,6 +170,7 @@ class DetectorState:
     bright: Optional[np.ndarray] = None
     bright_mode: str = "divide"
     background: Optional[np.ndarray] = None
+    proj_raw: Optional[np.ndarray] = None
     _inv_coords: Optional[tuple] = None
     _inv_cache_key: tuple = ()
 
@@ -173,13 +204,18 @@ class DetectorState:
 
     def get_remapped_frame(self, frame_idx: int, dataset: str,
                            big_det_size: int) -> np.ndarray:
-        img = _load_image(self.data_file, dataset, frame_idx)
-        if self.dark is not None or self.bright is not None or self.background is not None:
-            # Same order as the single-detector tab (DataLoaderPanel.corrected,
-            # then _apply_im_trans) — correction on the raw frame, before ImTransOpt.
-            img = apply_field_corrections(img, dark=self.dark, bright=self.bright,
-                                          bright_mode=self.bright_mode,
-                                          background=self.background)
+        if self.proj_raw is not None:
+            # Already corrected + projected by ProjectionWorker — same
+            # precedent as the single-detector tab's _on_projection_done.
+            img = self.proj_raw
+        else:
+            img = _load_image(self.data_file, dataset, frame_idx)
+            if self.dark is not None or self.bright is not None or self.background is not None:
+                # Same order as the single-detector tab (DataLoaderPanel.corrected,
+                # then _apply_im_trans) — correction on the raw frame, before ImTransOpt.
+                img = apply_field_corrections(img, dark=self.dark, bright=self.bright,
+                                              bright_mode=self.bright_mode,
+                                              background=self.background)
         img = _apply_im_trans(img, tuple(self.im_trans_opts))
         rows, cols = self.get_inv_coords(big_det_size)
         return remap_to_composite(img, rows, cols)

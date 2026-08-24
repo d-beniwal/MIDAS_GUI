@@ -211,6 +211,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 lambda: self._cal_tab.apply_geometry(self._view_tab.get_geometry()))
             # Calibrate → Data Viewer: push calibrated geometry into the Viewer fields.
             self._cal_tab.sendGeometryToViewer.connect(self._view_tab.set_geometry)
+            # Same hand-off, Hydra mode: per-panel geometry, keyed by panel number.
+            self._cal_tab.pullHydraFromViewer.connect(
+                lambda: self._cal_tab.import_hydra_from_viewer(self._view_tab.get_hydra_export()))
+            self._cal_tab.sendHydraGeometryToViewer.connect(self._view_tab.set_hydra_panel_geometry)
         except Exception:
             _log(f"Geometry hand-off wiring failed:\n{traceback.format_exc()}")
 

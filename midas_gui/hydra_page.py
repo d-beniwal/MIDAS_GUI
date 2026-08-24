@@ -91,13 +91,21 @@ class HydraViewerPage(QtWidgets.QWidget):
         self._loader.siblingsChanged.connect(self._on_siblings_changed)
         self._loader.frameChanged.connect(self._on_frame_changed)
         self._loader.fieldsChanged.connect(self._on_fields_changed)
+        self._loader.projectionChanged.connect(self._on_fields_changed)
         split.addWidget(self._loader)
 
-        # ── MIDDLE: one geometry card per panel + one for the composite ──
+        # ── MIDDLE: Projection card (top) + one geometry card per panel +
+        #    one for the composite (below, same as the single-detector tab's
+        #    Projection-card-then-geometry-card middle-panel layout) ──
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True); scroll.setMinimumWidth(260)
+        inner = QtWidgets.QWidget()
+        inner_lv = QtWidgets.QVBoxLayout(inner)
+        inner_lv.setContentsMargins(0, 0, 0, 0); inner_lv.setSpacing(8)
+        inner_lv.addWidget(self._loader.projection_card())
         self._card_stack = QtWidgets.QStackedWidget()
-        scroll.setWidget(self._card_stack)
+        inner_lv.addWidget(self._card_stack, 1)
+        scroll.setWidget(inner)
         # The multi-curve radial plot and shared R-bin/Auto controls are
         # built below (right side) before this loop's set_profile_view/
         # set_radial_controls calls, so build them first and reorder the
@@ -113,7 +121,7 @@ class HydraViewerPage(QtWidgets.QWidget):
 
         self._cards: dict = {}
         for key in ("ge1", "ge2", "ge3", "ge4", "composite"):
-            card = DetectorGeometryCard()
+            card = DetectorGeometryCard(show_rotate=(key != "composite"))
             card.set_image_source(self._make_image_provider(key), None)
             if key == "composite":
                 # The "Composite" curve on the shared plot is the DERIVED
@@ -138,6 +146,7 @@ class HydraViewerPage(QtWidgets.QWidget):
                 card.set_radial_controls(self._rad_r_bin, self._rad_auto)
                 n = int(key[2])
                 card.geometryChanged.connect(lambda n=n: self._on_card_geometry_changed(n))
+                card.imTransChanged.connect(lambda n=n: self._on_card_geometry_changed(n))
             self._cards[key] = card
             self._card_stack.addWidget(card)
         split.addWidget(scroll)
@@ -214,23 +223,32 @@ class HydraViewerPage(QtWidgets.QWidget):
         st.bright = self._loader.bright(n)
         st.bright_mode = self._loader.bright_mode()
         st.background = self._loader.background(n)
+        st.proj_raw = self._loader.projected(n)
 
     def _load_panel_frame(self, n: int) -> Optional[np.ndarray]:
         path = self._loader.siblings().get(n)
         st = self._states.get(n)
-        if path is None or st is None:
+        if st is None:
             return None
-        st.data_file = path
+        if path is not None:
+            st.data_file = path
         self._apply_field_selectors(n, st)
         try:
-            img = _load_image(path, self._loader.dataset(), self._loader.frame_index())
-            if st.dark is not None or st.bright is not None or st.background is not None:
-                # Same order as the single-detector tab: correction on the
-                # raw frame, before ImTransOpt (tab_view.py's _on_loader_data).
-                img = apply_field_corrections(img, dark=st.dark, bright=st.bright,
-                                              bright_mode=st.bright_mode,
-                                              background=st.background)
+            if st.proj_raw is not None:
+                # Already corrected + projected by ProjectionWorker.
+                img = st.proj_raw
+            else:
+                if path is None:
+                    return None
+                img = _load_image(path, self._loader.dataset(), self._loader.frame_index())
+                if st.dark is not None or st.bright is not None or st.background is not None:
+                    # Same order as the single-detector tab: correction on the
+                    # raw frame, before ImTransOpt (tab_view.py's _on_loader_data).
+                    img = apply_field_corrections(img, dark=st.dark, bright=st.bright,
+                                                  bright_mode=st.bright_mode,
+                                                  background=st.background)
             img = _apply_im_trans(img, tuple(st.im_trans_opts))
+            img = hydra.apply_panel_rotation(img, self._cards[f"ge{n}"].rotate_deg())
         except Exception:
             return None
         self._raw_frames[n] = img
@@ -343,7 +361,7 @@ class HydraViewerPage(QtWidgets.QWidget):
         st = self._states.setdefault(n, hydra.DetectorState())
         st.load_from_geometry_dict(fields)
         self._composite_img = None
-        if self._toolbar.current() == "composite":
+        if self._toolbar.current() in ("composite", f"ge{n}"):
             self._refresh_display()
         self._refresh_composite_curve()
 
@@ -449,6 +467,18 @@ class HydraViewerPage(QtWidgets.QWidget):
         self._viewer.set_image(img, autorange=fresh)
         if self._active_card is not None:
             self._active_card.refresh_rings_and_radial()
+
+    # ── Export (Calibrate tab's Hydra "← Data Viewer" import) ───────
+
+    def export_for_calibration(self) -> dict:
+        """Anchor path + each present panel's full geometry (BC/Lsd/tilts/
+        transforms) — consumed by ``HydraCalibrationPage.import_from_viewer``."""
+        siblings = self._loader.siblings()
+        return {
+            "anchor_path": self._loader.current_path(),
+            "geometries": {n: self._cards[f"ge{n}"].get_full_geometry()
+                          for n in siblings},
+        }
 
     # ── GUI state ────────────────────────────────────────────────
 
