@@ -21,7 +21,10 @@ import numpy as np
 import pytest
 from PyQt5 import QtCore, QtWidgets
 
+import h5py
+
 import midas_gui.hydra_calib_page as hydra_calib_page_mod
+from midas_gui import project
 from midas_gui.helpers import geometry_fields_from_file
 from midas_gui.hydra_calib_page import HydraCalibrationPage
 
@@ -140,11 +143,17 @@ def test_hydra_calib_page_wiring_and_pick_isolation(app, fixture_available):
     assert page._active_card.panel_number == 2
 
 
-def test_hydra_calib_run_orchestration_and_results_switching(app, fixture_available):
+def test_hydra_calib_run_orchestration_and_results_switching(app, fixture_available, tmp_path):
     """Sequential run: independent per-panel BCs. Parallel run: all 4
     workers started up-front. Results/Ring-Residuals tabs switch with the
-    active panel. All against ONE page instance (see module docstring)."""
+    active panel. All against ONE page instance (see module docstring).
+    Also verifies each panel's completed run is logged to a project file
+    when one is open (FAIR provenance — see midas_gui/project.py)."""
     page = HydraCalibrationPage()
+    proj_path = str(tmp_path / "proj.h5")
+    project.create_project(proj_path)
+    page.set_project_context(project.ProjectContext())
+    page._project_ctx.path = proj_path
     _load_and_seed(page, fixture_available)
     # The synthetic fixture's ps_ge{1..4}.txt files all share the same
     # nominal BC (128, 128) by design (built for geometry/composite tests,
@@ -165,6 +174,13 @@ def test_hydra_calib_run_orchestration_and_results_switching(app, fixture_availa
     assert len(set(bcs.values())) > 1, "panels should not all share the same fitted BC"
     assert page._run_btn.isEnabled() and not page._abort_btn.isEnabled()
 
+    with h5py.File(proj_path, "r") as f:
+        for n in (1, 2, 3, 4):
+            att = f[f"ge{n}/calib/attempt_0001"]
+            assert att.attrs["BC_y"] == pytest.approx(bcs[n][0])
+    for n in (1, 2, 3, 4):
+        assert getattr(results[n], "_project_attempt_ref", None) == f"/ge{n}/calib/attempt_0001"
+
     page._toolbar.set_current("ge1")
     assert page._results_stack.currentWidget() is page._cards[1].results_widget
     assert page._resid_stack.currentWidget() is page._cards[1].residual_chart
@@ -180,3 +196,9 @@ def test_hydra_calib_run_orchestration_and_results_switching(app, fixture_availa
     ok = _pump(app, lambda: not page._workers and not page._pending_panels)
     assert ok, "parallel run did not complete"
     assert all(page._cards[n].result is not None for n in (1, 2, 3, 4))
+
+    with h5py.File(proj_path, "r") as f:
+        for n in (1, 2, 3, 4):
+            grp = f[f"ge{n}/calib"]
+            assert set(grp.keys()) == {"attempt_0001", "attempt_0002"}
+            assert grp.attrs["latest"] == "attempt_0002"

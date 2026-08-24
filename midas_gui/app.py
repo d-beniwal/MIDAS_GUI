@@ -71,6 +71,7 @@ from midas_gui.tab_texture import TextureTab
 from midas_gui.tab_pumpprobe import PumpProbeTab
 from midas_gui.tab_export import ExportTab
 from midas_gui import constants as C
+from midas_gui import project
 
 _CHECKMARK_SVG = _make_checkmark_svg()
 _ARROW_UP_SVG = _make_arrow_svg("up")
@@ -83,6 +84,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle(f"MIDAS GUI v{__version__}")
         self.resize(1600, 950)
         self._gui_state_path: Optional[str] = None   # last loaded/saved GUI-state path
+        self._project_ctx = project.ProjectContext()  # currently-open FAIR provenance project
         self._build_ui()
         # Lets B-PILOT (a separate Bluesky plan-runner GUI) auto-start Live
         # Data on a detector's PVA channel when it launches a scan — no-op
@@ -222,10 +224,26 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             _log(f"Geometry hand-off wiring failed:\n{traceback.format_exc()}")
 
+        # FAIR provenance: hand the (initially closed) project context to the
+        # two tabs that log attempts to it. Defensive, like the wiring above —
+        # a placeholder tab (failed to build) simply has no such method.
+        for tab in (self._cal_tab, self._batch_tab):
+            setter = getattr(tab, "set_project_context", None)
+            if setter is not None:
+                try:
+                    setter(self._project_ctx)
+                except Exception:
+                    _log(f"Project-context wiring failed:\n{traceback.format_exc()}")
+
         self._build_file_menu()
         self._build_menu()
         self.statusBar().showMessage(
             "Tip: mask → calibrate → (refine) → batch integrate")
+        self._project_lbl = QtWidgets.QLabel("Project: none")
+        self._project_lbl.setToolTip(
+            "The currently-open FAIR provenance project file (File → New/Open Project…).\n"
+            "Calibrate and Batch Integrate runs are logged to it automatically while open.")
+        self.statusBar().addPermanentWidget(self._project_lbl)
 
     # ── modular tab visibility ─────────────────────────────────────
     _NUMERALS = "⓪①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭"
@@ -265,6 +283,58 @@ class MainWindow(QtWidgets.QMainWindow):
         act_load = m.addAction("Load GUI State…")
         act_load.setShortcut(QtGui.QKeySequence("Ctrl+O"))
         act_load.triggered.connect(self._load_gui_state_dialog)
+
+        m.addSeparator()
+        act_new_proj = m.addAction("New Project…")
+        act_new_proj.triggered.connect(self._new_project_dialog)
+        act_open_proj = m.addAction("Open Project…")
+        act_open_proj.triggered.connect(self._open_project_dialog)
+        self._close_proj_act = m.addAction("Close Project")
+        self._close_proj_act.setEnabled(False)
+        self._close_proj_act.triggered.connect(self._close_project)
+
+    def _set_project_path(self, path) -> None:
+        self._project_ctx.path = path
+        self._project_lbl.setText(f"Project: {Path(path).name}" if path else "Project: none")
+        self._close_proj_act.setEnabled(path is not None)
+
+    def _new_project_dialog(self):
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "New Project", "midas_project.h5", "MIDAS Project (*.h5)")
+        if not path:
+            return
+        try:
+            project.create_project(path)
+        except FileExistsError:
+            QtWidgets.QMessageBox.critical(
+                self, "New Project failed",
+                f"{path}\nalready exists — pick a new file, or use "
+                "File → Open Project… to continue an existing one.")
+            return
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "New Project failed", str(e))
+            return
+        self._set_project_path(path)
+        QtWidgets.QMessageBox.information(
+            self, "New Project",
+            f"Created project:\n{path}\n\n"
+            "Calibrate and Batch Integrate runs will now be logged to it "
+            "automatically (for both single-detector and Hydra modes).")
+
+    def _open_project_dialog(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Open Project", "", "MIDAS Project (*.h5);;All files (*)")
+        if not path:
+            return
+        try:
+            project.open_project(path)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Open Project failed", str(e))
+            return
+        self._set_project_path(path)
+
+    def _close_project(self):
+        self._set_project_path(None)
 
     def _save_gui_state_dialog(self):
         """Ctrl+S: overwrite the file this session last loaded/saved from, if

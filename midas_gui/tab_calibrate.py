@@ -31,6 +31,7 @@ from midas_gui.workers import CalibrationWorker, IntegrationWorker
 from midas_gui.dialogs import _SaveParamstestDialog, DistortionRefineDialog
 from midas_gui.hydra_widgets import HydraModeRibbon
 from midas_gui.hydra_calib_page import HydraCalibrationPage
+from midas_gui import project
 from midas_gui import style as S
 
 
@@ -58,11 +59,19 @@ class CalibrationTab(QtWidgets.QWidget):
         self._dist_coeffs = set(DISTORTION_NAMES)   # distortion coeffs to refine
         self._seed_dist: dict = {}                  # seed distortion carried from a result
         self._last_dist_coeffs: Optional[set] = None  # coeffs selected for the last run
+        self._last_cfg: Optional[dict] = None          # cfg used for the last run (provenance)
+        self._last_bright: Optional[np.ndarray] = None
+        self._last_background: Optional[np.ndarray] = None
+        self._project_ctx: Optional[project.ProjectContext] = None
         self._build_ui()
         self._loader.set_path(DEFAULT_CALIBRANT_TIF)
 
     def set_mask_from_tab1(self, mask: Optional[np.ndarray]):
         self._loader.set_tab1_mask(mask)
+
+    def set_project_context(self, ctx: "project.ProjectContext"):
+        self._project_ctx = ctx
+        self._hydra_page.set_project_context(ctx)
 
     def import_hydra_from_viewer(self, data: dict):
         self._hydra_page.import_from_viewer(data)
@@ -757,6 +766,10 @@ class CalibrationTab(QtWidgets.QWidget):
                 "gap_y": self._pg_y.value(), "gap_z": self._pg_z.value(),
             }
 
+        self._last_cfg = dict(cfg)
+        self._last_bright = bright
+        self._last_background = background
+
         self._worker = CalibrationWorker(
             mode, self._calib_image(), self._dark, cfg, parent=self,
             bright=bright, background=background, bright_mode=bright_mode)
@@ -879,7 +892,27 @@ class CalibrationTab(QtWidgets.QWidget):
         self._draw_rings(result)
         self._bot_tabs.setCurrentWidget(self._prof_view)
         self._run_integration(result)
+        self._log_to_project(result)
         self.calibrationDone.emit(result)
+
+    def _log_to_project(self, result):
+        """Append a provenance record to the currently-open project file, if
+        any — a no-op (never blocks the result display) when no project is
+        open or the write fails for any reason."""
+        if not self._project_ctx or not self._project_ctx.path:
+            return
+        try:
+            ref = project.append_calibration_attempt(
+                self._project_ctx.path, "single",
+                cfg=self._last_cfg, result=result,
+                loader_state=self._loader.get_state(),
+                dark=self._dark, bright=self._last_bright,
+                background=self._last_background)
+            result._project_attempt_ref = ref
+            self._log.append(f"Logged to project: {ref}")
+        except Exception:
+            import traceback as _tb
+            self._log.append("Could not log to project file:\n" + _tb.format_exc()[:400])
 
     def _on_fail(self, msg):
         if self._calib_cancelled:

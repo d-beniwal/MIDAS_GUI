@@ -42,6 +42,7 @@ from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar, Hydr
 from midas_gui.hydra_calib_widgets import HydraCalibPanelCard
 from midas_gui.workers import CalibrationWorker, IntegrationWorker
 from midas_gui.dialogs import DistortionRefineDialog
+from midas_gui import project
 from midas_gui import style as S
 
 
@@ -62,8 +63,14 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._last_dist_coeffs: Optional[set] = None
         self._active_card: Optional[HydraCalibPanelCard] = None
         self._disp_key = None
+        self._last_cfgs: dict = {}      # panel_num -> cfg used for its last run (provenance)
+        self._last_fields: dict = {}    # panel_num -> (dark, bright, background) arrays
+        self._project_ctx: Optional[project.ProjectContext] = None
         self._build_ui()
         self._on_panel_changed(self._toolbar.current())
+
+    def set_project_context(self, ctx: "project.ProjectContext"):
+        self._project_ctx = ctx
 
     # ── UI ────────────────────────────────────────────────────────
 
@@ -560,6 +567,8 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         background = self._loader.background(n)
         bright_mode = self._loader.bright_mode()
         cfg = self._build_cfg(card)
+        self._last_cfgs[n] = dict(cfg)
+        self._last_fields[n] = (dark, bright, background)
         mode = self._pipeline.currentData()
         worker = CalibrationWorker(
             mode, image, dark, cfg, parent=self, bright=bright, background=background,
@@ -579,12 +588,34 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         result._calibrant_name = self._cal.currentText()
         card.on_result(result)
         self._log.append(f"[ge{n}] done — Lsd={result.Lsd/1000:.3f} mm")
+        self._log_to_project(n, result)
         self._run_integration(n, result)
         self.panelCalibrationDone.emit(n, result)
         self._workers.pop(n, None)
         if self._run_mode() == "sequential":
             self._start_next_sequential()
         self._maybe_finish_run()
+
+    def _log_to_project(self, n: int, result):
+        if not self._project_ctx or not self._project_ctx.path:
+            return
+        dark, bright, background = self._last_fields.get(n, (None, None, None))
+        siblings = self._loader.siblings()
+        loader_state = {
+            "path": siblings.get(n), "dataset": self._loader.dataset(),
+            "frame_index": self._loader.frame_index(),
+        }
+        try:
+            ref = project.append_calibration_attempt(
+                self._project_ctx.path, f"ge{n}",
+                cfg=self._last_cfgs.get(n, {}), result=result,
+                loader_state=loader_state,
+                dark=dark, bright=bright, background=background)
+            result._project_attempt_ref = ref
+            self._log.append(f"[ge{n}] logged to project: {ref}")
+        except Exception:
+            import traceback as _tb
+            self._log.append(f"[ge{n}] could not log to project file:\n" + _tb.format_exc()[:400])
 
     def _on_panel_fail(self, n: int, msg: str):
         if self._calib_cancelled:

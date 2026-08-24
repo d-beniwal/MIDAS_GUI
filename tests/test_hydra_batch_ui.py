@@ -15,12 +15,14 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import h5py
 import numpy as np
 import pytest
 from PyQt5 import QtCore, QtWidgets
 
 import midas_gui.hydra_batch_page as hydra_batch_page_mod
 import midas_gui.hydra_batch_widgets as hydra_batch_widgets_mod
+from midas_gui import project
 from midas_gui.hydra_batch_page import HydraBatchPage
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "test_data" / "gui_synthetic" / "hydra"
@@ -166,14 +168,22 @@ def test_hydra_batch_calibration_sources_and_masks(app, fixture_available):
     assert page._run_btn.isEnabled() and not page._abort_btn.isEnabled()
 
 
-def test_hydra_batch_run_orchestration_and_viewer_switching(app, fixture_available):
+def test_hydra_batch_run_orchestration_and_viewer_switching(app, fixture_available, tmp_path):
     """Sequential drains the queue one panel at a time; Parallel starts all
     4 workers up front; the per-panel Waterfall/Stacked viewer stack and
-    card stack both switch with the active-panel toolbar."""
+    card stack both switch with the active-panel toolbar. Also verifies each
+    panel's completed run is logged to a project file, linked back to its
+    (fake) calibration attempt, when one is open."""
     page = HydraBatchPage()
+    proj_path = str(tmp_path / "proj.h5")
+    project.create_project(proj_path)
+    page.set_project_context(project.ProjectContext())
+    page._project_ctx.path = proj_path
     page._loader.set_path(str(fixture_available / "ge1" / "panel.ge1.h5"))
     for n in (1, 2, 3, 4):
-        page.set_panel_calibration(n, _mk_result(BC_y=100.0 + n))
+        result = _mk_result(BC_y=100.0 + n)
+        result._project_attempt_ref = f"/ge{n}/calib/attempt_0001"
+        page.set_panel_calibration(n, result)
     page._out_ed.setText("/tmp/hydra_batch_test_out2")
 
     page._run_mode_combo.setCurrentIndex(0)   # Sequential
@@ -183,6 +193,12 @@ def test_hydra_batch_run_orchestration_and_viewer_switching(app, fixture_availab
     assert _FakeBatchWorker.calls == [f"/tmp/hydra_batch_test_out2/ge{n}" for n in (1, 2, 3, 4)]
     for n in (1, 2, 3, 4):
         assert "Complete" in page._cards[n]._status_lbl.text()
+
+    with h5py.File(proj_path, "r") as f:
+        for n in (1, 2, 3, 4):
+            att = f[f"ge{n}/integrate/attempt_0001"]
+            assert att.attrs["n_frames"] == 1
+            assert att.attrs["calib_attempt_ref"] == f"/ge{n}/calib/attempt_0001"
 
     _FakeBatchWorker.calls = []
     page._run_mode_combo.setCurrentIndex(1)   # Parallel

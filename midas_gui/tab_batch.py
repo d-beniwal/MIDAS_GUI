@@ -28,6 +28,7 @@ from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
 from midas_gui.workers import BatchWorker, apply_q_uniform, DriftWorker, FolderMonitorWorker
 from midas_gui.hydra_widgets import HydraModeRibbon
 from midas_gui.hydra_batch_page import HydraBatchPage
+from midas_gui import project
 from midas_gui import style as S
 
 
@@ -49,9 +50,17 @@ class BatchTab(QtWidgets.QWidget):
         # sessions never touch Hydra Batch Integrate — see .context/DECISIONS.md's
         # pyqtgraph interpreter-teardown / widget-count crash-risk entry.
         self._hydra_page: Optional[HydraBatchPage] = None
+        self._last_run_inputs: dict = {}
+        self._last_run_fields: dict = {}
+        self._project_ctx: Optional[project.ProjectContext] = None
         self._build_ui()
         self._loader.monitorToggled.connect(self._toggle_monitor)
         self._loader.set_path(DEFAULT_NICKEL_DIR)
+
+    def set_project_context(self, ctx: "project.ProjectContext"):
+        self._project_ctx = ctx
+        if self._hydra_page is not None:
+            self._hydra_page.set_project_context(ctx)
 
     def set_calibration(self, result):
         self._calib_result = result
@@ -79,6 +88,8 @@ class BatchTab(QtWidgets.QWidget):
         if self._hydra_page is None:
             self._hydra_page = HydraBatchPage()
             self._mode_stack.addWidget(self._hydra_page)
+            if self._project_ctx is not None:
+                self._hydra_page.set_project_context(self._project_ctx)
         return self._hydra_page
 
     def set_hydra_panel_calibration(self, n: int, result):
@@ -459,6 +470,17 @@ class BatchTab(QtWidgets.QWidget):
         sig = self._integration_signature(src_cfg, kernel, corrections, weighted)
         context = self._geom_cache if (sig == self._geom_sig and
                                        self._geom_cache is not None) else None
+
+        self._last_run_inputs = {
+            "src_cfg": src_cfg, "kernel": kernel, "fmt": fmt,
+            "frame_range": frame_range, "monitor_file": monitor_file,
+            "q_cfg": q_cfg, "weighted": weighted, "bright_mode": bright_mode,
+        }
+        self._last_run_fields = {
+            "mask": self._loader.composite_mask(),
+            "dark": dark, "bright": bright, "background": background,
+        }
+
         self._worker = BatchWorker(
             spec, src_cfg, self._loader.composite_mask(), out_dir, fmt, kernel,
             corrections, variance_cfg, q_cfg=q_cfg,
@@ -529,7 +551,26 @@ class BatchTab(QtWidgets.QWidget):
             msg += f"\nSaved to: {Path(out[0]).parent}"
         self._log.append(msg)
         self._prog_lbl.setText(f"{'Aborted' if aborted else 'Complete'}: {n} frames")
+        self._log_to_project(data)
         QtWidgets.QMessageBox.information(self, "Aborted" if aborted else "Done", msg)
+
+    def _log_to_project(self, data):
+        if not self._project_ctx or not self._project_ctx.path:
+            return
+        calib_fields, _note = self._calib_fields_in_use()
+        calib_ref = None
+        if self._use_tab2_btn.isChecked() and self._calib_result is not None:
+            calib_ref = getattr(self._calib_result, "_project_attempt_ref", None)
+        try:
+            ref = project.append_integration_attempt(
+                self._project_ctx.path, "single",
+                inputs=self._last_run_inputs, finished_payload=data,
+                calibration_snapshot=calib_fields, calib_attempt_ref=calib_ref,
+                **self._last_run_fields)
+            self._log.append(f"Logged to project: {ref}")
+        except Exception:
+            import traceback as _tb
+            self._log.append("Could not log to project file:\n" + _tb.format_exc()[:400])
 
     def _on_fail(self, msg):
         self._reset_run_buttons(); self._prog.setVisible(False)

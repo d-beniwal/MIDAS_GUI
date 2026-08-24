@@ -34,6 +34,7 @@ from midas_gui.widgets import LogPanel, CorrectionFlagsWidget, WaterfallViewer, 
 from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar
 from midas_gui.hydra_batch_widgets import HydraBatchPanelCard
 from midas_gui.workers import BatchWorker
+from midas_gui import project
 from midas_gui import style as S
 
 
@@ -67,8 +68,14 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._integrated_fids: dict = {}  # panel_num -> set of frame ids
         self._geom_cache: dict = {}      # panel_num -> cached integration context
         self._geom_sig: dict = {}        # panel_num -> signature the cache was built for
+        self._last_run_inputs: dict = {}  # panel_num -> JSON-safe run inputs (provenance)
+        self._last_run_fields: dict = {}  # panel_num -> {mask,dark,bright,background} arrays
+        self._project_ctx = None
         self._build_ui()
         self._on_panel_changed(self._toolbar.current())
+
+    def set_project_context(self, ctx):
+        self._project_ctx = ctx
 
     # ── UI ────────────────────────────────────────────────────────
 
@@ -339,6 +346,14 @@ class HydraBatchPage(QtWidgets.QWidget):
         sig = self._integration_signature(n, src_cfg, kernel, corrections, weighted, mask)
         context = self._geom_cache.get(n) if self._geom_sig.get(n) == sig else None
 
+        self._last_run_inputs[n] = {
+            "src_cfg": src_cfg, "kernel": kernel, "fmt": fmt,
+            "frame_range": frame_range, "monitor_file": monitor_file,
+            "q_cfg": q_cfg, "weighted": weighted, "bright_mode": bright_mode,
+        }
+        self._last_run_fields[n] = {"mask": mask, "dark": dark, "bright": bright,
+                                     "background": background}
+
         worker = BatchWorker(
             spec, src_cfg, mask, out_dir, fmt, kernel, corrections, variance_cfg,
             q_cfg=q_cfg, frame_range=frame_range, monitor_file=monitor_file, parent=self,
@@ -377,10 +392,30 @@ class HydraBatchPage(QtWidgets.QWidget):
         if out:
             msg += f"\n  saved to: {Path(out[0]).parent}"
         self._log.append(msg)
+        self._log_to_project(n, data)
         self._workers.pop(n, None)
         if self._run_mode() == "sequential":
             self._start_next_sequential()
         self._maybe_finish_run()
+
+    def _log_to_project(self, n: int, data: dict):
+        if not self._project_ctx or not self._project_ctx.path:
+            return
+        card = self._cards[n]
+        calib_fields, _note = card._calib_fields_in_use()
+        calib_ref = None
+        if not card.using_file():
+            calib_ref = getattr(card.result, "_project_attempt_ref", None)
+        try:
+            ref = project.append_integration_attempt(
+                self._project_ctx.path, f"ge{n}",
+                inputs=self._last_run_inputs.get(n, {}), finished_payload=data,
+                calibration_snapshot=calib_fields, calib_attempt_ref=calib_ref,
+                **self._last_run_fields.get(n, {}))
+            self._log.append(f"[ge{n}] logged to project: {ref}")
+        except Exception:
+            import traceback as _tb
+            self._log.append(f"[ge{n}] could not log to project file:\n" + _tb.format_exc()[:400])
 
     def _on_panel_fail(self, n: int, msg: str):
         if self._run_cancelled:

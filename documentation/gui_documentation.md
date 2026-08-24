@@ -3,7 +3,16 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-24 (Tab 4 — Batch Integrate: split into **Single
+**Last updated:** 2026-08-24 (File ▸ **Project** — a new, opt-in FAIR
+provenance record (HDF5), separate from GUI State: while a project is open,
+every completed Calibrate/Batch Integrate run (single-detector or per Hydra
+panel) automatically appends a self-contained record of its exact inputs,
+parameters, results, and software versions — raw multi-frame datasets are
+referenced by path + checksum rather than duplicated, so this stays small
+even for scans with thousands of frames. See §17 "File ▸ Project (FAIR
+provenance)".)
+
+**Previously:** (2026-08-24, Tab 4 — Batch Integrate: split into **Single
 detector** / **Hydra** modes behind a leftmost mode ribbon, the same pattern
 as the Calibrate/Data Viewer tabs' own splits. Hydra mode integrates each of
 the 4 GE panels with its own independently fitted geometry — auto-populated
@@ -246,6 +255,7 @@ strict `<` — a pixel exactly equal to the lower bound is no longer masked)
 14. [Packaging, Deployment & Diagnostics](#14-packaging-deployment--diagnostics)
 15. [Configuration & Defaults](#15-configuration--defaults)
 16. [File ▸ Save/Load GUI State](#16-file--saveload-gui-state)
+17. [File ▸ Project (FAIR provenance)](#17-file--project-fair-provenance)
 
 ---
 
@@ -1900,5 +1910,57 @@ in-progress work isn't silently lost:
   for the record and to reseed the manual/seed geometry fields. This does **not**
   reconstruct the in-memory fitted result object (it isn't a plain, re-loadable
   structure) — re-run **Fit** after loading to reproduce it.
+
+---
+
+## 17. File ▸ Project (FAIR provenance)
+
+Separate from GUI State (§16, which snapshots widget *configuration* so a
+session can be resumed), a **Project** is a long-lived record of what
+actually *happened*: every time a Calibrate or Batch Integrate run
+finishes, a self-contained record is appended to it — enough to reproduce
+that exact run later (inputs, parameters, results, and software versions).
+It's designed to accumulate across many separate launches of the GUI over
+the course of an experiment, not just one session.
+
+- **File ▸ New Project…** — pick a destination `.h5` file; it's created
+  empty and becomes the active project immediately. Refuses to overwrite an
+  existing file (use **Open Project…** to continue one).
+- **File ▸ Open Project…** — pick a previously-created project file to make
+  it active.
+- **File ▸ Close Project** — stops logging; no data already written is
+  touched.
+- The active project's filename is always shown in the status bar
+  (bottom-right, "Project: …" / "Project: none").
+
+### What gets logged, and when
+While a project is open, **every completed Calibrate run** (single-detector
+Tab 2, or each of the 4 panels in Hydra mode) and **every completed Batch
+Integrate run** (single-detector Tab 4, or each Hydra panel) appends one
+record — automatically, with no extra action needed. Nothing is logged when
+no project is open (the default), so this is entirely opt-in.
+
+Each record is self-contained and includes: the exact parameters used
+(pipeline/refine choices for a calibration, kernel/binning/corrections for
+an integration); the fitted calibration result or the integrated
+profile(s); the mask and dark/bright/background frames actually applied
+(embedded, since a mask drawn directly in Mask Builder has no file of its
+own to point back to); file paths and checksums for the raw calibrant
+image / raw scan data referenced (not duplicated — a scan can be many
+thousands of frames); and the midas-gui / MIDAS package versions active at
+the time. A Batch Integrate record additionally embeds the exact
+calibration values it used and links back to the specific Calibrate run
+that produced them, when that run was itself logged to the same project.
+
+Records are never overwritten — recalibrating or re-integrating adds a new,
+separately numbered record rather than replacing the previous one, so the
+full history of what was tried stays in the file. A failed provenance write
+(e.g. disk full) is logged to the tab's own Log panel and never blocks or
+alters the run's on-screen result.
+
+The file is plain HDF5 (`h5py`/`h5dump`/HDFView can browse it directly) —
+no separate tool is required to inspect what a project contains.
+
+---
 
 *For bugs or questions, see the MIDAS GUI repository.*
