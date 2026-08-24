@@ -1,7 +1,7 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-24 (Phase 6's 5 bugfixes committed: `0aa5feb` + docs `8d5ed5a` + this file's `6b55172`/successor; pushed to `origin`)_
+_Last updated: 2026-08-24 (Phase 6 continues: a 6th bug, Pick BC/Pick Ring point leakage across panels, found + fixed: `eadb14d` + docs `875d3ed`; pushed to `origin`)_
 
 ## Now working on
 
@@ -53,15 +53,27 @@ tests pass; the known pyqtgraph teardown crash (see below) still
 occasionally reproduces when the whole `test_hydra_*.py` battery runs in
 one process — unchanged risk profile, not worsened.
 
+**6th bug found continuing the manual pass, now fixed (`eadb14d`):** the
+single `ROIImageViewer` shared by all 5 panel cards keeps Pick BC/Pick Ring
+click state (`_ring_pts`) on the viewer itself, not per-card.
+`DetectorGeometryCard.bind_viewer()` cleared each card's own ring/label
+overlay items on rebind but not the viewer's in-progress pick points, so
+points picked on one panel could leak into another panel's circle fit
+after switching. Fixed by clearing the viewer's pick state in
+`bind_viewer()` too; new regression test
+`test_hydra_pick_ring_points_dont_leak_across_panels` in
+`tests/test_hydra_ui.py`.
+
 ## Next steps
 
 - Composite orientation (rotation direction + left/right mirror) is now
   user-confirmed correct against real `test_data/s1ide` data.
-- Rest of Phase 6: continue the real windowed manual pass — Pick BC/Pick
-  Ring tools on a real Hydra panel (interactive mouse picking can't be
-  exercised headlessly), and general layout/usability at a real window
-  size, now including the new Dark/Bright/Background card and shared-field
-  behavior.
+- Rest of Phase 6: continue the real windowed manual pass — actually
+  exercising Pick BC/Pick Ring with real mouse clicks on a real Hydra panel
+  (interactive mouse picking can't be exercised headlessly; the leakage bug
+  above was found by code inspection during this pass, not yet by a live
+  click-through), and general layout/usability at a real window size, now
+  including the new Dark/Bright/Background card and shared-field behavior.
 - Remaining documented scope cut: no intensity-range mask or Top-N
   brightest-pixel in Hydra mode (dark/bright/background is no longer a
   cut — see above).
@@ -102,6 +114,9 @@ one process — unchanged risk profile, not worsened.
 
 ## Recent changes (last 3-5 sessions, dated; drop the oldest as it grows)
 
+- 2026-08-24 (`eadb14d` + docs `875d3ed`): Hydra Phase 6, 6th bug — Pick
+  BC/Pick Ring point leakage across panels (shared viewer's pick state not
+  cleared on panel switch). See "Now working on" above.
 - 2026-08-24 (`0aa5feb` + docs `8d5ed5a`): Hydra Phase 6 manual pass found
   and fixed 5 bugs — shared λ/max2θ/px, dark/bright/background correction,
   composite orientation (rotation direction reverted CW->CCW, plus an
