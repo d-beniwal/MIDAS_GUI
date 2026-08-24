@@ -3,7 +3,39 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-24 (Tab 0 — Data Viewer, Hydra mode: fixed a
+**Last updated:** 2026-08-24 (Tab 2 — Calibrate: split into **Single
+detector** / **Hydra** modes behind a leftmost mode ribbon, the same pattern
+as the Data Viewer tab's own split. Hydra mode fits each of the 4 GE panels'
+own geometry from one calibrant dataset using a shared pipeline/refine
+recipe, with independent per-panel Transforms/seed/results, a **Sequential**
+or **Parallel** run-mode choice, and a **← Data Viewer** import of the
+Hydra Data Viewer page's loaded panels + fitted geometry. See §5 "Hydra
+mode (4-panel GE detector)".)
+
+**Previously:** (2026-08-24, Tab 0 — Data Viewer: the **Transforms** (Flip
+Y/Flip Z/Transpose[/Rotate]) checkboxes are now their own boxed
+**Transforms** card, directly below the Ring simulation card, instead of an
+inline "Transforms:" label + row inside it — fixes a large visual gap
+between the heading and the row; this is shared code, so it applies to both
+the single-detector tab's geometry card and every Hydra-tab panel card.
+Hydra mode: the **Projection** card moved from the left-side loader panel to
+the top of the middle panel, matching where the single-detector tab's own
+Projection card sits; and the radial-integration plot's pan/zoom is now
+bounded to the combined data range of the currently-visible curves (same
+margin formula as the single-detector tab's radial plot), instead of being
+free to scroll/zoom arbitrarily far from the data.)
+
+**Previously:** (2026-08-24, Tab 0 — Data Viewer, Hydra mode: added a
+per-panel **Projection** card (Max/Sum/Average stack reduction, mirroring
+the single-detector tab) that feeds all of GE1-4 *and* the Composite view;
+added a per-panel-only **Rotate** field (clockwise, degrees) next to
+Flip Y/Flip Z/Transpose on GE1-4 — deliberately excluded from the Composite
+view; fixed a bug where Flip Y/Flip Z/Transpose didn't actually refresh the
+displayed image on GE1-4 panels; and the Material dialog's **Preset**
+dropdown now also fills in the **Name** field (still editable), on both the
+single-detector and Hydra tabs.)
+
+**Previously:** (2026-08-24, Tab 0 — Data Viewer, Hydra mode: fixed a
 manual (Phase 6) review's 5 bugs — λ/max 2θ/pixel size now shared across
 all 5 geometry cards; dark/bright/background correction added (sibling
 -aware, mirroring the single-detector tab); the Composite windmill assembly's
@@ -389,15 +421,26 @@ registered image for a full-coverage view.
   matching files are found automatically, the same way the main Hydra data
   path works — no need to pick all 4 by hand. Each field computes and
   applies independently per panel.
+- **Projection (top of the middle panel)**: same **Max / Sum / Average**
+  stack-reduction as the single-detector tab's own Projection card (and in
+  the same place — top of the middle panel, above the geometry cards), but
+  computed **per panel** — clicking **Project stack** reduces every
+  currently-found panel's own frame stack (honoring Skip frames/N frames and
+  whatever Dark/Bright/Background correction is currently set) and shows the
+  result in place of the current frame for **all of GE1-4 and the Composite
+  view** (the Composite is rebuilt from the projected frames, not frame 0).
+  **Back to frames** — or moving the frame slider/spinbox — returns to
+  normal per-frame navigation.
 - **Image toolbar**: five buttons — **GE1 / GE2 / GE3 / GE4 / Composite** —
   select what's shown in the image viewer below. GE1-4 show that panel's own
   raw frame; **Composite** shows all currently-available panels remapped
   (via each panel's own beam-centre + tilt) into one shared, registered
   canvas — a geometry-based "windmill" composite, not a raw mosaic.
-- **Per-panel geometry card (middle panel)**: switching the image-toolbar
-  button swaps which panel's **Ring simulation + Load/save calibration**
-  card is shown — identical in every way to the single-detector tab's own
-  card (materials list, beam-centre pick/ring-fit, tilt fields, calibration
+- **Per-panel geometry card (middle panel, below the Projection card)**:
+  switching the image-toolbar button swaps which panel's **Ring simulation +
+  Transforms + Load/save calibration** cards are shown — identical in every
+  way to the single-detector tab's own cards (materials list, beam-centre
+  pick/ring-fit, tilt fields, calibration
   file load/save), just bound to that one panel. Loading a calibration file
   (or picking/editing a beam centre) on a GE1-4 card takes effect
   immediately: it's used for that panel's own ring overlay/radial
@@ -415,6 +458,12 @@ registered image for a full-coverage view.
   of them on GE1-4 or Composite applies it to the other 4 immediately (same
   X-ray beam and GE detector model, so these three are always physically
   identical); beam centre, Lsd, and tilt remain independent per panel.
+  GE1-4 (not the Composite) also have a **Rotate** field on the same row as
+  **Flip Y / Flip Z / Transpose** in that panel's own **Transforms** card: a
+  clockwise rotation (degrees, default 0) applied only to that one panel's
+  own raw display/radial-integration image — it is deliberately **not**
+  applied to the Composite view, which keeps building from each panel's
+  un-rotated frame and its own independent beam-centre/tilt geometry.
 - **Radial integration plot (bottom right)**: shows **all 4 panels' own
   azimuthal profiles at once** — GE1-4 in fixed colors, computed
   independently from each panel's own beam centre/geometry — plus a
@@ -427,7 +476,13 @@ registered image for a full-coverage view.
   resampled onto a shared 2θ axis first, then added together — **not** a
   radial integration of the composited image itself (which would
   double-count any panel overlap and mix registration error into the
-  profile).
+  profile). **Pan and zoom are bounded** to the combined X/Y extent of every
+  currently-visible curve (same margin formula as the single-detector tab's
+  own radial plot — see **Pan and zoom are always bounded to the current
+  profile's extent** below), recomputed on every curve refresh (X-axis unit
+  switch, checkbox toggle, or new data) so scrolling/zooming can't wander
+  off into empty space. This plot doesn't yet have the single-detector
+  plot's Auto/Manual toggle button pair.
 - **Not yet supported in Hydra mode** (present in Single detector mode):
   the intensity-range exclude mask, and Top-N brightest-pixel.
 
@@ -485,8 +540,11 @@ its own lattice, visibility, and ring color.
   on one row and **α, β, γ** (2 decimals) on the next, plus **SG #**, and a
   **Cubic (a=b=c, α=β=γ=90°)** checkbox that lets you enter only `a` for cubic
   crystals (b, c mirror a; angles fixed at 90°). Lattice fields are editable
-  only for Custom. OK applies the name/lattice/preset back to that material's
-  row (renaming here updates the row's displayed name); Cancel discards edits.
+  only for Custom. Picking a named preset also fills the **Name** field with
+  that preset's name (still freely editable afterward — e.g. rename it
+  without losing the lattice values just applied). OK applies the
+  name/lattice/preset back to that material's row (renaming here updates the
+  row's displayed name); Cancel discards edits.
 - Geometry (λ, max 2θ, Lsd, pixel size, beam centre) is shared across all
   materials — only the lattice/space-group/color/visibility are per-material.
   Beam centre (auto = image centre, or
@@ -508,17 +566,6 @@ its own lattice, visibility, and ring color.
   both at 0° reproduces the previous plain-circle rendering exactly. (Rotation
   about the beam axis, `tx`, leaves a full ring's shape unchanged, so it isn't
   exposed here.)
-- **Transforms: Flip Y / Flip Z / Transpose** apply MIDAS's `ImTransOpt` image
-  transform to the raw detector frame — before display, ring overlay, and
-  radial integration — in that fixed order (flips, then transpose). Use this
-  when the detector's raw pixel orientation doesn't match the geometry model
-  (e.g. the beam centre would otherwise land on the wrong side of the image).
-  Toggling refreshes the current frame (or the active projection)
-  immediately. The same three checkboxes appear on the Mask Builder and
-  Calibrate tabs and stay in sync whenever geometry is pushed/pulled between
-  tabs; saved/loaded calibration files (`.json`/`.txt`) round-trip the codes
-  as MIDAS's repeatable `ImTransOpt <code>` paramstest key (1=Flip Y,
-  2=Flip Z, 3=Transpose).
 - **Rings / Labels** toggles sit on one row together with a compact **thickness**
   spin box (0.5–10 px) that sets the line width of the simulated-ring overlay on
   the image; redraws immediately as you change it.
@@ -534,8 +581,27 @@ its own lattice, visibility, and ring color.
   Calibrate tab's detector + seed fields (the Calibrate tab has a matching
   **← Data Viewer** button that pulls the same values).
 
+### Transforms card
+A small standalone card sitting directly below the Ring simulation card,
+titled **Transforms** (previously an inline "Transforms:" label + row buried
+inside the Ring simulation card, with the label and row visually far apart —
+now its own boxed section so the heading sits directly above the checkboxes
+it labels). **Flip Y / Flip Z / Transpose** apply MIDAS's `ImTransOpt` image
+transform to the raw detector frame — before display, ring overlay, and
+radial integration — in that fixed order (flips, then transpose). Use this
+when the detector's raw pixel orientation doesn't match the geometry model
+(e.g. the beam centre would otherwise land on the wrong side of the image).
+Toggling refreshes the current frame (or the active projection) immediately.
+The same three checkboxes appear on the Mask Builder and Calibrate tabs and
+stay in sync whenever geometry is pushed/pulled between tabs; saved/loaded
+calibration files (`.json`/`.txt`) round-trip the codes as MIDAS's repeatable
+`ImTransOpt <code>` paramstest key (1=Flip Y, 2=Flip Z, 3=Transpose). In
+Hydra mode, GE1-4's Transforms cards also carry the per-panel-only **Rotate**
+field (see Hydra mode below); this same Transforms card is shared code
+between the single-detector and Hydra tabs.
+
 ### Load/save calibration card (optional)
-Sits directly below the Ring simulation card's **Simulate rings (live)** button.
+Sits directly below the Transforms card.
 Load geometry from a **calibration `.json`, a MIDAS `paramstest.txt`, or a pyFAI
 `.poni`** (auto-detected). It fills **BC, Lsd, pixel size, wavelength, the
 Ring-simulation card's ty/tz tilt fields, and the Transforms checkboxes**
@@ -918,6 +984,64 @@ Save the combined mask as TIFF (0 = good, 1 = bad); loading a TIFF applies immed
 
 **Purpose:** determine detector geometry (Lsd, BC, tilts, distortion, wavelength) from
 a calibrant pattern.
+
+### Mode ribbon (leftmost strip)
+Like the Data Viewer tab, a narrow vertical strip switches between **Single
+detector** (the view described below — unchanged) and **Hydra** (per-panel
+calibration for the 1-ID-E 4-panel GE detector). The two modes are
+independent: switching does not share data or geometry between them.
+
+### Hydra mode (4-panel GE detector)
+
+**Purpose:** fit each of the 4 GE panels' own detector geometry (BC, Lsd,
+tilts, distortion) from one calibrant dataset, using one shared "recipe"
+(pipeline, λ/pixel/calibrant, refine-parameter choice) applied to all 4 —
+since each GE panel is a physically separate detector, its beam centre,
+Lsd, and tilt are fit and shown independently.
+
+- **Hydra data / ← Data Viewer (left panel)**: the same sibling-discovery
+  data loader as the Data Viewer tab's Hydra mode (point at any one panel
+  file, the other 3 are found automatically; shared frame slider; Dark /
+  Bright / Background per panel). **← Data Viewer** pulls the currently
+  loaded Hydra panel path *and* every present panel's fitted/seeded geometry
+  (BC, Lsd, tilts, Transforms) straight from the Data Viewer tab's Hydra
+  page, so you don't have to re-browse or re-pick beam centres you've
+  already set up there. This mode has no stack-projection feature (like the
+  single-detector Calibrate tab) — use **Average frames** below instead.
+- **Detector & Calibrant, Threshold, Average frames, Refine parameters,
+  Advanced (middle panel, shared across ge1–ge4)**: one copy of each,
+  identical in meaning to the single-detector tab's own cards, applied to
+  every panel's fit. There is no **Multi-panel detector** (tiled sub-panel
+  rigid-shift) group in Hydra mode — that feature refines shifts between
+  tiles *inside* one monolithic detector's readout, which doesn't apply to
+  4 separate physical GE detectors.
+- **Transforms / Initial seed (middle panel, switches with the active
+  panel)**: independent per GE panel — physical mounting orientation
+  (Flip Y/Flip Z/Transpose) and beam centre/Lsd/tilts genuinely differ
+  panel to panel. **Load calibration file…** seeds one panel's BC/Lsd/tilts/
+  Transforms from a file (and mirrors λ/pixel into the shared Detector card
+  if the file carries them); Pick BC/Pick Ring on the image seed that
+  panel's BC the same way as the single-detector tab.
+- **Run (Run mode / Run Calibration / Abort)**: **Sequential** fits one
+  panel at a time (full per-line progress in the Log tab, same as the
+  single-detector tab); **Parallel** starts every currently-found panel's
+  fit at once — faster, but each panel's fine-grained progress prints go to
+  the console rather than the Log tab (only start/finish/error lines appear
+  there), since a fit's internal progress-capture can't safely be shared
+  across concurrent threads.
+- **Image toolbar**: **GE1 / GE2 / GE3 / GE4** (no Composite — calibration
+  is inherently per-panel; see the Data Viewer tab for the windmill
+  composite once all 4 are fitted) plus **Show rings** / **Corrected**,
+  identical in meaning to the single-detector tab's own predicted-ring
+  overlay toggles, applied to whichever panel is active.
+- **Radial Profile (bottom right)**: one shared multi-curve plot — all 4
+  panels' post-fit azimuthal profiles at once, same style/controls as the
+  Data Viewer tab's Hydra Radial Profile plot (R-bin/η-bin/weighting +
+  **Re-integrate**, X-axis unit selector). **Ring Residuals** and
+  **Results** switch to show only the currently active panel's own chart/
+  parameter grid (each has its own **→ Send to Data Viewer**, **Save
+  .json**, and **Save paramstest.txt**, scoped to that one panel). **Log**
+  is shared across all 4 panels, each line prefixed `[ge1]`…`[ge4]`.
 
 ### Data Loader panel (left)
 The calibrant frame (Data + Frame index), Dark, Bright, Background and Mask are selected

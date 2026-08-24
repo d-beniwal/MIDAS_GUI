@@ -110,6 +110,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Hydra multi-curve radial profile plot (4 panels + toggleable composite curve) | `8707372` |
 | Hydra Phase 6 pass: shared λ/2θ/px fields, dark/bright/background correction, composite orientation fix (CCW + vertical mirror), stale radial geometry fix, zero-excluded vmin% | `0aa5feb` |
 | Hydra: Pick BC/Pick Ring point leakage across panels fixed (shared viewer's pick state now cleared on panel switch) | `eadb14d` |
+| Transforms checkboxes extracted into their own boxed Transforms card (was an inline label inside Ring simulation); Hydra ge1-4 gain a per-panel Rotate field; Hydra gains a per-panel Projection card (Max/Sum/Average); fixed Flip Y/Flip Z/Transpose not refreshing the Hydra image; Hydra radial plot pan/zoom bounded to data extent; Material dialog Preset fills Name field | `93dafa2` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -138,6 +139,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Existing Transforms checkboxes now round-trip through saved/loaded paramstest.txt + calibration.json (previously in-memory only) | `068bd0d` |
 | Transforms checkboxes now live-update the preview and drive the actual calibration run (all pipeline modes); Send-to-Data-Viewer carries Transforms; Average frames drops the skip/stride control | `73a7a2a` |
 | Image origin flipped to bottom-left `(0,0)` (MIDAS convention) | `246dba7` |
+| Calibrate tab split into Single-detector/Hydra modes: per-panel fit of all 4 GE panels from one calibrant dataset, Sequential/Parallel run modes, geometry hand-off with the Data Viewer's Hydra page | `93dafa2` |
 
 ### Batch Integrate (Tab 4)
 | Change | Commit |
@@ -2260,6 +2262,59 @@ ge1, switches to ge2, asserts the viewer's pick state is empty, then picks
 3 fresh points and asserts only those 3 are present).
 **Files:** `midas_gui/hydra_geometry_card.py`, `tests/test_hydra_ui.py`.
 **Roll back:** `git revert eadb14d`. Self-contained; no dependents.
+
+### `93dafa2` — Hydra: Calibrate tab split into Single-detector/Hydra modes + Data Viewer refinements (2026-08-24)
+**Effect:** Calibrate tab (Tab 2) gains a leftmost mode ribbon
+(`HydraModeRibbon`, reused as-is) splitting **Single detector** / **Hydra**,
+mirroring the Data Viewer tab's existing split:
+1. New `hydra_calib_widgets.py` (`HydraCalibPanelCard` — one GE panel's
+   Transforms + seed + fitted result/rings/residuals/results-grid, all
+   independent per panel) and `hydra_calib_page.py` (`HydraCalibrationPage`
+   — shared Pipeline/Detector&Calibrant/Threshold/Average-frames/Refine
+   -parameters/Advanced cards applied to all 4 panels' fits, a
+   `HydraLoaderPanel` reused verbatim, a shared image viewer + ge1-4
+   toolbar with no Composite, and bottom tabs for a shared multi-curve
+   Radial Profile, per-panel Ring Residuals/Results, and a shared Log
+   prefixed `[ge{n}]`).
+2. **Sequential** (one panel at a time, full log capture) or **Parallel**
+   (all present panels fit at once) run modes. `CalibrationWorker` gained a
+   `capture_stdout` flag (default `True`); Parallel mode passes `False`
+   since several workers would otherwise race on the process-global
+   `sys.stdout`/`sys.stderr` redirect.
+3. Geometry hand-off with the Data Viewer's Hydra page: **← Data Viewer**
+   imports loaded panels + fitted geometry
+   (`HydraViewerPage.export_for_calibration` /
+   `DataViewerTab.get_hydra_export`); **→ Send to Data Viewer** pushes a
+   fitted panel's geometry back (`DataViewerTab.set_hydra_panel_geometry`).
+4. `helpers.source_kind` and `helpers.paramstest_pairs` promoted out of
+   `HydraFieldSelector._kind_of` / `CalibrationTab._paramstest_pairs` so
+   both single-detector and Hydra Results grids share one implementation.
+5. Bundled Data Viewer Hydra-page refinements from the same session:
+   Transforms (Flip Y/Flip Z/Transpose[/Rotate]) is now its own boxed
+   Transforms card shared by every geometry card; Hydra ge1-4 gain a
+   per-panel-only Rotate field (`hydra.apply_panel_rotation`, excluded from
+   the Composite view); a per-panel Projection card (Max/Sum/Average stack
+   reduction); a fix for Flip Y/Flip Z/Transpose not refreshing the
+   displayed Hydra image; the Hydra radial plot's pan/zoom bounded to the
+   combined data range of the visible curves; and the Material dialog's
+   Preset dropdown now also fills the Name field.
+**Verified:** new `tests/test_hydra_calib_ui.py` (pick-state cross-panel
+isolation; Sequential/Parallel run orchestration + Results/Ring-Residuals
+panel switching, against a stubbed `CalibrationWorker`/`IntegrationWorker`).
+Full suite run clean apart from the pre-existing `test_app_builds_offscreen`
+"visible_tabs" local-config flake and the known pyqtgraph interpreter
+-teardown noise (both pre-existing, see `.context/DECISIONS.md`). Not yet
+exercised with a real windowed pass (Pick BC/Pick Ring mouse clicks, real
+calibration convergence on real Hydra data) — offscreen/stubbed-worker
+tests only so far.
+**Files:** `midas_gui/app.py`, `midas_gui/helpers.py`, `midas_gui/hydra.py`,
+`midas_gui/hydra_calib_page.py` (new), `midas_gui/hydra_calib_widgets.py`
+(new), `midas_gui/hydra_geometry_card.py`, `midas_gui/hydra_page.py`,
+`midas_gui/hydra_widgets.py`, `midas_gui/tab_calibrate.py`,
+`midas_gui/tab_view.py`, `midas_gui/workers.py`,
+`tests/test_hydra_calib_ui.py` (new), `.context/DECISIONS.md`.
+**Roll back:** `git revert 93dafa2`. Self-contained back to the `eadb14d`
+state; no dependents yet.
 
 ---
 
