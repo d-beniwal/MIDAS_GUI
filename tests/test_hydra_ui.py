@@ -5,6 +5,7 @@ test_data/gui_synthetic/hydra/ (see make_hydra_test_data.py).
 """
 from __future__ import annotations
 
+import gc
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,21 @@ FIXTURE_DIR = Path(__file__).resolve().parent.parent / "test_data" / "gui_synthe
 @pytest.fixture(scope="module")
 def app():
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def _qt_teardown(app):
+    """Each test builds a full DataViewerTab (Hydra page + 5 geometry cards
+    + several pyqtgraph ViewBoxes). Left to accumulate across many tests in
+    one process, pyqtgraph's global ViewBox registry has caused a hard
+    segfault (reproduced when running this whole file, not any single test
+    in isolation) — a known category of pyqtgraph teardown fragility around
+    its ViewBox-list bookkeeping. An explicit ``gc.collect()`` here made it
+    *worse* (crashed sooner) by forcing collection mid-teardown, so this
+    only pumps the event loop to let Qt's own deferred deletion run instead
+    of forcing Python-level GC."""
+    yield
+    app.processEvents()
 
 
 @pytest.fixture()
@@ -80,6 +96,60 @@ def test_hydra_composite_builds_with_matched_calibration(app, fixture_available)
     # composite card auto-seeded at the canvas centre
     assert hp._cards["composite"]._bcy.value() == pytest.approx(256.0)
     assert hp._cards["composite"]._bcz.value() == pytest.approx(256.0)
+
+
+def test_hydra_profile_plot_shows_all_four_curves_plus_composite(app, fixture_available):
+    tab = DataViewerTab()
+    tab._mode_ribbon.set_mode("hydra")
+    hp = tab._hydra_page
+    hp._loader.set_path(str(fixture_available / "ge1" / "panel.ge1.h5"))
+    app.processEvents()
+    for n in (1, 2, 3, 4):
+        fields = geometry_fields_from_file(str(fixture_available / f"ge{n}" / f"ps_ge{n}.txt"))
+        hp._cards[f"ge{n}"].set_geometry(fields)
+    app.processEvents()
+
+    pv = hp._profile_view
+    for n in (1, 2, 3, 4):
+        assert pv.get_native(f"ge{n}") is not None, f"ge{n} curve missing"
+    composite = pv.get_native("composite")
+    assert composite is not None
+    r_ref, summed, lsd, px, wl = composite
+    assert len(r_ref) == len(summed) == 500
+    finite = summed[~__import__("numpy").isnan(summed)]
+    assert finite.size > 0 and finite.max() > 0
+
+    # hiding Composite clears it; re-showing recomputes it
+    pv._checks["composite"].setChecked(False)
+    app.processEvents()
+    assert pv.get_native("composite") is None
+    pv._checks["composite"].setChecked(True)
+    app.processEvents()
+    assert pv.get_native("composite") is not None
+
+
+def test_hydra_integrate_button_refreshes_all_curves(app, fixture_available):
+    tab = DataViewerTab()
+    tab._mode_ribbon.set_mode("hydra")
+    hp = tab._hydra_page
+    hp._loader.set_path(str(fixture_available / "ge1" / "panel.ge1.h5"))
+    app.processEvents()
+    for n in (1, 2, 3, 4):
+        fields = geometry_fields_from_file(str(fixture_available / f"ge{n}" / f"ps_ge{n}.txt"))
+        hp._cards[f"ge{n}"].set_geometry(fields)
+    app.processEvents()
+
+    hp._rad_auto.setChecked(False)
+    for n in (1, 2, 3, 4):
+        hp._profile_view.clear_curve(f"ge{n}")
+    hp._profile_view.clear_curve("composite")
+    assert hp._profile_view.get_native("ge1") is None
+
+    hp._rad_btn.click()
+    app.processEvents()
+    for n in (1, 2, 3, 4):
+        assert hp._profile_view.get_native(f"ge{n}") is not None
+    assert hp._profile_view.get_native("composite") is not None
 
 
 def test_hydra_state_round_trips(app, fixture_available):

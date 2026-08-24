@@ -3,6 +3,41 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-08-23 — Rare pyqtgraph teardown crash under a large test suite; mitigated, not fixed
+
+While adding `tests/test_hydra_ui.py` (each test builds a full
+`DataViewerTab`, i.e. the single-detector page's own viewer/profile plot
+*plus* the Hydra page's 5 `DetectorGeometryCard`s sharing one more viewer —
+a lot of `pg.ViewBox`/`pg.ImageView` instances per test), the full pytest
+suite intermittently crashed the interpreter outright (`Fatal Python error:
+Segmentation fault` / `Bus error`), not just failed an assertion. Tracebacks
+point into pyqtgraph's own `ViewBox.forgetView`/`WidgetGroup.autoAdd`
+internals — a known category of pyqtgraph fragility in its **global**
+ViewBox/WidgetGroup registries when many `ImageView`s are constructed and
+destroyed across one long-running process, not a bug in this codebase's
+own code.
+
+- Adding `gc.collect()` in an autouse per-test teardown fixture made it
+  **worse** (crashed sooner) — forcing Python-level GC mid-teardown
+  apparently hits pyqtgraph's half-torn-down C++/Python object graph more
+  often than letting it happen lazily.
+- Just pumping the event loop (`app.processEvents()`) after each test, with
+  no forced GC, measurably reduced the crash rate: reliably crashed before
+  the fix, 3-for-3 clean full-suite runs after it (still probabilistic, not
+  a guaranteed fix — pytest ran this at pass exit code with only the one
+  known pre-existing `test_app_builds_offscreen` assertion failure each
+  time, but a 4th or 5th run could still hit it).
+- **This is a pre-existing pyqtgraph characteristic** made more likely to
+  surface by this session's Hydra tests specifically because they multiply
+  the number of live `ImageView`/`ViewBox` instances per test file quite a
+  bit. If this recurs (in CI or locally) and the `processEvents()` mitigation
+  in `tests/test_hydra_ui.py`'s `_qt_teardown` fixture isn't enough,
+  consider: running Hydra UI tests in a separate pytest process (e.g.
+  `pytest-forked`), reducing the number of `DataViewerTab`/`ROIImageViewer`
+  instances built across the Hydra test files, or filing upstream against
+  pyqtgraph — do not just add more `gc.collect()` calls, that direction is
+  already confirmed to make it worse.
+
 ## 2026-08-23 — Hydra composite needs no chirality/X-mirror correction in this codebase
 
 While porting the Hydra (4-panel GE detector) windmill-compositing engine

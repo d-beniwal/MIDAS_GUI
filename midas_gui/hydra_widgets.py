@@ -11,11 +11,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+import math
 
-from midas_gui.helpers import _browse, _NoScrollSpinBox, hydra_siblings
+import numpy as np
+from PyQt5 import QtCore, QtGui, QtWidgets
+import pyqtgraph as pg
+
+from midas_gui.helpers import _browse, _NoScrollSpinBox, _NoScrollComboBox, hydra_siblings
 from midas_gui import hydra
 from midas_gui import style as S
+from midas_gui.widgets import _convert_radial, _XUNIT_LABEL
 
 
 class _VerticalToggleButton(QtWidgets.QAbstractButton):
@@ -318,3 +323,120 @@ class HydraDetectorToolbar(QtWidgets.QWidget):
     def set_current(self, key: str):
         if key in self._buttons and self._buttons[key].isEnabled():
             self._buttons[key].setChecked(True)
+
+
+# Fixed per-curve colors — semantic, not index-based, so ge1 is always the
+# same color regardless of which panels happen to be loaded/visible.
+_HYDRA_CURVE_COLORS = {
+    "ge1": "#4fc3f7", "ge2": "#ef5350", "ge3": "#66bb6a", "ge4": "#ab47bc",
+    "composite": "#f5f5f5",
+}
+_HYDRA_CURVE_KEYS = ("ge1", "ge2", "ge3", "ge4", "composite")
+
+
+class HydraProfileViewer(QtWidgets.QWidget):
+    """Radial-integration plot for Hydra mode: one independently-computed
+    curve per panel (ge1-4), each converted from its own native R-pixel
+    axis to a shared display unit (R/2θ/Q) via ``widgets._convert_radial``,
+    plus a toggleable "Composite" curve. This widget only displays curves —
+    the composite curve's data (a resampled, NaN-aware sum of the four
+    panels' own profiles) is computed by the owner (``HydraViewerPage``)
+    and pushed in via ``set_curve`` like any other curve."""
+
+    #: emitted when the "Composite" checkbox is toggled, so the owner knows
+    #: whether it's worth computing/pushing that curve at all.
+    compositeVisibilityChanged = QtCore.pyqtSignal(bool)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._native: dict = {}   # key -> (r_px, profile, lsd_um, px_um, wavelength_A)
+        self._curves: dict = {}
+        self._checks: dict = {}
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(2)
+
+        bar = QtWidgets.QHBoxLayout()
+        bar.addWidget(QtWidgets.QLabel("X:"))
+        self._xaxis = _NoScrollComboBox()
+        self._xaxis.addItems(["R (px)", "2θ (°)", "Q (Å⁻¹)"])
+        self._xaxis.setCurrentIndex(1)   # 2θ — the meaningful shared axis across panels
+        self._xaxis.currentIndexChanged.connect(self._replot)
+        bar.addWidget(self._xaxis)
+        self._logy = QtWidgets.QCheckBox("Log Y")
+        self._logy.toggled.connect(self._replot)
+        bar.addWidget(self._logy)
+        bar.addSpacing(12)
+        for key in _HYDRA_CURVE_KEYS:
+            label = "Composite" if key == "composite" else key.upper()
+            chk = QtWidgets.QCheckBox(label)
+            chk.setChecked(True)
+            chk.setStyleSheet(f"QCheckBox {{ color: {_HYDRA_CURVE_COLORS[key]}; }}")
+            if key == "composite":
+                chk.toggled.connect(self.compositeVisibilityChanged.emit)
+            chk.toggled.connect(self._replot)
+            bar.addWidget(chk)
+            self._checks[key] = chk
+        bar.addStretch(1)
+        self._toolbar_layout = bar
+        layout.addLayout(bar)
+
+        self._plot = pg.PlotWidget(background="k")
+        self._plot.setLabel("left", "Mean intensity")
+        self._plot.setLabel("bottom", _XUNIT_LABEL["2th"])
+        self._plot.showGrid(x=True, y=True, alpha=0.2)
+        self._plot.addLegend(offset=(-10, 10))
+        for key in _HYDRA_CURVE_KEYS:
+            label = "Composite" if key == "composite" else key.upper()
+            pen = pg.mkPen(_HYDRA_CURVE_COLORS[key], width=2,
+                           style=QtCore.Qt.DashLine if key == "composite" else QtCore.Qt.SolidLine)
+            self._curves[key] = self._plot.plot([], [], pen=pen, name=label)
+        layout.addWidget(self._plot, stretch=1)
+
+    def _unit_key(self) -> str:
+        return ("R", "2th", "Q")[self._xaxis.currentIndex()]
+
+    def set_curve(self, key: str, r_px, profile, *, lsd_um=None, px_um=None,
+                 wavelength_A=None):
+        """(Re)place one curve's data, in its own native R-pixel axis plus
+        the geometry needed to convert it — independent per curve, since
+        each Hydra panel generally has its own Lsd/pixel size/beam centre."""
+        if key not in self._curves:
+            return
+        self._native[key] = (np.asarray(r_px), np.asarray(profile), lsd_um, px_um, wavelength_A)
+        self._replot()
+
+    def clear_curve(self, key: str):
+        self._native.pop(key, None)
+        if key in self._curves:
+            self._curves[key].setData([], [])
+
+    def get_native(self, key: str) -> Optional[tuple]:
+        """The last data pushed via ``set_curve`` for ``key`` — its own
+        native (r_px, profile, lsd_um, px_um, wavelength_A), or None. Used
+        by an owner (e.g. deriving the "Composite" curve from ge1-4's own
+        curves) to read back what's already been computed."""
+        return self._native.get(key)
+
+    def _replot(self, *_):
+        target = self._unit_key()
+        log = self._logy.isChecked()
+        self._plot.setLabel("bottom", _XUNIT_LABEL[target])
+        self._plot.setLabel("left", "log₁₀(intensity)" if log else "Mean intensity")
+        for key, curve in self._curves.items():
+            visible = self._checks[key].isChecked()
+            data = self._native.get(key)
+            if not visible or data is None:
+                curve.setData([], [])
+                continue
+            r_px, profile, lsd, px, wl = data
+            x = _convert_radial(r_px, lsd, px, wl, "R", target)
+            y = profile
+            if log:
+                y = np.where(y > 0, np.log10(np.maximum(y, 1e-30)), np.nan)
+            curve.setData(x, y)
+
+    def composite_visible(self) -> bool:
+        return self._checks["composite"].isChecked()

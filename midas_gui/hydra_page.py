@@ -14,9 +14,13 @@ Scope for this first version (see the approved implementation plan):
 - The R-bin/Auto/Integrate radial-toolbar controls are shared across all 5
   panel cards (one setting, not duplicated 5x) — same simplification the
   plan calls out for v1.
-- The radial-integration plot is the existing single-curve ``ProfileViewer``
-  (shows whichever panel/composite is currently active); the 4-curves +
-  toggleable composite-sum plot is a follow-up phase.
+
+The radial-integration plot (``HydraProfileViewer``) shows all 4 panels'
+profiles at once (each computed independently, from its own beam-centre/
+geometry) plus a toggleable "Composite" curve — the NaN-aware sum of the
+four, each resampled onto a shared 2theta axis first (not a radial
+integration of the already-composited image, which would double-count any
+panel overlap and mix registration error into the profile).
 """
 from __future__ import annotations
 
@@ -30,10 +34,32 @@ from midas_gui import hydra
 from midas_gui.helpers import (_load_image, _apply_im_trans, _fspin,
                          geometry_fields_from_file, widgets_to_dict, apply_dict_to_widgets)
 from midas_gui.hydra_geometry_card import DetectorGeometryCard
-from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar
+from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar, HydraProfileViewer
 from midas_gui.roi_tools import ROIImageViewer, ROIRibbon
-from midas_gui.widgets import ProfileViewer
+from midas_gui.widgets import _convert_radial
 from midas_gui import style as S
+
+
+class _ProfileSinkAdapter:
+    """Adapts a DetectorGeometryCard's ProfileViewer-shaped calls
+    (``set_profile``/``set_ring_markers``) into one named curve on a shared
+    ``HydraProfileViewer`` — each card thinks it owns a normal profile
+    plot, but all 5 draw onto the same multi-curve widget."""
+
+    def __init__(self, viewer: HydraProfileViewer, key: str):
+        self._viewer = viewer
+        self._key = key
+
+    def set_profile(self, r_px, profile, *, sigma=None, wavelength_A=None,
+                    lsd_um=None, px_um=None):
+        self._viewer.set_curve(self._key, r_px, profile,
+                               lsd_um=lsd_um, px_um=px_um, wavelength_A=wavelength_A)
+
+    def set_ring_markers(self, groups, lsd_um=None, px_um=None, wl=None):
+        # Ring markers (vertical lines at each material's ring 2theta) aren't
+        # well-defined on a plot overlaying 4 independently-calibrated
+        # panels at once — skipped for this shared multi-curve plot.
+        pass
 
 
 class HydraViewerPage(QtWidgets.QWidget):
@@ -70,11 +96,42 @@ class HydraViewerPage(QtWidgets.QWidget):
         scroll.setWidgetResizable(True); scroll.setMinimumWidth(260)
         self._card_stack = QtWidgets.QStackedWidget()
         scroll.setWidget(self._card_stack)
+        # The multi-curve radial plot and shared R-bin/Auto controls are
+        # built below (right side) before this loop's set_profile_view/
+        # set_radial_controls calls, so build them first and reorder the
+        # widget insertion into `right`/`split` afterward.
+        self._profile_view = HydraProfileViewer()
+        self._rad_r_bin = _fspin(0.1, 20.0, 2, 1.0, "px"); self._rad_r_bin.setFixedWidth(56)
+        self._rad_r_bin.setToolTip(
+            "Radial bin size for the azimuthal average — shared across all "
+            "Hydra panels and the composite.")
+        self._rad_auto = QtWidgets.QCheckBox("Auto"); self._rad_auto.setChecked(True)
+        self._rad_auto.setToolTip("Recompute each panel's radial integration when "
+                                  "its beam centre, tilt, or the frame changes.")
+
         self._cards: dict = {}
         for key in ("ge1", "ge2", "ge3", "ge4", "composite"):
             card = DetectorGeometryCard()
             card.set_image_source(self._make_image_provider(key), None)
-            if key != "composite":
+            if key == "composite":
+                # The "Composite" curve on the shared plot is the DERIVED
+                # resample-and-sum of ge1-4's own curves (see
+                # _refresh_composite_curve) — deliberately NOT this card's
+                # own radial_integrate() (which would instead integrate the
+                # already-composited image and reintroduce the
+                # double-counting/registration-error problem that design
+                # explicitly avoids). Leaving its profile/radial-control
+                # bindings unset makes its own radial_integrate() a no-op;
+                # its ring-simulation/BC fields are still fully functional
+                # for the on-image ring overlay.
+                pass
+            else:
+                # Every ge-card's own curve is bound once, permanently —
+                # unlike the viewer (only one image shown at a time), all 4
+                # profiles should stay visible on the shared plot regardless
+                # of which panel is the currently *active* one for display.
+                card.set_profile_view(_ProfileSinkAdapter(self._profile_view, key))
+                card.set_radial_controls(self._rad_r_bin, self._rad_auto)
                 n = int(key[2])
                 card.geometryChanged.connect(lambda n=n: self._on_card_geometry_changed(n))
             self._cards[key] = card
@@ -97,21 +154,25 @@ class HydraViewerPage(QtWidgets.QWidget):
         vc_layout.addWidget(self._viewer, 1)
         right.addWidget(viewer_container)
 
-        self._profile_view = ProfileViewer()
         ptb = self._profile_view._toolbar_layout
-        self._rad_r_bin = _fspin(0.1, 20.0, 2, 1.0, "px"); self._rad_r_bin.setFixedWidth(56)
-        self._rad_r_bin.setToolTip(
-            "Radial bin size for the azimuthal average — shared across all "
-            "Hydra panels and the composite.")
-        self._rad_auto = QtWidgets.QCheckBox("Auto"); self._rad_auto.setChecked(True)
-        self._rad_auto.setToolTip("Recompute the radial integration when the beam "
-                                  "centre or frame changes.")
         self._rad_btn = QtWidgets.QPushButton("Integrate")
-        self._rad_btn.clicked.connect(lambda: self._active_card and self._active_card.radial_integrate())
-        ptb.insertWidget(3, self._rad_btn)
-        ptb.insertWidget(3, self._rad_auto)
-        ptb.insertWidget(3, self._rad_r_bin)
-        ptb.insertWidget(3, QtWidgets.QLabel("  R bin:"))
+        self._rad_btn.setToolTip("Recompute all 4 panels' (and the composite's) "
+                                 "radial integration now, regardless of Auto.")
+        self._rad_btn.clicked.connect(lambda: self._refresh_profile_curves(force=True))
+        # Insert right before the toolbar's trailing stretch, whatever index
+        # that currently is (robust to HydraProfileViewer's own toolbar
+        # layout, rather than a hardcoded position).
+        insert_at = ptb.count() - 1
+        ptb.insertWidget(insert_at, self._rad_btn)
+        ptb.insertWidget(insert_at, self._rad_auto)
+        ptb.insertWidget(insert_at, self._rad_r_bin)
+        ptb.insertWidget(insert_at, QtWidgets.QLabel("  R bin:"))
+        # R-bin edits already trigger each of the 5 cards' own auto-radial
+        # (wired inside set_radial_controls); refresh the derived Composite
+        # curve afterward since it depends on all 4 panels' fresh curves.
+        self._rad_r_bin.valueChanged.connect(lambda *_: self._refresh_composite_curve())
+        self._profile_view.compositeVisibilityChanged.connect(
+            lambda *_: self._refresh_composite_curve())
         right.addWidget(self._profile_view)
         right.setStretchFactor(0, 3); right.setStretchFactor(1, 1)
         right.setMinimumWidth(320)
@@ -214,26 +275,31 @@ class HydraViewerPage(QtWidgets.QWidget):
         self._composite_img = None
         self._composite_seeded_size = None
         self._refresh_display()
+        self._refresh_profile_curves()
 
     def _on_frame_changed(self, _idx: int):
         self._composite_img = None
         self._refresh_display()
+        self._refresh_profile_curves()
 
     def _on_panel_changed(self, key: str):
+        """Only the image viewer (one image at a time) rebinds when the
+        active panel changes — the profile-plot/radial-controls bindings
+        are permanent (set once per card in _build_ui) so all 5 curves stay
+        live regardless of which panel is currently displayed."""
         if self._active_card is not None:
             self._active_card.set_viewer(None)
-            self._active_card.set_profile_view(None)
         self._card_stack.setCurrentWidget(self._cards[key])
         self._active_card = self._cards[key]
         self._active_card.set_viewer(self._viewer)
-        self._active_card.set_profile_view(self._profile_view)
-        self._active_card.set_radial_controls(self._rad_r_bin, self._rad_auto)
         self._refresh_display()
 
     def _on_card_geometry_changed(self, n: int):
         """A ge1-4 card's geometry changed (BC edit/pick or calibration
-        file load) — sync it into the matching DetectorState and force the
-        composite (which depends on every panel's geometry) to rebuild."""
+        file load) — sync it into the matching DetectorState, force the
+        composite (which depends on every panel's geometry) to rebuild, and
+        refresh the derived Composite curve (that panel's own curve already
+        refreshed itself via the card's normal geometry-change handling)."""
         card = self._cards.get(f"ge{n}")
         if card is None:
             return
@@ -245,6 +311,64 @@ class HydraViewerPage(QtWidgets.QWidget):
         self._composite_img = None
         if self._toolbar.current() == "composite":
             self._refresh_display()
+        self._refresh_composite_curve()
+
+    def _refresh_profile_curves(self, force: bool = False):
+        """(Re)load every available panel's frame and — if Auto is on (or
+        `force`, from the Integrate button) — reintegrate it, independent
+        of which panel is currently the *active* one for image display.
+        Then refresh the derived Composite curve."""
+        siblings = self._loader.siblings()
+        for n in (1, 2, 3, 4):
+            if n not in siblings:
+                self._profile_view.clear_curve(f"ge{n}")
+                continue
+            img = self._load_panel_frame(n)
+            card = self._cards[f"ge{n}"]
+            if img is not None and (force or self._rad_auto.isChecked()):
+                card.radial_integrate()
+        self._refresh_composite_curve()
+
+    def _refresh_composite_curve(self):
+        """Recompute the toggleable "Composite" curve: each available
+        panel's own (already-computed) profile, converted to a shared
+        2theta axis, resampled onto one common grid, and NaN-aware summed —
+        not a radial integration of the composited image (that would
+        double-count any panel overlap and mix registration error into the
+        profile). Deliberately reads back the per-panel curves already
+        pushed into HydraProfileViewer rather than recomputing them here."""
+        if not self._profile_view.composite_visible():
+            self._profile_view.clear_curve("composite")
+            return
+        natives = []
+        for n in (1, 2, 3, 4):
+            data = self._profile_view.get_native(f"ge{n}")
+            if data is not None and None not in data[2:]:   # need lsd, px, wl
+                natives.append(data)
+        if not natives:
+            self._profile_view.clear_curve("composite")
+            return
+        grids = []
+        for r_px, profile, lsd, px, wl in natives:
+            tth = _convert_radial(r_px, lsd, px, wl, "R", "2th")
+            order = np.argsort(tth)
+            grids.append((tth[order], profile[order]))
+        lo = min(g[0].min() for g in grids)
+        hi = max(g[0].max() for g in grids)
+        common = np.linspace(lo, hi, 500)
+        resampled = [np.interp(common, tth, profile, left=np.nan, right=np.nan)
+                    for tth, profile in grids]
+        stacked = np.vstack(resampled)
+        all_nan = np.all(np.isnan(stacked), axis=0)
+        summed = np.where(all_nan, np.nan, np.nansum(stacked, axis=0))
+        # Push through the normal set_curve(r_px, ...) API using the first
+        # contributing panel's geometry as an arbitrary-but-consistent
+        # reference — round-trips correctly for any X-axis unit selection
+        # since it's the exact inverse of the R -> 2theta conversion above.
+        ref_lsd, ref_px, ref_wl = natives[0][2], natives[0][3], natives[0][4]
+        r_ref = ref_lsd * np.tan(np.radians(common)) / ref_px
+        self._profile_view.set_curve("composite", r_ref, summed,
+                                     lsd_um=ref_lsd, px_um=ref_px, wavelength_A=ref_wl)
 
     def _refresh_display(self):
         key = self._toolbar.current()
