@@ -1,16 +1,15 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-24 (Hydra composite also needed a vertical-axis mirror on top of the CCW revert — ge2/ge4 were swapped left/right; fixed)_
+_Last updated: 2026-08-24 (Phase 6's 5 bugfixes committed: `0aa5feb` + docs `8d5ed5a` + this file's `6b55172`/successor; pushed to `origin`)_
 
 ## Now working on
 
 Hydra (4-panel GE detector) mode, Data Viewer tab. Phases 1-5 (engine, UI,
 per-panel calibration, radial profiles) landed on `main` in a prior session
-(`3b785c9`..`1d8c6e5`, not pushed to `origin`). **Phase 6 (the real
-windowed manual pass) started this session and immediately found 5 real
-bugs** that offscreen tests never caught — all 5 are now fixed, but
-**uncommitted**:
+(`3b785c9`..`1d8c6e5`). **Phase 6 (the real windowed manual pass) started
+2026-08-23 and immediately found 5 real bugs** that offscreen tests never
+caught — all 5 are now fixed and committed (`0aa5feb`):
 1. λ/max 2θ/px now shared (mirrored) across ge1-4 + Composite cards
    (`DetectorGeometryCard.get_shared_fields`/`apply_shared_fields`,
    `HydraViewerPage._sync_shared_fields`).
@@ -63,9 +62,6 @@ one process — unchanged risk profile, not worsened.
   exercised headlessly), and general layout/usability at a real window
   size, now including the new Dark/Bright/Background card and shared-field
   behavior.
-- Commit this session's fixes (not yet committed) once the above manual
-  check is done — remember `documentation/development_history.md` +
-  PDF rebuild per standing rules.
 - Remaining documented scope cut: no intensity-range mask or Top-N
   brightest-pixel in Hydra mode (dark/bright/background is no longer a
   cut — see above).
@@ -106,20 +102,16 @@ one process — unchanged risk profile, not worsened.
 
 ## Recent changes (last 3-5 sessions, dated; drop the oldest as it grows)
 
-- 2026-08-24 (uncommitted): follow-up to the session below — the Hydra
-  composite still had ge2/ge4 on the wrong sides after the CW->CCW revert;
-  fixed with an added vertical-axis mirror in `compute_inv_coords`. See
+- 2026-08-24 (`0aa5feb` + docs `8d5ed5a`): Hydra Phase 6 manual pass found
+  and fixed 5 bugs — shared λ/max2θ/px, dark/bright/background correction,
+  composite orientation (rotation direction reverted CW->CCW, plus an
+  added vertical-axis mirror to fix ge2/ge4 left/right swap), stale
+  radial-integration geometry, and zero-excluded vmin% percentile. See
   "Now working on" above + DECISIONS.md.
-- 2026-08-23 (uncommitted): Hydra Phase 6 manual pass found and fixed 5
-  bugs — shared λ/max2θ/px, dark/bright/background correction, composite
-  rotation direction, stale radial-integration geometry, and zero-excluded
-  vmin% percentile. The rotation-direction fix was initially flipped the
-  wrong way (CW) and then corrected back to CCW after a real-data visual
-  check. See "Now working on" above + DECISIONS.md.
-- 2026-08-23 (`3b785c9`..`1d8c6e5`, 14 commits, on `main`, not pushed to
-  origin): Hydra detector-view feature, phases 1 through 5, plus an
-  unrelated stale-test-data-path fix (`3b785c9`) and committing `.context/`
-  which had been gitignored (`778a2f3`). Full detail in `DECISIONS.md`.
+- 2026-08-23 (`3b785c9`..`1d8c6e5`, 14 commits, on `main`): Hydra
+  detector-view feature, phases 1 through 5, plus an unrelated
+  stale-test-data-path fix (`3b785c9`) and committing `.context/` which
+  had been gitignored (`778a2f3`). Full detail in `DECISIONS.md`.
 - 2026-08-23 (`c8d98f1`, `246dba7`, `328674d`): `test_data/` reorganized
   into per-dataset subfolders; detector-image origin flipped to
   **bottom-left `(0,0)`** across every `pg.ImageView`-based viewer — see
