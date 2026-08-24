@@ -108,6 +108,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Hydra geometry-compositing engine (`hydra.py`) + sibling auto-discovery + tests | `dd44f38` |
 | Hydra loader/toolbar/per-panel calibration UI + composite wired into the tab | `1cc4dab` |
 | Hydra multi-curve radial profile plot (4 panels + toggleable composite curve) | `8707372` |
+| Hydra Phase 6 pass: shared λ/2θ/px fields, dark/bright/background correction, composite orientation fix (CCW + vertical mirror), stale radial geometry fix, zero-excluded vmin% | `0aa5feb` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -2192,6 +2193,55 @@ suite: 3 consecutive clean runs post-mitigation, same single pre-existing
 `tests/test_hydra_ui.py`, `.context/DECISIONS.md`.
 **Roll back:** `git revert 8707372`. Self-contained back to the `1cc4dab`
 single-curve-plot state.
+
+### `0aa5feb` — Hydra: fix 5 bugs found in the real windowed Phase 6 pass (2026-08-24)
+**Effect:** The first real windowed (not offscreen) manual pass over Hydra
+mode surfaced 5 real bugs that headless tests/screenshots never exercised,
+all fixed:
+1. **λ/max 2θ/pixel size shared across ge1-4 + Composite.**
+   `DetectorGeometryCard` gained `get_shared_fields()`/
+   `apply_shared_fields()`; `HydraViewerPage._sync_shared_fields()` mirrors
+   an edit on any one of the 5 geometry cards onto the other 4 (same
+   X-ray beam and GE detector model, so these three are always physically
+   identical), guarded by a `_syncing_shared` re-entrancy flag.
+2. **Dark/bright/background correction added for Hydra**, closing a
+   documented scope cut. New `HydraFieldSelector` (`hydra_widgets.py`)
+   reuses the single-detector tab's `helpers.apply_field_corrections`/
+   `workers.FieldAverageWorker` as-is and auto-discovers the other 3
+   panels' field files via `helpers.hydra_siblings`.
+3. **Composite windmill orientation.** Two rounds: (a) an earlier same-day
+   attempt to "fix" the rotation to clockwise was itself wrong and
+   reverted back to the original counterclockwise convention; (b) even
+   after that revert, ge2/ge4 were still on the wrong sides of the
+   canvas, fixed by adding a vertical-axis mirror in
+   `hydra.py::compute_inv_coords` (`Y_lab = (half - Yo) * px`) — scoped
+   to the composite build only, independent of the rotation-direction
+   math, and does not touch the per-panel ge1-4 raw displays. Both fixes
+   confirmed against real `park_may26_bc` calibration + real
+   `park_may26/ge{1..4}` frames, not just offscreen tests.
+4. **Stale radial-integration geometry fixed.** `_effective_calib_geom()`
+   was returning a frozen snapshot from calibration-load time, so a
+   post-load BC/λ/Lsd/px/tilt edit moved the ring overlay (reads live
+   widgets) but not the radial profile. Fixed to always override
+   wavelength/Lsd/BC/pxY/pxZ/ty/tz from the live widgets.
+5. **`ImageViewer` vmin% auto-level now excludes exact-zero pixels**
+   app-wide — fixes a washed-out Composite view whose mostly-empty
+   `BigDet` canvas previously dominated the percentile calculation.
+**Verified:** full Hydra geometry/chirality test suite (14 tests) passes
+against the reverted rotation + new mirror; orientation and stale-geometry
+fixes additionally confirmed by rendering the composite from real
+`park_may26_bc`/`park_may26/ge{1..4}` data, not offscreen fixtures alone.
+Full reasoning for all 5 bugs, including the wrong-then-reverted clockwise
+attempt, in `.context/DECISIONS.md`.
+**Files:** `midas_gui/hydra.py`, `midas_gui/hydra_geometry_card.py`,
+`midas_gui/hydra_page.py`, `midas_gui/hydra_widgets.py`,
+`midas_gui/widgets.py`, `tests/test_hydra_chirality.py`,
+`tests/test_hydra_geometry.py`, `tests/test_hydra_ui.py`,
+`.context/DECISIONS.md`.
+**Roll back:** `git revert 0aa5feb`. Self-contained back to the `8707372`
+state (Phase 6 scope cuts — dark/bright/background, shared fields — would
+return; the still-wrong pre-revert orientation is not restored, since that
+never existed on `main`).
 
 ---
 

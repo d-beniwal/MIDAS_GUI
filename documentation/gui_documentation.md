@@ -3,7 +3,19 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-23 (Tab 0 — Data Viewer, Hydra mode: the radial
+**Last updated:** 2026-08-24 (Tab 0 — Data Viewer, Hydra mode: fixed a
+manual (Phase 6) review's 5 bugs — λ/max 2θ/pixel size now shared across
+all 5 geometry cards; dark/bright/background correction added (sibling
+-aware, mirroring the single-detector tab); the Composite windmill assembly's
+panel rotation stays counterclockwise (confirmed correct against real
+`test_data/s1ide` data) and now also mirrors the whole canvas about its
+vertical axis, which was needed to put ge2/ge4 on their correct sides; a
+beam-centre edit now correctly updates the radial profile, not just the
+ring overlay; and the image viewer's vmin% auto-level now excludes exact
+-zero pixels app-wide, fixing a washed-out Composite view. The intensity
+-range exclude mask and Top-N brightest-pixel remain single-detector-only.)
+
+**Previously:** (2026-08-23, Tab 0 — Data Viewer, Hydra mode: the radial
 plot now shows all 4 panels' profiles at once (fixed colors, independent
 per-panel calibration) plus a toggleable summed **Composite** curve,
 replacing the earlier single-curve placeholder. Dark/bright/mask
@@ -370,6 +382,13 @@ registered image for a full-coverage view.
   panel is located (grayed out if not found — the view still works with as
   few as 2 panels present). A frame slider/spinbox navigates a shared frame
   index across all panels (they're synchronized frames of the same scan).
+- **Dark / Bright / Background (left panel, below Hydra data)**: same
+  correction math as the single-detector tab (dark subtraction, bright
+  flat-field divide/subtract, background subtraction). Point each field at
+  **any one** panel's dark/bright/background file and the other panels'
+  matching files are found automatically, the same way the main Hydra data
+  path works — no need to pick all 4 by hand. Each field computes and
+  applies independently per panel.
 - **Image toolbar**: five buttons — **GE1 / GE2 / GE3 / GE4 / Composite** —
   select what's shown in the image viewer below. GE1-4 show that panel's own
   raw frame; **Composite** shows all currently-available panels remapped
@@ -391,7 +410,11 @@ registered image for a full-coverage view.
   beam centre is automatically seeded at the composite canvas's own centre
   the first time a given canvas size is built, so ring simulation/radial
   integration on the Composite view work immediately with no extra setup
-  (though it can still be hand-edited like any other card).
+  (though it can still be hand-edited like any other card). **λ (wavelength),
+  max 2θ, and pixel size are shared across all 5 cards** — editing any one
+  of them on GE1-4 or Composite applies it to the other 4 immediately (same
+  X-ray beam and GE detector model, so these three are always physically
+  identical); beam centre, Lsd, and tilt remain independent per panel.
 - **Radial integration plot (bottom right)**: shows **all 4 panels' own
   azimuthal profiles at once** — GE1-4 in fixed colors, computed
   independently from each panel's own beam centre/geometry — plus a
@@ -406,8 +429,7 @@ registered image for a full-coverage view.
   double-count any panel overlap and mix registration error into the
   profile).
 - **Not yet supported in Hydra mode** (present in Single detector mode):
-  dark/bright/background correction, the intensity-range exclude mask, and
-  Top-N brightest-pixel — Hydra frames are shown raw.
+  the intensity-range exclude mask, and Top-N brightest-pixel.
 
 ### Data Loader panel (left)
 Data, Dark, Bright, Background and Mask are all selected in the shared **Data Loader
@@ -1485,9 +1507,12 @@ fraction, correction flags) can be copied to the clipboard for a Methods section
   files (`paramstest.txt`, `calibration.json`) it is always in **microns**; the mm↔µm
   conversion happens only at the display boundary. The config key remains `lsd_um` (µm).
 - **Image viewer color scale (Log/cmap/vmin%/vmax%)**, shared by the Data Viewer,
-  Calibrate, and Mask Builder image viewers: the colorbar's own zoom defaults to the
-  vmin%/vmax% percentile window rather than the full data range, which a single bad
-  pixel can otherwise stretch into an unreadable sliver. Dragging the LUT region or
+  Calibrate, and Mask Builder image viewers (including Hydra mode): the colorbar's own
+  zoom defaults to the vmin%/vmax% percentile window rather than the full data range,
+  which a single bad pixel can otherwise stretch into an unreadable sliver. The
+  percentile calculation excludes exact-zero pixels, so a mostly-empty frame (e.g. the
+  Hydra Composite view's unfilled canvas background) doesn't skew the window toward
+  looking washed out. Dragging the LUT region or
   zooming/panning the histogram's own axis is remembered and reapplied on redraw
   instead of resetting to the percentile defaults, and toggling Log/Linear converts a
   manually-set window into the other scale so it keeps pointing at the same data
