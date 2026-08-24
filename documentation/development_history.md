@@ -184,6 +184,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Preferences ▸ Devices tab; Live PV field becomes a device dropdown | `aa82cb6` |
 | Widen non-data-derived numeric field caps (tilts to ±180°, iteration/geometry/hyperparameter fields to effectively unbounded) across Data Viewer/Calibrate/Corrections/Mask/Refine/Batch | `53f8f19` |
 | Cross-tab DataSourceRegistry + "Import from…" menus (Data/Dark/Bright/Background) + buffer-save button | `6c79f13` |
+| File ▸ Project: opt-in FAIR provenance record (HDF5), auto-logs Calibrate/Batch Integrate runs | `e8dea6b` |
 
 ### Stability / performance / consistency (review-driven, phases 1–3)
 | Change | Commit |
@@ -2374,6 +2375,60 @@ so far.
 `midas_gui/tab_batch.py`, `midas_gui/tab_calibrate.py`,
 `tests/test_hydra_batch_ui.py` (new), `release.sh`.
 **Roll back:** `git revert 6b961d4`. Self-contained back to the `93dafa2`
+state; no dependents yet.
+
+### `e8dea6b` — Add File > Project: opt-in FAIR provenance record (HDF5) (2026-08-24)
+**Effect:** New `midas_gui/project.py` module and `File ▸ New/Open/Close
+Project…` menu actions add a long-lived, opt-in provenance record separate
+from GUI State (which snapshots widget *configuration*; a Project records
+what actually *happened*):
+1. A Project is a single HDF5 file (`project.create_project`/`open_project`,
+   marked with a `PROJECT_MARKER` attr + schema version). While one is open
+   (tracked via a shared `ProjectContext` handed to `CalibrationTab` and
+   `BatchTab`, which forward it to their Hydra pages), every completed
+   Calibrate run (single-detector or each of the 4 Hydra panels) and every
+   completed Batch Integrate run appends one append-only `attempt_NNNN`
+   record under `/single/...` or `/ge{n}/...` — never overwritten, so
+   re-running keeps the full history.
+2. Each record embeds: full params/result as a JSON `metadata` blob
+   (`_sanitize_result_dict` drops only torch-tensor fields, duck-typed via
+   `.numpy`); the mask/dark/bright/background actually applied, as small
+   embedded HDF5 datasets (masks drawn in Mask Builder have no file of
+   their own to reference); and an `environment_snapshot()` (midas-gui
+   version + best-effort git commit, package versions, PyQt/Qt versions).
+   Raw scan/calibrant file paths are referenced, not duplicated — hashed
+   via `sha256_file` (full SHA-256 under 200 MB, else a fast head/tail
+   fingerprint so logging never stalls on a huge multi-frame dataset).
+3. A Batch Integrate record embeds the exact calibration values used
+   (`calibration_snapshot`) and links back to the specific Calibrate
+   attempt that produced them via `calib_attempt_ref` (the calibration
+   result object carries its own `_project_attempt_ref` after being
+   logged), when that run was itself logged to the same project.
+4. Logging is always best-effort: `_log_to_project` (one per tab/page) is a
+   no-op when no project is open, and any write failure is caught, logged
+   to the tab's own Log panel, and never blocks or alters the on-screen
+   result — a full Calibrate/Integrate run must never fail because of a
+   provenance-write problem (e.g. disk full).
+5. Status bar gains a permanent "Project: …" label; File menu gains
+   New/Open/Close Project actions (Close only enabled while one is open).
+**Verified:** new `tests/test_project.py` (create/open roundtrip, refuses
+to overwrite, rejects a non-project `.h5`, `sha256_file` full vs. partial,
+attempt numbering + `latest` pointer, mask/cfg field filtering, integration
+-to-calibration linking, and `CalibrationTab`/`BatchTab`'s own
+`_log_to_project` methods including the open-project no-op case) plus new
+project-logging assertions added to `tests/test_hydra_calib_ui.py` and
+`tests/test_hydra_batch_ui.py` (per-panel attempts land under `/ge{n}/...`,
+`calib_attempt_ref` round-trips end to end). Full suite run clean (main
+suite in one process, the two Hydra UI files each in their own process per
+`release.sh`'s existing isolation) apart from the pre-existing
+`test_app_builds_offscreen` local-config flake and the known pyqtgraph
+interpreter-teardown noise (both pre-existing, see `.context/DECISIONS.md`).
+**Files:** `midas_gui/app.py`, `midas_gui/project.py` (new),
+`midas_gui/hydra_batch_page.py`, `midas_gui/hydra_calib_page.py`,
+`midas_gui/tab_batch.py`, `midas_gui/tab_calibrate.py`,
+`tests/test_project.py` (new), `tests/test_hydra_batch_ui.py`,
+`tests/test_hydra_calib_ui.py`.
+**Roll back:** `git revert e8dea6b`. Self-contained back to the `6b961d4`
 state; no dependents yet.
 
 ---
