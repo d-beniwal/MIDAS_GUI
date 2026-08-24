@@ -109,6 +109,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Hydra loader/toolbar/per-panel calibration UI + composite wired into the tab | `1cc4dab` |
 | Hydra multi-curve radial profile plot (4 panels + toggleable composite curve) | `8707372` |
 | Hydra Phase 6 pass: shared λ/2θ/px fields, dark/bright/background correction, composite orientation fix (CCW + vertical mirror), stale radial geometry fix, zero-excluded vmin% | `0aa5feb` |
+| Hydra: Pick BC/Pick Ring point leakage across panels fixed (shared viewer's pick state now cleared on panel switch) | `eadb14d` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -2242,6 +2243,23 @@ attempt, in `.context/DECISIONS.md`.
 state (Phase 6 scope cuts — dark/bright/background, shared fields — would
 return; the still-wrong pre-revert orientation is not restored, since that
 never existed on `main`).
+
+### `eadb14d` — Hydra: fix Pick BC/Pick Ring point leakage across panels (2026-08-24)
+**Effect:** Continuing the Phase 6 manual pass, found that the single
+`ROIImageViewer` shared by all 5 Hydra panel cards (ge1-4 + Composite) keeps
+its Pick BC/Pick Ring click state (`_ring_pts` etc.) on the viewer itself,
+not per-card. `DetectorGeometryCard.bind_viewer()` already cleared each
+card's own ring/label overlay items off the previous viewer on rebind, but
+never cleared the viewer's in-progress pick points — so points clicked
+while one panel was active could survive a panel switch and mix into
+another panel's circle fit. `bind_viewer()` now also calls
+`old._clear_ring_points()` when rebinding away from a viewer.
+**Verified:** new regression test
+`test_hydra_pick_ring_points_dont_leak_across_panels` (picks 2 points on
+ge1, switches to ge2, asserts the viewer's pick state is empty, then picks
+3 fresh points and asserts only those 3 are present).
+**Files:** `midas_gui/hydra_geometry_card.py`, `tests/test_hydra_ui.py`.
+**Roll back:** `git revert eadb14d`. Self-contained; no dependents.
 
 ---
 
