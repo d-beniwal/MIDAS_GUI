@@ -26,7 +26,7 @@ from midas_gui.helpers import (
     widgets_to_dict, apply_dict_to_widgets, im_trans_codes_from_checkboxes,
     _apply_im_trans, paramstest_pairs)
 from midas_gui.widgets import (
-    PickableImageViewer, ProfileViewer, LogPanel, ResidualBarChart, DataLoaderPanel)
+    PickableImageViewer, ProfileViewer, LogPanel, ResidualBarChart, DataLoaderPanel, CakeViewer)
 from midas_gui.workers import CalibrationWorker, IntegrationWorker
 from midas_gui.dialogs import _SaveParamstestDialog, DistortionRefineDialog
 from midas_gui.hydra_widgets import HydraModeRibbon
@@ -383,6 +383,8 @@ class CalibrationTab(QtWidgets.QWidget):
         ptb.insertWidget(3, self._cal_r_bin)
         ptb.insertWidget(3, QtWidgets.QLabel("  R bin:"))
         bot.addTab(self._prof_view, "Radial Profile")
+        self._cake_view = CakeViewer()
+        bot.addTab(self._cake_view, "Eta vs R Cake")
         self._resid_chart = ResidualBarChart()
         bot.addTab(self._resid_chart, "Ring Residuals")
         # Results tab: the full parameter set exactly as written to paramstest.txt,
@@ -1034,6 +1036,8 @@ class CalibrationTab(QtWidgets.QWidget):
         self._prof_view.set_profile(
             data["r_axis_px"], data["profile"],
             wavelength_A=data["wavelength_A"], lsd_um=data["lsd_um"], px_um=data["px_um"])
+        if data.get("cake_2d") is not None:
+            self._cake_view.set_cake(data["cake_2d"], data["r_axis_px"], data["eta_axis_deg"])
         if self._result:
             radii = _predict_ring_radii(self._result)
             self._prof_view.set_ring_markers(

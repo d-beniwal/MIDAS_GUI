@@ -97,9 +97,12 @@ class _FakeIntegrationWorker(_FakeWorker):
     def _finish(self):
         r_axis = np.linspace(0, 100, 50)
         profile = np.ones_like(r_axis)
+        eta_axis = np.linspace(-180, 180, 36)
+        cake = np.ones((len(eta_axis), len(r_axis)))
         self.finished.emit({"r_axis_px": r_axis, "profile": profile,
                             "wavelength_A": self._result.wavelength_A,
-                            "lsd_um": self._result.Lsd, "px_um": self._result.pxY})
+                            "lsd_um": self._result.Lsd, "px_um": self._result.pxY,
+                            "cake_2d": cake, "eta_axis_deg": eta_axis})
 
 
 @pytest.fixture(autouse=True)
@@ -142,6 +145,26 @@ def test_hydra_calib_page_wiring_and_pick_isolation(app, fixture_available):
     assert page._img_view._ring_pts == []
     assert page._active_card.panel_number == 2
 
+    # "Use manual seed" / "Feed result back to seed" are one shared choice
+    # across all 4 panels; the seed VALUES stay independent (already set
+    # per-panel above by _load_and_seed via seed_from_geometry).
+    for card in page._cards.values():
+        assert card._manual_seed_check.isChecked()   # seed_from_geometry sets it
+    page._cards[2]._manual_seed_check.setChecked(False)
+    assert all(not page._cards[n]._manual_seed_check.isChecked() for n in (1, 2, 3, 4))
+    page._cards[3]._manual_seed_check.setChecked(True)
+    assert all(page._cards[n]._manual_seed_check.isChecked() for n in (1, 2, 3, 4))
+    # The synthetic fixture's ps_ge{1..4}.txt files share one nominal BC by
+    # design; give each panel a distinct seed value here to prove the shared
+    # checkbox above didn't also link the VALUE fields.
+    for n in (1, 2, 3, 4):
+        page._cards[n]._seed_bcy.setValue(100.0 + n)
+    bcs = {n: page._cards[n]._seed_bcy.value() for n in (1, 2, 3, 4)}
+    assert len(set(bcs.values())) == 4, "seed VALUES must stay independent per panel"
+
+    page._cards[4]._feedback_check.setChecked(False)
+    assert all(not page._cards[n]._feedback_check.isChecked() for n in (1, 2, 3, 4))
+
 
 def test_hydra_calib_run_orchestration_and_results_switching(app, fixture_available, tmp_path):
     """Sequential run: independent per-panel BCs. Parallel run: all 4
@@ -181,12 +204,22 @@ def test_hydra_calib_run_orchestration_and_results_switching(app, fixture_availa
     for n in (1, 2, 3, 4):
         assert getattr(results[n], "_project_attempt_ref", None) == f"/ge{n}/calib/attempt_0001"
 
+    # Each panel's completed integration (fired from _on_done, one event-loop
+    # tick after the calibration itself) also populates its own Eta vs R
+    # cake view (built from IntegrationWorker's return_cake=True output).
+    ok = _pump(app, lambda: not page._int_workers)
+    assert ok, "integration did not complete for all panels"
+    for n in (1, 2, 3, 4):
+        assert page._cake_views[n]._cake is not None
+
     page._toolbar.set_current("ge1")
     assert page._results_stack.currentWidget() is page._cards[1].results_widget
     assert page._resid_stack.currentWidget() is page._cards[1].residual_chart
+    assert page._cake_stack.currentWidget() is page._cake_views[1]
     page._toolbar.set_current("ge3")
     assert page._results_stack.currentWidget() is page._cards[3].results_widget
     assert page._resid_stack.currentWidget() is page._cards[3].residual_chart
+    assert page._cake_stack.currentWidget() is page._cake_views[3]
 
     for n in (1, 2, 3, 4):
         page._cards[n].result = None

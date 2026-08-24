@@ -612,6 +612,136 @@ def _install_manual_axis_capture(plot_widget: "pg.PlotWidget", callback):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+#  CakeViewer
+# ═════════════════════════════════════════════════════════════════════════════
+
+class CakeViewer(QtWidgets.QWidget):
+    """2-D azimuthal-integration "cake" heatmap: R (px) on X, η (°) on Y.
+
+    Unlike ImageViewer, the two axes are physical integration-bin coordinates
+    (not detector row/column indices starting at 0) — the image is positioned
+    with ``ImageItem.setRect()`` to the actual R/η bin-centre extent rather
+    than assumed to start at the origin.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        pg.setConfigOptions(background="k", foreground="w")
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+
+        bar = QtWidgets.QHBoxLayout()
+        self._log = QtWidgets.QCheckBox("Log")
+        self._log.toggled.connect(self._redisplay)
+        bar.addWidget(self._log)
+        bar.addWidget(QtWidgets.QLabel("cmap:"))
+        self._cmap = _NoScrollComboBox()
+        self._cmap.addItems(COLORMAPS)
+        self._cmap.setCurrentText(_DEFAULT_CMAP)
+        self._cmap.currentTextChanged.connect(self._set_cmap)
+        self._cmap.setFixedWidth(90)
+        bar.addWidget(self._cmap)
+        bar.addWidget(QtWidgets.QLabel("vmin%:"))
+        self._vmin = _NoScrollSpinBox()
+        self._vmin.setRange(0, 99); self._vmin.setValue(1); self._vmin.setFixedWidth(45)
+        self._vmin.valueChanged.connect(self._redisplay)
+        bar.addWidget(self._vmin)
+        bar.addWidget(QtWidgets.QLabel("vmax%:"))
+        self._vmax = _NoScrollSpinBox()
+        self._vmax.setRange(1, 100); self._vmax.setValue(99); self._vmax.setFixedWidth(45)
+        self._vmax.valueChanged.connect(self._redisplay)
+        bar.addWidget(self._vmax)
+        bar.addStretch(1)
+        self._toolbar_layout = bar   # exposed so subclasses/callers can append widgets
+        layout.addLayout(bar)
+
+        self._iv = pg.ImageView(view=pg.PlotItem())
+        self._iv.ui.roiBtn.hide(); self._iv.ui.menuBtn.hide()
+        vb = self._iv.getView().getViewBox()
+        vb.setMouseEnabled(x=True, y=True)
+        vb.setMouseMode(pg.ViewBox.PanMode)
+        vb.invertY(False)   # η increases upward, like a normal Cartesian plot
+        self._iv.getView().setLabel("bottom", "R", units="px")
+        self._iv.getView().setLabel("left", "η", units="°")
+        layout.addWidget(self._iv, stretch=1)
+
+        self._coord_bar = QtWidgets.QLabel("Run an integration to see the (η, R) cake")
+        self._coord_bar.setStyleSheet(
+            f"color:#dddddd; background:#1a1a1a; font-family:{S.MONO_CSS};"
+            "font-size:12px; padding:2px 6px; border-top:1px solid #444;")
+        layout.addWidget(self._coord_bar)
+        self._mouse_proxy = pg.SignalProxy(self._iv.scene.sigMouseMoved, rateLimit=60, slot=self._mouse)
+
+        self._cake: Optional[np.ndarray] = None      # (n_eta, n_r)
+        self._r_axis: Optional[np.ndarray] = None
+        self._eta_axis: Optional[np.ndarray] = None
+        self._set_cmap(_DEFAULT_CMAP)
+
+    def set_cake(self, cake_2d: np.ndarray, r_axis_px: np.ndarray, eta_axis_deg: np.ndarray):
+        self._cake = np.asarray(cake_2d, dtype=np.float32)
+        self._r_axis = np.asarray(r_axis_px, dtype=np.float64)
+        self._eta_axis = np.asarray(eta_axis_deg, dtype=np.float64)
+        self._redisplay()
+
+    def clear(self):
+        self._cake = None
+        self._iv.clear()
+        self._coord_bar.setText("Run an integration to see the (η, R) cake")
+
+    def _redisplay(self, *_args):
+        if self._cake is None or self._cake.size == 0:
+            return
+        cake = self._cake
+        disp = np.log10(np.clip(cake, 1e-6, None)) if self._log.isChecked() else cake
+        finite = disp[np.isfinite(disp)]
+        if finite.size:
+            lo = float(np.percentile(finite, self._vmin.value()))
+            hi = float(np.percentile(finite, self._vmax.value()))
+            if hi <= lo:
+                hi = lo + 1.0
+        else:
+            lo, hi = 0.0, 1.0
+        img = disp.T   # (n_eta, n_r) -> (n_r, n_eta): pyqtgraph's first axis is X
+        self._iv.setImage(img.astype(np.float32), autoLevels=False, levels=(lo, hi),
+                          autoRange=False, autoHistogramRange=False)
+        r0, r1 = float(self._r_axis[0]), float(self._r_axis[-1])
+        e0, e1 = float(self._eta_axis[0]), float(self._eta_axis[-1])
+        self._iv.getImageItem().setRect(
+            QtCore.QRectF(r0, e0, max(r1 - r0, 1e-6), max(e1 - e0, 1e-6)))
+        self._iv.getView().getViewBox().autoRange()
+        self._iv.getHistogramWidget().item.setHistogramRange(lo, hi, padding=0.1)
+        n_eta, n_r = cake.shape
+        self._coord_bar.setText(
+            f"cake {n_r} R-bins × {n_eta} η-bins  |  "
+            f"R ∈ [{r0:.1f}, {r1:.1f}] px   η ∈ [{e0:.1f}, {e1:.1f}]°")
+
+    def _set_cmap(self, name: str):
+        self._iv.setColorMap(_resolve_cmap(name))
+
+    def _mouse(self, evt):
+        if self._cake is None or self._r_axis is None:
+            return
+        pos = evt[0]
+        vb = self._iv.getView().getViewBox()
+        if not self._iv.getView().sceneBoundingRect().contains(pos):
+            return
+        mp = vb.mapSceneToView(pos)
+        r, eta = mp.x(), mp.y()
+        n_eta, n_r = self._cake.shape
+        r0, r1 = float(self._r_axis[0]), float(self._r_axis[-1])
+        e0, e1 = float(self._eta_axis[0]), float(self._eta_axis[-1])
+        if not (min(r0, r1) <= r <= max(r0, r1) and min(e0, e1) <= eta <= max(e0, e1)):
+            return
+        ir = int((r - r0) / max(r1 - r0, 1e-9) * (n_r - 1))
+        ie = int((eta - e0) / max(e1 - e0, 1e-9) * (n_eta - 1))
+        ir = min(max(ir, 0), n_r - 1); ie = min(max(ie, 0), n_eta - 1)
+        val = self._cake[ie, ir]
+        self._coord_bar.setText(
+            f"R = {r:.2f} px   η = {eta:.2f}°   intensity = {val:.4g}")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 #  ProfileViewer
 # ═════════════════════════════════════════════════════════════════════════════
 

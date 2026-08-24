@@ -3,7 +3,14 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-24 (File ▸ **Project** — a new, opt-in FAIR
+**Last updated:** 2026-08-24 (Tab 2 — Calibrate: Hydra mode's **Use manual
+seed**/**Feed result back to seed** are now one shared choice linked across
+all 4 GE panels (seed *values* stay independent per panel); both
+Single-detector and Hydra Calibrate gain a new **Eta vs R Cake** tab
+alongside Radial Profile — a 2-D (η, R) intensity heatmap, the standard
+area-detector "cake" visualization, R on X and η on Y.)
+
+**Previously:** (2026-08-24, File ▸ **Project** — a new, opt-in FAIR
 provenance record (HDF5), separate from GUI State: while a project is open,
 every completed Calibrate/Batch Integrate run (single-detector or per Hydra
 panel) automatically appends a self-contained record of its exact inputs,
@@ -1041,7 +1048,13 @@ Lsd, and tilt are fit and shown independently.
   panel to panel. **Load calibration file…** seeds one panel's BC/Lsd/tilts/
   Transforms from a file (and mirrors λ/pixel into the shared Detector card
   if the file carries them); Pick BC/Pick Ring on the image seed that
-  panel's BC the same way as the single-detector tab.
+  panel's BC the same way as the single-detector tab. **Use manual seed**
+  and **Feed result back to seed** are one shared choice across all 4
+  panels — checking/unchecking either on any one panel's card mirrors the
+  same state onto the other three — since it's a single decision about
+  *how* the LM fit should start/carry forward, not a per-panel geometry
+  value; the seed BC/Lsd/tilt *values* themselves remain fully independent
+  per panel.
 - **Run (Run mode / Run Calibration / Abort)**: **Sequential** fits one
   panel at a time (full per-line progress in the Log tab, same as the
   single-detector tab); **Parallel** starts every currently-found panel's
@@ -1057,11 +1070,12 @@ Lsd, and tilt are fit and shown independently.
 - **Radial Profile (bottom right)**: one shared multi-curve plot — all 4
   panels' post-fit azimuthal profiles at once, same style/controls as the
   Data Viewer tab's Hydra Radial Profile plot (R-bin/η-bin/weighting +
-  **Re-integrate**, X-axis unit selector). **Ring Residuals** and
-  **Results** switch to show only the currently active panel's own chart/
-  parameter grid (each has its own **→ Send to Data Viewer**, **Save
-  .json**, and **Save paramstest.txt**, scoped to that one panel). **Log**
-  is shared across all 4 panels, each line prefixed `[ge1]`…`[ge4]`.
+  **Re-integrate**, X-axis unit selector). **Eta vs R Cake**, **Ring
+  Residuals** and **Results** switch to show only the currently active
+  panel's own 2-D cake / chart / parameter grid (Results has its own
+  **→ Send to Data Viewer**, **Save .json**, and **Save paramstest.txt**,
+  scoped to that one panel). **Log** is shared across all 4 panels, each
+  line prefixed `[ge1]`…`[ge4]`.
 
 ### Data Loader panel (left)
 The calibrant frame (Data + Frame index), Dark, Bright, Background and Mask are selected
@@ -1144,9 +1158,14 @@ you can immediately start a new run (the calibration is one uninterruptible libr
 call, so abort hard-terminates the worker thread rather than waiting).
 
 ### Results (right panel, bottom tabs)
-Radial Profile (with ring markers and an **Azim. avg** selector — see Tab 4), Ring
-Residuals bar chart, **Results**, and Log. Integration runs automatically after
-calibration. The **Results** tab shows the parameter set exactly as it is written to
+Radial Profile (with ring markers and an **Azim. avg** selector — see Tab 4), **Eta
+vs R Cake**, Ring Residuals bar chart, **Results**, and Log. Integration runs
+automatically after calibration. The **Eta vs R Cake** tab shows the same
+integration as a 2-D heatmap instead of collapsed to a 1-D curve — R (px) on the
+X-axis, η (°) on the Y-axis, intensity as color — the routine "cake" visualization
+for area-detector diffraction data; it has its own Log/colormap/vmin%/vmax%
+controls (same conventions as the main image viewer) and updates on every
+**Re-integrate**. The **Results** tab shows the parameter set exactly as it is written to
 `paramstest.txt` (Lsd, BC, tx/ty/tz, the distortion coefficients, Parallax, Wavelength,
 px, NrPixelsY/Z, RhoD, SpaceGroup, LatticeConstant, and any `ImTransOpt` codes from the
 Transforms checkboxes) as **plain text laid out in multiple

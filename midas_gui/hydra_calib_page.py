@@ -37,7 +37,7 @@ from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _NoScrollComboBox, make_kedge_label, make_pixel_label,
     _load_image, _apply_im_trans, apply_field_corrections, average_field, source_kind,
     widgets_to_dict, apply_dict_to_widgets, _predict_ring_radii)
-from midas_gui.widgets import PickableImageViewer, LogPanel
+from midas_gui.widgets import PickableImageViewer, LogPanel, CakeViewer
 from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar, HydraProfileViewer
 from midas_gui.hydra_calib_widgets import HydraCalibPanelCard
 from midas_gui.workers import CalibrationWorker, IntegrationWorker
@@ -255,6 +255,10 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             card.imTransChanged.connect(lambda n=n: self._on_card_transform_changed(n))
             card.calibFileLoaded.connect(self._on_card_calib_file_loaded)
             card.sendToViewer.connect(self.sendGeometryToViewer.emit)
+            card._manual_seed_check.toggled.connect(
+                lambda checked, n=n: self._sync_seed_checkbox("_manual_seed_check", n, checked))
+            card._feedback_check.toggled.connect(
+                lambda checked, n=n: self._sync_seed_checkbox("_feedback_check", n, checked))
             self._cards[n] = card
             self._card_stack.addWidget(card)
         lv.addWidget(self._card_stack)
@@ -296,6 +300,14 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         ptb.insertWidget(insert_at, self._cal_r_bin)
         ptb.insertWidget(insert_at, QtWidgets.QLabel("  R bin:"))
         bot.addTab(self._profile_view, "Radial Profile")
+
+        self._cake_views: dict = {}     # panel_num -> CakeViewer
+        self._cake_stack = QtWidgets.QStackedWidget()
+        for n in (1, 2, 3, 4):
+            cake_view = CakeViewer()
+            self._cake_views[n] = cake_view
+            self._cake_stack.addWidget(cake_view)
+        bot.addTab(self._cake_stack, "Eta vs R Cake")
 
         self._resid_stack = QtWidgets.QStackedWidget()
         for n in (1, 2, 3, 4):
@@ -340,6 +352,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._card_stack.setCurrentWidget(self._cards[n])
         self._resid_stack.setCurrentWidget(self._cards[n].residual_chart)
         self._results_stack.setCurrentWidget(self._cards[n].results_widget)
+        self._cake_stack.setCurrentWidget(self._cake_views[n])
         self._active_card = self._cards[n]
         self._active_card.bind_viewer(self._img_view)
         for chk, getter in ((self._show_rings_check, self._active_card.show_rings_checked),
@@ -356,6 +369,21 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             self._wl.setValue(float(g["wavelength_A"]))
         if g.get("pxY"):
             self._pxY.setValue(float(g["pxY"]))
+
+    def _sync_seed_checkbox(self, attr: str, src_panel: int, checked: bool):
+        """"Use manual seed" / "Feed result back to seed" are one shared
+        choice across all 4 GE panels (only the seed VALUES — BC/Lsd/tilts —
+        stay independent per panel), so mirror a change on one panel's
+        checkbox onto the other three without re-triggering their own
+        ``toggled`` handlers."""
+        for n, card in self._cards.items():
+            if n == src_panel:
+                continue
+            cb = getattr(card, attr)
+            if cb.isChecked() != checked:
+                cb.blockSignals(True)
+                cb.setChecked(checked)
+                cb.blockSignals(False)
 
     # ── Per-panel frame sourcing ─────────────────────────────────────
 
@@ -684,6 +712,8 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             lsd_um=data["lsd_um"], px_um=data["px_um"], wavelength_A=data["wavelength_A"])
         radii = _predict_ring_radii(result)
         self._cards[n].residual_chart.set_data(data["r_axis_px"], data["profile"], radii)
+        if data.get("cake_2d") is not None:
+            self._cake_views[n].set_cake(data["cake_2d"], data["r_axis_px"], data["eta_axis_deg"])
         self._int_workers.pop(n, None)
 
     # ── Import from Data Viewer ──────────────────────────────────────

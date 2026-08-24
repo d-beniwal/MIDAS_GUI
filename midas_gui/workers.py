@@ -715,15 +715,19 @@ class IntegrationWorker(QtCore.QThread):
             cnt = (count_cake(geom, "subpixel2", spec.NrPixelsZ, spec.NrPixelsY)
                    if self._weighted else None)
             img_t = torch.from_numpy(img.astype(np.float64))
-            prof, _ = integrate_frame(img_t, spec, geom, "subpixel2",
-                                      (None, None), None, need_sigma=False,
-                                      weighted=self._weighted, cnt_cake=cnt)
+            prof, _, cake_2d = integrate_frame(img_t, spec, geom, "subpixel2",
+                                               (None, None), None, need_sigma=False,
+                                               return_cake=True,
+                                               weighted=self._weighted, cnt_cake=cnt)
             r_ax = compute_r_axis(spec)
+            n_eta = spec.n_eta_bins
+            eta_ax = float(spec.EtaMin) + float(spec.EtaBinSize) * (np.arange(n_eta) + 0.5)
             self.log_line.emit(f"[integrate] Done — {len(prof)} bins, peak={prof.max():.1f}")
             self.finished.emit({
                 "r_axis_px": r_ax, "profile": prof,
                 "wavelength_A": float(spec.Wavelength),
                 "lsd_um": float(spec.Lsd), "px_um": float(spec.pxY),
+                "cake_2d": cake_2d, "eta_axis_deg": eta_ax,
             })
         except Exception:
             self.failed.emit(traceback.format_exc())
