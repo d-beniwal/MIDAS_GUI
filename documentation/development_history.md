@@ -140,6 +140,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Transforms checkboxes now live-update the preview and drive the actual calibration run (all pipeline modes); Send-to-Data-Viewer carries Transforms; Average frames drops the skip/stride control | `73a7a2a` |
 | Image origin flipped to bottom-left `(0,0)` (MIDAS convention) | `246dba7` |
 | Calibrate tab split into Single-detector/Hydra modes: per-panel fit of all 4 GE panels from one calibrant dataset, Sequential/Parallel run modes, geometry hand-off with the Data Viewer's Hydra page | `93dafa2` |
+| Hydra seed-mode (manual seed/feed-back) linked across all 4 panels; new Eta vs R Cake tab (Single-detector + Hydra) | `162fef1` |
 
 ### Batch Integrate (Tab 4)
 | Change | Commit |
@@ -2429,6 +2430,59 @@ interpreter-teardown noise (both pre-existing, see `.context/DECISIONS.md`).
 `tests/test_project.py` (new), `tests/test_hydra_batch_ui.py`,
 `tests/test_hydra_calib_ui.py`.
 **Roll back:** `git revert e8dea6b`. Self-contained back to the `6b961d4`
+state; no dependents yet.
+
+### `162fef1` — Calibrate: link Hydra seed-mode across panels; add Eta vs R Cake tab (2026-08-24)
+**Effect:** Two Calibrate-tab changes, requested independently of each other:
+1. Hydra Calibrate's **Use manual seed** / **Feed result back to seed**
+   checkboxes (`HydraCalibPanelCard._manual_seed_check`/`_feedback_check`)
+   are now one shared choice mirrored across all 4 GE panels — toggling
+   either on any one panel's card (whether by hand, or programmatically via
+   Pick BC/Pick Ring/Load calibration file/seed-from-result) sets the same
+   state on the other three (`HydraCalibrationPage._sync_seed_checkbox`,
+   wired per-card at construction). Only the *mode* is linked; the seed
+   BC/Lsd/tilt *values* stay fully independent per panel, since each GE
+   module's beam centre and mounting genuinely differ. Single-detector
+   Calibrate is unaffected (only one detector, nothing to link).
+2. Both Single-detector and Hydra Calibrate gain a new **Eta vs R Cake**
+   tab alongside Radial Profile: a 2-D (η, R) intensity heatmap — the
+   routine azimuthal-integration "cake" visualization for area-detector
+   diffraction data, R (px) on the X-axis and η (°) on the Y-axis. New
+   `midas_gui.widgets.CakeViewer` (a `pg.ImageView`-based widget, following
+   the app's existing 2-D-heatmap convention, but positioned via
+   `ImageItem.setRect()` to the actual R/η bin-centre extent rather than
+   assumed to start at pixel (0,0) like the detector `ImageViewer`) with
+   its own Log/colormap/vmin%/vmax% toolbar and a hover readout in R/η/
+   intensity. `IntegrationWorker.run()` (`workers.py`, shared by both
+   tabs) now passes `return_cake=True` to the existing
+   `integrate_frame()` (the 2-D cake was already computed there and
+   previously discarded at this call site) and emits `cake_2d`/
+   `eta_axis_deg` alongside the existing 1-D `profile`; both tabs'
+   `_on_int_done` feed the new field into the viewer(s) when present
+   (`.get()`-guarded, so the existing stubbed-`IntegrationWorker` tests —
+   which don't emit it — are unaffected). Hydra mode uses a per-panel
+   `CakeViewer` stack (`self._cake_views[n]`), switched by the same
+   toolbar that already drives the Results/Ring-Residuals stacks.
+**Verified:** new assertions added to `tests/test_hydra_calib_ui.py` —
+checkbox-state linking across all 4 panels with seed-value independence
+proven by giving each panel a distinct BC first; per-panel cake population
+after a run and cake-tab switching with the active panel (extends
+`_FakeIntegrationWorker` to emit synthetic `cake_2d`/`eta_axis_deg`). Also
+manually verified end-to-end outside the stubbed tests: a real
+(non-stubbed) `IntegrationWorker.run()` against a synthetic image produces
+a correctly-shaped `(n_eta, n_r)` cake and eta axis via the real
+`midas_integrate_v2` backend, and `CakeViewer.set_cake()`/log-toggle/
+percentile-change/hover-readout all render without error offscreen; a
+full `MainWindow()` construction confirms both the single-detector and
+lazily-built Hydra `CakeViewer`(s) wire up cleanly. Full suite run clean
+(main suite in one process, the two Hydra UI files each in their own
+process per `release.sh`'s existing isolation) apart from the two known
+pre-existing issues (`test_app_builds_offscreen` local-config flake,
+pyqtgraph interpreter-teardown noise — see `.context/DECISIONS.md`).
+**Files:** `midas_gui/hydra_calib_page.py`, `midas_gui/tab_calibrate.py`,
+`midas_gui/widgets.py`, `midas_gui/workers.py`,
+`tests/test_hydra_calib_ui.py`.
+**Roll back:** `git revert 162fef1`. Self-contained back to the `e8dea6b`
 state; no dependents yet.
 
 ---
