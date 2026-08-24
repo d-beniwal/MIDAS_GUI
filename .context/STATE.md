@@ -1,13 +1,14 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-23 (Hydra detector-view feature — phases 1-4 done, 5-6 remain)_
+_Last updated: 2026-08-23 (Hydra detector-view feature — phases 1-5 done, 6 (manual pass) remains)_
 
 ## Now working on
 
 Building a Hydra (4-panel GE detector) mode into the Data Viewer tab.
 Approved plan at implementation time: `/Users/dbeniwal/.claude/plans/rosy-wiggling-wind.md`
-(7 phases). **Phases 1 through 4 are done and committed to `main`**:
+(7 phases). **Phases 1 through 5 are done and committed to `main`** (14
+commits, `3b785c9`..`1d8c6e5`, not yet pushed to `origin`):
 - **Phase 1+1.5** (`3d2d99d`): leftmost `HydraModeRibbon` + `QStackedWidget`;
   extracted ~700 lines of ring-sim/calibration/radial-integration logic out
   of `DataViewerTab` into a reusable `DetectorGeometryCard`
@@ -25,24 +26,33 @@ Approved plan at implementation time: `/Users/dbeniwal/.claude/plans/rosy-wiggli
   auto-discovery, ge1-4/composite toolbar, one `DetectorGeometryCard` per
   panel + one for the composite (each independently calibratable), composite
   auto-rebuild on geometry change, composite ring overlay auto-seeded at
-  canvas centre. `test_hydra_ui.py` (4 tests). Verified end-to-end
-  (screenshots + tests) with the synthetic fixture.
+  canvas centre.
+- **Phase 5** (`8707372`): `HydraProfileViewer` — 4 independent per-panel
+  radial-profile curves (fixed colors) + a toggleable "Composite" curve
+  (NaN-aware `nansum` of each panel's own profile resampled onto a shared
+  2θ axis — NOT a radial integration of the composited image, per the
+  user's explicit sign-off on that design point). `test_hydra_ui.py` grew
+  to 6 tests. Verified end-to-end (screenshots + tests) with the synthetic
+  fixture at every phase.
 
-## Next steps (remaining phases)
+## Next steps
 
-- **Phase 5**: `HydraProfileViewer` — 4 independent per-panel radial
-  profiles + a toggleable summed/resampled "composite" curve (approach
-  confirmed with user: NaN-aware `nansum` after resampling each panel's own
-  profile onto a shared 2θ axis, NOT integrating the composited image).
-  Currently the Hydra page reuses the single-curve `ProfileViewer` (shows
-  whichever panel/composite is active) as a documented v1 scope cut.
-- **Phase 6**: a real windowed manual pass (both modes, save/load state
-  round-trip, mode switching mid-session) — everything so far is verified
-  via offscreen tests/screenshots only, not a live windowed session.
-- Documented-but-deferred scope cuts (not oversights, call out before
-  considering the feature "done"): no dark/bright/background correction or
-  intensity-range mask for Hydra frames; no Top-N brightest-pixel in Hydra
-  mode.
+- **Phase 6 (the only one left)**: a real *windowed* manual pass — open the
+  actual app, load real Hydra data, click through every button by hand.
+  Everything through Phase 5 is verified via offscreen tests/screenshots
+  only, never a live windowed session. Recommended focus: the image
+  viewer's Pick BC/Pick Ring tools on a real Hydra panel (interactive mouse
+  picking can't be exercised headlessly), and general layout/usability at
+  a real window size.
+- Documented-but-deferred scope cuts for this feature (not oversights —
+  call out before considering it "done"): no dark/bright/background
+  correction or intensity-range mask for Hydra frames; no Top-N
+  brightest-pixel in Hydra mode.
+- A rare, pre-existing pyqtgraph interpreter-crash risk under a large test
+  suite (many `ImageView`/`ViewBox` instances) was found and *mitigated*
+  (not eliminated) while adding `test_hydra_ui.py` — see DECISIONS.md if
+  `pytest` ever segfaults/bus-errors again; do not reach for `gc.collect()`,
+  already confirmed to make it worse.
 
 ## Open questions / blockers
 
@@ -75,11 +85,12 @@ Approved plan at implementation time: `/Users/dbeniwal/.claude/plans/rosy-wiggli
 
 ## Recent changes (last 3-5 sessions, dated; drop the oldest as it grows)
 
-- 2026-08-23 (`3b785c9`..`25a8eac`, 12 commits, on `main` as of this
-  session — not yet confirmed pushed to origin): Hydra detector-view
-  feature, phases 1 through 4 (see "Now working on" above), plus an
-  unrelated stale-test-data-path fix (`3b785c9`) and committing `.context/`
-  which had been gitignored (`778a2f3`). Full detail in `DECISIONS.md`.
+- 2026-08-23 (`3b785c9`..`1d8c6e5`, 14 commits, on `main`, not pushed to
+  origin): Hydra detector-view feature, phases 1 through 5 (see "Now
+  working on" above — only the manual windowed pass, Phase 6, remains),
+  plus an unrelated stale-test-data-path fix (`3b785c9`) and committing
+  `.context/` which had been gitignored (`778a2f3`). Full detail in
+  `DECISIONS.md`.
 - 2026-08-23 (`c8d98f1`, `246dba7`, `328674d`): `test_data/` reorganized
   into per-dataset subfolders; detector-image origin flipped to
   **bottom-left `(0,0)`** across every `pg.ImageView`-based viewer — see
