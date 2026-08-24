@@ -78,12 +78,27 @@ if [ "$PYPROJ_VER" != "$NEW_VERSION" ] || [ "$INIT_VER" != "$NEW_VERSION" ]; the
 fi
 
 # --- 3. Run tests ---
+# The Hydra UI test files (test_hydra_calib_ui.py, test_hydra_batch_ui.py)
+# each build a full Hydra page (6-8 pyqtgraph widgets apiece). Run together
+# with the rest of the suite in one process, their cumulative pyqtgraph
+# ViewBox/GC churn triggers a known, pre-existing interpreter-teardown
+# segfault (see .context/DECISIONS.md) far more often than either file run
+# alone — so each runs in its own fresh interpreter here.
 echo "[2/6] Running tests..."
-python -m pytest tests/ -q --tb=short || {
+HYDRA_UI_TESTS="tests/test_hydra_calib_ui.py tests/test_hydra_batch_ui.py"
+python -m pytest tests/ -q --tb=short --ignore=tests/test_hydra_calib_ui.py \
+    --ignore=tests/test_hydra_batch_ui.py || {
     echo "ERROR: tests failed. Aborting."
     git checkout -- pyproject.toml midas_gui/__init__.py
     exit 1
 }
+for t in $HYDRA_UI_TESTS; do
+    python -m pytest "$t" -q --tb=short || {
+        echo "ERROR: tests failed ($t). Aborting."
+        git checkout -- pyproject.toml midas_gui/__init__.py
+        exit 1
+    }
+done
 
 # --- 4. Build ---
 echo "[3/6] Building package..."

@@ -20,11 +20,14 @@ from midas_gui.constants import (KERNELS, OUTPUT_FORMATS, ERROR_MODELS,
                            DEFAULT_OUTPUT_FORMAT, DEFAULT_ERROR_MODEL)
 from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_file,
                                geometry_fields_from_file,
+                               resolve_calibration_fields, render_calib_value_grid,
                                _NoScrollSpinBox, _NoScrollComboBox,
                                widgets_to_dict, apply_dict_to_widgets)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, DataLoaderPanel)
 from midas_gui.workers import BatchWorker, apply_q_uniform, DriftWorker, FolderMonitorWorker
+from midas_gui.hydra_widgets import HydraModeRibbon
+from midas_gui.hydra_batch_page import HydraBatchPage
 from midas_gui import style as S
 
 
@@ -41,6 +44,11 @@ class BatchTab(QtWidgets.QWidget):
         self._integrated_fids: set = set()   # frame ids already displayed (batch + monitor)
         self._geom_cache = None              # cached integration context (detector map)
         self._geom_sig = None                # signature the cached context was built for
+        # Built lazily on first switch to Hydra mode: it owns 8 pyqtgraph
+        # widgets (4 WaterfallViewer + 4 StackedProfileViewer), and most
+        # sessions never touch Hydra Batch Integrate — see .context/DECISIONS.md's
+        # pyqtgraph interpreter-teardown / widget-count crash-risk entry.
+        self._hydra_page: Optional[HydraBatchPage] = None
         self._build_ui()
         self._loader.monitorToggled.connect(self._toggle_monitor)
         self._loader.set_path(DEFAULT_NICKEL_DIR)
@@ -56,79 +64,27 @@ class BatchTab(QtWidgets.QWidget):
     def _calib_fields_in_use(self):
         """Resolve the geometry currently selected (Tab-2 result or file), as a
         dict of display fields — or (None, note) if unavailable."""
-        if self._use_json_btn.isChecked() or self._calib_result is None:
-            path = self._json_ed.text().strip()
-            if not path:
-                return None, "No calibration file selected."
-            if not Path(path).exists():
-                return None, "Calibration file not found."
-            try:
-                return geometry_fields_from_file(path), f"From file: {Path(path).name}"
-            except Exception as e:
-                return None, f"Unreadable calibration file: {e}"
-        r = self._calib_result
-        fields = {
-            "wavelength_A": getattr(r, "wavelength_A", None),
-            "Lsd": getattr(r, "Lsd", None),
-            "BC_y": getattr(r, "BC_y", None), "BC_z": getattr(r, "BC_z", None),
-            "tx": getattr(r, "tx", 0.0), "ty": getattr(r, "ty", 0.0),
-            "tz": getattr(r, "tz", 0.0),
-            "pxY": getattr(r, "pxY", None), "pxZ": getattr(r, "pxZ", None),
-            "NrPixelsY": getattr(r, "NrPixelsY", None),
-            "NrPixelsZ": getattr(r, "NrPixelsZ", None),
-            "distortion": getattr(r, "distortion", {}) or {},
-        }
-        return fields, "From Tab 2 calibration."
+        return resolve_calibration_fields(
+            self._calib_result, self._use_json_btn.isChecked(), self._json_ed.text())
 
     def _refresh_calib_values(self):
         """Populate the read-only calibration-values grid from the active source."""
-        grid = self._calib_grid
-        while grid.count():
-            it = grid.takeAt(0)
-            w = it.widget()
-            if w is not None:
-                w.deleteLater()
         fields, note = self._calib_fields_in_use()
-        self._calib_val_note.setText(note)
-        if not fields:
-            return
-
-        def _num(v, fmt):
-            return "—" if v is None else format(float(v), fmt)
-
-        lsd = fields.get("Lsd")
-        pxY = fields.get("pxY"); pxZ = fields.get("pxZ") or pxY
-        dist = fields.get("distortion") or {}
-        n_dist = sum(1 for v in dist.values() if abs(float(v)) > 1e-12)
-        rows = [
-            ("λ (Å)", _num(fields.get("wavelength_A"), ".5f")),
-            ("Lsd (mm)", "—" if lsd is None else format(float(lsd) / 1000.0, ".3f")),
-            ("BC_y (px)", _num(fields.get("BC_y"), ".2f")),
-            ("BC_z (px)", _num(fields.get("BC_z"), ".2f")),
-            ("tx (°)", _num(fields.get("tx"), ".4f")),
-            ("ty (°)", _num(fields.get("ty"), ".4f")),
-            ("tz (°)", _num(fields.get("tz"), ".4f")),
-            ("pxY (µm)", _num(pxY, ".3f")),
-            ("pxZ (µm)", _num(pxZ, ".3f")),
-            ("Detector", f"{fields.get('NrPixelsY') or '—'} × {fields.get('NrPixelsZ') or '—'}"),
-            ("Distortion", f"{n_dist} non-zero coeff" + ("s" if n_dist != 1 else "")),
-        ]
-        # Two columns of key/value pairs.
-        ncols = 2
-        per = (len(rows) + ncols - 1) // ncols
-        for i, (k, v) in enumerate(rows):
-            col, row = divmod(i, per)
-            kl = QtWidgets.QLabel(k + ":")
-            kl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
-            vl = QtWidgets.QLabel(v)
-            vl.setStyleSheet(f"font-family:{S.MONO_CSS};font-size:10px")
-            vl.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-            grid.addWidget(kl, row, col * 2, QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-            grid.addWidget(vl, row, col * 2 + 1, QtCore.Qt.AlignVCenter)
-        grid.setColumnStretch(ncols * 2 + 1, 1)
+        render_calib_value_grid(self._calib_grid, self._calib_val_note, fields, note)
 
     def set_mask_from_tab1(self, mask):
         self._loader.set_tab1_mask(mask)
+
+    def _ensure_hydra_page(self) -> HydraBatchPage:
+        if self._hydra_page is None:
+            self._hydra_page = HydraBatchPage()
+            self._mode_stack.addWidget(self._hydra_page)
+        return self._hydra_page
+
+    def set_hydra_panel_calibration(self, n: int, result):
+        """A Hydra panel's fit finished on the Calibrate tab — hand it to
+        this tab's own Hydra Batch Integrate page (building it on first use)."""
+        self._ensure_hydra_page().set_panel_calibration(n, result)
 
     # ── GUI state (Save/Load GUI State) ─────────────────────────────
     def _state_widgets(self) -> dict:
@@ -161,6 +117,8 @@ class BatchTab(QtWidgets.QWidget):
             "fields": widgets_to_dict(self._state_widgets()),
             "corr": self._corr_widget.get_state(),
             "loader": self._loader.get_state(),
+            "hydra": {"active_mode": self._mode_ribbon.mode(),
+                      "page": self._hydra_page.get_state() if self._hydra_page else {}},
         }
 
     def set_state(self, state: dict):
@@ -168,13 +126,44 @@ class BatchTab(QtWidgets.QWidget):
         apply_dict_to_widgets(self._state_widgets(), state.get("fields", {}))
         self._corr_widget.set_state(state.get("corr") or {})
         self._refresh_calib_values()
+        hydra_state = state.get("hydra") or {}
+        page_state = hydra_state.get("page") or {}
+        if page_state:
+            self._ensure_hydra_page().set_state(page_state)
+        self._mode_ribbon.set_mode(hydra_state.get("active_mode", "single"))
+
+    def shutdown(self):
+        """Interrupt + bounded-wait every Hydra-page worker on app close —
+        this tab's own workers are already covered by MainWindow's generic
+        QThread sweep, but those nested inside ``self._hydra_page`` are not
+        (the sweep only inspects this tab's own ``vars()``, not recursively)."""
+        if self._hydra_page is not None:
+            self._hydra_page.shutdown()
+
+    def _on_mode_changed(self, mode: str):
+        """Leftmost ribbon switched between "single" and "hydra" — swap the
+        visible page (building the Hydra page on first use), mirroring
+        CalibrationTab's/DataViewerTab's identical split."""
+        self._mode_stack.setCurrentWidget(
+            self._ensure_hydra_page() if mode == "hydra" else self._hsplit)
 
     def _build_ui(self):
         root = QtWidgets.QHBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 6); root.setSpacing(0)
+
+        # Leftmost mode ribbon: "Single detector" (this tab's existing view)
+        # vs. "Hydra" (4-panel GE detector batch integration) — same pattern
+        # as the Data Viewer / Calibrate tabs' splits.
+        self._mode_ribbon = HydraModeRibbon()
+        self._mode_ribbon.modeChanged.connect(self._on_mode_changed)
+        root.addWidget(self._mode_ribbon)
+
+        self._mode_stack = QtWidgets.QStackedWidget()
+        root.addWidget(self._mode_stack, 1)
+
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         split.setChildrenCollapsible(False); split.setHandleWidth(6)
-        root.addWidget(split); self._hsplit = split
+        self._mode_stack.addWidget(split); self._hsplit = split
 
         # ── LEFT: data loader (streaming source + dark/bright/bg + mask) ──
         self._loader = DataLoaderPanel(mode="stream")

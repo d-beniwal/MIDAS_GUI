@@ -215,6 +215,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._cal_tab.pullHydraFromViewer.connect(
                 lambda: self._cal_tab.import_hydra_from_viewer(self._view_tab.get_hydra_export()))
             self._cal_tab.sendHydraGeometryToViewer.connect(self._view_tab.set_hydra_panel_geometry)
+            # Calibrate (Hydra mode) → Batch Integrate (Hydra mode): a panel's
+            # fit auto-populates that panel's calibration source as soon as it
+            # finishes, mirroring the single-detector calibrationDone wiring.
+            self._cal_tab.hydraPanelCalibrationDone.connect(self._batch_tab.set_hydra_panel_calibration)
         except Exception:
             _log(f"Geometry hand-off wiring failed:\n{traceback.format_exc()}")
 

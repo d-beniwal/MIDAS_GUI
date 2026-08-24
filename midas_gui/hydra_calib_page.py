@@ -48,6 +48,7 @@ from midas_gui import style as S
 class HydraCalibrationPage(QtWidgets.QWidget):
     pullFromViewer = QtCore.pyqtSignal()               # "← Data Viewer" clicked
     sendGeometryToViewer = QtCore.pyqtSignal(int, dict)  # panel_num, geometry
+    panelCalibrationDone = QtCore.pyqtSignal(int, object)  # panel_num, AutoCalibrationResult
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -579,6 +580,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         card.on_result(result)
         self._log.append(f"[ge{n}] done — Lsd={result.Lsd/1000:.3f} mm")
         self._run_integration(n, result)
+        self.panelCalibrationDone.emit(n, result)
         self._workers.pop(n, None)
         if self._run_mode() == "sequential":
             self._start_next_sequential()

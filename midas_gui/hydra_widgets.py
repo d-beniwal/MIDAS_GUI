@@ -22,7 +22,7 @@ from midas_gui.helpers import (_browse, _NoScrollSpinBox, _NoScrollComboBox, hyd
 from midas_gui.workers import FieldAverageWorker, ProjectionWorker
 from midas_gui import hydra
 from midas_gui import style as S
-from midas_gui.widgets import _convert_radial, _XUNIT_LABEL
+from midas_gui.widgets import _convert_radial, _XUNIT_LABEL, MaskSelector
 
 
 class _VerticalToggleButton(QtWidgets.QAbstractButton):
@@ -353,8 +353,17 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
 class HydraLoaderPanel(QtWidgets.QWidget):
     """Left-hand loader for the Hydra page. One path field — point it at any
     single GE panel's file — auto-discovers the other panels via
-    ``helpers.hydra_siblings``, plus a frame navigator shared across all
-    panels (they are synchronized frames of the same scan)."""
+    ``helpers.hydra_siblings``.
+
+    ``mode`` tailors the Data card, mirroring ``widgets.DataLoaderPanel``'s
+    own ``mode`` switch:
+      - ``"nav"``    — a frame navigator shared across all panels (they are
+        synchronized frames of the same scan) — Data Viewer / Calibrate.
+      - ``"stream"`` — a shared frame-range + stride row, no in-memory frame
+        navigation, plus one independent :class:`~midas_gui.widgets.MaskSelector`
+        per panel (masks are physically panel-specific bad-pixel/beamstop
+        maps, unlike the shared data path) — Batch Integrate.
+    """
 
     siblingsChanged = QtCore.pyqtSignal(dict)   # {panel_num: path}, may be {}
     frameChanged = QtCore.pyqtSignal(int)
@@ -365,8 +374,9 @@ class HydraLoaderPanel(QtWidgets.QWidget):
     #: far shares this convention (see hydra_default_geometry's callers).
     DATASET = "exchange/data"
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, mode="nav"):
         super().__init__(parent)
+        self._mode = mode
         self._siblings: dict = {}
         self._n_frames = 1
         self._frame = 0
@@ -375,6 +385,7 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         self._proj_workers: dict = {}    # panel -> ProjectionWorker (kept alive)
         self._proj_pending: set = set()
         self._proj_errors: dict = {}
+        self._mask_sels: dict = {}       # panel -> MaskSelector (stream mode only)
         self._build_ui()
 
     def _build_ui(self):
@@ -403,23 +414,36 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         status_row.addStretch(1)
         card.body.addLayout(status_row)
 
-        nav_row = QtWidgets.QHBoxLayout(); nav_row.setSpacing(4)
-        self._prev_btn = QtWidgets.QPushButton("◀"); self._prev_btn.setFixedWidth(28)
-        self._next_btn = QtWidgets.QPushButton("▶"); self._next_btn.setFixedWidth(28)
-        self._frame_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self._frame_spin = _NoScrollSpinBox(); self._frame_spin.setFixedWidth(60)
-        self._prev_btn.clicked.connect(lambda: self._set_frame(self._frame - 1))
-        self._next_btn.clicked.connect(lambda: self._set_frame(self._frame + 1))
-        self._frame_slider.valueChanged.connect(
-            lambda v: self._set_frame(v, from_widget="slider"))
-        self._frame_spin.valueChanged.connect(
-            lambda v: self._set_frame(v, from_widget="spin"))
-        nav_row.addWidget(self._prev_btn)
-        nav_row.addWidget(self._frame_slider, 1)
-        nav_row.addWidget(self._frame_spin)
-        nav_row.addWidget(self._next_btn)
-        card.body.addLayout(nav_row)
-        self._set_nav_enabled(False)
+        if self._mode == "nav":
+            nav_row = QtWidgets.QHBoxLayout(); nav_row.setSpacing(4)
+            self._prev_btn = QtWidgets.QPushButton("◀"); self._prev_btn.setFixedWidth(28)
+            self._next_btn = QtWidgets.QPushButton("▶"); self._next_btn.setFixedWidth(28)
+            self._frame_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+            self._frame_spin = _NoScrollSpinBox(); self._frame_spin.setFixedWidth(60)
+            self._prev_btn.clicked.connect(lambda: self._set_frame(self._frame - 1))
+            self._next_btn.clicked.connect(lambda: self._set_frame(self._frame + 1))
+            self._frame_slider.valueChanged.connect(
+                lambda v: self._set_frame(v, from_widget="slider"))
+            self._frame_spin.valueChanged.connect(
+                lambda v: self._set_frame(v, from_widget="spin"))
+            nav_row.addWidget(self._prev_btn)
+            nav_row.addWidget(self._frame_slider, 1)
+            nav_row.addWidget(self._frame_spin)
+            nav_row.addWidget(self._next_btn)
+            card.body.addLayout(nav_row)
+            self._set_nav_enabled(False)
+        else:   # "stream" — shared frame-range + stride, no navigator
+            self._fr_start = _NoScrollSpinBox(); self._fr_start.setRange(0, 999999)
+            self._fr_start.setFixedWidth(64)
+            self._fr_end = _NoScrollSpinBox(); self._fr_end.setRange(0, 999999)
+            self._fr_end.setFixedWidth(64)
+            self._fr_end.setToolTip("Last frame (exclusive). 0 = all frames.")
+            self._fr_stride = _NoScrollSpinBox(); self._fr_stride.setRange(1, 100000)
+            self._fr_stride.setValue(1); self._fr_stride.setFixedWidth(64)
+            sf = S.Form()
+            sf.row(("start:", self._fr_start), ("end(0=all):", self._fr_end))
+            sf.row(("stride:", self._fr_stride))
+            card.body.addLayout(sf)
 
         self._info_lbl = QtWidgets.QLabel("")
         self._info_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
@@ -437,6 +461,19 @@ class HydraLoaderPanel(QtWidgets.QWidget):
             w.fieldsReady.connect(self.fieldsChanged)
             fld.body.addWidget(w)
         lv.addWidget(fld)
+
+        # ── Mask (stream mode only — independent per panel, no sibling
+        #    auto-discovery: bad-pixel/beamstop masks are physically
+        #    panel-specific and don't follow a shared naming convention) ──
+        if self._mode == "stream":
+            mask_card = S.make_card("Mask  (independent per panel)")
+            for n in (1, 2, 3, 4):
+                sel = MaskSelector()
+                sel.setTitle(f"ge{n} mask")
+                sel.maskChanged.connect(self.fieldsChanged)
+                self._mask_sels[n] = sel
+                mask_card.body.addWidget(sel)
+            lv.addWidget(mask_card)
 
         # ── Projection (stack max/sum/average, all panels + composite) ──
         # Built here (owns the projection logic/state) but NOT added to this
@@ -522,14 +559,15 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         except Exception as exc:
             self._info_lbl.setText(f"Could not read frame count: {exc}")
             self._n_frames = 1
-        self._frame_slider.blockSignals(True)
-        self._frame_slider.setRange(0, max(0, self._n_frames - 1))
-        self._frame_slider.blockSignals(False)
-        self._frame_spin.blockSignals(True)
-        self._frame_spin.setRange(0, max(0, self._n_frames - 1))
-        self._frame_spin.blockSignals(False)
+        if self._mode == "nav":
+            self._frame_slider.blockSignals(True)
+            self._frame_slider.setRange(0, max(0, self._n_frames - 1))
+            self._frame_slider.blockSignals(False)
+            self._frame_spin.blockSignals(True)
+            self._frame_spin.setRange(0, max(0, self._n_frames - 1))
+            self._frame_spin.blockSignals(False)
+            self._set_nav_enabled(self._n_frames > 1)
         self._frame = 0
-        self._set_nav_enabled(self._n_frames > 1)
         self._proj_grp.setEnabled(self._n_frames > 1)
         self._info_lbl.setText(f"Found {len(siblings)}/4 panels  ·  {self._n_frames} frame(s)")
         self.siblingsChanged.emit(siblings)
@@ -670,6 +708,51 @@ class HydraLoaderPanel(QtWidgets.QWidget):
 
     def bright_mode(self) -> str:
         return self._bright_sel.mode()
+
+    # ── Stream-mode accessors (Batch Integrate) ─────────────────────
+
+    def source_cfg(self, n: int) -> dict:
+        """Streaming source descriptor for ``BatchWorker``, for panel ``n`` —
+        mirrors ``widgets.DataLoaderPanel.source_cfg()``."""
+        path = self._siblings.get(n, "")
+        if source_kind(path) == "hdf5":
+            return {"type": "hdf5", "path": path, "dataset": self.DATASET}
+        return {"type": "tiff_glob", "path": path}
+
+    def frame_range(self) -> tuple:
+        """Shared (start, end_or_None, stride) — Hydra panels are
+        synchronized frames of one scan, so one range applies to all."""
+        end = self._fr_end.value() if self._fr_end.value() > 0 else None
+        return (self._fr_start.value(), end, max(1, self._fr_stride.value()))
+
+    def composite_mask(self, n: int) -> Optional[np.ndarray]:
+        sel = self._mask_sels.get(n)
+        return sel.composite_mask() if sel is not None else None
+
+    # ── GUI state (Save/Load GUI State, stream mode only) ───────────
+
+    def get_state(self) -> dict:
+        if self._mode != "stream":
+            return {}
+        return {
+            "fr_start": self._fr_start.value(), "fr_end": self._fr_end.value(),
+            "fr_stride": self._fr_stride.value(),
+            "masks": {n: sel.get_state() for n, sel in self._mask_sels.items()},
+        }
+
+    def set_state(self, state: dict):
+        if self._mode != "stream" or not state:
+            return
+        if "fr_start" in state:
+            self._fr_start.setValue(int(state["fr_start"]))
+        if "fr_end" in state:
+            self._fr_end.setValue(int(state["fr_end"]))
+        if "fr_stride" in state:
+            self._fr_stride.setValue(int(state["fr_stride"]))
+        for n_key, mstate in (state.get("masks") or {}).items():
+            sel = self._mask_sels.get(int(n_key))
+            if sel is not None:
+                sel.set_state(mstate)
 
 
 class HydraDetectorToolbar(QtWidgets.QWidget):

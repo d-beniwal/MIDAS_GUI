@@ -16,6 +16,7 @@ import numpy as np
 from PyQt5 import QtCore, QtWidgets
 
 from midas_gui.constants import _SENTINELS, _LATT, H5_EXTS, _V2_TO_V1
+from midas_gui import style as S
 
 # checkmark SVG written to a temp file so the QSS image: property can use it
 import tempfile as _tf
@@ -756,6 +757,86 @@ def result_ns_from_geometry_file(path: str):
         tx=float(f["tx"]), ty=float(f["ty"]), tz=float(f["tz"]),
         wavelength_A=float(f["wavelength_A"]), distortion=f["distortion"],
         residual_corr_bin_path=None)
+
+
+def resolve_calibration_fields(calib_result, use_file: bool, file_path: str, *,
+                               source_label: str = "Tab 2 calibration"):
+    """Resolve the geometry currently selected (an in-memory calibration
+    result, or a geometry file), as a dict of display fields — or
+    ``(None, note)`` if unavailable. Shared by ``BatchTab`` (single-detector)
+    and ``HydraBatchPanelCard`` (one panel's own calibration source)."""
+    if use_file or calib_result is None:
+        path = (file_path or "").strip()
+        if not path:
+            return None, "No calibration file selected."
+        if not Path(path).exists():
+            return None, "Calibration file not found."
+        try:
+            return geometry_fields_from_file(path), f"From file: {Path(path).name}"
+        except Exception as e:
+            return None, f"Unreadable calibration file: {e}"
+    r = calib_result
+    fields = {
+        "wavelength_A": getattr(r, "wavelength_A", None),
+        "Lsd": getattr(r, "Lsd", None),
+        "BC_y": getattr(r, "BC_y", None), "BC_z": getattr(r, "BC_z", None),
+        "tx": getattr(r, "tx", 0.0), "ty": getattr(r, "ty", 0.0),
+        "tz": getattr(r, "tz", 0.0),
+        "pxY": getattr(r, "pxY", None), "pxZ": getattr(r, "pxZ", None),
+        "NrPixelsY": getattr(r, "NrPixelsY", None),
+        "NrPixelsZ": getattr(r, "NrPixelsZ", None),
+        "distortion": getattr(r, "distortion", {}) or {},
+    }
+    return fields, f"From {source_label}."
+
+
+def render_calib_value_grid(grid: "QtWidgets.QGridLayout", note_label: "QtWidgets.QLabel",
+                            fields: Optional[dict], note: str) -> None:
+    """Populate a read-only 2-column key/value grid of calibration-geometry
+    fields (as resolved by :func:`resolve_calibration_fields`). Shared by
+    ``BatchTab`` and ``HydraBatchPanelCard`` so the "Calibration values"
+    display looks identical in both places."""
+    while grid.count():
+        it = grid.takeAt(0)
+        w = it.widget()
+        if w is not None:
+            w.deleteLater()
+    note_label.setText(note)
+    if not fields:
+        return
+
+    def _num(v, fmt):
+        return "—" if v is None else format(float(v), fmt)
+
+    lsd = fields.get("Lsd")
+    pxY = fields.get("pxY"); pxZ = fields.get("pxZ") or pxY
+    dist = fields.get("distortion") or {}
+    n_dist = sum(1 for v in dist.values() if abs(float(v)) > 1e-12)
+    rows = [
+        ("λ (Å)", _num(fields.get("wavelength_A"), ".5f")),
+        ("Lsd (mm)", "—" if lsd is None else format(float(lsd) / 1000.0, ".3f")),
+        ("BC_y (px)", _num(fields.get("BC_y"), ".2f")),
+        ("BC_z (px)", _num(fields.get("BC_z"), ".2f")),
+        ("tx (°)", _num(fields.get("tx"), ".4f")),
+        ("ty (°)", _num(fields.get("ty"), ".4f")),
+        ("tz (°)", _num(fields.get("tz"), ".4f")),
+        ("pxY (µm)", _num(pxY, ".3f")),
+        ("pxZ (µm)", _num(pxZ, ".3f")),
+        ("Detector", f"{fields.get('NrPixelsY') or '—'} × {fields.get('NrPixelsZ') or '—'}"),
+        ("Distortion", f"{n_dist} non-zero coeff" + ("s" if n_dist != 1 else "")),
+    ]
+    ncols = 2
+    per = (len(rows) + ncols - 1) // ncols
+    for i, (k, v) in enumerate(rows):
+        col, row = divmod(i, per)
+        kl = QtWidgets.QLabel(k + ":")
+        kl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        vl = QtWidgets.QLabel(v)
+        vl.setStyleSheet(f"font-family:{S.MONO_CSS};font-size:10px")
+        vl.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        grid.addWidget(kl, row, col * 2, QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        grid.addWidget(vl, row, col * 2 + 1, QtCore.Qt.AlignVCenter)
+    grid.setColumnStretch(ncols * 2 + 1, 1)
 
 
 # ── Log stream (redirect verbose stdout to a Qt signal) ─────────────────────────

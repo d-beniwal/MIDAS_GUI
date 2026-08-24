@@ -40,6 +40,7 @@ class CalibrationTab(QtWidgets.QWidget):
     sendGeometryToViewer = QtCore.pyqtSignal(dict)  # push calibrated geometry → Data Viewer
     pullHydraFromViewer = QtCore.pyqtSignal()     # Hydra page's "← Data Viewer" clicked
     sendHydraGeometryToViewer = QtCore.pyqtSignal(int, dict)  # panel_num, geometry
+    hydraPanelCalibrationDone = QtCore.pyqtSignal(int, object)  # panel_num, AutoCalibrationResult
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -423,6 +424,7 @@ class CalibrationTab(QtWidgets.QWidget):
         self._hydra_page = HydraCalibrationPage()
         self._hydra_page.pullFromViewer.connect(self.pullHydraFromViewer.emit)
         self._hydra_page.sendGeometryToViewer.connect(self.sendHydraGeometryToViewer.emit)
+        self._hydra_page.panelCalibrationDone.connect(self.hydraPanelCalibrationDone.emit)
         self._mode_stack.addWidget(self._hydra_page)
 
     # ── Data (from the loader panel) ──────────────────────────────
