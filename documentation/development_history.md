@@ -148,6 +148,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Clear results + inline per-file labels & plot controls | `524f5f1` |
 | Stacked profiles: publication themes, point+line, symbol size, x-units, grid | `d135c80` |
 | Waterfall R/2θ/Q x-axis selector | `2385f75` |
+| Batch Integrate tab split into Single-detector/Hydra modes: per-panel integration of all 4 GE panels with independently fitted geometry, automatic Calibrate→Batch hand-off, per-panel masks, Sequential/Parallel run modes | `6b961d4` |
 
 ### PDF Analysis (Tab 6)
 | Change | Commit |
@@ -2314,6 +2315,65 @@ tests only so far.
 `midas_gui/tab_view.py`, `midas_gui/workers.py`,
 `tests/test_hydra_calib_ui.py` (new), `.context/DECISIONS.md`.
 **Roll back:** `git revert 93dafa2`. Self-contained back to the `eadb14d`
+state; no dependents yet.
+
+### `6b961d4` — Hydra: Batch Integrate tab split into Single-detector/Hydra modes (2026-08-24)
+**Effect:** Batch Integrate tab (Tab 4) gains a leftmost mode ribbon
+(`HydraModeRibbon`, reused as-is) splitting **Single detector** / **Hydra**,
+mirroring the Calibrate tab's own split — each of the 4 GE panels is
+integrated with its own independently fitted geometry:
+1. New `hydra_batch_widgets.py` (`HydraBatchPanelCard` — one panel's
+   Calibration source [From Calibrate tab / From file] + read-only values
+   grid + compact progress bar) and `hydra_batch_page.py` (`HydraBatchPage`
+   — shared Integration/Corrections/Monitor-normalisation/Output cards
+   applied to all 4 panels, a `HydraLoaderPanel(mode="stream")`, a
+   `QStackedWidget` of 4 per-panel Waterfall+Stacked-profile viewer pairs
+   switched by a `HydraDetectorToolbar` panel toggle, shared Log prefixed
+   `[ge{n}]`).
+2. **Sequential** (one panel at a time) or **Parallel** (all panels at
+   once) run modes, `BatchWorker`-per-panel orchestration copied from
+   `HydraCalibrationPage`'s pattern. Each panel writes to its own
+   `<out_dir>/ge{n}/` subfolder.
+3. Automatic hand-off: a Hydra panel's Calibrate-tab fit auto-populates
+   that panel's Batch Integrate calibration source the moment it finishes
+   (`HydraCalibrationPage.panelCalibrationDone` →
+   `CalibrationTab.hydraPanelCalibrationDone` →
+   `BatchTab.set_hydra_panel_calibration`), mirroring the existing
+   single-detector `calibrationDone`→`set_calibration` wiring. Each panel
+   keeps an independent manual "From file" fallback.
+4. Masks are wired per panel for Hydra Integrate — a deliberate departure
+   from Hydra Calibrate's `mask=None` scope-cut: `HydraLoaderPanel` gains a
+   `mode="nav"|"stream"` switch; `"stream"` mode adds a shared
+   frame-range+stride row and one independent `MaskSelector` per panel (no
+   sibling auto-discovery, since mask files are physically panel-specific).
+5. Drift correction and live MONITOR mode are deferred for Hydra v1 (both
+   exist on the single-detector Batch tab).
+6. `HydraBatchPage` is built lazily on `BatchTab` (only on first switch to
+   Hydra mode, on the auto hand-off, or on a saved-session restore) since
+   it owns 8 pyqtgraph widgets and most sessions never open it.
+7. `helpers.py` gains `resolve_calibration_fields`/`render_calib_value_grid`,
+   hoisted out of `BatchTab`'s own calibration-value-grid logic so
+   `HydraBatchPanelCard` doesn't duplicate it; `BatchTab` now calls the
+   same two functions.
+**Verified:** new `tests/test_hydra_batch_ui.py` (calibration hand-off,
+per-panel mask independence, output subfolder-per-panel naming,
+Sequential/Parallel orchestration + per-panel viewer-stack switching)
+against a stubbed `BatchWorker`. `release.sh`'s test step now runs the two
+Hydra UI test files (`test_hydra_calib_ui.py`, `test_hydra_batch_ui.py`) in
+their own separate `pytest` processes instead of one combined run — A/B
+testing found their cumulative pyqtgraph widget churn pushed the
+pre-existing, documented interpreter-teardown segfault (see
+`.context/DECISIONS.md`) from a ~40% baseline rate to ~100%; isolated runs
+eliminate it for those files while leaving the rest of the suite at
+baseline. Not yet exercised with a live windowed pass (real Hydra data,
+real per-panel `BatchWorker` runs) — offscreen/stubbed-worker tests only
+so far.
+**Files:** `midas_gui/app.py`, `midas_gui/helpers.py`,
+`midas_gui/hydra_batch_page.py` (new), `midas_gui/hydra_batch_widgets.py`
+(new), `midas_gui/hydra_calib_page.py`, `midas_gui/hydra_widgets.py`,
+`midas_gui/tab_batch.py`, `midas_gui/tab_calibrate.py`,
+`tests/test_hydra_batch_ui.py` (new), `release.sh`.
+**Roll back:** `git revert 6b961d4`. Self-contained back to the `93dafa2`
 state; no dependents yet.
 
 ---

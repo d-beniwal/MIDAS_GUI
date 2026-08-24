@@ -3,7 +3,17 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-24 (Tab 2 — Calibrate: split into **Single
+**Last updated:** 2026-08-24 (Tab 4 — Batch Integrate: split into **Single
+detector** / **Hydra** modes behind a leftmost mode ribbon, the same pattern
+as the Calibrate/Data Viewer tabs' own splits. Hydra mode integrates each of
+the 4 GE panels with its own independently fitted geometry — auto-populated
+from the Calibrate tab's Hydra fits as each panel finishes, or loadable from
+a file per panel — using one shared Integration/Corrections/Monitor
+-normalisation/Output recipe, a **Sequential** or **Parallel** run-mode
+choice, independent per-panel masks, and per-panel Waterfall/Stacked
+-profile output. See §7 "Hydra mode (4-panel GE detector)".)
+
+**Previously:** (2026-08-24, Tab 2 — Calibrate: split into **Single
 detector** / **Hydra** modes behind a leftmost mode ribbon, the same pattern
 as the Data Viewer tab's own split. Hydra mode fits each of the 4 GE panels'
 own geometry from one calibrant dataset using a shared pipeline/refine
@@ -1171,6 +1181,53 @@ the Tab 2 result flows through unchanged.
 
 **Purpose:** integrate a stack of frames into 1-D profiles using the calibrated
 geometry and optional corrections.
+
+### Mode ribbon (leftmost strip)
+Like the Data Viewer and Calibrate tabs, a narrow vertical strip switches
+between **Single detector** (the view described below — unchanged) and
+**Hydra** (per-panel integration for the 1-ID-E 4-panel GE detector). The
+two modes are independent: switching does not share data or geometry
+between them.
+
+### Hydra mode (4-panel GE detector)
+
+**Purpose:** integrate each of the 4 GE panels' own frame stack with its
+own independently fitted geometry, using one shared integration "recipe"
+(kernel, bins, corrections, monitor normalisation, output format) applied
+to all 4 — since each GE panel is a physically separate detector with its
+own geometry, but the same beam and the same choice of what to compute.
+
+- **Hydra data (left panel)**: the same sibling-discovery data loader as
+  the other Hydra pages (point at any one panel file, the other 3 are found
+  automatically), but in **streaming** form for batch runs — a shared
+  frame **range + stride** (frames are synchronized across panels, so one
+  range applies to all) instead of a frame navigator, Dark/Bright/
+  Background per panel, and an independent **Mask** per panel (its own
+  file/folder sources, unioned — no cross-panel auto-discovery, since mask
+  files are physically panel-specific and may not follow the ge{n} naming
+  convention data files do).
+- **Integration, Physics corrections, Monitor normalisation, Output
+  (middle panel, shared across ge1–ge4)**: one copy of each, identical in
+  meaning to the single-detector tab's own cards, applied to every panel's
+  run. Each panel writes its output into its own `ge{n}/` subfolder under
+  the shared output directory, so the 4 panels' files never collide. There
+  is no Drift correction or live **MONITOR** folder-watch in Hydra mode
+  (both single-detector-only for now).
+- **ge1 – ge4 toggle + Calibration source / values / progress (middle
+  panel, switches with the active panel)**: each panel picks **From
+  Calibrate tab** (auto-populated the moment that panel's fit finishes on
+  the Calibrate tab's own Hydra page — no action needed here) or **From
+  file** (a calibration `.json`, MIDAS `paramstest.txt`, or pyFAI `.poni`,
+  same auto-detection as the single-detector tab); the **Calibration
+  values** grid and a compact progress bar are per panel.
+- **Run (Run mode / Start Integration / Abort)**: **Sequential** integrates
+  one panel at a time; **Parallel** starts every currently-found panel's
+  run at once. Abort stops every running panel after its current frame,
+  keeping frames already written.
+- **Waterfall / Stacked profiles (right panel, switches with the active
+  panel)**: each panel has its own pair, same controls as the
+  single-detector tab's own viewers. A shared **Log** below is prefixed
+  `[ge{n}]` per line so all 4 panels' activity can be read from one place.
 
 ### Data Loader panel (left)
 The streaming **Data** source (folder/glob or HDF5 dataset) with **frame range + stride**,
