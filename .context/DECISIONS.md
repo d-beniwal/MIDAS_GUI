@@ -3,6 +3,97 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-08-24 — Batch Integrate Hydra split: hand-off direction, mask scope (diverges from Calibrate), lazy page construction, and a pytest-isolation fix for `release.sh` (uncommitted at write time)
+
+Added Hydra support to Batch Integrate (Tab 3), mirroring the Calibrate
+tab's Single-detector/Hydra ribbon split: each of the 4 GE panels is
+integrated with its own independently fitted geometry, via a new
+`HydraBatchPanelCard` (per-panel calibration source + values + progress)
+and `HydraBatchPage` (shared Integration/Corrections/Monitor/Output cards,
+Sequential/Parallel `BatchWorker`-per-panel orchestration copied from
+`HydraCalibrationPage`'s pattern). Four decisions worth recording:
+
+**Hand-off direction: automatic push, not a manual pull button.** Confirmed
+with the user before implementing. The Data Viewer↔Calibrate hand-off uses
+a manual "← Data Viewer" pull button because the Data Viewer has no
+"finished" event — it's just whatever's currently loaded. Calibrate→Batch
+is different: a Hydra panel's fit genuinely *finishes* (`_on_panel_done`),
+exactly like the single-detector tab's existing `calibrationDone`→
+`set_calibration` auto-wiring. So `HydraCalibrationPage` gained
+`panelCalibrationDone(n, result)`, forwarded through `CalibrationTab
+.hydraPanelCalibrationDone`, wired in `app.py` to `BatchTab
+.set_hydra_panel_calibration` — a panel's Batch Integrate calibration
+source populates itself the moment that panel's Calibrate-tab fit
+completes, with no user action needed. Each panel keeps an independent
+manual "From file" fallback too, mirroring the single-detector tab's own
+radio-button pattern.
+
+**Masks ARE wired per panel for Hydra Integrate — a deliberate departure
+from Hydra Calibrate's `cfg["mask"]=None` scope-cut**, confirmed explicitly
+with the user rather than assumed. Rationale: the single-detector Batch tab
+already treats masks as a first-class input (`DataLoaderPanel`'s
+`MaskSelector`), and bad-pixel/beamstop masking matters more for
+integration-profile quality than for ring-centroid calibration fitting.
+`HydraLoaderPanel` gained a `mode="nav"|"stream"` constructor param
+(default `"nav"` preserves existing Viewer/Calib behavior unchanged);
+`"stream"` mode adds a shared frame-range+stride row (frames are
+synchronized across panels — one range for all 4, per the class's own
+existing docstring) and one independent `MaskSelector` per panel (each with
+its own manual "Add file…" picker — **no sibling auto-discovery**, also
+confirmed with the user: mask files are physically panel-specific and may
+not follow a shared ge{n} naming convention the way data files do).
+
+**Drift correction and live MONITOR (folder-watch) mode are deferred for
+Hydra v1** — both exist on the single-detector Batch tab; the user
+confirmed deferring both rather than scoping either in now. `BatchWorker`
+needed no `capture_stdout`-style flag for safe Parallel-mode concurrency
+(unlike `CalibrationWorker`) — it already logs via the `log_line` Qt signal
+only and never redirects the process-global `sys.stdout`.
+
+**`HydraBatchPage` is built lazily**, unlike `HydraCalibrationPage`/
+`HydraViewerPage` (both built eagerly in their tab's `__init__`). It owns 8
+pyqtgraph widgets (4 `WaterfallViewer` + 4 `StackedProfileViewer` — more
+than Calib's 6), and most sessions never open Hydra Batch Integrate at all.
+`BatchTab._ensure_hydra_page()` builds it on first ribbon switch to
+"hydra", on `set_hydra_panel_calibration` (the auto hand-off must land
+somewhere even if the user hasn't opened the tab yet), or on `set_state`
+restore if the saved session actually has Hydra page state.
+
+**A concrete instance of the pyqtgraph interpreter-teardown crash risk this
+change ran into, and how it was fixed**: DECISIONS.md's existing entry on
+this risk anticipated "if the full-suite crash rate becomes a real
+nuisance, run Hydra UI tests in a separate pytest process" — this session
+hit exactly that. A/B testing (5 runs each) showed the *unmodified*
+baseline full suite (`pytest tests/`, one process) already segfaults
+~40% of the time from this pre-existing, documented pyqtgraph
+`ViewBox`/GC global-state bug (confirmed via crash tracebacks landing in
+unrelated tests, e.g. `test_mask`'s own `ViewBox` construction — not a
+correctness bug in any specific page). Adding this session's new
+`tests/test_hydra_batch_ui.py` (which — like `test_hydra_calib_ui.py`
+before it — builds `HydraBatchPage` instances, each with several more
+pyqtgraph widgets) pushed that same full-suite run to 5/5 segfaults.
+Running each Hydra-UI-heavy test file in its own fresh `pytest` invocation
+(a fresh interpreter → fresh pyqtgraph global state) eliminated the
+segfault for those files entirely (0/4 in isolation across repeated runs)
+without touching the files' content or reducing test coverage — the crash
+is a property of *cumulative* pyqtgraph widget churn within one process,
+not of any single test. `release.sh`'s test step was changed from one
+`pytest tests/` call to three (main suite minus
+`test_hydra_calib_ui.py`/`test_hydra_batch_ui.py`, then each of those two
+files run separately), preserving identical pass/fail gating semantics. A
+bare `pytest tests/` run by hand still carries the underlying (pre-existing,
+now slightly more frequent) risk — this only fixes the release-gating path.
+
+**Reused as-is / promoted**: `helpers._build_spec`/`spec_from_geometry_file`
+(a Hydra panel's fitted result is exactly the `AutoCalibrationResult`-shaped
+object those already expect — no new spec-building code needed);
+`widgets.MaskSelector` (confirmed zero-coupling to `DataLoaderPanel`,
+directly reusable standalone per panel); a new
+`helpers.resolve_calibration_fields`/`render_calib_value_grid` pair,
+hoisted out of `BatchTab._calib_fields_in_use`/`_refresh_calib_values` so
+`HydraBatchPanelCard` doesn't duplicate that logic — the single-detector
+tab's own methods are now thin wrappers over the same two functions.
+
 ## 2026-08-24 — Calibrate tab Hydra split: field-sharing boundary, and CalibrationWorker's stdout capture made optional for Parallel mode
 
 Split the Calibrate tab into Single-detector/Hydra modes (mirroring the
