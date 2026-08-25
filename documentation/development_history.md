@@ -186,6 +186,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Widen non-data-derived numeric field caps (tilts to ±180°, iteration/geometry/hyperparameter fields to effectively unbounded) across Data Viewer/Calibrate/Corrections/Mask/Refine/Batch | `53f8f19` |
 | Cross-tab DataSourceRegistry + "Import from…" menus (Data/Dark/Bright/Background) + buffer-save button | `6c79f13` |
 | File ▸ Project: opt-in FAIR provenance record (HDF5), auto-logs Calibrate/Batch Integrate runs | `e8dea6b` |
+| Header Profile combo (instant switching); Hydra gated to 1-ID-E; fix stale device/Calibrant dropdowns + pixel/K-edge popups on profile change | `81056e4` |
 
 ### Stability / performance / consistency (review-driven, phases 1–3)
 | Change | Commit |
@@ -2551,6 +2552,61 @@ pyqtgraph interpreter-teardown noise — see `.context/DECISIONS.md`).
 `midas_gui/app.py`, `midas_gui/tab_calibrate.py`, `midas_gui/tab_batch.py`,
 `tests/test_project.py`.
 **Roll back:** `git revert e693316`. Self-contained back to the `162fef1`
+state; no dependents yet.
+
+---
+
+### `81056e4` — Profiles: header Profile combo for instant switching; fix stale option lists on profile change (2026-08-25)
+**Effect:** Two related complaints fixed together. First, switching
+profiles required opening Settings ▸ Preferences every time — a **Profile:
+[combo ▼]** control now sits at the main window's top-left corner, in the
+same row as the tab bar (`QTabWidget.setCornerWidget`), wired straight to
+`settings.set_active_profile()` + `constants.reload_from_config()`; the
+Preferences dialog's own Profile row still works the same as before and
+stays in sync either way — both now funnel through one new
+`MainWindow.on_profile_changed()` instead of the dialog calling
+`apply_tab_visibility()` directly. Second, Hydra mode (the 1-ID-E 4-panel
+GE detector view) is now hidden on Data Viewer/Calibrate/Batch Integrate's
+mode ribbons unless the active profile is **1-ID-E** — the only beamline
+with that detector — falling back to Single detector automatically if
+Hydra was the active mode when it's hidden (`set_hydra_available`/
+`set_hydra_enabled`, driven by `MainWindow.apply_hydra_visibility()`).
+Third, the actual reported bug: profile-scoped *option lists* — the Data
+Viewer's Live PV device dropdown, the Calibrate tab's Calibrant dropdown
+(single-detector and every Hydra panel), and the pixel-size-preset/
+K-edge-foil popup menus — were only ever populated once at
+tab-construction time, so after a profile switch they kept showing the
+*previous* profile's choices until the app was restarted. Fixed with new
+`refresh_devices()` (`DataViewerTab`/`DataLoaderPanel`) and
+`refresh_calibrants()` (`CalibrationTab`/`HydraCalibrationPage`) methods,
+both called from `on_profile_changed()`, sharing a new
+`helpers.refresh_combo_items()` that repopulates a combo box while
+preserving the current selection if it still exists; the pixel/K-edge
+popup menus (`make_pixel_label`/`make_kedge_label`) now rebuild their
+entries from live `constants.*` module attributes on every
+`QMenu.aboutToShow` instead of freezing a list at construction. Seeded
+default *values* (wavelength, pixel size, Lsd, beam-centre, default file
+paths) are deliberately left alone by a profile switch — only fields built
+after the switch pick those up — since there's no way to tell a seeded
+default apart from the user's own in-progress edit once a field exists;
+see `.context/DECISIONS.md` (2026-08-25 entry) for the full reasoning.
+**Verified:** new tests in `tests/test_helpers.py` (combo/menu rebuild
+logic in isolation), `tests/test_live_stream.py`
+(`refresh_devices` — repopulates, preserves custom-typed text, no-ops
+without a Live Data card), and `tests/test_smoke.py`
+(`on_profile_changed` end-to-end through a real `MainWindow`, asserting
+the Live PV dropdown and both the single-detector and Hydra Calibrant
+dropdowns all show the newly-active profile's values). Full suite run
+clean apart from the two known pre-existing issues
+(`test_app_builds_offscreen` local-config flake, pyqtgraph
+interpreter-teardown noise — see `.context/DECISIONS.md`).
+**Files:** `midas_gui/app.py`, `midas_gui/helpers.py`,
+`midas_gui/hydra_calib_page.py`, `midas_gui/hydra_widgets.py`,
+`midas_gui/prefs_dialog.py`, `midas_gui/tab_batch.py`,
+`midas_gui/tab_calibrate.py`, `midas_gui/tab_view.py`,
+`midas_gui/widgets.py`, `tests/test_helpers.py`,
+`tests/test_live_stream.py`, `tests/test_smoke.py`.
+**Roll back:** `git revert 81056e4`. Self-contained back to the `e693316`
 state; no dependents yet.
 
 ---
