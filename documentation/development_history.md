@@ -88,6 +88,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Fix: debounce intensity-mask pixel≤/pixel> spinbox edits | `57ced2f` |
 | Fix: warn when composite mask silently drops a shape-mismatched source | `81b8ea8` |
 | Sim Detector: hardware-free fake PVA stream in the Live Data dropdown | `3d96cb1` |
+| Auto-detect pixel size (filename tag) + wavelength (HDF5 beam energy) on file load, 1-ID-E/20-ID-D/20-ID-E only | `9e4b5c0` |
 | Image viewer: persist manual color-scale window (incl. histogram zoom) across live frames | `3b12fbf` |
 | Fix: "Use Buffer" state now carries into Start instead of resetting | `f3a1b91` |
 | Unrestrict λ/Lsd/pixel-size ranges; tighten decimals; Rings/Labels/thickness on one row | `2525277` |
@@ -141,6 +142,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Image origin flipped to bottom-left `(0,0)` (MIDAS convention) | `246dba7` |
 | Calibrate tab split into Single-detector/Hydra modes: per-panel fit of all 4 GE panels from one calibrant dataset, Sequential/Parallel run modes, geometry hand-off with the Data Viewer's Hydra page | `93dafa2` |
 | Hydra seed-mode (manual seed/feed-back) linked across all 4 panels; new Eta vs R Cake tab (Single-detector + Hydra) | `162fef1` |
+| Auto-detect pixel size + wavelength on file load (1-ID-E/20-ID-D/20-ID-E only; Single-detector + Hydra) | `9e4b5c0` |
 
 ### Batch Integrate (Tab 4)
 | Change | Commit |
@@ -2608,6 +2610,41 @@ interpreter-teardown noise — see `.context/DECISIONS.md`).
 `tests/test_live_stream.py`, `tests/test_smoke.py`.
 **Roll back:** `git revert 81056e4`. Self-contained back to the `e693316`
 state; no dependents yet.
+
+### `9e4b5c0` — Data Viewer/Calibrate: auto-detect pixel size + wavelength on file load (2026-08-25)
+
+**Effect:** Loading a Data file now auto-populates **pixel size** (from the
+detector tag in the filename — `.ge1`–`.ge5` → GE, 200 µm; `.vrx` → Varex,
+150 µm; `.pxrd` is recognized as Pixirad but has no known pixel size to
+auto-fill) and, for an HDF5 frame file, **wavelength** (derived from its
+recorded beam energy at the `instrument/HEM/Energy` dataset, keV → Å via
+`HC_KEV_A`). Gated to the **1-ID-E**, **20-ID-D**, and **20-ID-E** profiles
+via `settings.active_profile()` since the filename/metadata conventions are
+beamline-specific; anything not detected is left at its previous/default
+value. New `helpers.detect_detector_from_filename()` /
+`detect_wavelength_from_h5()` / `detect_geometry_from_path()` do the
+detection (best-effort — any read error or missing dataset just yields `{}`,
+never blocks the actual file load). Wired into the Data Viewer (via a new
+`DataLoaderPanel.metadataDetected` signal feeding `DetectorGeometryCard.
+apply_shared_fields`) and Calibrate (`CalibrationTab._on_metadata_detected`)
+in single-detector mode, and into Hydra mode on both tabs via a new
+`HydraLoaderPanel.detected_geometry()` accessor consulted from
+`HydraViewerPage._on_siblings_changed`/`HydraCalibrationPage.
+_on_siblings_changed` off the loaded anchor-panel file. Batch Integrate is
+unaffected by design — it always gets pixel size/wavelength from the
+calibration it's handed, not the raw file. **Verified:** new tests in
+`tests/test_helpers.py` (filename/HDF5/combined detection, gating to
+unknown profiles) and `tests/test_smoke.py` (end-to-end through a real
+`MainWindow`/`CalibrationTab` load). Full suite run clean apart from the
+two known pre-existing issues (`test_app_builds_offscreen` local-config
+flake, pyqtgraph interpreter-teardown noise across many `MainWindow()`
+builds in one process — see `.context/DECISIONS.md`); each new test also
+verified individually in its own process.
+**Files:** `midas_gui/helpers.py`, `midas_gui/hydra_calib_page.py`,
+`midas_gui/hydra_page.py`, `midas_gui/hydra_widgets.py`,
+`midas_gui/tab_calibrate.py`, `midas_gui/tab_view.py`,
+`midas_gui/widgets.py`, `tests/test_helpers.py`, `tests/test_smoke.py`.
+**Roll back:** `git revert 9e4b5c0`. Self-contained; no dependents yet.
 
 ---
 
