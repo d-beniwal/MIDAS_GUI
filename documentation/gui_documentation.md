@@ -3,7 +3,14 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-24 (Tab 2 — Calibrate: Hydra mode's **Use manual
+**Last updated:** 2026-08-24 (File ▸ **Open Project…** now offers to
+*populate* the GUI from the project's own recorded attempts, not just make
+it active for future logging — a **Populate from project** dialog lets you
+pick, per panel (single-detector or each present Hydra GE panel), which
+recorded Calibrate/Batch Integrate attempt to load. See §17 "File ▸ Project
+(FAIR provenance)" → "Opening a project can populate the GUI".)
+
+**Previously:** (2026-08-24, Tab 2 — Calibrate: Hydra mode's **Use manual
 seed**/**Feed result back to seed** are now one shared choice linked across
 all 4 GE panels (seed *values* stay independent per panel); both
 Single-detector and Hydra Calibrate gain a new **Eta vs R Cake** tab
@@ -1946,7 +1953,8 @@ the course of an experiment, not just one session.
   empty and becomes the active project immediately. Refuses to overwrite an
   existing file (use **Open Project…** to continue one).
 - **File ▸ Open Project…** — pick a previously-created project file to make
-  it active.
+  it active. If it has any recorded attempts, a **Populate from project**
+  dialog follows immediately — see below.
 - **File ▸ Close Project** — stops logging; no data already written is
   touched.
 - The active project's filename is always shown in the status bar
@@ -1979,6 +1987,38 @@ alters the run's on-screen result.
 
 The file is plain HDF5 (`h5py`/`h5dump`/HDFView can browse it directly) —
 no separate tool is required to inspect what a project contains.
+
+### Opening a project can populate the GUI
+
+**File ▸ Open Project…** doesn't just make a project active for future
+logging — if it contains any recorded attempts, a **Populate from project**
+dialog appears with one row per panel found in the file (**Single detector**,
+or each of **ge1**–**ge4** present in Hydra mode). Each row has two
+independent checkboxes, **Calibrate** and **Batch Integrate**, each paired
+with a picker defaulting to that panel's latest attempt (older attempts stay
+selectable if the project has more than one). A checkbox is disabled if that
+panel has no attempt of that kind. Click **Populate** to apply the checked
+rows, or **Skip** to leave every tab exactly as it was (the project still
+becomes active for future logging either way).
+
+Populating switches the Calibrate/Batch Integrate mode ribbon
+(Single-detector vs Hydra) to match what was selected, and restores:
+
+- **Calibrate:** the data path/dataset (and, single-detector only, the frame
+  index), wavelength, pixel size, calibrant, refine-parameter checkboxes,
+  iteration counts, device, and the fitted BC/Lsd/tilts as a manual seed
+  (**Use manual seed** is turned on) — a single click of **Fit** reproduces
+  the recorded result.
+- **Batch Integrate:** the data path/dataset and frame range, kernel, output
+  format, and monitor file — plus, unlike a plain GUI-state load, a live,
+  ready-to-use **calibration** built from the attempt's own recorded
+  geometry, so **Run** works immediately without first re-running Tab 2.
+
+Only fields the codebase can already restore from a file path are populated
+this way — dark/bright/background/mask sources that were embedded directly
+in the project (no file of their own, e.g. a mask hand-drawn in Mask
+Builder) are not re-created automatically and must be re-added from Mask
+Builder / the Data card if needed.
 
 ---
 

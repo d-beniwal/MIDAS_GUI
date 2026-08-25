@@ -2487,6 +2487,74 @@ state; no dependents yet.
 
 ---
 
+### `e693316` — File > Open Project now populates Calibrate/Batch Integrate from recorded attempts (2026-08-24)
+**Effect:** Opening a project (`e8dea6b`) previously only wired it up for
+*future* provenance logging — every tab's fields were left exactly as they
+were, so a saved project's data paths, geometry, and settings could never be
+picked back up. **File ▸ Open Project…** now follows a successful open with
+a new `ProjectLoadDialog` (one row per panel found in the file — single-
+detector, or each present Hydra ge1–ge4) offering two independent
+checkboxes per row, **Calibrate** and **Batch Integrate**, each paired with
+an attempt picker defaulting to that panel's latest record; a checkbox is
+disabled if that panel has no attempt of that kind. Accepting applies the
+checked rows and switches each tab's mode ribbon (Single-detector/Hydra) to
+match.
+`project.py` gains a read-side API — `discover_panels`/`list_attempts`/
+`read_attempt` — plus pure (no-Qt) mapping functions
+(`calib_attempt_gui_fields`/`calib_attempt_loader_state`/
+`integrate_attempt_gui_fields`/`integrate_attempt_loader_state`/
+`calibration_namespace`) that translate a stored attempt's `cfg`/`result`/
+`inputs` into the *same widget-keyed field dicts* `CalibrationTab`'s and
+`BatchTab`'s existing `get_state()`/`set_state()` GUI-state machinery
+already know how to apply — the single-detector tab's fields, the Hydra
+page's shared "recipe" fields, and one Hydra panel card's seed fields turn
+out to be three non-overlapping subsets of the same key vocabulary, so one
+field dict serves all three (`helpers.apply_dict_to_widgets` just ignores
+keys a given widget map doesn't define). `CalibrationTab
+.apply_project_calibration()`/`BatchTab.apply_project_integration()` build
+one combined state dict per tab and call `set_state()` once, so a project
+with attempts for several Hydra panels lands in a single restore rather than
+one mode-ribbon flip per panel.
+Batch Integrate additionally gets a *live, usable* calibration (not just the
+read-only display fields `set_state()` alone would give it): the attempt's
+stored `calibration_snapshot` is turned into a duck-typed result object
+(`project.calibration_namespace`, mirroring `helpers
+.result_ns_from_geometry_file`'s shape) and installed via the tab's own
+`set_calibration()`/`HydraBatchPage.set_panel_calibration()` — so **Run**
+reproduces the recorded integration immediately, without first re-running
+Tab 2.
+Known limitation (documented, not fixed here): dark/bright/background/mask
+sources that were embedded directly in the project (no file of their own —
+e.g. a mask hand-drawn in Mask Builder) are not restored, since
+`FieldSelector`/`MaskSelector` only ever supported file-path-backed sources,
+even for plain GUI-State save/load.
+**Verified:** new pure-logic tests in `tests/test_project.py` for every new
+`project.py` helper (panel discovery, attempt listing/reading, both
+attempt→field mappings including the µm→mm Lsd conversion and the
+unbounded-frame-range `None`→`0` guard, and the calibration namespace
+shape), plus two Qt-level end-to-end tests building a real `CalibrationTab`/
+`BatchTab` and asserting the actual widget values after
+`apply_project_calibration`/`apply_project_integration` — one exercising
+Hydra (ge1/ge2, mode switch + per-panel seed/calibration values distinct per
+panel) and one single-detector. Also manually exercised against the
+project file this bug was filed against
+(`test_data/midas_project.h5`, a real Hydra ge1–ge4 project) end-to-end
+through `MainWindow`: mode switched to Hydra, each panel's seed BC/Lsd and
+shared wavelength/calibrant populated correctly, and each Batch panel got a
+live calibration with the recorded Lsd — confirming the exact complaint
+("data paths and settings are not autopopulated") is fixed. Full suite run
+clean (main suite in one process, the two Hydra UI files each in their own
+process per `release.sh`'s existing isolation) apart from the two known
+pre-existing issues (`test_app_builds_offscreen` local-config flake,
+pyqtgraph interpreter-teardown noise — see `.context/DECISIONS.md`).
+**Files:** `midas_gui/project.py`, `midas_gui/dialogs.py`,
+`midas_gui/app.py`, `midas_gui/tab_calibrate.py`, `midas_gui/tab_batch.py`,
+`tests/test_project.py`.
+**Roll back:** `git revert e693316`. Self-contained back to the `162fef1`
+state; no dependents yet.
+
+---
+
 ## Rollback recipes (common intents)
 
 - **Undo the Pump Probe tab only:** `git revert 590b410` removes Pump Probe *and*
