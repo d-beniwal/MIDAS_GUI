@@ -114,6 +114,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Hydra: Pick BC/Pick Ring point leakage across panels fixed (shared viewer's pick state now cleared on panel switch) | `eadb14d` |
 | Transforms checkboxes extracted into their own boxed Transforms card (was an inline label inside Ring simulation); Hydra ge1-4 gain a per-panel Rotate field; Hydra gains a per-panel Projection card (Max/Sum/Average); fixed Flip Y/Flip Z/Transpose not refreshing the Hydra image; Hydra radial plot pan/zoom bounded to data extent; Material dialog Preset fills Name field | `93dafa2` |
 | Lab-frame axes overlay (APS/MIDAS coordinate compass), ported from midas-gui-swaxs | `87d9df7` |
+| Fix ImTransOpt propagation: Hydra radial-profile geometry now applies the flip via the MIDAS backend instead of dropping it | `2358ae4` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -126,6 +127,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Dilation switched from 4-connected to 8-neighbor full-block growth | `188ea77` |
 | Transforms: Flip Y/Flip Z/Transpose checkboxes (MIDAS ImTransOpt), applied to the single image and the stack source alike; synced from an incoming Calibrate result | `068bd0d` |
 | Image origin flipped to bottom-left `(0,0)` (MIDAS convention) | `246dba7` |
+| Fix ImTransOpt propagation: azimuthal/learnable mask computations now honor the active flip via the MIDAS backend where possible | `2358ae4` |
 
 ### Calibrate (Tab 2) / Refinement (Tab 3)
 | Change | Commit |
@@ -147,6 +149,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Auto-detect pixel size + wavelength on file load (1-ID-E/20-ID-D/20-ID-E only; Single-detector + Hydra) | `9e4b5c0` |
 | Radial Profile/Eta vs R Cake pan/zoom bounded to data extent; Cake right-drag zooms η (Y) only | `08c917f` |
 | Eta vs R Cake auto-level: vmin% default 1→30, percentile calc excludes exact-zero bins | `d0cd6ce` |
+| Fix ImTransOpt propagation: calibration/refinement now pass the raw image + `im_trans` straight through, letting the MIDAS backend apply the flip instead of pre-flipping in Python | `2358ae4` |
 
 ### Batch Integrate (Tab 4)
 | Change | Commit |
@@ -158,6 +161,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Batch Integrate tab split into Single-detector/Hydra modes: per-panel integration of all 4 GE panels with independently fitted geometry, automatic Calibrate→Batch hand-off, per-panel masks, Sequential/Parallel run modes | `6b961d4` |
 | Waterfall/Stacked profiles pan/zoom bounded to data extent; Waterfall gains a color-scale histogram sidebar | `08c917f` |
 | Waterfall auto-level: vmin% default 1→30, percentile calc excludes exact-zero pixels | `d0cd6ce` |
+| Fix ImTransOpt propagation: geometry's flip/transpose now applied by the MIDAS backend (`spec.TransOpt`), not silently dropped | `2358ae4` |
 
 ### PDF Analysis (Tab 6)
 | Change | Commit |
@@ -171,6 +175,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Change | Commit |
 |--------|--------|
 | New tab: TRR pooling + MIDAS-engine integration + ΔI(q,delay) + 4 pyqtgraph views + publication-quality plots + default MIDAS calibration | `590b410` |
+| Fix ImTransOpt propagation: worker now passes the active calibration's `im_trans` through to the MIDAS backend | `2358ae4` |
 
 ### Cross-cutting UI / infrastructure
 | Change | Commit |
@@ -2869,6 +2874,57 @@ made the old default too permissive for typical (mostly-empty) cakes.
 **Files:** `midas_gui/widgets.py` (`CakeViewer._redisplay`,
 `WaterfallViewer` level calc), `documentation/gui_documentation.md`.
 **Roll back:** `git revert d0cd6ce`. Self-contained; no dependents.
+
+---
+
+### `2358ae4` — Batch/Pump Probe/Refinement/Data Viewer: fix ImTransOpt propagation to the MIDAS integration backend (2026-08-25)
+
+**Effect:** Batch Integrate's lineout was wrong whenever the active
+calibration had a non-zero ImTransOpt (Flip Y / Flip Z / Transpose):
+`spec_from_calibration_result()` never copied `im_trans` onto the built
+`IntegrationSpec`, and no worker applied a flip of its own either, so raw
+(untransformed) frames were integrated against a geometry that had actually
+been fit on a transformed image — a coordinate-frame mismatch, not a
+double-flip. Confirmed with `test_data/test_ps.txt` (`ImTransOpt 2`) + a real
+CeO2 frame: unflipped integration piled signal at R≈1394-1677 px (a
+detector-corner edge artifact); the corrected path gives clean bands at
+R≈96-601 px. Fixed under a single rule for the whole app: **the MIDAS backend
+performs every pixel flip used in an actual calibration/integration
+computation; `midas_gui` never does** (the only exception, kept as-is, is a
+viewer's on-screen preview array). Concretely: `helpers._build_spec()` /
+`_spec_from_result_ns()` now set `spec.TransOpt` from `im_trans`, so
+`midas_integrate_v2`'s own `apply_trans_opt=True` (default) flips every raw
+frame internally, exactly once, at every integration call site
+(`CalibrationWorker`, `IntegrationWorker`, `BatchWorker`,
+`FolderMonitorWorker`, `PumpProbeWorker`, `RefinementWorker`,
+`RefineCompareWorker`, `DetectorGeometryCard._midas_radial`).
+`CalibrationWorker` stopped pre-flipping the image/dark and clearing
+`cfg["im_trans"]` before calling `calib.run_pipeline` — it now passes the
+raw arrays and the original `im_trans` straight through, since
+`run_pipeline` already branches correctly per pipeline (native `im_trans`
+kwarg for plain `calibrate()`; manual pre-flip only for the pipeline entry
+points that lack the parameter). Masks are the one exception that still get
+pre-flipped in Python — `*BinGeometry.from_spec()` has no `apply_trans_opt`
+hook — tracked as a package-side gap in ROADMAP.md, not fixed here. The
+Batch Integrate "Calibration values" card also gained a visible **ImTransOpt**
+row so the active transform is no longer invisible. Two other upstream
+backend gaps (most calibration pipelines don't accept `im_trans` natively;
+no `apply_trans_opt` hook on `BinGeometry.from_spec` for masks) and one
+pre-existing, unrelated ImTransOpt/mask bug in the Texture tab's
+`PoleFigureWorker` were found along the way and logged in ROADMAP.md, not
+fixed in this commit.
+**Files:** `midas_gui/helpers.py` (`_build_spec`, `_spec_from_result_ns`,
+`result_ns_from_geometry_file`, `resolve_calibration_fields`,
+`render_calib_value_grid`), `midas_gui/workers.py` (`MaskComputeWorker`,
+`CalibrationWorker`, `IntegrationWorker`, `BatchWorker`,
+`FolderMonitorWorker`, `PumpProbeWorker`, `RefinementWorker`,
+`RefineCompareWorker`), `midas_gui/tab_batch.py`,
+`midas_gui/hydra_batch_page.py`, `midas_gui/hydra_batch_widgets.py`,
+`midas_gui/tab_pumpprobe.py`, `midas_gui/hydra_geometry_card.py`,
+`tests/test_hydra_batch_ui.py`, `documentation/gui_documentation.md`,
+`test_data/test_ps.txt` (new — the real repro params file).
+**Roll back:** `git revert 2358ae4`. Self-contained; no dependents. Reverting
+restores the pre-fix (broken) behavior for any non-zero-ImTransOpt geometry.
 
 ---
 

@@ -1,14 +1,37 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-25 (MIDAS backend package upgrade, `a74b7d6` — committed, not yet pushed)_
+_Last updated: 2026-08-25 (ImTransOpt propagation fix, `2358ae4` — committed,
+not yet pushed)_
 
 ## Now working on
 
-Nothing in progress — working tree is clean. `a74b7d6` (+ docs commit)
+Nothing in progress — working tree is clean. `2358ae4` (+ docs commit)
 committed locally; not yet pushed to `origin/main`.
 
 ## Recently completed
+
+**ImTransOpt propagation fix across Batch/Pump-probe/Refine/Data
+Viewer/Mask Builder (`2358ae4`, see DECISIONS.md 2026-08-25 for full
+detail)** User reported Batch Integrate's lineout was wrong whenever
+the active calibration had a non-zero `ImTransOpt`. Root cause: the
+transform was silently dropped when a calibration result became an
+`IntegrationSpec`, so raw (untransformed) frames were integrated against a
+geometry fit on a *transformed* image. Fixed so the MIDAS backend itself
+performs every pixel flip used in an actual calibration/integration
+computation (`spec.TransOpt` + `midas_integrate_v2`'s own
+`apply_trans_opt=True`) — midas_gui no longer flips images in Python for
+that purpose, only masks (backend has no flip-hook for those) and viewer
+on-screen previews (explicitly fine per user). Touched: `helpers.py`
+(central spec builders + a new "ImTransOpt" row in the Calibration-values
+display), `workers.py` (CalibrationWorker, IntegrationWorker, BatchWorker,
+FolderMonitorWorker, PumpProbeWorker, RefinementWorker, RefineCompareWorker,
+MaskComputeWorker), `tab_batch.py`, `hydra_batch_page.py`/
+`hydra_batch_widgets.py`, `tab_pumpprobe.py`, `hydra_geometry_card.py`.
+Verified against the real `test_data/test_ps.txt` + CeO2 test image repro,
+plus per-file-isolated pytest across every touched test file. Two real
+*backend* (not GUI) limitations found along the way — logged in ROADMAP.md
+("Package-side fixes") for future upstream/GUI follow-up, not fixed here.
 
 **Upgrade all 8 MIDAS backend packages to latest PyPI releases (`a74b7d6`)**
 midas-calibrate/-v2, midas-hkls, midas-integrate/-v2, midas-peakfit,
@@ -17,7 +40,7 @@ Verified API-clean first (3 parallel research passes statically diffed
 every symbol midas_gui imports — all present, unchanged/compatible
 signatures, zero midas_gui code changes needed), then tested in a cloned
 conda env (`conda create --clone`) before touching the live `midas-gui`
-env: full per-file-isolated test suite identical in both envs (no new
+env; full per-file-isolated test suite identical in both envs (no new
 failures, same pre-existing pyqtgraph teardown flakiness); manual runtime
 smoke test of the full `pdf_backend.py` surface against real test data
 (identical numeric results). New dependency `midas-params` now required by
@@ -38,27 +61,23 @@ sum rule, falls back to neutral-atom scattering) — upstream data-table
 note, not a midas_gui bug, but will show up in the GUI's log console the
 first time a Ce-containing composition hits PDF/structure-factor code.
 
-**Data Viewer: lab-frame axes overlay ported from midas-gui-swaxs (`87d9df7`)**
-New **Lab-frame axes** checkbox on the Data Viewer's image toolbar overlays
-the APS/MIDAS lab coordinate system (X_Lab/Y_Lab arrows, Z_Lab beam glyph,
-η-sweep arc) anchored at the beam centre, ported from the sibling
-`midas-gui-swaxs` repo's `DataViewerTab._draw_lab_axes()`. Porting subtlety:
-that repo's `pg.ImageView` keeps pyqtgraph's default `invertY()`, needing a
-`V=-1` flip to keep the Y_Lab arrow pointing up; this repo's `ImageViewer`
-overrides that (`vb.invertY(False)`, MIDAS `(0,0)` bottom-left convention)
-— the opposite sense — so `V=+1` here instead. Redraw wired to
-`DetectorGeometryCard.geometryChanged` + every `self._cur`-reassigning call
-site + `set_state()`. Verified offscreen (item count on toggle, redraw on
-BC change, screenshot confirming arrow directions) plus 5x isolated
-`test_smoke.py` runs (only the two known pre-existing flakes reproduced).
-
-See DECISIONS.md / `development_history.md` (`08c917f`, `653c832`,
-`9e4b5c0`) for earlier sessions' work (plot bounding, Open Project
-auto-plots, auto-detect geometry) — summarized in "Recent changes" below.
+See DECISIONS.md / `development_history.md` (`87d9df7`, `08c917f`,
+`653c832`, `9e4b5c0`) for earlier sessions' work (lab-frame axes overlay,
+plot bounding, Open Project auto-plots, auto-detect geometry) — summarized
+in "Recent changes" below.
 
 ## Open questions / blockers
 
 - None currently blocking.
+- **New follow-ups (not blocking, tracked in ROADMAP.md "Package-side
+  fixes" P3-1/P3-2 and the Texture per-tab item):** (1) several
+  `midas_calibrate_v2` calibration pipelines have no native `im_trans`
+  parameter — GUI already works around it correctly, upstream addition
+  would just simplify `calib.py`; (2) `*BinGeometry.from_spec()` has no
+  `apply_trans_opt` hook for masks — GUI must keep pre-flipping masks in
+  Python indefinitely unless that's added upstream; (3) Texture tab's
+  `PoleFigureWorker` has a pre-existing, unrelated mask/ImTransOpt bug,
+  found but not fixed this session (out of scope).
 - Pre-existing pyqtgraph interpreter-teardown crash risk — **now confirmed
   worse than previously documented**: this session found a plain
   `pytest tests/` (full dir, ignoring only the 2 named Hydra UI files, i.e.
@@ -75,13 +94,12 @@ auto-plots, auto-detect geometry) — summarized in "Recent changes" below.
 - `test_smoke.py::test_app_builds_offscreen` has a pre-existing, unrelated
   local-config flake (stale `visible_tabs` count) — confirmed present on
   bare `main` before this session's changes too.
-- ~~`.context/` is gitignored~~ — checked this session: it is **not**
-  gitignored (`.gitignore` only excludes `claude/` and `CLAUDE.md`; `git
-  check-ignore` confirms `.context/STATE.md`/`DECISIONS.md` are tracked).
-  The earlier flagged note was stale; no action needed.
 
 ## Recent changes (last 3-5 sessions, dated; drop the oldest as it grows)
 
+- 2026-08-25 (`2358ae4`): ImTransOpt propagation fix — the MIDAS backend
+  now performs every pixel flip for calibration/integration; GUI only
+  pre-flips masks and viewer-display previews. See "Recently completed" above.
 - 2026-08-25 (`a74b7d6`): Upgraded all 8 MIDAS backend packages to latest
   PyPI releases (API-clean, zero midas_gui code changes); added
   `midas-params`, pinned `zarr`/`numcodecs`; tested in a cloned conda env
@@ -93,13 +111,6 @@ auto-plots, auto-detect geometry) — summarized in "Recent changes" below.
   Stacked profiles pan-zoom bounded to data extent (like image viewers);
   Cake right-drag now zooms η (Y) only; Waterfall gains a color-scale
   histogram sidebar.
-- 2026-08-25 (`653c832`): Open Project now redraws rings/profile/cake
-  (Calibrate) and Waterfall/Stacked-profiles per Hydra panel (Batch
-  Integrate) from a populated attempt's stored result, not just fields;
-  new header "Project: `<name>`" indicator (top-right, high-contrast).
-- 2026-08-25 (`9e4b5c0` + docs `e43f5a2`): Auto-detect pixel size (filename
-  tag) + wavelength (HDF5 beam energy) on file load, gated to 1-ID-E/
-  20-ID-D/20-ID-E; Data Viewer + Calibrate, single-detector + Hydra.
 
 ## Standing rules (from memory)
 

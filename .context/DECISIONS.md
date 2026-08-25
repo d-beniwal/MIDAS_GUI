@@ -3,6 +3,104 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-08-25 — ImTransOpt fix: the MIDAS backend does the pixel flip everywhere it can; GUI only flips masks (never images) and only for on-screen display (`2358ae4`)
+
+User-reported bug: Batch Integrate's lineout was wrong whenever the active
+calibration used a non-zero `ImTransOpt` (Flip Y / Flip Z / Transpose).
+Root cause: `spec_from_calibration_result()` (external `midas_calibrate_v2`
+package) never copied `im_trans` onto the built `IntegrationSpec`, so
+`spec.TransOpt` was always empty — and `BatchWorker` never applied any flip
+of its own either. Net effect: raw, untransformed frames were integrated
+against a geometry (BC/tilts) that had actually been fit on a *transformed*
+image — a coordinate-frame mismatch, not a double-flip. Confirmed by
+reproducing with `test_data/test_ps.txt` (`ImTransOpt 2`) +
+`test_data/trr_s25ide/images/CeO2-89427.tif`: unflipped integration piled
+signal at R≈1394–1677 px (detector-corner edge artifact); the corrected
+path gives clean bands at R≈96–601 px (physically sensible, near beam
+centre).
+
+**First pass (rejected by user, kept only briefly): GUI pre-flips the pixel
+array itself, `spec.TransOpt` stays empty.** Implemented once, worked, but
+the user explicitly objected: MIDAS's own packages already accept
+`ImTransOpt`/`TransOpt` and know how to apply it — the GUI's job is to *pass
+the parameter*, not duplicate the transform logic in Python. Re-architected
+before anything was committed.
+
+**Final architecture — single rule for the whole app: the MIDAS backend
+performs every pixel-array flip used for an actual calibration/integration
+computation; `midas_gui` never does. The only exception is a viewer's
+on-screen preview array, which may be flipped locally for display.**
+Concretely:
+- `helpers._build_spec()` / `_spec_from_result_ns()` (the shared spec
+  builders behind `_build_spec`, `spec_from_geometry_file`, and every tab
+  that integrates) now set `spec.TransOpt = list(result.im_trans)`.
+  `midas_integrate_v2`'s `integrate_hard/subpixel/polygon(_with_variance)`
+  and `integrate_with_corrections` all default `apply_trans_opt=True` and
+  read `geom.trans_opt`/`spec.TransOpt` themselves — so every raw frame
+  handed to them (unflipped, exactly as loaded) gets flipped internally,
+  exactly once, by the backend.
+- `calib.py`'s calibration path already had this right for the ONE pipeline
+  that supports it: `midas_calibrate_v2.calibrate(image, im_trans=...)`
+  flips `image`/`dark` internally itself. `CalibrationWorker` used to
+  pre-flip in Python *and* clear `cfg["im_trans"]` before calling
+  `run_pipeline` — defeating that native support entirely. Fixed to pass the
+  raw image/dark and the original (uncleared) `im_trans` straight through;
+  `calib.py`'s existing per-branch logic (native kwarg for plain
+  `calibrate()`, manual pre-flip only for the pipelines that lack the
+  parameter — see ROADMAP P3-1) was already correct and untouched.
+- **Masks are the one thing still manually pre-flipped in Python, and this
+  is a genuine backend gap, not a shortcut:** `*BinGeometry.from_spec(spec,
+  mask=mask)` has no `apply_trans_opt` hook at all (unlike every
+  `integrate_*` function) — the mask is evaluated directly against the
+  untransformed pixel grid, so it must already be in the geometry's
+  transformed/world orientation by the time it reaches `from_spec`/
+  `build_geom`. See ROADMAP P3-2 for the upstream ask.
+- **Viewer-only exception, deliberately preserved:** the Calibrate/Mask/Data
+  Viewer tabs still call `_apply_im_trans()` on the array they hand to
+  `ImageViewer.set_image()` for on-screen preview — this never touches a
+  backend calibration/integration call and was explicitly called out by the
+  user as fine to keep ("it is ok to transform image temporarily since we
+  need to view the effect of the parameter").
+- **Structural wrinkle found along the way:** a few places reuse the SAME
+  array for both display and a backend computation (`hydra_geometry_card.py`
+  `_midas_radial()`'s `image_provider()`, and `tab_mask.py`'s
+  `MaskComputeWorker` azimuthal/learnable methods) — both had already
+  flipped that shared array for display before this session. Rather than
+  restructure the image-provider wiring, both now un-transform the array
+  back to raw (`_apply_im_trans(img, tuple(reversed(im_trans)))` — each op
+  is self-inverse, so reversing the code order inverts the composition)
+  immediately before the backend call, then let `spec.TransOpt` reapply it
+  once, correctly. `azimuthal_sigma_clip()` was found to have no
+  `apply_trans_opt` parameter either (unlike `integrate_with_corrections`),
+  so `MaskComputeWorker`'s azimuthal-clip branch is the one call site that
+  deliberately keeps feeding it the already-transformed array — verified
+  case-by-case per function signature via `inspect.signature()`, not assumed.
+- **Self-inflicted bug caught during this session, fixed before landing:**
+  an intermediate edit to `RefinementWorker` zeroed pixels with
+  `img[mask.astype(bool)] = 0.0` using a mask that had been pre-flipped to
+  transformed space while `img` was raw — silently masking the wrong
+  pixels. Fixed by keeping two mask copies: the untouched raw one for the
+  pointwise `img[mask]=0` zeroing (must match `img`'s current, raw, space)
+  and a separately-flipped one (`mask_t`) for `build_geom`. Lesson: whenever
+  a mask feeds two different consumers, check what coordinate space *each
+  one* expects — they are not always the same.
+- **`geometry_fields_from_file()`'s parsed `im_trans` was already correct**
+  (confirmed `ImTransOpt` round-trips through paramstest/`.json`); the bug
+  was entirely downstream of that parse, in spec-building and worker code.
+- **Known follow-up left deliberately unfixed (flagged, not silently
+  expanded into):** `PoleFigureWorker` (Texture tab) passes its mask to
+  `build_geom` with zero transform handling — pre-existing, unrelated to
+  what was asked, tracked in ROADMAP's Texture item.
+
+**Verification:** re-ran the physical repro against the real `BatchWorker`
+code path (not a standalone script) before and after; per-file-isolated
+pytest across every touched test file (`test_im_trans`, `test_helpers`,
+`test_hydra_batch_ui`, `test_hydra_geometry`, `test_hydra_calib_ui`,
+`test_config`, `test_bridge_server`, `test_hydra_chirality`) — all green.
+`test_project.py`/`test_smoke.py` crashes matched the identical pre-existing
+pyqtgraph-teardown flake rate on unmodified `main` via `git stash` A/B
+comparison — not a new regression.
+
 ## 2026-08-25 — MIDAS backend package upgrade: test in a cloned conda env first, keep numpy/torch/numba fixed, pin the newly-surfaced transitive deps explicitly (`a74b7d6`)
 
 User request: the MIDAS PyPI packages had moved on substantially since this

@@ -36,7 +36,17 @@ already-available backend, not a packaging blocker. Build-critical reference:
 - **Data Viewer:** tilt/distortion in ring **overlay** (radial integration
   already handled by df544d2), multi-detector.
 - **Mask:** DAC gasket / angular wedge exclusion.
-- **Texture:** multi-frame (χ,φ) stacks, ODF/WIMV.
+- **Texture:** multi-frame (χ,φ) stacks, ODF/WIMV. **Known bug (found
+  2026-08-25, not fixed — out of scope for the ImTransOpt session that found
+  it):** `PoleFigureWorker` (`workers.py`) passes its mask straight to
+  `build_geom(spec, "subpixel2", mask_t)` with **no transform handling at
+  all** — never did, before or after the 2026-08-25 ImTransOpt fix. If the
+  active calibration has a non-zero ImTransOpt, the mask will be misaligned
+  with the geometry (same class of bug as the one fixed everywhere else this
+  session, but this one call site was outside the reported scope). Fix the
+  same way as `BatchWorker`/`RefinementWorker`: pre-flip the mask (not the
+  image — `spec.TransOpt` already handles the image) before it reaches
+  `build_geom`.
 - **Cross-cutting:** multi-detector merge, energy-sweep calibration.
 
 ## Package-side fixes (for MIDAS maintainers — NOT done in GUI)
@@ -45,3 +55,28 @@ P0-1 normalize corrections cake · P0-2 wire Q-uniform into kernels · P1-1 fini
 autograd geometry grads · P1-2 robuster tilt in one_shot/bayesian · P2-1 smooth
 absorption at μR=1.5 · P2-3 fold `analyze_workflows/` round-trips into package CI.
 (GUI already works around P0-1/P0-2/P1-1/P1-2 — see DECISIONS.)
+
+**P3-1 — `im_trans`/`ImTransOpt` not accepted by most calibration pipeline
+entry points (found 2026-08-25).** Only `midas_calibrate_v2.calibrate()`
+accepts `im_trans` as a native kwarg (and flips `image`/`dark` internally).
+`autocalibrate_four_stage`, `autocalibrate_bayesian`, `autocalibrate_joint`,
+`first_time_calibrate`, and `pipelines.single.autocalibrate` (the
+panel-layout / partial-distortion-refinement routes `calib.py` uses) have
+**no such parameter** — confirmed via `inspect.signature()` against the
+installed package. `midas_gui`'s `calib.py` already works around this
+correctly (manual pre-flip only for those specific branches, since there's
+no alternative) — this is a request for upstream `midas_calibrate_v2` to add
+`im_trans` to the other pipeline entry points for consistency, not a GUI bug.
+
+**P3-2 — no `apply_trans_opt` hook on `*BinGeometry.from_spec(spec,
+mask=mask)` (found 2026-08-25).** Every `midas_integrate_v2.integrate_*`
+function accepts `apply_trans_opt=True` (default) and flips the *image*
+internally via `spec.TransOpt`. Geometry construction itself
+(`HardBinGeometry`/`SubpixelBinGeometry`/`PolygonBinGeometry.from_spec`) has
+no equivalent — a `mask=` array passed to `from_spec()` is evaluated
+directly against the untransformed pixel-index grid, with no way to ask it
+to honor `spec.TransOpt`. `midas_gui` therefore must keep manually
+pre-flipping every mask in Python (once, before `from_spec`/`build_geom`)
+even though it never flips images anymore — see DECISIONS 2026-08-25
+("backend does the flip"). Upstream fix would be an `apply_trans_opt` param
+on `from_spec()` itself, mirroring the `integrate_*` functions.
