@@ -51,6 +51,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Add pip `requirements.txt` mirroring `environment.yml` + README pip path | `683d150` |
 | Reorganize `test_data/` into per-dataset subfolders (`gui_synthetic/`, `s17bm/`, `trr_s25ide/`, `trr_s7id/`) | `c8d98f1` |
 | Fix stale `DEFAULT_*` test-data paths after the `gui_synthetic/` reorg | `3b785c9` |
+| Upgrade all 8 MIDAS backend packages to latest PyPI releases; add midas-params, pin zarr/numcodecs | `a74b7d6` |
 
 ### Data Viewer (Tab 0)
 | Change | Commit |
@@ -2774,6 +2775,66 @@ known local-config `visible_tabs` flake in `test_app_builds_offscreen` also
 reproduces on unmodified `main`.
 **Files:** `midas_gui/tab_view.py`, `documentation/gui_documentation.md`.
 **Roll back:** `git revert 87d9df7`. Self-contained; no dependents yet.
+
+---
+
+### `a74b7d6` — Upgrade MIDAS backend packages to latest PyPI releases (2026-08-25)
+
+**Effect:** Bumped all 8 MIDAS analysis-backend pins in `pyproject.toml`/
+`environment.yml`/`requirements.txt` to their latest PyPI releases:
+midas-calibrate 0.2.7→0.4.3, midas-calibrate-v2 0.5.3→0.10.0, midas-hkls
+0.7.0→0.9.0, midas-integrate 0.4.2→0.6.0, midas-integrate-v2 0.3.1→0.6.0,
+midas-peakfit 0.5.0→0.6.0, midas-zipper 0.1.5→0.2.1, midas-pdf 0.1.1→0.1.3
+(midas-distortion stayed at 0.2.0, unchanged upstream). Added an explicit
+pin for `midas-params==0.11.1`, a new shared params-file registry/validator
+dependency first required (`>=0.9.0`) by several of the bumped packages.
+Also made `zarr==2.18.7`/`numcodecs==0.15.1` explicit pins — both were
+already being pulled in transitively by the old midas-integrate/-peakfit/
+-zipper versions but were never pinned in this repo's env files; this just
+closes that gap. `numpy==1.26.4`/`scipy==1.13.1`/`torch==2.4.0`/
+`numba==0.59.1`/`pvapy==5.4.1` and the rest of the core scientific/GUI stack
+are unchanged — none of the new backend releases require a newer floor.
+**Verified:** Three parallel research passes statically diffed every symbol
+`midas_gui` imports from these packages (all of `midas_calibrate_v2`'s
+`pipelines`/`compat`/`forward`/`seed` submodules, `midas_hkls.{SpaceGroup,
+Lattice,generate_hkls}`, all of `midas_integrate_v2`'s top-level `__all__`,
+and all of `midas_pdf`'s top-level + `corrections`/`cif`/`fluorescence`
+symbols) against old vs. new source — every one still exists at the same
+module path with an unchanged or backward-compatible signature (new kwargs
+are optional), so no `midas_gui` source changes were needed. Testing itself
+was done in a cloned conda env (`midas-gui-next`, `conda create --clone`)
+before touching the live env: `pip install` with the new backend pins
+alongside the held-fixed core stack resolved cleanly (no conflicts); the
+full test suite was run **per-file, isolated** (each `tests/test_*.py` in
+its own `pytest` process — a combined `pytest tests/` run is documented in
+`.context/STATE.md` as unreliable even on unmodified `main`) in both the
+clone and an untouched `midas-gui` baseline for comparison — identical
+results in both: no new failures, only the same pre-existing pyqtgraph
+interpreter-teardown crashes (`test_hydra_ui.py`, `test_project.py`) and
+the same `test_smoke.py` flake rate (3-4/5 runs) already documented as
+environment-level, not code-related. Manually smoke-tested `pdf_backend.py`
+end to end against real `test_data/test_pdf/` CSVs/CIF (Composition,
+faber_ziman_S, i_of_q_to_Gr, read_cif_to_crystal, paalman_pings_cell_only,
+fluorescence_report_sample_and_container) — identical numeric results old
+vs. new, with one new benign informational warning from midas-hkls 0.9.0's
+added ionic-form-factor self-consistency check (flags its own bundled Ce4+
+coefficients as violating the electron-count sum rule and falls back to
+neutral-atom scattering — an upstream data-table note, not an error).
+`tests/test_hydra_calib_ui.py`'s real `CalibrationWorker` run against
+synthetic panel data (the deepest exercise of the `calibrate_v2` pipeline)
+passed identically. Only after all of this was green did the live
+`midas-gui` env get the same `pip install` applied in place (backed up via
+`pip freeze` to `/tmp/midas-gui-env-backup-2026-08-25.txt` first), and the
+stale editable-install `midas_gui.egg-info/requires.txt` (left over from an
+earlier `pip install -e .` in both envs, contrary to `environment.yml`'s
+comment that midas-gui isn't pip-installed there) was refreshed via
+`pip install --no-deps -e .` to stop pip's cosmetic "midas-gui requires
+midas-calibrate==0.2.7 but you have 0.4.3" conflict warnings.
+**Files:** `pyproject.toml`, `environment.yml`, `requirements.txt`.
+**Roll back:** `git revert a74b7d6`, then re-run the same `pip install`
+command from this entry with the old pinned versions in both the
+`midas-gui` conda env and (if recreated) any clone, since this commit only
+touches the pin files — it does not itself change the installed env.
 
 ---
 

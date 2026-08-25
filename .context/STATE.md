@@ -1,14 +1,42 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-25 (Data Viewer lab-frame axes overlay, `87d9df7` — committed, not yet pushed)_
+_Last updated: 2026-08-25 (MIDAS backend package upgrade, `a74b7d6` — committed, not yet pushed)_
 
 ## Now working on
 
-Nothing in progress — working tree is clean. `87d9df7` (+ docs `8f618a8`)
+Nothing in progress — working tree is clean. `a74b7d6` (+ docs commit)
 committed locally; not yet pushed to `origin/main`.
 
 ## Recently completed
+
+**Upgrade all 8 MIDAS backend packages to latest PyPI releases (`a74b7d6`)**
+midas-calibrate/-v2, midas-hkls, midas-integrate/-v2, midas-peakfit,
+midas-zipper, midas-pdf bumped to latest (midas-distortion unchanged).
+Verified API-clean first (3 parallel research passes statically diffed
+every symbol midas_gui imports — all present, unchanged/compatible
+signatures, zero midas_gui code changes needed), then tested in a cloned
+conda env (`conda create --clone`) before touching the live `midas-gui`
+env: full per-file-isolated test suite identical in both envs (no new
+failures, same pre-existing pyqtgraph teardown flakiness); manual runtime
+smoke test of the full `pdf_backend.py` surface against real test data
+(identical numeric results). New dependency `midas-params` now required by
+several bumped packages; `zarr`/`numcodecs` (previously unpinned transitive
+deps) now pinned explicitly. Live env upgraded in place after tests were
+green (`pip freeze` backup at `/tmp/midas-gui-env-backup-2026-08-25.txt`);
+test clone (`midas-gui-next`) removed after cutover. **Gotcha found:**
+`midas_gui` is pip-installed editable (`-e .`) in the `midas-gui` conda env
+despite `environment.yml`'s comment claiming otherwise — its
+`egg-info/requires.txt` goes stale on a pin bump and must be refreshed with
+`pip install --no-deps -e .` (not a plain `-e .`, which would fight the
+conda-forge PyQt5 pin — see that file's own warning) or pip prints spurious
+"midas-gui requires X==old but you have new" conflict warnings forever.
+**New (benign) runtime behavior:** midas-hkls 0.9.0 added a self-check on
+its bundled ionic form-factor table; it now emits a `RuntimeWarning` when
+loading Ce4+ (flags its own coefficients as violating the electron-count
+sum rule, falls back to neutral-atom scattering) — upstream data-table
+note, not a midas_gui bug, but will show up in the GUI's log console the
+first time a Ce-containing composition hits PDF/structure-factor code.
 
 **Data Viewer: lab-frame axes overlay ported from midas-gui-swaxs (`87d9df7`)**
 New **Lab-frame axes** checkbox on the Data Viewer's image toolbar overlays
@@ -24,28 +52,9 @@ site + `set_state()`. Verified offscreen (item count on toggle, redraw on
 BC change, screenshot confirming arrow directions) plus 5x isolated
 `test_smoke.py` runs (only the two known pre-existing flakes reproduced).
 
-**Calibrate/Batch Integrate plots bounded like image viewers; Cake
-right-drag zooms η only; Waterfall gains a color-scale sidebar (`08c917f`)**
-Radial Profile, Eta vs R Cake (Calibrate) and Waterfall, Stacked profiles
-(Batch Integrate) could be zoomed/panned arbitrarily far from their actual
-data — unlike the main image viewers, which `ImageViewer._apply_view_limits()`
-already bounds to the image extent. Added the same `setLimits()`-based
-bounding to `CakeViewer`, `WaterfallViewer`, `StackedProfileViewer`
-(`ProfileViewer`/`HydraProfileViewer` already had it). Also: the cake plot's
-right-click-drag zoomed both R and η together (stock pyqtgraph); new
-`_YZoomViewBox(pg.ViewBox)` restricts that gesture to η (Y) only, everything
-else delegated to the base class. `WaterfallViewer` had no color-scale
-legend at all (unlike the `pg.ImageView`-based viewers) — added a
-`pg.HistogramLUTWidget` wired via `setImageItem()`, driven by the existing
-cmap dropdown through the gradient editor. All three touched classes are
-shared between single-detector and Hydra mode, so one fix covers both.
-Verified via `tests/test_hydra_calib_ui.py`/`test_hydra_batch_ui.py`/
-`test_hydra_ui.py` (each run individually, in its own process) plus manual
-offscreen exercising of the drag math and histogram/cmap wiring.
-
-See DECISIONS.md / `development_history.md` (`653c832`, `9e4b5c0`, `e693316`)
-for earlier sessions' work (Open Project auto-plots, auto-detect geometry,
-Hydra seed-mode linking) — summarized in "Recent changes" below.
+See DECISIONS.md / `development_history.md` (`08c917f`, `653c832`,
+`9e4b5c0`) for earlier sessions' work (plot bounding, Open Project
+auto-plots, auto-detect geometry) — summarized in "Recent changes" below.
 
 ## Open questions / blockers
 
@@ -73,6 +82,10 @@ Hydra seed-mode linking) — summarized in "Recent changes" below.
 
 ## Recent changes (last 3-5 sessions, dated; drop the oldest as it grows)
 
+- 2026-08-25 (`a74b7d6`): Upgraded all 8 MIDAS backend packages to latest
+  PyPI releases (API-clean, zero midas_gui code changes); added
+  `midas-params`, pinned `zarr`/`numcodecs`; tested in a cloned conda env
+  before cutting the live `midas-gui` env over.
 - 2026-08-25 (`87d9df7` + docs `8f618a8`): Data Viewer gains a **Lab-frame
   axes** overlay toggle (APS/MIDAS coordinate compass), ported from
   midas-gui-swaxs with the Y-invert sign flipped for this repo's convention.
@@ -87,10 +100,6 @@ Hydra seed-mode linking) — summarized in "Recent changes" below.
 - 2026-08-25 (`9e4b5c0` + docs `e43f5a2`): Auto-detect pixel size (filename
   tag) + wavelength (HDF5 beam energy) on file load, gated to 1-ID-E/
   20-ID-D/20-ID-E; Data Viewer + Calibrate, single-detector + Hydra.
-- 2026-08-25 (`81056e4` + docs `27f172c`): Header Profile combo (instant
-  switching); Hydra mode gated to 1-ID-E profile only; fixed Live PV
-  device/Calibrant dropdowns + pixel/K-edge popups going stale on a
-  profile switch.
 
 ## Standing rules (from memory)
 

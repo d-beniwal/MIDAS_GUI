@@ -3,6 +3,69 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-08-25 — MIDAS backend package upgrade: test in a cloned conda env first, keep numpy/torch/numba fixed, pin the newly-surfaced transitive deps explicitly (`a74b7d6`)
+
+User request: the MIDAS PyPI packages had moved on substantially since this
+repo's pins were set (e.g. midas-calibrate-v2 0.5.3→0.10.0); confirm the GUI
+still works against the new releases, then upgrade the working `midas-gui`
+env to match.
+
+**Isolation choice: `conda create --clone`, not a fresh env from
+`environment.yml`.** A fresh env would rebuild `pyqt`/`qt` from conda-forge
+too, but cloning guarantees byte-identical Qt bindings to the working env —
+the whole point of `environment.yml`'s conda-forge-not-pip PyQt5 pin is a
+specific machine's xcb library set; a "faithful" rebuild from the recipe
+still risks conda solving to slightly different builds. User explicitly
+chose this over an in-place upgrade-with-rollback to keep the daily-driver
+GUI usable during testing.
+
+**Core stack (numpy/torch/numba/pvapy) held fixed on purpose, not because
+the resolver forced it.** User explicitly chose "keep numpy/torch/numba
+fixed" over "let the upgrade pull them forward too" before the real `pip`
+resolve was even run. It happened to resolve cleanly at the old pins anyway
+(none of the new backend releases' metadata requires numpy>=2), but the
+decision was made independent of that outcome — a numpy 2.x move is a much
+larger, separately-scoped change (see the numpy-1-vs-2/numba/torch
+compatibility note already at the top of `environment.yml`).
+
+**Static API diffing before any install.** Three parallel research agents
+statically diffed the exact symbols `midas_gui` imports (old installed
+source vs. new PyPI wheels/GitHub source) *before* any environment was
+touched, to catch a rename/removal cheaply. All 16+ symbols checked were
+unchanged or backward-compatible (new args optional) — this is why the
+upgrade needed zero `midas_gui` source changes, unusual for a jump this
+large (0.3.x→0.6.x, 0.5.x→0.10.x). Worth repeating this pattern before any
+future backend bump of this size, rather than assuming semver discipline.
+
+**New dependency `midas-params` and the zarr/numcodecs pins: not a
+regression, a pre-existing gap made visible.** `zarr`/`numcodecs` were
+*already* being pulled in transitively by the old midas-integrate/-peakfit/
+-zipper versions (confirmed via `pip show` in the untouched baseline env
+before any upgrade) — they were just never pinned in this repo's env files.
+The upgrade didn't introduce the dependency, only the discipline of pinning
+it. `midas-params` (a lightweight params-file registry/validator) is
+genuinely new, first required (`>=0.9.0`) by several of the bumped
+packages.
+
+**Verification trusted per-file isolated pytest runs only, run in both the
+old and new env for direct comparison** — not a combined `pytest tests/`
+invocation, per the crash-flakiness already documented below (`653c832`
+entry's era). A same-file, same-env repeat (5x) of `test_smoke.py` in both
+envs showed the identical ~3-4/5 flake rate, which is what actually proved
+the crash pattern is environment-level and not a new regression — a single
+run in each env would not have been enough to distinguish "always crashes
+now" from "sometimes crashed before too."
+
+**Gotcha for next time:** `midas_gui` turned out to be pip-installed
+editable in the `midas-gui` conda env (contrary to `environment.yml`'s own
+comment saying it isn't) — pip's dependency resolver read that stale
+`egg-info/requires.txt` and printed permanent "midas-gui requires X==old
+but you have new" conflict warnings on every `pip install` afterward, purely
+cosmetic but noisy. Fixed by `pip install --no-deps -e .` (regenerates the
+egg-info without re-resolving dependencies, so it can't fight the
+conda-forge PyQt5 pin the way a plain `-e .` would per that file's existing
+warning).
+
 ## 2026-08-25 — Open Project's auto-plots reuse the exact live-fit code paths (no new "replay" logic for Calibrate); Batch's replay is new because no such path existed; per-file test isolation is the only trustworthy verification now (`653c832`)
 
 User request: after Open Project populates Calibrate/Batch Integrate
