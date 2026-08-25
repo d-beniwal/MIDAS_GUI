@@ -112,6 +112,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Hydra Phase 6 pass: shared λ/2θ/px fields, dark/bright/background correction, composite orientation fix (CCW + vertical mirror), stale radial geometry fix, zero-excluded vmin% | `0aa5feb` |
 | Hydra: Pick BC/Pick Ring point leakage across panels fixed (shared viewer's pick state now cleared on panel switch) | `eadb14d` |
 | Transforms checkboxes extracted into their own boxed Transforms card (was an inline label inside Ring simulation); Hydra ge1-4 gain a per-panel Rotate field; Hydra gains a per-panel Projection card (Max/Sum/Average); fixed Flip Y/Flip Z/Transpose not refreshing the Hydra image; Hydra radial plot pan/zoom bounded to data extent; Material dialog Preset fills Name field | `93dafa2` |
+| Lab-frame axes overlay (APS/MIDAS coordinate compass), ported from midas-gui-swaxs | `87d9df7` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -2727,6 +2728,52 @@ confirm limits are applied, the histogram levels track cmap changes, and a
 simulated right-drag-up scales Y only while leaving X unchanged.
 **Files:** `midas_gui/widgets.py`, `documentation/gui_documentation.md`.
 **Roll back:** `git revert 08c917f`. Self-contained; no dependents yet.
+
+### `87d9df7` — Data Viewer: add lab-frame axes overlay (APS/MIDAS coordinate compass) (2026-08-25)
+
+**Effect:** Ported the "Lab-frame axes" overlay from the sibling
+`midas-gui-swaxs` repo's Data Viewer (`gui_common.draw_lab_frame_axes` /
+`ff_asym_qt._draw_axes`, itself ported from JSP's tooling): a new **Lab-frame
+axes** checkbox on the Data Viewer's image toolbar (next to Top-N pixels)
+overlays the APS/MIDAS lab coordinate system on the displayed image,
+anchored at the beam centre — a red **X_Lab** arrow, a green **Y_Lab**
+arrow, a blue **⊗** beam-direction (Z_Lab) glyph, and an orange η-sweep arc
+(0°→45°) with a tick at η=0°. Lets a user visually confirm
+orientation/ImTransOpt is correct: a known feature should land in the
+quadrant the overlay predicts. All items are plain `pg.PlotDataItem`/
+`pg.TextItem`s added directly onto the viewer's `pg.ImageView` ViewBox, so
+pan/zoom transforms them for free — they're only rebuilt (`_clear_lab_axes`
+then `_draw_lab_axes`) when the image or geometry actually changes, wired
+via `DetectorGeometryCard.geometryChanged` (BC/tilt/calibration edits) plus
+an explicit call at the tail of every `self._cur`-reassigning method
+(`_on_loader_data`, `_on_fields_changed`, `_on_projection_done`,
+`_on_im_trans_changed`'s projection branch) and `set_state()` (session
+restore). The checkbox's state round-trips through Save/Load GUI State via
+the existing generic `_state_widgets()` dict, no dedicated setting needed.
+**Porting note:** the source repo's `pg.ImageView` keeps pyqtgraph's default
+`invertY()`, so its code needs a `V=-1.0` flip to make the Y_Lab arrow still
+point up on screen; this repo's `ImageViewer` explicitly overrides that
+(`vb.invertY(False)`, so MIDAS pixel `(0,0)` renders bottom-left per
+`.context` convention) — the opposite convention — so `V=+1.0` here instead.
+Everything else (arrow/arc geometry, colors, the `y_sign=-1.0` MIDAS 'bl'
+convention, label placement math) ports verbatim, since neither repo
+inverts the X axis.
+**Verified:** offscreen (`QT_QPA_PLATFORM=offscreen`) construction of
+`DataViewerTab`, toggling the checkbox on/off and confirming exactly 9
+pyqtgraph items are added/removed; confirmed the overlay redraws (new
+objects, not stale references) when `DetectorGeometryCard`'s BC spinbox
+changes; rendered a screenshot with the widget properly shown/sized first
+to confirm the green Y_Lab arrow points up and the red X_Lab arrow points
+left as intended, with the ⊗ glyph centered at BC. `tests/test_smoke.py`
+run 5x individually: the known pre-existing pyqtgraph interpreter-teardown
+segfault (`ColorMapMenu`/`GradientEditorItem` construction inside
+`tab_calibrate.py`, unrelated to this change) reproduced 1/5 times,
+identically reproducible on unmodified `main` via `git stash` — confirmed
+pre-existing, not introduced by this change (`.context/STATE.md`); the
+known local-config `visible_tabs` flake in `test_app_builds_offscreen` also
+reproduces on unmodified `main`.
+**Files:** `midas_gui/tab_view.py`, `documentation/gui_documentation.md`.
+**Roll back:** `git revert 87d9df7`. Self-contained; no dependents yet.
 
 ---
 
