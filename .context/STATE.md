@@ -1,13 +1,13 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-25 (ImTransOpt propagation fix, `2358ae4` — committed,
-not yet pushed)_
+_Last updated: 2026-08-25 (ImTransOpt propagation fix, `2358ae4` + docs
+`003d466` — committed and pushed)_
 
 ## Now working on
 
-Nothing in progress — working tree is clean. `2358ae4` (+ docs commit)
-committed locally; not yet pushed to `origin/main`.
+Nothing in progress — working tree is clean. `2358ae4` (+ docs `003d466`)
+committed and pushed to `origin/main`.
 
 ## Recently completed
 
