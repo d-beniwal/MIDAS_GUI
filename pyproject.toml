@@ -51,17 +51,25 @@ dependencies = [
                                   # metadata (soft/try-except import), so midas_gui must pin
                                   # it explicitly or seeding silently falls back to a coarser
                                   # arc seed.
-    "midas-calibrate-v2==0.5.3",
-    "midas-integrate-v2==0.3.1",
-    "midas-calibrate==0.2.7",
-    "midas-hkls==0.7.0",
+    "midas-calibrate-v2==0.10.0",
+    "midas-integrate-v2==0.6.0",
+    "midas-calibrate==0.4.3",
+    "midas-hkls==0.9.0",
     "midas-distortion==0.2.0",
-    "midas-pdf==0.1.1",           # public PyPI package used by the PDF tab (pdf_backend.py)
+    "midas-pdf==0.1.3",           # public PyPI package used by the PDF tab (pdf_backend.py)
     # ── Transitive MIDAS deps pinned explicitly (pulled in by midas-calibrate-v2 /
     #    midas-pdf but not imported by midas_gui directly) ─────────────────────────
-    "midas-integrate==0.4.2",
-    "midas-peakfit==0.5.0",
-    "midas-zipper==0.1.5",
+    "midas-integrate==0.6.0",
+    "midas-peakfit==0.6.0",
+    "midas-zipper==0.2.1",
+    "midas-params==0.11.1",       # new shared params-file registry/validator dep, first
+                                  # required (>=0.9.0) by midas-calibrate/-v2, midas-hkls,
+                                  # midas-integrate-v2 and midas-pdf as of this pin bump.
+    "zarr==2.18.7",               # required by midas-integrate/-peakfit/-zipper; was already
+                                  # pulled in transitively before this pin bump (unpinned), so
+                                  # this just makes an existing dependency explicit.
+    "numcodecs==0.15.1",          # zarr's codec backend; same "already transitive, now
+                                  # explicit" situation as zarr above.
     "hdf5plugin==7.0.0",
     "psutil==7.2.2",
     # pvapy backs the Data Viewer's "Live Data" card (subscribes to an EPICS
