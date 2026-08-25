@@ -3,6 +3,193 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-08-24 — Open Project's "populate the GUI" reuses GUI-State's widget-key vocabulary instead of a bespoke schema; Batch Integrate gets a real calibration, not just display fields (`e693316`)
+
+User complaint: opening a project (`e8dea6b`) only marked it active for
+*future* provenance logging — every tab's fields were left exactly as they
+were, so a saved project's data paths/geometry/settings could never actually
+be picked back up. Fixed by adding a "populate the GUI from this project"
+path, triggered from `_open_project_dialog` right after a successful open.
+A few things worth recording:
+
+**The attempt→GUI mapping reuses `_state_widgets()`/`state_widgets()`'s
+existing widget-key vocabulary and `apply_dict_to_widgets`, rather than
+writing bespoke per-field setter calls.** Investigating `CalibrationTab`'s
+and `HydraCalibrationPage`/`HydraCalibPanelCard`'s state dictionaries showed
+they're three *non-overlapping* subsets of the same key names (e.g. `wl`,
+`cal`, `seed_bcy`, `ref_lsd` mean the same thing whether they come from the
+single-detector tab's own `_state_widgets()`, the Hydra page's shared
+"recipe" fields, or one Hydra panel card's seed fields) — because the
+single-detector tab's dict is literally the union of the other two (no
+separate cards there, just one detector). That meant one pure function,
+`project.calib_attempt_gui_fields(meta)`, could produce a single field dict
+handed to `apply_dict_to_widgets()` in all three places; each call site
+naturally ignores the keys it doesn't define. Same reasoning applies to
+`integrate_attempt_gui_fields`. This avoided a second, independent
+attempt-schema-to-widget mapping (the risk being that if the widget schema
+changes later, only one place — `_state_widgets()`/`state_widgets()` — would
+need touching, not two).
+
+**Batch Integrate's populate step bypasses `set_state()` for the actual
+calibration and calls `set_calibration()`/`set_panel_calibration()`
+directly.** `BatchTab.set_state()` deliberately never restores
+`self._calib_result` (see its docstring: "long-running pipelines ... are
+not re-run"), because plain GUI State has no live result object to restore
+— a real Tab-2 run is the only source. A project attempt is different: it
+already recorded the *exact* calibration values used
+(`calibration_snapshot`), so there's no reason to leave Batch Integrate
+non-functional pending a Tab-2 re-run. `project.calibration_namespace()`
+turns that stored dict into a duck-typed object (same shape as
+`helpers.result_ns_from_geometry_file()`'s output, which already proved
+sufficient for `resolve_calibration_fields`/`_build_spec`) and hands it to
+the existing `set_calibration()` "From Tab 2"-radio path — the button's
+static label text becomes slightly inaccurate (the values didn't come from
+a live Tab-2 run this session) but this was accepted rather than adding a
+third calibration-source radio button/UI, since the values displayed and
+used are exactly correct either way.
+
+**Combined into one `set_state()` call per tab, not one per selected
+panel.** Calling `set_state()` per Hydra panel selection would flip the
+mode ribbon and touch `anchor_path`/shared "recipe" fields redundantly on
+every call; instead `apply_project_calibration`/`apply_project_integration`
+loop over the selected attempts building one combined `cards`/`fields`
+dict and call `set_state()` exactly once, so a project with attempts for
+all 4 Hydra panels lands in a single restore.
+
+**Explicitly out of scope for this pass**: restoring dark/bright/
+background/mask sources that were embedded directly in a project record
+(no owning file — e.g. a mask hand-drawn in Mask Builder). Checked first
+whether plain GUI-State save/load already supported this (it doesn't —
+`FieldSelector`/`MaskSelector.set_state()` only ever restore file-path
+-backed sources) — so this is a pre-existing gap, not a regression, and
+left as a known follow-up rather than growing this change into a
+selector-widget rework.
+
+## 2026-08-24 — Hydra seed-mode linking is signal-fanout across per-panel checkboxes, not a moved-to-toolbar shared widget; cake data reuses an already-computed, previously-discarded array (`162fef1`)
+
+Two independent Calibrate-tab changes, requested together:
+
+**Seed-mode linking kept the checkboxes on each per-panel card and
+synced their *state* via signals, rather than hoisting a single shared
+checkbox onto the page-level toolbar** (the toolbar — where
+`_show_rings_check`/`_corrected_check` already live — was the obvious
+alternative). Rejected because several existing per-panel methods
+(`_on_bc_picked`, `_on_ring_fit_bc`, `_load_calib_file`, `seed_from_result`,
+`seed_from_geometry`) already call `self._manual_seed_check.setChecked(True)`
+as a side effect scoped to *that* card, with tooltips/log lines phrased
+per-panel ("sets this panel's seed…"). Moving the checkbox off the card
+would have meant rewriting all of those call sites to reach through to a
+page-level widget instead, for a purely cosmetic win. Instead,
+`HydraCalibrationPage._sync_seed_checkbox(attr, src_panel, checked)` is
+wired to each card's `toggled` signal at construction and mirrors any
+state change (manual click or one of those programmatic call sites) onto
+the other three cards' checkboxes directly (`blockSignals` during the
+mirror, so it's a flat fan-out rather than a signal cascade through all 4
+cards). Net effect matches the request exactly — "a selection on any panel
+updates all of them" — while every existing per-panel code path continues
+to work unmodified.
+
+**The Eta-vs-R cake array was already being computed by the backend and
+silently discarded at the GUI boundary** — `integrate_frame()` has
+supported `return_cake=True` since before this session (used by the Batch
+tab's `2d_csv` export format and by `texture.cake_to_pole_figure`), but
+`IntegrationWorker` — the one class shared by both the single-detector and
+Hydra Calibrate tabs' post-fit auto-integration — called it without that
+flag and its `finished` dict only carried the collapsed 1-D profile. So
+this feature needed no new integration math: only threading
+`return_cake=True` through one call site, deriving `eta_axis_deg` the same
+way `build_integration_context` already does for the Batch tab
+(`spec.EtaMin + spec.EtaBinSize * (arange(n_eta) + 0.5)`), and adding the
+two fields to the emitted dict.
+
+**New `CakeViewer` widget rather than reusing/subclassing `ImageViewer`.**
+`ImageViewer`'s mouse-hover/status-bar/pan-zoom-limits code assumes the
+displayed array's row/column indices *are* the physical coordinates
+(detector pixels, always starting at (0,0)) — see its `_mouse()` doing
+`ix, iy = int(x), int(y)` directly against the view coordinates. A cake's
+two axes are physical R (px) and η (°) bin centres, which don't start at
+the origin and aren't 1-unit-per-pixel. Retrofitting `ImageViewer` to
+support an arbitrary axis extent would have meant conditionally branching
+most of its methods; a new, smaller, purpose-built widget
+(`ImageItem.setRect()` to position/scale the image to the real R/η extent,
+its own percentile-based level logic, a hover readout that inverts the
+R/η→array-index mapping) was more contained and left `ImageViewer` alone.
+It does reuse `_resolve_cmap`/`COLORMAPS`/`_DEFAULT_CMAP` and the same
+Log/cmap/vmin%/vmax% toolbar convention, so it looks and behaves like the
+rest of the app's 2-D viewers.
+
+**Verification went beyond the stubbed UI tests deliberately.** Both
+Hydra UI test files stub `IntegrationWorker` entirely (documented reason:
+the synthetic fixture doesn't converge a real fit), so the stub's
+`finished` dict needed `cake_2d`/`eta_axis_deg` added by hand for the new
+assertions to exercise the GUI-side wiring at all — that only proves the
+*plumbing*, not that `integrate_frame(return_cake=True)` actually produces
+a sane array end-to-end. A short manual script (not committed — ad hoc,
+same rationale as this repo's ad hoc PDF-rebuild pipeline) ran the real,
+non-stubbed `IntegrationWorker.run()` against a synthetic image through
+the real `midas_integrate_v2` backend and confirmed a correctly-shaped
+`(n_eta, n_r)` cake, before trusting the stubbed-test assertions as
+sufficient regression coverage.
+
+## 2026-08-24 — File ▸ Project: FAIR provenance is separate from GUI State, always best-effort, and links Batch → Calibrate attempts (`e8dea6b`)
+
+Added an opt-in, long-lived HDF5 "project" file (`midas_gui/project.py`)
+that records what actually *happened* during Calibrate/Batch Integrate
+runs, as opposed to GUI State's existing job of snapshotting widget
+*configuration* for session resume. A few things worth recording:
+
+**Deliberately a separate concept from GUI State**, not an extension of
+it. GUI State is a point-in-time UI snapshot meant to be overwritten
+(Ctrl+S semantics). A provenance record must never be overwritten — it's
+supposed to accumulate a full history of every attempt across many
+separate GUI launches over an experiment's lifetime. Reusing the GUI
+State sidecar format/file would have made "every save silently loses the
+previous attempt" the default behavior, which is the opposite of what
+FAIR provenance needs. Hence its own file format (HDF5, self-marked via a
+`PROJECT_MARKER` attr + schema version so `open_project` can reject a
+random `.h5` file), its own menu section, and its own append-only
+`attempt_NNNN` group-per-run structure.
+
+**Raw scan data is referenced by path + checksum, never duplicated.**
+A Hydra Batch Integrate run can touch a multi-thousand-frame HDF5 stack;
+embedding it would make the project file balloon and duplicate data users
+already have. `sha256_file` hashes fully for files ≤200 MB, and for larger
+files takes a head+tail fingerprint instead (`sha256_partial`) — good
+enough to detect "this isn't the file the record claims" without stalling
+every run on hashing gigabytes. Masks/dark/bright/background frames *are*
+embedded directly (small, and — critically — a mask drawn by hand in Mask
+Builder has no file of its own to reference at all).
+
+**Logging is always best-effort and must never affect the run's own
+outcome.** Each tab/page's `_log_to_project` is called from the existing
+`_on_done`/panel-done handler, wrapped in a bare `try/except` that logs
+any failure (e.g. disk full, permissions) to the tab's own Log panel and
+otherwise does nothing — a provenance-write problem must never make a
+successful calibration or integration look like it failed, nor block the
+result from displaying. `project.py` itself has no Qt dependency (pure
+`h5py`/`json`/`hashlib`), so `tests/test_project.py` covers most of it
+without a QApplication.
+
+**Batch → Calibrate linking uses a field bolted onto the result object,
+not a project-side query.** When a calibration attempt is logged,
+`append_calibration_attempt` returns a path-like ref string
+(`/ge2/calib/attempt_0003`) that the calling page stashes as
+`result._project_attempt_ref`. When that same result later gets used for
+a Batch Integrate run, `_log_to_project` reads that attribute back off and
+passes it as `calib_attempt_ref` so the integration record can point at
+its calibration's exact record — cheaper and simpler than re-deriving
+"which calibration attempt matches these exact cfg values" by scanning
+the HDF5 file, and correct as long as the same in-memory GUI session did
+both runs (a manual "From file" calibration source has no such ref, and
+correctly logs `calib_attempt_ref=None`).
+
+**Reused as-is**: the `.numpy`-attribute duck-type check for dropping
+torch-tensor fields from a result (already used by
+`hydra_calib_widgets.py`'s `_save_json`) — `_sanitize_result_dict` uses
+the identical heuristic so large tensor fields (`residual_corr_map`, etc.)
+are never JSON-serialized into the metadata blob, only their existence
+implied by the sibling `..._embedded` boolean flags.
+
 ## 2026-08-24 — Batch Integrate Hydra split: hand-off direction, mask scope (diverges from Calibrate), lazy page construction, and a pytest-isolation fix for `release.sh` (uncommitted at write time)
 
 Added Hydra support to Batch Integrate (Tab 3), mirroring the Calibrate

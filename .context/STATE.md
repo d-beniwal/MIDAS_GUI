@@ -1,122 +1,82 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-24 (Batch Integrate tab split into Single-detector/Hydra modes — committed as `6b961d4` + docs `0382137`)_
+_Last updated: 2026-08-24 (Open Project now populates the GUI — committed as `e693316`, docs `f60e0dd`)_
 
 ## Now working on
 
 Nothing in progress — awaiting next task.
 
-**Batch Integrate tab (Tab 3) split into Single-detector / Hydra modes**
-(committed as `6b961d4`, docs `0382137`), mirroring the Calibrate tab's split: each of the 4 GE panels
-is integrated with its own independently fitted geometry. New files:
-`hydra_batch_widgets.py` (`HydraBatchPanelCard` — one panel's Calibration
-source [From Calibrate tab / From file] + read-only values grid + compact
-progress bar, mirrors `BatchTab`'s own calibration-source card) and
-`hydra_batch_page.py` (`HydraBatchPage` — shared Integration/Corrections/
-Monitor-normalisation/Output cards applied to all 4 panels' runs, a
-`HydraLoaderPanel(mode="stream")`, a `QStackedWidget` of 4 per-panel
-Waterfall+Stacked-profile viewer pairs switched by a `HydraDetectorToolbar`
-panel toggle, shared Log prefixed `[ge{n}]`). Supports **Sequential**/
-**Parallel** run modes (`BatchWorker` per panel, dict-of-workers
-orchestration — direct copy of `HydraCalibrationPage`'s pattern). Each
-panel writes to its own `<out_dir>/ge{n}/` subfolder.
+## Recently completed
 
-Three confirmed design decisions (user sign-off): (1) **automatic hand-off**
-— `HydraCalibrationPage.panelCalibrationDone(n, result)` → `CalibrationTab
-.hydraPanelCalibrationDone` → `BatchTab.set_hydra_panel_calibration`, wired
-in `app.py`, auto-populates a panel's calibration source the moment that
-panel's Hydra fit finishes (mirrors the existing single-detector
-`calibrationDone`→`set_calibration`); (2) **masks ARE wired per panel** for
-Hydra Integrate (`HydraLoaderPanel` gained `mode="nav"|"stream"`; stream
-mode adds one independent `MaskSelector` per panel, no sibling
-auto-discovery) — a deliberate departure from Hydra Calibrate's
-`cfg["mask"]=None` scope-cut; (3) **Drift correction and live MONITOR mode
-are deferred** for Hydra v1 (both exist in single-detector Batch).
+**File > Open Project now populates Calibrate/Batch Integrate (`e693316`)**
+User complaint: opening a project (`e8dea6b`) only wired it up for *future*
+logging — data paths/geometry/settings from what was already recorded were
+never restored into the GUI. Fixed with a new `ProjectLoadDialog` shown
+right after a successful Open Project: one row per panel found in the file
+(single-detector or each present Hydra ge1–ge4), two checkboxes per row
+(Calibrate / Batch Integrate) each paired with an attempt picker (defaults
+to latest). `project.py` gained a read-side API
+(`discover_panels`/`list_attempts`/`read_attempt`) plus pure mapping
+functions that translate a stored attempt into the *same widget-keyed field
+dicts* `CalibrationTab`/`BatchTab`'s existing `get_state()`/`set_state()`
+machinery already applies — so `apply_project_calibration()`/
+`apply_project_integration()` reuse that machinery instead of poking
+widgets directly. Batch Integrate additionally gets a live, usable
+calibration (via `project.calibration_namespace` + `set_calibration()`/
+`set_panel_calibration()`), so Run works immediately without re-running
+Tab 2 first. Known gap (documented, not fixed): embedded (no-file)
+mask/dark/bright/background sources aren't restored — `FieldSelector`/
+`MaskSelector` only ever supported file-path-backed sources.
+Verified: new pure-logic + Qt end-to-end tests in `tests/test_project.py`
+(discovery/listing/reading, both attempt→field mappings, a Hydra
+2-panel apply, a single-detector apply); manually exercised against the
+real `test_data/midas_project.h5` (a Hydra ge1–ge4 project) through a full
+`MainWindow` — mode switch, per-panel seed values, and a live per-panel
+Batch calibration all populated correctly. Full suite clean apart from the
+two known pre-existing issues below.
 
-`HydraBatchPage` is built **lazily** on `BatchTab` — only on first switch
-to Hydra mode, or when `set_hydra_panel_calibration`/a saved session with
-Hydra page state needs it — rather than eagerly in `BatchTab.__init__`
-(unlike `HydraCalibrationPage`/`HydraViewerPage`, which build eagerly).
-Reason: it owns 8 pyqtgraph widgets (4 `WaterfallViewer` + 4
-`StackedProfileViewer`), and most sessions never touch Hydra Batch
-Integrate — see the pyqtgraph test note below.
-
-`helpers.py` gained two small shared functions, `resolve_calibration_fields`
-and `render_calib_value_grid`, hoisted out of `BatchTab._calib_fields_in_use`
-/`_refresh_calib_values` so `HydraBatchPanelCard` doesn't duplicate that
-~50-line block; `BatchTab` itself now calls the same two helpers.
-
-New test `tests/test_hydra_batch_ui.py` (2 test functions, each building
-exactly ONE `HydraBatchPage` — same "few pages, few tests" pyqtgraph
--teardown mitigation as `test_hydra_calib_ui.py`): calibration hand-off
-(auto `set_panel_calibration` + manual "From file"), per-panel mask
-independence, output subfolder-per-panel naming, and Sequential/Parallel
-orchestration + per-panel viewer-stack switching — all against a stubbed
-`BatchWorker` (spec-building itself is also stubbed at the
-`hydra_batch_widgets._build_spec`/`spec_from_geometry_file` boundary, same
-rationale as Calib's stubbed `CalibrationWorker`: not exercising real
-geometry-fit numerics).
-
-**pyqtgraph test-isolation finding, and `release.sh` fix (this session):**
-running `test_hydra_batch_ui.py` together with the rest of the suite in one
-`pytest` process pushed the pre-existing, documented pyqtgraph interpreter
--teardown segfault (see DECISIONS.md) from a ~40% baseline rate to ~100% —
-confirmed by A/B testing against the unmodified baseline (5 runs each).
-Running each Hydra UI test file (`test_hydra_calib_ui.py`,
-`test_hydra_batch_ui.py`) in **its own fresh `pytest` process** eliminates
-the segfault for those files entirely (0/4 in isolation) and leaves the
-main suite at its pre-existing baseline rate. `release.sh`'s test step was
-changed to invoke pytest 3 times (main suite minus the two Hydra UI files,
-then each Hydra UI file separately) rather than once — this is the "next
-lever" DECISIONS.md's pyqtgraph entry already anticipated needing "if the
-full-suite crash rate becomes a real nuisance." A plain `pytest tests/`
-(e.g. run by hand) still carries the pre-existing risk, now with one more
-contributing file.
-
-## Next steps
-
-- Not yet exercised with a live windowed pass (real Hydra data, real
-  per-panel `BatchWorker` runs) — only offscreen/stubbed-worker tests so
-  far, same caveat as the Hydra Calibrate page before it.
-- No "→ Send to Batch Integrate" push button was added to
-  `HydraCalibPanelCard` (only the pull-style automatic hand-off) — not
-  raised with the user; could add for symmetry with "→ Send to Data
-  Viewer" if wanted later.
+**Calibrate: Hydra seed-mode linking + Eta vs R Cake tab (`162fef1`)** — Use
+manual seed/Feed-back checkboxes linked across all 4 Hydra GE panels
+(values stay independent); new Eta vs R Cake 2-D heatmap tab (both
+Single-detector and Hydra Calibrate), reusing `IntegrationWorker`'s
+already-computed cake array via a new `return_cake=True` flag. See
+DECISIONS.md for full detail.
 
 ## Open questions / blockers
 
 - None currently blocking.
-- The pre-existing pyqtgraph interpreter-teardown crash risk (see above)
-  is now measurably more frequent for a plain, single-process `pytest
-  tests/` run (two Hydra-UI-heavy files instead of one). `release.sh` is
-  fixed; a developer running bare `pytest tests/` will still see it more
-  often than before. Do not reach for `gc.collect()` — already confirmed
-  to make it worse (see DECISIONS.md).
-- **`.context/` is `.gitignore`d in this repo** (`.gitignore:58`), which
-  contradicts the global CLAUDE.md instruction that `.context/` should
-  always be committed. Not touched — flagged for the user to decide.
+- Pre-existing pyqtgraph interpreter-teardown crash risk: a plain
+  `pytest tests/` (not through `release.sh`) still segfaults more often
+  than before the two Hydra UI test files existed; `release.sh` itself
+  runs them isolated and is unaffected. Do not reach for `gc.collect()`
+  (confirmed to make it worse — see DECISIONS.md).
+- `test_smoke.py::test_app_builds_offscreen` has a pre-existing, unrelated
+  local-config flake (stale `visible_tabs` count) — confirmed present on
+  bare `main` before this session's changes too.
+- ~~`.context/` is gitignored~~ — checked this session: it is **not**
+  gitignored (`.gitignore` only excludes `claude/` and `CLAUDE.md`; `git
+  check-ignore` confirms `.context/STATE.md`/`DECISIONS.md` are tracked).
+  The earlier flagged note was stale; no action needed.
 
 ## Recent changes (last 3-5 sessions, dated; drop the oldest as it grows)
 
+- 2026-08-24 (`e693316` + docs `f60e0dd`): File > Open Project now offers a
+  "Populate from project" dialog that restores Calibrate/Batch Integrate
+  fields (+ a live calibration) from the project's recorded attempts.
+- 2026-08-24 (`162fef1` + docs `be0347c`): Hydra Calibrate seed-mode
+  (manual seed/feed-back) linked across all 4 panels; new Eta vs R Cake
+  tab in both Single-detector and Hydra Calibrate.
+- 2026-08-24 (`e8dea6b` + docs `e79a104`): File ▸ Project — opt-in FAIR
+  provenance (HDF5) for Calibrate/Batch Integrate runs, single-detector +
+  Hydra.
 - 2026-08-24 (`6b961d4` + docs `0382137`): Batch Integrate tab split into
   Single-detector/Hydra modes, per-panel masks, automatic Calibrate→Batch
-  hand-off, lazy Hydra-page construction, `release.sh` test-isolation fix
-  — see "Now working on".
+  hand-off, lazy Hydra-page construction, `release.sh` test-isolation fix.
 - 2026-08-24 (`93dafa2` + docs `c23151f`): Calibrate tab split into
   Single-detector/Hydra modes, + bundled Data Viewer Hydra refinements
   (Transforms card extraction, per-panel Rotate, per-panel Projection,
   bounded radial-plot pan/zoom, Preset-fills-Name).
-- 2026-08-24 (`eadb14d` + docs `875d3ed`): Data Viewer Hydra Phase 6, 6th
-  bug — Pick BC/Pick Ring point leakage across panels (shared viewer's pick
-  state not cleared on panel switch).
-- 2026-08-24 (`0aa5feb` + docs `8d5ed5a`): Data Viewer Hydra Phase 6 manual
-  pass found and fixed 5 bugs — shared λ/max2θ/px, dark/bright/background
-  correction, composite orientation (rotation direction + vertical mirror),
-  stale radial-integration geometry, zero-excluded vmin% percentile.
-- 2026-08-23 (`3b785c9`..`1d8c6e5`, 14 commits, on `main`): Data Viewer
-  Hydra detector-view feature, phases 1-5, plus an unrelated
-  stale-test-data-path fix and committing `.context/`.
 
 ## Standing rules (from memory)
 
