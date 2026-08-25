@@ -143,6 +143,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Calibrate tab split into Single-detector/Hydra modes: per-panel fit of all 4 GE panels from one calibrant dataset, Sequential/Parallel run modes, geometry hand-off with the Data Viewer's Hydra page | `93dafa2` |
 | Hydra seed-mode (manual seed/feed-back) linked across all 4 panels; new Eta vs R Cake tab (Single-detector + Hydra) | `162fef1` |
 | Auto-detect pixel size + wavelength on file load (1-ID-E/20-ID-D/20-ID-E only; Single-detector + Hydra) | `9e4b5c0` |
+| Radial Profile/Eta vs R Cake pan/zoom bounded to data extent; Cake right-drag zooms η (Y) only | `08c917f` |
 
 ### Batch Integrate (Tab 4)
 | Change | Commit |
@@ -152,6 +153,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Stacked profiles: publication themes, point+line, symbol size, x-units, grid | `d135c80` |
 | Waterfall R/2θ/Q x-axis selector | `2385f75` |
 | Batch Integrate tab split into Single-detector/Hydra modes: per-panel integration of all 4 GE panels with independently fitted geometry, automatic Calibrate→Batch hand-off, per-panel masks, Sequential/Parallel run modes | `6b961d4` |
+| Waterfall/Stacked profiles pan/zoom bounded to data extent; Waterfall gains a color-scale histogram sidebar | `08c917f` |
 
 ### PDF Analysis (Tab 6)
 | Change | Commit |
@@ -2683,6 +2685,48 @@ is known to make it worse).
 `midas_gui/tab_batch.py`, `midas_gui/tab_calibrate.py`,
 `tests/test_project.py`, `tests/test_smoke.py`.
 **Roll back:** `git revert 653c832`. Self-contained; no dependents yet.
+
+### `08c917f` — Calibrate/Batch Integrate plots: bound pan/zoom like image viewers; Cake right-drag zooms Y only; Waterfall gains color-scale sidebar (2026-08-25)
+
+**Effect:** Radial Profile and Eta vs R Cake (Calibrate) and Waterfall and
+Stacked profiles (Batch Integrate) could be zoomed/panned arbitrarily far
+from their actual data, unlike the main image viewers which are bounded via
+`ImageViewer._apply_view_limits()`. Added the same `setLimits()`-based
+bounding: `CakeViewer._apply_view_limits()` (R/η extent),
+`WaterfallViewer._apply_view_limits()` (R/frame# extent), and
+`StackedProfileViewer._apply_view_limits()` (combined data extent across all
+stacked curves, tracked incrementally as profiles stream in and recomputed
+on a spacing/x-unit change). `ProfileViewer`/`HydraProfileViewer` already had
+equivalent bounding — untouched. Also: the cake plot's right-click-drag
+zoomed **both** R and η together (stock pyqtgraph scales both axes on a
+diagonal right-drag); a new `_YZoomViewBox(pg.ViewBox)` overrides
+`mouseDragEvent` for the right button so the gesture scales η (Y) only —
+every other interaction (left-drag pan, wheel zoom, the context menu) is
+untouched, delegated to the base class. Separately, `WaterfallViewer` had no
+color-scale legend at all — unlike the `pg.ImageView`-based viewers
+(`ImageViewer`, `CakeViewer`), it only ever set a `cmap` name to an
+`ImageItem.setLookupTable()` call with no visible gradient/levels widget.
+Added a `pg.HistogramLUTWidget` wired via `setImageItem()`, placed in a new
+row alongside the plot; its gradient (not a direct `setLookupTable()` call)
+now drives color so a user's histogram level drag and the cmap dropdown stay
+consistent. `CakeViewer` already had this via `pg.ImageView`'s built-in
+histogram — unchanged. All three touched viewer classes are shared between
+single-detector and Hydra mode (`HydraCalibrationPage`/`HydraBatchPage`
+instantiate the same `CakeViewer`/`WaterfallViewer`/`StackedProfileViewer`),
+so the fix applies to both without per-mode changes.
+**Verified:** `tests/test_hydra_calib_ui.py`, `tests/test_hydra_batch_ui.py`
+and `tests/test_hydra_ui.py` each re-run individually in their own process —
+all pass (the only failures are the pre-existing pyqtgraph
+interpreter-teardown segfault/`QComboBox`-deleted noise at interpreter exit,
+reproduced identically on unmodified `main` via `git stash`); `tests/
+test_smoke.py`'s `test_app_builds_offscreen` shows the same pre-existing
+local-config `visible_tabs` flake documented in `.context/STATE.md`. Also
+manually exercised `CakeViewer`/`WaterfallViewer`/`StackedProfileViewer` and
+the `_YZoomViewBox` drag math offscreen (`QT_QPA_PLATFORM=offscreen`) to
+confirm limits are applied, the histogram levels track cmap changes, and a
+simulated right-drag-up scales Y only while leaving X unchanged.
+**Files:** `midas_gui/widgets.py`, `documentation/gui_documentation.md`.
+**Roll back:** `git revert 08c917f`. Self-contained; no dependents yet.
 
 ---
 
