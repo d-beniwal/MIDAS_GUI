@@ -3,7 +3,20 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-25 (Data Viewer and Calibrate: loading a Data file
+**Last updated:** 2026-08-25 (Open Project's "Populate from project" now
+redraws the recorded run's **results**, not just the input fields:
+Calibrate's predicted-ring overlay, Radial Profile, and Eta vs R Cake
+reappear immediately (rings need only the stored geometry; profile/cake also
+need the run's data file to still be loadable), and Batch Integrate's
+Waterfall/Stacked-profiles views are replayed from the attempt's saved
+per-frame data — in Hydra mode, independently per GE panel, so switching the
+GE1–GE4 toolbar shows that panel's own recorded run. A new bold, high-
+contrast **Project: …** label also appears at the far right of the tab-bar
+header row whenever a project is open (in addition to the existing quiet
+status-bar one), so an active project is now hard to miss. See §5, §7, and
+§17 "File ▸ Project (FAIR provenance)".)
+
+**Previously:** (2026-08-25, Data Viewer and Calibrate: loading a Data file
 now auto-populates **pixel size** (from the detector encoded in the
 filename — `.ge1`–`.ge5` → GE, 200 µm; `.vrx` → Varex, 150 µm; `.pxrd` is
 recognized as Pixirad but has no known pixel size to auto-fill) and, for an
@@ -1835,7 +1848,10 @@ JSON file (below) — copy it wherever you like.
 ### Profiles — header dropdown + Settings ▸ Preferences… ▸ Profile row
 A large **Profile: [combo ▼]** control sits at the top-left of the main window,
 in the same row as the tab bar (a vertical rule separates it from the tabs) —
-the fastest way to switch profiles day-to-day. Picking a different profile there
+the fastest way to switch profiles day-to-day. The mirror-image top-right
+corner of that same row shows the active **Project** name (bold, high-
+contrast green) whenever File ▸ Project has one open — see §17 "File ▸
+Project (FAIR provenance)". Picking a different profile there
 switches instantly (no confirmation prompt): live `DEFAULT_*` globals reload,
 tab visibility re-applies, Hydra mode's availability updates, and every
 option-list dropdown/menu backed by that profile (Data Viewer's Live PV
@@ -2022,7 +2038,10 @@ the course of an experiment, not just one session.
 - **File ▸ Close Project** — stops logging; no data already written is
   touched.
 - The active project's filename is always shown in the status bar
-  (bottom-right, "Project: …" / "Project: none").
+  (bottom-right, "Project: …" / "Project: none") **and**, in a bold,
+  high-contrast green, at the far right of the tab-bar header row (empty
+  when no project is open) — the header indicator is the one meant to catch
+  your eye; the status-bar one is the quiet, always-present record.
 
 ### What gets logged, and when
 While a project is open, **every completed Calibrate run** (single-detector
@@ -2077,6 +2096,21 @@ Populating switches the Calibrate/Batch Integrate mode ribbon
   format, and monitor file — plus, unlike a plain GUI-state load, a live,
   ready-to-use **calibration** built from the attempt's own recorded
   geometry, so **Run** works immediately without first re-running Tab 2.
+
+Populating also redraws the recorded run's **results**, immediately, without
+needing to press Fit or Run again:
+
+- **Calibrate:** the predicted-ring overlay reappears on the image at once
+  (pure geometry — no image needed). If the attempt's data file can still be
+  loaded, the **Radial Profile** and **Eta vs R Cake** tabs are also
+  recomputed and shown right away, exactly as if Fit had just finished. In
+  Hydra mode this happens per panel — switch panels (or the panel is the
+  toolbar's current one already) to see each one's rings.
+- **Batch Integrate:** the **Waterfall** and **Stacked profiles** views are
+  replayed from the attempt's own saved per-frame profiles — no re-run
+  needed. In Hydra mode, each GE panel keeps its own independent pair of
+  views, so switching the **GE1/GE2/GE3/GE4** toolbar shows that panel's own
+  recorded run, not a shared plot.
 
 Only fields the codebase can already restore from a file path are populated
 this way — dark/bright/background/mask sources that were embedded directly

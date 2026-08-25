@@ -3,6 +3,87 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-08-25 — Open Project's auto-plots reuse the exact live-fit code paths (no new "replay" logic for Calibrate); Batch's replay is new because no such path existed; per-file test isolation is the only trustworthy verification now (`653c832`)
+
+User request: after Open Project populates Calibrate/Batch Integrate
+fields, also show the recorded *results* (rings, radial profile, Eta-vs-R
+cake, Waterfall/Stacked-profiles — panel-specific in Hydra) without
+requiring a re-run, plus a prominent header project-name indicator.
+
+**Calibrate/Hydra Calibrate: no new "replay" code — call the same methods a
+live fit already calls.** `_draw_rings(result)`/`_run_integration(result)`
+(single-detector) and `card.on_result(result)`/`_run_integration(n, result)`
+(Hydra) were already pure functions of a duck-typed result object plus
+whatever image the loader currently has loaded — neither cares whether the
+result came from a just-finished `CalibrationWorker` or from
+`project.calibration_namespace()` reconstructing a stored attempt's `result`
+dict. So `_display_stored_result()`/`HydraCalibrationPage.
+display_stored_result()` are thin wrappers that just call the existing
+methods in the same order `_on_done`/`_on_panel_done` do, wrapped in
+per-step `try/except` (a stored attempt's data file may no longer exist,
+which must degrade to "rings only" rather than raising). Confirmed via
+`_predict_ring_radii`/`_sanitize_result_dict`: the stored `result` dict
+already carries every field these methods read (including the
+underscore-prefixed `_calibrant_name` GUI-bolted-on extra), since
+`_sanitize_result_dict` only drops torch-tensor fields, not underscore keys.
+
+**Batch/Hydra Batch: genuinely new code, because no prior path replayed a
+finished run's arrays into the plots.** `_on_frame`'s incremental
+`reset()`+`add_profile()`-per-frame calls are the *only* existing way data
+reaches `WaterfallViewer`/`StackedProfileViewer` — there was no "given a
+complete profiles array, populate the whole plot" entry point. Also,
+`project.read_attempt` never read integration attempts' `results/*` HDF5
+datasets at all (only the JSON `metadata`) — a separate
+`read_attempt_results()` was needed, and the Open Project dialog
+(`app.py:_offer_populate_from_project`) now stashes its output onto
+`meta["_results_arrays"]` before handing attempts to
+`apply_project_integration`, rather than teaching `read_attempt` itself to
+always eagerly read arrays it usually doesn't need (calibration attempts
+have no `results` group at all; keeping the array read separate and
+call-site-triggered avoids a wasted HDF5 read on every calibration-only
+`Open Project`).
+
+**Axis re-labelling (R/2θ/Q) reuses `_build_spec()`/`resolved_spec()`
+rather than reading `Lsd`/`pxY`/`wavelength_A` off the raw result
+directly** — those return the same v2-backend `spec` object
+`set_axis_context()` already expects (attribute names differ:
+`spec.Wavelength` vs. the stored result's `wavelength_A`), and calling
+through the existing method keeps this consistent with what a live run's
+`_run()`/`_start_panel_worker()` compute. Wrapped in `try/except` since a
+synthetic/incomplete stored calibration could fail spec resolution —
+axis mislabelling is acceptable, silently losing the whole plot is not.
+
+**Header project-name label is a second, new corner widget — `TopRightCorner`
+of the same `QTabWidget` — not a replacement for the existing status-bar
+one.** Mirrors the 2026-08-25 header-Profile-combo decision above: added
+*alongside* the quiet, always-present status-bar label rather than
+replacing it, because the ask was specifically for something *prominent*
+("different contrasting color... easily visible"), which is a different
+job than a permanent status readout. Text is empty (not "Project: none")
+when no project is open, since an empty high-contrast label reads as
+"nothing to see here" more naturally than a colored "none" would.
+
+**Verification finding, not a fix: the pre-existing pyqtgraph
+interpreter-teardown segfault reproduces on unmodified `main`, not just
+after this session's edits.** While chasing an apparent regression (the
+exact `release.sh`-style invocation — full `tests/` dir minus the 2 named
+Hydra UI files — segfaulted/bus-errored with this session's changes
+applied), `git stash`-ing back to a clean `main` and re-running 3× showed
+the *same* crash on *unmodified* code, and `tests/test_hydra_ui.py` alone
+(not one of the two files `release.sh` isolates) also crashes standalone on
+unmodified `main`. So the crash is environment-level flakiness (this
+machine's current PyQt5/pyqtgraph/Python 3.12 combination), not a
+regression from this session's widget additions — but it also means the
+STATE.md claim "`release.sh` ... is unaffected" no longer holds reliably,
+and a combined `pytest tests/` run can no longer be trusted to surface a
+real failure vs. this crash. Every test file touched this session was
+therefore verified by running it alone in its own process (already this
+repo's established mitigation for exactly this scenario), and that
+per-file-isolation requirement is now recorded as the verification method
+going forward, not just for the two already-named heavy files. Not
+attempted to fix (per the standing "`gc.collect()` makes it worse" note) —
+out of scope for a feature session.
+
 ## 2026-08-25 — Profile switch refreshes option *lists*, never seeded default *values*; header combo added alongside (not instead of) the Preferences one
 
 Two related bugs reported together: switching profiles was buried in

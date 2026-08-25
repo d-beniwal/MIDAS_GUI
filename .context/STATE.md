@@ -1,14 +1,35 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-25 (Auto-detect pixel size/wavelength on file load, `9e4b5c0` — committed & pushed)_
+_Last updated: 2026-08-25 (Open Project auto-plots + header project label, `653c832` — committed, not yet pushed)_
 
 ## Now working on
 
-Nothing in progress — working tree is clean, everything below is committed
-and pushed to `origin/main`.
+Docs for `653c832` written (development_history.md + PDFs, gui_documentation.md
++ PDF) but not yet committed/pushed — do that next, then push both commits.
 
 ## Recently completed
+
+**Open Project auto-displays rings/profile/cake + Hydra per-panel batch
+plots; header project-name indicator (`653c832`)**
+Populating Calibrate/Batch Integrate from a project attempt previously only
+restored input *fields*, leaving every plot blank until Fit/Run was pressed
+again. Now `CalibrationTab._display_stored_result()`/`HydraCalibrationPage.
+display_stored_result()` redraw the ring overlay immediately from the
+stored geometry (no image needed) and re-run the existing
+`IntegrationWorker` for Radial Profile/Eta-vs-R Cake if the attempt's data
+file still loads — mirrors a live Fit's `_on_done`/`_on_panel_done` exactly.
+New `project.read_attempt_results()` reads the embedded
+profiles/r_axis_px/frame_ids arrays (previously unread by Open Project);
+`BatchTab._populate_plots_from_attempt()`/`HydraBatchPage.
+populate_panel_plots()` replay them into Waterfall/Stacked-profiles — each
+Hydra panel keeps its own independent viewer pair, so GE1–GE4 toolbar
+switching now shows genuinely panel-specific results. Also added: a bold
+high-contrast "Project: `<name>`" label at the tab bar's top-right corner
+(mirrors the Profile combo's top-left one), alongside the existing quiet
+status-bar label. Verified via new/extended tests in test_project.py +
+test_smoke.py, each test file re-run individually in its own process (see
+"Open questions" below re: the pyqtgraph segfault).
 
 **Auto-detect pixel size + wavelength on file load (`9e4b5c0` + docs `e43f5a2`)**
 Loading a Data file now auto-populates **pixel size** (from the detector tag
@@ -36,11 +57,19 @@ linking, FAIR provenance) — summarized in "Recent changes" below.
 ## Open questions / blockers
 
 - None currently blocking.
-- Pre-existing pyqtgraph interpreter-teardown crash risk: a plain
-  `pytest tests/` (not through `release.sh`) still segfaults more often
-  than before the two Hydra UI test files existed; `release.sh` itself
-  runs them isolated and is unaffected. Do not reach for `gc.collect()`
-  (confirmed to make it worse — see DECISIONS.md).
+- Pre-existing pyqtgraph interpreter-teardown crash risk — **now confirmed
+  worse than previously documented**: this session found a plain
+  `pytest tests/` (full dir, ignoring only the 2 named Hydra UI files, i.e.
+  `release.sh`'s own invocation) segfaults/bus-errors on **unmodified**
+  `main` too (3/3 runs), and `tests/test_hydra_ui.py` alone (not one of the
+  2 files release.sh isolates) also crashes standalone on unmodified `main`.
+  So this is env-level flakiness (this machine's current PyQt5/pyqtgraph/
+  Python 3.12 combo), not something introduced by any recent session's code
+  — but the earlier claim "`release.sh` ... is unaffected" no longer holds
+  reliably. Verification going forward: trust per-file isolated runs (each
+  file in its own `pytest <file>` process), not a combined `tests/` run. Do
+  not reach for `gc.collect()` (confirmed to make it worse — see
+  DECISIONS.md). Not attempted to fix — out of scope, pre-existing.
 - `test_smoke.py::test_app_builds_offscreen` has a pre-existing, unrelated
   local-config flake (stale `visible_tabs` count) — confirmed present on
   bare `main` before this session's changes too.
@@ -51,6 +80,10 @@ linking, FAIR provenance) — summarized in "Recent changes" below.
 
 ## Recent changes (last 3-5 sessions, dated; drop the oldest as it grows)
 
+- 2026-08-25 (`653c832`): Open Project now redraws rings/profile/cake
+  (Calibrate) and Waterfall/Stacked-profiles per Hydra panel (Batch
+  Integrate) from a populated attempt's stored result, not just fields;
+  new header "Project: `<name>`" indicator (top-right, high-contrast).
 - 2026-08-25 (`9e4b5c0` + docs `e43f5a2`): Auto-detect pixel size (filename
   tag) + wavelength (HDF5 beam energy) on file load, gated to 1-ID-E/
   20-ID-D/20-ID-E; Data Viewer + Calibrate, single-detector + Hydra.
@@ -64,9 +97,6 @@ linking, FAIR provenance) — summarized in "Recent changes" below.
 - 2026-08-24 (`162fef1` + docs `be0347c`): Hydra Calibrate seed-mode
   (manual seed/feed-back) linked across all 4 panels; new Eta vs R Cake
   tab in both Single-detector and Hydra Calibrate.
-- 2026-08-24 (`e8dea6b` + docs `e79a104`): File ▸ Project — opt-in FAIR
-  provenance (HDF5) for Calibrate/Batch Integrate runs, single-detector +
-  Hydra.
 
 ## Standing rules (from memory)
 

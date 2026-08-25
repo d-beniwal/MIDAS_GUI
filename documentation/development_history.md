@@ -2646,6 +2646,44 @@ verified individually in its own process.
 `midas_gui/widgets.py`, `tests/test_helpers.py`, `tests/test_smoke.py`.
 **Roll back:** `git revert 9e4b5c0`. Self-contained; no dependents yet.
 
+### `653c832` — Open Project: auto-display rings/profile/cake + Hydra per-panel batch plots; header project-name indicator (2026-08-25)
+
+**Effect:** Populating Calibrate/Batch Integrate from a project attempt
+(File ▸ Open Project…) previously only restored *input fields*, leaving
+every plot blank until the user pressed Fit/Run again. Now it also redraws
+the recorded **result**: `CalibrationTab._display_stored_result()` /
+`HydraCalibrationPage.display_stored_result()` redraw the predicted-ring
+overlay immediately from the stored geometry (pure geometry, no image
+needed) and, if the attempt's data file can still be loaded, re-run the
+existing `IntegrationWorker` for the Radial Profile / Eta-vs-R Cake tabs —
+mirroring exactly what a live Fit's `_on_done`/`_on_panel_done` already do.
+New `project.read_attempt_results()` reads the embedded
+`profiles`/`r_axis_px`/`frame_ids` arrays an integration attempt already
+stores (previously only the JSON metadata was read back by `Open Project`);
+`BatchTab._populate_plots_from_attempt()` / `HydraBatchPage.
+populate_panel_plots()` replay them into the Waterfall/Stacked-profiles
+views via the same widget calls a live run's per-frame streaming already
+uses. Each Hydra panel keeps its own independent viewer pair
+(`_viewer_pairs`), so the existing GE1–GE4 toolbar now shows genuinely
+panel-specific recorded results instead of nothing. Also: a new bold,
+high-contrast **"Project: `<name>`"** label at the tab bar's top-right
+corner (mirroring the Profile combo's top-left one) makes an open project
+hard to miss, alongside the existing quiet status-bar label.
+**Verified:** new/extended tests in `tests/test_project.py`
+(`test_read_attempt_results_roundtrip`, ring/plot assertions added to the
+existing `apply_project_calibration`/`apply_project_integration` tests) and
+`tests/test_smoke.py` (header label). Each relevant test file re-run
+individually in its own process; confirmed the pre-existing pyqtgraph
+interpreter-teardown segfault (`.context/DECISIONS.md`) reproduces on
+unmodified `main` too (3/3 runs) when running the full `tests/` directory in
+one process — unrelated to this change, not attempted to fix (`gc.collect()`
+is known to make it worse).
+**Files:** `midas_gui/app.py`, `midas_gui/hydra_batch_page.py`,
+`midas_gui/hydra_calib_page.py`, `midas_gui/project.py`,
+`midas_gui/tab_batch.py`, `midas_gui/tab_calibrate.py`,
+`tests/test_project.py`, `tests/test_smoke.py`.
+**Roll back:** `git revert 653c832`. Self-contained; no dependents yet.
+
 ---
 
 ## Rollback recipes (common intents)
