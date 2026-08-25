@@ -146,6 +146,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Hydra seed-mode (manual seed/feed-back) linked across all 4 panels; new Eta vs R Cake tab (Single-detector + Hydra) | `162fef1` |
 | Auto-detect pixel size + wavelength on file load (1-ID-E/20-ID-D/20-ID-E only; Single-detector + Hydra) | `9e4b5c0` |
 | Radial Profile/Eta vs R Cake pan/zoom bounded to data extent; Cake right-drag zooms η (Y) only | `08c917f` |
+| Eta vs R Cake auto-level: vmin% default 1→30, percentile calc excludes exact-zero bins | `d0cd6ce` |
 
 ### Batch Integrate (Tab 4)
 | Change | Commit |
@@ -156,6 +157,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Waterfall R/2θ/Q x-axis selector | `2385f75` |
 | Batch Integrate tab split into Single-detector/Hydra modes: per-panel integration of all 4 GE panels with independently fitted geometry, automatic Calibrate→Batch hand-off, per-panel masks, Sequential/Parallel run modes | `6b961d4` |
 | Waterfall/Stacked profiles pan/zoom bounded to data extent; Waterfall gains a color-scale histogram sidebar | `08c917f` |
+| Waterfall auto-level: vmin% default 1→30, percentile calc excludes exact-zero pixels | `d0cd6ce` |
 
 ### PDF Analysis (Tab 6)
 | Change | Commit |
@@ -2850,6 +2852,23 @@ existing environment in place (adds/upgrades changed packages, and with
 round-trip.
 **Files:** `README.md`.
 **Roll back:** `git revert 40da952`. Self-contained; no dependents.
+
+---
+
+### `d0cd6ce` — Calibrate/Batch: fix Cake and Waterfall auto-level to exclude zero bins (2026-08-25)
+
+**Effect:** `CakeViewer` (Calibrate's Eta vs R Cake) and `WaterfallViewer`
+(Batch Integrate) computed their vmin%/vmax% auto-level percentiles over all
+finite display values, including exact-zero bins/pixels from unfilled η/R
+bins or zero-padded rows — skewing the level window toward zero on a
+partially-empty cake/waterfall. Both now mask out exact zeros before the
+percentile calc (falling back to the unmasked set if nothing survives),
+matching the fix already in place for the main image viewer. Also raised
+the default vmin% from 1 to 30 for both, since the zero-exclusion alone
+made the old default too permissive for typical (mostly-empty) cakes.
+**Files:** `midas_gui/widgets.py` (`CakeViewer._redisplay`,
+`WaterfallViewer` level calc), `documentation/gui_documentation.md`.
+**Roll back:** `git revert d0cd6ce`. Self-contained; no dependents.
 
 ---
 
