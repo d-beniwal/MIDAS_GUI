@@ -670,7 +670,7 @@ class CakeViewer(QtWidgets.QWidget):
         bar.addWidget(self._cmap)
         bar.addWidget(QtWidgets.QLabel("vmin%:"))
         self._vmin = _NoScrollSpinBox()
-        self._vmin.setRange(0, 99); self._vmin.setValue(1); self._vmin.setFixedWidth(45)
+        self._vmin.setRange(0, 99); self._vmin.setValue(30); self._vmin.setFixedWidth(45)
         self._vmin.valueChanged.connect(self._redisplay)
         bar.addWidget(self._vmin)
         bar.addWidget(QtWidgets.QLabel("vmax%:"))
@@ -720,7 +720,12 @@ class CakeViewer(QtWidgets.QWidget):
             return
         cake = self._cake
         disp = np.log10(np.clip(cake, 1e-6, None)) if self._log.isChecked() else cake
-        finite = disp[np.isfinite(disp)]
+        # Exclude exact-zero bins from the percentile calc (masked on the
+        # pre-log data, like ImageViewer) — unfilled η/R bins would otherwise
+        # skew the auto-level window toward zero.
+        nonzero = cake != 0
+        candidates = disp[np.isfinite(disp) & nonzero]
+        finite = candidates if candidates.size else disp[np.isfinite(disp)]
         if finite.size:
             lo = float(np.percentile(finite, self._vmin.value()))
             hi = float(np.percentile(finite, self._vmax.value()))
@@ -3186,11 +3191,16 @@ class WaterfallViewer(QtWidgets.QWidget):
             return
         arr = self._buf[:self._nrows]                     # (n_frames, n_r) view — no copy
         disp = np.log10(np.clip(arr, 1e-6, None)) if self._log.isChecked() else arr
+        # Exclude exact-zero pixels from the level calc (masked pre-log, like
+        # ImageViewer) — unfilled/zero-padded rows would otherwise skew the
+        # auto-level window toward zero.
+        nonzero = arr != 0
+        candidates = disp[np.isfinite(disp) & nonzero]
+        fin = candidates if candidates.size else disp[np.isfinite(disp)]
         # Level from a strided sample (fast + stable) rather than sorting every pixel.
-        fin = disp[np.isfinite(disp)]
         if fin.size > 200_000:
             fin = fin[:: fin.size // 200_000]
-        lo, hi = (float(np.percentile(fin, 1)), float(np.percentile(fin, 99))) if fin.size else (0.0, 1.0)
+        lo, hi = (float(np.percentile(fin, 30)), float(np.percentile(fin, 99))) if fin.size else (0.0, 1.0)
         if hi <= lo:
             hi = lo + 1.0
         # ImageItem (col-major): pass (n_r, n_frames) so x=R, y=frame

@@ -3,7 +3,13 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-25 (Data Viewer's image toolbar gained a
+**Last updated:** 2026-08-25 (Calibrate's Eta vs R Cake and Batch Integrate's
+Waterfall auto-level: vmin% default raised from 1 to 30, and the percentile
+calculation now excludes exact-zero bins/pixels — same fix already applied to
+the main image viewer — so a partially-empty cake/waterfall no longer skews
+the auto-level window toward zero. See §5 and §7.)
+
+**Previously:** (2026-08-25, Data Viewer's image toolbar gained a
 **Lab-frame axes** overlay toggle — plots the APS/MIDAS lab coordinate
 system (X_Lab/Y_Lab compass, beam-direction glyph, η-sweep arc) anchored at
 the beam centre, for verifying orientation/ImTransOpt. See §3.)
@@ -1254,8 +1260,11 @@ automatically after calibration. The **Eta vs R Cake** tab shows the same
 integration as a 2-D heatmap instead of collapsed to a 1-D curve — R (px) on the
 X-axis, η (°) on the Y-axis, intensity as color — the routine "cake" visualization
 for area-detector diffraction data; it has its own Log/colormap/vmin%/vmax%
-controls plus a color-scale histogram sidebar (same conventions as the main image
-viewer) and updates on every **Re-integrate**. Pan/zoom is bounded to the cake's
+controls (vmin% defaults to **30**) plus a color-scale histogram sidebar (same
+conventions as the main image viewer) and updates on every **Re-integrate**. The
+vmin%/vmax% auto-level calculation excludes exact-zero bins (unfilled η/R bins),
+same as the main image viewer, so a partially-empty cake doesn't skew the level
+window toward zero. Pan/zoom is bounded to the cake's
 own (R, η) extent, like the main image viewers, so you can't scroll/zoom out into
 empty space; a right-click-drag zooms the **η (Y) axis only** — dragging up zooms
 in — leaving R untouched (the stock pyqtgraph gesture that zoomed both axes at
@@ -1423,7 +1432,10 @@ selector to show the axis in **R (px) / 2θ (°) / Q (Å⁻¹)** (converted from
 calibration). Both plots are bounded to their own data extent (like the main image
 viewers) so you can't scroll/zoom out into empty space. **Waterfall** now has a
 color-scale histogram sidebar on the right, same as the main image viewers, driven
-by its **cmap** selector.
+by its **cmap** selector; its vmin%/vmax% auto-level defaults to the **30th/99th**
+percentile and, like the main image viewer, excludes exact-zero pixels from the
+percentile calculation so zero-padded/unfilled rows don't skew the level window
+toward zero.
 
 The **Stacked profiles** view is a publication-quality plot: each curve tags its
 **source file name inline, just below the curve at its left edge** (toggle with the
