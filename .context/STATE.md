@@ -1,14 +1,33 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-25 (Open Project auto-plots + header project label, `653c832` — committed & pushed)_
+_Last updated: 2026-08-25 (Calibrate/Batch plot bounding + Cake Y-zoom + Waterfall colorbar, `08c917f` — committed, not yet pushed)_
 
 ## Now working on
 
-Nothing in progress — working tree is clean, everything below is committed
-and pushed to `origin/main`.
+Nothing in progress — working tree is clean. `08c917f` (+ docs `565524a`)
+committed locally; not yet pushed to `origin/main`.
 
 ## Recently completed
+
+**Calibrate/Batch Integrate plots bounded like image viewers; Cake
+right-drag zooms η only; Waterfall gains a color-scale sidebar (`08c917f`)**
+Radial Profile, Eta vs R Cake (Calibrate) and Waterfall, Stacked profiles
+(Batch Integrate) could be zoomed/panned arbitrarily far from their actual
+data — unlike the main image viewers, which `ImageViewer._apply_view_limits()`
+already bounds to the image extent. Added the same `setLimits()`-based
+bounding to `CakeViewer`, `WaterfallViewer`, `StackedProfileViewer`
+(`ProfileViewer`/`HydraProfileViewer` already had it). Also: the cake plot's
+right-click-drag zoomed both R and η together (stock pyqtgraph); new
+`_YZoomViewBox(pg.ViewBox)` restricts that gesture to η (Y) only, everything
+else delegated to the base class. `WaterfallViewer` had no color-scale
+legend at all (unlike the `pg.ImageView`-based viewers) — added a
+`pg.HistogramLUTWidget` wired via `setImageItem()`, driven by the existing
+cmap dropdown through the gradient editor. All three touched classes are
+shared between single-detector and Hydra mode, so one fix covers both.
+Verified via `tests/test_hydra_calib_ui.py`/`test_hydra_batch_ui.py`/
+`test_hydra_ui.py` (each run individually, in its own process) plus manual
+offscreen exercising of the drag math and histogram/cmap wiring.
 
 **Open Project auto-displays rings/profile/cake + Hydra per-panel batch
 plots; header project-name indicator (`653c832`)**
@@ -31,28 +50,9 @@ status-bar label. Verified via new/extended tests in test_project.py +
 test_smoke.py, each test file re-run individually in its own process (see
 "Open questions" below re: the pyqtgraph segfault).
 
-**Auto-detect pixel size + wavelength on file load (`9e4b5c0` + docs `e43f5a2`)**
-Loading a Data file now auto-populates **pixel size** (from the detector tag
-in the filename — `.ge1`–`.ge5` → GE 200 µm, `.vrx` → Varex 150 µm, `.pxrd`
-identified but no known size) and, for an HDF5 frame file, **wavelength**
-(from its recorded beam energy at `instrument/HEM/Energy`, keV → Å). Gated
-to the **1-ID-E**/**20-ID-D**/**20-ID-E** profiles only (beamline-specific
-filename/metadata conventions); anything not detected leaves the field at
-its previous/default value. New `helpers.detect_geometry_from_path()` (+
-`detect_detector_from_filename()`/`detect_wavelength_from_h5()`, best-effort
-— never blocks the actual load on a read error). Wired into Data Viewer +
-Calibrate, both single-detector (`DataLoaderPanel.metadataDetected` signal)
-and Hydra mode (`HydraLoaderPanel.detected_geometry()`, consulted from each
-page's `_on_siblings_changed`). Batch Integrate unaffected by design — it
-gets geometry from the calibration it's handed, not the raw file. Verified:
-new tests in `test_helpers.py` + `test_smoke.py`; full suite green apart
-from the two known pre-existing issues below (each new/relevant test also
-re-run individually in its own process to rule out the pyqtgraph
-teardown-crash masking a real failure).
-
-See DECISIONS.md / `development_history.md` (`e693316`, `162fef1`, `e8dea6b`)
-for earlier sessions' work (Open Project populate-GUI, Hydra seed-mode
-linking, FAIR provenance) — summarized in "Recent changes" below.
+See DECISIONS.md / `development_history.md` (`9e4b5c0`, `e693316`, `162fef1`)
+for earlier sessions' work (auto-detect geometry, Open Project populate-GUI,
+Hydra seed-mode linking) — summarized in "Recent changes" below.
 
 ## Open questions / blockers
 
@@ -80,6 +80,10 @@ linking, FAIR provenance) — summarized in "Recent changes" below.
 
 ## Recent changes (last 3-5 sessions, dated; drop the oldest as it grows)
 
+- 2026-08-25 (`08c917f` + docs `565524a`): Radial Profile/Cake/Waterfall/
+  Stacked profiles pan-zoom bounded to data extent (like image viewers);
+  Cake right-drag now zooms η (Y) only; Waterfall gains a color-scale
+  histogram sidebar.
 - 2026-08-25 (`653c832`): Open Project now redraws rings/profile/cake
   (Calibrate) and Waterfall/Stacked-profiles per Hydra panel (Batch
   Integrate) from a populated attempt's stored result, not just fields;
@@ -94,9 +98,6 @@ linking, FAIR provenance) — summarized in "Recent changes" below.
 - 2026-08-24 (`e693316` + docs `f60e0dd`): File > Open Project now offers a
   "Populate from project" dialog that restores Calibrate/Batch Integrate
   fields (+ a live calibration) from the project's recorded attempts.
-- 2026-08-24 (`162fef1` + docs `be0347c`): Hydra Calibrate seed-mode
-  (manual seed/feed-back) linked across all 4 panels; new Eta vs R Cake
-  tab in both Single-detector and Hydra Calibrate.
 
 ## Standing rules (from memory)
 
