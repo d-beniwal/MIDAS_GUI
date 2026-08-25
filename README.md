@@ -37,6 +37,17 @@ python launch.py
 traceback to `~/midas_gui_error.log` and shows it in a dialog (or the
 console) instead of the window silently vanishing.
 
+**Updating the environment.** If `environment.yml` changed (e.g. after
+pulling new commits) and you want to keep the existing `midas-gui`
+environment rather than recreating it from scratch:
+
+```bash
+conda env update -n midas-gui -f environment.yml --prune
+```
+
+`--prune` removes packages no longer listed in `environment.yml`, keeping
+the environment in sync with the file rather than just adding to it.
+
 **Recreating the environment.** If `midas-gui` already exists (e.g. a failed
 install, or `environment.yml` changed), remove it first — `conda env create`
 will not overwrite an existing environment:
