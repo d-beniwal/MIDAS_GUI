@@ -2838,6 +2838,21 @@ touches the pin files — it does not itself change the installed env.
 
 ---
 
+### `40da952` — docs: add conda env update command to README (2026-08-25)
+
+**Effect:** README's "Installation & Running" section previously only
+documented recreating the `midas-gui` conda environment from scratch
+(`conda env remove` + `conda env create`) when `environment.yml` changes.
+Added a lighter-weight "Updating the environment" subsection above it with
+`conda env update -n midas-gui -f environment.yml --prune`, which syncs an
+existing environment in place (adds/upgrades changed packages, and with
+`--prune` removes ones no longer listed) without the remove/recreate
+round-trip.
+**Files:** `README.md`.
+**Roll back:** `git revert 40da952`. Self-contained; no dependents.
+
+---
+
 ## Rollback recipes (common intents)
 
 - **Undo the Pump Probe tab only:** `git revert 590b410` removes Pump Probe *and*
