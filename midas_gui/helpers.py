@@ -15,7 +15,7 @@ from typing import Optional
 import numpy as np
 from PyQt5 import QtCore, QtWidgets
 
-from midas_gui.constants import _SENTINELS, _LATT, H5_EXTS, _V2_TO_V1
+from midas_gui.constants import _SENTINELS, _LATT, H5_EXTS, _V2_TO_V1, HC_KEV_A
 from midas_gui import style as S
 
 # checkmark SVG written to a temp file so the QSS image: property can use it
@@ -155,6 +155,82 @@ def parse_im_trans(text: str) -> list:
 
 def is_h5(path: str) -> bool:
     return Path(path).suffix.lower() in H5_EXTS
+
+
+# ── Auto-detect geometry from a loaded file (Data Viewer / Calibrate) ──────────
+# Filename conventions and the HDF5 energy-metadata location below are specific
+# to the APS 1-ID-E / 20-ID-D / 20-ID-E beamlines, so detection only fires for
+# those profiles (see settings.active_profile()) — elsewhere the tags/dataset
+# path may not mean the same thing (or may not exist at all).
+_AUTO_DETECT_PROFILES = {"1-ID-E", "20-ID-D", "20-ID-E"}
+_DETECTOR_FILENAME_TAGS = (
+    (".ge1", "ge"), (".ge2", "ge"), (".ge3", "ge"), (".ge4", "ge"), (".ge5", "ge"),
+    (".vrx", "vrx"),
+    (".pxrd", "pxrd"),
+)
+# Pixel size (µm) for each recognized detector tag. No entry for "pxrd" —
+# Pixirad is identified but its pixel size isn't auto-populated (not given).
+_DETECTOR_PIXEL_UM = {"ge": 200.0, "vrx": 150.0}
+# HDF5 dataset holding the beam energy (keV) used to derive wavelength, on the
+# beamlines above — confirmed as the authoritative source over the other
+# energy-like datasets present in these files (HRM/IDEnergy readbacks, which
+# may reflect a different or inactive monochromator/undulator setpoint).
+_ENERGY_DATASET = "instrument/HEM/Energy"
+
+
+def detect_detector_from_filename(path: str) -> Optional[str]:
+    """Detector tag ("ge"/"vrx"/"pxrd") from a known filename convention, or
+    None if the filename doesn't match any of them."""
+    name = Path(path).name.lower()
+    for tag, det in _DETECTOR_FILENAME_TAGS:
+        if tag in name:
+            return det
+    return None
+
+
+def detect_wavelength_from_h5(path: str) -> Optional[float]:
+    """Wavelength (Å) derived from `_ENERGY_DATASET` (keV) in an HDF5 frame
+    file, or None if the file isn't HDF5, the dataset is absent, or anything
+    else goes wrong reading it (best-effort, like project.py's provenance
+    logging — a metadata read must never block loading the file)."""
+    if not is_h5(path):
+        return None
+    try:
+        import h5py
+        with h5py.File(path, "r") as f:
+            ds = f.get(_ENERGY_DATASET)
+            if ds is None:
+                return None
+            energy_kev = float(np.atleast_1d(ds[()])[0])
+        if energy_kev <= 0:
+            return None
+        return HC_KEV_A / energy_kev
+    except Exception:
+        return None
+
+
+def detect_geometry_from_path(path: str, *, profile: Optional[str] = None) -> dict:
+    """Best-effort auto-detected geometry hints from a just-loaded file's name
+    ('pxY' from a known detector-file naming convention) and, for an HDF5
+    frame file, its beam-energy metadata ('wavelength_A') — gated to the
+    beamline profiles that use these conventions. Returns a dict using the
+    same key vocabulary as DetectorGeometryCard.get_geometry/set_geometry
+    (e.g. {"pxY": 200.0, "wavelength_A": 0.1653}); a field is omitted rather
+    than guessed when it can't be detected, so callers should only override
+    the fields actually present."""
+    if profile is None:
+        from midas_gui import settings
+        profile = settings.active_profile()
+    if profile not in _AUTO_DETECT_PROFILES:
+        return {}
+    out = {}
+    px = _DETECTOR_PIXEL_UM.get(detect_detector_from_filename(path))
+    if px is not None:
+        out["pxY"] = px
+    wl = detect_wavelength_from_h5(path)
+    if wl is not None:
+        out["wavelength_A"] = wl
+    return out
 
 
 def new_temp_h5_path(prefix: str = "midas_buffer_") -> str:

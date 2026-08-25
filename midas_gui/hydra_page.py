@@ -311,7 +311,11 @@ class HydraViewerPage(QtWidgets.QWidget):
     def _on_siblings_changed(self, siblings: dict):
         self._ensure_states_for_siblings(siblings)
         if siblings:
-            self._sync_shared_fields(f"ge{min(siblings)}")
+            source_key = f"ge{min(siblings)}"
+            detected = self._loader.detected_geometry()
+            if detected:
+                self._cards[source_key].apply_shared_fields(detected)
+            self._sync_shared_fields(source_key)
         self._toolbar.set_available(siblings.keys())
         self._composite_img = None
         self._composite_seeded_size = None

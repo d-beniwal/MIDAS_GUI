@@ -79,3 +79,77 @@ def test_kedge_label_menu_rebuilds_from_current_constants(app, monkeypatch):
     assert len(foil_labels_after) == 2
     assert foil_labels_after[0].startswith("Cu")
     assert foil_labels_after[1].startswith("Ni")
+
+
+# ── detect_geometry_from_path (auto pxY/wavelength_A on load) ─────────────────
+# Detector-from-filename and the HDF5 energy-metadata location are specific to
+# the APS 1-ID-E / 20-ID-D / 20-ID-E beamlines, so every case below pins an
+# explicit `profile=` rather than depending on whatever profile is active on
+# the machine running the tests.
+
+@pytest.mark.parametrize("name,expected", [
+    ("scan.ge1", "ge"), ("scan.GE3.h5", "ge"), ("scan_ge4_001.ge4", "ge"),
+    ("scan.vrx", "vrx"), ("scan.VRX.h5", "vrx"),
+    ("scan.pxrd", "pxrd"),
+    ("scan.tif", None), ("scan.h5", None),
+])
+def test_detect_detector_from_filename(name, expected):
+    from midas_gui.helpers import detect_detector_from_filename
+    assert detect_detector_from_filename(name) == expected
+
+
+def test_detect_geometry_gated_to_known_beamline_profiles():
+    from midas_gui.helpers import detect_geometry_from_path
+
+    assert detect_geometry_from_path("scan.ge2", profile="Default") == {}
+    assert detect_geometry_from_path("scan.ge2", profile="Some Other Profile") == {}
+
+
+@pytest.mark.parametrize("profile", ["1-ID-E", "20-ID-D", "20-ID-E"])
+def test_detect_geometry_pixel_size_from_filename(profile):
+    from midas_gui.helpers import detect_geometry_from_path
+
+    assert detect_geometry_from_path("scan.ge1", profile=profile) == {"pxY": 200.0}
+    assert detect_geometry_from_path("scan.vrx", profile=profile) == {"pxY": 150.0}
+    # Pixirad is identified but has no known pixel size to auto-populate.
+    assert detect_geometry_from_path("scan.pxrd", profile=profile) == {}
+    assert detect_geometry_from_path("scan.tif", profile=profile) == {}
+
+
+def test_detect_geometry_wavelength_from_h5_energy_metadata(tmp_path):
+    h5py = pytest.importorskip("h5py")
+    from midas_gui import constants as C
+    from midas_gui.helpers import detect_geometry_from_path
+
+    path = tmp_path / "scan.h5"
+    with h5py.File(path, "w") as f:
+        f.create_dataset("instrument/HEM/Energy", data=[10.0])
+
+    detected = detect_geometry_from_path(str(path), profile="20-ID-D")
+    assert detected == pytest.approx({"wavelength_A": C.HC_KEV_A / 10.0})
+
+
+def test_detect_geometry_wavelength_absent_when_dataset_missing(tmp_path):
+    h5py = pytest.importorskip("h5py")
+    from midas_gui.helpers import detect_geometry_from_path
+
+    path = tmp_path / "scan.h5"
+    with h5py.File(path, "w") as f:
+        f.create_dataset("exchange/data", data=[[1, 2], [3, 4]])
+
+    assert detect_geometry_from_path(str(path), profile="1-ID-E") == {}
+
+
+def test_detect_geometry_combines_filename_and_h5_metadata(tmp_path):
+    """A real Hydra frame file's name carries the detector tag AND its own
+    HDF5 metadata carries the energy — both should be detected together."""
+    h5py = pytest.importorskip("h5py")
+    from midas_gui import constants as C
+    from midas_gui.helpers import detect_geometry_from_path
+
+    path = tmp_path / "dark_scan_002030.ge1.h5"
+    with h5py.File(path, "w") as f:
+        f.create_dataset("instrument/HEM/Energy", data=[80.61])
+
+    detected = detect_geometry_from_path(str(path), profile="1-ID-E")
+    assert detected == pytest.approx({"pxY": 200.0, "wavelength_A": C.HC_KEV_A / 80.61})

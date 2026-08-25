@@ -117,6 +117,7 @@ class CalibrationTab(QtWidgets.QWidget):
         self._loader.setMinimumWidth(200)
         self._loader.dataChanged.connect(self._on_loader_data)
         self._loader.fieldsChanged.connect(self._on_fields_changed)
+        self._loader.metadataDetected.connect(self._on_metadata_detected)
         split.addWidget(self._loader)
 
         # ── MIDDLE: parameters ──
@@ -476,6 +477,15 @@ class CalibrationTab(QtWidgets.QWidget):
         if self._image is None:
             return
         self._show_calib_image(autorange=False)
+
+    def _on_metadata_detected(self, detected: dict):
+        """Best-effort pxY/wavelength_A auto-detected from the just-loaded
+        file (see helpers.detect_geometry_from_path) — only the fields
+        actually present are applied."""
+        if "wavelength_A" in detected:
+            self._wl.setValue(float(detected["wavelength_A"]))
+        if "pxY" in detected:
+            self._pxY.setValue(float(detected["pxY"]))
 
     # ── Threshold (calibration image only) ────────────────────────
 

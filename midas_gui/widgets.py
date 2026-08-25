@@ -30,7 +30,7 @@ _DEFAULT_CMAP = DEFAULT_COLORMAP if DEFAULT_COLORMAP in COLORMAPS else COLORMAPS
 from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollDoubleSpinBox, _fspin, _twocol,
                                _browse, is_h5, list_h5_datasets, _NoScrollComboBox,
                                _load_image, _collect_frame_paths, apply_field_corrections,
-                               new_temp_h5_path, save_stack_h5)
+                               new_temp_h5_path, save_stack_h5, detect_geometry_from_path)
 from midas_gui import style as S
 
 
@@ -2015,6 +2015,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
     fieldsChanged = QtCore.pyqtSignal()   # dark/bright/background/mask changed
     monitorToggled = QtCore.pyqtSignal(bool)  # MONITOR button toggled (stream mode)
     bufferInvalidated = QtCore.pyqtSignal()   # this panel's own buffer was reset
+    metadataDetected = QtCore.pyqtSignal(dict)  # auto-detected pxY/wavelength_A from a new Data load
 
     def __init__(self, parent=None, *, mode="single", data_dataset="exchange/data",
                  dark_dataset="exchange/data_dark", allow_live=False):
@@ -2461,6 +2462,10 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._info.setText(f"Loaded: {kind}")
             self._setup_navigator()
             self._set_frame(0)
+            detect_path = self._paths[0] if self._paths else raw
+            detected = detect_geometry_from_path(detect_path)
+            if detected:
+                self.metadataDetected.emit(detected)
         except Exception:
             import traceback
             QtWidgets.QMessageBox.critical(self, "Load error", traceback.format_exc()[:500])

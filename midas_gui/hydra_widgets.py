@@ -18,7 +18,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
 from midas_gui.helpers import (_browse, _NoScrollSpinBox, _NoScrollComboBox, hydra_siblings,
-                         is_h5, list_h5_datasets, source_kind)
+                         is_h5, list_h5_datasets, source_kind, detect_geometry_from_path)
 from midas_gui.workers import FieldAverageWorker, ProjectionWorker
 from midas_gui import hydra
 from midas_gui import style as S
@@ -386,6 +386,7 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         super().__init__(parent)
         self._mode = mode
         self._siblings: dict = {}
+        self._detected: dict = {}        # last auto-detected pxY/wavelength_A (nav mode only)
         self._n_frames = 1
         self._frame = 0
         self._is_projection = False
@@ -544,11 +545,19 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         if p:
             self._set_path(p)
 
+    def detected_geometry(self) -> dict:
+        """Best-effort pxY/wavelength_A auto-detected from the current anchor
+        path (see helpers.detect_geometry_from_path) — always {} in "stream"
+        mode (Batch Integrate gets its geometry from a calibration, not the
+        raw file)."""
+        return dict(self._detected)
+
     def _set_path(self, path: str):
         if not path:
             return
         self._clear_projection(emit=False)
         self._path_ed.setText(path)
+        self._detected = detect_geometry_from_path(path) if self._mode == "nav" else {}
         siblings = hydra_siblings(path)
         self._siblings = siblings
         for n, lbl in self._status_lbls.items():

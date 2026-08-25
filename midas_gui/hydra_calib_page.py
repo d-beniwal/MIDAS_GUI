@@ -342,6 +342,11 @@ class HydraCalibrationPage(QtWidgets.QWidget):
     def _on_siblings_changed(self, siblings: dict):
         self._toolbar.set_available(siblings.keys())
         self._sync_avg_controls()
+        detected = self._loader.detected_geometry()
+        if "wavelength_A" in detected:
+            self._wl.setValue(float(detected["wavelength_A"]))
+        if "pxY" in detected:
+            self._pxY.setValue(float(detected["pxY"]))
         self._refresh_display()
 
     def _on_frame_changed(self, _idx: int):

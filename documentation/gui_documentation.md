@@ -3,7 +3,19 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-25 (Switching profiles from the header **Profile:
+**Last updated:** 2026-08-25 (Data Viewer and Calibrate: loading a Data file
+now auto-populates **pixel size** (from the detector encoded in the
+filename — `.ge1`–`.ge5` → GE, 200 µm; `.vrx` → Varex, 150 µm; `.pxrd` is
+recognized as Pixirad but has no known pixel size to auto-fill) and, for an
+HDF5 frame file, **wavelength** (from its recorded beam energy, `keV` →
+Å). Only active for the **1-ID-E**, **20-ID-D**, and **20-ID-E** profiles —
+these are beamline-specific filename/metadata conventions. Applies to both
+single-detector and Hydra mode in both tabs; anything not detected is left
+at its previous/default value. Batch Integrate is unaffected — it always
+gets pixel size/wavelength from the calibration it's handed. See §3 and §5
+"Data Loader panel".)
+
+**Previously:** (2026-08-25, Switching profiles from the header **Profile:
 [combo ▼]** now actually refreshes every dropdown/menu whose choices come
 from that profile, not only tab visibility and Hydra availability: the Data
 Viewer's **Live Data** PV dropdown, the Calibrate tab's **Calibrant**
@@ -555,7 +567,10 @@ and the composite mask are applied to the displayed image and to the radial inte
 **Pan and zoom are bounded to the image** (roughly half an image-width of margin on each
 side) so scrolling/dragging cannot wander off into empty space or zoom out indefinitely;
 the bottom-left **A** (auto-range) button re-fits the image without leaving zoom "stuck"
-tracking the mouse.
+tracking the mouse. On the **1-ID-E** / **20-ID-D** / **20-ID-E** profiles, loading a
+Data file also auto-detects **pixel size** (from a `.ge1`–`.ge5`/`.vrx`/`.pxrd` filename
+tag) and, for an HDF5 file, **wavelength** (from its recorded beam energy) into the Ring
+simulation card's λ/pixel fields below — whatever isn't detected is left unchanged.
 
 ### Projection card
 Collapse a stack to one image: **Max** (hot-pixel hunting), **Sum** (long-exposure
@@ -1121,6 +1136,11 @@ calibration pipeline; bright/background are applied to the calibrant before cali
 and post-calibration integration. The image preview updates live to show the
 dark/bright/background-corrected frame as soon as a field is picked or changed (the raw
 frame still feeds the actual calibration run, which applies these corrections itself).
+On the **1-ID-E** / **20-ID-D** / **20-ID-E** profiles, loading the Data file also
+auto-detects **pixel size** (from a `.ge1`–`.ge5`/`.vrx`/`.pxrd` filename tag) and, for
+an HDF5 file, **wavelength** (from its recorded beam energy) into the Detector card
+below — whatever isn't detected is left unchanged. (Hydra mode: the same detection runs
+off the loaded anchor panel file and applies to the shared λ/pixel fields.)
 
 ### Detector, seed & Load calibration file
 The **Detector & Calibrant** card sets λ, pixel size(s) and detector transforms

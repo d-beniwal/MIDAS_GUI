@@ -288,6 +288,7 @@ class DataViewerTab(QtWidgets.QWidget):
         self._geom_card.pushGeometry.connect(self.pushGeometry.emit)
         self._geom_card.imTransChanged.connect(self._on_im_trans_changed)
         self._geom_card.set_image_source(lambda: self._cur, self._combined_bad_mask)
+        self._loader.metadataDetected.connect(self._geom_card.apply_shared_fields)
         lv.addWidget(self._geom_card)
         lv.addStretch(1)
         split.addWidget(scroll)

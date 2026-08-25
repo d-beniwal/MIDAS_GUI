@@ -90,6 +90,62 @@ def test_on_profile_changed_refreshes_devices_and_calibrants(monkeypatch):
     assert [hydra_cal.itemText(i) for i in range(hydra_cal.count())] == ["OnlyThisCalibrant"]
 
 
+def _make_ge_h5(path, energy_kev=80.61):
+    h5py = pytest.importorskip("h5py")
+    import numpy as np
+    with h5py.File(path, "w") as f:
+        f.create_dataset("exchange/data", data=np.zeros((1, 4, 4), dtype="uint16"))
+        f.create_dataset("instrument/HEM/Energy", data=[energy_kev])
+
+
+def test_data_viewer_autodetects_geometry_from_ge_file(tmp_path, monkeypatch):
+    """Loading a .ge1-tagged HDF5 file into the Data Viewer under a beamline
+    profile auto-populates the geometry card's pixel size + wavelength (see
+    helpers.detect_geometry_from_path) — the wired-up end of the feature, not
+    just the pure detection logic already covered in test_helpers.py."""
+    QtWidgets = pytest.importorskip("PyQt5.QtWidgets")
+    try:
+        import midas_gui.app as app_mod
+        import midas_gui.constants as C
+    except Exception as exc:
+        pytest.skip(f"midas_gui.app needs the full MIDAS stack: {exc}")
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    win = app_mod.MainWindow()
+
+    import midas_gui.settings as settings_mod
+    monkeypatch.setattr(settings_mod, "active_profile", lambda: "1-ID-E")
+
+    path = tmp_path / "dark_scan_002030.ge1.h5"
+    _make_ge_h5(path, energy_kev=80.61)
+    win._view_tab._loader.set_path(str(path))
+
+    g = win._view_tab.get_geometry()
+    assert g["pxY"] == 200.0
+    # The wavelength spin box only keeps 4 decimals — compare with matching tolerance.
+    assert g["wavelength_A"] == pytest.approx(C.HC_KEV_A / 80.61, abs=1e-4)
+
+
+def test_calibrate_autodetects_geometry_from_ge_file(tmp_path, monkeypatch):
+    QtWidgets = pytest.importorskip("PyQt5.QtWidgets")
+    try:
+        import midas_gui.app as app_mod
+        import midas_gui.constants as C
+    except Exception as exc:
+        pytest.skip(f"midas_gui.app needs the full MIDAS stack: {exc}")
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    win = app_mod.MainWindow()
+
+    import midas_gui.settings as settings_mod
+    monkeypatch.setattr(settings_mod, "active_profile", lambda: "20-ID-D")
+
+    path = tmp_path / "scan_001.vrx.h5"
+    _make_ge_h5(path, energy_kev=50.0)
+    win._cal_tab._loader.set_path(str(path))
+
+    assert win._cal_tab._pxY.value() == 150.0
+    assert win._cal_tab._wl.value() == pytest.approx(C.HC_KEV_A / 50.0, abs=1e-5)
+
+
 def test_trr_filename_parser():
     """TRR filenames parse to (fshw, delay, id) with the delay sign flipped."""
     from midas_gui.tab_pumpprobe import parse_trr_filename
