@@ -1,14 +1,28 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-25 (Calibrate/Batch plot bounding + Cake Y-zoom + Waterfall colorbar, `08c917f` — committed, not yet pushed)_
+_Last updated: 2026-08-25 (Data Viewer lab-frame axes overlay, `87d9df7` — committed, not yet pushed)_
 
 ## Now working on
 
-Nothing in progress — working tree is clean. `08c917f` (+ docs `565524a`)
+Nothing in progress — working tree is clean. `87d9df7` (+ docs `8f618a8`)
 committed locally; not yet pushed to `origin/main`.
 
 ## Recently completed
+
+**Data Viewer: lab-frame axes overlay ported from midas-gui-swaxs (`87d9df7`)**
+New **Lab-frame axes** checkbox on the Data Viewer's image toolbar overlays
+the APS/MIDAS lab coordinate system (X_Lab/Y_Lab arrows, Z_Lab beam glyph,
+η-sweep arc) anchored at the beam centre, ported from the sibling
+`midas-gui-swaxs` repo's `DataViewerTab._draw_lab_axes()`. Porting subtlety:
+that repo's `pg.ImageView` keeps pyqtgraph's default `invertY()`, needing a
+`V=-1` flip to keep the Y_Lab arrow pointing up; this repo's `ImageViewer`
+overrides that (`vb.invertY(False)`, MIDAS `(0,0)` bottom-left convention)
+— the opposite sense — so `V=+1` here instead. Redraw wired to
+`DetectorGeometryCard.geometryChanged` + every `self._cur`-reassigning call
+site + `set_state()`. Verified offscreen (item count on toggle, redraw on
+BC change, screenshot confirming arrow directions) plus 5x isolated
+`test_smoke.py` runs (only the two known pre-existing flakes reproduced).
 
 **Calibrate/Batch Integrate plots bounded like image viewers; Cake
 right-drag zooms η only; Waterfall gains a color-scale sidebar (`08c917f`)**
@@ -29,29 +43,8 @@ Verified via `tests/test_hydra_calib_ui.py`/`test_hydra_batch_ui.py`/
 `test_hydra_ui.py` (each run individually, in its own process) plus manual
 offscreen exercising of the drag math and histogram/cmap wiring.
 
-**Open Project auto-displays rings/profile/cake + Hydra per-panel batch
-plots; header project-name indicator (`653c832`)**
-Populating Calibrate/Batch Integrate from a project attempt previously only
-restored input *fields*, leaving every plot blank until Fit/Run was pressed
-again. Now `CalibrationTab._display_stored_result()`/`HydraCalibrationPage.
-display_stored_result()` redraw the ring overlay immediately from the
-stored geometry (no image needed) and re-run the existing
-`IntegrationWorker` for Radial Profile/Eta-vs-R Cake if the attempt's data
-file still loads — mirrors a live Fit's `_on_done`/`_on_panel_done` exactly.
-New `project.read_attempt_results()` reads the embedded
-profiles/r_axis_px/frame_ids arrays (previously unread by Open Project);
-`BatchTab._populate_plots_from_attempt()`/`HydraBatchPage.
-populate_panel_plots()` replay them into Waterfall/Stacked-profiles — each
-Hydra panel keeps its own independent viewer pair, so GE1–GE4 toolbar
-switching now shows genuinely panel-specific results. Also added: a bold
-high-contrast "Project: `<name>`" label at the tab bar's top-right corner
-(mirrors the Profile combo's top-left one), alongside the existing quiet
-status-bar label. Verified via new/extended tests in test_project.py +
-test_smoke.py, each test file re-run individually in its own process (see
-"Open questions" below re: the pyqtgraph segfault).
-
-See DECISIONS.md / `development_history.md` (`9e4b5c0`, `e693316`, `162fef1`)
-for earlier sessions' work (auto-detect geometry, Open Project populate-GUI,
+See DECISIONS.md / `development_history.md` (`653c832`, `9e4b5c0`, `e693316`)
+for earlier sessions' work (Open Project auto-plots, auto-detect geometry,
 Hydra seed-mode linking) — summarized in "Recent changes" below.
 
 ## Open questions / blockers
@@ -80,6 +73,9 @@ Hydra seed-mode linking) — summarized in "Recent changes" below.
 
 ## Recent changes (last 3-5 sessions, dated; drop the oldest as it grows)
 
+- 2026-08-25 (`87d9df7` + docs `8f618a8`): Data Viewer gains a **Lab-frame
+  axes** overlay toggle (APS/MIDAS coordinate compass), ported from
+  midas-gui-swaxs with the Y-invert sign flipped for this repo's convention.
 - 2026-08-25 (`08c917f` + docs `565524a`): Radial Profile/Cake/Waterfall/
   Stacked profiles pan-zoom bounded to data extent (like image viewers);
   Cake right-drag now zooms η (Y) only; Waterfall gains a color-scale
@@ -95,9 +91,6 @@ Hydra seed-mode linking) — summarized in "Recent changes" below.
   switching); Hydra mode gated to 1-ID-E profile only; fixed Live PV
   device/Calibrant dropdowns + pixel/K-edge popups going stale on a
   profile switch.
-- 2026-08-24 (`e693316` + docs `f60e0dd`): File > Open Project now offers a
-  "Populate from project" dialog that restores Calibrate/Batch Integrate
-  fields (+ a live calibration) from the project's recorded attempts.
 
 ## Standing rules (from memory)
 
