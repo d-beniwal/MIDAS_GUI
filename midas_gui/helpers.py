@@ -932,6 +932,20 @@ class _NoScrollComboBox(QtWidgets.QComboBox):
         e.ignore()
 
 
+def refresh_combo_items(combo: QtWidgets.QComboBox, items) -> None:
+    """Repopulate a plain-text combo box from ``items``, keeping the current
+    selection if it still exists, else falling back to index 0. Used to bring
+    profile-scoped dropdowns (e.g. the Calibrant combo) up to date after a
+    profile switch without disturbing the user's current pick."""
+    prev = combo.currentText()
+    combo.blockSignals(True)
+    combo.clear()
+    combo.addItems(list(items))
+    idx = combo.findText(prev)
+    combo.setCurrentIndex(idx if idx >= 0 else 0)
+    combo.blockSignals(False)
+
+
 def _fspin(lo, hi, dec, val, suf="", step=None):
     """``step`` (if given) fixes the up/down-arrow increment; omit it to keep the
     default adaptive-decimal stepping used everywhere else in the GUI."""
@@ -952,8 +966,12 @@ def _clickable_menu_label(text, entries, parent=None):
     """A clickable, form-label-sized widget with a popup menu.
 
     Looks like a field label (underlined, accent colour) but occupies the same
-    space and pops a menu on click. ``entries`` is a list of ``(label, callback)``;
-    the callback runs when its item is chosen.
+    space and pops a menu on click. ``entries`` is either a list of
+    ``(label, callback)`` pairs, or a zero-arg callable returning that list —
+    the callable form is re-invoked right before the menu opens, so entries
+    backed by a per-profile config (e.g. ``constants.PIXEL_PRESETS``) always
+    reflect whichever profile is active, not whatever it was when this widget
+    was constructed.
     """
     from PyQt5 import QtWidgets
     btn = QtWidgets.QToolButton(parent)
@@ -966,9 +984,17 @@ def _clickable_menu_label(text, entries, parent=None):
         "QToolButton::menu-indicator { image: none; }")
     f = btn.font(); f.setUnderline(True); btn.setFont(f)
     menu = QtWidgets.QMenu(btn)
-    for label, cb in entries:
-        act = menu.addAction(label)
-        act.triggered.connect(lambda _checked=False, c=cb: c())
+
+    def _populate():
+        menu.clear()
+        items = entries() if callable(entries) else entries
+        for label, cb in items:
+            act = menu.addAction(label)
+            act.triggered.connect(lambda _checked=False, c=cb: c())
+
+    if callable(entries):
+        menu.aboutToShow.connect(_populate)
+    _populate()
     btn.setMenu(menu)
     return btn
 
@@ -976,7 +1002,7 @@ def _clickable_menu_label(text, entries, parent=None):
 def make_kedge_label(wl_spin, text="λ:", parent=None):
     """A clickable 'λ' label that pops a menu to either type a photon energy
     (keV, auto-converted to wavelength) or pick a common K-edge foil energy."""
-    from midas_gui.constants import K_EDGE_FOILS, HC_KEV_A
+    from midas_gui import constants as C
 
     btn = QtWidgets.QToolButton(parent)
     btn.setText(text)
@@ -995,13 +1021,13 @@ def make_kedge_label(wl_spin, text="λ:", parent=None):
     row.setContentsMargins(8, 4, 8, 4)
     row.addWidget(QtWidgets.QLabel("Energy:"))
     cur_wl = wl_spin.value()
-    energy_spin = _fspin(0.1, 999.0, 3, HC_KEV_A / cur_wl if cur_wl > 0 else 10.0, "keV")
+    energy_spin = _fspin(0.1, 999.0, 3, C.HC_KEV_A / cur_wl if cur_wl > 0 else 10.0, "keV")
     row.addWidget(energy_spin)
 
     def _apply_energy():
         keV = energy_spin.value()
         if keV > 0:
-            wl_spin.setValue(float(HC_KEV_A / keV))
+            wl_spin.setValue(float(C.HC_KEV_A / keV))
         menu.close()
 
     energy_spin.lineEdit().returnPressed.connect(_apply_energy)
@@ -1016,12 +1042,23 @@ def make_kedge_label(wl_spin, text="λ:", parent=None):
     menu.addAction(energy_action)
     menu.addSeparator()
 
-    entries = [(f"{sym}   {keV:.2f} keV · {HC_KEV_A / keV:.5f} Å",
-                (lambda l=HC_KEV_A / keV: wl_spin.setValue(float(l))))
-               for sym, keV in K_EDGE_FOILS]
-    for label, cb in entries:
-        act = menu.addAction(label)
-        act.triggered.connect(lambda _checked=False, c=cb: c())
+    # Foil entries are rebuilt right before the menu opens (not once here) so a
+    # profile switch's updated constants.K_EDGE_FOILS shows up immediately.
+    _foil_actions: list = []
+
+    def _rebuild_foils():
+        for act in _foil_actions:
+            menu.removeAction(act)
+        _foil_actions.clear()
+        for sym, keV in C.K_EDGE_FOILS:
+            label = f"{sym}   {keV:.2f} keV · {C.HC_KEV_A / keV:.5f} Å"
+            act = menu.addAction(label)
+            act.triggered.connect(
+                lambda _checked=False, l=C.HC_KEV_A / keV: wl_spin.setValue(float(l)))
+            _foil_actions.append(act)
+
+    menu.aboutToShow.connect(_rebuild_foils)
+    _rebuild_foils()
 
     btn.setMenu(menu)
     btn.setToolTip("Click to enter a photon energy (keV) or pick a common K-edge foil energy.")
@@ -1031,7 +1068,7 @@ def make_kedge_label(wl_spin, text="λ:", parent=None):
 def make_pixel_label(px_spin, text="px:", also=None, parent=None):
     """A clickable pixel-size label that pops a common-detector menu; selecting an
     entry sets ``px_spin`` (and ``also``, if given) to that detector's pixel size."""
-    from midas_gui.constants import PIXEL_PRESETS
+    from midas_gui import constants as C
 
     def _setter(um):
         def _apply():
@@ -1040,8 +1077,14 @@ def make_pixel_label(px_spin, text="px:", also=None, parent=None):
                 also.setValue(float(um))
         return _apply
 
-    entries = [(f"{name}  ({um:g} µm)", _setter(um)) for name, um in PIXEL_PRESETS]
-    btn = _clickable_menu_label(text, entries, parent)
+    # A callable, not a precomputed list: constants.PIXEL_PRESETS is rebound (not
+    # mutated) by a profile switch, so re-reading it via module attribute access
+    # each time the menu opens (_clickable_menu_label's aboutToShow rebuild) is
+    # what keeps this current — a one-time import here would go stale.
+    def _entries():
+        return [(f"{name}  ({um:g} µm)", _setter(um)) for name, um in C.PIXEL_PRESETS]
+
+    btn = _clickable_menu_label(text, _entries, parent)
     btn.setToolTip("Click to set the pixel size from a common detector.")
     return btn
 

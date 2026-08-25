@@ -36,6 +36,41 @@ def test_empty_pv_warns_and_does_not_start(monkeypatch):
     assert panel._live_src is None or not panel._live_src.is_active()
 
 
+def test_refresh_devices_repopulates_from_current_profile(monkeypatch):
+    """Data Viewer's Live PV dropdown must pick up a profile switch's device
+    list live, not only at construction (the reported bug)."""
+    W, _app = _make_app_and_module()
+    import midas_gui.constants as C
+    monkeypatch.setattr(C, "DEVICES", [
+        {"name": "before", "prefix": "beforePrefix:", "pva_suffix": "Pva1:Image"}])
+    monkeypatch.setattr(W, "DEVICES", C.DEVICES)
+    panel = W.DataLoaderPanel(mode="stack", allow_live=True)
+    assert [panel._pv_ed.itemText(i) for i in range(panel._pv_ed.count())] == ["before"]
+
+    new_devices = [
+        {"name": "after1", "prefix": "after1:", "pva_suffix": "Pva1:Image"},
+        {"name": "after2", "prefix": "after2:", "pva_suffix": "Pva1:Image"},
+    ]
+    monkeypatch.setattr(W, "DEVICES", new_devices)
+    panel.refresh_devices()
+    assert [panel._pv_ed.itemText(i) for i in range(panel._pv_ed.count())] == \
+        ["after1", "after2"]
+
+
+def test_refresh_devices_preserves_current_text():
+    W, _app = _make_app_and_module()
+    panel = W.DataLoaderPanel(mode="stack", allow_live=True)
+    panel._pv_ed.setEditText("customTyped:Pva1:Image")
+    panel.refresh_devices()
+    assert panel._pv_ed.currentText() == "customTyped:Pva1:Image"
+
+
+def test_refresh_devices_noop_without_live_card():
+    W, _app = _make_app_and_module()
+    panel = W.DataLoaderPanel(mode="single")
+    panel.refresh_devices()  # must not raise
+
+
 def test_live_frame_updates_current_frame():
     W, _app = _make_app_and_module()
     panel = W.DataLoaderPanel(mode="stack", allow_live=True)

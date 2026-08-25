@@ -114,6 +114,14 @@ class HydraModeRibbon(QtWidgets.QWidget):
     def set_mode(self, mode: str):
         (self._hydra_btn if mode == "hydra" else self._single_btn).setChecked(True)
 
+    def set_hydra_enabled(self, enabled: bool):
+        """Show/hide the Hydra button (only meaningful at the 1-ID-E
+        beamline profile). Falls back to Single detector first if Hydra
+        mode was active when it's disabled."""
+        if not enabled and self._hydra_btn.isChecked():
+            self._single_btn.setChecked(True)
+        self._hydra_btn.setVisible(enabled)
+
 
 class HydraFieldSelector(QtWidgets.QGroupBox):
     """Sibling-aware dark / bright / background field picker for Hydra mode.

@@ -56,6 +56,40 @@ def test_tab_visibility_toggle():
     assert win.centralWidget().count() == len(C.ALWAYS_TABS) + len(C.OPTIONAL_TABS)
 
 
+def test_on_profile_changed_refreshes_devices_and_calibrants(monkeypatch):
+    """A profile switch (MainWindow.on_profile_changed) must repopulate the
+    Data Viewer's Live PV dropdown and the Calibrate tab's Calibrant dropdown
+    (single-detector + Hydra) live, not only at tab-construction time — the
+    reported "Live View devices don't update on profile change" bug, plus
+    the same fix applied to the other profile-scoped option list."""
+    QtWidgets = pytest.importorskip("PyQt5.QtWidgets")
+    try:
+        import midas_gui.app as app_mod
+        import midas_gui.constants as C
+    except Exception as exc:
+        pytest.skip(f"midas_gui.app needs the full MIDAS stack: {exc}")
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    win = app_mod.MainWindow()
+
+    import midas_gui.widgets as W
+    new_devices = [{"name": "newDevice", "prefix": "new:", "pva_suffix": "Pva1:Image"}]
+    monkeypatch.setattr(W, "DEVICES", new_devices)
+    monkeypatch.setattr(C, "CALIBRANTS", ["OnlyThisCalibrant"])
+    import midas_gui.tab_calibrate as tab_calibrate_mod
+    import midas_gui.hydra_calib_page as hydra_calib_page_mod
+    monkeypatch.setattr(tab_calibrate_mod, "CALIBRANTS", C.CALIBRANTS)
+    monkeypatch.setattr(hydra_calib_page_mod, "CALIBRANTS", C.CALIBRANTS)
+
+    win.on_profile_changed()
+
+    pv_combo = win._view_tab._loader._pv_ed
+    assert [pv_combo.itemText(i) for i in range(pv_combo.count())] == ["newDevice"]
+    assert [win._cal_tab._cal.itemText(i) for i in range(win._cal_tab._cal.count())] == \
+        ["OnlyThisCalibrant"]
+    hydra_cal = win._cal_tab._hydra_page._cal
+    assert [hydra_cal.itemText(i) for i in range(hydra_cal.count())] == ["OnlyThisCalibrant"]
+
+
 def test_trr_filename_parser():
     """TRR filenames parse to (fshw, delay, id) with the delay sign flipped."""
     from midas_gui.tab_pumpprobe import parse_trr_filename

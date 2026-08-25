@@ -3,6 +3,46 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-08-25 — Profile switch refreshes option *lists*, never seeded default *values*; header combo added alongside (not instead of) the Preferences one
+
+Two related bugs reported together: switching profiles was buried in
+Settings ▸ Preferences, and several option-list widgets (Data Viewer's Live
+PV device dropdown, Calibrate's Calibrant dropdown on every panel, the
+pixel-size-preset and K-edge-foil popup menus) silently kept showing the
+*previous* profile's choices until the app was restarted.
+
+**Header Profile combo, not a replacement for the Preferences one.** Added
+via `QTabWidget.setCornerWidget` on the main tab bar rather than a toolbar,
+so it reads as part of the window chrome without a new toolbar row. Both
+places call through the same `MainWindow.on_profile_changed()` now (the
+Preferences dialog previously called `apply_tab_visibility()` directly),
+so there's exactly one code path that reacts to "the active profile just
+changed," regardless of which UI triggered it.
+
+**Hydra mode gated to the 1-ID-E profile.** Only that beamline has the
+4-panel GE detector; showing the Hydra ribbon option elsewhere just invited
+confusion. `set_hydra_available()`/`set_hydra_enabled()` on each of the
+three split tabs' mode ribbons falls back to Single detector automatically
+if Hydra was the active mode when it's hidden — never leaves the ribbon in
+a state with no visible option selected.
+
+**Option lists refresh live; seeded default *values* deliberately do not.**
+`refresh_devices()`/`refresh_calibrants()` (new, called from
+`on_profile_changed()`) repopulate combo boxes in place, and the
+pixel-size/K-edge popup menus now rebuild their entries from live
+`constants.*` module attributes on every `QMenu.aboutToShow` instead of
+freezing a list at construction time. But numeric/path defaults that a
+profile seeds into a field — wavelength, pixel size, Lsd, beam-centre,
+default file paths — are **not** re-pushed into already-built fields on a
+switch; they only apply to fields built *after* the switch (or after a
+restart). **Why:** a field's value at any moment may be the user's own
+in-progress edit, not the seeded default — there is no way to tell the two
+apart from the widget alone, so re-seeding on every switch risks silently
+clobbering real work. An option *list* has no such ambiguity (it's a
+finite, profile-owned vocabulary, and the widget's current selection is
+preserved by `refresh_combo_items()` when it still exists in the new list),
+which is why lists refresh live but values don't.
+
 ## 2026-08-24 — Open Project's "populate the GUI" reuses GUI-State's widget-key vocabulary instead of a bespoke schema; Batch Integrate gets a real calibration, not just display fields (`e693316`)
 
 User complaint: opening a project (`e8dea6b`) only marked it active for

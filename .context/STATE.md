@@ -1,13 +1,34 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-24 (Open Project now populates the GUI — committed as `e693316`, docs `f60e0dd`)_
+_Last updated: 2026-08-25 (Header Profile combo + live profile-scoped refresh — uncommitted, see "Now working on")_
 
 ## Now working on
 
-Nothing in progress — awaiting next task.
+Nothing in progress — ready to commit (see "Recently completed" for what's
+in the working tree right now).
 
 ## Recently completed
+
+**Header Profile combo + fix stale option lists on profile switch**
+(uncommitted). New **Profile: [combo ▼]** pinned to the main window's
+top-left corner (`QTabWidget.setCornerWidget`) for instant switching, no
+more Preferences round-trip; Preferences' own Profile row now funnels
+through the same new `MainWindow.on_profile_changed()`. Hydra mode (4-panel
+GE) is now gated to the **1-ID-E** profile only, on all three tabs' mode
+ribbons (`set_hydra_available`/`set_hydra_enabled`), falling back to Single
+detector if Hydra was active when hidden. Real bug fixed: profile-scoped
+option lists (Live PV device dropdown, Calibrant dropdown incl. every Hydra
+panel, pixel-size-preset/K-edge-foil popups) were only populated once at
+tab-construction and kept the *old* profile's choices until restart — now
+`on_profile_changed()` calls new `refresh_devices()`/`refresh_calibrants()`
+(shared `helpers.refresh_combo_items()`), and the popup menus rebuild from
+live `constants.*` on every `aboutToShow`. Seeded default *values*
+(wavelength, pixel size, Lsd, beam-centre, paths) are deliberately left
+alone — see DECISIONS.md. Verified: new tests in `test_helpers.py`,
+`test_live_stream.py`, `test_smoke.py`; full suite green apart from the two
+known pre-existing issues below. `gui_documentation.md`/PDF already updated
+this session; still need the commit + `development_history.md` entry.
 
 **File > Open Project now populates Calibrate/Batch Integrate (`e693316`)**
 User complaint: opening a project (`e8dea6b`) only wired it up for *future*
@@ -36,13 +57,6 @@ real `test_data/midas_project.h5` (a Hydra ge1–ge4 project) through a full
 Batch calibration all populated correctly. Full suite clean apart from the
 two known pre-existing issues below.
 
-**Calibrate: Hydra seed-mode linking + Eta vs R Cake tab (`162fef1`)** — Use
-manual seed/Feed-back checkboxes linked across all 4 Hydra GE panels
-(values stay independent); new Eta vs R Cake 2-D heatmap tab (both
-Single-detector and Hydra Calibrate), reusing `IntegrationWorker`'s
-already-computed cake array via a new `return_cake=True` flag. See
-DECISIONS.md for full detail.
-
 ## Open questions / blockers
 
 - None currently blocking.
@@ -61,6 +75,9 @@ DECISIONS.md for full detail.
 
 ## Recent changes (last 3-5 sessions, dated; drop the oldest as it grows)
 
+- 2026-08-25 (uncommitted): Header Profile combo (instant switching);
+  Hydra mode gated to 1-ID-E profile only; fixed Live PV device/Calibrant
+  dropdowns + pixel/K-edge popups going stale on a profile switch.
 - 2026-08-24 (`e693316` + docs `f60e0dd`): File > Open Project now offers a
   "Populate from project" dialog that restores Calibrate/Batch Integrate
   fields (+ a live calibration) from the project's recorded attempts.
@@ -73,10 +90,6 @@ DECISIONS.md for full detail.
 - 2026-08-24 (`6b961d4` + docs `0382137`): Batch Integrate tab split into
   Single-detector/Hydra modes, per-panel masks, automatic Calibrate→Batch
   hand-off, lazy Hydra-page construction, `release.sh` test-isolation fix.
-- 2026-08-24 (`93dafa2` + docs `c23151f`): Calibrate tab split into
-  Single-detector/Hydra modes, + bundled Data Viewer Hydra refinements
-  (Transforms card extraction, per-panel Rotate, per-panel Projection,
-  bounded radial-plot pan/zoom, Preset-fills-Name).
 
 ## Standing rules (from memory)
 

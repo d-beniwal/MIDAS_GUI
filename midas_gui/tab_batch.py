@@ -199,6 +199,11 @@ class BatchTab(QtWidgets.QWidget):
         self._mode_stack.setCurrentWidget(
             self._ensure_hydra_page() if mode == "hydra" else self._hsplit)
 
+    def set_hydra_available(self, enabled: bool) -> None:
+        """Show/hide the Hydra option on the mode ribbon (only meaningful at
+        the 1-ID-E beamline profile — see MainWindow.apply_hydra_visibility)."""
+        self._mode_ribbon.set_hydra_enabled(enabled)
+
     def _build_ui(self):
         root = QtWidgets.QHBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 6); root.setSpacing(0)

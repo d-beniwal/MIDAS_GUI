@@ -72,6 +72,7 @@ from midas_gui.tab_pumpprobe import PumpProbeTab
 from midas_gui.tab_export import ExportTab
 from midas_gui import constants as C
 from midas_gui import project
+from midas_gui import settings
 
 _CHECKMARK_SVG = _make_checkmark_svg()
 _ARROW_UP_SVG = _make_arrow_svg("up")
@@ -103,6 +104,32 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_ui(self):
         tabs = QtWidgets.QTabWidget()
         self.setCentralWidget(tabs)
+
+        # Profile selector, pinned to the same row as the tab bar (top-left
+        # corner widget) so it reads "Profile: <dropdown> | <tabs>" as one
+        # header row without disturbing centralWidget() (tests assert
+        # win.centralWidget().count() directly — see test_smoke.py).
+        profile_corner = QtWidgets.QWidget()
+        profile_row = QtWidgets.QHBoxLayout(profile_corner)
+        profile_row.setContentsMargins(8, 0, 6, 0)
+        profile_row.setSpacing(6)
+        profile_label = QtWidgets.QLabel("Profile:")
+        profile_font = profile_label.font()
+        profile_font.setPointSize(profile_font.pointSize() + 3)
+        profile_font.setBold(True)
+        profile_label.setFont(profile_font)
+        self._profile_combo = QtWidgets.QComboBox()
+        self._profile_combo.setFont(profile_font)
+        self._profile_combo.setMinimumWidth(140)
+        profile_row.addWidget(profile_label)
+        profile_row.addWidget(self._profile_combo)
+        sep = QtWidgets.QFrame()
+        sep.setFrameShape(QtWidgets.QFrame.VLine)
+        sep.setFrameShadow(QtWidgets.QFrame.Sunken)
+        profile_row.addWidget(sep)
+        tabs.setCornerWidget(profile_corner, QtCore.Qt.TopLeftCorner)
+        self._refresh_profile_combo()
+        self._profile_combo.activated[str].connect(self._on_header_profile_changed)
 
         # Build each tab in isolation: a single tab that fails on this platform
         # becomes an error placeholder instead of taking the whole window down.
@@ -149,6 +176,7 @@ class MainWindow(QtWidgets.QMainWindow):
             (self._export_tab, "Results & Export",  False),
         ]
         self.apply_tab_visibility()
+        self.apply_hydra_visibility()
 
         # Cross-tab data sharing: every tab's DataLoaderPanel (plus Mask Builder's
         # bespoke loader) registers itself so any other tab's "Import from…" menu
@@ -270,6 +298,66 @@ class MainWindow(QtWidgets.QMainWindow):
         idx = self._tabs.indexOf(current) if current is not None else -1
         if idx >= 0:
             self._tabs.setCurrentIndex(idx)
+
+    # ── header profile selector ─────────────────────────────────────
+    def _refresh_profile_combo(self):
+        self._profile_combo.blockSignals(True)
+        self._profile_combo.clear()
+        self._profile_combo.addItems(settings.list_profiles())
+        idx = self._profile_combo.findText(settings.active_profile())
+        if idx >= 0:
+            self._profile_combo.setCurrentIndex(idx)
+        self._profile_combo.blockSignals(False)
+
+    def _on_header_profile_changed(self, name: str):
+        if name == settings.active_profile():
+            return
+        try:
+            settings.set_active_profile(name)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Switch failed", str(e))
+            self._refresh_profile_combo()
+            return
+        C.reload_from_config()
+        self.on_profile_changed()
+
+    def on_profile_changed(self):
+        """Common tail for any profile switch, whichever UI triggered it
+        (header combo or Settings ▸ Preferences ▸ Profile): sync the header
+        combo's selection and re-apply profile-dependent live UI state."""
+        self._refresh_profile_combo()
+        self.apply_tab_visibility()
+        self.apply_hydra_visibility()
+        self._refresh_profile_scoped_widgets()
+
+    def _refresh_profile_scoped_widgets(self):
+        """Repopulate option-list widgets whose choices come from the active
+        profile's config: the Data Viewer's Live PV device dropdown and the
+        Calibrant dropdown (single-detector + every Hydra panel). The
+        pixel-size-preset / K-edge-foil popup menus and the Materials dialog
+        rebuild themselves lazily on open and need no wiring here; seeded
+        default *values* (wavelength, pixel size, Lsd, beam-centre, default
+        paths, ...) are deliberately left alone — see .context/DECISIONS.md."""
+        for tab, method in ((self._view_tab, "refresh_devices"),
+                            (self._cal_tab, "refresh_calibrants")):
+            fn = getattr(tab, method, None)
+            if fn is not None:
+                try:
+                    fn()
+                except Exception:
+                    _log(f"Profile refresh ({method}) failed:\n{traceback.format_exc()}")
+
+    def apply_hydra_visibility(self):
+        """Hydra (4-panel GE detector) mode is only offered at the 1-ID-E
+        beamline profile — no other bundled profile has that detector."""
+        enabled = settings.active_profile() == "1-ID-E"
+        for tab in (self._view_tab, self._cal_tab, self._batch_tab):
+            setter = getattr(tab, "set_hydra_available", None)
+            if setter is not None:
+                try:
+                    setter(enabled)
+                except Exception:
+                    _log(f"Hydra-visibility update failed:\n{traceback.format_exc()}")
 
     # ── File menu: Save/Load GUI State ──────────────────────────────
     def _build_file_menu(self):
@@ -531,7 +619,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def _open_scaling(self):
         """Quick interface-scale picker (whole-app zoom for HiDPI / 4K monitors).
         Persists ui.ui_scale and offers to relaunch so the new scale takes effect."""
-        from midas_gui import settings
         cur = float(getattr(C, "DEFAULT_UI_SCALE", 1.0) or 1.0)
         val, ok = QtWidgets.QInputDialog.getDouble(
             self, "Interface scaling",
@@ -577,13 +664,11 @@ class MainWindow(QtWidgets.QMainWindow):
         QtWidgets.QApplication.quit()
 
     def _open_config_folder(self):
-        from midas_gui import settings
         folder = settings.user_config_path().parent
         folder.mkdir(parents=True, exist_ok=True)
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(folder)))
 
     def _reload_config(self):
-        from midas_gui import settings
         settings.reload()
         QtWidgets.QMessageBox.information(
             self, "Config reloaded",

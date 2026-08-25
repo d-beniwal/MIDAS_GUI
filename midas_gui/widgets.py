@@ -2511,6 +2511,27 @@ class DataLoaderPanel(QtWidgets.QWidget):
         if not checked:
             self.stop_live()
 
+    def refresh_devices(self):
+        """Repopulate the Live PV dropdown from the (possibly just-switched)
+        active profile's ``constants.DEVICES`` list, preserving whatever the
+        user currently has selected/typed. No-op if this panel has no Live
+        Data card (``allow_live=False``)."""
+        if not hasattr(self, "_pv_ed"):
+            return
+        prev_text = self._pv_ed.currentText()
+        self._pv_ed.blockSignals(True)
+        self._pv_ed.clear()
+        for d in DEVICES:
+            full_pv = f"{d.get('prefix', '')}{d.get('pva_suffix', '')}"
+            self._pv_ed.addItem(d.get("name", ""), full_pv)
+        idx = self._pv_ed.findText(prev_text)
+        if idx >= 0:
+            self._pv_ed.setCurrentIndex(idx)
+        else:
+            self._pv_ed.setCurrentIndex(-1)
+            self._pv_ed.setEditText(prev_text)
+        self._pv_ed.blockSignals(False)
+
     def _on_pv_device_picked(self, index):
         """Selecting a known device by name fills in its full live PV
         (prefix + PVA suffix); typing a PV by hand is untouched (this only

@@ -36,7 +36,7 @@ from midas_gui.constants import (
 from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _NoScrollComboBox, make_kedge_label, make_pixel_label,
     _load_image, _apply_im_trans, apply_field_corrections, average_field, source_kind,
-    widgets_to_dict, apply_dict_to_widgets, _predict_ring_radii)
+    widgets_to_dict, apply_dict_to_widgets, _predict_ring_radii, refresh_combo_items)
 from midas_gui.widgets import PickableImageViewer, LogPanel, CakeViewer
 from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar, HydraProfileViewer
 from midas_gui.hydra_calib_widgets import HydraCalibPanelCard
@@ -71,6 +71,11 @@ class HydraCalibrationPage(QtWidgets.QWidget):
 
     def set_project_context(self, ctx: "project.ProjectContext"):
         self._project_ctx = ctx
+
+    def refresh_calibrants(self) -> None:
+        """Repopulate this page's shared Calibrant dropdown from the
+        just-activated profile's constants.CALIBRANTS."""
+        refresh_combo_items(self._cal, CALIBRANTS)
 
     # ── UI ────────────────────────────────────────────────────────
 

@@ -80,6 +80,16 @@ class DataViewerTab(QtWidgets.QWidget):
         is shared between them."""
         self._mode_stack.setCurrentWidget(self._hydra_page if mode == "hydra" else self._hsplit)
 
+    def set_hydra_available(self, enabled: bool) -> None:
+        """Show/hide the Hydra option on the mode ribbon (only meaningful at
+        the 1-ID-E beamline profile — see MainWindow.apply_hydra_visibility)."""
+        self._mode_ribbon.set_hydra_enabled(enabled)
+
+    def refresh_devices(self) -> None:
+        """Repopulate the Live Data card's device dropdown from the
+        just-activated profile (see MainWindow.on_profile_changed)."""
+        self._loader.refresh_devices()
+
     def start_live_pv(self, pv: str) -> bool:
         """Programmatic equivalent of picking `pv` in the Live Data card and
         clicking Start — used by the MIDAS-bridge QLocalServer (app.py)."""

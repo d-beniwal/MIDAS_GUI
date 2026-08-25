@@ -22,7 +22,7 @@ from midas_gui.constants import (
     DISTORTION_NAMES)
 from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _predict_ring_radii, _NoScrollComboBox,
-    make_kedge_label, make_pixel_label, tilted_ring_xy,
+    make_kedge_label, make_pixel_label, tilted_ring_xy, refresh_combo_items,
     widgets_to_dict, apply_dict_to_widgets, im_trans_codes_from_checkboxes,
     _apply_im_trans, paramstest_pairs)
 from midas_gui.widgets import (
@@ -80,6 +80,17 @@ class CalibrationTab(QtWidgets.QWidget):
         """Leftmost ribbon switched between "single" and "hydra" — swap the
         visible page, mirroring DataViewerTab's identical split."""
         self._mode_stack.setCurrentWidget(self._hydra_page if mode == "hydra" else self._hsplit)
+
+    def set_hydra_available(self, enabled: bool) -> None:
+        """Show/hide the Hydra option on the mode ribbon (only meaningful at
+        the 1-ID-E beamline profile — see MainWindow.apply_hydra_visibility)."""
+        self._mode_ribbon.set_hydra_enabled(enabled)
+
+    def refresh_calibrants(self) -> None:
+        """Repopulate the Calibrant dropdown (single-detector view and every
+        Hydra panel) from the just-activated profile's constants.CALIBRANTS."""
+        refresh_combo_items(self._cal, CALIBRANTS)
+        self._hydra_page.refresh_calibrants()
 
     # ── UI ────────────────────────────────────────────────────────
 

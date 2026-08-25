@@ -517,8 +517,8 @@ class PreferencesDialog(QtWidgets.QDialog):
         self._refresh_profile_combo()
         self._update_profile_label()
         try:
-            if self._mw is not None and hasattr(self._mw, "apply_tab_visibility"):
-                self._mw.apply_tab_visibility()
+            if self._mw is not None and hasattr(self._mw, "on_profile_changed"):
+                self._mw.on_profile_changed()
         except Exception:
             pass
 

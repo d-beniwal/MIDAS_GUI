@@ -3,7 +3,27 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-24 (File ▸ **Open Project…** now offers to
+**Last updated:** 2026-08-25 (Switching profiles from the header **Profile:
+[combo ▼]** now actually refreshes every dropdown/menu whose choices come
+from that profile, not only tab visibility and Hydra availability: the Data
+Viewer's **Live Data** PV dropdown, the Calibrate tab's **Calibrant**
+dropdown (single-detector and every Hydra panel), and the pixel-size-preset /
+K-edge-foil popup menus all now show the newly-active profile's values
+immediately — previously these kept the *old* profile's list until the app
+was restarted. Seeded numeric/path defaults (wavelength, pixel size, Lsd,
+beam-centre, default files) are unchanged — they still only seed a field
+once when a tab is built, so in-progress edits are never overwritten by a
+profile switch. See §15 "Profiles".)
+
+**Previously:** (2026-08-25, A prominent **Profile: [combo ▼]** dropdown now
+sits at the top-left of the main window, in the same row as the tab bar —
+switching profiles is instant, no more digging into Preferences. The
+**Hydra** option on Data Viewer/Calibrate/Batch Integrate's mode ribbon now
+only appears when the active profile is **1-ID-E** — the only beamline with
+that detector — falling back to Single detector automatically if you switch
+away while Hydra mode is active. See §15 "Profiles" and §3 "Mode ribbon".)
+
+**Previously:** (2026-08-24, File ▸ **Open Project…** now offers to
 *populate* the GUI from the project's own recorded attempts, not just make
 it active for future logging — a **Populate from project** dialog lets you
 pick, per panel (single-detector or each present Hydra GE panel), which
@@ -432,7 +452,13 @@ Produces no shared state for other tabs.
 A narrow vertical strip at the very left edge of the tab switches between
 **Single detector** (the view described below — unchanged) and **Hydra**
 (the 1-ID-E 4-panel GE detector view). The two modes are independent:
-switching does not share data or geometry between them.
+switching does not share data or geometry between them. **The Hydra option
+only appears when the active profile (top-left header dropdown — see §15
+"Profiles") is 1-ID-E**, the only beamline with that detector; on any other
+profile the ribbon shows Single detector only, and switching away from
+1-ID-E while Hydra mode is active falls back to Single detector
+automatically. Same rule applies to Calibrate's (§5) and Batch Integrate's
+(§7) identical mode ribbons.
 
 ### Hydra mode (4-panel GE detector)
 
@@ -1023,7 +1049,9 @@ a calibrant pattern.
 Like the Data Viewer tab, a narrow vertical strip switches between **Single
 detector** (the view described below — unchanged) and **Hydra** (per-panel
 calibration for the 1-ID-E 4-panel GE detector). The two modes are
-independent: switching does not share data or geometry between them.
+independent: switching does not share data or geometry between them. As on
+the Data Viewer tab, **Hydra only appears when the active profile is
+1-ID-E** (see §3 "Mode ribbon", §15 "Profiles").
 
 ### Hydra mode (4-panel GE detector)
 
@@ -1223,7 +1251,8 @@ Like the Data Viewer and Calibrate tabs, a narrow vertical strip switches
 between **Single detector** (the view described below — unchanged) and
 **Hydra** (per-panel integration for the 1-ID-E 4-panel GE detector). The
 two modes are independent: switching does not share data or geometry
-between them.
+between them. As on the other two tabs, **Hydra only appears when the
+active profile is 1-ID-E** (see §3 "Mode ribbon", §15 "Profiles").
 
 ### Hydra mode (4-panel GE detector)
 
@@ -1783,10 +1812,20 @@ One per-user file, auto-located per OS:
 defaults are used. Sharing between machines/users is done by exporting/importing a
 JSON file (below) — copy it wherever you like.
 
-### Profiles — Settings ▸ Preferences… ▸ Profile row
-The top of the Preferences dialog has a **Profile** row —
-`Profile: [combo ▼]  [New…] [Duplicate…] [Rename…] [Delete]` — for keeping several
-independent sets of defaults (e.g. one per beamline) and switching between them:
+### Profiles — header dropdown + Settings ▸ Preferences… ▸ Profile row
+A large **Profile: [combo ▼]** control sits at the top-left of the main window,
+in the same row as the tab bar (a vertical rule separates it from the tabs) —
+the fastest way to switch profiles day-to-day. Picking a different profile there
+switches instantly (no confirmation prompt): live `DEFAULT_*` globals reload,
+tab visibility re-applies, Hydra mode's availability updates, and every
+option-list dropdown/menu backed by that profile (Data Viewer's Live PV
+device list, Calibrate's Calibrant dropdown, and the pixel-size-preset /
+K-edge-foil popup menus) repopulates from the newly-active profile
+immediately (see §3 "Mode
+ribbon"). Profile *management* — creating, duplicating, renaming, deleting —
+still lives in the Preferences dialog's own Profile row —
+`Profile: [combo ▼]  [New…] [Duplicate…] [Rename…] [Delete]` — which stays in
+sync with the header dropdown either way you switch:
 - Each profile is its own config file under `<config dir>/profiles/<name>.json`; the
   active one is remembered in `<config dir>/profile_meta.json`. Existing single-config
   installs are migrated transparently into a profile named **Default** the first time
@@ -1804,8 +1843,13 @@ independent sets of defaults (e.g. one per beamline) and switching between them:
   the active profile switches to another one first.
 - Switching profiles (via the combo) prompts to confirm if the dialog has unsaved
   edits, then reloads the dialog's fields and the live `DEFAULT_*` globals from the
-  new profile — most values apply immediately; a few (e.g. viewer step sizes set at
-  widget-construction time) need a restart, and you're offered one.
+  new profile. Option lists — the Live Data device dropdown, the Calibrant
+  dropdown, and the pixel-size-preset / K-edge-foil menus — refresh immediately
+  everywhere they're shown. Seeded default *values* (wavelength, pixel size,
+  Lsd, beam-centre, viewer step sizes, default file paths) only take effect on
+  fields built after the switch — an already-open tab keeps whatever it was
+  showing, since a profile switch should never silently overwrite a value
+  you're in the middle of editing; a restart applies them everywhere.
 - The "Local config: …" label under the row becomes **"Profile '\<name\>': \<path\>"**
   so you always know which file you're editing.
 
