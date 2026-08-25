@@ -1,12 +1,12 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-25 (Open Project auto-plots + header project label, `653c832` — committed, not yet pushed)_
+_Last updated: 2026-08-25 (Open Project auto-plots + header project label, `653c832` — committed & pushed)_
 
 ## Now working on
 
-Docs for `653c832` written (development_history.md + PDFs, gui_documentation.md
-+ PDF) but not yet committed/pushed — do that next, then push both commits.
+Nothing in progress — working tree is clean, everything below is committed
+and pushed to `origin/main`.
 
 ## Recently completed
 
