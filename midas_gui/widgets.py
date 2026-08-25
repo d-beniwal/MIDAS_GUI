@@ -615,6 +615,32 @@ def _install_manual_axis_capture(plot_widget: "pg.PlotWidget", callback):
 #  CakeViewer
 # ═════════════════════════════════════════════════════════════════════════════
 
+class _YZoomViewBox(pg.ViewBox):
+    """A ViewBox whose right-click-drag zooms the Y axis only.
+
+    Stock pyqtgraph's right-drag scales X and Y together (diagonally
+    proportional to the drag vector), which on the cake plot reads as an
+    unwanted R-axis (X) zoom whenever the user just meant to zoom η (Y) by
+    dragging up/down. Every other gesture (left-drag pan, wheel zoom, the
+    right-click context menu) is left to the base implementation."""
+
+    def mouseDragEvent(self, ev, axis=None):
+        if ev.button() != QtCore.Qt.RightButton:
+            super().mouseDragEvent(ev, axis=axis)
+            return
+        ev.accept()
+        mouseEnabled = self.state['mouseEnabled']
+        if not mouseEnabled[1]:
+            return
+        dif = ev.screenPos() - ev.lastScreenPos()
+        s = 1.02 ** dif.y()
+        tr = pg.functions.invertQTransform(self.childGroup.transform())
+        center = pg.Point(tr.map(ev.buttonDownPos(QtCore.Qt.RightButton)))
+        self._resetTarget()
+        self.scaleBy(x=None, y=s, center=center)
+        self.sigRangeChangedManually.emit(mouseEnabled)
+
+
 class CakeViewer(QtWidgets.QWidget):
     """2-D azimuthal-integration "cake" heatmap: R (px) on X, η (°) on Y.
 
@@ -656,7 +682,7 @@ class CakeViewer(QtWidgets.QWidget):
         self._toolbar_layout = bar   # exposed so subclasses/callers can append widgets
         layout.addLayout(bar)
 
-        self._iv = pg.ImageView(view=pg.PlotItem())
+        self._iv = pg.ImageView(view=pg.PlotItem(viewBox=_YZoomViewBox()))
         self._iv.ui.roiBtn.hide(); self._iv.ui.menuBtn.hide()
         vb = self._iv.getView().getViewBox()
         vb.setMouseEnabled(x=True, y=True)
@@ -709,12 +735,37 @@ class CakeViewer(QtWidgets.QWidget):
         e0, e1 = float(self._eta_axis[0]), float(self._eta_axis[-1])
         self._iv.getImageItem().setRect(
             QtCore.QRectF(r0, e0, max(r1 - r0, 1e-6), max(e1 - e0, 1e-6)))
+        self._apply_view_limits(r0, r1, e0, e1)
         self._iv.getView().getViewBox().autoRange()
         self._iv.getHistogramWidget().item.setHistogramRange(lo, hi, padding=0.1)
         n_eta, n_r = cake.shape
         self._coord_bar.setText(
             f"cake {n_r} R-bins × {n_eta} η-bins  |  "
             f"R ∈ [{r0:.1f}, {r1:.1f}] px   η ∈ [{e0:.1f}, {e1:.1f}]°")
+
+    def _apply_view_limits(self, r0: float, r1: float, e0: float, e1: float):
+        """Bound pan/zoom to the current cake's (R, η) extent (+ margin), same
+        intent as ``ImageViewer._apply_view_limits`` — stops the user
+        scrolling/zooming out into an empty void or losing the cake off-screen."""
+        if not all(math.isfinite(v) for v in (r0, r1, e0, e1)):
+            return
+        rmin, rmax = min(r0, r1), max(r0, r1)
+        emin, emax = min(e0, e1), max(e0, e1)
+        if rmax <= rmin:
+            rmax = rmin + 1.0
+        if emax <= emin:
+            emax = emin + 1.0
+        rpad = 0.5 * (rmax - rmin)
+        epad = 0.5 * (emax - emin)
+        vb = self._iv.getView().getViewBox()
+        vb.setLimits(
+            xMin=rmin - rpad, xMax=rmax + rpad,
+            yMin=emin - epad, yMax=emax + epad,
+            minXRange=max((rmax - rmin) * 0.01, 1e-6),
+            minYRange=max((emax - emin) * 0.01, 1e-6),
+            maxXRange=(rmax - rmin) + 2 * rpad,
+            maxYRange=(emax - emin) + 2 * epad,
+        )
 
     def _set_cmap(self, name: str):
         self._iv.setColorMap(_resolve_cmap(name))
@@ -3060,7 +3111,18 @@ class WaterfallViewer(QtWidgets.QWidget):
         self._plot.setLabel("bottom", "R (px)")
         self._img = pg.ImageItem()
         self._plot.addItem(self._img)
-        layout.addWidget(self._plot, stretch=1)
+
+        # Color-scale sidebar, same role as pg.ImageView's built-in histogram
+        # widget on the single-detector/Hydra image viewers — this viewer uses
+        # a bare PlotWidget+ImageItem (not ImageView) so the histogram must be
+        # wired in by hand.
+        self._hist = pg.HistogramLUTWidget()
+        self._hist.setImageItem(self._img)
+        row = QtWidgets.QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0); row.setSpacing(2)
+        row.addWidget(self._plot, stretch=1)
+        row.addWidget(self._hist)
+        layout.addLayout(row, stretch=1)
 
         # Rows are written into a growing pre-allocated buffer (no per-frame vstack),
         # and redraws are throttled so a fast/large scan stays O(N) not O(N²).
@@ -3135,9 +3197,31 @@ class WaterfallViewer(QtWidgets.QWidget):
         self._img.setImage(disp.T, autoLevels=False, levels=(lo, hi))
         r0, r1 = float(self._r_axis[0]), float(self._r_axis[-1])
         self._img.setRect(QtCore.QRectF(r0, 0.0, r1 - r0, self._nrows))
+        self._apply_view_limits(r0, r1, self._nrows)
+
+    def _apply_view_limits(self, r0: float, r1: float, nrows: int):
+        """Bound pan/zoom to the waterfall's (R, frame#) extent (+ margin), same
+        intent as ``ImageViewer._apply_view_limits`` — stops the user
+        scrolling/zooming out into an empty void or losing the image off-screen."""
+        if not math.isfinite(r0) or not math.isfinite(r1) or nrows <= 0:
+            return
+        rmin, rmax = min(r0, r1), max(r0, r1)
+        if rmax <= rmin:
+            rmax = rmin + 1.0
+        rpad = 0.5 * (rmax - rmin)
+        npad = 0.5 * nrows
+        vb = self._plot.getPlotItem().getViewBox()
+        vb.setLimits(
+            xMin=max(0.0, rmin - rpad), xMax=rmax + rpad,
+            yMin=-npad, yMax=nrows + npad,
+            minXRange=max((rmax - rmin) * 0.01, 1e-6),
+            minYRange=max(nrows * 0.01, 1.0),
+            maxXRange=(rmax - rmin) + 2 * rpad,
+            maxYRange=nrows + 2 * npad,
+        )
 
     def _apply_cmap(self, name: str):
-        self._img.setLookupTable(_resolve_cmap(name).getLookupTable(0.0, 1.0, 256))
+        self._hist.gradient.setColorMap(_resolve_cmap(name))
 
 
 def _frame_color(i: int) -> tuple:
@@ -3264,6 +3348,7 @@ class StackedProfileViewer(QtWidgets.QWidget):
         self._curves: list = []
         self._labels: list = []          # inline pg.TextItem per curve
         self._fontsize = 9
+        self._data_bounds = None         # running (xmin, xmax, ymin, ymax) across all curves
         # Axis conversion context (from the run's calibration).
         self._lsd = self._px = self._wl = None
         self._native_unit = "R"          # unit the stored x arrays are already in
@@ -3297,6 +3382,7 @@ class StackedProfileViewer(QtWidgets.QWidget):
         if self._legend is not None:
             self._legend.clear()
         self._stat.setText("")
+        self._data_bounds = None
 
     def add_profile(self, r_axis, profile, label=None):
         """Append one frame's 1-D profile; draws it at its stacked offset.
@@ -3325,6 +3411,16 @@ class StackedProfileViewer(QtWidgets.QWidget):
         self._labels.append(ti)
         n = len(self._profiles)
         self._stat.setText(f"{n} frame{'s' if n != 1 else ''}")
+        yd = p + offset
+        fin = np.isfinite(xd) & np.isfinite(yd)
+        if fin.any():
+            xmin, xmax = float(xd[fin].min()), float(xd[fin].max())
+            ymin, ymax = float(yd[fin].min()), float(yd[fin].max())
+            if self._data_bounds is not None:
+                xmin = min(xmin, self._data_bounds[0]); xmax = max(xmax, self._data_bounds[1])
+                ymin = min(ymin, self._data_bounds[2]); ymax = max(ymax, self._data_bounds[3])
+            self._data_bounds = (xmin, xmax, ymin, ymax)
+            self._apply_view_limits(*self._data_bounds)
 
     # ── x-axis units (R / 2θ / Q) ─────────────────────────────────────
 
@@ -3445,14 +3541,41 @@ class StackedProfileViewer(QtWidgets.QWidget):
     def _restack(self, _=None):
         """Redraw all curves + inline labels (offsets, spacing, x-unit)."""
         spacing = float(self._spacing.value())
+        xmins, xmaxs, ymins, ymaxs = [], [], [], []
         for i, (curve, r, p) in enumerate(
                 zip(self._curves, self._r_axes, self._profiles)):
             xd = self._x_display(r)
-            curve.setData(xd, p + i * spacing)
+            yd = p + i * spacing
+            curve.setData(xd, yd)
             if i < len(self._labels) and xd.size:
                 self._labels[i].setPos(float(xd[0]), float(p[0] + i * spacing))
+            fin = np.isfinite(xd) & np.isfinite(yd)
+            if fin.any():
+                xmins.append(float(xd[fin].min())); xmaxs.append(float(xd[fin].max()))
+                ymins.append(float(yd[fin].min())); ymaxs.append(float(yd[fin].max()))
         if self._curves:
             self._plot.autoRange()
+        if xmins:
+            self._data_bounds = (min(xmins), max(xmaxs), min(ymins), max(ymaxs))
+            self._apply_view_limits(*self._data_bounds)
+
+    def _apply_view_limits(self, xmin, xmax, ymin, ymax):
+        """Bound pan/zoom to the stacked profiles' combined data (+ margin),
+        same intent as ``ProfileViewer._apply_view_limits`` — stops the user
+        scrolling/zooming arbitrarily far from where the data actually is."""
+        if not all(math.isfinite(v) for v in (xmin, xmax, ymin, ymax)):
+            return
+        if xmax <= xmin:
+            xmax = xmin + 1.0
+        if ymax <= ymin:
+            ymax = ymin + 1.0
+        xpad = 0.15 * (xmax - xmin)
+        ypad = 0.15 * (ymax - ymin)
+        vb = self._plot.getPlotItem().getViewBox()
+        vb.setLimits(xMin=max(0.0, xmin - xpad), xMax=xmax + xpad,
+                     yMin=ymin - ypad, yMax=ymax + ypad,
+                     maxXRange=(xmax - xmin) + 2 * xpad,
+                     maxYRange=(ymax - ymin) + 2 * ypad)
 
 
 class LogPanel(QtWidgets.QPlainTextEdit):

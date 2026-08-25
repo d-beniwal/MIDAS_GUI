@@ -3,7 +3,13 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-25 (Open Project's "Populate from project" now
+**Last updated:** 2026-08-25 (Calibrate's Radial Profile/Eta vs R Cake and
+Batch Integrate's Waterfall/Stacked profiles now bound pan/zoom to their own
+data extent, same as the main image viewers; the Cake plot's right-click-drag
+now zooms only the η (Y) axis instead of both axes; the Waterfall plot gained
+a color-scale histogram sidebar like the main image viewers. See §5 and §7.)
+
+**Previously:** (2026-08-25, Open Project's "Populate from project" now
 redraws the recorded run's **results**, not just the input fields:
 Calibrate's predicted-ring overlay, Radial Profile, and Eta vs R Cake
 reappear immediately (rings need only the stored geometry; profile/cake also
@@ -1232,8 +1238,13 @@ automatically after calibration. The **Eta vs R Cake** tab shows the same
 integration as a 2-D heatmap instead of collapsed to a 1-D curve — R (px) on the
 X-axis, η (°) on the Y-axis, intensity as color — the routine "cake" visualization
 for area-detector diffraction data; it has its own Log/colormap/vmin%/vmax%
-controls (same conventions as the main image viewer) and updates on every
-**Re-integrate**. The **Results** tab shows the parameter set exactly as it is written to
+controls plus a color-scale histogram sidebar (same conventions as the main image
+viewer) and updates on every **Re-integrate**. Pan/zoom is bounded to the cake's
+own (R, η) extent, like the main image viewers, so you can't scroll/zoom out into
+empty space; a right-click-drag zooms the **η (Y) axis only** — dragging up zooms
+in — leaving R untouched (the stock pyqtgraph gesture that zoomed both axes at
+once has been overridden here). The **Radial Profile** plot is bounded the same
+way, to its own data range. The **Results** tab shows the parameter set exactly as it is written to
 `paramstest.txt` (Lsd, BC, tx/ty/tz, the distortion coefficients, Parallax, Wavelength,
 px, NrPixelsY/Z, RhoD, SpaceGroup, LatticeConstant, and any `ImTransOpt` codes from the
 Transforms checkboxes) as **plain text laid out in multiple
@@ -1393,7 +1404,10 @@ profiles by a scalar file.)
 CSV (R,I,σ) · XYE (2θ) · FXYE (centideg) · DAT (Q) · HDF5 (full stack) · 2D-CSV (η×R
 cake). Right panel: live **Waterfall** and **Stacked profiles** — both have an **x**
 selector to show the axis in **R (px) / 2θ (°) / Q (Å⁻¹)** (converted from the run's
-calibration).
+calibration). Both plots are bounded to their own data extent (like the main image
+viewers) so you can't scroll/zoom out into empty space. **Waterfall** now has a
+color-scale histogram sidebar on the right, same as the main image viewers, driven
+by its **cmap** selector.
 
 The **Stacked profiles** view is a publication-quality plot: each curve tags its
 **source file name inline, just below the curve at its left edge** (toggle with the
