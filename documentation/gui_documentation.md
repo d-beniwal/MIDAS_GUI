@@ -3,7 +3,12 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-25 (Calibrate's Radial Profile/Eta vs R Cake and
+**Last updated:** 2026-08-25 (Data Viewer's image toolbar gained a
+**Lab-frame axes** overlay toggle — plots the APS/MIDAS lab coordinate
+system (X_Lab/Y_Lab compass, beam-direction glyph, η-sweep arc) anchored at
+the beam centre, for verifying orientation/ImTransOpt. See §3.)
+
+**Previously:** (2026-08-25, Calibrate's Radial Profile/Eta vs R Cake and
 Batch Integrate's Waterfall/Stacked profiles now bound pan/zoom to their own
 data extent, same as the main image viewers; the Cake plot's right-click-drag
 now zooms only the η (Y) axis instead of both axes; the Waterfall plot gained
@@ -830,6 +835,17 @@ or below that value are excluded from ranking entirely — never marked, never
 counted toward N — so a low-signal frame can't be forced to mark N pixels that
 aren't actually meaningful. If fewer than N pixels clear the threshold, fewer
 than N markers are drawn (down to none).
+
+### Lab-frame axes overlay (image toolbar)
+A **Lab-frame axes** checkbox on the image toolbar overlays the APS/MIDAS lab
+coordinate system on the image, anchored at the beam centre: a red **+X_Lab
+(+Y_MIDAS)** arrow, a green **+Y_Lab (+Z_MIDAS)** arrow, a blue **⊗** glyph
+at BC labelled **+Z_Lab (+X_MIDAS, beam)** for the beam direction, and an
+orange η-sweep arc from η=0° to η=45° with a tick at η=0°. It's a visual
+sanity check for orientation/ImTransOpt — a known feature should land in the
+quadrant the overlay predicts. The overlay redraws automatically whenever
+the beam centre, tilt, calibration, or displayed image changes, and stays
+anchored under pan/zoom since it's drawn directly on the image view.
 
 ### Region-of-interest (ROI) tool (image toolbar)
 A **ROI: Box / Line** row sits on the image toolbar, alongside a
