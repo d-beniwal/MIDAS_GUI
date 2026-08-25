@@ -1226,6 +1226,32 @@ class CalibrationTab(QtWidgets.QWidget):
         self._hydra_page.set_state(hydra_state.get("page") or {})
 
     # ── File > Open Project… ─────────────────────────────────────────
+
+    def _display_stored_result(self, result) -> None:
+        """Redraw rings + (if an image is loaded) the radial profile/cake for
+        a result recovered from a project attempt — same visual effects as a
+        live Fit's ``_on_done``, without re-running Fit. Best-effort per step
+        so a partially-available result (e.g. the source image no longer on
+        disk) still shows whatever it can."""
+        self._result = result
+        try:
+            self._populate_param_grid(paramstest_pairs(result))
+            self._to_view_btn.setEnabled(True)
+            self._save_json_btn.setEnabled(True)
+            self._save_ps_btn.setEnabled(True)
+        except Exception:
+            pass
+        try:
+            self._draw_rings(result)
+        except Exception:
+            pass
+        if self._image is not None:
+            self._bot_tabs.setCurrentWidget(self._prof_view)
+            try:
+                self._run_integration(result)
+            except Exception:
+                pass
+
     def apply_project_calibration(self, attempts: dict) -> None:
         """``attempts`` maps panel key (``"single"`` or ``"ge1"``..``"ge4"``)
         to that panel's calibration-attempt metadata (``project.read_attempt``)
@@ -1257,3 +1283,10 @@ class CalibrationTab(QtWidgets.QWidget):
         elif single_meta is not None:
             state["hydra"] = {"active_mode": "single"}
         self.set_state(state)
+
+        if single_meta is not None and single_meta.get("result"):
+            self._display_stored_result(project.calibration_namespace(single_meta["result"]))
+        for panel_key, meta in hydra_metas.items():
+            if meta.get("result"):
+                self._hydra_page.display_stored_result(
+                    int(panel_key[2:]), project.calibration_namespace(meta["result"]))

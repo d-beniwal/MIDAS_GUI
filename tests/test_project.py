@@ -213,6 +213,30 @@ def test_batch_tab_logs_to_project_with_calibration_snapshot(app, tmp_path):
         assert att["results/profiles"].shape == (3, 20)
 
 
+def test_read_attempt_results_roundtrip(tmp_path):
+    path = str(tmp_path / "proj.h5")
+    project.create_project(path)
+    finished_payload = {
+        "n": 3, "aborted": False,
+        "profiles": np.random.rand(3, 10).astype(np.float32),
+        "r_axis_px": np.arange(10, dtype=np.float32),
+        "sigmas": np.ones((3, 10), dtype=np.float32),
+        "frame_ids": ["f0", "f1", "f2"],
+    }
+    ref = project.append_integration_attempt(
+        path, "single", inputs={}, finished_payload=finished_payload)
+
+    arrays = project.read_attempt_results(path, ref)
+    assert arrays["profiles"].shape == (3, 10)
+    assert list(arrays["r_axis_px"]) == pytest.approx(list(range(10)))
+    assert arrays["frame_ids"] == ["f0", "f1", "f2"]
+
+    # A calibration attempt has no "results" group — {} rather than raising.
+    calib_ref = project.append_calibration_attempt(
+        path, "single", cfg={}, result=_fake_result(), loader_state={})
+    assert project.read_attempt_results(path, calib_ref) == {}
+
+
 def test_discover_list_and_read_attempt(tmp_path):
     path = str(tmp_path / "proj.h5")
     project.create_project(path)
@@ -305,6 +329,7 @@ def test_apply_project_calibration_and_integration_hydra(app, tmp_path):
     proj_path = str(tmp_path / "proj.h5")
     project.create_project(proj_path)
     data_paths = {}
+    n_frames = {"ge1": 4, "ge2": 6}   # distinct per panel — proves independent per-panel plots
     for panel, bc in (("ge1", 1024.0), ("ge2", 1030.0)):
         data_path = tmp_path / f"{panel}.h5"
         data_path.write_bytes(b"")   # only needs to exist for the anchor-path exists() gate
@@ -317,12 +342,18 @@ def test_apply_project_calibration_and_integration_hydra(app, tmp_path):
                  "lm_max_iter": 200, "device": "cpu"},
             result=calib_result, loader_state={"path": data_paths[panel],
                                                 "dataset": "exchange/data"})
+        n = n_frames[panel]
         project.append_integration_attempt(
             proj_path, panel,
             inputs={"src_cfg": {"type": "hdf5", "path": data_paths[panel],
                                  "dataset": "exchange/data"},
                     "kernel": "subpixel2", "fmt": "csv", "frame_range": [0, None, 1]},
-            finished_payload={"n": 10, "aborted": False},
+            finished_payload={
+                "n": n, "aborted": False,
+                "profiles": np.random.rand(n, 12).astype(np.float32),
+                "r_axis_px": np.arange(12, dtype=np.float32),
+                "frame_ids": [f"{panel}_f{i}" for i in range(n)],
+            },
             calibration_snapshot={"Lsd": calib_result.Lsd, "wavelength_A": 0.1729,
                                    "BC_y": bc, "BC_z": 1024.0,
                                    "NrPixelsY": 2048, "NrPixelsZ": 2048},
@@ -330,8 +361,12 @@ def test_apply_project_calibration_and_integration_hydra(app, tmp_path):
 
     calib_attempts = {p: project.read_attempt(proj_path, project.list_attempts(proj_path, p, "calib")[0]["ref"])
                        for p in ("ge1", "ge2")}
-    integrate_attempts = {p: project.read_attempt(proj_path, project.list_attempts(proj_path, p, "integrate")[0]["ref"])
-                           for p in ("ge1", "ge2")}
+    integrate_attempts = {}
+    for p in ("ge1", "ge2"):
+        ref = project.list_attempts(proj_path, p, "integrate")[0]["ref"]
+        meta = project.read_attempt(proj_path, ref)
+        meta["_results_arrays"] = project.read_attempt_results(proj_path, ref)
+        integrate_attempts[p] = meta
 
     cal_tab = CalibrationTab()
     cal_tab.apply_project_calibration(calib_attempts)
@@ -340,6 +375,13 @@ def test_apply_project_calibration_and_integration_hydra(app, tmp_path):
     assert cal_tab._hydra_page._cards[2]._seed_bcy.value() == pytest.approx(1030.0)
     assert cal_tab._hydra_page._cards[1]._manual_seed_check.isChecked()
     assert cal_tab._hydra_page._wl.value() == pytest.approx(0.1729)
+    # Rings are redrawn from the stored result without re-running Fit — panel
+    # 1 is the toolbar's default active panel (viewer already bound), so its
+    # ring items are drawn immediately; panel 2's result is stored too (rings
+    # appear as soon as the user switches to it — see bind_viewer).
+    assert cal_tab._hydra_page._cards[1].result is not None
+    assert cal_tab._hydra_page._cards[2].result is not None
+    assert len(cal_tab._hydra_page._cards[1]._ring_items) > 0
 
     batch_tab = BatchTab()
     batch_tab.apply_project_integration(integrate_attempts)
@@ -350,6 +392,14 @@ def test_apply_project_calibration_and_integration_hydra(app, tmp_path):
     assert hp._cards[1].result.BC_y == pytest.approx(1024.0)
     assert hp._cards[2].result.BC_y == pytest.approx(1030.0)
     assert hp._cards[1]._use_calib_btn.isChecked()
+    # Each panel's Waterfall/Stacked-profiles views are replayed from its own
+    # attempt's stored arrays — distinct frame counts per panel prove the
+    # toolbar's GE1/GE2 selection shows genuinely panel-specific results,
+    # not one shared plot.
+    assert hp._viewer_pairs[1].waterfall._nrows == n_frames["ge1"]
+    assert hp._viewer_pairs[2].waterfall._nrows == n_frames["ge2"]
+    assert len(hp._viewer_pairs[1].stack_view._profiles) == n_frames["ge1"]
+    assert len(hp._viewer_pairs[2].stack_view._profiles) == n_frames["ge2"]
 
 
 def test_apply_project_calibration_single_detector(app, tmp_path):
@@ -371,6 +421,48 @@ def test_apply_project_calibration_single_detector(app, tmp_path):
     assert cal_tab._seed_bcy.value() == pytest.approx(1111.0)
     assert cal_tab._cal.currentText() == "LaB6"
     assert cal_tab._manual_seed_check.isChecked()
+    # Rings are redrawn from the stored result immediately (no image was
+    # loaded here — loader_state's path doesn't exist — so the radial
+    # profile/cake, which need an actual image, are correctly skipped).
+    assert cal_tab._result is not None
+    assert len(cal_tab._ring_items) > 0
+
+
+def test_apply_project_integration_populates_batch_plots_single_detector(app, tmp_path):
+    """Open Project → Batch Integrate (single-detector) should replay the
+    stored profiles/r_axis_px arrays into the Waterfall/Stacked-profiles
+    views right away, not leave them blank until a fresh run. The Hydra,
+    per-panel version of this is covered (without building a second
+    HydraBatchPage's worth of pyqtgraph widgets — see .context/STATE.md's
+    interpreter-teardown crash-risk note) by
+    ``test_apply_project_calibration_and_integration_hydra`` above, which
+    already builds one."""
+    from midas_gui.tab_batch import BatchTab
+
+    proj_path = str(tmp_path / "proj.h5")
+    project.create_project(proj_path)
+    calib_result = _fake_result()
+    calib_ref = project.append_calibration_attempt(
+        proj_path, "single", cfg={"mode": "one_shot"}, result=calib_result, loader_state={})
+    ref = project.append_integration_attempt(
+        proj_path, "single", inputs={"src_cfg": {"type": "hdf5", "path": None}},
+        finished_payload={
+            "n": 4, "aborted": False,
+            "profiles": np.random.rand(4, 12).astype(np.float32),
+            "r_axis_px": np.arange(12, dtype=np.float32),
+            "frame_ids": [f"f{i}" for i in range(4)],
+        },
+        calibration_snapshot={"Lsd": calib_result.Lsd, "wavelength_A": 0.1729,
+                               "BC_y": 1024.0, "BC_z": 1024.0,
+                               "NrPixelsY": 2048, "NrPixelsZ": 2048},
+        calib_attempt_ref=calib_ref)
+    meta = project.read_attempt(proj_path, ref)
+    meta["_results_arrays"] = project.read_attempt_results(proj_path, ref)
+
+    batch_tab = BatchTab()
+    batch_tab.apply_project_integration({"single": meta})
+    assert batch_tab._waterfall._nrows == 4
+    assert len(batch_tab._stack_view._profiles) == 4
 
 
 def test_hash_paths_in_adds_hash_for_existing_files(tmp_path):

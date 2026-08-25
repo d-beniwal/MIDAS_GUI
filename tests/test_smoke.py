@@ -55,6 +55,19 @@ def test_tab_visibility_toggle():
     win.apply_tab_visibility(C.OPTIONAL_TABS)
     assert win.centralWidget().count() == len(C.ALWAYS_TABS) + len(C.OPTIONAL_TABS)
 
+    # Header project-name indicator (top-right corner of the tab bar,
+    # separate from the muted status-bar "Project: none" label) — reused
+    # from this same window rather than constructing another MainWindow,
+    # since each one adds several pyqtgraph widgets to the same process
+    # (see .context/STATE.md's interpreter-teardown crash-risk note).
+    assert win._header_project_lbl.text() == ""
+    win._set_project_path("/tmp/my_experiment.h5")
+    assert "my_experiment.h5" in win._header_project_lbl.text()
+    assert win._project_lbl.text() == "Project: my_experiment.h5"
+    win._set_project_path(None)
+    assert win._header_project_lbl.text() == ""
+    assert win._project_lbl.text() == "Project: none"
+
 
 def test_on_profile_changed_refreshes_devices_and_calibrants(monkeypatch):
     """A profile switch (MainWindow.on_profile_changed) must repopulate the

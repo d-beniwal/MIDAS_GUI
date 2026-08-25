@@ -514,3 +514,35 @@ class HydraBatchPage(QtWidgets.QWidget):
         card = self._cards.get(n)
         if card is not None:
             card.set_calibration(result)
+
+    def populate_panel_plots(self, n: int, meta: dict) -> None:
+        """Fill panel ``n``'s own Waterfall/Stacked-profiles views from a
+        project integration attempt's embedded arrays — mirrors
+        ``BatchTab._populate_plots_from_attempt`` for one Hydra panel. Each
+        panel keeps its own independent viewer pair (``_viewer_pairs``), so
+        populating several panels' worth here is what makes the toolbar
+        selection (GE1/GE2/…) actually show panel-specific results."""
+        arrays = meta.get("_results_arrays") or {}
+        r_axis = arrays.get("r_axis_px")
+        profiles = arrays.get("profiles")
+        if r_axis is None or profiles is None or len(profiles) == 0:
+            return
+        pair = self._viewer_pairs.get(n)
+        if pair is None:
+            return
+        try:
+            spec = self._cards[n].resolved_spec(self._r_bin.value(), self._e_bin.value())
+            axctx = (float(spec.Lsd), float(spec.pxY), float(spec.Wavelength))
+            pair.waterfall.set_axis_context(*axctx)
+            pair.stack_view.set_axis_context(*axctx)
+        except Exception:
+            pass
+        pair.waterfall.reset(r_axis)
+        pair.stack_view.reset(r_axis)
+        frame_ids = arrays.get("frame_ids") or list(range(len(profiles)))
+        self._integrated_fids[n] = set()
+        for fid, prof in zip(frame_ids, profiles):
+            pair.waterfall.add_profile(prof)
+            pair.stack_view.add_profile(r_axis, prof, label=fid)
+            self._integrated_fids[n].add(str(fid))
+        pair.wf_started = True

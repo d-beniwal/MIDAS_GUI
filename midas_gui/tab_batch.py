@@ -178,11 +178,45 @@ class BatchTab(QtWidgets.QWidget):
             snap = single_meta.get("calibration_snapshot")
             if snap:
                 self.set_calibration(project.calibration_namespace(snap))
+            self._populate_plots_from_attempt(single_meta)
         for panel_key, meta in hydra_metas.items():
             snap = meta.get("calibration_snapshot")
+            n = int(panel_key[2:])
             if snap:
                 self._ensure_hydra_page().set_panel_calibration(
-                    int(panel_key[2:]), project.calibration_namespace(snap))
+                    n, project.calibration_namespace(snap))
+            self._ensure_hydra_page().populate_panel_plots(n, meta)
+
+    def _populate_plots_from_attempt(self, meta: dict) -> None:
+        """Fill the Waterfall/Stacked-profiles views from an integration
+        attempt's embedded ``profiles``/``r_axis_px``/``frame_ids`` arrays
+        (``project.read_attempt_results``, stashed onto ``meta`` under
+        ``_results_arrays`` by the Open Project dialog) — same widget calls
+        ``_on_frame`` makes per-frame during a live run, just replayed in one
+        shot instead of streamed. Best-effort: a missing/incompatible
+        calibration (for the x-axis re-labelling) never blocks the plots."""
+        arrays = meta.get("_results_arrays") or {}
+        r_axis = arrays.get("r_axis_px")
+        profiles = arrays.get("profiles")
+        if r_axis is None or profiles is None or len(profiles) == 0:
+            return
+        try:
+            spec = self._build_spec()
+            axctx = (float(spec.Lsd), float(spec.pxY), float(spec.Wavelength))
+            self._waterfall.set_axis_context(*axctx)
+            self._stack_view.set_axis_context(*axctx)
+        except Exception:
+            pass
+        self._waterfall.reset(r_axis)
+        self._stack_view.reset(r_axis)
+        frame_ids = arrays.get("frame_ids") or list(range(len(profiles)))
+        self._integrated_fids = set()
+        for fid, prof in zip(frame_ids, profiles):
+            self._waterfall.add_profile(prof)
+            self._stack_view.add_profile(r_axis, prof, label=fid)
+            self._integrated_fids.add(str(fid))
+        self._wf_started = True
+        self._view_tabs.setCurrentWidget(self._waterfall)
 
     def shutdown(self):
         """Interrupt + bounded-wait every Hydra-page worker on app close —

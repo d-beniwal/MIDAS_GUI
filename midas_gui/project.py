@@ -260,6 +260,28 @@ def read_attempt(project_path, ref: str) -> dict:
         return json.loads(f[ref.lstrip("/")]["metadata"][()])
 
 
+def read_attempt_results(project_path, ref: str) -> dict:
+    """The embedded 1-D result arrays for an *integration* attempt
+    (``profiles``/``r_axis_px``/``sigmas``/``frame_ids``) — these live as
+    raw HDF5 datasets under ``<ref>/results``, separate from the JSON
+    ``metadata`` blob ``read_attempt`` returns (see
+    ``append_integration_attempt``). Returns {} if the attempt has no
+    ``results`` group (e.g. a calibration attempt, or an aborted run with
+    zero frames)."""
+    with h5py.File(str(project_path), "r") as f:
+        grp = f.get(f"{ref.lstrip('/')}/results")
+        if grp is None:
+            return {}
+        out = {}
+        for key in ("profiles", "r_axis_px", "sigmas"):
+            if key in grp:
+                out[key] = grp[key][()]
+        if "frame_ids" in grp:
+            out["frame_ids"] = [v.decode() if isinstance(v, bytes) else v
+                                 for v in grp["frame_ids"][()]]
+        return out
+
+
 def calib_attempt_gui_fields(meta: dict) -> dict:
     """Map a parsed calibration-attempt ``metadata`` dict to the
     widget-keyed field dict consumed by ``CalibrationTab``/

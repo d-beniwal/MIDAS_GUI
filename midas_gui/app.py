@@ -131,6 +131,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_profile_combo()
         self._profile_combo.activated[str].connect(self._on_header_profile_changed)
 
+        # Active-project indicator, pinned to the opposite (top-right) corner
+        # of the same tab bar row — deliberately separate from the muted
+        # status-bar "Project: none" label (kept as-is), since this one needs
+        # to be prominent/high-contrast rather than a quiet status readout.
+        self._header_project_lbl = QtWidgets.QLabel("")
+        proj_font = self._header_project_lbl.font()
+        proj_font.setPointSize(proj_font.pointSize() + 2)
+        proj_font.setBold(True)
+        self._header_project_lbl.setFont(proj_font)
+        self._header_project_lbl.setStyleSheet("color: #3ddc84; padding-right: 8px;")
+        tabs.setCornerWidget(self._header_project_lbl, QtCore.Qt.TopRightCorner)
+
         # Build each tab in isolation: a single tab that fails on this platform
         # becomes an error placeholder instead of taking the whole window down.
         def _tab(factory, name):
@@ -384,6 +396,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _set_project_path(self, path) -> None:
         self._project_ctx.path = path
         self._project_lbl.setText(f"Project: {Path(path).name}" if path else "Project: none")
+        self._header_project_lbl.setText(f"● Project: {Path(path).name}" if path else "")
         self._close_proj_act.setEnabled(path is not None)
 
     def _new_project_dialog(self):
@@ -453,8 +466,11 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             calib_attempts = {k: project.read_attempt(path, ref)
                                for k, ref in dlg.calib_selection().items()}
-            integrate_attempts = {k: project.read_attempt(path, ref)
-                                   for k, ref in dlg.integrate_selection().items()}
+            integrate_attempts = {}
+            for k, ref in dlg.integrate_selection().items():
+                meta = project.read_attempt(path, ref)
+                meta["_results_arrays"] = project.read_attempt_results(path, ref)
+                integrate_attempts[k] = meta
             if calib_attempts:
                 self._cal_tab.apply_project_calibration(calib_attempts)
             if integrate_attempts:

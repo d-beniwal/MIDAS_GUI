@@ -726,6 +726,18 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             self._cake_views[n].set_cake(data["cake_2d"], data["r_axis_px"], data["eta_axis_deg"])
         self._int_workers.pop(n, None)
 
+    # ── File > Open Project… ─────────────────────────────────────────
+
+    def display_stored_result(self, n: int, result) -> None:
+        """Redraw panel ``n``'s rings + (if its image is loaded) profile/cake
+        for a result recovered from a project attempt — mirrors
+        ``_on_panel_done``'s visual effects without re-running Fit."""
+        card = self._cards.get(n)
+        if card is None:
+            return
+        card.on_result(result)
+        self._run_integration(n, result)
+
     # ── Import from Data Viewer ──────────────────────────────────────
 
     def import_from_viewer(self, data: dict):
