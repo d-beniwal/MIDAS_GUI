@@ -31,6 +31,7 @@ from midas_gui.constants import (KERNELS, DEFAULT_KERNEL, DEFAULT_TRXRD_DIR,
                                  DEFAULT_TRXRD_PREFIX, DEFAULT_TRXRD_CALIB,
                                  DEFAULT_TRXRD_MASK)
 from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_file,
+                               geometry_fields_from_file,
                                _NoScrollComboBox, widgets_to_dict, apply_dict_to_widgets)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, DataLoaderPanel,
                                _convert_radial, _UnitAxis)
@@ -635,6 +636,19 @@ class PumpProbeTab(QtWidgets.QWidget):
             raise FileNotFoundError(f"Calibration file not found: {path}")
         return spec_from_geometry_file(path, r_bin, e_bin)
 
+    def _resolved_im_trans(self) -> tuple:
+        """ImTransOpt codes from the active calibration source — see
+        ``BatchTab._resolved_im_trans`` (same role, no shared calib-values grid here)."""
+        if self._use_tab2_btn.isChecked():
+            return tuple(getattr(self._result, "im_trans", ()) or ())
+        path = self._calib_ed.text().strip()
+        if not path or not Path(path).exists():
+            return ()
+        try:
+            return tuple(geometry_fields_from_file(path).get("im_trans") or ())
+        except Exception:
+            return ()
+
     def _run(self):
         if self._worker and self._worker.isRunning():
             return
@@ -681,7 +695,7 @@ class PumpProbeTab(QtWidgets.QWidget):
             weighted=True, q_cfg=q_cfg, ref_delays=ref_delays, norm_range=norm_range,
             dark=self._loader.dark(), bright=self._loader.bright(),
             background=self._loader.background(), bright_mode=self._loader.bright_mode(),
-            parent=self)
+            parent=self, im_trans=self._resolved_im_trans())
         self._worker.progress.connect(self._on_progress)
         self._worker.log_line.connect(self._log.append)
         self._worker.finished.connect(self._on_done)

@@ -589,7 +589,13 @@ def write_poni(geom: dict, path: str | Path) -> None:
 
 def _build_spec(result, r_bin: float, eta_bin: float):
     from midas_calibrate_v2.compat.to_integrate import spec_from_calibration_result
-    return spec_from_calibration_result(result, RBinSize=r_bin, EtaBinSize=eta_bin)
+    spec = spec_from_calibration_result(result, RBinSize=r_bin, EtaBinSize=eta_bin)
+    # spec_from_calibration_result doesn't copy ImTransOpt — set it here so
+    # every consumer of this spec can hand the RAW frame straight to
+    # midas_integrate_v2 and let its own apply_trans_opt=True do the flip
+    # (never flip the pixel array in midas_gui for a backend integration call).
+    spec.TransOpt = list(getattr(result, "im_trans", []) or [])
+    return spec
 
 
 def _spec_from_json(path: str, r_bin: float, eta_bin: float):
@@ -682,7 +688,9 @@ def _spec_from_result_ns(r_bin, eta_bin, **fields):
         tx=float(fields.get("tx") or 0.0), ty=float(fields.get("ty") or 0.0),
         tz=float(fields.get("tz") or 0.0), wavelength_A=float(fields["wavelength_A"]),
         distortion=fields.get("distortion") or {}, residual_corr_bin_path=None)
-    return spec_from_calibration_result(ns, RBinSize=float(r_bin), EtaBinSize=float(eta_bin))
+    spec = spec_from_calibration_result(ns, RBinSize=float(r_bin), EtaBinSize=float(eta_bin))
+    spec.TransOpt = list(fields.get("im_trans") or [])
+    return spec
 
 
 def geometry_fields_from_file(path: str) -> dict:
@@ -823,7 +831,7 @@ def result_ns_from_geometry_file(path: str):
     ``.poni`` or ``.json`` geometry file — carries the attributes
     ``spec_from_calibration_result`` / the tabs' ``set_calibration`` expect
     (``wavelength_A, Lsd, BC_y, BC_z, pxY, pxZ, NrPixelsY, NrPixelsZ, tx, ty, tz,
-    distortion``)."""
+    distortion, im_trans``)."""
     from types import SimpleNamespace
     f = geometry_fields_from_file(path)
     return SimpleNamespace(
@@ -832,6 +840,7 @@ def result_ns_from_geometry_file(path: str):
         Lsd=float(f["Lsd"]), BC_y=float(f["BC_y"]), BC_z=float(f["BC_z"]),
         tx=float(f["tx"]), ty=float(f["ty"]), tz=float(f["tz"]),
         wavelength_A=float(f["wavelength_A"]), distortion=f["distortion"],
+        im_trans=list(f.get("im_trans") or []),
         residual_corr_bin_path=None)
 
 
@@ -862,6 +871,7 @@ def resolve_calibration_fields(calib_result, use_file: bool, file_path: str, *,
         "NrPixelsY": getattr(r, "NrPixelsY", None),
         "NrPixelsZ": getattr(r, "NrPixelsZ", None),
         "distortion": getattr(r, "distortion", {}) or {},
+        "im_trans": list(getattr(r, "im_trans", []) or []),
     }
     return fields, f"From {source_label}."
 
@@ -888,6 +898,10 @@ def render_calib_value_grid(grid: "QtWidgets.QGridLayout", note_label: "QtWidget
     pxY = fields.get("pxY"); pxZ = fields.get("pxZ") or pxY
     dist = fields.get("distortion") or {}
     n_dist = sum(1 for v in dist.values() if abs(float(v)) > 1e-12)
+    im_trans = fields.get("im_trans") or []
+    _IM_TRANS_NAMES = {1: "Flip Y", 2: "Flip Z", 3: "Transpose"}
+    trans_txt = (", ".join(_IM_TRANS_NAMES.get(c, str(c)) for c in im_trans)
+                 if im_trans else "None")
     rows = [
         ("λ (Å)", _num(fields.get("wavelength_A"), ".5f")),
         ("Lsd (mm)", "—" if lsd is None else format(float(lsd) / 1000.0, ".3f")),
@@ -900,6 +914,7 @@ def render_calib_value_grid(grid: "QtWidgets.QGridLayout", note_label: "QtWidget
         ("pxZ (µm)", _num(pxZ, ".3f")),
         ("Detector", f"{fields.get('NrPixelsY') or '—'} × {fields.get('NrPixelsZ') or '—'}"),
         ("Distortion", f"{n_dist} non-zero coeff" + ("s" if n_dist != 1 else "")),
+        ("ImTransOpt", trans_txt),
     ]
     ncols = 2
     per = (len(rows) + ncols - 1) // ncols

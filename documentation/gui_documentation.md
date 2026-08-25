@@ -3,7 +3,22 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-25 (Calibrate's Eta vs R Cake and Batch Integrate's
+**Last updated:** 2026-08-25 (Fixed a geometry/image-orientation mismatch:
+Batch Integrate, Pump Probe, Calibration Refinement, and the Data Viewer /
+Sim Detector radial-profile preview now correctly account for **ImTransOpt**
+(the Flip Y / Flip Z / Transpose transform set on the Calibrate tab) —
+previously it was silently dropped once a calibration left Tab 2, so these
+consumers integrated the raw, untransformed frame against a geometry that had
+actually been fit on a transformed one. The fix passes `ImTransOpt` to the
+MIDAS integration backend itself (`IntegrationSpec.TransOpt`, which
+`midas_integrate_v2`'s own `apply_trans_opt=True` then applies) rather than
+flipping the pixel array in the GUI, so the backend is the single place the
+transform is actually performed for every integration call site. The
+Batch Integrate "Calibration values" card also gained a visible **ImTransOpt**
+row so the active transform is no longer invisible. See §5 "Calibration
+values" and §7.)
+
+**Previously:** (2026-08-25, Calibrate's Eta vs R Cake and Batch Integrate's
 Waterfall auto-level: vmin% default raised from 1 to 30, and the percentile
 calculation now excludes exact-zero bins/pixels — same fix already applied to
 the main image viewer — so a partially-empty cake/waterfall no longer skews
@@ -1376,11 +1391,15 @@ plus Dark/Bright/Background and Mask, are selected in the shared **Data Loader p
 
 ### Calibration values (middle, read-only)
 A **Calibration values** card shows the geometry actually in use — λ, Lsd (mm),
-BC_y/BC_z (px), tilts tx/ty/tz (°), pixel sizes, detector size, and a distortion summary
-(number of non-zero coefficients). It repopulates whenever a calibration arrives from
-Tab 2 (or Tab 3 refinement, or the Data Viewer via Tab 2) **and** when a calibration
-file path is entered, parsing the file directly so you can confirm the numbers before
-running. A note line reports the active source (or any file-read error).
+BC_y/BC_z (px), tilts tx/ty/tz (°), pixel sizes, detector size, a distortion summary
+(number of non-zero coefficients), and an **ImTransOpt** row (e.g. "Flip Y, Flip Z" or
+"None") naming the image transform the active geometry was calibrated in — the same
+transform Batch Integrate now applies internally (via the MIDAS integration backend,
+not a GUI-side pixel flip) to every streamed frame so it matches. It repopulates
+whenever a calibration arrives from Tab 2 (or Tab 3 refinement, or the Data Viewer via
+Tab 2) **and** when a calibration file path is entered, parsing the file directly so
+you can confirm the numbers before running. A note line reports the active source (or
+any file-read error).
 
 ### Integration
 | Field | Description |

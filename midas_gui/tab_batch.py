@@ -76,6 +76,13 @@ class BatchTab(QtWidgets.QWidget):
         return resolve_calibration_fields(
             self._calib_result, self._use_json_btn.isChecked(), self._json_ed.text())
 
+    def _resolved_im_trans(self) -> tuple:
+        """ImTransOpt codes from the active calibration source — the same
+        flip/transpose the geometry (BC/tilts) was fit in, which every raw
+        frame streamed into BatchWorker/FolderMonitorWorker must also get."""
+        fields, _ = self._calib_fields_in_use()
+        return tuple(fields.get("im_trans") or []) if fields else ()
+
     def _refresh_calib_values(self):
         """Populate the read-only calibration-values grid from the active source."""
         fields, note = self._calib_fields_in_use()
@@ -567,7 +574,7 @@ class BatchTab(QtWidgets.QWidget):
             frame_range=frame_range, monitor_file=monitor_file,
             drift_traj=drift_traj, parent=self,
             dark=dark, bright=bright, background=background, bright_mode=bright_mode,
-            weighted=weighted, context=context)
+            weighted=weighted, context=context, im_trans=self._resolved_im_trans())
         self._worker.progress.connect(self._on_progress)
         self._worker.frame_done.connect(self._on_frame)
         self._worker.finished.connect(self._on_done)
@@ -753,7 +760,8 @@ class BatchTab(QtWidgets.QWidget):
             spec, src_cfg["path"], self._loader.composite_mask(), kernel, corrections,
             variance_cfg, q_cfg=q_cfg, dark=dark, bright=bright, background=background,
             bright_mode=bmode, weighted=weighted, seen=set(self._integrated_fids),
-            context=context, out_dir=out_dir, fmt=fmt, parent=self)
+            context=context, out_dir=out_dir, fmt=fmt, parent=self,
+            im_trans=self._resolved_im_trans())
         self._monitor_worker.frame_done.connect(self._on_frame)
         self._monitor_worker.new_count.connect(self._on_monitor_count)
         self._monitor_worker.log_line.connect(self._log.append)

@@ -108,6 +108,12 @@ class HydraBatchPanelCard(QtWidgets.QWidget):
             self.result, self._use_file_btn.isChecked(), self._json_ed.text(),
             source_label=f"Calibrate tab (ge{self.panel_number})")
 
+    def resolved_im_trans(self) -> tuple:
+        """ImTransOpt codes from this panel's active calibration source — see
+        ``BatchTab._resolved_im_trans`` (single-detector counterpart)."""
+        fields, _ = self._calib_fields_in_use()
+        return tuple(fields.get("im_trans") or []) if fields else ()
+
     def refresh_calib_values(self):
         fields, note = self._calib_fields_in_use()
         render_calib_value_grid(self._calib_grid, self._calib_val_note, fields, note)

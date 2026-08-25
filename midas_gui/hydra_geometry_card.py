@@ -31,7 +31,7 @@ from midas_gui.helpers import (_fspin, _NoScrollSpinBox, _browse,
                          _spec_from_result_ns, _NoScrollComboBox,
                          make_kedge_label, make_pixel_label, tilted_ring_xy,
                          write_poni, write_standalone_paramstest,
-                         im_trans_codes_from_checkboxes)
+                         im_trans_codes_from_checkboxes, _apply_im_trans)
 from midas_gui.workers import build_integration_context, integrate_frame
 from midas_gui import style as S
 
@@ -928,6 +928,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             "tx": 0.0, "ty": ty, "tz": tz,
             "pxY": px, "pxZ": px,
             "NrPixelsY": ny, "NrPixelsZ": nz, "distortion": {},
+            "im_trans": list(self.im_trans_codes()),
         }
 
     def show_radial_help(self):
@@ -990,11 +991,20 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         loaded calibration's geometry or one synthesized from the live Ring-sim
         widgets (see ``_effective_calib_geom``). The binning geometry is built
         once per (geometry, R-bin, image shape, mask) and reused across frames;
-        only the per-frame integration runs on a frame change."""
+        only the per-frame integration runs on a frame change.
+
+        ``img`` is the display-oriented frame (``image_provider`` already
+        applied this card's Transforms checkboxes, for on-screen viewing) —
+        it is un-transformed back to raw here so the backend can apply
+        ``g["im_trans"]`` itself via ``spec.TransOpt`` exactly once, the same
+        as every other integration call site."""
         import json
         import torch
         r_bin = max(float(self._rad_r_bin.value()), 0.1)
         eta_bin = 5.0
+        im_trans = tuple(g.get("im_trans") or ())
+        if im_trans:
+            img = _apply_im_trans(img, tuple(reversed(im_trans)))   # display → raw
         nz, ny = img.shape
         mask = None if mask is None else np.ascontiguousarray(mask, dtype=bool)
         mask_fp = None if mask is None else hash(mask.tobytes())
@@ -1003,7 +1013,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
                round(float(g.get("ty") or 0.0), 4), round(float(g.get("tz") or 0.0), 4),
                round(float(g["pxY"]), 4), round(float(g.get("pxZ") or g["pxY"]), 4),
                round(float(g["wavelength_A"]), 6), g.get("NrPixelsY"), g.get("NrPixelsZ"),
-               round(r_bin, 4), (nz, ny), mask_fp,
+               round(r_bin, 4), (nz, ny), mask_fp, im_trans,
                json.dumps(g.get("distortion") or {}, sort_keys=True))
         if self._calib_ctx is None or self._calib_ctx_sig != sig:
             spec = _spec_from_result_ns(
@@ -1011,7 +1021,8 @@ class DetectorGeometryCard(QtWidgets.QWidget):
                 pxY=g["pxY"], pxZ=g.get("pxZ") or g["pxY"], Lsd=g["Lsd"],
                 BC_y=g["BC_y"], BC_z=g["BC_z"], tx=g.get("tx") or 0.0,
                 ty=g.get("ty") or 0.0, tz=g.get("tz") or 0.0,
-                wavelength_A=g["wavelength_A"], distortion=g.get("distortion") or {})
+                wavelength_A=g["wavelength_A"], distortion=g.get("distortion") or {},
+                im_trans=im_trans)
             ctx = build_integration_context(spec, "hard", mask, (None, None), weighted=True)
             self._calib_ctx = (spec, ctx); self._calib_ctx_sig = sig
         spec, ctx = self._calib_ctx

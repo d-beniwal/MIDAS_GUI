@@ -448,6 +448,9 @@ class MaskComputeWorker(QtCore.QThread):
                 from midas_gui.helpers import _build_spec
                 spec = _build_spec(self._result, 2.0, 5.0)
                 geom = m.HardBinGeometry.from_spec(spec)   # needs per-pixel bins
+                # azimuthal_sigma_clip has no apply_trans_opt hook — it needs the
+                # image already in the geometry's transformed/world orientation,
+                # which self._image already is (Mask Builder's Transforms preview).
                 _, am = m.azimuthal_sigma_clip(
                     self._image.astype(np.float64), geom, n_sigma=azim["n_sigma"])
                 combined |= am.astype(bool)
@@ -463,7 +466,13 @@ class MaskComputeWorker(QtCore.QThread):
                 static_t = torch.from_numpy(combined.astype(bool))
                 lm = m.LearnableMask(NZ, NY, init_weight=float(learn.get("init_weight", 0.9)),
                                      static_mask=static_t)
-                img_t = torch.from_numpy(self._image.astype(np.float64))
+                # integrate_with_corrections DOES flip internally (apply_trans_opt=
+                # True, via spec.TransOpt) — so unlike azimuthal_sigma_clip above,
+                # this one wants self._image reverted back to raw first.
+                im_trans = tuple(self._im_trans)
+                raw_image = (_apply_im_trans(self._image, tuple(reversed(im_trans)))
+                             if im_trans else self._image)
+                img_t = torch.from_numpy(raw_image.astype(np.float64))
                 loss_fn = m.EtaUniformityLoss(intensity_floor=0.0)
                 opt = torch.optim.Adam(lm.parameters(), lr=float(learn.get("lr", 0.5)))
                 n_steps = int(learn.get("n_steps", 300))
@@ -640,20 +649,16 @@ class CalibrationWorker(QtCore.QThread):
             if mask is not None:
                 image = image.copy()
                 image[mask.astype(bool)] = 0.0   # zero sentinels before calibration
-            # Apply the Transforms checkboxes here, once, so the array handed to
-            # the pipeline matches what's displayed/picked in the GUI (same
-            # coordinate space as the seed BC). Clear cfg["im_trans"] afterwards
-            # so calib.run_pipeline's own internal per-branch transform (needed
-            # only when a caller hands it a raw image) doesn't double-apply it.
-            im_trans = tuple(self._cfg.get("im_trans", ()))
-            dark = self._dark
-            if im_trans:
-                image = _apply_im_trans(image, im_trans)
-                if dark is not None:
-                    dark = _apply_im_trans(dark.astype(np.float32), im_trans)
-                self._cfg = dict(self._cfg)
-                self._cfg["im_trans"] = ()
-            raw = calib.run_pipeline(self._mode, image, dark, self._cfg)
+            # Hand image/dark to the pipeline exactly as loaded, with the
+            # Transforms checkboxes' codes intact in cfg["im_trans"] —
+            # calib.run_pipeline applies them per-branch: the plain
+            # midas_calibrate_v2.calibrate() path takes im_trans as a native
+            # kwarg and flips internally; the other pipeline entry points
+            # (four_stage/bayesian/joint/first_time/partial-distortion) have
+            # no such parameter in the installed package, so run_pipeline
+            # pre-flips for those itself. Either way, this worker never flips
+            # the array — it just passes the raw data and codes through.
+            raw = calib.run_pipeline(self._mode, image, self._dark, self._cfg)
             NZ, NY = image.shape
             result = calib.normalize_result(
                 raw, self._mode, NY=NY, NZ=NZ,
@@ -696,20 +701,21 @@ class IntegrationWorker(QtCore.QThread):
             import torch
             self.log_line.emit("[integrate] Building spec…")
             spec = _build_spec(self._result, self._r_bin, self._eta_bin)
-            img = _apply_im_trans(self._image.astype(np.float32), self._im_trans)
+            # spec.TransOpt carries self._result.im_trans (see helpers._build_spec);
+            # midas_integrate_v2's apply_trans_opt=True (default) flips the image
+            # internally, so image/dark/bright/background stay exactly as loaded.
+            # Only the mask is pre-flipped here (no backend hook for it) — against
+            # self._im_trans (the live Transforms-checkbox state this preview run
+            # was requested with, which normally matches self._result.im_trans).
+            img = self._image.astype(np.float32)
             if self._dark is not None or self._bright is not None or self._background is not None:
-                dark = (_apply_im_trans(self._dark.astype(np.float32), self._im_trans)
-                        if self._dark is not None else None)
-                bright = (_apply_im_trans(self._bright.astype(np.float32), self._im_trans)
-                          if self._bright is not None else None)
-                bg = (_apply_im_trans(self._background.astype(np.float32), self._im_trans)
-                      if self._background is not None else None)
                 img = apply_field_corrections(
-                    img, dark=dark, bright=bright,
-                    bright_mode=self._bright_mode, background=bg).astype(np.float32)
+                    img, dark=self._dark, bright=self._bright,
+                    bright_mode=self._bright_mode, background=self._background).astype(np.float32)
             mask_t = None
             if self._mask is not None:
-                mask_t = _apply_im_trans(self._mask.astype(np.float32), self._im_trans)
+                mask_t = (_apply_im_trans(self._mask.astype(np.float32), self._im_trans)
+                          if self._im_trans else self._mask.astype(np.float32))
             self.log_line.emit("[integrate] Running integration…")
             geom = build_geom(spec, "subpixel2", mask_t)
             cnt = (count_cake(geom, "subpixel2", spec.NrPixelsZ, spec.NrPixelsY)
@@ -749,7 +755,7 @@ class BatchWorker(QtCore.QThread):
                  corrections, variance_cfg, q_cfg=None,
                  frame_range=None, monitor_file=None, drift_traj=None, parent=None,
                  dark=None, bright=None, background=None, bright_mode="divide",
-                 weighted=True, context=None):
+                 weighted=True, context=None, im_trans=()):
         super().__init__(parent)
         self._context = context              # prebuilt integration context or None
         self._spec = spec                    # always R-uniform (Q handled by rebinning)
@@ -769,6 +775,11 @@ class BatchWorker(QtCore.QThread):
         # Dark / bright / background pre-processing (per-frame)
         self._dark, self._bright, self._background = dark, bright, background
         self._bright_mode = bright_mode
+        # ImTransOpt codes the active geometry was fit in. spec.TransOpt (set
+        # by helpers._build_spec) already carries this, so midas_integrate_v2
+        # flips each streamed frame itself — this copy is used only to
+        # pre-flip the mask, which has no such backend hook (see run()).
+        self._im_trans = tuple(im_trans or ())
 
     def _open_source(self):
         from midas_integrate_v2.streaming import TIFFGlobSource, HDF5FrameSource
@@ -792,12 +803,22 @@ class BatchWorker(QtCore.QThread):
             spec.validate()
             lsd = float(spec.Lsd); px = float(spec.pxY); wl = float(spec.Wavelength)
 
+            # spec.TransOpt already carries ImTransOpt (see helpers._build_spec) —
+            # midas_integrate_v2's apply_trans_opt=True (default) flips the raw
+            # streamed frame itself, so it is passed through untouched below.
+            # The mask has no such hook (it's baked into the geometry map at
+            # build time against the *transformed* pixel grid), so it alone is
+            # pre-flipped here, once.
+            dark, bright, background = self._dark, self._bright, self._background
+            mask = (self._mask if not self._im_trans or self._mask is None
+                    else _apply_im_trans(self._mask.astype(np.float32), self._im_trans))
+
             if self._context is not None:
                 self.log_line.emit("[batch] Reusing existing detector map…")
                 ctx = self._context
             else:
                 self.log_line.emit("[batch] Building geometry (one-time)…")
-                ctx = build_integration_context(spec, self._kernel, self._mask,
+                ctx = build_integration_context(spec, self._kernel, mask,
                                                 self._corrections, self._weighted)
             self.geom_ready.emit(ctx)
             geom = ctx["geom"]; corr_on = ctx["corr_on"]
@@ -838,13 +859,13 @@ class BatchWorker(QtCore.QThread):
                     f"[batch] drift trajectory: {len(self._drift_traj.frame_indices)} knots  "
                     f"Lsd [{self._drift_traj.Lsd_t.min():.0f}, {self._drift_traj.Lsd_t.max():.0f}] µm")
 
-            fields_on = (self._dark is not None or self._bright is not None
-                         or self._background is not None)
+            fields_on = (dark is not None or bright is not None
+                         or background is not None)
             if fields_on:
                 self.log_line.emit(
-                    f"[batch] field corrections: dark={'y' if self._dark is not None else 'n'} "
-                    f"bright={self._bright_mode if self._bright is not None else 'n'} "
-                    f"background={'y' if self._background is not None else 'n'}")
+                    f"[batch] field corrections: dark={'y' if dark is not None else 'n'} "
+                    f"bright={self._bright_mode if bright is not None else 'n'} "
+                    f"background={'y' if background is not None else 'n'}")
 
             aborted = False
             all_profiles, all_sigmas, frame_ids, out_paths = [], [], [], []
@@ -862,17 +883,20 @@ class BatchWorker(QtCore.QThread):
                     break
                 if (abs_i - fr_start) % fr_stride != 0:
                     continue
+                # img stays exactly as streamed — no im_trans applied to it in
+                # Python. spec.TransOpt (see run()'s top) makes the backend
+                # integrate_* call flip it internally further down.
                 # Dark / bright / background pre-processing
                 if fields_on:
                     img = apply_field_corrections(
-                        img, dark=self._dark, bright=self._bright,
-                        bright_mode=self._bright_mode, background=self._background)
+                        img, dark=dark, bright=bright,
+                        bright_mode=self._bright_mode, background=background)
 
                 # Per-frame geometry when drift correction is active
                 if self._drift_traj is not None:
                     cur_spec = _spec_from_trajectory(self._spec, self._drift_traj, abs_i)
                     cur_lsd  = float(cur_spec.Lsd)
-                    cur_geom = None if corr_on else build_geom(cur_spec, self._kernel, self._mask)
+                    cur_geom = None if corr_on else build_geom(cur_spec, self._kernel, mask)
                     cur_cc   = corrections_counts(cur_spec) if corr_on else None
                     cur_cnt  = (count_cake(cur_geom, self._kernel, cur_spec.NrPixelsZ,
                                            cur_spec.NrPixelsY)
@@ -966,7 +990,7 @@ class PumpProbeWorker(QtCore.QThread):
     def __init__(self, spec, frames, mask, kernel, corrections, weighted=True,
                  q_cfg=None, ref_delays=None, norm_range=None, context=None,
                  dark=None, bright=None, background=None, bright_mode="divide",
-                 parent=None):
+                 parent=None, im_trans=()):
         super().__init__(parent)
         self._spec = spec
         self._frames = frames                 # [(path, delay, fshw), …]
@@ -980,6 +1004,10 @@ class PumpProbeWorker(QtCore.QThread):
         self._context = context
         self._dark, self._bright, self._background = dark, bright, background
         self._bright_mode = bright_mode
+        # spec.TransOpt already carries ImTransOpt (see helpers._build_spec) so
+        # each frame loaded below is integrated exactly as read from disk; only
+        # the mask needs a manual pre-flip (see BatchWorker for why).
+        self._im_trans = tuple(im_trans or ())
 
     def run(self):
         try:
@@ -988,12 +1016,14 @@ class PumpProbeWorker(QtCore.QThread):
             spec.validate()
             lsd = float(spec.Lsd); px = float(spec.pxY); wl = float(spec.Wavelength)
 
+            mask = (self._mask if not self._im_trans or self._mask is None
+                    else _apply_im_trans(self._mask.astype(np.float32), self._im_trans))
             if self._context is not None:
                 self.log_line.emit("[pump] Reusing existing detector map…")
                 ctx = self._context
             else:
                 self.log_line.emit("[pump] Building geometry (one-time)…")
-                ctx = build_integration_context(spec, self._kernel, self._mask,
+                ctx = build_integration_context(spec, self._kernel, mask,
                                                 self._corrections, self._weighted)
             geom = ctx["geom"]; corr_counts = ctx["corr_counts"]; cnt = ctx["cnt"]
             r_ax = ctx["r_ax"]
@@ -1107,7 +1137,8 @@ class FolderMonitorWorker(QtCore.QThread):
     def __init__(self, spec, folder, mask, kernel, corrections, variance_cfg,
                  q_cfg=None, dark=None, bright=None, background=None,
                  bright_mode="divide", weighted=True, seen=None, context=None,
-                 out_dir=None, fmt="csv", poll_interval=1.0, parent=None):
+                 out_dir=None, fmt="csv", poll_interval=1.0, parent=None,
+                 im_trans=()):
         super().__init__(parent)
         self._spec = spec
         self._folder = folder
@@ -1124,18 +1155,26 @@ class FolderMonitorWorker(QtCore.QThread):
         self._out_dir = Path(out_dir) if out_dir else None
         self._fmt = fmt
         self._poll_ms = int(max(0.2, poll_interval) * 1000)
+        # See BatchWorker's __init__ note — same ImTransOpt discipline (applied
+        # here in Python, never via spec.TransOpt).
+        self._im_trans = tuple(im_trans or ())
 
     def run(self):
         try:
             import torch
             import tifffile
             spec = self._spec
+            # See BatchWorker.run() — spec.TransOpt already carries ImTransOpt;
+            # only the mask needs a manual pre-flip (no backend hook for it).
+            dark, bright, background = self._dark, self._bright, self._background
+            mask = (self._mask if not self._im_trans or self._mask is None
+                    else _apply_im_trans(self._mask.astype(np.float32), self._im_trans))
             if self._context is not None:
                 self.log_line.emit("[monitor] reusing existing detector map")
                 ctx = self._context
             else:
                 self.log_line.emit("[monitor] building detector map (one-time)…")
-                ctx = build_integration_context(spec, self._kernel, self._mask,
+                ctx = build_integration_context(spec, self._kernel, mask,
                                                 self._corrections, self._weighted)
             self.geom_ready.emit(ctx)
             geom = ctx["geom"]; corr_counts = ctx["corr_counts"]; cnt = ctx["cnt"]
@@ -1144,8 +1183,8 @@ class FolderMonitorWorker(QtCore.QThread):
             qgrid = None
             if self._q_cfg:
                 qgrid, r_ax = q_grid_and_r(self._q_cfg, lsd, px, wl)
-            fields_on = (self._dark is not None or self._bright is not None
-                         or self._background is not None)
+            fields_on = (dark is not None or bright is not None
+                         or background is not None)
             can_save = self._out_dir is not None and self._fmt in (
                 "csv", "xye", "fxye", "dat")
             if self._out_dir is not None and not can_save:
@@ -1175,8 +1214,8 @@ class FolderMonitorWorker(QtCore.QThread):
                         continue
                     if fields_on:
                         img = apply_field_corrections(
-                            img, dark=self._dark, bright=self._bright,
-                            bright_mode=self._bright_mode, background=self._background)
+                            img, dark=dark, bright=bright,
+                            bright_mode=self._bright_mode, background=background)
                     img_t = torch.from_numpy(img)
                     prof, sigma = integrate_frame(
                         img_t, spec, geom, self._kernel, self._corrections,
@@ -1260,22 +1299,35 @@ class RefinementWorker(QtCore.QThread):
             import midas_integrate_v2 as m
 
             spec = _build_spec(self._result, self._r_bin, self._eta_bin)
+            # spec.TransOpt (set by _build_spec from self._result.im_trans) makes
+            # every integrate_hard() call below flip img_t internally — so the
+            # raw loader frame/dark/bright/background are used exactly as loaded.
+            # Only the mask is pre-flipped: it's baked into build_geom()'s
+            # geometry map against the *transformed* pixel grid, with no
+            # backend-side apply_trans_opt hook of its own.
+            dark, bright, background = self._dark, self._bright, self._background
+            im_trans = tuple(getattr(self._result, "im_trans", ()) or ())
+            mask = self._mask   # RAW space — matches img below, zeroed pointwise
             img = self._image.astype(np.float64)
-            if self._dark is not None or self._bright is not None or self._background is not None:
+            if dark is not None or bright is not None or background is not None:
                 img = apply_field_corrections(
-                    img, dark=self._dark, bright=self._bright,
-                    bright_mode=self._bright_mode, background=self._background)
+                    img, dark=dark, bright=bright,
+                    bright_mode=self._bright_mode, background=background)
             # Prepare mask tensor once — passed to the geometry builder each iteration
             # so masked pixels are excluded from both intensity sums AND bin counts.
             # Zeroing in the image alone is not enough: HardBinGeometry still counts
             # those pixels in its normalisation, dragging down the mean and inflating
             # the η-variance, biasing the loss.
-            if self._mask is not None:
-                img = img.copy(); img[self._mask.astype(bool)] = 0.0
-                mask_t = torch.from_numpy(self._mask.astype(np.float32))
-                n_bad = int(self._mask.astype(bool).sum())
+            if mask is not None:
+                img = img.copy(); img[mask.astype(bool)] = 0.0   # img is still RAW here
+                # mask_t excludes pixels at build_geom() time, which bins against
+                # the *transformed* pixel grid — unlike img above, it needs the flip.
+                mask_xf = (_apply_im_trans(mask.astype(np.float32), im_trans)
+                           if im_trans else mask.astype(np.float32))
+                mask_t = torch.from_numpy(mask_xf)
+                n_bad = int(mask.astype(bool).sum())
                 self.log_line.emit(
-                    f"[refine] mask active: {n_bad:,} px excluded ({100*n_bad/self._mask.size:.2f}%)")
+                    f"[refine] mask active: {n_bad:,} px excluded ({100*n_bad/mask.size:.2f}%)")
             else:
                 mask_t = None
                 self.log_line.emit("[refine] mask: none — all pixels included")
@@ -1434,12 +1486,22 @@ class RefineCompareWorker(QtCore.QThread):
     def run(self):
         try:
             import torch
-            mask_t = torch.from_numpy(self._mask.astype(np.float32)) if self._mask is not None else None
+            # _build_spec (below, per result) sets spec.TransOpt from each
+            # result's im_trans, so img_t below stays exactly as loaded — only
+            # the mask is pre-flipped (see RefinementWorker for why). Both
+            # results share the same im_trans lineage (refinement never
+            # touches ImTransOpt).
+            im_trans = tuple(getattr(self._orig, "im_trans", ()) or ())
+            dark, bright, background, mask = (
+                self._dark, self._bright, self._background, self._mask)
+            if im_trans and mask is not None:
+                mask = _apply_im_trans(mask.astype(np.float32), im_trans)
+            mask_t = torch.from_numpy(mask.astype(np.float32)) if mask is not None else None
             img = self._image.astype(np.float64)
-            if self._dark is not None or self._bright is not None or self._background is not None:
+            if dark is not None or bright is not None or background is not None:
                 img = apply_field_corrections(
-                    img, dark=self._dark, bright=self._bright,
-                    bright_mode=self._bright_mode, background=self._background)
+                    img, dark=dark, bright=bright,
+                    bright_mode=self._bright_mode, background=background)
             img_t = torch.from_numpy(img)
             profiles, r_axes = [], []
             for res in (self._orig, self._refined):

@@ -358,7 +358,7 @@ class HydraBatchPage(QtWidgets.QWidget):
             spec, src_cfg, mask, out_dir, fmt, kernel, corrections, variance_cfg,
             q_cfg=q_cfg, frame_range=frame_range, monitor_file=monitor_file, parent=self,
             dark=dark, bright=bright, background=background, bright_mode=bright_mode,
-            weighted=weighted, context=context)
+            weighted=weighted, context=context, im_trans=card.resolved_im_trans())
         worker.progress.connect(lambda done, total, n=n: self._cards[n].set_progress(done, total))
         worker.frame_done.connect(
             lambda fid, r_ax, prof, sigma, n=n: self._on_frame(n, fid, r_ax, prof, sigma))
