@@ -115,6 +115,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Transforms checkboxes extracted into their own boxed Transforms card (was an inline label inside Ring simulation); Hydra ge1-4 gain a per-panel Rotate field; Hydra gains a per-panel Projection card (Max/Sum/Average); fixed Flip Y/Flip Z/Transpose not refreshing the Hydra image; Hydra radial plot pan/zoom bounded to data extent; Material dialog Preset fills Name field | `93dafa2` |
 | Lab-frame axes overlay (APS/MIDAS coordinate compass), ported from midas-gui-swaxs | `87d9df7` |
 | Fix ImTransOpt propagation: Hydra radial-profile geometry now applies the flip via the MIDAS backend instead of dropping it | `2358ae4` |
+| Single-detector mode gains an Eta vs R Cake tab next to Radial Profile | `943a91d` |
 
 ### Mask Builder (Tab 1)
 | Change | Commit |
@@ -128,6 +129,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Transforms: Flip Y/Flip Z/Transpose checkboxes (MIDAS ImTransOpt), applied to the single image and the stack source alike; synced from an incoming Calibrate result | `068bd0d` |
 | Image origin flipped to bottom-left `(0,0)` (MIDAS convention) | `246dba7` |
 | Fix ImTransOpt propagation: azimuthal/learnable mask computations now honor the active flip via the MIDAS backend where possible | `2358ae4` |
+| A mask logged to a Project attempt is embedded only when it includes something hand-drawn/computed in Mask Builder; a file/folder-only mask is referenced by path+hash instead | `943a91d` |
 
 ### Calibrate (Tab 2) / Refinement (Tab 3)
 | Change | Commit |
@@ -150,6 +152,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Radial Profile/Eta vs R Cake pan/zoom bounded to data extent; Cake right-drag zooms η (Y) only | `08c917f` |
 | Eta vs R Cake auto-level: vmin% default 1→30, percentile calc excludes exact-zero bins | `d0cd6ce` |
 | Fix ImTransOpt propagation: calibration/refinement now pass the raw image + `im_trans` straight through, letting the MIDAS backend apply the flip instead of pre-flipping in Python | `2358ae4` |
+| Hydra Overall Radial Profile becomes a toggle button (was a checkbox); Eta vs R Cake tab gains GE1-4 checkboxes + an Overall button showing the summed cake across all 4 panels; calibration attempts embed their computed Radial Profile/Eta vs R Cake so Populate needs no recompute | `943a91d` |
 
 ### Batch Integrate (Tab 4)
 | Change | Commit |
@@ -201,6 +204,7 @@ Dates are commit dates (YYYY-MM-DD).
 | File ▸ Project: opt-in FAIR provenance record (HDF5), auto-logs Calibrate/Batch Integrate runs | `e8dea6b` |
 | Header Profile combo (instant switching); Hydra gated to 1-ID-E; fix stale device/Calibrant dropdowns + pixel/K-edge popups on profile change | `81056e4` |
 | File ▸ Workspace (renamed from GUI State) + Recent Projects/Workspaces, unsaved-changes indicator, autosave/crash-recovery, Project History viewer | `6b1564b` |
+| Workspace/Project record + restore the active beamline Profile on load/open; Eta vs R Cake plots' right-click-drag zooms only the axis actually dragged (was always η-only) | `943a91d` |
 
 ### Stability / performance / consistency (review-driven, phases 1–3)
 | Change | Commit |
@@ -2993,6 +2997,91 @@ subsections).
 **Roll back:** `git revert 6b1564b` (or, since this is isolated to
 `workspace_ux`, simply don't merge/delete the branch). Self-contained; no
 dependents — `project.py` itself is untouched by this commit.
+
+### `943a91d` — Project/Calibrate: self-contained project records, Hydra Overall Cake UI, cake-plot zoom fix, Profile persistence (2026-08-26)
+
+**Effect:** bundles several related, already-implemented-but-uncommitted
+features found together when preparing to commit (see `.context/DECISIONS.md`
+2026-08-26 entries for full rationale on each): (1) a calibration attempt
+logged to a Project now embeds its computed Radial Profile / Eta vs R Cake
+arrays (`project.append_calibration_attempt(..., results=...)`, a new
+`results` HDF5 group, `read_calib_attempt_results`), so **File ▸ Open
+Project…**'s Populate step shows them instantly with no recompute and no
+need for the original raw image to still be on disk — required deferring
+the project-log call (`_pending_log_result`/`_flush_pending_log`) until the
+asynchronous post-Fit integration actually finishes, in both
+`tab_calibrate.py` (single-detector) and `hydra_calib_page.py` (per-panel);
+(2) a mask logged to a Project attempt is now embedded only when it
+includes something hand-drawn/computed in Mask Builder
+(`MaskSelector.has_live_mask_source`) — a mask assembled purely from
+file/folder sources is referenced by path+hash instead, like the raw
+calibrant image already was, threaded through as a `mask_is_file_backed`
+flag from `tab_calibrate.py`/`hydra_calib_page.py`/`tab_batch.py`/
+`hydra_batch_page.py`; a new `mask_present` attr separates "was any mask
+applied" from `mask_embedded`'s "is the array actually stored" so neither
+existing field's meaning changed; (3) Hydra Calibrate's **Overall** Radial
+Profile control changes from a checkbox to a green-when-active toggle
+button (`HydraProfileViewer`'s new `composite_as_button` mode) that hides
+GE1-4's curves and shows their already-verified NaN-aware summed profile;
+the **Eta vs R Cake** tab gains matching GE1-4 checkboxes plus an Overall
+button that computes and displays the summed cake
+(`_compose_overall_cake`, verified correct via synthetic-data tests earlier
+in this session — no logic change, only wiring the existing function to a
+UI); a finished live Hydra run with Overall active also logs the summed
+profile as its own lightweight `hydra_composite` Project attempt
+(`dialogs.py` label "Hydra Overall"; `app.py`'s `discover_panels`/Populate
+flow explicitly skips this pseudo-panel — no tab widget to restore an
+Overall result into, so it's visible only via **File ▸ Project History…**);
+(4) the Data Viewer's single-detector mode gains an **Eta vs R Cake** tab
+next to Radial Profile, reusing the same `integrate_frame(...,
+return_cake=True)` path Hydra Calibrate already used; (5) a saved
+Workspace and a newly-created Project both record the active beamline
+Profile, restored automatically on load/Open Project
+(`app.py: _restore_active_profile`, `project.py:
+project_active_profile`/`active_profile_at_creation` attr) through the
+same `settings.set_active_profile`/`C.reload_from_config`/
+`on_profile_changed` path the header combo uses, if the recorded Profile
+still exists locally and differs from the one currently active;
+(6) Eta vs R Cake plots' right-click-drag now zooms only the axis actually
+dragged (horizontal → R, vertical → η, diagonal → both), matching Radial
+Profile's gesture, instead of always zooming η only — root cause was
+`pg.ImageView.__init__` force-locking `aspectLocked=True` on any view it's
+given, which recouples X/Y on every right-drag regardless of a custom
+`mouseDragEvent`'s math; fix is `vb.setAspectLocked(False)` (R-px and
+η-degrees have no physical aspect to preserve), which let the now-obsolete
+custom `_YZoomViewBox` class be removed entirely in favor of stock
+pyqtgraph behavior. All of (1)-(6) are additive to `project.py`'s existing
+HDF5 schema — no field renamed or removed, so older project files keep
+reading exactly as before. Verified via synthetic-data tests and the
+existing test suite; not run against a live GUI session by a human this
+session. Found in this session: unlocking `CakeViewer`'s ViewBox makes
+`tests/test_hydra_calib_ui.py`/`tests/test_hydra_ui.py` segfault on
+teardown noticeably more often than before — bisected extensively and
+confirmed this is the same pre-existing pyqtgraph/PyQt offscreen-teardown
+heisenbug already documented in `.context/STATE.md` (any change to that
+ViewBox object shifts crash probability, not a logic bug in this fix), not
+attempted to fix further.
+**Files:** `midas_gui/project.py` (`append_calibration_attempt`,
+`append_integration_attempt`, `read_calib_attempt_results`,
+`project_active_profile`, `create_project`, `discover_panels`,
+`_PANEL_ORDER`), `midas_gui/tab_calibrate.py` (`_log_to_project`,
+`_pending_log_result`/`_flush_pending_log`, `_display_stored_result`,
+`_run_integration`), `midas_gui/hydra_calib_page.py`
+(`_compose_overall_cake` wiring, `_on_cake_panel_toggled`/
+`_on_cake_overall_toggled`, `_maybe_log_composite_attempt`,
+`_refresh_composite_curve`, `_pending_log_results`/`_flush_pending_log`),
+`midas_gui/hydra_widgets.py` (`HydraProfileViewer.composite_as_button`),
+`midas_gui/widgets.py` (`CakeViewer` — removed `_YZoomViewBox`,
+`MaskSelector.has_live_mask_source`), `midas_gui/tab_view.py`,
+`midas_gui/hydra_geometry_card.py` (Data Viewer Cake tab), `midas_gui/
+tab_batch.py`, `midas_gui/hydra_batch_page.py` (mask-embed flag,
+active-Profile logging), `midas_gui/app.py` (`_restore_active_profile`),
+`midas_gui/dialogs.py` ("Hydra Overall" panel label),
+`documentation/gui_documentation.md` (§5, §15-§17).
+**Roll back:** `git revert 943a91d`. Self-contained back to `6b1564b`
+(reverting drops the new `results`/mask-embed-flag/active-Profile project
+fields, the Overall Cake UI, the Data Viewer Cake tab, and the cake-zoom
+fix together — see `.context/DECISIONS.md` if only one piece needs undoing).
 
 ---
 

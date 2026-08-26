@@ -133,7 +133,7 @@ geometry) — summarized in "Recent changes" below.
 
 ## Recent changes (last 3-5 sessions, dated; drop the oldest as it grows)
 
-- 2026-08-26 (`<pending>`): Project attempts embed calibration results +
+- 2026-08-26 (`943a91d`): Project attempts embed calibration results +
   skip embedding file-backed masks, Hydra Overall Cake full UI, Data Viewer
   Cake tab, Workspace/Project active-Profile persistence, Cake-plot
   independent-axis zoom fix — see "Recently completed" above.
