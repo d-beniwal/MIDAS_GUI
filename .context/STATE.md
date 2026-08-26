@@ -1,16 +1,15 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-26 (Workspace/Project UX rework, `6b1564b` + docs
-`b4a6dfe` — committed to branch `workspace_ux`, NOT merged into `main`)_
+_Last updated: 2026-08-26 (Workspace/Project UX rework merged into `main`
+via fast-forward to `77f5867`; `workspace_ux` branch deleted after merge)_
 
 ## Now working on
 
-Nothing in progress on `main` (working tree clean there). A separate branch
-**`workspace_ux`** (2 commits ahead: `6b1564b` feature, `b4a6dfe` docs) holds
-a File-menu UX rework — see "Recently completed" below. Landed on its own
-branch **by explicit user request**, so the user can review/diff it and
-decide whether to keep (merge) or discard it; not touched on `main`.
+Nothing in progress. `main` is at `77f5867`, not yet pushed to
+`origin/main`. The Workspace/Project UX rework (`6b1564b`/`b4a6dfe`,
+formerly on branch `workspace_ux`) has been reviewed and merged — see
+"Recently completed" below.
 
 ## Recently completed
 
@@ -51,9 +50,8 @@ geometry) — summarized in "Recent changes" below.
 
 ## Open questions / blockers
 
-- **`workspace_ux` branch awaits user review** — not merged, not deleted.
-  Next session should check whether the user has decided to keep/merge it
-  or discard it before doing further work there.
+- `main` is 3 commits ahead of `origin/main` (`6b1564b`, `b4a6dfe`,
+  `77f5867`) — not yet pushed; ask before pushing.
 - **New follow-ups (not blocking, tracked in ROADMAP.md "Package-side
   fixes" P3-1/P3-2 and the Texture per-tab item):** (1) several
   `midas_calibrate_v2` calibration pipelines have no native `im_trans`
@@ -78,8 +76,9 @@ geometry) — summarized in "Recent changes" below.
 
 ## Recent changes (last 3-5 sessions, dated; drop the oldest as it grows)
 
-- 2026-08-26 (`6b1564b` + docs `b4a6dfe`, branch `workspace_ux`): Workspace/
-  Project UX rework — see "Recently completed" above. Not merged to `main`.
+- 2026-08-26 (`6b1564b` + docs `b4a6dfe`): Workspace/Project UX rework —
+  see "Recently completed" above. Merged into `main` via fast-forward
+  (`77f5867`); `workspace_ux` branch deleted.
 - 2026-08-25 (`2358ae4`): ImTransOpt propagation fix — the MIDAS backend
   now performs every pixel flip for calibration/integration; GUI only
   pre-flips masks and viewer-display previews.
