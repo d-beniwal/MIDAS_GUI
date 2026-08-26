@@ -3,7 +3,32 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-25 (Fixed a geometry/image-orientation mismatch:
+**Last updated:** 2026-08-26 (File menu reworked around a clearer Project/
+Workspace mental model, with a recent-files list, an unsaved-changes
+indicator, autosave/crash-recovery, and a built-in provenance browser — see
+§16 "File ▸ Save/Load Workspace" and §17 "File ▸ Project (FAIR
+provenance)" for the full detail. Summary:
+- "GUI State" is renamed **Workspace** everywhere in the UI (same
+  `Ctrl+S`/`Ctrl+Shift+S`/`Ctrl+O` shortcuts, same JSON file format —
+  existing saved files still load unchanged).
+- File ▸ **Recent Projects** / **Recent Workspaces** submenus list the last
+  10 of each, newest first.
+- The window title now shows the active Workspace's name with Qt's native
+  `[*]` unsaved-changes marker; closing the window with unsaved changes
+  prompts to Save / Discard / Cancel instead of silently closing.
+- An autosave draft is written every few minutes while the Workspace has
+  unsaved changes; if MIDAS GUI is later relaunched after a crash or forced
+  quit, it offers to restore that draft.
+- File ▸ **New Project…** can optionally save a Workspace linked to the new
+  project in the same step.
+- A new read-only File ▸ **Project History…** dialog lists every recorded
+  Calibrate/Batch Integrate attempt (panel, kind, timestamp, full recorded
+  parameters) for the open project, so inspecting what's in it no longer
+  requires an external HDF5 tool.
+None of this touches the Project `.h5` file's format or its opt-in,
+append-only logging behavior — see §17.)
+
+**Previously:** (2026-08-25, Fixed a geometry/image-orientation mismatch:
 Batch Integrate, Pump Probe, Calibration Refinement, and the Data Viewer /
 Sim Detector radial-profile preview now correctly account for **ImTransOpt**
 (the Flip Y / Flip Z / Transpose transform set on the Calibrate tab) —
@@ -345,7 +370,7 @@ strict `<` — a pixel exactly equal to the lower bound is no longer masked)
 13. [Common UI Conventions](#13-common-ui-conventions)
 14. [Packaging, Deployment & Diagnostics](#14-packaging-deployment--diagnostics)
 15. [Configuration & Defaults](#15-configuration--defaults)
-16. [File ▸ Save/Load GUI State](#16-file--saveload-gui-state)
+16. [File ▸ Save/Load Workspace](#16-file--saveload-workspace)
 17. [File ▸ Project (FAIR provenance)](#17-file--project-fair-provenance)
 
 ---
@@ -2033,23 +2058,42 @@ next launch**.
 
 ---
 
-## 16. File ▸ Save/Load GUI State
+## 16. File ▸ Save/Load Workspace
 
 Beyond a saved **profile** of defaults (§15), the **File** menu can capture the
 **live, in-progress state of every tab** — every field you've typed or picked, across
 all 10 tabs — to one JSON file, so a session can be closed and resumed later exactly
-where it left off.
+where it left off. This is called a **Workspace** (previously "GUI State" — same file
+format, same shortcuts, just a clearer name: a Workspace is your editable, freely
+overwritable draft, as opposed to a **Project**'s permanent FAIR record — see §17).
 
-- **File ▸ Save GUI State…** (`Ctrl+S`) — the first time in a session, prompts for a
+- **File ▸ Save Workspace…** (`Ctrl+S`) — the first time in a session, prompts for a
   destination (default `midas_session.json`); every subsequent `Ctrl+S` **silently
   overwrites that same file** (no dialog) as long as the session hasn't loaded/saved
-  a different file since. **File ▸ Save GUI State As…** (`Ctrl+Shift+S`) always prompts
+  a different file since. **File ▸ Save Workspace As…** (`Ctrl+Shift+S`) always prompts
   for a destination, and makes *that* file the target for future plain `Ctrl+S`. Either
   way, a completion dialog lists which tabs (if any) failed to save.
-- **File ▸ Load GUI State…** (`Ctrl+O`) — asks for confirmation (loading overwrites
+- **File ▸ Load Workspace…** (`Ctrl+O`) — asks for confirmation (loading overwrites
   every tab's current values), then pick a previously saved file. A completion dialog
   reports any tabs present in the file that no longer exist, or that failed to restore.
   The tab that was active at save time is re-selected.
+- **File ▸ Recent Workspaces** — the last 10 saved/loaded Workspace files, newest
+  first; picking one goes through the same overwrite-confirmation as Load Workspace.
+
+### Unsaved-changes indicator and autosave
+The window title shows the active Workspace's name (or "Untitled") and grows a `*`
+the moment any tab's value differs from what was last saved/loaded — a plain,
+Qt-native marker, not tied to any one field, so it stays accurate across every tab.
+Closing the window while it's showing prompts **Save / Discard / Cancel** instead of
+silently discarding your changes.
+
+While the `*` is showing, MIDAS GUI periodically (every few minutes) writes an
+internal autosave draft in the background — not to your chosen file, and never to a
+Project's `.h5`. If the application is later relaunched after a crash or a forced
+quit and a draft is found, it offers **"Restore unsaved workspace?"**; accepting
+loads it and marks the window as still unsaved (so the next Save prompts you for a
+real destination, rather than silently overwriting the internal draft), and
+declining discards the draft.
 
 ### What is restored automatically
 Every field (text boxes, spin boxes, checkboxes, combo/dropdown selections) in every
@@ -2060,7 +2104,7 @@ after a state load (guarded so a moved/deleted file is skipped quietly rather th
 popping a warning).
 
 ### What is *not* re-run
-Loading a state **does not re-run any long-running pipeline** — Calibrate's Fit,
+Loading a Workspace **does not re-run any long-running pipeline** — Calibrate's Fit,
 Batch Integrate, the PDF transform, and Calibration Refinement all keep their inputs
 restored but require **one manual click of the tab's own Run/Fit button** to reproduce
 their result. This keeps a load fast and avoids silently kicking off a multi-minute
@@ -2069,7 +2113,7 @@ job in the background.
 ### Sidecar files for in-progress derived data
 Two tabs can hold computed data that hasn't been exported to a file of its own yet —
 a drawn/computed **mask** (Mask Builder) and a just-fit **calibration result**
-(Calibrate). Saving a GUI state writes small sidecar files next to it so this
+(Calibrate). Saving a Workspace writes small sidecar files next to it so this
 in-progress work isn't silently lost:
 - `<state file stem>_mask.tif` — the current in-memory mask, if any; reloaded
   automatically on the next Load.
@@ -2082,7 +2126,7 @@ in-progress work isn't silently lost:
 
 ## 17. File ▸ Project (FAIR provenance)
 
-Separate from GUI State (§16, which snapshots widget *configuration* so a
+Separate from a Workspace (§16, which snapshots widget *configuration* so a
 session can be resumed), a **Project** is a long-lived record of what
 actually *happened*: every time a Calibrate or Batch Integrate run
 finishes, a self-contained record is appended to it — enough to reproduce
@@ -2092,10 +2136,18 @@ the course of an experiment, not just one session.
 
 - **File ▸ New Project…** — pick a destination `.h5` file; it's created
   empty and becomes the active project immediately. Refuses to overwrite an
-  existing file (use **Open Project…** to continue one).
+  existing file (use **Open Project…** to continue one). You're then asked
+  whether to also save the current Workspace linked to the new project
+  (written as `<project name>_workspace.json` next to it) — a one-step way
+  to start a project with today's setup already recorded as its Workspace.
 - **File ▸ Open Project…** — pick a previously-created project file to make
   it active. If it has any recorded attempts, a **Populate from project**
   dialog follows immediately — see below.
+- **File ▸ Recent Projects** — the last 10 opened/created projects, newest
+  first.
+- **File ▸ Project History…** — a read-only browser listing every attempt
+  recorded in the active project; see below. Disabled when no project is
+  open.
 - **File ▸ Close Project** — stops logging; no data already written is
   touched.
 - The active project's filename is always shown in the status bar
@@ -2178,6 +2230,16 @@ this way — dark/bright/background/mask sources that were embedded directly
 in the project (no file of their own, e.g. a mask hand-drawn in Mask
 Builder) are not re-created automatically and must be re-added from Mask
 Builder / the Data card if needed.
+
+### File ▸ Project History…
+
+A read-only browser over everything the active project has recorded, so
+checking what's in it doesn't require an external HDF5 tool (`h5dump`,
+HDFView). The table lists one row per attempt — panel, kind (Calibrate /
+Batch Integrate), attempt name, and its UTC timestamp — across every panel
+the project contains; selecting a row shows that attempt's full recorded
+parameters (the same JSON `Populate from project` reads from) in a detail
+pane below. Purely a viewer: nothing here can modify the project file.
 
 ---
 

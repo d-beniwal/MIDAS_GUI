@@ -1,7 +1,10 @@
 """Dialogs.  _SaveParamstestDialog ported verbatim from the v3 template."""
 from __future__ import annotations
 
-from PyQt5 import QtWidgets
+import json
+from pathlib import Path
+
+from PyQt5 import QtCore, QtWidgets
 
 from .constants import DISTORTION_NAMES, DISTORTION_ISO, DISTORTION_PRESETS
 
@@ -236,3 +239,90 @@ class ProjectLoadDialog(QtWidgets.QDialog):
     def integrate_selection(self) -> dict:
         """``{panel_key: attempt_ref}`` for every checked Batch Integrate row."""
         return self._selection("integrate")
+
+
+class ProjectHistoryDialog(QtWidgets.QDialog):
+    """Read-only browser for File → Project History… — every recorded
+    Calibrate/Batch-Integrate attempt across all panels in one place, so
+    inspecting a project's FAIR record doesn't require an external tool
+    (``h5dump``/HDFView). Built entirely from ``project.py``'s existing
+    read-side API (``discover_panels``/``list_attempts``/``read_attempt``) —
+    no new provenance logic, no writes, so it can't drift from what
+    ``append_*_attempt`` actually stores.
+    """
+
+    def __init__(self, project_path, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Project History — {Path(project_path).name}")
+        self.setMinimumSize(720, 480)
+        self._project_path = project_path
+
+        from . import project as _project
+        rows = []
+        load_error = None
+        try:
+            for panel_key in _project.discover_panels(project_path):
+                for kind, label in (("calib", "Calibrate"), ("integrate", "Batch Integrate")):
+                    for a in _project.list_attempts(project_path, panel_key, kind):
+                        rows.append({
+                            "panel": _PANEL_LABELS.get(panel_key, panel_key),
+                            "kind": label,
+                            "name": a["name"],
+                            "timestamp": a.get("timestamp_utc", ""),
+                            "ref": a["ref"],
+                        })
+        except Exception as e:
+            load_error = str(e)
+        rows.sort(key=lambda r: r["timestamp"], reverse=True)
+        self._rows = rows
+
+        layout = QtWidgets.QVBoxLayout(self)
+        if load_error:
+            err = QtWidgets.QLabel(f"Could not read this project's records:\n{load_error}")
+            err.setStyleSheet("color:#e66;")
+            err.setWordWrap(True)
+            layout.addWidget(err)
+        elif not rows:
+            layout.addWidget(QtWidgets.QLabel("This project has no recorded attempts yet."))
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        self._table = QtWidgets.QTableWidget(len(rows), 4)
+        self._table.setHorizontalHeaderLabels(["Panel", "Kind", "Attempt", "Timestamp (UTC)"])
+        self._table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self._table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self._table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self._table.horizontalHeader().setStretchLastSection(True)
+        for r, row in enumerate(rows):
+            for c, key in enumerate(("panel", "kind", "name", "timestamp")):
+                self._table.setItem(r, c, QtWidgets.QTableWidgetItem(str(row[key])))
+        self._table.itemSelectionChanged.connect(self._on_selection_changed)
+        splitter.addWidget(self._table)
+
+        self._detail = QtWidgets.QPlainTextEdit()
+        self._detail.setReadOnly(True)
+        self._detail.setPlaceholderText(
+            "Select an attempt above to see its full recorded parameters.")
+        splitter.addWidget(self._detail)
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 1)
+        layout.addWidget(splitter)
+
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+        if rows:
+            self._table.selectRow(0)
+
+    def _on_selection_changed(self) -> None:
+        selected = self._table.selectionModel().selectedRows()
+        if not selected:
+            self._detail.setPlainText("")
+            return
+        row = self._rows[selected[0].row()]
+        from . import project as _project
+        try:
+            meta = _project.read_attempt(self._project_path, row["ref"])
+            self._detail.setPlainText(json.dumps(meta, indent=2, default=str))
+        except Exception as e:
+            self._detail.setPlainText(f"Could not read this attempt's metadata:\n{e}")

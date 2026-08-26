@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import faulthandler
+import hashlib
 import inspect
 import json
 import sys
@@ -82,11 +83,30 @@ _ARROW_DOWN_SVG = _make_arrow_svg("down")
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"MIDAS GUI v{__version__}")
         self.resize(1600, 950)
-        self._gui_state_path: Optional[str] = None   # last loaded/saved GUI-state path
+        self._gui_state_path: Optional[str] = None   # last loaded/saved Workspace path
+        self._workspace_dirty = False
+        self._last_saved_hash: Optional[str] = None
         self._project_ctx = project.ProjectContext()  # currently-open FAIR provenance project
         self._build_ui()
+        self._update_window_title()
+        # Baseline for the dirty-check timer below — an untouched, freshly
+        # built window must never report itself as having unsaved changes.
+        self._last_saved_hash = self._hash_workspace_state(self._serialize_workspace()[0])
+
+        # Periodic, cheap (no sidecar file I/O — see _serialize_workspace)
+        # dirty-state check driving the window-title "*" / Close-confirm
+        # prompt, plus a separate, much less frequent autosave of a
+        # crash-recovery draft. Neither ever touches a Project's `.h5` file.
+        self._dirty_timer = QtCore.QTimer(self)
+        self._dirty_timer.setInterval(7_000)
+        self._dirty_timer.timeout.connect(self._check_workspace_dirty)
+        self._dirty_timer.start()
+        self._autosave_timer = QtCore.QTimer(self)
+        self._autosave_timer.setInterval(5 * 60_000)
+        self._autosave_timer.timeout.connect(self._autosave_tick)
+        self._autosave_timer.start()
+
         # Lets B-PILOT (a separate Bluesky plan-runner GUI) auto-start Live
         # Data on a detector's PVA channel when it launches a scan — no-op
         # if B-PILOT never connects. See midas_gui/bridge_server.py.
@@ -371,33 +391,68 @@ class MainWindow(QtWidgets.QMainWindow):
                 except Exception:
                     _log(f"Hydra-visibility update failed:\n{traceback.format_exc()}")
 
-    # ── File menu: Save/Load GUI State ──────────────────────────────
+    # ── File menu: Workspace (session) + Project (FAIR provenance) ──
     def _build_file_menu(self):
         m = self.menuBar().addMenu("&File")
-        act_save = m.addAction("Save GUI State…")
+        act_save = m.addAction("Save Workspace…")
         act_save.setShortcut(QtGui.QKeySequence("Ctrl+S"))
         act_save.triggered.connect(self._save_gui_state_dialog)
-        act_save_as = m.addAction("Save GUI State As…")
+        act_save_as = m.addAction("Save Workspace As…")
         act_save_as.setShortcut(QtGui.QKeySequence("Ctrl+Shift+S"))
         act_save_as.triggered.connect(self._save_gui_state_as_dialog)
-        act_load = m.addAction("Load GUI State…")
+        act_load = m.addAction("Load Workspace…")
         act_load.setShortcut(QtGui.QKeySequence("Ctrl+O"))
         act_load.triggered.connect(self._load_gui_state_dialog)
+        self._recent_workspaces_menu = m.addMenu("Recent Workspaces")
 
         m.addSeparator()
         act_new_proj = m.addAction("New Project…")
         act_new_proj.triggered.connect(self._new_project_dialog)
         act_open_proj = m.addAction("Open Project…")
         act_open_proj.triggered.connect(self._open_project_dialog)
+        self._recent_projects_menu = m.addMenu("Recent Projects")
+        self._project_history_act = m.addAction("Project History…")
+        self._project_history_act.setEnabled(False)
+        self._project_history_act.triggered.connect(self._show_project_history)
         self._close_proj_act = m.addAction("Close Project")
         self._close_proj_act.setEnabled(False)
         self._close_proj_act.triggered.connect(self._close_project)
+
+        m.aboutToShow.connect(self._refresh_recent_menus)
+
+    def _refresh_recent_menus(self) -> None:
+        self._populate_recent_menu(
+            self._recent_projects_menu, "project", self._open_project_path)
+        self._populate_recent_menu(
+            self._recent_workspaces_menu, "workspace", self._load_gui_state_path)
+
+    @staticmethod
+    def _format_recent_when(when_utc) -> str:
+        try:
+            return datetime.fromisoformat(when_utc).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return ""
+
+    def _populate_recent_menu(self, menu, kind: str, open_fn) -> None:
+        menu.clear()
+        entries = settings.get_recent(kind)
+        if not entries:
+            act = menu.addAction("(none yet)")
+            act.setEnabled(False)
+            return
+        for entry in entries:
+            when = self._format_recent_when(entry.get("last_opened_utc"))
+            label = f"{entry['name']}   —   {when}" if when else entry["name"]
+            act = menu.addAction(label)
+            act.setToolTip(entry["path"])
+            act.triggered.connect(lambda checked=False, p=entry["path"]: open_fn(p))
 
     def _set_project_path(self, path) -> None:
         self._project_ctx.path = path
         self._project_lbl.setText(f"Project: {Path(path).name}" if path else "Project: none")
         self._header_project_lbl.setText(f"● Project: {Path(path).name}" if path else "")
         self._close_proj_act.setEnabled(path is not None)
+        self._project_history_act.setEnabled(path is not None)
 
     def _new_project_dialog(self):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
@@ -416,27 +471,48 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "New Project failed", str(e))
             return
         self._set_project_path(path)
-        QtWidgets.QMessageBox.information(
-            self, "New Project",
-            f"Created project:\n{path}\n\n"
-            "Calibrate and Batch Integrate runs will now be logged to it "
-            "automatically (for both single-detector and Hydra modes).")
+        settings.record_recent(path, "project")
+        info = (f"Created project:\n{path}\n\n"
+                "Calibrate and Batch Integrate runs will now be logged to it "
+                "automatically (for both single-detector and Hydra modes).")
+        if QtWidgets.QMessageBox.question(
+                self, "New Project",
+                info + "\n\nAlso save the current Workspace, linked to this "
+                "project (so Open Project can restore it later)?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.Yes) == QtWidgets.QMessageBox.Yes:
+            ws_path = f"{Path(path).with_suffix('')}_workspace.json"
+            self.save_gui_state(ws_path)
+        else:
+            QtWidgets.QMessageBox.information(self, "New Project", info)
 
     def _open_project_dialog(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, "Open Project", "", "MIDAS Project (*.h5);;All files (*)")
         if not path:
             return
+        self._open_project_path(path)
+
+    def _open_project_path(self, path) -> None:
+        """Shared by File ▸ Open Project… and the Recent Projects menu."""
         try:
             project.open_project(path)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Open Project failed", str(e))
             return
         self._set_project_path(path)
+        settings.record_recent(path, "project")
         self._offer_populate_from_project(path)
 
     def _close_project(self):
         self._set_project_path(None)
+
+    def _show_project_history(self) -> None:
+        path = self._project_ctx.path
+        if not path:
+            return
+        from midas_gui.dialogs import ProjectHistoryDialog
+        ProjectHistoryDialog(path, self).exec_()
 
     def _offer_populate_from_project(self, path) -> None:
         """After a successful File > Open Project…, offer to populate the
@@ -502,23 +578,27 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _save_gui_state_as_dialog(self):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save GUI State", self._gui_state_path or "midas_session.json",
+            self, "Save Workspace", self._gui_state_path or "midas_session.json",
             "JSON (*.json)")
         if not path:
             return
         self.save_gui_state(path)
 
     def _load_gui_state_dialog(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Load Workspace", "", "JSON (*.json);;All files (*)")
+        if not path:
+            return
+        self._load_gui_state_path(path)
+
+    def _load_gui_state_path(self, path) -> None:
+        """Shared by File ▸ Load Workspace… and the Recent Workspaces menu."""
         if QtWidgets.QMessageBox.question(
-                self, "Load GUI State",
-                "Loading a saved session will overwrite the current values in "
-                "every tab. Continue?",
+                self, "Load Workspace",
+                "Loading a saved workspace will overwrite the current values "
+                "in every tab. Continue?",
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
                 QtWidgets.QMessageBox.No) != QtWidgets.QMessageBox.Yes:
-            return
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Load GUI State", "", "JSON (*.json);;All files (*)")
-        if not path:
             return
         self.load_gui_state(path)
 
@@ -529,11 +609,13 @@ class MainWindow(QtWidgets.QMainWindow):
         except (TypeError, ValueError):
             return False
 
-    def save_gui_state(self, path):
-        """Dump every tab's ``get_state()`` into one JSON file. Tabs that hold
-        derived data not yet exported to a file of its own (MaskTab, CalibrationTab)
-        write small sidecars named after ``path`` so nothing in-progress is lost."""
-        stem = str(Path(path).with_suffix(""))
+    def _serialize_workspace(self, sidecar_stem=None, *, quiet: bool = False):
+        """Build the ``{"__midas_gui_state__": ..., "tabs": {...}}`` dict that
+        :meth:`save_gui_state` writes to disk. Shared with the periodic
+        dirty-check and autosave: passing ``sidecar_stem=None`` (their case)
+        skips every tab's sidecar file I/O (mask/calibration export — see
+        each tab's own ``get_state``), so it's cheap and side-effect-free to
+        call on every timer tick. Returns ``(state, errors)``."""
         current = self._tabs.currentWidget()
         state = {"__midas_gui_state__": True, "version": 1, "tabs": {}}
         for widget, name, _always in self._tab_specs:
@@ -545,23 +627,106 @@ class MainWindow(QtWidgets.QMainWindow):
             if get_state is None:
                 continue
             try:
-                if self._accepts_sidecar_stem(get_state):
-                    state["tabs"][name] = get_state(sidecar_stem=stem)
+                if sidecar_stem is not None and self._accepts_sidecar_stem(get_state):
+                    state["tabs"][name] = get_state(sidecar_stem=sidecar_stem)
                 else:
                     state["tabs"][name] = get_state()
             except Exception:
-                _log(f"Save GUI state failed for tab '{name}':\n{traceback.format_exc()}")
+                if not quiet:
+                    _log(f"Serialize workspace failed for tab '{name}':\n"
+                         f"{traceback.format_exc()}")
                 errors.append(name)
+        return state, errors
+
+    @staticmethod
+    def _hash_workspace_state(state: dict) -> str:
+        blob = json.dumps(state, sort_keys=True, default=str)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+    def _set_workspace_dirty(self, dirty: bool) -> None:
+        self._workspace_dirty = dirty
+        self.setWindowModified(dirty)
+
+    def _check_workspace_dirty(self) -> None:
+        """QTimer tick: cheap hash-diff against the last saved/loaded state
+        (see _serialize_workspace) drives the window title's Qt-native
+        ``[*]`` unsaved-changes marker — no per-widget change signals wired."""
+        if self._last_saved_hash is None:
+            return
+        state, _errors = self._serialize_workspace(quiet=True)
+        self._set_workspace_dirty(self._hash_workspace_state(state) != self._last_saved_hash)
+
+    def _update_window_title(self) -> None:
+        name = Path(self._gui_state_path).stem if self._gui_state_path else "Untitled"
+        self.setWindowTitle(f"MIDAS GUI v{__version__} — {name}[*]")
+
+    def _autosave_tick(self) -> None:
+        """QTimer tick (every few minutes): if the Workspace is dirty, write
+        a crash-recovery draft — reusing the exact serialization save_gui_state
+        uses, just pointed at a fixed internal path instead of prompting.
+        Never touches a Project's `.h5` file."""
+        if not self._workspace_dirty:
+            return
+        state, _errors = self._serialize_workspace(quiet=True)
+        draft = settings.autosave_draft_path()
+        try:
+            draft.parent.mkdir(parents=True, exist_ok=True)
+            draft.write_text(json.dumps(state, indent=2))
+        except Exception:
+            _log(f"Workspace autosave failed:\n{traceback.format_exc()}")
+
+    def _clear_autosave_draft(self) -> None:
+        try:
+            settings.autosave_draft_path().unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def maybe_offer_restore_autosave(self) -> None:
+        """Called once from main(), after the window is shown — deliberately
+        NOT from __init__/_build_ui, so plain ``MainWindow()`` construction
+        (as every test does) never risks blocking on a modal dialog because
+        of a leftover draft from an earlier crashed/killed session."""
+        draft = settings.autosave_draft_path()
+        if not draft.is_file():
+            return
+        try:
+            when = datetime.fromtimestamp(draft.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            when = "an earlier session"
+        if QtWidgets.QMessageBox.question(
+                self, "Restore unsaved workspace?",
+                f"MIDAS GUI found an autosaved workspace from {when} that was "
+                "never explicitly saved (likely from a crash or a forced "
+                "quit).\n\nRestore it?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.Yes) == QtWidgets.QMessageBox.Yes:
+            self.load_gui_state(str(draft))
+            self._gui_state_path = None   # recovered draft has no "real" home yet
+            self._update_window_title()
+            self._set_workspace_dirty(True)   # force Ctrl+S to prompt for a destination
+        self._clear_autosave_draft()
+
+    def save_gui_state(self, path):
+        """Dump every tab's ``get_state()`` into one JSON file. Tabs that hold
+        derived data not yet exported to a file of its own (MaskTab, CalibrationTab)
+        write small sidecars named after ``path`` so nothing in-progress is lost."""
+        stem = str(Path(path).with_suffix(""))
+        state, errors = self._serialize_workspace(sidecar_stem=stem)
         try:
             Path(path).write_text(json.dumps(state, indent=2))
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Save failed", str(e))
             return
         self._gui_state_path = path
-        msg = f"Saved GUI state to:\n{path}"
+        self._last_saved_hash = self._hash_workspace_state(state)
+        self._set_workspace_dirty(False)
+        self._update_window_title()
+        settings.record_recent(path, "workspace")
+        self._clear_autosave_draft()
+        msg = f"Saved workspace to:\n{path}"
         if errors:
             msg += "\n\nThe following tabs could not be saved:\n" + "\n".join(errors)
-        QtWidgets.QMessageBox.information(self, "Save GUI State", msg)
+        QtWidgets.QMessageBox.information(self, "Save Workspace", msg)
 
     def load_gui_state(self, path):
         """Restore every tab's fields from a file written by :meth:`save_gui_state`.
@@ -576,7 +741,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if not data.get("__midas_gui_state__"):
             QtWidgets.QMessageBox.critical(
-                self, "Load failed", "This file is not a MIDAS GUI state file.")
+                self, "Load failed", "This file is not a MIDAS GUI workspace file.")
             return
         self._gui_state_path = path
         stem = str(Path(path).with_suffix(""))
@@ -594,14 +759,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 else:
                     set_state(tstate)
             except Exception:
-                _log(f"Load GUI state failed for tab '{name}':\n{traceback.format_exc()}")
+                _log(f"Load Workspace failed for tab '{name}':\n{traceback.format_exc()}")
                 errors.append(name)
         active = data.get("active_tab")
         widget = name_to_widget.get(active) if active else None
         idx = self._tabs.indexOf(widget) if widget is not None else -1
         if idx >= 0:
             self._tabs.setCurrentIndex(idx)
-        msg = (f"Loaded GUI state from:\n{path}\n\n"
+        state, _errors = self._serialize_workspace(quiet=True)
+        self._last_saved_hash = self._hash_workspace_state(state)
+        self._set_workspace_dirty(False)
+        self._update_window_title()
+        settings.record_recent(path, "workspace")
+        msg = (f"Loaded workspace from:\n{path}\n\n"
                "Path-backed fields (images, masks, dark/bright/background) were "
                "reloaded. Fit / Batch Integrate / PDF transform / Refinement "
                "results are not recomputed — re-run each tab's own action to "
@@ -610,7 +780,7 @@ class MainWindow(QtWidgets.QMainWindow):
             msg += "\n\nTabs in the file no longer present:\n" + "\n".join(skipped)
         if errors:
             msg += "\n\nThe following tabs failed to restore:\n" + "\n".join(errors)
-        QtWidgets.QMessageBox.information(self, "Load GUI State", msg)
+        QtWidgets.QMessageBox.information(self, "Load Workspace", msg)
 
     def _build_menu(self):
         """Settings menu: preferences, open config folder, reload."""
@@ -732,6 +902,28 @@ class MainWindow(QtWidgets.QMainWindow):
                     pass
 
     def closeEvent(self, event):
+        if getattr(self, "_workspace_dirty", False):
+            resp = QtWidgets.QMessageBox.question(
+                self, "Unsaved changes",
+                "Your workspace has unsaved changes. Save before closing?",
+                QtWidgets.QMessageBox.Save | QtWidgets.QMessageBox.Discard
+                | QtWidgets.QMessageBox.Cancel,
+                QtWidgets.QMessageBox.Save)
+            if resp == QtWidgets.QMessageBox.Cancel:
+                event.ignore()
+                return
+            if resp == QtWidgets.QMessageBox.Save:
+                self._save_gui_state_dialog()
+                if self._workspace_dirty:   # user cancelled the Save/Save-As prompt
+                    event.ignore()
+                    return
+            else:   # Discard
+                self._clear_autosave_draft()
+        try:
+            self._dirty_timer.stop()
+            self._autosave_timer.stop()
+        except Exception:
+            pass
         try:
             self._stop_all_workers()
         except Exception:
@@ -790,6 +982,11 @@ def main():
 
     win = MainWindow()
     win.show()
+    # Only the real app entry point offers to restore a crash-recovery draft —
+    # never bare `MainWindow()` construction (every test does exactly that),
+    # so a leftover draft on disk can't block a headless test run on a modal
+    # dialog. See MainWindow.maybe_offer_restore_autosave.
+    win.maybe_offer_restore_autosave()
     sys.exit(app.exec_())
 
 

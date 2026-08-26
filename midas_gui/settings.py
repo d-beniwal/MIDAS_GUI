@@ -46,6 +46,9 @@ CONFIG_FILENAME = "config.json"          # legacy single-profile file (pre-migra
 PROFILES_DIRNAME = "profiles"
 META_FILENAME = "profile_meta.json"
 DEFAULT_PROFILE = "Default"
+RECENT_FILENAME = "recent_files.json"    # global, NOT per-profile (see record_recent)
+RECENT_KINDS = ("project", "workspace")
+RECENT_MAX = 10
 
 _cache: Optional[dict] = None
 
@@ -114,6 +117,10 @@ def _profiles_dir() -> Path:
 
 def _meta_path() -> Path:
     return _config_base_dir() / META_FILENAME
+
+
+def _recent_path() -> Path:
+    return _config_base_dir() / RECENT_FILENAME
 
 
 # ── io ───────────────────────────────────────────────────────────────────────
@@ -316,3 +323,52 @@ def reset_user_config() -> None:
 def config_paths() -> dict:
     up = user_config_path()
     return {"user": up, "user_exists": up.is_file()}
+
+
+# ── recent files (Projects / Workspaces) ─────────────────────────────────────
+# Deliberately global (not stored inside a profile) — a recently-opened
+# project/workspace should stay "recent" regardless of which beamline Profile
+# happens to be active, matching how every other app's recent-files list works.
+def _read_recent() -> dict:
+    data = read_json(_recent_path())
+    for kind in RECENT_KINDS:
+        data.setdefault(kind, [])
+    return data
+
+
+def record_recent(path, kind: str, *, when_utc: Optional[str] = None) -> None:
+    """Add ``path`` to the front of the MRU list for ``kind`` ("project" or
+    "workspace"), de-duplicating by path and capping at :data:`RECENT_MAX`."""
+    if kind not in RECENT_KINDS:
+        raise ValueError(f"Unknown recent-files kind: {kind!r}")
+    if when_utc is None:
+        from datetime import datetime, timezone
+        when_utc = datetime.now(timezone.utc).isoformat()
+    path = str(Path(path))
+    data = _read_recent()
+    entries = [e for e in data[kind] if e.get("path") != path]
+    entries.insert(0, {"path": path, "name": Path(path).name, "last_opened_utc": when_utc})
+    data[kind] = entries[:RECENT_MAX]
+    _write_json(_recent_path(), data)
+
+
+def autosave_draft_path() -> Path:
+    """Path to the Workspace autosave/crash-recovery draft file. Global (not
+    per-profile) since a crash can happen regardless of which profile is
+    active; unrelated to any Project's `.h5` file, which this never touches."""
+    return _config_base_dir() / "autosave" / "workspace_draft.json"
+
+
+def get_recent(kind: str) -> list:
+    """MRU-ordered list of ``{"path", "name", "last_opened_utc"}`` dicts for
+    ``kind``. Entries whose file no longer exists are silently dropped (and
+    the dropped list persisted) rather than shown as dead menu items."""
+    if kind not in RECENT_KINDS:
+        raise ValueError(f"Unknown recent-files kind: {kind!r}")
+    data = _read_recent()
+    entries = data[kind]
+    live = [e for e in entries if Path(e.get("path", "")).is_file()]
+    if len(live) != len(entries):
+        data[kind] = live
+        _write_json(_recent_path(), data)
+    return live
