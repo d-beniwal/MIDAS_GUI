@@ -200,6 +200,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Cross-tab DataSourceRegistry + "Import from…" menus (Data/Dark/Bright/Background) + buffer-save button | `6c79f13` |
 | File ▸ Project: opt-in FAIR provenance record (HDF5), auto-logs Calibrate/Batch Integrate runs | `e8dea6b` |
 | Header Profile combo (instant switching); Hydra gated to 1-ID-E; fix stale device/Calibrant dropdowns + pixel/K-edge popups on profile change | `81056e4` |
+| File ▸ Workspace (renamed from GUI State) + Recent Projects/Workspaces, unsaved-changes indicator, autosave/crash-recovery, Project History viewer | `6b1564b` |
 
 ### Stability / performance / consistency (review-driven, phases 1–3)
 | Change | Commit |
@@ -2925,6 +2926,73 @@ fixed in this commit.
 `test_data/test_ps.txt` (new — the real repro params file).
 **Roll back:** `git revert 2358ae4`. Self-contained; no dependents. Reverting
 restores the pre-fix (broken) behavior for any non-zero-ImTransOpt geometry.
+
+---
+
+### `6b1564b` — File menu: rename GUI State to Workspace, add recent-files, dirty-state indicator, autosave, and a Project History viewer (2026-08-26, branch `workspace_ux`)
+
+**Effect:** user feedback that creating/saving/loading a "project" felt
+inconvenient traced to two functionally unrelated concepts sharing the
+"Project" mental-model space with no supporting affordances around either:
+"GUI State" (`Ctrl+S`/`Shift+S`/`Ctrl+O`, a mutable JSON widget snapshot)
+and "Project" (File ▸ New/Open/Close Project, an append-only HDF5 FAIR-
+provenance log, no shortcuts). Neither had a recent-files list, an unsaved-
+changes indicator, autosave/crash recovery, or a way to browse a project's
+own history without `h5dump`/HDFView. Reworked the File menu around a
+clearer model — **Workspace** (renamed from "GUI State": your editable
+draft) vs. **Project** (the permanent FAIR record it can optionally log
+into) — borrowing recent-files/dirty-indicator/autosave patterns from
+established desktop apps (VS Code, Photoshop, Blender), while leaving
+`project.py`'s HDF5 schema, its `create_project`/`open_project`/
+`append_*_attempt` functions, and its opt-in/append-only guarantees
+completely untouched — every new feature either reuses `project.py`'s
+existing read-side API or lives in new, additive sidecar/config files.
+Concretely: (1) "GUI State" renamed to "Workspace" everywhere in the UI —
+same shortcuts, same JSON schema, existing saved files still load; (2) new
+global recent-files store (`settings.py`: `record_recent`/`get_recent`,
+capped at 10, MRU-ordered, stored in a new `recent_files.json` sibling to
+`profile_meta.json` — deliberately global, not per-Profile) backing new
+File ▸ Recent Projects / Recent Workspaces submenus; (3) window title now
+shows the active Workspace name plus Qt's native `[*]` unsaved-changes
+marker, driven by a periodic (~7s) cheap hash-diff of a shared
+`_serialize_workspace()` helper (refactored out of the old inline
+`save_gui_state` body) against the hash captured at the last save/load —
+reuses each tab's existing `get_state()`, no per-widget change signals
+wired, and passing `sidecar_stem=None` on the timer tick skips every tab's
+sidecar file I/O so the check has no side effects; (4) `closeEvent` now
+prompts Save/Discard/Cancel when dirty instead of closing silently;
+(5) a second, much less frequent (~5 min) timer autosaves a crash-recovery
+draft to `settings.autosave_draft_path()` while dirty (never touches a
+Project's `.h5`), and `MainWindow.maybe_offer_restore_autosave()` offers to
+restore it — wired *only* from `main()`, deliberately not from
+`__init__`/`_build_ui`, so plain `MainWindow()` construction (what every
+existing test does) can never block on a modal dialog because of a
+leftover draft from an earlier crashed/killed session; (6) File ▸ New
+Project… now offers to also save a Workspace linked to the new project
+(`<name>_workspace.json`) in the same step; (7) new read-only
+`ProjectHistoryDialog` (`dialogs.py`) — a `QTableWidget` (the app's first)
+listing every recorded attempt (panel/kind/name/timestamp) built entirely
+from `project.py`'s existing `discover_panels`/`list_attempts`/
+`read_attempt`, with a detail pane showing the selected attempt's full
+metadata — wired to a new, project-open-only File ▸ Project History… menu
+item, so inspecting a project no longer requires an external HDF5 viewer.
+Landed on a separate `workspace_ux` branch per explicit request, so it can
+be reviewed/kept or discarded independently of `main`.
+**Files:** `midas_gui/app.py` (`_build_file_menu`, recent-menu population,
+`_serialize_workspace`/`_hash_workspace_state`/`_check_workspace_dirty`/
+`_update_window_title`/`_autosave_tick`/`_clear_autosave_draft`/
+`maybe_offer_restore_autosave`, `save_gui_state`/`load_gui_state`,
+`closeEvent`, `main()`), `midas_gui/settings.py` (`record_recent`/
+`get_recent`/`autosave_draft_path`), `midas_gui/dialogs.py`
+(`ProjectHistoryDialog`), `tests/test_workspace_ux.py` (new — recent-files
+roundtrip/pruning/cap, dirty-flag hash-diff, autosave write/clear,
+restore-on-relaunch accept/decline, `ProjectHistoryDialog` against a
+fixture project), `documentation/gui_documentation.md` (§16 renamed/
+rewritten, §17 gains Recent Projects/New-Project-pairing/Project History
+subsections).
+**Roll back:** `git revert 6b1564b` (or, since this is isolated to
+`workspace_ux`, simply don't merge/delete the branch). Self-contained; no
+dependents — `project.py` itself is untouched by this commit.
 
 ---
 
