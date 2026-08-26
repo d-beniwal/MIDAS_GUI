@@ -40,11 +40,16 @@ def create_project(path, name: Optional[str] = None) -> str:
     path = str(path)
     if Path(path).exists():
         raise FileExistsError(f"{path} already exists")
+    from midas_gui import settings
     with h5py.File(path, "w") as f:
         f.attrs[PROJECT_MARKER] = True
         f.attrs["schema_version"] = SCHEMA_VERSION
         f.attrs["project_name"] = name or Path(path).stem
         f.attrs["created_utc"] = _now_iso()
+        try:
+            f.attrs["active_profile_at_creation"] = settings.active_profile()
+        except Exception:
+            pass
     return path
 
 
@@ -54,6 +59,14 @@ def open_project(path) -> str:
         if not f.attrs.get(PROJECT_MARKER, False):
             raise ValueError(f"{path} is not a MIDAS GUI project file")
     return path
+
+
+def project_active_profile(project_path) -> Optional[str]:
+    """The beamline Profile active when this project was created (a stable,
+    file-level attr — see ``create_project``), or ``None`` for a project
+    file predating this feature."""
+    with h5py.File(str(project_path), "r") as f:
+        return f.attrs.get("active_profile_at_creation")
 
 
 def sha256_file(path) -> dict:
@@ -185,9 +198,12 @@ def _next_attempt_name(group) -> str:
 
 def append_calibration_attempt(project_path, panel_key, *, cfg, result, loader_state,
                                 dark=None, bright=None, background=None,
+                                mask_is_file_backed: bool = False,
+                                results: Optional[dict] = None,
                                 extra: Optional[dict] = None) -> str:
     cfg_copy = dict(cfg or {})
     mask = cfg_copy.pop("mask", None)
+    embed_mask = mask is not None and not mask_is_file_backed
 
     metadata = {
         "timestamp_utc": _now_iso(),
@@ -196,7 +212,8 @@ def append_calibration_attempt(project_path, panel_key, *, cfg, result, loader_s
         "result": _sanitize_result_dict(result),
         "loader_state": _hash_paths_in(loader_state or {}),
         "environment": environment_snapshot(),
-        "mask_embedded": mask is not None,
+        "mask_present": mask is not None,
+        "mask_embedded": embed_mask,
         "dark_embedded": dark is not None,
         "bright_embedded": bright is not None,
         "background_embedded": background is not None,
@@ -215,7 +232,7 @@ def append_calibration_attempt(project_path, panel_key, *, cfg, result, loader_s
             v = getattr(result, k, None)
             if v is not None:
                 att.attrs[k] = float(v)
-        if mask is not None:
+        if embed_mask:
             _write_array(att, "mask", mask)
         if dark is not None:
             _write_array(att, "dark", dark)
@@ -223,12 +240,20 @@ def append_calibration_attempt(project_path, panel_key, *, cfg, result, loader_s
             _write_array(att, "bright", bright)
         if background is not None:
             _write_array(att, "background", background)
+        if results:
+            res_grp = att.create_group("results")
+            for key in ("profile", "r_axis_px", "cake_2d", "eta_axis_deg"):
+                if results.get(key) is not None:
+                    _write_array(res_grp, key, results[key])
+            for k in ("lsd_um", "px_um", "wavelength_A"):
+                if results.get(k) is not None:
+                    res_grp.attrs[k] = float(results[k])
         grp.attrs["latest"] = name
 
     return f"/{panel_key}/calib/{name}"
 
 
-_PANEL_ORDER = ("single", "ge1", "ge2", "ge3", "ge4")
+_PANEL_ORDER = ("single", "ge1", "ge2", "ge3", "ge4", "hydra_composite")
 
 
 def discover_panels(project_path) -> list:
@@ -279,6 +304,27 @@ def read_attempt_results(project_path, ref: str) -> dict:
         if "frame_ids" in grp:
             out["frame_ids"] = [v.decode() if isinstance(v, bytes) else v
                                  for v in grp["frame_ids"][()]]
+        return out
+
+
+def read_calib_attempt_results(project_path, ref: str) -> dict:
+    """The embedded cake/profile arrays for a *calibration* attempt (see
+    ``append_calibration_attempt``'s ``results`` kwarg) — ``profile``,
+    ``r_axis_px``, ``cake_2d``, ``eta_axis_deg`` plus scalar
+    ``lsd_um``/``px_um``/``wavelength_A``. Returns {} if the attempt has no
+    ``results`` group (e.g. an attempt logged before this feature existed,
+    or integration never ran for it)."""
+    with h5py.File(str(project_path), "r") as f:
+        grp = f.get(f"{ref.lstrip('/')}/results")
+        if grp is None:
+            return {}
+        out = {}
+        for key in ("profile", "r_axis_px", "cake_2d", "eta_axis_deg"):
+            if key in grp:
+                out[key] = grp[key][()]
+        for k in ("lsd_um", "px_um", "wavelength_A"):
+            if k in grp.attrs:
+                out[k] = float(grp.attrs[k])
         return out
 
 
@@ -404,12 +450,14 @@ def calibration_namespace(calibration_snapshot: dict):
 def append_integration_attempt(project_path, panel_key, *, inputs, finished_payload,
                                 calibration_snapshot=None, calib_attempt_ref=None,
                                 mask=None, dark=None, bright=None, background=None,
+                                mask_is_file_backed: bool = False,
                                 extra: Optional[dict] = None) -> str:
     payload = dict(finished_payload or {})
     profiles = payload.pop("profiles", None)
     r_axis = payload.pop("r_axis_px", None)
     sigmas = payload.pop("sigmas", None)
     frame_ids = payload.pop("frame_ids", None)
+    embed_mask = mask is not None and not mask_is_file_backed
 
     metadata = {
         "timestamp_utc": _now_iso(),
@@ -421,7 +469,8 @@ def append_integration_attempt(project_path, panel_key, *, inputs, finished_payl
         "calibration_snapshot": calibration_snapshot,
         "calib_attempt_ref": calib_attempt_ref,
         "environment": environment_snapshot(),
-        "mask_embedded": mask is not None,
+        "mask_present": mask is not None,
+        "mask_embedded": embed_mask,
         "dark_embedded": dark is not None,
         "bright_embedded": bright is not None,
         "background_embedded": background is not None,
@@ -441,7 +490,7 @@ def append_integration_attempt(project_path, panel_key, *, inputs, finished_payl
             att.attrs["kernel"] = str(inputs["kernel"])
         if calib_attempt_ref:
             att.attrs["calib_attempt_ref"] = calib_attempt_ref
-        if mask is not None:
+        if embed_mask:
             _write_array(att, "mask", mask)
         if dark is not None:
             _write_array(att, "dark", dark)

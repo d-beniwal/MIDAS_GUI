@@ -171,6 +171,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
 
         self._viewer = None
         self._profile_view = None
+        self._cake_view = None
         self._image_provider: Callable[[], Optional[np.ndarray]] = lambda: None
         self._mask_provider: Optional[Callable[[np.ndarray], Optional[np.ndarray]]] = None
         self._rad_r_bin: Optional[QtWidgets.QDoubleSpinBox] = None
@@ -187,6 +188,9 @@ class DetectorGeometryCard(QtWidgets.QWidget):
 
     def set_profile_view(self, profile_view):
         self._profile_view = profile_view
+
+    def set_cake_view(self, cake_view):
+        self._cake_view = cake_view
 
     def set_radial_controls(self, r_bin_spin: QtWidgets.QDoubleSpinBox,
                              auto_checkbox: QtWidgets.QCheckBox):
@@ -1027,9 +1031,14 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             self._calib_ctx = (spec, ctx); self._calib_ctx_sig = sig
         spec, ctx = self._calib_ctx
         img_t = torch.from_numpy(np.ascontiguousarray(img, dtype=np.float64))
-        prof, _ = integrate_frame(
+        prof, _, cake_2d = integrate_frame(
             img_t, spec, ctx["geom"], "hard", (None, None), None, False,
-            corr_counts=ctx["corr_counts"], weighted=True, cnt_cake=ctx["cnt"])
+            corr_counts=ctx["corr_counts"], return_cake=True,
+            weighted=True, cnt_cake=ctx["cnt"])
+        if self._cake_view is not None:
+            n_eta = spec.n_eta_bins
+            eta_ax = float(spec.EtaMin) + float(spec.EtaBinSize) * (np.arange(n_eta) + 0.5)
+            self._cake_view.set_cake(cake_2d, ctx["r_ax"], eta_ax)
         return ctx["r_ax"], prof
 
     def _log_error(self, text):

@@ -746,6 +746,10 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         sel = self._mask_sels.get(n)
         return sel.composite_mask() if sel is not None else None
 
+    def has_live_mask_source(self, n: int) -> bool:
+        sel = self._mask_sels.get(n)
+        return sel.has_live_mask_source() if sel is not None else False
+
     # ── GUI state (Save/Load GUI State, stream mode only) ───────────
 
     def get_state(self) -> dict:
@@ -855,11 +859,13 @@ class HydraProfileViewer(QtWidgets.QWidget):
     #: whether it's worth computing/pushing that curve at all.
     compositeVisibilityChanged = QtCore.pyqtSignal(bool)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, composite_as_button: bool = False):
         super().__init__(parent)
         self._native: dict = {}   # key -> (r_px, profile, lsd_um, px_um, wavelength_A)
         self._curves: dict = {}
         self._checks: dict = {}
+        self._composite_as_button = composite_as_button
+        self._overall_btn: Optional[QtWidgets.QPushButton] = None
         self._build_ui()
 
     def _build_ui(self):
@@ -878,6 +884,14 @@ class HydraProfileViewer(QtWidgets.QWidget):
         bar.addWidget(self._logy)
         bar.addSpacing(12)
         for key in _HYDRA_CURVE_KEYS:
+            if key == "composite" and self._composite_as_button:
+                btn = QtWidgets.QPushButton("Overall")
+                btn.setCheckable(True)
+                btn.toggled.connect(self._on_overall_toggled)
+                bar.addWidget(btn)
+                self._overall_btn = btn
+                self._apply_overall_style(False)
+                continue
             label = "Composite" if key == "composite" else key.upper()
             chk = QtWidgets.QCheckBox(label)
             chk.setChecked(True)
@@ -928,14 +942,34 @@ class HydraProfileViewer(QtWidgets.QWidget):
         curves) to read back what's already been computed."""
         return self._native.get(key)
 
+    def _apply_overall_style(self, active: bool):
+        if active:
+            self._overall_btn.setStyleSheet(
+                "QPushButton { background: #2e7d32; color: white; font-weight: bold; "
+                "border: 1px solid #1b5e20; border-radius: 4px; padding: 3px 10px; }")
+        else:
+            self._overall_btn.setStyleSheet(
+                "QPushButton { border: 1px solid #666; border-radius: 4px; padding: 3px 10px; }")
+
+    def _on_overall_toggled(self, active: bool):
+        self._apply_overall_style(active)
+        self.compositeVisibilityChanged.emit(active)
+        self._replot()
+        if active:
+            self._plot.getPlotItem().getViewBox().autoRange()
+
     def _replot(self, *_):
         target = self._unit_key()
         log = self._logy.isChecked()
+        overall_active = self._composite_as_button and self._overall_btn.isChecked()
         self._plot.setLabel("bottom", _XUNIT_LABEL[target])
         self._plot.setLabel("left", "log₁₀(intensity)" if log else "Mean intensity")
         xs, ys = [], []
         for key, curve in self._curves.items():
-            visible = self._checks[key].isChecked()
+            if key == "composite":
+                visible = overall_active if self._composite_as_button else self._checks[key].isChecked()
+            else:
+                visible = self._checks[key].isChecked() and not overall_active
             data = self._native.get(key)
             if not visible or data is None:
                 curve.setData([], [])
@@ -974,4 +1008,6 @@ class HydraProfileViewer(QtWidgets.QWidget):
                      maxYRange=(ymax - ymin) + 2 * ypad)
 
     def composite_visible(self) -> bool:
+        if self._composite_as_button:
+            return self._overall_btn.isChecked()
         return self._checks["composite"].isChecked()

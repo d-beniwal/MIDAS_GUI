@@ -37,13 +37,57 @@ from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _NoScrollComboBox, make_kedge_label, make_pixel_label,
     _load_image, _apply_im_trans, apply_field_corrections, average_field, source_kind,
     widgets_to_dict, apply_dict_to_widgets, _predict_ring_radii, refresh_combo_items)
-from midas_gui.widgets import PickableImageViewer, LogPanel, CakeViewer
+from midas_gui.widgets import PickableImageViewer, LogPanel, CakeViewer, _convert_radial
 from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar, HydraProfileViewer
 from midas_gui.hydra_calib_widgets import HydraCalibPanelCard
 from midas_gui.workers import CalibrationWorker, IntegrationWorker
 from midas_gui.dialogs import DistortionRefineDialog
 from midas_gui import project
+from midas_gui import settings
 from midas_gui import style as S
+
+
+def _compose_overall_cake(panels: dict) -> Optional[tuple]:
+    """Sum the available panels' (η, R) cakes into one "Overall" cake.
+
+    ``panels`` maps panel number -> ``(cake_2d, r_axis_px, eta_axis_deg,
+    lsd_um, px_um, wavelength_A)`` (see ``HydraCalibrationPage._on_int_done``,
+    which caches this per panel). Returns ``(cake, r_axis, eta_axis)`` or
+    ``None`` if no panel has been integrated yet.
+
+    Only the R-axis needs resampling: every panel's cake is built from the
+    same shared ``eta_bin`` control and ``spec_from_calibration_result``'s
+    fixed ``EtaMin``/``EtaMax`` (-180°..180°), so all 4 panels share one
+    identical eta axis by construction — no row-resampling is needed, unlike
+    the 1D composite profile's R-axis, which genuinely differs per panel
+    (each panel's own beam-centre/detector-corner distance)."""
+    if not panels:
+        return None
+    eta_axis = next(iter(panels.values()))[2]
+    n_eta = len(eta_axis)
+    tth_grids, cakes, refs = [], [], []
+    for cake, r_px, _eta, lsd, px, wl in panels.values():
+        tth = _convert_radial(np.asarray(r_px), lsd, px, wl, "R", "2th")
+        order = np.argsort(tth)
+        tth_grids.append(tth[order])
+        cakes.append(np.asarray(cake)[:, order])
+        refs.append((lsd, px, wl))
+    lo = min(g.min() for g in tth_grids)
+    hi = max(g.max() for g in tth_grids)
+    n_common = max(c.shape[1] for c in cakes)
+    common = np.linspace(lo, hi, n_common)
+    resampled = []
+    for tth, cake in zip(tth_grids, cakes):
+        rows = np.full((n_eta, n_common), np.nan, dtype=np.float32)
+        for i in range(n_eta):
+            rows[i, :] = np.interp(common, tth, cake[i, :], left=np.nan, right=np.nan)
+        resampled.append(rows)
+    stacked = np.stack(resampled, axis=0)
+    all_nan = np.all(np.isnan(stacked), axis=0)
+    summed = np.where(all_nan, np.nan, np.nansum(stacked, axis=0))
+    ref_lsd, ref_px, _ref_wl = refs[0]
+    r_ref = ref_lsd * np.tan(np.radians(common)) / ref_px
+    return summed, r_ref, eta_axis
 
 
 class HydraCalibrationPage(QtWidgets.QWidget):
@@ -65,6 +109,8 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._disp_key = None
         self._last_cfgs: dict = {}      # panel_num -> cfg used for its last run (provenance)
         self._last_fields: dict = {}    # panel_num -> (dark, bright, background) arrays
+        self._pending_log_results: dict = {}  # panel_num -> result awaiting _log_to_project
+        self._composite_log_pending = False   # True during a live run, until it fully finishes
         self._project_ctx: Optional[project.ProjectContext] = None
         self._build_ui()
         self._on_panel_changed(self._toolbar.current())
@@ -289,7 +335,9 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         right.addWidget(self._img_view)
 
         bot = QtWidgets.QTabWidget()
-        self._profile_view = HydraProfileViewer()
+        self._profile_view = HydraProfileViewer(composite_as_button=True)
+        self._profile_view.compositeVisibilityChanged.connect(
+            lambda _active: self._refresh_composite_curve())
         ptb = self._profile_view._toolbar_layout
         self._cal_r_bin = _fspin(0.1, 20.0, 2, 1.0, "px"); self._cal_r_bin.setFixedWidth(78)
         self._cal_eta_bin = _fspin(0.5, 30.0, 1, 5.0, "°"); self._cal_eta_bin.setFixedWidth(64)
@@ -306,13 +354,37 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         ptb.insertWidget(insert_at, QtWidgets.QLabel("  R bin:"))
         bot.addTab(self._profile_view, "Radial Profile")
 
+        cake_tab = QtWidgets.QWidget()
+        cake_layout = QtWidgets.QVBoxLayout(cake_tab)
+        cake_layout.setContentsMargins(0, 0, 0, 0); cake_layout.setSpacing(2)
+        cake_bar = QtWidgets.QHBoxLayout()
+        self._cake_checks: dict = {}
+        for n in (1, 2, 3, 4):
+            chk = QtWidgets.QCheckBox(f"GE{n}")
+            chk.setChecked(n == 1)
+            chk.toggled.connect(lambda checked, n=n: self._on_cake_panel_toggled(n, checked))
+            cake_bar.addWidget(chk)
+            self._cake_checks[n] = chk
+        self._cake_overall_btn = QtWidgets.QPushButton("Overall")
+        self._cake_overall_btn.setCheckable(True)
+        self._cake_overall_btn.setStyleSheet(
+            "QPushButton { border: 1px solid #666; border-radius: 4px; padding: 3px 10px; }")
+        self._cake_overall_btn.toggled.connect(self._on_cake_overall_toggled)
+        cake_bar.addWidget(self._cake_overall_btn)
+        cake_bar.addStretch(1)
+        cake_layout.addLayout(cake_bar)
+
         self._cake_views: dict = {}     # panel_num -> CakeViewer
+        self._last_cake_data: dict = {}  # panel_num -> (cake_2d, r_axis_px, eta_axis_deg, lsd_um, px_um, wavelength_A)
         self._cake_stack = QtWidgets.QStackedWidget()
         for n in (1, 2, 3, 4):
             cake_view = CakeViewer()
             self._cake_views[n] = cake_view
             self._cake_stack.addWidget(cake_view)
-        bot.addTab(self._cake_stack, "Eta vs R Cake")
+        self._overall_cake_view = CakeViewer()
+        self._cake_stack.addWidget(self._overall_cake_view)
+        cake_layout.addWidget(self._cake_stack)
+        bot.addTab(cake_tab, "Eta vs R Cake")
 
         self._resid_stack = QtWidgets.QStackedWidget()
         for n in (1, 2, 3, 4):
@@ -363,6 +435,11 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._resid_stack.setCurrentWidget(self._cards[n].residual_chart)
         self._results_stack.setCurrentWidget(self._cards[n].results_widget)
         self._cake_stack.setCurrentWidget(self._cake_views[n])
+        self._cake_overall_btn.blockSignals(True)
+        self._cake_overall_btn.setChecked(False)
+        self._cake_overall_btn.blockSignals(False)
+        for cn, chk in self._cake_checks.items():
+            chk.blockSignals(True); chk.setChecked(cn == n); chk.blockSignals(False)
         self._active_card = self._cards[n]
         self._active_card.bind_viewer(self._img_view)
         for chk, getter in ((self._show_rings_check, self._active_card.show_rings_checked),
@@ -568,6 +645,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             return
         self._orphans = [o for o in self._orphans if o.isRunning()]
         self._calib_cancelled = False
+        self._composite_log_pending = True
         self._last_dist_coeffs = set(self._dist_coeffs) if self._ref_dist.isChecked() else set()
         self._run_btn.setEnabled(False); self._abort_btn.setEnabled(True)
         self._prog.setVisible(True)
@@ -626,15 +704,20 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         result._calibrant_name = self._cal.currentText()
         card.on_result(result)
         self._log.append(f"[ge{n}] done — Lsd={result.Lsd/1000:.3f} mm")
-        self._log_to_project(n, result)
+        self._pending_log_results[n] = result
         self._run_integration(n, result)
+        if not (self._int_workers.get(n) is not None and self._int_workers[n].isRunning()):
+            # No image loaded (or integration otherwise didn't start) — log
+            # now, without cake/profile results.
+            self._pending_log_results.pop(n, None)
+            self._log_to_project(n, result)
         self.panelCalibrationDone.emit(n, result)
         self._workers.pop(n, None)
         if self._run_mode() == "sequential":
             self._start_next_sequential()
         self._maybe_finish_run()
 
-    def _log_to_project(self, n: int, result):
+    def _log_to_project(self, n: int, result, results: Optional[dict] = None):
         if not self._project_ctx or not self._project_ctx.path:
             return
         dark, bright, background = self._last_fields.get(n, (None, None, None))
@@ -648,7 +731,9 @@ class HydraCalibrationPage(QtWidgets.QWidget):
                 self._project_ctx.path, f"ge{n}",
                 cfg=self._last_cfgs.get(n, {}), result=result,
                 loader_state=loader_state,
-                dark=dark, bright=bright, background=background)
+                dark=dark, bright=bright, background=background,
+                results=results,
+                extra={"active_profile": settings.active_profile()})
             result._project_attempt_ref = ref
             self._log.append(f"[ge{n}] logged to project: {ref}")
         except Exception:
@@ -707,7 +792,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             background=self._loader.background(n), bright_mode=self._loader.bright_mode(),
             weighted=bool(self._cal_azim.currentData()))
         w.finished.connect(lambda data, n=n, result=result: self._on_int_done(n, result, data))
-        w.failed.connect(lambda m, n=n: self._log.append(f"[ge{n}] integration error: {m[:200]}"))
+        w.failed.connect(lambda m, n=n: self._on_int_failed(n, m))
         self._int_workers[n] = w
         w.start()
 
@@ -715,6 +800,16 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         for n, card in self._cards.items():
             if card.result is not None:
                 self._run_integration(n, card.result)
+
+    def _flush_pending_log(self, n: int, results: Optional[dict]):
+        pending = self._pending_log_results.pop(n, None)
+        if pending is not None:
+            self._log_to_project(n, pending, results=results)
+
+    def _on_int_failed(self, n: int, msg: str):
+        self._log.append(f"[ge{n}] integration error: {msg[:200]}")
+        self._int_workers.pop(n, None)
+        self._flush_pending_log(n, None)
 
     def _on_int_done(self, n: int, result, data: dict):
         self._profile_view.set_curve(
@@ -724,19 +819,149 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._cards[n].residual_chart.set_data(data["r_axis_px"], data["profile"], radii)
         if data.get("cake_2d") is not None:
             self._cake_views[n].set_cake(data["cake_2d"], data["r_axis_px"], data["eta_axis_deg"])
+            self._last_cake_data[n] = (
+                data["cake_2d"], data["r_axis_px"], data["eta_axis_deg"],
+                data["lsd_um"], data["px_um"], data["wavelength_A"])
         self._int_workers.pop(n, None)
+        self._refresh_composite_curve()
+        self._flush_pending_log(n, data)
+        self._maybe_log_composite_attempt()
+
+    def _maybe_log_composite_attempt(self):
+        """Once a live run's calibration AND integration have both fully
+        finished for every panel (not on a manual Re-integrate), append the
+        Overall/composite profile as its own lightweight attempt — only if
+        Overall was active and something was actually computed."""
+        if self._workers or self._pending_panels or self._int_workers:
+            return
+        if not self._composite_log_pending:
+            return
+        self._composite_log_pending = False
+        if not (self._project_ctx and self._project_ctx.path):
+            return
+        if not self._profile_view.composite_visible():
+            return
+        native = self._profile_view.get_native("composite")
+        if native is None:
+            return
+        r_ref, summed = native[0], native[1]
+        try:
+            from types import SimpleNamespace
+            ref = project.append_calibration_attempt(
+                self._project_ctx.path, "hydra_composite",
+                cfg={}, result=SimpleNamespace(), loader_state={},
+                results={"profile": summed, "r_axis_px": r_ref},
+                extra={"active_profile": settings.active_profile()})
+            self._log.append(f"Logged Overall profile to project: {ref}")
+        except Exception:
+            import traceback as _tb
+            self._log.append(
+                "Could not log Overall profile to project:\n" + _tb.format_exc()[:400])
+
+    def _refresh_composite_curve(self):
+        """Recompute the toggleable "Overall" radial-profile curve: each
+        available panel's own (already-computed) profile, converted to a
+        shared 2theta axis, resampled onto one common grid, and NaN-aware
+        summed — not a re-integration of a composited image (would double-
+        count any panel overlap). Mirrors
+        ``hydra_page.HydraViewerPage._refresh_composite_curve``."""
+        if not self._profile_view.composite_visible():
+            self._profile_view.clear_curve("composite")
+            return
+        natives = []
+        for n in (1, 2, 3, 4):
+            data = self._profile_view.get_native(f"ge{n}")
+            if data is not None and None not in data[2:]:   # need lsd, px, wl
+                natives.append(data)
+        if not natives:
+            self._profile_view.clear_curve("composite")
+            return
+        grids = []
+        for r_px, profile, lsd, px, wl in natives:
+            tth = _convert_radial(r_px, lsd, px, wl, "R", "2th")
+            order = np.argsort(tth)
+            grids.append((tth[order], profile[order]))
+        lo = min(g[0].min() for g in grids)
+        hi = max(g[0].max() for g in grids)
+        common = np.linspace(lo, hi, 500)
+        resampled = [np.interp(common, tth, profile, left=np.nan, right=np.nan)
+                    for tth, profile in grids]
+        stacked = np.vstack(resampled)
+        all_nan = np.all(np.isnan(stacked), axis=0)
+        summed = np.where(all_nan, np.nan, np.nansum(stacked, axis=0))
+        ref_lsd, ref_px, ref_wl = natives[0][2], natives[0][3], natives[0][4]
+        r_ref = ref_lsd * np.tan(np.radians(common)) / ref_px
+        self._profile_view.set_curve("composite", r_ref, summed,
+                                     lsd_um=ref_lsd, px_um=ref_px, wavelength_A=ref_wl)
+
+    # ── Overall cake ─────────────────────────────────────────────────
+
+    def _on_cake_panel_toggled(self, n: int, checked: bool):
+        if not checked:
+            return
+        for cn, chk in self._cake_checks.items():
+            if cn != n:
+                chk.blockSignals(True); chk.setChecked(False); chk.blockSignals(False)
+        self._cake_overall_btn.blockSignals(True)
+        self._cake_overall_btn.setChecked(False)
+        self._cake_overall_btn.blockSignals(False)
+        self._toolbar.set_current(f"ge{n}")
+
+    def _on_cake_overall_toggled(self, active: bool):
+        if active:
+            self._cake_overall_btn.setStyleSheet(
+                "QPushButton { background: #2e7d32; color: white; font-weight: bold; "
+                "border: 1px solid #1b5e20; border-radius: 4px; padding: 3px 10px; }")
+            for chk in self._cake_checks.values():
+                chk.blockSignals(True); chk.setChecked(False); chk.blockSignals(False)
+            composed = _compose_overall_cake(self._last_cake_data)
+            if composed is not None:
+                cake, r_axis, eta_axis = composed
+                self._overall_cake_view.set_cake(cake, r_axis, eta_axis)
+                self._cake_stack.setCurrentWidget(self._overall_cake_view)
+            else:
+                self._log.append("Overall cake: no panels integrated yet.")
+        else:
+            self._cake_overall_btn.setStyleSheet(
+                "QPushButton { border: 1px solid #666; border-radius: 4px; padding: 3px 10px; }")
+            n = int(self._toolbar.current()[2])
+            self._cake_stack.setCurrentWidget(self._cake_views[n])
+            self._cake_checks[n].blockSignals(True)
+            self._cake_checks[n].setChecked(True)
+            self._cake_checks[n].blockSignals(False)
 
     # ── File > Open Project… ─────────────────────────────────────────
 
-    def display_stored_result(self, n: int, result) -> None:
-        """Redraw panel ``n``'s rings + (if its image is loaded) profile/cake
-        for a result recovered from a project attempt — mirrors
-        ``_on_panel_done``'s visual effects without re-running Fit."""
+    def display_stored_result(self, n: int, result, results_arrays: Optional[dict] = None) -> None:
+        """Redraw panel ``n``'s rings + profile/cake for a result recovered
+        from a project attempt — mirrors ``_on_panel_done``'s visual effects
+        without re-running Fit. When ``results_arrays`` (the attempt's
+        embedded cake/profile) is available, populates directly instead of
+        re-integrating; otherwise falls back to live re-integration if an
+        image happens to be loaded."""
         card = self._cards.get(n)
         if card is None:
             return
         card.on_result(result)
-        self._run_integration(n, result)
+        if results_arrays and results_arrays.get("profile") is not None:
+            self._profile_view.set_curve(
+                f"ge{n}", results_arrays["r_axis_px"], results_arrays["profile"],
+                lsd_um=results_arrays.get("lsd_um"), px_um=results_arrays.get("px_um"),
+                wavelength_A=results_arrays.get("wavelength_A"))
+            radii = _predict_ring_radii(result)
+            card.residual_chart.set_data(
+                results_arrays["r_axis_px"], results_arrays["profile"], radii)
+            if results_arrays.get("cake_2d") is not None:
+                self._cake_views[n].set_cake(
+                    results_arrays["cake_2d"], results_arrays["r_axis_px"],
+                    results_arrays["eta_axis_deg"])
+                self._last_cake_data[n] = (
+                    results_arrays["cake_2d"], results_arrays["r_axis_px"],
+                    results_arrays["eta_axis_deg"], results_arrays.get("lsd_um"),
+                    results_arrays.get("px_um"), results_arrays.get("wavelength_A"))
+            self._refresh_composite_curve()
+        else:
+            self._run_integration(n, result)
 
     # ── Import from Data Viewer ──────────────────────────────────────
 

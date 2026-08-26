@@ -29,6 +29,7 @@ from midas_gui.workers import BatchWorker, apply_q_uniform, DriftWorker, FolderM
 from midas_gui.hydra_widgets import HydraModeRibbon
 from midas_gui.hydra_batch_page import HydraBatchPage
 from midas_gui import project
+from midas_gui import settings
 from midas_gui import style as S
 
 
@@ -562,10 +563,13 @@ class BatchTab(QtWidgets.QWidget):
             "src_cfg": src_cfg, "kernel": kernel, "fmt": fmt,
             "frame_range": frame_range, "monitor_file": monitor_file,
             "q_cfg": q_cfg, "weighted": weighted, "bright_mode": bright_mode,
+            "mask_sources": self._loader.get_state().get("mask"),
         }
+        mask = self._loader.composite_mask()
         self._last_run_fields = {
-            "mask": self._loader.composite_mask(),
+            "mask": mask,
             "dark": dark, "bright": bright, "background": background,
+            "mask_is_file_backed": mask is not None and not self._loader.has_live_mask_source(),
         }
 
         self._worker = BatchWorker(
@@ -653,6 +657,7 @@ class BatchTab(QtWidgets.QWidget):
                 self._project_ctx.path, "single",
                 inputs=self._last_run_inputs, finished_payload=data,
                 calibration_snapshot=calib_fields, calib_attempt_ref=calib_ref,
+                extra={"active_profile": settings.active_profile()},
                 **self._last_run_fields)
             self._log.append(f"Logged to project: {ref}")
         except Exception:

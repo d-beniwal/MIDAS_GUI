@@ -615,32 +615,6 @@ def _install_manual_axis_capture(plot_widget: "pg.PlotWidget", callback):
 #  CakeViewer
 # ═════════════════════════════════════════════════════════════════════════════
 
-class _YZoomViewBox(pg.ViewBox):
-    """A ViewBox whose right-click-drag zooms the Y axis only.
-
-    Stock pyqtgraph's right-drag scales X and Y together (diagonally
-    proportional to the drag vector), which on the cake plot reads as an
-    unwanted R-axis (X) zoom whenever the user just meant to zoom η (Y) by
-    dragging up/down. Every other gesture (left-drag pan, wheel zoom, the
-    right-click context menu) is left to the base implementation."""
-
-    def mouseDragEvent(self, ev, axis=None):
-        if ev.button() != QtCore.Qt.RightButton:
-            super().mouseDragEvent(ev, axis=axis)
-            return
-        ev.accept()
-        mouseEnabled = self.state['mouseEnabled']
-        if not mouseEnabled[1]:
-            return
-        dif = ev.screenPos() - ev.lastScreenPos()
-        s = 1.02 ** dif.y()
-        tr = pg.functions.invertQTransform(self.childGroup.transform())
-        center = pg.Point(tr.map(ev.buttonDownPos(QtCore.Qt.RightButton)))
-        self._resetTarget()
-        self.scaleBy(x=None, y=s, center=center)
-        self.sigRangeChangedManually.emit(mouseEnabled)
-
-
 class CakeViewer(QtWidgets.QWidget):
     """2-D azimuthal-integration "cake" heatmap: R (px) on X, η (°) on Y.
 
@@ -682,12 +656,22 @@ class CakeViewer(QtWidgets.QWidget):
         self._toolbar_layout = bar   # exposed so subclasses/callers can append widgets
         layout.addLayout(bar)
 
-        self._iv = pg.ImageView(view=pg.PlotItem(viewBox=_YZoomViewBox()))
+        self._iv = pg.ImageView(view=pg.PlotItem(viewBox=pg.ViewBox()))
         self._iv.ui.roiBtn.hide(); self._iv.ui.menuBtn.hide()
         vb = self._iv.getView().getViewBox()
         vb.setMouseEnabled(x=True, y=True)
         vb.setMouseMode(pg.ViewBox.PanMode)
         vb.invertY(False)   # η increases upward, like a normal Cartesian plot
+        # R (px) and η (°) are unrelated units with no physical aspect ratio to
+        # preserve. pg.ImageView.__init__ force-locks the aspect on any view it's
+        # given, and an aspect-locked ViewBox always couples X/Y on right-drag
+        # zoom (ViewBox.scaleBy sets scale[0]=scale[1] whenever both axes are
+        # given, and ViewBox.updateViewRange re-derives one axis from the other
+        # on every range change regardless) — so a pure horizontal drag ends up
+        # zooming both axes together (or not at all), never R alone. Unlocking
+        # it lets right-drag zoom independently per axis, matching
+        # ProfileViewer/HydraProfileViewer's plain (unlocked) PlotWidget.
+        vb.setAspectLocked(False)
         self._iv.getView().setLabel("bottom", "R", units="px")
         self._iv.getView().setLabel("left", "η", units="°")
         layout.addWidget(self._iv, stretch=1)
@@ -1777,6 +1761,14 @@ class MaskSelector(QtWidgets.QGroupBox):
         ) if dropped else None
         self._refresh()
         return out.astype(np.uint8) if out is not None else None
+
+    def has_live_mask_source(self) -> bool:
+        """True iff the composite mask currently includes an enabled "tab1"
+        (Mask-tab-drawn/computed, live) source — i.e. it cannot be fully
+        reconstructed from file paths alone, so a caller (e.g. logging a
+        Project attempt) should embed the raw array rather than relying on
+        the file/folder sources' own path+hash provenance."""
+        return any(e["kind"] == "tab1" and e.get("enabled", True) for e in self._sources)
 
     def _refresh(self):
         n = len(self._sources)
@@ -2903,6 +2895,9 @@ class DataLoaderPanel(QtWidgets.QWidget):
 
     def composite_mask(self):
         return self._mask_sel.composite_mask()
+
+    def has_live_mask_source(self) -> bool:
+        return self._mask_sel.has_live_mask_source()
 
     def set_tab1_mask(self, mask):
         self._mask_sel.set_tab1_mask(mask)

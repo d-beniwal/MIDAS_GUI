@@ -21,7 +21,7 @@ import pyqtgraph as pg
 from midas_gui.constants import DEFAULT_NICKEL_H5
 from midas_gui.helpers import (_fspin, _NoScrollSpinBox,
                          widgets_to_dict, apply_dict_to_widgets, _apply_im_trans)
-from midas_gui.widgets import ProfileViewer, DataLoaderPanel
+from midas_gui.widgets import ProfileViewer, DataLoaderPanel, CakeViewer
 from midas_gui.roi_tools import ROIImageViewer, ROIRibbon
 from midas_gui.hydra_widgets import HydraModeRibbon
 from midas_gui.hydra_geometry_card import DetectorGeometryCard
@@ -363,6 +363,8 @@ class DataViewerTab(QtWidgets.QWidget):
         self._profile_view = ProfileViewer()
         self._profile_view.radiusClicked.connect(self._on_radius_clicked)
         self._geom_card.set_profile_view(self._profile_view)
+        self._cake_view = CakeViewer()
+        self._geom_card.set_cake_view(self._cake_view)
         ptb = self._profile_view._toolbar_layout
         self._rad_r_bin = _fspin(0.1, 20.0, 2, 1.0, "px"); self._rad_r_bin.setFixedWidth(56)
         self._rad_r_bin.setToolTip("Radial bin size for the azimuthal average.")
@@ -396,7 +398,10 @@ class DataViewerTab(QtWidgets.QWidget):
         ptb.addWidget(self._imask_lo)
         ptb.addWidget(QtWidgets.QLabel(">"))
         ptb.addWidget(self._imask_hi)
-        right.addWidget(self._profile_view)
+        bot = QtWidgets.QTabWidget()
+        bot.addTab(self._profile_view, "Radial Profile")
+        bot.addTab(self._cake_view, "Eta vs R Cake")
+        right.addWidget(bot)
         right.setStretchFactor(0, 3); right.setStretchFactor(1, 1)
         right.setMinimumWidth(320)
         split.addWidget(right)

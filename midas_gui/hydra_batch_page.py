@@ -35,6 +35,7 @@ from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar
 from midas_gui.hydra_batch_widgets import HydraBatchPanelCard
 from midas_gui.workers import BatchWorker
 from midas_gui import project
+from midas_gui import settings
 from midas_gui import style as S
 
 
@@ -350,9 +351,12 @@ class HydraBatchPage(QtWidgets.QWidget):
             "src_cfg": src_cfg, "kernel": kernel, "fmt": fmt,
             "frame_range": frame_range, "monitor_file": monitor_file,
             "q_cfg": q_cfg, "weighted": weighted, "bright_mode": bright_mode,
+            "mask_sources": self._loader.get_state().get("masks", {}).get(n),
         }
-        self._last_run_fields[n] = {"mask": mask, "dark": dark, "bright": bright,
-                                     "background": background}
+        self._last_run_fields[n] = {
+            "mask": mask, "dark": dark, "bright": bright, "background": background,
+            "mask_is_file_backed": mask is not None and not self._loader.has_live_mask_source(n),
+        }
 
         worker = BatchWorker(
             spec, src_cfg, mask, out_dir, fmt, kernel, corrections, variance_cfg,
@@ -411,6 +415,7 @@ class HydraBatchPage(QtWidgets.QWidget):
                 self._project_ctx.path, f"ge{n}",
                 inputs=self._last_run_inputs.get(n, {}), finished_payload=data,
                 calibration_snapshot=calib_fields, calib_attempt_ref=calib_ref,
+                extra={"active_profile": settings.active_profile()},
                 **self._last_run_fields.get(n, {}))
             self._log.append(f"[ge{n}] logged to project: {ref}")
         except Exception:

@@ -3,6 +3,165 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-08-26 — Project records embed calibration results + skip embedding file-backed masks; Hydra Overall Cake full UI; Data Viewer Cake tab; Workspace/Project active-Profile persistence
+
+Discovered already implemented (uncommitted) alongside the Overall-Cake-
+logic-verification / Cake-zoom-fix work below when preparing to commit —
+not separately logged in a prior STATE.md entry (same class of gap as
+2026-08-24's "STATE.md omits already-implemented features", see project
+github memory). `documentation/gui_documentation.md`'s diff already
+describes the user-visible behavior in full (§5, §15-§17); this entry
+records the *why* behind the implementation choices, read directly from the
+code:
+
+- **Selective mask embedding** (`project.py`, `widgets.py`
+  `MaskSelector.has_live_mask_source`, threaded through
+  `tab_calibrate.py`/`hydra_calib_page.py`/`tab_batch.py`/
+  `hydra_batch_page.py` as a `mask_is_file_backed` flag). Rationale: a mask
+  built purely from file/folder sources is already fully reconstructable
+  from its path+hash (same provenance model as the raw calibrant image),
+  so embedding its pixel array too was pure size bloat; a mask that
+  includes anything hand-drawn/computed in Mask Builder has no file to
+  point back to and must still be embedded. `mask_embedded` is kept as an
+  existing-name attr (now `mask_present or embedded`, split into a new
+  `mask_present` attr for "was any mask applied" vs `mask_embedded` for
+  "is the array actually stored") — additive, no renamed/removed field.
+- **Calibration attempts embed their computed Radial Profile / Eta-R Cake**
+  (`project.append_calibration_attempt(..., results=...)`,
+  `read_calib_attempt_results`, a new `results` HDF5 group). Rationale:
+  previously, **Open Project…**'s Populate step could only redraw a
+  calibration's predicted-ring overlay (pure geometry); the profile/cake
+  plots required the original raw image to still be on disk and re-ran a
+  full integration. Embedding the already-computed arrays makes Populate
+  instant and independent of the original data file's continued existence
+  — consistent with the project's FAIR-provenance goal of a self-contained
+  record. Implementation had to add a "wait for integration to finish
+  before logging" step (`_pending_log_result`/`_flush_pending_log` in both
+  `tab_calibrate.py` and `hydra_calib_page.py`) since integration runs
+  asynchronously (`IntegrationWorker`) after Fit returns; falls back to
+  logging with no `results` if integration never starts (no image loaded)
+  or fails.
+- **Hydra Overall Cake gained the button/checkbox UI to match the
+  already-existing `_compose_overall_cake` compute function** (see the
+  entry below) — GE1-4 checkboxes (mutually exclusive) plus an Overall
+  toggle button on the Eta-R Cake tab, and the Radial Profile's Overall
+  control changed from a checkbox to a button (`HydraProfileViewer`'s new
+  `composite_as_button` mode) so it reads as an alternate view rather than
+  a 5th overlaid curve. A finished live run with Overall active also logs
+  the summed profile as its own `hydra_composite` project attempt (new
+  `_PANEL_ORDER` entry, `dialogs.py` label "Hydra Overall") — deliberately
+  **not** wired into `app.py`'s Populate-from-project flow
+  (`discover_panels` explicitly skips `hydra_composite`) since there's no
+  tab widget to restore an Overall result into; it's still visible via
+  File ▸ Project History for provenance purposes.
+- **Data Viewer's single-detector mode gained an Eta vs R Cake tab**
+  (`tab_view.py`, wired to `hydra_geometry_card.py`'s existing
+  `integrate_frame(..., return_cake=True)` path already used by Hydra) —
+  previously Cake was Calibrate-only even though the same integration path
+  already computed it; the Data Viewer view was just never surfaced.
+- **Workspace/Project record + restore the active beamline Profile**
+  (`app.py: _restore_active_profile`, `project.py:
+  project_active_profile`/`active_profile_at_creation` attr, Workspace
+  JSON's `active_profile` key). Rationale: a Workspace/Project made under
+  one beamline Profile (different calibrant sets, device defaults, tab
+  visibility) would silently apply against whatever Profile happened to be
+  active at load time instead. Restoring it goes through the exact same
+  `settings.set_active_profile` + `C.reload_from_config` +
+  `on_profile_changed` path the header combo/Preferences dialog use, so
+  every side effect applies identically; silently skipped if the recorded
+  Profile no longer exists locally or is already active. `create_project`
+  records the Profile once, at creation time, as a stable fact about the
+  project's origin — not updated on later attempts, unlike a Workspace's
+  `active_profile` which is refreshed on every save.
+
+Verified via the existing synthetic-data test suite plus a manual read-
+through of each touched code path; not run against a live GUI session by a
+human this session. All of the above is additive to `project.py`'s HDF5
+schema — no existing field renamed or removed, so older project files keep
+reading exactly as before.
+
+## 2026-08-26 — Hydra Overall Eta-R Cake (verified, no code change) + Cake-plot independent-axis zoom (`widgets.py`, uncommitted)
+
+User asked for two Hydra-related fixes: (1) the "Overall" Eta vs R cake
+should merge the 4 GE panels' cakes by **summing** matching (η, R) bins —
+since each panel physically covers only part of the full η range, Overall
+should end up populated across a much wider η span than any single panel;
+(2) Eta-R cake plots should support independent-axis right-click-drag zoom
+(horizontal-only drag → R only, vertical-only → η only, diagonal → both),
+matching how the Radial Profile plots already behave — cake plots instead
+forced every right-drag to a η-only zoom.
+
+**(1) Investigated and found already correct, no code change needed.** The
+uncommitted `_compose_overall_cake` (`hydra_calib_page.py`, part of an
+undocumented in-progress "Overall Cake" feature already on disk before this
+session — a gap: no prior STATE.md entry recorded it) already does exactly
+what was asked: the η axis is identical across all 4 panels by construction
+(one shared `eta_bin` spinbox feeds all 4 integration calls, and
+`spec_from_calibration_result`'s `EtaMin`/`EtaMax` defaults are fixed at
+-180°/180° and never overridden — confirmed by reading
+`midas_calibrate_v2.compat.to_integrate.spec_from_calibration_result`'s
+source directly), so no η-axis resampling is needed or done. Each panel's R
+axis is converted to 2θ using **that panel's own** geometry
+(lsd/px/wavelength can differ per panel), resampled onto one shared 2θ grid
+via `np.interp(..., left=np.nan, right=np.nan)`, then `np.nansum`'d across
+the 4 panels. Verified with synthetic data mimicking real GE-panel
+non-overlapping quadrant coverage (each panel zero-filled outside its real
+coverage, since `midas_integrate_v2.integrate_subpixel`'s
+`counts.clamp(min=1e-12)` zero-fills empty bins, not NaN-fills — confirmed
+by reading that function's source): a single panel populated 18/72 η rows,
+Overall populated 72/72; a deliberately-overlapping-panel test confirmed
+overlap regions add (30 + 50 → 80), not average or overwrite. Conclusion:
+ship as-is.
+
+**(2) Root cause: `pg.ImageView.__init__` unconditionally calls
+`self.view.setAspectLocked(True)` on whatever view it's given** (confirmed
+by reading pyqtgraph's own `ImageView.__init__` source) — so `CakeViewer`'s
+ViewBox was aspect-locked even though R (px) and η (°) are unrelated units
+with no physical aspect to preserve. An aspect-locked ViewBox **cannot**
+zoom X/Y independently no matter what a custom `mouseDragEvent` computes:
+`ViewBox.scaleBy` forces `scale[0] = scale[1]` whenever both axes are given
+(the right-drag code path) when aspect-locked, and separately
+`ViewBox.updateViewRange` re-derives one axis's displayed range from the
+other on *every* range-change call (not just drag) to satisfy the aspect
+constraint — proved this exhaustively via direct `ViewBox` API calls before
+touching a line of the class, including a from-scratch custom
+`mouseDragEvent` that bypassed `scaleBy` entirely and called `setRange()`
+directly: still got recoupled by `updateViewRange`. **The only fix is
+`vb.setAspectLocked(False)`**; once unlocked, stock (unmodified) pyqtgraph
+`ViewBox.mouseDragEvent`'s right-button handler already computes fully
+independent per-axis scale factors from the drag's x/y screen-delta
+components — exactly the desired behavior, with zero custom code, and
+identical to how `ProfileViewer`/`HydraProfileViewer` already behave (they
+just use a plain unlocked `pg.PlotWidget`, no custom ViewBox). Removed the
+now-obsolete `_YZoomViewBox` custom class entirely.
+
+**Important trade-off found via bisection, disclosed to the user rather
+than silently shipped:** `tests/test_hydra_calib_ui.py` (5 CakeViewers built
+at once: 4 hydra panels + Overall) went from 0/8 segfault-on-teardown across
+manual test runs (true baseline, unmodified) to ~5/6 after this fix.
+Bisected extensively (many variants: bare `pg.ViewBox()` vs. a trivial
+empty subclass vs. keeping the exact original class name with a neutered
+body vs. a full custom `mouseDragEvent`) — **every** variant that changed
+`CakeViewer`'s ViewBox at all, including ones behaviorally identical to
+`pg.ViewBox()` with `aspectLocked` untouched, destabilized teardown to a
+similar degree. This is not a logic bug introduced by this fix (verified via
+direct widget-level tests, no full page needed) — it's the *same*
+pre-existing pyqtgraph/PyQt offscreen-Qt-teardown heisenbug already
+documented below (see the `workspace_ux` entry and STATE.md), just far more
+frequency-sensitive to any perturbation near this specific object than
+expected. `tests/test_hydra_ui.py` (Data Viewer's Hydra page) already
+segfaults 100% of the time on **unmodified** `main` too — confirmed via
+`git stash` — so it was already maximally sensitive before this change.
+Caveat: a raw hand-rolled repro script (not going through pytest's own
+fixture/teardown machinery) is **not** trustworthy for this investigation —
+it crashed even on true unmodified `main`, almost certainly because it
+called `gc.collect()` explicitly, which STATE.md already documents as
+"confirmed to make it worse." All comparative numbers above are from actual
+`pytest tests/test_hydra_calib_ui.py` invocations, not the hand-rolled
+script. Not investigated further — out of scope; flagged in STATE.md
+instead so a future session doesn't mistake a segfault in these two files
+for a regression in unrelated work.
+
 ## 2026-08-26 — Workspace/Project UX rework: unify the mental model at the UI layer only, never touch the FAIR HDF5 schema (`6b1564b` + docs `b4a6dfe`, branch `workspace_ux`)
 
 User feedback: creating/saving/loading a "project" didn't feel convenient or

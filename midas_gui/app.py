@@ -502,7 +502,27 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._set_project_path(path)
         settings.record_recent(path, "project")
+        try:
+            self._restore_active_profile(project.project_active_profile(path))
+        except Exception:
+            _log(f"Could not read project's active profile:\n{traceback.format_exc()}")
         self._offer_populate_from_project(path)
+
+    def _restore_active_profile(self, name) -> None:
+        """Switch to ``name`` (a Workspace/Project's recorded active Profile)
+        via the exact same path the header combo/Preferences dialog use, so
+        every side effect (tab visibility, calibrant/device dropdowns, ...)
+        applies identically. Silently does nothing if ``name`` is falsy,
+        unknown locally, or already active."""
+        if not name or name not in settings.list_profiles() or name == settings.active_profile():
+            return
+        try:
+            settings.set_active_profile(name)
+        except Exception:
+            _log(f"Could not restore active profile ({name!r}):\n{traceback.format_exc()}")
+            return
+        C.reload_from_config()
+        self.on_profile_changed()
 
     def _close_project(self):
         self._set_project_path(None)
@@ -524,6 +544,12 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             panels = {}
             for panel_key in project.discover_panels(path):
+                # "hydra_composite" (the Hydra Overall/summed-profile pseudo-panel)
+                # has no corresponding tab widget to restore into — only
+                # single-detector/per-GE-panel attempts are populate-able here.
+                # It's still fully visible via File ▸ Project History….
+                if panel_key not in ("single", "ge1", "ge2", "ge3", "ge4"):
+                    continue
                 calib = project.list_attempts(path, panel_key, "calib")
                 integrate = project.list_attempts(path, panel_key, "integrate")
                 if calib or integrate:
@@ -540,8 +566,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         try:
-            calib_attempts = {k: project.read_attempt(path, ref)
-                               for k, ref in dlg.calib_selection().items()}
+            calib_attempts = {}
+            for k, ref in dlg.calib_selection().items():
+                meta = project.read_attempt(path, ref)
+                meta["_results_arrays"] = project.read_calib_attempt_results(path, ref)
+                calib_attempts[k] = meta
             integrate_attempts = {}
             for k, ref in dlg.integrate_selection().items():
                 meta = project.read_attempt(path, ref)
@@ -617,7 +646,8 @@ class MainWindow(QtWidgets.QMainWindow):
         each tab's own ``get_state``), so it's cheap and side-effect-free to
         call on every timer tick. Returns ``(state, errors)``."""
         current = self._tabs.currentWidget()
-        state = {"__midas_gui_state__": True, "version": 1, "tabs": {}}
+        state = {"__midas_gui_state__": True, "version": 1, "tabs": {},
+                 "active_profile": settings.active_profile()}
         for widget, name, _always in self._tab_specs:
             if widget is current:
                 state["active_tab"] = name
@@ -745,6 +775,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._gui_state_path = path
         stem = str(Path(path).with_suffix(""))
+        try:
+            self._restore_active_profile(data.get("active_profile"))
+        except Exception:
+            _log(f"Could not restore workspace's active profile:\n{traceback.format_exc()}")
         name_to_widget = {name: widget for widget, name, _always in self._tab_specs}
         errors, skipped = [], []
         for name, tstate in data.get("tabs", {}).items():

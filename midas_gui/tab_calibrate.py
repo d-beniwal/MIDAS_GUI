@@ -32,6 +32,7 @@ from midas_gui.dialogs import _SaveParamstestDialog, DistortionRefineDialog
 from midas_gui.hydra_widgets import HydraModeRibbon
 from midas_gui.hydra_calib_page import HydraCalibrationPage
 from midas_gui import project
+from midas_gui import settings
 from midas_gui import style as S
 
 
@@ -63,6 +64,7 @@ class CalibrationTab(QtWidgets.QWidget):
         self._last_bright: Optional[np.ndarray] = None
         self._last_background: Optional[np.ndarray] = None
         self._project_ctx: Optional[project.ProjectContext] = None
+        self._pending_log_result = None   # result awaiting _log_to_project once integration finishes
         self._build_ui()
         self._loader.set_path(DEFAULT_CALIBRANT_TIF)
 
@@ -914,23 +916,35 @@ class CalibrationTab(QtWidgets.QWidget):
                 self._log.append(f"    {name:12s} ± {sigma:.4g}")
         self._draw_rings(result)
         self._bot_tabs.setCurrentWidget(self._prof_view)
+        self._pending_log_result = result
         self._run_integration(result)
-        self._log_to_project(result)
+        if not (self._int_worker and self._int_worker.isRunning()):
+            # No image loaded (or integration otherwise didn't start) — log
+            # now, without cake/profile results.
+            self._pending_log_result = None
+            self._log_to_project(result)
         self.calibrationDone.emit(result)
 
-    def _log_to_project(self, result):
+    def _log_to_project(self, result, results: Optional[dict] = None):
         """Append a provenance record to the currently-open project file, if
         any — a no-op (never blocks the result display) when no project is
-        open or the write fails for any reason."""
+        open or the write fails for any reason. ``results`` (when given) is
+        the last IntegrationWorker payload — cake/profile arrays get
+        embedded alongside the calibration record."""
         if not self._project_ctx or not self._project_ctx.path:
             return
         try:
+            mask = (self._last_cfg or {}).get("mask")
+            mask_is_file_backed = mask is not None and not self._loader.has_live_mask_source()
             ref = project.append_calibration_attempt(
                 self._project_ctx.path, "single",
                 cfg=self._last_cfg, result=result,
                 loader_state=self._loader.get_state(),
                 dark=self._dark, bright=self._last_bright,
-                background=self._last_background)
+                background=self._last_background,
+                mask_is_file_backed=mask_is_file_backed,
+                results=results,
+                extra={"active_profile": settings.active_profile()})
             result._project_attempt_ref = ref
             self._log.append(f"Logged to project: {ref}")
         except Exception:
@@ -1032,12 +1046,15 @@ class CalibrationTab(QtWidgets.QWidget):
     # ── Integration / residual chart ───────────────────────────────
 
     def _run_integration(self, result):
+        image = self._calib_image()
+        if image is None:
+            return
         if self._int_worker and self._int_worker.isRunning():
             return
         im_trans = tuple(im_trans_codes_from_checkboxes(
             self._flip_y, self._flip_z, self._transp))
         self._int_worker = IntegrationWorker(
-            result, self._calib_image(), self._loader.dark(), im_trans,
+            result, image, self._loader.dark(), im_trans,
             r_bin=self._cal_r_bin.value(), eta_bin=self._cal_eta_bin.value(),
             mask=self._loader.composite_mask(), parent=self,
             bright=self._loader.bright(), background=self._loader.background(),
@@ -1045,13 +1062,21 @@ class CalibrationTab(QtWidgets.QWidget):
             weighted=bool(self._cal_azim.currentData()))
         self._int_worker.log_line.connect(self._log.append)
         self._int_worker.finished.connect(self._on_int_done)
-        self._int_worker.failed.connect(
-            lambda m: self._log.append(f"Integration error: {m[:200]}"))
+        self._int_worker.failed.connect(self._on_int_failed)
         self._int_worker.start()
 
     def _reintegrate(self):
         if self._result is not None:
             self._run_integration(self._result)
+
+    def _flush_pending_log(self, results: Optional[dict]):
+        if self._pending_log_result is not None:
+            pending, self._pending_log_result = self._pending_log_result, None
+            self._log_to_project(pending, results=results)
+
+    def _on_int_failed(self, msg: str):
+        self._log.append(f"Integration error: {msg[:200]}")
+        self._flush_pending_log(None)
 
     def _on_int_done(self, data):
         self._prof_view.set_profile(
@@ -1065,6 +1090,7 @@ class CalibrationTab(QtWidgets.QWidget):
                 [{"radii": radii, "color": "#f0c060"}],
                 data["lsd_um"], data["px_um"], data["wavelength_A"])
             self._resid_chart.set_data(data["r_axis_px"], data["profile"], radii)
+        self._flush_pending_log(data)
 
     # ── Save ───────────────────────────────────────────────────────
 
@@ -1227,12 +1253,16 @@ class CalibrationTab(QtWidgets.QWidget):
 
     # ── File > Open Project… ─────────────────────────────────────────
 
-    def _display_stored_result(self, result) -> None:
-        """Redraw rings + (if an image is loaded) the radial profile/cake for
-        a result recovered from a project attempt — same visual effects as a
-        live Fit's ``_on_done``, without re-running Fit. Best-effort per step
-        so a partially-available result (e.g. the source image no longer on
-        disk) still shows whatever it can."""
+    def _display_stored_result(self, result, results_arrays: Optional[dict] = None) -> None:
+        """Redraw rings + the radial profile/cake for a result recovered
+        from a project attempt — same visual effects as a live Fit's
+        ``_on_done``, without re-running Fit. When ``results_arrays`` (the
+        attempt's embedded cake/profile, see
+        ``project.read_calib_attempt_results``) is available, the plots are
+        populated directly from it — no recompute needed. Otherwise, falls
+        back to live re-integration if an image happens to be loaded.
+        Best-effort per step so a partially-available result (e.g. the
+        source image no longer on disk) still shows whatever it can."""
         self._result = result
         try:
             self._populate_param_grid(paramstest_pairs(result))
@@ -1245,7 +1275,27 @@ class CalibrationTab(QtWidgets.QWidget):
             self._draw_rings(result)
         except Exception:
             pass
-        if self._image is not None:
+        if results_arrays and results_arrays.get("profile") is not None:
+            try:
+                self._bot_tabs.setCurrentWidget(self._prof_view)
+                self._prof_view.set_profile(
+                    results_arrays["r_axis_px"], results_arrays["profile"],
+                    wavelength_A=results_arrays.get("wavelength_A"),
+                    lsd_um=results_arrays.get("lsd_um"), px_um=results_arrays.get("px_um"))
+                if results_arrays.get("cake_2d") is not None:
+                    self._cake_view.set_cake(
+                        results_arrays["cake_2d"], results_arrays["r_axis_px"],
+                        results_arrays["eta_axis_deg"])
+                radii = _predict_ring_radii(result)
+                self._prof_view.set_ring_markers(
+                    [{"radii": radii, "color": "#f0c060"}],
+                    results_arrays.get("lsd_um"), results_arrays.get("px_um"),
+                    results_arrays.get("wavelength_A"))
+                self._resid_chart.set_data(
+                    results_arrays["r_axis_px"], results_arrays["profile"], radii)
+            except Exception:
+                pass
+        elif self._image is not None:
             self._bot_tabs.setCurrentWidget(self._prof_view)
             try:
                 self._run_integration(result)
@@ -1285,8 +1335,11 @@ class CalibrationTab(QtWidgets.QWidget):
         self.set_state(state)
 
         if single_meta is not None and single_meta.get("result"):
-            self._display_stored_result(project.calibration_namespace(single_meta["result"]))
+            self._display_stored_result(
+                project.calibration_namespace(single_meta["result"]),
+                single_meta.get("_results_arrays"))
         for panel_key, meta in hydra_metas.items():
             if meta.get("result"):
                 self._hydra_page.display_stored_result(
-                    int(panel_key[2:]), project.calibration_namespace(meta["result"]))
+                    int(panel_key[2:]), project.calibration_namespace(meta["result"]),
+                    meta.get("_results_arrays"))

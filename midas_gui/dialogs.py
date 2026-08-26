@@ -9,7 +9,7 @@ from PyQt5 import QtCore, QtWidgets
 from .constants import DISTORTION_NAMES, DISTORTION_ISO, DISTORTION_PRESETS
 
 _PANEL_LABELS = {"single": "Single detector", "ge1": "ge1", "ge2": "ge2",
-                 "ge3": "ge3", "ge4": "ge4"}
+                 "ge3": "ge3", "ge4": "ge4", "hydra_composite": "Hydra Overall"}
 
 
 class DistortionRefineDialog(QtWidgets.QDialog):

@@ -3,7 +3,47 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-26 (File menu reworked around a clearer Project/
+**Last updated:** 2026-08-26 (Project records are now more self-sufficient,
+and two Hydra plots gained an Overall/summed view — see §5, §15-§17 for
+full detail. Summary:
+- A Project attempt's mask is embedded (compressed) only when it includes
+  something hand-drawn/computed in Mask Builder — a mask assembled purely
+  from files is referenced by path+hash instead, to keep project files
+  smaller. Dark/bright/background are unaffected (always embedded, as
+  before).
+- A calibration attempt now also embeds its computed Radial Profile / Eta
+  vs R Cake, so **Open Project…**'s Populate step shows them instantly with
+  no recompute and no need for the original image to still be reachable
+  (older attempts fall back to the previous recompute-if-image-loaded
+  behavior).
+- Calibrate's Hydra **Radial Profile** plot: **Overall** is now a
+  green-when-active toggle button (was a checkbox) that hides GE1-4's
+  curves and shows their NaN-aware summed profile, rescaling to fit;
+  clicking again restores GE1-4. Its **Eta vs R Cake** plot gained its own
+  GE1-4 checkboxes plus a matching **Overall** button that computes and
+  shows a summed cake across all 4 panels.
+- The Data Viewer's single-detector mode gained an **Eta vs R Cake** tab
+  next to its Radial Profile (previously cake was only available in
+  Calibrate).
+- Both a saved **Workspace** and a **Project** now record the active
+  beamline **Profile** (§15) alongside them, and restore it automatically
+  on load/open if it still exists locally.
+None of this renames or removes any existing Project `.h5` field — every
+addition is a new, optional dataset/attribute, so older project files keep
+reading exactly as before.
+- Hydra's **Overall Eta vs R Cake** now genuinely sums all 4 GE panels onto
+  a shared (η, 2θ) bin grid (NaN-aware, per-panel geometry-correct 2θ
+  conversion) — since each panel physically covers only part of the full
+  η range, the Overall cake ends up populated across a much wider η span
+  than any single panel, with panel overlaps added together bin-for-bin.
+- **Eta vs R Cake** plots' right-click-drag now zooms independently per axis
+  (a purely horizontal drag zooms R only, a purely vertical drag zooms η
+  only, a diagonal drag zooms both) instead of always zooming η only,
+  matching the Radial Profile plot's own right-drag gesture; the mouse
+  wheel is unchanged (always zooms both axes). Applies everywhere the Cake
+  plot appears: single-detector and Hydra Calibrate, and the Data Viewer.)
+
+**Previously:** (2026-08-26, File menu reworked around a clearer Project/
 Workspace mental model, with a recent-files list, an unsaved-changes
 indicator, autosave/crash-recovery, and a built-in provenance browser — see
 §16 "File ▸ Save/Load Workspace" and §17 "File ▸ Project (FAIR
@@ -1006,7 +1046,15 @@ the histogram holds those limits instead of auto-rescaling to
 `(0, xmax)` / `(−2, ymax)` on every refresh (new frame, scope change,
 Top-N toggle).
 
-### Radial integration plot (bottom-right)
+### Radial Profile / Eta vs R Cake plots (bottom-right)
+A **Radial Profile** tab and an **Eta vs R Cake** tab sit side by side below
+the image; both come from the same azimuthal-integration pass — Cake shows
+the same run's full 2-D (η, R) binning as a heatmap, purely for inspection
+(no separate controls of its own; it re-renders whenever a new Radial
+integration runs, only when the tilt/distortion-aware MIDAS engine path is
+in effect — the fast geometry-free circle-binning fallback has no cake to
+show).
+
 Below the image is a live **azimuthal average about the beam centre** (`R bin`,
 `Integrate`, and an `Auto` toggle that recomputes on frame/BC/mask change) — geometry-free
 circle binning by default, or the tilt/distortion-aware MIDAS engine when a full
@@ -1198,15 +1246,30 @@ Lsd, and tilt are fit and shown independently.
   composite once all 4 are fitted) plus **Show rings** / **Corrected**,
   identical in meaning to the single-detector tab's own predicted-ring
   overlay toggles, applied to whichever panel is active.
-- **Radial Profile (bottom right)**: one shared multi-curve plot — all 4
-  panels' post-fit azimuthal profiles at once, same style/controls as the
-  Data Viewer tab's Hydra Radial Profile plot (R-bin/η-bin/weighting +
-  **Re-integrate**, X-axis unit selector). **Eta vs R Cake**, **Ring
-  Residuals** and **Results** switch to show only the currently active
-  panel's own 2-D cake / chart / parameter grid (Results has its own
-  **→ Send to Data Viewer**, **Save .json**, and **Save paramstest.txt**,
-  scoped to that one panel). **Log** is shared across all 4 panels, each
-  line prefixed `[ge1]`…`[ge4]`.
+- **Radial Profile (bottom right)**: one shared multi-curve plot — GE1-4
+  are ordinary checkboxes (any combination can be shown at once), same
+  style/controls as the Data Viewer tab's Hydra Radial Profile plot
+  (R-bin/η-bin/weighting + **Re-integrate**, X-axis unit selector). An
+  **Overall** button sits alongside them instead of a fifth checkbox —
+  click it and it turns green, hides GE1-4's curves, and plots their
+  NaN-aware summed profile (resampled onto a shared 2θ axis first, so
+  overlapping panel coverage isn't double-counted), rescaling the view to
+  fit; click it again to hide the summed curve and bring GE1-4 back exactly
+  as they were checked. **Ring Residuals** and **Results** switch to show
+  only the currently active panel's own chart / parameter grid (Results
+  has its own **→ Send to Data Viewer**, **Save .json**, and **Save
+  paramstest.txt**, scoped to that one panel). Once a Hydra run finishes
+  with **Overall** active and a project is open, the summed profile is also
+  logged to the project as its own record (see §17).
+- **Eta vs R Cake (bottom right)**: its own row of **GE1/GE2/GE3/GE4**
+  checkboxes (mutually exclusive — picking one shows that panel's 2-D
+  heatmap and syncs the image toolbar to match) plus an **Overall** button
+  that computes and shows a single summed cake across all 4 panels
+  (resampled onto a shared 2θ axis the same way the profile's Overall does;
+  all 4 panels already share one η axis by construction, so only the R
+  axis needs resampling). Recomputed on demand each time it's clicked, from
+  whichever panels have already been integrated.
+- **Log** is shared across all 4 panels, each line prefixed `[ge1]`…`[ge4]`.
 
 ### Data Loader panel (left)
 The calibrant frame (Data + Frame index), Dark, Bright, Background and Mask are selected
@@ -1306,9 +1369,10 @@ vmin%/vmax% auto-level calculation excludes exact-zero bins (unfilled η/R bins)
 same as the main image viewer, so a partially-empty cake doesn't skew the level
 window toward zero. Pan/zoom is bounded to the cake's
 own (R, η) extent, like the main image viewers, so you can't scroll/zoom out into
-empty space; a right-click-drag zooms the **η (Y) axis only** — dragging up zooms
-in — leaving R untouched (the stock pyqtgraph gesture that zoomed both axes at
-once has been overridden here). The **Radial Profile** plot is bounded the same
+empty space; the mouse wheel zooms **both axes together**, while a right-click-drag
+zooms **only the axis you actually dragged in** — a purely horizontal drag zooms R,
+a purely vertical drag zooms η, a diagonal drag zooms both — matching the
+**Radial Profile** plot's own right-drag behavior. The **Radial Profile** plot is bounded the same
 way, to its own data range. The **Results** tab shows the parameter set exactly as it is written to
 `paramstest.txt` (Lsd, BC, tx/ty/tz, the distortion coefficients, Parallax, Wavelength,
 px, NrPixelsY/Z, RhoD, SpaceGroup, LatticeConstant, and any `ImTransOpt` codes from the
@@ -2101,7 +2165,11 @@ tab is restored as typed. In addition, **path-backed data is reloaded from disk*
 same way it loads when you type/browse to a path by hand — images, masks-by-path,
 dark/bright/background frames, and HDF5 datasets all re-read their file automatically
 after a state load (guarded so a moved/deleted file is skipped quietly rather than
-popping a warning).
+popping a warning). The beamline **Profile** (§15) active at save time is recorded
+alongside the tab fields and restored the same way a manual profile switch would be
+(header combo synced, tab visibility and calibrant/device dropdowns refreshed) — if it
+still exists locally and differs from the one currently active; otherwise this is
+silently skipped.
 
 ### What is *not* re-run
 Loading a Workspace **does not re-run any long-running pipeline** — Calibrate's Fit,
@@ -2141,8 +2209,12 @@ the course of an experiment, not just one session.
   (written as `<project name>_workspace.json` next to it) — a one-step way
   to start a project with today's setup already recorded as its Workspace.
 - **File ▸ Open Project…** — pick a previously-created project file to make
-  it active. If it has any recorded attempts, a **Populate from project**
-  dialog follows immediately — see below.
+  it active. The beamline Profile that was active when the project was
+  first created (see §15) is restored automatically, if it still exists
+  locally, before anything else happens — so calibrant/device dropdowns
+  and Hydra availability already match the project before its attempts are
+  populated. If the project has any recorded attempts, a **Populate from
+  project** dialog follows next — see below.
 - **File ▸ Recent Projects** — the last 10 opened/created projects, newest
   first.
 - **File ▸ Project History…** — a read-only browser listing every attempt
@@ -2165,15 +2237,23 @@ no project is open (the default), so this is entirely opt-in.
 
 Each record is self-contained and includes: the exact parameters used
 (pipeline/refine choices for a calibration, kernel/binning/corrections for
-an integration); the fitted calibration result or the integrated
-profile(s); the mask and dark/bright/background frames actually applied
-(embedded, since a mask drawn directly in Mask Builder has no file of its
-own to point back to); file paths and checksums for the raw calibrant
-image / raw scan data referenced (not duplicated — a scan can be many
-thousands of frames); and the midas-gui / MIDAS package versions active at
-the time. A Batch Integrate record additionally embeds the exact
-calibration values it used and links back to the specific Calibrate run
-that produced them, when that run was itself logged to the same project.
+an integration); the fitted calibration result **and its computed radial
+profile / Eta-vs-R cake** (for a calibration, so re-opening the project
+never needs to recompute or even re-locate the original image — see
+"Opening a project can populate the GUI" below); dark/bright/background
+frames actually applied, always embedded (they're locally-computed
+averages, not identical to any one file on disk); and the mask actually
+applied — embedded **only** when it isn't fully reconstructable from a
+file path, i.e. when it includes anything hand-drawn/computed directly in
+Mask Builder. A mask assembled purely from file/folder sources is *not*
+duplicated into the record — its source paths are hashed and referenced
+instead, the same as the raw calibrant image / raw scan data (not
+duplicated — a scan can be many thousands of frames); and the midas-gui /
+MIDAS package versions active at the time, **plus the beamline Profile
+active for that run** (see §15). A Batch Integrate record additionally
+embeds the exact calibration values it used and links back to the specific
+Calibrate run that produced them, when that run was itself logged to the
+same project.
 
 Records are never overwritten — recalibrating or re-integrating adds a new,
 separately numbered record rather than replacing the previous one, so the
@@ -2214,10 +2294,13 @@ Populating also redraws the recorded run's **results**, immediately, without
 needing to press Fit or Run again:
 
 - **Calibrate:** the predicted-ring overlay reappears on the image at once
-  (pure geometry — no image needed). If the attempt's data file can still be
-  loaded, the **Radial Profile** and **Eta vs R Cake** tabs are also
-  recomputed and shown right away, exactly as if Fit had just finished. In
-  Hydra mode this happens per panel — switch panels (or the panel is the
+  (pure geometry — no image needed). The **Radial Profile** and **Eta vs R
+  Cake** tabs are populated **directly from the record itself** — no
+  recompute, and the original image doesn't even need to still be
+  reachable. (An older attempt logged before this was supported has no
+  saved profile/cake; for those, the tabs fall back to a live recompute if
+  the attempt's data file can still be loaded, same as before.) In Hydra
+  mode this happens per panel — switch panels (or the panel is the
   toolbar's current one already) to see each one's rings.
 - **Batch Integrate:** the **Waterfall** and **Stacked profiles** views are
   replayed from the attempt's own saved per-frame profiles — no re-run
@@ -2226,10 +2309,10 @@ needing to press Fit or Run again:
   recorded run, not a shared plot.
 
 Only fields the codebase can already restore from a file path are populated
-this way — dark/bright/background/mask sources that were embedded directly
-in the project (no file of their own, e.g. a mask hand-drawn in Mask
-Builder) are not re-created automatically and must be re-added from Mask
-Builder / the Data card if needed.
+this way — a mask that was embedded directly in the project (i.e. included
+something hand-drawn/computed in Mask Builder, with no file of its own to
+point back to) is not re-created automatically and must be re-added from
+Mask Builder / the Data card if needed.
 
 ### File ▸ Project History…
 
