@@ -3,6 +3,106 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-08-26 — Workspace/Project UX rework: unify the mental model at the UI layer only, never touch the FAIR HDF5 schema (`6b1564b` + docs `b4a6dfe`, branch `workspace_ux`)
+
+User feedback: creating/saving/loading a "project" didn't feel convenient or
+approachable; asked for a rethink on par with established software (VS
+Code, Photoshop, Xcode, Blender), while guaranteeing FAIR data provenance
+stays exactly as rigorous. Explicitly asked for this to land on a separate
+branch (`workspace_ux`) so it can be reviewed and kept-or-discarded
+independently of `main`, and asked to proceed without further check-ins.
+
+**Root-cause investigation (via two research subagents) found the problem
+wasn't one broken feature — it was two functionally unrelated concepts both
+occupying the "Project" mental-model space with none of the affordances
+users expect from any of them:** "GUI State" (`Ctrl+S`/`Shift+S`/`Ctrl+O`, a
+mutable JSON widget-value snapshot — what a user actually means by "my
+project" day to day) and "Project" (File ▸ New/Open/Close Project, no
+shortcuts, an append-only HDF5 FAIR-provenance log — deliberately immutable
+and opt-in by design). Neither had a recent-files list, a dirty/unsaved
+indicator, autosave/crash recovery, or an in-app way to browse a project's
+own records (only `h5dump`/HDFView). No icon/resource/QSettings
+infrastructure existed anywhere in the repo (confirmed via full-repo
+search) — ruled out thumbnails for this pass as a separable, larger effort.
+
+**Guiding constraint, honored throughout: unify the UX/mental model without
+ever touching `project.py`'s HDF5 schema, its `create_project`/
+`open_project`/`append_*_attempt` functions, or its opt-in/append-only
+guarantees.** Every new feature either reuses `project.py`'s existing
+read-side API (`discover_panels`/`list_attempts`/`read_attempt`/
+`read_attempt_results`) or lives entirely in new, additive sidecar/config
+files. No migration needed for existing `.h5` or `.json` files.
+
+**Decisions locked in via AskUserQuestion before implementing (user picked
+the recommended option each time):**
+1. Full scope in one pass (not a smaller slice): recents, rename, dirty-
+   state + confirm-on-close, autosave/crash-recovery, **and** the new
+   Project History viewer.
+2. Rename "GUI State" → **"Workspace"** in every user-facing label (menus,
+   dialog titles, window title) — shortcuts unchanged, JSON format
+   unchanged. Mental model: **Workspace = editable draft, Project =
+   permanent FAIR record it can optionally log into.**
+3. The new recent-files list is **global** (not scoped per beamline
+   Profile) — stored in a new sibling file next to `profile_meta.json`,
+   not inside a profile's own JSON, since a recently-opened project
+   shouldn't stop being "recent" just because the active Profile changed.
+
+**Dirty-state tracking deliberately reuses each tab's existing `get_state()`
+rather than wiring per-widget change signals across 10 tabs.** A shared
+`_serialize_workspace()` helper (refactored out of the old inline
+`save_gui_state` body) is called on a ~7s `QTimer`; its result is hashed
+(`sha256` of `json.dumps(..., sort_keys=True)`) and compared to the hash
+captured at the last save/load. Passing `sidecar_stem=None` on every timer
+tick — confirmed by reading `tab_mask.py`/`tab_calibrate.py`'s `get_state`
+bodies — skips their mask/calibration sidecar file writes entirely, so the
+periodic check has zero disk I/O side effects and is cheap enough to run
+every few seconds. This is far less code than instrumenting every widget's
+`textChanged`/`valueChanged`/etc. signal, and can never drift from what
+`save_gui_state` actually persists, since both now share one code path.
+
+**Autosave/crash-recovery is wired *only* from `main()`, never from
+`MainWindow.__init__`/`_build_ui` — this was the trickiest correctness
+constraint.** Every existing test constructs `MainWindow()` directly (not
+via `main()`); if the restore-prompt check ran during construction, a
+leftover autosave draft on a dev machine would pop a blocking modal
+`QMessageBox` under the offscreen QPA platform with no user to click it,
+hanging any test (and CI) that builds a `MainWindow`. Confirmed this isn't
+theoretical: an early test-writing pass that called `save_gui_state()`
+directly (which ends in a real, unstubbed `QMessageBox.information`) hung
+for the full 120s tool timeout under `QT_QPA_PLATFORM=offscreen` before the
+fix (stub `QMessageBox.information`/`.critical` in tests that must call
+these methods — see `tests/test_workspace_ux.py`'s `no_modal_dialogs`
+fixture). The periodic dirty-check/autosave `QTimer`s themselves *are*
+started unconditionally in `__init__` (they show no UI, matching the
+existing precedent of `bridge_server.start()` and `settings.py`'s
+profile-directory writes already happening unconditionally on
+`MainWindow()` construction in every test) — only the modal *restore
+prompt* needed the `main()`-only guard.
+
+**New Project's optional Workspace pairing simplified from the original
+plan's "checkbox in the creation dialog" to a plain follow-up
+`QMessageBox.question`.** Same user-facing outcome (offer to save+link a
+Workspace right after creating a project, default Yes) with far less code
+than a custom dialog subclass — reuses `save_gui_state()` verbatim, which
+already shows its own completion dialog.
+
+**Project History viewer shows raw JSON metadata in a detail pane instead
+of parsing app-specific fields into extra table columns.** The project
+schema's `metadata` blob varies by attempt kind (Calibrate vs. Integrate)
+and has evolved before (see the ImTransOpt-era `2358ae4` entry above); a
+generic "select a row, see its full recorded JSON" viewer can't drift out
+of sync with the schema the way column-specific field extraction could.
+
+**Verification:** all-green per-file-isolated pytest across every touched/
+added test file, including a fresh `tests/test_workspace_ux.py` (9 tests:
+recent-files roundtrip/pruning/cap, dirty-flag hash-diff, autosave write/
+clear, restore-on-relaunch accept/decline, `ProjectHistoryDialog` against a
+fixture project with both a Calibrate and an Integrate attempt). Confirmed
+via `git stash` A/B that the pyqtgraph interpreter-teardown crash risk and
+the `test_app_builds_offscreen` stale-config flake (both already documented
+above) reproduce identically on unmodified `main`, so neither is a
+regression introduced here.
+
 ## 2026-08-25 — ImTransOpt fix: the MIDAS backend does the pixel flip everywhere it can; GUI only flips masks (never images) and only for on-screen display (`2358ae4`)
 
 User-reported bug: Batch Integrate's lineout was wrong whenever the active
