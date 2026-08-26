@@ -1,17 +1,16 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-26 (committing the full uncommitted diff — Project
-records now embed calibration results + skip embedding file-backed masks,
-Hydra Overall Cake gained a full UI, Data Viewer gained a Cake tab, and
-Workspace/Project now persist the active beamline Profile — see "Recently
+_Last updated: 2026-08-26 (Project records now embed calibration results +
+skip embedding file-backed masks, Hydra Overall Cake gained a full UI, Data
+Viewer gained a Cake tab, and Workspace/Project now persist the active
+beamline Profile — committed `943a91d`/`573e938`, pushed — see "Recently
 completed" below)_
 
 ## Now working on
 
-Nothing in progress — the diff described below is being committed now.
-`main` is otherwise 3 commits ahead of `origin/main` (`6b1564b`, `b4a6dfe`,
-`77f5867`), about to be pushed along with the new commit(s).
+Nothing in progress. `main` is at `573e938`, pushed to `origin/main` — in
+sync.
 
 ## Recently completed
 
@@ -97,8 +96,6 @@ geometry) — summarized in "Recent changes" below.
 
 ## Open questions / blockers
 
-- `main` is 3 commits ahead of `origin/main` (`6b1564b`, `b4a6dfe`,
-  `77f5867`) — not yet pushed; ask before pushing.
 - **New follow-ups (not blocking, tracked in ROADMAP.md "Package-side
   fixes" P3-1/P3-2 and the Texture per-tab item):** (1) several
   `midas_calibrate_v2` calibration pipelines have no native `im_trans`
