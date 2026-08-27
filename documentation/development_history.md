@@ -224,6 +224,7 @@ Dates are commit dates (YYYY-MM-DD).
 | config_gui.md + config.example.json added | `d30be2c` |
 | development_history.md/.pdf added | `6d6f3fb` |
 | Commit `.context/` (was gitignored, contradicting standing policy) | `778a2f3` |
+| README troubleshooting: corrupted pip cache import errors | `08fe8f6` |
 
 ---
 
@@ -3114,6 +3115,24 @@ tab_calibrate.py`, `tab_refine.py`, `tab_pdf.py`, `tab_corrections.py`,
 this only restores the truncation bug — it does not touch the still-open
 Windows `midas_calibrate_v2` import failure that prompted the fix (see
 `.context/STATE.md`/`DECISIONS.md`).
+
+---
+
+### `08fe8f6` — Add README troubleshooting section for corrupted-cache import errors; gitignore local test_data/projects/ (2026-08-27)
+
+**Effect:** documents a self-diagnosis fix for "Module could not be found" /
+DLL load / missing-submodule errors (e.g. `torch`'s `fbgemm.dll`,
+`ModuleNotFoundError: No module named 'mpmath.libmp'`) — these usually mean
+the package was installed from a corrupted/incomplete pip cache entry, not
+a real incompatibility. The README's new Troubleshooting section walks
+through `pip uninstall`/`pip install --no-cache-dir`/standalone `import`
+to isolate the problem from midas-gui before assuming a GUI bug. Also adds
+`/test_data/projects/` to `.gitignore` — a 66 MB local-only set of
+self-contained project `.h5`/workspace-JSON files used for manual testing,
+matching the existing pattern for `s17bm/`, `trr_s25ide/`, etc. (large
+local test datasets kept off the shared repo, not deleted).
+**Files:** `README.md`, `.gitignore`.
+**Roll back:** `git revert 08fe8f6`. Self-contained; no dependents.
 
 ---
 
