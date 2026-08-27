@@ -21,6 +21,8 @@ in ``midas_calibrate_v2/pipelines/auto.py`` (the body of ``calibrate()``).
 from __future__ import annotations
 
 import math
+import os
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -213,15 +215,57 @@ def _auto_result_from_unpacked(u: dict, *, NY, NZ, pxY, pxZ, wavelength,
     )
 
 
-def normalize_result(raw, mode: str, *, NY, NZ, pxY, pxZ, wavelength):
+def _attach_panel_result(result, panel_u: dict, panel_layout: Optional[dict],
+                         output_dir: Optional[str]) -> None:
+    """Attach panel-layout results to ``result`` in a form downstream spec
+    building / paramstest export can use directly.
+
+    ``result._panel_unpacked`` (raw tensors, private) already lets the save
+    dialog write a companion panel_shifts.txt on demand. That alone isn't
+    enough for in-GUI integration (Results-tab preview, Batch Integrate's
+    "Use Tab 2 calibration"): those build an IntegrationSpec straight from
+    ``result`` with no save step, so the shifts need to already be on disk
+    and the panel *grid* (rows/cols/size/gaps — not just the deltas) needs
+    to be recorded somewhere too. Writes panel_shifts.txt unconditionally
+    (unlike residual_corr.bin, which stays in-memory-only without an
+    output_dir) since a missing panel correction silently produces the
+    wrong geometry, not just a smaller residual. Sets two plain,
+    JSON-serializable attributes (``panel_layout`` dict of ints,
+    ``panel_shifts_path`` str) so both survive ``_save_json``'s
+    underscore-attribute filter.
+    """
+    if not panel_u or not panel_layout:
+        return
+    from midas_calibrate_v2.compat.to_v1 import write_panel_shifts_file
+    if output_dir:
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        path = out / "panel_shifts.txt"
+    else:
+        import tempfile
+        fd, tmp = tempfile.mkstemp(suffix="_panel_shifts.txt")
+        os.close(fd)
+        path = Path(tmp)
+    write_panel_shifts_file(panel_u, path)
+    result.panel_layout = dict(panel_layout)
+    result.panel_shifts_path = str(path)
+
+
+def normalize_result(raw, mode: str, *, NY, NZ, pxY, pxZ, wavelength,
+                     panel_layout: Optional[dict] = None,
+                     output_dir: Optional[str] = None):
     """Return an AutoCalibrationResult regardless of which pipeline produced raw.
 
     When panel_layout was used, the refined panel shifts (panel_delta_yz /
     panel_delta_theta) are attached as ``result._panel_unpacked`` so the save
-    dialog can write a companion panel_shifts.txt.  For one_shot + panel_layout,
-    run_pipeline internally routes through autocalibrate_four_stage (which
-    exposes stage2.unpacked); we detect this by checking for a ``.stage2``
-    attribute on the raw result.
+    dialog can write a companion panel_shifts.txt, and — via
+    :func:`_attach_panel_result` — as ``result.panel_layout``/
+    ``result.panel_shifts_path`` so in-GUI spec building
+    (``helpers._build_spec``) can feed panel corrections to
+    ``midas_integrate_v2`` without requiring an explicit save first. For
+    one_shot + panel_layout, run_pipeline internally routes through
+    autocalibrate_four_stage (which exposes stage2.unpacked); we detect this
+    by checking for a ``.stage2`` attribute on the raw result.
     """
     # one_shot+panel_layout was re-routed through four_stage to expose unpacked
     if mode == "one_shot" and hasattr(raw, "stage2"):
@@ -258,6 +302,7 @@ def normalize_result(raw, mode: str, *, NY, NZ, pxY, pxZ, wavelength):
         panel_u = _extract_panel_unpacked(pv.unpacked)
         if panel_u:
             result._panel_unpacked = panel_u
+            _attach_panel_result(result, panel_u, panel_layout, output_dir)
         return result
 
     if effective_mode == "bayesian":
@@ -266,6 +311,7 @@ def normalize_result(raw, mode: str, *, NY, NZ, pxY, pxZ, wavelength):
         panel_u = _extract_panel_unpacked(raw.map_unpacked)
         if panel_u:
             result._panel_unpacked = panel_u
+            _attach_panel_result(result, panel_u, panel_layout, output_dir)
         lap = getattr(raw, "laplace", None)
         if lap is not None:
             names = list(getattr(lap, "refined_names", []) or [])
@@ -280,6 +326,7 @@ def normalize_result(raw, mode: str, *, NY, NZ, pxY, pxZ, wavelength):
         panel_u = _extract_panel_unpacked(raw.map_unpacked)
         if panel_u:
             result._panel_unpacked = panel_u
+            _attach_panel_result(result, panel_u, panel_layout, output_dir)
         return result
 
     raise ValueError(f"Unsupported pipeline mode for normalisation: {effective_mode}")

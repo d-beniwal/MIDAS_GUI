@@ -3,6 +3,110 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-08-27 — Feed Calibrate's Multi-panel results to downstream integration
+
+User report: with "Multi-panel detector" checked, Calibrate visibly performs
+the panel refinement, but the per-panel results never reach downstream
+integration in the format `midas_integrate_v2` needs — no panel geometry
+was showing up in the saved parameter file or a linked companion file.
+
+**Root cause, 3 places, traced against the installed `midas_calibrate_v2`/
+`midas_integrate_v2`/`midas_integrate`:** `IntegrationSpec` needs exactly 7
+fields to apply panel corrections at integration time (confirmed by reading
+`midas_integrate_v2/spec.py`, `compat/to_v1.py`, `compat/from_v1.py`, and
+`forward/pixels.py::_panel_inputs_from_spec`, which re-derives the panel
+grid + re-reads `PanelShiftsFile` from disk via v1's
+`build_panels_from_params` at bin-build time): `NPanelsY`, `NPanelsZ`,
+`PanelSizeY`, `PanelSizeZ`, `PanelGapsY`, `PanelGapsZ`, `PanelShiftsFile`.
+Panel numbering (`id = iy*NPanelsZ + iz`) already matches between
+`midas_calibrate_v2`'s `PanelLayout.regular` and the v1 `DetectorMapper`
+convention the shifts file is written for — no package-side numbering bug.
+`midas_gui` had three independent gaps, all upstream of any package fix:
+1. `midas_calibrate_v2.compat.to_integrate.spec_from_calibration_result()`
+   — the function every in-GUI spec builder funnels through
+   (`helpers._build_spec`, used by both Calibrate's own Results-tab
+   preview *and* Batch Integrate's "Use Tab 2 calibration" run) — has no
+   panel awareness at all, the same gap `TransOpt` already had (and was
+   already worked around the same way: `_build_spec` patches
+   `spec.TransOpt` manually after the call since the library helper drops
+   it). So even right after a Multi-panel calibration finished, neither
+   the live preview nor an in-GUI Batch Integrate run ever saw the panel
+   corrections — regardless of Save.
+2. `helpers.geometry_fields_from_file()` (the GUI's generic paramstest/
+   json/poni geometry reader used by "Load calibration file" across Batch/
+   Export/PDF/Corrections/Hydra tabs) never parsed the panel keys out of a
+   paramstest, nor a `panel_layout`/`panel_shifts_path` pair out of a
+   calibration.json — so even a correctly-written file couldn't be loaded
+   back with its panel data intact.
+3. `tab_calibrate.py`'s `_save_paramstest()` ("Save paramstest.txt") did
+   already write a companion `panel_shifts.txt` + a `PanelShiftsFile <path>`
+   line (pre-existing), but never the panel *grid* keys
+   (`NPanelsY`/`NPanelsZ`/`PanelSizeY`/`PanelSizeZ`/`PanelGapsY`/
+   `PanelGapsZ`) — so even `midas_integrate_v2`'s own native v1 reader
+   (unused by the GUI, but what any external/CLI consumer would use) would
+   see `NPanelsY=0` and silently treat the detector as unpaneled despite
+   the shifts file being right there.
+
+Underneath all three: `calib.py` never recorded the panel grid config
+(rows/cols/panel-size/gaps) anywhere on the result object — only the raw
+per-panel delta tensors (`result._panel_unpacked`, private, deliberately
+excluded from JSON export).
+
+**Fix (GUI-only, no package bug to report):**
+- `calib.py`: new `_attach_panel_result(result, panel_u, panel_layout,
+  output_dir)`, called from all three normalize_result branches that
+  extract `panel_u` (four_stage / bayesian / joint — one_shot+panel_layout
+  routes through four_stage already). Writes `panel_shifts.txt`
+  **unconditionally** (into `output_dir` if set, else a tempfile) — unlike
+  `residual_corr.bin`, which stays in-memory-only without an `output_dir` —
+  because a missing panel correction silently produces the wrong geometry,
+  not just a smaller residual. Sets two new plain, JSON-safe attributes:
+  `result.panel_layout` (dict of ints) and `result.panel_shifts_path`
+  (str) — both survive `_save_json`'s underscore-attribute filter for
+  free, no special-casing needed there.
+- `helpers.py`: new `_apply_panel_fields(spec, panel_layout,
+  panel_shifts_path)` sets the 7 `IntegrationSpec` fields (gap ints expand
+  to `[gap]*(n-1)` lists, mirroring `PanelLayout.regular`'s own uniform-gap
+  expansion); called from `_build_spec()` (fixes Calibrate preview + Batch
+  Integrate live) and `_spec_from_result_ns()` (fixes
+  `spec_from_geometry_file`, i.e. Batch Integrate's "Load calibration
+  file"). `geometry_fields_from_file()` now parses the panel keys from
+  paramstest text and reads `panel_layout`/`panel_shifts_path` back from
+  calibration.json; `result_ns_from_geometry_file()` carries them through
+  too.
+- `tab_calibrate.py`'s `_save_paramstest()`: now also writes
+  `NPanelsY`/`NPanelsZ`/`PanelSizeY`/`PanelSizeZ`/`PanelGapsY`/
+  `PanelGapsZ` (space-joined gap lists, matching
+  `midas_integrate.params`'s `_list_int` parser) alongside the existing
+  `PanelShiftsFile`, in both template-append and standalone-`extra` modes
+  — makes an externally saved paramstest.txt usable by
+  `midas_integrate_v2` standalone, no GUI in the loop.
+
+**Scope check (explicit):** only the single-detector Calibrate tab's
+`panel_layout` (tiled sub-panels of one physical detector) is affected.
+Hydra mode's 4 panels are 4 independent full detectors with their own
+separate calibrations — unrelated concept, untouched. All shared-helper
+changes are additive (new dict keys default to "no panels"), so every
+non-panel caller (Hydra, PumpProbe, PDF, Export, Corrections) is a no-op.
+
+**Verification:** unit-level (the real four-stage pipeline needs a
+physically convergent ring image, out of scope to fabricate one for this)
+— built a synthetic `panel_u`/`panel_layout` and confirmed:
+`_attach_panel_result` writes a real, non-empty `panel_shifts.txt` and sets
+both new attributes; `_build_spec` on that result produces an
+`IntegrationSpec` with correct `NPanelsY/NPanelsZ/PanelSizeY/PanelSizeZ/
+PanelGapsY/PanelGapsZ/PanelShiftsFile`; a standalone paramstest.txt saved
+with the panel `extra` keys, then re-parsed via `geometry_fields_from_file`
+and rebuilt via `spec_from_geometry_file`, round-trips every panel field
+correctly (including scalar-gap → per-gap-list expansion on both write and
+read). Ran `tests/test_im_trans.py`, `tests/test_hydra_geometry.py`,
+`tests/test_hydra_chirality.py` (all pass, unaffected by the additive
+`geometry_fields_from_file` change) and `tests/test_smoke.py::
+test_app_builds_offscreen` (passes). `tests/test_hydra_calib_ui.py` hit the
+pre-existing, already-tracked pyqtgraph interpreter-teardown segfault (see
+STATE.md "Open questions") after its one test passed — confirmed unrelated
+to this change (same crash signature/location as previously documented).
+
 ## 2026-08-27 — Fix: Flip Z ignored when "Multi-panel detector" is checked in Calibrate
 
 User report: with `test_data/trr_s25ide/images/CeO2-89427.tif` +

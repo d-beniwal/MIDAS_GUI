@@ -1,15 +1,44 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-27 (Calibrate Flip Z + Multi-panel seed/solve frame-
-mismatch fix, committed `ccce056`/pending docs commit — see "Recently
-completed" below)_
+_Last updated: 2026-08-27 (Multi-panel results now reach downstream
+integration — see "Recently completed" below, about to commit)_
 
 ## Now working on
 
-Nothing in progress; branch about to be pushed to `origin/main`.
+Nothing in progress; about to commit + push the Multi-panel integration fix.
 
 ## Recently completed
+
+**2026-08-27 — Feed Calibrate's Multi-panel results to downstream
+integration.** Three GUI-side gaps, all upstream of any package bug (panel
+numbering already matches between `PanelLayout.regular` and the v1
+`DetectorMapper` convention): (1) `helpers._build_spec` (used by Calibrate's
+own Results-tab preview *and* Batch Integrate's "Use Tab 2 calibration")
+never patched panel fields onto the `IntegrationSpec` — same pre-existing
+gap `TransOpt` already had and was already patched for; (2)
+`geometry_fields_from_file` (the "Load calibration file" reader used across
+Batch/Export/PDF/Corrections/Hydra) never parsed panel keys at all; (3)
+`_save_paramstest`'s existing `panel_shifts.txt`/`PanelShiftsFile` export
+never wrote the panel *grid* (`NPanelsY`/`NPanelsZ`/`PanelSizeY`/
+`PanelSizeZ`/`PanelGapsY`/`PanelGapsZ`), so even a correct shifts file
+linked to `NPanelsY=0` downstream. Root cause underneath all three:
+`calib.py` never recorded the panel grid config anywhere on the result
+object. Fixed by attaching two new plain, JSON-safe attributes
+(`result.panel_layout`, `result.panel_shifts_path`) the moment a
+Multi-panel run finishes (`calib._attach_panel_result`, called from
+`normalize_result`'s four_stage/bayesian/joint branches), a shared
+`helpers._apply_panel_fields()` spec-patcher used everywhere a spec is
+built from a result, and the missing grid keys added to
+`_save_paramstest`'s output. Verified via a synthetic panel_u/panel_layout
+round-trip (write → spec-patch → save paramstest → reparse → rebuild spec)
+since the real four-stage pipeline needs a physically convergent ring image
+to exercise end-to-end. Full detail + file list in DECISIONS.md; ROADMAP
+gained P3-3 for the one real upstream gap this surfaced
+(`spec_from_calibration_result` has no panel support, same shape as the
+`TransOpt` gap). Only the single-detector Calibrate tab is affected —
+Hydra mode's 4 independent-detector "panels" are a different concept,
+untouched.
 
 **2026-08-27 (`ccce056`) — Fix: Calibrate ignored Flip Z when "Multi-panel
 detector" was checked.** `calib.py`'s manual `im_trans` pre-flip workaround (needed
@@ -72,11 +101,6 @@ independent-axis zoom fix. Full detail in DECISIONS.md.
 (renamed "GUI State"→Workspace, recent-files menus, dirty-marker/autosave,
 `ProjectHistoryDialog`) — merged to `main` via `77f5867`.
 
-**2026-08-25:** ImTransOpt propagation fix (`2358ae4`) — MIDAS backend now
-performs every pixel flip for calibration/integration, GUI only pre-flips
-masks/previews. MIDAS backend package upgrade (`a74b7d6`) — all 8 backend
-packages to latest PyPI.
-
 ## Open questions / blockers
 
 - **Windows user (`lheald`) calibration failure, unresolved.** Two
@@ -90,12 +114,14 @@ packages to latest PyPI.
   midas_calibrate_v2` / `from midas_calibrate_v2.forward.panels import
   PanelLayout` / `pip show midas_calibrate_v2` directly in their env to get
   the untruncated traceback + version — response not yet received.
-- **New follow-ups (tracked in ROADMAP.md "Package-side fixes" P3-1/P3-2
+- **New follow-ups (tracked in ROADMAP.md "Package-side fixes" P3-1/P3-2/P3-3
   and the Texture per-tab item):** (1) several `midas_calibrate_v2`
   pipelines have no native `im_trans` param — GUI already works around it;
   (2) `*BinGeometry.from_spec()` has no `apply_trans_opt` hook for masks —
   GUI must keep pre-flipping masks in Python; (3) Texture tab's
-  `PoleFigureWorker` has a pre-existing, unrelated mask/ImTransOpt bug.
+  `PoleFigureWorker` has a pre-existing, unrelated mask/ImTransOpt bug;
+  (4) `spec_from_calibration_result` has no panel-layout support — GUI
+  already works around it (see P3-3).
 - **Pre-existing pyqtgraph interpreter-teardown crash risk**, especially
   around `CakeViewer`'s ViewBox (`tests/test_hydra_calib_ui.py`,
   `tests/test_hydra_ui.py`) and any module-scoped-fixture MainWindow

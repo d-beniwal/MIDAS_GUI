@@ -1117,14 +1117,38 @@ class CalibrationTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "No output", "Please specify an output file."); return
         tmpl_path = dlg.template_path()
         panel_u = getattr(self._result, "_panel_unpacked", None)
+        panel_layout = getattr(self._result, "panel_layout", None)
         ps_path = Path(out_path).parent / "panel_shifts.txt" if panel_u else None
+
+        def _gap_str(g, n):
+            # Same uniform-gap expansion as PanelLayout.regular/helpers._apply_panel_fields.
+            vals = g if isinstance(g, (list, tuple)) else [int(g)] * max(int(n) - 1, 0)
+            return " ".join(str(int(v)) for v in vals)
+
+        panel_grid_lines = []
+        panel_grid_extra = {}
+        if panel_layout:
+            n_y, n_z = int(panel_layout["n_y"]), int(panel_layout["n_z"])
+            panel_grid_extra = {
+                "NPanelsY": n_y, "NPanelsZ": n_z,
+                "PanelSizeY": int(panel_layout["sy"]), "PanelSizeZ": int(panel_layout["sz"]),
+                "PanelGapsY": _gap_str(panel_layout.get("gap_y", 0), n_y),
+                "PanelGapsZ": _gap_str(panel_layout.get("gap_z", 0), n_z),
+            }
+            panel_grid_lines = [f"{k} {v}" for k, v in panel_grid_extra.items()]
         try:
             if tmpl_path:
                 if not Path(tmpl_path).exists():
                     raise FileNotFoundError(f"Template not found: {tmpl_path}")
                 from midas_calibrate_v2.compat.to_v1 import ff_paramstest_from_auto_result
                 ff_paramstest_from_auto_result(self._result, tmpl_path, out_path)
-                # Append PanelShiftsFile so downstream tools find the companion file
+                # Append panel grid + PanelShiftsFile so downstream tools (the GUI's own
+                # spec builder, or midas_integrate_v2 standalone) know where each panel
+                # sits, not just its refined shift.
+                if panel_grid_lines:
+                    with open(out_path, "a") as _f:
+                        for line in panel_grid_lines:
+                            _f.write(line + "\n")
                 if ps_path:
                     with open(out_path, "a") as _f:
                         _f.write(f"PanelShiftsFile {ps_path}\n")
@@ -1138,7 +1162,7 @@ class CalibrationTab(QtWidgets.QWidget):
                 from midas_calibrate.params import CalibrationParams
                 from midas_gui.helpers import write_standalone_paramstest
                 result = self._result
-                extra = {}
+                extra = dict(panel_grid_extra)
                 rcm = getattr(result, "residual_corr_bin_path", None)
                 if rcm and getattr(result, "residual_corr_map", None) is not None:
                     extra["ResidualCorrectionMap"] = rcm

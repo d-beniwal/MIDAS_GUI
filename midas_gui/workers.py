@@ -663,7 +663,9 @@ class CalibrationWorker(QtCore.QThread):
             result = calib.normalize_result(
                 raw, self._mode, NY=NY, NZ=NZ,
                 pxY=self._cfg["pxY"], pxZ=self._cfg.get("pxZ"),
-                wavelength=self._cfg["wavelength"])
+                wavelength=self._cfg["wavelength"],
+                panel_layout=self._cfg.get("panel_layout"),
+                output_dir=self._cfg.get("output_dir"))
             result._calibrant_name = self._cfg["calibrant"]
             self.finished.emit(result)
         except Exception:

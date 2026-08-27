@@ -587,6 +587,37 @@ def write_poni(geom: dict, path: str | Path) -> None:
     Path(path).write_text("\n".join(lines) + "\n")
 
 
+def _apply_panel_fields(spec, panel_layout: dict | None, panel_shifts_path: str | None):
+    """Set the 7 panel fields ``midas_integrate_v2``'s ``IntegrationSpec`` needs
+    (``NPanelsY/NPanelsZ/PanelSizeY/PanelSizeZ/PanelGapsY/PanelGapsZ/
+    PanelShiftsFile``) from a ``panel_layout`` dict — no-op when absent.
+
+    ``spec_from_calibration_result``/``spec_from_v1_params`` don't know about
+    panels at all (same gap as ``TransOpt``, patched the same way just below),
+    so every spec builder that wants panel corrections applied must call this
+    itself. ``gap_y``/``gap_z`` may be a single int (uniform gap, the only
+    shape the Calibrate tab's UI produces) or an explicit per-gap list (as
+    parsed back from a saved paramstest's ``PanelGapsY``/``PanelGapsZ``) —
+    mirrors ``PanelLayout.regular``'s own uniform-gap expansion.
+    """
+    if not panel_layout:
+        return
+    n_y, n_z = int(panel_layout["n_y"]), int(panel_layout["n_z"])
+
+    def _gaps(g, n):
+        if isinstance(g, (list, tuple)):
+            return list(g)
+        return [int(g)] * max(n - 1, 0)
+
+    spec.NPanelsY = n_y
+    spec.NPanelsZ = n_z
+    spec.PanelSizeY = int(panel_layout["sy"])
+    spec.PanelSizeZ = int(panel_layout["sz"])
+    spec.PanelGapsY = _gaps(panel_layout.get("gap_y", 0), n_y)
+    spec.PanelGapsZ = _gaps(panel_layout.get("gap_z", 0), n_z)
+    spec.PanelShiftsFile = str(panel_shifts_path or "")
+
+
 def _build_spec(result, r_bin: float, eta_bin: float):
     from midas_calibrate_v2.compat.to_integrate import spec_from_calibration_result
     spec = spec_from_calibration_result(result, RBinSize=r_bin, EtaBinSize=eta_bin)
@@ -595,6 +626,8 @@ def _build_spec(result, r_bin: float, eta_bin: float):
     # midas_integrate_v2 and let its own apply_trans_opt=True do the flip
     # (never flip the pixel array in midas_gui for a backend integration call).
     spec.TransOpt = list(getattr(result, "im_trans", []) or [])
+    _apply_panel_fields(spec, getattr(result, "panel_layout", None),
+                        getattr(result, "panel_shifts_path", None))
     return spec
 
 
@@ -690,6 +723,7 @@ def _spec_from_result_ns(r_bin, eta_bin, **fields):
         distortion=fields.get("distortion") or {}, residual_corr_bin_path=None)
     spec = spec_from_calibration_result(ns, RBinSize=float(r_bin), EtaBinSize=float(eta_bin))
     spec.TransOpt = list(fields.get("im_trans") or [])
+    _apply_panel_fields(spec, fields.get("panel_layout"), fields.get("panel_shifts_path"))
     return spec
 
 
@@ -717,6 +751,8 @@ def geometry_fields_from_file(path: str) -> dict:
             fields[t] = fields.get(t) or 0.0
         fields["distortion"] = fields.get("distortion") or {}
         fields["im_trans"] = list(fields.get("im_trans") or [])
+        fields["panel_layout"] = fields.get("panel_layout") or None
+        fields["panel_shifts_path"] = fields.get("panel_shifts_path") or None
         return fields
 
     # ── calibration.json (GUI bare keys OR pipeline *_um/_px/_deg keys) ──
@@ -735,7 +771,8 @@ def geometry_fields_from_file(path: str) -> dict:
             Lsd=g("Lsd", "Lsd_um"), BC_y=g("BC_y", "BC_y_px"), BC_z=g("BC_z", "BC_z_px"),
             tx=g("tx", "tx_deg"), ty=g("ty", "ty_deg"), tz=g("tz", "tz_deg"),
             wavelength_A=g("wavelength_A", "Wavelength"), distortion=c.get("distortion", {}),
-            im_trans=c.get("im_trans", []))
+            im_trans=c.get("im_trans", []),
+            panel_layout=c.get("panel_layout"), panel_shifts_path=c.get("panel_shifts_path"))
         missing = [k for k in ("NrPixelsY", "NrPixelsZ", "pxY", "Lsd", "BC_y", "BC_z",
                                "wavelength_A") if fields[k] is None]
         if missing:
@@ -781,8 +818,9 @@ def geometry_fields_from_file(path: str) -> dict:
             tx=0.0, ty=0.0, tz=0.0, wavelength_A=float(wl_m) * 1e10, distortion={}))
 
     # ── MIDAS paramstest ──
-    kv, p_vals = {}, {}
+    kv, p_vals, panel_kv = {}, {}, {}
     NY = NZ = None
+    panel_shifts_path = None
     for line in text.splitlines():
         parts = line.split()
         if not parts:
@@ -803,6 +841,20 @@ def geometry_fields_from_file(path: str) -> dict:
                 NY = int(float(parts[1]))
             elif key == "NrPixelsZ":
                 NZ = int(float(parts[1]))
+            elif key == "NPanelsY":
+                panel_kv["n_y"] = int(float(parts[1]))
+            elif key == "NPanelsZ":
+                panel_kv["n_z"] = int(float(parts[1]))
+            elif key == "PanelSizeY":
+                panel_kv["sy"] = int(float(parts[1]))
+            elif key == "PanelSizeZ":
+                panel_kv["sz"] = int(float(parts[1]))
+            elif key == "PanelGapsY":
+                panel_kv["gap_y"] = [int(float(x)) for x in parts[1:]]
+            elif key == "PanelGapsZ":
+                panel_kv["gap_z"] = [int(float(x)) for x in parts[1:]]
+            elif key == "PanelShiftsFile":
+                panel_shifts_path = " ".join(parts[1:]) or None
             elif len(key) > 1 and key[0] == "p" and key[1:].isdigit():
                 p_vals[key] = float(parts[1])
         except (ValueError, IndexError):
@@ -813,11 +865,19 @@ def geometry_fields_from_file(path: str) -> dict:
     if missing:
         raise ValueError(f"paramstest missing keys: {', '.join(missing)}")
     dist = {v2: p_vals[p1] for p1, v2 in _PARAMSTEST_DISTORTION.items() if p1 in p_vals}
+    panel_layout = None
+    if all(k in panel_kv for k in ("n_y", "n_z", "sy", "sz")):
+        panel_layout = {
+            "n_y": panel_kv["n_y"], "n_z": panel_kv["n_z"],
+            "sy": panel_kv["sy"], "sz": panel_kv["sz"],
+            "gap_y": panel_kv.get("gap_y", 0), "gap_z": panel_kv.get("gap_z", 0),
+        }
     return _norm(dict(
         NrPixelsY=NY, NrPixelsZ=NZ, pxY=kv["pxY"], pxZ=kv["pxY"],
         Lsd=kv["Lsd"], BC_y=kv["BC_y"], BC_z=kv["BC_z"], tx=kv.get("tx"), ty=kv.get("ty"),
         tz=kv.get("tz"), wavelength_A=kv["wavelength_A"], distortion=dist,
-        im_trans=parse_im_trans(text)))
+        im_trans=parse_im_trans(text),
+        panel_layout=panel_layout, panel_shifts_path=panel_shifts_path))
 
 
 def spec_from_geometry_file(path: str, r_bin: float, eta_bin: float):
@@ -841,7 +901,8 @@ def result_ns_from_geometry_file(path: str):
         tx=float(f["tx"]), ty=float(f["ty"]), tz=float(f["tz"]),
         wavelength_A=float(f["wavelength_A"]), distortion=f["distortion"],
         im_trans=list(f.get("im_trans") or []),
-        residual_corr_bin_path=None)
+        residual_corr_bin_path=None,
+        panel_layout=f.get("panel_layout"), panel_shifts_path=f.get("panel_shifts_path"))
 
 
 def resolve_calibration_fields(calib_result, use_file: bool, file_path: str, *,

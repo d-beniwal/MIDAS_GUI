@@ -3,7 +3,11 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-27 (Error dialogs across every tab no longer
+**Last updated:** 2026-08-27 (Calibrate's Multi-panel detector results —
+per-panel shifts + grid geometry — now reach downstream integration
+properly: see Tab 2 "Export" for detail.)
+
+**Previously:** (2026-08-27, Error dialogs across every tab no longer
 truncate the underlying error — see §13 "Common UI Conventions" for detail.
 A failure now shows a one-line summary with a **Show Details…** button
 revealing the complete traceback, and the same complete text is written to
@@ -1401,6 +1405,19 @@ tab.
 Both carry the Transforms checkboxes' `ImTransOpt` codes (one `ImTransOpt <code>` line
 per checked transform in the `.txt`; an `im_trans` list in the `.json`), so reloading
 either file elsewhere restores the same detector orientation.
+
+When **Multi-panel detector** was used, both exports also carry the refined per-panel
+geometry: `NPanelsY`/`NPanelsZ`/`PanelSizeY`/`PanelSizeZ`/`PanelGapsY`/`PanelGapsZ`
+(the panel grid) plus `PanelShiftsFile` pointing at a companion `panel_shifts.txt`
+(one line per panel — id, δy, δz, δθ, δLsd, δp₂) — the exact fields
+`midas_integrate_v2`'s detector mapper needs to apply the panel corrections, so a
+saved paramstest.txt is immediately usable standalone. The same panel geometry is
+also attached to the in-memory calibration result the moment a Multi-panel run
+finishes (not only on explicit Save), so **Results tab preview** (Radial Profile /
+Eta vs R Cake) and **Batch Integrate**'s "Use Tab 2 calibration" run both apply the
+panel corrections automatically; loading a saved calibration file back in (Batch
+Integrate's "Load calibration file", or anywhere else that reads a paramstest/json
+geometry file) round-trips the same panel fields.
 
 ---
 

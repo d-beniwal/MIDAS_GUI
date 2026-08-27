@@ -89,6 +89,23 @@ for seed + solve + dark in every affected branch. See DECISIONS 2026-08-27.
 This upstream ask still stands — the fix only makes the workaround correct,
 it doesn't remove the need for one.
 
+**P3-3 — `midas_calibrate_v2.compat.to_integrate.spec_from_calibration_result()`
+has no panel-layout support (found 2026-08-27).** It sets none of
+`IntegrationSpec`'s 7 panel fields (`NPanelsY/NPanelsZ/PanelSizeY/
+PanelSizeZ/PanelGapsY/PanelGapsZ/PanelShiftsFile`) from an
+`AutoCalibrationResult` — the same gap `TransOpt` already had (confirmed:
+`_build_spec` already manually patches `spec.TransOpt` after calling this
+function, for the same reason). `midas_gui` now works around it by
+stashing `result.panel_layout`/`result.panel_shifts_path` (plain,
+JSON-safe attributes; see DECISIONS 2026-08-27 "Feed Calibrate's
+Multi-panel results to downstream integration") and patching the spec
+itself via `helpers._apply_panel_fields()` everywhere a spec is built from
+a calibration result. Upstream fix: teach `spec_from_calibration_result`
+to read panel fields off the result the same way it already will need to
+once P3-1's `panel_delta_*` exposure on `AutoCalibrationResult` lands —
+these two upstream asks are related (both are "the panel_layout config +
+refined shifts don't survive on `AutoCalibrationResult`").
+
 **P3-2 — no `apply_trans_opt` hook on `*BinGeometry.from_spec(spec,
 mask=mask)` (found 2026-08-25).** Every `midas_integrate_v2.integrate_*`
 function accepts `apply_trans_opt=True` (default) and flips the *image*
