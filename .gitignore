@@ -83,6 +83,7 @@ test_data/out_temp.txt
 # constants point here, so the PDF tab just won't have data preloaded on a fresh checkout.
 /test_data/test_pdf/
 /test_data/s1ide/
+/test_data/projects/
 
 # Internal-only documentation (kept local, not published to GitHub)
 documentation/pdf_calculation_explained.md

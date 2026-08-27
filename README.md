@@ -93,6 +93,23 @@ The app auto-loads bundled synthetic test data (`test_data/`) on startup when
 present, so it's immediately usable after checkout — no dataset of your own
 required to explore the tabs.
 
+## Troubleshooting
+
+> **"Module could not be found" / DLL load errors / missing submodule
+> errors (e.g. `torch`'s `fbgemm.dll`, `ModuleNotFoundError: No module named
+> 'mpmath.libmp'`).** These usually mean the package was installed from a
+> corrupted or incomplete pip cache entry, not a real incompatibility.
+> Force a clean reinstall of the offending package and confirm it imports
+> standalone before retrying the GUI:
+> ```bash
+> pip uninstall lib_name -y
+> pip install lib_name --no-cache-dir
+> python -c "import lib_name"
+> ```
+> If the standalone import still fails, the traceback from that last command
+> is the real error to debug (it isolates the problem from midas-gui
+> entirely).
+
 ## What it's for
 
 MIDAS GUI is built around one continuous workflow, and each tab hands its
