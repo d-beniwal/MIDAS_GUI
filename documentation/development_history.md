@@ -3085,6 +3085,38 @@ fix together — see `.context/DECISIONS.md` if only one piece needs undoing).
 
 ---
 
+### `5cf2e8c` — Fix app-wide error-dialog/log truncation that could hide the real exception (2026-08-27)
+
+**Effect:** a Windows user's "Calibration failed" dialog showed only a
+stray `F` — `tab_calibrate.py`'s `_on_fail` did `QMessageBox.critical(self,
+"Calibration failed", msg[:400])`, and 400 characters happened to cut the
+traceback mid-word. The same `msg[:N]`/`traceback.format_exc()[:N]`
+truncation pattern (N ∈ {200,300,400,500,600}) was copy-pasted across ~15
+files' worker-failure handlers, silently discarding whatever text fell past
+the cutoff on every tab, not just Calibrate. Added `dialogs.show_error(
+parent, title, full_text, log=None, log_prefix="")`: a one-line summary
+with Qt's native scrollable "Show Details…" panel holding the complete
+text, plus an optional full-text append to a tab's log widget/callback.
+Every truncated critical-dialog call was replaced with it — paired
+"log the cut text" + "show the cut dialog" call sites collapsed into one
+untruncated `show_error(...)` call; log-only sites with no paired dialog
+just had the `[:N]` slice dropped. `str(e)`-only dialogs (never truncated
+to begin with) were left untouched. One unrelated single-line status-label
+truncation (`widgets.py`'s `FieldAverageWidget`, no dialog/log involved)
+was found but deliberately left alone as a different UI affordance.
+**Files:** `midas_gui/dialogs.py` (new `show_error`), `midas_gui/
+tab_calibrate.py`, `tab_refine.py`, `tab_pdf.py`, `tab_corrections.py`,
+`tab_batch.py`, `tab_pumpprobe.py`, `tab_texture.py`, `tab_view.py`,
+`tab_export.py`, `tab_mask.py`, `widgets.py`, `hydra_calib_widgets.py`,
+`hydra_geometry_card.py`, `hydra_batch_page.py`, `hydra_calib_page.py`,
+`documentation/gui_documentation.md` (§13).
+**Roll back:** `git revert 5cf2e8c`. Self-contained; no dependents. Note
+this only restores the truncation bug — it does not touch the still-open
+Windows `midas_calibrate_v2` import failure that prompted the fix (see
+`.context/STATE.md`/`DECISIONS.md`).
+
+---
+
 ## Rollback recipes (common intents)
 
 - **Undo the Pump Probe tab only:** `git revert 590b410` removes Pump Probe *and*

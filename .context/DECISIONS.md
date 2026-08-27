@@ -3,6 +3,65 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-08-27 (`5cf2e8c`) — Error dialogs/logs never truncate the underlying exception, app-wide
+
+Triggered by a Windows user's screenshot of a "Calibration failed" dialog
+showing a single stray `F` — `tab_calibrate.py`'s `_on_fail` did
+`QMessageBox.critical(self, "Calibration failed", msg[:400])`, and 400
+chars happened to land mid-word in the traceback. Grepping surfaced the
+identical `msg[:N]`/`traceback.format_exc()[:N]` pattern (N ∈
+{200,300,400,500,600}) copy-pasted across ~15 files' worker `failed`-signal
+handlers — every tab's calibration/integration/fit/save-error dialog had
+the same latent bug, just waiting for a long enough traceback to hit it.
+
+**Decision: fix it once, everywhere, via one shared helper** —
+`dialogs.show_error(parent, title, full_text, log=None, log_prefix="")` —
+rather than patching only the Calibrate tab. Asked the user explicitly
+(scope was ambiguous: "the truncation error" could mean just the one
+dialog just discussed) and they chose app-wide. Rationale for one helper
+over just deleting the `[:N]` slices at each site: `QMessageBox.critical`
+with a full multi-KB traceback dumped as plain text resizes into an
+unreadable giant box with no scrolling; Qt's `setDetailedText` gives a
+compact one-line summary plus a native scrollable "Show Details…" panel
+for the full text, which is the idiomatic fix, not just "don't slice."
+
+**What changed:** paired `log.append(f"...\n{msg[:600]}")` +
+`QMessageBox.critical(..., msg[:400])` sites (the dominant shape, one per
+tab's `_on_fail`/`_on_*_failed`) collapsed into a single `show_error(self,
+"<Title>", msg, log=self._log, log_prefix="...")` call, preserving each
+site's prefix tag (`[gain]`, `[monitor]`, `[drift]`, `[pump]`, `[ge{n}]`,
+etc.). Dialog-only sites (no paired log — `hydra_geometry_card.py` x3,
+`tab_export.py`, `widgets.py`, `tab_mask.py`, `tab_view.py`) became
+`show_error(...)` with the slice dropped. Log-only sites with no dialog
+(several per-GE-panel background failures in `hydra_batch_page.py`/
+`hydra_calib_page.py`, plus a few in `tab_calibrate.py`/`tab_refine.py`/
+`tab_batch.py`) just had the `[:N]` removed — not worth wrapping in a
+helper for a one-token fix. `str(e)`-only dialogs were already untruncated
+(an exception's `str()` is normally short) and were deliberately left
+alone — not part of the reported bug, avoiding scope creep.
+
+**Explicitly left alone, found but out of scope:** `widgets.py:1540`
+(`FieldAverageWidget._on_failed`) truncates its status-label text to the
+error's last line, 120 chars — a compact inline status widget with no
+dialog or log to show the full text elsewhere, a different UI affordance
+than the modal-dialog pattern this fix addressed. Adding a dialog there
+would be new behavior, not a truncation fix.
+
+**Underlying Windows bug still open** — this fix only guarantees the *next*
+occurrence shows the full text; the original user's actual exception (an
+import from `midas_calibrate_v2`/`midas_calibrate_v2.forward.panels`
+failing, seen in two different code paths across two screenshots) is still
+unconfirmed. Likely candidates, ranked: (1) their `midas_calibrate_v2`
+install predates the 2026-08-25 upgrade (`a74b7d6`) and lacks
+`forward.panels`/`PanelLayout` or other API this GUI expects — both
+tracebacks break on a bare `from midas_calibrate_v2[.x] import y`
+statement, never inside real calibration math, which fits a version/API
+mismatch better than a runtime bug; (2) a Windows-specific DLL/native-
+extension load failure inside that package. Asked the user to run the
+import directly in their env (`python -c "from midas_calibrate_v2.forward
+.panels import PanelLayout"`) plus `pip show midas_calibrate_v2` to get an
+untruncated traceback and confirm the version — not yet answered.
+
 ## 2026-08-26 — Project records embed calibration results + skip embedding file-backed masks; Hydra Overall Cake full UI; Data Viewer Cake tab; Workspace/Project active-Profile persistence
 
 Discovered already implemented (uncommitted) alongside the Overall-Cake-
