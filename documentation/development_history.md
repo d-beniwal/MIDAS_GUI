@@ -153,6 +153,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Eta vs R Cake auto-level: vmin% default 1→30, percentile calc excludes exact-zero bins | `d0cd6ce` |
 | Fix ImTransOpt propagation: calibration/refinement now pass the raw image + `im_trans` straight through, letting the MIDAS backend apply the flip instead of pre-flipping in Python | `2358ae4` |
 | Hydra Overall Radial Profile becomes a toggle button (was a checkbox); Eta vs R Cake tab gains GE1-4 checkboxes + an Overall button showing the summed cake across all 4 panels; calibration attempts embed their computed Radial Profile/Eta vs R Cake so Populate needs no recompute | `943a91d` |
+| Fix Flip Z ignored when Multi-panel detector is checked: seed and solve were running in two different image frames | `ccce056` |
 
 ### Batch Integrate (Tab 4)
 | Change | Commit |
@@ -3133,6 +3134,38 @@ matching the existing pattern for `s17bm/`, `trr_s25ide/`, etc. (large
 local test datasets kept off the shared repo, not deleted).
 **Files:** `README.md`, `.gitignore`.
 **Roll back:** `git revert 08fe8f6`. Self-contained; no dependents.
+
+---
+
+### `ccce056` — Calibrate: fix Flip Z ignored when Multi-panel detector is checked (2026-08-27)
+**Effect:** With a Flip Z transform active, checking "Multi-panel detector"
+produced a beam centre still in the unflipped frame. Root cause:
+`calib.py`'s manual `im_trans` pre-flip workaround (needed because
+`autocalibrate_four_stage`/`_bayesian`/`_joint`/
+`pipelines.single.autocalibrate` have no native `im_trans` param) computed
+the auto-seed from the raw/untransformed image but ran the solve on the
+manually-flipped image, in all four affected `run_pipeline()` branches
+(one_shot+panel_layout, one_shot partial-distortion-refinement, four_stage,
+bayesian/joint) — seed and solve ran in two different frames, so the
+gradient-based refinement converged near the seed's original (wrong)
+position. `dark` was also passed untransformed to the solver whenever
+`image` had been flipped. Added `_prep_transformed(image, dark, im_trans)`,
+applying the transform to image+dark together once before seeding; all four
+branches now consume its output for both seed and solve. The `first_time`
+pipeline branch (ignores `im_trans` entirely — a separate, pre-existing
+gap) was explicitly left unfixed, per user agreement.
+**Verified:** the real bug-report image was too sparse for the installed
+auto-seeder (`make_seed()` raises `RuntimeError: no arcs detected`);
+verified instead with a synthetic ring image built around a known
+off-centre beam centre — confirmed `make_seed_safe()` returns a different
+BC depending on which frame (raw vs. flipped) it's given, then ran the
+fixed `run_pipeline("four_stage", ..., {"im_trans": [2]})` end-to-end and
+confirmed the recovered `BC_z` matches the flipped-frame truth, not the raw
+one.
+**Files:** `midas_gui/calib.py`.
+**Roll back:** `git revert ccce056`. Self-contained; no dependents. Restores
+the seed/solve frame mismatch for Flip-Z + Multi-panel-detector calibration
+(and the untransformed-dark bug in the same four branches).
 
 ---
 

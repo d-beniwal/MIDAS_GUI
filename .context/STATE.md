@@ -2,16 +2,17 @@
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
 _Last updated: 2026-08-27 (Calibrate Flip Z + Multi-panel seed/solve frame-
-mismatch fix, about to be committed — see "Recently completed" below)_
+mismatch fix, committed `ccce056`/pending docs commit — see "Recently
+completed" below)_
 
 ## Now working on
 
-Nothing in progress; about to commit + push the Calibrate fix below.
+Nothing in progress; branch about to be pushed to `origin/main`.
 
 ## Recently completed
 
-**2026-08-27 — Fix: Calibrate ignored Flip Z when "Multi-panel detector" was
-checked.** `calib.py`'s manual `im_trans` pre-flip workaround (needed
+**2026-08-27 (`ccce056`) — Fix: Calibrate ignored Flip Z when "Multi-panel
+detector" was checked.** `calib.py`'s manual `im_trans` pre-flip workaround (needed
 because `autocalibrate_four_stage`/`_bayesian`/`_joint`/
 `pipelines.single.autocalibrate` have no native `im_trans` param — see
 ROADMAP P3-1) computed the auto-seed from the raw/untransformed image but
