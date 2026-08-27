@@ -1,15 +1,32 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-27 (README troubleshooting section + test_data/projects/
-gitignore, committed `08fe8f6`/`fe59939` and pushed — see "Recently
-completed" below)_
+_Last updated: 2026-08-27 (Calibrate Flip Z + Multi-panel seed/solve frame-
+mismatch fix, about to be committed — see "Recently completed" below)_
 
 ## Now working on
 
-Nothing in progress; branch is clean and pushed to `origin/main`.
+Nothing in progress; about to commit + push the Calibrate fix below.
 
 ## Recently completed
+
+**2026-08-27 — Fix: Calibrate ignored Flip Z when "Multi-panel detector" was
+checked.** `calib.py`'s manual `im_trans` pre-flip workaround (needed
+because `autocalibrate_four_stage`/`_bayesian`/`_joint`/
+`pipelines.single.autocalibrate` have no native `im_trans` param — see
+ROADMAP P3-1) computed the auto-seed from the raw/untransformed image but
+ran the solve on the manually-flipped image, in all four affected branches
+of `run_pipeline()` — seed and solve ran in two different frames whenever a
+transform was active, so local gradient-based refinement converged near the
+seed's original (wrong) position. Also `dark` was passed untransformed to
+the solver even when `image` was flipped. Added `_prep_transformed()` to
+apply `im_trans` to image+dark together once, before seeding; all four
+branches now use its output for both seed and solve. Verified with a
+synthetic ring image (real test image too sparse for the auto-seeder).
+Full root-cause + verification detail in DECISIONS.md; ROADMAP P3-1 updated
+(corrects a previous wrong claim that the workaround was already
+bug-free). Scope: `first_time` pipeline branch (ignores im_trans entirely,
+separate pre-existing gap) explicitly left unfixed, per user agreement.
 
 **2026-08-27 (`08fe8f6`/`fe59939`, pushed):** Added a README Troubleshooting
 section (pip `--no-cache-dir` reinstall fix for corrupted-cache DLL/

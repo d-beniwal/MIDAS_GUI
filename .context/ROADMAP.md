@@ -57,16 +57,37 @@ absorption at μR=1.5 · P2-3 fold `analyze_workflows/` round-trips into package
 (GUI already works around P0-1/P0-2/P1-1/P1-2 — see DECISIONS.)
 
 **P3-1 — `im_trans`/`ImTransOpt` not accepted by most calibration pipeline
-entry points (found 2026-08-25).** Only `midas_calibrate_v2.calibrate()`
-accepts `im_trans` as a native kwarg (and flips `image`/`dark` internally).
-`autocalibrate_four_stage`, `autocalibrate_bayesian`, `autocalibrate_joint`,
-`first_time_calibrate`, and `pipelines.single.autocalibrate` (the
-panel-layout / partial-distortion-refinement routes `calib.py` uses) have
-**no such parameter** — confirmed via `inspect.signature()` against the
-installed package. `midas_gui`'s `calib.py` already works around this
-correctly (manual pre-flip only for those specific branches, since there's
-no alternative) — this is a request for upstream `midas_calibrate_v2` to add
-`im_trans` to the other pipeline entry points for consistency, not a GUI bug.
+entry points (found 2026-08-25, still true in 0.10.0 — current PyPI latest,
+re-checked 2026-08-27).** Only `midas_calibrate_v2.calibrate()` accepts
+`im_trans` as a native kwarg (and flips `image`/`dark` internally, then
+derives NrPixelsY/Z from the transformed shape, then seeds — everything
+downstream in one consistent frame). `autocalibrate_four_stage`,
+`autocalibrate_bayesian`, `autocalibrate_joint`, `first_time_calibrate`, and
+`pipelines.single.autocalibrate` (the panel-layout / partial-distortion-
+refinement routes `calib.py` uses) have **no such parameter** — confirmed
+via `inspect.signature()` against the installed package.
+
+Additionally (found 2026-08-27): `calibrate()`'s own `panel_layout` support
+doesn't help either — it runs panel refinement internally
+(`pipelines/auto.py:587-638`, computes `panel_delta_*` into `cr.unpacked`)
+but the final `return AutoCalibrationResult(...)` never copies those keys
+out, and the dataclass has no fields for them. So even `calibrate()` can't
+be used for panel-layout calibration without losing the per-panel
+shift/rotation output the GUI needs (its panel_shifts.txt export). Upstream
+fix needs **either** `im_trans` added to the four entry points above, **or**
+`panel_delta_*` exposed on `AutoCalibrationResult` (either one would let
+`calib.py` stop manually pre-flipping pixels for panel-layout calibration).
+
+**Correction (2026-08-27):** the previous note here ("`midas_gui`'s
+`calib.py` already works around this correctly") was wrong. The manual
+pre-flip workaround had a real bug: it flipped the image for the *solve*
+call but computed the auto-seed from the *unflipped* image in the same
+branch, so seed and solve ran in two different frames whenever a transform
+was active — exactly the failure a user hit with Flip Z + Multi-panel
+detector. Fixed in `calib.py` via `_prep_transformed()`, used consistently
+for seed + solve + dark in every affected branch. See DECISIONS 2026-08-27.
+This upstream ask still stands — the fix only makes the workaround correct,
+it doesn't remove the need for one.
 
 **P3-2 — no `apply_trans_opt` hook on `*BinGeometry.from_spec(spec,
 mask=mask)` (found 2026-08-25).** Every `midas_integrate_v2.integrate_*`

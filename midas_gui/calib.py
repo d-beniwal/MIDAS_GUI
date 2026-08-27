@@ -52,6 +52,30 @@ def _supported_kwargs(fn, kwargs: dict) -> dict:
 
 # ── Seed ────────────────────────────────────────────────────────────────────────
 
+def _prep_transformed(image: np.ndarray, dark, im_trans: tuple):
+    """Apply ``im_trans`` to image + dark once, together, before any seeding
+    or solving happens — mirrors ``midas_calibrate_v2.calibrate()``'s own
+    internal transform handling (it flips image AND dark, then derives
+    NrPixelsY/Z, then seeds, all from the same transformed array).
+
+    Needed only because ``autocalibrate_four_stage`` / ``_bayesian`` /
+    ``_joint`` / ``pipelines.single.autocalibrate`` have no native
+    ``im_trans`` parameter (see ROADMAP P3-1) — every caller of this helper
+    must use its returned ``img``/``dark``/``NY``/``NZ`` for everything
+    downstream (seed AND solve), never the original ``image``, or the seed
+    and the solve run in two different frames.
+    """
+    img = image.astype(np.float32)
+    dk = dark
+    if im_trans:
+        from midas_gui.helpers import _apply_im_trans
+        img = _apply_im_trans(img, im_trans)
+        if dk is not None:
+            dk = _apply_im_trans(np.asarray(dk, dtype=np.float32), im_trans)
+    NZ, NY = img.shape
+    return img, dk, NY, NZ
+
+
 def make_seed_safe(image: np.ndarray, wavelength: float, pxY: float,
                    calibrant: str):
     """Run the automatic seeder; return a Seed or None on failure.
@@ -292,10 +316,11 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
             # autocalibrate_four_stage instead so stage2.unpacked retains the
             # refined panel shifts; normalize_result detects the FourStageResult
             # via its .stage2 attribute and handles it correctly.
+            img, dk, pNY, pNZ = _prep_transformed(image, dark, im_trans)
             if manual:
                 seed = _manual_seed_dict(manual)
             else:
-                s = make_seed_safe(image, wavelength, pxY, calibrant)
+                s = make_seed_safe(img, wavelength, pxY, calibrant)
                 if s is None:
                     raise RuntimeError(
                         "Auto-seed failed for panel calibration (one_shot). "
@@ -303,13 +328,9 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
                 seed = {"BC_y": s.BC_y, "BC_z": s.BC_z, "Lsd": s.Lsd_um}
             v1 = build_v1_params(
                 seed, wavelength=wavelength, pxY=pxY, pxZ=pxZ, calibrant=calibrant,
-                NY=NY, NZ=NZ, refine=refine, n_iter=n_iter, device=device)
-            img = image.astype(np.float32)
-            if im_trans:
-                from midas_gui.helpers import _apply_im_trans
-                img = _apply_im_trans(img, im_trans)
+                NY=pNY, NZ=pNZ, refine=refine, n_iter=n_iter, device=device)
             from midas_calibrate_v2.pipelines import autocalibrate_four_stage
-            return autocalibrate_four_stage(v1, img, dark=dark, device=device,
+            return autocalibrate_four_stage(v1, img, dark=dk, device=device,
                                             panel_layout=panel_layout, verbose=True)
 
         coeffs = _distortion_coeffs(refine)
@@ -320,10 +341,11 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
             # bayesian / joint already use (build_v1_params' per-p# Refine
             # dict) so the LM fit actually restricts itself to the selected
             # coefficients instead of silently widening the selection to all 15.
+            img, dk, pNY, pNZ = _prep_transformed(image, dark, im_trans)
             if manual:
                 seed = _manual_seed_dict(manual)
             else:
-                s = make_seed_safe(image, wavelength, pxY, calibrant)
+                s = make_seed_safe(img, wavelength, pxY, calibrant)
                 if s is None:
                     raise RuntimeError(
                         "Auto-seed failed for partial distortion refinement "
@@ -332,11 +354,7 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
                 seed = {"BC_y": s.BC_y, "BC_z": s.BC_z, "Lsd": s.Lsd_um}
             v1 = build_v1_params(
                 seed, wavelength=wavelength, pxY=pxY, pxZ=pxZ, calibrant=calibrant,
-                NY=NY, NZ=NZ, refine=refine, n_iter=n_iter, device=device)
-            img = image.astype(np.float32)
-            if im_trans:
-                from midas_gui.helpers import _apply_im_trans
-                img = _apply_im_trans(img, im_trans)
+                NY=pNY, NZ=pNZ, refine=refine, n_iter=n_iter, device=device)
             bin_path = None
             if cfg.get("output_dir"):
                 from pathlib import Path
@@ -344,7 +362,7 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
                 bin_path = str(out / "residual_corr.bin")
             from midas_calibrate_v2.pipelines.single import autocalibrate
             raw = autocalibrate(
-                v1, img, dark=dark, n_iter=n_iter, lm_max_iter=lm_iter,
+                v1, img, dark=dk, n_iter=n_iter, lm_max_iter=lm_iter,
                 device=device, verbose=True,
                 build_residual_corr=bool(cfg.get("build_residual_corr", True)),
                 residual_corr_path=bin_path)
@@ -393,10 +411,11 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
 
     if mode == "four_stage":
         from midas_calibrate_v2.pipelines import autocalibrate_four_stage
+        img, dk, pNY, pNZ = _prep_transformed(image, dark, im_trans)
         if manual:
             seed = _manual_seed_dict(manual)
         else:
-            s = make_seed_safe(image, wavelength, pxY, calibrant)
+            s = make_seed_safe(img, wavelength, pxY, calibrant)
             if s is None:
                 raise RuntimeError(
                     "Auto-seed failed for four-stage pipeline. "
@@ -404,34 +423,32 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
             seed = {"BC_y": s.BC_y, "BC_z": s.BC_z, "Lsd": s.Lsd_um}
         v1 = build_v1_params(
             seed, wavelength=wavelength, pxY=pxY, pxZ=pxZ, calibrant=calibrant,
-            NY=NY, NZ=NZ, refine=refine, n_iter=n_iter, device=device)
-        img = image.astype(np.float32)
-        if im_trans:
-            from midas_gui.helpers import _apply_im_trans
-            img = _apply_im_trans(img, im_trans)
-        return autocalibrate_four_stage(v1, img, dark=dark, device=device,
+            NY=pNY, NZ=pNZ, refine=refine, n_iter=n_iter, device=device)
+        return autocalibrate_four_stage(v1, img, dark=dk, device=device,
                                         panel_layout=panel_layout, verbose=True)
 
     if mode in ("bayesian", "joint"):
-        v1 = _seed_and_v1(image, wavelength, pxY, pxZ, calibrant, NY, NZ,
+        img, dk, pNY, pNZ = _prep_transformed(image, dark, im_trans)
+        v1 = _seed_and_v1(img, wavelength, pxY, pxZ, calibrant, pNY, pNZ,
                           refine, n_iter, device, manual)
-        img = image.astype(np.float32)
-        if im_trans:
-            from midas_gui.helpers import _apply_im_trans
-            img = _apply_im_trans(img, im_trans)
         if mode == "bayesian":
             from midas_calibrate_v2.pipelines import autocalibrate_bayesian
-            return autocalibrate_bayesian(v1, img, mode="laplace", dark=dark,
+            return autocalibrate_bayesian(v1, img, mode="laplace", dark=dk,
                                           panel_layout=panel_layout)
         from midas_calibrate_v2.pipelines import autocalibrate_joint
-        return autocalibrate_joint(v1, img, dark=dark, panel_layout=panel_layout)
+        return autocalibrate_joint(v1, img, dark=dk, panel_layout=panel_layout)
 
     raise ValueError(f"Unknown pipeline mode: {mode}")
 
 
 def _seed_and_v1(image, wavelength, pxY, pxZ, calibrant, NY, NZ,
                  refine, n_iter, device, manual):
-    """Seed (manual or auto) → build_v1_params. Shared by advanced pipelines."""
+    """Seed (manual or auto) → build_v1_params. Shared by advanced pipelines.
+
+    ``image`` must already be im_trans-transformed (via ``_prep_transformed``)
+    — this seeds directly from whatever array is passed in, so the caller is
+    responsible for making sure it's the same array that gets solved against.
+    """
     if manual:
         seed = _manual_seed_dict(manual)
     else:

@@ -3,6 +3,71 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-08-27 — Fix: Flip Z ignored when "Multi-panel detector" is checked in Calibrate
+
+User report: with `test_data/trr_s25ide/images/CeO2-89427.tif` +
+`test_data/trr_s25ide/midas_param.txt` (this detector needs Flip Z),
+calibrating without "Multi-panel detector" works; checking it produces a
+beam centre that's clearly still in the *unflipped* frame.
+
+**Root cause:** `midas_gui/calib.py`'s manual pre-flip workaround (needed
+because `autocalibrate_four_stage`/`_bayesian`/`_joint`/
+`pipelines.single.autocalibrate` have no `im_trans` parameter — see
+ROADMAP P3-1) computed the auto-seed from the *raw, untransformed* image
+(`make_seed_safe(image, ...)` / `_seed_and_v1(image, ...)`) but ran the
+actual solve on the *manually flipped* image (`img = _apply_im_trans(image,
+im_trans)`), in four separate branches of `run_pipeline()`: `one_shot` +
+panel_layout, `one_shot` partial-distortion-refinement, `four_stage`, and
+`bayesian`/`joint` (via `_seed_and_v1`). With Flip Z on, the seed lands
+roughly `NrPixelsZ` away from the true position in the frame actually being
+solved; these pipelines do local gradient-based refinement from the seed
+(not a global search), so they converge near the seed's original
+(unflipped) position instead. The plain "One-shot, no panel" path was
+never affected — it calls `midas_calibrate_v2.calibrate()` directly,
+passing the raw image + `im_trans` as a real kwarg, and the backend keeps
+seed and solve in the same frame internally (confirmed by reading
+`pipelines/auto.py:351-368`).
+
+**Checked whether to fix upstream instead:** no — the mismatch is between
+two local variables inside `calib.py` (`image` vs `img`); the backend never
+sees the raw array in these branches, so it has no way to detect or prevent
+this. Also checked whether the currently-installed `midas-calibrate-v2`
+0.10.0 (current PyPI latest) has fixed the *separate* upstream gap that
+requires the manual-pre-flip workaround to exist at all — it hasn't:
+`calibrate()`'s `panel_layout` support computes `panel_delta_*` internally
+but never copies it onto the returned `AutoCalibrationResult` (no such
+field exists on the dataclass), so routing panel-layout calibration through
+`calibrate()` directly still isn't viable for the GUI (it would lose the
+panel_shifts.txt export data). ROADMAP.md P3-1 updated with this finding
+and to correct its previous (wrong) claim that the GUI workaround was
+already bug-free.
+
+**Fix:** added `_prep_transformed(image, dark, im_trans)` to `calib.py` —
+applies `im_trans` to image *and* dark together, once, before anything else
+happens, and returns the transformed `NY`/`NZ` too (matters if Transpose is
+active, since it swaps the shape) — mirroring `calibrate()`'s own internal
+`_imtrans()` pattern. Called at the top of all four affected branches;
+their seed step and solve call now both consume its return value, never the
+original raw `image`. Also fixes a related bug found in the same code:
+`dark` was previously passed untransformed to the solver in all four
+branches even after `image` was manually flipped, misaligning dark
+correction whenever both a dark frame and a transform were active.
+
+**Scope decision (explicit, asked the user):** fixed only the branches
+above. Left the `first_time` ("First-time, no prior") pipeline branch
+untouched — it currently ignores `im_trans`/`panel_layout` entirely
+(separate, pre-existing gap, not what the user hit), tracked as a
+follow-up rather than fixed in this session.
+
+**Verification:** the real test image is too sparse for the installed
+auto-seeder (only 45 nonzero pixels — `make_seed()` raises `RuntimeError:
+no arcs detected`), so verified instead with a synthetic ring image built
+around a known off-centre `(BC_y, BC_z)`: confirmed `make_seed_safe()`
+returns a different BC depending on which frame (raw vs. flipped) it's
+given (as expected), then ran the fixed `run_pipeline("four_stage", ...,
+{"im_trans": [2]})` end-to-end and confirmed the recovered `BC_z` matches
+the *flipped-frame* truth (`NZ - BC_z_true`), not the raw/unflipped one.
+
 ## 2026-08-27 (`5cf2e8c`) — Error dialogs/logs never truncate the underlying exception, app-wide
 
 Triggered by a Windows user's screenshot of a "Calibration failed" dialog
