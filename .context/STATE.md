@@ -1,15 +1,22 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-27 (error-dialog/log truncation fixed app-wide,
-committed `5cf2e8c` — see "Recently completed" below)_
+_Last updated: 2026-08-27 (README troubleshooting section + test_data/projects/
+gitignore, committed `08fe8f6`/`fe59939` and pushed — see "Recently
+completed" below)_
 
 ## Now working on
 
-Docs update (development_history.md + PDF rebuild) for `5cf2e8c` in
-progress this session; not yet pushed.
+Nothing in progress; branch is clean and pushed to `origin/main`.
 
 ## Recently completed
+
+**2026-08-27 (`08fe8f6`/`fe59939`, pushed):** Added a README Troubleshooting
+section (pip `--no-cache-dir` reinstall fix for corrupted-cache DLL/
+submodule import errors, e.g. torch `fbgemm.dll`, `mpmath.libmp`) and
+gitignored the local-only `test_data/projects/` dataset (66 MB of
+self-contained-project `.h5`/workspace JSON, same pattern as `s17bm/`
+etc.).
 
 **2026-08-27 (`5cf2e8c`) — error dialogs/logs no longer truncate the
 underlying exception, app-wide.** Triggered by a Windows user's
