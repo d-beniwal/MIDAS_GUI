@@ -154,6 +154,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Fix ImTransOpt propagation: calibration/refinement now pass the raw image + `im_trans` straight through, letting the MIDAS backend apply the flip instead of pre-flipping in Python | `2358ae4` |
 | Hydra Overall Radial Profile becomes a toggle button (was a checkbox); Eta vs R Cake tab gains GE1-4 checkboxes + an Overall button showing the summed cake across all 4 panels; calibration attempts embed their computed Radial Profile/Eta vs R Cake so Populate needs no recompute | `943a91d` |
 | Fix Flip Z ignored when Multi-panel detector is checked: seed and solve were running in two different image frames | `ccce056` |
+| Feed Multi-panel detector's per-panel shifts + grid geometry to downstream integration (Results-tab preview, Batch Integrate, and saved paramstest.txt) | `101558a` |
 
 ### Batch Integrate (Tab 4)
 | Change | Commit |
@@ -3166,6 +3167,56 @@ one.
 **Roll back:** `git revert ccce056`. Self-contained; no dependents. Restores
 the seed/solve frame mismatch for Flip-Z + Multi-panel-detector calibration
 (and the untransformed-dark bug in the same four branches).
+
+---
+
+### `101558a` — Calibrate: feed Multi-panel detector results to downstream integration (2026-08-27)
+**Effect:** Multi-panel calibration refined per-panel shifts, but the
+results never reached downstream integration in the format
+`midas_integrate_v2` needs. Three GUI-side gaps, all upstream of any
+package bug (panel numbering already matches between
+`PanelLayout.regular` and the v1 `DetectorMapper` convention): (1)
+`helpers._build_spec` (used by Calibrate's own Results-tab preview *and*
+Batch Integrate's "Use Tab 2 calibration") never patched panel fields onto
+the `IntegrationSpec` it builds — same pre-existing gap `TransOpt` already
+had and was already worked around for; (2) `geometry_fields_from_file`
+(the "Load calibration file" reader shared by Batch/Export/PDF/
+Corrections/Hydra) never parsed `NPanelsY`/`NPanelsZ`/`PanelSizeY`/
+`PanelSizeZ`/`PanelGapsY`/`PanelGapsZ`/`PanelShiftsFile` out of a
+paramstest, nor `panel_layout`/`panel_shifts_path` out of a
+calibration.json; (3) `tab_calibrate.py`'s "Save paramstest.txt" already
+wrote `panel_shifts.txt` + `PanelShiftsFile`, but never the panel grid
+keys — so even a correct shifts file pointed at `NPanelsY=0` downstream.
+`calib.py` now attaches `result.panel_layout`/`result.panel_shifts_path`
+(plain, JSON-safe attributes) the moment a Multi-panel run finishes
+(`_attach_panel_result`, called from `normalize_result`'s four_stage/
+bayesian/joint branches); a shared `helpers._apply_panel_fields()` patches
+any `IntegrationSpec` built from a result or a loaded geometry file
+(`_build_spec`, `_spec_from_result_ns`); `_save_paramstest` writes the
+missing grid keys alongside the existing `PanelShiftsFile`. Only the
+single-detector Calibrate tab's `panel_layout` is affected — Hydra mode's
+4 independent-detector "panels" are a different concept, untouched.
+**Verified:** built a synthetic `panel_u`/`panel_layout` (the real
+four-stage pipeline needs a physically convergent ring image, out of scope
+to fabricate here) and confirmed the full round-trip: `_attach_panel_result`
+writes a real, non-empty `panel_shifts.txt`; `_build_spec` on that result
+produces a spec with correct `NPanelsY/NPanelsZ/PanelSizeY/PanelSizeZ/
+PanelGapsY/PanelGapsZ/PanelShiftsFile`; a standalone paramstest.txt saved
+with the panel keys, then reloaded via `geometry_fields_from_file` +
+`spec_from_geometry_file`, round-trips every panel field (including
+scalar-gap → per-gap-list expansion both ways). Ran `test_im_trans.py`,
+`test_hydra_geometry.py`, `test_hydra_chirality.py` (all pass) and
+`test_smoke.py::test_app_builds_offscreen` (passes); `test_hydra_calib_ui.py`
+hit the pre-existing, already-tracked pyqtgraph interpreter-teardown
+segfault after its one test passed — confirmed unrelated (see
+`.context/STATE.md`).
+**Files:** `midas_gui/calib.py`, `midas_gui/helpers.py`,
+`midas_gui/tab_calibrate.py`, `midas_gui/workers.py`,
+`documentation/gui_documentation.md`.
+**Roll back:** `git revert 101558a`. Self-contained; no dependents. Restores
+the pre-existing behavior where Multi-panel results never reach the
+Results-tab preview, Batch Integrate, or a fully-usable exported
+paramstest.txt.
 
 ---
 

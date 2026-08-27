@@ -2,16 +2,17 @@
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
 _Last updated: 2026-08-27 (Multi-panel results now reach downstream
-integration — see "Recently completed" below, about to commit)_
+integration, committed `101558a`/pending docs commit — see "Recently
+completed" below)_
 
 ## Now working on
 
-Nothing in progress; about to commit + push the Multi-panel integration fix.
+Nothing in progress; branch about to be pushed to `origin/main`.
 
 ## Recently completed
 
-**2026-08-27 — Feed Calibrate's Multi-panel results to downstream
-integration.** Three GUI-side gaps, all upstream of any package bug (panel
+**2026-08-27 (`101558a`) — Feed Calibrate's Multi-panel results to
+downstream integration.** Three GUI-side gaps, all upstream of any package bug (panel
 numbering already matches between `PanelLayout.regular` and the v1
 `DetectorMapper` convention): (1) `helpers._build_spec` (used by Calibrate's
 own Results-tab preview *and* Batch Integrate's "Use Tab 2 calibration")
