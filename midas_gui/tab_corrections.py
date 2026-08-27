@@ -17,6 +17,7 @@ from midas_gui.helpers import (_load_image, _fspin, _twocol, _browse, is_h5,
                                widgets_to_dict, apply_dict_to_widgets)
 from midas_gui.constants import DEFAULT_NICKEL_FRAME0
 from midas_gui.widgets import LogPanel
+from midas_gui.dialogs import show_error
 from midas_gui.workers import CorrectionPreviewWorker, LearnableGainWorker
 from midas_gui import style as S
 
@@ -293,8 +294,7 @@ class CorrectionsTab(QtWidgets.QWidget):
         self._gain_train_btn.setEnabled(True)
         self._gain_prog.setVisible(False)
         self._gain_stats_lbl.setText("Training failed")
-        self._log.append(f"\n[gain] ERROR:\n{msg[:600]}")
-        QtWidgets.QMessageBox.critical(self, "Gain training failed", msg[:400])
+        show_error(self, "Gain training failed", msg, log=self._log, log_prefix="\n[gain] ERROR:\n")
 
     def _save_gain_map(self):
         if self._gain_map is None: return
@@ -361,5 +361,4 @@ class CorrectionsTab(QtWidgets.QWidget):
 
     def _on_fail(self, msg):
         self._run_btn.setEnabled(True)
-        self._log.append(f"\nERROR:\n{msg[:600]}")
-        QtWidgets.QMessageBox.critical(self, "Correction failed", msg[:400])
+        show_error(self, "Correction failed", msg, log=self._log, log_prefix="\nERROR:\n")

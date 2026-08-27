@@ -12,6 +12,27 @@ _PANEL_LABELS = {"single": "Single detector", "ge1": "ge1", "ge2": "ge2",
                  "ge3": "ge3", "ge4": "ge4", "hydra_composite": "Hydra Overall"}
 
 
+def show_error(parent, title: str, full_text: str, log=None, log_prefix: str = ""):
+    """Critical-error dialog that never truncates ``full_text``.
+
+    Qt's built-in "Show Details..." panel is scrollable, so the dialog's
+    headline is a short summary (the traceback's last non-blank line) while
+    the complete text is always available via ``setDetailedText``. ``log``,
+    if given, is a widget with ``.append()`` (LogPanel/QTextEdit) or a plain
+    ``callable(str)`` — the full text (with ``log_prefix``) is recorded there
+    too, untruncated.
+    """
+    if log is not None:
+        text = log_prefix + full_text
+        (log.append if hasattr(log, "append") else log)(text)
+    lines = [ln for ln in full_text.strip().splitlines() if ln.strip()]
+    summary = (lines[-1] if lines else full_text)[:300]
+    box = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Critical, title, summary,
+                                 QtWidgets.QMessageBox.Ok, parent)
+    box.setDetailedText(full_text)
+    box.exec_()
+
+
 class DistortionRefineDialog(QtWidgets.QDialog):
     """Pick which of the 15 distortion coefficients to refine.
 

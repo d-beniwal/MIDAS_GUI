@@ -19,6 +19,7 @@ from midas_gui.helpers import (_fspin, _twocol, _NoScrollSpinBox, _NoScrollCombo
                                widgets_to_dict, apply_dict_to_widgets)
 from midas_gui.widgets import LossCurveViewer, LogPanel, DataLoaderPanel
 from midas_gui.workers import RefinementWorker, RefineCompareWorker
+from midas_gui.dialogs import show_error
 from midas_gui import style as S
 
 
@@ -278,13 +279,12 @@ class RefinementTab(QtWidgets.QWidget):
                 background=self._loader.background(), bright_mode=self._loader.bright_mode())
             self._compare_worker.finished.connect(self._on_compare_done)
             self._compare_worker.failed.connect(
-                lambda msg: self._log.append(f"[compare] failed: {msg[:300]}"))
+                lambda msg: self._log.append(f"[compare] failed: {msg}"))
             self._compare_worker.start()
 
     def _on_fail(self, msg):
         self._run_btn.setEnabled(True); self._prog.setVisible(False)
-        self._log.append(f"\nERROR:\n{msg[:600]}")
-        QtWidgets.QMessageBox.critical(self, "Refinement failed", msg[:400])
+        show_error(self, "Refinement failed", msg, log=self._log, log_prefix="\nERROR:\n")
 
     def _apply(self):
         if self._result is not None:

@@ -22,6 +22,7 @@ from midas_gui.constants import DEFAULT_NICKEL_H5
 from midas_gui.helpers import (_fspin, _NoScrollSpinBox,
                          widgets_to_dict, apply_dict_to_widgets, _apply_im_trans)
 from midas_gui.widgets import ProfileViewer, DataLoaderPanel, CakeViewer
+from midas_gui.dialogs import show_error
 from midas_gui.roi_tools import ROIImageViewer, ROIRibbon
 from midas_gui.hydra_widgets import HydraModeRibbon
 from midas_gui.hydra_geometry_card import DetectorGeometryCard
@@ -522,7 +523,7 @@ class DataViewerTab(QtWidgets.QWidget):
     def _on_projection_fail(self, msg):
         self._proj_btn.setEnabled(True)
         self._info_lbl.setText("Projection failed.")
-        QtWidgets.QMessageBox.critical(self, "Projection error", msg[:500])
+        show_error(self, "Projection error", msg)
 
     def _on_radius_clicked(self, r_px: float):
         """A radius was clicked on the profile — draw its ring on the image."""

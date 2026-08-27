@@ -23,6 +23,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
 from midas_gui.constants import COLORMAPS, DISTORTION_NAMES, DEFAULT_COLORMAP, DEVICES
+from midas_gui.dialogs import show_error
 from midas_gui.sim_detector import DEFAULT_CHANNEL_NAME as _SIM_CHANNEL_NAME
 
 # Default colormap: the configured one if it's a known option, else the first.
@@ -2516,7 +2517,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
                 self.metadataDetected.emit(detected)
         except Exception:
             import traceback
-            QtWidgets.QMessageBox.critical(self, "Load error", traceback.format_exc()[:500])
+            show_error(self, "Load error", traceback.format_exc())
 
     def _setup_navigator(self):
         hi = max(0, self._nframes - 1)

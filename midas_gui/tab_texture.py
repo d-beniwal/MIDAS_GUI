@@ -17,6 +17,7 @@ from midas_gui.helpers import (_load_image, _fspin, _twocol, _browse, _predict_r
                                widgets_to_dict, apply_dict_to_widgets)
 from midas_gui.constants import DEFAULT_NICKEL_FRAME0, DEFAULT_COLORMAP
 from midas_gui.widgets import LogPanel
+from midas_gui.dialogs import show_error
 from midas_gui.workers import PoleFigureWorker
 from midas_gui import style as S
 
@@ -188,8 +189,7 @@ class TextureTab(QtWidgets.QWidget):
 
     def _on_fail(self, msg):
         self._run_btn.setEnabled(True)
-        self._log.append(f"\nERROR:\n{msg[:600]}")
-        QtWidgets.QMessageBox.critical(self, "Pole figure failed", msg[:400])
+        show_error(self, "Pole figure failed", msg, log=self._log, log_prefix="\nERROR:\n")
 
     def _save(self):
         if not self._last: return

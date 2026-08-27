@@ -20,6 +20,7 @@ from midas_gui.helpers import (_load_image, _fspin, _NoScrollSpinBox, _browse, i
                                new_temp_h5_path, save_stack_h5,
                                _apply_im_trans, im_trans_codes_from_checkboxes)
 from midas_gui.widgets import ImageViewer
+from midas_gui.dialogs import show_error
 from midas_gui.workers import MaskComputeWorker
 from midas_gui import style as S
 
@@ -651,8 +652,7 @@ class MaskTab(QtWidgets.QWidget):
 
     def _on_stat_fail(self, msg: str):
         self._stat_prog.setText("Failed — check parameters.")
-        QtWidgets.QMessageBox.critical(
-            self, "Mask error", f"Statistical outlier mask failed:\n\n{msg[:500]}")
+        show_error(self, "Mask error", f"Statistical outlier mask failed:\n\n{msg}")
 
     def _set_mask(self, mask):
         """Set the *computed* mask (threshold/stat/loaded), apply pixel dilation,

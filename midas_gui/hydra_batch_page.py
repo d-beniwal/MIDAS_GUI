@@ -420,13 +420,13 @@ class HydraBatchPage(QtWidgets.QWidget):
             self._log.append(f"[ge{n}] logged to project: {ref}")
         except Exception:
             import traceback as _tb
-            self._log.append(f"[ge{n}] could not log to project file:\n" + _tb.format_exc()[:400])
+            self._log.append(f"[ge{n}] could not log to project file:\n" + _tb.format_exc())
 
     def _on_panel_fail(self, n: int, msg: str):
         if self._run_cancelled:
             return
         self._cards[n].set_status("Error")
-        self._log.append(f"[ge{n}] ERROR:\n{msg[:400]}")
+        self._log.append(f"[ge{n}] ERROR:\n{msg}")
         self._workers.pop(n, None)
         if self._run_mode() == "sequential":
             self._start_next_sequential()

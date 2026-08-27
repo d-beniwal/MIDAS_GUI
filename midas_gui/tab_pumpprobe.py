@@ -36,6 +36,7 @@ from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, DataLoaderPanel,
                                _convert_radial, _UnitAxis)
 from midas_gui.workers import PumpProbeWorker
+from midas_gui.dialogs import show_error
 from midas_gui import style as S
 
 
@@ -723,8 +724,7 @@ class PumpProbeTab(QtWidgets.QWidget):
     def _on_fail(self, msg):
         self._run_btn.setEnabled(True); self._abort_btn.setEnabled(False)
         self._prog.setVisible(False)
-        self._log.append(f"\n[pump] ERROR:\n{msg[:600]}")
-        QtWidgets.QMessageBox.critical(self, "Pump Probe failed", msg[:400])
+        show_error(self, "Pump Probe failed", msg, log=self._log, log_prefix="\n[pump] ERROR:\n")
 
     # ── plotting ───────────────────────────────────────────────────
     def _radial_axis(self):

@@ -32,7 +32,7 @@ from midas_gui.helpers import (
     _predict_ring_radii, tilted_ring_xy, paramstest_pairs, write_standalone_paramstest,
     _PARAMSTEST_DISTORTION)
 from midas_gui.widgets import ResidualBarChart, _mono_font
-from midas_gui.dialogs import _SaveParamstestDialog
+from midas_gui.dialogs import _SaveParamstestDialog, show_error
 from midas_gui import style as S
 
 
@@ -381,7 +381,7 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
         except Exception:
             import traceback as _tb
             self._r_diag.setText("Could not render parameter grid — see log.")
-            self._log(f"ge{self.panel_number} param grid error:\n{_tb.format_exc()[:400]}")
+            self._log(f"ge{self.panel_number} param grid error:\n{_tb.format_exc()}")
         s = getattr(result, "post_residual_strain_uE", None)
         strain_txt = f"{s:.1f} µε" if s else "n/a"
         self._r_diag.setText(f"Post-refine strain: {strain_txt}")
@@ -466,8 +466,8 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
             self._log(f"ge{self.panel_number}: paramstest.txt saved: {out_path}")
         except Exception:
             import traceback
-            self._log(f"ge{self.panel_number}: save paramstest error:\n{traceback.format_exc()[:400]}")
-            QtWidgets.QMessageBox.critical(self, "Save failed", traceback.format_exc()[:400])
+            show_error(self, "Save failed", traceback.format_exc(), log=self._log,
+                       log_prefix=f"ge{self.panel_number}: save paramstest error:\n")
 
     # ── GUI state ────────────────────────────────────────────────────
 

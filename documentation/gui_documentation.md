@@ -3,7 +3,13 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-26 (Project records are now more self-sufficient,
+**Last updated:** 2026-08-27 (Error dialogs across every tab no longer
+truncate the underlying error — see §13 "Common UI Conventions" for detail.
+A failure now shows a one-line summary with a **Show Details…** button
+revealing the complete traceback, and the same complete text is written to
+that tab's log panel, not just the dialog.)
+
+**Previously:** (2026-08-26, Project records are now more self-sufficient,
 and two Hydra plots gained an Overall/summed view — see §5, §15-§17 for
 full detail. Summary:
 - A Project attempt's mask is embedded (compressed) only when it includes
@@ -1930,6 +1936,13 @@ fraction, correction flags) can be copied to the clipboard for a Methods section
 - **No accidental scroll changes.** Spin boxes and drop-downs ignore the mouse wheel —
   values change only by clicking/typing; the wheel scrolls the panel instead.
 - **Readable right-click menus.** pyqtgraph plot context menus use the dark theme.
+- **Error dialogs never truncate the underlying error.** A worker/background-task
+  failure ("Calibration failed", "Integration failed", "PDF failed", etc.) shows a
+  one-line summary with a **Show Details…** button revealing the complete, scrollable
+  error text (traceback included) — and the same complete text is written to that
+  tab's log panel, not just the dialog. This applies across every tab; earlier
+  versions truncated both to a fixed character count, which could cut an error off
+  mid-word and hide the actual exception (see `documentation/development_history.md`).
 - **Dark theme, orange accent** (Dioptas-inspired); off-white text, light input fields.
 - **Sample-to-detector distance is entered/shown in mm** (Data Viewer, Calibrate seed,
   Preferences ▸ Geometry). Internally — all calculations — and in written calibration

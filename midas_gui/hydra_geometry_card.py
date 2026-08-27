@@ -26,6 +26,7 @@ from midas_gui.constants import (MATERIALS, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM
                            DEFAULT_STEP_WAVELENGTH, DEFAULT_STEP_TWO_THETA,
                            DEFAULT_STEP_LSD_MM, DEFAULT_STEP_PIXEL, DEFAULT_STEP_BC,
                            DEFAULT_STEP_TILT)
+from midas_gui.dialogs import show_error
 from midas_gui.helpers import (_fspin, _NoScrollSpinBox, _browse,
                          simulate_rings, read_geometry, geometry_fields_from_file,
                          _spec_from_result_ns, _NoScrollComboBox,
@@ -782,7 +783,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             lines = ["No enabled materials."]
         self._ring_info.setPlainText("\n".join(lines).rstrip())
         if errors and not any_rings:
-            QtWidgets.QMessageBox.critical(self, "Simulation error", "\n".join(errors)[:500])
+            show_error(self, "Simulation error", "\n".join(errors))
 
     def _clear_rings(self):
         if self._viewer is None:
@@ -1151,8 +1152,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             self._after_geometry_change()
         except Exception:
             import traceback
-            QtWidgets.QMessageBox.critical(self, "Calibration load error",
-                                           traceback.format_exc()[:500])
+            show_error(self, "Calibration load error", traceback.format_exc())
 
     def get_full_geometry(self) -> Optional[dict]:
         """Public alias for ``_export_geom`` — the best-available full
@@ -1220,6 +1220,6 @@ class DetectorGeometryCard(QtWidgets.QWidget):
                 write_poni(geom, path)
         except Exception:
             import traceback
-            QtWidgets.QMessageBox.critical(self, "Save failed", traceback.format_exc()[:500])
+            show_error(self, "Save failed", traceback.format_exc())
             return
         QtWidgets.QMessageBox.information(self, "Saved", f"Calibration saved to:\n{path}")

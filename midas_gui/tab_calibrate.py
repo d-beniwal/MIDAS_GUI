@@ -28,7 +28,7 @@ from midas_gui.helpers import (
 from midas_gui.widgets import (
     PickableImageViewer, ProfileViewer, LogPanel, ResidualBarChart, DataLoaderPanel, CakeViewer)
 from midas_gui.workers import CalibrationWorker, IntegrationWorker
-from midas_gui.dialogs import _SaveParamstestDialog, DistortionRefineDialog
+from midas_gui.dialogs import _SaveParamstestDialog, DistortionRefineDialog, show_error
 from midas_gui.hydra_widgets import HydraModeRibbon
 from midas_gui.hydra_calib_page import HydraCalibrationPage
 from midas_gui import project
@@ -896,7 +896,7 @@ class CalibrationTab(QtWidgets.QWidget):
                 paramstest_pairs(result, selected=self._last_dist_coeffs))
         except Exception:
             import traceback as _tb
-            self._log.append("Could not render parameter grid:\n" + _tb.format_exc()[:400])
+            self._log.append("Could not render parameter grid:\n" + _tb.format_exc())
         s = result.post_residual_strain_uE
         seed_s = getattr(result, "seed_seconds", 0.0) or 0.0
         ref_s  = getattr(result, "refine_seconds", 0.0) or 0.0
@@ -949,15 +949,14 @@ class CalibrationTab(QtWidgets.QWidget):
             self._log.append(f"Logged to project: {ref}")
         except Exception:
             import traceback as _tb
-            self._log.append("Could not log to project file:\n" + _tb.format_exc()[:400])
+            self._log.append("Could not log to project file:\n" + _tb.format_exc())
 
     def _on_fail(self, msg):
         if self._calib_cancelled:
             return   # user aborted — ignore the late failure
         self._run_btn.setEnabled(True); self._abort_btn.setEnabled(False)
         self._prog.setVisible(False)
-        self._log.append(f"\nERROR:\n{msg[:600]}")
-        QtWidgets.QMessageBox.critical(self, "Calibration failed", msg[:400])
+        show_error(self, "Calibration failed", msg, log=self._log, log_prefix="\nERROR:\n")
 
     # ── Rings ──────────────────────────────────────────────────────
 
@@ -1033,7 +1032,7 @@ class CalibrationTab(QtWidgets.QWidget):
                                         result.pxY, result.pxZ)
             except Exception:
                 import traceback
-                self._log.append(f"Corrected ring error:\n{traceback.format_exc()[:300]}")
+                self._log.append(f"Corrected ring error:\n{traceback.format_exc()}")
                 continue
             item = pg.PlotDataItem(ys, zs, pen=pen)
             item.setVisible(vis)
@@ -1075,7 +1074,7 @@ class CalibrationTab(QtWidgets.QWidget):
             self._log_to_project(pending, results=results)
 
     def _on_int_failed(self, msg: str):
-        self._log.append(f"Integration error: {msg[:200]}")
+        self._log.append(f"Integration error: {msg}")
         self._flush_pending_log(None)
 
     def _on_int_done(self, data):
@@ -1158,13 +1157,13 @@ class CalibrationTab(QtWidgets.QWidget):
                     ps_saved = f"\npanel_shifts.txt: {ps_path}"
                 except Exception:
                     import traceback
-                    self._log.append(f"Panel shifts save error:\n{traceback.format_exc()[:300]}")
+                    self._log.append(f"Panel shifts save error:\n{traceback.format_exc()}")
             QtWidgets.QMessageBox.information(
                 self, "Saved",
                 f"paramstest.txt saved ({mode}):\n{out_path}{ps_saved}")
         except Exception as e:
             import traceback
-            self._log.append(f"Save paramstest error:\n{traceback.format_exc()[:400]}")
+            self._log.append(f"Save paramstest error:\n{traceback.format_exc()}")
             QtWidgets.QMessageBox.critical(self, "Save failed", str(e))
 
     def get_result(self):

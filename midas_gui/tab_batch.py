@@ -26,6 +26,7 @@ from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, DataLoaderPanel)
 from midas_gui.workers import BatchWorker, apply_q_uniform, DriftWorker, FolderMonitorWorker
+from midas_gui.dialogs import show_error
 from midas_gui.hydra_widgets import HydraModeRibbon
 from midas_gui.hydra_batch_page import HydraBatchPage
 from midas_gui import project
@@ -662,12 +663,11 @@ class BatchTab(QtWidgets.QWidget):
             self._log.append(f"Logged to project: {ref}")
         except Exception:
             import traceback as _tb
-            self._log.append("Could not log to project file:\n" + _tb.format_exc()[:400])
+            self._log.append("Could not log to project file:\n" + _tb.format_exc())
 
     def _on_fail(self, msg):
         self._reset_run_buttons(); self._prog.setVisible(False)
-        self._log.append(f"\nERROR:\n{msg[:600]}")
-        QtWidgets.QMessageBox.critical(self, "Integration failed", msg[:400])
+        show_error(self, "Integration failed", msg, log=self._log, log_prefix="\nERROR:\n")
 
     def _clear_results(self):
         """Clear this session's computed profiles/plots for the current data so a
@@ -799,8 +799,7 @@ class BatchTab(QtWidgets.QWidget):
     def _on_monitor_fail(self, msg):
         self._loader.set_monitor_active(False)
         self._monitor_worker = None
-        self._log.append(f"\n[monitor] ERROR:\n{msg[:600]}")
-        QtWidgets.QMessageBox.critical(self, "Monitor failed", msg[:400])
+        show_error(self, "Monitor failed", msg, log=self._log, log_prefix="\n[monitor] ERROR:\n")
 
     # ── Drift correction ───────────────────────────────────────────
 
@@ -858,5 +857,4 @@ class BatchTab(QtWidgets.QWidget):
     def _on_drift_fail(self, msg):
         self._drift_fit_btn.setEnabled(True)
         self._drift_status_lbl.setText("Fitting failed")
-        self._log.append(f"\n[drift] ERROR:\n{msg[:600]}")
-        QtWidgets.QMessageBox.critical(self, "Drift fitting failed", msg[:400])
+        show_error(self, "Drift fitting failed", msg, log=self._log, log_prefix="\n[drift] ERROR:\n")

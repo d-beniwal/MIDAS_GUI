@@ -14,6 +14,7 @@ from PyQt5 import QtCore, QtWidgets
 
 from midas_gui import style as S
 from midas_gui.helpers import widgets_to_dict, apply_dict_to_widgets
+from midas_gui.dialogs import show_error
 
 
 class ExportTab(QtWidgets.QWidget):
@@ -157,7 +158,7 @@ class ExportTab(QtWidgets.QWidget):
                 self, "Exported", "Wrote:\n  " + "\n  ".join(written) + f"\n\nto {out}")
         except Exception as e:
             import traceback
-            QtWidgets.QMessageBox.critical(self, "Export failed", traceback.format_exc()[:500])
+            show_error(self, "Export failed", traceback.format_exc())
 
     def _write_paramstest(self, path):
         from midas_gui.helpers import write_standalone_paramstest

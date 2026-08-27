@@ -30,6 +30,7 @@ from midas_gui.constants import (DEFAULT_NICKEL_FRAME0, DEFAULT_PDF_IQ_FILE,
                                  DEFAULT_PDF_MASK, DEFAULT_PDF_EMPTY_IQ,
                                  DEFAULT_PDF_CIF)
 from midas_gui.widgets import LogPanel
+from midas_gui.dialogs import show_error
 from midas_gui.workers import PDFWorker, PDFStructureFitWorker, _parse_composition
 from midas_gui import style as S
 
@@ -1007,8 +1008,7 @@ class PDFTab(QtWidgets.QWidget):
 
     def _on_fail(self, msg):
         self._run_btn.setEnabled(True)
-        self._log.append(f"\nERROR:\n{msg[:600]}")
-        QtWidgets.QMessageBox.critical(self, "PDF failed", msg[:400])
+        show_error(self, "PDF failed", msg, log=self._log, log_prefix="\nERROR:\n")
 
     # ── structure fit ────────────────────────────────────────────────────────
     def _collect_fit_cfg(self):
@@ -1088,8 +1088,7 @@ class PDFTab(QtWidgets.QWidget):
 
     def _on_fit_fail(self, msg):
         self._fit_run_btn.setEnabled(True)
-        self._log.append(f"\nERROR:\n{msg[:600]}")
-        QtWidgets.QMessageBox.critical(self, "Structure fit failed", msg[:400])
+        show_error(self, "Structure fit failed", msg, log=self._log, log_prefix="\nERROR:\n")
 
     def _redraw_fit(self):
         d = self._fit_result
