@@ -167,6 +167,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Waterfall/Stacked profiles pan/zoom bounded to data extent; Waterfall gains a color-scale histogram sidebar | `08c917f` |
 | Waterfall auto-level: vmin% default 1→30, percentile calc excludes exact-zero pixels | `d0cd6ce` |
 | Fix ImTransOpt propagation: geometry's flip/transpose now applied by the MIDAS backend (`spec.TransOpt`), not silently dropped | `2358ae4` |
+| Browse… parity: Multiple files + filestem-filtered (live folder+prefix) sources, MONITOR re-scans a filestem filter | `af8066f` |
 
 ### PDF Analysis (Tab 6)
 | Change | Commit |
@@ -3339,6 +3340,41 @@ project restores an edited field exactly.
 downstream `append_calibration_attempt`/`append_integration_attempt`
 callers would need their `dark`/`bright`/`background` args restored too if
 reverted in isolation.
+
+### `af8066f` — Batch Integrate: Browse… parity — Multiple files + filestem-filtered sources (2026-08-28)
+**Effect:** Batch Integrate's streamed Data field previously only offered
+Single file/Full folder in its Browse… popup — Multiple files/Filestem were
+withheld because the streaming reader (`TIFFGlobSource`/`HDF5FrameSource`)
+could only consume a glob path, not an arbitrary file list.
+1. `DataLoaderPanel._open_browse_dialog()` now always offers all four modes.
+   A **Filestem** pick in stream mode is kept as a live `(folder, prefix)`
+   filter (`_set_stem_filter`) rather than resolved to a frozen list:
+   `_raw_source()` substitutes it into a `<folder>/<prefix>*` glob, so
+   `source_cfg()`, `_load()`, and cross-tab "Import from…" all stay
+   filestem-aware for free, and `FolderMonitorWorker` re-globs it on every
+   poll like any other glob path — a new matching file dropped in later is
+   picked up, a non-matching one is ignored.
+2. A **Multiple files** pick becomes a new `"tiff_list"` source type;
+   `workers._ExplicitTIFFSource` iterates the resolved paths in order via
+   `helpers._load_image` (covers `.ge*` frames too). Not watchable by
+   MONITOR (no single glob describes an arbitrary list) — `_start_monitor`'s
+   existing `type != "tiff_glob"` guard already rejects it, with a clearer
+   warning message naming filestem/folder as the watchable options.
+3. `_raw_source`/`get_state`/`set_state` round-trip the stem filter
+   alongside the pre-existing explicit-paths handling; manually editing the
+   path field clears either one (`_on_path_changed`), matching the existing
+   explicit-paths behavior.
+**Verified:** new `tests/test_batch_data_source.py` (8 tests, dependency-free
+— PyQt5/numpy/tifffile only): stem-filter→glob and explicit-list→tiff_list
+`source_cfg()` shapes, manual-edit clearing, info-label text, get/set_state
+round-trip, `_ExplicitTIFFSource` frame order/content, and `BatchWorker.
+_open_source` dispatch for `"tiff_list"`. All pass.
+**Files:** `midas_gui/widgets.py`, `midas_gui/workers.py`,
+`midas_gui/tab_batch.py`, `midas_gui/dialogs.py`,
+`tests/test_batch_data_source.py` (new), `documentation/gui_documentation.md`.
+**Roll back:** `git revert af8066f`. Self-contained — restores the
+Single-file/Full-folder-only Browse… restriction for Batch Integrate's Data
+field; no later commit depends on the `"tiff_list"` source type.
 
 ---
 
