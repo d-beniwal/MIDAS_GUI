@@ -1,15 +1,38 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-28 (Merged Workspace + Project into one `.h5` file —
-committed as `ae3b665`; see "Recently completed" below)_
+_Last updated: 2026-08-28 (Batch Integrate Browse… parity — committed as
+`af8066f`; see "Recently completed" below)_
 
 ## Now working on
 
-Nothing in flight — `ae3b665` (Workspace/Project merge) is committed and
+Nothing in flight — `af8066f` (Batch Browse… parity) is committed and
 pushed; awaiting next task.
 
 ## Recently completed
+
+**2026-08-28 (`af8066f`) — Batch Integrate: Browse… parity — Multiple
+files + filestem-filtered sources.** Batch Integrate's streamed Data field
+previously only offered Single file/Full folder in Browse… (Multiple
+files/Filestem were withheld since the streaming reader could only consume
+a glob path). Now offers all four modes: a **Filestem** pick in stream mode
+is kept as a live `(folder, prefix)` filter (`DataLoaderPanel.
+_set_stem_filter`) rather than resolved to a frozen list — `_raw_source()`
+substitutes it into a `<folder>/<prefix>*` glob so `source_cfg()`/`_load()`/
+cross-tab Import-from stay filestem-aware for free, and `FolderMonitorWorker`
+re-globs it every poll (a new matching file dropped in later is picked up
+by MONITOR, non-matching ones ignored). A **Multiple files** pick becomes a
+new `"tiff_list"` source type; `workers._ExplicitTIFFSource` iterates the
+resolved paths via `helpers._load_image` (covers `.ge*` too) — not
+watchable by MONITOR (no glob describes an arbitrary list), guarded by the
+existing `type != "tiff_glob"` check with a clearer warning message.
+**Verified:** new `tests/test_batch_data_source.py` (8, dependency-free —
+PyQt5/numpy/tifffile only) — stem-filter/explicit-list `source_cfg()`
+shapes, manual-edit clearing, info-label text, get/set_state round-trip,
+`_ExplicitTIFFSource` ordering, `BatchWorker._open_source` dispatch. All
+pass. `gui_documentation.md` updated (§1 "The Browse… popup" + new
+"Batch Integrate: filestem-filtered sources and MONITOR" under §7) + PDF
+rebuilt.
 
 **2026-08-28 (`ae3b665`) — Merged Workspace + Project into one `.h5`
 "Project" file.** User request: unify the two previously-independent
@@ -95,56 +118,9 @@ pass; `test_hydra_ui.py`/`test_project.py` hit the pre-existing
 interpreter-teardown segfault/abort at process exit (see "Open questions"
 below) — unrelated, all tests pass before it.
 
-**2026-08-27 (`101558a`) — Feed Calibrate's Multi-panel results to
-downstream integration.** Three GUI-side gaps, all upstream of any package bug (panel
-numbering already matches between `PanelLayout.regular` and the v1
-`DetectorMapper` convention): (1) `helpers._build_spec` (used by Calibrate's
-own Results-tab preview *and* Batch Integrate's "Use Tab 2 calibration")
-never patched panel fields onto the `IntegrationSpec` — same pre-existing
-gap `TransOpt` already had and was already patched for; (2)
-`geometry_fields_from_file` (the "Load calibration file" reader used across
-Batch/Export/PDF/Corrections/Hydra) never parsed panel keys at all; (3)
-`_save_paramstest`'s existing `panel_shifts.txt`/`PanelShiftsFile` export
-never wrote the panel *grid* (`NPanelsY`/`NPanelsZ`/`PanelSizeY`/
-`PanelSizeZ`/`PanelGapsY`/`PanelGapsZ`), so even a correct shifts file
-linked to `NPanelsY=0` downstream. Root cause underneath all three:
-`calib.py` never recorded the panel grid config anywhere on the result
-object. Fixed by attaching two new plain, JSON-safe attributes
-(`result.panel_layout`, `result.panel_shifts_path`) the moment a
-Multi-panel run finishes (`calib._attach_panel_result`, called from
-`normalize_result`'s four_stage/bayesian/joint branches), a shared
-`helpers._apply_panel_fields()` spec-patcher used everywhere a spec is
-built from a result, and the missing grid keys added to
-`_save_paramstest`'s output. Verified via a synthetic panel_u/panel_layout
-round-trip (write → spec-patch → save paramstest → reparse → rebuild spec)
-since the real four-stage pipeline needs a physically convergent ring image
-to exercise end-to-end. Full detail + file list in DECISIONS.md; ROADMAP
-gained P3-3 for the one real upstream gap this surfaced
-(`spec_from_calibration_result` has no panel support, same shape as the
-`TransOpt` gap). Only the single-detector Calibrate tab is affected —
-Hydra mode's 4 independent-detector "panels" are a different concept,
-untouched.
-
-**2026-08-27 (`ccce056`) — Fix: Calibrate ignored Flip Z when "Multi-panel
-detector" was checked.** `calib.py`'s manual `im_trans` pre-flip workaround (needed
-because `autocalibrate_four_stage`/`_bayesian`/`_joint`/
-`pipelines.single.autocalibrate` have no native `im_trans` param — see
-ROADMAP P3-1) computed the auto-seed from the raw/untransformed image but
-ran the solve on the manually-flipped image, in all four affected branches
-of `run_pipeline()` — seed and solve ran in two different frames whenever a
-transform was active, so local gradient-based refinement converged near the
-seed's original (wrong) position. Also `dark` was passed untransformed to
-the solver even when `image` was flipped. Added `_prep_transformed()` to
-apply `im_trans` to image+dark together once, before seeding; all four
-branches now use its output for both seed and solve. Verified with a
-synthetic ring image (real test image too sparse for the auto-seeder).
-Full root-cause + verification detail in DECISIONS.md; ROADMAP P3-1 updated
-(corrects a previous wrong claim that the workaround was already
-bug-free). Scope: `first_time` pipeline branch (ignores im_trans entirely,
-separate pre-existing gap) explicitly left unfixed, per user agreement.
-
-_(Older entries — `08fe8f6`/`fe59939` README+gitignore, `5cf2e8c` error-
-dialog truncation fix — trimmed here; full detail in
+_(Older entries — `101558a` Calibrate Multi-panel→downstream-integration
+feed, `ccce056` Flip-Z/Multi-panel fix, `08fe8f6`/`fe59939` README+gitignore,
+`5cf2e8c` error-dialog truncation fix — trimmed here; full detail in
 `documentation/development_history.md`.)_
 
 ## Open questions / blockers
