@@ -169,6 +169,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Fix ImTransOpt propagation: geometry's flip/transpose now applied by the MIDAS backend (`spec.TransOpt`), not silently dropped | `2358ae4` |
 | Browse… parity: Multiple files + filestem-filtered (live folder+prefix) sources, MONITOR re-scans a filestem filter | `af8066f` |
 | Cosmetic overhaul: Drift hidden, "View calibration" popup, checkbox output formats, green Save/red Abort, Sequential/Batch-Parallel workers (single-detector + Hydra) | `a27790a` |
+| Output format + Run mode become popups (button/tooltip, not permanent widgets); fix View-calibration popup rebuilding stale on first open | `e6f2e50` |
 
 ### PDF Analysis (Tab 6)
 | Change | Commit |
@@ -3458,6 +3459,44 @@ always-visible Drift/Calibration-values cards, the single-select format
 combo, the plain Start/Abort row with no Save button, and single-worker
 `BatchWorker`-only runs; no later commit depends on `BatchRunCoordinator`/
 `OutputFormatSelector`/`write_all_profiles`.
+
+### `e6f2e50` — Batch Integrate: Output format + Run mode as popups, fix calib-popup rebuild (2026-08-28)
+**Effect:** Same-day follow-up to `a27790a`, tightening three of its pieces:
+1. **`widgets.OutputFormatSelector`** — the checkbox list no longer sits
+   permanently in the Output card; the checkboxes now live inside a
+   `QMenu` behind a clickable "Output format ▾" `QToolButton` (same
+   click-to-see-options interaction as `helpers.make_calib_values_button`).
+   The button's own text is kept in sync with the checked set (e.g.
+   "Output format: CSV, XYE ▾") via a new `_sync_button_text()` called from
+   each checkbox's `toggled` signal and from `set_state()`.
+2. **Run mode explanation → tooltip.** The permanent explanatory
+   `QLabel` under the Sequential/Batch-Parallel combo (single-detector
+   "Mode:" row in `tab_batch.py`, Hydra "Per panel:" row in
+   `hydra_batch_page.py`) is removed; the same text is now a `setToolTip()`
+   on both the row label and the combo box, freeing up card vertical space.
+3. **Fix `helpers.make_calib_values_button` popup staleness** — the
+   `QMenu`'s widget tree (`QVBoxLayout`/grid/note label/`QWidgetAction`)
+   was previously built once at construction and only its *contents*
+   refreshed in `_populate()`; a `QMenu` computes its popup size from the
+   `QWidgetAction`'s `sizeHint()` at show time, so the very first open
+   (before any calibration fields exist) could cache a near-zero size that
+   then stuck on later opens even after fields were populated. `_populate()`
+   now calls `menu.clear()` and rebuilds the whole host widget/layout/action
+   fresh on every open, guaranteeing the size hint matches the content about
+   to be shown.
+**Verified:** manual reasoning + existing `tests/test_hydra_batch_ui.py`/
+`tests/test_batch_data_source.py` suites (no behavior they assert on
+changed — `OutputFormatSelector.checked_keys()`/`get_state()`/`set_state()`
+and the calib-popup's field content are unchanged, only presentation).
+`gui_documentation.md` updated (Batch Integrate summary + §7 body) + PDF
+rebuilt.
+**Files:** `midas_gui/widgets.py`, `midas_gui/tab_batch.py`,
+`midas_gui/hydra_batch_page.py`, `midas_gui/helpers.py`,
+`documentation/gui_documentation.md`.
+**Roll back:** `git revert e6f2e50`. Self-contained — restores the
+always-visible checkbox list, the permanent Run-mode note label, and the
+mutate-in-place calibration popup from `a27790a`; no later commit depends
+on the button/tooltip presentation.
 
 ---
 

@@ -1,15 +1,30 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-28 (Batch Integrate cosmetic overhaul + Batch-Parallel
-workers — committed as `a27790a`; see "Recently completed" below)_
+_Last updated: 2026-08-28 (Output format/Run mode popups + calib-popup
+rebuild fix — committed as `e6f2e50`; see "Recently completed" below)_
 
 ## Now working on
 
-Nothing in flight — `a27790a` (Batch cosmetic overhaul + Batch-Parallel) is
-committed and pushed; awaiting next task.
+Nothing in flight — `e6f2e50` (Output format/Run mode popups, calib-popup
+rebuild fix) is committed and pushed; awaiting next task.
 
 ## Recently completed
+
+**2026-08-28 (`e6f2e50`) — Batch Integrate: Output format + Run mode as
+popups, fix calib-popup rebuild.** Same-day follow-up to `a27790a`: (1)
+`OutputFormatSelector`'s checkboxes moved from an always-visible list into
+a `QMenu` behind a clickable "Output format ▾" button whose text names the
+checked formats (same pattern as `make_calib_values_button`); (2) the
+Run-mode explanatory note (single-detector "Mode:", Hydra "Per panel:")
+became a hover tooltip on the label + combo instead of a permanent
+`QLabel`; (3) fixed `make_calib_values_button`'s popup caching a stale
+near-zero size on first open — `_populate()` now `menu.clear()`s and
+rebuilds the whole widget tree (not just the grid contents) on every open,
+since `QMenu` computes its popup size from the `QWidgetAction`'s sizeHint
+at show time. No behavior change to `checked_keys()`/`get_state()`/
+`set_state()` or the calib popup's field content — presentation only.
+`gui_documentation.md` updated + PDF rebuilt.
 
 **2026-08-28 (`a27790a`) — Batch Integrate: cosmetic overhaul +
 Batch-Parallel workers, single-detector + Hydra.** Five requested changes,
@@ -48,49 +63,9 @@ after all tests pass, unrelated). Full single-detector + Hydra tabs build
 and round-trip state correctly in an offscreen smoke check.
 `gui_documentation.md` §7 rewritten + PDF rebuilt.
 
-**2026-08-28 (`ae3b665`) — Merged Workspace + Project into one `.h5`
-"Project" file.** User request: unify the two previously-independent
-persistence mechanisms — a JSON "Workspace" (`Ctrl+S`/`Ctrl+Shift+S`/
-`Ctrl+O`, every tab's live fields) and an HDF5 "Project" (append-only
-Calibrate/Batch-Integrate provenance) — into one `.h5`. `project.py` gained
-`write_workspace()`/`read_workspace()`: a single mutable `/workspace` slot
-(JSON state + optional sidecars), overwritten each save, alongside the
-existing append-only `attempt_NNNN` history (`SCHEMA_VERSION` bumped to 2,
-old v1 files still open fine — `read_workspace` returns `({}, {})` when
-there's no `/workspace` group). `app.py`'s File menu collapsed to Save
-Project (`Ctrl+S`)/Save Project As…(`Ctrl+Shift+S`)/Open Project…(`Ctrl+O`)
-— `New Project…` is gone (Save-As to a new filename creates one); `Close
-Project` and `closeEvent` now prompt to save first if the session is
-dirty, since Ctrl+S now targets the same file. `save_project`/
-`_apply_workspace_state` replace `save_gui_state`/`load_gui_state`,
-harvesting the Mask-Builder/Calibrate sidecar files (`get_state(sidecar_
-stem=...)`, unchanged) through a scratch `tempfile.TemporaryDirectory()`
-instead of leaving them next to a JSON file — **no changes needed in
-`tab_mask.py`/`tab_calibrate.py`**. A `File ▸ Import Legacy Workspace
-(.json)…` action reads old standalone Workspace JSON files for backward
-compatibility. Per user's explicit decision, `append_calibration_attempt`/
-`append_integration_attempt` dropped their `dark`/`bright`/`background`
-embedding entirely (always file-backed already — path+hash in
-`loader_state`/`inputs` already covers provenance); a live/drawn-in-tab
-mask with no file of its own remains the one embedded exception (had no
-`mask_is_file_backed` alternative). Fixed 4 call sites across
-`tab_calibrate.py`, `tab_batch.py`, `hydra_calib_page.py`,
-`hydra_batch_page.py` (plus removed now-dead `_last_fields`/`dark`/
-`bright`/`background` plumbing in the two Hydra pages).
-**Verified:** `tests/test_project.py` (20, incl. 2 new `write_workspace`/
-`read_workspace` round-trip tests) and `tests/test_workspace_ux.py` (9,
-updated for the new API) pass per-file (the known pyqtgraph teardown crash
-— see "Open questions" — fires after all tests pass in both files,
-unrelated). An offscreen end-to-end script confirmed: Ctrl+S with no
-project open → Save-As creates a fresh `.h5`; a second save overwrites
-`/workspace` in place leaving `attempt_NNNN` groups untouched; a logged
-calibration attempt has no `dark`/`bright`/`background` datasets; a fresh
-`MainWindow` opening that project restores an edited field exactly.
-`gui_documentation.md` §16 rewritten (old §16/§17 merged into one section)
-+ PDF rebuilt.
-
-_(Older entries — `af8066f` Batch Browse… parity, `a54f796`/`ac13797`
-Browse… popup (multi-file/folder/name-stem + polish), `101558a` Calibrate
+_(Older entries — `ae3b665` merged Workspace+Project into one `.h5`,
+`af8066f` Batch Browse… parity, `a54f796`/`ac13797` Browse… popup
+(multi-file/folder/name-stem + polish), `101558a` Calibrate
 Multi-panel→downstream-integration feed, `ccce056` Flip-Z/Multi-panel fix,
 `08fe8f6`/`fe59939` README+gitignore, `5cf2e8c` error-dialog truncation fix
 — trimmed here; full detail in `documentation/development_history.md`.)_
