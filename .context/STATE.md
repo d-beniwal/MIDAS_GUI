@@ -1,15 +1,56 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-27 (Browse… popup polish — folder-path display,
-project-root default dir, wider name column — committed `a54f796`/pending
-docs commit; see "Recently completed" below)_
+_Last updated: 2026-08-28 (Merged Workspace + Project into one `.h5` file —
+committed as `ae3b665`; see "Recently completed" below)_
 
 ## Now working on
 
-Nothing in progress; branch about to be pushed to `origin/main`.
+Nothing in flight — `ae3b665` (Workspace/Project merge) is committed and
+pushed; awaiting next task.
 
 ## Recently completed
+
+**2026-08-28 (`ae3b665`) — Merged Workspace + Project into one `.h5`
+"Project" file.** User request: unify the two previously-independent
+persistence mechanisms — a JSON "Workspace" (`Ctrl+S`/`Ctrl+Shift+S`/
+`Ctrl+O`, every tab's live fields) and an HDF5 "Project" (append-only
+Calibrate/Batch-Integrate provenance) — into one `.h5`. `project.py` gained
+`write_workspace()`/`read_workspace()`: a single mutable `/workspace` slot
+(JSON state + optional sidecars), overwritten each save, alongside the
+existing append-only `attempt_NNNN` history (`SCHEMA_VERSION` bumped to 2,
+old v1 files still open fine — `read_workspace` returns `({}, {})` when
+there's no `/workspace` group). `app.py`'s File menu collapsed to Save
+Project (`Ctrl+S`)/Save Project As…(`Ctrl+Shift+S`)/Open Project…(`Ctrl+O`)
+— `New Project…` is gone (Save-As to a new filename creates one); `Close
+Project` and `closeEvent` now prompt to save first if the session is
+dirty, since Ctrl+S now targets the same file. `save_project`/
+`_apply_workspace_state` replace `save_gui_state`/`load_gui_state`,
+harvesting the Mask-Builder/Calibrate sidecar files (`get_state(sidecar_
+stem=...)`, unchanged) through a scratch `tempfile.TemporaryDirectory()`
+instead of leaving them next to a JSON file — **no changes needed in
+`tab_mask.py`/`tab_calibrate.py`**. A `File ▸ Import Legacy Workspace
+(.json)…` action reads old standalone Workspace JSON files for backward
+compatibility. Per user's explicit decision, `append_calibration_attempt`/
+`append_integration_attempt` dropped their `dark`/`bright`/`background`
+embedding entirely (always file-backed already — path+hash in
+`loader_state`/`inputs` already covers provenance); a live/drawn-in-tab
+mask with no file of its own remains the one embedded exception (had no
+`mask_is_file_backed` alternative). Fixed 4 call sites across
+`tab_calibrate.py`, `tab_batch.py`, `hydra_calib_page.py`,
+`hydra_batch_page.py` (plus removed now-dead `_last_fields`/`dark`/
+`bright`/`background` plumbing in the two Hydra pages).
+**Verified:** `tests/test_project.py` (20, incl. 2 new `write_workspace`/
+`read_workspace` round-trip tests) and `tests/test_workspace_ux.py` (9,
+updated for the new API) pass per-file (the known pyqtgraph teardown crash
+— see "Open questions" — fires after all tests pass in both files,
+unrelated). An offscreen end-to-end script confirmed: Ctrl+S with no
+project open → Save-As creates a fresh `.h5`; a second save overwrites
+`/workspace` in place leaving `attempt_NNNN` groups untouched; a logged
+calibration attempt has no `dark`/`bright`/`background` datasets; a fresh
+`MainWindow` opening that project restores an edited field exactly.
+`gui_documentation.md` §16 rewritten (old §16/§17 merged into one section)
++ PDF rebuilt.
 
 **2026-08-27 (`a54f796`) — Browse… popup polish: folder-path display,
 project-root default dir, wider name column.** User feedback on the just-
@@ -102,38 +143,9 @@ Full root-cause + verification detail in DECISIONS.md; ROADMAP P3-1 updated
 bug-free). Scope: `first_time` pipeline branch (ignores im_trans entirely,
 separate pre-existing gap) explicitly left unfixed, per user agreement.
 
-**2026-08-27 (`08fe8f6`/`fe59939`, pushed):** Added a README Troubleshooting
-section (pip `--no-cache-dir` reinstall fix for corrupted-cache DLL/
-submodule import errors, e.g. torch `fbgemm.dll`, `mpmath.libmp`) and
-gitignored the local-only `test_data/projects/` dataset (66 MB of
-self-contained-project `.h5`/workspace JSON, same pattern as `s17bm/`
-etc.).
-
-**2026-08-27 (`5cf2e8c`) — error dialogs/logs no longer truncate the
-underlying exception, app-wide.** Triggered by a Windows user's
-"Calibration failed" dialog showing only a stray `F` —
-`QMessageBox.critical(..., msg[:400])` in `tab_calibrate.py`'s `_on_fail`
-happened to cut the traceback mid-word. The same `msg[:N]`/
-`traceback.format_exc()[:N]` pattern (N in 200-600) was copy-pasted across
-~15 files' worker-failure handlers. Added `dialogs.show_error(parent,
-title, full_text, log=None, log_prefix="")`: shows a one-line summary with
-Qt's native scrollable "Show Details…" panel holding the complete text, and
-optionally appends the same full text to a tab's log widget/callback.
-Replaced every truncated dialog call with it across `tab_calibrate.py`,
-`tab_refine.py`, `tab_pdf.py`, `tab_corrections.py`, `tab_batch.py`,
-`tab_pumpprobe.py`, `tab_texture.py`, `tab_view.py`, `tab_export.py`,
-`tab_mask.py`, `widgets.py`, `hydra_calib_widgets.py`,
-`hydra_geometry_card.py`; dropped the slice on log-only sites in
-`hydra_batch_page.py`/`hydra_calib_page.py` that had no paired dialog.
-`str(e)`-only dialogs (never truncated) were left alone, as was one
-unrelated single-line status-label truncation in `widgets.py`
-(`FieldAverageWidget`, no dialog/log involved — different UI affordance).
-`documentation/gui_documentation.md` §13 updated. The Windows user's actual
-underlying exception (an import from `midas_calibrate_v2`/
-`midas_calibrate_v2.forward.panels` failing) is still unconfirmed — this
-fix only unblocks *seeing* the full error next time it happens; likely
-causes flagged to the user: version mismatch with the 2026-08-25 backend
-upgrade (`a74b7d6`), or a Windows DLL/native-extension load failure.
+_(Older entries — `08fe8f6`/`fe59939` README+gitignore, `5cf2e8c` error-
+dialog truncation fix — trimmed here; full detail in
+`documentation/development_history.md`.)_
 
 ## Open questions / blockers
 

@@ -209,6 +209,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Workspace/Project record + restore the active beamline Profile on load/open; Eta vs R Cake plots' right-click-drag zooms only the axis actually dragged (was always η-only) | `943a91d` |
 | Data Loader Browse… popup (Single/Multiple files/Full folder/Files sharing a name stem) + Hydra gains real cross-tab Import from… | `ac13797` |
 | Browse… popup polish: folder/file-path display (not a count), project-root default dir, wider name column | `a54f796` |
+| Merge Workspace (JSON) and FAIR Project (HDF5) into one `.h5` Project file; File menu collapses to Save/Save As/Open Project | `ae3b665` |
 
 ### Stability / performance / consistency (review-driven, phases 1–3)
 | Change | Commit |
@@ -3287,6 +3288,57 @@ green.
 **Roll back:** `git revert a54f796`. Self-contained; no dependents.
 Restores the "N files selected" count text, `Path.home()` as the popup's
 default folder, and the original 100px name column.
+
+---
+
+### `ae3b665` — Project: merge Workspace and FAIR Project into one `.h5` file (2026-08-28)
+**Effect:** Unified the two previously-independent persistence mechanisms —
+a JSON "Workspace" (`Ctrl+S`/`Ctrl+Shift+S`/`Ctrl+O`, every tab's live
+fields) and an HDF5 "Project" (append-only Calibrate/Batch-Integrate
+provenance) — into one `.h5`. `project.py` gained `write_workspace()`/
+`read_workspace()`: a single mutable `/workspace` slot (JSON state +
+optional sidecars), overwritten each save, alongside the existing
+append-only `attempt_NNNN` history (`SCHEMA_VERSION` bumped 1→2; old v1
+files still open fine, `read_workspace` returns `({}, {})` when there's no
+`/workspace` group yet). `app.py`'s File menu collapsed to Save Project
+(`Ctrl+S`)/Save Project As…(`Ctrl+Shift+S`)/Open Project…(`Ctrl+O`) — `New
+Project…` is gone (Save-As to a new filename creates one); `Close Project`
+and `closeEvent` now prompt to save first if the session is dirty, since
+`Ctrl+S` now targets the same file. `save_project`/`_apply_workspace_state`
+replace `save_gui_state`/`load_gui_state`, harvesting the Mask-Builder/
+Calibrate sidecar files (`get_state(sidecar_stem=...)`, unchanged) through
+a scratch `tempfile.TemporaryDirectory()` instead of leaving them next to a
+JSON file — no changes needed in `tab_mask.py`/`tab_calibrate.py`'s
+`get_state`/`set_state`. A `File ▸ Import Legacy Workspace (.json)…` action
+reads old standalone Workspace JSON files for backward compatibility. Per
+explicit decision, `append_calibration_attempt`/`append_integration_
+attempt` dropped their `dark`/`bright`/`background` embedding entirely
+(already always file-backed — path+hash in `loader_state`/`inputs` already
+covers provenance); a live/drawn-in-tab mask with no file of its own
+remains the one embedded exception (had no `mask_is_file_backed`
+alternative). Fixed 4 call sites across `tab_calibrate.py`, `tab_batch.py`,
+`hydra_calib_page.py`, `hydra_batch_page.py` (plus removed now-dead
+`_last_fields`/`dark`/`bright`/`background` plumbing in the two Hydra
+pages).
+**Verified:** `tests/test_project.py` (20, incl. 2 new `write_workspace`/
+`read_workspace` round-trip tests) and `tests/test_workspace_ux.py` (9,
+updated for the new API) pass per-file (the known pyqtgraph interpreter-
+teardown crash fires after all tests pass, unrelated). An offscreen
+end-to-end script confirmed: `Ctrl+S` with no project open → Save-As
+creates a fresh `.h5`; a second save overwrites `/workspace` in place
+leaving `attempt_NNNN` groups untouched; a logged calibration attempt has
+no `dark`/`bright`/`background` datasets; a fresh `MainWindow` opening that
+project restores an edited field exactly.
+**Files:** `midas_gui/app.py`, `midas_gui/project.py`,
+`midas_gui/tab_batch.py`, `midas_gui/tab_calibrate.py`,
+`midas_gui/hydra_batch_page.py`, `midas_gui/hydra_calib_page.py`,
+`tests/test_project.py`, `tests/test_workspace_ux.py`,
+`documentation/gui_documentation.md`.
+**Roll back:** `git revert ae3b665`. Restores the separate JSON Workspace
+(`save_gui_state`/`load_gui_state`) and the old `New Project…` menu action;
+downstream `append_calibration_attempt`/`append_integration_attempt`
+callers would need their `dark`/`bright`/`background` args restored too if
+reverted in isolation.
 
 ---
 
