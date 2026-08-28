@@ -37,9 +37,6 @@ def test_record_and_get_recent_roundtrip(tmp_path, monkeypatch):
     entries = settings.get_recent("project")
     assert [e["name"] for e in entries] == ["a.h5", "b.h5"]
 
-    # Workspaces and projects are tracked independently.
-    assert settings.get_recent("workspace") == []
-
     with pytest.raises(ValueError):
         settings.record_recent(str(a), "bogus_kind")
 
@@ -118,13 +115,13 @@ def win(qapp):
 
 @pytest.fixture
 def no_modal_dialogs(monkeypatch):
-    """save_gui_state/load_gui_state end with an informational QMessageBox —
-    fine interactively, but exec_() blocks forever with no user to click it
-    under the offscreen QPA platform. Existing tests elsewhere in the suite
-    avoid this by calling tab-level apply_project_* methods directly instead
-    of the MainWindow wrappers that pop these dialogs (see test_project.py);
-    the tests here need the MainWindow wrappers themselves, so stub the
-    dialogs instead."""
+    """save_project/_apply_workspace_state end with an informational
+    QMessageBox — fine interactively, but exec_() blocks forever with no
+    user to click it under the offscreen QPA platform. Existing tests
+    elsewhere in the suite avoid this by calling tab-level apply_project_*
+    methods directly instead of the MainWindow wrappers that pop these
+    dialogs (see test_project.py); the tests here need the MainWindow
+    wrappers themselves, so stub the dialogs instead."""
     from PyQt5 import QtWidgets
     monkeypatch.setattr(QtWidgets.QMessageBox, "information",
                          staticmethod(lambda *a, **k: None))
@@ -152,12 +149,15 @@ def test_editing_a_field_marks_workspace_dirty(win, tmp_path, no_modal_dialogs):
     assert win.isWindowModified() is True
 
     # Saving clears the dirty flag and updates the baseline.
-    save_path = str(tmp_path / "session.json")
-    win.save_gui_state(save_path)
+    save_path = str(tmp_path / "session.h5")
+    project.create_project(save_path)
+    win.save_project(save_path)
     assert win._workspace_dirty is False
     assert win.isWindowModified() is False
     win._check_workspace_dirty()
     assert win._workspace_dirty is False   # unchanged since the save
+
+    win._close_project()   # leave a clean baseline for later tests
 
 
 def test_autosave_tick_writes_and_is_cleared_by_save(win, tmp_path, monkeypatch):
@@ -187,23 +187,23 @@ def test_maybe_offer_restore_autosave_decline_and_accept(
     # Decline: draft is discarded, nothing else about the window changes.
     draft.write_text(_json.dumps(state))
     monkeypatch.setattr(MB, "question", staticmethod(lambda *a, **k: MB.No))
-    win._gui_state_path = "/tmp/whatever.json"
+    win._project_ctx.path = "/tmp/whatever.h5"
     win.maybe_offer_restore_autosave()
     assert not draft.exists()
-    assert win._gui_state_path == "/tmp/whatever.json"
+    assert win._project_ctx.path == "/tmp/whatever.h5"
 
-    # Accept: draft is loaded, and _gui_state_path is reset to None (so the
+    # Accept: draft is loaded, and the open project is detached (so the
     # next Ctrl+S prompts for a real destination rather than silently
-    # overwriting the hidden autosave file).
+    # overwriting whichever project happened to be open).
     draft.write_text(_json.dumps(state))
     monkeypatch.setattr(MB, "question", staticmethod(lambda *a, **k: MB.Yes))
     win.maybe_offer_restore_autosave()
-    assert win._gui_state_path is None
+    assert win._project_ctx.path is None
     assert win._workspace_dirty is True
     assert not draft.exists()
 
     win._set_workspace_dirty(False)   # leave a clean baseline for later tests
-    win._gui_state_path = None
+    win._project_ctx.path = None
 
 
 def test_project_history_dialog_lists_attempts(qapp, project_with_attempts):

@@ -108,7 +108,6 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._active_card: Optional[HydraCalibPanelCard] = None
         self._disp_key = None
         self._last_cfgs: dict = {}      # panel_num -> cfg used for its last run (provenance)
-        self._last_fields: dict = {}    # panel_num -> (dark, bright, background) arrays
         self._pending_log_results: dict = {}  # panel_num -> result awaiting _log_to_project
         self._composite_log_pending = False   # True during a live run, until it fully finishes
         self._project_ctx: Optional[project.ProjectContext] = None
@@ -684,7 +683,6 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         bright_mode = self._loader.bright_mode()
         cfg = self._build_cfg(card)
         self._last_cfgs[n] = dict(cfg)
-        self._last_fields[n] = (dark, bright, background)
         mode = self._pipeline.currentData()
         worker = CalibrationWorker(
             mode, image, dark, cfg, parent=self, bright=bright, background=background,
@@ -720,7 +718,6 @@ class HydraCalibrationPage(QtWidgets.QWidget):
     def _log_to_project(self, n: int, result, results: Optional[dict] = None):
         if not self._project_ctx or not self._project_ctx.path:
             return
-        dark, bright, background = self._last_fields.get(n, (None, None, None))
         siblings = self._loader.siblings()
         loader_state = {
             "path": siblings.get(n), "dataset": self._loader.dataset(),
@@ -731,7 +728,6 @@ class HydraCalibrationPage(QtWidgets.QWidget):
                 self._project_ctx.path, f"ge{n}",
                 cfg=self._last_cfgs.get(n, {}), result=result,
                 loader_state=loader_state,
-                dark=dark, bright=bright, background=background,
                 results=results,
                 extra={"active_profile": settings.active_profile()})
             result._project_attempt_ref = ref

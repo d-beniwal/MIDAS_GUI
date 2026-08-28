@@ -946,8 +946,6 @@ class CalibrationTab(QtWidgets.QWidget):
                 self._project_ctx.path, "single",
                 cfg=self._last_cfg, result=result,
                 loader_state=self._loader.get_state(),
-                dark=self._dark, bright=self._last_bright,
-                background=self._last_background,
                 mask_is_file_backed=mask_is_file_backed,
                 results=results,
                 extra={"active_profile": settings.active_profile()})

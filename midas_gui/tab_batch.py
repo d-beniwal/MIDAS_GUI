@@ -583,7 +583,6 @@ class BatchTab(QtWidgets.QWidget):
         mask = self._loader.composite_mask()
         self._last_run_fields = {
             "mask": mask,
-            "dark": dark, "bright": bright, "background": background,
             "mask_is_file_backed": mask is not None and not self._loader.has_live_mask_source(),
         }
 

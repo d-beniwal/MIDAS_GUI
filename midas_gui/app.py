@@ -6,6 +6,7 @@ import hashlib
 import inspect
 import json
 import sys
+import tempfile
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -84,10 +85,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.resize(1600, 950)
-        self._gui_state_path: Optional[str] = None   # last loaded/saved Workspace path
         self._workspace_dirty = False
         self._last_saved_hash: Optional[str] = None
-        self._project_ctx = project.ProjectContext()  # currently-open FAIR provenance project
+        self._project_ctx = project.ProjectContext()  # currently-open project (path also
+                                                        # doubles as "the file Ctrl+S targets")
         self._build_ui()
         self._update_window_title()
         # Baseline for the dirty-check timer below — an untouched, freshly
@@ -407,26 +408,22 @@ class MainWindow(QtWidgets.QMainWindow):
                 except Exception:
                     _log(f"Hydra-visibility update failed:\n{traceback.format_exc()}")
 
-    # ── File menu: Workspace (session) + Project (FAIR provenance) ──
+    # ── File menu: one Project (.h5) holds both the session snapshot and
+    # the append-only FAIR-provenance calibration/integration history ──
     def _build_file_menu(self):
         m = self.menuBar().addMenu("&File")
-        act_save = m.addAction("Save Workspace…")
+        act_save = m.addAction("Save Project")
         act_save.setShortcut(QtGui.QKeySequence("Ctrl+S"))
-        act_save.triggered.connect(self._save_gui_state_dialog)
-        act_save_as = m.addAction("Save Workspace As…")
+        act_save.triggered.connect(self._save_project_dialog)
+        act_save_as = m.addAction("Save Project As…")
         act_save_as.setShortcut(QtGui.QKeySequence("Ctrl+Shift+S"))
-        act_save_as.triggered.connect(self._save_gui_state_as_dialog)
-        act_load = m.addAction("Load Workspace…")
-        act_load.setShortcut(QtGui.QKeySequence("Ctrl+O"))
-        act_load.triggered.connect(self._load_gui_state_dialog)
-        self._recent_workspaces_menu = m.addMenu("Recent Workspaces")
+        act_save_as.triggered.connect(self._save_project_as_dialog)
+        act_open = m.addAction("Open Project…")
+        act_open.setShortcut(QtGui.QKeySequence("Ctrl+O"))
+        act_open.triggered.connect(self._open_project_dialog)
+        self._recent_projects_menu = m.addMenu("Recent Projects")
 
         m.addSeparator()
-        act_new_proj = m.addAction("New Project…")
-        act_new_proj.triggered.connect(self._new_project_dialog)
-        act_open_proj = m.addAction("Open Project…")
-        act_open_proj.triggered.connect(self._open_project_dialog)
-        self._recent_projects_menu = m.addMenu("Recent Projects")
         self._project_history_act = m.addAction("Project History…")
         self._project_history_act.setEnabled(False)
         self._project_history_act.triggered.connect(self._show_project_history)
@@ -434,13 +431,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._close_proj_act.setEnabled(False)
         self._close_proj_act.triggered.connect(self._close_project)
 
+        m.addSeparator()
+        act_import_legacy = m.addAction("Import Legacy Workspace (.json)…")
+        act_import_legacy.triggered.connect(self._import_legacy_workspace_dialog)
+
         m.aboutToShow.connect(self._refresh_recent_menus)
 
     def _refresh_recent_menus(self) -> None:
         self._populate_recent_menu(
             self._recent_projects_menu, "project", self._open_project_path)
-        self._populate_recent_menu(
-            self._recent_workspaces_menu, "workspace", self._load_gui_state_path)
 
     @staticmethod
     def _format_recent_when(when_utc) -> str:
@@ -470,38 +469,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._close_proj_act.setEnabled(path is not None)
         self._project_history_act.setEnabled(path is not None)
 
-    def _new_project_dialog(self):
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "New Project", "midas_project.h5", "MIDAS Project (*.h5)")
-        if not path:
-            return
-        try:
-            project.create_project(path)
-        except FileExistsError:
-            QtWidgets.QMessageBox.critical(
-                self, "New Project failed",
-                f"{path}\nalready exists — pick a new file, or use "
-                "File → Open Project… to continue an existing one.")
-            return
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "New Project failed", str(e))
-            return
-        self._set_project_path(path)
-        settings.record_recent(path, "project")
-        info = (f"Created project:\n{path}\n\n"
-                "Calibrate and Batch Integrate runs will now be logged to it "
-                "automatically (for both single-detector and Hydra modes).")
-        if QtWidgets.QMessageBox.question(
-                self, "New Project",
-                info + "\n\nAlso save the current Workspace, linked to this "
-                "project (so Open Project can restore it later)?",
-                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                QtWidgets.QMessageBox.Yes) == QtWidgets.QMessageBox.Yes:
-            ws_path = f"{Path(path).with_suffix('')}_workspace.json"
-            self.save_gui_state(ws_path)
-        else:
-            QtWidgets.QMessageBox.information(self, "New Project", info)
-
     def _open_project_dialog(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, "Open Project", "", "MIDAS Project (*.h5);;All files (*)")
@@ -510,7 +477,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._open_project_path(path)
 
     def _open_project_path(self, path) -> None:
-        """Shared by File ▸ Open Project… and the Recent Projects menu."""
+        """Shared by File ▸ Open Project… and the Recent Projects menu. Opens
+        the project for future Calibrate/Batch-Integrate logging, restores
+        its saved session (``/workspace`` — see ``project.read_workspace``)
+        into every tab if it has one, and offers the separate, opt-in
+        historical-attempt picker (``_offer_populate_from_project``)."""
         try:
             project.open_project(path)
         except Exception as e:
@@ -519,9 +490,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_project_path(path)
         settings.record_recent(path, "project")
         try:
-            self._restore_active_profile(project.project_active_profile(path))
+            state, sidecars = project.read_workspace(path)
         except Exception:
-            _log(f"Could not read project's active profile:\n{traceback.format_exc()}")
+            _log(f"Reading project workspace failed:\n{traceback.format_exc()}")
+            state, sidecars = {}, {}
+        if state:
+            if QtWidgets.QMessageBox.question(
+                    self, "Open Project",
+                    "Restoring this project's saved session will overwrite "
+                    "the current values in every tab. Continue?",
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                    QtWidgets.QMessageBox.No) == QtWidgets.QMessageBox.Yes:
+                self._apply_workspace_state(state, sidecars)
+        else:
+            # No saved session yet (brand-new project, or a v1 project
+            # predating this feature) — fall back to the creation-time
+            # profile so at least Profile-scoped defaults line up.
+            try:
+                self._restore_active_profile(project.project_active_profile(path))
+            except Exception:
+                _log(f"Could not read project's active profile:\n{traceback.format_exc()}")
         self._offer_populate_from_project(path)
 
     def _restore_active_profile(self, name) -> None:
@@ -541,6 +529,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.on_profile_changed()
 
     def _close_project(self):
+        """Unlike closing the whole app, this detaches from the project file
+        (stops future Calibrate/Batch-Integrate logging and the Ctrl+S
+        target) without touching any tab's live field values — but since
+        Ctrl+S now writes the session into this same file, an unsaved
+        session would otherwise be silently lost on Close, so offer to save
+        first exactly like ``closeEvent`` does."""
+        if self._workspace_dirty:
+            resp = QtWidgets.QMessageBox.question(
+                self, "Unsaved changes",
+                "This project has unsaved session changes. Save before closing it?",
+                QtWidgets.QMessageBox.Save | QtWidgets.QMessageBox.Discard
+                | QtWidgets.QMessageBox.Cancel,
+                QtWidgets.QMessageBox.Save)
+            if resp == QtWidgets.QMessageBox.Cancel:
+                return
+            if resp == QtWidgets.QMessageBox.Save:
+                self._save_project_dialog()
+                if self._workspace_dirty:   # user cancelled the Save/Save-As prompt
+                    return
         self._set_project_path(None)
 
     def _show_project_history(self) -> None:
@@ -613,39 +620,59 @@ class MainWindow(QtWidgets.QMainWindow):
             self, "Populate from project",
             "Populated from this project's recorded attempts:\n\n" + "\n".join(msg))
 
-    def _save_gui_state_dialog(self):
-        """Ctrl+S: overwrite the file this session last loaded/saved from, if
-        any; otherwise fall back to a Save-As prompt (first save)."""
-        if self._gui_state_path:
-            self.save_gui_state(self._gui_state_path)
+    def _save_project_dialog(self):
+        """Ctrl+S: overwrite the currently-open project's ``/workspace``
+        slot, if any; otherwise fall back to a Save-As prompt (first save)."""
+        if self._project_ctx.path:
+            self.save_project(self._project_ctx.path)
             return
-        self._save_gui_state_as_dialog()
+        self._save_project_as_dialog()
 
-    def _save_gui_state_as_dialog(self):
+    def _save_project_as_dialog(self):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save Workspace", self._gui_state_path or "midas_session.json",
-            "JSON (*.json)")
+            self, "Save Project As", self._project_ctx.path or "midas_project.h5",
+            "MIDAS Project (*.h5)")
         if not path:
             return
-        self.save_gui_state(path)
+        if Path(path).exists():
+            try:
+                project.open_project(path)   # validate it really is a project file
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Save Project As failed", str(e))
+                return
+        else:
+            try:
+                project.create_project(path)
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Save Project As failed", str(e))
+                return
+        self.save_project(path)
 
-    def _load_gui_state_dialog(self):
+    def _import_legacy_workspace_dialog(self):
+        """Reads a standalone Workspace JSON file from before this feature
+        merged Workspace and Project into one ``.h5`` file, and applies it
+        into whichever project is (or isn't) currently open."""
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Load Workspace", "", "JSON (*.json);;All files (*)")
+            self, "Import Legacy Workspace", "", "JSON (*.json);;All files (*)")
         if not path:
             return
-        self._load_gui_state_path(path)
-
-    def _load_gui_state_path(self, path) -> None:
-        """Shared by File ▸ Load Workspace… and the Recent Workspaces menu."""
+        try:
+            data = json.loads(Path(path).read_text())
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Import failed", str(e))
+            return
+        if not data.get("__midas_gui_state__"):
+            QtWidgets.QMessageBox.critical(
+                self, "Import failed", "This file is not a MIDAS GUI workspace file.")
+            return
         if QtWidgets.QMessageBox.question(
-                self, "Load Workspace",
-                "Loading a saved workspace will overwrite the current values "
+                self, "Import Legacy Workspace",
+                "Importing this workspace will overwrite the current values "
                 "in every tab. Continue?",
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
                 QtWidgets.QMessageBox.No) != QtWidgets.QMessageBox.Yes:
             return
-        self.load_gui_state(path)
+        self._apply_workspace_state(data, sidecars={})
 
     @staticmethod
     def _accepts_sidecar_stem(fn) -> bool:
@@ -656,7 +683,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _serialize_workspace(self, sidecar_stem=None, *, quiet: bool = False):
         """Build the ``{"__midas_gui_state__": ..., "tabs": {...}}`` dict that
-        :meth:`save_gui_state` writes to disk. Shared with the periodic
+        :meth:`save_project` writes into the project's ``/workspace`` slot.
+        Shared with the periodic
         dirty-check and autosave: passing ``sidecar_stem=None`` (their case)
         skips every tab's sidecar file I/O (mask/calibration export — see
         each tab's own ``get_state``), so it's cheap and side-effect-free to
@@ -703,14 +731,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_workspace_dirty(self._hash_workspace_state(state) != self._last_saved_hash)
 
     def _update_window_title(self) -> None:
-        name = Path(self._gui_state_path).stem if self._gui_state_path else "Untitled"
+        name = Path(self._project_ctx.path).stem if self._project_ctx.path else "Untitled"
         self.setWindowTitle(f"MIDAS GUI v{__version__} — {name}[*]")
 
     def _autosave_tick(self) -> None:
-        """QTimer tick (every few minutes): if the Workspace is dirty, write
-        a crash-recovery draft — reusing the exact serialization save_gui_state
-        uses, just pointed at a fixed internal path instead of prompting.
-        Never touches a Project's `.h5` file."""
+        """QTimer tick (every few minutes): if the session is dirty, write a
+        crash-recovery draft JSON — reusing the exact serialization
+        save_project uses, just pointed at a fixed internal path instead of
+        prompting. Never touches the open Project's `.h5` file itself."""
         if not self._workspace_dirty:
             return
         state, _errors = self._serialize_workspace(quiet=True)
@@ -719,7 +747,7 @@ class MainWindow(QtWidgets.QMainWindow):
             draft.parent.mkdir(parents=True, exist_ok=True)
             draft.write_text(json.dumps(state, indent=2))
         except Exception:
-            _log(f"Workspace autosave failed:\n{traceback.format_exc()}")
+            _log(f"Session autosave failed:\n{traceback.format_exc()}")
 
     def _clear_autosave_draft(self) -> None:
         try:
@@ -740,77 +768,94 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             when = "an earlier session"
         if QtWidgets.QMessageBox.question(
-                self, "Restore unsaved workspace?",
-                f"MIDAS GUI found an autosaved workspace from {when} that was "
+                self, "Restore unsaved session?",
+                f"MIDAS GUI found an autosaved session from {when} that was "
                 "never explicitly saved (likely from a crash or a forced "
                 "quit).\n\nRestore it?",
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
                 QtWidgets.QMessageBox.Yes) == QtWidgets.QMessageBox.Yes:
-            self.load_gui_state(str(draft))
-            self._gui_state_path = None   # recovered draft has no "real" home yet
-            self._update_window_title()
-            self._set_workspace_dirty(True)   # force Ctrl+S to prompt for a destination
+            try:
+                data = json.loads(draft.read_text())
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Restore failed", str(e))
+                data = None
+            if data is not None:
+                self._apply_workspace_state(data, sidecars={})
+                self._set_project_path(None)      # recovered draft has no "real" home yet
+                self._update_window_title()
+                self._set_workspace_dirty(True)   # force Ctrl+S to prompt for a destination
         self._clear_autosave_draft()
 
-    def save_gui_state(self, path):
-        """Dump every tab's ``get_state()`` into one JSON file. Tabs that hold
-        derived data not yet exported to a file of its own (MaskTab, CalibrationTab)
-        write small sidecars named after ``path`` so nothing in-progress is lost."""
-        stem = str(Path(path).with_suffix(""))
-        state, errors = self._serialize_workspace(sidecar_stem=stem)
+    def save_project(self, path):
+        """Overwrite this project's ``/workspace`` slot (see
+        ``project.write_workspace``) with every tab's current field state —
+        the merged replacement for the old standalone Workspace JSON file.
+        Tabs that hold derived data not yet exported to a file of its own
+        (MaskTab, CalibrationTab) still write small sidecars via their
+        existing ``get_state(sidecar_stem=...)`` contract; those are
+        harvested from a scratch temp dir and embedded into the project
+        instead of being left as loose files on disk."""
+        with tempfile.TemporaryDirectory(prefix="midas_gui_sidecar_") as td:
+            stem = str(Path(td) / "sidecar")
+            state, errors = self._serialize_workspace(sidecar_stem=stem)
+            sidecars = {f.name: f.read_bytes() for f in Path(td).iterdir()}
         try:
-            Path(path).write_text(json.dumps(state, indent=2))
+            project.write_workspace(path, state, sidecars)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Save failed", str(e))
             return
-        self._gui_state_path = path
+        self._set_project_path(path)
         self._last_saved_hash = self._hash_workspace_state(state)
         self._set_workspace_dirty(False)
         self._update_window_title()
-        settings.record_recent(path, "workspace")
+        settings.record_recent(path, "project")
         self._clear_autosave_draft()
-        msg = f"Saved workspace to:\n{path}"
+        msg = f"Saved project to:\n{path}"
         if errors:
             msg += "\n\nThe following tabs could not be saved:\n" + "\n".join(errors)
-        QtWidgets.QMessageBox.information(self, "Save Workspace", msg)
+        QtWidgets.QMessageBox.information(self, "Save Project", msg)
 
-    def load_gui_state(self, path):
-        """Restore every tab's fields from a file written by :meth:`save_gui_state`.
-        Path-backed fields (images, masks, dark/bright/background, HDF5 datasets)
-        are re-loaded automatically; long-running pipelines (Fit, Batch Integrate,
-        PDF transform, Refinement) are not re-run — their inputs are restored so a
-        single click of the tab's own Run/Fit button reproduces the result."""
-        try:
-            data = json.loads(Path(path).read_text())
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Load failed", str(e))
-            return
+    def _apply_workspace_state(self, data: dict, sidecars: Optional[dict] = None) -> None:
+        """Restore every tab's fields from a previously saved session
+        snapshot — a project's ``/workspace`` (see ``_open_project_path``),
+        a legacy standalone Workspace JSON (``_import_legacy_workspace_dialog``),
+        or an autosave crash-recovery draft (``maybe_offer_restore_autosave``).
+        Path-backed fields (images, masks, dark/bright/background, HDF5
+        datasets) are re-loaded automatically; long-running pipelines (Fit,
+        Batch Integrate, PDF transform, Refinement) are not re-run — their
+        inputs are restored so a single click of the tab's own Run/Fit
+        button reproduces the result."""
         if not data.get("__midas_gui_state__"):
             QtWidgets.QMessageBox.critical(
-                self, "Load failed", "This file is not a MIDAS GUI workspace file.")
+                self, "Load failed", "This is not a valid MIDAS GUI session snapshot.")
             return
-        self._gui_state_path = path
-        stem = str(Path(path).with_suffix(""))
         try:
             self._restore_active_profile(data.get("active_profile"))
         except Exception:
-            _log(f"Could not restore workspace's active profile:\n{traceback.format_exc()}")
+            _log(f"Could not restore session's active profile:\n{traceback.format_exc()}")
         name_to_widget = {name: widget for widget, name, _always in self._tab_specs}
         errors, skipped = [], []
-        for name, tstate in data.get("tabs", {}).items():
-            widget = name_to_widget.get(name)
-            set_state = getattr(widget, "set_state", None) if widget is not None else None
-            if set_state is None:
-                skipped.append(name)
-                continue
-            try:
-                if self._accepts_sidecar_stem(set_state):
-                    set_state(tstate, sidecar_stem=stem)
+        with tempfile.TemporaryDirectory(prefix="midas_gui_sidecar_") as td:
+            stem = str(Path(td) / "sidecar")
+            for name, blob in (sidecars or {}).items():
+                if isinstance(blob, (bytes, bytearray)):
+                    (Path(td) / name).write_bytes(bytes(blob))
                 else:
-                    set_state(tstate)
-            except Exception:
-                _log(f"Load Workspace failed for tab '{name}':\n{traceback.format_exc()}")
-                errors.append(name)
+                    (Path(td) / name).write_text(blob)
+            for name, tstate in data.get("tabs", {}).items():
+                widget = name_to_widget.get(name)
+                set_state = getattr(widget, "set_state", None) if widget is not None else None
+                if set_state is None:
+                    skipped.append(name)
+                    continue
+                try:
+                    if self._accepts_sidecar_stem(set_state):
+                        set_state(tstate, sidecar_stem=stem)
+                    else:
+                        set_state(tstate)
+                except Exception:
+                    _log(f"Session restore failed for tab '{name}':\n{traceback.format_exc()}")
+                    errors.append(name)
         active = data.get("active_tab")
         widget = name_to_widget.get(active) if active else None
         idx = self._tabs.indexOf(widget) if widget is not None else -1
@@ -820,8 +865,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_saved_hash = self._hash_workspace_state(state)
         self._set_workspace_dirty(False)
         self._update_window_title()
-        settings.record_recent(path, "workspace")
-        msg = (f"Loaded workspace from:\n{path}\n\n"
+        msg = ("Restored session.\n\n"
                "Path-backed fields (images, masks, dark/bright/background) were "
                "reloaded. Fit / Batch Integrate / PDF transform / Refinement "
                "results are not recomputed — re-run each tab's own action to "
@@ -830,7 +874,7 @@ class MainWindow(QtWidgets.QMainWindow):
             msg += "\n\nTabs in the file no longer present:\n" + "\n".join(skipped)
         if errors:
             msg += "\n\nThe following tabs failed to restore:\n" + "\n".join(errors)
-        QtWidgets.QMessageBox.information(self, "Load Workspace", msg)
+        QtWidgets.QMessageBox.information(self, "Open Project", msg)
 
     def _build_menu(self):
         """Settings menu: preferences, open config folder, reload."""
@@ -955,7 +999,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if getattr(self, "_workspace_dirty", False):
             resp = QtWidgets.QMessageBox.question(
                 self, "Unsaved changes",
-                "Your workspace has unsaved changes. Save before closing?",
+                "This project has unsaved session changes. Save before closing?",
                 QtWidgets.QMessageBox.Save | QtWidgets.QMessageBox.Discard
                 | QtWidgets.QMessageBox.Cancel,
                 QtWidgets.QMessageBox.Save)
@@ -963,7 +1007,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 event.ignore()
                 return
             if resp == QtWidgets.QMessageBox.Save:
-                self._save_gui_state_dialog()
+                self._save_project_dialog()
                 if self._workspace_dirty:   # user cancelled the Save/Save-As prompt
                     event.ignore()
                     return

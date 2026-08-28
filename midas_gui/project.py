@@ -1,13 +1,19 @@
 """FAIR provenance "project" files.
 
-A project file is a single, long-lived HDF5 file that accumulates one
-append-only record every time a Calibrate or Batch-Integrate run finishes
-(single-detector under ``/single``, Hydra panels under ``/ge1``..``/ge4``).
-Each attempt group is self-sufficient: a JSON ``metadata`` blob (full
-params, full result, resolved input paths + hashes, environment/version
-snapshot) plus a few small embedded arrays (mask/dark/bright/background,
-and for integration the resulting profiles). Raw multi-frame datasets are
-never duplicated here — only referenced by path + hash.
+A project file is a single, long-lived HDF5 file with two parts:
+
+- ``/workspace`` — a single mutable slot holding the most recently saved
+  session snapshot (every tab's live field state), overwritten in place on
+  each save. See ``write_workspace``/``read_workspace``.
+- ``/<panel_key>/{calib,integrate}/attempt_NNNN`` — an append-only record
+  every time a Calibrate or Batch-Integrate run finishes (single-detector
+  under ``/single``, Hydra panels under ``/ge1``..``/ge4``). Each attempt
+  group is self-sufficient: a JSON ``metadata`` blob (full params, full
+  result, resolved input paths + hashes, environment/version snapshot) plus
+  the resulting profile/cake arrays. Input correction data (mask/dark/
+  bright/background) is never duplicated as raw arrays — only referenced by
+  path + hash — except a live/drawn-in-tab mask that was never saved to a
+  file, which has no path to hash and is embedded as-is.
 """
 from __future__ import annotations
 
@@ -22,7 +28,7 @@ import h5py
 import numpy as np
 
 PROJECT_MARKER = "__midas_gui_project__"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _HASH_FULL_MAX_BYTES = 200 * 1024 * 1024
 _HASH_PARTIAL_CHUNK = 4 * 1024 * 1024
@@ -67,6 +73,65 @@ def project_active_profile(project_path) -> Optional[str]:
     file predating this feature."""
     with h5py.File(str(project_path), "r") as f:
         return f.attrs.get("active_profile_at_creation")
+
+
+def write_workspace(project_path, state: dict, sidecars: Optional[dict] = None) -> None:
+    """Overwrite the project's ``/workspace`` group with the current session
+    snapshot (the merged replacement for the old standalone Workspace JSON
+    file) — a single mutable slot, unlike the append-only calibration/
+    integration attempt history elsewhere in this file. ``sidecars`` holds
+    any not-yet-exported derived data a tab's own ``get_state(sidecar_stem=)``
+    wrote (e.g. a live/drawn mask array, an unfitted-but-in-progress
+    calibration summary) — see ``app.py``'s ``save_project``."""
+    with h5py.File(str(project_path), "a") as f:
+        if "workspace" in f:
+            del f["workspace"]
+        grp = f.create_group("workspace")
+        grp.create_dataset("state", data=json.dumps(state, indent=2, default=_json_default))
+        grp.attrs["saved_utc"] = _now_iso()
+        if sidecars:
+            side_grp = grp.create_group("sidecars")
+            for name, data in sidecars.items():
+                if isinstance(data, (bytes, bytearray, str)):
+                    # h5py's VLEN string/bytes type rejects embedded NUL
+                    # bytes (common in binary sidecars like a mask .npy
+                    # export), raising "VLEN strings do not support
+                    # embedded NULLs". Store as opaque uint8 bytes instead,
+                    # tagged so read_workspace() can tell it apart from a
+                    # genuine uint8 array sidecar (e.g. a mask array) and
+                    # reconstruct the original str/bytes.
+                    is_str = isinstance(data, str)
+                    raw = data.encode("utf-8") if is_str else bytes(data)
+                    ds = side_grp.create_dataset(name, data=np.frombuffer(raw, dtype=np.uint8))
+                    ds.attrs["_midas_gui_encoding"] = "str" if is_str else "bytes"
+                else:
+                    _write_array(side_grp, name, data)
+
+
+def read_workspace(project_path) -> tuple:
+    """The most recently saved session snapshot, as ``(state, sidecars)`` —
+    both ``{}`` for a project with no ``/workspace`` group yet (a brand-new
+    project, or one created before this feature/schema_version 1). Not an
+    error case: callers should treat an empty result as "nothing to
+    restore," not a failure."""
+    with h5py.File(str(project_path), "r") as f:
+        grp = f.get("workspace")
+        if grp is None:
+            return {}, {}
+        state = json.loads(grp["state"][()])
+        sidecars = {}
+        side_grp = grp.get("sidecars")
+        if side_grp is not None:
+            for name in side_grp.keys():
+                ds = side_grp[name]
+                value = ds[()]
+                encoding = ds.attrs.get("_midas_gui_encoding")
+                if encoding == "bytes":
+                    value = value.tobytes()
+                elif encoding == "str":
+                    value = value.tobytes().decode("utf-8")
+                sidecars[name] = value
+        return state, sidecars
 
 
 def sha256_file(path) -> dict:
@@ -197,7 +262,6 @@ def _next_attempt_name(group) -> str:
 
 
 def append_calibration_attempt(project_path, panel_key, *, cfg, result, loader_state,
-                                dark=None, bright=None, background=None,
                                 mask_is_file_backed: bool = False,
                                 results: Optional[dict] = None,
                                 extra: Optional[dict] = None) -> str:
@@ -214,9 +278,6 @@ def append_calibration_attempt(project_path, panel_key, *, cfg, result, loader_s
         "environment": environment_snapshot(),
         "mask_present": mask is not None,
         "mask_embedded": embed_mask,
-        "dark_embedded": dark is not None,
-        "bright_embedded": bright is not None,
-        "background_embedded": background is not None,
     }
     if extra:
         metadata.update(extra)
@@ -234,12 +295,6 @@ def append_calibration_attempt(project_path, panel_key, *, cfg, result, loader_s
                 att.attrs[k] = float(v)
         if embed_mask:
             _write_array(att, "mask", mask)
-        if dark is not None:
-            _write_array(att, "dark", dark)
-        if bright is not None:
-            _write_array(att, "bright", bright)
-        if background is not None:
-            _write_array(att, "background", background)
         if results:
             res_grp = att.create_group("results")
             for key in ("profile", "r_axis_px", "cake_2d", "eta_axis_deg"):
@@ -449,8 +504,7 @@ def calibration_namespace(calibration_snapshot: dict):
 
 def append_integration_attempt(project_path, panel_key, *, inputs, finished_payload,
                                 calibration_snapshot=None, calib_attempt_ref=None,
-                                mask=None, dark=None, bright=None, background=None,
-                                mask_is_file_backed: bool = False,
+                                mask=None, mask_is_file_backed: bool = False,
                                 extra: Optional[dict] = None) -> str:
     payload = dict(finished_payload or {})
     profiles = payload.pop("profiles", None)
@@ -471,9 +525,6 @@ def append_integration_attempt(project_path, panel_key, *, inputs, finished_payl
         "environment": environment_snapshot(),
         "mask_present": mask is not None,
         "mask_embedded": embed_mask,
-        "dark_embedded": dark is not None,
-        "bright_embedded": bright is not None,
-        "background_embedded": background is not None,
     }
     if extra:
         metadata.update(extra)
@@ -492,12 +543,6 @@ def append_integration_attempt(project_path, panel_key, *, inputs, finished_payl
             att.attrs["calib_attempt_ref"] = calib_attempt_ref
         if embed_mask:
             _write_array(att, "mask", mask)
-        if dark is not None:
-            _write_array(att, "dark", dark)
-        if bright is not None:
-            _write_array(att, "bright", bright)
-        if background is not None:
-            _write_array(att, "background", background)
 
         res_grp = att.create_group("results")
         if profiles is not None:

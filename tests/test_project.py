@@ -45,6 +45,45 @@ def test_open_project_rejects_non_project_h5(tmp_path):
         project.open_project(str(path))
 
 
+def test_read_workspace_empty_for_fresh_project(tmp_path):
+    path = str(tmp_path / "proj.h5")
+    project.create_project(path)
+    state, sidecars = project.read_workspace(path)
+    assert state == {}
+    assert sidecars == {}
+
+
+def test_write_and_read_workspace_roundtrip(tmp_path):
+    path = str(tmp_path / "proj.h5")
+    project.create_project(path)
+    state = {"__midas_gui_state__": True, "version": 1, "tabs": {"Mask Builder": {"fields": {}}},
+              "active_profile": "1-ID-E", "active_tab": "Mask Builder"}
+    sidecars = {"sidecar_mask.tif": np.ones((4, 4), dtype=np.uint8),
+                "sidecar_calibration.json": json.dumps({"Lsd": 200000.0})}
+
+    project.write_workspace(path, state, sidecars)
+    got_state, got_sidecars = project.read_workspace(path)
+    assert got_state == state
+    assert np.array_equal(got_sidecars["sidecar_mask.tif"], sidecars["sidecar_mask.tif"])
+    assert json.loads(got_sidecars["sidecar_calibration.json"]) == {"Lsd": 200000.0}
+
+    # A second save overwrites the single /workspace slot rather than appending.
+    state2 = dict(state, active_tab="Calibrate")
+    project.write_workspace(path, state2, sidecars=None)
+    got_state2, got_sidecars2 = project.read_workspace(path)
+    assert got_state2["active_tab"] == "Calibrate"
+    assert got_sidecars2 == {}
+
+    # Calibrate/integrate attempt history is untouched by a workspace save.
+    project.append_calibration_attempt(
+        path, "single", cfg={"mode": "one_shot"}, result=_fake_result(), loader_state={})
+    with h5py.File(path, "r") as f:
+        assert "single/calib/attempt_0001" in f
+    project.write_workspace(path, state2, sidecars=None)
+    with h5py.File(path, "r") as f:
+        assert "single/calib/attempt_0001" in f
+
+
 def test_sha256_file_full_and_partial(tmp_path, monkeypatch):
     small = tmp_path / "small.bin"
     small.write_bytes(b"hello world")
@@ -90,10 +129,10 @@ def test_append_calibration_attempt_numbering_and_filtering(tmp_path):
     loader_state = {"path": None, "dataset": "exchange/data"}
 
     ref1 = project.append_calibration_attempt(
-        path, "single", cfg=cfg, result=result, loader_state=loader_state,
-        dark=np.ones((4, 4)), bright=np.ones((4, 4)) * 2)
-    ref2 = project.append_calibration_attempt(
         path, "single", cfg=cfg, result=result, loader_state=loader_state)
+    ref2 = project.append_calibration_attempt(
+        path, "single", cfg=cfg, result=result, loader_state=loader_state,
+        mask_is_file_backed=True)
 
     assert ref1 == "/single/calib/attempt_0001"
     assert ref2 == "/single/calib/attempt_0002"
@@ -107,11 +146,14 @@ def test_append_calibration_attempt_numbering_and_filtering(tmp_path):
         assert meta["result"]["_calibrant_name"] == "CeO2"
         assert "residual_corr_map" not in meta["result"]
         assert "mask" not in meta["cfg"]
-        assert "dark" in att
-        assert "bright" in att
+        assert "dark" not in att
+        assert "bright" not in att
+        # A live (non-file-backed) mask is still embedded as raw array data —
+        # the one approved exception, since it has no path to hash.
         assert "mask" in att
         att2 = grp["attempt_0002"]
-        assert "dark" not in att2
+        # File-backed mask (mask_is_file_backed=True) -> path+hash only, never embedded.
+        assert "mask" not in att2
 
 
 def test_append_integration_attempt_embeds_profiles_and_links_calibration(tmp_path):
@@ -201,7 +243,7 @@ def test_batch_tab_logs_to_project_with_calibration_snapshot(app, tmp_path):
     tab._use_tab2_btn.setChecked(True)
 
     tab._last_run_inputs = {"src_cfg": {"type": "hdf5", "path": None}, "kernel": "subpixel4"}
-    tab._last_run_fields = {"mask": None, "dark": None, "bright": None, "background": None}
+    tab._last_run_fields = {"mask": None, "mask_is_file_backed": False}
     data = {"n": 3, "out_paths": ["/tmp/out/f0.csv"], "aborted": False,
             "profiles": np.random.rand(3, 20).astype(np.float32)}
 

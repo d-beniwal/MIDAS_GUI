@@ -70,7 +70,7 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._geom_cache: dict = {}      # panel_num -> cached integration context
         self._geom_sig: dict = {}        # panel_num -> signature the cache was built for
         self._last_run_inputs: dict = {}  # panel_num -> JSON-safe run inputs (provenance)
-        self._last_run_fields: dict = {}  # panel_num -> {mask,dark,bright,background} arrays
+        self._last_run_fields: dict = {}  # panel_num -> {mask, mask_is_file_backed}
         self._project_ctx = None
         self._build_ui()
         self._on_panel_changed(self._toolbar.current())
@@ -354,7 +354,7 @@ class HydraBatchPage(QtWidgets.QWidget):
             "mask_sources": self._loader.get_state().get("masks", {}).get(n),
         }
         self._last_run_fields[n] = {
-            "mask": mask, "dark": dark, "bright": bright, "background": background,
+            "mask": mask,
             "mask_is_file_backed": mask is not None and not self._loader.has_live_mask_source(n),
         }
 
