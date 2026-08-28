@@ -3,7 +3,20 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-28 (Workspace and Project are merged into one
+**Last updated:** 2026-08-28 (Batch Integrate's Data field gains Browse…
+parity with Calibrate/Data Viewer — **Multiple files** and **Files sharing
+a name stem** are now offered there too, alongside the existing Single
+file/Full folder. A filestem pick is kept as a live folder+prefix filter,
+so both a one-shot run and **MONITOR** re-scan for files starting with that
+prefix — a new matching file dropped in later is picked up, a non-matching
+one is ignored; the info line under the field then reads e.g. `Source:
+/data/scan  (filestem: scan_*)`. An arbitrary Multiple-files pick works for
+a one-shot run but can't be watched by MONITOR (no folder/pattern to
+re-scan) — its info line reads `Source: N file(s) — <shared folder>`. See
+§7 "Data Loader panel (left)" → "Browse… options" and §1 "The Browse…
+popup" for detail.)
+
+**Previously:** (2026-08-28, Workspace and Project are merged into one
 `.h5` file — see §16 "File ▸ Project (session + FAIR provenance)" for full
 detail. Summary:
 - `Ctrl+S`/`Ctrl+Shift+S`/`Ctrl+O` now save/save-as/open **one Project
@@ -495,11 +508,13 @@ popup file browser with four selection modes (radio buttons at the top):
   frame index already comes from one anchor file's own internal frame count.
 - **Multiple files** — an arbitrary multi-select. Not offered for Hydra
   fields (there's no way to derive the other 3 panels' files from an
-  arbitrary pick list) or for Batch Integrate's streamed Data field (handed
-  straight to an external glob-based reader that can't take a file list).
+  arbitrary pick list).
 - **Full folder** — every TIFF-family file in one directory.
 - **Files sharing a name stem** — every TIFF-family file in one directory
   starting with a typed prefix (click a file in the browser to prefill it).
+  On **Batch Integrate's** streamed Data field specifically, a filestem pick
+  is kept as a *live* filter (folder + prefix), not a frozen file list — see
+  "Batch Integrate: filestem-filtered sources and MONITOR" below.
 
 **HDF5 files are simply not shown** in Multiple-files/Full-folder/Filestem
 mode — since an HDF5 file is itself a multi-frame container, only Single
@@ -1572,6 +1587,25 @@ The streaming **Data** source (folder/glob or HDF5 dataset) with **frame range +
 plus Dark/Bright/Background and Mask, are selected in the shared **Data Loader panel**
 (see §1). Dark/bright/background are applied per frame; all mask sources are unioned.
 
+**Browse… options (Multiple files / Filestem), and how MONITOR sees them.**
+The Data field's **⋯ → Browse…** popup (see §1 "The Browse… popup") offers
+all four selection modes here too:
+- **Full folder** — unchanged; MONITOR watches it for new TIFF frames.
+- **Files sharing a name stem** — kept as a *live* filter (the chosen folder
+  + typed prefix), not a frozen file list: both a one-shot *Start
+  Integration* run and MONITOR re-scan the folder for files whose name
+  starts with that prefix, so a new matching file dropped in later is
+  picked up by MONITOR and a non-matching file (e.g. from an unrelated scan
+  sharing the same folder) is ignored. Once loaded, the small info line
+  under the field reads e.g. `Source: /data/scan  (filestem: scan_*)`.
+- **Multiple files** — an arbitrary multi-select (may not share a prefix).
+  This runs through *Start Integration* like any other source, but **cannot
+  be watched by MONITOR** (there's no folder/pattern to re-scan) — the
+  info line reads `Source: N file(s) — <shared folder>`, and turning
+  MONITOR on with this kind of pick selected shows a "Folder needed"
+  warning instead of starting.
+- **Single file** — unchanged.
+
 ### Calibration source (middle)
 - **From Tab 2** — the calibration (or refined) result.
 - **From file** — a **calibration `.json`, MIDAS `paramstest.txt`, or pyFAI `.poni`**
@@ -1621,9 +1655,12 @@ any active monitor but does **not** delete raw data or any files already written
 
 ### Live folder monitoring (MONITOR)
 The **MONITOR** button at the bottom of the left Data Loader panel (folder/glob sources
-only) starts a live watch: while active it turns **green** and the GUI polls the data
-folder for **new** TIFF frames, integrating each one **as it appears** and adding it to
-the display. It does **not** re-run the whole batch — it reuses the already-built
+only — including a filestem-filtered folder, see "Browse… options" above; not an
+explicit Multiple-files pick) starts a live watch: while active it turns **green** and
+the GUI polls the data folder for **new** TIFF frames — matching the chosen filestem
+prefix when one is set, otherwise every TIFF frame in the folder — integrating each one
+**as it appears** and adding it to the display. It does **not** re-run the whole batch — it
+reuses the already-built
 **detector map** (the binning geometry / pixel-count cakes; reused from a prior *Start
 Integration* run when the calibration, kernel, bins, mask and folder are unchanged, or
 built once on first use) and integrates **only the new files** (tracked by frame id, so

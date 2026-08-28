@@ -515,8 +515,10 @@ class BatchTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.critical(self, "Calibration error", str(e)); return
 
         src_cfg = self._loader.source_cfg()
-        if not src_cfg.get("path"):
-            QtWidgets.QMessageBox.warning(self, "No data", "Select a data folder/glob or HDF5 file."); return
+        if not (src_cfg.get("path") or src_cfg.get("paths")):
+            QtWidgets.QMessageBox.warning(
+                self, "No data",
+                "Select a data folder/glob, HDF5 file, or file selection."); return
 
         kernel = self._kernel.currentData()
         corrections = self._corr_widget.build_corrections()
@@ -715,7 +717,8 @@ class BatchTab(QtWidgets.QWidget):
         pol, sa = corrections
         return (calib, kernel, round(self._r_bin.value(), 4), round(self._e_bin.value(), 4),
                 bool(weighted), pol is not None, sa is not None, mask_id,
-                src_cfg.get("path"), src_cfg.get("type"), src_cfg.get("dataset"))
+                src_cfg.get("path"), tuple(src_cfg.get("paths") or ()),
+                src_cfg.get("type"), src_cfg.get("dataset"))
 
     def _cache_geom(self, sig, ctx):
         self._geom_cache = ctx
@@ -738,8 +741,10 @@ class BatchTab(QtWidgets.QWidget):
         if src_cfg.get("type") != "tiff_glob" or not src_cfg.get("path"):
             QtWidgets.QMessageBox.warning(
                 self, "Folder needed",
-                "MONITOR watches a folder/glob of TIFF frames — select a folder "
-                "as the data source (HDF5 sources are not monitored).")
+                "MONITOR watches a folder (optionally filtered by a filestem) "
+                "for new TIFF frames — select a folder or a filestem pick as "
+                "the data source (HDF5 sources and an explicit multi-file "
+                "pick can't be monitored — there's no folder to watch).")
             self._loader.set_monitor_active(False); return
         try:
             spec = self._build_spec()

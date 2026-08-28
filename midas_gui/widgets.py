@@ -2127,6 +2127,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._registry = None          # DataSourceRegistry, set by bind_registry()
         self._registry_label = ""      # this panel's own label in the registry
         self._explicit_paths = None    # list[str], set by a Browse… "Multiple files"/"stem" pick
+        self._stem_filter = None       # str, "stream" mode's live filestem filter (see _raw_source)
         self._external = None          # another DataLoaderPanel this one delegates to, or None
         self._buffer_snapshot_file = None  # temp .h5 path from importing an external buffer (stream mode)
         self._buffer = None            # deque(maxlen=N) once "Use Buffer" is on
@@ -2363,9 +2364,19 @@ class DataLoaderPanel(QtWidgets.QWidget):
 
     def _raw_source(self):
         """The current source: an explicit ``list[str]`` from a Browse…
-        "Multiple files"/"Files sharing a stem" pick, else the plain path
-        text (file / folder / glob)."""
-        return self._explicit_paths if self._explicit_paths else self._path_ed.text().strip()
+        "Multiple files"/"Files sharing a stem" pick, a ``<folder>/<stem>*``
+        glob pattern when "stream" mode's live filestem filter is set (see
+        ``_set_stem_filter`` — this one substitution is what makes
+        ``source_cfg()``, ``_load()`` and cross-tab "Import from…" all
+        filestem-aware for free), else the plain path text (file / folder /
+        glob)."""
+        if self._explicit_paths:
+            return self._explicit_paths
+        text = self._path_ed.text().strip()
+        if self._stem_filter and text:
+            from pathlib import Path
+            return str(Path(text) / (self._stem_filter + "*"))
+        return text
 
     def _set_explicit_paths(self, paths):
         """``paths`` is a resolved ``list[str]`` (Multiple files / stem
@@ -2381,13 +2392,25 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._path_ed.setToolTip("")
         self._path_ed.blockSignals(False)
 
+    def _set_stem_filter(self, folder, stem):
+        """"stream" mode (Batch Integrate) only: keep a filestem pick as a
+        live ``(folder, prefix)`` filter rather than resolving it to a frozen
+        file list, so MONITOR picks up newly-arriving matching files too (see
+        ``_raw_source``). ``stem`` falsy clears it. Uses blockSignals like
+        ``_set_explicit_paths`` so writing ``folder`` into the path field
+        doesn't itself clear ``_stem_filter`` via ``_on_path_changed``."""
+        self._stem_filter = stem or None
+        self._path_ed.blockSignals(True)
+        if stem:
+            self._path_ed.setText(folder)
+            self._path_ed.setToolTip(f"Filestem filter: {stem}*")
+        else:
+            self._path_ed.setToolTip("")
+        self._path_ed.blockSignals(False)
+
     def _open_browse_dialog(self):
-        # "stream" mode (Batch Integrate) hands its Data path straight to an
-        # external glob/path-based streaming reader (see source_cfg()) that
-        # can't consume an arbitrary file list, so Multiple-files/stem aren't
-        # offered there — Single file / Full folder already worked this way.
-        modes = ("file", "folder") if self._mode == "stream" else ("file", "files", "folder", "stem")
-        dlg = BrowseFilesDialog(self, title="Select data", modes=modes)
+        dlg = BrowseFilesDialog(self, title="Select data",
+                                modes=("file", "files", "folder", "stem"))
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return
         mode = dlg.mode()
@@ -2396,22 +2419,34 @@ class DataLoaderPanel(QtWidgets.QWidget):
             if not paths:
                 return
             self._set_explicit_paths(None)
+            self._set_stem_filter(None, None)
             self._path_ed.setText(paths[0])
         elif mode == "folder":
             self._set_explicit_paths(None)
+            self._set_stem_filter(None, None)
             self._path_ed.setText(dlg.folder())
-        else:  # "files" or "stem" — both resolve to an explicit file list
+        elif mode == "stem" and self._mode == "stream":
+            # Batch Integrate keeps the filestem as a live filter instead of
+            # a frozen file list — see _set_stem_filter.
+            folder, stem = dlg.stem()
+            if not stem:
+                return
+            self._set_explicit_paths(None)
+            self._set_stem_filter(folder, stem)
+        else:  # "files", or "stem" outside Batch Integrate's stream mode
             paths = dlg.paths()
             if not paths:
                 return
+            self._set_stem_filter(None, None)
             self._set_explicit_paths(paths)
         self._load()
 
     def _on_path_changed(self, p: str):
         from pathlib import Path
-        # Fires only for a real text edit — a Browse… explicit-list pick sets
-        # its own summary text via blockSignals, so this never races it.
+        # Fires only for a real text edit — a Browse… explicit-list/stem pick
+        # sets its own summary text via blockSignals, so this never races it.
         self._explicit_paths = None
+        self._stem_filter = None
         h5 = is_h5(p)
         self._ds_row.setVisible(h5)
         if h5 and Path(p).exists():
@@ -2482,13 +2517,6 @@ class DataLoaderPanel(QtWidgets.QWidget):
             menu.addAction("(no other tabs loaded)").setEnabled(False)
             return
         sources = self._registry.available(exclude=self, field="data")
-        if self._mode == "stream":
-            # This panel's Data path is handed to an external glob/path-based
-            # streaming reader (see source_cfg()) that can't consume an
-            # arbitrary file list — see _open_browse_dialog for the matching
-            # restriction on its own Browse… popup.
-            sources = [d for d in sources
-                       if not (d["kind"] == "path" and isinstance(d["path"], list))]
         if not sources:
             menu.addAction("(nothing loaded elsewhere)").setEnabled(False)
             return
@@ -2571,7 +2599,13 @@ class DataLoaderPanel(QtWidgets.QWidget):
             return
         if self._mode == "stream":
             # No in-memory load; just report the source.
-            self._info.setText(f"Source: {raw}")
+            if isinstance(raw, list):
+                text = f"Source: {len(raw)} file(s) — {display_text_for_paths(raw)}"
+            elif self._stem_filter:
+                text = f"Source: {self._path_ed.text().strip()}  (filestem: {self._stem_filter}*)"
+            else:
+                text = f"Source: {raw}"
+            self._info.setText(text)
             self._live_frame_update = False
             self.dataChanged.emit()
             return
@@ -2969,9 +3003,18 @@ class DataLoaderPanel(QtWidgets.QWidget):
         return self._live_frame_update
 
     def source_cfg(self) -> dict:
-        """Streaming source descriptor for BatchWorker (stream mode)."""
-        from pathlib import Path
-        raw = self._path_ed.text().strip()
+        """Streaming source descriptor for BatchWorker (stream mode).
+
+        An explicit "Multiple files" pick (an arbitrary list — see
+        ``_raw_source``) becomes ``"tiff_list"``: not watchable by MONITOR
+        (no single glob pattern describes it). A filestem pick is already
+        folded into a ``<folder>/<stem>*`` glob by ``_raw_source``, so it
+        comes out as an ordinary ``"tiff_glob"`` here and MONITOR re-globs it
+        on every poll like any other glob path (see ``FolderMonitorWorker``).
+        """
+        raw = self._raw_source()
+        if isinstance(raw, list):
+            return {"type": "tiff_list", "paths": list(raw)}
         if is_h5(raw):
             return {"type": "hdf5", "path": raw, "dataset": self._dataset()}
         return {"type": "tiff_glob", "path": raw}
@@ -3061,6 +3104,8 @@ class DataLoaderPanel(QtWidgets.QWidget):
         }
         if self._explicit_paths:
             st["explicit_paths"] = list(self._explicit_paths)
+        if self._mode == "stream" and self._stem_filter:
+            st["stem_filter"] = self._stem_filter
         if self._mode == "stream":
             st["fr_start"] = self._fr_start.value()
             st["fr_end"] = self._fr_end.value()
@@ -3080,11 +3125,15 @@ class DataLoaderPanel(QtWidgets.QWidget):
         if not state:
             return
         explicit = state.get("explicit_paths")
+        stem_filter = state.get("stem_filter") if self._mode == "stream" else None
         path = state.get("path", "")
         if explicit:
             self._set_explicit_paths(list(explicit))
             if state.get("dataset"):
                 self._ds_combo.setEditText(state["dataset"])
+            self._load()
+        elif stem_filter and path:
+            self._set_stem_filter(path, stem_filter)
             self._load()
         elif path:
             self.set_path(path, dataset=state.get("dataset"), load=True)

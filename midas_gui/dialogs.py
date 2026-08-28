@@ -308,9 +308,6 @@ class BrowseFilesDialog(QtWidgets.QDialog):
     - Hydra's main Data field has one anchor file only (its frame index
       comes from that one file's internal frame count, not separate
       per-frame files) — pass ``modes=("file",)``.
-    - Batch Integrate's streamed (never-fully-loaded) Data field is handed
-      to an external glob/path-based streaming reader that can't consume
-      an arbitrary file list — pass ``modes=("file", "folder")``.
     A single-element ``modes`` hides the mode row entirely and behaves
     like a plain file/folder picker.
     """

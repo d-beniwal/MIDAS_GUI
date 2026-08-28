@@ -790,6 +790,8 @@ class BatchWorker(QtCore.QThread):
             return TIFFGlobSource(c["path"])
         if c["type"] == "hdf5":
             return HDF5FrameSource(c["path"], dataset=c.get("dataset", "frames"))
+        if c["type"] == "tiff_list":
+            return _ExplicitTIFFSource(c["paths"])
         raise ValueError(f"Unknown source type: {c['type']}")
 
     def _write_one(self, base: Path, fmt, r_px, prof, sigma, lsd, px, wl,
@@ -1119,6 +1121,32 @@ def _list_tiff_files(path: str) -> list:
     if p.is_file():
         return [str(p)]
     return []
+
+
+class _ExplicitTIFFSource:
+    """Iterate over an arbitrary, already-resolved ``list[str]`` of frame files
+    (a Batch Integrate "Multiple files" Browse… pick — see
+    ``widgets.DataLoaderPanel.source_cfg``'s ``"tiff_list"`` source type).
+
+    Unlike ``TIFFGlobSource`` this can't be expressed as one glob pattern (the
+    files may not share a name prefix / may span selections made in different
+    moments), so it isn't watchable by MONITOR — see ``tab_batch.py``'s
+    ``type != "tiff_glob"`` guard in ``_start_monitor``. Reads via
+    ``helpers._load_image`` (not bare ``tifffile``) so it also covers ``.ge*``
+    frames, matching every other multi-file picker in the app.
+    """
+
+    def __init__(self, paths):
+        self._paths = [Path(p) for p in paths]
+
+    @property
+    def n_frames(self) -> int:
+        return len(self._paths)
+
+    def __iter__(self):
+        for p in self._paths:
+            img = _load_image(p).astype(np.float64)
+            yield p.stem, (img[0] if img.ndim == 3 else img)
 
 
 class FolderMonitorWorker(QtCore.QThread):
