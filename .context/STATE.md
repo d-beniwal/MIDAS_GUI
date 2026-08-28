@@ -1,38 +1,52 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-28 (Batch Integrate Browse… parity — committed as
-`af8066f`; see "Recently completed" below)_
+_Last updated: 2026-08-28 (Batch Integrate cosmetic overhaul + Batch-Parallel
+workers — committed as `a27790a`; see "Recently completed" below)_
 
 ## Now working on
 
-Nothing in flight — `af8066f` (Batch Browse… parity) is committed and
-pushed; awaiting next task.
+Nothing in flight — `a27790a` (Batch cosmetic overhaul + Batch-Parallel) is
+committed and pushed; awaiting next task.
 
 ## Recently completed
 
-**2026-08-28 (`af8066f`) — Batch Integrate: Browse… parity — Multiple
-files + filestem-filtered sources.** Batch Integrate's streamed Data field
-previously only offered Single file/Full folder in Browse… (Multiple
-files/Filestem were withheld since the streaming reader could only consume
-a glob path). Now offers all four modes: a **Filestem** pick in stream mode
-is kept as a live `(folder, prefix)` filter (`DataLoaderPanel.
-_set_stem_filter`) rather than resolved to a frozen list — `_raw_source()`
-substitutes it into a `<folder>/<prefix>*` glob so `source_cfg()`/`_load()`/
-cross-tab Import-from stay filestem-aware for free, and `FolderMonitorWorker`
-re-globs it every poll (a new matching file dropped in later is picked up
-by MONITOR, non-matching ones ignored). A **Multiple files** pick becomes a
-new `"tiff_list"` source type; `workers._ExplicitTIFFSource` iterates the
-resolved paths via `helpers._load_image` (covers `.ge*` too) — not
-watchable by MONITOR (no glob describes an arbitrary list), guarded by the
-existing `type != "tiff_glob"` check with a clearer warning message.
-**Verified:** new `tests/test_batch_data_source.py` (8, dependency-free —
-PyQt5/numpy/tifffile only) — stem-filter/explicit-list `source_cfg()`
-shapes, manual-edit clearing, info-label text, get/set_state round-trip,
-`_ExplicitTIFFSource` ordering, `BatchWorker._open_source` dispatch. All
-pass. `gui_documentation.md` updated (§1 "The Browse… popup" + new
-"Batch Integrate: filestem-filtered sources and MONITOR" under §7) + PDF
-rebuilt.
+**2026-08-28 (`a27790a`) — Batch Integrate: cosmetic overhaul +
+Batch-Parallel workers, single-detector + Hydra.** Five requested changes,
+applied to both the single-detector tab and Hydra's per-panel page: (1)
+Drift correction hidden from the GUI (single-detector only, not used in
+production — `DriftWorker`/state untouched, `setVisible(False)`); (2) the
+always-visible "Calibration values" grid replaced by a "View calibration"
+popup (`helpers.make_calib_values_button`, same click-to-see-options
+pattern as `make_pixel_label`/`make_kedge_label`) — single card + each of
+Hydra's 4 panel cards; (3) output format is now a checkbox list
+(`widgets.OutputFormatSelector`) — every checked format is written;
+`BatchWorker`/`FolderMonitorWorker` gained `fmts: list[str]` replacing
+`fmt: str`; (4) a green **Save** button (`workers.write_all_profiles`)
+writes already-computed lineouts on demand regardless of whether an Output
+folder was set before running; Start Integration narrower, Abort red; (5) a
+new **Sequential**/**Batch Parallel** run-mode + worker-count control
+(`workers.BatchRunCoordinator`, same signal surface as `BatchWorker`)
+splits one run's frames across N `BatchWorker` QThreads (in-process, not
+OS processes — numpy/torch release the GIL) sharing one detector map built
+once (`_GeomBuildWorker`), auto-shrinking workers so each gets ≥10 frames
+(`resolve_worker_count`); needed a new `BatchWorker.frame_indices` param
+for exact random-access reads per chunk (the old frame_range skip-loop
+would otherwise decode every frame up to a late chunk's start). Hydra gets
+this as a *second*, independent parallelism level under its existing
+per-panel Sequential/Parallel toggle. `BatchWorker.finished` also now
+carries `"sigmas"` (previously computed but never emitted — a pre-existing
+gap in `project.append_integration_attempt`'s expected payload, now closed).
+**Verified:** `tests/test_batch_data_source.py` extended to 17 (frame-index
+resolution, chunk-splitting, worker-count auto-shrink, `write_all_profiles`,
+`_ExplicitTIFFSource.get`); `tests/test_hydra_batch_ui.py` updated for the
+`BatchWorker`→`BatchRunCoordinator` swap + removed `_calib_val_note`;
+`tests/test_project.py`'s `integrate_attempt_gui_fields` test updated for
+`fmt` becoming a list. All pass (per-file isolated — the pre-existing
+pyqtgraph/thread teardown crash, see "Open questions" below, still fires
+after all tests pass, unrelated). Full single-detector + Hydra tabs build
+and round-trip state correctly in an offscreen smoke check.
+`gui_documentation.md` §7 rewritten + PDF rebuilt.
 
 **2026-08-28 (`ae3b665`) — Merged Workspace + Project into one `.h5`
 "Project" file.** User request: unify the two previously-independent
@@ -75,53 +89,11 @@ calibration attempt has no `dark`/`bright`/`background` datasets; a fresh
 `gui_documentation.md` §16 rewritten (old §16/§17 merged into one section)
 + PDF rebuilt.
 
-**2026-08-27 (`a54f796`) — Browse… popup polish: folder-path display,
-project-root default dir, wider name column.** User feedback on the just-
-shipped Browse… popup (`ac13797`): (1) a Multiple-files/Filestem pick
-showed a bare `"N files selected"` count instead of a real path — new
-`helpers.display_text_for_paths()` (single file's own path if exactly one
-matched, else the shared parent folder via `os.path.commonpath`) is now
-used by `FieldSelector`/`DataLoaderPanel._set_explicit_paths` **and**
-Mask Builder's pre-existing `_browse_stack_files` "Files (multi-select)…"
-picker (`tab_mask.py` — same `"N files selected"` pattern, predates this
-session, unrelated to `ac13797`'s new dialog); (2) `BrowseFilesDialog`
-opened to `Path.home()` — now defaults to the new `constants.PROJECT_ROOT`
-(`Path(__file__).resolve().parent.parent`, matching the existing
-`_TEST_DATA` repo-root convention) unless a caller passes `start_dir`; (3)
-the tree view's name column (Qt's stock 100px default) is now doubled to
-200px so longer filenames aren't immediately elided. `gui_documentation.md`
-updated (§1 "The Browse… popup" + the Mask Builder Stack-field paragraph).
-Verified: per-file isolated `test_smoke.py` tests + `test_live_stream.py`
-green; a standalone offscreen script confirmed `PROJECT_ROOT` resolves to
-the repo root, the popup's initial `_current_dir` matches it, and
-`columnWidth(0)` goes from 100→200.
-
-**2026-08-27 (`ac13797`) — Data Loader: Browse… popup (multi-file/folder/
-name-stem) + Hydra gains real cross-tab Import from….** Every Data/Dark/
-Bright/Background field's ⋯ button (single-detector and Hydra alike) now
-opens **Browse…** + **Import from…** instead of the old flat File…/
-Folder… pair. New `dialogs.BrowseFilesDialog` offers up to 4 modes per
-field (Single file / Multiple files / Full folder / Files sharing a name
-stem — HDF5 excluded from every mode but Single file). Hydra's Data
-Viewer/Calibrate/Batch Integrate pages now bind into the same
-`data_bridge.DataSourceRegistry` as their single-detector counterparts
-(new `bind_hydra_registry()` per tab, wired from `app.py`), so Hydra
-fields get a real "Import from…" for the first time — labeled distinctly
-("Data Viewer (Hydra)" etc.) so a Hydra path is never confused with the
-single-detector one. An explicit Multiple-files/stem pick is a `list[str]`
-with no string/glob form; `helpers.source_kind`/`_collect_frame_paths` and
-`FieldSelector`/`DataLoaderPanel` state save/restore now handle it
-alongside plain path text. `gui_documentation.md` updated ("The Browse…
-popup", "Cross-tab data import"). Verified: per-file isolated
-`tests/test_smoke.py`, `test_live_stream.py`, `test_hydra_geometry.py`
-pass; `test_hydra_ui.py`/`test_project.py` hit the pre-existing
-interpreter-teardown segfault/abort at process exit (see "Open questions"
-below) — unrelated, all tests pass before it.
-
-_(Older entries — `101558a` Calibrate Multi-panel→downstream-integration
-feed, `ccce056` Flip-Z/Multi-panel fix, `08fe8f6`/`fe59939` README+gitignore,
-`5cf2e8c` error-dialog truncation fix — trimmed here; full detail in
-`documentation/development_history.md`.)_
+_(Older entries — `af8066f` Batch Browse… parity, `a54f796`/`ac13797`
+Browse… popup (multi-file/folder/name-stem + polish), `101558a` Calibrate
+Multi-panel→downstream-integration feed, `ccce056` Flip-Z/Multi-panel fix,
+`08fe8f6`/`fe59939` README+gitignore, `5cf2e8c` error-dialog truncation fix
+— trimmed here; full detail in `documentation/development_history.md`.)_
 
 ## Open questions / blockers
 
