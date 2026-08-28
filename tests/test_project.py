@@ -335,7 +335,10 @@ def test_integrate_attempt_gui_fields_and_loader_state():
     }
     fields = project.integrate_attempt_gui_fields(meta)
     assert fields["kernel"] == "Subpixel K=4"
-    assert fields["fmt"] == "XYE  (2θ, I, σ)"
+    # Legacy single-string "fmt" (as recorded before the checkbox-list output
+    # format selector) is wrapped into the list widgets.OutputFormatSelector
+    # expects — see project.integrate_attempt_gui_fields.
+    assert fields["fmt_keys"] == ["xye"]
     assert fields["mon_ed"] == "/data/monitor.csv"
     assert fields["q_check"] is True
     assert fields["q_min"] == 0.5 and fields["q_max"] == 8.0 and fields["q_bin"] == 0.01
@@ -343,6 +346,11 @@ def test_integrate_attempt_gui_fields_and_loader_state():
     loader = project.integrate_attempt_loader_state(meta)
     assert loader == {"path": "/data/ge1.h5", "dataset": "exchange/data",
                        "fr_start": 0, "fr_end": 20, "fr_stride": 1}
+
+    # New-style "fmt" (list[str] from the checkbox-list output selector)
+    # round-trips as-is, filtered to valid OUTPUT_FORMATS keys.
+    meta2 = {"inputs": {"kernel": "subpixel2", "fmt": ["csv", "h5", "bogus"]}}
+    assert project.integrate_attempt_gui_fields(meta2)["fmt_keys"] == ["csv", "h5"]
 
     # Unbounded frame range (end=None) maps to fr_end=0 ("all"), not a bare None
     # that would crash DataLoaderPanel.set_state's int(state["fr_end"]).

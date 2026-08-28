@@ -9,23 +9,25 @@ Ports the v3 batch tab and adds Phase-1 features:
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 from PyQt5 import QtCore, QtWidgets
 
-from midas_gui.constants import (KERNELS, OUTPUT_FORMATS, ERROR_MODELS,
+from midas_gui.constants import (KERNELS, ERROR_MODELS,
                            DEFAULT_NICKEL_DIR, DEFAULT_KERNEL,
-                           DEFAULT_OUTPUT_FORMAT, DEFAULT_ERROR_MODEL)
+                           DEFAULT_ERROR_MODEL)
 from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_file,
                                geometry_fields_from_file,
-                               resolve_calibration_fields, render_calib_value_grid,
+                               resolve_calibration_fields, make_calib_values_button,
                                _NoScrollSpinBox, _NoScrollComboBox,
                                widgets_to_dict, apply_dict_to_widgets)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
-                               StackedProfileViewer, DataLoaderPanel)
-from midas_gui.workers import BatchWorker, apply_q_uniform, DriftWorker, FolderMonitorWorker
+                               StackedProfileViewer, DataLoaderPanel, OutputFormatSelector)
+from midas_gui.workers import (BatchWorker, BatchRunCoordinator, apply_q_uniform,
+                               DriftWorker, FolderMonitorWorker, write_all_profiles)
 from midas_gui.dialogs import show_error
 from midas_gui.hydra_widgets import HydraModeRibbon
 from midas_gui.hydra_batch_page import HydraBatchPage
@@ -56,6 +58,8 @@ class BatchTab(QtWidgets.QWidget):
         self._hydra_registry_label = ""
         self._last_run_inputs: dict = {}
         self._last_run_fields: dict = {}
+        self._last_results: Optional[dict] = None   # for the Save button — see _on_done
+        self._last_axis_ctx: Optional[tuple] = None  # (lsd, px, wl) for the Save button
         self._project_ctx: Optional[project.ProjectContext] = None
         self._build_ui()
         self._loader.monitorToggled.connect(self._toggle_monitor)
@@ -72,11 +76,12 @@ class BatchTab(QtWidgets.QWidget):
             f"From Tab 2: Lsd={result.Lsd/1000:.3f} mm  "
             f"λ={result.wavelength_A:.5f} Å  {result.NrPixelsY}×{result.NrPixelsZ} px")
         self._use_tab2_btn.setChecked(True)
-        self._refresh_calib_values()
 
     def _calib_fields_in_use(self):
         """Resolve the geometry currently selected (Tab-2 result or file), as a
-        dict of display fields — or (None, note) if unavailable."""
+        dict of display fields — or (None, note) if unavailable. Also backs
+        the "View calibration" popup (see helpers.make_calib_values_button),
+        called fresh each time it's opened."""
         return resolve_calibration_fields(
             self._calib_result, self._use_json_btn.isChecked(), self._json_ed.text())
 
@@ -86,11 +91,6 @@ class BatchTab(QtWidgets.QWidget):
         frame streamed into BatchWorker/FolderMonitorWorker must also get."""
         fields, _ = self._calib_fields_in_use()
         return tuple(fields.get("im_trans") or []) if fields else ()
-
-    def _refresh_calib_values(self):
-        """Populate the read-only calibration-values grid from the active source."""
-        fields, note = self._calib_fields_in_use()
-        render_calib_value_grid(self._calib_grid, self._calib_val_note, fields, note)
 
     def set_mask_from_tab1(self, mask):
         self._loader.set_tab1_mask(mask)
@@ -143,13 +143,15 @@ class BatchTab(QtWidgets.QWidget):
             "drift_knots": self._drift_knots,
             "drift_bayesian": self._drift_bayesian,
             "out_ed": self._out_ed,
-            "fmt": self._fmt,
+            "run_mode": self._run_mode,
+            "n_workers": self._n_workers,
         }
 
     def get_state(self) -> dict:
         return {
             "fields": widgets_to_dict(self._state_widgets()),
             "corr": self._corr_widget.get_state(),
+            "fmt": self._fmt.get_state(),
             "loader": self._loader.get_state(),
             "hydra": {"active_mode": self._mode_ribbon.mode(),
                       "page": self._hydra_page.get_state() if self._hydra_page else {}},
@@ -157,9 +159,14 @@ class BatchTab(QtWidgets.QWidget):
 
     def set_state(self, state: dict):
         self._loader.set_state(state.get("loader") or {})
-        apply_dict_to_widgets(self._state_widgets(), state.get("fields", {}))
+        fields = dict(state.get("fields", {}))
+        # A project-attempt's "fmt_keys" (see project.integrate_attempt_gui_fields)
+        # rides along in "fields" but isn't a plain widget — pull it out before
+        # the generic apply_dict_to_widgets pass (which would just ignore it).
+        fmt_keys = fields.pop("fmt_keys", None)
+        apply_dict_to_widgets(self._state_widgets(), fields)
         self._corr_widget.set_state(state.get("corr") or {})
-        self._refresh_calib_values()
+        self._fmt.set_state(fmt_keys if fmt_keys is not None else state.get("fmt"))
         hydra_state = state.get("hydra") or {}
         page_state = hydra_state.get("page") or {}
         if page_state:
@@ -313,23 +320,13 @@ class BatchTab(QtWidgets.QWidget):
                     "Calibration (*.json *.txt *.poni);;All (*)") or "")); jr.addWidget(bj)
         self._json_ed.textChanged.connect(
             lambda t: self._use_json_btn.setChecked(True) if t.strip() else None)
-        self._json_ed.textChanged.connect(lambda *_: self._refresh_calib_values())
         cal.body.addLayout(jr)
+        # "Calibration values" used to be an always-visible grid here (took a
+        # lot of vertical space); it's now a popup, opened on click, showing
+        # the same fields — see helpers.make_calib_values_button.
+        calib_view_btn = make_calib_values_button(self._calib_fields_in_use)
+        cal.body.addWidget(calib_view_btn, 0, QtCore.Qt.AlignLeft)
         lv.addWidget(cal)
-
-        # ── Calibration values (read-only, in use) ──
-        valcard = S.make_card("Calibration values")
-        self._calib_grid = QtWidgets.QGridLayout()
-        self._calib_grid.setHorizontalSpacing(18); self._calib_grid.setVerticalSpacing(4)
-        _cv_host = QtWidgets.QWidget(); _cv_host.setLayout(self._calib_grid)
-        valcard.body.addWidget(_cv_host)
-        self._calib_val_note = QtWidgets.QLabel("No calibration loaded yet.")
-        self._calib_val_note.setStyleSheet(f"color:{S.MUTED};font-size:10px")
-        self._calib_val_note.setWordWrap(True)
-        valcard.body.addWidget(self._calib_val_note)
-        lv.addWidget(valcard)
-        self._use_tab2_btn.toggled.connect(lambda *_: self._refresh_calib_values())
-        self._use_json_btn.toggled.connect(lambda *_: self._refresh_calib_values())
 
         # ── Integration ──
         integ = S.make_card("Integration")
@@ -427,6 +424,10 @@ class BatchTab(QtWidgets.QWidget):
         self._drift_status_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         drift.body.addWidget(self._drift_status_lbl)
         lv.addWidget(drift)
+        # Not used in production yet — hidden from the GUI but left fully wired
+        # (DriftWorker/_fit_drift/state save-restore all still work) so it can
+        # be shown again by removing this one line.
+        drift.setVisible(False)
 
         # ── Output ──
         out = S.make_card("Output")
@@ -435,14 +436,37 @@ class BatchTab(QtWidgets.QWidget):
         bou = _br(); bou.clicked.connect(lambda: self._out_ed.setText(
             QtWidgets.QFileDialog.getExistingDirectory(self, "Output directory") or "")); orow.addWidget(bou)
         out.body.addLayout(S.Form().row(("Folder:", orow)))
-        self._fmt = _NoScrollComboBox()
-        for label in OUTPUT_FORMATS:
-            self._fmt.addItem(label, OUTPUT_FORMATS[label])
-        _fi = self._fmt.findData(DEFAULT_OUTPUT_FORMAT)
-        if _fi >= 0:
-            self._fmt.setCurrentIndex(_fi)
-        out.body.addLayout(S.Form().row(("Format:", self._fmt)))
+        out.body.addWidget(QtWidgets.QLabel("Format(s):"))
+        self._fmt = OutputFormatSelector()
+        out.body.addWidget(self._fmt)
         lv.addWidget(out)
+
+        # ── Run mode ──
+        run_mode_card = S.make_card("Run mode")
+        mode_row = QtWidgets.QHBoxLayout(); mode_row.setSpacing(6)
+        mode_row.addWidget(S.LabelRight("Mode:"))
+        self._run_mode = _NoScrollComboBox()
+        self._run_mode.addItem("Sequential", "sequential")
+        self._run_mode.addItem("Batch Parallel", "batch_parallel")
+        mode_row.addWidget(self._run_mode)
+        mode_row.addWidget(S.LabelRight("Workers:"))
+        _max_workers = os.cpu_count() or 8
+        self._n_workers = _NoScrollSpinBox()
+        self._n_workers.setRange(1, _max_workers)
+        self._n_workers.setValue(min(4, _max_workers))
+        self._n_workers.setEnabled(False)
+        mode_row.addWidget(self._n_workers)
+        self._run_mode.currentIndexChanged.connect(
+            lambda *_: self._n_workers.setEnabled(self._run_mode.currentData() == "batch_parallel"))
+        run_mode_card.body.addLayout(mode_row)
+        mode_note = QtWidgets.QLabel(
+            "Batch Parallel splits this run's frames across N workers sharing "
+            "one detector map (built once). The worker count auto-shrinks so "
+            f"each worker gets ≥{BatchRunCoordinator.MIN_FRAMES_PER_WORKER} frames.")
+        mode_note.setWordWrap(True)
+        mode_note.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        run_mode_card.body.addWidget(mode_note)
+        lv.addWidget(run_mode_card)
 
         # ── Run ──
         self._run_btn = S.primary_btn("Start Integration")
@@ -451,8 +475,19 @@ class BatchTab(QtWidgets.QWidget):
         self._abort_btn.setEnabled(False)
         self._abort_btn.setToolTip("Stop after the current frame, keeping frames already integrated.")
         self._abort_btn.clicked.connect(self._abort)
+        self._abort_btn.setStyleSheet(S.DANGER_BTN_QSS)
+        self._save_btn = QtWidgets.QPushButton("Save")
+        self._save_btn.setEnabled(False)
+        self._save_btn.setToolTip(
+            "Write the lineouts already computed this run to disk, in the "
+            "checked format(s) above — works even if no Output folder was "
+            "set before running.")
+        self._save_btn.clicked.connect(self._save_results)
+        self._save_btn.setStyleSheet(S.SUCCESS_BTN_QSS)
         run_row = QtWidgets.QHBoxLayout(); run_row.setSpacing(6)
-        run_row.addWidget(self._run_btn, 1); run_row.addWidget(self._abort_btn)
+        run_row.addWidget(self._run_btn, 1)
+        run_row.addWidget(self._abort_btn, 1)
+        run_row.addWidget(self._save_btn, 1)
         lv.addLayout(run_row)
         self._clear_btn = QtWidgets.QPushButton("Clear results")
         self._clear_btn.setToolTip(
@@ -484,7 +519,6 @@ class BatchTab(QtWidgets.QWidget):
         split.addWidget(right)
         split.setStretchFactor(0, 0); split.setStretchFactor(1, 0); split.setStretchFactor(2, 1)
         split.setSizes([286, 361, 950])
-        self._refresh_calib_values()
 
     # ── Run ────────────────────────────────────────────────────────
 
@@ -529,11 +563,11 @@ class BatchTab(QtWidgets.QWidget):
             variance_cfg = None
 
         out_dir = self._out_ed.text().strip() or None
-        fmt = self._fmt.currentData()
+        fmts = self._fmt.checked_keys()
         q_cfg = ({"QMin": self._q_min.value(), "QMax": self._q_max.value(),
                   "QBinSize": self._q_bin.value()} if self._q_check.isChecked() else None)
-        _axctx = (float(spec.Lsd), float(spec.pxY), float(spec.Wavelength),
-                  "Q" if q_cfg else "R")
+        lsd, px, wl = float(spec.Lsd), float(spec.pxY), float(spec.Wavelength)
+        _axctx = (lsd, px, wl, "Q" if q_cfg else "R")
         self._stack_view.set_axis_context(*_axctx)
         self._waterfall.set_axis_context(*_axctx)
 
@@ -549,6 +583,8 @@ class BatchTab(QtWidgets.QWidget):
         bright_mode = self._loader.bright_mode()
 
         self._run_btn.setEnabled(False); self._abort_btn.setEnabled(True)
+        self._save_btn.setEnabled(False)
+        self._last_results = None
         self._prog.setVisible(True); self._prog.setValue(0)
         self._wf_started = False
         self._integrated_fids = set()
@@ -577,24 +613,26 @@ class BatchTab(QtWidgets.QWidget):
                                        self._geom_cache is not None) else None
 
         self._last_run_inputs = {
-            "src_cfg": src_cfg, "kernel": kernel, "fmt": fmt,
+            "src_cfg": src_cfg, "kernel": kernel, "fmt": fmts,
             "frame_range": frame_range, "monitor_file": monitor_file,
             "q_cfg": q_cfg, "weighted": weighted, "bright_mode": bright_mode,
             "mask_sources": self._loader.get_state().get("mask"),
         }
+        self._last_axis_ctx = (lsd, px, wl)
         mask = self._loader.composite_mask()
         self._last_run_fields = {
             "mask": mask,
             "mask_is_file_backed": mask is not None and not self._loader.has_live_mask_source(),
         }
 
-        self._worker = BatchWorker(
-            spec, src_cfg, self._loader.composite_mask(), out_dir, fmt, kernel,
+        self._worker = BatchRunCoordinator(
+            spec, src_cfg, self._loader.composite_mask(), out_dir, fmts, kernel,
             corrections, variance_cfg, q_cfg=q_cfg,
             frame_range=frame_range, monitor_file=monitor_file,
             drift_traj=drift_traj, parent=self,
             dark=dark, bright=bright, background=background, bright_mode=bright_mode,
-            weighted=weighted, context=context, im_trans=self._resolved_im_trans())
+            weighted=weighted, context=context, im_trans=self._resolved_im_trans(),
+            run_mode=self._run_mode.currentData(), n_workers=self._n_workers.value())
         self._worker.progress.connect(self._on_progress)
         self._worker.frame_done.connect(self._on_frame)
         self._worker.finished.connect(self._on_done)
@@ -658,6 +696,12 @@ class BatchTab(QtWidgets.QWidget):
             msg += f"\nSaved to: {Path(out[0]).parent}"
         self._log.append(msg)
         self._prog_lbl.setText(f"{'Aborted' if aborted else 'Complete'}: {n} frames")
+        if n and data.get("r_axis_px") is not None and self._last_axis_ctx is not None:
+            self._last_results = {
+                "r_axis_px": data["r_axis_px"], "profiles": data.get("profiles"),
+                "sigmas": data.get("sigmas"), "frame_ids": data.get("frame_ids"),
+            }
+            self._save_btn.setEnabled(True)
         self._log_to_project(data)
         QtWidgets.QMessageBox.information(self, "Aborted" if aborted else "Done", msg)
 
@@ -700,9 +744,42 @@ class BatchTab(QtWidgets.QWidget):
         self._stack_view.reset()
         self._integrated_fids = set()
         self._wf_started = False
+        self._last_results = None
+        self._save_btn.setEnabled(False)
         self._prog.setVisible(False); self._prog.setValue(0)
         self._prog_lbl.setText("")
         self._log.append("Cleared session results — raw data untouched.")
+
+    def _save_results(self):
+        """Write the lineouts already computed this run to disk — independent
+        of whether an Output folder was set before running (that only wired
+        up incremental per-frame writes; this writes everything now, in the
+        currently-checked format(s))."""
+        if not self._last_results or self._last_axis_ctx is None:
+            return
+        fmts = self._fmt.checked_keys()
+        if not fmts:
+            QtWidgets.QMessageBox.warning(
+                self, "No format", "Check at least one output format first."); return
+        out_dir = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Save lineouts to…", self._out_ed.text().strip())
+        if not out_dir:
+            return
+        if "2d_csv" in fmts:
+            self._log.append(
+                "[batch] Note: 2D CSV (cake) isn't saved by Save — per-frame "
+                "cakes aren't kept in memory after a run; re-run with an "
+                "Output folder set to get that format.")
+        lsd, px, wl = self._last_axis_ctx
+        try:
+            paths = write_all_profiles(
+                out_dir, fmts, self._last_results["r_axis_px"],
+                self._last_results["profiles"], self._last_results["sigmas"],
+                self._last_results["frame_ids"], lsd, px, wl)
+        except Exception as e:
+            show_error(self, "Save failed", str(e), log=self._log, log_prefix="\nERROR:\n")
+            return
+        self._log.append(f"Saved {len(paths)} file(s) to {out_dir}")
 
     # ── Folder monitoring (live new-file integration) ──────────────
 
@@ -773,7 +850,7 @@ class BatchTab(QtWidgets.QWidget):
         dark = self._loader.dark(); bright = self._loader.bright()
         background = self._loader.background(); bmode = self._loader.bright_mode()
         out_dir = self._out_ed.text().strip() or None
-        fmt = self._fmt.currentData()
+        fmts = self._fmt.checked_keys()
 
         sig = self._integration_signature(src_cfg, kernel, corrections, weighted)
         context = self._geom_cache if (sig == self._geom_sig and
@@ -783,7 +860,7 @@ class BatchTab(QtWidgets.QWidget):
             spec, src_cfg["path"], self._loader.composite_mask(), kernel, corrections,
             variance_cfg, q_cfg=q_cfg, dark=dark, bright=bright, background=background,
             bright_mode=bmode, weighted=weighted, seen=set(self._integrated_fids),
-            context=context, out_dir=out_dir, fmt=fmt, parent=self,
+            context=context, out_dir=out_dir, fmts=fmts, parent=self,
             im_trans=self._resolved_im_trans())
         self._monitor_worker.frame_done.connect(self._on_frame)
         self._monitor_worker.new_count.connect(self._on_monitor_count)

@@ -1265,6 +1265,54 @@ def make_pixel_label(px_spin, text="px:", also=None, parent=None):
     return btn
 
 
+def make_calib_values_button(fields_getter, text="View calibration ▾", parent=None):
+    """A clickable button that pops a menu showing the calibration-geometry
+    value grid (built by :func:`render_calib_value_grid`) instead of leaving
+    it always visible in the layout — same click-to-see-options interaction
+    as :func:`make_pixel_label`/:func:`make_kedge_label` above, just showing
+    a read-only grid instead of a list of selectable presets.
+
+    ``fields_getter`` is a zero-arg callable returning ``(fields, note)`` —
+    the shape :func:`resolve_calibration_fields` already returns — invoked
+    fresh each time the menu opens (via ``aboutToShow``, matching
+    ``_clickable_menu_label``'s pattern) so the popup always reflects
+    whichever calibration source is currently active."""
+    btn = QtWidgets.QToolButton(parent)
+    btn.setText(text)
+    btn.setAutoRaise(True)
+    btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+    btn.setCursor(QtCore.Qt.PointingHandCursor)
+    btn.setStyleSheet(
+        "QToolButton { border: none; padding: 0 2px; color: #4da3ff; }"
+        "QToolButton::menu-indicator { image: none; }")
+    f = btn.font(); f.setUnderline(True); btn.setFont(f)
+    btn.setToolTip("Click to view the calibration geometry currently in use.")
+
+    menu = QtWidgets.QMenu(btn)
+    host = QtWidgets.QWidget(menu)
+    hv = QtWidgets.QVBoxLayout(host)
+    hv.setContentsMargins(10, 8, 10, 8); hv.setSpacing(6)
+    grid = QtWidgets.QGridLayout()
+    grid.setHorizontalSpacing(18); grid.setVerticalSpacing(4)
+    grid_host = QtWidgets.QWidget(); grid_host.setLayout(grid)
+    hv.addWidget(grid_host)
+    note_label = QtWidgets.QLabel()
+    note_label.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+    note_label.setWordWrap(True)
+    hv.addWidget(note_label)
+    action = QtWidgets.QWidgetAction(menu)
+    action.setDefaultWidget(host)
+    menu.addAction(action)
+
+    def _populate():
+        fields, note = fields_getter()
+        render_calib_value_grid(grid, note_label, fields, note)
+
+    menu.aboutToShow.connect(_populate)
+    btn.setMenu(menu)
+    return btn
+
+
 # ── Layout helpers ──────────────────────────────────────────────────────────────
 
 def _twocol(lbl1, w1, lbl2, w2):

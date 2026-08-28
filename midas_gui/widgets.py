@@ -1254,6 +1254,49 @@ class CorrectionFlagsWidget(QtWidgets.QGroupBox):
             self.solid_check.setChecked(bool(state["solid_check"]))
 
 
+class OutputFormatSelector(QtWidgets.QWidget):
+    """Multi-select output-format list for the batch tabs — one checkbox per
+    ``constants.OUTPUT_FORMATS`` entry, so a run can write several formats at
+    once instead of picking exactly one. ``DEFAULT_OUTPUT_FORMAT`` starts
+    checked. Kept out of the generic ``_state_widgets()``/``widgets_to_dict``
+    save-state path (like ``CorrectionFlagsWidget``) since that only
+    understands single-value widgets — callers wire ``get_state()``/
+    ``set_state()`` directly instead."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        from midas_gui.constants import OUTPUT_FORMATS, DEFAULT_OUTPUT_FORMAT
+        v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0); v.setSpacing(2)
+        self._checks: dict = {}   # key -> QCheckBox
+        for label, key in OUTPUT_FORMATS.items():
+            cb = QtWidgets.QCheckBox(label)
+            cb.setChecked(key == DEFAULT_OUTPUT_FORMAT)
+            v.addWidget(cb)
+            self._checks[key] = cb
+
+    def checked_keys(self) -> list:
+        return [key for key, cb in self._checks.items() if cb.isChecked()]
+
+    def get_state(self) -> dict:
+        return {"checked": self.checked_keys()}
+
+    def set_state(self, state) -> None:
+        """``state`` is either the ``get_state()`` dict shape, or a bare
+        ``list[str]`` of keys (as stored on a project integration attempt —
+        see ``project.integrate_attempt_gui_fields``)."""
+        if not state:
+            return
+        keys = state.get("checked") if isinstance(state, dict) else state
+        if not keys:
+            return
+        keys = set(keys)
+        for key, cb in self._checks.items():
+            cb.blockSignals(True)
+            cb.setChecked(key in keys)
+            cb.blockSignals(False)
+
+
 def _fmt_source_desc(desc: dict) -> str:
     """Human-readable "Import from…" menu label for one
     ``data_bridge.DataSourceRegistry`` descriptor — shared by every

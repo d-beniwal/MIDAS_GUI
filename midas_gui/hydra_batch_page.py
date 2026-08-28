@@ -8,11 +8,15 @@ fitted geometry), and shared "recipe" cards (Integration, Corrections,
 Monitor normalisation, Output) applied identically to every panel's run,
 since it's the same integration settings for all 4.
 
-Runs currently-present panels Sequentially (one ``BatchWorker`` at a time)
-or in Parallel (all workers started at once) — ``BatchWorker`` never touches
-process-global state (it logs via the ``log_line`` signal only, unlike
-``CalibrationWorker``'s stdout redirect), so no ``capture_stdout``-style flag
-is needed for safe concurrent runs.
+Runs currently-present panels Sequentially (one ``BatchRunCoordinator`` at a
+time) or in Parallel (all started at once) — panel-level concurrency.
+Independently, each panel's own ``BatchRunCoordinator`` can further split
+that panel's frames across N concurrent chunk workers ("Batch Parallel"),
+sharing one detector map — see ``workers.BatchRunCoordinator``.
+``BatchWorker``/``BatchRunCoordinator`` never touch process-global state
+(they log via the ``log_line`` signal only, unlike ``CalibrationWorker``'s
+stdout redirect), so no ``capture_stdout``-style flag is needed for safe
+concurrent runs.
 
 Deliberately has no Drift-correction or live-MONITOR (folder-watch) support
 for Hydra mode in this first pass — both exist on the single-detector Batch
@@ -20,20 +24,22 @@ tab and can be added later if needed; see ``.context/DECISIONS.md``.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
 from PyQt5 import QtCore, QtWidgets
 
-from midas_gui.constants import (KERNELS, OUTPUT_FORMATS, ERROR_MODELS,
-                                 DEFAULT_KERNEL, DEFAULT_OUTPUT_FORMAT, DEFAULT_ERROR_MODEL)
+from midas_gui.constants import (KERNELS, ERROR_MODELS,
+                                 DEFAULT_KERNEL, DEFAULT_ERROR_MODEL)
 from midas_gui.helpers import (
-    _fspin, _browse, _NoScrollComboBox,
+    _fspin, _browse, _NoScrollComboBox, _NoScrollSpinBox,
     widgets_to_dict, apply_dict_to_widgets)
-from midas_gui.widgets import LogPanel, CorrectionFlagsWidget, WaterfallViewer, StackedProfileViewer
+from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
+                               StackedProfileViewer, OutputFormatSelector)
 from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar
 from midas_gui.hydra_batch_widgets import HydraBatchPanelCard
-from midas_gui.workers import BatchWorker
+from midas_gui.workers import BatchRunCoordinator, write_all_profiles
 from midas_gui import project
 from midas_gui import settings
 from midas_gui import style as S
@@ -62,7 +68,7 @@ class HydraBatchPage(QtWidgets.QWidget):
         super().__init__(parent)
         self._cards: dict = {}           # panel_num -> HydraBatchPanelCard
         self._viewer_pairs: dict = {}    # panel_num -> _PanelViewerPair
-        self._workers: dict = {}         # panel_num -> BatchWorker (running)
+        self._workers: dict = {}         # panel_num -> BatchRunCoordinator (running)
         self._orphans: list = []         # aborted workers kept alive until they wind down
         self._pending_panels: list = []  # sequential-mode queue
         self._run_cancelled = False
@@ -71,6 +77,8 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._geom_sig: dict = {}        # panel_num -> signature the cache was built for
         self._last_run_inputs: dict = {}  # panel_num -> JSON-safe run inputs (provenance)
         self._last_run_fields: dict = {}  # panel_num -> {mask, mask_is_file_backed}
+        self._last_results: dict = {}     # panel_num -> {r_axis_px, profiles, sigmas, frame_ids}
+        self._last_axis_ctx: dict = {}    # panel_num -> (lsd, px, wl) — for the Save button
         self._project_ctx = None
         self._build_ui()
         self._on_panel_changed(self._toolbar.current())
@@ -169,19 +177,20 @@ class HydraBatchPage(QtWidgets.QWidget):
         bou.clicked.connect(lambda: self._out_ed.setText(
             QtWidgets.QFileDialog.getExistingDirectory(self, "Output directory") or "")); orow.addWidget(bou)
         out.body.addLayout(S.Form().row(("Folder:", orow)))
-        self._fmt = _NoScrollComboBox()
-        for label in OUTPUT_FORMATS:
-            self._fmt.addItem(label, OUTPUT_FORMATS[label])
-        _fi = self._fmt.findData(DEFAULT_OUTPUT_FORMAT)
-        if _fi >= 0:
-            self._fmt.setCurrentIndex(_fi)
-        out.body.addLayout(S.Form().row(("Format:", self._fmt)))
+        out.body.addWidget(QtWidgets.QLabel("Format(s):"))
+        self._fmt = OutputFormatSelector()
+        out.body.addWidget(self._fmt)
         lv.addWidget(out)
 
-        # Run controls
+        # Run controls — two independent levels of parallelism:
+        #  (1) panel-level Sequential/Parallel (below, unchanged): how many of
+        #      ge1..ge4 integrate concurrently.
+        #  (2) frame-level Sequential/Batch-Parallel (new): whether *each*
+        #      panel's own frames are further split across chunk workers —
+        #      same BatchRunCoordinator single-detector Batch Integrate uses.
         run_card = S.make_card("Run  (Hydra: ge1–ge4, one recipe)")
         mode_row = QtWidgets.QHBoxLayout(); mode_row.setSpacing(6)
-        mode_row.addWidget(S.LabelRight("Run mode:"))
+        mode_row.addWidget(S.LabelRight("Panels:"))
         self._run_mode_combo = _NoScrollComboBox()
         self._run_mode_combo.addItem("Sequential", "sequential")
         self._run_mode_combo.addItem("Parallel", "parallel")
@@ -191,6 +200,30 @@ class HydraBatchPage(QtWidgets.QWidget):
             "shares CPU/GPU across concurrent runs.")
         mode_row.addWidget(self._run_mode_combo); mode_row.addStretch(1)
         run_card.body.addLayout(mode_row)
+        frame_mode_row = QtWidgets.QHBoxLayout(); frame_mode_row.setSpacing(6)
+        frame_mode_row.addWidget(S.LabelRight("Per panel:"))
+        self._frame_run_mode = _NoScrollComboBox()
+        self._frame_run_mode.addItem("Sequential", "sequential")
+        self._frame_run_mode.addItem("Batch Parallel", "batch_parallel")
+        frame_mode_row.addWidget(self._frame_run_mode)
+        frame_mode_row.addWidget(S.LabelRight("Workers:"))
+        _max_workers = os.cpu_count() or 8
+        self._n_workers = _NoScrollSpinBox()
+        self._n_workers.setRange(1, _max_workers)
+        self._n_workers.setValue(min(4, _max_workers))
+        self._n_workers.setEnabled(False)
+        frame_mode_row.addWidget(self._n_workers)
+        self._frame_run_mode.currentIndexChanged.connect(
+            lambda *_: self._n_workers.setEnabled(
+                self._frame_run_mode.currentData() == "batch_parallel"))
+        run_card.body.addLayout(frame_mode_row)
+        frame_mode_note = QtWidgets.QLabel(
+            "Batch Parallel splits each running panel's own frames across N "
+            "workers sharing one detector map. The worker count auto-shrinks "
+            f"so each worker gets ≥{BatchRunCoordinator.MIN_FRAMES_PER_WORKER} frames.")
+        frame_mode_note.setWordWrap(True)
+        frame_mode_note.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        run_card.body.addWidget(frame_mode_note)
         self._run_btn = S.primary_btn("Start Integration")
         self._run_btn.clicked.connect(self._run_all)
         self._abort_btn = QtWidgets.QPushButton("Abort")
@@ -198,8 +231,19 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._abort_btn.setToolTip("Stop each running panel after its current frame, "
                                    "keeping frames already integrated.")
         self._abort_btn.clicked.connect(self._abort_all)
+        self._abort_btn.setStyleSheet(S.DANGER_BTN_QSS)
+        self._save_btn = QtWidgets.QPushButton("Save")
+        self._save_btn.setEnabled(False)
+        self._save_btn.setToolTip(
+            "Write every panel's lineouts already computed this run to disk "
+            "(each into its own ge{n}/ subfolder), in the checked format(s) "
+            "above — works even if no Output folder was set before running.")
+        self._save_btn.clicked.connect(self._save_results)
+        self._save_btn.setStyleSheet(S.SUCCESS_BTN_QSS)
         run_row = QtWidgets.QHBoxLayout(); run_row.setSpacing(6)
-        run_row.addWidget(self._run_btn, 1); run_row.addWidget(self._abort_btn)
+        run_row.addWidget(self._run_btn, 1)
+        run_row.addWidget(self._abort_btn, 1)
+        run_row.addWidget(self._save_btn, 1)
         run_card.body.addLayout(run_row)
         self._prog = QtWidgets.QProgressBar(); self._prog.setRange(0, 0); self._prog.setVisible(False)
         run_card.body.addWidget(self._prog)
@@ -279,6 +323,8 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._orphans = [o for o in self._orphans if o.isRunning()]
         self._run_cancelled = False
         self._run_btn.setEnabled(False); self._abort_btn.setEnabled(True)
+        self._save_btn.setEnabled(False)
+        self._last_results = {}
         self._prog.setVisible(True)
         mode = self._run_mode()
         self._log.append("─" * 40 + f"\nStarting Hydra batch integration ({mode})…")
@@ -325,13 +371,14 @@ class HydraBatchPage(QtWidgets.QWidget):
             variance_cfg = None
         base_out = self._out_ed.text().strip()
         out_dir = str(Path(base_out) / f"ge{n}") if base_out else None
-        fmt = self._fmt.currentData()
+        fmts = self._fmt.checked_keys()
         q_cfg = ({"QMin": self._q_min.value(), "QMax": self._q_max.value(),
                   "QBinSize": self._q_bin.value()} if self._q_check.isChecked() else None)
 
         pair = self._viewer_pairs[n]
-        _axctx = (float(spec.Lsd), float(spec.pxY), float(spec.Wavelength),
-                  "Q" if q_cfg else "R")
+        lsd, px, wl = float(spec.Lsd), float(spec.pxY), float(spec.Wavelength)
+        self._last_axis_ctx[n] = (lsd, px, wl)
+        _axctx = (lsd, px, wl, "Q" if q_cfg else "R")
         pair.waterfall.set_axis_context(*_axctx)
         pair.stack_view.set_axis_context(*_axctx)
         pair.wf_started = False
@@ -348,7 +395,7 @@ class HydraBatchPage(QtWidgets.QWidget):
         context = self._geom_cache.get(n) if self._geom_sig.get(n) == sig else None
 
         self._last_run_inputs[n] = {
-            "src_cfg": src_cfg, "kernel": kernel, "fmt": fmt,
+            "src_cfg": src_cfg, "kernel": kernel, "fmt": fmts,
             "frame_range": frame_range, "monitor_file": monitor_file,
             "q_cfg": q_cfg, "weighted": weighted, "bright_mode": bright_mode,
             "mask_sources": self._loader.get_state().get("masks", {}).get(n),
@@ -358,11 +405,12 @@ class HydraBatchPage(QtWidgets.QWidget):
             "mask_is_file_backed": mask is not None and not self._loader.has_live_mask_source(n),
         }
 
-        worker = BatchWorker(
-            spec, src_cfg, mask, out_dir, fmt, kernel, corrections, variance_cfg,
+        worker = BatchRunCoordinator(
+            spec, src_cfg, mask, out_dir, fmts, kernel, corrections, variance_cfg,
             q_cfg=q_cfg, frame_range=frame_range, monitor_file=monitor_file, parent=self,
             dark=dark, bright=bright, background=background, bright_mode=bright_mode,
-            weighted=weighted, context=context, im_trans=card.resolved_im_trans())
+            weighted=weighted, context=context, im_trans=card.resolved_im_trans(),
+            run_mode=self._frame_run_mode.currentData(), n_workers=self._n_workers.value())
         worker.progress.connect(lambda done, total, n=n: self._cards[n].set_progress(done, total))
         worker.frame_done.connect(
             lambda fid, r_ax, prof, sigma, n=n: self._on_frame(n, fid, r_ax, prof, sigma))
@@ -396,6 +444,11 @@ class HydraBatchPage(QtWidgets.QWidget):
         if out:
             msg += f"\n  saved to: {Path(out[0]).parent}"
         self._log.append(msg)
+        if count and data.get("r_axis_px") is not None:
+            self._last_results[n] = {
+                "r_axis_px": data["r_axis_px"], "profiles": data.get("profiles"),
+                "sigmas": data.get("sigmas"), "frame_ids": data.get("frame_ids"),
+            }
         self._log_to_project(n, data)
         self._workers.pop(n, None)
         if self._run_mode() == "sequential":
@@ -436,8 +489,46 @@ class HydraBatchPage(QtWidgets.QWidget):
         if self._workers or self._pending_panels:
             return
         self._run_btn.setEnabled(True); self._abort_btn.setEnabled(False)
+        self._save_btn.setEnabled(bool(self._last_results))
         self._prog.setVisible(False)
         self._log.append("Hydra batch integration run complete.")
+
+    def _save_results(self):
+        """Write every panel's already-computed lineouts to disk — mirrors
+        ``BatchTab._save_results``, but writes each panel into its own
+        ``ge{n}/`` subfolder under the chosen directory (same layout a run
+        with an Output folder set already uses)."""
+        if not self._last_results:
+            return
+        fmts = self._fmt.checked_keys()
+        if not fmts:
+            QtWidgets.QMessageBox.warning(
+                self, "No format", "Check at least one output format first."); return
+        out_dir = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Save lineouts to…", self._out_ed.text().strip())
+        if not out_dir:
+            return
+        if "2d_csv" in fmts:
+            self._log.append(
+                "[batch] Note: 2D CSV (cake) isn't saved by Save — per-frame "
+                "cakes aren't kept in memory after a run; re-run with an "
+                "Output folder set to get that format.")
+        total = 0
+        for n, results in sorted(self._last_results.items()):
+            axis_ctx = self._last_axis_ctx.get(n)
+            if axis_ctx is None:
+                continue
+            lsd, px, wl = axis_ctx
+            try:
+                paths = write_all_profiles(
+                    Path(out_dir) / f"ge{n}", fmts, results["r_axis_px"],
+                    results["profiles"], results["sigmas"], results["frame_ids"],
+                    lsd, px, wl)
+                total += len(paths)
+            except Exception:
+                import traceback as _tb
+                self._log.append(f"[ge{n}] save failed:\n" + _tb.format_exc())
+        self._log.append(f"Saved {total} file(s) to {out_dir}")
 
     def _abort_all(self):
         """Stop every running panel. Mirrors ``HydraCalibrationPage._abort_all``:
@@ -478,7 +569,8 @@ class HydraBatchPage(QtWidgets.QWidget):
             "azim": self._azim, "var_check": self._var_check, "err_model": self._err_model,
             "q_check": self._q_check, "q_min": self._q_min, "q_max": self._q_max,
             "q_bin": self._q_bin, "mon_ed": self._mon_ed, "out_ed": self._out_ed,
-            "fmt": self._fmt, "run_mode": self._run_mode_combo,
+            "run_mode": self._run_mode_combo, "frame_run_mode": self._frame_run_mode,
+            "n_workers": self._n_workers,
         }
 
     def get_state(self) -> dict:
@@ -487,6 +579,7 @@ class HydraBatchPage(QtWidgets.QWidget):
             "active_panel": self._toolbar.current(),
             "fields": widgets_to_dict(self._state_widgets()),
             "corr": self._corr_widget.get_state(),
+            "fmt": self._fmt.get_state(),
             "loader": self._loader.get_state(),
             "cards": {n: widgets_to_dict(card.state_widgets())
                      for n, card in self._cards.items()},
@@ -495,15 +588,19 @@ class HydraBatchPage(QtWidgets.QWidget):
     def set_state(self, state: dict):
         if not state:
             return
-        apply_dict_to_widgets(self._state_widgets(), state.get("fields", {}))
+        fields = dict(state.get("fields", {}))
+        # A project-attempt's "fmt_keys" (see project.integrate_attempt_gui_fields)
+        # rides along in "fields" but isn't a plain widget — see BatchTab.set_state.
+        fmt_keys = fields.pop("fmt_keys", None)
+        apply_dict_to_widgets(self._state_widgets(), fields)
         self._corr_widget.set_state(state.get("corr") or {})
+        self._fmt.set_state(fmt_keys if fmt_keys is not None else state.get("fmt"))
         self._loader.set_state(state.get("loader") or {})
         for n_key, fields in (state.get("cards") or {}).items():
             card = self._cards.get(int(n_key))
             if card is None:
                 continue
             apply_dict_to_widgets(card.state_widgets(), fields)
-            card.refresh_calib_values()
         anchor = state.get("anchor_path")
         if anchor and Path(anchor).exists():
             self._loader.set_path(anchor)

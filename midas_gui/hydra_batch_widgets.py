@@ -13,11 +13,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt5 import QtWidgets
+from PyQt5 import QtCore, QtWidgets
 
 from midas_gui.helpers import (
     _browse, _build_spec, spec_from_geometry_file, resolve_calibration_fields,
-    render_calib_value_grid)
+    make_calib_values_button)
 from midas_gui import style as S
 
 
@@ -61,23 +61,14 @@ class HydraBatchPanelCard(QtWidgets.QWidget):
         jr.addWidget(bj)
         self._json_ed.textChanged.connect(
             lambda t: self._use_file_btn.setChecked(True) if t.strip() else None)
-        self._json_ed.textChanged.connect(lambda *_: self.refresh_calib_values())
         cal.body.addLayout(jr)
+        # "Calibration values" used to be an always-visible grid here — with
+        # 4 of these panels stacked it cost even more space than the
+        # single-detector tab's version; now a popup, opened on click,
+        # showing the same fields — see helpers.make_calib_values_button.
+        calib_view_btn = make_calib_values_button(self._calib_fields_in_use)
+        cal.body.addWidget(calib_view_btn, 0, QtCore.Qt.AlignLeft)
         lv.addWidget(cal)
-
-        # ── Calibration values (read-only, in use) ──
-        valcard = S.make_card("Calibration values")
-        self._calib_grid = QtWidgets.QGridLayout()
-        self._calib_grid.setHorizontalSpacing(18); self._calib_grid.setVerticalSpacing(4)
-        _cv_host = QtWidgets.QWidget(); _cv_host.setLayout(self._calib_grid)
-        valcard.body.addWidget(_cv_host)
-        self._calib_val_note = QtWidgets.QLabel("No calibration loaded yet.")
-        self._calib_val_note.setStyleSheet(f"color:{S.MUTED};font-size:10px")
-        self._calib_val_note.setWordWrap(True)
-        valcard.body.addWidget(self._calib_val_note)
-        lv.addWidget(valcard)
-        self._use_calib_btn.toggled.connect(lambda *_: self.refresh_calib_values())
-        self._use_file_btn.toggled.connect(lambda *_: self.refresh_calib_values())
 
         # ── Run progress (this panel only) ──
         prog_card = S.make_card(f"ge{self.panel_number} — progress")
@@ -89,7 +80,6 @@ class HydraBatchPanelCard(QtWidgets.QWidget):
         lv.addWidget(prog_card)
 
         lv.addStretch(1)
-        self.refresh_calib_values()
 
     # ── Calibration source ──────────────────────────────────────────
 
@@ -101,9 +91,12 @@ class HydraBatchPanelCard(QtWidgets.QWidget):
             f"From Calibrate tab: Lsd={result.Lsd/1000:.3f} mm  "
             f"λ={result.wavelength_A:.5f} Å  {result.NrPixelsY}×{result.NrPixelsZ} px")
         self._use_calib_btn.setChecked(True)
-        self.refresh_calib_values()
 
     def _calib_fields_in_use(self):
+        """Resolve this panel's active geometry as a dict of display fields —
+        or ``(None, note)`` if unavailable. Also backs the "View calibration"
+        popup (see helpers.make_calib_values_button), called fresh each time
+        it's opened."""
         return resolve_calibration_fields(
             self.result, self._use_file_btn.isChecked(), self._json_ed.text(),
             source_label=f"Calibrate tab (ge{self.panel_number})")
@@ -113,10 +106,6 @@ class HydraBatchPanelCard(QtWidgets.QWidget):
         ``BatchTab._resolved_im_trans`` (single-detector counterpart)."""
         fields, _ = self._calib_fields_in_use()
         return tuple(fields.get("im_trans") or []) if fields else ()
-
-    def refresh_calib_values(self):
-        fields, note = self._calib_fields_in_use()
-        render_calib_value_grid(self._calib_grid, self._calib_val_note, fields, note)
 
     def using_file(self) -> bool:
         return self._use_file_btn.isChecked()

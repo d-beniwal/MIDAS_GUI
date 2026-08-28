@@ -273,6 +273,27 @@ def primary_btn(text: str) -> QtWidgets.QPushButton:
     return b
 
 
+# Green/red QPushButton hues (Save/Abort in the batch tabs) — the green matches
+# this codebase's existing ad hoc "confirm" green (e.g. hydra_widgets.py's
+# Cake-Overall toggle); the red has no prior precedent here, chosen to match
+# it. Both define an explicit :disabled rule so a disabled Save/Abort still
+# reads as inactive instead of looking "stuck" in color.
+SUCCESS_BTN_QSS = (
+    "QPushButton { background: #2e7d32; color: white; font-weight: bold; "
+    "border: 1px solid #1b5e20; border-radius: 4px; padding: 3px 10px; }"
+    "QPushButton:hover { background: #33902e; }"
+    "QPushButton:disabled { background: #3a3a3a; color: " + MUTED + "; "
+    "border: 1px solid " + BORDER + "; }"
+)
+DANGER_BTN_QSS = (
+    "QPushButton { background: #c62828; color: white; font-weight: bold; "
+    "border: 1px solid #8e0000; border-radius: 4px; padding: 3px 10px; }"
+    "QPushButton:hover { background: #d32f2f; }"
+    "QPushButton:disabled { background: #3a3a3a; color: " + MUTED + "; "
+    "border: 1px solid " + BORDER + "; }"
+)
+
+
 class Form(QtWidgets.QGridLayout):
     """A compact label→field grid (Dioptas form style).
 

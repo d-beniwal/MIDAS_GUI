@@ -451,9 +451,17 @@ def integrate_attempt_gui_fields(meta: dict) -> dict:
     kernel_label = {v: k for k, v in KERNELS.items()}.get(inputs.get("kernel"))
     if kernel_label:
         fields["kernel"] = kernel_label
-    fmt_label = {v: k for k, v in OUTPUT_FORMATS.items()}.get(inputs.get("fmt"))
-    if fmt_label:
-        fields["fmt"] = fmt_label
+    # "fmt" is a list[str] of OUTPUT_FORMATS keys as of the checkbox-list
+    # output-format selector; older project files recorded a single string —
+    # wrap it so both shapes feed widgets.OutputFormatSelector.set_state the
+    # same way.
+    fmt_val = inputs.get("fmt")
+    if fmt_val:
+        fmt_keys = fmt_val if isinstance(fmt_val, list) else [fmt_val]
+        valid_keys = set(OUTPUT_FORMATS.values())
+        fmt_keys = [k for k in fmt_keys if k in valid_keys]
+        if fmt_keys:
+            fields["fmt_keys"] = fmt_keys
     if inputs.get("monitor_file"):
         fields["mon_ed"] = inputs["monitor_file"]
     q_cfg = inputs.get("q_cfg")

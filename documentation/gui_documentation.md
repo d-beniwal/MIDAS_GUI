@@ -3,7 +3,34 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-28 (Batch Integrate's Data field gains Browse…
+**Last updated:** 2026-08-28 (Batch Integrate cosmetic + Batch-Parallel
+overhaul, single-detector **and** Hydra — see §7 "Tab 4 — Batch Integrate"
+for full detail. Summary:
+- **Drift correction** is hidden from the GUI (single-detector only —
+  Hydra never had it) — not used in production; the code/`DriftWorker`
+  are untouched and it can be shown again with a one-line change.
+- **Calibration values** is no longer an always-visible grid — click the
+  new **View calibration ▾** link (next to Calibration source, same
+  click-to-see-options interaction as the Data Viewer's λ/pixel-size
+  labels) to pop it up. Applies to the single-detector card and each of
+  Hydra's 4 per-panel cards.
+- **Output format** is now a checkbox list — check as many of
+  CSV/XYE/FXYE/DAT/HDF5/2D-CSV as you want; every checked format is
+  written.
+- A green **Save** button (next to a now-red **Abort**, both narrower than
+  before alongside a narrower **Start Integration**) writes out the
+  lineouts already computed this run, in whichever formats are checked,
+  to a folder you pick on the spot — independent of whether an Output
+  folder was set before running (that still only wires up incremental
+  per-frame writes during the run itself, unchanged).
+- A new **Sequential** / **Batch Parallel** run-mode + worker-count
+  control splits one run's frames across N concurrent workers sharing one
+  detector map built once up front, auto-shrinking the worker count so
+  each worker gets at least 10 frames. Hydra gets this as a *second*,
+  independent level of parallelism layered under its existing per-panel
+  Sequential/Parallel toggle (which is unchanged).)
+
+**Previously:** (2026-08-28, Batch Integrate's Data field gains Browse…
 parity with Calibrate/Data Viewer — **Multiple files** and **Files sharing
 a name stem** are now offered there too, alongside the existing Single
 file/Full folder. A filestem pick is kept as a live folder+prefix filter,
@@ -1571,12 +1598,19 @@ own geometry, but the same beam and the same choice of what to compute.
   Calibrate tab** (auto-populated the moment that panel's fit finishes on
   the Calibrate tab's own Hydra page — no action needed here) or **From
   file** (a calibration `.json`, MIDAS `paramstest.txt`, or pyFAI `.poni`,
-  same auto-detection as the single-detector tab); the **Calibration
-  values** grid and a compact progress bar are per panel.
-- **Run (Run mode / Start Integration / Abort)**: **Sequential** integrates
-  one panel at a time; **Parallel** starts every currently-found panel's
-  run at once. Abort stops every running panel after its current frame,
-  keeping frames already written.
+  same auto-detection as the single-detector tab); a per-panel **View
+  calibration ▾** popup (see "Calibration values" below) and a compact
+  progress bar are per panel.
+- **Run — two independent levels of parallelism**: a **Panels:**
+  Sequential/Parallel choice (unchanged) controls how many of ge1–ge4
+  integrate concurrently; a separate **Per panel:** Sequential/Batch
+  Parallel + worker-count control (new, shared across panels) decides
+  whether *each* running panel's own frames are further split across
+  chunk workers — see "Run / Abort / Save" below for how Batch Parallel
+  works. **Start Integration** / **Abort** (red) / **Save** (green, saves
+  every panel's already-computed lineouts, each into its own `ge{n}/`
+  subfolder) sit in one row. Abort stops every running panel after its
+  current frame, keeping frames already written.
 - **Waterfall / Stacked profiles (right panel, switches with the active
   panel)**: each panel has its own pair, same controls as the
   single-detector tab's own viewers. A shared **Log** below is prefixed
@@ -1612,17 +1646,20 @@ all four selection modes here too:
   (auto-detected; both GUI and MIDAS-pipeline json key styles supported). Entering a
   path auto-selects this option.
 
-### Calibration values (middle, read-only)
-A **Calibration values** card shows the geometry actually in use — λ, Lsd (mm),
-BC_y/BC_z (px), tilts tx/ty/tz (°), pixel sizes, detector size, a distortion summary
-(number of non-zero coefficients), and an **ImTransOpt** row (e.g. "Flip Y, Flip Z" or
-"None") naming the image transform the active geometry was calibrated in — the same
-transform Batch Integrate now applies internally (via the MIDAS integration backend,
-not a GUI-side pixel flip) to every streamed frame so it matches. It repopulates
-whenever a calibration arrives from Tab 2 (or Tab 3 refinement, or the Data Viewer via
-Tab 2) **and** when a calibration file path is entered, parsing the file directly so
-you can confirm the numbers before running. A note line reports the active source (or
-any file-read error).
+### Calibration values (click "View calibration ▾" to see them)
+Next to Calibration source, a **View calibration ▾** link — the same
+click-to-see-options interaction as the Data Viewer's clickable λ/pixel-size
+labels — pops up the geometry actually in use, instead of an always-visible
+grid taking up space in the middle panel: λ, Lsd (mm), BC_y/BC_z (px), tilts
+tx/ty/tz (°), pixel sizes, detector size, a distortion summary (number of
+non-zero coefficients), and an **ImTransOpt** row (e.g. "Flip Y, Flip Z" or
+"None") naming the image transform the active geometry was calibrated in — the
+same transform Batch Integrate applies internally (via the MIDAS integration
+backend, not a GUI-side pixel flip) to every streamed frame so it matches. The
+popup is rebuilt fresh every time it opens, so it always reflects whichever
+calibration source (Tab 2 result, or a parsed file) is currently active, plus
+a note line reporting that source (or any file-read error). Hydra mode has the
+same popup per panel, next to each `ge{n}` card's calibration-source radios.
 
 ### Integration
 | Field | Description |
@@ -1640,18 +1677,50 @@ Polarization and solid-angle (pixel-domain, via `integrate_with_corrections`).
 Divide each processed frame's profile/σ by a per-frame scalar from a text file (one
 value per *processed* frame).
 
-### Drift correction (long scans)
-Per-frame geometry interpolated from an anchor JSON (`{frame_idx: {Lsd, BC_y, BC_z}}`)
-with spline/linear/constant parametrization; **Fit trajectory** builds it. Each frame
-is then integrated with its own geometry.
+### Drift correction (long scans) — hidden from the GUI
+Not shown in the GUI (not used in production) — per-frame geometry
+interpolated from an anchor JSON (`{frame_idx: {Lsd, BC_y, BC_z}}`) with
+spline/linear/constant parametrization, each frame then integrated with its
+own geometry, is still fully implemented underneath (`DriftWorker` and all
+its state save/restore keys), so it can be shown again by removing one
+`setVisible(False)` line if it's ever needed.
 
-### Run / Abort / Clear
-**Start Integration** / **Abort**. Abort first asks the worker to stop cleanly between
-frames (keeping frames already written); if it does not stop promptly it force-terminates
-and frees the slot. Completed frames' output files are preserved. **Clear results** removes
-the profiles/plots computed **this session** for the current data (waterfall, stacked
-profiles, and the integrated-frame tracking) so a fresh integration can start — it stops
-any active monitor but does **not** delete raw data or any files already written to disk.
+### Run mode: Sequential / Batch Parallel
+A **Run mode** card above Start Integration chooses how this run's frames
+are processed:
+- **Sequential** *(default)* — one `BatchWorker`, unchanged from before.
+- **Batch Parallel** — a **Workers** spin box (1..CPU count) splits the
+  run's frames into that many contiguous, near-equal chunks, each handled
+  by its own concurrent worker sharing **one** detector map built once up
+  front (the "detector mapping happens on one process first" step) rather
+  than rebuilt per worker. The worker count **auto-shrinks** so every
+  worker gets at least **10 frames** — e.g. asking for 8 workers on a
+  15-frame run silently drops to 1 worker (logged in the tab's Log panel).
+  Waterfall/Stacked-profiles and the progress bar behave identically to
+  Sequential; frames may just arrive slightly out of order as chunks
+  finish at different times. Workers are threads within the app, not
+  separate OS processes — the same approach Hydra's own per-panel
+  Sequential/Parallel toggle already uses for its concurrency.
+
+### Run / Abort / Save / Clear
+**Start Integration**, a red **Abort**, and a green **Save** sit in one row
+(Start Integration is narrower than before to make room). Abort first asks
+the worker(s) to stop cleanly between frames (keeping frames already
+written); if a worker does not stop promptly it is detached to finish on
+its own. **Save** writes the lineouts already computed this run to a folder
+you pick on the spot, in whichever output format(s) are checked — this
+works even when no Output folder was set before running (that field only
+wires up *incremental* per-frame writes during the run itself; Save always
+writes everything currently held in memory, on demand, afterward). Save is
+enabled once a run has produced at least one frame, and disabled again by
+**Clear results** or the start of a new run. 2D CSV (cake) is the one format
+Save can't produce — per-frame cake arrays aren't kept in memory after a run
+to avoid bloating RAM for large batches; re-run with an Output folder set
+and 2D CSV checked to get that format. **Clear results** removes the
+profiles/plots computed **this session** for the current data (waterfall,
+stacked profiles, and the integrated-frame tracking) so a fresh integration
+can start — it stops any active monitor but does **not** delete raw data or
+any files already written to disk.
 
 ### Live folder monitoring (MONITOR)
 The **MONITOR** button at the bottom of the left Data Loader panel (folder/glob sources
@@ -1670,9 +1739,12 @@ when a 1-D format is selected. Click MONITOR again to stop; starting a fresh *St
 Integration* also stops it. (Distinct from **Monitor normalisation** above, which divides
 profiles by a scalar file.)
 
-### Output formats
-CSV (R,I,σ) · XYE (2θ) · FXYE (centideg) · DAT (Q) · HDF5 (full stack) · 2D-CSV (η×R
-cake). Right panel: live **Waterfall** and **Stacked profiles** — both have an **x**
+### Output formats — checkbox list (multi-select)
+A checkbox per format — CSV (R,I,σ) · XYE (2θ) · FXYE (centideg) · DAT (Q) ·
+HDF5 (full stack) · 2D-CSV (η×R cake) — check as many as you want and every
+checked one is written for every frame (HDF5 as one combined full-stack
+file, the rest one file per frame). One format (CSV) is checked by default.
+Right panel: live **Waterfall** and **Stacked profiles** — both have an **x**
 selector to show the axis in **R (px) / 2θ (°) / Q (Å⁻¹)** (converted from the run's
 calibration). Both plots are bounded to their own data extent (like the main image
 viewers) so you can't scroll/zoom out into empty space. **Waterfall** now has a

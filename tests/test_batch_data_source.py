@@ -1,8 +1,11 @@
 """Tests for Batch Integrate's Browse… parity: DataLoaderPanel(mode="stream")'s
-filestem-filter/explicit-multi-file source_cfg(), and the workers.py source
-that backs an explicit file pick (`_ExplicitTIFFSource`).
+filestem-filter/explicit-multi-file source_cfg(), the workers.py source that
+backs an explicit file pick (`_ExplicitTIFFSource`), and Batch Parallel's
+frame-index resolution / chunk-splitting / worker-count math and the
+write_all_profiles() Save-button helper (workers.BatchRunCoordinator).
 
-Dependency-free: no MIDAS analysis backend needed, only PyQt5 + numpy + tifffile.
+Mostly dependency-free (PyQt5 + numpy + tifffile); the two write_all_profiles
+tests additionally need midas_integrate_v2 and skip if it's unavailable.
 """
 import numpy as np
 import pytest
@@ -108,3 +111,105 @@ def test_batch_worker_open_source_dispatches_tiff_list(tmp_path):
     source = worker._open_source()
     assert isinstance(source, wk._ExplicitTIFFSource)
     assert source.n_frames == 1
+
+
+def test_explicit_tiff_source_random_access_matches_iteration(tmp_path):
+    tifffile = pytest.importorskip("tifffile")
+    import midas_gui.workers as wk
+
+    paths = []
+    for i in range(3):
+        p = tmp_path / f"scan_{i:04d}.tif"
+        tifffile.imwrite(str(p), np.full((4, 4), i, dtype=np.float32))
+        paths.append(str(p))
+
+    src = wk._ExplicitTIFFSource(paths)
+    for i in range(3):
+        fid, img = src.get(i)
+        assert fid == f"scan_{i:04d}"
+        assert img.mean() == i
+
+
+# ── Batch Parallel: frame-index resolution / chunk-splitting / worker count ──
+
+def test_resolve_frame_indices_full_range():
+    import midas_gui.workers as wk
+    assert wk.resolve_frame_indices(25, None) == list(range(25))
+
+
+def test_resolve_frame_indices_with_stride_and_end():
+    import midas_gui.workers as wk
+    assert wk.resolve_frame_indices(25, (2, 20, 3)) == list(range(2, 20, 3))
+
+
+def test_resolve_frame_indices_end_clamped_to_n_frames():
+    import midas_gui.workers as wk
+    assert wk.resolve_frame_indices(10, (5, 1000, 1)) == list(range(5, 10))
+
+
+def test_split_into_chunks_covers_all_indices_in_order():
+    import midas_gui.workers as wk
+    indices = list(range(23))
+    chunks = wk._split_into_chunks(indices, 4)
+    assert len(chunks) == 4
+    assert sum(chunks, []) == indices
+    # near-equal: no chunk more than 1 larger than the smallest
+    assert max(len(c) for c in chunks) - min(len(c) for c in chunks) <= 1
+
+
+def test_split_into_chunks_more_chunks_than_items():
+    import midas_gui.workers as wk
+    indices = [0, 1, 2]
+    chunks = wk._split_into_chunks(indices, 10)
+    assert len(chunks) == 3
+    assert all(len(c) == 1 for c in chunks)
+    assert sum(chunks, []) == indices
+
+
+def test_resolve_worker_count_shrinks_to_minimum_ten_per_worker():
+    import midas_gui.workers as wk
+    # plenty of frames — full requested count survives
+    assert wk.resolve_worker_count(100, 8, 10) == 8
+    # too few frames for 8 workers at 10/worker — shrinks to 1 (15 // 10 == 1)
+    assert wk.resolve_worker_count(15, 8, 10) == 1
+    # exactly enough for 2 workers
+    assert wk.resolve_worker_count(20, 8, 10) == 2
+    # never below 1, even with very few frames
+    assert wk.resolve_worker_count(3, 8, 10) == 1
+
+
+# ── write_all_profiles (backs the batch tabs' Save button) ──────────────────
+
+def test_write_all_profiles_writes_every_frame_and_format(tmp_path):
+    pytest.importorskip("midas_integrate_v2")
+    import midas_gui.workers as wk
+
+    n = 3
+    r_axis = np.linspace(1.0, 10.0, 20)
+    profiles = np.random.rand(n, 20)
+    sigmas = np.sqrt(profiles)
+    frame_ids = [f"frame_{i:03d}" for i in range(n)]
+
+    paths = wk.write_all_profiles(
+        tmp_path, ["csv", "dat", "h5"], r_axis, profiles, sigmas, frame_ids,
+        lsd=200000.0, px=200.0, wl=0.2)
+
+    for fid in frame_ids:
+        assert (tmp_path / f"{fid}.csv").exists()
+        assert (tmp_path / f"{fid}.dat").exists()
+    assert (tmp_path / "integrated.h5").exists()
+    assert len(paths) == 2 * n + 1
+
+
+def test_write_all_profiles_skips_2d_csv(tmp_path):
+    pytest.importorskip("midas_integrate_v2")
+    import midas_gui.workers as wk
+
+    r_axis = np.linspace(1.0, 10.0, 5)
+    profiles = np.random.rand(1, 5)
+    frame_ids = ["f0"]
+    paths = wk.write_all_profiles(
+        tmp_path, ["2d_csv"], r_axis, profiles, None, frame_ids,
+        lsd=200000.0, px=200.0, wl=0.2)
+    assert paths == []
+    assert not any(tmp_path.iterdir())

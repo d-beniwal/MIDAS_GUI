@@ -68,7 +68,7 @@ def _stub_spec_builders(monkeypatch):
 
 
 class _FakeBatchWorker(QtCore.QObject):
-    """No-op-thread shape for ``BatchWorker``: finishes on the next
+    """No-op-thread shape for ``BatchRunCoordinator``: finishes on the next
     event-loop tick instead of a real background thread/file source."""
     progress = QtCore.pyqtSignal(int, int)
     frame_done = QtCore.pyqtSignal(str, object, object, object)
@@ -80,11 +80,13 @@ class _FakeBatchWorker(QtCore.QObject):
     #: (panel key inferred from out_dir) -> out_dir passed at construction,
     #: appended by every instance — tests reset this list before each run.
     calls: list = []
+    MIN_FRAMES_PER_WORKER = 10   # duck-typed to match BatchRunCoordinator
 
-    def __init__(self, spec, source_cfg, mask, out_dir, fmt, kernel, corrections,
+    def __init__(self, spec, source_cfg, mask, out_dir, fmts, kernel, corrections,
                  variance_cfg, q_cfg=None, frame_range=None, monitor_file=None,
                  drift_traj=None, parent=None, dark=None, bright=None, background=None,
-                 bright_mode="divide", weighted=True, context=None, im_trans=()):
+                 bright_mode="divide", weighted=True, context=None, im_trans=(),
+                 run_mode="sequential", n_workers=1):
         super().__init__(parent)
         self.out_dir = out_dir
         _FakeBatchWorker.calls.append(out_dir)
@@ -103,13 +105,16 @@ class _FakeBatchWorker(QtCore.QObject):
         profile = np.ones_like(r_axis)
         self.progress.emit(1, 1)
         self.frame_done.emit("0", r_axis, profile, None)
-        self.finished.emit({"n": 1, "out_paths": [f"{self.out_dir}/f0.csv"] if self.out_dir else []})
+        self.finished.emit({
+            "n": 1, "r_axis_px": r_axis, "profiles": profile.reshape(1, -1),
+            "sigmas": profile.reshape(1, -1), "frame_ids": ["0"],
+            "out_paths": [f"{self.out_dir}/f0.csv"] if self.out_dir else []})
 
 
 @pytest.fixture(autouse=True)
 def _stub_worker(monkeypatch):
     _FakeBatchWorker.calls = []
-    monkeypatch.setattr(hydra_batch_page_mod, "BatchWorker", _FakeBatchWorker)
+    monkeypatch.setattr(hydra_batch_page_mod, "BatchRunCoordinator", _FakeBatchWorker)
 
 
 def _mk_result(**overrides):
@@ -145,13 +150,15 @@ def test_hydra_batch_calibration_sources_and_masks(app, fixture_available):
     page.set_panel_calibration(1, _mk_result(BC_y=111.0))
     card1 = page._cards[1]
     assert card1._use_calib_btn.isChecked()
-    assert "Calibrate tab" in card1._calib_val_note.text()
+    _, note1 = card1._calib_fields_in_use()
+    assert "Calibrate tab" in note1
 
     # Panel 2: manual "From file".
     card2 = page._cards[2]
     card2._json_ed.setText(str(fixture_available / "ge2" / "ps_ge2.txt"))
     assert card2._use_file_btn.isChecked()
-    assert "From file" in card2._calib_val_note.text()
+    _, note2 = card2._calib_fields_in_use()
+    assert "From file" in note2
 
     # Panels 3 & 4: no calibration configured at all.
     page._out_ed.setText("/tmp/hydra_batch_test_out")

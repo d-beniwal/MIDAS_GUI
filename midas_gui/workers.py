@@ -745,6 +745,21 @@ class IntegrationWorker(QtCore.QThread):
 #  Batch integration worker (Tab 3)
 # ═════════════════════════════════════════════════════════════════════════════
 
+def _open_source_cfg(cfg):
+    """Open a ``DataLoaderPanel.source_cfg()`` descriptor as a frame source.
+    Shared by ``BatchWorker._open_source`` and ``BatchRunCoordinator`` (which
+    needs a frame count up front, before any ``BatchWorker`` exists, to split
+    a Batch-Parallel run into chunks)."""
+    from midas_integrate_v2.streaming import TIFFGlobSource, HDF5FrameSource
+    if cfg["type"] == "tiff_glob":
+        return TIFFGlobSource(cfg["path"])
+    if cfg["type"] == "hdf5":
+        return HDF5FrameSource(cfg["path"], dataset=cfg.get("dataset", "frames"))
+    if cfg["type"] == "tiff_list":
+        return _ExplicitTIFFSource(cfg["paths"])
+    raise ValueError(f"Unknown source type: {cfg['type']}")
+
+
 class BatchWorker(QtCore.QThread):
     progress   = QtCore.pyqtSignal(int, int)
     frame_done = QtCore.pyqtSignal(str, object, object, object)  # id, r_axis, prof, sigma
@@ -753,9 +768,10 @@ class BatchWorker(QtCore.QThread):
     log_line   = QtCore.pyqtSignal(str)
     geom_ready = QtCore.pyqtSignal(object)   # integration context (for reuse/caching)
 
-    def __init__(self, spec, source_cfg, mask, out_dir, fmt, kernel,
+    def __init__(self, spec, source_cfg, mask, out_dir, fmts, kernel,
                  corrections, variance_cfg, q_cfg=None,
-                 frame_range=None, monitor_file=None, drift_traj=None, parent=None,
+                 frame_range=None, frame_indices=None, monitor_file=None,
+                 drift_traj=None, parent=None,
                  dark=None, bright=None, background=None, bright_mode="divide",
                  weighted=True, context=None, im_trans=()):
         super().__init__(parent)
@@ -765,13 +781,17 @@ class BatchWorker(QtCore.QThread):
         self._src  = source_cfg
         self._mask = mask
         self._out_dir = Path(out_dir) if out_dir else None
-        self._fmt = fmt
+        # Accept a single legacy format string too (older call sites / tests).
+        self._fmts = [fmts] if isinstance(fmts, str) else list(fmts or [])
         self._kernel = kernel
         self._corrections = corrections      # (pol, sa)
         self._variance_cfg = variance_cfg    # dict or None
         self._q_cfg = q_cfg                  # {"QMin","QMax","QBinSize"} or None
-        # frame_range: (start, end_exclusive_or_None, stride) — None means all frames
+        # frame_range: (start, end_exclusive_or_None, stride) — None means all frames.
+        # Ignored when frame_indices is given (an explicit random-access chunk —
+        # see BatchRunCoordinator, which splits one run across several BatchWorkers).
         self._frame_range = frame_range or (0, None, 1)
+        self._frame_indices = list(frame_indices) if frame_indices is not None else None
         self._monitor_file = monitor_file    # path to text file, one value per line
         self._drift_traj = drift_traj        # DriftTrajectory or None
         # Dark / bright / background pre-processing (per-frame)
@@ -784,20 +804,35 @@ class BatchWorker(QtCore.QThread):
         self._im_trans = tuple(im_trans or ())
 
     def _open_source(self):
-        from midas_integrate_v2.streaming import TIFFGlobSource, HDF5FrameSource
-        c = self._src
-        if c["type"] == "tiff_glob":
-            return TIFFGlobSource(c["path"])
-        if c["type"] == "hdf5":
-            return HDF5FrameSource(c["path"], dataset=c.get("dataset", "frames"))
-        if c["type"] == "tiff_list":
-            return _ExplicitTIFFSource(c["paths"])
-        raise ValueError(f"Unknown source type: {c['type']}")
+        return _open_source_cfg(self._src)
 
     def _write_one(self, base: Path, fmt, r_px, prof, sigma, lsd, px, wl,
                    cake_2d=None, eta_axis=None):
         write_profile(base, fmt, r_px, prof, sigma, lsd, px, wl,
                       cake_2d=cake_2d, eta_axis=eta_axis)
+
+    def _iter_frames(self, source):
+        """Yield ``(abs_i, fid, img)`` for the frames this worker should process.
+
+        ``frame_indices`` (an explicit chunk assigned by ``BatchRunCoordinator``
+        for Batch-Parallel mode) reads only those frames via ``source.get(i)`` —
+        no wasted decode of frames outside the chunk. Otherwise streams the
+        source sequentially, applying ``frame_range``'s start/end/stride (a
+        leading skip still decodes-then-discards, matching prior behavior)."""
+        if self._frame_indices is not None:
+            for i in self._frame_indices:
+                fid, img = source.get(i)
+                yield i, fid, img
+            return
+        fr_start, fr_end, fr_stride = self._frame_range
+        for abs_i, (fid, img) in enumerate(source):
+            if abs_i < fr_start:
+                continue
+            if fr_end is not None and abs_i >= fr_end:
+                break
+            if (abs_i - fr_start) % fr_stride != 0:
+                continue
+            yield abs_i, fid, img
 
     def run(self):
         try:
@@ -828,14 +863,11 @@ class BatchWorker(QtCore.QThread):
             geom = ctx["geom"]; corr_on = ctx["corr_on"]
             corr_counts = ctx["corr_counts"]; cnt = ctx["cnt"]
             r_ax = ctx["r_ax"]; eta_ax = ctx["eta_ax"]
-            want_cake = (self._fmt == "2d_csv")
+            want_cake = ("2d_csv" in self._fmts)
             need_sigma = True   # xye/fxye require σ; always provide it
             # Q-uniform handled by rebinning the R-uniform profile (kernels lack Q-mode)
             if self._q_cfg:
                 qgrid, r_ax = q_grid_and_r(self._q_cfg, lsd, px, wl)
-
-            # Frame range / stride
-            fr_start, fr_end, fr_stride = self._frame_range
 
             # Monitor normalisation: load per-frame scalars if a file was provided
             monitor_vals = None
@@ -849,13 +881,16 @@ class BatchWorker(QtCore.QThread):
                     self.log_line.emit(f"[batch] monitor file error: {e}")
 
             source = self._open_source()
-            total = source.n_frames
+            total = (len(self._frame_indices) if self._frame_indices is not None
+                     else source.n_frames)
+            range_desc = (f"chunk of {total} frame(s)" if self._frame_indices is not None
+                          else f"frame_range={self._frame_range}")
             self.log_line.emit(
                 f"[batch] {total} frames | kernel={self._kernel} | "
                 f"corrections={'on' if corr_on else 'off'} | "
                 f"variance={'on' if self._variance_cfg else 'off'} | "
                 f"q_uniform={'on (rebinned)' if self._q_cfg else 'off'} | "
-                f"frame_range=({fr_start},{fr_end},{fr_stride}) | "
+                f"{range_desc} | "
                 f"monitor={'yes' if monitor_vals else 'no'} | "
                 f"drift={'on' if self._drift_traj else 'off'}")
             if self._drift_traj is not None:
@@ -874,19 +909,12 @@ class BatchWorker(QtCore.QThread):
             aborted = False
             all_profiles, all_sigmas, frame_ids, out_paths = [], [], [], []
             proc_idx = 0  # index into monitor_vals for processed frames only
-            for abs_i, (fid, img) in enumerate(source):
+            for abs_i, fid, img in self._iter_frames(source):
                 # Cooperative abort — stop cleanly, keeping frames already done.
                 if self.isInterruptionRequested():
                     aborted = True
                     self.log_line.emit(f"[batch] aborted by user after {proc_idx} frame(s)")
                     break
-                # Apply frame range / stride
-                if abs_i < fr_start:
-                    continue
-                if fr_end is not None and abs_i >= fr_end:
-                    break
-                if (abs_i - fr_start) % fr_stride != 0:
-                    continue
                 # img stays exactly as streamed — no im_trans applied to it in
                 # Python. spec.TransOpt (see run()'s top) makes the backend
                 # integrate_* call flip it internally further down.
@@ -947,16 +975,18 @@ class BatchWorker(QtCore.QThread):
                 self.progress.emit(proc_idx + 1, total)
                 proc_idx += 1
 
-                if self._out_dir is not None and self._fmt not in ("h5",):
+                file_fmts = [f for f in self._fmts if f != "h5"]
+                if self._out_dir is not None and file_fmts:
                     self._out_dir.mkdir(parents=True, exist_ok=True)
                     base = self._out_dir / fid
-                    self._write_one(base, self._fmt, r_ax, prof, sigma, cur_lsd, px, wl,
-                                    cake_2d=cake_2d, eta_axis=eta_ax)
-                    ext = "_cake.csv" if self._fmt == "2d_csv" else "." + self._fmt
-                    out_paths.append(str(base) + ext)
+                    for f in file_fmts:
+                        self._write_one(base, f, r_ax, prof, sigma, cur_lsd, px, wl,
+                                        cake_2d=cake_2d, eta_axis=eta_ax)
+                        ext = "_cake.csv" if f == "2d_csv" else "." + f
+                        out_paths.append(str(base) + ext)
 
             # HDF5: single file with the full stack
-            if self._out_dir is not None and self._fmt == "h5":
+            if self._out_dir is not None and "h5" in self._fmts:
                 self._out_dir.mkdir(parents=True, exist_ok=True)
                 h5_path = self._out_dir / "integrated.h5"
                 m.write_h5(str(h5_path),
@@ -970,6 +1000,7 @@ class BatchWorker(QtCore.QThread):
             self.finished.emit({
                 "n": n_proc, "r_axis_px": r_ax,
                 "profiles": np.array(all_profiles) if all_profiles else np.array([]),
+                "sigmas": np.array(all_sigmas) if all_sigmas else np.array([]),
                 "frame_ids": frame_ids,
                 "out_paths": out_paths,
                 "aborted": aborted,
@@ -1148,6 +1179,11 @@ class _ExplicitTIFFSource:
             img = _load_image(p).astype(np.float64)
             yield p.stem, (img[0] if img.ndim == 3 else img)
 
+    def get(self, idx: int):
+        p = self._paths[idx]
+        img = _load_image(p).astype(np.float64)
+        return p.stem, (img[0] if img.ndim == 3 else img)
+
 
 class FolderMonitorWorker(QtCore.QThread):
     """Watch a folder for new TIFF frames and integrate only the new ones.
@@ -1167,7 +1203,7 @@ class FolderMonitorWorker(QtCore.QThread):
     def __init__(self, spec, folder, mask, kernel, corrections, variance_cfg,
                  q_cfg=None, dark=None, bright=None, background=None,
                  bright_mode="divide", weighted=True, seen=None, context=None,
-                 out_dir=None, fmt="csv", poll_interval=1.0, parent=None,
+                 out_dir=None, fmts=("csv",), poll_interval=1.0, parent=None,
                  im_trans=()):
         super().__init__(parent)
         self._spec = spec
@@ -1183,7 +1219,8 @@ class FolderMonitorWorker(QtCore.QThread):
         self._seen = set(seen or [])
         self._context = context
         self._out_dir = Path(out_dir) if out_dir else None
-        self._fmt = fmt
+        # Accept a single legacy format string too (older call sites / tests).
+        self._fmts = [fmts] if isinstance(fmts, str) else list(fmts or [])
         self._poll_ms = int(max(0.2, poll_interval) * 1000)
         # See BatchWorker's __init__ note — same ImTransOpt discipline (applied
         # here in Python, never via spec.TransOpt).
@@ -1215,11 +1252,13 @@ class FolderMonitorWorker(QtCore.QThread):
                 qgrid, r_ax = q_grid_and_r(self._q_cfg, lsd, px, wl)
             fields_on = (dark is not None or bright is not None
                          or background is not None)
-            can_save = self._out_dir is not None and self._fmt in (
-                "csv", "xye", "fxye", "dat")
-            if self._out_dir is not None and not can_save:
-                self.log_line.emit(f"[monitor] note: '{self._fmt}' not saved "
-                                   "incrementally; new frames are displayed only.")
+            save_fmts = [f for f in self._fmts if f in ("csv", "xye", "fxye", "dat")]
+            can_save = self._out_dir is not None and bool(save_fmts)
+            skipped_fmts = [f for f in self._fmts if f not in save_fmts]
+            if self._out_dir is not None and skipped_fmts:
+                self.log_line.emit(
+                    f"[monitor] note: {', '.join(skipped_fmts)} not saved "
+                    "incrementally; new frames are displayed only.")
 
             self.status.emit("monitoring")
             self.log_line.emit(f"[monitor] watching {self._folder}")
@@ -1263,8 +1302,9 @@ class FolderMonitorWorker(QtCore.QThread):
                     self.log_line.emit(f"[monitor] +{fid}: peak={prof.max():.1f}")
                     if can_save:
                         self._out_dir.mkdir(parents=True, exist_ok=True)
-                        write_profile(self._out_dir / fid, self._fmt, r_ax, prof,
-                                      sigma, lsd, px, wl)
+                        for f in save_fmts:
+                            write_profile(self._out_dir / fid, f, r_ax, prof,
+                                          sigma, lsd, px, wl)
                 # responsive sleep
                 slept = 0
                 while slept < self._poll_ms and not self.isInterruptionRequested():
@@ -1273,6 +1313,303 @@ class FolderMonitorWorker(QtCore.QThread):
             self.log_line.emit(f"[monitor] stopped — {count} new frame(s) integrated")
         except Exception:
             self.failed.emit(traceback.format_exc())
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Batch Parallel: split one run's frames across several concurrent
+#  BatchWorkers sharing one pre-built detector map
+# ═════════════════════════════════════════════════════════════════════════════
+
+def resolve_frame_indices(n_frames: int, frame_range) -> list:
+    """Expand a ``(start, end_exclusive_or_None, stride)`` frame_range against
+    a known frame count into an explicit, ordered list of absolute indices."""
+    start, end, stride = frame_range or (0, None, 1)
+    end = n_frames if end is None else min(int(end), n_frames)
+    return list(range(int(start), end, max(1, int(stride))))
+
+
+def resolve_worker_count(n_items: int, requested: int, min_per_worker: int) -> int:
+    """How many workers to actually use for ``n_items`` frames — the
+    requested count, shrunk so every worker gets at least ``min_per_worker``
+    items (never below 1)."""
+    requested = max(1, int(requested))
+    min_per_worker = max(1, int(min_per_worker))
+    return min(requested, max(1, int(n_items) // min_per_worker))
+
+
+def _split_into_chunks(indices: list, n_chunks: int) -> list:
+    """Split a sorted list of frame indices into ``n_chunks`` contiguous,
+    near-equal pieces (earlier chunks absorb the remainder). Concatenating
+    the chunks back in order reproduces ``indices`` exactly."""
+    n = len(indices)
+    n_chunks = max(1, min(n_chunks, n))
+    base, extra = divmod(n, n_chunks)
+    chunks, start = [], 0
+    for i in range(n_chunks):
+        size = base + (1 if i < extra else 0)
+        if size == 0:
+            continue
+        chunks.append(indices[start:start + size])
+        start += size
+    return chunks
+
+
+def write_all_profiles(out_dir, fmts, r_axis, profiles, sigmas, frame_ids,
+                       lsd, px, wl) -> list:
+    """Write every frame's already-computed lineout to disk, in every format
+    in ``fmts``. Backs the batch tabs' **Save** button — writing results that
+    already exist in memory, independent of whether an output directory was
+    set before the run — and ``BatchRunCoordinator``'s combined HDF5 write for
+    Batch-Parallel mode (each chunk worker would otherwise write its own
+    colliding ``integrated.h5``).
+
+    ``"2d_csv"`` (per-frame cake) is silently skipped — per-frame cake arrays
+    aren't retained in memory after a run (only 1-D profiles/sigmas are, to
+    avoid bloating RAM for large batches); re-run with an output directory
+    and 2D CSV checked to get that format. Returns the list of paths written.
+    """
+    import midas_integrate_v2 as m
+    out_dir = Path(out_dir)
+    profiles = np.asarray(profiles)
+    sigmas = (np.asarray(sigmas) if sigmas is not None and len(sigmas)
+              else np.sqrt(np.maximum(profiles, 0.0)))
+    frame_ids = list(frame_ids)
+    file_fmts = [f for f in fmts if f not in ("h5", "2d_csv")]
+    out_paths = []
+    if file_fmts and len(frame_ids):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for i, fid in enumerate(frame_ids):
+            base = out_dir / str(fid)
+            for f in file_fmts:
+                write_profile(base, f, r_axis, profiles[i], sigmas[i], lsd, px, wl)
+                out_paths.append(str(base) + "." + f)
+    if "h5" in fmts and len(frame_ids):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        h5_path = out_dir / "integrated.h5"
+        m.write_h5(str(h5_path), profiles=profiles, r_axis=r_axis,
+                   frame_ids=frame_ids, sigmas=sigmas)
+        out_paths.append(str(h5_path))
+    return out_paths
+
+
+class _GeomBuildWorker(QtCore.QThread):
+    """One-shot thread that builds the integration context ("detector map")
+    for a spec/kernel/mask/corrections combo — the "detector mapping happens
+    on one process first" step ``BatchRunCoordinator`` runs once, ahead of
+    fanning per-frame integration out to N concurrent ``BatchWorker``s."""
+    done   = QtCore.pyqtSignal(object)   # integration context dict
+    failed = QtCore.pyqtSignal(str)
+
+    def __init__(self, spec, kernel, mask, corrections, weighted, parent=None):
+        super().__init__(parent)
+        self._spec, self._kernel, self._mask = spec, kernel, mask
+        self._corrections, self._weighted = corrections, weighted
+
+    def run(self):
+        try:
+            ctx = build_integration_context(
+                self._spec, self._kernel, self._mask, self._corrections, self._weighted)
+            self.done.emit(ctx)
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
+class BatchRunCoordinator(QtCore.QObject):
+    """Runs one batch-integration job either as a single ``BatchWorker``
+    ("sequential") or as several concurrent ``BatchWorker``s, each given a
+    disjoint, contiguous slice of the frame list ("batch_parallel"), sharing
+    one detector map built once up front by ``_GeomBuildWorker``.
+
+    Exposes the same signal surface as ``BatchWorker`` (``progress``,
+    ``frame_done``, ``finished``, ``failed``, ``log_line``, ``geom_ready``)
+    plus ``isRunning()``/``start()``/``requestInterruption()``/``wait()``, so
+    callers (``BatchTab``, ``HydraBatchPage``) can construct this in place of
+    ``BatchWorker`` with no change to their signal wiring or abort logic.
+
+    Threads, not OS processes, run the parallel chunks — numpy/torch release
+    the GIL during their heavy compute, so this gets real multi-core
+    throughput while staying in-process (no pickling geometry/spec objects
+    across a process boundary, no cross-process progress plumbing) — the
+    same approach ``hydra_batch_page.py``'s existing per-panel "Parallel"
+    run mode already uses for its own, independent level of concurrency.
+    """
+    progress   = QtCore.pyqtSignal(int, int)
+    frame_done = QtCore.pyqtSignal(str, object, object, object)
+    finished   = QtCore.pyqtSignal(dict)
+    failed     = QtCore.pyqtSignal(str)
+    log_line   = QtCore.pyqtSignal(str)
+    geom_ready = QtCore.pyqtSignal(object)
+
+    MIN_FRAMES_PER_WORKER = 10
+
+    def __init__(self, spec, source_cfg, mask, out_dir, fmts, kernel,
+                 corrections, variance_cfg, q_cfg=None,
+                 frame_range=None, monitor_file=None, drift_traj=None,
+                 dark=None, bright=None, background=None, bright_mode="divide",
+                 weighted=True, context=None, im_trans=(),
+                 run_mode="sequential", n_workers=1, parent=None):
+        super().__init__(parent)
+        self._args = dict(
+            spec=spec, source_cfg=source_cfg, mask=mask, out_dir=out_dir, fmts=fmts,
+            kernel=kernel, corrections=corrections, variance_cfg=variance_cfg,
+            q_cfg=q_cfg, frame_range=frame_range, monitor_file=monitor_file,
+            drift_traj=drift_traj, dark=dark, bright=bright, background=background,
+            bright_mode=bright_mode, weighted=weighted, im_trans=im_trans)
+        self._context = context
+        self._run_mode = run_mode if run_mode == "batch_parallel" else "sequential"
+        self._n_workers_requested = max(1, int(n_workers))
+        self._solo_worker: Optional[BatchWorker] = None
+        self._geom_worker: Optional[_GeomBuildWorker] = None
+        self._chunks: list = []
+        self._chunk_workers: list = []
+        self._chunk_results: dict = {}
+        self._chunk_totals: dict = {}
+        self._chunk_done: dict = {}
+        self._interrupted = False
+
+    def isRunning(self) -> bool:
+        if self._solo_worker is not None:
+            return self._solo_worker.isRunning()
+        if self._geom_worker is not None and self._geom_worker.isRunning():
+            return True
+        return any(w.isRunning() for w in self._chunk_workers)
+
+    def start(self):
+        if self._run_mode != "batch_parallel":
+            self._start_sequential()
+            return
+        self._start_batch_parallel()
+
+    def _start_sequential(self):
+        w = BatchWorker(context=self._context, parent=self, **self._args)
+        self._solo_worker = w
+        w.progress.connect(self.progress)
+        w.frame_done.connect(self.frame_done)
+        w.finished.connect(self.finished)
+        w.failed.connect(self.failed)
+        w.log_line.connect(self.log_line)
+        w.geom_ready.connect(self.geom_ready)
+        w.start()
+
+    def _start_batch_parallel(self):
+        try:
+            source = _open_source_cfg(self._args["source_cfg"])
+            n_frames = source.n_frames
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+            return
+        indices = resolve_frame_indices(n_frames, self._args["frame_range"])
+        if not indices:
+            self.failed.emit("No frames match the selected frame range.")
+            return
+        n_workers = resolve_worker_count(
+            len(indices), self._n_workers_requested, self.MIN_FRAMES_PER_WORKER)
+        if n_workers < self._n_workers_requested:
+            self.log_line.emit(
+                f"[batch] {len(indices)} frame(s) too few for "
+                f"{self._n_workers_requested} requested workers (minimum "
+                f"{self.MIN_FRAMES_PER_WORKER} frames/worker) — using {n_workers}.")
+        if n_workers <= 1:
+            self._start_sequential()
+            return
+        self._chunks = _split_into_chunks(indices, n_workers)
+        self.log_line.emit(
+            f"[batch] Batch Parallel: {len(indices)} frames across "
+            f"{len(self._chunks)} workers ({[len(c) for c in self._chunks]})")
+        if self._context is not None:
+            self._on_geom_ready(self._context)
+            return
+        self.log_line.emit("[batch] Building geometry (one-time, shared)…")
+        gw = _GeomBuildWorker(self._args["spec"], self._args["kernel"],
+                              self._args["mask"], self._args["corrections"],
+                              self._args["weighted"], parent=self)
+        self._geom_worker = gw
+        gw.done.connect(self._on_geom_ready)
+        gw.failed.connect(self.failed)
+        gw.start()
+
+    def _on_geom_ready(self, ctx):
+        if self._interrupted:
+            self.finished.emit({"n": 0, "r_axis_px": ctx.get("r_ax"),
+                                "profiles": np.array([]), "sigmas": np.array([]),
+                                "frame_ids": [], "out_paths": [], "aborted": True})
+            return
+        self.geom_ready.emit(ctx)
+        for chunk in self._chunks:
+            w = BatchWorker(context=ctx, frame_indices=chunk, parent=self, **self._args)
+            self._chunk_workers.append(w)
+            self._chunk_totals[id(w)] = len(chunk)
+            self._chunk_done[id(w)] = 0
+            w.progress.connect(lambda done, total, w=w: self._on_chunk_progress(w, done))
+            w.frame_done.connect(self.frame_done)
+            w.finished.connect(lambda data, w=w: self._on_chunk_finished(w, data))
+            w.failed.connect(self.failed)
+            w.log_line.connect(self.log_line)
+            w.start()
+
+    def _on_chunk_progress(self, w, done):
+        self._chunk_done[id(w)] = done
+        self.progress.emit(sum(self._chunk_done.values()), sum(self._chunk_totals.values()))
+
+    def _on_chunk_finished(self, w, data):
+        self._chunk_results[id(w)] = data
+        if len(self._chunk_results) < len(self._chunk_workers):
+            return
+        # All chunks reported — merge, preserving overall frame order (each
+        # chunk is a contiguous slice of the sorted index list).
+        merged_profiles, merged_sigmas, merged_ids, merged_out = [], [], [], []
+        aborted = False
+        r_axis = None
+        for cw in self._chunk_workers:
+            d = self._chunk_results[id(cw)]
+            if d.get("profiles") is not None and len(d["profiles"]):
+                merged_profiles.extend(d["profiles"])
+            if d.get("sigmas") is not None and len(d["sigmas"]):
+                merged_sigmas.extend(d["sigmas"])
+            merged_ids.extend(d.get("frame_ids") or [])
+            merged_out.extend(d.get("out_paths") or [])
+            aborted = aborted or d.get("aborted", False)
+            if r_axis is None:
+                r_axis = d.get("r_axis_px")
+        out_dir = self._args["out_dir"]
+        fmts = self._args["fmts"] or []
+        if out_dir and "h5" in fmts and merged_profiles:
+            try:
+                spec = self._args["spec"]
+                h5_paths = write_all_profiles(
+                    out_dir, ["h5"], r_axis, merged_profiles, merged_sigmas, merged_ids,
+                    float(spec.Lsd), float(spec.pxY), float(spec.Wavelength))
+                merged_out.extend(h5_paths)
+            except Exception:
+                self.log_line.emit(
+                    "[batch] combined HDF5 write failed:\n" + traceback.format_exc())
+        self.finished.emit({
+            "n": len(merged_profiles), "r_axis_px": r_axis,
+            "profiles": np.array(merged_profiles) if merged_profiles else np.array([]),
+            "sigmas": np.array(merged_sigmas) if merged_sigmas else np.array([]),
+            "frame_ids": merged_ids, "out_paths": merged_out, "aborted": aborted,
+        })
+
+    def requestInterruption(self):
+        self._interrupted = True
+        if self._solo_worker is not None:
+            self._solo_worker.requestInterruption()
+        for w in self._chunk_workers:
+            w.requestInterruption()
+
+    def wait(self, ms=None) -> bool:
+        import time
+        deadline = None if ms is None else time.monotonic() + ms / 1000.0
+        workers = ([self._geom_worker] if self._geom_worker is not None else []) + \
+                  ([self._solo_worker] if self._solo_worker is not None else list(self._chunk_workers))
+        ok = True
+        for w in workers:
+            if w is None or not w.isRunning():
+                continue
+            remaining_ms = 30000 if deadline is None else max(0, int((deadline - time.monotonic()) * 1000))
+            if not w.wait(remaining_ms):
+                ok = False
+        return ok
 
 
 # ═════════════════════════════════════════════════════════════════════════════
