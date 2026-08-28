@@ -6,7 +6,8 @@ from pathlib import Path
 
 from PyQt5 import QtCore, QtWidgets
 
-from .constants import DISTORTION_NAMES, DISTORTION_ISO, DISTORTION_PRESETS
+from .constants import DISTORTION_NAMES, DISTORTION_ISO, DISTORTION_PRESETS, H5_EXTS
+from .helpers import is_h5
 
 _PANEL_LABELS = {"single": "Single detector", "ge1": "ge1", "ge2": "ge2",
                  "ge3": "ge3", "ge4": "ge4", "hydra_composite": "Hydra Overall"}
@@ -260,6 +261,276 @@ class ProjectLoadDialog(QtWidgets.QDialog):
     def integrate_selection(self) -> dict:
         """``{panel_key: attempt_ref}`` for every checked Batch Integrate row."""
         return self._selection("integrate")
+
+
+# Every extension the app already recognizes as a detector-frame file
+# (mirrors the combined QFileDialog filter used across widgets.py/hydra_widgets.py),
+# split into the HDF5 (multi-frame container) and non-HDF5 (single-frame-per-file:
+# TIFF + the beamline .geN/.cbf/.edf conventions) halves.
+_H5_NAME_FILTERS = sorted("*" + ext for ext in H5_EXTS)
+_NON_H5_NAME_FILTERS = ["*.tif", "*.tiff", "*.ge*", "*.cbf", "*.edf"]
+_ALL_NAME_FILTERS = _NON_H5_NAME_FILTERS + _H5_NAME_FILTERS
+
+
+def _count_frame_files(folder: str) -> int:
+    """How many non-HDF5 frame files (see ``_NON_H5_NAME_FILTERS``) sit
+    directly in ``folder`` — used for the Full-folder/Filestem preview."""
+    p = Path(folder)
+    if not p.is_dir():
+        return 0
+    n = 0
+    for pat in _NON_H5_NAME_FILTERS:
+        n += sum(1 for _ in p.glob(pat))
+    return n
+
+
+class BrowseFilesDialog(QtWidgets.QDialog):
+    """Unified file-browsing popup for a Data/Dark/Bright/Background field.
+
+    Offers four selection modes sharing one file-browser view:
+
+    - **Single file** — one file, TIFF-family or HDF5.
+    - **Multiple files** — an arbitrary multi-select, TIFF-family only
+      (HDF5 files are excluded from the listing entirely, so this can
+      never resolve to one — a container format doesn't need this).
+    - **Full folder** — every TIFF-family file in one directory (resolves
+      to the folder path itself; the caller's existing folder-glob logic,
+      e.g. ``helpers._collect_frame_paths``, does the rest lazily).
+    - **Files sharing a name stem** — every TIFF-family file in one
+      directory whose name starts with a given prefix.
+
+    ``modes`` restricts which of the four are offered (default: all four),
+    for callers whose consuming pipeline can't take every shape:
+    - A Hydra Dark/Bright/Background field auto-discovers its other 3
+      panels from one anchor path (``helpers.hydra_siblings``), which has
+      no way to generalize to an arbitrary per-file pick list — pass
+      ``modes=("file", "folder", "stem")``.
+    - Hydra's main Data field has one anchor file only (its frame index
+      comes from that one file's internal frame count, not separate
+      per-frame files) — pass ``modes=("file",)``.
+    - Batch Integrate's streamed (never-fully-loaded) Data field is handed
+      to an external glob/path-based streaming reader that can't consume
+      an arbitrary file list — pass ``modes=("file", "folder")``.
+    A single-element ``modes`` hides the mode row entirely and behaves
+    like a plain file/folder picker.
+    """
+
+    _MODE_LABELS = {"file": "Single file", "files": "Multiple files",
+                     "folder": "Full folder", "stem": "Files sharing a name stem"}
+
+    def __init__(self, parent=None, *, title="Select data", start_dir="",
+                 modes=("file", "files", "folder", "stem")):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(760, 520)
+        modes = tuple(modes)
+        self._mode = modes[0]
+        self._current_dir = ""
+        self._folder = ""
+        self._stem = ""
+        self._paths: list = []
+
+        layout = QtWidgets.QVBoxLayout(self)
+
+        self._mode_btns = {}
+        if len(modes) > 1:
+            mode_row = QtWidgets.QHBoxLayout(); mode_row.setSpacing(12)
+            group = QtWidgets.QButtonGroup(self)
+            for key in modes:
+                rb = QtWidgets.QRadioButton(self._MODE_LABELS[key])
+                rb.toggled.connect(lambda checked, k=key: self._on_mode_toggled(k, checked))
+                group.addButton(rb)
+                mode_row.addWidget(rb)
+                self._mode_btns[key] = rb
+            mode_row.addStretch(1)
+            layout.addLayout(mode_row)
+
+        addr_row = QtWidgets.QHBoxLayout(); addr_row.setSpacing(4)
+        self._up_btn = QtWidgets.QToolButton()
+        self._up_btn.setText("⬆")  # ⬆
+        self._up_btn.setToolTip("Up one level")
+        self._up_btn.clicked.connect(self._go_up)
+        self._path_ed = QtWidgets.QLineEdit()
+        self._path_ed.returnPressed.connect(lambda: self._navigate(self._path_ed.text().strip()))
+        addr_row.addWidget(self._up_btn)
+        addr_row.addWidget(self._path_ed, 1)
+        layout.addLayout(addr_row)
+
+        self._model = QtWidgets.QFileSystemModel(self)
+        self._model.setRootPath("")
+        self._tree = QtWidgets.QTreeView()
+        self._tree.setModel(self._model)
+        self._tree.setSortingEnabled(True)
+        self._tree.sortByColumn(0, QtCore.Qt.AscendingOrder)
+        self._tree.doubleClicked.connect(self._on_double_clicked)
+        self._tree.selectionModel().selectionChanged.connect(self._on_selection_changed)
+        layout.addWidget(self._tree, 1)
+
+        self._stem_row = QtWidgets.QWidget()
+        sr = QtWidgets.QHBoxLayout(self._stem_row)
+        sr.setContentsMargins(0, 0, 0, 0); sr.setSpacing(4)
+        sr.addWidget(QtWidgets.QLabel("Filename starts with:"))
+        self._stem_ed = QtWidgets.QLineEdit()
+        self._stem_ed.setPlaceholderText("e.g. scan_  (click a file below to prefill)")
+        self._stem_ed.textChanged.connect(lambda *_: (self._update_info(), self._update_ok_enabled()))
+        sr.addWidget(self._stem_ed, 1)
+        self._stem_row.setVisible(False)
+        layout.addWidget(self._stem_row)
+
+        self._info = QtWidgets.QLabel("")
+        self._info.setStyleSheet("color:#9a9a9a;font-size:10px")
+        self._info.setWordWrap(True)
+        layout.addWidget(self._info)
+
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        self._ok_btn = btns.button(QtWidgets.QDialogButtonBox.Ok)
+        btns.accepted.connect(self._on_accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+        self._navigate(start_dir or str(Path.home()))
+        if len(modes) > 1:
+            self._mode_btns[modes[0]].setChecked(True)
+        else:
+            self._apply_mode()
+
+    # ── navigation ───────────────────────────────────────────────
+    def _navigate(self, path: str):
+        p = Path(path) if path else Path.home()
+        if not p.is_dir():
+            p = p.parent if p.exists() else Path.home()
+        self._current_dir = str(p)
+        self._path_ed.blockSignals(True)
+        self._path_ed.setText(self._current_dir)
+        self._path_ed.blockSignals(False)
+        self._tree.setRootIndex(self._model.index(self._current_dir))
+        self._update_info()
+        self._update_ok_enabled()
+
+    def _go_up(self):
+        d = QtCore.QDir(self._current_dir)
+        if d.cdUp():
+            self._navigate(d.absolutePath())
+
+    def _on_double_clicked(self, index):
+        if self._model.isDir(index):
+            self._navigate(self._model.filePath(index))
+        elif self._mode == "file":
+            self._paths = [self._model.filePath(index)]
+            self.accept()
+
+    # ── mode switching ───────────────────────────────────────────
+    def _on_mode_toggled(self, key: str, checked: bool):
+        if checked:
+            self._mode = key
+            self._apply_mode()
+
+    def _apply_mode(self):
+        if self._mode == "file":
+            self._model.setNameFilters(_ALL_NAME_FILTERS)
+            self._tree.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        elif self._mode == "files":
+            self._model.setNameFilters(_NON_H5_NAME_FILTERS)
+            self._tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        else:  # folder / stem
+            self._model.setNameFilters(_NON_H5_NAME_FILTERS)
+            self._tree.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self._model.setNameFilterDisables(False)
+        self._stem_row.setVisible(self._mode == "stem")
+        self._tree.clearSelection()
+        self._update_info()
+        self._update_ok_enabled()
+
+    # ── selection ────────────────────────────────────────────────
+    def _selected_files(self) -> list:
+        sel_model = self._tree.selectionModel()
+        if sel_model is None:
+            return []
+        out = []
+        for idx in sel_model.selectedRows():
+            if self._model.isDir(idx):
+                continue
+            p = self._model.filePath(idx)
+            if self._mode != "file" and is_h5(p):
+                continue
+            out.append(p)
+        return sorted(out)
+
+    def _stem_matches(self) -> list:
+        stem = self._stem_ed.text().strip()
+        if not stem or not self._current_dir:
+            return []
+        import glob as _glob
+        pattern = str(Path(self._current_dir) / (stem + "*"))
+        return sorted(m for m in _glob.glob(pattern)
+                      if Path(m).is_file() and not is_h5(m))
+
+    def _on_selection_changed(self, *_):
+        if self._mode == "stem":
+            files = self._selected_files()
+            if len(files) == 1 and not self._stem_ed.text().strip():
+                self._stem_ed.setText(Path(files[0]).stem)
+        self._update_info()
+        self._update_ok_enabled()
+
+    def _update_info(self):
+        if self._mode == "file":
+            files = self._selected_files()
+            self._info.setText(f"Selected: {files[0]}" if files else "Select one file.")
+        elif self._mode == "files":
+            n = len(self._selected_files())
+            self._info.setText(
+                f"{n} file(s) selected." if n else
+                "Select one or more files (HDF5 files aren't shown — they hold "
+                "many frames in one file, so only single-file selection applies).")
+        elif self._mode == "folder":
+            n = _count_frame_files(self._current_dir)
+            self._info.setText(f"{n} frame file(s) found in this folder.")
+        elif self._mode == "stem":
+            n = len(self._stem_matches())
+            self._info.setText(
+                f"{n} matching file(s) in {self._current_dir}" if self._current_dir
+                else "Browse to a folder and enter a filename stem.")
+
+    def _update_ok_enabled(self):
+        if self._mode == "file":
+            ok = len(self._selected_files()) == 1
+        elif self._mode == "files":
+            ok = len(self._selected_files()) >= 1
+        elif self._mode == "folder":
+            ok = bool(self._current_dir) and Path(self._current_dir).is_dir()
+        else:  # stem
+            ok = len(self._stem_matches()) >= 1
+        self._ok_btn.setEnabled(ok)
+
+    def _on_accept(self):
+        if self._mode in ("file", "files"):
+            self._paths = self._selected_files()
+        elif self._mode == "folder":
+            self._folder = self._current_dir
+        elif self._mode == "stem":
+            self._paths = self._stem_matches()
+            self._stem = self._stem_ed.text().strip()
+        self.accept()
+
+    # ── result API ───────────────────────────────────────────────
+    def mode(self) -> str:
+        """"file" | "files" | "folder" | "stem" — which mode was confirmed."""
+        return self._mode
+
+    def paths(self) -> list:
+        """Resolved file list, for "file"/"files"/"stem" modes."""
+        return list(self._paths)
+
+    def folder(self) -> str:
+        """The chosen directory, for "folder" mode."""
+        return self._folder
+
+    def stem(self) -> tuple:
+        """(folder, stem) for "stem" mode — Hydra callers re-run sibling
+        discovery on the folder before applying the stem to each panel."""
+        return (self._current_dir, self._stem)
 
 
 class ProjectHistoryDialog(QtWidgets.QDialog):

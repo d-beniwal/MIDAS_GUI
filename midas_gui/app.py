@@ -234,6 +234,22 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 _log(f"Registry bind failed for Mask Builder:\n{traceback.format_exc()}")
 
+        # Same registry, Hydra mode: Data Viewer / Calibrate / Batch Integrate
+        # each also own a HydraLoaderPanel (a separate page, not the same
+        # object as their single-detector `_loader`) — label them distinctly
+        # so Import-from lists don't conflate a Hydra anchor path with its
+        # single-detector counterpart.
+        for tab, label in (
+            (self._view_tab, "Data Viewer (Hydra)"), (self._cal_tab, "Calibrate (Hydra)"),
+            (self._batch_tab, "Batch Integrate (Hydra)"),
+        ):
+            bind_hydra = getattr(tab, "bind_hydra_registry", None)
+            if bind_hydra is not None:
+                try:
+                    bind_hydra(registry, label)
+                except Exception:
+                    _log(f"Hydra registry bind failed for {label}:\n{traceback.format_exc()}")
+
         # Wire cross-tab signals defensively (skip any placeholder tab).
         def _connect(src, signal_name, targets, slot_name):
             sig = getattr(src, signal_name, None)

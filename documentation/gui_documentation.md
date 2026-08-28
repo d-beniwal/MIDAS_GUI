@@ -3,7 +3,15 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-27 (Calibrate's Multi-panel detector results —
+**Last updated:** 2026-08-27 (Every Data/Dark/Bright/Background field's ⋯
+button — single-detector and Hydra alike — now opens a two-item menu,
+**Browse…** and **Import from…**; Browse… opens a popup offering Single
+file / Multiple files / Full folder / Files sharing a name stem, and Hydra
+tabs gained real cross-tab Import from… for the first time. See "The
+Browse… popup" and "Cross-tab data import" in §1 "Overview and
+Architecture" for detail.)
+
+**Previously:** (2026-08-27, Calibrate's Multi-panel detector results —
 per-panel shifts + grid geometry — now reach downstream integration
 properly: see Tab 2 "Export" for detail.)
 
@@ -454,14 +462,42 @@ automatically propagated to all downstream tabs. When Tab 1 (Mask Builder) compu
 a mask it is sent to the consuming tabs. Tab 3 (Refinement), if applied, re-broadcasts
 the refined geometry. No manual copying is needed.
 
-**Cross-tab data import ("Import from…").** Every Data Loader panel's **Data**
-browse button (Data Viewer, Calibrate, Calib. Refinement, Batch Integrate, Pump
-Probe), plus Mask Builder's **Image** and **Stack** browse buttons, carry an
-**Import from…** submenu listing whatever's currently loaded in every *other*
-tab — a file/folder path, or, if that tab's Live Data **Use Buffer** ring
-buffer is frozen (green), a **Buffer (N frames)** entry. The menu is built
-fresh each time it's opened, so it always reflects what's loaded right now.
-Picking a path just loads it like a normal browse. Picking a **buffer**:
+**The Browse… popup.** Every **Data, Dark, Bright, Background** field's **⋯**
+button — single-detector tabs (Data Viewer, Calibrate, Calib. Refinement,
+Batch Integrate, Pump Probe) and their Hydra equivalents alike — opens the
+same two-item menu: **Browse…** and **Import from…**. **Browse…** opens a
+popup file browser with four selection modes (radio buttons at the top):
+- **Single file** — one file, TIFF-family (`.tif/.tiff/.geN/.cbf/.edf`) or
+  HDF5. The only mode offered for Hydra's main **Hydra data** field, whose
+  frame index already comes from one anchor file's own internal frame count.
+- **Multiple files** — an arbitrary multi-select. Not offered for Hydra
+  fields (there's no way to derive the other 3 panels' files from an
+  arbitrary pick list) or for Batch Integrate's streamed Data field (handed
+  straight to an external glob-based reader that can't take a file list).
+- **Full folder** — every TIFF-family file in one directory.
+- **Files sharing a name stem** — every TIFF-family file in one directory
+  starting with a typed prefix (click a file in the browser to prefill it).
+
+**HDF5 files are simply not shown** in Multiple-files/Full-folder/Filestem
+mode — since an HDF5 file is itself a multi-frame container, only Single
+file ever applies to one. For a Hydra field, Full-folder/Filestem resolve
+per-panel exactly like Single-file does today: point at any one panel's
+folder (or a file inside it) and the other panels' folders are found via the
+same `geN` naming convention.
+
+**Cross-tab data import ("Import from…").** Every Data Loader panel's **Data,
+Dark, Bright, Background** fields (single-detector and Hydra alike), plus
+Mask Builder's **Image** and **Stack** browse buttons, carry an **Import
+from…** submenu listing whatever's currently loaded in every *other* tab of
+the same field type — a file/folder path, an explicit multi-file/filestem
+selection, or, if that tab's Live Data **Use Buffer** ring buffer is frozen
+(green), a **Buffer (N frames)** entry. Hydra tabs are labeled distinctly
+(e.g. "Data Viewer (Hydra)") so a Hydra anchor path is never confused with
+its single-detector counterpart; a Hydra field's menu also silently omits
+any single-detector Multiple-files selection it couldn't use. The menu is
+built fresh each time it's opened, so it always reflects what's loaded right
+now. Picking a path or file list just loads it like a normal Browse pick.
+Picking a **buffer**:
 - In a tab that keeps a live in-memory stack (Data Viewer, Calibrate,
   Refinement), the picking tab **delegates** to the source's buffer directly —
   no copy is made, so it always reflects the source buffer's current
@@ -516,7 +552,9 @@ Refinement, 4 Batch Integrate** — use a **three-panel layout**:
 - **Data Loader (left).** A shared `DataLoaderPanel` for selecting the five inputs —
   **Data, Dark, Bright, Background, Mask** — each as a single file, a folder, or an
   HDF5 dataset (a container dropdown appears for HDF5). Frame controls live here too
-  (Tab 0 navigator, Tab 2/3 frame index, Tab 4 frame range + stride).
+  (Tab 0 navigator, Tab 2/3 frame index, Tab 4 frame range + stride). Data/Dark/Bright/
+  Background's **⋯** button opens a two-item menu — **Browse…** and **Import from…**
+  (below) — see **The Browse… popup** just below for what Browse… offers.
 - **Parameters (middle).** The tab's analysis controls.
 - **Display / results (right).** Image viewer, plots, and/or a log panel.
 
@@ -606,13 +644,19 @@ registered image for a full-coverage view.
   panel is located (grayed out if not found — the view still works with as
   few as 2 panels present). A frame slider/spinbox navigates a shared frame
   index across all panels (they're synchronized frames of the same scan).
+  Its **⋯** button's **Browse…** only offers Single file (see "The Browse…
+  popup" in §1) — the frame index already comes from that one file's own
+  internal frame count, not separate per-frame files.
 - **Dark / Bright / Background (left panel, below Hydra data)**: same
   correction math as the single-detector tab (dark subtraction, bright
   flat-field divide/subtract, background subtraction). Point each field at
-  **any one** panel's dark/bright/background file and the other panels'
-  matching files are found automatically, the same way the main Hydra data
-  path works — no need to pick all 4 by hand. Each field computes and
-  applies independently per panel.
+  **any one** panel's dark/bright/background file (or folder, or filestem —
+  see "The Browse… popup" in §1) and the other panels' matching files are
+  found automatically, the same way the main Hydra data path works — no need
+  to pick all 4 by hand. Each field computes and applies independently per
+  panel. Also gets a real **Import from…** (see "Cross-tab data import" in
+  §1) — Hydra fields are labeled distinctly (e.g. "Data Viewer (Hydra)") so
+  they're never confused with their single-detector counterparts.
 - **Projection (top of the middle panel)**: same **Max / Sum / Average**
   stack-reduction as the single-detector tab's own Projection card (and in
   the same place — top of the middle panel, above the geometry cards), but

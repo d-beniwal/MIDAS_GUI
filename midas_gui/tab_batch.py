@@ -52,6 +52,8 @@ class BatchTab(QtWidgets.QWidget):
         # sessions never touch Hydra Batch Integrate — see .context/DECISIONS.md's
         # pyqtgraph interpreter-teardown / widget-count crash-risk entry.
         self._hydra_page: Optional[HydraBatchPage] = None
+        self._hydra_registry = None          # DataSourceRegistry, set by bind_hydra_registry()
+        self._hydra_registry_label = ""
         self._last_run_inputs: dict = {}
         self._last_run_fields: dict = {}
         self._project_ctx: Optional[project.ProjectContext] = None
@@ -93,12 +95,24 @@ class BatchTab(QtWidgets.QWidget):
     def set_mask_from_tab1(self, mask):
         self._loader.set_tab1_mask(mask)
 
+    def bind_hydra_registry(self, registry, label: str):
+        """Same role as `widgets.DataLoaderPanel.bind_registry`, for this
+        tab's Hydra loader — deferred like `set_project_context` since the
+        Hydra page (and its loader) is built lazily on first use."""
+        self._hydra_registry = registry
+        self._hydra_registry_label = label
+        if self._hydra_page is not None:
+            self._hydra_page._loader.bind_registry(registry, label)
+
     def _ensure_hydra_page(self) -> HydraBatchPage:
         if self._hydra_page is None:
             self._hydra_page = HydraBatchPage()
             self._mode_stack.addWidget(self._hydra_page)
             if self._project_ctx is not None:
                 self._hydra_page.set_project_context(self._project_ctx)
+            if self._hydra_registry is not None:
+                self._hydra_page._loader.bind_registry(
+                    self._hydra_registry, self._hydra_registry_label)
         return self._hydra_page
 
     def set_hydra_panel_calibration(self, n: int, result):

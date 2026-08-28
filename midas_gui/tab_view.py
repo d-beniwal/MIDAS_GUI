@@ -88,6 +88,12 @@ class DataViewerTab(QtWidgets.QWidget):
         the 1-ID-E beamline profile — see MainWindow.apply_hydra_visibility)."""
         self._mode_ribbon.set_hydra_enabled(enabled)
 
+    def bind_hydra_registry(self, registry, label: str):
+        """Same role as `widgets.DataLoaderPanel.bind_registry`, for this
+        tab's Hydra loader (the Hydra page is built eagerly, unlike Batch
+        Integrate's, so no deferred binding is needed)."""
+        self._hydra_page._loader.bind_registry(registry, label)
+
     def refresh_devices(self) -> None:
         """Repopulate the Live Data card's device dropdown from the
         just-activated profile (see MainWindow.on_profile_changed)."""

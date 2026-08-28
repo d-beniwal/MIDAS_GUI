@@ -265,8 +265,14 @@ def list_h5_datasets(path: str | Path) -> list:
     return items
 
 
-def _collect_frame_paths(raw: str) -> list:
-    """Frames from a folder or a *.tif glob (sorted).  Mirrors tab_view logic."""
+def _collect_frame_paths(raw) -> list:
+    """Frames from a folder or a *.tif glob (sorted).  Mirrors tab_view logic.
+
+    ``raw`` may also be an already-resolved ``list[str]`` of explicit paths
+    (an arbitrary multi-file selection from ``dialogs.BrowseFilesDialog``,
+    which has no single string/glob representation) — returned as-is."""
+    if isinstance(raw, list):
+        return raw
     import glob as _glob
     p = Path(raw)
     if p.is_dir():
@@ -277,10 +283,14 @@ def _collect_frame_paths(raw: str) -> list:
     return sorted(_glob.glob(raw))
 
 
-def source_kind(path: str) -> str:
+def source_kind(path) -> str:
     """Classify a data-source path as "folder" (dir or glob), "hdf5", or
     "file" — the ``kind`` argument ``average_field``/``FieldAverageWorker``
-    need to know how to read it."""
+    need to know how to read it. An explicit ``list[str]`` of paths (an
+    arbitrary multi-file selection) is treated as "folder" too — both are
+    "a set of single-frame files to average/stack over"."""
+    if isinstance(path, list):
+        return "folder"
     if Path(path).is_dir() or any(c in path for c in "*?"):
         return "folder"
     if is_h5(path):

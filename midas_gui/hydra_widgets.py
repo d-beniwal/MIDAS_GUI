@@ -17,12 +17,14 @@ import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
-from midas_gui.helpers import (_browse, _NoScrollSpinBox, _NoScrollComboBox, hydra_siblings,
-                         is_h5, list_h5_datasets, source_kind, detect_geometry_from_path)
+from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollComboBox, hydra_siblings,
+                         hydra_panel_index, is_h5, list_h5_datasets, source_kind,
+                         detect_geometry_from_path)
 from midas_gui.workers import FieldAverageWorker, ProjectionWorker
 from midas_gui import hydra
 from midas_gui import style as S
-from midas_gui.widgets import _convert_radial, _XUNIT_LABEL, MaskSelector
+from midas_gui.dialogs import BrowseFilesDialog
+from midas_gui.widgets import _convert_radial, _XUNIT_LABEL, MaskSelector, _fmt_source_desc
 
 
 class _VerticalToggleButton(QtWidgets.QAbstractButton):
@@ -146,6 +148,8 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
         self._sibling_paths: dict = {}   # panel -> path
         self._workers: dict = {}         # panel -> FieldAverageWorker (kept alive)
         self._pending: set = set()
+        self._registry = None            # DataSourceRegistry, set by set_registry()
+        self._exclude_label = None       # owning panel's registry label — skip its own entry
 
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(6, 2, 6, 4); outer.setSpacing(2)
@@ -162,7 +166,13 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
         self._path_ed.editingFinished.connect(lambda: self._set_path(self._path_ed.text().strip()))
         browse = QtWidgets.QToolButton()
         browse.setText("⋯"); browse.setFixedWidth(28)
-        browse.clicked.connect(self._browse_file)
+        browse.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        menu = QtWidgets.QMenu(browse)
+        menu.addAction("Browse…", self._open_browse_dialog)
+        menu.addSeparator()
+        self._import_menu = menu.addMenu("Import from…")
+        self._import_menu.aboutToShow.connect(self._populate_import_menu)
+        browse.setMenu(menu)
         pr = QtWidgets.QHBoxLayout(); pr.setSpacing(4)
         pr.addWidget(self._path_ed); pr.addWidget(browse)
         v.addLayout(pr)
@@ -224,11 +234,48 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
     def _dataset(self) -> str:
         return self._ds_combo.currentText().split("   ")[0].strip() or self._default_dataset
 
-    def _browse_file(self):
-        p = _browse(self, f"Select {self.title()} file",
-                   "Data (*.tif *.tiff *.h5 *.hdf5 *.hdf *.nxs *.ge*);;All (*)")
-        if p:
-            self._set_path(p)
+    def _open_browse_dialog(self):
+        # "Multiple files" isn't offered here — the other 3 panels are
+        # auto-discovered from one anchor path (helpers.hydra_siblings),
+        # which has no way to generalize to an arbitrary per-file pick list.
+        dlg = BrowseFilesDialog(self, title=f"Select {self.title()}",
+                                modes=("file", "folder", "stem"))
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        mode = dlg.mode()
+        if mode == "file":
+            paths = dlg.paths()
+            if paths:
+                self._set_path(paths[0])
+        elif mode == "folder":
+            self._set_path(dlg.folder())
+        else:  # "stem"
+            folder, stem = dlg.stem()
+            self._set_stem(folder, stem)
+
+    def _set_stem(self, folder: str, stem: str):
+        """Every sibling panel's field = every TIFF-family file in that
+        panel's own folder starting with `stem` — sibling *folders* are
+        discovered via `hydra_siblings` (needs a real existing path), then
+        `folder*` is appended per panel; the resulting glob strings flow
+        through the existing folder-kind averaging unchanged."""
+        if not folder or not stem:
+            return
+        self._path_ed.setText(str(Path(folder) / (stem + "*")))
+        if hydra_panel_index(folder) is None:
+            self._sibling_paths = {}
+        else:
+            self._sibling_paths = {n: str(Path(p) / (stem + "*"))
+                                   for n, p in hydra_siblings(folder).items()}
+        for n, lbl in self._status_lbls.items():
+            lbl.setStyleSheet(self._status_style("found" if n in self._sibling_paths else "none"))
+        self._fields = {}
+        self._ds_row.setVisible(False)   # a TIFF-family glob, never HDF5
+        self._update_frame_limit()
+        if not self._sibling_paths:
+            self._status.setText("No sibling panels found for this folder.")
+        else:
+            self._status.setText(f"Found {len(self._sibling_paths)}/4 panel(s) — not computed.")
 
     def _set_path(self, path: str):
         if not path:
@@ -357,6 +404,52 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
     def current_path(self) -> str:
         return self._path_ed.text().strip()
 
+    # ── cross-tab import (data_bridge.DataSourceRegistry) ───────────
+    def _field_kind(self) -> str:
+        """This selector's type ("dark"/"bright"/"background"), derived from
+        its title — mirrors ``widgets.FieldSelector._field_kind``."""
+        return self.title().strip().lower()
+
+    def set_registry(self, registry, *, exclude_label=None):
+        """Let this selector's "Import from…" menu offer the same-type field
+        currently loaded in any *other* tab bound to `registry` — including
+        single-detector tabs (the registry doesn't distinguish Hydra from
+        single-detector sources, only by `field`)."""
+        self._registry = registry
+        self._exclude_label = exclude_label
+
+    def describe_source(self, label: str):
+        """Export this field's anchor path (if enabled and set) — mirrors
+        ``widgets.FieldSelector.describe_source``. Never a `list[str]`:
+        Hydra fields have no "Multiple files" mode."""
+        if not self.isChecked():
+            return None
+        raw = self._path_ed.text().strip()
+        if not raw:
+            return None
+        return {"kind": "path", "path": raw,
+                "dataset": self._dataset() if is_h5(raw) else None,
+                "field": self._field_kind(), "label": label}
+
+    def _populate_import_menu(self):
+        menu = self._import_menu
+        menu.clear()
+        sources = (self._registry.available(field=self._field_kind())
+                   if self._registry is not None else [])
+        sources = [d for d in sources if d.get("label") != self._exclude_label
+                   and not isinstance(d.get("path"), list)]
+        if not sources:
+            menu.addAction("(nothing loaded elsewhere)").setEnabled(False)
+            return
+        for desc in sources:
+            menu.addAction(_fmt_source_desc(desc), lambda d=desc: self._apply_imported_source(d))
+
+    def _apply_imported_source(self, desc: dict):
+        self._set_path(desc["path"])
+        if desc.get("dataset"):
+            self._ds_combo.setEditText(desc["dataset"])
+            self._update_frame_limit()
+
 
 class HydraLoaderPanel(QtWidgets.QWidget):
     """Left-hand loader for the Hydra page. One path field — point it at any
@@ -395,6 +488,8 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         self._proj_pending: set = set()
         self._proj_errors: dict = {}
         self._mask_sels: dict = {}       # panel -> MaskSelector (stream mode only)
+        self._registry = None            # DataSourceRegistry, set by bind_registry()
+        self._registry_label = ""        # this panel's own label in the registry
         self._build_ui()
 
     def _build_ui(self):
@@ -408,9 +503,15 @@ class HydraLoaderPanel(QtWidgets.QWidget):
             lambda: self._set_path(self._path_ed.text().strip()))
         row = QtWidgets.QHBoxLayout(); row.setSpacing(4)
         row.addWidget(self._path_ed)
-        browse_btn = QtWidgets.QPushButton("…"); browse_btn.setFixedWidth(30)
-        browse_btn.clicked.connect(self._browse)
-        row.addWidget(browse_btn)
+        browse = QtWidgets.QToolButton(); browse.setText("⋯"); browse.setFixedWidth(28)
+        browse.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        menu = QtWidgets.QMenu(browse)
+        menu.addAction("Browse…", self._open_browse_dialog)
+        menu.addSeparator()
+        self._import_menu = menu.addMenu("Import from…")
+        self._import_menu.aboutToShow.connect(self._populate_import_menu)
+        browse.setMenu(menu)
+        row.addWidget(browse)
         card.body.addLayout(row)
 
         self._status_lbls = {}
@@ -539,11 +640,63 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         for w in (self._prev_btn, self._next_btn, self._frame_slider, self._frame_spin):
             w.setEnabled(enabled)
 
-    def _browse(self):
-        p = _browse(self, "Open a Hydra GE panel file",
-                   "Data (*.tif *.tiff *.h5 *.hdf5 *.hdf *.nxs *.ge*);;All (*)")
-        if p:
-            self._set_path(p)
+    def _open_browse_dialog(self):
+        # Single file only — this panel's frame index comes from one anchor
+        # file's own internal frame count (hydra.n_frames_in), not separate
+        # per-frame files, so folder/multi/stem selection doesn't apply.
+        dlg = BrowseFilesDialog(self, title="Select Hydra data", modes=("file",))
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        paths = dlg.paths()
+        if paths:
+            self._set_path(paths[0])
+
+    # ── cross-tab data sharing (data_bridge.DataSourceRegistry) ─────
+    def bind_registry(self, registry, label: str):
+        """Register this panel as an importable data source under `label`
+        (e.g. "Data Viewer (Hydra)"), and gain an "Import from…" menu
+        listing every other bound panel's currently-loaded data — mirrors
+        ``widgets.DataLoaderPanel.bind_registry``."""
+        self._registry = registry
+        self._registry_label = label
+        registry.register(label, self)
+        for sel in (self._dark_sel, self._bright_sel, self._bg_sel):
+            sel.set_registry(registry, exclude_label=label)
+
+    def describe_source(self):
+        """Live snapshot of what this panel offers other panels — its main
+        Data anchor path (if found) plus any of its own Dark/Bright/
+        Background fields that are enabled and point at a path."""
+        out = []
+        raw = self._path_ed.text().strip()
+        if raw:
+            out.append({"kind": "path", "path": raw,
+                       "dataset": self.DATASET if is_h5(raw) else None,
+                       "field": "data", "label": self._registry_label})
+        for sel in (self._dark_sel, self._bright_sel, self._bg_sel):
+            d = sel.describe_source(self._registry_label)
+            if d is not None:
+                out.append(d)
+        return out
+
+    def _populate_import_menu(self):
+        menu = self._import_menu
+        menu.clear()
+        if self._registry is None:
+            menu.addAction("(no other tabs loaded)").setEnabled(False)
+            return
+        sources = self._registry.available(exclude=self, field="data")
+        # A single-detector Data field can be an arbitrary multi-file pick,
+        # which this panel's one-anchor-path sibling-discovery can't use.
+        sources = [d for d in sources if not isinstance(d.get("path"), list)]
+        if not sources:
+            menu.addAction("(nothing loaded elsewhere)").setEnabled(False)
+            return
+        for desc in sources:
+            menu.addAction(_fmt_source_desc(desc), lambda d=desc: self._apply_imported_source(d))
+
+    def _apply_imported_source(self, desc: dict):
+        self._set_path(desc["path"])
 
     def detected_geometry(self) -> dict:
         """Best-effort pxY/wavelength_A auto-detected from the current anchor

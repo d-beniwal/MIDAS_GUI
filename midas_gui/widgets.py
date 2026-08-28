@@ -23,7 +23,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
 from midas_gui.constants import COLORMAPS, DISTORTION_NAMES, DEFAULT_COLORMAP, DEVICES
-from midas_gui.dialogs import show_error
+from midas_gui.dialogs import show_error, BrowseFilesDialog
 from midas_gui.sim_detector import DEFAULT_CHANNEL_NAME as _SIM_CHANNEL_NAME
 
 # Default colormap: the configured one if it's a known option, else the first.
@@ -31,7 +31,8 @@ _DEFAULT_CMAP = DEFAULT_COLORMAP if DEFAULT_COLORMAP in COLORMAPS else COLORMAPS
 from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollDoubleSpinBox, _fspin, _twocol,
                                _browse, is_h5, list_h5_datasets, _NoScrollComboBox,
                                _load_image, _collect_frame_paths, apply_field_corrections,
-                               new_temp_h5_path, save_stack_h5, detect_geometry_from_path)
+                               new_temp_h5_path, save_stack_h5, detect_geometry_from_path,
+                               source_kind)
 from midas_gui import style as S
 
 
@@ -1253,6 +1254,19 @@ class CorrectionFlagsWidget(QtWidgets.QGroupBox):
             self.solid_check.setChecked(bool(state["solid_check"]))
 
 
+def _fmt_source_desc(desc: dict) -> str:
+    """Human-readable "Import from…" menu label for one
+    ``data_bridge.DataSourceRegistry`` descriptor — shared by every
+    Data/Dark/Bright/Background selector (single-detector and Hydra)."""
+    if desc["kind"] == "buffer":
+        n = len(desc["provider"]._buffer) if desc["provider"]._buffer else 0
+        return f"{desc['label']}: Buffer ({n} frames)"
+    path = desc["path"]
+    if isinstance(path, list):
+        return f"{desc['label']}: {len(path)} files"
+    return f"{desc['label']}: {path}"
+
+
 class FieldSelector(QtWidgets.QGroupBox):
     """Compact reusable dark / bright / background field picker.
 
@@ -1276,6 +1290,7 @@ class FieldSelector(QtWidgets.QGroupBox):
         self._registry = None          # DataSourceRegistry, set by set_registry()
         self._exclude_label = None     # owning panel's registry label — skip its own entry
         self._buffer_snapshot_file = None   # temp .h5 from importing another tab's buffer
+        self._explicit_paths = None    # list[str], set by a Browse… "Multiple files"/"stem" pick
 
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(6, 2, 6, 4); outer.setSpacing(2)
@@ -1295,8 +1310,7 @@ class FieldSelector(QtWidgets.QGroupBox):
         browse.setText("⋯"); browse.setFixedWidth(28)
         browse.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         menu = QtWidgets.QMenu(browse)
-        menu.addAction("File…", self._browse_file)
-        menu.addAction("Folder…", self._browse_folder)
+        menu.addAction("Browse…", self._open_browse_dialog)
         menu.addSeparator()
         self._import_menu = menu.addMenu("Import from…")
         self._import_menu.aboutToShow.connect(self._populate_import_menu)
@@ -1344,28 +1358,53 @@ class FieldSelector(QtWidgets.QGroupBox):
         v.addWidget(self._status)
 
     # ── helpers ───────────────────────────────────────────────────
+    def _raw_source(self):
+        """The current source: an explicit ``list[str]`` from a Browse…
+        "Multiple files"/"Files sharing a stem" pick, else the plain path
+        text (file / folder / glob)."""
+        return self._explicit_paths if self._explicit_paths else self._path_ed.text().strip()
+
     def _kind(self) -> str:
-        from pathlib import Path
-        raw = self._path_ed.text().strip()
-        if Path(raw).is_dir() or any(c in raw for c in "*?"):
-            return "folder"
-        if is_h5(raw):
-            return "hdf5"
-        return "file"
+        return source_kind(self._raw_source())
 
     def _dataset(self) -> str:
         return self._ds_combo.currentText().split("   ")[0].strip() or "exchange/data"
 
-    def _browse_file(self):
-        p = _browse(self, f"Select {self.title()} file",
-                    "Data (*.tif *.tiff *.h5 *.hdf5 *.hdf *.nxs *.ge*);;All (*)")
-        if p:
-            self._path_ed.setText(p); self._update_frame_limit(); self._compute()
+    def _set_explicit_paths(self, paths):
+        """``paths`` is a resolved ``list[str]`` (Multiple files / stem
+        match) or None to fall back to the plain path text. Uses
+        blockSignals so the summary text it writes doesn't itself clear
+        ``_explicit_paths`` via ``_on_path_changed``."""
+        self._explicit_paths = paths
+        self._path_ed.blockSignals(True)
+        if paths:
+            self._path_ed.setText(f"{len(paths)} files selected")
+            self._path_ed.setToolTip("\n".join(paths))
+        else:
+            self._path_ed.setToolTip("")
+        self._path_ed.blockSignals(False)
 
-    def _browse_folder(self):
-        d = QtWidgets.QFileDialog.getExistingDirectory(self, f"Select {self.title()} folder")
-        if d:
-            self._path_ed.setText(d); self._update_frame_limit(); self._compute()
+    def _open_browse_dialog(self):
+        dlg = BrowseFilesDialog(self, title=f"Select {self.title()}")
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        mode = dlg.mode()
+        if mode == "file":
+            paths = dlg.paths()
+            if not paths:
+                return
+            self._set_explicit_paths(None)
+            self._path_ed.setText(paths[0])
+        elif mode == "folder":
+            self._set_explicit_paths(None)
+            self._path_ed.setText(dlg.folder())
+        else:  # "files" or "stem" — both resolve to an explicit file list
+            paths = dlg.paths()
+            if not paths:
+                return
+            self._set_explicit_paths(paths)
+        self._update_frame_limit()
+        self._compute()
 
     # ── cross-tab import (data_bridge.DataSourceRegistry) ───────────
     def _field_kind(self) -> str:
@@ -1387,14 +1426,15 @@ class FieldSelector(QtWidgets.QGroupBox):
         """Export this field as an importable source of type `_field_kind()`
         (if enabled and pointing at a path) — mirrors
         DataLoaderPanel.describe_source() so another tab's same-type selector
-        can pull it via the registry."""
+        can pull it via the registry. `path` may be a `list[str]` if this
+        field's source is an explicit Multiple-files/stem pick."""
         if not self.isChecked():
             return None
-        raw = self._path_ed.text().strip()
+        raw = self._raw_source()
         if not raw:
             return None
         return {"kind": "path", "path": raw,
-                "dataset": self._dataset() if is_h5(raw) else None,
+                "dataset": self._dataset() if (isinstance(raw, str) and is_h5(raw)) else None,
                 "field": self._field_kind(), "label": label}
 
     def _populate_import_menu(self):
@@ -1407,18 +1447,18 @@ class FieldSelector(QtWidgets.QGroupBox):
             menu.addAction("(nothing loaded elsewhere)").setEnabled(False)
             return
         for desc in sources:
-            if desc["kind"] == "buffer":
-                n = len(desc["provider"]._buffer) if desc["provider"]._buffer else 0
-                text = f"{desc['label']}: Buffer ({n} frames)"
-            else:
-                text = f"{desc['label']}: {desc['path']}"
-            menu.addAction(text, lambda d=desc: self._apply_imported_source(d))
+            menu.addAction(_fmt_source_desc(desc), lambda d=desc: self._apply_imported_source(d))
 
     def _apply_imported_source(self, desc: dict):
         if desc["kind"] == "buffer":
             self._import_buffer(desc["provider"])
             return
-        self._path_ed.setText(desc["path"])
+        path = desc["path"]
+        if isinstance(path, list):
+            self._set_explicit_paths(path)
+        else:
+            self._set_explicit_paths(None)
+            self._path_ed.setText(path)
         if desc.get("dataset"):
             self._ds_combo.setEditText(desc["dataset"])
         self._update_frame_limit()
@@ -1449,6 +1489,9 @@ class FieldSelector(QtWidgets.QGroupBox):
 
     def _on_path_changed(self, p: str):
         from pathlib import Path
+        # Fires only for a real text edit — a Browse… explicit-list pick sets
+        # its own summary text via blockSignals, so this never races it.
+        self._explicit_paths = None
         h5 = is_h5(p)
         self._ds_row.setVisible(h5)
         if h5 and Path(p).exists():
@@ -1472,7 +1515,7 @@ class FieldSelector(QtWidgets.QGroupBox):
     def _count_frames(self) -> int:
         """Number of frames available in the current source (0 if unknown)."""
         from pathlib import Path
-        raw = self._path_ed.text().strip()
+        raw = self._raw_source()
         if not raw:
             return 0
         kind = self._kind()
@@ -1514,7 +1557,7 @@ class FieldSelector(QtWidgets.QGroupBox):
             self._start.setValue(hi)
 
     def _compute(self):
-        raw = self._path_ed.text().strip()
+        raw = self._raw_source()
         if not raw:
             self._status.setText("Enter a path first."); return
         from midas_gui.workers import FieldAverageWorker
@@ -1563,6 +1606,8 @@ class FieldSelector(QtWidgets.QGroupBox):
             "start": self._start.value(),
             "end": self._end.value(),
         }
+        if self._explicit_paths:
+            st["explicit_paths"] = list(self._explicit_paths)
         if self._mode is not None:
             st["mode"] = self._mode.currentIndex()
         return st
@@ -1573,8 +1618,12 @@ class FieldSelector(QtWidgets.QGroupBox):
         dark/bright/background fields specifically."""
         if not state:
             return
+        explicit = state.get("explicit_paths")
         path = state.get("path", "")
-        if path:
+        if explicit:
+            self._set_explicit_paths(list(explicit))
+        elif path:
+            self._set_explicit_paths(None)
             self._path_ed.setText(path)
         ds = state.get("dataset")
         if ds:
@@ -1591,7 +1640,7 @@ class FieldSelector(QtWidgets.QGroupBox):
         if self._mode is not None and "mode" in state:
             self._mode.setCurrentIndex(int(state["mode"]))
         self.setChecked(bool(state.get("checked", False)))
-        if self.isChecked() and path:
+        if self.isChecked() and (explicit or path):
             self._compute()
 
 
@@ -2077,6 +2126,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._live_src: Optional[PvaLiveSource] = None
         self._registry = None          # DataSourceRegistry, set by bind_registry()
         self._registry_label = ""      # this panel's own label in the registry
+        self._explicit_paths = None    # list[str], set by a Browse… "Multiple files"/"stem" pick
         self._external = None          # another DataLoaderPanel this one delegates to, or None
         self._buffer_snapshot_file = None  # temp .h5 path from importing an external buffer (stream mode)
         self._buffer = None            # deque(maxlen=N) once "Use Buffer" is on
@@ -2192,8 +2242,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
         browse = QtWidgets.QToolButton(); browse.setText("⋯"); browse.setFixedWidth(28)
         browse.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         menu = QtWidgets.QMenu(browse)
-        menu.addAction("File…", self._browse_file)
-        menu.addAction("Folder…", self._browse_folder)
+        menu.addAction("Browse…", self._open_browse_dialog)
         menu.addSeparator()
         self._import_menu = menu.addMenu("Import from…")
         self._import_menu.aboutToShow.connect(self._populate_import_menu)
@@ -2312,19 +2361,57 @@ class DataLoaderPanel(QtWidgets.QWidget):
     def _dataset(self) -> str:
         return self._ds_combo.currentText().split("   ")[0].strip() or "exchange/data"
 
-    def _browse_file(self):
-        p = _browse(self, "Open data",
-                    "Data (*.tif *.tiff *.h5 *.hdf5 *.hdf *.nxs *.ge*);;All (*)")
-        if p:
-            self._path_ed.setText(p); self._load()
+    def _raw_source(self):
+        """The current source: an explicit ``list[str]`` from a Browse…
+        "Multiple files"/"Files sharing a stem" pick, else the plain path
+        text (file / folder / glob)."""
+        return self._explicit_paths if self._explicit_paths else self._path_ed.text().strip()
 
-    def _browse_folder(self):
-        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select folder of frames")
-        if d:
-            self._path_ed.setText(d); self._load()
+    def _set_explicit_paths(self, paths):
+        """``paths`` is a resolved ``list[str]`` (Multiple files / stem
+        match) or None to fall back to the plain path text. Uses
+        blockSignals so the summary text it writes doesn't itself clear
+        ``_explicit_paths`` via ``_on_path_changed``."""
+        self._explicit_paths = paths
+        self._path_ed.blockSignals(True)
+        if paths:
+            self._path_ed.setText(f"{len(paths)} files selected")
+            self._path_ed.setToolTip("\n".join(paths))
+        else:
+            self._path_ed.setToolTip("")
+        self._path_ed.blockSignals(False)
+
+    def _open_browse_dialog(self):
+        # "stream" mode (Batch Integrate) hands its Data path straight to an
+        # external glob/path-based streaming reader (see source_cfg()) that
+        # can't consume an arbitrary file list, so Multiple-files/stem aren't
+        # offered there — Single file / Full folder already worked this way.
+        modes = ("file", "folder") if self._mode == "stream" else ("file", "files", "folder", "stem")
+        dlg = BrowseFilesDialog(self, title="Select data", modes=modes)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        mode = dlg.mode()
+        if mode == "file":
+            paths = dlg.paths()
+            if not paths:
+                return
+            self._set_explicit_paths(None)
+            self._path_ed.setText(paths[0])
+        elif mode == "folder":
+            self._set_explicit_paths(None)
+            self._path_ed.setText(dlg.folder())
+        else:  # "files" or "stem" — both resolve to an explicit file list
+            paths = dlg.paths()
+            if not paths:
+                return
+            self._set_explicit_paths(paths)
+        self._load()
 
     def _on_path_changed(self, p: str):
         from pathlib import Path
+        # Fires only for a real text edit — a Browse… explicit-list pick sets
+        # its own summary text via blockSignals, so this never races it.
+        self._explicit_paths = None
         h5 = is_h5(p)
         self._ds_row.setVisible(h5)
         if h5 and Path(p).exists():
@@ -2344,7 +2431,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
                 self._ds_combo.setCurrentIndex(idx)
                 self._ds_combo.blockSignals(False)
 
-    def _collect_paths(self, raw: str) -> list:
+    def _collect_paths(self, raw) -> list:
         return _collect_frame_paths(raw)
 
     # ── cross-tab data sharing (data_bridge.DataSourceRegistry) ─────
@@ -2360,14 +2447,16 @@ class DataLoaderPanel(QtWidgets.QWidget):
 
     def _describe_data_field(self):
         """Live snapshot of this panel's own Data (field="data"), or None if
-        nothing is loaded."""
+        nothing is loaded. `path` may be a `list[str]` if this panel's own
+        source is an explicit Multiple-files/stem pick."""
         if self._buffer_frozen and self._buffer:
             return {"kind": "buffer", "provider": self, "field": "data",
                     "label": self._registry_label}
-        raw = self._path_ed.text().strip()
+        raw = self._raw_source()
         if not raw:
             return None
-        return {"kind": "path", "path": raw, "dataset": self._dataset() if is_h5(raw) else None,
+        return {"kind": "path", "path": raw,
+                "dataset": self._dataset() if (isinstance(raw, str) and is_h5(raw)) else None,
                 "field": "data", "label": self._registry_label}
 
     def describe_source(self):
@@ -2393,21 +2482,28 @@ class DataLoaderPanel(QtWidgets.QWidget):
             menu.addAction("(no other tabs loaded)").setEnabled(False)
             return
         sources = self._registry.available(exclude=self, field="data")
+        if self._mode == "stream":
+            # This panel's Data path is handed to an external glob/path-based
+            # streaming reader (see source_cfg()) that can't consume an
+            # arbitrary file list — see _open_browse_dialog for the matching
+            # restriction on its own Browse… popup.
+            sources = [d for d in sources
+                       if not (d["kind"] == "path" and isinstance(d["path"], list))]
         if not sources:
             menu.addAction("(nothing loaded elsewhere)").setEnabled(False)
             return
         for desc in sources:
-            if desc["kind"] == "buffer":
-                n = len(desc["provider"]._buffer) if desc["provider"]._buffer else 0
-                text = f"{desc['label']}: Buffer ({n} frames)"
-            else:
-                text = f"{desc['label']}: {desc['path']}"
-            menu.addAction(text, lambda d=desc: self._apply_imported_source(d))
+            menu.addAction(_fmt_source_desc(desc), lambda d=desc: self._apply_imported_source(d))
 
     def _apply_imported_source(self, desc: dict):
         if desc["kind"] == "path":
             self._clear_external()
-            self.set_path(desc["path"], dataset=desc.get("dataset"))
+            path = desc["path"]
+            if isinstance(path, list):
+                self._set_explicit_paths(path)
+                self._load()
+            else:
+                self.set_path(path, dataset=desc.get("dataset"))
             return
         if self._mode == "stream":
             self._import_buffer_via_tempfile(desc["provider"])
@@ -2470,7 +2566,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
     def _load(self):
         from pathlib import Path
         self._clear_external()
-        raw = self._path_ed.text().strip()
+        raw = self._raw_source()
         if not raw:
             return
         if self._mode == "stream":
@@ -2482,8 +2578,13 @@ class DataLoaderPanel(QtWidgets.QWidget):
         try:
             self._stack = self._paths = self._h5 = None; self._nframes = 0
             self._reset_buffer()
-            p = Path(raw)
-            if p.is_dir() or any(ch in raw for ch in "*?"):
+            if isinstance(raw, list):
+                paths = self._collect_paths(raw)
+                if not paths:
+                    QtWidgets.QMessageBox.warning(self, "Empty", "No frames found."); return
+                self._paths = paths; self._nframes = len(paths)
+                kind = f"{self._nframes} file(s) selected"
+            elif Path(raw).is_dir() or any(ch in raw for ch in "*?"):
                 paths = self._collect_paths(raw)
                 if not paths:
                     QtWidgets.QMessageBox.warning(self, "Empty", "No frames found."); return
@@ -2958,6 +3059,8 @@ class DataLoaderPanel(QtWidgets.QWidget):
             "background": self._bg_sel.get_state(),
             "mask": self._mask_sel.get_state(),
         }
+        if self._explicit_paths:
+            st["explicit_paths"] = list(self._explicit_paths)
         if self._mode == "stream":
             st["fr_start"] = self._fr_start.value()
             st["fr_end"] = self._fr_end.value()
@@ -2976,8 +3079,14 @@ class DataLoaderPanel(QtWidgets.QWidget):
         never auto-started (that's a stateful, non-idempotent action)."""
         if not state:
             return
+        explicit = state.get("explicit_paths")
         path = state.get("path", "")
-        if path:
+        if explicit:
+            self._set_explicit_paths(list(explicit))
+            if state.get("dataset"):
+                self._ds_combo.setEditText(state["dataset"])
+            self._load()
+        elif path:
             self.set_path(path, dataset=state.get("dataset"), load=True)
         if self._mode == "stream":
             if "fr_start" in state:
