@@ -168,6 +168,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Waterfall auto-level: vmin% default 1→30, percentile calc excludes exact-zero pixels | `d0cd6ce` |
 | Fix ImTransOpt propagation: geometry's flip/transpose now applied by the MIDAS backend (`spec.TransOpt`), not silently dropped | `2358ae4` |
 | Browse… parity: Multiple files + filestem-filtered (live folder+prefix) sources, MONITOR re-scans a filestem filter | `af8066f` |
+| Cosmetic overhaul: Drift hidden, "View calibration" popup, checkbox output formats, green Save/red Abort, Sequential/Batch-Parallel workers (single-detector + Hydra) | `a27790a` |
 
 ### PDF Analysis (Tab 6)
 | Change | Commit |
@@ -3375,6 +3376,88 @@ _open_source` dispatch for `"tiff_list"`. All pass.
 **Roll back:** `git revert af8066f`. Self-contained — restores the
 Single-file/Full-folder-only Browse… restriction for Batch Integrate's Data
 field; no later commit depends on the `"tiff_list"` source type.
+
+### `a27790a` — Batch Integrate: cosmetic overhaul + Batch-Parallel workers, single-detector + Hydra (2026-08-28)
+**Effect:** Five requested cosmetic/functional changes to the Batch
+Integrate tab, applied to both the single-detector tab and Hydra's
+per-panel page:
+1. **Drift correction hidden from the GUI** (single-detector only — not
+   used in production) — `drift.setVisible(False)`; `DriftWorker`/
+   `_fit_drift`/state save-restore all stay fully wired, re-enabled by
+   removing one line.
+2. **"Calibration values" is now a popup**, not an always-visible grid —
+   new `helpers.make_calib_values_button()` reuses the existing
+   `_clickable_menu_label` pattern (`make_pixel_label`/`make_kedge_label`)
+   to pop a menu containing the same `render_calib_value_grid` output,
+   rebuilt fresh on every open. Applied to `tab_batch.py`'s single card and
+   each of `hydra_batch_widgets.HydraBatchPanelCard`'s 4 per-panel cards.
+3. **Output format is a checkbox list** — new
+   `widgets.OutputFormatSelector` (one `QCheckBox` per
+   `constants.OUTPUT_FORMATS` entry, `.checked_keys()`/`.get_state()`/
+   `.set_state()`) replaces the single-select combo everywhere `_fmt` was
+   used (`BatchWorker`/`FolderMonitorWorker` gained `fmts: list[str]`
+   replacing `fmt: str`).
+4. **Green Save button** (new `workers.write_all_profiles()`) writes the
+   lineouts already computed this run to disk on demand, independent of
+   whether an Output folder was set before running — the pre-existing
+   "no output dir → nothing saved during the run" behavior is unchanged;
+   Save is a separate, always-available write-what's-in-memory action.
+   `BatchWorker.finished` now also carries `"sigmas"` (previously computed
+   but never emitted — `project.append_integration_attempt` already
+   expected this key and silently dropped it, a pre-existing gap this
+   closes too). Start Integration is narrower (equal-thirds row with
+   Abort/Save instead of taking most of the row); Abort is now red,
+   Save green (`style.DANGER_BTN_QSS`/`SUCCESS_BTN_QSS`).
+5. **Sequential / Batch Parallel run mode** — new `workers.
+   BatchRunCoordinator` (same signal surface as `BatchWorker`: `progress`/
+   `frame_done`/`finished`/`failed`/`log_line`/`geom_ready`, plus
+   `isRunning`/`start`/`requestInterruption`/`wait`, so existing call sites
+   barely change). "Sequential" constructs one plain `BatchWorker`
+   (identical to before, zero overhead). "Batch Parallel" resolves the
+   frame_range into an explicit index list, computes
+   `resolve_worker_count()` (auto-shrinks the requested worker count so
+   each worker gets >=10 frames — `MIN_FRAMES_PER_WORKER`), splits into
+   contiguous chunks (`_split_into_chunks`), builds the detector map once
+   via a new one-shot `_GeomBuildWorker`, then fans out one `BatchWorker`
+   per chunk (new `frame_indices` param — reads via `source.get(i)` for
+   exact random access, since the old frame_range skip-by-continue loop
+   would otherwise decode every frame up to a late chunk's start,
+   defeating the point of parallelism) sharing that one context; merges
+   their `finished` payloads in chunk order and writes one combined HDF5
+   if `"h5"` is selected (instead of each chunk writing its own colliding
+   `integrated.h5`). Threads, not OS processes — numpy/torch release the
+   GIL during their heavy compute, matching the existing precedent of
+   Hydra's own per-panel Sequential/Parallel toggle (multiple concurrent
+   `BatchWorker` QThreads in one process). Hydra gets this as a **second,
+   independent** level of parallelism (`HydraBatchPage`'s new shared
+   "Per panel:" control) layered under its existing "Panels:"
+   Sequential/Parallel toggle — a Parallel panel run with Batch Parallel
+   selected can have up to (panels × workers) concurrent threads.
+**Verified:** `tests/test_batch_data_source.py` extended to 17 tests
+(frame-index resolution, chunk-splitting, `resolve_worker_count`'s
+auto-shrink math, `write_all_profiles` writing every frame/format and
+skipping `2d_csv`, `_ExplicitTIFFSource.get()` random access) — all pass.
+`tests/test_hydra_batch_ui.py` updated for the `BatchWorker`→
+`BatchRunCoordinator` swap (its fake gained `run_mode`/`n_workers` params
+and a `MIN_FRAMES_PER_WORKER` class attr) and the removed
+`_calib_val_note` widget (assertions now read `_calib_fields_in_use()`'s
+note directly) — both tests pass. `tests/test_project.py`'s
+`integrate_attempt_gui_fields` test updated for `fmt` becoming a list
+(`fields["fmt_keys"]` instead of `fields["fmt"]`; legacy single-string
+values still wrap into a 1-element list for old project files) — passes.
+Full single-detector and Hydra Batch tabs build and round-trip
+save/restore state correctly in an offscreen smoke check.
+**Files:** `midas_gui/workers.py`, `midas_gui/widgets.py`,
+`midas_gui/helpers.py`, `midas_gui/style.py`, `midas_gui/tab_batch.py`,
+`midas_gui/hydra_batch_widgets.py`, `midas_gui/hydra_batch_page.py`,
+`midas_gui/project.py`, `tests/test_batch_data_source.py`,
+`tests/test_hydra_batch_ui.py`, `tests/test_project.py`,
+`documentation/gui_documentation.md`.
+**Roll back:** `git revert a27790a`. Self-contained — restores the
+always-visible Drift/Calibration-values cards, the single-select format
+combo, the plain Start/Abort row with no Save button, and single-worker
+`BatchWorker`-only runs; no later commit depends on `BatchRunCoordinator`/
+`OutputFormatSelector`/`write_all_profiles`.
 
 ---
 
