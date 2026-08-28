@@ -1255,25 +1255,67 @@ class CorrectionFlagsWidget(QtWidgets.QGroupBox):
 
 
 class OutputFormatSelector(QtWidgets.QWidget):
-    """Multi-select output-format list for the batch tabs — one checkbox per
+    """Multi-select output-format picker for the batch tabs — one checkbox per
     ``constants.OUTPUT_FORMATS`` entry, so a run can write several formats at
     once instead of picking exactly one. ``DEFAULT_OUTPUT_FORMAT`` starts
-    checked. Kept out of the generic ``_state_widgets()``/``widgets_to_dict``
-    save-state path (like ``CorrectionFlagsWidget``) since that only
-    understands single-value widgets — callers wire ``get_state()``/
-    ``set_state()`` directly instead."""
+    checked.
+
+    The checkboxes live behind a clickable "Output format" button (a popup
+    menu) rather than always taking up vertical space in the layout — same
+    click-to-see-options interaction as ``helpers.make_calib_values_button``.
+    The button's own text is kept in sync with the current selection so the
+    choice is visible without opening the menu. Kept out of the generic
+    ``_state_widgets()``/``widgets_to_dict`` save-state path (like
+    ``CorrectionFlagsWidget``) since that only understands single-value
+    widgets — callers wire ``get_state()``/``set_state()`` directly instead.
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
         from midas_gui.constants import OUTPUT_FORMATS, DEFAULT_OUTPUT_FORMAT
-        v = QtWidgets.QVBoxLayout(self)
-        v.setContentsMargins(0, 0, 0, 0); v.setSpacing(2)
+        # key -> short display name (label text before the parenthesised
+        # description), for the compact button text.
+        self._short_names = {key: label.split("(")[0].strip()
+                              for label, key in OUTPUT_FORMATS.items()}
+        h = QtWidgets.QHBoxLayout(self)
+        h.setContentsMargins(0, 0, 0, 0)
+
+        self._btn = QtWidgets.QToolButton()
+        self._btn.setAutoRaise(True)
+        self._btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self._btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self._btn.setStyleSheet(
+            "QToolButton { border: none; padding: 0 2px; color: #4da3ff; }"
+            "QToolButton::menu-indicator { image: none; }")
+        f = self._btn.font(); f.setUnderline(True); self._btn.setFont(f)
+
+        menu = QtWidgets.QMenu(self._btn)
+        host = QtWidgets.QWidget(menu)
+        v = QtWidgets.QVBoxLayout(host)
+        v.setContentsMargins(10, 8, 10, 8); v.setSpacing(4)
         self._checks: dict = {}   # key -> QCheckBox
         for label, key in OUTPUT_FORMATS.items():
             cb = QtWidgets.QCheckBox(label)
             cb.setChecked(key == DEFAULT_OUTPUT_FORMAT)
+            cb.toggled.connect(self._sync_button_text)
             v.addWidget(cb)
             self._checks[key] = cb
+        action = QtWidgets.QWidgetAction(menu)
+        action.setDefaultWidget(host)
+        menu.addAction(action)
+        self._btn.setMenu(menu)
+
+        h.addWidget(self._btn)
+        h.addStretch(1)
+        self._sync_button_text()
+
+    def _sync_button_text(self):
+        keys = self.checked_keys()
+        if not keys:
+            self._btn.setText("Output format: none selected ▾")
+        else:
+            names = ", ".join(self._short_names[k] for k in self._checks if k in keys)
+            self._btn.setText(f"Output format: {names} ▾")
 
     def checked_keys(self) -> list:
         return [key for key, cb in self._checks.items() if cb.isChecked()]
@@ -1295,6 +1337,7 @@ class OutputFormatSelector(QtWidgets.QWidget):
             cb.blockSignals(True)
             cb.setChecked(key in keys)
             cb.blockSignals(False)
+        self._sync_button_text()
 
 
 def _fmt_source_desc(desc: dict) -> str:

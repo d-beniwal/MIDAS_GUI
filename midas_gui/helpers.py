@@ -1289,22 +1289,31 @@ def make_calib_values_button(fields_getter, text="View calibration ▾", parent=
     btn.setToolTip("Click to view the calibration geometry currently in use.")
 
     menu = QtWidgets.QMenu(btn)
-    host = QtWidgets.QWidget(menu)
-    hv = QtWidgets.QVBoxLayout(host)
-    hv.setContentsMargins(10, 8, 10, 8); hv.setSpacing(6)
-    grid = QtWidgets.QGridLayout()
-    grid.setHorizontalSpacing(18); grid.setVerticalSpacing(4)
-    grid_host = QtWidgets.QWidget(); grid_host.setLayout(grid)
-    hv.addWidget(grid_host)
-    note_label = QtWidgets.QLabel()
-    note_label.setStyleSheet(f"color:{S.MUTED};font-size:10px")
-    note_label.setWordWrap(True)
-    hv.addWidget(note_label)
-    action = QtWidgets.QWidgetAction(menu)
-    action.setDefaultWidget(host)
-    menu.addAction(action)
 
     def _populate():
+        # Rebuild the whole popup body (not just the grid contents) on every
+        # open: a QMenu computes its popup size from the QWidgetAction's
+        # sizeHint at show time, and mutating a *persistent* grid layout in
+        # place risks that size being stale (e.g. the very first open, before
+        # any fields exist, would otherwise cache a near-zero size). A fresh
+        # widget tree each time guarantees the sizeHint matches the content
+        # about to be shown.
+        menu.clear()
+        host = QtWidgets.QWidget(menu)
+        hv = QtWidgets.QVBoxLayout(host)
+        hv.setContentsMargins(10, 8, 10, 8); hv.setSpacing(6)
+        grid = QtWidgets.QGridLayout()
+        grid.setHorizontalSpacing(18); grid.setVerticalSpacing(4)
+        grid_host = QtWidgets.QWidget(); grid_host.setLayout(grid)
+        hv.addWidget(grid_host)
+        note_label = QtWidgets.QLabel()
+        note_label.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        note_label.setWordWrap(True)
+        hv.addWidget(note_label)
+        action = QtWidgets.QWidgetAction(menu)
+        action.setDefaultWidget(host)
+        menu.addAction(action)
+
         fields, note = fields_getter()
         render_calib_value_grid(grid, note_label, fields, note)
 

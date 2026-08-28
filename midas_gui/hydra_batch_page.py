@@ -177,7 +177,6 @@ class HydraBatchPage(QtWidgets.QWidget):
         bou.clicked.connect(lambda: self._out_ed.setText(
             QtWidgets.QFileDialog.getExistingDirectory(self, "Output directory") or "")); orow.addWidget(bou)
         out.body.addLayout(S.Form().row(("Folder:", orow)))
-        out.body.addWidget(QtWidgets.QLabel("Format(s):"))
         self._fmt = OutputFormatSelector()
         out.body.addWidget(self._fmt)
         lv.addWidget(out)
@@ -201,10 +200,18 @@ class HydraBatchPage(QtWidgets.QWidget):
         mode_row.addWidget(self._run_mode_combo); mode_row.addStretch(1)
         run_card.body.addLayout(mode_row)
         frame_mode_row = QtWidgets.QHBoxLayout(); frame_mode_row.setSpacing(6)
-        frame_mode_row.addWidget(S.LabelRight("Per panel:"))
+        _frame_mode_tip = (
+            "Sequential: frames integrated one at a time.\n"
+            "Batch Parallel: splits each running panel's own frames across N "
+            "workers sharing one detector map. The worker count auto-shrinks "
+            f"so each worker gets ≥{BatchRunCoordinator.MIN_FRAMES_PER_WORKER} frames.")
+        _frame_mode_lbl = S.LabelRight("Per panel:")
+        _frame_mode_lbl.setToolTip(_frame_mode_tip)
+        frame_mode_row.addWidget(_frame_mode_lbl)
         self._frame_run_mode = _NoScrollComboBox()
         self._frame_run_mode.addItem("Sequential", "sequential")
         self._frame_run_mode.addItem("Batch Parallel", "batch_parallel")
+        self._frame_run_mode.setToolTip(_frame_mode_tip)
         frame_mode_row.addWidget(self._frame_run_mode)
         frame_mode_row.addWidget(S.LabelRight("Workers:"))
         _max_workers = os.cpu_count() or 8
@@ -217,13 +224,6 @@ class HydraBatchPage(QtWidgets.QWidget):
             lambda *_: self._n_workers.setEnabled(
                 self._frame_run_mode.currentData() == "batch_parallel"))
         run_card.body.addLayout(frame_mode_row)
-        frame_mode_note = QtWidgets.QLabel(
-            "Batch Parallel splits each running panel's own frames across N "
-            "workers sharing one detector map. The worker count auto-shrinks "
-            f"so each worker gets ≥{BatchRunCoordinator.MIN_FRAMES_PER_WORKER} frames.")
-        frame_mode_note.setWordWrap(True)
-        frame_mode_note.setStyleSheet(f"color:{S.MUTED};font-size:10px")
-        run_card.body.addWidget(frame_mode_note)
         self._run_btn = S.primary_btn("Start Integration")
         self._run_btn.clicked.connect(self._run_all)
         self._abort_btn = QtWidgets.QPushButton("Abort")

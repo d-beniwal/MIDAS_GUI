@@ -4,19 +4,27 @@
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
 **Last updated:** 2026-08-28 (Batch Integrate cosmetic + Batch-Parallel
-overhaul, single-detector **and** Hydra — see §7 "Tab 4 — Batch Integrate"
-for full detail. Summary:
+overhaul, single-detector **and** Hydra, plus a same-day follow-up making
+**Output format**, **Run mode**, and **View calibration** into on-demand
+popups — see §7 "Tab 4 — Batch Integrate" for full detail. Summary:
 - **Drift correction** is hidden from the GUI (single-detector only —
   Hydra never had it) — not used in production; the code/`DriftWorker`
   are untouched and it can be shown again with a one-line change.
-- **Calibration values** is no longer an always-visible grid — click the
-  new **View calibration ▾** link (next to Calibration source, same
-  click-to-see-options interaction as the Data Viewer's λ/pixel-size
-  labels) to pop it up. Applies to the single-detector card and each of
+- **Calibration values** popup (click **View calibration ▾**, next to
+  Calibration source, same click-to-see-options interaction as the Data
+  Viewer's λ/pixel-size labels) now shows the full geometry parameter grid
+  every time — its menu is rebuilt fresh on each open, not just refreshed
+  in place, so the numeric fields always render (not just the "From Tab 2 /
+  From file" source note). Applies to the single-detector card and each of
   Hydra's 4 per-panel cards.
-- **Output format** is now a checkbox list — check as many of
-  CSV/XYE/FXYE/DAT/HDF5/2D-CSV as you want; every checked format is
-  written.
+- **Output format** is a checkbox list behind a clickable **Output
+  format ▾** button (its own text names the checked formats, e.g. "Output
+  format: CSV, XYE ▾") instead of an always-visible list of checkboxes —
+  check as many of CSV/XYE/FXYE/DAT/HDF5/2D-CSV as you want; every checked
+  format is written.
+- **Run mode**'s explanation of what Sequential/Batch Parallel do is now a
+  hover tooltip on the "Mode:"/"Per panel:" label and the mode combo box
+  itself, instead of a permanent explanatory line taking up card space.
 - A green **Save** button (next to a now-red **Abort**, both narrower than
   before alongside a narrower **Start Integration**) writes out the
   lineouts already computed this run, in whichever formats are checked,
@@ -1656,10 +1664,12 @@ non-zero coefficients), and an **ImTransOpt** row (e.g. "Flip Y, Flip Z" or
 "None") naming the image transform the active geometry was calibrated in — the
 same transform Batch Integrate applies internally (via the MIDAS integration
 backend, not a GUI-side pixel flip) to every streamed frame so it matches. The
-popup is rebuilt fresh every time it opens, so it always reflects whichever
-calibration source (Tab 2 result, or a parsed file) is currently active, plus
-a note line reporting that source (or any file-read error). Hydra mode has the
-same popup per panel, next to each `ge{n}` card's calibration-source radios.
+popup's entire content (not just the field values) is rebuilt fresh every
+time it opens, so it always reflects whichever calibration source (Tab 2
+result, or a parsed file) is currently active and always shows the full
+parameter grid alongside a note line reporting that source (or any
+file-read error) — never just the note on its own. Hydra mode has the same
+popup per panel, next to each `ge{n}` card's calibration-source radios.
 
 ### Integration
 | Field | Description |
@@ -1687,7 +1697,9 @@ its state save/restore keys), so it can be shown again by removing one
 
 ### Run mode: Sequential / Batch Parallel
 A **Run mode** card above Start Integration chooses how this run's frames
-are processed:
+are processed. What each mode does is a **hover tooltip** on the "Mode:"
+label and the mode combo box itself (not a permanent explanatory line —
+keeps the card compact):
 - **Sequential** *(default)* — one `BatchWorker`, unchanged from before.
 - **Batch Parallel** — a **Workers** spin box (1..CPU count) splits the
   run's frames into that many contiguous, near-equal chunks, each handled
@@ -1701,6 +1713,10 @@ are processed:
   finish at different times. Workers are threads within the app, not
   separate OS processes — the same approach Hydra's own per-panel
   Sequential/Parallel toggle already uses for its concurrency.
+
+Hydra's **Per panel:** Sequential/Batch Parallel combo (its own frame-level
+parallelism, independent of the **Panels:** Sequential/Parallel toggle)
+carries the same tooltip-instead-of-permanent-note treatment.
 
 ### Run / Abort / Save / Clear
 **Start Integration**, a red **Abort**, and a green **Save** sit in one row
@@ -1739,11 +1755,16 @@ when a 1-D format is selected. Click MONITOR again to stop; starting a fresh *St
 Integration* also stops it. (Distinct from **Monitor normalisation** above, which divides
 profiles by a scalar file.)
 
-### Output formats — checkbox list (multi-select)
-A checkbox per format — CSV (R,I,σ) · XYE (2θ) · FXYE (centideg) · DAT (Q) ·
-HDF5 (full stack) · 2D-CSV (η×R cake) — check as many as you want and every
-checked one is written for every frame (HDF5 as one combined full-stack
-file, the rest one file per frame). One format (CSV) is checked by default.
+### Output formats — checkbox list behind a popup button (multi-select)
+Click the **Output format ▾** button to reveal a checkbox per format —
+CSV (R,I,σ) · XYE (2θ) · FXYE (centideg) · DAT (Q) · HDF5 (full stack) ·
+2D-CSV (η×R cake) — check as many as you want and every checked one is
+written for every frame (HDF5 as one combined full-stack file, the rest one
+file per frame). One format (CSV) is checked by default. The button's own
+text names whichever formats are currently checked (e.g. "Output format:
+CSV, XYE ▾") so the selection is visible without opening the menu — the
+checkboxes themselves no longer take up permanent space in the Output
+card.
 Right panel: live **Waterfall** and **Stacked profiles** — both have an **x**
 selector to show the axis in **R (px) / 2θ (°) / Q (Å⁻¹)** (converted from the run's
 calibration). Both plots are bounded to their own data extent (like the main image

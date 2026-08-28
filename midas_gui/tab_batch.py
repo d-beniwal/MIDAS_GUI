@@ -436,7 +436,6 @@ class BatchTab(QtWidgets.QWidget):
         bou = _br(); bou.clicked.connect(lambda: self._out_ed.setText(
             QtWidgets.QFileDialog.getExistingDirectory(self, "Output directory") or "")); orow.addWidget(bou)
         out.body.addLayout(S.Form().row(("Folder:", orow)))
-        out.body.addWidget(QtWidgets.QLabel("Format(s):"))
         self._fmt = OutputFormatSelector()
         out.body.addWidget(self._fmt)
         lv.addWidget(out)
@@ -444,10 +443,18 @@ class BatchTab(QtWidgets.QWidget):
         # ── Run mode ──
         run_mode_card = S.make_card("Run mode")
         mode_row = QtWidgets.QHBoxLayout(); mode_row.setSpacing(6)
-        mode_row.addWidget(S.LabelRight("Mode:"))
+        _mode_tip = (
+            "Sequential: frames integrated one at a time.\n"
+            "Batch Parallel: splits this run's frames across N workers sharing "
+            "one detector map (built once). The worker count auto-shrinks so "
+            f"each worker gets ≥{BatchRunCoordinator.MIN_FRAMES_PER_WORKER} frames.")
+        _mode_lbl = S.LabelRight("Mode:")
+        _mode_lbl.setToolTip(_mode_tip)
+        mode_row.addWidget(_mode_lbl)
         self._run_mode = _NoScrollComboBox()
         self._run_mode.addItem("Sequential", "sequential")
         self._run_mode.addItem("Batch Parallel", "batch_parallel")
+        self._run_mode.setToolTip(_mode_tip)
         mode_row.addWidget(self._run_mode)
         mode_row.addWidget(S.LabelRight("Workers:"))
         _max_workers = os.cpu_count() or 8
@@ -459,13 +466,6 @@ class BatchTab(QtWidgets.QWidget):
         self._run_mode.currentIndexChanged.connect(
             lambda *_: self._n_workers.setEnabled(self._run_mode.currentData() == "batch_parallel"))
         run_mode_card.body.addLayout(mode_row)
-        mode_note = QtWidgets.QLabel(
-            "Batch Parallel splits this run's frames across N workers sharing "
-            "one detector map (built once). The worker count auto-shrinks so "
-            f"each worker gets ≥{BatchRunCoordinator.MIN_FRAMES_PER_WORKER} frames.")
-        mode_note.setWordWrap(True)
-        mode_note.setStyleSheet(f"color:{S.MUTED};font-size:10px")
-        run_mode_card.body.addWidget(mode_note)
         lv.addWidget(run_mode_card)
 
         # ── Run ──
