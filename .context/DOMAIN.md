@@ -147,6 +147,33 @@ CeO2 calibrant + 10-frame Ni scan expanding +0.1%/frame, rendered with the same
 CeO2 λ=0.42459Å (29.2keV), Lsd=286240µm, px=172µm (Eiger2-500k), shape
 (512,1028) uint32.
 
+## GE detector data: HDF5 lossless-compression benchmark (2026-08-27)
+
+Measured (not extrapolated) on `test_data/s1ide/park_may26/ge1/
+hydra_orientation_scan_002029.ge1.h5` (`exchange/data`, uint16, 2048×2048,
+100% nonzero, bg~1300-1800 counts, max 16349 — dense/noisy GE frames, so
+ratios cap ~2-3x, not the 10x+ seen on sparse/masked data). Per-frame HDF5
+chunking (`chunks=(1,2048,2048)`) so each frame compresses independently —
+confirmed linear scaling by writing a real tiled 1440-frame file (not just
+math): 12.08 GB raw → **4.81 GB** with blosc+zstd c5 bitshuffle, 77.4s write
+(53.7 ms/frame), 13.8s read (9.6 ms/frame). Raw = 8.39 MB/frame.
+
+Best options (all via `hdf5plugin`; native gzip/lzf also tested but dominated):
+- **`bzip2`**: 2.71 MB/frame (3.09x) — best ratio, but decompress is
+  ~150 ms/frame (15-30x slower than the others) — avoid for interactive
+  per-frame viewing.
+- **`hdf5plugin.Blosc(cname='zstd', clevel=5, shuffle=Blosc.BITSHUFFLE)`
+  — recommended default**: 3.34 MB/frame (2.51x), ~50 ms/frame write,
+  ~9 ms/frame read. clevel=9 only gains ~5% ratio for ~18x write time.
+- Fastest with real compression: `Blosc(cname='lz4')` or direct
+  `hdf5plugin.Zstd(clevel=1)` — sub-20ms write, single-digit ms read,
+  ~1.8-2.1x ratio.
+- Bitshuffle alone (no entropy coder behind it) gives ~1.00x — useless on
+  this 16-bit data without a compressor.
+- Full benchmark script + all filters tried: see chat history 2026-08-27;
+  not committed to repo (was an ad hoc exploratory analysis, not a code
+  change).
+
 ## Terminology quick-ref
 
 Q — scattering vector (Å⁻¹). 2θ — diffraction angle. η — azimuthal angle.
