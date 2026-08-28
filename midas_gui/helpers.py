@@ -283,6 +283,20 @@ def _collect_frame_paths(raw) -> list:
     return sorted(_glob.glob(raw))
 
 
+def display_text_for_paths(paths: list) -> str:
+    """Text a Data/Dark/Bright/Background/Stack field should show after an
+    explicit multi-file Browse… pick (``dialogs.BrowseFilesDialog`` "Multiple
+    files"/"Files sharing a name stem" modes): the one file's own path if
+    exactly one was picked, else the shared parent folder of every picked
+    file — never a bare "N files selected" count, so the field always shows
+    a real filesystem path like every other selection mode does."""
+    if len(paths) == 1:
+        return paths[0]
+    import os as _os
+    parents = {str(Path(p).parent) for p in paths}
+    return next(iter(parents)) if len(parents) == 1 else _os.path.commonpath(list(parents))
+
+
 def source_kind(path) -> str:
     """Classify a data-source path as "folder" (dir or glob), "hdf5", or
     "file" — the ``kind`` argument ``average_field``/``FieldAverageWorker``

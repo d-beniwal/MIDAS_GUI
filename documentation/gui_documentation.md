@@ -3,13 +3,17 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-27 (Every Data/Dark/Bright/Background field's ⋯
+**Last updated:** 2026-08-27 (Browse… popup polish: a Multiple-files/
+Filestem pick now shows the files' shared folder — or the single file's own
+path if only one matched — instead of an "N files selected" count; the
+popup now opens to the `midas-gui` project root by default, with its
+name column doubled in width. See "The Browse… popup" in §1 for detail.)
+
+**Previously:** (2026-08-27, Every Data/Dark/Bright/Background field's ⋯
 button — single-detector and Hydra alike — now opens a two-item menu,
 **Browse…** and **Import from…**; Browse… opens a popup offering Single
 file / Multiple files / Full folder / Files sharing a name stem, and Hydra
-tabs gained real cross-tab Import from… for the first time. See "The
-Browse… popup" and "Cross-tab data import" in §1 "Overview and
-Architecture" for detail.)
+tabs gained real cross-tab Import from… for the first time.)
 
 **Previously:** (2026-08-27, Calibrate's Multi-panel detector results —
 per-panel shifts + grid geometry — now reach downstream integration
@@ -484,6 +488,15 @@ file ever applies to one. For a Hydra field, Full-folder/Filestem resolve
 per-panel exactly like Single-file does today: point at any one panel's
 folder (or a file inside it) and the other panels' folders are found via the
 same `geN` naming convention.
+
+After a pick, the field always shows a real filesystem path — the single
+file's own path (Single file mode, or a Multiple-files/Filestem pick that
+resolved to exactly one file), the chosen directory (Full folder), or the
+shared parent folder of every matched file (Multiple files/Filestem with
+more than one match; hover the field for the full file list). The popup
+opens to the `midas-gui` project's root folder by default, and its file/
+folder name column is twice Qt's default width so longer names aren't
+immediately truncated.
 
 **Cross-tab data import ("Import from…").** Every Data Loader panel's **Data,
 Dark, Bright, Background** fields (single-detector and Hydra alike), plus
@@ -1177,8 +1190,9 @@ like a browsed folder/file would. The Stack browse menu also has a
 temporal stack can be built from an explicit, hand-picked set of files
 (e.g. frames scattered across a directory or spread across multiple
 directories) instead of only a whole folder or a single glob pattern — the
-field then shows "N files selected" (hover for the full file list) and the
-stride still applies to the chosen list.
+field then shows the files' shared parent folder (or the one file's own
+path if only a single file was picked; hover for the full file list) and
+the stride still applies to the chosen list.
 
 **Transforms: Flip Y / Flip Z / Transpose** (below the Image field) apply
 MIDAS's `ImTransOpt` image transform to every frame this tab loads — the

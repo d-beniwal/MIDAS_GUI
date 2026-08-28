@@ -32,7 +32,7 @@ from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollDoubleSpinBox, _fspin,
                                _browse, is_h5, list_h5_datasets, _NoScrollComboBox,
                                _load_image, _collect_frame_paths, apply_field_corrections,
                                new_temp_h5_path, save_stack_h5, detect_geometry_from_path,
-                               source_kind)
+                               source_kind, display_text_for_paths)
 from midas_gui import style as S
 
 
@@ -1378,7 +1378,7 @@ class FieldSelector(QtWidgets.QGroupBox):
         self._explicit_paths = paths
         self._path_ed.blockSignals(True)
         if paths:
-            self._path_ed.setText(f"{len(paths)} files selected")
+            self._path_ed.setText(display_text_for_paths(paths))
             self._path_ed.setToolTip("\n".join(paths))
         else:
             self._path_ed.setToolTip("")
@@ -2375,7 +2375,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._explicit_paths = paths
         self._path_ed.blockSignals(True)
         if paths:
-            self._path_ed.setText(f"{len(paths)} files selected")
+            self._path_ed.setText(display_text_for_paths(paths))
             self._path_ed.setToolTip("\n".join(paths))
         else:
             self._path_ed.setToolTip("")

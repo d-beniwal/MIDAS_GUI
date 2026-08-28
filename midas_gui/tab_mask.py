@@ -18,7 +18,8 @@ from midas_gui.helpers import (_load_image, _fspin, _NoScrollSpinBox, _browse, i
                                _NoScrollComboBox, list_h5_datasets,
                                widgets_to_dict, apply_dict_to_widgets,
                                new_temp_h5_path, save_stack_h5,
-                               _apply_im_trans, im_trans_codes_from_checkboxes)
+                               _apply_im_trans, im_trans_codes_from_checkboxes,
+                               display_text_for_paths)
 from midas_gui.widgets import ImageViewer
 from midas_gui.dialogs import show_error
 from midas_gui.workers import MaskComputeWorker
@@ -425,7 +426,7 @@ class MaskTab(QtWidgets.QWidget):
         if not files:
             return
         files = sorted(files)   # deterministic frame order regardless of click order
-        self._stack_ed.setText(f"{len(files)} files selected")
+        self._stack_ed.setText(display_text_for_paths(files))
         self._stack_ed.setToolTip("\n".join(files))
         self._stack_files = files
 

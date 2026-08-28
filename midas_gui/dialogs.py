@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PyQt5 import QtCore, QtWidgets
 
-from .constants import DISTORTION_NAMES, DISTORTION_ISO, DISTORTION_PRESETS, H5_EXTS
+from .constants import DISTORTION_NAMES, DISTORTION_ISO, DISTORTION_PRESETS, H5_EXTS, PROJECT_ROOT
 from .helpers import is_h5
 
 _PANEL_LABELS = {"single": "Single detector", "ge1": "ge1", "ge2": "ge2",
@@ -364,6 +364,9 @@ class BrowseFilesDialog(QtWidgets.QDialog):
         self._tree.sortByColumn(0, QtCore.Qt.AscendingOrder)
         self._tree.doubleClicked.connect(self._on_double_clicked)
         self._tree.selectionModel().selectionChanged.connect(self._on_selection_changed)
+        # Name column defaults to Qt's stock 100px header section — double it
+        # so folder/file names aren't immediately elided.
+        self._tree.setColumnWidth(0, self._tree.columnWidth(0) * 2)
         layout.addWidget(self._tree, 1)
 
         self._stem_row = QtWidgets.QWidget()
@@ -389,7 +392,7 @@ class BrowseFilesDialog(QtWidgets.QDialog):
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
 
-        self._navigate(start_dir or str(Path.home()))
+        self._navigate(start_dir or str(PROJECT_ROOT))
         if len(modes) > 1:
             self._mode_btns[modes[0]].setChecked(True)
         else:

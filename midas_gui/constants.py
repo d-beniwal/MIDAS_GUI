@@ -141,7 +141,10 @@ K_EDGE_FOILS = [
 
 # ── Default test-data paths (repo-root test_data/, git-ignored) ─────────────────
 from pathlib import Path as _Path
-_TEST_DATA = _Path(__file__).resolve().parent.parent / "test_data"
+# The midas_gui project root (parent of the `midas_gui` package itself) —
+# default starting folder for dialogs.BrowseFilesDialog.
+PROJECT_ROOT = _Path(__file__).resolve().parent.parent
+_TEST_DATA = PROJECT_ROOT / "test_data"
 # Synthetic GUI fixtures live under test_data/gui_synthetic/ (moved there by the
 # 2026-08-23 per-dataset reorg — these six defaults must track that subfolder).
 _GUI_SYNTH = _TEST_DATA / "gui_synthetic"
