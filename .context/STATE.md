@@ -1,15 +1,36 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-27 (Data Loader Browse… popup + Hydra cross-tab
-Import from…, committed `ac13797`/pending docs commit — see "Recently
-completed" below)_
+_Last updated: 2026-08-27 (Browse… popup polish — folder-path display,
+project-root default dir, wider name column — committed `a54f796`/pending
+docs commit; see "Recently completed" below)_
 
 ## Now working on
 
 Nothing in progress; branch about to be pushed to `origin/main`.
 
 ## Recently completed
+
+**2026-08-27 (`a54f796`) — Browse… popup polish: folder-path display,
+project-root default dir, wider name column.** User feedback on the just-
+shipped Browse… popup (`ac13797`): (1) a Multiple-files/Filestem pick
+showed a bare `"N files selected"` count instead of a real path — new
+`helpers.display_text_for_paths()` (single file's own path if exactly one
+matched, else the shared parent folder via `os.path.commonpath`) is now
+used by `FieldSelector`/`DataLoaderPanel._set_explicit_paths` **and**
+Mask Builder's pre-existing `_browse_stack_files` "Files (multi-select)…"
+picker (`tab_mask.py` — same `"N files selected"` pattern, predates this
+session, unrelated to `ac13797`'s new dialog); (2) `BrowseFilesDialog`
+opened to `Path.home()` — now defaults to the new `constants.PROJECT_ROOT`
+(`Path(__file__).resolve().parent.parent`, matching the existing
+`_TEST_DATA` repo-root convention) unless a caller passes `start_dir`; (3)
+the tree view's name column (Qt's stock 100px default) is now doubled to
+200px so longer filenames aren't immediately elided. `gui_documentation.md`
+updated (§1 "The Browse… popup" + the Mask Builder Stack-field paragraph).
+Verified: per-file isolated `test_smoke.py` tests + `test_live_stream.py`
+green; a standalone offscreen script confirmed `PROJECT_ROOT` resolves to
+the repo root, the popup's initial `_current_dir` matches it, and
+`columnWidth(0)` goes from 100→200.
 
 **2026-08-27 (`ac13797`) — Data Loader: Browse… popup (multi-file/folder/
 name-stem) + Hydra gains real cross-tab Import from….** Every Data/Dark/

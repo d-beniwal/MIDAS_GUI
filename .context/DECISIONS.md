@@ -3,6 +3,61 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-08-27 — Browse… popup polish: folder-path display, project-root default dir, wider name column
+
+User feedback on the Browse… popup (previous entry, commit `ac13797`),
+three independent asks against "all the data panels (data/dark/bright/
+background/mask)":
+
+1. **After a Multiple-files/Filestem pick, the field should show a folder
+   path (or the file path, if only one file matched) — not an "N files
+   selected" count.** Grepped the whole codebase for that exact string
+   (`grep -rn "files selected" midas_gui/*.py`) and found exactly 3 sites,
+   not just the two `ac13797` added: `widgets.py`'s `FieldSelector` and
+   `DataLoaderPanel._set_explicit_paths`, **and** a third, older,
+   unrelated site — `tab_mask.py`'s Mask Builder Stack field
+   `_browse_stack_files()` ("Files (multi-select)…" in its own browse
+   menu, a native `QFileDialog.getOpenFileNames` picker that predates
+   `ac13797` and doesn't use `dialogs.BrowseFilesDialog` at all). This is
+   why "mask" was in the user's list even though Mask Builder's Image/
+   Stack fields and the shared `MaskSelector` widget (Data Loader panels'
+   "Mask" row — a checkbox list of sources, not a single-path field, and
+   already shows `kind: name` per row) never touch `BrowseFilesDialog`.
+   Added `helpers.display_text_for_paths(paths)`: the one path directly if
+   `len(paths) == 1`, else the shared parent folder of every path (all in
+   one dir → that dir; scattered across dirs, possible via Mask Builder's
+   arbitrary multi-select → `os.path.commonpath` of the parents, so the
+   field still shows *a* real ancestor path rather than falling back to a
+   count). Used at all 3 sites; the underlying `list[str]`
+   (`_explicit_paths` / `_stack_files`) that actually drives loading is
+   untouched — only the displayed text changed.
+2. **Default browse folder → the `midas-gui` project root**, not
+   `Path.home()`. Added `constants.PROJECT_ROOT = Path(__file__).resolve()
+   .parent.parent` (module lives at `midas_gui/constants.py`, so
+   `.parent.parent` is the repo root) — same derivation `_TEST_DATA` already
+   used inline; factored the shared expression out so `dialogs.py` could
+   import one named constant. `BrowseFilesDialog.__init__` now falls back
+   to `str(PROJECT_ROOT)` instead of `Path.home()` when no `start_dir` is
+   given (a caller-supplied `start_dir` still wins, and mid-dialog
+   navigation errors still fall back to `Path.home()` — a different,
+   unrelated fallback path, not "the default the dialog opens to").
+3. **Name column doubled in width.** Qt's `QHeaderView` gives a
+   `QFileSystemModel`-backed `QTreeView` a stock 100px default section
+   size for column 0 with no code in this repo ever overriding it
+   (confirmed via an offscreen script: `columnWidth(0) == 100` both before
+   and after `show()+processEvents()`). Set once, right after the tree is
+   built (`self._tree.setColumnWidth(0, self._tree.columnWidth(0) * 2)`) —
+   before `_navigate()` runs, and not inside `_navigate()` itself, so
+   subsequent folder navigation doesn't re-double an already-doubled width.
+**Verified:** offscreen script confirmed `PROJECT_ROOT` resolves to the
+repo root, a fresh `BrowseFilesDialog`'s `_current_dir` matches it, and
+`columnWidth(0)` reads 200; `display_text_for_paths` spot-checked for
+1 file / N files same dir / N files different dirs. Per-file isolated
+`test_smoke.py` (all 10 tests) and `test_live_stream.py` green.
+**Files:** `midas_gui/constants.py`, `midas_gui/dialogs.py`,
+`midas_gui/helpers.py`, `midas_gui/widgets.py`, `midas_gui/tab_mask.py`,
+`documentation/gui_documentation.md`.
+
 ## 2026-08-27 — Data Loader: Browse… popup + Hydra cross-tab Import from…
 
 Two related gaps in the shared Data/Dark/Bright/Background loader UI:

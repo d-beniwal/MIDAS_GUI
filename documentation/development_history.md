@@ -208,6 +208,7 @@ Dates are commit dates (YYYY-MM-DD).
 | File ▸ Workspace (renamed from GUI State) + Recent Projects/Workspaces, unsaved-changes indicator, autosave/crash-recovery, Project History viewer | `6b1564b` |
 | Workspace/Project record + restore the active beamline Profile on load/open; Eta vs R Cake plots' right-click-drag zooms only the axis actually dragged (was always η-only) | `943a91d` |
 | Data Loader Browse… popup (Single/Multiple files/Full folder/Files sharing a name stem) + Hydra gains real cross-tab Import from… | `ac13797` |
+| Browse… popup polish: folder/file-path display (not a count), project-root default dir, wider name column | `a54f796` |
 
 ### Stability / performance / consistency (review-driven, phases 1–3)
 | Change | Commit |
@@ -3256,6 +3257,36 @@ pyqtgraph ViewBox teardown, already tracked in `.context/STATE.md`).
 **Roll back:** `git revert ac13797`. Self-contained; no dependents.
 Restores the old flat File…/Folder… menu and leaves Hydra fields without
 cross-tab "Import from…".
+
+---
+
+### `a54f796` — Browse popup: show folder/file path (not a count) after multi-file picks; default to project root; wider name column (2026-08-27)
+**Effect:** A Multiple-files/Filestem Browse… pick showed a bare "N files
+selected" count instead of a real path. New
+`helpers.display_text_for_paths()` shows the one file's own path if
+exactly one matched, else the shared parent folder of every matched file
+(`os.path.commonpath` if they're not all in the same directory). Used by
+`FieldSelector`/`DataLoaderPanel._set_explicit_paths` (Data/Dark/Bright/
+Background, single-detector) and by Mask Builder's pre-existing Stack-field
+"Files (multi-select)…" picker (`tab_mask.py` — a separate, older,
+native-`QFileDialog` picker with the same "N files selected" pattern,
+predating the Browse… popup and unrelated to `ac13797`). Separately,
+`BrowseFilesDialog` now opens to new `constants.PROJECT_ROOT` (the
+`midas-gui` repo root, same derivation `_TEST_DATA` already used) instead
+of the user's home directory when no `start_dir` is given, and its file/
+folder name column is now double Qt's stock 100px default.
+**Verified:** offscreen script confirmed `PROJECT_ROOT` resolves to the
+repo root, a fresh dialog's starting directory matches it, and
+`columnWidth(0)` reads 200 (was 100); `display_text_for_paths` spot-checked
+for 1 file / N files in one directory / N files across directories.
+Per-file isolated `test_smoke.py` (all 10 tests) and `test_live_stream.py`
+green.
+**Files:** `midas_gui/constants.py`, `midas_gui/dialogs.py`,
+`midas_gui/helpers.py`, `midas_gui/widgets.py`, `midas_gui/tab_mask.py`,
+`documentation/gui_documentation.md`.
+**Roll back:** `git revert a54f796`. Self-contained; no dependents.
+Restores the "N files selected" count text, `Path.home()` as the popup's
+default folder, and the original 100px name column.
 
 ---
 
