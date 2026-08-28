@@ -3,6 +3,97 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-08-27 — Data Loader: Browse… popup + Hydra cross-tab Import from…
+
+Two related gaps in the shared Data/Dark/Bright/Background loader UI:
+
+1. The ⋯ button's old `File…`/`Folder…` pair couldn't express "an
+   arbitrary set of files" or "every file starting with a prefix" — a user
+   with a scan directory containing several unrelated frame sets had no
+   way to point a field at just one subset without renaming files or
+   moving them into their own folder first.
+2. Hydra's per-tab loader (`HydraLoaderPanel`) never joined the
+   `data_bridge.DataSourceRegistry` its single-detector sibling
+   (`DataLoaderPanel`) already used — so Hydra fields had no "Import
+   from…" at all, and a single-detector tab's registry entries were
+   invisible to Hydra even though the underlying `FieldSelector`/
+   `HydraFieldSelector` field types line up 1:1 (dark/bright/background).
+
+**Fix:**
+- New `dialogs.BrowseFilesDialog`: one popup, up to 4 mutually-exclusive
+  modes (radio buttons) — Single file, Multiple files (arbitrary
+  multi-select), Full folder, Files sharing a name stem (type-or-click a
+  prefix). HDF5 files are filtered out of every mode but Single file — a
+  container format has no "multiple files" to select, so showing them in
+  the multi-select list would just be visual noise no valid selection can
+  include. Which modes a given field offers is passed in by the caller,
+  not baked into the dialog, since three different consuming pipelines
+  can't take every shape: Hydra Dark/Bright/Background auto-discovers the
+  other 3 panels from one anchor path (`helpers.hydra_siblings`) and can't
+  generalize that to an arbitrary pick list (`modes=("file","folder",
+  "stem")`); Hydra's main Data field has one anchor file whose own
+  internal frame count drives the frame index, so folder/multi/stem don't
+  apply at all (`modes=("file",)`); Batch Integrate's streamed Data field
+  is handed to an external glob/path-based streaming reader that can't
+  consume a file list (`modes=("file","folder")`).
+- A confirmed **Multiple files**/**Files sharing a name stem** pick has no
+  single string/glob representation, so it's carried through as a plain
+  `list[str]` end to end: `FieldSelector`/`DataLoaderPanel` gained an
+  `_explicit_paths` instance var (mutually exclusive with the path
+  `QLineEdit`'s text — set via `_set_explicit_paths()`, cleared the moment
+  the user edits the text field directly via `_on_path_changed`) and a
+  `_raw_source()` accessor used everywhere the old code read
+  `self._path_ed.text().strip()` directly (kind detection, frame counting,
+  averaging, state save/restore, registry export). `helpers.source_kind`
+  and `helpers._collect_frame_paths` both special-case `isinstance(raw,
+  list)` up front — a list is always treated as the "folder" kind (a set
+  of single-frame files to average/stack over), returned as-is by
+  `_collect_frame_paths` rather than glob-expanded.
+- **Why not resolve an explicit list down to a glob and keep the old
+  string-only representation?** A stem match and an arbitrary multi-select
+  both start from real files that may not share a single glob pattern
+  (non-contiguous numbering, mixed extensions within the TIFF family) —
+  collapsing to a glob would silently include or exclude files the user
+  didn't pick. Threading `list[str]` through was more code (every
+  `_path_ed.text()` call site needed auditing) but keeps the loaded set
+  exactly what was selected.
+- Hydra registry wiring: `HydraLoaderPanel.bind_registry(registry, label)`
+  (mirrors `DataLoaderPanel.bind_registry`) registers the panel's main Data
+  anchor plus its 3 `HydraFieldSelector`s' dark/bright/background paths;
+  each tab (`tab_view.py`, `tab_calibrate.py`, `tab_batch.py`) gained a
+  `bind_hydra_registry()` forwarding to its Hydra page's loader, called
+  from `app.py`'s `_wire_signals` alongside the existing single-detector
+  `bind_registry()` calls. Batch Integrate's Hydra page is built lazily
+  (first tab switch) — `bind_hydra_registry` stashes `(registry, label)`
+  and `_ensure_hydra_page()` applies it once the page exists, same pattern
+  already used for `set_project_context`.
+- Hydra tabs are labeled distinctly ("Data Viewer (Hydra)", "Calibrate
+  (Hydra)", "Batch Integrate (Hydra)") in the registry so a Hydra anchor
+  path is never offered to — or accepted from — a single-detector field
+  under an ambiguous shared name; a Hydra field's "Import from…" also
+  silently drops any single-detector `list[str]` (Multiple-files) entry it
+  has no way to consume (one anchor path, not a pick list).
+- `_fmt_source_desc()` (menu-label formatting for one registry descriptor)
+  factored out of `FieldSelector._populate_import_menu` into a
+  module-level function in `widgets.py`, reused by both `FieldSelector`
+  and `HydraFieldSelector`/`HydraLoaderPanel` in `hydra_widgets.py` — was
+  becoming inline-duplicated logic once Hydra needed the same "buffer /
+  N-file-list / plain path" label formatting.
+
+**Verified:** per-file isolated `pytest tests/test_smoke.py::<each test>`,
+full-file `test_live_stream.py`, `test_hydra_geometry.py` all green.
+`test_hydra_ui.py` and `test_project.py` each hit the pre-existing
+interpreter-teardown segfault/abort at process exit after all their tests
+already passed (see STATE.md "Open questions" — module-scoped MainWindow
+fixture + pyqtgraph ViewBox teardown, not this change: `test_hydra_ui.py`
+was already on the known list, `test_project.py` shares the same
+module-scoped-MainWindow-fixture shape). Combined `test_smoke.py` run
+(not per-test) also segfaults at teardown, same known cause.
+**Files:** `midas_gui/dialogs.py` (new `BrowseFilesDialog`), `midas_gui/
+widgets.py`, `midas_gui/hydra_widgets.py`, `midas_gui/helpers.py`,
+`midas_gui/app.py`, `midas_gui/tab_view.py`, `midas_gui/tab_calibrate.py`,
+`midas_gui/tab_batch.py`, `documentation/gui_documentation.md`.
+
 ## 2026-08-27 — Feed Calibrate's Multi-panel results to downstream integration
 
 User report: with "Multi-panel detector" checked, Calibrate visibly performs

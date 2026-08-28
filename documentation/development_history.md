@@ -207,6 +207,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Header Profile combo (instant switching); Hydra gated to 1-ID-E; fix stale device/Calibrant dropdowns + pixel/K-edge popups on profile change | `81056e4` |
 | File ▸ Workspace (renamed from GUI State) + Recent Projects/Workspaces, unsaved-changes indicator, autosave/crash-recovery, Project History viewer | `6b1564b` |
 | Workspace/Project record + restore the active beamline Profile on load/open; Eta vs R Cake plots' right-click-drag zooms only the axis actually dragged (was always η-only) | `943a91d` |
+| Data Loader Browse… popup (Single/Multiple files/Full folder/Files sharing a name stem) + Hydra gains real cross-tab Import from… | `ac13797` |
 
 ### Stability / performance / consistency (review-driven, phases 1–3)
 | Change | Commit |
@@ -3217,6 +3218,44 @@ segfault after its one test passed — confirmed unrelated (see
 the pre-existing behavior where Multi-panel results never reach the
 Results-tab preview, Batch Integrate, or a fully-usable exported
 paramstest.txt.
+
+---
+
+### `ac13797` — Data Loader: Browse… popup (multi-file/folder/name-stem) + Hydra gains real cross-tab Import from… (2026-08-27)
+**Effect:** Every Data/Dark/Bright/Background field's ⋯ button — single-
+detector and Hydra alike — now opens a two-item menu, **Browse…** and
+**Import from…**, in place of the old flat File…/Folder… pair. New
+`dialogs.BrowseFilesDialog` offers up to 4 modes (radio buttons), passed
+in per-caller since three different consuming pipelines can't take every
+shape: **Single file**, **Multiple files** (arbitrary multi-select, not
+offered for Hydra fields or Batch Integrate's streamed Data field),
+**Full folder**, **Files sharing a name stem** (type-or-click-to-prefill a
+prefix; not offered for Hydra's main Data field, whose frame index comes
+from one anchor file's own internal frame count). HDF5 files are excluded
+from every mode but Single file. Separately, Hydra's Data Viewer/
+Calibrate/Batch Integrate pages now bind their `HydraLoaderPanel` into the
+same `data_bridge.DataSourceRegistry` their single-detector counterparts
+already used (new `bind_hydra_registry()` on each tab, wired from
+`app.py`), so Hydra fields gain a real "Import from…" for the first time —
+labeled distinctly ("Data Viewer (Hydra)" etc.) so a Hydra anchor path is
+never confused with its single-detector counterpart. A confirmed Multiple-
+files/stem pick has no single string/glob form, so it's carried as a
+`list[str]` through `helpers.source_kind`/`_collect_frame_paths` and new
+`_explicit_paths` state on `FieldSelector`/`DataLoaderPanel` (save/restore
+included), alongside the existing plain-path-text case.
+**Verified:** per-file isolated `pytest tests/test_smoke.py::<each test>`
+all pass; full-file `test_live_stream.py` and `test_hydra_geometry.py`
+pass. `test_hydra_ui.py`/`test_project.py` each hit the pre-existing
+interpreter-teardown segfault/abort at process exit after every test in
+the file already passed — confirmed unrelated (module-scoped MainWindow +
+pyqtgraph ViewBox teardown, already tracked in `.context/STATE.md`).
+**Files:** `midas_gui/dialogs.py`, `midas_gui/widgets.py`,
+`midas_gui/hydra_widgets.py`, `midas_gui/helpers.py`, `midas_gui/app.py`,
+`midas_gui/tab_view.py`, `midas_gui/tab_calibrate.py`,
+`midas_gui/tab_batch.py`, `documentation/gui_documentation.md`.
+**Roll back:** `git revert ac13797`. Self-contained; no dependents.
+Restores the old flat File…/Folder… menu and leaves Hydra fields without
+cross-tab "Import from…".
 
 ---
 

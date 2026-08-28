@@ -1,8 +1,8 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-27 (Multi-panel results now reach downstream
-integration, committed `101558a`/pending docs commit — see "Recently
+_Last updated: 2026-08-27 (Data Loader Browse… popup + Hydra cross-tab
+Import from…, committed `ac13797`/pending docs commit — see "Recently
 completed" below)_
 
 ## Now working on
@@ -10,6 +10,28 @@ completed" below)_
 Nothing in progress; branch about to be pushed to `origin/main`.
 
 ## Recently completed
+
+**2026-08-27 (`ac13797`) — Data Loader: Browse… popup (multi-file/folder/
+name-stem) + Hydra gains real cross-tab Import from….** Every Data/Dark/
+Bright/Background field's ⋯ button (single-detector and Hydra alike) now
+opens **Browse…** + **Import from…** instead of the old flat File…/
+Folder… pair. New `dialogs.BrowseFilesDialog` offers up to 4 modes per
+field (Single file / Multiple files / Full folder / Files sharing a name
+stem — HDF5 excluded from every mode but Single file). Hydra's Data
+Viewer/Calibrate/Batch Integrate pages now bind into the same
+`data_bridge.DataSourceRegistry` as their single-detector counterparts
+(new `bind_hydra_registry()` per tab, wired from `app.py`), so Hydra
+fields get a real "Import from…" for the first time — labeled distinctly
+("Data Viewer (Hydra)" etc.) so a Hydra path is never confused with the
+single-detector one. An explicit Multiple-files/stem pick is a `list[str]`
+with no string/glob form; `helpers.source_kind`/`_collect_frame_paths` and
+`FieldSelector`/`DataLoaderPanel` state save/restore now handle it
+alongside plain path text. `gui_documentation.md` updated ("The Browse…
+popup", "Cross-tab data import"). Verified: per-file isolated
+`tests/test_smoke.py`, `test_live_stream.py`, `test_hydra_geometry.py`
+pass; `test_hydra_ui.py`/`test_project.py` hit the pre-existing
+interpreter-teardown segfault/abort at process exit (see "Open questions"
+below) — unrelated, all tests pass before it.
 
 **2026-08-27 (`101558a`) — Feed Calibrate's Multi-panel results to
 downstream integration.** Three GUI-side gaps, all upstream of any package bug (panel
@@ -91,16 +113,6 @@ underlying exception (an import from `midas_calibrate_v2`/
 fix only unblocks *seeing* the full error next time it happens; likely
 causes flagged to the user: version mismatch with the 2026-08-25 backend
 upgrade (`a74b7d6`), or a Windows DLL/native-extension load failure.
-
-**2026-08-26 (`943a91d`/`573e938`, pushed):** Project attempts embed
-calibration results + skip embedding file-backed masks; Hydra Calibrate
-gained a full Overall Eta-R Cake UI; Data Viewer gained a Cake tab;
-Workspace/Project now persist the active beamline Profile; Cake-plot
-independent-axis zoom fix. Full detail in DECISIONS.md.
-
-**2026-08-26 (`6b1564b` + docs `b4a6dfe`):** Workspace/Project UX rework
-(renamed "GUI State"→Workspace, recent-files menus, dirty-marker/autosave,
-`ProjectHistoryDialog`) — merged to `main` via `77f5867`.
 
 ## Open questions / blockers
 
