@@ -1466,6 +1466,14 @@ class BatchRunCoordinator(QtCore.QObject):
         self._chunk_totals: dict = {}
         self._chunk_done: dict = {}
         self._interrupted = False
+        # Live frame_done re-ordering (batch_parallel only) — chunks run
+        # concurrently so their frame_done signals arrive in wall-clock
+        # completion order, not frame order; buffer and re-emit in the
+        # overall sorted-index order instead. See _on_chunk_frame.
+        self._live_order: list = []
+        self._live_ptr = 0
+        self._live_pending: dict = {}
+        self._chunk_frame_counter: dict = {}
 
     def isRunning(self) -> bool:
         if self._solo_worker is not None:
@@ -1535,17 +1543,35 @@ class BatchRunCoordinator(QtCore.QObject):
                                 "frame_ids": [], "out_paths": [], "aborted": True})
             return
         self.geom_ready.emit(ctx)
+        self._live_order = [i for chunk in self._chunks for i in chunk]
         for chunk in self._chunks:
             w = BatchWorker(context=ctx, frame_indices=chunk, parent=self, **self._args)
             self._chunk_workers.append(w)
             self._chunk_totals[id(w)] = len(chunk)
             self._chunk_done[id(w)] = 0
+            self._chunk_frame_counter[id(w)] = 0
             w.progress.connect(lambda done, total, w=w: self._on_chunk_progress(w, done))
-            w.frame_done.connect(self.frame_done)
+            w.frame_done.connect(lambda fid, r_ax, prof, sigma, w=w, chunk=chunk:
+                                 self._on_chunk_frame(w, chunk, fid, r_ax, prof, sigma))
             w.finished.connect(lambda data, w=w: self._on_chunk_finished(w, data))
             w.failed.connect(self.failed)
             w.log_line.connect(self.log_line)
             w.start()
+
+    def _on_chunk_frame(self, w, chunk, fid, r_ax, prof, sigma):
+        """Relay one chunk worker's frame_done, re-ordered to match the overall
+        sorted frame-index order (``_live_order``) instead of wall-clock
+        completion order — concurrent chunks would otherwise interleave
+        arbitrarily, scrambling the waterfall/stacked-profile display."""
+        k = self._chunk_frame_counter[id(w)]
+        self._chunk_frame_counter[id(w)] = k + 1
+        abs_i = chunk[k]   # BatchWorker._iter_frames processes `chunk` in order
+        self._live_pending[abs_i] = (fid, r_ax, prof, sigma)
+        while (self._live_ptr < len(self._live_order)
+               and self._live_order[self._live_ptr] in self._live_pending):
+            i = self._live_order[self._live_ptr]
+            self.frame_done.emit(*self._live_pending.pop(i))
+            self._live_ptr += 1
 
     def _on_chunk_progress(self, w, done):
         self._chunk_done[id(w)] = done

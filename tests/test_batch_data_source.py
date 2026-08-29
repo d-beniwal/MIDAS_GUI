@@ -166,6 +166,39 @@ def test_split_into_chunks_more_chunks_than_items():
     assert sum(chunks, []) == indices
 
 
+def test_batch_parallel_frame_done_reorders_out_of_completion_order():
+    """Batch Parallel's chunks run concurrently, so a faster chunk's
+    frame_done signals can arrive before a slower, earlier chunk's — the
+    waterfall/stacked-profile views must still see frames in overall sorted
+    frame-index order, not wall-clock completion order."""
+    import midas_gui.workers as wk
+
+    coord = wk.BatchRunCoordinator(
+        spec=None, source_cfg=None, mask=None, out_dir=None, fmts=[],
+        kernel=None, corrections=None, variance_cfg=None)
+
+    class _DummyWorker:
+        pass
+
+    chunk_a, chunk_b = [0, 1, 2], [3, 4, 5]
+    w_a, w_b = _DummyWorker(), _DummyWorker()
+    coord._chunks = [chunk_a, chunk_b]
+    coord._live_order = [i for c in coord._chunks for i in c]
+    coord._chunk_frame_counter = {id(w_a): 0, id(w_b): 0}
+
+    emitted = []
+    coord.frame_done.connect(lambda fid, r_ax, prof, sigma: emitted.append(fid))
+
+    # Chunk b (fast) completes fully before chunk a (slow) reports anything.
+    for fid in (3, 4, 5):
+        coord._on_chunk_frame(w_b, chunk_b, str(fid), None, None, None)
+    assert emitted == []   # buffered — frames 0-2 haven't arrived yet
+    for fid in (0, 1, 2):
+        coord._on_chunk_frame(w_a, chunk_a, str(fid), None, None, None)
+
+    assert emitted == ["0", "1", "2", "3", "4", "5"]
+
+
 def test_resolve_worker_count_shrinks_to_minimum_ten_per_worker():
     import midas_gui.workers as wk
     # plenty of frames — full requested count survives
