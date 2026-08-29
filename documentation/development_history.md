@@ -171,6 +171,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Browse… parity: Multiple files + filestem-filtered (live folder+prefix) sources, MONITOR re-scans a filestem filter | `af8066f` |
 | Cosmetic overhaul: Drift hidden, "View calibration" popup, checkbox output formats, green Save/red Abort, Sequential/Batch-Parallel workers (single-detector + Hydra) | `a27790a` |
 | Output format + Run mode become popups (button/tooltip, not permanent widgets); fix View-calibration popup rebuilding stale on first open | `e6f2e50` |
+| Fix Batch-Parallel frame ordering in live waterfall/stacked-profile view | `0332683` |
 
 ### PDF Analysis (Tab 6)
 | Change | Commit |
@@ -3643,6 +3644,39 @@ unrelated. `gui_documentation.md` §4 and §16 rewritten + PDF rebuilt.
 `.h5` saved under schema_version 3 (this commit) is not readable by the
 pre-redesign code the revert restores, and vice versa; there is no
 migration path between the two schemas.
+
+---
+
+### `0332683` — Batch Integrate: fix frame ordering in Batch Parallel's live waterfall/stacked-profile view (2026-08-29)
+**Effect:** In Batch Parallel mode, `BatchRunCoordinator` split the frame
+list into one contiguous chunk per worker thread and ran the chunks
+concurrently, but wired each chunk's `frame_done` signal straight through
+to its own `frame_done` — so whichever chunk finished a given frame first
+delivered it first. `WaterfallViewer.add_profile`/
+`StackedProfileViewer.add_profile` (`widgets.py`) both append purely
+positionally (row = arrival order), so the live views showed frames in
+wall-clock completion order rather than frame order whenever a later chunk
+happened to finish ahead of an earlier one — Sequential mode was unaffected
+(one thread, in-order emission). The final merged result used by Save/HDF5
+was already correctly ordered (`_on_chunk_finished` iterates chunk workers
+in dispatch order); only the incremental live display was wrong. Added
+`_on_chunk_frame`: tracks, per chunk worker, which absolute frame index its
+next `frame_done` corresponds to (`BatchWorker._iter_frames` processes a
+chunk's `frame_indices` strictly in order), buffers out-of-order arrivals,
+and re-emits `frame_done` only once frames become available in ascending
+frame-index order. Both `tab_batch.py` and `hydra_batch_page.py` consume
+the same `BatchRunCoordinator.frame_done` signal, so this single fix covers
+both the single-detector and Hydra per-panel batch pages.
+**Verified:** new unit test
+`test_batch_parallel_frame_done_reorders_out_of_completion_order`
+(simulates a fast chunk completing all its frames before a slower, earlier
+chunk reports anything; asserts `frame_done` still emits in ascending
+frame-index order). Ran `tests/test_batch_data_source.py` and
+`tests/test_hydra_batch_ui.py` per-file — all pass.
+**Files:** `midas_gui/workers.py`, `tests/test_batch_data_source.py`.
+**Roll back:** `git revert 0332683`. Self-contained; no dependents. Restores
+the wall-clock-order live display for Batch Parallel runs (final
+Save/HDF5 output was never affected).
 
 ---
 
