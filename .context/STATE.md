@@ -1,53 +1,50 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-29 (Batch Integrate: fix Batch-Parallel live
-waterfall/stacked-profile frame ordering, committed as `0332683`/`e168813`;
-see "Recently completed" below)_
+_Last updated: 2026-08-29 (Mask Builder: build masks in raw detector-space,
+fix double-transform bug, committed as `5954a57`; see "Recently completed"
+below)_
 
 ## Now working on
 
-Nothing in flight — `0332683` (Batch-Parallel frame-ordering fix) is
-committed and pushed; awaiting next task.
-
-**Uncommitted in the working tree (pre-existing, not from this session —
-left untouched, awaiting user confirmation before committing):**
-`midas_gui/dialogs.py` + `documentation/gui_documentation.md` carry an
-`ProjectContentsPicker` Analysis-section layout refinement (Single
-detector/Hydra headings, one Calibrate/Batch-Integrate row each instead of
-one grid row per panel; GUI Workspace tabs indented under "Select all").
-The doc already reflects it (§ "Last updated" + the Open Project section),
-so it reads as finished work from an earlier, uncaptured session — just
-never committed. Ask the user before committing/discarding it.
+Nothing in flight — `5954a57` (Mask Builder raw-detector-space fix +
+Open Project layout refinement) is committed and pushed; awaiting next task.
 
 ## Recently completed
 
-**2026-08-29 (`0332683`) — Batch Integrate: fix Batch-Parallel live
-waterfall/stacked-profile frame ordering.** `BatchRunCoordinator` ran each
-chunk-worker's `frame_done` straight through to the GUI; since chunks
-execute concurrently, frames arrived in wall-clock completion order rather
-than frame order whenever a later chunk finished ahead of an earlier one —
-Sequential mode was unaffected (single thread, in-order emission), and the
-final Save/HDF5 merge was already correctly ordered. Added
-`_on_chunk_frame`, which buffers each chunk's `frame_done` and re-emits in
-ascending frame-index order (each chunk's `frame_indices` is processed
-strictly in order by `BatchWorker._iter_frames`, so the coordinator can map
-arrival → absolute frame index via a per-worker counter). One shared fix —
-`tab_batch.py` and `hydra_batch_page.py` both consume the same
-`BatchRunCoordinator.frame_done` signal. **Verified:** new test
-`test_batch_parallel_frame_done_reorders_out_of_completion_order`
-(`tests/test_batch_data_source.py`); ran that file + `test_hydra_batch_ui.py`
-per-file, both pass. No GUI-visible change → `gui_documentation.md` not
-touched for this commit.
+**2026-08-29 (`5954a57`) — Mask Builder: build masks in raw detector-space,
+fix double-transform bug.** Mask Builder's own Flip Y/Flip Z/Transpose
+checkboxes (added in `068bd0d`) let a mask be built already transformed,
+which then got transformed *again* by Calibrate/Batch Integrate/Refinement
+downstream — silently misaligning the mask against the geometry whenever
+Mask Builder's checkboxes were checked to match a flipped calibration.
+Removed those checkboxes entirely: Mask Builder now always loads/previews
+raw and every mask it produces is raw detector-space, matching a file/
+folder mask loaded from disk. `MaskComputeWorker` drops its `im_trans`
+param; `azimuthal_sigma_clip` and the learnable-mask trainer each
+transform to/from world space only around their own call (their internal
+conventions differ), mapping results back to raw before combining. Data
+Viewer's composite-mask overlay (always raw) is now transformed with that
+tab's own `im_trans` codes before compositing onto its transformed
+preview. Bundled in: the `ProjectContentsPicker` Analysis-section layout
+refinement (Single detector/Hydra headings, GUI Workspace tabs indented
+under "Select all") that had been sitting uncommitted in the working tree
+from an earlier, uncaptured session — `gui_documentation.md` already
+described it as done, so it was folded into this commit rather than left
+stranded. **Files:** `tab_mask.py`, `tab_view.py`, `workers.py`,
+`dialogs.py`. **Not verified against a running GUI or test suite this
+session** — reviewed by diff/syntax-check only; no automated test covers
+the azimuthal/learnable transform-direction logic (pre-existing gap).
 
-_(Older entries — `21faaf8` Project schema redesign (`gui_workspace` +
-`analysis`) + unified Open Project dialog, `c67ad1b` multi-panel
-calibration refinement fix + persistence, `e6f2e50` Output-format/Run-mode
-popups, `a27790a` Batch Integrate cosmetic overhaul + Batch-Parallel
-workers, `ae3b665` merged Workspace+Project into one `.h5`, `af8066f` Batch
-Browse… parity, `a54f796`/`ac13797` Browse… popup (multi-file/folder/
-name-stem + polish), `101558a` Calibrate Multi-panel→downstream-integration
-feed, `ccce056` Flip-Z/Multi-panel fix — trimmed here; full detail in
+_(Older entries — `0332683` Batch-Parallel live-view frame-ordering fix,
+`21faaf8` Project schema redesign (`gui_workspace` + `analysis`) + unified
+Open Project dialog, `c67ad1b` multi-panel calibration refinement fix +
+persistence, `e6f2e50` Output-format/Run-mode popups, `a27790a` Batch
+Integrate cosmetic overhaul + Batch-Parallel workers, `ae3b665` merged
+Workspace+Project into one `.h5`, `af8066f` Batch Browse… parity,
+`a54f796`/`ac13797` Browse… popup (multi-file/folder/name-stem + polish),
+`101558a` Calibrate Multi-panel→downstream-integration feed, `ccce056`
+Flip-Z/Multi-panel fix — trimmed here; full detail in
 `documentation/development_history.md`.)_
 
 ## Open questions / blockers

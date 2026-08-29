@@ -130,6 +130,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Image origin flipped to bottom-left `(0,0)` (MIDAS convention) | `246dba7` |
 | Fix ImTransOpt propagation: azimuthal/learnable mask computations now honor the active flip via the MIDAS backend where possible | `2358ae4` |
 | A mask logged to a Project attempt is embedded only when it includes something hand-drawn/computed in Mask Builder; a file/folder-only mask is referenced by path+hash instead | `943a91d` |
+| Drop own Transforms checkboxes; always build masks in raw detector-space (Calibrate/Batch/Refinement apply ImTransOpt downstream instead) — fixes a double-transform bug | `5954a57` |
 
 ### Calibrate (Tab 2) / Refinement (Tab 3)
 | Change | Commit |
@@ -216,6 +217,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Browse… popup polish: folder/file-path display (not a count), project-root default dir, wider name column | `a54f796` |
 | Merge Workspace (JSON) and FAIR Project (HDF5) into one `.h5` Project file; File menu collapses to Save/Save As/Open Project | `ae3b665` |
 | Project schema redesign (clean cutover, no back-compat): `/gui_workspace` per-tab groups + `/analysis/{mask,calibrate,integrate}` FAIR history; Mask Builder gets `/analysis/mask` provenance + "Log to Project"; unified Open Project dialog (browse + live checkbox-tree preview) replaces the old Yes/No + separate attempt-picker flow | `21faaf8` |
+| Open Project dialog's Analysis section groups Calibrate/Batch Integrate rows under Single detector/Hydra headings instead of one grid row per panel; GUI Workspace tab list indented under Select all | `5954a57` |
 
 ### Stability / performance / consistency (review-driven, phases 1–3)
 | Change | Commit |
@@ -3677,6 +3679,52 @@ frame-index order). Ran `tests/test_batch_data_source.py` and
 **Roll back:** `git revert 0332683`. Self-contained; no dependents. Restores
 the wall-clock-order live display for Batch Parallel runs (final
 Save/HDF5 output was never affected).
+
+---
+
+### `5954a57` — Mask Builder: build masks in raw detector-space, fix double-transform bug (2026-08-29)
+**Effect:** Mask Builder previously had its own Flip Y/Flip Z/Transpose
+checkboxes (`068bd0d`) and applied them to the loaded image before masking,
+so a mask built there could already be in transformed/world orientation.
+Downstream tabs (Calibrate, Batch Integrate, Refinement) then apply the
+active calibration's `ImTransOpt` to whatever mask is handed to them —
+producing a silent double-transform whenever Mask Builder's own checkboxes
+were checked to match a flipped calibration, landing the mask back in raw
+orientation misaligned against the transformed geometry. Removed Mask
+Builder's Transforms checkboxes entirely: the tab now always loads/previews
+the image as stored on disk and every mask it produces (threshold,
+statistical, spike, cosmic-ray, azimuthal, learnable, hand-drawn) is always
+raw detector-space, exactly like a file/folder mask loaded from disk.
+`MaskComputeWorker` drops its `im_trans` param; the stack loader no longer
+pre-transforms frames. The two calibration-aware methods each transform
+around their own call instead, since `azimuthal_sigma_clip` and
+`integrate_with_corrections`'s internal `apply_trans_opt` have opposite
+input-orientation conventions: `azimuthal_sigma_clip` gets a transformed
+copy of the image built just for that call, with its output mask mapped
+back to raw before combining; the learnable-mask trainer keeps `self._image`
+raw (matching `integrate_with_corrections`'s own internal flip) but must
+transform the running `combined` prior mask into world space first, since
+the learnable weights are trained/applied post-flip. Data Viewer's
+composite-mask overlay (`MaskLoader.composite_mask()`, always raw) is now
+transformed with the tab's own `im_trans` codes before compositing onto the
+tab's transformed preview image, so overlays still align when Data
+Viewer's own Transforms checkboxes are active. Bundled in the same commit:
+Open Project dialog's `ProjectContentsPicker` Analysis section now groups
+Calibrate/Batch Integrate rows under **Single detector**/**Hydra**
+headings (one row each) instead of one grid row per panel, and the GUI
+Workspace tab checkboxes are indented under **Select all** to show it
+isn't a tab itself — an unrelated layout refinement left uncommitted from
+an earlier session, folded in here since `gui_documentation.md` already
+described it as done.
+**Verified:** manual review of the diff; no automated test covers the
+azimuthal/learnable transform-direction logic (pre-existing gap, not
+introduced by this change).
+**Files:** `midas_gui/tab_mask.py`, `midas_gui/tab_view.py`,
+`midas_gui/workers.py`, `midas_gui/dialogs.py`.
+**Roll back:** `git revert 5954a57`. Self-contained; restores Mask
+Builder's own Transforms checkboxes and the pre-refinement Open Project
+Analysis grid layout. Re-introduces the double-transform bug this commit
+fixes.
 
 ---
 
