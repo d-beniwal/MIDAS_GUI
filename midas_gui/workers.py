@@ -330,15 +330,14 @@ class MaskComputeWorker(QtCore.QThread):
     failed   = QtCore.pyqtSignal(str)
 
     def __init__(self, image, base_mask, methods, *, stack_paths=None,
-                 stack_hdf5=None, calib_result=None, im_trans=None, parent=None):
+                 stack_hdf5=None, calib_result=None, parent=None):
         super().__init__(parent)
-        self._image = image
+        self._image = image              # always raw detector-space
         self._base = base_mask
         self._methods = methods          # dict of {name: params or False}
         self._stack_paths = stack_paths
         self._stack_hdf5 = stack_hdf5    # (path, dataset, stride) for a 3-D HDF5 stack
         self._result = calib_result
-        self._im_trans = tuple(im_trans or ())   # applied per-frame to the stack source
 
     def run(self):
         try:
@@ -370,15 +369,11 @@ class MaskComputeWorker(QtCore.QThread):
                             raise ValueError(
                                 f"HDF5 dataset '{dset}' is {ds.ndim}-D; need a 2-D image "
                                 "or a 3-D (time, y, x) sequence.")
-                    if self._im_trans:
-                        stack = np.stack(
-                            [_apply_im_trans(f, self._im_trans) for f in stack], axis=0)
                     self.progress.emit(f"HDF5 stack: {stack.shape[0]} frame(s) "
                                        f"of {stack.shape[1]}×{stack.shape[2]}")
                 elif self._stack_paths:
                     self.progress.emit(f"Loading {len(self._stack_paths)} frames…")
-                    frames = [_apply_im_trans(_load_image(p).astype(np.float32), self._im_trans)
-                              for p in self._stack_paths]
+                    frames = [_load_image(p).astype(np.float32) for p in self._stack_paths]
                     stack = np.stack(frames, axis=0)
 
             # Statistical auto-mask: spatial outlier and temporal constancy are
@@ -445,34 +440,41 @@ class MaskComputeWorker(QtCore.QThread):
             azim = self._methods.get("azimuthal")
             if azim and self._result is not None:
                 self.progress.emit("Azimuthal σ-clip…")
-                from midas_gui.helpers import _build_spec
+                from midas_gui.helpers import _build_spec, _apply_im_trans
                 spec = _build_spec(self._result, 2.0, 5.0)
                 geom = m.HardBinGeometry.from_spec(spec)   # needs per-pixel bins
+                im_trans = tuple(getattr(self._result, "im_trans", ()) or ())
                 # azimuthal_sigma_clip has no apply_trans_opt hook — it needs the
-                # image already in the geometry's transformed/world orientation,
-                # which self._image already is (Mask Builder's Transforms preview).
+                # image in the geometry's transformed/world orientation. self._image
+                # is raw, so transform it just for this call, then transform the
+                # resulting mask back to raw before combining it with `combined`.
+                img_xf = _apply_im_trans(self._image, im_trans) if im_trans else self._image
                 _, am = m.azimuthal_sigma_clip(
-                    self._image.astype(np.float64), geom, n_sigma=azim["n_sigma"])
-                combined |= am.astype(bool)
-                parts.append(f"azimuthal: {int(am.sum()):,}")
+                    img_xf.astype(np.float64), geom, n_sigma=azim["n_sigma"])
+                am_raw = (_apply_im_trans(am.astype(np.uint8), tuple(reversed(im_trans))).astype(bool)
+                          if im_trans else am.astype(bool))
+                combined |= am_raw
+                parts.append(f"azimuthal: {int(am_raw.sum()):,}")
 
             # Learnable mask (needs geometry; differentiable training)
             learn = self._methods.get("learnable")
             if learn and self._result is not None:
                 self.progress.emit("Learnable mask training…")
-                from midas_gui.helpers import _build_spec
+                from midas_gui.helpers import _build_spec, _apply_im_trans
                 spec = _build_spec(self._result, 2.0, 5.0)
-                NZ, NY = self._image.shape
-                static_t = torch.from_numpy(combined.astype(bool))
+                im_trans = tuple(getattr(self._result, "im_trans", ()) or ())
+                # integrate_with_corrections flips internally (apply_trans_opt=True,
+                # via spec.TransOpt) and applies the learnable-mask weights *after*
+                # that flip, i.e. in transformed/world space — so self._image (raw)
+                # is passed through untouched, but the mask's shape/static prior
+                # must be built from a transformed copy of the running `combined`.
+                combined_xf = (_apply_im_trans(combined.astype(np.uint8), im_trans).astype(bool)
+                               if im_trans else combined)
+                NZ, NY = combined_xf.shape
+                static_t = torch.from_numpy(combined_xf)
                 lm = m.LearnableMask(NZ, NY, init_weight=float(learn.get("init_weight", 0.9)),
                                      static_mask=static_t)
-                # integrate_with_corrections DOES flip internally (apply_trans_opt=
-                # True, via spec.TransOpt) — so unlike azimuthal_sigma_clip above,
-                # this one wants self._image reverted back to raw first.
-                im_trans = tuple(self._im_trans)
-                raw_image = (_apply_im_trans(self._image, tuple(reversed(im_trans)))
-                             if im_trans else self._image)
-                img_t = torch.from_numpy(raw_image.astype(np.float64))
+                img_t = torch.from_numpy(self._image.astype(np.float64))
                 loss_fn = m.EtaUniformityLoss(intensity_floor=0.0)
                 opt = torch.optim.Adam(lm.parameters(), lr=float(learn.get("lr", 0.5)))
                 n_steps = int(learn.get("n_steps", 300))
@@ -487,9 +489,11 @@ class MaskComputeWorker(QtCore.QThread):
                             nlow = lm.n_low_weight_pixels(0.5)
                         self.progress.emit(f"Learnable step {step+1}/{n_steps}  "
                                            f"loss={float(loss.detach()):.4g}  masked≈{nlow:,}")
-                hard = lm.extract_hard_mask(threshold=0.5)
-                combined |= np.asarray(hard).astype(bool)
-                parts.append(f"learnable: {int(np.asarray(hard).sum()):,}")
+                hard = np.asarray(lm.extract_hard_mask(threshold=0.5)).astype(bool)
+                hard_raw = (_apply_im_trans(hard.astype(np.uint8), tuple(reversed(im_trans))).astype(bool)
+                            if im_trans else hard)
+                combined |= hard_raw
+                parts.append(f"learnable: {int(hard_raw.sum()):,}")
 
             out = combined.astype(np.uint8)
             n = int(out.sum())

@@ -287,40 +287,64 @@ class ProjectContentsPicker(QtWidgets.QWidget):
             select_all = QtWidgets.QCheckBox("Select all")
             select_all.setChecked(True)
             v.addWidget(select_all)
+            tabs_layout = QtWidgets.QVBoxLayout()
+            tabs_layout.setContentsMargins(20, 0, 0, 0)
+            tabs_layout.setSpacing(4)
             for name in tabs:
                 cb = QtWidgets.QCheckBox(name)
                 cb.setChecked(True)
                 self._workspace_checks[name] = cb
-                v.addWidget(cb)
+                tabs_layout.addWidget(cb)
+            v.addLayout(tabs_layout)
             select_all.toggled.connect(
                 lambda checked: [cb.setChecked(checked) for cb in self._workspace_checks.values()])
             self._content_layout.addWidget(box)
 
         if mask_attempts or calib_by_panel or integrate_by_panel:
             box = QtWidgets.QGroupBox("Analysis")
-            grid = QtWidgets.QGridLayout(box)
-            grid.setHorizontalSpacing(12); grid.setVerticalSpacing(6)
-            r = 0
+            outer_v = QtWidgets.QVBoxLayout(box)
+            outer_v.setSpacing(10)
+
             if mask_attempts:
-                grid.addWidget(QtWidgets.QLabel("Mask"), r, 0)
-                self._mask_row = self._attempt_cell(grid, r, 1, mask_attempts, span=2)
-                r += 1
-            if calib_by_panel or integrate_by_panel:
-                grid.addWidget(QtWidgets.QLabel("<b>Panel</b>"), r, 0)
-                grid.addWidget(QtWidgets.QLabel("<b>Calibrate</b>"), r, 1)
-                grid.addWidget(QtWidgets.QLabel("<b>Batch Integrate</b>"), r, 2)
-                r += 1
-                for panel_key in panels:
+                grid = QtWidgets.QGridLayout()
+                grid.setHorizontalSpacing(12); grid.setVerticalSpacing(6)
+                grid.addWidget(QtWidgets.QLabel("Mask"), 0, 0)
+                self._mask_row = self._attempt_cell(grid, 0, 1, mask_attempts)
+                outer_v.addLayout(grid)
+
+            single_panels = [p for p in panels if p == "single"]
+            hydra_panels = [p for p in panels if p != "single"]
+
+            def add_panel_group(title, group_panels):
+                if not any(calib_by_panel.get(p) or integrate_by_panel.get(p) for p in group_panels):
+                    return
+                outer_v.addWidget(QtWidgets.QLabel(f"<b>{title}</b>"))
+                grid = QtWidgets.QGridLayout()
+                grid.setContentsMargins(16, 0, 0, 0)
+                grid.setHorizontalSpacing(12); grid.setVerticalSpacing(4)
+                r = 0
+                for panel_key in group_panels:
                     calib_attempts = calib_by_panel.get(panel_key)
                     integrate_attempts = integrate_by_panel.get(panel_key)
                     if not calib_attempts and not integrate_attempts:
                         continue
-                    grid.addWidget(QtWidgets.QLabel(_PANEL_LABELS.get(panel_key, panel_key)), r, 0)
+                    if len(group_panels) > 1:
+                        grid.addWidget(QtWidgets.QLabel(f"<i>{_PANEL_LABELS.get(panel_key, panel_key)}</i>"),
+                                       r, 0, 1, 2)
+                        r += 1
                     if calib_attempts:
+                        grid.addWidget(QtWidgets.QLabel("Calibrate"), r, 0)
                         self._calib_rows[panel_key] = self._attempt_cell(grid, r, 1, calib_attempts)
+                        r += 1
                     if integrate_attempts:
-                        self._integrate_rows[panel_key] = self._attempt_cell(grid, r, 2, integrate_attempts)
-                    r += 1
+                        grid.addWidget(QtWidgets.QLabel("Batch Integrate"), r, 0)
+                        self._integrate_rows[panel_key] = self._attempt_cell(grid, r, 1, integrate_attempts)
+                        r += 1
+                outer_v.addLayout(grid)
+
+            add_panel_group("Single detector", single_panels)
+            add_panel_group("Hydra", hydra_panels)
+
             self._content_layout.addWidget(box)
 
         return True

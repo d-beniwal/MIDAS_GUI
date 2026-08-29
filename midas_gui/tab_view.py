@@ -711,8 +711,13 @@ class DataViewerTab(QtWidgets.QWidget):
         if im is not None:
             parts.append(im)
         cm = self._loader.composite_mask()
-        if cm is not None and cm.shape == img.shape:
-            parts.append(cm != 0)
+        if cm is not None:
+            # composite_mask() is always raw detector-space; `img` (self._cur)
+            # is shown in this tab's own transformed orientation — align them.
+            codes = self._im_trans_codes()
+            cm = _apply_im_trans(cm, codes) if codes else cm
+            if cm.shape == img.shape:
+                parts.append(cm != 0)
         if not parts:
             return None
         out = parts[0]

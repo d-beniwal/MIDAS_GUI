@@ -3,9 +3,25 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-29 (Project `.h5` schema redesign — `gui_workspace`
-(modular, per-tab) + `analysis` (mask/calibrate/integrate FAIR history) — and
-a unified Open Project dialog; see §16 for full detail. Summary:
+**Last updated:** 2026-08-29 (Mask Builder no longer has its own
+Flip Y/Flip Z/Transpose **Transforms** checkboxes — see §4. Masks it produces
+are now always in raw detector-space, exactly like a file/folder mask loaded
+from disk; Calibrate/Batch Integrate/Refinement apply the active
+calibration's `ImTransOpt` to the mask themselves at the same point they
+transform (or hand off to the backend to transform) the image it pairs with.
+This closes a latent coordinate-frame bug where a mask built with a flip
+selected in Mask Builder could be transformed a second time downstream,
+silently landing it back in raw orientation misaligned against the
+transformed geometry.)
+
+**Previously:** (2026-08-29, Open Project checkbox-tree preview: **Analysis**
+now lists **Single detector**/**Hydra** headings with one **Calibrate** row
+and one **Batch Integrate** row each, instead of cramming both into one grid
+row per panel; **GUI Workspace** tabs are now indented under **Select all**
+to show it isn't a tab itself. See §16 for full detail. Also: Project `.h5`
+schema redesign — `gui_workspace` (modular, per-tab) + `analysis` (mask/
+calibrate/integrate FAIR history) — and a unified Open Project dialog.
+Summary:
 - **Breaking schema change (clean cutover, `schema_version` 2 → 3):** the old
   single `/workspace` blob is replaced by `/gui_workspace/<tab name>/...`,
   one independently-readable/restorable group per tab; the old
@@ -686,11 +702,11 @@ matching MIDAS's own convention: the on-screen image then matches the
 physical world view of the detector when looking downstream from the
 sample along the beam direction. This is a display-only convention,
 separate from the **Transforms** (Flip Y / Flip Z / Transpose) checkboxes
-found in Data Viewer, Mask Builder, and Calibrate — those still flip or
-transpose the underlying pixel *data* itself (persisted as MIDAS's
-`ImTransOpt` in saved calibration files) to correct a detector's raw
-readout orientation, independent of which corner the GUI renders as the
-origin.
+found in Data Viewer and Calibrate — those still flip or transpose the
+underlying pixel *data* itself (persisted as MIDAS's `ImTransOpt` in saved
+calibration files) to correct a detector's raw readout orientation,
+independent of which corner the GUI renders as the origin. Mask Builder has
+no Transforms checkboxes of its own — see §4.
 
 **Layout pattern.** The four analysis tabs — **0 Data Viewer, 2 Calibrate, 3 Calib.
 Refinement, 4 Batch Integrate** — use a **three-panel layout**:
@@ -981,8 +997,9 @@ radial integration — in that fixed order (flips, then transpose). Use this
 when the detector's raw pixel orientation doesn't match the geometry model
 (e.g. the beam centre would otherwise land on the wrong side of the image).
 Toggling refreshes the current frame (or the active projection) immediately.
-The same three checkboxes appear on the Mask Builder and Calibrate tabs and
-stay in sync whenever geometry is pushed/pulled between tabs; saved/loaded
+The same three checkboxes appear on the Calibrate tab and stay in sync
+whenever geometry is pushed/pulled between tabs (Mask Builder has no
+Transforms checkboxes of its own — see §4); saved/loaded
 calibration files (`.json`/`.txt`) round-trip the codes as MIDAS's repeatable
 `ImTransOpt <code>` paramstest key (1=Flip Y, 2=Flip Z, 3=Transpose). In
 Hydra mode, GE1-4's Transforms cards also carry the per-panel-only **Rotate**
@@ -1331,13 +1348,16 @@ field then shows the files' shared parent folder (or the one file's own
 path if only a single file was picked; hover for the full file list) and
 the stride still applies to the chosen list.
 
-**Transforms: Flip Y / Flip Z / Transpose** (below the Image field) apply
-MIDAS's `ImTransOpt` image transform to every frame this tab loads — the
-single preview image and every frame of the Section 2 statistical stack
-source alike — before any masking runs, in the fixed Flip Y → Flip Z →
-Transpose order. Receiving a calibration from Tab 2 (Section 4) pre-checks
-these to match the Calibrate tab's own Transforms state (still overridable
-here). Same codes/semantics as the Data Viewer and Calibrate tabs.
+**No Transforms row.** Unlike Data Viewer and Calibrate, this tab has no
+Flip Y/Flip Z/Transpose checkboxes of its own — the image is always loaded
+and previewed exactly as stored on disk, and every mask this tab produces
+(threshold, statistical, spike, cosmic-ray, azimuthal, learnable, and
+hand-drawn shapes alike) is therefore always in **raw detector-space**,
+matching a file/folder mask loaded from disk. Tabs 2/3/4/5 apply the active
+calibration's own `ImTransOpt` to the mask automatically, at the same point
+they transform (or hand off to the backend to transform) the image it pairs
+with — so a mask built here never needs to be flipped by hand to match a
+flipped calibration.
 
 ### Section 1 · Threshold mask (always applied)
 `pixel ≤ lower | pixel > upper`. The upper bound auto-fills from the data type on load
@@ -1501,7 +1521,7 @@ off the loaded anchor panel file and applies to the shared λ/pixel fields.)
 The **Detector & Calibrant** card sets λ, pixel size(s) and detector transforms
 (**Flip Y / Flip Z / Transpose** — MIDAS's `ImTransOpt`, in that fixed order).
 Toggling a Transforms checkbox live-updates the image preview immediately, the
-same way Data Viewer and Mask Builder do; Pick BC / Pick Ring clicks are read
+same way Data Viewer does; Pick BC / Pick Ring clicks are read
 straight off that (transformed) preview, so the seed beam centre always lands
 in the same coordinate space the fit will actually run in. The calibration run
 itself applies the identical transform (to the calibrant image and to Dark) right
@@ -2613,18 +2633,21 @@ no separate tool is required to inspect what a project contains.
 choose what to restore — nothing happens until you click **Open** on the
 checked selection. The tree has two parts, matching the file's two headers:
 
-- **GUI Workspace** — one checkbox per tab that has a saved snapshot in this
-  project (plus a **Select all** convenience toggle). Checking a tab
-  restores its fields exactly as **File ▸ Save Project** left them,
-  including its sidecars (see above) — unchecking a tab leaves it exactly
-  as it currently is.
+- **GUI Workspace** — a **Select all** convenience toggle above a slightly
+  indented list of one checkbox per tab that has a saved snapshot in this
+  project, the indent making clear "Select all" is the toggle, not a tab of
+  its own. Checking a tab restores its fields exactly as **File ▸ Save
+  Project** left them, including its sidecars (see above) — unchecking a
+  tab leaves it exactly as it currently is.
 - **Analysis** — a **Mask** row (checkbox + a picker over every recorded
-  mask attempt, defaulting to the latest) and a **Calibrate**/**Batch
-  Integrate** grid, one row per panel found in the file (**Single
-  detector**, or each of **ge1**–**ge4** present in Hydra mode), each with
-  its own checkbox + attempt picker (older attempts stay selectable if the
-  project has more than one). A checkbox is disabled if that panel/kind has
-  no recorded attempt. (The Hydra **Overall** composite attempt has no
+  mask attempt, defaulting to the latest), then one heading per detector
+  group actually present in the file — **Single detector** and/or **Hydra**
+  — each followed by its own indented **Calibrate** and **Batch Integrate**
+  rows (Hydra additionally labels each row with its panel, **ge1**–**ge4**,
+  since a Hydra project can have more than one), every row its own
+  checkbox + attempt picker (older attempts stay selectable if the project
+  has more than one). Only panel/kind combinations with a recorded attempt
+  appear at all. (The Hydra **Overall** composite attempt has no
   corresponding tab to restore into, so it never appears here — it's still
   fully visible, read-only, via **File ▸ Project History…**.)
 

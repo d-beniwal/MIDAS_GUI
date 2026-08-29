@@ -18,7 +18,6 @@ from midas_gui.helpers import (_load_image, _fspin, _NoScrollSpinBox, _browse, i
                                _NoScrollComboBox, list_h5_datasets,
                                widgets_to_dict, apply_dict_to_widgets,
                                new_temp_h5_path, save_stack_h5,
-                               _apply_im_trans, im_trans_codes_from_checkboxes,
                                display_text_for_paths)
 from midas_gui.widgets import ImageViewer
 from midas_gui.dialogs import show_error
@@ -85,16 +84,9 @@ class MaskTab(QtWidgets.QWidget):
             self._geom_group.setEnabled(True)
             self._geom_note.setText(
                 f"Calibration available (Lsd={result.Lsd/1000:.2f} mm) — "
-                "azimuthal & learnable masks enabled.")
-            im_trans = getattr(result, "im_trans", None)
-            if im_trans is not None:
-                self._flip_y.setChecked(1 in im_trans)
-                self._flip_z.setChecked(2 in im_trans)
-                self._transp.setChecked(3 in im_trans)
-
-    def _im_trans_codes(self) -> list:
-        """Ordered MIDAS ImTransOpt codes from the Transforms checkboxes."""
-        return im_trans_codes_from_checkboxes(self._flip_y, self._flip_z, self._transp)
+                "azimuthal & learnable masks enabled. The mask is always built "
+                "against the raw detector image — Calibrate/Batch/Integrate apply "
+                "the calibration's own ImTransOpt to it automatically.")
 
     def _build_ui(self):
         root = QtWidgets.QHBoxLayout(self)
@@ -136,17 +128,6 @@ class MaskTab(QtWidgets.QWidget):
         ds = QtWidgets.QHBoxLayout(); ds.setSpacing(4)
         ds.addWidget(self._h5loc_lbl); ds.addWidget(self._h5loc_edit, 1)
         img.body.addLayout(ds)
-        self._flip_y = QtWidgets.QCheckBox("Flip Y"); self._flip_z = QtWidgets.QCheckBox("Flip Z")
-        self._transp = QtWidgets.QCheckBox("Transpose")
-        self._flip_y.setToolTip(
-            "MIDAS ImTransOpt image transform, applied to the raw detector\n"
-            "image before masking (matches the Calibrate/Data Viewer tabs).")
-        tb_trans = QtWidgets.QHBoxLayout(); tb_trans.setSpacing(8)
-        tb_trans.addWidget(self._flip_y); tb_trans.addWidget(self._flip_z)
-        tb_trans.addWidget(self._transp); tb_trans.addStretch(1)
-        img.body.addWidget(S.LabelRight("Transforms:")); img.body.addLayout(tb_trans)
-        for cb in (self._flip_y, self._flip_z, self._transp):
-            cb.toggled.connect(lambda _=False: self._image is not None and self._load_image())
         self._img_edit.textChanged.connect(self._on_img_path_changed)
         self._img_edit.returnPressed.connect(self._load_image)
         self._h5loc_edit.currentIndexChanged.connect(
@@ -564,7 +545,7 @@ class MaskTab(QtWidgets.QWidget):
             raw = tifffile.imread(path) if Path(path).suffix.lower() in (".tif", ".tiff") \
                   else _load_image(path, data_loc=data_loc)
             self._orig_dtype = raw.dtype
-            self._image = _apply_im_trans(raw.astype(np.float32), self._im_trans_codes())
+            self._image = raw.astype(np.float32)
             sentinel = _SENTINELS.get(np.dtype(raw.dtype).name)
             if sentinel is not None:
                 self._upper.setValue(float(sentinel))
@@ -623,7 +604,7 @@ class MaskTab(QtWidgets.QWidget):
         self._mask_worker = MaskComputeWorker(
             self._image, thresh_mask, methods,
             stack_paths=stack_paths, stack_hdf5=stack_hdf5,
-            calib_result=self._calib_result, im_trans=self._im_trans_codes(), parent=self)
+            calib_result=self._calib_result, parent=self)
         self._mask_worker.progress.connect(self._stat_prog.setText)
         self._mask_worker.finished.connect(self._on_mask_done)
         self._mask_worker.failed.connect(self._on_stat_fail)
@@ -1056,9 +1037,6 @@ class MaskTab(QtWidgets.QWidget):
         return {
             "img_path": self._img_edit,
             "h5_dataset": self._h5loc_edit,
-            "flip_y": self._flip_y,
-            "flip_z": self._flip_z,
-            "transp": self._transp,
             "lower": self._lower,
             "upper": self._upper,
             "spatial_check": self._spatial_check,
