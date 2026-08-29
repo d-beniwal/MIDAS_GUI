@@ -246,6 +246,8 @@ def _attach_panel_result(result, panel_u: dict, panel_layout: Optional[dict],
         fd, tmp = tempfile.mkstemp(suffix="_panel_shifts.txt")
         os.close(fd)
         path = Path(tmp)
+        print(f"[calibrate] panel shifts written to a temporary file ({path}) — "
+              f"Save .json / Save paramstest, or set an Output folder, to keep them.")
     write_panel_shifts_file(panel_u, path)
     result.panel_layout = dict(panel_layout)
     result.panel_shifts_path = str(path)
@@ -289,9 +291,14 @@ def normalize_result(raw, mode: str, *, NY, NZ, pxY, pxZ, wavelength,
         pv = raw.result
         strain = (pv.history[-1].mean_strain_uE
                   if getattr(pv, "history", None) else None)
-        return _auto_result_from_unpacked(
+        result = _auto_result_from_unpacked(
             pv.unpacked, NY=NY, NZ=NZ, pxY=pxY, pxZ=pxZ,
             wavelength=wavelength, strain=strain)
+        panel_u = _extract_panel_unpacked(pv.unpacked)
+        if panel_u:
+            result._panel_unpacked = panel_u
+            _attach_panel_result(result, panel_u, panel_layout, output_dir)
+        return result
 
     if effective_mode == "four_stage":
         pv = raw.stage2   # final geometry stage (PVCalibrationResult)
@@ -377,8 +384,9 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
                 seed, wavelength=wavelength, pxY=pxY, pxZ=pxZ, calibrant=calibrant,
                 NY=pNY, NZ=pNZ, refine=refine, n_iter=n_iter, device=device)
             from midas_calibrate_v2.pipelines import autocalibrate_four_stage
-            return autocalibrate_four_stage(v1, img, dark=dk, device=device,
-                                            panel_layout=panel_layout, verbose=True)
+            return autocalibrate_four_stage(
+                v1, img, dark=dk, device=device, panel_layout=panel_layout,
+                spec=_panel_spec(v1, panel_layout), verbose=True)
 
         coeffs = _distortion_coeffs(refine)
         if refine.get("Distortion", True) and coeffs and coeffs != set(DISTORTION_NAMES):
@@ -454,6 +462,10 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
             lsd_initial_guess_um=(manual["Lsd"] if manual else DEFAULT_LSD_UM),
             bc_initial_guess=((manual["BC_y"], manual["BC_z"]) if manual else None),
             dark=dark,
+            # first_time_calibrate registers + refines panel shifts correctly
+            # on its own (unlike four_stage/bayesian/joint below, which need
+            # an explicit panel-aware spec) — it just needs the layout passed.
+            panel_layout=panel_layout,
         )
 
     if mode == "four_stage":
@@ -471,19 +483,23 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
         v1 = build_v1_params(
             seed, wavelength=wavelength, pxY=pxY, pxZ=pxZ, calibrant=calibrant,
             NY=pNY, NZ=pNZ, refine=refine, n_iter=n_iter, device=device)
+        spec = _panel_spec(v1, panel_layout) if panel_layout is not None else None
         return autocalibrate_four_stage(v1, img, dark=dk, device=device,
-                                        panel_layout=panel_layout, verbose=True)
+                                        panel_layout=panel_layout, spec=spec,
+                                        verbose=True)
 
     if mode in ("bayesian", "joint"):
         img, dk, pNY, pNZ = _prep_transformed(image, dark, im_trans)
         v1 = _seed_and_v1(img, wavelength, pxY, pxZ, calibrant, pNY, pNZ,
                           refine, n_iter, device, manual)
+        spec = _panel_spec(v1, panel_layout) if panel_layout is not None else None
         if mode == "bayesian":
             from midas_calibrate_v2.pipelines import autocalibrate_bayesian
             return autocalibrate_bayesian(v1, img, mode="laplace", dark=dk,
-                                          panel_layout=panel_layout)
+                                          panel_layout=panel_layout, spec=spec)
         from midas_calibrate_v2.pipelines import autocalibrate_joint
-        return autocalibrate_joint(v1, img, dark=dk, panel_layout=panel_layout)
+        return autocalibrate_joint(v1, img, dark=dk, panel_layout=panel_layout,
+                                   spec=spec)
 
     raise ValueError(f"Unknown pipeline mode: {mode}")
 
@@ -518,3 +534,26 @@ def _build_panel_layout(cfg):
         int(cfg["n_y"]), int(cfg["n_z"]),
         int(cfg["sy"]), int(cfg["sz"]),
         gap_y=int(cfg.get("gap_y", 0)), gap_z=int(cfg.get("gap_z", 0)))
+
+
+def _panel_spec(v1_params, panel_layout):
+    """A CalibrationSpec with per-panel rigid-shift parameters
+    (panel_delta_yz/panel_delta_theta) registered as refinable.
+
+    autocalibrate_four_stage/_bayesian/_joint build their own spec via
+    spec_from_v1_params() when none is passed, which never registers panel
+    parameters — panel_layout alone only affects the FIXED forward
+    projection (which panel a pixel belongs to), never what gets refined.
+    Passing this spec in makes their existing freeze/thaw/refined-parameter
+    logic (four_stage's own Stage 1/2 split in particular) actually include
+    the panel shift. Tolerances mirror midas_calibrate_v2.calibrate()'s own
+    panel_mode="shift" defaults (panel_tol_shift_px=3.0,
+    panel_tol_rot_deg=1.0) — the one place in the installed package that
+    already does per-panel rigid-shift refinement correctly.
+    """
+    from midas_calibrate_v2.compat.from_v1 import (
+        spec_from_v1_params, add_panel_parameters)
+    spec = spec_from_v1_params(v1_params)
+    add_panel_parameters(spec, panel_layout.n_panels(),
+                         tol_shift_px=3.0, tol_rot_deg=1.0)
+    return spec

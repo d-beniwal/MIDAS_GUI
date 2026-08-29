@@ -1,5 +1,6 @@
 """Pure-logic tests for midas_gui.project (no Qt needed)."""
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import h5py
@@ -154,6 +155,57 @@ def test_append_calibration_attempt_numbering_and_filtering(tmp_path):
         att2 = grp["attempt_0002"]
         # File-backed mask (mask_is_file_backed=True) -> path+hash only, never embedded.
         assert "mask" not in att2
+
+
+def test_calibration_attempt_embeds_and_materializes_panel_shifts(tmp_path):
+    path = str(tmp_path / "proj.h5")
+    project.create_project(path)
+    panel_u = {
+        "panel_delta_yz": np.array([[0.1, -0.2], [0.3, 0.4]]),
+        "panel_delta_theta": np.array([0.001, -0.002]),
+        "panel_delta_lsd": np.array([1.5, -1.5]),
+        "panel_delta_p2": np.array([0.0, 0.0]),
+    }
+    result = _fake_result(_panel_unpacked=panel_u,
+                           panel_layout={"n_y": 1, "n_z": 2, "sy": 100, "sz": 100})
+    ref = project.append_calibration_attempt(
+        path, "single", cfg={"mode": "four_stage", "calibrant": "CeO2"},
+        result=result, loader_state={})
+
+    with h5py.File(path, "r") as f:
+        att = f[ref.lstrip("/")]
+        meta = json.loads(att["metadata"][()])
+        assert meta["panel_shifts_embedded"] is True
+        assert "panel_shifts" in att
+
+    arr = project.read_calib_attempt_panel_shifts(path, ref)
+    assert arr.shape == (2, 6)
+    assert list(arr[:, 0]) == [0, 1]           # panel_id
+    assert arr[0, 1] == pytest.approx(0.1)     # dy
+    assert arr[1, 4] == pytest.approx(-1.5)    # dlsd
+
+    ps_path = project.materialize_panel_shifts(path, ref, arr)
+    ps_file = Path(ps_path)
+    assert ps_file.is_file()
+    assert ps_file.parent == Path(path).with_name(Path(path).stem + "_panel_shifts")
+    assert ps_file.name == f"{ref.rsplit('/', 1)[-1]}_panelshifts.txt"
+    lines = ps_file.read_text().splitlines()
+    assert len(lines) == 2
+    assert lines[0].split()[0] == "0"
+    assert lines[1].split()[0] == "1"
+
+
+def test_read_calib_attempt_panel_shifts_none_when_absent(tmp_path):
+    path = str(tmp_path / "proj.h5")
+    project.create_project(path)
+    ref = project.append_calibration_attempt(
+        path, "single", cfg={"mode": "one_shot"}, result=_fake_result(),
+        loader_state={})
+    with h5py.File(path, "r") as f:
+        meta = json.loads(f[ref.lstrip("/")]["metadata"][()])
+        assert meta["panel_shifts_embedded"] is False
+    assert project.read_calib_attempt_panel_shifts(path, ref) is None
+    assert project.materialize_panel_shifts(path, ref, None) is None
 
 
 def test_append_integration_attempt_embeds_profiles_and_links_calibration(tmp_path):

@@ -1106,9 +1106,36 @@ class CalibrationTab(QtWidgets.QWidget):
         d = {k: v for k, v in vars(self._result).items()
              if not k.startswith("_") and not hasattr(v, "numpy")}
         d.pop("residual_corr_map", None); d.pop("iter_history", None)
+        panel_u = getattr(self._result, "_panel_unpacked", None)
+        ps_note = ""
+        if panel_u and d.get("panel_layout"):
+            # Re-write the shifts sidecar next to wherever this JSON actually
+            # lands — d["panel_shifts_path"] may still point at the tempfile
+            # calib._attach_panel_result fell back to when no Output folder
+            # was set during Fit, which is not guaranteed to persist or to
+            # travel with this file. Same convention as MIDAS's own
+            # write_v1_paramstest: <stem>_panelshifts.txt beside the file
+            # that describes the instrument. Best-effort: a result restored
+            # from a project attempt carries a JSON round-tripped (string,
+            # not tensor) ``_panel_unpacked``, which this can't rewrite from
+            # — fall back to whatever panel_shifts_path is already on the
+            # result (already resolved to a real file by the project-open
+            # flow in that case) rather than failing the whole save.
+            try:
+                from midas_calibrate_v2.compat.to_v1 import write_panel_shifts_file
+                ps_path = Path(path).with_name(Path(path).stem + "_panelshifts.txt")
+                write_panel_shifts_file(panel_u, ps_path)
+                d["panel_shifts_path"] = str(ps_path)
+                ps_note = f"\npanel shifts saved: {ps_path}"
+                self._log.append(f"Panel shifts saved: {ps_path}")
+            except Exception:
+                import traceback
+                self._log.append(f"Panel shifts save error (kept existing "
+                                  f"panel_shifts_path):\n{traceback.format_exc()}")
         Path(path).write_text(json.dumps(d, indent=2, default=str))
         self._log.append(f"Saved: {path}")
-        QtWidgets.QMessageBox.information(self, "Saved", f"calibration.json saved:\n{path}")
+        QtWidgets.QMessageBox.information(
+            self, "Saved", f"calibration.json saved:\n{path}{ps_note}")
 
     def _save_paramstest(self):
         if not self._result:
@@ -1122,7 +1149,12 @@ class CalibrationTab(QtWidgets.QWidget):
         tmpl_path = dlg.template_path()
         panel_u = getattr(self._result, "_panel_unpacked", None)
         panel_layout = getattr(self._result, "panel_layout", None)
-        ps_path = Path(out_path).parent / "panel_shifts.txt" if panel_u else None
+        # <stem>_panelshifts.txt, not a generic "panel_shifts.txt" — saving
+        # more than one paramstest into the same output folder would
+        # otherwise have every one of them share (and overwrite) a single
+        # sidecar, silently swapping in whichever calibration saved last.
+        ps_path = (Path(out_path).with_name(Path(out_path).stem + "_panelshifts.txt")
+                   if panel_u else None)
 
         def _gap_str(g, n):
             # Same uniform-gap expansion as PanelLayout.regular/helpers._apply_panel_fields.

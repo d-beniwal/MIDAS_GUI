@@ -3,7 +3,47 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-28 (Batch Integrate cosmetic + Batch-Parallel
+**Last updated:** 2026-08-28 (Multi-panel calibration actually refines panel
+shifts now, and the result persists wherever the calibration ends up — see
+§5 "Export" for full detail. Summary:
+- **Root-cause fix:** every pipeline behind **Multi-panel detector**
+  (One-shot, First-time, Four-stage, Bayesian, Joint) was silently doing
+  nothing with the panel grid beyond fixed-geometry bookkeeping — no
+  per-panel δy/δz/δθ was ever actually being fit, so there was nothing to
+  save regardless of how the result got exported. Each pipeline now
+  registers the per-panel shift as something to refine before running, so
+  Multi-panel detector runs produce real, nonzero panel corrections for
+  the first time.
+- **Save calibration.json** now (re)writes a companion
+  `<name>_panelshifts.txt` next to wherever you actually save it, instead
+  of just recording whatever path happened to be live when Fit finished —
+  which, unless an Output folder was already set, was an anonymous
+  temporary file with no guarantee of surviving. The saved `.json` is now
+  self-contained: copy or move it together with its sidecar and the panel
+  correction still resolves.
+- **Save paramstest.txt** now names its sidecar `<name>_panelshifts.txt`
+  too (previously a generic `panel_shifts.txt`) — saving more than one
+  paramstest into the same folder no longer has them silently share (and
+  overwrite) one sidecar.
+- If Fit finishes with **Multi-panel detector** on and no Output folder
+  set, the Log now says so explicitly (a temporary file was used and
+  needs an explicit Save to keep it) instead of leaving it to be
+  discovered later, once the temp file may already be gone.
+- Loading a calibration file back in (**Load calibration file**, or
+  anywhere else that reads a paramstest/`.json` geometry file) now also
+  finds its `PanelShiftsFile`/`panel_shifts_path` sidecar when the
+  recorded path is stale but the sidecar was copied/moved alongside the
+  geometry file itself.
+- A Project (`.h5`) calibration attempt's refined panel shifts are now
+  **embedded** in the project, the same treatment a live/drawn-in-tab
+  mask already got — not just a path reference to whatever (possibly
+  temporary) file was live at save time. Reopening a project regenerates
+  a real `_panelshifts.txt` next to the project file and points the
+  restored calibration at it, so a multi-panel calibration keeps
+  integrating correctly instead of silently reverting to zero panel
+  shifts.)
+
+**Previously:** (2026-08-28, Batch Integrate cosmetic + Batch-Parallel
 overhaul, single-detector **and** Hydra, plus a same-day follow-up making
 **Output format**, **Run mode**, and **View calibration** into on-demand
 popups — see §7 "Tab 4 — Batch Integrate" for full detail. Summary:
@@ -1533,18 +1573,38 @@ Both carry the Transforms checkboxes' `ImTransOpt` codes (one `ImTransOpt <code>
 per checked transform in the `.txt`; an `im_trans` list in the `.json`), so reloading
 either file elsewhere restores the same detector orientation.
 
-When **Multi-panel detector** was used, both exports also carry the refined per-panel
-geometry: `NPanelsY`/`NPanelsZ`/`PanelSizeY`/`PanelSizeZ`/`PanelGapsY`/`PanelGapsZ`
-(the panel grid) plus `PanelShiftsFile` pointing at a companion `panel_shifts.txt`
-(one line per panel — id, δy, δz, δθ, δLsd, δp₂) — the exact fields
-`midas_integrate_v2`'s detector mapper needs to apply the panel corrections, so a
-saved paramstest.txt is immediately usable standalone. The same panel geometry is
-also attached to the in-memory calibration result the moment a Multi-panel run
-finishes (not only on explicit Save), so **Results tab preview** (Radial Profile /
-Eta vs R Cake) and **Batch Integrate**'s "Use Tab 2 calibration" run both apply the
-panel corrections automatically; loading a saved calibration file back in (Batch
-Integrate's "Load calibration file", or anywhere else that reads a paramstest/json
-geometry file) round-trips the same panel fields.
+**Multi-panel detector** registers each panel's rigid shift (δy, δz, δθ) as something
+every pipeline (One-shot, First-time, Four-stage, Bayesian, Joint) actually refines,
+not just a fixed grid the forward geometry accounts for — so a Fit with it checked
+produces a real, nonzero per-panel correction. Both exports also carry the refined
+per-panel geometry: `NPanelsY`/`NPanelsZ`/`PanelSizeY`/`PanelSizeZ`/`PanelGapsY`/`PanelGapsZ`
+(the panel grid) plus `PanelShiftsFile`/`panel_shifts_path` pointing at a companion
+`<name>_panelshifts.txt` (one line per panel — id, δy, δz, δθ, δLsd, δp₂) — the exact
+fields `midas_integrate_v2`'s detector mapper needs to apply the panel corrections, so
+a saved paramstest.txt or calibration.json is immediately usable standalone. This
+sidecar is (re)written **at Save time**, next to wherever the `.json`/`.txt` actually
+lands — so it always travels with the file you saved, rather than pointing back at the
+possibly-temporary file the live Fit run first wrote it to (Fit itself writes into
+whatever Output folder is set; with no Output folder, panel shifts land in an
+anonymous temp file and the Log says so explicitly, as a reminder that Save is needed
+to make them permanent). Each saved file gets its own uniquely-named sidecar (derived
+from that file's own name), so saving several calibrations into the same folder never
+has them overwrite each other's panel data. If a saved calibration/paramstest and its
+sidecar are later copied or moved together to somewhere the originally-recorded path
+no longer resolves, loading the file back in still finds the sidecar as long as it's
+sitting right beside it.
+
+The same panel geometry is also attached to the in-memory calibration result the
+moment a Multi-panel run finishes (not only on explicit Save), so **Results tab
+preview** (Radial Profile / Eta vs R Cake) and **Batch Integrate**'s "Use Tab 2
+calibration" run both apply the panel corrections automatically; loading a saved
+calibration file back in (Batch Integrate's "Load calibration file", or anywhere else
+that reads a paramstest/json geometry file) round-trips the same panel fields. A
+calibration attempt logged to a **Project** (`.h5`, see §16) also embeds the refined
+panel-shift values directly — reopening the project and populating Tab 2 from a
+recorded multi-panel attempt regenerates a real `_panelshifts.txt` next to the project
+file and points the restored result at it, so the panel correction survives even if
+the original run's file is long gone or the project was moved to another machine.
 
 ---
 
@@ -2552,7 +2612,14 @@ Only fields the codebase can already restore from a file path are populated
 this way — a mask that was embedded directly in the project (i.e. included
 something hand-drawn/computed in Mask Builder, with no file of its own to
 point back to) is not re-created automatically and must be re-added from
-Mask Builder / the Data card if needed.
+Mask Builder / the Data card if needed. A **Multi-panel detector**
+calibration attempt's refined panel shifts are the one exception: those
+embedded values *are* re-created automatically — populating Tab 2 from
+such an attempt writes a fresh `_panelshifts.txt` next to the project file
+(in a `<project name>_panel_shifts/` folder) and points the restored
+calibration at it, so the panel correction is usable immediately, the same
+as any other geometry field. See §5 "Export" for how panel shifts are
+saved/embedded in the first place.
 
 ### File ▸ Project History…
 

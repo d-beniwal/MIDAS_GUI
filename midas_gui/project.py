@@ -261,6 +261,69 @@ def _next_attempt_name(group) -> str:
     return f"attempt_{len(existing) + 1:04d}"
 
 
+def _panel_shifts_array(panel_u: Optional[dict]) -> Optional[np.ndarray]:
+    """``(N, 6)`` array ``[panel_id, dy, dz, dtheta, dlsd, dp2]`` from a
+    calibration result's ``_panel_unpacked`` dict (raw refined-shift
+    tensors) — same column layout
+    ``midas_calibrate_v2.compat.to_v1.write_panel_shifts_file`` writes, so
+    :func:`materialize_panel_shifts` can round-trip through that function
+    unmodified. Returns ``None`` when there is no panel data to embed."""
+    if not panel_u:
+        return None
+    dyz = panel_u.get("panel_delta_yz")
+    dth = panel_u.get("panel_delta_theta")
+    if dyz is None or dth is None:
+        return None
+
+    def _np(x):
+        return x.detach().cpu().numpy() if hasattr(x, "detach") else np.asarray(x)
+
+    dyz, dth = _np(dyz), _np(dth)
+    n = dyz.shape[0]
+    dl = _np(panel_u["panel_delta_lsd"]) if panel_u.get("panel_delta_lsd") is not None else np.zeros(n)
+    dp2 = _np(panel_u["panel_delta_p2"]) if panel_u.get("panel_delta_p2") is not None else np.zeros(n)
+    return np.column_stack([np.arange(n), dyz[:, 0], dyz[:, 1], dth, dl, dp2])
+
+
+def materialize_panel_shifts(project_path, ref: str, arr) -> Optional[str]:
+    """Write an embedded panel-shifts array (see :func:`_panel_shifts_array`)
+    back out to a real ``<attempt>_panelshifts.txt`` file next to the
+    project, so a reopened project's multi-panel calibration keeps
+    integrating correctly even though the file the *live* Fit run wrote (an
+    Output-folder path, or an anonymous tempfile — see
+    ``calib._attach_panel_result``) may be long gone or on a different
+    machine. Returns the written path, or ``None`` if ``arr`` is empty."""
+    if arr is None or len(arr) == 0:
+        return None
+    from midas_calibrate_v2.compat.to_v1 import write_panel_shifts_file
+    arr = np.asarray(arr)
+    unpacked = {
+        "panel_delta_yz": arr[:, 1:3],
+        "panel_delta_theta": arr[:, 3],
+        "panel_delta_lsd": arr[:, 4],
+        "panel_delta_p2": arr[:, 5],
+    }
+    project_path = Path(project_path)
+    out_dir = project_path.with_name(project_path.stem + "_panel_shifts")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    attempt_name = ref.rstrip("/").rsplit("/", 1)[-1]
+    out_path = out_dir / f"{attempt_name}_panelshifts.txt"
+    write_panel_shifts_file(unpacked, out_path)
+    return str(out_path)
+
+
+def read_calib_attempt_panel_shifts(project_path, ref: str) -> Optional[np.ndarray]:
+    """The raw ``(N, 6)`` panel-shifts array embedded by
+    :func:`append_calibration_attempt` (see :func:`_panel_shifts_array` for
+    the column layout), or ``None`` if this attempt has none (a
+    single-panel calibration, or one logged before this feature existed)."""
+    with h5py.File(project_path, "r") as f:
+        grp = f.get(ref.lstrip("/"))
+        if grp is None or "panel_shifts" not in grp:
+            return None
+        return grp["panel_shifts"][()]
+
+
 def append_calibration_attempt(project_path, panel_key, *, cfg, result, loader_state,
                                 mask_is_file_backed: bool = False,
                                 results: Optional[dict] = None,
@@ -268,6 +331,7 @@ def append_calibration_attempt(project_path, panel_key, *, cfg, result, loader_s
     cfg_copy = dict(cfg or {})
     mask = cfg_copy.pop("mask", None)
     embed_mask = mask is not None and not mask_is_file_backed
+    panel_arr = _panel_shifts_array(getattr(result, "_panel_unpacked", None))
 
     metadata = {
         "timestamp_utc": _now_iso(),
@@ -278,6 +342,7 @@ def append_calibration_attempt(project_path, panel_key, *, cfg, result, loader_s
         "environment": environment_snapshot(),
         "mask_present": mask is not None,
         "mask_embedded": embed_mask,
+        "panel_shifts_embedded": panel_arr is not None,
     }
     if extra:
         metadata.update(extra)
@@ -295,6 +360,8 @@ def append_calibration_attempt(project_path, panel_key, *, cfg, result, loader_s
                 att.attrs[k] = float(v)
         if embed_mask:
             _write_array(att, "mask", mask)
+        if panel_arr is not None:
+            _write_array(att, "panel_shifts", panel_arr)
         if results:
             res_grp = att.create_group("results")
             for key in ("profile", "r_axis_px", "cake_2d", "eta_axis_deg"):

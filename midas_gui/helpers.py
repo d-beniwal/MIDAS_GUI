@@ -776,7 +776,18 @@ def geometry_fields_from_file(path: str) -> dict:
         fields["distortion"] = fields.get("distortion") or {}
         fields["im_trans"] = list(fields.get("im_trans") or [])
         fields["panel_layout"] = fields.get("panel_layout") or None
-        fields["panel_shifts_path"] = fields.get("panel_shifts_path") or None
+        ps = fields.get("panel_shifts_path") or None
+        if ps and not Path(ps).is_file():
+            # A bare filename (the v1/C DetectorMapper convention — resolved
+            # relative to the working directory) or a stale absolute path
+            # from before this geometry file was copied/moved elsewhere.
+            # Retry it next to the geometry file itself, since that's where
+            # every midas-gui writer (write_panel_shifts_file's sidecar
+            # convention) actually puts it.
+            beside = p.parent / Path(ps).name
+            if beside.is_file():
+                ps = str(beside)
+        fields["panel_shifts_path"] = ps
         return fields
 
     # ── calibration.json (GUI bare keys OR pipeline *_um/_px/_deg keys) ──

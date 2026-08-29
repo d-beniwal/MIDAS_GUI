@@ -593,6 +593,20 @@ class MainWindow(QtWidgets.QMainWindow):
             for k, ref in dlg.calib_selection().items():
                 meta = project.read_attempt(path, ref)
                 meta["_results_arrays"] = project.read_calib_attempt_results(path, ref)
+                # A multi-panel calibration's refined shifts are embedded in
+                # the project (see append_calibration_attempt) rather than
+                # relying on whatever file path was live when the attempt was
+                # saved — that path is often an ephemeral tempfile (no Output
+                # folder set during Fit) and may no longer exist, especially
+                # after moving the project to another machine. Re-materialize
+                # it next to the project file and point the restored result
+                # at that instead, so integration keeps seeing real panel
+                # shifts rather than silently falling back to zero.
+                panel_arr = project.read_calib_attempt_panel_shifts(path, ref)
+                if panel_arr is not None and meta.get("result") is not None:
+                    ps_path = project.materialize_panel_shifts(path, ref, panel_arr)
+                    if ps_path:
+                        meta["result"]["panel_shifts_path"] = ps_path
                 calib_attempts[k] = meta
             integrate_attempts = {}
             for k, ref in dlg.integrate_selection().items():
