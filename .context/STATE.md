@@ -1,66 +1,58 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-29 (Multi-panel calibration actually refines panel
-shifts + persists across save/reload — committed as `c67ad1b`; see
-"Recently completed" below)_
+_Last updated: 2026-08-29 (Project `.h5` schema redesign — `gui_workspace`
+(per-tab) + `analysis` (mask/calibrate/integrate) — and a unified Open
+Project dialog, committed as `21faaf8`/`197a266`; see "Recently completed"
+below)_
 
 ## Now working on
 
-Nothing in flight — `c67ad1b` (multi-panel calibration refinement fix +
-persistence) is committed and pushed; awaiting next task.
+Nothing in flight — `21faaf8` (Project schema redesign + unified Open
+Project dialog) is committed and pushed; awaiting next task.
 
 ## Recently completed
 
-**2026-08-29 (`c67ad1b`) — Calibrate: multi-panel pipelines actually
-refine panel shifts, persist across save/reload.** Root cause: every
-Multi-panel-detector pipeline (one-shot, first-time, four-stage, bayesian,
-joint) passed `panel_layout` only to the fixed forward geometry — no
-per-panel δy/δz/δθ was ever registered as refinable, so a Fit run produced
-no real correction regardless of export path. New `calib._panel_spec()`
-builds a `CalibrationSpec` with panel parameters added
-(`spec_from_v1_params()` + `add_panel_parameters()`, tolerances matching
-`midas_calibrate_v2.calibrate()`'s own `panel_mode="shift"` defaults) and
-every `run_pipeline()` branch now passes `spec=`; one-shot's
-`normalize_result()` also gained the missing `_attach_panel_result()`
-call. Persistence follow-through: (1) Save calibration.json/paramstest.txt
-rewrite a co-located `<name>_panelshifts.txt` sidecar at save time instead
-of trusting a possibly-ephemeral `panel_shifts_path` (`calib.
-_attach_panel_result` now logs to the tab when it falls back to a
-tempfile); (2) `helpers.geometry_fields_from_file` retries a sidecar next
-to the geometry file when the recorded path is stale; (3) Project (`.h5`)
-calibration attempts embed the raw panel-shifts array
-(`project._panel_shifts_array`/`append_calibration_attempt`), and
-reopening a project materializes a real sidecar next to the project file
-(`materialize_panel_shifts`, wired into `app.py`'s attempt-population
-path) instead of pointing at a long-gone tempfile. New tests:
-`tests/test_panel_refinement.py`, `tests/test_panel_shifts.py`,
-`tests/test_calibrate_panel_save.py`; `tests/test_project.py` gained two
-cases for the embed/materialize round-trip. All pass per-file isolated.
-`gui_documentation.md` §5/§16 updated + PDF rebuilt.
+**2026-08-29 (`21faaf8`) — Project: redesign `.h5` schema into
+`gui_workspace` (per-tab) + `analysis` (mask/calibrate/integrate); unified
+Open Project dialog.** Clean-cutover breaking change, `schema_version` 2→3,
+**no backward compatibility** — an old project file now shows a clear
+warning naming its schema version instead of silently restoring nothing.
+(1) `/workspace` (one JSON blob for all 10 tabs) → `/gui_workspace/<tab
+name>/{state, sidecars/}`, modular per tab (`project.write_gui_workspace`/
+`list_workspace_tabs`/`read_workspace_tab`/`read_workspace_meta`); (2)
+`/<panel_key>/{calib,integrate}/attempt_NNNN` → `/analysis/{calibrate,
+integrate}/<panel_key>/attempt_NNNN` (no signature changes — every
+read-side function is already keyed by an opaque `ref` string); (3) new
+`/analysis/mask` — a *global* (not per-panel) FAIR-provenance history for
+Mask Builder (`append_mask_attempt`/`list_mask_attempts`/
+`read_mask_attempt_array`), with a new "Log to Project" button + explicit
+user-triggered logging (confirmed with the user — no single "run finished"
+moment exists to auto-log from, unlike Calibrate/Batch-Integrate) and
+`apply_project_mask` (restores fields, reloads the image, sets the mask
+directly from the recorded array without re-dilating). (4) The old
+two-stage Open Project flow (blind Yes/No workspace restore, then a
+separate `ProjectLoadDialog`) is replaced by one `ProjectOpenDialog`
+(file-tree browser + a live checkbox-tree preview via new
+`ProjectContentsPicker`, refreshing as a `.h5` is clicked, everything
+checked by default) / `ProjectSelectionDialog` (picker only, for Recent
+Projects); `app.py`'s open-project methods collapse into one
+`_open_project_selection`. `ProjectHistoryDialog` also lists mask
+attempts. **Verified:** rewrote `test_project.py`'s workspace tests +
+every hardcoded old-schema path assertion (also caught stale ones in
+`test_hydra_batch_ui.py`/`test_hydra_calib_ui.py` via a full per-file test
+sweep); new tests for mask-attempt read/write, `apply_project_mask`, and
+the new picker/dialogs. All pass per-file isolated.
+`gui_documentation.md` §4/§16 rewritten + PDF rebuilt.
 
-**2026-08-28 (`e6f2e50`) — Batch Integrate: Output format + Run mode as
-popups, fix calib-popup rebuild.** Same-day follow-up to `a27790a`: (1)
-`OutputFormatSelector`'s checkboxes moved from an always-visible list into
-a `QMenu` behind a clickable "Output format ▾" button whose text names the
-checked formats (same pattern as `make_calib_values_button`); (2) the
-Run-mode explanatory note (single-detector "Mode:", Hydra "Per panel:")
-became a hover tooltip on the label + combo instead of a permanent
-`QLabel`; (3) fixed `make_calib_values_button`'s popup caching a stale
-near-zero size on first open — `_populate()` now `menu.clear()`s and
-rebuilds the whole widget tree (not just the grid contents) on every open,
-since `QMenu` computes its popup size from the `QWidgetAction`'s sizeHint
-at show time. No behavior change to `checked_keys()`/`get_state()`/
-`set_state()` or the calib popup's field content — presentation only.
-`gui_documentation.md` updated + PDF rebuilt.
-
-_(Older entries — `a27790a` Batch Integrate cosmetic overhaul +
-Batch-Parallel workers, `ae3b665` merged Workspace+Project into one `.h5`,
-`af8066f` Batch Browse… parity, `a54f796`/`ac13797` Browse… popup
-(multi-file/folder/name-stem + polish), `101558a` Calibrate
-Multi-panel→downstream-integration feed, `ccce056` Flip-Z/Multi-panel fix,
-`08fe8f6`/`fe59939` README+gitignore, `5cf2e8c` error-dialog truncation fix
-— trimmed here; full detail in `documentation/development_history.md`.)_
+_(Older entries — `c67ad1b` multi-panel calibration refinement fix +
+persistence, `e6f2e50` Output-format/Run-mode popups, `a27790a` Batch
+Integrate cosmetic overhaul + Batch-Parallel workers, `ae3b665` merged
+Workspace+Project into one `.h5`, `af8066f` Batch Browse… parity,
+`a54f796`/`ac13797` Browse… popup (multi-file/folder/name-stem + polish),
+`101558a` Calibrate Multi-panel→downstream-integration feed, `ccce056`
+Flip-Z/Multi-panel fix — trimmed here; full detail in
+`documentation/development_history.md`.)_
 
 ## Open questions / blockers
 
@@ -94,7 +86,14 @@ Multi-panel→downstream-integration feed, `ccce056` Flip-Z/Multi-panel fix,
   `build_geom`-running `QThread` at pytest teardown, reproduced even
   running `tests/test_project.py` (pure-logic, no Qt) alone; confirmed
   present on HEAD *before* the `c67ad1b` panel-refinement commit too — not
-  introduced by it, just re-discovered while checking that commit's tests.
+  introduced by it. **Widened again 2026-08-29 (schema-redesign session):**
+  `tests/test_smoke.py` run alone is *non-deterministic* even on
+  unmodified HEAD — 3 consecutive runs gave 10/10 pass, then a Bus error at
+  4 dots, then a Segfault at 4 dots (each MainWindow-constructing test adds
+  more pyqtgraph widgets to the same process; teardown corruption seems to
+  accumulate randomly rather than at a fixed test). Don't trust a single
+  green/red `test_smoke.py` run as signal either way — rerun a few times
+  before concluding a change broke or fixed it.
 - `test_smoke.py::test_app_builds_offscreen` has a pre-existing, unrelated
   local-config flake (stale `visible_tabs` count) — hit again this session,
   confirmed unrelated to the truncation fix.

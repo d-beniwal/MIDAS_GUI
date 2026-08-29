@@ -3,6 +3,92 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-08-29 — Project `.h5` schema redesign (`21faaf8`): `gui_workspace` + `analysis`, clean cutover, global mask history, one combined Open Project dialog
+
+User requested three changes to the Project file: (1) a `gui_workspace`
+header with a separate, independently-restorable snapshot per tab instead
+of one JSON blob; (2) an `analysis` header with `mask`/`calibrate`/
+`integrate` sub-headers, each an append-only FAIR-provenance history, so
+loading any recorded analysis into its tab restores everything including
+results; (3) a single richer Open Project dialog — browse to a project,
+click it, see checkboxes for everything it contains, uncheck what you don't
+want, all checked by default.
+
+**Three design decisions were explicitly confirmed with the user before
+implementing** (via `AskUserQuestion`), since each had a real trade-off:
+
+1. **Mask attempts are a global history (`/analysis/mask/attempt_NNNN`),
+   not per-panel**, even though calibrate/integrate are split by
+   `panel_key` (single/ge1-4/hydra_composite). Rationale given by the user:
+   `/analysis/mask` should only store mask-*creation* attempts and their
+   final compressed mask; the calibrate/integrate records separately keep
+   embedding/hashing whichever mask they *actually used* for that specific
+   analysis run (already existing, unchanged behavior — see the
+   2026-08-26 "selective mask embedding" entry below), so every analysis
+   attempt is still self-sufficient for reproducing itself even though the
+   mask-creation history itself isn't per-panel.
+2. **Clean cutover, no backward compatibility** with schema_version 1/2
+   project files. Chosen deliberately over a dual-path reader (which the
+   codebase *has* done before, at the 1→2 bump — see `ae3b665`) because the
+   old layout has no natural per-tab boundary to migrate into automatically
+   (one JSON blob doesn't know which fields belong to which tab without
+   re-deriving the exact tab-name/widget-key mapping that existed at save
+   time, which drifts across GUI versions). Opening a pre-3 file shows a
+   clear warning naming its schema version (`project.project_schema_version`)
+   instead of a silently empty checkbox tree or a confusing partial
+   restore.
+3. **One combined dialog** (file-tree browser + a live checkbox-tree
+   preview that refreshes as different `.h5` files are clicked) rather than
+   a native `QFileDialog` followed by a second custom dialog. Matches the
+   user's literal description most closely and reuses
+   `BrowseFilesDialog`'s existing navigation building blocks (address bar +
+   up button + filtered `QFileSystemModel`/`QTreeView`) rather than
+   introducing a second, different browsing pattern.
+
+**Schema mapping (old → new), all in `project.py`:**
+`/workspace` → `/gui_workspace/<tab_name>/{state, sidecars/}`;
+`/<panel_key>/calib/...` → `/analysis/calibrate/<panel_key>/...`;
+`/<panel_key>/integrate/...` → `/analysis/integrate/<panel_key>/...`; new
+`/analysis/mask/...`. Confirmed via a dedicated research pass (checked
+every `append_calibration_attempt`/`append_integration_attempt` call site
+in `hydra_calib_page.py`/`hydra_batch_page.py`/`tab_batch.py`) that none of
+them ever assume the storage path — only `panel_key`/`cfg`/`result`/
+`mask*` kwargs — so the path-prefix change needed **zero signature
+changes** to either function, and every read-side function keyed by an
+opaque `ref` string (`read_attempt`, `read_calib_attempt_results`,
+`read_calib_attempt_panel_shifts`, `materialize_panel_shifts`) needed no
+changes at all.
+
+**Mask Builder's provenance trigger** (a fourth question asked): unlike
+Calibrate/Batch-Integrate, there's no single "run finished" moment to
+auto-log a mask attempt from (Compute, Load, hand-drawn shapes, or any
+combination can produce the final mask). User chose an explicit **"Log to
+Project"** button over piggybacking on the existing Save button, to put the
+user in control of exactly when a mask is considered final — avoids
+spamming attempts on every incremental threshold tweak or shape edit.
+
+**`ProjectLoadDialog` (the old calibrate/integrate-only attempt picker) is
+fully removed**, superseded by `ProjectContentsPicker` (the reusable
+checkbox-tree widget, rebuilding its entire layout on every `set_project()`
+call rather than mutating in place — same rationale as
+`helpers.make_calib_values_button`'s popup rebuild, see the 2026-08-28
+entry below) wrapped by `ProjectOpenDialog` (adds the file browser) or
+`ProjectSelectionDialog` (picker only, for Recent Projects where the path
+is already known).
+
+**Verification widened scope discovered mid-session:** a full per-file test
+sweep (not just the new schema's own unit tests) caught stale hardcoded
+old-schema path assertions in `tests/test_hydra_batch_ui.py` and
+`tests/test_hydra_calib_ui.py` that the initial `test_project.py`-focused
+pass had missed — fixed by the same sweep. Also used this session to
+confirm (via repeated runs against unmodified HEAD) that `tests/
+test_smoke.py` run alone is itself non-deterministically flaky
+(pyqtgraph/interpreter-teardown corruption, same family as the already-
+documented `test_hydra_ui.py`/`test_hydra_calib_ui.py` risk) — not
+something this session's changes introduced, but worth recording since a
+single `test_smoke.py` run is no longer trustworthy signal either way; see
+STATE.md's widened crash-risk note.
+
 ## 2026-08-27 — Browse… popup polish: folder-path display, project-root default dir, wider name column
 
 User feedback on the Browse… popup (previous entry, commit `ac13797`),
