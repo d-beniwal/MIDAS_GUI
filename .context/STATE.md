@@ -1,57 +1,53 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-29 (Project `.h5` schema redesign — `gui_workspace`
-(per-tab) + `analysis` (mask/calibrate/integrate) — and a unified Open
-Project dialog, committed as `21faaf8`/`197a266`; see "Recently completed"
-below)_
+_Last updated: 2026-08-29 (Batch Integrate: fix Batch-Parallel live
+waterfall/stacked-profile frame ordering, committed as `0332683`/`e168813`;
+see "Recently completed" below)_
 
 ## Now working on
 
-Nothing in flight — `21faaf8` (Project schema redesign + unified Open
-Project dialog) is committed and pushed; awaiting next task.
+Nothing in flight — `0332683` (Batch-Parallel frame-ordering fix) is
+committed and pushed; awaiting next task.
+
+**Uncommitted in the working tree (pre-existing, not from this session —
+left untouched, awaiting user confirmation before committing):**
+`midas_gui/dialogs.py` + `documentation/gui_documentation.md` carry an
+`ProjectContentsPicker` Analysis-section layout refinement (Single
+detector/Hydra headings, one Calibrate/Batch-Integrate row each instead of
+one grid row per panel; GUI Workspace tabs indented under "Select all").
+The doc already reflects it (§ "Last updated" + the Open Project section),
+so it reads as finished work from an earlier, uncaptured session — just
+never committed. Ask the user before committing/discarding it.
 
 ## Recently completed
 
-**2026-08-29 (`21faaf8`) — Project: redesign `.h5` schema into
-`gui_workspace` (per-tab) + `analysis` (mask/calibrate/integrate); unified
-Open Project dialog.** Clean-cutover breaking change, `schema_version` 2→3,
-**no backward compatibility** — an old project file now shows a clear
-warning naming its schema version instead of silently restoring nothing.
-(1) `/workspace` (one JSON blob for all 10 tabs) → `/gui_workspace/<tab
-name>/{state, sidecars/}`, modular per tab (`project.write_gui_workspace`/
-`list_workspace_tabs`/`read_workspace_tab`/`read_workspace_meta`); (2)
-`/<panel_key>/{calib,integrate}/attempt_NNNN` → `/analysis/{calibrate,
-integrate}/<panel_key>/attempt_NNNN` (no signature changes — every
-read-side function is already keyed by an opaque `ref` string); (3) new
-`/analysis/mask` — a *global* (not per-panel) FAIR-provenance history for
-Mask Builder (`append_mask_attempt`/`list_mask_attempts`/
-`read_mask_attempt_array`), with a new "Log to Project" button + explicit
-user-triggered logging (confirmed with the user — no single "run finished"
-moment exists to auto-log from, unlike Calibrate/Batch-Integrate) and
-`apply_project_mask` (restores fields, reloads the image, sets the mask
-directly from the recorded array without re-dilating). (4) The old
-two-stage Open Project flow (blind Yes/No workspace restore, then a
-separate `ProjectLoadDialog`) is replaced by one `ProjectOpenDialog`
-(file-tree browser + a live checkbox-tree preview via new
-`ProjectContentsPicker`, refreshing as a `.h5` is clicked, everything
-checked by default) / `ProjectSelectionDialog` (picker only, for Recent
-Projects); `app.py`'s open-project methods collapse into one
-`_open_project_selection`. `ProjectHistoryDialog` also lists mask
-attempts. **Verified:** rewrote `test_project.py`'s workspace tests +
-every hardcoded old-schema path assertion (also caught stale ones in
-`test_hydra_batch_ui.py`/`test_hydra_calib_ui.py` via a full per-file test
-sweep); new tests for mask-attempt read/write, `apply_project_mask`, and
-the new picker/dialogs. All pass per-file isolated.
-`gui_documentation.md` §4/§16 rewritten + PDF rebuilt.
+**2026-08-29 (`0332683`) — Batch Integrate: fix Batch-Parallel live
+waterfall/stacked-profile frame ordering.** `BatchRunCoordinator` ran each
+chunk-worker's `frame_done` straight through to the GUI; since chunks
+execute concurrently, frames arrived in wall-clock completion order rather
+than frame order whenever a later chunk finished ahead of an earlier one —
+Sequential mode was unaffected (single thread, in-order emission), and the
+final Save/HDF5 merge was already correctly ordered. Added
+`_on_chunk_frame`, which buffers each chunk's `frame_done` and re-emits in
+ascending frame-index order (each chunk's `frame_indices` is processed
+strictly in order by `BatchWorker._iter_frames`, so the coordinator can map
+arrival → absolute frame index via a per-worker counter). One shared fix —
+`tab_batch.py` and `hydra_batch_page.py` both consume the same
+`BatchRunCoordinator.frame_done` signal. **Verified:** new test
+`test_batch_parallel_frame_done_reorders_out_of_completion_order`
+(`tests/test_batch_data_source.py`); ran that file + `test_hydra_batch_ui.py`
+per-file, both pass. No GUI-visible change → `gui_documentation.md` not
+touched for this commit.
 
-_(Older entries — `c67ad1b` multi-panel calibration refinement fix +
-persistence, `e6f2e50` Output-format/Run-mode popups, `a27790a` Batch
-Integrate cosmetic overhaul + Batch-Parallel workers, `ae3b665` merged
-Workspace+Project into one `.h5`, `af8066f` Batch Browse… parity,
-`a54f796`/`ac13797` Browse… popup (multi-file/folder/name-stem + polish),
-`101558a` Calibrate Multi-panel→downstream-integration feed, `ccce056`
-Flip-Z/Multi-panel fix — trimmed here; full detail in
+_(Older entries — `21faaf8` Project schema redesign (`gui_workspace` +
+`analysis`) + unified Open Project dialog, `c67ad1b` multi-panel
+calibration refinement fix + persistence, `e6f2e50` Output-format/Run-mode
+popups, `a27790a` Batch Integrate cosmetic overhaul + Batch-Parallel
+workers, `ae3b665` merged Workspace+Project into one `.h5`, `af8066f` Batch
+Browse… parity, `a54f796`/`ac13797` Browse… popup (multi-file/folder/
+name-stem + polish), `101558a` Calibrate Multi-panel→downstream-integration
+feed, `ccce056` Flip-Z/Multi-panel fix — trimmed here; full detail in
 `documentation/development_history.md`.)_
 
 ## Open questions / blockers
