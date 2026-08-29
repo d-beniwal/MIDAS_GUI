@@ -155,6 +155,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Hydra Overall Radial Profile becomes a toggle button (was a checkbox); Eta vs R Cake tab gains GE1-4 checkboxes + an Overall button showing the summed cake across all 4 panels; calibration attempts embed their computed Radial Profile/Eta vs R Cake so Populate needs no recompute | `943a91d` |
 | Fix Flip Z ignored when Multi-panel detector is checked: seed and solve were running in two different image frames | `ccce056` |
 | Feed Multi-panel detector's per-panel shifts + grid geometry to downstream integration (Results-tab preview, Batch Integrate, and saved paramstest.txt) | `101558a` |
+| Fix Multi-panel detector pipelines never actually refining panel shifts (spec built without panel parameters); Save calibration.json/paramstest.txt rewrite a co-located sidecar; Project attempts embed + rematerialize panel shifts on reopen | `c67ad1b` |
 
 ### Batch Integrate (Tab 4)
 | Change | Commit |
@@ -3497,6 +3498,69 @@ rebuilt.
 always-visible checkbox list, the permanent Run-mode note label, and the
 mutate-in-place calibration popup from `a27790a`; no later commit depends
 on the button/tooltip presentation.
+
+---
+
+### `c67ad1b` — Calibrate: multi-panel pipelines actually refine panel shifts, persist across save/reload (2026-08-29)
+**Effect:** Root-cause fix + persistence follow-through for Multi-panel
+detector calibration:
+1. **Root cause:** every Multi-panel-detector pipeline (one-shot,
+   first-time, four-stage, bayesian, joint) passed `panel_layout` through
+   to `midas_calibrate_v2` for the fixed forward geometry only — no
+   per-panel δy/δz/δθ was ever registered as something to refine, so a
+   Fit run produced no real panel correction regardless of how it was
+   later exported. New `calib._panel_spec()` builds a `CalibrationSpec`
+   via `spec_from_v1_params()` + `add_panel_parameters()` (tolerances
+   matching `midas_calibrate_v2.calibrate()`'s own `panel_mode="shift"`
+   defaults) and every pipeline branch in `run_pipeline()` now passes it
+   as `spec=`, so panel shifts are real and nonzero for the first time.
+   `normalize_result()`'s one-shot branch also gained the missing
+   `_attach_panel_result()` call (it built the result but never attached
+   panel data, unlike the other three modes).
+2. **Save calibration.json / Save paramstest.txt** (`tab_calibrate.py`)
+   now rewrite a co-located `<name>_panelshifts.txt` sidecar at save time
+   from the result's `_panel_unpacked` tensors, instead of trusting
+   whatever `panel_shifts_path` was live when Fit finished — which, with
+   no Output folder set, is an anonymous tempfile with no guarantee of
+   surviving. `calib._attach_panel_result()` now also logs to the tab's
+   Log panel when it falls back to that tempfile, so the gap is visible
+   immediately rather than discovered later. Paramstest's sidecar name
+   changed from a shared `panel_shifts.txt` to `<stem>_panelshifts.txt`
+   so multiple saves into one folder don't overwrite each other's data.
+3. **`helpers.geometry_fields_from_file`** now retries a stale/missing
+   `panel_shifts_path` next to the geometry file itself before giving up,
+   so a `.json`/paramstest copied or moved together with its sidecar
+   still resolves it on reload.
+4. **Project (`.h5`) persistence** (`project.py`): calibration attempts
+   now embed the raw panel-shifts array (`_panel_shifts_array()`,
+   `append_calibration_attempt()` writing an `att["panel_shifts"]`
+   dataset + `panel_shifts_embedded` metadata flag). Reopening a project
+   and populating Tab 2 from such an attempt (`app.py`'s calibration
+   population path) calls the new `materialize_panel_shifts()` to write a
+   real `<attempt>_panelshifts.txt` into a `<project>_panel_shifts/`
+   folder beside the project file and points the restored result at it —
+   so the panel correction survives even if the original run's file (or
+   the whole project) has moved to another machine.
+**Verified:** `tests/test_project.py` gained
+`test_calibration_attempt_embeds_and_materializes_panel_shifts` +
+`test_read_calib_attempt_panel_shifts_none_when_absent`; new
+`tests/test_panel_refinement.py` (spec-building/pipeline wiring),
+`tests/test_panel_shifts.py`, and `tests/test_calibrate_panel_save.py`
+(Qt-backed, exercises `CalibrationTab._save_json`'s sidecar rewrite). All
+pass per-file isolated (the pre-existing `midas_gui/workers.py`
+`build_geom` interpreter-teardown crash — confirmed present on HEAD before
+this commit too, unrelated — still fires after all tests pass in a
+combined run; see "Open questions" in `.context/STATE.md`).
+`gui_documentation.md` §5 "Export" and §16 rewritten + PDF rebuilt.
+**Files:** `midas_gui/calib.py`, `midas_gui/tab_calibrate.py`,
+`midas_gui/helpers.py`, `midas_gui/project.py`, `midas_gui/app.py`,
+`tests/test_project.py`, `tests/test_calibrate_panel_save.py`,
+`tests/test_panel_refinement.py`, `tests/test_panel_shifts.py`,
+`documentation/gui_documentation.md`.
+**Roll back:** `git revert c67ad1b`. Self-contained — later commits don't
+depend on real panel-shift refinement; reverting restores the
+fixed-geometry-only (no refinement) behavior and the old tempfile-trusting
+save/reload paths.
 
 ---
 
