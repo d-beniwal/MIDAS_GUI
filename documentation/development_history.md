@@ -214,6 +214,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Data Loader Browse… popup (Single/Multiple files/Full folder/Files sharing a name stem) + Hydra gains real cross-tab Import from… | `ac13797` |
 | Browse… popup polish: folder/file-path display (not a count), project-root default dir, wider name column | `a54f796` |
 | Merge Workspace (JSON) and FAIR Project (HDF5) into one `.h5` Project file; File menu collapses to Save/Save As/Open Project | `ae3b665` |
+| Project schema redesign (clean cutover, no back-compat): `/gui_workspace` per-tab groups + `/analysis/{mask,calibrate,integrate}` FAIR history; Mask Builder gets `/analysis/mask` provenance + "Log to Project"; unified Open Project dialog (browse + live checkbox-tree preview) replaces the old Yes/No + separate attempt-picker flow | `21faaf8` |
 
 ### Stability / performance / consistency (review-driven, phases 1–3)
 | Change | Commit |
@@ -3561,6 +3562,87 @@ combined run; see "Open questions" in `.context/STATE.md`).
 depend on real panel-shift refinement; reverting restores the
 fixed-geometry-only (no refinement) behavior and the old tempfile-trusting
 save/reload paths.
+
+---
+
+### `21faaf8` — Project: redesign .h5 schema into gui_workspace (per-tab) + analysis (mask/calibrate/integrate), unified Open Project dialog (2026-08-29)
+**Effect:** Requested redesign of the project `.h5` schema plus a richer Open
+Project experience — a **clean-cutover breaking change**, `schema_version`
+2 → 3, no backward compatibility with older project files:
+1. **`/workspace` (single mutable JSON blob for all 10 tabs) →
+   `/gui_workspace/<tab name>/{state, sidecars/}`**, one independently
+   readable/restorable group per tab. `project.write_gui_workspace()`
+   replaces `write_workspace()`; new `list_workspace_tabs()`/
+   `read_workspace_tab()`/`read_workspace_meta()` replace `read_workspace()`.
+   `app.py`'s `_serialize_workspace()`/`_apply_workspace_state()` now give
+   each tab its own sidecar subdirectory (was one shared stem across every
+   tab, distinguished only by filename-suffix convention).
+2. **`/<panel_key>/{calib,integrate}/attempt_NNNN` →
+   `/analysis/{calibrate,integrate}/<panel_key>/attempt_NNNN`.**
+   `append_calibration_attempt`/`append_integration_attempt`/
+   `discover_panels`/`list_attempts` updated for the new path prefix — no
+   signature changes, confirmed against all 4 existing call sites
+   (`tab_calibrate.py`, `tab_batch.py`, `hydra_calib_page.py` ×2,
+   `hydra_batch_page.py`). Every read-side function keyed by an opaque
+   `ref` string (`read_attempt`, `read_attempt_results`,
+   `read_calib_attempt_results`, `read_calib_attempt_panel_shifts`,
+   `materialize_panel_shifts`) needed zero changes.
+3. **New `/analysis/mask`** — a *global* (not per-panel; Mask Builder is one
+   shared tab, unlike Calibrate/Integrate's single-detector-vs-Hydra-panel
+   split) FAIR-provenance history: `append_mask_attempt()`/
+   `list_mask_attempts()`/`read_mask_attempt_array()`. `tab_mask.py` gains a
+   **"Log to Project"** button (next to Save, disabled until a mask exists)
+   and `apply_project_mask()` (restores threshold/statistical/spike/cosmic/
+   azimuthal/learnable field settings, reloads the source image, and sets
+   the mask directly from the recorded array — already fully processed, so
+   it bypasses `_set_mask()`'s dilation step to avoid double-dilating).
+   Unlike Calibrate/Batch-Integrate there's no single "run finished" moment
+   to auto-log from (a mask can come from Compute, Load, hand-drawn shapes,
+   or any combination), so this is an explicit, click-when-ready action —
+   confirmed with the user before implementing.
+4. **Unified Open Project dialog** (`dialogs.py`) replaces the old two-stage
+   flow (a blind Yes/No "restore the whole workspace or nothing" box, then
+   a separate `ProjectLoadDialog` calibrate/integrate-only attempt picker,
+   now removed): new `ProjectContentsPicker` (a `QWidget` that, given a
+   project path, builds a checkbox tree of every `gui_workspace` tab and
+   every mask/calibrate/integrate attempt present, everything checked by
+   default, rebuilding its whole layout on every `set_project()` call rather
+   than mutating in place) is wrapped by `ProjectOpenDialog` (adds a
+   file-tree browser pane on the left, styled after `BrowseFilesDialog`'s
+   navigation, refreshing the picker live as a `.h5` is clicked — for File ▸
+   Open Project…) and `ProjectSelectionDialog` (picker only, no browser —
+   for Recent Projects entries where the path is already known). A pre-3
+   or non-project `.h5` shows an inline warning naming its schema version
+   instead of a silently empty tree. `app.py`'s `_open_project_dialog`/
+   `_open_project_path` collapse into one shared `_open_project_selection()`
+   that restores exactly the checked items (calling the existing
+   `apply_project_calibration`/`apply_project_integration`/new
+   `apply_project_mask` per tab) — nothing restores until Open is clicked.
+   `ProjectHistoryDialog` also lists mask attempts (`"Mask"` kind, panel
+   column shows `"—"`).
+**Verified:** `tests/test_project.py`'s workspace tests rewritten for the
+per-tab API; every hardcoded old-schema path assertion updated there and in
+`tests/test_hydra_batch_ui.py`/`tests/test_hydra_calib_ui.py` (caught by a
+full per-file test run, not just the new schema's own unit tests); new
+tests for `append_mask_attempt`/`list_mask_attempts`/
+`read_mask_attempt_array`/`apply_project_mask` and for
+`ProjectContentsPicker`/`ProjectSelectionDialog` (defaults-all-checked,
+unchecking a tab/panel excludes it from `selection()`, an invalid/old file
+reports no content). Manual offscreen smoke of the full
+`_open_project_selection` path (create project → log a mask attempt + save
+a workspace tab → reopen with a mixed selection → confirm only the checked
+items restore). All pass per-file isolated; the pre-existing pyqtgraph/
+interpreter-teardown crash on a combined run (also independently confirmed
+non-deterministic on HEAD before this commit, via repeated runs) is
+unrelated. `gui_documentation.md` §4 and §16 rewritten + PDF rebuilt.
+**Files:** `midas_gui/project.py`, `midas_gui/app.py`, `midas_gui/dialogs.py`,
+`midas_gui/tab_mask.py`, `tests/test_project.py`, `tests/test_workspace_ux.py`,
+`tests/test_hydra_batch_ui.py`, `tests/test_hydra_calib_ui.py`,
+`documentation/gui_documentation.md`.
+**Roll back:** `git revert 21faaf8`. Breaking either direction — any project
+`.h5` saved under schema_version 3 (this commit) is not readable by the
+pre-redesign code the revert restores, and vice versa; there is no
+migration path between the two schemas.
 
 ---
 
