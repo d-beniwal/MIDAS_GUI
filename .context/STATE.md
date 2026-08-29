@@ -1,15 +1,43 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-28 (Output format/Run mode popups + calib-popup
-rebuild fix — committed as `e6f2e50`; see "Recently completed" below)_
+_Last updated: 2026-08-29 (Multi-panel calibration actually refines panel
+shifts + persists across save/reload — committed as `c67ad1b`; see
+"Recently completed" below)_
 
 ## Now working on
 
-Nothing in flight — `e6f2e50` (Output format/Run mode popups, calib-popup
-rebuild fix) is committed and pushed; awaiting next task.
+Nothing in flight — `c67ad1b` (multi-panel calibration refinement fix +
+persistence) is committed and pushed; awaiting next task.
 
 ## Recently completed
+
+**2026-08-29 (`c67ad1b`) — Calibrate: multi-panel pipelines actually
+refine panel shifts, persist across save/reload.** Root cause: every
+Multi-panel-detector pipeline (one-shot, first-time, four-stage, bayesian,
+joint) passed `panel_layout` only to the fixed forward geometry — no
+per-panel δy/δz/δθ was ever registered as refinable, so a Fit run produced
+no real correction regardless of export path. New `calib._panel_spec()`
+builds a `CalibrationSpec` with panel parameters added
+(`spec_from_v1_params()` + `add_panel_parameters()`, tolerances matching
+`midas_calibrate_v2.calibrate()`'s own `panel_mode="shift"` defaults) and
+every `run_pipeline()` branch now passes `spec=`; one-shot's
+`normalize_result()` also gained the missing `_attach_panel_result()`
+call. Persistence follow-through: (1) Save calibration.json/paramstest.txt
+rewrite a co-located `<name>_panelshifts.txt` sidecar at save time instead
+of trusting a possibly-ephemeral `panel_shifts_path` (`calib.
+_attach_panel_result` now logs to the tab when it falls back to a
+tempfile); (2) `helpers.geometry_fields_from_file` retries a sidecar next
+to the geometry file when the recorded path is stale; (3) Project (`.h5`)
+calibration attempts embed the raw panel-shifts array
+(`project._panel_shifts_array`/`append_calibration_attempt`), and
+reopening a project materializes a real sidecar next to the project file
+(`materialize_panel_shifts`, wired into `app.py`'s attempt-population
+path) instead of pointing at a long-gone tempfile. New tests:
+`tests/test_panel_refinement.py`, `tests/test_panel_shifts.py`,
+`tests/test_calibrate_panel_save.py`; `tests/test_project.py` gained two
+cases for the embed/materialize round-trip. All pass per-file isolated.
+`gui_documentation.md` §5/§16 updated + PDF rebuilt.
 
 **2026-08-28 (`e6f2e50`) — Batch Integrate: Output format + Run mode as
 popups, fix calib-popup rebuild.** Same-day follow-up to `a27790a`: (1)
@@ -26,44 +54,8 @@ at show time. No behavior change to `checked_keys()`/`get_state()`/
 `set_state()` or the calib popup's field content — presentation only.
 `gui_documentation.md` updated + PDF rebuilt.
 
-**2026-08-28 (`a27790a`) — Batch Integrate: cosmetic overhaul +
-Batch-Parallel workers, single-detector + Hydra.** Five requested changes,
-applied to both the single-detector tab and Hydra's per-panel page: (1)
-Drift correction hidden from the GUI (single-detector only, not used in
-production — `DriftWorker`/state untouched, `setVisible(False)`); (2) the
-always-visible "Calibration values" grid replaced by a "View calibration"
-popup (`helpers.make_calib_values_button`, same click-to-see-options
-pattern as `make_pixel_label`/`make_kedge_label`) — single card + each of
-Hydra's 4 panel cards; (3) output format is now a checkbox list
-(`widgets.OutputFormatSelector`) — every checked format is written;
-`BatchWorker`/`FolderMonitorWorker` gained `fmts: list[str]` replacing
-`fmt: str`; (4) a green **Save** button (`workers.write_all_profiles`)
-writes already-computed lineouts on demand regardless of whether an Output
-folder was set before running; Start Integration narrower, Abort red; (5) a
-new **Sequential**/**Batch Parallel** run-mode + worker-count control
-(`workers.BatchRunCoordinator`, same signal surface as `BatchWorker`)
-splits one run's frames across N `BatchWorker` QThreads (in-process, not
-OS processes — numpy/torch release the GIL) sharing one detector map built
-once (`_GeomBuildWorker`), auto-shrinking workers so each gets ≥10 frames
-(`resolve_worker_count`); needed a new `BatchWorker.frame_indices` param
-for exact random-access reads per chunk (the old frame_range skip-loop
-would otherwise decode every frame up to a late chunk's start). Hydra gets
-this as a *second*, independent parallelism level under its existing
-per-panel Sequential/Parallel toggle. `BatchWorker.finished` also now
-carries `"sigmas"` (previously computed but never emitted — a pre-existing
-gap in `project.append_integration_attempt`'s expected payload, now closed).
-**Verified:** `tests/test_batch_data_source.py` extended to 17 (frame-index
-resolution, chunk-splitting, worker-count auto-shrink, `write_all_profiles`,
-`_ExplicitTIFFSource.get`); `tests/test_hydra_batch_ui.py` updated for the
-`BatchWorker`→`BatchRunCoordinator` swap + removed `_calib_val_note`;
-`tests/test_project.py`'s `integrate_attempt_gui_fields` test updated for
-`fmt` becoming a list. All pass (per-file isolated — the pre-existing
-pyqtgraph/thread teardown crash, see "Open questions" below, still fires
-after all tests pass, unrelated). Full single-detector + Hydra tabs build
-and round-trip state correctly in an offscreen smoke check.
-`gui_documentation.md` §7 rewritten + PDF rebuilt.
-
-_(Older entries — `ae3b665` merged Workspace+Project into one `.h5`,
+_(Older entries — `a27790a` Batch Integrate cosmetic overhaul +
+Batch-Parallel workers, `ae3b665` merged Workspace+Project into one `.h5`,
 `af8066f` Batch Browse… parity, `a54f796`/`ac13797` Browse… popup
 (multi-file/folder/name-stem + polish), `101558a` Calibrate
 Multi-panel→downstream-integration feed, `ccce056` Flip-Z/Multi-panel fix,
@@ -91,13 +83,18 @@ Multi-panel→downstream-integration feed, `ccce056` Flip-Z/Multi-panel fix,
   `PoleFigureWorker` has a pre-existing, unrelated mask/ImTransOpt bug;
   (4) `spec_from_calibration_result` has no panel-layout support — GUI
   already works around it (see P3-3).
-- **Pre-existing pyqtgraph interpreter-teardown crash risk**, especially
-  around `CakeViewer`'s ViewBox (`tests/test_hydra_calib_ui.py`,
+- **Pre-existing interpreter-teardown crash risk**, especially around
+  `CakeViewer`'s ViewBox (`tests/test_hydra_calib_ui.py`,
   `tests/test_hydra_ui.py`) and any module-scoped-fixture MainWindow
   (`tests/test_workspace_ux.py`, `test_smoke.py` run as a whole file).
   Trust per-file isolated runs, not a combined `tests/` run; do not reach
   for `gc.collect()` (confirmed to make it worse). Out of scope, see
-  DECISIONS.md for the 2026-08-26 bisection.
+  DECISIONS.md for the 2026-08-26 bisection. **Widened 2026-08-29:** also
+  seen with a `Fatal Python error: Aborted` in a leaked `workers.py`
+  `build_geom`-running `QThread` at pytest teardown, reproduced even
+  running `tests/test_project.py` (pure-logic, no Qt) alone; confirmed
+  present on HEAD *before* the `c67ad1b` panel-refinement commit too — not
+  introduced by it, just re-discovered while checking that commit's tests.
 - `test_smoke.py::test_app_builds_offscreen` has a pre-existing, unrelated
   local-config flake (stale `visible_tabs` count) — hit again this session,
   confirmed unrelated to the truncation fix.
