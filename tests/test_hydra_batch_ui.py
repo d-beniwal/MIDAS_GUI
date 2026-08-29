@@ -189,7 +189,7 @@ def test_hydra_batch_run_orchestration_and_viewer_switching(app, fixture_availab
     page._loader.set_path(str(fixture_available / "ge1" / "panel.ge1.h5"))
     for n in (1, 2, 3, 4):
         result = _mk_result(BC_y=100.0 + n)
-        result._project_attempt_ref = f"/ge{n}/calib/attempt_0001"
+        result._project_attempt_ref = f"/analysis/calibrate/ge{n}/attempt_0001"
         page.set_panel_calibration(n, result)
     page._out_ed.setText("/tmp/hydra_batch_test_out2")
 
@@ -203,9 +203,9 @@ def test_hydra_batch_run_orchestration_and_viewer_switching(app, fixture_availab
 
     with h5py.File(proj_path, "r") as f:
         for n in (1, 2, 3, 4):
-            att = f[f"ge{n}/integrate/attempt_0001"]
+            att = f[f"analysis/integrate/ge{n}/attempt_0001"]
             assert att.attrs["n_frames"] == 1
-            assert att.attrs["calib_attempt_ref"] == f"/ge{n}/calib/attempt_0001"
+            assert att.attrs["calib_attempt_ref"] == f"/analysis/calibrate/ge{n}/attempt_0001"
 
     _FakeBatchWorker.calls = []
     page._run_mode_combo.setCurrentIndex(1)   # Parallel

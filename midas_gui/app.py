@@ -302,9 +302,9 @@ class MainWindow(QtWidgets.QMainWindow):
             _log(f"Geometry hand-off wiring failed:\n{traceback.format_exc()}")
 
         # FAIR provenance: hand the (initially closed) project context to the
-        # two tabs that log attempts to it. Defensive, like the wiring above —
+        # tabs that log attempts to it. Defensive, like the wiring above —
         # a placeholder tab (failed to build) simply has no such method.
-        for tab in (self._cal_tab, self._batch_tab):
+        for tab in (self._cal_tab, self._batch_tab, self._mask_tab):
             setter = getattr(tab, "set_project_context", None)
             if setter is not None:
                 try:
@@ -470,18 +470,40 @@ class MainWindow(QtWidgets.QMainWindow):
         self._project_history_act.setEnabled(path is not None)
 
     def _open_project_dialog(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Open Project", "", "MIDAS Project (*.h5);;All files (*)")
-        if not path:
+        """File ▸ Open Project…: browse to a project ``.h5`` and, the moment
+        one is clicked, preview exactly what it contains (which
+        ``gui_workspace`` tabs, which mask/calibrate/integrate attempts) as a
+        checkbox tree — everything checked by default; uncheck what
+        shouldn't be restored, then Open."""
+        from midas_gui.dialogs import ProjectOpenDialog
+        dlg = ProjectOpenDialog(self)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return
-        self._open_project_path(path)
+        self._open_project_selection(dlg.selected_path(), dlg.selection())
 
     def _open_project_path(self, path) -> None:
-        """Shared by File ▸ Open Project… and the Recent Projects menu. Opens
-        the project for future Calibrate/Batch-Integrate logging, restores
-        its saved session (``/workspace`` — see ``project.read_workspace``)
-        into every tab if it has one, and offers the separate, opt-in
-        historical-attempt picker (``_offer_populate_from_project``)."""
+        """Recent Projects menu entries: the path is already known, so skip
+        the file-browser pane and go straight to the same checkbox-tree
+        preview (``ProjectSelectionDialog``, wrapping the same
+        ``ProjectContentsPicker`` widget ``ProjectOpenDialog`` uses) for this
+        one file."""
+        from midas_gui.dialogs import ProjectSelectionDialog
+        dlg = ProjectSelectionDialog(path, self)
+        if not dlg.has_content():
+            QtWidgets.QMessageBox.critical(
+                self, "Open Project failed",
+                dlg.error_message() or f"{path} has nothing this version can restore.")
+            return
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        self._open_project_selection(path, dlg.selection())
+
+    def _open_project_selection(self, path, sel: dict) -> None:
+        """Shared by File ▸ Open Project… and the Recent Projects menu: given
+        a validated project path and a checkbox-tree selection (see
+        ``dialogs.ProjectContentsPicker.selection``), opens the project for
+        future Calibrate/Batch-Integrate/Mask-Builder logging and restores
+        only what was checked."""
         try:
             project.open_project(path)
         except Exception as e:
@@ -489,28 +511,82 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._set_project_path(path)
         settings.record_recent(path, "project")
-        try:
-            state, sidecars = project.read_workspace(path)
-        except Exception:
-            _log(f"Reading project workspace failed:\n{traceback.format_exc()}")
-            state, sidecars = {}, {}
-        if state:
-            if QtWidgets.QMessageBox.question(
-                    self, "Open Project",
-                    "Restoring this project's saved session will overwrite "
-                    "the current values in every tab. Continue?",
-                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                    QtWidgets.QMessageBox.No) == QtWidgets.QMessageBox.Yes:
-                self._apply_workspace_state(state, sidecars)
+
+        tab_names = sel.get("workspace_tabs") or []
+        if tab_names:
+            try:
+                meta = project.read_workspace_meta(path)
+                data = {"__midas_gui_state__": True, "tabs": {},
+                        "active_tab": meta.get("active_tab"),
+                        "active_profile": meta.get("active_profile")}
+                sidecars = {}
+                for name in tab_names:
+                    tstate, tsidecars = project.read_workspace_tab(path, name)
+                    data["tabs"][name] = tstate
+                    if tsidecars:
+                        sidecars[name] = tsidecars
+                self._apply_workspace_state(data, sidecars)
+            except Exception:
+                _log(f"Restoring gui_workspace failed:\n{traceback.format_exc()}")
         else:
-            # No saved session yet (brand-new project, or a v1 project
-            # predating this feature) — fall back to the creation-time
-            # profile so at least Profile-scoped defaults line up.
+            # Nothing checked under GUI Workspace (or none saved) — fall
+            # back to the creation-time profile so at least Profile-scoped
+            # defaults line up.
             try:
                 self._restore_active_profile(project.project_active_profile(path))
             except Exception:
                 _log(f"Could not read project's active profile:\n{traceback.format_exc()}")
-        self._offer_populate_from_project(path)
+
+        restored = []
+        try:
+            calib_attempts = {}
+            for k, ref in (sel.get("calib_refs") or {}).items():
+                meta = project.read_attempt(path, ref)
+                meta["_results_arrays"] = project.read_calib_attempt_results(path, ref)
+                # A multi-panel calibration's refined shifts are embedded in
+                # the project (see append_calibration_attempt) rather than
+                # relying on whatever file path was live when the attempt was
+                # saved — that path is often an ephemeral tempfile (no Output
+                # folder set during Fit) and may no longer exist, especially
+                # after moving the project to another machine. Re-materialize
+                # it next to the project file and point the restored result
+                # at that instead, so integration keeps seeing real panel
+                # shifts rather than silently falling back to zero.
+                panel_arr = project.read_calib_attempt_panel_shifts(path, ref)
+                if panel_arr is not None and meta.get("result") is not None:
+                    ps_path = project.materialize_panel_shifts(path, ref, panel_arr)
+                    if ps_path:
+                        meta["result"]["panel_shifts_path"] = ps_path
+                calib_attempts[k] = meta
+            integrate_attempts = {}
+            for k, ref in (sel.get("integrate_refs") or {}).items():
+                meta = project.read_attempt(path, ref)
+                meta["_results_arrays"] = project.read_attempt_results(path, ref)
+                integrate_attempts[k] = meta
+            if calib_attempts:
+                self._cal_tab.apply_project_calibration(calib_attempts)
+                restored.append("Calibrate: " + ", ".join(sorted(calib_attempts)))
+            if integrate_attempts:
+                self._batch_tab.apply_project_integration(integrate_attempts)
+                restored.append("Batch Integrate: " + ", ".join(sorted(integrate_attempts)))
+            mask_ref = sel.get("mask_ref")
+            if mask_ref:
+                mask_meta = project.read_attempt(path, mask_ref)
+                mask_arr = project.read_mask_attempt_array(path, mask_ref)
+                self._mask_tab.apply_project_mask(mask_meta, mask_arr)
+                restored.append(f"Mask: {mask_ref.rsplit('/', 1)[-1]}")
+        except Exception:
+            _log(f"Populate from project failed:\n{traceback.format_exc()}")
+            QtWidgets.QMessageBox.critical(
+                self, "Populate from project failed",
+                f"Could not populate the GUI from this project's records.\n"
+                f"See the error log:\n{_LOG_FILE}")
+            return
+
+        if restored:
+            QtWidgets.QMessageBox.information(
+                self, "Open Project",
+                "Restored from this project's recorded analysis:\n\n" + "\n".join(restored))
 
     def _restore_active_profile(self, name) -> None:
         """Switch to ``name`` (a Workspace/Project's recorded active Profile)
@@ -557,82 +633,6 @@ class MainWindow(QtWidgets.QMainWindow):
         from midas_gui.dialogs import ProjectHistoryDialog
         ProjectHistoryDialog(path, self).exec_()
 
-    def _offer_populate_from_project(self, path) -> None:
-        """After a successful File > Open Project…, offer to populate the
-        Calibrate / Batch Integrate tabs from the project's recorded
-        attempts — opening a project previously only wired it up for
-        *future* logging and left every tab's fields exactly as they were,
-        which meant "Open Project" didn't actually let you pick up a saved
-        project's data paths/geometry/settings."""
-        try:
-            panels = {}
-            for panel_key in project.discover_panels(path):
-                # "hydra_composite" (the Hydra Overall/summed-profile pseudo-panel)
-                # has no corresponding tab widget to restore into — only
-                # single-detector/per-GE-panel attempts are populate-able here.
-                # It's still fully visible via File ▸ Project History….
-                if panel_key not in ("single", "ge1", "ge2", "ge3", "ge4"):
-                    continue
-                calib = project.list_attempts(path, panel_key, "calib")
-                integrate = project.list_attempts(path, panel_key, "integrate")
-                if calib or integrate:
-                    panels[panel_key] = {"calib": calib, "integrate": integrate}
-        except Exception:
-            _log(f"Reading project attempts failed:\n{traceback.format_exc()}")
-            return
-        if not panels:
-            return
-
-        from midas_gui.dialogs import ProjectLoadDialog
-        dlg = ProjectLoadDialog(panels, self)
-        if dlg.exec_() != QtWidgets.QDialog.Accepted:
-            return
-
-        try:
-            calib_attempts = {}
-            for k, ref in dlg.calib_selection().items():
-                meta = project.read_attempt(path, ref)
-                meta["_results_arrays"] = project.read_calib_attempt_results(path, ref)
-                # A multi-panel calibration's refined shifts are embedded in
-                # the project (see append_calibration_attempt) rather than
-                # relying on whatever file path was live when the attempt was
-                # saved — that path is often an ephemeral tempfile (no Output
-                # folder set during Fit) and may no longer exist, especially
-                # after moving the project to another machine. Re-materialize
-                # it next to the project file and point the restored result
-                # at that instead, so integration keeps seeing real panel
-                # shifts rather than silently falling back to zero.
-                panel_arr = project.read_calib_attempt_panel_shifts(path, ref)
-                if panel_arr is not None and meta.get("result") is not None:
-                    ps_path = project.materialize_panel_shifts(path, ref, panel_arr)
-                    if ps_path:
-                        meta["result"]["panel_shifts_path"] = ps_path
-                calib_attempts[k] = meta
-            integrate_attempts = {}
-            for k, ref in dlg.integrate_selection().items():
-                meta = project.read_attempt(path, ref)
-                meta["_results_arrays"] = project.read_attempt_results(path, ref)
-                integrate_attempts[k] = meta
-            if calib_attempts:
-                self._cal_tab.apply_project_calibration(calib_attempts)
-            if integrate_attempts:
-                self._batch_tab.apply_project_integration(integrate_attempts)
-        except Exception:
-            _log(f"Populate from project failed:\n{traceback.format_exc()}")
-            QtWidgets.QMessageBox.critical(
-                self, "Populate from project failed",
-                f"Could not populate the GUI from this project's records.\n"
-                f"See the error log:\n{_LOG_FILE}")
-            return
-
-        msg = []
-        if calib_attempts:
-            msg.append("Calibrate: " + ", ".join(sorted(calib_attempts)))
-        if integrate_attempts:
-            msg.append("Batch Integrate: " + ", ".join(sorted(integrate_attempts)))
-        QtWidgets.QMessageBox.information(
-            self, "Populate from project",
-            "Populated from this project's recorded attempts:\n\n" + "\n".join(msg))
 
     def _save_project_dialog(self):
         """Ctrl+S: overwrite the currently-open project's ``/workspace``
@@ -695,14 +695,18 @@ class MainWindow(QtWidgets.QMainWindow):
         except (TypeError, ValueError):
             return False
 
-    def _serialize_workspace(self, sidecar_stem=None, *, quiet: bool = False):
+    def _serialize_workspace(self, sidecar_dir=None, *, quiet: bool = False):
         """Build the ``{"__midas_gui_state__": ..., "tabs": {...}}`` dict that
-        :meth:`save_project` writes into the project's ``/workspace`` slot.
-        Shared with the periodic
-        dirty-check and autosave: passing ``sidecar_stem=None`` (their case)
-        skips every tab's sidecar file I/O (mask/calibration export — see
-        each tab's own ``get_state``), so it's cheap and side-effect-free to
-        call on every timer tick. Returns ``(state, errors)``."""
+        :meth:`save_project` writes into the project's ``/gui_workspace``
+        header, one child group per tab (see ``project.write_gui_workspace``).
+        Shared with the periodic dirty-check and autosave: passing
+        ``sidecar_dir=None`` (their case) skips every tab's sidecar file I/O
+        (mask/calibration export — see each tab's own ``get_state``), so it's
+        cheap and side-effect-free to call on every timer tick. When given, each
+        tab that accepts ``sidecar_stem`` gets its own subdirectory under
+        ``sidecar_dir`` (named after the tab) so its exported sidecar files
+        stay unambiguously scoped to that tab — ``save_project`` reads them
+        back out per-subdirectory. Returns ``(state, errors)``."""
         current = self._tabs.currentWidget()
         state = {"__midas_gui_state__": True, "version": 1, "tabs": {},
                  "active_profile": settings.active_profile()}
@@ -715,8 +719,10 @@ class MainWindow(QtWidgets.QMainWindow):
             if get_state is None:
                 continue
             try:
-                if sidecar_stem is not None and self._accepts_sidecar_stem(get_state):
-                    state["tabs"][name] = get_state(sidecar_stem=sidecar_stem)
+                if sidecar_dir is not None and self._accepts_sidecar_stem(get_state):
+                    tab_dir = Path(sidecar_dir) / name
+                    tab_dir.mkdir(parents=True, exist_ok=True)
+                    state["tabs"][name] = get_state(sidecar_stem=str(tab_dir / "sidecar"))
                 else:
                     state["tabs"][name] = get_state()
             except Exception:
@@ -801,20 +807,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self._clear_autosave_draft()
 
     def save_project(self, path):
-        """Overwrite this project's ``/workspace`` slot (see
-        ``project.write_workspace``) with every tab's current field state —
-        the merged replacement for the old standalone Workspace JSON file.
-        Tabs that hold derived data not yet exported to a file of its own
-        (MaskTab, CalibrationTab) still write small sidecars via their
-        existing ``get_state(sidecar_stem=...)`` contract; those are
-        harvested from a scratch temp dir and embedded into the project
-        instead of being left as loose files on disk."""
+        """Overwrite this project's ``/gui_workspace`` header (see
+        ``project.write_gui_workspace``) with every tab's current field
+        state, one modular group per tab. Tabs that hold derived data not
+        yet exported to a file of its own (MaskTab, CalibrationTab) still
+        write small sidecars via their existing ``get_state(sidecar_stem=...)``
+        contract; those are harvested from a scratch temp dir (one
+        subdirectory per tab — see ``_serialize_workspace``) and embedded
+        into that tab's own group instead of being left as loose files on
+        disk."""
         with tempfile.TemporaryDirectory(prefix="midas_gui_sidecar_") as td:
-            stem = str(Path(td) / "sidecar")
-            state, errors = self._serialize_workspace(sidecar_stem=stem)
-            sidecars = {f.name: f.read_bytes() for f in Path(td).iterdir()}
+            state, errors = self._serialize_workspace(sidecar_dir=td)
+            sidecars = {}
+            for sub in Path(td).iterdir():
+                if sub.is_dir():
+                    files = {f.name: f.read_bytes() for f in sub.iterdir()}
+                    if files:
+                        sidecars[sub.name] = files
+        meta = {"active_tab": state.get("active_tab"), "active_profile": state.get("active_profile")}
         try:
-            project.write_workspace(path, state, sidecars)
+            project.write_gui_workspace(path, tabs=state["tabs"], sidecars=sidecars, meta=meta)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Save failed", str(e))
             return
@@ -831,14 +843,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _apply_workspace_state(self, data: dict, sidecars: Optional[dict] = None) -> None:
         """Restore every tab's fields from a previously saved session
-        snapshot — a project's ``/workspace`` (see ``_open_project_path``),
-        a legacy standalone Workspace JSON (``_import_legacy_workspace_dialog``),
-        or an autosave crash-recovery draft (``maybe_offer_restore_autosave``).
-        Path-backed fields (images, masks, dark/bright/background, HDF5
-        datasets) are re-loaded automatically; long-running pipelines (Fit,
-        Batch Integrate, PDF transform, Refinement) are not re-run — their
-        inputs are restored so a single click of the tab's own Run/Fit
-        button reproduces the result."""
+        snapshot — one or more of a project's ``/gui_workspace`` tab groups
+        (see ``_open_project_dialog``), a legacy standalone Workspace JSON
+        (``_import_legacy_workspace_dialog``), or an autosave crash-recovery
+        draft (``maybe_offer_restore_autosave``). ``sidecars`` is nested,
+        ``{tab_name: {filename: data}}`` (matching ``_serialize_workspace``'s
+        per-tab subdirectories) — empty/omitted for callers with no sidecars
+        of their own. Path-backed fields (images, masks, dark/bright/
+        background, HDF5 datasets) are re-loaded automatically; long-running
+        pipelines (Fit, Batch Integrate, PDF transform, Refinement) are not
+        re-run — their inputs are restored so a single click of the tab's
+        own Run/Fit button reproduces the result."""
         if not data.get("__midas_gui_state__"):
             QtWidgets.QMessageBox.critical(
                 self, "Load failed", "This is not a valid MIDAS GUI session snapshot.")
@@ -850,12 +865,6 @@ class MainWindow(QtWidgets.QMainWindow):
         name_to_widget = {name: widget for widget, name, _always in self._tab_specs}
         errors, skipped = [], []
         with tempfile.TemporaryDirectory(prefix="midas_gui_sidecar_") as td:
-            stem = str(Path(td) / "sidecar")
-            for name, blob in (sidecars or {}).items():
-                if isinstance(blob, (bytes, bytearray)):
-                    (Path(td) / name).write_bytes(bytes(blob))
-                else:
-                    (Path(td) / name).write_text(blob)
             for name, tstate in data.get("tabs", {}).items():
                 widget = name_to_widget.get(name)
                 set_state = getattr(widget, "set_state", None) if widget is not None else None
@@ -864,7 +873,14 @@ class MainWindow(QtWidgets.QMainWindow):
                     continue
                 try:
                     if self._accepts_sidecar_stem(set_state):
-                        set_state(tstate, sidecar_stem=stem)
+                        tab_dir = Path(td) / name
+                        tab_dir.mkdir(parents=True, exist_ok=True)
+                        for fname, blob in (sidecars or {}).get(name, {}).items():
+                            if isinstance(blob, (bytes, bytearray)):
+                                (tab_dir / fname).write_bytes(bytes(blob))
+                            else:
+                                (tab_dir / fname).write_text(blob)
+                        set_state(tstate, sidecar_stem=str(tab_dir / "sidecar"))
                     else:
                         set_state(tstate)
                 except Exception:

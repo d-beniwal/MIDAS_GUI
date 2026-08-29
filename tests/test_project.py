@@ -49,7 +49,9 @@ def test_open_project_rejects_non_project_h5(tmp_path):
 def test_read_workspace_empty_for_fresh_project(tmp_path):
     path = str(tmp_path / "proj.h5")
     project.create_project(path)
-    state, sidecars = project.read_workspace(path)
+    assert project.list_workspace_tabs(path) == []
+    assert project.read_workspace_meta(path) == {}
+    state, sidecars = project.read_workspace_tab(path, "Mask Builder")
     assert state == {}
     assert sidecars == {}
 
@@ -57,32 +59,43 @@ def test_read_workspace_empty_for_fresh_project(tmp_path):
 def test_write_and_read_workspace_roundtrip(tmp_path):
     path = str(tmp_path / "proj.h5")
     project.create_project(path)
-    state = {"__midas_gui_state__": True, "version": 1, "tabs": {"Mask Builder": {"fields": {}}},
-              "active_profile": "1-ID-E", "active_tab": "Mask Builder"}
-    sidecars = {"sidecar_mask.tif": np.ones((4, 4), dtype=np.uint8),
-                "sidecar_calibration.json": json.dumps({"Lsd": 200000.0})}
+    tabs = {"Mask Builder": {"fields": {}}, "Calibrate": {"fields": {"wl": 0.17}}}
+    sidecars = {"Mask Builder": {"sidecar_mask.tif": np.ones((4, 4), dtype=np.uint8)},
+                "Calibrate": {"sidecar_calibration.json": json.dumps({"Lsd": 200000.0})}}
+    meta = {"active_profile": "1-ID-E", "active_tab": "Mask Builder"}
 
-    project.write_workspace(path, state, sidecars)
-    got_state, got_sidecars = project.read_workspace(path)
-    assert got_state == state
-    assert np.array_equal(got_sidecars["sidecar_mask.tif"], sidecars["sidecar_mask.tif"])
-    assert json.loads(got_sidecars["sidecar_calibration.json"]) == {"Lsd": 200000.0}
+    project.write_gui_workspace(path, tabs=tabs, sidecars=sidecars, meta=meta)
+    assert set(project.list_workspace_tabs(path)) == {"Mask Builder", "Calibrate"}
+    got_meta = project.read_workspace_meta(path)
+    assert got_meta["active_tab"] == "Mask Builder"
+    assert got_meta["active_profile"] == "1-ID-E"
 
-    # A second save overwrites the single /workspace slot rather than appending.
-    state2 = dict(state, active_tab="Calibrate")
-    project.write_workspace(path, state2, sidecars=None)
-    got_state2, got_sidecars2 = project.read_workspace(path)
-    assert got_state2["active_tab"] == "Calibrate"
-    assert got_sidecars2 == {}
+    mb_state, mb_sidecars = project.read_workspace_tab(path, "Mask Builder")
+    assert mb_state == tabs["Mask Builder"]
+    assert np.array_equal(mb_sidecars["sidecar_mask.tif"], sidecars["Mask Builder"]["sidecar_mask.tif"])
+
+    cal_state, cal_sidecars = project.read_workspace_tab(path, "Calibrate")
+    assert cal_state == tabs["Calibrate"]
+    assert json.loads(cal_sidecars["sidecar_calibration.json"]) == {"Lsd": 200000.0}
+
+    # A second save overwrites /gui_workspace wholesale rather than appending —
+    # a tab dropped from the new `tabs` dict is gone, not left stale.
+    project.write_gui_workspace(path, tabs={"Calibrate": {"fields": {}}}, sidecars=None,
+                                 meta={"active_tab": "Calibrate"})
+    assert project.list_workspace_tabs(path) == ["Calibrate"]
+    assert project.read_workspace_meta(path)["active_tab"] == "Calibrate"
+    _, empty_sidecars = project.read_workspace_tab(path, "Calibrate")
+    assert empty_sidecars == {}
 
     # Calibrate/integrate attempt history is untouched by a workspace save.
     project.append_calibration_attempt(
         path, "single", cfg={"mode": "one_shot"}, result=_fake_result(), loader_state={})
     with h5py.File(path, "r") as f:
-        assert "single/calib/attempt_0001" in f
-    project.write_workspace(path, state2, sidecars=None)
+        assert "analysis/calibrate/single/attempt_0001" in f
+    project.write_gui_workspace(path, tabs={"Calibrate": {"fields": {}}}, sidecars=None,
+                                 meta={"active_tab": "Calibrate"})
     with h5py.File(path, "r") as f:
-        assert "single/calib/attempt_0001" in f
+        assert "analysis/calibrate/single/attempt_0001" in f
 
 
 def test_sha256_file_full_and_partial(tmp_path, monkeypatch):
@@ -135,11 +148,11 @@ def test_append_calibration_attempt_numbering_and_filtering(tmp_path):
         path, "single", cfg=cfg, result=result, loader_state=loader_state,
         mask_is_file_backed=True)
 
-    assert ref1 == "/single/calib/attempt_0001"
-    assert ref2 == "/single/calib/attempt_0002"
+    assert ref1 == "/analysis/calibrate/single/attempt_0001"
+    assert ref2 == "/analysis/calibrate/single/attempt_0002"
 
     with h5py.File(path, "r") as f:
-        grp = f["single/calib"]
+        grp = f["analysis/calibrate/single"]
         assert grp.attrs["latest"] == "attempt_0002"
         att = grp["attempt_0001"]
         assert att.attrs["Lsd"] == pytest.approx(200000.0)
@@ -208,6 +221,51 @@ def test_read_calib_attempt_panel_shifts_none_when_absent(tmp_path):
     assert project.materialize_panel_shifts(path, ref, None) is None
 
 
+def test_append_and_list_mask_attempt(tmp_path):
+    path = str(tmp_path / "proj.h5")
+    project.create_project(path)
+    mask = np.zeros((4, 4), dtype=np.uint8)
+    mask[0, 0] = 1
+    cfg = {"fields": {"lower": -5.0, "spatial_check": True}}
+    loader_state = {"path": None, "stack_files": ["/x/a.tif", "/x/b.tif"]}
+
+    ref = project.append_mask_attempt(path, cfg=cfg, mask=mask, loader_state=loader_state)
+    assert ref == "/analysis/mask/attempt_0001"
+
+    attempts = project.list_mask_attempts(path)
+    assert [a["name"] for a in attempts] == ["attempt_0001"]
+    assert attempts[0]["ref"] == ref
+
+    meta = project.read_attempt(path, ref)
+    assert meta["cfg"]["fields"]["lower"] == -5.0
+    assert meta["loader_state"]["stack_files"] == ["/x/a.tif", "/x/b.tif"]
+    assert "environment" in meta
+
+    # A global history, not per-panel — no panel_key axis at all.
+    ref2 = project.append_mask_attempt(path, cfg={}, mask=mask, loader_state={})
+    assert ref2 == "/analysis/mask/attempt_0002"
+    assert [a["name"] for a in project.list_mask_attempts(path)] == ["attempt_0002", "attempt_0001"]
+
+
+def test_read_mask_attempt_array(tmp_path):
+    path = str(tmp_path / "proj.h5")
+    project.create_project(path)
+    mask = np.zeros((3, 5), dtype=np.uint8)
+    mask[1, 2] = 1
+    ref = project.append_mask_attempt(path, cfg={}, mask=mask, loader_state={})
+
+    arr = project.read_mask_attempt_array(path, ref)
+    assert arr.shape == (3, 5)
+    assert arr[1, 2] == 1
+    assert arr.sum() == 1
+
+    # A ref with no "mask" dataset (e.g. a calibration attempt) -> None,
+    # not a KeyError.
+    calib_ref = project.append_calibration_attempt(
+        path, "single", cfg={}, result=_fake_result(), loader_state={})
+    assert project.read_mask_attempt_array(path, calib_ref) is None
+
+
 def test_append_integration_attempt_embeds_profiles_and_links_calibration(tmp_path):
     path = str(tmp_path / "proj.h5")
     project.create_project(path)
@@ -228,9 +286,9 @@ def test_append_integration_attempt_embeds_profiles_and_links_calibration(tmp_pa
         path, "ge1", inputs=inputs, finished_payload=finished_payload,
         calibration_snapshot={"Lsd": 200000.0}, calib_attempt_ref=calib_ref)
 
-    assert ref == "/ge1/integrate/attempt_0001"
+    assert ref == "/analysis/integrate/ge1/attempt_0001"
     with h5py.File(path, "r") as f:
-        att = f["ge1/integrate/attempt_0001"]
+        att = f["analysis/integrate/ge1/attempt_0001"]
         assert att.attrs["n_frames"] == 5
         assert att.attrs["kernel"] == "subpixel4"
         assert att.attrs["calib_attempt_ref"] == calib_ref
@@ -269,9 +327,9 @@ def test_calibration_tab_logs_to_project(app, tmp_path):
                       "refine": {}, "mask": None}
 
     tab._log_to_project(result)
-    assert result._project_attempt_ref == "/single/calib/attempt_0001"
+    assert result._project_attempt_ref == "/analysis/calibrate/single/attempt_0001"
     with h5py.File(proj_path, "r") as f:
-        att = f["single/calib/attempt_0001"]
+        att = f["analysis/calibrate/single/attempt_0001"]
         assert att.attrs["pipeline"] == "one_shot"
         meta = json.loads(att["metadata"][()])
         assert meta["result"]["_calibrant_name"] == "CeO2"
@@ -290,7 +348,7 @@ def test_batch_tab_logs_to_project_with_calibration_snapshot(app, tmp_path):
     tab.set_project_context(ctx)
 
     calib_result = _fake_result()
-    calib_result._project_attempt_ref = "/single/calib/attempt_0003"
+    calib_result._project_attempt_ref = "/analysis/calibrate/single/attempt_0003"
     tab._calib_result = calib_result
     tab._use_tab2_btn.setChecked(True)
 
@@ -301,9 +359,9 @@ def test_batch_tab_logs_to_project_with_calibration_snapshot(app, tmp_path):
 
     tab._log_to_project(data)
     with h5py.File(proj_path, "r") as f:
-        att = f["single/integrate/attempt_0001"]
+        att = f["analysis/integrate/single/attempt_0001"]
         assert att.attrs["n_frames"] == 3
-        assert att.attrs["calib_attempt_ref"] == "/single/calib/attempt_0003"
+        assert att.attrs["calib_attempt_ref"] == "/analysis/calibrate/single/attempt_0003"
         assert att["results/profiles"].shape == (3, 20)
 
 
@@ -528,6 +586,30 @@ def test_apply_project_calibration_single_detector(app, tmp_path):
     # profile/cake, which need an actual image, are correctly skipped).
     assert cal_tab._result is not None
     assert len(cal_tab._ring_items) > 0
+
+
+def test_apply_project_mask_restores_fields_and_mask(app, tmp_path):
+    from midas_gui.tab_mask import MaskTab
+
+    proj_path = str(tmp_path / "proj.h5")
+    project.create_project(proj_path)
+    mask = np.zeros((4, 6), dtype=np.uint8)
+    mask[2, 3] = 1
+    ref = project.append_mask_attempt(
+        proj_path, cfg={"fields": {"lower": -7.5, "spatial_check": True}},
+        mask=mask, loader_state={"path": None, "stack_files": None})
+
+    meta = project.read_attempt(proj_path, ref)
+    arr = project.read_mask_attempt_array(proj_path, ref)
+
+    mask_tab = MaskTab()
+    mask_tab.apply_project_mask(meta, arr)
+    assert mask_tab._lower.value() == pytest.approx(-7.5)
+    assert mask_tab._spatial_check.isChecked()
+    restored = mask_tab.get_mask()
+    assert restored is not None
+    assert restored[2, 3] == 1
+    assert restored.sum() == 1
 
 
 def test_apply_project_integration_populates_batch_plots_single_detector(app, tmp_path):

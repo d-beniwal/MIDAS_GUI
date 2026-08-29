@@ -3,7 +3,35 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-28 (Multi-panel calibration actually refines panel
+**Last updated:** 2026-08-29 (Project `.h5` schema redesign — `gui_workspace`
+(modular, per-tab) + `analysis` (mask/calibrate/integrate FAIR history) — and
+a unified Open Project dialog; see §16 for full detail. Summary:
+- **Breaking schema change (clean cutover, `schema_version` 2 → 3):** the old
+  single `/workspace` blob is replaced by `/gui_workspace/<tab name>/...`,
+  one independently-readable/restorable group per tab; the old
+  `/<panel_key>/{calib,integrate}` attempt history moves to
+  `/analysis/{calibrate,integrate}/<panel_key>/...`. Project files created by
+  an earlier version are **not** readable by this one — Open Project shows a
+  clear warning naming the old schema version rather than silently restoring
+  nothing.
+- **New: Mask Builder gets FAIR provenance too** (`/analysis/mask`, global —
+  not per-panel, since Mask Builder is one shared tab). A new **Log to
+  Project** button (§4) records the current mask's full parameters plus its
+  resulting compressed mask array as an explicit, click-when-ready action
+  (unlike Calibrate/Batch Integrate there's no single "run finished" moment
+  to auto-log from).
+- **New unified Open Project dialog** replaces the old two-stage flow (a
+  blind Yes/No "restore everything" box, then a separate calibrate/integrate
+  picker): browse to a `.h5` on the left, and the moment one is clicked, the
+  right pane previews everything it contains — every `gui_workspace` tab and
+  every mask/calibrate/integrate attempt — as one checkbox tree, everything
+  checked by default. Recent Projects entries show the same tree without the
+  browser pane. Nothing is restored until you click Open on the checked
+  selection.
+- **File ▸ Project History…** now also lists mask attempts (a "Mask" row,
+  panel column shows "—" since it isn't per-panel).)
+
+**Previously:** (2026-08-28, Multi-panel calibration actually refines panel
 shifts now, and the result persists wherever the calibration ends up — see
 §5 "Export" for full detail. Summary:
 - **Root-cause fix:** every pipeline behind **Multi-panel detector**
@@ -1358,6 +1386,12 @@ removes them.
 
 ### Save / Load
 Save the combined mask as TIFF (0 = good, 1 = bad); loading a TIFF applies immediately.
+A **Log to Project** button next to Save records the current mask — its full
+parameters and the resulting compressed mask array — as a new FAIR-provenance
+attempt in the currently-open project (see §16), enabled once a mask exists.
+Unlike Calibrate/Batch Integrate there's no single "run finished" moment to
+log from automatically (a mask can come from Compute, Load, hand-drawn
+shapes, or any combination), so this is an explicit, click-when-ready action.
 
 ---
 
@@ -2421,62 +2455,62 @@ next launch**.
 
 ## 16. File ▸ Project (session + FAIR provenance)
 
-A **Project** is a single, long-lived `.h5` file that holds two things at
-once — beyond a saved **profile** of defaults (§15):
+A **Project** is a single, long-lived `.h5` file with two top-level headers
+— beyond a saved **profile** of defaults (§15):
 
-- **Session** — the live, in-progress state of every tab (every field
-  you've typed or picked, across all 10 tabs), so a session can be closed
-  and resumed later exactly where it left off. This lives in the project's
-  `workspace` slot and is simply **overwritten** each time you save — a
-  freely-editable draft, not a permanent record.
-- **Provenance history** — every time a Calibrate or Batch Integrate run
-  finishes, a self-contained, append-only record of what actually
-  *happened* (inputs, parameters, results, software versions) is added
-  alongside it. This never gets overwritten — it accumulates across many
-  separate launches of the GUI over the course of an experiment.
+- **`gui_workspace`** — the live, in-progress state of every tab, stored
+  **modularly, one group per tab** (Data Viewer, Mask Builder, Calibrate,
+  …), so a tab's saved snapshot can be inspected or restored independently
+  of every other tab's. This is simply **overwritten** each time you save —
+  a freely-editable draft, not a permanent record.
+- **`analysis`** — three sub-headers (**mask**, **calibrate**, **integrate**),
+  each an append-only, self-contained FAIR-provenance history: every time
+  Mask Builder logs a mask, or a Calibrate/Batch Integrate run finishes, a
+  full record of what actually *happened* (inputs, parameters, results,
+  software versions) is added. This never gets overwritten — it accumulates
+  across many separate launches of the GUI over the course of an experiment.
 
-(Workspace and Project used to be two separate files — a JSON "Workspace"
-and an HDF5 "Project" linked only by filename convention. They're now one
-file: `Ctrl+S` saves your session *into* the project you have open,
-creating one if you don't have one yet.)
+> **Breaking change:** this two-header layout (`schema_version 3`) replaced
+> the older single-`workspace`-slot layout in a clean cutover — **project
+> files created by an earlier version of MIDAS GUI are not readable by this
+> one.** Opening one shows a clear warning (rather than a silently empty
+> project) naming its old schema version; there is no automatic migration.
 
 - **File ▸ Save Project** (`Ctrl+S`) — if a project is already open,
-  silently overwrites its `workspace` slot with the current session (no
-  dialog); the append-only attempt history elsewhere in the file is
-  untouched. If no project is open yet, falls through to Save Project As….
-  A completion dialog lists which tabs (if any) failed to save.
+  silently overwrites its `gui_workspace` header with the current session
+  (no dialog), one group per tab; the `analysis` history elsewhere in the
+  file is untouched. If no project is open yet, falls through to Save
+  Project As…. A completion dialog lists which tabs (if any) failed to save.
 - **File ▸ Save Project As…** (`Ctrl+Shift+S`) — always prompts for a
   destination `.h5`. Pick a name that doesn't exist yet to create a new,
   empty project (immediately populated with your current session); pick an
   existing project file to make *it* the active project and overwrite
-  *its* session (its attempt history is kept). Either way, that file
+  *its* session (its `analysis` history is kept). Either way, that file
   becomes the target for future plain `Ctrl+S`.
-- **File ▸ Open Project…** (`Ctrl+O`) — pick a previously-created project
-  file to make it active. If it has a saved session, you're asked to
-  confirm (restoring overwrites every tab's current values) before it's
-  applied; a completion dialog reports any tabs that no longer exist or
-  failed to restore, and the tab that was active at save time is
-  re-selected. A project with no saved session yet (brand new, or created
-  before this feature existed) instead restores just its creation-time
-  beamline Profile. Either way, if the project has any recorded
-  Calibrate/Batch Integrate attempts, a **Populate from project** dialog
-  follows next — see below; this is a separate, opt-in step for jumping to
-  one specific historical run, independent of the session restore above.
+- **File ▸ Open Project…** (`Ctrl+O`) — opens a single combined dialog: a
+  file-tree browser on the left to navigate to a `.h5`, and the moment one
+  is clicked, the right pane previews exactly what that project contains —
+  which `gui_workspace` tabs have a saved snapshot, and which mask/
+  calibrate/integrate attempts are recorded — as a checkbox tree,
+  **everything checked by default**. Uncheck anything you don't want
+  restored, then **Open**; nothing is restored until you do. See "Opening a
+  project can populate the GUI" below for exactly what each checked item
+  restores.
 - **File ▸ Recent Projects** — the last 10 opened/saved projects, newest
-  first; picking one goes through **Open Project…**'s same flow.
+  first; picking one shows the same checkbox-tree preview (without the
+  file-browser pane, since the path is already known).
 - **File ▸ Project History…** — a read-only browser listing every attempt
-  recorded in the active project; see below. Disabled when no project is
-  open.
+  recorded in the active project, including mask attempts; see below.
+  Disabled when no project is open.
 - **File ▸ Close Project** — detaches from the file (stops future
-  Calibrate/Batch-Integrate logging and the `Ctrl+S` target) without
-  touching any tab's current values. If the session has unsaved changes,
-  prompts **Save / Discard / Cancel** first, the same as closing the
-  window does.
+  Calibrate/Batch-Integrate/Mask-Builder logging and the `Ctrl+S` target)
+  without touching any tab's current values. If the session has unsaved
+  changes, prompts **Save / Discard / Cancel** first, the same as closing
+  the window does.
 - **File ▸ Import Legacy Workspace (.json)…** — reads a standalone
-  Workspace JSON file saved before this feature merged Workspace and
-  Project into one `.h5` (same validation and confirmation as the old
-  Load Workspace…), and applies it into whichever project is — or isn't —
-  currently open.
+  Workspace JSON file saved before Workspace and Project were merged into
+  one `.h5` (same validation and confirmation as the old Load Workspace…),
+  and applies it into whichever project is — or isn't — currently open.
 - The active project's filename is always shown in the status bar
   (bottom-right, "Project: …" / "Project: none") **and**, in a bold,
   high-contrast green, at the far right of the tab-bar header row (empty
@@ -2518,10 +2552,11 @@ their result. This keeps a load fast and avoids silently kicking off a multi-min
 job in the background.
 
 ### Sidecars for in-progress derived data
-Two tabs can hold computed data that hasn't been exported to a file of its own yet —
-a drawn/computed **mask** (Mask Builder) and a just-fit **calibration result**
-(Calibrate). Saving a session embeds small sidecars into the project's `workspace`
-slot (never as loose files on disk) so this in-progress work isn't silently lost:
+A tab's `gui_workspace` snapshot can hold computed data that hasn't been exported to a
+file of its own yet — a drawn/computed **mask** (Mask Builder) and a just-fit
+**calibration result** (Calibrate). Saving a session embeds small sidecars into that
+tab's own group (never as loose files on disk) so this in-progress work isn't silently
+lost:
 - the current in-memory **mask**, if any; reloaded automatically the next time this
   session is restored.
 - the last fit's **calibration result**, flattened, kept for the record and to reseed
@@ -2533,103 +2568,112 @@ slot (never as loose files on disk) so this in-progress work isn't silently lost
 While a project is open, **every completed Calibrate run** (single-detector
 Tab 2, or each of the 4 panels in Hydra mode) and **every completed Batch
 Integrate run** (single-detector Tab 4, or each Hydra panel) appends one
-record — automatically, with no extra action needed. Nothing is logged when
-no project is open (the default), so this is entirely opt-in.
+record automatically, with no extra action needed. **Mask Builder** is the
+one exception — since there's no single "run finished" moment to log from
+(a mask can come from Compute, Load, hand-drawn shapes, or any combination),
+clicking its **Log to Project** button (§4) explicitly records the current
+mask. Nothing is logged when no project is open (the default), so all of
+this is entirely opt-in.
 
 Each record is self-contained and includes: the exact parameters used
 (pipeline/refine choices for a calibration, kernel/binning/corrections for
-an integration); the fitted calibration result **and its computed radial
-profile / Eta-vs-R cake** (for a calibration, so re-opening the project
-never needs to recompute or even re-locate the original image — see
-"Opening a project can populate the GUI" below); the mask/dark/bright/
-background **files actually used, referenced by path + hash** — never
-duplicated into the record, the same as the raw calibrant image / raw scan
-data (not duplicated — a scan can be many thousands of frames), since
-they're always backed by a real file on disk. The one exception is a mask
-that includes anything hand-drawn/computed directly in Mask Builder with no
-file of its own to point back to — that one *is* embedded (compressed),
-since there's no path to hash. Each record also carries the midas-gui /
-MIDAS package versions active at the time, **plus the beamline Profile
-active for that run** (see §15). A Batch Integrate record additionally
-embeds the exact calibration values it used and links back to the specific
-Calibrate run that produced them, when that run was itself logged to the
-same project.
+an integration, every threshold/method toggle for a mask); the fitted
+calibration result **and its computed radial profile / Eta-vs-R cake** (for
+a calibration, so re-opening the project never needs to recompute or even
+re-locate the original image — see "Opening a project can populate the GUI"
+below); the mask/dark/bright/background **files actually used, referenced
+by path + hash** — never duplicated into the record, the same as the raw
+calibrant image / raw scan data (not duplicated — a scan can be many
+thousands of frames), since they're always backed by a real file on disk.
+The one exception is a mask that includes anything hand-drawn/computed
+directly in Mask Builder with no file of its own to point back to — that
+one *is* embedded (compressed) in the calibrate/integrate record that used
+it, since there's no path to hash — a **mask attempt** itself (`analysis/
+mask`) always embeds its resulting mask array, compressed, since recording
+that array *is* the point of logging one. Each record also carries the
+midas-gui / MIDAS package versions active at the time, **plus the beamline
+Profile active for that run** (see §15). A Batch Integrate record
+additionally embeds the exact calibration values it used and links back to
+the specific Calibrate run that produced them, when that run was itself
+logged to the same project.
 
-Records are never overwritten — recalibrating or re-integrating adds a new,
-separately numbered record rather than replacing the previous one, so the
-full history of what was tried stays in the file. A failed provenance write
-(e.g. disk full) is logged to the tab's own Log panel and never blocks or
-alters the run's on-screen result.
+Records are never overwritten — recalibrating, re-integrating, or logging
+another mask adds a new, separately numbered record rather than replacing
+the previous one, so the full history of what was tried stays in the file.
+A failed provenance write (e.g. disk full) is logged to the tab's own Log
+panel (a message box, for Mask Builder) and never blocks or alters the
+run's on-screen result.
 
 The file is plain HDF5 (`h5py`/`h5dump`/HDFView can browse it directly) —
 no separate tool is required to inspect what a project contains.
 
 ### Opening a project can populate the GUI
 
-**File ▸ Open Project…** doesn't just make a project active for future
-logging — if it contains any recorded attempts, a **Populate from project**
-dialog appears with one row per panel found in the file (**Single detector**,
-or each of **ge1**–**ge4** present in Hydra mode). Each row has two
-independent checkboxes, **Calibrate** and **Batch Integrate**, each paired
-with a picker defaulting to that panel's latest attempt (older attempts stay
-selectable if the project has more than one). A checkbox is disabled if that
-panel has no attempt of that kind. Click **Populate** to apply the checked
-rows, or **Skip** to leave every tab exactly as it was (the project still
-becomes active for future logging either way).
+**File ▸ Open Project…**'s checkbox-tree preview (see above) is where you
+choose what to restore — nothing happens until you click **Open** on the
+checked selection. The tree has two parts, matching the file's two headers:
 
-Populating switches the Calibrate/Batch Integrate mode ribbon
-(Single-detector vs Hydra) to match what was selected, and restores:
+- **GUI Workspace** — one checkbox per tab that has a saved snapshot in this
+  project (plus a **Select all** convenience toggle). Checking a tab
+  restores its fields exactly as **File ▸ Save Project** left them,
+  including its sidecars (see above) — unchecking a tab leaves it exactly
+  as it currently is.
+- **Analysis** — a **Mask** row (checkbox + a picker over every recorded
+  mask attempt, defaulting to the latest) and a **Calibrate**/**Batch
+  Integrate** grid, one row per panel found in the file (**Single
+  detector**, or each of **ge1**–**ge4** present in Hydra mode), each with
+  its own checkbox + attempt picker (older attempts stay selectable if the
+  project has more than one). A checkbox is disabled if that panel/kind has
+  no recorded attempt. (The Hydra **Overall** composite attempt has no
+  corresponding tab to restore into, so it never appears here — it's still
+  fully visible, read-only, via **File ▸ Project History…**.)
+
+Checking a **Calibrate**/**Batch Integrate** row switches that tab's mode
+ribbon (Single-detector vs Hydra) to match, and restores:
 
 - **Calibrate:** the data path/dataset (and, single-detector only, the frame
   index), wavelength, pixel size, calibrant, refine-parameter checkboxes,
   iteration counts, device, and the fitted BC/Lsd/tilts as a manual seed
   (**Use manual seed** is turned on) — a single click of **Fit** reproduces
-  the recorded result.
+  the recorded result. The predicted-ring overlay reappears immediately
+  (pure geometry — no image needed), and the **Radial Profile**/**Eta vs R
+  Cake** tabs are populated **directly from the record itself** — no
+  recompute, and the original image doesn't even need to still be
+  reachable. In Hydra mode this happens per panel.
 - **Batch Integrate:** the data path/dataset and frame range, kernel, output
   format, and monitor file — plus, unlike a plain GUI-state load, a live,
   ready-to-use **calibration** built from the attempt's own recorded
   geometry, so **Run** works immediately without first re-running Tab 2.
+  The **Waterfall** and **Stacked profiles** views are replayed from the
+  attempt's own saved per-frame profiles — no re-run needed. In Hydra mode
+  each GE panel keeps its own independent pair of views.
 
-Populating also redraws the recorded run's **results**, immediately, without
-needing to press Fit or Run again:
+Checking the **Mask** row restores Mask Builder's threshold/statistical/
+spike/cosmic/azimuthal/learnable field settings and its data-source fields
+(image path, stack source), reloading the image if its path still resolves
+— and sets the tab's mask directly from the recorded attempt's embedded
+array (already fully processed — dilation etc. already applied when it was
+first computed), broadcasting it to every other tab exactly as a fresh
+**Compute Mask** would.
 
-- **Calibrate:** the predicted-ring overlay reappears on the image at once
-  (pure geometry — no image needed). The **Radial Profile** and **Eta vs R
-  Cake** tabs are populated **directly from the record itself** — no
-  recompute, and the original image doesn't even need to still be
-  reachable. (An older attempt logged before this was supported has no
-  saved profile/cake; for those, the tabs fall back to a live recompute if
-  the attempt's data file can still be loaded, same as before.) In Hydra
-  mode this happens per panel — switch panels (or the panel is the
-  toolbar's current one already) to see each one's rings.
-- **Batch Integrate:** the **Waterfall** and **Stacked profiles** views are
-  replayed from the attempt's own saved per-frame profiles — no re-run
-  needed. In Hydra mode, each GE panel keeps its own independent pair of
-  views, so switching the **GE1/GE2/GE3/GE4** toolbar shows that panel's own
-  recorded run, not a shared plot.
-
-Only fields the codebase can already restore from a file path are populated
-this way — a mask that was embedded directly in the project (i.e. included
-something hand-drawn/computed in Mask Builder, with no file of its own to
-point back to) is not re-created automatically and must be re-added from
-Mask Builder / the Data card if needed. A **Multi-panel detector**
-calibration attempt's refined panel shifts are the one exception: those
-embedded values *are* re-created automatically — populating Tab 2 from
-such an attempt writes a fresh `_panelshifts.txt` next to the project file
-(in a `<project name>_panel_shifts/` folder) and points the restored
-calibration at it, so the panel correction is usable immediately, the same
-as any other geometry field. See §5 "Export" for how panel shifts are
-saved/embedded in the first place.
+A **Multi-panel detector** calibration attempt's refined panel shifts are
+re-created automatically on restore: populating Tab 2 from such an attempt
+writes a fresh `_panelshifts.txt` next to the project file (in a `<project
+name>_panel_shifts/` folder) and points the restored calibration at it, so
+the panel correction is usable immediately, the same as any other geometry
+field. See §5 "Export" for how panel shifts are saved/embedded in the first
+place.
 
 ### File ▸ Project History…
 
 A read-only browser over everything the active project has recorded, so
 checking what's in it doesn't require an external HDF5 tool (`h5dump`,
-HDFView). The table lists one row per attempt — panel, kind (Calibrate /
-Batch Integrate), attempt name, and its UTC timestamp — across every panel
-the project contains; selecting a row shows that attempt's full recorded
-parameters (the same JSON `Populate from project` reads from) in a detail
-pane below. Purely a viewer: nothing here can modify the project file.
+HDFView). The table lists one row per attempt — panel (or "—" for a mask
+attempt, which isn't per-panel), kind (**Mask** / Calibrate / Batch
+Integrate), attempt name, and its UTC timestamp — across every panel the
+project contains; selecting a row shows that attempt's full recorded
+parameters (the same JSON the Open Project checkbox-tree reads from) in a
+detail pane below. Purely a viewer: nothing here can modify the project file.
 
 ---
 

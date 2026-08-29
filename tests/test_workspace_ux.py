@@ -226,3 +226,84 @@ def test_project_history_dialog_handles_empty_project(qapp, tmp_path):
         assert dlg._table.rowCount() == 0
     finally:
         dlg.close()
+
+
+def test_project_history_dialog_lists_mask_attempts(qapp, project_with_attempts):
+    from midas_gui.dialogs import ProjectHistoryDialog
+
+    project.append_mask_attempt(
+        project_with_attempts, cfg={"fields": {}}, mask=np.zeros((2, 2), dtype=np.uint8),
+        loader_state={})
+
+    dlg = ProjectHistoryDialog(project_with_attempts)
+    try:
+        assert dlg._table.rowCount() == 3
+        kinds = {dlg._table.item(r, 1).text() for r in range(dlg._table.rowCount())}
+        assert kinds == {"Calibrate", "Batch Integrate", "Mask"}
+    finally:
+        dlg.close()
+
+
+# ── dialogs.py: ProjectContentsPicker / ProjectOpenDialog / ProjectSelectionDialog ──
+def test_project_contents_picker_defaults_everything_checked(qapp, project_with_attempts):
+    from midas_gui.dialogs import ProjectContentsPicker
+
+    project.write_gui_workspace(project_with_attempts, tabs={"Mask Builder": {"fields": {}}},
+                                 meta={"active_tab": "Mask Builder"})
+    project.append_mask_attempt(
+        project_with_attempts, cfg={"fields": {}}, mask=np.zeros((2, 2), dtype=np.uint8),
+        loader_state={})
+
+    picker = ProjectContentsPicker()
+    assert picker.set_project(project_with_attempts) is True
+    assert picker.has_content()
+
+    sel = picker.selection()
+    assert sel["workspace_tabs"] == ["Mask Builder"]
+    assert sel["mask_ref"] is not None
+    assert set(sel["calib_refs"]) == {"single"}
+    assert set(sel["integrate_refs"]) == {"single"}
+
+
+def test_project_contents_picker_unchecking_excludes_from_selection(qapp, project_with_attempts):
+    from midas_gui.dialogs import ProjectContentsPicker
+
+    project.write_gui_workspace(project_with_attempts, tabs={"Mask Builder": {"fields": {}}},
+                                 meta={"active_tab": "Mask Builder"})
+
+    picker = ProjectContentsPicker()
+    picker.set_project(project_with_attempts)
+    picker._workspace_checks["Mask Builder"].setChecked(False)
+    picker._calib_rows["single"][0].setChecked(False)
+
+    sel = picker.selection()
+    assert sel["workspace_tabs"] == []
+    assert "single" not in sel["calib_refs"]
+    assert sel["integrate_refs"]   # untouched row still selected
+
+
+def test_project_contents_picker_rejects_invalid_file(qapp, tmp_path):
+    import h5py
+    from midas_gui.dialogs import ProjectContentsPicker
+
+    bad = tmp_path / "not_a_project.h5"
+    with h5py.File(bad, "w") as f:
+        f.create_dataset("x", data=[1, 2, 3])
+
+    picker = ProjectContentsPicker()
+    assert picker.set_project(str(bad)) is False
+    assert not picker.has_content()
+    assert picker.error_message() is not None
+
+
+def test_project_selection_dialog_wraps_picker_for_a_known_path(qapp, project_with_attempts):
+    from midas_gui.dialogs import ProjectSelectionDialog
+
+    dlg = ProjectSelectionDialog(project_with_attempts)
+    try:
+        assert dlg.has_content()
+        assert dlg.error_message() is None
+        sel = dlg.selection()
+        assert "single" in sel["calib_refs"]
+    finally:
+        dlg.close()

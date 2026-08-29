@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Optional
 
 from PyQt5 import QtCore, QtWidgets
 
@@ -179,88 +180,336 @@ class _SaveParamstestDialog(QtWidgets.QDialog):
         return self._tmpl_edit.text().strip()
 
 
-class ProjectLoadDialog(QtWidgets.QDialog):
-    """Shown right after File → Open Project…: lets the user choose which of
-    the project's recorded attempts to populate into the Calibrate / Batch
-    Integrate tabs, per panel (single-detector, or each present Hydra GE
-    panel), rather than silently leaving the GUI untouched.
+def _clear_layout(layout) -> None:
+    while layout.count():
+        item = layout.takeAt(0)
+        w = item.widget()
+        if w is not None:
+            w.setParent(None)
+            w.deleteLater()
 
-    One row per panel; each of the two "populate ___ from" checkboxes is
-    paired with an attempt picker (defaulting to the latest) and disabled
-    if that panel has no attempts of that kind. ``calib_selection()`` /
-    ``integrate_selection()`` return ``{panel_key: attempt_ref}`` for the
-    checked rows only.
-    """
 
-    def __init__(self, panels: dict, parent=None):
-        """``panels`` is ``{panel_key: {"calib": [attempts], "integrate": [attempts]}}``,
-        each attempt list as returned by ``project.list_attempts`` (newest first)."""
+# Panels a saved attempt can actually be *restored* into — "hydra_composite"
+# (the Hydra Overall/summed-profile pseudo-panel) has no corresponding tab
+# widget, so it's deliberately excluded here even though it's a real,
+# discoverable panel key (see ``project._PANEL_ORDER``); it's still fully
+# visible, read-only, via File ▸ Project History….
+_RESTORABLE_PANELS = ("single", "ge1", "ge2", "ge3", "ge4")
+
+
+class ProjectContentsPicker(QtWidgets.QWidget):
+    """Given a project path (``set_project``), shows exactly what it
+    contains — which ``gui_workspace`` tabs have a saved snapshot, which
+    mask/calibrate/integrate attempts are recorded — as a checkbox tree,
+    everything checked by default. Used standalone, wrapped by
+    ``ProjectSelectionDialog`` for a path already known (Recent Projects), or
+    embedded in ``ProjectOpenDialog``, refreshing live as the browsed
+    selection changes.
+
+    Rebuilds its entire content layout on every ``set_project()`` call rather
+    than mutating widgets in place — the set of tabs/panels/attempts differs
+    per file, so there's no stable widget identity worth preserving (same
+    rationale as ``helpers.make_calib_values_button``'s popup rebuild)."""
+
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Populate GUI from project")
-        self.setMinimumWidth(560)
-        self._rows: dict = {}   # panel_key -> {"calib": (check, combo, refs), "integrate": (...)}
+        self._path = None
+        self._error = None
+        self._workspace_checks: dict = {}    # tab_name -> QCheckBox
+        self._mask_row = None                # (QCheckBox, QComboBox) or None
+        self._calib_rows: dict = {}          # panel_key -> (QCheckBox, QComboBox)
+        self._integrate_rows: dict = {}      # panel_key -> (QCheckBox, QComboBox)
+
+        outer = QtWidgets.QVBoxLayout(self)
+        self._warning = QtWidgets.QLabel("")
+        self._warning.setWordWrap(True)
+        self._warning.setStyleSheet("color:#e6a23c;padding:4px;")
+        self._warning.setVisible(False)
+        outer.addWidget(self._warning)
+
+        self._content = QtWidgets.QWidget()
+        self._content_layout = QtWidgets.QVBoxLayout(self._content)
+        self._content_layout.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._content)
+        outer.addStretch(1)
+
+        placeholder = QtWidgets.QLabel("Click a project (.h5) file to preview its contents.")
+        placeholder.setStyleSheet("color:#888;padding:12px;")
+        placeholder.setWordWrap(True)
+        self._content_layout.addWidget(placeholder)
+
+    def has_content(self) -> bool:
+        return self._path is not None and self._error is None
+
+    def error_message(self) -> Optional[str]:
+        return self._error
+
+    def set_project(self, path) -> bool:
+        """Rebuild the checkbox tree for ``path``. Returns whether it's a
+        valid, schema-3 MIDAS GUI project with at least one restorable thing
+        — callers gate their Open button (or an error dialog) on this."""
+        self._path = None
+        self._error = None
+        self._workspace_checks = {}
+        self._mask_row = None
+        self._calib_rows = {}
+        self._integrate_rows = {}
+        _clear_layout(self._content_layout)
+
+        from midas_gui import project
+        schema = project.project_schema_version(path)
+        if schema is None:
+            self._error = f"{path} is not a MIDAS GUI project file."
+        elif schema < project.SCHEMA_VERSION:
+            self._error = (f"This project uses an older, incompatible file layout "
+                            f"(schema_version {schema}) — nothing here can be restored.")
+        if self._error:
+            self._show_warning(self._error)
+            return False
+
+        tabs = project.list_workspace_tabs(path)
+        panels = [p for p in project.discover_panels(path) if p in _RESTORABLE_PANELS]
+        mask_attempts = project.list_mask_attempts(path)
+        calib_by_panel = {p: v for p in panels
+                          if (v := project.list_attempts(path, p, "calib"))}
+        integrate_by_panel = {p: v for p in panels
+                              if (v := project.list_attempts(path, p, "integrate"))}
+
+        if not tabs and not mask_attempts and not calib_by_panel and not integrate_by_panel:
+            self._show_warning("This project has nothing recorded yet.")
+            return False
+
+        self._path = str(path)
+
+        if tabs:
+            box = QtWidgets.QGroupBox("GUI Workspace")
+            v = QtWidgets.QVBoxLayout(box)
+            select_all = QtWidgets.QCheckBox("Select all")
+            select_all.setChecked(True)
+            v.addWidget(select_all)
+            for name in tabs:
+                cb = QtWidgets.QCheckBox(name)
+                cb.setChecked(True)
+                self._workspace_checks[name] = cb
+                v.addWidget(cb)
+            select_all.toggled.connect(
+                lambda checked: [cb.setChecked(checked) for cb in self._workspace_checks.values()])
+            self._content_layout.addWidget(box)
+
+        if mask_attempts or calib_by_panel or integrate_by_panel:
+            box = QtWidgets.QGroupBox("Analysis")
+            grid = QtWidgets.QGridLayout(box)
+            grid.setHorizontalSpacing(12); grid.setVerticalSpacing(6)
+            r = 0
+            if mask_attempts:
+                grid.addWidget(QtWidgets.QLabel("Mask"), r, 0)
+                self._mask_row = self._attempt_cell(grid, r, 1, mask_attempts, span=2)
+                r += 1
+            if calib_by_panel or integrate_by_panel:
+                grid.addWidget(QtWidgets.QLabel("<b>Panel</b>"), r, 0)
+                grid.addWidget(QtWidgets.QLabel("<b>Calibrate</b>"), r, 1)
+                grid.addWidget(QtWidgets.QLabel("<b>Batch Integrate</b>"), r, 2)
+                r += 1
+                for panel_key in panels:
+                    calib_attempts = calib_by_panel.get(panel_key)
+                    integrate_attempts = integrate_by_panel.get(panel_key)
+                    if not calib_attempts and not integrate_attempts:
+                        continue
+                    grid.addWidget(QtWidgets.QLabel(_PANEL_LABELS.get(panel_key, panel_key)), r, 0)
+                    if calib_attempts:
+                        self._calib_rows[panel_key] = self._attempt_cell(grid, r, 1, calib_attempts)
+                    if integrate_attempts:
+                        self._integrate_rows[panel_key] = self._attempt_cell(grid, r, 2, integrate_attempts)
+                    r += 1
+            self._content_layout.addWidget(box)
+
+        return True
+
+    def _show_warning(self, message: str) -> None:
+        self._warning.setText(message)
+        self._warning.setVisible(True)
+
+    @staticmethod
+    def _attempt_cell(grid, row, col, attempts: list, span: int = 1):
+        check = QtWidgets.QCheckBox()
+        combo = QtWidgets.QComboBox()
+        for a in attempts:
+            combo.addItem(f"{a['name']}  ({a['timestamp_utc'][:19]})", a["ref"])
+        cell = QtWidgets.QWidget()
+        cl = QtWidgets.QHBoxLayout(cell); cl.setContentsMargins(0, 0, 0, 0); cl.setSpacing(4)
+        check.setChecked(True)
+        cl.addWidget(check); cl.addWidget(combo, 1)
+        grid.addWidget(cell, row, col, 1, span)
+        return check, combo
+
+    def selection(self) -> dict:
+        """``workspace_tabs`` (list[str]), ``mask_ref`` (Optional[str]),
+        ``calib_refs``/``integrate_refs`` (``{panel_key: attempt_ref}``) —
+        checked rows only."""
+        mask_ref = None
+        if self._mask_row is not None:
+            check, combo = self._mask_row
+            if check.isChecked():
+                mask_ref = combo.currentData()
+        return {
+            "workspace_tabs": [name for name, cb in self._workspace_checks.items() if cb.isChecked()],
+            "mask_ref": mask_ref,
+            "calib_refs": {p: combo.currentData() for p, (check, combo) in self._calib_rows.items()
+                           if check.isChecked()},
+            "integrate_refs": {p: combo.currentData() for p, (check, combo) in self._integrate_rows.items()
+                                if check.isChecked()},
+        }
+
+
+class ProjectOpenDialog(QtWidgets.QDialog):
+    """File ▸ Open Project…: browse to a project ``.h5`` on the left; the
+    moment one is clicked, the right pane (``ProjectContentsPicker``)
+    previews exactly what it contains — every checkbox on by default.
+    Navigation mirrors ``BrowseFilesDialog``'s file-tree building blocks
+    (address bar + up button + a filtered ``QFileSystemModel``/``QTreeView``),
+    but adapted for this single, simpler purpose (pick one ``.h5``, preview
+    its contents) rather than that dialog's multi-mode file/folder picking."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Open Project")
+        self.resize(920, 560)
+        self._selected_path = None
+        self._current_dir = ""
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+
+        browser = QtWidgets.QWidget()
+        bl = QtWidgets.QVBoxLayout(browser); bl.setContentsMargins(0, 0, 0, 0)
+        addr_row = QtWidgets.QHBoxLayout(); addr_row.setSpacing(4)
+        self._up_btn = QtWidgets.QToolButton()
+        self._up_btn.setText("⬆")
+        self._up_btn.setToolTip("Up one level")
+        self._up_btn.clicked.connect(self._go_up)
+        self._path_ed = QtWidgets.QLineEdit()
+        self._path_ed.returnPressed.connect(lambda: self._navigate(self._path_ed.text().strip()))
+        addr_row.addWidget(self._up_btn)
+        addr_row.addWidget(self._path_ed, 1)
+        bl.addLayout(addr_row)
+
+        self._model = QtWidgets.QFileSystemModel(self)
+        self._model.setRootPath("")
+        self._model.setNameFilters(["*.h5"])
+        self._model.setNameFilterDisables(False)
+        self._tree = QtWidgets.QTreeView()
+        self._tree.setModel(self._model)
+        self._tree.setSortingEnabled(True)
+        self._tree.sortByColumn(0, QtCore.Qt.AscendingOrder)
+        self._tree.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self._tree.doubleClicked.connect(self._on_double_clicked)
+        self._tree.selectionModel().selectionChanged.connect(self._on_selection_changed)
+        self._tree.setColumnWidth(0, self._tree.columnWidth(0) * 2)
+        bl.addWidget(self._tree, 1)
+        splitter.addWidget(browser)
+
+        self._picker = ProjectContentsPicker()
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self._picker)
+        splitter.addWidget(scroll)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
 
         layout = QtWidgets.QVBoxLayout(self)
-        info = QtWidgets.QLabel(
-            "This project has recorded calibration/integration attempts. Choose "
-            "which ones to load into the Calibrate and Batch Integrate tabs so "
-            "you can pick up where this project left off. Leave a box unchecked "
-            "to leave that tab as-is.")
-        info.setWordWrap(True)
-        info.setStyleSheet("color:#bbb;font-size:11px;padding-bottom:8px;")
-        layout.addWidget(info)
-
-        grid = QtWidgets.QGridLayout(); grid.setHorizontalSpacing(12); grid.setVerticalSpacing(6)
-        grid.addWidget(QtWidgets.QLabel("<b>Panel</b>"), 0, 0)
-        grid.addWidget(QtWidgets.QLabel("<b>Calibrate</b>"), 0, 1)
-        grid.addWidget(QtWidgets.QLabel("<b>Batch Integrate</b>"), 0, 2)
-
-        for r, panel_key in enumerate(panels, start=1):
-            entry = panels[panel_key]
-            grid.addWidget(QtWidgets.QLabel(_PANEL_LABELS.get(panel_key, panel_key)), r, 0)
-            self._rows[panel_key] = {}
-            for col, kind in ((1, "calib"), (2, "integrate")):
-                attempts = entry.get(kind) or []
-                cell = QtWidgets.QHBoxLayout(); cell.setSpacing(4)
-                check = QtWidgets.QCheckBox()
-                combo = QtWidgets.QComboBox()
-                for a in attempts:
-                    combo.addItem(f"{a['name']}  ({a['timestamp_utc'][:19]})", a["ref"])
-                has_attempts = bool(attempts)
-                check.setChecked(has_attempts)
-                check.setEnabled(has_attempts)
-                combo.setEnabled(has_attempts)
-                if not has_attempts:
-                    combo.addItem("(none recorded)")
-                cell.addWidget(check); cell.addWidget(combo, 1)
-                w = QtWidgets.QWidget(); w.setLayout(cell)
-                grid.addWidget(w, r, col)
-                self._rows[panel_key][kind] = (check, combo)
-        layout.addLayout(grid)
+        layout.addWidget(splitter, 1)
 
         btns = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
-        btns.button(QtWidgets.QDialogButtonBox.Ok).setText("Populate")
-        btns.button(QtWidgets.QDialogButtonBox.Cancel).setText("Skip")
+            QtWidgets.QDialogButtonBox.Open | QtWidgets.QDialogButtonBox.Cancel)
+        self._open_btn = btns.button(QtWidgets.QDialogButtonBox.Open)
+        self._open_btn.setEnabled(False)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
 
-    def _selection(self, kind: str) -> dict:
-        out = {}
-        for panel_key, kinds in self._rows.items():
-            check, combo = kinds[kind]
-            if check.isChecked() and combo.isEnabled():
-                out[panel_key] = combo.currentData()
-        return out
+        self._navigate(self._initial_dir())
 
-    def calib_selection(self) -> dict:
-        """``{panel_key: attempt_ref}`` for every checked Calibrate row."""
-        return self._selection("calib")
+    @staticmethod
+    def _initial_dir() -> str:
+        from midas_gui import settings
+        recent = settings.get_recent("project")
+        if recent:
+            return str(Path(recent[0]["path"]).parent)
+        return str(Path.home())
 
-    def integrate_selection(self) -> dict:
-        """``{panel_key: attempt_ref}`` for every checked Batch Integrate row."""
-        return self._selection("integrate")
+    def _navigate(self, path: str) -> None:
+        p = Path(path) if path else Path.home()
+        if not p.is_dir():
+            p = p.parent if p.exists() else Path.home()
+        self._current_dir = str(p)
+        self._path_ed.blockSignals(True)
+        self._path_ed.setText(self._current_dir)
+        self._path_ed.blockSignals(False)
+        self._tree.setRootIndex(self._model.index(self._current_dir))
+
+    def _go_up(self) -> None:
+        d = QtCore.QDir(self._current_dir)
+        if d.cdUp():
+            self._navigate(d.absolutePath())
+
+    def _on_double_clicked(self, index) -> None:
+        if self._model.isDir(index):
+            self._navigate(self._model.filePath(index))
+            return
+        path = self._model.filePath(index)
+        if self._picker.set_project(path):
+            self._selected_path = path
+            self.accept()
+
+    def _on_selection_changed(self, *_) -> None:
+        sel_model = self._tree.selectionModel()
+        rows = sel_model.selectedRows() if sel_model is not None else []
+        if not rows or self._model.isDir(rows[0]):
+            self._open_btn.setEnabled(False)
+            return
+        path = self._model.filePath(rows[0])
+        ok = self._picker.set_project(path)
+        self._selected_path = path if ok else None
+        self._open_btn.setEnabled(ok)
+
+    def selected_path(self) -> Optional[str]:
+        return self._selected_path
+
+    def selection(self) -> dict:
+        return self._picker.selection()
+
+
+class ProjectSelectionDialog(QtWidgets.QDialog):
+    """Same checkbox-tree preview as ``ProjectOpenDialog``, but for a path
+    already known (the Recent Projects menu) — no file-browser pane."""
+
+    def __init__(self, path, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Open Project — {Path(path).name}")
+        self.resize(520, 520)
+        self._picker = ProjectContentsPicker()
+        ok = self._picker.set_project(path)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self._picker)
+        layout.addWidget(scroll, 1)
+
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Open | QtWidgets.QDialogButtonBox.Cancel)
+        btns.button(QtWidgets.QDialogButtonBox.Open).setEnabled(ok)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def has_content(self) -> bool:
+        return self._picker.has_content()
+
+    def error_message(self) -> Optional[str]:
+        return self._picker.error_message()
+
+    def selection(self) -> dict:
+        return self._picker.selection()
 
 
 # Every extension the app already recognizes as a detector-frame file
@@ -553,6 +802,14 @@ class ProjectHistoryDialog(QtWidgets.QDialog):
         rows = []
         load_error = None
         try:
+            for a in _project.list_mask_attempts(project_path):
+                rows.append({
+                    "panel": "—",
+                    "kind": "Mask",
+                    "name": a["name"],
+                    "timestamp": a.get("timestamp_utc", ""),
+                    "ref": a["ref"],
+                })
             for panel_key in _project.discover_panels(project_path):
                 for kind, label in (("calib", "Calibrate"), ("integrate", "Batch Integrate")):
                     for a in _project.list_attempts(project_path, panel_key, kind):

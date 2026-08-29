@@ -199,10 +199,10 @@ def test_hydra_calib_run_orchestration_and_results_switching(app, fixture_availa
 
     with h5py.File(proj_path, "r") as f:
         for n in (1, 2, 3, 4):
-            att = f[f"ge{n}/calib/attempt_0001"]
+            att = f[f"analysis/calibrate/ge{n}/attempt_0001"]
             assert att.attrs["BC_y"] == pytest.approx(bcs[n][0])
     for n in (1, 2, 3, 4):
-        assert getattr(results[n], "_project_attempt_ref", None) == f"/ge{n}/calib/attempt_0001"
+        assert getattr(results[n], "_project_attempt_ref", None) == f"/analysis/calibrate/ge{n}/attempt_0001"
 
     # Each panel's completed integration (fired from _on_done, one event-loop
     # tick after the calibration itself) also populates its own Eta vs R
@@ -232,6 +232,6 @@ def test_hydra_calib_run_orchestration_and_results_switching(app, fixture_availa
 
     with h5py.File(proj_path, "r") as f:
         for n in (1, 2, 3, 4):
-            grp = f[f"ge{n}/calib"]
+            grp = f[f"analysis/calibrate/ge{n}"]
             assert set(grp.keys()) == {"attempt_0001", "attempt_0002"}
             assert grp.attrs["latest"] == "attempt_0002"

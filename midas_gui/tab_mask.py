@@ -23,6 +23,8 @@ from midas_gui.helpers import (_load_image, _fspin, _NoScrollSpinBox, _browse, i
 from midas_gui.widgets import ImageViewer
 from midas_gui.dialogs import show_error
 from midas_gui.workers import MaskComputeWorker
+from midas_gui import project
+from midas_gui import settings
 from midas_gui import style as S
 
 
@@ -53,9 +55,13 @@ class MaskTab(QtWidgets.QWidget):
         self._registry = None            # DataSourceRegistry, set by bind_registry()
         self._stack_snapshot_file = None  # temp .h5 from importing another tab's buffer
         self._stack_files: Optional[list] = None  # explicit multi-select stack files, or None
+        self._project_ctx = None
         self._build_ui()
         if Path(self._img_edit.text().strip() or "x").exists():
             self._load_image()
+
+    def set_project_context(self, ctx):
+        self._project_ctx = ctx
 
     def bind_registry(self, registry):
         """Register this tab as an importable ("path" kind only — Mask Builder
@@ -324,6 +330,13 @@ class MaskTab(QtWidgets.QWidget):
         b2 = _br(); b2.clicked.connect(self._browse_save); srow.addWidget(b2)
         self._save_btn = QtWidgets.QPushButton("Save"); self._save_btn.setEnabled(False)
         self._save_btn.setFixedWidth(52); self._save_btn.clicked.connect(self._save); srow.addWidget(self._save_btn)
+        self._log_project_btn = QtWidgets.QPushButton("Log to Project")
+        self._log_project_btn.setEnabled(False)
+        self._log_project_btn.setToolTip(
+            "Record this mask (parameters + resulting mask) as a new FAIR-provenance "
+            "attempt in the currently-open project — see File ▸ Open Project…")
+        self._log_project_btn.clicked.connect(self._log_to_project)
+        srow.addWidget(self._log_project_btn)
         sl.body.addLayout(srow)
         self._load_mask_edit = QtWidgets.QLineEdit(); self._load_mask_edit.setPlaceholderText("Load existing mask…")
         lrow = QtWidgets.QHBoxLayout(); lrow.setSpacing(4)
@@ -691,6 +704,7 @@ class MaskTab(QtWidgets.QWidget):
         self._viewer.set_mask_overlay(final)
         self._viewer.set_overlay_visible(self._show_overlay_check.isChecked())
         self._save_btn.setEnabled(True)
+        self._log_project_btn.setEnabled(True)
         self.maskReady.emit(final)
 
     # ── Hand-drawn shape masks ────────────────────────────────────
@@ -968,6 +982,60 @@ class MaskTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.information(self, "Saved", f"Mask saved:\n{path}")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Save error", str(e))
+
+    def _log_to_project(self):
+        """Append this mask (full parameters + the resulting compressed
+        array) as a new FAIR-provenance attempt under a currently-open
+        project's ``/analysis/mask`` — see ``project.append_mask_attempt``.
+        Unlike Calibrate/Batch-Integrate there's no single "run finished"
+        moment to auto-log from (a mask can come from Compute, Load, hand-
+        drawn shapes, or any combination), so this is an explicit, user-
+        triggered action, same click-when-ready contract as ``_save``."""
+        if self._mask is None:
+            return
+        if not self._project_ctx or not self._project_ctx.path:
+            QtWidgets.QMessageBox.warning(
+                self, "No project open",
+                "Open or create a project first (File ▸ Open Project…) to log this mask.")
+            return
+        cfg = {"fields": widgets_to_dict(self._state_widgets())}
+        loader_state = {
+            "path": self._img_edit.text().strip() or None,
+            "h5_dataset": self._h5loc_edit.currentText().strip() if is_h5(self._img_edit.text().strip()) else None,
+            "stack_files": self._stack_files,
+        }
+        try:
+            ref = project.append_mask_attempt(
+                self._project_ctx.path, cfg=cfg, mask=self._mask, loader_state=loader_state,
+                extra={"active_profile": settings.active_profile()})
+            QtWidgets.QMessageBox.information(self, "Logged to project", f"Mask attempt logged:\n{ref}")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Log to project failed", str(e))
+
+    def apply_project_mask(self, meta: dict, mask_array: Optional[np.ndarray]) -> None:
+        """Populate this tab from a recorded ``/analysis/mask`` attempt (see
+        ``project.append_mask_attempt``) — mirrors
+        ``CalibrationTab.apply_project_calibration``/
+        ``BatchTab.apply_project_integration``'s "load this analysis into
+        the tab, including its result" contract. Called after File ▸ Open
+        Project… when the user opts to restore a mask attempt."""
+        cfg = meta.get("cfg") or {}
+        fields = cfg.get("fields") or {}
+        loader_state = meta.get("loader_state") or {}
+        img_path = loader_state.get("path")
+        if img_path and Path(img_path).exists():
+            self._img_edit.setText(img_path)
+            self._load_image()
+        apply_dict_to_widgets(self._state_widgets(), fields)
+        self._stack_files = list(loader_state.get("stack_files") or []) or None
+        if mask_array is not None:
+            # The embedded array is already the final, fully-processed mask
+            # (dilation etc. already applied when it was first computed) —
+            # set it directly as the "computed" half rather than routing
+            # through _set_mask, which would dilate it a second time.
+            self._computed_mask = mask_array.astype(bool)
+            self._drawn_mask = None
+            self._emit_final()
 
     def _load_existing_mask(self):
         path = self._load_mask_edit.text().strip()

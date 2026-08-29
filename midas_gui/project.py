@@ -1,19 +1,35 @@
 """FAIR provenance "project" files.
 
-A project file is a single, long-lived HDF5 file with two parts:
+A project file is a single, long-lived HDF5 file with two top-level headers
+(schema_version 3 — a clean-cutover redesign, no backward compatibility with
+the single-``/workspace``-blob v1/v2 layout):
 
-- ``/workspace`` — a single mutable slot holding the most recently saved
-  session snapshot (every tab's live field state), overwritten in place on
-  each save. See ``write_workspace``/``read_workspace``.
-- ``/<panel_key>/{calib,integrate}/attempt_NNNN`` — an append-only record
-  every time a Calibrate or Batch-Integrate run finishes (single-detector
-  under ``/single``, Hydra panels under ``/ge1``..``/ge4``). Each attempt
-  group is self-sufficient: a JSON ``metadata`` blob (full params, full
-  result, resolved input paths + hashes, environment/version snapshot) plus
-  the resulting profile/cake arrays. Input correction data (mask/dark/
-  bright/background) is never duplicated as raw arrays — only referenced by
-  path + hash — except a live/drawn-in-tab mask that was never saved to a
-  file, which has no path to hash and is embedded as-is.
+- ``/gui_workspace/<tab_name>/{state, sidecars/}`` — one group per GUI tab
+  (e.g. ``"Data Viewer"``, ``"Mask Builder"``, ``"Calibrate"``), each holding
+  that tab's most recently saved field state (JSON) plus any binary/text
+  sidecars it exports (a live mask array, an unfitted calibration summary).
+  Modular by design: a tab's snapshot can be read/restored independently of
+  every other tab's. Overwritten in place on each save (mutable), unlike the
+  append-only history below. See ``write_gui_workspace``/``read_workspace_tab``/
+  ``list_workspace_tabs``/``read_workspace_meta``.
+- ``/analysis/{mask,calibrate,integrate}/...`` — append-only FAIR-provenance
+  records:
+  - ``/analysis/mask/attempt_NNNN`` — one *global* history (Mask Builder is a
+    single shared tab, not per-detector) of mask-creation attempts: full
+    parameters + the resulting compressed mask array. See
+    ``append_mask_attempt``/``list_mask_attempts``/``read_mask_attempt_array``.
+  - ``/analysis/calibrate/<panel_key>/attempt_NNNN`` and
+    ``/analysis/integrate/<panel_key>/attempt_NNNN`` — one per Calibrate or
+    Batch-Integrate run that finishes (single-detector under ``single``,
+    Hydra panels under ``ge1``..``ge4``, the Hydra composite under
+    ``hydra_composite``). Each attempt group is self-sufficient: a JSON
+    ``metadata`` blob (full params, full result, resolved input paths +
+    hashes, environment/version snapshot) plus the resulting profile/cake
+    arrays. Input correction data (mask/dark/bright/background) is never
+    duplicated as raw arrays — only referenced by path + hash — except a
+    live/drawn-in-tab mask that was never saved to a file, which has no path
+    to hash and is embedded as-is. See ``append_calibration_attempt``/
+    ``append_integration_attempt``.
 """
 from __future__ import annotations
 
@@ -28,7 +44,7 @@ import h5py
 import numpy as np
 
 PROJECT_MARKER = "__midas_gui_project__"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _HASH_FULL_MAX_BYTES = 200 * 1024 * 1024
 _HASH_PARTIAL_CHUNK = 4 * 1024 * 1024
@@ -75,63 +91,115 @@ def project_active_profile(project_path) -> Optional[str]:
         return f.attrs.get("active_profile_at_creation")
 
 
-def write_workspace(project_path, state: dict, sidecars: Optional[dict] = None) -> None:
-    """Overwrite the project's ``/workspace`` group with the current session
-    snapshot (the merged replacement for the old standalone Workspace JSON
-    file) — a single mutable slot, unlike the append-only calibration/
-    integration attempt history elsewhere in this file. ``sidecars`` holds
-    any not-yet-exported derived data a tab's own ``get_state(sidecar_stem=)``
-    wrote (e.g. a live/drawn mask array, an unfitted-but-in-progress
-    calibration summary) — see ``app.py``'s ``save_project``."""
+def project_schema_version(project_path) -> Optional[int]:
+    """The recorded ``schema_version`` attr, or ``None`` if the file can't be
+    read or isn't a MIDAS GUI project at all. Since schema_version 3 is a
+    clean-cutover redesign (no backward compatibility — see the module
+    docstring), callers use this to detect a pre-3 project file and warn
+    rather than silently show an empty checkbox tree."""
+    try:
+        with h5py.File(str(project_path), "r") as f:
+            if not f.attrs.get(PROJECT_MARKER, False):
+                return None
+            return int(f.attrs.get("schema_version", 0))
+    except Exception:
+        return None
+
+
+def _write_sidecars(parent_grp, sidecars: dict) -> None:
+    """Shared by ``write_gui_workspace``'s per-tab groups: write a
+    ``sidecars`` child group holding not-yet-exported derived data a tab's
+    own ``get_state(sidecar_stem=)`` wrote (e.g. a live/drawn mask array, an
+    unfitted-but-in-progress calibration summary)."""
+    side_grp = parent_grp.create_group("sidecars")
+    for name, data in sidecars.items():
+        if isinstance(data, (bytes, bytearray, str)):
+            # h5py's VLEN string/bytes type rejects embedded NUL bytes
+            # (common in binary sidecars like a mask .npy export), raising
+            # "VLEN strings do not support embedded NULLs". Store as opaque
+            # uint8 bytes instead, tagged so the reader can tell it apart
+            # from a genuine uint8 array sidecar (e.g. a mask array) and
+            # reconstruct the original str/bytes.
+            is_str = isinstance(data, str)
+            raw = data.encode("utf-8") if is_str else bytes(data)
+            ds = side_grp.create_dataset(name, data=np.frombuffer(raw, dtype=np.uint8))
+            ds.attrs["_midas_gui_encoding"] = "str" if is_str else "bytes"
+        else:
+            _write_array(side_grp, name, data)
+
+
+def _read_sidecars(parent_grp) -> dict:
+    side_grp = parent_grp.get("sidecars")
+    if side_grp is None:
+        return {}
+    sidecars = {}
+    for name in side_grp.keys():
+        ds = side_grp[name]
+        value = ds[()]
+        encoding = ds.attrs.get("_midas_gui_encoding")
+        if encoding == "bytes":
+            value = value.tobytes()
+        elif encoding == "str":
+            value = value.tobytes().decode("utf-8")
+        sidecars[name] = value
+    return sidecars
+
+
+def write_gui_workspace(project_path, *, tabs: dict, sidecars: Optional[dict] = None,
+                         meta: Optional[dict] = None) -> None:
+    """Overwrite the project's ``/gui_workspace`` group, one child group per
+    tab in ``tabs`` (``{tab_name: state_dict}``) — modular by design, unlike
+    the single mutable JSON blob the old ``/workspace`` slot held: a tab's
+    snapshot can be read back independently via ``read_workspace_tab``
+    without touching any other tab's. ``sidecars`` is
+    ``{tab_name: {filename: data}}`` (see ``_write_sidecars``); ``meta`` is a
+    flat dict of whole-session facts (``active_tab``/``active_profile``/
+    ``saved_utc``) stored as attrs on the ``/gui_workspace`` group itself."""
+    sidecars = sidecars or {}
     with h5py.File(str(project_path), "a") as f:
-        if "workspace" in f:
-            del f["workspace"]
-        grp = f.create_group("workspace")
-        grp.create_dataset("state", data=json.dumps(state, indent=2, default=_json_default))
-        grp.attrs["saved_utc"] = _now_iso()
-        if sidecars:
-            side_grp = grp.create_group("sidecars")
-            for name, data in sidecars.items():
-                if isinstance(data, (bytes, bytearray, str)):
-                    # h5py's VLEN string/bytes type rejects embedded NUL
-                    # bytes (common in binary sidecars like a mask .npy
-                    # export), raising "VLEN strings do not support
-                    # embedded NULLs". Store as opaque uint8 bytes instead,
-                    # tagged so read_workspace() can tell it apart from a
-                    # genuine uint8 array sidecar (e.g. a mask array) and
-                    # reconstruct the original str/bytes.
-                    is_str = isinstance(data, str)
-                    raw = data.encode("utf-8") if is_str else bytes(data)
-                    ds = side_grp.create_dataset(name, data=np.frombuffer(raw, dtype=np.uint8))
-                    ds.attrs["_midas_gui_encoding"] = "str" if is_str else "bytes"
-                else:
-                    _write_array(side_grp, name, data)
+        if "gui_workspace" in f:
+            del f["gui_workspace"]
+        root = f.create_group("gui_workspace")
+        root.attrs["saved_utc"] = _now_iso()
+        for k, v in (meta or {}).items():
+            root.attrs[k] = v if v is not None else ""
+        for tab_name, state in tabs.items():
+            g = root.create_group(tab_name)
+            g.create_dataset("state", data=json.dumps(state, indent=2, default=_json_default))
+            tab_sidecars = sidecars.get(tab_name)
+            if tab_sidecars:
+                _write_sidecars(g, tab_sidecars)
 
 
-def read_workspace(project_path) -> tuple:
-    """The most recently saved session snapshot, as ``(state, sidecars)`` —
-    both ``{}`` for a project with no ``/workspace`` group yet (a brand-new
-    project, or one created before this feature/schema_version 1). Not an
-    error case: callers should treat an empty result as "nothing to
-    restore," not a failure."""
+def list_workspace_tabs(project_path) -> list:
+    """Which tabs have a saved ``/gui_workspace`` snapshot in this project,
+    in HDF5 iteration order. Empty for a brand-new project, or one with no
+    saved session yet — not an error case."""
     with h5py.File(str(project_path), "r") as f:
-        grp = f.get("workspace")
+        grp = f.get("gui_workspace")
+        return list(grp.keys()) if grp is not None else []
+
+
+def read_workspace_meta(project_path) -> dict:
+    """The whole-session facts (``active_tab``/``active_profile``/
+    ``saved_utc``) recorded alongside ``/gui_workspace``'s per-tab groups, or
+    ``{}`` if no session has been saved yet."""
+    with h5py.File(str(project_path), "r") as f:
+        grp = f.get("gui_workspace")
+        return dict(grp.attrs) if grp is not None else {}
+
+
+def read_workspace_tab(project_path, tab_name: str) -> tuple:
+    """One tab's saved snapshot, as ``(state, sidecars)`` — both ``{}`` if
+    that tab has no saved snapshot (never saved, or saved before this tab
+    existed). Not an error case: callers should treat an empty result as
+    "nothing to restore for this tab," not a failure."""
+    with h5py.File(str(project_path), "r") as f:
+        grp = f.get(f"gui_workspace/{tab_name}")
         if grp is None:
             return {}, {}
         state = json.loads(grp["state"][()])
-        sidecars = {}
-        side_grp = grp.get("sidecars")
-        if side_grp is not None:
-            for name in side_grp.keys():
-                ds = side_grp[name]
-                value = ds[()]
-                encoding = ds.attrs.get("_midas_gui_encoding")
-                if encoding == "bytes":
-                    value = value.tobytes()
-                elif encoding == "str":
-                    value = value.tobytes().decode("utf-8")
-                sidecars[name] = value
-        return state, sidecars
+        return state, _read_sidecars(grp)
 
 
 def sha256_file(path) -> dict:
@@ -348,7 +416,7 @@ def append_calibration_attempt(project_path, panel_key, *, cfg, result, loader_s
         metadata.update(extra)
 
     with h5py.File(project_path, "a") as f:
-        grp = f.require_group(f"{panel_key}/calib")
+        grp = f.require_group(f"analysis/calibrate/{panel_key}")
         name = _next_attempt_name(grp)
         att = grp.create_group(name)
         att.create_dataset("metadata", data=json.dumps(metadata, indent=2, default=_json_default))
@@ -372,37 +440,102 @@ def append_calibration_attempt(project_path, panel_key, *, cfg, result, loader_s
                     res_grp.attrs[k] = float(results[k])
         grp.attrs["latest"] = name
 
-    return f"/{panel_key}/calib/{name}"
+    return f"/analysis/calibrate/{panel_key}/{name}"
+
+
+def append_mask_attempt(project_path, *, cfg, mask, loader_state,
+                         extra: Optional[dict] = None) -> str:
+    """Append a global (not per-panel — Mask Builder is one shared tab, not
+    per-detector) FAIR-provenance record of a mask-creation attempt: the
+    full parameter set (``cfg``, typically ``{"fields": widgets_to_dict(...)}``)
+    and resolved source (``loader_state``, hashed like every other attempt's
+    input paths) alongside the resulting compressed mask array itself. See
+    ``list_mask_attempts``/``read_mask_attempt_array`` for the read side, and
+    ``MaskTab.apply_project_mask`` for how a recorded attempt repopulates the
+    tab it came from."""
+    metadata = {
+        "timestamp_utc": _now_iso(),
+        "cfg": _hash_paths_in(dict(cfg or {})),
+        "loader_state": _hash_paths_in(dict(loader_state or {})),
+        "environment": environment_snapshot(),
+    }
+    if extra:
+        metadata.update(extra)
+
+    with h5py.File(project_path, "a") as f:
+        grp = f.require_group("analysis/mask")
+        name = _next_attempt_name(grp)
+        att = grp.create_group(name)
+        att.create_dataset("metadata", data=json.dumps(metadata, indent=2, default=_json_default))
+        att.attrs["timestamp_utc"] = metadata["timestamp_utc"]
+        _write_array(att, "mask", mask)
+        grp.attrs["latest"] = name
+
+    return f"/analysis/mask/{name}"
+
+
+def list_mask_attempts(project_path) -> list:
+    """Global mask-creation attempts recorded under ``/analysis/mask``,
+    newest first — same entry shape as :func:`list_attempts` (``name``/
+    ``ref``/``timestamp_utc``), just with no ``panel_key`` axis."""
+    with h5py.File(str(project_path), "r") as f:
+        grp = f.get("analysis/mask")
+        if grp is None:
+            return []
+        names = sorted((k for k in grp.keys() if k.startswith("attempt_")), reverse=True)
+        return [{"name": n, "ref": f"/analysis/mask/{n}",
+                 "timestamp_utc": grp[n].attrs.get("timestamp_utc", "")}
+                for n in names]
+
+
+def read_mask_attempt_array(project_path, ref: str) -> Optional[np.ndarray]:
+    """The embedded mask array for a ``/analysis/mask`` attempt, or ``None``
+    if the ref has no ``mask`` dataset (shouldn't happen for a genuine mask
+    attempt — every one embeds its mask — but kept defensive like
+    :func:`read_calib_attempt_panel_shifts`)."""
+    with h5py.File(str(project_path), "r") as f:
+        grp = f.get(ref.lstrip("/"))
+        if grp is None or "mask" not in grp:
+            return None
+        return grp["mask"][()]
 
 
 _PANEL_ORDER = ("single", "ge1", "ge2", "ge3", "ge4", "hydra_composite")
 
 
+_KIND_DIRS = {"calib": "calibrate", "integrate": "integrate"}
+
+
 def discover_panels(project_path) -> list:
     """Which of the canonical panel groups (single-detector or the 4 Hydra
-    GE panels) exist in this project file, in canonical order."""
+    GE panels) have at least one recorded calibrate or integrate attempt, in
+    canonical order."""
     with h5py.File(str(project_path), "r") as f:
-        return [p for p in _PANEL_ORDER if p in f]
+        calib = set(f.get("analysis/calibrate", {}).keys())
+        integrate = set(f.get("analysis/integrate", {}).keys())
+        return [p for p in _PANEL_ORDER if p in calib or p in integrate]
 
 
 def list_attempts(project_path, panel_key: str, kind: str) -> list:
-    """Attempts recorded under ``<panel_key>/<kind>`` (``kind`` is ``"calib"``
-    or ``"integrate"``), newest first. Each entry is enough to populate a
-    picker without parsing the (possibly large) ``metadata`` JSON blob."""
+    """Attempts recorded under ``analysis/<calibrate|integrate>/<panel_key>``
+    (``kind`` is ``"calib"`` or ``"integrate"``), newest first. Each entry is
+    enough to populate a picker without parsing the (possibly large)
+    ``metadata`` JSON blob."""
+    kind_dir = _KIND_DIRS[kind]
     with h5py.File(str(project_path), "r") as f:
-        grp = f.get(f"{panel_key}/{kind}")
+        grp = f.get(f"analysis/{kind_dir}/{panel_key}")
         if grp is None:
             return []
         names = sorted((k for k in grp.keys() if k.startswith("attempt_")), reverse=True)
-        return [{"name": n, "ref": f"/{panel_key}/{kind}/{n}",
+        return [{"name": n, "ref": f"/analysis/{kind_dir}/{panel_key}/{n}",
                  "timestamp_utc": grp[n].attrs.get("timestamp_utc", "")}
                 for n in names]
 
 
 def read_attempt(project_path, ref: str) -> dict:
     """Parsed ``metadata`` JSON for one attempt, given a ref such as
-    ``/ge1/calib/attempt_0003`` (as returned by ``append_*_attempt`` /
-    ``list_attempts``)."""
+    ``/analysis/calibrate/ge1/attempt_0003`` (as returned by
+    ``append_*_attempt`` / ``list_attempts``/``list_mask_attempts``)."""
     with h5py.File(str(project_path), "r") as f:
         return json.loads(f[ref.lstrip("/")]["metadata"][()])
 
@@ -605,7 +738,7 @@ def append_integration_attempt(project_path, panel_key, *, inputs, finished_payl
         metadata.update(extra)
 
     with h5py.File(project_path, "a") as f:
-        grp = f.require_group(f"{panel_key}/integrate")
+        grp = f.require_group(f"analysis/integrate/{panel_key}")
         name = _next_attempt_name(grp)
         att = grp.create_group(name)
         att.create_dataset("metadata", data=json.dumps(metadata, indent=2, default=_json_default))
@@ -630,4 +763,4 @@ def append_integration_attempt(project_path, panel_key, *, inputs, finished_payl
             res_grp.create_dataset("frame_ids", data=np.array(list(frame_ids), dtype=h5py.string_dtype()))
         grp.attrs["latest"] = name
 
-    return f"/{panel_key}/integrate/{name}"
+    return f"/analysis/integrate/{panel_key}/{name}"
