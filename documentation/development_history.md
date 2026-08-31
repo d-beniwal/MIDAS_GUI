@@ -224,6 +224,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Merge Workspace (JSON) and FAIR Project (HDF5) into one `.h5` Project file; File menu collapses to Save/Save As/Open Project | `ae3b665` |
 | Project schema redesign (clean cutover, no back-compat): `/gui_workspace` per-tab groups + `/analysis/{mask,calibrate,integrate}` FAIR history; Mask Builder gets `/analysis/mask` provenance + "Log to Project"; unified Open Project dialog (browse + live checkbox-tree preview) replaces the old Yes/No + separate attempt-picker flow | `21faaf8` |
 | Open Project dialog's Analysis section groups Calibrate/Batch Integrate rows under Single detector/Hydra headings instead of one grid row per panel; GUI Workspace tab list indented under Select all | `5954a57` |
+| Crash-safe `gui_workspace`/`analysis` writes (stage-and-swap + rolling `.bak`); Save Project As… always creates a fresh project and offers a full/latest-only/none analysis-history copy scope; Open Project…/Recent Projects now run the same unsaved-changes Save/Discard/Cancel guard as Close | `18c9b77` |
 
 ### Stability / performance / consistency (review-driven, phases 1–3)
 | Change | Commit |
@@ -3814,6 +3815,57 @@ memory.
 practice (different files) but were shipped as one commit; a partial
 revert (e.g. keep the backend bump, drop GSAS-II export) needs a manual
 `git checkout d84c58e^ -- <path>` per file instead of a clean revert.
+
+### `18c9b77` — Project: crash-safe saves, Save-As history-scope choice, Open-Project unsaved-changes guard (2026-08-31)
+**Effect:**
+- **Crash-safe project writes** — every mutating write
+  (`write_gui_workspace` and the three `append_*_attempt` functions in
+  `project.py`) now builds its new content in a sibling `"_<name>_staging"`
+  child group first and swaps it into the real name with a cheap
+  metadata-only rename (`_stage_and_swap`), instead of deleting and
+  rebuilding the target group in place — a crash partway through a build
+  now leaves whatever was there before fully intact (verified by a test
+  that raises mid-`build_fn` and checks prior content survives).
+  `write_gui_workspace` additionally makes a rolling `path + ".bak"` copy
+  (`backup_before_overwrite`) before each overwrite, and `create_project`
+  gained an `overwrite=True` option that also backs up first (previously
+  it only ever raised `FileExistsError`).
+- **Save Project As… always creates a fresh project, with a chosen
+  history-copy scope** — picking an existing file no longer adopts that
+  file's own history; it's fully overwritten (after an explicit
+  confirmation dialog and a `.bak` backup) via
+  `project.create_project(path, overwrite=True)`. If a project was already
+  open and has any recorded `/analysis` provenance, a new
+  `SaveAsHistoryDialog` (in `dialogs.py`) asks how much of *that* project's
+  history to carry into the new file — full history (default),
+  latest-attempt-of-each-kind only, or none — via new
+  `project.analysis_summary()`/`project.copy_analysis_history()`. The
+  "latest" scope also pulls in whichever calibrate attempt a copied
+  "latest" integrate attempt references, even if that isn't itself that
+  panel's own latest, so a copied integrate attempt never ends up with a
+  dangling `calib_attempt_ref`.
+- **Open-Project unsaved-changes guard** — the Close-window
+  Save/Discard/Cancel prompt for unsaved session changes was factored out
+  of `closeEvent` into a shared `_confirm_ok_to_switch_project()` in
+  `app.py`, and both `_open_project_dialog()` and `_open_project_path()`
+  (used by Recent Projects) now call it before switching projects, so
+  opening a different project can no longer silently discard in-progress
+  edits the way it previously could.
+**Verified:** `pytest tests/test_project.py` (all 8 new tests for
+stage-and-swap/overwrite/analysis_summary/copy_analysis_history pass; one
+unrelated pre-existing test, `test_apply_project_calibration_single_detector`,
+CRASHED with SIGABRT under this repo's `pytest-forked` isolation — matches
+the long-documented interpreter-teardown crash risk, not introduced by this
+change) and `pytest tests/test_workspace_ux.py` (25/25 pass, including 8
+new tests for the guard and Save-As overwrite/history-copy flow).
+`gui_documentation.md` §16 already fully described this feature going into
+the commit.
+**Files:** `midas_gui/project.py`, `midas_gui/dialogs.py`,
+`midas_gui/app.py`, `tests/test_project.py`, `tests/test_workspace_ux.py`.
+**Roll back:** `git revert 18c9b77` — self-contained to Project save/open
+plumbing; no schema change to existing project files (only how new content
+is staged/written), so a revert is a clean drop of the added safety/UX
+behavior.
 
 ---
 
