@@ -263,6 +263,14 @@ class CalibrationTab(QtWidgets.QWidget):
         self._seed_ty = _fspin(-180, 180, 4, 0.0, "°")
         self._seed_tz = _fspin(-180, 180, 4, 0.0, "°")
         self._seed_tilts = (self._seed_tx, self._seed_ty, self._seed_tz)
+        for w in self._seed_tilts:
+            w.setToolTip(
+                "Honoured by Four-stage / Bayesian / Joint (always), and by "
+                "One-shot when Multi-panel is enabled or Distortion refinement "
+                "is restricted to a subset of coefficients. Plain One-shot / "
+                "First-time only honour this if the installed calibrate() "
+                "backend exposes initial-tilt kwargs — a warning is logged "
+                "before Run if it doesn't and this value is non-zero.")
         for w in (self._seed_bcy, self._seed_bcz, self._seed_lsd, *self._seed_tilts):
             w.setEnabled(False)
         for sig in (self._seed_bcy, self._seed_bcz, self._seed_lsd, *self._seed_tilts):
@@ -803,6 +811,19 @@ class CalibrationTab(QtWidgets.QWidget):
                 "sy": self._ps_y.value(), "sz": self._ps_z.value(),
                 "gap_y": self._pg_y.value(), "gap_z": self._pg_z.value(),
             }
+
+        manual = cfg.get("manual_seed")
+        if manual and any(manual.get(k) for k in ("tx", "ty", "tz")):
+            from midas_gui.calib import tilt_seed_effective
+            if not tilt_seed_effective(mode, panel_layout=cfg.get("panel_layout"),
+                                       refine=cfg["refine"]):
+                self._log.append(
+                    f"⚠ Tilt seed (tx={manual['tx']:.3f}°, ty={manual['ty']:.3f}°, "
+                    f"tz={manual['tz']:.3f}°) will NOT be used: the '{self._pipeline.currentText()}' "
+                    "pipeline with these settings ignores an initial tilt guess — tilts "
+                    "start from 0° instead. Four-stage / Bayesian / Joint pipelines (or "
+                    "One-shot with Multi-panel, or with Distortion refinement restricted "
+                    "to a coefficient subset) do honour a tilt seed.")
 
         self._last_cfg = dict(cfg)
         self._last_bright = bright
