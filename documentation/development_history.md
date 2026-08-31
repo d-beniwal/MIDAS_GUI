@@ -157,6 +157,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Fix Flip Z ignored when Multi-panel detector is checked: seed and solve were running in two different image frames | `ccce056` |
 | Feed Multi-panel detector's per-panel shifts + grid geometry to downstream integration (Results-tab preview, Batch Integrate, and saved paramstest.txt) | `101558a` |
 | Fix Multi-panel detector pipelines never actually refining panel shifts (spec built without panel parameters); Save calibration.json/paramstest.txt rewrite a co-located sidecar; Project attempts embed + rematerialize panel shifts on reopen | `c67ad1b` |
+| Fix Hydra Overall Eta vs R Cake: rotate each panel's cake by its own `tx` before summing, so panels spread across the full -180°..180° range instead of piling on top of each other | `fd7f67a` |
 
 ### Batch Integrate (Tab 4)
 | Change | Commit |
@@ -174,6 +175,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Output format + Run mode become popups (button/tooltip, not permanent widgets); fix View-calibration popup rebuilding stale on first open | `e6f2e50` |
 | Fix Batch-Parallel frame ordering in live waterfall/stacked-profile view | `0332683` |
 | Opt-in "Multi-azimuth output (cake)" checkbox: keep every η sector as a separate output profile instead of collapsing to one full-circle profile per frame (off by default, reuses existing η bin/range fields) | `d84c58e` |
+| Rmin/Rmax exclusion (Rmin=0 default, Rmax=0 → auto farthest-corner, Corner/Edge preset buttons) + new "Detector view" tab overlaying Rmin/Rmax circles and an optional (R, η) bin-grid on the current frame | `fd7f67a` |
 
 ### Results & Export tab
 | Change | Commit |
@@ -225,6 +227,7 @@ Dates are commit dates (YYYY-MM-DD).
 | Project schema redesign (clean cutover, no back-compat): `/gui_workspace` per-tab groups + `/analysis/{mask,calibrate,integrate}` FAIR history; Mask Builder gets `/analysis/mask` provenance + "Log to Project"; unified Open Project dialog (browse + live checkbox-tree preview) replaces the old Yes/No + separate attempt-picker flow | `21faaf8` |
 | Open Project dialog's Analysis section groups Calibrate/Batch Integrate rows under Single detector/Hydra headings instead of one grid row per panel; GUI Workspace tab list indented under Select all | `5954a57` |
 | Crash-safe `gui_workspace`/`analysis` writes (stage-and-swap + rolling `.bak`); Save Project As… always creates a fresh project and offers a full/latest-only/none analysis-history copy scope; Open Project…/Recent Projects now run the same unsaved-changes Save/Discard/Cancel guard as Close | `18c9b77` |
+| Every Mask/Calibrate/Batch Integrate attempt's `environment` snapshot gains a `workstation` block (hostname, OS, CPU model, core counts, RAM) for post-hoc machine provenance | `fd7f67a` |
 
 ### Stability / performance / consistency (review-driven, phases 1–3)
 | Change | Commit |
@@ -3866,6 +3869,53 @@ the commit.
 plumbing; no schema change to existing project files (only how new content
 is staged/written), so a revert is a clean drop of the added safety/UX
 behavior.
+
+### `fd7f67a` — Provenance + Hydra cake fix + Batch Integrate Rmin/Rmax and Detector view (2026-08-31)
+**Effect:** Three independent features bundled per this repo's convention:
+- **Workstation provenance** — `project.workstation_snapshot()` (hostname,
+  OS name/release/version, CPU model, logical/physical core counts, total
+  RAM) folded into `environment_snapshot()`, so every Mask/Calibrate/Batch
+  Integrate attempt now records the machine it ran on. Every field is
+  independently best-effort; a lookup failure on an unusual platform
+  yields `None` for just that field, never a missing snapshot.
+- **Hydra Overall Eta-R Cake now rotates each panel by its own `tx`
+  before summing** (`hydra_calib_page.py`: new `_resample_rows_to_eta_grid`,
+  `_compose_overall_cake` docstring rewritten) — fixes panels piling on
+  top of each other instead of covering the full -180°..180° range.
+  Panel calibration normally leaves `tx` unrefined at its seeded value
+  (a full powder ring can't constrain rotation about the beam axis), so
+  loading each panel's real geometry before Fit (so `tx` carries its true
+  ~90°-apart windmill value) now spreads the panels out correctly.
+- **Batch Integrate: Rmin/Rmax exclusion + Detector-view preview**
+  (single-detector `tab_batch.py` + Hydra `hydra_batch_page.py`/
+  `hydra_batch_widgets.py`) — new Rmin/Rmax spinboxes (Rmin defaults 0,
+  Rmax 0="auto"→backend's own farthest-corner default, with Corner/Edge
+  preset buttons: `helpers.rmax_corner_px`/`rmax_edge_px`) and a new
+  "Detector view" tab showing the current frame with the Rmin/Rmax
+  circles plus an optional (R, η) bin-grid overlay
+  (`helpers.draw_polar_bin_overlay`, thinned to ≤50 rings/≤72 spokes via
+  `_thinned_bin_edges`). `_build_spec`/`spec_from_geometry_file`/
+  `_spec_from_result_ns` gained `r_min`/`r_max` kwargs defaulting to
+  `None` (= untouched) so every other caller (pump-probe, GSAS export,
+  diagnostic cake previews) is unaffected. Hydra's Detector view is one
+  shared `ImageViewer` across all 4 GE panels (never reparented) to avoid
+  the known pyqtgraph-teardown segfault — `tests/test_hydra_batch_ui.py`
+  now also carries `pytestmark = pytest.mark.forked`.
+**Verified:** `tests/test_hydra_overall_cake.py` (new, 9 tests, pure-logic
+no Qt) and `tests/test_helpers.py` (+7 tests) pass; `tests/test_project.py`
+(+3 tests) and `tests/test_hydra_batch_ui.py` (stub signatures updated)
+pass under this repo's per-file `pytest-forked` isolation.
+`gui_documentation.md` (top summary + §7 + §16/§17) already fully
+described all three features going into the commit.
+**Files:** `midas_gui/project.py`, `midas_gui/hydra_calib_page.py`,
+`midas_gui/helpers.py`, `midas_gui/tab_batch.py`,
+`midas_gui/hydra_batch_page.py`, `midas_gui/hydra_batch_widgets.py`,
+`tests/test_project.py`, `tests/test_hydra_overall_cake.py` (new),
+`tests/test_helpers.py`, `tests/test_hydra_batch_ui.py`.
+**Roll back:** `git revert fd7f67a` — the three pieces are independent in
+practice (different files, no shared state) but were shipped as one
+commit; a partial revert needs a manual `git checkout fd7f67a^ -- <path>`
+per file instead of a clean revert.
 
 ---
 
