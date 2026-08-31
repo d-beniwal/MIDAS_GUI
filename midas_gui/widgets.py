@@ -944,8 +944,8 @@ class StrainCakeViewer(CakeViewer):
         self._cmap.insertItem(0, "coolwarm")
         self._cmap.setCurrentIndex(0)
         self._source = _NoScrollComboBox()
-        self._source.addItem("Model (whole detector)", "model")
         self._source.addItem("Ring (η-resolved)", "ring")
+        self._source.addItem("Model (whole detector)", "model")
         self._source.setToolTip(
             "Model: the backend's smoothed residual_corr_map, rebinned onto\n"
             "the (R, η) cake grid. Ring: the same local-peak measurement\n"
