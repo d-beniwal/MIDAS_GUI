@@ -47,6 +47,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import socket
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -318,7 +320,69 @@ def environment_snapshot() -> dict:
         env["qt_version"] = QtCore.QT_VERSION_STR
     except Exception:
         pass
+    env["workstation"] = workstation_snapshot()
     return env
+
+
+def _cpu_model() -> Optional[str]:
+    """Best-effort human-readable CPU model string (e.g. "Apple M2 Pro" or
+    an Intel/AMD brand string). Platform-specific lookups are each wrapped
+    individually — a failure just falls through to the next, least-specific
+    source rather than losing the whole field."""
+    import platform
+    system = platform.system()
+    try:
+        if system == "Darwin":
+            out = subprocess.run(
+                ["sysctl", "-n", "machdep.cpu.brand_string"],
+                capture_output=True, text=True, timeout=2)
+            if out.returncode == 0 and out.stdout.strip():
+                return out.stdout.strip()
+        elif system == "Linux":
+            with open("/proc/cpuinfo") as f:
+                for line in f:
+                    if line.lower().startswith("model name"):
+                        return line.split(":", 1)[1].strip()
+    except Exception:
+        pass
+    return platform.processor() or None
+
+
+def workstation_snapshot() -> dict:
+    """Best-effort hardware/OS identification for the machine an analysis
+    attempt actually ran on, so a project file can still be traced back to
+    the exact workstation it was produced on long after the fact. Every
+    field is independently best-effort — a lookup failure yields ``None``
+    for just that field rather than dropping the whole snapshot."""
+    import platform
+
+    ws = {
+        "hostname": None,
+        "os": platform.system(),
+        "os_release": platform.release(),
+        "os_version": platform.version(),
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        "processor": None,
+        "cpu_count_logical": os.cpu_count(),
+        "cpu_count_physical": None,
+        "total_memory_gb": None,
+    }
+    try:
+        ws["hostname"] = socket.gethostname()
+    except Exception:
+        pass
+    try:
+        ws["processor"] = _cpu_model()
+    except Exception:
+        pass
+    try:
+        import psutil
+        ws["cpu_count_physical"] = psutil.cpu_count(logical=False)
+        ws["total_memory_gb"] = round(psutil.virtual_memory().total / (1024 ** 3), 2)
+    except Exception:
+        pass
+    return ws
 
 
 def _now_iso() -> str:

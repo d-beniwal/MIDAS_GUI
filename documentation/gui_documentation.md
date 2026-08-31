@@ -3,18 +3,50 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-31 (§16 "File ▸ Project": crash-safe saves,
-Save-As history-scope choice, Open-Project unsaved-changes guard. Summary:
-- Every `gui_workspace`/`analysis` write is now crash-safe — new content is
-  built alongside the old and swapped in only once complete, with a
-  rolling `.bak` backup made before each `gui_workspace` overwrite.
-- **File ▸ Save Project As…** now always creates a *fresh* project at the
-  destination (an existing file there is fully overwritten, after
-  confirmation, never merged into), and — when the currently open project
-  has recorded `analysis` history — asks how much of it to carry into the
-  new file: full history (default), latest-attempt-only, or none.
-- **File ▸ Open Project…**/Recent Projects now prompt Save/Discard/Cancel
-  first if the current session has unsaved changes, matching Close.
+**Last updated:** 2026-08-31 (Batch Integrate gains Rmin/Rmax exclusion +
+a Detector-view preview, single-detector and Hydra. Summary:
+- **Rmin/Rmax** (§7 "Integration", both tabs): exclude an inner (e.g.
+  beamstop shadow) or outer radial region from integration. Rmin defaults
+  to 0; Rmax defaults to "auto" (0 → the farthest detector corner from the
+  beam centre, computed by the backend the same way as before) and
+  auto-fills to that corner value once a calibration resolves. **Corner**/
+  **Edge** buttons next to Rmax fill in the farthest-corner/farthest-edge
+  radius from whichever calibration (or, in Hydra mode, whichever
+  toolbar-selected panel) is active.
+- **Detector view tab** (§7): a new tab next to Waterfall/Stacked profiles
+  showing the current source frame with the Rmin/Rmax boundary circles
+  always overlaid, plus the full (R, η) integration bin grid — concentric
+  circles at each R-bin edge, spokes at each η-bin edge, thinned to ~50
+  rings/~72 spokes for legibility — when the new **Show bin grid** checkbox
+  is on (off by default). In Hydra mode this is one page-level tab shared
+  across the 4 GE panels, refreshed for whichever panel is toolbar-selected
+  (kept as a single `ImageViewer` rather than one per panel — see
+  `.context/DECISIONS.md` for the pyqtgraph-widget-count teardown-crash risk
+  this avoided).
+
+Previously (2026-08-31): Analysis provenance now records the workstation it
+ran on; Hydra's Overall Eta vs R Cake now correctly spans the full
+azimuthal range. Summary:
+- **Workstation provenance** (§16/§17): every Mask/Calibrate/Batch
+  Integrate attempt's recorded `environment` snapshot gains a
+  `workstation` block — hostname, OS name/release/version, CPU model,
+  logical/physical core counts, and total RAM — so a project file can be
+  traced back to the exact machine an analysis ran on, even years later.
+  Every field is independently best-effort; a lookup failure on an
+  unusual platform yields `None` for just that field, never a missing
+  snapshot.
+- **Hydra Overall Eta vs R Cake now actually spans -180°..180°** (§7,
+  Calibrate): each GE panel's cake is now rotated by that panel's own
+  `tx` (its physical installation angle about the beam axis — the same
+  value the Data Viewer's windmill composite image already uses) before
+  the four panels are summed. Panel calibration normally leaves `tx`
+  unrefined at 0° (a full powder ring can't constrain a rotation about
+  the beam axis), so every panel's cake previously landed on the same
+  un-rotated η range and piled on top of each other instead of covering
+  the full circle; loading each panel's real geometry (so its `tx` is the
+  true ~90°-apart windmill value) now spreads them out correctly. No
+  change to non-Hydra cakes or to `tx=0` panels (unchanged, still overlap
+  since there's nothing to rotate by).
 
 Previously (2026-08-29): Batch Integrate gets an opt-in **Multi-azimuth
 output (cake)** checkbox — see §7 "Integration" — and Results & Export gets
@@ -1819,10 +1851,19 @@ popup per panel, next to each `ge{n}` card's calibration-source radios.
 |---|---|
 | Kernel | Hard (fastest) · Subpixel K=2 · Subpixel K=4 · Polygon (exact). |
 | R bin (px) / η bin (°) | Radial and azimuthal bin sizes. |
+| **Rmin / Rmax (px)** | Exclude an inner (e.g. beamstop shadow) or outer radial region from integration. Rmin defaults to 0. Rmax defaults to 0, meaning **auto** — left at 0 it's passed through unset so the backend picks the farthest-detector-corner radius itself (same value the **Corner** button below fills in); once a calibration is resolved, Rmax auto-fills to that corner value the first time (a manual edit or preset click after that always wins). **Corner** sets Rmax to the farthest detector corner from the beam centre; **Edge** sets it to the farthest straight detector edge (smaller than Corner — excludes the corner regions beyond it). |
 | **Azim. avg** | How the (η, R) cake becomes a 1-D profile: **Pixel-weighted** (default) `Σ(mean·count)/Σ(count)` — independent of η-bin size and robust to partial azimuthal coverage / **off-detector beam centres**; or **η-bin mean (legacy)** — the unweighted mean of per-η-bin means, which can distort with a coarse η bin when the beam centre is off the detector. |
 | Per-bin variance (σ) | Error model poisson / azimuthal / hybrid (ignored when corrections are on → σ = √I). |
 | Q-uniform bins | Integrate in R then rebin onto a uniform-Q grid (Qmin, Qmax, ΔQ). |
 | **Multi-azimuth output (cake)** | Off by default. Keeps every azimuthal (η) sector from the η bin/range above as a **separate** output profile per frame (`profiles`/`sigmas` become `(n_frames, n_eta, n_r)`) instead of collapsing to one full-circle-averaged profile — needed for per-azimuth GSAS-II/texture work. Off, η bin still exists (default 5° over the full 360°, i.e. 72 internal bins) but is used only to control the collapse's weighting resolution, so turning this on repurposes that same field rather than changing any existing run's output. Text-format Save/live writes become one file per `(frame, η bin)`, named `<id>_etaNNN.<fmt>`; HDF5 output is skipped in this mode (`write_h5` expects one profile per frame) — use the text formats or the GSAS-II zarr export (§12) instead. Not yet combinable with Q-uniform bins. |
+| **Show bin grid** | Off by default. Overlays the full (R, η) integration bin grid — concentric circles at each R-bin edge, spokes at each η-bin edge — on the **Detector view** tab, thinned to at most ~50 rings / ~72 spokes so a fine bin size stays legible. |
+
+A new **Detector view** tab (alongside Waterfall/Stacked profiles — one page-level
+tab in Hydra mode, shared across the 4 GE panels and refreshed for whichever
+panel is toolbar-selected) shows the current source frame with the Rmin/Rmax
+boundary circles always overlaid (once a calibration resolves), plus the bin
+grid when **Show bin grid** is checked — lets you confirm the excluded
+region/binning geometry visually before running a batch.
 
 ### Physics corrections
 Polarization and solid-angle (pixel-domain, via `integrate_with_corrections`).
@@ -2675,7 +2716,11 @@ it, since there's no path to hash — a **mask attempt** itself (`analysis/
 mask`) always embeds its resulting mask array, compressed, since recording
 that array *is* the point of logging one. Each record also carries the
 midas-gui / MIDAS package versions active at the time, **plus the beamline
-Profile active for that run** (see §15). A Batch Integrate record
+Profile active for that run** (see §15), **plus a workstation snapshot** —
+hostname, OS name/release/version, CPU model, logical/physical core
+counts, and total RAM — recorded automatically, so a run can always be
+traced back to exactly which machine it was analyzed on, even long
+afterward. A Batch Integrate record
 additionally embeds the exact calibration values it used and links back to
 the specific Calibrate run that produced them, when that run was itself
 logged to the same project.

@@ -22,10 +22,12 @@ from midas_gui.constants import (KERNELS, ERROR_MODELS,
 from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_file,
                                geometry_fields_from_file,
                                resolve_calibration_fields, make_calib_values_button,
+                               rmax_corner_px, rmax_edge_px, draw_polar_bin_overlay,
                                _NoScrollSpinBox, _NoScrollComboBox,
                                widgets_to_dict, apply_dict_to_widgets)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
-                               StackedProfileViewer, DataLoaderPanel, OutputFormatSelector)
+                               StackedProfileViewer, DataLoaderPanel, OutputFormatSelector,
+                               ImageViewer)
 from midas_gui.workers import (BatchWorker, BatchRunCoordinator, apply_q_uniform,
                                DriftWorker, FolderMonitorWorker, write_all_profiles)
 from midas_gui.dialogs import show_error
@@ -49,6 +51,7 @@ class BatchTab(QtWidgets.QWidget):
         self._integrated_fids: set = set()   # frame ids already displayed (batch + monitor)
         self._geom_cache = None              # cached integration context (detector map)
         self._geom_sig = None                # signature the cached context was built for
+        self._bin_overlay_items: list = []   # Rmin/Rmax + bin-grid overlay on _det_view
         # Built lazily on first switch to Hydra mode: it owns 8 pyqtgraph
         # widgets (4 WaterfallViewer + 4 StackedProfileViewer), and most
         # sessions never touch Hydra Batch Integrate — see .context/DECISIONS.md's
@@ -63,6 +66,9 @@ class BatchTab(QtWidgets.QWidget):
         self._project_ctx: Optional[project.ProjectContext] = None
         self._build_ui()
         self._loader.monitorToggled.connect(self._toggle_monitor)
+        self._loader.dataChanged.connect(self._refresh_detector_preview)
+        self._use_tab2_btn.toggled.connect(self._refresh_detector_preview)
+        self._json_ed.textChanged.connect(lambda *_: self._refresh_detector_preview())
         self._loader.set_path(DEFAULT_NICKEL_DIR)
 
     def set_project_context(self, ctx: "project.ProjectContext"):
@@ -76,6 +82,7 @@ class BatchTab(QtWidgets.QWidget):
             f"From Tab 2: Lsd={result.Lsd/1000:.3f} mm  "
             f"λ={result.wavelength_A:.5f} Å  {result.NrPixelsY}×{result.NrPixelsZ} px")
         self._use_tab2_btn.setChecked(True)
+        self._refresh_detector_preview()
 
     def _calib_fields_in_use(self):
         """Resolve the geometry currently selected (Tab-2 result or file), as a
@@ -84,6 +91,43 @@ class BatchTab(QtWidgets.QWidget):
         called fresh each time it's opened."""
         return resolve_calibration_fields(
             self._calib_result, self._use_json_btn.isChecked(), self._json_ed.text())
+
+    def _apply_rmax_preset(self, formula) -> None:
+        """Corner/Edge button handler — ``formula`` is ``rmax_corner_px`` or
+        ``rmax_edge_px``; resolves the active calibration and fills Rmax."""
+        fields, note = self._calib_fields_in_use()
+        if not fields or fields.get("BC_y") is None or fields.get("NrPixelsY") is None:
+            self._log.append(f"[batch] Can't set Rmax preset: {note}")
+            return
+        value = formula(fields["BC_y"], fields["BC_z"], fields["NrPixelsY"], fields["NrPixelsZ"])
+        self._r_max.setValue(value)
+
+    def _refresh_detector_preview(self, *_args) -> None:
+        """Refresh the Detector-view tab's frame + Rmin/Rmax/bin-grid overlay —
+        called on new/changed data, a calibration-source change, or any of
+        the Rmin/Rmax/R-bin/η-bin/Show-bin-grid controls changing. The Rmax
+        auto-fill and overlay must not depend on a frame already being
+        loaded — calibration commonly arrives before data does."""
+        frame = self._loader.current_frame()
+        if frame is not None:
+            self._det_view.set_image(frame, autorange=True, reset_levels=True)
+        fields, _ = self._calib_fields_in_use()
+        if not fields or fields.get("BC_y") is None or fields.get("NrPixelsY") is None:
+            draw_polar_bin_overlay(
+                self._det_view, self._bin_overlay_items,
+                bc_y=0.0, bc_z=0.0, r_min=0.0, r_max=0.0, r_bin=1.0, e_bin=5.0)
+            return
+        if self._r_max.value() == 0.0:
+            self._r_max.blockSignals(True)
+            self._r_max.setValue(rmax_corner_px(
+                fields["BC_y"], fields["BC_z"], fields["NrPixelsY"], fields["NrPixelsZ"]))
+            self._r_max.blockSignals(False)
+        draw_polar_bin_overlay(
+            self._det_view, self._bin_overlay_items,
+            bc_y=fields["BC_y"], bc_z=fields["BC_z"],
+            r_min=self._r_min.value(), r_max=self._r_max.value(),
+            r_bin=self._r_bin.value(), e_bin=self._e_bin.value(),
+            show_grid=self._grid_chk.isChecked())
 
     def _resolved_im_trans(self) -> tuple:
         """ImTransOpt codes from the active calibration source — the same
@@ -129,6 +173,9 @@ class BatchTab(QtWidgets.QWidget):
             "kernel": self._kernel,
             "r_bin": self._r_bin,
             "e_bin": self._e_bin,
+            "r_min": self._r_min,
+            "r_max": self._r_max,
+            "grid_chk": self._grid_chk,
             "azim": self._azim,
             "multi_azimuth": self._multi_azimuth_chk,
             "var_check": self._var_check,
@@ -353,6 +400,39 @@ class BatchTab(QtWidgets.QWidget):
         intf.row(("R bin:", self._r_bin), ("η bin:", self._e_bin))
         intf.row(("Azim. avg:", self._azim))
         integ.body.addLayout(intf)
+        # Rmin/Rmax — exclude an inner (e.g. beamstop shadow) or outer region
+        # from integration. Rmax 0.0 is the "auto" sentinel: left untouched,
+        # it's passed through as RMax=None so the backend's own farthest-
+        # corner default stays authoritative (see helpers._build_spec) —
+        # auto-filled to that same corner value once calibration resolves.
+        self._r_min = _fspin(0.0, 1_000_000.0, 2, 0.0, "px")
+        self._r_max = _fspin(0.0, 1_000_000.0, 2, 0.0, "px")
+        self._r_max.setToolTip(
+            "0 = auto (farthest detector corner from the beam centre).\n"
+            "Use the Corner/Edge buttons to fill in a value, or type your own.")
+        self._rmax_corner_btn = QtWidgets.QPushButton("Corner")
+        self._rmax_corner_btn.setToolTip("Set Rmax to the farthest detector CORNER from the beam centre.")
+        self._rmax_corner_btn.clicked.connect(lambda: self._apply_rmax_preset(rmax_corner_px))
+        self._rmax_edge_btn = QtWidgets.QPushButton("Edge")
+        self._rmax_edge_btn.setToolTip("Set Rmax to the farthest detector EDGE from the beam centre.")
+        self._rmax_edge_btn.clicked.connect(lambda: self._apply_rmax_preset(rmax_edge_px))
+        rmax_row = QtWidgets.QHBoxLayout(); rmax_row.setSpacing(4)
+        rmax_row.addWidget(self._r_max)
+        rmax_row.addWidget(self._rmax_corner_btn); rmax_row.addWidget(self._rmax_edge_btn)
+        rf = S.Form()
+        rf.row(("Rmin:", self._r_min))
+        rf.row(("Rmax:", rmax_row))
+        integ.body.addLayout(rf)
+        self._grid_chk = QtWidgets.QCheckBox("Show bin grid")
+        self._grid_chk.setToolTip(
+            "Overlay the full (R, η) integration bin grid on the Detector "
+            "view tab — concentric circles at each R-bin edge, spokes at "
+            "each η-bin edge. Thinned to at most ~50 rings / ~72 spokes "
+            "for legibility with fine bin sizes.")
+        integ.body.addWidget(self._grid_chk)
+        for w in (self._r_min, self._r_max, self._r_bin, self._e_bin):
+            w.valueChanged.connect(self._refresh_detector_preview)
+        self._grid_chk.toggled.connect(self._refresh_detector_preview)
         self._multi_azimuth_chk = QtWidgets.QCheckBox("Multi-azimuth output (cake)")
         self._multi_azimuth_chk.setToolTip(
             "Keep every azimuthal (η) sector as a SEPARATE output profile "
@@ -517,13 +597,15 @@ class BatchTab(QtWidgets.QWidget):
         lv.addStretch(1)
         split.addWidget(scroll)
 
-        # Right: waterfall / stacked-profiles tabs + log
+        # Right: waterfall / stacked-profiles / detector-view tabs + log
         right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         self._view_tabs = QtWidgets.QTabWidget()
         self._waterfall = WaterfallViewer()
         self._stack_view = StackedProfileViewer()
+        self._det_view = ImageViewer()
         self._view_tabs.addTab(self._waterfall, "Waterfall")
         self._view_tabs.addTab(self._stack_view, "Stacked profiles")
+        self._view_tabs.addTab(self._det_view, "Detector view")
         right.addWidget(self._view_tabs)
         self._log = LogPanel()
         self._log.setMaximumHeight(16_777_215)   # let the splitter size it
@@ -540,14 +622,15 @@ class BatchTab(QtWidgets.QWidget):
         # Always R-uniform; Q-uniform is handled by rebinning in the worker because the
         # kernels do not implement Q-mode binning (see analyze_workflows/workflow_analysis.md).
         r_bin = self._r_bin.value(); e_bin = self._e_bin.value()
+        r_min = self._r_min.value(); r_max = self._r_max.value() or None
         if self._use_tab2_btn.isChecked():
             if self._calib_result is None:
                 raise RuntimeError("No calibration from Tab 2. Run Tab 2 first.")
-            return _build_spec(self._calib_result, r_bin, e_bin)
+            return _build_spec(self._calib_result, r_bin, e_bin, r_min=r_min, r_max=r_max)
         path = self._json_ed.text().strip()
         if not path or not Path(path).exists():
             raise FileNotFoundError(f"Calibration file not found: {path}")
-        return spec_from_geometry_file(path, r_bin, e_bin)
+        return spec_from_geometry_file(path, r_bin, e_bin, r_min=r_min, r_max=r_max)
 
     def _run(self):
         if self._worker and self._worker.isRunning():
@@ -828,6 +911,7 @@ class BatchTab(QtWidgets.QWidget):
         mask_id = None if mask is None else (tuple(mask.shape), int(np.count_nonzero(mask)))
         pol, sa = corrections
         return (calib, kernel, round(self._r_bin.value(), 4), round(self._e_bin.value(), 4),
+                round(self._r_min.value(), 4), round(self._r_max.value(), 4),
                 bool(weighted), pol is not None, sa is not None, mask_id,
                 src_cfg.get("path"), tuple(src_cfg.get("paths") or ()),
                 src_cfg.get("type"), src_cfg.get("dataset"))

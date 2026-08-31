@@ -126,6 +126,22 @@ def test_environment_snapshot_shape():
     assert isinstance(env, dict)
     assert "midas_gui_version" in env
     assert "python_version" in env
+    assert "workstation" in env
+    assert env["workstation"]["hostname"]
+
+
+def test_workstation_snapshot_has_hardware_identity():
+    ws = project.workstation_snapshot()
+    assert ws["hostname"]
+    assert ws["os"] in ("Darwin", "Linux", "Windows")
+    assert ws["cpu_count_logical"] and ws["cpu_count_logical"] > 0
+
+
+def test_workstation_snapshot_never_raises_on_lookup_failure(monkeypatch):
+    monkeypatch.setattr(project.socket, "gethostname", lambda: (_ for _ in ()).throw(OSError("boom")))
+    ws = project.workstation_snapshot()
+    assert ws["hostname"] is None
+    assert ws["os"]   # other fields still populate independently
 
 
 def _fake_result(**overrides):

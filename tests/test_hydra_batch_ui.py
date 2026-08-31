@@ -4,11 +4,12 @@ mask wiring, output subfolder-per-panel naming, and Sequential/Parallel run
 orchestration + per-panel result-viewer switching.
 
 ``HydraBatchPage`` builds 4 ``WaterfallViewer`` + 4 ``StackedProfileViewer``
-(8 pyqtgraph widgets total — more than the Calibrate Hydra page's 6). Per
-.context/DECISIONS.md's pyqtgraph-teardown-crash entry (reproduced there
-building one ``HydraCalibrationPage`` per test function), this file follows
-the same fix: exactly 2 test functions, each building exactly ONE page and
-reusing it for every assertion — see ``tests/test_hydra_calib_ui.py``.
++ 1 shared Detector-view ``ImageViewer`` (9 pyqtgraph widgets total — more
+than the Calibrate Hydra page's 6). Per .context/DECISIONS.md's
+pyqtgraph-teardown-crash entry (reproduced there building one
+``HydraCalibrationPage`` per test function), this file follows the same
+fix: exactly 2 test functions, each building exactly ONE page and reusing
+it for every assertion — see ``tests/test_hydra_calib_ui.py``.
 """
 from __future__ import annotations
 
@@ -26,6 +27,13 @@ from midas_gui import project
 from midas_gui.hydra_batch_page import HydraBatchPage
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "test_data" / "gui_synthetic" / "hydra"
+
+# Run each test in this file in its own forked subprocess (pytest-forked):
+# the Detector-view ImageViewer added alongside the existing 8 pyqtgraph
+# widgets tipped this file into the pyqtgraph-teardown segfault documented
+# above and in .context/STATE.md — forking contains it to one clean FAILED
+# with signal info per test, instead of crashing the whole pytest run.
+pytestmark = pytest.mark.forked
 
 
 @pytest.fixture(scope="module")
@@ -60,11 +68,11 @@ def _stub_spec_builders(monkeypatch):
     lightweight object carrying just the attributes ``_start_panel_worker``
     reads (``Lsd``, ``pxY``, ``Wavelength``)."""
     monkeypatch.setattr(hydra_batch_widgets_mod, "_build_spec",
-                        lambda result, r_bin, e_bin: _fake_spec(
+                        lambda result, r_bin, e_bin, r_min=None, r_max=None: _fake_spec(
                             getattr(result, "Lsd", 200_000.0), getattr(result, "pxY", 200.0),
                             getattr(result, "wavelength_A", 0.1729)))
     monkeypatch.setattr(hydra_batch_widgets_mod, "spec_from_geometry_file",
-                        lambda path, r_bin, e_bin: _fake_spec())
+                        lambda path, r_bin, e_bin, r_min=None, r_max=None: _fake_spec())
 
 
 class _FakeBatchWorker(QtCore.QObject):

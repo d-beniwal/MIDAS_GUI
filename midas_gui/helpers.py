@@ -642,9 +642,106 @@ def _apply_panel_fields(spec, panel_layout: dict | None, panel_shifts_path: str 
     spec.PanelShiftsFile = str(panel_shifts_path or "")
 
 
-def _build_spec(result, r_bin: float, eta_bin: float):
+# ── R-range presets + polar (R, η) bin-grid overlay ─────────────────────────
+# Used by the Integration tabs' Rmin/Rmax fields (Corner/Edge preset buttons)
+# and their "Detector view" preview (Rmin/Rmax boundary + optional bin grid).
+
+def rmax_corner_px(bc_y: float, bc_z: float, ny: int, nz: int) -> float:
+    """Distance from the beam centre to the farthest detector CORNER — the
+    same formula ``spec_from_calibration_result`` uses internally when
+    ``RMax=None`` (auto), so leaving Rmax at this value always matches what
+    a run actually integrates to."""
+    return float(math.hypot(max(bc_y, ny - 1 - bc_y), max(bc_z, nz - 1 - bc_z)))
+
+
+def rmax_edge_px(bc_y: float, bc_z: float, ny: int, nz: int) -> float:
+    """Distance from the beam centre to the farthest detector EDGE (the
+    largest perpendicular distance to any one of the 4 straight sides) —
+    smaller than :func:`rmax_corner_px`, excludes the corner regions beyond
+    that edge."""
+    return float(max(bc_y, ny - 1 - bc_y, bc_z, nz - 1 - bc_z))
+
+
+def _thinned_bin_edges(lo: float, hi: float, step: float, max_count: int) -> np.ndarray:
+    """Bin-edge positions between ``lo``/``hi`` spaced by ``step``, evenly
+    strided down to at most ``max_count`` values so a fine bin size doesn't
+    draw an unreadable number of overlay rings/spokes. Returns an empty
+    array for a degenerate range/step."""
+    if step <= 0 or hi <= lo:
+        return np.empty(0, dtype=float)
+    edges = np.arange(lo, hi + step / 2, step)
+    edges = edges[edges <= hi + 1e-9]
+    if edges.size > max_count:
+        stride = int(math.ceil(edges.size / max_count))
+        edges = edges[::stride]
+    return edges
+
+
+def draw_polar_bin_overlay(viewer, items: list, *, bc_y: float, bc_z: float,
+                           r_min: float, r_max: float, r_bin: float, e_bin: float,
+                           eta_min: float = -180.0, eta_max: float = 180.0,
+                           show_grid: bool = False, max_rings: int = 50,
+                           max_spokes: int = 72) -> None:
+    """Draw the Rmin/Rmax exclusion-boundary circles (always, skipping any
+    non-positive radius) and, if ``show_grid``, the full polar (R, η) bin
+    grid — concentric circles at each radial-bin edge plus spokes at each
+    η-bin edge, both thinned to at most ``max_rings``/``max_spokes`` — onto
+    ``viewer._iv``.
+
+    ``items`` is the caller's own persistent list of previously-drawn
+    items: cleared and rebuilt in place every call, mirroring the
+    add/remove overlay lifecycle ``tab_calibrate.py``'s ``_draw_rings``
+    uses for calibration rings.
+    """
+    import pyqtgraph as pg
+    for it in items:
+        viewer._iv.removeItem(it)
+    items.clear()
+    if r_max <= 0:
+        return
+    th = np.linspace(0, 2 * math.pi, 256)
+
+    def _circle(r, pen):
+        item = pg.PlotDataItem(bc_y + r * np.cos(th), bc_z + r * np.sin(th), pen=pen)
+        viewer._iv.addItem(item)
+        items.append(item)
+
+    if r_min > 0:
+        _circle(r_min, pg.mkPen("orange", width=1.2, style=QtCore.Qt.DashLine))
+    _circle(r_max, pg.mkPen("orange", width=1.5))
+
+    if not show_grid:
+        return
+    grid_pen = pg.mkPen((120, 180, 255), width=0.8)
+    for r in _thinned_bin_edges(r_min, r_max, r_bin, max_rings):
+        if r_min < r < r_max:
+            _circle(r, grid_pen)
+    eta_edges = _thinned_bin_edges(eta_min, eta_max, e_bin, max_spokes)
+    if eta_max - eta_min >= 360.0 - 1e-6:
+        eta_edges = eta_edges[eta_edges < eta_max - 1e-9]   # drop the wraparound duplicate
+    for eta in eta_edges:
+        th_r = math.radians(float(eta))
+        item = pg.PlotDataItem(
+            [bc_y + r_min * math.cos(th_r), bc_y + r_max * math.cos(th_r)],
+            [bc_z + r_min * math.sin(th_r), bc_z + r_max * math.sin(th_r)],
+            pen=grid_pen)
+        viewer._iv.addItem(item); items.append(item)
+
+
+def _build_spec(result, r_bin: float, eta_bin: float,
+                r_min: Optional[float] = None, r_max: Optional[float] = None):
+    """``r_min``/``r_max`` (px) are ``None`` by default, meaning "leave
+    ``spec_from_calibration_result``'s own default" (``RMin=10.0``,
+    ``RMax=None``→auto-corner) — only the Integration tabs' explicit
+    Rmin/Rmax fields override them; every other caller (pump-probe,
+    GSAS export, diagnostic cake previews) is unaffected."""
     from midas_calibrate_v2.compat.to_integrate import spec_from_calibration_result
-    spec = spec_from_calibration_result(result, RBinSize=r_bin, EtaBinSize=eta_bin)
+    kwargs = dict(RBinSize=r_bin, EtaBinSize=eta_bin)
+    if r_min is not None:
+        kwargs["RMin"] = r_min
+    if r_max is not None:
+        kwargs["RMax"] = r_max
+    spec = spec_from_calibration_result(result, **kwargs)
     # spec_from_calibration_result doesn't copy ImTransOpt — set it here so
     # every consumer of this spec can hand the RAW frame straight to
     # midas_integrate_v2 and let its own apply_trans_opt=True do the flip
@@ -730,11 +827,13 @@ def paramstest_pairs(result, selected=None) -> list:
     return pairs
 
 
-def _spec_from_result_ns(r_bin, eta_bin, **fields):
+def _spec_from_result_ns(r_bin, eta_bin, r_min: Optional[float] = None,
+                         r_max: Optional[float] = None, **fields):
     """Build an IntegrationSpec from geometry fields via a duck-typed result.
 
     Routes through ``spec_from_calibration_result`` so RhoD, RMax and the bin
-    counts are derived exactly as for a live calibration result.
+    counts are derived exactly as for a live calibration result. ``r_min``/
+    ``r_max`` — see ``_build_spec``.
     """
     from types import SimpleNamespace
     from midas_calibrate_v2.compat.to_integrate import spec_from_calibration_result
@@ -745,7 +844,12 @@ def _spec_from_result_ns(r_bin, eta_bin, **fields):
         tx=float(fields.get("tx") or 0.0), ty=float(fields.get("ty") or 0.0),
         tz=float(fields.get("tz") or 0.0), wavelength_A=float(fields["wavelength_A"]),
         distortion=fields.get("distortion") or {}, residual_corr_bin_path=None)
-    spec = spec_from_calibration_result(ns, RBinSize=float(r_bin), EtaBinSize=float(eta_bin))
+    kwargs = dict(RBinSize=float(r_bin), EtaBinSize=float(eta_bin))
+    if r_min is not None:
+        kwargs["RMin"] = r_min
+    if r_max is not None:
+        kwargs["RMax"] = r_max
+    spec = spec_from_calibration_result(ns, **kwargs)
     spec.TransOpt = list(fields.get("im_trans") or [])
     _apply_panel_fields(spec, fields.get("panel_layout"), fields.get("panel_shifts_path"))
     return spec
@@ -915,10 +1019,13 @@ def geometry_fields_from_file(path: str) -> dict:
         panel_layout=panel_layout, panel_shifts_path=panel_shifts_path))
 
 
-def spec_from_geometry_file(path: str, r_bin: float, eta_bin: float):
+def spec_from_geometry_file(path: str, r_bin: float, eta_bin: float,
+                            r_min: Optional[float] = None, r_max: Optional[float] = None):
     """Build an IntegrationSpec from a MIDAS paramstest, a pyFAI ``.poni``, or a
-    calibration ``.json``.  Thin wrapper over :func:`geometry_fields_from_file`."""
-    return _spec_from_result_ns(r_bin, eta_bin, **geometry_fields_from_file(path))
+    calibration ``.json``.  Thin wrapper over :func:`geometry_fields_from_file`.
+    ``r_min``/``r_max`` — see ``_build_spec``."""
+    return _spec_from_result_ns(r_bin, eta_bin, r_min=r_min, r_max=r_max,
+                                **geometry_fields_from_file(path))
 
 
 def result_ns_from_geometry_file(path: str):

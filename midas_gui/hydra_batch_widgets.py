@@ -113,20 +113,21 @@ class HydraBatchPanelCard(QtWidgets.QWidget):
     def file_path(self) -> str:
         return self._json_ed.text().strip()
 
-    def resolved_spec(self, r_bin: float, e_bin: float):
+    def resolved_spec(self, r_bin: float, e_bin: float, r_min=None, r_max=None):
         """Build an ``IntegrationSpec`` from whichever source is active —
-        raises if neither a Calibrate-tab result nor a valid file is set."""
+        raises if neither a Calibrate-tab result nor a valid file is set.
+        ``r_min``/``r_max`` — see ``helpers._build_spec``."""
         if not self._use_file_btn.isChecked():
             if self.result is None:
                 raise RuntimeError(
                     f"ge{self.panel_number}: no calibration from the Calibrate tab. "
                     "Run its Hydra fit first.")
-            return _build_spec(self.result, r_bin, e_bin)
+            return _build_spec(self.result, r_bin, e_bin, r_min=r_min, r_max=r_max)
         path = self._json_ed.text().strip()
         if not path or not Path(path).exists():
             raise FileNotFoundError(
                 f"ge{self.panel_number}: calibration file not found: {path}")
-        return spec_from_geometry_file(path, r_bin, e_bin)
+        return spec_from_geometry_file(path, r_bin, e_bin, r_min=r_min, r_max=r_max)
 
     # ── Progress ─────────────────────────────────────────────────────
 

@@ -34,9 +34,10 @@ from midas_gui.constants import (KERNELS, ERROR_MODELS,
                                  DEFAULT_KERNEL, DEFAULT_ERROR_MODEL)
 from midas_gui.helpers import (
     _fspin, _browse, _NoScrollComboBox, _NoScrollSpinBox,
-    widgets_to_dict, apply_dict_to_widgets)
+    widgets_to_dict, apply_dict_to_widgets,
+    _load_image, _apply_im_trans, rmax_corner_px, rmax_edge_px, draw_polar_bin_overlay)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
-                               StackedProfileViewer, OutputFormatSelector)
+                               StackedProfileViewer, OutputFormatSelector, ImageViewer)
 from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar
 from midas_gui.hydra_batch_widgets import HydraBatchPanelCard
 from midas_gui.workers import BatchRunCoordinator, write_all_profiles
@@ -48,18 +49,24 @@ from midas_gui import style as S
 class _PanelViewerPair(QtWidgets.QWidget):
     """One panel's own Waterfall/Stacked-profiles tab pair — a small copy of
     the single-detector Batch tab's RIGHT-pane viewer, one instance per GE
-    panel so each panel's results display independently."""
+    panel so each panel's results display independently.
+
+    The Detector-view preview is deliberately NOT part of this pair — see
+    ``HydraBatchPage``'s own docstring comment (in ``_build_ui``, RIGHT
+    section) for why it's one page-level ``ImageViewer`` refreshed in place
+    rather than a per-panel widget reparented on every switch.
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
         lv = QtWidgets.QVBoxLayout(self)
         lv.setContentsMargins(0, 0, 0, 0)
-        tabs = QtWidgets.QTabWidget()
+        self.tabs = QtWidgets.QTabWidget()
         self.waterfall = WaterfallViewer()
         self.stack_view = StackedProfileViewer()
-        tabs.addTab(self.waterfall, "Waterfall")
-        tabs.addTab(self.stack_view, "Stacked profiles")
-        lv.addWidget(tabs)
+        self.tabs.addTab(self.waterfall, "Waterfall")
+        self.tabs.addTab(self.stack_view, "Stacked profiles")
+        lv.addWidget(self.tabs)
         self.wf_started = False
 
 
@@ -80,6 +87,12 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._last_results: dict = {}     # panel_num -> {r_axis_px, profiles, sigmas, frame_ids}
         self._last_axis_ctx: dict = {}    # panel_num -> (lsd, px, wl) — for the Save button
         self._project_ctx = None
+        # Single shared, page-level Detector-view widget + its overlay
+        # items — its content (not the widget itself) refreshes per the
+        # toolbar-selected panel (see _PanelViewerPair's docstring for why
+        # it's never reparented between panels).
+        self._det_view = ImageViewer()
+        self._bin_overlay_items: list = []
         self._build_ui()
         self._on_panel_changed(self._toolbar.current())
 
@@ -100,6 +113,7 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._loader = HydraLoaderPanel(mode="stream")
         self._loader.setMinimumWidth(200)
         self._loader.siblingsChanged.connect(self._on_siblings_changed)
+        self._loader.frameChanged.connect(lambda *_: self._refresh_active_detector_preview())
         split.addWidget(self._loader)
 
         # ── MIDDLE: shared "recipe" cards + per-panel card stack ──
@@ -127,6 +141,42 @@ class HydraBatchPage(QtWidgets.QWidget):
         intf.row(("R bin:", self._r_bin), ("η bin:", self._e_bin))
         intf.row(("Azim. avg:", self._azim))
         integ.body.addLayout(intf)
+        # Rmin/Rmax — shared across panels like R bin/η bin; Corner/Edge
+        # presets compute from whichever panel is currently selected in the
+        # toolbar (see BatchTab's single-detector counterpart for the 0.0
+        # "auto" sentinel convention).
+        self._r_min = _fspin(0.0, 1_000_000.0, 2, 0.0, "px")
+        self._r_max = _fspin(0.0, 1_000_000.0, 2, 0.0, "px")
+        self._r_max.setToolTip(
+            "0 = auto (farthest detector corner from the beam centre).\n"
+            "Use the Corner/Edge buttons to fill in a value, or type your own.")
+        self._rmax_corner_btn = QtWidgets.QPushButton("Corner")
+        self._rmax_corner_btn.setToolTip(
+            "Set Rmax to the farthest detector CORNER from the beam centre "
+            "of the currently-selected panel.")
+        self._rmax_corner_btn.clicked.connect(lambda: self._apply_rmax_preset(rmax_corner_px))
+        self._rmax_edge_btn = QtWidgets.QPushButton("Edge")
+        self._rmax_edge_btn.setToolTip(
+            "Set Rmax to the farthest detector EDGE from the beam centre "
+            "of the currently-selected panel.")
+        self._rmax_edge_btn.clicked.connect(lambda: self._apply_rmax_preset(rmax_edge_px))
+        rmax_row = QtWidgets.QHBoxLayout(); rmax_row.setSpacing(4)
+        rmax_row.addWidget(self._r_max)
+        rmax_row.addWidget(self._rmax_corner_btn); rmax_row.addWidget(self._rmax_edge_btn)
+        rf = S.Form()
+        rf.row(("Rmin:", self._r_min))
+        rf.row(("Rmax:", rmax_row))
+        integ.body.addLayout(rf)
+        self._grid_chk = QtWidgets.QCheckBox("Show bin grid")
+        self._grid_chk.setToolTip(
+            "Overlay the full (R, η) integration bin grid on each panel's "
+            "Detector view tab — concentric circles at each R-bin edge, "
+            "spokes at each η-bin edge. Thinned to at most ~50 rings / "
+            "~72 spokes for legibility with fine bin sizes.")
+        integ.body.addWidget(self._grid_chk)
+        for w in (self._r_min, self._r_max, self._r_bin, self._e_bin):
+            w.valueChanged.connect(self._refresh_active_detector_preview)
+        self._grid_chk.toggled.connect(self._refresh_active_detector_preview)
         self._var_check = QtWidgets.QCheckBox("Per-bin variance (σ)")
         self._var_check.setToolTip(
             "Compute per-bin σ via the chosen error model.\n"
@@ -258,19 +308,35 @@ class HydraBatchPage(QtWidgets.QWidget):
             card = HydraBatchPanelCard(n)
             self._cards[n] = card
             self._card_stack.addWidget(card)
+            card._use_calib_btn.toggled.connect(
+                lambda *_, n=n: self._refresh_detector_preview(n))
+            card._json_ed.textChanged.connect(
+                lambda *_, n=n: self._refresh_detector_preview(n))
         lv.addWidget(self._card_stack)
         lv.addStretch(1)
         split.addWidget(scroll)
 
-        # ── RIGHT: per-panel Waterfall/Stacked-profiles, switched with the
-        #    same active-panel toggle, + a shared Log ──
+        # ── RIGHT: per-panel Waterfall/Stacked-profiles (switched with the
+        #    active-panel toggle) + a page-level Detector-view tab, + a
+        #    shared Log. ONE shared ImageViewer (not one per panel) — a 5th
+        #    pyqtgraph ImageView here pushes this page's already-heavy
+        #    widget count (4x Waterfall + 4x StackedProfileViewer) further
+        #    into the pyqtgraph-teardown segfault risk documented in
+        #    .context/STATE.md (worse under an explicit gc.collect(), fine
+        #    in normal use — see tests/test_hydra_batch_ui.py's pytestmark).
+        #    Its content (not the widget itself) refreshes per the
+        #    toolbar-selected panel, mirroring ``HydraCalibrationPage``'s
+        #    shared ``_img_view``.
         right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         self._viewer_stack = QtWidgets.QStackedWidget()
         for n in (1, 2, 3, 4):
             pair = _PanelViewerPair()
             self._viewer_pairs[n] = pair
             self._viewer_stack.addWidget(pair)
-        right.addWidget(self._viewer_stack)
+        top_tabs = QtWidgets.QTabWidget()
+        top_tabs.addTab(self._viewer_stack, "Per-panel results")
+        top_tabs.addTab(self._det_view, "Detector view")
+        right.addWidget(top_tabs)
         self._log = LogPanel()
         self._log.setMaximumHeight(16_777_215)
         right.addWidget(self._log)
@@ -284,11 +350,77 @@ class HydraBatchPage(QtWidgets.QWidget):
 
     def _on_siblings_changed(self, siblings: dict):
         self._toolbar.set_available(siblings.keys())
+        self._refresh_active_detector_preview()
 
     def _on_panel_changed(self, key: str):
         n = int(key[2])
         self._card_stack.setCurrentWidget(self._cards[n])
         self._viewer_stack.setCurrentWidget(self._viewer_pairs[n])
+        self._refresh_detector_preview(n)
+
+    # ── Detector-view preview (Rmin/Rmax + bin-grid overlay) ─────────
+
+    def _apply_rmax_preset(self, formula) -> None:
+        """Corner/Edge button handler — resolves the currently-selected
+        panel's calibration and fills the shared Rmax field."""
+        n = self._toolbar.current()
+        n = int(n[2]) if n else None
+        card = self._cards.get(n) if n else None
+        if card is None:
+            return
+        fields, note = card._calib_fields_in_use()
+        if not fields or fields.get("BC_y") is None or fields.get("NrPixelsY") is None:
+            self._log.append(f"[hydra batch] Can't set Rmax preset: {note}")
+            return
+        value = formula(fields["BC_y"], fields["BC_z"], fields["NrPixelsY"], fields["NrPixelsZ"])
+        self._r_max.setValue(value)
+
+    def _refresh_active_detector_preview(self, *_args) -> None:
+        key = self._toolbar.current()
+        if key:
+            self._refresh_detector_preview(int(key[2]))
+
+    def _refresh_detector_preview(self, n: int) -> None:
+        """Refresh the (single, page-level) Detector-view tab's frame +
+        Rmin/Rmax/bin-grid overlay for panel ``n`` — a no-op unless ``n`` is
+        the panel currently selected in the toolbar, since drawing onto the
+        shared viewer for a panel that isn't the active one would show the
+        wrong geometry. Reads the frame straight off disk since the Hydra
+        loader is stream-mode (see ``hydra_calib_page._panel_raw_image``
+        for the identical pattern)."""
+        key = self._toolbar.current()
+        if not key or n != int(key[2]):
+            return
+        card = self._cards.get(n)
+        if card is None:
+            return
+        # The Rmax auto-fill/overlay below only need calibration fields, not
+        # a loaded frame — calibration commonly arrives before data does.
+        path = self._loader.siblings().get(n)
+        if path is not None:
+            try:
+                frame = _load_image(path, self._loader.dataset(), self._loader.frame_index())
+                frame = _apply_im_trans(frame, card.resolved_im_trans())
+                self._det_view.set_image(frame, autorange=True, reset_levels=True)
+            except Exception:
+                pass
+        fields, _ = card._calib_fields_in_use()
+        if not fields or fields.get("BC_y") is None or fields.get("NrPixelsY") is None:
+            draw_polar_bin_overlay(
+                self._det_view, self._bin_overlay_items,
+                bc_y=0.0, bc_z=0.0, r_min=0.0, r_max=0.0, r_bin=1.0, e_bin=5.0)
+            return
+        if self._r_max.value() == 0.0:
+            self._r_max.blockSignals(True)
+            self._r_max.setValue(rmax_corner_px(
+                fields["BC_y"], fields["BC_z"], fields["NrPixelsY"], fields["NrPixelsZ"]))
+            self._r_max.blockSignals(False)
+        draw_polar_bin_overlay(
+            self._det_view, self._bin_overlay_items,
+            bc_y=fields["BC_y"], bc_z=fields["BC_z"],
+            r_min=self._r_min.value(), r_max=self._r_max.value(),
+            r_bin=self._r_bin.value(), e_bin=self._e_bin.value(),
+            show_grid=self._grid_chk.isChecked())
 
     # ── Run ────────────────────────────────────────────────────────
 
@@ -306,6 +438,7 @@ class HydraBatchPage(QtWidgets.QWidget):
         mask_id = None if mask is None else (tuple(mask.shape), int(np.count_nonzero(mask)))
         pol, sa = corrections
         return (calib, kernel, round(self._r_bin.value(), 4), round(self._e_bin.value(), 4),
+                round(self._r_min.value(), 4), round(self._r_max.value(), 4),
                 bool(weighted), pol is not None, sa is not None, mask_id,
                 src_cfg.get("path"), src_cfg.get("type"), src_cfg.get("dataset"))
 
@@ -354,7 +487,8 @@ class HydraBatchPage(QtWidgets.QWidget):
     def _start_panel_worker(self, n: int):
         card = self._cards[n]
         try:
-            spec = card.resolved_spec(self._r_bin.value(), self._e_bin.value())
+            spec = card.resolved_spec(self._r_bin.value(), self._e_bin.value(),
+                                      r_min=self._r_min.value(), r_max=self._r_max.value() or None)
         except Exception as e:
             self._skip_panel(n, f"calibration error: {e}")
             return
@@ -566,6 +700,7 @@ class HydraBatchPage(QtWidgets.QWidget):
     def _state_widgets(self) -> dict:
         return {
             "kernel": self._kernel, "r_bin": self._r_bin, "e_bin": self._e_bin,
+            "r_min": self._r_min, "r_max": self._r_max, "grid_chk": self._grid_chk,
             "azim": self._azim, "var_check": self._var_check, "err_model": self._err_model,
             "q_check": self._q_check, "q_min": self._q_min, "q_max": self._q_max,
             "q_bin": self._q_bin, "mon_ed": self._mon_ed, "out_ed": self._out_ed,
@@ -616,6 +751,7 @@ class HydraBatchPage(QtWidgets.QWidget):
         card = self._cards.get(n)
         if card is not None:
             card.set_calibration(result)
+            self._refresh_detector_preview(n)
 
     def populate_panel_plots(self, n: int, meta: dict) -> None:
         """Fill panel ``n``'s own Waterfall/Stacked-profiles views from a

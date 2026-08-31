@@ -5,6 +5,7 @@ refresh_combo_items (used by the Calibrant dropdown) and the pixel-size /
 K-edge-foil popup menus rebuilding their entries from live constants each
 time they're opened, instead of freezing them at construction.
 """
+import numpy as np
 import pytest
 
 
@@ -153,3 +154,54 @@ def test_detect_geometry_combines_filename_and_h5_metadata(tmp_path):
 
     detected = detect_geometry_from_path(str(path), profile="1-ID-E")
     assert detected == pytest.approx({"pxY": 200.0, "wavelength_A": C.HC_KEV_A / 80.61})
+
+
+# ── Integration tab Rmin/Rmax presets + bin-grid thinning (pure logic, no Qt) ──
+
+def test_rmax_corner_px_centered_beam():
+    from midas_gui.helpers import rmax_corner_px
+    import math
+    # Centered beam on a 100x100 detector: corner distance is the half-diagonal.
+    assert rmax_corner_px(49.5, 49.5, 100, 100) == pytest.approx(
+        math.hypot(49.5, 49.5))
+
+
+def test_rmax_corner_px_off_center_beam():
+    from midas_gui.helpers import rmax_corner_px
+    import math
+    # Beam near the bottom-left corner of a 100x100 detector: farthest corner
+    # is the top-right one, at distance (99-10, 99-20) away.
+    assert rmax_corner_px(10, 20, 100, 100) == pytest.approx(math.hypot(89, 79))
+
+
+def test_rmax_edge_px_off_center_beam():
+    from midas_gui.helpers import rmax_edge_px
+    # Farthest straight edge is whichever perpendicular distance is largest:
+    # left=10, right=89, bottom=20, top=79 -> the right edge, at 89.
+    assert rmax_edge_px(10, 20, 100, 100) == pytest.approx(89)
+
+
+def test_rmax_edge_never_exceeds_corner():
+    from midas_gui.helpers import rmax_corner_px, rmax_edge_px
+    for bc_y, bc_z in [(10, 20), (49.5, 49.5), (5, 990)]:
+        assert rmax_edge_px(bc_y, bc_z, 1000, 1000) <= rmax_corner_px(bc_y, bc_z, 1000, 1000)
+
+
+def test_thinned_bin_edges_no_thinning_needed():
+    from midas_gui.helpers import _thinned_bin_edges
+    edges = _thinned_bin_edges(0.0, 10.0, 2.0, max_count=50)
+    np.testing.assert_allclose(edges, [0.0, 2.0, 4.0, 6.0, 8.0, 10.0])
+
+
+def test_thinned_bin_edges_caps_dense_bins():
+    from midas_gui.helpers import _thinned_bin_edges
+    edges = _thinned_bin_edges(0.0, 1000.0, 0.5, max_count=50)
+    assert len(edges) <= 50
+    assert edges[0] == pytest.approx(0.0)
+
+
+def test_thinned_bin_edges_degenerate_range_is_empty():
+    from midas_gui.helpers import _thinned_bin_edges
+    assert len(_thinned_bin_edges(10.0, 10.0, 1.0, max_count=50)) == 0
+    assert len(_thinned_bin_edges(10.0, 0.0, 1.0, max_count=50)) == 0
+    assert len(_thinned_bin_edges(0.0, 10.0, 0.0, max_count=50)) == 0

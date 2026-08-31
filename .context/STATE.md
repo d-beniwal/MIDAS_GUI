@@ -1,19 +1,57 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-31 (about to commit Project save-safety +
-Save-As-history-scope work; see "Recently completed" below)_
+_Last updated: 2026-08-31 (workstation provenance + Hydra Overall-Cake
+rotation fix + Batch Integrate Rmin/Rmax + Detector-view preview all
+implemented, not yet committed; see "Now working on" below)_
 
 ## Now working on
 
-Nothing in progress — about to commit the crash-safe-saves/Save-As-history
-work below. Working tree otherwise clean apart from local-only
-`test_data/test_out/` (GSAS-II export test artifacts; untracked,
-gitignore-precedent says leave it, see the github-skill project memory).
+Three features implemented and tested, **not yet committed** (user hasn't
+asked to commit this round):
+- **Workstation provenance** — `project.workstation_snapshot()` (hostname/
+  OS/CPU/cores/RAM) folded into `environment_snapshot()`, so every Mask/
+  Calibrate/Batch-Integrate attempt now records the machine it ran on.
+- **Hydra Overall Eta-R Cake now rotates each panel by its own `tx`**
+  before summing (`hydra_calib_page.py`: `_rotate_eta_axis`/
+  `_resample_rows_to_eta_grid`, `_compose_overall_cake` updated,
+  `_last_cake_data` tuples grew a 7th `tx_deg` field) — fixes panels
+  piling on top of each other instead of covering -180°..180°.
+- **Batch Integrate: Rmin/Rmax exclusion + Detector-view preview**
+  (single-detector `tab_batch.py` + Hydra `hydra_batch_page.py`/
+  `hydra_batch_widgets.py`) — new Rmin/Rmax spinboxes (Rmin defaults 0,
+  Rmax 0="auto"→backend's own farthest-corner default, with Corner/Edge
+  preset buttons: `helpers.rmax_corner_px`/`rmax_edge_px`) and a new
+  "Detector view" tab showing the current frame with the Rmin/Rmax circles
+  + an optional (R, η) bin-grid overlay (`helpers.draw_polar_bin_overlay`,
+  thinned to ≤50 rings/≤72 spokes via `_thinned_bin_edges`). `_build_spec`/
+  `spec_from_geometry_file`/`_spec_from_result_ns` gained `r_min`/`r_max`
+  kwargs defaulting to `None` (= untouched) so every other caller (pump-
+  probe, GSAS export, diagnostic cake previews) is unaffected. **Hydra
+  Detector-view is ONE shared `ImageViewer`** (not one per panel, and never
+  reparented between panels' tab widgets) — adding even one more
+  persistent pyqtgraph `ImageView` to `HydraBatchPage` reliably trips the
+  pyqtgraph-teardown segfault already documented below; mitigated the same
+  way as the other 4 known-crash-prone files: `tests/test_hydra_batch_ui.py`
+  now also carries `pytestmark = pytest.mark.forked`. Files touched:
+  `helpers.py`, `tab_batch.py`, `hydra_batch_page.py`,
+  `hydra_batch_widgets.py`, `tests/test_helpers.py` (+7 pure-logic tests),
+  `tests/test_hydra_batch_ui.py` (stub signatures + forked mark).
+  `gui_documentation.md` §7 already updated.
+
+Files touched (all three features): `project.py`, `hydra_calib_page.py`,
+`helpers.py`, `tab_batch.py`, `hydra_batch_page.py`,
+`hydra_batch_widgets.py`, `tests/test_project.py` (+3 tests), new
+`tests/test_hydra_overall_cake.py` (9 tests, pure-logic, no Qt),
+`tests/test_helpers.py` (+7 tests), `tests/test_hydra_batch_ui.py`.
+`gui_documentation.md` already updated (top summary + §7 + §16/§17). Working
+tree otherwise clean apart from local-only `test_data/test_out/` (GSAS-II
+export test artifacts; untracked, gitignore-precedent says leave it, see
+the github-skill project memory).
 
 ## Recently completed
 
-**2026-08-31 (uncommitted) — Project saves made crash-safe; Save-As lets
+**2026-08-31 (`18c9b77`) — Project saves made crash-safe; Save-As lets
 you choose how much analysis history to carry over; Open-Project guards
 unsaved changes.** `project.py`: every mutating write
 (`write_gui_workspace` and the three `append_*_attempt` functions) now

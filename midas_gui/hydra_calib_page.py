@@ -47,30 +47,93 @@ from midas_gui import settings
 from midas_gui import style as S
 
 
+def _resample_rows_to_eta_grid(cake: np.ndarray, src_eta: np.ndarray,
+                               dst_eta: np.ndarray) -> np.ndarray:
+    """Redistribute ``cake``'s rows from ``src_eta`` bin centres onto
+    ``dst_eta`` bin centres via per-column linear interpolation, periodic in
+    η so it's correct across the ±180° seam. Purely a defensive alignment
+    step for ``_compose_overall_cake`` (see its docstring): every panel's
+    cake there is already expressed in the shared/world η frame by the
+    backend, so in the normal case (every panel integrated with the same
+    page-level ``EtaMin``/``EtaMax``/``EtaBinSize``) ``src_eta`` and
+    ``dst_eta`` are numerically identical and this is a no-op; it only does
+    real work if two panels' cakes were captured at different times with
+    different η-bin settings. Unlike the R-axis resampling below, no
+    NaN-outside-range guard is needed here: a panel's cake already spans the
+    *full* -180°..180° grid with real zero-count bins wherever it saw no
+    data (``midas_integrate_v2``'s binning zero-fills, never NaN-fills — see
+    DECISIONS.md 2026-08-26), so every output row has a genuine value to
+    interpolate from."""
+    src_eta = np.asarray(src_eta, dtype=np.float64)
+    order = np.argsort(src_eta)
+    src_sorted = src_eta[order]
+    cake_sorted = np.asarray(cake, dtype=np.float64)[order, :]
+    ext_eta = np.concatenate([src_sorted - 360.0, src_sorted, src_sorted + 360.0])
+    ext_cake = np.concatenate([cake_sorted, cake_sorted, cake_sorted], axis=0)
+    out = np.empty((len(dst_eta), cake.shape[1]), dtype=np.float32)
+    for j in range(cake.shape[1]):
+        out[:, j] = np.interp(dst_eta, ext_eta, ext_cake[:, j])
+    return out
+
+
 def _compose_overall_cake(panels: dict) -> Optional[tuple]:
-    """Sum the available panels' (η, R) cakes into one "Overall" cake.
+    """Sum the available panels' (η, R) cakes into one "Overall" cake,
+    covering the full -180°..180° η range instead of each panel's own
+    narrower wedge landing on top of the others.
 
     ``panels`` maps panel number -> ``(cake_2d, r_axis_px, eta_axis_deg,
     lsd_um, px_um, wavelength_A)`` (see ``HydraCalibrationPage._on_int_done``,
     which caches this per panel). Returns ``(cake, r_axis, eta_axis)`` or
     ``None`` if no panel has been integrated yet.
 
-    Only the R-axis needs resampling: every panel's cake is built from the
-    same shared ``eta_bin`` control and ``spec_from_calibration_result``'s
-    fixed ``EtaMin``/``EtaMax`` (-180°..180°), so all 4 panels share one
-    identical eta axis by construction — no row-resampling is needed, unlike
-    the 1D composite profile's R-axis, which genuinely differs per panel
-    (each panel's own beam-centre/detector-corner distance)."""
+    **No η rotation is applied here, deliberately.** Each panel's own cake
+    is already expressed in the shared/world η frame at the point
+    ``IntegrationWorker`` produces it: ``helpers._build_spec`` always sets
+    ``spec.tx = result.tx`` (calibration never refines tx — see
+    ``calib._refine_dict``, which doesn't even include it — so ``result.tx``
+    is exactly whatever was seeded: 0.0 by default, or a panel's real,
+    distinct installation angle if one was loaded/pulled from the Data
+    Viewer before Fit), and the backend's
+    ``midas_calibrate_v2.forward.geometry.pixel_to_REta`` applies that
+    ``tx`` (via ``build_tilt_matrix``, the same rotation convention —
+    verified same sign/handedness — as ``hydra.compute_inv_coords``, which
+    places panels into the Data Viewer's windmill composite) *before*
+    computing ``eta = atan2(-Y, Z)``. So a panel calibrated with its real
+    tx already lands in the same world frame the composite image uses; a
+    second rotation here would double-count it. (A prior version of this
+    function did exactly that — see DECISIONS.md.)
+
+    A practical consequence: Overall is only physically meaningful once
+    each panel has been calibrated with its own true, distinct installation
+    ``tx`` fixed as a (possibly-unrefined) seed. If every panel is left at
+    the 0.0 default, every cake is genuinely computed as if unrotated, and
+    Overall correctly shows one wedge with all panels' signal piled onto
+    it — that reflects missing placement information, not a bug this
+    function can compensate for after the fact.
+
+    Every panel already shares one η bin grid too (``EtaMin``/``EtaMax``/
+    ``EtaBinSize`` are one page-level control used for every panel's Fit),
+    so ``_resample_rows_to_eta_grid`` below is normally a no-op; it only
+    does real work if two panels' cakes were captured at different times
+    with different η-bin settings. The existing R-axis handling is
+    unchanged and still needed: each panel's R axis is converted to 2θ
+    using **that panel's own** geometry (lsd/px/wavelength can differ per
+    panel — 2θ itself is tx-invariant when ty=tz=0, so this part was never
+    affected by the rotation bug), resampled onto one shared 2θ grid, and
+    ``np.nansum``'d — the R axis genuinely differs per panel (each panel's
+    own beam-centre/detector-corner distance) so NaN-outside-range tracking
+    still applies there."""
     if not panels:
         return None
-    eta_axis = next(iter(panels.values()))[2]
+    eta_axis = np.asarray(next(iter(panels.values()))[2], dtype=np.float64)
     n_eta = len(eta_axis)
     tth_grids, cakes, refs = [], [], []
-    for cake, r_px, _eta, lsd, px, wl in panels.values():
+    for cake, r_px, eta, lsd, px, wl in panels.values():
+        eta_aligned_cake = _resample_rows_to_eta_grid(np.asarray(cake), np.asarray(eta), eta_axis)
         tth = _convert_radial(np.asarray(r_px), lsd, px, wl, "R", "2th")
         order = np.argsort(tth)
         tth_grids.append(tth[order])
-        cakes.append(np.asarray(cake)[:, order])
+        cakes.append(eta_aligned_cake[:, order])
         refs.append((lsd, px, wl))
     lo = min(g.min() for g in tth_grids)
     hi = max(g.max() for g in tth_grids)
