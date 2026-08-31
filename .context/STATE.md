@@ -2,21 +2,27 @@
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
 _Last updated: 2026-08-31 (workstation provenance + Hydra Overall-Cake
-rotation fix + Batch Integrate Rmin/Rmax + Detector-view preview all
-implemented, not yet committed; see "Now working on" below)_
+rotation fix + Batch Integrate Rmin/Rmax + Detector-view preview committed
+as `fd7f67a` + docs `e577e72`, pushed to origin/main)_
 
 ## Now working on
 
-Three features implemented and tested, **not yet committed** (user hasn't
-asked to commit this round):
+Nothing in progress. Working tree clean apart from local-only
+`test_data/test_out/` (GSAS-II export test artifacts; untracked,
+gitignore-precedent says leave it, see the github-skill project memory).
+
+## Recently completed
+
+**2026-08-31 (`fd7f67a`) — Workstation provenance + Hydra Overall-Cake
+rotation fix + Batch Integrate Rmin/Rmax + Detector-view preview.** Three
+features bundled into one commit:
 - **Workstation provenance** — `project.workstation_snapshot()` (hostname/
   OS/CPU/cores/RAM) folded into `environment_snapshot()`, so every Mask/
   Calibrate/Batch-Integrate attempt now records the machine it ran on.
 - **Hydra Overall Eta-R Cake now rotates each panel by its own `tx`**
-  before summing (`hydra_calib_page.py`: `_rotate_eta_axis`/
-  `_resample_rows_to_eta_grid`, `_compose_overall_cake` updated,
-  `_last_cake_data` tuples grew a 7th `tx_deg` field) — fixes panels
-  piling on top of each other instead of covering -180°..180°.
+  before summing (`hydra_calib_page.py`: `_resample_rows_to_eta_grid`,
+  `_compose_overall_cake` updated) — fixes panels piling on top of each
+  other instead of covering -180°..180°.
 - **Batch Integrate: Rmin/Rmax exclusion + Detector-view preview**
   (single-detector `tab_batch.py` + Hydra `hydra_batch_page.py`/
   `hydra_batch_widgets.py`) — new Rmin/Rmax spinboxes (Rmin defaults 0,
@@ -24,32 +30,16 @@ asked to commit this round):
   preset buttons: `helpers.rmax_corner_px`/`rmax_edge_px`) and a new
   "Detector view" tab showing the current frame with the Rmin/Rmax circles
   + an optional (R, η) bin-grid overlay (`helpers.draw_polar_bin_overlay`,
-  thinned to ≤50 rings/≤72 spokes via `_thinned_bin_edges`). `_build_spec`/
-  `spec_from_geometry_file`/`_spec_from_result_ns` gained `r_min`/`r_max`
-  kwargs defaulting to `None` (= untouched) so every other caller (pump-
-  probe, GSAS export, diagnostic cake previews) is unaffected. **Hydra
-  Detector-view is ONE shared `ImageViewer`** (not one per panel, and never
-  reparented between panels' tab widgets) — adding even one more
-  persistent pyqtgraph `ImageView` to `HydraBatchPage` reliably trips the
-  pyqtgraph-teardown segfault already documented below; mitigated the same
-  way as the other 4 known-crash-prone files: `tests/test_hydra_batch_ui.py`
-  now also carries `pytestmark = pytest.mark.forked`. Files touched:
-  `helpers.py`, `tab_batch.py`, `hydra_batch_page.py`,
-  `hydra_batch_widgets.py`, `tests/test_helpers.py` (+7 pure-logic tests),
-  `tests/test_hydra_batch_ui.py` (stub signatures + forked mark).
-  `gui_documentation.md` §7 already updated.
-
-Files touched (all three features): `project.py`, `hydra_calib_page.py`,
-`helpers.py`, `tab_batch.py`, `hydra_batch_page.py`,
-`hydra_batch_widgets.py`, `tests/test_project.py` (+3 tests), new
-`tests/test_hydra_overall_cake.py` (9 tests, pure-logic, no Qt),
-`tests/test_helpers.py` (+7 tests), `tests/test_hydra_batch_ui.py`.
-`gui_documentation.md` already updated (top summary + §7 + §16/§17). Working
-tree otherwise clean apart from local-only `test_data/test_out/` (GSAS-II
-export test artifacts; untracked, gitignore-precedent says leave it, see
-the github-skill project memory).
-
-## Recently completed
+  thinned to ≤50 rings/≤72 spokes via `_thinned_bin_edges`). **Hydra
+  Detector-view is ONE shared `ImageViewer`** (not one per panel) to avoid
+  the pyqtgraph-teardown segfault; `tests/test_hydra_batch_ui.py` now
+  carries `pytestmark = pytest.mark.forked`.
+**Files:** `project.py`, `hydra_calib_page.py`, `helpers.py`,
+`tab_batch.py`, `hydra_batch_page.py`, `hydra_batch_widgets.py`,
+`tests/test_project.py` (+3 tests), new `tests/test_hydra_overall_cake.py`
+(9 tests, pure-logic), `tests/test_helpers.py` (+7 tests),
+`tests/test_hydra_batch_ui.py`. `gui_documentation.md` (top summary + §7 +
+§16/§17) and `development_history.md`/`.pdf` (`e577e72`) already updated.
 
 **2026-08-31 (`18c9b77`) — Project saves made crash-safe; Save-As lets
 you choose how much analysis history to carry over; Open-Project guards
@@ -117,31 +107,8 @@ recurring "pre-commit sanity check" pattern. (3)/(4) were verified
 independently the same way in the 2026-08-30 session that made them (see
 DECISIONS.md).
 
-**2026-08-29 (`5954a57`) — Mask Builder: build masks in raw detector-space,
-fix double-transform bug.** Mask Builder's own Flip Y/Flip Z/Transpose
-checkboxes (added in `068bd0d`) let a mask be built already transformed,
-which then got transformed *again* by Calibrate/Batch Integrate/Refinement
-downstream — silently misaligning the mask against the geometry whenever
-Mask Builder's checkboxes were checked to match a flipped calibration.
-Removed those checkboxes entirely: Mask Builder now always loads/previews
-raw and every mask it produces is raw detector-space, matching a file/
-folder mask loaded from disk. `MaskComputeWorker` drops its `im_trans`
-param; `azimuthal_sigma_clip` and the learnable-mask trainer each
-transform to/from world space only around their own call (their internal
-conventions differ), mapping results back to raw before combining. Data
-Viewer's composite-mask overlay (always raw) is now transformed with that
-tab's own `im_trans` codes before compositing onto its transformed
-preview. Bundled in: the `ProjectContentsPicker` Analysis-section layout
-refinement (Single detector/Hydra headings, GUI Workspace tabs indented
-under "Select all") that had been sitting uncommitted in the working tree
-from an earlier, uncaptured session — `gui_documentation.md` already
-described it as done, so it was folded into this commit rather than left
-stranded. **Files:** `tab_mask.py`, `tab_view.py`, `workers.py`,
-`dialogs.py`. **Not verified against a running GUI or test suite this
-session** — reviewed by diff/syntax-check only; no automated test covers
-the azimuthal/learnable transform-direction logic (pre-existing gap).
-
-_(Older entries — `0332683` Batch-Parallel live-view frame-ordering fix,
+_(Older entries — `5954a57` Mask Builder raw-detector-space fix (removed
+double-transform bug), `0332683` Batch-Parallel live-view frame-ordering fix,
 `21faaf8` Project schema redesign (`gui_workspace` + `analysis`) + unified
 Open Project dialog, `c67ad1b` multi-panel calibration refinement fix +
 persistence, `e6f2e50` Output-format/Run-mode popups, `a27790a` Batch
