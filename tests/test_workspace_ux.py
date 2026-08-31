@@ -10,6 +10,7 @@ mirroring how the rest of the suite is run per-file-isolated.
 """
 from types import SimpleNamespace
 
+import h5py
 import numpy as np
 import pytest
 
@@ -206,6 +207,126 @@ def test_maybe_offer_restore_autosave_decline_and_accept(
     win._project_ctx.path = None
 
 
+# ── Open-Project unsaved-changes guard (_confirm_ok_to_switch_project) ───────
+def test_confirm_ok_to_switch_project_clean_state_is_ok(win):
+    win._set_workspace_dirty(False)
+    assert win._confirm_ok_to_switch_project() is True
+
+
+def test_confirm_ok_to_switch_project_cancel_blocks(win, monkeypatch):
+    from PyQt5 import QtWidgets
+    win._set_workspace_dirty(True)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                         staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Cancel))
+    assert win._confirm_ok_to_switch_project() is False
+    win._set_workspace_dirty(False)   # leave a clean baseline for later tests
+
+
+def test_confirm_ok_to_switch_project_discard_clears_autosave(win, monkeypatch, tmp_path):
+    from PyQt5 import QtWidgets
+    draft = tmp_path / "draft.json"
+    draft.write_text("{}")
+    monkeypatch.setattr(settings, "autosave_draft_path", lambda: draft)
+    win._set_workspace_dirty(True)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                         staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Discard))
+    assert win._confirm_ok_to_switch_project() is True
+    assert not draft.exists()
+    win._set_workspace_dirty(False)
+
+
+def test_confirm_ok_to_switch_project_save_success_proceeds(win, monkeypatch):
+    from PyQt5 import QtWidgets
+    win._set_workspace_dirty(True)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                         staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Save))
+    monkeypatch.setattr(win, "_save_project_dialog", lambda: win._set_workspace_dirty(False))
+    assert win._confirm_ok_to_switch_project() is True
+
+
+def test_confirm_ok_to_switch_project_save_cancelled_blocks(win, monkeypatch):
+    from PyQt5 import QtWidgets
+    win._set_workspace_dirty(True)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                         staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Save))
+    # Simulate the user cancelling the Save/Save-As prompt raised from here.
+    monkeypatch.setattr(win, "_save_project_dialog", lambda: None)
+    assert win._confirm_ok_to_switch_project() is False
+    win._set_workspace_dirty(False)   # leave a clean baseline for later tests
+
+
+def test_open_project_dialog_aborts_when_guard_declines(win, monkeypatch):
+    monkeypatch.setattr(win, "_confirm_ok_to_switch_project", lambda: False)
+    called = []
+    monkeypatch.setattr(win, "_open_project_selection", lambda *a, **k: called.append(True))
+    win._open_project_dialog()
+    assert called == []
+
+
+def test_open_project_path_aborts_when_guard_declines(win, monkeypatch):
+    monkeypatch.setattr(win, "_confirm_ok_to_switch_project", lambda: False)
+    called = []
+    monkeypatch.setattr(win, "_open_project_selection", lambda *a, **k: called.append(True))
+    win._open_project_path("/tmp/whatever.h5")
+    assert called == []
+
+
+# ── Save Project As… : overwrite confirmation + history-scope copy ───────────
+def test_save_as_dialog_declining_overwrite_aborts(win, tmp_path, monkeypatch):
+    from PyQt5 import QtWidgets
+    win._project_ctx.path = None
+    win._set_workspace_dirty(False)
+
+    existing = tmp_path / "existing.h5"
+    project.create_project(str(existing), name="keep-me")
+
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
+                         staticmethod(lambda *a, **k: (str(existing), "")))
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                         staticmethod(lambda *a, **k: QtWidgets.QMessageBox.No))
+
+    win._save_project_as_dialog()
+
+    with h5py.File(str(existing), "r") as f:
+        assert f.attrs["project_name"] == "keep-me"   # untouched
+    assert win._project_ctx.path is None
+
+
+def test_save_as_dialog_copies_history_with_chosen_scope(win, tmp_path, monkeypatch, no_modal_dialogs):
+    from PyQt5 import QtWidgets
+    import midas_gui.dialogs as dialogs_mod
+
+    src_path = str(tmp_path / "src.h5")
+    project.create_project(src_path)
+    project.append_calibration_attempt(
+        src_path, "single", cfg={"mode": "one_shot"}, result=_fake_result(), loader_state={})
+    win._project_ctx.path = src_path
+    win._set_workspace_dirty(False)
+
+    dest_path = str(tmp_path / "dest.h5")
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
+                         staticmethod(lambda *a, **k: (dest_path, "")))
+
+    class _FakeHistoryDialog:
+        def __init__(self, summary, parent=None):
+            self.summary = summary
+
+        def exec_(self):
+            return QtWidgets.QDialog.Accepted
+
+        def selected_scope(self):
+            return "all"
+
+    monkeypatch.setattr(dialogs_mod, "SaveAsHistoryDialog", _FakeHistoryDialog)
+
+    win._save_project_as_dialog()
+
+    assert win._project_ctx.path == dest_path
+    assert project.analysis_summary(dest_path) == {"calibrate": {"single": 1}}
+
+    win._close_project()   # leave a clean baseline for later tests
+
+
 def test_project_history_dialog_lists_attempts(qapp, project_with_attempts):
     from midas_gui.dialogs import ProjectHistoryDialog
     dlg = ProjectHistoryDialog(project_with_attempts)
@@ -294,6 +415,33 @@ def test_project_contents_picker_rejects_invalid_file(qapp, tmp_path):
     assert picker.set_project(str(bad)) is False
     assert not picker.has_content()
     assert picker.error_message() is not None
+
+
+def test_save_as_history_dialog_defaults_to_all(qapp):
+    from midas_gui.dialogs import SaveAsHistoryDialog
+
+    dlg = SaveAsHistoryDialog({"mask": 2, "calibrate": {"single": 1}, "integrate": {"single": 3}})
+    try:
+        assert dlg.selected_scope() == "all"
+    finally:
+        dlg.close()
+
+
+def test_save_as_history_dialog_scope_selection(qapp):
+    from midas_gui.dialogs import SaveAsHistoryDialog
+
+    dlg = SaveAsHistoryDialog({"mask": 1})
+    try:
+        for btn in dlg._group.buttons():
+            if btn.property("scope") == "latest":
+                btn.setChecked(True)
+        assert dlg.selected_scope() == "latest"
+        for btn in dlg._group.buttons():
+            if btn.property("scope") == "none":
+                btn.setChecked(True)
+        assert dlg.selected_scope() == "none"
+    finally:
+        dlg.close()
 
 
 def test_project_selection_dialog_wraps_picker_for_a_known_path(qapp, project_with_attempts):

@@ -30,6 +30,18 @@ the single-``/workspace``-blob v1/v2 layout):
     live/drawn-in-tab mask that was never saved to a file, which has no path
     to hash and is embedded as-is. See ``append_calibration_attempt``/
     ``append_integration_attempt``.
+
+Every mutating write (``write_gui_workspace`` and the three
+``append_*_attempt`` functions) builds its new content in a sibling
+"staging" child group first and only swaps it into place with a cheap
+metadata-only rename (:func:`_stage_and_swap`) — a crash mid-write leaves
+whatever was there before fully intact. ``write_gui_workspace`` additionally
+makes a rolling ``path + ".bak"`` copy (:func:`backup_before_overwrite`)
+before each overwrite. Saving As to a new file (``create_project`` +
+:func:`copy_analysis_history`) lets the caller choose how much of the
+*source* project's ``/analysis`` history — none, latest-only, or all — to
+carry into the fresh destination file; see :func:`analysis_summary` for the
+counts shown to the user before they choose.
 """
 from __future__ import annotations
 
@@ -58,10 +70,46 @@ class ProjectContext:
         self.path: Optional[str] = None
 
 
-def create_project(path, name: Optional[str] = None) -> str:
+def backup_before_overwrite(path) -> None:
+    """Best-effort single rolling backup (``path + ".bak"``), made just
+    before a destructive rewrite of an existing project file. Never
+    raises — a failed backup must not block the save/overwrite it exists to
+    protect against mistakes for."""
+    try:
+        import shutil
+        shutil.copy2(str(path), str(path) + ".bak")
+    except Exception:
+        pass
+
+
+def _stage_and_swap(parent_grp, target_name: str, build_fn) -> None:
+    """Build a new child group under ``parent_grp`` via
+    ``build_fn(staging_group)``, then swap it into ``target_name`` with a
+    metadata-only rename — not the previous delete-then-rebuild-in-place
+    pattern. A crash during ``build_fn`` leaves any pre-existing
+    ``target_name`` group fully intact and just orphans a harmless
+    ``"_<target_name>_staging"`` group (invisible to every reader, which
+    only ever looks up exact names like ``"gui_workspace"`` or
+    ``attempt_NNNN`` — and automatically cleaned up the next time this same
+    parent/name is written, by the check at the top of this function)."""
+    staging_name = f"_{target_name}_staging"
+    if staging_name in parent_grp:
+        del parent_grp[staging_name]
+    staging = parent_grp.create_group(staging_name)
+    build_fn(staging)
+    parent_grp.file.flush()
+    if target_name in parent_grp:
+        del parent_grp[target_name]
+    parent_grp.move(staging_name, target_name)
+
+
+def create_project(path, name: Optional[str] = None, *, overwrite: bool = False) -> str:
     path = str(path)
     if Path(path).exists():
-        raise FileExistsError(f"{path} already exists")
+        if not overwrite:
+            raise FileExistsError(f"{path} already exists")
+        backup_before_overwrite(path)
+        Path(path).unlink()
     from midas_gui import settings
     with h5py.File(path, "w") as f:
         f.attrs[PROJECT_MARKER] = True
@@ -156,10 +204,11 @@ def write_gui_workspace(project_path, *, tabs: dict, sidecars: Optional[dict] = 
     flat dict of whole-session facts (``active_tab``/``active_profile``/
     ``saved_utc``) stored as attrs on the ``/gui_workspace`` group itself."""
     sidecars = sidecars or {}
-    with h5py.File(str(project_path), "a") as f:
-        if "gui_workspace" in f:
-            del f["gui_workspace"]
-        root = f.create_group("gui_workspace")
+    project_path = str(project_path)
+    if Path(project_path).exists():
+        backup_before_overwrite(project_path)
+
+    def _build(root):
         root.attrs["saved_utc"] = _now_iso()
         for k, v in (meta or {}).items():
             root.attrs[k] = v if v is not None else ""
@@ -169,6 +218,9 @@ def write_gui_workspace(project_path, *, tabs: dict, sidecars: Optional[dict] = 
             tab_sidecars = sidecars.get(tab_name)
             if tab_sidecars:
                 _write_sidecars(g, tab_sidecars)
+
+    with h5py.File(project_path, "a") as f:
+        _stage_and_swap(f, "gui_workspace", _build)
 
 
 def list_workspace_tabs(project_path) -> list:
@@ -415,10 +467,7 @@ def append_calibration_attempt(project_path, panel_key, *, cfg, result, loader_s
     if extra:
         metadata.update(extra)
 
-    with h5py.File(project_path, "a") as f:
-        grp = f.require_group(f"analysis/calibrate/{panel_key}")
-        name = _next_attempt_name(grp)
-        att = grp.create_group(name)
+    def _build(att):
         att.create_dataset("metadata", data=json.dumps(metadata, indent=2, default=_json_default))
         att.attrs["timestamp_utc"] = metadata["timestamp_utc"]
         att.attrs["pipeline"] = str(cfg_copy.get("mode") or "")
@@ -438,6 +487,11 @@ def append_calibration_attempt(project_path, panel_key, *, cfg, result, loader_s
             for k in ("lsd_um", "px_um", "wavelength_A"):
                 if results.get(k) is not None:
                     res_grp.attrs[k] = float(results[k])
+
+    with h5py.File(project_path, "a") as f:
+        grp = f.require_group(f"analysis/calibrate/{panel_key}")
+        name = _next_attempt_name(grp)
+        _stage_and_swap(grp, name, _build)
         grp.attrs["latest"] = name
 
     return f"/analysis/calibrate/{panel_key}/{name}"
@@ -462,13 +516,15 @@ def append_mask_attempt(project_path, *, cfg, mask, loader_state,
     if extra:
         metadata.update(extra)
 
-    with h5py.File(project_path, "a") as f:
-        grp = f.require_group("analysis/mask")
-        name = _next_attempt_name(grp)
-        att = grp.create_group(name)
+    def _build(att):
         att.create_dataset("metadata", data=json.dumps(metadata, indent=2, default=_json_default))
         att.attrs["timestamp_utc"] = metadata["timestamp_utc"]
         _write_array(att, "mask", mask)
+
+    with h5py.File(project_path, "a") as f:
+        grp = f.require_group("analysis/mask")
+        name = _next_attempt_name(grp)
+        _stage_and_swap(grp, name, _build)
         grp.attrs["latest"] = name
 
     return f"/analysis/mask/{name}"
@@ -737,10 +793,7 @@ def append_integration_attempt(project_path, panel_key, *, inputs, finished_payl
     if extra:
         metadata.update(extra)
 
-    with h5py.File(project_path, "a") as f:
-        grp = f.require_group(f"analysis/integrate/{panel_key}")
-        name = _next_attempt_name(grp)
-        att = grp.create_group(name)
+    def _build(att):
         att.create_dataset("metadata", data=json.dumps(metadata, indent=2, default=_json_default))
         att.attrs["timestamp_utc"] = metadata["timestamp_utc"]
         if metadata["n_frames"] is not None:
@@ -761,6 +814,137 @@ def append_integration_attempt(project_path, panel_key, *, inputs, finished_payl
             _write_array(res_grp, "sigmas", sigmas)
         if frame_ids is not None:
             res_grp.create_dataset("frame_ids", data=np.array(list(frame_ids), dtype=h5py.string_dtype()))
+
+    with h5py.File(project_path, "a") as f:
+        grp = f.require_group(f"analysis/integrate/{panel_key}")
+        name = _next_attempt_name(grp)
+        _stage_and_swap(grp, name, _build)
         grp.attrs["latest"] = name
 
     return f"/analysis/integrate/{panel_key}/{name}"
+
+
+def analysis_summary(project_path) -> dict:
+    """Attempt counts per kind/panel: ``{"mask": n, "calibrate": {panel:
+    n}, "integrate": {panel: n}}``. Empty kinds/panels are omitted, so a
+    caller can cheaply check ``bool(analysis_summary(path))`` for "does
+    this project have any provenance to offer copying" — used by both the
+    Save-As history-scope dialog and :func:`copy_analysis_history`."""
+    summary = {}
+    mask_n = len(list_mask_attempts(project_path))
+    if mask_n:
+        summary["mask"] = mask_n
+    panels = discover_panels(project_path)
+    for kind, key in (("calib", "calibrate"), ("integrate", "integrate")):
+        per_panel = {}
+        for panel in panels:
+            n = len(list_attempts(project_path, panel, kind))
+            if n:
+                per_panel[panel] = n
+        if per_panel:
+            summary[key] = per_panel
+    return summary
+
+
+def copy_analysis_history(src_path, dest_path, scope: str = "all") -> dict:
+    """Copy ``/analysis`` attempt history from ``src_path`` (a
+    currently-open project) into ``dest_path`` on a Save-As — used only
+    when ``dest_path`` was just created empty (see ``create_project``), so
+    copied attempts always keep their original names verbatim: no
+    collision, no renumbering, and (for "latest") no ``calib_attempt_ref``
+    rewriting is ever needed since the referenced calibrate attempt is
+    included under the same name it already has.
+
+    ``scope``:
+      - ``"none"``   -- no-op, returns ``{}``.
+      - ``"all"``    -- every attempt, every kind/panel, plus the mask
+        history.
+      - ``"latest"`` -- each kind/panel's ``"latest"`` attempt only, plus
+        (for integrate) whichever calibrate attempt it references — even if
+        that isn't itself the calibrate panel's own latest — so a copied
+        integrate attempt is never left with a dangling
+        ``calib_attempt_ref``.
+
+    Returns the same shape as :func:`analysis_summary`, but counting only
+    what was actually copied.
+    """
+    if scope == "none":
+        return {}
+    if scope not in ("all", "latest"):
+        raise ValueError(f"unknown scope: {scope!r}")
+
+    copied = {}
+    with h5py.File(str(src_path), "r") as src, h5py.File(str(dest_path), "a") as dest:
+        src_mask = src.get("analysis/mask")
+        if src_mask is not None:
+            names = sorted(k for k in src_mask.keys() if k.startswith("attempt_"))
+            if scope == "latest":
+                latest = src_mask.attrs.get("latest")
+                if latest and latest in src_mask:
+                    names = [latest]
+                elif names:
+                    names = names[-1:]
+                else:
+                    names = []
+            if names:
+                dest_mask = dest.require_group("analysis/mask")
+                for n in names:
+                    src.copy(src_mask[n], dest_mask, name=n)
+                latest = src_mask.attrs.get("latest")
+                dest_mask.attrs["latest"] = latest if latest in names else names[-1]
+                copied["mask"] = len(names)
+
+        panels = discover_panels(src_path)
+
+        # "latest" scope: whichever calibrate attempts a to-be-copied
+        # "latest" integrate attempt references, so it never ends up
+        # dangling even if that calibrate attempt isn't itself that panel's
+        # own latest.
+        forced_calib = {}
+        if scope == "latest":
+            for panel in panels:
+                src_int = src.get(f"analysis/integrate/{panel}")
+                if src_int is None:
+                    continue
+                latest = src_int.attrs.get("latest")
+                if not latest or latest not in src_int:
+                    continue
+                ref = src_int[latest].attrs.get("calib_attempt_ref")
+                if not ref:
+                    continue
+                parts = ref.lstrip("/").split("/")
+                if len(parts) >= 4 and parts[0] == "analysis" and parts[1] == "calibrate":
+                    forced_calib.setdefault(parts[2], set()).add(parts[3])
+
+        for kind, key in (("calibrate", "calibrate"), ("integrate", "integrate")):
+            panel_counts = {}
+            for panel in panels:
+                src_grp = src.get(f"analysis/{kind}/{panel}")
+                if src_grp is None:
+                    continue
+                names = sorted(k for k in src_grp.keys() if k.startswith("attempt_"))
+                if not names:
+                    continue
+                if scope == "latest":
+                    latest = src_grp.attrs.get("latest")
+                    chosen = {latest} if latest and latest in src_grp else set(names[-1:])
+                    if kind == "calibrate":
+                        chosen |= forced_calib.get(panel, set())
+                    names = sorted(chosen & set(names))
+                if not names:
+                    continue
+                dest_grp = dest.require_group(f"analysis/{kind}/{panel}")
+                for n in names:
+                    src.copy(src_grp[n], dest_grp, name=n)
+                latest = src_grp.attrs.get("latest")
+                dest_grp.attrs["latest"] = latest if latest in names else names[-1]
+                panel_counts[panel] = len(names)
+            if panel_counts:
+                copied[key] = panel_counts
+
+        dest.attrs["forked_from_path"] = str(src_path)
+        dest.attrs["forked_from_project_name"] = src.attrs.get("project_name", "")
+        dest.attrs["forked_from_utc"] = _now_iso()
+        dest.attrs["fork_scope"] = scope
+
+    return copied

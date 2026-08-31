@@ -536,6 +536,67 @@ class ProjectSelectionDialog(QtWidgets.QDialog):
         return self._picker.selection()
 
 
+class SaveAsHistoryDialog(QtWidgets.QDialog):
+    """File → Save Project As…: how much of the *currently open* project's
+    ``/analysis`` history to carry into the freshly (over)written
+    destination file — see ``project.copy_analysis_history``. Only shown
+    when there's a currently-open project with recorded attempts to offer;
+    ``source_summary`` is a ``project.analysis_summary()`` result, used
+    purely to describe what's available."""
+
+    def __init__(self, source_summary: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Save Project As — analysis history")
+        self.setMinimumWidth(420)
+
+        lines = []
+        if source_summary.get("mask"):
+            lines.append(f"Mask: {source_summary['mask']} attempt(s)")
+        for key, label in (("calibrate", "Calibrate"), ("integrate", "Batch Integrate")):
+            per_panel = source_summary.get(key) or {}
+            if per_panel:
+                detail = ", ".join(
+                    f"{_PANEL_LABELS.get(p, p)}: {n}" for p, n in sorted(per_panel.items()))
+                lines.append(f"{label}: {detail}")
+        summary_text = "The current project has:\n" + "\n".join(lines)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        info = QtWidgets.QLabel(
+            "The new file starts as an empty project. Choose how much of "
+            "the current project's recorded analysis history to copy into "
+            "it.")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+        summary_lbl = QtWidgets.QLabel(summary_text)
+        summary_lbl.setWordWrap(True)
+        summary_lbl.setStyleSheet("color:#bbb;font-size:11px;padding:6px 0;")
+        layout.addWidget(summary_lbl)
+
+        self._group = QtWidgets.QButtonGroup(self)
+        options = [
+            ("all", "Include full history (recommended)"),
+            ("latest", "Include only the most recent attempt of each kind"),
+            ("none", "Don't include analysis history (workspace only)"),
+        ]
+        for scope, label in options:
+            rb = QtWidgets.QRadioButton(label)
+            rb.setProperty("scope", scope)
+            self._group.addButton(rb)
+            layout.addWidget(rb)
+            if scope == "all":
+                rb.setChecked(True)
+
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def selected_scope(self) -> str:
+        checked = self._group.checkedButton()
+        return checked.property("scope") if checked is not None else "none"
+
+
 # Every extension the app already recognizes as a detector-frame file
 # (mirrors the combined QFileDialog filter used across widgets.py/hydra_widgets.py),
 # split into the HDF5 (multi-frame container) and non-HDF5 (single-frame-per-file:

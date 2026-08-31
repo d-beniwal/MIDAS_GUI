@@ -3,7 +3,20 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-29 (Batch Integrate gets an opt-in **Multi-azimuth
+**Last updated:** 2026-08-31 (§16 "File ▸ Project": crash-safe saves,
+Save-As history-scope choice, Open-Project unsaved-changes guard. Summary:
+- Every `gui_workspace`/`analysis` write is now crash-safe — new content is
+  built alongside the old and swapped in only once complete, with a
+  rolling `.bak` backup made before each `gui_workspace` overwrite.
+- **File ▸ Save Project As…** now always creates a *fresh* project at the
+  destination (an existing file there is fully overwritten, after
+  confirmation, never merged into), and — when the currently open project
+  has recorded `analysis` history — asks how much of it to carry into the
+  new file: full history (default), latest-attempt-only, or none.
+- **File ▸ Open Project…**/Recent Projects now prompt Save/Discard/Cancel
+  first if the current session has unsaved changes, matching Close.
+
+Previously (2026-08-29): Batch Integrate gets an opt-in **Multi-azimuth
 output (cake)** checkbox — see §7 "Integration" — and Results & Export gets
 an **Export for GSAS-II** feature — see §12. Summary:
 - **Multi-azimuth output (cake)** (off by default, §7): `midas_integrate_v2`
@@ -2540,11 +2553,19 @@ A **Project** is a single, long-lived `.h5` file with two top-level headers
   (no dialog), one group per tab; the `analysis` history elsewhere in the
   file is untouched. If no project is open yet, falls through to Save
   Project As…. A completion dialog lists which tabs (if any) failed to save.
+  Every such overwrite is crash-safe: the new content is built alongside
+  the old (not deleted-then-rebuilt in place) and swapped in only once
+  it's complete, and a rolling backup copy (`<name>.h5.bak`) of the file is
+  made first, so a crash mid-save can't take the whole project — including
+  its `analysis` history — down with it.
 - **File ▸ Save Project As…** (`Ctrl+Shift+S`) — always prompts for a
-  destination `.h5`. Pick a name that doesn't exist yet to create a new,
-  empty project (immediately populated with your current session); pick an
-  existing project file to make *it* the active project and overwrite
-  *its* session (its `analysis` history is kept). Either way, that file
+  destination `.h5`, and always creates a **fresh** project there: an
+  existing file at that path is completely overwritten (after an explicit
+  confirmation, and a `.bak` backup of it), never merged into. If the
+  currently open project has any recorded `analysis` history, a second
+  prompt lets you choose how much of it to carry into the new file:
+  **include the full history** (default), **only the most recent attempt
+  of each kind**, or **none** (workspace only). Either way, the new file
   becomes the target for future plain `Ctrl+S`.
 - **File ▸ Open Project…** (`Ctrl+O`) — opens a single combined dialog: a
   file-tree browser on the left to navigate to a `.h5`, and the moment one
@@ -2554,7 +2575,10 @@ A **Project** is a single, long-lived `.h5` file with two top-level headers
   **everything checked by default**. Uncheck anything you don't want
   restored, then **Open**; nothing is restored until you do. See "Opening a
   project can populate the GUI" below for exactly what each checked item
-  restores.
+  restores. If the current session has unsaved changes, this (and picking
+  a Recent Projects entry) prompts **Save / Discard / Cancel** first, the
+  same as closing the window does — opening a project can no longer
+  silently discard in-progress edits.
 - **File ▸ Recent Projects** — the last 10 opened/saved projects, newest
   first; picking one shows the same checkbox-tree preview (without the
   file-browser pane, since the path is already known).

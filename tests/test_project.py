@@ -307,6 +307,148 @@ def test_append_integration_attempt_embeds_profiles_and_links_calibration(tmp_pa
         assert meta["out_paths"] == ["/tmp/out/frame_0.csv"]
 
 
+def test_create_project_overwrite_backs_up_and_replaces(tmp_path):
+    path = str(tmp_path / "proj.h5")
+    project.create_project(path, name="original")
+    project.append_mask_attempt(path, cfg={}, mask=np.zeros((2, 2), dtype=np.uint8), loader_state={})
+
+    with pytest.raises(FileExistsError):
+        project.create_project(path)   # default overwrite=False unchanged
+
+    project.create_project(path, name="fresh", overwrite=True)
+    assert Path(path + ".bak").is_file()
+    with h5py.File(path + ".bak", "r") as f:
+        assert f.attrs["project_name"] == "original"
+    # The new file is a genuinely empty project, not a merge.
+    assert project.list_mask_attempts(path) == []
+    with h5py.File(path, "r") as f:
+        assert f.attrs["project_name"] == "fresh"
+
+
+def test_stage_and_swap_survives_a_failed_build(tmp_path):
+    """A crash partway through building new content must leave whatever
+    was there before fully intact — never a half-written group."""
+    path = str(tmp_path / "proj.h5")
+    project.create_project(path)
+    project.write_gui_workspace(path, tabs={"Data Viewer": {"a": 1}})
+
+    with h5py.File(path, "a") as f:
+        with pytest.raises(RuntimeError):
+            project._stage_and_swap(f, "gui_workspace", lambda staging: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    # Old content untouched; only an orphaned staging group left behind.
+    assert project.list_workspace_tabs(path) == ["Data Viewer"]
+    with h5py.File(path, "r") as f:
+        assert "_gui_workspace_staging" in f
+
+    # A later, successful write to the same target cleans up the orphan.
+    project.write_gui_workspace(path, tabs={"Mask Builder": {"b": 2}})
+    with h5py.File(path, "r") as f:
+        assert "_gui_workspace_staging" not in f
+    assert project.list_workspace_tabs(path) == ["Mask Builder"]
+
+
+def test_analysis_summary_counts_per_kind_and_panel(tmp_path):
+    path = str(tmp_path / "proj.h5")
+    project.create_project(path)
+    assert project.analysis_summary(path) == {}
+
+    project.append_mask_attempt(path, cfg={}, mask=np.zeros((2, 2), dtype=np.uint8), loader_state={})
+    calib_ref = project.append_calibration_attempt(
+        path, "single", cfg={"mode": "one_shot"}, result=_fake_result(), loader_state={})
+    project.append_integration_attempt(
+        path, "single", inputs={"kernel": "subpixel4"},
+        finished_payload={"n": 1, "profiles": np.zeros((1, 4), dtype=np.float32)},
+        calib_attempt_ref=calib_ref)
+
+    assert project.analysis_summary(path) == {
+        "mask": 1, "calibrate": {"single": 1}, "integrate": {"single": 1}}
+
+
+def _make_project_with_history(path, n_calib=1, n_integrate=2):
+    project.create_project(path)
+    calib_refs = []
+    for _ in range(n_calib):
+        calib_refs.append(project.append_calibration_attempt(
+            path, "single", cfg={"mode": "one_shot"}, result=_fake_result(), loader_state={}))
+    project.append_mask_attempt(path, cfg={}, mask=np.zeros((2, 2), dtype=np.uint8), loader_state={})
+    for _ in range(n_integrate):
+        project.append_integration_attempt(
+            path, "single", inputs={"kernel": "subpixel4"},
+            finished_payload={"n": 1, "profiles": np.zeros((1, 4), dtype=np.float32)},
+            calib_attempt_ref=calib_refs[0])
+    return calib_refs
+
+
+def test_copy_analysis_history_none_is_noop(tmp_path):
+    src = str(tmp_path / "src.h5")
+    _make_project_with_history(src)
+    dest = str(tmp_path / "dest.h5")
+    project.create_project(dest)
+    assert project.copy_analysis_history(src, dest, "none") == {}
+    assert project.analysis_summary(dest) == {}
+
+
+def test_copy_analysis_history_all_copies_everything_verbatim(tmp_path):
+    src = str(tmp_path / "src.h5")
+    _make_project_with_history(src, n_calib=1, n_integrate=3)
+    dest = str(tmp_path / "dest.h5")
+    project.create_project(dest)
+
+    copied = project.copy_analysis_history(src, dest, "all")
+    assert copied == {"mask": 1, "calibrate": {"single": 1}, "integrate": {"single": 3}}
+    assert project.analysis_summary(dest) == copied
+
+    # Names, latest attrs, and the calib_attempt_ref cross-link are preserved
+    # unchanged, since the destination started empty.
+    with h5py.File(src, "r") as s, h5py.File(dest, "r") as d:
+        assert d["analysis/integrate/single"].attrs["latest"] == s["analysis/integrate/single"].attrs["latest"]
+        for name in d["analysis/integrate/single"].keys():
+            assert d[f"analysis/integrate/single/{name}"].attrs["calib_attempt_ref"] == \
+                s[f"analysis/integrate/single/{name}"].attrs["calib_attempt_ref"]
+        assert d.attrs["forked_from_path"] == src
+        assert d.attrs["fork_scope"] == "all"
+
+
+def test_copy_analysis_history_latest_includes_referenced_calibration(tmp_path):
+    """A second, non-latest calibration attempt exists; the latest
+    integration attempt references the FIRST (non-latest) one. "latest"
+    scope always includes the panel's own latest calibration attempt, but
+    must ALSO pull in whichever calibration attempt the latest integration
+    attempt actually references (even though that's a different, older
+    one here), so the copied integration attempt is never left with a
+    dangling calib_attempt_ref."""
+    src = str(tmp_path / "src.h5")
+    project.create_project(src)
+    calib_ref_1 = project.append_calibration_attempt(
+        src, "single", cfg={"mode": "one_shot"}, result=_fake_result(), loader_state={})
+    calib_ref_2 = project.append_calibration_attempt(
+        src, "single", cfg={"mode": "one_shot"}, result=_fake_result(), loader_state={})
+    assert calib_ref_1 != calib_ref_2
+    with h5py.File(src, "r") as f:
+        assert f["analysis/calibrate/single"].attrs["latest"] == "attempt_0002"
+    # The only (and therefore latest) integration attempt links back to the
+    # OLDER calibration attempt, not the panel's own latest.
+    int_ref = project.append_integration_attempt(
+        src, "single", inputs={"kernel": "subpixel4"},
+        finished_payload={"n": 1, "profiles": np.zeros((1, 4), dtype=np.float32)},
+        calib_attempt_ref=calib_ref_1)
+
+    dest = str(tmp_path / "dest.h5")
+    project.create_project(dest)
+    copied = project.copy_analysis_history(src, dest, "latest")
+
+    assert copied["integrate"] == {"single": 1}
+    # Both the panel's own latest (attempt_0002) and the older one the
+    # latest integration attempt actually references (attempt_0001) are
+    # carried over.
+    assert copied["calibrate"] == {"single": 2}
+    with h5py.File(dest, "r") as f:
+        assert calib_ref_1.lstrip("/") in f
+        assert calib_ref_2.lstrip("/") in f
+        assert f[int_ref.lstrip("/")].attrs["calib_attempt_ref"] == calib_ref_1
+
+
 @pytest.fixture(scope="module")
 def app():
     from PyQt5 import QtWidgets

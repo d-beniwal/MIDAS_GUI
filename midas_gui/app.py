@@ -469,12 +469,39 @@ class MainWindow(QtWidgets.QMainWindow):
         self._close_proj_act.setEnabled(path is not None)
         self._project_history_act.setEnabled(path is not None)
 
+    def _confirm_ok_to_switch_project(self) -> bool:
+        """Shared by ``closeEvent``/``_close_project``/``_open_project_dialog``/
+        ``_open_project_path``: if there are unsaved session changes, prompt
+        Save/Discard/Cancel exactly like closing the app does. Returns True
+        if it's fine to proceed (nothing unsaved, or the user explicitly
+        saved or discarded), False if the caller should abort (Cancel, or a
+        Save/Save-As prompt raised from here was itself cancelled)."""
+        if not self._workspace_dirty:
+            return True
+        resp = QtWidgets.QMessageBox.question(
+            self, "Unsaved changes",
+            "This project has unsaved session changes. Save before continuing?",
+            QtWidgets.QMessageBox.Save | QtWidgets.QMessageBox.Discard
+            | QtWidgets.QMessageBox.Cancel,
+            QtWidgets.QMessageBox.Save)
+        if resp == QtWidgets.QMessageBox.Cancel:
+            return False
+        if resp == QtWidgets.QMessageBox.Save:
+            self._save_project_dialog()
+            if self._workspace_dirty:   # user cancelled the Save/Save-As prompt
+                return False
+        else:   # Discard
+            self._clear_autosave_draft()
+        return True
+
     def _open_project_dialog(self):
         """File ▸ Open Project…: browse to a project ``.h5`` and, the moment
         one is clicked, preview exactly what it contains (which
         ``gui_workspace`` tabs, which mask/calibrate/integrate attempts) as a
         checkbox tree — everything checked by default; uncheck what
         shouldn't be restored, then Open."""
+        if not self._confirm_ok_to_switch_project():
+            return
         from midas_gui.dialogs import ProjectOpenDialog
         dlg = ProjectOpenDialog(self)
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
@@ -487,6 +514,8 @@ class MainWindow(QtWidgets.QMainWindow):
         preview (``ProjectSelectionDialog``, wrapping the same
         ``ProjectContentsPicker`` widget ``ProjectOpenDialog`` uses) for this
         one file."""
+        if not self._confirm_ok_to_switch_project():
+            return
         from midas_gui.dialogs import ProjectSelectionDialog
         dlg = ProjectSelectionDialog(path, self)
         if not dlg.has_content():
@@ -611,19 +640,8 @@ class MainWindow(QtWidgets.QMainWindow):
         Ctrl+S now writes the session into this same file, an unsaved
         session would otherwise be silently lost on Close, so offer to save
         first exactly like ``closeEvent`` does."""
-        if self._workspace_dirty:
-            resp = QtWidgets.QMessageBox.question(
-                self, "Unsaved changes",
-                "This project has unsaved session changes. Save before closing it?",
-                QtWidgets.QMessageBox.Save | QtWidgets.QMessageBox.Discard
-                | QtWidgets.QMessageBox.Cancel,
-                QtWidgets.QMessageBox.Save)
-            if resp == QtWidgets.QMessageBox.Cancel:
-                return
-            if resp == QtWidgets.QMessageBox.Save:
-                self._save_project_dialog()
-                if self._workspace_dirty:   # user cancelled the Save/Save-As prompt
-                    return
+        if not self._confirm_ok_to_switch_project():
+            return
         self._set_project_path(None)
 
     def _show_project_history(self) -> None:
@@ -643,14 +661,31 @@ class MainWindow(QtWidgets.QMainWindow):
         self._save_project_as_dialog()
 
     def _save_project_as_dialog(self):
+        """Save Project As… always targets a *fresh* project file: an
+        existing target is completely overwritten (after explicit
+        confirmation, and a ``.bak`` copy — see
+        ``project.backup_before_overwrite``) rather than adopting its own
+        analysis history. If a project is currently open and has any
+        ``/analysis`` provenance, the user separately picks how much of it
+        (none / latest-only / all) to carry into the new file — see
+        ``project.copy_analysis_history``."""
+        src_path = self._project_ctx.path
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save Project As", self._project_ctx.path or "midas_project.h5",
+            self, "Save Project As", src_path or "midas_project.h5",
             "MIDAS Project (*.h5)")
         if not path:
             return
         if Path(path).exists():
+            if QtWidgets.QMessageBox.question(
+                    self, "Save Project As",
+                    f"{Path(path).name} already exists and will be completely "
+                    "overwritten, replacing any project data it currently "
+                    "holds. Continue?",
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                    QtWidgets.QMessageBox.No) != QtWidgets.QMessageBox.Yes:
+                return
             try:
-                project.open_project(path)   # validate it really is a project file
+                project.create_project(path, overwrite=True)
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "Save Project As failed", str(e))
                 return
@@ -660,7 +695,42 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "Save Project As failed", str(e))
                 return
+
+        scope = "none"
+        src_summary = {}
+        if src_path and str(src_path) != str(path):
+            src_summary = project.analysis_summary(src_path)
+            if src_summary:
+                from midas_gui.dialogs import SaveAsHistoryDialog
+                dlg = SaveAsHistoryDialog(src_summary, self)
+                if dlg.exec_() != QtWidgets.QDialog.Accepted:
+                    return
+                scope = dlg.selected_scope()
+
         self.save_project(path)
+
+        if scope != "none" and src_path and str(src_path) != str(path):
+            try:
+                copied = project.copy_analysis_history(src_path, path, scope)
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(
+                    self, "Copying analysis history failed",
+                    f"The workspace was saved, but copying analysis history "
+                    f"from the previous project failed:\n{e}")
+                return
+            if copied:
+                lines = []
+                if copied.get("mask"):
+                    lines.append(f"Mask: {copied['mask']} attempt(s)")
+                for key, label in (("calibrate", "Calibrate"), ("integrate", "Batch Integrate")):
+                    per_panel = copied.get(key) or {}
+                    if per_panel:
+                        detail = ", ".join(f"{p}: {n}" for p, n in sorted(per_panel.items()))
+                        lines.append(f"{label}: {detail}")
+                QtWidgets.QMessageBox.information(
+                    self, "Save Project As",
+                    "Copied analysis history from the previous project:\n\n"
+                    + "\n".join(lines))
 
     def _import_legacy_workspace_dialog(self):
         """Reads a standalone Workspace JSON file from before this feature
@@ -1026,23 +1096,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     pass
 
     def closeEvent(self, event):
-        if getattr(self, "_workspace_dirty", False):
-            resp = QtWidgets.QMessageBox.question(
-                self, "Unsaved changes",
-                "This project has unsaved session changes. Save before closing?",
-                QtWidgets.QMessageBox.Save | QtWidgets.QMessageBox.Discard
-                | QtWidgets.QMessageBox.Cancel,
-                QtWidgets.QMessageBox.Save)
-            if resp == QtWidgets.QMessageBox.Cancel:
-                event.ignore()
-                return
-            if resp == QtWidgets.QMessageBox.Save:
-                self._save_project_dialog()
-                if self._workspace_dirty:   # user cancelled the Save/Save-As prompt
-                    event.ignore()
-                    return
-            else:   # Discard
-                self._clear_autosave_draft()
+        if getattr(self, "_workspace_dirty", False) and not self._confirm_ok_to_switch_project():
+            event.ignore()
+            return
         try:
             self._dirty_timer.stop()
             self._autosave_timer.stop()

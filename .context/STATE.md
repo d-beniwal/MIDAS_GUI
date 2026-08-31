@@ -1,16 +1,48 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-31 (bundled commit `d84c58e`; see "Recently
-completed" below)_
+_Last updated: 2026-08-31 (about to commit Project save-safety +
+Save-As-history-scope work; see "Recently completed" below)_
 
 ## Now working on
 
-Nothing in progress — working tree clean apart from local-only
+Nothing in progress — about to commit the crash-safe-saves/Save-As-history
+work below. Working tree otherwise clean apart from local-only
 `test_data/test_out/` (GSAS-II export test artifacts; untracked,
 gitignore-precedent says leave it, see the github-skill project memory).
 
 ## Recently completed
+
+**2026-08-31 (uncommitted) — Project saves made crash-safe; Save-As lets
+you choose how much analysis history to carry over; Open-Project guards
+unsaved changes.** `project.py`: every mutating write
+(`write_gui_workspace` and the three `append_*_attempt` functions) now
+builds its new content in a sibling staging child group and swaps it into
+place with a cheap metadata-only rename (`_stage_and_swap`) instead of
+delete-then-rebuild-in-place, so a crash mid-write leaves prior content
+fully intact; `write_gui_workspace` also makes a rolling `path + ".bak"`
+copy (`backup_before_overwrite`) before each overwrite, and
+`create_project` gained an `overwrite=True` option (also backs up first).
+New `analysis_summary()`/`copy_analysis_history()` let **File ▸ Save
+Project As…** (`app.py`, new `SaveAsHistoryDialog` in `dialogs.py`) always
+create a genuinely fresh project at the destination (overwriting an
+existing file there only after explicit confirmation, never merging into
+it) and separately ask how much of the *currently open* project's
+`/analysis` history to carry into it — full history (default),
+latest-attempt-only (never leaving a dangling `calib_attempt_ref`), or
+none. `app.py` also factored the Close-window unsaved-changes
+Save/Discard/Cancel prompt into a shared `_confirm_ok_to_switch_project()`
+and now runs it before **File ▸ Open Project…**/a Recent-Projects pick too,
+so opening a different project can no longer silently discard in-progress
+edits. **Files:** `project.py`, `dialogs.py`, `app.py`,
+`tests/test_project.py` (+8 new tests), `tests/test_workspace_ux.py` (+8
+new tests). `gui_documentation.md` §16 already updated. **Verified:**
+`pytest tests/test_project.py` (all new tests pass; one unrelated
+pre-existing test, `test_apply_project_calibration_single_detector`,
+CRASHED with SIGABRT under `pytest-forked` — matches the long-documented
+interpreter-teardown crash risk below, not introduced by this change) and
+`pytest tests/test_workspace_ux.py` (25/25 pass, only teardown-noise
+tracebacks after the dots, exit 0).
 
 **2026-08-31 (`d84c58e`) — Batch Integrate Multi-azimuth cake output +
 Export for GSAS-II; MIDAS backend bump; pytest-forked test isolation.**
