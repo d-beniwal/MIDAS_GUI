@@ -339,6 +339,48 @@ def normalize_result(raw, mode: str, *, NY, NZ, pxY, pxZ, wavelength,
     raise ValueError(f"Unsupported pipeline mode for normalisation: {effective_mode}")
 
 
+def tilt_seed_effective(mode: str, *, panel_layout=None, refine: Optional[dict] = None) -> bool:
+    """Whether a manual tx/ty/tz seed will actually reach the underlying solver
+    for this pipeline/config, mirroring :func:`run_pipeline`'s own branching —
+    kept in sync with it deliberately rather than introspected generically,
+    since the branch taken (not just the pipeline name) decides this.
+
+    * ``four_stage`` / ``bayesian`` / ``joint`` always seed tilts via
+      :func:`build_v1_params` (``CalibrationParams`` takes tx/ty/tz directly).
+    * ``one_shot`` seeds tilts the same way when internally routed through
+      ``autocalibrate_four_stage`` (``panel_layout`` set) or
+      ``pipelines.single.autocalibrate`` (distortion refinement restricted to
+      a subset of coefficients) — see the corresponding branches in
+      :func:`run_pipeline`. The *plain* one_shot path calls
+      ``midas_calibrate_v2.calibrate()`` directly, whose ``initial_tx/ty/tz``
+      kwargs are silently dropped by :func:`_supported_kwargs` unless the
+      installed backend's signature actually exposes them — checked here at
+      call time, not assumed, so this stays correct if a future backend
+      release adds them (see QUESTIONS_FOR_COLLEAGUES.md item 1).
+    * ``first_time`` never passes a tilt seed to ``first_time_calibrate()``
+      at all, regardless of backend version.
+    """
+    if mode in ("four_stage", "bayesian", "joint"):
+        return True
+    if mode == "first_time":
+        return False
+    if mode == "one_shot":
+        if panel_layout:
+            return True
+        refine = refine or {}
+        coeffs = _distortion_coeffs(refine)
+        if refine.get("Distortion", True) and coeffs and coeffs != set(DISTORTION_NAMES):
+            return True
+        try:
+            import inspect
+            from midas_calibrate_v2 import calibrate
+            params = inspect.signature(calibrate).parameters
+            return all(f"initial_{k}" in params for k in ("tx", "ty", "tz"))
+        except Exception:
+            return False
+    return False
+
+
 # ── Dispatch ─────────────────────────────────────────────────────────────────────
 
 def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
