@@ -26,7 +26,8 @@ from midas_gui.helpers import (
     widgets_to_dict, apply_dict_to_widgets, im_trans_codes_from_checkboxes,
     _apply_im_trans, paramstest_pairs)
 from midas_gui.widgets import (
-    PickableImageViewer, ProfileViewer, LogPanel, ResidualBarChart, DataLoaderPanel, CakeViewer)
+    PickableImageViewer, ProfileViewer, LogPanel, ResidualBarChart, DataLoaderPanel, CakeViewer,
+    StrainCakeViewer, build_lab_frame_axes_items, ring_azimuth_residual)
 from midas_gui.workers import CalibrationWorker, IntegrationWorker
 from midas_gui.dialogs import _SaveParamstestDialog, DistortionRefineDialog, show_error
 from midas_gui.hydra_widgets import HydraModeRibbon
@@ -382,6 +383,16 @@ class CalibrationTab(QtWidgets.QWidget):
         self._corr_status = QtWidgets.QLabel("")
         self._corr_status.setStyleSheet(f"color:{S.ACCENT};font-size:10px")
         tb.addWidget(self._corr_status)
+        self._lab_axes_on = QtWidgets.QCheckBox("Lab-frame axes")
+        self._lab_axes_on.setToolTip(
+            "Overlay MIDAS lab-frame axes (X_Lab/Y_Lab), the beam-direction ⊗ "
+            "glyph, and an η sweep arc, anchored at the current seed beam "
+            "centre — lets you verify orientation/ImTransOpt at a glance.")
+        self._lab_axes_on.toggled.connect(self._on_lab_axes_toggled)
+        tb.addWidget(self._lab_axes_on)
+        self._axis_items: list = []
+        for sig in (self._seed_bcy.valueChanged, self._seed_bcz.valueChanged):
+            sig.connect(self._redraw_lab_axes_if_on)
         right.addWidget(self._img_view)
 
         bot = QtWidgets.QTabWidget()
@@ -407,6 +418,8 @@ class CalibrationTab(QtWidgets.QWidget):
         bot.addTab(self._cake_view, "Eta vs R Cake")
         self._resid_chart = ResidualBarChart()
         bot.addTab(self._resid_chart, "Ring Residuals")
+        self._resid_cake_view = StrainCakeViewer()
+        bot.addTab(self._resid_cake_view, "Strain Cake")
         # Results tab: the full parameter set exactly as written to paramstest.txt,
         # laid out across several columns (the panel is wide but short) as plain text —
         # including the distortion coefficients (no table) — plus a button to push the
@@ -626,6 +639,40 @@ class CalibrationTab(QtWidgets.QWidget):
             img = self._loader.corrected(self._calib_image())
             img = _apply_im_trans(img, self._im_trans_codes())
             self._img_view.set_image(img, autorange=autorange, reset_levels=autorange)
+        self._redraw_lab_axes_if_on()
+
+    # ── Lab-frame axes overlay ───────────────────────────────────────
+    # Same overlay as the Data Viewer tab (see tab_view.py / widgets.py
+    # build_lab_frame_axes_items) — anchored here at the current seed BC
+    # (rather than a "geometry card") since that's what's always present
+    # and kept up to date (Pick BC, Load calibration file, the post-run
+    # feedback loop, and typing all funnel through _seed_bcy/_seed_bcz).
+
+    def _on_lab_axes_toggled(self, checked: bool):
+        if checked:
+            self._draw_lab_axes()
+        else:
+            self._clear_lab_axes()
+
+    def _redraw_lab_axes_if_on(self, *_args):
+        if getattr(self, "_lab_axes_on", None) is not None and self._lab_axes_on.isChecked():
+            self._draw_lab_axes()
+
+    def _clear_lab_axes(self):
+        for it in self._axis_items:
+            self._img_view._iv.removeItem(it)
+        self._axis_items.clear()
+
+    def _draw_lab_axes(self):
+        self._clear_lab_axes()
+        img = self._img_view._data
+        if img is None:
+            return
+        items = build_lab_frame_axes_items(
+            self._img_view._iv, img.shape, self._seed_bcy.value(), self._seed_bcz.value())
+        for it in items:
+            self._img_view._iv.addItem(it)
+        self._axis_items.extend(items)
 
     def _on_threshold_toggled(self, on: bool):
         for w in (self._thr_min, self._thr_max, self._thr_slider, self._thr_val):
@@ -1087,8 +1134,16 @@ class CalibrationTab(QtWidgets.QWidget):
             wavelength_A=data["wavelength_A"], lsd_um=data["lsd_um"], px_um=data["px_um"])
         if data.get("cake_2d") is not None:
             self._cake_view.set_cake(data["cake_2d"], data["r_axis_px"], data["eta_axis_deg"])
+        radii = _predict_ring_radii(self._result) if self._result else []
+        if data.get("cake_2d") is not None and radii:
+            ring_grid, kept_radii = ring_azimuth_residual(
+                data["cake_2d"], data["r_axis_px"], radii)
+            self._resid_cake_view.set_data(
+                data.get("resid_cake"), ring_grid, kept_radii,
+                data["r_axis_px"], data["eta_axis_deg"])
+        else:
+            self._resid_cake_view.clear()
         if self._result:
-            radii = _predict_ring_radii(self._result)
             self._prof_view.set_ring_markers(
                 [{"radii": radii, "color": "#f0c060"}],
                 data["lsd_um"], data["px_um"], data["wavelength_A"])
@@ -1346,6 +1401,14 @@ class CalibrationTab(QtWidgets.QWidget):
                         results_arrays["cake_2d"], results_arrays["r_axis_px"],
                         results_arrays["eta_axis_deg"])
                 radii = _predict_ring_radii(result)
+                if results_arrays.get("cake_2d") is not None and radii:
+                    ring_grid, kept_radii = ring_azimuth_residual(
+                        results_arrays["cake_2d"], results_arrays["r_axis_px"], radii)
+                    self._resid_cake_view.set_data(
+                        results_arrays.get("resid_cake"), ring_grid, kept_radii,
+                        results_arrays["r_axis_px"], results_arrays["eta_axis_deg"])
+                else:
+                    self._resid_cake_view.clear()
                 self._prof_view.set_ring_markers(
                     [{"radii": radii, "color": "#f0c060"}],
                     results_arrays.get("lsd_um"), results_arrays.get("px_um"),

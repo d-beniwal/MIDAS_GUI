@@ -770,22 +770,41 @@ class IntegrationWorker(QtCore.QThread):
                           if self._im_trans else self._mask.astype(np.float32))
             self.log_line.emit("[integrate] Running integration…")
             geom = build_geom(spec, "subpixel2", mask_t)
-            cnt = (count_cake(geom, "subpixel2", spec.NrPixelsZ, spec.NrPixelsY)
-                   if self._weighted else None)
+            # Needed for both the optional weighted profile and (below) masking
+            # empty bins in the residual-strain cake, so compute unconditionally.
+            cnt = count_cake(geom, "subpixel2", spec.NrPixelsZ, spec.NrPixelsY)
             img_t = torch.from_numpy(img.astype(np.float64))
             prof, _, cake_2d, _ = integrate_frame(img_t, spec, geom, "subpixel2",
                                                (None, None), None, need_sigma=False,
                                                return_cake=True,
-                                               weighted=self._weighted, cnt_cake=cnt)
+                                               weighted=self._weighted,
+                                               cnt_cake=cnt if self._weighted else None)
             r_ax = compute_r_axis(spec)
             n_eta = spec.n_eta_bins
             eta_ax = float(spec.EtaMin) + float(spec.EtaBinSize) * (np.arange(n_eta) + 0.5)
+
+            # Rebin the per-pixel radial-correction map (already in the
+            # im_trans-applied frame, same as `geom`) into the same (η, R) bins
+            # as the cake — a ring × azimuth pseudo-strain map. apply_trans_opt
+            # must be False: residual_corr_map is already transformed, unlike
+            # the raw image above which needs the flip applied internally.
+            resid_cake = None
+            resid_map = getattr(self._result, "residual_corr_map", None)
+            if resid_map is not None:
+                import midas_integrate_v2 as m
+                resid_t = resid_map.detach().to("cpu", torch.float64)
+                resid_cake = m.integrate_subpixel(
+                    resid_t, geom, apply_trans_opt=False, normalize=True
+                ).detach().cpu().numpy()
+                resid_cake = np.where(cnt > 0, resid_cake, np.nan)
+
             self.log_line.emit(f"[integrate] Done — {len(prof)} bins, peak={prof.max():.1f}")
             self.finished.emit({
                 "r_axis_px": r_ax, "profile": prof,
                 "wavelength_A": float(spec.Wavelength),
                 "lsd_um": float(spec.Lsd), "px_um": float(spec.pxY),
                 "cake_2d": cake_2d, "eta_axis_deg": eta_ax,
+                "resid_cake": resid_cake,
             })
         except Exception:
             self.failed.emit(traceback.format_exc())

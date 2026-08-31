@@ -614,6 +614,135 @@ def _install_manual_axis_capture(plot_widget: "pg.PlotWidget", callback):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+#  Lab-frame axes overlay  (shared builder — see tab_view.py / tab_calibrate.py)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> list:
+    """MIDAS lab-frame axes overlay: X_Lab/Y_Lab compass, beam-direction
+    (Z_Lab) ⊗ glyph, and an η sweep arc, anchored at (bc_y, bc_z) — lets a
+    user verify orientation/ImTransOpt by checking a feature lands in the
+    quadrant the overlay predicts.
+
+    Returns a list of plain pyqtgraph scene items, NOT yet added to any
+    view — the caller adds them (``iv.addItem(item)``) and owns removal;
+    pan/zoom transforms them for free once added.
+
+    ``iv`` must be a ``pg.ImageView`` whose ViewBox has ``invertY(False)``
+    set, as every image viewer in this app already does
+    (``ImageViewer.__init__``, ``CakeViewer.__init__``) — the MIDAS 'bl'
+    lab-frame convention (+Y_MIDAS = display-left) assumes that.
+    """
+    nz, ny = image_shape
+    y_sign = -1.0   # MIDAS 'bl' convention: +Y_MIDAS points display-left
+    # invertY(False) is already applied on every viewer this is used with, so
+    # +Z_MIDAS (increasing pixel row) already renders upward — no extra flip.
+    V = 1.0
+
+    xl_color, yl_color, zl_color, eta_color = "#FF3B30", "#34C759", "#0A84FF", "#FFA500"
+    L = max(60.0, min(400.0, 0.15 * min(ny, nz)))
+    head = max(15.0, L * 0.20)
+
+    text_pen = pg.mkPen("w")
+    text_fill = pg.mkBrush(0, 0, 0, 200)
+    xl_pen = pg.mkPen(xl_color, width=3.5)
+    yl_pen = pg.mkPen(yl_color, width=3.5)
+    arc_pen = pg.mkPen(eta_color, width=2.5)
+    label_font = QtGui.QFont(); label_font.setPointSize(13); label_font.setBold(False)
+    glyph_font = QtGui.QFont(); glyph_font.setPointSize(17); glyph_font.setBold(True)
+
+    px_w = px_h = 1.0
+    try:
+        pw, ph = iv.getView().getViewBox().viewPixelSize()
+        if pw and ph and pw > 0 and ph > 0:
+            px_w, px_h = pw, ph
+    except Exception:
+        pass
+    px_iso = math.sqrt(px_w * px_h) if (px_w > 0 and px_h > 0) else 1.0
+
+    items: list = []
+
+    def add(item):
+        items.append(item)
+
+    def shaft_with_head(x0, y0, x1, y1):
+        dx, dy = x1 - x0, y1 - y0
+        length = math.hypot(dx, dy)
+        if length < 1e-9:
+            return [x0, x1], [y0, y1]
+        ux, uy = dx / length, dy / length
+        nx, ny_ = -uy, ux
+        base_x, base_y = x1 - ux * head, y1 - uy * head
+        wing = head * 0.55
+        p1x, p1y = base_x + nx * wing, base_y + ny_ * wing
+        p2x, p2y = base_x - nx * wing, base_y - ny_ * wing
+        return [x0, x1, p1x, x1, p2x], [y0, y1, p1y, y1, p2y]
+
+    # X_Lab arrow (MIDAS-native Y_MIDAS, display-LEFT) — unaffected by V.
+    xs, ys = shaft_with_head(bc_y, bc_z, bc_y + y_sign * L, bc_z)
+    add(pg.PlotDataItem(xs, ys, pen=xl_pen, connect="all"))
+    # Y_Lab arrow (MIDAS-native Z_MIDAS, display-UP) — flipped by V.
+    xs, ys = shaft_with_head(bc_y, bc_z, bc_y, bc_z + V * L)
+    add(pg.PlotDataItem(xs, ys, pen=yl_pen, connect="all"))
+
+    fm = QtGui.QFontMetrics(label_font)
+    margin_px = 4.0
+    label_specs = (
+        ("h", "+X<sub>Lab</sub> (+Y<sub>MIDAS</sub>)", xl_color),
+        ("v", "+Y<sub>Lab</sub> (+Z<sub>MIDAS</sub>)", yl_color))
+    for axis_kind, html_body, axis_color in label_specs:
+        html = f'<span style="color:{axis_color};">{html_body}</span>'
+        if axis_kind == "h":
+            arrow_label_R_h = L + head * 0.6
+            dx, dy = y_sign * arrow_label_R_h, V * (-head * 0.9)
+            anchor = (0.0 if dx > 0 else 1.0, 0.5)
+        else:
+            text_extent = min((fm.height() / 2.0 + margin_px) * px_iso, 0.5 * L)
+            arrow_label_R_v = L + max(head * 0.6, text_extent)
+            dx, dy = 0.0, V * arrow_label_R_v
+            anchor = (0.5, 0.5)
+        lbl = pg.TextItem(html=html, anchor=anchor, border=text_pen, fill=text_fill)
+        lbl.setFont(label_font)
+        lbl.setPos(bc_y + dx, bc_z + dy)
+        add(lbl)
+
+    # ⊗ glyph at BC — Z_Lab (MIDAS-native X_MIDAS), the beam direction.
+    glyph = pg.TextItem("⊗", color=zl_color, anchor=(0.5, 0.5), border=text_pen, fill=text_fill)
+    glyph.setFont(glyph_font)
+    glyph.setPos(bc_y, bc_z)
+    add(glyph)
+    beam_html = f'<span style="color:{zl_color};">+Z<sub>Lab</sub> (+X<sub>MIDAS</sub>, beam)</span>'
+    x_lbl = pg.TextItem(html=beam_html, anchor=(0.5, 0.0), border=text_pen, fill=text_fill)
+    x_lbl.setFont(label_font)
+    x_lbl.setPos(bc_y, bc_z + V * (-head * 1.2))
+    add(x_lbl)
+
+    # η sweep arc, 0°→+45°, flipped by V so η=0 still points toward Y_Lab.
+    R_arc = L * 0.85
+    eta_rad = np.deg2rad(np.linspace(0.0, 45.0, 24))
+    arc_x = bc_y + (-y_sign) * R_arc * np.sin(eta_rad)
+    arc_y = bc_z + V * R_arc * np.cos(eta_rad)
+    add(pg.PlotDataItem(arc_x, arc_y, pen=arc_pen))
+
+    end = math.radians(45.0)
+    tan_x = (-y_sign) * math.cos(end)
+    tan_y = -V * math.sin(end)
+    head_size = head * 0.9
+    tip_x, tip_y = float(arc_x[-1]), float(arc_y[-1])
+    bx, by = tip_x - tan_x * head_size, tip_y - tan_y * head_size
+    nx_, ny_ = -tan_y, tan_x
+    wing = head_size * 0.55
+    p1x, p1y = bx + nx_ * wing, by + ny_ * wing
+    p2x, p2y = bx - nx_ * wing, by - ny_ * wing
+    add(pg.PlotDataItem([p1x, tip_x, p2x], [p1y, tip_y, p2y], pen=arc_pen, connect="all"))
+
+    # η=0 tick, just outside the arc.
+    tick_inner, tick_outer = R_arc * 1.04, R_arc * 1.18
+    add(pg.PlotDataItem([bc_y, bc_y], [bc_z + V * tick_inner, bc_z + V * tick_outer], pen=arc_pen))
+
+    return items
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 #  CakeViewer
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -781,6 +910,168 @@ class CakeViewer(QtWidgets.QWidget):
         val = self._cake[ie, ir]
         self._coord_bar.setText(
             f"R = {r:.2f} px   η = {eta:.2f}°   intensity = {val:.4g}")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  StrainCakeViewer  (NEW — ring × azimuth pseudo-strain heatmap)
+# ═════════════════════════════════════════════════════════════════════════════
+
+class StrainCakeViewer(CakeViewer):
+    """Ring × azimuth pseudo-strain map, in either of two sources:
+
+    * **Model** — ``AutoCalibrationResult.residual_corr_map`` (the backend's
+      whole-detector RBF-smoothed residual model) rebinned onto the same
+      (R, η) grid as the intensity cake. Dense, but interpolated — it has a
+      value everywhere the detector has pixel coverage, not just at the
+      calibrant's actual ring positions.
+    * **Ring** — :func:`ring_azimuth_residual`: the same "local peak near the
+      predicted radius" measurement :class:`ResidualBarChart` already makes
+      per ring, just run independently per η row instead of once on the
+      azimuthally-collapsed profile. This is the direct deviation from the
+      calibrant's ideal ring position (tied to its real d-spacings) — no
+      smoothing/interpolation involved. X-axis is ring index, not R, since
+      rings aren't evenly spaced in radius.
+
+    Both are a signed quantity centred on zero (a good calibration reads ~0
+    everywhere) and NaN marks "no data" rather than 0 — so this overrides
+    ``CakeViewer``'s log toggle, percentile windowing and mouse readout
+    instead of reusing them as-is.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._log.setVisible(False)
+        self._cmap.insertItem(0, "coolwarm")
+        self._cmap.setCurrentIndex(0)
+        self._source = _NoScrollComboBox()
+        self._source.addItem("Model (whole detector)", "model")
+        self._source.addItem("Ring (η-resolved)", "ring")
+        self._source.setToolTip(
+            "Model: the backend's smoothed residual_corr_map, rebinned onto\n"
+            "the (R, η) cake grid. Ring: the same local-peak measurement\n"
+            "'Ring Residuals' makes per ring, run independently per azimuth\n"
+            "row instead of on the azimuthally-collapsed profile.")
+        self._source.currentIndexChanged.connect(self._on_source_changed)
+        self._toolbar_layout.insertWidget(1, self._source)
+        self._mode = _NoScrollComboBox()
+        self._mode.addItem("ΔR (px)", "px")
+        self._mode.addItem("strain (µε)", "strain")
+        self._mode.currentIndexChanged.connect(self._redisplay)
+        self._toolbar_layout.insertWidget(2, self._mode)
+
+        self._model_cake: Optional[np.ndarray] = None   # (n_eta, n_r)
+        self._ring_grid: Optional[np.ndarray] = None     # (n_eta, n_rings)
+        self._ring_radii: Optional[np.ndarray] = None    # (n_rings,) px
+
+    def set_data(self, model_cake, ring_grid, ring_radii_px, r_axis_px, eta_axis_deg):
+        """``model_cake``/``ring_grid`` may each be None (e.g. no
+        residual_corr_map for a Multi-panel run, or no ring matched the
+        cake) — the source combo simply has nothing to show for that entry."""
+        self._model_cake = None if model_cake is None else np.asarray(model_cake, dtype=float)
+        self._ring_grid = None if ring_grid is None else np.asarray(ring_grid, dtype=float)
+        self._ring_radii = np.asarray(ring_radii_px, dtype=float)
+        self._r_axis = np.asarray(r_axis_px, dtype=float)
+        self._eta_axis = np.asarray(eta_axis_deg, dtype=float)
+        self._redisplay()
+
+    def clear(self):
+        self._model_cake = None
+        self._ring_grid = None
+        self._iv.clear()
+        self._coord_bar.setText(
+            "No residual data for this attempt (Model needs "
+            "residual_corr_map — unavailable with Multi-panel enabled or "
+            "Distortion refinement off; Ring needs a matched ring in the "
+            "cake's R range).")
+
+    def _on_source_changed(self, *_args):
+        self._redisplay()
+
+    def _active(self):
+        """(cake, x_axis, x_label, x_units) for the selected source."""
+        if self._source.currentData() == "ring":
+            n = 0 if self._ring_radii is None else len(self._ring_radii)
+            return self._ring_grid, np.arange(n, dtype=float), "ring index", None
+        return self._model_cake, self._r_axis, "R", "px"
+
+    def _display_cake(self, cake, x_axis):
+        """The raw ΔR (px) cake, or the same data as strain (µε) — ΔR/R × 1e6,
+        matching the µε units already used for post_residual_strain_uE
+        elsewhere in the app. `x_axis` is R (px) in Model mode, or the actual
+        ring radii (px) in Ring mode — ring index itself has no physical
+        length, but the strain denominator must be the true radius."""
+        r_for_strain = self._ring_radii if self._source.currentData() == "ring" else x_axis
+        if self._mode.currentData() == "strain":
+            with np.errstate(invalid="ignore", divide="ignore"):
+                return 1e6 * cake / r_for_strain[np.newaxis, :]
+        return cake
+
+    def _redisplay(self, *_args):
+        cake, x_axis, x_label, x_units = self._active()
+        self._iv.getView().setLabel("bottom", x_label, units=x_units)
+        self._iv.getView().setLabel("left", "η", units="°")
+        if cake is None or cake.size == 0 or self._eta_axis is None:
+            self._iv.clear()
+            return
+        disp = self._display_cake(cake, x_axis)
+        finite = disp[np.isfinite(disp)]
+        if finite.size:
+            v = float(np.percentile(np.abs(finite), self._vmax.value()))
+            v = max(v, 1e-9)
+        else:
+            v = 1.0
+        lo, hi = -v, v
+        img = disp.T   # (n_eta, n_x) -> (n_x, n_eta): pyqtgraph's first axis is X
+        self._iv.setImage(img.astype(np.float32), autoLevels=False, levels=(lo, hi),
+                          autoRange=False, autoHistogramRange=False)
+        x0, x1 = (float(x_axis[0]), float(x_axis[-1])) if x_axis.size else (0.0, 1.0)
+        e0, e1 = float(self._eta_axis[0]), float(self._eta_axis[-1])
+        # Ring mode: centre each ring's column on its index (bar-chart-style),
+        # not a zero-width point at x_axis[0]==x_axis[-1]==0 for a single ring.
+        rect_x0 = x0 - 0.5 if x_units is None else x0
+        rect_w = max((x1 - x0) + (1.0 if x_units is None else 0.0), 1e-6)
+        self._iv.getImageItem().setRect(
+            QtCore.QRectF(rect_x0, e0, rect_w, max(e1 - e0, 1e-6)))
+        self._apply_view_limits(rect_x0, rect_x0 + rect_w, e0, e1)
+        self._iv.getView().getViewBox().autoRange()
+        self._iv.getHistogramWidget().item.setHistogramRange(lo, hi, padding=0.1)
+        n_eta, n_x = disp.shape
+        unit = "µε" if self._mode.currentData() == "strain" else "px"
+        src = "ring" if self._source.currentData() == "ring" else "R"
+        self._coord_bar.setText(
+            f"strain cake {n_x} {src}-bins × {n_eta} η-bins  |  "
+            f"η ∈ [{e0:.1f}, {e1:.1f}]°   (±{v:.3g} {unit} shown)")
+
+    def _mouse(self, evt):
+        cake, x_axis, _label, x_units = self._active()
+        if cake is None or x_axis is None or x_axis.size == 0 or self._eta_axis is None:
+            return
+        pos = evt[0]
+        vb = self._iv.getView().getViewBox()
+        if not self._iv.getView().sceneBoundingRect().contains(pos):
+            return
+        mp = vb.mapSceneToView(pos)
+        x, eta = mp.x(), mp.y()
+        n_eta, n_x = cake.shape
+        x0, x1 = float(x_axis[0]), float(x_axis[-1])
+        e0, e1 = float(self._eta_axis[0]), float(self._eta_axis[-1])
+        ring_mode = x_units is None
+        x_lo = x0 - 0.5 if ring_mode else min(x0, x1)
+        x_hi = x1 + 0.5 if ring_mode else max(x0, x1)
+        if not (x_lo <= x <= x_hi and min(e0, e1) <= eta <= max(e0, e1)):
+            return
+        ix = int(round(x)) if ring_mode else int((x - x0) / max(x1 - x0, 1e-9) * (n_x - 1))
+        ie = int((eta - e0) / max(e1 - e0, 1e-9) * (n_eta - 1))
+        ix = min(max(ix, 0), n_x - 1); ie = min(max(ie, 0), n_eta - 1)
+        dr = cake[ie, ix]
+        loc = f"ring {ix}" if ring_mode else f"R = {x:.2f} px"
+        if not np.isfinite(dr):
+            self._coord_bar.setText(f"{loc}   η = {eta:.2f}°   (no data)")
+            return
+        r_for_strain = self._ring_radii[ix] if ring_mode else x_axis[ix]
+        eps_ue = 1e6 * dr / r_for_strain
+        self._coord_bar.setText(
+            f"{loc}   η = {eta:.2f}°   Δr = {dr:.4g} px (ε = {eps_ue:.4g} µε)")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1088,6 +1379,49 @@ class ProfileViewer(QtWidgets.QWidget):
                      yMin=ymin - ypad, yMax=ymax + ypad,
                      maxXRange=(xmax - xmin) + 2 * xpad,
                      maxYRange=(ymax - ymin) + 2 * ypad)
+
+
+def ring_azimuth_residual(cake_2d, r_axis_px, ring_radii_px, window_px: float = 8.0):
+    """Per-(η row, ring) radial residual Δr = r_obs − r_pred — the same
+    windowed-local-peak algorithm as :class:`ResidualBarChart` (below), run
+    independently for each η row of a cake instead of once on the
+    azimuthally-collapsed profile. This is the actual per-ring deviation from
+    the calibrant's ideal ring position (tied to its real d-spacings),
+    resolved by azimuth — as opposed to :func:`StrainCakeViewer`'s other mode,
+    which rebins the backend's whole-detector RBF-smoothed residual model.
+
+    Returns ``(grid, kept_radii)``: ``grid`` has shape
+    ``(n_eta, len(kept_radii))``, NaN where an η row had no signal in a
+    ring's window (e.g. that azimuth falls outside the detector at that
+    radius); ``kept_radii`` is the subset of ``ring_radii_px`` that had at
+    least one in-window R-axis sample, matching the ring-dropping
+    ``ResidualBarChart`` already does.
+    """
+    r_axis = np.asarray(r_axis_px, dtype=float)
+    cake = np.asarray(cake_2d, dtype=float)
+    n_eta = cake.shape[0]
+    sels, kept_radii = [], []
+    for r_pred in ring_radii_px:
+        sel = np.abs(r_axis - r_pred) <= window_px
+        if sel.any():
+            sels.append(sel)
+            kept_radii.append(float(r_pred))
+    if not sels:
+        return np.zeros((n_eta, 0)), []
+    grid = np.full((n_eta, len(sels)), np.nan)
+    for k, (sel, r_pred) in enumerate(zip(sels, kept_radii)):
+        local_r = r_axis[sel]
+        local_i = cake[:, sel]                    # (n_eta, n_sel)
+        # A cake bin with no pixel coverage reads as exact 0 (integrate_*'s
+        # normalize=True divides by clamp(min=1e-12) there), not NaN — same
+        # convention CakeViewer._redisplay already uses to spot empty bins.
+        has_signal = np.any(local_i != 0, axis=1)
+        if not has_signal.any():
+            continue
+        arg = np.argmax(local_i, axis=1)
+        r_obs = local_r[arg]
+        grid[has_signal, k] = r_obs[has_signal] - r_pred
+    return grid, kept_radii
 
 
 # ═════════════════════════════════════════════════════════════════════════════
