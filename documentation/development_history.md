@@ -173,6 +173,12 @@ Dates are commit dates (YYYY-MM-DD).
 | Cosmetic overhaul: Drift hidden, "View calibration" popup, checkbox output formats, green Save/red Abort, Sequential/Batch-Parallel workers (single-detector + Hydra) | `a27790a` |
 | Output format + Run mode become popups (button/tooltip, not permanent widgets); fix View-calibration popup rebuilding stale on first open | `e6f2e50` |
 | Fix Batch-Parallel frame ordering in live waterfall/stacked-profile view | `0332683` |
+| Opt-in "Multi-azimuth output (cake)" checkbox: keep every η sector as a separate output profile instead of collapsing to one full-circle profile per frame (off by default, reuses existing η bin/range fields) | `d84c58e` |
+
+### Results & Export tab
+| Change | Commit |
+|--------|--------|
+| Export for GSAS-II: write one chosen Batch-Integrate attempt as a native MIDAS-format zarr (`midas_integrate_v2.io.zarr_gsas`) + provenance sidecar, directly importable by GSAS-II's MIDAS zarr reader | `d84c58e` |
 
 ### PDF Analysis (Tab 6)
 | Change | Commit |
@@ -225,6 +231,12 @@ Dates are commit dates (YYYY-MM-DD).
 | Clean worker shutdown, drop QThread.terminate(), guard stdout, offload projection | `399f3d7` |
 | Waterfall O(N²)→O(N), frame-slider debounce, radial-grid + stats caching | `4462ee1` |
 | Dedupe distortion map + paramstest writer, align calibrant lattices, texture colormap | `8846619` |
+
+### Testing / dependencies
+| Change | Commit |
+|--------|--------|
+| MIDAS backend package bump (midas-integrate-v2 0.7.0, midas-calibrate-v2 0.11.0, midas-integrate 0.7.0, midas-calibrate 0.5.0, midas-pdf 0.2.0) for PolygonBinGeometry.from_spec()'s tilt/distortion/parallax/panel-shift fix | `d84c58e` |
+| `pytest-forked` isolation for the four known interpreter-teardown-crash-prone test files (crash surfaces as a clean FAILED report instead of aborting the whole pytest process, per-file runs only) | `d84c58e` |
 
 ### Documentation
 | Change | Commit |
@@ -3725,6 +3737,83 @@ introduced by this change).
 Builder's own Transforms checkboxes and the pre-refinement Open Project
 Analysis grid layout. Re-introduces the double-transform bug this commit
 fixes.
+
+### `d84c58e` — Batch Integrate Multi-azimuth cake output + Export for GSAS-II; MIDAS backend bump; pytest-forked test isolation (2026-08-31)
+**Effect:** Four independent pieces bundled into one commit (this repo's
+"bundle the full diff" convention when a commit is prepared and the working
+tree turns out to carry more than the session narrative described — see
+`.context/DECISIONS.md` 2026-08-29/2026-08-30 entries for the full *why*
+behind each):
+- **Batch Integrate: "Multi-azimuth output (cake)"** — a new opt-in
+  checkbox (off by default) that keeps every azimuthal (η) sector from the
+  existing η bin/range fields as a *separate* output profile per frame
+  (`profiles`/`sigmas` become `(n_frames, n_eta, n_r)`) instead of
+  collapsing to one full-circle-averaged profile, needed for per-azimuth
+  GSAS-II/texture work. Reuses the η bin/range fields rather than adding a
+  parallel control; off, no existing run's result size/shape changes.
+  `write_frame_profiles()` (new, in `workers.py`) is the shared per-format
+  writer for both the live-run and Save-button paths, naming per-azimuth
+  files `<id>_etaNNN.<fmt>`. Not yet combinable with Q-uniform bins
+  (blocked in the UI and, as defense in depth, in `BatchWorker`); HDF5
+  output is skipped in this mode (`midas_integrate_v2.write_h5` expects one
+  profile per frame) — text formats or the GSAS-II zarr export below cover
+  that case.
+- **Export for GSAS-II** (new `midas_gui/gsas_export.py`, a card in
+  Results & Export's `tab_export.py`) — writes one chosen Batch-Integrate
+  attempt, picked from a dropdown of the open project's attempt history, as
+  a native MIDAS-format `.zarr.zip` via
+  `midas_integrate_v2.io.zarr_gsas.write_gsas_zarr_zip` (the exact layout
+  GSAS-II's own `G2pwd_MIDAS.py` "MIDAS zarr" importer expects — verified
+  against that importer's real read contract, not guessed), plus a
+  `<name>.zarr.zip.provenance.json` sidecar carrying the attempt's full
+  provenance verbatim, kept next to (never inside) the zip. v1 scope:
+  single-detector only, R-uniform binning only (a Q-uniform attempt's
+  stored `r_axis_px` can't be reconstructed into a geometry), and an
+  embedded mask only (not file-backed) — each unsupported case raises a
+  named `ValueError` rather than exporting something silently wrong. Works
+  with either the legacy 2-D `profiles` (degenerates to one azimuth) or the
+  new 3-D multi-azimuth `profiles` above.
+- **MIDAS backend package bump** — `midas-integrate-v2` 0.6.0→0.7.0,
+  `midas-calibrate-v2` 0.10.0→0.11.0, `midas-integrate` 0.6.0→0.7.0,
+  `midas-calibrate` 0.4.3→0.5.0, `midas-pdf` 0.1.3→0.2.0, bumped as an
+  interdependent set to pick up `midas-integrate-v2` 0.7.0's fix for
+  `PolygonBinGeometry.from_spec()` silently discarding tilt/distortion/
+  parallax/panel-shifts/residual-correction-map (now routed through the
+  shared `pixel_to_REta_from_spec`, like every other kernel) and
+  `midas-integrate` 0.7.0's related `QUAD_ORDER` area-conservation fix.
+  Verified independently before upgrading: a numeric repro against the
+  pre-upgrade 0.6.0 reproduced the described divergence, and the same repro
+  against 0.7.0 gave `max|deltaR| = 0.0000 px`.
+- **`pytest-forked` test isolation** — added `pytest-forked==1.7.5` (dev
+  extra) + `pytestmark = pytest.mark.forked` to the four known
+  interpreter-teardown-crash-prone test files (`test_hydra_calib_ui.py`,
+  `test_hydra_ui.py`, `test_smoke.py`, `test_project.py`). Confirmed this
+  turns a pyqtgraph-teardown segfault/abort that used to kill the whole
+  pytest process into a normal `FAILED ... CRASHED with signal N` inside a
+  clean pytest exit, for the already-recommended per-file-run workflow.
+  Does **not** fix a combined `pytest tests/` run — `os.fork()` itself
+  becomes unsafe once torch/numba/Qt/HDF5 have spun up background threads
+  earlier in a combined run, a different/deeper problem than the
+  per-file-isolable pyqtgraph teardown bug (see `.context/DECISIONS.md`).
+**Verified:** `pytest tests/test_batch_multiazimuth.py tests/test_gsas_export.py`
+(8/8 passing this session). The multi-azimuth/GSAS-II work itself was
+implemented and GUI-tested in an earlier, uncaptured 2026-08-29 session —
+`gui_documentation.md` already documented it in full; this commit's own
+diff was reconciled against that documentation (rather than against the
+narrower, stale `.context/STATE.md` "Now working on" from the 2026-08-30
+session) before committing, per the recurring "diff the full working tree,
+don't trust STATE.md alone" lesson logged in the github skill's per-project
+memory.
+**Files:** `midas_gui/tab_batch.py`, `midas_gui/tab_export.py`,
+`midas_gui/workers.py`, `midas_gui/app.py`, new `midas_gui/gsas_export.py`,
+`requirements.txt`, `environment.yml`, `pyproject.toml`,
+`tests/test_hydra_calib_ui.py`, `tests/test_hydra_ui.py`,
+`tests/test_project.py`, `tests/test_smoke.py`, new
+`tests/test_batch_multiazimuth.py`, new `tests/test_gsas_export.py`.
+**Roll back:** `git revert d84c58e` — the four pieces are independent in
+practice (different files) but were shipped as one commit; a partial
+revert (e.g. keep the backend bump, drop GSAS-II export) needs a manual
+`git checkout d84c58e^ -- <path>` per file instead of a clean revert.
 
 ---
 

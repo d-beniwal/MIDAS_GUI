@@ -1,16 +1,51 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-29 (Mask Builder: build masks in raw detector-space,
-fix double-transform bug, committed as `5954a57`; see "Recently completed"
-below)_
+_Last updated: 2026-08-31 (bundled commit `d84c58e`; see "Recently
+completed" below)_
 
 ## Now working on
 
-Nothing in flight — `5954a57` (Mask Builder raw-detector-space fix +
-Open Project layout refinement) is committed and pushed; awaiting next task.
+Nothing in progress — working tree clean apart from local-only
+`test_data/test_out/` (GSAS-II export test artifacts; untracked,
+gitignore-precedent says leave it, see the github-skill project memory).
 
 ## Recently completed
+
+**2026-08-31 (`d84c58e`) — Batch Integrate Multi-azimuth cake output +
+Export for GSAS-II; MIDAS backend bump; pytest-forked test isolation.**
+Four independent pieces bundled into one commit (this repo's "bundle the
+full diff" convention — see DECISIONS.md 2026-08-29/2026-08-30 entries for
+the *why* behind each): (1) Batch Integrate's opt-in **"Multi-azimuth
+output (cake)"** checkbox (off by default) keeps every azimuthal (η)
+sector as a separate output profile (`profiles`/`sigmas` →
+`(n_frames, n_eta, n_r)`) instead of collapsing to one full-circle profile
+per frame, reusing the existing η bin/range fields; `write_frame_profiles()`
+is the new shared per-format writer for both the live-run and Save-button
+paths. Not yet combinable with Q-uniform bins; HDF5 output is skipped in
+this mode. (2) New **Export for GSAS-II** feature (`midas_gui/
+gsas_export.py` + a card in Results & Export, `tab_export.py`) writes one
+chosen Batch-Integrate attempt as a native MIDAS-format GSAS-II zarr via
+`midas_integrate_v2.io.zarr_gsas.write_gsas_zarr_zip` + a provenance
+sidecar; v1 scope is single-detector/R-uniform-binning/embedded-mask only,
+each unsupported case raising a named `ValueError`. (3) MIDAS backend
+package bump — `midas-integrate-v2` 0.7.0, `midas-calibrate-v2` 0.11.0,
+`midas-integrate` 0.7.0, `midas-calibrate` 0.5.0, `midas-pdf` 0.2.0 — for
+`PolygonBinGeometry.from_spec()`'s tilt/distortion/parallax/panel-shift
+fix. (4) `pytest-forked` added + `pytestmark = pytest.mark.forked` on the
+four known interpreter-teardown-crash-prone test files (see the crash-risk
+bullet below). **Files:** `tab_batch.py`, `tab_export.py`, `workers.py`,
+`app.py`, new `gsas_export.py`, `requirements.txt`/`environment.yml`/
+`pyproject.toml`, the four test files + new `tests/test_batch_multiazimuth.py`/
+`tests/test_gsas_export.py`. **Verified:** both new test files pass
+(`pytest tests/test_batch_multiazimuth.py tests/test_gsas_export.py`, 8/8);
+(1)/(2) were actually implemented and GUI-tested in an earlier, uncaptured
+2026-08-29 session whose STATE.md update never landed — caught only by
+diffing the full working tree against `gui_documentation.md` (already
+current) before this commit, per the github-skill project memory's
+recurring "pre-commit sanity check" pattern. (3)/(4) were verified
+independently the same way in the 2026-08-30 session that made them (see
+DECISIONS.md).
 
 **2026-08-29 (`5954a57`) — Mask Builder: build masks in raw detector-space,
 fix double-transform bug.** Mask Builder's own Flip Y/Flip Z/Transpose
@@ -74,7 +109,17 @@ Flip-Z/Multi-panel fix — trimmed here; full detail in
   (`tests/test_workspace_ux.py`, `test_smoke.py` run as a whole file).
   Trust per-file isolated runs, not a combined `tests/` run; do not reach
   for `gc.collect()` (confirmed to make it worse). Out of scope, see
-  DECISIONS.md for the 2026-08-26 bisection. **Widened 2026-08-29:** also
+  DECISIONS.md for the 2026-08-26 bisection. **2026-08-30: `pytest-forked`
+  now isolates this for the trusted per-file workflow** — `test_hydra_
+  calib_ui.py`, `test_hydra_ui.py`, `test_smoke.py`, `test_project.py` all
+  carry `pytestmark = pytest.mark.forked`, so a crash inside one of them
+  run alone is a clean `FAILED ... CRASHED with signal N` instead of an
+  interpreter abort. Does NOT fix a combined `tests/` run — see DECISIONS.md
+  2026-08-30: `os.fork()` itself becomes unsafe once torch/numba/Qt/HDF5
+  have spun up background threads earlier in the session, so forked tests
+  late in a combined run can crash regardless of their own content (even
+  `test_helpers.py`, pure logic). Keep trusting per-file runs only.
+  **Widened 2026-08-29:** also
   seen with a `Fatal Python error: Aborted` in a leaked `workers.py`
   `build_geom`-running `QThread` at pytest teardown, reproduced even
   running `tests/test_project.py` (pure-logic, no Qt) alone; confirmed
