@@ -1396,6 +1396,17 @@ def ring_azimuth_residual(cake_2d, r_axis_px, ring_radii_px, window_px: float = 
     radius); ``kept_radii`` is the subset of ``ring_radii_px`` that had at
     least one in-window R-axis sample, matching the ring-dropping
     ``ResidualBarChart`` already does.
+
+    The peak position is parabolic-interpolated around the discrete argmax
+    (3-point quadratic fit through it and its two neighbors), not just the
+    bin centre the plain argmax lands on. ``ResidualBarChart`` gets away
+    with a raw argmax because it acts on the azimuthally-**averaged**
+    profile — pooling the whole ring's signal smooths the result enough
+    that R-bin quantization isn't visible. Averaged over only one η row's
+    worth of pixels, that same discretization dominates: without subpixel
+    refinement, adjacent η rows mostly round to the *same* R-bin (a flat,
+    uniform-looking ring) with occasional whole-bin-width jumps between
+    rows that cross a boundary — not genuine azimuthal structure.
     """
     r_axis = np.asarray(r_axis_px, dtype=float)
     cake = np.asarray(cake_2d, dtype=float)
@@ -1409,6 +1420,7 @@ def ring_azimuth_residual(cake_2d, r_axis_px, ring_radii_px, window_px: float = 
     if not sels:
         return np.zeros((n_eta, 0)), []
     grid = np.full((n_eta, len(sels)), np.nan)
+    rows = np.arange(n_eta)
     for k, (sel, r_pred) in enumerate(zip(sels, kept_radii)):
         local_r = r_axis[sel]
         local_i = cake[:, sel]                    # (n_eta, n_sel)
@@ -1418,8 +1430,22 @@ def ring_azimuth_residual(cake_2d, r_axis_px, ring_radii_px, window_px: float = 
         has_signal = np.any(local_i != 0, axis=1)
         if not has_signal.any():
             continue
+        n_sel = local_i.shape[1]
         arg = np.argmax(local_i, axis=1)
-        r_obs = local_r[arg]
+        if n_sel < 3:
+            r_obs = local_r[arg]   # window too narrow to fit a parabola through
+        else:
+            # A neighbor on each side is needed for the fit — clip the centre
+            # index inward by one bin at the window's edges (rare in an
+            # 8 px-wide window) rather than skip refinement there.
+            c = np.clip(arg, 1, n_sel - 2)
+            y0, y1, y2 = local_i[rows, c - 1], local_i[rows, c], local_i[rows, c + 1]
+            denom = y0 - 2 * y1 + y2
+            with np.errstate(invalid="ignore", divide="ignore"):
+                offset = np.where(denom != 0, 0.5 * (y0 - y2) / denom, 0.0)
+            offset = np.clip(offset, -1.0, 1.0)   # guard a near-flat/noisy local max
+            bin_width = local_r[1] - local_r[0]   # r_axis bins are uniform-width
+            r_obs = local_r[c] + offset * bin_width
         grid[has_signal, k] = r_obs[has_signal] - r_pred
     return grid, kept_radii
 
