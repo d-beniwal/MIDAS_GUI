@@ -709,13 +709,18 @@ class CalibrationTab(QtWidgets.QWidget):
         self._seed_bcy.setValue(float(g["BC_y"]))
         self._seed_bcz.setValue(float(g["BC_z"]))
         self._seed_lsd.setValue(float(g["Lsd"]) / 1000.0)   # µm → mm display
+        self._seed_tx.setValue(float(g.get("tx") or 0.0))
+        self._seed_ty.setValue(float(g.get("ty") or 0.0))
+        self._seed_tz.setValue(float(g.get("tz") or 0.0))
         im_trans = g.get("im_trans") or []
         self._flip_y.setChecked(1 in im_trans)
         self._flip_z.setChecked(2 in im_trans)
         self._transp.setChecked(3 in im_trans)
         self._seed_note.setText(
             f"Loaded {Path(path).name}: λ={g['wavelength_A']:.5f} Å, px={g['pxY']:.2f} µm, "
-            f"BC=({g['BC_y']:.2f}, {g['BC_z']:.2f}), Lsd={g['Lsd']/1000:.3f} mm.")
+            f"BC=({g['BC_y']:.2f}, {g['BC_z']:.2f}), Lsd={g['Lsd']/1000:.3f} mm, "
+            f"tx={g.get('tx') or 0.0:.3f}°, ty={g.get('ty') or 0.0:.3f}°, "
+            f"tz={g.get('tz') or 0.0:.3f}°.")
         self._log.append(f"Calibration file loaded: {path}")
         if im_trans and im_trans != [c for c in (1, 2, 3) if c in im_trans]:
             self._log.append(
@@ -738,6 +743,8 @@ class CalibrationTab(QtWidgets.QWidget):
             self._seed_bcz.setValue(float(g["BC_z"]))
         if g.get("Lsd"):
             self._seed_lsd.setValue(float(g["Lsd"]) / 1000.0)   # µm → mm display
+        if g.get("tx") is not None:
+            self._seed_tx.setValue(float(g["tx"]))
         if g.get("ty") is not None:
             self._seed_ty.setValue(float(g["ty"]))
         if g.get("im_trans") is not None:
@@ -752,7 +759,7 @@ class CalibrationTab(QtWidgets.QWidget):
             f"px={g.get('pxY', 0):.2f} µm, "
             f"BC=({g.get('BC_y', 0):.2f}, {g.get('BC_z', 0):.2f}), "
             f"Lsd={g.get('Lsd', 0)/1000:.3f} mm, "
-            f"ty={g.get('ty', 0):.3f}°, tz={g.get('tz', 0):.3f}°.")
+            f"tx={g.get('tx', 0):.3f}°, ty={g.get('ty', 0):.3f}°, tz={g.get('tz', 0):.3f}°.")
         self._log.append("Geometry pulled from Data Viewer tab.")
 
     def _on_bc_picked(self, bc_y, bc_z):
