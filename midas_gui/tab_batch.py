@@ -130,6 +130,7 @@ class BatchTab(QtWidgets.QWidget):
             "r_bin": self._r_bin,
             "e_bin": self._e_bin,
             "azim": self._azim,
+            "multi_azimuth": self._multi_azimuth_chk,
             "var_check": self._var_check,
             "err_model": self._err_model,
             "q_check": self._q_check,
@@ -352,6 +353,19 @@ class BatchTab(QtWidgets.QWidget):
         intf.row(("R bin:", self._r_bin), ("η bin:", self._e_bin))
         intf.row(("Azim. avg:", self._azim))
         integ.body.addLayout(intf)
+        self._multi_azimuth_chk = QtWidgets.QCheckBox("Multi-azimuth output (cake)")
+        self._multi_azimuth_chk.setToolTip(
+            "Keep every azimuthal (η) sector as a SEPARATE output profile "
+            "instead of collapsing to one full-circle-averaged profile per "
+            "frame. Reuses the η bin/η range above to define the sectors.\n\n"
+            "Off by default — η bin already defaults to 5° over the full "
+            "360° (72 internal bins) purely to control collapse-weighting "
+            "resolution; turning this on repurposes that same setting to "
+            "also define real output granularity, so every existing run's "
+            "result size is unaffected unless you opt in.\n\n"
+            "Needed for per-azimuth GSAS-II/texture analysis. Not yet "
+            "supported together with Q-uniform bins.")
+        integ.body.addWidget(self._multi_azimuth_chk)
         self._var_check = QtWidgets.QCheckBox("Per-bin variance (σ)")
         self._var_check.setToolTip(
             "Compute per-bin σ via the chosen error model.\n"
@@ -566,6 +580,12 @@ class BatchTab(QtWidgets.QWidget):
         fmts = self._fmt.checked_keys()
         q_cfg = ({"QMin": self._q_min.value(), "QMax": self._q_max.value(),
                   "QBinSize": self._q_bin.value()} if self._q_check.isChecked() else None)
+        multi_azimuth = self._multi_azimuth_chk.isChecked()
+        if multi_azimuth and q_cfg:
+            QtWidgets.QMessageBox.warning(
+                self, "Incompatible options",
+                "Multi-azimuth output isn't supported together with "
+                "Q-uniform bins yet. Uncheck one of them."); return
         lsd, px, wl = float(spec.Lsd), float(spec.pxY), float(spec.Wavelength)
         _axctx = (lsd, px, wl, "Q" if q_cfg else "R")
         self._stack_view.set_axis_context(*_axctx)
@@ -617,6 +637,8 @@ class BatchTab(QtWidgets.QWidget):
             "frame_range": frame_range, "monitor_file": monitor_file,
             "q_cfg": q_cfg, "weighted": weighted, "bright_mode": bright_mode,
             "mask_sources": self._loader.get_state().get("mask"),
+            "r_bin": self._r_bin.value(), "e_bin": self._e_bin.value(),
+            "multi_azimuth": multi_azimuth,
         }
         self._last_axis_ctx = (lsd, px, wl)
         mask = self._loader.composite_mask()
@@ -632,6 +654,7 @@ class BatchTab(QtWidgets.QWidget):
             drift_traj=drift_traj, parent=self,
             dark=dark, bright=bright, background=background, bright_mode=bright_mode,
             weighted=weighted, context=context, im_trans=self._resolved_im_trans(),
+            multi_azimuth=multi_azimuth,
             run_mode=self._run_mode.currentData(), n_workers=self._n_workers.value())
         self._worker.progress.connect(self._on_progress)
         self._worker.frame_done.connect(self._on_frame)
@@ -697,9 +720,13 @@ class BatchTab(QtWidgets.QWidget):
         self._log.append(msg)
         self._prog_lbl.setText(f"{'Aborted' if aborted else 'Complete'}: {n} frames")
         if n and data.get("r_axis_px") is not None and self._last_axis_ctx is not None:
+            profiles_arr = data.get("profiles")
+            n_eta_bins = (int(profiles_arr.shape[1])
+                         if profiles_arr is not None and profiles_arr.ndim == 3 else 1)
             self._last_results = {
-                "r_axis_px": data["r_axis_px"], "profiles": data.get("profiles"),
+                "r_axis_px": data["r_axis_px"], "profiles": profiles_arr,
                 "sigmas": data.get("sigmas"), "frame_ids": data.get("frame_ids"),
+                "n_eta_bins": n_eta_bins, "eta_axis": data.get("eta_axis"),
             }
             self._save_btn.setEnabled(True)
         self._log_to_project(data)
@@ -712,12 +739,18 @@ class BatchTab(QtWidgets.QWidget):
         calib_ref = None
         if self._use_tab2_btn.isChecked() and self._calib_result is not None:
             calib_ref = getattr(self._calib_result, "_project_attempt_ref", None)
+        profiles_arr = data.get("profiles")
+        n_eta_bins = (int(profiles_arr.shape[1])
+                     if profiles_arr is not None and profiles_arr.ndim == 3 else 1)
+        eta_axis = data.get("eta_axis")
         try:
             ref = project.append_integration_attempt(
                 self._project_ctx.path, "single",
                 inputs=self._last_run_inputs, finished_payload=data,
                 calibration_snapshot=calib_fields, calib_attempt_ref=calib_ref,
-                extra={"active_profile": settings.active_profile()},
+                extra={"active_profile": settings.active_profile(),
+                       "n_eta_bins": n_eta_bins,
+                       "eta_axis_deg": (eta_axis.tolist() if eta_axis is not None else None)},
                 **self._last_run_fields)
             self._log.append(f"Logged to project: {ref}")
         except Exception:
@@ -765,17 +798,19 @@ class BatchTab(QtWidgets.QWidget):
             self, "Save lineouts to…", self._out_ed.text().strip())
         if not out_dir:
             return
-        if "2d_csv" in fmts:
+        if "2d_csv" in fmts and self._last_results.get("n_eta_bins", 1) <= 1:
             self._log.append(
-                "[batch] Note: 2D CSV (cake) isn't saved by Save — per-frame "
-                "cakes aren't kept in memory after a run; re-run with an "
-                "Output folder set to get that format.")
+                "[batch] Note: 2D CSV (cake) isn't saved by Save for this run — "
+                "per-frame cakes are only kept when 'Multi-azimuth output' was "
+                "checked; re-run with that (or an Output folder + 2D CSV "
+                "checked) to get that format.")
         lsd, px, wl = self._last_axis_ctx
         try:
             paths = write_all_profiles(
                 out_dir, fmts, self._last_results["r_axis_px"],
                 self._last_results["profiles"], self._last_results["sigmas"],
-                self._last_results["frame_ids"], lsd, px, wl)
+                self._last_results["frame_ids"], lsd, px, wl,
+                eta_axis=self._last_results.get("eta_axis"))
         except Exception as e:
             show_error(self, "Save failed", str(e), log=self._log, log_prefix="\nERROR:\n")
             return

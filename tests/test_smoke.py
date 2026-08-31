@@ -11,6 +11,14 @@ import pytest
 
 import midas_gui
 
+# Several tests below build a full offscreen MainWindow (pyqtgraph-heavy);
+# running them in one process lets teardown corruption accumulate across
+# tests and crash the interpreter (see .context/STATE.md's
+# interpreter-teardown crash-risk note). pytest-forked runs each test in
+# this file in its own subprocess, so a crash is reported as a normal
+# FAILED with signal info instead of aborting the whole pytest run.
+pytestmark = pytest.mark.forked
+
 
 def test_version_is_nonempty_string():
     assert isinstance(midas_gui.__version__, str) and midas_gui.__version__

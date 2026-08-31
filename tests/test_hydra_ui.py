@@ -18,6 +18,12 @@ from midas_gui.tab_view import DataViewerTab
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "test_data" / "gui_synthetic" / "hydra"
 
+# Run each test in this file in its own forked subprocess (pytest-forked):
+# this file's pyqtgraph-teardown segfault, documented in .context/STATE.md /
+# DECISIONS.md, then aborts only that subprocess, reported as a normal
+# FAILED with signal info, instead of crashing the whole pytest run.
+pytestmark = pytest.mark.forked
+
 
 @pytest.fixture(scope="module")
 def app():

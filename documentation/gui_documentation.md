@@ -3,7 +3,23 @@
 **Version:** 1.0.0
 **Application:** `midas-gui` (or `python -m midas_gui`)
 **Backends:** `midas_calibrate_v2`, `midas_integrate_v2`, `midas_calibrate`, `midas_hkls`, `midas_distortion`
-**Last updated:** 2026-08-29 (Mask Builder no longer has its own
+**Last updated:** 2026-08-29 (Batch Integrate gets an opt-in **Multi-azimuth
+output (cake)** checkbox — see §7 "Integration" — and Results & Export gets
+an **Export for GSAS-II** feature — see §12. Summary:
+- **Multi-azimuth output (cake)** (off by default, §7): `midas_integrate_v2`
+  already returns a full `(η, R)` cake per frame for every kernel — Batch
+  Integrate was always collapsing it to one full-circle profile before
+  anything downstream saw it, even though the η bin/range fields already
+  existed. Checking this keeps every azimuthal sector as a separate output
+  profile instead (`profiles`/`sigmas` become `(n_frames, n_eta, n_r)`).
+  Left off, nothing changes — η bin's default (5° over 360°, 72 internal
+  bins) is only ever used for the existing collapse-weighting, not output
+  shape, so no existing run's result size is affected.
+- **Export for GSAS-II** (§12): writes one chosen Batch-Integrate attempt as
+  a native MIDAS-format zarr, directly importable by GSAS-II's own MIDAS
+  zarr reader, plus a provenance sidecar — see §12 for scope/limits.)
+
+**Previously:** (2026-08-29, Mask Builder no longer has its own
 Flip Y/Flip Z/Transpose **Transforms** checkboxes — see §4. Masks it produces
 are now always in raw detector-space, exactly like a file/folder mask loaded
 from disk; Calibrate/Batch Integrate/Refinement apply the active
@@ -1793,6 +1809,7 @@ popup per panel, next to each `ge{n}` card's calibration-source radios.
 | **Azim. avg** | How the (η, R) cake becomes a 1-D profile: **Pixel-weighted** (default) `Σ(mean·count)/Σ(count)` — independent of η-bin size and robust to partial azimuthal coverage / **off-detector beam centres**; or **η-bin mean (legacy)** — the unweighted mean of per-η-bin means, which can distort with a coarse η bin when the beam centre is off the detector. |
 | Per-bin variance (σ) | Error model poisson / azimuthal / hybrid (ignored when corrections are on → σ = √I). |
 | Q-uniform bins | Integrate in R then rebin onto a uniform-Q grid (Qmin, Qmax, ΔQ). |
+| **Multi-azimuth output (cake)** | Off by default. Keeps every azimuthal (η) sector from the η bin/range above as a **separate** output profile per frame (`profiles`/`sigmas` become `(n_frames, n_eta, n_r)`) instead of collapsing to one full-circle-averaged profile — needed for per-azimuth GSAS-II/texture work. Off, η bin still exists (default 5° over the full 360°, i.e. 72 internal bins) but is used only to control the collapse's weighting resolution, so turning this on repurposes that same field rather than changing any existing run's output. Text-format Save/live writes become one file per `(frame, η bin)`, named `<id>_etaNNN.<fmt>`; HDF5 output is skipped in this mode (`write_h5` expects one profile per frame) — use the text formats or the GSAS-II zarr export (§12) instead. Not yet combinable with Q-uniform bins. |
 
 ### Physics corrections
 Polarization and solid-angle (pixel-domain, via `integrate_with_corrections`).
@@ -2263,6 +2280,28 @@ Session summary + one-click export. Checkboxes select which products (calibratio
 paramstest.txt, mask.tif, integrated profiles, G(r), pole figures, session log) to copy
 to an output directory. A provenance block (package versions, geometry hash, mask
 fraction, correction flags) can be copied to the clipboard for a Methods section.
+
+### Export for GSAS-II
+
+Writes ONE chosen Batch-Integrate attempt from the open project — picked from
+a dropdown (newest first, via the project's attempt history; nothing is
+silently assumed) — as a native MIDAS-format GSAS-II zarr (`<name>.zarr.zip`),
+directly importable via GSAS-II's own **Import → Powder Data → from MIDAS
+zarr file**. Uses `midas_integrate_v2.io.zarr_gsas.write_gsas_zarr_zip`
+directly, so the layout is bit-for-bit what MIDAS's own C integrator
+produces — not a GUI-specific approximation. Works whether the attempt used
+plain (single full-circle profile) or Multi-azimuth (cake) Batch Integrate
+output (§7); degenerates to one azimuth in the plain case. A
+`<name>.zarr.zip.provenance.json` sidecar carries the attempt's full
+provenance (params, hashed input paths, environment snapshot, calibration
+snapshot) verbatim, alongside — never inside — the zip, so the zip's
+structure stays exactly what GSAS-II expects.
+
+Single-detector only for v1 (Hydra composite is a possible fast-follow). Not
+yet supported: an attempt run with Q-uniform bins (its stored radial axis is
+Q-rebinned, not a plain function of the calibration geometry) or a
+file-backed (not embedded) mask — both raise a clear error naming the
+attempt and what to change, rather than exporting something silently wrong.
 
 ---
 

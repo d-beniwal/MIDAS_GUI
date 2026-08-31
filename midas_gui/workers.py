@@ -137,7 +137,8 @@ def corrections_counts(spec):
 def integrate_frame(img_t, spec, geom, kernel, corrections, variance_cfg,
                     need_sigma: bool, corr_counts=None, return_cake=False,
                     weighted: bool = False, cnt_cake=None):
-    """Integrate one frame, returning (profile, sigma_or_None) or (profile, sigma, cake).
+    """Integrate one frame, returning (profile, sigma_or_None) or
+    (profile, sigma, cake_2d, cake_sigma_2d).
 
     Routing:
       - corrections enabled  → integrate_with_corrections, NORMALISED by the pixel-count
@@ -151,8 +152,11 @@ def integrate_frame(img_t, spec, geom, kernel, corrections, variance_cfg,
     :func:`count_cake`, computed once per geometry); the corrections path reuses its
     own ``corr_counts``.
 
-    When return_cake=True, returns a 3-tuple (prof, sigma, cake_2d) where cake_2d is
-    the (n_eta_bins, n_r_bins) normalised cake array.
+    When return_cake=True, returns a 4-tuple (prof, sigma, cake_2d, cake_sigma) where
+    cake_2d/cake_sigma are the (n_eta_bins, n_r_bins) normalised cake and its per-cell
+    uncertainty — real per-cell σ for the variance-model path (computed before it's
+    reduced to the 1-D ``sigma``), else √(cake) per cell (matching how ``sigma`` itself
+    is derived for the plain/corrections paths).
     """
     import torch
     import midas_integrate_v2 as m
@@ -167,7 +171,8 @@ def integrate_frame(img_t, spec, geom, kernel, corrections, variance_cfg,
         prof = _profile_from_cake(norm, count_cake=counts if weighted else None)
         sigma = np.sqrt(np.maximum(prof, 0.0)) if need_sigma else None
         if return_cake:
-            return prof, sigma, norm
+            cake_sigma = np.sqrt(np.maximum(np.nan_to_num(norm, nan=0.0), 0.0))
+            return prof, sigma, norm, cake_sigma
         return prof, sigma
 
     if variance_cfg is not None:
@@ -185,7 +190,10 @@ def integrate_frame(img_t, spec, geom, kernel, corrections, variance_cfg,
         cnt = np.maximum(np.sum(np.isfinite(sig_np), axis=0), 1)
         sigma = np.nan_to_num(np.sqrt(var) / cnt, nan=0.0)
         if return_cake:
-            return prof, sigma, mean_np
+            # Real per-cell σ from the error model — strictly more correct than
+            # the post-collapse √(cake) fallback used in the other two paths.
+            cake_sigma = np.nan_to_num(sig_np, nan=0.0)
+            return prof, sigma, mean_np, cake_sigma
         return prof, sigma
 
     fn = {
@@ -197,7 +205,8 @@ def integrate_frame(img_t, spec, geom, kernel, corrections, variance_cfg,
     prof = _profile_from_cake(cake_np, count_cake=cnt_cake if weighted else None)
     sigma = np.sqrt(np.maximum(prof, 0.0)) if need_sigma else None
     if return_cake:
-        return prof, sigma, cake_np
+        cake_sigma = np.sqrt(np.maximum(np.nan_to_num(cake_np, nan=0.0), 0.0))
+        return prof, sigma, cake_np, cake_sigma
     return prof, sigma
 
 
@@ -248,6 +257,43 @@ def write_profile(base, fmt, r_px, prof, sigma, lsd, px, wl,
         with open(out_path, "w") as fh:
             fh.write(header + "\n")
             fh.write("\n".join(rows) + "\n")
+
+
+def write_frame_profiles(base, file_fmts, r_px, prof, sigma, lsd, px, wl,
+                         cake_2d=None, cake_sigma=None, eta_axis=None) -> list:
+    """Write one frame's 1-D output file(s) in every format in ``file_fmts``
+    (``"2d_csv"``/``"h5"`` excluded — callers handle those separately).
+
+    Without ``cake_2d``: writes ``prof``/``sigma`` once, as always.
+
+    With ``cake_2d``/``cake_sigma`` (multi-azimuth/"cake" mode — see the
+    "Multi-azimuth output (cake)" checkbox in Batch Integrate): writes one
+    file *per azimuthal (η) bin* instead, named ``<base>_etaNNN.<fmt>``, each
+    a genuine 1-D lineout for that sector — ``prof``/``sigma`` (the
+    η-collapsed full-circle profile) are not written in this mode. ``"2d_csv"``
+    in ``file_fmts`` is honored separately as the one whole-cake file, unaffected.
+    Returns the list of paths written.
+    """
+    paths = []
+    if cake_2d is not None and cake_sigma is not None:
+        n_eta = cake_2d.shape[0]
+        eta_ax = eta_axis if eta_axis is not None else np.arange(n_eta, dtype=float)
+        for k in range(n_eta):
+            eta_base = Path(str(base) + f"_eta{k:03d}")
+            for f in file_fmts:
+                if f == "2d_csv":
+                    continue
+                write_profile(eta_base, f, r_px, cake_2d[k], cake_sigma[k], lsd, px, wl)
+                paths.append(str(eta_base) + "." + f)
+        if "2d_csv" in file_fmts:
+            write_profile(Path(base), "2d_csv", r_px, prof, sigma, lsd, px, wl,
+                         cake_2d=cake_2d, eta_axis=eta_ax)
+            paths.append(str(base) + "_cake.csv")
+    else:
+        for f in file_fmts:
+            write_profile(Path(base), f, r_px, prof, sigma, lsd, px, wl)
+            paths.append(str(base) + "." + f)
+    return paths
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -727,7 +773,7 @@ class IntegrationWorker(QtCore.QThread):
             cnt = (count_cake(geom, "subpixel2", spec.NrPixelsZ, spec.NrPixelsY)
                    if self._weighted else None)
             img_t = torch.from_numpy(img.astype(np.float64))
-            prof, _, cake_2d = integrate_frame(img_t, spec, geom, "subpixel2",
+            prof, _, cake_2d, _ = integrate_frame(img_t, spec, geom, "subpixel2",
                                                (None, None), None, need_sigma=False,
                                                return_cake=True,
                                                weighted=self._weighted, cnt_cake=cnt)
@@ -777,11 +823,18 @@ class BatchWorker(QtCore.QThread):
                  frame_range=None, frame_indices=None, monitor_file=None,
                  drift_traj=None, parent=None,
                  dark=None, bright=None, background=None, bright_mode="divide",
-                 weighted=True, context=None, im_trans=()):
+                 weighted=True, context=None, im_trans=(), multi_azimuth=False):
         super().__init__(parent)
         self._context = context              # prebuilt integration context or None
         self._spec = spec                    # always R-uniform (Q handled by rebinning)
         self._weighted = weighted            # pixel-weighted azimuthal mean (vs η-bin mean)
+        # Off by default: R bin/η bin/η range already exist for a different
+        # purpose (internal collapse-weighting resolution — η bin defaults to
+        # 5° over the full 360°, i.e. 72 internal bins, for EVERY run). Turning
+        # this on repurposes those same fields to also define real output
+        # azimuthal sectors, keeping one profile per (frame, η bin) instead of
+        # collapsing to one full-circle profile per frame.
+        self._multi_azimuth = bool(multi_azimuth)
         self._src  = source_cfg
         self._mask = mask
         self._out_dir = Path(out_dir) if out_dir else None
@@ -809,11 +862,6 @@ class BatchWorker(QtCore.QThread):
 
     def _open_source(self):
         return _open_source_cfg(self._src)
-
-    def _write_one(self, base: Path, fmt, r_px, prof, sigma, lsd, px, wl,
-                   cake_2d=None, eta_axis=None):
-        write_profile(base, fmt, r_px, prof, sigma, lsd, px, wl,
-                      cake_2d=cake_2d, eta_axis=eta_axis)
 
     def _iter_frames(self, source):
         """Yield ``(abs_i, fid, img)`` for the frames this worker should process.
@@ -867,8 +915,15 @@ class BatchWorker(QtCore.QThread):
             geom = ctx["geom"]; corr_on = ctx["corr_on"]
             corr_counts = ctx["corr_counts"]; cnt = ctx["cnt"]
             r_ax = ctx["r_ax"]; eta_ax = ctx["eta_ax"]
-            want_cake = ("2d_csv" in self._fmts)
+            want_cake = ("2d_csv" in self._fmts) or self._multi_azimuth
             need_sigma = True   # xye/fxye require σ; always provide it
+            if self._multi_azimuth and self._q_cfg:
+                # Q-rebinning (rebin_R_to_Q) only handles a 1-D profile; combining
+                # it with per-azimuth cake output isn't supported yet — the UI
+                # already blocks this combination before starting the worker.
+                raise RuntimeError(
+                    "Multi-azimuth output isn't supported together with "
+                    "Q-uniform bins yet.")
             # Q-uniform handled by rebinning the R-uniform profile (kernels lack Q-mode)
             if self._q_cfg:
                 qgrid, r_ax = q_grid_and_r(self._q_cfg, lsd, px, wl)
@@ -946,12 +1001,12 @@ class BatchWorker(QtCore.QThread):
 
                 img_t = torch.from_numpy(img.astype(np.float64))
                 if want_cake:
-                    prof, sigma, cake_2d = integrate_frame(
+                    prof, sigma, cake_2d, cake_sigma = integrate_frame(
                         img_t, cur_spec, cur_geom, self._kernel, self._corrections,
                         self._variance_cfg, need_sigma, corr_counts=cur_cc,
                         return_cake=True, weighted=self._weighted, cnt_cake=cur_cnt)
                 else:
-                    cake_2d = None
+                    cake_2d = None; cake_sigma = None
                     prof, sigma = integrate_frame(
                         img_t, cur_spec, cur_geom, self._kernel, self._corrections,
                         self._variance_cfg, need_sigma, corr_counts=cur_cc,
@@ -968,12 +1023,19 @@ class BatchWorker(QtCore.QThread):
                         sigma = sigma / abs(mon)
                         if cake_2d is not None:
                             cake_2d = cake_2d / mon
+                            cake_sigma = cake_sigma / abs(mon)
 
-                if self._q_cfg:   # rebin R-uniform → uniform Q
+                if self._q_cfg:   # rebin R-uniform → uniform Q (not combined with cake mode)
                     prof, sigma = rebin_R_to_Q(compute_r_axis(spec), prof, sigma,
                                                qgrid, lsd, px, wl)
-                all_profiles.append(prof)
-                all_sigmas.append(sigma)
+                # The live waterfall/stacked view always gets the η-collapsed profile,
+                # in both modes — only the accumulated/stored result differs.
+                if self._multi_azimuth and cake_2d is not None:
+                    all_profiles.append(cake_2d)
+                    all_sigmas.append(cake_sigma)
+                else:
+                    all_profiles.append(prof)
+                    all_sigmas.append(sigma)
                 frame_ids.append(fid)
                 self.frame_done.emit(fid, r_ax, prof, sigma)
                 self.progress.emit(proc_idx + 1, total)
@@ -983,22 +1045,29 @@ class BatchWorker(QtCore.QThread):
                 if self._out_dir is not None and file_fmts:
                     self._out_dir.mkdir(parents=True, exist_ok=True)
                     base = self._out_dir / fid
-                    for f in file_fmts:
-                        self._write_one(base, f, r_ax, prof, sigma, cur_lsd, px, wl,
-                                        cake_2d=cake_2d, eta_axis=eta_ax)
-                        ext = "_cake.csv" if f == "2d_csv" else "." + f
-                        out_paths.append(str(base) + ext)
+                    out_paths.extend(write_frame_profiles(
+                        base, file_fmts, r_ax, prof, sigma, cur_lsd, px, wl,
+                        cake_2d=(cake_2d if self._multi_azimuth else None),
+                        cake_sigma=(cake_sigma if self._multi_azimuth else None),
+                        eta_axis=eta_ax))
 
-            # HDF5: single file with the full stack
+            # HDF5: single file with the full stack — skipped in multi-azimuth mode,
+            # midas_integrate_v2.write_h5 expects a 1-D profile per frame.
             if self._out_dir is not None and "h5" in self._fmts:
-                self._out_dir.mkdir(parents=True, exist_ok=True)
-                h5_path = self._out_dir / "integrated.h5"
-                m.write_h5(str(h5_path),
-                           profiles=np.array(all_profiles),
-                           r_axis=r_ax,
-                           frame_ids=frame_ids,
-                           sigmas=np.array(all_sigmas))
-                out_paths.append(str(h5_path))
+                if self._multi_azimuth:
+                    self.log_line.emit(
+                        "[batch] Note: HDF5 output isn't written in multi-azimuth "
+                        "mode (write_h5 expects one profile per frame) — use the "
+                        "text formats or GSAS-II zarr export instead.")
+                else:
+                    self._out_dir.mkdir(parents=True, exist_ok=True)
+                    h5_path = self._out_dir / "integrated.h5"
+                    m.write_h5(str(h5_path),
+                               profiles=np.array(all_profiles),
+                               r_axis=r_ax,
+                               frame_ids=frame_ids,
+                               sigmas=np.array(all_sigmas))
+                    out_paths.append(str(h5_path))
 
             n_proc = len(all_profiles)
             self.finished.emit({
@@ -1008,6 +1077,8 @@ class BatchWorker(QtCore.QThread):
                 "frame_ids": frame_ids,
                 "out_paths": out_paths,
                 "aborted": aborted,
+                "multi_azimuth": self._multi_azimuth,
+                "eta_axis": eta_ax if self._multi_azimuth else None,
             })
         except Exception:
             self.failed.emit(traceback.format_exc())
@@ -1359,7 +1430,7 @@ def _split_into_chunks(indices: list, n_chunks: int) -> list:
 
 
 def write_all_profiles(out_dir, fmts, r_axis, profiles, sigmas, frame_ids,
-                       lsd, px, wl) -> list:
+                       lsd, px, wl, eta_axis=None) -> list:
     """Write every frame's already-computed lineout to disk, in every format
     in ``fmts``. Backs the batch tabs' **Save** button — writing results that
     already exist in memory, independent of whether an output directory was
@@ -1367,10 +1438,17 @@ def write_all_profiles(out_dir, fmts, r_axis, profiles, sigmas, frame_ids,
     Batch-Parallel mode (each chunk worker would otherwise write its own
     colliding ``integrated.h5``).
 
-    ``"2d_csv"`` (per-frame cake) is silently skipped — per-frame cake arrays
-    aren't retained in memory after a run (only 1-D profiles/sigmas are, to
-    avoid bloating RAM for large batches); re-run with an output directory
-    and 2D CSV checked to get that format. Returns the list of paths written.
+    ``profiles``/``sigmas`` may be ``(n_frames, n_r)`` (the usual case) or
+    ``(n_frames, n_eta, n_r)`` (multi-azimuth/"cake" mode) — in the latter,
+    one file per ``(frame, eta)`` is written per format, named
+    ``<fid>_etaNNN.<fmt>``, via :func:`write_frame_profiles`.
+
+    ``"2d_csv"`` (per-frame cake) is silently skipped when ``profiles`` is
+    2-D — per-frame cake arrays aren't retained in memory after a run unless
+    multi-azimuth mode was on; re-run with an output directory and 2D CSV
+    checked to get that format. ``"h5"`` is silently skipped when ``profiles``
+    is 3-D (``midas_integrate_v2.write_h5`` expects one profile per frame).
+    Returns the list of paths written.
     """
     import midas_integrate_v2 as m
     out_dir = Path(out_dir)
@@ -1378,16 +1456,21 @@ def write_all_profiles(out_dir, fmts, r_axis, profiles, sigmas, frame_ids,
     sigmas = (np.asarray(sigmas) if sigmas is not None and len(sigmas)
               else np.sqrt(np.maximum(profiles, 0.0)))
     frame_ids = list(frame_ids)
+    multi = profiles.ndim == 3
     file_fmts = [f for f in fmts if f not in ("h5", "2d_csv")]
     out_paths = []
     if file_fmts and len(frame_ids):
         out_dir.mkdir(parents=True, exist_ok=True)
         for i, fid in enumerate(frame_ids):
             base = out_dir / str(fid)
-            for f in file_fmts:
-                write_profile(base, f, r_axis, profiles[i], sigmas[i], lsd, px, wl)
-                out_paths.append(str(base) + "." + f)
-    if "h5" in fmts and len(frame_ids):
+            if multi:
+                out_paths.extend(write_frame_profiles(
+                    base, file_fmts, r_axis, None, None, lsd, px, wl,
+                    cake_2d=profiles[i], cake_sigma=sigmas[i], eta_axis=eta_axis))
+            else:
+                out_paths.extend(write_frame_profiles(
+                    base, file_fmts, r_axis, profiles[i], sigmas[i], lsd, px, wl))
+    if "h5" in fmts and len(frame_ids) and not multi:
         out_dir.mkdir(parents=True, exist_ok=True)
         h5_path = out_dir / "integrated.h5"
         m.write_h5(str(h5_path), profiles=profiles, r_axis=r_axis,
@@ -1450,7 +1533,7 @@ class BatchRunCoordinator(QtCore.QObject):
                  corrections, variance_cfg, q_cfg=None,
                  frame_range=None, monitor_file=None, drift_traj=None,
                  dark=None, bright=None, background=None, bright_mode="divide",
-                 weighted=True, context=None, im_trans=(),
+                 weighted=True, context=None, im_trans=(), multi_azimuth=False,
                  run_mode="sequential", n_workers=1, parent=None):
         super().__init__(parent)
         self._args = dict(
@@ -1458,7 +1541,8 @@ class BatchRunCoordinator(QtCore.QObject):
             kernel=kernel, corrections=corrections, variance_cfg=variance_cfg,
             q_cfg=q_cfg, frame_range=frame_range, monitor_file=monitor_file,
             drift_traj=drift_traj, dark=dark, bright=bright, background=background,
-            bright_mode=bright_mode, weighted=weighted, im_trans=im_trans)
+            bright_mode=bright_mode, weighted=weighted, im_trans=im_trans,
+            multi_azimuth=multi_azimuth)
         self._context = context
         self._run_mode = run_mode if run_mode == "batch_parallel" else "sequential"
         self._n_workers_requested = max(1, int(n_workers))
@@ -1590,6 +1674,7 @@ class BatchRunCoordinator(QtCore.QObject):
         merged_profiles, merged_sigmas, merged_ids, merged_out = [], [], [], []
         aborted = False
         r_axis = None
+        eta_axis = None
         for cw in self._chunk_workers:
             d = self._chunk_results[id(cw)]
             if d.get("profiles") is not None and len(d["profiles"]):
@@ -1601,23 +1686,33 @@ class BatchRunCoordinator(QtCore.QObject):
             aborted = aborted or d.get("aborted", False)
             if r_axis is None:
                 r_axis = d.get("r_axis_px")
+            if eta_axis is None:
+                eta_axis = d.get("eta_axis")
+        multi_azimuth = bool(self._args.get("multi_azimuth", False))
         out_dir = self._args["out_dir"]
         fmts = self._args["fmts"] or []
         if out_dir and "h5" in fmts and merged_profiles:
-            try:
-                spec = self._args["spec"]
-                h5_paths = write_all_profiles(
-                    out_dir, ["h5"], r_axis, merged_profiles, merged_sigmas, merged_ids,
-                    float(spec.Lsd), float(spec.pxY), float(spec.Wavelength))
-                merged_out.extend(h5_paths)
-            except Exception:
+            if multi_azimuth:
                 self.log_line.emit(
-                    "[batch] combined HDF5 write failed:\n" + traceback.format_exc())
+                    "[batch] Note: combined HDF5 output isn't written in "
+                    "multi-azimuth mode — use the text formats or GSAS-II "
+                    "zarr export instead.")
+            else:
+                try:
+                    spec = self._args["spec"]
+                    h5_paths = write_all_profiles(
+                        out_dir, ["h5"], r_axis, merged_profiles, merged_sigmas, merged_ids,
+                        float(spec.Lsd), float(spec.pxY), float(spec.Wavelength))
+                    merged_out.extend(h5_paths)
+                except Exception:
+                    self.log_line.emit(
+                        "[batch] combined HDF5 write failed:\n" + traceback.format_exc())
         self.finished.emit({
             "n": len(merged_profiles), "r_axis_px": r_axis,
             "profiles": np.array(merged_profiles) if merged_profiles else np.array([]),
             "sigmas": np.array(merged_sigmas) if merged_sigmas else np.array([]),
             "frame_ids": merged_ids, "out_paths": merged_out, "aborted": aborted,
+            "multi_azimuth": multi_azimuth, "eta_axis": eta_axis,
         })
 
     def requestInterruption(self):

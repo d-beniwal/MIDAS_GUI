@@ -9,6 +9,14 @@ import pytest
 
 from midas_gui import project
 
+# Pure logic, no Qt — but a leaked workers.py build_geom QThread from an
+# earlier import/test can still abort the interpreter at pytest teardown
+# (see .context/STATE.md's 2026-08-29 widening of the teardown-crash note).
+# pytest-forked runs each test here in its own subprocess so that crash is
+# reported as a normal FAILED with signal info instead of aborting the
+# whole pytest run.
+pytestmark = pytest.mark.forked
+
 
 class _FakeTensor:
     """Duck-types a torch tensor just enough to be dropped by the

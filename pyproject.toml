@@ -51,15 +51,27 @@ dependencies = [
                                   # metadata (soft/try-except import), so midas_gui must pin
                                   # it explicitly or seeding silently falls back to a coarser
                                   # arc seed.
-    "midas-calibrate-v2==0.10.0",
-    "midas-integrate-v2==0.6.0",
-    "midas-calibrate==0.4.3",
+    # 2026-08-30: bumped as an interdependent set (midas-pdf 0.2.0 requires
+    # midas-integrate-v2>=0.7.0, which requires midas-calibrate-v2>=0.11.0 and
+    # midas-integrate>=0.7.0) to pick up the midas-integrate-v2 0.7.0 fix for
+    # PolygonBinGeometry.from_spec() silently discarding tilt/distortion/
+    # parallax/panel-shifts/residual-correction-map (it now routes pixel
+    # corners through the shared pixel_to_REta_from_spec, same as every other
+    # kernel) and midas-integrate 0.7.0's related QUAD_ORDER area-conservation
+    # fix. Verified independently against the diagnosing bug report before
+    # upgrading: numeric repro against the pre-upgrade 0.6.0 reproduced the
+    # described divergence, and re-run against 0.7.0 gave max|deltaR| = 0.0000
+    # px. All requires-dist checked compatible with the numpy 1.26.4 / torch
+    # 2.4.0 / numba 0.59.1 pins above.
+    "midas-calibrate-v2==0.11.0",
+    "midas-integrate-v2==0.7.0",
+    "midas-calibrate==0.5.0",
     "midas-hkls==0.9.0",
     "midas-distortion==0.2.0",
-    "midas-pdf==0.1.3",           # public PyPI package used by the PDF tab (pdf_backend.py)
+    "midas-pdf==0.2.0",           # public PyPI package used by the PDF tab (pdf_backend.py)
     # ── Transitive MIDAS deps pinned explicitly (pulled in by midas-calibrate-v2 /
     #    midas-pdf but not imported by midas_gui directly) ─────────────────────────
-    "midas-integrate==0.6.0",
+    "midas-integrate==0.7.0",
     "midas-peakfit==0.6.0",
     "midas-zipper==0.2.1",
     "midas-params==0.11.1",       # new shared params-file registry/validator dep, first
@@ -82,7 +94,22 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest==9.1.1", "build", "twine"]
+dev = [
+    "pytest==9.1.1",
+    # Runs the known pyqtgraph-teardown-crash-prone test files (see
+    # tests/test_smoke.py, test_hydra_ui.py, test_hydra_calib_ui.py,
+    # test_project.py — each carries `pytestmark = pytest.mark.forked`) in a
+    # forked subprocess per test, so a segfault/abort there is reported as a
+    # normal FAILED with signal info instead of crashing the whole pytest
+    # process. Does not fix the underlying pyqtgraph global-registry
+    # teardown bug (out of scope, see .context/DECISIONS.md 2026-08-23/
+    # 2026-08-26) — only isolates it so it can't take unrelated tests down
+    # with it. 1.7.5+ requires pytest>=7 and no longer depends on the old
+    # `py` package. Uses os.fork(); Unix/macOS only, no effect on Windows.
+    "pytest-forked==1.7.5",
+    "build",
+    "twine",
+]
 
 [project.scripts]
 midas-gui = "midas_gui.app:main"

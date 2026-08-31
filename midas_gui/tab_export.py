@@ -22,6 +22,7 @@ class ExportTab(QtWidgets.QWidget):
         super().__init__(parent)
         self._result = None
         self._mask: Optional[np.ndarray] = None
+        self._project_ctx = None
         self._build_ui()
 
     def set_calibration(self, result):
@@ -31,6 +32,10 @@ class ExportTab(QtWidgets.QWidget):
     def set_mask_from_tab1(self, mask):
         self._mask = mask
         self._refresh()
+
+    def set_project_context(self, ctx):
+        self._project_ctx = ctx
+        self._refresh_gsas_attempts()
 
     # ── GUI state (Save/Load GUI State) ─────────────────────────────
     def _state_widgets(self) -> dict:
@@ -75,6 +80,23 @@ class ExportTab(QtWidgets.QWidget):
         self._export_btn.clicked.connect(self._export)
         ef.addWidget(self._export_btn)
         lv.addWidget(grp_exp)
+
+        grp_gsas = QtWidgets.QGroupBox("Export for GSAS-II")
+        gv = QtWidgets.QVBoxLayout(grp_gsas); gv.setSpacing(4)
+        gv.addWidget(QtWidgets.QLabel(
+            "Writes ONE chosen Batch-Integrate attempt as a native MIDAS\n"
+            "GSAS-II zarr (.zarr.zip) + a provenance sidecar — single-\n"
+            "detector only. Pick which attempt is the \"final\" result:"))
+        self._gsas_attempt_combo = QtWidgets.QComboBox()
+        gv.addWidget(self._gsas_attempt_combo)
+        self._gsas_refresh_btn = QtWidgets.QPushButton("Refresh list")
+        self._gsas_refresh_btn.clicked.connect(self._refresh_gsas_attempts)
+        gv.addWidget(self._gsas_refresh_btn)
+        self._gsas_export_btn = QtWidgets.QPushButton("Export for GSAS-II (.zarr.zip)…")
+        self._gsas_export_btn.clicked.connect(self._export_gsas)
+        self._gsas_export_btn.setEnabled(False)
+        gv.addWidget(self._gsas_export_btn)
+        lv.addWidget(grp_gsas)
         lv.addStretch(1)
         root.addWidget(left)
 
@@ -163,3 +185,41 @@ class ExportTab(QtWidgets.QWidget):
     def _write_paramstest(self, path):
         from midas_gui.helpers import write_standalone_paramstest
         write_standalone_paramstest(self._result, path)
+
+    # ── GSAS-II export ───────────────────────────────────────────────
+    def _refresh_gsas_attempts(self):
+        self._gsas_attempt_combo.clear()
+        if not self._project_ctx or not self._project_ctx.path:
+            self._gsas_attempt_combo.addItem("(open a project first)", None)
+            self._gsas_export_btn.setEnabled(False)
+            return
+        from midas_gui import project as _project
+        attempts = _project.list_attempts(self._project_ctx.path, "single", "integrate")
+        if not attempts:
+            self._gsas_attempt_combo.addItem(
+                "(no Batch Integrate attempts logged yet)", None)
+            self._gsas_export_btn.setEnabled(False)
+            return
+        for a in attempts:   # newest first, per list_attempts
+            self._gsas_attempt_combo.addItem(f"{a['name']}  —  {a['timestamp_utc']}", a["ref"])
+        self._gsas_export_btn.setEnabled(True)
+
+    def _export_gsas(self):
+        ref = self._gsas_attempt_combo.currentData()
+        if not ref or not self._project_ctx or not self._project_ctx.path:
+            return
+        default_name = ref.rsplit("/", 1)[-1] + ".zarr.zip"
+        out_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Export for GSAS-II", default_name, "MIDAS zarr (*.zarr.zip)")
+        if not out_path:
+            return
+        try:
+            from midas_gui import gsas_export
+            written = gsas_export.export_gsas_zarr(
+                self._project_ctx.path, "single", ref, out_path)
+            QtWidgets.QMessageBox.information(
+                self, "Exported",
+                f"Wrote:\n  {written}\n  {written}.provenance.json")
+        except Exception:
+            import traceback
+            show_error(self, "GSAS-II export failed", traceback.format_exc())

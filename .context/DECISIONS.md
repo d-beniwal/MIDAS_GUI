@@ -3,6 +3,120 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-08-30 — pytest-forked isolation for the known teardown-crash test files; root cause is fork()-after-multithreading, not just pyqtgraph
+
+Added `pytest-forked==1.7.5` (dev extra) and `pytestmark = pytest.mark.forked`
+to `tests/test_hydra_calib_ui.py`, `test_hydra_ui.py`, `test_smoke.py`, and
+`test_project.py` — the four files STATE.md already named as
+interpreter-teardown-crash-prone. **Confirmed working for the one thing it
+was meant to fix:** run any ONE of these four files by itself (the actually
+trusted/recommended workflow — see STATE.md), and a pyqtgraph-teardown
+segfault/abort that used to kill the whole pytest process (exit 128+signal,
+no report) now surfaces as a normal `FAILED ... CRASHED with signal N`
+inside a clean pytest exit (0 or 1), because that one test's crash happens
+in a forked child, not the parent pytest process.
+
+**Also discovered, and important: this does NOT make a combined `pytest
+tests/` run reliable, and can't with this approach.** Running these four
+files together, or the full suite, still produces a fatal interpreter
+crash some of the time, and even a fully-`--forked` full-suite run (every
+test forked) still shows dozens of `CRASHED with signal 11` failures —
+including in files with zero Qt/pyqtgraph content (`test_helpers.py`). Root
+cause: `pytest-forked` uses raw `os.fork()`, and forking a multithreaded
+process is unsafe (glibc/POSIX-documented; `multiprocessing.popen_fork`
+even warns about it: "this process is multi-threaded, use of fork() may
+lead to deadlocks in the child"). By the time enough of the suite has run,
+the main pytest process has accumulated background threads from
+torch/numba's thread pools, Qt's own thread pool, and HDF5 — forking after
+that inherits half-held native locks and crashes regardless of which
+specific test forked. This is a *different, deeper* problem than the
+pyqtgraph ViewBox/WidgetGroup global-registry teardown bug documented in
+the 2026-08-23 and 2026-08-26 entries below — forking isolates the latter
+perfectly in a single-file run, but the former (thread accumulation across
+a whole session) defeats it once enough other tests have run first.
+**Not fixed here — out of scope for this session.** A real fix for the
+combined-suite case would need worker processes spawned fresh (e.g.
+`pytest-xdist`'s `execnet`-based `spawn`, which starts brand-new
+interpreters rather than forking a live one) instead of `os.fork()`; not
+attempted. Until then, STATE.md's existing guidance stands: trust per-file
+isolated runs, not a combined `tests/` run — this change makes that
+specific, already-recommended workflow strictly better (clean crash
+reports instead of silent aborts) without pretending to fix the broader
+non-determinism.
+
+## 2026-08-29 — Export for GSAS-II: native MIDAS zarr, not a GUI-specific format; v1 scoped to single-detector/R-uniform/embedded-mask attempts
+
+Added `midas_gui/gsas_export.py` + a "Export for GSAS-II" card in the
+Results & Export tab. Deliberately calls `midas_integrate_v2.io.zarr_gsas.
+write_gsas_zarr_zip` directly rather than inventing a GUI-owned export
+format — that writer already reproduces the exact `.zarr.zip` layout
+GSAS-II's own `G2pwd_MIDAS.py` "MIDAS zarr" importer expects, so the output
+is bit-for-bit what MIDAS's C integrator would produce and needs no
+GSAS-II-side adapter. Verified against GSAS-II's real import contract by
+reading `G2pwd_MIDAS.py::readMidas`/`ContentsValidator` from
+AdvancedPhotonSource/GSAS-II while designing this (not guessed): required
+groups (`InstrumentParameters`, `REtaMap`, `OmegaSumFrame`), `REtaMap`'s
+`[R, 2θ, η, area, Q]` index order, and the >20-unmasked-point-per-azimuth
+filter GSAS-II applies on read — `tests/test_gsas_export.py` replicates
+that read path directly (no GSAS-II install needed) rather than only
+checking the writer's own contract.
+
+Picks ONE attempt from the open project's attempt history (dropdown,
+newest first) rather than exporting the whole history — GSAS-II imports
+one dataset at a time, and silently picking "latest" would be a hidden
+assumption. A `.provenance.json` sidecar carries the attempt's full
+metadata (params, hashed input paths, environment snapshot, calibration
+snapshot) verbatim, kept *next to* — never inside — the zip, so the zip's
+internal structure stays exactly what GSAS-II's importer expects.
+
+v1 scope, each enforced as a named `ValueError` rather than a silent wrong
+export: single-detector only (Hydra composite is a possible fast-follow);
+R-uniform binning only — a Q-uniform attempt's stored `r_axis_px` is
+Q-rebinned, not a plain function of the calibration geometry, so the bin
+area needed for `REtaMap` can't be reconstructed from it; and an embedded
+mask only — a file-backed mask reference isn't guaranteed to still resolve
+to the same file at export time, so only masks the project already
+captured verbatim (drawn/embedded, not loaded-from-path) are supported.
+Works with either the legacy 2-D `profiles` (single full-circle profile
+per frame, degenerates to `Nazim=1`) or the new 3-D multi-azimuth "cake"
+`profiles` (see the entry below) — the geometry rebuild forces η bin to
+360° (one azimuth) for the 2-D case specifically because the *original*
+run's η bin was only ever used for collapse-weighting, not output shape,
+so it must not be reused as if it described real azimuthal sectors.
+
+## 2026-08-29 — Batch Integrate "Multi-azimuth output (cake)": opt-in, off by default, repurposes the existing η bin field rather than adding a new one
+
+`midas_integrate_v2` already computes a full `(η, R)` cake per frame for
+every kernel internally — Batch Integrate was always collapsing it down to
+one full-circle profile before anything downstream (Save, HDF5, project
+attempt history) ever saw it, even though the η bin/η range fields already
+existed in the UI (previously used only to control collapse-weighting
+resolution). Added a "Multi-azimuth output (cake)" checkbox that instead
+keeps every azimuthal sector as its own output profile
+(`profiles`/`sigmas` become `(n_frames, n_eta, n_r)`), needed for
+per-azimuth GSAS-II (see the entry above) and texture work.
+
+Deliberately **off by default and reuses the existing η bin/range fields**
+rather than adding a parallel "azimuthal sectors" control: the fields
+already meant "how finely to slice azimuth," so overloading their meaning
+when the checkbox is on is more honest than a second control that could
+drift out of sync with the first. Off, nothing about an existing run's
+result size or shape changes — confirmed by keeping the 72-internal-bin
+default (5° over 360°) exactly as it already was for the collapse path.
+
+Not yet combinable with Q-uniform bins: `rebin_R_to_Q` only handles a 1-D
+profile, and combining it with a per-azimuth cake wasn't needed for this
+pass — blocked at both the UI (checkbox handler) and worker level
+(`BatchWorker` raises `RuntimeError` if both are set, as defense in depth
+in case a caller bypasses the UI check) rather than silently doing
+something wrong. HDF5 output is skipped in this mode for the same reason
+(`midas_integrate_v2.write_h5` expects one profile per frame) — text
+formats or the GSAS-II zarr export are the way to get cake data to disk.
+`write_frame_profiles()` extracted from `BatchWorker._write_one`/inlined
+Save logic as the shared per-format writer for both the live-run and
+Save-button paths, so the `<id>_etaNNN.<fmt>` naming and 2D-CSV-cake
+handling doesn't have to be maintained in two places.
+
 ## 2026-08-29 — Project `.h5` schema redesign (`21faaf8`): `gui_workspace` + `analysis`, clean cutover, global mask history, one combined Open Project dialog
 
 User requested three changes to the Project file: (1) a `gui_workspace`

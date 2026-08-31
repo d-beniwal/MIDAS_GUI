@@ -30,6 +30,12 @@ from midas_gui.hydra_calib_page import HydraCalibrationPage
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "test_data" / "gui_synthetic" / "hydra"
 
+# Run each test in this file in its own forked subprocess (pytest-forked):
+# the pyqtgraph-teardown segfault documented above and in .context/STATE.md
+# then aborts only that subprocess, reported as a normal FAILED with signal
+# info, instead of crashing the whole pytest run.
+pytestmark = pytest.mark.forked
+
 
 @pytest.fixture(scope="module")
 def app():
