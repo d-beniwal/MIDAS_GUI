@@ -560,7 +560,7 @@ def append_calibration_attempt(project_path, panel_key, *, cfg, result, loader_s
             _write_array(att, "panel_shifts", panel_arr)
         if results:
             res_grp = att.create_group("results")
-            for key in ("profile", "r_axis_px", "cake_2d", "eta_axis_deg"):
+            for key in ("profile", "r_axis_px", "cake_2d", "eta_axis_deg", "resid_cake"):
                 if results.get(key) is not None:
                     _write_array(res_grp, key, results[key])
             for k in ("lsd_um", "px_um", "wavelength_A"):
@@ -700,7 +700,7 @@ def read_attempt_results(project_path, ref: str) -> dict:
 def read_calib_attempt_results(project_path, ref: str) -> dict:
     """The embedded cake/profile arrays for a *calibration* attempt (see
     ``append_calibration_attempt``'s ``results`` kwarg) — ``profile``,
-    ``r_axis_px``, ``cake_2d``, ``eta_axis_deg`` plus scalar
+    ``r_axis_px``, ``cake_2d``, ``eta_axis_deg``, ``resid_cake`` plus scalar
     ``lsd_um``/``px_um``/``wavelength_A``. Returns {} if the attempt has no
     ``results`` group (e.g. an attempt logged before this feature existed,
     or integration never ran for it)."""
@@ -709,7 +709,7 @@ def read_calib_attempt_results(project_path, ref: str) -> dict:
         if grp is None:
             return {}
         out = {}
-        for key in ("profile", "r_axis_px", "cake_2d", "eta_axis_deg"):
+        for key in ("profile", "r_axis_px", "cake_2d", "eta_axis_deg", "resid_cake"):
             if key in grp:
                 out[key] = grp[key][()]
         for k in ("lsd_um", "px_um", "wavelength_A"):

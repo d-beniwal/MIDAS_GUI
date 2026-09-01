@@ -21,7 +21,7 @@ import pyqtgraph as pg
 from midas_gui.constants import DEFAULT_NICKEL_H5
 from midas_gui.helpers import (_fspin, _NoScrollSpinBox,
                          widgets_to_dict, apply_dict_to_widgets, _apply_im_trans)
-from midas_gui.widgets import ProfileViewer, DataLoaderPanel, CakeViewer
+from midas_gui.widgets import ProfileViewer, DataLoaderPanel, CakeViewer, build_lab_frame_axes_items
 from midas_gui.dialogs import show_error
 from midas_gui.roi_tools import ROIImageViewer, ROIRibbon
 from midas_gui.hydra_widgets import HydraModeRibbon
@@ -563,115 +563,12 @@ class DataViewerTab(QtWidgets.QWidget):
         self._clear_lab_axes()
         if self._cur is None:
             return
-        nz, ny = self._cur.shape
         geo = self._geom_card.get_geometry()
-        bc_y, bc_z = geo["BC_y"], geo["BC_z"]
-        y_sign = -1.0   # MIDAS 'bl' convention: +Y_MIDAS points display-left
-        # This viewer's ImageView overrides pyqtgraph's default invertY(), so
-        # +Z_MIDAS (increasing pixel row) already renders upward on screen
-        # (see widgets.ImageViewer.__init__) — no extra flip is needed here,
-        # unlike a stock (inverted) pg.ImageView.
-        V = 1.0
-
-        xl_color, yl_color, zl_color, eta_color = "#FF3B30", "#34C759", "#0A84FF", "#FFA500"
-        L = max(60.0, min(400.0, 0.15 * min(ny, nz)))
-        head = max(15.0, L * 0.20)
-
-        text_pen = pg.mkPen("w")
-        text_fill = pg.mkBrush(0, 0, 0, 200)
-        xl_pen = pg.mkPen(xl_color, width=3.5)
-        yl_pen = pg.mkPen(yl_color, width=3.5)
-        arc_pen = pg.mkPen(eta_color, width=2.5)
-        label_font = QtGui.QFont(); label_font.setPointSize(13); label_font.setBold(False)
-        glyph_font = QtGui.QFont(); glyph_font.setPointSize(17); glyph_font.setBold(True)
-
-        px_w = px_h = 1.0
-        try:
-            pw, ph = self._viewer._iv.getView().getViewBox().viewPixelSize()
-            if pw and ph and pw > 0 and ph > 0:
-                px_w, px_h = pw, ph
-        except Exception:
-            pass
-        px_iso = math.sqrt(px_w * px_h) if (px_w > 0 and px_h > 0) else 1.0
-
-        def add(item):
-            self._viewer._iv.addItem(item)
-            self._axis_items.append(item)
-
-        def shaft_with_head(x0, y0, x1, y1):
-            dx, dy = x1 - x0, y1 - y0
-            length = math.hypot(dx, dy)
-            if length < 1e-9:
-                return [x0, x1], [y0, y1]
-            ux, uy = dx / length, dy / length
-            nx, ny_ = -uy, ux
-            base_x, base_y = x1 - ux * head, y1 - uy * head
-            wing = head * 0.55
-            p1x, p1y = base_x + nx * wing, base_y + ny_ * wing
-            p2x, p2y = base_x - nx * wing, base_y - ny_ * wing
-            return [x0, x1, p1x, x1, p2x], [y0, y1, p1y, y1, p2y]
-
-        # X_Lab arrow (MIDAS-native Y_MIDAS, display-LEFT) — unaffected by V.
-        xs, ys = shaft_with_head(bc_y, bc_z, bc_y + y_sign * L, bc_z)
-        add(pg.PlotDataItem(xs, ys, pen=xl_pen, connect="all"))
-        # Y_Lab arrow (MIDAS-native Z_MIDAS, display-UP) — flipped by V.
-        xs, ys = shaft_with_head(bc_y, bc_z, bc_y, bc_z + V * L)
-        add(pg.PlotDataItem(xs, ys, pen=yl_pen, connect="all"))
-
-        fm = QtGui.QFontMetrics(label_font)
-        margin_px = 4.0
-        label_specs = (
-            ("h", "+X<sub>Lab</sub> (+Y<sub>MIDAS</sub>)", xl_color),
-            ("v", "+Y<sub>Lab</sub> (+Z<sub>MIDAS</sub>)", yl_color))
-        for axis_kind, html_body, axis_color in label_specs:
-            html = f'<span style="color:{axis_color};">{html_body}</span>'
-            if axis_kind == "h":
-                arrow_label_R_h = L + head * 0.6
-                dx, dy = y_sign * arrow_label_R_h, V * (-head * 0.9)
-                anchor = (0.0 if dx > 0 else 1.0, 0.5)
-            else:
-                text_extent = min((fm.height() / 2.0 + margin_px) * px_iso, 0.5 * L)
-                arrow_label_R_v = L + max(head * 0.6, text_extent)
-                dx, dy = 0.0, V * arrow_label_R_v
-                anchor = (0.5, 0.5)
-            lbl = pg.TextItem(html=html, anchor=anchor, border=text_pen, fill=text_fill)
-            lbl.setFont(label_font)
-            lbl.setPos(bc_y + dx, bc_z + dy)
-            add(lbl)
-
-        # ⊗ glyph at BC — Z_Lab (MIDAS-native X_MIDAS), the beam direction.
-        glyph = pg.TextItem("⊗", color=zl_color, anchor=(0.5, 0.5), border=text_pen, fill=text_fill)
-        glyph.setFont(glyph_font)
-        glyph.setPos(bc_y, bc_z)
-        add(glyph)
-        beam_html = f'<span style="color:{zl_color};">+Z<sub>Lab</sub> (+X<sub>MIDAS</sub>, beam)</span>'
-        x_lbl = pg.TextItem(html=beam_html, anchor=(0.5, 0.0), border=text_pen, fill=text_fill)
-        x_lbl.setFont(label_font)
-        x_lbl.setPos(bc_y, bc_z + V * (-head * 1.2))
-        add(x_lbl)
-
-        # η sweep arc, 0°→+45°, flipped by V so η=0 still points toward Y_Lab.
-        R_arc = L * 0.85
-        eta_rad = np.deg2rad(np.linspace(0.0, 45.0, 24))
-        arc_x = bc_y + (-y_sign) * R_arc * np.sin(eta_rad)
-        arc_y = bc_z + V * R_arc * np.cos(eta_rad)
-        add(pg.PlotDataItem(arc_x, arc_y, pen=arc_pen))
-
-        end = math.radians(45.0)
-        tan_x = (-y_sign) * math.cos(end)
-        tan_y = -V * math.sin(end)
-        head_size = head * 0.9
-        tip_x, tip_y = float(arc_x[-1]), float(arc_y[-1])
-        bx, by = tip_x - tan_x * head_size, tip_y - tan_y * head_size
-        nx_, ny_ = -tan_y, tan_x
-        wing = head_size * 0.55
-        p1x, p1y = bx + nx_ * wing, by + ny_ * wing
-        p2x, p2y = bx - nx_ * wing, by - ny_ * wing
-        add(pg.PlotDataItem([p1x, tip_x, p2x], [p1y, tip_y, p2y], pen=arc_pen, connect="all"))
-
-        # η=0 tick, just outside the arc.
-        tick_inner, tick_outer = R_arc * 1.04, R_arc * 1.18
-        add(pg.PlotDataItem([bc_y, bc_y], [bc_z + V * tick_inner, bc_z + V * tick_outer], pen=arc_pen))
+        items = build_lab_frame_axes_items(
+            self._viewer._iv, self._cur.shape, geo["BC_y"], geo["BC_z"])
+        for it in items:
+            self._viewer._iv.addItem(it)
+        self._axis_items.extend(items)
 
     # ── Intensity mask ──────────────────────────────────────────────
 
