@@ -78,6 +78,50 @@ def _load_image(path: str | Path, data_loc: str = "exchange/data",
     raise ValueError(f"Unsupported format: {p.suffix}")
 
 
+_COMBINE_OPS = {
+    "mean": lambda s: np.mean(s, axis=0, dtype=np.float64),
+    "sum": lambda s: np.sum(s, axis=0, dtype=np.float64),
+    "max": lambda s: np.max(s, axis=0),
+    "median": lambda s: np.median(s, axis=0),
+}
+
+
+def read_hdf5_stack_combined(path, dataset: str, *, chunk_size: Optional[int] = None,
+                             op: str = "mean") -> list:
+    """Read an HDF5 ``(N, H, W)`` (or plain ``(H, W)``) dataset and combine
+    consecutive raw sub-frames into one or more 2-D frames.
+
+    For a VAREX-style file where every raw sub-frame belongs to the same
+    scan point (e.g. ``exchange/data`` shape ``(10, 2880, 2880)``),
+    ``chunk_size=None`` (or ``0``) combines ALL frames into one — mirrors
+    ``mpe_wf_saxs_waxs``'s ``--avg-full-stack`` mode, which sets its
+    equivalent (``OmegaSumFrames``) to the file's own frame count for
+    exactly this case. A positive ``chunk_size`` instead splits the N
+    frames into ``ceil(N / chunk_size)`` contiguous chunks, each combined
+    independently (mirrors ``run_background_correction.py``'s
+    ``_chunked``/``_aggregate``).
+
+    ``op`` is one of "mean" (default) / "sum" / "max" / "median".
+
+    Returns a list of 2-D ``float32`` arrays (length 1 for the common
+    whole-file case). A plain 2-D dataset returns ``[dataset]``
+    unchanged, ``chunk_size``/``op`` ignored.
+    """
+    import h5py
+    combine = _COMBINE_OPS.get(op, _COMBINE_OPS["mean"])
+    with h5py.File(str(path), "r") as f:
+        dset = f[dataset]
+        if dset.ndim == 2:
+            return [np.asarray(dset[...], dtype=np.float32)]
+        n = dset.shape[0]
+        size = chunk_size if chunk_size else n
+        out = []
+        for start in range(0, n, size):
+            stack = np.asarray(dset[start:start + size], dtype=np.float32)
+            out.append(combine(stack).astype(np.float32))
+        return out
+
+
 def _apply_im_trans(image: np.ndarray, codes: tuple) -> np.ndarray:
     """Apply MIDAS image transform codes: 1=flipY, 2=flipZ, 3=transpose."""
     for c in codes:
@@ -729,18 +773,28 @@ def draw_polar_bin_overlay(viewer, items: list, *, bc_y: float, bc_z: float,
 
 
 def _build_spec(result, r_bin: float, eta_bin: float,
-                r_min: Optional[float] = None, r_max: Optional[float] = None):
+                r_min: Optional[float] = None, r_max: Optional[float] = None,
+                eta_min: Optional[float] = None, eta_max: Optional[float] = None):
     """``r_min``/``r_max`` (px) are ``None`` by default, meaning "leave
     ``spec_from_calibration_result``'s own default" (``RMin=10.0``,
     ``RMax=None``→auto-corner) — only the Integration tabs' explicit
     Rmin/Rmax fields override them; every other caller (pump-probe,
-    GSAS export, diagnostic cake previews) is unaffected."""
+    GSAS export, diagnostic cake previews) is unaffected. ``eta_min``/
+    ``eta_max`` (deg) — same "None leaves the backend default" contract
+    (``EtaMin=-180``/``EtaMax=180``, i.e. the full circle) — only
+    Batch Integrate's explicit Eta min/max fields (populated directly or
+    via a cake_parameters CSV's ETA_MIN/ETA_MAX, see ``cake_params.py``)
+    override them."""
     from midas_calibrate_v2.compat.to_integrate import spec_from_calibration_result
     kwargs = dict(RBinSize=r_bin, EtaBinSize=eta_bin)
     if r_min is not None:
         kwargs["RMin"] = r_min
     if r_max is not None:
         kwargs["RMax"] = r_max
+    if eta_min is not None:
+        kwargs["EtaMin"] = eta_min
+    if eta_max is not None:
+        kwargs["EtaMax"] = eta_max
     spec = spec_from_calibration_result(result, **kwargs)
     # spec_from_calibration_result doesn't copy ImTransOpt — set it here so
     # every consumer of this spec can hand the RAW frame straight to
@@ -828,12 +882,14 @@ def paramstest_pairs(result, selected=None) -> list:
 
 
 def _spec_from_result_ns(r_bin, eta_bin, r_min: Optional[float] = None,
-                         r_max: Optional[float] = None, **fields):
+                         r_max: Optional[float] = None,
+                         eta_min: Optional[float] = None, eta_max: Optional[float] = None,
+                         **fields):
     """Build an IntegrationSpec from geometry fields via a duck-typed result.
 
     Routes through ``spec_from_calibration_result`` so RhoD, RMax and the bin
     counts are derived exactly as for a live calibration result. ``r_min``/
-    ``r_max`` — see ``_build_spec``.
+    ``r_max``/``eta_min``/``eta_max`` — see ``_build_spec``.
     """
     from types import SimpleNamespace
     from midas_calibrate_v2.compat.to_integrate import spec_from_calibration_result
@@ -849,6 +905,10 @@ def _spec_from_result_ns(r_bin, eta_bin, r_min: Optional[float] = None,
         kwargs["RMin"] = r_min
     if r_max is not None:
         kwargs["RMax"] = r_max
+    if eta_min is not None:
+        kwargs["EtaMin"] = eta_min
+    if eta_max is not None:
+        kwargs["EtaMax"] = eta_max
     spec = spec_from_calibration_result(ns, **kwargs)
     spec.TransOpt = list(fields.get("im_trans") or [])
     _apply_panel_fields(spec, fields.get("panel_layout"), fields.get("panel_shifts_path"))
@@ -1020,11 +1080,13 @@ def geometry_fields_from_file(path: str) -> dict:
 
 
 def spec_from_geometry_file(path: str, r_bin: float, eta_bin: float,
-                            r_min: Optional[float] = None, r_max: Optional[float] = None):
+                            r_min: Optional[float] = None, r_max: Optional[float] = None,
+                            eta_min: Optional[float] = None, eta_max: Optional[float] = None):
     """Build an IntegrationSpec from a MIDAS paramstest, a pyFAI ``.poni``, or a
     calibration ``.json``.  Thin wrapper over :func:`geometry_fields_from_file`.
-    ``r_min``/``r_max`` — see ``_build_spec``."""
+    ``r_min``/``r_max``/``eta_min``/``eta_max`` — see ``_build_spec``."""
     return _spec_from_result_ns(r_bin, eta_bin, r_min=r_min, r_max=r_max,
+                                eta_min=eta_min, eta_max=eta_max,
                                 **geometry_fields_from_file(path))
 
 

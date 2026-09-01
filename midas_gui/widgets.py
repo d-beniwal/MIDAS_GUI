@@ -2387,6 +2387,33 @@ class DataLoaderPanel(QtWidgets.QWidget):
             sf.row(("stride:", self._fr_stride))
             card.body.addLayout(sf)
 
+            # Shown only when the resolved source is several separate HDF5
+            # files (e.g. one VAREX *.vrx.h5 per scan point, each itself a
+            # multi-frame stack) — see source_cfg()'s "hdf5_stack_glob" type.
+            # A single-file HDF5 stack ("hdf5" type) streams its frames
+            # as-is and never shows this row.
+            self._combine_row = QtWidgets.QWidget()
+            cr = QtWidgets.QHBoxLayout(self._combine_row)
+            cr.setContentsMargins(0, 0, 0, 0); cr.setSpacing(4)
+            cr.addWidget(QtWidgets.QLabel("Combine sub-frames:"))
+            self._combine_chunk = _NoScrollSpinBox()
+            self._combine_chunk.setRange(0, 999999); self._combine_chunk.setFixedWidth(64)
+            self._combine_chunk.setToolTip(
+                "How many consecutive raw sub-frames in each file to combine "
+                "into one integrated frame (mpe_wf's OME_SUM). 0 = combine "
+                "every sub-frame in the file into one (the usual case for a "
+                "detector that writes several raw exposures per scan point).")
+            self._combine_op_combo = _NoScrollComboBox()
+            self._combine_op_combo.addItem("Mean", "mean")
+            self._combine_op_combo.addItem("Sum", "sum")
+            self._combine_op_combo.addItem("Max", "max")
+            self._combine_op_combo.addItem("Median", "median")
+            cr.addWidget(self._combine_chunk)
+            cr.addWidget(QtWidgets.QLabel("op:")); cr.addWidget(self._combine_op_combo)
+            cr.addStretch(1)
+            self._combine_row.setVisible(False)
+            card.body.addWidget(self._combine_row)
+
         self._info = QtWidgets.QLabel("No data loaded.")
         self._info.setStyleSheet("color:#9a9a9a;font-size:10px"); self._info.setWordWrap(True)
         card.body.addWidget(self._info)
@@ -2525,7 +2552,24 @@ class DataLoaderPanel(QtWidgets.QWidget):
                 return
             self._set_stem_filter(None, None)
             self._set_explicit_paths(paths)
+        self._update_combine_visibility()
         self._load()
+
+    def _update_combine_visibility(self):
+        """Show the "Combine sub-frames" row (stream mode only) exactly
+        when the resolved source is several separate HDF5 files (see
+        ``source_cfg``'s ``"hdf5_stack_glob"`` type) — not for a single
+        bare HDF5 file (a plain multi-frame stack, unrelated "hdf5" type
+        with its own ``_ds_row``), and not for TIFF-family sources."""
+        if not hasattr(self, "_combine_row"):
+            return
+        from pathlib import Path
+        raw = self._raw_source()
+        if isinstance(raw, str) and is_h5(raw) and Path(raw).is_file():
+            self._combine_row.setVisible(False)
+            return
+        paths = raw if isinstance(raw, list) else (_collect_frame_paths(raw) if raw else [])
+        self._combine_row.setVisible(bool(paths) and any(is_h5(p) for p in paths))
 
     def _on_path_changed(self, p: str):
         from pathlib import Path
@@ -2535,6 +2579,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._stem_filter = None
         h5 = is_h5(p)
         self._ds_row.setVisible(h5)
+        self._update_combine_visibility()
         if h5 and Path(p).exists():
             try:
                 items = list_h5_datasets(p)
@@ -3097,12 +3142,31 @@ class DataLoaderPanel(QtWidgets.QWidget):
         folded into a ``<folder>/<stem>*`` glob by ``_raw_source``, so it
         comes out as an ordinary ``"tiff_glob"`` here and MONITOR re-globs it
         on every poll like any other glob path (see ``FolderMonitorWorker``).
+
+        A single bare HDF5 file is ``"hdf5"`` (one big multi-frame stack,
+        streamed frame-by-frame as-is). Several separate HDF5 files instead
+        (an explicit "Multiple files" pick, or a "Full folder"/"Files
+        sharing a name stem" selection that resolves to HDF5 files — e.g.
+        one VAREX ``*.vrx.h5`` per scan point) become ``"hdf5_stack_glob"``:
+        each file's own internal frame stack is combined down to one (or a
+        few, via the "Combine sub-frames" chunk-size) frame first — see
+        ``workers._HDF5StackGlobSource``/``helpers.read_hdf5_stack_combined``.
         """
+        from pathlib import Path
         raw = self._raw_source()
+        if isinstance(raw, str) and is_h5(raw) and Path(raw).is_file():
+            return {"type": "hdf5", "path": raw, "dataset": self._dataset()}
+        paths = raw if isinstance(raw, list) else (_collect_frame_paths(raw) if raw else [])
+        h5_paths = sorted(p for p in paths if is_h5(p))
+        if h5_paths:
+            return {"type": "hdf5_stack_glob", "paths": h5_paths,
+                    "dataset": self._dataset(),
+                    "chunk_size": (self._combine_chunk.value() or None)
+                                 if hasattr(self, "_combine_chunk") else None,
+                    "combine_op": (self._combine_op_combo.currentData()
+                                  if hasattr(self, "_combine_op_combo") else "mean")}
         if isinstance(raw, list):
             return {"type": "tiff_list", "paths": list(raw)}
-        if is_h5(raw):
-            return {"type": "hdf5", "path": raw, "dataset": self._dataset()}
         return {"type": "tiff_glob", "path": raw}
 
     def frame_range(self):
@@ -3196,6 +3260,8 @@ class DataLoaderPanel(QtWidgets.QWidget):
             st["fr_start"] = self._fr_start.value()
             st["fr_end"] = self._fr_end.value()
             st["fr_stride"] = self._fr_stride.value()
+            st["combine_chunk"] = self._combine_chunk.value()
+            st["combine_op"] = self._combine_op_combo.currentData()
         else:
             st["frame_index"] = self._frame_spin.value()
         if getattr(self, "_pv_ed", None) is not None:
@@ -3230,6 +3296,13 @@ class DataLoaderPanel(QtWidgets.QWidget):
                 self._fr_end.setValue(int(state["fr_end"]))
             if "fr_stride" in state:
                 self._fr_stride.setValue(int(state["fr_stride"]))
+            if "combine_chunk" in state:
+                self._combine_chunk.setValue(int(state["combine_chunk"]))
+            if state.get("combine_op"):
+                idx = self._combine_op_combo.findData(state["combine_op"])
+                if idx >= 0:
+                    self._combine_op_combo.setCurrentIndex(idx)
+            self._update_combine_visibility()
         elif "frame_index" in state and self._nframes:
             self.set_frame(int(state["frame_index"]))
         self._dark_sel.set_state(state.get("dark") or {})

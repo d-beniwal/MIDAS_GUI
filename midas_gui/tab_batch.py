@@ -35,6 +35,7 @@ from midas_gui.dialogs import show_error
 from midas_gui.hydra_widgets import HydraModeRibbon
 from midas_gui.hydra_batch_page import HydraBatchPage
 from midas_gui.job_queue import JobQueuePanel
+from midas_gui.cake_params import parse_cake_csv
 from midas_gui import project
 from midas_gui import settings
 from midas_gui import style as S
@@ -104,6 +105,38 @@ class BatchTab(QtWidgets.QWidget):
         value = formula(fields["BC_y"], fields["BC_z"], fields["NrPixelsY"], fields["NrPixelsZ"])
         self._r_max.setValue(value)
 
+    def _load_cake_csv(self) -> None:
+        """"Load cake parameters CSV…" button — applies R_MIN/R_MAX/R_STEP/
+        ETA_MIN/ETA_MAX/ETA_STEP/OME_SUM from an mpe_wf_saxs_waxs-style
+        cake_parameters CSV (see cake_params.parse_cake_csv) to the matching
+        fields. OME_START/OME_STEP have no equivalent in this pipeline and
+        are intentionally not applied to anything (see the button's tooltip)."""
+        path = _browse(self, "Open cake parameters CSV", "CSV (*.csv);;All (*)")
+        if not path:
+            return
+        values = parse_cake_csv(path)
+        if not values:
+            QtWidgets.QMessageBox.warning(
+                self, "Cake CSV", f"Could not parse any values from:\n{path}")
+            return
+        applied = []
+        if "R_MIN" in values:
+            self._r_min.setValue(values["R_MIN"]); applied.append("R_MIN")
+        if "R_MAX" in values:
+            self._r_max.setValue(values["R_MAX"]); applied.append("R_MAX")
+        if "R_STEP" in values:
+            self._r_bin.setValue(values["R_STEP"]); applied.append("R_STEP")
+        if "ETA_MIN" in values:
+            self._eta_min.setValue(values["ETA_MIN"]); applied.append("ETA_MIN")
+        if "ETA_MAX" in values:
+            self._eta_max.setValue(values["ETA_MAX"]); applied.append("ETA_MAX")
+        if "ETA_STEP" in values:
+            self._e_bin.setValue(values["ETA_STEP"]); applied.append("ETA_STEP")
+        if "OME_SUM" in values and hasattr(self._loader, "_combine_chunk"):
+            self._loader._combine_chunk.setValue(int(values["OME_SUM"]))
+            applied.append("OME_SUM -> Combine sub-frames")
+        self._log.append(f"[batch] Loaded cake parameters from {path}: {', '.join(applied) or '(nothing recognized)'}")
+
     def _refresh_detector_preview(self, *_args) -> None:
         """Refresh the Detector-view tab's frame + Rmin/Rmax/bin-grid overlay —
         called on new/changed data, a calibration-source change, or any of
@@ -129,6 +162,7 @@ class BatchTab(QtWidgets.QWidget):
             bc_y=fields["BC_y"], bc_z=fields["BC_z"],
             r_min=self._r_min.value(), r_max=self._r_max.value(),
             r_bin=self._r_bin.value(), e_bin=self._e_bin.value(),
+            eta_min=self._eta_min.value(), eta_max=self._eta_max.value(),
             show_grid=self._grid_chk.isChecked())
 
     def _resolved_im_trans(self) -> tuple:
@@ -177,6 +211,8 @@ class BatchTab(QtWidgets.QWidget):
             "e_bin": self._e_bin,
             "r_min": self._r_min,
             "r_max": self._r_max,
+            "eta_min": self._eta_min,
+            "eta_max": self._eta_max,
             "grid_chk": self._grid_chk,
             "azim": self._azim,
             "multi_azimuth": self._multi_azimuth_chk,
@@ -377,6 +413,17 @@ class BatchTab(QtWidgets.QWidget):
         # the same fields — see helpers.make_calib_values_button.
         calib_view_btn = make_calib_values_button(self._calib_fields_in_use)
         cal.body.addWidget(calib_view_btn, 0, QtCore.Qt.AlignLeft)
+        cake_csv_btn = QtWidgets.QPushButton("Load cake parameters CSV…")
+        cake_csv_btn.setToolTip(
+            "Load R_MIN/R_MAX/R_STEP/ETA_MIN/ETA_MAX/ETA_STEP/OME_SUM from a "
+            "cake_parameters CSV (mpe_wf_saxs_waxs convention — header row + "
+            "last data row wins) into the fields below. OME_SUM fills the "
+            "loader's 'Combine sub-frames' chunk size (only meaningful for a "
+            "multi-file HDF5 source). OME_START/OME_STEP are omega-series "
+            "bookkeeping for a different integration backend and have no "
+            "equivalent here — not applied to anything.")
+        cake_csv_btn.clicked.connect(self._load_cake_csv)
+        cal.body.addWidget(cake_csv_btn, 0, QtCore.Qt.AlignLeft)
         lv.addWidget(cal)
 
         # ── Integration ──
@@ -426,14 +473,25 @@ class BatchTab(QtWidgets.QWidget):
         rf.row(("Rmin:", self._r_min))
         rf.row(("Rmax:", rmax_row))
         integ.body.addLayout(rf)
+        # Eta min/max — restrict integration to an azimuthal wedge instead of
+        # the full circle. -180/180 (the default) matches the backend's own
+        # full-circle default (helpers._build_spec passes these through only
+        # when set, same None-means-"leave the backend default" contract as
+        # Rmin/Rmax) — a cake_parameters CSV's ETA_MIN/ETA_MAX (see
+        # _load_cake_csv) is the usual way to fill in a real sub-360° range.
+        self._eta_min = _fspin(-180.0, 180.0, 1, -180.0, "°")
+        self._eta_max = _fspin(-180.0, 180.0, 1, 180.0, "°")
+        ef = S.Form()
+        ef.row(("Eta min:", self._eta_min), ("Eta max:", self._eta_max))
+        integ.body.addLayout(ef)
         self._grid_chk = QtWidgets.QCheckBox("Show bin grid")
         self._grid_chk.setToolTip(
             "Overlay the full (R, η) integration bin grid on the Detector "
             "view tab — concentric circles at each R-bin edge, spokes at "
-            "each η-bin edge. Thinned to at most ~50 rings / ~72 spokes "
-            "for legibility with fine bin sizes.")
+            "each η-bin edge (bounded to Eta min/max). Thinned to at most "
+            "~50 rings / ~72 spokes for legibility with fine bin sizes.")
         integ.body.addWidget(self._grid_chk)
-        for w in (self._r_min, self._r_max, self._r_bin, self._e_bin):
+        for w in (self._r_min, self._r_max, self._eta_min, self._eta_max, self._r_bin, self._e_bin):
             w.valueChanged.connect(self._refresh_detector_preview)
         self._grid_chk.toggled.connect(self._refresh_detector_preview)
         self._multi_azimuth_chk = QtWidgets.QCheckBox("Multi-azimuth output (cake)")
@@ -637,14 +695,17 @@ class BatchTab(QtWidgets.QWidget):
         # kernels do not implement Q-mode binning (see analyze_workflows/workflow_analysis.md).
         r_bin = self._r_bin.value(); e_bin = self._e_bin.value()
         r_min = self._r_min.value(); r_max = self._r_max.value() or None
+        eta_min = self._eta_min.value(); eta_max = self._eta_max.value()
         if self._use_tab2_btn.isChecked():
             if self._calib_result is None:
                 raise RuntimeError("No calibration from Tab 2. Run Tab 2 first.")
-            return _build_spec(self._calib_result, r_bin, e_bin, r_min=r_min, r_max=r_max)
+            return _build_spec(self._calib_result, r_bin, e_bin, r_min=r_min, r_max=r_max,
+                               eta_min=eta_min, eta_max=eta_max)
         path = self._json_ed.text().strip()
         if not path or not Path(path).exists():
             raise FileNotFoundError(f"Calibration file not found: {path}")
-        return spec_from_geometry_file(path, r_bin, e_bin, r_min=r_min, r_max=r_max)
+        return spec_from_geometry_file(path, r_bin, e_bin, r_min=r_min, r_max=r_max,
+                                       eta_min=eta_min, eta_max=eta_max)
 
     def _run(self):
         if self._worker and self._worker.isRunning():

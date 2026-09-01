@@ -8,7 +8,6 @@ from typing import Optional
 from PyQt5 import QtCore, QtWidgets
 
 from .constants import DISTORTION_NAMES, DISTORTION_ISO, DISTORTION_PRESETS, H5_EXTS, PROJECT_ROOT
-from .helpers import is_h5
 
 _PANEL_LABELS = {"single": "Single detector", "ge1": "ge1", "ge2": "ge2",
                  "ge3": "ge3", "ge4": "ge4", "hydra_composite": "Hydra Overall"}
@@ -599,21 +598,26 @@ class SaveAsHistoryDialog(QtWidgets.QDialog):
 
 # Every extension the app already recognizes as a detector-frame file
 # (mirrors the combined QFileDialog filter used across widgets.py/hydra_widgets.py),
-# split into the HDF5 (multi-frame container) and non-HDF5 (single-frame-per-file:
-# TIFF + the beamline .geN/.cbf/.edf conventions) halves.
+# split into the HDF5 and non-HDF5 (TIFF + the beamline .geN/.cbf/.edf
+# conventions) halves. Both halves are now offered in every multi-select
+# mode ("Multiple files"/"Full folder"/"Files sharing a name stem") too,
+# not just "Single file" — an HDF5 file there is treated as one-frame-per-
+# file exactly like TIFF (see widgets.DataLoaderPanel.source_cfg's
+# "hdf5_stack_glob" source type, which combines each file's own internal
+# frame stack down to one — or a few, via a chunk size — frames first).
 _H5_NAME_FILTERS = sorted("*" + ext for ext in H5_EXTS)
 _NON_H5_NAME_FILTERS = ["*.tif", "*.tiff", "*.ge*", "*.cbf", "*.edf"]
 _ALL_NAME_FILTERS = _NON_H5_NAME_FILTERS + _H5_NAME_FILTERS
 
 
 def _count_frame_files(folder: str) -> int:
-    """How many non-HDF5 frame files (see ``_NON_H5_NAME_FILTERS``) sit
-    directly in ``folder`` — used for the Full-folder/Filestem preview."""
+    """How many frame files (TIFF-family or HDF5, see ``_ALL_NAME_FILTERS``)
+    sit directly in ``folder`` — used for the Full-folder/Filestem preview."""
     p = Path(folder)
     if not p.is_dir():
         return 0
     n = 0
-    for pat in _NON_H5_NAME_FILTERS:
+    for pat in _ALL_NAME_FILTERS:
         n += sum(1 for _ in p.glob(pat))
     return n
 
@@ -623,14 +627,20 @@ class BrowseFilesDialog(QtWidgets.QDialog):
 
     Offers four selection modes sharing one file-browser view:
 
-    - **Single file** — one file, TIFF-family or HDF5.
-    - **Multiple files** — an arbitrary multi-select, TIFF-family only
-      (HDF5 files are excluded from the listing entirely, so this can
-      never resolve to one — a container format doesn't need this).
-    - **Full folder** — every TIFF-family file in one directory (resolves
-      to the folder path itself; the caller's existing folder-glob logic,
-      e.g. ``helpers._collect_frame_paths``, does the rest lazily).
-    - **Files sharing a name stem** — every TIFF-family file in one
+    - **Single file** — one file, TIFF-family or HDF5, the latter unpacked
+      via its own internal frame stack + a dataset path.
+    - **Multiple files** — an arbitrary multi-select of TIFF-family and/or
+      HDF5 files. Each HDF5 file is treated as one detector-frame source
+      like a TIFF file, combining its own internal stack down to one (or a
+      few, via a chunk size) frame — see ``widgets.DataLoaderPanel``'s
+      ``"hdf5_stack_glob"`` source type. Not the same shape as "Single
+      file" + dataset path (one big multi-frame HDF5 container) — this is
+      for many separate HDF5 files (e.g. one per scan point).
+    - **Full folder** — every TIFF-family/HDF5 file in one directory
+      (resolves to the folder path itself; the caller's existing
+      folder-glob logic, e.g. ``helpers._collect_frame_paths``, does the
+      rest lazily).
+    - **Files sharing a name stem** — every TIFF-family/HDF5 file in one
       directory whose name starts with a given prefix.
 
     ``modes`` restricts which of the four are offered (default: all four),
@@ -765,10 +775,10 @@ class BrowseFilesDialog(QtWidgets.QDialog):
             self._model.setNameFilters(_ALL_NAME_FILTERS)
             self._tree.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         elif self._mode == "files":
-            self._model.setNameFilters(_NON_H5_NAME_FILTERS)
+            self._model.setNameFilters(_ALL_NAME_FILTERS)
             self._tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         else:  # folder / stem
-            self._model.setNameFilters(_NON_H5_NAME_FILTERS)
+            self._model.setNameFilters(_ALL_NAME_FILTERS)
             self._tree.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self._model.setNameFilterDisables(False)
         self._stem_row.setVisible(self._mode == "stem")
@@ -785,10 +795,7 @@ class BrowseFilesDialog(QtWidgets.QDialog):
         for idx in sel_model.selectedRows():
             if self._model.isDir(idx):
                 continue
-            p = self._model.filePath(idx)
-            if self._mode != "file" and is_h5(p):
-                continue
-            out.append(p)
+            out.append(self._model.filePath(idx))
         return sorted(out)
 
     def _stem_matches(self) -> list:
@@ -797,8 +804,7 @@ class BrowseFilesDialog(QtWidgets.QDialog):
             return []
         import glob as _glob
         pattern = str(Path(self._current_dir) / (stem + "*"))
-        return sorted(m for m in _glob.glob(pattern)
-                      if Path(m).is_file() and not is_h5(m))
+        return sorted(m for m in _glob.glob(pattern) if Path(m).is_file())
 
     def _on_selection_changed(self, *_):
         if self._mode == "stem":
@@ -816,8 +822,9 @@ class BrowseFilesDialog(QtWidgets.QDialog):
             n = len(self._selected_files())
             self._info.setText(
                 f"{n} file(s) selected." if n else
-                "Select one or more files (HDF5 files aren't shown — they hold "
-                "many frames in one file, so only single-file selection applies).")
+                "Select one or more files (TIFF-family or HDF5 — an HDF5 file "
+                "here is treated as one detector-frame source, not unpacked "
+                "into all its own internal frames).")
         elif self._mode == "folder":
             n = _count_frame_files(self._current_dir)
             self._info.setText(f"{n} frame file(s) found in this folder.")

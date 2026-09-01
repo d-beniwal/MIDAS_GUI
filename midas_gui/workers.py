@@ -19,7 +19,8 @@ import midas_gui._paths  # noqa: F401  (sys.path setup before MIDAS imports)
 from midas_gui import calib
 from midas_gui import provenance
 from midas_gui.helpers import (_LogStream, _load_image, _apply_im_trans, _build_spec,
-                               _spec_from_json, average_field, apply_field_corrections)
+                               _spec_from_json, average_field, apply_field_corrections,
+                               read_hdf5_stack_combined)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -838,6 +839,10 @@ def _open_source_cfg(cfg):
         return HDF5FrameSource(cfg["path"], dataset=cfg.get("dataset", "frames"))
     if cfg["type"] == "tiff_list":
         return _ExplicitTIFFSource(cfg["paths"])
+    if cfg["type"] == "hdf5_stack_glob":
+        return _HDF5StackGlobSource(
+            cfg["paths"], cfg.get("dataset", "exchange/data"),
+            chunk_size=cfg.get("chunk_size") or None, op=cfg.get("combine_op", "mean"))
     raise ValueError(f"Unknown source type: {cfg['type']}")
 
 
@@ -1335,6 +1340,58 @@ class _ExplicitTIFFSource:
         p = self._paths[idx]
         img = _load_image(p).astype(np.float64)
         return p.stem, (img[0] if img.ndim == 3 else img)
+
+
+class _HDF5StackGlobSource:
+    """Iterate over an arbitrary, already-resolved ``list[str]`` of VAREX-style
+    multi-frame HDF5 files (a Batch Integrate "Multiple files"/"Full folder"/
+    "Files sharing a name stem" pick whose selection resolved to HDF5 files —
+    see ``widgets.DataLoaderPanel.source_cfg``'s ``"hdf5_stack_glob"`` source
+    type), each file's ``dataset`` combined per ``read_hdf5_stack_combined``
+    (``chunk_size``/``op`` — see that function for the "whole file" default).
+
+    Unlike ``_ExplicitTIFFSource`` a single file may yield more than one frame
+    (when ``chunk_size`` splits its stack into several combined chunks), so
+    ``n_frames``/``get(idx)`` are computed over a flattened index built once
+    at construction time (one ``read_hdf5_stack_combined`` call per file,
+    cached — these files are large, and a second header-only pass to just
+    count frames isn't worth the extra h5py open)."""
+
+    def __init__(self, paths, dataset: str, *, chunk_size=None, op: str = "mean"):
+        self._paths = [Path(p) for p in paths]
+        self._dataset = dataset
+        self._chunk_size = chunk_size
+        self._op = op
+        self._cache: dict = {}   # path index -> list[np.ndarray]
+
+    def _combined(self, i: int) -> list:
+        if i not in self._cache:
+            self._cache[i] = read_hdf5_stack_combined(
+                self._paths[i], self._dataset,
+                chunk_size=self._chunk_size, op=self._op)
+        return self._cache[i]
+
+    @property
+    def n_frames(self) -> int:
+        return sum(len(self._combined(i)) for i in range(len(self._paths)))
+
+    def _fid(self, p: Path, k: int, n_chunks: int) -> str:
+        return p.stem if n_chunks == 1 else f"{p.stem}_c{k:02d}"
+
+    def __iter__(self):
+        for i, p in enumerate(self._paths):
+            frames = self._combined(i)
+            for k, img in enumerate(frames):
+                yield self._fid(p, k, len(frames)), img.astype(np.float64)
+
+    def get(self, idx: int):
+        remaining = idx
+        for i, p in enumerate(self._paths):
+            frames = self._combined(i)
+            if remaining < len(frames):
+                return self._fid(p, remaining, len(frames)), frames[remaining].astype(np.float64)
+            remaining -= len(frames)
+        raise IndexError(idx)
 
 
 class FolderMonitorWorker(QtCore.QThread):
