@@ -19,6 +19,7 @@ from midas_gui.constants import DEFAULT_NICKEL_FRAME0, DEFAULT_COLORMAP
 from midas_gui.widgets import LogPanel
 from midas_gui.dialogs import show_error
 from midas_gui.workers import PoleFigureWorker
+from midas_gui.peak_fit_panel import PeakFitPanel, PeakFitCatalog
 from midas_gui import style as S
 
 
@@ -61,7 +62,11 @@ class TextureTab(QtWidgets.QWidget):
         }
 
     def get_state(self) -> dict:
-        return {"fields": widgets_to_dict(self._state_widgets())}
+        return {
+            "fields": widgets_to_dict(self._state_widgets()),
+            "peak_fit_csv": self._peak_fit_catalog._csv_path,
+            "peak_fit_primary": self._peak_fit_catalog.primary_path,
+        }
 
     def set_state(self, state: dict):
         fields = state.get("fields", {})
@@ -69,6 +74,14 @@ class TextureTab(QtWidgets.QWidget):
         img_path = fields.get("img_ed")
         if img_path and Path(img_path).exists():
             self._load_img()
+        csv_path = state.get("peak_fit_csv", "")
+        if csv_path:
+            self._peak_fit_panel._csv_ed.setText(csv_path)
+            self._peak_fit_catalog.set_peak_fit_csv(csv_path)
+        primary_path = state.get("peak_fit_primary", "")
+        if primary_path:
+            self._peak_fit_panel._primary_ed.setText(primary_path)
+            self._peak_fit_catalog.set_primary_source(primary_path)
 
     def _build_ui(self):
         root = QtWidgets.QHBoxLayout(self)
@@ -145,7 +158,13 @@ class TextureTab(QtWidgets.QWidget):
         self._log = LogPanel()
         right.addWidget(self._log)
         right.setStretchFactor(0, 3); right.setStretchFactor(1, 2); right.setStretchFactor(2, 1)
-        root.addWidget(right, stretch=1)
+
+        self._right_tabs = QtWidgets.QTabWidget()
+        self._right_tabs.addTab(right, "Pole figure")
+        self._peak_fit_catalog = PeakFitCatalog()
+        self._peak_fit_panel = PeakFitPanel(self._peak_fit_catalog)
+        self._right_tabs.addTab(self._peak_fit_panel, "Peak fit (GSAS-2)")
+        root.addWidget(self._right_tabs, stretch=1)
 
     def _browse_img(self):
         p = _browse(self, "Open frame", "Images (*.tif *.tiff *.h5 *.hdf5 *.ge*);;All (*)")

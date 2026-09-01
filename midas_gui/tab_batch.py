@@ -10,6 +10,7 @@ Ports the v3 batch tab and adds Phase-1 features:
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -33,6 +34,7 @@ from midas_gui.workers import (BatchWorker, BatchRunCoordinator, apply_q_uniform
 from midas_gui.dialogs import show_error
 from midas_gui.hydra_widgets import HydraModeRibbon
 from midas_gui.hydra_batch_page import HydraBatchPage
+from midas_gui.job_queue import JobQueuePanel
 from midas_gui import project
 from midas_gui import settings
 from midas_gui import style as S
@@ -303,6 +305,7 @@ class BatchTab(QtWidgets.QWidget):
         (the sweep only inspects this tab's own ``vars()``, not recursively)."""
         if self._hydra_page is not None:
             self._hydra_page.shutdown()
+        self._job_queue.shutdown()
 
     def _on_mode_changed(self, mode: str):
         """Leftmost ribbon switched between "single" and "hydra" — swap the
@@ -583,6 +586,15 @@ class BatchTab(QtWidgets.QWidget):
         run_row.addWidget(self._abort_btn, 1)
         run_row.addWidget(self._save_btn, 1)
         lv.addLayout(run_row)
+        self._run_job_btn = QtWidgets.QPushButton("Run as background job")
+        self._run_job_btn.setToolTip(
+            "Linux only. Runs this same integration in a detached `screen` "
+            "session (python -m midas_gui.batch_cli) instead of in-process — "
+            "survives closing this GUI. Needs an Output folder (results and "
+            "a calibration snapshot are written there for the job to read).\n"
+            "Progress/log/cancel are tracked in the 'Background jobs' panel below.")
+        self._run_job_btn.clicked.connect(self._run_as_job)
+        lv.addWidget(self._run_job_btn)
         self._clear_btn = QtWidgets.QPushButton("Clear results")
         self._clear_btn.setToolTip(
             "Remove the integrated profiles/plots computed this session for the "
@@ -610,7 +622,9 @@ class BatchTab(QtWidgets.QWidget):
         self._log = LogPanel()
         self._log.setMaximumHeight(16_777_215)   # let the splitter size it
         right.addWidget(self._log)
-        right.setStretchFactor(0, 4); right.setStretchFactor(1, 1)
+        self._job_queue = JobQueuePanel()
+        right.addWidget(self._job_queue)
+        right.setStretchFactor(0, 4); right.setStretchFactor(1, 1); right.setStretchFactor(2, 2)
         right.setMinimumWidth(320)
         split.addWidget(right)
         split.setStretchFactor(0, 0); split.setStretchFactor(1, 0); split.setStretchFactor(2, 1)
@@ -746,6 +760,134 @@ class BatchTab(QtWidgets.QWidget):
         self._worker.log_line.connect(self._log.append)
         self._worker.geom_ready.connect(lambda ctx, s=sig: self._cache_geom(s, ctx))
         self._worker.start()
+
+    def _run_as_job(self):
+        """Launch this same integration as a detached background `screen`
+        job (see job_queue.JobQueuePanel) instead of running in-process —
+        survives closing this GUI. Everything the CLI needs is written to
+        disk first: the background process (a fresh `python -m
+        midas_gui.batch_cli`) has no access to this GUI's live state."""
+        try:
+            spec = self._build_spec()
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Calibration error", str(e)); return
+
+        src_cfg = self._loader.source_cfg()
+        if not (src_cfg.get("path") or src_cfg.get("paths")):
+            QtWidgets.QMessageBox.warning(
+                self, "No data",
+                "Select a data folder/glob, HDF5 file, or file selection."); return
+
+        out_dir = self._out_ed.text().strip()
+        if not out_dir:
+            QtWidgets.QMessageBox.warning(
+                self, "Output folder required",
+                "Background jobs need an Output folder — the job writes its "
+                "calibration snapshot and results there."); return
+        out_path = Path(out_dir)
+        out_path.mkdir(parents=True, exist_ok=True)
+
+        for sel in self._loader.has_pending_fields():
+            QtWidgets.QMessageBox.warning(
+                self, "Field not computed",
+                f"'{sel.title()}' is enabled but not computed. "
+                "Click 'Compute field' in that box first."); return
+
+        fmts = self._fmt.checked_keys()
+        if not fmts:
+            QtWidgets.QMessageBox.warning(
+                self, "No format", "Check at least one output format first."); return
+        multi_azimuth = self._multi_azimuth_chk.isChecked()
+        if multi_azimuth and self._q_check.isChecked():
+            QtWidgets.QMessageBox.warning(
+                self, "Incompatible options",
+                "Multi-azimuth output isn't supported together with "
+                "Q-uniform bins yet. Uncheck one of them."); return
+        if self._q_check.isChecked():
+            QtWidgets.QMessageBox.warning(
+                self, "Not supported in background jobs yet",
+                "Q-uniform bins aren't wired into background jobs yet.\n"
+                "Uncheck it, or use 'Start Integration' for an in-process run."); return
+
+        import tifffile
+        from midas_gui.helpers import write_standalone_paramstest
+        # Materialize the calibration this run uses to a standalone file so
+        # the background process never needs Tab 2's live in-memory result.
+        if self._use_tab2_btn.isChecked():
+            if self._calib_result is None:
+                QtWidgets.QMessageBox.critical(
+                    self, "Calibration error", "No calibration from Tab 2. Run Tab 2 first."); return
+            calib_path = out_path / "_bg_job_calibration.txt"
+            write_standalone_paramstest(self._calib_result, calib_path)
+        else:
+            calib_path = self._json_ed.text().strip()
+            if not calib_path or not Path(calib_path).exists():
+                QtWidgets.QMessageBox.critical(
+                    self, "Calibration error",
+                    f"Calibration file not found: {calib_path}"); return
+
+        argv = [sys.executable, "-m", "midas_gui.batch_cli",
+               "--calib-file", str(calib_path),
+               "--r-bin", str(self._r_bin.value()), "--eta-bin", str(self._e_bin.value())]
+        if self._r_min.value():
+            argv += ["--r-min", str(self._r_min.value())]
+        if self._r_max.value():
+            argv += ["--r-max", str(self._r_max.value())]
+
+        if src_cfg["type"] == "tiff_glob":
+            argv += ["--source-type", "tiff_glob", "--source-path", src_cfg["path"]]
+        elif src_cfg["type"] == "hdf5":
+            argv += ["--source-type", "hdf5", "--source-path", src_cfg["path"],
+                     "--dataset", src_cfg.get("dataset", "frames")]
+        else:
+            argv += ["--source-type", "tiff_list", "--source-paths", *src_cfg["paths"]]
+
+        argv += ["--out-dir", str(out_path), "--fmts", ",".join(fmts),
+                 "--kernel", self._kernel.currentData()]
+
+        frame_range = self._loader.frame_range()
+        argv += ["--frame-start", str(frame_range[0]), "--frame-stride", str(frame_range[2])]
+        if frame_range[1] is not None:
+            argv += ["--frame-end", str(frame_range[1])]
+
+        if multi_azimuth:
+            argv += ["--multi-azimuth"]
+        argv += ["--weighted"] if bool(self._azim.currentData()) else ["--no-weighted"]
+
+        if self._corr_widget.polar_check.isChecked():
+            argv += ["--polarization",
+                     "--pol-fraction", str(self._corr_widget.pol_fraction.value()),
+                     "--pol-plane", str(self._corr_widget.pol_plane.value())]
+        if self._corr_widget.solid_check.isChecked():
+            argv += ["--solid-angle"]
+        if self._var_check.isChecked() and not self._corr_widget.any_enabled():
+            argv += ["--variance", "--error-model", self._err_model.currentText()]
+
+        mask = self._loader.composite_mask()
+        if mask is not None:
+            mask_path = out_path / "_bg_job_mask.tif"
+            tifffile.imwrite(str(mask_path), mask.astype("uint8"))
+            argv += ["--mask", str(mask_path)]
+        for name, arr in (("dark", self._loader.dark()), ("bright", self._loader.bright()),
+                         ("background", self._loader.background())):
+            if arr is not None:
+                p = out_path / f"_bg_job_{name}.tif"
+                tifffile.imwrite(str(p), np.asarray(arr, dtype=np.float32))
+                argv += [f"--{name}", str(p)]
+        if self._loader.dark() is not None or self._loader.bright() is not None:
+            argv += ["--bright-mode", self._loader.bright_mode()]
+
+        monitor_file = self._mon_ed.text().strip()
+        if monitor_file:
+            argv += ["--monitor-file", monitor_file]
+
+        end = frame_range[1] if frame_range[1] is not None else (self._loader.n_frames() or frame_range[0] + 1)
+        total = max(1, (end - frame_range[0] + frame_range[2] - 1) // frame_range[2])
+
+        job = self._job_queue.launch(argv, name=out_path.name or "batch", total_frames=total)
+        if job is not None:
+            self._log.append(f"[batch] Launched background job: {job.session} "
+                             f"(see 'Background jobs' panel below)")
 
     def _abort(self):
         """Stop the run. First ask the worker to stop cooperatively (clean finish
