@@ -962,24 +962,16 @@ class StrainCakeViewer(CakeViewer):
         self._model_cake: Optional[np.ndarray] = None   # (n_eta, n_r)
         self._ring_grid: Optional[np.ndarray] = None     # (n_eta, n_rings)
         self._ring_radii: Optional[np.ndarray] = None    # (n_rings,) px
-        self._lsd: Optional[float] = None                # µm — for Bragg strain
-        self._px: Optional[float] = None                 # µm
 
-    def set_data(self, model_cake, ring_grid, ring_radii_px, r_axis_px, eta_axis_deg,
-                lsd_um: float, px_um: float):
+    def set_data(self, model_cake, ring_grid, ring_radii_px, r_axis_px, eta_axis_deg):
         """``model_cake``/``ring_grid`` may each be None (e.g. no
         residual_corr_map for a Multi-panel run, or no ring matched the
-        cake) — the source combo simply has nothing to show for that entry.
-        ``lsd_um``/``px_um`` are this attempt's geometry, needed to convert a
-        radial residual to a real Bragg-law pseudo-strain (see
-        :func:`bragg_pseudo_strain_ue`)."""
+        cake) — the source combo simply has nothing to show for that entry."""
         self._model_cake = None if model_cake is None else np.asarray(model_cake, dtype=float)
         self._ring_grid = None if ring_grid is None else np.asarray(ring_grid, dtype=float)
         self._ring_radii = np.asarray(ring_radii_px, dtype=float)
         self._r_axis = np.asarray(r_axis_px, dtype=float)
         self._eta_axis = np.asarray(eta_axis_deg, dtype=float)
-        self._lsd = float(lsd_um)
-        self._px = float(px_um)
         self._redisplay()
 
     def clear(self):
@@ -1003,10 +995,10 @@ class StrainCakeViewer(CakeViewer):
         return self._model_cake, self._r_axis, "R", "px"
 
     def _display_cake(self, cake, x_axis):
-        """The raw ΔR (px) cake, or the real Bragg-law pseudo-strain (µε) —
-        see :func:`bragg_pseudo_strain_ue`. Note: in Ring mode ``x_axis`` is
-        the *plot* x-position (ring index, for even bar-chart-style spacing)
-        — the physics needs the real radius, ``self._ring_radii``, not that
+        """The raw ΔR (px) cake, or the pseudo-strain (µε) — see
+        :func:`radius_ratio_strain_ue`. Note: in Ring mode ``x_axis`` is the
+        *plot* x-position (ring index, for even bar-chart-style spacing) —
+        the physics needs the real radius, ``self._ring_radii``, not that
         index. Whichever radius array is real, (radius, radius+cake) is
         r_pred vs. r_obs depending on source, per each one's own sign
         convention:
@@ -1019,8 +1011,6 @@ class StrainCakeViewer(CakeViewer):
         """
         if self._mode.currentData() != "strain":
             return cake
-        if self._lsd is None or self._px is None:
-            return np.full_like(cake, np.nan)
         is_ring = self._source.currentData() == "ring"
         r_axis = self._ring_radii if is_ring else x_axis
         r_grid = r_axis[np.newaxis, :]
@@ -1028,7 +1018,7 @@ class StrainCakeViewer(CakeViewer):
             r_pred, r_obs = r_grid, r_grid + cake
         else:
             r_obs, r_pred = r_grid, r_grid + cake
-        return bragg_pseudo_strain_ue(r_pred, r_obs, self._lsd, self._px)
+        return radius_ratio_strain_ue(r_pred, r_obs)
 
     def _redisplay(self, *_args):
         cake, x_axis, x_label, x_units = self._active()
@@ -1099,8 +1089,7 @@ class StrainCakeViewer(CakeViewer):
             r_pred, r_obs = r_val, r_val + dr
         else:
             r_obs, r_pred = r_val, r_val + dr
-        eps_ue = (float(bragg_pseudo_strain_ue(r_pred, r_obs, self._lsd, self._px))
-                 if self._lsd is not None and self._px is not None else float("nan"))
+        eps_ue = float(radius_ratio_strain_ue(r_pred, r_obs))
         self._coord_bar.setText(
             f"{loc}   η = {eta:.2f}°   Δr = {dr:.4g} px (ε = {eps_ue:.4g} µε)")
 
@@ -1412,29 +1401,28 @@ class ProfileViewer(QtWidgets.QWidget):
                      maxYRange=(ymax - ymin) + 2 * ypad)
 
 
-def bragg_pseudo_strain_ue(r_pred, r_obs, lsd_um: float, px_um: float):
-    """Physically exact pseudo-strain, in microstrain (µε):
-    ``eps = (d_obs - d_pred) / d_pred = sin(theta_pred) / sin(theta_obs) - 1``,
-    where ``theta = 0.5 * arctan(r_px * px_um / lsd_um)`` — Bragg's law, not
-    the small-angle ``Delta_r / r`` approximation. Wavelength cancels in the
-    ratio, so it isn't needed.
+def radius_ratio_strain_ue(r_pred, r_obs):
+    """Pseudo-strain in microstrain (µε): ``eps = 1 - R_obs/R_pred`` — the
+    exact residual the calibration's own LM fit minimizes, and what
+    ``post_residual_strain_uE`` (shown elsewhere in this app, e.g. the
+    Results tab and the calibration log) already reports. See
+    ``midas_calibrate_v2/loss/pseudo_strain.py``: "Per-spot pseudo-strain
+    residual: 1 - R_obs / R_pred. This is the v1 calibrant cost."
 
-    This isn't just a higher-order correction — the sign differs from a naive
-    ``(r_obs - r_pred) / r_pred`` ratio too, even at small angles. Bragg's
-    law inverts the r <-> d relationship (a ring at a *larger* radius has a
-    *smaller* d-spacing), so a ring appearing at larger r than predicted is
-    compressive (negative) strain, not the positive value a same-sign r-ratio
-    would give. The magnitude also diverges further from the small-angle
-    approximation as the diffraction angle grows (a ~17% difference at this
-    app's default 2θ_max of 28°) — both are compounded errors from using
-    Delta_r/r_pred as a stand-in for real d-spacing strain.
+    R_obs already carries the full geometry + distortion + parallax model
+    (``pixel_to_REta``), and R_pred is the exact ideal Bragg radius from the
+    calibrant's known d-spacing — so this ratio is a sound, self-consistent
+    strain measure, not a raw-pixel approximation. It is not identical to
+    the true ``(d_obs - d_pred)/d_pred`` at large angles (departs by ~17% at
+    this app's default 2θ_max of 28°, a magnitude difference — the SIGN
+    matches at all angles, verified by Taylor expansion against the exact
+    Bragg relation), but it matches what the calibration actually optimizes
+    rather than introducing a second, differently-defined "strain".
     """
     r_pred = np.asarray(r_pred, dtype=float)
     r_obs = np.asarray(r_obs, dtype=float)
-    theta_pred = 0.5 * np.arctan(r_pred * px_um / lsd_um)
-    theta_obs = 0.5 * np.arctan(r_obs * px_um / lsd_um)
     with np.errstate(invalid="ignore", divide="ignore"):
-        return 1e6 * (np.sin(theta_pred) / np.sin(theta_obs) - 1.0)
+        return 1e6 * (1.0 - r_obs / r_pred)
 
 
 def ring_azimuth_residual(cake_2d, r_axis_px, ring_radii_px, window_px: float = 8.0):

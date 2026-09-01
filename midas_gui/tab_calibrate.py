@@ -1140,8 +1140,7 @@ class CalibrationTab(QtWidgets.QWidget):
                 data["cake_2d"], data["r_axis_px"], radii)
             self._resid_cake_view.set_data(
                 data.get("resid_cake"), ring_grid, kept_radii,
-                data["r_axis_px"], data["eta_axis_deg"],
-                data["lsd_um"], data["px_um"])
+                data["r_axis_px"], data["eta_axis_deg"])
         else:
             self._resid_cake_view.clear()
         if self._result:
@@ -1407,8 +1406,7 @@ class CalibrationTab(QtWidgets.QWidget):
                         results_arrays["cake_2d"], results_arrays["r_axis_px"], radii)
                     self._resid_cake_view.set_data(
                         results_arrays.get("resid_cake"), ring_grid, kept_radii,
-                        results_arrays["r_axis_px"], results_arrays["eta_axis_deg"],
-                        results_arrays.get("lsd_um"), results_arrays.get("px_um"))
+                        results_arrays["r_axis_px"], results_arrays["eta_axis_deg"])
                 else:
                     self._resid_cake_view.clear()
                 self._prof_view.set_ring_markers(
