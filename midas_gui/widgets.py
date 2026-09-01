@@ -913,11 +913,12 @@ class CakeViewer(QtWidgets.QWidget):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  StrainCakeViewer  (NEW — ring × azimuth pseudo-strain heatmap)
+#  RingResidualViewer  (NEW — per-ring residual, 1-D bar chart or 2-D
+#  ring × azimuth pseudo-strain heatmap; ΔR (px) or strain (µε))
 # ═════════════════════════════════════════════════════════════════════════════
 
-class StrainCakeViewer(CakeViewer):
-    """Ring × azimuth pseudo-strain map, in either of two sources:
+class RingResidualViewer(CakeViewer):
+    """Per-ring radial residual, in either of two sources and two views:
 
     * **Model** — ``AutoCalibrationResult.residual_corr_map`` (the backend's
       whole-detector RBF-smoothed residual model) rebinned onto the same
@@ -925,17 +926,27 @@ class StrainCakeViewer(CakeViewer):
       value everywhere the detector has pixel coverage, not just at the
       calibrant's actual ring positions.
     * **Ring** — :func:`ring_azimuth_residual`: the same "local peak near the
-      predicted radius" measurement :class:`ResidualBarChart` already makes
-      per ring, just run independently per η row instead of once on the
-      azimuthally-collapsed profile. This is the direct deviation from the
-      calibrant's ideal ring position (tied to its real d-spacings) — no
-      smoothing/interpolation involved. X-axis is ring index, not R, since
-      rings aren't evenly spaced in radius.
+      predicted radius" measurement, run independently per η row instead of
+      once on the azimuthally-collapsed profile. This is the direct
+      deviation from the calibrant's ideal ring position (tied to its real
+      d-spacings) — no smoothing/interpolation involved. X-axis is ring
+      index, not R, since rings aren't evenly spaced in radius.
 
     Both are a signed quantity centred on zero (a good calibration reads ~0
     everywhere) and NaN marks "no data" rather than 0 — so this overrides
     ``CakeViewer``'s log toggle, percentile windowing and mouse readout
     instead of reusing them as-is.
+
+    **View** toggles between the full 2-D (ring/R × η) heatmap and a 1-D
+    per-ring reduction. For the 1-D **Ring** reduction, **Ring 1-D method**
+    picks how: "η-mean of cake" collapses the 2-D grid actually on screen
+    (so 1-D and 2-D always agree on the same underlying measurement), or
+    "Peak of collapsed profile" repeats the higher-SNR single-peak-search
+    :func:`collapsed_profile_ring_residual` does on the pre-azimuthally-
+    averaged profile (loses per-η detail, more robust for weak/spotty
+    rings). The Model source only ever has an η-mean reduction — its cake
+    is already a smoothed residual model, not raw intensity, so there's no
+    "collapsed profile" for it.
     """
 
     def __init__(self, parent=None):
@@ -948,9 +959,9 @@ class StrainCakeViewer(CakeViewer):
         self._source.addItem("Model (whole detector)", "model")
         self._source.setToolTip(
             "Model: the backend's smoothed residual_corr_map, rebinned onto\n"
-            "the (R, η) cake grid. Ring: the same local-peak measurement\n"
-            "'Ring Residuals' makes per ring, run independently per azimuth\n"
-            "row instead of on the azimuthally-collapsed profile.")
+            "the (R, η) cake grid. Ring: the local-peak measurement run\n"
+            "independently per azimuth row instead of on the azimuthally-\n"
+            "collapsed profile.")
         self._source.currentIndexChanged.connect(self._on_source_changed)
         self._toolbar_layout.insertWidget(1, self._source)
         self._mode = _NoScrollComboBox()
@@ -958,26 +969,70 @@ class StrainCakeViewer(CakeViewer):
         self._mode.addItem("strain (µε)", "strain")
         self._mode.currentIndexChanged.connect(self._redisplay)
         self._toolbar_layout.insertWidget(2, self._mode)
+        self._view = _NoScrollComboBox()
+        self._view.addItem("2-D (cake)", "2d")
+        self._view.addItem("1-D (per ring)", "1d")
+        self._view.currentIndexChanged.connect(self._redisplay)
+        self._toolbar_layout.insertWidget(3, self._view)
+        self._ring1d_method = _NoScrollComboBox()
+        self._ring1d_method.addItem("η-mean of cake", "eta_mean")
+        self._ring1d_method.addItem("Peak of collapsed profile", "collapsed_profile")
+        self._ring1d_method.setToolTip(
+            "η-mean of cake: average the per-η ring residuals shown in 2-D\n"
+            "mode — 1-D and 2-D always agree.\n"
+            "Peak of collapsed profile: one peak search on the azimuthally-\n"
+            "averaged profile (higher SNR, no η resolution).")
+        self._ring1d_method.currentIndexChanged.connect(self._redisplay)
+        self._toolbar_layout.insertWidget(4, self._ring1d_method)
 
         self._model_cake: Optional[np.ndarray] = None   # (n_eta, n_r)
         self._ring_grid: Optional[np.ndarray] = None     # (n_eta, n_rings)
         self._ring_radii: Optional[np.ndarray] = None    # (n_rings,) px
+        self._profile: Optional[np.ndarray] = None        # azimuthally-collapsed profile
+        self._all_ring_radii: Optional[np.ndarray] = None  # unfiltered predicted radii
 
-    def set_data(self, model_cake, ring_grid, ring_radii_px, r_axis_px, eta_axis_deg):
+        # 1-D view: a sibling plot, stacked with the 2-D image view so
+        # toggling View swaps which one is visible.
+        self._plot1d = pg.PlotWidget(background="k")
+        self._plot1d.showGrid(x=True, y=True, alpha=0.2)
+        self._zero1d = pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen("#888", width=1))
+        self._plot1d.addItem(self._zero1d)
+        self._plot1d_item = None
+        layout = self.layout()
+        idx = layout.indexOf(self._iv)
+        layout.removeWidget(self._iv)
+        self._view_stack = QtWidgets.QStackedWidget()
+        self._view_stack.addWidget(self._iv)
+        self._view_stack.addWidget(self._plot1d)
+        layout.insertWidget(idx, self._view_stack, 1)
+        self._update_ring1d_method_visibility()
+
+    def set_data(self, model_cake, ring_grid, ring_radii_px, r_axis_px, eta_axis_deg,
+                *, profile=None, all_ring_radii_px=None):
         """``model_cake``/``ring_grid`` may each be None (e.g. no
         residual_corr_map for a Multi-panel run, or no ring matched the
-        cake) — the source combo simply has nothing to show for that entry."""
+        cake) — the source combo simply has nothing to show for that entry.
+        ``profile``/``all_ring_radii_px`` are optional and feed only the
+        1-D "Peak of collapsed profile" Ring method."""
         self._model_cake = None if model_cake is None else np.asarray(model_cake, dtype=float)
         self._ring_grid = None if ring_grid is None else np.asarray(ring_grid, dtype=float)
         self._ring_radii = np.asarray(ring_radii_px, dtype=float)
         self._r_axis = np.asarray(r_axis_px, dtype=float)
         self._eta_axis = np.asarray(eta_axis_deg, dtype=float)
+        self._profile = None if profile is None else np.asarray(profile, dtype=float)
+        self._all_ring_radii = (None if all_ring_radii_px is None
+                                else np.asarray(all_ring_radii_px, dtype=float))
         self._redisplay()
 
     def clear(self):
         self._model_cake = None
         self._ring_grid = None
+        self._profile = None
+        self._all_ring_radii = None
         self._iv.clear()
+        if self._plot1d_item is not None:
+            self._plot1d.removeItem(self._plot1d_item)
+            self._plot1d_item = None
         self._coord_bar.setText(
             "No residual data for this attempt (Model needs "
             "residual_corr_map — unavailable with Multi-panel enabled or "
@@ -986,6 +1041,11 @@ class StrainCakeViewer(CakeViewer):
 
     def _on_source_changed(self, *_args):
         self._redisplay()
+
+    def _update_ring1d_method_visibility(self):
+        show = (self._view.currentData() == "1d"
+               and self._source.currentData() == "ring")
+        self._ring1d_method.setVisible(show)
 
     def _active(self):
         """(cake, x_axis, x_label, x_units) for the selected source."""
@@ -1021,6 +1081,15 @@ class StrainCakeViewer(CakeViewer):
         return radius_ratio_strain_ue(r_pred, r_obs)
 
     def _redisplay(self, *_args):
+        self._update_ring1d_method_visibility()
+        is_1d = self._view.currentData() == "1d"
+        self._view_stack.setCurrentWidget(self._plot1d if is_1d else self._iv)
+        if is_1d:
+            self._redisplay_1d()
+        else:
+            self._redisplay_2d()
+
+    def _redisplay_2d(self):
         cake, x_axis, x_label, x_units = self._active()
         self._iv.getView().setLabel("bottom", x_label, units=x_units)
         self._iv.getView().setLabel("left", "η", units="°")
@@ -1056,7 +1125,61 @@ class StrainCakeViewer(CakeViewer):
             f"strain cake {n_x} {src}-bins × {n_eta} η-bins  |  "
             f"η ∈ [{e0:.1f}, {e1:.1f}]°   (±{v:.3g} {unit} shown)")
 
+    def _redisplay_1d(self):
+        is_ring = self._source.currentData() == "ring"
+        is_strain = self._mode.currentData() == "strain"
+        unit = "µε" if is_strain else "px"
+        method = self._ring1d_method.currentData() if is_ring else "eta_mean"
+
+        if method == "collapsed_profile":
+            radii = list(self._all_ring_radii) if self._all_ring_radii is not None else []
+            resid, kept = collapsed_profile_ring_residual(self._r_axis, self._profile, radii)
+            if is_strain and kept:
+                r_pred = np.asarray(kept, dtype=float)
+                resid = radius_ratio_strain_ue(r_pred, r_pred + resid)
+            x = np.arange(len(kept), dtype=float)
+            y = resid
+        else:
+            cake, x_axis, _label, _units = self._active()
+            if cake is None or cake.size == 0:
+                x, y = np.array([]), np.array([])
+            else:
+                disp = self._display_cake(cake, x_axis)
+                with np.errstate(invalid="ignore"):
+                    y = np.nanmean(disp, axis=0)
+                x = x_axis
+
+        if self._plot1d_item is not None:
+            self._plot1d.removeItem(self._plot1d_item)
+            self._plot1d_item = None
+        ylabel = "strain (µε)" if is_strain else "Δr (px)"
+        self._plot1d.setLabel("left", ylabel)
+
+        finite = np.isfinite(y) if y.size else np.array([], dtype=bool)
+        if not np.any(finite):
+            self._plot1d.setLabel("bottom", "ring index" if is_ring else "R", units=None if is_ring else "px")
+            self._coord_bar.setText("no data")
+            return
+
+        xf, yf = x[finite], y[finite]
+        if is_ring:
+            self._plot1d.setLabel("bottom", "ring index")
+            self._plot1d_item = pg.BarGraphItem(x=xf, height=yf, width=0.6,
+                                                brush=pg.mkBrush("#5aa0e0"))
+            self._plot1d.addItem(self._plot1d_item)
+        else:
+            self._plot1d.setLabel("bottom", "R", units="px")
+            self._plot1d_item = self._plot1d.plot(xf, yf, pen=pg.mkPen("#5aa0e0", width=2))
+        self._plot1d.autoRange()
+        rms = float(np.sqrt(np.mean(yf ** 2)))
+        n_label = f"{len(yf)} rings" if is_ring else f"{len(yf)} points"
+        method_note = ("  |  peak-of-collapsed-profile" if method == "collapsed_profile"
+                       else "  |  η-mean of cake")
+        self._coord_bar.setText(f"{n_label} | RMS {unit} = {rms:.3f}{method_note}")
+
     def _mouse(self, evt):
+        if self._view.currentData() != "2d":
+            return
         cake, x_axis, _label, x_units = self._active()
         if cake is None or x_axis is None or x_axis.size == 0 or self._eta_axis is None:
             return
@@ -1494,6 +1617,40 @@ def ring_azimuth_residual(cake_2d, r_axis_px, ring_radii_px, window_px: float = 
     return grid, kept_radii
 
 
+def collapsed_profile_ring_residual(r_axis_px, profile, ring_radii_px,
+                                    window_px: float = 8.0):
+    """Δr = r_obs − r_pred per ring, from a single peak search on the
+    azimuthally-**collapsed** profile (no η resolution) — higher SNR than
+    :func:`ring_azimuth_residual`'s per-η peak search, at the cost of
+    losing azimuthal detail. Shared by :class:`ResidualBarChart` and
+    :class:`RingResidualViewer`'s 1-D "Peak of collapsed profile" method.
+
+    Returns ``(resid_px, kept_radii)`` — a ring with no in-window sample
+    is dropped from both, mirroring ``ring_azimuth_residual``'s contract.
+    Plain argmax (no subpixel refinement): the collapsed profile already
+    pools the whole ring's signal, smoothing the result enough that R-bin
+    quantization isn't visible (see ``ring_azimuth_residual``'s docstring
+    for why that's not true per-η-row).
+    """
+    r_axis = np.asarray(r_axis_px, dtype=float)
+    prof = np.asarray(profile, dtype=float)
+    if r_axis.size == 0 or not ring_radii_px:
+        return np.array([]), []
+    resid, kept_radii = [], []
+    for r_pred in ring_radii_px:
+        sel = np.abs(r_axis - r_pred) <= window_px
+        if not sel.any():
+            continue
+        local_r = r_axis[sel]
+        local_i = prof[sel]
+        if not np.isfinite(local_i).any():
+            continue
+        r_obs = float(local_r[int(np.nanargmax(local_i))])
+        resid.append(r_obs - float(r_pred))
+        kept_radii.append(float(r_pred))
+    return np.array(resid, dtype=float), kept_radii
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  ResidualBarChart  (NEW — per-ring radial residual after calibration)
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1528,33 +1685,20 @@ class ResidualBarChart(QtWidgets.QWidget):
         layout.addWidget(self._plot, stretch=1)
 
     def set_data(self, r_axis_px, profile, ring_radii_px, window_px: float = 8.0):
-        r_axis = np.asarray(r_axis_px, dtype=float)
-        prof   = np.asarray(profile, dtype=float)
         if self._bars is not None:
             self._plot.removeItem(self._bars)
             self._bars = None
-        if r_axis.size == 0 or not ring_radii_px:
-            self._stat.setText("no data")
+        h, kept_radii = collapsed_profile_ring_residual(
+            r_axis_px, profile, ring_radii_px, window_px)
+        if not kept_radii:
+            self._stat.setText("no data" if not ring_radii_px else
+                               "no rings matched the profile")
             return
 
-        idxs, resid = [], []
-        for k, r_pred in enumerate(ring_radii_px):
-            sel = np.abs(r_axis - r_pred) <= window_px
-            if not sel.any():
-                continue
-            local_r = r_axis[sel]
-            local_i = prof[sel]
-            if not np.isfinite(local_i).any():
-                continue
-            r_obs = float(local_r[int(np.nanargmax(local_i))])
-            idxs.append(k)
-            resid.append(r_obs - float(r_pred))
-        if not idxs:
-            self._stat.setText("no rings matched the profile")
-            return
-
+        # x = index into the ORIGINAL ring_radii_px list (gaps where a ring
+        # was dropped), so ring spacing/ordering stays recognizable.
+        idxs = [k for k, r_pred in enumerate(ring_radii_px) if r_pred in kept_radii]
         x = np.array(idxs, dtype=float)
-        h = np.array(resid, dtype=float)
         self._bars = pg.BarGraphItem(x=x, height=h, width=0.6,
                                      brush=pg.mkBrush("#5aa0e0"))
         self._plot.addItem(self._bars)

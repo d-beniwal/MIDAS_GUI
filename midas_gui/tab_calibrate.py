@@ -26,8 +26,8 @@ from midas_gui.helpers import (
     widgets_to_dict, apply_dict_to_widgets, im_trans_codes_from_checkboxes,
     _apply_im_trans, paramstest_pairs)
 from midas_gui.widgets import (
-    PickableImageViewer, ProfileViewer, LogPanel, ResidualBarChart, DataLoaderPanel, CakeViewer,
-    StrainCakeViewer, build_lab_frame_axes_items, ring_azimuth_residual)
+    PickableImageViewer, ProfileViewer, LogPanel, DataLoaderPanel, CakeViewer,
+    RingResidualViewer, build_lab_frame_axes_items, ring_azimuth_residual)
 from midas_gui.workers import CalibrationWorker, IntegrationWorker
 from midas_gui.dialogs import _SaveParamstestDialog, DistortionRefineDialog, show_error
 from midas_gui.hydra_widgets import HydraModeRibbon
@@ -416,10 +416,8 @@ class CalibrationTab(QtWidgets.QWidget):
         bot.addTab(self._prof_view, "Radial Profile")
         self._cake_view = CakeViewer()
         bot.addTab(self._cake_view, "Eta vs R Cake")
-        self._resid_chart = ResidualBarChart()
-        bot.addTab(self._resid_chart, "Ring Residuals")
-        self._resid_cake_view = StrainCakeViewer()
-        bot.addTab(self._resid_cake_view, "Strain Cake")
+        self._resid_cake_view = RingResidualViewer()
+        bot.addTab(self._resid_cake_view, "Ring Residual")
         # Results tab: the full parameter set exactly as written to paramstest.txt,
         # laid out across several columns (the panel is wide but short) as plain text —
         # including the distortion coefficients (no table) — plus a button to push the
@@ -1140,14 +1138,14 @@ class CalibrationTab(QtWidgets.QWidget):
                 data["cake_2d"], data["r_axis_px"], radii)
             self._resid_cake_view.set_data(
                 data.get("resid_cake"), ring_grid, kept_radii,
-                data["r_axis_px"], data["eta_axis_deg"])
+                data["r_axis_px"], data["eta_axis_deg"],
+                profile=data["profile"], all_ring_radii_px=radii)
         else:
             self._resid_cake_view.clear()
         if self._result:
             self._prof_view.set_ring_markers(
                 [{"radii": radii, "color": "#f0c060"}],
                 data["lsd_um"], data["px_um"], data["wavelength_A"])
-            self._resid_chart.set_data(data["r_axis_px"], data["profile"], radii)
         self._flush_pending_log(data)
 
     # ── Save ───────────────────────────────────────────────────────
@@ -1406,15 +1404,14 @@ class CalibrationTab(QtWidgets.QWidget):
                         results_arrays["cake_2d"], results_arrays["r_axis_px"], radii)
                     self._resid_cake_view.set_data(
                         results_arrays.get("resid_cake"), ring_grid, kept_radii,
-                        results_arrays["r_axis_px"], results_arrays["eta_axis_deg"])
+                        results_arrays["r_axis_px"], results_arrays["eta_axis_deg"],
+                        profile=results_arrays["profile"], all_ring_radii_px=radii)
                 else:
                     self._resid_cake_view.clear()
                 self._prof_view.set_ring_markers(
                     [{"radii": radii, "color": "#f0c060"}],
                     results_arrays.get("lsd_um"), results_arrays.get("px_um"),
                     results_arrays.get("wavelength_A"))
-                self._resid_chart.set_data(
-                    results_arrays["r_axis_px"], results_arrays["profile"], radii)
             except Exception:
                 pass
         elif self._image is not None:
