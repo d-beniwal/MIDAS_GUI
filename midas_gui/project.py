@@ -57,6 +57,8 @@ from typing import Optional
 import h5py
 import numpy as np
 
+from midas_gui import provenance
+
 PROJECT_MARKER = "__midas_gui_project__"
 SCHEMA_VERSION = 3
 
@@ -535,6 +537,19 @@ def append_calibration_attempt(project_path, panel_key, *, cfg, result, loader_s
         att.create_dataset("metadata", data=json.dumps(metadata, indent=2, default=_json_default))
         att.attrs["timestamp_utc"] = metadata["timestamp_utc"]
         att.attrs["pipeline"] = str(cfg_copy.get("mode") or "")
+        # provenance_history: same convention/schema as the new zarr cake
+        # output (see midas_gui/provenance.py) — lets tooling from the
+        # mpe_wf_saxs_waxs convergence read either project's outputs the
+        # same way. Complements, doesn't replace, the metadata/
+        # environment_snapshot above (that's MIDAS_GUI's own richer
+        # per-attempt record; this is the cross-project-compatible one).
+        try:
+            entry = provenance.build_entry(
+                'midas_gui.calibrate',
+                extra={'panel_key': panel_key, 'pipeline': cfg_copy.get('mode')})
+            provenance.append_to_hdf5_attrs(att, entry)
+        except Exception:
+            pass   # best-effort — never block saving the calibration attempt
         for k in ("Lsd", "BC_y", "BC_z"):
             v = getattr(result, k, None)
             if v is not None:

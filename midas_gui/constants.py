@@ -19,6 +19,7 @@ OUTPUT_FORMATS = {
     "DAT  (Q, I, σ)":          "dat",
     "HDF5 (full stack)":        "h5",
     "2D CSV (cake, η×R)":       "2d_csv",
+    "Zarr (cake, REtaMap)":     "zarr",
 }
 
 # Integration kernels (label → key)

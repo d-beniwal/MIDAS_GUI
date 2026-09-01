@@ -7,6 +7,7 @@ instance variable on the caller so it is not GC'd mid-run.
 from __future__ import annotations
 
 import math
+import re
 import traceback
 from pathlib import Path
 from typing import Optional
@@ -16,6 +17,7 @@ from PyQt5 import QtCore
 
 import midas_gui._paths  # noqa: F401  (sys.path setup before MIDAS imports)
 from midas_gui import calib
+from midas_gui import provenance
 from midas_gui.helpers import (_LogStream, _load_image, _apply_im_trans, _build_spec,
                                _spec_from_json, average_field, apply_field_corrections)
 
@@ -51,6 +53,35 @@ def axis_conversions(r_px, lsd, px, wl):
     two_theta = np.degrees(np.arctan(r_px * px / lsd))
     q = 4 * math.pi * np.sin(np.radians(two_theta) / 2) / wl
     return two_theta, two_theta * 100.0, q
+
+
+_FID_NUM_RE = re.compile(r'^(?P<froot>.+?)_(?P<num>\d+)(?P<tag>[^_\d]*)$')
+
+
+def froot_and_frame_num(fid, fallback_idx: int) -> tuple:
+    """Parse ``(froot, frame_number, tag)`` out of a frame id, matching
+    mpe_wf_saxs_waxs's own ``<froot>_<NNNNNN>`` output-naming convention when
+    ``fid`` already follows it — the common case, since detector files are
+    already named this way. Handles the frame number sitting mid-stem, not
+    just at the end, since ``Path.stem`` only strips the *last* suffix —
+    ``C611_017Fe_1_load3_009243.vrx.h5`` (this app's own test data) stems to
+    ``..._009243.vrx``, with a non-numeric detector tag (``.vrx``) trailing
+    the digits. ``tag`` preserves that (empty string when there isn't one).
+    Falls back to ``(fid, fallback_idx, "")`` when ``fid`` has no
+    underscore-digit run at all (e.g. a caller-supplied non-numeric id)."""
+    m = _FID_NUM_RE.match(str(fid))
+    if m:
+        return m.group('froot'), int(m.group('num')), m.group('tag')
+    return str(fid), int(fallback_idx), ''
+
+
+def stamp_h5_provenance(h5_path, entry: dict) -> None:
+    """Reopen ``h5_path`` (already written by ``midas_integrate_v2.write_h5``)
+    and append a provenance entry to its root attrs. Best-effort: a failure
+    here shouldn't take down an otherwise-successful batch run."""
+    import h5py
+    with h5py.File(str(h5_path), 'a') as h5:
+        provenance.append_to_hdf5_attrs(h5, entry)
 
 
 def build_geom(spec, kernel: str, mask):
@@ -915,7 +946,8 @@ class BatchWorker(QtCore.QThread):
             geom = ctx["geom"]; corr_on = ctx["corr_on"]
             corr_counts = ctx["corr_counts"]; cnt = ctx["cnt"]
             r_ax = ctx["r_ax"]; eta_ax = ctx["eta_ax"]
-            want_cake = ("2d_csv" in self._fmts) or self._multi_azimuth
+            want_zarr = "zarr" in self._fmts and self._out_dir is not None
+            want_cake = ("2d_csv" in self._fmts) or self._multi_azimuth or want_zarr
             need_sigma = True   # xye/fxye require σ; always provide it
             if self._multi_azimuth and self._q_cfg:
                 # Q-rebinning (rebin_R_to_Q) only handles a 1-D profile; combining
@@ -967,6 +999,7 @@ class BatchWorker(QtCore.QThread):
 
             aborted = False
             all_profiles, all_sigmas, frame_ids, out_paths = [], [], [], []
+            all_cakes, all_omegas = [], []   # zarr cake output only
             proc_idx = 0  # index into monitor_vals for processed frames only
             for abs_i, fid, img in self._iter_frames(source):
                 # Cooperative abort — stop cleanly, keeping frames already done.
@@ -1036,20 +1069,39 @@ class BatchWorker(QtCore.QThread):
                 else:
                     all_profiles.append(prof)
                     all_sigmas.append(sigma)
+                if want_zarr and cake_2d is not None:
+                    all_cakes.append(cake_2d)
+                    all_omegas.append(float(abs_i))
                 frame_ids.append(fid)
                 self.frame_done.emit(fid, r_ax, prof, sigma)
                 self.progress.emit(proc_idx + 1, total)
                 proc_idx += 1
 
-                file_fmts = [f for f in self._fmts if f != "h5"]
+                file_fmts = [f for f in self._fmts if f not in ("h5", "zarr")]
                 if self._out_dir is not None and file_fmts:
                     self._out_dir.mkdir(parents=True, exist_ok=True)
-                    base = self._out_dir / fid
+                    froot, frame_num, tag = froot_and_frame_num(fid, abs_i)
+                    base = self._out_dir / f"{froot}_{frame_num:06d}{tag}"
                     out_paths.extend(write_frame_profiles(
                         base, file_fmts, r_ax, prof, sigma, cur_lsd, px, wl,
                         cake_2d=(cake_2d if self._multi_azimuth else None),
                         cake_sigma=(cake_sigma if self._multi_azimuth else None),
                         eta_axis=eta_ax))
+
+            prov_entry = provenance.build_entry(
+                'midas_gui.batch_integrate',
+                inputs=[self._src.get('path')] if self._src.get('path') else [],
+                cake_params={
+                    'RMin': float(spec.RMin), 'RMax': float(spec.RMax),
+                    'RBinSize': float(spec.RBinSize), 'EtaMin': float(spec.EtaMin),
+                    'EtaMax': float(spec.EtaMax), 'EtaBinSize': float(spec.EtaBinSize),
+                },
+                extra={
+                    'kernel': self._kernel, 'weighted': self._weighted,
+                    'multi_azimuth': self._multi_azimuth,
+                    'n_frames': len(all_profiles), 'frame_range': list(self._frame_range),
+                },
+            )
 
             # HDF5: single file with the full stack — skipped in multi-azimuth mode,
             # midas_integrate_v2.write_h5 expects a 1-D profile per frame.
@@ -1067,7 +1119,32 @@ class BatchWorker(QtCore.QThread):
                                r_axis=r_ax,
                                frame_ids=frame_ids,
                                sigmas=np.array(all_sigmas))
+                    try:
+                        stamp_h5_provenance(h5_path, prov_entry)
+                    except Exception:
+                        self.log_line.emit(
+                            "[batch] note: provenance stamp on integrated.h5 "
+                            "failed (non-fatal):\n" + traceback.format_exc())
                     out_paths.append(str(h5_path))
+
+            # Zarr cake: full (eta, R) per frame — the direct complement of
+            # HDF5 above (which needs a 1-D profile per frame); works
+            # regardless of multi_azimuth since cake_2d is always available
+            # here when zarr was requested (see want_cake above).
+            if want_zarr and all_cakes:
+                from midas_gui.zarr_cake import write_cake_zarr
+                self._out_dir.mkdir(parents=True, exist_ok=True)
+                zarr_path = self._out_dir / "integrated.zarr.zip"
+                try:
+                    bin_area = count_cake(geom, self._kernel, spec.NrPixelsZ, spec.NrPixelsY)
+                    write_cake_zarr(
+                        zarr_path, all_cakes, r_axis_px=r_ax, eta_axis_deg=eta_ax,
+                        lsd_um=lsd, px_um=px, wavelength_A=wl, omegas=all_omegas,
+                        bin_area=bin_area, provenance_entry=prov_entry)
+                    out_paths.append(str(zarr_path))
+                except Exception:
+                    self.log_line.emit(
+                        "[batch] zarr cake output failed:\n" + traceback.format_exc())
 
             n_proc = len(all_profiles)
             self.finished.emit({
@@ -1377,8 +1454,10 @@ class FolderMonitorWorker(QtCore.QThread):
                     self.log_line.emit(f"[monitor] +{fid}: peak={prof.max():.1f}")
                     if can_save:
                         self._out_dir.mkdir(parents=True, exist_ok=True)
-                        for f in save_fmts:
-                            write_profile(self._out_dir / fid, f, r_ax, prof,
+                        froot, frame_num, tag = froot_and_frame_num(fid, count)
+                        base = self._out_dir / f"{froot}_{frame_num:06d}{tag}"
+                        for fmt in save_fmts:
+                            write_profile(base, fmt, r_ax, prof,
                                           sigma, lsd, px, wl)
                 # responsive sleep
                 slept = 0
@@ -1457,12 +1536,13 @@ def write_all_profiles(out_dir, fmts, r_axis, profiles, sigmas, frame_ids,
               else np.sqrt(np.maximum(profiles, 0.0)))
     frame_ids = list(frame_ids)
     multi = profiles.ndim == 3
-    file_fmts = [f for f in fmts if f not in ("h5", "2d_csv")]
+    file_fmts = [f for f in fmts if f not in ("h5", "2d_csv", "zarr")]
     out_paths = []
     if file_fmts and len(frame_ids):
         out_dir.mkdir(parents=True, exist_ok=True)
         for i, fid in enumerate(frame_ids):
-            base = out_dir / str(fid)
+            froot, frame_num, tag = froot_and_frame_num(fid, i)
+            base = out_dir / f"{froot}_{frame_num:06d}{tag}"
             if multi:
                 out_paths.extend(write_frame_profiles(
                     base, file_fmts, r_axis, None, None, lsd, px, wl,
@@ -1475,6 +1555,13 @@ def write_all_profiles(out_dir, fmts, r_axis, profiles, sigmas, frame_ids,
         h5_path = out_dir / "integrated.h5"
         m.write_h5(str(h5_path), profiles=profiles, r_axis=r_axis,
                    frame_ids=frame_ids, sigmas=sigmas)
+        try:
+            entry = provenance.build_entry(
+                'midas_gui.batch_integrate.save',
+                extra={'n_frames': len(frame_ids)})
+            stamp_h5_provenance(h5_path, entry)
+        except Exception:
+            pass   # best-effort — a failed stamp shouldn't fail the save
         out_paths.append(str(h5_path))
     return out_paths
 
