@@ -2758,6 +2758,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._nframes = 0
         self._cur = None
         self._stream_preview_dirty = True   # "stream" mode only — see current_frame()
+        self._preview_sum_n = 1             # "stream" mode only — see set_preview_sum
         self._live_src: Optional[PvaLiveSource] = None
         self._registry = None          # DataSourceRegistry, set by bind_registry()
         self._registry_label = ""      # this panel's own label in the registry
@@ -3352,25 +3353,45 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._stream_preview_dirty = True
             self.dataChanged.emit()
 
+    def set_preview_sum(self, n: int) -> None:
+        """"stream" mode only: how many of the source's leading frames
+        ``current_frame()``'s preview sums together (a display aid only —
+        never affects the real batch run). A single weak/noisy frame can be
+        dominated by detector artifacts (e.g. VAREX per-column gain
+        non-uniformity) that hide the actual diffraction pattern; summing
+        a handful together boosts the real signal enough to see it, at no
+        cost to callers that never ask for a preview (Pump Probe)."""
+        n = max(1, int(n))
+        if n != self._preview_sum_n:
+            self._preview_sum_n = n
+            self._stream_preview_dirty = True
+
     def _peek_stream_frame(self):
-        """Fetch just the first frame the current "stream"-mode source would
-        yield, for a caller's preview (e.g. Batch Integrate's Detector view
-        overlay) — without eagerly loading the whole dataset the way
-        "stack"/"single" mode does. Opens the exact same source the real
-        run will use (``workers._open_source_cfg``), so e.g. a VAREX
-        multi-file source previews its actual combined frame, not a raw
-        sub-frame. Returns None if no source is set or it can't be opened
-        (e.g. an incomplete pick, or a transient read error)."""
+        """Fetch and sum the first ``self._preview_sum_n`` frames the
+        current "stream"-mode source would yield, for a caller's preview
+        (e.g. Batch Integrate's Detector view overlay) — without eagerly
+        loading the whole dataset the way "stack"/"single" mode does.
+        Opens the exact same source the real run will use
+        (``workers._open_source_cfg``), so e.g. a VAREX multi-file source
+        previews its actual combined-per-file frames, not a raw sub-frame.
+        Returns None if no source is set or it can't be opened (e.g. an
+        incomplete pick, or a transient read error)."""
         cfg = self.source_cfg()
         if not (cfg.get("path") or cfg.get("paths")):
             return None
         try:
             from midas_gui.workers import _open_source_cfg
             source = _open_source_cfg(cfg)
-            if getattr(source, "n_frames", 0) == 0:
+            total = getattr(source, "n_frames", 0)
+            if total == 0:
                 return None
-            _fid, img = source.get(0)
-            return np.asarray(img, dtype=np.float32)
+            n = max(1, min(self._preview_sum_n, total))
+            acc = None
+            for i in range(n):
+                _fid, img = source.get(i)
+                img = np.asarray(img, dtype=np.float64)
+                acc = img if acc is None else acc + img
+            return acc.astype(np.float32)
         except Exception:
             return None
 

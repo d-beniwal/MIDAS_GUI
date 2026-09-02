@@ -168,6 +168,10 @@ class BatchTab(QtWidgets.QWidget):
             show_grid=self._grid_chk.isChecked())
         self._redraw_lab_axes_if_on(fields["BC_y"], fields["BC_z"])
 
+    def _on_preview_sum_changed(self, n: int) -> None:
+        self._loader.set_preview_sum(n)
+        self._refresh_detector_preview()
+
     # ── Lab-frame axes overlay (same as Data Viewer/Calibrate — see
     # widgets.build_lab_frame_axes_items) ───────────────────────────
     def _on_lab_axes_toggled(self, checked: bool) -> None:
@@ -462,8 +466,6 @@ class BatchTab(QtWidgets.QWidget):
         _ki = self._kernel.findData(DEFAULT_KERNEL)
         if _ki >= 0:
             self._kernel.setCurrentIndex(_ki)
-        self._r_bin = _fspin(0.1, 20.0, 2, 1.0, "px")
-        self._e_bin = _fspin(0.5, 30.0, 1, 5.0, "°")
         self._azim = _NoScrollComboBox()
         self._azim.addItem("Pixel-weighted", True)
         self._azim.addItem("η-bin mean (legacy)", False)
@@ -475,14 +477,26 @@ class BatchTab(QtWidgets.QWidget):
             "  profile with a coarse η bin when the beam centre is off the detector).")
         intf = S.Form()
         intf.row(("Kernel:", self._kernel))
-        intf.row(("R bin:", self._r_bin), ("η bin:", self._e_bin))
         intf.row(("Azim. avg:", self._azim))
         integ.body.addLayout(intf)
-        # Rmin/Rmax — exclude an inner (e.g. beamstop shadow) or outer region
-        # from integration. Rmax 0.0 is the "auto" sentinel: left untouched,
-        # it's passed through as RMax=None so the backend's own farthest-
-        # corner default stays authoritative (see helpers._build_spec) —
-        # auto-filled to that same corner value once calibration resolves.
+
+        def _section_label(text):
+            lbl = QtWidgets.QLabel(text)
+            lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px;font-weight:bold;")
+            return lbl
+
+        # Grouped per axis (bin size + range together) so it's clear these
+        # are all one thing — the caking geometry, matching a
+        # cake_parameters CSV's R_MIN/R_MAX/R_STEP/ETA_MIN/ETA_MAX/ETA_STEP
+        # one-for-one (see _load_cake_csv). Rmax 0.0 is the "auto" sentinel:
+        # left untouched, it's passed through as RMax=None so the backend's
+        # own farthest-corner default stays authoritative (see
+        # helpers._build_spec) — auto-filled to that same corner value once
+        # calibration resolves. Eta min/max default -180/180 (full circle),
+        # matching the backend's own default (same None-means-"leave the
+        # backend default" contract as Rmin/Rmax).
+        integ.body.addWidget(_section_label("RADIAL RANGE  (R_MIN / R_MAX / R_STEP)"))
+        self._r_bin = _fspin(0.1, 20.0, 2, 1.0, "px")
         self._r_min = _fspin(0.0, 1_000_000.0, 2, 0.0, "px")
         self._r_max = _fspin(0.0, 1_000_000.0, 2, 0.0, "px")
         self._r_max.setToolTip(
@@ -498,20 +512,20 @@ class BatchTab(QtWidgets.QWidget):
         rmax_row.addWidget(self._r_max)
         rmax_row.addWidget(self._rmax_corner_btn); rmax_row.addWidget(self._rmax_edge_btn)
         rf = S.Form()
+        rf.row(("R bin:", self._r_bin))
         rf.row(("Rmin:", self._r_min))
         rf.row(("Rmax:", rmax_row))
         integ.body.addLayout(rf)
-        # Eta min/max — restrict integration to an azimuthal wedge instead of
-        # the full circle. -180/180 (the default) matches the backend's own
-        # full-circle default (helpers._build_spec passes these through only
-        # when set, same None-means-"leave the backend default" contract as
-        # Rmin/Rmax) — a cake_parameters CSV's ETA_MIN/ETA_MAX (see
-        # _load_cake_csv) is the usual way to fill in a real sub-360° range.
+
+        integ.body.addWidget(_section_label("AZIMUTHAL RANGE  (ETA_MIN / ETA_MAX / ETA_STEP)"))
+        self._e_bin = _fspin(0.5, 30.0, 1, 5.0, "°")
         self._eta_min = _fspin(-180.0, 180.0, 1, -180.0, "°")
         self._eta_max = _fspin(-180.0, 180.0, 1, 180.0, "°")
         ef = S.Form()
+        ef.row(("η bin:", self._e_bin))
         ef.row(("Eta min:", self._eta_min), ("Eta max:", self._eta_max))
         integ.body.addLayout(ef)
+
         self._grid_chk = QtWidgets.QCheckBox("Show bin grid")
         self._grid_chk.setToolTip(
             "Overlay the full (R, η) integration bin grid on the Detector "
@@ -519,14 +533,6 @@ class BatchTab(QtWidgets.QWidget):
             "each η-bin edge (bounded to Eta min/max). Thinned to at most "
             "~50 rings / ~72 spokes for legibility with fine bin sizes.")
         integ.body.addWidget(self._grid_chk)
-        self._lab_axes_chk = QtWidgets.QCheckBox("Lab-frame axes")
-        self._lab_axes_chk.setToolTip(
-            "Overlay MIDAS lab-frame axes (X_Lab/Y_Lab), the beam-direction "
-            "⊗ glyph, and an η sweep arc on the Detector view tab, anchored "
-            "at the active calibration's beam centre — same overlay as the "
-            "Data Viewer/Calibrate tabs.")
-        integ.body.addWidget(self._lab_axes_chk)
-        self._lab_axes_chk.toggled.connect(self._on_lab_axes_toggled)
         for w in (self._r_min, self._r_max, self._eta_min, self._eta_max, self._r_bin, self._e_bin):
             w.valueChanged.connect(self._refresh_detector_preview)
         self._grid_chk.toggled.connect(self._refresh_detector_preview)
@@ -709,9 +715,29 @@ class BatchTab(QtWidgets.QWidget):
         self._waterfall = WaterfallViewer()
         self._stack_view = StackedProfileViewer()
         self._det_view = ImageViewer()
+        self._lab_axes_chk = QtWidgets.QCheckBox("Lab-frame axes")
+        self._lab_axes_chk.setToolTip(
+            "Overlay MIDAS lab-frame axes (X_Lab/Y_Lab), the beam-direction "
+            "⊗ glyph, and an η sweep arc, anchored at the active "
+            "calibration's beam centre — same overlay as the Data "
+            "Viewer/Calibrate tabs.")
+        self._lab_axes_chk.toggled.connect(self._on_lab_axes_toggled)
+        self._det_view._toolbar_layout.addWidget(self._lab_axes_chk)
+        self._det_view._toolbar_layout.addWidget(QtWidgets.QLabel("Preview: sum first"))
+        self._preview_sum_n = _NoScrollSpinBox()
+        self._preview_sum_n.setRange(1, 999); self._preview_sum_n.setValue(1)
+        self._preview_sum_n.setFixedWidth(50)
+        self._preview_sum_n.setToolTip(
+            "Detector-view preview only — never affects the real batch run. "
+            "Sums this many of the source's leading frames together before "
+            "display, to boost signal enough to see the actual diffraction "
+            "pattern beneath detector-readout artifacts (e.g. VAREX "
+            "per-column gain non-uniformity) that dominate a single frame.")
+        self._preview_sum_n.valueChanged.connect(self._on_preview_sum_changed)
+        self._det_view._toolbar_layout.addWidget(self._preview_sum_n)
+        self._view_tabs.addTab(self._det_view, "Detector view")
         self._view_tabs.addTab(self._waterfall, "Waterfall")
         self._view_tabs.addTab(self._stack_view, "Stacked profiles")
-        self._view_tabs.addTab(self._det_view, "Detector view")
         right.addWidget(self._view_tabs)
         self._log = LogPanel()
         self._log.setMaximumHeight(16_777_215)   # let the splitter size it
