@@ -2757,6 +2757,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._stack = self._paths = self._h5 = None
         self._nframes = 0
         self._cur = None
+        self._stream_preview_dirty = True   # "stream" mode only — see current_frame()
         self._live_src: Optional[PvaLiveSource] = None
         self._registry = None          # DataSourceRegistry, set by bind_registry()
         self._registry_label = ""      # this panel's own label in the registry
@@ -2961,6 +2962,10 @@ class DataLoaderPanel(QtWidgets.QWidget):
             cr.addStretch(1)
             self._combine_row.setVisible(False)
             card.body.addWidget(self._combine_row)
+            # Changing how sub-frames combine changes what the cached
+            # preview frame (_refresh_stream_preview) actually shows.
+            self._combine_chunk.valueChanged.connect(self._on_combine_changed)
+            self._combine_op_combo.currentIndexChanged.connect(self._on_combine_changed)
 
         self._info = QtWidgets.QLabel("No data loaded.")
         self._info.setStyleSheet("color:#9a9a9a;font-size:10px"); self._info.setWordWrap(True)
@@ -3277,7 +3282,12 @@ class DataLoaderPanel(QtWidgets.QWidget):
         if not raw:
             return
         if self._mode == "stream":
-            # No in-memory load; just report the source.
+            # No in-memory load of the whole dataset (that's the point of
+            # stream mode for large scans) — just mark the cached preview
+            # frame stale. current_frame() does the actual (cheap-if-
+            # unneeded, since Pump Probe's "stream" loader never calls it)
+            # one-frame "peek" lazily, on first ask — see current_frame /
+            # _peek_stream_frame.
             if isinstance(raw, list):
                 text = f"Source: {len(raw)} file(s) — {display_text_for_paths(raw)}"
             elif self._stem_filter:
@@ -3286,6 +3296,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
                 text = f"Source: {raw}"
             self._info.setText(text)
             self._live_frame_update = False
+            self._stream_preview_dirty = True
             self.dataChanged.emit()
             return
         try:
@@ -3332,6 +3343,36 @@ class DataLoaderPanel(QtWidgets.QWidget):
         except Exception:
             import traceback
             show_error(self, "Load error", traceback.format_exc())
+
+    def _on_combine_changed(self, *_args):
+        """A "Combine sub-frames" control (chunk size/op) changed — the
+        cached preview frame (if any caller has asked for one via
+        current_frame()) no longer reflects the current settings."""
+        if self._raw_source():
+            self._stream_preview_dirty = True
+            self.dataChanged.emit()
+
+    def _peek_stream_frame(self):
+        """Fetch just the first frame the current "stream"-mode source would
+        yield, for a caller's preview (e.g. Batch Integrate's Detector view
+        overlay) — without eagerly loading the whole dataset the way
+        "stack"/"single" mode does. Opens the exact same source the real
+        run will use (``workers._open_source_cfg``), so e.g. a VAREX
+        multi-file source previews its actual combined frame, not a raw
+        sub-frame. Returns None if no source is set or it can't be opened
+        (e.g. an incomplete pick, or a transient read error)."""
+        cfg = self.source_cfg()
+        if not (cfg.get("path") or cfg.get("paths")):
+            return None
+        try:
+            from midas_gui.workers import _open_source_cfg
+            source = _open_source_cfg(cfg)
+            if getattr(source, "n_frames", 0) == 0:
+                return None
+            _fid, img = source.get(0)
+            return np.asarray(img, dtype=np.float32)
+        except Exception:
+            return None
 
     def _setup_navigator(self):
         hi = max(0, self._nframes - 1)
@@ -3667,7 +3708,21 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._set_frame(i)
 
     def current_frame(self):
-        """Raw (uncorrected) current 2-D frame, or None."""
+        """Raw (uncorrected) current 2-D frame, or None.
+
+        "stream" mode fetches this lazily, on first ask, from
+        ``_peek_stream_frame`` — cached until ``_stream_preview_dirty`` is
+        set again (on a source or "Combine sub-frames" change). Pump Probe
+        also uses "stream" mode but never calls this, so the (sometimes
+        multi-second, for a large multi-frame HDF5) peek only ever happens
+        for a caller that actually wants a preview (Batch Integrate's
+        Detector view)."""
+        if self._mode == "stream":
+            if getattr(self, "_stream_preview_dirty", True):
+                self._cur = self._peek_stream_frame()
+                self._nframes = 1 if self._cur is not None else 0
+                self._stream_preview_dirty = False
+            return self._cur
         if self._nframes == 0:
             return None
         if self._cur is None:

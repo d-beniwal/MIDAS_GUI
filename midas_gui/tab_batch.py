@@ -28,7 +28,7 @@ from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_
                                widgets_to_dict, apply_dict_to_widgets)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, DataLoaderPanel, OutputFormatSelector,
-                               ImageViewer)
+                               ImageViewer, build_lab_frame_axes_items)
 from midas_gui.workers import (BatchWorker, BatchRunCoordinator, apply_q_uniform,
                                DriftWorker, FolderMonitorWorker, write_all_profiles)
 from midas_gui.dialogs import show_error
@@ -55,6 +55,7 @@ class BatchTab(QtWidgets.QWidget):
         self._geom_cache = None              # cached integration context (detector map)
         self._geom_sig = None                # signature the cached context was built for
         self._bin_overlay_items: list = []   # Rmin/Rmax + bin-grid overlay on _det_view
+        self._axis_items: list = []          # Lab-frame axes overlay on _det_view
         # Built lazily on first switch to Hydra mode: it owns 8 pyqtgraph
         # widgets (4 WaterfallViewer + 4 StackedProfileViewer), and most
         # sessions never touch Hydra Batch Integrate — see .context/DECISIONS.md's
@@ -151,6 +152,7 @@ class BatchTab(QtWidgets.QWidget):
             draw_polar_bin_overlay(
                 self._det_view, self._bin_overlay_items,
                 bc_y=0.0, bc_z=0.0, r_min=0.0, r_max=0.0, r_bin=1.0, e_bin=5.0)
+            self._clear_lab_axes()
             return
         if self._r_max.value() == 0.0:
             self._r_max.blockSignals(True)
@@ -164,6 +166,32 @@ class BatchTab(QtWidgets.QWidget):
             r_bin=self._r_bin.value(), e_bin=self._e_bin.value(),
             eta_min=self._eta_min.value(), eta_max=self._eta_max.value(),
             show_grid=self._grid_chk.isChecked())
+        self._redraw_lab_axes_if_on(fields["BC_y"], fields["BC_z"])
+
+    # ── Lab-frame axes overlay (same as Data Viewer/Calibrate — see
+    # widgets.build_lab_frame_axes_items) ───────────────────────────
+    def _on_lab_axes_toggled(self, checked: bool) -> None:
+        if checked:
+            self._refresh_detector_preview()
+        else:
+            self._clear_lab_axes()
+
+    def _redraw_lab_axes_if_on(self, bc_y: float, bc_z: float) -> None:
+        if not self._lab_axes_chk.isChecked():
+            return
+        self._clear_lab_axes()
+        img = self._det_view._data
+        if img is None:
+            return
+        items = build_lab_frame_axes_items(self._det_view._iv, img.shape, bc_y, bc_z)
+        for it in items:
+            self._det_view._iv.addItem(it)
+        self._axis_items.extend(items)
+
+    def _clear_lab_axes(self) -> None:
+        for it in self._axis_items:
+            self._det_view._iv.removeItem(it)
+        self._axis_items.clear()
 
     def _resolved_im_trans(self) -> tuple:
         """ImTransOpt codes from the active calibration source — the same
@@ -491,6 +519,14 @@ class BatchTab(QtWidgets.QWidget):
             "each η-bin edge (bounded to Eta min/max). Thinned to at most "
             "~50 rings / ~72 spokes for legibility with fine bin sizes.")
         integ.body.addWidget(self._grid_chk)
+        self._lab_axes_chk = QtWidgets.QCheckBox("Lab-frame axes")
+        self._lab_axes_chk.setToolTip(
+            "Overlay MIDAS lab-frame axes (X_Lab/Y_Lab), the beam-direction "
+            "⊗ glyph, and an η sweep arc on the Detector view tab, anchored "
+            "at the active calibration's beam centre — same overlay as the "
+            "Data Viewer/Calibrate tabs.")
+        integ.body.addWidget(self._lab_axes_chk)
+        self._lab_axes_chk.toggled.connect(self._on_lab_axes_toggled)
         for w in (self._r_min, self._r_max, self._eta_min, self._eta_max, self._r_bin, self._e_bin):
             w.valueChanged.connect(self._refresh_detector_preview)
         self._grid_chk.toggled.connect(self._refresh_detector_preview)
