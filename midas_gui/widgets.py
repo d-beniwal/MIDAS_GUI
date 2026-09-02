@@ -2019,7 +2019,8 @@ class FieldSelector(QtWidgets.QGroupBox):
         self._path_ed.blockSignals(False)
 
     def _open_browse_dialog(self):
-        dlg = BrowseFilesDialog(self, title=f"Select {self.title()}")
+        dlg = BrowseFilesDialog(self, title=f"Select {self.title()}",
+                                start_dir=self._path_ed.text().strip())
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return
         mode = dlg.mode()
@@ -3077,7 +3078,8 @@ class DataLoaderPanel(QtWidgets.QWidget):
 
     def _open_browse_dialog(self):
         dlg = BrowseFilesDialog(self, title="Select data",
-                                modes=("file", "files", "folder", "stem"))
+                                modes=("file", "files", "folder", "stem"),
+                                start_dir=self._path_ed.text().strip())
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return
         mode = dlg.mode()

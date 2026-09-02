@@ -71,6 +71,7 @@ class BatchTab(QtWidgets.QWidget):
         self._build_ui()
         self._loader.monitorToggled.connect(self._toggle_monitor)
         self._loader.dataChanged.connect(self._refresh_detector_preview)
+        self._loader.fieldsChanged.connect(self._refresh_detector_preview)
         self._use_tab2_btn.toggled.connect(self._refresh_detector_preview)
         self._json_ed.textChanged.connect(lambda *_: self._refresh_detector_preview())
         self._loader.set_path(DEFAULT_NICKEL_DIR)
@@ -144,7 +145,7 @@ class BatchTab(QtWidgets.QWidget):
         the Rmin/Rmax/R-bin/η-bin/Show-bin-grid controls changing. The Rmax
         auto-fill and overlay must not depend on a frame already being
         loaded — calibration commonly arrives before data does."""
-        frame = self._loader.current_frame()
+        frame = self._loader.corrected(self._loader.current_frame())
         if frame is not None:
             self._det_view.set_image(frame, autorange=True, reset_levels=True)
         fields, _ = self._calib_fields_in_use()
@@ -466,18 +467,8 @@ class BatchTab(QtWidgets.QWidget):
         _ki = self._kernel.findData(DEFAULT_KERNEL)
         if _ki >= 0:
             self._kernel.setCurrentIndex(_ki)
-        self._azim = _NoScrollComboBox()
-        self._azim.addItem("Pixel-weighted", True)
-        self._azim.addItem("η-bin mean (legacy)", False)
-        self._azim.setToolTip(
-            "How the 2-D (η, R) cake is collapsed to a 1-D profile:\n"
-            "• Pixel-weighted — Σ(mean·count)/Σ(count); robust to partial azimuthal\n"
-            "  coverage / off-detector beam centres and independent of η-bin size.\n"
-            "• η-bin mean — unweighted mean of the per-η-bin means (can distort the\n"
-            "  profile with a coarse η bin when the beam centre is off the detector).")
         intf = S.Form()
         intf.row(("Kernel:", self._kernel))
-        intf.row(("Azim. avg:", self._azim))
         integ.body.addLayout(intf)
 
         def _section_label(text):
@@ -485,16 +476,28 @@ class BatchTab(QtWidgets.QWidget):
             lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px;font-weight:bold;")
             return lbl
 
-        # Grouped per axis (bin size + range together) so it's clear these
-        # are all one thing — the caking geometry, matching a
-        # cake_parameters CSV's R_MIN/R_MAX/R_STEP/ETA_MIN/ETA_MAX/ETA_STEP
-        # one-for-one (see _load_cake_csv). Rmax 0.0 is the "auto" sentinel:
-        # left untouched, it's passed through as RMax=None so the backend's
-        # own farthest-corner default stays authoritative (see
-        # helpers._build_spec) — auto-filled to that same corner value once
-        # calibration resolves. Eta min/max default -180/180 (full circle),
-        # matching the backend's own default (same None-means-"leave the
-        # backend default" contract as Rmin/Rmax).
+        # Grouped per axis (bin size + range together, plus anything else
+        # that's really about that axis) so the relationships are visible
+        # instead of scattered across the card:
+        #   RADIAL:    R bin/Rmin/Rmax, then Q-uniform bins (an alternate
+        #              *output* binning for the same radial axis, not an
+        #              independent thing — R bin/Rmin/Rmax still set the
+        #              underlying integration grid; Q only rebins the
+        #              result, see _run()'s "Always R-uniform..." comment).
+        #   AZIMUTHAL: η bin/Eta min/Eta max, then Azim. avg (how η is
+        #              collapsed to 1-D) and Multi-azimuth output (whether
+        #              it's collapsed at all) — both are about the same η
+        #              axis. Maps to a cake_parameters CSV's
+        #              R_MIN/R_MAX/R_STEP/ETA_MIN/ETA_MAX/ETA_STEP
+        #              one-for-one (see _load_cake_csv). Rmax 0.0 is the
+        #              "auto" sentinel: left untouched, it's passed through
+        #              as RMax=None so the backend's own farthest-corner
+        #              default stays authoritative (see helpers._build_spec)
+        #              — auto-filled to that same corner value once
+        #              calibration resolves. Eta min/max default -180/180
+        #              (full circle), matching the backend's own default
+        #              (same None-means-"leave the backend default"
+        #              contract as Rmin/Rmax).
         integ.body.addWidget(_section_label("RADIAL RANGE  (R_MIN / R_MAX / R_STEP)"))
         self._r_bin = _fspin(0.1, 20.0, 2, 1.0, "px")
         self._r_min = _fspin(0.0, 1_000_000.0, 2, 0.0, "px")
@@ -516,6 +519,27 @@ class BatchTab(QtWidgets.QWidget):
         rf.row(("Rmin:", self._r_min))
         rf.row(("Rmax:", rmax_row))
         integ.body.addLayout(rf)
+        for w in (self._r_min, self._r_max, self._r_bin):
+            w.valueChanged.connect(self._refresh_detector_preview)
+
+        self._q_check = QtWidgets.QCheckBox("Q-uniform bins (instead of R)")
+        self._q_check.setToolTip(
+            "Bin uniformly in Q (Å⁻¹) instead of R (px) for OUTPUT — the same\n"
+            "radial axis, alternate units. R bin/Rmin/Rmax above still set\n"
+            "the underlying integration grid; this rebins that result into Q.")
+        integ.body.addWidget(self._q_check)
+        self._q_min = _fspin(0.0, 100.0, 3, 0.5, "Å⁻¹")
+        self._q_max = _fspin(0.0, 100.0, 3, 8.0, "Å⁻¹")
+        self._q_bin = _fspin(0.0001, 1.0, 4, 0.01, "Å⁻¹")
+        for w in (self._q_min, self._q_max, self._q_bin):
+            w.setEnabled(False)
+        self._q_check.toggled.connect(lambda c: [w.setEnabled(c) for w in
+                                                 (self._q_min, self._q_max, self._q_bin)])
+        qf = S.Form()
+        qf.row(("Qmin:", self._q_min))
+        qf.row(("Qmax:", self._q_max))
+        qf.row(("ΔQ:", self._q_bin))
+        integ.body.addLayout(qf)
 
         integ.body.addWidget(_section_label("AZIMUTHAL RANGE  (ETA_MIN / ETA_MAX / ETA_STEP)"))
         self._e_bin = _fspin(0.5, 30.0, 1, 5.0, "°")
@@ -523,19 +547,23 @@ class BatchTab(QtWidgets.QWidget):
         self._eta_max = _fspin(-180.0, 180.0, 1, 180.0, "°")
         ef = S.Form()
         ef.row(("η bin:", self._e_bin))
-        ef.row(("Eta min:", self._eta_min), ("Eta max:", self._eta_max))
+        ef.row(("Eta min:", self._eta_min))
+        ef.row(("Eta max:", self._eta_max))
         integ.body.addLayout(ef)
-
-        self._grid_chk = QtWidgets.QCheckBox("Show bin grid")
-        self._grid_chk.setToolTip(
-            "Overlay the full (R, η) integration bin grid on the Detector "
-            "view tab — concentric circles at each R-bin edge, spokes at "
-            "each η-bin edge (bounded to Eta min/max). Thinned to at most "
-            "~50 rings / ~72 spokes for legibility with fine bin sizes.")
-        integ.body.addWidget(self._grid_chk)
-        for w in (self._r_min, self._r_max, self._eta_min, self._eta_max, self._r_bin, self._e_bin):
+        for w in (self._eta_min, self._eta_max, self._e_bin):
             w.valueChanged.connect(self._refresh_detector_preview)
-        self._grid_chk.toggled.connect(self._refresh_detector_preview)
+
+        self._azim = _NoScrollComboBox()
+        self._azim.addItem("Pixel-weighted", True)
+        self._azim.addItem("η-bin mean (legacy)", False)
+        self._azim.setToolTip(
+            "How the 2-D (η, R) cake is collapsed to a 1-D profile:\n"
+            "• Pixel-weighted — Σ(mean·count)/Σ(count); robust to partial azimuthal\n"
+            "  coverage / off-detector beam centres and independent of η-bin size.\n"
+            "• η-bin mean — unweighted mean of the per-η-bin means (can distort the\n"
+            "  profile with a coarse η bin when the beam centre is off the detector).")
+        azf = S.Form(); azf.row(("Azim. avg:", self._azim))
+        integ.body.addLayout(azf)
         self._multi_azimuth_chk = QtWidgets.QCheckBox("Multi-azimuth output (cake)")
         self._multi_azimuth_chk.setToolTip(
             "Keep every azimuthal (η) sector as a SEPARATE output profile "
@@ -549,6 +577,15 @@ class BatchTab(QtWidgets.QWidget):
             "Needed for per-azimuth GSAS-II/texture analysis. Not yet "
             "supported together with Q-uniform bins.")
         integ.body.addWidget(self._multi_azimuth_chk)
+
+        self._grid_chk = QtWidgets.QCheckBox("Show bin grid")
+        self._grid_chk.setToolTip(
+            "Overlay the full (R, η) integration bin grid on the Detector "
+            "view tab — concentric circles at each R-bin edge, spokes at "
+            "each η-bin edge (bounded to Eta min/max). Thinned to at most "
+            "~50 rings / ~72 spokes for legibility with fine bin sizes.")
+        integ.body.addWidget(self._grid_chk)
+        self._grid_chk.toggled.connect(self._refresh_detector_preview)
         self._var_check = QtWidgets.QCheckBox("Per-bin variance (σ)")
         self._var_check.setToolTip(
             "Compute per-bin σ via the chosen error model.\n"
@@ -560,18 +597,6 @@ class BatchTab(QtWidgets.QWidget):
         vrow = QtWidgets.QHBoxLayout(); vrow.setSpacing(6)
         vrow.addWidget(self._var_check); vrow.addWidget(self._err_model, 1)
         integ.body.addLayout(vrow)
-        self._q_check = QtWidgets.QCheckBox("Q-uniform bins")
-        self._q_check.setToolTip("Bin uniformly in Q (Å⁻¹) instead of R (px).")
-        integ.body.addWidget(self._q_check)
-        self._q_min = _fspin(0.0, 100.0, 3, 0.5, "Å⁻¹")
-        self._q_max = _fspin(0.0, 100.0, 3, 8.0, "Å⁻¹")
-        self._q_bin = _fspin(0.0001, 1.0, 4, 0.01, "Å⁻¹")
-        for w in (self._q_min, self._q_max, self._q_bin):
-            w.setEnabled(False)
-        self._q_check.toggled.connect(lambda c: [w.setEnabled(c) for w in
-                                                 (self._q_min, self._q_max, self._q_bin)])
-        qf = S.Form(); qf.row(("Qmin:", self._q_min), ("Qmax:", self._q_max)); qf.row(("ΔQ:", self._q_bin))
-        integ.body.addLayout(qf)
         lv.addWidget(integ)
 
         # ── Corrections ──
