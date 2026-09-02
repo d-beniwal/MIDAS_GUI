@@ -56,6 +56,7 @@ class BatchTab(QtWidgets.QWidget):
         self._geom_sig = None                # signature the cached context was built for
         self._bin_overlay_items: list = []   # Rmin/Rmax + bin-grid overlay on _det_view
         self._axis_items: list = []          # Lab-frame axes overlay on _det_view
+        self._last_shape_mismatch_logged: Optional[tuple] = None
         # Built lazily on first switch to Hydra mode: it owns 8 pyqtgraph
         # widgets (4 WaterfallViewer + 4 StackedProfileViewer), and most
         # sessions never touch Hydra Batch Integrate — see .context/DECISIONS.md's
@@ -164,6 +165,16 @@ class BatchTab(QtWidgets.QWidget):
             self._r_max.setValue(rmax_corner_px(
                 fields["BC_y"], fields["BC_z"], fields["NrPixelsY"], fields["NrPixelsZ"]))
             self._r_max.blockSignals(False)
+        if frame is not None:
+            expected = (int(fields["NrPixelsZ"]), int(fields["NrPixelsY"]))
+            if tuple(frame.shape) != expected and expected != self._last_shape_mismatch_logged:
+                self._log.append(
+                    f"[batch] Warning: calibration is for a {expected[1]}x{expected[0]} "
+                    f"detector but the loaded frame is {frame.shape[1]}x{frame.shape[0]} — "
+                    "the beam-centre/Rmin/Rmax overlay and lab-frame axes will be drawn in "
+                    "the WRONG place (or effectively invisible) until the calibration "
+                    "matches this data's actual detector size.")
+                self._last_shape_mismatch_logged = expected
         draw_polar_bin_overlay(
             self._det_view, self._bin_overlay_items,
             bc_y=fields["BC_y"], bc_z=fields["BC_z"],
@@ -471,14 +482,23 @@ class BatchTab(QtWidgets.QWidget):
         _ki = self._kernel.findData(DEFAULT_KERNEL)
         if _ki >= 0:
             self._kernel.setCurrentIndex(_ki)
-        intf = S.Form()
-        intf.row(("Kernel:", self._kernel))
-        integ.body.addLayout(intf)
-
         def _section_label(text):
             lbl = QtWidgets.QLabel(text)
             lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px;font-weight:bold;")
             return lbl
+
+        # One Form for every label:value row in this card (Kernel through
+        # Azim. avg) — a QGridLayout sizes its label column to the widest
+        # label added to THAT SAME instance, so splitting R/Q/Eta into
+        # separate Form()s (as an earlier pass did) left each section's
+        # entry cells starting at a slightly different x depending on its
+        # own longest label ("η min:" vs "R bin:" vs "ΔQ:"). One shared
+        # Form makes every entry cell line up regardless of section.
+        # Section headers and checkboxes go in via .full() (spans the
+        # whole row) so they interleave with the label:value rows without
+        # starting a new grid.
+        pf = S.Form()
+        pf.row(("Kernel:", self._kernel))
 
         # Grouped per axis (bin size + range together, plus anything else
         # that's really about that axis) so the relationships are visible
@@ -488,7 +508,7 @@ class BatchTab(QtWidgets.QWidget):
         #              independent thing — R bin/Rmin/Rmax still set the
         #              underlying integration grid; Q only rebins the
         #              result, see _run()'s "Always R-uniform..." comment).
-        #   AZIMUTHAL: η bin/Eta min/Eta max, then Azim. avg (how η is
+        #   AZIMUTHAL: η bin/η min/η max, then Azim. avg (how η is
         #              collapsed to 1-D) and Multi-azimuth output (whether
         #              it's collapsed at all) — both are about the same η
         #              axis. Maps to a cake_parameters CSV's
@@ -498,31 +518,35 @@ class BatchTab(QtWidgets.QWidget):
         #              as RMax=None so the backend's own farthest-corner
         #              default stays authoritative (see helpers._build_spec)
         #              — auto-filled to that same corner value once
-        #              calibration resolves. Eta min/max default -180/180
+        #              calibration resolves. η min/max default -180/180
         #              (full circle), matching the backend's own default
         #              (same None-means-"leave the backend default"
         #              contract as Rmin/Rmax).
-        integ.body.addWidget(_section_label("RADIAL RANGE  (R_MIN / R_MAX / R_STEP)"))
+        pf.full(_section_label("RADIAL RANGE  (R_MIN / R_MAX / R_STEP)"))
         self._r_bin = _fspin(0.1, 20.0, 2, 1.0, "px")
         self._r_min = _fspin(0.0, 1_000_000.0, 2, 0.0, "px")
         self._r_max = _fspin(0.0, 1_000_000.0, 2, 0.0, "px")
         self._r_max.setToolTip(
             "0 = auto (farthest detector corner from the beam centre).\n"
-            "Use the Corner/Edge buttons to fill in a value, or type your own.")
+            "Use the Corner/Edge buttons (left) to fill in a value, or type your own.")
+        # Corner/Edge sit on their own left-aligned row instead of tacked
+        # onto the Rmax entry — keeps every entry cell in this card the
+        # same width/x-position (a compound Rmax-spinbox+buttons widget
+        # used to be wider than every other row's plain spinbox).
         self._rmax_corner_btn = QtWidgets.QPushButton("Corner")
         self._rmax_corner_btn.setToolTip("Set Rmax to the farthest detector CORNER from the beam centre.")
         self._rmax_corner_btn.clicked.connect(lambda: self._apply_rmax_preset(rmax_corner_px))
         self._rmax_edge_btn = QtWidgets.QPushButton("Edge")
         self._rmax_edge_btn.setToolTip("Set Rmax to the farthest detector EDGE from the beam centre.")
         self._rmax_edge_btn.clicked.connect(lambda: self._apply_rmax_preset(rmax_edge_px))
-        rmax_row = QtWidgets.QHBoxLayout(); rmax_row.setSpacing(4)
-        rmax_row.addWidget(self._r_max)
-        rmax_row.addWidget(self._rmax_corner_btn); rmax_row.addWidget(self._rmax_edge_btn)
-        rf = S.Form()
-        rf.row(("R bin:", self._r_bin))
-        rf.row(("Rmin:", self._r_min))
-        rf.row(("Rmax:", rmax_row))
-        integ.body.addLayout(rf)
+        rmax_btn_row = QtWidgets.QHBoxLayout(); rmax_btn_row.setSpacing(4)
+        rmax_btn_row.addWidget(QtWidgets.QLabel("Rmax presets:"))
+        rmax_btn_row.addWidget(self._rmax_corner_btn); rmax_btn_row.addWidget(self._rmax_edge_btn)
+        rmax_btn_row.addStretch(1)
+        pf.full(rmax_btn_row)
+        pf.row(("R bin:", self._r_bin))
+        pf.row(("Rmin:", self._r_min))
+        pf.row(("Rmax:", self._r_max))
         for w in (self._r_min, self._r_max, self._r_bin):
             w.valueChanged.connect(self._refresh_detector_preview)
 
@@ -531,7 +555,7 @@ class BatchTab(QtWidgets.QWidget):
             "Bin uniformly in Q (Å⁻¹) instead of R (px) for OUTPUT — the same\n"
             "radial axis, alternate units. R bin/Rmin/Rmax above still set\n"
             "the underlying integration grid; this rebins that result into Q.")
-        integ.body.addWidget(self._q_check)
+        pf.full(self._q_check)
         self._q_min = _fspin(0.0, 100.0, 3, 0.5, "Å⁻¹")
         self._q_max = _fspin(0.0, 100.0, 3, 8.0, "Å⁻¹")
         self._q_bin = _fspin(0.0001, 1.0, 4, 0.01, "Å⁻¹")
@@ -539,21 +563,17 @@ class BatchTab(QtWidgets.QWidget):
             w.setEnabled(False)
         self._q_check.toggled.connect(lambda c: [w.setEnabled(c) for w in
                                                  (self._q_min, self._q_max, self._q_bin)])
-        qf = S.Form()
-        qf.row(("Qmin:", self._q_min))
-        qf.row(("Qmax:", self._q_max))
-        qf.row(("ΔQ:", self._q_bin))
-        integ.body.addLayout(qf)
+        pf.row(("Qmin:", self._q_min))
+        pf.row(("Qmax:", self._q_max))
+        pf.row(("ΔQ:", self._q_bin))
 
-        integ.body.addWidget(_section_label("AZIMUTHAL RANGE  (ETA_MIN / ETA_MAX / ETA_STEP)"))
+        pf.full(_section_label("AZIMUTHAL RANGE  (ETA_MIN / ETA_MAX / ETA_STEP)"))
         self._e_bin = _fspin(0.5, 30.0, 1, 5.0, "°")
         self._eta_min = _fspin(-180.0, 180.0, 1, -180.0, "°")
         self._eta_max = _fspin(-180.0, 180.0, 1, 180.0, "°")
-        ef = S.Form()
-        ef.row(("η bin:", self._e_bin))
-        ef.row(("Eta min:", self._eta_min))
-        ef.row(("Eta max:", self._eta_max))
-        integ.body.addLayout(ef)
+        pf.row(("η bin:", self._e_bin))
+        pf.row(("η min:", self._eta_min))
+        pf.row(("η max:", self._eta_max))
         for w in (self._eta_min, self._eta_max, self._e_bin):
             w.valueChanged.connect(self._refresh_detector_preview)
 
@@ -566,8 +586,9 @@ class BatchTab(QtWidgets.QWidget):
             "  coverage / off-detector beam centres and independent of η-bin size.\n"
             "• η-bin mean — unweighted mean of the per-η-bin means (can distort the\n"
             "  profile with a coarse η bin when the beam centre is off the detector).")
-        azf = S.Form(); azf.row(("Azim. avg:", self._azim))
-        integ.body.addLayout(azf)
+        pf.row(("Azim. avg:", self._azim))
+        integ.body.addLayout(pf)
+
         self._multi_azimuth_chk = QtWidgets.QCheckBox("Multi-azimuth output (cake)")
         self._multi_azimuth_chk.setToolTip(
             "Keep every azimuthal (η) sector as a SEPARATE output profile "
@@ -579,14 +600,19 @@ class BatchTab(QtWidgets.QWidget):
             "also define real output granularity, so every existing run's "
             "result size is unaffected unless you opt in.\n\n"
             "Needed for per-azimuth GSAS-II/texture analysis. Not yet "
-            "supported together with Q-uniform bins.")
+            "supported together with Q-uniform bins.\n\n"
+            "Setting η bin to 360° does NOT make this equivalent to leaving "
+            "it unchecked — that just collapses the sectors to one trivial "
+            "360°-wide sector, still written as a (1-row) cake instead of a "
+            "plain profile, and HDF5 output is still skipped. For a real "
+            "azimuthally-averaged profile, leave this box unchecked.")
         integ.body.addWidget(self._multi_azimuth_chk)
 
         self._grid_chk = QtWidgets.QCheckBox("Show bin grid")
         self._grid_chk.setToolTip(
             "Overlay the full (R, η) integration bin grid on the Detector "
             "view tab — concentric circles at each R-bin edge, spokes at "
-            "each η-bin edge (bounded to Eta min/max). Thinned to at most "
+            "each η-bin edge (bounded to η min/max). Thinned to at most "
             "~50 rings / ~72 spokes for legibility with fine bin sizes.")
         integ.body.addWidget(self._grid_chk)
         self._grid_chk.toggled.connect(self._refresh_detector_preview)
