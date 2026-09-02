@@ -285,6 +285,8 @@ class BatchTab(QtWidgets.QWidget):
             "eta_min": self._eta_min,
             "eta_max": self._eta_max,
             "grid_chk": self._grid_chk,
+            "lab_axes_chk": self._lab_axes_chk,
+            "preview_sum_n": self._preview_sum_n,
             "azim": self._azim,
             "multi_azimuth": self._multi_azimuth_chk,
             "var_check": self._var_check,
@@ -310,6 +312,7 @@ class BatchTab(QtWidgets.QWidget):
             "corr": self._corr_widget.get_state(),
             "fmt": self._fmt.get_state(),
             "loader": self._loader.get_state(),
+            "det_view": self._det_view.display_state(),
             "hydra": {"active_mode": self._mode_ribbon.mode(),
                       "page": self._hydra_page.get_state() if self._hydra_page else {}},
         }
@@ -322,6 +325,7 @@ class BatchTab(QtWidgets.QWidget):
         # the generic apply_dict_to_widgets pass (which would just ignore it).
         fmt_keys = fields.pop("fmt_keys", None)
         apply_dict_to_widgets(self._state_widgets(), fields)
+        self._det_view.set_display_state(state.get("det_view"))
         self._corr_widget.set_state(state.get("corr") or {})
         self._fmt.set_state(fmt_keys if fmt_keys is not None else state.get("fmt"))
         hydra_state = state.get("hydra") or {}

@@ -218,6 +218,47 @@ class ImageViewer(QtWidgets.QWidget):
         self.set_image(frame, autorange=autorange, reset_levels=reset_levels)
         return frame
 
+    def display_state(self) -> dict:
+        """cmap/log/vmin%/vmax% as a plain dict — the one place a caller
+        that wants to persist "how this viewer is displayed" (e.g. a
+        tab's project-state save) should read from, instead of reaching
+        into ``_cmap``/``_log``/``_vmin``/``_vmax`` directly."""
+        return {"cmap": self._cmap.currentText(), "log": self._log.isChecked(),
+                "vmin": self._vmin.value(), "vmax": self._vmax.value()}
+
+    def set_display_state(self, state: Optional[dict]) -> None:
+        """Inverse of :meth:`display_state`. Restoring ``log``/``vmin``/
+        ``vmax`` alone is enough to take effect on the next
+        ``set_image``/``set_raw_frame`` (``_redisplay`` reads their
+        current values fresh every time), but ``cmap`` is different: the
+        colormap is only ever applied to the actual pyqtgraph view from
+        ``_set_cmap``, which only runs off the combo's own
+        ``currentTextChanged`` signal — restoring the combo's index with
+        signals blocked (the same convention ``apply_dict_to_widgets``
+        uses for every other widget) would leave the dropdown showing the
+        saved colormap while the image stayed rendered in whatever
+        colormap this viewer was constructed with. So this explicitly
+        re-applies it. Missing/unrecognized keys are left untouched."""
+        if not state:
+            return
+        cmap = state.get("cmap")
+        if cmap and self._cmap.findText(str(cmap)) >= 0:
+            self._cmap.blockSignals(True)
+            self._cmap.setCurrentText(str(cmap))
+            self._cmap.blockSignals(False)
+            self._set_cmap(str(cmap))
+        if "log" in state:
+            self._log.blockSignals(True)
+            self._log.setChecked(bool(state["log"]))
+            self._log.blockSignals(False)
+        for key, spin in (("vmin", self._vmin), ("vmax", self._vmax)):
+            if key in state:
+                spin.blockSignals(True)
+                spin.setValue(state[key])
+                spin.blockSignals(False)
+        if self._data is not None:
+            self._redisplay()
+
     def _apply_view_limits(self, w: int, h: int):
         """Bound pan/zoom to a sane region around the image so the user can't
         scroll/zoom out into an empty void or lose the image off-screen."""
