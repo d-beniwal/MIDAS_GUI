@@ -145,7 +145,11 @@ class BatchTab(QtWidgets.QWidget):
         the Rmin/Rmax/R-bin/η-bin/Show-bin-grid controls changing. The Rmax
         auto-fill and overlay must not depend on a frame already being
         loaded — calibration commonly arrives before data does."""
-        frame = self._loader.corrected(self._loader.current_frame())
+        # current_frame() already applies dark/bright/background correction
+        # to each constituent frame before any "Preview: sum first N"
+        # summing (see DataLoaderPanel._peek_stream_frame) — correcting
+        # again here would double-apply it.
+        frame = self._loader.current_frame()
         if frame is not None:
             self._det_view.set_image(frame, autorange=True, reset_levels=True)
         fields, _ = self._calib_fields_in_use()

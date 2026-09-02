@@ -2989,6 +2989,14 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._mask_sel.maskChanged.connect(self.fieldsChanged)
         lv.addWidget(self._mask_sel)
 
+        # "stream" mode's cached preview frame (_peek_stream_frame) now
+        # bakes dark/bright/background correction in — a field changing
+        # after a preview was already cached must invalidate it too, or a
+        # caller like Batch Integrate's Detector view would keep showing
+        # the pre-change (or wrongly-corrected) frame despite fieldsChanged
+        # asking it to refresh.
+        self.fieldsChanged.connect(self._on_fields_changed_stream)
+
         # Intensity statistics + histogram (Data Viewer only). Created here but
         # placed in a draggable splitter below, not in the scrolling card column.
         self.stats_panel = None
@@ -3355,6 +3363,10 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._stream_preview_dirty = True
             self.dataChanged.emit()
 
+    def _on_fields_changed_stream(self) -> None:
+        if self._mode == "stream":
+            self._stream_preview_dirty = True
+
     def set_preview_sum(self, n: int) -> None:
         """"stream" mode only: how many of the source's leading frames
         ``current_frame()``'s preview sums together (a display aid only —
@@ -3369,13 +3381,18 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._stream_preview_dirty = True
 
     def _peek_stream_frame(self):
-        """Fetch and sum the first ``self._preview_sum_n`` frames the
-        current "stream"-mode source would yield, for a caller's preview
-        (e.g. Batch Integrate's Detector view overlay) — without eagerly
-        loading the whole dataset the way "stack"/"single" mode does.
-        Opens the exact same source the real run will use
-        (``workers._open_source_cfg``), so e.g. a VAREX multi-file source
-        previews its actual combined-per-file frames, not a raw sub-frame.
+        """Fetch, dark/bright/background-correct, and sum the first
+        ``self._preview_sum_n`` frames the current "stream"-mode source
+        would yield, for a caller's preview (e.g. Batch Integrate's
+        Detector view overlay) — without eagerly loading the whole dataset
+        the way "stack"/"single" mode does. Opens the exact same source the
+        real run will use (``workers._open_source_cfg``), so e.g. a VAREX
+        multi-file source previews its actual combined-per-file frames, not
+        a raw sub-frame. Correction is applied to each constituent frame
+        BEFORE summing (matching how the real batch run corrects every
+        frame independently) — correcting only the final sum once would
+        subtract just one dark frame's worth from an N-times-larger signal,
+        making it look like dark subtraction barely did anything for N>1.
         Returns None if no source is set or it can't be opened (e.g. an
         incomplete pick, or a transient read error)."""
         cfg = self.source_cfg()
@@ -3391,7 +3408,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
             acc = None
             for i in range(n):
                 _fid, img = source.get(i)
-                img = np.asarray(img, dtype=np.float64)
+                img = self.corrected(np.asarray(img, dtype=np.float64))
                 acc = img if acc is None else acc + img
             return acc.astype(np.float32)
         except Exception:
