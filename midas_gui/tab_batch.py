@@ -57,6 +57,7 @@ class BatchTab(QtWidgets.QWidget):
         self._bin_overlay_items: list = []   # Rmin/Rmax + bin-grid overlay on _det_view
         self._axis_items: list = []          # Lab-frame axes overlay on _det_view
         self._last_shape_mismatch_logged: Optional[tuple] = None
+        self._last_calib_fail_note: Optional[str] = None
         # Built lazily on first switch to Hydra mode: it owns 8 pyqtgraph
         # widgets (4 WaterfallViewer + 4 StackedProfileViewer), and most
         # sessions never touch Hydra Batch Integrate — see .context/DECISIONS.md's
@@ -153,13 +154,26 @@ class BatchTab(QtWidgets.QWidget):
         frame = self._loader.current_frame()
         if frame is not None:
             self._det_view.set_image(frame, autorange=True, reset_levels=True)
-        fields, _ = self._calib_fields_in_use()
+        fields, note = self._calib_fields_in_use()
         if not fields or fields.get("BC_y") is None or fields.get("NrPixelsY") is None:
+            # No visible sign otherwise that the overlay silently isn't being
+            # drawn (e.g. "From file" pointing at a saved *project* .json
+            # instead of an actual calibration geometry file/paramstest.txt/
+            # .poni — geometry_fields_from_file rejects it, but every other
+            # caller of _calib_fields_in_use() throws the note away). Log it
+            # once per distinct note so re-checking a box or nudging a
+            # spinbox doesn't spam the log on every refresh.
+            if note != self._last_calib_fail_note:
+                self._log.append(
+                    f"[batch] Detector-view overlay (Rmin/Rmax, bin grid, "
+                    f"lab-frame axes) not drawn: {note}")
+                self._last_calib_fail_note = note
             draw_polar_bin_overlay(
                 self._det_view, self._bin_overlay_items,
                 bc_y=0.0, bc_z=0.0, r_min=0.0, r_max=0.0, r_bin=1.0, e_bin=5.0)
             self._clear_lab_axes()
             return
+        self._last_calib_fail_note = None
         if self._r_max.value() == 0.0:
             self._r_max.blockSignals(True)
             self._r_max.setValue(rmax_corner_px(
