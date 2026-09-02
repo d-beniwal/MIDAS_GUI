@@ -24,7 +24,7 @@ from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _predict_ring_radii, _NoScrollComboBox,
     make_kedge_label, make_pixel_label, tilted_ring_xy, refresh_combo_items,
     widgets_to_dict, apply_dict_to_widgets, im_trans_codes_from_checkboxes,
-    _apply_im_trans, paramstest_pairs)
+    paramstest_pairs)
 from midas_gui.widgets import (
     PickableImageViewer, ProfileViewer, LogPanel, DataLoaderPanel, CakeViewer,
     RingResidualViewer, build_lab_frame_axes_items, ring_azimuth_residual)
@@ -635,8 +635,8 @@ class CalibrationTab(QtWidgets.QWidget):
         to the array actually fed to the calibration pipeline."""
         if self._image is not None:
             img = self._loader.corrected(self._calib_image())
-            img = _apply_im_trans(img, self._im_trans_codes())
-            self._img_view.set_image(img, autorange=autorange, reset_levels=autorange)
+            self._img_view.set_raw_frame(img, self._im_trans_codes(),
+                                          autorange=autorange, reset_levels=autorange)
         self._redraw_lab_axes_if_on()
 
     # ── Lab-frame axes overlay ───────────────────────────────────────

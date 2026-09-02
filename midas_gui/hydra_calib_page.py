@@ -35,7 +35,7 @@ from midas_gui.constants import (
     DISTORTION_NAMES)
 from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _NoScrollComboBox, make_kedge_label, make_pixel_label,
-    _load_image, _apply_im_trans, apply_field_corrections, average_field, source_kind,
+    _load_image, apply_field_corrections, average_field, source_kind,
     widgets_to_dict, apply_dict_to_widgets, _predict_ring_radii, refresh_combo_items)
 from midas_gui.widgets import PickableImageViewer, LogPanel, CakeViewer, _convert_radial
 from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar, HydraProfileViewer
@@ -641,10 +641,14 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         img = apply_field_corrections(
             img, dark=self._loader.dark(n), bright=self._loader.bright(n),
             bright_mode=self._loader.bright_mode(), background=self._loader.background(n))
-        img = _apply_im_trans(img, tuple(self._active_card.im_trans_codes()))
-        fresh = (self._disp_key != (img.shape, n))
-        self._disp_key = (img.shape, n)
-        self._img_view.set_image(img, autorange=fresh, reset_levels=fresh)
+        im_trans = tuple(self._active_card.im_trans_codes())
+        # Cheap post-transform shape (only `3`=transpose changes it — see
+        # helpers._apply_im_trans) so the "fresh view" check below doesn't
+        # need to flip the array twice just to know its displayed shape.
+        disp_shape = img.shape[::-1] if 3 in im_trans else img.shape
+        fresh = (self._disp_key != (disp_shape, n))
+        self._disp_key = (disp_shape, n)
+        self._img_view.set_raw_frame(img, im_trans, autorange=fresh, reset_levels=fresh)
 
     # ── Distortion coefficient selection ──────────────────────────
 

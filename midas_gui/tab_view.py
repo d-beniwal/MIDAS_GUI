@@ -125,8 +125,8 @@ class DataViewerTab(QtWidgets.QWidget):
     def _on_im_trans_changed(self):
         """Transform checkbox toggled — re-apply to the current frame + refresh."""
         if self._is_projection and getattr(self, "_proj_raw", None) is not None:
-            self._cur = _apply_im_trans(self._proj_raw, self._im_trans_codes())
-            self._viewer.set_image(self._cur, autorange=False)
+            self._cur = self._viewer.set_raw_frame(
+                self._proj_raw, self._im_trans_codes(), autorange=False)
             self._redraw_lab_axes_if_on()
             self._geom_card.maybe_auto_radial()
         elif self._loader.current_frame() is not None:
@@ -443,9 +443,10 @@ class DataViewerTab(QtWidgets.QWidget):
             self._loader.stats_panel.set_scope_enabled(True)
         fresh = (self._disp_shape != raw.shape)
         self._disp_shape = raw.shape
-        self._cur = _apply_im_trans(self._loader.corrected(raw), self._im_trans_codes())
         is_live = self._loader.is_live_frame_update()
-        self._viewer.set_image(self._cur, autorange=fresh, reset_levels=not is_live)
+        self._cur = self._viewer.set_raw_frame(
+            self._loader.corrected(raw), self._im_trans_codes(),
+            autorange=fresh, reset_levels=not is_live)
         if fresh:
             self._autofill_imask_max()
         if self._geom_card.bc_auto_enabled():
@@ -468,8 +469,8 @@ class DataViewerTab(QtWidgets.QWidget):
         raw = self._loader.current_frame()
         if raw is None:
             return
-        self._cur = _apply_im_trans(self._loader.corrected(raw), self._im_trans_codes())
-        self._viewer.set_image(self._cur, autorange=False)
+        self._cur = self._viewer.set_raw_frame(
+            self._loader.corrected(raw), self._im_trans_codes(), autorange=False)
         self._redraw_lab_axes_if_on()
         self._update_intensity_overlay()
         if getattr(self, "_topn_btn", None) is not None and self._topn_btn.isChecked():
@@ -511,12 +512,11 @@ class DataViewerTab(QtWidgets.QWidget):
     def _on_projection_done(self, img, info):
         self._proj_btn.setEnabled(True)
         self._proj_raw = img
-        self._cur = _apply_im_trans(img, self._im_trans_codes())
         self._is_projection = True
         self._apply_project_style(True)
         if self._loader.stats_panel is not None:
             self._loader.stats_panel.set_scope_enabled(False)
-        self._viewer.set_image(self._cur)
+        self._cur = self._viewer.set_raw_frame(img, self._im_trans_codes())
         if self._geom_card.bc_auto_enabled():
             NZ, NY = self._cur.shape
             self._geom_card.center_beam_on(NY / 2.0, NZ / 2.0)

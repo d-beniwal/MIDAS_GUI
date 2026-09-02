@@ -35,7 +35,7 @@ from midas_gui.constants import (KERNELS, ERROR_MODELS,
 from midas_gui.helpers import (
     _fspin, _browse, _NoScrollComboBox, _NoScrollSpinBox,
     widgets_to_dict, apply_dict_to_widgets,
-    _load_image, _apply_im_trans, rmax_corner_px, rmax_edge_px, draw_polar_bin_overlay)
+    _load_image, rmax_corner_px, rmax_edge_px, draw_polar_bin_overlay)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, OutputFormatSelector, ImageViewer)
 from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar
@@ -400,8 +400,8 @@ class HydraBatchPage(QtWidgets.QWidget):
         if path is not None:
             try:
                 frame = _load_image(path, self._loader.dataset(), self._loader.frame_index())
-                frame = _apply_im_trans(frame, card.resolved_im_trans())
-                self._det_view.set_image(frame, autorange=True, reset_levels=True)
+                self._det_view.set_raw_frame(frame, card.resolved_im_trans(),
+                                              autorange=True, reset_levels=True)
             except Exception:
                 pass
         fields, _ = card._calib_fields_in_use()

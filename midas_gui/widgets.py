@@ -32,7 +32,7 @@ from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollDoubleSpinBox, _fspin,
                                _browse, is_h5, list_h5_datasets, _NoScrollComboBox,
                                _load_image, _collect_frame_paths, apply_field_corrections,
                                new_temp_h5_path, save_stack_h5, detect_geometry_from_path,
-                               source_kind, display_text_for_paths)
+                               source_kind, display_text_for_paths, _apply_im_trans)
 from midas_gui import style as S
 
 
@@ -183,6 +183,40 @@ class ImageViewer(QtWidgets.QWidget):
         self._coord_bar.setText(
             f"Image {data.shape[1]}×{data.shape[0]} px  |  "
             "Move cursor over image to inspect pixel values")
+
+    def set_raw_frame(self, raw_frame: np.ndarray, im_trans, *,
+                       autorange: bool = True, reset_levels: bool = True) -> np.ndarray:
+        """Display ``raw_frame`` after applying ``im_trans`` (the same
+        flip/transpose codes — 1=flipY, 2=flipZ, 3=transpose, see
+        ``helpers._apply_im_trans`` — a calibration's BC_y/BC_z were fit
+        under) and return the transformed array.
+
+        This is the ONE place a caller that has both a raw detector frame
+        and calibration geometry should go through, instead of calling
+        ``_apply_im_trans`` itself and then ``set_image``. Every BC-based
+        overlay (Rmin/Rmax circles, bin grids, lab-frame axes, calibration
+        rings) is computed in the flipped frame's coordinate system, so a
+        caller that forgets this step — as ``tab_batch.py``'s Detector view
+        once did — silently shows the overlay offset from the real
+        diffraction rings underneath. mpe_wf_saxs_waxs hit this same class
+        of bug (see its ``apply_image_transforms`` docstring in
+        ``ff_asym_qt.py``: "the 'data flipped on cols, dark flipped on
+        rows' trap") and fixed it the same way — one shared function every
+        display call goes through, rather than each call site remembering
+        to flip on its own. Returns the transformed array so callers that
+        keep their own reference to "the currently displayed frame" (for
+        pixel readback, mask overlays, shape lookups, etc.) can do
+        ``self._cur = viewer.set_raw_frame(raw, im_trans)`` in one line.
+
+        Use plain ``set_image`` instead when the array is already in its
+        final display orientation (e.g. Mask Builder, which deliberately
+        works in raw-frame space throughout — see ``tab_mask.py``) or has
+        no associated calibration geometry at all.
+        """
+        codes = tuple(im_trans or ())
+        frame = _apply_im_trans(raw_frame, codes) if codes else raw_frame
+        self.set_image(frame, autorange=autorange, reset_levels=reset_levels)
+        return frame
 
     def _apply_view_limits(self, w: int, h: int):
         """Bound pan/zoom to a sane region around the image so the user can't
