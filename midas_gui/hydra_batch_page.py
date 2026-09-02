@@ -420,7 +420,10 @@ class HydraBatchPage(QtWidgets.QWidget):
             bc_y=fields["BC_y"], bc_z=fields["BC_z"],
             r_min=self._r_min.value(), r_max=self._r_max.value(),
             r_bin=self._r_bin.value(), e_bin=self._e_bin.value(),
-            show_grid=self._grid_chk.isChecked())
+            show_grid=self._grid_chk.isChecked(),
+            tx=fields.get("tx") or 0.0, ty=fields.get("ty") or 0.0,
+            tz=fields.get("tz") or 0.0, lsd_um=fields.get("Lsd"),
+            pxY_um=fields.get("pxY"), pxZ_um=fields.get("pxZ"))
 
     # ── Run ────────────────────────────────────────────────────────
 

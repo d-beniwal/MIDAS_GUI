@@ -24,7 +24,7 @@ from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_
                                geometry_fields_from_file,
                                resolve_calibration_fields, make_calib_values_button,
                                rmax_corner_px, rmax_edge_px, draw_polar_bin_overlay,
-                               _NoScrollSpinBox, _NoScrollComboBox,
+                               _NoScrollSpinBox, _NoScrollComboBox, _apply_im_trans,
                                widgets_to_dict, apply_dict_to_widgets)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, DataLoaderPanel, OutputFormatSelector,
@@ -152,9 +152,19 @@ class BatchTab(QtWidgets.QWidget):
         # summing (see DataLoaderPanel._peek_stream_frame) — correcting
         # again here would double-apply it.
         frame = self._loader.current_frame()
-        if frame is not None:
-            self._det_view.set_image(frame, autorange=True, reset_levels=True)
         fields, note = self._calib_fields_in_use()
+        if frame is not None:
+            # BC_y/BC_z (and the overlay drawn from them) are defined in the
+            # *flipped/transposed* frame the calibration was fit against —
+            # spec.TransOpt/apply_trans_opt=True flips the same way inside
+            # the real batch run (see helpers._build_spec, workers.py's
+            # BatchWorker) — so the preview must apply that same im_trans
+            # before display, or the shown pattern and the BC-based overlay
+            # disagree about which pixel is which, and the overlay visibly
+            # sits off the real diffraction rings.
+            im_trans = tuple((fields or {}).get("im_trans") or ())
+            disp_frame = _apply_im_trans(frame, im_trans) if im_trans else frame
+            self._det_view.set_image(disp_frame, autorange=True, reset_levels=True)
         if not fields or fields.get("BC_y") is None or fields.get("NrPixelsY") is None:
             # No visible sign otherwise that the overlay silently isn't being
             # drawn (e.g. "From file" pointing at a saved *project* .json
@@ -195,7 +205,10 @@ class BatchTab(QtWidgets.QWidget):
             r_min=self._r_min.value(), r_max=self._r_max.value(),
             r_bin=self._r_bin.value(), e_bin=self._e_bin.value(),
             eta_min=self._eta_min.value(), eta_max=self._eta_max.value(),
-            show_grid=self._grid_chk.isChecked())
+            show_grid=self._grid_chk.isChecked(),
+            tx=fields.get("tx") or 0.0, ty=fields.get("ty") or 0.0,
+            tz=fields.get("tz") or 0.0, lsd_um=fields.get("Lsd"),
+            pxY_um=fields.get("pxY"), pxZ_um=fields.get("pxZ"))
         self._redraw_lab_axes_if_on(fields["BC_y"], fields["BC_z"])
 
     def _on_preview_sum_changed(self, n: int) -> None:

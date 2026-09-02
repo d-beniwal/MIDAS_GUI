@@ -496,6 +496,34 @@ def _tilt_matrix_np(tx_deg: float, ty_deg: float, tz_deg: float) -> np.ndarray:
     return Rx @ Ry @ Rz
 
 
+def _tilt_project_YZ(two_theta_deg: np.ndarray, eta_deg: np.ndarray,
+                      tx: float, ty: float, tz: float, Lsd_um: float,
+                      bc_y: float, bc_z: float, pxY_um: float, pxZ_um: float):
+    """Shared core of :func:`tilted_ring_xy` (fixed 2θ, η sweep — a ring) and
+    :func:`tilted_spoke_xy` (fixed η, 2θ sweep — a radial spoke).
+    ``two_theta_deg``/``eta_deg`` broadcast against each other (one of them
+    is typically a scalar-shaped array of the other's length)."""
+    tt = np.radians(np.asarray(two_theta_deg, dtype=float))
+    eta = np.radians(np.asarray(eta_deg, dtype=float))
+    tt, eta = np.broadcast_arrays(tt, eta)
+    u = np.stack([
+        np.cos(tt),
+        -np.sin(tt) * np.sin(eta),
+        np.sin(tt) * np.cos(eta),
+    ], axis=-1)                                      # (n, 3) unit ray directions
+    TRs = _tilt_matrix_np(tx, ty, tz)
+    n_hat = TRs[:, 0]
+    denom = u @ n_hat
+    denom = np.where(np.abs(denom) < 1e-12, 1e-12, denom)
+    t = Lsd_um * TRs[0, 0] / denom
+    off = t[..., None] * u - np.array([Lsd_um, 0.0, 0.0])
+    Yc = off @ TRs[:, 1]
+    Zc = off @ TRs[:, 2]
+    Y_px = bc_y - Yc / pxY_um
+    Z_px = bc_z + Zc / pxZ_um
+    return Y_px, Z_px
+
+
 def tilted_ring_xy(two_theta_deg: float, tx: float, ty: float, tz: float,
                     Lsd_um: float, bc_y: float, bc_z: float,
                     pxY_um: float, pxZ_um: float, n: int = 400):
@@ -507,24 +535,24 @@ def tilted_ring_xy(two_theta_deg: float, tx: float, ty: float, tz: float,
     it inverts the same ray/tilt-plane geometry as
     ``midas_integrate_v2.forward.pixels.pixel_to_REta_from_spec``.
     """
-    eta = np.linspace(0.0, 2.0 * math.pi, n, endpoint=False)
-    tt = math.radians(two_theta_deg)
-    u = np.stack([
-        np.full_like(eta, math.cos(tt)),
-        -math.sin(tt) * np.sin(eta),
-        math.sin(tt) * np.cos(eta),
-    ], axis=1)                                       # (n, 3) unit ray directions
-    TRs = _tilt_matrix_np(tx, ty, tz)
-    n_hat = TRs[:, 0]
-    denom = u @ n_hat
-    denom = np.where(np.abs(denom) < 1e-12, 1e-12, denom)
-    t = Lsd_um * TRs[0, 0] / denom
-    off = t[:, None] * u - np.array([Lsd_um, 0.0, 0.0])
-    Yc = off @ TRs[:, 1]
-    Zc = off @ TRs[:, 2]
-    Y_px = bc_y - Yc / pxY_um
-    Z_px = bc_z + Zc / pxZ_um
-    return Y_px, Z_px
+    eta = np.linspace(0.0, 360.0, n, endpoint=False)
+    return _tilt_project_YZ(np.full(n, two_theta_deg), eta, tx, ty, tz,
+                             Lsd_um, bc_y, bc_z, pxY_um, pxZ_um)
+
+
+def tilted_spoke_xy(two_theta_lo_deg: float, two_theta_hi_deg: float, eta_deg: float,
+                     tx: float, ty: float, tz: float, Lsd_um: float,
+                     bc_y: float, bc_z: float, pxY_um: float, pxZ_um: float,
+                     n: int = 24):
+    """Forward-project the radial line at fixed ``eta_deg`` from
+    ``two_theta_lo_deg`` to ``two_theta_hi_deg`` through the tilt geometry —
+    the spoke counterpart of :func:`tilted_ring_xy`'s ring. A tilted
+    detector's η-bin edges are not exactly straight lines through the beam
+    centre (same reason its R-bin edges are not exactly circles), so this
+    is sampled at ``n`` points rather than drawn as a single 2-point line."""
+    tt = np.linspace(two_theta_lo_deg, two_theta_hi_deg, n)
+    return _tilt_project_YZ(tt, np.full(n, eta_deg), tx, ty, tz,
+                             Lsd_um, bc_y, bc_z, pxY_um, pxZ_um)
 
 
 def read_geometry(path: str | Path) -> dict:
@@ -725,12 +753,28 @@ def draw_polar_bin_overlay(viewer, items: list, *, bc_y: float, bc_z: float,
                            r_min: float, r_max: float, r_bin: float, e_bin: float,
                            eta_min: float = -180.0, eta_max: float = 180.0,
                            show_grid: bool = False, max_rings: int = 50,
-                           max_spokes: int = 72) -> None:
+                           max_spokes: int = 72,
+                           tx: float = 0.0, ty: float = 0.0, tz: float = 0.0,
+                           lsd_um: Optional[float] = None,
+                           pxY_um: Optional[float] = None,
+                           pxZ_um: Optional[float] = None) -> None:
     """Draw the Rmin/Rmax exclusion-boundary circles (always, skipping any
     non-positive radius) and, if ``show_grid``, the full polar (R, η) bin
     grid — concentric circles at each radial-bin edge plus spokes at each
     η-bin edge, both thinned to at most ``max_rings``/``max_spokes`` — onto
     ``viewer._iv``.
+
+    ``tx``/``ty``/``tz`` (deg) + ``lsd_um``/``pxY_um``/``pxZ_um`` are
+    optional: when the detector has a non-trivial tilt AND all three
+    lengths are supplied, rings/spokes are forward-projected through the
+    real tilt geometry (:func:`tilted_ring_xy`/:func:`tilted_spoke_xy` —
+    the same geometry ``midas_integrate_v2`` bins pixels with), instead of
+    drawn as plain circles/straight lines around ``bc_y``/``bc_z``. A
+    tilted detector's true R-bin boundaries are not circles centred on the
+    beam centre, so without this the overlay visibly drifts off the actual
+    diffraction rings as tilt grows — the plain-circle path is kept as the
+    fallback for untilted geometries (and any caller that doesn't have
+    Lsd/pixel size handy) since it's cheaper and exact in that case.
 
     ``items`` is the caller's own persistent list of previously-drawn
     items: cleared and rebuilt in place every call, mirroring the
@@ -743,10 +787,20 @@ def draw_polar_bin_overlay(viewer, items: list, *, bc_y: float, bc_z: float,
     items.clear()
     if r_max <= 0:
         return
+    tilt_aware = (bool(lsd_um) and bool(pxY_um) and bool(pxZ_um)
+                  and (abs(tx) > 1e-9 or abs(ty) > 1e-9 or abs(tz) > 1e-9))
     th = np.linspace(0, 2 * math.pi, 256)
 
+    def _ring_xy(r):
+        if tilt_aware:
+            two_theta = math.degrees(math.atan(r * pxY_um / lsd_um))
+            return tilted_ring_xy(two_theta, tx, ty, tz, lsd_um, bc_y, bc_z,
+                                   pxY_um, pxZ_um, n=256)
+        return bc_y + r * np.cos(th), bc_z + r * np.sin(th)
+
     def _circle(r, pen):
-        item = pg.PlotDataItem(bc_y + r * np.cos(th), bc_z + r * np.sin(th), pen=pen)
+        Y, Z = _ring_xy(r)
+        item = pg.PlotDataItem(Y, Z, pen=pen)
         viewer._iv.addItem(item)
         items.append(item)
 
@@ -764,11 +818,16 @@ def draw_polar_bin_overlay(viewer, items: list, *, bc_y: float, bc_z: float,
     if eta_max - eta_min >= 360.0 - 1e-6:
         eta_edges = eta_edges[eta_edges < eta_max - 1e-9]   # drop the wraparound duplicate
     for eta in eta_edges:
-        th_r = math.radians(float(eta))
-        item = pg.PlotDataItem(
-            [bc_y + r_min * math.cos(th_r), bc_y + r_max * math.cos(th_r)],
-            [bc_z + r_min * math.sin(th_r), bc_z + r_max * math.sin(th_r)],
-            pen=grid_pen)
+        if tilt_aware:
+            tt_lo = math.degrees(math.atan(r_min * pxY_um / lsd_um))
+            tt_hi = math.degrees(math.atan(r_max * pxY_um / lsd_um))
+            Y, Z = tilted_spoke_xy(tt_lo, tt_hi, float(eta), tx, ty, tz,
+                                    lsd_um, bc_y, bc_z, pxY_um, pxZ_um)
+        else:
+            th_r = math.radians(float(eta))
+            Y = [bc_y + r_min * math.cos(th_r), bc_y + r_max * math.cos(th_r)]
+            Z = [bc_z + r_min * math.sin(th_r), bc_z + r_max * math.sin(th_r)]
+        item = pg.PlotDataItem(Y, Z, pen=grid_pen)
         viewer._iv.addItem(item); items.append(item)
 
 
