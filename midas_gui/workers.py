@@ -57,6 +57,9 @@ def axis_conversions(r_px, lsd, px, wl):
 
 
 _FID_NUM_RE = re.compile(r'^(?P<froot>.+?)_(?P<num>\d+)(?P<tag>[^_\d]*)$')
+# A trailing "_c<NN>" chunk suffix, as minted by _HDF5StackGlobSource when one
+# multi-frame HDF5 file is split into several combined chunks.
+_FID_CHUNK_RE = re.compile(r'^(?P<rest>.+)_c(?P<chunk>\d+)$')
 
 
 def froot_and_frame_num(fid, fallback_idx: int) -> tuple:
@@ -68,12 +71,58 @@ def froot_and_frame_num(fid, fallback_idx: int) -> tuple:
     ``C611_017Fe_1_load3_009243.vrx.h5`` (this app's own test data) stems to
     ``..._009243.vrx``, with a non-numeric detector tag (``.vrx``) trailing
     the digits. ``tag`` preserves that (empty string when there isn't one).
+
+    A trailing ``_c<NN>`` chunk suffix (``_HDF5StackGlobSource``'s id for the
+    k-th combined chunk of one multi-frame file) is split off *before* the
+    numeric parse and re-attached to ``tag``, so ``run_009243.vrx_c00`` keeps
+    its stem frame number 9243 and stays distinct from its ``_c01`` sibling.
+    When the stem carries no number of its own the chunk index becomes the
+    frame number (``run_c00`` → ``('run', 0, '')``), which sorts correctly
+    instead of falling back to an unrelated loop counter.
+
     Falls back to ``(fid, fallback_idx, "")`` when ``fid`` has no
-    underscore-digit run at all (e.g. a caller-supplied non-numeric id)."""
-    m = _FID_NUM_RE.match(str(fid))
+    underscore-digit run at all (e.g. a caller-supplied non-numeric id).
+
+    NOTE: this is deliberately *not* injective — ``scan_1`` and ``scan_001``
+    both parse to frame 1 — so callers that turn the result into a filename
+    must go through :func:`frame_output_base`, which de-duplicates.
+    """
+    s = str(fid)
+    chunk_suffix, chunk_num = '', None
+    m = _FID_CHUNK_RE.match(s)
     if m:
-        return m.group('froot'), int(m.group('num')), m.group('tag')
-    return str(fid), int(fallback_idx), ''
+        s = m.group('rest')
+        chunk_suffix = '_c' + m.group('chunk')
+        chunk_num = int(m.group('chunk'))
+    m = _FID_NUM_RE.match(s)
+    if m:
+        return m.group('froot'), int(m.group('num')), m.group('tag') + chunk_suffix
+    if chunk_num is not None:
+        # Stem has no number of its own — the chunk index *is* the frame index.
+        return s, chunk_num, ''
+    return s, int(fallback_idx), ''
+
+
+def frame_output_base(out_dir, fid, fallback_idx: int, used: set):
+    """Return the ``Path`` stem to write frame ``fid``'s profiles to, in the
+    ``<froot>_<NNNNNN><tag>`` convention, guaranteed unique within one run.
+
+    ``used`` is a caller-owned set of already-issued names, mutated in place.
+    Because :func:`froot_and_frame_num` normalises zero-padding, distinct
+    frame ids can collapse onto one name — ``scan_1``, ``scan_01`` and
+    ``scan_001`` all yield ``scan_000001`` — which would silently overwrite
+    earlier frames. On a clash we fall back to the raw ``fid`` (which is
+    unique by construction: it is a file stem, or a stem + chunk suffix), and
+    only if *that* is somehow taken too do we append the loop index.
+    """
+    froot, frame_num, tag = froot_and_frame_num(fid, fallback_idx)
+    name = f"{froot}_{frame_num:06d}{tag}"
+    if name in used:
+        name = str(fid)
+        if name in used:
+            name = f"{fid}_{int(fallback_idx):06d}"
+    used.add(name)
+    return Path(out_dir) / name
 
 
 def stamp_h5_provenance(h5_path, entry: dict) -> None:
@@ -1023,6 +1072,7 @@ class BatchWorker(QtCore.QThread):
 
             aborted = False
             all_profiles, all_sigmas, frame_ids, out_paths = [], [], [], []
+            used_names: set = set()   # frame_output_base collision guard
             all_cakes, all_omegas = [], []   # zarr cake output only
             proc_idx = 0  # index into monitor_vals for processed frames only
             for abs_i, fid, img in self._iter_frames(source):
@@ -1104,8 +1154,7 @@ class BatchWorker(QtCore.QThread):
                 file_fmts = [f for f in self._fmts if f not in ("h5", "zarr")]
                 if self._out_dir is not None and file_fmts:
                     self._out_dir.mkdir(parents=True, exist_ok=True)
-                    froot, frame_num, tag = froot_and_frame_num(fid, abs_i)
-                    base = self._out_dir / f"{froot}_{frame_num:06d}{tag}"
+                    base = frame_output_base(self._out_dir, fid, abs_i, used_names)
                     out_paths.extend(write_frame_profiles(
                         base, file_fmts, r_ax, prof, sigma, cur_lsd, px, wl,
                         cake_2d=(cake_2d if self._multi_azimuth else None),
@@ -1445,6 +1494,7 @@ class FolderMonitorWorker(QtCore.QThread):
         self._bright_mode = bright_mode
         self._weighted = weighted
         self._seen = set(seen or [])
+        self._used_names: set = set()   # frame_output_base collision guard
         self._context = context
         self._out_dir = Path(out_dir) if out_dir else None
         # Accept a single legacy format string too (older call sites / tests).
@@ -1530,8 +1580,8 @@ class FolderMonitorWorker(QtCore.QThread):
                     self.log_line.emit(f"[monitor] +{fid}: peak={prof.max():.1f}")
                     if can_save:
                         self._out_dir.mkdir(parents=True, exist_ok=True)
-                        froot, frame_num, tag = froot_and_frame_num(fid, count)
-                        base = self._out_dir / f"{froot}_{frame_num:06d}{tag}"
+                        base = frame_output_base(self._out_dir, fid, count,
+                                                 self._used_names)
                         for fmt in save_fmts:
                             write_profile(base, fmt, r_ax, prof,
                                           sigma, lsd, px, wl)
@@ -1616,9 +1666,9 @@ def write_all_profiles(out_dir, fmts, r_axis, profiles, sigmas, frame_ids,
     out_paths = []
     if file_fmts and len(frame_ids):
         out_dir.mkdir(parents=True, exist_ok=True)
+        used_names: set = set()   # frame_output_base collision guard
         for i, fid in enumerate(frame_ids):
-            froot, frame_num, tag = froot_and_frame_num(fid, i)
-            base = out_dir / f"{froot}_{frame_num:06d}{tag}"
+            base = frame_output_base(out_dir, fid, i, used_names)
             if multi:
                 out_paths.extend(write_frame_profiles(
                     base, file_fmts, r_axis, None, None, lsd, px, wl,
