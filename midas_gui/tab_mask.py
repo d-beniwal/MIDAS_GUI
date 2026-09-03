@@ -1070,7 +1070,8 @@ class MaskTab(QtWidgets.QWidget):
         extension. A mask that's been drawn/computed but not yet exported via
         the Save button is auto-exported to ``<sidecar_stem>_mask.tif`` so it
         isn't silently lost."""
-        state = {"fields": widgets_to_dict(self._state_widgets())}
+        state = {"fields": widgets_to_dict(self._state_widgets()),
+                  "viewer": self._viewer.display_state()}
         if self._stack_files:
             state["stack_files"] = self._stack_files
         if self._mask is not None and sidecar_stem:
@@ -1092,6 +1093,7 @@ class MaskTab(QtWidgets.QWidget):
             if Path(img_path).exists():
                 self._load_image()
         apply_dict_to_widgets(self._state_widgets(), fields)
+        self._viewer.set_display_state(state.get("viewer"))
         self._stack_files = list(state["stack_files"]) if state.get("stack_files") else None
         if sidecar_stem:
             mask_path = Path(f"{sidecar_stem}_mask.tif")

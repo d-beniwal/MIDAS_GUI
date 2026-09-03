@@ -313,6 +313,7 @@ class BatchTab(QtWidgets.QWidget):
             "fmt": self._fmt.get_state(),
             "loader": self._loader.get_state(),
             "det_view": self._det_view.display_state(),
+            "waterfall": self._waterfall.display_state(),
             "hydra": {"active_mode": self._mode_ribbon.mode(),
                       "page": self._hydra_page.get_state() if self._hydra_page else {}},
         }
@@ -326,6 +327,7 @@ class BatchTab(QtWidgets.QWidget):
         fmt_keys = fields.pop("fmt_keys", None)
         apply_dict_to_widgets(self._state_widgets(), fields)
         self._det_view.set_display_state(state.get("det_view"))
+        self._waterfall.set_display_state(state.get("waterfall"))
         self._corr_widget.set_state(state.get("corr") or {})
         self._fmt.set_state(fmt_keys if fmt_keys is not None else state.get("fmt"))
         hydra_state = state.get("hydra") or {}

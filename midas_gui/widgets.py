@@ -966,6 +966,38 @@ class CakeViewer(QtWidgets.QWidget):
     def _set_cmap(self, name: str):
         self._iv.setColorMap(_resolve_cmap(name))
 
+    def display_state(self) -> dict:
+        """Same contract as ``ImageViewer.display_state`` — see there for why
+        this exists as its own method rather than reading the widgets
+        directly (CakeViewer duplicates ImageViewer's cmap/log/vmin/vmax
+        toolbar rather than subclassing it, since its axes are physical
+        (R, η) bin coordinates rather than detector row/column indices)."""
+        return {"cmap": self._cmap.currentText(), "log": self._log.isChecked(),
+                "vmin": self._vmin.value(), "vmax": self._vmax.value()}
+
+    def set_display_state(self, state: Optional[dict]) -> None:
+        """See ``ImageViewer.set_display_state`` — identical reasoning
+        (cmap needs an explicit re-apply; log/vmin/vmax take effect on the
+        next ``set_cake`` regardless of whether their signal fired)."""
+        if not state:
+            return
+        cmap = state.get("cmap")
+        if cmap and self._cmap.findText(str(cmap)) >= 0:
+            self._cmap.blockSignals(True)
+            self._cmap.setCurrentText(str(cmap))
+            self._cmap.blockSignals(False)
+            self._set_cmap(str(cmap))
+        if "log" in state:
+            self._log.blockSignals(True)
+            self._log.setChecked(bool(state["log"]))
+            self._log.blockSignals(False)
+        for key, spin in (("vmin", self._vmin), ("vmax", self._vmax)):
+            if key in state:
+                spin.blockSignals(True)
+                spin.setValue(state[key])
+                spin.blockSignals(False)
+        self._redisplay()
+
     def _mouse(self, evt):
         if self._cake is None or self._r_axis is None:
             return
@@ -4395,6 +4427,27 @@ class WaterfallViewer(QtWidgets.QWidget):
 
     def _apply_cmap(self, name: str):
         self._hist.gradient.setColorMap(_resolve_cmap(name))
+
+    def display_state(self) -> dict:
+        """Same contract/reasoning as ``ImageViewer.display_state`` —
+        WaterfallViewer has no vmin%/vmax% (its color window is a plain
+        pyqtgraph HistogramLUTWidget, not a percentile pair), just cmap/log."""
+        return {"cmap": self._cmap.currentText(), "log": self._log.isChecked()}
+
+    def set_display_state(self, state: Optional[dict]) -> None:
+        if not state:
+            return
+        cmap = state.get("cmap")
+        if cmap and self._cmap.findText(str(cmap)) >= 0:
+            self._cmap.blockSignals(True)
+            self._cmap.setCurrentText(str(cmap))
+            self._cmap.blockSignals(False)
+            self._apply_cmap(str(cmap))
+        if "log" in state:
+            self._log.blockSignals(True)
+            self._log.setChecked(bool(state["log"]))
+            self._log.blockSignals(False)
+        self._redraw()
 
 
 def _frame_color(i: int) -> tuple:

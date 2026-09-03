@@ -170,6 +170,8 @@ class DataViewerTab(QtWidgets.QWidget):
         fields = widgets_to_dict(self._state_widgets())
         fields["materials"] = self._geom_card.materials_state()
         return {"fields": fields, "loader": self._loader.get_state(),
+                "viewer": self._viewer.display_state(),
+                "cake_view": self._cake_view.display_state(),
                 "hydra": {"active_mode": self._mode_ribbon.mode(),
                           "page": self._hydra_page.get_state()}}
 
@@ -182,6 +184,8 @@ class DataViewerTab(QtWidgets.QWidget):
         self._mode_ribbon.set_mode(hydra_state.get("active_mode", "single"))
         self._hydra_page.set_state(hydra_state.get("page") or {})
         self._loader.set_state(state.get("loader") or {})
+        self._viewer.set_display_state(state.get("viewer"))
+        self._cake_view.set_display_state(state.get("cake_view"))
         fields = state.get("fields", {})
         calib_path = fields.get("calib_ed")
         if calib_path:
