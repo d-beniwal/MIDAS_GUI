@@ -1371,28 +1371,60 @@ class _HDF5StackGlobSource:
 
     Unlike ``_ExplicitTIFFSource`` a single file may yield more than one frame
     (when ``chunk_size`` splits its stack into several combined chunks), so
-    ``n_frames``/``get(idx)`` are computed over a flattened index built once
-    at construction time (one ``read_hdf5_stack_combined`` call per file,
-    cached — these files are large, and a second header-only pass to just
-    count frames isn't worth the extra h5py open)."""
+    ``n_frames``/``get(idx)`` are computed over a flattened index of how many
+    combined frames each file yields, read from each file's dataset SHAPE
+    (an h5py header read) rather than by decoding it. Counting by decoding
+    is what this class used to do, and it made ``n_frames`` — which
+    ``BatchWorker`` asks for before a run even starts — read and combine
+    every selected file up front: for a 147-file VAREX scan that is tens of
+    GB of I/O and RAM before the first frame is integrated, so the run
+    looked hung (no progress, no output, no error). The pixel cache is
+    likewise bounded to the most recently used file, since both ``__iter__``
+    and a chunked ``BatchWorker`` walk the files in order and the old
+    unbounded dict retained every decoded file for the life of the run."""
 
     def __init__(self, paths, dataset: str, *, chunk_size=None, op: str = "mean"):
         self._paths = [Path(p) for p in paths]
         self._dataset = dataset
         self._chunk_size = chunk_size
         self._op = op
-        self._cache: dict = {}   # path index -> list[np.ndarray]
+        self._cache: dict = {}   # path index -> list[np.ndarray] (most-recent file only)
+        self._counts: Optional[list] = None   # per-file combined-frame count
+
+    def _n_chunks(self, i: int) -> int:
+        """How many combined frames file ``i`` yields — from its dataset
+        shape alone (no pixel read). Mirrors ``read_hdf5_stack_combined``'s
+        own chunking: a 2-D dataset is one frame; otherwise
+        ``ceil(N / chunk_size)``, with a falsy chunk_size meaning "whole
+        file" (one frame)."""
+        import h5py
+        try:
+            with h5py.File(str(self._paths[i]), "r") as f:
+                dset = f[self._dataset]
+                if dset.ndim == 2:
+                    return 1
+                n = int(dset.shape[0])
+        except Exception:
+            return 1   # unreadable/odd file — assume 1; get() surfaces the real error
+        if not self._chunk_size:
+            return 1
+        size = int(self._chunk_size)
+        return max(1, -(-n // size))   # ceil
 
     def _combined(self, i: int) -> list:
-        if i not in self._cache:
-            self._cache[i] = read_hdf5_stack_combined(
+        cached = self._cache.get(i)
+        if cached is None:
+            cached = read_hdf5_stack_combined(
                 self._paths[i], self._dataset,
                 chunk_size=self._chunk_size, op=self._op)
-        return self._cache[i]
+            self._cache = {i: cached}   # keep only the current file
+        return cached
 
     @property
     def n_frames(self) -> int:
-        return sum(len(self._combined(i)) for i in range(len(self._paths)))
+        if self._counts is None:
+            self._counts = [self._n_chunks(i) for i in range(len(self._paths))]
+        return sum(self._counts)
 
     def _fid(self, p: Path, k: int, n_chunks: int) -> str:
         return p.stem if n_chunks == 1 else f"{p.stem}_c{k:02d}"
@@ -1404,12 +1436,22 @@ class _HDF5StackGlobSource:
                 yield self._fid(p, k, len(frames)), img.astype(np.float64)
 
     def get(self, idx: int):
+        # Locate the owning file from the header-only counts, so only THAT
+        # file is decoded — walking _combined() over every preceding file
+        # (as this used to) made a mid-scan random access decode the whole
+        # scan up to that point, which is what BatchWorker's parallel
+        # chunks do constantly (each starts at a different offset).
+        if self._counts is None:
+            self._counts = [self._n_chunks(i) for i in range(len(self._paths))]
         remaining = idx
         for i, p in enumerate(self._paths):
-            frames = self._combined(i)
-            if remaining < len(frames):
+            n_here = self._counts[i]
+            if remaining < n_here:
+                frames = self._combined(i)
+                if remaining >= len(frames):   # header count disagreed with the real read
+                    raise IndexError(idx)
                 return self._fid(p, remaining, len(frames)), frames[remaining].astype(np.float64)
-            remaining -= len(frames)
+            remaining -= n_here
         raise IndexError(idx)
 
 
@@ -1556,6 +1598,44 @@ def resolve_frame_indices(n_frames: int, frame_range) -> list:
     start, end, stride = frame_range or (0, None, 1)
     end = n_frames if end is None else min(int(end), n_frames)
     return list(range(int(start), end, max(1, int(stride))))
+
+
+def frame_unit_for_cfg(source_cfg) -> str:
+    """What one "frame" actually is for a given source — the thing
+    ``frame_range``'s start/end/stride index. This differs by source type
+    in a way that isn't obvious from the UI: a single multi-frame HDF5
+    file indexes the RAW SUB-FRAMES inside it, while a multi-file source
+    indexes the FILES (each already combined down to one frame by the
+    "Combine sub-frames" setting — see ``_HDF5StackGlobSource``)."""
+    kind = (source_cfg or {}).get("type")
+    if kind == "hdf5":
+        return "sub-frame in this HDF5 file"
+    if kind == "hdf5_stack_glob":
+        return "file (each combined to one frame)"
+    if kind in ("tiff_list", "tiff_glob"):
+        return "file"
+    return "frame"
+
+
+def describe_empty_frame_range(n_frames: int, frame_range, source_cfg=None) -> str:
+    """A frame_range that selects nothing is nearly always an out-of-range
+    ``start`` (e.g. a scan-point number like 9243 typed into a field that
+    indexes 0..9 within one file), so say what the actual valid range is
+    instead of only that the selection was empty."""
+    start, end, stride = frame_range or (0, None, 1)
+    unit = frame_unit_for_cfg(source_cfg)
+    msg = [f"No frames match the selected frame range "
+           f"(start={start}, end={'all' if end in (None, 0) else end}, stride={stride})."]
+    if n_frames <= 0:
+        msg.append("The selected source reports 0 frames — check the data path/dataset.")
+    elif int(start) >= n_frames:
+        msg.append(f"This source has {n_frames} frame(s), indexed 0..{n_frames - 1} "
+                   f"— one per {unit} — so start={start} is past the end. "
+                   f"Set start to 0 (or at most {n_frames - 1}).")
+    else:
+        msg.append(f"This source has {n_frames} frame(s), indexed 0..{n_frames - 1} "
+                   f"— one per {unit}.")
+    return "\n".join(msg)
 
 
 def resolve_worker_count(n_items: int, requested: int, min_per_worker: int) -> int:
@@ -1759,7 +1839,8 @@ class BatchRunCoordinator(QtCore.QObject):
             return
         indices = resolve_frame_indices(n_frames, self._args["frame_range"])
         if not indices:
-            self.failed.emit("No frames match the selected frame range.")
+            self.failed.emit(describe_empty_frame_range(
+                n_frames, self._args["frame_range"], self._args.get("source_cfg")))
             return
         n_workers = resolve_worker_count(
             len(indices), self._n_workers_requested, self.MIN_FRAMES_PER_WORKER)

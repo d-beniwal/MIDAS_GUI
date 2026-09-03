@@ -32,7 +32,8 @@ from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollDoubleSpinBox, _fspin,
                                _browse, is_h5, list_h5_datasets, _NoScrollComboBox,
                                _load_image, _collect_frame_paths, apply_field_corrections,
                                new_temp_h5_path, save_stack_h5, detect_geometry_from_path,
-                               source_kind, display_text_for_paths, _apply_im_trans)
+                               source_kind, display_text_for_paths, _apply_im_trans,
+                               is_dark_like_name)
 from midas_gui import style as S
 
 
@@ -3004,14 +3005,35 @@ class DataLoaderPanel(QtWidgets.QWidget):
             fr.addWidget(QtWidgets.QLabel("Frame:")); fr.addWidget(self._frame_spin); fr.addStretch(1)
             card.body.addLayout(fr)
         else:  # stream
+            # What one "frame" is here depends on the selection (see
+            # workers.frame_unit_for_cfg): ONE multi-frame HDF5 file →
+            # its raw sub-frames; SEVERAL files → the files themselves.
+            # _update_frame_range_hint keeps the live label below in sync,
+            # since typing a scan-point number (e.g. 9243, which is really
+            # part of the FILENAME and is auto-parsed for output naming by
+            # workers.froot_and_frame_num) into `start` is an easy mistake.
+            _fr_tip = (
+                "0-based index into the frames this source yields — NOT the "
+                "scan-point number in the filename.\n"
+                "• One multi-frame HDF5 file → indexes the raw sub-frames inside it.\n"
+                "• Several files (folder / multi-select) → indexes the files, each "
+                "already combined to one frame by 'Combine sub-frames'.\n"
+                "The file's own root and number are parsed from its filename "
+                "automatically for output naming — don't enter them here.")
             self._fr_start = _NoScrollSpinBox(); self._fr_start.setRange(0, 999999); self._fr_start.setFixedWidth(64)
+            self._fr_start.setToolTip("First frame (inclusive).\n\n" + _fr_tip)
             self._fr_end = _NoScrollSpinBox(); self._fr_end.setRange(0, 999999); self._fr_end.setFixedWidth(64)
-            self._fr_end.setToolTip("Last frame (exclusive). 0 = all frames.")
+            self._fr_end.setToolTip("Last frame (exclusive). 0 = all frames.\n\n" + _fr_tip)
             self._fr_stride = _NoScrollSpinBox(); self._fr_stride.setRange(1, 100000); self._fr_stride.setValue(1); self._fr_stride.setFixedWidth(64)
+            self._fr_stride.setToolTip("Take every Nth frame (1 = every frame).\n\n" + _fr_tip)
             sf = S.Form()
             sf.row(("start:", self._fr_start), ("end(0=all):", self._fr_end))
             sf.row(("stride:", self._fr_stride))
             card.body.addLayout(sf)
+            self._fr_hint = QtWidgets.QLabel("")
+            self._fr_hint.setWordWrap(True)
+            self._fr_hint.setStyleSheet(f"color:{S.MUTED};font-size:10px;")
+            card.body.addWidget(self._fr_hint)
 
             # Shown only when the resolved source is several separate HDF5
             # files (e.g. one VAREX *.vrx.h5 per scan point, each itself a
@@ -3383,6 +3405,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._info.setText(text)
             self._live_frame_update = False
             self._stream_preview_dirty = True
+            self._autofill_frame_range()
             self.dataChanged.emit()
             return
         try:
@@ -3875,6 +3898,16 @@ class DataLoaderPanel(QtWidgets.QWidget):
         if isinstance(raw, str) and is_h5(raw) and Path(raw).is_file():
             return {"type": "hdf5", "path": raw, "dataset": self._dataset()}
         paths = raw if isinstance(raw, list) else (_collect_frame_paths(raw) if raw else [])
+        # Drop dark acquisitions swept in by a folder/stem selection (the
+        # beamline stores them alongside the scan they bracket) — see
+        # helpers.is_dark_like_name. An explicit multi-file pick is left
+        # alone: naming a dark file by hand is a deliberate choice.
+        if not isinstance(raw, list):
+            kept = [p for p in paths if not is_dark_like_name(p)]
+            self._n_dark_skipped = len(paths) - len(kept)
+            paths = kept
+        else:
+            self._n_dark_skipped = 0
         h5_paths = sorted(p for p in paths if is_h5(p))
         if h5_paths:
             return {"type": "hdf5_stack_glob", "paths": h5_paths,
@@ -3887,9 +3920,108 @@ class DataLoaderPanel(QtWidgets.QWidget):
             return {"type": "tiff_list", "paths": list(raw)}
         return {"type": "tiff_glob", "path": raw}
 
+    def _file_numbers(self) -> list:
+        """Scan-point numbers parsed from a MULTI-file source's filenames
+        (``C611_017Fe_1_load3_009243.vrx.h5`` → 9243), in the same sorted
+        order ``source_cfg()`` hands the paths to the worker. Empty for a
+        single-file source (whose start/end index sub-frames instead) or
+        when the names carry no number."""
+        from pathlib import Path
+        from midas_gui.workers import froot_and_frame_num
+        cfg = self.source_cfg()
+        paths = cfg.get("paths") or []
+        if len(paths) < 2:
+            return []
+        nums, roots = [], set()
+        for i, p in enumerate(paths):
+            froot, num, _tag = froot_and_frame_num(Path(p).stem, -1)
+            if num < 0:
+                return []
+            nums.append(num); roots.add(froot)
+        self._file_prefix = roots.pop() if len(roots) == 1 else ""
+        return nums
+
     def frame_range(self):
+        """(start, end_exclusive_or_None, stride) as 0-based indices for
+        ``workers.resolve_frame_indices``.
+
+        For a multi-file source the start/end spinboxes hold FILE NUMBERS
+        (auto-populated by ``_autofill_frame_range`` — what the user reads
+        off the filenames), so translate them to indices here rather than
+        changing the worker's/project's long-standing 0-based contract.
+        ``end`` is inclusive in file-number terms (9243..9250 processes
+        both ends, as a beamline scan range reads), and a gap in the
+        numbering can't produce a bogus range because the bounds are found
+        by scanning the sorted numbers rather than by arithmetic."""
+        stride = max(1, self._fr_stride.value())
+        nums = self._file_numbers()
+        if nums:
+            lo, hi = self._fr_start.value(), self._fr_end.value()
+            i0 = next((i for i, n in enumerate(nums) if n >= lo), len(nums))
+            i1 = next((i for i, n in enumerate(nums) if n > hi), len(nums)) if hi > 0 else len(nums)
+            return (i0, i1, stride)
         end = self._fr_end.value() if self._fr_end.value() > 0 else None
-        return (self._fr_start.value(), end, max(1, self._fr_stride.value()))
+        return (self._fr_start.value(), end, stride)
+
+    def _autofill_frame_range(self):
+        """Fill start/end with the full valid range for the current source
+        and describe what they index, so the range can't silently select
+        nothing (the "No frames match the selected frame range" failure —
+        typically a scan-point number typed into a field that indexes
+        sub-frames). Multi-file → file numbers; single multi-frame file →
+        0-based sub-frame indices, plus the froot/number that
+        ``workers.froot_and_frame_num`` parses out of the filename for
+        output naming (so it's clear those are automatic, not something to
+        enter here)."""
+        if self._mode != "stream" or not hasattr(self, "_fr_start"):
+            return
+        from pathlib import Path
+        from midas_gui.workers import froot_and_frame_num
+        self._file_prefix = ""
+        try:
+            cfg = self.source_cfg()
+        except Exception:
+            return
+        nums = self._file_numbers()
+        for w in (self._fr_start, self._fr_end):
+            w.blockSignals(True)
+        try:
+            if nums:
+                self._fr_start.setValue(min(nums)); self._fr_end.setValue(max(nums))
+                pfx = f"{self._file_prefix}_" if self._file_prefix else ""
+                extra = ""
+                n_dark = getattr(self, "_n_dark_skipped", 0)
+                if n_dark:
+                    extra += f"  Skipped {n_dark} dark file(s)."
+                # Gaps matter enough to surface: the range reads as a single
+                # contiguous scan but isn't, and a missing point mid-range is
+                # usually an aborted/failed acquisition worth knowing about.
+                missing = (max(nums) - min(nums) + 1) - len(nums)
+                if missing > 0:
+                    extra += f"  ⚠ {missing} number(s) missing in this range (gaps)."
+                self._fr_hint.setText(
+                    f"start/end = file numbers ({len(nums)} files: {pfx}"
+                    f"{min(nums):06d} … {pfx}{max(nums):06d}), end inclusive.{extra}")
+            elif cfg.get("type") == "hdf5" and cfg.get("path"):
+                n = 0
+                try:
+                    from midas_gui.workers import _open_source_cfg
+                    n = int(getattr(_open_source_cfg(cfg), "n_frames", 0) or 0)
+                except Exception:
+                    n = 0
+                if n > 0:
+                    self._fr_start.setValue(0); self._fr_end.setValue(n)
+                froot, num, _tag = froot_and_frame_num(Path(cfg["path"]).stem, -1)
+                auto = (f"  File root/number auto-detected from the filename: "
+                        f"{froot} / {num:06d}." if num >= 0 else "")
+                self._fr_hint.setText(
+                    f"start/end = 0-based sub-frame index within this file"
+                    f"{f' (0 … {n})' if n else ''}, end exclusive.{auto}")
+            else:
+                self._fr_hint.setText("")
+        finally:
+            for w in (self._fr_start, self._fr_end):
+                w.blockSignals(False)
 
     def dark(self):
         return self._dark_sel.get_field()

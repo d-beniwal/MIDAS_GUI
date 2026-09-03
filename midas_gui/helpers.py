@@ -309,6 +309,25 @@ def list_h5_datasets(path: str | Path) -> list:
     return items
 
 
+_DARK_NAME_RE = re.compile(r'(^|[_.])dark([_.]|$)|_dark_(before|after)\b', re.IGNORECASE)
+
+
+def is_dark_like_name(path) -> bool:
+    """True when a filename looks like a DARK/background acquisition rather
+    than sample data (``..._dark_before_009242.vrx.h5``,
+    ``..._dark_after_009388.vrx.h5``).
+
+    Beamline convention puts the dark frames in the SAME folder as the scan
+    they bracket, so a "Full folder"/stem selection sweeps them up as if
+    they were data — silently integrating two bogus frames and (worse)
+    skewing an auto-detected file-number range outward at both ends. Ported
+    from mpe_wf_saxs_waxs, which guards the same way when auto-populating
+    its froot/file-number fields (see gui_bc_launcher.py's dark-file check
+    and run_cakes.discover_all_froots's ``_dark_before``/``_dark_after``
+    skip)."""
+    return bool(_DARK_NAME_RE.search(Path(str(path)).name))
+
+
 def _collect_frame_paths(raw) -> list:
     """Frames from a folder or a *.tif glob (sorted).  Mirrors tab_view logic.
 
