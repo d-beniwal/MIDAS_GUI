@@ -117,9 +117,10 @@ def test_write_all_profiles_handles_3d_cake_profiles(tmp_path):
         tmp_path, ["csv", "h5"], r_axis, profiles, sigmas, frame_ids,
         lsd=200000.0, px=200.0, wl=0.2)
 
-    for fid in frame_ids:
+    # <froot>_<NNNNNN> output convention — see workers.frame_output_base.
+    for i in range(n_frames):
         for k in range(n_eta):
-            assert (tmp_path / f"{fid}_eta{k:03d}.csv").exists()
+            assert (tmp_path / f"frame_{i:06d}_eta{k:03d}.csv").exists()
     # h5 is skipped for 3-D profiles (write_h5 expects one profile per frame)
     assert not (tmp_path / "integrated.h5").exists()
     assert len(paths) == n_frames * n_eta

@@ -205,3 +205,160 @@ def test_thinned_bin_edges_degenerate_range_is_empty():
     assert len(_thinned_bin_edges(10.0, 10.0, 1.0, max_count=50)) == 0
     assert len(_thinned_bin_edges(10.0, 0.0, 1.0, max_count=50)) == 0
     assert len(_thinned_bin_edges(0.0, 10.0, 0.0, max_count=50)) == 0
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# VAREX-style multi-frame HDF5 stack combining (read_hdf5_stack_combined)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _stack_file(tmp_path, n, h=3, w=4, name="s.h5"):
+    h5py = pytest.importorskip("h5py")
+    data = np.arange(n * h * w, dtype=np.float32).reshape(n, h, w)
+    with h5py.File(tmp_path / name, "w") as f:
+        f.create_dataset("exchange/data", data=data)
+    return tmp_path / name, data
+
+
+def test_read_hdf5_stack_combined_whole_file_by_default(tmp_path):
+    """chunk_size=None collapses the whole (N,H,W) stack to one frame — the
+    VAREX case where every raw sub-frame is the same scan point."""
+    from midas_gui.helpers import read_hdf5_stack_combined
+    path, data = _stack_file(tmp_path, 5)
+    out = read_hdf5_stack_combined(path, "exchange/data")
+    assert len(out) == 1
+    np.testing.assert_allclose(out[0], data.mean(axis=0), rtol=1e-6)
+    assert out[0].dtype == np.float32
+
+
+@pytest.mark.parametrize("op, reducer", [
+    ("mean", np.mean), ("sum", np.sum), ("max", np.max), ("median", np.median),
+])
+def test_read_hdf5_stack_combined_ops(tmp_path, op, reducer):
+    from midas_gui.helpers import read_hdf5_stack_combined
+    path, data = _stack_file(tmp_path, 5)
+    out = read_hdf5_stack_combined(path, "exchange/data", op=op)
+    np.testing.assert_allclose(out[0], reducer(data, axis=0), rtol=1e-6)
+
+
+def test_read_hdf5_stack_combined_unknown_op_falls_back_to_mean(tmp_path):
+    from midas_gui.helpers import read_hdf5_stack_combined
+    path, data = _stack_file(tmp_path, 4)
+    out = read_hdf5_stack_combined(path, "exchange/data", op="nonsense")
+    np.testing.assert_allclose(out[0], data.mean(axis=0), rtol=1e-6)
+
+
+def test_read_hdf5_stack_combined_chunks_contiguously(tmp_path):
+    from midas_gui.helpers import read_hdf5_stack_combined
+    path, data = _stack_file(tmp_path, 6)
+    out = read_hdf5_stack_combined(path, "exchange/data", chunk_size=2, op="sum")
+    assert len(out) == 3
+    for k in range(3):
+        np.testing.assert_allclose(out[k], data[2 * k:2 * k + 2].sum(axis=0),
+                                   rtol=1e-6)
+
+
+def test_read_hdf5_stack_combined_ragged_last_chunk(tmp_path):
+    """A stack that doesn't divide evenly keeps its short trailing chunk."""
+    from midas_gui.helpers import read_hdf5_stack_combined
+    path, data = _stack_file(tmp_path, 5)
+    out = read_hdf5_stack_combined(path, "exchange/data", chunk_size=2)
+    assert len(out) == 3
+    np.testing.assert_allclose(out[-1], data[4:].mean(axis=0), rtol=1e-6)
+
+
+def test_read_hdf5_stack_combined_passes_2d_through(tmp_path):
+    """A plain (H,W) dataset is already one frame; chunk_size/op are ignored."""
+    h5py = pytest.importorskip("h5py")
+    from midas_gui.helpers import read_hdf5_stack_combined
+    img = np.arange(12, dtype=np.float32).reshape(3, 4)
+    with h5py.File(tmp_path / "flat.h5", "w") as f:
+        f.create_dataset("exchange/data", data=img)
+    out = read_hdf5_stack_combined(tmp_path / "flat.h5", "exchange/data",
+                                   chunk_size=2, op="sum")
+    assert len(out) == 1
+    np.testing.assert_allclose(out[0], img)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Tilt-aware overlay geometry (tilted_ring_xy / tilted_spoke_xy)
+# ═════════════════════════════════════════════════════════════════════════════
+
+_GEO = dict(Lsd_um=500000.0, bc_y=1024.0, bc_z=980.0, pxY_um=200.0, pxZ_um=200.0)
+
+
+def _expected_radius_px(two_theta_deg):
+    """Plain flat-detector radius: Lsd*tan(2θ) converted to pixels."""
+    return (_GEO["Lsd_um"] * np.tan(np.radians(two_theta_deg))) / _GEO["pxY_um"]
+
+
+def test_tilted_ring_reduces_to_a_plain_circle_at_zero_tilt():
+    """The documented invariant: with tx=ty=tz=0 the forward projection must
+    collapse to bc + r*(sin eta, cos eta), the untilted circle every overlay
+    used to draw directly."""
+    from midas_gui.helpers import tilted_ring_xy
+    tt, n = 8.0, 360
+    Y, Z = tilted_ring_xy(tt, 0.0, 0.0, 0.0, n=n, **_GEO)
+
+    r = _expected_radius_px(tt)
+    eta = np.radians(np.linspace(0.0, 360.0, n, endpoint=False))
+    np.testing.assert_allclose(Y, _GEO["bc_y"] + r * np.sin(eta), atol=1e-6)
+    np.testing.assert_allclose(Z, _GEO["bc_z"] + r * np.cos(eta), atol=1e-6)
+
+
+def test_tilted_ring_is_centred_and_round_at_zero_tilt():
+    from midas_gui.helpers import tilted_ring_xy
+    tt = 5.0
+    Y, Z = tilted_ring_xy(tt, 0.0, 0.0, 0.0, n=180, **_GEO)
+    radii = np.hypot(Y - _GEO["bc_y"], Z - _GEO["bc_z"])
+    np.testing.assert_allclose(radii, _expected_radius_px(tt), rtol=1e-9)
+
+
+def test_tilted_ring_becomes_eccentric_under_tilt():
+    """A non-zero tilt must actually change the projection — otherwise the
+    'overlay offset from the real rings' bug this replaced would be back."""
+    from midas_gui.helpers import tilted_ring_xy
+    tt = 8.0
+    Y0, Z0 = tilted_ring_xy(tt, 0.0, 0.0, 0.0, n=180, **_GEO)
+    Y1, Z1 = tilted_ring_xy(tt, 0.0, 3.0, 0.0, n=180, **_GEO)
+    assert not np.allclose(Y0, Y1, atol=1e-3) or not np.allclose(Z0, Z1, atol=1e-3)
+    # ...and the tilted ring is no longer a constant-radius circle.
+    radii = np.hypot(Y1 - _GEO["bc_y"], Z1 - _GEO["bc_z"])
+    assert radii.ptp() > 1e-3
+
+
+def test_tilted_ring_returns_n_points():
+    from midas_gui.helpers import tilted_ring_xy
+    Y, Z = tilted_ring_xy(6.0, 1.0, 2.0, 3.0, n=57, **_GEO)
+    assert Y.shape == Z.shape == (57,)
+
+
+def test_tilted_spoke_is_radial_at_zero_tilt():
+    """A fixed-eta spoke at zero tilt is a straight radial line through the
+    beam centre, sampled between the two 2θ limits."""
+    from midas_gui.helpers import tilted_spoke_xy
+    eta, n = 30.0, 24
+    Y, Z = tilted_spoke_xy(2.0, 10.0, eta, 0.0, 0.0, 0.0, n=n, **_GEO)
+    assert Y.shape == Z.shape == (n,)
+
+    r = np.hypot(Y - _GEO["bc_y"], Z - _GEO["bc_z"])
+    np.testing.assert_allclose(r[0], _expected_radius_px(2.0), rtol=1e-9)
+    np.testing.assert_allclose(r[-1], _expected_radius_px(10.0), rtol=1e-9)
+    assert np.all(np.diff(r) > 0), "must run outward monotonically"
+
+    # Every sample sits on the same azimuth.
+    ang = np.degrees(np.arctan2(Y - _GEO["bc_y"], Z - _GEO["bc_z"]))
+    np.testing.assert_allclose(ang, eta, atol=1e-6)
+
+
+def test_tilted_spoke_endpoints_match_the_ring_at_the_same_eta():
+    """Spoke and ring are two slices of one projection, so where they meet
+    they must agree exactly — the property that keeps a bin-grid overlay's
+    cells closed."""
+    from midas_gui.helpers import tilted_ring_xy, tilted_spoke_xy
+    tx, ty, tz, tt = 0.5, 2.0, -1.0, 7.0
+    n = 360
+    Yr, Zr = tilted_ring_xy(tt, tx, ty, tz, n=n, **_GEO)
+    idx = 45                                  # eta = 45 deg on the ring grid
+    eta = np.linspace(0.0, 360.0, n, endpoint=False)[idx]
+    Ys, Zs = tilted_spoke_xy(tt, tt, eta, tx, ty, tz, n=2, **_GEO)
+    np.testing.assert_allclose([Ys[0], Zs[0]], [Yr[idx], Zr[idx]], atol=1e-9)

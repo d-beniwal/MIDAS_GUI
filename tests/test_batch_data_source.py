@@ -227,9 +227,11 @@ def test_write_all_profiles_writes_every_frame_and_format(tmp_path):
         tmp_path, ["csv", "dat", "h5"], r_axis, profiles, sigmas, frame_ids,
         lsd=200000.0, px=200.0, wl=0.2)
 
-    for fid in frame_ids:
-        assert (tmp_path / f"{fid}.csv").exists()
-        assert (tmp_path / f"{fid}.dat").exists()
+    # Output names follow the <froot>_<NNNNNN> convention (workers.
+    # frame_output_base), so "frame_000" is written as "frame_000000".
+    for i in range(n):
+        assert (tmp_path / f"frame_{i:06d}.csv").exists()
+        assert (tmp_path / f"frame_{i:06d}.dat").exists()
     assert (tmp_path / "integrated.h5").exists()
     assert len(paths) == 2 * n + 1
 
