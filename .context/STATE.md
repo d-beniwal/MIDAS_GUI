@@ -1,17 +1,55 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-08-31 (workstation provenance + Hydra Overall-Cake
-rotation fix + Batch Integrate Rmin/Rmax + Detector-view preview committed
-as `fd7f67a` + docs `e577e72`, pushed to origin/main)_
+_Last updated: 2026-09-03 (junspark's PR #7 reviewed, fixed, tested and
+fast-forward-merged into local `main` as `092fbba`+`46e0fec`, logged in
+`a252b9d` — **not yet pushed**)_
 
 ## Now working on
 
-Nothing in progress. Working tree clean apart from local-only
+Nothing in progress. **`main` is 23 commits ahead of `origin/main` and
+unpushed** — pushing will also auto-close PR #7 on GitHub. Local branch
+`pr-7-strain-cake` and the fetched `refs/remotes/origin/pr/*` refs are still
+around and can be deleted. Working tree otherwise clean apart from local-only
 `test_data/test_out/` (GSAS-II export test artifacts; untracked,
 gitignore-precedent says leave it, see the github-skill project memory).
 
+Not done, worth deciding: junspark has not been told that PR #7 changes the
+per-frame output filename convention (see below) — no commit message in the
+PR mentions it, and it breaks anyone globbing Batch Integrate output.
+
 ## Recently completed
+
+**2026-09-02/03 (`092fbba`, `46e0fec`) — junspark's PR #7 ("Add Strain Cake
+tab with azimuth strain map and lab-frame axes") reviewed, fixed, covered by
+tests, and merged.** 20 commits, +3492/−295 over 19 files, 6 new modules
+(`job_queue.py`, `peak_fit_panel.py`, `provenance.py`, `zarr_cake.py`,
+`cake_params.py`, `batch_cli.py`), shipped with **zero test changes**.
+Reviewed against a per-file baseline of `main` first (essential — this repo
+has 4 permanently-failing files, see the crash blocker below); everything
+matched baseline except two files, both tripped by one intentional but
+undeclared behaviour change.
+- **Found + fixed: silent frame loss.** The PR moved per-frame profile
+  output to a `<froot>_<NNNNNN><tag>` convention (matching
+  mpe_wf_saxs_waxs) via a new `workers.froot_and_frame_num`, which
+  normalises zero-padding — so `scan_1`/`scan_01`/`scan_001` all became
+  `scan_000001.csv`: 3 frames in, 1 file out. New
+  `workers.frame_output_base()` now owns naming and de-duplicates per run;
+  all three call sites (`BatchWorker`, `FolderMonitorWorker`,
+  `write_all_profiles`) route through it. Also taught the parser the
+  `_c<NN>` chunk ids the PR's own `_HDF5StackGlobSource` mints.
+- **+108 tests** across 7 new files (`test_frame_naming`,
+  `test_provenance`, `test_zarr_cake`, `test_batch_zarr_output`,
+  `test_strain_cake`, `test_calib_tilt_seed`, `test_set_raw_frame`) plus 15
+  added to `test_helpers.py`; the two stale tests updated (the writer was
+  right, only their expectations were wrong).
+- **Verified:** full per-file suite on merged `main` is identical to the
+  pre-PR baseline — same 4 pre-existing failures, no new ones. No new
+  third-party deps (matplotlib/zarr/numcodecs already pinned); all 43
+  modules import; one new pyflakes warning only (unused local `spec`,
+  `tab_batch.py:972`). **Still untested** (no coverage added, out of
+  scope): `job_queue.py`, `peak_fit_panel.py`, `batch_cli.py` — tracked in
+  ROADMAP.md.
 
 **2026-08-31 (`fd7f67a`) — Workstation provenance + Hydra Overall-Cake
 rotation fix + Batch Integrate Rmin/Rmax + Detector-view preview.** Three
@@ -72,42 +110,8 @@ interpreter-teardown crash risk below, not introduced by this change) and
 `pytest tests/test_workspace_ux.py` (25/25 pass, only teardown-noise
 tracebacks after the dots, exit 0).
 
-**2026-08-31 (`d84c58e`) — Batch Integrate Multi-azimuth cake output +
-Export for GSAS-II; MIDAS backend bump; pytest-forked test isolation.**
-Four independent pieces bundled into one commit (this repo's "bundle the
-full diff" convention — see DECISIONS.md 2026-08-29/2026-08-30 entries for
-the *why* behind each): (1) Batch Integrate's opt-in **"Multi-azimuth
-output (cake)"** checkbox (off by default) keeps every azimuthal (η)
-sector as a separate output profile (`profiles`/`sigmas` →
-`(n_frames, n_eta, n_r)`) instead of collapsing to one full-circle profile
-per frame, reusing the existing η bin/range fields; `write_frame_profiles()`
-is the new shared per-format writer for both the live-run and Save-button
-paths. Not yet combinable with Q-uniform bins; HDF5 output is skipped in
-this mode. (2) New **Export for GSAS-II** feature (`midas_gui/
-gsas_export.py` + a card in Results & Export, `tab_export.py`) writes one
-chosen Batch-Integrate attempt as a native MIDAS-format GSAS-II zarr via
-`midas_integrate_v2.io.zarr_gsas.write_gsas_zarr_zip` + a provenance
-sidecar; v1 scope is single-detector/R-uniform-binning/embedded-mask only,
-each unsupported case raising a named `ValueError`. (3) MIDAS backend
-package bump — `midas-integrate-v2` 0.7.0, `midas-calibrate-v2` 0.11.0,
-`midas-integrate` 0.7.0, `midas-calibrate` 0.5.0, `midas-pdf` 0.2.0 — for
-`PolygonBinGeometry.from_spec()`'s tilt/distortion/parallax/panel-shift
-fix. (4) `pytest-forked` added + `pytestmark = pytest.mark.forked` on the
-four known interpreter-teardown-crash-prone test files (see the crash-risk
-bullet below). **Files:** `tab_batch.py`, `tab_export.py`, `workers.py`,
-`app.py`, new `gsas_export.py`, `requirements.txt`/`environment.yml`/
-`pyproject.toml`, the four test files + new `tests/test_batch_multiazimuth.py`/
-`tests/test_gsas_export.py`. **Verified:** both new test files pass
-(`pytest tests/test_batch_multiazimuth.py tests/test_gsas_export.py`, 8/8);
-(1)/(2) were actually implemented and GUI-tested in an earlier, uncaptured
-2026-08-29 session whose STATE.md update never landed — caught only by
-diffing the full working tree against `gui_documentation.md` (already
-current) before this commit, per the github-skill project memory's
-recurring "pre-commit sanity check" pattern. (3)/(4) were verified
-independently the same way in the 2026-08-30 session that made them (see
-DECISIONS.md).
-
-_(Older entries — `5954a57` Mask Builder raw-detector-space fix (removed
+_(Older entries — `d84c58e` Batch Multi-azimuth cake output + Export for
+GSAS-II + MIDAS backend bump + `pytest-forked` isolation, `5954a57` Mask Builder raw-detector-space fix (removed
 double-transform bug), `0332683` Batch-Parallel live-view frame-ordering fix,
 `21faaf8` Project schema redesign (`gui_workspace` + `analysis`) + unified
 Open Project dialog, `c67ad1b` multi-panel calibration refinement fix +
@@ -140,6 +144,14 @@ Flip-Z/Multi-panel fix — trimmed here; full detail in
   `PoleFigureWorker` has a pre-existing, unrelated mask/ImTransOpt bug;
   (4) `spec_from_calibration_result` has no panel-layout support — GUI
   already works around it (see P3-3).
+- **Known-failing baseline (2026-09-03, per-file runs).** Four files fail on
+  a clean `main` for the reasons below, and have for a long time:
+  `test_hydra_ui` 8 failed, `test_hydra_batch_ui` 2, `test_hydra_calib_ui` 2,
+  `test_smoke` 1 (`test_app_builds_offscreen`). Every other file is green.
+  **Capture this baseline before reviewing any incoming change** — without
+  it you cannot tell a regression from the standing noise (this is how PR
+  #7's two real regressions were isolated; see the github-skill project
+  memory for the full review recipe).
 - **Pre-existing interpreter-teardown crash risk**, especially around
   `CakeViewer`'s ViewBox (`tests/test_hydra_calib_ui.py`,
   `tests/test_hydra_ui.py`) and any module-scoped-fixture MainWindow
@@ -148,8 +160,9 @@ Flip-Z/Multi-panel fix — trimmed here; full detail in
   for `gc.collect()` (confirmed to make it worse). Out of scope, see
   DECISIONS.md for the 2026-08-26 bisection. **2026-08-30: `pytest-forked`
   now isolates this for the trusted per-file workflow** — `test_hydra_
-  calib_ui.py`, `test_hydra_ui.py`, `test_smoke.py`, `test_project.py` all
-  carry `pytestmark = pytest.mark.forked`, so a crash inside one of them
+  calib_ui.py`, `test_hydra_ui.py`, `test_smoke.py`, `test_project.py` (and,
+  from 2026-09-03, `test_set_raw_frame.py`, which builds one `ImageViewer`)
+  all carry `pytestmark = pytest.mark.forked`, so a crash inside one of them
   run alone is a clean `FAILED ... CRASHED with signal N` instead of an
   interpreter abort. Does NOT fix a combined `tests/` run — see DECISIONS.md
   2026-08-30: `os.fork()` itself becomes unsafe once torch/numba/Qt/HDF5
@@ -175,13 +188,6 @@ Flip-Z/Multi-panel fix — trimmed here; full detail in
 
 ## Standing rules (from memory)
 
-- After **every commit**: append to `documentation/development_history.md`
-  (hash/date/subject/Effect/Files/Roll back) + rebuild the `.pdf`.
-- On any user-visible GUI/tab/workflow change: update
-  `documentation/gui_documentation.md` + bump its "Last updated".
-- PDF rebuild pipeline: `pandoc <file>.md -s -o /tmp/<file>.html
-  --css=<inline stylesheet>`, then
-  `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-  --headless --disable-gpu --no-pdf-header-footer
-  --print-to-pdf=documentation/<file>.pdf file:///tmp/<file>.html`
-  (no committed script/template — recreated ad hoc each session).
+- Commit history is the record of recent work — see `git log`. Docs
+  (`development_history.md`, `gui_documentation.md`) are updated only when
+  explicitly asked, not automatically per commit.

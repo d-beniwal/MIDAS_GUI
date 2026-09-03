@@ -7,21 +7,13 @@ _verify against current code/commits before assuming still-open._
 Phases 1–3 (pipeline dropdown, refine flags, kernels, variance, Q-uniform,
 extra formats, learnable mask, refinement tab, corrections preview,
 multi-panel, Bayesian UQ, PDF Stage 1, texture, export hub, joint-cake) are
-**complete**.
-
-## PDF (Stage 2–3) — top priority, unblocked (2026-08-10)
-
-CIF structure fit, Δ-PDF, multiple scattering, absorption, RMCProfile/DISCUS
-export. The former blocker (`midas-hkls>=0.5.0` for the `absorption`
-submodule) is resolved — `midas-hkls` is now pinned to 0.7.0 and `midas_pdf`
-is the real PyPI package (0.1.1), replacing the old `midas_gui/_vendor` copy
-and its compatibility shim (see DECISIONS 2026-08-10). The installed
-`midas_pdf` already ships `cif.py`, `deltapdf.py`, `multiple_scattering.py`,
-`ms_transport.py`, `multi_phase.py`, `aniso_refine.py`, `bayesian_refine.py`,
-`rmc/`, `saxs/`, `strain_pdf.py` — Stage 2–3 is now GUI wiring work against an
-already-available backend, not a packaging blocker. Build-critical reference:
-`.context/reference/midas_pdf/` (esp. `01_core_api.md`, `05_gui_integration.md`)
-— verify against the installed package before assuming still accurate.
+**complete**. **PDF Stage 2–3 is also complete** (2026-08-12: CIF structure
+fit, Δ-PDF, multiple scattering, absorption, fluorescence — confirmed live
+in `midas_gui/tab_pdf.py`). Deliberately left out of scope, not currently
+planned: Bayesian SVI/NUTS, RMC/DISCUS export, SAXS/SANS joint refinement,
+multi-phase/core-shell, anisotropic ADP, directional strain-PDF.
+Build-critical reference for maintaining the PDF tab:
+`.context/reference/midas_pdf/` (esp. `01_core_api.md`, `05_gui_integration.md`).
 
 ## Per-tab open items
 
@@ -48,6 +40,25 @@ already-available backend, not a packaging blocker. Build-critical reference:
   image — `spec.TransOpt` already handles the image) before it reaches
   `build_geom`.
 - **Cross-cutting:** multi-detector merge, energy-sweep calibration.
+
+## Inherited from PR #7 (merged 2026-09-03, `092fbba`/`46e0fec`)
+
+- **No test coverage for three of the PR's six new modules** —
+  `job_queue.py` (background batch-integrate job queue, `screen`-backed),
+  `peak_fit_panel.py` (GSAS-2 peak-fit view), `batch_cli.py` (headless
+  batch runner). Skipped deliberately: useful tests need a live `screen`
+  session or a full widget harness, which was out of scope for the review
+  session. Import-only smoke tests were rejected as false assurance. The
+  other three (`provenance.py`, `zarr_cake.py`, `cake_params.py`) are
+  covered — see `tests/test_provenance.py`, `tests/test_zarr_cake.py`.
+- **The per-frame output filename change is undeclared.** PR #7 moved Batch
+  Integrate / Folder Monitor output from the verbatim frame id to
+  `<froot>_<NNNNNN><tag>` (see DECISIONS 2026-09-02). No commit message in
+  the PR mentions it. Anyone with a script globbing Batch Integrate output
+  is broken by it. Needs a note to junspark, release notes, or both.
+- **`tab_batch.py:972` has an unused local `spec`** — the one new pyflakes
+  warning the PR introduced. Cosmetic; likely a leftover from the
+  Detector-view/overlay work.
 
 ## Package-side fixes (for MIDAS maintainers — NOT done in GUI)
 

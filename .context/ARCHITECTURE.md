@@ -15,8 +15,8 @@ A ~9–10-tab QMainWindow (window 1600×950).
 (**inert stub** — only sets `KMP_DUPLICATE_LIB_OK`, `REPO_ROOT=None`;
 backends are separate deps) · `constants.py` · `helpers.py` · `style.py` ·
 `widgets.py` · `workers.py` · `calib.py` · `dialogs.py` · `prefs_dialog.py` ·
-`settings.py` · `pdf_backend.py` (import boundary for vendored `midas_pdf` +
-`midas_hkls.absorption` shim) · `_vendor/midas_pdf/` (vendored PDF pkg + data).
+`settings.py` · `pdf_backend.py` (plain `import midas_pdf` + re-export —
+`midas_pdf` is a real PyPI dependency since 2026-08-10, no vendoring/shim).
 
 **Tabs** (`tab_*.py`): view, mask, calibrate, refine, batch, corrections, pdf,
 texture, export, pumpprobe (TR-XRD). **Tab status:** 0–4 verified; 5–8 WIP —
@@ -156,6 +156,40 @@ becomes a placeholder; signal wiring guarded by `_connect`.
   `ImageViewer.__init__` (`widgets.py`), which overrides `pg.ImageView`'s
   own implicit `invertY()`; `roi_tools.py`'s crop-preview popup mirrors it.
   Independent of the `ImTransOpt`/Transforms-checkbox data-level flip.
+- **No Lsd auto-estimation from ring radius** — ring scoring always picked
+  the wrong ring (ambiguous assignment). "Pick Ring" gives BC+radius only;
+  Lsd stays a manual/seed value the user provides.
+
+## Qt / pyqtgraph gotchas (recurring root causes)
+
+- `autoRange(axes='x')` raises TypeError on this pyqtgraph version → use
+  `setXRange(min, max, padding=0.02)`.
+- `pg.ImageView.setImage()` defaults `autoRange=True, autoHistogramRange=True`
+  — pass both `False` on redraw (`ImageViewer._redisplay`) or zoom/pan resets
+  every frame.
+- `imageItem.setLookupTable()` is reset by every `setImage()` — use
+  `iv.setColorMap()`.
+- `pg.SignalProxy` and QThread workers must be stored as instance vars or
+  they're GC'd mid-run.
+- Stale `.pyc` caused phantom signature errors — clear `__pycache__` after
+  signature changes.
+- Linux non-native `QFileDialog` inherits the global light `QWidget` color →
+  invisible file names; needs explicit dark item-view colors in `style.py`
+  (macOS native dialog unaffected).
+- PyQt5 ≥5.5 hard-aborts the process on a slot exception → own
+  `sys.excepthook` + faulthandler installed; Windows crash log at
+  `%USERPROFILE%\midas_gui_error.log`.
+- `pg.ImageView.__init__` unconditionally calls `self.view.setAspectLocked(True)`
+  — a ViewBox needs `setAspectLocked(False)` before independent-axis
+  drag-zoom (e.g. R vs η in a cake plot) will work; an aspect-locked
+  ViewBox recouples both axes on every range-change, not just on drag.
+
+## Environment notes
+
+- **macOS TCC** blocks the Claude Code process from reading `~/Downloads`,
+  `~/Desktop`, `~/Documents` (`Operation not permitted` even with sandbox
+  off) — keep any external source dirs (e.g. a package's source checkout
+  used for reference) outside those three.
 
 ## Tests & docs
 
