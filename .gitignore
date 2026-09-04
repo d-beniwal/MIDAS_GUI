@@ -52,6 +52,8 @@ htmlcov/
 # Logs / temp
 *.log
 *.tmp
+.loglogin
+.smoke_test_log.txt
 
 # Local Claude working context (plans, ported context, notes)
 claude/
