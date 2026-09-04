@@ -108,6 +108,12 @@ def _build_corrections(args):
 def main(argv=None) -> int:
     args = _build_arg_parser().parse_args(argv)
 
+    from midas_gui.helpers import check_output_dir_writable
+    reason = check_output_dir_writable(args.out_dir)
+    if reason:
+        print(f"[batch] ERROR: {reason}", flush=True)
+        return 1
+
     # A QApplication instance is required to construct QThread/QObject
     # subclasses (BatchWorker) even though we never call .start() or run an
     # event loop — .run() is invoked directly, synchronously, on this thread.

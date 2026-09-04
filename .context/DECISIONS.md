@@ -3,6 +3,59 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-09-04 — Header Exp ID field; Batch Integrate output-folder "Suggest" + writability preflight
+
+Added a header-level "Exp ID" field (`app.py`, next to the Profile
+selector) in the `mpe_wf_saxs_waxs` style (e.g. `park_may26`) — shared
+app-wide via `MainWindow.expid()`/`set_expid()` rather than owned by any
+one tab, since more than one tab's output-path logic may eventually want
+it (today just Batch Integrate). Persists as a plain last-used value
+(`settings.get_last_expid`/`set_last_expid`, global like recent files —
+an Exp ID tracks the current experiment, not the beamline Profile) until
+a Project is open, at which point the Project's own saved Exp ID
+(`/gui_workspace` meta) travels with it instead.
+
+Batch Integrate's Output-folder row gained a "Suggest" button
+(`_suggest_output_dir`/`_apply_suggested_output_dir`/
+`_maybe_autofill_output_dir`, wired to fire automatically the first time
+a source loads) that fills in `<outroot>/<expid>_bc/<file-root>/
+<detector>/`, mirroring `mpe_wf_saxs_waxs`'s own
+`outroot/<expid>_bc/<froot>/<detector>/` convention. `expid`/`detector`/
+`outroot` are read *positionally* off the loaded source's own directory
+depth (mpe_wf's fixed `<outroot>/<expid>/<detector>/<froot>/<files>`
+layout) rather than requiring the Exp ID field to be typed first — the
+field is only consulted as a fallback when the source path isn't deep
+enough to read those segments off directly. Unlike mpe_wf's own GUIs
+(placeholder-text hints only), this auto-fills live, since MIDAS_GUI has
+no separate confirm-and-launch step to catch a wrong guess — manual
+Browse still overrides it once the user types/picks their own path.
+Output within a run is now split into per-format subfolders
+(csv/xye/fxye/dat/2d_csv/h5/zarr) instead of one flat directory, so the
+"Saved to" message after a run now names the chosen Output dir rather
+than one file's own parent, and the Save button (previously always
+enabled after a run) is now disabled whenever an Output folder was set —
+the run already wrote everything there as it went, so Save would only
+produce a second, flat, unsubfoldered duplicate of the text formats.
+
+Added `helpers.check_output_dir_writable()` as a preflight for all three
+places a chosen/suggested output dir gets used — `_run()`,
+`_run_as_job()`, and the two auto-suggest paths — since a wrong guess or
+a stale manual path landing on a directory someone else owns (real
+production output folders are not necessarily world-writable) previously
+surfaced only as an opaque write failure partway through a run. Also
+checked in `batch_cli.py`'s `main()` (background-job entry point) before
+any work starts, so a background job fails fast with a clear message
+instead of partway through, and — being the async, unattended-error-log
+path this exists for — logs it via `[batch] ERROR: ...` rather than a
+dialog.
+
+These three files landed as one commit rather than being split by
+sub-feature (Exp ID vs. Suggest-button vs. writability check) because
+`_apply_suggested_output_dir`/`_maybe_autofill_output_dir` call
+`check_output_dir_writable` directly and `tab_batch.py`'s import line
+pulls it in — splitting further would have meant an intermediate commit
+with a broken import.
+
 ## 2026-09-03 — File menu: "Open Last Project" and "Quit" actions
 
 Added "File ▸ Open Last Project" — a one-click shortcut for the top entry

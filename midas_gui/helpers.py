@@ -277,6 +277,37 @@ def detect_geometry_from_path(path: str, *, profile: Optional[str] = None) -> di
     return out
 
 
+def check_output_dir_writable(path: str | Path) -> Optional[str]:
+    """None if `path` can be written to (created if missing), else a
+    human-readable reason it can't.
+
+    Batch Integrate's suggested output folder (``<expid>_bc/<froot>/
+    <detector>``) is not something this GUI creates ahead of time in
+    production — it may already exist, made by someone else, with no
+    write access for whoever is actually running the batch (this differs
+    from `park_may26_bc`, which was deliberately made world-writable for
+    testing and is not representative). `mkdir(parents=True)` only
+    succeeds if the nearest *existing* ancestor is writable, so that's
+    what gets checked when `path` itself doesn't exist yet."""
+    p = Path(path)
+    check = p
+    while not check.exists():
+        parent = check.parent
+        if parent == check:
+            break
+        check = parent
+    if not _os.access(check, _os.W_OK):
+        user = _os.environ.get("USER") or _os.environ.get("LOGNAME") or "you"
+        if check == p:
+            return (f"'{p}' exists but isn't writable by {user}. Pick a "
+                     "different output folder, or ask whoever owns it to "
+                     "grant write access.")
+        return (f"Can't create '{p}' — '{check}' isn't writable by {user}. "
+                 "Pick a different output folder, or ask whoever owns it "
+                 "to grant write access.")
+    return None
+
+
 def new_temp_h5_path(prefix: str = "midas_buffer_") -> str:
     """Fresh temp .h5 path, auto-deleted at process exit."""
     f = _tf.NamedTemporaryFile(prefix=prefix, suffix=".h5", delete=False)

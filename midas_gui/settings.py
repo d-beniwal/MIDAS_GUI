@@ -325,6 +325,23 @@ def config_paths() -> dict:
     return {"user": up, "user_exists": up.is_file()}
 
 
+# ── last-used Exp ID ─────────────────────────────────────────────────────────
+# Deliberately global (in profile_meta.json, alongside "active" — not stored
+# inside a profile), mirroring recent files below: an Exp ID like "park_may26"
+# tracks the current experiment, not the beamline, so it shouldn't reset when
+# switching Profiles. This is only the app-wide fallback shown at startup —
+# once a Project is open, its own saved Exp ID (part of /gui_workspace meta,
+# see app.py's _serialize_workspace/_apply_workspace_state) takes over.
+def get_last_expid() -> str:
+    return read_json(_meta_path()).get("last_expid", "")
+
+
+def set_last_expid(value: str) -> None:
+    meta = read_json(_meta_path())
+    meta["last_expid"] = value or ""
+    _write_json(_meta_path(), meta)
+
+
 # ── recent files (Projects / Workspaces) ─────────────────────────────────────
 # Deliberately global (not stored inside a profile) — a recently-opened
 # project/workspace should stay "recent" regardless of which beamline Profile
