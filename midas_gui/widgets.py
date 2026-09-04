@@ -32,7 +32,8 @@ from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollDoubleSpinBox, _fspin,
                                _browse, is_h5, list_h5_datasets, _NoScrollComboBox,
                                _load_image, _collect_frame_paths, apply_field_corrections,
                                new_temp_h5_path, save_stack_h5, detect_geometry_from_path,
-                               source_kind, display_text_for_paths, _apply_im_trans)
+                               source_kind, display_text_for_paths, _apply_im_trans,
+                               is_dark_like_name)
 from midas_gui import style as S
 
 
@@ -217,6 +218,47 @@ class ImageViewer(QtWidgets.QWidget):
         frame = _apply_im_trans(raw_frame, codes) if codes else raw_frame
         self.set_image(frame, autorange=autorange, reset_levels=reset_levels)
         return frame
+
+    def display_state(self) -> dict:
+        """cmap/log/vmin%/vmax% as a plain dict — the one place a caller
+        that wants to persist "how this viewer is displayed" (e.g. a
+        tab's project-state save) should read from, instead of reaching
+        into ``_cmap``/``_log``/``_vmin``/``_vmax`` directly."""
+        return {"cmap": self._cmap.currentText(), "log": self._log.isChecked(),
+                "vmin": self._vmin.value(), "vmax": self._vmax.value()}
+
+    def set_display_state(self, state: Optional[dict]) -> None:
+        """Inverse of :meth:`display_state`. Restoring ``log``/``vmin``/
+        ``vmax`` alone is enough to take effect on the next
+        ``set_image``/``set_raw_frame`` (``_redisplay`` reads their
+        current values fresh every time), but ``cmap`` is different: the
+        colormap is only ever applied to the actual pyqtgraph view from
+        ``_set_cmap``, which only runs off the combo's own
+        ``currentTextChanged`` signal — restoring the combo's index with
+        signals blocked (the same convention ``apply_dict_to_widgets``
+        uses for every other widget) would leave the dropdown showing the
+        saved colormap while the image stayed rendered in whatever
+        colormap this viewer was constructed with. So this explicitly
+        re-applies it. Missing/unrecognized keys are left untouched."""
+        if not state:
+            return
+        cmap = state.get("cmap")
+        if cmap and self._cmap.findText(str(cmap)) >= 0:
+            self._cmap.blockSignals(True)
+            self._cmap.setCurrentText(str(cmap))
+            self._cmap.blockSignals(False)
+            self._set_cmap(str(cmap))
+        if "log" in state:
+            self._log.blockSignals(True)
+            self._log.setChecked(bool(state["log"]))
+            self._log.blockSignals(False)
+        for key, spin in (("vmin", self._vmin), ("vmax", self._vmax)):
+            if key in state:
+                spin.blockSignals(True)
+                spin.setValue(state[key])
+                spin.blockSignals(False)
+        if self._data is not None:
+            self._redisplay()
 
     def _apply_view_limits(self, w: int, h: int):
         """Bound pan/zoom to a sane region around the image so the user can't
@@ -750,28 +792,32 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
     x_lbl.setPos(bc_y, bc_z + V * (-head * 1.2))
     add(x_lbl)
 
-    # η sweep arc, 0°→+45°, flipped by V so η=0 still points toward Y_Lab.
+    # η reference marks at the four cardinal angles — 0°/+90°/−90°/180° —
+    # using the same convention as pixel_to_REta (η=atan2(-Yc,Zc): η=0 is
+    # +Z_MIDAS/+Y_Lab, straight up) and the same (-y_sign)/V flips as the
+    # X_Lab/Y_Lab arrows above, so these track any lab-frame flip exactly.
+    # A real caking ring/spoke overlay (draw_polar_bin_overlay) reduces to
+    # this same dY=r·sinη, dZ=r·cosη formula at zero tilt — this is just
+    # the always-visible compass, independent of any loaded geometry.
     R_arc = L * 0.85
-    eta_rad = np.deg2rad(np.linspace(0.0, 45.0, 24))
-    arc_x = bc_y + (-y_sign) * R_arc * np.sin(eta_rad)
-    arc_y = bc_z + V * R_arc * np.cos(eta_rad)
-    add(pg.PlotDataItem(arc_x, arc_y, pen=arc_pen))
-
-    end = math.radians(45.0)
-    tan_x = (-y_sign) * math.cos(end)
-    tan_y = -V * math.sin(end)
-    head_size = head * 0.9
-    tip_x, tip_y = float(arc_x[-1]), float(arc_y[-1])
-    bx, by = tip_x - tan_x * head_size, tip_y - tan_y * head_size
-    nx_, ny_ = -tan_y, tan_x
-    wing = head_size * 0.55
-    p1x, p1y = bx + nx_ * wing, by + ny_ * wing
-    p2x, p2y = bx - nx_ * wing, by - ny_ * wing
-    add(pg.PlotDataItem([p1x, tip_x, p2x], [p1y, tip_y, p2y], pen=arc_pen, connect="all"))
-
-    # η=0 tick, just outside the arc.
-    tick_inner, tick_outer = R_arc * 1.04, R_arc * 1.18
-    add(pg.PlotDataItem([bc_y, bc_y], [bc_z + V * tick_inner, bc_z + V * tick_outer], pen=arc_pen))
+    tick_inner, tick_outer, label_R = R_arc * 0.92, R_arc * 1.12, R_arc * 1.32
+    eta_marks = ((0.0, "η=0°"), (90.0, "η=+90°"), (-90.0, "η=−90°"), (180.0, "η=180°"))
+    for eta_deg, label in eta_marks:
+        eta_rad = math.radians(eta_deg)
+        ux = (-y_sign) * math.sin(eta_rad)
+        uy = V * math.cos(eta_rad)
+        add(pg.PlotDataItem([bc_y + ux * tick_inner, bc_y + ux * tick_outer],
+                             [bc_z + uy * tick_inner, bc_z + uy * tick_outer],
+                             pen=arc_pen))
+        if abs(uy) >= abs(ux):
+            anchor = (0.5, 1.0 if uy > 0 else 0.0)
+        else:
+            anchor = (0.0 if ux > 0 else 1.0, 0.5)
+        html = f'<span style="color:{eta_color};">{label}</span>'
+        lbl = pg.TextItem(html=html, anchor=anchor, border=text_pen, fill=text_fill)
+        lbl.setFont(label_font)
+        lbl.setPos(bc_y + ux * label_R, bc_z + uy * label_R)
+        add(lbl)
 
     return items
 
@@ -923,6 +969,38 @@ class CakeViewer(QtWidgets.QWidget):
 
     def _set_cmap(self, name: str):
         self._iv.setColorMap(_resolve_cmap(name))
+
+    def display_state(self) -> dict:
+        """Same contract as ``ImageViewer.display_state`` — see there for why
+        this exists as its own method rather than reading the widgets
+        directly (CakeViewer duplicates ImageViewer's cmap/log/vmin/vmax
+        toolbar rather than subclassing it, since its axes are physical
+        (R, η) bin coordinates rather than detector row/column indices)."""
+        return {"cmap": self._cmap.currentText(), "log": self._log.isChecked(),
+                "vmin": self._vmin.value(), "vmax": self._vmax.value()}
+
+    def set_display_state(self, state: Optional[dict]) -> None:
+        """See ``ImageViewer.set_display_state`` — identical reasoning
+        (cmap needs an explicit re-apply; log/vmin/vmax take effect on the
+        next ``set_cake`` regardless of whether their signal fired)."""
+        if not state:
+            return
+        cmap = state.get("cmap")
+        if cmap and self._cmap.findText(str(cmap)) >= 0:
+            self._cmap.blockSignals(True)
+            self._cmap.setCurrentText(str(cmap))
+            self._cmap.blockSignals(False)
+            self._set_cmap(str(cmap))
+        if "log" in state:
+            self._log.blockSignals(True)
+            self._log.setChecked(bool(state["log"]))
+            self._log.blockSignals(False)
+        for key, spin in (("vmin", self._vmin), ("vmax", self._vmax)):
+            if key in state:
+                spin.blockSignals(True)
+                spin.setValue(state[key])
+                spin.blockSignals(False)
+        self._redisplay()
 
     def _mouse(self, evt):
         if self._cake is None or self._r_axis is None:
@@ -2963,14 +3041,45 @@ class DataLoaderPanel(QtWidgets.QWidget):
             fr.addWidget(QtWidgets.QLabel("Frame:")); fr.addWidget(self._frame_spin); fr.addStretch(1)
             card.body.addLayout(fr)
         else:  # stream
+            # start/end are always FILE (scan) numbers, never an index into
+            # sub-frames or "Combine sub-frames" chunks — that setting is
+            # completely orthogonal, controlling only how each file's own
+            # internal sub-frames combine into output frames. _autofill_
+            # frame_range keeps the live label below in sync with whichever
+            # case applies:
+            # • Several files (multi-select / folder / stem-recursive) →
+            #   start/end are the smallest/largest scan number among them.
+            # • A single file → start/end lock to its own scan number (equal),
+            #   since there's exactly one file and nothing to range over.
+            _fr_tip = (
+                "The scan/file NUMBER to start/end at (parsed from filenames "
+                "like ..._009243.vrx.h5 → 9243), not a frame index — end is "
+                "inclusive.\n"
+                "• Several files (folder / multi-select / stem search) → set "
+                "these to pick a sub-range of scan numbers; both default to "
+                "the full min…max found.\n"
+                "• A single file → start/end always equal that file's own "
+                "scan number and are disabled, since there's only one file "
+                "to process. Use 'Combine sub-frames' below to control how "
+                "its internal sub-frames combine into output frames — that's "
+                "unrelated to start/end.\n"
+                "• Other frame-indexed sources (e.g. a single multi-frame "
+                "stack) fall back to a plain 0-based index, end exclusive, "
+                "0 = all.")
             self._fr_start = _NoScrollSpinBox(); self._fr_start.setRange(0, 999999); self._fr_start.setFixedWidth(64)
+            self._fr_start.setToolTip("First frame (inclusive).\n\n" + _fr_tip)
             self._fr_end = _NoScrollSpinBox(); self._fr_end.setRange(0, 999999); self._fr_end.setFixedWidth(64)
-            self._fr_end.setToolTip("Last frame (exclusive). 0 = all frames.")
+            self._fr_end.setToolTip("Last frame (exclusive). 0 = all frames.\n\n" + _fr_tip)
             self._fr_stride = _NoScrollSpinBox(); self._fr_stride.setRange(1, 100000); self._fr_stride.setValue(1); self._fr_stride.setFixedWidth(64)
+            self._fr_stride.setToolTip("Take every Nth frame (1 = every frame).\n\n" + _fr_tip)
             sf = S.Form()
             sf.row(("start:", self._fr_start), ("end(0=all):", self._fr_end))
             sf.row(("stride:", self._fr_stride))
             card.body.addLayout(sf)
+            self._fr_hint = QtWidgets.QLabel("")
+            self._fr_hint.setWordWrap(True)
+            self._fr_hint.setStyleSheet(f"color:{S.MUTED};font-size:10px;")
+            card.body.addWidget(self._fr_hint)
 
             # Shown only when the resolved source is several separate HDF5
             # files (e.g. one VAREX *.vrx.h5 per scan point, each itself a
@@ -3074,18 +3183,24 @@ class DataLoaderPanel(QtWidgets.QWidget):
 
     def _raw_source(self):
         """The current source: an explicit ``list[str]`` from a Browse…
-        "Multiple files"/"Files sharing a stem" pick, a ``<folder>/<stem>*``
+        "Multiple files"/"Files sharing a stem" pick, a ``<folder>/**/<stem>*``
         glob pattern when "stream" mode's live filestem filter is set (see
         ``_set_stem_filter`` — this one substitution is what makes
         ``source_cfg()``, ``_load()`` and cross-tab "Import from…" all
         filestem-aware for free), else the plain path text (file / folder /
-        glob)."""
+        glob). The ``**`` searches the entire folder tree below the selected
+        folder, not just its direct children — matching files sharing a stem
+        is meant to find every scan-point file regardless of which
+        subfolder it landed in, unlike "Full folder" (one flat directory).
+        ``helpers._collect_frame_paths`` globs this with ``recursive=True``,
+        under which ``**`` also matches zero directories, so files directly
+        in the selected folder still match too."""
         if self._explicit_paths:
             return self._explicit_paths
         text = self._path_ed.text().strip()
         if self._stem_filter and text:
             from pathlib import Path
-            return str(Path(text) / (self._stem_filter + "*"))
+            return str(Path(text) / "**" / (self._stem_filter + "*"))
         return text
 
     def _set_explicit_paths(self, paths):
@@ -3154,17 +3269,17 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._load()
 
     def _update_combine_visibility(self):
-        """Show the "Combine sub-frames" row (stream mode only) exactly
-        when the resolved source is several separate HDF5 files (see
-        ``source_cfg``'s ``"hdf5_stack_glob"`` type) — not for a single
-        bare HDF5 file (a plain multi-frame stack, unrelated "hdf5" type
-        with its own ``_ds_row``), and not for TIFF-family sources."""
+        """Show the "Combine sub-frames" row (stream mode only) whenever the
+        resolved source is HDF5 — a single bare file (``"hdf5"``) or several
+        separate files (``source_cfg``'s ``"hdf5_stack_glob"``) both combine
+        their own internal frame stack the same way (see ``source_cfg``) —
+        and not for TIFF-family sources, which have no such stack to combine."""
         if not hasattr(self, "_combine_row"):
             return
         from pathlib import Path
         raw = self._raw_source()
         if isinstance(raw, str) and is_h5(raw) and Path(raw).is_file():
-            self._combine_row.setVisible(False)
+            self._combine_row.setVisible(True)
             return
         paths = raw if isinstance(raw, list) else (_collect_frame_paths(raw) if raw else [])
         self._combine_row.setVisible(bool(paths) and any(is_h5(p) for p in paths))
@@ -3342,6 +3457,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._info.setText(text)
             self._live_frame_update = False
             self._stream_preview_dirty = True
+            self._autofill_frame_range()
             self.dataChanged.emit()
             return
         try:
@@ -3392,9 +3508,14 @@ class DataLoaderPanel(QtWidgets.QWidget):
     def _on_combine_changed(self, *_args):
         """A "Combine sub-frames" control (chunk size/op) changed — the
         cached preview frame (if any caller has asked for one via
-        current_frame()) no longer reflects the current settings."""
+        current_frame()) no longer reflects the current settings, and for a
+        single hdf5 source, start/end's displayed range (combined-frame
+        count) depends on chunk_size too — see _autofill_frame_range's
+        "combined-frame index" branch — so it needs recomputing here, not
+        just on source-path change."""
         if self._raw_source():
             self._stream_preview_dirty = True
+            self._autofill_frame_range()
             self.dataChanged.emit()
 
     def _on_fields_changed_stream(self) -> None:
@@ -3820,20 +3941,39 @@ class DataLoaderPanel(QtWidgets.QWidget):
         comes out as an ordinary ``"tiff_glob"`` here and MONITOR re-globs it
         on every poll like any other glob path (see ``FolderMonitorWorker``).
 
-        A single bare HDF5 file is ``"hdf5"`` (one big multi-frame stack,
-        streamed frame-by-frame as-is). Several separate HDF5 files instead
-        (an explicit "Multiple files" pick, or a "Full folder"/"Files
-        sharing a name stem" selection that resolves to HDF5 files — e.g.
-        one VAREX ``*.vrx.h5`` per scan point) become ``"hdf5_stack_glob"``:
-        each file's own internal frame stack is combined down to one (or a
-        few, via the "Combine sub-frames" chunk-size) frame first — see
-        ``workers._HDF5StackGlobSource``/``helpers.read_hdf5_stack_combined``.
+        A single bare HDF5 file is ``"hdf5"`` — its internal frame stack is
+        combined down to one (or a few, via the "Combine sub-frames"
+        chunk-size) frame first, same as each file in a multi-file pick
+        below (see ``workers._open_source_cfg``, which routes both through
+        ``_HDF5StackGlobSource``) — since a single VAREX ``*.vrx.h5``
+        holding several raw exposures for one scan point is exactly the
+        same shape as one file out of a multi-file scan, just picked on
+        its own (e.g. to preview/test one scan point). Several separate
+        HDF5 files instead (an explicit "Multiple files" pick, or a "Full
+        folder"/"Files sharing a name stem" selection that resolves to
+        HDF5 files — e.g. one VAREX ``*.vrx.h5`` per scan point) become
+        ``"hdf5_stack_glob"`` — see ``workers._HDF5StackGlobSource``/
+        ``helpers.read_hdf5_stack_combined``.
         """
         from pathlib import Path
         raw = self._raw_source()
         if isinstance(raw, str) and is_h5(raw) and Path(raw).is_file():
-            return {"type": "hdf5", "path": raw, "dataset": self._dataset()}
+            return {"type": "hdf5", "path": raw, "dataset": self._dataset(),
+                    "chunk_size": (self._combine_chunk.value() or None)
+                                 if hasattr(self, "_combine_chunk") else None,
+                    "combine_op": (self._combine_op_combo.currentData()
+                                  if hasattr(self, "_combine_op_combo") else "mean")}
         paths = raw if isinstance(raw, list) else (_collect_frame_paths(raw) if raw else [])
+        # Drop dark acquisitions swept in by a folder/stem selection (the
+        # beamline stores them alongside the scan they bracket) — see
+        # helpers.is_dark_like_name. An explicit multi-file pick is left
+        # alone: naming a dark file by hand is a deliberate choice.
+        if not isinstance(raw, list):
+            kept = [p for p in paths if not is_dark_like_name(p)]
+            self._n_dark_skipped = len(paths) - len(kept)
+            paths = kept
+        else:
+            self._n_dark_skipped = 0
         h5_paths = sorted(p for p in paths if is_h5(p))
         if h5_paths:
             return {"type": "hdf5_stack_glob", "paths": h5_paths,
@@ -3846,9 +3986,183 @@ class DataLoaderPanel(QtWidgets.QWidget):
             return {"type": "tiff_list", "paths": list(raw)}
         return {"type": "tiff_glob", "path": raw}
 
+    def _file_numbers(self) -> list:
+        """Scan-point numbers parsed from a MULTI-file source's filenames
+        (``C611_017Fe_1_load3_009243.vrx.h5`` → 9243), in the same sorted
+        order ``source_cfg()`` hands the paths to the worker. Empty for a
+        single-file source (whose start/end lock to its own scan number
+        instead — see ``_autofill_frame_range``) or when the names carry no
+        number.
+
+        A "tiff_glob" cfg (plain folder pick, or a stem-filter's
+        ``<folder>/**/<stem>*`` pattern from ``_raw_source``) carries only
+        ``path`` — ``source_cfg()`` expands it to a path list internally
+        just to check for HDF5 files, then discards that list — so it's
+        re-expanded here via the same ``_collect_frame_paths`` to reach the
+        folder/stem-recursive cases, not just the explicit-list/hdf5-stack
+        ones that already have a ``paths`` key."""
+        from pathlib import Path
+        from midas_gui.workers import froot_and_frame_num
+        cfg = self.source_cfg()
+        paths = cfg.get("paths")
+        if paths is None and cfg.get("type") == "tiff_glob" and cfg.get("path"):
+            paths = _collect_frame_paths(cfg["path"])
+        paths = paths or []
+        if len(paths) < 2:
+            return []
+        nums, roots = [], set()
+        for i, p in enumerate(paths):
+            froot, num, _tag = froot_and_frame_num(Path(p).stem, -1)
+            if num < 0:
+                return []
+            nums.append(num); roots.add(froot)
+        self._file_prefix = roots.pop() if len(roots) == 1 else ""
+        return nums
+
     def frame_range(self):
+        """(start, end_exclusive_or_None, stride) as 0-based indices for
+        ``workers.resolve_frame_indices`` — indices into the flattened
+        COMBINED-frame space ``source.n_frames`` counts over (one entry per
+        "Combine sub-frames" chunk, not one per file).
+
+        For a multi-file source the start/end spinboxes hold FILE NUMBERS
+        (auto-populated by ``_autofill_frame_range`` — what the user reads
+        off the filenames), so translate them to indices here rather than
+        changing the worker's/project's long-standing 0-based contract.
+        ``end`` is inclusive in file-number terms (9243..9250 processes
+        both ends, as a beamline scan range reads), and a gap in the
+        numbering can't produce a bogus range because the bounds are found
+        by scanning the sorted numbers rather than by arithmetic.
+
+        A multi-file HDF5 pick combined with "Combine sub-frames" > splits
+        each file into several combined-frame chunks, so a FILE-index range
+        is not the same as a COMBINED-FRAME-index range — file index 3 of
+        10 might be combined-frame index 12, not 3. Expand the file-index
+        bounds through each matched file's own chunk count (cheap header
+        reads, see ``_hdf5_multi_file_counts``) so the resulting range
+        lands on the right combined-frame indices; without this, a
+        multi-file range silently ran short (stopping partway through an
+        early file while later files in the range were never touched at
+        all) as soon as any file split into more than one combined frame."""
+        stride = max(1, self._fr_stride.value())
+        nums = self._file_numbers()
+        if nums:
+            lo, hi = self._fr_start.value(), self._fr_end.value()
+            i0 = next((i for i, n in enumerate(nums) if n >= lo), len(nums))
+            i1 = next((i for i, n in enumerate(nums) if n > hi), len(nums)) if hi > 0 else len(nums)
+            cfg = self.source_cfg()
+            paths = cfg.get("paths")
+            if cfg.get("type") == "hdf5_stack_glob" and paths and len(paths) == len(nums):
+                counts = self._hdf5_multi_file_counts(
+                    paths, cfg.get("dataset"), cfg.get("chunk_size"))
+                if counts is not None and len(counts) == len(paths):
+                    cum = np.cumsum([0] + list(counts))
+                    i0, i1 = int(cum[i0]), int(cum[i1])
+            return (i0, i1, stride)
+        if not self._fr_start.isEnabled():
+            # Single-file hdf5 source (see _autofill_frame_range): start/end
+            # show the file's own scan number for readability, not an index
+            # — there is exactly one file to process regardless of how many
+            # output frames "Combine sub-frames" splits it into.
+            return (0, None, 1)
         end = self._fr_end.value() if self._fr_end.value() > 0 else None
-        return (self._fr_start.value(), end, max(1, self._fr_stride.value()))
+        return (self._fr_start.value(), end, stride)
+
+    @staticmethod
+    def _hdf5_multi_file_counts(paths, dataset, chunk_size):
+        """Per-file combined-frame count for a multi-file HDF5 pick — header
+        reads only (see ``workers._HDF5StackGlobSource._stat``), no pixel
+        decode — used by ``frame_range`` to translate a FILE-index range
+        into the COMBINED-FRAME-index range ``resolve_frame_indices``
+        expects. Returns ``None`` if the source can't be inspected (e.g.
+        ``midas_integrate_v2``/h5py unavailable), so callers fall back to
+        treating file index == frame index unchanged."""
+        try:
+            from midas_gui.workers import _HDF5StackGlobSource
+            src = _HDF5StackGlobSource(paths, dataset, chunk_size=chunk_size)
+            src._ensure_stats()
+            return src._counts
+        except Exception:
+            return None
+
+    def _autofill_frame_range(self):
+        """Fill start/end with the full valid range for the current source
+        and describe what they mean, so the range can't silently select
+        nothing. start/end are always FILE (scan) numbers, never a sub-frame
+        or "Combine sub-frames"-chunk index — that setting is orthogonal.
+        Multi-file → min/max scan number among the files; single file →
+        locked equal to that one file's own scan number (parsed via
+        ``workers.froot_and_frame_num``), since there's only one file and
+        nothing to range over regardless of its internal chunk count."""
+        if self._mode != "stream" or not hasattr(self, "_fr_start"):
+            return
+        from pathlib import Path
+        from midas_gui.workers import froot_and_frame_num
+        self._file_prefix = ""
+        try:
+            cfg = self.source_cfg()
+        except Exception:
+            return
+        nums = self._file_numbers()
+        for w in (self._fr_start, self._fr_end):
+            w.blockSignals(True)
+        try:
+            # Reset from any previous single-combined-frame lock (below) so
+            # switching to a source that DOES have a real range to pick
+            # doesn't leave the controls stuck disabled.
+            self._fr_start.setEnabled(True)
+            self._fr_end.setEnabled(True)
+            self._fr_stride.setEnabled(True)
+            if nums:
+                self._fr_start.setValue(min(nums)); self._fr_end.setValue(max(nums))
+                pfx = f"{self._file_prefix}_" if self._file_prefix else ""
+                extra = ""
+                n_dark = getattr(self, "_n_dark_skipped", 0)
+                if n_dark:
+                    extra += f"  Skipped {n_dark} dark file(s)."
+                # Gaps matter enough to surface: the range reads as a single
+                # contiguous scan but isn't, and a missing point mid-range is
+                # usually an aborted/failed acquisition worth knowing about.
+                missing = (max(nums) - min(nums) + 1) - len(nums)
+                if missing > 0:
+                    extra += f"  ⚠ {missing} number(s) missing in this range (gaps)."
+                self._fr_hint.setText(
+                    f"start/end = file numbers ({len(nums)} files: {pfx}"
+                    f"{min(nums):06d} … {pfx}{max(nums):06d}), end inclusive.{extra}")
+            elif cfg.get("type") == "hdf5" and cfg.get("path"):
+                # start/end are always FILE numbers (see the "nums" branch
+                # above for the multi-file case) — never an index into this
+                # file's own sub-frames or "Combine sub-frames" chunks, which
+                # is an orthogonal setting. A single file is one file, so
+                # start=end=its own scan number and there's nothing to range
+                # over regardless of how many combined output frames
+                # "Combine sub-frames" below turns it into — frame_range()
+                # special-cases this via these widgets' disabled state
+                # rather than a literal index lookup.
+                froot, num, _tag = froot_and_frame_num(Path(cfg["path"]).stem, -1)
+                shown = num if num >= 0 else 0
+                self._fr_start.setValue(shown); self._fr_end.setValue(shown)
+                self._fr_stride.setValue(1)
+                self._fr_start.setEnabled(False)
+                self._fr_end.setEnabled(False)
+                self._fr_stride.setEnabled(False)
+                n = 0
+                try:
+                    from midas_gui.workers import _open_source_cfg
+                    n = int(getattr(_open_source_cfg(cfg), "n_frames", 0) or 0)
+                except Exception:
+                    n = 0
+                produces = (f" (produces {n} combined output frames via "
+                            f"'Combine sub-frames' below)" if n > 1 else "")
+                self._fr_hint.setText(
+                    f"Single file (scan point {shown:06d}){produces} — the "
+                    "whole file is always processed as one source; nothing "
+                    "to select here.")
+            else:
+                self._fr_hint.setText("")
+        finally:
+            for w in (self._fr_start, self._fr_end):
+                w.blockSignals(False)
 
     def dark(self):
         return self._dark_sel.get_field()
@@ -4222,6 +4536,27 @@ class WaterfallViewer(QtWidgets.QWidget):
 
     def _apply_cmap(self, name: str):
         self._hist.gradient.setColorMap(_resolve_cmap(name))
+
+    def display_state(self) -> dict:
+        """Same contract/reasoning as ``ImageViewer.display_state`` —
+        WaterfallViewer has no vmin%/vmax% (its color window is a plain
+        pyqtgraph HistogramLUTWidget, not a percentile pair), just cmap/log."""
+        return {"cmap": self._cmap.currentText(), "log": self._log.isChecked()}
+
+    def set_display_state(self, state: Optional[dict]) -> None:
+        if not state:
+            return
+        cmap = state.get("cmap")
+        if cmap and self._cmap.findText(str(cmap)) >= 0:
+            self._cmap.blockSignals(True)
+            self._cmap.setCurrentText(str(cmap))
+            self._cmap.blockSignals(False)
+            self._apply_cmap(str(cmap))
+        if "log" in state:
+            self._log.blockSignals(True)
+            self._log.setChecked(bool(state["log"]))
+            self._log.blockSignals(False)
+        self._redraw()
 
 
 def _frame_color(i: int) -> tuple:

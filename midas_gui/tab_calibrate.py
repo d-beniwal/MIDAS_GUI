@@ -1370,6 +1370,8 @@ class CalibrationTab(QtWidgets.QWidget):
         Fit with the restored seed fields reproduces it)."""
         state = {"fields": widgets_to_dict(self._state_widgets()),
                  "loader": self._loader.get_state(),
+                 "img_view": self._img_view.display_state(),
+                 "cake_view": self._cake_view.display_state(),
                  "hydra": {"active_mode": self._mode_ribbon.mode(),
                            "page": self._hydra_page.get_state()}}
         if self._result is not None and sidecar_stem:
@@ -1387,6 +1389,8 @@ class CalibrationTab(QtWidgets.QWidget):
     def set_state(self, state: dict, sidecar_stem: Optional[str] = None) -> None:
         apply_dict_to_widgets(self._state_widgets(), state.get("fields", {}))
         self._loader.set_state(state.get("loader") or {})
+        self._img_view.set_display_state(state.get("img_view"))
+        self._cake_view.set_display_state(state.get("cake_view"))
         hydra_state = state.get("hydra") or {}
         self._mode_ribbon.set_mode(hydra_state.get("active_mode", "single"))
         self._hydra_page.set_state(hydra_state.get("page") or {})

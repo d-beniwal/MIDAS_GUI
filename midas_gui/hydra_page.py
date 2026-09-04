@@ -497,12 +497,14 @@ class HydraViewerPage(QtWidgets.QWidget):
             "active_panel": self._toolbar.current(),
             "rad_r_bin": self._rad_r_bin.value(),
             "rad_auto": self._rad_auto.isChecked(),
+            "viewer": self._viewer.display_state(),
             "cards": cards,
         }
 
     def set_state(self, state: dict):
         if not state:
             return
+        self._viewer.set_display_state(state.get("viewer"))
         for key, fields in (state.get("cards") or {}).items():
             card = self._cards.get(key)
             if card is None:

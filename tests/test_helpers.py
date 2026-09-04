@@ -300,9 +300,21 @@ def test_tilted_ring_reduces_to_a_plain_circle_at_zero_tilt():
     Y, Z = tilted_ring_xy(tt, 0.0, 0.0, 0.0, n=n, **_GEO)
 
     r = _expected_radius_px(tt)
-    eta = np.radians(np.linspace(0.0, 360.0, n, endpoint=False))
+    # endpoint=True: the ring grid closes its polyline (last point == first),
+    # so the n samples span [0, 360] inclusive at 360/(n-1) spacing.
+    eta = np.radians(np.linspace(0.0, 360.0, n, endpoint=True))
     np.testing.assert_allclose(Y, _GEO["bc_y"] + r * np.sin(eta), atol=1e-6)
     np.testing.assert_allclose(Z, _GEO["bc_z"] + r * np.cos(eta), atol=1e-6)
+
+
+def test_tilted_ring_polyline_is_closed():
+    """The ring is fed straight to pg.PlotDataItem, which never auto-closes a
+    polyline — so the last sample must repeat the first, or the overlay shows
+    a visible seam at eta=0."""
+    from midas_gui.helpers import tilted_ring_xy
+    for tilt in ((0.0, 0.0, 0.0), (0.5, 2.0, -1.0)):
+        Y, Z = tilted_ring_xy(7.0, *tilt, n=180, **_GEO)
+        np.testing.assert_allclose([Y[0], Z[0]], [Y[-1], Z[-1]], atol=1e-12)
 
 
 def test_tilted_ring_is_centred_and_round_at_zero_tilt():
@@ -358,7 +370,7 @@ def test_tilted_spoke_endpoints_match_the_ring_at_the_same_eta():
     tx, ty, tz, tt = 0.5, 2.0, -1.0, 7.0
     n = 360
     Yr, Zr = tilted_ring_xy(tt, tx, ty, tz, n=n, **_GEO)
-    idx = 45                                  # eta = 45 deg on the ring grid
-    eta = np.linspace(0.0, 360.0, n, endpoint=False)[idx]
+    idx = 45                                  # some eta on the closed ring grid
+    eta = np.linspace(0.0, 360.0, n, endpoint=True)[idx]
     Ys, Zs = tilted_spoke_xy(tt, tt, eta, tx, ty, tz, n=2, **_GEO)
     np.testing.assert_allclose([Ys[0], Zs[0]], [Yr[idx], Zr[idx]], atol=1e-9)

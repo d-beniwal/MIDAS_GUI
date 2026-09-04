@@ -197,8 +197,16 @@ class JobQueuePanel(QtWidgets.QWidget):
                 self, "Cannot write log", f"Could not create job files:\n{e}")
             return None
 
+        # `argv` runs `python -m midas_gui.batch_cli`, which only resolves
+        # the `midas_gui` package when the process's cwd is the repo root
+        # (that's what puts the repo root on sys.path[0] for `-m`) — the
+        # spawned screen/bash session otherwise inherits whatever cwd the
+        # GUI itself happened to have, so pin it explicitly here rather
+        # than relying on that.
+        repo_root = Path(__file__).resolve().parent.parent
         inner = " ".join(shlex.quote(str(c)) for c in argv)
-        wrapped = f'{inner}; rc=$?; echo "[launcher] DONE exit=$rc"; sleep 3'
+        wrapped = (f'cd {shlex.quote(str(repo_root))} && {inner}; '
+                   f'rc=$?; echo "[launcher] DONE exit=$rc"; sleep 3')
         screen_cmd = ["screen", "-dmS", session, "-L", "-Logfile", logfile,
                       "bash", "-c", wrapped]
         rc = QtCore.QProcess.execute("screen", screen_cmd[1:])

@@ -60,6 +60,11 @@ _FID_NUM_RE = re.compile(r'^(?P<froot>.+?)_(?P<num>\d+)(?P<tag>[^_\d]*)$')
 # A trailing "_c<NN>" chunk suffix, as minted by _HDF5StackGlobSource when one
 # multi-frame HDF5 file is split into several combined chunks.
 _FID_CHUNK_RE = re.compile(r'^(?P<rest>.+)_c(?P<chunk>\d+)$')
+# The current _HDF5StackGlobSource chunk suffix: ".frame_<start>_<end>", the
+# raw 0-based sub-frame range a combined chunk was built from. Split off
+# before the numeric parse for the same reason as "_c<NN>" — otherwise the
+# trailing "_<end>" is mistaken for the stem's own frame number.
+_FID_RANGE_RE = re.compile(r'^(?P<rest>.+)\.frame_(?P<start>\d+)_(?P<end>\d+)$')
 
 
 def froot_and_frame_num(fid, fallback_idx: int) -> tuple:
@@ -72,13 +77,17 @@ def froot_and_frame_num(fid, fallback_idx: int) -> tuple:
     ``..._009243.vrx``, with a non-numeric detector tag (``.vrx``) trailing
     the digits. ``tag`` preserves that (empty string when there isn't one).
 
-    A trailing ``_c<NN>`` chunk suffix (``_HDF5StackGlobSource``'s id for the
-    k-th combined chunk of one multi-frame file) is split off *before* the
-    numeric parse and re-attached to ``tag``, so ``run_009243.vrx_c00`` keeps
-    its stem frame number 9243 and stays distinct from its ``_c01`` sibling.
-    When the stem carries no number of its own the chunk index becomes the
-    frame number (``run_c00`` → ``('run', 0, '')``), which sorts correctly
-    instead of falling back to an unrelated loop counter.
+    A trailing chunk suffix minted by ``_HDF5StackGlobSource`` for the k-th
+    combined chunk of one multi-frame file — currently
+    ``.frame_<start>_<end>``, historically ``_c<NN>`` — is split off *before*
+    the numeric parse and re-attached to ``tag``, so
+    ``run_009243.vrx.frame_0_9`` keeps its stem frame number 9243 and stays
+    distinct from its ``.frame_10_19`` sibling. When the stem carries no
+    number of its own the chunk's own start index becomes the frame number and
+    the suffix is dropped (``run.frame_0_9`` → ``('run', 0, '')``,
+    ``run.frame_10_19`` → ``('run', 10, '')``) — still unique and correctly
+    ordered across chunks, and matching mpe_wf's plain ``<froot>_<NNNNNN>``,
+    rather than falling back to an unrelated loop counter.
 
     Falls back to ``(fid, fallback_idx, "")`` when ``fid`` has no
     underscore-digit run at all (e.g. a caller-supplied non-numeric id).
@@ -89,11 +98,17 @@ def froot_and_frame_num(fid, fallback_idx: int) -> tuple:
     """
     s = str(fid)
     chunk_suffix, chunk_num = '', None
-    m = _FID_CHUNK_RE.match(s)
+    m = _FID_RANGE_RE.match(s)
     if m:
         s = m.group('rest')
-        chunk_suffix = '_c' + m.group('chunk')
-        chunk_num = int(m.group('chunk'))
+        chunk_suffix = '.frame_%s_%s' % (m.group('start'), m.group('end'))
+        chunk_num = int(m.group('start'))
+    else:
+        m = _FID_CHUNK_RE.match(s)
+        if m:
+            s = m.group('rest')
+            chunk_suffix = '_c' + m.group('chunk')
+            chunk_num = int(m.group('chunk'))
     m = _FID_NUM_RE.match(s)
     if m:
         return m.group('froot'), int(m.group('num')), m.group('tag') + chunk_suffix
@@ -103,8 +118,8 @@ def froot_and_frame_num(fid, fallback_idx: int) -> tuple:
     return s, int(fallback_idx), ''
 
 
-def frame_output_base(out_dir, fid, fallback_idx: int, used: set):
-    """Return the ``Path`` stem to write frame ``fid``'s profiles to, in the
+def frame_output_stem(fid, fallback_idx: int, used: set) -> str:
+    """Return the filename stem to write frame ``fid``'s output under, in the
     ``<froot>_<NNNNNN><tag>`` convention, guaranteed unique within one run.
 
     ``used`` is a caller-owned set of already-issued names, mutated in place.
@@ -114,6 +129,11 @@ def frame_output_base(out_dir, fid, fallback_idx: int, used: set):
     earlier frames. On a clash we fall back to the raw ``fid`` (which is
     unique by construction: it is a file stem, or a stem + chunk suffix), and
     only if *that* is somehow taken too do we append the loop index.
+
+    Callers that write one frame into several per-format subfolders must
+    allocate the stem ONCE and reuse it, rather than calling this per format
+    — otherwise the second format sees its own stem as already used and
+    needlessly falls back.
     """
     froot, frame_num, tag = froot_and_frame_num(fid, fallback_idx)
     name = f"{froot}_{frame_num:06d}{tag}"
@@ -122,7 +142,13 @@ def frame_output_base(out_dir, fid, fallback_idx: int, used: set):
         if name in used:
             name = f"{fid}_{int(fallback_idx):06d}"
     used.add(name)
-    return Path(out_dir) / name
+    return name
+
+
+def frame_output_base(out_dir, fid, fallback_idx: int, used: set):
+    """:func:`frame_output_stem` joined onto ``out_dir`` — for callers that
+    write every format of a frame into one flat directory."""
+    return Path(out_dir) / frame_output_stem(fid, fallback_idx, used)
 
 
 def stamp_h5_provenance(h5_path, entry: dict) -> None:
@@ -904,7 +930,13 @@ def _open_source_cfg(cfg):
     if cfg["type"] == "tiff_glob":
         return TIFFGlobSource(cfg["path"])
     if cfg["type"] == "hdf5":
-        return HDF5FrameSource(cfg["path"], dataset=cfg.get("dataset", "frames"))
+        # Route through _HDF5StackGlobSource (single-element path list) rather
+        # than a plain HDF5FrameSource, so "Combine sub-frames" (chunk_size/
+        # combine_op, now exposed for single-file HDF5 sources too) actually
+        # takes effect instead of being silently ignored.
+        return _HDF5StackGlobSource(
+            [cfg["path"]], cfg.get("dataset", "frames"),
+            chunk_size=cfg.get("chunk_size") or None, op=cfg.get("combine_op", "mean"))
     if cfg["type"] == "tiff_list":
         return _ExplicitTIFFSource(cfg["paths"])
     if cfg["type"] == "hdf5_stack_glob":
@@ -1072,9 +1104,39 @@ class BatchWorker(QtCore.QThread):
 
             aborted = False
             all_profiles, all_sigmas, frame_ids, out_paths = [], [], [], []
-            used_names: set = set()   # frame_output_base collision guard
-            all_cakes, all_omegas = [], []   # zarr cake output only
+            used_names: set = set()   # frame_output_stem collision guard
+            all_omegas = []   # still needed below for h5's <lo>_<hi> combined-stem
             proc_idx = 0  # index into monitor_vals for processed frames only
+
+            # Zarr is written ONE FILE PER COMBINED OUTPUT FRAME as it's
+            # produced (below, inside the loop) rather than bundled into one
+            # zarr for the whole run — mirrors mpe_wf's own one-zarr-per-
+            # scan-point convention, extended so a file that "Combine
+            # sub-frames" splits into several chunks gets one zarr per
+            # chunk too (see `fid`'s naming in _HDF5StackGlobSource._fid).
+            # Precompute what's shared across every per-frame write once,
+            # up front, rather than repeating it per frame.
+            zarr_dir = zarr_bin_area = zarr_prov_entry = write_gsas_zarr_zip = None
+            if want_zarr:
+                from midas_integrate_v2.io.zarr_gsas import write_gsas_zarr_zip
+                zarr_dir = self._out_dir / "zarr"
+                zarr_dir.mkdir(parents=True, exist_ok=True)
+                zarr_bin_area = count_cake(geom, self._kernel, spec.NrPixelsZ, spec.NrPixelsY)
+                zarr_prov_entry = provenance.build_entry(
+                    'midas_gui.batch_integrate',
+                    inputs=[self._src.get('path')] if self._src.get('path') else [],
+                    cake_params={
+                        'RMin': float(spec.RMin), 'RMax': float(spec.RMax),
+                        'RBinSize': float(spec.RBinSize), 'EtaMin': float(spec.EtaMin),
+                        'EtaMax': float(spec.EtaMax), 'EtaBinSize': float(spec.EtaBinSize),
+                    },
+                    extra={
+                        'kernel': self._kernel, 'weighted': self._weighted,
+                        'multi_azimuth': self._multi_azimuth,
+                        'n_frames': 1, 'frame_range': list(self._frame_range),
+                    },
+                )
+
             for abs_i, fid, img in self._iter_frames(source):
                 # Cooperative abort — stop cleanly, keeping frames already done.
                 if self.isInterruptionRequested():
@@ -1144,8 +1206,58 @@ class BatchWorker(QtCore.QThread):
                     all_profiles.append(prof)
                     all_sigmas.append(sigma)
                 if want_zarr and cake_2d is not None:
-                    all_cakes.append(cake_2d)
                     all_omegas.append(float(abs_i))
+                    # One zarr per combined output frame, written immediately
+                    # rather than accumulated — `fid` already carries the
+                    # right per-chunk identity (a bare file stem when
+                    # "Combine sub-frames" produces one output per file, or
+                    # "<stem>.frame_<start>_<end>" per chunk — the actual raw
+                    # sub-frame range it combines — when it splits a file
+                    # into several, see _HDF5StackGlobSource._fid), so this
+                    # naturally yields one zarr per image stack, and however
+                    # many the chunking splits it into, uneven remainder
+                    # chunk included, with the frames it covers visible in
+                    # the filename.
+                    zarr_path = zarr_dir / f"{fid}.ave.zarr.zip"
+                    # Instrument metadata (temperature/pressure/storage-ring
+                    # current), when the source can provide it (HDF5 stacks
+                    # only — see _HDF5StackGlobSource.metadata_for_index) —
+                    # always the mean across this chunk's raw sub-frames,
+                    # regardless of the pixel combine op, and already
+                    # aligned to the light-frame timestamps rather than a
+                    # longer light+dark metadata array.
+                    meta = None
+                    get_meta = getattr(source, "metadata_for_index", None)
+                    if get_meta is not None:
+                        try:
+                            meta = get_meta(abs_i)
+                        except Exception:
+                            meta = None
+                    temps = pressures = currents = None
+                    if meta:
+                        if meta.get("temperature") is not None:
+                            temps = [meta["temperature"]]
+                        if meta.get("pressure") is not None:
+                            pressures = [meta["pressure"]]
+                        if meta.get("current") is not None:
+                            currents = [meta["current"]]
+                    try:
+                        write_gsas_zarr_zip(
+                            zarr_path, [cake_2d], spec=spec,
+                            omegas=[float(abs_i)], bin_area=zarr_bin_area,
+                            temperatures=temps, pressures=pressures,
+                            currents=currents)
+                        try:
+                            provenance.append_to_zip(zarr_path, zarr_prov_entry)
+                        except Exception:
+                            self.log_line.emit(
+                                f"[batch] note: provenance stamp on {zarr_path.name} "
+                                "failed (non-fatal):\n" + traceback.format_exc())
+                        out_paths.append(str(zarr_path))
+                    except Exception:
+                        self.log_line.emit(
+                            f"[batch] zarr cake output for {fid!r} failed:\n"
+                            + traceback.format_exc())
                 frame_ids.append(fid)
                 self.frame_done.emit(fid, r_ax, prof, sigma)
                 self.progress.emit(proc_idx + 1, total)
@@ -1153,13 +1265,43 @@ class BatchWorker(QtCore.QThread):
 
                 file_fmts = [f for f in self._fmts if f not in ("h5", "zarr")]
                 if self._out_dir is not None and file_fmts:
-                    self._out_dir.mkdir(parents=True, exist_ok=True)
-                    base = frame_output_base(self._out_dir, fid, abs_i, used_names)
-                    out_paths.extend(write_frame_profiles(
-                        base, file_fmts, r_ax, prof, sigma, cur_lsd, px, wl,
-                        cake_2d=(cake_2d if self._multi_azimuth else None),
-                        cake_sigma=(cake_sigma if self._multi_azimuth else None),
-                        eta_axis=eta_ax))
+                    # Allocate the stem ONCE per frame (not per format) and
+                    # through frame_output_stem, so differently-padded frame
+                    # ids in one run can't collapse onto the same filename and
+                    # silently overwrite each other. The same stem is reused
+                    # across every format subfolder, which is safe: they are
+                    # different directories.
+                    stem = frame_output_stem(fid, abs_i, used_names)
+                    # One subfolder per lineout format (csv/, xye/,
+                    # 2d_csv/, ...), at the same level as h5/ and zarr/
+                    # below — rather than mixing every text format into
+                    # one folder, or nesting them all under another
+                    # "lineouts" layer.
+                    for fmt in file_fmts:
+                        fmt_dir = self._out_dir / fmt
+                        fmt_dir.mkdir(parents=True, exist_ok=True)
+                        out_paths.extend(write_frame_profiles(
+                            fmt_dir / stem, [fmt], r_ax, prof, sigma, cur_lsd, px, wl,
+                            cake_2d=(cake_2d if self._multi_azimuth else None),
+                            cake_sigma=(cake_sigma if self._multi_azimuth else None),
+                            eta_axis=eta_ax))
+
+            # Combined h5 output name: <original-source-stem>.<start>_<end>
+            # .cake — h5 remains one file for the whole run (unlike zarr,
+            # written per-frame above), so it still needs an explicit
+            # frame-index range. start/end are the actual processed 0-based
+            # frame indices (all_omegas), matching what per-frame lineout
+            # files already use via froot_and_frame_num(fid, abs_i) above.
+            src_path = self._src.get('path')
+            if src_path:
+                out_stem = Path(src_path).stem
+            else:
+                src_paths = self._src.get('paths') or []
+                out_stem = (froot_and_frame_num(Path(src_paths[0]).stem, -1)[0]
+                            if src_paths else "integrated")
+            lo = int(min(all_omegas)) if all_omegas else 0
+            hi = int(max(all_omegas)) if all_omegas else 0
+            combined_stem = f"{out_stem}.{lo:06d}_{hi:06d}.cake"
 
             prov_entry = provenance.build_entry(
                 'midas_gui.batch_integrate',
@@ -1185,8 +1327,9 @@ class BatchWorker(QtCore.QThread):
                         "mode (write_h5 expects one profile per frame) — use the "
                         "text formats or GSAS-II zarr export instead.")
                 else:
-                    self._out_dir.mkdir(parents=True, exist_ok=True)
-                    h5_path = self._out_dir / "integrated.h5"
+                    h5_dir = self._out_dir / "h5"
+                    h5_dir.mkdir(parents=True, exist_ok=True)
+                    h5_path = h5_dir / f"{combined_stem}.h5"
                     m.write_h5(str(h5_path),
                                profiles=np.array(all_profiles),
                                r_axis=r_ax,
@@ -1196,28 +1339,13 @@ class BatchWorker(QtCore.QThread):
                         stamp_h5_provenance(h5_path, prov_entry)
                     except Exception:
                         self.log_line.emit(
-                            "[batch] note: provenance stamp on integrated.h5 "
+                            f"[batch] note: provenance stamp on {h5_path.name} "
                             "failed (non-fatal):\n" + traceback.format_exc())
                     out_paths.append(str(h5_path))
 
-            # Zarr cake: full (eta, R) per frame — the direct complement of
-            # HDF5 above (which needs a 1-D profile per frame); works
-            # regardless of multi_azimuth since cake_2d is always available
-            # here when zarr was requested (see want_cake above).
-            if want_zarr and all_cakes:
-                from midas_gui.zarr_cake import write_cake_zarr
-                self._out_dir.mkdir(parents=True, exist_ok=True)
-                zarr_path = self._out_dir / "integrated.zarr.zip"
-                try:
-                    bin_area = count_cake(geom, self._kernel, spec.NrPixelsZ, spec.NrPixelsY)
-                    write_cake_zarr(
-                        zarr_path, all_cakes, r_axis_px=r_ax, eta_axis_deg=eta_ax,
-                        lsd_um=lsd, px_um=px, wavelength_A=wl, omegas=all_omegas,
-                        bin_area=bin_area, provenance_entry=prov_entry)
-                    out_paths.append(str(zarr_path))
-                except Exception:
-                    self.log_line.emit(
-                        "[batch] zarr cake output failed:\n" + traceback.format_exc())
+            # Zarr cake output is written per-frame inside the loop above
+            # (see the `want_zarr and cake_2d is not None` branch) — nothing
+            # left to do here.
 
             n_proc = len(all_profiles)
             self.finished.emit({
@@ -1420,45 +1548,223 @@ class _HDF5StackGlobSource:
 
     Unlike ``_ExplicitTIFFSource`` a single file may yield more than one frame
     (when ``chunk_size`` splits its stack into several combined chunks), so
-    ``n_frames``/``get(idx)`` are computed over a flattened index built once
-    at construction time (one ``read_hdf5_stack_combined`` call per file,
-    cached — these files are large, and a second header-only pass to just
-    count frames isn't worth the extra h5py open)."""
+    ``n_frames``/``get(idx)`` are computed over a flattened index of how many
+    combined frames each file yields, read from each file's dataset SHAPE
+    (an h5py header read) rather than by decoding it. Counting by decoding
+    is what this class used to do, and it made ``n_frames`` — which
+    ``BatchWorker`` asks for before a run even starts — read and combine
+    every selected file up front: for a 147-file VAREX scan that is tens of
+    GB of I/O and RAM before the first frame is integrated, so the run
+    looked hung (no progress, no output, no error). The pixel cache is
+    likewise bounded to the most recently used file, since both ``__iter__``
+    and a chunked ``BatchWorker`` walk the files in order and the old
+    unbounded dict retained every decoded file for the life of the run."""
+
+    #: HDF5 paths for the per-acquisition scalars mpe_wf/GSAS-II's zarr
+    #: schema carries — fixed regardless of ``dataset`` (the cake-source
+    #: dataset the user picked), since these live under the file's
+    #: ``instrument/`` group, not under ``exchange/``.
+    _METADATA_H5_PATHS = {
+        "temperature": "instrument/GSAS2_PVS/Temperature",
+        "pressure": "instrument/GSAS2_PVS/Pressure",
+        "current": "instrument/StorageRing/SRCurrent",
+    }
 
     def __init__(self, paths, dataset: str, *, chunk_size=None, op: str = "mean"):
         self._paths = [Path(p) for p in paths]
         self._dataset = dataset
         self._chunk_size = chunk_size
         self._op = op
-        self._cache: dict = {}   # path index -> list[np.ndarray]
+        self._cache: dict = {}   # path index -> list[np.ndarray] (most-recent file only)
+        self._counts: Optional[list] = None    # per-file combined-frame count
+        self._raw_ns: Optional[list] = None    # per-file raw (pre-combine) sub-frame count
+        self._metadata_cache: dict = {}   # path index -> {name: np.ndarray|None}
+
+    def _stat(self, i: int) -> tuple:
+        """``(n_chunks, raw_n)`` for file ``i`` — from its dataset shape
+        alone (no pixel read), one h5py header open covering both. Mirrors
+        ``read_hdf5_stack_combined``'s own chunking: a 2-D dataset is one
+        frame; otherwise ``ceil(N / chunk_size)`` combined frames out of
+        ``N`` raw ones, with a falsy chunk_size meaning "whole file" (one
+        combined frame, still ``N`` raw)."""
+        import h5py
+        try:
+            with h5py.File(str(self._paths[i]), "r") as f:
+                dset = f[self._dataset]
+                if dset.ndim == 2:
+                    return 1, 1
+                n = int(dset.shape[0])
+        except Exception:
+            return 1, 1   # unreadable/odd file — assume 1; get() surfaces the real error
+        if not self._chunk_size:
+            return 1, n
+        size = int(self._chunk_size)
+        return max(1, -(-n // size)), n   # ceil
+
+    def _ensure_stats(self) -> None:
+        if self._counts is None:
+            stats = [self._stat(i) for i in range(len(self._paths))]
+            self._counts = [s[0] for s in stats]
+            self._raw_ns = [s[1] for s in stats]
 
     def _combined(self, i: int) -> list:
-        if i not in self._cache:
-            self._cache[i] = read_hdf5_stack_combined(
+        cached = self._cache.get(i)
+        if cached is None:
+            cached = read_hdf5_stack_combined(
                 self._paths[i], self._dataset,
                 chunk_size=self._chunk_size, op=self._op)
-        return self._cache[i]
+            self._cache = {i: cached}   # keep only the current file
+        return cached
 
     @property
     def n_frames(self) -> int:
-        return sum(len(self._combined(i)) for i in range(len(self._paths)))
+        self._ensure_stats()
+        return sum(self._counts)
 
-    def _fid(self, p: Path, k: int, n_chunks: int) -> str:
-        return p.stem if n_chunks == 1 else f"{p.stem}_c{k:02d}"
+    def _chunk_range(self, k: int, n_raw: int) -> tuple:
+        """Inclusive ``(start, end)`` raw 0-based sub-frame range that
+        combined-frame ``k`` was built from — the same range ``_fid`` embeds
+        in the frame id, reused here to know exactly which raw metadata
+        entries (see ``_read_metadata``) belong to this combined frame."""
+        if not self._chunk_size:
+            return 0, n_raw - 1
+        size = int(self._chunk_size)
+        start = k * size
+        end = min(start + size, n_raw) - 1
+        return start, end
 
-    def __iter__(self):
-        for i, p in enumerate(self._paths):
-            frames = self._combined(i)
-            for k, img in enumerate(frames):
-                yield self._fid(p, k, len(frames)), img.astype(np.float64)
+    def _fid(self, p: Path, k: int, n_chunks: int, n_raw: int) -> str:
+        """Frame id for chunk ``k`` of file ``p``. A single-chunk file (no
+        "Combine sub-frames" split, or a 2-D dataset) is just its own stem.
+        A multi-chunk file names each chunk by the actual raw 0-based
+        sub-frame range it combines (``.frame_<start>_<end>``, no leading
+        zeros — same convention as the whole-run zarr naming this replaced)
+        rather than an opaque chunk index, so the frames a given output
+        actually came from are visible directly in every name built from
+        this id: zarr/h5 filenames, per-frame lineout files, and the
+        waterfall/stacked-view labels."""
+        if n_chunks == 1:
+            return p.stem
+        start, end = self._chunk_range(k, n_raw)
+        return f"{p.stem}.frame_{start}_{end}"
 
-    def get(self, idx: int):
+    @staticmethod
+    def _metadata_frame_count(f, n_data: int) -> int:
+        """How many of a per-acquisition metadata array's *leading* entries
+        are the ``n_data`` usable (light) frames actually being integrated,
+        as opposed to trailing dark-frame acquisitions folded into the same
+        flat, chronological array.
+
+        A VAREX HDF5 stack records one metadata sample per detector
+        acquisition — light *and* dark — in a single un-split array: a file
+        with ``exchange/data`` shape ``(10, ...)`` and ``exchange/data_dark``
+        shape ``(10, ...)`` has e.g. ``misc/NDArrayTimeStamp`` shape ``(20,)``,
+        not ``(10,)``. The light->dark transition shows up as one
+        anomalously large gap in those per-acquisition timestamps (confirmed
+        on real data: 19 steady ~7.01s gaps matching ``Detector/DetAcqPeriod``
+        plus exactly one ~9.47s gap, at the light/dark boundary) — use that
+        gap, when present, to confirm which leading slice is the light
+        block; fall back to ``n_data`` verbatim when there's no timestamp to
+        check, or the array is already exactly ``n_data`` long."""
+        try:
+            ts = np.asarray(f["misc/NDArrayTimeStamp"][()], dtype=np.float64)
+        except Exception:
+            return n_data
+        if ts.ndim != 1 or ts.size <= n_data:
+            return n_data
+        diffs = np.diff(ts)
+        if diffs.size == 0:
+            return n_data
+        typical = np.median(diffs)
+        gap_idx = int(np.argmax(diffs))
+        if typical > 0 and diffs[gap_idx] > 1.3 * typical:
+            return gap_idx + 1   # light block ends right after this gap
+        return n_data
+
+    def _read_metadata(self, i: int) -> dict:
+        """Per-raw-acquisition metadata arrays for file ``i``, each already
+        sliced down to the leading entries that correspond to the actual
+        data frames (see ``_metadata_frame_count``) — cached per file like
+        ``_stat``. Missing datasets/unreadable files come back as ``None``
+        per key rather than raising, since not every source has this
+        metadata (e.g. a non-VAREX HDF5 schema, or a differently-named
+        instrument group)."""
+        cached = self._metadata_cache.get(i)
+        if cached is not None:
+            return cached
+        out = {k: None for k in self._METADATA_H5_PATHS}
+        try:
+            import h5py
+            self._ensure_stats()
+            n_data = self._raw_ns[i]
+            with h5py.File(str(self._paths[i]), "r") as f:
+                n_aligned = self._metadata_frame_count(f, n_data)
+                for key, h5_path in self._METADATA_H5_PATHS.items():
+                    if h5_path in f:
+                        arr = np.asarray(f[h5_path][()], dtype=np.float64)
+                        if arr.ndim == 1 and arr.size >= n_aligned:
+                            out[key] = arr[:n_aligned]
+        except Exception:
+            pass
+        self._metadata_cache[i] = out
+        return out
+
+    def metadata_for_index(self, idx: int) -> dict:
+        """Chunk-averaged metadata (Temperature/Pressure/StorageRing current)
+        for combined frame ``idx``, in the same flattened index space as
+        ``get(idx)``/``__iter__``.
+
+        Always the arithmetic mean across the chunk's raw sub-frames,
+        independent of the pixel ``op`` (Mean/Sum/Max/Median) used to
+        combine the cake data itself — metadata like temperature/pressure
+        is a scalar sample of the environment during the exposure, not a
+        detector count, so it is never summed/maxed the way pixel data can
+        be. Returns ``None`` per key when that metadata isn't available for
+        this source."""
+        self._ensure_stats()
         remaining = idx
         for i, p in enumerate(self._paths):
+            n_here = self._counts[i]
+            if remaining < n_here:
+                n_raw = self._raw_ns[i]
+                start, end = self._chunk_range(remaining, n_raw)
+                meta = self._read_metadata(i)
+                out = {}
+                for key, arr in meta.items():
+                    if arr is None:
+                        out[key] = None
+                        continue
+                    hi = min(end, arr.size - 1)
+                    out[key] = float(np.mean(arr[start:hi + 1])) if start <= hi else None
+                return out
+            remaining -= n_here
+        raise IndexError(idx)
+
+    def __iter__(self):
+        self._ensure_stats()
+        for i, p in enumerate(self._paths):
             frames = self._combined(i)
-            if remaining < len(frames):
-                return self._fid(p, remaining, len(frames)), frames[remaining].astype(np.float64)
-            remaining -= len(frames)
+            n_raw = self._raw_ns[i]
+            for k, img in enumerate(frames):
+                yield self._fid(p, k, len(frames), n_raw), img.astype(np.float64)
+
+    def get(self, idx: int):
+        # Locate the owning file from the header-only counts, so only THAT
+        # file is decoded — walking _combined() over every preceding file
+        # (as this used to) made a mid-scan random access decode the whole
+        # scan up to that point, which is what BatchWorker's parallel
+        # chunks do constantly (each starts at a different offset).
+        self._ensure_stats()
+        remaining = idx
+        for i, p in enumerate(self._paths):
+            n_here = self._counts[i]
+            if remaining < n_here:
+                frames = self._combined(i)
+                if remaining >= len(frames):   # header count disagreed with the real read
+                    raise IndexError(idx)
+                return (self._fid(p, remaining, len(frames), self._raw_ns[i]),
+                        frames[remaining].astype(np.float64))
+            remaining -= n_here
         raise IndexError(idx)
 
 
@@ -1606,6 +1912,44 @@ def resolve_frame_indices(n_frames: int, frame_range) -> list:
     start, end, stride = frame_range or (0, None, 1)
     end = n_frames if end is None else min(int(end), n_frames)
     return list(range(int(start), end, max(1, int(stride))))
+
+
+def frame_unit_for_cfg(source_cfg) -> str:
+    """What one "frame" actually is for a given source — the thing
+    ``frame_range``'s start/end/stride index. This differs by source type
+    in a way that isn't obvious from the UI: a single multi-frame HDF5
+    file indexes the RAW SUB-FRAMES inside it, while a multi-file source
+    indexes the FILES (each already combined down to one frame by the
+    "Combine sub-frames" setting — see ``_HDF5StackGlobSource``)."""
+    kind = (source_cfg or {}).get("type")
+    if kind == "hdf5":
+        return "sub-frame in this HDF5 file"
+    if kind == "hdf5_stack_glob":
+        return "file (each combined to one frame)"
+    if kind in ("tiff_list", "tiff_glob"):
+        return "file"
+    return "frame"
+
+
+def describe_empty_frame_range(n_frames: int, frame_range, source_cfg=None) -> str:
+    """A frame_range that selects nothing is nearly always an out-of-range
+    ``start`` (e.g. a scan-point number like 9243 typed into a field that
+    indexes 0..9 within one file), so say what the actual valid range is
+    instead of only that the selection was empty."""
+    start, end, stride = frame_range or (0, None, 1)
+    unit = frame_unit_for_cfg(source_cfg)
+    msg = [f"No frames match the selected frame range "
+           f"(start={start}, end={'all' if end in (None, 0) else end}, stride={stride})."]
+    if n_frames <= 0:
+        msg.append("The selected source reports 0 frames — check the data path/dataset.")
+    elif int(start) >= n_frames:
+        msg.append(f"This source has {n_frames} frame(s), indexed 0..{n_frames - 1} "
+                   f"— one per {unit} — so start={start} is past the end. "
+                   f"Set start to 0 (or at most {n_frames - 1}).")
+    else:
+        msg.append(f"This source has {n_frames} frame(s), indexed 0..{n_frames - 1} "
+                   f"— one per {unit}.")
+    return "\n".join(msg)
 
 
 def resolve_worker_count(n_items: int, requested: int, min_per_worker: int) -> int:
@@ -1809,7 +2153,8 @@ class BatchRunCoordinator(QtCore.QObject):
             return
         indices = resolve_frame_indices(n_frames, self._args["frame_range"])
         if not indices:
-            self.failed.emit("No frames match the selected frame range.")
+            self.failed.emit(describe_empty_frame_range(
+                n_frames, self._args["frame_range"], self._args.get("source_cfg")))
             return
         n_workers = resolve_worker_count(
             len(indices), self._n_workers_requested, self.MIN_FRAMES_PER_WORKER)

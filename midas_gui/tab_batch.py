@@ -25,12 +25,14 @@ from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_
                                resolve_calibration_fields, make_calib_values_button,
                                rmax_corner_px, rmax_edge_px, draw_polar_bin_overlay,
                                _NoScrollSpinBox, _NoScrollComboBox,
-                               widgets_to_dict, apply_dict_to_widgets)
+                               widgets_to_dict, apply_dict_to_widgets,
+                               check_output_dir_writable)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, DataLoaderPanel, OutputFormatSelector,
                                ImageViewer, build_lab_frame_axes_items)
 from midas_gui.workers import (BatchWorker, BatchRunCoordinator, apply_q_uniform,
-                               DriftWorker, FolderMonitorWorker, write_all_profiles)
+                               DriftWorker, FolderMonitorWorker, write_all_profiles,
+                               froot_and_frame_num)
 from midas_gui.dialogs import show_error
 from midas_gui.hydra_widgets import HydraModeRibbon
 from midas_gui.hydra_batch_page import HydraBatchPage
@@ -69,13 +71,18 @@ class BatchTab(QtWidgets.QWidget):
         self._last_run_fields: dict = {}
         self._last_results: Optional[dict] = None   # for the Save button — see _on_done
         self._last_axis_ctx: Optional[tuple] = None  # (lsd, px, wl) for the Save button
+        self._last_run_out_dir: Optional[str] = None  # set in _run() — see _on_done
+        self._expid_provider = None  # () -> str, wired by app.py's MainWindow — see set_expid_provider
         self._project_ctx: Optional[project.ProjectContext] = None
         self._build_ui()
         self._loader.monitorToggled.connect(self._toggle_monitor)
         self._loader.dataChanged.connect(self._refresh_detector_preview)
+        self._loader.dataChanged.connect(self._maybe_autofill_output_dir)
         self._loader.fieldsChanged.connect(self._refresh_detector_preview)
         self._use_tab2_btn.toggled.connect(self._refresh_detector_preview)
         self._json_ed.textChanged.connect(lambda *_: self._refresh_detector_preview())
+        self._use_tab2_btn.toggled.connect(self._update_calib_src_enabled)
+        self._update_calib_src_enabled()
         self._loader.set_path(DEFAULT_NICKEL_DIR)
 
     def set_project_context(self, ctx: "project.ProjectContext"):
@@ -90,6 +97,13 @@ class BatchTab(QtWidgets.QWidget):
             f"λ={result.wavelength_A:.5f} Å  {result.NrPixelsY}×{result.NrPixelsZ} px")
         self._use_tab2_btn.setChecked(True)
         self._refresh_detector_preview()
+
+    def _update_calib_src_enabled(self):
+        """Grey out the calibration-file field/browse button while "From Tab
+        2" is selected — they only apply to the "From file" source."""
+        from_file = not self._use_tab2_btn.isChecked()
+        self._json_ed.setEnabled(from_file)
+        self._json_browse_btn.setEnabled(from_file)
 
     def _calib_fields_in_use(self):
         """Resolve the geometry currently selected (Tab-2 result or file), as a
@@ -285,6 +299,8 @@ class BatchTab(QtWidgets.QWidget):
             "eta_min": self._eta_min,
             "eta_max": self._eta_max,
             "grid_chk": self._grid_chk,
+            "lab_axes_chk": self._lab_axes_chk,
+            "preview_sum_n": self._preview_sum_n,
             "azim": self._azim,
             "multi_azimuth": self._multi_azimuth_chk,
             "var_check": self._var_check,
@@ -310,6 +326,8 @@ class BatchTab(QtWidgets.QWidget):
             "corr": self._corr_widget.get_state(),
             "fmt": self._fmt.get_state(),
             "loader": self._loader.get_state(),
+            "det_view": self._det_view.display_state(),
+            "waterfall": self._waterfall.display_state(),
             "hydra": {"active_mode": self._mode_ribbon.mode(),
                       "page": self._hydra_page.get_state() if self._hydra_page else {}},
         }
@@ -322,6 +340,8 @@ class BatchTab(QtWidgets.QWidget):
         # the generic apply_dict_to_widgets pass (which would just ignore it).
         fmt_keys = fields.pop("fmt_keys", None)
         apply_dict_to_widgets(self._state_widgets(), fields)
+        self._det_view.set_display_state(state.get("det_view"))
+        self._waterfall.set_display_state(state.get("waterfall"))
         self._corr_widget.set_state(state.get("corr") or {})
         self._fmt.set_state(fmt_keys if fmt_keys is not None else state.get("fmt"))
         hydra_state = state.get("hydra") or {}
@@ -473,9 +493,9 @@ class BatchTab(QtWidgets.QWidget):
         self._json_ed = QtWidgets.QLineEdit()
         self._json_ed.setPlaceholderText("calibration.json / paramstest.txt / .poni…")
         jr = QtWidgets.QHBoxLayout(); jr.setSpacing(4); jr.addWidget(self._json_ed, 1)
-        bj = _br(); bj.clicked.connect(lambda: self._json_ed.setText(
+        self._json_browse_btn = _br(); self._json_browse_btn.clicked.connect(lambda: self._json_ed.setText(
             _browse(self, "Open calibration file",
-                    "Calibration (*.json *.txt *.poni);;All (*)") or "")); jr.addWidget(bj)
+                    "Calibration (*.json *.txt *.poni);;All (*)") or "")); jr.addWidget(self._json_browse_btn)
         self._json_ed.textChanged.connect(
             lambda t: self._use_json_btn.setChecked(True) if t.strip() else None)
         cal.body.addLayout(jr)
@@ -633,10 +653,12 @@ class BatchTab(QtWidgets.QWidget):
 
         self._grid_chk = QtWidgets.QCheckBox("Show bin grid")
         self._grid_chk.setToolTip(
-            "Overlay the full (R, η) integration bin grid on the Detector "
-            "view tab — concentric circles at each R-bin edge, spokes at "
-            "each η-bin edge (bounded to η min/max). Thinned to at most "
-            "~50 rings / ~72 spokes for legibility with fine bin sizes.")
+            "Overlay the Rmin/Rmax boundary circles and the full (R, η) "
+            "integration bin grid on the Detector view tab — concentric "
+            "circles at each R-bin edge, spokes at each η-bin edge "
+            "(bounded to η min/max). Thinned to at most ~50 rings / ~72 "
+            "spokes for legibility with fine bin sizes. Unchecking this "
+            "hides the overlay entirely, including Rmin/Rmax.")
         integ.body.addWidget(self._grid_chk)
         self._grid_chk.toggled.connect(self._refresh_detector_preview)
         self._var_check = QtWidgets.QCheckBox("Per-bin variance (σ)")
@@ -710,6 +732,19 @@ class BatchTab(QtWidgets.QWidget):
         orow = QtWidgets.QHBoxLayout(); orow.setSpacing(4); orow.addWidget(self._out_ed, 1)
         bou = _br(); bou.clicked.connect(lambda: self._out_ed.setText(
             QtWidgets.QFileDialog.getExistingDirectory(self, "Output directory") or "")); orow.addWidget(bou)
+        self._suggest_out_btn = QtWidgets.QPushButton("Suggest")
+        self._suggest_out_btn.setToolTip(
+            "Fill in <outroot>/<expid>_bc/<file-root>/<detector>/, matching "
+            "mpe_wf_saxs_waxs's own outroot/<expid>_bc/<froot>/<detector>/ "
+            "output-folder convention. Read positionally off the loaded "
+            "source's own folder depth (<outroot>/<expid>/<detector>/"
+            "<froot>/<files>) — no need to type the Exp ID first; falls "
+            "back to <source folder>/<file-root>/, no detector segment, "
+            "only when the source path isn't that deep. "
+            "Output within is further split into per-format subfolders "
+            "(csv/, xye/, fxye/, dat/, 2d_csv/, h5/, zarr/).")
+        self._suggest_out_btn.clicked.connect(self._apply_suggested_output_dir)
+        orow.addWidget(self._suggest_out_btn)
         out.body.addLayout(S.Form().row(("Folder:", orow)))
         self._fmt = OutputFormatSelector()
         out.body.addWidget(self._fmt)
@@ -755,8 +790,10 @@ class BatchTab(QtWidgets.QWidget):
         self._save_btn.setEnabled(False)
         self._save_btn.setToolTip(
             "Write the lineouts already computed this run to disk, in the "
-            "checked format(s) above — works even if no Output folder was "
-            "set before running.")
+            "checked format(s) above. Only enabled after a run that had no "
+            "Output folder set — when an Output folder was set, the run "
+            "already wrote everything there as it went, so Save would just "
+            "duplicate it.")
         self._save_btn.clicked.connect(self._save_results)
         self._save_btn.setStyleSheet(S.SUCCESS_BTN_QSS)
         run_row = QtWidgets.QHBoxLayout(); run_row.setSpacing(6)
@@ -847,6 +884,99 @@ class BatchTab(QtWidgets.QWidget):
         return spec_from_geometry_file(path, r_bin, e_bin, r_min=r_min, r_max=r_max,
                                        eta_min=eta_min, eta_max=eta_max)
 
+    def set_expid_provider(self, provider) -> None:
+        """Wired by app.py's MainWindow: ``provider()`` returns the header's
+        current Exp ID (shared app-wide, not owned by this tab) for
+        ``_suggest_output_dir`` to consume."""
+        self._expid_provider = provider
+
+    def _suggest_output_dir(self) -> Optional[Path]:
+        """Best-effort ``<outroot>/<expid>_bc/<file-root>/<detector>/``,
+        mirroring mpe_wf_saxs_waxs's own ``outroot/<expid>_bc/<froot>/
+        <detector>/`` output-folder convention (``~/mnt/<station>/
+        <expid>_bc/<froot>/<detector>/`` — e.g. beamline home
+        ``/home/beams/S20IDUSER`` for 20-ID, ``/home/beams/S1IDUSER`` for
+        1-ID; ``~`` itself is just whatever directory the source path
+        happens to live under, this function never hardcodes it).
+
+        Raw data is read from mpe_wf's fixed ``<outroot>/<expid>/<detector>/
+        <froot>/<files>`` layout — four directories deep counting the
+        file's own containing folder — so ``expid``/``detector``/``outroot``
+        are read *positionally* off the loaded source path rather than
+        asked of the user: the whole point of "Suggest" is to read this off
+        the data that's actually loaded, not require someone to first type
+        the Exp ID into the header field before the button works. (The
+        header's Exp ID field feeds other things — see
+        ``set_expid_provider`` — but is intentionally not required here.)
+        When the source doesn't have that much directory depth (e.g. files
+        sitting directly under a flat folder), falls back to ``<source
+        folder>/<froot>/`` with no detector/expid segments — still correct,
+        just missing the pieces we have no way to locate. Returns ``None``
+        when no source is loaded yet."""
+        src_cfg = self._loader.source_cfg()
+        rep = src_cfg.get("path")
+        if not rep:
+            paths = src_cfg.get("paths") or []
+            rep = paths[0] if paths else None
+        if not rep:
+            return None
+        p = Path(rep)
+        name = p.name
+        if any(c in name for c in "*?["):
+            # A glob pattern ("<folder>/<stem>*"), not a real file — take the
+            # literal prefix before the first wildcard as the stem.
+            import re
+            name = re.split(r"[*?\[]", name, maxsplit=1)[0].rstrip("_-.") or name
+        else:
+            name = p.stem
+        froot, _num, _tag = froot_and_frame_num(name, 0)
+
+        # froot_dir = the folder actually holding the files (often
+        # froot-named itself); its parent is <detector>, and <expid> is one
+        # level above that — mpe_wf's layout puts them at this fixed depth
+        # regardless of what any of these folders happen to be named.
+        froot_dir = p.parent
+        ancestors = froot_dir.parents
+        if len(ancestors) >= 3:
+            detector = ancestors[0].name
+            expid = ancestors[1].name
+            outroot = ancestors[2]
+            return outroot / f"{expid}_bc" / froot / detector
+
+        # Not enough directory depth to locate expid/detector positionally
+        # — fall back to the typed Exp ID header field if there is one,
+        # else just <source folder>/<froot>/. Guard against duplicating
+        # froot when the source folder is itself named after it (the common
+        # "<froot>/<froot>_NNNNNN.tif" layout).
+        expid = self._expid_provider().strip() if self._expid_provider else ""
+        root = froot_dir / f"{expid}_bc" if expid else froot_dir
+        return root if root.name == froot else root / froot
+
+    def _apply_suggested_output_dir(self):
+        suggested = self._suggest_output_dir()
+        if suggested is not None:
+            self._out_ed.setText(str(suggested))
+            reason = check_output_dir_writable(suggested)
+            if reason:
+                self._log.append(f"[batch] Warning: {reason}")
+        else:
+            self._log.append("[batch] No data source loaded yet — nothing to suggest.")
+
+    def _maybe_autofill_output_dir(self):
+        """Auto-fill the Output folder once a source loads, unless the user
+        already typed/picked one — unlike mpe_wf's own GUIs (which only ever
+        hint via placeholder text and never auto-fill), MIDAS_GUI fills this
+        in live since there's no separate confirm-and-launch step to catch
+        a wrong guess."""
+        if self._out_ed.text().strip():
+            return
+        suggested = self._suggest_output_dir()
+        if suggested is not None:
+            self._out_ed.setText(str(suggested))
+            reason = check_output_dir_writable(suggested)
+            if reason:
+                self._log.append(f"[batch] Warning: {reason}")
+
     def _run(self):
         if self._worker and self._worker.isRunning():
             return
@@ -875,6 +1005,12 @@ class BatchTab(QtWidgets.QWidget):
             variance_cfg = None
 
         out_dir = self._out_ed.text().strip() or None
+        if out_dir:
+            reason = check_output_dir_writable(out_dir)
+            if reason:
+                QtWidgets.QMessageBox.critical(self, "Output folder not writable", reason)
+                return
+        self._last_run_out_dir = out_dir
         fmts = self._fmt.checked_keys()
         q_cfg = ({"QMin": self._q_min.value(), "QMax": self._q_max.value(),
                   "QBinSize": self._q_bin.value()} if self._q_check.isChecked() else None)
@@ -985,6 +1121,10 @@ class BatchTab(QtWidgets.QWidget):
                 self, "Output folder required",
                 "Background jobs need an Output folder — the job writes its "
                 "calibration snapshot and results there."); return
+        reason = check_output_dir_writable(out_dir)
+        if reason:
+            QtWidgets.QMessageBox.critical(self, "Output folder not writable", reason)
+            return
         out_path = Path(out_dir)
         out_path.mkdir(parents=True, exist_ok=True)
 
@@ -1142,7 +1282,16 @@ class BatchTab(QtWidgets.QWidget):
         verb = "aborted after" if aborted else "Done —"
         msg = f"{verb} {n} frames integrated"
         if out:
-            msg += f"\nSaved to: {Path(out[0]).parent}"
+            # Output is now split into per-format subfolders (csv/xye/.../h5/zarr)
+            # under the chosen Output dir — report that dir, not one file's
+            # own parent, so the message doesn't just name whichever format
+            # happened to run last.
+            msg += f"\nSaved to: {self._out_ed.text().strip() or Path(out[0]).parent}"
+        if (self._last_run_inputs.get("multi_azimuth")
+                and "h5" in (self._last_run_inputs.get("fmt") or [])):
+            msg += ("\nNote: HDF5 wasn't written — it isn't supported in "
+                    "multi-azimuth mode (use the text formats or the Zarr/"
+                    "GSAS-II export instead).")
         self._log.append(msg)
         self._prog_lbl.setText(f"{'Aborted' if aborted else 'Complete'}: {n} frames")
         if n and data.get("r_axis_px") is not None and self._last_axis_ctx is not None:
@@ -1154,7 +1303,19 @@ class BatchTab(QtWidgets.QWidget):
                 "sigmas": data.get("sigmas"), "frame_ids": data.get("frame_ids"),
                 "n_eta_bins": n_eta_bins, "eta_axis": data.get("eta_axis"),
             }
-            self._save_btn.setEnabled(True)
+            if self._last_run_out_dir:
+                # The run itself already wrote everything (subfoldered, per
+                # format) to this dir as it went — enabling Save here would
+                # just dump a second, flat, unsubfoldered copy of the text
+                # formats on top (the exact duplication reported against
+                # this dir). Save's job is only to persist results that
+                # were never written anywhere, i.e. a no-Output-folder run.
+                self._save_btn.setEnabled(False)
+                msg += ("\n(Save is disabled — results are already saved above; "
+                        "Save is only for runs with no Output folder set.)")
+                self._log.append(msg.rsplit('\n', 1)[-1])
+            else:
+                self._save_btn.setEnabled(True)
         self._log_to_project(data)
         QtWidgets.QMessageBox.information(self, "Aborted" if aborted else "Done", msg)
 

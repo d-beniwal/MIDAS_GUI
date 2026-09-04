@@ -277,6 +277,37 @@ def detect_geometry_from_path(path: str, *, profile: Optional[str] = None) -> di
     return out
 
 
+def check_output_dir_writable(path: str | Path) -> Optional[str]:
+    """None if `path` can be written to (created if missing), else a
+    human-readable reason it can't.
+
+    Batch Integrate's suggested output folder (``<expid>_bc/<froot>/
+    <detector>``) is not something this GUI creates ahead of time in
+    production — it may already exist, made by someone else, with no
+    write access for whoever is actually running the batch (this differs
+    from `park_may26_bc`, which was deliberately made world-writable for
+    testing and is not representative). `mkdir(parents=True)` only
+    succeeds if the nearest *existing* ancestor is writable, so that's
+    what gets checked when `path` itself doesn't exist yet."""
+    p = Path(path)
+    check = p
+    while not check.exists():
+        parent = check.parent
+        if parent == check:
+            break
+        check = parent
+    if not _os.access(check, _os.W_OK):
+        user = _os.environ.get("USER") or _os.environ.get("LOGNAME") or "you"
+        if check == p:
+            return (f"'{p}' exists but isn't writable by {user}. Pick a "
+                     "different output folder, or ask whoever owns it to "
+                     "grant write access.")
+        return (f"Can't create '{p}' — '{check}' isn't writable by {user}. "
+                 "Pick a different output folder, or ask whoever owns it "
+                 "to grant write access.")
+    return None
+
+
 def new_temp_h5_path(prefix: str = "midas_buffer_") -> str:
     """Fresh temp .h5 path, auto-deleted at process exit."""
     f = _tf.NamedTemporaryFile(prefix=prefix, suffix=".h5", delete=False)
@@ -309,6 +340,25 @@ def list_h5_datasets(path: str | Path) -> list:
     return items
 
 
+_DARK_NAME_RE = re.compile(r'(^|[_.])dark([_.]|$)|_dark_(before|after)\b', re.IGNORECASE)
+
+
+def is_dark_like_name(path) -> bool:
+    """True when a filename looks like a DARK/background acquisition rather
+    than sample data (``..._dark_before_009242.vrx.h5``,
+    ``..._dark_after_009388.vrx.h5``).
+
+    Beamline convention puts the dark frames in the SAME folder as the scan
+    they bracket, so a "Full folder"/stem selection sweeps them up as if
+    they were data — silently integrating two bogus frames and (worse)
+    skewing an auto-detected file-number range outward at both ends. Ported
+    from mpe_wf_saxs_waxs, which guards the same way when auto-populating
+    its froot/file-number fields (see gui_bc_launcher.py's dark-file check
+    and run_cakes.discover_all_froots's ``_dark_before``/``_dark_after``
+    skip)."""
+    return bool(_DARK_NAME_RE.search(Path(str(path)).name))
+
+
 def _collect_frame_paths(raw) -> list:
     """Frames from a folder or a *.tif glob (sorted).  Mirrors tab_view logic.
 
@@ -324,7 +374,10 @@ def _collect_frame_paths(raw) -> list:
         for ext in ("*.tif", "*.tiff", "*.h5", "*.hdf5", "*.ge*", "*.cbf", "*.edf"):
             out.extend(sorted(p.glob(ext)))
         return [str(x) for x in out]
-    return sorted(_glob.glob(raw))
+    # recursive=True only changes behavior when the pattern contains "**"
+    # (the filestem-filter case, widgets.DataLoaderPanel._raw_source) — a
+    # plain glob without it is unaffected.
+    return sorted(_glob.glob(raw, recursive=True))
 
 
 def display_text_for_paths(paths: list) -> str:
@@ -530,12 +583,15 @@ def tilted_ring_xy(two_theta_deg: float, tx: float, ty: float, tz: float,
     """Forward-project a diffraction ring at ``two_theta_deg`` through the tilt
     geometry (tx/ty/tz, degrees) onto detector pixel coordinates.
 
-    Returns ``(Y_px, Z_px)`` arrays of length ``n`` tracing the ring. Reduces
-    exactly to the plain circle ``bc + r*(sin η, cos η)`` when tx=ty=tz=0, since
-    it inverts the same ray/tilt-plane geometry as
+    Returns ``(Y_px, Z_px)`` arrays of length ``n`` tracing the ring, with the
+    last point equal to the first so the polyline a caller feeds straight
+    into ``pg.PlotDataItem`` closes with no seam (``pyqtgraph`` never
+    auto-closes a plain polyline back to its start). Reduces exactly to the
+    plain circle ``bc + r*(sin η, cos η)`` when tx=ty=tz=0, since it inverts
+    the same ray/tilt-plane geometry as
     ``midas_integrate_v2.forward.pixels.pixel_to_REta_from_spec``.
     """
-    eta = np.linspace(0.0, 360.0, n, endpoint=False)
+    eta = np.linspace(0.0, 360.0, n, endpoint=True)
     return _tilt_project_YZ(np.full(n, two_theta_deg), eta, tx, ty, tz,
                              Lsd_um, bc_y, bc_z, pxY_um, pxZ_um)
 
@@ -758,11 +814,11 @@ def draw_polar_bin_overlay(viewer, items: list, *, bc_y: float, bc_z: float,
                            lsd_um: Optional[float] = None,
                            pxY_um: Optional[float] = None,
                            pxZ_um: Optional[float] = None) -> None:
-    """Draw the Rmin/Rmax exclusion-boundary circles (always, skipping any
-    non-positive radius) and, if ``show_grid``, the full polar (R, η) bin
+    """If ``show_grid``, draw the Rmin/Rmax exclusion-boundary circles
+    (skipping any non-positive radius) plus the full polar (R, η) bin
     grid — concentric circles at each radial-bin edge plus spokes at each
     η-bin edge, both thinned to at most ``max_rings``/``max_spokes`` — onto
-    ``viewer._iv``.
+    ``viewer._iv``. Nothing is drawn when ``show_grid`` is false.
 
     ``tx``/``ty``/``tz`` (deg) + ``lsd_um``/``pxY_um``/``pxZ_um`` are
     optional: when the detector has a non-trivial tilt AND all three
@@ -804,12 +860,12 @@ def draw_polar_bin_overlay(viewer, items: list, *, bc_y: float, bc_z: float,
         viewer._iv.addItem(item)
         items.append(item)
 
+    if not show_grid:
+        return
+
     if r_min > 0:
         _circle(r_min, pg.mkPen("orange", width=1.2, style=QtCore.Qt.DashLine))
     _circle(r_max, pg.mkPen("orange", width=1.5))
-
-    if not show_grid:
-        return
     grid_pen = pg.mkPen((120, 180, 255), width=0.8)
     for r in _thinned_bin_edges(r_min, r_max, r_bin, max_rings):
         if r_min < r < r_max:
@@ -824,9 +880,13 @@ def draw_polar_bin_overlay(viewer, items: list, *, bc_y: float, bc_z: float,
             Y, Z = tilted_spoke_xy(tt_lo, tt_hi, float(eta), tx, ty, tz,
                                     lsd_um, bc_y, bc_z, pxY_um, pxZ_um)
         else:
+            # bc + r*(sin η, cos η) — same convention tilted_spoke_xy reduces
+            # to at zero tilt (and pixel_to_REta's eta=atan2(-Yc,Zc)): η=0 is
+            # straight up (+Z), not along +Y. cos/sin here (not sin/cos)
+            # would draw each η spoke 90° off from where it actually is.
             th_r = math.radians(float(eta))
-            Y = [bc_y + r_min * math.cos(th_r), bc_y + r_max * math.cos(th_r)]
-            Z = [bc_z + r_min * math.sin(th_r), bc_z + r_max * math.sin(th_r)]
+            Y = [bc_y + r_min * math.sin(th_r), bc_y + r_max * math.sin(th_r)]
+            Z = [bc_z + r_min * math.cos(th_r), bc_z + r_max * math.cos(th_r)]
         item = pg.PlotDataItem(Y, Z, pen=grid_pen)
         viewer._iv.addItem(item); items.append(item)
 

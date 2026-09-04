@@ -169,10 +169,12 @@ class HydraBatchPage(QtWidgets.QWidget):
         integ.body.addLayout(rf)
         self._grid_chk = QtWidgets.QCheckBox("Show bin grid")
         self._grid_chk.setToolTip(
-            "Overlay the full (R, η) integration bin grid on each panel's "
-            "Detector view tab — concentric circles at each R-bin edge, "
-            "spokes at each η-bin edge. Thinned to at most ~50 rings / "
-            "~72 spokes for legibility with fine bin sizes.")
+            "Overlay the Rmin/Rmax boundary circles and the full (R, η) "
+            "integration bin grid on each panel's Detector view tab — "
+            "concentric circles at each R-bin edge, spokes at each η-bin "
+            "edge. Thinned to at most ~50 rings / ~72 spokes for "
+            "legibility with fine bin sizes. Unchecking this hides the "
+            "overlay entirely, including Rmin/Rmax.")
         integ.body.addWidget(self._grid_chk)
         for w in (self._r_min, self._r_max, self._r_bin, self._e_bin):
             w.valueChanged.connect(self._refresh_active_detector_preview)
@@ -719,6 +721,9 @@ class HydraBatchPage(QtWidgets.QWidget):
             "corr": self._corr_widget.get_state(),
             "fmt": self._fmt.get_state(),
             "loader": self._loader.get_state(),
+            "det_view": self._det_view.display_state(),
+            "waterfalls": {n: pair.waterfall.display_state()
+                           for n, pair in self._viewer_pairs.items()},
             "cards": {n: widgets_to_dict(card.state_widgets())
                      for n, card in self._cards.items()},
         }
@@ -734,6 +739,11 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._corr_widget.set_state(state.get("corr") or {})
         self._fmt.set_state(fmt_keys if fmt_keys is not None else state.get("fmt"))
         self._loader.set_state(state.get("loader") or {})
+        self._det_view.set_display_state(state.get("det_view"))
+        for n_key, wf_state in (state.get("waterfalls") or {}).items():
+            pair = self._viewer_pairs.get(int(n_key))
+            if pair is not None:
+                pair.waterfall.set_display_state(wf_state)
         for n_key, fields in (state.get("cards") or {}).items():
             card = self._cards.get(int(n_key))
             if card is None:

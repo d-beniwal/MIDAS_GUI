@@ -49,6 +49,241 @@ Also confirmed this session: `gh` is not installed on this machine, so PR
 comments and closes cannot be scripted — either use the GitHub web UI or
 `brew install gh && gh auth login`.
 
+## 2026-09-04 — Header Exp ID field; Batch Integrate output-folder "Suggest" + writability preflight
+
+Added a header-level "Exp ID" field (`app.py`, next to the Profile
+selector) in the `mpe_wf_saxs_waxs` style (e.g. `park_may26`) — shared
+app-wide via `MainWindow.expid()`/`set_expid()` rather than owned by any
+one tab, since more than one tab's output-path logic may eventually want
+it (today just Batch Integrate). Persists as a plain last-used value
+(`settings.get_last_expid`/`set_last_expid`, global like recent files —
+an Exp ID tracks the current experiment, not the beamline Profile) until
+a Project is open, at which point the Project's own saved Exp ID
+(`/gui_workspace` meta) travels with it instead.
+
+Batch Integrate's Output-folder row gained a "Suggest" button
+(`_suggest_output_dir`/`_apply_suggested_output_dir`/
+`_maybe_autofill_output_dir`, wired to fire automatically the first time
+a source loads) that fills in `<outroot>/<expid>_bc/<file-root>/
+<detector>/`, mirroring `mpe_wf_saxs_waxs`'s own
+`outroot/<expid>_bc/<froot>/<detector>/` convention. `expid`/`detector`/
+`outroot` are read *positionally* off the loaded source's own directory
+depth (mpe_wf's fixed `<outroot>/<expid>/<detector>/<froot>/<files>`
+layout) rather than requiring the Exp ID field to be typed first — the
+field is only consulted as a fallback when the source path isn't deep
+enough to read those segments off directly. Unlike mpe_wf's own GUIs
+(placeholder-text hints only), this auto-fills live, since MIDAS_GUI has
+no separate confirm-and-launch step to catch a wrong guess — manual
+Browse still overrides it once the user types/picks their own path.
+Output within a run is now split into per-format subfolders
+(csv/xye/fxye/dat/2d_csv/h5/zarr) instead of one flat directory, so the
+"Saved to" message after a run now names the chosen Output dir rather
+than one file's own parent, and the Save button (previously always
+enabled after a run) is now disabled whenever an Output folder was set —
+the run already wrote everything there as it went, so Save would only
+produce a second, flat, unsubfoldered duplicate of the text formats.
+
+Added `helpers.check_output_dir_writable()` as a preflight for all three
+places a chosen/suggested output dir gets used — `_run()`,
+`_run_as_job()`, and the two auto-suggest paths — since a wrong guess or
+a stale manual path landing on a directory someone else owns (real
+production output folders are not necessarily world-writable) previously
+surfaced only as an opaque write failure partway through a run. Also
+checked in `batch_cli.py`'s `main()` (background-job entry point) before
+any work starts, so a background job fails fast with a clear message
+instead of partway through, and — being the async, unattended-error-log
+path this exists for — logs it via `[batch] ERROR: ...` rather than a
+dialog.
+
+These three files landed as one commit rather than being split by
+sub-feature (Exp ID vs. Suggest-button vs. writability check) because
+`_apply_suggested_output_dir`/`_maybe_autofill_output_dir` call
+`check_output_dir_writable` directly and `tab_batch.py`'s import line
+pulls it in — splitting further would have meant an intermediate commit
+with a broken import.
+
+## 2026-09-03 — File menu: "Open Last Project" and "Quit" actions
+
+Added "File ▸ Open Last Project" — a one-click shortcut for the top entry
+of Recent Projects, going through the same `_open_project_path`
+confirmation flow, for the common case of reopening whatever was worked
+on last without opening the submenu first. Added a standard "File ▸ Quit"
+action (Ctrl+Q) as well, since the File menu had no explicit quit entry.
+
+## 2026-09-03 — Grey out the calibration-file field when "From Tab 2" is selected
+
+Batch Integrate's calibration-file field/browse button stayed enabled even
+while "From Tab 2" was the selected calibration source, where they have no
+effect — misleading, since it looks editable but isn't consulted. Added
+`_update_calib_src_enabled()`, wired to `_use_tab2_btn.toggled` and called
+once at init, that enables the field/button only while "From file" is
+selected.
+
+## 2026-09-03 — `dialogs.show_error` always logs to `~/midas_gui_error.log`, even for worker-thread exceptions
+
+`show_error` is shown for exceptions a worker thread already caught and
+turned into a Qt signal — they never reach `app.py`'s global excepthook on
+their own, so before this the full traceback was lost the moment the
+dialog was dismissed, with no on-disk record. `show_error` now always
+appends `full_text` to the same log file the excepthook writes to
+(`app._log`/`app._LOG_FILE`), and the dialog's informative text names that
+file path so the user knows where to find it after closing the dialog.
+
+## 2026-09-03 — "Run as background job" pins the spawned screen session's cwd to the repo root
+
+`JobQueuePanel.launch()` runs `python -m midas_gui.batch_cli` inside a
+detached `screen` session. `-m` only resolves the `midas_gui` package when
+the process's cwd is the repo root (that's what puts the repo root on
+`sys.path[0]`) — but the spawned `screen`/`bash` session inherits whatever
+cwd the GUI itself happened to have at launch time, which isn't guaranteed
+to be the repo root. Fixed by prefixing the wrapped shell command with
+`cd <repo_root> &&`, where `repo_root` is derived from `Path(__file__)`
+rather than assumed from the caller's environment.
+
+## 2026-09-03 — Detector-view overlay: fixed η-spoke placement and made "Show bin grid" actually hide everything when unchecked
+
+Two bugs in `helpers.draw_polar_bin_overlay`, found while cross-checking
+its geometry against `pixel_to_REta`'s convention (`η = atan2(-Yc, Zc)`,
+so η=0 points straight up, +Z, not along +Y):
+
+- The non-tilted η-spoke formula used `Y = bc_y + r·cos(θ)`,
+  `Z = bc_z + r·sin(θ)` — swapped relative to that convention, so every
+  spoke was drawn 90° off from where it actually is. Fixed to
+  `Y = bc_y + r·sin(θ)`, `Z = bc_z + r·cos(θ)`.
+- `if not show_grid: return` ran *after* the Rmin/Rmax circles were
+  already drawn, so unchecking "Show bin grid" still left those circles
+  on screen. Moved the early-return before them so unchecking the box
+  hides the overlay entirely, and updated both tabs' tooltips
+  (`tab_batch.py`, `hydra_batch_page.py`) to say so.
+
+`widgets.build_lab_frame_axes_items`'s always-on compass overlay had the
+same follow-on fix: its old 0°→45° arc-sweep+arrowhead η indicator is
+replaced with four cardinal-angle (0°/+90°/−90°/180°) tick+label marks
+using the same `(-y_sign)·sin(η)`/`cos(η)` convention, so the lab-frame
+compass and the real caking overlay now agree on which way η points.
+
+## 2026-09-03 — `tilted_ring_xy` closes its polyline, fixing a seam in tilted ring overlays
+
+`tilted_ring_xy` sampled η over `np.linspace(0, 360, n, endpoint=False)`, so
+the returned `(Y, Z)` arrays never repeated their first point. Fed straight
+into `pg.PlotDataItem` (a plain polyline, which pyqtgraph never auto-closes
+back to its start), a tilted ring drawn with this always showed a visible
+gap between its last and first sampled point. Switched to
+`endpoint=True` so the last point exactly equals the first and the
+polyline closes with no seam.
+
+## 2026-09-03 — "Files sharing a name stem" now searches subfolders recursively
+
+`BrowseFilesDialog._stem_matches()`, `helpers._collect_frame_paths()`, and
+`widgets.DataLoaderPanel._raw_source()`'s live filestem filter all glob'd
+only the immediate directory (`<dir>/<stem>*`), so a stem match silently
+missed any file whose scan point landed in a sibling subfolder rather than
+directly under the picked folder. Changed all three to a recursive
+`<dir>/**/<stem>*` pattern (`glob(..., recursive=True)`) so a stem search
+finds a matching file anywhere below the selected folder, not just as a
+direct child.
+
+This was found while investigating a still-unconfirmed `FileNotFoundError`
+report in Batch Integrate's stem-match mode when source files were split
+across sibling subfolders — three attempts to reproduce it from a fresh
+repro script did not trigger the error, so this is not a confirmed root
+cause, but it's the strongest candidate found while reading through this
+code path: the old non-recursive glob is exactly the kind of gap that
+would produce a "file the GUI expected to find isn't there" style error
+for that scenario. Recorded here as what changed, not as a confirmed fix —
+if the original report resurfaces, revisit with the actual failing
+directory layout in hand.
+
+**Verified**: `test_stem_filter_becomes_glob_pattern_in_source_cfg` and
+`test_stem_filter_roundtrips_through_get_set_state` updated to expect the
+`**` pattern in `source_cfg()`'s output.
+
+## 2026-09-03 — Single-file HDF5 sources now honor "Combine sub-frames" and frame-range bounds the same way multi-file sources do
+
+A single bare HDF5 file picked in Batch Integrate's Data Loader silently
+ignored the "Combine sub-frames" (chunk_size/combine_op) control — it was
+routed through a plain `HDF5FrameSource` in `workers._open_source_cfg`,
+while several separate HDF5 files (an explicit multi-select, or a folder/
+stem-filter pick that resolves to several files) went through
+`_HDF5StackGlobSource`, the only source that actually implements combining.
+This also meant frame-range bounds for a chunked multi-file HDF5 pick were
+wrong: the Data Loader's start/end spinboxes hold FILE numbers, but
+`_HDF5StackGlobSource.n_frames` counts COMBINED-FRAME chunks, so a range
+computed by file-index arithmetic silently stopped partway through an
+early file whenever "Combine sub-frames" split it into more than one
+chunk.
+
+Fix: `_open_source_cfg`'s `"hdf5"` case now routes through
+`_HDF5StackGlobSource` (a single-element path list) instead of a bare
+`HDF5FrameSource`, so combining takes effect for single files too.
+`widgets.DataLoaderPanel` follows suit: "Combine sub-frames" is now shown
+for single bare HDF5 files (previously hidden), `source_cfg()` includes
+`chunk_size`/`combine_op` for the single-`"hdf5"` case, a single-file
+source's start/end spinboxes are reset-then-locked to its own scan number
+(parsed via `froot_and_frame_num`) rather than left editable over
+sub-frames that were never addressable that way, and `frame_range()` gains
+a `_hdf5_multi_file_counts()` helper that expands FILE-index bounds
+through each matched file's own chunk count before turning them into the
+COMBINED-FRAME-index range `_HDF5StackGlobSource.n_frames` actually counts
+over.
+
+**Verified**: new test
+`test_frame_range_multi_file_hdf5_spans_all_files_with_combine_chunk`
+(3 synthetic 10-raw-frame HDF5 files, chunk size 3) asserts
+`frame_range() == (0, 12, 1)` — 3 files × 4 combined frames each — rather
+than the file count of 3 a naive file-index range would have produced.
+
+## 2026-09-03 — Batch Integrate's Zarr checkbox rewired onto `write_gsas_zarr_zip`; retired the homegrown `zarr_cake` writer
+
+A GSAS-II user hit "Read Error" on a `.zarr.zip` produced by Batch
+Integrate's "Zarr (cake, REtaMap)" checkbox. Initial guess ("wrong button —
+should've used the dedicated Export-for-GSAS-II card instead") was rejected:
+in `mpe_wf_saxs_waxs`, ONE zarr output is read by both its own viewer and
+GSAS-II with no separate export step, so this GUI having two divergent
+writers producing the same-labeled output was itself the bug, not
+by-design.
+
+Root cause, confirmed by reading `midas_integrate_v2/io/zarr_gsas.py`
+directly and by opening real production mpe_wf `.zarr.zip` files with
+`zarr.open(..., mode='r')`: the old `zarr_cake.write_cake_zarr` wrote cake
+data to `/IntegrationResult/FrameNr_<i>`, a group GSAS-II's importer never
+reads; the schema it actually reads is `/OmegaSumFrame/LastFrameNumber_<i>`,
+which `write_cake_zarr` never wrote at all. Its `/InstrumentParameters` also
+only carried 2 of the 10 keys GSAS-II requires (`Lam`, `Distance` — missing
+`Polariz, SH_L, U, V, W, X, Y, Z`), a compounding failure. This GUI already
+had a *correct* writer for this exact schema —
+`midas_integrate_v2.io.zarr_gsas.write_gsas_zarr_zip`, used until now only
+by the separate "Export for GSAS-II" button (`gsas_export.py`).
+
+Fix: `BatchWorker.run()` (`workers.py`) now calls `write_gsas_zarr_zip`
+directly instead of `zarr_cake.write_cake_zarr`, writing **one zarr per
+combined output frame** (`<fid>.ave.zarr.zip`, into a `zarr/` subfolder)
+rather than one bundled `integrated.zarr.zip` for the whole run — mirrors
+mpe_wf's own one-zarr-per-scan-point convention, and sidesteps
+`write_gsas_zarr_zip` having no multi-frame API of its own. Provenance is
+stamped post-hoc via the existing `provenance.append_to_zip()` (the writer
+has no attrs slot for it, same pattern as mpe_wf's own
+`stamp_zarr_provenance.py`). `zarr_cake.py` deleted outright — no other call
+site, no test imported it. The other lineout formats (csv/dat/xye/fxye/
+2d_csv) and the combined HDF5 output moved into their own subfolders
+(`<fmt>/`, `h5/`) alongside `zarr/` at the same pass, so per-frame zarr
+files don't collide with per-format lineout files in one flat directory.
+`_HDF5StackGlobSource` gained `metadata_for_index()` (Temperature/Pressure/
+StorageRing-current, always the chunk mean regardless of pixel combine-op)
+so the per-frame zarr can carry the same instrument metadata mpe_wf's own
+output does, when the source is a VAREX-style HDF5 stack.
+
+**Verified**: `tests/test_batch_zarr_gsas.py` (new) opens the written zarr
+with `zarr.open` and asserts all 3 of GSAS-II's `ContentsValidator`-required
+groups (`InstrumentParameters`/`REtaMap`/`OmegaSumFrame`) are present, plus
+`provenance_history`; a second test confirms per-chunk metadata is always
+the arithmetic mean of the raw sub-frames even when the pixel op is Sum/Max/
+Median. Full suite re-run file-by-file (the standing isolation method, see
+2026-08-30 below) shows no new failures beyond the already-documented
+baseline. Independently, the user opened the real zarr files this fix
+produced against the actual C611 dataset in GSAS-II and confirmed they load
+correctly.
+
 ## 2026-09-02 — PR #7's `<froot>_<NNNNNN>` output naming kept, but made collision-safe rather than reverted
 
 junspark's PR #7 changed Batch Integrate's per-frame profile filenames from

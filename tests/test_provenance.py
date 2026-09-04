@@ -115,12 +115,15 @@ def test_append_to_zip_updates_an_existing_store(tmp_path):
     zarr = pytest.importorskip("zarr")
     import numpy as np
 
-    from midas_gui.zarr_cake import write_cake_zarr
+    # Build the fixture store directly rather than through a cake writer —
+    # this test is about append_to_zip's extract/edit/repack, not about
+    # whichever module happens to produce the zip.
     path = tmp_path / "c.zarr.zip"
-    write_cake_zarr(path, [np.zeros((2, 3))], r_axis_px=np.arange(3.0),
-                    eta_axis_deg=np.arange(2.0), lsd_um=1e5, px_um=200.0,
-                    wavelength_A=0.2,
-                    provenance_entry=provenance.build_entry("write"))
+    store = zarr.ZipStore(str(path), mode="w")
+    root = zarr.group(store=store)
+    root.create_dataset("REtaMap", data=np.zeros((5, 3, 2), dtype="f4"))
+    provenance.append_to_zarr_group(root, provenance.build_entry("write"))
+    store.close()
 
     provenance.append_to_zip(path, provenance.build_entry("restamp"))
 

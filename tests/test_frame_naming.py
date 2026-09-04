@@ -131,14 +131,15 @@ def test_hdf5_stack_glob_source_combines_whole_file_by_default(tmp_path):
 
 def test_hdf5_stack_glob_source_chunks_and_labels(tmp_path):
     """A positive chunk_size splits one file into several combined frames,
-    each labelled ``<stem>_c<NN>`` — ids that froot_and_frame_num can parse."""
+    each labelled ``<stem>.frame_<start>_<end>`` by the raw 0-based sub-frame
+    range it combines — ids that froot_and_frame_num can parse."""
     data = _write_stack(tmp_path / "run.h5", 6)
 
     src = _HDF5StackGlobSource([tmp_path / "run.h5"], "exchange/data",
                                chunk_size=2, op="sum")
     assert src.n_frames == 3
     ids = [fid for fid, _ in src]
-    assert ids == ["run_c00", "run_c01", "run_c02"]
+    assert ids == ["run.frame_0_1", "run.frame_2_3", "run.frame_4_5"]
 
     _, img = src.get(1)
     np.testing.assert_allclose(img, data[2:4].sum(axis=0), rtol=1e-6)
@@ -148,7 +149,30 @@ def test_hdf5_stack_glob_source_chunks_and_labels(tmp_path):
     used = set()
     names = [frame_output_base(tmp_path, f, i, used).name
              for i, f in enumerate(ids)]
-    assert names == ["run_000000", "run_000001", "run_000002"]
+    # The stem carries no frame number of its own, so the chunk's start index
+    # becomes the frame number — distinct and correctly ordered per chunk.
+    assert names == ["run_000000", "run_000002", "run_000004"]
+
+
+def test_range_chunk_suffix_is_split_off_before_the_numeric_parse():
+    """``.frame_<start>_<end>`` is _HDF5StackGlobSource's current chunk id.
+    Without splitting it off first the trailing ``_<end>`` is mistaken for the
+    stem's own frame number, so every chunk of one file would be renamed by
+    its end index and a real detector frame number would be lost."""
+    assert froot_and_frame_num("run_009243.vrx.frame_0_9", -1) == \
+        ("run", 9243, ".vrx.frame_0_9")
+    assert froot_and_frame_num("run_009243.vrx.frame_10_19", -1) == \
+        ("run", 9243, ".vrx.frame_10_19")
+
+
+def test_range_chunks_of_one_numbered_file_stay_distinct(tmp_path):
+    """Chunks of a single numbered source share a froot AND a frame number,
+    so only the preserved range tag keeps their output names apart."""
+    used = set()
+    names = [frame_output_base(tmp_path, f, i, used).name for i, f in enumerate(
+        ["run_009243.vrx.frame_0_9", "run_009243.vrx.frame_10_19"])]
+    assert names == ["run_009243.vrx.frame_0_9", "run_009243.vrx.frame_10_19"]
+    assert len(set(names)) == 2
 
 
 def test_hdf5_stack_glob_source_indexes_across_files(tmp_path):
@@ -159,6 +183,6 @@ def test_hdf5_stack_glob_source_indexes_across_files(tmp_path):
                                "exchange/data", chunk_size=2)
     assert src.n_frames == 4
     assert [src.get(i)[0] for i in range(4)] == \
-        ["a_c00", "a_c01", "b_c00", "b_c01"]
+        ["a.frame_0_1", "a.frame_2_3", "b.frame_0_1", "b.frame_2_3"]
     with pytest.raises(IndexError):
         src.get(4)

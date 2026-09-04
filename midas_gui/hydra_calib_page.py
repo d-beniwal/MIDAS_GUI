@@ -1073,6 +1073,9 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             "anchor_path": self._loader.current_path(),
             "active_panel": self._toolbar.current(),
             "fields": widgets_to_dict(self._state_widgets()),
+            "img_view": self._img_view.display_state(),
+            "cake_views": {n: cv.display_state() for n, cv in self._cake_views.items()},
+            "overall_cake_view": self._overall_cake_view.display_state(),
             "cards": cards,
         }
 
@@ -1080,6 +1083,12 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         if not state:
             return
         apply_dict_to_widgets(self._state_widgets(), state.get("fields", {}))
+        self._img_view.set_display_state(state.get("img_view"))
+        for n_key, cv_state in (state.get("cake_views") or {}).items():
+            cv = self._cake_views.get(int(n_key))
+            if cv is not None:
+                cv.set_display_state(cv_state)
+        self._overall_cake_view.set_display_state(state.get("overall_cake_view"))
         for n_key, fields in (state.get("cards") or {}).items():
             card = self._cards.get(int(n_key))
             if card is None:

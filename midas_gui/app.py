@@ -144,6 +144,31 @@ class MainWindow(QtWidgets.QMainWindow):
         self._profile_combo.setMinimumWidth(140)
         profile_row.addWidget(profile_label)
         profile_row.addWidget(self._profile_combo)
+
+        # Exp ID, mpe_wf_saxs_waxs style (e.g. "park_may26") — pinned here
+        # rather than living inside any one tab so every tab's own output-path
+        # logic can share it (today just Batch Integrate's "Suggest" button,
+        # via set_expid_provider() below). Persists across restarts as a
+        # plain last-used value (settings.get/set_last_expid); once a Project
+        # is open its own saved Exp ID travels with it instead — see
+        # _serialize_workspace/_apply_workspace_state/save_project.
+        expid_label = QtWidgets.QLabel("Exp ID:")
+        expid_label.setFont(profile_font)
+        self._expid_ed = QtWidgets.QLineEdit()
+        self._expid_ed.setFont(profile_font)
+        self._expid_ed.setMaximumWidth(120)
+        self._expid_ed.setPlaceholderText("park_may26")
+        self._expid_ed.setToolTip(
+            "Experiment ID (mpe_wf_saxs_waxs style, e.g. 'park_may26'). "
+            "Shared across every tab — Batch Integrate's 'Suggest' output-"
+            "folder button inserts it as <expid>_bc/. Saved with the Project "
+            "once one is open; otherwise remembered as your last-used value.")
+        self._expid_ed.setText(settings.get_last_expid())
+        self._expid_ed.editingFinished.connect(
+            lambda: settings.set_last_expid(self._expid_ed.text().strip()))
+        profile_row.addWidget(expid_label)
+        profile_row.addWidget(self._expid_ed)
+
         sep = QtWidgets.QFrame()
         sep.setFrameShape(QtWidgets.QFrame.VLine)
         sep.setFrameShadow(QtWidgets.QFrame.Sunken)
@@ -251,6 +276,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 except Exception:
                     _log(f"Hydra registry bind failed for {label}:\n{traceback.format_exc()}")
 
+        # Header Exp ID field: any tab that wants it for output-path
+        # suggestions reads it live via this callback rather than keeping its
+        # own copy — today just Batch Integrate.
+        for tab in (self._batch_tab,):
+            set_provider = getattr(tab, "set_expid_provider", None)
+            if set_provider is not None:
+                try:
+                    set_provider(self.expid)
+                except Exception:
+                    _log(f"Exp ID provider wiring failed:\n{traceback.format_exc()}")
+
         # Wire cross-tab signals defensively (skip any placeholder tab).
         def _connect(src, signal_name, targets, slot_name):
             sig = getattr(src, signal_name, None)
@@ -348,6 +384,16 @@ class MainWindow(QtWidgets.QMainWindow):
         if idx >= 0:
             self._tabs.setCurrentIndex(idx)
 
+    # ── header Exp ID field ─────────────────────────────────────────
+    def expid(self) -> str:
+        """Current Exp ID (mpe_wf_saxs_waxs style, e.g. 'park_may26'), or ''
+        if unset. Shared read path for any tab's output-path logic — see
+        set_expid_provider() wiring in _build_ui."""
+        return self._expid_ed.text().strip()
+
+    def set_expid(self, value: str) -> None:
+        self._expid_ed.setText(value or "")
+
     # ── header profile selector ─────────────────────────────────────
     def _refresh_profile_combo(self):
         self._profile_combo.blockSignals(True)
@@ -421,6 +467,12 @@ class MainWindow(QtWidgets.QMainWindow):
         act_open = m.addAction("Open Project…")
         act_open.setShortcut(QtGui.QKeySequence("Ctrl+O"))
         act_open.triggered.connect(self._open_project_dialog)
+        self._open_last_act = m.addAction("Open Last Project")
+        self._open_last_act.setToolTip(
+            "Open the most recently-opened project — same confirmation "
+            "dialog as picking the top entry in Recent Projects below, "
+            "just one click instead of two.")
+        self._open_last_act.triggered.connect(self._open_last_project)
         self._recent_projects_menu = m.addMenu("Recent Projects")
 
         m.addSeparator()
@@ -434,6 +486,11 @@ class MainWindow(QtWidgets.QMainWindow):
         m.addSeparator()
         act_import_legacy = m.addAction("Import Legacy Workspace (.json)…")
         act_import_legacy.triggered.connect(self._import_legacy_workspace_dialog)
+
+        m.addSeparator()
+        act_quit = m.addAction("Quit")
+        act_quit.setShortcut(QtGui.QKeySequence("Ctrl+Q"))
+        act_quit.triggered.connect(self.close)
 
         m.aboutToShow.connect(self._refresh_recent_menus)
 
@@ -508,6 +565,18 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._open_project_selection(dlg.selected_path(), dlg.selection())
 
+    def _open_last_project(self) -> None:
+        """File ▸ Open Last Project: shortcut for the top entry of Recent
+        Projects — goes through the exact same ``_open_project_path`` flow
+        (confirmation dialog included), just without opening the submenu
+        first."""
+        entries = settings.get_recent("project")
+        if not entries:
+            QtWidgets.QMessageBox.information(
+                self, "No recent project", "No recently-opened project found.")
+            return
+        self._open_project_path(entries[0]["path"])
+
     def _open_project_path(self, path) -> None:
         """Recent Projects menu entries: the path is already known, so skip
         the file-browser pane and go straight to the same checkbox-tree
@@ -547,7 +616,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 meta = project.read_workspace_meta(path)
                 data = {"__midas_gui_state__": True, "tabs": {},
                         "active_tab": meta.get("active_tab"),
-                        "active_profile": meta.get("active_profile")}
+                        "active_profile": meta.get("active_profile"),
+                        "expid": meta.get("expid")}
                 sidecars = {}
                 for name in tab_names:
                     tstate, tsidecars = project.read_workspace_tab(path, name)
@@ -565,6 +635,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._restore_active_profile(project.project_active_profile(path))
             except Exception:
                 _log(f"Could not read project's active profile:\n{traceback.format_exc()}")
+            try:
+                expid = project.read_workspace_meta(path).get("expid")
+                if expid:
+                    self.set_expid(expid)
+            except Exception:
+                _log(f"Could not read project's Exp ID:\n{traceback.format_exc()}")
 
         restored = []
         try:
@@ -779,7 +855,8 @@ class MainWindow(QtWidgets.QMainWindow):
         back out per-subdirectory. Returns ``(state, errors)``."""
         current = self._tabs.currentWidget()
         state = {"__midas_gui_state__": True, "version": 1, "tabs": {},
-                 "active_profile": settings.active_profile()}
+                 "active_profile": settings.active_profile(),
+                 "expid": self.expid()}
         for widget, name, _always in self._tab_specs:
             if widget is current:
                 state["active_tab"] = name
@@ -894,7 +971,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     files = {f.name: f.read_bytes() for f in sub.iterdir()}
                     if files:
                         sidecars[sub.name] = files
-        meta = {"active_tab": state.get("active_tab"), "active_profile": state.get("active_profile")}
+        meta = {"active_tab": state.get("active_tab"), "active_profile": state.get("active_profile"),
+                "expid": state.get("expid")}
         try:
             project.write_gui_workspace(path, tabs=state["tabs"], sidecars=sidecars, meta=meta)
         except Exception as e:
@@ -932,6 +1010,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._restore_active_profile(data.get("active_profile"))
         except Exception:
             _log(f"Could not restore session's active profile:\n{traceback.format_exc()}")
+        if data.get("expid"):
+            self.set_expid(data["expid"])
         name_to_widget = {name: widget for widget, name, _always in self._tab_specs}
         errors, skipped = [], []
         with tempfile.TemporaryDirectory(prefix="midas_gui_sidecar_") as td:
