@@ -3,6 +3,57 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-09-03 — Batch Integrate's Zarr checkbox rewired onto `write_gsas_zarr_zip`; retired the homegrown `zarr_cake` writer
+
+A GSAS-II user hit "Read Error" on a `.zarr.zip` produced by Batch
+Integrate's "Zarr (cake, REtaMap)" checkbox. Initial guess ("wrong button —
+should've used the dedicated Export-for-GSAS-II card instead") was rejected:
+in `mpe_wf_saxs_waxs`, ONE zarr output is read by both its own viewer and
+GSAS-II with no separate export step, so this GUI having two divergent
+writers producing the same-labeled output was itself the bug, not
+by-design.
+
+Root cause, confirmed by reading `midas_integrate_v2/io/zarr_gsas.py`
+directly and by opening real production mpe_wf `.zarr.zip` files with
+`zarr.open(..., mode='r')`: the old `zarr_cake.write_cake_zarr` wrote cake
+data to `/IntegrationResult/FrameNr_<i>`, a group GSAS-II's importer never
+reads; the schema it actually reads is `/OmegaSumFrame/LastFrameNumber_<i>`,
+which `write_cake_zarr` never wrote at all. Its `/InstrumentParameters` also
+only carried 2 of the 10 keys GSAS-II requires (`Lam`, `Distance` — missing
+`Polariz, SH_L, U, V, W, X, Y, Z`), a compounding failure. This GUI already
+had a *correct* writer for this exact schema —
+`midas_integrate_v2.io.zarr_gsas.write_gsas_zarr_zip`, used until now only
+by the separate "Export for GSAS-II" button (`gsas_export.py`).
+
+Fix: `BatchWorker.run()` (`workers.py`) now calls `write_gsas_zarr_zip`
+directly instead of `zarr_cake.write_cake_zarr`, writing **one zarr per
+combined output frame** (`<fid>.ave.zarr.zip`, into a `zarr/` subfolder)
+rather than one bundled `integrated.zarr.zip` for the whole run — mirrors
+mpe_wf's own one-zarr-per-scan-point convention, and sidesteps
+`write_gsas_zarr_zip` having no multi-frame API of its own. Provenance is
+stamped post-hoc via the existing `provenance.append_to_zip()` (the writer
+has no attrs slot for it, same pattern as mpe_wf's own
+`stamp_zarr_provenance.py`). `zarr_cake.py` deleted outright — no other call
+site, no test imported it. The other lineout formats (csv/dat/xye/fxye/
+2d_csv) and the combined HDF5 output moved into their own subfolders
+(`<fmt>/`, `h5/`) alongside `zarr/` at the same pass, so per-frame zarr
+files don't collide with per-format lineout files in one flat directory.
+`_HDF5StackGlobSource` gained `metadata_for_index()` (Temperature/Pressure/
+StorageRing-current, always the chunk mean regardless of pixel combine-op)
+so the per-frame zarr can carry the same instrument metadata mpe_wf's own
+output does, when the source is a VAREX-style HDF5 stack.
+
+**Verified**: `tests/test_batch_zarr_gsas.py` (new) opens the written zarr
+with `zarr.open` and asserts all 3 of GSAS-II's `ContentsValidator`-required
+groups (`InstrumentParameters`/`REtaMap`/`OmegaSumFrame`) are present, plus
+`provenance_history`; a second test confirms per-chunk metadata is always
+the arithmetic mean of the raw sub-frames even when the pixel op is Sum/Max/
+Median. Full suite re-run file-by-file (the standing isolation method, see
+2026-08-30 below) shows no new failures beyond the already-documented
+baseline. Independently, the user opened the real zarr files this fix
+produced against the actual C611 dataset in GSAS-II and confirmed they load
+correctly.
+
 ## 2026-08-30 — pytest-forked isolation for the known teardown-crash test files; root cause is fork()-after-multithreading, not just pyqtgraph
 
 Added `pytest-forked==1.7.5` (dev extra) and `pytestmark = pytest.mark.forked`
