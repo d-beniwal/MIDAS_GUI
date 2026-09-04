@@ -199,6 +199,38 @@ def test_batch_parallel_frame_done_reorders_out_of_completion_order():
     assert emitted == ["0", "1", "2", "3", "4", "5"]
 
 
+def _make_h5_stack(path, n_raw=10, size=4):
+    h5py = pytest.importorskip("h5py")
+    with h5py.File(str(path), "w") as f:
+        f.create_dataset("exchange/data",
+                          data=np.zeros((n_raw, size, size), dtype=np.float32))
+
+
+def test_frame_range_multi_file_hdf5_spans_all_files_with_combine_chunk(tmp_path):
+    """Regression: a multi-file HDF5 pick with "Combine sub-frames" set
+    used to return FILE-index bounds (0..len(paths)) even though the
+    worker consumes COMBINED-FRAME indices — so any chunk_size that split
+    a file into more than one combined frame made the run stop partway
+    through the first file(s) and never reach later files at all."""
+    pytest.importorskip("h5py")
+    W, _app = _make_app_and_module()
+
+    paths = []
+    for num in (9251, 9253, 9255):
+        p = tmp_path / f"C611_017Fe_1_load3_{num:06d}.vrx.h5"
+        _make_h5_stack(p, n_raw=10)
+        paths.append(str(p))
+
+    panel = W.DataLoaderPanel(mode="stream")
+    panel._set_explicit_paths(paths)
+    panel._combine_chunk.setValue(3)   # 10 raw frames / chunk 3 -> 4 combined frames/file
+    panel._autofill_frame_range()
+
+    assert panel.source_cfg()["type"] == "hdf5_stack_glob"
+    # 3 files x 4 combined frames each = 12, not the file count (3).
+    assert panel.frame_range() == (0, 12, 1)
+
+
 def test_resolve_worker_count_shrinks_to_minimum_ten_per_worker():
     import midas_gui.workers as wk
     # plenty of frames — full requested count survives

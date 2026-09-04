@@ -855,7 +855,13 @@ def _open_source_cfg(cfg):
     if cfg["type"] == "tiff_glob":
         return TIFFGlobSource(cfg["path"])
     if cfg["type"] == "hdf5":
-        return HDF5FrameSource(cfg["path"], dataset=cfg.get("dataset", "frames"))
+        # Route through _HDF5StackGlobSource (single-element path list) rather
+        # than a plain HDF5FrameSource, so "Combine sub-frames" (chunk_size/
+        # combine_op, now exposed for single-file HDF5 sources too) actually
+        # takes effect instead of being silently ignored.
+        return _HDF5StackGlobSource(
+            [cfg["path"]], cfg.get("dataset", "frames"),
+            chunk_size=cfg.get("chunk_size") or None, op=cfg.get("combine_op", "mean"))
     if cfg["type"] == "tiff_list":
         return _ExplicitTIFFSource(cfg["paths"])
     if cfg["type"] == "hdf5_stack_glob":

@@ -3,6 +3,41 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-09-03 — Single-file HDF5 sources now honor "Combine sub-frames" and frame-range bounds the same way multi-file sources do
+
+A single bare HDF5 file picked in Batch Integrate's Data Loader silently
+ignored the "Combine sub-frames" (chunk_size/combine_op) control — it was
+routed through a plain `HDF5FrameSource` in `workers._open_source_cfg`,
+while several separate HDF5 files (an explicit multi-select, or a folder/
+stem-filter pick that resolves to several files) went through
+`_HDF5StackGlobSource`, the only source that actually implements combining.
+This also meant frame-range bounds for a chunked multi-file HDF5 pick were
+wrong: the Data Loader's start/end spinboxes hold FILE numbers, but
+`_HDF5StackGlobSource.n_frames` counts COMBINED-FRAME chunks, so a range
+computed by file-index arithmetic silently stopped partway through an
+early file whenever "Combine sub-frames" split it into more than one
+chunk.
+
+Fix: `_open_source_cfg`'s `"hdf5"` case now routes through
+`_HDF5StackGlobSource` (a single-element path list) instead of a bare
+`HDF5FrameSource`, so combining takes effect for single files too.
+`widgets.DataLoaderPanel` follows suit: "Combine sub-frames" is now shown
+for single bare HDF5 files (previously hidden), `source_cfg()` includes
+`chunk_size`/`combine_op` for the single-`"hdf5"` case, a single-file
+source's start/end spinboxes are reset-then-locked to its own scan number
+(parsed via `froot_and_frame_num`) rather than left editable over
+sub-frames that were never addressable that way, and `frame_range()` gains
+a `_hdf5_multi_file_counts()` helper that expands FILE-index bounds
+through each matched file's own chunk count before turning them into the
+COMBINED-FRAME-index range `_HDF5StackGlobSource.n_frames` actually counts
+over.
+
+**Verified**: new test
+`test_frame_range_multi_file_hdf5_spans_all_files_with_combine_chunk`
+(3 synthetic 10-raw-frame HDF5 files, chunk size 3) asserts
+`frame_range() == (0, 12, 1)` — 3 files × 4 combined frames each — rather
+than the file count of 3 a naive file-index range would have produced.
+
 ## 2026-09-03 — Batch Integrate's Zarr checkbox rewired onto `write_gsas_zarr_zip`; retired the homegrown `zarr_cake` writer
 
 A GSAS-II user hit "Read Error" on a `.zarr.zip` produced by Batch
