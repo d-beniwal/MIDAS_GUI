@@ -19,10 +19,13 @@ def _make_app_and_module():
 
 
 def test_stem_filter_becomes_glob_pattern_in_source_cfg():
+    # "**" makes the glob recursive — "Files sharing a stem" is meant to
+    # find every scan-point file below the selected folder, in any
+    # subfolder, not just its direct children.
     W, _app = _make_app_and_module()
     panel = W.DataLoaderPanel(mode="stream")
     panel._set_stem_filter("/tmp/x", "scan_")
-    assert panel.source_cfg() == {"type": "tiff_glob", "path": "/tmp/x/scan_*"}
+    assert panel.source_cfg() == {"type": "tiff_glob", "path": "/tmp/x/**/scan_*"}
 
 
 def test_explicit_multi_file_pick_becomes_tiff_list():
@@ -78,7 +81,7 @@ def test_stem_filter_roundtrips_through_get_set_state():
     restored = W.DataLoaderPanel(mode="stream")
     restored.set_state(state)
     assert restored._stem_filter == "scan_"
-    assert restored.source_cfg() == {"type": "tiff_glob", "path": "/tmp/x/scan_*"}
+    assert restored.source_cfg() == {"type": "tiff_glob", "path": "/tmp/x/**/scan_*"}
 
 
 def test_explicit_tiff_source_reads_paths_in_order(tmp_path):

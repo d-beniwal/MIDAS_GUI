@@ -3179,18 +3179,24 @@ class DataLoaderPanel(QtWidgets.QWidget):
 
     def _raw_source(self):
         """The current source: an explicit ``list[str]`` from a Browse…
-        "Multiple files"/"Files sharing a stem" pick, a ``<folder>/<stem>*``
+        "Multiple files"/"Files sharing a stem" pick, a ``<folder>/**/<stem>*``
         glob pattern when "stream" mode's live filestem filter is set (see
         ``_set_stem_filter`` — this one substitution is what makes
         ``source_cfg()``, ``_load()`` and cross-tab "Import from…" all
         filestem-aware for free), else the plain path text (file / folder /
-        glob)."""
+        glob). The ``**`` searches the entire folder tree below the selected
+        folder, not just its direct children — matching files sharing a stem
+        is meant to find every scan-point file regardless of which
+        subfolder it landed in, unlike "Full folder" (one flat directory).
+        ``helpers._collect_frame_paths`` globs this with ``recursive=True``,
+        under which ``**`` also matches zero directories, so files directly
+        in the selected folder still match too."""
         if self._explicit_paths:
             return self._explicit_paths
         text = self._path_ed.text().strip()
         if self._stem_filter and text:
             from pathlib import Path
-            return str(Path(text) / (self._stem_filter + "*"))
+            return str(Path(text) / "**" / (self._stem_filter + "*"))
         return text
 
     def _set_explicit_paths(self, paths):

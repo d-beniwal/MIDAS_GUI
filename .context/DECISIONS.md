@@ -3,6 +3,32 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-09-03 — "Files sharing a name stem" now searches subfolders recursively
+
+`BrowseFilesDialog._stem_matches()`, `helpers._collect_frame_paths()`, and
+`widgets.DataLoaderPanel._raw_source()`'s live filestem filter all glob'd
+only the immediate directory (`<dir>/<stem>*`), so a stem match silently
+missed any file whose scan point landed in a sibling subfolder rather than
+directly under the picked folder. Changed all three to a recursive
+`<dir>/**/<stem>*` pattern (`glob(..., recursive=True)`) so a stem search
+finds a matching file anywhere below the selected folder, not just as a
+direct child.
+
+This was found while investigating a still-unconfirmed `FileNotFoundError`
+report in Batch Integrate's stem-match mode when source files were split
+across sibling subfolders — three attempts to reproduce it from a fresh
+repro script did not trigger the error, so this is not a confirmed root
+cause, but it's the strongest candidate found while reading through this
+code path: the old non-recursive glob is exactly the kind of gap that
+would produce a "file the GUI expected to find isn't there" style error
+for that scenario. Recorded here as what changed, not as a confirmed fix —
+if the original report resurfaces, revisit with the actual failing
+directory layout in hand.
+
+**Verified**: `test_stem_filter_becomes_glob_pattern_in_source_cfg` and
+`test_stem_filter_roundtrips_through_get_set_state` updated to expect the
+`**` pattern in `source_cfg()`'s output.
+
 ## 2026-09-03 — Single-file HDF5 sources now honor "Combine sub-frames" and frame-range bounds the same way multi-file sources do
 
 A single bare HDF5 file picked in Batch Integrate's Data Loader silently

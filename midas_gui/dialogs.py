@@ -799,12 +799,16 @@ class BrowseFilesDialog(QtWidgets.QDialog):
         return sorted(out)
 
     def _stem_matches(self) -> list:
+        """Every file under the current directory (searched recursively —
+        "Files sharing a name stem" is meant to find every scan-point file
+        regardless of which subfolder it landed in) whose name starts with
+        the given stem."""
         stem = self._stem_ed.text().strip()
         if not stem or not self._current_dir:
             return []
         import glob as _glob
-        pattern = str(Path(self._current_dir) / (stem + "*"))
-        return sorted(m for m in _glob.glob(pattern) if Path(m).is_file())
+        pattern = str(Path(self._current_dir) / "**" / (stem + "*"))
+        return sorted(m for m in _glob.glob(pattern, recursive=True) if Path(m).is_file())
 
     def _on_selection_changed(self, *_):
         if self._mode == "stem":

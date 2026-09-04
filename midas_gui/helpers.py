@@ -343,7 +343,10 @@ def _collect_frame_paths(raw) -> list:
         for ext in ("*.tif", "*.tiff", "*.h5", "*.hdf5", "*.ge*", "*.cbf", "*.edf"):
             out.extend(sorted(p.glob(ext)))
         return [str(x) for x in out]
-    return sorted(_glob.glob(raw))
+    # recursive=True only changes behavior when the pattern contains "**"
+    # (the filestem-filter case, widgets.DataLoaderPanel._raw_source) — a
+    # plain glob without it is unaffected.
+    return sorted(_glob.glob(raw, recursive=True))
 
 
 def display_text_for_paths(paths: list) -> str:
