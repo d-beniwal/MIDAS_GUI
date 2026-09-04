@@ -1909,19 +1909,20 @@ carries the same tooltip-instead-of-permanent-note treatment.
 the worker(s) to stop cleanly between frames (keeping frames already
 written); if a worker does not stop promptly it is detached to finish on
 its own. **Save** writes the lineouts already computed this run to a folder
-you pick on the spot, in whichever output format(s) are checked — this
-works even when no Output folder was set before running (that field only
-wires up *incremental* per-frame writes during the run itself; Save always
-writes everything currently held in memory, on demand, afterward). Save is
-enabled once a run has produced at least one frame, and disabled again by
-**Clear results** or the start of a new run. 2D CSV (cake) is the one format
-Save can't produce — per-frame cake arrays aren't kept in memory after a run
-to avoid bloating RAM for large batches; re-run with an Output folder set
-and 2D CSV checked to get that format. **Clear results** removes the
-profiles/plots computed **this session** for the current data (waterfall,
-stacked profiles, and the integrated-frame tracking) so a fresh integration
-can start — it stops any active monitor but does **not** delete raw data or
-any files already written to disk.
+you pick on the spot, in whichever output format(s) are checked. Save is
+only enabled for a run that had **no Output folder** set — if an Output
+folder was set, the run already wrote everything there as it went (into
+its per-format subfolders — see "Output folder" below), so Save is left
+**disabled** afterward to avoid dumping a second, flat, unsubfoldered copy
+on top of what's already on disk; the completion message notes this
+explicitly ("Save is disabled — results are already saved above..."). 2D
+CSV (cake) is the one format Save can't produce — per-frame cake arrays
+aren't kept in memory after a run to avoid bloating RAM for large batches;
+re-run with an Output folder set and 2D CSV checked to get that format.
+**Clear results** removes the profiles/plots computed **this session** for
+the current data (waterfall, stacked profiles, and the integrated-frame
+tracking) so a fresh integration can start — it stops any active monitor
+but does **not** delete raw data or any files already written to disk.
 
 ### Live folder monitoring (MONITOR)
 The **MONITOR** button at the bottom of the left Data Loader panel (folder/glob sources
@@ -1939,6 +1940,32 @@ Dark/Bright/Background, mask and Q-uniform settings, and are saved to the output
 when a 1-D format is selected. Click MONITOR again to stop; starting a fresh *Start
 Integration* also stops it. (Distinct from **Monitor normalisation** above, which divides
 profiles by a scalar file.)
+
+### Output folder
+The **Folder:** field (Output card) is a plain text field + **Browse…**,
+plus a **Suggest** button that fills it in automatically from whatever
+data source is loaded, mirroring `mpe_wf_saxs_waxs`'s own
+`outroot/<expid>_bc/<froot>/<detector>/` output-folder convention:
+- **Suggest** reads `<outroot>/<expid>/<detector>/<froot>/<files>`
+  positionally off the loaded source's own path (four directories deep,
+  counting the files' own containing folder) and fills in
+  `<outroot>/<expid>_bc/<froot>/<detector>/` — no need to type the header
+  Exp ID field first. When the source doesn't sit that deep (e.g. files in
+  a flat folder), it falls back to `<source folder>/<expid>_bc/<froot>/`
+  using the header **Exp ID** field instead (see below), dropping the
+  `_bc` segment entirely if that field is empty.
+- The folder is also **auto-filled** the moment a data source loads,
+  using the same logic as clicking Suggest — but only when the field is
+  still empty; typing or Browse-picking a folder yourself always wins and
+  is never overwritten.
+- Once an Output folder is set (by any of the above, or a run started
+  with one), output is written into **per-format subfolders** underneath
+  it — `csv/`, `xye/`, `fxye/`, `dat/`, `2d_csv/`, `h5/`, `zarr/` — rather
+  than all formats side by side in one folder.
+- The header-level **Exp ID** field (top of the window, next to the
+  Profile selector) is a free-text label — e.g. `park_may26` — used as the
+  fallback expid for Suggest above and saved with the Project (§16) and
+  across restarts (last-used value, independent of Profile).
 
 ### Output formats — checkbox list behind a popup button (multi-select)
 Click the **Output format ▾** button to reveal a checkbox per format —
@@ -2608,6 +2635,9 @@ A **Project** is a single, long-lived `.h5` file with two top-level headers
   **include the full history** (default), **only the most recent attempt
   of each kind**, or **none** (workspace only). Either way, the new file
   becomes the target for future plain `Ctrl+S`.
+- **File ▸ Open Last Project** — a one-click shortcut for the top entry of
+  Recent Projects below: opens the most recently opened/saved project
+  through the same confirmation flow, without going through the submenu.
 - **File ▸ Open Project…** (`Ctrl+O`) — opens a single combined dialog: a
   file-tree browser on the left to navigate to a `.h5`, and the moment one
   is clicked, the right pane previews exactly what that project contains —
@@ -2635,6 +2665,9 @@ A **Project** is a single, long-lived `.h5` file with two top-level headers
   Workspace JSON file saved before Workspace and Project were merged into
   one `.h5` (same validation and confirmation as the old Load Workspace…),
   and applies it into whichever project is — or isn't — currently open.
+- **File ▸ Quit** (`Ctrl+Q`) — closes the main window (same as the window's
+  own close button), so quitting no longer requires the OS window-manager
+  shortcut.
 - The active project's filename is always shown in the status bar
   (bottom-right, "Project: …" / "Project: none") **and**, in a bold,
   high-contrast green, at the far right of the tab-bar header row (empty

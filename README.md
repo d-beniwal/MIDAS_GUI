@@ -159,7 +159,7 @@ always shown, the rest can be toggled on as you need them.
 | 1 | **Mask Builder** | Threshold, statistical auto-mask (spatial outlier, temporal constancy), drawn shapes (rect/oval/annulus/polygon/freeform), cosmic-ray rejection, calibration-based azimuthal σ-clip, learnable mask |
 | 2 | **Calibrate** | One-shot / first-time / four-stage / Bayesian / joint-cake pipelines; multi-panel detector; per-coefficient distortion refinement; ring residuals |
 | 3 | **Calib. Refinement** | Derivative-free Nelder-Mead optimization against an η-uniformity loss |
-| 4 | **Batch Integrate** | Hard / subpixel / polygon kernels; monitor normalisation; frame stride; drift correction; live folder monitoring; publication-quality waterfall/stacked-profile plots |
+| 4 | **Batch Integrate** | Hard / subpixel / polygon kernels; monitor normalisation; frame stride; drift correction; live folder monitoring; auto-suggested per-format output folders; publication-quality waterfall/stacked-profile plots |
 | 5 | **Corrections & Physics** | Polarization, solid-angle, absorption, Compton preview; per-pixel learnable gain training |
 | 6 | **PDF Analysis** | Composition-weighted I(Q) → S(Q) → F(Q) → G(r) total-scattering reduction with σ propagation and optional scale/background refinement |
 | 7 | **Texture** | Per-ring azimuthal extraction and stereographic pole-figure projection (POPLA export) |
