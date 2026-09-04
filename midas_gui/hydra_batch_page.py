@@ -169,10 +169,12 @@ class HydraBatchPage(QtWidgets.QWidget):
         integ.body.addLayout(rf)
         self._grid_chk = QtWidgets.QCheckBox("Show bin grid")
         self._grid_chk.setToolTip(
-            "Overlay the full (R, η) integration bin grid on each panel's "
-            "Detector view tab — concentric circles at each R-bin edge, "
-            "spokes at each η-bin edge. Thinned to at most ~50 rings / "
-            "~72 spokes for legibility with fine bin sizes.")
+            "Overlay the Rmin/Rmax boundary circles and the full (R, η) "
+            "integration bin grid on each panel's Detector view tab — "
+            "concentric circles at each R-bin edge, spokes at each η-bin "
+            "edge. Thinned to at most ~50 rings / ~72 spokes for "
+            "legibility with fine bin sizes. Unchecking this hides the "
+            "overlay entirely, including Rmin/Rmax.")
         integ.body.addWidget(self._grid_chk)
         for w in (self._r_min, self._r_max, self._r_bin, self._e_bin):
             w.valueChanged.connect(self._refresh_active_detector_preview)

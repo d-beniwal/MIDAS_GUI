@@ -3,6 +3,28 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-09-03 — Detector-view overlay: fixed η-spoke placement and made "Show bin grid" actually hide everything when unchecked
+
+Two bugs in `helpers.draw_polar_bin_overlay`, found while cross-checking
+its geometry against `pixel_to_REta`'s convention (`η = atan2(-Yc, Zc)`,
+so η=0 points straight up, +Z, not along +Y):
+
+- The non-tilted η-spoke formula used `Y = bc_y + r·cos(θ)`,
+  `Z = bc_z + r·sin(θ)` — swapped relative to that convention, so every
+  spoke was drawn 90° off from where it actually is. Fixed to
+  `Y = bc_y + r·sin(θ)`, `Z = bc_z + r·cos(θ)`.
+- `if not show_grid: return` ran *after* the Rmin/Rmax circles were
+  already drawn, so unchecking "Show bin grid" still left those circles
+  on screen. Moved the early-return before them so unchecking the box
+  hides the overlay entirely, and updated both tabs' tooltips
+  (`tab_batch.py`, `hydra_batch_page.py`) to say so.
+
+`widgets.build_lab_frame_axes_items`'s always-on compass overlay had the
+same follow-on fix: its old 0°→45° arc-sweep+arrowhead η indicator is
+replaced with four cardinal-angle (0°/+90°/−90°/180°) tick+label marks
+using the same `(-y_sign)·sin(η)`/`cos(η)` convention, so the lab-frame
+compass and the real caking overlay now agree on which way η points.
+
 ## 2026-09-03 — `tilted_ring_xy` closes its polyline, fixing a seam in tilted ring overlays
 
 `tilted_ring_xy` sampled η over `np.linspace(0, 360, n, endpoint=False)`, so

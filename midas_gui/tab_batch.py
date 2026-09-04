@@ -639,10 +639,12 @@ class BatchTab(QtWidgets.QWidget):
 
         self._grid_chk = QtWidgets.QCheckBox("Show bin grid")
         self._grid_chk.setToolTip(
-            "Overlay the full (R, η) integration bin grid on the Detector "
-            "view tab — concentric circles at each R-bin edge, spokes at "
-            "each η-bin edge (bounded to η min/max). Thinned to at most "
-            "~50 rings / ~72 spokes for legibility with fine bin sizes.")
+            "Overlay the Rmin/Rmax boundary circles and the full (R, η) "
+            "integration bin grid on the Detector view tab — concentric "
+            "circles at each R-bin edge, spokes at each η-bin edge "
+            "(bounded to η min/max). Thinned to at most ~50 rings / ~72 "
+            "spokes for legibility with fine bin sizes. Unchecking this "
+            "hides the overlay entirely, including Rmin/Rmax.")
         integ.body.addWidget(self._grid_chk)
         self._grid_chk.toggled.connect(self._refresh_detector_preview)
         self._var_check = QtWidgets.QCheckBox("Per-bin variance (σ)")

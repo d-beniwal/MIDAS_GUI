@@ -783,11 +783,11 @@ def draw_polar_bin_overlay(viewer, items: list, *, bc_y: float, bc_z: float,
                            lsd_um: Optional[float] = None,
                            pxY_um: Optional[float] = None,
                            pxZ_um: Optional[float] = None) -> None:
-    """Draw the Rmin/Rmax exclusion-boundary circles (always, skipping any
-    non-positive radius) and, if ``show_grid``, the full polar (R, η) bin
+    """If ``show_grid``, draw the Rmin/Rmax exclusion-boundary circles
+    (skipping any non-positive radius) plus the full polar (R, η) bin
     grid — concentric circles at each radial-bin edge plus spokes at each
     η-bin edge, both thinned to at most ``max_rings``/``max_spokes`` — onto
-    ``viewer._iv``.
+    ``viewer._iv``. Nothing is drawn when ``show_grid`` is false.
 
     ``tx``/``ty``/``tz`` (deg) + ``lsd_um``/``pxY_um``/``pxZ_um`` are
     optional: when the detector has a non-trivial tilt AND all three
@@ -829,12 +829,12 @@ def draw_polar_bin_overlay(viewer, items: list, *, bc_y: float, bc_z: float,
         viewer._iv.addItem(item)
         items.append(item)
 
+    if not show_grid:
+        return
+
     if r_min > 0:
         _circle(r_min, pg.mkPen("orange", width=1.2, style=QtCore.Qt.DashLine))
     _circle(r_max, pg.mkPen("orange", width=1.5))
-
-    if not show_grid:
-        return
     grid_pen = pg.mkPen((120, 180, 255), width=0.8)
     for r in _thinned_bin_edges(r_min, r_max, r_bin, max_rings):
         if r_min < r < r_max:
@@ -849,9 +849,13 @@ def draw_polar_bin_overlay(viewer, items: list, *, bc_y: float, bc_z: float,
             Y, Z = tilted_spoke_xy(tt_lo, tt_hi, float(eta), tx, ty, tz,
                                     lsd_um, bc_y, bc_z, pxY_um, pxZ_um)
         else:
+            # bc + r*(sin η, cos η) — same convention tilted_spoke_xy reduces
+            # to at zero tilt (and pixel_to_REta's eta=atan2(-Yc,Zc)): η=0 is
+            # straight up (+Z), not along +Y. cos/sin here (not sin/cos)
+            # would draw each η spoke 90° off from where it actually is.
             th_r = math.radians(float(eta))
-            Y = [bc_y + r_min * math.cos(th_r), bc_y + r_max * math.cos(th_r)]
-            Z = [bc_z + r_min * math.sin(th_r), bc_z + r_max * math.sin(th_r)]
+            Y = [bc_y + r_min * math.sin(th_r), bc_y + r_max * math.sin(th_r)]
+            Z = [bc_z + r_min * math.cos(th_r), bc_z + r_max * math.cos(th_r)]
         item = pg.PlotDataItem(Y, Z, pen=grid_pen)
         viewer._iv.addItem(item); items.append(item)
 

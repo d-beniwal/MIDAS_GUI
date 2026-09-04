@@ -792,28 +792,32 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
     x_lbl.setPos(bc_y, bc_z + V * (-head * 1.2))
     add(x_lbl)
 
-    # η sweep arc, 0°→+45°, flipped by V so η=0 still points toward Y_Lab.
+    # η reference marks at the four cardinal angles — 0°/+90°/−90°/180° —
+    # using the same convention as pixel_to_REta (η=atan2(-Yc,Zc): η=0 is
+    # +Z_MIDAS/+Y_Lab, straight up) and the same (-y_sign)/V flips as the
+    # X_Lab/Y_Lab arrows above, so these track any lab-frame flip exactly.
+    # A real caking ring/spoke overlay (draw_polar_bin_overlay) reduces to
+    # this same dY=r·sinη, dZ=r·cosη formula at zero tilt — this is just
+    # the always-visible compass, independent of any loaded geometry.
     R_arc = L * 0.85
-    eta_rad = np.deg2rad(np.linspace(0.0, 45.0, 24))
-    arc_x = bc_y + (-y_sign) * R_arc * np.sin(eta_rad)
-    arc_y = bc_z + V * R_arc * np.cos(eta_rad)
-    add(pg.PlotDataItem(arc_x, arc_y, pen=arc_pen))
-
-    end = math.radians(45.0)
-    tan_x = (-y_sign) * math.cos(end)
-    tan_y = -V * math.sin(end)
-    head_size = head * 0.9
-    tip_x, tip_y = float(arc_x[-1]), float(arc_y[-1])
-    bx, by = tip_x - tan_x * head_size, tip_y - tan_y * head_size
-    nx_, ny_ = -tan_y, tan_x
-    wing = head_size * 0.55
-    p1x, p1y = bx + nx_ * wing, by + ny_ * wing
-    p2x, p2y = bx - nx_ * wing, by - ny_ * wing
-    add(pg.PlotDataItem([p1x, tip_x, p2x], [p1y, tip_y, p2y], pen=arc_pen, connect="all"))
-
-    # η=0 tick, just outside the arc.
-    tick_inner, tick_outer = R_arc * 1.04, R_arc * 1.18
-    add(pg.PlotDataItem([bc_y, bc_y], [bc_z + V * tick_inner, bc_z + V * tick_outer], pen=arc_pen))
+    tick_inner, tick_outer, label_R = R_arc * 0.92, R_arc * 1.12, R_arc * 1.32
+    eta_marks = ((0.0, "η=0°"), (90.0, "η=+90°"), (-90.0, "η=−90°"), (180.0, "η=180°"))
+    for eta_deg, label in eta_marks:
+        eta_rad = math.radians(eta_deg)
+        ux = (-y_sign) * math.sin(eta_rad)
+        uy = V * math.cos(eta_rad)
+        add(pg.PlotDataItem([bc_y + ux * tick_inner, bc_y + ux * tick_outer],
+                             [bc_z + uy * tick_inner, bc_z + uy * tick_outer],
+                             pen=arc_pen))
+        if abs(uy) >= abs(ux):
+            anchor = (0.5, 1.0 if uy > 0 else 0.0)
+        else:
+            anchor = (0.0 if ux > 0 else 1.0, 0.5)
+        html = f'<span style="color:{eta_color};">{label}</span>'
+        lbl = pg.TextItem(html=html, anchor=anchor, border=text_pen, fill=text_fill)
+        lbl.setFont(label_font)
+        lbl.setPos(bc_y + ux * label_R, bc_z + uy * label_R)
+        add(lbl)
 
     return items
 
