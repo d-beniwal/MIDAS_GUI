@@ -3,6 +3,17 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-09-03 — "Run as background job" pins the spawned screen session's cwd to the repo root
+
+`JobQueuePanel.launch()` runs `python -m midas_gui.batch_cli` inside a
+detached `screen` session. `-m` only resolves the `midas_gui` package when
+the process's cwd is the repo root (that's what puts the repo root on
+`sys.path[0]`) — but the spawned `screen`/`bash` session inherits whatever
+cwd the GUI itself happened to have at launch time, which isn't guaranteed
+to be the repo root. Fixed by prefixing the wrapped shell command with
+`cd <repo_root> &&`, where `repo_root` is derived from `Path(__file__)`
+rather than assumed from the caller's environment.
+
 ## 2026-09-03 — Detector-view overlay: fixed η-spoke placement and made "Show bin grid" actually hide everything when unchecked
 
 Two bugs in `helpers.draw_polar_bin_overlay`, found while cross-checking
