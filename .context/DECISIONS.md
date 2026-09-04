@@ -3,6 +3,16 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-09-03 — `tilted_ring_xy` closes its polyline, fixing a seam in tilted ring overlays
+
+`tilted_ring_xy` sampled η over `np.linspace(0, 360, n, endpoint=False)`, so
+the returned `(Y, Z)` arrays never repeated their first point. Fed straight
+into `pg.PlotDataItem` (a plain polyline, which pyqtgraph never auto-closes
+back to its start), a tilted ring drawn with this always showed a visible
+gap between its last and first sampled point. Switched to
+`endpoint=True` so the last point exactly equals the first and the
+polyline closes with no seam.
+
 ## 2026-09-03 — "Files sharing a name stem" now searches subfolders recursively
 
 `BrowseFilesDialog._stem_matches()`, `helpers._collect_frame_paths()`, and

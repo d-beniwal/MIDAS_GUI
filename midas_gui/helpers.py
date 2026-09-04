@@ -552,12 +552,15 @@ def tilted_ring_xy(two_theta_deg: float, tx: float, ty: float, tz: float,
     """Forward-project a diffraction ring at ``two_theta_deg`` through the tilt
     geometry (tx/ty/tz, degrees) onto detector pixel coordinates.
 
-    Returns ``(Y_px, Z_px)`` arrays of length ``n`` tracing the ring. Reduces
-    exactly to the plain circle ``bc + r*(sin η, cos η)`` when tx=ty=tz=0, since
-    it inverts the same ray/tilt-plane geometry as
+    Returns ``(Y_px, Z_px)`` arrays of length ``n`` tracing the ring, with the
+    last point equal to the first so the polyline a caller feeds straight
+    into ``pg.PlotDataItem`` closes with no seam (``pyqtgraph`` never
+    auto-closes a plain polyline back to its start). Reduces exactly to the
+    plain circle ``bc + r*(sin η, cos η)`` when tx=ty=tz=0, since it inverts
+    the same ray/tilt-plane geometry as
     ``midas_integrate_v2.forward.pixels.pixel_to_REta_from_spec``.
     """
-    eta = np.linspace(0.0, 360.0, n, endpoint=False)
+    eta = np.linspace(0.0, 360.0, n, endpoint=True)
     return _tilt_project_YZ(np.full(n, two_theta_deg), eta, tx, ty, tz,
                              Lsd_um, bc_y, bc_z, pxY_um, pxZ_um)
 
