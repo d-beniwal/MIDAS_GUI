@@ -1,53 +1,53 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-09-04 (PR #7's first 20 commits by **Jun-Sang Park**
-(`junspark`, jun.sang.park@outlook.com) are merged into local `main`;
-**PR #7 is still open and has since grown 16 more commits that are NOT in
-`main`** — do not push-and-close yet)_
+_Last updated: 2026-09-04 (all 36 commits of **Jun-Sang Park's** PR #7 merged
+into `main` as `549e96f` and pushed; PR #7 closed as merged and commented on)_
 
 ## Now working on
 
-**BLOCKED on a decision: PR #7 is a moving target.** `main` is 23 commits
-ahead of `origin/main` and unpushed, but PR #7 (`refs/pull/7/head`, now
-`bd32b62`) is **16 commits ahead of the `078f216` we reviewed and merged**
-— pushed by Jun-Sang Park on 2026-09-02 and 2026-09-04, +1982/−285 over 23
-files. So the PR head is **not** contained in `main`: pushing `main` will
-*not* auto-close it, and closing it manually would discard those 16 commits.
+Nothing in progress. **PR #7 is fully merged and closed; `main` is pushed**
+(`549e96f`, `origin/main` in sync). A comment on PR #7 records the merge, the
+four things fixed on the way in, the output-filename convention change, and a
+request for tests on the next contribution.
 
-What the 16 new commits contain (all `junspark`): Batch Integrate output-folder
-auto-suggest + Exp ID + writability preflight, recursive stem-match source
-search, single-file HDF5 honouring Combine sub-frames, dark-file skipping /
-frame-range autofill / HDF5-stack hang fix, Detector-view eta-spoke + tilted-
-ring-seam fixes, persisted viewer display settings (colormap/log/vmin/vmax)
-across all tabs, File-menu "Open Last Project"/"Quit", worker-exception
-logging, job-queue cwd pinning, a new `QUESTIONS_FOR_COLLEAGUES.md` (324
-lines), `.gitignore` additions, and doc updates. **Plus one deletion that
-directly collides with our work: `66b25da` retires `midas_gui/zarr_cake.py`,
-rewiring Zarr output onto `write_gsas_zarr_zip`** — our `tests/test_zarr_cake.py`
-(150 lines) imports that module and would break on merge. They also added
-`tests/test_batch_zarr_gsas.py` (186 lines) and touched
-`tests/test_batch_data_source.py`.
+Cleanup left: local branch `pr-7-strain-cake` and the fetched
+`refs/remotes/origin/pr/*` refs can be deleted. Working tree clean apart from
+local-only `test_data/test_out/` (untracked, leave it).
 
-**Dry-run merge (`git merge-tree main origin/pr/7`) conflicts in exactly two
-files:** `midas_gui/workers.py` (their +409 lines vs our `frame_output_base`
-collision-safe-naming fix — must not be lost) and `.context/DECISIONS.md`
-(they added their own 235-line entry). Everything else auto-merges, but
-auto-merging leaves `tests/test_zarr_cake.py` importing a deleted module.
-
-Local branch `pr-7-strain-cake` (== `main`) and the fetched
-`refs/remotes/origin/pr/*` refs are still around. Working tree otherwise
-clean apart from local-only `test_data/test_out/` (GSAS-II export test
-artifacts; untracked, gitignore-precedent says leave it, see the
-github-skill project memory).
-
-Not done, worth deciding: Jun-Sang Park has not been told that PR #7 changes
-the per-frame output filename convention (see below) — no commit message in
-the PR mentions it, and it breaks anyone globbing Batch Integrate output.
-Also not installed: `gh` CLI, so PR comments/closes cannot be scripted (use
-the web UI or `brew install gh`).
+Still open from the merge: `job_queue.py`, `peak_fit_panel.py` and
+`batch_cli.py` remain untested (ROADMAP.md). One new pyflakes warning, unused
+`HDF5FrameSource` import in `workers.py`. Pre-existing and unrelated:
+`app.py:992` annotates `Optional` without importing it — harmless only because
+of `from __future__ import annotations`.
 
 ## Recently completed
+
+**2026-09-04 (`549e96f`) — PR #7's remaining 16 commits merged, `main`
+pushed, PR closed.** Second half of Jun-Sang Park's PR (+1982/−285 over 23
+files): Batch Integrate output-folder auto-suggest + Exp ID + writability
+preflight, recursive stem-match search, single-file HDF5 honouring Combine
+sub-frames, dark-file skipping / frame-range autofill / HDF5-stack hang fix,
+Detector-view eta-spoke + tilted-ring-seam fixes, viewer display settings
+persisted across all tabs, File-menu Open Last Project/Quit, worker-exception
+logging, job-queue cwd pinning, `QUESTIONS_FOR_COLLEAGUES.md`.
+- **Resolved on merge:** `workers.py` (kept their per-format `csv/`/`h5/`/
+  `zarr/` subfolders, but re-applied our collision-safe stem allocation, which
+  their branch had reverted by branching before `092fbba`; `frame_output_base`
+  split into `frame_output_stem` + path wrapper so a frame allocates its stem
+  once, not once per format); taught the parser their new
+  `.frame_<start>_<end>` chunk suffix; `.context/DECISIONS.md` interleaved.
+- **Silent break git couldn't see:** their `zarr_cake.py` retirement (correct —
+  the old schema wrote `/IntegrationResult/FrameNr_<i>`, which GSAS-II never
+  reads) auto-merged clean but left `tests/test_zarr_cake.py` importing a
+  deleted module. Removed it, rewired `test_batch_zarr_output.py` onto the new
+  one-zarr-per-frame layout, rebuilt the `test_provenance` fixture.
+- **Checked, not a regression:** `tilted_ring_xy`'s `endpoint=True` change
+  shifted the η sampling grid and tripped 2 `test_helpers` tests; zero-tilt
+  reduction to a plain circle still holds to 1.7e-13. Expectations updated,
+  closure property newly pinned.
+- **Verified:** per-file suite identical to the pre-merge baseline — same 5
+  files failing with the same counts, no new failures; all 42 modules import.
 
 **2026-09-02/03 (`092fbba`, `46e0fec`) — Jun-Sang Park's (`junspark`) PR #7
 ("Add Strain Cake tab with azimuth strain map and lab-frame axes"), first 20
