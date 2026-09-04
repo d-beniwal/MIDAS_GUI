@@ -22,7 +22,15 @@ def show_error(parent, title: str, full_text: str, log=None, log_prefix: str = "
     if given, is a widget with ``.append()`` (LogPanel/QTextEdit) or a plain
     ``callable(str)`` — the full text (with ``log_prefix``) is recorded there
     too, untruncated.
+
+    ``full_text`` is also always appended to the same on-disk log that
+    ``app.py``'s global excepthook uses (``~/midas_gui_error.log``) — this
+    dialog is shown for exceptions a worker thread already caught and turned
+    into a Qt signal, so they never reach that excepthook on their own, and
+    without this the traceback is lost the moment the dialog is dismissed.
     """
+    from . import app as _app_mod
+    _app_mod._log(f"[{title}]\n{full_text}")
     if log is not None:
         text = log_prefix + full_text
         (log.append if hasattr(log, "append") else log)(text)
@@ -31,6 +39,7 @@ def show_error(parent, title: str, full_text: str, log=None, log_prefix: str = "
     box = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Critical, title, summary,
                                  QtWidgets.QMessageBox.Ok, parent)
     box.setDetailedText(full_text)
+    box.setInformativeText(f"Full details saved to {_app_mod._LOG_FILE}")
     box.exec_()
 
 

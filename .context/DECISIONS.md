@@ -3,6 +3,16 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-09-03 — `dialogs.show_error` always logs to `~/midas_gui_error.log`, even for worker-thread exceptions
+
+`show_error` is shown for exceptions a worker thread already caught and
+turned into a Qt signal — they never reach `app.py`'s global excepthook on
+their own, so before this the full traceback was lost the moment the
+dialog was dismissed, with no on-disk record. `show_error` now always
+appends `full_text` to the same log file the excepthook writes to
+(`app._log`/`app._LOG_FILE`), and the dialog's informative text names that
+file path so the user knows where to find it after closing the dialog.
+
 ## 2026-09-03 — "Run as background job" pins the spawned screen session's cwd to the repo root
 
 `JobQueuePanel.launch()` runs `python -m midas_gui.batch_cli` inside a
