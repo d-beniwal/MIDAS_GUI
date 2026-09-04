@@ -3,6 +3,14 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-09-03 — File menu: "Open Last Project" and "Quit" actions
+
+Added "File ▸ Open Last Project" — a one-click shortcut for the top entry
+of Recent Projects, going through the same `_open_project_path`
+confirmation flow, for the common case of reopening whatever was worked
+on last without opening the submenu first. Added a standard "File ▸ Quit"
+action (Ctrl+Q) as well, since the File menu had no explicit quit entry.
+
 ## 2026-09-03 — Grey out the calibration-file field when "From Tab 2" is selected
 
 Batch Integrate's calibration-file field/browse button stayed enabled even

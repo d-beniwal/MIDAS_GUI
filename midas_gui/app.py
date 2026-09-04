@@ -421,6 +421,12 @@ class MainWindow(QtWidgets.QMainWindow):
         act_open = m.addAction("Open Project…")
         act_open.setShortcut(QtGui.QKeySequence("Ctrl+O"))
         act_open.triggered.connect(self._open_project_dialog)
+        self._open_last_act = m.addAction("Open Last Project")
+        self._open_last_act.setToolTip(
+            "Open the most recently-opened project — same confirmation "
+            "dialog as picking the top entry in Recent Projects below, "
+            "just one click instead of two.")
+        self._open_last_act.triggered.connect(self._open_last_project)
         self._recent_projects_menu = m.addMenu("Recent Projects")
 
         m.addSeparator()
@@ -434,6 +440,11 @@ class MainWindow(QtWidgets.QMainWindow):
         m.addSeparator()
         act_import_legacy = m.addAction("Import Legacy Workspace (.json)…")
         act_import_legacy.triggered.connect(self._import_legacy_workspace_dialog)
+
+        m.addSeparator()
+        act_quit = m.addAction("Quit")
+        act_quit.setShortcut(QtGui.QKeySequence("Ctrl+Q"))
+        act_quit.triggered.connect(self.close)
 
         m.aboutToShow.connect(self._refresh_recent_menus)
 
@@ -507,6 +518,18 @@ class MainWindow(QtWidgets.QMainWindow):
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return
         self._open_project_selection(dlg.selected_path(), dlg.selection())
+
+    def _open_last_project(self) -> None:
+        """File ▸ Open Last Project: shortcut for the top entry of Recent
+        Projects — goes through the exact same ``_open_project_path`` flow
+        (confirmation dialog included), just without opening the submenu
+        first."""
+        entries = settings.get_recent("project")
+        if not entries:
+            QtWidgets.QMessageBox.information(
+                self, "No recent project", "No recently-opened project found.")
+            return
+        self._open_project_path(entries[0]["path"])
 
     def _open_project_path(self, path) -> None:
         """Recent Projects menu entries: the path is already known, so skip
