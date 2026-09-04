@@ -8,6 +8,47 @@ file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this
 date for the full uncondensed entries if ever needed._
 
+## 2026-09-04 — PR #7 is a live branch, not a snapshot: do not push-and-close `main` until it is re-merged
+
+Attribution first, since it was implicit in earlier entries: PR #7 and its
+whole Strain Cake body of work are **Jun-Sang Park's** (`junspark`,
+jun.sang.park@outlook.com), an external contributor to what had been a
+solo-owned repo. The 20 commits we reviewed (`c21ba35`..`078f216`, +3492/−295,
+19 files, 6 new modules) are merged into local `main`; the two commits on top
+(`092fbba` collision-safe frame naming, `46e0fec` +108 tests) are ours.
+
+Going to push `main` and close the PR, we found PR #7 had **moved 16 commits
+past the head we reviewed** (`078f216` → `bd32b62`, +1982/−285 over 23 files,
+pushed 2026-09-02 and 2026-09-04). The PR head is therefore not an ancestor of
+`main`: a push would not auto-close it, and a manual close would silently
+discard those 16 commits. **Did not push and did not close** — recorded here
+because the failure mode is quiet and easy to repeat.
+
+The general rule this yields: **before pushing a branch to close somebody's
+PR, re-fetch `refs/pull/N/head` and check containment**
+(`git merge-base --is-ancestor <pr-head> main`). "We merged it locally two
+days ago" is not the same as "the PR is merged", and this contributor pushes
+daily.
+
+Three specific collisions to resolve when re-merging:
+- `66b25da` **retires `midas_gui/zarr_cake.py`**, rewiring Zarr output onto
+  `write_gsas_zarr_zip` and adding `tests/test_batch_zarr_gsas.py` (186 lines).
+  Our `tests/test_zarr_cake.py` (150 lines) imports the deleted module. Git
+  auto-merges this cleanly into a broken state — no conflict marker, just an
+  ImportError. The invariants that test pinned (REtaMap channel order, the
+  (5, nR, nEta) orientation that GSAS-II's `G2pwd_MIDAS.py` reads) still
+  matter and should be re-pointed at the new writer, not dropped.
+- `midas_gui/workers.py` conflicts (their +409 vs our `frame_output_base`).
+  Our fix must survive verbatim — it is the one guarding against silent frame
+  loss (see the 2026-09-02 entry below).
+- `.context/DECISIONS.md` conflicts: they appended their own 235-line entry to
+  this file. Both sides are keepers; resolve by interleaving newest-first, not
+  by taking a side.
+
+Also confirmed this session: `gh` is not installed on this machine, so PR
+comments and closes cannot be scripted — either use the GitHub web UI or
+`brew install gh && gh auth login`.
+
 ## 2026-09-02 — PR #7's `<froot>_<NNNNNN>` output naming kept, but made collision-safe rather than reverted
 
 junspark's PR #7 changed Batch Integrate's per-frame profile filenames from

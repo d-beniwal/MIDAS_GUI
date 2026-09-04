@@ -1,28 +1,58 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-09-03 (junspark's PR #7 reviewed, fixed, tested and
-fast-forward-merged into local `main` as `092fbba`+`46e0fec`, logged in
-`a252b9d` — **not yet pushed**)_
+_Last updated: 2026-09-04 (PR #7's first 20 commits by **Jun-Sang Park**
+(`junspark`, jun.sang.park@outlook.com) are merged into local `main`;
+**PR #7 is still open and has since grown 16 more commits that are NOT in
+`main`** — do not push-and-close yet)_
 
 ## Now working on
 
-Nothing in progress. **`main` is 23 commits ahead of `origin/main` and
-unpushed** — pushing will also auto-close PR #7 on GitHub. Local branch
-`pr-7-strain-cake` and the fetched `refs/remotes/origin/pr/*` refs are still
-around and can be deleted. Working tree otherwise clean apart from local-only
-`test_data/test_out/` (GSAS-II export test artifacts; untracked,
-gitignore-precedent says leave it, see the github-skill project memory).
+**BLOCKED on a decision: PR #7 is a moving target.** `main` is 23 commits
+ahead of `origin/main` and unpushed, but PR #7 (`refs/pull/7/head`, now
+`bd32b62`) is **16 commits ahead of the `078f216` we reviewed and merged**
+— pushed by Jun-Sang Park on 2026-09-02 and 2026-09-04, +1982/−285 over 23
+files. So the PR head is **not** contained in `main`: pushing `main` will
+*not* auto-close it, and closing it manually would discard those 16 commits.
 
-Not done, worth deciding: junspark has not been told that PR #7 changes the
-per-frame output filename convention (see below) — no commit message in the
-PR mentions it, and it breaks anyone globbing Batch Integrate output.
+What the 16 new commits contain (all `junspark`): Batch Integrate output-folder
+auto-suggest + Exp ID + writability preflight, recursive stem-match source
+search, single-file HDF5 honouring Combine sub-frames, dark-file skipping /
+frame-range autofill / HDF5-stack hang fix, Detector-view eta-spoke + tilted-
+ring-seam fixes, persisted viewer display settings (colormap/log/vmin/vmax)
+across all tabs, File-menu "Open Last Project"/"Quit", worker-exception
+logging, job-queue cwd pinning, a new `QUESTIONS_FOR_COLLEAGUES.md` (324
+lines), `.gitignore` additions, and doc updates. **Plus one deletion that
+directly collides with our work: `66b25da` retires `midas_gui/zarr_cake.py`,
+rewiring Zarr output onto `write_gsas_zarr_zip`** — our `tests/test_zarr_cake.py`
+(150 lines) imports that module and would break on merge. They also added
+`tests/test_batch_zarr_gsas.py` (186 lines) and touched
+`tests/test_batch_data_source.py`.
+
+**Dry-run merge (`git merge-tree main origin/pr/7`) conflicts in exactly two
+files:** `midas_gui/workers.py` (their +409 lines vs our `frame_output_base`
+collision-safe-naming fix — must not be lost) and `.context/DECISIONS.md`
+(they added their own 235-line entry). Everything else auto-merges, but
+auto-merging leaves `tests/test_zarr_cake.py` importing a deleted module.
+
+Local branch `pr-7-strain-cake` (== `main`) and the fetched
+`refs/remotes/origin/pr/*` refs are still around. Working tree otherwise
+clean apart from local-only `test_data/test_out/` (GSAS-II export test
+artifacts; untracked, gitignore-precedent says leave it, see the
+github-skill project memory).
+
+Not done, worth deciding: Jun-Sang Park has not been told that PR #7 changes
+the per-frame output filename convention (see below) — no commit message in
+the PR mentions it, and it breaks anyone globbing Batch Integrate output.
+Also not installed: `gh` CLI, so PR comments/closes cannot be scripted (use
+the web UI or `brew install gh`).
 
 ## Recently completed
 
-**2026-09-02/03 (`092fbba`, `46e0fec`) — junspark's PR #7 ("Add Strain Cake
-tab with azimuth strain map and lab-frame axes") reviewed, fixed, covered by
-tests, and merged.** 20 commits, +3492/−295 over 19 files, 6 new modules
+**2026-09-02/03 (`092fbba`, `46e0fec`) — Jun-Sang Park's (`junspark`) PR #7
+("Add Strain Cake tab with azimuth strain map and lab-frame axes"), first 20
+commits, reviewed, fixed, covered by tests, and fast-forward-merged into
+local `main`.** (PR still open upstream; see "Now working on".) 20 commits, +3492/−295 over 19 files, 6 new modules
 (`job_queue.py`, `peak_fit_panel.py`, `provenance.py`, `zarr_cake.py`,
 `cake_params.py`, `batch_cli.py`), shipped with **zero test changes**.
 Reviewed against a per-file baseline of `main` first (essential — this repo
