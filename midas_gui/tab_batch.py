@@ -76,6 +76,8 @@ class BatchTab(QtWidgets.QWidget):
         self._loader.fieldsChanged.connect(self._refresh_detector_preview)
         self._use_tab2_btn.toggled.connect(self._refresh_detector_preview)
         self._json_ed.textChanged.connect(lambda *_: self._refresh_detector_preview())
+        self._use_tab2_btn.toggled.connect(self._update_calib_src_enabled)
+        self._update_calib_src_enabled()
         self._loader.set_path(DEFAULT_NICKEL_DIR)
 
     def set_project_context(self, ctx: "project.ProjectContext"):
@@ -90,6 +92,13 @@ class BatchTab(QtWidgets.QWidget):
             f"λ={result.wavelength_A:.5f} Å  {result.NrPixelsY}×{result.NrPixelsZ} px")
         self._use_tab2_btn.setChecked(True)
         self._refresh_detector_preview()
+
+    def _update_calib_src_enabled(self):
+        """Grey out the calibration-file field/browse button while "From Tab
+        2" is selected — they only apply to the "From file" source."""
+        from_file = not self._use_tab2_btn.isChecked()
+        self._json_ed.setEnabled(from_file)
+        self._json_browse_btn.setEnabled(from_file)
 
     def _calib_fields_in_use(self):
         """Resolve the geometry currently selected (Tab-2 result or file), as a
@@ -479,9 +488,9 @@ class BatchTab(QtWidgets.QWidget):
         self._json_ed = QtWidgets.QLineEdit()
         self._json_ed.setPlaceholderText("calibration.json / paramstest.txt / .poni…")
         jr = QtWidgets.QHBoxLayout(); jr.setSpacing(4); jr.addWidget(self._json_ed, 1)
-        bj = _br(); bj.clicked.connect(lambda: self._json_ed.setText(
+        self._json_browse_btn = _br(); self._json_browse_btn.clicked.connect(lambda: self._json_ed.setText(
             _browse(self, "Open calibration file",
-                    "Calibration (*.json *.txt *.poni);;All (*)") or "")); jr.addWidget(bj)
+                    "Calibration (*.json *.txt *.poni);;All (*)") or "")); jr.addWidget(self._json_browse_btn)
         self._json_ed.textChanged.connect(
             lambda t: self._use_json_btn.setChecked(True) if t.strip() else None)
         cal.body.addLayout(jr)

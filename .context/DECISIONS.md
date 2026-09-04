@@ -3,6 +3,15 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-09-03 — Grey out the calibration-file field when "From Tab 2" is selected
+
+Batch Integrate's calibration-file field/browse button stayed enabled even
+while "From Tab 2" was the selected calibration source, where they have no
+effect — misleading, since it looks editable but isn't consulted. Added
+`_update_calib_src_enabled()`, wired to `_use_tab2_btn.toggled` and called
+once at init, that enables the field/button only while "From file" is
+selected.
+
 ## 2026-09-03 — `dialogs.show_error` always logs to `~/midas_gui_error.log`, even for worker-thread exceptions
 
 `show_error` is shown for exceptions a worker thread already caught and
