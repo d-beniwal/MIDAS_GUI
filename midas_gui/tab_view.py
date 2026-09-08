@@ -376,6 +376,17 @@ class DataViewerTab(QtWidgets.QWidget):
         self._geom_card.set_profile_view(self._profile_view)
         self._cake_view = CakeViewer()
         self._geom_card.set_cake_view(self._cake_view)
+        # The cake otherwise only appears as a by-product of a full-geometry
+        # radial integration — this computes it on demand, for the current
+        # frame, whether or not a calibration is loaded.
+        self._cake_btn = QtWidgets.QPushButton("Calculate")
+        self._cake_btn.setToolTip(
+            "Compute the (η, R) cake for the current frame, using the loaded "
+            "calibration / dialled-in tilt if there is one and a plain polar "
+            "binning about the beam centre otherwise. Uses the R bin size set "
+            "on the Radial Profile tab.")
+        self._cake_btn.clicked.connect(self._geom_card.cake_integrate)
+        self._cake_view._toolbar_layout.insertWidget(0, self._cake_btn)
         ptb = self._profile_view._toolbar_layout
         self._rad_r_bin = _fspin(0.1, 20.0, 2, 1.0, "px"); self._rad_r_bin.setFixedWidth(56)
         self._rad_r_bin.setToolTip("Radial bin size for the azimuthal average.")
@@ -409,9 +420,18 @@ class DataViewerTab(QtWidgets.QWidget):
         ptb.addWidget(self._imask_lo)
         ptb.addWidget(QtWidgets.QLabel(">"))
         ptb.addWidget(self._imask_hi)
+        # Bottom tab strip. The intensity-statistics panel is built by the
+        # loader (it reports on the loader's frames) but lives here, alongside
+        # the profile and cake, instead of squeezing the left card column — and
+        # is the tab shown on open, since it is the first thing to look at on a
+        # freshly loaded frame.
         bot = QtWidgets.QTabWidget()
+        self._bottom_tabs = bot
+        if self._loader.stats_panel is not None:
+            bot.addTab(self._loader.stats_panel, "Statistics")
         bot.addTab(self._profile_view, "Radial Profile")
         bot.addTab(self._cake_view, "Eta vs R Cake")
+        bot.setCurrentIndex(0)
         right.addWidget(bot)
         right.setStretchFactor(0, 3); right.setStretchFactor(1, 1)
         right.setMinimumWidth(320)

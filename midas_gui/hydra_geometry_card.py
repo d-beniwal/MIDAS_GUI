@@ -41,6 +41,10 @@ from midas_gui import style as S
 _MATERIAL_COLORS = ("#f0c060", "#4fc3f7", "#ab47bc", "#66bb6a", "#ef5350",
                      "#ffca28", "#26a69a", "#ec407a", "#7e57c2", "#8d6e63")
 
+# η bin size (deg) used for the (η, R) cake, by both the full-geometry engine
+# path and the circle-binning fallback, so the two are directly comparable.
+CAKE_ETA_BIN_DEG = 5.0
+
 
 class MaterialDialog(QtWidgets.QDialog):
     """Edit one ring-simulation material: name, preset, lattice, space group."""
@@ -169,6 +173,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         self._calib_ctx = None
         self._calib_ctx_sig = None
         self._rad_grid_cache = None
+        self._eta_grid_cache = None
 
         self._viewer = None
         self._profile_view = None
@@ -990,6 +995,36 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             lsd_um=self._lsd_um(), px_um=self._px.value())
         self._refresh_profile_markers()
 
+    def cake_integrate(self):
+        """Compute + display the (η, R) cake for the current frame.
+
+        With a geometry (loaded calibration, or a tilt dialled into the
+        Ring-simulation card) the MIDAS engine produces the cake as a
+        by-product of the radial profile, so that path is reused verbatim —
+        it is the same cake an "Integrate" would have drawn. Without one
+        there is no engine geometry to integrate through, so a plain polar
+        binning about the beam centre is used, mirroring what
+        ``radial_integrate`` falls back to for the 1-D profile."""
+        img = self._image_provider()
+        if img is None or self._cake_view is None or self._rad_r_bin is None:
+            return
+        mask = self._mask_provider(img) if self._mask_provider is not None else None
+        geom = self._effective_calib_geom(img)
+        if geom is not None:
+            try:
+                self._midas_radial(img, geom, mask)   # sets the cake as a side effect
+                return
+            except Exception:
+                import traceback
+                self._calib_lbl.setText(
+                    "Full-geometry cake integration failed — using circle "
+                    "binning. See error log.")
+                self._log_error(traceback.format_exc())
+        cake, r_axis, eta_axis = self._cake_bin(
+            img, self._bcy.value(), self._bcz.value(),
+            self._rad_r_bin.value(), mask=mask)
+        self._cake_view.set_cake(cake, r_axis, eta_axis)
+
     def _midas_radial(self, img, g, mask):
         """Radial profile via the MIDAS engine, honouring the given geometry's
         tilts + distortion (not just concentric circles). ``g`` is either the
@@ -1006,7 +1041,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         import json
         import torch
         r_bin = max(float(self._rad_r_bin.value()), 0.1)
-        eta_bin = 5.0
+        eta_bin = CAKE_ETA_BIN_DEG
         im_trans = tuple(g.get("im_trans") or ())
         if im_trans:
             img = _apply_im_trans(img, tuple(reversed(im_trans)))   # display → raw
@@ -1089,6 +1124,58 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         nz = counts > 0
         prof[nz] = sums[nz] / counts[nz]
         return r_axis, prof
+
+    def _eta_grid(self, shape, bc_y, bc_z, eta_bin):
+        """Cached per-pixel η bin index + axis, keyed on (shape, BC, η-bin) —
+        the azimuthal counterpart of ``_radial_grid``.
+
+        η follows the app's own display-space convention, η = atan2(Y − BC_y,
+        Z − BC_z) with 0° straight up (+Z) — the same one
+        ``helpers.draw_polar_bin_overlay`` draws its η spokes with — so a
+        feature in the cake sits at the η the on-image overlay marks."""
+        eta_bin = max(float(eta_bin), 1e-3)
+        key = (tuple(shape), round(float(bc_y), 4), round(float(bc_z), 4),
+               round(eta_bin, 6))
+        cache = self._eta_grid_cache
+        if cache is not None and cache[0] == key:
+            return cache[1], cache[2], cache[3]
+        NZ, NY = shape
+        zz, yy = np.indices((NZ, NY))
+        eta = np.degrees(np.arctan2(yy - bc_y, zz - bc_z))       # (-180, 180]
+        nbins = max(1, int(math.ceil(360.0 / eta_bin)))
+        which = np.clip(((eta + 180.0) / eta_bin).astype(np.int64),
+                        0, nbins - 1).ravel()
+        eta_axis = -180.0 + (np.arange(nbins) + 0.5) * eta_bin
+        self._eta_grid_cache = (key, which, nbins, eta_axis)
+        return which, nbins, eta_axis
+
+    def _cake_bin(self, img: np.ndarray, bc_y: float, bc_z: float,
+                  r_bin: float = 1.0, eta_bin: float = CAKE_ETA_BIN_DEG,
+                  mask: Optional[np.ndarray] = None):
+        """Mean intensity per (η, R) bin about (bc_y, bc_z), using the cached
+        grids — the 2-D counterpart of ``_radial_profile``, and equally
+        tilt-blind (pixels are grouped purely by distance and azimuth about
+        the beam centre).
+
+        ``mask`` (bool, True = exclude) drops pixels; non-finite pixels are
+        ignored. Returns (cake (n_eta, n_r), r_axis_px, eta_axis_deg). Empty
+        bins are 0.0 rather than NaN, matching the engine cake — CakeViewer
+        keeps exact zeros out of its auto-level window already.
+        """
+        which_r, n_r, r_axis = self._radial_grid(img.shape, bc_y, bc_z, r_bin)
+        which_eta, n_eta, eta_axis = self._eta_grid(img.shape, bc_y, bc_z, eta_bin)
+        vals = img.ravel()
+        good = np.isfinite(vals)
+        if mask is not None:
+            good &= ~mask.ravel()
+        flat = which_eta[good] * n_r + which_r[good]
+        n = n_eta * n_r
+        sums = np.bincount(flat, weights=vals[good], minlength=n)
+        counts = np.bincount(flat, minlength=n)
+        cake = np.zeros(n, dtype=np.float64)
+        nz = counts > 0
+        cake[nz] = sums[nz] / counts[nz]
+        return cake.reshape(n_eta, n_r), r_axis, eta_axis
 
     # ── Calibration file ────────────────────────────────────────────
 

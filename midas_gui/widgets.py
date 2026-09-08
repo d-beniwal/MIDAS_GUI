@@ -37,7 +37,7 @@ from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollDoubleSpinBox, _fspin,
 from midas_gui import style as S
 
 
-def _mono_font(size: int) -> QtGui.QFont:
+def _mono_font(size: float) -> QtGui.QFont:
     """A fixed-width font at ``size`` pt using the real-family stack in style.py.
 
     Naming concrete families (Menlo/Consolas/…) instead of ``QFont("Monospace")``
@@ -49,7 +49,7 @@ def _mono_font(size: int) -> QtGui.QFont:
     except Exception:
         f.setFamily(S.MONO_FAMILIES[0])
     f.setStyleHint(QtGui.QFont.Monospace)
-    f.setPointSize(size)
+    f.setPointSizeF(float(size))
     return f
 
 
@@ -2670,7 +2670,6 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
         self._curve = self._plot.plot(
             [], [], stepMode="center", fillLevel=0,
             brush=(90, 140, 220, 150), pen=pg.mkPen("#6ea8ff"))
-        v.addWidget(self._plot)
 
         # Manual axis limits reuse the axis's own native right-click "Manual"
         # min/max fields rather than a separate row of spin boxes.
@@ -2682,7 +2681,7 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
 
         self._text = QtWidgets.QPlainTextEdit()
         self._text.setReadOnly(True)
-        self._text.setFont(_mono_font(8))
+        self._text.setFont(_mono_font(6.4))     # 20% down from the original 8 pt
         # The readout is a fixed, short list of lines — show it in full (no inner
         # scrollbar) and let its height track the content. That leaves the plot as
         # the only flexible child, so the splitter above resizes the plot while the
@@ -2690,23 +2689,36 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
         self._text.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
         self._text.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self._text.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self._text.setSizePolicy(QtWidgets.QSizePolicy.Preferred,
+        self._text.setSizePolicy(QtWidgets.QSizePolicy.Fixed,
                                  QtWidgets.QSizePolicy.Fixed)
         self._text.setStyleSheet(
             "QPlainTextEdit { background:#23252b; color:#d6d6d6; border:1px solid #444; }")
-        v.addWidget(self._text)
-        self._fit_text_height()
+        # Histogram and numbers side by side: the readout is a fixed, narrow
+        # block of short lines, so stacking it under the plot spent the panel's
+        # width on nothing and its height twice over. The plot takes all the
+        # slack; the readout hugs its content and pins to the top of the row.
+        row = QtWidgets.QHBoxLayout(); row.setSpacing(6)
+        row.addWidget(self._plot, 1)
+        row.addWidget(self._text, 0, QtCore.Qt.AlignTop)
+        v.addLayout(row, 1)
+        self._fit_text_to_content()
         self._hist = None
 
-    def _fit_text_height(self):
-        """Size the readout box to fit exactly its current line count."""
+    def _fit_text_to_content(self):
+        """Size the readout box to exactly its current content — its line count
+        tall and its longest line wide — so it never scrolls and never claims
+        width the histogram beside it could use."""
         fm = self._text.fontMetrics()
-        n = max(1, self._text.document().blockCount())
+        doc = self._text.document()
+        n = max(1, doc.blockCount())
         m = self._text.contentsMargins()
-        doc_m = int(self._text.document().documentMargin()) * 2
+        doc_m = int(doc.documentMargin()) * 2
         fr = self._text.frameWidth() * 2
         self._text.setFixedHeight(
             n * fm.lineSpacing() + doc_m + fr + m.top() + m.bottom() + 4)
+        widest = max((fm.horizontalAdvance(line)
+                      for line in doc.toPlainText().splitlines()), default=0)
+        self._text.setFixedWidth(widest + doc_m + fr + m.left() + m.right() + 8)
 
     def scope(self) -> str:
         return self._scope.currentData()
@@ -2755,10 +2767,11 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
         vals = vals[np.isfinite(vals)]
         if vals.size == 0:
             self._text.setPlainText(f"{scope}\n(no pixels)")
-            self._fit_text_height()
+            self._fit_text_to_content()
             self._hist = None; self._curve.setData([], [])
             return
         n = vals.size
+        vmin, vmax = float(vals.min()), float(vals.max())
         p70, p90, p99, p999, p9999 = np.percentile(vals, [70, 90, 99, 99.9, 99.99])
 
         def g(x):
@@ -2769,6 +2782,10 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
         lines = [
             scope,
             f"N      = {n:,}",
+            f"min    = {g(vmin)}",
+            f"max    = {g(vmax)}",
+            f"mean   = {g(float(vals.mean()))}",
+            f"std    = {g(float(vals.std()))}",
             f"p70    = {g(p70):<10} (>: {cnt(p70):,})",
             f"p90    = {g(p90):<10} (>: {cnt(p90):,})",
             f"p99    = {g(p99):<10} (>: {cnt(p99):,})",
@@ -2776,10 +2793,9 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
             f"p99.99 = {g(p9999):<10} (>: {cnt(p9999):,})",
         ]
         self._text.setPlainText("\n".join(lines))
-        self._fit_text_height()
+        self._fit_text_to_content()
 
         # Histogram over the FULL intensity range so high-intensity pixels appear.
-        vmin, vmax = float(vals.min()), float(vals.max())
         if vmax <= vmin:
             vmax = vmin + 1.0
         v_hist = vals
@@ -3177,8 +3193,10 @@ class DataLoaderPanel(QtWidgets.QWidget):
         # asking it to refresh.
         self.fieldsChanged.connect(self._on_fields_changed_stream)
 
-        # Intensity statistics + histogram (Data Viewer only). Created here but
-        # placed in a draggable splitter below, not in the scrolling card column.
+        # Intensity statistics + histogram (Data Viewer only). Created here so
+        # the panel's lifetime follows the loader it reports on, but deliberately
+        # left unparented — the owning tab places it (the Data Viewer puts it in
+        # its bottom tab strip next to Radial Profile / Eta vs R Cake).
         self.stats_panel = None
         lv.addStretch(1)
         if mode == "stack":
@@ -3198,21 +3216,10 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._apply_monitor_style(False)
             lv.addWidget(self._monitor_btn)
 
-        # ── Outer layout: scroll on top, optional draggable stats panel below ──
+        # ── Outer layout ──
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(0)
-        if self.stats_panel is not None:
-            self._left_split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-            self._left_split.setChildrenCollapsible(False)
-            self._left_split.setHandleWidth(6)
-            self._left_split.addWidget(self._scroll)
-            self._left_split.addWidget(self.stats_panel)
-            self._left_split.setStretchFactor(0, 3)
-            self._left_split.setStretchFactor(1, 1)
-            self._left_split.setSizes([560, 320])
-            outer.addWidget(self._left_split)
-        else:
-            outer.addWidget(self._scroll)
+        outer.addWidget(self._scroll)
 
     # ── data source (path / dataset / loading) ────────────────────
     def _dataset(self) -> str:
