@@ -81,6 +81,41 @@ def _resolve_cmap(name):
 #  ImageViewer
 # ═════════════════════════════════════════════════════════════════════════════
 
+def _detach_from_pg_view_registry(iv: "pg.ImageView") -> None:
+    """Take an ImageView's ViewBoxes out of pyqtgraph's process-global view
+    registry.
+
+    ``pg.ImageView.__init__`` registers both of its ViewBoxes by name
+    (``"ImageView"`` and ``"ImageView_ROI"``) in ``ViewBox.NamedViews`` /
+    ``ViewBox.AllViews`` and connects each one's ``destroyed`` signal to
+    ``ViewBox.forgetView``. Two consequences here:
+
+    * Every ImageViewer in the app registers under the *same* two names, so
+      the registry (a WeakValueDictionary keyed by name) can only ever hold
+      the most recent one — the "Link axis" context-menu feature it powers is
+      already meaningless for us.
+    * ``destroyed`` fires whenever Python's GC happens to collect a discarded
+      viewer, which can land inside an unrelated Qt C++ callback (a
+      LabelItem resize, a QLabel construction). ``forgetView`` then re-enters
+      the registry and calls ``updateViewLists()`` on every ViewBox ever
+      created in the process — including half-destructed ones — which
+      segfaults. That is the long-standing "pyqtgraph teardown crash" behind
+      the permanently-failing UI test files.
+
+    We use no named/linked views, so dropping the registration costs nothing
+    and removes the crash at its source.
+    """
+    for vb in (iv.getView().getViewBox(), iv.ui.roiPlot.getPlotItem().getViewBox()):
+        try:
+            vb.destroyed.disconnect()
+        except (TypeError, RuntimeError):
+            pass
+        pg.ViewBox.AllViews.pop(vb, None)
+        if vb.name is not None:
+            pg.ViewBox.NamedViews.pop(vb.name, None)
+            vb.name = None
+
+
 class ImageViewer(QtWidgets.QWidget):
     """pyqtgraph image viewer with log scale, colormap, vmin/vmax, crosshair,
     pixel-value status bar, and a mask overlay."""
@@ -123,6 +158,7 @@ class ImageViewer(QtWidgets.QWidget):
 
         # Image view
         self._iv = pg.ImageView(view=pg.PlotItem())
+        _detach_from_pg_view_registry(self._iv)
         self._iv.ui.roiBtn.hide(); self._iv.ui.menuBtn.hide()
         vb = self._iv.getView().getViewBox()
         vb.setMouseEnabled(x=True, y=True)
@@ -868,6 +904,7 @@ class CakeViewer(QtWidgets.QWidget):
         layout.addLayout(bar)
 
         self._iv = pg.ImageView(view=pg.PlotItem(viewBox=pg.ViewBox()))
+        _detach_from_pg_view_registry(self._iv)
         self._iv.ui.roiBtn.hide(); self._iv.ui.menuBtn.hide()
         vb = self._iv.getView().getViewBox()
         vb.setMouseEnabled(x=True, y=True)
