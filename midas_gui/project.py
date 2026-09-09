@@ -423,7 +423,7 @@ def _hash_paths_in(obj):
     return obj
 
 
-def _sanitize_result_dict(result) -> Optional[dict]:
+def sanitize_result_dict(result) -> Optional[dict]:
     """Full result fields, including the underscore-prefixed extras the
     GUI bolts on (_calibrant_name, _panel_unpacked, ...) — unlike the
     existing GUI-state sidecar JSON, nothing is dropped here except
@@ -523,7 +523,7 @@ def append_calibration_attempt(project_path, panel_key, *, cfg, result, loader_s
         "timestamp_utc": _now_iso(),
         "panel_key": panel_key,
         "cfg": _hash_paths_in(cfg_copy),
-        "result": _sanitize_result_dict(result),
+        "result": sanitize_result_dict(result),
         "loader_state": _hash_paths_in(loader_state or {}),
         "environment": environment_snapshot(),
         "mask_present": mask is not None,

@@ -91,12 +91,15 @@ class BatchTab(QtWidgets.QWidget):
             self._hydra_page.set_project_context(ctx)
 
     def set_calibration(self, result):
+        self._apply_calib_result(result)
+        self._use_tab2_btn.setChecked(True)
+        self._refresh_detector_preview()
+
+    def _apply_calib_result(self, result):
         self._calib_result = result
         self._calib_src_lbl.setText(
             f"From Tab 2: Lsd={result.Lsd/1000:.3f} mm  "
             f"λ={result.wavelength_A:.5f} Å  {result.NrPixelsY}×{result.NrPixelsZ} px")
-        self._use_tab2_btn.setChecked(True)
-        self._refresh_detector_preview()
 
     def _update_calib_src_enabled(self):
         """Grey out the calibration-file field/browse button while "From Tab
@@ -330,6 +333,7 @@ class BatchTab(QtWidgets.QWidget):
             "waterfall": self._waterfall.display_state(),
             "hydra": {"active_mode": self._mode_ribbon.mode(),
                       "page": self._hydra_page.get_state() if self._hydra_page else {}},
+            "calib_result": project.sanitize_result_dict(self._calib_result),
         }
 
     def set_state(self, state: dict):
@@ -349,6 +353,10 @@ class BatchTab(QtWidgets.QWidget):
         if page_state:
             self._ensure_hydra_page().set_state(page_state)
         self._mode_ribbon.set_mode(hydra_state.get("active_mode", "single"))
+        calib_state = state.get("calib_result")
+        if calib_state:
+            self._apply_calib_result(project.calibration_namespace(calib_state))
+            self._refresh_detector_preview()
 
     # ── File > Open Project… ─────────────────────────────────────────
     def apply_project_integration(self, attempts: dict) -> None:

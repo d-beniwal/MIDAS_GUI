@@ -815,6 +815,44 @@ def test_apply_project_integration_populates_batch_plots_single_detector(app, tm
     assert len(batch_tab._stack_view._profiles) == 4
 
 
+
+
+def test_batch_tab_get_state_set_state_roundtrip_restores_calib_result(app):
+    from midas_gui.tab_batch import BatchTab
+
+    tab = BatchTab()
+    tab.set_calibration(_fake_result(BC_y=1111.0))
+    state = tab.get_state()
+    assert state["calib_result"]["BC_y"] == pytest.approx(1111.0)
+
+    tab2 = BatchTab()
+    assert tab2._calib_result is None
+    tab2.set_state(state)
+    assert tab2._calib_result is not None
+    assert tab2._calib_result.BC_y == pytest.approx(1111.0)
+    assert tab2._use_tab2_btn.isChecked()
+
+
+def test_batch_tab_set_state_does_not_override_persisted_from_file_source(app):
+    """A saved session where the user had picked "From file" as the
+    calibration source must not silently flip back to "From Tab 2" on
+    reload just because a stale ``calib_result`` also happens to be present
+    in the saved state."""
+    from midas_gui.tab_batch import BatchTab
+
+    tab = BatchTab()
+    tab.set_calibration(_fake_result())
+    tab._use_json_btn.setChecked(True)
+    state = tab.get_state()
+    assert state["fields"]["use_json_btn"] is True
+
+    tab2 = BatchTab()
+    tab2.set_state(state)
+    assert tab2._calib_result is not None   # still restored, just not the active source
+    assert tab2._use_json_btn.isChecked()
+    assert not tab2._use_tab2_btn.isChecked()
+
+
 def test_hash_paths_in_adds_hash_for_existing_files(tmp_path):
     f = tmp_path / "data.bin"
     f.write_bytes(b"abc123")
