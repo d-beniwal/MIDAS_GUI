@@ -3,6 +3,115 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-09-09 — Manual d-spacing fit: BC-only default, parameter limits, and σ reporting
+
+The manual ring-pick fit added in `bdd9b51` was wired to the tab's Refine
+checkboxes, whose defaults (Lsd + BC + ty + tz) are correct for a crystalline
+calibrant and badly wrong for AgBH at a SAXS geometry. Reported as *"calibration
+runs away and the AgBH rings are significantly off"* on a real 13.5 m dataset
+(λ = 0.1730 Å, 55 µm, 3072×512). Reproduced numerically: with 8 picks on the one
+visible 42° arc of ring 1, refining Lsd+BC+tilt returns `success=True` with
+Lsd = 12886 ± 3690 mm, BC_z = 157 ± 387 px, ty = −2.4 ± 406°, drawing the ring
+4.8 px off; BC-only returns BC to ±1 px and draws it 0.95 px off.
+
+This is identifiability, not a solver defect. At small 2θ, Lsd, beam centre and
+tilt are nearly degenerate, so the residual surface is a long flat valley and
+pick noise picks the point along it. Three decisions follow:
+
+**Per-calibrant-kind refine defaults, not one global default.** The checkboxes
+are shared UI, but the right defaults are not: a crystalline pattern fills the
+detector and constrains Lsd and tilt well. So `_refine_state_xtal` /
+`_refine_state_dsp` are remembered separately and swapped *on the calibrant-kind
+transition only* (`_sync_refine_mode`) — a user who ticks Lsd while on AgBH keeps
+it while they stay there. Rejected: globally defaulting tilt off, which would
+have degraded CeO2 to fix AgBH.
+
+**Report σ, don't block or auto-select.** `fit_geometry_from_ring_picks` now
+returns a per-parameter 1σ from the linearised covariance (`inv(JᵀJ)·s²`,
+`_fit_parameter_sigma`), `inf` when `JᵀJ` is singular — the honest answer for a
+degenerate fit. `ManualDspacingCalibWorker._identifiability_lines()` turns that
+into `value ± σ` log lines plus an explicit "not constrained by these picks —
+largely fitted noise" warning past a *this-is-not-a-measurement* scale (1 % of
+Lsd/λ, 5 px of BC, 0.5° of tilt). These are coarse usefulness thresholds, not
+statistical tests. It warns rather than refusing, because loose data may be
+deliberate, and a good default plus a visible σ beats a hard rule the user has
+to fight. σ is the reason it is now safe for a user to re-enable Lsd or tilt:
+the runaway is still possible, but no longer silent.
+
+**Bounds switch solvers; unbounded stays bit-identical.** scipy's `lm` rejects
+bounds outright, so `bounds` (a dict in fit units) selects `trf` and clamps `p0`
+into the box first (`trf` raises on an outside `x0`), recording `clamped`. With
+every bound infinite the call is unchanged — `method="lm"`, same numbers as
+before — so existing callers and saved results are unaffected. A parameter
+resting on an active bound is reported `at_limit` instead of with a σ, which the
+covariance formula would misstate there.
+
+The **Limits…** dialog defaults each row's unit by whether the quantity has a
+non-zero scale: `%` for Lsd and λ, absolute for BC and the tilts. Tilts seed at
+0°, where ±5 % pins the parameter exactly — the opposite of asking for a window
+— so a degenerate percentage window widens to the row's absolute default rather
+than pinning. All rows start off, so an untouched dialog changes nothing.
+
+Also added **Use seed as calibration (no fit)**: nudging BC/Lsd until the
+predicted overlay sits on the measured rings is a legitimate calibration that
+had no way to reach Save/Send, which were all gated on a completed fit. Every
+row is marked `(fixed)` since nothing was refined. Documented alongside it that
+a good-looking overlay is weak evidence at long Lsd (313 mm of Lsd error moves
+the first AgBH ring ~17 px at 13.5 m).
+
+**d-spacing pick markers are haloed, not merely recoloured.** Picks were filled
+dots in a per-ring colour; ring 1's `#e05656` is essentially the hot colormap's
+own red, so the marker disappeared into the arc the user had just clicked.
+Recolouring only moves the collision to another colormap, so each pick is now a
+black halo with the ring colour over its middle and an open centre (the picked
+pixel stays visible). `_dsp_pt_items` consequently holds a tuple of items per
+pick rather than a flat list, so undo/clear remove a whole marker.
+
+### Same-session fixes, unrelated to the above
+
+**Lab-frame compass sized in screen pixels.** A wide/short SAXS strip auto-fits
+at a much lower effective zoom than a square WAXS panel, so a compass sized as a
+fraction of image dimensions shrank to nothing while the zoom-independent
+`TextItem` labels stayed full size — guaranteed overlap. `L` is now driven by
+`px_iso` (data units per screen pixel) with a data-unit clamp, label boxes are
+placed from font metrics converted into data units, each box is anchored on the
+edge facing the beam centre so it grows away from the compass, and the η=0° /
+η=−90° labels are folded into the +Y_Lab / +X_Lab boxes they sat on top of.
+
+**Ring labels anchor to the visible arc** (`_ring_label_pos`). Twelve o'clock is
+wrong whenever the beam centre is near an edge: on a SAXS strip every ring's top
+lies far below the frame and all labels pile up off-screen. Now the highest
+on-image point of the arc, falling back to the plotted point nearest the image.
+
+**Mismatched correction fields are skipped and flagged, not fatal.** A dark/
+bright/background left over from a session saved against a different detector
+used to raise inside `apply_field_corrections`. It now skips the mismatched
+field, and `FieldSelector.note_frame_shape` marks it inline (`⚠ SKIPPED: data is
+…`), mirroring `MaskSelector` — a silent skip would be worse than the crash.
+
+**Batch Integrate persists the Tab-2 calibration result** (`sanitize_result_dict`
+made public for it). `set_calibration()` was split so `_apply_calib_result()`
+restores state without also forcing the "From Tab 2" radio, which would override
+a session where the user had deliberately chosen "From file".
+
+**Save Project As appends `.h5`** when the typed name has no suffix; the dialog's
+own filter does not force one on every platform.
+
+### Test-infrastructure findings
+
+`pytest --forked` combined with `--basetemp` (added in `1e5cace`) races: each
+forked child re-creates the basetemp directory, so a different test errors in
+fixture setup on each run. Unforked runs are clean. Unforked runs of the Qt
+suite, however, still segfault once several `CalibrationTab`s exist — so neither
+mode runs everything, and the suite is split by which failure mode a file
+triggers. Not fixed here; recorded so the next person does not re-diagnose it.
+
+`test_apply_project_calibration_single_detector` asserted on `_ring_items`, but
+with the manual seed card active `_draw_rings` delegates to the seed preview and
+the items land in `_seed_ring_items` (verified: 166 of them). The assertion now
+accepts either. The test still hits the known pyqtgraph teardown SIGABRT, which
+reproduces identically on a clean HEAD worktree.
+
 ## 2026-09-04 — Header Exp ID field; Batch Integrate output-folder "Suggest" + writability preflight
 
 Added a header-level "Exp ID" field (`app.py`, next to the Profile
