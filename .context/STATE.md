@@ -1,27 +1,57 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-09-04 (all 36 commits of **Jun-Sang Park's** PR #7 merged
-into `main` as `549e96f` and pushed; PR #7 closed as merged and commented on)_
+_Last updated: 2026-09-09 (manual d-spacing fit made trustworthy — BC-only
+defaults, parameter limits, σ reporting — merged from
+`feature/caking-improvements` into main and PR'd to upstream)_
 
 ## Now working on
 
-Nothing in progress. **PR #7 is fully merged and closed; `main` is pushed**
-(`549e96f`, `origin/main` in sync). A comment on PR #7 records the merge, the
-four things fixed on the way in, the output-filename convention change, and a
-request for tests on the next contribution.
+Nothing in progress.
 
-Cleanup left: local branch `pr-7-strain-cake` and the fetched
-`refs/remotes/origin/pr/*` refs can be deleted. Working tree clean apart from
-local-only `test_data/test_out/` (untracked, leave it).
+Open follow-ups, none blocking:
+- `documentation/calibration_unification_plan.md` — the three Calibrate UI
+  surfaces (`tab_calibrate.py`, `hydra_calib_page.py`,
+  `hydra_geometry_card.py`) have drifted; Hydra has none of the d-spacing
+  work. Phases 0–1 are the cheap half. Phase 5 (technique presets) would
+  replace the AgBH-shaped special case with a conditioning advisory driven
+  by the actual seed geometry, which is the more honest axis.
+- Test suite needs two runs to cover: `--forked` races with `--basetemp`,
+  unforked segfaults on multiple `CalibrationTab`s. See DECISIONS 2026-09-09.
+- `test_apply_project_calibration_single_detector` still hits the known
+  pyqtgraph teardown SIGABRT (reproduces on clean HEAD; not ours).
 
-Still open from the merge: `job_queue.py`, `peak_fit_panel.py` and
-`batch_cli.py` remain untested (ROADMAP.md). One new pyflakes warning, unused
-`HDF5FrameSource` import in `workers.py`. Pre-existing and unrelated:
-`app.py:992` annotates `Optional` without importing it — harmless only because
-of `from __future__ import annotations`.
+- Still untested (ROADMAP.md): `job_queue.py`, `peak_fit_panel.py`,
+  `batch_cli.py`. Left over from the PR #7 merge: local branch
+  `pr-7-strain-cake` and the fetched `refs/remotes/origin/pr/*` refs can
+  be deleted.
 
 ## Recently completed
+
+**2026-09-09 — Manual d-spacing (AgBH/SAXS) fit made trustworthy.** Reported
+as *"calibration runs away and the AgBH rings are significantly off"* on a
+13.5 m SAXS geometry. Root cause is identifiability, not a solver bug: at
+small 2θ, Lsd/BC/tilt are nearly degenerate, so the fit converges happily
+onto noise. d-spacing calibrants now default to **BC-only** refinement
+(remembered separately from the crystalline defaults and swapped on the
+calibrant-kind transition), `fit_geometry_from_ring_picks` reports a
+per-parameter **1σ** plus `at_limit`/`clamped`/`method`, the worker logs
+`value ± σ` and warns when a parameter was not constrained, and a new
+**Limits…** dialog bounds any parameter to a window around its seed
+(switching the solver `lm`→`trf`; unbounded stays bit-identical). Also
+**Use seed as calibration (no fit)**, high-contrast haloed pick markers,
+and — unrelated, same session — a screen-pixel-sized lab-frame compass,
+ring labels anchored to the visible arc, mismatched correction fields
+skipped-and-flagged instead of fatal, Batch Integrate persisting its Tab-2
+calibration result, and `.h5` appended in Save Project As.
+**Files:** `helpers.py`, `workers.py`, `tab_calibrate.py`, `dialogs.py`,
+`constants.py`, `widgets.py`, `hydra_geometry_card.py`, `project.py`,
+`tab_batch.py`, `app.py`; new `tests/test_manual_fit_conditioning.py` and
+`tests/test_calibrate_state_restore.py`, plus additions to
+`test_manual_dspacing_calib_ui.py`, `test_helpers.py`, `test_project.py`,
+`test_calibrate_panel_save.py`, `test_workspace_ux.py`.
+`gui_documentation.md` §5 gained a *Non-crystalline calibrants* section and
+an expanded *Refine flags*.
 
 **2026-09-04 (`549e96f`) — PR #7's remaining 16 commits merged, `main`
 pushed, PR closed.** Second half of Jun-Sang Park's PR (+1982/−285 over 23

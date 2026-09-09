@@ -111,6 +111,150 @@ class DistortionRefineDialog(QtWidgets.QDialog):
         return {nm for nm, cb in self._boxes.items() if cb.isChecked()}
 
 
+#: Manual-fit limit rows: slot name → (label, default unit, default window,
+#: absolute unit, decimals, absolute fallback window).
+#:
+#: The unit default is not cosmetic. A percentage window is only meaningful
+#: for a quantity with a non-zero scale, and the tilts seed at 0° — ±5% of 0
+#: pins the parameter exactly, which is the opposite of what the user asked
+#: for. So Lsd and the wavelength default to %, while the beam centre (which
+#: can legitimately sit near or below zero on an off-centre geometry) and the
+#: tilts default to an absolute window. Either unit is selectable per row.
+PARAMETER_LIMIT_ROWS = (
+    ("Lsd",          "Lsd",        "%",  5.0,  "mm", 3, 100.0),
+    ("BC_y",         "BC_y",       "px", 50.0, "px", 2, 50.0),
+    ("BC_z",         "BC_z",       "px", 50.0, "px", 2, 50.0),
+    ("tx",           "tx",         "°",  5.0,  "°",  3, 5.0),
+    ("ty",           "ty",         "°",  5.0,  "°",  3, 5.0),
+    ("tz",           "tz",         "°",  5.0,  "°",  3, 5.0),
+    ("wavelength_A", "Wavelength", "%",  1.0,  "Å",  5, 0.01),
+)
+
+
+class ParameterLimitsDialog(QtWidgets.QDialog):
+    """Per-parameter ± windows for the manual (d-spacing) geometry fit.
+
+    Each row is ``[enable] [± value] [unit]``, where the unit is either ``%``
+    (a fraction of the parameter's current seed value) or the parameter's own
+    absolute unit. Rows start disabled, so an untouched dialog leaves the fit
+    exactly as it was — unbounded, and solved with Levenberg-Marquardt.
+
+    ``state()``/``set_state()`` round-trip a plain JSON-able dict so the tab
+    can persist the limits with the rest of its project state.
+    """
+
+    def __init__(self, state=None, seed=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Manual fit — parameter limits")
+        self.setMinimumWidth(460)
+        self._seed = dict(seed or {})
+
+        layout = QtWidgets.QVBoxLayout(self)
+        info = QtWidgets.QLabel(
+            "Bound a parameter to a window around its current seed value. Use "
+            "this to hold a quantity you already know — a measured sample-detector "
+            "distance, say — near its true value while the fit determines the rest.<br><br>"
+            "Limits apply to the <b>manual d-spacing fit only</b>; the crystalline "
+            "calibration backend takes no bounds. Any limit switched on moves the "
+            "solver from Levenberg-Marquardt to trust-region reflective.")
+        info.setWordWrap(True)
+        info.setStyleSheet("color:#bbb;font-size:11px;padding-bottom:6px;")
+        layout.addWidget(info)
+
+        grid = QtWidgets.QGridLayout(); grid.setSpacing(4)
+        for col, title in enumerate(("", "Parameter", "±", "Unit", "Resulting range")):
+            lbl = QtWidgets.QLabel(f"<b>{title}</b>")
+            grid.addWidget(lbl, 0, col)
+        self._rows: dict = {}
+        for r, (name, label, unit0, win0, abs_unit, decimals, _) in enumerate(
+                PARAMETER_LIMIT_ROWS, start=1):
+            cb = QtWidgets.QCheckBox()
+            spin = QtWidgets.QDoubleSpinBox()
+            spin.setRange(0.0, 1e6); spin.setDecimals(decimals); spin.setValue(win0)
+            combo = QtWidgets.QComboBox(); combo.addItems(["%", abs_unit])
+            combo.setCurrentText(unit0)
+            preview = QtWidgets.QLabel("")
+            preview.setStyleSheet("color:#888;font-size:10px")
+            grid.addWidget(cb, r, 0); grid.addWidget(QtWidgets.QLabel(label), r, 1)
+            grid.addWidget(spin, r, 2); grid.addWidget(combo, r, 3)
+            grid.addWidget(preview, r, 4)
+            self._rows[name] = (cb, spin, combo, preview)
+            for sig in (cb.toggled, spin.valueChanged, combo.currentTextChanged):
+                sig.connect(self._update_previews)
+            spin.setEnabled(False); combo.setEnabled(False)
+            cb.toggled.connect(spin.setEnabled)
+            cb.toggled.connect(combo.setEnabled)
+        layout.addLayout(grid)
+
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+        if state:
+            self.set_state(state)
+        self._update_previews()
+
+    def _update_previews(self, *_args):
+        for name, (cb, spin, combo, preview) in self._rows.items():
+            if not cb.isChecked() or name not in self._seed:
+                preview.setText("" if cb.isChecked() else "unbounded")
+                continue
+            lo, hi = limit_window(name, self._seed[name], spin.value(),
+                                  combo.currentText())
+            unit = _limit_row(name)[4]
+            scale = 1e-3 if name == "Lsd" else 1.0
+            preview.setText(f"{lo * scale:.4g} … {hi * scale:.4g} {unit}")
+
+    def state(self) -> dict:
+        """``{slot: {"on": bool, "value": float, "unit": str}}`` for every row."""
+        return {name: {"on": cb.isChecked(), "value": spin.value(),
+                       "unit": combo.currentText()}
+                for name, (cb, spin, combo, _p) in self._rows.items()}
+
+    def set_state(self, state: dict) -> None:
+        for name, (cb, spin, combo, _p) in self._rows.items():
+            row = (state or {}).get(name)
+            if not isinstance(row, dict):
+                continue
+            cb.setChecked(bool(row.get("on", False)))
+            if row.get("value") is not None:
+                spin.setValue(float(row["value"]))
+            idx = combo.findText(str(row.get("unit", "")))
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+
+
+def _limit_row(name):
+    for row in PARAMETER_LIMIT_ROWS:
+        if row[0] == name:
+            return row
+    raise KeyError(name)
+
+
+def limit_window(name: str, value: float, window: float, unit: str) -> tuple:
+    """``(lo, hi)`` around ``value`` for limit row ``name``, in the parameter's
+    *fit* units. Raises ``KeyError`` for an unknown parameter.
+
+    ``unit`` is either ``"%"`` (``window`` percent of ``value``) or the row's
+    absolute unit. Lsd is entered in mm but fit in µm, so an absolute Lsd
+    window is converted here.
+
+    A percentage window collapses to nothing when ``value`` is zero — which is
+    exactly where the tilts sit by default — so a degenerate window falls back
+    to the row's absolute default rather than silently pinning the parameter
+    to a single value.
+    """
+    abs_fallback = _limit_row(name)[6]
+    to_fit_units = 1000.0 if name == "Lsd" else 1.0     # mm → µm
+    if unit == "%":
+        half = abs(value) * (window / 100.0) or abs_fallback * to_fit_units
+    else:
+        half = window * to_fit_units
+    return (value - half, value + half)
+
+
 class _SaveParamstestDialog(QtWidgets.QDialog):
     """Single dialog exposing output path + optional template path.
 

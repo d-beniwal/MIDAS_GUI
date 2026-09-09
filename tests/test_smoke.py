@@ -105,8 +105,16 @@ def test_on_profile_changed_refreshes_devices_and_calibrants(monkeypatch):
 
     pv_combo = win._view_tab._loader._pv_ed
     assert [pv_combo.itemText(i) for i in range(pv_combo.count())] == ["newDevice"]
+    # The single-detector dropdown is the unified list built by
+    # constants.calibrant_combo_items(): the profile's crystalline CALIBRANTS
+    # first, then the non-crystalline d-spacing entries. Those come from
+    # MATERIALS, not CALIBRANTS, so patching CALIBRANTS alone no longer empties
+    # the combo — the profile still fully controls the crystalline half, which
+    # is what this test is about.
     assert [win._cal_tab._cal.itemText(i) for i in range(win._cal_tab._cal.count())] == \
-        ["OnlyThisCalibrant"]
+        ["OnlyThisCalibrant", "AgBH (silver behenate)", "Custom d-spacings…"]
+    # Hydra has no d-spacing support yet (see calibration_unification_plan.md),
+    # so its combo is still exactly the profile's crystalline list.
     hydra_cal = win._cal_tab._hydra_page._cal
     assert [hydra_cal.itemText(i) for i in range(hydra_cal.count())] == ["OnlyThisCalibrant"]
 

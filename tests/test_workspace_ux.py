@@ -292,6 +292,27 @@ def test_save_as_dialog_declining_overwrite_aborts(win, tmp_path, monkeypatch):
     assert win._project_ctx.path is None
 
 
+def test_save_as_dialog_appends_missing_extension(win, tmp_path, monkeypatch, no_modal_dialogs):
+    """A bare filename with no ``.h5`` suffix (e.g. typed as "myproject"
+    rather than picked via the dialog's own filter) must still land on a
+    ``.h5`` file — the dialog's "MIDAS Project (*.h5)" filter doesn't force
+    an extension on every platform."""
+    from PyQt5 import QtWidgets
+    win._project_ctx.path = None
+    win._set_workspace_dirty(False)
+
+    dest_no_ext = str(tmp_path / "myproject")
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
+                         staticmethod(lambda *a, **k: (dest_no_ext, "")))
+
+    win._save_project_as_dialog()
+
+    assert win._project_ctx.path == dest_no_ext + ".h5"
+    assert (tmp_path / "myproject.h5").is_file()
+
+    win._close_project()   # leave a clean baseline for later tests
+
+
 def test_save_as_dialog_copies_history_with_chosen_scope(win, tmp_path, monkeypatch, no_modal_dialogs):
     from PyQt5 import QtWidgets
     import midas_gui.dialogs as dialogs_mod

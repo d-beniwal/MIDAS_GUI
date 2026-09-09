@@ -751,6 +751,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "MIDAS Project (*.h5)")
         if not path:
             return
+        if not path.lower().endswith(".h5"):
+            path += ".h5"
         if Path(path).exists():
             if QtWidgets.QMessageBox.question(
                     self, "Save Project As",

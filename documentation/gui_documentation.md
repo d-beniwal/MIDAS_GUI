@@ -1627,6 +1627,17 @@ backend otherwise only supports all-15-or-none); picking "All (15)" or leaving
 Distortion unchecked runs the normal One-shot path unchanged. Advanced (E-M / LM
 iters, device, output dir) and Multi-panel detector groups are collapsible.
 
+A **Refining: … Fixed: …** line above the checkboxes states the current selection in
+words, so what the fit will actually vary is readable without decoding six checkboxes.
+
+The defaults differ by calibrant kind, and the two sets are remembered separately.
+A crystalline calibrant fills the detector with rings and constrains Lsd and tilt
+well, so it starts at **Lsd + BC + ty + tz**. A d-spacing calibrant is fit from a
+handful of hand-picked points, often on a single short arc, where floating Lsd on
+top of BC is badly conditioned and tilt is not identifiable at all — so it starts at
+**BC only**. Switching calibrant kind swaps the two sets; changes you make while
+staying on one kind stick. See *Non-crystalline calibrants* below for why.
+
 ### Live threshold slider
 Zeroes calibration-image pixels below the slider value (background suppression for
 ring-finding); the preview updates instantly.
@@ -1634,6 +1645,67 @@ ring-finding); the preview updates instantly.
 ### Pick BC / Pick Ring
 Click the image to seed the beam centre (single click) or fit a ring (≥3 clicks); the
 Pick Ring points/fit are drawn in blue, distinct from the amber Simulate-rings overlay.
+
+### Non-crystalline calibrants (AgBH / custom d-spacings)
+Calibrants with no usable space group are fit from picked points against a list of
+known d-spacings, bypassing the crystallographic backend entirely. Select **AgBH
+(silver behenate)** or **Custom d-spacings…** in the Calibrant dropdown (the latter
+takes a comma-separated list in Å) and the tab switches to this mode: the Distortion
+row, residual-map build and multi-panel groups hide (the manual fit supports none of
+them) and a **Pick d-spacing pts** tool and **Fit Geometry (manual)** button appear.
+
+Pick points with **Ring #** set to the ring each point belongs to — ring 1 is the
+innermost (largest d). Points are drawn as a **black-haloed open circle in that
+ring's colour**; the halo keeps the marker readable over a bright arc (ring 1's red
+would otherwise vanish into a hot-colormap ring) and the open centre leaves the
+picked pixel visible. **Undo** removes the last point, **Clear** all of them, and the
+status line tracks the count per ring. Picks are saved with the project, so a
+reopened session can re-run the fit without re-picking.
+
+**Fit Geometry (manual)** minimises the 2θ residual of those points over whichever
+parameters the Refine flags leave free (`least_squares`, Levenberg–Marquardt when
+unbounded, trust-region reflective when any limit is set).
+
+**Why BC only by default.** At a long sample–detector distance the rings subtend a
+very small 2θ, and Lsd, beam centre and tilt become nearly degenerate — several quite
+different geometries fit the same picked points about equally well. The solver then
+converges, reports success, and returns a value that is mostly noise. Measured on a
+13.5 m SAXS geometry (λ = 0.1730 Å, 55 µm pixels, 3072×512 frame) with 8 points on the
+one visible 42° arc of AgBH ring 1:
+
+| refining | result | drawn ring error |
+|---|---|---|
+| Lsd + BC + ty + tz | Lsd 12886 ± 3690 mm, BC_z 157 ± 387 px, ty −2.4 ± 406° | 4.8 px |
+| BC only | BC (128.40, 124.74) ± (0.37, 1.19) px | 0.95 px |
+
+Both report `success`. Only the second is a measurement. Refining more than BC is
+worth doing when the picks justify it — points on several rings, spread over a wide
+arc — and the σ readout below is how you tell.
+
+**Uncertainty and identifiability.** The fit reports a 1σ estimate per refined
+parameter, from the covariance of the Jacobian at the solution. Refined rows in the
+**Results** grid show `value ± σ`; held rows show `(fixed)`; a parameter resting on
+one of its limits shows `(at limit)`, where σ is not meaningful. The Log lists every
+refined parameter as `value ± σ` and, for any whose σ is too large to call it
+measured (>1 % for Lsd/λ, >5 px for BC, >0.5° for a tilt) or that could not be
+determined at all, prints:
+
+> `WARNING: … not constrained by these picks — the value above is largely fitted
+> noise. Pick points on more rings or over a wider arc, hold the parameter fixed, or
+> bound it via Limits…`
+
+This warns, never blocks — loose data may be exactly what you meant to fit.
+
+**Limits…** (Refine card, d-spacing calibrants only) bounds a refined parameter to a
+window around its current seed, for holding a quantity you already know — a measured
+sample–detector distance — near its true value while the fit determines the rest. One
+row per parameter: `[enable] [± value] [unit]`, with a live preview of the resulting
+range. The unit is either `%` of the seed or the parameter's own absolute unit;
+tilts default to absolute because they seed at 0°, where a percentage window would
+pin the parameter exactly (a degenerate percentage window falls back to the row's
+absolute default rather than pinning it). All rows start off, so an untouched dialog
+leaves the fit exactly as it was. The button label shows how many are set. Limits
+apply to the manual fit only — the crystalline backend takes no bounds arguments.
 
 ### Predicted-ring overlay (image toolbar)
 After a run, the calibrant's predicted ring radii are drawn in **lime** with a
@@ -1683,6 +1755,17 @@ bottom tab area is fully resizable (drag the horizontal splitter) and the Log fi
 tab.
 
 ### Export
+**Use seed as calibration (no fit)** publishes the **Initial seed** card's geometry as
+the calibration result without running anything. `→ Send to Data Viewer`, `Save .json`
+and `Save paramstest.txt` are otherwise all gated on a completed fit, which left no way
+to use a geometry you had already dialled in by hand — nudging BC/Lsd until the
+predicted ring overlay sits on the measured rings is a legitimate calibration, it just
+isn't a fit. Nothing is refined and no uncertainty exists, so every geometry row in the
+**Results** grid comes out marked `(fixed)` and the Log records that no fit was run.
+Note that a good-looking overlay is weaker evidence than it appears at a long
+sample–detector distance: on a 13.5 m SAXS geometry a 313 mm Lsd error moves the first
+AgBH ring by only ~17 px, so prefer a real fit when you have points to pick.
+
 **Save calibration.json** and **Save paramstest.txt** (standalone or from a template).
 Both carry the Transforms checkboxes' `ImTransOpt` codes (one `ImTransOpt <code>` line
 per checked transform in the `.txt`; an `im_trans` list in the `.json`), so reloading

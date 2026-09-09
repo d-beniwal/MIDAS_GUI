@@ -24,6 +24,7 @@ import pyqtgraph as pg
 
 from midas_gui.constants import COLORMAPS, DISTORTION_NAMES, DEFAULT_COLORMAP, DEVICES
 from midas_gui.dialogs import show_error, BrowseFilesDialog
+from midas_gui.helpers import fit_circle_algebraic
 from midas_gui.sim_detector import DEFAULT_CHANNEL_NAME as _SIM_CHANNEL_NAME
 
 # Default colormap: the configured one if it's a known option, else the first.
@@ -450,10 +451,17 @@ class PickableImageViewer(ImageViewer):
     """
     bcPicked  = QtCore.pyqtSignal(float, float)         # (BC_y, BC_z)
     ringFitBC = QtCore.pyqtSignal(float, float, float)  # (BC_y, BC_z, R_px)
+    dspacingPicksChanged = QtCore.pyqtSignal()
 
-    PICK_NONE = 0
-    PICK_BC   = 1
-    PICK_RING = 2
+    PICK_NONE      = 0
+    PICK_BC        = 1
+    PICK_RING      = 2
+    PICK_DSPACING  = 3
+
+    _DSP_COLORS = ["#e05656", "#56a8e0", "#7fd45a", "#e0c056",
+                   "#c066e0", "#e08c40", "#40c8c0", "#c0c0c0"]
+    #: Outer diameter of a d-spacing pick marker, in screen px.
+    _DSP_MARK_PX = 13
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -463,6 +471,11 @@ class PickableImageViewer(ImageViewer):
         self._ring_fit_item    = None
         self._ring_fit_center  = None
         self._bc_click_item    = None
+        self._dsp_pts:         list = []
+        #: One entry per pick, each a tuple of the plot items drawn for it
+        #: (see _add_dspacing_point) — not a flat item list, so undo/clear
+        #: remove a whole marker rather than half of one.
+        self._dsp_pt_items:    list = []
 
         _BTN = ("QPushButton{padding:2px 8px;border-radius:3px}"
                 "QPushButton:checked{background:#2a7fd4;color:white;font-weight:bold}")
@@ -484,6 +497,22 @@ class PickableImageViewer(ImageViewer):
             "Click 3+ points on a ring; algebraic circle fit estimates beam center")
         self._pick_ring_btn.toggled.connect(self._on_pick_ring_toggled)
         pick_bar.addWidget(self._pick_ring_btn)
+
+        self._pick_dsp_btn = QtWidgets.QPushButton("Pick d-spacing pts")
+        self._pick_dsp_btn.setCheckable(True)
+        self._pick_dsp_btn.setStyleSheet(_BTN)
+        self._pick_dsp_btn.setToolTip(
+            "Click points on a ring, set Ring # per group, "
+            "for manual Bragg's-law geometry fitting")
+        self._pick_dsp_btn.toggled.connect(self._on_pick_dsp_toggled)
+        pick_bar.addWidget(self._pick_dsp_btn)
+
+        pick_bar.addWidget(QtWidgets.QLabel("Ring #"))
+        self._dsp_ring_spin = QtWidgets.QSpinBox()
+        self._dsp_ring_spin.setRange(1, 20)
+        self._dsp_ring_spin.setValue(1)
+        self._dsp_ring_spin.setToolTip("Ring group new d-spacing clicks are added to")
+        pick_bar.addWidget(self._dsp_ring_spin)
 
         self._undo_btn = QtWidgets.QPushButton("Undo")
         self._undo_btn.setEnabled(False)
@@ -509,6 +538,9 @@ class PickableImageViewer(ImageViewer):
             self._pick_ring_btn.blockSignals(True)
             self._pick_ring_btn.setChecked(False)
             self._pick_ring_btn.blockSignals(False)
+            self._pick_dsp_btn.blockSignals(True)
+            self._pick_dsp_btn.setChecked(False)
+            self._pick_dsp_btn.blockSignals(False)
             self._pick_mode = self.PICK_BC
             self._pick_status.setText("Click image to set BC")
         elif self._pick_mode == self.PICK_BC:
@@ -520,6 +552,9 @@ class PickableImageViewer(ImageViewer):
             self._pick_bc_btn.blockSignals(True)
             self._pick_bc_btn.setChecked(False)
             self._pick_bc_btn.blockSignals(False)
+            self._pick_dsp_btn.blockSignals(True)
+            self._pick_dsp_btn.setChecked(False)
+            self._pick_dsp_btn.blockSignals(False)
             self._pick_mode = self.PICK_RING
             n = len(self._ring_pts)
             self._pick_status.setText(
@@ -530,6 +565,24 @@ class PickableImageViewer(ImageViewer):
             self._pick_status.setText(
                 f"{len(self._ring_pts)} ring pts (mode off)"
                 if self._ring_pts else "")
+
+    def _on_pick_dsp_toggled(self, checked: bool):
+        if checked:
+            self._pick_bc_btn.blockSignals(True)
+            self._pick_bc_btn.setChecked(False)
+            self._pick_bc_btn.blockSignals(False)
+            self._pick_ring_btn.blockSignals(True)
+            self._pick_ring_btn.setChecked(False)
+            self._pick_ring_btn.blockSignals(False)
+            self._pick_mode = self.PICK_DSPACING
+            n = len(self._dsp_pts)
+            self._pick_status.setText(
+                f"{n} pts — click ring to add (Ring #{self._dsp_ring_spin.value()})")
+        elif self._pick_mode == self.PICK_DSPACING:
+            self._pick_mode = self.PICK_NONE
+            self._pick_status.setText(
+                f"{len(self._dsp_pts)} d-spacing pts (mode off)"
+                if self._dsp_pts else "")
 
     def _on_scene_clicked(self, event):
         if self._pick_mode == self.PICK_NONE:
@@ -545,6 +598,8 @@ class PickableImageViewer(ImageViewer):
             self._pick_bc_btn.setChecked(False)   # one-shot
         elif self._pick_mode == self.PICK_RING:
             self._add_ring_point(x, y)
+        elif self._pick_mode == self.PICK_DSPACING:
+            self._add_dspacing_point(x, y)
 
     def _set_bc_marker(self, x: float, y: float):
         if self._bc_click_item is not None:
@@ -568,6 +623,12 @@ class PickableImageViewer(ImageViewer):
         self._update_ring_fit()
 
     def _undo_ring_point(self):
+        # Route by which list actually has points, not by the currently
+        # toggled tool — the tool may have been switched (or turned off)
+        # since the points were picked, and Undo must still act on them.
+        if self._pick_mode == self.PICK_DSPACING or (self._dsp_pts and not self._ring_pts):
+            self._undo_dspacing_point()
+            return
         if not self._ring_pts:
             return
         self._ring_pts.pop()
@@ -578,6 +639,9 @@ class PickableImageViewer(ImageViewer):
         self._update_ring_fit()
 
     def _clear_ring_points(self):
+        # Clear unconditionally clears every picking workflow's points
+        # (ring-BC picks, the BC marker, and d-spacing picks) regardless of
+        # which tool is currently toggled — same reasoning as _undo_ring_point.
         for item in self._ring_pt_items:
             self._iv.removeItem(item)
         self._ring_pt_items.clear()
@@ -589,12 +653,101 @@ class PickableImageViewer(ImageViewer):
         if self._bc_click_item is not None:
             self._iv.removeItem(self._bc_click_item)
             self._bc_click_item = None
+        self._remove_all_dspacing_items()
+        self._dsp_pts.clear()
         self._undo_btn.setEnabled(False)
         self._clear_ring_btn.setEnabled(False)
         self._pick_status.setText(
             "Click on a ring to pick points (need ≥3)"
             if self._pick_mode == self.PICK_RING else
-            "Click image to set BC" if self._pick_mode == self.PICK_BC else "")
+            "Click image to set BC" if self._pick_mode == self.PICK_BC else
+            "Click on a ring to pick points" if self._pick_mode == self.PICK_DSPACING else "")
+        self.dspacingPicksChanged.emit()
+
+    def _add_dspacing_point(self, x: float, y: float):
+        ring_idx = self._dsp_ring_spin.value()
+        self._dsp_pts.append((x, y, ring_idx))
+        color = self._DSP_COLORS[(ring_idx - 1) % len(self._DSP_COLORS)]
+        # Drawn as a black halo with the ring colour laid over its middle,
+        # and an open centre. A filled dot in the ring colour disappears
+        # wherever the colormap happens to match it — ring 1's red over the
+        # hot map's red arc being the case that prompted this — whereas the
+        # halo separates the marker from anything underneath, and the open
+        # centre leaves the picked pixel itself visible to aim at.
+        halo = pg.ScatterPlotItem([x], [y], symbol="o", size=self._DSP_MARK_PX,
+                                  pen=pg.mkPen("#000000", width=3), brush=None)
+        core = pg.ScatterPlotItem([x], [y], symbol="o", size=self._DSP_MARK_PX,
+                                  pen=pg.mkPen(color, width=1.5), brush=None)
+        items = (halo, core)
+        for it in items:
+            self._iv.addItem(it)
+        self._dsp_pt_items.append(items)
+        self._undo_btn.setEnabled(True)
+        self._clear_ring_btn.setEnabled(True)
+        n = len(self._dsp_pts)
+        self._pick_status.setText(f"{n} pts — click ring to add (Ring #{ring_idx})")
+        self.dspacingPicksChanged.emit()
+
+    def _undo_dspacing_point(self):
+        if not self._dsp_pts:
+            return
+        self._dsp_pts.pop()
+        if self._dsp_pt_items:
+            for it in self._dsp_pt_items.pop():
+                self._iv.removeItem(it)
+        self._undo_btn.setEnabled(bool(self._dsp_pts))
+        self._clear_ring_btn.setEnabled(bool(self._dsp_pts))
+        n = len(self._dsp_pts)
+        self._pick_status.setText(
+            f"{n} pts — click ring to add (Ring #{self._dsp_ring_spin.value()})"
+            if n else "Click on a ring to pick points")
+        self.dspacingPicksChanged.emit()
+
+    def _remove_all_dspacing_items(self):
+        for items in self._dsp_pt_items:
+            for it in items:
+                self._iv.removeItem(it)
+        self._dsp_pt_items.clear()
+
+    def _clear_dspacing_points(self):
+        self._remove_all_dspacing_items()
+        self._dsp_pts.clear()
+        self._undo_btn.setEnabled(False)
+        self._clear_ring_btn.setEnabled(False)
+        self._pick_status.setText("Click on a ring to pick points")
+        self.dspacingPicksChanged.emit()
+
+    def dspacing_picks(self) -> list:
+        """Read-only snapshot of picked (x, y, ring_idx) points."""
+        return list(self._dsp_pts)
+
+    def pick_state(self) -> dict:
+        """Picked-point state for project/session round-tripping — kept
+        separate from display_state() (that one is pure cosmetics: cmap/
+        log/vmin/vmax). Without this, reloading a saved project/session
+        loses every manually-picked point, breaking the documented promise
+        that a single click of the tab's own Run/Fit button reproduces the
+        result from restored inputs — cheap to satisfy for the crystalline
+        pipeline (no picks needed), but not for manual d-spacing/ring-BC
+        fitting, which is built entirely from these picks."""
+        return {"dsp_picks": list(self._dsp_pts), "ring_picks": list(self._ring_pts)}
+
+    def set_pick_state(self, state: Optional[dict]) -> None:
+        """Inverse of :meth:`pick_state`. Re-adds each point through the
+        same code path as an interactive click (scatter item + list entry)
+        so the restored picks are visually and behaviorally identical to
+        ones just picked by hand."""
+        if not state:
+            return
+        for x, y in state.get("ring_picks") or []:
+            self._add_ring_point(float(x), float(y))
+        dsp_picks = state.get("dsp_picks") or []
+        if dsp_picks:
+            prev_ring = self._dsp_ring_spin.value()
+            for x, y, ring_idx in dsp_picks:
+                self._dsp_ring_spin.setValue(int(ring_idx))
+                self._add_dspacing_point(float(x), float(y))
+            self._dsp_ring_spin.setValue(prev_ring)
 
     def _update_ring_fit(self):
         n = len(self._ring_pts)
@@ -630,20 +783,7 @@ class PickableImageViewer(ImageViewer):
     @staticmethod
     def _fit_circle(pts: list) -> Optional[tuple]:
         """Algebraic least-squares circle fit.  Returns (cx, cy, r) or None."""
-        arr = np.array(pts, dtype=np.float64)
-        x, y = arr[:, 0], arr[:, 1]
-        A = np.column_stack([x, y, np.ones(len(x))])
-        b = -(x ** 2 + y ** 2)
-        try:
-            res, _, rank, _ = np.linalg.lstsq(A, b, rcond=None)
-        except np.linalg.LinAlgError:
-            return None
-        if rank < 3:
-            return None
-        D, E, F = res
-        cx, cy = -D / 2, -E / 2
-        r2 = cx ** 2 + cy ** 2 - F
-        return (cx, cy, math.sqrt(r2)) if r2 > 0 else None
+        return fit_circle_algebraic(pts)
 
 
 def _add_auto_manual_buttons(plot_widget: "pg.PlotWidget", on_auto, on_manual):
@@ -751,16 +891,6 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
     V = 1.0
 
     xl_color, yl_color, zl_color, eta_color = "#FF3B30", "#34C759", "#0A84FF", "#FFA500"
-    L = max(60.0, min(400.0, 0.15 * min(ny, nz)))
-    head = max(15.0, L * 0.20)
-
-    text_pen = pg.mkPen("w")
-    text_fill = pg.mkBrush(0, 0, 0, 200)
-    xl_pen = pg.mkPen(xl_color, width=3.5)
-    yl_pen = pg.mkPen(yl_color, width=3.5)
-    arc_pen = pg.mkPen(eta_color, width=2.5)
-    label_font = QtGui.QFont(); label_font.setPointSize(13); label_font.setBold(False)
-    glyph_font = QtGui.QFont(); glyph_font.setPointSize(17); glyph_font.setBold(True)
 
     px_w = px_h = 1.0
     try:
@@ -770,6 +900,26 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
     except Exception:
         pass
     px_iso = math.sqrt(px_w * px_h) if (px_w > 0 and px_h > 0) else 1.0
+
+    # Size the compass in *screen* pixels (via px_iso, the current view's
+    # data-units-per-screen-pixel), not purely as a fraction of image
+    # dimensions. A wide/short SAXS strip (e.g. 3072x512) gets auto-fit at a
+    # much smaller effective zoom than a square WAXS panel, so a compass
+    # sized only from image pixels shrinks to an illegible on-screen
+    # footprint while the (zoom-independent) TextItem labels stay full
+    # size — guaranteeing overlap. Targeting a fixed on-screen arrow length
+    # keeps the compass legible regardless of image aspect ratio, and the
+    # data-unit clamp keeps it from becoming absurd at extreme zoom.
+    L = max(0.03 * min(ny, nz), min(0.5 * min(ny, nz), 80.0 * px_iso))
+    head = max(15.0, L * 0.20)
+
+    text_pen = pg.mkPen("w")
+    text_fill = pg.mkBrush(0, 0, 0, 200)
+    xl_pen = pg.mkPen(xl_color, width=3.5)
+    yl_pen = pg.mkPen(yl_color, width=3.5)
+    arc_pen = pg.mkPen(eta_color, width=2.5)
+    label_font = QtGui.QFont(); label_font.setPointSize(13); label_font.setBold(False)
+    glyph_font = QtGui.QFont(); glyph_font.setPointSize(17); glyph_font.setBold(True)
 
     items: list = []
 
@@ -798,20 +948,50 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
 
     fm = QtGui.QFontMetrics(label_font)
     margin_px = 4.0
+    # TextItem boxes are drawn at a fixed *screen* size while every position
+    # below is in data units, so on a wide/short SAXS strip (auto-fit at a low
+    # effective zoom) a box is far wider than the compass it labels. Convert
+    # the font metrics into data units and drive the placement from those, so
+    # the boxes stay clear of each other at any zoom.
+    line_h = fm.height() * px_h
+
+    def text_w(plain: str) -> float:
+        return fm.horizontalAdvance(plain) * px_w
+
+    # The beam label is the widest box and sits on the compass origin, so
+    # every other label is placed to clear it. Its own offset must clear the
+    # ⊗ glyph, which is set in the larger glyph_font — at low zoom head*1.2
+    # alone is smaller than half that box.
+    beam_half_w = 0.5 * text_w("+Z_Lab (+X_MIDAS, beam)")
+    glyph_half_h = 0.5 * QtGui.QFontMetrics(glyph_font).height() * px_h
+    beam_gap = max(head * 1.2, glyph_half_h + 0.35 * line_h)
+
+    # η=0°/η=−90° sit exactly on top of the +Y_Lab/+X_Lab arrows (same
+    # cardinal directions), so their tick labels are folded into these
+    # axis labels (as a second line) instead of drawn as separate
+    # overlapping TextItems at nearly the same radius — this is what was
+    # producing stacked/illegible boxes on narrow SAXS strips. The folded
+    # line is set at the same size as every other η label: de-duplicating
+    # the boxes was the point, shrinking the text was not.
     label_specs = (
-        ("h", "+X<sub>Lab</sub> (+Y<sub>MIDAS</sub>)", xl_color),
-        ("v", "+Y<sub>Lab</sub> (+Z<sub>MIDAS</sub>)", yl_color))
-    for axis_kind, html_body, axis_color in label_specs:
-        html = f'<span style="color:{axis_color};">{html_body}</span>'
+        ("h", "+X<sub>Lab</sub> (+Y<sub>MIDAS</sub>)", "+X_Lab (+Y_MIDAS)",
+         xl_color, "η=−90°"),
+        ("v", "+Y<sub>Lab</sub> (+Z<sub>MIDAS</sub>)", "+Y_Lab (+Z_MIDAS)",
+         yl_color, "η=0°"))
+    for axis_kind, html_body, _plain, axis_color, eta_label in label_specs:
+        html = (f'<span style="color:{axis_color};">{html_body}</span>'
+                f'<br><span style="color:{eta_color};">{eta_label}</span>')
+        # Anchor each box on the edge facing the beam centre, so it grows
+        # *away* from the compass instead of straddling the arrow tip — that
+        # straddling is what pushed these boxes over the ⊗ glyph and the beam
+        # label at low zoom, whatever their font size.
         if axis_kind == "h":
-            arrow_label_R_h = L + head * 0.6
-            dx, dy = y_sign * arrow_label_R_h, V * (-head * 0.9)
+            dx = y_sign * max(L + head * 0.6, beam_half_w + 0.6 * line_h)
+            dy = 0.0
             anchor = (0.0 if dx > 0 else 1.0, 0.5)
         else:
-            text_extent = min((fm.height() / 2.0 + margin_px) * px_iso, 0.5 * L)
-            arrow_label_R_v = L + max(head * 0.6, text_extent)
-            dx, dy = 0.0, V * arrow_label_R_v
-            anchor = (0.5, 0.5)
+            dx, dy = 0.0, V * (L + head * 0.35)
+            anchor = (0.5, 1.0 if V > 0 else 0.0)
         lbl = pg.TextItem(html=html, anchor=anchor, border=text_pen, fill=text_fill)
         lbl.setFont(label_font)
         lbl.setPos(bc_y + dx, bc_z + dy)
@@ -823,9 +1003,10 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
     glyph.setPos(bc_y, bc_z)
     add(glyph)
     beam_html = f'<span style="color:{zl_color};">+Z<sub>Lab</sub> (+X<sub>MIDAS</sub>, beam)</span>'
-    x_lbl = pg.TextItem(html=beam_html, anchor=(0.5, 0.0), border=text_pen, fill=text_fill)
+    x_lbl = pg.TextItem(html=beam_html, anchor=(0.5, 0.0 if V > 0 else 1.0),
+                        border=text_pen, fill=text_fill)
     x_lbl.setFont(label_font)
-    x_lbl.setPos(bc_y, bc_z + V * (-head * 1.2))
+    x_lbl.setPos(bc_y, bc_z - V * beam_gap)
     add(x_lbl)
 
     # η reference marks at the four cardinal angles — 0°/+90°/−90°/180° —
@@ -838,6 +1019,14 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
     R_arc = L * 0.85
     tick_inner, tick_outer, label_R = R_arc * 0.92, R_arc * 1.12, R_arc * 1.32
     eta_marks = ((0.0, "η=0°"), (90.0, "η=+90°"), (-90.0, "η=−90°"), (180.0, "η=180°"))
+    # The two η labels that are still drawn separately sit on the same
+    # cardinals as the beam label's box, so push them past its on-screen
+    # extent when label_R alone doesn't clear it.
+    eta_label_R = {90.0: max(label_R, beam_half_w + 0.6 * line_h),
+                   180.0: max(label_R, beam_gap + 1.6 * line_h)}
+    # 0°/−90° already have their labels folded into the +Y_Lab/+X_Lab
+    # boxes above — draw only their tick marks here, not a second label.
+    _eta_labeled_on_axis = {0.0, -90.0}
     for eta_deg, label in eta_marks:
         eta_rad = math.radians(eta_deg)
         ux = (-y_sign) * math.sin(eta_rad)
@@ -845,6 +1034,8 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
         add(pg.PlotDataItem([bc_y + ux * tick_inner, bc_y + ux * tick_outer],
                              [bc_z + uy * tick_inner, bc_z + uy * tick_outer],
                              pen=arc_pen))
+        if eta_deg in _eta_labeled_on_axis:
+            continue
         if abs(uy) >= abs(ux):
             anchor = (0.5, 1.0 if uy > 0 else 0.0)
         else:
@@ -852,7 +1043,8 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
         html = f'<span style="color:{eta_color};">{label}</span>'
         lbl = pg.TextItem(html=html, anchor=anchor, border=text_pen, fill=text_fill)
         lbl.setFont(label_font)
-        lbl.setPos(bc_y + ux * label_R, bc_z + uy * label_R)
+        R = eta_label_R.get(eta_deg, label_R)
+        lbl.setPos(bc_y + ux * R, bc_z + uy * R)
         add(lbl)
 
     return items
@@ -2375,6 +2567,24 @@ class FieldSelector(QtWidgets.QGroupBox):
 
     def get_field(self):
         return self._field if self.isChecked() else None
+
+    def note_frame_shape(self, frame_shape):
+        """Flag inline if this field's shape doesn't match the current data
+        frame — e.g. a dark/bright/background left over from reusing a
+        session saved against a different detector, which
+        ``apply_field_corrections`` now skips rather than crashing on.
+        Mirrors ``MaskSelector``'s shape-mismatch warning. No-op until a
+        field has actually been computed."""
+        if self._field is None:
+            return
+        base = (f"Computed — {self._field.shape}  "
+                f"[{float(self._field.min()):.4g}, {float(self._field.max()):.4g}]")
+        if frame_shape is not None and self._field.shape != frame_shape:
+            self._status.setText(base + f"  ⚠ SKIPPED: data is {frame_shape}")
+            self._status.setStyleSheet("color:#e0a030;font-size:10px")
+        else:
+            self._status.setText(base)
+            self._status.setStyleSheet("color:#9a9a9a;font-size:10px")
 
     def get_mode(self) -> str:
         if self._mode is None:
@@ -4237,9 +4447,19 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._mask_sel.add_file_source(path)
 
     def corrected(self, frame):
-        """Apply dark/bright/background to a raw frame (mask handled separately)."""
+        """Apply dark/bright/background to a raw frame (mask handled separately).
+
+        A field whose shape doesn't match `frame` (typically stale dark/
+        bright/background left over from reusing a session saved against a
+        different detector) is skipped by ``apply_field_corrections`` rather
+        than raising; flagged here on that field's own status label so the
+        skip is visible instead of silent.
+        """
         if frame is None:
             return None
+        frame_shape = np.asarray(frame).shape
+        for sel in (self._dark_sel, self._bright_sel, self._bg_sel):
+            sel.note_frame_shape(frame_shape)
         d, b, g = self.dark(), self.bright(), self.background()
         if d is None and b is None and g is None:
             return np.asarray(frame, dtype=np.float32)

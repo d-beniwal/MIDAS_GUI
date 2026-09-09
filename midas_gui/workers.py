@@ -836,6 +836,137 @@ class CalibrationWorker(QtCore.QThread):
                 sys.stderr = old_err
 
 
+class ManualDspacingCalibWorker(QtCore.QThread):
+    """Fit detector geometry from user-picked ring points and known d-spacings
+    (Bragg's law), entirely bypassing ``calib.run_pipeline``/``midas_calibrate_v2``
+    — used for non-crystalline calibrants (e.g. AgBH) that have no space group.
+    ``refine`` selects which of Lsd/BC/tx/ty/tz/Wavelength float (same dict
+    shape as ``CalibrationTab._refine_flags()``; distortion is not supported
+    here — no per-pixel intensity model). ``bounds`` optionally boxes any of
+    them in (see :func:`~midas_gui.helpers.fit_geometry_from_ring_picks`).
+    Same signal names as ``CalibrationWorker`` so the tab's existing
+    ``_on_done``/``_on_fail``/``_abort`` wiring works unchanged."""
+    log_line = QtCore.pyqtSignal(str)
+    finished = QtCore.pyqtSignal(object)
+    failed   = QtCore.pyqtSignal(str)
+
+    #: Per-parameter 1-sigma above which a refined value is reported as not
+    #: actually constrained by the picked points. These are "coarser than any
+    #: calibration worth keeping" scales, not statistical thresholds: a beam
+    #: centre known to worse than 5 px, or an Lsd to worse than 1%, has not
+    #: been measured by this fit. (Lsd/wavelength entries are fractions of the
+    #: fitted value; the rest are absolute, in the parameter's own unit.)
+    _SIGMA_WARN_FRAC = {"Lsd": 0.01, "wavelength_A": 0.01}
+    _SIGMA_WARN_ABS  = {"BC_y": 5.0, "BC_z": 5.0, "tx": 0.5, "ty": 0.5, "tz": 0.5}
+    #: (display unit, multiplier from fit units). Lsd is fit in µm but shown in
+    #: mm, matching the seed card and every other Lsd readout in the GUI.
+    _SIGMA_UNITS = {"Lsd": ("mm", 1e-3), "BC_y": ("px", 1.0), "BC_z": ("px", 1.0),
+                    "tx": ("°", 1.0), "ty": ("°", 1.0), "tz": ("°", 1.0),
+                    "wavelength_A": ("Å", 1.0)}
+
+    def __init__(self, picks, wavelength_A, pxY, pxZ, seed, NY, NZ,
+                 material_name, d_list, parent=None,
+                 refine=None, tilt_seed=(0.0, 0.0, 0.0), bounds=None):
+        super().__init__(parent)
+        self._picks = list(picks)
+        self._wavelength_A = wavelength_A
+        self._pxY = pxY
+        self._pxZ = pxZ
+        self._seed = seed
+        self._NY = NY
+        self._NZ = NZ
+        self._material_name = material_name
+        self._d_list = list(d_list)
+        self._refine = dict(refine) if refine else None
+        self._tilt_seed = tuple(tilt_seed)
+        self._bounds = dict(bounds) if bounds else None
+
+    def run(self):
+        from types import SimpleNamespace
+        from midas_gui.helpers import fit_geometry_from_ring_picks
+        try:
+            refine = self._refine or {}
+            free = [name for name, key in
+                    (("Lsd", "Lsd"), ("BC", "BC"), ("tx", "tx"), ("ty", "ty"),
+                     ("tz", "tz"), ("Wavelength", "Wavelength"))
+                    if refine.get(key, key in ("Lsd", "BC"))]
+            self.log_line.emit(
+                f"[manual fit] fitting {', '.join(free)} from {len(self._picks)} picked "
+                f"points across {len(set(p[2] for p in self._picks))} ring(s), "
+                f"calibrant='{self._material_name}'…")
+            fit = fit_geometry_from_ring_picks(
+                self._picks, self._wavelength_A, self._pxY, self._pxZ,
+                seed=self._seed, tilt_seed=self._tilt_seed, refine=self._refine,
+                bounds=self._bounds)
+            self.log_line.emit(
+                f"[manual fit] seed={fit['seed_quality']}  success={fit['success']}  "
+                f"solver={fit['method']}  residual RMS={fit['residual_deg_rms']:.4f}°  "
+                f"({fit['message']})")
+            if fit["clamped"]:
+                self.log_line.emit(
+                    f"[manual fit] seed value(s) outside the limits you set were moved "
+                    f"onto the limit before fitting: {', '.join(sorted(fit['clamped']))}")
+            for line in self._identifiability_lines(fit):
+                self.log_line.emit(line)
+            if not fit["success"]:
+                self.failed.emit(f"Manual fit did not converge: {fit['message']}")
+                return
+            result = SimpleNamespace(
+                Lsd=fit["Lsd"], BC_y=fit["BC_y"], BC_z=fit["BC_z"],
+                tx=fit["tx"], ty=fit["ty"], tz=fit["tz"], distortion={},
+                pxY=self._pxY, pxZ=self._pxZ or self._pxY,
+                NrPixelsY=self._NY, NrPixelsZ=self._NZ,
+                wavelength_A=fit["wavelength_A"], post_residual_strain_uE=None,
+                _calibrant_name=self._material_name, _d_list=list(self._d_list),
+            )
+            result.fit_sigma = dict(fit["sigma"])
+            result.fit_at_limit = set(fit["at_limit"])
+            self.finished.emit(result)
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+    def _identifiability_lines(self, fit) -> list:
+        """``value ± sigma`` for each refined parameter, plus an explicit
+        warning for any the picked points did not actually pin down.
+
+        This is the readout that makes an ill-posed manual fit obvious. With
+        only a short ring arc on the detector — the usual case for a
+        large-Lsd SAXS geometry, where a low-order AgBH ring runs off the
+        edge — Lsd and the beam centre trade off against each other almost
+        freely, and tilt does essentially nothing to the residual at all. The
+        fit still converges; the sigmas are what say whether to believe it.
+        """
+        refine = self._refine or {}
+        free = [n for n in ("Lsd", "BC_y", "BC_z", "tx", "ty", "tz", "wavelength_A")
+                if refine.get({"BC_y": "BC", "BC_z": "BC",
+                               "wavelength_A": "Wavelength"}.get(n, n),
+                              n in ("Lsd", "BC_y", "BC_z"))]
+        if not free:
+            return []
+        sigma, at_limit, lines, suspect = fit["sigma"], fit["at_limit"], [], []
+        for name in free:
+            unit, mult = self._SIGMA_UNITS[name]
+            val, sig = fit[name], sigma.get(name, 0.0)
+            if name in at_limit:
+                lines.append(f"[manual fit]   {name} = {val * mult:.5g} {unit}  (at limit "
+                             f"— the fit ran to the edge of the range you allowed)")
+                suspect.append(name)
+                continue
+            lines.append(f"[manual fit]   {name} = {val * mult:.5g} "
+                         f"± {sig * mult:.3g} {unit}")
+            frac = self._SIGMA_WARN_FRAC.get(name)
+            limit = abs(val) * frac if frac is not None else self._SIGMA_WARN_ABS[name]
+            if not math.isfinite(sig) or sig > limit:
+                suspect.append(name)
+        if suspect:
+            lines.append(
+                f"[manual fit] WARNING: {', '.join(suspect)} not constrained by these "
+                f"picks — the value above is largely fitted noise. Pick points on more "
+                f"rings or over a wider arc, hold the parameter fixed, or bound it "
+                f"via Limits…")
+        return lines
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  Single-frame integration worker (Tab 2 post-calibration preview)
 # ═════════════════════════════════════════════════════════════════════════════

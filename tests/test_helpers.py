@@ -5,6 +5,8 @@ refresh_combo_items (used by the Calibrant dropdown) and the pixel-size /
 K-edge-foil popup menus rebuilding their entries from live constants each
 time they're opened, instead of freezing them at construction.
 """
+import math
+
 import numpy as np
 import pytest
 
@@ -92,6 +94,7 @@ def test_kedge_label_menu_rebuilds_from_current_constants(app, monkeypatch):
     ("scan.ge1", "ge"), ("scan.GE3.h5", "ge"), ("scan_ge4_001.ge4", "ge"),
     ("scan.vrx", "vrx"), ("scan.VRX.h5", "vrx"),
     ("scan.pxrd", "pxrd"),
+    ("silver_behenate_72keV_001027.pmg.h5", "pimega"), ("scan.PMG", "pimega"),
     ("scan.tif", None), ("scan.h5", None),
 ])
 def test_detect_detector_from_filename(name, expected):
@@ -112,6 +115,7 @@ def test_detect_geometry_pixel_size_from_filename(profile):
 
     assert detect_geometry_from_path("scan.ge1", profile=profile) == {"pxY": 200.0}
     assert detect_geometry_from_path("scan.vrx", profile=profile) == {"pxY": 150.0}
+    assert detect_geometry_from_path("scan.pmg.h5", profile=profile) == {"pxY": 55.0}
     # Pixirad is identified but has no known pixel size to auto-populate.
     assert detect_geometry_from_path("scan.pxrd", profile=profile) == {}
     assert detect_geometry_from_path("scan.tif", profile=profile) == {}
@@ -374,3 +378,228 @@ def test_tilted_spoke_endpoints_match_the_ring_at_the_same_eta():
     eta = np.linspace(0.0, 360.0, n, endpoint=True)[idx]
     Ys, Zs = tilted_spoke_xy(tt, tt, eta, tx, ty, tz, n=2, **_GEO)
     np.testing.assert_allclose([Ys[0], Zs[0]], [Yr[idx], Zr[idx]], atol=1e-9)
+def test_simulate_rings_from_dspacings_matches_braggs_law():
+    import math
+    from midas_gui.helpers import simulate_rings_from_dspacings
+    d = 58.380
+    wavelength_A = 0.1729
+    lsd_um, px_um = 200000.0, 200.0
+    rings = simulate_rings_from_dspacings([d], wavelength_A, lsd_um, px_um, max_2theta_deg=30.0)
+    assert len(rings) == 1
+    r = rings[0]
+    expected_two_theta = 2.0 * math.degrees(math.asin(wavelength_A / (2.0 * d)))
+    assert r["two_theta_deg"] == pytest.approx(expected_two_theta)
+    assert r["d_spacing"] == pytest.approx(d)
+    assert r["hkl"] is None
+    assert r["order"] == 1
+    expected_radius = lsd_um * math.tan(math.radians(expected_two_theta)) / px_um
+    assert r["radius_px"] == pytest.approx(expected_radius)
+
+
+def test_simulate_rings_from_dspacings_drops_orders_past_max_two_theta():
+    from midas_gui.helpers import simulate_rings_from_dspacings
+    d_list = [58.380 / n for n in range(1, 11)]
+    rings = simulate_rings_from_dspacings(d_list, 0.1729, 200000.0, 200.0, max_2theta_deg=1.0)
+    assert rings
+    assert all(r["two_theta_deg"] <= 1.0 for r in rings)
+    assert len(rings) < len(d_list)
+
+
+def test_simulate_rings_from_dspacings_skips_non_positive_d():
+    from midas_gui.helpers import simulate_rings_from_dspacings
+    rings = simulate_rings_from_dspacings([58.380, 0.0, -1.0], 0.1729, 200000.0, 200.0)
+    assert len(rings) == 1
+    assert rings[0]["d_spacing"] == pytest.approx(58.380)
+
+
+def test_coerce_material_dspacing_valid():
+    from midas_gui.constants import _coerce_material
+    m = _coerce_material({"kind": "dspacing", "d_list": [58.38, "29.19"]})
+    assert m == {"kind": "dspacing", "d_list": [58.38, 29.19]}
+
+
+def test_coerce_material_dspacing_empty_list_raises():
+    from midas_gui.constants import _coerce_material
+    with pytest.raises(ValueError):
+        _coerce_material({"kind": "dspacing", "d_list": []})
+
+
+# ── Manual d-spacing ring-picking calibration (Calibrate tab) ────────────────
+
+def test_parse_dspacing_text_drops_blank_and_invalid_tokens():
+    from midas_gui.helpers import parse_dspacing_text
+    assert parse_dspacing_text("58.38, 29.19  19.46 0 -1 abc") == [58.38, 29.19, 19.46]
+
+
+def test_parse_dspacing_text_empty_string():
+    from midas_gui.helpers import parse_dspacing_text
+    assert parse_dspacing_text("   ") == []
+
+
+def test_fit_circle_algebraic_recovers_known_circle():
+    from midas_gui.helpers import fit_circle_algebraic
+    cx0, cy0, r0 = 123.4, -50.0, 200.0
+    angles = np.linspace(0, 2 * math.pi, 12, endpoint=False)
+    pts = [(cx0 + r0 * math.cos(a), cy0 + r0 * math.sin(a)) for a in angles]
+    cx, cy, r = fit_circle_algebraic(pts)
+    assert (cx, cy, r) == pytest.approx((cx0, cy0, r0))
+
+
+def test_fit_circle_algebraic_returns_none_for_too_few_points():
+    from midas_gui.helpers import fit_circle_algebraic
+    assert fit_circle_algebraic([(0, 0), (1, 1)]) is None
+
+
+def test_fit_geometry_from_ring_picks_recovers_known_geometry():
+    from midas_gui.helpers import fit_geometry_from_ring_picks, simulate_rings_from_dspacings
+
+    wavelength_A = 0.1729
+    px_um = 200.0
+    lsd_um, bc_y, bc_z = 300000.0, 512.3, 498.7
+    d_list = [58.380, 29.190, 19.460]
+
+    rings = simulate_rings_from_dspacings(d_list, wavelength_A, lsd_um, px_um)
+    rng = np.random.default_rng(0)
+    picks = []
+    for ring in rings:
+        r_px = ring["radius_px"]
+        for angle in np.linspace(0, 2 * math.pi, 8, endpoint=False):
+            y = bc_y - r_px * math.cos(angle)
+            z = bc_z + r_px * math.sin(angle)
+            picks.append((y, z, ring["d_spacing"]))
+
+    fit = fit_geometry_from_ring_picks(picks, wavelength_A, px_um, px_um)
+    assert fit["success"]
+    assert fit["Lsd"] == pytest.approx(lsd_um, rel=1e-4)
+    assert fit["BC_y"] == pytest.approx(bc_y, abs=0.05)
+    assert fit["BC_z"] == pytest.approx(bc_z, abs=0.05)
+    assert fit["residual_deg_rms"] < 1e-3
+
+
+def test_fit_geometry_from_ring_picks_refine_none_matches_legacy_lsd_bc_only():
+    from midas_gui.helpers import fit_geometry_from_ring_picks, simulate_rings_from_dspacings
+
+    wavelength_A = 0.1729
+    px_um = 200.0
+    lsd_um, bc_y, bc_z = 300000.0, 512.3, 498.7
+    d_list = [58.380, 29.190, 19.460]
+
+    rings = simulate_rings_from_dspacings(d_list, wavelength_A, lsd_um, px_um)
+    picks = []
+    for ring in rings:
+        r_px = ring["radius_px"]
+        for angle in np.linspace(0, 2 * math.pi, 8, endpoint=False):
+            y = bc_y - r_px * math.cos(angle)
+            z = bc_z + r_px * math.sin(angle)
+            picks.append((y, z, ring["d_spacing"]))
+
+    legacy = fit_geometry_from_ring_picks(picks, wavelength_A, px_um, px_um)
+    explicit = fit_geometry_from_ring_picks(
+        picks, wavelength_A, px_um, px_um,
+        refine={"Lsd": True, "BC": True, "tx": False, "ty": False,
+                "tz": False, "Wavelength": False})
+
+    assert legacy["tx"] == pytest.approx(0.0)
+    assert legacy["ty"] == pytest.approx(0.0)
+    assert legacy["tz"] == pytest.approx(0.0)
+    assert legacy["wavelength_A"] == pytest.approx(wavelength_A)
+    assert legacy["n_free"] == 3
+    for key in ("Lsd", "BC_y", "BC_z", "tx", "ty", "tz", "wavelength_A",
+                "residual_deg_rms", "n_free"):
+        assert legacy[key] == pytest.approx(explicit[key])
+
+
+def test_fit_geometry_from_ring_picks_recovers_tilt_with_fixed_tx():
+    from midas_gui.helpers import fit_geometry_from_ring_picks, tilted_ring_xy
+
+    # A short wavelength / large-d combo (as in the AgBH test above) puts
+    # every ring at a tiny 2theta, where tilt's effect on ring shape is
+    # second-order and numerically degenerate with Lsd/BC — not a realistic
+    # stand-in for a tilt-refinement scenario. Use d-spacings/wavelength
+    # that spread 2theta across ~20-60 degrees so tilt is well identified.
+    wavelength_A = 1.0
+    px_um = 200.0
+    lsd_um, bc_y, bc_z = 300000.0, 512.3, 498.7
+    tx_true, ty_true, tz_true = 0.0, 1.7, -0.9
+    d_list = [3.0, 1.5, 1.0]
+
+    picks = []
+    for d in d_list:
+        s = wavelength_A / (2.0 * d)
+        two_theta = 2.0 * math.degrees(math.asin(s))
+        Y_px, Z_px = tilted_ring_xy(two_theta, tx_true, ty_true, tz_true,
+                                     lsd_um, bc_y, bc_z, px_um, px_um, n=16)
+        for y, z in zip(Y_px[:-1], Z_px[:-1]):
+            picks.append((float(y), float(z), d))
+
+    # tx is held fixed at its (correct) seed of 0.0 — only the free ty/tz
+    # get a deliberately wrong seed, to make sure the fit actually moves
+    # them rather than just reporting the seed back.
+    wrong_seed_tilt = (0.0, 0.5, 0.5)
+    refine = {"Lsd": True, "BC": True, "tx": False, "ty": True, "tz": True,
+              "Wavelength": False}
+    fit = fit_geometry_from_ring_picks(
+        picks, wavelength_A, px_um, px_um,
+        tilt_seed=wrong_seed_tilt, refine=refine)
+
+    assert fit["success"]
+    assert fit["n_free"] == 5
+    assert fit["Lsd"] == pytest.approx(lsd_um, rel=1e-3)
+    assert fit["BC_y"] == pytest.approx(bc_y, abs=0.1)
+    assert fit["BC_z"] == pytest.approx(bc_z, abs=0.1)
+    assert fit["ty"] == pytest.approx(ty_true, abs=1e-2)
+    assert fit["tz"] == pytest.approx(tz_true, abs=1e-2)
+    # tx was not selected to refine — it must stay pinned exactly at its
+    # seed value, never nudged toward compensating for ty/tz residuals.
+    assert fit["tx"] == pytest.approx(wrong_seed_tilt[0])
+    assert fit["residual_deg_rms"] < 1e-3
+
+
+def test_auto_seed_from_picks_falls_back_when_no_ring_has_enough_points():
+    from midas_gui.helpers import _auto_seed_from_picks
+    picks = [(10.0, 20.0, 58.38), (30.0, 40.0, 29.19)]   # 1 pt per ring, can't circle-fit
+    lsd, bc_y, bc_z, quality = _auto_seed_from_picks(picks, 0.1729, 200.0, 200.0)
+    assert quality == "fallback"
+    assert bc_y == pytest.approx(20.0)
+    assert bc_z == pytest.approx(30.0)
+
+
+def test_predict_ring_radii_uses_d_list_branch_not_crystalline_fallback():
+    from types import SimpleNamespace
+    from midas_gui.helpers import _predict_ring_radii, simulate_rings_from_dspacings
+
+    d_list = [58.380, 29.190]
+    wavelength_A, lsd_um, px_um = 0.1729, 300000.0, 200.0
+    result = SimpleNamespace(
+        _d_list=d_list, wavelength_A=wavelength_A, Lsd=lsd_um, pxY=px_um,
+        _calibrant_name="AgBH (silver behenate)")
+
+    radii = _predict_ring_radii(result)
+    expected = sorted({round(r["radius_px"], 3)
+                       for r in simulate_rings_from_dspacings(d_list, wavelength_A, lsd_um, px_um)})
+    assert radii == expected
+
+
+def test_apply_field_corrections_skips_mismatched_shape_instead_of_raising():
+    """Regression test for a crash hit loading a saved session whose dark/
+    bright/background paths were computed against a different detector
+    (e.g. a 2880x2880 WAXS dark reused with a 512x3072 SAXS image): a plain
+    ``out - d`` used to raise a numpy broadcast ValueError. Mismatched
+    fields are now skipped (treated as None) with a warning, mirroring
+    MaskSelector.composite_mask()'s "skip + warn" handling of a mismatched
+    mask source."""
+    import warnings
+    from midas_gui.helpers import apply_field_corrections
+
+    img = np.full((512, 3072), 10.0)
+    stale_dark = np.ones((2880, 2880))
+    matching_dark = np.full((512, 3072), 1.0)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        out = apply_field_corrections(img, dark=stale_dark)
+    assert np.array_equal(out, img)   # mismatched dark skipped, image unchanged
+    assert any("dark" in str(w.message) and "skipped" in str(w.message) for w in caught)
+
+    out2 = apply_field_corrections(img, dark=matching_dark)
+    assert np.allclose(out2, 9.0)   # matching-shape dark still applies normally
