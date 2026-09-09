@@ -20,6 +20,7 @@ import pyqtgraph as pg
 from midas_gui.constants import (
     CALIBRANTS, PIPELINES, DEFAULT_PIPELINE, _SG, _LC, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM,
     DEFAULT_LSD_UM, DEFAULT_BC_Y, DEFAULT_BC_Z, DEFAULT_CALIBRANT_TIF,
+    DEFAULT_STEP_BC, DEFAULT_STEP_LSD_MM, DEFAULT_STEP_TILT,
     DISTORTION_NAMES, MATERIALS, calibrant_combo_items, is_dspacing_calibrant)
 from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _predict_ring_radii, _NoScrollComboBox,
@@ -299,16 +300,24 @@ class CalibrationTab(QtWidgets.QWidget):
             "Enable BC + Lsd as the LM starting point.\n"
             "Use Pick BC / Pick Ring on the image to populate BC automatically.")
         seed.body.addWidget(self._manual_seed_check)
-        self._seed_bcy = _fspin(-99999, 99999, 2, DEFAULT_BC_Y, "px")
-        self._seed_bcz = _fspin(-99999, 99999, 2, DEFAULT_BC_Z, "px")
+        # Explicit arrow steps, from the same constants (and the same user
+        # preference) the Data Viewer's geometry card uses. Without them these
+        # spinboxes fall back to _fspin's adaptive stepping, which scales with
+        # the value's magnitude: at BC_z ≈ 1340 px one click moved 100 px, and
+        # at Lsd = 1000 mm one click moved 50 mm — useless for nudging a seed.
+        self._seed_bcy = _fspin(-99999, 99999, 2, DEFAULT_BC_Y, "px",
+                                step=DEFAULT_STEP_BC)
+        self._seed_bcz = _fspin(-99999, 99999, 2, DEFAULT_BC_Z, "px",
+                                step=DEFAULT_STEP_BC)
         # Lsd shown/entered in mm; calculations & files use µm.
-        self._seed_lsd = _fspin(0.001, 1e5, 4, DEFAULT_LSD_UM / 1000.0, " mm")
+        self._seed_lsd = _fspin(0.001, 1e5, 4, DEFAULT_LSD_UM / 1000.0, " mm",
+                                step=DEFAULT_STEP_LSD_MM)
         # Seed tilts (deg). Honoured by the four-stage / advanced pipelines; the
         # one-shot / first-time paths seed tilts only if the installed backend
         # exposes initial-tilt kwargs (otherwise they start at 0).
-        self._seed_tx = _fspin(-180, 180, 4, 0.0, "°")
-        self._seed_ty = _fspin(-180, 180, 4, 0.0, "°")
-        self._seed_tz = _fspin(-180, 180, 4, 0.0, "°")
+        self._seed_tx = _fspin(-180, 180, 4, 0.0, "°", step=DEFAULT_STEP_TILT)
+        self._seed_ty = _fspin(-180, 180, 4, 0.0, "°", step=DEFAULT_STEP_TILT)
+        self._seed_tz = _fspin(-180, 180, 4, 0.0, "°", step=DEFAULT_STEP_TILT)
         self._seed_tilts = (self._seed_tx, self._seed_ty, self._seed_tz)
         for w in self._seed_tilts:
             w.setToolTip(
