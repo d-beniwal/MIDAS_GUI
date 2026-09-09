@@ -53,6 +53,33 @@ _CUSTOM_DSPACING = "Custom (d-spacings)"
 _FALLBACK_LATTICE = dict(a=5.4116, b=5.4116, c=5.4116, alpha=90.0, beta=90.0, gamma=90.0, sg=225)
 
 
+def _ring_label_pos(ys, zs, img_shape):
+    """Where to anchor a ring's ``hkl``/order label, given the ring's plotted
+    points and the image's ``(rows, cols)`` shape.
+
+    Prefers a point where the ring actually crosses the image, so the label
+    sits on the arc the user can see. The obvious choice — the ring's twelve
+    o'clock point — is wrong whenever the beam centre is near an edge: on a
+    wide, short SAXS strip with the centre at the left, every ring's top lies
+    hundreds of pixels below the frame and all the labels pile up off-screen.
+    Falls back to the plotted point closest to the image when no part of the
+    ring is on it, which keeps the label near the visible area instead of
+    arbitrarily far from it.
+    """
+    nz, ny = img_shape[:2]
+    ys = np.asarray(ys, dtype=float); zs = np.asarray(zs, dtype=float)
+    on = (ys >= 0) & (ys < ny) & (zs >= 0) & (zs < nz)
+    if on.any():
+        # Highest on-image point of the arc: clear of the data below it, and
+        # a stable choice as the geometry is nudged.
+        idx = np.flatnonzero(on)
+        return float(ys[idx][np.argmax(zs[idx])]), float(zs[idx][np.argmax(zs[idx])])
+    dy = np.clip(ys, 0, ny - 1) - ys
+    dz = np.clip(zs, 0, nz - 1) - zs
+    i = int(np.argmin(dy ** 2 + dz ** 2))
+    return float(ys[i]), float(zs[i])
+
+
 class MaterialDialog(QtWidgets.QDialog):
     """Edit one ring-simulation material: name, preset, and either a
     lattice + space group (crystalline) or an explicit list of d-spacings
@@ -887,10 +914,9 @@ class DetectorGeometryCard(QtWidgets.QWidget):
                 if tilted:
                     ys, zs = tilted_ring_xy(r["two_theta_deg"], 0.0, ty, tz,
                                              self._lsd_um(), bc_y, bc_z, px, px)
-                    label_y, label_z = ys[len(ys) // 2], zs[len(zs) // 2]
                 else:
                     ys = bc_y + rad * np.cos(th); zs = bc_z + rad * np.sin(th)
-                    label_y, label_z = bc_y, bc_z - rad
+                label_y, label_z = _ring_label_pos(ys, zs, img.shape)
                 item = pg.PlotDataItem(ys, zs, pen=pen)
                 item.setVisible(vis_r)
                 self._viewer._iv.addItem(item); self._ring_items.append(item)
