@@ -118,6 +118,36 @@ def _manual_seed_dict(manual: dict) -> dict:
     return seed
 
 
+#: Parameter-window ("tolerance") fields on ``CalibrationParams``, in the units
+#: the dataclass stores them in. ``midas_calibrate/param_vector.py:bounds()``
+#: turns each into a hard ``(value - tol, value + tol)`` box constraint on the
+#: LM solve, so these are real bounds, not hints — and they apply on *every*
+#: crystalline route whether or not anyone sets them, at the defaults below.
+TOL_FIELDS = ("tolLsd", "tolBC", "tolTilts", "tolDistortion", "tolWavelength")
+
+
+def tol_defaults() -> dict:
+    """The ``tol*`` defaults actually in force, read off the installed
+    ``CalibrationParams`` rather than hardcoded — a backend release that
+    retunes them must not leave the GUI displaying stale windows."""
+    import dataclasses as dc
+    from midas_calibrate.params import CalibrationParams
+    out = {}
+    for f in dc.fields(CalibrationParams):
+        if f.name in TOL_FIELDS:
+            out[f.name] = float(f.default)
+    return out
+
+
+def tols_are_default(tols: Optional[dict]) -> bool:
+    """True when ``tols`` asks for nothing the backend would not already do."""
+    if not tols:
+        return True
+    defaults = tol_defaults()
+    return all(abs(float(v) - defaults[k]) <= 1e-12
+               for k, v in tols.items() if k in defaults)
+
+
 def _refine_dict(refine: dict) -> dict:
     """Translate the GUI refine flags into a v1 ``Refine`` dict.
 
@@ -145,11 +175,17 @@ def _refine_dict(refine: dict) -> dict:
 
 def build_v1_params(seed, *, wavelength, pxY, pxZ, calibrant, NY, NZ,
                     refine: dict, n_iter: int, device: str,
-                    min_ring_px: float = 120.0, max_ring_px: Optional[float] = None):
+                    min_ring_px: float = 120.0, max_ring_px: Optional[float] = None,
+                    tols: Optional[dict] = None):
     """Build a CalibrationParams (V1Params) from a seed.
 
     Mirrors the construction in ``pipelines/auto.py`` — RhoD is the BC-to-farthest
     -corner distance expressed in µm.
+
+    ``tols`` optionally overrides the parameter windows (:data:`TOL_FIELDS`, in
+    the dataclass's own units: µm / px / deg / Å). Keys left out keep the
+    dataclass default, and ``tols=None`` reproduces the object this built
+    before tolerances were plumbed through at all.
     """
     from midas_calibrate.params import CalibrationParams
 
@@ -181,8 +217,28 @@ def build_v1_params(seed, *, wavelength, pxY, pxZ, calibrant, NY, NZ,
         nIterations=n_iter, Refine=_refine_dict(refine),
         Device=device, Dtype="fp64", **p_seed,
     )
+    for name, val in (tols or {}).items():
+        if name in TOL_FIELDS and val is not None:
+            setattr(v1, name, float(val))
     v1.validate()
     return v1
+
+
+def _seed_for_v1(img, *, wavelength, pxY, calibrant, manual, why: str):
+    """The ``{"BC_y","BC_z","Lsd"}`` seed :func:`build_v1_params` needs.
+
+    Every v1-based route needs this and none of them can auto-seed themselves
+    the way ``calibrate()`` does, so a failed auto-seed has to become an
+    actionable error naming the route that required one — hence ``why``.
+    """
+    if manual:
+        return _manual_seed_dict(manual)
+    s = make_seed_safe(img, wavelength, pxY, calibrant)
+    if s is None:
+        raise RuntimeError(
+            f"Auto-seed failed for {why}. Enable manual seed "
+            "(Pick BC / Pick Ring + Lsd) and retry.")
+    return {"BC_y": s.BC_y, "BC_z": s.BC_z, "Lsd": s.Lsd_um}
 
 
 # ── Normalisation: any pipeline output → AutoCalibrationResult ───────────────────
@@ -402,6 +458,7 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
     device     = cfg.get("device", "cpu")
     im_trans   = tuple(cfg.get("im_trans", ()))
     manual     = cfg.get("manual_seed")   # None or {"BC_y","BC_z","Lsd"}
+    tols       = cfg.get("tols")          # None or a subset of TOL_FIELDS
     NZ, NY     = image.shape
     panel_layout = _build_panel_layout(cfg.get("panel_layout"))
 
@@ -413,45 +470,57 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
             # refined panel shifts; normalize_result detects the FourStageResult
             # via its .stage2 attribute and handles it correctly.
             img, dk, pNY, pNZ = _prep_transformed(image, dark, im_trans)
-            if manual:
-                seed = _manual_seed_dict(manual)
-            else:
-                s = make_seed_safe(img, wavelength, pxY, calibrant)
-                if s is None:
-                    raise RuntimeError(
-                        "Auto-seed failed for panel calibration (one_shot). "
-                        "Enable manual seed (Pick BC / Pick Ring + Lsd) and retry.")
-                seed = {"BC_y": s.BC_y, "BC_z": s.BC_z, "Lsd": s.Lsd_um}
+            seed = _seed_for_v1(img, wavelength=wavelength, pxY=pxY,
+                                calibrant=calibrant, manual=manual,
+                                why="panel calibration (one_shot)")
             v1 = build_v1_params(
                 seed, wavelength=wavelength, pxY=pxY, pxZ=pxZ, calibrant=calibrant,
-                NY=pNY, NZ=pNZ, refine=refine, n_iter=n_iter, device=device)
+                NY=pNY, NZ=pNZ, refine=refine, n_iter=n_iter, device=device,
+                tols=tols)
             from midas_calibrate_v2.pipelines import autocalibrate_four_stage
             return autocalibrate_four_stage(
                 v1, img, dark=dk, device=device, panel_layout=panel_layout,
                 spec=_panel_spec(v1, panel_layout), verbose=True)
 
+        # Three things calibrate() structurally cannot express, all fixed the
+        # same way: route through the lower-level single-pass routine that
+        # four_stage / bayesian / joint already use, driven by a GUI-built
+        # CalibrationParams.
         coeffs = _distortion_coeffs(refine)
+        reroute = []
         if refine.get("Distortion", True) and coeffs and coeffs != set(DISTORTION_NAMES):
-            # midas_calibrate_v2.calibrate() only exposes an all-or-nothing
-            # refine_distortion bool (every p-slot gets the same flag) — route
-            # through the same lower-level single-pass routine four_stage /
-            # bayesian / joint already use (build_v1_params' per-p# Refine
-            # dict) so the LM fit actually restricts itself to the selected
-            # coefficients instead of silently widening the selection to all 15.
+            # calibrate() exposes only an all-or-nothing refine_distortion bool
+            # (every p-slot gets the same flag), so a subset would silently
+            # widen to all 15.
+            reroute.append("a distortion-coefficient subset")
+        if bool(refine.get("ty", True)) != bool(refine.get("tz", True)):
+            # calibrate() takes one refine_tilts bool for both, which the GUI
+            # has to compute as (ty or tz) — so refining exactly one of them is
+            # not expressible and would silently refine both.
+            reroute.append("only one of ty/tz refined")
+        if not (refine.get("Lsd", True) and refine.get("BC", True)):
+            # auto.py:619 hardcodes Refine={"Lsd": True, "BC": True, ...} and
+            # there is no kwarg to change it, so on the plain path unchecking
+            # either does nothing at all — the fit refines them regardless.
+            held = [n for n in ("Lsd", "BC") if not refine.get(n, True)]
+            reroute.append(f"{'/'.join(held)} held fixed")
+        if not tols_are_default(tols):
+            # calibrate() builds its own CalibrationParams, so its tol* windows
+            # are always the dataclass defaults.
+            reroute.append("non-default parameter limits")
+        if reroute:
+            print(f"[calib] note: routing one_shot through "
+                  f"pipelines.single.autocalibrate — calibrate() cannot express "
+                  f"{', '.join(reroute)}. This skips its STAGE-1 "
+                  f"multi-hypothesis Lsd search, so the seed is used as given.")
             img, dk, pNY, pNZ = _prep_transformed(image, dark, im_trans)
-            if manual:
-                seed = _manual_seed_dict(manual)
-            else:
-                s = make_seed_safe(img, wavelength, pxY, calibrant)
-                if s is None:
-                    raise RuntimeError(
-                        "Auto-seed failed for partial distortion refinement "
-                        "(one_shot). Enable manual seed (Pick BC / Pick Ring + "
-                        "Lsd) and retry.")
-                seed = {"BC_y": s.BC_y, "BC_z": s.BC_z, "Lsd": s.Lsd_um}
+            seed = _seed_for_v1(img, wavelength=wavelength, pxY=pxY,
+                                calibrant=calibrant, manual=manual,
+                                why="one_shot with " + ", ".join(reroute))
             v1 = build_v1_params(
                 seed, wavelength=wavelength, pxY=pxY, pxZ=pxZ, calibrant=calibrant,
-                NY=pNY, NZ=pNZ, refine=refine, n_iter=n_iter, device=device)
+                NY=pNY, NZ=pNZ, refine=refine, n_iter=n_iter, device=device,
+                tols=tols)
             bin_path = None
             if cfg.get("output_dir"):
                 from pathlib import Path
@@ -493,6 +562,15 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
 
     if mode == "first_time":
         from midas_calibrate_v2.pipelines import first_time_calibrate
+        if not tols_are_default(tols):
+            # first_time_calibrate() takes neither a CalibrationParams nor any
+            # tol* kwarg — it has its own tilt_prior_deg/half_window_px knobs
+            # on a different footing. Say so rather than accepting limits and
+            # quietly ignoring them.
+            print("[calib] WARNING: parameter limits are ignored by the "
+                  "'First-time' pipeline — it takes no bounds arguments. Use "
+                  "One-shot, Four-stage, Bayesian or Joint-cake for bounded "
+                  "refinement.")
         a, b, c, alpha, beta, gamma = _LC.get(calibrant, _LC["CeO2"])
         return first_time_calibrate(
             image,
@@ -513,18 +591,13 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
     if mode == "four_stage":
         from midas_calibrate_v2.pipelines import autocalibrate_four_stage
         img, dk, pNY, pNZ = _prep_transformed(image, dark, im_trans)
-        if manual:
-            seed = _manual_seed_dict(manual)
-        else:
-            s = make_seed_safe(img, wavelength, pxY, calibrant)
-            if s is None:
-                raise RuntimeError(
-                    "Auto-seed failed for four-stage pipeline. "
-                    "Enable manual seed (Pick BC / Pick Ring + Lsd) and retry.")
-            seed = {"BC_y": s.BC_y, "BC_z": s.BC_z, "Lsd": s.Lsd_um}
+        seed = _seed_for_v1(img, wavelength=wavelength, pxY=pxY,
+                            calibrant=calibrant, manual=manual,
+                            why="four-stage pipeline")
         v1 = build_v1_params(
             seed, wavelength=wavelength, pxY=pxY, pxZ=pxZ, calibrant=calibrant,
-            NY=pNY, NZ=pNZ, refine=refine, n_iter=n_iter, device=device)
+            NY=pNY, NZ=pNZ, refine=refine, n_iter=n_iter, device=device,
+            tols=tols)
         spec = _panel_spec(v1, panel_layout) if panel_layout is not None else None
         return autocalibrate_four_stage(v1, img, dark=dk, device=device,
                                         panel_layout=panel_layout, spec=spec,
@@ -533,7 +606,7 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
     if mode in ("bayesian", "joint"):
         img, dk, pNY, pNZ = _prep_transformed(image, dark, im_trans)
         v1 = _seed_and_v1(img, wavelength, pxY, pxZ, calibrant, pNY, pNZ,
-                          refine, n_iter, device, manual)
+                          refine, n_iter, device, manual, tols=tols)
         spec = _panel_spec(v1, panel_layout) if panel_layout is not None else None
         if mode == "bayesian":
             from midas_calibrate_v2.pipelines import autocalibrate_bayesian
@@ -547,24 +620,19 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
 
 
 def _seed_and_v1(image, wavelength, pxY, pxZ, calibrant, NY, NZ,
-                 refine, n_iter, device, manual):
+                 refine, n_iter, device, manual, tols=None):
     """Seed (manual or auto) → build_v1_params. Shared by advanced pipelines.
 
     ``image`` must already be im_trans-transformed (via ``_prep_transformed``)
     — this seeds directly from whatever array is passed in, so the caller is
     responsible for making sure it's the same array that gets solved against.
     """
-    if manual:
-        seed = _manual_seed_dict(manual)
-    else:
-        s = make_seed_safe(image, wavelength, pxY, calibrant)
-        if s is None:
-            raise RuntimeError(
-                "Auto-seed failed. Enable manual seed (Pick BC / Pick Ring + Lsd).")
-        seed = {"BC_y": s.BC_y, "BC_z": s.BC_z, "Lsd": s.Lsd_um}
+    seed = _seed_for_v1(image, wavelength=wavelength, pxY=pxY,
+                        calibrant=calibrant, manual=manual,
+                        why="this pipeline")
     return build_v1_params(
         seed, wavelength=wavelength, pxY=pxY, pxZ=pxZ, calibrant=calibrant,
-        NY=NY, NZ=NZ, refine=refine, n_iter=n_iter, device=device)
+        NY=NY, NZ=NZ, refine=refine, n_iter=n_iter, device=device, tols=tols)
 
 
 def _build_panel_layout(cfg):

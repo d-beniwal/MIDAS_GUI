@@ -438,25 +438,93 @@ def test_each_calibrant_kind_keeps_its_own_refine_flags(app):
     assert _flags(tab)["ty"] is False             # crystalline edit remembered
 
 
-def test_limits_button_is_manual_fit_only(app):
-    """The crystalline backend takes no bounds kwargs, so the control is
-    hidden for it — and the distortion row, which the manual fit cannot do,
-    is hidden the other way round."""
+def test_limits_column_is_shaped_per_calibrant_kind(app):
+    """Both kinds bound their fit, at different granularity.
+
+    ``CalibrationParams`` carries one window for both centre coordinates and
+    one for both refined tilts, and never refines tx, so those rows are hidden
+    for a crystalline calibrant and a distortion row (which the manual fit has
+    no model for) takes their place.
+    """
     import midas_gui.tab_calibrate as tab_calibrate_mod
     tab = tab_calibrate_mod.CalibrationTab()
 
+    def shown():
+        return {n for n, cells in tab._limit_row_cells.items()
+                if not cells[2].isHidden()}
+
     tab._cal.setCurrentIndex(tab._cal.findText("CeO2"))
-    assert all(w.isHidden() for w in tab._limit_cells)
+    assert shown() == {"Lsd", "BC_y", "ty", "wavelength_A", "distortion"}
     assert not tab._dist_row.isHidden()
+    # Always applied, so the opt-in checkbox would state something false.
+    assert all(tab._limit_widgets[n][0].isHidden()
+               for n in ("Lsd", "BC_y", "ty", "wavelength_A"))
+    assert all(tab._limit_widgets[n][0].isChecked()
+               for n in ("Lsd", "BC_y", "ty", "wavelength_A", "distortion"))
 
     tab._cal.setCurrentIndex(tab._cal.findText("AgBH (silver behenate)"))
-    assert not any(w.isHidden() for w in tab._limit_cells)
+    assert shown() == {"Lsd", "BC_y", "BC_z", "ty", "tz", "tx", "wavelength_A"}
     assert tab._dist_row.isHidden()
+    # ...and opt-in again, so an untouched card leaves the manual fit unbounded.
+    assert not any(cb.isChecked() for cb, _s, _c in tab._limit_widgets.values())
+    assert tab._limit_bounds() == (None, [])
+
+
+def test_crystalline_limits_show_the_windows_actually_in_force(app):
+    """The crystalline windows always apply, so the card is prefilled from the
+    backend's own defaults and reports no override until one is edited."""
+    import midas_gui.tab_calibrate as tab_calibrate_mod
+    from midas_gui.calib import tol_defaults
+    tab = tab_calibrate_mod.CalibrationTab()
+    tab._cal.setCurrentIndex(tab._cal.findText("CeO2"))
+    d = tol_defaults()
+
+    assert tab._limit_widgets["Lsd"][1].value() == pytest.approx(d["tolLsd"] / 1000.0)
+    assert tab._limit_widgets["BC_y"][1].value() == pytest.approx(d["tolBC"])
+    assert tab._limit_widgets["ty"][1].value() == pytest.approx(d["tolTilts"])
+    # Untouched defaults ask the backend for nothing it would not already do,
+    # which is what keeps run_pipeline on the plain calibrate() path.
+    assert tab._crystalline_tols() is None
+    assert "Always applied" in tab._limits_note.text()
+
+    tab._manual_seed_check.setChecked(True)
+    tab._seed_lsd.setValue(1000.0)
+    _set_limit(tab, "Lsd", 2.0, "mm")
+    tols = tab._crystalline_tols()
+    assert tols is not None
+    assert tols["tolLsd"] == pytest.approx(2000.0)        # mm entered, µm stored
+    assert tols["tolBC"] == pytest.approx(d["tolBC"])     # untouched rows ride along
+
+
+def test_seed_step_follows_the_limit_window(app):
+    """A window states how far a value can sensibly move, so it is a better
+    arrow step than a fixed constant."""
+    import midas_gui.tab_calibrate as tab_calibrate_mod
+    from midas_gui.constants import DEFAULT_STEP_LSD_MM
+    tab = tab_calibrate_mod.CalibrationTab()
+    tab._cal.setCurrentIndex(tab._cal.findText("CeO2"))
+    tab._manual_seed_check.setChecked(True)
+    tab._seed_lsd.setValue(1000.0)
+
+    _set_limit(tab, "Lsd", 5.0, "mm")
+    # 10% of the full ±5 mm span.
+    assert tab._seed_lsd.singleStep() == pytest.approx(1.0)
+    # The merged crystalline BC window drives both centre boxes.
+    _set_limit(tab, "BC_y", 20.0, "px")
+    assert tab._seed_bcy.singleStep() == pytest.approx(4.0)
+    assert tab._seed_bcz.singleStep() == pytest.approx(4.0)
+
+    # No window in force -> back to the configured constant.
+    tab._cal.setCurrentIndex(tab._cal.findText("AgBH (silver behenate)"))
+    assert tab._seed_lsd.singleStep() == pytest.approx(DEFAULT_STEP_LSD_MM)
 
 
 def test_limit_bounds_conversion_and_zero_value_guard(app):
     import midas_gui.tab_calibrate as tab_calibrate_mod
     tab = tab_calibrate_mod.CalibrationTab()
+    # _limit_bounds() feeds the manual d-spacing fit, which only runs for a
+    # d-spacing calibrant — crystalline windows go through _crystalline_tols().
+    tab._cal.setCurrentIndex(tab._cal.findText("AgBH (silver behenate)"))
     tab._manual_seed_check.setChecked(True)
     tab._seed_lsd.setValue(13500.0)     # mm in the UI, µm in the fit
     tab._seed_bcy.setValue(129.0)
@@ -486,6 +554,7 @@ def test_seed_relative_limits_are_dropped_when_the_manual_seed_is_off(app):
     the wavelength, which is always live, is kept."""
     import midas_gui.tab_calibrate as tab_calibrate_mod
     tab = tab_calibrate_mod.CalibrationTab()
+    tab._cal.setCurrentIndex(tab._cal.findText("AgBH (silver behenate)"))
     tab._manual_seed_check.setChecked(False)
     tab._wl.setValue(0.173)
     _set_limit(tab, "Lsd", 5.0, "%")

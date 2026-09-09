@@ -98,3 +98,124 @@ def test_populate_param_grid_marks_unrefined_geometry_params_as_fixed(app):
     assert not any(lbl.startswith("ty") and "(fixed)" in lbl for lbl in labels)
     assert not any(lbl.startswith("tz") and "(fixed)" in lbl for lbl in labels)
     assert not any(lbl.startswith("Wavelength") and "(fixed)" in lbl for lbl in labels)
+
+
+# ── Parameter windows (tol*) reaching the crystalline backend ────────────────
+
+_V1_KW = dict(wavelength=0.1729, pxY=200.0, pxZ=200.0, calibrant="CeO2",
+              NY=2048, NZ=2048, refine={}, n_iter=4, device="cpu")
+_V1_SEED = {"BC_y": 1024.0, "BC_z": 1024.0, "Lsd": 1_000_000.0}
+
+
+def test_build_v1_params_tols_override_only_what_is_given():
+    """midas_calibrate/param_vector.py:bounds() turns these into hard (lo, hi)
+    box constraints, so they are the crystalline bounding mechanism. Omitted
+    keys must keep the dataclass default, and tols=None must reproduce exactly
+    the object this built before tolerances were plumbed through."""
+    import dataclasses as dc
+    from midas_gui.calib import build_v1_params, tol_defaults, TOL_FIELDS
+
+    base = build_v1_params(_V1_SEED, **_V1_KW)
+    defaults = tol_defaults()
+    assert {f: getattr(base, f) for f in TOL_FIELDS} == defaults
+
+    tight = build_v1_params(_V1_SEED, **_V1_KW,
+                            tols={"tolLsd": 2000.0, "tolBC": 5.0})
+    assert tight.tolLsd == pytest.approx(2000.0)
+    assert tight.tolBC == pytest.approx(5.0)
+    assert tight.tolTilts == pytest.approx(defaults["tolTilts"])
+    # Nothing else moved.
+    differing = [f.name for f in dc.fields(base)
+                 if getattr(base, f.name) != getattr(tight, f.name)]
+    assert sorted(differing) == ["tolBC", "tolLsd"]
+
+
+def test_tols_are_default_drives_the_one_shot_reroute():
+    """calibrate() builds its own CalibrationParams and hardcodes
+    Refine={"Lsd": True, "BC": True} (auto.py:619), so it can express neither a
+    custom window nor a held Lsd/BC. tols_are_default is what decides whether
+    the plain path is still usable."""
+    from midas_gui.calib import tols_are_default, tol_defaults
+    d = tol_defaults()
+
+    assert tols_are_default(None)
+    assert tols_are_default({})
+    assert tols_are_default({"tolBC": d["tolBC"]})
+    assert not tols_are_default({"tolBC": 5.0})
+    assert not tols_are_default({"tolLsd": 2000.0})
+
+
+def test_crystalline_tols_maps_rows_to_backend_windows(app):
+    """The UI rows are coarser than the manual fit's: one window for both
+    centre coordinates, one for both tilts, one for all distortion slots."""
+    from midas_gui.tab_calibrate import CalibrationTab
+
+    tab = CalibrationTab()
+    tab._cal.setCurrentIndex(tab._cal.findText("CeO2"))
+    tab._manual_seed_check.setChecked(True)
+    tab._seed_lsd.setValue(1000.0)
+    tab._seed_ty.setValue(0.0)
+
+    cb, spin, combo = tab._limit_widgets["Lsd"]
+    spin.setValue(3.0); combo.setCurrentText("mm")
+    cb, spin, combo = tab._limit_widgets["ty"]
+    spin.setValue(1.5); combo.setCurrentText("°")
+
+    tols = tab._crystalline_tols()
+    assert tols["tolLsd"] == pytest.approx(3000.0)     # mm entered, µm stored
+    assert tols["tolTilts"] == pytest.approx(1.5)      # covers ty and tz
+    assert set(tols) <= {"tolLsd", "tolBC", "tolTilts",
+                          "tolWavelength", "tolDistortion"}
+
+    # A d-spacing calibrant has no crystalline run to bound.
+    tab._cal.setCurrentIndex(tab._cal.findText("AgBH (silver behenate)"))
+    assert tab._crystalline_tols() is None
+
+
+def _route_taken(monkeypatch, *, refine=None, tols=None):
+    """Which backend entry point run_pipeline('one_shot') actually calls."""
+    import numpy as np
+    import midas_gui.calib as calib_mod
+    import midas_calibrate_v2
+    import midas_calibrate_v2.pipelines.single as single_mod
+
+    calls = []
+
+    def _stub(name):
+        # A namespace, not a bare object: the reroute branch tags the result
+        # with _residual_bin_path on the way out.
+        def run(*_a, **_k):
+            calls.append(name)
+            return SimpleNamespace()
+        return run
+
+    monkeypatch.setattr(midas_calibrate_v2, "calibrate", _stub("calibrate"))
+    monkeypatch.setattr(single_mod, "autocalibrate", _stub("autocalibrate"))
+    cfg = {"wavelength": 0.1729, "pxY": 200.0, "pxZ": 200.0, "calibrant": "CeO2",
+           "refine": refine if refine is not None else {}, "n_iter": 1,
+           "lm_max_iter": 10, "device": "cpu", "im_trans": (),
+           "build_residual_corr": False, "tols": tols,
+           "manual_seed": {"BC_y": 1024.0, "BC_z": 1024.0, "Lsd": 1_000_000.0}}
+    calib_mod.run_pipeline("one_shot", np.zeros((256, 256), dtype=np.float32),
+                           None, cfg)
+    return calls[0]
+
+
+def test_one_shot_stays_on_calibrate_when_nothing_needs_rerouting(monkeypatch):
+    assert _route_taken(monkeypatch) == "calibrate"
+    assert _route_taken(monkeypatch, tols={"tolBC": 20.0}) == "calibrate"
+
+
+def test_one_shot_reroutes_for_what_calibrate_cannot_express(monkeypatch):
+    """calibrate() has no tol* kwarg and hardcodes Refine Lsd/BC True, and its
+    single refine_tilts bool cannot refine exactly one of ty/tz — each of those
+    has to go through the v1 route instead, or the GUI would be lying about
+    what it asked for."""
+    # A tightened window.
+    assert _route_taken(monkeypatch, tols={"tolLsd": 2000.0}) == "autocalibrate"
+    # Lsd or BC held fixed.
+    assert _route_taken(monkeypatch, refine={"Lsd": False}) == "autocalibrate"
+    assert _route_taken(monkeypatch, refine={"BC": False}) == "autocalibrate"
+    # Exactly one tilt refined.
+    assert _route_taken(monkeypatch,
+                        refine={"ty": True, "tz": False}) == "autocalibrate"

@@ -80,6 +80,12 @@ class CalibrationTab(QtWidgets.QWidget):
         self._refine_state_dsp: dict = {"Lsd": False, "BC": True, "tx": False,
                                         "ty": False, "tz": False, "Wavelength": False}
         self._refine_mode_is_dsp: Optional[bool] = None
+        # The limits column is likewise per-calibrant-kind — different rows,
+        # different granularity, and "off" means unbounded for the manual fit
+        # but "backend default" for the crystalline one. See _sync_limits_mode.
+        self._limit_state_xtal: Optional[dict] = None
+        self._limit_state_dsp: Optional[dict] = None
+        self._limits_mode_is_dsp: Optional[bool] = None
         self._last_cfg: Optional[dict] = None          # cfg used for the last run (provenance)
         self._last_bright: Optional[np.ndarray] = None
         self._last_background: Optional[np.ndarray] = None
@@ -367,27 +373,40 @@ class CalibrationTab(QtWidgets.QWidget):
         # One row per parameter: the "refine?" checkbox on the left, and on the
         # right the ± window that bounds it — the two decisions about the same
         # parameter read together instead of living in separate blocks.
-        # Column 1 is the limits column: manual (d-spacing) fit only, because
-        # the crystalline backend exposes no bounds kwargs, so every cell in it
-        # is hidden as a unit for crystalline calibrants (_set_limits_visible).
-        hdr = QtWidgets.QLabel("Limits — bound a refined parameter to ± a window "
-                               "around its seed value (manual fit only):")
+        # Column 1 is the limits column. Both calibrant kinds bound their fit,
+        # but at different granularity and with different semantics — see
+        # _LIMIT_ROWS_XTAL / _sync_limits_mode. The header says which is in
+        # force, since "± window" means an opt-in bound for the manual fit and
+        # an always-applied one for the crystalline backend.
+        hdr = QtWidgets.QLabel("")
         hdr.setStyleSheet(f"color:{S.MUTED};font-size:10px"); hdr.setWordWrap(True)
         rfl.addWidget(hdr, 0, 0, 1, 5)
+        self._limits_hdr = hdr
         #: limit slot -> (refine checkbox, sub-label). The single "BC" checkbox
         #: frees both centre coordinates, so it spans the BC_y/BC_z rows and
         #: those two rows carry their own sub-label; every other row is already
         #: named by its refine checkbox, so its limit checkbox has no text.
+        #: "distortion" has no checkbox of its own here — the Distortion refine
+        #: box lives in its own row below the grid — so it carries a sub-label.
         limit_layout = {"Lsd": (self._ref_lsd, ""), "BC_y": (self._ref_bc, "BC_y"),
                         "BC_z": (None, "BC_z"), "ty": (self._ref_ty, ""),
                         "tz": (self._ref_tz, ""), "tx": (self._ref_tx, ""),
-                        "wavelength_A": (self._ref_wl, "")}
-        order = ("Lsd", "BC_y", "BC_z", "ty", "tz", "tx", "wavelength_A")
+                        "wavelength_A": (self._ref_wl, ""),
+                        "distortion": (None, "Distortion")}
+        order = ("Lsd", "BC_y", "BC_z", "ty", "tz", "tx", "wavelength_A",
+                 "distortion")
         #: slot -> (unit0, win0, abs_unit, decimals), dropping the label and
         #: fallback columns the dialog form of this block used.
         rows = {r[0]: (r[2], r[3], r[4], r[5]) for r in PARAMETER_LIMIT_ROWS}
         self._limit_widgets: dict = {}
         self._limit_cells: list = [hdr]
+        #: slot -> its own cells, so a row can be hidden on its own. The
+        #: crystalline windows are coarser than the manual fit's (one for both
+        #: centre coordinates, one for both tilts), so the surplus rows are
+        #: hidden rather than shown as controls that would silently do nothing.
+        self._limit_row_cells: dict = {}
+        self._limit_row_index: dict = {}
+        self._refine_grid = rfl
         for r, name in enumerate(order, start=1):
             unit0, win0, abs_unit, dec = rows[name]
             ref_box, sub = limit_layout[name]
@@ -398,12 +417,17 @@ class CalibrationTab(QtWidgets.QWidget):
                 rfl.addWidget(ref_box, r, 0, span, 1)
             cb = QtWidgets.QCheckBox(sub)
             spin = _fspin(0.0, 1e6, dec, win0, "")
-            combo = _NoScrollComboBox(); combo.addItems(["%", abs_unit])
-            combo.setCurrentText(unit0)
+            combo = _NoScrollComboBox()
+            # A percentage of the seed is meaningless for the distortion
+            # coefficients (they seed at 0), so that row is absolute-only.
+            combo.addItems([u for u in ("%", abs_unit) if u])
+            combo.setCurrentText(unit0 or abs_unit)
             spin.setEnabled(False); combo.setEnabled(False)
             cb.toggled.connect(spin.setEnabled)
             cb.toggled.connect(combo.setEnabled)
-            cb.toggled.connect(self._update_limits_label)
+            cb.toggled.connect(self._on_limits_changed)
+            spin.valueChanged.connect(self._on_limits_changed)
+            combo.currentTextChanged.connect(self._on_limits_changed)
             # Placed straight into the outer grid rather than in a per-row
             # container, so the ± / value / unit columns line up down the card
             # even though the BC rows carry an extra sub-label.
@@ -411,22 +435,14 @@ class CalibrationTab(QtWidgets.QWidget):
             for c, w in enumerate(cells, start=1):
                 rfl.addWidget(w, r, c)
             self._limit_widgets[name] = (cb, spin, combo)
+            self._limit_row_cells[name] = list(cells)
+            self._limit_row_index[name] = r
             self._limit_cells.extend(cells)
         self._limits_note = QtWidgets.QLabel("")
         self._limits_note.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         self._limits_note.setWordWrap(True)
         rfl.addWidget(self._limits_note, len(order) + 1, 0, 1, 5)
         self._limit_cells.append(self._limits_note)
-        # Shown in place of the whole limits column for crystalline calibrants.
-        # Silently dropping the ± entries reads as a glitch — the user is left
-        # wondering where the bounds went — so say why they are gone.
-        self._limits_na_lbl = QtWidgets.QLabel(
-            "Parameter limits are not available for this calibrant: the MIDAS "
-            "calibrate backend takes no bounds arguments, so there is nothing to "
-            "pass them to. They apply to the manual d-spacing fit only.")
-        self._limits_na_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
-        self._limits_na_lbl.setWordWrap(True)
-        rfl.addWidget(self._limits_na_lbl, len(order) + 1, 0, 1, 5)
 
         # Distortion gets a companion "…" button opening the per-coefficient dialog.
         # Held in a container widget (not a bare layout) so the whole row can be
@@ -806,18 +822,199 @@ class CalibrationTab(QtWidgets.QWidget):
                        "unit": combo.currentText()}
                 for name, (cb, spin, combo) in self._limit_widgets.items()}
 
-    def _set_limits_visible(self, on: bool) -> None:
-        """Show/hide the limits column of the Refine grid as one unit — its
-        cells are interleaved with the refine checkboxes rather than living in
-        a single container, so they are hidden individually."""
-        for w in self._limit_cells:
-            w.setVisible(on)
-        self._limits_na_lbl.setVisible(not on)
+    #: Limit rows each calibrant kind actually has a bound for. The manual fit
+    #: bounds every free parameter individually; ``CalibrationParams`` carries
+    #: one window for both centre coordinates (``tolBC``), one for both refined
+    #: tilts (``tolTilts``) and one for all fifteen distortion slots
+    #: (``tolDistortion``), and never refines tx at all — so the surplus rows
+    #: are hidden rather than left as controls that would do nothing.
+    _LIMIT_ROWS_DSP  = ("Lsd", "BC_y", "BC_z", "ty", "tz", "tx", "wavelength_A")
+    _LIMIT_ROWS_XTAL = ("Lsd", "BC_y", "ty", "wavelength_A", "distortion")
+    #: Crystalline row -> the ``CalibrationParams`` window it drives, and the
+    #: label it wears (BC_y/ty stand in for the merged pair).
+    _XTAL_TOL_FIELD = {"Lsd": "tolLsd", "BC_y": "tolBC", "ty": "tolTilts",
+                       "wavelength_A": "tolWavelength", "distortion": "tolDistortion"}
+    _XTAL_ROW_LABEL = {"BC_y": "BC", "ty": "Tilts"}
+
+    def _limit_rows_for_mode(self, is_dsp: bool) -> tuple:
+        return self._LIMIT_ROWS_DSP if is_dsp else self._LIMIT_ROWS_XTAL
+
+    def _sync_limits_mode(self, is_dsp: bool) -> None:
+        """Shape the limits column for the calibrant kind.
+
+        The two kinds differ in more than which rows exist. For the manual fit
+        a row that is off means *unbounded*, so rows are opt-in. For the
+        crystalline backend the windows are **always** applied — an untouched
+        fit already runs at ±15 mm / ±20 px / ±3° — so "off" there would state
+        something false. Crystalline rows are therefore always on, their enable
+        checkbox is hidden, and they are seeded with the values actually in
+        force so the card shows the real constraint rather than an invitation
+        to add one.
+        """
+        if self._limits_mode_is_dsp == is_dsp:
+            return
+        if self._limits_mode_is_dsp is not None:      # remember the outgoing mode
+            snap = self._limits
+            if self._limits_mode_is_dsp:
+                self._limit_state_dsp = snap
+            else:
+                self._limit_state_xtal = snap
+        want = set(self._limit_rows_for_mode(is_dsp))
+        for name, cells in self._limit_row_cells.items():
+            for w in cells:
+                w.setVisible(name in want)
+        for name, (cb, _spin, _combo) in self._limit_widgets.items():
+            # Crystalline: the window always applies, so the opt-in box is
+            # meaningless — hide it and hold it checked so _limits() reports
+            # the row as live. "distortion" is the exception: its refine box
+            # lives outside this grid, so the row would have no label at all
+            # without it. Shown disabled there, which reads as "always on".
+            if is_dsp:
+                cb.setVisible(name in want)
+                cb.setEnabled(True)
+            else:
+                cb.setVisible(name == "distortion" and name in want)
+                cb.setEnabled(False)
+        # The crystalline tilt window is one value for ty and tz (tolTilts), so
+        # span it across both rows the way the BC refine box already spans its
+        # pair — parked on the ty row alone it reads as bounding only ty.
+        for w, col in zip(self._limit_row_cells["ty"], (1, 2, 3, 4)):
+            self._refine_grid.removeWidget(w)
+            self._refine_grid.addWidget(w, self._limit_row_index["ty"], col,
+                                        1 if is_dsp else 2, 1)
+        incoming = self._limit_state_dsp if is_dsp else self._limit_state_xtal
+        if incoming is None:
+            incoming = (self._dsp_default_limit_state() if is_dsp
+                        else self._xtal_default_limit_state())
+        self._apply_limit_state(incoming, force_on=not is_dsp, rows=want)
+        self._limits_hdr.setText(
+            "Limits — bound a refined parameter to ± a window around its seed "
+            "value:" if is_dsp else
+            "Limits — the MIDAS backend always bounds the fit to a ± window "
+            "around the seed. These are the windows in force; edit to tighten "
+            "or loosen them.")
+        self._limits_mode_is_dsp = is_dsp
+        self._update_limits_label()
+        self._sync_seed_steps()
+
+    def _dsp_default_limit_state(self) -> dict:
+        """Manual-fit rows start off, at the ``PARAMETER_LIMIT_ROWS`` defaults —
+        an untouched card must leave the fit unbounded. Spelled out rather than
+        left to whatever the other mode happened to set, so arriving from a
+        crystalline calibrant does not inherit its always-on rows."""
+        return {r[0]: {"on": False, "value": r[3], "unit": r[2] or r[4]}
+                for r in PARAMETER_LIMIT_ROWS}
+
+    def _xtal_default_limit_state(self) -> dict:
+        """Crystalline rows prefilled from the ``tol*`` defaults actually in
+        force, read off the installed backend rather than hardcoded."""
+        from midas_gui.calib import tol_defaults
+        d = tol_defaults()
+        # tolLsd is stored in µm; the row is entered in mm.
+        vals = {"Lsd": d["tolLsd"] / 1000.0, "BC_y": d["tolBC"],
+                "ty": d["tolTilts"], "wavelength_A": d["tolWavelength"],
+                "distortion": d["tolDistortion"]}
+        units = {"Lsd": "mm", "BC_y": "px", "ty": "°",
+                 "wavelength_A": "Å", "distortion": ""}
+        return {n: {"on": True, "value": v, "unit": units[n]}
+                for n, v in vals.items()}
+
+    def _apply_limit_state(self, state: dict, *, force_on: bool, rows) -> None:
+        for name, (cb, spin, combo) in self._limit_widgets.items():
+            row = (state or {}).get(name)
+            if isinstance(row, dict):
+                if row.get("value") is not None:
+                    spin.setValue(float(row["value"]))
+                idx = combo.findText(str(row.get("unit", "")))
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+                cb.setChecked(bool(row.get("on", False)))
+            if force_on and name in rows:
+                cb.setChecked(True)
+            spin.setEnabled(cb.isChecked())
+            combo.setEnabled(cb.isChecked())
+
+    def _on_limits_changed(self, *_args):
+        self._update_limits_label()
+        self._sync_seed_steps()
 
     def _n_limits_set(self) -> int:
-        return sum(1 for cb, _s, _c in self._limit_widgets.values() if cb.isChecked())
+        rows = set(self._limit_rows_for_mode(bool(self._limits_mode_is_dsp)))
+        return sum(1 for n, (cb, _s, _c) in self._limit_widgets.items()
+                   if n in rows and cb.isChecked())
+
+    #: Limit row -> the seed spin box its window is centred on. Used both to
+    #: report the resulting range and to size that box's arrow step.
+    _LIMIT_SEED_BOX = {"Lsd": "_seed_lsd", "BC_y": "_seed_bcy", "BC_z": "_seed_bcz",
+                       "tx": "_seed_tx", "ty": "_seed_ty", "tz": "_seed_tz"}
+    #: Crystalline rows that drive more than one seed box (merged windows).
+    _XTAL_STEP_EXTRA = {"BC_y": ("_seed_bcz",), "ty": ("_seed_tz",)}
+    #: Fraction of the *full* [lo, hi] span used as the arrow step, so a ±5 mm
+    #: window steps 1 mm and a ±20 px window steps 4 px.
+    _STEP_FRACTION_OF_RANGE = 0.10
+
+    def _sync_seed_steps(self, *_args):
+        """Size each seed box's arrow step from its own limit window.
+
+        A window is a statement about how far the value can sensibly move, so
+        it is a better step than a fixed constant: tightening Lsd to ±2 mm
+        should also stop the arrow jumping 1 mm at a time. Rows without a live
+        window fall back to the configured DEFAULT_STEP_* constants.
+        """
+        is_dsp = bool(self._limits_mode_is_dsp)
+        rows = set(self._limit_rows_for_mode(is_dsp))
+        fallback = {"_seed_lsd": DEFAULT_STEP_LSD_MM,
+                    "_seed_bcy": DEFAULT_STEP_BC, "_seed_bcz": DEFAULT_STEP_BC,
+                    "_seed_tx": DEFAULT_STEP_TILT, "_seed_ty": DEFAULT_STEP_TILT,
+                    "_seed_tz": DEFAULT_STEP_TILT}
+        steps = dict(fallback)
+        seed = self._limit_seed_values()
+        for name, attr in self._LIMIT_SEED_BOX.items():
+            if name not in rows or name not in seed:
+                continue
+            cb, spin, combo = self._limit_widgets[name]
+            if not cb.isChecked():
+                continue
+            try:
+                lo, hi = limit_window(name, seed[name], spin.value(),
+                                      combo.currentText())
+            except KeyError:
+                continue
+            span = abs(hi - lo) * (1e-3 if name == "Lsd" else 1.0)   # µm → mm
+            step = span * self._STEP_FRACTION_OF_RANGE
+            if step <= 0:
+                continue
+            for target in (attr,) + (self._XTAL_STEP_EXTRA.get(name, ())
+                                     if not is_dsp else ()):
+                steps[target] = step
+        for attr, step in steps.items():
+            box = getattr(self, attr, None)
+            if box is not None:
+                box.setStepType(QtWidgets.QAbstractSpinBox.DefaultStepType)
+                box.setSingleStep(step)
+
+    #: Crystalline window -> (label, display scale from fit units, unit, fmt).
+    _XTAL_NOTE_ROWS = (("tolLsd", "Lsd", 1e-3, "mm", ".4g"),
+                       ("tolBC", "BC", 1.0, "px", ".4g"),
+                       ("tolTilts", "tilts", 1.0, "°", ".4g"),
+                       ("tolWavelength", "λ", 1.0, "Å", ".3g"),
+                       ("tolDistortion", "distortion", 1.0, "", ".3g"))
 
     def _update_limits_label(self, *_args):
+        if self._limits_mode_is_dsp is False:
+            # The crystalline windows are always applied and are centred on
+            # whatever seed the fit starts from, so the manual fit's
+            # "unbounded"/"needs a manual seed" wording would both be wrong.
+            from midas_gui.calib import tol_defaults
+            tols = self._crystalline_tols() or {}
+            eff = {**tol_defaults(), **tols}
+            bits = [f"{lbl} ±{eff[f] * sc:{fmt}}{(' ' + u) if u else ''}"
+                    for f, lbl, sc, u, fmt in self._XTAL_NOTE_ROWS if f in eff]
+            tail = ("" if tols else
+                    "  — backend defaults; edit any to tighten or loosen")
+            self._limits_note.setText(
+                "Always applied, centred on the seed: " + "   ".join(bits) + tail)
+            return
         bounds, skipped = self._limit_bounds()
         if not bounds and not skipped:
             self._limits_note.setText("No limits set — the fit is unbounded.")
@@ -828,6 +1025,30 @@ class CalibrationTab(QtWidgets.QWidget):
         if skipped:
             bits.append(f"{', '.join(sorted(skipped))} ignored (needs 'Use manual seed')")
         self._limits_note.setText("   ".join(bits))
+
+    def _crystalline_tols(self) -> Optional[dict]:
+        """The ``tol*`` overrides for a crystalline run, or ``None`` when every
+        row still sits at the backend default (which keeps ``run_pipeline`` on
+        the plain ``calibrate()`` path — see ``calib.tols_are_default``)."""
+        from midas_gui.calib import tols_are_default
+        if self._limits_mode_is_dsp:
+            return None
+        seed = self._limit_seed_values()
+        out = {}
+        for name in self._LIMIT_ROWS_XTAL:
+            cb, spin, combo = self._limit_widgets[name]
+            if not cb.isChecked():
+                continue
+            field = self._XTAL_TOL_FIELD[name]
+            if name == "distortion":
+                # Seeds at 0 and has no seed box, so the entered value is the
+                # window itself rather than something to centre on a value.
+                out[field] = float(spin.value())
+                continue
+            centre = seed.get(name, 0.0)
+            lo, hi = limit_window(name, centre, spin.value(), combo.currentText())
+            out[field] = abs(hi - lo) / 2.0
+        return None if tols_are_default(out) else out
 
     #: Limit rows whose ± window is centred on a manual-seed field. Without
     #: "Use manual seed" the fit auto-seeds Lsd/BC from the picks themselves
@@ -841,11 +1062,21 @@ class CalibrationTab(QtWidgets.QWidget):
         plus the names of any dropped because their window has no defined
         centre. ``bounds`` is ``None`` when nothing is bounded, which keeps
         the fit on the unbounded Levenberg-Marquardt path it has always
-        used."""
+        used.
+
+        Crystalline calibrants never reach the manual fit, and their rows are
+        always on and coarser (see :meth:`_crystalline_tols`), so this reports
+        nothing for them rather than handing those windows to a solver that
+        will not run."""
+        if self._limits_mode_is_dsp is False:
+            return None, []
         seed = self._limit_seed_values()
         seeded = self._manual_seed_check.isChecked()
         out, skipped = {}, []
+        rows = set(self._limit_rows_for_mode(True))
         for name, row in (self._limits or {}).items():
+            if name not in rows:
+                continue
             if not (isinstance(row, dict) and row.get("on")) or name not in seed:
                 continue
             if not seeded and name in self._SEED_DEPENDENT_LIMITS:
@@ -1101,7 +1332,7 @@ class CalibrationTab(QtWidgets.QWidget):
         self._dsp_custom_ed.setVisible(text == "Custom d-spacings…")
         self._manual_card.setVisible(is_dsp)
         self._refc_card.setVisible(True)
-        self._set_limits_visible(is_dsp)
+        self._sync_limits_mode(is_dsp)
         self._dist_row.setVisible(not is_dsp)
         self._build_rc.setVisible(not is_dsp)
         self._refc_card.setToolTip(
@@ -1342,6 +1573,9 @@ class CalibrationTab(QtWidgets.QWidget):
             "output_dir": self._out_ed.text().strip() or None,
             "im_trans": trans,
             "mask": self._loader.composite_mask(),
+            # None while every window sits at the backend default, which keeps
+            # run_pipeline on the plain calibrate() path.
+            "tols": self._crystalline_tols(),
         }
         self._last_dist_coeffs = cfg["refine"]["distortion_coeffs"]
         self._last_refine_flags = cfg["refine"]
@@ -2045,6 +2279,10 @@ class CalibrationTab(QtWidgets.QWidget):
                  # would lose the crystalline flags entirely (and vice versa).
                  "refine_modes": {"xtal": self._refine_state_xtal,
                                    "dsp": self._refine_state_dsp},
+                 # Same reasoning for the limit rows, which are likewise
+                 # remembered per calibrant kind.
+                 "limit_modes": {"xtal": self._limit_state_xtal,
+                                  "dsp": self._limit_state_dsp},
                  "result": project.sanitize_result_dict(self._result)}
         if self._result is not None and sidecar_stem:
             try:
@@ -2077,8 +2315,17 @@ class CalibrationTab(QtWidgets.QWidget):
         # belong to the saved calibrant, so pin the mode first — otherwise
         # _on_calibrant_changed would treat this as a transition, file them
         # under the wrong mode, and overwrite them with the other one's set.
+        limits = state.get("limit_modes") or {}
+        if isinstance(limits.get("xtal"), dict):
+            self._limit_state_xtal = dict(limits["xtal"])
+        if isinstance(limits.get("dsp"), dict):
+            self._limit_state_dsp = dict(limits["dsp"])
         self._refine_mode_is_dsp = is_dspacing_calibrant(self._cal.currentText())
+        # Same pinning as above for the limits column: the live rows were just
+        # restored from "fields" and already belong to the saved calibrant.
+        self._limits_mode_is_dsp = self._refine_mode_is_dsp
         self._on_calibrant_changed(self._cal.currentText())
+        self._sync_seed_steps()
         self._loader.set_state(state.get("loader") or {})
         self._img_view.set_display_state(state.get("img_view"))
         self._img_view.set_pick_state(state.get("img_picks"))

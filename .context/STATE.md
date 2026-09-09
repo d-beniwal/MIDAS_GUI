@@ -28,6 +28,25 @@ Open follow-ups, none blocking:
 
 ## Recently completed
 
+**2026-09-09 (later) — Parameter limits for crystalline calibrants; One-shot
+refine flags made real.** The "limits are not available for this calibrant"
+label shipped in the entry below was **wrong**: `CalibrationParams` carries
+`tolLsd`/`tolBC`/`tolTilts`/`tolDistortion`/`tolWavelength` and
+`param_vector.bounds()` makes them hard LM box constraints, so crystalline fits
+were already bounded at invisible defaults (±15 mm / ±20 px / ±3°). The Refine
+card now shows those windows, always-on and prefilled from the installed
+backend, merged to the backend's coarser granularity (one BC window, one tilt
+window, no tx). Plain One-shot is rerouted through
+`build_v1_params` + `pipelines.single.autocalibrate` whenever `calibrate()`
+cannot express what was asked — a custom window, a held Lsd/BC, or exactly one
+of ty/tz — which also makes those checkboxes genuinely control the fit for the
+first time. Seed arrow steps now follow the window (10 % of the full range).
+**Files:** `calib.py` (`tol_defaults`/`tols_are_default`/`_seed_for_v1`,
+`build_v1_params(tols=)`, reroute), `tab_calibrate.py` (`_sync_limits_mode`,
+`_crystalline_tols`, `_sync_seed_steps`), `dialogs.py` (distortion row; dead
+`ParameterLimitsDialog` deleted), tests in `test_calibrate_panel_save.py` and
+`test_manual_dspacing_calib_ui.py`. Docs: DECISIONS + `gui_documentation.md` §5.
+
 **2026-09-09 — Manual d-spacing (AgBH/SAXS) fit made trustworthy.** Reported
 as *"calibration runs away and the AgBH rings are significantly off"* on a
 13.5 m SAXS geometry. Root cause is identifiability, not a solver bug: at

@@ -8,6 +8,69 @@ file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this
 date for the full uncondensed entries if ever needed._
 
+## 2026-09-09 (later) — Crystalline calibrants DO have parameter bounds; the earlier claim was wrong
+
+The entry below shipped a label saying "Parameter limits are not available for
+this calibrant: the MIDAS calibrate backend takes no bounds arguments, so there
+is nothing to pass them to." **That is false**, and it was written from an
+incomplete check (`calibrate()`'s own signature) rather than from the params
+object the solve actually uses.
+
+`midas_calibrate.params.CalibrationParams` carries `tolLsd` / `tolBC` /
+`tolTilts` / `tolDistortion` / `tolWavelength`, and
+`midas_calibrate/param_vector.py:bounds()` turns each into a hard
+`(value − tol, value + tol)` box constraint on the LM solve. So crystalline fits
+were **already bounded all along** — at defaults nobody chose and nobody could
+see: ±15 mm on Lsd, ±20 px on BC, ±3° on tilt, ±0.001 Å on λ. On the reported
+13.5 m SAXS geometry that Lsd window is ±0.1 %.
+
+Lesson worth keeping: "the backend does not support X" needs checking against
+the object the solver consumes, not only the entry point's signature. The GUI
+builds `CalibrationParams` itself in `build_v1_params`, so anything that
+dataclass carries was always reachable.
+
+**Presentation: always-on rows showing the effective values, not opt-in
+checkboxes.** For the manual fit an unticked row means *unbounded*, which is
+true there. For the crystalline backend "off" would mean "backend default", and
+a user reading it as unbounded is exactly the misconception that produced the
+wrong label in the first place. So crystalline rows are always active, have no
+enable checkbox, and are prefilled from `tol_defaults()` — read off the
+installed dataclass rather than hardcoded, so a backend release that retunes
+them cannot leave the GUI displaying stale windows.
+
+The backend's granularity is coarser than the manual fit's — one window for both
+BC coordinates, one for both refined tilts, one for all fifteen distortion slots,
+and `refine_mask` never refines tx — so the surplus rows are hidden rather than
+left as controls that would silently do nothing. The tilt row spans ty/tz in the
+grid so it does not read as bounding only ty.
+
+**Rerouting One-shot rather than leaving its flags inert.** Plain One-shot calls
+`calibrate()`, which builds its own `CalibrationParams` (no tol* kwarg) and
+hardcodes `Refine={"Lsd": True, "BC": True, ...}` (`auto.py:619`). Three things
+it therefore cannot express: a non-default window, a held Lsd/BC, and refining
+exactly one of ty/tz (its single `refine_tilts` bool is computed as `ty or tz`).
+Each now routes through `build_v1_params` + `pipelines.single.autocalibrate` —
+the escape hatch this file already used for a distortion subset, for exactly the
+same reason. Rejected the alternative of warning that the checkboxes do nothing:
+the mechanism to make them work already existed and was one branch away.
+
+The trade-off is real and is logged rather than hidden: the v1 route skips
+`calibrate()`'s STAGE-1 multi-hypothesis Lsd search and uses the seed as given.
+`first_time` still cannot be bounded at all (it takes neither a
+`CalibrationParams` nor a tol* kwarg — it has its own `tilt_prior_deg` /
+`half_window_px` on a different footing) and warns when limits are set.
+
+**Seed arrow steps follow the window** at 10 % of the full range (±15 mm → 3 mm,
+±2 mm → 0.4 mm). A window is a statement about how far a value can sensibly
+move, which is a better step than a constant; rows with no window fall back to
+the `DEFAULT_STEP_*` preferences.
+
+Also fixed here: `_limit_bounds()` (which feeds the manual fit) was not
+mode-filtered, so once crystalline rows became always-on it would have handed
+their windows to a solver that never runs. `dialogs.ParameterLimitsDialog` was
+dead code — superseded by the inline column, only its row table and
+`limit_window()` were ever imported — and is deleted.
+
 ## 2026-09-09 — Manual d-spacing fit: BC-only default, parameter limits, and σ reporting
 
 The manual ring-pick fit added in `bdd9b51` was wired to the tab's Refine

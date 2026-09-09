@@ -1696,16 +1696,45 @@ determined at all, prints:
 
 This warns, never blocks — loose data may be exactly what you meant to fit.
 
-**Limits…** (Refine card, d-spacing calibrants only) bounds a refined parameter to a
-window around its current seed, for holding a quantity you already know — a measured
-sample–detector distance — near its true value while the fit determines the rest. One
-row per parameter: `[enable] [± value] [unit]`, with a live preview of the resulting
-range. The unit is either `%` of the seed or the parameter's own absolute unit;
-tilts default to absolute because they seed at 0°, where a percentage window would
-pin the parameter exactly (a degenerate percentage window falls back to the row's
-absolute default rather than pinning it). All rows start off, so an untouched dialog
-leaves the fit exactly as it was. The button label shows how many are set. Limits
-apply to the manual fit only — the crystalline backend takes no bounds arguments.
+**Limits** (the ± column in the Refine card) bounds a parameter to a window around its
+seed, for holding a quantity you already know — a measured sample–detector distance —
+near its true value while the fit determines the rest. Each row is `[± value] [unit]`,
+with a live readout of the resulting range. The unit is either `%` of the seed or the
+parameter's own absolute unit; tilts default to absolute because they seed at 0°, where
+a percentage window would pin the parameter exactly (a degenerate percentage window
+falls back to the row's absolute default rather than pinning it).
+
+Both calibrant kinds are bounded, but they mean different things, so the column is
+shaped for each.
+
+*Manual (d-spacing) fit* — one row per free parameter, each with an **enable
+checkbox**. All rows start off, so an untouched card leaves the fit unbounded on the
+Levenberg–Marquardt path it has always used; ticking any row switches the solver to
+trust-region reflective.
+
+*Crystalline calibrants* — the MIDAS backend **always** bounds the fit
+(`CalibrationParams.tolLsd` and friends become hard `(lo, hi)` constraints on the LM
+solve), so there is no "off" state to offer: an untouched CeO2 fit already runs at
+**±15 mm** on Lsd, **±20 px** on the beam centre, **±3°** on tilt, **±0.001 Å** on λ
+and **±0.01** on the distortion coefficients. The rows are therefore always active and
+prefilled with the windows actually in force, so the card shows the real constraint
+rather than inviting you to add one. The backend's windows are coarser than the manual
+fit's — one value covers both beam-centre coordinates, one covers both refined tilts,
+and one covers all fifteen distortion slots — so those rows are merged, and `tx` has no
+row at all because this backend never refines it.
+
+Tightening a window also **shrinks that seed field's arrow step**, to 10 % of the full
+range: at ±15 mm the Lsd arrows move 3 mm, at ±2 mm they move 0.4 mm. Rows with no
+window in force fall back to the steps set in Preferences.
+
+One consequence worth knowing: `midas_calibrate_v2.calibrate()`, which the plain
+**One-shot** pipeline calls, accepts no window arguments and hardcodes Lsd and the beam
+centre as refined. So editing a limit, unchecking **Lsd** or **BC**, or refining exactly
+one of **ty**/**tz** makes the GUI route One-shot through the same lower-level routine
+the Four-stage / Bayesian / Joint pipelines use, which honours all of them. The Log says
+when this happens and why. The trade-off is that this route skips `calibrate()`'s
+STAGE-1 multi-hypothesis Lsd search and uses your seed as given, so a poor seed matters
+more. **First-time** cannot take windows at all and warns if any are set.
 
 ### Predicted-ring overlay (image toolbar)
 After a run, the calibrant's predicted ring radii are drawn in **lime** with a
