@@ -670,29 +670,59 @@ def _auto_seed_from_picks(picks, wavelength_A: float, pxY_um: float, pxZ_um: flo
 
 
 def fit_geometry_from_ring_picks(picks, wavelength_A: float, pxY_um: float,
-                                 pxZ_um: float, seed=None) -> dict:
-    """Fit detector Lsd + beam center (BC_y, BC_z) from user-picked ring points
-    and their known d-spacings, bypassing any crystallographic calibrant
-    backend entirely (tilt is fixed at 0 — a plain untilted Debye-Scherrer
-    geometry). ``picks`` is an iterable of (Y_px, Z_px, d_spacing_A) triples;
-    points on the same ring share the same d-spacing value.
+                                 pxZ_um: float, seed=None,
+                                 tilt_seed=(0.0, 0.0, 0.0), refine=None,
+                                 bounds=None) -> dict:
+    """Fit detector geometry from user-picked ring points and their known
+    d-spacings, bypassing any crystallographic calibrant backend entirely.
+    ``picks`` is an iterable of (Y_px, Z_px, d_spacing_A) triples; points on
+    the same ring share the same d-spacing value.
+
+    ``refine`` is a dict of booleans selecting which parameters float —
+    the same shape ``CalibrationTab._refine_flags()`` produces (keys
+    ``"Lsd"``, ``"BC"`` (jointly gates BC_y/BC_z), ``"tx"``, ``"ty"``,
+    ``"tz"``, ``"Wavelength"``; any other keys, e.g. ``"Distortion"``, are
+    ignored). ``refine=None`` reproduces the historical behavior: only
+    Lsd/BC free, tilt fixed at ``tilt_seed`` (default 0) and wavelength
+    fixed at ``wavelength_A``.
+
+    ``bounds`` optionally restricts free parameters to a box: a dict keyed by
+    *slot* name (``"Lsd"``, ``"BC_y"``, ``"BC_z"``, ``"tx"``, ``"ty"``,
+    ``"tz"``, ``"wavelength_A"``) mapping to a ``(lo, hi)`` pair in fit units
+    (µm / px / deg / Å); a missing or ``None`` entry means ±inf. Because
+    scipy's Levenberg-Marquardt implementation rejects bounds outright, the
+    solver is chosen accordingly: ``"lm"`` when every bound is infinite (so
+    the unbounded path stays exactly as it has always been) and ``"trf"``
+    as soon as any bound is finite. A seed outside its box is clamped into
+    it rather than raising, and reported in ``clamped``.
 
     For each picked point, the *observed* 2theta implied by a trial geometry
-    is ``atan2(r_px, Lsd)`` where ``r_px`` is the radial pixel distance from
-    the trial beam center (this is the untilted case of the same forward
-    model used by :func:`tilted_ring_xy`/``_draw_corrected_rings``). The
-    residual against the *expected* 2theta from Bragg's law
-    (``2*asin(wavelength/(2*d))``) is minimized over (Lsd, BC_y, BC_z).
+    is computed via :func:`_pixel_to_two_theta_deg` — the closed-form
+    inverse of the tilted forward-projection used by
+    :func:`tilted_ring_xy`/``_draw_corrected_rings`` (reduces exactly to
+    ``atan2(r_px, Lsd)`` when tilt is 0). The residual against the
+    *expected* 2theta from Bragg's law (``2*asin(wavelength/(2*d))``) is
+    minimized over whichever parameters ``refine`` marks free.
 
-    Returns a dict with ``Lsd``, ``BC_y``, ``BC_z`` (µm/px), ``residual_deg_rms``,
-    ``success``, ``message``, and ``seed_quality`` ("ok"/"fallback"/"given").
+    Returns a dict with ``Lsd``, ``BC_y``, ``BC_z`` (µm/px), ``tx``, ``ty``,
+    ``tz`` (deg), ``wavelength_A`` (Å), ``residual_deg_rms``, ``success``,
+    ``message``, ``seed_quality`` ("ok"/"fallback"/"given"), ``n_free``,
+    plus the identifiability report described in
+    :func:`_fit_parameter_sigma`: ``sigma`` (per-slot 1-sigma estimate; 0.0
+    for held-fixed parameters, ``inf`` when the data cannot constrain one),
+    ``at_limit`` (names resting on an active bound, whose ``sigma`` is not
+    meaningful), ``clamped``, and ``method``.
+
+    The ``sigma`` report is the point of this function for small-2theta
+    calibrants: with only a short ring arc on the detector, Lsd/BC are
+    strongly correlated and tilt is effectively unconstrained, so the fit
+    can converge happily onto noise. ``sigma`` is what makes that visible
+    instead of silent — see ``CalibrationTab`` and ``ManualDspacingCalibWorker``.
     """
     from scipy.optimize import least_squares
     picks = list(picks)
     pts = np.array([(p[0], p[1]) for p in picks], dtype=np.float64)
     d = np.array([p[2] for p in picks], dtype=np.float64)
-    s = np.clip(wavelength_A / (2.0 * d), -1.0, 1.0)
-    two_theta_calc = 2.0 * np.degrees(np.arcsin(s))
 
     if seed is None:
         lsd0, bcy0, bcz0, seed_quality = _auto_seed_from_picks(
@@ -700,23 +730,120 @@ def fit_geometry_from_ring_picks(picks, wavelength_A: float, pxY_um: float,
     else:
         lsd0, bcy0, bcz0 = seed
         seed_quality = "given"
+    tx0, ty0, tz0 = tilt_seed
+
+    refine = refine or {}
+    ref_lsd = refine.get("Lsd", True)
+    ref_bc = refine.get("BC", True)
+    ref_tx = refine.get("tx", False)
+    ref_ty = refine.get("ty", False)
+    ref_tz = refine.get("tz", False)
+    ref_wl = refine.get("Wavelength", False)
+
+    # Ordered parameter slots: (name, seed value, is free to refine).
+    slots = [("Lsd", lsd0, ref_lsd), ("BC_y", bcy0, ref_bc), ("BC_z", bcz0, ref_bc),
+             ("tx", tx0, ref_tx), ("ty", ty0, ref_ty), ("tz", tz0, ref_tz),
+             ("wavelength_A", wavelength_A, ref_wl)]
+    free_idx = [i for i, s in enumerate(slots) if s[2]]
+    fixed = {name: val for name, val, is_free in slots if not is_free}
+
+    def unpack(p):
+        vals = dict(fixed)
+        for i, v in zip(free_idx, p):
+            vals[slots[i][0]] = v
+        return vals
 
     def resid(p):
-        Lsd, bc_y, bc_z = p
-        Yc = (bc_y - pts[:, 0]) * pxY_um
-        Zc = (pts[:, 1] - bc_z) * pxZ_um
-        r = np.hypot(Yc, Zc)
-        two_theta_obs = np.degrees(np.arctan2(r, Lsd))
+        v = unpack(p)
+        s = np.clip(v["wavelength_A"] / (2.0 * d), -1.0, 1.0)
+        two_theta_calc = 2.0 * np.degrees(np.arcsin(s))
+        two_theta_obs = _pixel_to_two_theta_deg(
+            pts[:, 0], pts[:, 1], v["Lsd"], v["BC_y"], v["BC_z"],
+            v["tx"], v["ty"], v["tz"], pxY_um, pxZ_um)
         return two_theta_obs - two_theta_calc
 
-    sol = least_squares(resid, [lsd0, bcy0, bcz0], method="lm")
-    Lsd, bc_y, bc_z = (float(v) for v in sol.x)
+    p0 = [slots[i][1] for i in free_idx]
+    free_names = [slots[i][0] for i in free_idx]
+    bounds = bounds or {}
+    lo = np.array([(bounds.get(n) or (-np.inf, np.inf))[0] for n in free_names], dtype=float)
+    hi = np.array([(bounds.get(n) or (-np.inf, np.inf))[1] for n in free_names], dtype=float)
+    bounded = bool(len(p0)) and bool(np.isfinite(lo).any() or np.isfinite(hi).any())
+
+    sigma = {name: 0.0 for name, _, _ in slots}
+    at_limit: set = set()
+    clamped: set = set()
+    method = "lm"
+
+    if not p0:
+        # Nothing selected to refine — report the seed geometry's own residual.
+        vals, success, message, fun = unpack([]), True, "nothing to refine (all parameters fixed)", resid([])
+        jac = None
+    else:
+        if bounded:
+            # trf raises if x0 is outside the box; nudge strictly inside instead.
+            method = "trf"
+            x0 = np.clip(np.asarray(p0, dtype=float), lo, hi)
+            clamped = {n for n, a, b in zip(free_names, p0, x0) if a != b}
+            sol = least_squares(resid, x0, method="trf", bounds=(lo, hi))
+        else:
+            sol = least_squares(resid, p0, method="lm")
+        vals = unpack(list(sol.x))
+        success, message, fun = bool(sol.success), str(sol.message), sol.fun
+        jac = sol.jac
+        if bounded:
+            # A parameter that ran to the edge of its box isn't determined by
+            # the data, so its covariance-based sigma would be meaningless.
+            # scipy's own active_mask is the authoritative signal but is
+            # xtol-relative to the *parameter*, which is far too strict at
+            # Lsd's magnitude (~1e7 µm): trf routinely halts a few µm short of
+            # a bound on ftol and reports it inactive. The scale that actually
+            # matters to the user is the width of the window they specified,
+            # so also treat "within 0.1% of the box width of an edge" as at
+            # the limit.
+            for name, x, a, b, act in zip(free_names, sol.x, lo, hi, sol.active_mask):
+                span = (b - a) if (np.isfinite(a) and np.isfinite(b)) else np.inf
+                tol = 1e-3 * span if np.isfinite(span) else 1e-6 * max(abs(x), 1.0)
+                if act != 0 or (np.isfinite(a) and x - a <= tol) \
+                        or (np.isfinite(b) and b - x <= tol):
+                    at_limit.add(name)
+
+    if jac is not None:
+        sigma.update(_fit_parameter_sigma(jac, np.asarray(fun), free_names))
+    for name in at_limit:
+        sigma[name] = 0.0
+
     return {
-        "Lsd": Lsd, "BC_y": bc_y, "BC_z": bc_z,
-        "residual_deg_rms": float(np.sqrt(np.mean(sol.fun ** 2))),
-        "success": bool(sol.success), "message": str(sol.message),
-        "seed_quality": seed_quality,
+        "Lsd": float(vals["Lsd"]), "BC_y": float(vals["BC_y"]), "BC_z": float(vals["BC_z"]),
+        "tx": float(vals["tx"]), "ty": float(vals["ty"]), "tz": float(vals["tz"]),
+        "wavelength_A": float(vals["wavelength_A"]),
+        "residual_deg_rms": float(np.sqrt(np.mean(np.asarray(fun) ** 2))) if len(fun) else 0.0,
+        "success": success, "message": message,
+        "seed_quality": seed_quality, "n_free": len(p0),
+        "sigma": sigma, "at_limit": at_limit, "clamped": clamped, "method": method,
     }
+
+
+def _fit_parameter_sigma(jac, resid_vec, free_names) -> dict:
+    """1-sigma estimates for the free parameters of a ``least_squares`` solve,
+    from the usual linearised covariance ``inv(J.T @ J) * s^2`` with
+    ``s^2 = sum(r^2) / (m - n)``.
+
+    Returns ``inf`` for every parameter when ``J.T @ J`` is singular — that is
+    the honest answer for a genuinely degenerate fit (e.g. tilt at very small
+    2theta, where the residual barely responds to it at all), and it is what
+    callers threshold on to warn the user rather than reporting a converged
+    value that is really just fitted noise.
+    """
+    m, n = len(resid_vec), len(free_names)
+    if n == 0:
+        return {}
+    s2 = float(np.sum(np.asarray(resid_vec) ** 2)) / max(m - n, 1)
+    try:
+        cov = np.linalg.inv(np.asarray(jac).T @ np.asarray(jac)) * s2
+        sig = np.sqrt(np.abs(np.diag(cov)))
+    except np.linalg.LinAlgError:
+        sig = np.full(n, np.inf)
+    return {name: float(v) for name, v in zip(free_names, sig)}
 
 
 def _tilt_matrix_np(tx_deg: float, ty_deg: float, tz_deg: float) -> np.ndarray:
@@ -792,6 +919,27 @@ def tilted_spoke_xy(two_theta_lo_deg: float, two_theta_hi_deg: float, eta_deg: f
     tt = np.linspace(two_theta_lo_deg, two_theta_hi_deg, n)
     return _tilt_project_YZ(tt, np.full(n, eta_deg), tx, ty, tz,
                              Lsd_um, bc_y, bc_z, pxY_um, pxZ_um)
+
+
+def _pixel_to_two_theta_deg(Y_px, Z_px, Lsd_um: float, bc_y: float, bc_z: float,
+                             tx: float, ty: float, tz: float,
+                             pxY_um: float, pxZ_um: float):
+    """Closed-form inverse of :func:`_tilt_project_YZ`: the observed 2theta
+    (degrees) for picked pixel(s) given a trial tilted geometry. Exact
+    because the in-plane offset ``_tilt_project_YZ`` builds has zero
+    component along the tilt plane's normal (``TRs[:,0]``) by construction,
+    so it is fully recoverable from its two in-plane basis components
+    (``TRs[:,1]``, ``TRs[:,2]``) alone — no iteration needed per point.
+    Reduces exactly to ``degrees(atan2(r_px, Lsd))`` when tx=ty=tz=0."""
+    Yc = (bc_y - np.asarray(Y_px, dtype=float)) * pxY_um
+    Zc = (np.asarray(Z_px, dtype=float) - bc_z) * pxZ_um
+    TRs = _tilt_matrix_np(tx, ty, tz)
+    y_hat, z_hat = TRs[:, 1], TRs[:, 2]
+    Px = Lsd_um + Yc * y_hat[0] + Zc * z_hat[0]
+    Py = Yc * y_hat[1] + Zc * z_hat[1]
+    Pz = Yc * y_hat[2] + Zc * z_hat[2]
+    norm = np.sqrt(Px ** 2 + Py ** 2 + Pz ** 2)
+    return np.degrees(np.arccos(np.clip(Px / norm, -1.0, 1.0)))
 
 
 def read_geometry(path: str | Path) -> dict:

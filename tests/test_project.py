@@ -750,8 +750,10 @@ def test_apply_project_calibration_single_detector(app, tmp_path):
     # Rings are redrawn from the stored result immediately (no image was
     # loaded here — loader_state's path doesn't exist — so the radial
     # profile/cake, which need an actual image, are correctly skipped).
+    # With the manual seed card active it owns the overlay, so _draw_rings
+    # delegates to the seed preview and the items land in _seed_ring_items.
     assert cal_tab._result is not None
-    assert len(cal_tab._ring_items) > 0
+    assert len(cal_tab._ring_items) + len(cal_tab._seed_ring_items) > 0
 
 
 def test_apply_project_mask_restores_fields_and_mask(app, tmp_path):
@@ -815,6 +817,34 @@ def test_apply_project_integration_populates_batch_plots_single_detector(app, tm
     assert len(batch_tab._stack_view._profiles) == 4
 
 
+def test_calibration_tab_get_state_set_state_roundtrip_restores_result(app):
+    """get_state()/set_state() must round-trip the fitted ``_result`` itself,
+    not just the seed widget values — reloading a saved project/session
+    should not require the user to remember to re-run Fit. Per
+    ``_apply_workspace_state``'s "long-running pipelines are not re-run"
+    contract, this must NOT spawn a real background integration — even
+    though the tab auto-loads a default calibrant image at construction,
+    ``set_state()`` only restores the rings/param grid/Save-button state
+    (``_display_stored_result(..., reintegrate_if_missing=False)``)."""
+    import midas_gui.tab_calibrate as tab_calibrate_mod
+
+    tab = tab_calibrate_mod.CalibrationTab()
+    tab._result = _fake_result()
+
+    state = tab.get_state()
+    assert state["result"]["BC_y"] == pytest.approx(1024.0)
+    assert "residual_corr_map" not in state["result"]   # torch-tensor field dropped
+
+    tab2 = tab_calibrate_mod.CalibrationTab()
+    assert tab2._result is None
+    tab2.set_state(state)
+
+    assert tab2._result is not None
+    assert tab2._result.Lsd == pytest.approx(200000.0)
+    assert tab2._result.BC_y == pytest.approx(1024.0)
+    assert tab2._result._calibrant_name == "CeO2"
+    assert tab2._save_json_btn.isEnabled()
+    assert tab2._save_ps_btn.isEnabled()
 
 
 def test_batch_tab_get_state_set_state_roundtrip_restores_calib_result(app):

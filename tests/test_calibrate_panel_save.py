@@ -63,3 +63,38 @@ def test_save_json_rewrites_colocated_panel_shifts_sidecar(app, tmp_path, monkey
     assert not saved["panel_shifts_path"].startswith(str(tempfile_shifts.parent))
     lines = sidecar.read_text().splitlines()
     assert len(lines) == 2
+
+
+def _crystalline_result():
+    return SimpleNamespace(
+        Lsd=200000.0, BC_y=1024.0, BC_z=1024.0, tx=0.15, ty=0.0, tz=0.0,
+        distortion={"iso_R2": 0.1}, pxY=200.0, pxZ=200.0,
+        NrPixelsY=2048, NrPixelsZ=2048, wavelength_A=0.1729,
+        _calibrant_name="CeO2", im_trans=[])
+
+
+def test_populate_param_grid_marks_unrefined_geometry_params_as_fixed(app):
+    """Parallel check to the manual-fit "(fixed)" annotation test — same
+    _populate_param_grid method, driven by a crystalline (CeO2-shaped)
+    result and a refine dict with Distortion/tx unchecked."""
+    from PyQt5 import QtWidgets
+    from midas_gui.tab_calibrate import CalibrationTab
+    from midas_gui.helpers import paramstest_pairs
+
+    tab = CalibrationTab()
+    result = _crystalline_result()
+    refine_flags = {"Lsd": True, "BC": True, "tx": False, "ty": True,
+                     "tz": True, "Wavelength": True, "Distortion": False,
+                     "distortion_coeffs": set()}
+    tab._populate_param_grid(paramstest_pairs(result, selected=set()),
+                             refine_flags=refine_flags)
+
+    grid = tab._param_grid
+    labels = [grid.itemAt(i).widget().text() for i in range(grid.count())
+              if isinstance(grid.itemAt(i).widget(), QtWidgets.QLabel)
+              and grid.itemAt(i).widget().text().endswith(":")]
+    assert any(lbl.startswith("tx") and "(fixed)" in lbl for lbl in labels)
+    assert not any(lbl.startswith("Lsd") and "(fixed)" in lbl for lbl in labels)
+    assert not any(lbl.startswith("ty") and "(fixed)" in lbl for lbl in labels)
+    assert not any(lbl.startswith("tz") and "(fixed)" in lbl for lbl in labels)
+    assert not any(lbl.startswith("Wavelength") and "(fixed)" in lbl for lbl in labels)

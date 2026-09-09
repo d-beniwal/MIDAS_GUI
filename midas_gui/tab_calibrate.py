@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 import numpy as np
@@ -19,7 +20,7 @@ import pyqtgraph as pg
 from midas_gui.constants import (
     CALIBRANTS, PIPELINES, DEFAULT_PIPELINE, _SG, _LC, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM,
     DEFAULT_LSD_UM, DEFAULT_BC_Y, DEFAULT_BC_Z, DEFAULT_CALIBRANT_TIF,
-    DISTORTION_NAMES, MATERIALS)
+    DISTORTION_NAMES, MATERIALS, calibrant_combo_items, is_dspacing_calibrant)
 from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _predict_ring_radii, _NoScrollComboBox,
     make_kedge_label, make_pixel_label, tilted_ring_xy, refresh_combo_items,
@@ -29,7 +30,8 @@ from midas_gui.widgets import (
     PickableImageViewer, ProfileViewer, LogPanel, DataLoaderPanel, CakeViewer,
     RingResidualViewer, build_lab_frame_axes_items, ring_azimuth_residual)
 from midas_gui.workers import CalibrationWorker, IntegrationWorker, ManualDspacingCalibWorker
-from midas_gui.dialogs import _SaveParamstestDialog, DistortionRefineDialog, show_error
+from midas_gui.dialogs import (_SaveParamstestDialog, DistortionRefineDialog,
+                                PARAMETER_LIMIT_ROWS, limit_window, show_error)
 from midas_gui.hydra_widgets import HydraModeRibbon
 from midas_gui.hydra_calib_page import HydraCalibrationPage
 from midas_gui import project
@@ -57,10 +59,26 @@ class CalibrationTab(QtWidgets.QWidget):
         self._orphans: list = []       # aborted workers kept alive until they wind down
         self._ring_items: list = []
         self._corrected_ring_items: list = []
+        self._seed_ring_items: list = []
         self._calib_result = None
         self._dist_coeffs = set(DISTORTION_NAMES)   # distortion coeffs to refine
         self._seed_dist: dict = {}                  # seed distortion carried from a result
         self._last_dist_coeffs: Optional[set] = None  # coeffs selected for the last run
+        self._last_refine_flags: Optional[dict] = None  # refine flags used for the last run
+        self._last_fit_sigma: Optional[dict] = None     # per-parameter 1σ from the last manual fit
+        self._last_at_limit: set = set()                # params that hit a limit last run
+        # The Refine checkboxes are shared by the crystalline and manual fits,
+        # but their sensible defaults are not. A crystalline CeO2 pattern fills
+        # the detector and constrains Lsd and tilt well; a d-spacing calibrant
+        # is fit from a handful of hand-picked points, often on a single short
+        # ring arc, where floating Lsd on top of BC is badly conditioned and
+        # tilt is not identifiable at all. So each mode keeps its own flags and
+        # they are swapped on the calibrant transition, rather than one set of
+        # defaults being wrong for one of the two.
+        self._refine_state_xtal: Optional[dict] = None
+        self._refine_state_dsp: dict = {"Lsd": False, "BC": True, "tx": False,
+                                        "ty": False, "tz": False, "Wavelength": False}
+        self._refine_mode_is_dsp: Optional[bool] = None
         self._last_cfg: Optional[dict] = None          # cfg used for the last run (provenance)
         self._last_bright: Optional[np.ndarray] = None
         self._last_background: Optional[np.ndarray] = None
@@ -97,8 +115,9 @@ class CalibrationTab(QtWidgets.QWidget):
 
     def refresh_calibrants(self) -> None:
         """Repopulate the Calibrant dropdown (single-detector view and every
-        Hydra panel) from the just-activated profile's constants.CALIBRANTS."""
-        refresh_combo_items(self._cal, CALIBRANTS)
+        Hydra panel) from the just-activated profile's constants.CALIBRANTS /
+        constants.MATERIALS."""
+        refresh_combo_items(self._cal, calibrant_combo_items())
         self._hydra_page.refresh_calibrants()
 
     # ── UI ────────────────────────────────────────────────────────
@@ -177,7 +196,7 @@ class CalibrationTab(QtWidgets.QWidget):
         _lrow.addStretch(1)
         det.body.addLayout(_lrow)
         self._wl = _fspin(0.001, 10.0, 5, DEFAULT_WAVELENGTH, "Å")
-        self._cal = _NoScrollComboBox(); self._cal.addItems(CALIBRANTS); self._cal.setMaximumWidth(150)
+        self._cal = _NoScrollComboBox(); self._cal.addItems(calibrant_combo_items()); self._cal.setMaximumWidth(150)
         det.body.addLayout(S.Form().row(
             (make_kedge_label(self._wl, "λ:"), self._wl), ("Calibrant:", self._cal)))
         self._pxY = _fspin(1.0, 5000.0, 2, DEFAULT_PIXEL_UM, "µm")
@@ -199,34 +218,29 @@ class CalibrationTab(QtWidgets.QWidget):
 
         # ── Manual ring-picking (non-crystalline calibrants) ──
         manual = S.make_card("Manual ring-picking (non-crystalline calibrants)")
+        self._manual_card = manual
         manual_hint = QtWidgets.QLabel(
-            "For calibrants with no space group (e.g. AgBH): pick points on the "
-            "image with 'Pick d-spacing pts' below, tag each with its Ring #, "
-            "then fit Lsd + beam center directly from Bragg's law. Bypasses the "
-            "Calibrant dropdown above; tilt is fixed at 0.")
+            "Shown because a calibrant with no space group is selected above "
+            "(e.g. AgBH, or Custom d-spacings…): pick points on the image with "
+            "'Pick d-spacing pts', tag each with its Ring #, then Run fits the "
+            "geometry directly from Bragg's law, refining whichever parameters "
+            "are ticked under Refine parameters.\n"
+            "Defaults to beam centre only. Points spread over one short ring arc "
+            "cannot separate Lsd from the beam centre, and constrain tilt hardly "
+            "at all — pick across more rings and a wider arc before freeing "
+            "those, and check the ± uncertainty reported for each fitted value.")
         manual_hint.setStyleSheet(f"color:{S.MUTED};font-size:10px"); manual_hint.setWordWrap(True)
         manual.body.addWidget(manual_hint)
-        self._dsp_material = _NoScrollComboBox()
-        self._dsp_material.addItems(
-            [n for n, m in MATERIALS.items() if m.get("kind") == "dspacing"]
-            + ["Custom d-spacings…"])
-        manual.body.addLayout(S.Form().row(("Material:", self._dsp_material)))
         self._dsp_custom_ed = QtWidgets.QLineEdit()
         self._dsp_custom_ed.setPlaceholderText(
             "Custom d-spacings (Å), comma/space-separated, e.g. 58.38 29.19 19.46")
         self._dsp_custom_ed.setVisible(False)
         manual.body.addWidget(self._dsp_custom_ed)
-        self._dsp_material.currentTextChanged.connect(self._on_dsp_material_changed)
+        self._cal.currentTextChanged.connect(self._on_calibrant_changed)
         self._dsp_custom_ed.textChanged.connect(self._on_dspacing_picks_changed)
         self._dsp_summary = QtWidgets.QLabel("No points picked yet.")
         self._dsp_summary.setStyleSheet(f"color:{S.MUTED};font-size:10px"); self._dsp_summary.setWordWrap(True)
         manual.body.addWidget(self._dsp_summary)
-        self._dsp_fit_btn = QtWidgets.QPushButton("Fit Geometry (manual)")
-        self._dsp_fit_btn.setEnabled(False)
-        self._dsp_fit_btn.setToolTip(
-            "Fit Lsd + beam center from the picked d-spacing points (need ≥3 valid points).")
-        self._dsp_fit_btn.clicked.connect(self._run_manual_fit)
-        manual.body.addWidget(self._dsp_fit_btn)
         lv.addWidget(manual)
 
         # ── Threshold (calibration image only) ──
@@ -324,6 +338,10 @@ class CalibrationTab(QtWidgets.QWidget):
 
         # ── Refine parameters ──
         refc = S.make_card("Refine parameters")
+        self._refine_summary_lbl = QtWidgets.QLabel("")
+        self._refine_summary_lbl.setStyleSheet(f"color:{S.ACCENT};font-size:10px")
+        self._refine_summary_lbl.setWordWrap(True)
+        refc.body.addWidget(self._refine_summary_lbl)
         rfl = QtWidgets.QGridLayout(); rfl.setSpacing(4)
         self._ref_lsd = QtWidgets.QCheckBox("Lsd"); self._ref_lsd.setChecked(True)
         self._ref_bc = QtWidgets.QCheckBox("BC"); self._ref_bc.setChecked(True)
@@ -333,22 +351,95 @@ class CalibrationTab(QtWidgets.QWidget):
         self._ref_wl = QtWidgets.QCheckBox("Wavelength")
         self._ref_dist = QtWidgets.QCheckBox("Distortion"); self._ref_dist.setChecked(True)
         self._build_rc = QtWidgets.QCheckBox("Residual map"); self._build_rc.setChecked(True)
-        for i, w in enumerate((self._ref_lsd, self._ref_bc, self._ref_ty, self._ref_tz,
-                               self._ref_tx, self._ref_wl)):
-            rfl.addWidget(w, i // 2, i % 2)
+        for w in (self._ref_lsd, self._ref_bc, self._ref_ty, self._ref_tz,
+                  self._ref_tx, self._ref_wl):
+            w.toggled.connect(self._on_refine_flags_changed)
+
+        # One row per parameter: the "refine?" checkbox on the left, and on the
+        # right the ± window that bounds it — the two decisions about the same
+        # parameter read together instead of living in separate blocks.
+        # Column 1 is the limits column: manual (d-spacing) fit only, because
+        # the crystalline backend exposes no bounds kwargs, so every cell in it
+        # is hidden as a unit for crystalline calibrants (_set_limits_visible).
+        hdr = QtWidgets.QLabel("Limits — bound a refined parameter to ± a window "
+                               "around its seed value (manual fit only):")
+        hdr.setStyleSheet(f"color:{S.MUTED};font-size:10px"); hdr.setWordWrap(True)
+        rfl.addWidget(hdr, 0, 0, 1, 5)
+        #: limit slot -> (refine checkbox, sub-label). The single "BC" checkbox
+        #: frees both centre coordinates, so it spans the BC_y/BC_z rows and
+        #: those two rows carry their own sub-label; every other row is already
+        #: named by its refine checkbox, so its limit checkbox has no text.
+        limit_layout = {"Lsd": (self._ref_lsd, ""), "BC_y": (self._ref_bc, "BC_y"),
+                        "BC_z": (None, "BC_z"), "ty": (self._ref_ty, ""),
+                        "tz": (self._ref_tz, ""), "tx": (self._ref_tx, ""),
+                        "wavelength_A": (self._ref_wl, "")}
+        order = ("Lsd", "BC_y", "BC_z", "ty", "tz", "tx", "wavelength_A")
+        #: slot -> (unit0, win0, abs_unit, decimals), dropping the label and
+        #: fallback columns the dialog form of this block used.
+        rows = {r[0]: (r[2], r[3], r[4], r[5]) for r in PARAMETER_LIMIT_ROWS}
+        self._limit_widgets: dict = {}
+        self._limit_cells: list = [hdr]
+        for r, name in enumerate(order, start=1):
+            unit0, win0, abs_unit, dec = rows[name]
+            ref_box, sub = limit_layout[name]
+            if ref_box is not None:
+                # BC owns two rows; centring its box across them keeps it read
+                # as the parent of both sub-rows rather than a peer of BC_y.
+                span = 2 if name == "BC_y" else 1
+                rfl.addWidget(ref_box, r, 0, span, 1)
+            cb = QtWidgets.QCheckBox(sub)
+            spin = _fspin(0.0, 1e6, dec, win0, "")
+            combo = _NoScrollComboBox(); combo.addItems(["%", abs_unit])
+            combo.setCurrentText(unit0)
+            spin.setEnabled(False); combo.setEnabled(False)
+            cb.toggled.connect(spin.setEnabled)
+            cb.toggled.connect(combo.setEnabled)
+            cb.toggled.connect(self._update_limits_label)
+            # Placed straight into the outer grid rather than in a per-row
+            # container, so the ± / value / unit columns line up down the card
+            # even though the BC rows carry an extra sub-label.
+            cells = (cb, QtWidgets.QLabel("±"), spin, combo)
+            for c, w in enumerate(cells, start=1):
+                rfl.addWidget(w, r, c)
+            self._limit_widgets[name] = (cb, spin, combo)
+            self._limit_cells.extend(cells)
+        self._limits_note = QtWidgets.QLabel("")
+        self._limits_note.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        self._limits_note.setWordWrap(True)
+        rfl.addWidget(self._limits_note, len(order) + 1, 0, 1, 5)
+        self._limit_cells.append(self._limits_note)
+        # Shown in place of the whole limits column for crystalline calibrants.
+        # Silently dropping the ± entries reads as a glitch — the user is left
+        # wondering where the bounds went — so say why they are gone.
+        self._limits_na_lbl = QtWidgets.QLabel(
+            "Parameter limits are not available for this calibrant: the MIDAS "
+            "calibrate backend takes no bounds arguments, so there is nothing to "
+            "pass them to. They apply to the manual d-spacing fit only.")
+        self._limits_na_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        self._limits_na_lbl.setWordWrap(True)
+        rfl.addWidget(self._limits_na_lbl, len(order) + 1, 0, 1, 5)
+
         # Distortion gets a companion "…" button opening the per-coefficient dialog.
+        # Held in a container widget (not a bare layout) so the whole row can be
+        # hidden as one unit for calibrants that don't support distortion refinement.
         self._dist_btn = QtWidgets.QToolButton(); self._dist_btn.setText("…")
         self._dist_btn.setToolTip("Choose which distortion coefficients to refine "
                                   "(η-fold presets available).")
         self._dist_btn.clicked.connect(self._edit_distortion_coeffs)
-        drow = QtWidgets.QHBoxLayout(); drow.setSpacing(4)
+        self._dist_row = QtWidgets.QWidget()
+        drow = QtWidgets.QHBoxLayout(self._dist_row); drow.setContentsMargins(0, 0, 0, 0); drow.setSpacing(4)
         drow.addWidget(self._ref_dist); drow.addWidget(self._dist_btn); drow.addStretch(1)
-        rfl.addLayout(drow, 3, 0)
-        rfl.addWidget(self._build_rc, 3, 1)
+        rfl.addWidget(self._dist_row, len(order) + 2, 0)
+        rfl.addWidget(self._build_rc, len(order) + 2, 1, 1, 4)
         self._ref_dist.toggled.connect(lambda _=0: self._update_dist_label())
+        self._ref_dist.toggled.connect(self._on_refine_flags_changed)
+        rfl.setColumnStretch(4, 1)
         refc.body.addLayout(rfl)
         lv.addWidget(refc)
+        self._refc_card = refc
         self._update_dist_label()
+        self._update_limits_label()
+        self._update_refine_summary()
 
         # ── Advanced ──
         grp_adv = QtWidgets.QGroupBox("Advanced")
@@ -365,6 +456,7 @@ class CalibrationTab(QtWidgets.QWidget):
         av.addLayout(S.Form().row(("Device:", self._device)))
         av.addLayout(S.Form().row(("Output:", outr)))
         lv.addWidget(grp_adv)
+        self._adv_grp = grp_adv
 
         # ── Multi-panel ──
         grp_panel = QtWidgets.QGroupBox("Multi-panel detector")
@@ -387,7 +479,7 @@ class CalibrationTab(QtWidgets.QWidget):
 
         # ── Run + Save ──
         self._run_btn = S.primary_btn("Run Calibration")
-        self._run_btn.clicked.connect(self._run)
+        self._run_btn.clicked.connect(self._on_run_clicked)
         self._abort_btn = QtWidgets.QPushButton("Abort")
         self._abort_btn.setEnabled(False)
         self._abort_btn.setToolTip("Cancel: returns control immediately and discards the "
@@ -396,6 +488,20 @@ class CalibrationTab(QtWidgets.QWidget):
         run_row = QtWidgets.QHBoxLayout(); run_row.setSpacing(6)
         run_row.addWidget(self._run_btn, 1); run_row.addWidget(self._abort_btn)
         lv.addLayout(run_row)
+        # Every export below is gated on a calibration *result*, which until now
+        # only a fit could produce — so a user who had already dialled the seed
+        # in by hand until the simulated rings sat on the measured ones had no
+        # way to use that geometry downstream. This publishes the seed as the
+        # result without fitting anything; the parameter grid then marks every
+        # geometry row "(fixed)", because none of them were measured.
+        self._accept_seed_btn = QtWidgets.QPushButton("Use seed as calibration (no fit)")
+        self._accept_seed_btn.setToolTip(
+            "Publish the seed geometry above as the calibration result — no fit, "
+            "no picked points, no uncertainties. Use this when you have already "
+            "matched the simulated rings to the measured ones by hand and just "
+            "want to send that geometry on to integration.")
+        self._accept_seed_btn.clicked.connect(self._accept_seed_as_result)
+        lv.addWidget(self._accept_seed_btn)
         self._prog = QtWidgets.QProgressBar(); self._prog.setRange(0, 0); self._prog.setVisible(False)
         lv.addWidget(self._prog)
         self._save_json_btn = QtWidgets.QPushButton("Save .json"); self._save_json_btn.setEnabled(False)
@@ -434,6 +540,16 @@ class CalibrationTab(QtWidgets.QWidget):
         self._axis_items: list = []
         for sig in (self._seed_bcy.valueChanged, self._seed_bcz.valueChanged):
             sig.connect(self._redraw_lab_axes_if_on)
+        for sig in (self._seed_bcy.valueChanged, self._seed_bcz.valueChanged,
+                    self._seed_lsd.valueChanged, self._wl.valueChanged,
+                    self._pxY.valueChanged, self._pxZ_spin.valueChanged,
+                    self._seed_tx.valueChanged, self._seed_ty.valueChanged,
+                    self._seed_tz.valueChanged):
+            sig.connect(self._update_seed_ring_preview)
+        self._pxZ_check.toggled.connect(self._update_seed_ring_preview)
+        self._manual_seed_check.toggled.connect(self._update_seed_ring_preview)
+        self._cal.currentTextChanged.connect(self._update_seed_ring_preview)
+        self._dsp_custom_ed.textChanged.connect(self._update_seed_ring_preview)
         right.addWidget(self._img_view)
 
         bot = QtWidgets.QTabWidget()
@@ -510,6 +626,8 @@ class CalibrationTab(QtWidgets.QWidget):
         self._hydra_page.panelCalibrationDone.connect(self.hydraPanelCalibrationDone.emit)
         self._mode_stack.addWidget(self._hydra_page)
 
+        self._on_calibrant_changed(self._cal.currentText())
+
     # ── Data (from the loader panel) ──────────────────────────────
 
     def _on_loader_data(self):
@@ -541,7 +659,18 @@ class CalibrationTab(QtWidgets.QWidget):
     def _on_metadata_detected(self, detected: dict):
         """Best-effort pxY/wavelength_A auto-detected from the just-loaded
         file (see helpers.detect_geometry_from_path) — only the fields
-        actually present are applied."""
+        actually present are applied.
+
+        Suppressed while ``set_state()`` is restoring: that path re-loads the
+        saved file, which re-fires this signal *after* the saved fields have
+        been applied, so the file header would silently overwrite the
+        wavelength/pixel size the user explicitly saved. A file's
+        ``instrument/HEM/Energy`` is a best-effort hint for a fresh
+        interactive load, and is routinely stale (e.g. an AgBH frame taken at
+        72 keV whose header still reads 51 keV); an explicitly restored
+        workspace value always wins over it."""
+        if getattr(self, "_restoring_state", False):
+            return
         if "wavelength_A" in detected:
             self._wl.setValue(float(detected["wavelength_A"]))
         if "pxY" in detected:
@@ -641,6 +770,84 @@ class CalibrationTab(QtWidgets.QWidget):
     def _update_dist_label(self):
         n = len(self._dist_coeffs) if self._ref_dist.isChecked() else 0
         self._ref_dist.setText(f"Distortion ({n}/15)")
+        self._update_refine_summary()
+
+    def _on_refine_flags_changed(self, *_args):
+        self._update_refine_summary()
+        self._on_dspacing_picks_changed()
+
+    # ── Manual-fit parameter limits ───────────────────────────────
+
+    def _limit_seed_values(self) -> dict:
+        """Current seed geometry keyed by ``fit_geometry_from_ring_picks`` slot
+        name, in *fit* units (Lsd in µm) — the centre each ± window is taken
+        around."""
+        return {"Lsd": self._seed_lsd.value() * 1000.0,
+                "BC_y": self._seed_bcy.value(), "BC_z": self._seed_bcz.value(),
+                "tx": self._seed_tx.value(), "ty": self._seed_ty.value(),
+                "tz": self._seed_tz.value(), "wavelength_A": self._wl.value()}
+
+    @property
+    def _limits(self) -> dict:
+        """``{slot: {"on", "value", "unit"}}`` read straight off the inline
+        limit widgets — they are the single source of truth, so there is no
+        separate copy to keep in sync (and project state persists them via
+        ``_state_widgets`` like any other spin box)."""
+        return {name: {"on": cb.isChecked(), "value": spin.value(),
+                       "unit": combo.currentText()}
+                for name, (cb, spin, combo) in self._limit_widgets.items()}
+
+    def _set_limits_visible(self, on: bool) -> None:
+        """Show/hide the limits column of the Refine grid as one unit — its
+        cells are interleaved with the refine checkboxes rather than living in
+        a single container, so they are hidden individually."""
+        for w in self._limit_cells:
+            w.setVisible(on)
+        self._limits_na_lbl.setVisible(not on)
+
+    def _n_limits_set(self) -> int:
+        return sum(1 for cb, _s, _c in self._limit_widgets.values() if cb.isChecked())
+
+    def _update_limits_label(self, *_args):
+        bounds, skipped = self._limit_bounds()
+        if not bounds and not skipped:
+            self._limits_note.setText("No limits set — the fit is unbounded.")
+            return
+        bits = [f"{n} ∈ [{lo * (1e-3 if n == 'Lsd' else 1):.5g}, "
+                f"{hi * (1e-3 if n == 'Lsd' else 1):.5g}]"
+                for n, (lo, hi) in sorted((bounds or {}).items())]
+        if skipped:
+            bits.append(f"{', '.join(sorted(skipped))} ignored (needs 'Use manual seed')")
+        self._limits_note.setText("   ".join(bits))
+
+    #: Limit rows whose ± window is centred on a manual-seed field. Without
+    #: "Use manual seed" the fit auto-seeds Lsd/BC from the picks themselves
+    #: and starts the tilts at 0, so those spin boxes are not the centre the
+    #: window would be taken around — only the wavelength is always live.
+    _SEED_DEPENDENT_LIMITS = ("Lsd", "BC_y", "BC_z", "tx", "ty", "tz")
+
+    def _limit_bounds(self):
+        """``(bounds, skipped)`` — the enabled limit rows as the ``bounds``
+        dict :func:`~midas_gui.helpers.fit_geometry_from_ring_picks` expects,
+        plus the names of any dropped because their window has no defined
+        centre. ``bounds`` is ``None`` when nothing is bounded, which keeps
+        the fit on the unbounded Levenberg-Marquardt path it has always
+        used."""
+        seed = self._limit_seed_values()
+        seeded = self._manual_seed_check.isChecked()
+        out, skipped = {}, []
+        for name, row in (self._limits or {}).items():
+            if not (isinstance(row, dict) and row.get("on")) or name not in seed:
+                continue
+            if not seeded and name in self._SEED_DEPENDENT_LIMITS:
+                skipped.append(name)
+                continue
+            try:
+                out[name] = limit_window(name, seed[name], float(row.get("value", 0.0)),
+                                         str(row.get("unit", "")))
+            except KeyError:
+                continue                      # unknown slot in a stale project file
+        return (out or None), skipped
 
     # ── Seed feedback from a result ───────────────────────────────
 
@@ -656,7 +863,13 @@ class CalibrationTab(QtWidgets.QWidget):
         if getattr(result, "wavelength_A", None):
             self._wl.setValue(float(result.wavelength_A))
         self._seed_dist = dict(getattr(result, "distortion", {}) or {})
-        self._seed_note.setText("Seed updated from the last calibration result.")
+        self._seed_note.setText(
+            f"Seed updated from the last fit: BC=({result.BC_y:.2f}, {result.BC_z:.2f}) px, "
+            f"Lsd={float(result.Lsd) / 1000:.3f} mm, "
+            f"tx={float(getattr(result, 'tx', 0.0) or 0.0):.4f}°, "
+            f"ty={float(getattr(result, 'ty', 0.0) or 0.0):.4f}°, "
+            f"tz={float(getattr(result, 'tz', 0.0) or 0.0):.4f}°. Rings are drawn from these.")
+        self._update_seed_ring_preview()
 
     def _im_trans_codes(self) -> list:
         """Ordered MIDAS ImTransOpt codes from the Transforms checkboxes."""
@@ -679,6 +892,7 @@ class CalibrationTab(QtWidgets.QWidget):
             self._img_view.set_raw_frame(img, self._im_trans_codes(),
                                           autorange=autorange, reset_levels=autorange)
         self._redraw_lab_axes_if_on()
+        self._update_seed_ring_preview()
 
     # ── Lab-frame axes overlay ───────────────────────────────────────
     # Same overlay as the Data Viewer tab (see tab_view.py / widgets.py
@@ -773,16 +987,16 @@ class CalibrationTab(QtWidgets.QWidget):
         """Set λ / pixel size / seed BC + Lsd from a geometry dict (Data Viewer)."""
         if not g:
             return
-        if g.get("wavelength_A"):
+        if g.get("wavelength_A") is not None:
             self._wl.setValue(float(g["wavelength_A"]))
-        if g.get("pxY"):
+        if g.get("pxY") is not None:
             self._pxY.setValue(float(g["pxY"]))
         self._manual_seed_check.setChecked(True)
         if g.get("BC_y") is not None:
             self._seed_bcy.setValue(float(g["BC_y"]))
         if g.get("BC_z") is not None:
             self._seed_bcz.setValue(float(g["BC_z"]))
-        if g.get("Lsd"):
+        if g.get("Lsd") is not None:
             self._seed_lsd.setValue(float(g["Lsd"]) / 1000.0)   # µm → mm display
         if g.get("tx") is not None:
             self._seed_tx.setValue(float(g["tx"]))
@@ -819,21 +1033,91 @@ class CalibrationTab(QtWidgets.QWidget):
     # ── Manual d-spacing ring-picking fit (non-crystalline calibrants) ──
 
     def _manual_d_list(self) -> list:
-        """Current material's d-spacings (Å), sorted descending — Ring #1 is
+        """Current calibrant's d-spacings (Å), sorted descending — Ring #1 is
         the largest d-spacing, matching ``simulate_rings_from_dspacings``'s
         ``order`` numbering."""
-        name = self._dsp_material.currentText()
+        name = self._cal.currentText()
         if name == "Custom d-spacings…":
             d_list = parse_dspacing_text(self._dsp_custom_ed.text())
         else:
             d_list = list(MATERIALS.get(name, {}).get("d_list", []))
         return sorted(d_list, reverse=True)
 
-    def _on_dsp_material_changed(self, text: str):
+    _REFINE_BOXES = ("Lsd", "BC", "tx", "ty", "tz", "Wavelength")
+
+    def _refine_box(self, key):
+        return {"Lsd": self._ref_lsd, "BC": self._ref_bc, "tx": self._ref_tx,
+                "ty": self._ref_ty, "tz": self._ref_tz, "Wavelength": self._ref_wl}[key]
+
+    def _refine_box_state(self) -> dict:
+        return {k: self._refine_box(k).isChecked() for k in self._REFINE_BOXES}
+
+    def _set_refine_box_state(self, state: dict) -> None:
+        """Apply a saved checkbox set without firing a signal storm — the
+        summary/pick-count refresh is done once by the caller instead."""
+        for key in self._REFINE_BOXES:
+            if key not in state:
+                continue
+            box = self._refine_box(key)
+            box.blockSignals(True)
+            box.setChecked(bool(state[key]))
+            box.blockSignals(False)
+
+    def _sync_refine_mode(self, is_dsp: bool) -> None:
+        """Swap the Refine checkboxes between the crystalline and d-spacing
+        parameter sets when the calibrant kind changes.
+
+        Only the *transition* swaps: while the user stays on one kind of
+        calibrant their own choices stick, so ticking Lsd for an AgBH fit
+        survives until they switch to a crystalline calibrant and back. See
+        ``_refine_state_dsp`` in ``__init__`` for why the two defaults differ.
+        """
+        if self._refine_mode_is_dsp == is_dsp:
+            return
+        if self._refine_mode_is_dsp is not None:      # remember the outgoing mode
+            if self._refine_mode_is_dsp:
+                self._refine_state_dsp = self._refine_box_state()
+            else:
+                self._refine_state_xtal = self._refine_box_state()
+        elif not is_dsp:
+            self._refine_state_xtal = self._refine_box_state()
+        incoming = self._refine_state_dsp if is_dsp else self._refine_state_xtal
+        if incoming:
+            self._set_refine_box_state(incoming)
+        self._refine_mode_is_dsp = is_dsp
+
+    def _on_calibrant_changed(self, text: str):
+        is_dsp = is_dspacing_calibrant(text)
+        self._sync_refine_mode(is_dsp)
         self._dsp_custom_ed.setVisible(text == "Custom d-spacings…")
+        self._manual_card.setVisible(is_dsp)
+        self._refc_card.setVisible(True)
+        self._set_limits_visible(is_dsp)
+        self._dist_row.setVisible(not is_dsp)
+        self._build_rc.setVisible(not is_dsp)
+        self._refc_card.setToolTip(
+            "Distortion and residual-map refinement need a full-image forward "
+            "model — not available for manual point-pick fits." if is_dsp else "")
+        self._panel_grp.setVisible(not is_dsp)
+        self._adv_grp.setVisible(not is_dsp)
+        self._run_btn.setText("Fit Geometry (manual)" if is_dsp else "Run Calibration")
         self._on_dspacing_picks_changed()
+        self._update_seed_ring_preview()
+        self._update_refine_summary()
+
+    def _manual_min_picks(self) -> int:
+        """Minimum valid picks needed for the manual fit given which
+        parameters are currently selected to refine (BC counts as 2 free
+        parameters — BC_y and BC_z)."""
+        flags = self._refine_flags()
+        n_free = ((1 if flags["Lsd"] else 0) + (2 if flags["BC"] else 0) +
+                  (1 if flags["tx"] else 0) + (1 if flags["ty"] else 0) +
+                  (1 if flags["tz"] else 0) + (1 if flags["Wavelength"] else 0))
+        return max(3, n_free)
 
     def _on_dspacing_picks_changed(self, *_args):
+        if not is_dspacing_calibrant(self._cal.currentText()):
+            return
         picks = self._img_view.dspacing_picks()
         d_list = self._manual_d_list()
         counts: dict = {}
@@ -849,7 +1133,7 @@ class CalibrationTab(QtWidgets.QWidget):
             parts.append(f"{invalid} pt(s) on a ring # beyond this material's "
                          f"{len(d_list)} d-spacings (invalid)")
         self._dsp_summary.setText("   ".join(parts) if parts else "No points picked yet.")
-        self._dsp_fit_btn.setEnabled(bool(d_list) and (len(picks) - invalid) >= 3)
+        self._run_btn.setEnabled(bool(d_list) and (len(picks) - invalid) >= self._manual_min_picks())
 
     def _run_manual_fit(self):
         if self._worker and self._worker.isRunning():
@@ -862,8 +1146,11 @@ class CalibrationTab(QtWidgets.QWidget):
         picks = [(x, y, d_list[ring_idx - 1])
                 for x, y, ring_idx in self._img_view.dspacing_picks()
                 if 1 <= ring_idx <= len(d_list)]
-        if len(picks) < 3:
-            show_error(self, "Manual fit", "Need at least 3 valid picked points.")
+        min_picks = self._manual_min_picks()
+        if len(picks) < min_picks:
+            show_error(self, "Manual fit",
+                       f"Need at least {min_picks} valid picked points to refine the "
+                       f"selected parameters — have {len(picks)}.")
             return
         self._orphans = [o for o in self._orphans if o.isRunning()]
         pxY = self._pxY.value()
@@ -872,29 +1159,98 @@ class CalibrationTab(QtWidgets.QWidget):
         if self._manual_seed_check.isChecked():
             seed = (self._seed_lsd.value() * 1000.0,   # mm display → µm
                     self._seed_bcy.value(), self._seed_bcz.value())
+        tilt_seed = (self._seed_tx.value(), self._seed_ty.value(), self._seed_tz.value()) \
+            if self._manual_seed_check.isChecked() else (0.0, 0.0, 0.0)
         img = self._img_view._data
         NZ, NY = img.shape[:2] if img is not None else (0, 0)
-        material_name = self._dsp_material.currentText()
+        material_name = self._cal.currentText()
 
         self._calib_cancelled = False
-        self._run_btn.setEnabled(False); self._dsp_fit_btn.setEnabled(False)
+        self._run_btn.setEnabled(False)
         self._abort_btn.setEnabled(True)
         self._prog.setVisible(True)
         self._bot_tabs.setCurrentWidget(self._log)
         self._log.append("─" * 40 + "\nStarting manual d-spacing fit…")
+        self._log.append(self._refine_summary_text())
 
+        refine = self._refine_flags()
+        bounds, skipped_limits = self._limit_bounds()
+        if bounds:
+            self._log.append(
+                "Limits: " + ",  ".join(
+                    f"{n} ∈ [{lo * (1e-3 if n == 'Lsd' else 1):.5g}, "
+                    f"{hi * (1e-3 if n == 'Lsd' else 1):.5g}]"
+                    for n, (lo, hi) in sorted(bounds.items())))
+        if skipped_limits:
+            self._log.append(
+                f"Limits on {', '.join(sorted(skipped_limits))} ignored: they are "
+                f"windows around the manual seed, but 'Use manual seed' is off, so "
+                f"the fit is seeding from the picked points instead.")
         self._last_dist_coeffs = set()
+        self._last_refine_flags = refine
         self._worker = ManualDspacingCalibWorker(
             picks, self._wl.value(), pxY, pxZ, seed, NY, NZ, material_name, d_list,
-            parent=self)
+            parent=self, refine=refine, tilt_seed=tilt_seed, bounds=bounds)
         self._worker.log_line.connect(self._log.append)
         self._worker.finished.connect(self._on_manual_fit_done)
         self._worker.failed.connect(self._on_fail)
         self._worker.start()
 
-    def _on_manual_fit_done(self, result):
-        self._dsp_fit_btn.setEnabled(True)
+    def _accept_seed_as_result(self):
+        """Take the seed geometry as the calibration, with no fit at all.
+
+        A forward-simulated ring overlay that lands on the measured rings is
+        real evidence about the geometry, and hand-matching it is a legitimate
+        way to calibrate — but it is *not* a fit, so nothing here is measured
+        and no uncertainty can be reported. The distinction is kept visible
+        rather than blurred: the run is logged as seed-accepted, and every
+        geometry row in the results grid comes out marked "(fixed)".
+        """
+        from types import SimpleNamespace
+        if self._seed_lsd.value() <= 0:
+            show_error(self, "Use seed as calibration",
+                       "Seed Lsd is zero — set the seed geometry first.")
+            return
+        img = self._img_view._data
+        NZ, NY = img.shape[:2] if img is not None else (0, 0)
+        pxY = self._pxY.value()
+        d_list = self._manual_d_list() if is_dspacing_calibrant(self._cal.currentText()) else []
+        result = SimpleNamespace(
+            Lsd=self._seed_lsd.value() * 1000.0,        # mm display → µm
+            BC_y=self._seed_bcy.value(), BC_z=self._seed_bcz.value(),
+            tx=self._seed_tx.value(), ty=self._seed_ty.value(), tz=self._seed_tz.value(),
+            distortion=dict(self._seed_dist),
+            pxY=pxY, pxZ=self._pxZ_spin.value() if self._pxZ_check.isChecked() else pxY,
+            NrPixelsY=NY, NrPixelsZ=NZ,
+            wavelength_A=self._wl.value(), post_residual_strain_uE=None,
+            _calibrant_name=self._cal.currentText(), _d_list=list(d_list),
+        )
+        result.fit_sigma = None
+        result.fit_at_limit = set()
+        result._seed_accepted = True
+        self._last_dist_coeffs = set()
+        # Nothing was refined, which is exactly what the grid should say.
+        self._last_refine_flags = {k: False for k in self._GEOMETRY_REFINE_KEYS}
+        self._last_refine_flags.update({"Distortion": False, "distortion_coeffs": set()})
+        self._calib_cancelled = False
+        self._bot_tabs.setCurrentWidget(self._log)
+        self._log.append("─" * 40 + "\nSeed geometry accepted as the calibration — "
+                         "no fit was run, so these values carry no uncertainty and "
+                         "are only as good as the ring overlay you matched by eye.")
         self._on_done(result)
+        # _on_done re-enables Run unconditionally; in manual mode that button is
+        # gated on having enough picks, so restore its real state.
+        self._on_dspacing_picks_changed()
+
+    def _on_manual_fit_done(self, result):
+        self._run_btn.setEnabled(True)
+        self._on_done(result)
+
+    def _on_run_clicked(self):
+        if is_dspacing_calibrant(self._cal.currentText()):
+            self._run_manual_fit()
+        else:
+            self._run()
 
     # ── Run ────────────────────────────────────────────────────────
 
@@ -910,6 +1266,31 @@ class CalibrationTab(QtWidgets.QWidget):
             "Distortion": self._ref_dist.isChecked(),   # legacy/back-compat
             "distortion_coeffs": coeffs,
         }
+
+    def _refine_summary_text(self) -> str:
+        """One-line 'Refining: ... Fixed: ...' summary, so it's always
+        obvious which geometry parameters a run will actually vary — shown
+        live in the Refine parameters card and logged at the start of every
+        run (crystalline or manual)."""
+        flags = self._refine_flags()
+        is_dsp = is_dspacing_calibrant(self._cal.currentText())
+        rows = [("Lsd", "Lsd"), ("BC", "BC"), ("tx", "tx"), ("ty", "ty"),
+                ("tz", "tz"), ("Wavelength", "Wavelength")]
+        if not is_dsp:
+            dist_label = (f"Distortion ({len(flags['distortion_coeffs'])}/15)"
+                          if flags["Distortion"] else "Distortion")
+            rows.append(("Distortion", dist_label))
+        refining = [label for key, label in rows if flags.get(key)]
+        fixed = [label for key, label in rows if not flags.get(key)]
+        bits = []
+        if refining:
+            bits.append("Refining: " + ", ".join(refining))
+        if fixed:
+            bits.append("Fixed: " + ", ".join(fixed))
+        return "   ".join(bits) if bits else "Nothing selected to refine."
+
+    def _update_refine_summary(self):
+        self._refine_summary_lbl.setText(self._refine_summary_text())
 
     def _run(self):
         self._image = self._source_image()
@@ -935,6 +1316,7 @@ class CalibrationTab(QtWidgets.QWidget):
         self._prog.setVisible(True)
         self._bot_tabs.setCurrentWidget(self._log)
         self._log.append("─" * 40 + f"\nStarting calibration ({mode})…")
+        self._log.append(self._refine_summary_text())
 
         trans = im_trans_codes_from_checkboxes(self._flip_y, self._flip_z, self._transp)
 
@@ -953,6 +1335,7 @@ class CalibrationTab(QtWidgets.QWidget):
             "mask": self._loader.composite_mask(),
         }
         self._last_dist_coeffs = cfg["refine"]["distortion_coeffs"]
+        self._last_refine_flags = cfg["refine"]
         if self._manual_seed_check.isChecked():
             cfg["manual_seed"] = {
                 "BC_y": self._seed_bcy.value(),
@@ -1024,12 +1407,48 @@ class CalibrationTab(QtWidgets.QWidget):
         self._log.append("Calibration aborted — you can start a new run now "
                          "(a background thread may still be winding down).")
 
-    def _populate_param_grid(self, pairs, ncols=3):
+    _GEOMETRY_REFINE_KEYS = ("Lsd", "BC", "tx", "ty", "tz", "Wavelength")
+
+    #: paramstest row key → the ``fit_geometry_from_ring_picks`` sigma slot(s)
+    #: it displays. "BC" is one row holding both centre coordinates.
+    _SIGMA_SLOTS_FOR_KEY = {"Lsd": ("Lsd",), "BC": ("BC_y", "BC_z"),
+                            "tx": ("tx",), "ty": ("ty",), "tz": ("tz",),
+                            "Wavelength": ("wavelength_A",)}
+
+    def _sigma_suffix(self, key, sigma, at_limit) -> str:
+        """`` ± σ`` (or ``(at limit)``) for a geometry row, in the row's own
+        displayed units — empty for rows with no uncertainty to report."""
+        slots = self._SIGMA_SLOTS_FOR_KEY.get(key)
+        if not slots:
+            return ""
+        if any(s in (at_limit or set()) for s in slots):
+            return "   (at limit)"
+        vals = [sigma.get(s) for s in slots]
+        if any(v is None or not v for v in vals):    # unrefined, or exactly 0
+            return ""
+        if any(not math.isfinite(v) for v in vals):
+            return "   ± ∞ (unconstrained)"
+        return "   ± " + ", ".join(f"{v:.4g}" for v in vals)
+
+    def _populate_param_grid(self, pairs, ncols=3, refine_flags=None, sigma=None,
+                             at_limit=None):
         """Lay (key, value) pairs into ``ncols`` columns as plain text, filled
         column-major so each column reads top-to-bottom in file order. The paramstest
         distortion slots p0–p14 are relabelled with their coefficient names
-        (iso_R2, a1, …) so the distortion reads clearly without a separate table."""
-        import math
+        (iso_R2, a1, …) so the distortion reads clearly without a separate table.
+
+        ``refine_flags``, when given (the dict ``_refine_flags()`` produces
+        for the run that generated ``pairs``), marks each geometry row
+        (Lsd/BC/tx/ty/tz/Wavelength) that was held fixed with a muted
+        "(fixed)" label — so it's never ambiguous which values were actually
+        optimized vs. carried over from the seed.
+
+        ``sigma``/``at_limit`` (from a manual d-spacing fit) annotate each
+        *refined* geometry row with its 1σ uncertainty. A converged fit is not
+        the same as a determined one — on a short ring arc the optimizer will
+        happily report a beam centre it could not actually measure — so the
+        uncertainty belongs next to the value, not only in the log. This is
+        display-only: ``pairs`` still mirrors paramstest.txt exactly."""
         from midas_gui.widgets import _mono_font
         from midas_gui.helpers import _PARAMSTEST_DISTORTION   # p#-slot → v2 name
         grid = self._param_grid
@@ -1040,11 +1459,20 @@ class CalibrationTab(QtWidgets.QWidget):
                 w.deleteLater()
         mono = _mono_font(12)
         klbl = "font-weight:600; font-size:12px;"
+        fixed_lbl = "font-weight:600; font-size:12px; color:#888;"
+        fixed_keys = ({k for k in self._GEOMETRY_REFINE_KEYS if not refine_flags.get(k)}
+                      if refine_flags is not None else set())
         n = len(pairs); nrows = max(1, math.ceil(n / ncols))
         for idx, (key, val) in enumerate(pairs):
             col, row = idx // nrows, idx % nrows
             label = _PARAMSTEST_DISTORTION.get(key, key)   # name distortion slots
-            k = QtWidgets.QLabel(f"{label}:"); k.setStyleSheet(klbl)
+            if key in fixed_keys:
+                label += " (fixed)"
+                k = QtWidgets.QLabel(f"{label}:"); k.setStyleSheet(fixed_lbl)
+            else:
+                k = QtWidgets.QLabel(f"{label}:"); k.setStyleSheet(klbl)
+                if sigma:
+                    val += self._sigma_suffix(key, sigma, at_limit)
             v = QtWidgets.QLabel(val); v.setFont(mono)
             v.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
             grid.addWidget(k, row, col * 2, QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
@@ -1084,9 +1512,15 @@ class CalibrationTab(QtWidgets.QWidget):
                 pass   # feedback is best-effort; never block the result display
         self._run_btn.setEnabled(True); self._abort_btn.setEnabled(False)
         self._prog.setVisible(False)
+        # Only the manual d-spacing fit reports uncertainties (the crystalline
+        # backend returns none), so these are absent for a crystalline run.
+        self._last_fit_sigma = getattr(result, "fit_sigma", None)
+        self._last_at_limit = getattr(result, "fit_at_limit", set())
         try:
             self._populate_param_grid(
-                paramstest_pairs(result, selected=self._last_dist_coeffs))
+                paramstest_pairs(result, selected=self._last_dist_coeffs),
+                refine_flags=self._last_refine_flags,
+                sigma=self._last_fit_sigma, at_limit=self._last_at_limit)
         except Exception:
             import traceback as _tb
             self._log.append("Could not render parameter grid:\n" + _tb.format_exc())
@@ -1153,10 +1587,17 @@ class CalibrationTab(QtWidgets.QWidget):
 
     def _draw_rings(self, result):
         self._calib_result = result
+        self._clear_seed_ring_preview()
         for item in self._ring_items:
             self._img_view._iv.removeItem(item)
         self._ring_items.clear()
         self._clear_corrected_rings()
+        if self._manual_seed_check.isChecked():
+            # The seed card owns the overlay — see _update_seed_ring_preview.
+            # With feedback on, _seed_from_result has already copied this
+            # result into it, so the rings drawn are this result's.
+            self._update_seed_ring_preview()
+            return
         radii = _predict_ring_radii(result)
         visible = self._show_rings_check.isChecked()
         th = np.linspace(0, 2 * math.pi, 512)
@@ -1181,9 +1622,106 @@ class CalibrationTab(QtWidgets.QWidget):
                   else self._ring_items)
         for item in active:
             item.setVisible(visible)
+        self._update_seed_ring_preview()
+
+    # ── Seed-geometry ring preview (before any Fit/Run has completed) ──
+    # "Show rings" should still preview predicted ring positions computed
+    # from the current seed BC/Lsd/wavelength + calibrant d-spacings, not
+    # just toggle visibility of an already-fitted result's rings — the
+    # fitted-result overlay (_draw_rings/_ring_items, lime solid) takes
+    # over and this preview (cyan dashed) clears itself once self._result
+    # is set.
+
+    def _clear_seed_ring_preview(self):
+        for item in self._seed_ring_items:
+            self._img_view._iv.removeItem(item)
+        self._seed_ring_items.clear()
+
+    def _seed_ring_namespace(self):
+        """A minimal stand-in for an AutoCalibrationResult, built from the
+        current seed/manual geometry fields, for _predict_ring_radii()."""
+        if not self._manual_seed_check.isChecked():
+            return None   # seed fields are disabled/stale — nothing to preview
+        wl = self._wl.value()
+        lsd_um = self._seed_lsd.value() * 1000.0   # mm display → µm
+        if wl <= 0 or lsd_um <= 0:
+            return None
+        pxY = self._pxY.value()
+        pxZ = self._pxZ_spin.value() if self._pxZ_check.isChecked() else pxY
+        ns = SimpleNamespace(
+            BC_y=self._seed_bcy.value(), BC_z=self._seed_bcz.value(),
+            Lsd=lsd_um, wavelength_A=wl, pxY=pxY, pxZ=pxZ,
+            tx=self._seed_tx.value(), ty=self._seed_ty.value(),
+            tz=self._seed_tz.value(),
+            NrPixelsY=0, NrPixelsZ=0)
+        img = self._img_view._data
+        if img is not None:
+            ns.NrPixelsZ, ns.NrPixelsY = img.shape[:2]
+        name = self._cal.currentText()
+        if is_dspacing_calibrant(name):
+            d_list = self._manual_d_list()
+            if not d_list:
+                return None
+            ns._d_list = d_list
+        else:
+            ns._calibrant_name = name
+        return ns
+
+    def _update_seed_ring_preview(self, *_args):
+        """Draw the ring overlay from the geometry *currently shown in the seed
+        card* — before a fit and after one.
+
+        The seed card is the geometry the user can actually see and edit, and
+        with "Feed result back to seed" on it holds the most recent fit, so
+        driving the overlay from it keeps what is drawn and what is displayed
+        in agreement by construction. The overlay used to come from a hidden
+        result object instead, which meant a stale or badly-converged result
+        reloaded from a project could paint rings that matched nothing on
+        screen — including a runaway tilt turning them into near-vertical
+        curves — with no way to tell from the panel why.
+
+        With feedback off the seed is deliberately not the fit, so the rings
+        follow the seed and the fitted numbers stay in the Results grid.
+        """
+        self._clear_seed_ring_preview()
+        if not self._show_rings_check.isChecked():
+            return
+        ns = self._seed_ring_namespace()
+        if ns is None:
+            return
+        radii = _predict_ring_radii(ns)
+        max_r = (max(ns.NrPixelsY, ns.NrPixelsZ)
+                 if (ns.NrPixelsY and ns.NrPixelsZ) else float("inf"))
+        # Solid lime once the seed carries a fitted result, dashed cyan while
+        # it is still just a starting guess — same visual language as before.
+        fitted = self._result is not None
+        pen = (pg.mkPen("lime", width=1.2) if fitted else
+               pg.mkPen("cyan", width=1.0, style=QtCore.Qt.DashLine))
+        tilted = (self._corrected_check.isChecked()
+                  and max(abs(ns.tx), abs(ns.ty), abs(ns.tz)) > 1e-9)
+        th = np.linspace(0, 2 * math.pi, 512)
+        n = 0
+        for r in radii:
+            if not (0 < r < max_r):
+                continue
+            if tilted:
+                two_theta = math.degrees(math.atan(r * ns.pxY / ns.Lsd))
+                ys, zs = tilted_ring_xy(two_theta, ns.tx, ns.ty, ns.tz,
+                                        ns.Lsd, ns.BC_y, ns.BC_z, ns.pxY, ns.pxZ)
+            else:
+                ys, zs = ns.BC_y + r * np.cos(th), ns.BC_z + r * np.sin(th)
+            item = pg.PlotDataItem(ys, zs, pen=pen)
+            self._img_view._iv.addItem(item); self._seed_ring_items.append(item)
+            n += 1
+        bc = pg.ScatterPlotItem([ns.BC_y], [ns.BC_z], symbol="+", size=12,
+                                pen=pg.mkPen("lime" if fitted else "cyan", width=2))
+        self._img_view._iv.addItem(bc); self._seed_ring_items.append(bc)
+        self._corr_status.setText(
+            f"{n} ring(s) from seed geometry" + ("  (tilt applied)" if tilted else ""))
 
     def _on_corrected_rings_toggled(self, checked):
-        if self._calib_result is None:
+        if self._manual_seed_check.isChecked() or self._calib_result is None:
+            self._update_seed_ring_preview()   # seed-driven overlay redraws itself
             return
         if checked:
             for item in self._ring_items:
@@ -1430,6 +1968,7 @@ class CalibrationTab(QtWidgets.QWidget):
             "pipeline": self._pipeline,
             "wl": self._wl,
             "cal": self._cal,
+            "dsp_custom_ed": self._dsp_custom_ed,
             "pxY": self._pxY,
             "pxZ_check": self._pxZ_check,
             "pxZ_spin": self._pxZ_spin,
@@ -1473,21 +2012,31 @@ class CalibrationTab(QtWidgets.QWidget):
             "cal_r_bin": self._cal_r_bin,
             "cal_eta_bin": self._cal_eta_bin,
             "cal_azim": self._cal_azim,
+            **{f"limit_{n}_on": cb for n, (cb, _s, _c) in self._limit_widgets.items()},
+            **{f"limit_{n}_val": sp for n, (_cb, sp, _c) in self._limit_widgets.items()},
+            **{f"limit_{n}_unit": co for n, (_cb, _s, co) in self._limit_widgets.items()},
         }
 
     def get_state(self, sidecar_stem: Optional[str] = None) -> dict:
         """``sidecar_stem`` (if given) is the state file's path without its
-        extension. A fitted result that hasn't been exported via "Save JSON" is
-        written to ``<sidecar_stem>_calibration.json`` for the record and to
-        reseed the geometry fields on load — but is NOT reconstructed into a
-        live ``self._result`` object (there is no loader for that; re-running
-        Fit with the restored seed fields reproduces it)."""
+        extension. A fitted result is embedded in the returned state (under
+        ``"result"``, via ``project.sanitize_result_dict``) so ``set_state()``
+        can restore the rings/param grid/Save-button state without
+        re-running Fit — and is also, best-effort, written out to
+        ``<sidecar_stem>_calibration.json`` as an external-facing record."""
         state = {"fields": widgets_to_dict(self._state_widgets()),
                  "loader": self._loader.get_state(),
                  "img_view": self._img_view.display_state(),
+                 "img_picks": self._img_view.pick_state(),
                  "cake_view": self._cake_view.display_state(),
                  "hydra": {"active_mode": self._mode_ribbon.mode(),
-                           "page": self._hydra_page.get_state()}}
+                           "page": self._hydra_page.get_state()},
+                 # Both remembered Refine sets, not just the live checkboxes —
+                 # otherwise reloading a project saved on an AgBH calibrant
+                 # would lose the crystalline flags entirely (and vice versa).
+                 "refine_modes": {"xtal": self._refine_state_xtal,
+                                   "dsp": self._refine_state_dsp},
+                 "result": project.sanitize_result_dict(self._result)}
         if self._result is not None and sidecar_stem:
             try:
                 import json
@@ -1501,26 +2050,55 @@ class CalibrationTab(QtWidgets.QWidget):
         return state
 
     def set_state(self, state: dict, sidecar_stem: Optional[str] = None) -> None:
+        self._restoring_state = True
+        try:
+            self._set_state(state, sidecar_stem)
+        finally:
+            self._restoring_state = False
+
+    def _set_state(self, state: dict, sidecar_stem: Optional[str] = None) -> None:
         apply_dict_to_widgets(self._state_widgets(), state.get("fields", {}))
+        self._update_limits_label()
+        modes = state.get("refine_modes") or {}
+        if isinstance(modes.get("xtal"), dict):
+            self._refine_state_xtal = dict(modes["xtal"])
+        if isinstance(modes.get("dsp"), dict):
+            self._refine_state_dsp = dict(modes["dsp"])
+        # The live checkboxes were just restored from "fields" and already
+        # belong to the saved calibrant, so pin the mode first — otherwise
+        # _on_calibrant_changed would treat this as a transition, file them
+        # under the wrong mode, and overwrite them with the other one's set.
+        self._refine_mode_is_dsp = is_dspacing_calibrant(self._cal.currentText())
+        self._on_calibrant_changed(self._cal.currentText())
         self._loader.set_state(state.get("loader") or {})
         self._img_view.set_display_state(state.get("img_view"))
+        self._img_view.set_pick_state(state.get("img_picks"))
         self._cake_view.set_display_state(state.get("cake_view"))
         hydra_state = state.get("hydra") or {}
         self._mode_ribbon.set_mode(hydra_state.get("active_mode", "single"))
         self._hydra_page.set_state(hydra_state.get("page") or {})
+        result_state = state.get("result")
+        if result_state:
+            self._display_stored_result(project.calibration_namespace(result_state),
+                                         reintegrate_if_missing=False)
 
     # ── File > Open Project… ─────────────────────────────────────────
 
-    def _display_stored_result(self, result, results_arrays: Optional[dict] = None) -> None:
+    def _display_stored_result(self, result, results_arrays: Optional[dict] = None,
+                                reintegrate_if_missing: bool = True) -> None:
         """Redraw rings + the radial profile/cake for a result recovered
         from a project attempt — same visual effects as a live Fit's
         ``_on_done``, without re-running Fit. When ``results_arrays`` (the
         attempt's embedded cake/profile, see
         ``project.read_calib_attempt_results``) is available, the plots are
         populated directly from it — no recompute needed. Otherwise, falls
-        back to live re-integration if an image happens to be loaded.
-        Best-effort per step so a partially-available result (e.g. the
-        source image no longer on disk) still shows whatever it can."""
+        back to live re-integration if an image happens to be loaded, unless
+        ``reintegrate_if_missing`` is False (``set_state()`` passes False —
+        a generic project/session reload must not silently kick off a
+        long-running background integration; see ``_apply_workspace_state``'s
+        "long-running pipelines are not re-run" contract). Best-effort per
+        step so a partially-available result (e.g. the source image no
+        longer on disk) still shows whatever it can."""
         self._result = result
         try:
             self._populate_param_grid(paramstest_pairs(result))
@@ -1560,7 +2138,7 @@ class CalibrationTab(QtWidgets.QWidget):
                     results_arrays.get("wavelength_A"))
             except Exception:
                 pass
-        elif self._image is not None:
+        elif reintegrate_if_missing and self._image is not None:
             self._bot_tabs.setCurrentWidget(self._prof_view)
             try:
                 self._run_integration(result)

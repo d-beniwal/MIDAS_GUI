@@ -193,6 +193,21 @@ MATERIALS = {
 }
 
 
+def calibrant_combo_items() -> list:
+    """Unified list for the Calibrate tab's single Calibrant dropdown:
+    crystalline calibrants (need a space group) + non-crystalline,
+    d-spacing-only materials (e.g. AgBH) + a Custom entry. Recomputed on
+    each call so profile/config swaps of CALIBRANTS/MATERIALS (see the
+    config loader above) are reflected live."""
+    return list(CALIBRANTS) + \
+        [n for n, m in MATERIALS.items() if m.get("kind") == "dspacing"] + \
+        ["Custom d-spacings…"]
+
+
+def is_dspacing_calibrant(name: str) -> bool:
+    return name == "Custom d-spacings…" or MATERIALS.get(name, {}).get("kind") == "dspacing"
+
+
 # ── UI / algorithm defaults (overridable) — first option of each list ───────────
 DEFAULT_KERNEL        = "subpixel2"   # key in KERNELS (integration algorithm)
 DEFAULT_PIPELINE      = "one_shot"    # key in PIPELINES (calibration algorithm)

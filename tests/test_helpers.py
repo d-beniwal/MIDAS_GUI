@@ -309,6 +309,85 @@ def test_fit_geometry_from_ring_picks_recovers_known_geometry():
     assert fit["residual_deg_rms"] < 1e-3
 
 
+def test_fit_geometry_from_ring_picks_refine_none_matches_legacy_lsd_bc_only():
+    from midas_gui.helpers import fit_geometry_from_ring_picks, simulate_rings_from_dspacings
+
+    wavelength_A = 0.1729
+    px_um = 200.0
+    lsd_um, bc_y, bc_z = 300000.0, 512.3, 498.7
+    d_list = [58.380, 29.190, 19.460]
+
+    rings = simulate_rings_from_dspacings(d_list, wavelength_A, lsd_um, px_um)
+    picks = []
+    for ring in rings:
+        r_px = ring["radius_px"]
+        for angle in np.linspace(0, 2 * math.pi, 8, endpoint=False):
+            y = bc_y - r_px * math.cos(angle)
+            z = bc_z + r_px * math.sin(angle)
+            picks.append((y, z, ring["d_spacing"]))
+
+    legacy = fit_geometry_from_ring_picks(picks, wavelength_A, px_um, px_um)
+    explicit = fit_geometry_from_ring_picks(
+        picks, wavelength_A, px_um, px_um,
+        refine={"Lsd": True, "BC": True, "tx": False, "ty": False,
+                "tz": False, "Wavelength": False})
+
+    assert legacy["tx"] == pytest.approx(0.0)
+    assert legacy["ty"] == pytest.approx(0.0)
+    assert legacy["tz"] == pytest.approx(0.0)
+    assert legacy["wavelength_A"] == pytest.approx(wavelength_A)
+    assert legacy["n_free"] == 3
+    for key in ("Lsd", "BC_y", "BC_z", "tx", "ty", "tz", "wavelength_A",
+                "residual_deg_rms", "n_free"):
+        assert legacy[key] == pytest.approx(explicit[key])
+
+
+def test_fit_geometry_from_ring_picks_recovers_tilt_with_fixed_tx():
+    from midas_gui.helpers import fit_geometry_from_ring_picks, tilted_ring_xy
+
+    # A short wavelength / large-d combo (as in the AgBH test above) puts
+    # every ring at a tiny 2theta, where tilt's effect on ring shape is
+    # second-order and numerically degenerate with Lsd/BC — not a realistic
+    # stand-in for a tilt-refinement scenario. Use d-spacings/wavelength
+    # that spread 2theta across ~20-60 degrees so tilt is well identified.
+    wavelength_A = 1.0
+    px_um = 200.0
+    lsd_um, bc_y, bc_z = 300000.0, 512.3, 498.7
+    tx_true, ty_true, tz_true = 0.0, 1.7, -0.9
+    d_list = [3.0, 1.5, 1.0]
+
+    picks = []
+    for d in d_list:
+        s = wavelength_A / (2.0 * d)
+        two_theta = 2.0 * math.degrees(math.asin(s))
+        Y_px, Z_px = tilted_ring_xy(two_theta, tx_true, ty_true, tz_true,
+                                     lsd_um, bc_y, bc_z, px_um, px_um, n=16)
+        for y, z in zip(Y_px[:-1], Z_px[:-1]):
+            picks.append((float(y), float(z), d))
+
+    # tx is held fixed at its (correct) seed of 0.0 — only the free ty/tz
+    # get a deliberately wrong seed, to make sure the fit actually moves
+    # them rather than just reporting the seed back.
+    wrong_seed_tilt = (0.0, 0.5, 0.5)
+    refine = {"Lsd": True, "BC": True, "tx": False, "ty": True, "tz": True,
+              "Wavelength": False}
+    fit = fit_geometry_from_ring_picks(
+        picks, wavelength_A, px_um, px_um,
+        tilt_seed=wrong_seed_tilt, refine=refine)
+
+    assert fit["success"]
+    assert fit["n_free"] == 5
+    assert fit["Lsd"] == pytest.approx(lsd_um, rel=1e-3)
+    assert fit["BC_y"] == pytest.approx(bc_y, abs=0.1)
+    assert fit["BC_z"] == pytest.approx(bc_z, abs=0.1)
+    assert fit["ty"] == pytest.approx(ty_true, abs=1e-2)
+    assert fit["tz"] == pytest.approx(tz_true, abs=1e-2)
+    # tx was not selected to refine — it must stay pinned exactly at its
+    # seed value, never nudged toward compensating for ty/tz residuals.
+    assert fit["tx"] == pytest.approx(wrong_seed_tilt[0])
+    assert fit["residual_deg_rms"] < 1e-3
+
+
 def test_auto_seed_from_picks_falls_back_when_no_ring_has_enough_points():
     from midas_gui.helpers import _auto_seed_from_picks
     picks = [(10.0, 20.0, 58.38), (30.0, 40.0, 29.19)]   # 1 pt per ring, can't circle-fit
