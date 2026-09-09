@@ -424,6 +424,8 @@ class PickableImageViewer(ImageViewer):
 
     _DSP_COLORS = ["#e05656", "#56a8e0", "#7fd45a", "#e0c056",
                    "#c066e0", "#e08c40", "#40c8c0", "#c0c0c0"]
+    #: Outer diameter of a d-spacing pick marker, in screen px.
+    _DSP_MARK_PX = 13
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -434,6 +436,9 @@ class PickableImageViewer(ImageViewer):
         self._ring_fit_center  = None
         self._bc_click_item    = None
         self._dsp_pts:         list = []
+        #: One entry per pick, each a tuple of the plot items drawn for it
+        #: (see _add_dspacing_point) — not a flat item list, so undo/clear
+        #: remove a whole marker rather than half of one.
         self._dsp_pt_items:    list = []
 
         _BTN = ("QPushButton{padding:2px 8px;border-radius:3px}"
@@ -582,7 +587,10 @@ class PickableImageViewer(ImageViewer):
         self._update_ring_fit()
 
     def _undo_ring_point(self):
-        if self._pick_mode == self.PICK_DSPACING:
+        # Route by which list actually has points, not by the currently
+        # toggled tool — the tool may have been switched (or turned off)
+        # since the points were picked, and Undo must still act on them.
+        if self._pick_mode == self.PICK_DSPACING or (self._dsp_pts and not self._ring_pts):
             self._undo_dspacing_point()
             return
         if not self._ring_pts:
@@ -595,9 +603,9 @@ class PickableImageViewer(ImageViewer):
         self._update_ring_fit()
 
     def _clear_ring_points(self):
-        if self._pick_mode == self.PICK_DSPACING:
-            self._clear_dspacing_points()
-            return
+        # Clear unconditionally clears every picking workflow's points
+        # (ring-BC picks, the BC marker, and d-spacing picks) regardless of
+        # which tool is currently toggled — same reasoning as _undo_ring_point.
         for item in self._ring_pt_items:
             self._iv.removeItem(item)
         self._ring_pt_items.clear()
@@ -609,22 +617,35 @@ class PickableImageViewer(ImageViewer):
         if self._bc_click_item is not None:
             self._iv.removeItem(self._bc_click_item)
             self._bc_click_item = None
+        self._remove_all_dspacing_items()
+        self._dsp_pts.clear()
         self._undo_btn.setEnabled(False)
         self._clear_ring_btn.setEnabled(False)
         self._pick_status.setText(
             "Click on a ring to pick points (need ≥3)"
             if self._pick_mode == self.PICK_RING else
-            "Click image to set BC" if self._pick_mode == self.PICK_BC else "")
+            "Click image to set BC" if self._pick_mode == self.PICK_BC else
+            "Click on a ring to pick points" if self._pick_mode == self.PICK_DSPACING else "")
+        self.dspacingPicksChanged.emit()
 
     def _add_dspacing_point(self, x: float, y: float):
         ring_idx = self._dsp_ring_spin.value()
         self._dsp_pts.append((x, y, ring_idx))
         color = self._DSP_COLORS[(ring_idx - 1) % len(self._DSP_COLORS)]
-        dot = pg.ScatterPlotItem(
-            [x], [y], symbol="o", size=10,
-            pen=pg.mkPen(color, width=1.5), brush=pg.mkBrush(color))
-        self._iv.addItem(dot)
-        self._dsp_pt_items.append(dot)
+        # Drawn as a black halo with the ring colour laid over its middle,
+        # and an open centre. A filled dot in the ring colour disappears
+        # wherever the colormap happens to match it — ring 1's red over the
+        # hot map's red arc being the case that prompted this — whereas the
+        # halo separates the marker from anything underneath, and the open
+        # centre leaves the picked pixel itself visible to aim at.
+        halo = pg.ScatterPlotItem([x], [y], symbol="o", size=self._DSP_MARK_PX,
+                                  pen=pg.mkPen("#000000", width=3), brush=None)
+        core = pg.ScatterPlotItem([x], [y], symbol="o", size=self._DSP_MARK_PX,
+                                  pen=pg.mkPen(color, width=1.5), brush=None)
+        items = (halo, core)
+        for it in items:
+            self._iv.addItem(it)
+        self._dsp_pt_items.append(items)
         self._undo_btn.setEnabled(True)
         self._clear_ring_btn.setEnabled(True)
         n = len(self._dsp_pts)
@@ -636,7 +657,8 @@ class PickableImageViewer(ImageViewer):
             return
         self._dsp_pts.pop()
         if self._dsp_pt_items:
-            self._iv.removeItem(self._dsp_pt_items.pop())
+            for it in self._dsp_pt_items.pop():
+                self._iv.removeItem(it)
         self._undo_btn.setEnabled(bool(self._dsp_pts))
         self._clear_ring_btn.setEnabled(bool(self._dsp_pts))
         n = len(self._dsp_pts)
@@ -645,10 +667,14 @@ class PickableImageViewer(ImageViewer):
             if n else "Click on a ring to pick points")
         self.dspacingPicksChanged.emit()
 
-    def _clear_dspacing_points(self):
-        for item in self._dsp_pt_items:
-            self._iv.removeItem(item)
+    def _remove_all_dspacing_items(self):
+        for items in self._dsp_pt_items:
+            for it in items:
+                self._iv.removeItem(it)
         self._dsp_pt_items.clear()
+
+    def _clear_dspacing_points(self):
+        self._remove_all_dspacing_items()
         self._dsp_pts.clear()
         self._undo_btn.setEnabled(False)
         self._clear_ring_btn.setEnabled(False)
@@ -658,6 +684,34 @@ class PickableImageViewer(ImageViewer):
     def dspacing_picks(self) -> list:
         """Read-only snapshot of picked (x, y, ring_idx) points."""
         return list(self._dsp_pts)
+
+    def pick_state(self) -> dict:
+        """Picked-point state for project/session round-tripping — kept
+        separate from display_state() (that one is pure cosmetics: cmap/
+        log/vmin/vmax). Without this, reloading a saved project/session
+        loses every manually-picked point, breaking the documented promise
+        that a single click of the tab's own Run/Fit button reproduces the
+        result from restored inputs — cheap to satisfy for the crystalline
+        pipeline (no picks needed), but not for manual d-spacing/ring-BC
+        fitting, which is built entirely from these picks."""
+        return {"dsp_picks": list(self._dsp_pts), "ring_picks": list(self._ring_pts)}
+
+    def set_pick_state(self, state: Optional[dict]) -> None:
+        """Inverse of :meth:`pick_state`. Re-adds each point through the
+        same code path as an interactive click (scatter item + list entry)
+        so the restored picks are visually and behaviorally identical to
+        ones just picked by hand."""
+        if not state:
+            return
+        for x, y in state.get("ring_picks") or []:
+            self._add_ring_point(float(x), float(y))
+        dsp_picks = state.get("dsp_picks") or []
+        if dsp_picks:
+            prev_ring = self._dsp_ring_spin.value()
+            for x, y, ring_idx in dsp_picks:
+                self._dsp_ring_spin.setValue(int(ring_idx))
+                self._add_dspacing_point(float(x), float(y))
+            self._dsp_ring_spin.setValue(prev_ring)
 
     def _update_ring_fit(self):
         n = len(self._ring_pts)
