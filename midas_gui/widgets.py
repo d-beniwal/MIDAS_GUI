@@ -801,16 +801,6 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
     V = 1.0
 
     xl_color, yl_color, zl_color, eta_color = "#FF3B30", "#34C759", "#0A84FF", "#FFA500"
-    L = max(60.0, min(400.0, 0.15 * min(ny, nz)))
-    head = max(15.0, L * 0.20)
-
-    text_pen = pg.mkPen("w")
-    text_fill = pg.mkBrush(0, 0, 0, 200)
-    xl_pen = pg.mkPen(xl_color, width=3.5)
-    yl_pen = pg.mkPen(yl_color, width=3.5)
-    arc_pen = pg.mkPen(eta_color, width=2.5)
-    label_font = QtGui.QFont(); label_font.setPointSize(13); label_font.setBold(False)
-    glyph_font = QtGui.QFont(); glyph_font.setPointSize(17); glyph_font.setBold(True)
 
     px_w = px_h = 1.0
     try:
@@ -820,6 +810,26 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
     except Exception:
         pass
     px_iso = math.sqrt(px_w * px_h) if (px_w > 0 and px_h > 0) else 1.0
+
+    # Size the compass in *screen* pixels (via px_iso, the current view's
+    # data-units-per-screen-pixel), not purely as a fraction of image
+    # dimensions. A wide/short SAXS strip (e.g. 3072x512) gets auto-fit at a
+    # much smaller effective zoom than a square WAXS panel, so a compass
+    # sized only from image pixels shrinks to an illegible on-screen
+    # footprint while the (zoom-independent) TextItem labels stay full
+    # size — guaranteeing overlap. Targeting a fixed on-screen arrow length
+    # keeps the compass legible regardless of image aspect ratio, and the
+    # data-unit clamp keeps it from becoming absurd at extreme zoom.
+    L = max(0.03 * min(ny, nz), min(0.5 * min(ny, nz), 80.0 * px_iso))
+    head = max(15.0, L * 0.20)
+
+    text_pen = pg.mkPen("w")
+    text_fill = pg.mkBrush(0, 0, 0, 200)
+    xl_pen = pg.mkPen(xl_color, width=3.5)
+    yl_pen = pg.mkPen(yl_color, width=3.5)
+    arc_pen = pg.mkPen(eta_color, width=2.5)
+    label_font = QtGui.QFont(); label_font.setPointSize(13); label_font.setBold(False)
+    glyph_font = QtGui.QFont(); glyph_font.setPointSize(17); glyph_font.setBold(True)
 
     items: list = []
 
@@ -848,20 +858,50 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
 
     fm = QtGui.QFontMetrics(label_font)
     margin_px = 4.0
+    # TextItem boxes are drawn at a fixed *screen* size while every position
+    # below is in data units, so on a wide/short SAXS strip (auto-fit at a low
+    # effective zoom) a box is far wider than the compass it labels. Convert
+    # the font metrics into data units and drive the placement from those, so
+    # the boxes stay clear of each other at any zoom.
+    line_h = fm.height() * px_h
+
+    def text_w(plain: str) -> float:
+        return fm.horizontalAdvance(plain) * px_w
+
+    # The beam label is the widest box and sits on the compass origin, so
+    # every other label is placed to clear it. Its own offset must clear the
+    # ⊗ glyph, which is set in the larger glyph_font — at low zoom head*1.2
+    # alone is smaller than half that box.
+    beam_half_w = 0.5 * text_w("+Z_Lab (+X_MIDAS, beam)")
+    glyph_half_h = 0.5 * QtGui.QFontMetrics(glyph_font).height() * px_h
+    beam_gap = max(head * 1.2, glyph_half_h + 0.35 * line_h)
+
+    # η=0°/η=−90° sit exactly on top of the +Y_Lab/+X_Lab arrows (same
+    # cardinal directions), so their tick labels are folded into these
+    # axis labels (as a second line) instead of drawn as separate
+    # overlapping TextItems at nearly the same radius — this is what was
+    # producing stacked/illegible boxes on narrow SAXS strips. The folded
+    # line is set at the same size as every other η label: de-duplicating
+    # the boxes was the point, shrinking the text was not.
     label_specs = (
-        ("h", "+X<sub>Lab</sub> (+Y<sub>MIDAS</sub>)", xl_color),
-        ("v", "+Y<sub>Lab</sub> (+Z<sub>MIDAS</sub>)", yl_color))
-    for axis_kind, html_body, axis_color in label_specs:
-        html = f'<span style="color:{axis_color};">{html_body}</span>'
+        ("h", "+X<sub>Lab</sub> (+Y<sub>MIDAS</sub>)", "+X_Lab (+Y_MIDAS)",
+         xl_color, "η=−90°"),
+        ("v", "+Y<sub>Lab</sub> (+Z<sub>MIDAS</sub>)", "+Y_Lab (+Z_MIDAS)",
+         yl_color, "η=0°"))
+    for axis_kind, html_body, _plain, axis_color, eta_label in label_specs:
+        html = (f'<span style="color:{axis_color};">{html_body}</span>'
+                f'<br><span style="color:{eta_color};">{eta_label}</span>')
+        # Anchor each box on the edge facing the beam centre, so it grows
+        # *away* from the compass instead of straddling the arrow tip — that
+        # straddling is what pushed these boxes over the ⊗ glyph and the beam
+        # label at low zoom, whatever their font size.
         if axis_kind == "h":
-            arrow_label_R_h = L + head * 0.6
-            dx, dy = y_sign * arrow_label_R_h, V * (-head * 0.9)
+            dx = y_sign * max(L + head * 0.6, beam_half_w + 0.6 * line_h)
+            dy = 0.0
             anchor = (0.0 if dx > 0 else 1.0, 0.5)
         else:
-            text_extent = min((fm.height() / 2.0 + margin_px) * px_iso, 0.5 * L)
-            arrow_label_R_v = L + max(head * 0.6, text_extent)
-            dx, dy = 0.0, V * arrow_label_R_v
-            anchor = (0.5, 0.5)
+            dx, dy = 0.0, V * (L + head * 0.35)
+            anchor = (0.5, 1.0 if V > 0 else 0.0)
         lbl = pg.TextItem(html=html, anchor=anchor, border=text_pen, fill=text_fill)
         lbl.setFont(label_font)
         lbl.setPos(bc_y + dx, bc_z + dy)
@@ -873,9 +913,10 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
     glyph.setPos(bc_y, bc_z)
     add(glyph)
     beam_html = f'<span style="color:{zl_color};">+Z<sub>Lab</sub> (+X<sub>MIDAS</sub>, beam)</span>'
-    x_lbl = pg.TextItem(html=beam_html, anchor=(0.5, 0.0), border=text_pen, fill=text_fill)
+    x_lbl = pg.TextItem(html=beam_html, anchor=(0.5, 0.0 if V > 0 else 1.0),
+                        border=text_pen, fill=text_fill)
     x_lbl.setFont(label_font)
-    x_lbl.setPos(bc_y, bc_z + V * (-head * 1.2))
+    x_lbl.setPos(bc_y, bc_z - V * beam_gap)
     add(x_lbl)
 
     # η reference marks at the four cardinal angles — 0°/+90°/−90°/180° —
@@ -888,6 +929,14 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
     R_arc = L * 0.85
     tick_inner, tick_outer, label_R = R_arc * 0.92, R_arc * 1.12, R_arc * 1.32
     eta_marks = ((0.0, "η=0°"), (90.0, "η=+90°"), (-90.0, "η=−90°"), (180.0, "η=180°"))
+    # The two η labels that are still drawn separately sit on the same
+    # cardinals as the beam label's box, so push them past its on-screen
+    # extent when label_R alone doesn't clear it.
+    eta_label_R = {90.0: max(label_R, beam_half_w + 0.6 * line_h),
+                   180.0: max(label_R, beam_gap + 1.6 * line_h)}
+    # 0°/−90° already have their labels folded into the +Y_Lab/+X_Lab
+    # boxes above — draw only their tick marks here, not a second label.
+    _eta_labeled_on_axis = {0.0, -90.0}
     for eta_deg, label in eta_marks:
         eta_rad = math.radians(eta_deg)
         ux = (-y_sign) * math.sin(eta_rad)
@@ -895,6 +944,8 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
         add(pg.PlotDataItem([bc_y + ux * tick_inner, bc_y + ux * tick_outer],
                              [bc_z + uy * tick_inner, bc_z + uy * tick_outer],
                              pen=arc_pen))
+        if eta_deg in _eta_labeled_on_axis:
+            continue
         if abs(uy) >= abs(ux):
             anchor = (0.5, 1.0 if uy > 0 else 0.0)
         else:
@@ -902,7 +953,8 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
         html = f'<span style="color:{eta_color};">{label}</span>'
         lbl = pg.TextItem(html=html, anchor=anchor, border=text_pen, fill=text_fill)
         lbl.setFont(label_font)
-        lbl.setPos(bc_y + ux * label_R, bc_z + uy * label_R)
+        R = eta_label_R.get(eta_deg, label_R)
+        lbl.setPos(bc_y + ux * R, bc_z + uy * R)
         add(lbl)
 
     return items
