@@ -332,3 +332,28 @@ def test_predict_ring_radii_uses_d_list_branch_not_crystalline_fallback():
     expected = sorted({round(r["radius_px"], 3)
                        for r in simulate_rings_from_dspacings(d_list, wavelength_A, lsd_um, px_um)})
     assert radii == expected
+
+
+def test_apply_field_corrections_skips_mismatched_shape_instead_of_raising():
+    """Regression test for a crash hit loading a saved session whose dark/
+    bright/background paths were computed against a different detector
+    (e.g. a 2880x2880 WAXS dark reused with a 512x3072 SAXS image): a plain
+    ``out - d`` used to raise a numpy broadcast ValueError. Mismatched
+    fields are now skipped (treated as None) with a warning, mirroring
+    MaskSelector.composite_mask()'s "skip + warn" handling of a mismatched
+    mask source."""
+    import warnings
+    from midas_gui.helpers import apply_field_corrections
+
+    img = np.full((512, 3072), 10.0)
+    stale_dark = np.ones((2880, 2880))
+    matching_dark = np.full((512, 3072), 1.0)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        out = apply_field_corrections(img, dark=stale_dark)
+    assert np.array_equal(out, img)   # mismatched dark skipped, image unchanged
+    assert any("dark" in str(w.message) and "skipped" in str(w.message) for w in caught)
+
+    out2 = apply_field_corrections(img, dark=matching_dark)
+    assert np.allclose(out2, 9.0)   # matching-shape dark still applies normally

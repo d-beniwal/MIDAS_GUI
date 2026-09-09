@@ -2425,6 +2425,24 @@ class FieldSelector(QtWidgets.QGroupBox):
     def get_field(self):
         return self._field if self.isChecked() else None
 
+    def note_frame_shape(self, frame_shape):
+        """Flag inline if this field's shape doesn't match the current data
+        frame — e.g. a dark/bright/background left over from reusing a
+        session saved against a different detector, which
+        ``apply_field_corrections`` now skips rather than crashing on.
+        Mirrors ``MaskSelector``'s shape-mismatch warning. No-op until a
+        field has actually been computed."""
+        if self._field is None:
+            return
+        base = (f"Computed — {self._field.shape}  "
+                f"[{float(self._field.min()):.4g}, {float(self._field.max()):.4g}]")
+        if frame_shape is not None and self._field.shape != frame_shape:
+            self._status.setText(base + f"  ⚠ SKIPPED: data is {frame_shape}")
+            self._status.setStyleSheet("color:#e0a030;font-size:10px")
+        else:
+            self._status.setText(base)
+            self._status.setStyleSheet("color:#9a9a9a;font-size:10px")
+
     def get_mode(self) -> str:
         if self._mode is None:
             return "divide"
@@ -4279,9 +4297,19 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._mask_sel.add_file_source(path)
 
     def corrected(self, frame):
-        """Apply dark/bright/background to a raw frame (mask handled separately)."""
+        """Apply dark/bright/background to a raw frame (mask handled separately).
+
+        A field whose shape doesn't match `frame` (typically stale dark/
+        bright/background left over from reusing a session saved against a
+        different detector) is skipped by ``apply_field_corrections`` rather
+        than raising; flagged here on that field's own status label so the
+        skip is visible instead of silent.
+        """
         if frame is None:
             return None
+        frame_shape = np.asarray(frame).shape
+        for sel in (self._dark_sel, self._bright_sel, self._bg_sel):
+            sel.note_frame_shape(frame_shape)
         d, b, g = self.dark(), self.bright(), self.background()
         if d is None and b is None and g is None:
             return np.asarray(frame, dtype=np.float32)

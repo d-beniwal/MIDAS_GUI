@@ -464,13 +464,31 @@ def apply_field_corrections(img: np.ndarray, *, dark=None, bright=None,
     Order: (img − dark) → bright → (− background) → clip≥0.  For divide mode the
     flat field is dark-corrected too: out / (bright − dark) × mean(bright − dark).
     Returns float64.  Any field may be None.
+
+    A field whose shape doesn't match ``img`` (typically a dark/bright/background
+    left over from reusing a session saved against a different detector) is
+    skipped rather than raising — mirrors ``MaskSelector.composite_mask()``'s
+    "skip + warn" handling of a mismatched mask source.
     """
+    import warnings
     out = np.asarray(img, dtype=np.float64)
-    d = None if dark is None else np.asarray(dark, dtype=np.float64)
+
+    def _checked(field, label):
+        if field is None:
+            return None
+        arr = np.asarray(field, dtype=np.float64)
+        if arr.shape != out.shape:
+            warnings.warn(
+                f"apply_field_corrections: {label} shape {arr.shape} != "
+                f"image shape {out.shape} — skipped", RuntimeWarning, stacklevel=2)
+            return None
+        return arr
+
+    d = _checked(dark, "dark")
     if d is not None:
         out = out - d
-    if bright is not None:
-        b = np.asarray(bright, dtype=np.float64)
+    b = _checked(bright, "bright")
+    if b is not None:
         if d is not None:
             b = b - d
         if bright_mode == "subtract":
@@ -478,8 +496,9 @@ def apply_field_corrections(img: np.ndarray, *, dark=None, bright=None,
         else:  # flat-field divide, rescaled to preserve counts
             b = np.clip(b, 1e-9, None)
             out = out / b * float(np.mean(b))
-    if background is not None:
-        out = out - np.asarray(background, dtype=np.float64)
+    g = _checked(background, "background")
+    if g is not None:
+        out = out - g
     if clip_negative:
         out = np.clip(out, 0.0, None)
     return out
