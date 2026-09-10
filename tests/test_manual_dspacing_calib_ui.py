@@ -8,7 +8,6 @@ branch of `_predict_ring_radii`, not the CeO2 fallback).
 from types import SimpleNamespace
 
 import pytest
-from PyQt5 import QtCore, QtWidgets
 
 # Each test here builds at least one full CalibrationTab (a pyqtgraph
 # ImageView plus several PlotWidgets); a couple build a second one for a
@@ -22,89 +21,129 @@ from PyQt5 import QtCore, QtWidgets
 pytestmark = pytest.mark.forked
 
 
+_QT_LOADED = False
+
+# Bound by _load_qt() at fixture time, declared here so static analysis
+# (and the pyflakes diff in the review recipe) can still resolve them.
+QtCore = QtWidgets = None
+_FakeManualDspacingCalibWorker = _FakeIntegrationWorker = None
+
+
+def _load_qt():
+    """Import Qt and the QObject-subclass fakes, publishing them as module
+    globals.
+
+    Deliberately NOT done at module level. pytest imports this module during
+    collection, in the *parent* process, while pytest-forked (see
+    ``pytestmark`` above) runs each test in a forked child. Importing PyQt5
+    in the parent initialises macOS CoreFoundation, which a forked child may
+    not use — all 17 tests then die with SIGSEGV ("The process has forked and
+    you cannot use this CoreFoundation functionality safely") before their
+    bodies run. Importing here means each child does its own first-time
+    init, which is legal.
+
+    The two fakes subclass ``QtCore.QObject`` and declare ``pyqtSignal``
+    class attributes, so they cannot be defined at module scope either —
+    that alone would force the import at collection time. They are defined
+    here and published into globals() so the test bodies below can go on
+    referring to them by bare name. See .context/STATE.md.
+    """
+    global _QT_LOADED
+    if _QT_LOADED:
+        return
+    from PyQt5 import QtCore, QtWidgets
+
+    class _FakeManualDspacingCalibWorker(QtCore.QObject):
+        """No-op-thread fake: finishes on the next event-loop tick with a fixed
+        known result, instead of actually running least_squares."""
+        log_line = QtCore.pyqtSignal(str)
+        finished = QtCore.pyqtSignal(object)
+        failed = QtCore.pyqtSignal(str)
+
+        def __init__(self, picks, wavelength_A, pxY, pxZ, seed, NY, NZ,
+                     material_name, d_list, parent=None,
+                     refine=None, tilt_seed=(0.0, 0.0, 0.0), bounds=None):
+            super().__init__(parent)
+            self.refine = refine
+            self.bounds = bounds
+            self._wavelength_A = wavelength_A
+            self._pxY = pxY
+            self._pxZ = pxZ
+            self._NY = NY
+            self._NZ = NZ
+            self._material_name = material_name
+            self._d_list = d_list
+            self._refine = refine
+            self._tilt_seed = tilt_seed
+
+        def start(self):
+            QtCore.QTimer.singleShot(0, self._finish)
+
+        def isRunning(self) -> bool:
+            return False
+
+        def requestInterruption(self):
+            pass
+
+        def _finish(self):
+            result = SimpleNamespace(
+                Lsd=300000.0, BC_y=512.0, BC_z=498.0, tx=0.0, ty=0.0, tz=0.0,
+                distortion={}, pxY=self._pxY, pxZ=self._pxZ or self._pxY,
+                NrPixelsY=self._NY, NrPixelsZ=self._NZ,
+                wavelength_A=self._wavelength_A, post_residual_strain_uE=None,
+                _calibrant_name=self._material_name, _d_list=list(self._d_list))
+            self.finished.emit(result)
+
+
+    class _FakeIntegrationWorker(QtCore.QObject):
+        """No-op-thread fake for the real ``IntegrationWorker`` that ``_on_done``
+        kicks off automatically after any successful fit (manual or not) — the
+        Calibrate tab auto-loads ``DEFAULT_CALIBRANT_TIF`` at construction, so
+        ``_calib_image()`` is never None and a real background thread (importing
+        torch/midas_calibrate_v2) would otherwise be left running past test/
+        interpreter teardown."""
+        log_line = QtCore.pyqtSignal(str)
+        finished = QtCore.pyqtSignal(object)
+        failed = QtCore.pyqtSignal(str)
+
+        def __init__(self, result, image, dark, im_trans, r_bin, eta_bin, mask=None,
+                     parent=None, bright=None, background=None, bright_mode="divide",
+                     weighted=True):
+            super().__init__(parent)
+            self._result = result
+
+        def start(self):
+            QtCore.QTimer.singleShot(0, self._finish)
+
+        def isRunning(self) -> bool:
+            return False
+
+        def requestInterruption(self):
+            pass
+
+        def _finish(self):
+            import numpy as np
+            r_axis = np.linspace(0, 100, 50)
+            profile = np.ones_like(r_axis)
+            eta_axis = np.linspace(-180, 180, 36)
+            cake = np.ones((len(eta_axis), len(r_axis)))
+            self.finished.emit({"r_axis_px": r_axis, "profile": profile,
+                                "wavelength_A": self._result.wavelength_A,
+                                "lsd_um": self._result.Lsd, "px_um": self._result.pxY,
+                                "cake_2d": cake, "eta_axis_deg": eta_axis})
+
+    _QT_LOADED = True
+    globals().update(
+        QtCore=QtCore, QtWidgets=QtWidgets,
+        _FakeManualDspacingCalibWorker=_FakeManualDspacingCalibWorker,
+        _FakeIntegrationWorker=_FakeIntegrationWorker,
+    )
+
+
 @pytest.fixture(scope="module")
 def app():
+    _load_qt()
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-
-
-class _FakeManualDspacingCalibWorker(QtCore.QObject):
-    """No-op-thread fake: finishes on the next event-loop tick with a fixed
-    known result, instead of actually running least_squares."""
-    log_line = QtCore.pyqtSignal(str)
-    finished = QtCore.pyqtSignal(object)
-    failed = QtCore.pyqtSignal(str)
-
-    def __init__(self, picks, wavelength_A, pxY, pxZ, seed, NY, NZ,
-                 material_name, d_list, parent=None,
-                 refine=None, tilt_seed=(0.0, 0.0, 0.0), bounds=None):
-        super().__init__(parent)
-        self.refine = refine
-        self.bounds = bounds
-        self._wavelength_A = wavelength_A
-        self._pxY = pxY
-        self._pxZ = pxZ
-        self._NY = NY
-        self._NZ = NZ
-        self._material_name = material_name
-        self._d_list = d_list
-        self._refine = refine
-        self._tilt_seed = tilt_seed
-
-    def start(self):
-        QtCore.QTimer.singleShot(0, self._finish)
-
-    def isRunning(self) -> bool:
-        return False
-
-    def requestInterruption(self):
-        pass
-
-    def _finish(self):
-        result = SimpleNamespace(
-            Lsd=300000.0, BC_y=512.0, BC_z=498.0, tx=0.0, ty=0.0, tz=0.0,
-            distortion={}, pxY=self._pxY, pxZ=self._pxZ or self._pxY,
-            NrPixelsY=self._NY, NrPixelsZ=self._NZ,
-            wavelength_A=self._wavelength_A, post_residual_strain_uE=None,
-            _calibrant_name=self._material_name, _d_list=list(self._d_list))
-        self.finished.emit(result)
-
-
-class _FakeIntegrationWorker(QtCore.QObject):
-    """No-op-thread fake for the real ``IntegrationWorker`` that ``_on_done``
-    kicks off automatically after any successful fit (manual or not) — the
-    Calibrate tab auto-loads ``DEFAULT_CALIBRANT_TIF`` at construction, so
-    ``_calib_image()`` is never None and a real background thread (importing
-    torch/midas_calibrate_v2) would otherwise be left running past test/
-    interpreter teardown."""
-    log_line = QtCore.pyqtSignal(str)
-    finished = QtCore.pyqtSignal(object)
-    failed = QtCore.pyqtSignal(str)
-
-    def __init__(self, result, image, dark, im_trans, r_bin, eta_bin, mask=None,
-                 parent=None, bright=None, background=None, bright_mode="divide",
-                 weighted=True):
-        super().__init__(parent)
-        self._result = result
-
-    def start(self):
-        QtCore.QTimer.singleShot(0, self._finish)
-
-    def isRunning(self) -> bool:
-        return False
-
-    def requestInterruption(self):
-        pass
-
-    def _finish(self):
-        import numpy as np
-        r_axis = np.linspace(0, 100, 50)
-        profile = np.ones_like(r_axis)
-        eta_axis = np.linspace(-180, 180, 36)
-        cake = np.ones((len(eta_axis), len(r_axis)))
-        self.finished.emit({"r_axis_px": r_axis, "profile": profile,
-                            "wavelength_A": self._result.wavelength_A,
-                            "lsd_um": self._result.Lsd, "px_um": self._result.pxY,
-                            "cake_2d": cake, "eta_axis_deg": eta_axis})
 
 
 def test_manual_fit_pick_summary_and_button_gating(app, monkeypatch):

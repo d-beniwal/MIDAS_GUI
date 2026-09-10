@@ -204,34 +204,31 @@ Flip-Z/Multi-panel fix — trimmed here; full detail in
   `PoleFigureWorker` has a pre-existing, unrelated mask/ImTransOpt bug;
   (4) `spec_from_calibration_result` has no panel-layout support — GUI
   already works around it (see P3-3).
-- **Known-failing baseline (2026-09-09, per-file runs).** Five files fail,
-  29 fork crashes + 1 config flake: `test_hydra_ui` 8,
-  `test_manual_dspacing_calib_ui` 17, `test_hydra_batch_ui` 2,
-  `test_hydra_calib_ui` 2, and `test_smoke` 1 (`test_app_builds_offscreen`).
-  Every other file is green. **Capture this baseline before reviewing any
-  incoming change** — without it you cannot tell a regression from the
-  standing noise (this is how PR #7's two real regressions were isolated;
-  see the github-skill project memory for the full review recipe).
-- **The 29 fork crashes have a known cause and a known fix (found
-  2026-09-09).** They are not an unfixable Qt-teardown problem. Every
-  `pytest.mark.forked` file that imports PyQt5 at **module level** fails
-  (the four above); every forked file that imports it **inside a fixture**
-  passes (`test_set_raw_frame` 12, `test_project` 36, `test_smoke` 10).
-  Proved causal: adding one `from PyQt5 import QtWidgets` line to the top
-  of `test_set_raw_frame.py` flipped it 12 passed → 12 failed (SIGSEGV,
-  *"The process has forked and you cannot use this CoreFoundation
-  functionality safely"*), and removing it restored the pass. Importing
-  PyQt5 in the *parent* initialises CoreFoundation, which macOS forbids in
-  a forked child. Fix is the pattern the passing files already use:
-  `QtWidgets = pytest.importorskip("PyQt5.QtWidgets")` inside the `app`
-  fixture. Files that subclass `QtCore.QObject` at module level (the fakes
-  in `test_manual_dspacing_calib_ui.py`) need those moved into a factory
-  first. Not done yet — tracked in ROADMAP.md.
-- **`test_smoke` failures are usually the local config, not the code.**
-  `constants._apply` replaces `MATERIALS`/`CALIBRANTS` wholesale from the
-  saved config, so a stale `materials` block changes what the Calibrate
-  combo offers. Re-run any suspicious `test_smoke` failure with
-  `HOME=$(mktemp -d)` before calling it a regression.
+- **Known-failing baseline (2026-09-10, per-file runs): none.** Every test
+  file is green on a clean config. The one failure you will see on this
+  machine, `test_smoke` 1 (`test_app_builds_offscreen`), is a local-config
+  artifact, not code: `constants._apply` replaces `MATERIALS`/`CALIBRANTS`
+  wholesale from the saved config, so a stale block changes what the
+  Calibrate combo offers. `HOME=$(mktemp -d) pytest tests/test_smoke.py`
+  gives 10/10. **Re-check any suspicious failure that way before calling it
+  a regression**, and still capture a per-file baseline before reviewing an
+  incoming change (this is how PR #7's and PR #8's real regressions were
+  isolated; see the github-skill project memory for the review recipe).
+- **The 29 forked SIGSEGVs are fixed (2026-09-10).** They were never the
+  pyqtgraph teardown crash — the forked children died before the test bodies
+  ran. Cause: pytest imports test modules during collection in the *parent*,
+  and importing PyQt5 there (directly, or transitively via any `midas_gui`
+  GUI module) initialises macOS CoreFoundation, which a forked child may not
+  use. Proved causal by adding one `from PyQt5 import QtWidgets` line to
+  `test_set_raw_frame.py`: 12 passed → 12 failed, restored on removal.
+  `test_hydra_ui` (8), `test_manual_dspacing_calib_ui` (17),
+  `test_hydra_batch_ui` (2) and `test_hydra_calib_ui` (2) now defer every
+  Qt-pulling import into a `_load_qt()` called from their `app` fixture,
+  which publishes the names (and the `QtCore.QObject` fake workers, which
+  cannot be defined at module scope for the same reason) into module
+  globals. All 29 pass. **Rule for new Qt test files: import PyQt5 and
+  `midas_gui` GUI modules inside a fixture, never at module level** —
+  `tests/test_set_raw_frame.py` is the reference.
 - **Pre-existing interpreter-teardown crash risk**, especially around
   `CakeViewer`'s ViewBox (`tests/test_hydra_calib_ui.py`,
   `tests/test_hydra_ui.py`) and any module-scoped-fixture MainWindow

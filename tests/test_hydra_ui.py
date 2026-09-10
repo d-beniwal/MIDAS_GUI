@@ -10,11 +10,6 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from PyQt5 import QtWidgets
-
-from midas_gui.helpers import geometry_fields_from_file
-from midas_gui.hydra_widgets import HydraFieldSelector
-from midas_gui.tab_view import DataViewerTab
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "test_data" / "gui_synthetic" / "hydra"
 
@@ -25,8 +20,48 @@ FIXTURE_DIR = Path(__file__).resolve().parent.parent / "test_data" / "gui_synthe
 pytestmark = pytest.mark.forked
 
 
+_QT_LOADED = False
+
+# Bound by _load_qt() at fixture time, declared here so static analysis
+# (and the pyflakes diff in the review recipe) can still resolve them.
+QtWidgets = None
+geometry_fields_from_file = HydraFieldSelector = DataViewerTab = None
+
+
+def _load_qt():
+    """Import Qt (and the GUI modules under test, which import it
+    transitively) and publish them as module globals.
+
+    Deliberately NOT done at module level. pytest imports this module during
+    collection, in the *parent* process, while pytest-forked runs each test
+    in a forked child. Importing PyQt5 in the parent initialises macOS
+    CoreFoundation, and CoreFoundation may not be used in a forked child —
+    every test then dies with SIGSEGV ("The process has forked and you
+    cannot use this CoreFoundation functionality safely") before its body
+    runs. Importing from inside the ``app`` fixture happens in the child, so
+    each child initialises CoreFoundation itself, which is legal.
+
+    See .context/STATE.md; ``tests/test_set_raw_frame.py`` is the file this
+    pattern was taken from."""
+    global _QT_LOADED
+    if _QT_LOADED:
+        return
+    from PyQt5 import QtWidgets
+    from midas_gui.helpers import geometry_fields_from_file
+    from midas_gui.hydra_widgets import HydraFieldSelector
+    from midas_gui.tab_view import DataViewerTab
+    _QT_LOADED = True
+    globals().update(
+        QtWidgets=QtWidgets,
+        geometry_fields_from_file=geometry_fields_from_file,
+        HydraFieldSelector=HydraFieldSelector,
+        DataViewerTab=DataViewerTab,
+    )
+
+
 @pytest.fixture(scope="module")
 def app():
+    _load_qt()
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 

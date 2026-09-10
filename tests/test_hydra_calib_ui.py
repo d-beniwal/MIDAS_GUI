@@ -19,14 +19,8 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from PyQt5 import QtCore, QtWidgets
 
 import h5py
-
-import midas_gui.hydra_calib_page as hydra_calib_page_mod
-from midas_gui import project
-from midas_gui.helpers import geometry_fields_from_file
-from midas_gui.hydra_calib_page import HydraCalibrationPage
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "test_data" / "gui_synthetic" / "hydra"
 
@@ -37,8 +31,111 @@ FIXTURE_DIR = Path(__file__).resolve().parent.parent / "test_data" / "gui_synthe
 pytestmark = pytest.mark.forked
 
 
+_QT_LOADED = False
+
+# Bound by _load_qt() at fixture time, declared here so static analysis
+# (and the pyflakes diff in the review recipe) can still resolve them.
+QtCore = QtWidgets = None
+hydra_calib_page_mod = project = None
+geometry_fields_from_file = HydraCalibrationPage = None
+_FakeWorker = _FakeCalibrationWorker = _FakeIntegrationWorker = None
+
+
+def _load_qt():
+    """Import Qt, the GUI modules under test, and the QObject-subclass fakes,
+    publishing them all as module globals.
+
+    Deliberately NOT done at module level. pytest imports this module during
+    collection, in the *parent* process, while pytest-forked runs each test
+    in a forked child. Importing PyQt5 in the parent initialises macOS
+    CoreFoundation, which a forked child may not use — every test then dies
+    with SIGSEGV ("The process has forked and you cannot use this
+    CoreFoundation functionality safely") before its body runs. Importing
+    here means each child does its own first-time init, which is legal.
+
+    The fakes below subclass ``QtCore.QObject``, so they cannot be defined at
+    module scope either — that alone would force the import at collection
+    time. See .context/STATE.md.
+    """
+    global _QT_LOADED
+    if _QT_LOADED:
+        return
+    from PyQt5 import QtCore, QtWidgets
+    import midas_gui.hydra_calib_page as hydra_calib_page_mod
+    from midas_gui import project
+    from midas_gui.helpers import geometry_fields_from_file
+    from midas_gui.hydra_calib_page import HydraCalibrationPage
+
+    class _FakeWorker(QtCore.QObject):
+        """Shared no-op-thread shape for both CalibrationWorker and
+        IntegrationWorker fakes: finishes on the next event-loop tick instead of
+        a real background thread. The synthetic Hydra fixture wasn't built to
+        produce enough calibrant rings for a real fit to converge (verified
+        directly against midas_gui.calib — a pre-existing fixture/data
+        characteristic, not a page bug), so these tests exercise the GUI's
+        sequencing/routing logic rather than the fit numerics."""
+        log_line = QtCore.pyqtSignal(str)
+        finished = QtCore.pyqtSignal(object)
+        failed = QtCore.pyqtSignal(str)
+
+        def start(self):
+            QtCore.QTimer.singleShot(0, self._finish)
+
+        def isRunning(self) -> bool:
+            return False
+
+        def requestInterruption(self):
+            pass
+
+
+    class _FakeCalibrationWorker(_FakeWorker):
+        def __init__(self, mode, image, dark, cfg, parent=None, bright=None, background=None,
+                     bright_mode="divide", capture_stdout=True):
+            super().__init__(parent)
+            self._cfg = cfg
+
+        def _finish(self):
+            seed = self._cfg.get("manual_seed") or {}
+            result = SimpleNamespace(
+                BC_y=seed.get("BC_y", 128.0), BC_z=seed.get("BC_z", 128.0),
+                Lsd=seed.get("Lsd", 1_000_000.0), wavelength_A=self._cfg["wavelength"],
+                pxY=self._cfg["pxY"], pxZ=self._cfg["pxY"], NrPixelsY=256, NrPixelsZ=256,
+                tx=0.0, ty=0.0, tz=0.0, distortion={}, post_residual_strain_uE=0.0)
+            self.finished.emit(result)
+
+
+    class _FakeIntegrationWorker(_FakeWorker):
+        def __init__(self, result, image, dark, im_trans, r_bin, eta_bin, mask=None, parent=None,
+                     bright=None, background=None, bright_mode="divide", weighted=True):
+            super().__init__(parent)
+            self._result = result
+
+        def _finish(self):
+            r_axis = np.linspace(0, 100, 50)
+            profile = np.ones_like(r_axis)
+            eta_axis = np.linspace(-180, 180, 36)
+            cake = np.ones((len(eta_axis), len(r_axis)))
+            self.finished.emit({"r_axis_px": r_axis, "profile": profile,
+                                "wavelength_A": self._result.wavelength_A,
+                                "lsd_um": self._result.Lsd, "px_um": self._result.pxY,
+                                "cake_2d": cake, "eta_axis_deg": eta_axis})
+
+    _QT_LOADED = True
+    globals().update(
+        QtCore=QtCore, QtWidgets=QtWidgets,
+        hydra_calib_page_mod=hydra_calib_page_mod,
+        project=project,
+        geometry_fields_from_file=geometry_fields_from_file,
+        HydraCalibrationPage=HydraCalibrationPage,
+        _FakeWorker=_FakeWorker,
+        _FakeCalibrationWorker=_FakeCalibrationWorker,
+        _FakeIntegrationWorker=_FakeIntegrationWorker,
+    )
+
+
 @pytest.fixture(scope="module")
 def app():
+    _load_qt()
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
@@ -56,63 +153,8 @@ def fixture_available():
     return FIXTURE_DIR
 
 
-class _FakeWorker(QtCore.QObject):
-    """Shared no-op-thread shape for both CalibrationWorker and
-    IntegrationWorker fakes: finishes on the next event-loop tick instead of
-    a real background thread. The synthetic Hydra fixture wasn't built to
-    produce enough calibrant rings for a real fit to converge (verified
-    directly against midas_gui.calib — a pre-existing fixture/data
-    characteristic, not a page bug), so these tests exercise the GUI's
-    sequencing/routing logic rather than the fit numerics."""
-    log_line = QtCore.pyqtSignal(str)
-    finished = QtCore.pyqtSignal(object)
-    failed = QtCore.pyqtSignal(str)
-
-    def start(self):
-        QtCore.QTimer.singleShot(0, self._finish)
-
-    def isRunning(self) -> bool:
-        return False
-
-    def requestInterruption(self):
-        pass
-
-
-class _FakeCalibrationWorker(_FakeWorker):
-    def __init__(self, mode, image, dark, cfg, parent=None, bright=None, background=None,
-                 bright_mode="divide", capture_stdout=True):
-        super().__init__(parent)
-        self._cfg = cfg
-
-    def _finish(self):
-        seed = self._cfg.get("manual_seed") or {}
-        result = SimpleNamespace(
-            BC_y=seed.get("BC_y", 128.0), BC_z=seed.get("BC_z", 128.0),
-            Lsd=seed.get("Lsd", 1_000_000.0), wavelength_A=self._cfg["wavelength"],
-            pxY=self._cfg["pxY"], pxZ=self._cfg["pxY"], NrPixelsY=256, NrPixelsZ=256,
-            tx=0.0, ty=0.0, tz=0.0, distortion={}, post_residual_strain_uE=0.0)
-        self.finished.emit(result)
-
-
-class _FakeIntegrationWorker(_FakeWorker):
-    def __init__(self, result, image, dark, im_trans, r_bin, eta_bin, mask=None, parent=None,
-                 bright=None, background=None, bright_mode="divide", weighted=True):
-        super().__init__(parent)
-        self._result = result
-
-    def _finish(self):
-        r_axis = np.linspace(0, 100, 50)
-        profile = np.ones_like(r_axis)
-        eta_axis = np.linspace(-180, 180, 36)
-        cake = np.ones((len(eta_axis), len(r_axis)))
-        self.finished.emit({"r_axis_px": r_axis, "profile": profile,
-                            "wavelength_A": self._result.wavelength_A,
-                            "lsd_um": self._result.Lsd, "px_um": self._result.pxY,
-                            "cake_2d": cake, "eta_axis_deg": eta_axis})
-
-
 @pytest.fixture(autouse=True)
-def _stub_workers(monkeypatch):
+def _stub_workers(app, monkeypatch):   # `app` so _load_qt() has run first
     monkeypatch.setattr(hydra_calib_page_mod, "CalibrationWorker", _FakeCalibrationWorker)
     monkeypatch.setattr(hydra_calib_page_mod, "IntegrationWorker", _FakeIntegrationWorker)
 
