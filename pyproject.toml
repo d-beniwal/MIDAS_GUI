@@ -127,4 +127,10 @@ testpaths = ["tests"]
 # basetemp keeps every tmp_path-based test's scratch output under the repo's
 # own .scratch/ (gitignored) instead of scattering pytest-NNNN dirs across
 # /tmp indefinitely — `rm -rf .scratch` clears it all in one place.
-addopts = "-ra -q --basetemp=.scratch/pytest"
+#
+# One path level, not two: pytest creates basetemp with a non-recursive
+# mkdir, so a nested `.scratch/pytest` raises FileNotFoundError in fixture
+# setup for every tmp_path test whenever `.scratch/` does not already
+# exist — which is every fresh clone and every CI run, since `.scratch/`
+# is gitignored. `.scratch` alone is created fine.
+addopts = "-ra -q --basetemp=.scratch"
