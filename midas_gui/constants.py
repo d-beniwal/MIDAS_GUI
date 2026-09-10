@@ -192,6 +192,16 @@ MATERIALS = {
     "AgBH (silver behenate)": dict(kind="dspacing", d_list=[58.380 / n for n in range(1, 11)]),
 }
 
+#: The shipped "dspacing"-kind materials, captured before any user/profile
+#: config overlay can replace MATERIALS. The Preferences material table is
+#: lattice-only: it skips these when populating and carries them forward
+#: verbatim on Save (see prefs_dialog), so a d-spacing entry can never be
+#: removed by a deliberate user edit. Its absence from a saved config
+#: therefore only ever means the config predates it — which is why _apply()
+#: restores the missing ones instead of letting a stale snapshot mask them.
+_BUILTIN_DSPACING_MATERIALS = {n: dict(m) for n, m in MATERIALS.items()
+                               if m.get("kind") == "dspacing"}
+
 
 def calibrant_combo_items() -> list:
     """Unified list for the Calibrate tab's single Calibrant dropdown:
@@ -368,6 +378,12 @@ def _apply(cfg: dict) -> None:
             except Exception:
                 pass
         if parsed or cfg["materials"] == {}:
+            # Replace, then re-add any shipped d-spacing material the config
+            # simply never knew about (see _BUILTIN_DSPACING_MATERIALS). A
+            # config written before such a material shipped would otherwise
+            # mask it permanently — the user would never see it offered.
+            for name, m in _BUILTIN_DSPACING_MATERIALS.items():
+                parsed.setdefault(name, dict(m))
             MATERIALS.clear(); MATERIALS.update(parsed)
 
     # calibrants — likewise replace the CALIBRANTS dropdown list when present;

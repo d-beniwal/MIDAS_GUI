@@ -95,7 +95,14 @@ def test_overlay_applies_and_replaces(tmp_path):
     check = (
         "import midas_gui.constants as c;"
         "assert abs(c.DEFAULT_WAVELENGTH-0.222)<1e-9, c.DEFAULT_WAVELENGTH;"
-        "assert list(c.MATERIALS)==['OnlyPhase'], list(c.MATERIALS);"   # replace, not merge
+        # Lattice materials are REPLACED, not merged: none of the shipped
+        # crystalline entries survive a config that lists only OnlyPhase.
+        "assert [n for n,m in c.MATERIALS.items() if m.get('kind')!='dspacing']"
+        "       ==['OnlyPhase'], list(c.MATERIALS);"
+        # ...but a shipped "dspacing" material is restored rather than masked.
+        # The Preferences table cannot show or delete one, so its absence from
+        # a saved config only ever means the config predates it.
+        "assert 'AgBH (silver behenate)' in c.MATERIALS, list(c.MATERIALS);"
         "assert c.DEFAULT_KERNEL=='hard';"
         "assert c.DEFAULT_PIPELINE=='four_stage';"
         "print('ok')"
