@@ -21,7 +21,8 @@ import pyqtgraph as pg
 from midas_gui.constants import DEFAULT_NICKEL_H5
 from midas_gui.helpers import (_fspin, _NoScrollSpinBox,
                          widgets_to_dict, apply_dict_to_widgets, _apply_im_trans)
-from midas_gui.widgets import ProfileViewer, DataLoaderPanel, CakeViewer, build_lab_frame_axes_items
+from midas_gui.widgets import (ProfileViewer, DataLoaderPanel, CakeViewer,
+                              OriginToolButton, build_lab_frame_axes_items)
 from midas_gui.dialogs import show_error
 from midas_gui.roi_tools import ROIImageViewer, ROIRibbon
 from midas_gui.hydra_widgets import HydraModeRibbon
@@ -185,6 +186,7 @@ class DataViewerTab(QtWidgets.QWidget):
         self._hydra_page.set_state(hydra_state.get("page") or {})
         self._loader.set_state(state.get("loader") or {})
         self._viewer.set_display_state(state.get("viewer"))
+        self._origin_btn.sync()   # display_state carries "origin"; the button can't see it change
         self._cake_view.set_display_state(state.get("cake_view"))
         fields = state.get("fields", {})
         calib_path = fields.get("calib_ed")
@@ -314,8 +316,16 @@ class DataViewerTab(QtWidgets.QWidget):
         right.setHandleWidth(8)
         self._viewer = ROIImageViewer()
         self._geom_card.set_viewer(self._viewer)
-        # Top-N brightest-pixel locator (toggle on the image toolbar).
         vtb = self._viewer._toolbar_layout
+        # Display-origin selector — bottom-left (MIDAS convention, the default)
+        # or top-left (what most generic image viewers show).
+        self._origin_btn = OriginToolButton(self._viewer)
+        vtb.addWidget(self._origin_btn)
+        origin_sep = QtWidgets.QFrame()
+        origin_sep.setFrameShape(QtWidgets.QFrame.VLine)
+        origin_sep.setFrameShadow(QtWidgets.QFrame.Sunken)
+        vtb.addWidget(origin_sep)
+        # Top-N brightest-pixel locator (toggle on the image toolbar).
         self._topn_btn = QtWidgets.QPushButton("Top-N pixels"); self._topn_btn.setCheckable(True)
         self._topn_btn.setToolTip(
             "Mark the N highest-intensity pixels on the image (crosshair + circle) "

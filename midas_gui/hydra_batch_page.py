@@ -37,7 +37,8 @@ from midas_gui.helpers import (
     widgets_to_dict, apply_dict_to_widgets,
     _load_image, rmax_corner_px, rmax_edge_px, draw_polar_bin_overlay)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
-                               StackedProfileViewer, OutputFormatSelector, ImageViewer)
+                               StackedProfileViewer, OutputFormatSelector, ImageViewer,
+                               OriginToolButton)
 from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar
 from midas_gui.hydra_batch_widgets import HydraBatchPanelCard
 from midas_gui.workers import BatchRunCoordinator, write_all_profiles
@@ -92,6 +93,8 @@ class HydraBatchPage(QtWidgets.QWidget):
         # toolbar-selected panel (see _PanelViewerPair's docstring for why
         # it's never reparented between panels).
         self._det_view = ImageViewer()
+        self._origin_btn = OriginToolButton(self._det_view)
+        self._det_view._toolbar_layout.addWidget(self._origin_btn)
         self._bin_overlay_items: list = []
         self._build_ui()
         self._on_panel_changed(self._toolbar.current())
@@ -740,6 +743,7 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._fmt.set_state(fmt_keys if fmt_keys is not None else state.get("fmt"))
         self._loader.set_state(state.get("loader") or {})
         self._det_view.set_display_state(state.get("det_view"))
+        self._origin_btn.sync()
         for n_key, wf_state in (state.get("waterfalls") or {}).items():
             pair = self._viewer_pairs.get(int(n_key))
             if pair is not None:

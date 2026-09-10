@@ -15,7 +15,8 @@ import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
-from midas_gui.widgets import PickableImageViewer, _mono_font, _resolve_cmap
+from midas_gui.widgets import (PickableImageViewer, _mono_font, _resolve_cmap,
+                              ORIGIN_TOP_LEFT)
 
 # Cycled per new ROI — same palette convention as tab_view._MATERIAL_COLORS
 # (duplicated here rather than imported, to avoid a tab_view <-> roi_tools
@@ -178,6 +179,7 @@ class ROIStatsPopup(QtWidgets.QDialog):
             self._stats_lbl.setStyleSheet("color:#d6d6d6;")
             v.addWidget(self._stats_lbl)
             self._hist_plot = None
+            self._crop_vb = None
         else:
             row = QtWidgets.QHBoxLayout(); row.setSpacing(6)
 
@@ -237,6 +239,13 @@ class ROIStatsPopup(QtWidgets.QDialog):
         # needs (crop view + our reduced plot minimums) so nothing clips.
         target = self.sizeHint() * 0.5
         self.resize(target.expandedTo(self.minimumSizeHint()))
+
+    def set_origin(self, origin: str):
+        """Match the parent viewer's display origin, so the zoomed crop isn't
+        drawn upside-down relative to the image it was taken from. No-op for a
+        line ROI, whose popup has no crop view."""
+        if self._crop_vb is not None:
+            self._crop_vb.invertY(origin == ORIGIN_TOP_LEFT)
 
     def _on_label_edited(self, text: str):
         self.setWindowTitle(text)
@@ -470,6 +479,11 @@ class ROIImageViewer(PickableImageViewer):
 
         self._iv.ui.graphicsView.viewport().installEventFilter(self)
 
+    def set_origin(self, origin: str):
+        super().set_origin(origin)
+        for entry in self._roi_entries:
+            entry["popup"].set_origin(self._origin)
+
     def set_ribbon(self, ribbon: "ROIRibbon"):
         """Wire this viewer's minimized-ROI entries into `ribbon` (created and
         placed alongside the viewer by tab_view.py)."""
@@ -645,6 +659,7 @@ class ROIImageViewer(PickableImageViewer):
                 self._iv.addItem(item)
 
         popup = ROIStatsPopup(kind, color, label, parent=self)
+        popup.set_origin(self._origin)
         entry = {
             "kind": kind, "roi": roi, "color": color, "label": label,
             "label_item": label_item, "arrow": arrow, "popup": popup,

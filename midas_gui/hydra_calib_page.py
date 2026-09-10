@@ -37,7 +37,8 @@ from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _NoScrollComboBox, make_kedge_label, make_pixel_label,
     _load_image, apply_field_corrections, average_field, source_kind,
     widgets_to_dict, apply_dict_to_widgets, _predict_ring_radii, refresh_combo_items)
-from midas_gui.widgets import PickableImageViewer, LogPanel, CakeViewer, _convert_radial
+from midas_gui.widgets import (PickableImageViewer, LogPanel, CakeViewer, _convert_radial,
+                               OriginToolButton)
 from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar, HydraProfileViewer
 from midas_gui.hydra_calib_widgets import HydraCalibPanelCard
 from midas_gui.workers import CalibrationWorker, IntegrationWorker
@@ -384,6 +385,8 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._toolbar = HydraDetectorToolbar(include_composite=False)
         self._toolbar.panelChanged.connect(self._on_panel_changed)
         tb = self._img_view._toolbar_layout
+        self._origin_btn = OriginToolButton(self._img_view)
+        tb.addWidget(self._origin_btn)
         tb.addWidget(self._toolbar)
         self._show_rings_check = QtWidgets.QCheckBox("Show rings"); self._show_rings_check.setChecked(True)
         self._show_rings_check.toggled.connect(
@@ -1084,6 +1087,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             return
         apply_dict_to_widgets(self._state_widgets(), state.get("fields", {}))
         self._img_view.set_display_state(state.get("img_view"))
+        self._origin_btn.sync()
         for n_key, cv_state in (state.get("cake_views") or {}).items():
             cv = self._cake_views.get(int(n_key))
             if cv is not None:

@@ -28,7 +28,8 @@ from midas_gui.helpers import (
     paramstest_pairs, parse_dspacing_text)
 from midas_gui.widgets import (
     PickableImageViewer, ProfileViewer, LogPanel, DataLoaderPanel, CakeViewer,
-    RingResidualViewer, build_lab_frame_axes_items, ring_azimuth_residual)
+    RingResidualViewer, OriginToolButton, build_lab_frame_axes_items,
+    ring_azimuth_residual)
 from midas_gui.workers import CalibrationWorker, IntegrationWorker, ManualDspacingCalibWorker
 from midas_gui.dialogs import (_SaveParamstestDialog, DistortionRefineDialog,
                                 PARAMETER_LIMIT_ROWS, limit_window, show_error)
@@ -520,6 +521,8 @@ class CalibrationTab(QtWidgets.QWidget):
         self._img_view.ringFitBC.connect(self._on_ring_fit_bc)
         self._img_view.dspacingPicksChanged.connect(self._on_dspacing_picks_changed)
         tb = self._img_view._toolbar_layout
+        self._origin_btn = OriginToolButton(self._img_view)
+        tb.addWidget(self._origin_btn)
         self._show_rings_check = QtWidgets.QCheckBox("Show rings"); self._show_rings_check.setChecked(True)
         self._show_rings_check.toggled.connect(self._on_show_rings_toggled)
         tb.addWidget(self._show_rings_check)
@@ -2072,6 +2075,7 @@ class CalibrationTab(QtWidgets.QWidget):
         self._on_calibrant_changed(self._cal.currentText())
         self._loader.set_state(state.get("loader") or {})
         self._img_view.set_display_state(state.get("img_view"))
+        self._origin_btn.sync()
         self._img_view.set_pick_state(state.get("img_picks"))
         self._cake_view.set_display_state(state.get("cake_view"))
         hydra_state = state.get("hydra") or {}

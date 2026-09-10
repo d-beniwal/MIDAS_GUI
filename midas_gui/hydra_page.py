@@ -36,7 +36,7 @@ from midas_gui.helpers import (_load_image, _apply_im_trans, _fspin, apply_field
 from midas_gui.hydra_geometry_card import DetectorGeometryCard
 from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar, HydraProfileViewer
 from midas_gui.roi_tools import ROIImageViewer, ROIRibbon
-from midas_gui.widgets import _convert_radial
+from midas_gui.widgets import _convert_radial, OriginToolButton
 from midas_gui import style as S
 
 
@@ -155,6 +155,9 @@ class HydraViewerPage(QtWidgets.QWidget):
         right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         right.setHandleWidth(8)
         self._viewer = ROIImageViewer()
+        # Same display-origin selector as the single-detector Data Viewer.
+        self._origin_btn = OriginToolButton(self._viewer)
+        self._viewer._toolbar_layout.addWidget(self._origin_btn)
         self._toolbar = HydraDetectorToolbar()
         self._toolbar.panelChanged.connect(self._on_panel_changed)
         self._viewer._toolbar_layout.addWidget(self._toolbar)
@@ -505,6 +508,7 @@ class HydraViewerPage(QtWidgets.QWidget):
         if not state:
             return
         self._viewer.set_display_state(state.get("viewer"))
+        self._origin_btn.sync()
         for key, fields in (state.get("cards") or {}).items():
             card = self._cards.get(key)
             if card is None:

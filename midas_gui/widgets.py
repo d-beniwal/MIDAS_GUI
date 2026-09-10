@@ -29,6 +29,18 @@ from midas_gui.sim_detector import DEFAULT_CHANNEL_NAME as _SIM_CHANNEL_NAME
 
 # Default colormap: the configured one if it's a known option, else the first.
 _DEFAULT_CMAP = DEFAULT_COLORMAP if DEFAULT_COLORMAP in COLORMAPS else COLORMAPS[0]
+
+# Which screen corner a viewer draws pixel (0,0) in. Display-only — see
+# ImageViewer.set_origin. MIDAS convention (and every geometry the Calibrate
+# tab fits) is bottom-left, which stays the default everywhere.
+ORIGIN_BOTTOM_LEFT = "bottom-left"
+ORIGIN_TOP_LEFT = "top-left"
+ORIGIN_LABELS = {ORIGIN_BOTTOM_LEFT: "Bottom-left", ORIGIN_TOP_LEFT: "Top-left"}
+# Abbreviated form for the toolbar button itself: the image toolbar is already
+# over-full at the app's default window size (every control in it elides), so a
+# full "Origin: Bottom-left" button would render as "Ori...eft". The dropdown
+# and the tooltip both spell the current choice out in full.
+ORIGIN_SHORT = {ORIGIN_BOTTOM_LEFT: "BL", ORIGIN_TOP_LEFT: "TL"}
 from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollDoubleSpinBox, _fspin, _twocol,
                                _browse, is_h5, list_h5_datasets, _NoScrollComboBox,
                                _load_image, _collect_frame_paths, apply_field_corrections,
@@ -143,16 +155,21 @@ class ImageViewer(QtWidgets.QWidget):
         self._cmap.currentTextChanged.connect(self._set_cmap)
         self._cmap.setFixedWidth(90)
         bar.addWidget(self._cmap)
-        bar.addWidget(QtWidgets.QLabel("vmin%:"))
-        self._vmin = _NoScrollSpinBox()
-        self._vmin.setRange(0, 99); self._vmin.setValue(30); self._vmin.setFixedWidth(45)
+        # vmin%/vmax% define the auto-level percentile window that
+        # ``_redisplay`` reads fresh on every redraw. They are deliberately
+        # *not* on the toolbar: the histogram/LUT handles beside the image are
+        # the direct way to set a colour window, and the row is short of space.
+        # They stay real (hidden) spin boxes rather than plain attributes so
+        # ``display_state``/``set_display_state``, the valueChanged wiring and
+        # any caller driving them keep working unchanged.
+        self._vmin = _NoScrollSpinBox(self)
+        self._vmin.setRange(0, 99); self._vmin.setValue(30)
         self._vmin.valueChanged.connect(self._on_percentile_changed)
-        bar.addWidget(self._vmin)
-        bar.addWidget(QtWidgets.QLabel("vmax%:"))
-        self._vmax = _NoScrollSpinBox()
-        self._vmax.setRange(1, 100); self._vmax.setValue(99); self._vmax.setFixedWidth(45)
+        self._vmin.hide()
+        self._vmax = _NoScrollSpinBox(self)
+        self._vmax.setRange(1, 100); self._vmax.setValue(99)
         self._vmax.valueChanged.connect(self._on_percentile_changed)
-        bar.addWidget(self._vmax)
+        self._vmax.hide()
         bar.addStretch(1)
         self._toolbar_layout = bar   # exposed so subclasses can append widgets
         layout.addLayout(bar)
@@ -170,6 +187,7 @@ class ImageViewer(QtWidgets.QWidget):
         # the physical world view of the detector looking downstream from
         # the sample along the beam. Override that default here.
         vb.invertY(False)
+        self._origin = ORIGIN_BOTTOM_LEFT
         layout.addWidget(self._iv, stretch=1)
 
         # Crosshair
@@ -197,6 +215,13 @@ class ImageViewer(QtWidgets.QWidget):
         layout.addWidget(self._coord_bar)
 
         self._data: Optional[np.ndarray] = None
+        # Last cursor position, in image (col, row) coordinates, or None when
+        # the cursor is not over this viewer. Remembered so the readout can be
+        # re-rendered against a *new* frame without the mouse having moved:
+        # during live acquisition frames stream in under a stationary cursor,
+        # and the bar used to fall back to its "Move cursor over image"
+        # placeholder on every one of them.
+        self._hover_xy: Optional[tuple] = None
         self._manual_levels: Optional[tuple] = None
         self._manual_hist_range: Optional[tuple] = None
         self._suspend_level_track = False
@@ -218,9 +243,7 @@ class ImageViewer(QtWidgets.QWidget):
         self._apply_view_limits(data.shape[1], data.shape[0])
         if autorange:
             self._iv.getView().getViewBox().autoRange()
-        self._coord_bar.setText(
-            f"Image {data.shape[1]}×{data.shape[0]} px  |  "
-            "Move cursor over image to inspect pixel values")
+        self._refresh_coord_bar()
 
     def set_raw_frame(self, raw_frame: np.ndarray, im_trans, *,
                        autorange: bool = True, reset_levels: bool = True) -> np.ndarray:
@@ -256,13 +279,34 @@ class ImageViewer(QtWidgets.QWidget):
         self.set_image(frame, autorange=autorange, reset_levels=reset_levels)
         return frame
 
+    def set_origin(self, origin: str) -> None:
+        """Choose which screen corner pixel (0,0) is drawn in.
+
+        Purely a display flip: the pixel readout, every overlay (rings, ROIs,
+        lab-frame axes, Top-N markers) and all saved geometry stay in the same
+        (row, col) frame either way — only the direction the rows are painted
+        in changes. MIDAS convention, and every geometry the Calibrate tab
+        fits, is ``ORIGIN_BOTTOM_LEFT``, which is the default; top-left is
+        offered because most generic image viewers and detector-vendor tools
+        display frames that way, so matching them makes a frame easier to
+        recognise while inspecting it. Unknown values fall back to bottom-left.
+        """
+        origin = ORIGIN_TOP_LEFT if str(origin) == ORIGIN_TOP_LEFT else ORIGIN_BOTTOM_LEFT
+        self._origin = origin
+        self._iv.getView().getViewBox().invertY(origin == ORIGIN_TOP_LEFT)
+
+    def origin(self) -> str:
+        """Current display origin — ``ORIGIN_BOTTOM_LEFT`` or ``ORIGIN_TOP_LEFT``."""
+        return self._origin
+
     def display_state(self) -> dict:
-        """cmap/log/vmin%/vmax% as a plain dict — the one place a caller
+        """cmap/log/vmin%/vmax%/origin as a plain dict — the one place a caller
         that wants to persist "how this viewer is displayed" (e.g. a
         tab's project-state save) should read from, instead of reaching
         into ``_cmap``/``_log``/``_vmin``/``_vmax`` directly."""
         return {"cmap": self._cmap.currentText(), "log": self._log.isChecked(),
-                "vmin": self._vmin.value(), "vmax": self._vmax.value()}
+                "vmin": self._vmin.value(), "vmax": self._vmax.value(),
+                "origin": self._origin}
 
     def set_display_state(self, state: Optional[dict]) -> None:
         """Inverse of :meth:`display_state`. Restoring ``log``/``vmin``/
@@ -294,6 +338,8 @@ class ImageViewer(QtWidgets.QWidget):
                 spin.blockSignals(True)
                 spin.setValue(state[key])
                 spin.blockSignals(False)
+        if state.get("origin"):
+            self.set_origin(state["origin"])
         if self._data is not None:
             self._redisplay()
 
@@ -429,14 +475,94 @@ class ImageViewer(QtWidgets.QWidget):
             mp = vb.mapSceneToView(pos)
             x, y = mp.x(), mp.y()
             self._vl.setPos(x); self._hl.setPos(y)
-            if self._data is not None:
-                ix, iy = int(x), int(y)   # floor, not round (Bug 6)
-                h, w = self._data.shape
+            self._hover_xy = (x, y)
+            self._refresh_coord_bar()
+
+    def leaveEvent(self, ev):
+        """Cursor left the viewer — stop treating the last hovered pixel as
+        live, so incoming frames don't keep updating a readout for a pixel the
+        cursor is no longer on. The text itself is left standing (as it was
+        before) until the next frame or hover replaces it."""
+        self._hover_xy = None
+        super().leaveEvent(ev)
+
+    def _refresh_coord_bar(self):
+        """Re-render the bottom pixel-readout bar from the remembered cursor
+        position against the *current* frame.
+
+        Called from ``_mouse`` and from ``set_image``. The ``set_image`` half is
+        what keeps the readout live during acquisition: frames arrive under a
+        stationary cursor, and pyqtgraph only emits ``sigMouseMoved`` when the
+        mouse actually moves, so re-rendering here is the only way the value
+        under the cursor tracks the incoming data (it used to be reset to the
+        "Move cursor over image" placeholder by every frame instead)."""
+        self._coord_bar.setText(self._coord_text())
+
+    def _coord_text(self) -> str:
+        if self._data is not None:
+            h, w = self._data.shape
+            if self._hover_xy is not None:
+                # floor, not round (Bug 6)
+                ix, iy = int(self._hover_xy[0]), int(self._hover_xy[1])
                 if 0 <= iy < h and 0 <= ix < w:
-                    val = self._data[iy, ix]
-                    self._coord_bar.setText(
-                        f"  x (col) = {ix}    y (row) = {iy}    "
-                        f"intensity = {val:.4g}    (image {w}×{h} px)")
+                    return (f"  x (col) = {ix}    y (row) = {iy}    "
+                            f"intensity = {self._data[iy, ix]:.4g}    "
+                            f"(image {w}×{h} px)")
+            return (f"Image {w}×{h} px  |  "
+                    "Move cursor over image to inspect pixel values")
+        return "Move cursor over image to inspect pixel values"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  OriginToolButton
+# ═════════════════════════════════════════════════════════════════════════════
+
+class OriginToolButton(QtWidgets.QToolButton):
+    """Image-toolbar dropdown choosing an :class:`ImageViewer`'s display origin.
+
+    Owns its own menu and keeps its label in sync with the viewer. A caller
+    that restores a saved display state (which carries ``origin``) behind this
+    button's back must call :meth:`sync` afterwards, since the viewer has no
+    change signal to listen to.
+    """
+
+    def __init__(self, viewer: "ImageViewer", parent=None):
+        super().__init__(parent)
+        self._viewer = viewer
+        self.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        menu = QtWidgets.QMenu(self)
+        group = QtWidgets.QActionGroup(self)
+        group.setExclusive(True)
+        self._actions = {}
+        for value in (ORIGIN_BOTTOM_LEFT, ORIGIN_TOP_LEFT):
+            act = menu.addAction(ORIGIN_LABELS[value])
+            act.setCheckable(True)
+            group.addAction(act)
+            act.triggered.connect(lambda _checked=False, v=value: self._choose(v))
+            self._actions[value] = act
+        self.setMenu(menu)
+        self.sync()
+
+    def _choose(self, origin: str):
+        self._viewer.set_origin(origin)
+        self.sync()
+
+    def sync(self):
+        """Re-read the viewer's origin into this button's label, tooltip and
+        check mark."""
+        origin = self._viewer.origin()
+        label = ORIGIN_LABELS.get(origin, origin)
+        self.setText(f"Origin: {ORIGIN_SHORT.get(origin, label)}")
+        self.setToolTip(
+            "Which corner of the screen pixel (0,0) is drawn in.\n"
+            "For MIDAS calibration, use Bottom-Left origin.\n"
+            f"Currently: {label}.\n"
+            "Display only — pixel coordinates, overlays and any geometry you "
+            "save are unaffected.")
+        act = self._actions.get(origin)
+        if act is not None:
+            act.setChecked(True)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1081,16 +1207,21 @@ class CakeViewer(QtWidgets.QWidget):
         self._cmap.currentTextChanged.connect(self._set_cmap)
         self._cmap.setFixedWidth(90)
         bar.addWidget(self._cmap)
-        bar.addWidget(QtWidgets.QLabel("vmin%:"))
-        self._vmin = _NoScrollSpinBox()
-        self._vmin.setRange(0, 99); self._vmin.setValue(30); self._vmin.setFixedWidth(45)
+        # vmin%/vmax% define the auto-level percentile window that
+        # ``_redisplay`` reads fresh on every redraw. They are deliberately
+        # *not* on the toolbar: the histogram/LUT handles beside the image are
+        # the direct way to set a colour window, and the row is short of space.
+        # They stay real (hidden) spin boxes rather than plain attributes so
+        # ``display_state``/``set_display_state``, the valueChanged wiring and
+        # any caller driving them keep working unchanged.
+        self._vmin = _NoScrollSpinBox(self)
+        self._vmin.setRange(0, 99); self._vmin.setValue(30)
         self._vmin.valueChanged.connect(self._redisplay)
-        bar.addWidget(self._vmin)
-        bar.addWidget(QtWidgets.QLabel("vmax%:"))
-        self._vmax = _NoScrollSpinBox()
-        self._vmax.setRange(1, 100); self._vmax.setValue(99); self._vmax.setFixedWidth(45)
+        self._vmin.hide()
+        self._vmax = _NoScrollSpinBox(self)
+        self._vmax.setRange(1, 100); self._vmax.setValue(99)
         self._vmax.valueChanged.connect(self._redisplay)
-        bar.addWidget(self._vmax)
+        self._vmax.hide()
         bar.addStretch(1)
         self._toolbar_layout = bar   # exposed so subclasses/callers can append widgets
         layout.addLayout(bar)

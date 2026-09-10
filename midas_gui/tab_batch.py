@@ -29,7 +29,7 @@ from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_
                                check_output_dir_writable)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, DataLoaderPanel, OutputFormatSelector,
-                               ImageViewer, build_lab_frame_axes_items)
+                               ImageViewer, OriginToolButton, build_lab_frame_axes_items)
 from midas_gui.workers import (BatchWorker, BatchRunCoordinator, apply_q_uniform,
                                DriftWorker, FolderMonitorWorker, write_all_profiles,
                                froot_and_frame_num)
@@ -345,6 +345,7 @@ class BatchTab(QtWidgets.QWidget):
         fmt_keys = fields.pop("fmt_keys", None)
         apply_dict_to_widgets(self._state_widgets(), fields)
         self._det_view.set_display_state(state.get("det_view"))
+        self._origin_btn.sync()
         self._waterfall.set_display_state(state.get("waterfall"))
         self._corr_widget.set_state(state.get("corr") or {})
         self._fmt.set_state(fmt_keys if fmt_keys is not None else state.get("fmt"))
@@ -838,6 +839,8 @@ class BatchTab(QtWidgets.QWidget):
         self._waterfall = WaterfallViewer()
         self._stack_view = StackedProfileViewer()
         self._det_view = ImageViewer()
+        self._origin_btn = OriginToolButton(self._det_view)
+        self._det_view._toolbar_layout.addWidget(self._origin_btn)
         self._lab_axes_chk = QtWidgets.QCheckBox("Lab-frame axes")
         self._lab_axes_chk.setToolTip(
             "Overlay MIDAS lab-frame axes (X_Lab/Y_Lab), the beam-direction "
