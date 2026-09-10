@@ -41,6 +41,28 @@ Build-critical reference for maintaining the PDF tab:
   `build_geom`.
 - **Cross-cutting:** multi-detector merge, energy-sweep calibration.
 
+## Test suite: retire the 29 forked SIGSEGV failures (found 2026-09-09)
+
+Not an unfixable Qt-teardown problem — see `.context/STATE.md`. Every
+`pytest.mark.forked` file that imports PyQt5 at module level crashes on
+macOS (importing PyQt5 in the parent initialises CoreFoundation, which a
+forked child may not touch); every forked file that defers the import into
+its `app` fixture passes. Proved by adding one module-level import to
+`test_set_raw_frame.py` and flipping it 12 passed → 12 failed.
+
+Fix, per file, is to move the import into the fixture
+(`QtWidgets = pytest.importorskip("PyQt5.QtWidgets")`):
+
+- `tests/test_hydra_ui.py` (8)
+- `tests/test_manual_dspacing_calib_ui.py` (17) — also needs its
+  module-level `QtCore.QObject` fake-worker subclasses moved into a factory
+  function, since those force the import at collection time
+- `tests/test_hydra_batch_ui.py` (2)
+- `tests/test_hydra_calib_ui.py` (2)
+
+Would take the known-failing baseline from five files to one (`test_smoke`'s
+local-config flake).
+
 ## Inherited from PR #7 (merged 2026-09-03, `092fbba`/`46e0fec`)
 
 - **No test coverage for three of the PR's six new modules** —
