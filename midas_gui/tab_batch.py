@@ -1417,7 +1417,16 @@ class BatchTab(QtWidgets.QWidget):
     # ── Folder monitoring (live new-file integration) ──────────────
 
     def _integration_signature(self, src_cfg, kernel, corrections, weighted):
-        """Signature identifying a reusable detector map for the current settings."""
+        """Signature identifying a reusable detector map for the current settings.
+
+        Deliberately does NOT include the data source. ``build_integration_context``
+        takes only (spec, kernel, mask, corrections, weighted) — the detector map
+        is a property of the geometry, not of the frames fed through it — so
+        keying on the source path only threw the map away every time the user
+        pointed the tab at a different file under the same calibration. It does
+        include Eta min/max, which the source terms used to sit next to and
+        which genuinely do change the spec (``_build_spec`` passes them through,
+        and the context's eta axis is derived from them)."""
         if self._use_tab2_btn.isChecked():
             calib = ("tab2", id(self._calib_result))
         else:
@@ -1427,9 +1436,8 @@ class BatchTab(QtWidgets.QWidget):
         pol, sa = corrections
         return (calib, kernel, round(self._r_bin.value(), 4), round(self._e_bin.value(), 4),
                 round(self._r_min.value(), 4), round(self._r_max.value(), 4),
-                bool(weighted), pol is not None, sa is not None, mask_id,
-                src_cfg.get("path"), tuple(src_cfg.get("paths") or ()),
-                src_cfg.get("type"), src_cfg.get("dataset"))
+                round(self._eta_min.value(), 4), round(self._eta_max.value(), 4),
+                bool(weighted), pol is not None, sa is not None, mask_id)
 
     def _cache_geom(self, sig, ctx):
         self._geom_cache = ctx
