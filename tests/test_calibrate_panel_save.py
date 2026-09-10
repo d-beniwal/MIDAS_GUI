@@ -219,3 +219,46 @@ def test_one_shot_reroutes_for_what_calibrate_cannot_express(monkeypatch):
     # Exactly one tilt refined.
     assert _route_taken(monkeypatch,
                         refine={"ty": True, "tz": False}) == "autocalibrate"
+
+
+def test_crystalline_at_limit_flags_a_fit_stopped_by_its_window(app):
+    """A bounded fit that stops on its bound is reporting the bound, not a
+    measurement — the windows being visible is not on its own enough."""
+    from midas_gui.tab_calibrate import CalibrationTab
+
+    tab = CalibrationTab()
+    tab._cal.setCurrentIndex(tab._cal.findText("CeO2"))
+    tab._manual_seed_check.setChecked(True)
+    tab._seed_lsd.setValue(1000.0)          # mm in the UI, µm in the seed slot
+    tab._seed_bcy.setValue(1024.0); tab._seed_bcz.setValue(1024.0)
+    tab._seed_ty.setValue(0.0); tab._seed_tz.setValue(0.0)
+    _cb, spin, combo = tab._limit_widgets["Lsd"]
+    spin.setValue(2.0); combo.setCurrentText("mm")
+
+    def at_limit(**over):
+        base = dict(Lsd=1_000_000.0, BC_y=1024.0, BC_z=1024.0, ty=0.0, tz=0.0,
+                    wavelength_A=tab._wl.value())
+        base.update(over)
+        return tab._crystalline_at_limit(SimpleNamespace(**base))
+
+    assert at_limit() == set()                                # mid-window
+    assert at_limit(Lsd=1_002_000.0) == {"Lsd"}               # on the ±2 mm bound
+    assert at_limit(Lsd=1_001_500.0) == set()                 # just inside
+    assert at_limit(BC_z=1044.0) == {"BC_z"}                  # on the ±20 px bound
+    assert at_limit(tz=3.0) == {"tz"}                         # on the ±3° bound
+
+    # Held-fixed parameters never moved, so they cannot have been stopped.
+    tab._ref_lsd.setChecked(False)
+    tab._last_refine_flags = tab._refine_flags()
+    assert at_limit(Lsd=1_002_000.0) == set()
+
+    # Without a manual seed the window's centre is unknown; guessing would be
+    # worse than saying nothing.
+    tab._ref_lsd.setChecked(True)
+    tab._last_refine_flags = tab._refine_flags()
+    tab._manual_seed_check.setChecked(False)
+    assert at_limit(Lsd=1_002_000.0) == set()
+
+    # A d-spacing calibrant reports through the manual fit's own at_limit.
+    tab._cal.setCurrentIndex(tab._cal.findText("AgBH (silver behenate)"))
+    assert tab._crystalline_at_limit(SimpleNamespace(Lsd=1_002_000.0)) == set()

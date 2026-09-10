@@ -1026,6 +1026,53 @@ class CalibrationTab(QtWidgets.QWidget):
             bits.append(f"{', '.join(sorted(skipped))} ignored (needs 'Use manual seed')")
         self._limits_note.setText("   ".join(bits))
 
+    #: tol* field -> the result attributes it bounds, the seed slot each is
+    #: centred on, and the refine flag that had to be on for the value to move
+    #: at all. One window covers both centre coordinates and both tilts.
+    _XTAL_AT_LIMIT = {"tolLsd": (("Lsd", "Lsd", "Lsd"),),
+                      "tolBC": (("BC_y", "BC_y", "BC"), ("BC_z", "BC_z", "BC")),
+                      "tolTilts": (("ty", "ty", "ty"), ("tz", "tz", "tz")),
+                      "tolWavelength": (("wavelength_A", "wavelength_A",
+                                         "Wavelength"),)}
+
+    def _crystalline_at_limit(self, result) -> set:
+        """Which crystalline parameters came back sitting on their window.
+
+        A bounded fit that stops at its bound is reporting the bound, not a
+        measurement — the same thing ``at_limit`` says for the manual fit, and
+        the reason the windows being visible is not on its own enough.
+
+        Only decidable when the window's centre is known, i.e. with "Use manual
+        seed" on. An auto-seeded run is centred on a seed the GUI never sees,
+        so this reports nothing rather than guessing.
+        """
+        if self._limits_mode_is_dsp is not False:
+            return set()
+        if not self._manual_seed_check.isChecked():
+            return set()
+        from midas_gui.calib import tol_defaults
+        eff = {**tol_defaults(), **(self._crystalline_tols() or {})}
+        seed = self._limit_seed_values()
+        refine = self._last_refine_flags or self._refine_flags()
+        out = set()
+        for field, pairs in self._XTAL_AT_LIMIT.items():
+            tol = eff.get(field)
+            if not tol or not math.isfinite(tol):
+                continue
+            for attr, slot, flag in pairs:
+                # A parameter that was held fixed never moved, so it cannot
+                # have been stopped by its window — saying otherwise would be
+                # noise on exactly the rows the user already knows are pinned.
+                if not refine.get(flag, True):
+                    continue
+                centre, got = seed.get(slot), getattr(result, attr, None)
+                if centre is None or got is None:
+                    continue
+                # Lsd is seeded in µm here and returned in µm, so no scaling.
+                if abs(float(got) - float(centre)) >= tol * (1.0 - 1e-6):
+                    out.add(slot)
+        return out
+
     def _crystalline_tols(self) -> Optional[dict]:
         """The ``tol*`` overrides for a crystalline run, or ``None`` when every
         row still sits at the backend default (which keeps ``run_pipeline`` on
@@ -1557,6 +1604,12 @@ class CalibrationTab(QtWidgets.QWidget):
         self._bot_tabs.setCurrentWidget(self._log)
         self._log.append("─" * 40 + f"\nStarting calibration ({mode})…")
         self._log.append(self._refine_summary_text())
+        # The windows bound the answer, so they belong in the run's own record
+        # next to what was refined — not only on the card, which shows whatever
+        # is set now rather than what this run used.
+        if self._limits_mode_is_dsp is False:
+            self._log.append("Limits: " + self._limits_note.text()
+                             .replace("Always applied, centred on the seed: ", ""))
 
         trans = im_trans_codes_from_checkboxes(self._flip_y, self._flip_z, self._transp)
 
@@ -1756,9 +1809,16 @@ class CalibrationTab(QtWidgets.QWidget):
         self._run_btn.setEnabled(True); self._abort_btn.setEnabled(False)
         self._prog.setVisible(False)
         # Only the manual d-spacing fit reports uncertainties (the crystalline
-        # backend returns none), so these are absent for a crystalline run.
+        # backend returns none), so sigma is absent for a crystalline run.
         self._last_fit_sigma = getattr(result, "fit_sigma", None)
-        self._last_at_limit = getattr(result, "fit_at_limit", set())
+        self._last_at_limit = (getattr(result, "fit_at_limit", None)
+                               or self._crystalline_at_limit(result))
+        if self._last_at_limit:
+            self._log.append(
+                "\nWARNING: " + ", ".join(sorted(self._last_at_limit)) +
+                " came back on the edge of the allowed window — that value was "
+                "set by the limit, not measured from the data. Widen the limit "
+                "if the true value may lie outside it, or check the seed.")
         try:
             self._populate_param_grid(
                 paramstest_pairs(result, selected=self._last_dist_coeffs),

@@ -1727,6 +1727,16 @@ Tightening a window also **shrinks that seed field's arrow step**, to 10 % of th
 range: at ±15 mm the Lsd arrows move 3 mm, at ±2 mm they move 0.4 mm. Rows with no
 window in force fall back to the steps set in Preferences.
 
+**When the fit stops on a bound**, the parameter is reporting the bound rather than a
+measurement — a window that is visible but silently binding is barely better than an
+invisible one. Any such parameter is marked `(at limit)` in the **Results** grid and
+named in the Log, with a prompt to widen the window or check the seed. This needs the
+window's centre to be known, so it is reported for a run with **Use manual seed** on;
+an auto-seeded run is centred on a seed the GUI never sees, and reports nothing rather
+than guessing. Parameters you held fixed are never flagged — they never moved. The Log
+also records the windows in force at the start of each run, so a run's own record says
+what bounded it rather than only the card, which shows whatever is set now.
+
 One consequence worth knowing: `midas_calibrate_v2.calibrate()`, which the plain
 **One-shot** pipeline calls, accepts no window arguments and hardcodes Lsd and the beam
 centre as refined. So editing a limit, unchecking **Lsd** or **BC**, or refining exactly
