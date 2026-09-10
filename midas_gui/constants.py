@@ -236,11 +236,11 @@ DEFAULT_UI_SCALE      = 1.0           # multiplier, clamped to [0.5, 4.0] at sta
 # is the subset of OPTIONAL_TABS shown at startup (all optional tabs ship enabled);
 # it is overridable via the per-user config key ``ui.visible_tabs``.
 ALWAYS_TABS = ["Data Viewer", "Mask Builder", "Calibrate", "Batch Integrate"]
-OPTIONAL_TABS = ["Calib. Refinement", "Corrections", "PDF Analysis", "Texture",
-                 "Pump Probe", "Results & Export"]
+OPTIONAL_TABS = ["Calib. Refinement", "Batch Queue", "Corrections", "PDF Analysis",
+                 "Texture", "Pump Probe", "Results & Export"]
 # Optional tabs shown by default. Corrections / PDF Analysis / Texture / Results &
 # Export ship hidden (turn them on in Settings ▸ Preferences ▸ Tabs).
-DEFAULT_VISIBLE_TABS = ["Calib. Refinement", "Pump Probe"]
+DEFAULT_VISIBLE_TABS = ["Calib. Refinement", "Batch Queue", "Pump Probe"]
 
 # ── Beamline devices (Data Viewer ▸ Live Data PV dropdown) ──────────────────────
 # Default detector devices for 20-ID-D, extracted from the beamline's area-detector

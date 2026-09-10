@@ -895,6 +895,22 @@ class BatchTab(QtWidgets.QWidget):
         return spec_from_geometry_file(path, r_bin, e_bin, r_min=r_min, r_max=r_max,
                                        eta_min=eta_min, eta_max=eta_max)
 
+    def integration_settings(self) -> dict:
+        """This tab's current binning / kernel / format choices, in the shape
+        the Batch Queue tab's "Copy from Batch Integrate" button consumes.
+
+        Read-only and widget-shaped rather than a spec: the queue applies these
+        to several different calibrations, so it needs the *settings*, not one
+        resolved ``IntegrationSpec``."""
+        return {"kernel": self._kernel.currentData(),
+                "r_bin": self._r_bin.value(), "e_bin": self._e_bin.value(),
+                "r_min": self._r_min.value(), "r_max": self._r_max.value(),
+                "eta_min": self._eta_min.value(), "eta_max": self._eta_max.value(),
+                "fmt": self._fmt.checked_keys(),
+                "weighted": bool(self._azim.currentData()),
+                "chunk_size": self._loader.source_cfg().get("chunk_size") or 0,
+                "combine_op": self._loader.source_cfg().get("combine_op") or "mean"}
+
     def set_expid_provider(self, provider) -> None:
         """Wired by app.py's MainWindow: ``provider()`` returns the header's
         current Exp ID (shared app-wide, not owned by this tab) for

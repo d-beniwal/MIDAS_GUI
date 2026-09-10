@@ -848,7 +848,17 @@ def calibration_namespace(calibration_snapshot: dict):
 def append_integration_attempt(project_path, panel_key, *, inputs, finished_payload,
                                 calibration_snapshot=None, calib_attempt_ref=None,
                                 mask=None, mask_is_file_backed: bool = False,
-                                extra: Optional[dict] = None) -> str:
+                                extra: Optional[dict] = None,
+                                environment: Optional[dict] = None) -> str:
+    """Append one integration attempt to ``/analysis/integrate/<panel_key>``.
+
+    ``environment`` lets a caller supply a pre-computed
+    :func:`environment_snapshot`; omitted (the default), one is taken here as
+    it always was. It exists for callers that log many attempts in a row — the
+    Batch Queue writes one project per sample — because a snapshot shells out
+    to ``git rev-parse`` and (on macOS) ``sysctl``, each with a 2 s timeout, so
+    paying for it once per run rather than once per sample is worth the kwarg.
+    The environment cannot meaningfully change mid-run."""
     payload = dict(finished_payload or {})
     profiles = payload.pop("profiles", None)
     r_axis = payload.pop("r_axis_px", None)
@@ -865,7 +875,7 @@ def append_integration_attempt(project_path, panel_key, *, inputs, finished_payl
         "aborted": payload.get("aborted", False),
         "calibration_snapshot": calibration_snapshot,
         "calib_attempt_ref": calib_attempt_ref,
-        "environment": environment_snapshot(),
+        "environment": environment if environment is not None else environment_snapshot(),
         "mask_present": mask is not None,
         "mask_embedded": embed_mask,
     }

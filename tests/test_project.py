@@ -891,3 +891,71 @@ def test_hash_paths_in_adds_hash_for_existing_files(tmp_path):
     assert out["path_hash"]["method"] == "sha256_full"
     assert out["nested"]["path_hash"]["method"] == "sha256_full"
     assert "path_hash" not in out["missing"]
+
+
+# ── injectable environment snapshot (Batch Queue writes one project per sample) ──
+
+def _minimal_payload():
+    return {"n": 1, "profiles": np.ones((1, 4), dtype=np.float32),
+            "r_axis_px": np.arange(4, dtype=np.float32), "sigmas": None,
+            "frame_ids": ["f0"], "out_paths": [], "aborted": False}
+
+
+def test_integration_attempt_uses_an_injected_environment(tmp_path):
+    """A caller logging N attempts in a row supplies one snapshot for all of
+    them — environment_snapshot() shells out to git and sysctl with 2 s
+    timeouts, which is fine once and wasteful per sample."""
+    path = str(tmp_path / "proj.h5")
+    project.create_project(path)
+    env = {"midas_gui_version": "test", "python_version": "3.x", "marker": "injected"}
+
+    project.append_integration_attempt(
+        path, "single", inputs={}, finished_payload=_minimal_payload(),
+        environment=env)
+
+    with h5py.File(path, "r") as f:
+        meta = json.loads(f["analysis/integrate/single/attempt_0001/metadata"][()])
+    assert meta["environment"] == env
+
+
+def test_integration_attempt_still_takes_its_own_environment_by_default(tmp_path):
+    """Omitting the kwarg must behave exactly as before it existed."""
+    path = str(tmp_path / "proj.h5")
+    project.create_project(path)
+    project.append_integration_attempt(
+        path, "single", inputs={}, finished_payload=_minimal_payload())
+
+    with h5py.File(path, "r") as f:
+        meta = json.loads(f["analysis/integrate/single/attempt_0001/metadata"][()])
+    env = meta["environment"]
+    assert isinstance(env, dict) and "python_version" in env and "workstation" in env
+    assert env.get("marker") is None
+
+
+def test_an_injected_environment_does_not_leak_into_other_attempt_kinds(tmp_path):
+    """Only the integration attempt grew the kwarg; calibration attempts keep
+    computing their own."""
+    path = str(tmp_path / "proj.h5")
+    project.create_project(path)
+    ref = project.append_calibration_attempt(
+        path, "single", cfg={}, result=_fake_result(), loader_state={})
+    with h5py.File(path, "r") as f:
+        meta = json.loads(f[ref]["metadata"][()])
+    assert "python_version" in meta["environment"]
+
+
+def test_repeated_attempts_accumulate_for_a_per_sample_project(tmp_path):
+    """The Batch Queue's re-run behaviour: a second run over the same sample
+    appends attempt_0002 rather than replacing attempt_0001."""
+    path = str(tmp_path / "scan_001.h5")
+    project.create_project(path, name="scan_001")
+    first = project.append_integration_attempt(
+        path, "single", inputs={}, finished_payload=_minimal_payload())
+    second = project.append_integration_attempt(
+        path, "single", inputs={}, finished_payload=_minimal_payload())
+
+    assert first == "/analysis/integrate/single/attempt_0001"
+    assert second == "/analysis/integrate/single/attempt_0002"
+    with h5py.File(path, "r") as f:
+        assert sorted(f["analysis/integrate/single"]) == ["attempt_0001", "attempt_0002"]
+        assert f["analysis/integrate/single"].attrs["latest"] == "attempt_0002"

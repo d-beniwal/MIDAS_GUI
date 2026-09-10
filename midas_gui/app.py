@@ -66,6 +66,7 @@ from midas_gui.tab_view import DataViewerTab
 from midas_gui.tab_mask import MaskTab
 from midas_gui.tab_calibrate import CalibrationTab
 from midas_gui.tab_batch import BatchTab
+from midas_gui.tab_queue import BatchQueueTab
 from midas_gui.tab_refine import RefinementTab
 from midas_gui.tab_corrections import CorrectionsTab
 from midas_gui.tab_pdf import PDFTab
@@ -209,6 +210,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._mask_tab   = _tab(MaskTab,         "Mask Builder")
         self._cal_tab    = _tab(CalibrationTab,  "Calibrate")
         self._batch_tab  = _tab(BatchTab,        "Batch Integrate")
+        self._queue_tab  = _tab(BatchQueueTab,   "Batch Queue")
         self._refine_tab = _tab(RefinementTab,   "Calib. Refinement")
         self._corr_tab   = _tab(CorrectionsTab,  "Corrections")
         self._pdf_tab    = _tab(PDFTab,          "PDF Analysis")
@@ -227,6 +229,7 @@ class MainWindow(QtWidgets.QMainWindow):
             (self._cal_tab,    "Calibrate",         True),
             (self._refine_tab, "Calib. Refinement", False),
             (self._batch_tab,  "Batch Integrate",   True),
+            (self._queue_tab,  "Batch Queue",       False),
             (self._corr_tab,   "Corrections",       False),
             (self._pdf_tab,    "PDF Analysis",      False),
             (self._tex_tab,    "Texture",           False),
@@ -309,13 +312,15 @@ class MainWindow(QtWidgets.QMainWindow):
                  "set_mask_from_tab1")
         # Calibration propagation (Tab 2 result → consumers)
         _connect(self._cal_tab, "calibrationDone",
-                 (self._batch_tab, self._mask_tab, self._refine_tab, self._corr_tab,
-                  self._pdf_tab, self._tex_tab, self._pump_tab, self._export_tab),
+                 (self._batch_tab, self._queue_tab, self._mask_tab, self._refine_tab,
+                  self._corr_tab, self._pdf_tab, self._tex_tab, self._pump_tab,
+                  self._export_tab),
                  "set_calibration")
         # Refined geometry (Tab 4) re-broadcasts to the calibration consumers
         _connect(self._refine_tab, "refinedResult",
-                 (self._batch_tab, self._mask_tab, self._corr_tab, self._pdf_tab,
-                  self._tex_tab, self._pump_tab, self._export_tab), "set_calibration")
+                 (self._batch_tab, self._queue_tab, self._mask_tab, self._corr_tab,
+                  self._pdf_tab, self._tex_tab, self._pump_tab, self._export_tab),
+                 "set_calibration")
 
         # Geometry hand-off between Data Viewer (Tab 0) and Calibrate (Tab 2):
         #   Data Viewer "→ Send geometry to Calibrate" pushes its values;
@@ -337,10 +342,21 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             _log(f"Geometry hand-off wiring failed:\n{traceback.format_exc()}")
 
+        # Batch Queue's "Copy from Batch Integrate" reads that tab's current
+        # binning/format choices live, rather than snapshotting them at startup.
+        try:
+            provider = getattr(self._batch_tab, "integration_settings", None)
+            setter = getattr(self._queue_tab, "set_settings_provider", None)
+            if provider is not None and setter is not None:
+                setter(provider)
+        except Exception:
+            _log(f"Batch Queue settings-provider wiring failed:\n{traceback.format_exc()}")
+
         # FAIR provenance: hand the (initially closed) project context to the
         # tabs that log attempts to it. Defensive, like the wiring above —
         # a placeholder tab (failed to build) simply has no such method.
-        for tab in (self._cal_tab, self._batch_tab, self._mask_tab, self._export_tab):
+        for tab in (self._cal_tab, self._batch_tab, self._queue_tab, self._mask_tab,
+                    self._export_tab):
             setter = getattr(tab, "set_project_context", None)
             if setter is not None:
                 try:
