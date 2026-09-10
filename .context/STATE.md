@@ -22,9 +22,11 @@ Open follow-ups, none blocking:
   pyqtgraph teardown SIGABRT (reproduces on clean HEAD; not ours).
 
 - Still untested (ROADMAP.md): `job_queue.py`, `peak_fit_panel.py`,
-  `batch_cli.py`. Left over from the PR #7 merge: local branch
-  `pr-7-strain-cake` and the fetched `refs/remotes/origin/pr/*` refs can
-  be deleted.
+  `batch_cli.py`.
+- Branch cleanup done 2026-09-10: `pr-7-strain-cake`, `test-fork-imports` and
+  the four fetched `refs/remotes/origin/pr/*` refs are gone; only `main` and
+  `origin/main` remain. Re-fetch any PR head with
+  `git fetch origin 'refs/pull/*/head:refs/remotes/origin/pr/*'`.
 
 ## Recently completed
 
