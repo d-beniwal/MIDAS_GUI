@@ -8,6 +8,72 @@ file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this
 date for the full uncondensed entries if ever needed._
 
+## 2026-09-10 — Data Viewer: accurate integration on demand, and rings that stay where you put them
+
+Six Data Viewer changes landed together. Four are UI placement; two encode a
+judgment worth recording.
+
+**A second integration path rather than a faster accurate one.** The radial
+profile has to serve two jobs that pull in opposite directions: keeping up with
+a live PV stream, and being trustworthy enough to read a peak position off. The
+existing profile is the first — circle binning with no calibration, MIDAS engine
+with the `hard` kernel once a tilt/calibration exists. Rather than trying to
+make one path do both, an **Accurate** tick (off by default) switches it to the
+Batch-Integrate pipeline verbatim: geometry synthesized from the live widgets
+even at zero tilt, `subpixel2` kernel — the same one `constants.DEFAULT_KERNEL`
+gives Batch. So the numbers a user compares against a Batch run come from the
+same code, and the live view costs nothing when they don't need that. Rejected:
+making accurate the default and throttling it, which trades a correctness
+property the user can see for a latency property they can't reason about.
+
+**The cake is always accurate, and no longer a by-product.** It is an explicit
+Calculate, not a per-frame refresh, so there is no live budget to protect and no
+reason to offer the fast path at all. Giving it its own R/η bin spinboxes then
+forces a second decision: `radial_integrate` used to fill the cake for free,
+since both ran through one `_midas_radial` call. With independent bin sizes that
+by-product would silently overwrite a cake the user had just binned differently,
+so it is now suppressed whenever the cake controls are bound (`set_cake_controls`).
+Hydra binds none and keeps the old free cake. The single `_calib_ctx`/`_calib_ctx_sig`
+slot became a 6-entry dict cache keyed on kernel and both bin sizes — with three
+callers wanting three different contexts, one slot would thrash on every switch.
+
+**Simulated rings are frozen at the parameters they were simulated with.**
+Reported as *"the rings on the image are still getting influenced by the
+parameters when Simulate rings is not live"*. The cause was that `_redraw_rings`
+always read the live BC/tilt/px/Lsd widgets while the ring *radii* only changed
+on an actual `_simulate()` — so a BC nudge moved rings whose radii belonged to
+the old geometry, which is a half-updated overlay, not a stale one. A checkable
+"live mode" button made this worse by hiding the distinction: the button being
+off did not mean the overlay was static. `_simulate()` now snapshots the
+placement geometry into `_ring_draw_geom` and `_redraw_rings` draws from it,
+except in live mode where it reads the widgets (a BC edit only *moves* rings, so
+it never reaches `_simulate` and would otherwise pin them to the snapshot). The
+control became a plain button + a `live` tick + a `✕`, so "one-shot" and "armed"
+are two visibly different states — green only when armed. The beam-centre `+`
+marker deliberately still tracks the live BC: it reports where the beam centre
+*is*, not where the rings were drawn from.
+
+`✕` clears the simulated overlay and disarms live (otherwise the next edit
+redraws it immediately), but leaves the click-picked magenta radius ring — that
+one comes from clicking the profile, not from a simulation.
+
+**d-spacing picking follows the enabled materials.** "Pick d-spacing pts" +
+"Ring #" only mean something for a non-crystalline calibrant, so
+`PickableImageViewer.set_dspacing_picking_visible()` hides them and the geometry
+card drives it off `kind == "dspacing"` among *enabled* materials — the general
+rule AgBH is the shipped instance of, rather than a name check. Visible by
+default, so the Calibrate tab (which has its own calibrant combo) is untouched.
+
+**Transforms moved between Projection and Ring simulation**, in the card itself
+rather than by re-parenting: the Data Viewer and Hydra both put this card in a
+Projection-first column, so one ordering serves both. Transforms describes the
+image; it never belonged inside the ring model.
+
+**Files:** `hydra_geometry_card.py`, `tab_view.py`, `widgets.py`,
+`tab_calibrate.py` (new public `geometry_for_viewer()`, shared by its own
+"→ Send to Data Viewer" and the Viewer's new "← Get" pull), `app.py`; new
+`tests/test_view_tab_controls.py` (27 tests).
+
 ## 2026-09-09 — Manual d-spacing fit: BC-only default, parameter limits, and σ reporting
 
 The manual ring-pick fit added in `bdd9b51` was wired to the tab's Refine

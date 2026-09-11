@@ -48,6 +48,17 @@ _MATERIAL_COLORS = ("#f0c060", "#4fc3f7", "#ab47bc", "#66bb6a", "#ef5350",
 # path and the circle-binning fallback, so the two are directly comparable.
 CAKE_ETA_BIN_DEG = 5.0
 
+# Integration kernels (the same vocabulary Batch Integrate's kernel selector
+# uses, see constants.KERNELS). "hard" drops each pixel wholly into one (η, R)
+# cell — cheap enough to keep up with a live stream; "subpixel2" splits every
+# pixel over a 2x2 subgrid, which is what Batch Integrate defaults to and what
+# the Data Viewer's "Accurate" tick and the cake both use.
+FAST_KERNEL = "hard"
+ACCURATE_KERNEL = "subpixel2"
+
+#: Max engine binning contexts kept alive at once (see ``_midas_radial``).
+_CTX_CACHE_MAX = 6
+
 
 _CUSTOM_DSPACING = "Custom (d-spacings)"
 
@@ -246,7 +257,8 @@ class DetectorGeometryCard(QtWidgets.QWidget):
       Hydra panels) rather than duplicated per card.
     """
 
-    pushGeometry = QtCore.pyqtSignal(dict)    # "-> Send geometry to Calibrate" clicked
+    pushGeometry = QtCore.pyqtSignal(dict)    # "Send →" (geometry → Calibrate) clicked
+    pullGeometry = QtCore.pyqtSignal()        # "← Get" (geometry ← Calibrate) clicked
     imTransChanged = QtCore.pyqtSignal()      # a Flip Y/Flip Z/Transpose checkbox toggled
     geometryChanged = QtCore.pyqtSignal()     # BC/tilt/calibration changed (edit, pick, or file load)
 
@@ -259,10 +271,17 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         self._pick_ring_item = None
         self._picked_r: Optional[float] = None
         self._calib_geom: Optional[dict] = None
-        self._calib_ctx = None
-        self._calib_ctx_sig = None
+        #: Engine binning contexts, keyed by their (geometry, kernel, bins,
+        #: shape, mask) signature — the radial profile and the cake may run
+        #: with different bin sizes/kernels, so one slot is not enough.
+        self._calib_ctx_cache: dict = {}
         self._rad_grid_cache = None
         self._eta_grid_cache = None
+        #: Live ring simulation armed (the "live" tick *and* a Simulate click).
+        self._sim_live_on = False
+        #: Geometry the currently-drawn rings were simulated with (frozen, so
+        #: a one-shot simulation does not follow later parameter edits).
+        self._ring_draw_geom: Optional[dict] = None
 
         self._viewer = None
         self._profile_view = None
@@ -271,6 +290,9 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         self._mask_provider: Optional[Callable[[np.ndarray], Optional[np.ndarray]]] = None
         self._rad_r_bin: Optional[QtWidgets.QDoubleSpinBox] = None
         self._rad_auto: Optional[QtWidgets.QCheckBox] = None
+        self._rad_accurate: Optional[QtWidgets.QCheckBox] = None
+        self._cake_r_bin: Optional[QtWidgets.QDoubleSpinBox] = None
+        self._cake_eta_bin: Optional[QtWidgets.QDoubleSpinBox] = None
 
         self._build_ui()
 
@@ -288,10 +310,28 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         self._cake_view = cake_view
 
     def set_radial_controls(self, r_bin_spin: QtWidgets.QDoubleSpinBox,
-                             auto_checkbox: QtWidgets.QCheckBox):
+                             auto_checkbox: QtWidgets.QCheckBox,
+                             accurate_checkbox: Optional[QtWidgets.QCheckBox] = None):
+        """Bind the profile toolbar's R-bin / Auto controls, and optionally the
+        "Accurate" tick that switches the profile onto the full Batch-Integrate
+        pipeline (see ``radial_integrate``). Hydra passes no accurate tick —
+        its 4 panels integrate on every frame, so the fast path is the only
+        sensible one there."""
         self._rad_r_bin = r_bin_spin
         self._rad_auto = auto_checkbox
+        self._rad_accurate = accurate_checkbox
         r_bin_spin.valueChanged.connect(self._on_rad_param_changed)
+        if accurate_checkbox is not None:
+            accurate_checkbox.toggled.connect(self._on_rad_param_changed)
+
+    def set_cake_controls(self, r_bin_spin: QtWidgets.QDoubleSpinBox,
+                           eta_bin_spin: QtWidgets.QDoubleSpinBox):
+        """Bind the cake's own R-bin / η-bin spin boxes (shown above the cake
+        plot). Once bound, ``radial_integrate`` stops writing the cake as a
+        by-product — the two now use different binning, so only the cake's own
+        Calculate may fill it."""
+        self._cake_r_bin = r_bin_spin
+        self._cake_eta_bin = eta_bin_spin
 
     def set_viewer(self, viewer):
         """Bind (or rebind) the image viewer this card draws rings on and
@@ -322,6 +362,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         if viewer is not None:
             viewer.bcPicked.connect(self._on_bc_picked)
             viewer.ringFitBC.connect(self._on_ring_fit_bc)
+            self._sync_dspacing_picking()
             self._redraw_rings()
             self._redraw_picked_ring()
 
@@ -492,7 +533,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         if any(not geom.get(k) for k in required):
             return   # incomplete — keep circle binning
         self._calib_geom = geom
-        self._calib_ctx = self._calib_ctx_sig = None
+        self._calib_ctx_cache.clear()
         tilt = any(abs(geom[k]) > 1e-9 for k in ("tx", "ty", "tz"))
         mode = ("full integration: tilts"
                 + ("+distortion" if geom["distortion"] else "")
@@ -613,14 +654,23 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         self._tz.setToolTip("Detector tilt about the Z axis — bends the simulated rings.")
         ring.body.addLayout(S.Form().row(("ty:", self._ty), ("tz:", self._tz)))
 
-        # Send λ / pixel / Lsd / beam-centre to the Calibrate tab (seed values).
-        self._to_calib_btn = QtWidgets.QPushButton("→ Send geometry to Calibrate")
+        # Two-way geometry hand-off with the Calibrate tab.
+        calib_row = QtWidgets.QHBoxLayout(); calib_row.setSpacing(4)
+        calib_row.addWidget(S.LabelRight("Geometry:"))
+        self._to_calib_btn = QtWidgets.QPushButton("Send →")
         self._to_calib_btn.setToolTip(
             "Copy λ, pixel size, Lsd and beam centre from here into the Calibrate "
             "tab's detector + seed fields.")
         self._to_calib_btn.clicked.connect(
             lambda: self.pushGeometry.emit(self.get_geometry()))
-        ring.body.addWidget(self._to_calib_btn)
+        self._from_calib_btn = QtWidgets.QPushButton("← Get")
+        self._from_calib_btn.setToolTip(
+            "Pull the Calibrate tab's latest calibrated geometry (λ, pixel size, "
+            "Lsd, beam centre, tilts and distortion) into these fields.")
+        self._from_calib_btn.clicked.connect(self.pullGeometry.emit)
+        calib_row.addWidget(self._to_calib_btn, 1)
+        calib_row.addWidget(self._from_calib_btn, 1)
+        ring.body.addLayout(calib_row)
 
         ctl = QtWidgets.QHBoxLayout()
         self._show_rings = QtWidgets.QCheckBox("Rings"); self._show_rings.setChecked(True)
@@ -637,21 +687,40 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         ctl.addWidget(self._ring_width)
         ctl.addStretch(1)
         ring.body.addLayout(ctl)
+        sim_row = QtWidgets.QHBoxLayout(); sim_row.setSpacing(4)
         self._sim_btn = S.primary_btn("Simulate rings")
-        self._sim_btn.setCheckable(True)
         self._sim_btn.setToolTip(
-            "Toggle live ring simulation — while on, rings recompute automatically "
-            "whenever material, lattice, or geometry parameters change.")
-        self._sim_btn.toggled.connect(self._on_sim_toggled)
-        ring.body.addWidget(self._sim_btn)
+            "Simulate the enabled materials' rings once, from the current "
+            "parameters. With \"live\" ticked, clicking this instead arms live "
+            "mode (button turns green): rings then track every material, "
+            "lattice, and geometry edit until live is switched off.")
+        self._sim_btn.clicked.connect(self._on_sim_clicked)
+        self._sim_live = QtWidgets.QCheckBox("live")
+        self._sim_live.setToolTip(
+            "Tick before clicking Simulate rings to keep the overlay in sync "
+            "with the parameters. Unticked, a click is a one-shot simulation "
+            "and later parameter edits leave the drawn rings untouched.")
+        self._sim_live.toggled.connect(self._on_sim_live_toggled)
+        self._sim_clear_btn = QtWidgets.QPushButton("✕")
+        self._sim_clear_btn.setFixedSize(26, 26)
+        self._sim_clear_btn.setToolTip("Remove all simulated rings from the image.")
+        self._sim_clear_btn.clicked.connect(self._clear_simulated_rings)
+        sim_row.addWidget(self._sim_btn, 1)
+        sim_row.addWidget(self._sim_live)
+        sim_row.addWidget(self._sim_clear_btn)
+        ring.body.addLayout(sim_row)
         for w in (self._wl, self._lsd, self._px, self._max2t):
             w.valueChanged.connect(self._on_sim_param_changed)
         self._ring_info = QtWidgets.QPlainTextEdit(); self._ring_info.setReadOnly(True)
         self._ring_info.setMaximumHeight(140)
         self._ring_info.setStyleSheet(f"font-family:{S.MONO_CSS};font-size:10px")
         ring.body.addWidget(self._ring_info)
-        lv.addWidget(ring)
+        # Transforms sits above Ring simulation: in the Data Viewer the card
+        # column is Projection → this card, so this puts Transforms between
+        # Projection and Ring simulation, where it belongs (it describes the
+        # image, not the ring model).
         lv.addWidget(trans_card)
+        lv.addWidget(ring)
 
         # ── Calibration card ──
         calc = S.make_card("Load/save calibration (optional)")
@@ -778,6 +847,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         if not self._materials:
             self._add_material("Ni (FCC)")
         self._update_material_delete_buttons()
+        self._sync_dspacing_picking()
 
     def _on_material_enabled(self, material: dict, checked: bool):
         material["enabled"] = checked
@@ -811,6 +881,21 @@ class DetectorGeometryCard(QtWidgets.QWidget):
     def _any_material_rings(self) -> bool:
         return any(m.get("_rings") for m in self._materials)
 
+    def _any_dspacing_material(self) -> bool:
+        """Is an enabled material a d-spacing-list (non-crystalline) one —
+        AgBH, or a hand-entered d-spacing list?"""
+        return any(m.get("enabled") and m.get("kind") == "dspacing"
+                   for m in self._materials)
+
+    def _sync_dspacing_picking(self):
+        """Manual d-spacing ring picking is only meaningful for a SAXS-style
+        d-spacing calibrant (AgBH), so its viewer controls follow the selected
+        materials rather than sitting there permanently."""
+        viewer = self._viewer
+        if viewer is None or not hasattr(viewer, "set_dspacing_picking_visible"):
+            return
+        viewer.set_dspacing_picking_visible(self._any_dspacing_material())
+
     def _primary_material_name(self) -> str:
         for m in self._materials:
             if m["enabled"]:
@@ -819,11 +904,44 @@ class DetectorGeometryCard(QtWidgets.QWidget):
 
     # ── Ring simulation ───────────────────────────────────────────
 
-    def _on_sim_toggled(self, checked: bool):
-        """"Simulate rings" is now a live mode, not a one-shot action."""
-        self._sim_btn.setText("Simulate rings (live)" if checked else "Simulate rings")
-        if checked:
-            self._simulate()
+    def _sim_is_live(self) -> bool:
+        """Live ring simulation armed? Requires both the "live" tick and a
+        click on Simulate rings (ticking the box alone changes nothing)."""
+        return bool(getattr(self, "_sim_live_on", False))
+
+    def _set_sim_live(self, on: bool):
+        self._sim_live_on = bool(on)
+        # Green while live, otherwise back to the plain accent "primary" look.
+        self._sim_btn.setStyleSheet(S.SUCCESS_BTN_QSS if on else "")
+        self._sim_btn.setText("Simulate rings (live)" if on else "Simulate rings")
+
+    def _on_sim_clicked(self):
+        """"Simulate rings" clicked — one-shot, or arm live mode if "live" is
+        ticked. Either way the rings are (re)simulated right now."""
+        if self._sim_live.isChecked():
+            self._set_sim_live(True)
+        self._simulate()
+
+    def _on_sim_live_toggled(self, checked: bool):
+        """Unticking "live" disarms live mode immediately (and drops the green);
+        ticking it only takes effect on the next Simulate rings click."""
+        if not checked:
+            self._set_sim_live(False)
+
+    def _clear_simulated_rings(self):
+        """"✕" — drop every simulated ring from the image and from the
+        profile's ring markers, and disarm live mode (otherwise the next
+        parameter edit would immediately draw them again). Deliberately
+        leaves the click-picked radius ring alone: that one is a manual
+        marker, not a simulation."""
+        self._set_sim_live(False)
+        self._sim_live.setChecked(False)
+        for m in self._materials:
+            m["_rings"] = []
+        self._ring_draw_geom = None
+        self._clear_rings()
+        self._refresh_profile_markers()
+        self._ring_info.setPlainText("")
 
     def _on_sim_param_changed(self, *_):
         """Material/lattice/geometry field edited — resimulate while live mode is on.
@@ -832,17 +950,17 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         ``_add_material``) before ``self._sim_btn`` exists during ``_build_ui``.
 
         λ/Lsd/px/max2θ feed the radial-integration geometry
-        (``_effective_calib_geom``) and any already-simulated rings even
-        when live ring simulation is off — without this else-branch, editing
-        them silently left the profile/rings stale until something else
-        (e.g. a beam-centre edit) happened to refresh them. Mirrors
-        ``_on_bc_changed``'s tail."""
+        (``_effective_calib_geom``) even when live ring simulation is off —
+        without this else-branch, editing them silently left the profile
+        stale until something else (e.g. a beam-centre edit) happened to
+        refresh it. Mirrors ``_on_bc_changed``'s tail. The ring overlay
+        itself is *not* touched when live is off: a one-shot simulation is
+        frozen at the parameters it was run with (see ``_ring_draw_geom``)."""
+        self._sync_dspacing_picking()
         sim_btn = getattr(self, "_sim_btn", None)
-        if sim_btn is not None and sim_btn.isChecked() and self._image_provider() is not None:
+        if sim_btn is not None and self._sim_is_live() and self._image_provider() is not None:
             self._simulate()
         else:
-            if self._any_material_rings():
-                self._redraw_rings()
             self._maybe_auto_radial()
             self.geometryChanged.emit()
 
@@ -878,6 +996,10 @@ class DetectorGeometryCard(QtWidgets.QWidget):
                 lines.append(f"{label:>10}  {r['two_theta_deg']:7.3f}  "
                              f"{r['d_spacing']:7.4f}  {r['radius_px']:8.1f}")
             lines.append("")
+        # Freeze the placement parameters this simulation was run with, so a
+        # later BC/tilt edit cannot silently move rings that are no longer
+        # being recomputed (only live mode re-runs _simulate).
+        self._ring_draw_geom = self._current_ring_geom() if any_rings else None
         self._after_geometry_change()
         if errors:
             lines.append("Errors:"); lines.extend(errors)
@@ -895,15 +1017,30 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             self._viewer._iv.removeItem(it)
         self._ring_items.clear(); self._label_items.clear()
 
+    def _current_ring_geom(self) -> dict:
+        """The placement parameters the ring overlay is drawn with."""
+        return {"bc_y": self._bcy.value(), "bc_z": self._bcz.value(),
+                "ty": self._ty.value(), "tz": self._tz.value(),
+                "px": self._px.value(), "lsd": self._lsd_um()}
+
     def _redraw_rings(self):
         self._clear_rings()
         img = self._image_provider()
         if self._viewer is None or img is None or not self._any_material_rings():
             return
-        bc_y, bc_z = self._bcy.value(), self._bcz.value()
-        ty, tz = self._ty.value(), self._tz.value()
+        # Rings are placed with the geometry their radii were computed from,
+        # not the live widgets — a one-shot simulation stays put when the
+        # beam centre or a tilt is nudged afterwards. Live mode instead
+        # tracks the widgets: a BC/tilt edit only moves rings (radii are
+        # unchanged), so it never reaches _simulate and would otherwise
+        # leave the overlay pinned to the snapshot.
+        g = self._current_ring_geom() if self._sim_is_live() \
+            else (self._ring_draw_geom or self._current_ring_geom())
+        bc_y, bc_z = g["bc_y"], g["bc_z"]
+        ty, tz = g["ty"], g["tz"]
         tilted = abs(ty) > 1e-9 or abs(tz) > 1e-9
-        px = self._px.value()
+        px = g["px"]
+        lsd_um = g["lsd"]
         th = np.linspace(0, 2 * math.pi, 400)
         vis_r = self._show_rings.isChecked()
         vis_l = self._show_labels.isChecked() and vis_r
@@ -918,7 +1055,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
                     continue
                 if tilted:
                     ys, zs = tilted_ring_xy(r["two_theta_deg"], 0.0, ty, tz,
-                                             self._lsd_um(), bc_y, bc_z, px, px)
+                                             lsd_um, bc_y, bc_z, px, px)
                 else:
                     ys = bc_y + rad * np.cos(th); zs = bc_z + rad * np.sin(th)
                 label_y, label_z = _ring_label_pos(ys, zs, img.shape)
@@ -930,8 +1067,10 @@ class DetectorGeometryCard(QtWidgets.QWidget):
                 txt.setPos(label_y, label_z)
                 txt.setVisible(vis_l)
                 self._viewer._iv.addItem(txt); self._label_items.append(txt)
-        # beam-centre marker
-        bc = pg.ScatterPlotItem([bc_y], [bc_z], symbol="+", size=16,
+        # Beam-centre marker — always the *live* beam centre, not the frozen
+        # one the rings were drawn with, so a BC edit is visibly reflected.
+        bc = pg.ScatterPlotItem([self._bcy.value()], [self._bcz.value()],
+                                symbol="+", size=16,
                                 pen=pg.mkPen("#00cfff", width=2), brush=pg.mkBrush(0, 0, 0, 0))
         bc.setVisible(vis_r)
         self._viewer._iv.addItem(bc); self._ring_items.append(bc)
@@ -957,7 +1096,12 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         self._bcy.setValue(bc_y); self._bcz.setValue(bc_z)   # triggers _on_bc_changed
 
     def _on_bc_changed(self, *_):
-        """Beam centre edited (manually or by a pick) — refresh overlays/plot."""
+        """Beam centre (or a tilt) edited manually or by a pick — refresh
+        overlays/plot. In live mode the rings move with it; otherwise only the
+        beam-centre marker does (the rings stay frozen at the parameters they
+        were simulated with)."""
+        if self._sim_is_live():
+            self._ring_draw_geom = self._current_ring_geom()
         if self._any_material_rings():
             self._redraw_rings()
         self._redraw_picked_ring()
@@ -1013,13 +1157,16 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         widget equivalent, so those alone come from the frozen snapshot."""
         if self._calib_geom is not None:
             geom = dict(self._calib_geom)
-            px = self._px.value()
-            geom.update({
-                "wavelength_A": self._wl.value(), "Lsd": self._lsd_um(),
-                "BC_y": self._bcy.value(), "BC_z": self._bcz.value(),
-                "ty": self._ty.value(), "tz": self._tz.value(),
-                "pxY": px, "pxZ": px,
-            })
+            for w, key, scale in ((self._wl, "wavelength_A", 1.0),
+                                  (self._lsd, "Lsd", 0.001),
+                                  (self._bcy, "BC_y", 1.0), (self._bcz, "BC_z", 1.0),
+                                  (self._ty, "ty", 1.0), (self._tz, "tz", 1.0)):
+                if not self._widget_edited(w, geom.get(key), scale):
+                    continue
+                geom[key] = w.value() / scale
+            if self._widget_edited(self._px, geom.get("pxY")):
+                # One px widget for both axes, so an edit can only set them equal.
+                geom["pxY"] = geom["pxZ"] = self._px.value()
             return geom
         ty, tz = self._ty.value(), self._tz.value()
         if abs(ty) < 1e-9 and abs(tz) < 1e-9:
@@ -1037,6 +1184,43 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             "im_trans": list(self.im_trans_codes()),
         }
 
+    @staticmethod
+    def _widget_edited(w: QtWidgets.QDoubleSpinBox, frozen, scale: float = 1.0) -> bool:
+        """Has ``w`` been moved off the calibration's own ``frozen`` value?
+
+        The spinboxes display 1–4 decimals, so reading the geometry back out of
+        them quantises it: at this file's 14° tilt, ty/tz alone round to 0.01°
+        and move every ring by ~0.5 px — precisely the accuracy the "Accurate"
+        path exists to deliver. So a widget still showing the frozen value (to
+        within its own display resolution, which is as finely as a user can
+        type into it) is treated as untouched, and the full-precision number
+        from the calibration file is kept. Only a real edit overrides it."""
+        if frozen is None:
+            return True
+        return abs(w.value() - float(frozen) * scale) > 0.5 * 10.0 ** -w.decimals()
+
+    def _engine_geom(self, img: np.ndarray) -> Optional[dict]:
+        """Full geometry for the accurate (engine) path — like
+        ``_effective_calib_geom`` but never returns ``None`` just because the
+        tilts happen to be zero: the engine path is explicitly requested
+        there, so a flat-detector geometry is still built from the live
+        widgets. ``None`` only when there is no image to size it from."""
+        geom = self._effective_calib_geom(img)
+        if geom is not None:
+            return geom
+        if img is None:
+            return None
+        nz, ny = img.shape
+        px = self._px.value()
+        return {
+            "wavelength_A": self._wl.value(), "Lsd": self._lsd_um(),
+            "BC_y": self._bcy.value(), "BC_z": self._bcz.value(),
+            "tx": 0.0, "ty": self._ty.value(), "tz": self._tz.value(),
+            "pxY": px, "pxZ": px,
+            "NrPixelsY": ny, "NrPixelsZ": nz, "distortion": {},
+            "im_trans": list(self.im_trans_codes()),
+        }
+
     def show_radial_help(self):
         """Explain how the radial-integration plot's profile is computed."""
         QtWidgets.QMessageBox.information(
@@ -1044,16 +1228,21 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             "The plot shows intensity vs. radius: the azimuthal (angular) average "
             "of the image about the beam centre, grouped into rings of width "
             "\"R bin\".\n\n"
+            "\"Accurate\" ticked: the full Batch-Integrate pipeline runs — the "
+            "same MIDAS engine, geometry and subpixel K=2 kernel Batch Integrate "
+            "uses — so detector tilt (tx/ty/tz), pixel size and distortion are all "
+            "honoured, and each R-bin's value is a pixel-count-weighted mean "
+            "across η: Σ(cell_mean·count) / Σ(count). This is the trustworthy "
+            "profile, but it is far slower and will not keep up with a live "
+            "stream.\n\n"
+            "\"Accurate\" unticked (the default, fast):\n"
             "• Calibration loaded, or a tilt (ty/tz) set on the Ring-simulation "
-            "card: the full MIDAS geometry engine is used. Pixels are binned into "
-            "(η, R) cells honouring detector tilt and distortion, and each R-bin's "
-            "value is a pixel-count-weighted mean across η — "
-            "Σ(cell_mean·count) / Σ(count) — robust to partial or uneven azimuthal "
-            "coverage.\n\n"
-            "• Otherwise: a fast circle-binning fallback is used. Pixels are "
-            "grouped purely by distance from the beam centre (BC_y, BC_z) into "
-            "R-bins, and each bin's value is Σintensity / Σpixels — a plain "
-            "per-bin mean, with no tilt correction.\n\n"
+            "card: the MIDAS engine is used with the hard-binning kernel (each "
+            "pixel lands wholly in one cell — no subpixel splitting).\n"
+            "• Otherwise: a fast circle-binning fallback. Pixels are grouped "
+            "purely by distance from the beam centre (BC_y, BC_z) into R-bins, "
+            "and each bin's value is Σintensity / Σpixels — a plain per-bin "
+            "mean, with no tilt correction.\n\n"
             "If full-geometry integration fails, the plot automatically falls "
             "back to circle binning and a warning is shown above the "
             "calibration card.")
@@ -1061,31 +1250,42 @@ class DetectorGeometryCard(QtWidgets.QWidget):
     def radial_integrate(self):
         """Azimuthal average of the current frame.
 
-        With a loaded calibration file, or a tilt dialled into the Ring-simulation
-        card, the full geometry (tilts + distortion) is used via the MIDAS
-        integration engine; otherwise a fast circle-binning about the beam centre
-        is used."""
+        Fast path (the default): the MIDAS engine with the hard-binning kernel
+        when a calibration file is loaded or a tilt is dialled into the
+        Ring-simulation card, and a plain circle binning about the beam centre
+        otherwise. This is cheap enough to keep up with a live stream, but it
+        does not split pixels across bins.
+
+        Accurate path (the "Accurate" tick above the plot): always the full
+        Batch-Integrate pipeline — same geometry build, same subpixel K=2
+        kernel — so tilts, pixel size and distortion are fully accounted for.
+        """
         img = self._image_provider()
         if img is None or self._rad_r_bin is None or self._profile_view is None:
             return
         mask = self._mask_provider(img) if self._mask_provider is not None else None
-        geom = self._effective_calib_geom(img)
+        accurate = self._rad_accurate is not None and self._rad_accurate.isChecked()
+        geom = self._engine_geom(img) if accurate else self._effective_calib_geom(img)
+        r_axis = prof = None
         if geom is not None:
             try:
-                r_axis, prof = self._midas_radial(img, geom, mask)
+                r_axis, prof = self._midas_radial(
+                    img, geom, mask,
+                    kernel=(ACCURATE_KERNEL if accurate else FAST_KERNEL),
+                    # The cake has its own bin-size controls and its own
+                    # Calculate button once they are bound, so this run must
+                    # not overwrite it with a differently-binned by-product.
+                    set_cake=(self._cake_r_bin is None))
             except Exception:
                 import traceback
                 self._calib_lbl.setText(
                     "Full-geometry integration failed — using circle binning. "
                     "See error log.")
                 self._log_error(traceback.format_exc())
-                r_axis, prof = self._radial_profile(
-                    img, self._bcy.value(), self._bcz.value(),
-                    self._rad_r_bin.value(), mask=mask)
-        else:
+        if prof is None:
             r_axis, prof = self._radial_profile(
-                img, self._bcy.value(), self._bcz.value(), self._rad_r_bin.value(),
-                mask=mask)
+                img, self._bcy.value(), self._bcz.value(),
+                self._rad_r_bin.value(), mask=mask)
         self._profile_view.set_profile(
             r_axis, prof, wavelength_A=self._wl.value(),
             lsd_um=self._lsd_um(), px_um=self._px.value())
@@ -1094,21 +1294,25 @@ class DetectorGeometryCard(QtWidgets.QWidget):
     def cake_integrate(self):
         """Compute + display the (η, R) cake for the current frame.
 
-        With a geometry (loaded calibration, or a tilt dialled into the
-        Ring-simulation card) the MIDAS engine produces the cake as a
-        by-product of the radial profile, so that path is reused verbatim —
-        it is the same cake an "Integrate" would have drawn. Without one
-        there is no engine geometry to integrate through, so a plain polar
-        binning about the beam centre is used, mirroring what
-        ``radial_integrate`` falls back to for the 1-D profile."""
+        Always takes the accurate route: the full Batch-Integrate pipeline
+        (MIDAS engine, subpixel K=2) through the loaded calibration's geometry
+        or one synthesized from the live Ring-simulation widgets, at the R and
+        η bin sizes set above the plot. Unlike the radial profile this is an
+        explicit, on-demand Calculate, so there is no live-view budget to keep
+        to. A plain polar binning about the beam centre is the fallback if the
+        engine path fails outright.
+        """
         img = self._image_provider()
-        if img is None or self._cake_view is None or self._rad_r_bin is None:
+        if img is None or self._cake_view is None:
             return
         mask = self._mask_provider(img) if self._mask_provider is not None else None
-        geom = self._effective_calib_geom(img)
+        geom = self._engine_geom(img)
         if geom is not None:
             try:
-                self._midas_radial(img, geom, mask)   # sets the cake as a side effect
+                self._midas_radial(img, geom, mask, kernel=ACCURATE_KERNEL,
+                                   r_bin=self._cake_r_bin_value(),
+                                   eta_bin=self._cake_eta_bin_value(),
+                                   set_cake=True)
                 return
             except Exception:
                 import traceback
@@ -1118,15 +1322,37 @@ class DetectorGeometryCard(QtWidgets.QWidget):
                 self._log_error(traceback.format_exc())
         cake, r_axis, eta_axis = self._cake_bin(
             img, self._bcy.value(), self._bcz.value(),
-            self._rad_r_bin.value(), mask=mask)
+            self._cake_r_bin_value(), eta_bin=self._cake_eta_bin_value(),
+            mask=mask)
         self._cake_view.set_cake(cake, r_axis, eta_axis)
 
-    def _midas_radial(self, img, g, mask):
+    def _cake_r_bin_value(self) -> float:
+        """Cake R bin size — its own control if bound, else the profile's."""
+        if self._cake_r_bin is not None:
+            return max(float(self._cake_r_bin.value()), 0.1)
+        if self._rad_r_bin is not None:
+            return max(float(self._rad_r_bin.value()), 0.1)
+        return 1.0
+
+    def _cake_eta_bin_value(self) -> float:
+        if self._cake_eta_bin is not None:
+            return max(float(self._cake_eta_bin.value()), 0.05)
+        return CAKE_ETA_BIN_DEG
+
+    def _midas_radial(self, img, g, mask, *, kernel: str = FAST_KERNEL,
+                      r_bin: Optional[float] = None,
+                      eta_bin: float = CAKE_ETA_BIN_DEG,
+                      set_cake: bool = True):
         """Radial profile via the MIDAS engine, honouring the given geometry's
         tilts + distortion (not just concentric circles). ``g`` is either the
         loaded calibration's geometry or one synthesized from the live Ring-sim
-        widgets (see ``_effective_calib_geom``). The binning geometry is built
-        once per (geometry, R-bin, image shape, mask) and reused across frames;
+        widgets (see ``_effective_calib_geom``/``_engine_geom``). ``kernel`` is
+        the same integration kernel Batch Integrate exposes — ``"hard"`` for
+        the fast live-view path, ``"subpixel2"`` for the accurate one.
+
+        The binning geometry is built once per (geometry, kernel, bins, image
+        shape, mask) and cached, so alternating between the fast profile, the
+        accurate profile and the cake does not rebuild a context each time;
         only the per-frame integration runs on a frame change.
 
         ``img`` is the display-oriented frame (``image_provider`` already
@@ -1136,8 +1362,10 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         as every other integration call site."""
         import json
         import torch
-        r_bin = max(float(self._rad_r_bin.value()), 0.1)
-        eta_bin = CAKE_ETA_BIN_DEG
+        if r_bin is None:
+            r_bin = self._rad_r_bin.value() if self._rad_r_bin is not None else 1.0
+        r_bin = max(float(r_bin), 0.1)
+        eta_bin = max(float(eta_bin), 0.05)
         im_trans = tuple(g.get("im_trans") or ())
         if im_trans:
             img = _apply_im_trans(img, tuple(reversed(im_trans)))   # display → raw
@@ -1149,9 +1377,10 @@ class DetectorGeometryCard(QtWidgets.QWidget):
                round(float(g.get("ty") or 0.0), 4), round(float(g.get("tz") or 0.0), 4),
                round(float(g["pxY"]), 4), round(float(g.get("pxZ") or g["pxY"]), 4),
                round(float(g["wavelength_A"]), 6), g.get("NrPixelsY"), g.get("NrPixelsZ"),
-               round(r_bin, 4), (nz, ny), mask_fp, im_trans,
+               round(r_bin, 4), round(eta_bin, 4), kernel, (nz, ny), mask_fp, im_trans,
                json.dumps(g.get("distortion") or {}, sort_keys=True))
-        if self._calib_ctx is None or self._calib_ctx_sig != sig:
+        entry = self._calib_ctx_cache.get(sig)
+        if entry is None:
             spec = _spec_from_result_ns(
                 r_bin, eta_bin, NrPixelsY=ny, NrPixelsZ=nz,
                 pxY=g["pxY"], pxZ=g.get("pxZ") or g["pxY"], Lsd=g["Lsd"],
@@ -1159,15 +1388,25 @@ class DetectorGeometryCard(QtWidgets.QWidget):
                 ty=g.get("ty") or 0.0, tz=g.get("tz") or 0.0,
                 wavelength_A=g["wavelength_A"], distortion=g.get("distortion") or {},
                 im_trans=im_trans)
-            ctx = build_integration_context(spec, "hard", mask, (None, None), weighted=True)
-            self._calib_ctx = (spec, ctx); self._calib_ctx_sig = sig
-        spec, ctx = self._calib_ctx
+            ctx = build_integration_context(spec, kernel, mask, (None, None), weighted=True)
+            entry = (spec, ctx)
+            # Bounded: the handful of live combinations (fast/accurate profile,
+            # cake) churn otherwise as the user drags a bin-size spinbox.
+            if len(self._calib_ctx_cache) >= _CTX_CACHE_MAX:
+                self._calib_ctx_cache.pop(next(iter(self._calib_ctx_cache)))
+            self._calib_ctx_cache[sig] = entry
+        spec, ctx = entry
         img_t = torch.from_numpy(np.ascontiguousarray(img, dtype=np.float64))
-        prof, _, cake_2d = integrate_frame(
-            img_t, spec, ctx["geom"], "hard", (None, None), None, False,
+        # return_cake=True → a 4-tuple (prof, sigma, cake, cake_sigma). Unpacking
+        # it into three raised ValueError on *every* call, so this whole engine
+        # path silently fell back to circle binning (see radial_integrate /
+        # cake_integrate) — which drops the tilt correction and splits every
+        # peak on a tilted geometry.
+        prof, _, cake_2d, _ = integrate_frame(
+            img_t, spec, ctx["geom"], kernel, (None, None), None, False,
             corr_counts=ctx["corr_counts"], return_cake=True,
             weighted=True, cnt_cake=ctx["cnt"])
-        if self._cake_view is not None:
+        if set_cake and self._cake_view is not None:
             n_eta = spec.n_eta_bins
             eta_ax = float(spec.EtaMin) + float(spec.EtaBinSize) * (np.arange(n_eta) + 0.5)
             self._cake_view.set_cake(cake_2d, ctx["r_ax"], eta_ax)
@@ -1313,7 +1552,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
                 parts.append(f"BC=({float(bcy):.1f}, {float(bcz):.1f})")
             if wl is not None: parts.append(f"λ={float(wl):.5g} Å")
             if px is not None: parts.append(f"px={float(px):.4g} µm")
-            self._calib_ctx = self._calib_ctx_sig = None
+            self._calib_ctx_cache.clear()
             try:
                 self._calib_geom = geometry_fields_from_file(path)
                 d = self._calib_geom

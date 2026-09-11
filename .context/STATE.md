@@ -1,9 +1,8 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-09-09 (manual d-spacing fit made trustworthy — BC-only
-defaults, parameter limits, σ reporting — merged from
-`feature/caking-improvements` into main and PR'd to upstream)_
+_Last updated: 2026-09-10 (Data Viewer: Accurate radial pipeline, cake R/η
+bins, one-shot vs. live ring simulation, two-way geometry hand-off)_
 
 ## Now working on
 
@@ -29,6 +28,39 @@ Open follow-ups, none blocking:
   `git fetch origin 'refs/pull/*/head:refs/remotes/origin/pr/*'`.
 
 ## Recently completed
+
+**2026-09-10 — Data Viewer: accurate integration on demand,
+rings that stay put, and a two-way geometry hand-off.** Six requested changes:
+- **"Accurate" tick** above the radial profile (off by default) switches it
+  from the fast path (circle binning, or the engine's `hard` kernel once a
+  calibration/tilt exists — the live-view-capable default, unchanged) to the
+  **Batch-Integrate pipeline verbatim**: geometry synthesized from the live
+  widgets even at zero tilt, `subpixel2` kernel.
+- **Eta-vs-R Cake** gained its own `R bin` / `η bin` spinboxes next to
+  `Calculate` (defaults 1.00 px / 5.00°, i.e. what it computed before) and now
+  *always* runs the accurate pipeline. Because the two bin independently,
+  `radial_integrate` no longer fills the cake as a by-product once
+  `set_cake_controls` is bound (Hydra binds none, keeps the old behaviour).
+  The single engine-context slot became a bounded 6-entry cache keyed on
+  kernel + both bin sizes.
+- **Simulate rings** is a plain button + `live` tick + `✕` again. A one-shot
+  click leaves the button orange and **freezes** the overlay at the parameters
+  it was simulated with (`_ring_draw_geom`) — fixes rings drifting on a BC/tilt
+  edit while not live. Green only when live is armed; `✕` clears the simulated
+  rings and disarms (leaves the click-picked magenta ring).
+- **"Pick d-spacing pts" + "Ring #"** are hidden unless an *enabled* material
+  is `kind == "dspacing"` (AgBH, custom lists), via new
+  `PickableImageViewer.set_dspacing_picking_visible()`. Visible by default, so
+  the Calibrate tab is untouched.
+- **Transforms card** moved between Projection and Ring simulation (inside the
+  card, so Hydra's panel cards match).
+- **`Geometry: [Send →] [← Get]`** replaces the single Send button; `← Get`
+  pulls via new `CalibrationTab.geometry_for_viewer()` (shared with Calibrate's
+  own "→ Send to Data Viewer") and says so plainly when there is no result.
+**Files:** `hydra_geometry_card.py`, `tab_view.py`, `widgets.py`,
+`tab_calibrate.py`, `app.py`; new `tests/test_view_tab_controls.py` (31 tests).
+**Verified:** 21-file per-file sweep green, zero new pyflakes warnings vs.
+HEAD, offscreen screenshots of all three toolbars + the card column.
 
 **2026-09-09 — Manual d-spacing (AgBH/SAXS) fit made trustworthy.** Reported
 as *"calibration runs away and the AgBH rings are significantly off"* on a
@@ -113,66 +145,11 @@ undeclared behaviour change.
   scope): `job_queue.py`, `peak_fit_panel.py`, `batch_cli.py` — tracked in
   ROADMAP.md.
 
-**2026-08-31 (`fd7f67a`) — Workstation provenance + Hydra Overall-Cake
-rotation fix + Batch Integrate Rmin/Rmax + Detector-view preview.** Three
-features bundled into one commit:
-- **Workstation provenance** — `project.workstation_snapshot()` (hostname/
-  OS/CPU/cores/RAM) folded into `environment_snapshot()`, so every Mask/
-  Calibrate/Batch-Integrate attempt now records the machine it ran on.
-- **Hydra Overall Eta-R Cake now rotates each panel by its own `tx`**
-  before summing (`hydra_calib_page.py`: `_resample_rows_to_eta_grid`,
-  `_compose_overall_cake` updated) — fixes panels piling on top of each
-  other instead of covering -180°..180°.
-- **Batch Integrate: Rmin/Rmax exclusion + Detector-view preview**
-  (single-detector `tab_batch.py` + Hydra `hydra_batch_page.py`/
-  `hydra_batch_widgets.py`) — new Rmin/Rmax spinboxes (Rmin defaults 0,
-  Rmax 0="auto"→backend's own farthest-corner default, with Corner/Edge
-  preset buttons: `helpers.rmax_corner_px`/`rmax_edge_px`) and a new
-  "Detector view" tab showing the current frame with the Rmin/Rmax circles
-  + an optional (R, η) bin-grid overlay (`helpers.draw_polar_bin_overlay`,
-  thinned to ≤50 rings/≤72 spokes via `_thinned_bin_edges`). **Hydra
-  Detector-view is ONE shared `ImageViewer`** (not one per panel) to avoid
-  the pyqtgraph-teardown segfault; `tests/test_hydra_batch_ui.py` now
-  carries `pytestmark = pytest.mark.forked`.
-**Files:** `project.py`, `hydra_calib_page.py`, `helpers.py`,
-`tab_batch.py`, `hydra_batch_page.py`, `hydra_batch_widgets.py`,
-`tests/test_project.py` (+3 tests), new `tests/test_hydra_overall_cake.py`
-(9 tests, pure-logic), `tests/test_helpers.py` (+7 tests),
-`tests/test_hydra_batch_ui.py`. `gui_documentation.md` (top summary + §7 +
-§16/§17) and `development_history.md`/`.pdf` (`e577e72`) already updated.
-
-**2026-08-31 (`18c9b77`) — Project saves made crash-safe; Save-As lets
-you choose how much analysis history to carry over; Open-Project guards
-unsaved changes.** `project.py`: every mutating write
-(`write_gui_workspace` and the three `append_*_attempt` functions) now
-builds its new content in a sibling staging child group and swaps it into
-place with a cheap metadata-only rename (`_stage_and_swap`) instead of
-delete-then-rebuild-in-place, so a crash mid-write leaves prior content
-fully intact; `write_gui_workspace` also makes a rolling `path + ".bak"`
-copy (`backup_before_overwrite`) before each overwrite, and
-`create_project` gained an `overwrite=True` option (also backs up first).
-New `analysis_summary()`/`copy_analysis_history()` let **File ▸ Save
-Project As…** (`app.py`, new `SaveAsHistoryDialog` in `dialogs.py`) always
-create a genuinely fresh project at the destination (overwriting an
-existing file there only after explicit confirmation, never merging into
-it) and separately ask how much of the *currently open* project's
-`/analysis` history to carry into it — full history (default),
-latest-attempt-only (never leaving a dangling `calib_attempt_ref`), or
-none. `app.py` also factored the Close-window unsaved-changes
-Save/Discard/Cancel prompt into a shared `_confirm_ok_to_switch_project()`
-and now runs it before **File ▸ Open Project…**/a Recent-Projects pick too,
-so opening a different project can no longer silently discard in-progress
-edits. **Files:** `project.py`, `dialogs.py`, `app.py`,
-`tests/test_project.py` (+8 new tests), `tests/test_workspace_ux.py` (+8
-new tests). `gui_documentation.md` §16 already updated. **Verified:**
-`pytest tests/test_project.py` (all new tests pass; one unrelated
-pre-existing test, `test_apply_project_calibration_single_detector`,
-CRASHED with SIGABRT under `pytest-forked` — matches the long-documented
-interpreter-teardown crash risk below, not introduced by this change) and
-`pytest tests/test_workspace_ux.py` (25/25 pass, only teardown-noise
-tracebacks after the dots, exit 0).
-
-_(Older entries — `d84c58e` Batch Multi-azimuth cake output + Export for
+_(Older entries — `fd7f67a` Workstation provenance + Hydra Overall-Cake
+per-panel `tx` rotation fix + Batch Integrate Rmin/Rmax + Detector-view
+preview, `18c9b77` crash-safe project saves (staging-group swap + rolling
+`.bak`) + Save-As analysis-history choice + Open-Project unsaved-changes
+guard, `d84c58e` Batch Multi-azimuth cake output + Export for
 GSAS-II + MIDAS backend bump + `pytest-forked` isolation, `5954a57` Mask Builder raw-detector-space fix (removed
 double-transform bug), `0332683` Batch-Parallel live-view frame-ordering fix,
 `21faaf8` Project schema redesign (`gui_workspace` + `analysis`) + unified

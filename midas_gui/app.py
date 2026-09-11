@@ -329,8 +329,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._view_tab.pushGeometry.connect(self._cal_tab.apply_geometry)
             self._cal_tab.pullGeometry.connect(
                 lambda: self._cal_tab.apply_geometry(self._view_tab.get_geometry()))
-            # Calibrate → Data Viewer: push calibrated geometry into the Viewer fields.
+            # Calibrate → Data Viewer: push calibrated geometry into the Viewer
+            # fields — either Calibrate's own "→ Send to Data Viewer", or the
+            # Viewer's "← Get" pulling the same geometry on demand.
             self._cal_tab.sendGeometryToViewer.connect(self._view_tab.set_geometry)
+            self._view_tab.pullGeometry.connect(self._pull_geometry_from_calibrate)
             # Same hand-off, Hydra mode: per-panel geometry, keyed by panel number.
             self._cal_tab.pullHydraFromViewer.connect(
                 lambda: self._cal_tab.import_hydra_from_viewer(self._view_tab.get_hydra_export()))
@@ -373,6 +376,21 @@ class MainWindow(QtWidgets.QMainWindow):
             "The currently-open FAIR provenance project file (File → New/Open Project…).\n"
             "Calibrate and Batch Integrate runs are logged to it automatically while open.")
         self.statusBar().addPermanentWidget(self._project_lbl)
+
+    def _pull_geometry_from_calibrate(self):
+        """Data Viewer's "← Get" — copy the Calibrate tab's latest calibrated
+        geometry into the Viewer's fields. Same payload as Calibrate's own
+        "→ Send to Data Viewer"; says so plainly when there is no result to
+        pull, rather than silently doing nothing."""
+        g = self._cal_tab.geometry_for_viewer()
+        if not g:
+            QtWidgets.QMessageBox.information(
+                self, "No calibration yet",
+                "The Calibrate tab has no calibration result to send.\n\n"
+                "Run a calibration there first (or load a calibration file "
+                "directly with the Data Viewer's Load/save calibration card).")
+            return
+        self._view_tab.set_geometry(g)
 
     # ── modular tab visibility ─────────────────────────────────────
     _NUMERALS = "⓪①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭"

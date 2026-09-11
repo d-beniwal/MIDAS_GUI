@@ -1482,13 +1482,15 @@ class CalibrationTab(QtWidgets.QWidget):
             grid.addWidget(v, row, col * 2 + 1, QtCore.Qt.AlignVCenter)
         grid.setColumnStretch(ncols * 2 + 1, 1)
 
-    def _send_to_viewer(self):
-        """Push the calibrated geometry to the Data Viewer (µm internal; the Viewer
-        converts Lsd to its mm display)."""
+    def geometry_for_viewer(self) -> Optional[dict]:
+        """The calibrated geometry as a Data-Viewer geometry dict (µm internal;
+        the Viewer converts Lsd to its mm display), or ``None`` if this tab has
+        no result yet. Shared by this tab's "→ Send to Data Viewer" and the Data
+        Viewer's own "← Get" pull."""
         r = self._result
         if r is None:
-            return
-        self.sendGeometryToViewer.emit({
+            return None
+        return {
             "wavelength_A": float(r.wavelength_A), "pxY": float(r.pxY),
             "pxZ": float(getattr(r, "pxZ", r.pxY) or r.pxY),
             "Lsd": float(r.Lsd), "BC_y": float(r.BC_y), "BC_z": float(r.BC_z),
@@ -1498,7 +1500,14 @@ class CalibrationTab(QtWidgets.QWidget):
             "NrPixelsY": int(getattr(r, "NrPixelsY", 0) or 0),
             "NrPixelsZ": int(getattr(r, "NrPixelsZ", 0) or 0),
             "distortion": dict(getattr(r, "distortion", {}) or {}),
-            "im_trans": list(getattr(r, "im_trans", []) or [])})
+            "im_trans": list(getattr(r, "im_trans", []) or [])}
+
+    def _send_to_viewer(self):
+        """Push the calibrated geometry to the Data Viewer."""
+        g = self.geometry_for_viewer()
+        if g is None:
+            return
+        self.sendGeometryToViewer.emit(g)
         self._log.append("Sent calibrated geometry (incl. tilts + distortion) "
                          "to the Data Viewer.")
 

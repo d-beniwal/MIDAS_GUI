@@ -26,7 +26,7 @@ from midas_gui.widgets import (ProfileViewer, DataLoaderPanel, CakeViewer,
 from midas_gui.dialogs import show_error
 from midas_gui.roi_tools import ROIImageViewer, ROIRibbon
 from midas_gui.hydra_widgets import HydraModeRibbon
-from midas_gui.hydra_geometry_card import DetectorGeometryCard
+from midas_gui.hydra_geometry_card import DetectorGeometryCard, CAKE_ETA_BIN_DEG
 from midas_gui.hydra_page import HydraViewerPage
 from midas_gui.workers import ProjectionWorker, AllFrameStatsWorker
 from midas_gui import style as S
@@ -40,6 +40,7 @@ _IMASK_MAX = 5_000_000_000
 
 class DataViewerTab(QtWidgets.QWidget):
     pushGeometry = QtCore.pyqtSignal(dict)   # λ/px/Lsd/BC → Calibrate tab
+    pullGeometry = QtCore.pyqtSignal()       # "← Get": pull Calibrate's geometry
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -162,6 +163,9 @@ class DataViewerTab(QtWidgets.QWidget):
             "topn_spin": self._topn_spin,
             "rad_r_bin": self._rad_r_bin,
             "rad_auto": self._rad_auto,
+            "rad_accurate": self._rad_accurate,
+            "cake_r_bin": self._cake_r_bin,
+            "cake_eta_bin": self._cake_eta_bin,
             "lab_axes_on": self._lab_axes_on,
         }
         widgets.update(self._geom_card.state_widgets())
@@ -304,6 +308,7 @@ class DataViewerTab(QtWidgets.QWidget):
         # ── Ring simulation + calibration load/save (extracted, reusable) ──
         self._geom_card = DetectorGeometryCard()
         self._geom_card.pushGeometry.connect(self.pushGeometry.emit)
+        self._geom_card.pullGeometry.connect(self.pullGeometry.emit)
         self._geom_card.imTransChanged.connect(self._on_im_trans_changed)
         self._geom_card.set_image_source(lambda: self._cur, self._combined_bad_mask)
         self._loader.metadataDetected.connect(self._geom_card.apply_shared_fields)
@@ -396,18 +401,42 @@ class DataViewerTab(QtWidgets.QWidget):
             "binning about the beam centre otherwise. Uses the R bin size set "
             "on the Radial Profile tab.")
         self._cake_btn.clicked.connect(self._geom_card.cake_integrate)
-        self._cake_view._toolbar_layout.insertWidget(0, self._cake_btn)
+        # Cake binning is independent of the profile's: it is an on-demand
+        # Calculate, not a live-view refresh, so it can afford finer bins.
+        self._cake_r_bin = _fspin(0.1, 50.0, 2, 1.0, "px"); self._cake_r_bin.setFixedWidth(64)
+        self._cake_r_bin.setToolTip("Radial (R) bin size for the cake, in detector pixels.")
+        self._cake_eta_bin = _fspin(0.05, 45.0, 2, CAKE_ETA_BIN_DEG, "°")
+        self._cake_eta_bin.setFixedWidth(64)
+        self._cake_eta_bin.setToolTip(
+            "Azimuthal (η) bin size for the cake, in degrees. Smaller bins give "
+            "finer η resolution at the cost of counts per bin and compute time.")
+        self._geom_card.set_cake_controls(self._cake_r_bin, self._cake_eta_bin)
+        ctb = self._cake_view._toolbar_layout
+        ctb.insertWidget(0, self._cake_btn)
+        ctb.insertWidget(1, QtWidgets.QLabel("  R bin:"))
+        ctb.insertWidget(2, self._cake_r_bin)
+        ctb.insertWidget(3, QtWidgets.QLabel("η bin:"))
+        ctb.insertWidget(4, self._cake_eta_bin)
         ptb = self._profile_view._toolbar_layout
         self._rad_r_bin = _fspin(0.1, 20.0, 2, 1.0, "px"); self._rad_r_bin.setFixedWidth(56)
         self._rad_r_bin.setToolTip("Radial bin size for the azimuthal average.")
         self._rad_auto = QtWidgets.QCheckBox("Auto"); self._rad_auto.setChecked(True)
         self._rad_auto.setToolTip("Recompute the radial integration when the beam "
                                   "centre or frame changes.")
-        self._geom_card.set_radial_controls(self._rad_r_bin, self._rad_auto)
+        self._rad_accurate = QtWidgets.QCheckBox("Accurate")
+        self._rad_accurate.setToolTip(
+            "Integrate through the full Batch-Integrate pipeline (MIDAS engine, "
+            "subpixel K=2), so detector tilts, pixel size and distortion are all "
+            "properly accounted for.\n"
+            "Off (the default) uses the fast approximate profile, which ignores "
+            "some of those but is quick enough to keep up with the live view.")
+        self._geom_card.set_radial_controls(self._rad_r_bin, self._rad_auto,
+                                            self._rad_accurate)
         self._rad_btn = QtWidgets.QPushButton("Integrate")
         self._rad_btn.clicked.connect(self._geom_card.radial_integrate)
         ptb.insertWidget(3, self._rad_btn)
         ptb.insertWidget(3, self._rad_auto)
+        ptb.insertWidget(3, self._rad_accurate)
         ptb.insertWidget(3, self._rad_r_bin)
         ptb.insertWidget(3, QtWidgets.QLabel("  R bin:"))
         self._radial_help_btn = QtWidgets.QToolButton()

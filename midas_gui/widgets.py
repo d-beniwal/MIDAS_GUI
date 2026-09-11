@@ -633,7 +633,8 @@ class PickableImageViewer(ImageViewer):
         self._pick_dsp_btn.toggled.connect(self._on_pick_dsp_toggled)
         pick_bar.addWidget(self._pick_dsp_btn)
 
-        pick_bar.addWidget(QtWidgets.QLabel("Ring #"))
+        self._dsp_ring_lbl = QtWidgets.QLabel("Ring #")
+        pick_bar.addWidget(self._dsp_ring_lbl)
         self._dsp_ring_spin = QtWidgets.QSpinBox()
         self._dsp_ring_spin.setRange(1, 20)
         self._dsp_ring_spin.setValue(1)
@@ -658,6 +659,18 @@ class PickableImageViewer(ImageViewer):
 
         self.layout().insertLayout(1, pick_bar)   # after main toolbar
         self._iv.scene.sigMouseClicked.connect(self._on_scene_clicked)
+
+    def set_dspacing_picking_visible(self, visible: bool):
+        """Show/hide the "Pick d-spacing pts" button and its Ring # selector.
+
+        Manual d-spacing picking only means anything for a non-crystalline
+        (d-spacing-list) calibrant such as AgBH, so the Data Viewer hides
+        these unless one is selected. Visible by default — the Calibrate tab
+        drives them from its own calibrant combo and never calls this."""
+        if not visible and self._pick_dsp_btn.isChecked():
+            self._pick_dsp_btn.setChecked(False)   # leaves PICK_DSPACING mode
+        for w in (self._pick_dsp_btn, self._dsp_ring_lbl, self._dsp_ring_spin):
+            w.setVisible(visible)
 
     def _on_pick_bc_toggled(self, checked: bool):
         if checked:
