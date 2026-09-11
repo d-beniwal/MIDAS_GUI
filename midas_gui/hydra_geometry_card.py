@@ -1390,7 +1390,18 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             img, self._bcy.value(), self._bcz.value(),
             self._cake_r_bin_value(), eta_bin=self._cake_eta_bin_value(),
             mask=mask)
+        self._set_cake_axis_context()
         self._cake_view.set_cake(cake, r_axis, eta_axis)
+
+    def _set_cake_axis_context(self):
+        """Hand the cake view the live geometry so its x-axis can be labelled
+        in 2θ / d / Q as well as R (px). Cheap and idempotent — called on every
+        cake refresh, since the user may have dialled the fields since the last
+        one."""
+        if self._cake_view is None or not hasattr(self._cake_view, "set_axis_context"):
+            return
+        self._cake_view.set_axis_context(
+            self._lsd_um(), self._px.value(), self._wl.value())
 
     def _cake_r_bin_value(self) -> float:
         """Cake R bin size — its own control if bound, else the profile's."""
@@ -1475,6 +1486,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         if set_cake and self._cake_view is not None:
             n_eta = spec.n_eta_bins
             eta_ax = float(spec.EtaMin) + float(spec.EtaBinSize) * (np.arange(n_eta) + 0.5)
+            self._set_cake_axis_context()
             self._cake_view.set_cake(cake_2d, ctx["r_ax"], eta_ax)
         return ctx["r_ax"], prof
 

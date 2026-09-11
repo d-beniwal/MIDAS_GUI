@@ -601,7 +601,9 @@ class HydraBatchPage(QtWidgets.QWidget):
         if not self._project_ctx or not self._project_ctx.path:
             return
         card = self._cards[n]
-        calib_fields, _note = card._calib_fields_in_use()
+        # The whole calibration, not the display subset — an attempt has to be
+        # able to reconstruct the geometry it ran under.
+        calib_fields, _note = card.full_calib_snapshot()
         calib_ref = None
         if not card.using_file():
             calib_ref = getattr(card.result, "_project_attempt_ref", None)

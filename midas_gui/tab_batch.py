@@ -22,14 +22,16 @@ from midas_gui.constants import (KERNELS, ERROR_MODELS,
                            DEFAULT_ERROR_MODEL)
 from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_file,
                                geometry_fields_from_file,
-                               resolve_calibration_fields, make_calib_values_button,
+                               resolve_calibration_fields, full_calibration_snapshot,
+                               make_calib_values_button,
                                rmax_corner_px, rmax_edge_px, draw_polar_bin_overlay,
                                _NoScrollSpinBox, _NoScrollComboBox,
                                widgets_to_dict, apply_dict_to_widgets,
                                check_output_dir_writable)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, DataLoaderPanel, OutputFormatSelector,
-                               ImageViewer, OriginToolButton, build_lab_frame_axes_items)
+                               ImageViewer, OriginToolButton, build_lab_frame_axes_items,
+                               CakeStackViewer)
 from midas_gui.workers import (BatchWorker, BatchRunCoordinator, apply_q_uniform,
                                DriftWorker, FolderMonitorWorker, write_all_profiles,
                                froot_and_frame_num)
@@ -342,6 +344,7 @@ class BatchTab(QtWidgets.QWidget):
             "loader": self._loader.get_state(),
             "det_view": self._det_view.display_state(),
             "waterfall": self._waterfall.display_state(),
+            "cake_stack": self._cake_stack_view.display_state(),
             "hydra": {"active_mode": self._mode_ribbon.mode(),
                       "page": self._hydra_page.get_state() if self._hydra_page else {}},
             "calib_result": project.sanitize_result_dict(self._calib_result),
@@ -358,6 +361,7 @@ class BatchTab(QtWidgets.QWidget):
         self._det_view.set_display_state(state.get("det_view"))
         self._origin_btn.sync()
         self._waterfall.set_display_state(state.get("waterfall"))
+        self._cake_stack_view.set_display_state(state.get("cake_stack"))
         self._corr_widget.set_state(state.get("corr") or {})
         self._fmt.set_state(fmt_keys if fmt_keys is not None else state.get("fmt"))
         hydra_state = state.get("hydra") or {}
@@ -421,22 +425,36 @@ class BatchTab(QtWidgets.QWidget):
         ``_results_arrays`` by the Open Project dialog) — same widget calls
         ``_on_frame`` makes per-frame during a live run, just replayed in one
         shot instead of streamed. Best-effort: a missing/incompatible
-        calibration (for the x-axis re-labelling) never blocks the plots."""
+        calibration (for the x-axis re-labelling) never blocks the plots.
+
+        A multi-azimuth attempt stores ``(n_frames, n_eta, n_r)`` cakes rather
+        than 1-D profiles. Those go to the "Eta-R cakes" tab whole, and the two
+        1-D views get an η-collapse of them (see :meth:`_collapse_cakes`) —
+        feeding the raw cakes to a 1-D viewer used to raise on the first
+        frame, which took the whole restore with it.
+        """
         arrays = meta.get("_results_arrays") or {}
         r_axis = arrays.get("r_axis_px")
         profiles = arrays.get("profiles")
         if r_axis is None or profiles is None or len(profiles) == 0:
             return
+        profiles = np.asarray(profiles)
         try:
             spec = self._build_spec()
             axctx = (float(spec.Lsd), float(spec.pxY), float(spec.Wavelength))
             self._waterfall.set_axis_context(*axctx)
             self._stack_view.set_axis_context(*axctx)
+            self._cake_stack_view.set_axis_context(*axctx)
         except Exception:
             pass
+        frame_ids = arrays.get("frame_ids") or list(range(len(profiles)))
+        if profiles.ndim == 3:
+            self._restore_cake_stack(meta, r_axis, profiles, frame_ids)
+            profiles = self._collapse_cakes(profiles)
+        else:
+            self._cake_stack_view.clear()
         self._waterfall.reset(r_axis)
         self._stack_view.reset(r_axis)
-        frame_ids = arrays.get("frame_ids") or list(range(len(profiles)))
         self._integrated_fids = set()
         for fid, prof in zip(frame_ids, profiles):
             self._waterfall.add_profile(prof)
@@ -444,6 +462,37 @@ class BatchTab(QtWidgets.QWidget):
             self._integrated_fids.add(str(fid))
         self._wf_started = True
         self._view_tabs.setCurrentWidget(self._waterfall)
+
+    def _restore_cake_stack(self, meta: dict, r_axis, cakes, frame_ids) -> None:
+        """Replay a multi-azimuth attempt's stored cakes into the "Eta-R
+        cakes" tab. The η axis isn't a ``results`` array — ``_log_to_project``
+        records it in the attempt's ``extra`` as ``eta_axis_deg`` — so an
+        attempt written before that existed falls back to evenly spaced bins
+        over a full turn, which is what every multi-azimuth run this tab can
+        produce actually uses."""
+        eta_axis = meta.get("eta_axis_deg")
+        n_eta = int(np.asarray(cakes).shape[1])
+        if eta_axis is None or len(eta_axis) != n_eta:
+            step = 360.0 / n_eta
+            eta_axis = -180.0 + step * (np.arange(n_eta) + 0.5)
+        self._cake_stack_view.set_cakes(cakes, r_axis, eta_axis,
+                                        frame_ids=frame_ids)
+
+    @staticmethod
+    def _collapse_cakes(cakes):
+        """``(n_frames, n_eta, n_r)`` → ``(n_frames, n_r)``, averaging each
+        frame's filled η bins.
+
+        The run's *own* collapsed profile is not stored (multi-azimuth mode
+        keeps the cake instead), so this reconstructs one for the Waterfall /
+        Stacked-profiles views. Exact-zero bins are unfilled η/R coverage
+        rather than measured zeros — the same convention ``CakeViewer``'s
+        auto-levelling uses — so they're excluded from the mean instead of
+        dragging it toward zero. It is an approximation of the engine's
+        count-weighted collapse, not a reproduction of it."""
+        arr = np.asarray(cakes, dtype=np.float64)
+        filled = (arr != 0).sum(axis=1)
+        return arr.sum(axis=1) / np.maximum(filled, 1)
 
     def shutdown(self):
         """Interrupt + bounded-wait every Hydra-page worker on app close —
@@ -849,6 +898,10 @@ class BatchTab(QtWidgets.QWidget):
         self._view_tabs = QtWidgets.QTabWidget()
         self._waterfall = WaterfallViewer()
         self._stack_view = StackedProfileViewer()
+        # One (η, R) cake per frame — only filled by a "Multi-azimuth output"
+        # run, which is what produces a per-frame cake instead of the
+        # η-collapsed profile the other two views show.
+        self._cake_stack_view = CakeStackViewer()
         self._det_view = ImageViewer()
         self._origin_btn = OriginToolButton(self._det_view)
         self._det_view._toolbar_layout.addWidget(self._origin_btn)
@@ -879,6 +932,7 @@ class BatchTab(QtWidgets.QWidget):
         self._view_tabs.addTab(self._det_view, "Detector view")
         self._view_tabs.addTab(self._waterfall, "Waterfall")
         self._view_tabs.addTab(self._stack_view, "Stacked profiles")
+        self._view_tabs.addTab(self._cake_stack_view, "Eta-R cakes")
         right.addWidget(self._view_tabs)
         self._log = LogPanel()
         self._log.setMaximumHeight(16_777_215)   # let the splitter size it
@@ -1066,6 +1120,9 @@ class BatchTab(QtWidgets.QWidget):
         _axctx = (lsd, px, wl, "Q" if q_cfg else "R")
         self._stack_view.set_axis_context(*_axctx)
         self._waterfall.set_axis_context(*_axctx)
+        # The cake's R axis is never Q-rebinned (multi-azimuth and Q-uniform
+        # are mutually exclusive, rejected above), so it takes no native unit.
+        self._cake_stack_view.set_axis_context(lsd, px, wl)
 
         # Dark / bright / background fields (from the loader)
         for sel in self._loader.has_pending_fields():
@@ -1084,6 +1141,7 @@ class BatchTab(QtWidgets.QWidget):
         self._prog.setVisible(True); self._prog.setValue(0)
         self._wf_started = False
         self._integrated_fids = set()
+        self._cake_stack_view.clear()
         self._view_tabs.setCurrentWidget(self._waterfall)
         self._log.append("─" * 40 + "\nStarting batch integration…")
 
@@ -1358,13 +1416,39 @@ class BatchTab(QtWidgets.QWidget):
                 self._log.append(msg.rsplit('\n', 1)[-1])
             else:
                 self._save_btn.setEnabled(True)
+        self._update_cake_stack(data)
         self._log_to_project(data)
         QtWidgets.QMessageBox.information(self, "Aborted" if aborted else "Done", msg)
+
+    def _update_cake_stack(self, data) -> None:
+        """Fill (or clear) the "Eta-R cakes" tab from a finished run.
+
+        Only a "Multi-azimuth output" run has cakes to show: that mode makes
+        the worker accumulate each frame's ``cake_2d`` rather than the
+        η-collapsed profile, so ``profiles`` comes back ``(n_frames, n_eta,
+        n_r)`` alongside an ``eta_axis``. Anything else — including an
+        η-collapsed run whose profiles are 2-D — clears the tab rather than
+        leaving the previous run's cakes sitting there looking current.
+        Both ``BatchWorker`` and ``BatchRunCoordinator`` (parallel) return the
+        same payload shape, so this covers either run mode."""
+        profiles = data.get("profiles")
+        eta_axis = data.get("eta_axis")
+        r_axis = data.get("r_axis_px")
+        if (profiles is None or np.asarray(profiles).ndim != 3
+                or eta_axis is None or r_axis is None):
+            self._cake_stack_view.clear()
+            return
+        self._cake_stack_view.set_cakes(profiles, r_axis, eta_axis,
+                                        frame_ids=data.get("frame_ids"))
 
     def _log_to_project(self, data):
         if not self._project_ctx or not self._project_ctx.path:
             return
-        calib_fields, _note = self._calib_fields_in_use()
+        # The whole calibration, not the display subset _calib_fields_in_use
+        # returns — an attempt has to be able to reconstruct the geometry it
+        # ran under (helpers.full_calibration_snapshot).
+        calib_fields, _note = full_calibration_snapshot(
+            self._calib_result, self._use_json_btn.isChecked(), self._json_ed.text())
         calib_ref = None
         if self._use_tab2_btn.isChecked() and self._calib_result is not None:
             calib_ref = getattr(self._calib_result, "_project_attempt_ref", None)
@@ -1404,6 +1488,7 @@ class BatchTab(QtWidgets.QWidget):
             self._loader.set_monitor_active(False)
         self._waterfall.reset()
         self._stack_view.reset()
+        self._cake_stack_view.clear()
         self._integrated_fids = set()
         self._wf_started = False
         self._last_results = None

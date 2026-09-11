@@ -675,9 +675,10 @@ class PickableImageViewer(ImageViewer):
         """Show/hide the "Pick d-spacing pts" button and its Ring # selector.
 
         Manual d-spacing picking only means anything for a non-crystalline
-        (d-spacing-list) calibrant such as AgBH, so the Data Viewer hides
-        these unless one is selected. Visible by default — the Calibrate tab
-        drives them from its own calibrant combo and never calls this."""
+        (d-spacing-list) calibrant such as AgBH, so both the Data Viewer's
+        geometry card and the Calibrate tab hide these unless one is selected,
+        each driving it from its own calibrant combo. Visible by default, for
+        any viewer that has no calibrant concept to drive it from."""
         if not visible and self._pick_dsp_btn.isChecked():
             self._pick_dsp_btn.setChecked(False)   # leaves PICK_DSPACING mode
         for w in (self._pick_dsp_btn, self._dsp_ring_lbl, self._dsp_ring_spin):
@@ -1232,6 +1233,72 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+#  Radial-unit conversion (R / 2θ / d / Q) + the axis that relabels ticks
+#  with it — shared by CakeViewer and the 1-D waterfall/stacked viewers.
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _convert_radial(x, lsd, px, wl, native, target):
+    """Convert a radial axis between R (px), 2θ (deg), d (Å) and Q (Å⁻¹).
+
+    ``native`` is the unit ``x`` is already in (any of the four); returns ``x``
+    unchanged if the target matches or the geometry (lsd/px/wl) is missing.
+
+    d-spacing diverges on the beam axis (d → ∞ as 2θ → 0), so R = 0 converts
+    to ``inf`` rather than raising — callers that render the value are
+    expected to format non-finite entries (see :class:`_UnitAxis`).
+    """
+    x = np.asarray(x, dtype=float)
+    if target == native or None in (lsd, px, wl):
+        return x
+    lsd, px, wl = float(lsd), float(px), float(wl)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        if native == "Q":
+            tth = 2.0 * np.degrees(np.arcsin(np.clip(x * wl / (4 * math.pi), -1, 1)))
+        elif native == "d":
+            tth = 2.0 * np.degrees(np.arcsin(np.clip(wl / (2.0 * x), -1, 1)))
+        elif native == "2th":
+            tth = x
+        else:  # R px
+            tth = np.degrees(np.arctan(x * px / lsd))
+        if target == "2th":
+            return tth
+        if target == "Q":
+            return 4 * math.pi * np.sin(np.radians(tth) / 2) / wl
+        if target == "d":
+            return wl / (2.0 * np.sin(np.radians(tth) / 2))
+        return lsd * np.tan(np.radians(tth)) / px   # target == "R"
+
+
+_XUNIT_LABEL = {"R": "R (px)", "2th": "2θ (°)", "d": "d (Å)", "Q": "Q (Å⁻¹)"}
+
+
+class _UnitAxis(pg.AxisItem):
+    """Bottom axis that relabels R-pixel tick positions in a chosen radial unit.
+
+    The image/curves stay in their native coordinates; only the tick *labels* are
+    converted, so the axis is exact (no resampling) even for a nonlinear unit."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self._convert = None
+
+    def set_convert(self, fn):
+        self._convert = fn
+        self.picture = None
+        self.update()
+
+    def tickStrings(self, values, scale, spacing):
+        if self._convert is None or not len(values):
+            return super().tickStrings(values, scale, spacing)
+        conv = self._convert(np.asarray(values, dtype=float))
+        # d-spacing is infinite at R = 0 (see _convert_radial) -- "inf" reads
+        # as a bug on an axis, "∞" reads as the physics.
+        return [("∞" if not math.isfinite(v) else f"{v:.4g}") for v in conv]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  CakeViewer / CakeStackViewer  (2-D (η, R) heatmaps)
+# ═════════════════════════════════════════════════════════════════════════════
 
 #: Pan/zoom bound on a cake's η axis, in degrees. η spans a full turn
 #: (−180°…+180°) by construction, so the axis is fixed rather than derived from
@@ -1247,6 +1314,15 @@ class CakeViewer(QtWidgets.QWidget):
     (not detector row/column indices starting at 0) — the image is positioned
     with ``ImageItem.setRect()`` to the actual R/η bin-centre extent rather
     than assumed to start at the origin.
+
+    Y is always η in degrees. X is always *stored* in R pixels, but can be
+    *labelled* in R / 2θ / d / Q once a caller supplies the geometry via
+    :meth:`set_axis_context` — only the tick strings convert (see
+    :class:`_UnitAxis`), so the picture stays the exact integrated bins with
+    no resampling. Until a context is set the selector is hidden and the axis
+    behaves exactly as it always did, which is what keeps the Calibrate tab's
+    and Hydra's cakes (and :class:`RingResidualViewer`, whose X is a ring
+    index rather than a radius) unchanged.
     """
 
     def __init__(self, parent=None):
@@ -1267,6 +1343,24 @@ class CakeViewer(QtWidgets.QWidget):
         self._cmap.currentTextChanged.connect(self._set_cmap)
         self._cmap.setFixedWidth(90)
         bar.addWidget(self._cmap)
+        # X-axis unit. Appended after the cmap combo rather than inserted at a
+        # fixed index, so RingResidualViewer's insertWidget(1, ...) and the
+        # Data Viewer's insertWidget(0..4, ...) both still land where they mean
+        # to. Hidden until set_axis_context() supplies a geometry to convert
+        # with -- see the class docstring.
+        self._xunit_lbl = QtWidgets.QLabel("  X:")
+        self._xunit_lbl.setVisible(False)
+        bar.addWidget(self._xunit_lbl)
+        self._xunit = _NoScrollComboBox()
+        for _key in ("R", "2th", "d", "Q"):
+            self._xunit.addItem(_XUNIT_LABEL[_key], _key)
+        self._xunit.setToolTip(
+            "Label the x-axis in R (px), 2θ (deg), d-spacing (Å) or Q (Å⁻¹).\n"
+            "Only the tick labels convert — the cake itself is never resampled, "
+            "so what you see is always the integrated bins.")
+        self._xunit.setVisible(False)
+        self._xunit.currentIndexChanged.connect(self._refresh_xaxis)
+        bar.addWidget(self._xunit)
         # vmin%/vmax% define the auto-level percentile window that
         # ``_redisplay`` reads fresh on every redraw. They are deliberately
         # *not* on the toolbar: the histogram/LUT handles beside the image are
@@ -1286,7 +1380,9 @@ class CakeViewer(QtWidgets.QWidget):
         self._toolbar_layout = bar   # exposed so subclasses/callers can append widgets
         layout.addLayout(bar)
 
-        self._iv = pg.ImageView(view=pg.PlotItem(viewBox=pg.ViewBox()))
+        self._xaxis_item = _UnitAxis(orientation="bottom")
+        self._iv = pg.ImageView(view=pg.PlotItem(
+            viewBox=pg.ViewBox(), axisItems={"bottom": self._xaxis_item}))
         _detach_from_pg_view_registry(self._iv)
         self._iv.ui.roiBtn.hide(); self._iv.ui.menuBtn.hide()
         vb = self._iv.getView().getViewBox()
@@ -1322,7 +1418,59 @@ class CakeViewer(QtWidgets.QWidget):
         self._cake: Optional[np.ndarray] = None      # (n_eta, n_r)
         self._r_axis: Optional[np.ndarray] = None
         self._eta_axis: Optional[np.ndarray] = None
+        # Geometry for the R → 2θ/d/Q tick relabelling; None until a caller
+        # supplies one through set_axis_context().
+        self._lsd = self._px = self._wl = None
+        # When set, _redisplay leaves the view range alone. Frame-stepping a
+        # CakeStackViewer would otherwise throw away the user's zoom on every
+        # step. Not a _redisplay argument because _redisplay is a slot wired to
+        # toggled/valueChanged, which pass their own payload.
+        self._preserve_view = False
         self._set_cmap(_DEFAULT_CMAP)
+
+    # ── x-axis units (R / 2θ / d / Q) ─────────────────────────────────
+    #
+    # Same contract as WaterfallViewer.set_axis_context: the image keeps its
+    # native R-pixel coordinates (setRect, view limits, the mouse readout's
+    # bin lookup) and only the tick *labels* convert, so the axis is exact for
+    # a nonlinear unit and costs nothing to switch.
+
+    def set_axis_context(self, lsd_um, px_um, wavelength_A):
+        """Provide the run's geometry so the x-axis can be labelled in
+        R / 2θ / d / Q, and reveal the unit selector."""
+        self._lsd, self._px, self._wl = lsd_um, px_um, wavelength_A
+        has_geom = None not in (lsd_um, px_um, wavelength_A)
+        self._xunit_lbl.setVisible(has_geom)
+        self._xunit.setVisible(has_geom)
+        self._refresh_xaxis()
+
+    def x_unit(self) -> str:
+        """The selected radial unit key — ``"R"``, ``"2th"``, ``"d"`` or ``"Q"``."""
+        return self._xunit.currentData() or "R"
+
+    def _refresh_xaxis(self, *_args):
+        unit = self.x_unit()
+        if unit == "R" or None in (self._lsd, self._px, self._wl):
+            self._xaxis_item.set_convert(None)
+            self._iv.getView().setLabel("bottom", "R", units="px")
+            return
+        self._xaxis_item.set_convert(
+            lambda vals, u=unit: _convert_radial(vals, self._lsd, self._px,
+                                                 self._wl, "R", u))
+        # No `units=` — pyqtgraph would SI-prefix it, and _XUNIT_LABEL already
+        # carries the unit in the text.
+        self._iv.getView().setLabel("bottom", _XUNIT_LABEL[unit])
+
+    def _x_label_at(self, r_px: float) -> str:
+        """``r_px`` rendered in the selected unit, for the mouse readout —
+        ``""`` when the selection is plain R (the readout already shows it)."""
+        unit = self.x_unit()
+        if unit == "R" or None in (self._lsd, self._px, self._wl):
+            return ""
+        v = float(_convert_radial(np.asarray([r_px], dtype=float), self._lsd,
+                                  self._px, self._wl, "R", unit)[0])
+        shown = "∞" if not math.isfinite(v) else f"{v:.4g}"
+        return f"   {_XUNIT_LABEL[unit]} = {shown}"
 
     def set_cake(self, cake_2d: np.ndarray, r_axis_px: np.ndarray, eta_axis_deg: np.ndarray):
         self._cake = np.asarray(cake_2d, dtype=np.float32)
@@ -1361,10 +1509,11 @@ class CakeViewer(QtWidgets.QWidget):
         self._iv.getImageItem().setRect(
             QtCore.QRectF(r0, e0, max(r1 - r0, 1e-6), max(e1 - e0, 1e-6)))
         self._apply_view_limits(r0, r1, e0, e1)
-        # Same framing as ProfileViewer's radial plot: X pinned to the data
-        # extent with a hair of padding, η shown in full.
-        self._iv.getView().setXRange(min(r0, r1), max(r0, r1), padding=0.02)
-        self._iv.getView().setYRange(min(e0, e1), max(e0, e1), padding=0)
+        if not self._preserve_view:
+            # Same framing as ProfileViewer's radial plot: X pinned to the data
+            # extent with a hair of padding, η shown in full.
+            self._iv.getView().setXRange(min(r0, r1), max(r0, r1), padding=0.02)
+            self._iv.getView().setYRange(min(e0, e1), max(e0, e1), padding=0)
         self._iv.getHistogramWidget().item.setHistogramRange(lo, hi, padding=0.1)
         n_eta, n_r = cake.shape
         self._coord_bar.setText(
@@ -1415,7 +1564,8 @@ class CakeViewer(QtWidgets.QWidget):
         toolbar rather than subclassing it, since its axes are physical
         (R, η) bin coordinates rather than detector row/column indices)."""
         return {"cmap": self._cmap.currentText(), "log": self._log.isChecked(),
-                "vmin": self._vmin.value(), "vmax": self._vmax.value()}
+                "vmin": self._vmin.value(), "vmax": self._vmax.value(),
+                "xunit": self.x_unit()}
 
     def set_display_state(self, state: Optional[dict]) -> None:
         """See ``ImageViewer.set_display_state`` — identical reasoning
@@ -1438,6 +1588,16 @@ class CakeViewer(QtWidgets.QWidget):
                 spin.blockSignals(True)
                 spin.setValue(state[key])
                 spin.blockSignals(False)
+        xunit = state.get("xunit")
+        if xunit is not None:
+            idx = self._xunit.findData(str(xunit))
+            if idx >= 0:
+                self._xunit.blockSignals(True)
+                self._xunit.setCurrentIndex(idx)
+                self._xunit.blockSignals(False)
+                # Signals blocked, so drive the relabelling by hand — same
+                # reason _set_cmap is re-applied explicitly just above.
+                self._refresh_xaxis()
         self._redisplay()
 
     def _mouse(self, evt):
@@ -1459,7 +1619,127 @@ class CakeViewer(QtWidgets.QWidget):
         ir = min(max(ir, 0), n_r - 1); ie = min(max(ie, 0), n_eta - 1)
         val = self._cake[ie, ir]
         self._coord_bar.setText(
-            f"R = {r:.2f} px   η = {eta:.2f}°   intensity = {val:.4g}")
+            f"R = {r:.2f} px{self._x_label_at(r)}   "
+            f"η = {eta:.2f}°   intensity = {val:.4g}")
+
+
+class CakeStackViewer(CakeViewer):
+    """A :class:`CakeViewer` over a *stack* of cakes — one per frame — with a
+    scrubber bar to step between them.
+
+    This is what a multi-azimuth batch integration actually produces: with
+    "Multi-azimuth output" ticked the worker keeps each frame's ``cake_2d``
+    instead of the η-collapsed profile, so the run's result is
+    ``(n_frames, n_eta, n_r)`` on one shared (R, η) grid. The scrubber is
+    hidden for a single-frame stack, so a one-frame run just looks like a
+    plain cake.
+
+    Frame-stepping reuses the inherited ``set_cake`` but suppresses the view
+    reframe (``_preserve_view``): the axes are identical across the stack by
+    construction, so re-fitting the range on every step would only throw away
+    the zoom the user is scrubbing *with*. Levels still auto-scale per frame,
+    matching every other viewer in the app.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._cakes: Optional[np.ndarray] = None    # (n_frames, n_eta, n_r)
+        self._frame_ids: list = []
+        self._frame_idx = 0
+
+        row = QtWidgets.QHBoxLayout()
+        row.setContentsMargins(4, 0, 4, 2)
+        row.setSpacing(4)
+        self._prev_btn = QtWidgets.QToolButton()
+        self._prev_btn.setText("◀")
+        self._prev_btn.setToolTip("Previous frame")
+        self._prev_btn.clicked.connect(lambda: self._step(-1))
+        row.addWidget(self._prev_btn)
+        self._frame_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self._frame_slider.setMinimum(0)
+        self._frame_slider.setPageStep(1)
+        self._frame_slider.valueChanged.connect(self._show_frame)
+        row.addWidget(self._frame_slider, 1)
+        self._next_btn = QtWidgets.QToolButton()
+        self._next_btn.setText("▶")
+        self._next_btn.setToolTip("Next frame")
+        self._next_btn.clicked.connect(lambda: self._step(1))
+        row.addWidget(self._next_btn)
+        self._frame_lbl = QtWidgets.QLabel("")
+        self._frame_lbl.setMinimumWidth(200)
+        # Monospace so the counter doesn't jitter as the digits change, but no
+        # colour override: this bar sits below the plot's dark coordinate strip,
+        # in the light form chrome, so it takes the palette's text colour.
+        self._frame_lbl.setStyleSheet(f"font-family:{S.MONO_CSS};")
+        row.addWidget(self._frame_lbl)
+        self._scrub_bar = QtWidgets.QWidget()
+        self._scrub_bar.setLayout(row)
+        self._scrub_bar.setVisible(False)
+        self.layout().addWidget(self._scrub_bar)
+
+        self._coord_bar.setText(
+            "Run a multi-azimuth integration to see one (η, R) cake per frame")
+
+    def set_cakes(self, cakes, r_axis_px, eta_axis_deg, frame_ids=None):
+        """Show a ``(n_frames, n_eta, n_r)`` stack sharing one (R, η) grid.
+
+        ``frame_ids`` labels the scrubber; it falls back to plain indices.
+        A stack with no frames clears the viewer.
+        """
+        cakes = np.asarray(cakes)
+        if cakes.ndim != 3 or cakes.shape[0] == 0:
+            self.clear()
+            return
+        self._cakes = cakes
+        self._r_axis = np.asarray(r_axis_px, dtype=np.float64)
+        self._eta_axis = np.asarray(eta_axis_deg, dtype=np.float64)
+        ids = list(frame_ids or [])
+        self._frame_ids = [str(v) for v in ids] if len(ids) == cakes.shape[0] else \
+                          [str(i) for i in range(cakes.shape[0])]
+        n = cakes.shape[0]
+        self._scrub_bar.setVisible(n > 1)
+        self._frame_slider.blockSignals(True)
+        self._frame_slider.setMaximum(n - 1)
+        self._frame_slider.setValue(0)
+        self._frame_slider.blockSignals(False)
+        self._frame_idx = 0
+        # First frame of a new stack reframes the view; later steps don't.
+        self._show_frame(0, preserve_view=False)
+
+    def frame_count(self) -> int:
+        return 0 if self._cakes is None else int(self._cakes.shape[0])
+
+    def frame_index(self) -> int:
+        return self._frame_idx
+
+    def clear(self):
+        self._cakes = None
+        self._frame_ids = []
+        self._frame_idx = 0
+        self._scrub_bar.setVisible(False)
+        self._frame_lbl.setText("")
+        super().clear()
+        self._coord_bar.setText(
+            "Run a multi-azimuth integration to see one (η, R) cake per frame")
+
+    def _step(self, delta: int):
+        if self._cakes is None:
+            return
+        self._frame_slider.setValue(
+            min(max(self._frame_idx + delta, 0), self.frame_count() - 1))
+
+    def _show_frame(self, idx: int, preserve_view: bool = True):
+        if self._cakes is None:
+            return
+        idx = min(max(int(idx), 0), self.frame_count() - 1)
+        self._frame_idx = idx
+        self._preserve_view = preserve_view
+        try:
+            self.set_cake(self._cakes[idx], self._r_axis, self._eta_axis)
+        finally:
+            self._preserve_view = False
+        self._frame_lbl.setText(
+            f"frame {idx + 1}/{self.frame_count()} — {self._frame_ids[idx]}")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -4829,52 +5109,6 @@ class LossCurveViewer(QtWidgets.QWidget):
             return
         self._xs.append(it); self._ys.append(loss)
         self._curve.setData(self._xs, self._ys)
-
-
-def _convert_radial(x, lsd, px, wl, native, target):
-    """Convert a radial axis between R (px), 2θ (deg) and Q (Å⁻¹).
-
-    ``native`` is the unit ``x`` is already in ("R" or "Q"); returns ``x`` unchanged
-    if the target matches or the geometry (lsd/px/wl) is missing.
-    """
-    x = np.asarray(x, dtype=float)
-    if target == native or None in (lsd, px, wl):
-        return x
-    lsd, px, wl = float(lsd), float(px), float(wl)
-    if native == "Q":
-        tth = 2.0 * np.degrees(np.arcsin(np.clip(x * wl / (4 * math.pi), -1, 1)))
-    else:  # R px
-        tth = np.degrees(np.arctan(x * px / lsd))
-    if target == "2th":
-        return tth
-    if target == "Q":
-        return 4 * math.pi * np.sin(np.radians(tth) / 2) / wl
-    return lsd * np.tan(np.radians(tth)) / px   # target == "R"
-
-
-_XUNIT_LABEL = {"R": "R (px)", "2th": "2θ (°)", "Q": "Q (Å⁻¹)"}
-
-
-class _UnitAxis(pg.AxisItem):
-    """Bottom axis that relabels R-pixel tick positions in a chosen radial unit.
-
-    The image/curves stay in their native coordinates; only the tick *labels* are
-    converted, so the axis is exact (no resampling) even for a nonlinear unit."""
-
-    def __init__(self, *a, **k):
-        super().__init__(*a, **k)
-        self._convert = None
-
-    def set_convert(self, fn):
-        self._convert = fn
-        self.picture = None
-        self.update()
-
-    def tickStrings(self, values, scale, spacing):
-        if self._convert is None or not len(values):
-            return super().tickStrings(values, scale, spacing)
-        conv = self._convert(np.asarray(values, dtype=float))
-        return [f"{v:.4g}" for v in conv]
 
 
 class WaterfallViewer(QtWidgets.QWidget):

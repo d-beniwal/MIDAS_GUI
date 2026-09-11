@@ -1704,6 +1704,46 @@ def resolve_calibration_fields(calib_result, use_file: bool, file_path: str, *,
     return fields, f"From {source_label}."
 
 
+def full_calibration_snapshot(calib_result, use_file: bool, file_path: str, *,
+                              source_label: str = "Tab 2 calibration"):
+    """Every field of the calibration currently selected — not just the
+    display subset :func:`resolve_calibration_fields` returns.
+
+    Same ``(dict | None, note)`` contract as that function, so it is a
+    drop-in wherever the *whole* calibration matters rather than the handful
+    of numbers a user reads off a panel. That is the provenance path: an
+    integration attempt's ``calibration_snapshot`` has to be able to
+    reconstruct the calibration the run actually used, which the 13 display
+    fields cannot (they drop ``_calibrant_name``, ``_panel_unpacked``,
+    ``panel_layout``, the refined-parameter σ / at-limit flags, ...).
+
+    The display fields are overlaid *on top of* the raw result, not merged
+    under it: they are read straight off the same object, so no value can
+    drift, but they also supply defaults a bare result may not carry
+    (``tx/ty/tz`` → 0.0, ``distortion`` → {}, ``im_trans`` → []). Keeping the
+    output a strict superset of ``resolve_calibration_fields``' is what lets
+    every existing reader — ``project.calibration_namespace``,
+    ``render_calib_value_grid``, ``gsas_export`` — consume it unchanged.
+    """
+    fields, note = resolve_calibration_fields(calib_result, use_file, file_path,
+                                              source_label=source_label)
+    if fields is None:
+        return None, note
+    if use_file or calib_result is None:
+        try:
+            result = result_ns_from_geometry_file((file_path or "").strip())
+        except Exception:
+            # Unreadable on the re-parse (it parsed once, for `fields`) —
+            # the display subset is still an honest record. Never block
+            # logging an otherwise-good integration over this.
+            return fields, note
+    else:
+        result = calib_result
+    from midas_gui import project   # deferred: project doesn't import helpers
+    full = project.sanitize_result_dict(result) or {}
+    return {**full, **fields}, note
+
+
 def render_calib_value_grid(grid: "QtWidgets.QGridLayout", note_label: "QtWidgets.QLabel",
                             fields: Optional[dict], note: str) -> None:
     """Populate a read-only 2-column key/value grid of calibration-geometry

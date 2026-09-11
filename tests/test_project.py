@@ -531,6 +531,89 @@ def test_batch_tab_logs_to_project_with_calibration_snapshot(app, tmp_path):
         assert att["results/profiles"].shape == (3, 20)
 
 
+# Every key resolve_calibration_fields returns — the snapshot must stay a
+# superset of these, since calibration_namespace/_build_spec/gsas_export and
+# the "View calibration" grid all read them by name.
+_DISPLAY_KEYS = {"wavelength_A", "Lsd", "BC_y", "BC_z", "tx", "ty", "tz",
+                 "pxY", "pxZ", "NrPixelsY", "NrPixelsZ", "distortion", "im_trans"}
+
+
+def _logged_snapshot(tab, tmp_path, name="proj.h5"):
+    """Run BatchTab._log_to_project against a fresh project and hand back the
+    calibration_snapshot it recorded."""
+    proj_path = str(tmp_path / name)
+    project.create_project(proj_path)
+    ctx = project.ProjectContext()
+    ctx.path = proj_path
+    tab.set_project_context(ctx)
+    tab._last_run_inputs = {"src_cfg": {}, "kernel": "subpixel4"}
+    tab._last_run_fields = {"mask": None, "mask_is_file_backed": False}
+    tab._log_to_project({"n": 1, "aborted": False,
+                         "profiles": np.zeros((1, 8), dtype=np.float32)})
+    meta = project.read_attempt(proj_path, "/analysis/integrate/single/attempt_0001")
+    return meta["calibration_snapshot"]
+
+
+def test_integration_attempt_records_the_whole_tab2_calibration(app, tmp_path):
+    """The snapshot is the full calibration result, not the display subset —
+    an attempt has to be able to reconstruct the geometry it ran under."""
+    from midas_gui.tab_batch import BatchTab
+
+    tab = BatchTab()
+    tab._calib_result = _fake_result()
+    tab._use_tab2_btn.setChecked(True)
+
+    snap = _logged_snapshot(tab, tmp_path)
+    assert _DISPLAY_KEYS <= set(snap)                     # still a superset
+    # ...plus everything the display subset used to drop.
+    assert snap["_calibrant_name"] == "CeO2"
+    assert snap["post_residual_strain_uE"] == pytest.approx(12.3)
+    assert snap["seed_seconds"] == pytest.approx(0.1)
+    assert snap["refine_seconds"] == pytest.approx(1.2)
+    # Torch-tensor fields are still dropped (sanitize_result_dict's rule).
+    assert "residual_corr_map" not in snap
+    # And it round-trips back into a usable calibration.
+    ns = project.calibration_namespace(snap)
+    assert ns.Lsd == pytest.approx(200000.0)
+    assert ns._calibrant_name == "CeO2"
+
+
+def test_integration_attempt_records_the_whole_file_calibration(app, tmp_path):
+    """Same for the "From file" source — the geometry file is re-parsed into a
+    full result rather than only its display fields."""
+    from midas_gui.tab_batch import BatchTab
+
+    calib_json = tmp_path / "calibration.json"
+    calib_json.write_text(json.dumps({
+        "NrPixelsY": 2048, "NrPixelsZ": 2048, "pxY": 200.0, "pxZ": 200.0,
+        "Lsd": 200000.0, "BC_y": 1024.0, "BC_z": 1020.0,
+        "tx": 0.0, "ty": 0.1, "tz": -0.2, "wavelength_A": 0.1729,
+        "distortion": {}, "im_trans": [1]}))
+
+    tab = BatchTab()
+    tab._use_json_btn.setChecked(True)
+    tab._json_ed.setText(str(calib_json))
+
+    snap = _logged_snapshot(tab, tmp_path)
+    assert _DISPLAY_KEYS <= set(snap)
+    assert snap["Lsd"] == pytest.approx(200000.0)
+    assert snap["ty"] == pytest.approx(0.1)
+    assert snap["im_trans"] == [1]
+    # residual_corr_bin_path comes from the full result, not the display fields.
+    assert "residual_corr_bin_path" in snap
+
+
+def test_integration_attempt_snapshot_is_none_without_a_calibration(app, tmp_path):
+    """No calibration selected — the attempt is still logged, with a null
+    snapshot rather than a crash."""
+    from midas_gui.tab_batch import BatchTab
+
+    tab = BatchTab()
+    tab._use_json_btn.setChecked(True)
+    tab._json_ed.setText("")
+    assert _logged_snapshot(tab, tmp_path) is None
+
+
 def test_read_attempt_results_roundtrip(tmp_path):
     path = str(tmp_path / "proj.h5")
     project.create_project(path)

@@ -17,7 +17,7 @@ from PyQt5 import QtCore, QtWidgets
 
 from midas_gui.helpers import (
     _browse, _build_spec, spec_from_geometry_file, resolve_calibration_fields,
-    make_calib_values_button)
+    full_calibration_snapshot, make_calib_values_button)
 from midas_gui import style as S
 
 
@@ -98,6 +98,15 @@ class HydraBatchPanelCard(QtWidgets.QWidget):
         popup (see helpers.make_calib_values_button), called fresh each time
         it's opened."""
         return resolve_calibration_fields(
+            self.result, self._use_file_btn.isChecked(), self._json_ed.text(),
+            source_label=f"Calibrate tab (ge{self.panel_number})")
+
+    def full_calib_snapshot(self):
+        """This panel's active geometry as the *whole* calibration rather than
+        the display subset — what gets recorded as an integration attempt's
+        ``calibration_snapshot`` (see
+        ``helpers.full_calibration_snapshot``)."""
+        return full_calibration_snapshot(
             self.result, self._use_file_btn.isChecked(), self._json_ed.text(),
             source_label=f"Calibrate tab (ge{self.panel_number})")
 
