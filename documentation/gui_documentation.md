@@ -1535,9 +1535,10 @@ Lsd, and tilt are fit and shown independently.
   across concurrent threads.
 - **Image toolbar**: **GE1 / GE2 / GE3 / GE4** (no Composite — calibration
   is inherently per-panel; see the Data Viewer tab for the windmill
-  composite once all 4 are fitted) plus **Show rings** / **Corrected**,
-  identical in meaning to the single-detector tab's own predicted-ring
-  overlay toggles, applied to whichever panel is active.
+  composite once all 4 are fitted) plus **Show rings**, identical in
+  meaning to the single-detector tab's own predicted-ring overlay toggle,
+  applied to whichever panel is active. As there, the rings are always
+  drawn through the fitted tilts and distortion.
 - **Radial Profile (bottom right)**: one shared multi-curve plot — GE1-4
   are ordinary checkboxes (any combination can be shown at once), same
   style/controls as the Data Viewer tab's Hydra Radial Profile plot
@@ -1708,12 +1709,20 @@ leaves the fit exactly as it was. The button label shows how many are set. Limit
 apply to the manual fit only — the crystalline backend takes no bounds arguments.
 
 ### Predicted-ring overlay (image toolbar)
-After a run, the calibrant's predicted ring radii are drawn in **lime** with a
-red/yellow beam-centre marker. **Show rings** toggles the overlay; **Corrected**
-redraws the same lime rings reshaped through the fitted tilt (tx/ty/tz) instead
-of as plain circles, so you can see how much the geometry actually deviates
-from an untilted detector — the rings still look like the same thin curves,
-just bent, rather than a separate scattered point-cloud.
+After a run, the calibrant's predicted ring positions are drawn in **lime** with a
+red/yellow beam-centre marker. **Show rings** toggles the overlay.
+
+The rings are always drawn through the *full* forward model — the fitted tilts
+(tx/ty/tz) **and** the refined distortion harmonics — so what you see is where the
+calibration says each ring actually lands, not a circle approximating it. On a tilted
+or distorted detector the curves are visibly bent rather than round; at zero tilt and
+zero distortion they reduce exactly to circles about the beam centre. There is no
+longer a **Corrected** toggle: correctness was never a display preference, and having
+it default to off meant the honest overlay was the one you had to go looking for.
+
+One term is left out: the empirical `residual_corr_map` (a smooth sub-pixel ΔR(Y, Z)
+absorbed after the harmonics converge, and present only if you refined **Residual
+map**). When a result carries one, the status text beside the toolbar says so.
 
 ### Run / Abort
 **Run Calibration** launches the worker; **Abort** terminates it and frees the slot so
@@ -1755,16 +1764,10 @@ bottom tab area is fully resizable (drag the horizontal splitter) and the Log fi
 tab.
 
 ### Export
-**Use seed as calibration (no fit)** publishes the **Initial seed** card's geometry as
-the calibration result without running anything. `→ Send to Data Viewer`, `Save .json`
-and `Save paramstest.txt` are otherwise all gated on a completed fit, which left no way
-to use a geometry you had already dialled in by hand — nudging BC/Lsd until the
-predicted ring overlay sits on the measured rings is a legitimate calibration, it just
-isn't a fit. Nothing is refined and no uncertainty exists, so every geometry row in the
-**Results** grid comes out marked `(fixed)` and the Log records that no fit was run.
-Note that a good-looking overlay is weaker evidence than it appears at a long
-sample–detector distance: on a 13.5 m SAXS geometry a 313 mm Lsd error moves the first
-AgBH ring by only ~17 px, so prefer a real fit when you have points to pick.
+`→ Send to Data Viewer`, `Save .json` and `Save paramstest.txt` are all gated on a
+completed fit. To use a geometry you have dialled in by hand rather than fitted, build
+it in the **Data Viewer** tab — its Ring simulation card exists for exactly that, and
+`Geometry: [← Get]` there pulls this tab's calibrated values as a starting point.
 
 **Save calibration.json** and **Save paramstest.txt** (standalone or from a template).
 Both carry the Transforms checkboxes' `ImTransOpt` codes (one `ImTransOpt <code>` line

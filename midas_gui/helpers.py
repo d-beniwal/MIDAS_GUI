@@ -906,6 +906,119 @@ def tilted_ring_xy(two_theta_deg: float, tx: float, ty: float, tz: float,
                              Lsd_um, bc_y, bc_z, pxY_um, pxZ_um)
 
 
+def distortion_rho_d_um(NrPixelsY, NrPixelsZ, bc_y: float, bc_z: float,
+                         pxY_um: float, pxZ_um: float) -> Optional[float]:
+    """The distortion normalisation radius ρ_d, in µm.
+
+    Reproduces ``spec_from_calibration_result``'s own definition exactly —
+    the beam-centre-to-farthest-corner distance in px (measured to ``N-1``,
+    the last pixel index) times the mean pixel pitch. It has to match: the
+    harmonic basis is evaluated at ρ = R_µm / ρ_d, so a ρ_d off by even the
+    pixel pitch rescales every term and the polynomial no longer describes
+    the detector it was fitted on.
+
+    ``None`` when the detector size is unknown (a result that never carried
+    ``NrPixelsY``/``NrPixelsZ``), which callers read as "cannot evaluate
+    distortion here" rather than substituting a guess.
+    """
+    try:
+        NY, NZ = int(NrPixelsY or 0), int(NrPixelsZ or 0)
+    except (TypeError, ValueError):
+        return None
+    if NY <= 0 or NZ <= 0:
+        return None
+    px_mean = 0.5 * (float(pxY_um) + float(pxZ_um or pxY_um))
+    corner_px = math.hypot(max(bc_y, NY - 1 - bc_y), max(bc_z, NZ - 1 - bc_z))
+    return corner_px * px_mean if corner_px > 0 else None
+
+
+def ring_xy_corrected(two_theta_deg: float, tx: float, ty: float, tz: float,
+                       Lsd_um: float, bc_y: float, bc_z: float,
+                       pxY_um: float, pxZ_um: float, *,
+                       distortion: Optional[dict] = None,
+                       rho_d_um: Optional[float] = None, n: int = 400):
+    """Where a ring at ``two_theta_deg`` actually lands on the detector, through
+    the *full* forward model — tilt (:func:`tilted_ring_xy`) **and** the refined
+    distortion harmonics.
+
+    :func:`tilted_ring_xy` answers "where does the undistorted ray hit?". That
+    is not where the ring is drawn on a detector whose calibration refined
+    distortion coefficients, because the backend reports a pixel's radius as
+    ``R_corrected = D(ρ, η) · R_projected`` (``midas_calibrate_v2.forward.
+    geometry.pixel_to_REta``). A ring is the locus of pixels whose *corrected*
+    radius equals the Bragg radius, so this inverts that relation instead of
+    ignoring it.
+
+    Per η, solve ``D(rad/ρ_d, η) · rad = Lsd·tan(2θ)`` for the projected radius
+    ``rad`` by fixed-point iteration — D is within a few percent of 1 for any
+    physical calibration, so the map is a strong contraction and this converges
+    in a handful of passes. The recovered ``rad`` becomes a per-point effective
+    2θ, which :func:`_tilt_project_YZ` then projects exactly as for a ring.
+
+    ``distortion`` is a v2-named coefficient dict (``iso_R2``, ``a1``,
+    ``phi1``, …) as carried by an ``AutoCalibrationResult``; the model itself
+    comes from :mod:`midas_distortion`, the shared leaf ``midas_calibrate_v2``
+    and ``midas_integrate_v2`` both evaluate, so there is one definition of it
+    rather than a second copy here.
+
+    With no coefficients — or no ``rho_d_um`` to normalise them against — the
+    solve is skipped entirely and the result is bit-identical to
+    :func:`tilted_ring_xy`, which is what every untilted/undistorted caller
+    still gets.
+
+    Note: the empirical ``residual_corr_map`` (a smooth per-pixel ΔR the
+    backend adds *after* the harmonics, present only when residual-map
+    refinement was run) is NOT applied here — it is a sub-pixel term and would
+    need the map tensor in a redraw path. Callers that care should say so.
+    """
+    eta = np.linspace(0.0, 360.0, n, endpoint=True)
+    p = _distortion_coeff_vector(distortion)
+    R_target_um = float(Lsd_um) * math.tan(math.radians(float(two_theta_deg)))
+    if p is None or not rho_d_um or rho_d_um <= 0 or R_target_um == 0.0:
+        # Nothing to invert. Pass the requested 2θ straight through rather
+        # than round-tripping it through tan/arctan, so this stays *exactly*
+        # tilted_ring_xy — the reduction property its docstring promises.
+        tt_eff = np.full(n, float(two_theta_deg))
+    else:
+        from midas_distortion import distortion_factor
+        rad = np.full(n, R_target_um, dtype=float)
+        for _ in range(_DISTORTION_SOLVE_ITERS):
+            D = distortion_factor(rad / float(rho_d_um), eta, p)
+            # A non-positive factor is not a physical distortion — bail out
+            # and draw the undistorted ring rather than a folded-over curve.
+            if not np.all(np.isfinite(D)) or np.any(D <= 0.0):
+                rad = np.full(n, R_target_um, dtype=float)
+                break
+            nxt = R_target_um / D
+            converged = np.max(np.abs(nxt - rad)) <= 1e-13 * abs(R_target_um)
+            rad = nxt
+            if converged:
+                break
+        tt_eff = np.degrees(np.arctan(rad / float(Lsd_um)))
+    return _tilt_project_YZ(tt_eff, eta, tx, ty, tz,
+                             Lsd_um, bc_y, bc_z, pxY_um, pxZ_um)
+
+
+#: Fixed-point passes in :func:`ring_xy_corrected`. D is a near-unity
+#: multiplier, so this converges to float64 noise in ~5; 20 is headroom for a
+#: badly-scaled coefficient set, and costs nothing on a 400-point ring.
+_DISTORTION_SOLVE_ITERS = 20
+
+
+def _distortion_coeff_vector(distortion: Optional[dict]):
+    """A v2-ordered 15-vector for ``distortion``, or ``None`` when it holds
+    nothing to apply (missing, empty, or every coefficient zero — the common
+    case of a calibration that never refined distortion)."""
+    if not distortion:
+        return None
+    try:
+        from midas_distortion import v2_coeffs_from_named
+        p = v2_coeffs_from_named(distortion)
+    except Exception:
+        return None
+    return p if np.any(p != 0.0) else None
+
+
 def tilted_spoke_xy(two_theta_lo_deg: float, two_theta_hi_deg: float, eta_deg: float,
                      tx: float, ty: float, tz: float, Lsd_um: float,
                      bc_y: float, bc_z: float, pxY_um: float, pxZ_um: float,

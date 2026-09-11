@@ -24,7 +24,6 @@ the single-detector tab over the last few sessions, in the Hydra copy:
 | "Refining: … Fixed: …" summary line | 13 | **0** |
 | Parameter limits (± windows) | 7 | **0** |
 | Seed-driven ring preview | 16 | **0** |
-| Use seed as calibration (no fit) | 5 | **0** |
 | Per-calibrant-kind refine defaults | yes | **no** |
 | Refined-value ± σ in the results grid | yes | **no** |
 

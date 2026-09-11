@@ -389,14 +389,12 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         tb.addWidget(self._origin_btn)
         tb.addWidget(self._toolbar)
         self._show_rings_check = QtWidgets.QCheckBox("Show rings"); self._show_rings_check.setChecked(True)
+        self._show_rings_check.setToolTip(
+            "Overlay the active panel's predicted rings, drawn through its full "
+            "fitted geometry — tilts and refined distortion both applied.")
         self._show_rings_check.toggled.connect(
             lambda c: self._active_card and self._active_card.set_show_rings(c))
         tb.addWidget(self._show_rings_check)
-        self._corrected_check = QtWidgets.QCheckBox("Corrected")
-        self._corrected_check.setToolTip("Redraw the active panel's rings reflecting its fitted tilt.")
-        self._corrected_check.toggled.connect(
-            lambda c: self._active_card and self._active_card.set_corrected(c))
-        tb.addWidget(self._corrected_check)
         right.addWidget(self._img_view)
 
         bot = QtWidgets.QTabWidget()
@@ -507,9 +505,9 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             chk.blockSignals(True); chk.setChecked(cn == n); chk.blockSignals(False)
         self._active_card = self._cards[n]
         self._active_card.bind_viewer(self._img_view)
-        for chk, getter in ((self._show_rings_check, self._active_card.show_rings_checked),
-                            (self._corrected_check, self._active_card.corrected_checked)):
-            chk.blockSignals(True); chk.setChecked(getter()); chk.blockSignals(False)
+        chk = self._show_rings_check
+        chk.blockSignals(True); chk.setChecked(self._active_card.show_rings_checked())
+        chk.blockSignals(False)
         self._refresh_display()
 
     def _on_card_transform_changed(self, n: int):
@@ -1070,7 +1068,6 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         for n, card in self._cards.items():
             fields = widgets_to_dict(card.state_widgets())
             fields["show_rings"] = card.show_rings_checked()
-            fields["corrected"] = card.corrected_checked()
             cards[n] = fields
         return {
             "anchor_path": self._loader.current_path(),
@@ -1100,8 +1097,6 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             apply_dict_to_widgets(card.state_widgets(), fields)
             if "show_rings" in fields:
                 card.set_show_rings(bool(fields["show_rings"]))
-            if "corrected" in fields:
-                card.set_corrected(bool(fields["corrected"]))
         anchor = state.get("anchor_path")
         if anchor and Path(anchor).exists():
             self._loader.set_path(anchor)

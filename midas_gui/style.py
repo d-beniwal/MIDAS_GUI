@@ -347,8 +347,8 @@ DANGER_BTN_QSS = (
 class Form(QtWidgets.QGridLayout):
     """A compact label→field grid (Dioptas form style).
 
-    ``row(("Label:", widget), ...)`` adds up to two right-aligned label/field
-    pairs on one line; ``full(widget)`` spans the whole width.
+    ``row(("Label:", widget), ...)`` adds any number of right-aligned
+    label/field pairs on one line; ``full(widget)`` spans the whole width.
     """
     def __init__(self):
         super().__init__()
@@ -368,10 +368,11 @@ class Form(QtWidgets.QGridLayout):
                 self.addLayout(w, self._r, col + 1)
             else:
                 self.addWidget(w, self._r, col + 1)
+            # Every field column shares the row's spare width. Stretching only
+            # columns 1 and 3 left a third pair's field pinned to its minimum
+            # while the first two stretched around it.
+            self.setColumnStretch(col + 1, 1)
             col += 2
-        self.setColumnStretch(1, 1)
-        if len(pairs) > 1:
-            self.setColumnStretch(3, 1)
         self._r += 1
         return self
 

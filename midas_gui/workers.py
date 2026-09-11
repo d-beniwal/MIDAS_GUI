@@ -1001,11 +1001,18 @@ class IntegrationWorker(QtCore.QThread):
             # Only the mask is pre-flipped here (no backend hook for it) — against
             # self._im_trans (the live Transforms-checkbox state this preview run
             # was requested with, which normally matches self._result.im_trans).
-            img = self._image.astype(np.float32)
+            # float64 the whole way, as BatchWorker does (_ExplicitTIFFSource and
+            # every other source hand it float64, and it integrates float64). This
+            # used to narrow to float32 and widen back at the torch call, which
+            # cost ~7 significant digits and made the Calibrate tab's profile
+            # differ from the Batch run it is meant to preview — small (4e-8
+            # relative here) but a difference with no reason to exist, in the one
+            # plot a user reads a peak position off.
+            img = self._image.astype(np.float64)
             if self._dark is not None or self._bright is not None or self._background is not None:
                 img = apply_field_corrections(
                     img, dark=self._dark, bright=self._bright,
-                    bright_mode=self._bright_mode, background=self._background).astype(np.float32)
+                    bright_mode=self._bright_mode, background=self._background).astype(np.float64)
             mask_t = None
             if self._mask is not None:
                 mask_t = (_apply_im_trans(self._mask.astype(np.float32), self._im_trans)
@@ -1015,7 +1022,7 @@ class IntegrationWorker(QtCore.QThread):
             # Needed for both the optional weighted profile and (below) masking
             # empty bins in the residual-strain cake, so compute unconditionally.
             cnt = count_cake(geom, "subpixel2", spec.NrPixelsZ, spec.NrPixelsY)
-            img_t = torch.from_numpy(img.astype(np.float64))
+            img_t = torch.from_numpy(np.ascontiguousarray(img, dtype=np.float64))
             prof, _, cake_2d, _ = integrate_frame(img_t, spec, geom, "subpixel2",
                                                (None, None), None, need_sigma=False,
                                                return_cake=True,

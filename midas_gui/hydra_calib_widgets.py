@@ -21,7 +21,6 @@ import math
 from pathlib import Path
 from typing import Callable, Optional
 
-import numpy as np
 from PyQt5 import QtCore, QtWidgets
 import pyqtgraph as pg
 
@@ -29,7 +28,8 @@ from midas_gui.constants import DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM, DEFAULT_LS
     DEFAULT_BC_Y, DEFAULT_BC_Z
 from midas_gui.helpers import (
     _fspin, im_trans_codes_from_checkboxes, geometry_fields_from_file,
-    _predict_ring_radii, tilted_ring_xy, paramstest_pairs, write_standalone_paramstest,
+    _predict_ring_radii, ring_xy_corrected, distortion_rho_d_um, paramstest_pairs,
+    write_standalone_paramstest,
     _PARAMSTEST_DISTORTION)
 from midas_gui.widgets import ResidualBarChart, _mono_font
 from midas_gui.dialogs import _SaveParamstestDialog, show_error
@@ -57,9 +57,7 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
         self._viewer = None
         self._log_fn: Optional[Callable[[str], None]] = None
         self._ring_items: list = []
-        self._corrected_ring_items: list = []
         self._show_rings = True
-        self._corrected = False
         self._build_ui()
 
     # ── Wiring ───────────────────────────────────────────────────
@@ -87,7 +85,7 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
                 old.ringFitBC.disconnect(self._on_ring_fit_bc)
             except TypeError:
                 pass
-            for it in self._ring_items + self._corrected_ring_items:
+            for it in self._ring_items:
                 old._iv.removeItem(it)
             old._clear_ring_points()
         self._viewer = viewer
@@ -275,33 +273,11 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
 
     def set_show_rings(self, visible: bool):
         self._show_rings = visible
-        active = self._corrected_ring_items if (self._corrected and self._corrected_ring_items) \
-            else self._ring_items
-        for it in active:
+        for it in self._ring_items:
             it.setVisible(visible)
 
     def show_rings_checked(self) -> bool:
         return self._show_rings
-
-    def set_corrected(self, checked: bool):
-        self._corrected = checked
-        if self.result is None:
-            return
-        if checked:
-            for item in self._ring_items:
-                item.setVisible(False)
-            if not self._corrected_ring_items:
-                self._draw_corrected_rings(_predict_ring_radii(self.result))
-            for item in self._corrected_ring_items:
-                item.setVisible(self._show_rings)
-        else:
-            for item in self._corrected_ring_items:
-                item.setVisible(False)
-            for item in self._ring_items:
-                item.setVisible(self._show_rings)
-
-    def corrected_checked(self) -> bool:
-        return self._corrected
 
     def _clear_rings(self):
         if self._viewer is not None:
@@ -309,55 +285,47 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
                 self._viewer._iv.removeItem(it)
         self._ring_items = []
 
-    def _clear_corrected_rings(self):
-        if self._viewer is not None:
-            for it in self._corrected_ring_items:
-                self._viewer._iv.removeItem(it)
-        self._corrected_ring_items = []
-
     def _redraw_rings(self):
         """(Re)draw this panel's fitted rings onto whichever viewer is
         currently bound — called after a fit completes, and again on
-        ``bind_viewer`` so switching back to this panel restores them."""
+        ``bind_viewer`` so switching back to this panel restores them.
+
+        Always through the full forward model — this panel's fitted tilts and
+        refined distortion both applied — matching the single-detector tab,
+        which dropped its "Corrected" tick for the same reason: a ring overlay
+        that has to be switched into correctness is one most users read in its
+        wrong state. ``ring_xy_corrected`` reduces exactly to a circle about
+        the beam centre when there is neither tilt nor distortion to apply.
+        """
         self._clear_rings()
-        self._clear_corrected_rings()
         if self.result is None or self._viewer is None:
             return
         result = self.result
-        radii = _predict_ring_radii(result)
-        th = np.linspace(0, 2 * math.pi, 512)
+        pxY = float(result.pxY)
+        pxZ = float(getattr(result, "pxZ", 0.0) or pxY)
+        rho_d = distortion_rho_d_um(getattr(result, "NrPixelsY", 0),
+                                    getattr(result, "NrPixelsZ", 0),
+                                    result.BC_y, result.BC_z, pxY, pxZ)
+        dist = dict(getattr(result, "distortion", {}) or {})
         pen = pg.mkPen("lime", width=1.2)
         max_r = max(result.NrPixelsY, result.NrPixelsZ)
-        for r in radii:
-            if 0 < r < max_r:
-                item = pg.PlotDataItem(result.BC_y + r * np.cos(th),
-                                       result.BC_z + r * np.sin(th), pen=pen)
-                item.setVisible(self._show_rings and not self._corrected)
-                self._viewer._iv.addItem(item); self._ring_items.append(item)
-        bc = pg.ScatterPlotItem([result.BC_y], [result.BC_z], symbol="o", size=10,
-                                pen=pg.mkPen("yellow", width=2), brush=pg.mkBrush("red"))
-        bc.setVisible(self._show_rings and not self._corrected)
-        self._viewer._iv.addItem(bc); self._ring_items.append(bc)
-        if self._corrected:
-            self._draw_corrected_rings(radii)
-
-    def _draw_corrected_rings(self, radii_px):
-        if self.result is None or self._viewer is None:
-            return
-        result = self.result
-        self._clear_corrected_rings()
-        pen = pg.mkPen("lime", width=1.2)
-        for r in radii_px:
+        for r in (r for r in _predict_ring_radii(result) if 0 < r < max_r):
             try:
-                two_theta_deg = math.degrees(math.atan(r * result.pxY / result.Lsd))
-                ys, zs = tilted_ring_xy(two_theta_deg, result.tx, result.ty, result.tz,
-                                        result.Lsd, result.BC_y, result.BC_z,
-                                        result.pxY, result.pxZ)
+                two_theta_deg = math.degrees(math.atan(r * pxY / float(result.Lsd)))
+                ys, zs = ring_xy_corrected(
+                    two_theta_deg, result.tx, result.ty, result.tz,
+                    float(result.Lsd), result.BC_y, result.BC_z, pxY, pxZ,
+                    distortion=dist, rho_d_um=rho_d)
             except Exception:
+                self._log(f"ge{self.panel_number}: could not project ring at R={r:.1f} px")
                 continue
             item = pg.PlotDataItem(ys, zs, pen=pen)
             item.setVisible(self._show_rings)
-            self._viewer._iv.addItem(item); self._corrected_ring_items.append(item)
+            self._viewer._iv.addItem(item); self._ring_items.append(item)
+        bc = pg.ScatterPlotItem([result.BC_y], [result.BC_z], symbol="o", size=10,
+                                pen=pg.mkPen("yellow", width=2), brush=pg.mkBrush("red"))
+        bc.setVisible(self._show_rings)
+        self._viewer._iv.addItem(bc); self._ring_items.append(bc)
 
     def on_result(self, result):
         """A fresh fitted result for this panel — store it, refresh seed

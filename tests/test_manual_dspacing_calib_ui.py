@@ -485,11 +485,13 @@ def test_limits_button_is_manual_fit_only(app):
     tab = tab_calibrate_mod.CalibrationTab()
 
     tab._cal.setCurrentIndex(tab._cal.findText("CeO2"))
-    assert all(w.isHidden() for w in tab._limit_cells)
+    assert tab._limits_host.isHidden()
+    assert not tab._limits_na_lbl.isHidden()   # says *why* it is gone
     assert not tab._dist_row.isHidden()
 
     tab._cal.setCurrentIndex(tab._cal.findText("AgBH (silver behenate)"))
-    assert not any(w.isHidden() for w in tab._limit_cells)
+    assert not tab._limits_host.isHidden()
+    assert tab._limits_na_lbl.isHidden()
     assert tab._dist_row.isHidden()
 
 
@@ -651,7 +653,6 @@ def test_ring_overlay_is_driven_by_the_seed_card(app):
     tab._seed_lsd.setValue(13500.0)
     tab._seed_bcy.setValue(129.0); tab._seed_bcz.setValue(124.0)
     tab._show_rings_check.setChecked(True)
-    tab._corrected_check.setChecked(True)
     tab._feedback_check.setChecked(True)
 
     untilted = _ring_extents(tab)
@@ -710,46 +711,166 @@ def test_ring_labels_land_on_the_visible_arc(app):
     assert _ring_label_pos(ys, zs, shape) is None
 
 
-def test_seed_can_be_accepted_as_the_calibration_without_a_fit(app, monkeypatch):
-    """A hand-matched seed is a usable calibration.
 
-    Every export is gated on a result, and only a fit produced one — so a
-    geometry dialled in until the simulated rings sat on the measured ones
-    could not be sent anywhere. Accepting the seed publishes it as-is, and
-    says so: nothing is refined, so every geometry row reads "(fixed)" and
-    the Fit button stays gated on picks it still does not have.
-    """
+
+# ── Calibrant-driven controls, compact Refine card, accurate rings ────────
+
+
+def test_dspacing_pick_controls_only_appear_for_a_dspacing_calibrant(app):
+    """"Pick d-spacing pts" and its "Ring #" selector tag a point with the ring
+    it belongs to — a question only a d-spacing-list calibrant asks. Leaving
+    them on the toolbar for CeO2 offered a workflow that leads nowhere."""
     import midas_gui.tab_calibrate as tab_calibrate_mod
-    monkeypatch.setattr(tab_calibrate_mod, "IntegrationWorker",
-                        _FakeIntegrationWorker)
+    tab = tab_calibrate_mod.CalibrationTab()
+    view = tab._img_view
+    controls = (view._pick_dsp_btn, view._dsp_ring_lbl, view._dsp_ring_spin)
+
+    tab._cal.setCurrentIndex(tab._cal.findText("CeO2"))
+    assert all(w.isHidden() for w in controls)
+
+    tab._cal.setCurrentIndex(tab._cal.findText("AgBH (silver behenate)"))
+    assert not any(w.isHidden() for w in controls)
+
+    tab._cal.setCurrentIndex(tab._cal.findText("Custom d-spacings…"))
+    assert not any(w.isHidden() for w in controls)
+
+
+def test_leaving_a_dspacing_calibrant_cancels_an_active_pick_mode(app):
+    """Hiding the button while it is checked would strand the viewer in
+    PICK_DSPACING with no way to leave it — the next click on a CeO2 image
+    would silently add a d-spacing point."""
+    import midas_gui.tab_calibrate as tab_calibrate_mod
     tab = tab_calibrate_mod.CalibrationTab()
     tab._cal.setCurrentIndex(tab._cal.findText("AgBH (silver behenate)"))
-    tab._wl.setValue(0.17220)
-    tab._pxY.setValue(55.0)
-    tab._seed_lsd.setValue(13500.0)          # mm in the UI, µm in the result
-    tab._seed_bcy.setValue(129.0)
-    tab._seed_bcz.setValue(124.0)
+    tab._img_view._pick_dsp_btn.setChecked(True)
+    assert tab._img_view._pick_mode == tab._img_view.PICK_DSPACING
 
-    assert not tab._run_btn.isEnabled()      # no picks
-    assert not tab._save_json_btn.isEnabled()
-    assert not tab._save_ps_btn.isEnabled()
-    assert not tab._to_view_btn.isEnabled()
+    tab._cal.setCurrentIndex(tab._cal.findText("CeO2"))
+    assert not tab._img_view._pick_dsp_btn.isChecked()
+    assert tab._img_view._pick_mode != tab._img_view.PICK_DSPACING
 
-    tab._accept_seed_btn.click()
 
-    assert tab._result is not None
-    assert tab._result.Lsd == pytest.approx(13500.0 * 1000.0)
-    assert tab._result.BC_y == pytest.approx(129.0)
-    assert tab._result.BC_z == pytest.approx(124.0)
-    assert tab._result.wavelength_A == pytest.approx(0.17220)
-    assert tab._result.fit_sigma is None     # nothing was measured
-    assert tab._save_json_btn.isEnabled()
-    assert tab._save_ps_btn.isEnabled()
-    assert tab._to_view_btn.isEnabled()
-    # Still no picks, so the fit itself stays unavailable.
-    assert not tab._run_btn.isEnabled()
+def _grid_rows(grid):
+    """{row: [widget, …]} for a QGridLayout, in column order."""
+    rows = {}
+    for i in range(grid.count()):
+        it = grid.itemAt(i)
+        r, c, _, _ = grid.getItemPosition(i)
+        w = it.widget()
+        if w is not None:
+            rows.setdefault(r, []).append((c, w))
+    return {r: [w for _c, w in sorted(cells)] for r, cells in rows.items()}
 
-    labels = _param_grid_labels(tab)
-    for key in ("Lsd", "BC", "tx", "ty", "tz", "Wavelength"):
-        assert any(lbl.startswith(key) and "(fixed)" in lbl for lbl in labels), key
-    assert "no fit was run" in tab._log.toPlainText()
+
+def test_refine_card_lays_out_as_three_rows(app):
+    """Lsd/BC/Wavelength, then the tilts, then the two whole-image
+    refinements — instead of one control per line."""
+    import midas_gui.tab_calibrate as tab_calibrate_mod
+    tab = tab_calibrate_mod.CalibrationTab()
+    rows = _grid_rows(tab._refine_grid)
+    assert len(rows) == 3, f"expected 3 rows, got {sorted(rows)}"
+    assert rows[0] == [tab._ref_lsd, tab._ref_bc, tab._ref_wl]
+    assert rows[1] == [tab._ref_ty, tab._ref_tz, tab._ref_tx]
+    assert rows[2] == [tab._dist_row, tab._build_rc]
+
+
+def test_seed_and_advanced_cards_pack_three_controls_per_row(app):
+    """BC_y/BC_z/Lsd then tx/ty/tz; E-M iters/LM iters/Device on one line."""
+    import midas_gui.tab_calibrate as tab_calibrate_mod
+    tab = tab_calibrate_mod.CalibrationTab()
+
+    def _row_of(w):
+        """Grid row of ``w`` within whichever S.Form grid holds it. The Form is
+        nested inside its card's QVBoxLayout via addLayout, so it is not
+        reachable from the parent widget's layout without descending."""
+        def walk(layout):
+            for i in range(layout.count()):
+                item = layout.itemAt(i)
+                if item.widget() is w and isinstance(layout, QtWidgets.QGridLayout):
+                    return layout.getItemPosition(i)[0]
+                sub = item.layout()
+                if sub is not None:
+                    found = walk(sub)
+                    if found is not None:
+                        return found
+            return None
+        row = walk(w.parentWidget().layout())
+        assert row is not None, f"{w} not found in any grid under its parent"
+        return row
+
+    assert _row_of(tab._seed_bcy) == _row_of(tab._seed_bcz) == _row_of(tab._seed_lsd)
+    assert _row_of(tab._seed_tx) == _row_of(tab._seed_ty) == _row_of(tab._seed_tz)
+    assert _row_of(tab._seed_bcy) != _row_of(tab._seed_tx)
+    assert _row_of(tab._n_iter) == _row_of(tab._lm_iter) == _row_of(tab._device)
+
+
+def test_rings_account_for_distortion_with_no_toggle_to_find(app):
+    """The overlay is always the full forward model. Previously the honest
+    rings lived behind a "Corrected" tick that defaulted off — and even ticked,
+    it applied tilt only, so a refined-distortion calibration still drew rings
+    that sat off the measured ones.
+    """
+    import numpy as np
+    import midas_gui.tab_calibrate as tab_calibrate_mod
+
+    tab = tab_calibrate_mod.CalibrationTab()
+    assert not hasattr(tab, "_corrected_check")
+    tab._show_rings_check.setChecked(True)
+
+    common = dict(Lsd=1_000_000.0, BC_y=1024.0, BC_z=1024.0, tx=0.0, ty=0.0, tz=0.0,
+                  pxY=200.0, pxZ=200.0, NrPixelsY=2048, NrPixelsZ=2048,
+                  wavelength_A=0.1729, _calibrant_name="CeO2", im_trans=[])
+
+    def _curves(**over):
+        tab._result = None
+        tab._manual_seed_check.setChecked(False)
+        tab._draw_rings(SimpleNamespace(**dict(common, **over)))
+        return [it.getData() for it in tab._ring_items
+                if it.getData()[0] is not None and len(it.getData()[0]) > 10]
+
+    plain = _curves(distortion={})
+    assert plain, "a flat, undistorted geometry should still draw rings"
+
+    distorted = _curves(distortion={"iso_R2": 5e-3, "a2": 4e-3, "phi2": 30.0})
+    assert len(distorted) == len(plain)
+    shifts = [float(np.abs(np.hypot(dy - 1024.0, dz - 1024.0)
+                           - np.hypot(py - 1024.0, pz - 1024.0)).max())
+              for (py, pz), (dy, dz) in zip(plain, distorted)]
+    assert max(shifts) > 1.0, (
+        f"distortion moved the drawn rings by at most {max(shifts):.3f} px — "
+        "it is not reaching the overlay")
+
+    assert "distortion applied" in tab._ring_status.text()
+
+
+def test_ring_status_flags_the_residual_map_it_cannot_draw(app):
+    """The one term the overlay leaves out says so, rather than going missing."""
+    import midas_gui.tab_calibrate as tab_calibrate_mod
+    tab = tab_calibrate_mod.CalibrationTab()
+    tab._show_rings_check.setChecked(True)
+    tab._manual_seed_check.setChecked(False)
+    tab._draw_rings(SimpleNamespace(
+        Lsd=1_000_000.0, BC_y=1024.0, BC_z=1024.0, tx=0.0, ty=0.4, tz=0.0,
+        pxY=200.0, pxZ=200.0, NrPixelsY=2048, NrPixelsZ=2048, wavelength_A=0.1729,
+        distortion={}, _calibrant_name="CeO2", im_trans=[],
+        residual_corr_bin_path="/tmp/resid.bin"))
+    assert "tilt applied" in tab._ring_status.text()
+    assert "residual map not drawn" in tab._ring_status.text()
+
+
+def test_reloaded_result_keeps_its_distortion_for_the_seed_overlay(app):
+    """With "Use manual seed" on, the overlay is driven by the seed namespace —
+    which has no distortion widgets to be restored from project fields. The
+    coefficients have to be carried across explicitly or a reloaded project
+    quietly draws the tilt-only rings."""
+    import midas_gui.tab_calibrate as tab_calibrate_mod
+    tab = tab_calibrate_mod.CalibrationTab()
+    assert tab._seed_dist == {}
+    tab._display_stored_result(SimpleNamespace(
+        Lsd=1_000_000.0, BC_y=1024.0, BC_z=1024.0, tx=0.0, ty=0.0, tz=0.0,
+        pxY=200.0, pxZ=200.0, NrPixelsY=2048, NrPixelsZ=2048, wavelength_A=0.1729,
+        distortion={"iso_R2": 5e-3}, _calibrant_name="CeO2", im_trans=[],
+        post_residual_strain_uE=None), reintegrate_if_missing=False)
+    assert tab._seed_dist == {"iso_R2": 5e-3}
+    assert tab._seed_ring_namespace() is None or \
+        tab._seed_ring_namespace().distortion == {"iso_R2": 5e-3}
