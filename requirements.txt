@@ -58,22 +58,48 @@ pvapy==5.4.1
 # and re-run against 0.7.0 gave max|deltaR| = 0.0000 px. All requires-dist
 # checked compatible with the numpy 1.26.4 / torch 2.4.0 / numba 0.59.1 pins
 # above (numpy>=1.22, torch>=2.1, numba>=0.59 across the bumped set).
-midas-calibrate-v2==0.11.0
-midas-integrate-v2==0.7.0
+# 2026-09-08: bumped to the then-current PyPI latest of each set member
+# (calibrate-v2 0.11.0->0.13.0, integrate 0.7.0->0.8.0, integrate-v2
+# 0.7.0->0.7.1, hkls 0.9.0->0.10.0, params 0.11.1->0.12.0, pdf 0.2.0->0.3.0);
+# midas-pdf 0.3.0 also introduced the midas-saxs -> midas-transforms ->
+# midas-stress transitive chain now pinned below. That bump reached
+# pyproject.toml and environment.yml but NOT this file, which sat two bumps
+# behind until 2026-09-11 -- so `pip install -r requirements.txt` and
+# `pip install .` installed different backends. Keep all three in sync.
+#
+# 2026-09-11: calibrate-v2 0.13.0->0.17.0, hkls 0.10.0->0.11.0, stress
+# 0.13.0->0.14.0. calibrate-v2 is upstream implementing this repo's filed
+# issue (.context/issue_draft_calibrate_v2_tilt_imtrans.md): initial_tx/ty/tz
+# on calibrate(), CalibrationSpec.im_trans reaching every pipeline through one
+# shared io/transforms.apply_im_trans, im_trans recorded on the result and
+# carried into IntegrationSpec.TransOpt, and first_time_calibrate gaining
+# both. 0.15.0 documents a double-transform hazard for callers that
+# pre-transform their image; midas_gui is unaffected (its specs come from
+# calib.build_v1_params, which sets no ImTransOpt, so spec.im_trans is () and
+# the pipelines leave its arrays alone). Full rationale in pyproject.toml.
+# numpy 1.26.4 / torch 2.4.0 / numba 0.59.1 / zarr<3 all unchanged.
+midas-calibrate-v2==0.17.0
+midas-integrate-v2==0.7.1
 midas-calibrate==0.5.0
-midas-hkls==0.9.0
+midas-hkls==0.11.0
 midas-distortion==0.2.0
-midas-pdf==0.2.0                # Faber-Ziman PDF reduction used by the PDF tab
+midas-pdf==0.3.0                # Faber-Ziman PDF reduction used by the PDF tab
 
 # ── Transitive MIDAS deps pinned explicitly (pulled in by midas-calibrate-v2 /
 #    midas-pdf but not imported by midas_gui directly) — pinned for
 #    reproducible, verified-working installs rather than leaving them to float ─
-midas-integrate==0.7.0
+midas-integrate==0.8.0
 midas-peakfit==0.6.0
 midas-zipper==0.2.1
-midas-params==0.11.1            # new shared params-file registry/validator dep, first
+midas-params==0.12.0            # new shared params-file registry/validator dep, first
                                  # required (>=0.9.0) by midas-calibrate/-v2, midas-hkls,
                                  # midas-integrate-v2 and midas-pdf as of this pin bump
+# Transitive chain introduced by midas-pdf 0.3.0: midas-saxs>=0.1.0 ->
+# midas-transforms>=0.10.0 -> midas-stress>=0.11.0. Not imported by midas_gui
+# directly; pinned for the same reproducibility reason as the rest of the block.
+midas-saxs==0.1.1
+midas-transforms==0.10.0
+midas-stress==0.14.0
 zarr==2.18.7                    # required by midas-integrate/-peakfit/-zipper; was already
                                  # pulled in transitively before this pin bump (unpinned), so
                                  # this just makes an existing dependency explicit

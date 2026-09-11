@@ -1,8 +1,8 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-09-10 (Data Viewer: Accurate radial pipeline, cake R/η
-bins, one-shot vs. live ring simulation, two-way geometry hand-off)_
+_Last updated: 2026-09-11 (MIDAS backend bump to PyPI latest; the filed
+tilt/im_trans upstream issue came back fixed)_
 
 ## Now working on
 
@@ -28,6 +28,49 @@ Open follow-ups, none blocking:
   `git fetch origin 'refs/pull/*/head:refs/remotes/origin/pr/*'`.
 
 ## Recently completed
+
+**2026-09-11 — MIDAS backends bumped to current PyPI latest; the tilt/im_trans
+issue this repo filed came back fixed.** `midas-calibrate-v2` 0.13.0→**0.17.0**,
+`midas-hkls` 0.10.0→0.11.0, `midas-stress` 0.13.0→0.14.0 (the rest of the set was
+already latest; nothing else moves — numpy/torch/numba/zarr untouched). The
+calibrate-v2 jump is upstream implementing
+`.context/issue_draft_calibrate_v2_tilt_imtrans.md` nearly whole: `initial_tx/ty/tz`
+on `calibrate()`, `CalibrationSpec.im_trans` reaching every pipeline via one shared
+`io/transforms.apply_im_trans`, `im_trans` recorded on the result and carried into
+`IntegrationSpec.TransOpt`, and `first_time_calibrate` gaining both. **ROADMAP P3-1
+and P3-4 closed**; P3-2/P3-3 re-checked, still open.
+- **`calib._prep_transformed()` deliberately kept.** 0.15.0 introduces a silent
+  double-transform for callers that pre-transform, but the GUI is not exposed: its
+  specs come from `build_v1_params`, which sets no `ImTransOpt`, so `spec.im_trans`
+  is `()` and every pipeline's `if spec.im_trans:` guard is false. Verified, plus
+  `apply_im_trans` proven bit-identical to `helpers._apply_im_trans` on all 8 opcode
+  combos. Removing the workaround is optional cleanup and must be done whole (delete
+  `_prep_transformed` **and** set `v1.extra["ImTransOpt"]` in the same change) — see
+  DECISIONS 2026-09-11.
+- **Behaviour change to know about:** `initial_tx/ty/tz`, which the one_shot branch
+  has always passed speculatively and `_supported_kwargs` silently dropped, now take
+  effect. Also inherited: RhoD µm unit fixes, `use_diplib` defaulting False,
+  distortion phase bounds ±90→±180.
+- **`requirements.txt` was two bumps stale** (the 2026-09-08 bump never reached it),
+  so it and `pip install .` installed different backends. Regenerated in sync; all
+  three pin files now cross-checked against the installed env.
+- **`first_time` now gets the transform (same session).** That branch had never
+  passed one — a first_time calibration on a flipped detector ran in the wrong
+  frame, silently. It now forwards the codes and hands over the RAW frame (the
+  backend flips image/dark/panel_mask and re-derives `n_pixels_y/z`, so it must not
+  also pre-flip). Fixing it exposed a wider bug: `workers.CalibrationWorker` read
+  `NZ, NY = image.shape` off the **raw** image, so on a non-square detector with a
+  transpose every non-plain-one_shot mode recorded `NrPixelsY/Z` for a detector it
+  never fitted — now `calib.effective_pixel_counts()`. New
+  `tests/test_first_time_im_trans.py` (19 tests, mutation-checked).
+  **Still open:** first_time is not passed a *tilt* seed, which 0.17.0 now accepts
+  (`initial_tx` + `tilt_prior_deg`→ty/tz); `test_calib_tilt_seed.py`'s "at any
+  backend version" wording is stale.
+- **Verified:** 43-file per-file sweep byte-identical before/after (same one
+  pre-existing `test_smoke` local-config failure, 10/10 under a clean `HOME`); all 46
+  modules import. One sweep run had `test_live_stream.py` exit 139 — the documented
+  pyqtgraph teardown flake, not this work (5/5 green on re-run; that file imports
+  neither changed module).
 
 **2026-09-10 — Data Viewer: accurate integration on demand,
 rings that stay put, and a two-way geometry hand-off.** Six requested changes:
@@ -87,63 +130,20 @@ calibration result, and `.h5` appended in Save Project As.
 `gui_documentation.md` §5 gained a *Non-crystalline calibrants* section and
 an expanded *Refine flags*.
 
-**2026-09-04 (`549e96f`) — PR #7's remaining 16 commits merged, `main`
-pushed, PR closed.** Second half of Jun-Sang Park's PR (+1982/−285 over 23
-files): Batch Integrate output-folder auto-suggest + Exp ID + writability
-preflight, recursive stem-match search, single-file HDF5 honouring Combine
-sub-frames, dark-file skipping / frame-range autofill / HDF5-stack hang fix,
-Detector-view eta-spoke + tilted-ring-seam fixes, viewer display settings
-persisted across all tabs, File-menu Open Last Project/Quit, worker-exception
-logging, job-queue cwd pinning, `QUESTIONS_FOR_COLLEAGUES.md`.
-- **Resolved on merge:** `workers.py` (kept their per-format `csv/`/`h5/`/
-  `zarr/` subfolders, but re-applied our collision-safe stem allocation, which
-  their branch had reverted by branching before `092fbba`; `frame_output_base`
-  split into `frame_output_stem` + path wrapper so a frame allocates its stem
-  once, not once per format); taught the parser their new
-  `.frame_<start>_<end>` chunk suffix; `.context/DECISIONS.md` interleaved.
-- **Silent break git couldn't see:** their `zarr_cake.py` retirement (correct —
-  the old schema wrote `/IntegrationResult/FrameNr_<i>`, which GSAS-II never
-  reads) auto-merged clean but left `tests/test_zarr_cake.py` importing a
-  deleted module. Removed it, rewired `test_batch_zarr_output.py` onto the new
-  one-zarr-per-frame layout, rebuilt the `test_provenance` fixture.
-- **Checked, not a regression:** `tilted_ring_xy`'s `endpoint=True` change
-  shifted the η sampling grid and tripped 2 `test_helpers` tests; zero-tilt
-  reduction to a plain circle still holds to 1.7e-13. Expectations updated,
-  closure property newly pinned.
-- **Verified:** per-file suite identical to the pre-merge baseline — same 5
-  files failing with the same counts, no new failures; all 42 modules import.
-
-**2026-09-02/03 (`092fbba`, `46e0fec`) — Jun-Sang Park's (`junspark`) PR #7
-("Add Strain Cake tab with azimuth strain map and lab-frame axes"), first 20
-commits, reviewed, fixed, covered by tests, and fast-forward-merged into
-local `main`.** (PR still open upstream; see "Now working on".) 20 commits, +3492/−295 over 19 files, 6 new modules
-(`job_queue.py`, `peak_fit_panel.py`, `provenance.py`, `zarr_cake.py`,
-`cake_params.py`, `batch_cli.py`), shipped with **zero test changes**.
-Reviewed against a per-file baseline of `main` first (essential — this repo
-has 4 permanently-failing files, see the crash blocker below); everything
-matched baseline except two files, both tripped by one intentional but
-undeclared behaviour change.
-- **Found + fixed: silent frame loss.** The PR moved per-frame profile
-  output to a `<froot>_<NNNNNN><tag>` convention (matching
-  mpe_wf_saxs_waxs) via a new `workers.froot_and_frame_num`, which
-  normalises zero-padding — so `scan_1`/`scan_01`/`scan_001` all became
-  `scan_000001.csv`: 3 frames in, 1 file out. New
-  `workers.frame_output_base()` now owns naming and de-duplicates per run;
-  all three call sites (`BatchWorker`, `FolderMonitorWorker`,
-  `write_all_profiles`) route through it. Also taught the parser the
-  `_c<NN>` chunk ids the PR's own `_HDF5StackGlobSource` mints.
-- **+108 tests** across 7 new files (`test_frame_naming`,
-  `test_provenance`, `test_zarr_cake`, `test_batch_zarr_output`,
-  `test_strain_cake`, `test_calib_tilt_seed`, `test_set_raw_frame`) plus 15
-  added to `test_helpers.py`; the two stale tests updated (the writer was
-  right, only their expectations were wrong).
-- **Verified:** full per-file suite on merged `main` is identical to the
-  pre-PR baseline — same 4 pre-existing failures, no new ones. No new
-  third-party deps (matplotlib/zarr/numcodecs already pinned); all 43
-  modules import; one new pyflakes warning only (unused local `spec`,
-  `tab_batch.py:972`). **Still untested** (no coverage added, out of
-  scope): `job_queue.py`, `peak_fit_panel.py`, `batch_cli.py` — tracked in
-  ROADMAP.md.
+**2026-09-04 (`549e96f`) + 2026-09-02/03 (`092fbba`, `46e0fec`) — Jun-Sang Park's
+(`junspark`) PR #7 reviewed, fixed, covered by tests and merged in two halves
+(36 commits, ~+5500/−580 over ~30 files); PR closed.** Strain Cake tab, job
+queue, peak-fit panel, provenance, per-frame zarr cake, batch CLI, Batch
+Integrate output-folder/Exp-ID/preflight work, HDF5 stack fixes, viewer display
+persistence. Shipped with zero test changes; +108 tests added across 7 new files
+plus additions to `test_helpers.py`. Two real regressions caught only by holding
+a per-file baseline first: **silent frame loss** (the PR's zero-padding
+normalisation collapsed `scan_1`/`scan_01`/`scan_001` onto one output file — now
+owned by `workers.frame_output_base()`/`frame_output_stem`, de-duplicated per
+run) and a **stale import git couldn't see** (`zarr_cake.py`'s correct
+retirement auto-merged clean but left `tests/test_zarr_cake.py` importing a
+deleted module). Full detail in DECISIONS.md and
+`documentation/development_history.md`.
 
 _(Older entries — `fd7f67a` Workstation provenance + Hydra Overall-Cake
 per-panel `tx` rotation fix + Batch Integrate Rmin/Rmax + Detector-view
@@ -175,9 +175,10 @@ Flip-Z/Multi-panel fix — trimmed here; full detail in
   midas_calibrate_v2` / `from midas_calibrate_v2.forward.panels import
   PanelLayout` / `pip show midas_calibrate_v2` directly in their env to get
   the untruncated traceback + version — response not yet received.
-- **New follow-ups (tracked in ROADMAP.md "Package-side fixes" P3-1/P3-2/P3-3
-  and the Texture per-tab item):** (1) several `midas_calibrate_v2`
-  pipelines have no native `im_trans` param — GUI already works around it;
+- **New follow-ups (tracked in ROADMAP.md "Package-side fixes" P3-2/P3-3
+  and the Texture per-tab item):** (1) ~~several `midas_calibrate_v2`
+  pipelines have no native `im_trans` param~~ — fixed upstream in 0.15.0,
+  see 2026-09-11 above;
   (2) `*BinGeometry.from_spec()` has no `apply_trans_opt` hook for masks —
   GUI must keep pre-flipping masks in Python; (3) Texture tab's
   `PoleFigureWorker` has a pre-existing, unrelated mask/ImTransOpt bug;

@@ -8,6 +8,100 @@ file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this
 date for the full uncondensed entries if ever needed._
 
+## 2026-09-11 — MIDAS backend bump to current PyPI latest; the tilt/im_trans issue came back fixed
+
+**What moved:** `midas-calibrate-v2` 0.13.0→**0.17.0**, `midas-hkls`
+0.10.0→0.11.0, `midas-stress` 0.13.0→0.14.0. Everything else in the MIDAS set
+was already at PyPI latest. pip confirmed those three are the only packages
+that move — numpy 1.26.4 / torch 2.4.0 / numba 0.59.1 / zarr<3 all unchanged.
+
+**Why it matters more than a version bump:** the four calibrate-v2 releases
+(0.14–0.17, all 2026-09-10) are upstream implementing
+`.context/issue_draft_calibrate_v2_tilt_imtrans.md` — the issue this repo filed
+on 2026-09-08 — nearly in full: `initial_tx/ty/tz` on `calibrate()` (A),
+`CalibrationSpec.im_trans` applied by every pipeline through one shared
+`io/transforms.apply_im_trans` (B1), `im_trans` recorded on the result and
+carried into `IntegrationSpec.TransOpt` (C), and `first_time_calibrate` gaining
+both (D). `refine_tx` was declined on gauge-degeneracy grounds. ROADMAP P3-1
+and P3-4 are closed; P3-2 and P3-3 were re-checked and still stand.
+
+**The decision that needed making — leave `calib._prep_transformed()` alone.**
+Upstream flags a real behaviour change in 0.15.0: a caller that pre-transforms
+its image *and* lets the pipeline see an `im_trans` now applies the transform
+twice, and a double flip is silent. It would have been easy to read that as
+"the GUI must stop pre-transforming" and rip the workaround out as part of the
+bump. That would have been wrong on both counts:
+
+* The GUI is *not* exposed. Every pipeline gates on `if spec.im_trans:`; the
+  spec comes from `spec_from_v1_params`, which reads `ImTransOpt` off
+  `v1.extra`; and `calib.build_v1_params` never sets it. So `spec.im_trans` is
+  `()`, the guard is false, and the pre-flip lands exactly once. Verified
+  directly, not inferred — and `apply_im_trans` was checked bit-identical to
+  `helpers._apply_im_trans` on all 8 opcode combinations, so the two
+  implementations can coexist safely.
+* Removing the workaround is optional cleanup, not a fix, and it is the one
+  change that must not be made half-way. Doing it means deleting
+  `_prep_transformed` **and** teaching `build_v1_params` to set
+  `v1.extra["ImTransOpt"]` in the same commit; either half alone is a silent
+  double flip or a silent no flip. Deliberately left for its own change, with
+  its own test, rather than smuggled into a dependency bump.
+
+**What does change behaviourally:** `calib.run_pipeline`'s one_shot branch has
+always passed `initial_tx/ty/tz` speculatively through `_supported_kwargs`,
+which silently dropped them on ≤0.13.0 with a printed note. They now take
+effect — which is what that code always intended, and why the issue was filed.
+Also inherited: RhoD unit fixes (it is µm; three pipelines fell back to a
+pixel-valued `MaxRingRad`), `make_seed(use_diplib=)` now defaulting to False
+(the macOS segfault `midas_gui` already passed False for), and distortion phase
+bounds widened ±90→±180 so a phase near the seam stops railing.
+
+**Also fixed here: `requirements.txt` had silently fallen two bumps behind.**
+The 2026-09-08 bump reached `pyproject.toml` and `environment.yml` but not
+`requirements.txt`, so `pip install -r requirements.txt` and `pip install .`
+installed *different* backend versions (calibrate-v2 0.11.0 vs 0.13.0, and the
+whole midas-saxs→transforms→stress chain missing). Now regenerated in sync, and
+a cross-check of all three files against the installed env is part of the
+verification below. Worth a standing habit: all three files move together.
+
+**Follow-up taken in the same session — `first_time` now gets the transform,
+and a wider bug fell out of it.** `run_pipeline`'s `first_time` branch had never
+passed a transform (no entry point accepted one before 0.15.0), so a first_time
+calibration on a flipped detector ran in the wrong frame and returned a
+confident wrong geometry with nothing in the output to say so. It now forwards
+the codes and hands over the RAW frame, because the backend flips
+image/dark/panel_mask itself and re-derives `n_pixels_y/z` — so this branch must
+*not* also pre-flip. Passed unguarded rather than through `_supported_kwargs`
+deliberately: on too-old a backend a loud `TypeError` is the right outcome,
+since silently dropping the kwarg is precisely the bug being fixed.
+
+Wiring that up exposed a second bug the first one was hiding.
+`workers.CalibrationWorker` took `NZ, NY = image.shape` off the **raw** image and
+handed it to `normalize_result`, which uses it for every mode except plain
+one_shot (that one returns the package's own result untouched). A transpose
+swaps Y and Z, so on a **non-square** detector first_time, four_stage, bayesian,
+joint and the partial-distortion re-route all recorded `NrPixelsY`/`NrPixelsZ`
+for a detector they never fitted — and every downstream consumer (integration
+spec, paramstest export, ring overlays) inherited it. Fixed centrally with
+`calib.effective_pixel_counts()` rather than only in the first_time branch:
+fixing one caller of a shared helper and leaving the other four wrong would have
+been arbitrary, and the correct value is the same computation in all five.
+
+Covered by `tests/test_first_time_im_trans.py` (19 tests). The tests were
+mutation-checked, not just observed green: reverting the forwarding fails
+`test_im_trans_is_forwarded` + `test_multiple_codes_are_forwarded_in_order`, and
+adding a pre-flip on top fails `test_image_is_handed_over_raw_not_pre_flipped`.
+`effective_pixel_counts` is asserted against the backend's own `apply_im_trans`
+across 11 opcode combinations rather than against a re-derivation.
+
+**Verified:** per-file test sweep (43 files) byte-identical before and after the
+upgrade — same single pre-existing failure (`test_smoke::test_app_builds_offscreen`,
+the known stale-local-config artifact; 10/10 under `HOME=$(mktemp -d)`), no new
+ones, plus the new file. All 46 `midas_gui` modules import. The issue draft's own
+runnable repro re-run against 0.17.0, now asserting the gaps are closed rather
+than open. (One sweep run showed `test_live_stream.py` exiting 139 — the
+documented non-deterministic pyqtgraph teardown crash, not this change: that file
+imports only `widgets`/`constants`, and it passed 5/5 on re-run.)
+
 ## 2026-09-10 — Data Viewer: accurate integration on demand, and rings that stay where you put them
 
 Six Data Viewer changes landed together. Four are UI placement; two encode a

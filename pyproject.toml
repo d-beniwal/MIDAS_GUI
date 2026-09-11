@@ -69,10 +69,43 @@ dependencies = [
     # 0.2.0->0.3.0). No change to the numpy 1.26.4 / torch 2.4.0 / numba
     # 0.59.1 / zarr<3 constraints -- checked against every requires-dist
     # before upgrading.
-    "midas-calibrate-v2==0.13.0",
+    # 2026-09-11: calibrate-v2 0.13.0->0.17.0, hkls 0.10.0->0.11.0, stress
+    # 0.13.0->0.14.0 (the rest of the set is already at PyPI latest). The
+    # calibrate-v2 jump is upstream implementing this repo's own filed issue,
+    # `.context/issue_draft_calibrate_v2_tilt_imtrans.md`, essentially entire:
+    # fix A (`initial_tx/ty/tz` on `calibrate()`), B1 (`CalibrationSpec.
+    # im_trans` + one shared `io/transforms.apply_im_trans`, reaching every
+    # pipeline), C (`AutoCalibrationResult.im_trans`, carried into
+    # `IntegrationSpec.TransOpt` by `spec_from_calibration_result`) and D
+    # (`first_time_calibrate` gains both). Only `refine_tx` was declined, with
+    # a gauge-degeneracy argument now written into `forward/geometry.py`.
+    #
+    # Upstream flags a BEHAVIOUR CHANGE in 0.15.0: a caller that pre-transforms
+    # its image AND lets the pipeline see an `im_trans` now applies it twice,
+    # silently. midas_gui is NOT affected, and the reason is worth recording
+    # because it is load-bearing: every pipeline applies the transform under
+    # `if spec.im_trans:`, the spec comes from `spec_from_v1_params`, and that
+    # reads `ImTransOpt` off `v1.extra` -- which `calib.build_v1_params` never
+    # sets. So the GUI's specs carry `im_trans == ()`, the pipelines leave the
+    # arrays alone, and `calib._prep_transformed`'s pre-flip stays correct and
+    # single. Verified against 0.17.0, along with `apply_im_trans` being
+    # bit-identical to `helpers._apply_im_trans` on all 8 code combinations.
+    # What DOES change: `calib.run_pipeline`'s one_shot branch has always
+    # passed `initial_tx/ty/tz` speculatively through `_supported_kwargs`,
+    # which silently dropped them on <=0.13.0; they now take effect, which is
+    # what that code always intended. Also picked up: RhoD unit fixes (it is
+    # micrometres, and three pipelines fell back to a pixel-valued
+    # MaxRingRad), `auto_seed.make_seed(use_diplib=)` defaulting to False (the
+    # macOS segfault midas_gui already passed False for), and distortion phase
+    # bounds widened +/-90 -> +/-180 so a phase near the seam stops railing.
+    # hkls 0.11.0 and stress 0.14.0 are purely additive (`centring_allowed`,
+    # `ab_sensitive_mask`, `orientation_maps.py`); nothing midas_gui imports
+    # changed. No numpy 1.26.4 / torch 2.4.0 / numba 0.59.1 / zarr<3 movement
+    # -- pip confirmed the three are the only packages that move.
+    "midas-calibrate-v2==0.17.0",
     "midas-integrate-v2==0.7.1",
     "midas-calibrate==0.5.0",
-    "midas-hkls==0.10.0",
+    "midas-hkls==0.11.0",
     "midas-distortion==0.2.0",
     "midas-pdf==0.3.0",           # public PyPI package used by the PDF tab (pdf_backend.py)
     # ── Transitive MIDAS deps pinned explicitly (pulled in by midas-calibrate-v2 /
@@ -89,7 +122,7 @@ dependencies = [
     # reproducibility reason as the block above.
     "midas-saxs==0.1.1",
     "midas-transforms==0.10.0",
-    "midas-stress==0.13.0",
+    "midas-stress==0.14.0",
     "zarr==2.18.7",               # required by midas-integrate/-peakfit/-zipper; was already
                                   # pulled in transitively before this pin bump (unpinned), so
                                   # this just makes an existing dependency explicit.

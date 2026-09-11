@@ -1,3 +1,11 @@
+> **RESOLVED UPSTREAM — `midas-calibrate-v2` 0.14.0–0.17.0 (released 2026-09-10),
+> verified here 2026-09-11.** Fixes **A**, **B1**, **C** and **D** all landed,
+> essentially as proposed below. `refine_tx` was deliberately declined, with a
+> gauge-degeneracy argument now written into `forward/geometry.py` — see
+> `.context/ROADMAP.md` P3-4 for the point-by-point status and the one follow-up
+> still open on the GUI side (`first_time_calibrate` is not yet passed
+> `im_trans`). Kept as the record of what was asked for and why.
+
 # `tx/ty/tz` seeds and `im_trans` are honoured by disjoint sets of calibration pipelines — no entry point accepts both
 
 **Package:** `midas-calibrate-v2` **0.13.0** (current PyPI latest, installed from PyPI)

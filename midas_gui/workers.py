@@ -809,14 +809,18 @@ class CalibrationWorker(QtCore.QThread):
             # Hand image/dark to the pipeline exactly as loaded, with the
             # Transforms checkboxes' codes intact in cfg["im_trans"] —
             # calib.run_pipeline applies them per-branch: the plain
-            # midas_calibrate_v2.calibrate() path takes im_trans as a native
-            # kwarg and flips internally; the other pipeline entry points
-            # (four_stage/bayesian/joint/first_time/partial-distortion) have
-            # no such parameter in the installed package, so run_pipeline
-            # pre-flips for those itself. Either way, this worker never flips
-            # the array — it just passes the raw data and codes through.
+            # midas_calibrate_v2.calibrate() and first_time_calibrate() paths
+            # take im_trans as a native kwarg and flip internally; the other
+            # entry points (four_stage/bayesian/joint/partial-distortion) still
+            # have no such parameter, so run_pipeline pre-flips for those
+            # itself. Either way, this worker never flips the array — it just
+            # passes the raw data and codes through.
             raw = calib.run_pipeline(self._mode, image, self._dark, self._cfg)
-            NZ, NY = image.shape
+            # Post-transform counts, not image.shape: every branch solves in the
+            # transformed frame, and a transpose swaps Y/Z on a non-square
+            # detector (see calib.effective_pixel_counts).
+            NY, NZ = calib.effective_pixel_counts(
+                image, self._cfg.get("im_trans", ()))
             result = calib.normalize_result(
                 raw, self._mode, NY=NY, NZ=NZ,
                 pxY=self._cfg["pxY"], pxZ=self._cfg.get("pxZ"),

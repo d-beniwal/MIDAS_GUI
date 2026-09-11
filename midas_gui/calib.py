@@ -339,6 +339,28 @@ def normalize_result(raw, mode: str, *, NY, NZ, pxY, pxZ, wavelength,
     raise ValueError(f"Unsupported pipeline mode for normalisation: {effective_mode}")
 
 
+def effective_pixel_counts(image: np.ndarray, im_trans) -> tuple:
+    """``(NrPixelsY, NrPixelsZ)`` in the frame the pipeline actually solved in.
+
+    Every :func:`run_pipeline` branch fits in the *transformed* frame — either
+    because it pre-transforms itself (:func:`_prep_transformed`) or because the
+    backend applies ``im_trans`` internally — so the counts handed to
+    :func:`normalize_result` have to come from the transformed shape too. Only
+    opcode 3 (transpose) changes the shape, and it swaps Y and Z, so an odd
+    number of them flips the pair; the mirrors (1, 2) leave it alone.
+
+    Getting this wrong is silent and only bites on a **non-square** detector
+    with a transpose active: the fit is fine, but the recorded
+    ``NrPixelsY``/``NrPixelsZ`` describe a detector that was never fitted, and
+    every downstream consumer of the result (integration spec, paramstest
+    export, ring overlays) inherits the mismatch.
+    """
+    NZ, NY = np.asarray(image).shape
+    if tuple(im_trans or ()).count(3) % 2:
+        NY, NZ = NZ, NY
+    return int(NY), int(NZ)
+
+
 def tilt_seed_effective(mode: str, *, panel_layout=None, refine: Optional[dict] = None) -> bool:
     """Whether a manual tx/ty/tz seed will actually reach the underlying solver
     for this pipeline/config, mirroring :func:`run_pipeline`'s own branching —
@@ -494,8 +516,7 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
     if mode == "first_time":
         from midas_calibrate_v2.pipelines import first_time_calibrate
         a, b, c, alpha, beta, gamma = _LC.get(calibrant, _LC["CeO2"])
-        return first_time_calibrate(
-            image,
+        kwargs = dict(
             lattice=(a, b, c, alpha, beta, gamma),
             space_group=_SG.get(calibrant, 225),
             wavelength_A=wavelength,
@@ -509,6 +530,22 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
             # an explicit panel-aware spec) — it just needs the layout passed.
             panel_layout=panel_layout,
         )
+        # Native im_trans since midas_calibrate_v2 0.15.0: the backend flips
+        # image, dark and panel_mask together and re-derives n_pixels_y/z from
+        # the transformed shape, so this branch hands over the RAW frame and
+        # the codes — exactly like the calibrate() path above — and must NOT
+        # pre-flip via _prep_transformed, which would apply the transform
+        # twice (silently: a double flip looks like a valid image).
+        #
+        # Before 0.15.0 this branch passed no transform at all and no error
+        # was raised, so a first_time calibration on a flipped detector simply
+        # ran in the wrong frame and returned a confident wrong geometry.
+        # Passed unguarded rather than through _supported_kwargs on purpose:
+        # if the installed backend is too old to accept it, a loud TypeError
+        # is the right outcome — silently dropping it is the exact bug above.
+        if im_trans:
+            kwargs["im_trans"] = im_trans
+        return first_time_calibrate(image, **kwargs)
 
     if mode == "four_stage":
         from midas_calibrate_v2.pipelines import autocalibrate_four_stage
