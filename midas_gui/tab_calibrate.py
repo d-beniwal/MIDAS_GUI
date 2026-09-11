@@ -543,6 +543,10 @@ class CalibrationTab(QtWidgets.QWidget):
         self._axis_items: list = []
         for sig in (self._seed_bcy.valueChanged, self._seed_bcz.valueChanged):
             sig.connect(self._redraw_lab_axes_if_on)
+        # Flipping the display origin inverts the ViewBox's Y axis; the compass
+        # points at the hutch, not the pixel grid, so it is re-derived rather
+        # than carried along (widgets.build_lab_frame_axes_items).
+        self._img_view.originChanged.connect(self._redraw_lab_axes_if_on)
         for sig in (self._seed_bcy.valueChanged, self._seed_bcz.valueChanged,
                     self._seed_lsd.valueChanged, self._wl.valueChanged,
                     self._pxY.valueChanged, self._pxZ_spin.valueChanged,

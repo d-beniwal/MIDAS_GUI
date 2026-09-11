@@ -236,6 +236,17 @@ class BatchTab(QtWidgets.QWidget):
         else:
             self._clear_lab_axes()
 
+    def _on_origin_changed(self, *_args) -> None:
+        """Display origin flipped — the compass is drawn in screen terms, so
+        it has to be re-derived rather than carried along by the ViewBox's
+        now-inverted Y axis."""
+        if not self._lab_axes_chk.isChecked():
+            return
+        fields, _ = self._calib_fields_in_use()
+        if not fields or fields.get("BC_y") is None:
+            return
+        self._redraw_lab_axes_if_on(fields["BC_y"], fields["BC_z"])
+
     def _redraw_lab_axes_if_on(self, bc_y: float, bc_z: float) -> None:
         if not self._lab_axes_chk.isChecked():
             return
@@ -848,6 +859,10 @@ class BatchTab(QtWidgets.QWidget):
             "calibration's beam centre — same overlay as the Data "
             "Viewer/Calibrate tabs.")
         self._lab_axes_chk.toggled.connect(self._on_lab_axes_toggled)
+        # Flipping the display origin inverts the ViewBox's Y axis; the compass
+        # points at the hutch, not the pixel grid, so it is re-derived rather
+        # than carried along (widgets.build_lab_frame_axes_items).
+        self._det_view.originChanged.connect(self._on_origin_changed)
         self._det_view._toolbar_layout.addWidget(self._lab_axes_chk)
         self._det_view._toolbar_layout.addWidget(QtWidgets.QLabel("Preview: sum first"))
         self._preview_sum_n = _NoScrollSpinBox()

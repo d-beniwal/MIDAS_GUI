@@ -223,7 +223,8 @@ DEFAULT_KERNEL        = "subpixel2"   # key in KERNELS (integration algorithm)
 DEFAULT_PIPELINE      = "one_shot"    # key in PIPELINES (calibration algorithm)
 DEFAULT_OUTPUT_FORMAT = "csv"         # key in OUTPUT_FORMATS
 DEFAULT_ERROR_MODEL   = "poisson"     # value in ERROR_MODELS
-DEFAULT_COLORMAP      = "hot"         # value in COLORMAPS
+DEFAULT_COLORMAP      = "gray"        # value in COLORMAPS — every image/cake
+                                      # viewer in every tab starts here
 
 # Interface scale (whole-app zoom for HiDPI / 4K monitors). Applied at startup via
 # Qt's QT_SCALE_FACTOR, so the entire layout + fonts scale uniformly. 1.0 suits a

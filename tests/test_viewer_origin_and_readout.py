@@ -246,3 +246,103 @@ def test_origin_button_present_and_state_round_trips(app, page, viewer_attr):
     restored.set_state(tab.get_state())
     assert getattr(restored, viewer_attr).origin() == ORIGIN_TOP_LEFT
     assert restored._origin_btn.text() == "Origin: TL"
+
+
+# ── lab-frame compass is invariant to the display origin ─────────────
+#
+# The compass describes the hutch, not the frame: +Y_Lab is vertically up in
+# the real world and the beam goes into the screen, whatever the user has done
+# to the picture. A reference that flipped along with the image could not be
+# used to check the image, which is the overlay's entire job.
+
+def _compass_screen_directions(app, viewer, shape=(200, 200), bc=(100.0, 100.0)):
+    """Render the compass into ``viewer`` and report, in *screen* terms, where
+    each arrow points and which side of the beam centre each label sits on."""
+    import pyqtgraph as pg
+    from midas_gui.widgets import build_lab_frame_axes_items
+    NAMES = {"#ff3b30": "X_Lab", "#34c759": "Y_Lab"}
+
+    items = build_lab_frame_axes_items(viewer._iv, shape, *bc)
+    for it in items:
+        viewer._iv.addItem(it)
+    app.processEvents()
+    vb = viewer._iv.getView().getViewBox()
+    p0 = vb.mapViewToScene(pg.Point(*bc))
+    out = {}
+    for it in items:
+        if isinstance(it, pg.PlotDataItem):
+            name = NAMES.get(it.opts["pen"].color().name().lower())
+            if name is None:
+                continue                     # η tick, not an axis arrow
+            x, y = it.getData()
+            tip = int(np.argmax(np.hypot(x - bc[0], y - bc[1])))
+            p1 = vb.mapViewToScene(pg.Point(float(x[tip]), float(y[tip])))
+            dx, dy = p1.x() - p0.x(), p1.y() - p0.y()
+            out[name] = (("left" if dx < 0 else "right") if abs(dx) > abs(dy)
+                         else ("up" if dy < 0 else "down"))   # scene y grows down
+        elif isinstance(it, pg.TextItem):
+            text = it.toPlainText().replace("\n", " ")
+            key = ("beam" if "beam" in text else
+                   "eta180" if "180" in text else
+                   "Y_Lab box" if "ZMIDAS" in text else None)
+            if key:
+                cy = it.mapRectToScene(it.boundingRect()).center().y()
+                out[key] = "below" if cy > p0.y() else "above"
+    for it in items:
+        viewer._iv.removeItem(it)
+    return out
+
+
+def test_compass_points_the_same_way_in_both_origins(app, viewer):
+    from midas_gui.widgets import ORIGIN_BOTTOM_LEFT, ORIGIN_TOP_LEFT
+    viewer.resize(500, 500); viewer.show()
+    viewer.set_raw_frame(np.zeros((200, 200), dtype=np.float32), [])
+    app.processEvents()
+
+    viewer.set_origin(ORIGIN_BOTTOM_LEFT)
+    app.processEvents()
+    bl = _compass_screen_directions(app, viewer)
+    viewer.set_origin(ORIGIN_TOP_LEFT)
+    app.processEvents()
+    tl = _compass_screen_directions(app, viewer)
+
+    assert bl == tl, "the lab frame moved when only the display origin changed"
+    # ...and it points where the lab actually is, not merely consistently.
+    assert bl["X_Lab"] == "left" and bl["Y_Lab"] == "up"
+    assert bl["Y_Lab box"] == "above"      # label rides the arrow it names
+    assert bl["beam"] == "below"           # ⊗ caption hangs under the centre
+    assert bl["eta180"] == "below"         # η=180° is straight down
+
+
+def test_origin_change_emits_so_overlays_can_rebuild(viewer):
+    """The compass has to be *re-derived*, not merely re-painted, so the
+    viewer announces the flip. Only a real change fires."""
+    from midas_gui.widgets import ORIGIN_BOTTOM_LEFT, ORIGIN_TOP_LEFT
+    seen = []
+    viewer.originChanged.connect(seen.append)
+
+    viewer.set_origin(ORIGIN_BOTTOM_LEFT)          # already there
+    assert seen == []
+    viewer.set_origin(ORIGIN_TOP_LEFT)
+    assert seen == [ORIGIN_TOP_LEFT]
+    viewer.set_origin(ORIGIN_TOP_LEFT)             # no-op
+    assert seen == [ORIGIN_TOP_LEFT]
+    viewer.set_origin(ORIGIN_BOTTOM_LEFT)
+    assert seen == [ORIGIN_TOP_LEFT, ORIGIN_BOTTOM_LEFT]
+
+
+@pytest.mark.parametrize("tab_cls, viewer_attr", [
+    ("midas_gui.tab_view:DataViewerTab", "_viewer"),
+    ("midas_gui.tab_calibrate:CalibrationTab", "_img_view"),
+    ("midas_gui.tab_batch:BatchTab", "_det_view"),
+])
+def test_every_tab_with_a_compass_listens_for_the_origin_flip(app, tab_cls, viewer_attr):
+    """Each tab that can draw the compass must be subscribed to its viewer's
+    ``originChanged``; without that the overlay keeps the stale orientation
+    until something else happens to redraw it."""
+    import importlib
+    mod_name, cls_name = tab_cls.split(":")
+    tab = getattr(importlib.import_module(mod_name), cls_name)()
+    viewer = getattr(tab, viewer_attr)
+    assert viewer.receivers(viewer.originChanged) > 0, \
+        f"{cls_name} never connected to originChanged"

@@ -68,31 +68,62 @@ _CUSTOM_DSPACING = "Custom (d-spacings)"
 _FALLBACK_LATTICE = dict(a=5.4116, b=5.4116, c=5.4116, alpha=90.0, beta=90.0, gamma=90.0, sg=225)
 
 
-def _ring_label_pos(ys, zs, img_shape):
-    """Where to anchor a ring's ``hkl``/order label, given the ring's plotted
-    points and the image's ``(rows, cols)`` shape.
+def _ring_on_image_mask(ys, zs, img_shape):
+    """Boolean mask of the ring points that fall on the detector image."""
+    nz, ny = img_shape[:2]
+    return (ys >= 0) & (ys <= ny - 1) & (zs >= 0) & (zs <= nz - 1)
 
-    Prefers a point where the ring actually crosses the image, so the label
-    sits on the arc the user can see. The obvious choice — the ring's twelve
-    o'clock point — is wrong whenever the beam centre is near an edge: on a
-    wide, short SAXS strip with the centre at the left, every ring's top lies
-    hundreds of pixels below the frame and all the labels pile up off-screen.
-    Falls back to the plotted point closest to the image when no part of the
-    ring is on it, which keeps the label near the visible area instead of
-    arbitrarily far from it.
+
+def _ring_label_pos(ys, zs, img_shape, box_w: float = 0.0, box_h: float = 0.0,
+                    y_up: bool = True):
+    """Where to anchor a ring's ``hkl``/order label, and with which
+    ``pg.TextItem`` anchor, given the ring's plotted points, the image's
+    ``(rows, cols)`` shape, and the label box's size in *data* units.
+
+    Returns ``(y, z, (anchor_x, anchor_y))``, or ``None`` when no part of the
+    ring crosses the image — a label out in the empty space beside the
+    detector describes nothing the user can see, so it is not drawn at all
+    (neither is the ring; see ``_redraw_rings``).
+
+    The anchor point is the highest on-image point of the arc: clear of the
+    data below it, and stable as the geometry is nudged. The obvious choice —
+    the ring's twelve o'clock point — is wrong whenever the beam centre is
+    near an edge: on a wide, short SAXS strip with the centre at the left,
+    every ring's top lies hundreds of pixels below the frame and all the
+    labels pile up off-screen. Anchoring on the visible arc means the beam
+    centre's position relative to the frame decides where each label lands,
+    which is what makes the labels follow the rings the user can actually see.
+
+    The *anchor* then keeps the box itself on the image. A text box is drawn
+    at a fixed screen size, so ``box_w``/``box_h`` are the caller's font
+    metrics converted to data units: the box grows away from the arc when
+    there is room above it and back over the arc when there is not, and slides
+    its horizontal anchor to the box edge near a left/right border. ``y_up``
+    says whether increasing ``z`` renders upward (false when the display
+    origin is top-left, which inverts the view) — anchors are resolved in
+    screen space, so that flip has to be accounted for here.
     """
     nz, ny = img_shape[:2]
     ys = np.asarray(ys, dtype=float); zs = np.asarray(zs, dtype=float)
-    on = (ys >= 0) & (ys < ny) & (zs >= 0) & (zs < nz)
-    if on.any():
-        # Highest on-image point of the arc: clear of the data below it, and
-        # a stable choice as the geometry is nudged.
-        idx = np.flatnonzero(on)
-        return float(ys[idx][np.argmax(zs[idx])]), float(zs[idx][np.argmax(zs[idx])])
-    dy = np.clip(ys, 0, ny - 1) - ys
-    dz = np.clip(zs, 0, nz - 1) - zs
-    i = int(np.argmin(dy ** 2 + dz ** 2))
-    return float(ys[i]), float(zs[i])
+    on = _ring_on_image_mask(ys, zs, img_shape) & np.isfinite(ys) & np.isfinite(zs)
+    if not on.any():
+        return None
+    idx = np.flatnonzero(on)
+    top = idx[np.argmax(zs[idx])]
+    ly, lz = float(ys[top]), float(zs[top])
+
+    # Grow the box off the top of the arc when it fits between there and the
+    # top edge; otherwise fold it back down over the arc, which is inside the
+    # image by construction.
+    grow_up_in_data = (lz + box_h) <= (nz - 1)
+    anchor_y = 1.0 if (grow_up_in_data == bool(y_up)) else 0.0
+    if box_w > 0 and ly - 0.5 * box_w < 0:
+        anchor_x = 0.0                      # box grows right, off the left edge
+    elif box_w > 0 and ly + 0.5 * box_w > ny - 1:
+        anchor_x = 1.0                      # box grows left, off the right edge
+    else:
+        anchor_x = 0.5
+    return ly, lz, (anchor_x, anchor_y)
 
 
 class MaterialDialog(QtWidgets.QDialog):
@@ -1044,6 +1075,26 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         th = np.linspace(0, 2 * math.pi, 400)
         vis_r = self._show_rings.isChecked()
         vis_l = self._show_labels.isChecked() and vis_r
+        # Ring arcs and their labels are confined to the detector image: a
+        # simulated ring drawn across the empty canvas beside the frame is not
+        # a prediction about anything the user can check, and the labels out
+        # there were the noisiest part of it. Points off the image become NaN
+        # and `connect="finite"` breaks the polyline there, so an arc that
+        # leaves and re-enters the frame is drawn as the two visible segments
+        # rather than one chord across the gap. (The beam-centre marker is
+        # deliberately exempt — it is the one thing worth seeing off-image.)
+        vb = self._viewer._iv.getView().getViewBox()
+        try:
+            px_w, px_h = vb.viewPixelSize()
+            y_up = not vb.yInverted()
+        except Exception:
+            px_w = px_h = 1.0
+            y_up = True
+        px_w = px_w if px_w and px_w > 0 else 1.0
+        px_h = px_h if px_h and px_h > 0 else 1.0
+        label_font = S.font_px()
+        fm = QtGui.QFontMetrics(label_font)
+        box_h = fm.height() * px_h
         for m in self._materials:
             rings = m.get("_rings")
             if not m["enabled"] or not rings:
@@ -1058,12 +1109,21 @@ class DetectorGeometryCard(QtWidgets.QWidget):
                                              lsd_um, bc_y, bc_z, px, px)
                 else:
                     ys = bc_y + rad * np.cos(th); zs = bc_z + rad * np.sin(th)
-                label_y, label_z = _ring_label_pos(ys, zs, img.shape)
-                item = pg.PlotDataItem(ys, zs, pen=pen)
+                label = f"n{r['order']}" if r["hkl"] is None else "".join(str(x) for x in r["hkl"])
+                placement = _ring_label_pos(
+                    ys, zs, img.shape,
+                    box_w=fm.horizontalAdvance(label) * px_w, box_h=box_h, y_up=y_up)
+                if placement is None:
+                    continue          # ring misses the detector entirely
+                on = _ring_on_image_mask(ys, zs, img.shape)
+                ys_clip = np.where(on, ys, np.nan)
+                zs_clip = np.where(on, zs, np.nan)
+                item = pg.PlotDataItem(ys_clip, zs_clip, pen=pen, connect="finite")
                 item.setVisible(vis_r)
                 self._viewer._iv.addItem(item); self._ring_items.append(item)
-                label = f"n{r['order']}" if r["hkl"] is None else "".join(str(x) for x in r["hkl"])
-                txt = pg.TextItem(label, color=m["color"], anchor=(0.5, 1.0))
+                label_y, label_z, anchor = placement
+                txt = pg.TextItem(label, color=m["color"], anchor=anchor)
+                txt.setFont(label_font)
                 txt.setPos(label_y, label_z)
                 txt.setVisible(vis_l)
                 self._viewer._iv.addItem(txt); self._label_items.append(txt)
@@ -1137,7 +1197,13 @@ class DetectorGeometryCard(QtWidgets.QWidget):
     def _refresh_profile_markers(self):
         if self._profile_view is None:
             return
-        groups = [{"radii": [r["radius_px"] for r in m["_rings"]], "color": m["color"]}
+        # Same hkl/order text as the on-image ring labels, so a peak in the
+        # profile and the arc it came from carry the identical name.
+        groups = [{"radii": [r["radius_px"] for r in m["_rings"]],
+                   "labels": [f"n{r['order']}" if r["hkl"] is None
+                              else "".join(str(x) for x in r["hkl"])
+                              for r in m["_rings"]],
+                   "color": m["color"]}
                   for m in self._materials if m["enabled"] and m.get("_rings")]
         self._profile_view.set_ring_markers(
             groups, self._lsd_um(), self._px.value(), self._wl.value())

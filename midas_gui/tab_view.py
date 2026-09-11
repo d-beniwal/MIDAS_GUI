@@ -373,6 +373,7 @@ class DataViewerTab(QtWidgets.QWidget):
         self._lab_axes_on.toggled.connect(self._on_lab_axes_toggled)
         vtb.addWidget(self._lab_axes_on)
         self._geom_card.geometryChanged.connect(self._redraw_lab_axes_if_on)
+        self._viewer.originChanged.connect(self._redraw_lab_axes_if_on)
         # ROI popups are always-on-top (roi_tools.ROIStatsPopup) so they don't
         # get buried behind the main window; minimizing one tucks it into this
         # ribbon on the viewer's left edge instead of just closing it.
@@ -605,7 +606,10 @@ class DataViewerTab(QtWidgets.QWidget):
     # verify orientation/ImTransOpt by checking that a feature lands in the
     # quadrant the overlay predicts. All items are plain pyqtgraph scene
     # items added onto the viewer's ViewBox, so pan/zoom transforms them for
-    # free; they only need rebuilding when the image/beam-centre changes.
+    # free; they only need rebuilding when the image/beam-centre changes — or
+    # when the display origin flips, which inverts the ViewBox's Y axis and so
+    # needs the compass re-derived to keep pointing at the real hutch (see
+    # widgets.build_lab_frame_axes_items).
 
     def _on_lab_axes_toggled(self, checked: bool):
         if checked:
@@ -613,7 +617,7 @@ class DataViewerTab(QtWidgets.QWidget):
         else:
             self._clear_lab_axes()
 
-    def _redraw_lab_axes_if_on(self):
+    def _redraw_lab_axes_if_on(self, *_args):
         if getattr(self, "_lab_axes_on", None) is not None and self._lab_axes_on.isChecked():
             self._draw_lab_axes()
 

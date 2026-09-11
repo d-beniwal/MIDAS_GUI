@@ -9,7 +9,7 @@ Functionality is unchanged — these only affect appearance and arrangement.
 """
 from __future__ import annotations
 
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets
 
 # ── Palette ─────────────────────────────────────────────────────────────────────
 BG        = "#3c3c3c"   # window / panel background
@@ -30,6 +30,56 @@ MONO_FAMILIES = ["Menlo", "Consolas", "DejaVu Sans Mono", "Courier New"]
 MONO_CSS = ", ".join(f'"{f}"' if " " in f else f for f in MONO_FAMILIES)
 
 
+# ── Fonts for graphics-scene items (overlays, plot axis titles) ─────────────────
+# The application stylesheet below sizes every *widget* in **pixels**
+# ("QWidget { font-size: 12px }"). Qt scales logical pixels by
+# QT_SCALE_FACTOR (see app._apply_ui_scale), so px-sized text tracks the rest of
+# the UI exactly at any interface scale.
+#
+# Items living in a QGraphicsScene — pg.TextItem overlays, pyqtgraph axis
+# titles — do NOT inherit that stylesheet, and the two obvious ways of sizing
+# them both misbehave:
+#
+#   * ``QFont().pointSize()`` on a default-constructed font returns the *system*
+#     size (13 pt on macOS), not the app's 12 px, so scaling "the app font by
+#     1.2" silently produced ~19 px text. On a widget the stylesheet has already
+#     touched, pointSize() comes back -1 instead, and bumping *that* gives a ~1 pt
+#     illegible font (see ROIRibbon's paintEvent, which hit this first).
+#   * A point size anywhere — QFont.setPointSize, or "font-size: 12pt" in the
+#     HTML pyqtgraph feeds its axis-title QGraphicsTextItem — is converted to
+#     pixels through the screen's logical DPI, which QT_SCALE_FACTOR already
+#     moved. The result is scaled twice and grows out of proportion with
+#     everything around it as the interface scale goes up.
+#
+# So: one base size in px, and every overlay/axis font derived from it.
+BASE_FONT_PX = 12        # keep in sync with the QWidget rule in stylesheet()
+
+
+def font_px(factor: float = 1.0, *, bold: bool = False, mono: bool = False) -> QtGui.QFont:
+    """A QFont sized ``factor`` × the app's base UI font, in **pixels**.
+
+    Use for anything drawn into a QGraphicsScene (pg.TextItem overlays, custom
+    paintEvent text) instead of setPointSize — see the note above.
+    """
+    f = QtGui.QFont()
+    if mono:
+        f.setFamilies(list(MONO_FAMILIES))
+        f.setStyleHint(QtGui.QFont.Monospace)
+    f.setPixelSize(max(1, round(BASE_FONT_PX * float(factor))))
+    f.setBold(bold)
+    return f
+
+
+def axis_label_css(color: str, factor: float = 1.0) -> dict:
+    """``setLabel(...)`` style kwargs for a pyqtgraph axis title, sized in px.
+
+    pyqtgraph wraps the title in ``<span style='...'>``; CSS ``px`` is taken
+    literally by QTextDocument (no DPI conversion), so the title scales with
+    the interface exactly like the surrounding widgets do.
+    """
+    return {"color": color, "font-size": f"{max(1, round(BASE_FONT_PX * float(factor)))}px"}
+
+
 def stylesheet(checkmark_svg: str, up_arrow_svg: str = "", down_arrow_svg: str = "") -> str:
     """Return the full application QSS.
 
@@ -37,7 +87,7 @@ def stylesheet(checkmark_svg: str, up_arrow_svg: str = "", down_arrow_svg: str =
     are the glyphs drawn inside spinbox step buttons and the combo drop-down.
     """
     return f"""
-    QWidget {{ color: {TEXT}; font-size: 12px; }}
+    QWidget {{ color: {TEXT}; font-size: {BASE_FONT_PX}px; }}
     QMainWindow, QScrollArea, QSplitter {{ background: {BG}; }}
     QScrollArea {{ border: none; }}
     QToolTip {{ background: #2d2d30; color: {TEXT}; border: 1px solid {BORDER}; }}

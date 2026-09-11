@@ -17,6 +17,7 @@ import pyqtgraph as pg
 
 from midas_gui.widgets import (PickableImageViewer, _mono_font, _resolve_cmap,
                               ORIGIN_TOP_LEFT)
+from midas_gui import style as S
 
 # Cycled per new ROI — same palette convention as tab_view._MATERIAL_COLORS
 # (duplicated here rather than imported, to avoid a tab_view <-> roi_tools
@@ -62,17 +63,17 @@ def _build_arrow_path(p0: QtCore.QPointF, p1: QtCore.QPointF,
 def _make_roi_text_item(text: str, color: str, anchor=(0, 0)) -> pg.TextItem:
     """pg.TextItem styled for legibility over arbitrary image content: a
     translucent background box (pyqtgraph draws this for free behind the
-    text via `fill=`) and a font ~20% larger than the app's default."""
+    text via `fill=`) and a font ~20% larger than the app's default.
+
+    The size comes from :func:`style.font_px`, in pixels off the app's base
+    font. A default-constructed ``QFont().pointSize()`` is the *system* size
+    (13 pt on macOS), not this app's 12 px, so scaling that by 1.2 gave a label
+    half again too big — and a point size is then re-scaled by the interface
+    scale a second time, which is why these labels ballooned at ui_scale 1.5.
+    """
     item = pg.TextItem(text=text, color=color, anchor=anchor,
                         fill=(0, 0, 0, 160), border=None)
-    font = QtGui.QFont()
-    base = font.pointSize()
-    if base <= 0:
-        base = font.pixelSize()
-    if base <= 0:
-        base = 10
-    font.setPointSize(round(base * 1.2))
-    item.setFont(font)
+    item.setFont(S.font_px(1.2))
     return item
 
 
@@ -157,8 +158,8 @@ class ROIStatsPopup(QtWidgets.QDialog):
         if kind == "line":
             self._plot = pg.PlotWidget(background="#2b2e35")
             self._plot.setMinimumSize(110, 65)
-            self._plot.setLabel("bottom", "distance (px)", **{"color": "#d0d0d0", "font-size": "12pt"})
-            self._plot.setLabel("left", "intensity", **{"color": "#d0d0d0", "font-size": "12pt"})
+            self._plot.setLabel("bottom", "distance (px)", **S.axis_label_css("#d0d0d0"))
+            self._plot.setLabel("left", "intensity", **S.axis_label_css("#d0d0d0"))
             for ax in ("bottom", "left"):
                 self._plot.getAxis(ax).setTextPen("#c8c8c8")
                 self._plot.getAxis(ax).setPen("#8a8a8a")
@@ -186,8 +187,8 @@ class ROIStatsPopup(QtWidgets.QDialog):
             hist_col = QtWidgets.QVBoxLayout(); hist_col.setSpacing(2)
             self._hist_plot = pg.PlotWidget(background="#2b2e35")
             self._hist_plot.setMinimumSize(85, 55)
-            self._hist_plot.setLabel("bottom", "intensity", **{"color": "#d0d0d0", "font-size": "12pt"})
-            self._hist_plot.setLabel("left", "count", **{"color": "#d0d0d0", "font-size": "12pt"})
+            self._hist_plot.setLabel("bottom", "intensity", **S.axis_label_css("#d0d0d0"))
+            self._hist_plot.setLabel("left", "count", **S.axis_label_css("#d0d0d0"))
             for ax in ("bottom", "left"):
                 self._hist_plot.getAxis(ax).setTextPen("#c8c8c8")
                 self._hist_plot.getAxis(ax).setPen("#8a8a8a")
@@ -298,7 +299,7 @@ class ROIStatsPopup(QtWidgets.QDialog):
             y = np.log10(y + 1.0)
         self._curve.setData(edges, y)
         self._hist_plot.setLabel("left", "log(count+1)" if log else "count",
-                                 **{"color": "#d0d0d0", "font-size": "12pt"})
+                                 **S.axis_label_css("#d0d0d0"))
         if edges.size:
             _apply_view_limits(self._hist_plot, float(edges[0]), float(edges[-1]),
                                 0.0, float(y.max()) if y.size else 1.0,
@@ -362,13 +363,10 @@ class _VerticalLabel(QtWidgets.QWidget):
     def paintEvent(self, event):
         painter = QtGui.QPainter(self)
         painter.setPen(QtGui.QColor("#f5f5f5"))
-        font = painter.font()
-        font.setBold(True)
-        # The app's global stylesheet sets font-size in px (style.py), which
-        # makes QFont.pointSize() come back -1 — bumping *that* produced an
-        # illegible ~1pt font. Force an explicit pixel size instead.
-        font.setPixelSize(14)
-        painter.setFont(font)
+        # Sized in px off the app's base font — see style.font_px for why a
+        # point size (or a bump of QFont.pointSize(), which the stylesheet
+        # makes -1 here) is the wrong tool for text this app draws itself.
+        painter.setFont(S.font_px(1.17, bold=True))
         painter.translate(0, self.height())
         painter.rotate(-90)
         painter.drawText(QtCore.QRect(0, 0, self.height(), self.width()),

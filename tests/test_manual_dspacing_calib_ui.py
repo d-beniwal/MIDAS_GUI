@@ -699,15 +699,15 @@ def test_ring_labels_land_on_the_visible_arc(app):
         rad = r["radius_px"]
         ys, zs = bc_y + rad * np.cos(th), bc_z + rad * np.sin(th)
         assert bc_z - rad < 0                       # old anchor: below the frame
-        ly, lz = _ring_label_pos(ys, zs, shape)
+        ly, lz, _anchor = _ring_label_pos(ys, zs, shape)
         if 0 <= ly < shape[1] and 0 <= lz < shape[0]:
             on_image += 1
     assert on_image == 4
 
-    # A ring entirely off the frame still gets a label near it, not far away.
+    # A ring entirely off the frame gets no label at all: a label out in the
+    # empty canvas beside the detector describes nothing the user can see.
     ys, zs = bc_y + 9000 * np.cos(th), bc_z + 9000 * np.sin(th)
-    ly, lz = _ring_label_pos(ys, zs, shape)
-    assert -2000 < ly < 12000 and -2000 < lz < 2000
+    assert _ring_label_pos(ys, zs, shape) is None
 
 
 def test_seed_can_be_accepted_as_the_calibration_without_a_fit(app, monkeypatch):
