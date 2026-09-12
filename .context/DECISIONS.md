@@ -8,6 +8,145 @@ file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this
 date for the full uncondensed entries if ever needed._
 
+## 2026-09-11 (later) — One honest ring overlay; Batch's cakes made visible; the whole calibration in the provenance record
+
+Commits `54cdd48` (Calibrate) and `f44314d` (Batch Integrate).
+
+### The predicted-ring overlay is always the full forward model — no toggle
+
+**The decision:** delete the "Corrected" checkbox (single-detector tab *and*
+Hydra calib page, plus its saved project state) and draw every ring through
+tilt **and** refined distortion, always.
+
+**Why, and why it is not merely a default change.** The tick was off by
+default, so the overlay a user actually read was a plain circle about the beam
+centre. Worse, ticked it applied *tilt only* — so on a detector whose
+calibration refined distortion harmonics, both states were wrong, one just
+less so. A ring overlay that sits off the measured rings is the most expensive
+kind of wrong: it still looks like rings, so it reads as a bad calibration
+rather than a bad drawing, and the user goes off refitting a geometry that was
+fine. Correctness of a *prediction* is not a display preference the way a
+colormap is. The reduction property is what makes removing the choice safe:
+`ring_xy_corrected` is bit-identical to `tilted_ring_xy` when there is no
+distortion, and that in turn is a circle at zero tilt, so the untilted
+undistorted case draws exactly what it always drew.
+
+**Why invert the backend's relation instead of writing a ring equation.** The
+backend reports a pixel's radius as `R_corrected = D(ρ, η) · R_projected`
+(`midas_calibrate_v2.forward.geometry.pixel_to_REta`). A ring is therefore the
+locus of pixels whose *corrected* radius equals the Bragg radius — not the
+locus where the undistorted ray lands. So per η we solve
+`D(rad/ρ_d, η) · rad = Lsd·tan(2θ)` for `rad` by fixed-point iteration (D is
+within a few percent of 1 for any physical calibration, so the map is a strong
+contraction; ~5 passes reach float64 noise, 20 is the cap) and hand the
+recovered radius back to the tilt projector as a per-point effective 2θ. The
+factor comes from `midas_distortion`, the shared leaf both `midas_calibrate_v2`
+and `midas_integrate_v2` evaluate, so there is one definition of the model
+rather than a second copy in the GUI that can drift from it.
+
+**ρ_d has to match `spec_from_calibration_result`'s definition exactly** —
+beam-centre-to-farthest-corner in px measured to `N-1`, times the mean pixel
+pitch. The harmonic basis is evaluated at `ρ = R_µm / ρ_d`, so a ρ_d off by even
+one pixel pitch rescales every term and the polynomial stops describing the
+detector it was fitted on. `helpers.distortion_rho_d_um` reproduces it and
+returns `None` (→ "cannot evaluate distortion here") rather than substituting a
+guess when the detector size is unknown.
+
+**What is deliberately *not* drawn:** the empirical `residual_corr_map`, a
+smooth per-pixel ΔR the backend adds after the harmonics converge. It is
+sub-pixel and would need the map tensor available in a redraw path. Rather than
+let it go silently missing, the status line beside the toolbar says
+"residual map not drawn" when a result carries one — the same line that now
+reports "(tilt + distortion applied)", so "these rings are bent" reads as the
+geometry rather than as a bug.
+
+Verified against the backend rather than against a hand-derived expectation:
+`tests/test_ring_projection.py` feeds every point the projector draws back
+through `pixel_to_REta` and requires it to come back at the ring's radius.
+
+### "Use seed as calibration (no fit)" removed (added 2026-09-09, superseded)
+
+It existed because every export was gated on a fit result, leaving a
+hand-matched geometry with nowhere to go. Two things since have made it a
+duplicate rather than a feature: the Data Viewer's Ring simulation card is
+purpose-built for dialling a geometry in by eye, and `Geometry: [← Get]`
+(2026-09-10) seeds it from this tab's calibrated values. Keeping a second,
+weaker no-fit publishing path inside Calibrate meant two places to hand-build a
+geometry and one of them silently produced a "result" with no uncertainties
+sitting in the same grid as fitted ones. The docs now point at the Data Viewer.
+
+### Calibrate's panel column compacted
+
+The Refine card is three rows (Lsd/BC/Wavelength · the tilts · Distortion +
+Residual map) with **Limits** as a block below it, instead of one control per
+line woven through a ± column. The ± column was the reason for the one-per-line
+shape, and it applies to the manual d-spacing fit only — the crystalline
+backend takes no bounds arguments — so for most calibrants the tallest card in
+a six-card column was tall for a feature that was hidden. Seed and Advanced pack
+three controls per row. `S.Form.row` now stretches every field column rather
+than columns 1 and 3, which is what a third pair needs to not sit pinned at its
+minimum width.
+
+### `IntegrationWorker` stays in float64
+
+It narrowed to float32 and widened back at the torch call. `BatchWorker` does
+not, so the Calibrate tab's profile differed from the Batch run it is meant to
+preview — 4e-8 relative, harmless in magnitude, but a difference with no reason
+to exist in the one plot a user reads a peak position off.
+`tests/test_calibrate_integration_accuracy.py` pins the Calibrate profile equal
+to the Data Viewer's accurate path, so the cheaper kernel cannot be substituted
+back in for speed without a failing test.
+
+### Batch Integrate: the cakes it already computed are now visible
+
+A "Multi-azimuth output" run keeps each frame's `(η, R)` cake instead of the
+η-collapsed profile. The tab computed those, wrote them to disk and embedded
+them in the project — and displayed none of them. Reopening such a project
+*raised*, because the restore path fed 2-D cake rows to the 1-D waterfall
+buffer, and that took the whole restore down with it.
+
+- `CakeStackViewer` (a `CakeViewer` over an `(n_frames, n_eta, n_r)` stack with
+  a scrubber) backs a new "Eta-R cakes" view tab. Frame-stepping suppresses the
+  view reframe: the axes are identical across the stack by construction, so
+  re-fitting the range on every step only discards the zoom the user is
+  scrubbing *with*. Levels still auto-scale per frame, as every other viewer does.
+- The two 1-D views get an η-collapse of the stack (mean over filled bins).
+  Exact-zero bins are unfilled coverage, not measured zeros — the same
+  convention `CakeViewer`'s auto-levelling uses — so they are excluded rather
+  than dragging the mean down. It is an approximation of the engine's
+  count-weighted collapse and is documented as one; the run's own collapsed
+  profile does not exist to restore, because multi-azimuth mode keeps the cake
+  instead of computing it.
+- A non-multi-azimuth run **clears** the tab. Leaving the previous run's cakes
+  sitting there is worse than an empty tab, because they look current.
+
+### Cake x-axis in R / 2θ / d / Q — labels only, and opt-in
+
+Only the tick *strings* convert; the image keeps its native R-pixel coordinates
+(setRect, view limits, the readout's bin lookup). So the axis is exact for a
+nonlinear unit and switching costs nothing — no resampling, and what you see
+stays the integrated bins. d diverges at R = 0 and renders as "∞", because
+"inf" on an axis reads as a bug. The selector stays **hidden until a caller
+supplies geometry** via `set_axis_context`, which is what leaves the Calibrate
+and Hydra cakes — and `RingResidualViewer`, whose X is a ring index and not a
+radius at all — behaving exactly as before. `_convert_radial` moved up beside
+the cake viewers (it was defined near the bottom, next to the 1-D waterfall)
+and gained the d case.
+
+### An integration attempt records the *whole* calibration
+
+`calibration_snapshot` was the 13 display fields from
+`resolve_calibration_fields`. An attempt has to be able to reconstruct the
+geometry it ran under, and those cannot: they drop `_calibrant_name`,
+`_panel_unpacked`, `panel_layout`, and the refined-parameter σ / at-limit flags.
+`helpers.full_calibration_snapshot` overlays the display fields *on top of* the
+sanitized full result — not merged under it — so no value can drift (both are
+read off the same object) while the display fields still supply defaults a bare
+result may not carry (`tx/ty/tz` → 0.0, `distortion` → {}, `im_trans` → []).
+Keeping the output a strict superset is what lets `project.calibration_namespace`,
+`render_calib_value_grid` and `gsas_export` consume it unchanged; the test
+asserts that superset property by name rather than checking a sample of keys.
+
 ## 2026-09-11 — MIDAS backend bump to current PyPI latest; the tilt/im_trans issue came back fixed
 
 **What moved:** `midas-calibrate-v2` 0.13.0→**0.17.0**, `midas-hkls`

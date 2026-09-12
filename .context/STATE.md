@@ -1,8 +1,8 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-09-11 (MIDAS backend bump to PyPI latest; the filed
-tilt/im_trans upstream issue came back fixed)_
+_Last updated: 2026-09-11 (ring overlay through the full forward model;
+Batch "Eta-R cakes" tab; full calibration in the provenance record)_
 
 ## Now working on
 
@@ -28,6 +28,51 @@ Open follow-ups, none blocking:
   `git fetch origin 'refs/pull/*/head:refs/remotes/origin/pr/*'`.
 
 ## Recently completed
+
+**2026-09-11 (later) — One honest ring overlay, Batch's cakes made visible,
+and the whole calibration in the provenance record.** Two commits.
+- **`54cdd48` Calibrate.** The predicted-ring overlay is *always* the full
+  forward model — fitted tilt **and** refined distortion — and the "Corrected"
+  tick is gone from both the single-detector tab and the Hydra calib page
+  (with its saved state). It was off by default and applied tilt only, so on a
+  distortion-refined detector both of its states drew rings off the measured
+  ones, which reads as a bad calibration rather than a bad overlay. New
+  `helpers.ring_xy_corrected` inverts the backend's own
+  `R_corrected = D(ρ,η)·R` by fixed-point iteration, calling `midas_distortion`
+  rather than copying the model; `helpers.distortion_rho_d_um` reproduces
+  `spec_from_calibration_result`'s normalisation radius exactly. Reduces
+  bit-exactly to `tilted_ring_xy` (and so to a circle) with nothing to apply.
+  The status line now names what was applied and says when the empirical
+  `residual_corr_map` is *not* drawn. Also: the seed overlay carries fed-back
+  distortion (fresh fit **and** project restore — it silently drew tilt-only
+  rings before); **"Use seed as calibration (no fit)" removed** (superseded by
+  the Data Viewer's Ring simulation card + `Geometry: [← Get]`); d-spacing pick
+  controls hidden for crystalline calibrants, and leaving a d-spacing calibrant
+  cancels an active pick mode; Refine card compacted to three rows with Limits
+  as its own block, Seed/Advanced three-per-row, `S.Form.row` stretching every
+  field column; `IntegrationWorker` float64 end-to-end (it narrowed to float32
+  and widened back, so the Calibrate preview differed from the Batch run it
+  previews). New `tests/test_ring_projection.py` (11, every drawn point fed
+  back through `pixel_to_REta`) and `tests/test_calibrate_integration_accuracy.py`
+  (4, pinning the Calibrate profile equal to the Data Viewer's accurate path).
+- **`f44314d` Batch Integrate.** A multi-azimuth run's per-frame `(η, R)` cakes
+  were computed, written to disk and embedded in the project — and shown
+  nowhere; reopening such a project *raised* (2-D cake rows fed to the 1-D
+  waterfall buffer). New `CakeStackViewer` + an "Eta-R cakes" view tab, frame
+  scrubber, zoom preserved across steps; the 1-D views get an η-collapse over
+  filled bins; a non-multi-azimuth run clears the tab rather than showing stale
+  cakes. `CakeViewer`'s x-axis can be labelled R / 2θ / d / Q — tick strings
+  only, no resampling, d → "∞" at R = 0 — and the selector stays hidden until a
+  caller supplies geometry, which is what leaves Calibrate, Hydra and
+  `RingResidualViewer` untouched. Separately, an attempt's
+  `calibration_snapshot` is now the whole calibration via new
+  `helpers.full_calibration_snapshot` (a strict superset of the display
+  fields, so every existing reader is unchanged). New
+  `tests/test_batch_cake_stack.py` (21) + 2 in `test_project.py`.
+**Verified:** the 5 touched/new test files pass per-file on a clean `HOME`
+(11/4/21/23, and `test_project.py` 42 pass + the known
+`test_apply_project_calibration_single_detector` SIGABRT); `pyflakes
+midas_gui/*.py` 35 warnings before and after, line numbers only.
 
 **2026-09-11 — MIDAS backends bumped to current PyPI latest; the tilt/im_trans
 issue this repo filed came back fixed.** `midas-calibrate-v2` 0.13.0→**0.17.0**,
@@ -107,42 +152,25 @@ HEAD, offscreen screenshots of all three toolbars + the card column.
 
 **2026-09-09 — Manual d-spacing (AgBH/SAXS) fit made trustworthy.** Reported
 as *"calibration runs away and the AgBH rings are significantly off"* on a
-13.5 m SAXS geometry. Root cause is identifiability, not a solver bug: at
-small 2θ, Lsd/BC/tilt are nearly degenerate, so the fit converges happily
-onto noise. d-spacing calibrants now default to **BC-only** refinement
-(remembered separately from the crystalline defaults and swapped on the
-calibrant-kind transition), `fit_geometry_from_ring_picks` reports a
-per-parameter **1σ** plus `at_limit`/`clamped`/`method`, the worker logs
-`value ± σ` and warns when a parameter was not constrained, and a new
-**Limits…** dialog bounds any parameter to a window around its seed
-(switching the solver `lm`→`trf`; unbounded stays bit-identical). Also
-**Use seed as calibration (no fit)**, high-contrast haloed pick markers,
-and — unrelated, same session — a screen-pixel-sized lab-frame compass,
-ring labels anchored to the visible arc, mismatched correction fields
-skipped-and-flagged instead of fatal, Batch Integrate persisting its Tab-2
-calibration result, and `.h5` appended in Save Project As.
-**Files:** `helpers.py`, `workers.py`, `tab_calibrate.py`, `dialogs.py`,
-`constants.py`, `widgets.py`, `hydra_geometry_card.py`, `project.py`,
-`tab_batch.py`, `app.py`; new `tests/test_manual_fit_conditioning.py` and
-`tests/test_calibrate_state_restore.py`, plus additions to
-`test_manual_dspacing_calib_ui.py`, `test_helpers.py`, `test_project.py`,
-`test_calibrate_panel_save.py`, `test_workspace_ux.py`.
-`gui_documentation.md` §5 gained a *Non-crystalline calibrants* section and
-an expanded *Refine flags*.
+13.5 m SAXS geometry; root cause was identifiability, not a solver bug (at
+small 2θ, Lsd/BC/tilt are near-degenerate). d-spacing calibrants default to
+**BC-only** refinement, the fit reports per-parameter **1σ** +
+`at_limit`/`clamped`/`method`, and a **Limits…** dialog bounds a parameter to a
+window around its seed (`lm`→`trf`; unbounded stays bit-identical). Same
+session: lab-frame compass, ring labels on the visible arc, mismatched
+correction fields skipped-and-flagged instead of fatal, Batch persisting its
+Tab-2 calibration result. (**"Use seed as calibration (no fit)"** also landed
+here and was removed again 2026-09-11 — see above.) Full detail in DECISIONS.md.
 
 **2026-09-04 (`549e96f`) + 2026-09-02/03 (`092fbba`, `46e0fec`) — Jun-Sang Park's
-(`junspark`) PR #7 reviewed, fixed, covered by tests and merged in two halves
-(36 commits, ~+5500/−580 over ~30 files); PR closed.** Strain Cake tab, job
-queue, peak-fit panel, provenance, per-frame zarr cake, batch CLI, Batch
-Integrate output-folder/Exp-ID/preflight work, HDF5 stack fixes, viewer display
-persistence. Shipped with zero test changes; +108 tests added across 7 new files
-plus additions to `test_helpers.py`. Two real regressions caught only by holding
-a per-file baseline first: **silent frame loss** (the PR's zero-padding
-normalisation collapsed `scan_1`/`scan_01`/`scan_001` onto one output file — now
-owned by `workers.frame_output_base()`/`frame_output_stem`, de-duplicated per
-run) and a **stale import git couldn't see** (`zarr_cake.py`'s correct
-retirement auto-merged clean but left `tests/test_zarr_cake.py` importing a
-deleted module). Full detail in DECISIONS.md and
+(`junspark`) PR #7 reviewed, fixed, covered by tests and merged in two halves**
+(36 commits, ~+5500/−580 over ~30 files; PR closed). Strain Cake tab, job queue,
+peak-fit panel, provenance, per-frame zarr cake, batch CLI, Batch Integrate
+output-folder/Exp-ID/preflight work, HDF5 stack fixes. Shipped with zero test
+changes; +108 tests added. Two real regressions caught only by holding a
+per-file baseline first — silent frame loss from zero-padding normalisation
+(`scan_1`/`scan_01`/`scan_001` collapsing onto one output file) and a stale
+import git could not see. Full detail in DECISIONS.md and
 `documentation/development_history.md`.
 
 _(Older entries — `fd7f67a` Workstation provenance + Hydra Overall-Cake
