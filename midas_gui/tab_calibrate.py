@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Optional
 
 import numpy as np
@@ -33,7 +32,8 @@ from midas_gui.widgets import (
     ring_azimuth_residual)
 from midas_gui.workers import CalibrationWorker, IntegrationWorker, ManualDspacingCalibWorker
 from midas_gui.dialogs import (_SaveParamstestDialog, DistortionRefineDialog,
-                                PARAMETER_LIMIT_ROWS, limit_window, show_error)
+                                ManualSeedDialog, PARAMETER_LIMIT_ROWS, limit_window,
+                                show_error)
 from midas_gui.hydra_widgets import HydraModeRibbon
 from midas_gui.hydra_calib_page import HydraCalibrationPage
 from midas_gui import project
@@ -60,7 +60,6 @@ class CalibrationTab(QtWidgets.QWidget):
         self._calib_cancelled = False
         self._orphans: list = []       # aborted workers kept alive until they wind down
         self._ring_items: list = []
-        self._seed_ring_items: list = []
         self._calib_result = None
         self._dist_coeffs = set(DISTORTION_NAMES)   # distortion coeffs to refine
         self._seed_dist: dict = {}                  # seed distortion carried from a result
@@ -294,48 +293,91 @@ class CalibrationTab(QtWidgets.QWidget):
         lv.addWidget(avgc)
 
         # ── Initial seed ──
+        # "Manual seed…" opens a non-modal per-parameter panel (ManualSeedDialog):
+        # BC (as one pair — the backend only accepts BC_y/BC_z together, see
+        # calib._resolve_seed), Lsd, tx, ty, tz can each be independently
+        # ticked "include in seed"; an unticked parameter behaves exactly as
+        # if seeding were off for it alone (auto-seed for BC/Lsd, 0° default
+        # for a tilt). `_manual_seed_check` is kept only as a derived bulk
+        # on/off convenience — see `_on_seed_master_toggled`/
+        # `_on_seed_enable_changed` — for project-file backward compatibility
+        # and the Hydra cross-panel sync (hydra_calib_page._sync_seed_checkbox).
         seed = S.make_card("Initial seed  (Pick tools on image)")
         self._manual_seed_check = QtWidgets.QCheckBox("Use manual seed")
-        self._manual_seed_check.setToolTip(
-            "Enable BC + Lsd as the LM starting point.\n"
-            "Use Pick BC / Pick Ring on the image to populate BC automatically.")
-        seed.body.addWidget(self._manual_seed_check)
-        self._seed_bcy = _fspin(-99999, 99999, 2, DEFAULT_BC_Y, "px")
-        self._seed_bcz = _fspin(-99999, 99999, 2, DEFAULT_BC_Z, "px")
+        self._manual_seed_check.setTristate(True)
+        self._manual_seed_check.setVisible(False)   # superseded by the dialog; kept as internal/legacy state only
+        self._syncing_seed_master = False
+        # Displayed precision is deliberately coarser than the fit's: this card
+        # is a *starting point*, and a sub-0.1 px beam centre or a sub-µm Lsd is
+        # noise to type in. The extra digits only widened the column.
+        self._seed_bcy = _fspin(-99999, 99999, 1, DEFAULT_BC_Y, "px")
+        self._seed_bcz = _fspin(-99999, 99999, 1, DEFAULT_BC_Z, "px")
         # Lsd shown/entered in mm; calculations & files use µm.
-        self._seed_lsd = _fspin(0.001, 1e5, 4, DEFAULT_LSD_UM / 1000.0, " mm")
+        self._seed_lsd = _fspin(0.001, 1e5, 3, DEFAULT_LSD_UM / 1000.0, " mm")
         # Seed tilts (deg). Honoured by the four-stage / advanced pipelines; the
         # one-shot / first-time paths seed tilts only if the installed backend
         # exposes initial-tilt kwargs (otherwise they start at 0).
-        self._seed_tx = _fspin(-180, 180, 4, 0.0, "°")
-        self._seed_ty = _fspin(-180, 180, 4, 0.0, "°")
-        self._seed_tz = _fspin(-180, 180, 4, 0.0, "°")
+        self._seed_tx = _fspin(-180, 180, 2, 0.0, "°")
+        self._seed_ty = _fspin(-180, 180, 2, 0.0, "°")
+        self._seed_tz = _fspin(-180, 180, 2, 0.0, "°")
         self._seed_tilts = (self._seed_tx, self._seed_ty, self._seed_tz)
         for w in self._seed_tilts:
             w.setToolTip(
                 "Honoured by Four-stage / Bayesian / Joint (always), and by "
-                "One-shot when Multi-panel is enabled or Distortion refinement "
-                "is restricted to a subset of coefficients. Plain One-shot / "
-                "First-time only honour this if the installed calibrate() "
-                "backend exposes initial-tilt kwargs — a warning is logged "
-                "before Run if it doesn't and this value is non-zero.")
+                "One-shot (with or without Multi-panel / a partial distortion "
+                "selection). Plain One-shot / First-time only honour this if "
+                "the installed calibrate() backend exposes initial-tilt "
+                "kwargs — a warning is logged before Run if it doesn't and "
+                "this value is non-zero.")
+        self._seed_en_bc = QtWidgets.QCheckBox("Beam centre")
+        self._seed_en_lsd = QtWidgets.QCheckBox("Lsd")
+        self._seed_en_tx = QtWidgets.QCheckBox("tx")
+        self._seed_en_ty = QtWidgets.QCheckBox("ty")
+        self._seed_en_tz = QtWidgets.QCheckBox("tz")
+        self._seed_enables = (self._seed_en_bc, self._seed_en_lsd,
+                              self._seed_en_tx, self._seed_en_ty, self._seed_en_tz)
+        self._seed_en_bc.toggled.connect(self._seed_bcy.setEnabled)
+        self._seed_en_bc.toggled.connect(self._seed_bcz.setEnabled)
+        self._seed_en_lsd.toggled.connect(self._seed_lsd.setEnabled)
+        self._seed_en_tx.toggled.connect(self._seed_tx.setEnabled)
+        self._seed_en_ty.toggled.connect(self._seed_ty.setEnabled)
+        self._seed_en_tz.toggled.connect(self._seed_tz.setEnabled)
         for w in (self._seed_bcy, self._seed_bcz, self._seed_lsd, *self._seed_tilts):
             w.setEnabled(False)
-        for sig in (self._seed_bcy, self._seed_bcz, self._seed_lsd, *self._seed_tilts):
-            self._manual_seed_check.toggled.connect(sig.setEnabled)
-        sfm = S.Form()
-        sfm.row(("BC_y:", self._seed_bcy), ("BC_z:", self._seed_bcz), ("Lsd:", self._seed_lsd))
-        sfm.row(("tx:", self._seed_tx), ("ty:", self._seed_ty), ("tz:", self._seed_tz))
-        seed.body.addLayout(sfm)
+        for cb in self._seed_enables:
+            cb.toggled.connect(self._on_seed_enable_changed)
+        self._manual_seed_check.toggled.connect(self._on_seed_master_toggled)
+        # Column 2 holds only two-decimal degree fields, so it does not need the
+        # default numeric width — narrowing it is most of what keeps this card
+        # (and with it the whole left column) from setting the panel width.
+        for w in (self._seed_ty, self._seed_tz):
+            w.setMaximumWidth(76)
         self._feedback_check = QtWidgets.QCheckBox("Feed result back to seed")
         self._feedback_check.setChecked(True)
         self._feedback_check.setToolTip(
             "After a calibration, copy the optimized BC / Lsd / tilts / distortion "
             "back into these seed fields so the next run starts from them.")
-        seed.body.addWidget(self._feedback_check)
         self._seed_note = QtWidgets.QLabel("")
         self._seed_note.setStyleSheet(f"color:{S.ACCENT};font-size:10px"); self._seed_note.setWordWrap(True)
-        seed.body.addWidget(self._seed_note)
+        self._seed_dialog = ManualSeedDialog(
+            en_bc=self._seed_en_bc, bcy=self._seed_bcy, bcz=self._seed_bcz,
+            en_lsd=self._seed_en_lsd, lsd=self._seed_lsd,
+            en_tx=self._seed_en_tx, tx=self._seed_tx,
+            en_ty=self._seed_en_ty, ty=self._seed_ty,
+            en_tz=self._seed_en_tz, tz=self._seed_tz,
+            feedback_check=self._feedback_check, note=self._seed_note, parent=self)
+        self._seed_btn = QtWidgets.QPushButton("Manual seed…")
+        self._seed_btn.setToolTip(
+            "Choose which of BC / Lsd / tx / ty / tz to seed the fit's "
+            "starting point from. Use Pick BC / Pick Ring on the image to "
+            "populate BC while this is open.")
+        self._seed_btn.clicked.connect(self._open_seed_dialog)
+        seed.body.addWidget(self._seed_btn)
+        self._seed_summary_lbl = QtWidgets.QLabel("")
+        self._seed_summary_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        self._seed_summary_lbl.setWordWrap(True)
+        seed.body.addWidget(self._seed_summary_lbl)
+        self._update_seed_summary()
         lv.addWidget(seed)
 
         # ── Refine parameters ──
@@ -535,16 +577,11 @@ class CalibrationTab(QtWidgets.QWidget):
         # points at the hutch, not the pixel grid, so it is re-derived rather
         # than carried along (widgets.build_lab_frame_axes_items).
         self._img_view.originChanged.connect(self._redraw_lab_axes_if_on)
-        for sig in (self._seed_bcy.valueChanged, self._seed_bcz.valueChanged,
-                    self._seed_lsd.valueChanged, self._wl.valueChanged,
-                    self._pxY.valueChanged, self._pxZ_spin.valueChanged,
-                    self._seed_tx.valueChanged, self._seed_ty.valueChanged,
-                    self._seed_tz.valueChanged):
-            sig.connect(self._update_seed_ring_preview)
-        self._pxZ_check.toggled.connect(self._update_seed_ring_preview)
-        self._manual_seed_check.toggled.connect(self._update_seed_ring_preview)
-        self._cal.currentTextChanged.connect(self._update_seed_ring_preview)
-        self._dsp_custom_ed.textChanged.connect(self._update_seed_ring_preview)
+        # Nothing here redraws rings. This tab overlays one geometry and one
+        # only — the calibration it produced. Dialling a geometry in by eye and
+        # watching rings follow is the Data Viewer's Ring simulation card; a
+        # second, weaker copy of it driven by the seed fields meant ticking
+        # "Use manual seed" painted rings that no calibration had endorsed.
         right.addWidget(self._img_view)
 
         bot = QtWidgets.QTabWidget()
@@ -827,12 +864,12 @@ class CalibrationTab(QtWidgets.QWidget):
         the fit on the unbounded Levenberg-Marquardt path it has always
         used."""
         seed = self._limit_seed_values()
-        seeded = self._manual_seed_check.isChecked()
         out, skipped = {}, []
         for name, row in (self._limits or {}).items():
             if not (isinstance(row, dict) and row.get("on")) or name not in seed:
                 continue
-            if not seeded and name in self._SEED_DEPENDENT_LIMITS:
+            en = self._seed_enable_for_slot(name)
+            if en is not None and not en.isChecked() and name in self._SEED_DEPENDENT_LIMITS:
                 skipped.append(name)
                 continue
             try:
@@ -842,11 +879,95 @@ class CalibrationTab(QtWidgets.QWidget):
                 continue                      # unknown slot in a stale project file
         return (out or None), skipped
 
+    def _seed_enable_for_slot(self, name: str):
+        """The granular "include in seed" checkbox governing limit-row
+        ``name`` (``Lsd``/``BC_y``/``BC_z``/``tx``/``ty``/``tz``), or ``None``
+        for a slot with no seed concept (``wavelength_A``)."""
+        return {
+            "Lsd": self._seed_en_lsd, "BC_y": self._seed_en_bc, "BC_z": self._seed_en_bc,
+            "tx": self._seed_en_tx, "ty": self._seed_en_ty, "tz": self._seed_en_tz,
+        }.get(name)
+
+    # ── Per-parameter manual seed: enable flags, dialog, sparse dict ──
+
+    def _open_seed_dialog(self):
+        self._seed_dialog.show()
+        self._seed_dialog.raise_()
+        self._seed_dialog.activateWindow()
+
+    def _on_seed_enable_changed(self, *_args):
+        """A granular enable flag changed — resync the derived master
+        tri-state (used for legacy project state + Hydra's cross-panel sync)
+        and the visible summary, without re-firing ``_on_seed_master_toggled``."""
+        self._syncing_seed_master = True
+        try:
+            n_on = sum(cb.isChecked() for cb in self._seed_enables)
+            if n_on == 0:
+                self._manual_seed_check.setCheckState(QtCore.Qt.Unchecked)
+            elif n_on == len(self._seed_enables):
+                self._manual_seed_check.setCheckState(QtCore.Qt.Checked)
+            else:
+                self._manual_seed_check.setCheckState(QtCore.Qt.PartiallyChecked)
+        finally:
+            self._syncing_seed_master = False
+        self._update_seed_summary()
+
+    def _on_seed_master_toggled(self, *_args):
+        """``_manual_seed_check`` set programmatically or by a test/legacy
+        project restore — bulk on/off over every granular flag. Ignored while
+        ``_on_seed_enable_changed`` is itself updating the master's tri-state,
+        so the two don't bounce off each other."""
+        if self._syncing_seed_master:
+            return
+        want = self._manual_seed_check.isChecked()   # PartiallyChecked reads as True
+        for cb in self._seed_enables:
+            cb.setChecked(want)
+
+    def _update_seed_summary(self):
+        on = [label for cb, label in zip(
+                  self._seed_enables, ("BC", "Lsd", "tx", "ty", "tz"))
+              if cb.isChecked()]
+        self._seed_summary_lbl.setText(
+            "Seeding: " + ", ".join(on) if on else "Fully automatic (no manual seed)")
+
+    def _enable_seed(self, **flags):
+        """Tick specific granular seed-enable flags by slot name, e.g.
+        ``self._enable_seed(BC=True)``. Never unticks — callers that populate
+        a subset of fields (Pick BC, a partial geometry dict) should not
+        silently disable a parameter the user already enabled."""
+        by_name = dict(zip(("BC", "Lsd", "tx", "ty", "tz"), self._seed_enables))
+        for name, on in flags.items():
+            if on:
+                by_name[name].setChecked(True)
+
+    def _manual_seed_kwargs(self) -> dict:
+        """Sparse seed dict for ``calib.run_pipeline``'s ``manual_seed`` cfg
+        key: only the parameters actually ticked "include in seed" are
+        present. BC_y/BC_z always travel together (see
+        ``calib._resolve_seed``); ``distortion`` is carried along whenever
+        anything else is, unchanged from the previous all-or-nothing
+        behaviour — this task adds no per-coefficient seed-value control."""
+        manual: dict = {}
+        if self._seed_en_bc.isChecked():
+            manual["BC_y"] = self._seed_bcy.value()
+            manual["BC_z"] = self._seed_bcz.value()
+        if self._seed_en_lsd.isChecked():
+            manual["Lsd"] = self._seed_lsd.value() * 1000.0   # mm display → µm
+        for en, key, w in ((self._seed_en_tx, "tx", self._seed_tx),
+                           (self._seed_en_ty, "ty", self._seed_ty),
+                           (self._seed_en_tz, "tz", self._seed_tz)):
+            if en.isChecked():
+                manual[key] = w.value()
+        if manual and self._seed_dist:
+            manual["distortion"] = dict(self._seed_dist)
+        return manual
+
     # ── Seed feedback from a result ───────────────────────────────
 
     def _seed_from_result(self, result):
-        """Copy optimized geometry from a result into the seed fields."""
-        self._manual_seed_check.setChecked(True)
+        """Copy optimized geometry from a result into the seed fields — a
+        completed fit is a full geometry, so every parameter is enabled."""
+        self._enable_seed(BC=True, Lsd=True, tx=True, ty=True, tz=True)
         self._seed_bcy.setValue(float(result.BC_y))
         self._seed_bcz.setValue(float(result.BC_z))
         self._seed_lsd.setValue(float(result.Lsd) / 1000.0)   # µm → mm
@@ -857,12 +978,11 @@ class CalibrationTab(QtWidgets.QWidget):
             self._wl.setValue(float(result.wavelength_A))
         self._seed_dist = dict(getattr(result, "distortion", {}) or {})
         self._seed_note.setText(
-            f"Seed updated from the last fit: BC=({result.BC_y:.2f}, {result.BC_z:.2f}) px, "
+            f"Seed updated from the last fit: BC=({result.BC_y:.1f}, {result.BC_z:.1f}) px, "
             f"Lsd={float(result.Lsd) / 1000:.3f} mm, "
-            f"tx={float(getattr(result, 'tx', 0.0) or 0.0):.4f}°, "
-            f"ty={float(getattr(result, 'ty', 0.0) or 0.0):.4f}°, "
-            f"tz={float(getattr(result, 'tz', 0.0) or 0.0):.4f}°. Rings are drawn from these.")
-        self._update_seed_ring_preview()
+            f"tx={float(getattr(result, 'tx', 0.0) or 0.0):.2f}°, "
+            f"ty={float(getattr(result, 'ty', 0.0) or 0.0):.2f}°, "
+            f"tz={float(getattr(result, 'tz', 0.0) or 0.0):.2f}°.")
 
     def _im_trans_codes(self) -> list:
         """Ordered MIDAS ImTransOpt codes from the Transforms checkboxes."""
@@ -885,7 +1005,6 @@ class CalibrationTab(QtWidgets.QWidget):
             self._img_view.set_raw_frame(img, self._im_trans_codes(),
                                           autorange=autorange, reset_levels=autorange)
         self._redraw_lab_axes_if_on()
-        self._update_seed_ring_preview()
 
     # ── Lab-frame axes overlay ───────────────────────────────────────
     # Same overlay as the Data Viewer tab (see tab_view.py / widgets.py
@@ -953,7 +1072,7 @@ class CalibrationTab(QtWidgets.QWidget):
             self._pxZ_check.setChecked(True); self._pxZ_spin.setValue(float(g["pxZ"]))
         else:
             self._pxZ_check.setChecked(False)
-        self._manual_seed_check.setChecked(True)
+        self._enable_seed(BC=True, Lsd=True, tx=True, ty=True, tz=True)
         self._seed_bcy.setValue(float(g["BC_y"]))
         self._seed_bcz.setValue(float(g["BC_z"]))
         self._seed_lsd.setValue(float(g["Lsd"]) / 1000.0)   # µm → mm display
@@ -984,17 +1103,22 @@ class CalibrationTab(QtWidgets.QWidget):
             self._wl.setValue(float(g["wavelength_A"]))
         if g.get("pxY") is not None:
             self._pxY.setValue(float(g["pxY"]))
-        self._manual_seed_check.setChecked(True)
-        if g.get("BC_y") is not None:
+        # Only the geometry keys this dict actually carries get enabled as
+        # seed — a Data Viewer "Get" that supplies BC but not Lsd (say)
+        # should not also silently seed Lsd from whatever was last typed.
+        if g.get("BC_y") is not None and g.get("BC_z") is not None:
             self._seed_bcy.setValue(float(g["BC_y"]))
-        if g.get("BC_z") is not None:
             self._seed_bcz.setValue(float(g["BC_z"]))
+            self._enable_seed(BC=True)
         if g.get("Lsd") is not None:
             self._seed_lsd.setValue(float(g["Lsd"]) / 1000.0)   # µm → mm display
+            self._enable_seed(Lsd=True)
         if g.get("tx") is not None:
             self._seed_tx.setValue(float(g["tx"]))
+            self._enable_seed(tx=True)
         if g.get("ty") is not None:
             self._seed_ty.setValue(float(g["ty"]))
+            self._enable_seed(ty=True)
         if g.get("im_trans") is not None:
             im_trans = g["im_trans"] or []
             self._flip_y.setChecked(1 in im_trans)
@@ -1002,6 +1126,7 @@ class CalibrationTab(QtWidgets.QWidget):
             self._transp.setChecked(3 in im_trans)
         if g.get("tz") is not None:
             self._seed_tz.setValue(float(g["tz"]))
+            self._enable_seed(tz=True)
         self._seed_note.setText(
             f"Geometry from Data Viewer: λ={g.get('wavelength_A', 0):.5f} Å, "
             f"px={g.get('pxY', 0):.2f} µm, "
@@ -1011,17 +1136,18 @@ class CalibrationTab(QtWidgets.QWidget):
         self._log.append("Geometry pulled from Data Viewer tab.")
 
     def _on_bc_picked(self, bc_y, bc_z):
-        self._manual_seed_check.setChecked(True)
+        self._enable_seed(BC=True)
         self._seed_bcy.setValue(bc_y); self._seed_bcz.setValue(bc_z)
-        self._seed_note.setText("BC set from click — also set Lsd before running.")
-        self._log.append(f"BC set by click: ({bc_y:.2f}, {bc_z:.2f}) px — manual seed enabled")
+        self._seed_note.setText("BC set from click — Lsd is auto-seeded unless it's ticked too.")
+        self._log.append(f"BC set by click: ({bc_y:.2f}, {bc_z:.2f}) px — BC seed enabled")
 
     def _on_ring_fit_bc(self, bc_y, bc_z, r_px):
-        self._manual_seed_check.setChecked(True)
+        self._enable_seed(BC=True)
         self._seed_bcy.setValue(bc_y); self._seed_bcz.setValue(bc_z)
-        self._seed_note.setText(f"BC from ring fit (R={r_px:.1f} px). Set Lsd before running.")
+        self._seed_note.setText(
+            f"BC from ring fit (R={r_px:.1f} px). Lsd is auto-seeded unless it's ticked too.")
         self._log.append(
-            f"Ring fit: BC=({bc_y:.2f}, {bc_z:.2f}) px  R={r_px:.1f} px — manual seed enabled")
+            f"Ring fit: BC=({bc_y:.2f}, {bc_z:.2f}) px  R={r_px:.1f} px — BC seed enabled")
 
     # ── Manual d-spacing ring-picking fit (non-crystalline calibrants) ──
 
@@ -1100,7 +1226,6 @@ class CalibrationTab(QtWidgets.QWidget):
         self._adv_grp.setVisible(not is_dsp)
         self._run_btn.setText("Fit Geometry (manual)" if is_dsp else "Run Calibration")
         self._on_dspacing_picks_changed()
-        self._update_seed_ring_preview()
         self._update_refine_summary()
 
     def _manual_min_picks(self) -> int:
@@ -1153,12 +1278,19 @@ class CalibrationTab(QtWidgets.QWidget):
         self._orphans = [o for o in self._orphans if o.isRunning()]
         pxY = self._pxY.value()
         pxZ = self._pxZ_spin.value() if self._pxZ_check.isChecked() else pxY
+        # fit_geometry_from_ring_picks's ``seed`` is a single (Lsd, BC_y, BC_z)
+        # starting point, not independently settable per this helper's own
+        # API — so BC and Lsd both need to be ticked to supply it; otherwise
+        # the fit self-seeds from the picked points, as before. Tilts stay
+        # genuinely independent (each defaults to 0° unless its own flag is on).
         seed = None
-        if self._manual_seed_check.isChecked():
+        if self._seed_en_bc.isChecked() and self._seed_en_lsd.isChecked():
             seed = (self._seed_lsd.value() * 1000.0,   # mm display → µm
                     self._seed_bcy.value(), self._seed_bcz.value())
-        tilt_seed = (self._seed_tx.value(), self._seed_ty.value(), self._seed_tz.value()) \
-            if self._manual_seed_check.isChecked() else (0.0, 0.0, 0.0)
+        tilt_seed = (
+            self._seed_tx.value() if self._seed_en_tx.isChecked() else 0.0,
+            self._seed_ty.value() if self._seed_en_ty.isChecked() else 0.0,
+            self._seed_tz.value() if self._seed_en_tz.isChecked() else 0.0)
         img = self._img_view._data
         NZ, NY = img.shape[:2] if img is not None else (0, 0)
         material_name = self._cal.currentText()
@@ -1182,8 +1314,9 @@ class CalibrationTab(QtWidgets.QWidget):
         if skipped_limits:
             self._log.append(
                 f"Limits on {', '.join(sorted(skipped_limits))} ignored: they are "
-                f"windows around the manual seed, but 'Use manual seed' is off, so "
-                f"the fit is seeding from the picked points instead.")
+                f"windows around a manual seed value, but that parameter isn't "
+                f"ticked to be seeded (Manual seed…), so the fit is determining "
+                f"it from the picked points instead.")
         self._last_dist_coeffs = set()
         self._last_refine_flags = refine
         self._worker = ManualDspacingCalibWorker(
@@ -1288,16 +1421,9 @@ class CalibrationTab(QtWidgets.QWidget):
         }
         self._last_dist_coeffs = cfg["refine"]["distortion_coeffs"]
         self._last_refine_flags = cfg["refine"]
-        if self._manual_seed_check.isChecked():
-            cfg["manual_seed"] = {
-                "BC_y": self._seed_bcy.value(),
-                "BC_z": self._seed_bcz.value(),
-                "Lsd":  self._seed_lsd.value() * 1000.0,   # mm display → µm
-                "tx": self._seed_tx.value(),
-                "ty": self._seed_ty.value(),
-                "tz": self._seed_tz.value(),
-                "distortion": dict(self._seed_dist),
-            }
+        manual = self._manual_seed_kwargs()   # sparse: only ticked parameters
+        if manual:
+            cfg["manual_seed"] = manual
         if self._panel_grp.isChecked():
             cfg["panel_layout"] = {
                 "n_y": self._pn_y.value(), "n_z": self._pn_z.value(),
@@ -1305,18 +1431,18 @@ class CalibrationTab(QtWidgets.QWidget):
                 "gap_y": self._pg_y.value(), "gap_z": self._pg_z.value(),
             }
 
-        manual = cfg.get("manual_seed")
-        if manual and any(manual.get(k) for k in ("tx", "ty", "tz")):
+        if manual and any(k in manual for k in ("tx", "ty", "tz")):
             from midas_gui.calib import tilt_seed_effective
             if not tilt_seed_effective(mode, panel_layout=cfg.get("panel_layout"),
                                        refine=cfg["refine"]):
+                tilt_bits = ", ".join(f"{k}={manual[k]:.3f}°" for k in ("tx", "ty", "tz")
+                                      if k in manual)
                 self._log.append(
-                    f"⚠ Tilt seed (tx={manual['tx']:.3f}°, ty={manual['ty']:.3f}°, "
-                    f"tz={manual['tz']:.3f}°) will NOT be used: the '{self._pipeline.currentText()}' "
-                    "pipeline with these settings ignores an initial tilt guess — tilts "
-                    "start from 0° instead. Four-stage / Bayesian / Joint pipelines (or "
-                    "One-shot with Multi-panel, or with Distortion refinement restricted "
-                    "to a coefficient subset) do honour a tilt seed.")
+                    f"⚠ Tilt seed ({tilt_bits}) will NOT be used: the "
+                    f"'{self._pipeline.currentText()}' pipeline with these settings "
+                    "ignores an initial tilt guess — tilts start from 0° instead. "
+                    "Four-stage / Bayesian / Joint pipelines (or One-shot with "
+                    "Multi-panel) do honour a tilt seed.")
 
         self._last_cfg = dict(cfg)
         self._last_bright = bright
@@ -1601,17 +1727,17 @@ class CalibrationTab(QtWidgets.QWidget):
         return note
 
     def _draw_rings(self, result):
+        """Overlay ``result``'s predicted rings — the only rings this tab draws.
+
+        Whether "Use manual seed" is ticked makes no difference: the seed card
+        is an input to the fit, not a thing to preview. What is on screen is
+        always the geometry a calibration actually produced (or one restored
+        from a project attempt), so rings that sit off the measured ones mean
+        the fit, not the drawing."""
         self._calib_result = result
-        self._clear_seed_ring_preview()
         for item in self._ring_items:
             self._img_view._iv.removeItem(item)
         self._ring_items.clear()
-        if self._manual_seed_check.isChecked():
-            # The seed card owns the overlay — see _update_seed_ring_preview.
-            # With feedback on, _seed_from_result has already copied this
-            # result into it, so the rings drawn are this result's.
-            self._update_seed_ring_preview()
-            return
         max_r = max(result.NrPixelsY, result.NrPixelsZ)
         radii = [r for r in _predict_ring_radii(result) if 0 < r < max_r]
         visible = self._show_rings_check.isChecked()
@@ -1632,100 +1758,10 @@ class CalibrationTab(QtWidgets.QWidget):
     def _on_show_rings_toggled(self, visible):
         for item in self._ring_items:
             item.setVisible(visible)
-        self._update_seed_ring_preview()
-
-    # ── Seed-geometry ring preview (before any Fit/Run has completed) ──
-    # "Show rings" should still preview predicted ring positions computed
-    # from the current seed BC/Lsd/wavelength + calibrant d-spacings, not
-    # just toggle visibility of an already-fitted result's rings — the
-    # fitted-result overlay (_draw_rings/_ring_items, lime solid) takes
-    # over and this preview (cyan dashed) clears itself once self._result
-    # is set.
-
-    def _clear_seed_ring_preview(self):
-        for item in self._seed_ring_items:
-            self._img_view._iv.removeItem(item)
-        self._seed_ring_items.clear()
-
-    def _seed_ring_namespace(self):
-        """A minimal stand-in for an AutoCalibrationResult, built from the
-        current seed/manual geometry fields, for _predict_ring_radii()."""
-        if not self._manual_seed_check.isChecked():
-            return None   # seed fields are disabled/stale — nothing to preview
-        wl = self._wl.value()
-        lsd_um = self._seed_lsd.value() * 1000.0   # mm display → µm
-        if wl <= 0 or lsd_um <= 0:
-            return None
-        pxY = self._pxY.value()
-        pxZ = self._pxZ_spin.value() if self._pxZ_check.isChecked() else pxY
-        ns = SimpleNamespace(
-            BC_y=self._seed_bcy.value(), BC_z=self._seed_bcz.value(),
-            Lsd=lsd_um, wavelength_A=wl, pxY=pxY, pxZ=pxZ,
-            tx=self._seed_tx.value(), ty=self._seed_ty.value(),
-            tz=self._seed_tz.value(),
-            # Carried from the last fit by _seed_from_result. The seed card has
-            # no distortion widgets, but the overlay it drives is the one shown
-            # after a fit (feedback is on by default), so dropping the
-            # coefficients here would quietly undo the accurate projection in
-            # precisely the case it matters.
-            distortion=dict(self._seed_dist),
-            NrPixelsY=0, NrPixelsZ=0)
-        img = self._img_view._data
-        if img is not None:
-            ns.NrPixelsZ, ns.NrPixelsY = img.shape[:2]
-        name = self._cal.currentText()
-        if is_dspacing_calibrant(name):
-            d_list = self._manual_d_list()
-            if not d_list:
-                return None
-            ns._d_list = d_list
-        else:
-            ns._calibrant_name = name
-        return ns
-
-    def _update_seed_ring_preview(self, *_args):
-        """Draw the ring overlay from the geometry *currently shown in the seed
-        card* — before a fit and after one.
-
-        The seed card is the geometry the user can actually see and edit, and
-        with "Feed result back to seed" on it holds the most recent fit, so
-        driving the overlay from it keeps what is drawn and what is displayed
-        in agreement by construction. The overlay used to come from a hidden
-        result object instead, which meant a stale or badly-converged result
-        reloaded from a project could paint rings that matched nothing on
-        screen — including a runaway tilt turning them into near-vertical
-        curves — with no way to tell from the panel why.
-
-        With feedback off the seed is deliberately not the fit, so the rings
-        follow the seed and the fitted numbers stay in the Results grid.
-        """
-        self._clear_seed_ring_preview()
-        if not self._show_rings_check.isChecked():
+        if not self._ring_items:
             # Nothing on screen to describe — a leftover "N ring(s) …" beside
             # an unticked Show rings reads as an overlay that failed to appear.
-            if not self._ring_items:
-                self._ring_status.setText("")
-            return
-        ns = self._seed_ring_namespace()
-        if ns is None:
-            return
-        max_r = (max(ns.NrPixelsY, ns.NrPixelsZ)
-                 if (ns.NrPixelsY and ns.NrPixelsZ) else float("inf"))
-        radii = [r for r in _predict_ring_radii(ns) if 0 < r < max_r]
-        # Solid lime once the seed carries a fitted result, dashed cyan while
-        # it is still just a starting guess — same visual language as before.
-        fitted = self._result is not None
-        pen = (pg.mkPen("lime", width=1.2) if fitted else
-               pg.mkPen("cyan", width=1.0, style=QtCore.Qt.DashLine))
-        curves = self._ring_curves(ns, radii)
-        for ys, zs in curves:
-            item = pg.PlotDataItem(ys, zs, pen=pen)
-            self._img_view._iv.addItem(item); self._seed_ring_items.append(item)
-        bc = pg.ScatterPlotItem([ns.BC_y], [ns.BC_z], symbol="+", size=12,
-                                pen=pg.mkPen("lime" if fitted else "cyan", width=2))
-        self._img_view._iv.addItem(bc); self._seed_ring_items.append(bc)
-        self._ring_status.setText(
-            f"{len(curves)} ring(s) from seed geometry" + self._ring_model_note(ns))
+            self._ring_status.setText("")
 
     # ── Integration / residual chart ───────────────────────────────
 
@@ -1937,7 +1973,12 @@ class CalibrationTab(QtWidgets.QWidget):
             "avg_check": self._avg_check,
             "avg_start": self._avg_start,
             "avg_end": self._avg_end,
-            "manual_seed_check": self._manual_seed_check,
+            "manual_seed_check": self._manual_seed_check,   # derived bulk on/off — see _on_seed_enable_changed
+            "seed_en_bc": self._seed_en_bc,
+            "seed_en_lsd": self._seed_en_lsd,
+            "seed_en_tx": self._seed_en_tx,
+            "seed_en_ty": self._seed_en_ty,
+            "seed_en_tz": self._seed_en_tz,
             "seed_bcy": self._seed_bcy,
             "seed_bcz": self._seed_bcz,
             "seed_lsd": self._seed_lsd,
@@ -2012,7 +2053,15 @@ class CalibrationTab(QtWidgets.QWidget):
             self._restoring_state = False
 
     def _set_state(self, state: dict, sidecar_stem: Optional[str] = None) -> None:
-        apply_dict_to_widgets(self._state_widgets(), state.get("fields", {}))
+        fields = state.get("fields", {})
+        apply_dict_to_widgets(self._state_widgets(), fields)
+        if "seed_en_bc" not in fields and self._manual_seed_check.isChecked():
+            # A project saved before the per-parameter seed panel existed:
+            # "Use manual seed" meant BC+Lsd+tilts all together, so reproduce
+            # that exactly rather than silently seeding nothing.
+            self._enable_seed(BC=True, Lsd=True, tx=True, ty=True, tz=True)
+        else:
+            self._on_seed_enable_changed()   # resync the derived master tri-state
         self._update_limits_label()
         modes = state.get("refine_modes") or {}
         if isinstance(modes.get("xtal"), dict):
@@ -2057,9 +2106,9 @@ class CalibrationTab(QtWidgets.QWidget):
         longer on disk) still shows whatever it can."""
         self._result = result
         # The seed spin boxes come back from "fields", but distortion has no
-        # widget to be restored into — so without this a project reloaded with
-        # "Use manual seed" ticked routes its overlay through the seed path
-        # with no coefficients, and silently draws the tilt-only rings.
+        # widget to be restored into — so without this, re-running the fit from
+        # a reloaded project would seed it with no coefficients, quietly
+        # discarding the harmonics the stored result was refined with.
         self._seed_dist = dict(getattr(result, "distortion", {}) or {})
         try:
             self._populate_param_grid(paramstest_pairs(result))

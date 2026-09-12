@@ -833,10 +833,8 @@ def test_apply_project_calibration_single_detector(app, tmp_path):
     # Rings are redrawn from the stored result immediately (no image was
     # loaded here — loader_state's path doesn't exist — so the radial
     # profile/cake, which need an actual image, are correctly skipped).
-    # With the manual seed card active it owns the overlay, so _draw_rings
-    # delegates to the seed preview and the items land in _seed_ring_items.
     assert cal_tab._result is not None
-    assert len(cal_tab._ring_items) + len(cal_tab._seed_ring_items) > 0
+    assert len(cal_tab._ring_items) > 0
 
 
 def test_apply_project_mask_restores_fields_and_mask(app, tmp_path):

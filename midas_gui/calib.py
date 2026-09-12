@@ -107,9 +107,34 @@ def _distortion_coeffs(refine: dict) -> set:
     return set(DISTORTION_NAMES) if bool(refine.get("Distortion", True)) else set()
 
 
-def _manual_seed_dict(manual: dict) -> dict:
-    """Seed dict from a GUI manual_seed: BC/Lsd plus optional tilts + distortion."""
-    seed = {"BC_y": manual["BC_y"], "BC_z": manual["BC_z"], "Lsd": manual["Lsd"]}
+def _resolve_seed(manual: Optional[dict], image: np.ndarray, wavelength: float,
+                  pxY: float, calibrant: str) -> Optional[dict]:
+    """Build a full geometry seed (BC_y, BC_z, Lsd, tx, ty, tz) for the
+    v1-native pipelines (``build_v1_params`` needs concrete numbers to start
+    from regardless of what's actually being *refined*), mixing whichever
+    fields the GUI's per-parameter seed panel enabled with an automatic seed
+    for the rest.
+
+    ``manual`` is *sparse*: only keys the user ticked "include in seed" for
+    are present (BC_y and BC_z always travel together — the backend has no
+    way to seed one without the other). Returns ``None`` only when an
+    automatic seed is needed to fill a gap and it fails; callers already
+    raise their own "auto-seed failed, enable manual seed" error in that
+    case, same as before this function existed.
+    """
+    manual = manual or {}
+    have_bc = "BC_y" in manual and "BC_z" in manual
+    have_lsd = "Lsd" in manual
+    auto = None
+    if not (have_bc and have_lsd):
+        auto = make_seed_safe(image, wavelength, pxY, calibrant)
+        if auto is None:
+            return None
+    seed = {
+        "BC_y": manual["BC_y"] if have_bc else auto.BC_y,
+        "BC_z": manual["BC_z"] if have_bc else auto.BC_z,
+        "Lsd":  manual["Lsd"] if have_lsd else auto.Lsd_um,
+    }
     for k in ("tx", "ty", "tz"):
         if manual.get(k) is not None:
             seed[k] = float(manual[k])
@@ -272,15 +297,6 @@ def normalize_result(raw, mode: str, *, NY, NZ, pxY, pxZ, wavelength,
     # one_shot+panel_layout was re-routed through four_stage to expose unpacked
     if mode == "one_shot" and hasattr(raw, "stage2"):
         effective_mode = "four_stage"
-    elif mode == "one_shot" and hasattr(raw, "unpacked"):
-        # Partial distortion-coefficient refinement re-routed run_pipeline
-        # through pipelines.single.autocalibrate (see run_pipeline) — a
-        # CalibrationResult, not AutoCalibrationResult; normalize like
-        # first_time's pv.unpacked case.
-        return _auto_result_from_unpacked(
-            raw.unpacked, NY=NY, NZ=NZ, pxY=pxY, pxZ=pxZ, wavelength=wavelength,
-            strain=raw.post_residual_strain_uE, residual_map=raw.residual_corr_map,
-            residual_bin_path=getattr(raw, "_residual_bin_path", None))
     else:
         effective_mode = mode
 
@@ -370,10 +386,9 @@ def tilt_seed_effective(mode: str, *, panel_layout=None, refine: Optional[dict] 
     * ``four_stage`` / ``bayesian`` / ``joint`` always seed tilts via
       :func:`build_v1_params` (``CalibrationParams`` takes tx/ty/tz directly).
     * ``one_shot`` seeds tilts the same way when internally routed through
-      ``autocalibrate_four_stage`` (``panel_layout`` set) or
-      ``pipelines.single.autocalibrate`` (distortion refinement restricted to
-      a subset of coefficients) — see the corresponding branches in
-      :func:`run_pipeline`. The *plain* one_shot path calls
+      ``autocalibrate_four_stage`` (``panel_layout`` set) — see the
+      corresponding branch in :func:`run_pipeline`. Every other one_shot case
+      (full, no, or partial distortion refinement) calls
       ``midas_calibrate_v2.calibrate()`` directly, whose ``initial_tx/ty/tz``
       kwargs are silently dropped by :func:`_supported_kwargs` unless the
       installed backend's signature actually exposes them — checked here at
@@ -388,10 +403,6 @@ def tilt_seed_effective(mode: str, *, panel_layout=None, refine: Optional[dict] 
         return False
     if mode == "one_shot":
         if panel_layout:
-            return True
-        refine = refine or {}
-        coeffs = _distortion_coeffs(refine)
-        if refine.get("Distortion", True) and coeffs and coeffs != set(DISTORTION_NAMES):
             return True
         try:
             import inspect
@@ -435,15 +446,11 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
             # refined panel shifts; normalize_result detects the FourStageResult
             # via its .stage2 attribute and handles it correctly.
             img, dk, pNY, pNZ = _prep_transformed(image, dark, im_trans)
-            if manual:
-                seed = _manual_seed_dict(manual)
-            else:
-                s = make_seed_safe(img, wavelength, pxY, calibrant)
-                if s is None:
-                    raise RuntimeError(
-                        "Auto-seed failed for panel calibration (one_shot). "
-                        "Enable manual seed (Pick BC / Pick Ring + Lsd) and retry.")
-                seed = {"BC_y": s.BC_y, "BC_z": s.BC_z, "Lsd": s.Lsd_um}
+            seed = _resolve_seed(manual, img, wavelength, pxY, calibrant)
+            if seed is None:
+                raise RuntimeError(
+                    "Auto-seed failed for panel calibration (one_shot). "
+                    "Enable manual seed (Pick BC / Pick Ring + Lsd) and retry.")
             v1 = build_v1_params(
                 seed, wavelength=wavelength, pxY=pxY, pxZ=pxZ, calibrant=calibrant,
                 NY=pNY, NZ=pNZ, refine=refine, n_iter=n_iter, device=device)
@@ -452,50 +459,22 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
                 v1, img, dark=dk, device=device, panel_layout=panel_layout,
                 spec=_panel_spec(v1, panel_layout), verbose=True)
 
-        coeffs = _distortion_coeffs(refine)
-        if refine.get("Distortion", True) and coeffs and coeffs != set(DISTORTION_NAMES):
-            # midas_calibrate_v2.calibrate() only exposes an all-or-nothing
-            # refine_distortion bool (every p-slot gets the same flag) — route
-            # through the same lower-level single-pass routine four_stage /
-            # bayesian / joint already use (build_v1_params' per-p# Refine
-            # dict) so the LM fit actually restricts itself to the selected
-            # coefficients instead of silently widening the selection to all 15.
-            img, dk, pNY, pNZ = _prep_transformed(image, dark, im_trans)
-            if manual:
-                seed = _manual_seed_dict(manual)
-            else:
-                s = make_seed_safe(img, wavelength, pxY, calibrant)
-                if s is None:
-                    raise RuntimeError(
-                        "Auto-seed failed for partial distortion refinement "
-                        "(one_shot). Enable manual seed (Pick BC / Pick Ring + "
-                        "Lsd) and retry.")
-                seed = {"BC_y": s.BC_y, "BC_z": s.BC_z, "Lsd": s.Lsd_um}
-            v1 = build_v1_params(
-                seed, wavelength=wavelength, pxY=pxY, pxZ=pxZ, calibrant=calibrant,
-                NY=pNY, NZ=pNZ, refine=refine, n_iter=n_iter, device=device)
-            bin_path = None
-            if cfg.get("output_dir"):
-                from pathlib import Path
-                out = Path(cfg["output_dir"]); out.mkdir(parents=True, exist_ok=True)
-                bin_path = str(out / "residual_corr.bin")
-            from midas_calibrate_v2.pipelines.single import autocalibrate
-            raw = autocalibrate(
-                v1, img, dark=dk, n_iter=n_iter, lm_max_iter=lm_iter,
-                device=device, verbose=True,
-                build_residual_corr=bool(cfg.get("build_residual_corr", True)),
-                residual_corr_path=bin_path)
-            raw._residual_bin_path = bin_path   # no .bin field on CalibrationResult
-            return raw
-
         from midas_calibrate_v2 import calibrate
+        coeffs = _distortion_coeffs(refine)
         kwargs = dict(
             wavelength=wavelength, pxY=pxY, dark=dark, calibrant=calibrant,
             output_dir=cfg.get("output_dir"),
             build_residual_corr=bool(cfg.get("build_residual_corr", True)),
             n_iter=n_iter, lm_max_iter=lm_iter, device=device, verbose=True,
             refine_tilts=bool(refine.get("ty", True) or refine.get("tz", True)),
-            refine_distortion=bool(_distortion_coeffs(refine)),
+            # calibrate() accepts a bool OR an explicit list of v2 coefficient
+            # names (Union[bool, str, Sequence[str]] — see
+            # forward.distortion.resolve_distortion_block, which it calls
+            # internally): a partial selection reaches the fit exactly as
+            # ticked, instead of being widened to "refine all 15" the way a
+            # bare bool would. ``coeffs`` is already empty exactly when the
+            # "Distortion" checkbox is off (see _distortion_coeffs).
+            refine_distortion=(sorted(coeffs) if coeffs else False),
         )
         if pxZ:
             kwargs["pxZ"] = pxZ
@@ -503,9 +482,20 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
             kwargs["im_trans"] = im_trans
         # BC + Lsd seed must be supplied together (see bugs_and_fixes Bug 5)
         if manual:
-            kwargs["initial_BC_y"] = manual["BC_y"]
-            kwargs["initial_BC_z"] = manual["BC_z"]
-            kwargs["initial_Lsd"]  = manual["Lsd"]
+            have_bc = "BC_y" in manual and "BC_z" in manual
+            if have_bc:
+                kwargs["initial_BC_y"] = manual["BC_y"]
+                kwargs["initial_BC_z"] = manual["BC_z"]
+            if "Lsd" in manual:
+                kwargs["initial_Lsd"] = manual["Lsd"]
+            elif have_bc:
+                # BC_guess (BC_y+BC_z) bypasses calibrate()'s own auto-seeder
+                # entirely, Lsd included — so BC-only seeding would otherwise
+                # silently start Lsd from the library's 1 m nominal. Auto-seed
+                # once here just for a plausible Lsd instead.
+                auto = make_seed_safe(image, wavelength, pxY, calibrant)
+                if auto is not None and auto.Lsd_um:
+                    kwargs["initial_Lsd"] = auto.Lsd_um
             # Seed tilts only if the installed calibrate() exposes them
             # (_supported_kwargs drops any it does not accept).
             for k in ("tx", "ty", "tz"):
@@ -522,8 +512,10 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
             wavelength_A=wavelength,
             pixel_size_um=pxY,
             n_pixels_y=NY, n_pixels_z=NZ,
-            lsd_initial_guess_um=(manual["Lsd"] if manual else DEFAULT_LSD_UM),
-            bc_initial_guess=((manual["BC_y"], manual["BC_z"]) if manual else None),
+            lsd_initial_guess_um=((manual or {}).get("Lsd", DEFAULT_LSD_UM)),
+            bc_initial_guess=((manual["BC_y"], manual["BC_z"])
+                              if manual and "BC_y" in manual and "BC_z" in manual
+                              else None),
             dark=dark,
             # first_time_calibrate registers + refines panel shifts correctly
             # on its own (unlike four_stage/bayesian/joint below, which need
@@ -550,15 +542,11 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
     if mode == "four_stage":
         from midas_calibrate_v2.pipelines import autocalibrate_four_stage
         img, dk, pNY, pNZ = _prep_transformed(image, dark, im_trans)
-        if manual:
-            seed = _manual_seed_dict(manual)
-        else:
-            s = make_seed_safe(img, wavelength, pxY, calibrant)
-            if s is None:
-                raise RuntimeError(
-                    "Auto-seed failed for four-stage pipeline. "
-                    "Enable manual seed (Pick BC / Pick Ring + Lsd) and retry.")
-            seed = {"BC_y": s.BC_y, "BC_z": s.BC_z, "Lsd": s.Lsd_um}
+        seed = _resolve_seed(manual, img, wavelength, pxY, calibrant)
+        if seed is None:
+            raise RuntimeError(
+                "Auto-seed failed for four-stage pipeline. "
+                "Enable manual seed (Pick BC / Pick Ring + Lsd) and retry.")
         v1 = build_v1_params(
             seed, wavelength=wavelength, pxY=pxY, pxZ=pxZ, calibrant=calibrant,
             NY=pNY, NZ=pNZ, refine=refine, n_iter=n_iter, device=device)
@@ -591,14 +579,10 @@ def _seed_and_v1(image, wavelength, pxY, pxZ, calibrant, NY, NZ,
     — this seeds directly from whatever array is passed in, so the caller is
     responsible for making sure it's the same array that gets solved against.
     """
-    if manual:
-        seed = _manual_seed_dict(manual)
-    else:
-        s = make_seed_safe(image, wavelength, pxY, calibrant)
-        if s is None:
-            raise RuntimeError(
-                "Auto-seed failed. Enable manual seed (Pick BC / Pick Ring + Lsd).")
-        seed = {"BC_y": s.BC_y, "BC_z": s.BC_z, "Lsd": s.Lsd_um}
+    seed = _resolve_seed(manual, image, wavelength, pxY, calibrant)
+    if seed is None:
+        raise RuntimeError(
+            "Auto-seed failed. Enable manual seed (Pick BC / Pick Ring + Lsd).")
     return build_v1_params(
         seed, wavelength=wavelength, pxY=pxY, pxZ=pxZ, calibrant=calibrant,
         NY=NY, NZ=NZ, refine=refine, n_iter=n_iter, device=device)

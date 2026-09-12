@@ -634,53 +634,75 @@ def _ring_extents(tab):
     extents, a tilt-distorted one does not."""
     import numpy as np
     out = []
-    for it in tab._seed_ring_items:
+    for it in tab._ring_items:
         d = it.getData() if hasattr(it, "getData") else None
         if d and d[0] is not None and len(d[0]) > 10:
             out.append((float(np.ptp(d[0])), float(np.ptp(d[1]))))
     return out
 
 
-def test_ring_overlay_is_driven_by_the_seed_card(app):
-    """The overlay must come from the geometry shown in the seed card, so a
-    stale or badly-converged result can never paint rings that disagree with
-    the numbers on screen (the AgBH runaway-tilt bug)."""
+def test_seed_card_never_draws_rings(app):
+    """The Calibrate tab overlays calibration results only. Previewing a
+    hand-dialled geometry belongs to the Data Viewer's Ring simulation card;
+    doing it here too meant ticking "Use manual seed" painted rings no
+    calibration had endorsed, which reads as a calibrated overlay."""
     import midas_gui.tab_calibrate as tab_calibrate_mod
     tab = tab_calibrate_mod.CalibrationTab()
     tab._cal.setCurrentIndex(tab._cal.findText("AgBH (silver behenate)"))
     tab._wl.setValue(0.1730); tab._pxY.setValue(55.0)
+    tab._show_rings_check.setChecked(True)
     tab._manual_seed_check.setChecked(True)
     tab._seed_lsd.setValue(13500.0)
     tab._seed_bcy.setValue(129.0); tab._seed_bcz.setValue(124.0)
-    tab._show_rings_check.setChecked(True)
-    tab._feedback_check.setChecked(True)
+    assert tab._ring_items == []
+    assert tab._ring_status.text() == ""
 
-    untilted = _ring_extents(tab)
-    assert untilted, "seed geometry should draw rings before any fit"
+    # Only a result puts rings on the image — and editing the seed afterwards
+    # leaves them where the fit put them.
+    result = SimpleNamespace(
+        Lsd=13500e3, BC_y=129.0, BC_z=124.0, tx=0.0, ty=0.0, tz=0.0,
+        distortion={}, pxY=55.0, pxZ=55.0, NrPixelsY=3072, NrPixelsZ=512,
+        wavelength_A=0.1730, _calibrant_name="AgBH (silver behenate)",
+        _d_list=sorted([58.380 / n for n in range(1, 11)], reverse=True),
+        im_trans=[])
+    tab._draw_rings(result)
+    drawn = _ring_extents(tab)
+    assert drawn, "a fitted result should draw rings"
     # Circles, to within the 512-point sampling of the curve.
-    for y_ext, z_ext in untilted:
+    for y_ext, z_ext in drawn:
         assert y_ext == pytest.approx(z_ext, rel=1e-3)
 
-    # A fit that ran away in tilt, fed back into the seed.
-    bad = SimpleNamespace(
+    tab._seed_ty.setValue(-82.0)
+    assert _ring_extents(tab) == pytest.approx(drawn, rel=1e-9)
+
+
+def test_fitted_tilt_reaches_the_overlay_with_the_seed_card_on(app):
+    """"Use manual seed" used to divert the overlay through the seed fields.
+    A result's own tilt must reach the image whether it is ticked or not."""
+    import midas_gui.tab_calibrate as tab_calibrate_mod
+    tab = tab_calibrate_mod.CalibrationTab()
+    tab._cal.setCurrentIndex(tab._cal.findText("AgBH (silver behenate)"))
+    tab._wl.setValue(0.1730); tab._pxY.setValue(55.0)
+    tab._show_rings_check.setChecked(True)
+    tab._manual_seed_check.setChecked(True)
+    tab._feedback_check.setChecked(True)
+
+    tilted = SimpleNamespace(
         Lsd=13500e3, BC_y=129.0, BC_z=124.0, tx=0.0, ty=-82.0, tz=0.0,
         distortion={}, pxY=55.0, pxZ=55.0, NrPixelsY=3072, NrPixelsZ=512,
         wavelength_A=0.1730, _calibrant_name="AgBH (silver behenate)",
         _d_list=sorted([58.380 / n for n in range(1, 11)], reverse=True),
         im_trans=[])
-    tab._result = bad
-    tab._seed_from_result(bad)
+    tab._result = tilted
+    tab._seed_from_result(tilted)
+    tab._draw_rings(tilted)
 
-    # The runaway tilt is now visible in the seed card, not hidden in a result.
+    # The tilt is both visible in the seed card and applied to the overlay.
     assert tab._seed_ty.value() == pytest.approx(-82.0)
     assert "ty=-82" in tab._seed_note.text()
-    distorted = _ring_extents(tab)
-    assert distorted[0][1] > 3 * distorted[0][0]            # stretched, not circular
-
-    # ...and editing the seed corrects the overlay immediately.
-    tab._seed_ty.setValue(0.0)
-    for y_ext, z_ext in _ring_extents(tab):
-        assert y_ext == pytest.approx(z_ext, rel=1e-3)
+    stretched = _ring_extents(tab)
+    assert stretched[0][1] > 3 * stretched[0][0]            # stretched, not circular
+    assert "tilt applied" in tab._ring_status.text()
 
 
 def test_ring_labels_land_on_the_visible_arc(app):
@@ -774,34 +796,47 @@ def test_refine_card_lays_out_as_three_rows(app):
     assert rows[2] == [tab._dist_row, tab._build_rc]
 
 
-def test_seed_and_advanced_cards_pack_three_controls_per_row(app):
-    """BC_y/BC_z/Lsd then tx/ty/tz; E-M iters/LM iters/Device on one line."""
+def _row_of(w):
+    """Grid row of ``w`` within whichever grid layout holds it, descending
+    through nested layouts starting at its parent widget's own layout."""
+    def walk(layout):
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            if item.widget() is w and isinstance(layout, QtWidgets.QGridLayout):
+                return layout.getItemPosition(i)[0]
+            sub = item.layout()
+            if sub is not None:
+                found = walk(sub)
+                if found is not None:
+                    return found
+        return None
+    row = walk(w.parentWidget().layout())
+    assert row is not None, f"{w} not found in any grid under its parent"
+    return row
+
+
+def test_advanced_card_packs_three_controls_per_row(app):
+    """E-M iters/LM iters/Device on one line."""
+    import midas_gui.tab_calibrate as tab_calibrate_mod
+    tab = tab_calibrate_mod.CalibrationTab()
+    assert _row_of(tab._n_iter) == _row_of(tab._lm_iter) == _row_of(tab._device)
+
+
+def test_manual_seed_dialog_lays_out_one_row_per_parameter(app):
+    """The per-parameter seed panel (ManualSeedDialog, behind the "Manual
+    seed…" button): BC_y and BC_z share the "Beam centre" row (the backend
+    only takes them as a pair — see calib._resolve_seed); Lsd/tx/ty/tz each
+    get their own row so each can be ticked independently."""
     import midas_gui.tab_calibrate as tab_calibrate_mod
     tab = tab_calibrate_mod.CalibrationTab()
 
-    def _row_of(w):
-        """Grid row of ``w`` within whichever S.Form grid holds it. The Form is
-        nested inside its card's QVBoxLayout via addLayout, so it is not
-        reachable from the parent widget's layout without descending."""
-        def walk(layout):
-            for i in range(layout.count()):
-                item = layout.itemAt(i)
-                if item.widget() is w and isinstance(layout, QtWidgets.QGridLayout):
-                    return layout.getItemPosition(i)[0]
-                sub = item.layout()
-                if sub is not None:
-                    found = walk(sub)
-                    if found is not None:
-                        return found
-            return None
-        row = walk(w.parentWidget().layout())
-        assert row is not None, f"{w} not found in any grid under its parent"
-        return row
-
-    assert _row_of(tab._seed_bcy) == _row_of(tab._seed_bcz) == _row_of(tab._seed_lsd)
-    assert _row_of(tab._seed_tx) == _row_of(tab._seed_ty) == _row_of(tab._seed_tz)
-    assert _row_of(tab._seed_bcy) != _row_of(tab._seed_tx)
-    assert _row_of(tab._n_iter) == _row_of(tab._lm_iter) == _row_of(tab._device)
+    assert tab._seed_bcy.parentWidget() is tab._seed_dialog
+    assert _row_of(tab._seed_bcy) == _row_of(tab._seed_bcz)
+    for w in (tab._seed_lsd, tab._seed_tx, tab._seed_ty, tab._seed_tz):
+        assert _row_of(w) not in (_row_of(tab._seed_bcy),)
+    rows = {_row_of(w) for w in
+            (tab._seed_lsd, tab._seed_tx, tab._seed_ty, tab._seed_tz)}
+    assert len(rows) == 4, "Lsd/tx/ty/tz must each get their own row"
 
 
 def test_rings_account_for_distortion_with_no_toggle_to_find(app):
@@ -858,11 +893,11 @@ def test_ring_status_flags_the_residual_map_it_cannot_draw(app):
     assert "residual map not drawn" in tab._ring_status.text()
 
 
-def test_reloaded_result_keeps_its_distortion_for_the_seed_overlay(app):
-    """With "Use manual seed" on, the overlay is driven by the seed namespace —
-    which has no distortion widgets to be restored from project fields. The
-    coefficients have to be carried across explicitly or a reloaded project
-    quietly draws the tilt-only rings."""
+def test_reloaded_result_keeps_its_distortion_for_the_next_seed(app):
+    """The seed card has no distortion widgets to be restored from project
+    fields, so the coefficients have to be carried across explicitly — else
+    re-running the fit from a reloaded project seeds it with none, quietly
+    discarding the harmonics the stored result was refined with."""
     import midas_gui.tab_calibrate as tab_calibrate_mod
     tab = tab_calibrate_mod.CalibrationTab()
     assert tab._seed_dist == {}
@@ -872,5 +907,3 @@ def test_reloaded_result_keeps_its_distortion_for_the_seed_overlay(app):
         distortion={"iso_R2": 5e-3}, _calibrant_name="CeO2", im_trans=[],
         post_residual_strain_uE=None), reintegrate_if_missing=False)
     assert tab._seed_dist == {"iso_R2": 5e-3}
-    assert tab._seed_ring_namespace() is None or \
-        tab._seed_ring_namespace().distortion == {"iso_R2": 5e-3}

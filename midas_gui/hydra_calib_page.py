@@ -373,6 +373,10 @@ class HydraCalibrationPage(QtWidgets.QWidget):
                 lambda checked, n=n: self._sync_seed_checkbox("_manual_seed_check", n, checked))
             card._feedback_check.toggled.connect(
                 lambda checked, n=n: self._sync_seed_checkbox("_feedback_check", n, checked))
+            for attr in ("_seed_en_bc", "_seed_en_lsd", "_seed_en_tx",
+                        "_seed_en_ty", "_seed_en_tz"):
+                getattr(card, attr).toggled.connect(
+                    lambda checked, n=n, a=attr: self._sync_seed_checkbox(a, n, checked, block=False))
             self._cards[n] = card
             self._card_stack.addWidget(card)
         lv.addWidget(self._card_stack)
@@ -520,20 +524,35 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         if g.get("pxY"):
             self._pxY.setValue(float(g["pxY"]))
 
-    def _sync_seed_checkbox(self, attr: str, src_panel: int, checked: bool):
-        """"Use manual seed" / "Feed result back to seed" are one shared
-        choice across all 4 GE panels (only the seed VALUES — BC/Lsd/tilts —
-        stay independent per panel), so mirror a change on one panel's
-        checkbox onto the other three without re-triggering their own
-        ``toggled`` handlers."""
+    def _sync_seed_checkbox(self, attr: str, src_panel: int, checked: bool,
+                            block: bool = True):
+        """"Use manual seed" / "Feed result back to seed" / each per-parameter
+        seed-enable flag are one shared choice across all 4 GE panels (only
+        the seed VALUES — BC/Lsd/tilts — stay independent per panel), so
+        mirror a change on one panel's checkbox onto the other three.
+
+        ``block`` (default True, matching the original "Use manual seed" /
+        "Feed result back" behaviour) blocks the destination's own
+        ``toggled`` handlers while mirroring. The five per-parameter
+        ``_seed_en_*`` flags pass ``block=False`` instead: each drives that
+        card's own spin-box enable state and seed summary label
+        (``_on_seed_enable_changed``), which must actually run on every
+        mirrored panel, not just the one the user clicked. The equality
+        guard below still prevents runaway recursion — a card whose flag
+        already matches ``checked`` is a no-op, so the cascade this can
+        trigger (each card's own ``toggled`` re-enters this method) settles
+        in at most one pass per panel."""
         for n, card in self._cards.items():
             if n == src_panel:
                 continue
             cb = getattr(card, attr)
             if cb.isChecked() != checked:
-                cb.blockSignals(True)
-                cb.setChecked(checked)
-                cb.blockSignals(False)
+                if block:
+                    cb.blockSignals(True)
+                    cb.setChecked(checked)
+                    cb.blockSignals(False)
+                else:
+                    cb.setChecked(checked)
 
     # ── Per-panel frame sourcing ─────────────────────────────────────
 
@@ -1094,7 +1113,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             card = self._cards.get(int(n_key))
             if card is None:
                 continue
-            apply_dict_to_widgets(card.state_widgets(), fields)
+            card.apply_state_fields(fields)
             if "show_rings" in fields:
                 card.set_show_rings(bool(fields["show_rings"]))
         anchor = state.get("anchor_path")

@@ -51,6 +51,15 @@ class DistortionRefineDialog(QtWidgets.QDialog):
     preset buttons auto-select a coefficient set (see
     :data:`midas_gui.constants.DISTORTION_PRESETS`).  ``selected()`` returns the
     set of checked v2 coefficient names.
+
+    Each fold's amplitude (``a{k}``) and phase (``phi{k}``) are kept ticked
+    together: ``midas_calibrate_v2.forward.distortion.resolve_distortion_block``
+    rejects one without the other ("an amplitude without its phase is not a
+    meaningful degree of freedom, and a phase without its amplitude has zero
+    gradient"), so letting the GUI produce that selection is just a deferred,
+    less legible version of the same error. The three isotropic terms
+    (``iso_R2/4/6``) carry no such constraint and stay independently
+    toggleable.
     """
 
     def __init__(self, selected=None, parent=None):
@@ -58,12 +67,15 @@ class DistortionRefineDialog(QtWidgets.QDialog):
         self.setWindowTitle("Distortion parameters to refine")
         self.setMinimumWidth(360)
         selected = set(selected or [])
+        self._syncing_pair = False
 
         layout = QtWidgets.QVBoxLayout(self)
         info = QtWidgets.QLabel(
             "Choose which distortion harmonics the calibration refines.  Use a "
             "preset to select a whole η-fold ladder, or tick coefficients "
-            "individually.")
+            "individually.  Each fold's amplitude and phase are linked — "
+            "ticking one ticks the other, since the backend refuses one "
+            "without the other.")
         info.setWordWrap(True)
         info.setStyleSheet("color:#bbb;font-size:11px;padding-bottom:6px;")
         layout.addWidget(info)
@@ -95,12 +107,31 @@ class DistortionRefineDialog(QtWidgets.QDialog):
                 grid.addWidget(cb, r, col)
                 col += 1
         layout.addLayout(grid)
+        # Wire amplitude/phase pairs after every box exists (each handler
+        # needs to look up its partner by name).
+        for k in range(1, 7):
+            a, phi = self._boxes[f"a{k}"], self._boxes[f"phi{k}"]
+            a.toggled.connect(lambda checked, other=phi: self._sync_pair(other, checked))
+            phi.toggled.connect(lambda checked, other=a: self._sync_pair(other, checked))
 
         btns = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
+
+    def _sync_pair(self, other: QtWidgets.QCheckBox, checked: bool):
+        """Mirror a fold's amplitude/phase checkbox onto its partner.
+
+        Guarded by ``_syncing_pair`` so the partner's own ``toggled`` (fired
+        by ``setChecked`` below) doesn't bounce back and re-enter this."""
+        if self._syncing_pair or other.isChecked() == checked:
+            return
+        self._syncing_pair = True
+        try:
+            other.setChecked(checked)
+        finally:
+            self._syncing_pair = False
 
     def _apply_preset(self, coeffs):
         want = set(coeffs)
@@ -110,6 +141,69 @@ class DistortionRefineDialog(QtWidgets.QDialog):
     def selected(self) -> set:
         """Set of checked coefficient names (v2 harmonic names)."""
         return {nm for nm, cb in self._boxes.items() if cb.isChecked()}
+
+
+class ManualSeedDialog(QtWidgets.QDialog):
+    """Per-parameter "include in seed" panel behind a "Manual seed…" button.
+
+    Deliberately non-modal: Pick BC / Pick Ring live as toolbar buttons on the
+    image viewer, not in this dialog, so a modal window here would block the
+    exact workflow the seed card exists to support (click Pick BC, then click
+    a point on the image). Rather than own copies of the value/enable widgets
+    and copy them in/out, this dialog *reparents* the caller's own widgets
+    into its layout at construction time — so a pick made on the image while
+    the dialog is open updates it immediately, no sync step needed, and
+    there is nothing to accept/cancel (edits already apply live, exactly
+    like the inline fields this replaces).
+
+    ``en_bc`` gates the BC_y/BC_z pair together (the backend takes them as a
+    pair or not at all — see ``calib._resolve_seed`` — so one checkbox is
+    correct here, not two).
+    """
+
+    def __init__(self, *, en_bc, bcy, bcz, en_lsd, lsd, en_tx, tx, en_ty, ty,
+                en_tz, tz, feedback_check=None, note=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Manual seed")
+        self.setModal(False)
+        self.setMinimumWidth(320)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        info = QtWidgets.QLabel(
+            "Tick a parameter to start the fit from the value beside it. "
+            "Anything left unticked is determined automatically, the way it "
+            "always has been — ticking only Lsd, say, leaves the beam centre "
+            "on the auto-seeder.")
+        info.setWordWrap(True)
+        info.setStyleSheet("color:#bbb;font-size:11px;padding-bottom:6px;")
+        layout.addWidget(info)
+
+        grid = QtWidgets.QGridLayout(); grid.setSpacing(6)
+        r = 0
+        grid.addWidget(en_bc, r, 0)
+        grid.addWidget(QtWidgets.QLabel("BC_y:"), r, 1); grid.addWidget(bcy, r, 2)
+        grid.addWidget(QtWidgets.QLabel("BC_z:"), r, 3); grid.addWidget(bcz, r, 4)
+        r += 1
+        grid.addWidget(en_lsd, r, 0)
+        grid.addWidget(QtWidgets.QLabel("Lsd:"), r, 1); grid.addWidget(lsd, r, 2)
+        r += 1
+        for en, w, label in ((en_tx, tx, "tx:"), (en_ty, ty, "ty:"), (en_tz, tz, "tz:")):
+            grid.addWidget(en, r, 0)
+            grid.addWidget(QtWidgets.QLabel(label), r, 1); grid.addWidget(w, r, 2)
+            r += 1
+        layout.addLayout(grid)
+
+        if feedback_check is not None:
+            layout.addWidget(feedback_check)
+        if note is not None:
+            layout.addWidget(note)
+
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        btns.rejected.connect(self.close)
+        close_btn = btns.button(QtWidgets.QDialogButtonBox.Close)
+        if close_btn is not None:
+            close_btn.clicked.connect(self.close)
+        layout.addWidget(btns)
 
 
 #: Manual-fit limit rows: slot name → (label, default unit, default window,
