@@ -56,6 +56,12 @@ dependencies:
     # already satisfied by the pin, so nothing else here moves.
     - "pvapy==5.4.1"
 
+    # pyepics backs the Data Viewer's "Live Data" card's EPICS Channel Access
+    # (CA) backend, used by beamlines (e.g. 17-BM's Varex detector) whose IOC
+    # doesn't expose an NDPluginPva. Declares numpy>=1.26 with no upper bound --
+    # unlike pvapy, no numpy-2.0 pin conflict to work around.
+    - "pyepics==3.5.10"
+
     # ── MIDAS analysis backends (exact verified-working versions; still NumPy-1
     #    compatible against numpy 1.26.4 + numba 0.59.1) ──────────────────────────
     # 2026-08-30: bumped as an interdependent set (midas-pdf 0.2.0 requires

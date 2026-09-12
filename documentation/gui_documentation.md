@@ -1101,25 +1101,41 @@ an image is loaded warns instead of writing a file (there is no detector size to
 Sits **above the Data card**, collapsed by default behind its own title-bar
 checkbox — check it to reveal the live-PV controls, uncheck to hide them
 again (unchecking also stops an active stream, so a hidden card can never be
-left silently connected). Subscribes directly to an EPICS PVA detector-image
-PV (NTNDArray) and renders each frame **inline in the Data Viewer's own image
-pane** — the same view used for files/folders/HDF5 stacks. Because it feeds
-the normal frame pipeline, all existing Data Viewer analysis keeps working
-live: dark/bright/background/mask corrections, the intensity-range mask,
+left silently connected). Subscribes to a live EPICS detector-image readout
+and renders each frame **inline in the Data Viewer's own image pane** — the
+same view used for files/folders/HDF5 stacks. Because it feeds the normal
+frame pipeline, all existing Data Viewer analysis keeps working live:
+dark/bright/background/mask corrections, the intensity-range mask,
 beam-centre picking, and the radial integration plot all update as new
 frames arrive.
-- **Dependency:** `pvapy` (the EPICS pvAccess client library) is a required,
-  pinned dependency (`pyproject.toml` / `environment.yml`), installed
+- **Two EPICS backends, picked per-device:** each entry in **Preferences ▸
+  Devices** has a `backend` field — `pva` (default) subscribes to a single
+  pvAccess NTNDArray PV, for beamlines whose areaDetector IOC runs an
+  NDPluginPva plugin. `ca` instead reads plain EPICS Channel Access records
+  off an areaDetector **NDPluginStdArrays** plugin (`ArrayData` plus its
+  `ArraySize*_RBV`/`ColorMode_RBV`/`UniqueId_RBV` metadata records), for a
+  beamline whose IOC has no PVA plugin (e.g. 17-BM's Varex detector, which
+  ships as the bundled **17-BM** profile's `varex` device). Both backends
+  share one internal contract (`midas_gui/live_sources.py`:
+  `PvaLiveSource`/`CaLiveSource`) so everything else on this card — buffering,
+  the frame sink, Start/Stop, the B-PILOT bridge below — behaves identically
+  regardless of which one a device uses. Picking a device from the dropdown
+  sets its backend automatically (shown as a small `[PVA]`/`[CA]` label next
+  to the field); typing a PV by hand keeps whichever backend was last picked.
+- **Dependencies:** `pvapy` (PVA) and `pyepics` (CA) are both required,
+  pinned dependencies (`pyproject.toml` / `environment.yml`), installed
   automatically with the rest of the GUI's stack — no separate extra to
-  install. If somehow missing from the active environment, **Start** shows an
-  install hint instead of failing outright.
+  install. If either is somehow missing from the active environment,
+  **Start** shows an install hint instead of failing outright (only the one
+  needed for the currently-selected device's backend is checked).
 - **Live PV** field is an editable dropdown: pick a known device by name (the
   list comes from **Preferences ▸ Devices**, see below) to fill in its full PV
-  automatically, or type any other PV by hand (placeholder shows an example,
-  `20IDFF:Pva1:Image`). **Start** / **Stop** buttons and a status line (stopped
-  / waiting for PV / connected / streaming with frame id / error). GUI updates
-  are throttled to the tab's existing ~16 fps debounce, so a fast PV update
-  rate doesn't overwhelm the interface.
+  automatically (`prefix + PVA suffix` or `prefix + CA suffix`, depending on
+  that device's backend), or type any other PV by hand (placeholder shows an
+  example, `20IDFF:Pva1:Image`). **Start** / **Stop** buttons and a status
+  line (stopped / waiting for PV / connected / streaming with frame id /
+  error). GUI updates are throttled to the tab's existing ~16 fps debounce, so
+  a fast PV update rate doesn't overwhelm the interface.
 - **Sim Detector** is a built-in dropdown entry (PV `midasSim:Pva1:Image`) for
   exercising Live Data with **no beamline hardware**: picking it and clicking
   **Start** lazily launches an in-process fake PVA server
@@ -2573,12 +2589,13 @@ sync with the header dropdown either way you switch:
   active one is remembered in `<config dir>/profile_meta.json`. Existing single-config
   installs are migrated transparently into a profile named **Default** the first time
   this runs — no data is lost.
-- Three beamline device presets ship bundled and appear in the combo alongside
-  **Default**: **20-ID-D**, **20-ID-E**, **1-ID-E** — each differs only in its
-  **Devices** list (below), so picking one just swaps the Live Data PV dropdown's
-  detectors for that beamline's. They're seeded once, the first time the app runs
-  on a machine; deleting one doesn't bring it back. Fresh installs still start on
-  **Default** (same detectors as 20-ID-D) so existing setups are unaffected.
+- Four beamline device presets ship bundled and appear in the combo alongside
+  **Default**: **20-ID-D**, **20-ID-E**, **1-ID-E**, **17-BM** — each differs only
+  in its **Devices** list (below), so picking one just swaps the Live Data PV
+  dropdown's detectors for that beamline's. They're seeded once, the first time
+  the app runs on a machine; deleting one doesn't bring it back. Fresh installs
+  still start on **Default** (same detectors as 20-ID-D) so existing setups are
+  unaffected.
 - **New…** seeds a blank profile from the shipped built-in defaults.
 - **Duplicate…** seeds a new profile from whatever is currently shown in the dialog
   (including unsaved edits), then switches to it.
@@ -2606,11 +2623,15 @@ with the full shipped defaults** so you edit from a complete starting point:
 - **Paths** — default data / calibration / output files & folders.
 - **Materials** / **Calibrants** — add / remove / modify (name + lattice + SG).
 - **Devices** — the detector devices offered in the Data Viewer's **Live Data**
-  PV dropdown (name, prefix, PVA suffix). The live PV is built as
-  `prefix + PVA suffix`. All PVA suffixes are `Pva1:Image`, plus a built-in
-  **Sim Detector** entry (`midasSim:` prefix) for hardware-free testing — see
-  the Live Data card section above; add / remove / edit rows for your own
-  beamline's devices, or switch to one of the bundled beamline **Profiles**
+  PV dropdown (name, prefix, PVA suffix, backend, CA suffix). `backend` picks
+  which suffix column builds the live PV: `pva` (default, or blank) uses
+  `prefix + PVA suffix`; `ca` uses `prefix + CA suffix` instead — read over
+  plain EPICS Channel Access via an areaDetector **NDPluginStdArrays** plugin,
+  for a beamline whose IOC has no PVA plugin (see the Live Data card section
+  above). All PVA suffixes are `Pva1:Image`; the CA suffix convention is
+  `image1:`. A built-in **Sim Detector** entry (`midasSim:` prefix, PVA) is
+  always included for hardware-free testing; add / remove / edit rows for your
+  own beamline's devices, or switch to one of the bundled beamline **Profiles**
   above instead of hand-editing:
   - **20-ID-D** — `20iddNF` (`20idOR1:`), `s20idPil` (`20idPil:`), `pg4`
     (`1idPG4:`), `20iddTomo` (`20idGH1s:`), `20iddFF` (`20IDFF:`).
@@ -2621,6 +2642,9 @@ with the full shipped defaults** so you edit from a complete starting point:
     (`1idVarex1:`). Names match each detector's variable name in B-PILOT
     (`mpe_bluesky/instrument/devices/`), the beamline's Bluesky/ophyd device
     definitions, so entries are traceable back to source.
+  - **17-BM** — `varex` (`17bmVarex:`, `backend: ca`, CA suffix `image1:`) —
+    **placeholder prefix/plugin name**, pending confirmation with 17-BM staff
+    that the IOC actually runs an NDPluginStdArrays instance at that name.
 - **Menus** — the pixel-size presets and K-edge foils.
 - **Algorithms** — default calibration pipeline, integration kernel, output format,
   error model, colormap/theme.
@@ -2651,7 +2675,10 @@ next launch**.
                     "pixel": 0.1, "bc": 1.0, "tilt": 0.1 },
   "materials":  { "Ni (FCC)": {"a":3.5238,"b":3.5238,"c":3.5238,"alpha":90,"beta":90,"gamma":90,"sg":225} },
   "calibrants": { "CeO2": {"a":5.4116,"b":5.4116,"c":5.4116,"alpha":90,"beta":90,"gamma":90,"sg":225} },
-  "devices": [ {"name": "s20varex1", "prefix": "20IDFF:", "pva_suffix": "Pva1:Image"} ],
+  "devices": [
+    {"name": "s20varex1", "prefix": "20IDFF:", "pva_suffix": "Pva1:Image"},
+    {"name": "varex", "prefix": "17bmVarex:", "backend": "ca", "ca_suffix": "image1:"}
+  ],
   "paths": { "nickel_h5": "/data/mygroup/sample.h5", "calib_file": "/data/mygroup/calibration.json" },
   "ui": { "calibration_pipeline": "one_shot", "integration_kernel": "subpixel2",
           "output_format": "csv", "azimuthal_method": "poisson", "plot_theme": "hot",

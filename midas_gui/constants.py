@@ -412,9 +412,14 @@ def _apply(cfg: dict) -> None:
             try:
                 name = str(d.get("name", "")).strip()
                 if name:
+                    # backend/ca_suffix are optional — any profile written
+                    # before these fields existed (or any entry that just
+                    # never sets them) defaults to plain PVA, unchanged.
                     parsed.append({"name": name,
                                     "prefix": str(d.get("prefix", "")).strip(),
-                                    "pva_suffix": str(d.get("pva_suffix", "")).strip()})
+                                    "pva_suffix": str(d.get("pva_suffix", "")).strip(),
+                                    "backend": str(d.get("backend", "pva")).strip().lower() or "pva",
+                                    "ca_suffix": str(d.get("ca_suffix", "image1:")).strip() or "image1:"})
             except Exception:
                 pass
         if parsed or cfg["devices"] == []:

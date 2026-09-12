@@ -22,7 +22,7 @@ def test_bundled_beamline_profiles_seeded(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
 
     names = settings.list_profiles()
-    assert set(names) == {"Default", "20-ID-D", "20-ID-E", "1-ID-E"}
+    assert set(names) == {"Default", "20-ID-D", "20-ID-E", "1-ID-E", "17-BM"}
     assert settings.active_profile() == "Default"  # unseeded fresh install stays on Default
 
     d_names = [d["name"] for d in settings.read_json(settings.profile_path("20-ID-D"))["devices"]]

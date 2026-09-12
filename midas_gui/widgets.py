@@ -25,6 +25,7 @@ import pyqtgraph as pg
 from midas_gui.constants import COLORMAPS, DISTORTION_NAMES, DEFAULT_COLORMAP, DEVICES
 from midas_gui.dialogs import show_error, BrowseFilesDialog
 from midas_gui.helpers import fit_circle_algebraic
+from midas_gui.live_sources import PvaLiveSource, CaLiveSource, create_live_source
 from midas_gui.sim_detector import DEFAULT_CHANNEL_NAME as _SIM_CHANNEL_NAME
 
 # Default colormap: the configured one if it's a known option, else the first.
@@ -3560,66 +3561,18 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
         vb.setYRange(-2.0, ymax, padding=0)
 
 
-class PvaLiveSource(QtCore.QObject):
-    """Subscribes to an EPICS PVA image PV (NTNDArray) and emits decoded
-    numpy frames.
+# PvaLiveSource/CaLiveSource live in midas_gui.live_sources (imported above,
+# re-exported here as module attributes) -- see that module's docstring for
+# the shared signal/method contract both backends implement.
 
-    pvapy's ``Channel.monitor()`` delivers callbacks on its own internal
-    thread; this class never touches Qt widgets directly, only emits
-    signals — Qt auto-queues those onto the receiving (GUI) thread."""
 
-    frameReady = QtCore.pyqtSignal(np.ndarray, int)      # image, uniqueId
-    connectionChanged = QtCore.pyqtSignal(bool)
-    error = QtCore.pyqtSignal(str)
-
-    _REQUEST = "field(value,dimension,uniqueId,attribute,codec,uncompressedSize)"
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._channel = None
-        self._AdImageUtility = None
-
-    def start(self, pv_name: str) -> bool:
-        self.stop()
-        try:
-            import pvapy as pva
-            from pvapy.utility.adImageUtility import AdImageUtility
-        except ImportError as e:
-            self.error.emit(f"pvapy not installed: {e}")
-            return False
-        self._AdImageUtility = AdImageUtility
-        try:
-            self._channel = pva.Channel(pv_name)
-            self._channel.setConnectionCallback(self._on_connection)
-            self._channel.monitor(self._on_value, self._REQUEST)
-        except Exception as e:
-            self.error.emit(str(e))
-            self._channel = None
-            return False
-        return True
-
-    def _on_connection(self, is_connected):
-        self.connectionChanged.emit(bool(is_connected))
-
-    def _on_value(self, pv_object):
-        try:
-            image_id, image, *_ = self._AdImageUtility.reshapeNtNdArray(pv_object)
-        except Exception as e:
-            self.error.emit(f"Frame decode failed: {e}")
-            return
-        if image is not None:
-            self.frameReady.emit(np.asarray(image, dtype=np.float32), int(image_id))
-
-    def stop(self):
-        if self._channel is not None:
-            try:
-                self._channel.stopMonitor()
-            except Exception:
-                pass
-            self._channel = None
-
-    def is_active(self) -> bool:
-        return self._channel is not None
+def _device_pv_and_backend(d: dict) -> tuple:
+    """(full_pv, backend) for a ``constants.DEVICES``-style dict. Defensive
+    ``.get()`` defaults (backend->"pva", ca_suffix->"image1:") are what let
+    a device dict predating these fields keep resolving to plain PVA."""
+    backend = str(d.get("backend", "pva")).strip().lower() or "pva"
+    suffix = d.get("ca_suffix", "image1:") if backend == "ca" else d.get("pva_suffix", "")
+    return f"{d.get('prefix', '')}{suffix}", backend
 
 
 class DataLoaderPanel(QtWidgets.QWidget):
@@ -3650,7 +3603,8 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._cur = None
         self._stream_preview_dirty = True   # "stream" mode only — see current_frame()
         self._preview_sum_n = 1             # "stream" mode only — see set_preview_sum
-        self._live_src: Optional[PvaLiveSource] = None
+        self._live_src: Optional[QtCore.QObject] = None   # PvaLiveSource | CaLiveSource
+        self._live_backend = "pva"     # which backend self._live_src (if any) was built for
         self._registry = None          # DataSourceRegistry, set by bind_registry()
         self._registry_label = ""      # this panel's own label in the registry
         self._explicit_paths = None    # list[str], set by a Browse… "Multiple files"/"stem" pick
@@ -3709,12 +3663,18 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._pv_ed.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
             self._pv_ed.lineEdit().setPlaceholderText("e.g. 20IDFF:Pva1:Image")
             for d in DEVICES:
-                full_pv = f"{d.get('prefix', '')}{d.get('pva_suffix', '')}"
-                self._pv_ed.addItem(d.get("name", ""), full_pv)
+                self._pv_ed.addItem(d.get("name", ""), _device_pv_and_backend(d))
             self._pv_ed.setCurrentIndex(-1)
             self._pv_ed.setEditText("")
             self._pv_ed.activated.connect(self._on_pv_device_picked)
             pv_row.addWidget(self._pv_ed, 1)
+            self._live_backend_lbl = QtWidgets.QLabel("[PVA]")
+            self._live_backend_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+            self._live_backend_lbl.setToolTip(
+                "Which EPICS protocol the Live PV field will be read over — "
+                "set by picking a device above (backend field in Preferences ▸ "
+                "Devices); typing a PV by hand keeps whatever backend was last picked.")
+            pv_row.addWidget(self._live_backend_lbl)
             lvbox.addLayout(pv_row)
             btn_row = QtWidgets.QHBoxLayout(); btn_row.setSpacing(4)
             self._live_start_btn = QtWidgets.QPushButton("Start")
@@ -4395,8 +4355,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._pv_ed.blockSignals(True)
         self._pv_ed.clear()
         for d in DEVICES:
-            full_pv = f"{d.get('prefix', '')}{d.get('pva_suffix', '')}"
-            self._pv_ed.addItem(d.get("name", ""), full_pv)
+            self._pv_ed.addItem(d.get("name", ""), _device_pv_and_backend(d))
         idx = self._pv_ed.findText(prev_text)
         if idx >= 0:
             self._pv_ed.setCurrentIndex(idx)
@@ -4407,21 +4366,40 @@ class DataLoaderPanel(QtWidgets.QWidget):
 
     def _on_pv_device_picked(self, index):
         """Selecting a known device by name fills in its full live PV
-        (prefix + PVA suffix); typing a PV by hand is untouched (this only
-        fires on an explicit dropdown pick, not on text edits)."""
-        pv = self._pv_ed.itemData(index)
+        (prefix + backend-appropriate suffix) and remembers which backend
+        (PVA/CA) it should be read over; typing a PV by hand is untouched
+        (this only fires on an explicit dropdown pick, not on text edits) —
+        it keeps whichever backend was last picked."""
+        data = self._pv_ed.itemData(index)
+        if not data:
+            return
+        pv, backend = data
         if pv:
             self._pv_ed.setEditText(pv)
+        self._live_backend = backend
+        if hasattr(self, "_live_backend_lbl"):
+            self._live_backend_lbl.setText(f"[{backend.upper()}]")
 
     def _start_live(self):
-        try:
-            import pvapy  # noqa: F401
-        except ImportError:
-            QtWidgets.QMessageBox.warning(
-                self, "pvapy not installed",
-                "pvapy is a required dependency but isn't importable in this "
-                "environment.\nReinstall it with:  pip install pvapy==5.4.1")
-            return
+        if self._live_backend == "ca":
+            try:
+                import epics  # noqa: F401
+            except ImportError:
+                QtWidgets.QMessageBox.warning(
+                    self, "pyepics not installed",
+                    "pyepics is a required dependency for CA-backed devices but "
+                    "isn't importable in this environment.\n"
+                    "Reinstall it with:  pip install pyepics==3.5.10")
+                return
+        else:
+            try:
+                import pvapy  # noqa: F401
+            except ImportError:
+                QtWidgets.QMessageBox.warning(
+                    self, "pvapy not installed",
+                    "pvapy is a required dependency but isn't importable in this "
+                    "environment.\nReinstall it with:  pip install pvapy==5.4.1")
+                return
         pv = self._pv_ed.currentText().strip()
         if not pv:
             QtWidgets.QMessageBox.warning(self, "No PV", "Enter a PV name first.")
@@ -4437,8 +4415,15 @@ class DataLoaderPanel(QtWidgets.QWidget):
                 QtWidgets.QMessageBox.warning(
                     self, "Sim Detector failed to start", str(e))
                 return
+        if self._live_src is not None and getattr(self._live_src, "_backend_tag", None) != self._live_backend:
+            # Switching backends mid-session (e.g. PVA device -> CA device) --
+            # the two use structurally different underlying PVs, so the old
+            # instance can't be reused the way one PvaLiveSource always was.
+            self.stop_live()
+            self._live_src = None
         if self._live_src is None:
-            self._live_src = PvaLiveSource(self)
+            self._live_src = create_live_source(self._live_backend, self)
+            self._live_src._backend_tag = self._live_backend
             self._live_src.frameReady.connect(self._on_live_frame)
             self._live_src.connectionChanged.connect(self._on_live_connection)
             self._live_src.error.connect(self._on_live_error)
@@ -4460,21 +4445,26 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._pv_ed.setEnabled(False)
         self._live_status_lbl.setText("Waiting for PV…")
 
-    def start_live_pv(self, pv: str) -> bool:
+    def start_live_pv(self, pv: str, backend: str = "pva") -> bool:
         """Programmatic equivalent of picking `pv` in the Live PV combo and
         clicking Start — used by the MIDAS-bridge QLocalServer (app.py) so
-        another app can trigger Live Data with no clicks in this GUI."""
+        another app can trigger Live Data with no clicks in this GUI.
+        ``backend`` defaults to "pva" to preserve this method's original
+        call signature for any pre-existing caller."""
         if getattr(self, "_pv_ed", None) is None:
             return False  # panel built without allow_live
         if self._live_src is not None and self._live_src.is_active() \
-                and self._pv_ed.currentText().strip() == pv:
-            return True  # already streaming this exact PV
+                and self._pv_ed.currentText().strip() == pv and self._live_backend == backend:
+            return True  # already streaming this exact PV/backend
         if self._live_src is not None and self._live_src.is_active():
             self.stop_live()
         live_card = getattr(self, "_live_card", None)
         if live_card is not None:
             live_card.setChecked(True)  # expand if collapsed
         self._pv_ed.setEditText(pv)
+        self._live_backend = backend
+        if hasattr(self, "_live_backend_lbl"):
+            self._live_backend_lbl.setText(f"[{backend.upper()}]")
         self._start_live()
         return self._live_src is not None and self._live_src.is_active()
 

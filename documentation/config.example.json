@@ -11,6 +11,10 @@
     "nickel_dir": "",
     "calib_file": ""
   },
+  "devices": [
+    {"name": "s20varex1", "prefix": "20IDFF:", "pva_suffix": "Pva1:Image"},
+    {"name": "varex", "prefix": "17bmVarex:", "backend": "ca", "ca_suffix": "image1:"}
+  ],
   "ui": {
     "calibration_pipeline": "one_shot",
     "integration_kernel": "subpixel2",

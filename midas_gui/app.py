@@ -117,11 +117,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._bridge_server.start()
 
     def _resolve_and_start_live(self, prefix: str) -> None:
-        pv = bridge_server.resolve_pv(prefix, C.DEVICES)
-        if pv is None:
+        resolved = bridge_server.resolve_pv(prefix, C.DEVICES)
+        if resolved is None:
             _log(f"MIDAS bridge: no DEVICES entry for prefix {prefix!r}")
             return
-        self._view_tab.start_live_pv(pv)
+        pv, backend = resolved
+        self._view_tab.start_live_pv(pv, backend)
 
     def _build_ui(self):
         tabs = QtWidgets.QTabWidget()
