@@ -45,6 +45,73 @@ from midas_gui import settings
 from midas_gui import style as S
 
 
+class _RadialBinsDialog(QtWidgets.QDialog):
+    """Δ/min/max for one radial-axis mode (R in px, or Q in Å⁻¹), opened
+    from Batch Integrate's mode-dependent "R bins…"/"Q bins…" button next to
+    the Bin type dropdown. Hosts the tab's own spinboxes directly (not
+    copies) — this is a relocated view of the same widgets ``_build_spec``
+    and GUI-state save/restore already use, not a separate value store.
+    Only the R variant takes Corner/Edge presets; Q has no detector-geometry
+    equivalent."""
+
+    def __init__(self, mode: str, bin_spin, min_spin, max_spin,
+                 corner_btn=None, edge_btn=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Radial (R) bins" if mode == "R" else "Q bins")
+        v = QtWidgets.QVBoxLayout(self)
+        note = QtWidgets.QLabel(
+            "R bin/Rmin/Rmax define the underlying integration grid, in "
+            "detector pixels. Rmax 0 = auto (farthest detector corner from "
+            "the beam centre)." if mode == "R" else
+            "Bin uniformly in Q (Å⁻¹) instead of R, for OUTPUT only — the "
+            "same radial axis, alternate units. The Radial (R) bins still "
+            "set the underlying integration grid; this rebins that result "
+            "into Q.")
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color:{S.MUTED};font-size:10px;padding-bottom:4px")
+        v.addWidget(note)
+        form = S.Form()
+        if corner_btn is not None:
+            preset_row = QtWidgets.QHBoxLayout(); preset_row.setSpacing(4)
+            preset_row.addWidget(QtWidgets.QLabel("Rmax presets:"))
+            preset_row.addWidget(corner_btn); preset_row.addWidget(edge_btn)
+            preset_row.addStretch(1)
+            form.full(preset_row)
+        form.row((f"{mode} bin:", bin_spin))
+        form.row((f"{mode}min:", min_spin))
+        form.row((f"{mode}max:", max_spin))
+        v.addLayout(form)
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        btns.rejected.connect(self.accept); btns.accepted.connect(self.accept)
+        v.addWidget(btns)
+
+
+class _AzimuthalBinsDialog(QtWidgets.QDialog):
+    """Δ/min/max for the azimuthal (η) integration axis, opened from Batch
+    Integrate's "Azimuthal bins…" button. Hosts the tab's own η-bin/min/max
+    spinboxes directly (not copies) — see ``_RadialBinsDialog``."""
+
+    def __init__(self, bin_spin, min_spin, max_spin, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Azimuthal (η) bins")
+        v = QtWidgets.QVBoxLayout(self)
+        note = QtWidgets.QLabel(
+            "η bin controls how the 2-D (η, R) cake is collapsed to a 1-D "
+            "profile (see Azim. avg) and, when Multi-azimuth output is on, "
+            "defines the output sectors themselves.")
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color:{S.MUTED};font-size:10px;padding-bottom:4px")
+        v.addWidget(note)
+        form = S.Form()
+        form.row(("η bin:", bin_spin))
+        form.row(("η min:", min_spin))
+        form.row(("η max:", max_spin))
+        v.addLayout(form)
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        btns.rejected.connect(self.accept); btns.accepted.connect(self.accept)
+        v.addWidget(btns)
+
+
 class BatchTab(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -127,6 +194,17 @@ class BatchTab(QtWidgets.QWidget):
             return
         value = formula(fields["BC_y"], fields["BC_z"], fields["NrPixelsY"], fields["NrPixelsZ"])
         self._r_max.setValue(value)
+
+    def _q_mode_active(self) -> bool:
+        """True when the Bin type dropdown selects Q (rebin the OUTPUT
+        uniformly in Q, not the underlying R-uniform integration grid)."""
+        return self._bin_type.currentData() == "Q"
+
+    def _on_bin_type_changed(self, *_args) -> None:
+        self._radial_bins_btn.setText("Q bins…" if self._q_mode_active() else "R bins…")
+
+    def _open_radial_bins_dialog(self) -> None:
+        (self._q_bins_dialog if self._q_mode_active() else self._r_bins_dialog).exec_()
 
     def _load_cake_csv(self) -> None:
         """"Load cake parameters CSV…" button — applies R_MIN/R_MAX/R_STEP/
@@ -321,7 +399,7 @@ class BatchTab(QtWidgets.QWidget):
             "multi_azimuth": self._multi_azimuth_chk,
             "var_check": self._var_check,
             "err_model": self._err_model,
-            "q_check": self._q_check,
+            "bin_type": self._bin_type,
             "q_min": self._q_min,
             "q_max": self._q_max,
             "q_bin": self._q_bin,
@@ -357,6 +435,12 @@ class BatchTab(QtWidgets.QWidget):
         # rides along in "fields" but isn't a plain widget — pull it out before
         # the generic apply_dict_to_widgets pass (which would just ignore it).
         fmt_keys = fields.pop("fmt_keys", None)
+        # Likewise "q_check": the boolean the Bin type dropdown replaced —
+        # still emitted by project.integrate_attempt_gui_fields (shared with
+        # HydraBatchPage, which still uses the checkbox) when restoring a
+        # saved integration attempt's provenance.
+        if fields.pop("q_check", None):
+            fields.setdefault("bin_type", "Q")
         apply_dict_to_widgets(self._state_widgets(), fields)
         self._det_view.set_display_state(state.get("det_view"))
         self._origin_btn.sync()
@@ -614,16 +698,21 @@ class BatchTab(QtWidgets.QWidget):
 
         # Grouped per axis (bin size + range together, plus anything else
         # that's really about that axis) so the relationships are visible
-        # instead of scattered across the card:
-        #   RADIAL:    R bin/Rmin/Rmax, then Q-uniform bins (an alternate
-        #              *output* binning for the same radial axis, not an
-        #              independent thing — R bin/Rmin/Rmax still set the
-        #              underlying integration grid; Q only rebins the
-        #              result, see _run()'s "Always R-uniform..." comment).
-        #   AZIMUTHAL: η bin/η min/η max, then Azim. avg (how η is
-        #              collapsed to 1-D) and Multi-azimuth output (whether
-        #              it's collapsed at all) — both are about the same η
-        #              axis. Maps to a cake_parameters CSV's
+        # instead of scattered across the card. The actual Δ/min/max fields
+        # for each axis live in a popup dialog (opened by the button next to
+        # it) rather than inline — see _RadialBinsDialog/_AzimuthalBinsDialog
+        # below — freeing this card down to the choices that matter at a
+        # glance:
+        #   RADIAL:    Bin type selects which axis the adjacent button edits.
+        #              R bin/Rmin/Rmax always define the underlying
+        #              integration grid; Q only rebins that result for
+        #              OUTPUT (see _run()'s "Always R-uniform..." comment) —
+        #              not an independent axis.
+        #   AZIMUTHAL: η bin/η min/η max live behind "Azimuthal bins…".
+        #              Azim. avg (how η is collapsed to 1-D) and
+        #              Multi-azimuth output (whether it's collapsed at all)
+        #              stay inline — both are about the same η axis. Maps to
+        #              a cake_parameters CSV's
         #              R_MIN/R_MAX/R_STEP/ETA_MIN/ETA_MAX/ETA_STEP
         #              one-for-one (see _load_cake_csv). Rmax 0.0 is the
         #              "auto" sentinel: left untouched, it's passed through
@@ -634,60 +723,58 @@ class BatchTab(QtWidgets.QWidget):
         #              (full circle), matching the backend's own default
         #              (same None-means-"leave the backend default"
         #              contract as Rmin/Rmax).
-        pf.full(_section_label("RADIAL RANGE  (R_MIN / R_MAX / R_STEP)"))
         self._r_bin = _fspin(0.1, 20.0, 2, 1.0, "px")
         self._r_min = _fspin(0.0, 1_000_000.0, 2, 0.0, "px")
         self._r_max = _fspin(0.0, 1_000_000.0, 2, 0.0, "px")
         self._r_max.setToolTip(
             "0 = auto (farthest detector corner from the beam centre).\n"
-            "Use the Corner/Edge buttons (left) to fill in a value, or type your own.")
-        # Corner/Edge sit on their own left-aligned row instead of tacked
-        # onto the Rmax entry — keeps every entry cell in this card the
-        # same width/x-position (a compound Rmax-spinbox+buttons widget
-        # used to be wider than every other row's plain spinbox).
+            "Use the Corner/Edge presets in the R bins dialog, or type your own.")
         self._rmax_corner_btn = QtWidgets.QPushButton("Corner")
         self._rmax_corner_btn.setToolTip("Set Rmax to the farthest detector CORNER from the beam centre.")
         self._rmax_corner_btn.clicked.connect(lambda: self._apply_rmax_preset(rmax_corner_px))
         self._rmax_edge_btn = QtWidgets.QPushButton("Edge")
         self._rmax_edge_btn.setToolTip("Set Rmax to the farthest detector EDGE from the beam centre.")
         self._rmax_edge_btn.clicked.connect(lambda: self._apply_rmax_preset(rmax_edge_px))
-        rmax_btn_row = QtWidgets.QHBoxLayout(); rmax_btn_row.setSpacing(4)
-        rmax_btn_row.addWidget(QtWidgets.QLabel("Rmax presets:"))
-        rmax_btn_row.addWidget(self._rmax_corner_btn); rmax_btn_row.addWidget(self._rmax_edge_btn)
-        rmax_btn_row.addStretch(1)
-        pf.full(rmax_btn_row)
-        pf.row(("R bin:", self._r_bin))
-        pf.row(("Rmin:", self._r_min))
-        pf.row(("Rmax:", self._r_max))
         for w in (self._r_min, self._r_max, self._r_bin):
             w.valueChanged.connect(self._refresh_detector_preview)
-
-        self._q_check = QtWidgets.QCheckBox("Q-uniform bins (instead of R)")
-        self._q_check.setToolTip(
-            "Bin uniformly in Q (Å⁻¹) instead of R (px) for OUTPUT — the same\n"
-            "radial axis, alternate units. R bin/Rmin/Rmax above still set\n"
-            "the underlying integration grid; this rebins that result into Q.")
-        pf.full(self._q_check)
         self._q_min = _fspin(0.0, 100.0, 3, 0.5, "Å⁻¹")
         self._q_max = _fspin(0.0, 100.0, 3, 8.0, "Å⁻¹")
         self._q_bin = _fspin(0.0001, 1.0, 4, 0.01, "Å⁻¹")
-        for w in (self._q_min, self._q_max, self._q_bin):
-            w.setEnabled(False)
-        self._q_check.toggled.connect(lambda c: [w.setEnabled(c) for w in
-                                                 (self._q_min, self._q_max, self._q_bin)])
-        pf.row(("Qmin:", self._q_min))
-        pf.row(("Qmax:", self._q_max))
-        pf.row(("ΔQ:", self._q_bin))
+        self._r_bins_dialog = _RadialBinsDialog(
+            "R", self._r_bin, self._r_min, self._r_max,
+            self._rmax_corner_btn, self._rmax_edge_btn, parent=self)
+        self._q_bins_dialog = _RadialBinsDialog(
+            "Q", self._q_bin, self._q_min, self._q_max, parent=self)
 
-        pf.full(_section_label("AZIMUTHAL RANGE  (ETA_MIN / ETA_MAX / ETA_STEP)"))
+        pf.full(_section_label("RADIAL"))
+        self._bin_type = _NoScrollComboBox()
+        self._bin_type.addItem("Radial", "R")
+        self._bin_type.addItem("Q", "Q")
+        self._bin_type.setToolTip(
+            "Radial — bin uniformly in R (detector pixels).\n"
+            "Q — additionally rebin the OUTPUT uniformly in Q (Å⁻¹); the "
+            "underlying integration grid is still R-uniform.")
+        self._bin_type.currentIndexChanged.connect(self._on_bin_type_changed)
+        self._radial_bins_btn = QtWidgets.QPushButton("R bins…")
+        self._radial_bins_btn.clicked.connect(self._open_radial_bins_dialog)
+        bt_row = QtWidgets.QHBoxLayout(); bt_row.setSpacing(4)
+        bt_row.addWidget(self._bin_type, 1); bt_row.addWidget(self._radial_bins_btn)
+        pf.row(("Bin type:", bt_row))
+
         self._e_bin = _fspin(0.5, 30.0, 1, 5.0, "°")
         self._eta_min = _fspin(-180.0, 180.0, 1, -180.0, "°")
         self._eta_max = _fspin(-180.0, 180.0, 1, 180.0, "°")
-        pf.row(("η bin:", self._e_bin))
-        pf.row(("η min:", self._eta_min))
-        pf.row(("η max:", self._eta_max))
         for w in (self._eta_min, self._eta_max, self._e_bin):
             w.valueChanged.connect(self._refresh_detector_preview)
+        self._azim_bins_dialog = _AzimuthalBinsDialog(
+            self._e_bin, self._eta_min, self._eta_max, parent=self)
+
+        pf.full(_section_label("AZIMUTHAL"))
+        self._azim_bins_btn = QtWidgets.QPushButton("Azimuthal bins…")
+        self._azim_bins_btn.clicked.connect(self._azim_bins_dialog.exec_)
+        azim_btn_row = QtWidgets.QHBoxLayout(); azim_btn_row.setSpacing(4)
+        azim_btn_row.addWidget(self._azim_bins_btn); azim_btn_row.addStretch(1)
+        pf.full(azim_btn_row)
 
         self._azim = _NoScrollComboBox()
         self._azim.addItem("Pixel-weighted", True)
@@ -720,16 +807,6 @@ class BatchTab(QtWidgets.QWidget):
             "azimuthally-averaged profile, leave this box unchecked.")
         integ.body.addWidget(self._multi_azimuth_chk)
 
-        self._grid_chk = QtWidgets.QCheckBox("Show bin grid")
-        self._grid_chk.setToolTip(
-            "Overlay the Rmin/Rmax boundary circles and the full (R, η) "
-            "integration bin grid on the Detector view tab — concentric "
-            "circles at each R-bin edge, spokes at each η-bin edge "
-            "(bounded to η min/max). Thinned to at most ~50 rings / ~72 "
-            "spokes for legibility with fine bin sizes. Unchecking this "
-            "hides the overlay entirely, including Rmin/Rmax.")
-        integ.body.addWidget(self._grid_chk)
-        self._grid_chk.toggled.connect(self._refresh_detector_preview)
         self._var_check = QtWidgets.QCheckBox("Per-bin variance (σ)")
         self._var_check.setToolTip(
             "Compute per-bin σ via the chosen error model.\n"
@@ -895,6 +972,19 @@ class BatchTab(QtWidgets.QWidget):
 
         # Right: waterfall / stacked-profiles / detector-view tabs + log
         right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        # A view-only option (not an integration parameter — see
+        # tooltip), so it sits above the view tabs it affects rather than in
+        # the left Integration card.
+        self._grid_chk = QtWidgets.QCheckBox("Show bin grid")
+        self._grid_chk.setToolTip(
+            "Overlay the Rmin/Rmax boundary circles and the full (R, η) "
+            "integration bin grid on the Detector view tab — concentric "
+            "circles at each R-bin edge, spokes at each η-bin edge "
+            "(bounded to η min/max). Thinned to at most ~50 rings / ~72 "
+            "spokes for legibility with fine bin sizes. Unchecking this "
+            "hides the overlay entirely, including Rmin/Rmax.\n\n"
+            "View-only — has no effect on the integration itself.")
+        self._grid_chk.toggled.connect(self._refresh_detector_preview)
         self._view_tabs = QtWidgets.QTabWidget()
         self._waterfall = WaterfallViewer()
         self._stack_view = StackedProfileViewer()
@@ -933,7 +1023,13 @@ class BatchTab(QtWidgets.QWidget):
         self._view_tabs.addTab(self._waterfall, "Waterfall")
         self._view_tabs.addTab(self._stack_view, "Stacked profiles")
         self._view_tabs.addTab(self._cake_stack_view, "Eta-R cakes")
-        right.addWidget(self._view_tabs)
+        view_container = QtWidgets.QWidget()
+        view_container_layout = QtWidgets.QVBoxLayout(view_container)
+        view_container_layout.setContentsMargins(0, 0, 0, 0)
+        view_container_layout.setSpacing(4)
+        view_container_layout.addWidget(self._grid_chk)
+        view_container_layout.addWidget(self._view_tabs)
+        right.addWidget(view_container)
         self._log = LogPanel()
         self._log.setMaximumHeight(16_777_215)   # let the splitter size it
         right.addWidget(self._log)
@@ -1109,13 +1205,14 @@ class BatchTab(QtWidgets.QWidget):
         self._last_run_out_dir = out_dir
         fmts = self._fmt.checked_keys()
         q_cfg = ({"QMin": self._q_min.value(), "QMax": self._q_max.value(),
-                  "QBinSize": self._q_bin.value()} if self._q_check.isChecked() else None)
+                  "QBinSize": self._q_bin.value()} if self._q_mode_active() else None)
         multi_azimuth = self._multi_azimuth_chk.isChecked()
         if multi_azimuth and q_cfg:
             QtWidgets.QMessageBox.warning(
                 self, "Incompatible options",
                 "Multi-azimuth output isn't supported together with "
-                "Q-uniform bins yet. Uncheck one of them."); return
+                "Q-uniform bins yet. Uncheck Multi-azimuth output, or set "
+                "Bin type back to Radial."); return
         lsd, px, wl = float(spec.Lsd), float(spec.pxY), float(spec.Wavelength)
         _axctx = (lsd, px, wl, "Q" if q_cfg else "R")
         self._stack_view.set_axis_context(*_axctx)
@@ -1239,16 +1336,18 @@ class BatchTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(
                 self, "No format", "Check at least one output format first."); return
         multi_azimuth = self._multi_azimuth_chk.isChecked()
-        if multi_azimuth and self._q_check.isChecked():
+        if multi_azimuth and self._q_mode_active():
             QtWidgets.QMessageBox.warning(
                 self, "Incompatible options",
                 "Multi-azimuth output isn't supported together with "
-                "Q-uniform bins yet. Uncheck one of them."); return
-        if self._q_check.isChecked():
+                "Q-uniform bins yet. Uncheck Multi-azimuth output, or set "
+                "Bin type back to Radial."); return
+        if self._q_mode_active():
             QtWidgets.QMessageBox.warning(
                 self, "Not supported in background jobs yet",
                 "Q-uniform bins aren't wired into background jobs yet.\n"
-                "Uncheck it, or use 'Start Integration' for an in-process run."); return
+                "Set Bin type back to Radial, or use 'Start Integration' "
+                "for an in-process run."); return
 
         import tifffile
         from midas_gui.helpers import write_standalone_paramstest
@@ -1599,7 +1698,7 @@ class BatchTab(QtWidgets.QWidget):
         if variance_cfg and self._corr_widget.any_enabled():
             variance_cfg = None
         q_cfg = ({"QMin": self._q_min.value(), "QMax": self._q_max.value(),
-                  "QBinSize": self._q_bin.value()} if self._q_check.isChecked() else None)
+                  "QBinSize": self._q_bin.value()} if self._q_mode_active() else None)
         _axctx = (float(spec.Lsd), float(spec.pxY), float(spec.Wavelength),
                   "Q" if q_cfg else "R")
         self._stack_view.set_axis_context(*_axctx)
