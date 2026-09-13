@@ -785,15 +785,19 @@ def _grid_rows(grid):
 
 
 def test_refine_card_lays_out_as_three_rows(app):
-    """Lsd/BC/Wavelength, then the tilts, then the two whole-image
-    refinements — instead of one control per line."""
+    """Lsd/BC/Wavelength, then the tilts — their own tightly-spaced grid —
+    then the two whole-image refinements in a separate grid (needs a wider
+    "…" button column, so it keeps its own spacing) — instead of one
+    control per line."""
     import midas_gui.tab_calibrate as tab_calibrate_mod
     tab = tab_calibrate_mod.CalibrationTab()
     rows = _grid_rows(tab._refine_grid)
-    assert len(rows) == 3, f"expected 3 rows, got {sorted(rows)}"
+    assert len(rows) == 2, f"expected 2 rows, got {sorted(rows)}"
     assert rows[0] == [tab._ref_lsd, tab._ref_bc, tab._ref_wl]
     assert rows[1] == [tab._ref_ty, tab._ref_tz, tab._ref_tx]
-    assert rows[2] == [tab._dist_row, tab._build_rc]
+    bottom_rows = _grid_rows(tab._refine_grid_bottom)
+    assert len(bottom_rows) == 1, f"expected 1 row, got {sorted(bottom_rows)}"
+    assert bottom_rows[0] == [tab._dist_row, tab._build_rc]
 
 
 def _row_of(w):
@@ -815,11 +819,54 @@ def _row_of(w):
     return row
 
 
+def _grid_of(w):
+    """The QGridLayout instance holding ``w`` directly, descending through
+    nested layouts starting at its parent widget's own layout."""
+    def walk(layout):
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            if item.widget() is w and isinstance(layout, QtWidgets.QGridLayout):
+                return layout
+            sub = item.layout()
+            if sub is not None:
+                found = walk(sub)
+                if found is not None:
+                    return found
+        return None
+    grid = walk(w.parentWidget().layout())
+    assert grid is not None, f"{w} not found in any grid under its parent"
+    return grid
+
+
+def _layout_of(w):
+    """The immediate QLayout holding ``w``, descending through nested
+    layouts starting at its parent widget's own layout."""
+    def walk(layout):
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            if item.widget() is w:
+                return layout
+            sub = item.layout()
+            if sub is not None:
+                found = walk(sub)
+                if found is not None:
+                    return found
+        return None
+    layout = walk(w.parentWidget().layout())
+    assert layout is not None, f"{w} not found in any layout under its parent"
+    return layout
+
+
 def test_advanced_card_packs_three_controls_per_row(app):
-    """E-M iters/LM iters/Device on one line."""
+    """E-M iters/LM iters share one tightly-packed line; Device sits on its
+    own line below. Each is a plain QHBoxLayout (with a trailing stretch)
+    rather than a Form()/QGridLayout row: giving a fixed-width field its own
+    stretched grid column left a wide gap before the next label instead of
+    packing the fields close together."""
     import midas_gui.tab_calibrate as tab_calibrate_mod
     tab = tab_calibrate_mod.CalibrationTab()
-    assert _row_of(tab._n_iter) == _row_of(tab._lm_iter) == _row_of(tab._device)
+    assert _layout_of(tab._n_iter) is _layout_of(tab._lm_iter)
+    assert _layout_of(tab._device) is not _layout_of(tab._n_iter)
 
 
 def test_manual_seed_dialog_lays_out_one_row_per_parameter(app):

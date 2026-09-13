@@ -1819,7 +1819,8 @@ class _LogStream(io.TextIOBase):
 def widgets_to_dict(widgets: dict) -> dict:
     """Snapshot a ``{key: widget}`` map into a plain JSON-able dict, by widget type:
     spin boxes → ``.value()``, combo boxes → current text, line edits → ``.text()``,
-    checkable buttons → ``.isChecked()``. Unrecognized widget types are skipped."""
+    checkable buttons (or a checkable ``QGroupBox``) → ``.isChecked()``. Unrecognized
+    widget types are skipped."""
     out = {}
     for key, w in widgets.items():
         if isinstance(w, QtWidgets.QAbstractSpinBox):
@@ -1829,6 +1830,8 @@ def widgets_to_dict(widgets: dict) -> dict:
         elif isinstance(w, QtWidgets.QLineEdit):
             out[key] = w.text()
         elif isinstance(w, QtWidgets.QAbstractButton):
+            out[key] = w.isChecked()
+        elif isinstance(w, QtWidgets.QGroupBox) and w.isCheckable():
             out[key] = w.isChecked()
     return out
 
@@ -1856,6 +1859,8 @@ def apply_dict_to_widgets(widgets: dict, data: dict) -> None:
             elif isinstance(w, QtWidgets.QLineEdit):
                 w.setText(str(val))
             elif isinstance(w, QtWidgets.QAbstractButton):
+                w.setChecked(bool(val))
+            elif isinstance(w, QtWidgets.QGroupBox) and w.isCheckable():
                 w.setChecked(bool(val))
         except Exception:
             pass

@@ -3594,10 +3594,17 @@ class DataLoaderPanel(QtWidgets.QWidget):
     metadataDetected = QtCore.pyqtSignal(dict)  # auto-detected pxY/wavelength_A from a new Data load
 
     def __init__(self, parent=None, *, mode="single", data_dataset="exchange/data",
-                 dark_dataset="exchange/data_dark", allow_live=False):
+                 dark_dataset="exchange/data_dark", allow_live=False,
+                 hide_frame_field=False):
         super().__init__(parent)
         from midas_gui import style as S
         self._mode = mode
+        # "single" mode only: always hide the compact "Frame:" spin, for an
+        # embedding tab that shows a bigger scrubber of its own instead (e.g.
+        # Calibrate's under-viewer slider) — see _setup_navigator. Off by
+        # default so other "single" consumers (e.g. tab_refine.py) are
+        # unaffected.
+        self._hide_frame_field = hide_frame_field
         self._stack = self._paths = self._h5 = None
         self._nframes = 0
         self._cur = None
@@ -3777,7 +3784,9 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._frame_spin.valueChanged.connect(self._set_frame)
             fr = QtWidgets.QHBoxLayout(); fr.setSpacing(4)
             fr.addWidget(QtWidgets.QLabel("Frame:")); fr.addWidget(self._frame_spin); fr.addStretch(1)
-            card.body.addLayout(fr)
+            self._frame_row = QtWidgets.QWidget(); self._frame_row.setLayout(fr)
+            self._frame_row.setVisible(not self._hide_frame_field)
+            card.body.addWidget(self._frame_row)
         else:  # stream
             # start/end are always FILE (scan) numbers, never an index into
             # sub-frames or "Combine sub-frames" chunks — that setting is

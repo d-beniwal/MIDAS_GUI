@@ -141,7 +141,7 @@ class CalibrationTab(QtWidgets.QWidget):
         self._mode_stack.addWidget(split); self._hsplit = split
 
         # ── LEFT: data loader ──
-        self._loader = DataLoaderPanel(mode="single")
+        self._loader = DataLoaderPanel(mode="single", hide_frame_field=True)
         self._loader.setMinimumWidth(200)
         self._loader.dataChanged.connect(self._on_loader_data)
         self._loader.fieldsChanged.connect(self._on_fields_changed)
@@ -161,6 +161,7 @@ class CalibrationTab(QtWidgets.QWidget):
         # ── Pipeline ──
         pipe = S.make_card("Pipeline")
         self._pipeline = _NoScrollComboBox()
+        self._pipeline.setMaximumWidth(208)   # ~50% of the unconstrained width
         for label, key, enabled in PIPELINES:
             self._pipeline.addItem(label, key)
             if not enabled:
@@ -174,19 +175,16 @@ class CalibrationTab(QtWidgets.QWidget):
             "validation found One-shot / Bayesian can report a spurious tilt on\n"
             "weakly-tilted data (it is self-compensated, so integration is still fine).")
         pipe.body.addWidget(self._pipeline)
-        guide = QtWidgets.QLabel("Lsd/BC: any · tilt/strain: Four-stage or First-time")
-        guide.setStyleSheet(f"color:{S.MUTED};font-size:10px"); guide.setWordWrap(True)
-        pipe.body.addWidget(guide)
         lv.addWidget(pipe)
 
         # ── Detector & Calibrant ──
-        det = S.make_card("Detector & Calibrant")
+        det = S.make_card("Define experiment")
         self._load_calib_btn = QtWidgets.QPushButton("Load calibration file…")
         self._load_calib_btn.setToolTip(
             "Load geometry from a MIDAS paramstest (.txt), a calibration .json, "
             "or a pyFAI .poni — sets λ, pixel size, and the seed BC + Lsd.")
         self._load_calib_btn.clicked.connect(self._load_calib_file)
-        self._from_view_btn = QtWidgets.QPushButton("← Data Viewer")
+        self._from_view_btn = QtWidgets.QPushButton("→ Get from Data Viewer")
         self._from_view_btn.setToolTip(
             "Pull λ, pixel size, Lsd and beam centre from the Data Viewer tab "
             "into the detector + seed fields here.")
@@ -196,24 +194,48 @@ class CalibrationTab(QtWidgets.QWidget):
         _lrow.addStretch(1)
         det.body.addLayout(_lrow)
         self._wl = _fspin(0.001, 10.0, 5, DEFAULT_WAVELENGTH, "Å")
-        self._cal = _NoScrollComboBox(); self._cal.addItems(calibrant_combo_items()); self._cal.setMaximumWidth(150)
-        det.body.addLayout(S.Form().row(
-            (make_kedge_label(self._wl, "λ:"), self._wl), ("Calibrant:", self._cal)))
+        self._cal = _NoScrollComboBox(); self._cal.addItems(calibrant_combo_items()); self._cal.setMaximumWidth(75)
+        # A Form().row() stretches every field column equally, which spreads
+        # "Calibrant:" arbitrarily far from λ as the panel widens. Build this
+        # row by hand instead so the gap between the two fields stays small
+        # and fixed, with the leftover width pushed past Calibrant.
+        wl_row = QtWidgets.QHBoxLayout(); wl_row.setSpacing(4)
+        wl_row.addWidget(make_kedge_label(self._wl, "λ:")); wl_row.addWidget(self._wl)
+        wl_row.addSpacing(10)
+        wl_row.addWidget(S.LabelRight("Calibrant:")); wl_row.addWidget(self._cal)
+        wl_row.addStretch(1)
+        det.body.addLayout(wl_row)
         self._pxY = _fspin(1.0, 5000.0, 2, DEFAULT_PIXEL_UM, "µm")
         self._pxZ_check = QtWidgets.QCheckBox("pxZ")
         self._pxZ_spin = _fspin(1.0, 5000.0, 2, DEFAULT_PIXEL_UM, "µm"); self._pxZ_spin.setEnabled(False)
         self._pxZ_check.toggled.connect(self._pxZ_spin.setEnabled)
         prow = QtWidgets.QHBoxLayout(); prow.setSpacing(4)
-        prow.addWidget(self._pxY, 1); prow.addWidget(self._pxZ_check); prow.addWidget(self._pxZ_spin, 1)
+        # No stretch on any of these: a stretched spinbox grows well past its
+        # digits (up to its 104px cap), which visually reads as "far from" the
+        # checkbox beside it even though it starts right after it. Pack all
+        # three at their natural width and push the leftover space to a
+        # trailing stretch instead.
+        prow.addWidget(self._pxY); prow.addWidget(self._pxZ_check); prow.addWidget(self._pxZ_spin)
+        prow.addStretch(1)
         det.body.addLayout(S.Form().row(
             (make_pixel_label(self._pxY, "Pixel:", also=self._pxZ_spin), prow)))
         self._flip_y = QtWidgets.QCheckBox("Flip Y"); self._flip_z = QtWidgets.QCheckBox("Flip Z")
         self._transp = QtWidgets.QCheckBox("Transpose")
         for cb in (self._flip_y, self._flip_z, self._transp):
             cb.toggled.connect(self._on_im_trans_changed)
+
+        def _vsep():
+            f = QtWidgets.QFrame()
+            f.setFrameShape(QtWidgets.QFrame.VLine)
+            f.setFrameShadow(QtWidgets.QFrame.Sunken)
+            return f
+
         tb2 = QtWidgets.QHBoxLayout(); tb2.setSpacing(8)
-        tb2.addWidget(self._flip_y); tb2.addWidget(self._flip_z); tb2.addWidget(self._transp); tb2.addStretch(1)
-        det.body.addWidget(S.LabelRight("Transforms:")); det.body.addLayout(tb2)
+        tb2.addWidget(QtWidgets.QLabel("Transforms:"))
+        tb2.addWidget(self._flip_y); tb2.addWidget(_vsep())
+        tb2.addWidget(self._flip_z); tb2.addWidget(_vsep())
+        tb2.addWidget(self._transp); tb2.addStretch(1)
+        det.body.addLayout(tb2)
         lv.addWidget(det)
 
         # ── Manual ring-picking (non-crystalline calibrants) ──
@@ -244,44 +266,65 @@ class CalibrationTab(QtWidgets.QWidget):
         lv.addWidget(manual)
 
         # ── Threshold (calibration image only) ──
-        thr = S.make_card("Threshold  (pixels below → 0, calibration image)")
-        self._thr_check = QtWidgets.QCheckBox("Apply threshold to calibration image")
-        self._thr_check.setToolTip(
+        thr = S.make_card("Apply threshold to calibration image")
+        thr.setCheckable(True); thr.setChecked(False)
+        thr.setToolTip(
             "When on, pixels dimmer than the slider value are set to 0 in the image\n"
             "fed to the calibration pipeline (and the live preview). Useful to drop\n"
             "background / weak pixels before calibrating.")
-        thr.body.addWidget(self._thr_check)
-        self._thr_min = _fspin(-1e9, 1e9, 1, 0.0)
-        self._thr_max = _fspin(-1e9, 1e9, 1, 65535.0)
-        thr.body.addLayout(S.Form().row(("slider min:", self._thr_min), ("max:", self._thr_max)))
+        self._thr_check = thr
+        self._thr_min = _fspin(-1e9, 1e9, 0, 0.0)
+        self._thr_min.setMaximumWidth(52)
+        self._thr_max = _fspin(-1e9, 1e9, 0, 65535.0)
+        self._thr_max.setMaximumWidth(83)
         self._thr_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self._thr_slider.setRange(0, 1000); self._thr_slider.setValue(0)
         self._thr_val = QtWidgets.QLabel("threshold = —")
         self._thr_val.setStyleSheet(f"color:{S.ACCENT};font-size:11px")
         srow = QtWidgets.QHBoxLayout(); srow.setSpacing(6)
-        srow.addWidget(self._thr_slider, 1); srow.addWidget(self._thr_val)
+        srow.addWidget(self._thr_min); srow.addWidget(self._thr_slider, 9); srow.addStretch(1)
+        srow.addWidget(self._thr_max)
         thr.body.addLayout(srow)
+        thr.body.addWidget(self._thr_val)
         for w in (self._thr_min, self._thr_max, self._thr_slider, self._thr_val):
             w.setEnabled(False)
-        self._thr_check.toggled.connect(self._on_threshold_toggled)
+        thr.toggled.connect(self._on_threshold_toggled)
         self._thr_slider.valueChanged.connect(self._on_threshold_changed)
         self._thr_min.valueChanged.connect(self._on_threshold_changed)
         self._thr_max.valueChanged.connect(self._on_threshold_changed)
         lv.addWidget(thr)
 
         # ── Average frames (hdf5 / folder) ──
-        avgc = S.make_card("Average frames")
-        self._avg_check = QtWidgets.QCheckBox("Average frames into a single image")
-        self._avg_check.setToolTip(
+        # Checkable QGroupBox (like "Multi-panel detector" below): the on/off
+        # toggle lives in the heading itself rather than a separate checkbox
+        # in the body. `_avg_check` is the groupbox itself — it already has
+        # isChecked()/setChecked()/toggled, so every existing caller (state
+        # save/restore included, see helpers.widgets_to_dict) works unchanged.
+        avgc = QtWidgets.QGroupBox("Average frames in single image")
+        avgc.setCheckable(True); avgc.setChecked(False)
+        avgc.setToolTip(
             "Average a range of frames into one image used for calibration. "
             "Requires a multi-frame source.")
-        avgc.body.addWidget(self._avg_check)
+        avgc_body = QtWidgets.QVBoxLayout(avgc)
+        avgc_body.setContentsMargins(8, 6, 8, 6); avgc_body.setSpacing(5)
+        avgc.body = avgc_body
+        self._avg_check = avgc
         self._avg_start = _NoScrollSpinBox(); self._avg_start.setRange(0, 999999)
         self._avg_end = _NoScrollSpinBox(); self._avg_end.setRange(0, 999999)
         self._avg_end.setToolTip("Last frame (exclusive). 0 = all frames.")
         for w in (self._avg_start, self._avg_end):
             w.setEnabled(False)
-        afm = S.Form(); afm.row(("start:", self._avg_start), ("end(0=all):", self._avg_end))
+            w.setFixedWidth(69)   # ~50% narrower than the default rendered width
+        # Plain grid (not S.Form) with the stretch pushed onto a trailing
+        # empty column, so start/end stay packed left with just the row's
+        # own spacing between them instead of being spread across the card.
+        afm = QtWidgets.QGridLayout(); afm.setHorizontalSpacing(6); afm.setVerticalSpacing(5)
+        afm.setContentsMargins(0, 0, 0, 0)
+        afm.addWidget(S.LabelRight("start:"), 0, 0)
+        afm.addWidget(self._avg_start, 0, 1)
+        afm.addWidget(S.LabelRight("end(0=all):"), 0, 2)
+        afm.addWidget(self._avg_end, 0, 3)
+        afm.setColumnStretch(4, 1)
         avgc.body.addLayout(afm)
         self._avg_note = QtWidgets.QLabel("")
         self._avg_note.setStyleSheet("color:#9a9a9a;font-size:10px"); self._avg_note.setWordWrap(True)
@@ -377,7 +420,17 @@ class CalibrationTab(QtWidgets.QWidget):
         self._seed_summary_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         self._seed_summary_lbl.setWordWrap(True)
         seed.body.addWidget(self._seed_summary_lbl)
+        # BC without Lsd is a known-bad combination — Lsd/BC/tilt are near-
+        # degenerate at small 2theta (see the Refine card / DECISIONS
+        # 2026-09-09), so flag it rather than let a half-seeded geometry run away.
+        self._seed_bc_lsd_warn = QtWidgets.QLabel("")
+        self._seed_bc_lsd_warn.setStyleSheet("color:#d7861f;font-weight:bold;font-size:10px")
+        self._seed_bc_lsd_warn.setWordWrap(True)
+        self._seed_bc_lsd_warn.setVisible(False)
+        seed.body.addWidget(self._seed_bc_lsd_warn)
         self._update_seed_summary()
+        self._update_seed_bc_lsd_warning()
+        self._update_seed_btn_style()
         lv.addWidget(seed)
 
         # ── Refine parameters ──
@@ -390,7 +443,12 @@ class CalibrationTab(QtWidgets.QWidget):
         # whole-image refinements. Each of these used to own a line of its own
         # (a hangover from the ± limits column that ran alongside them), which
         # made this the tallest card in a column that has to hold six.
-        rfl = QtWidgets.QGridLayout(); rfl.setSpacing(4)
+        # Rows 0-1 (the scalars + tilts) get their own grid, separate from row
+        # 2's (Distortion/Residual map need a wider "…" button column) — a
+        # single shared grid ties every row's column widths together, which
+        # is why row 2 stayed unchanged while rows 0-1 can go tighter here.
+        rfl = QtWidgets.QGridLayout(); rfl.setHorizontalSpacing(2); rfl.setVerticalSpacing(4)
+        rfl_bottom = QtWidgets.QGridLayout(); rfl_bottom.setSpacing(4)
         self._ref_lsd = QtWidgets.QCheckBox("Lsd"); self._ref_lsd.setChecked(True)
         self._ref_bc = QtWidgets.QCheckBox("BC"); self._ref_bc.setChecked(True)
         self._ref_ty = QtWidgets.QCheckBox("ty"); self._ref_ty.setChecked(True)
@@ -419,14 +477,21 @@ class CalibrationTab(QtWidgets.QWidget):
         for c, w in enumerate((self._ref_ty, self._ref_tz, self._ref_tx)):
             rfl.addWidget(w, 1, c)
         # Distortion needs two cells for its "…" button; Residual map takes the third.
-        rfl.addWidget(self._dist_row, 2, 0, 1, 2)
-        rfl.addWidget(self._build_rc, 2, 2)
-        for c in range(3):
-            rfl.setColumnStretch(c, 1)
+        rfl_bottom.addWidget(self._dist_row, 0, 0, 1, 2)
+        rfl_bottom.addWidget(self._build_rc, 0, 2)
+        # Column 1 (BC / tz) only ever holds a short checkbox label, but with
+        # equal stretch it was claiming as much surplus width as columns 0/2
+        # (Lsd/Wavelength, ty/tx/"Residual map") — starve it instead.
+        for grid in (rfl, rfl_bottom):
+            grid.setColumnStretch(0, 1)
+            grid.setColumnStretch(1, 0)
+            grid.setColumnStretch(2, 1)
         self._refine_grid = rfl
+        self._refine_grid_bottom = rfl_bottom
         self._ref_dist.toggled.connect(lambda _=0: self._update_dist_label())
         self._ref_dist.toggled.connect(self._on_refine_flags_changed)
         refc.body.addLayout(rfl)
+        refc.body.addLayout(rfl_bottom)
 
         # ── Limits (manual d-spacing fit only) ──
         # A block of its own below the refine rows, rather than a ± column woven
@@ -492,15 +557,24 @@ class CalibrationTab(QtWidgets.QWidget):
         grp_adv.setCheckable(True); grp_adv.setChecked(False)
         av = QtWidgets.QVBoxLayout(grp_adv); av.setContentsMargins(8, 6, 8, 6); av.setSpacing(5)
         self._n_iter = _NoScrollSpinBox(); self._n_iter.setRange(1, 1_000_000); self._n_iter.setValue(4)
+        self._n_iter.setFixedWidth(53)    # ~50% narrower than the default sizeHint
         self._lm_iter = _NoScrollSpinBox(); self._lm_iter.setRange(1, 1_000_000); self._lm_iter.setValue(200)
+        self._lm_iter.setFixedWidth(63)   # ~40% narrower than the default sizeHint
         self._device = _NoScrollComboBox(); self._device.addItems(["cpu", "cuda"])
-        av.addLayout(S.Form().row(("E-M iters:", self._n_iter), ("LM iters:", self._lm_iter),
-                                  ("Device:", self._device)))
-        self._out_ed = QtWidgets.QLineEdit(); self._out_ed.setPlaceholderText("Output dir…")
-        bou = _br(); bou.clicked.connect(lambda: self._out_ed.setText(
-            QtWidgets.QFileDialog.getExistingDirectory(self, "Output dir") or ""))
-        outr = QtWidgets.QHBoxLayout(); outr.setSpacing(4); outr.addWidget(self._out_ed, 1); outr.addWidget(bou)
-        av.addLayout(S.Form().row(("Output:", outr)))
+        # 20% of the 72px sizeHint would be 14px — too narrow for a combo box
+        # to show its text past the 18px drop-down arrow, so 50px is the
+        # practical floor that still keeps "cuda" legible.
+        self._device.setFixedWidth(50)
+        iter_row = QtWidgets.QHBoxLayout(); iter_row.setSpacing(4)
+        iter_row.addWidget(S.LabelRight("E-M iters:")); iter_row.addWidget(self._n_iter)
+        iter_row.addSpacing(10)
+        iter_row.addWidget(S.LabelRight("LM iters:")); iter_row.addWidget(self._lm_iter)
+        iter_row.addStretch(1)
+        av.addLayout(iter_row)
+        device_row = QtWidgets.QHBoxLayout(); device_row.setSpacing(4)
+        device_row.addWidget(S.LabelRight("Device:")); device_row.addWidget(self._device)
+        device_row.addStretch(1)
+        av.addLayout(device_row)
         lv.addWidget(grp_adv)
         self._adv_grp = grp_adv
 
@@ -515,35 +589,81 @@ class CalibrationTab(QtWidgets.QWidget):
         self._ps_z = _NoScrollSpinBox(); self._ps_z.setRange(1, 1_000_000); self._ps_z.setValue(195)
         self._pg_y = _NoScrollSpinBox(); self._pg_y.setRange(0, 1_000_000); self._pg_y.setValue(7)
         self._pg_z = _NoScrollSpinBox(); self._pg_z.setRange(0, 1_000_000); self._pg_z.setValue(17)
-        pf2 = S.Form()
-        pf2.row(("panels Y:", self._pn_y), ("panels Z:", self._pn_z))
-        pf2.row(("size Y:", self._ps_y), ("size Z:", self._ps_z))
-        pf2.row(("gap Y:", self._pg_y), ("gap Z:", self._pg_z))
+        for w in (self._pn_y, self._pn_z, self._ps_y, self._ps_z, self._pg_y, self._pg_z):
+            w.setFixedWidth(64)   # ~50% narrower than the default rendered width
+        # Plain grid (not S.Form) with the stretch pushed onto a trailing
+        # empty column, so the Y column stays flush left and the Z column
+        # follows it with only the row's own spacing, instead of both field
+        # columns being stretched apart across the card.
+        pf2 = QtWidgets.QGridLayout(); pf2.setHorizontalSpacing(6); pf2.setVerticalSpacing(5)
+        pf2.setContentsMargins(0, 0, 0, 0)
+        for r, (lab_y, w_y, lab_z, w_z) in enumerate((
+                ("panels Y:", self._pn_y, "panels Z:", self._pn_z),
+                ("size Y:", self._ps_y, "size Z:", self._ps_z),
+                ("gap Y:", self._pg_y, "gap Z:", self._pg_z))):
+            pf2.addWidget(S.LabelRight(lab_y), r, 0)
+            pf2.addWidget(w_y, r, 1)
+            pf2.addWidget(S.LabelRight(lab_z), r, 2)
+            pf2.addWidget(w_z, r, 3)
+        pf2.setColumnStretch(4, 1)
         pv.addLayout(pf2)
         self._panel_grp = grp_panel
         lv.addWidget(grp_panel)
 
+        lv.addStretch(1)
+
+        # ── Output / Run / Save — a fixed footer, not part of the scrollable
+        # content above, so it stays pinned to the bottom of this panel no
+        # matter how many cards above it are expanded ──
+        footer = QtWidgets.QWidget()
+        fv = QtWidgets.QVBoxLayout(footer); fv.setContentsMargins(2, 6, 2, 0); fv.setSpacing(6)
+        fv.addWidget(S.hline())
+
+        self._out_ed = QtWidgets.QLineEdit(); self._out_ed.setPlaceholderText("Output dir…")
+        self._out_ed.setMaximumWidth(238)   # ~25% narrower than the default rendered width
+        bou = _br(); bou.clicked.connect(lambda: self._out_ed.setText(
+            QtWidgets.QFileDialog.getExistingDirectory(self, "Output dir") or ""))
+        outr = QtWidgets.QHBoxLayout(); outr.setSpacing(4); outr.addWidget(self._out_ed); outr.addWidget(bou)
+        # A Form().row() stretches its field column to fill the footer's full
+        # width, so the row grows/shrinks with the splitter instead of
+        # staying pinned to the left like the Run/Save rows below it.
+        out_row = QtWidgets.QHBoxLayout(); out_row.setSpacing(4)
+        out_row.addWidget(S.LabelRight("Output:")); out_row.addLayout(outr)
+        out_row.addStretch(1)
+        fv.addLayout(out_row)
+
         # ── Run + Save ──
         self._run_btn = S.primary_btn("Run Calibration")
         self._run_btn.clicked.connect(self._on_run_clicked)
+        self._run_btn.setFixedWidth(189)   # ~3x its old 63px (~50% of natural sizeHint 126)
+        self._run_btn.setToolTip("Run Calibration")
         self._abort_btn = QtWidgets.QPushButton("Abort")
         self._abort_btn.setEnabled(False)
         self._abort_btn.setToolTip("Cancel: returns control immediately and discards the "
                                    "result. The running computation finishes in the background.")
         self._abort_btn.clicked.connect(self._abort)
         run_row = QtWidgets.QHBoxLayout(); run_row.setSpacing(6)
-        run_row.addWidget(self._run_btn, 1); run_row.addWidget(self._abort_btn)
-        lv.addLayout(run_row)
+        run_row.addStretch(1); run_row.addWidget(self._run_btn); run_row.addWidget(self._abort_btn)
+        run_row.addStretch(1)
+        fv.addLayout(run_row)
         self._prog = QtWidgets.QProgressBar(); self._prog.setRange(0, 0); self._prog.setVisible(False)
-        lv.addWidget(self._prog)
+        fv.addWidget(self._prog)
         self._save_json_btn = QtWidgets.QPushButton("Save .json"); self._save_json_btn.setEnabled(False)
         self._save_json_btn.clicked.connect(self._save_json)
+        self._save_json_btn.setFixedWidth(132)   # ~3x its old 44px (~50% of natural sizeHint 88)
+        self._save_json_btn.setToolTip("Save .json")   # button is narrower than its own text
         self._save_ps_btn = QtWidgets.QPushButton("Save paramstest.txt"); self._save_ps_btn.setEnabled(False)
         self._save_ps_btn.clicked.connect(self._save_paramstest)
-        lv.addLayout(S.button_grid([self._save_json_btn, self._save_ps_btn], 2))
+        save_row = QtWidgets.QHBoxLayout(); save_row.setSpacing(6)
+        save_row.addStretch(1); save_row.addWidget(self._save_json_btn); save_row.addWidget(self._save_ps_btn)
+        save_row.addStretch(1)
+        fv.addLayout(save_row)
 
-        lv.addStretch(1)
-        split.addWidget(scroll)
+        mid_col = QtWidgets.QWidget()
+        mid_v = QtWidgets.QVBoxLayout(mid_col); mid_v.setContentsMargins(0, 0, 0, 0); mid_v.setSpacing(0)
+        mid_v.addWidget(scroll, 1)
+        mid_v.addWidget(footer)
+        split.addWidget(mid_col)
 
         # Right: image + bottom tabs
         right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
@@ -582,7 +702,12 @@ class CalibrationTab(QtWidgets.QWidget):
         # watching rings follow is the Data Viewer's Ring simulation card; a
         # second, weaker copy of it driven by the seed fields meant ticking
         # "Use manual seed" painted rings that no calibration had endorsed.
-        right.addWidget(self._img_view)
+        img_container = QtWidgets.QWidget()
+        icl = QtWidgets.QVBoxLayout(img_container)
+        icl.setContentsMargins(0, 0, 0, 0); icl.setSpacing(0)
+        icl.addWidget(self._img_view, 1)
+        icl.addWidget(self._build_frame_scrub_bar())
+        right.addWidget(img_container)
 
         bot = QtWidgets.QTabWidget()
         self._prof_view = ProfileViewer()
@@ -662,9 +787,59 @@ class CalibrationTab(QtWidgets.QWidget):
 
     # ── Data (from the loader panel) ──────────────────────────────
 
+    def _build_frame_scrub_bar(self) -> QtWidgets.QWidget:
+        """Prev/slider/next scrubber shown under the image viewer once the
+        loaded source (HDF5 dataset / TIFF folder) has more than one frame —
+        replaces the loader panel's compact "Frame:" spin, which this tab
+        keeps hidden entirely (see ``DataLoaderPanel(hide_frame_field=True)``),
+        mirroring ``CakeStackViewer``'s scrub bar in the Batch "Eta-R cakes"
+        tab."""
+        row = QtWidgets.QHBoxLayout()
+        row.setContentsMargins(4, 2, 4, 2); row.setSpacing(4)
+        self._frame_prev_btn = QtWidgets.QToolButton(); self._frame_prev_btn.setText("◀")
+        self._frame_prev_btn.setToolTip("Previous frame")
+        self._frame_prev_btn.clicked.connect(lambda: self._step_frame(-1))
+        row.addWidget(self._frame_prev_btn)
+        self._frame_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self._frame_slider.setMinimum(0)
+        self._frame_slider.setPageStep(1)
+        self._frame_slider.valueChanged.connect(self._loader.set_frame)
+        row.addWidget(self._frame_slider, 1)
+        self._frame_next_btn = QtWidgets.QToolButton(); self._frame_next_btn.setText("▶")
+        self._frame_next_btn.setToolTip("Next frame")
+        self._frame_next_btn.clicked.connect(lambda: self._step_frame(1))
+        row.addWidget(self._frame_next_btn)
+        self._frame_lbl = QtWidgets.QLabel("")
+        self._frame_lbl.setMinimumWidth(90)
+        row.addWidget(self._frame_lbl)
+        self._frame_scrub_bar = QtWidgets.QWidget()
+        self._frame_scrub_bar.setLayout(row)
+        self._frame_scrub_bar.setVisible(False)
+        return self._frame_scrub_bar
+
+    def _step_frame(self, delta: int):
+        n = self._loader.n_frames()
+        if n <= 1:
+            return
+        self._frame_slider.setValue(
+            min(max(self._frame_slider.value() + delta, 0), n - 1))
+
+    def _sync_frame_scrub_bar(self):
+        n = self._loader.n_frames()
+        self._frame_scrub_bar.setVisible(n > 1)
+        if n <= 1:
+            return
+        idx = self._loader.frame_index()
+        self._frame_slider.blockSignals(True)
+        self._frame_slider.setRange(0, n - 1)
+        self._frame_slider.setValue(idx)
+        self._frame_slider.blockSignals(False)
+        self._frame_lbl.setText(f"frame {idx + 1}/{n}")
+
     def _on_loader_data(self):
         """New frame / data from the loader — refresh the calibration image, the
         threshold-slider range, and the display."""
+        self._sync_frame_scrub_bar()
         self._sync_avg_controls()
         self._image = self._source_image()
         if self._image is None:
@@ -911,6 +1086,24 @@ class CalibrationTab(QtWidgets.QWidget):
         finally:
             self._syncing_seed_master = False
         self._update_seed_summary()
+        self._update_seed_bc_lsd_warning()
+        self._update_seed_btn_style()
+
+    def _update_seed_btn_style(self):
+        """Green "Manual seed..." once at least one parameter is ticked, so an
+        active (and easily forgotten) seed is visible without opening the dialog."""
+        active = any(cb.isChecked() for cb in self._seed_enables)
+        self._seed_btn.setStyleSheet(S.SUCCESS_BTN_QSS if active else "")
+
+    def _update_seed_bc_lsd_warning(self):
+        bad = self._seed_en_bc.isChecked() and not self._seed_en_lsd.isChecked()
+        self._seed_bc_lsd_warn.setVisible(bad)
+        if bad:
+            self._seed_bc_lsd_warn.setText(
+                "WARNING: BC guess is provided, but Lsd guess is missing. It is "
+                "recommended to either provide a good guess for both BC and Lsd, "
+                "or skip the guess entirely and let MIDAS run it's own auto-seed "
+                "program.")
 
     def _on_seed_master_toggled(self, *_args):
         """``_manual_seed_check`` set programmatically or by a test/legacy
@@ -1224,7 +1417,9 @@ class CalibrationTab(QtWidgets.QWidget):
             "model — not available for manual point-pick fits." if is_dsp else "")
         self._panel_grp.setVisible(not is_dsp)
         self._adv_grp.setVisible(not is_dsp)
-        self._run_btn.setText("Fit Geometry (manual)" if is_dsp else "Run Calibration")
+        run_label = "Fit Geometry (manual)" if is_dsp else "Run Calibration"
+        self._run_btn.setText(run_label)
+        self._run_btn.setToolTip(run_label)   # button is narrower than its own text
         self._on_dspacing_picks_changed()
         self._update_refine_summary()
 
