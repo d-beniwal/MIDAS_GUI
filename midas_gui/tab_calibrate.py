@@ -23,7 +23,7 @@ from midas_gui.constants import (
 from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _predict_ring_radii, _NoScrollComboBox,
     make_kedge_label, make_pixel_label, ring_xy_corrected, distortion_rho_d_um,
-    refresh_combo_items,
+    ring_on_image_mask, refresh_combo_items,
     widgets_to_dict, apply_dict_to_widgets, im_trans_codes_from_checkboxes,
     paramstest_pairs, parse_dspacing_text)
 from midas_gui.widgets import (
@@ -1952,8 +1952,18 @@ class CalibrationTab(QtWidgets.QWidget):
         visible = self._show_rings_check.isChecked()
         pen = pg.mkPen("lime", width=1.2)
         curves = self._ring_curves(result, radii)
+        img_shape = (result.NrPixelsZ, result.NrPixelsY)
         for ys, zs in curves:
-            item = pg.PlotDataItem(ys, zs, pen=pen)
+            # Confined to the detector image, same as the Data Viewer's ring
+            # overlay: a ring that swings outside the frame is not a
+            # prediction the fit's own measured rings can be checked against,
+            # so points off the image become NaN and connect="finite" breaks
+            # the polyline there rather than drawing a chord across empty
+            # canvas (see helpers.ring_on_image_mask).
+            on = ring_on_image_mask(ys, zs, img_shape)
+            ys_clip = np.where(on, ys, np.nan)
+            zs_clip = np.where(on, zs, np.nan)
+            item = pg.PlotDataItem(ys_clip, zs_clip, pen=pen, connect="finite")
             item.setVisible(visible)
             self._img_view._iv.addItem(item); self._ring_items.append(item)
         bc = pg.ScatterPlotItem([result.BC_y], [result.BC_z], symbol="o", size=10,

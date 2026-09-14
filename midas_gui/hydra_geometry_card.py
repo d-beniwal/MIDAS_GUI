@@ -35,7 +35,7 @@ from midas_gui.helpers import (_fspin, _NoScrollSpinBox, _browse,
                          make_kedge_label, make_pixel_label, tilted_ring_xy,
                          write_poni, write_standalone_paramstest,
                          im_trans_codes_from_checkboxes, _apply_im_trans,
-                         parse_dspacing_text)
+                         parse_dspacing_text, ring_on_image_mask as _ring_on_image_mask)
 from midas_gui.workers import build_integration_context, integrate_frame
 from midas_gui import style as S
 
@@ -66,12 +66,6 @@ _CUSTOM_DSPACING = "Custom (d-spacings)"
 # has no a/b/c/.../sg of its own yet — a "dspacing"-kind material (e.g.
 # AgBH) or a brand-new dialog opened straight into d-spacing mode.
 _FALLBACK_LATTICE = dict(a=5.4116, b=5.4116, c=5.4116, alpha=90.0, beta=90.0, gamma=90.0, sg=225)
-
-
-def _ring_on_image_mask(ys, zs, img_shape):
-    """Boolean mask of the ring points that fall on the detector image."""
-    nz, ny = img_shape[:2]
-    return (ys >= 0) & (ys <= ny - 1) & (zs >= 0) & (zs <= nz - 1)
 
 
 def _ring_label_pos(ys, zs, img_shape, box_w: float = 0.0, box_h: float = 0.0,
@@ -881,7 +875,14 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         self._sync_dspacing_picking()
 
     def _on_material_enabled(self, material: dict, checked: bool):
+        """A material's enabled tick only changes which already-simulated
+        rings are visible — not their geometry — so the on-image overlay must
+        be redrawn here even when live mode is off (the case
+        ``_on_sim_param_changed`` alone leaves untouched, see its docstring).
+        Mirrors ``refresh_after_projection``'s same guard."""
         material["enabled"] = checked
+        if self._any_material_rings():
+            self._redraw_rings()
         self._on_sim_param_changed()
 
     def _pick_material_color(self, material: dict, swatch_btn: QtWidgets.QPushButton):

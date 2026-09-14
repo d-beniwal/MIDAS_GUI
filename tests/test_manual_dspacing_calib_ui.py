@@ -631,14 +631,37 @@ def test_param_grid_marks_a_bound_pinned_row_instead_of_a_sigma(app):
 
 def _ring_extents(tab):
     """(y-extent, z-extent) of each drawn ring curve — a plain circle has equal
-    extents, a tilt-distorted one does not."""
+    extents, a tilt-distorted one does not.
+
+    A curve's off-detector points are drawn as NaN (see
+    ``helpers.ring_on_image_mask``), so the extent is taken over the finite
+    (on-image) points only — otherwise a ring that partly leaves the frame
+    would report an all-NaN extent instead of the visible arc's."""
     import numpy as np
     out = []
     for it in tab._ring_items:
         d = it.getData() if hasattr(it, "getData") else None
         if d and d[0] is not None and len(d[0]) > 10:
-            out.append((float(np.ptp(d[0])), float(np.ptp(d[1]))))
+            x, y = d
+            fin = np.isfinite(x) & np.isfinite(y)
+            if fin.sum() > 10:
+                out.append((float(np.ptp(x[fin])), float(np.ptp(y[fin]))))
     return out
+
+
+def _curve_extents(tab, result):
+    """(y-extent, z-extent) of each *unclipped* predicted ring curve — the
+    underlying forward-model geometry (circular vs. tilt-stretched), not what
+    actually lands on the detector image. ``_draw_rings`` clips its rendered
+    items to the image (see ``helpers.ring_on_image_mask``), which is the
+    right thing on screen but means a ring far larger than this test's tiny
+    512x3072 detector would report a near-empty visible extent instead of
+    the shape this test is actually checking."""
+    import numpy as np
+    import midas_gui.tab_calibrate as tab_calibrate_mod
+    max_r = max(result.NrPixelsY, result.NrPixelsZ)
+    radii = [r for r in tab_calibrate_mod._predict_ring_radii(result) if 0 < r < max_r]
+    return [(float(np.ptp(ys)), float(np.ptp(zs))) for ys, zs in tab._ring_curves(result, radii)]
 
 
 def test_seed_card_never_draws_rings(app):
@@ -666,14 +689,17 @@ def test_seed_card_never_draws_rings(app):
         _d_list=sorted([58.380 / n for n in range(1, 11)], reverse=True),
         im_trans=[])
     tab._draw_rings(result)
-    drawn = _ring_extents(tab)
-    assert drawn, "a fitted result should draw rings"
-    # Circles, to within the 512-point sampling of the curve.
-    for y_ext, z_ext in drawn:
+    rendered = _ring_extents(tab)
+    assert rendered, "a fitted result should draw rings"
+    # Circles, to within the 512-point sampling of the curve — checked on the
+    # unclipped model, since these test rings are far larger than the tiny
+    # detector and their *rendered* (image-clipped) extents are not circular
+    # (see _curve_extents).
+    for y_ext, z_ext in _curve_extents(tab, result):
         assert y_ext == pytest.approx(z_ext, rel=1e-3)
 
     tab._seed_ty.setValue(-82.0)
-    assert _ring_extents(tab) == pytest.approx(drawn, rel=1e-9)
+    assert _ring_extents(tab) == pytest.approx(rendered, rel=1e-9)
 
 
 def test_fitted_tilt_reaches_the_overlay_with_the_seed_card_on(app):
@@ -700,7 +726,7 @@ def test_fitted_tilt_reaches_the_overlay_with_the_seed_card_on(app):
     # The tilt is both visible in the seed card and applied to the overlay.
     assert tab._seed_ty.value() == pytest.approx(-82.0)
     assert "ty=-82" in tab._seed_note.text()
-    stretched = _ring_extents(tab)
+    stretched = _curve_extents(tab, tilted)
     assert stretched[0][1] > 3 * stretched[0][0]            # stretched, not circular
     assert "tilt applied" in tab._ring_status.text()
 

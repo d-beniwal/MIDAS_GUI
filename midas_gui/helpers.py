@@ -999,6 +999,20 @@ def ring_xy_corrected(two_theta_deg: float, tx: float, ty: float, tz: float,
                              Lsd_um, bc_y, bc_z, pxY_um, pxZ_um)
 
 
+def ring_on_image_mask(ys, zs, img_shape):
+    """Boolean mask of the ``(ys, zs)`` ring points that fall on the detector
+    image whose array shape is ``img_shape`` (``(rows, cols, ...)``, i.e.
+    ``(NrPixelsZ, NrPixelsY)``).
+
+    Shared by every ring overlay (Data Viewer, Calibrate) so a predicted ring
+    that swings outside the frame is confined to the pixels a caller can
+    actually check it against, rather than drawn across the empty canvas
+    beside the detector.
+    """
+    nz, ny = img_shape[:2]
+    return (ys >= 0) & (ys <= ny - 1) & (zs >= 0) & (zs <= nz - 1)
+
+
 #: Fixed-point passes in :func:`ring_xy_corrected`. D is a near-unity
 #: multiplier, so this converges to float64 noise in ~5; 20 is headroom for a
 #: badly-scaled coefficient set, and costs nothing on a 400-point ring.
