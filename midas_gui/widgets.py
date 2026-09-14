@@ -3823,6 +3823,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
             sf.row(("start:", self._fr_start), ("end(0=all):", self._fr_end))
             sf.row(("stride:", self._fr_stride))
             card.body.addLayout(sf)
+            card.body.addWidget(S.hline())
             self._fr_hint = QtWidgets.QLabel("")
             self._fr_hint.setWordWrap(True)
             self._fr_hint.setStyleSheet(f"color:{S.MUTED};font-size:10px;")
@@ -3839,6 +3840,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
             cr.addWidget(QtWidgets.QLabel("Combine sub-frames:"))
             self._combine_chunk = _NoScrollSpinBox()
             self._combine_chunk.setRange(0, 999999); self._combine_chunk.setFixedWidth(64)
+            self._combine_chunk.setValue(1)
             self._combine_chunk.setToolTip(
                 "How many consecutive raw sub-frames in each file to combine "
                 "into one integrated frame (mpe_wf's OME_SUM). 0 = combine "

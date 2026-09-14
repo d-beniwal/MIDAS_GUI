@@ -226,7 +226,9 @@ class BatchQueueTab(QtWidgets.QWidget):
     # ── wiring from app.py ───────────────────────────────────────
 
     def set_calibration(self, result):
-        """The Calibrate tab finished — offer it to new calibration nodes.
+        """A calibration result is available from the Calibrate tab — either
+        a Fit that just finished, or one restored from an opened project —
+        offer it to new calibration nodes.
 
         Existing nodes keep their snapshot: a queue built this morning must not
         change because the calibrant was re-fit this afternoon."""

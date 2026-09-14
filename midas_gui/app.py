@@ -706,6 +706,26 @@ class MainWindow(QtWidgets.QMainWindow):
             if calib_attempts:
                 self._cal_tab.apply_project_calibration(calib_attempts)
                 restored.append("Calibrate: " + ", ".join(sorted(calib_attempts)))
+                # apply_project_calibration only redraws the Calibrate tab
+                # itself — it doesn't emit calibrationDone (that signal is
+                # reserved for a just-finished Fit), so consumers wired only
+                # to that signal (Batch Queue chiefly) never learn a result
+                # now exists, and report "No calibration available from the
+                # Calibrate tab yet" even though the tab plainly shows one.
+                # Propagate the restored single-detector result by hand, to
+                # the same consumer list the live signal wiring uses.
+                restored_result = self._cal_tab.get_result()
+                if restored_result is not None:
+                    for t in (self._batch_tab, self._queue_tab, self._mask_tab,
+                              self._refine_tab, self._corr_tab, self._pdf_tab,
+                              self._tex_tab, self._pump_tab, self._export_tab):
+                        setter = getattr(t, "set_calibration", None)
+                        if setter is not None:
+                            try:
+                                setter(restored_result)
+                            except Exception:
+                                _log("Calibration propagation to "
+                                     f"{t} failed:\n{traceback.format_exc()}")
             if integrate_attempts:
                 self._batch_tab.apply_project_integration(integrate_attempts)
                 restored.append("Batch Integrate: " + ", ".join(sorted(integrate_attempts)))
