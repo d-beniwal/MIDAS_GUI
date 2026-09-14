@@ -12,6 +12,14 @@ Prints two kinds of structured lines to stdout, unbuffered:
   ``[launcher] DONE exit=<code>``       — printed by the launching shell
                                           command after this process exits,
                                           not by this module itself.
+
+On success, also writes ``_bg_job_results.npz`` into ``--out-dir`` — the
+arrays ``BatchTab._populate_plots_from_attempt`` needs to fill the
+Waterfall/Stacked-profiles/Eta-R cakes tabs. This process has no Qt signals
+reaching the GUI that launched it (it's a detached `screen` session), and
+the user's chosen ``--fmts`` don't necessarily round-trip that shape (plain
+csv doesn't), so this sidecar is the one thing ``JobQueuePanel``'s
+``on_job_done`` callback can always rely on.
 """
 from __future__ import annotations
 
@@ -105,6 +113,30 @@ def _build_corrections(args):
     return (pol, sa)
 
 
+def _write_results_sidecar(out_dir: str, data: dict) -> None:
+    """Persist the ``r_axis_px``/``profiles``/``frame_ids``/``eta_axis`` arrays
+    a finished ``BatchWorker`` run carries as ``_bg_job_results.npz`` in
+    ``out_dir`` — see the module docstring for why. No-op if the run produced
+    nothing to plot (``n == 0``)."""
+    import numpy as np
+    from pathlib import Path
+
+    r_axis = data.get("r_axis_px")
+    profiles = data.get("profiles")
+    if r_axis is None or profiles is None or len(profiles) == 0:
+        return
+    frame_ids = data.get("frame_ids") or list(range(len(profiles)))
+    payload = {
+        "r_axis_px": np.asarray(r_axis),
+        "profiles": np.asarray(profiles),
+        "frame_ids": np.array([str(f) for f in frame_ids]),
+    }
+    eta_axis = data.get("eta_axis")
+    if eta_axis is not None:
+        payload["eta_axis_deg"] = np.asarray(eta_axis)
+    np.savez(Path(out_dir) / "_bg_job_results.npz", **payload)
+
+
 def main(argv=None) -> int:
     args = _build_arg_parser().parse_args(argv)
 
@@ -163,6 +195,12 @@ def main(argv=None) -> int:
         n = data.get("n", 0)
         out = data.get("out_paths") or []
         print(f"[batch] FINISHED n={n} out_paths={len(out)}", flush=True)
+        if not data.get("aborted") and exit_code[0] == 0:
+            try:
+                _write_results_sidecar(args.out_dir, data)
+            except Exception as e:
+                print(f"[batch] WARNING: could not write GUI results sidecar: {e}",
+                     flush=True)
 
     worker.progress.connect(_on_progress)
     worker.log_line.connect(_on_log)

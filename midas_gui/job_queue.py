@@ -66,6 +66,9 @@ class Job:
     meta_path: str
     name: str
     total_frames: int = 1
+    out_dir: str = ""                # where the job writes results — see
+                                      # batch_cli._write_results_sidecar and
+                                      # JobQueuePanel's on_job_done callback
     start_time: float = field(default_factory=time.time)
     status: str = "Running"          # Running / Cancelling / Done / Failed(n) / Ended / Cancelled
     exit_code: Optional[int] = None
@@ -78,6 +81,7 @@ class Job:
     status_label: Optional[QtWidgets.QLabel] = None
     reattach_btn: Optional[QtWidgets.QPushButton] = None
     cancel_btn: Optional[QtWidgets.QPushButton] = None
+    load_results_btn: Optional[QtWidgets.QPushButton] = None
 
 
 def screen_available() -> bool:
@@ -101,12 +105,26 @@ def _sanitize(name: str) -> str:
 
 
 class JobQueuePanel(QtWidgets.QWidget):
-    """Embeddable panel: a "Refresh" bar, a scrollable list of active-job
-    rows (most recent first), and a dedicated log pane streaming the most
-    recently focused job's logfile."""
+    """Embeddable panel: a "Refresh" bar and a scrollable list of active-job
+    rows (most recent first). Log output for the most recently focused job's
+    logfile is streamed into ``log_widget`` (a ``widgets.LogPanel``, owned by
+    the caller) rather than a log widget of this panel's own — the caller
+    shares one log surface across this panel and its own in-process run
+    output.
 
-    def __init__(self, parent=None):
+    ``on_job_done``, if given, is called with the ``Job`` as soon as it's
+    detected ``Done`` (screen session exited 0) — both right after that
+    happens and again whenever "Load results" is clicked on an already-Done
+    row (including one adopted from a prior GUI instance). A background
+    ``screen`` job runs in a separate process with no Qt signals reaching
+    this one, so this callback is the only way its results ever reach the
+    caller; the caller reads ``job.out_dir`` for whatever results sidecar it
+    left there."""
+
+    def __init__(self, log_widget, parent=None, *, on_job_done=None):
         super().__init__(parent)
+        self._log = log_widget
+        self._on_job_done = on_job_done
         self._jobs: list[Job] = []
         self._active_log_job: Optional[Job] = None
         self._tail_proc: Optional[QtCore.QProcess] = None
@@ -152,24 +170,20 @@ class JobQueuePanel(QtWidgets.QWidget):
         self._empty_lbl.setStyleSheet("color:#888;font-size:10px;")
         self._jobs_layout.insertWidget(0, self._empty_lbl)
 
-        self._log = QtWidgets.QTextEdit()
-        self._log.setReadOnly(True)
-        self._log.setStyleSheet(
-            "QTextEdit { background-color:#1e1e1e; color:#e0e0e0; "
-            "font-family: monospace; font-size: 11px; }")
-        self._log.setMinimumHeight(120)
-        v.addWidget(self._log, 1)
-
     def _refresh_empty_label(self):
         self._empty_lbl.setVisible(not self._jobs)
 
     # ── Launch ───────────────────────────────────────────────────────
 
-    def launch(self, argv: list, *, name: str, total_frames: int) -> Optional[Job]:
+    def launch(self, argv: list, *, name: str, total_frames: int,
+              out_dir: str = "") -> Optional[Job]:
         """Launch ``argv`` (e.g. ``[sys.executable, "-m", "midas_gui.batch_cli", ...]``)
         in a fresh detached ``screen`` session. Returns the new ``Job``, or
         ``None`` if ``screen`` isn't available or a same-named session is
-        already running (both cases show a message box)."""
+        already running (both cases show a message box). ``out_dir`` is the
+        job's own ``--out-dir`` — recorded so ``on_job_done`` (and a later
+        "Load results" click) knows where to find whatever results sidecar
+        the job leaves behind."""
         if not screen_available():
             QtWidgets.QMessageBox.warning(
                 self, "screen not found",
@@ -191,7 +205,7 @@ class JobQueuePanel(QtWidgets.QWidget):
             open(logfile, "w").close()
             Path(meta_path).write_text(json.dumps(
                 {"name": name, "total_frames": total_frames,
-                 "started": time.time()}))
+                 "out_dir": out_dir, "started": time.time()}))
         except OSError as e:
             QtWidgets.QMessageBox.warning(
                 self, "Cannot write log", f"Could not create job files:\n{e}")
@@ -216,7 +230,7 @@ class JobQueuePanel(QtWidgets.QWidget):
             return None
 
         job = Job(session=session, logfile=logfile, meta_path=meta_path,
-                 name=name, total_frames=max(1, total_frames))
+                 name=name, total_frames=max(1, total_frames), out_dir=out_dir)
         self._jobs.append(job)
         self._add_job_row(job)
         self._set_active_log_job(job, header_cmd=argv)
@@ -243,15 +257,16 @@ class JobQueuePanel(QtWidgets.QWidget):
                 continue
             logfile = str(JOBS_DIR / f"{session}.screenlog")
             meta_path = str(JOBS_DIR / f"{session}.meta.json")
-            name, total_frames = session, 1
+            name, total_frames, out_dir = session, 1, ""
             try:
                 meta = json.loads(Path(meta_path).read_text())
                 name = meta.get("name", session)
                 total_frames = int(meta.get("total_frames", 1))
+                out_dir = meta.get("out_dir", "")
             except (OSError, ValueError, json.JSONDecodeError):
                 pass
             job = Job(session=session, logfile=logfile, meta_path=meta_path,
-                     name=name, total_frames=max(1, total_frames))
+                     name=name, total_frames=max(1, total_frames), out_dir=out_dir)
             if os.path.isfile(logfile):
                 try:
                     job.log_offset = os.path.getsize(logfile)
@@ -314,15 +329,30 @@ class JobQueuePanel(QtWidgets.QWidget):
         reattach_btn.clicked.connect(lambda _=False, j=job: self._reattach_job(j))
         cancel_btn = QtWidgets.QPushButton("Cancel")
         cancel_btn.clicked.connect(lambda _=False, j=job: self._cancel_job(j))
+        load_results_btn = QtWidgets.QPushButton("Load results")
+        load_results_btn.setToolTip(
+            "Populate the Waterfall/Stacked-profiles/Eta-R cakes tabs from "
+            "this job's results (enabled once it finishes successfully).")
+        load_results_btn.setEnabled(job.status == "Done")
+        load_results_btn.clicked.connect(lambda _=False, j=job: self._load_results(j))
 
-        for w in (label, progress, status_label, show_log_btn, reattach_btn, cancel_btn):
+        for w in (label, progress, status_label, show_log_btn, reattach_btn,
+                 cancel_btn, load_results_btn):
             hl.addWidget(w)
         hl.setStretchFactor(label, 1)
 
         job.row_widget = row; job.label = label; job.progress = progress
         job.status_label = status_label
         job.reattach_btn = reattach_btn; job.cancel_btn = cancel_btn
+        job.load_results_btn = load_results_btn
         self._jobs_layout.insertWidget(0, row)
+
+    def _load_results(self, job: Job) -> None:
+        if self._on_job_done is not None:
+            self._on_job_done(job)
+        else:
+            QtWidgets.QMessageBox.information(
+                self, "No handler", "Nothing is registered to load this job's results.")
 
     def _remove_job_row(self, job: Job) -> None:
         if job.row_widget is not None:
@@ -382,7 +412,7 @@ class JobQueuePanel(QtWidgets.QWidget):
         color, bold = _classify_line(line)
         weight = "bold" if bold else "normal"
         escaped = html.escape(line).replace(" ", "&nbsp;")
-        self._log.append(f'<span style="color:{color};font-weight:{weight};">{escaped}</span>')
+        self._log.append_html(f'<span style="color:{color};font-weight:{weight};">{escaped}</span>')
 
     def _on_tail_stdout(self) -> None:
         if self._tail_proc is None:
@@ -469,9 +499,13 @@ class JobQueuePanel(QtWidgets.QWidget):
             job.status_label.setStyleSheet(f"color:{color};font-weight:bold;")
         if job.cancel_btn is not None:
             job.cancel_btn.setEnabled(False)
+        if job.load_results_btn is not None:
+            job.load_results_btn.setEnabled(job.status == "Done")
         self._update_job_progress(job)
         if self._active_log_job is job:
             self._append_log(f"[launcher] session ended ({job.status}).")
+        if job.status == "Done" and self._on_job_done is not None:
+            self._on_job_done(job)
 
     def _parse_exit_from_logfile(self, logfile: str) -> Optional[int]:
         if not logfile or not os.path.isfile(logfile):

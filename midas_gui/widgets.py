@@ -5656,3 +5656,7 @@ class LogPanel(QtWidgets.QPlainTextEdit):
     def append(self, line: str):
         self.appendPlainText(line)
         self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
+
+    def append_html(self, html: str):
+        self.appendHtml(html)
+        self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())

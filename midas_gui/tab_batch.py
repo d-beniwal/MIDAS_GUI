@@ -578,6 +578,38 @@ class BatchTab(QtWidgets.QWidget):
         filled = (arr != 0).sum(axis=1)
         return arr.sum(axis=1) / np.maximum(filled, 1)
 
+    def _on_job_done(self, job) -> None:
+        """``JobQueuePanel``'s ``on_job_done`` callback: a background
+        ``screen`` job runs in a separate process, so its results only ever
+        reach this tab via the ``_bg_job_results.npz`` sidecar
+        ``batch_cli._write_results_sidecar`` leaves in ``job.out_dir`` —
+        reuses ``_populate_plots_from_attempt``'s replay logic, same as
+        restoring a project's saved attempt."""
+        if not job.out_dir:
+            self._log.append(f"[batch] Job {job.session} has no recorded "
+                             f"output folder — can't load its results.")
+            return
+        sidecar = Path(job.out_dir) / "_bg_job_results.npz"
+        if not sidecar.is_file():
+            self._log.append(f"[batch] No results file found for job {job.session} "
+                             f"(expected {sidecar}).")
+            return
+        try:
+            with np.load(sidecar) as npz:
+                arrays = {
+                    "r_axis_px": npz["r_axis_px"],
+                    "profiles": npz["profiles"],
+                    "frame_ids": list(npz["frame_ids"]),
+                }
+                eta_axis_deg = (npz["eta_axis_deg"].tolist()
+                               if "eta_axis_deg" in npz.files else None)
+        except Exception as e:
+            self._log.append(f"[batch] Could not load results for job {job.session}: {e}")
+            return
+        self._populate_plots_from_attempt({"_results_arrays": arrays,
+                                          "eta_axis_deg": eta_axis_deg})
+        self._log.append(f"[batch] Loaded results from background job: {job.session}")
+
     def shutdown(self):
         """Interrupt + bounded-wait every Hydra-page worker on app close —
         this tab's own workers are already covered by MainWindow's generic
@@ -970,11 +1002,10 @@ class BatchTab(QtWidgets.QWidget):
         lv.addStretch(1)
         split.addWidget(scroll)
 
-        # Right: waterfall / stacked-profiles / detector-view tabs + log
-        right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        # Right: waterfall / stacked-profiles / detector-view / logs tabs
         # A view-only option (not an integration parameter — see
-        # tooltip), so it sits above the view tabs it affects rather than in
-        # the left Integration card.
+        # tooltip), so it sits on the Detector-view toolbar next to Origin
+        # rather than in the left Integration card.
         self._grid_chk = QtWidgets.QCheckBox("Show bin grid")
         self._grid_chk.setToolTip(
             "Overlay the Rmin/Rmax boundary circles and the full (R, η) "
@@ -995,6 +1026,7 @@ class BatchTab(QtWidgets.QWidget):
         self._det_view = ImageViewer()
         self._origin_btn = OriginToolButton(self._det_view)
         self._det_view._toolbar_layout.addWidget(self._origin_btn)
+        self._det_view._toolbar_layout.addWidget(self._grid_chk)
         self._lab_axes_chk = QtWidgets.QCheckBox("Lab-frame axes")
         self._lab_axes_chk.setToolTip(
             "Overlay MIDAS lab-frame axes (X_Lab/Y_Lab), the beam-direction "
@@ -1023,21 +1055,21 @@ class BatchTab(QtWidgets.QWidget):
         self._view_tabs.addTab(self._waterfall, "Waterfall")
         self._view_tabs.addTab(self._stack_view, "Stacked profiles")
         self._view_tabs.addTab(self._cake_stack_view, "Eta-R cakes")
-        view_container = QtWidgets.QWidget()
-        view_container_layout = QtWidgets.QVBoxLayout(view_container)
-        view_container_layout.setContentsMargins(0, 0, 0, 0)
-        view_container_layout.setSpacing(4)
-        view_container_layout.addWidget(self._grid_chk)
-        view_container_layout.addWidget(self._view_tabs)
-        right.addWidget(view_container)
+        # Logs tab: background-job rows (JobQueuePanel) above one shared log
+        # surface, used by both the in-process run and the currently-focused
+        # background job's tailed output.
         self._log = LogPanel()
-        self._log.setMaximumHeight(16_777_215)   # let the splitter size it
-        right.addWidget(self._log)
-        self._job_queue = JobQueuePanel()
-        right.addWidget(self._job_queue)
-        right.setStretchFactor(0, 4); right.setStretchFactor(1, 1); right.setStretchFactor(2, 2)
-        right.setMinimumWidth(320)
-        split.addWidget(right)
+        self._log.setMaximumHeight(16_777_215)   # let the layout size it
+        self._job_queue = JobQueuePanel(self._log, on_job_done=self._on_job_done)
+        self._logs_tab = QtWidgets.QWidget()
+        logs_tab_layout = QtWidgets.QVBoxLayout(self._logs_tab)
+        logs_tab_layout.setContentsMargins(4, 4, 4, 4)
+        logs_tab_layout.setSpacing(4)
+        logs_tab_layout.addWidget(self._job_queue)
+        logs_tab_layout.addWidget(self._log, 1)
+        self._view_tabs.addTab(self._logs_tab, "Logs")
+        self._view_tabs.setMinimumWidth(320)
+        split.addWidget(self._view_tabs)
         split.setStretchFactor(0, 0); split.setStretchFactor(1, 0); split.setStretchFactor(2, 1)
         split.setSizes([286, 361, 950])
 
@@ -1424,10 +1456,12 @@ class BatchTab(QtWidgets.QWidget):
         end = frame_range[1] if frame_range[1] is not None else (self._loader.n_frames() or frame_range[0] + 1)
         total = max(1, (end - frame_range[0] + frame_range[2] - 1) // frame_range[2])
 
-        job = self._job_queue.launch(argv, name=out_path.name or "batch", total_frames=total)
+        job = self._job_queue.launch(argv, name=out_path.name or "batch", total_frames=total,
+                                     out_dir=str(out_path))
         if job is not None:
             self._log.append(f"[batch] Launched background job: {job.session} "
-                             f"(see 'Background jobs' panel below)")
+                             f"(see the Logs tab)")
+            self._view_tabs.setCurrentWidget(self._logs_tab)
 
     def _abort(self):
         """Stop the run. First ask the worker to stop cooperatively (clean finish
