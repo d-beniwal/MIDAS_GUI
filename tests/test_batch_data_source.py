@@ -96,6 +96,33 @@ def test_dark_browse_starts_from_data_folder_when_dark_path_is_empty():
     assert seen["start_dir"] == "/tmp/x/data.h5"
 
 
+def test_unchecking_dark_emits_fields_changed():
+    # Turning a correction off is itself a change the preview must react to
+    # (previously only a *completed compute* emitted fieldReady, so
+    # unchecking Dark/Bright/Background left the corrected preview stale).
+    W, _app = _make_app_and_module()
+    panel = W.DataLoaderPanel(mode="single")
+    panel._dark_sel.setChecked(True)
+    seen = []
+    panel.fieldsChanged.connect(lambda: seen.append(True))
+    panel._dark_sel.setChecked(False)
+    assert seen
+    assert panel._dark_sel.get_field() is None
+
+
+def test_rechecking_dark_with_an_already_computed_field_emits_fields_changed():
+    W, _app = _make_app_and_module()
+    panel = W.DataLoaderPanel(mode="single")
+    panel._dark_sel.setChecked(True)
+    panel._dark_sel._field = np.zeros((2, 2))  # pretend Compute already ran
+    panel._dark_sel.setChecked(False)
+    seen = []
+    panel.fieldsChanged.connect(lambda: seen.append(True))
+    panel._dark_sel.setChecked(True)
+    assert seen
+    assert panel._dark_sel.get_field() is not None
+
+
 def test_manual_edit_clears_stem_filter_and_explicit_paths():
     W, _app = _make_app_and_module()
     panel = W.DataLoaderPanel(mode="stream")

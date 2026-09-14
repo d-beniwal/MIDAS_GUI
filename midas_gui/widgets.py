@@ -2764,6 +2764,8 @@ class FieldSelector(QtWidgets.QGroupBox):
     divide / subtract mode combo.  ``get_field()`` → computed field (or None);
     ``get_mode()`` → "divide" | "subtract".
     """
+    #: emitted whenever the field finishes computing, or the checkbox is
+    #: toggled (turning correction on/off is itself a change).
     fieldReady = QtCore.pyqtSignal()
 
     def __init__(self, title, parent=None, *, with_mode=False,
@@ -2785,6 +2787,7 @@ class FieldSelector(QtWidgets.QGroupBox):
         self._body = QtWidgets.QWidget()
         self._body.setVisible(False)                       # collapsed until enabled
         self.toggled.connect(self._body.setVisible)
+        self.toggled.connect(lambda *_: self.fieldReady.emit())
         self.toggled.connect(self._prefill_from_data)
         outer.addWidget(self._body)
         v = QtWidgets.QVBoxLayout(self._body)
