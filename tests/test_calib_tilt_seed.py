@@ -12,9 +12,13 @@ from midas_gui.calib import tilt_seed_effective
 from midas_gui.constants import DISTORTION_NAMES
 
 
-@pytest.mark.parametrize("mode", ["four_stage", "bayesian", "joint"])
+@pytest.mark.parametrize("mode", ["four_stage", "bayesian", "joint", "frozen_point"])
 def test_v1_param_pipelines_always_seed_tilts(mode):
-    """These build CalibrationParams, which takes tx/ty/tz directly."""
+    """These build CalibrationParams, which takes tx/ty/tz directly.
+
+    ``frozen_point`` (vendored, see midas_gui/_vendor/frozen_point_calib)
+    genuinely uses a seeded tx too, even though it's never refined by that
+    pipeline — see tilt_seed_effective's docstring."""
     assert tilt_seed_effective(mode) is True
 
 

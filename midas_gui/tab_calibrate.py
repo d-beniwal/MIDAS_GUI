@@ -1591,12 +1591,26 @@ class CalibrationTab(QtWidgets.QWidget):
         bright_mode = self._loader.bright_mode()
 
         mode = self._pipeline.currentData()
+        if mode == "frozen_point" and self._panel_grp.isChecked():
+            QtWidgets.QMessageBox.warning(
+                self, "Multi-panel not supported",
+                "'Frozen-point (high-tilt)' does not support Multi-panel "
+                "detectors yet. Uncheck 'Multi-panel' or choose a "
+                "different pipeline."); return
         self._calib_cancelled = False
         self._run_btn.setEnabled(False); self._abort_btn.setEnabled(True)
         self._prog.setVisible(True)
         self._bot_tabs.setCurrentWidget(self._log)
         self._log.append("─" * 40 + f"\nStarting calibration ({mode})…")
         self._log.append(self._refine_summary_text())
+        if mode == "frozen_point":
+            self._log.append(
+                "ℹ Frozen-point (high-tilt) always refines Lsd/BC/ty/tz; "
+                "Distortion is refined too if ticked (less-validated for "
+                "this pipeline than geometry-only — check results against "
+                "a separate refit). tx is never refined (not identifiable "
+                "from a single image). Runs on CPU regardless of the "
+                "Device setting.")
 
         trans = im_trans_codes_from_checkboxes(self._flip_y, self._flip_z, self._transp)
 

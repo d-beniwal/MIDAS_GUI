@@ -352,6 +352,17 @@ def normalize_result(raw, mode: str, *, NY, NZ, pxY, pxZ, wavelength,
             _attach_panel_result(result, panel_u, panel_layout, output_dir)
         return result
 
+    if effective_mode == "frozen_point":
+        pv = raw.res   # final PVCalibrationResult, same shape as first_time/four_stage
+        strain = (pv.history[-1].mean_strain_uE
+                  if getattr(pv, "history", None) else None)
+        result = _auto_result_from_unpacked(
+            pv.unpacked, NY=NY, NZ=NZ, pxY=pxY, pxZ=pxZ,
+            wavelength=wavelength, strain=strain)
+        result._frozen_point_converged = raw.converged
+        result._frozen_point_n_iter = raw.n_iter
+        return result
+
     raise ValueError(f"Unsupported pipeline mode for normalisation: {effective_mode}")
 
 
@@ -396,8 +407,14 @@ def tilt_seed_effective(mode: str, *, panel_layout=None, refine: Optional[dict] 
       release adds them (see QUESTIONS_FOR_COLLEAGUES.md item 1).
     * ``first_time`` never passes a tilt seed to ``first_time_calibrate()``
       at all, regardless of backend version.
+    * ``frozen_point`` seeds tilts via :func:`build_v1_params` like the
+      other advanced pipelines — ty/tz become the fit's starting point (and
+      the iterative wrapper's re-centering anchor), and tx is used as a
+      fixed value even though the pipeline never refines it. So a seed is
+      genuinely used here, unlike ``first_time``, even though tx itself
+      never moves.
     """
-    if mode in ("four_stage", "bayesian", "joint"):
+    if mode in ("four_stage", "bayesian", "joint", "frozen_point"):
         return True
     if mode == "first_time":
         return False
@@ -567,6 +584,34 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
         from midas_calibrate_v2.pipelines import autocalibrate_joint
         return autocalibrate_joint(v1, img, dark=dk, panel_layout=panel_layout,
                                    spec=spec)
+
+    if mode == "frozen_point":
+        # Vendored pipeline (see midas_gui/_vendor/frozen_point_calib) — no
+        # native panel_layout support, unlike every other advanced pipeline
+        # above.
+        if panel_layout is not None:
+            raise RuntimeError(
+                "Frozen-point (high-tilt) does not support Multi-panel "
+                "detectors yet. Uncheck 'Multi-panel' or choose a "
+                "different pipeline.")
+        img, dk, pNY, pNZ = _prep_transformed(image, dark, im_trans)
+        if dk is not None:
+            # point_pick() takes no dark argument (only a boolean mask), so
+            # subtract it here — every other branch above hands dark to the
+            # backend natively instead.
+            img = np.clip(img - dk.astype(np.float32), 0, None)
+        # v1.Refine (from build_v1_params, inside _seed_and_v1) already carries
+        # the GUI's Distortion checkboxes for p0..p14 — iterate_frozen_point_
+        # until_stable defers to it exactly like four_stage/bayesian/joint do,
+        # so no separate refine_distortion override is passed here.
+        v1 = _seed_and_v1(img, wavelength, pxY, pxZ, calibrant, pNY, pNZ,
+                          refine, n_iter, device, manual)
+        if device != "cpu":
+            print(f"[calib] note: Frozen-point (high-tilt) always runs on "
+                  f"CPU — ignoring device={device!r}.")
+        from midas_gui._vendor.frozen_point_calib import iterate_frozen_point_until_stable
+        return iterate_frozen_point_until_stable(v1, img, lm_max_iter=lm_iter,
+                                                 verbose=True)
 
     raise ValueError(f"Unknown pipeline mode: {mode}")
 
