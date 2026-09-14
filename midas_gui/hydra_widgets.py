@@ -150,6 +150,7 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
         self._pending: set = set()
         self._registry = None            # DataSourceRegistry, set by set_registry()
         self._exclude_label = None       # owning panel's registry label — skip its own entry
+        self._data_path_provider = None  # callable → owning panel's current Data path
 
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(6, 2, 6, 4); outer.setSpacing(2)
@@ -157,6 +158,7 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
         self._body.setVisible(False)
         self.toggled.connect(self._body.setVisible)
         self.toggled.connect(lambda *_: self.fieldsReady.emit())
+        self.toggled.connect(self._prefill_from_data)
         outer.addWidget(self._body)
         v = QtWidgets.QVBoxLayout(self._body)
         v.setContentsMargins(0, 0, 0, 0); v.setSpacing(3)
@@ -234,12 +236,31 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
     def _dataset(self) -> str:
         return self._ds_combo.currentText().split("   ")[0].strip() or self._default_dataset
 
+    def set_data_path_provider(self, fn):
+        """`fn()` returns the owning panel's current Data path (str). Used to
+        prefill this field the first time it's checked, and as the Browse…
+        dialog's starting folder while this field has no path of its own —
+        mirrors ``widgets.FieldSelector.set_data_path_provider``."""
+        self._data_path_provider = fn
+
+    def _prefill_from_data(self, checked: bool):
+        """On first check, default this field to the same file/folder as
+        the Hydra page's Data source. A no-op if a path is already set."""
+        if not checked or self._path_ed.text().strip() or self._data_path_provider is None:
+            return
+        src = self._data_path_provider()
+        if src:
+            self._set_path(src)
+
     def _open_browse_dialog(self):
         # "Multiple files" isn't offered here — the other 3 panels are
         # auto-discovered from one anchor path (helpers.hydra_siblings),
         # which has no way to generalize to an arbitrary per-file pick list.
+        start = self._path_ed.text().strip()
+        if not start and self._data_path_provider is not None:
+            start = self._data_path_provider() or ""
         dlg = BrowseFilesDialog(self, title=f"Select {self.title()}",
-                                modes=("file", "folder", "stem"))
+                                modes=("file", "folder", "stem"), start_dir=start)
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return
         mode = dlg.mode()
@@ -569,6 +590,7 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         self._bg_sel = HydraFieldSelector("Background")
         for w in (self._dark_sel, self._bright_sel, self._bg_sel):
             w.fieldsReady.connect(self.fieldsChanged)
+            w.set_data_path_provider(lambda: self._path_ed.text().strip())
             fld.body.addWidget(w)
         lv.addWidget(fld)
 

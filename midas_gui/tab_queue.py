@@ -21,6 +21,7 @@ the widgets.
 """
 from __future__ import annotations
 
+import os
 import traceback
 from pathlib import Path
 from typing import Optional
@@ -30,17 +31,46 @@ from PyQt5 import QtCore, QtWidgets
 from midas_gui import project, settings
 from midas_gui import style as S
 from midas_gui.batch_queue import (
-    BatchQueue, CalibrationNode, CorrectionsNode, KIND_HDF5, SOURCE_FILE,
-    SOURCE_TAB2, infer_data_root, is_unrooted, plan_output_dirs,
-    project_path_for, sample_source_cfg,
+    BatchQueue, CalibrationNode, CorrectionsNode, KIND_FOLDER, KIND_HDF5,
+    SOURCE_FILE, SOURCE_TAB2, detect_dataset, infer_data_root, is_unrooted,
+    plan_output_dirs, project_path_for, sample_source_cfg,
 )
-from midas_gui.constants import DEFAULT_KERNEL, KERNELS
+from midas_gui.constants import DEFAULT_KERNEL, H5_EXTS, KERNELS
 from midas_gui.dialogs import AddSamplesDialog, show_error
 from midas_gui.helpers import (_NoScrollComboBox, _NoScrollSpinBox, _fspin,
                                _build_spec, check_output_dir_writable,
-                               resolve_calibration_fields, spec_from_geometry_file)
+                               list_h5_datasets, resolve_calibration_fields,
+                               rmax_corner_px, rmax_edge_px, spec_from_geometry_file)
 from midas_gui.queue_runner import RunItem, SampleRunScheduler, default_max_concurrent
 from midas_gui.widgets import LogPanel, OutputFormatSelector
+
+#: Single-frame file suffixes that make a folder sample's children worth
+#: listing — same rule ``dialogs.find_samples_below`` uses to decide a
+#: directory holds frames (TIFF-family + ``.ge*`` + HDF5).
+_FRAME_EXTS = {".tif", ".tiff", ".cbf", ".edf"}
+
+#: How many children to list under an expanded folder sample. A frame
+#: folder can hold tens of thousands of files; this keeps the tree usable.
+_FOLDER_EXPAND_LIMIT = 500
+
+
+def _folder_children(folder: str, limit: int = _FOLDER_EXPAND_LIMIT) -> list:
+    """Frame file names sitting directly in ``folder``, sorted, capped at
+    ``limit``. Read-only preview for the queue tree's lazy expansion — never
+    raises on an unreadable or vanished folder."""
+    names = []
+    try:
+        with os.scandir(str(folder)) as it:
+            for entry in it:
+                if not entry.is_file():
+                    continue
+                suf = Path(entry.name).suffix.lower()
+                if suf in _FRAME_EXTS or suf in H5_EXTS or suf.startswith(".ge"):
+                    names.append(entry.name)
+    except OSError:
+        pass
+    names.sort()
+    return names[:limit], len(names)
 
 # Tree column layout.
 COL_NAME, COL_DETAIL, COL_STATUS = 0, 1, 2
@@ -208,6 +238,68 @@ class CalibrationDialog(QtWidgets.QDialog):
         node.mask_sources = [{"kind": "file", "path": mask, "enabled": True}] if mask else None
 
 
+class SampleDialog(QtWidgets.QDialog):
+    """Edit one sample — its label, and (HDF5 only) which internal dataset
+    holds the frames.
+
+    The dataset combo is populated the same way the Data Viewer's loader
+    panel populates its own (``helpers.list_h5_datasets``), and the
+    selection already showing is whatever ``batch_queue.detect_dataset``
+    picked when the sample was added — first ≥3-D dataset, else the first
+    one at all — so opening this dialog on an untouched sample shows the
+    same default the Data Viewer would."""
+
+    def __init__(self, sample, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Sample")
+        self.resize(520, 160)
+        self._sample = sample
+        v = QtWidgets.QVBoxLayout(self)
+        form = S.Form()
+        self._label = QtWidgets.QLineEdit(sample.label)
+        form.row(("Label:", self._label))
+
+        self._ds_combo = None
+        if sample.kind == KIND_HDF5:
+            self._ds_combo = _NoScrollComboBox()
+            self._ds_combo.setEditable(True)
+            try:
+                items = list_h5_datasets(sample.path)
+            except Exception:
+                items = []
+            for name, shape in items:
+                self._ds_combo.addItem(f"{name}   {tuple(shape)}", name)
+            current = sample.dataset or detect_dataset(sample.path)
+            idx = next((i for i in range(self._ds_combo.count())
+                        if self._ds_combo.itemData(i) == current), -1)
+            if idx >= 0:
+                self._ds_combo.setCurrentIndex(idx)
+            else:
+                self._ds_combo.setEditText(current)
+            form.row(("Dataset:", self._ds_combo))
+        v.addLayout(form)
+
+        if sample.kind == KIND_HDF5:
+            hint = QtWidgets.QLabel(
+                "Which HDF5 dataset holds the frames. Defaults to what the "
+                "Data Viewer would pick for this file — change it only when "
+                "that guess is wrong.")
+            hint.setWordWrap(True); hint.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+            v.addWidget(hint)
+
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept); btns.rejected.connect(self.reject)
+        v.addStretch(1)
+        v.addWidget(btns)
+
+    def apply_to(self, sample):
+        sample.label = self._label.text().strip() or sample.label
+        if self._ds_combo is not None:
+            text = self._ds_combo.currentText().split("   ")[0].strip()
+            sample.dataset = text or sample.dataset
+
+
 class BatchQueueTab(QtWidgets.QWidget):
     """The tab: the tree, the queue-wide settings, and the run bar."""
 
@@ -261,6 +353,7 @@ class BatchQueueTab(QtWidgets.QWidget):
         self._tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self._tree.itemDoubleClicked.connect(lambda *_: self._edit_selected())
         self._tree.itemChanged.connect(self._on_item_changed)
+        self._tree.itemExpanded.connect(self._on_item_expanded)
         lv.addWidget(self._tree, 1)
 
         row = QtWidgets.QHBoxLayout(); row.setSpacing(4)
@@ -332,28 +425,43 @@ class BatchQueueTab(QtWidgets.QWidget):
         self._r_max = _fspin(0.0, 1_000_000.0, 2, 0.0, "px")
         self._eta_min = _fspin(-180.0, 180.0, 1, -180.0, "°")
         self._eta_max = _fspin(-180.0, 180.0, 1, 180.0, "°")
-        self._r_max.setToolTip("0 = auto (the backend's farthest-corner default).")
+        self._r_max.setToolTip(
+            "Manual mode only. 0 = auto (the backend's farthest-corner default).")
+        self._r_max_mode = _NoScrollComboBox()
+        for label, key in (("Manual", "manual"), ("Corner", "corner"), ("Edge", "edge")):
+            self._r_max_mode.addItem(label, key)
+        self._r_max_mode.setToolTip(
+            "Manual: use the value at left for every stage.\n"
+            "Corner/Edge: computed per calibration node when the queue runs, "
+            "from that stage's own beam centre and detector size — the same "
+            "formulas as Batch Integrate's Corner/Edge Rmax presets. Right "
+            "for a queue whose stages don't share one detector geometry.")
+        self._r_max_mode.currentIndexChanged.connect(self._on_r_max_mode_changed)
+        r_max_row = QtWidgets.QHBoxLayout(); r_max_row.setSpacing(4)
+        r_max_row.addWidget(self._r_max, 1); r_max_row.addWidget(self._r_max_mode)
         form = S.Form()
         form.row(("Kernel:", self._kernel))
         form.row(("R bin:", self._r_bin), ("η bin:", self._e_bin))
-        form.row(("R min:", self._r_min), ("R max:", self._r_max))
+        form.row(("R min:", self._r_min), ("R max:", r_max_row))
         form.row(("η min:", self._eta_min), ("η max:", self._eta_max))
         integ.body.addLayout(form)
-        # Combine sub-frames — mirrors the Batch Integrate control. The default
-        # (0 = combine every sub-frame in a file into one) matches that tab, and
-        # is right for a detector writing several raw exposures per scan point.
-        # It is emphatically NOT right for an HDF5 holding N distinct scan
-        # points, where it would silently average them into one profile — hence
-        # exposing it here rather than hard-coding the default.
+        # Combine sub-frames — mirrors the Batch Integrate control, whose own
+        # default is 1 (one integrated frame per raw frame — right for an
+        # HDF5 holding a scan of distinct points). 0 (combine the whole file
+        # into one) is for a detector writing several raw exposures per scan
+        # point, and must be chosen deliberately: left at 0 by default, an
+        # HDF5 holding N distinct scan points was silently averaged into ONE
+        # profile — ten frames in, one CSV out, no error.
         self._combine_chunk = _NoScrollSpinBox()
         self._combine_chunk.setRange(0, 999999)
         self._combine_chunk.setFixedWidth(70)
+        self._combine_chunk.setValue(1)
         self._combine_chunk.setToolTip(
             "HDF5 samples only: how many consecutive raw sub-frames in each "
             "file to combine into one integrated frame.\n"
+            "1 = one integrated frame per raw frame (an HDF5 holding a scan).\n"
             "0 = combine the whole file into one (a detector writing several "
-            "exposures per scan point).\n"
-            "1 = one integrated frame per raw frame (an HDF5 holding a scan).")
+            "exposures per scan point).")
         self._combine_op = _NoScrollComboBox()
         for label, key in (("Mean", "mean"), ("Sum", "sum"),
                            ("Max", "max"), ("Median", "median")):
@@ -398,6 +506,10 @@ class BatchQueueTab(QtWidgets.QWidget):
         self._log = LogPanel()
         outer.addWidget(self._log)
         self._refresh_calib_hint()
+        self._on_r_max_mode_changed()
+
+    def _on_r_max_mode_changed(self, *_args):
+        self._r_max.setEnabled(self._r_max_mode.currentData() == "manual")
 
     def _browse_dir(self, edit):
         path = QtWidgets.QFileDialog.getExistingDirectory(self, "Select folder")
@@ -431,8 +543,11 @@ class BatchQueueTab(QtWidgets.QWidget):
                     s_item = QtWidgets.QTreeWidgetItem(corr_item)
                     icon = "📄" if sample.kind == KIND_HDF5 else "📁"
                     s_item.setText(COL_NAME, f"{icon}  {sample.label}")
-                    s_item.setText(COL_DETAIL, sample.path)
-                    s_item.setToolTip(COL_DETAIL, sample.path)
+                    detail = sample.path
+                    if sample.kind == KIND_HDF5 and sample.dataset:
+                        detail += f"   [{sample.dataset}]"
+                    s_item.setText(COL_DETAIL, detail)
+                    s_item.setToolTip(COL_DETAIL, detail)
                     s_item.setFlags(s_item.flags() | QtCore.Qt.ItemIsUserCheckable)
                     s_item.setCheckState(
                         COL_NAME,
@@ -440,8 +555,42 @@ class BatchQueueTab(QtWidgets.QWidget):
                     s_item.setData(COL_NAME, _ROLE_KIND, "sample")
                     s_item.setData(COL_NAME, _ROLE_OBJ, (ci, ki, si))
                     self._items[self._sample_key(ci, ki, si)] = s_item
+                    if sample.kind == KIND_FOLDER:
+                        placeholder = QtWidgets.QTreeWidgetItem(s_item)
+                        placeholder.setText(COL_NAME, "…")
+                        placeholder.setData(COL_NAME, _ROLE_KIND, "placeholder")
         self._tree.blockSignals(False)
         self._refresh_preview()
+
+    def _on_item_expanded(self, item):
+        """Lazily list a folder sample's frame files the first time it is
+        expanded — walking every queued folder up front would stall the UI
+        on a large beamtime tree for no benefit until someone looks."""
+        if item.data(COL_NAME, _ROLE_KIND) != "sample" or item.childCount() != 1:
+            return
+        child = item.child(0)
+        if child.data(COL_NAME, _ROLE_KIND) != "placeholder":
+            return
+        ci, ki, si = item.data(COL_NAME, _ROLE_OBJ)
+        try:
+            sample = self._queue.calibrations[ci].corrections[ki].samples[si]
+        except (IndexError, TypeError):
+            return
+        item.removeChild(child)
+        names, total = _folder_children(sample.path)
+        if not names:
+            empty = QtWidgets.QTreeWidgetItem(item)
+            empty.setText(COL_NAME, "(no frame files found)")
+            empty.setData(COL_NAME, _ROLE_KIND, "placeholder")
+            return
+        for name in names:
+            c = QtWidgets.QTreeWidgetItem(item)
+            c.setText(COL_NAME, name)
+            c.setData(COL_NAME, _ROLE_KIND, "file")
+        if total > len(names):
+            more = QtWidgets.QTreeWidgetItem(item)
+            more.setText(COL_NAME, f"… {total - len(names)} more not shown")
+            more.setData(COL_NAME, _ROLE_KIND, "placeholder")
 
     @staticmethod
     def _sample_key(ci, ki, si) -> str:
@@ -560,6 +709,10 @@ class BatchQueueTab(QtWidgets.QWidget):
         elif kind == "corr":
             node = self._queue.calibrations[obj[0]].corrections[obj[1]]
             dlg = CorrectionsDialog(node, parent=self)
+        elif kind == "sample":
+            ci, ki, si = obj
+            node = self._queue.calibrations[ci].corrections[ki].samples[si]
+            dlg = SampleDialog(node, parent=self)
         else:
             return
         if dlg.exec_() == QtWidgets.QDialog.Accepted:
@@ -602,6 +755,12 @@ class BatchQueueTab(QtWidgets.QWidget):
                             ("eta_min", self._eta_min), ("eta_max", self._eta_max)):
             if st.get(key) is not None:
                 widget.setValue(float(st[key]))
+        if st.get("r_max") is not None:
+            # Batch Integrate has no persistent Corner/Edge mode of its own —
+            # its Corner/Edge buttons are one-shot presets that write a plain
+            # number into the same field we just copied — so a copy always
+            # means "use this number as-is".
+            self._r_max_mode.setCurrentIndex(self._r_max_mode.findData("manual"))
         if st.get("kernel"):
             i = self._kernel.findData(st["kernel"])
             if i >= 0:
@@ -622,6 +781,7 @@ class BatchQueueTab(QtWidgets.QWidget):
         return {"kernel": self._kernel.currentData(),
                 "r_bin": self._r_bin.value(), "e_bin": self._e_bin.value(),
                 "r_min": self._r_min.value(), "r_max": self._r_max.value(),
+                "r_max_mode": self._r_max_mode.currentData(),
                 "eta_min": self._eta_min.value(), "eta_max": self._eta_max.value(),
                 "fmt": self._fmt.checked_keys(),
                 "weighted": self._weighted.isChecked(),
@@ -641,6 +801,10 @@ class BatchQueueTab(QtWidgets.QWidget):
             i = self._kernel.findData(st["kernel"])
             if i >= 0:
                 self._kernel.setCurrentIndex(i)
+        if st.get("r_max_mode"):
+            i = self._r_max_mode.findData(st["r_max_mode"])
+            if i >= 0:
+                self._r_max_mode.setCurrentIndex(i)
         if st.get("fmt"):
             self._fmt.set_state(st["fmt"])
         if st.get("weighted") is not None:
@@ -682,7 +846,7 @@ class BatchQueueTab(QtWidgets.QWidget):
         """One ``IntegrationSpec`` per calibration node, from its snapshot or
         its geometry file — the same two producers Batch Integrate uses."""
         st = self._settings_dict()
-        kw = dict(r_min=st["r_min"], r_max=st["r_max"] or None,
+        kw = dict(r_min=st["r_min"], r_max=self._resolve_r_max(cal, st),
                   eta_min=st["eta_min"], eta_max=st["eta_max"])
         if cal.using_file():
             if not cal.file_path or not Path(cal.file_path).exists():
@@ -696,12 +860,38 @@ class BatchQueueTab(QtWidgets.QWidget):
         return _build_spec(project.calibration_namespace(cal.calib_snapshot),
                            st["r_bin"], st["e_bin"], **kw)
 
-    def _calib_fields(self, cal: CalibrationNode):
+    def _resolve_r_max(self, cal: CalibrationNode, st: dict) -> Optional[float]:
+        """The Rmax to integrate this calibration's samples to.
+
+        Manual mode uses the queue-wide spinbox value as-is (0 → auto,
+        matching Batch Integrate). Corner/Edge is computed per calibration
+        node, from *this* node's own beam centre and detector size — a queue
+        commonly spans stages with different detectors, so a single
+        precomputed number (as Batch Integrate's one-shot preset buttons
+        produce) would be wrong for every stage but the one it was taken
+        from."""
+        mode = st.get("r_max_mode", "manual")
+        if mode == "manual":
+            return st["r_max"] or None
+        fields, note = self._calib_fields_with_note(cal)
+        if not fields or fields.get("BC_y") is None or fields.get("NrPixelsY") is None:
+            self._log.append(
+                f"[queue] '{cal.name}': can't compute {mode} Rmax ({note}) — "
+                "leaving Rmax at auto (backend's farthest-corner default).")
+            return None
+        formula = rmax_corner_px if mode == "corner" else rmax_edge_px
+        return formula(fields["BC_y"], fields["BC_z"],
+                       fields["NrPixelsY"], fields["NrPixelsZ"])
+
+    def _calib_fields_with_note(self, cal: CalibrationNode):
         result = (project.calibration_namespace(cal.calib_snapshot)
                   if cal.calib_snapshot else None)
-        fields, _note = resolve_calibration_fields(
+        return resolve_calibration_fields(
             result, cal.using_file(), cal.file_path or "",
             source_label=f"Batch Queue '{cal.name}'")
+
+    def _calib_fields(self, cal: CalibrationNode):
+        fields, _note = self._calib_fields_with_note(cal)
         return fields
 
     def _build_run_items(self, rows) -> list:

@@ -43,6 +43,59 @@ def test_plain_folder_is_still_tiff_glob():
     assert panel.source_cfg() == {"type": "tiff_glob", "path": "/tmp/x"}
 
 
+def test_checking_dark_prefills_from_data_path():
+    # Checking Dark/Bright/Background should default to the same file as
+    # Data, since that's the common case — a dark/bright/background frame
+    # living alongside the data itself.
+    W, _app = _make_app_and_module()
+    panel = W.DataLoaderPanel(mode="single")
+    panel._path_ed.setText("/tmp/x/data.h5")
+    panel._dark_sel.setChecked(True)
+    assert panel._dark_sel._path_ed.text().strip() == "/tmp/x/data.h5"
+
+
+def test_checking_dark_does_not_override_an_existing_path():
+    W, _app = _make_app_and_module()
+    panel = W.DataLoaderPanel(mode="single")
+    panel._path_ed.setText("/tmp/x/data.h5")
+    panel._dark_sel._path_ed.setText("/tmp/x/dark.h5")
+    panel._dark_sel.setChecked(True)
+    assert panel._dark_sel._path_ed.text().strip() == "/tmp/x/dark.h5"
+
+
+def test_unchecking_and_rechecking_dark_does_not_reprefill_over_a_clear():
+    W, _app = _make_app_and_module()
+    panel = W.DataLoaderPanel(mode="single")
+    panel._path_ed.setText("/tmp/x/data.h5")
+    panel._dark_sel.setChecked(True)
+    assert panel._dark_sel._path_ed.text().strip() == "/tmp/x/data.h5"
+    panel._dark_sel.setChecked(False)
+    panel._dark_sel.setChecked(True)
+    assert panel._dark_sel._path_ed.text().strip() == "/tmp/x/data.h5"
+
+
+def test_dark_browse_starts_from_data_folder_when_dark_path_is_empty():
+    W, _app = _make_app_and_module()
+    panel = W.DataLoaderPanel(mode="single")
+    panel._path_ed.setText("/tmp/x/data.h5")
+    seen = {}
+
+    class _FakeDialog:
+        def __init__(self, parent, *, title, start_dir=""):
+            seen["start_dir"] = start_dir
+
+        def exec_(self):
+            return 0  # QDialog.Rejected
+
+    orig = W.BrowseFilesDialog
+    W.BrowseFilesDialog = _FakeDialog
+    try:
+        panel._dark_sel._open_browse_dialog()
+    finally:
+        W.BrowseFilesDialog = orig
+    assert seen["start_dir"] == "/tmp/x/data.h5"
+
+
 def test_manual_edit_clears_stem_filter_and_explicit_paths():
     W, _app = _make_app_and_module()
     panel = W.DataLoaderPanel(mode="stream")

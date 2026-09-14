@@ -276,10 +276,10 @@ def test_removing_several_samples_at_once(tab):
 # ── combining sub-frames ─────────────────────────────────────────────
 
 def test_combine_defaults_match_batch_integrate(tab):
-    """0 = combine every sub-frame in a file into one, same as the Batch
-    Integrate control this mirrors."""
+    """1 = one integrated frame per raw frame, same default as the Batch
+    Integrate loader control this mirrors."""
     st = tab._settings_dict()
-    assert st["chunk_size"] == 0 and st["combine_op"] == "mean"
+    assert st["chunk_size"] == 1 and st["combine_op"] == "mean"
 
 
 def test_combine_setting_reaches_the_source_cfg(tab):
@@ -301,6 +301,7 @@ def test_zero_means_whole_file_not_literal_zero(tab):
     """0 must reach the reader as None ('combine the whole file'), never as a
     chunk size of zero."""
     from midas_gui.batch_queue import Sample, sample_source_cfg
+    tab._combine_chunk.setValue(0)
     st = tab._settings_dict()
     assert st["chunk_size"] == 0
     cfg = sample_source_cfg(Sample("/d/scan.h5"), chunk_size=st["chunk_size"] or None)
@@ -315,3 +316,151 @@ def test_combine_round_trips_through_state(tab, app):
     other.set_state(tab.get_state())
     assert other._settings_dict()["chunk_size"] == 4
     assert other._settings_dict()["combine_op"] == "median"
+
+
+# ── HDF5 dataset selection ───────────────────────────────────────────
+
+def test_hdf5_sample_detail_shows_its_dataset(tab):
+    from midas_gui.batch_queue import BatchQueue, CalibrationNode, CorrectionsNode, Sample
+    from midas_gui.tab_queue import COL_DETAIL
+    tab._queue = BatchQueue(calibrations=[CalibrationNode(
+        corrections=[CorrectionsNode(
+            samples=[Sample("/d/scan.h5", dataset="exchange/data")])])])
+    tab._rebuild_tree()
+    item = tab._tree.topLevelItem(0).child(0).child(0)
+    assert "[exchange/data]" in item.text(COL_DETAIL)
+
+
+def test_edit_selected_on_a_sample_opens_a_dataset_dialog(tab):
+    """Editing an HDF5 sample offers a dataset combo, and applying it back
+    updates the model. The file doesn't exist here, so the combo can't be
+    populated from it — this only checks the widget is offered and the
+    round-trip through ``apply_to`` works, same as ``list_h5_datasets``
+    failing softly does for a queue built before every file has landed."""
+    from midas_gui.batch_queue import Sample
+    from midas_gui.tab_queue import SampleDialog
+    sample = Sample("/d/scan.h5", dataset="exchange/data")
+    dlg = SampleDialog(sample, parent=tab)
+    assert dlg._ds_combo is not None
+    dlg._label.setText("renamed")
+    dlg.apply_to(sample)
+    assert sample.label == "renamed"
+    assert sample.dataset == "exchange/data"
+
+
+def test_edit_selected_on_a_folder_sample_has_no_dataset_combo(tab):
+    from midas_gui.batch_queue import Sample
+    from midas_gui.tab_queue import SampleDialog
+    sample = Sample("/d/tiffs/sampleA")
+    dlg = SampleDialog(sample, parent=tab)
+    assert dlg._ds_combo is None
+
+
+# ── folder samples expand to show their frame files ───────────────────
+
+def test_hdf5_sample_has_no_expand_placeholder(tab):
+    _populate(tab)
+    hdf5_item = tab._tree.topLevelItem(0).child(0).child(0)
+    assert hdf5_item.childCount() == 0
+
+
+def test_folder_sample_starts_with_a_placeholder_child(tab):
+    _populate(tab)
+    folder_item = tab._tree.topLevelItem(0).child(1).child(0)
+    assert folder_item.childCount() == 1
+
+
+def test_expanding_a_folder_sample_lists_its_frame_files(tab, tmp_path):
+    from midas_gui.batch_queue import BatchQueue, CalibrationNode, CorrectionsNode, Sample
+    folder = tmp_path / "sampleA"
+    folder.mkdir()
+    (folder / "frame_0001.tif").write_bytes(b"")
+    (folder / "frame_0002.tif").write_bytes(b"")
+    (folder / "notes.txt").write_bytes(b"")
+    tab._queue = BatchQueue(calibrations=[CalibrationNode(
+        corrections=[CorrectionsNode(samples=[Sample(str(folder))])])])
+    tab._rebuild_tree()
+    sample_item = tab._tree.topLevelItem(0).child(0).child(0)
+    assert sample_item.childCount() == 1
+    tab._on_item_expanded(sample_item)
+    names = sorted(sample_item.child(i).text(0) for i in range(sample_item.childCount()))
+    assert names == ["frame_0001.tif", "frame_0002.tif"]
+
+
+def test_expanding_an_empty_folder_says_so(tab, tmp_path):
+    from midas_gui.batch_queue import BatchQueue, CalibrationNode, CorrectionsNode, Sample
+    folder = tmp_path / "empty"
+    folder.mkdir()
+    tab._queue = BatchQueue(calibrations=[CalibrationNode(
+        corrections=[CorrectionsNode(samples=[Sample(str(folder))])])])
+    tab._rebuild_tree()
+    sample_item = tab._tree.topLevelItem(0).child(0).child(0)
+    tab._on_item_expanded(sample_item)
+    assert sample_item.childCount() == 1
+    assert "no frame files" in sample_item.child(0).text(0)
+
+
+# ── Rmax: manual value vs. per-calibration Corner/Edge ─────────────────
+
+def test_r_max_mode_defaults_to_manual_and_enabled(tab):
+    assert tab._r_max_mode.currentData() == "manual"
+    assert tab._r_max.isEnabled()
+
+
+def test_switching_to_corner_disables_the_manual_spinbox(tab):
+    tab._r_max_mode.setCurrentIndex(tab._r_max_mode.findData("corner"))
+    assert not tab._r_max.isEnabled()
+    tab._r_max_mode.setCurrentIndex(tab._r_max_mode.findData("manual"))
+    assert tab._r_max.isEnabled()
+
+
+def test_resolve_r_max_manual_uses_the_spinbox(tab):
+    from midas_gui.batch_queue import CalibrationNode
+    tab._r_max.setValue(250.0)
+    cal = CalibrationNode(calib_snapshot={"BC_y": 100.0, "BC_z": 100.0,
+                                          "NrPixelsY": 200, "NrPixelsZ": 200})
+    assert tab._resolve_r_max(cal, tab._settings_dict()) == 250.0
+
+
+def test_resolve_r_max_corner_is_computed_per_calibration(tab):
+    from midas_gui.batch_queue import CalibrationNode
+    from midas_gui.helpers import rmax_corner_px
+    tab._r_max_mode.setCurrentIndex(tab._r_max_mode.findData("corner"))
+    cal = CalibrationNode(calib_snapshot={"BC_y": 50.0, "BC_z": 60.0,
+                                          "NrPixelsY": 300, "NrPixelsZ": 400})
+    expected = rmax_corner_px(50.0, 60.0, 300, 400)
+    assert tab._resolve_r_max(cal, tab._settings_dict()) == expected
+
+
+def test_resolve_r_max_edge_is_smaller_than_corner_for_the_same_geometry(tab):
+    from midas_gui.batch_queue import CalibrationNode
+    cal = CalibrationNode(calib_snapshot={"BC_y": 50.0, "BC_z": 60.0,
+                                          "NrPixelsY": 300, "NrPixelsZ": 400})
+    tab._r_max_mode.setCurrentIndex(tab._r_max_mode.findData("corner"))
+    corner = tab._resolve_r_max(cal, tab._settings_dict())
+    tab._r_max_mode.setCurrentIndex(tab._r_max_mode.findData("edge"))
+    edge = tab._resolve_r_max(cal, tab._settings_dict())
+    assert edge < corner
+
+
+def test_resolve_r_max_without_a_calibration_falls_back_to_auto(tab):
+    from midas_gui.batch_queue import CalibrationNode
+    tab._r_max_mode.setCurrentIndex(tab._r_max_mode.findData("corner"))
+    cal = CalibrationNode()
+    assert tab._resolve_r_max(cal, tab._settings_dict()) is None
+
+
+def test_r_max_mode_round_trips_through_state(tab, app):
+    from midas_gui.tab_queue import BatchQueueTab
+    tab._r_max_mode.setCurrentIndex(tab._r_max_mode.findData("edge"))
+    other = BatchQueueTab()
+    other.set_state(tab.get_state())
+    assert other._r_max_mode.currentData() == "edge"
+
+
+def test_copying_a_concrete_r_max_from_batch_switches_mode_to_manual(tab):
+    tab._r_max_mode.setCurrentIndex(tab._r_max_mode.findData("corner"))
+    tab.set_settings_provider(lambda: {"r_max": 400.0})
+    tab._copy_from_batch()
+    assert tab._r_max_mode.currentData() == "manual"
+    assert tab._r_max.value() == 400.0

@@ -2778,12 +2778,14 @@ class FieldSelector(QtWidgets.QGroupBox):
         self._exclude_label = None     # owning panel's registry label — skip its own entry
         self._buffer_snapshot_file = None   # temp .h5 from importing another tab's buffer
         self._explicit_paths = None    # list[str], set by a Browse… "Multiple files"/"stem" pick
+        self._data_path_provider = None  # callable → owning panel's current Data path
 
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(6, 2, 6, 4); outer.setSpacing(2)
         self._body = QtWidgets.QWidget()
         self._body.setVisible(False)                       # collapsed until enabled
         self.toggled.connect(self._body.setVisible)
+        self.toggled.connect(self._prefill_from_data)
         outer.addWidget(self._body)
         v = QtWidgets.QVBoxLayout(self._body)
         v.setContentsMargins(0, 0, 0, 0); v.setSpacing(3)
@@ -2871,9 +2873,34 @@ class FieldSelector(QtWidgets.QGroupBox):
             self._path_ed.setToolTip("")
         self._path_ed.blockSignals(False)
 
+    def set_data_path_provider(self, fn):
+        """`fn()` returns the owning panel's current Data path (str). Used to
+        prefill this field the first time it's checked, and as the Browse…
+        dialog's starting folder while this field has no path of its own —
+        so Dark/Bright/Background browsing starts from wherever Data was
+        loaded from, not the app's working directory."""
+        self._data_path_provider = fn
+
+    def _prefill_from_data(self, checked: bool):
+        """On first check, default this field to the same file/folder as
+        the panel's Data source — the common case is a dark/bright/background
+        frame living in the same file or folder as the data itself. A no-op
+        if a path is already set (explicit pick or restored state)."""
+        if not checked or self._raw_source() or self._data_path_provider is None:
+            return
+        src = self._data_path_provider()
+        if not src:
+            return
+        self._set_explicit_paths(None)
+        self._path_ed.setText(src)
+        self._update_frame_limit()
+
     def _open_browse_dialog(self):
+        start = self._path_ed.text().strip()
+        if not start and self._data_path_provider is not None:
+            start = self._data_path_provider() or ""
         dlg = BrowseFilesDialog(self, title=f"Select {self.title()}",
-                                start_dir=self._path_ed.text().strip())
+                                start_dir=start)
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return
         mode = dlg.mode()
@@ -3873,6 +3900,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._bg_sel = FieldSelector("Background")
         for w in (self._dark_sel, self._bright_sel, self._bg_sel):
             w.fieldReady.connect(self.fieldsChanged)
+            w.set_data_path_provider(lambda: self._path_ed.text().strip())
             fld.body.addWidget(w)
         lv.addWidget(fld)
 
