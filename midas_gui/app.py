@@ -1164,8 +1164,27 @@ class MainWindow(QtWidgets.QMainWindow):
                 mask=mask, energy_keV=energy_keV, geometry=geometry,
             )
 
-            args = ["-m", "midas_gui.auto_attenuation.app", "--snapshot", path]
-            if not QtCore.QProcess.startDetached(sys.executable, args):
+            # QProcess.startDetached(sys.executable, args) is not enough on
+            # its own: sys.executable is the right interpreter, but if this
+            # process can only import midas_gui because its launcher put the
+            # repo root on sys.path (e.g. an un-pip-installed source
+            # checkout run via cwd), a *fresh* child interpreter started with
+            # `-m` has no such head start and fails with "No module named
+            # 'midas_gui'" — seen on a beamline workstation. Prepending
+            # midas_gui's own parent directory to PYTHONPATH makes the child
+            # able to import it however this process could; on a proper pip
+            # install it's already on sys.path, so this is a harmless no-op.
+            import midas_gui as _mg
+            pkg_root = str(Path(_mg.__file__).resolve().parent.parent)
+            env = QtCore.QProcessEnvironment.systemEnvironment()
+            old_pp = env.value("PYTHONPATH")
+            env.insert("PYTHONPATH", pkg_root + (os.pathsep + old_pp if old_pp else ""))
+
+            proc = QtCore.QProcess()
+            proc.setProgram(sys.executable)
+            proc.setArguments(["-m", "midas_gui.auto_attenuation.app", "--snapshot", path])
+            proc.setProcessEnvironment(env)
+            if not proc.startDetached():
                 QtWidgets.QMessageBox.critical(
                     self, "Auto Attenuation",
                     "Failed to launch the Auto Attenuation process.")
