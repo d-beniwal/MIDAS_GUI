@@ -158,7 +158,7 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
         self._body.setVisible(False)
         self.toggled.connect(self._body.setVisible)
         self.toggled.connect(lambda *_: self.fieldsReady.emit())
-        self.toggled.connect(self._prefill_from_data)
+        self.toggled.connect(self._on_toggled)
         outer.addWidget(self._body)
         v = QtWidgets.QVBoxLayout(self._body)
         v.setContentsMargins(0, 0, 0, 0); v.setSpacing(3)
@@ -251,6 +251,29 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
         src = self._data_path_provider()
         if src:
             self._set_path(src)
+
+    def _on_toggled(self, checked: bool):
+        """Mirrors ``widgets.FieldSelector._on_toggled``: checking prefills
+        from the Data source; unchecking resets the path (and every
+        discovered sibling panel) entirely, so a later re-check prefills
+        fresh instead of keeping whatever was picked/computed before."""
+        if checked:
+            self._prefill_from_data(checked)
+        else:
+            self._reset_path()
+
+    def _reset_path(self):
+        """Clear this field back to its empty, uncomputed startup state."""
+        self._workers = {}
+        self._pending = set()
+        self._fields = {}
+        self._sibling_paths = {}
+        for lbl in self._status_lbls.values():
+            lbl.setStyleSheet(self._status_style("none"))
+        self._path_ed.setText("")
+        self._ds_row.setVisible(False)
+        self._ds_combo.setEditText(self._default_dataset)
+        self._status.setText("Not computed.")
 
     def _open_browse_dialog(self):
         # "Multiple files" isn't offered here — the other 3 panels are

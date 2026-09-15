@@ -122,6 +122,14 @@ def test_hydra_field_selector_sibling_discovery_and_compute(app, tmp_path):
 
     sel.setChecked(False)
     assert sel.field(1) is None   # unchecked -> no correction, even though computed
+    # Uncheck also resets the path/siblings/computed fields outright (mirrors
+    # widgets.FieldSelector) — a stale pick must not survive to the next check.
+    assert sel._path_ed.text().strip() == ""
+    assert sel._sibling_paths == {}
+    assert sel._fields == {}
+
+    sel.setChecked(True)
+    assert sel._path_ed.text().strip() == ""  # no Data-path provider set here — nothing to prefill
 
 
 def test_mode_ribbon_switches_pages(app):

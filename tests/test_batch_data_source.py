@@ -63,14 +63,40 @@ def test_checking_dark_does_not_override_an_existing_path():
     assert panel._dark_sel._path_ed.text().strip() == "/tmp/x/dark.h5"
 
 
-def test_unchecking_and_rechecking_dark_does_not_reprefill_over_a_clear():
+def test_unchecking_dark_resets_the_path():
+    # Unchecking must clear the path outright (not just hide it) so a later
+    # re-check prefills fresh from Data rather than keeping a stale pick.
     W, _app = _make_app_and_module()
     panel = W.DataLoaderPanel(mode="single")
     panel._path_ed.setText("/tmp/x/data.h5")
     panel._dark_sel.setChecked(True)
     assert panel._dark_sel._path_ed.text().strip() == "/tmp/x/data.h5"
     panel._dark_sel.setChecked(False)
+    assert panel._dark_sel._path_ed.text().strip() == ""
+
+
+def test_rechecking_dark_reprefills_from_the_current_data_path():
+    # Re-checking after an uncheck must reflect whatever Data currently
+    # points at, even if Data changed while Dark was off — the stale path
+    # from before the uncheck must not persist.
+    W, _app = _make_app_and_module()
+    panel = W.DataLoaderPanel(mode="single")
+    panel._path_ed.setText("/tmp/x/data.h5")
     panel._dark_sel.setChecked(True)
+    panel._dark_sel.setChecked(False)
+    panel._path_ed.setText("/tmp/y/other.h5")  # Data changed while Dark was off
+    panel._dark_sel.setChecked(True)
+    assert panel._dark_sel._path_ed.text().strip() == "/tmp/y/other.h5"
+
+
+def test_checked_dark_ignores_a_later_data_path_change():
+    # While Dark stays checked, editing Data must not silently retarget
+    # it — only an uncheck/recheck cycle re-syncs (see the two tests above).
+    W, _app = _make_app_and_module()
+    panel = W.DataLoaderPanel(mode="single")
+    panel._path_ed.setText("/tmp/x/data.h5")
+    panel._dark_sel.setChecked(True)
+    panel._path_ed.setText("/tmp/y/other.h5")
     assert panel._dark_sel._path_ed.text().strip() == "/tmp/x/data.h5"
 
 
@@ -110,7 +136,9 @@ def test_unchecking_dark_emits_fields_changed():
     assert panel._dark_sel.get_field() is None
 
 
-def test_rechecking_dark_with_an_already_computed_field_emits_fields_changed():
+def test_unchecking_dark_clears_a_previously_computed_field():
+    # Uncheck resets the field along with the path — recheck must not
+    # silently resurrect a stale computed field; the user must Compute again.
     W, _app = _make_app_and_module()
     panel = W.DataLoaderPanel(mode="single")
     panel._dark_sel.setChecked(True)
@@ -120,7 +148,7 @@ def test_rechecking_dark_with_an_already_computed_field_emits_fields_changed():
     panel.fieldsChanged.connect(lambda: seen.append(True))
     panel._dark_sel.setChecked(True)
     assert seen
-    assert panel._dark_sel.get_field() is not None
+    assert panel._dark_sel.get_field() is None
 
 
 def test_manual_edit_clears_stem_filter_and_explicit_paths():

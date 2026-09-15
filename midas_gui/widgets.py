@@ -2774,6 +2774,7 @@ class FieldSelector(QtWidgets.QGroupBox):
         self.setCheckable(True)
         self.setChecked(False)
         self._with_mode = with_mode
+        self._default_dataset = default_dataset
         self._field = None
         self._worker = None
         self._registry = None          # DataSourceRegistry, set by set_registry()
@@ -2788,7 +2789,7 @@ class FieldSelector(QtWidgets.QGroupBox):
         self._body.setVisible(False)                       # collapsed until enabled
         self.toggled.connect(self._body.setVisible)
         self.toggled.connect(lambda *_: self.fieldReady.emit())
-        self.toggled.connect(self._prefill_from_data)
+        self.toggled.connect(self._on_toggled)
         outer.addWidget(self._body)
         v = QtWidgets.QVBoxLayout(self._body)
         v.setContentsMargins(0, 0, 0, 0); v.setSpacing(3)
@@ -2897,6 +2898,34 @@ class FieldSelector(QtWidgets.QGroupBox):
         self._set_explicit_paths(None)
         self._path_ed.setText(src)
         self._update_frame_limit()
+
+    def _on_toggled(self, checked: bool):
+        """Checking prefills from the current Data source (see
+        ``_prefill_from_data``); unchecking resets the path entirely, so a
+        later re-check prefills fresh instead of silently keeping whatever
+        was picked/computed before. While checked, changing the panel's Data
+        source never touches this field — only the checkbox transition does."""
+        if checked:
+            self._prefill_from_data(checked)
+        else:
+            self._reset_path()
+
+    def _reset_path(self):
+        """Clear this field back to its empty, uncomputed startup state."""
+        self._worker = None
+        self._field = None
+        if self._buffer_snapshot_file is not None:
+            import os
+            try:
+                os.unlink(self._buffer_snapshot_file)
+            except OSError:
+                pass
+            self._buffer_snapshot_file = None
+        self._explicit_paths = None
+        self._path_ed.setText("")   # triggers _on_path_changed (hides ds_row, etc.)
+        self._path_ed.setToolTip("")
+        self._ds_combo.setEditText(self._default_dataset)
+        self._status.setText("Not computed.")
 
     def _open_browse_dialog(self):
         start = self._path_ed.text().strip()
