@@ -143,6 +143,74 @@ class DistortionRefineDialog(QtWidgets.QDialog):
         return {nm for nm, cb in self._boxes.items() if cb.isChecked()}
 
 
+class DistortionSeedDialog(QtWidgets.QDialog):
+    """Per-coefficient seed *values* for the 15 distortion coefficients.
+
+    Companion to :class:`DistortionRefineDialog`, which only picks which
+    coefficients to refine. This lets a distortion known ahead of time —
+    carried over from a previous calibration of the same detector, or
+    measured independently — be typed in as a starting point, the same way
+    BC/Lsd/tilts already can be. Grouped by η-fold like the refine dialog,
+    but no amplitude/phase pairing is enforced: unlike refining, seeding
+    only one of a pair is meaningful (the other simply starts at 0), so
+    each row is independently toggleable.
+
+    Only ticked coefficients are returned by :meth:`values`; an unticked
+    one is left out of the seed entirely, which is exactly as if this
+    dialog had never touched it (the fit then starts it at 0).
+    """
+
+    def __init__(self, values=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Distortion seed values")
+        self.setMinimumWidth(660)
+        values = dict(values or {})
+
+        layout = QtWidgets.QVBoxLayout(self)
+        info = QtWidgets.QLabel(
+            "Tick a coefficient to seed the fit's starting point from the "
+            "value beside it — e.g. a detector's distortion measured or "
+            "fitted previously. Anything left unticked starts at 0, the "
+            "way it always has.")
+        info.setWordWrap(True)
+        info.setStyleSheet("color:#bbb;font-size:11px;padding-bottom:6px;")
+        layout.addWidget(info)
+
+        grid = QtWidgets.QGridLayout(); grid.setSpacing(4)
+        groups = [("Isotropic (fold 0)", DISTORTION_ISO)]
+        groups += [(f"Fold {k}", [f"a{k}", f"phi{k}"]) for k in range(1, 7)]
+        self._boxes: dict = {}
+        for r, (title, names) in enumerate(groups):
+            grid.addWidget(QtWidgets.QLabel(f"<b>{title}</b>"), r, 0)
+            for c, nm in enumerate(names, start=1):
+                cb = QtWidgets.QCheckBox(nm)
+                cb.setChecked(nm in values)
+                spin = QtWidgets.QDoubleSpinBox()
+                spin.setRange(-1e5, 1e5); spin.setDecimals(6)
+                spin.setValue(float(values.get(nm, 0.0)))
+                spin.setMaximumWidth(100)
+                spin.setEnabled(cb.isChecked())
+                cb.toggled.connect(spin.setEnabled)
+                pair = QtWidgets.QWidget()
+                prow = QtWidgets.QHBoxLayout(pair)
+                prow.setContentsMargins(0, 0, 0, 0); prow.setSpacing(2)
+                prow.addWidget(cb); prow.addWidget(spin)
+                grid.addWidget(pair, r, c)
+                self._boxes[nm] = (cb, spin)
+        layout.addLayout(grid)
+
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def values(self) -> dict:
+        """``{coefficient_name: value}`` for every ticked row only."""
+        return {nm: spin.value() for nm, (cb, spin) in self._boxes.items()
+                if cb.isChecked()}
+
+
 class ManualSeedDialog(QtWidgets.QDialog):
     """Per-parameter "include in seed" panel behind a "Manual seed…" button.
 
@@ -158,11 +226,16 @@ class ManualSeedDialog(QtWidgets.QDialog):
 
     ``en_bc`` gates the BC_y/BC_z pair together (the backend takes them as a
     pair or not at all — see ``calib._resolve_seed`` — so one checkbox is
-    correct here, not two).
+    correct here, not two). ``en_dist``/``dist_btn`` (optional — omitted by
+    callers that predate per-coefficient distortion seeding, e.g. Hydra's
+    per-panel seed dialog) add a "Distortion" row whose values live behind
+    ``dist_btn``'s own dialog rather than inline, since 15 coefficients
+    don't fit this grid.
     """
 
     def __init__(self, *, en_bc, bcy, bcz, en_lsd, lsd, en_tx, tx, en_ty, ty,
-                en_tz, tz, feedback_check=None, note=None, parent=None):
+                en_tz, tz, en_dist=None, dist_btn=None,
+                feedback_check=None, note=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Manual seed")
         self.setModal(False)
@@ -190,6 +263,12 @@ class ManualSeedDialog(QtWidgets.QDialog):
         for en, w, label in ((en_tx, tx, "tx:"), (en_ty, ty, "ty:"), (en_tz, tz, "tz:")):
             grid.addWidget(en, r, 0)
             grid.addWidget(QtWidgets.QLabel(label), r, 1); grid.addWidget(w, r, 2)
+            r += 1
+        if en_dist is not None:
+            grid.addWidget(en_dist, r, 0)
+            grid.addWidget(QtWidgets.QLabel("Distortion:"), r, 1)
+            if dist_btn is not None:
+                grid.addWidget(dist_btn, r, 2)
             r += 1
         layout.addLayout(grid)
 

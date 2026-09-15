@@ -32,8 +32,8 @@ from midas_gui.widgets import (
     ring_azimuth_residual)
 from midas_gui.workers import CalibrationWorker, IntegrationWorker, ManualDspacingCalibWorker
 from midas_gui.dialogs import (_SaveParamstestDialog, DistortionRefineDialog,
-                                ManualSeedDialog, PARAMETER_LIMIT_ROWS, limit_window,
-                                show_error)
+                                DistortionSeedDialog, ManualSeedDialog,
+                                PARAMETER_LIMIT_ROWS, limit_window, show_error)
 from midas_gui.hydra_widgets import HydraModeRibbon
 from midas_gui.hydra_calib_page import HydraCalibrationPage
 from midas_gui import project
@@ -62,7 +62,7 @@ class CalibrationTab(QtWidgets.QWidget):
         self._ring_items: list = []
         self._calib_result = None
         self._dist_coeffs = set(DISTORTION_NAMES)   # distortion coeffs to refine
-        self._seed_dist: dict = {}                  # seed distortion carried from a result
+        self._seed_dist: dict = {}                  # {v2 coeff name: value} — from a result's feedback or typed in via _edit_seed_distortion
         self._last_dist_coeffs: Optional[set] = None  # coeffs selected for the last run
         self._last_refine_flags: Optional[dict] = None  # refine flags used for the last run
         self._last_fit_sigma: Optional[dict] = None     # per-parameter 1σ from the last manual fit
@@ -350,11 +350,12 @@ class CalibrationTab(QtWidgets.QWidget):
         self._manual_seed_check.setTristate(True)
         self._manual_seed_check.setVisible(False)   # superseded by the dialog; kept as internal/legacy state only
         self._syncing_seed_master = False
-        # Displayed precision is deliberately coarser than the fit's: this card
-        # is a *starting point*, and a sub-0.1 px beam centre or a sub-µm Lsd is
-        # noise to type in. The extra digits only widened the column.
-        self._seed_bcy = _fspin(-99999, 99999, 1, DEFAULT_BC_Y, "px")
-        self._seed_bcz = _fspin(-99999, 99999, 1, DEFAULT_BC_Z, "px")
+        # Beam-centre seed accepts up to 3 decimal places — a precisely-known
+        # centre (e.g. from an external optical/mechanical measurement, or
+        # copied from a fit result's own sub-pixel precision) can be entered
+        # exactly rather than rounded to the nearest tenth of a pixel.
+        self._seed_bcy = _fspin(-99999, 99999, 3, DEFAULT_BC_Y, "px")
+        self._seed_bcz = _fspin(-99999, 99999, 3, DEFAULT_BC_Z, "px")
         # Lsd shown/entered in mm; calculations & files use µm.
         self._seed_lsd = _fspin(0.001, 1e5, 3, DEFAULT_LSD_UM / 1000.0, " mm")
         # Seed tilts (deg). Honoured by the four-stage / advanced pipelines; the
@@ -377,16 +378,32 @@ class CalibrationTab(QtWidgets.QWidget):
         self._seed_en_tx = QtWidgets.QCheckBox("tx")
         self._seed_en_ty = QtWidgets.QCheckBox("ty")
         self._seed_en_tz = QtWidgets.QCheckBox("tz")
+        # Distortion seed: unlike BC/Lsd/tilts, its values (up to 15
+        # coefficients) don't fit an inline spinbox, so they live behind
+        # their own "…" dialog (DistortionSeedDialog) — self._seed_dist
+        # (a plain {name: value} dict, set up in __init__) is what it edits.
+        # Seeded independently of BC/Lsd/tilts (see _manual_seed_kwargs):
+        # ticking only this lets a known detector distortion be fixed as a
+        # starting point while BC/Lsd still auto-seed.
+        self._seed_en_dist = QtWidgets.QCheckBox("Distortion")
+        self._seed_dist_btn = QtWidgets.QToolButton(); self._seed_dist_btn.setText("…")
+        self._seed_dist_btn.setToolTip(
+            "Enter starting values for individual distortion coefficients "
+            "(iso_R2/4/6, per-fold amplitude/phase).")
+        self._seed_dist_btn.clicked.connect(self._edit_seed_distortion)
         self._seed_enables = (self._seed_en_bc, self._seed_en_lsd,
-                              self._seed_en_tx, self._seed_en_ty, self._seed_en_tz)
+                              self._seed_en_tx, self._seed_en_ty, self._seed_en_tz,
+                              self._seed_en_dist)
         self._seed_en_bc.toggled.connect(self._seed_bcy.setEnabled)
         self._seed_en_bc.toggled.connect(self._seed_bcz.setEnabled)
         self._seed_en_lsd.toggled.connect(self._seed_lsd.setEnabled)
         self._seed_en_tx.toggled.connect(self._seed_tx.setEnabled)
         self._seed_en_ty.toggled.connect(self._seed_ty.setEnabled)
         self._seed_en_tz.toggled.connect(self._seed_tz.setEnabled)
+        self._seed_en_dist.toggled.connect(self._seed_dist_btn.setEnabled)
         for w in (self._seed_bcy, self._seed_bcz, self._seed_lsd, *self._seed_tilts):
             w.setEnabled(False)
+        self._seed_dist_btn.setEnabled(False)
         for cb in self._seed_enables:
             cb.toggled.connect(self._on_seed_enable_changed)
         self._manual_seed_check.toggled.connect(self._on_seed_master_toggled)
@@ -408,12 +425,13 @@ class CalibrationTab(QtWidgets.QWidget):
             en_tx=self._seed_en_tx, tx=self._seed_tx,
             en_ty=self._seed_en_ty, ty=self._seed_ty,
             en_tz=self._seed_en_tz, tz=self._seed_tz,
+            en_dist=self._seed_en_dist, dist_btn=self._seed_dist_btn,
             feedback_check=self._feedback_check, note=self._seed_note, parent=self)
         self._seed_btn = QtWidgets.QPushButton("Manual seed…")
         self._seed_btn.setToolTip(
-            "Choose which of BC / Lsd / tx / ty / tz to seed the fit's "
-            "starting point from. Use Pick BC / Pick Ring on the image to "
-            "populate BC while this is open.")
+            "Choose which of BC / Lsd / tx / ty / tz / Distortion to seed "
+            "the fit's starting point from. Use Pick BC / Pick Ring on the "
+            "image to populate BC while this is open.")
         self._seed_btn.clicked.connect(self._open_seed_dialog)
         seed.body.addWidget(self._seed_btn)
         self._seed_summary_lbl = QtWidgets.QLabel("")
@@ -428,6 +446,7 @@ class CalibrationTab(QtWidgets.QWidget):
         self._seed_bc_lsd_warn.setWordWrap(True)
         self._seed_bc_lsd_warn.setVisible(False)
         seed.body.addWidget(self._seed_bc_lsd_warn)
+        self._update_seed_dist_label()
         self._update_seed_summary()
         self._update_seed_bc_lsd_warning()
         self._update_seed_btn_style()
@@ -1118,7 +1137,7 @@ class CalibrationTab(QtWidgets.QWidget):
 
     def _update_seed_summary(self):
         on = [label for cb, label in zip(
-                  self._seed_enables, ("BC", "Lsd", "tx", "ty", "tz"))
+                  self._seed_enables, ("BC", "Lsd", "tx", "ty", "tz", "Distortion"))
               if cb.isChecked()]
         self._seed_summary_lbl.setText(
             "Seeding: " + ", ".join(on) if on else "Fully automatic (no manual seed)")
@@ -1128,7 +1147,7 @@ class CalibrationTab(QtWidgets.QWidget):
         ``self._enable_seed(BC=True)``. Never unticks — callers that populate
         a subset of fields (Pick BC, a partial geometry dict) should not
         silently disable a parameter the user already enabled."""
-        by_name = dict(zip(("BC", "Lsd", "tx", "ty", "tz"), self._seed_enables))
+        by_name = dict(zip(("BC", "Lsd", "tx", "ty", "tz", "Distortion"), self._seed_enables))
         for name, on in flags.items():
             if on:
                 by_name[name].setChecked(True)
@@ -1137,9 +1156,12 @@ class CalibrationTab(QtWidgets.QWidget):
         """Sparse seed dict for ``calib.run_pipeline``'s ``manual_seed`` cfg
         key: only the parameters actually ticked "include in seed" are
         present. BC_y/BC_z always travel together (see
-        ``calib._resolve_seed``); ``distortion`` is carried along whenever
-        anything else is, unchanged from the previous all-or-nothing
-        behaviour — this task adds no per-coefficient seed-value control."""
+        ``calib._resolve_seed``). Distortion is seeded independently of
+        BC/Lsd/tilts — ticking only "Distortion" seeds a known detector
+        distortion while BC/Lsd/tilts stay on the auto-seeder, and vice
+        versa — from whichever coefficients are in ``self._seed_dist``
+        (typed in via ``_edit_seed_distortion``, or carried forward from a
+        prior result by "Feed result back to seed")."""
         manual: dict = {}
         if self._seed_en_bc.isChecked():
             manual["BC_y"] = self._seed_bcy.value()
@@ -1151,9 +1173,21 @@ class CalibrationTab(QtWidgets.QWidget):
                            (self._seed_en_tz, "tz", self._seed_tz)):
             if en.isChecked():
                 manual[key] = w.value()
-        if manual and self._seed_dist:
+        if self._seed_en_dist.isChecked() and self._seed_dist:
             manual["distortion"] = dict(self._seed_dist)
         return manual
+
+    def _edit_seed_distortion(self):
+        dlg = DistortionSeedDialog(self._seed_dist, self)
+        if dlg.exec_():
+            self._seed_dist = dlg.values()
+            if self._seed_dist and not self._seed_en_dist.isChecked():
+                self._seed_en_dist.setChecked(True)
+            self._update_seed_dist_label()
+
+    def _update_seed_dist_label(self):
+        n = len(self._seed_dist)
+        self._seed_en_dist.setText(f"Distortion ({n}/15)" if n else "Distortion")
 
     # ── Seed feedback from a result ───────────────────────────────
 
@@ -1170,6 +1204,9 @@ class CalibrationTab(QtWidgets.QWidget):
         if getattr(result, "wavelength_A", None):
             self._wl.setValue(float(result.wavelength_A))
         self._seed_dist = dict(getattr(result, "distortion", {}) or {})
+        if self._seed_dist:
+            self._enable_seed(Distortion=True)
+        self._update_seed_dist_label()
         self._seed_note.setText(
             f"Seed updated from the last fit: BC=({result.BC_y:.1f}, {result.BC_z:.1f}) px, "
             f"Lsd={float(result.Lsd) / 1000:.3f} mm, "
@@ -2198,6 +2235,7 @@ class CalibrationTab(QtWidgets.QWidget):
             "seed_en_tx": self._seed_en_tx,
             "seed_en_ty": self._seed_en_ty,
             "seed_en_tz": self._seed_en_tz,
+            "seed_en_dist": self._seed_en_dist,
             "seed_bcy": self._seed_bcy,
             "seed_bcz": self._seed_bcz,
             "seed_lsd": self._seed_lsd,
@@ -2251,6 +2289,12 @@ class CalibrationTab(QtWidgets.QWidget):
                  # would lose the crystalline flags entirely (and vice versa).
                  "refine_modes": {"xtal": self._refine_state_xtal,
                                    "dsp": self._refine_state_dsp},
+                 # Distortion seed *values* — "seed_en_dist" (in "fields") is
+                 # just the on/off tick; this is the {coeff: value} dict it
+                 # gates, which has no widget of its own. Restoring a result
+                 # (below) overwrites this with the result's own distortion,
+                 # so this only matters when there's no result yet.
+                 "seed_dist": dict(self._seed_dist),
                  "result": project.sanitize_result_dict(self._result)}
         if self._result is not None and sidecar_stem:
             try:
@@ -2301,6 +2345,14 @@ class CalibrationTab(QtWidgets.QWidget):
         hydra_state = state.get("hydra") or {}
         self._mode_ribbon.set_mode(hydra_state.get("active_mode", "single"))
         self._hydra_page.set_state(hydra_state.get("page") or {})
+        # Restored first so it's in place even with no "result" below (a
+        # project saved before a first fit, with only a manually-typed seed);
+        # _display_stored_result overwrites it from the actual result when
+        # one exists, which is the more authoritative source.
+        seed_dist = state.get("seed_dist")
+        if seed_dist:
+            self._seed_dist = dict(seed_dist)
+            self._update_seed_dist_label()
         result_state = state.get("result")
         if result_state:
             self._display_stored_result(project.calibration_namespace(result_state),
@@ -2324,11 +2376,17 @@ class CalibrationTab(QtWidgets.QWidget):
         step so a partially-available result (e.g. the source image no
         longer on disk) still shows whatever it can."""
         self._result = result
-        # The seed spin boxes come back from "fields", but distortion has no
-        # widget to be restored into — so without this, re-running the fit from
-        # a reloaded project would seed it with no coefficients, quietly
-        # discarding the harmonics the stored result was refined with.
+        # The seed spin boxes come back from "fields", but the distortion
+        # *values* dict has no widget of its own to be restored into — so
+        # without this, re-running the fit from a reloaded project would
+        # seed it with no coefficients, quietly discarding the harmonics
+        # the stored result was refined with. ``_enable_seed`` never
+        # unticks, so this only ever turns Distortion seeding on to match,
+        # never overrides an explicit off left over from "fields".
         self._seed_dist = dict(getattr(result, "distortion", {}) or {})
+        if self._seed_dist:
+            self._enable_seed(Distortion=True)
+        self._update_seed_dist_label()
         try:
             self._populate_param_grid(paramstest_pairs(result))
             self._to_view_btn.setEnabled(True)
