@@ -4685,6 +4685,23 @@ class DataLoaderPanel(QtWidgets.QWidget):
             return np.stack(frames, axis=0)
         raise RuntimeError("No data loaded")
 
+    def data_source_kind(self) -> str:
+        """Which branch ``full_stack()`` would take right now: ``"buffer"``
+        (live ring buffer, frozen and non-empty, or an imported external
+        buffer), ``"loaded"`` (a static file/folder/HDF5 stack), or
+        ``"none"``. Informational only — loading static data always clears
+        the buffer and starting/using the buffer always clears loaded data
+        (see ``_load``/``_start_live``/``use_external_buffer``), so in
+        practice only one of the two is ever populated at a time."""
+        if self._external is not None:
+            return "buffer"
+        with self._buffer_lock:
+            if self._buffer_frozen and self._buffer:
+                return "buffer"
+        if self._stack is not None or self._h5 is not None or self._paths is not None:
+            return "loaded"
+        return "none"
+
     def average_frames(self, start=0, end=None, step=1):
         """Mean of frames ``start:end:step`` (end None/<=0 = all), streamed one
         frame at a time so large folders / HDF5 stacks stay memory-safe.

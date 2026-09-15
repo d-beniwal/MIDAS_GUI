@@ -11,8 +11,14 @@ import numpy as np
 
 
 def write_snapshot(path, *, frames, dark=None, dark_stack=None, mask=None,
-                    energy_keV=None, geometry=None):
-    """Write a buffer/dark/mask/geometry snapshot to *path* as ``.npz``."""
+                    energy_keV=None, geometry=None, source=None):
+    """Write a buffer/dark/mask/geometry snapshot to *path* as ``.npz``.
+
+    ``source`` optionally records which of the Data Viewer's two mutually
+    exclusive frame sources *frames* came from (``"buffer"`` or ``"loaded"``
+    — see ``widgets.DataLoaderPanel.data_source_kind``), purely for display
+    in the popup.
+    """
     kwargs = {"frames": np.asarray(frames, dtype=np.float32)}
     if dark is not None:
         kwargs["dark"] = np.asarray(dark, dtype=np.float32)
@@ -24,6 +30,8 @@ def write_snapshot(path, *, frames, dark=None, dark_stack=None, mask=None,
         kwargs["energy_keV"] = np.array(float(energy_keV))
     if geometry is not None:
         kwargs["geometry_json"] = np.array(json.dumps(geometry))
+    if source is not None:
+        kwargs["source"] = np.array(str(source))
 
     with open(path, "wb") as f:
         np.savez(f, **kwargs)
@@ -33,8 +41,8 @@ def load_snapshot(path):
     """Read back a snapshot written by :func:`write_snapshot`.
 
     Returns a dict with ``frames`` always present; ``dark``, ``dark_stack``,
-    ``mask``, ``energy_keV`` and ``geometry`` present only if they were
-    written.
+    ``mask``, ``energy_keV``, ``geometry`` and ``source`` present only if
+    they were written.
     """
     result = {}
     with open(path, "rb") as f:
@@ -47,4 +55,6 @@ def load_snapshot(path):
                 result["energy_keV"] = float(z["energy_keV"])
             if "geometry_json" in z.files:
                 result["geometry"] = json.loads(str(z["geometry_json"]))
+            if "source" in z.files:
+                result["source"] = str(z["source"])
     return result

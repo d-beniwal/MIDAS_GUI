@@ -62,6 +62,7 @@ def _install_diagnostics() -> None:
 from midas_gui.helpers import _make_checkmark_svg, _make_arrow_svg
 from midas_gui import style as S
 from midas_gui import bridge_server
+from midas_gui.auto_attenuation import refresh_server as auto_att_refresh_server
 from midas_gui.tab_view import DataViewerTab
 from midas_gui.tab_mask import MaskTab
 from midas_gui.tab_calibrate import CalibrationTab
@@ -115,6 +116,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._bridge_server = bridge_server.BridgeServer(
             self._resolve_and_start_live, log_fn=_log)
         self._bridge_server.start()
+
+        # Lets a still-open, detached Auto Attenuation popup ask for a fresh
+        # data/dark/mask snapshot without this GUI ever handing over live
+        # objects — see midas_gui/auto_attenuation/refresh_server.py.
+        self._auto_att_refresh_server = auto_att_refresh_server.AutoAttenuationRefreshServer(
+            self._on_auto_attenuation_refresh_request, log_fn=_log)
+        self._auto_att_refresh_server.start()
 
     def _resolve_and_start_live(self, prefix: str) -> None:
         resolved = bridge_server.resolve_pv(prefix, C.DEVICES)
@@ -1134,35 +1142,57 @@ class MainWindow(QtWidgets.QMainWindow):
         act = m.addAction("Auto Attenuation…")
         act.triggered.connect(self._open_auto_attenuation)
 
+    def _write_auto_attenuation_snapshot(self, path):
+        """Gather the Data Viewer's current buffer/loaded-data/dark/mask/
+        geometry and write it to *path* as an Auto Attenuation snapshot.
+
+        Shared by the initial launch (``_open_auto_attenuation``) and a
+        running popup's "Refresh from Data Viewer" request (see
+        ``midas_gui/auto_attenuation/refresh_server.py``) — the popup itself
+        never touches these live objects, only this method does. Returns
+        ``(ok, message)``; ``message`` is set only when ``ok`` is False."""
+        loader = getattr(self._view_tab, "_loader", None)
+        if loader is None or loader.n_frames() == 0:
+            return False, "Capture or load a buffer/stack in the Data Viewer first."
+        frames = loader.full_stack()
+        source = loader.data_source_kind()
+        dark = loader.dark()
+        dark_stack = loader.dark_raw_stack()
+        mask = loader.composite_mask()
+        geometry = self._view_tab.get_geometry() or {}
+        wl = float(geometry.get("wavelength_A") or 0.0)
+        energy_keV = (C.HC_KEV_A / wl) if wl > 0 else None
+
+        from midas_gui.auto_attenuation.snapshot import write_snapshot
+        write_snapshot(
+            path, frames=frames, dark=dark, dark_stack=dark_stack,
+            mask=mask, energy_keV=energy_keV, geometry=geometry, source=source,
+        )
+        return True, None
+
+    def _on_auto_attenuation_refresh_request(self, path):
+        """Callback for AutoAttenuationRefreshServer — see that module."""
+        try:
+            return self._write_auto_attenuation_snapshot(path)
+        except Exception:
+            _log(f"Auto Attenuation refresh failed:\n{traceback.format_exc()}")
+            return False, "Refresh failed — see the main GUI's log."
+
     def _open_auto_attenuation(self):
         """Snapshot the Data Viewer's buffer/dark/mask/geometry to a temp
         file and launch the Auto Attenuation popup as a separate, detached
         process (see midas_gui.auto_attenuation) — it only ever reads that
         one snapshot, never the live GUI objects, so it can't be crashed by
         or crash the main GUI, and survives the main GUI closing."""
-        loader = getattr(self._view_tab, "_loader", None)
-        if loader is None or loader.n_frames() == 0:
-            QtWidgets.QMessageBox.information(
-                self, "Auto Attenuation",
-                "Capture or load a buffer/stack in the Data Viewer first.")
-            return
+        import os
+        fd, path = tempfile.mkstemp(suffix=".npz", prefix="midas_auto_att_")
+        os.close(fd)
         try:
-            frames = loader.full_stack()
-            dark = loader.dark()
-            dark_stack = loader.dark_raw_stack()
-            mask = loader.composite_mask()
-            geometry = self._view_tab.get_geometry() or {}
-            wl = float(geometry.get("wavelength_A") or 0.0)
-            energy_keV = (C.HC_KEV_A / wl) if wl > 0 else None
-
-            import os
-            from midas_gui.auto_attenuation.snapshot import write_snapshot
-            fd, path = tempfile.mkstemp(suffix=".npz", prefix="midas_auto_att_")
-            os.close(fd)
-            write_snapshot(
-                path, frames=frames, dark=dark, dark_stack=dark_stack,
-                mask=mask, energy_keV=energy_keV, geometry=geometry,
-            )
+            ok, message = self._write_auto_attenuation_snapshot(path)
+            if not ok:
+                os.unlink(path)
+                QtWidgets.QMessageBox.information(self, "Auto Attenuation", message)
+                return
 
             # QProcess.startDetached(sys.executable, args) is not enough on
             # its own: sys.executable is the right interpreter, but if this
@@ -1317,6 +1347,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._bridge_server.stop()
         except Exception:
             _log(f"Bridge server shutdown failed:\n{traceback.format_exc()}")
+        try:
+            self._auto_att_refresh_server.stop()
+        except Exception:
+            _log(f"Auto Attenuation refresh server shutdown failed:\n{traceback.format_exc()}")
         super().closeEvent(event)
 
 

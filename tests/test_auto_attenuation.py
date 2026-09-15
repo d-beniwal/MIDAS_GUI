@@ -5,6 +5,8 @@ single-capture analysis), the new saturation pre-check (not present in
 pyAutoBeam), the snapshot round-trip, and a Qt smoke test of the popup
 dialog built directly off an in-memory snapshot (no subprocess).
 """
+import json
+
 import numpy as np
 import pytest
 
@@ -243,6 +245,17 @@ def test_snapshot_round_trip(tmp_path):
     assert out["energy_keV"] == pytest.approx(71.676)
     assert out["geometry"] == geometry
     assert "dark_stack" not in out
+    assert "source" not in out
+
+
+def test_snapshot_round_trip_records_source(tmp_path):
+    from midas_gui.auto_attenuation.snapshot import write_snapshot, load_snapshot
+
+    frames = np.zeros((2, 4, 4), dtype=np.float32)
+    path = tmp_path / "snap.npz"
+    write_snapshot(str(path), frames=frames, source="buffer")
+    out = load_snapshot(str(path))
+    assert out["source"] == "buffer"
 
 
 # ── dialog.py (Qt smoke test) ─────────────────────────────────────────────
@@ -316,3 +329,317 @@ def test_dialog_saturated_run_blocks_analysis(app, monkeypatch):
 
     assert "SATURATION DETECTED" in dlg.log.toPlainText()
     dlg.close()
+
+
+def test_dialog_shows_source_label(app):
+    from midas_gui.auto_attenuation.dialog import AutoAttenuationDialog
+
+    snapshot = _make_snapshot()
+    snapshot["source"] = "buffer"
+    dlg = AutoAttenuationDialog(snapshot)
+    assert "Source: Buffer" in dlg._source_summary_lbl.text()
+    dlg.close()
+
+    snapshot["source"] = "loaded"
+    dlg = AutoAttenuationDialog(snapshot)
+    assert "Source: Loaded data" in dlg._source_summary_lbl.text()
+    dlg.close()
+
+    del snapshot["source"]
+    dlg = AutoAttenuationDialog(snapshot)
+    assert "Source: Unspecified" in dlg._source_summary_lbl.text()
+    dlg.close()
+
+
+def test_refresh_without_snapshot_path_shows_info(app, monkeypatch):
+    """A dialog built directly off an in-memory snapshot (no launcher path,
+    e.g. the other Qt smoke tests above) can't refresh -- must say so, not
+    crash trying to reach a server."""
+    from midas_gui.auto_attenuation.dialog import AutoAttenuationDialog
+    from PyQt5 import QtWidgets
+
+    dlg = AutoAttenuationDialog(_make_snapshot())
+    informed = {}
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox, "information",
+        lambda *a, **k: informed.setdefault("called", True),
+    )
+    dlg._on_refresh_source()
+    assert informed.get("called")
+    dlg.close()
+
+
+def test_refresh_with_no_server_listening_warns(app, monkeypatch, tmp_path):
+    from midas_gui.auto_attenuation.dialog import AutoAttenuationDialog
+    from midas_gui.auto_attenuation.snapshot import write_snapshot
+    from PyQt5 import QtWidgets
+    import uuid
+
+    path = tmp_path / "snap.npz"
+    write_snapshot(str(path), frames=np.zeros((1, 4, 4), dtype=np.float32))
+
+    dlg = AutoAttenuationDialog(
+        _make_snapshot(), snapshot_path=str(path),
+        refresh_server_name=f"auto_att_test_no_server_{uuid.uuid4().hex[:8]}")
+    warned = {}
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox, "warning",
+        lambda *a, **k: warned.setdefault("called", True),
+    )
+    dlg._on_refresh_source()
+    assert warned.get("called")
+    dlg.close()
+
+
+class _FakeLocalSocket:
+    """Stand-in for QtNetwork.QLocalSocket used by dialog._on_refresh_source.
+
+    A real client+server round trip over one QLocalSocket/QLocalServer pair
+    needs a running Qt event loop on *both* ends to dispatch socket events;
+    a synchronous single-threaded test has neither, so (like
+    tests/test_bridge_server.py) the server and client sides are each
+    exercised directly instead of over a real socket."""
+
+    def __init__(self, connected, reply, parent=None):
+        self._connected = connected
+        self._reply = reply
+        self.written = None
+
+    def connectToServer(self, name):
+        pass
+
+    def waitForConnected(self, timeout=0):
+        return self._connected
+
+    def write(self, data):
+        self.written = data
+
+    def waitForBytesWritten(self, timeout=0):
+        return True
+
+    def waitForReadyRead(self, timeout=0):
+        return self._reply is not None
+
+    def readAll(self):
+        return self._reply if self._reply is not None else b""
+
+    def disconnectFromServer(self):
+        pass
+
+
+def _patch_fake_socket(monkeypatch, *, connected=True, reply=None):
+    from midas_gui.auto_attenuation import dialog as dialog_mod
+    monkeypatch.setattr(
+        dialog_mod.QtNetwork, "QLocalSocket",
+        lambda parent=None: _FakeLocalSocket(connected, reply, parent))
+
+
+def test_refresh_updates_snapshot_and_checkboxes_on_success(app, monkeypatch, tmp_path):
+    """The "main GUI" side (a real write_snapshot, standing in for what
+    AutoAttenuationRefreshServer's callback would do) writes a new snapshot
+    with a dark_stack the original didn't have; a successful reply makes the
+    dialog reload it and re-enable the dependent checkbox."""
+    from midas_gui.auto_attenuation.dialog import AutoAttenuationDialog
+    from midas_gui.auto_attenuation.snapshot import write_snapshot
+
+    path = tmp_path / "snap.npz"
+    write_snapshot(str(path), frames=np.full((3, 8, 8), 500.0, dtype=np.float32),
+                   source="loaded")
+    _patch_fake_socket(monkeypatch, reply=json.dumps({"ok": True}).encode("utf-8"))
+
+    dlg = AutoAttenuationDialog(
+        {"frames": np.full((3, 8, 8), 500.0, dtype=np.float32), "source": "loaded"},
+        snapshot_path=str(path))
+    assert dlg.chk_dark_mask.isEnabled() is False
+
+    # Simulate the main GUI's response to the refresh request, i.e. what
+    # _on_auto_attenuation_refresh_request would have done to `path`.
+    write_snapshot(
+        str(path), frames=np.full((5, 8, 8), 700.0, dtype=np.float32),
+        dark_stack=np.zeros((4, 8, 8), dtype=np.float32), source="buffer")
+    dlg._on_refresh_source()
+
+    assert dlg._snapshot["frames"].shape[0] == 5
+    assert dlg._snapshot["source"] == "buffer"
+    assert dlg.chk_dark_mask.isEnabled() is True
+    assert "Source: Buffer" in dlg._source_summary_lbl.text()
+    assert "Refreshed data source" in dlg.log.toPlainText()
+    dlg.close()
+
+
+def test_refresh_reports_handler_failure_message(app, monkeypatch, tmp_path):
+    from midas_gui.auto_attenuation.dialog import AutoAttenuationDialog
+    from midas_gui.auto_attenuation.snapshot import write_snapshot
+    from PyQt5 import QtWidgets
+
+    path = tmp_path / "snap.npz"
+    write_snapshot(str(path), frames=np.zeros((1, 4, 4), dtype=np.float32))
+    reply = json.dumps({
+        "ok": False,
+        "message": "Capture or load a buffer/stack in the Data Viewer first.",
+    }).encode("utf-8")
+    _patch_fake_socket(monkeypatch, reply=reply)
+
+    dlg = AutoAttenuationDialog(_make_snapshot(), snapshot_path=str(path))
+    warned = {}
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox, "warning",
+        lambda *a, **k: warned.setdefault("message", a[-1]),
+    )
+    dlg._on_refresh_source()
+    assert "Capture or load" in warned.get("message", "")
+    dlg.close()
+
+
+def test_refresh_no_reply_warns(app, monkeypatch, tmp_path):
+    from midas_gui.auto_attenuation.dialog import AutoAttenuationDialog
+    from midas_gui.auto_attenuation.snapshot import write_snapshot
+    from PyQt5 import QtWidgets
+
+    path = tmp_path / "snap.npz"
+    write_snapshot(str(path), frames=np.zeros((1, 4, 4), dtype=np.float32))
+    _patch_fake_socket(monkeypatch, reply=None)  # waitForReadyRead times out
+
+    dlg = AutoAttenuationDialog(_make_snapshot(), snapshot_path=str(path))
+    warned = {}
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox, "warning",
+        lambda *a, **k: warned.setdefault("called", True),
+    )
+    dlg._on_refresh_source()
+    assert warned.get("called")
+    dlg.close()
+
+
+# ── refresh_server.py ──────────────────────────────────────────────────────
+
+class _FakeServerSocket:
+    """Stand-in for QtNetwork.QLocalSocket on the server side — only
+    `.readAll()` is read and `.write()`/`.flush()`/`.disconnectFromServer()`
+    are recorded, matching tests/test_bridge_server.py's `_FakeSocket`."""
+
+    def __init__(self, payload: bytes):
+        self._payload = payload
+        self.replies = []
+        self.disconnected = False
+
+    def readAll(self):
+        return self._payload
+
+    def write(self, data):
+        self.replies.append(data)
+
+    def flush(self):
+        pass
+
+    def disconnectFromServer(self):
+        self.disconnected = True
+
+
+def test_on_refresh_data_dispatches_valid_request(tmp_path):
+    from midas_gui.auto_attenuation.refresh_server import AutoAttenuationRefreshServer
+
+    calls = []
+
+    def handler(path):
+        calls.append(path)
+        return True, None
+
+    srv = AutoAttenuationRefreshServer(handler)
+    sock = _FakeServerSocket(json.dumps({
+        "type": "refresh_request", "version": 1, "path": str(tmp_path / "snap.npz"),
+    }).encode("utf-8"))
+    srv._on_refresh_data(sock)
+
+    assert calls == [str(tmp_path / "snap.npz")]
+    reply = json.loads(sock.replies[0].decode("utf-8"))
+    assert reply == {"type": "refresh_done", "ok": True, "message": None}
+    assert sock.disconnected
+
+
+@pytest.mark.parametrize("payload", [
+    b"not json",
+    b'{"type": "something_else", "version": 1, "path": "/tmp/x.npz"}',
+    b'{"type": "refresh_request", "version": 2, "path": "/tmp/x.npz"}',
+    b'{"type": "refresh_request", "version": 1}',
+    b'{"type": "refresh_request", "version": 1, "path": ""}',
+])
+def test_on_refresh_data_rejects_invalid_requests(payload):
+    from midas_gui.auto_attenuation.refresh_server import AutoAttenuationRefreshServer
+
+    calls = []
+    srv = AutoAttenuationRefreshServer(lambda path: calls.append(path) or (True, None))
+    sock = _FakeServerSocket(payload)
+    srv._on_refresh_data(sock)
+
+    assert calls == []
+    reply = json.loads(sock.replies[0].decode("utf-8"))
+    assert reply["ok"] is False
+
+
+def test_on_refresh_data_reports_handler_exception():
+    from midas_gui.auto_attenuation.refresh_server import AutoAttenuationRefreshServer
+
+    def handler(path):
+        raise RuntimeError("boom")
+
+    srv = AutoAttenuationRefreshServer(handler)
+    sock = _FakeServerSocket(json.dumps({
+        "type": "refresh_request", "version": 1, "path": "/tmp/x.npz",
+    }).encode("utf-8"))
+    srv._on_refresh_data(sock)
+
+    reply = json.loads(sock.replies[0].decode("utf-8"))
+    assert reply["ok"] is False
+    assert "boom" in reply["message"]
+
+
+def test_refresh_server_start_removes_stale_socket_and_listens():
+    import uuid
+    from midas_gui.auto_attenuation.refresh_server import AutoAttenuationRefreshServer
+
+    name = f"auto_att_refresh_test_{uuid.uuid4().hex[:8]}"
+    srv = AutoAttenuationRefreshServer(lambda path: (True, None))
+    try:
+        assert srv.start(name) is True
+    finally:
+        srv.stop()
+
+
+def test_write_auto_attenuation_snapshot_wired_in_mainwindow(tmp_path):
+    """MainWindow._on_auto_attenuation_refresh_request (the refresh server's
+    callback) and _open_auto_attenuation's own snapshot gathering both go
+    through _write_auto_attenuation_snapshot -- exercise it directly against
+    a real MainWindow/DataLoaderPanel, no subprocess or socket involved."""
+    QtWidgets = pytest.importorskip("PyQt5.QtWidgets")
+    try:
+        import midas_gui.app as app_mod
+    except Exception as exc:
+        pytest.skip(f"midas_gui.app needs the full MIDAS stack: {exc}")
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    win = app_mod.MainWindow()
+    try:
+        path = tmp_path / "snap.npz"
+        loader = win._view_tab._loader
+
+        # MainWindow starts up with a default sample stack already loaded
+        # (tab_view.py's DEFAULT_NICKEL_H5) -- a real "loaded data" source.
+        assert loader.n_frames() > 0
+        ok, message = win._on_auto_attenuation_refresh_request(str(path))
+        assert ok
+        assert message is None
+        from midas_gui.auto_attenuation.snapshot import load_snapshot
+        snap = load_snapshot(str(path))
+        assert snap["frames"].shape[0] == loader.n_frames()
+        assert snap["source"] == "loaded"
+
+        # Clearing it out entirely reproduces the no-data guard.
+        loader._stack = loader._paths = loader._h5 = None
+        loader._nframes = 0
+        ok, message = win._on_auto_attenuation_refresh_request(str(path))
+        assert not ok
+        assert "Capture or load" in message
+    finally:
+        win._bridge_server.stop()
+        win._auto_att_refresh_server.stop()

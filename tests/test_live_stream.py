@@ -140,6 +140,23 @@ def test_live_frame_updates_current_frame():
     assert got.get("fired") is True
 
 
+def test_data_source_kind_reports_none_loaded_then_buffer():
+    """DataLoaderPanel.data_source_kind() — used by Auto Attenuation's
+    source label — must report 'none' with nothing loaded, 'loaded' for a
+    static in-memory stack, and 'buffer' once a live buffer is frozen."""
+    W, _app = _make_app_and_module()
+    panel = W.DataLoaderPanel(mode="stack", allow_live=True)
+    assert panel.data_source_kind() == "none"
+
+    panel._stack = np.zeros((2, 4, 4), dtype=np.float32)
+    assert panel.data_source_kind() == "loaded"
+
+    with panel._buffer_lock:
+        panel._buffer = [np.zeros((4, 4), dtype=np.float32)]
+        panel._buffer_frozen = True
+    assert panel.data_source_kind() == "buffer"
+
+
 def test_pva_live_source_roundtrip():
     pytest.importorskip("pvapy")
     import time

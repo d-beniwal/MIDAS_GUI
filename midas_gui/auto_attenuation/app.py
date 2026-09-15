@@ -8,7 +8,6 @@ by a crash in it (or vice versa).
 """
 
 import argparse
-import os
 import sys
 
 
@@ -20,16 +19,16 @@ def main(argv=None):
 
     from midas_gui.auto_attenuation.snapshot import load_snapshot
     snapshot = load_snapshot(args.snapshot)
-    try:
-        os.unlink(args.snapshot)
-    except OSError:
-        pass
 
     from PyQt5 import QtWidgets
     from midas_gui.auto_attenuation.dialog import AutoAttenuationDialog
 
     app = QtWidgets.QApplication(sys.argv[:1])
-    win = AutoAttenuationDialog(snapshot)
+    # The snapshot file is kept (not deleted here, unlike before) so the
+    # window's "Refresh from Data Viewer" can ask the main GUI to overwrite
+    # it in place — see refresh_server.py. AutoAttenuationDialog removes it
+    # on close.
+    win = AutoAttenuationDialog(snapshot, snapshot_path=args.snapshot)
     win.show()
     sys.exit(app.exec_())
 

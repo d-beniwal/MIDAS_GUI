@@ -5,11 +5,13 @@ only ever touches the one-time snapshot dict loaded at startup, never the
 main GUI's live objects.
 """
 
+import json
+import os
 import traceback
 
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtNetwork, QtWidgets
 
-from midas_gui.auto_attenuation import analysis, saturation
+from midas_gui.auto_attenuation import analysis, refresh_server, saturation
 from midas_gui.auto_attenuation.attenuator_table import DEFAULT_POSITION_THICKNESS_MM
 
 
@@ -80,11 +82,14 @@ class _AnalysisWorker(QtCore.QThread):
 class AutoAttenuationDialog(QtWidgets.QMainWindow):
     """Standalone Auto Attenuation window (built in its own QApplication)."""
 
-    def __init__(self, snapshot, parent=None):
+    def __init__(self, snapshot, parent=None, snapshot_path=None,
+                 refresh_server_name=refresh_server.SERVER_NAME):
         super().__init__(parent)
         self.setWindowTitle("Auto Attenuation")
         self.resize(980, 620)
         self._snapshot = snapshot
+        self._snapshot_path = snapshot_path
+        self._refresh_server_name = refresh_server_name
         self._worker = None
 
         central = QtWidgets.QWidget()
@@ -127,22 +132,37 @@ class AutoAttenuationDialog(QtWidgets.QMainWindow):
 
     # ── UI construction ──────────────────────────────────────────────
 
-    def _build_source_summary(self, layout):
+    _SOURCE_LABELS = {"buffer": "Buffer", "loaded": "Loaded data (Data Viewer)"}
+
+    def _source_summary_text(self):
         frames = self._snapshot["frames"]
         n = frames.shape[0] if frames.ndim == 3 else 1
         shape = frames.shape[-2:]
-        bits = [f"Buffer: {n} frame(s), {shape[0]}x{shape[1]} px"]
+        source_label = self._SOURCE_LABELS.get(
+            self._snapshot.get("source"), "Unspecified")
+        bits = [f"Source: {source_label}",
+                f"{n} frame(s), {shape[0]}x{shape[1]} px"]
         bits.append("Dark: " + ("yes" if "dark" in self._snapshot else "none"))
         bits.append(
             "Dark stack (for dark mask): "
             + ("yes" if "dark_stack" in self._snapshot else "none")
         )
         bits.append("Mask: " + ("yes" if "mask" in self._snapshot else "none"))
-        summary = QtWidgets.QLabel("\n".join(bits))
-        summary.setWordWrap(True)
+        return "\n".join(bits)
+
+    def _build_source_summary(self, layout):
         box = QtWidgets.QGroupBox("Captured from Data Viewer")
         v = QtWidgets.QVBoxLayout(box)
-        v.addWidget(summary)
+        self._source_summary_lbl = QtWidgets.QLabel(self._source_summary_text())
+        self._source_summary_lbl.setWordWrap(True)
+        v.addWidget(self._source_summary_lbl)
+        self.refresh_source_btn = QtWidgets.QPushButton("Refresh from Data Viewer")
+        self.refresh_source_btn.setToolTip(
+            "Ask the main MIDAS GUI for its current buffer/loaded data, "
+            "dark and mask, and reload this window with it."
+        )
+        self.refresh_source_btn.clicked.connect(self._on_refresh_source)
+        v.addWidget(self.refresh_source_btn)
         layout.addWidget(box)
 
     def _build_primary_fields(self, layout):
@@ -202,31 +222,41 @@ class AutoAttenuationDialog(QtWidgets.QMainWindow):
         checkbox.toggled.connect(container.setVisible)
         return container
 
-    def _build_mask_checkboxes(self, layout):
-        box = QtWidgets.QGroupBox("Masking steps")
-        v = QtWidgets.QVBoxLayout(box)
-
+    def _apply_source_availability(self):
+        """Sync the dark/dark-mask/user-mask checkboxes to what
+        ``self._snapshot`` actually has — called at construction and again
+        after a successful refresh, since a refreshed snapshot's dark/mask
+        availability can differ from what the window opened with."""
         has_dark = "dark" in self._snapshot
         has_dark_stack = "dark_stack" in self._snapshot
         has_mask = "mask" in self._snapshot
 
-        # ── Dark subtraction (no nested params) ─────────────────────
-        self.chk_dark = QtWidgets.QCheckBox("Apply dark subtraction")
         self.chk_dark.setChecked(has_dark)
         self.chk_dark.setEnabled(has_dark)
+
+        self.chk_dark_mask.setChecked(has_dark_stack)
+        self.chk_dark_mask.setEnabled(has_dark_stack)
+        self.chk_dark_mask.setToolTip(
+            "" if has_dark_stack else
+            "Requires a dark source with multiple raw frames captured "
+            "(not just a single averaged dark)."
+        )
+
+        self.chk_user_mask.setChecked(has_mask)
+        self.chk_user_mask.setEnabled(has_mask)
+
+    def _build_mask_checkboxes(self, layout):
+        box = QtWidgets.QGroupBox("Masking steps")
+        v = QtWidgets.QVBoxLayout(box)
+
+        # ── Dark subtraction (no nested params) ─────────────────────
+        self.chk_dark = QtWidgets.QCheckBox("Apply dark subtraction")
         v.addWidget(self.chk_dark)
 
         # ── Dark-derived dead/hot pixel mask ─────────────────────────
         self.chk_dark_mask = QtWidgets.QCheckBox(
             "Dark-derived dead/hot pixel mask"
         )
-        self.chk_dark_mask.setChecked(has_dark_stack)
-        self.chk_dark_mask.setEnabled(has_dark_stack)
-        if not has_dark_stack:
-            self.chk_dark_mask.setToolTip(
-                "Requires a dark source with multiple raw frames captured "
-                "(not just a single averaged dark)."
-            )
         v.addWidget(self.chk_dark_mask)
 
         self.dark_nsigma_spin = QtWidgets.QSpinBox()
@@ -243,9 +273,8 @@ class AutoAttenuationDialog(QtWidgets.QMainWindow):
 
         # ── Data Viewer mask (no nested params) ──────────────────────
         self.chk_user_mask = QtWidgets.QCheckBox("Apply Data Viewer mask")
-        self.chk_user_mask.setChecked(has_mask)
-        self.chk_user_mask.setEnabled(has_mask)
         v.addWidget(self.chk_user_mask)
+        self._apply_source_availability()
 
         # ── Frozen-pixel mask ─────────────────────────────────────────
         self.chk_frozen = QtWidgets.QCheckBox("Frozen-pixel mask")
@@ -360,6 +389,62 @@ class AutoAttenuationDialog(QtWidgets.QMainWindow):
         if "energy_keV" in self._snapshot:
             self.energy_spin.setValue(self._snapshot["energy_keV"])
 
+    # ── refresh from Data Viewer ────────────────────────────────────────
+
+    def _on_refresh_source(self):
+        """Ask the main GUI (over refresh_server.AutoAttenuationRefreshServer)
+        to overwrite our snapshot file with whatever the Data Viewer
+        currently holds, then reload it. Only the captured data/dark/mask
+        summary and availability are refreshed — entered parameters
+        (energy, exposure, thresholds, ...) are left exactly as the user set
+        them."""
+        if not self._snapshot_path:
+            QtWidgets.QMessageBox.information(
+                self, "Auto Attenuation",
+                "This window has no snapshot file to refresh (opened directly, "
+                "not from the main GUI).")
+            return
+
+        sock = QtNetwork.QLocalSocket(self)
+        sock.connectToServer(self._refresh_server_name)
+        if not sock.waitForConnected(1500):
+            QtWidgets.QMessageBox.warning(
+                self, "Auto Attenuation",
+                "Could not reach the main MIDAS GUI — it may have been "
+                "closed. Source not refreshed.")
+            return
+
+        request = json.dumps({
+            "type": "refresh_request", "version": 1, "path": self._snapshot_path,
+        }).encode("utf-8")
+        sock.write(request)
+        sock.waitForBytesWritten(1500)
+        if not sock.waitForReadyRead(5000):
+            QtWidgets.QMessageBox.warning(
+                self, "Auto Attenuation",
+                "No response from the main GUI — source not refreshed.")
+            return
+        try:
+            resp = json.loads(bytes(sock.readAll()).decode("utf-8"))
+        except Exception:
+            QtWidgets.QMessageBox.warning(
+                self, "Auto Attenuation", "Bad response from the main GUI.")
+            return
+        finally:
+            sock.disconnectFromServer()
+
+        if not resp.get("ok"):
+            QtWidgets.QMessageBox.warning(
+                self, "Auto Attenuation",
+                resp.get("message") or "Refresh failed.")
+            return
+
+        from midas_gui.auto_attenuation.snapshot import load_snapshot
+        self._snapshot = load_snapshot(self._snapshot_path)
+        self._source_summary_lbl.setText(self._source_summary_text())
+        self._apply_source_availability()
+        self._append_log("Refreshed data source from the Data Viewer.")
+
     # ── run ──────────────────────────────────────────────────────────
 
     def _append_log(self, text):
@@ -436,3 +521,11 @@ class AutoAttenuationDialog(QtWidgets.QMainWindow):
     def _on_failed(self, message):
         self._append_log("ERROR:\n" + message)
         QtWidgets.QMessageBox.critical(self, "Auto Attenuation — error", message)
+
+    def closeEvent(self, event):
+        if self._snapshot_path:
+            try:
+                os.unlink(self._snapshot_path)
+            except OSError:
+                pass
+        super().closeEvent(event)
