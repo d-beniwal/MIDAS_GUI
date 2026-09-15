@@ -454,3 +454,37 @@ def test_clear_leaves_the_click_picked_radius_ring_alone(framed):
     card._sim_clear_btn.click()
     assert card._ring_items == []
     assert card._picked_r == 42.0 and card._pick_ring_item is not None
+
+
+# ── Manual color-scale survives frame navigation ─────────────────────
+
+def _load_frames(tab, n, size):
+    loader = tab._loader
+    loader._stack = np.zeros((n, size, size), dtype=np.float32)
+    loader._paths = None
+    loader._h5 = None
+    loader._nframes = n
+    loader._setup_navigator()
+    loader._set_frame(0)
+    tab._on_loader_data()
+
+
+def test_manual_levels_survive_next_prev_but_reset_on_a_new_load(tab):
+    """A manually-dragged color-scale window must stay put across
+    next/previous/slider frame navigation within the same stack, and reset
+    back to auto only when a genuinely new dataset is loaded (different
+    frame shape)."""
+    _load_frames(tab, 2, 16)
+    assert tab._viewer._manual_levels is None  # fresh load — auto levels
+
+    tab._viewer._manual_levels = (5.0, 95.0)
+    tab._loader._set_frame(1)
+    tab._on_loader_data()
+    assert tab._viewer._manual_levels == (5.0, 95.0)
+
+    tab._loader._set_frame(0)
+    tab._on_loader_data()
+    assert tab._viewer._manual_levels == (5.0, 95.0)
+
+    _load_frames(tab, 3, 32)  # a new dataset — different frame shape
+    assert tab._viewer._manual_levels is None

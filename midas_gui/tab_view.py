@@ -507,10 +507,9 @@ class DataViewerTab(QtWidgets.QWidget):
             self._loader.stats_panel.set_scope_enabled(True)
         fresh = (self._disp_shape != raw.shape)
         self._disp_shape = raw.shape
-        is_live = self._loader.is_live_frame_update()
         self._cur = self._viewer.set_raw_frame(
             self._loader.corrected(raw), self._im_trans_codes(),
-            autorange=fresh, reset_levels=not is_live)
+            autorange=fresh, reset_levels=fresh)
         if fresh:
             self._autofill_imask_max()
         if self._geom_card.bc_auto_enabled():
