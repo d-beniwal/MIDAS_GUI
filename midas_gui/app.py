@@ -370,6 +370,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._build_file_menu()
         self._build_menu()
+        self._build_tools_menu()
         self.statusBar().showMessage(
             "Tip: mask → calibrate → (refine) → batch integrate")
         self._project_lbl = QtWidgets.QLabel("Project: none")
@@ -1125,6 +1126,54 @@ class MainWindow(QtWidgets.QMainWindow):
         act_open.triggered.connect(self._open_config_folder)
         act_reload = m.addAction("Reload config")
         act_reload.triggered.connect(self._reload_config)
+
+    def _build_tools_menu(self):
+        """Tools menu: standalone utilities that operate on the current
+        session's data but run as their own process."""
+        m = self.menuBar().addMenu("&Tools")
+        act = m.addAction("Auto Attenuation…")
+        act.triggered.connect(self._open_auto_attenuation)
+
+    def _open_auto_attenuation(self):
+        """Snapshot the Data Viewer's buffer/dark/mask/geometry to a temp
+        file and launch the Auto Attenuation popup as a separate, detached
+        process (see midas_gui.auto_attenuation) — it only ever reads that
+        one snapshot, never the live GUI objects, so it can't be crashed by
+        or crash the main GUI, and survives the main GUI closing."""
+        loader = getattr(self._view_tab, "_loader", None)
+        if loader is None or loader.n_frames() == 0:
+            QtWidgets.QMessageBox.information(
+                self, "Auto Attenuation",
+                "Capture or load a buffer/stack in the Data Viewer first.")
+            return
+        try:
+            frames = loader.full_stack()
+            dark = loader.dark()
+            dark_stack = loader.dark_raw_stack()
+            mask = loader.composite_mask()
+            geometry = self._view_tab.get_geometry() or {}
+            wl = float(geometry.get("wavelength_A") or 0.0)
+            energy_keV = (C.HC_KEV_A / wl) if wl > 0 else None
+
+            import os
+            from midas_gui.auto_attenuation.snapshot import write_snapshot
+            fd, path = tempfile.mkstemp(suffix=".npz", prefix="midas_auto_att_")
+            os.close(fd)
+            write_snapshot(
+                path, frames=frames, dark=dark, dark_stack=dark_stack,
+                mask=mask, energy_keV=energy_keV, geometry=geometry,
+            )
+
+            args = ["-m", "midas_gui.auto_attenuation.app", "--snapshot", path]
+            if not QtCore.QProcess.startDetached(sys.executable, args):
+                QtWidgets.QMessageBox.critical(
+                    self, "Auto Attenuation",
+                    "Failed to launch the Auto Attenuation process.")
+        except Exception:
+            _log(f"Auto Attenuation launch failed:\n{traceback.format_exc()}")
+            QtWidgets.QMessageBox.critical(
+                self, "Auto Attenuation",
+                "Failed to launch Auto Attenuation — see log.")
 
     def _open_preferences(self):
         try:

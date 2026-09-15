@@ -3110,6 +3110,28 @@ class FieldSelector(QtWidgets.QGroupBox):
     def get_field(self):
         return self._field if self.isChecked() else None
 
+    def raw_stack(self):
+        """The raw, un-averaged (N, Y, X) frame stack this field was built
+        from, or ``None`` if the field isn't checked, has no backing
+        path (e.g. imported from a live buffer as a single average), or
+        fails to re-read. Used by Auto Attenuation to build a
+        dark-derived dead/hot-pixel mask, which needs per-pixel variance
+        across raw frames rather than the already-averaged field."""
+        if not self.isChecked():
+            return None
+        raw = self._raw_source()
+        if not raw:
+            return None
+        try:
+            from midas_gui.helpers import read_frame_range
+            stack = read_frame_range(
+                self._kind(), raw, self._dataset(),
+                self._start.value(), self._end.value(),
+            )
+        except Exception:
+            return None
+        return stack if stack.shape[0] >= 2 else None
+
     def note_frame_shape(self, frame_shape):
         """Flag inline if this field's shape doesn't match the current data
         frame — e.g. a dark/bright/background left over from reusing a
@@ -4967,6 +4989,11 @@ class DataLoaderPanel(QtWidgets.QWidget):
 
     def dark(self):
         return self._dark_sel.get_field()
+
+    def dark_raw_stack(self):
+        """Raw (un-averaged) multi-frame dark stack, or None — see
+        ``FieldSelector.raw_stack``."""
+        return self._dark_sel.raw_stack()
 
     def bright(self):
         return self._bright_sel.get_field()

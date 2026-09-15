@@ -456,6 +456,49 @@ def average_field(kind: str, path: str, dataset: str = "exchange/data",
     return arr
 
 
+def read_frame_range(kind: str, path: str, dataset: str = "exchange/data",
+                     idx_start: int = 0, idx_end: int = -1) -> np.ndarray:
+    """Read the raw (N, Y, X) frame stack over an index range, unaveraged.
+
+    Same ``kind``/index-range semantics as :func:`average_field` (which this
+    mirrors), for callers that need the individual frames rather than their
+    mean — e.g. a dead/hot-pixel mask built from per-pixel variance across a
+    dark stack.
+    """
+    def _slice(n: int) -> tuple:
+        s = max(0, int(idx_start))
+        e = n - 1 if idx_end is None or int(idx_end) < 0 else min(int(idx_end), n - 1)
+        return s, e
+
+    if kind == "hdf5":
+        import h5py
+        with h5py.File(str(path), "r") as f:
+            dset = f[dataset]
+            if dset.ndim >= 3:
+                s, e = _slice(dset.shape[0])
+                return np.asarray(dset[s:e + 1], dtype=np.float32)
+            return np.asarray(dset[...], dtype=np.float32)[None, ...]
+
+    if kind == "folder":
+        paths = _collect_frame_paths(path)
+        if not paths:
+            raise ValueError(f"No frames found for '{path}'")
+        s, e = _slice(len(paths))
+        frames = []
+        for p in paths[s:e + 1]:
+            a = _load_image(p).astype(np.float32)
+            a = a[0] if a.ndim == 3 else a       # guard multi-page file in a folder
+            frames.append(a)
+        return np.stack(frames, axis=0)
+
+    # single file
+    arr = _load_image(path).astype(np.float32)
+    if arr.ndim >= 3:
+        s, e = _slice(arr.shape[0])
+        return arr[s:e + 1]
+    return arr[None, ...]
+
+
 def apply_field_corrections(img: np.ndarray, *, dark=None, bright=None,
                             bright_mode: str = "divide", background=None,
                             clip_negative: bool = True) -> np.ndarray:

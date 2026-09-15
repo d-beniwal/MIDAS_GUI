@@ -173,6 +173,12 @@ Issues = "https://github.com/d-beniwal/MIDAS_GUI/issues"
 where = ["."]
 include = ["midas_gui*"]
 
+[tool.setuptools.package-data]
+# NIST XCOM Cu attenuation table used by midas_gui.auto_attenuation.nist_cu
+# (ported from pyAutoBeam; loaded via importlib.resources, so it must ship
+# as package data rather than just living on disk in the source tree).
+"midas_gui.auto_attenuation" = ["data/*.txt"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # basetemp keeps every tmp_path-based test's scratch output under the repo's

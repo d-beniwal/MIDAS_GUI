@@ -1,0 +1,38 @@
+"""Entry point for the Auto Attenuation popup process.
+
+Invoked as ``python -m midas_gui.auto_attenuation.app --snapshot <path>``
+by the main GUI (``midas_gui.app._open_auto_attenuation``). Builds its own
+``QApplication`` and window — a genuinely separate OS process from the
+main GUI, so it survives the main GUI closing and can't be brought down
+by a crash in it (or vice versa).
+"""
+
+import argparse
+import os
+import sys
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Auto Attenuation")
+    parser.add_argument("--snapshot", required=True,
+                        help="Path to a .npz snapshot written by the main GUI")
+    args = parser.parse_args(argv)
+
+    from midas_gui.auto_attenuation.snapshot import load_snapshot
+    snapshot = load_snapshot(args.snapshot)
+    try:
+        os.unlink(args.snapshot)
+    except OSError:
+        pass
+
+    from PyQt5 import QtWidgets
+    from midas_gui.auto_attenuation.dialog import AutoAttenuationDialog
+
+    app = QtWidgets.QApplication(sys.argv[:1])
+    win = AutoAttenuationDialog(snapshot)
+    win.show()
+    sys.exit(app.exec_())
+
+
+if __name__ == "__main__":
+    main()
