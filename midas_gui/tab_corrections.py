@@ -14,7 +14,8 @@ from PyQt5 import QtCore, QtWidgets
 import pyqtgraph as pg
 
 from midas_gui.helpers import (_load_image, _fspin, _twocol, _browse, is_h5,
-                               widgets_to_dict, apply_dict_to_widgets)
+                               widgets_to_dict, apply_dict_to_widgets,
+                               browse_start_dir, warn_if_path_missing)
 from midas_gui.constants import DEFAULT_NICKEL_FRAME0
 from midas_gui.widgets import LogPanel
 from midas_gui.dialogs import show_error
@@ -139,6 +140,7 @@ class CorrectionsTab(QtWidgets.QWidget):
         self._empty_chk = QtWidgets.QCheckBox("Empty subtraction")
         pf.addRow(self._empty_chk)
         self._empty_ed = QtWidgets.QLineEdit(); self._empty_ed.setPlaceholderText("empty-cell frame…")
+        warn_if_path_missing(self._empty_ed, self)
         pf.addRow("file:", _frow(self._empty_ed, self._browse_empty))
         self._empty_scale = _fspin(0.0, 1e9, 3, 1.0)
         pf.addRow("scale:", self._empty_scale)
@@ -169,8 +171,10 @@ class CorrectionsTab(QtWidgets.QWidget):
         gv = QtWidgets.QVBoxLayout(grp_gain); gv.setSpacing(4)
         gf2 = QtWidgets.QFormLayout(); gf2.setSpacing(4)
         self._gain_ref_ed = QtWidgets.QLineEdit(); self._gain_ref_ed.setPlaceholderText("Reference (clean) frame…")
+        warn_if_path_missing(self._gain_ref_ed, self)
         gf2.addRow("Ref frame:", _frow(self._gain_ref_ed, self._browse_gain_ref))
         self._gain_drift_ed = QtWidgets.QLineEdit(); self._gain_drift_ed.setPlaceholderText("Drifted frame…")
+        warn_if_path_missing(self._gain_drift_ed, self)
         gf2.addRow("Drift frame:", _frow(self._gain_drift_ed, self._browse_gain_drift))
         self._gain_nsteps = _fspin(1, 1_000_000, 0, 100); self._gain_nsteps.setSingleStep(10)
         self._gain_lr = _fspin(0.0, 1e6, 4, 0.02)
@@ -215,11 +219,13 @@ class CorrectionsTab(QtWidgets.QWidget):
         root.addWidget(right, stretch=1)
 
     def _browse_gain_ref(self):
-        p = _browse(self, "Open reference (clean) frame", "Images (*.tif *.tiff *.h5 *.hdf5);;All (*)")
+        p = _browse(self, "Open reference (clean) frame", "Images (*.tif *.tiff *.h5 *.hdf5);;All (*)",
+                    start_dir=browse_start_dir(self._gain_ref_ed.text()))
         if p: self._gain_ref_ed.setText(p); self._load_gain_ref()
 
     def _browse_gain_drift(self):
-        p = _browse(self, "Open drifted frame", "Images (*.tif *.tiff *.h5 *.hdf5);;All (*)")
+        p = _browse(self, "Open drifted frame", "Images (*.tif *.tiff *.h5 *.hdf5);;All (*)",
+                    start_dir=browse_start_dir(self._gain_drift_ed.text()))
         if p: self._gain_drift_ed.setText(p); self._load_gain_drift()
 
     def _load_gain_ref(self):
@@ -306,11 +312,13 @@ class CorrectionsTab(QtWidgets.QWidget):
         QtWidgets.QMessageBox.information(self, "Saved", f"Gain map saved:\n{path}")
 
     def _browse_img(self):
-        p = _browse(self, "Open frame", "Images (*.tif *.tiff *.h5 *.hdf5 *.ge*);;All (*)")
+        p = _browse(self, "Open frame", "Images (*.tif *.tiff *.h5 *.hdf5 *.ge*);;All (*)",
+                    start_dir=browse_start_dir(self._img_ed.text()))
         if p: self._img_ed.setText(p); self._load_img()
 
     def _browse_empty(self):
-        p = _browse(self, "Open empty-cell frame", "Images (*.tif *.tiff *.h5 *.hdf5);;All (*)")
+        p = _browse(self, "Open empty-cell frame", "Images (*.tif *.tiff *.h5 *.hdf5);;All (*)",
+                    start_dir=browse_start_dir(self._empty_ed.text()))
         if p: self._empty_ed.setText(p)
 
     def _load_img(self):

@@ -1358,46 +1358,18 @@ def _apply_ui_scale():
     """Set Qt's whole-application scale factor from the configured ui.ui_scale BEFORE
     the QApplication is created, so layout + fonts scale uniformly on HiDPI / 4K
     screens. Must run before any QApplication instance exists."""
-    import os
-    try:
-        scale = float(getattr(C, "DEFAULT_UI_SCALE", 1.0) or 1.0)
-    except Exception:
-        scale = 1.0
-    scale = min(4.0, max(0.5, scale))
+    from midas_gui import helpers
     # In-app setting is authoritative (overwrites any inherited value on restart).
-    os.environ["QT_SCALE_FACTOR"] = f"{scale:.4g}"
+    scale = helpers.apply_ui_scale()
     _log(f"UI scale (QT_SCALE_FACTOR) = {scale:.4g}")
 
 
 def main():
     _install_diagnostics()
     _apply_ui_scale()   # must precede QApplication construction
-    # Crisper icons/pixmaps at non-unit scales (attribute set before QApplication).
-    try:
-        QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
-    except Exception:
-        pass
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     app.setApplicationName("MIDAS GUI")
-    app.setStyle("Fusion")
-
-    pal = QtGui.QPalette()
-    for role, col in [
-        (QtGui.QPalette.Window,          S.BG),
-        (QtGui.QPalette.WindowText,      S.TEXT),
-        (QtGui.QPalette.Base,            S.INPUT_BG),
-        (QtGui.QPalette.AlternateBase,   "#e4e4e4"),
-        (QtGui.QPalette.Text,            S.INPUT_FG),
-        (QtGui.QPalette.Button,          "#444444"),
-        (QtGui.QPalette.ButtonText,      S.TEXT),
-        (QtGui.QPalette.Highlight,       S.ACCENT),
-        (QtGui.QPalette.HighlightedText, "#ffffff"),
-        (QtGui.QPalette.ToolTipBase,     "#2d2d30"),
-        (QtGui.QPalette.ToolTipText,     S.TEXT),
-    ]:
-        pal.setColor(role, QtGui.QColor(col))
-    app.setPalette(pal)
-    app.setStyleSheet(S.stylesheet(_CHECKMARK_SVG, _ARROW_UP_SVG, _ARROW_DOWN_SVG))
+    S.apply_theme(app, _CHECKMARK_SVG, _ARROW_UP_SVG, _ARROW_DOWN_SVG)
 
     win = MainWindow()
     win.show()

@@ -25,7 +25,7 @@ from midas_gui.helpers import (
     make_kedge_label, make_pixel_label, ring_xy_corrected, distortion_rho_d_um,
     ring_on_image_mask, refresh_combo_items,
     widgets_to_dict, apply_dict_to_widgets, im_trans_codes_from_checkboxes,
-    paramstest_pairs, parse_dspacing_text)
+    paramstest_pairs, parse_dspacing_text, browse_start_dir, warn_if_path_missing)
 from midas_gui.widgets import (
     PickableImageViewer, ProfileViewer, LogPanel, DataLoaderPanel, CakeViewer,
     RingResidualViewer, OriginToolButton, build_lab_frame_axes_items,
@@ -640,8 +640,10 @@ class CalibrationTab(QtWidgets.QWidget):
 
         self._out_ed = QtWidgets.QLineEdit(); self._out_ed.setPlaceholderText("Output dir…")
         self._out_ed.setMaximumWidth(238)   # ~25% narrower than the default rendered width
+        warn_if_path_missing(self._out_ed, self, is_output_dir=True)
         bou = _br(); bou.clicked.connect(lambda: self._out_ed.setText(
-            QtWidgets.QFileDialog.getExistingDirectory(self, "Output dir") or ""))
+            QtWidgets.QFileDialog.getExistingDirectory(
+                self, "Output dir", browse_start_dir(self._out_ed.text())) or ""))
         outr = QtWidgets.QHBoxLayout(); outr.setSpacing(4); outr.addWidget(self._out_ed); outr.addWidget(bou)
         # A Form().row() stretches its field column to fill the footer's full
         # width, so the row grows/shrinks with the splitter instead of

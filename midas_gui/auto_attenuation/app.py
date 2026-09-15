@@ -20,10 +20,16 @@ def main(argv=None):
     from midas_gui.auto_attenuation.snapshot import load_snapshot
     snapshot = load_snapshot(args.snapshot)
 
+    from midas_gui import helpers
+    helpers.apply_ui_scale()   # must precede QApplication construction
+
     from PyQt5 import QtWidgets
+    from midas_gui import style as S
     from midas_gui.auto_attenuation.dialog import AutoAttenuationDialog
 
     app = QtWidgets.QApplication(sys.argv[:1])
+    S.apply_theme(app, helpers._make_checkmark_svg(),
+                  helpers._make_arrow_svg("up"), helpers._make_arrow_svg("down"))
     # The snapshot file is kept (not deleted here, unlike before) so the
     # window's "Refresh from Data Viewer" can ask the main GUI to overwrite
     # it in place — see refresh_server.py. AutoAttenuationDialog removes it

@@ -286,6 +286,31 @@ def test_dialog_prefills_energy_and_toggles_advanced(app):
     dlg.close()
 
 
+def test_log_uses_the_apps_shared_px_based_monospace_font(app):
+    # Regression: the log panel used to set an explicit QFont("Menlo") with no
+    # pixel size, which Qt renders at the *system* point size and then
+    # double-scales through QT_SCALE_FACTOR — the same trap style.font_px()
+    # exists to avoid (see style.py's module docstring comment).
+    from midas_gui import style as S
+    from midas_gui.auto_attenuation.dialog import AutoAttenuationDialog
+
+    dlg = AutoAttenuationDialog(_make_snapshot())
+    assert dlg.log.font().pixelSize() == S.BASE_FONT_PX
+    dlg.close()
+
+
+def test_apply_theme_gives_the_window_a_pixel_sized_stylesheet(app):
+    # Regression: main.py never applied the main GUI's palette/QSS to this
+    # window's QApplication, so every widget fell back to the OS/Fusion
+    # default *point*-sized font — which QT_SCALE_FACTOR (inherited from the
+    # main GUI's environment) then scales a second time, reading as "huge"
+    # on a 4K/HiDPI display.
+    from midas_gui import helpers, style as S
+
+    S.apply_theme(app, helpers._make_checkmark_svg())
+    assert f"font-size: {S.BASE_FONT_PX}px" in app.styleSheet()
+
+
 def test_dialog_run_blocks_without_saturation_intensity(app, monkeypatch):
     from midas_gui.auto_attenuation.dialog import AutoAttenuationDialog
     from PyQt5 import QtWidgets

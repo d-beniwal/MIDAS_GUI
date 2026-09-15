@@ -29,6 +29,8 @@ from typing import Optional
 import numpy as np
 from PyQt5 import QtCore, QtWidgets
 
+from midas_gui.helpers import browse_start_dir, warn_if_path_missing
+
 import matplotlib
 matplotlib.use("Qt5Agg")
 import matplotlib.cm  # noqa: E402
@@ -237,6 +239,7 @@ class PeakFitPanel(QtWidgets.QWidget):
         self._csv_ed.setPlaceholderText("GSAS-2 sequential peak-fit CSV…")
         self._csv_ed.editingFinished.connect(
             lambda: self._catalog.set_peak_fit_csv(self._csv_ed.text().strip()))
+        warn_if_path_missing(self._csv_ed, self)
         csv_browse = QtWidgets.QPushButton("Browse for peak-fit CSV…")
         csv_browse.clicked.connect(self._browse_csv)
         src.addWidget(self._csv_ed, 1)
@@ -249,6 +252,7 @@ class PeakFitPanel(QtWidgets.QWidget):
             "Primary HDF5 (samX/samY) — optional, for Real-space view…")
         self._primary_ed.editingFinished.connect(
             lambda: self._catalog.set_primary_source(self._primary_ed.text().strip()))
+        warn_if_path_missing(self._primary_ed, self)
         primary_browse = QtWidgets.QPushButton("Browse for primary source…")
         primary_browse.clicked.connect(self._browse_primary)
         src2.addWidget(self._primary_ed, 1)
@@ -306,14 +310,16 @@ class PeakFitPanel(QtWidgets.QWidget):
 
     def _browse_csv(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Open peak-fit CSV", "", "CSV (*.csv);;All (*)")
+            self, "Open peak-fit CSV", browse_start_dir(self._csv_ed.text()),
+            "CSV (*.csv);;All (*)")
         if path:
             self._csv_ed.setText(path)
             self._catalog.set_peak_fit_csv(path)
 
     def _browse_primary(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Open primary source", "", "HDF5 (*.h5 *.hdf5 *.nxs);;All (*)")
+            self, "Open primary source", browse_start_dir(self._primary_ed.text()),
+            "HDF5 (*.h5 *.hdf5 *.nxs);;All (*)")
         if path:
             self._primary_ed.setText(path)
             self._catalog.set_primary_source(path)

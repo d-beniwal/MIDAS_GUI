@@ -47,7 +47,8 @@ from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollDoubleSpinBox, _fspin,
                                _load_image, _collect_frame_paths, apply_field_corrections,
                                new_temp_h5_path, save_stack_h5, detect_geometry_from_path,
                                source_kind, display_text_for_paths, _apply_im_trans,
-                               is_dark_like_name)
+                               is_dark_like_name, warn_if_path_missing,
+                               path_is_missing)
 from midas_gui import style as S
 
 
@@ -2799,6 +2800,7 @@ class FieldSelector(QtWidgets.QGroupBox):
         self._path_ed.setPlaceholderText("file / folder / .h5")
         self._path_ed.textChanged.connect(self._on_path_changed)
         self._path_ed.editingFinished.connect(self._update_frame_limit)
+        warn_if_path_missing(self._path_ed, self)
         browse = QtWidgets.QToolButton()
         browse.setText("⋯"); browse.setFixedWidth(28)
         browse.setPopupMode(QtWidgets.QToolButton.InstantPopup)
@@ -3814,7 +3816,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._path_ed = QtWidgets.QLineEdit()
         self._path_ed.setPlaceholderText("file / folder / .h5")
         self._path_ed.textChanged.connect(self._on_path_changed)
-        self._path_ed.returnPressed.connect(self._load)
+        self._path_ed.returnPressed.connect(self._on_return_pressed)
         browse = QtWidgets.QToolButton(); browse.setText("⋯"); browse.setFixedWidth(28)
         browse.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         menu = QtWidgets.QMenu(browse)
@@ -4256,6 +4258,18 @@ class DataLoaderPanel(QtWidgets.QWidget):
                 os.unlink(old)
             except OSError:
                 pass
+
+    def _on_return_pressed(self):
+        """Enter in the path field: warn (and stop) on a path that doesn't
+        exist, rather than letting ``_load()`` attempt it and surface a raw
+        traceback dialog. An explicit multi-file/stem pick's field text is a
+        synthetic display string, not a literal path — nothing to check
+        there. Only the Enter keypress is gated; ``_load()`` itself is
+        called from many other places (Browse, Reload, dataset combo, …)
+        that shouldn't re-run this check."""
+        if not self._explicit_paths and path_is_missing(self._path_ed, self):
+            return
+        self._load()
 
     def _load(self):
         from pathlib import Path

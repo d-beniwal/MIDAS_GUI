@@ -54,6 +54,86 @@ def _make_arrow_svg(direction: str = "down", color: str = "#333333") -> str:
     return f.name.replace("\\", "/")
 
 
+def apply_ui_scale() -> float:
+    """Set QT_SCALE_FACTOR from the configured ``ui.ui_scale`` and enable crisp
+    HiDPI pixmaps. Must run before any QApplication instance exists (Qt only
+    reads QT_SCALE_FACTOR / the AA_UseHighDpiPixmaps attribute at that point).
+
+    Shared by ``app.main()`` and ``auto_attenuation.app.main()`` so a
+    standalone window scales identically to the main GUI at any interface
+    scale. Returns the clamped scale actually applied.
+    """
+    from midas_gui import constants as C
+    try:
+        scale = float(getattr(C, "DEFAULT_UI_SCALE", 1.0) or 1.0)
+    except Exception:
+        scale = 1.0
+    scale = min(4.0, max(0.5, scale))
+    _os.environ["QT_SCALE_FACTOR"] = f"{scale:.4g}"
+    try:
+        QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
+    except Exception:
+        pass
+    return scale
+
+
+def browse_start_dir(path_text: str, fallback: str = "") -> str:
+    """Directory to seed a Browse dialog at, given a path field's current text.
+
+    Returns the typed path itself if it's an existing directory, its parent
+    if that exists, else *fallback*.
+    """
+    text = (path_text or "").strip()
+    if text:
+        p = Path(text)
+        if p.is_dir():
+            return str(p)
+        if p.parent.exists():
+            return str(p.parent)
+    return fallback
+
+
+def path_is_missing(line_edit: QtWidgets.QLineEdit, parent: QtWidgets.QWidget, *,
+                     is_output_dir: bool = False) -> bool:
+    """Check the field's current text and pop up a dialog if it's a
+    non-empty path that doesn't exist on disk; returns whether it popped one.
+
+    Informational ("will be created when you run") for ``is_output_dir=True``,
+    a "Not found" warning otherwise. Empty text never triggers a popup.
+    Use this directly (as an early-return guard) inside a field's own
+    ``returnPressed``/``editingFinished`` handler when that handler already
+    acts on the path — e.g. loading it — so a missing path shows this one
+    friendly message instead of *also* whatever error the load raises. For a
+    field with no such handler, connect ``warn_if_path_missing`` instead.
+    """
+    text = line_edit.text().strip()
+    if not text or Path(text).exists():
+        return False
+    if is_output_dir:
+        QtWidgets.QMessageBox.information(
+            parent, "Output folder",
+            f"This folder does not exist yet:\n\n{text}\n\n"
+            "It will be created when you run.")
+    else:
+        QtWidgets.QMessageBox.warning(
+            parent, "Not found", f"Path not found:\n\n{text}")
+    return True
+
+
+def warn_if_path_missing(line_edit: QtWidgets.QLineEdit,
+                          parent: QtWidgets.QWidget, *,
+                          is_output_dir: bool = False) -> None:
+    """Connect ``line_edit.returnPressed`` to a missing-path check
+    (``path_is_missing``). Purely additive — safe to call alongside any
+    handler the field already has, since Qt fires every connected slot; use
+    this for a field whose existing handler (if any) doesn't itself act on
+    the path (e.g. it only clamps a spinbox range), so there's no risk of a
+    second, less friendly error dialog stacking on top of this one.
+    """
+    line_edit.returnPressed.connect(
+        lambda: path_is_missing(line_edit, parent, is_output_dir=is_output_dir))
+
+
 # ── Image IO ──────────────────────────────────────────────────────────────────
 
 def _load_image(path: str | Path, data_loc: str = "exchange/data",
@@ -2199,6 +2279,6 @@ def _sep():
     return f
 
 
-def _browse(parent, caption, filt) -> str:
-    p, _ = QtWidgets.QFileDialog.getOpenFileName(parent, caption, "", filt)
+def _browse(parent, caption, filt, start_dir: str = "") -> str:
+    p, _ = QtWidgets.QFileDialog.getOpenFileName(parent, caption, start_dir, filt)
     return p

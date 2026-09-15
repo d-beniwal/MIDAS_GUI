@@ -11,18 +11,9 @@ import traceback
 
 from PyQt5 import QtCore, QtNetwork, QtWidgets
 
+from midas_gui import style as S
 from midas_gui.auto_attenuation import analysis, refresh_server, saturation
 from midas_gui.auto_attenuation.attenuator_table import DEFAULT_POSITION_THICKNESS_MM
-
-
-def _monospace_font():
-    try:
-        from PyQt5 import QtGui
-        f = QtGui.QFont("Menlo")
-        f.setStyleHint(QtGui.QFont.Monospace)
-        return f
-    except Exception:
-        return None
 
 
 class _AnalysisWorker(QtCore.QThread):
@@ -95,6 +86,10 @@ class AutoAttenuationDialog(QtWidgets.QMainWindow):
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         outer = QtWidgets.QHBoxLayout(central)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        outer.addWidget(splitter)
 
         left = QtWidgets.QWidget()
         left_layout = QtWidgets.QVBoxLayout(left)
@@ -107,8 +102,7 @@ class AutoAttenuationDialog(QtWidgets.QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        scroll.setMaximumWidth(440)
-        outer.addWidget(scroll)
+        splitter.addWidget(scroll)
 
         self._build_source_summary(left_layout)
         self._build_primary_fields(left_layout)
@@ -123,10 +117,12 @@ class AutoAttenuationDialog(QtWidgets.QMainWindow):
         self.log = QtWidgets.QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
-        font = _monospace_font()
-        if font is not None:
-            self.log.setFont(font)
-        outer.addWidget(self.log, 1)
+        self.log.setFont(S.font_px(mono=True))
+        splitter.addWidget(self.log)
+
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([440, 540])
 
         self._prefill_from_snapshot()
 

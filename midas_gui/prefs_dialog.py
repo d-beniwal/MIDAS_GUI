@@ -15,6 +15,7 @@ from PyQt5 import QtWidgets
 
 from midas_gui import settings
 from midas_gui import constants as C
+from midas_gui.helpers import browse_start_dir, warn_if_path_missing
 
 _PATH_ROWS = [
     ("calibrant_tif", "Calibrant TIFF:", "file"),
@@ -189,6 +190,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         self._paths = {}
         for key, label, kind in _PATH_ROWS:
             ed = QtWidgets.QLineEdit(); self._paths[key] = ed
+            warn_if_path_missing(ed, self)
             b = QtWidgets.QPushButton("…"); b.setFixedWidth(28)
             b.clicked.connect(lambda _=0, e=ed, k=kind: self._browse_path(e, k))
             r = QtWidgets.QHBoxLayout(); r.setSpacing(4); r.addWidget(ed); r.addWidget(b)
@@ -515,10 +517,11 @@ class PreferencesDialog(QtWidgets.QDialog):
 
     # ── actions ────────────────────────────────────────────────────────
     def _browse_path(self, edit, kind):
+        start = browse_start_dir(edit.text())
         if kind == "dir":
-            p = QtWidgets.QFileDialog.getExistingDirectory(self, "Select folder")
+            p = QtWidgets.QFileDialog.getExistingDirectory(self, "Select folder", start)
         else:
-            p, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select file")
+            p, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select file", start)
         if p:
             edit.setText(p)
 

@@ -391,3 +391,75 @@ def test_write_all_profiles_skips_2d_csv(tmp_path):
         lsd=200000.0, px=200.0, wl=0.2)
     assert paths == []
     assert not any(tmp_path.iterdir())
+
+
+# ── Enter-to-validate on the path fields ─────────────────────────────────
+
+def test_data_field_enter_on_a_missing_path_warns_instead_of_loading(monkeypatch, tmp_path):
+    # Regression: pressing Enter on a typo'd path used to fall straight
+    # into _load()'s tifffile/h5py attempt and surface a raw traceback
+    # dialog. It should now show one friendly "Not found" warning and never
+    # reach _load() at all.
+    from PyQt5 import QtWidgets
+    W, _app = _make_app_and_module()
+
+    calls = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
+                         lambda *a, **k: calls.append(a))
+
+    panel = W.DataLoaderPanel(mode="single")
+    missing = tmp_path / "nope.h5"
+    panel._path_ed.setText(str(missing))
+    panel._path_ed.returnPressed.emit()
+    assert len(calls) == 1
+    assert str(missing) in calls[0][-1]
+    assert panel._nframes == 0   # _load() never ran
+
+
+def test_data_field_enter_on_an_existing_path_loads_normally(tmp_path):
+    import tifffile
+    W, _app = _make_app_and_module()
+
+    path = tmp_path / "frame.tif"
+    tifffile.imwrite(str(path), np.zeros((4, 4), dtype=np.float32))
+
+    panel = W.DataLoaderPanel(mode="single")
+    panel._path_ed.setText(str(path))
+    panel._path_ed.returnPressed.emit()
+    assert panel._nframes == 1
+
+
+def test_dark_field_enter_on_a_missing_path_warns(monkeypatch, tmp_path):
+    from PyQt5 import QtWidgets
+    W, _app = _make_app_and_module()
+
+    calls = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
+                         lambda *a, **k: calls.append(a))
+
+    panel = W.DataLoaderPanel(mode="single")
+    panel._dark_sel.setChecked(True)
+    panel._dark_sel._path_ed.setText(str(tmp_path / "nope.h5"))
+    panel._dark_sel._path_ed.returnPressed.emit()
+    assert len(calls) == 1
+
+
+# ── Browse dialog starts at the typed path ───────────────────────────────
+
+def test_data_field_browse_starts_at_the_typed_directory(monkeypatch, tmp_path):
+    W, _app = _make_app_and_module()
+
+    seen = {}
+
+    class _FakeDialog:
+        def __init__(self, parent=None, *, title="", modes=(), start_dir=""):
+            seen["start_dir"] = start_dir
+        def exec_(self):
+            from PyQt5 import QtWidgets
+            return QtWidgets.QDialog.Rejected
+    monkeypatch.setattr(W, "BrowseFilesDialog", _FakeDialog)
+
+    panel = W.DataLoaderPanel(mode="single")
+    panel._path_ed.setText(str(tmp_path))
+    panel._open_browse_dialog()
+    assert seen["start_dir"] == str(tmp_path)

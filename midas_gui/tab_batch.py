@@ -27,7 +27,8 @@ from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_
                                rmax_corner_px, rmax_edge_px, draw_polar_bin_overlay,
                                _NoScrollSpinBox, _NoScrollComboBox,
                                widgets_to_dict, apply_dict_to_widgets,
-                               check_output_dir_writable)
+                               check_output_dir_writable,
+                               browse_start_dir, warn_if_path_missing)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, DataLoaderPanel, OutputFormatSelector,
                                ImageViewer, OriginToolButton, build_lab_frame_axes_items,
@@ -907,9 +908,11 @@ class BatchTab(QtWidgets.QWidget):
         # ── Output ──
         out = S.make_card("Output")
         self._out_ed = QtWidgets.QLineEdit(); self._out_ed.setPlaceholderText("Output directory…")
+        warn_if_path_missing(self._out_ed, self, is_output_dir=True)
         orow = QtWidgets.QHBoxLayout(); orow.setSpacing(4); orow.addWidget(self._out_ed, 1)
         bou = _br(); bou.clicked.connect(lambda: self._out_ed.setText(
-            QtWidgets.QFileDialog.getExistingDirectory(self, "Output directory") or "")); orow.addWidget(bou)
+            QtWidgets.QFileDialog.getExistingDirectory(
+                self, "Output directory", browse_start_dir(self._out_ed.text())) or "")); orow.addWidget(bou)
         self._suggest_out_btn = QtWidgets.QPushButton("Suggest")
         self._suggest_out_btn.setToolTip(
             "Fill in <outroot>/<expid>_bc/<file-root>/<detector>/, matching "

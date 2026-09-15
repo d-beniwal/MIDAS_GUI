@@ -13,7 +13,8 @@ import numpy as np
 from PyQt5 import QtCore, QtWidgets
 
 from midas_gui import style as S
-from midas_gui.helpers import widgets_to_dict, apply_dict_to_widgets
+from midas_gui.helpers import (widgets_to_dict, apply_dict_to_widgets,
+                               browse_start_dir, warn_if_path_missing)
 from midas_gui.dialogs import show_error
 
 
@@ -70,10 +71,12 @@ class ExportTab(QtWidgets.QWidget):
             ef.addWidget(c)
         out_row = QtWidgets.QHBoxLayout(); out_row.setSpacing(3)
         self._out_ed = QtWidgets.QLineEdit(); self._out_ed.setPlaceholderText("Output directory…")
+        warn_if_path_missing(self._out_ed, self, is_output_dir=True)
         out_row.addWidget(self._out_ed)
         b = QtWidgets.QPushButton("…"); b.setFixedWidth(28)
         b.clicked.connect(lambda: self._out_ed.setText(
-            QtWidgets.QFileDialog.getExistingDirectory(self, "Output directory") or ""))
+            QtWidgets.QFileDialog.getExistingDirectory(
+                self, "Output directory", browse_start_dir(self._out_ed.text())) or ""))
         out_row.addWidget(b)
         ef.addLayout(out_row)
         self._export_btn = S.primary_btn("Export all checked")

@@ -40,7 +40,8 @@ from midas_gui.dialogs import AddSamplesDialog, show_error
 from midas_gui.helpers import (_NoScrollComboBox, _NoScrollSpinBox, _fspin,
                                _build_spec, check_output_dir_writable,
                                list_h5_datasets, resolve_calibration_fields,
-                               rmax_corner_px, rmax_edge_px, spec_from_geometry_file)
+                               rmax_corner_px, rmax_edge_px, spec_from_geometry_file,
+                               browse_start_dir, warn_if_path_missing)
 from midas_gui.queue_runner import RunItem, SampleRunScheduler, default_max_concurrent
 from midas_gui.widgets import LogPanel, OutputFormatSelector
 
@@ -102,6 +103,7 @@ class CorrectionsDialog(QtWidgets.QDialog):
             h.setContentsMargins(0, 0, 0, 0); h.setSpacing(4)
             ed = QtWidgets.QLineEdit(getattr(node, key) or "")
             ed.setPlaceholderText("file or folder — averaged before use")
+            warn_if_path_missing(ed, self)
             btn = QtWidgets.QToolButton(); btn.setText("…")
             btn.clicked.connect(lambda _c=False, e=ed: self._browse(e))
             h.addWidget(ed, 1); h.addWidget(btn)
@@ -128,9 +130,10 @@ class CorrectionsDialog(QtWidgets.QDialog):
         v.addWidget(btns)
 
     def _browse(self, edit):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select frame file")
+        start = browse_start_dir(edit.text())
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select frame file", start)
         if not path:
-            path = QtWidgets.QFileDialog.getExistingDirectory(self, "Select folder")
+            path = QtWidgets.QFileDialog.getExistingDirectory(self, "Select folder", start)
         if path:
             edit.setText(path)
 
@@ -184,6 +187,7 @@ class CalibrationDialog(QtWidgets.QDialog):
         self._file_ed = QtWidgets.QLineEdit(node.file_path or "")
         self._file_ed.setPlaceholderText("paramstest .txt / .poni / .json")
         self._file_ed.textEdited.connect(lambda *_: self._from_file.setChecked(True))
+        warn_if_path_missing(self._file_ed, self)
         b = QtWidgets.QToolButton(); b.setText("…")
         b.clicked.connect(self._browse_calib)
         h.addWidget(self._file_ed, 1); h.addWidget(b)
@@ -195,6 +199,7 @@ class CalibrationDialog(QtWidgets.QDialog):
         mh.addWidget(QtWidgets.QLabel("Mask:"))
         self._mask_ed = QtWidgets.QLineEdit(self._mask_path_of(node) or "")
         self._mask_ed.setPlaceholderText("optional — a mask file for this detector")
+        warn_if_path_missing(self._mask_ed, self)
         mb = QtWidgets.QToolButton(); mb.setText("…")
         mb.clicked.connect(self._browse_mask)
         mh.addWidget(self._mask_ed, 1); mh.addWidget(mb)
@@ -215,13 +220,15 @@ class CalibrationDialog(QtWidgets.QDialog):
 
     def _browse_calib(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Select calibration", "", "Geometry (*.json *.txt *.poni);;All files (*)")
+            self, "Select calibration", browse_start_dir(self._file_ed.text()),
+            "Geometry (*.json *.txt *.poni);;All files (*)")
         if path:
             self._file_ed.setText(path)
             self._from_file.setChecked(True)
 
     def _browse_mask(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select mask")
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Select mask", browse_start_dir(self._mask_ed.text()))
         if path:
             self._mask_ed.setText(path)
 
@@ -387,9 +394,11 @@ class BatchQueueTab(QtWidgets.QWidget):
             "Samples are mirrored relative to this folder. Left blank, it is "
             "the deepest folder every queued sample shares.")
         self._data_root.textChanged.connect(lambda *_: self._refresh_preview())
+        warn_if_path_missing(self._data_root, self)
         self._out_root = QtWidgets.QLineEdit()
         self._out_root.setPlaceholderText("where the results tree is written")
         self._out_root.textChanged.connect(lambda *_: self._refresh_preview())
+        warn_if_path_missing(self._out_root, self, is_output_dir=True)
         for label, ed, browse in (("Data root:", self._data_root, True),
                                   ("Output root:", self._out_root, True)):
             w = QtWidgets.QWidget()
@@ -512,7 +521,8 @@ class BatchQueueTab(QtWidgets.QWidget):
         self._r_max.setEnabled(self._r_max_mode.currentData() == "manual")
 
     def _browse_dir(self, edit):
-        path = QtWidgets.QFileDialog.getExistingDirectory(self, "Select folder")
+        path = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Select folder", browse_start_dir(edit.text()))
         if path:
             edit.setText(path)
 

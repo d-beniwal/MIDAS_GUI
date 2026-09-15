@@ -19,7 +19,7 @@ import pyqtgraph as pg
 
 from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollComboBox, hydra_siblings,
                          hydra_panel_index, is_h5, list_h5_datasets, source_kind,
-                         detect_geometry_from_path)
+                         detect_geometry_from_path, warn_if_path_missing)
 from midas_gui.workers import FieldAverageWorker, ProjectionWorker
 from midas_gui import hydra
 from midas_gui import style as S
@@ -166,6 +166,7 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
         self._path_ed = QtWidgets.QLineEdit()
         self._path_ed.setPlaceholderText("Any one ge1-ge4 panel file…")
         self._path_ed.editingFinished.connect(lambda: self._set_path(self._path_ed.text().strip()))
+        warn_if_path_missing(self._path_ed, self)
         browse = QtWidgets.QToolButton()
         browse.setText("⋯"); browse.setFixedWidth(28)
         browse.setPopupMode(QtWidgets.QToolButton.InstantPopup)
@@ -545,6 +546,7 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         self._path_ed.setPlaceholderText("Any one ge1-ge4 panel file…")
         self._path_ed.returnPressed.connect(
             lambda: self._set_path(self._path_ed.text().strip()))
+        warn_if_path_missing(self._path_ed, self)
         row = QtWidgets.QHBoxLayout(); row.setSpacing(4)
         row.addWidget(self._path_ed)
         browse = QtWidgets.QToolButton(); browse.setText("⋯"); browse.setFixedWidth(28)
@@ -689,7 +691,8 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         # Single file only — this panel's frame index comes from one anchor
         # file's own internal frame count (hydra.n_frames_in), not separate
         # per-frame files, so folder/multi/stem selection doesn't apply.
-        dlg = BrowseFilesDialog(self, title="Select Hydra data", modes=("file",))
+        dlg = BrowseFilesDialog(self, title="Select Hydra data", modes=("file",),
+                                start_dir=self._path_ed.text().strip())
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return
         paths = dlg.paths()

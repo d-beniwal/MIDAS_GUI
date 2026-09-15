@@ -132,6 +132,52 @@ def test_hydra_field_selector_sibling_discovery_and_compute(app, tmp_path):
     assert sel._path_ed.text().strip() == ""  # no Data-path provider set here — nothing to prefill
 
 
+def test_hydra_field_selector_enter_on_a_missing_path_warns(app, monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
+                         lambda *a, **k: calls.append(a))
+
+    sel = HydraFieldSelector("Dark", default_dataset="exchange/data")
+    missing = tmp_path / "ge1" / "dark.ge1.h5"
+    sel._path_ed.setText(str(missing))
+    sel._path_ed.returnPressed.emit()
+    assert len(calls) == 1
+    assert str(missing) in calls[0][-1]
+
+
+def test_hydra_loader_panel_enter_on_a_missing_path_warns(app, monkeypatch, tmp_path):
+    from midas_gui.hydra_widgets import HydraLoaderPanel
+
+    calls = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
+                         lambda *a, **k: calls.append(a))
+
+    panel = HydraLoaderPanel()
+    missing = tmp_path / "ge1" / "data.ge1.h5"
+    panel._path_ed.setText(str(missing))
+    panel._path_ed.returnPressed.emit()
+    assert len(calls) == 1
+    assert str(missing) in calls[0][-1]
+
+
+def test_hydra_loader_panel_browse_starts_at_the_typed_directory(app, monkeypatch, tmp_path):
+    import midas_gui.hydra_widgets as HW
+
+    seen = {}
+
+    class _FakeDialog:
+        def __init__(self, parent=None, *, title="", modes=(), start_dir=""):
+            seen["start_dir"] = start_dir
+        def exec_(self):
+            return QtWidgets.QDialog.Rejected
+    monkeypatch.setattr(HW, "BrowseFilesDialog", _FakeDialog)
+
+    panel = HW.HydraLoaderPanel()
+    panel._path_ed.setText(str(tmp_path))
+    panel._open_browse_dialog()
+    assert seen["start_dir"] == str(tmp_path)
+
+
 def test_mode_ribbon_switches_pages(app):
     tab = DataViewerTab()
     assert tab._mode_ribbon.mode() == "single"

@@ -25,7 +25,8 @@ import pyqtgraph as pg
 
 from midas_gui.helpers import (_load_image, _fspin, _twocol, _browse, is_h5,
                                _NoScrollComboBox, make_kedge_label,
-                               widgets_to_dict, apply_dict_to_widgets)
+                               widgets_to_dict, apply_dict_to_widgets,
+                               browse_start_dir, warn_if_path_missing)
 from midas_gui.constants import (DEFAULT_NICKEL_FRAME0, DEFAULT_PDF_IQ_FILE,
                                  DEFAULT_PDF_MASK, DEFAULT_PDF_EMPTY_IQ,
                                  DEFAULT_PDF_CIF)
@@ -289,6 +290,7 @@ class PDFTab(QtWidgets.QWidget):
         self._mask_ed = QtWidgets.QLineEdit("")
         self._mask_ed.setPlaceholderText("Optional mask .tif (nonzero = masked)…")
         self._mask_ed.returnPressed.connect(self._load_mask)
+        warn_if_path_missing(self._mask_ed, self)
         gf.addRow("Mask:", self._frow(self._mask_ed, self._browse_mask))
         lv.addWidget(self._grp_img)
 
@@ -299,6 +301,7 @@ class PDFTab(QtWidgets.QWidget):
             DEFAULT_PDF_IQ_FILE if Path(DEFAULT_PDF_IQ_FILE).exists() else "")
         self._iq_ed.setPlaceholderText("Q,I,σ text/CSV (2- or 3-column)…")
         self._iq_ed.textChanged.connect(lambda _: self._update_run_enabled())
+        warn_if_path_missing(self._iq_ed, self)
         ff.addRow("File:", self._frow(self._iq_ed, self._browse_iq))
         lv.addWidget(self._grp_file)
 
@@ -328,6 +331,7 @@ class PDFTab(QtWidgets.QWidget):
         self._bg_iq_ed = QtWidgets.QLineEdit(
             DEFAULT_PDF_EMPTY_IQ if Path(DEFAULT_PDF_EMPTY_IQ).exists() else "")
         self._bg_iq_ed.setPlaceholderText("Empty-cell / container Q,I,σ file…")
+        warn_if_path_missing(self._bg_iq_ed, self)
         bgf.addRow("Empty I(Q):", self._frow(self._bg_iq_ed, self._browse_bg_iq))
         self._bg_mode = _NoScrollComboBox()
         self._bg_mode.addItem("Manual scale", "manual")
@@ -532,6 +536,7 @@ class PDFTab(QtWidgets.QWidget):
         self._crystal_source.currentIndexChanged.connect(self._on_crystal_source_changed)
         crf.addRow("Source:", self._crystal_source)
         self._cif_ed = QtWidgets.QLineEdit(DEFAULT_PDF_CIF if Path(DEFAULT_PDF_CIF).exists() else "")
+        warn_if_path_missing(self._cif_ed, self)
         crf.addRow("CIF file:", self._frow(self._cif_ed, self._browse_cif))
         lv.addWidget(grp_cr)
 
@@ -781,23 +786,28 @@ class PDFTab(QtWidgets.QWidget):
         self._run_btn.setEnabled(ok)
 
     def _browse_img(self):
-        p = _browse(self, "Open frame", "Images (*.tif *.tiff *.h5 *.hdf5 *.ge*);;All (*)")
+        p = _browse(self, "Open frame", "Images (*.tif *.tiff *.h5 *.hdf5 *.ge*);;All (*)",
+                    start_dir=browse_start_dir(self._img_ed.text()))
         if p: self._img_ed.setText(p); self._load_img()
 
     def _browse_iq(self):
-        p = _browse(self, "Open I(Q) file", "I(Q) (*.csv *.txt *.dat *.xy *.chi);;All (*)")
+        p = _browse(self, "Open I(Q) file", "I(Q) (*.csv *.txt *.dat *.xy *.chi);;All (*)",
+                    start_dir=browse_start_dir(self._iq_ed.text()))
         if p: self._iq_ed.setText(p)
 
     def _browse_mask(self):
-        p = _browse(self, "Open mask", "Mask (*.tif *.tiff);;All (*)")
+        p = _browse(self, "Open mask", "Mask (*.tif *.tiff);;All (*)",
+                    start_dir=browse_start_dir(self._mask_ed.text()))
         if p: self._mask_ed.setText(p); self._load_mask()
 
     def _browse_bg_iq(self):
-        p = _browse(self, "Open empty-cell I(Q) file", "I(Q) (*.csv *.txt *.dat *.xy *.chi);;All (*)")
+        p = _browse(self, "Open empty-cell I(Q) file", "I(Q) (*.csv *.txt *.dat *.xy *.chi);;All (*)",
+                    start_dir=browse_start_dir(self._bg_iq_ed.text()))
         if p: self._bg_iq_ed.setText(p)
 
     def _browse_cif(self):
-        p = _browse(self, "Open CIF file", "CIF (*.cif);;All (*)")
+        p = _browse(self, "Open CIF file", "CIF (*.cif);;All (*)",
+                    start_dir=browse_start_dir(self._cif_ed.text()))
         if p: self._cif_ed.setText(p)
 
     def _load_img(self):

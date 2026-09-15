@@ -36,7 +36,8 @@ from midas_gui.constants import (
 from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _NoScrollComboBox, make_kedge_label, make_pixel_label,
     _load_image, apply_field_corrections, average_field, source_kind,
-    widgets_to_dict, apply_dict_to_widgets, _predict_ring_radii, refresh_combo_items)
+    widgets_to_dict, apply_dict_to_widgets, _predict_ring_radii, refresh_combo_items,
+    browse_start_dir, warn_if_path_missing)
 from midas_gui.widgets import (PickableImageViewer, LogPanel, CakeViewer, _convert_radial,
                                OriginToolButton)
 from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar, HydraProfileViewer
@@ -325,9 +326,11 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._device = _NoScrollComboBox(); self._device.addItems(["cpu", "cuda"])
         av.addLayout(S.Form().row(("E-M iters:", self._n_iter), ("LM iters:", self._lm_iter)))
         self._out_ed = QtWidgets.QLineEdit(); self._out_ed.setPlaceholderText("Output dir…")
+        warn_if_path_missing(self._out_ed, self, is_output_dir=True)
         bou = QtWidgets.QPushButton("…"); bou.setFixedWidth(30)
         bou.clicked.connect(lambda: self._out_ed.setText(
-            QtWidgets.QFileDialog.getExistingDirectory(self, "Output dir") or ""))
+            QtWidgets.QFileDialog.getExistingDirectory(
+                self, "Output dir", browse_start_dir(self._out_ed.text())) or ""))
         outr = QtWidgets.QHBoxLayout(); outr.setSpacing(4); outr.addWidget(self._out_ed, 1); outr.addWidget(bou)
         av.addLayout(S.Form().row(("Device:", self._device)))
         av.addLayout(S.Form().row(("Output:", outr)))

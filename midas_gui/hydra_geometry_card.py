@@ -35,7 +35,8 @@ from midas_gui.helpers import (_fspin, _NoScrollSpinBox, _browse,
                          make_kedge_label, make_pixel_label, tilted_ring_xy,
                          write_poni, write_standalone_paramstest,
                          im_trans_codes_from_checkboxes, _apply_im_trans,
-                         parse_dspacing_text, ring_on_image_mask as _ring_on_image_mask)
+                         parse_dspacing_text, ring_on_image_mask as _ring_on_image_mask,
+                         browse_start_dir)
 from midas_gui.workers import build_integration_context, integrate_frame
 from midas_gui import style as S
 
@@ -1595,7 +1596,8 @@ class DetectorGeometryCard(QtWidgets.QWidget):
 
     def _browse_calib(self):
         p = _browse(self, "Open calibration file",
-                    "Calibration (*.json *.poni *.txt);;All (*)")
+                    "Calibration (*.json *.poni *.txt);;All (*)",
+                    start_dir=browse_start_dir(self._calib_ed.text()))
         if p:
             self._calib_ed.setText(p)
             self._load_calibration()

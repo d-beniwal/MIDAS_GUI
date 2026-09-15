@@ -35,7 +35,8 @@ from midas_gui.constants import (KERNELS, ERROR_MODELS,
 from midas_gui.helpers import (
     _fspin, _browse, _NoScrollComboBox, _NoScrollSpinBox,
     widgets_to_dict, apply_dict_to_widgets,
-    _load_image, rmax_corner_px, rmax_edge_px, draw_polar_bin_overlay)
+    _load_image, rmax_corner_px, rmax_edge_px, draw_polar_bin_overlay,
+    browse_start_dir, warn_if_path_missing)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, OutputFormatSelector, ImageViewer,
                                OriginToolButton)
@@ -227,10 +228,12 @@ class HydraBatchPage(QtWidgets.QWidget):
         # Output (shared base dir — each panel writes to its own ge{n}/ subfolder)
         out = S.make_card("Output  (shared — each panel writes to its own ge{n}/ subfolder)")
         self._out_ed = QtWidgets.QLineEdit(); self._out_ed.setPlaceholderText("Output directory…")
+        warn_if_path_missing(self._out_ed, self, is_output_dir=True)
         orow = QtWidgets.QHBoxLayout(); orow.setSpacing(4); orow.addWidget(self._out_ed, 1)
         bou = QtWidgets.QPushButton("…"); bou.setFixedWidth(30)
         bou.clicked.connect(lambda: self._out_ed.setText(
-            QtWidgets.QFileDialog.getExistingDirectory(self, "Output directory") or "")); orow.addWidget(bou)
+            QtWidgets.QFileDialog.getExistingDirectory(
+                self, "Output directory", browse_start_dir(self._out_ed.text())) or "")); orow.addWidget(bou)
         out.body.addLayout(S.Form().row(("Folder:", orow)))
         self._fmt = OutputFormatSelector()
         out.body.addWidget(self._fmt)

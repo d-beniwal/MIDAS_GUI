@@ -603,3 +603,144 @@ def test_apply_field_corrections_skips_mismatched_shape_instead_of_raising():
 
     out2 = apply_field_corrections(img, dark=matching_dark)
     assert np.allclose(out2, 9.0)   # matching-shape dark still applies normally
+
+
+# ── browse_start_dir / warn_if_path_missing ──────────────────────────────
+
+def test_browse_start_dir_existing_directory_is_used_directly(tmp_path):
+    from midas_gui.helpers import browse_start_dir
+
+    assert browse_start_dir(str(tmp_path)) == str(tmp_path)
+
+
+def test_browse_start_dir_existing_file_falls_back_to_its_parent(tmp_path):
+    from midas_gui.helpers import browse_start_dir
+
+    f = tmp_path / "data.h5"
+    f.write_text("x")
+    assert browse_start_dir(str(f)) == str(tmp_path)
+
+
+def test_browse_start_dir_missing_leaf_falls_back_to_existing_parent(tmp_path):
+    from midas_gui.helpers import browse_start_dir
+
+    assert browse_start_dir(str(tmp_path / "not_there.h5")) == str(tmp_path)
+
+
+def test_browse_start_dir_nothing_existing_returns_fallback(tmp_path):
+    from midas_gui.helpers import browse_start_dir
+
+    bogus = tmp_path / "nope" / "also_nope" / "x.h5"
+    assert browse_start_dir(str(bogus), fallback="/some/default") == "/some/default"
+
+
+def test_browse_start_dir_empty_text_returns_fallback():
+    from midas_gui.helpers import browse_start_dir
+
+    assert browse_start_dir("", fallback="/some/default") == "/some/default"
+    assert browse_start_dir("   ") == ""
+
+
+def test_warn_if_path_missing_ignores_empty_text(app, monkeypatch):
+    from PyQt5 import QtWidgets
+    from midas_gui.helpers import warn_if_path_missing
+
+    calls = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
+                         lambda *a, **k: calls.append(("warning", a)))
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information",
+                         lambda *a, **k: calls.append(("information", a)))
+
+    edit = QtWidgets.QLineEdit()
+    parent = QtWidgets.QWidget()
+    warn_if_path_missing(edit, parent)
+    edit.setText("")
+    edit.returnPressed.emit()
+    assert calls == []
+
+
+def test_warn_if_path_missing_says_nothing_for_an_existing_path(app, monkeypatch, tmp_path):
+    from PyQt5 import QtWidgets
+    from midas_gui.helpers import warn_if_path_missing
+
+    calls = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
+                         lambda *a, **k: calls.append(a))
+
+    edit = QtWidgets.QLineEdit(str(tmp_path))
+    parent = QtWidgets.QWidget()
+    warn_if_path_missing(edit, parent)
+    edit.returnPressed.emit()
+    assert calls == []
+
+
+def test_warn_if_path_missing_warns_for_an_input_field(app, monkeypatch, tmp_path):
+    from PyQt5 import QtWidgets
+    from midas_gui.helpers import warn_if_path_missing
+
+    calls = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
+                         lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information",
+                         lambda *a, **k: (_ for _ in ()).throw(
+                             AssertionError("should warn, not inform")))
+
+    missing = tmp_path / "nope.h5"
+    edit = QtWidgets.QLineEdit(str(missing))
+    parent = QtWidgets.QWidget()
+    warn_if_path_missing(edit, parent, is_output_dir=False)
+    edit.returnPressed.emit()
+    assert len(calls) == 1
+    assert str(missing) in calls[0][-1]
+
+
+def test_warn_if_path_missing_informs_for_an_output_dir(app, monkeypatch, tmp_path):
+    from PyQt5 import QtWidgets
+    from midas_gui.helpers import warn_if_path_missing
+
+    calls = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information",
+                         lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
+                         lambda *a, **k: (_ for _ in ()).throw(
+                             AssertionError("should inform, not warn")))
+
+    missing = tmp_path / "new_output_dir"
+    edit = QtWidgets.QLineEdit(str(missing))
+    parent = QtWidgets.QWidget()
+    warn_if_path_missing(edit, parent, is_output_dir=True)
+    edit.returnPressed.emit()
+    assert len(calls) == 1
+
+
+def test_warn_if_path_missing_does_not_shadow_an_existing_return_pressed_handler(app, monkeypatch, tmp_path):
+    from PyQt5 import QtWidgets
+    from midas_gui.helpers import warn_if_path_missing
+
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a, **k: None)
+
+    edit = QtWidgets.QLineEdit(str(tmp_path / "missing"))
+    seen = []
+    edit.returnPressed.connect(lambda: seen.append(True))
+    parent = QtWidgets.QWidget()
+    warn_if_path_missing(edit, parent)
+    edit.returnPressed.emit()
+    assert seen == [True]
+
+
+def test_path_is_missing_returns_a_guard_flag_for_a_handlers_own_return_pressed(app, monkeypatch, tmp_path):
+    # path_is_missing() is the building block a field with its own Enter
+    # handler (e.g. DataLoaderPanel._load) uses as an early-return guard, so
+    # a missing path shows only this one friendly dialog instead of stacking
+    # a second, less friendly error from the handler's own load attempt.
+    from PyQt5 import QtWidgets
+    from midas_gui.helpers import path_is_missing
+
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a, **k: None)
+    parent = QtWidgets.QWidget()
+
+    ok_edit = QtWidgets.QLineEdit(str(tmp_path))
+    assert path_is_missing(ok_edit, parent) is False
+
+    missing_edit = QtWidgets.QLineEdit(str(tmp_path / "missing"))
+    assert path_is_missing(missing_edit, parent) is True

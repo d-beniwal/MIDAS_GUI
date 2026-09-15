@@ -80,6 +80,33 @@ def axis_label_css(color: str, factor: float = 1.0) -> dict:
     return {"color": color, "font-size": f"{max(1, round(BASE_FONT_PX * float(factor)))}px"}
 
 
+def apply_theme(app: QtWidgets.QApplication, checkmark_svg: str,
+                 up_arrow_svg: str = "", down_arrow_svg: str = "") -> None:
+    """Apply the shared Fusion style, dark palette and QSS to *app*.
+
+    Shared by the main GUI and any standalone window (e.g. Auto Attenuation)
+    that should look — and scale with QT_SCALE_FACTOR — identically to it.
+    """
+    app.setStyle("Fusion")
+    pal = QtGui.QPalette()
+    for role, col in [
+        (QtGui.QPalette.Window,          BG),
+        (QtGui.QPalette.WindowText,      TEXT),
+        (QtGui.QPalette.Base,            INPUT_BG),
+        (QtGui.QPalette.AlternateBase,   "#e4e4e4"),
+        (QtGui.QPalette.Text,            INPUT_FG),
+        (QtGui.QPalette.Button,          "#444444"),
+        (QtGui.QPalette.ButtonText,      TEXT),
+        (QtGui.QPalette.Highlight,       ACCENT),
+        (QtGui.QPalette.HighlightedText, "#ffffff"),
+        (QtGui.QPalette.ToolTipBase,     "#2d2d30"),
+        (QtGui.QPalette.ToolTipText,     TEXT),
+    ]:
+        pal.setColor(role, QtGui.QColor(col))
+    app.setPalette(pal)
+    app.setStyleSheet(stylesheet(checkmark_svg, up_arrow_svg, down_arrow_svg))
+
+
 def stylesheet(checkmark_svg: str, up_arrow_svg: str = "", down_arrow_svg: str = "") -> str:
     """Return the full application QSS.
 
