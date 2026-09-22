@@ -5740,9 +5740,8 @@ class StackedProfileViewer(QtWidgets.QWidget):
             if fin.any():
                 xmins.append(float(xd[fin].min())); xmaxs.append(float(xd[fin].max()))
                 ymins.append(float(yd[fin].min())); ymaxs.append(float(yd[fin].max()))
-        if self._curves:
-            self._plot.autoRange()
         if xmins:
+            self._plot.autoRange()
             self._data_bounds = (min(xmins), max(xmaxs), min(ymins), max(ymaxs))
             self._apply_view_limits(*self._data_bounds)
 

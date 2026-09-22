@@ -524,6 +524,13 @@ class BatchTab(QtWidgets.QWidget):
         if r_axis is None or profiles is None or len(profiles) == 0:
             return
         profiles = np.asarray(profiles)
+        # Clear the views before re-deriving their axis context from this
+        # attempt's calibration — otherwise set_axis_context()'s _restack()
+        # re-plots whatever attempt/run was displayed previously under the
+        # new geometry (see _run()'s identical fix).
+        self._waterfall.reset(r_axis)
+        self._stack_view.reset(r_axis)
+        self._cake_stack_view.clear()
         try:
             spec = self._build_spec()
             axctx = (float(spec.Lsd), float(spec.pxY), float(spec.Wavelength))
@@ -536,10 +543,6 @@ class BatchTab(QtWidgets.QWidget):
         if profiles.ndim == 3:
             self._restore_cake_stack(meta, r_axis, profiles, frame_ids)
             profiles = self._collapse_cakes(profiles)
-        else:
-            self._cake_stack_view.clear()
-        self._waterfall.reset(r_axis)
-        self._stack_view.reset(r_axis)
         self._integrated_fids = set()
         for fid, prof in zip(frame_ids, profiles):
             self._waterfall.add_profile(prof)
@@ -1250,11 +1253,6 @@ class BatchTab(QtWidgets.QWidget):
                 "Bin type back to Radial."); return
         lsd, px, wl = float(spec.Lsd), float(spec.pxY), float(spec.Wavelength)
         _axctx = (lsd, px, wl, "Q" if q_cfg else "R")
-        self._stack_view.set_axis_context(*_axctx)
-        self._waterfall.set_axis_context(*_axctx)
-        # The cake's R axis is never Q-rebinned (multi-azimuth and Q-uniform
-        # are mutually exclusive, rejected above), so it takes no native unit.
-        self._cake_stack_view.set_axis_context(lsd, px, wl)
 
         # Dark / bright / background fields (from the loader)
         for sel in self._loader.has_pending_fields():
@@ -1273,7 +1271,19 @@ class BatchTab(QtWidgets.QWidget):
         self._prog.setVisible(True); self._prog.setValue(0)
         self._wf_started = False
         self._integrated_fids = set()
+        # Clear any previous run's views before re-deriving their axis context
+        # from this run's geometry — otherwise set_axis_context()'s _restack()
+        # re-plots stale curves under the new context, and a leftover curve
+        # with no finite data (e.g. an empty/fully-masked profile) sends
+        # pyqtgraph's autoRange() a [nan, nan] range and crashes the run.
+        self._stack_view.reset()
+        self._waterfall.reset()
         self._cake_stack_view.clear()
+        self._stack_view.set_axis_context(*_axctx)
+        self._waterfall.set_axis_context(*_axctx)
+        # The cake's R axis is never Q-rebinned (multi-azimuth and Q-uniform
+        # are mutually exclusive, rejected above), so it takes no native unit.
+        self._cake_stack_view.set_axis_context(lsd, px, wl)
         self._view_tabs.setCurrentWidget(self._waterfall)
         self._log.append("─" * 40 + "\nStarting batch integration…")
 
