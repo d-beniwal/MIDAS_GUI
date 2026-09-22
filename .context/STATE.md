@@ -1,8 +1,7 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-09-11 (ring overlay through the full forward model;
-Batch "Eta-R cakes" tab; full calibration in the provenance record)_
+_Last updated: 2026-09-22 (Batch Integrate run/restore crash fix)_
 
 ## Now working on
 
@@ -28,6 +27,18 @@ Open follow-ups, none blocking:
   `git fetch origin 'refs/pull/*/head:refs/remotes/origin/pr/*'`.
 
 ## Recently completed
+
+**2026-09-22 (`eebce45`) — Batch Integrate run/restore crash from stale
+views under a new axis context.** `_run()` and `_restore_run()` called
+`set_axis_context()`/`_restack()` while the waterfall/stack view still held
+the *previous* run's or attempt's curves; a leftover curve with no finite
+data (empty/fully-masked profile) sent pyqtgraph's `autoRange()` a
+`[nan, nan]` range and crashed. Fix: `reset()`/`clear()` all three views
+(`_stack_view`, `_waterfall`, `_cake_stack_view`) *before* re-deriving axis
+context, in both call sites. Also `StackedProfileViewer.autoRange()` was
+called even when no curve had finite data — now gated on `xmins` being
+non-empty. `tests/test_hydra_batch_ui.py` green (clean `HOME`); no test
+changes.
 
 **2026-09-11 (later) — One honest ring overlay, Batch's cakes made visible,
 and the whole calibration in the provenance record.** Two commits.

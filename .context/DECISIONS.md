@@ -8,6 +8,39 @@ file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this
 date for the full uncondensed entries if ever needed._
 
+## 2026-09-22 — Batch Integrate: clear views before re-deriving axis context, not after
+
+Commit `eebce45`.
+
+**The bug:** `_run()` and `_restore_run()` (`tab_batch.py`) called
+`set_axis_context()` on `_waterfall`/`_stack_view` (and `set_axis_context`/
+`clear()` on `_cake_stack_view`) while those widgets still held curves from
+the *previous* run or attempt. `set_axis_context()`'s internal `_restack()`
+re-plots whatever is currently held under the new context — so a leftover
+curve from a prior run got re-plotted under the new run's geometry. If that
+leftover curve had no finite data (an empty or fully-masked profile),
+`StackedProfileViewer`'s `autoRange()` call received a `[nan, nan]` bounding
+range from pyqtgraph and crashed.
+
+**The fix:** `reset()`/`clear()` the three views *before* setting axis
+context, in both `_run()` and `_restore_run()`, so `_restack()` only ever
+operates on data that belongs to the thing being drawn now. Order matters
+here — clear-then-context, not context-then-clear — because the crash lives
+inside `set_axis_context()`'s own `_restack()` call, not in anything after it.
+
+**Also:** `StackedProfileViewer.autoRange()` was unconditionally called
+whenever `self._curves` was non-empty, regardless of whether any curve
+actually had finite data. Moved the `autoRange()` call inside the `if
+xmins:` branch so it only fires when there's real data to range over — a
+second, independent guard against the same nan-range crash, for curves that
+survive `reset()` but are individually all-nan/all-masked.
+
+**Why this matters beyond this one fix:** any future view that layers
+"set new context" on top of "may still hold stale content" needs the clear
+to happen first. This is the same shape of bug as the ring-overlay staleness
+fixed 2026-09-11, and the `CakeStackViewer`/`RingResidualViewer` family
+mentioned there — check them if a similar nan/stale-plot crash turns up.
+
 ## 2026-09-11 (later) — One honest ring overlay; Batch's cakes made visible; the whole calibration in the provenance record
 
 Commits `54cdd48` (Calibrate) and `f44314d` (Batch Integrate).
