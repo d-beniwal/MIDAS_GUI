@@ -37,8 +37,7 @@ PIPELINES = [
     ("Four-stage (patchy det.)", "four_stage", True),
     ("Bayesian MAP+Laplace",     "bayesian",   True),    # Phase 2
     ("Joint cake",               "joint",      True),    # Phase 3
-    ("Frozen-point (high-tilt)", "frozen_point", True),  # vendored, see
-                                                          # midas_gui/_vendor/frozen_point_calib
+    ("Frozen-point (high-tilt)", "frozen_point", True),
     ("Multi-distance",           "multi",      False),   # multi-image, deferred
 ]
 

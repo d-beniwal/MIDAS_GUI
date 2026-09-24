@@ -84,10 +84,10 @@ pyepics==3.5.10
 # calib.build_v1_params, which sets no ImTransOpt, so spec.im_trans is () and
 # the pipelines leave its arrays alone). Full rationale in pyproject.toml.
 # numpy 1.26.4 / torch 2.4.0 / numba 0.59.1 / zarr<3 all unchanged.
-midas-calibrate-v2==0.17.0
+midas-calibrate-v2==0.22.0
 midas-integrate-v2==0.7.1
 midas-calibrate==0.5.0
-midas-hkls==0.11.0
+midas-hkls==0.15.0
 midas-distortion==0.2.0
 midas-pdf==0.3.0                # Faber-Ziman PDF reduction used by the PDF tab
 
@@ -103,9 +103,9 @@ midas-params==0.12.0            # new shared params-file registry/validator dep,
 # Transitive chain introduced by midas-pdf 0.3.0: midas-saxs>=0.1.0 ->
 # midas-transforms>=0.10.0 -> midas-stress>=0.11.0. Not imported by midas_gui
 # directly; pinned for the same reproducibility reason as the rest of the block.
-midas-saxs==0.1.1
+midas-saxs==0.1.2
 midas-transforms==0.10.0
-midas-stress==0.14.0
+midas-stress==0.14.1
 zarr==2.18.7                    # required by midas-integrate/-peakfit/-zipper; was already
                                  # pulled in transitively before this pin bump (unpinned), so
                                  # this just makes an existing dependency explicit

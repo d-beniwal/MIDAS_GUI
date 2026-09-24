@@ -1,11 +1,11 @@
-"""``calib.run_pipeline``/``normalize_result`` dispatch for the vendored
-"frozen_point" (high-tilt) pipeline (see midas_gui/_vendor/frozen_point_calib
-for provenance). The actual fit's numerical behavior is covered by
-tests/test_frozen_point_vendor.py against the vendored package directly —
-these tests only pin the GUI-side wiring: panel_layout is rejected, dark is
-subtracted before the pipeline sees the image (point_pick has no native dark
-argument), and the raw IterateResult normalizes into a proper
-AutoCalibrationResult.
+"""``calib.run_pipeline``/``normalize_result`` dispatch for the "frozen_point"
+(high-tilt) pipeline (``midas_calibrate_v2.pipelines.
+iterate_frozen_point_until_stable``). The actual fit's numerical behavior is
+covered by tests/test_frozen_point_vendor.py against the real package
+directly — these tests only pin the GUI-side wiring: panel_layout is
+rejected, dark is subtracted before the pipeline sees the image (point_pick
+has no native dark argument), and the raw IterateResult normalizes into a
+proper AutoCalibrationResult.
 """
 from types import SimpleNamespace
 
@@ -49,8 +49,8 @@ def test_frozen_point_subtracts_dark_and_dispatches(monkeypatch):
         captured["verbose"] = verbose
         return "sentinel-result"
 
-    import midas_gui._vendor.frozen_point_calib as fpc
-    monkeypatch.setattr(fpc, "iterate_frozen_point_until_stable", fake_iterate)
+    import midas_calibrate_v2.pipelines as mcv2_pipelines
+    monkeypatch.setattr(mcv2_pipelines, "iterate_frozen_point_until_stable", fake_iterate)
 
     cfg = _base_cfg(lm_max_iter=77)
     out = calib.run_pipeline("frozen_point", image, dark, cfg)
@@ -67,8 +67,8 @@ def test_frozen_point_subtracts_dark_and_dispatches(monkeypatch):
 def test_frozen_point_logs_note_for_non_cpu_device(monkeypatch, capsys):
     image = np.zeros((4, 4), dtype=np.float32)
     monkeypatch.setattr(calib, "_seed_and_v1", lambda *a, **k: SimpleNamespace())
-    import midas_gui._vendor.frozen_point_calib as fpc
-    monkeypatch.setattr(fpc, "iterate_frozen_point_until_stable",
+    import midas_calibrate_v2.pipelines as mcv2_pipelines
+    monkeypatch.setattr(mcv2_pipelines, "iterate_frozen_point_until_stable",
                         lambda *a, **k: "sentinel-result")
 
     calib.run_pipeline("frozen_point", image, None, _base_cfg(device="cuda"))
