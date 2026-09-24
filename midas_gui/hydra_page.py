@@ -55,7 +55,7 @@ class _ProfileSinkAdapter:
         self._viewer.set_curve(self._key, r_px, profile,
                                lsd_um=lsd_um, px_um=px_um, wavelength_A=wavelength_A)
 
-    def set_ring_markers(self, groups, lsd_um=None, px_um=None, wl=None):
+    def set_ring_markers(self, groups, lsd_um=None, px_um=None, wl=None, width=1.5):
         # Ring markers (vertical lines at each material's ring 2theta) aren't
         # well-defined on a plot overlaying 4 independently-calibrated
         # panels at once — skipped for this shared multi-curve plot.

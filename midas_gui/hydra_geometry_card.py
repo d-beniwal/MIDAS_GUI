@@ -707,6 +707,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         self._ring_width.setToolTip("Line thickness of the simulated rings on the image.")
         self._ring_width.setMaximumWidth(80)
         self._ring_width.valueChanged.connect(self._redraw_rings)
+        self._ring_width.valueChanged.connect(self._refresh_profile_markers)
         ctl.addWidget(self._show_rings); ctl.addWidget(self._show_labels)
         ctl.addSpacing(8)
         ctl.addWidget(QtWidgets.QLabel("thickness:"))
@@ -1144,6 +1145,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             it.setVisible(vis_r)
         for it in self._label_items:
             it.setVisible(vis_l)
+        self._refresh_profile_markers()
 
     # ── Beam-centre picking / radial integration ──────────────────
 
@@ -1178,7 +1180,12 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         return f"Picked radius: {r_px:.1f} px  (magenta ring)"
 
     def _redraw_picked_ring(self):
-        """(Re)draw the click-picked ring (magenta) about the current beam centre."""
+        """(Re)draw the click-picked ring (magenta) about the current beam
+        centre. ``r`` came from the profile's ``_x_to_r`` (a flat-panel 2θ
+        radius), so on a tilted geometry it must go back through the same
+        tilt projection ``_redraw_rings`` uses for material rings — a plain
+        circle at that radius is the wrong curve once ty/tz != 0 and drifts
+        away from where the ring (and the peak it marks) actually sits."""
         if self._pick_ring_item is not None and self._viewer is not None:
             self._viewer._iv.removeItem(self._pick_ring_item)
             self._pick_ring_item = None
@@ -1187,10 +1194,17 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         if r is None or img is None or self._viewer is None:
             return
         bc_y, bc_z = self._bcy.value(), self._bcz.value()
-        th = np.linspace(0, 2 * math.pi, 512)
+        ty, tz = self._ty.value(), self._tz.value()
+        if abs(ty) > 1e-9 or abs(tz) > 1e-9:
+            lsd_um, px = self._lsd_um(), self._px.value()
+            two_theta_deg = math.degrees(math.atan2(r * px, lsd_um))
+            ys, zs = tilted_ring_xy(two_theta_deg, 0.0, ty, tz,
+                                     lsd_um, bc_y, bc_z, px, px)
+        else:
+            th = np.linspace(0, 2 * math.pi, 512)
+            ys, zs = bc_y + r * np.cos(th), bc_z + r * np.sin(th)
         self._pick_ring_item = pg.PlotDataItem(
-            bc_y + r * np.cos(th), bc_z + r * np.sin(th),
-            pen=pg.mkPen("#ff30ff", width=1.8))
+            ys, zs, pen=pg.mkPen("#ff30ff", width=1.8))
         self._viewer._iv.addItem(self._pick_ring_item)
 
     def _on_rad_param_changed(self, *_):
@@ -1200,15 +1214,19 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         if self._profile_view is None:
             return
         # Same hkl/order text as the on-image ring labels, so a peak in the
-        # profile and the arc it came from carry the identical name.
+        # profile and the arc it came from carry the identical name. Hidden
+        # together with the image overlay: unchecking "Rings" should clear
+        # the profile markers too, not just the on-image arcs.
         groups = [{"radii": [r["radius_px"] for r in m["_rings"]],
                    "labels": [f"n{r['order']}" if r["hkl"] is None
                               else "".join(str(x) for x in r["hkl"])
                               for r in m["_rings"]],
                    "color": m["color"]}
-                  for m in self._materials if m["enabled"] and m.get("_rings")]
+                  for m in self._materials if m["enabled"] and m.get("_rings")
+                  ] if self._show_rings.isChecked() else []
         self._profile_view.set_ring_markers(
-            groups, self._lsd_um(), self._px.value(), self._wl.value())
+            groups, self._lsd_um(), self._px.value(), self._wl.value(),
+            width=self._ring_width.value())
 
     def _effective_calib_geom(self, img: np.ndarray) -> Optional[dict]:
         """Geometry used for radial integration: the loaded calibration's full
