@@ -2858,6 +2858,12 @@ class CalibrationTab(QtWidgets.QWidget):
                  # (below) overwrites this with the result's own distortion,
                  # so this only matters when there's no result yet.
                  "seed_dist": dict(self._seed_dist),
+                 # Which of the fifteen distortion harmonics are selected.
+                 # Same reasoning as "seed_dist": "ref_dist" (in "fields") is
+                 # only the on/off tick, and the set it gates has no widget of
+                 # its own — so without this a reopened project came back
+                 # refining all 15 whatever the user had picked.
+                 "dist_coeffs": sorted(self._dist_coeffs),
                  "result": project.sanitize_result_dict(self._result)}
         if self._result is not None and sidecar_stem:
             try:
@@ -2899,6 +2905,15 @@ class CalibrationTab(QtWidgets.QWidget):
         else:
             self._on_seed_enable_changed()   # resync the derived master tri-state
         self._update_limits_label()
+        dist_coeffs = state.get("dist_coeffs")
+        if dist_coeffs is not None:            # absent in pre-2026-09 projects
+            self._dist_coeffs = set(dist_coeffs)
+        # Unconditional, even when the key is absent: apply_dict_to_widgets
+        # restores "ref_dist" with signals blocked, so the checkbox's own
+        # "Distortion (n/15)" caption — which only _update_dist_label writes —
+        # would otherwise keep whatever the freshly built tab defaulted to and
+        # contradict the tick right next to it.
+        self._update_dist_label()
         modes = state.get("refine_modes") or {}
         if isinstance(modes.get("xtal"), dict):
             self._refine_state_xtal = dict(modes["xtal"])
@@ -3014,7 +3029,8 @@ class CalibrationTab(QtWidgets.QWidget):
             except Exception:
                 pass
 
-    def apply_project_calibration(self, attempts: dict) -> None:
+    def apply_project_calibration(self, attempts: dict, *,
+                                  restore_fields: bool = True) -> None:
         """``attempts`` maps panel key (``"single"`` or ``"ge1"``..``"ge4"``)
         to that panel's calibration-attempt metadata (``project.read_attempt``)
         — called after File > Open Project… when the user opts to populate
@@ -3022,7 +3038,19 @@ class CalibrationTab(QtWidgets.QWidget):
         (widget keys are shared across the single-detector tab, the Hydra
         page's shared recipe, and a Hydra panel card's seed fields — see
         ``project.calib_attempt_gui_fields``), and switches the mode ribbon
-        to match what was found."""
+        to match what was found.
+
+        ``restore_fields=False`` restores only the fitted results, leaving
+        every input widget alone. File ▸ Open Project… passes it when the
+        Calibrate tab's GUI Workspace was restored in the same action: the
+        workspace holds all the same fields and is strictly newer (saved at
+        Ctrl+S, whereas the attempt was recorded when the fit ran), so
+        replaying the attempt over it only reverts the user's later edits —
+        the Distortion tick being the case that surfaced it. What the
+        attempt still has that the workspace doesn't is the embedded
+        cake/profile arrays and the materialized panel shifts, which is why
+        the result half runs either way.
+        """
         if not attempts:
             return
         single_meta = attempts.get("single")
@@ -3031,6 +3059,12 @@ class CalibrationTab(QtWidgets.QWidget):
         if single_meta is not None:
             state["fields"] = project.calib_attempt_gui_fields(single_meta)
             state["loader"] = project.calib_attempt_loader_state(single_meta)
+            # The tick alone says only *that* distortion was refined; without
+            # the set it gates the replay silently widened a 3-coefficient fit
+            # back out to all 15.
+            coeffs = project.calib_attempt_dist_coeffs(single_meta)
+            if coeffs is not None:
+                state["dist_coeffs"] = coeffs
         if hydra_metas:
             cards, page_fields, anchor_path = {}, {}, None
             for panel_key, meta in sorted(hydra_metas.items()):
@@ -3044,7 +3078,8 @@ class CalibrationTab(QtWidgets.QWidget):
                                         "anchor_path": anchor_path}}
         elif single_meta is not None:
             state["hydra"] = {"active_mode": "single"}
-        self.set_state(state)
+        if restore_fields:
+            self.set_state(state)
 
         if single_meta is not None and single_meta.get("result"):
             self._display_stored_result(

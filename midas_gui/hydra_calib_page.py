@@ -1197,12 +1197,18 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             "cake_views": {n: cv.display_state() for n, cv in self._cake_views.items()},
             "overall_cake_view": self._overall_cake_view.display_state(),
             "cards": cards,
+            # No widget of its own — see CalibrationTab.get_state's copy.
+            "dist_coeffs": sorted(self._dist_coeffs),
         }
 
     def set_state(self, state: dict):
         if not state:
             return
         apply_dict_to_widgets(self._state_widgets(), state.get("fields", {}))
+        dist_coeffs = state.get("dist_coeffs")
+        if dist_coeffs is not None:
+            self._dist_coeffs = set(dist_coeffs)
+        self._update_dist_label()   # signals were blocked above; resync the caption
         self._img_view.set_display_state(state.get("img_view"))
         self._origin_btn.sync()
         for n_key, cv_state in (state.get("cake_views") or {}).items():

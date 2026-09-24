@@ -1601,3 +1601,44 @@ structure and deleted it; the build-critical `midas_pdf` reference stack
 was *moved* (not summarized) to `.context/reference/midas_pdf/` — too
 detailed to lose. Discarded as stale: `CLAUDE_original_scratch.md` and
 `claude/gui_documentation.md` (a strict subset of the shipped doc).
+
+## 2026-09-24 — The Distortion selection is project state, and the workspace outranks an attempt
+
+Reported from the beamline: untick Distortion, save the project, reopen — and it
+comes back ticked at 15/15. Three independent faults, all of which had to go:
+
+1. **`_dist_coeffs` was never serialized.** `ref_dist` (the tick) was in
+   `_state_widgets()`, but the set of harmonics it gates has no widget, so
+   `widgets_to_dict` could not see it and nothing else wrote it out. A reopened
+   project silently refined all fifteen whatever the user had picked. Fixed the
+   way `seed_dist` already was: a top-level key in `get_state()`. Restored as
+   `None`-means-absent, so a pre-existing project keeps the constructor default
+   rather than being narrowed to "refine nothing".
+
+2. **The caption went stale.** `apply_dict_to_widgets` restores with signals
+   blocked, and `_update_dist_label()` is the only writer of the
+   `Distortion (n/15)` text — so a freshly built tab kept its `(15/15)` caption
+   next to a checkbox that had just been restored to unticked. `_set_state` now
+   calls it unconditionally, not only when the new key is present: the caption
+   is wrong after *any* restore, including of an old project.
+
+3. **The attempt replay clobbered the workspace.** `_open_project_selection`
+   restores the GUI Workspace first and then, if the user also ticked a
+   calibration attempt in the picker, replays that attempt's fields over the
+   top. Those fields are strictly staler — the workspace is written at Ctrl+S,
+   the attempt when the fit ran — so the replay reverted every input the user
+   had touched since their last run, which is what actually put the tick back.
+
+The precedence rule is the part worth arguing. `apply_project_calibration` grew
+`restore_fields`, and Open Project passes `False` when the Calibrate tab's
+workspace was restored in the same action. The workspace is a superset of the
+attempt's fields *and* newer, so the field replay was pure loss; what the attempt
+uniquely carries — the embedded cake/profile arrays and the materialized panel
+shifts — is in the result half, which still runs either way. Opening an attempt
+without its workspace is unchanged and now restores the coefficient subset too,
+via `project.calib_attempt_dist_coeffs()`; the set was already in the stored
+metadata (`_json_default` sorts sets to lists), just never read back.
+
+Not done: the same precedence question applies to Batch Integrate's
+`apply_project_integration`, which has the identical shape. Left alone — no
+report against it, and the fix belongs with evidence of the symptom.

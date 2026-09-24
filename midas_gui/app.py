@@ -714,7 +714,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 meta["_results_arrays"] = project.read_attempt_results(path, ref)
                 integrate_attempts[k] = meta
             if calib_attempts:
-                self._cal_tab.apply_project_calibration(calib_attempts)
+                # Fields only when the workspace didn't already restore them —
+                # see apply_project_calibration's restore_fields.
+                self._cal_tab.apply_project_calibration(
+                    calib_attempts, restore_fields="Calibrate" not in tab_names)
                 restored.append("Calibrate: " + ", ".join(sorted(calib_attempts)))
                 # apply_project_calibration only redraws the Calibrate tab
                 # itself — it doesn't emit calibrationDone (that signal is

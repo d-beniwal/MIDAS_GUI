@@ -1647,6 +1647,15 @@ iters, device, output dir) and Multi-panel detector groups are collapsible.
 A **Refining: … Fixed: …** line above the checkboxes states the current selection in
 words, so what the fit will actually vary is readable without decoding six checkboxes.
 
+Both halves of the Distortion row — the tick and the per-coefficient selection behind
+the **…** — are saved with the project and restored on reopen. Where the GUI Workspace
+and a recorded calibration attempt are both restored in one **File ▸ Open Project…**,
+the workspace wins for every input field: it was saved when you pressed Ctrl+S, whereas
+the attempt records what the fit used when it ran, so the workspace is the later of the
+two. The attempt still supplies its fitted result, cake and panel shifts. Opening an
+attempt *without* its workspace restores that run's fields, including the exact
+coefficient subset it refined.
+
 The defaults differ by calibrant kind, and the two sets are remembered separately.
 A crystalline calibrant fills the detector with rings and constrains Lsd and tilt
 well, so it starts at **Lsd + BC + ty + tz**. A d-spacing calibrant is fit from a
