@@ -1,7 +1,7 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-09-22 (Batch Integrate run/restore crash fix)_
+_Last updated: 2026-09-24 (Mask Builder folder/multi-frame Image + threshold projection)_
 
 ## Now working on
 
@@ -27,6 +27,21 @@ Open follow-ups, none blocking:
   `git fetch origin 'refs/pull/*/head:refs/remotes/origin/pr/*'`.
 
 ## Recently completed
+
+**2026-09-24 (`d224c97`) — Mask Builder: folder/multi-frame Image loading +
+threshold-mask projection.** The Image field now accepts a folder of
+single-frame files, a multi-page TIFF, a 3-D HDF5 dataset, or a multi-frame
+`.geN` file (new `_detect_multiframe`, peeks shape/page-count/file-size
+only, never loads pixel data), with a Frame navigator (◀/▶ + spinbox) to
+step through them — same pattern as the existing section-2 Stack folder
+loader. New Projection combo (Current frame / Average / Sum / Max) lets the
+threshold step (section 1, `_compute`/`_threshold_source_image`) build its
+mask from a reduction across every frame instead of just the frame shown,
+since a per-frame threshold on one noisy frame is often unreliable; disabled
+and locked to "Current frame" for a plain single image. Frame index
+persists in both mask-attempt provenance and sidecar state. New
+`tests/test_mask_folder_frames.py` (10 tests, forked per the pyqtgraph
+teardown-crash pattern).
 
 **2026-09-22 (`eebce45`) — Batch Integrate run/restore crash from stale
 views under a new axis context.** `_run()` and `_restore_run()` called
