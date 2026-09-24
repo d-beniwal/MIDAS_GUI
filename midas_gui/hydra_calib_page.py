@@ -24,6 +24,8 @@ frame and applies bright/background itself). Averaging frames instead
 """
 from __future__ import annotations
 
+import re
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -37,7 +39,8 @@ from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _NoScrollComboBox, make_kedge_label, make_pixel_label,
     _load_image, apply_field_corrections, average_field, source_kind,
     widgets_to_dict, apply_dict_to_widgets, _predict_ring_radii, refresh_combo_items,
-    browse_start_dir, warn_if_path_missing)
+    browse_start_dir, warn_if_path_missing, suggest_working_dir,
+    check_output_dir_writable, scratch_dir, SCRATCH_DIRNAME)
 from midas_gui.widgets import (PickableImageViewer, LogPanel, CakeViewer, _convert_radial,
                                OriginToolButton)
 from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar, HydraProfileViewer
@@ -176,6 +179,9 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._pending_log_results: dict = {}  # panel_num -> result awaiting _log_to_project
         self._composite_log_pending = False   # True during a live run, until it fully finishes
         self._project_ctx: Optional[project.ProjectContext] = None
+        self._expid_provider = None     # forwarded by CalibrationTab; see there
+        self._run_scratch_id = ""       # one per Run All, shared by its panels
+        self._wd_declined = ""          # last unwritable candidate, logged once
         self._build_ui()
         self._on_panel_changed(self._toolbar.current())
 
@@ -325,15 +331,30 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._lm_iter = _NoScrollSpinBox(); self._lm_iter.setRange(1, 1_000_000); self._lm_iter.setValue(200)
         self._device = _NoScrollComboBox(); self._device.addItems(["cpu", "cuda"])
         av.addLayout(S.Form().row(("E-M iters:", self._n_iter), ("LM iters:", self._lm_iter)))
-        self._out_ed = QtWidgets.QLineEdit(); self._out_ed.setPlaceholderText("Output dir…")
+        # Attribute and state key stay `_out_ed` / "out_ed" across the rename
+        # to "Working dir" — see CalibrationTab for the same reasoning.
+        self._out_ed = QtWidgets.QLineEdit()
+        self._out_ed.setPlaceholderText("Working directory…")
+        self._out_ed.setToolTip(
+            "Working directory shared by all four panels.\n\n"
+            f"Each panel's intermediates go in their own {SCRATCH_DIRNAME}/"
+            "<run>/ge<N>/ subfolder here, so a parallel run can't have four "
+            "panels overwriting one another's files. Delete the subfolder "
+            "whenever you like — nothing saved through a Save button is in it."
+            "\n\nDefaults to the <expid>_bc analysis folder derived from the "
+            "loaded data path.")
         warn_if_path_missing(self._out_ed, self, is_output_dir=True)
         bou = QtWidgets.QPushButton("…"); bou.setFixedWidth(30)
         bou.clicked.connect(lambda: self._out_ed.setText(
             QtWidgets.QFileDialog.getExistingDirectory(
-                self, "Output dir", browse_start_dir(self._out_ed.text())) or ""))
-        outr = QtWidgets.QHBoxLayout(); outr.setSpacing(4); outr.addWidget(self._out_ed, 1); outr.addWidget(bou)
+                self, "Working directory", browse_start_dir(self._out_ed.text())) or ""))
+        self._suggest_out_btn = QtWidgets.QPushButton("Suggest")
+        self._suggest_out_btn.clicked.connect(self._apply_suggested_working_dir)
+        outr = QtWidgets.QHBoxLayout(); outr.setSpacing(4)
+        outr.addWidget(self._out_ed, 1); outr.addWidget(bou)
+        outr.addWidget(self._suggest_out_btn)
         av.addLayout(S.Form().row(("Device:", self._device)))
-        av.addLayout(S.Form().row(("Output:", outr)))
+        av.addLayout(S.Form().row(("Working dir:", outr)))
         lv.addWidget(grp_adv)
 
         # Run controls
@@ -481,8 +502,56 @@ class HydraCalibrationPage(QtWidgets.QWidget):
 
     # ── Loader signal handlers ──────────────────────────────────────
 
+    def _suggest_working_dir(self):
+        path = self._loader.current_path()
+        if not path:
+            return None
+        try:
+            expid = (self._expid_provider() or "").strip() if self._expid_provider else ""
+        except Exception:
+            expid = ""
+        return suggest_working_dir(path, expid_fallback=expid)
+
+    def _set_working_dir(self, d) -> None:
+        self._out_ed.setText(str(d))
+        reason = check_output_dir_writable(d)
+        if reason:
+            self._log.append(f"[hydra] Warning: {reason}")
+
+    def _apply_suggested_working_dir(self):
+        d = self._suggest_working_dir()
+        if d is None:
+            self._log.append("[hydra] Can't derive a working directory from the "
+                             "loaded data path — pick one with the … button.")
+            return
+        self._set_working_dir(d)
+
+    def _maybe_autofill_working_dir(self):
+        """Never overwrites a directory the user already chose.
+
+        Nor pre-fills one that can't be written to — see CalibrationTab's
+        copy for why, and why the reason is logged only once per candidate.
+        """
+        if self._out_ed.text().strip():
+            return
+        d = self._suggest_working_dir()
+        if d is None:
+            return
+        reason = check_output_dir_writable(d)
+        if reason:
+            if self._wd_declined != str(d):
+                self._wd_declined = str(d)
+                self._log.append(
+                    f"[hydra] No working directory filled in — {reason}")
+            return
+        self._set_working_dir(d)
+
     def _on_siblings_changed(self, siblings: dict):
         self._toolbar.set_available(siblings.keys())
+        # Safe to autofill straight off the load signal here, unlike
+        # CalibrationTab: this page never loads a bundled demo image in
+        # __init__, so there is no packaged path to derive a bogus default from.
+        self._maybe_autofill_working_dir()
         self._sync_avg_controls()
         detected = self._loader.detected_geometry()
         if "wavelength_A" in detected:
@@ -712,7 +781,10 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             "lm_max_iter": self._lm_iter.value(),
             "device": self._device.currentText(),
             "build_residual_corr": self._build_rc.isChecked(),
-            "output_dir": self._out_ed.text().strip() or None,
+            "work_dir": self._out_ed.text().strip() or None,
+            # No "scratch_dir" here on purpose: _build_cfg has no panel number,
+            # and all four panels share this cfg. It is resolved per panel in
+            # _start_panel_worker, which is where the cfg forks.
             "im_trans": card.im_trans_codes(),
             "mask": None,
         }
@@ -732,6 +804,16 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             return
         if self._workers:
             return
+        work_dir = self._out_ed.text().strip() or None
+        if work_dir:
+            reason = check_output_dir_writable(work_dir)
+            if reason:
+                QtWidgets.QMessageBox.critical(
+                    self, "Working directory not writable", reason)
+                return
+        # One id for the whole Run All, so its four panels land side by side
+        # under a single run folder rather than four timestamps apart.
+        self._run_scratch_id = "calib_" + time.strftime("%Y%m%d-%H%M%S")
         self._orphans = [o for o in self._orphans if o.isRunning()]
         self._calib_cancelled = False
         self._composite_log_pending = True
@@ -772,6 +854,22 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         background = self._loader.background(n)
         bright_mode = self._loader.bright_mode()
         cfg = self._build_cfg(card)
+        # Each panel gets its own scratch leaf. In parallel mode all four
+        # workers are in flight at once against one working directory, and
+        # every file the backend writes there is generically named
+        # (residual_corr.bin, calibration.json) — one shared folder is a race,
+        # and in sequential mode it is last-writer-wins, which silently gives
+        # panels 1-3 panel 4's residual map.
+        try:
+            cfg["scratch_dir"] = str(scratch_dir(
+                cfg.get("work_dir"),
+                self._run_scratch_id or "calib_" + time.strftime("%Y%m%d-%H%M%S"),
+                f"ge{n}"))
+        except OSError as e:
+            # _on_panel_fail logs it and unwinds the run state; don't log twice.
+            self._on_panel_fail(n, str(e))
+            return
+        cfg["save_stem"] = f"ge{n}"
         self._last_cfgs[n] = dict(cfg)
         mode = self._pipeline.currentData()
         worker = CalibrationWorker(

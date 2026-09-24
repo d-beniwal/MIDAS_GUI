@@ -28,14 +28,14 @@ from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_
                                _NoScrollSpinBox, _NoScrollComboBox,
                                widgets_to_dict, apply_dict_to_widgets,
                                check_output_dir_writable,
+                               suggest_integration_output_dir,
                                browse_start_dir, warn_if_path_missing)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, DataLoaderPanel, OutputFormatSelector,
                                ImageViewer, OriginToolButton, build_lab_frame_axes_items,
                                CakeStackViewer)
 from midas_gui.workers import (BatchWorker, BatchRunCoordinator, apply_q_uniform,
-                               DriftWorker, FolderMonitorWorker, write_all_profiles,
-                               froot_and_frame_num)
+                               DriftWorker, FolderMonitorWorker, write_all_profiles)
 from midas_gui.dialogs import show_error
 from midas_gui.hydra_widgets import HydraModeRibbon
 from midas_gui.hydra_batch_page import HydraBatchPage
@@ -1121,28 +1121,17 @@ class BatchTab(QtWidgets.QWidget):
         self._expid_provider = provider
 
     def _suggest_output_dir(self) -> Optional[Path]:
-        """Best-effort ``<outroot>/<expid>_bc/<file-root>/<detector>/``,
-        mirroring mpe_wf_saxs_waxs's own ``outroot/<expid>_bc/<froot>/
-        <detector>/`` output-folder convention (``~/mnt/<station>/
-        <expid>_bc/<froot>/<detector>/`` — e.g. beamline home
-        ``/home/beams/S20IDUSER`` for 20-ID, ``/home/beams/S1IDUSER`` for
-        1-ID; ``~`` itself is just whatever directory the source path
-        happens to live under, this function never hardcodes it).
+        """Best-effort ``<outroot>/<expid>_bc/<froot>/<detector>/`` off the
+        loaded source path.
 
-        Raw data is read from mpe_wf's fixed ``<outroot>/<expid>/<detector>/
-        <froot>/<files>`` layout — four directories deep counting the
-        file's own containing folder — so ``expid``/``detector``/``outroot``
-        are read *positionally* off the loaded source path rather than
-        asked of the user: the whole point of "Suggest" is to read this off
-        the data that's actually loaded, not require someone to first type
-        the Exp ID into the header field before the button works. (The
-        header's Exp ID field feeds other things — see
-        ``set_expid_provider`` — but is intentionally not required here.)
-        When the source doesn't have that much directory depth (e.g. files
-        sitting directly under a flat folder), falls back to ``<source
-        folder>/<froot>/`` with no detector/expid segments — still correct,
-        just missing the pieces we have no way to locate. Returns ``None``
-        when no source is loaded yet."""
+        The layout parse itself lives in ``helpers.bc_path_parts`` (shared with
+        the Calibrate tab's working-directory suggestion, which composes a
+        different tail from the same parse — see
+        ``helpers.suggest_working_dir``). The header's Exp ID field feeds other
+        things (see ``set_expid_provider``) but is intentionally not required
+        here: the whole point of "Suggest" is to read the convention off the
+        data that's actually loaded. Returns None when no source is loaded.
+        """
         src_cfg = self._loader.source_cfg()
         rep = src_cfg.get("path")
         if not rep:
@@ -1150,37 +1139,8 @@ class BatchTab(QtWidgets.QWidget):
             rep = paths[0] if paths else None
         if not rep:
             return None
-        p = Path(rep)
-        name = p.name
-        if any(c in name for c in "*?["):
-            # A glob pattern ("<folder>/<stem>*"), not a real file — take the
-            # literal prefix before the first wildcard as the stem.
-            import re
-            name = re.split(r"[*?\[]", name, maxsplit=1)[0].rstrip("_-.") or name
-        else:
-            name = p.stem
-        froot, _num, _tag = froot_and_frame_num(name, 0)
-
-        # froot_dir = the folder actually holding the files (often
-        # froot-named itself); its parent is <detector>, and <expid> is one
-        # level above that — mpe_wf's layout puts them at this fixed depth
-        # regardless of what any of these folders happen to be named.
-        froot_dir = p.parent
-        ancestors = froot_dir.parents
-        if len(ancestors) >= 3:
-            detector = ancestors[0].name
-            expid = ancestors[1].name
-            outroot = ancestors[2]
-            return outroot / f"{expid}_bc" / froot / detector
-
-        # Not enough directory depth to locate expid/detector positionally
-        # — fall back to the typed Exp ID header field if there is one,
-        # else just <source folder>/<froot>/. Guard against duplicating
-        # froot when the source folder is itself named after it (the common
-        # "<froot>/<froot>_NNNNNN.tif" layout).
         expid = self._expid_provider().strip() if self._expid_provider else ""
-        root = froot_dir / f"{expid}_bc" if expid else froot_dir
-        return root if root.name == froot else root / froot
+        return suggest_integration_output_dir(rep, expid_fallback=expid)
 
     def _apply_suggested_output_dir(self):
         suggested = self._suggest_output_dir()

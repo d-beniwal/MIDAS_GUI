@@ -10,7 +10,7 @@ import io
 import math
 import re
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import numpy as np
 from PyQt5 import QtCore, QtWidgets
@@ -358,6 +358,123 @@ def detect_geometry_from_path(path: str, *, profile: Optional[str] = None) -> di
     return out
 
 
+class BcParts(NamedTuple):
+    """The pieces of mpe_wf's output-folder convention, parsed off a data path.
+
+    Kept as a decomposition rather than a finished string because Batch
+    Integrate and Calibrate need different tails from the *same* parse — see
+    :func:`suggest_integration_output_dir` and :func:`suggest_working_dir`.
+    """
+    root: Path        # <outroot>/<expid>_bc, or the shallow fallback root
+    froot: str
+    detector: str     # "" when the layout is too shallow to locate one
+    positional: bool  # True when read off the 4-deep mpe_wf layout
+    has_bc: bool      # True when `root` actually ends in "_bc"
+
+
+def bc_path_parts(data_path, *, expid_fallback: str = "") -> Optional[BcParts]:
+    """Parse ``<outroot>/<expid>/<detector>/<froot>/<files>`` off `data_path`.
+
+    Mirrors mpe_wf_saxs_waxs's own ``outroot/<expid>_bc/<froot>/<detector>/``
+    output-folder convention (``~/mnt/<station>/<expid>_bc/<froot>/<detector>/``
+    — e.g. beamline home ``/home/beams/S20IDUSER`` for 20-ID,
+    ``/home/beams/S1IDUSER`` for 1-ID; ``~`` itself is just whatever directory
+    the source path happens to live under, this function never hardcodes it).
+
+    Raw data is read from mpe_wf's fixed layout — four directories deep
+    counting the file's own containing folder — so ``expid``/``detector``/
+    ``outroot`` are read *positionally* rather than asked of the user: the
+    whole point is to read this off the data that's actually loaded, not
+    require someone to first type the Exp ID. When the source doesn't have
+    that much depth (e.g. files sitting directly under a flat folder), falls
+    back to `expid_fallback` if given, else to the source folder itself, and
+    reports ``positional=False`` so callers can tell a located layout from a
+    guess. Pure path arithmetic — nothing here touches the filesystem.
+
+    Returns None when `data_path` is empty.
+    """
+    if not data_path:
+        return None
+    from midas_gui.workers import froot_and_frame_num  # helpers<-workers cycle
+    p = Path(data_path)
+    name = p.name
+    if any(c in name for c in "*?["):
+        # A glob pattern ("<folder>/<stem>*"), not a real file — take the
+        # literal prefix before the first wildcard as the stem.
+        name = re.split(r"[*?\[]", name, maxsplit=1)[0].rstrip("_-.") or name
+    else:
+        name = p.stem
+    froot, _num, _tag = froot_and_frame_num(name, 0)
+
+    # froot_dir = the folder actually holding the files (often froot-named
+    # itself); its parent is <detector>, and <expid> is one level above that —
+    # mpe_wf's layout puts them at this fixed depth regardless of what any of
+    # these folders happen to be named.
+    froot_dir = p.parent
+    ancestors = froot_dir.parents
+    if len(ancestors) >= 3:
+        return BcParts(root=ancestors[2] / f"{ancestors[1].name}_bc",
+                       froot=froot, detector=ancestors[0].name,
+                       positional=True, has_bc=True)
+
+    expid = (expid_fallback or "").strip()
+    root = froot_dir / f"{expid}_bc" if expid else froot_dir
+    return BcParts(root=root, froot=froot, detector="",
+                   positional=False, has_bc=bool(expid))
+
+
+def suggest_integration_output_dir(data_path, *, expid_fallback: str = "") -> Optional[Path]:
+    """``<outroot>/<expid>_bc/<froot>/<detector>`` — Batch Integrate's convention.
+
+    The shallow fallback deliberately guards against duplicating ``froot`` when
+    the source folder is itself named after it (the common
+    ``<froot>/<froot>_NNNNNN.tif`` layout).
+    """
+    parts = bc_path_parts(data_path, expid_fallback=expid_fallback)
+    if parts is None:
+        return None
+    if parts.positional:
+        return parts.root / parts.froot / parts.detector
+    return (parts.root if parts.root.name == parts.froot
+            else parts.root / parts.froot)
+
+
+def suggest_working_dir(data_path, *, expid_fallback: str = "") -> Optional[Path]:
+    """The bare ``<expid>_bc`` analysis root to use as a working directory.
+
+    Deliberately *not* :func:`suggest_integration_output_dir` minus its tail,
+    for two reasons:
+
+    **An existing ``_bc`` directory wins over the positional read.** The
+    positional derivation assumes the full 4-deep mpe_wf layout, and quietly
+    mislabels shallower ones. A real case: ``.../export/s20a/
+    PUP_AML_stubbins_sep26_bc/run.h5`` sits *directly inside* an already-``_bc``
+    directory, only three levels below the mount, so the positional read calls
+    ``export`` the expid and proposes ``/net/s20iddata/export_bc`` — a sibling
+    of the mount root that nobody can create. Recognising the ``_bc`` directory
+    the data already lives in gets the right answer, and it is the directory
+    that demonstrably *is* writable, since the data is sitting in it. Batch
+    keeps the positional read (it is correct for the layout Batch is pointed
+    at); only the working-directory ladder puts ``_bc`` recognition first.
+
+    **No fallback into the data tree.** Where Batch falls back to
+    ``<source folder>/<froot>``, this returns None. A working directory inside
+    the raw-data tree is precisely the littering the working directory exists
+    to stop; an empty field that makes the user choose is the better answer.
+    """
+    if not data_path:
+        return None
+    parent = Path(data_path).parent
+    # 1. the data's own folder, 2. the nearest ancestor above it.
+    for cand in (parent, *parent.parents):
+        if cand.name.endswith("_bc"):
+            return cand
+    parts = bc_path_parts(data_path, expid_fallback=expid_fallback)
+    if parts is None or not parts.has_bc:
+        return None
+    return parts.root
+
+
 def check_output_dir_writable(path: str | Path) -> Optional[str]:
     """None if `path` can be written to (created if missing), else a
     human-readable reason it can't.
@@ -387,6 +504,65 @@ def check_output_dir_writable(path: str | Path) -> Optional[str]:
                  "Pick a different output folder, or ask whoever owns it "
                  "to grant write access.")
     return None
+
+
+SCRATCH_DIRNAME = ".midas_scratch"
+
+_SESSION_SCRATCH: Optional[str] = None
+
+
+def session_scratch_dir() -> str:
+    """One ``mkdtemp`` per process, removed at exit.
+
+    Where scratch goes when no working directory is set. Same contract as
+    :func:`new_temp_h5_path`: the caller gets somewhere valid to write without
+    having to special-case "nowhere", and the process cleans up after itself
+    rather than leaving files in /tmp for someone else to find.
+    """
+    global _SESSION_SCRATCH
+    if _SESSION_SCRATCH is None:
+        import shutil
+        _SESSION_SCRATCH = _tf.mkdtemp(prefix="midas_gui_scratch_")
+        _atexit.register(shutil.rmtree, _SESSION_SCRATCH, ignore_errors=True)
+    return _SESSION_SCRATCH
+
+
+def scratch_dir(work_dir, *parts: str, create: bool = True) -> Path:
+    """``<work_dir>/.midas_scratch/<parts…>`` — where intermediate files go.
+
+    Everything under ``.midas_scratch`` is machine-generated and re-derivable:
+    the user can delete the whole folder at any time without losing anything
+    they asked for, because every deliberate save on the Calibrate tab goes
+    through a file dialog elsewhere. The GUI never deletes it on their behalf
+    — an analysis directory that empties itself between sessions is its own
+    kind of surprise.
+
+    Keeping it to one subfolder, under a directory the user named, is the
+    whole point: the alternative that shipped before this was scratch landing
+    either next to the raw data or in an unfindable ``mkstemp`` file.
+
+    `parts` exist because the files written here (``residual_corr.bin``,
+    the backend's ``calibration.json``, ``panel_shifts.txt``) are all
+    *generically named*, so two fits sharing a working directory would
+    overwrite each other and four concurrent Hydra panels would race. Callers
+    pass a per-run (and per-panel) leaf to keep them apart.
+
+    With no `work_dir`, falls back to :func:`session_scratch_dir` so callers
+    never have to handle "nowhere to write" themselves.
+
+    Raises OSError carrying :func:`check_output_dir_writable`'s human-readable
+    reason rather than writing somewhere the user can't — failing loudly beats
+    a fit that runs and then silently records a file it never managed to save.
+    """
+    base = Path(session_scratch_dir()) if not work_dir \
+        else Path(work_dir) / SCRATCH_DIRNAME
+    d = base.joinpath(*parts) if parts else base
+    if create:
+        reason = check_output_dir_writable(d)
+        if reason:
+            raise OSError(reason)
+        d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 def new_temp_h5_path(prefix: str = "midas_buffer_") -> str:
@@ -1472,6 +1648,31 @@ def draw_polar_bin_overlay(viewer, items: list, *, bc_y: float, bc_z: float,
         viewer._iv.addItem(item); items.append(item)
 
 
+def _drop_missing_residual_map(spec):
+    """Clear ``spec.ResidualCorrectionMap`` when it names a file that isn't
+    readable, and say so.
+
+    midas_integrate_v2 treats an unreadable map as fatal
+    (``forward/pixels.py:_load_residual_map``), so one stale path takes down
+    every integration, cake and pseudo-strain view built from the geometry —
+    even though the map is a refinement on top of a geometry that is otherwise
+    complete. A path can go stale in several ordinary ways: the map was never
+    built (the Build-residual-map box was off, or too few non-outlier fits),
+    the .bin was cleaned up alongside other scratch files, or a project is
+    reopened on a host where that mount is absent. Degrading to "no map" keeps
+    the rest of the result usable; failing shut does not.
+    """
+    import os
+    rcm = getattr(spec, "ResidualCorrectionMap", None)
+    if rcm and not os.path.isfile(str(rcm)):
+        spec.ResidualCorrectionMap = None
+        print(f"[spec] note: residual correction map {rcm!s} is not readable — "
+              f"integrating without it. The geometry is unaffected; re-run the "
+              f"calibration with 'Build residual map' on to regenerate it.",
+              flush=True)
+    return spec
+
+
 def _build_spec(result, r_bin: float, eta_bin: float,
                 r_min: Optional[float] = None, r_max: Optional[float] = None,
                 eta_min: Optional[float] = None, eta_max: Optional[float] = None):
@@ -1503,12 +1704,15 @@ def _build_spec(result, r_bin: float, eta_bin: float,
     spec.TransOpt = list(getattr(result, "im_trans", []) or [])
     _apply_panel_fields(spec, getattr(result, "panel_layout", None),
                         getattr(result, "panel_shifts_path", None))
-    return spec
+    return _drop_missing_residual_map(spec)
 
 
 def _spec_from_json(path: str, r_bin: float, eta_bin: float):
+    # compat.to_integrate copies the JSON's "residual_corr_bin" key straight
+    # into the spec, so a calibration.json outlives the .bin it points at.
     from midas_calibrate_v2.compat.to_integrate import spec_from_calibration_json
-    return spec_from_calibration_json(path, RBinSize=r_bin, EtaBinSize=eta_bin)
+    return _drop_missing_residual_map(
+        spec_from_calibration_json(path, RBinSize=r_bin, EtaBinSize=eta_bin))
 
 
 # v1 paramstest index (p#) → v2 harmonic name — the inverse of the single source
@@ -1638,6 +1842,14 @@ def geometry_fields_from_file(path: str) -> dict:
         for t in ("tx", "ty", "tz"):
             fields[t] = fields.get(t) or 0.0
         fields["distortion"] = fields.get("distortion") or {}
+        # Absent and empty are different answers. A paramstest with no
+        # ImTransOpt lines genuinely means "no transform"; a backend-written
+        # calibration.json (which records no im_trans at all) and a .poni
+        # (which has no such concept) mean "this file does not say". Callers
+        # that restore UI state must not read the second as the first and
+        # silently untick the user's flips -- so record which one it was,
+        # while still handing every existing caller a plain list.
+        fields["im_trans_in_file"] = fields.get("im_trans") is not None
         fields["im_trans"] = list(fields.get("im_trans") or [])
         fields["panel_layout"] = fields.get("panel_layout") or None
         ps = fields.get("panel_shifts_path") or None
@@ -1670,7 +1882,7 @@ def geometry_fields_from_file(path: str) -> dict:
             Lsd=g("Lsd", "Lsd_um"), BC_y=g("BC_y", "BC_y_px"), BC_z=g("BC_z", "BC_z_px"),
             tx=g("tx", "tx_deg"), ty=g("ty", "ty_deg"), tz=g("tz", "tz_deg"),
             wavelength_A=g("wavelength_A", "Wavelength"), distortion=c.get("distortion", {}),
-            im_trans=c.get("im_trans", []),
+            im_trans=c.get("im_trans"),   # None when absent -- see _norm
             panel_layout=c.get("panel_layout"), panel_shifts_path=c.get("panel_shifts_path"))
         missing = [k for k in ("NrPixelsY", "NrPixelsZ", "pxY", "Lsd", "BC_y", "BC_z",
                                "wavelength_A") if fields[k] is None]

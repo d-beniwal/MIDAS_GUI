@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -280,7 +281,7 @@ def _auto_result_from_unpacked(u: dict, *, NY, NZ, pxY, pxZ, wavelength,
 
 
 def _attach_panel_result(result, panel_u: dict, panel_layout: Optional[dict],
-                         output_dir: Optional[str]) -> None:
+                         scratch: Optional[str], stem: str = "") -> None:
     """Attach panel-layout results to ``result`` in a form downstream spec
     building / paramstest export can use directly.
 
@@ -290,37 +291,84 @@ def _attach_panel_result(result, panel_u: dict, panel_layout: Optional[dict],
     "Use Tab 2 calibration"): those build an IntegrationSpec straight from
     ``result`` with no save step, so the shifts need to already be on disk
     and the panel *grid* (rows/cols/size/gaps — not just the deltas) needs
-    to be recorded somewhere too. Writes panel_shifts.txt unconditionally
-    (unlike residual_corr.bin, which stays in-memory-only without an
-    output_dir) since a missing panel correction silently produces the
-    wrong geometry, not just a smaller residual. Sets two plain,
+    to be recorded somewhere too. Writes the file unconditionally (unlike
+    residual_corr.bin, which stays in-memory-only when the fit didn't build
+    one) since a missing panel correction silently produces the wrong
+    geometry, not just a smaller residual. Sets two plain,
     JSON-serializable attributes (``panel_layout`` dict of ints,
     ``panel_shifts_path`` str) so both survive ``_save_json``'s
     underscore-attribute filter.
+
+    Named ``<stem>_panelshifts.txt``, matching what the save dialog already
+    does (``tab_calibrate._save_paramstest``) and for the same reason: the
+    generic ``panel_shifts.txt`` this used to write meant two fits sharing a
+    directory silently overwrote each other's shifts, and a Hydra run with
+    four panels in flight raced. The per-run scratch leaf already separates
+    them; the name also makes the file self-describing to anyone who goes
+    looking.
     """
     if not panel_u or not panel_layout:
         return
     from midas_calibrate_v2.compat.to_v1 import write_panel_shifts_file
-    if output_dir:
-        out = Path(output_dir)
-        out.mkdir(parents=True, exist_ok=True)
-        path = out / "panel_shifts.txt"
-    else:
-        import tempfile
-        fd, tmp = tempfile.mkstemp(suffix="_panel_shifts.txt")
-        os.close(fd)
-        path = Path(tmp)
-        print(f"[calibrate] panel shifts written to a temporary file ({path}) — "
-              f"Save .json / Save paramstest, or set an Output folder, to keep them.")
+    from midas_gui.helpers import session_scratch_dir
+    stem = re.sub(r"[^\w.-]", "_", stem or "calib")   # free-form Exp ID upstream
+    # `scratch` arrives already resolved and created by helpers.scratch_dir at
+    # the caller — do not re-resolve it here, that would nest a second
+    # .midas_scratch inside it. Without one, fall back to the process temp dir
+    # (cleaned at exit) so "no working directory set" still produces shifts.
+    base = Path(scratch) if scratch else Path(session_scratch_dir())
+    base.mkdir(parents=True, exist_ok=True)
+    path = base / f"{stem}_panelshifts.txt"
+    if not scratch:
+        print(f"[calibrate] panel shifts written to session scratch ({path}) — "
+              f"they won't survive this session. Save .json / Save paramstest, "
+              f"or set a Working directory, to keep them.")
     write_panel_shifts_file(panel_u, path)
     result.panel_layout = dict(panel_layout)
     result.panel_shifts_path = str(path)
 
 
+def _confirm_residual_bin(result):
+    """Null out ``residual_corr_bin_path`` when it names a file nothing wrote.
+
+    ``calibrate()`` mints the path from ``output_dir`` alone
+    (``midas_calibrate_v2/pipelines/auto.py:680-683``) and returns it at
+    ``:976`` without ever checking the file exists — but it only *builds* the
+    map when ``build_residual_corr`` is on (``:702``), and it disables map
+    building outright for a multi-panel fit (``:702-703``,
+    ``build_residual_corr and panel_layout is None``). The phase-2 path at
+    ``:773`` can also give up on too few surviving non-outlier fits. So an
+    un-ticked "Build residual map", or any panel-layout run, hands back a
+    result pointing at a ``residual_corr.bin`` that was never created.
+
+    That matters because midas_integrate_v2 treats an unreadable
+    ``ResidualCorrectionMap`` as fatal rather than ignoring it, so the phantom
+    path takes down every integration, cake and pseudo-strain view built from
+    an otherwise complete geometry. Worse, it does not stay in memory: it is
+    persisted into the project snapshot and exported into paramstest, so one
+    bad fit poisons files that outlive the session.
+
+    ``helpers._drop_missing_residual_map`` defends the spec, but by then the
+    bad path is already recorded. Clearing it here fixes it at the source, for
+    every branch below, and is idempotent for the reroute branch that already
+    confirms its own path.
+    """
+    p = getattr(result, "residual_corr_bin_path", None)
+    if p and not os.path.isfile(str(p)):
+        try:
+            result.residual_corr_bin_path = None
+        except AttributeError:      # frozen/slotted result — nothing to fix up
+            pass
+    return result
+
+
 def normalize_result(raw, mode: str, *, NY, NZ, pxY, pxZ, wavelength,
                      panel_layout: Optional[dict] = None,
-                     output_dir: Optional[str] = None):
+                     scratch: Optional[str] = None, stem: str = ""):
     """Return an AutoCalibrationResult regardless of which pipeline produced raw.
+
+    Every branch's result goes out through :func:`_confirm_residual_bin`; see
+    there for why a returned residual-map path cannot be trusted as written.
 
     When panel_layout was used, the refined panel shifts (panel_delta_yz /
     panel_delta_theta) are attached as ``result._panel_unpacked`` so the save
@@ -333,6 +381,15 @@ def normalize_result(raw, mode: str, *, NY, NZ, pxY, pxZ, wavelength,
     autocalibrate_four_stage (which exposes stage2.unpacked); we detect this
     by checking for a ``.stage2`` attribute on the raw result.
     """
+    return _confirm_residual_bin(_normalize_result_impl(
+        raw, mode, NY=NY, NZ=NZ, pxY=pxY, pxZ=pxZ, wavelength=wavelength,
+        panel_layout=panel_layout, scratch=scratch, stem=stem))
+
+
+def _normalize_result_impl(raw, mode: str, *, NY, NZ, pxY, pxZ, wavelength,
+                           panel_layout: Optional[dict] = None,
+                           scratch: Optional[str] = None, stem: str = ""):
+    """The per-mode conversion itself; see :func:`normalize_result`."""
     # one_shot+panel_layout was re-routed through four_stage to expose unpacked
     if mode == "one_shot" and hasattr(raw, "stage2"):
         effective_mode = "four_stage"
@@ -340,6 +397,34 @@ def normalize_result(raw, mode: str, *, NY, NZ, pxY, pxZ, wavelength,
         effective_mode = mode
 
     if effective_mode == "one_shot":
+        # Two different objects arrive here. calibrate() hands back a real
+        # AutoCalibrationResult; the reroute through
+        # pipelines.single.autocalibrate (run_pipeline takes it for non-default
+        # tol*, Lsd/BC held fixed, or only one of ty/tz refined) hands back a v2
+        # CalibrationResult — spec + unpacked, with no flat Lsd/BC_y/NrPixelsY
+        # fields at all. Returning that unconverted crashed every downstream
+        # reader of the geometry (paramstest export first). Detected the same
+        # way the four_stage reroute is detected above: by the shape of raw.
+        if hasattr(raw, "unpacked") and not hasattr(raw, "Lsd"):
+            strain = getattr(raw, "post_residual_strain_uE", None)
+            if strain is None and getattr(raw, "history", None):
+                strain = raw.history[-1].mean_strain_uE
+            result = _auto_result_from_unpacked(
+                raw.unpacked, NY=NY, NZ=NZ, pxY=pxY, pxZ=pxZ,
+                wavelength=wavelength, strain=strain,
+                residual_map=getattr(raw, "residual_corr_map", None),
+                residual_bin_path=getattr(raw, "_residual_bin_path", None))
+            # run_pipeline pre-flipped the image for this branch, so the frame
+            # the geometry was solved in is only recorded on raw._im_trans.
+            # The non-rerouted one_shot path gets this natively from
+            # calibrate(); without it a rerouted result would integrate in the
+            # wrong frame.
+            result.im_trans = tuple(getattr(raw, "_im_trans", ()) or ())
+            panel_u = _extract_panel_unpacked(raw.unpacked)
+            if panel_u:
+                result._panel_unpacked = panel_u
+                _attach_panel_result(result, panel_u, panel_layout, scratch, stem)
+            return result
         return raw   # calibrate() already returns AutoCalibrationResult, no panel data
 
     if effective_mode == "first_time":
@@ -352,7 +437,7 @@ def normalize_result(raw, mode: str, *, NY, NZ, pxY, pxZ, wavelength,
         panel_u = _extract_panel_unpacked(pv.unpacked)
         if panel_u:
             result._panel_unpacked = panel_u
-            _attach_panel_result(result, panel_u, panel_layout, output_dir)
+            _attach_panel_result(result, panel_u, panel_layout, scratch, stem)
         return result
 
     if effective_mode == "four_stage":
@@ -364,7 +449,7 @@ def normalize_result(raw, mode: str, *, NY, NZ, pxY, pxZ, wavelength,
         panel_u = _extract_panel_unpacked(pv.unpacked)
         if panel_u:
             result._panel_unpacked = panel_u
-            _attach_panel_result(result, panel_u, panel_layout, output_dir)
+            _attach_panel_result(result, panel_u, panel_layout, scratch, stem)
         return result
 
     if effective_mode == "bayesian":
@@ -373,7 +458,7 @@ def normalize_result(raw, mode: str, *, NY, NZ, pxY, pxZ, wavelength,
         panel_u = _extract_panel_unpacked(raw.map_unpacked)
         if panel_u:
             result._panel_unpacked = panel_u
-            _attach_panel_result(result, panel_u, panel_layout, output_dir)
+            _attach_panel_result(result, panel_u, panel_layout, scratch, stem)
         lap = getattr(raw, "laplace", None)
         if lap is not None:
             names = list(getattr(lap, "refined_names", []) or [])
@@ -388,7 +473,7 @@ def normalize_result(raw, mode: str, *, NY, NZ, pxY, pxZ, wavelength,
         panel_u = _extract_panel_unpacked(raw.map_unpacked)
         if panel_u:
             result._panel_unpacked = panel_u
-            _attach_panel_result(result, panel_u, panel_layout, output_dir)
+            _attach_panel_result(result, panel_u, panel_layout, scratch, stem)
         return result
 
     if effective_mode == "frozen_point":
@@ -559,24 +644,38 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
                 seed, wavelength=wavelength, pxY=pxY, pxZ=pxZ, calibrant=calibrant,
                 NY=pNY, NZ=pNZ, refine=refine, n_iter=n_iter, device=device,
                 tols=tols)
+            build_rc = bool(cfg.get("build_residual_corr", True))
             bin_path = None
-            if cfg.get("output_dir"):
-                from pathlib import Path
-                out = Path(cfg["output_dir"]); out.mkdir(parents=True, exist_ok=True)
-                bin_path = str(out / "residual_corr.bin")
+            if build_rc and cfg.get("scratch_dir"):
+                # Already created and writability-checked by helpers.scratch_dir
+                # at the caller; just name the file inside it.
+                bin_path = str(Path(cfg["scratch_dir"]) / "residual_corr.bin")
             from midas_calibrate_v2.pipelines.single import autocalibrate
             raw = autocalibrate(
                 v1, img, dark=dk, n_iter=n_iter, lm_max_iter=lm_iter,
                 device=device, verbose=True,
-                build_residual_corr=bool(cfg.get("build_residual_corr", True)),
+                build_residual_corr=build_rc,
                 residual_corr_path=bin_path)
-            raw._residual_bin_path = bin_path   # no .bin field on CalibrationResult
+            # bin_path is only where autocalibrate would *put* a residual map,
+            # decided before it runs. It writes one only if it actually builds
+            # one, and it gives up quietly on too few non-outlier fits
+            # (single.py:322-345). Recording the path regardless hands
+            # integration a ResidualCorrectionMap that isn't on disk, and
+            # midas_integrate_v2 hard-fails on an unreadable map rather than
+            # ignoring it — so confirm the file before claiming it.
+            import os as _os
+            raw._residual_bin_path = (        # no .bin field on CalibrationResult
+                bin_path if bin_path and _os.path.isfile(bin_path) else None)
+            raw._im_trans = im_trans             # ditto; see normalize_result
             return raw
 
         from midas_calibrate_v2 import calibrate
         kwargs = dict(
             wavelength=wavelength, pxY=pxY, dark=dark, calibrant=calibrant,
-            output_dir=cfg.get("output_dir"),
+            # Scratch, not the working directory: calibrate() writes both
+            # residual_corr.bin and a generically-named calibration.json here
+            # (pipelines/auto.py:680-683, :921-955), neither of them asked for.
+            output_dir=cfg.get("scratch_dir"),
             build_residual_corr=bool(cfg.get("build_residual_corr", True)),
             n_iter=n_iter, lm_max_iter=lm_iter, device=device, verbose=True,
             refine_tilts=bool(refine.get("ty", True) or refine.get("tz", True)),

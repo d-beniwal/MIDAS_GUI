@@ -1779,6 +1779,51 @@ One term is left out: the empirical `residual_corr_map` (a smooth sub-pixel ΔR(
 absorbed after the harmonics converge, and present only if you refined **Residual
 map**). When a result carries one, the status text beside the toolbar says so.
 
+### Working directory
+The **Working dir:** field (bottom of the left panel, with a **…** browse
+button and **Suggest**) is the one place calibration writes on its own. Deliberate saves
+are unaffected — **Save calibration.json** and **Save paramstest.txt** still ask
+where to put the file — but everything generated along the way goes here.
+
+Intermediates land in a `.midas_scratch/` subfolder inside it, one folder per
+run (and, in Hydra mode, one per panel inside that): the residual-correction
+map, the fit-time `<name>_panelshifts.txt`, and the backend's own scratch
+output. Everything in `.midas_scratch/` is re-derivable and safe to delete
+whenever you like — the GUI never deletes it for you, so a run's intermediates
+are still there when you come back to them.
+
+The field fills itself when you load data, following this order:
+
+1. the folder the data sits in, if its name ends in `_bc`;
+2. the nearest folder above it whose name ends in `_bc`;
+3. mpe_wf's convention read off the path — `<outroot>/<expid>_bc`, derived from
+   the standard `<outroot>/<expid>/<detector>/<froot>/<files>` layout;
+4. `<data folder>/<expid>_bc`, using the Exp ID from the header;
+5. otherwise **nothing** — the field stays empty and you pick a folder.
+
+An already-`_bc` folder wins over the positional reading because data does not
+always sit four levels deep: a file directly inside an `…_sep26_bc` directory
+read positionally would propose a folder next to the mount root that nobody can
+create. Note this is *not* the same default as Batch Integrate, which appends
+`/<froot>/<detector>/` to the same `_bc` root — calibration writes one run's
+scratch, not a tree of per-detector outputs.
+
+Autofill never overwrites a path you typed yourself, and never fills in a
+folder it can't write to — if the derived default isn't writable it is left out
+and the Log says why. **Suggest** re-derives it on demand, so a default you
+cleared or overwrote is always recoverable; unlike autofill it fills the field
+even when the folder isn't writable, and warns, so you can see what it picked.
+
+Leaving the field empty is allowed: intermediates then go to a temporary folder
+that is deleted when the GUI exits, and the Log says so. You lose the residual
+map and the fit-time panel shifts on exit unless you Save.
+
+If the folder can't be written to, **Run Calibration** stops before starting
+rather than discovering it minutes later with a finished fit that has quietly
+failed to record its residual map. Reopening a project whose stored working
+directory no longer resolves (a different machine, a mount that isn't there)
+logs a warning at open time — the stored path is left alone for you to correct.
+
 ### Run / Abort
 **Run Calibration** launches the worker; **Abort** terminates it and frees the slot so
 you can immediately start a new run (the calibration is one uninterruptible library
@@ -1841,9 +1886,10 @@ a saved paramstest.txt or calibration.json is immediately usable standalone. Thi
 sidecar is (re)written **at Save time**, next to wherever the `.json`/`.txt` actually
 lands — so it always travels with the file you saved, rather than pointing back at the
 possibly-temporary file the live Fit run first wrote it to (Fit itself writes into
-whatever Output folder is set; with no Output folder, panel shifts land in an
-anonymous temp file and the Log says so explicitly, as a reminder that Save is needed
-to make them permanent). Each saved file gets its own uniquely-named sidecar (derived
+`.midas_scratch/` inside the **Working dir** — see above; with no working directory
+set, panel shifts land in a temporary folder that is deleted when the GUI exits and
+the Log says so explicitly, as a reminder that Save is needed to make them
+permanent). Each saved file gets its own uniquely-named sidecar (derived
 from that file's own name), so saving several calibrations into the same folder never
 has them overwrite each other's panel data. If a saved calibration/paramstest and its
 sidecar are later copied or moved together to somewhere the originally-recorded path
@@ -2107,6 +2153,12 @@ data source is loaded, mirroring `mpe_wf_saxs_waxs`'s own
   Profile selector) is a free-text label — e.g. `park_may26` — used as the
   fallback expid for Suggest above and saved with the Project (§16) and
   across restarts (last-used value, independent of Profile).
+- The Calibrate tab's **Working dir** (§5) is derived from the same `_bc`
+  convention but is deliberately *not* the same folder: it stops at the bare
+  `<expid>_bc` root, without the `/<froot>/<detector>/` tail, and it prefers
+  an existing `_bc` folder in the path over the positional reading. Batch
+  keeps the positional reading, which is correct for the layout Batch is
+  pointed at. See §5's "Working directory" for why they differ.
 
 ### Output formats — checkbox list behind a popup button (multi-select)
 Click the **Output format ▾** button to reveal a checkbox per format —
@@ -2158,6 +2210,12 @@ Also hosts **per-pixel gain training (LearnableGain)**: from a clean reference f
 a drifted frame, learn a spatial gain map `g_i = 1 + scale·r_i` by minimising
 `MSE(profile) + unity·Σ(g−1)² + smooth·TV(g)`; save as NPZ and apply with
 `corrected = raw / gain_map`.
+
+An **Output:** field (text + **…** browse button, in the gain card) sets where the save dialog
+opens, so a trained gain map doesn't default to whatever directory the app was
+launched from. It's a starting directory only — **Save gain map** still asks,
+and you can put the file anywhere. The path is saved with the tab's state, and
+is flagged in place if it stops resolving.
 
 ---
 

@@ -826,7 +826,8 @@ class CalibrationWorker(QtCore.QThread):
                 pxY=self._cfg["pxY"], pxZ=self._cfg.get("pxZ"),
                 wavelength=self._cfg["wavelength"],
                 panel_layout=self._cfg.get("panel_layout"),
-                output_dir=self._cfg.get("output_dir"))
+                scratch=self._cfg.get("scratch_dir"),
+                stem=self._cfg.get("save_stem", ""))
             result._calibrant_name = self._cfg["calibrant"]
             self.finished.emit(result)
         except Exception:

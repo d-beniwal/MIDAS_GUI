@@ -8,6 +8,102 @@ file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this
 date for the full uncondensed entries if ever needed._
 
+## 2026-09-24 — A named working directory for calibration, and `.midas_scratch/`
+
+Triggered by a live integration failure:
+
+```
+FileNotFoundError: ResidualCorrectionMap
+'/net/s20iddata/export/s20a/PUP_AML_stubbins_sep26_bc/residual_corr.bin'
+is set but cannot be read
+```
+
+Three separate problems behind one traceback, fixed separately.
+
+**1. A returned path is a claim, not a fact.** `calibrate()` mints
+`residual_corr_bin_path` from `output_dir` alone
+(`midas_calibrate_v2/pipelines/auto.py:680-683`) and returns it at `:976`
+without checking the file exists — but it only *builds* the map when
+`build_residual_corr` is on, and disables map building outright for any
+multi-panel fit (`:702-703`). Untick "Build residual map", or run Hydra, and
+the result names a file nothing wrote, which `midas_integrate_v2` treats as
+fatal. `calib._confirm_residual_bin` is now a single choke point on
+`normalize_result`'s way out: a path naming no file becomes `None`. Downstream,
+`helpers._drop_missing_residual_map` degrades an unreadable map to "no map"
+rather than raising. The earlier reroute-only fix did not cover this path.
+
+**2. Scratch had nowhere to live.** `residual_corr.bin` and
+`panel_shifts.txt` landed either in the user's *data* directory or, with the
+Output field blank, in a `tempfile.mkstemp` file they could never find again.
+Neither is tidy, and the user asked for neither. There is now one working
+directory per calibration, and every intermediate goes in
+`<workdir>/.midas_scratch/<run-id>/` — deletable wholesale, because everything
+in it is re-derivable and every deliberate save still goes through a file
+dialog. The GUI never deletes it: an analysis folder that empties itself
+between sessions is its own kind of surprise.
+
+The Calibrate tab's existing `Output:` field was *repurposed* rather than
+joined by a second one. It had no deliberate outputs — every real save went
+through a dialog — so it was already a working directory in all but name and
+default. The state key stays `out_ed` so pre-change projects still restore.
+
+Per-run and per-panel leaves are not decoration: everything the backend writes
+there is generically named (`residual_corr.bin`, `calibration.json`,
+`panel_shifts.txt`), so two fits sharing a folder overwrote each other and four
+parallel Hydra panels raced. The fit-time `panel_shifts.txt` also picked up the
+`<stem>_panelshifts.txt` naming the *save* path had used for this reason since
+`test_calibrate_panel_save.py` was written; only the fit path had missed it.
+
+**3. `_bc` recognition must precede the positional derivation.** Batch's
+`_suggest_output_dir` reads expid/detector/outroot *positionally*, assuming
+mpe_wf's four-deep `<outroot>/<expid>/<detector>/<froot>/<files>`. That is
+correct for what Batch is pointed at, and wrong here. The user's `.h5` sits
+*directly inside* an already-`_bc` directory, three levels below the mount, so
+the positional read calls `export` the expid and proposes
+`/net/s20iddata/export_bc` — a sibling of the mount root nobody can create.
+So `suggest_working_dir` checks for a `_bc` ancestor **first** (which also
+happens to be demonstrably writable — the data is sitting in it), and only then
+falls back to the positional read and the header Exp ID. It deliberately has no
+fallback into the data tree: a working directory inside the raw data is exactly
+the littering this feature exists to stop, and an empty field that makes the
+user choose is the better answer.
+
+Batch's behaviour is unchanged. The shared parse was extracted to
+`helpers.bc_path_parts`, with `suggest_integration_output_dir` (Batch's full
+`/<froot>/<detector>` tail) and `suggest_working_dir` (the bare `_bc` root) as
+the two callers. `tests/test_batch_output_dir.py` was written as
+characterization *before* the refactor — the function had zero coverage — so
+the extraction is provably behaviour-preserving, including the case that pins
+Batch still producing `/net/s20iddata/export_bc` for the user's real path.
+
+**An unwritable candidate is never pre-filled.** Autofill runs
+`check_output_dir_writable` and, on failure, leaves the field empty and logs
+the reason once — a path that looks accepted and then fails at Run time is
+worse than no path. The Suggest button *does* fill it, with the warning: there
+the user asked, so they get the answer and the reason it won't work. Restoring
+a project logs a warning for a stored directory that has gone stale (a host
+without that mount) rather than silently rewriting it — it is the user's choice
+to correct. At Run time an unwritable working directory blocks the fit rather
+than warning and carrying on: a fit that runs for minutes and only then finds
+it cannot record its residual map has wasted the user's time and left them a
+result silently missing the refinement they asked for.
+
+`scratch_dir()` **raises** `OSError` carrying that reason rather than returning
+`None`, for the same reason — a silent fallback is how the original bug got
+this far. With no working directory set it falls back to one `mkdtemp` per
+process, removed at exit, so a blank field is never fatal and never litters.
+
+**Folder designation elsewhere.** `tab_corrections.py` was the one tab the user
+named that had no folder field at all (only a save dialog); it got one on the
+established idiom. `tab_batch`, `tab_export` and `tab_queue` already had theirs.
+`tab_pdf.py` and `tab_texture.py` also lack one and were deliberately left out —
+both are work-in-progress per the README.
+
+**Out of scope, deliberately:** `app.py`'s `~/midas_gui_error.log` and
+`job_queue.py`'s `~/.midas_gui/jobs/` stay in `$HOME`. Both are app-lifetime
+rather than per-calibration state, and the job store must stay at a stable path
+to be adoptable across GUI instances.
+
 ## 2026-09-23 — The Calibrate Run/Save block keeps this fork's full-width layout
 
 Upstream's `6104310` did two things at once: pinned Output/Run/Save into a

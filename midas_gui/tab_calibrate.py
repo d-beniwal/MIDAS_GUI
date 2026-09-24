@@ -9,6 +9,8 @@ Ports the v3 calibration tab and adds Phase-1 features:
 from __future__ import annotations
 
 import math
+import re
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -26,7 +28,8 @@ from midas_gui.helpers import (
     make_kedge_label, make_pixel_label, ring_xy_corrected, distortion_rho_d_um,
     ring_on_image_mask, refresh_combo_items,
     widgets_to_dict, apply_dict_to_widgets, im_trans_codes_from_checkboxes,
-    paramstest_pairs, parse_dspacing_text, browse_start_dir, warn_if_path_missing)
+    paramstest_pairs, parse_dspacing_text, browse_start_dir, warn_if_path_missing,
+    suggest_working_dir, check_output_dir_writable, scratch_dir, SCRATCH_DIRNAME)
 from midas_gui.widgets import (
     PickableImageViewer, ProfileViewer, LogPanel, DataLoaderPanel, CakeViewer,
     RingResidualViewer, OriginToolButton, build_lab_frame_axes_items,
@@ -92,8 +95,15 @@ class CalibrationTab(QtWidgets.QWidget):
         self._project_ctx: Optional[project.ProjectContext] = None
         self._pending_log_result = None   # result awaiting _log_to_project once integration finishes
         self._expid_provider = None       # set by app.py; see set_expid_provider
+        self._wd_declined = ""            # last unwritable candidate, logged once
         self._build_ui()
         self._loader.set_path(DEFAULT_CALIBRANT_TIF)
+        # Connected after the bundled demo image loads above, deliberately
+        # unlike Batch Integrate (which connects before its own default load):
+        # DEFAULT_CALIBRANT_TIF lives inside the installed package, so letting
+        # it autofill would propose a working directory next to the source
+        # tree on every cold start — a path nobody asked to write to.
+        self._loader.dataChanged.connect(self._maybe_autofill_working_dir)
 
     def set_mask_from_tab1(self, mask: Optional[np.ndarray]):
         self._loader.set_tab1_mask(mask)
@@ -104,9 +114,14 @@ class CalibrationTab(QtWidgets.QWidget):
 
     def set_expid_provider(self, provider) -> None:
         """Wired by app.py's MainWindow: ``provider()`` returns the header's
-        current Exp ID (shared app-wide, not owned by this tab). Used only to
-        name saved calibrations — see ``_default_save_stem``."""
+        current Exp ID (shared app-wide, not owned by this tab). Feeds the
+        saved-calibration name (``_default_save_stem``) and, as a fallback for
+        layouts too shallow to read it off the path, the working-directory
+        suggestion (``_suggest_working_dir``)."""
         self._expid_provider = provider
+        # Forwarded the same way set_project_context is: the Hydra page is a
+        # child of this tab, not separately wired by app.py.
+        self._hydra_page._expid_provider = provider
 
     # ── Default names for saved calibrations ──────────────────────
 
@@ -134,6 +149,59 @@ class CalibrationTab(QtWidgets.QWidget):
             if stem:
                 parts.append(stem)
         return "_".join(parts) if parts else "calibration"
+
+    def _suggest_working_dir(self):
+        """The ``<expid>_bc`` folder implied by the loaded data, or None."""
+        path = self._loader.data_path()
+        if not path:
+            return None
+        try:
+            expid = (self._expid_provider() or "").strip() if self._expid_provider else ""
+        except Exception:
+            expid = ""
+        return suggest_working_dir(path, expid_fallback=expid)
+
+    def _set_working_dir(self, d) -> None:
+        self._out_ed.setText(str(d))
+        reason = check_output_dir_writable(d)
+        if reason:
+            self._log.append(f"[calibrate] Warning: {reason}")
+
+    def _apply_suggested_working_dir(self):
+        """The Suggest button: overwrite whatever is there with the default."""
+        d = self._suggest_working_dir()
+        if d is None:
+            self._log.append(
+                "[calibrate] Can't derive a working directory from the loaded "
+                "data path — pick one with the … button.")
+            return
+        self._set_working_dir(d)
+
+    def _maybe_autofill_working_dir(self, *_a):
+        """Fill the field on data load, but never overwrite the user's choice.
+
+        Declines an unwritable candidate rather than pre-filling it: a path
+        that looks accepted but fails at Run time is worse than an empty field
+        that makes the user choose. The Suggest button still fills it — there
+        the user asked, so they get the path and the warning.
+
+        Silent when it can't derive one, unlike the Suggest button: this fires
+        on every data change, and a log line per frame would be noise. The
+        same reason a repeated unwritable candidate is only reported once.
+        """
+        if self._out_ed.text().strip():
+            return
+        d = self._suggest_working_dir()
+        if d is None:
+            return
+        reason = check_output_dir_writable(d)
+        if reason:
+            if self._wd_declined != str(d):
+                self._wd_declined = str(d)
+                self._log.append(
+                    f"[calibrate] No working directory filled in — {reason}")
+            return
+        self._set_working_dir(d)
 
     def _default_save_path(self, suffix: str) -> str:
         """``_default_save_stem()`` + *suffix*, under the Output dir if one is
@@ -741,17 +809,42 @@ class CalibrationTab(QtWidgets.QWidget):
         fv = QtWidgets.QVBoxLayout(footer); fv.setContentsMargins(2, 6, 2, 0); fv.setSpacing(6)
         fv.addWidget(S.hline())
 
-        self._out_ed = QtWidgets.QLineEdit(); self._out_ed.setPlaceholderText("Output dir…")
+        # Labelled "Working dir", but the attribute and state key stay
+        # `_out_ed` / "out_ed" so projects saved before the rename still
+        # restore into it — the directory means the same thing either way.
+        self._out_ed = QtWidgets.QLineEdit()
+        self._out_ed.setPlaceholderText("Working directory…")
+        self._out_ed.setToolTip(
+            "Working directory for this calibration.\n\n"
+            "Intermediate files the fit produces (residual_corr.bin, the "
+            "backend's calibration.json, panel shifts) go in a "
+            f"{SCRATCH_DIRNAME}/ subfolder here, never next to your raw data. "
+            "Delete that subfolder whenever you like — nothing you saved "
+            "through a Save button lives in it.\n\n"
+            "Defaults to the <expid>_bc analysis folder derived from the "
+            "loaded data path. Also the folder the Save dialogs open on.")
         warn_if_path_missing(self._out_ed, self, is_output_dir=True)
         bou = _br(); bou.clicked.connect(lambda: self._out_ed.setText(
             QtWidgets.QFileDialog.getExistingDirectory(
-                self, "Output dir", browse_start_dir(self._out_ed.text())) or ""))
-        outr = QtWidgets.QHBoxLayout(); outr.setSpacing(4); outr.addWidget(self._out_ed, 1); outr.addWidget(bou)
+                self, "Working directory", browse_start_dir(self._out_ed.text())) or ""))
+        # Autofill only fires into an empty field, by design, so without a
+        # button there is no way back to the derived default after a project
+        # restore or a typo.
+        self._suggest_out_btn = QtWidgets.QPushButton("Suggest")
+        self._suggest_out_btn.setToolTip(
+            "Fill in the <expid>_bc analysis folder, read off the loaded data "
+            "path — the _bc folder the data already sits in if there is one, "
+            "otherwise derived from the <outroot>/<expid>/<detector>/<froot>/ "
+            "layout. No need to type the Exp ID first.")
+        self._suggest_out_btn.clicked.connect(self._apply_suggested_working_dir)
+        outr = QtWidgets.QHBoxLayout(); outr.setSpacing(4)
+        outr.addWidget(self._out_ed, 1); outr.addWidget(bou)
+        outr.addWidget(self._suggest_out_btn)
         # A Form().row() stretches its field column to fill the footer's full
         # width, so the row grows/shrinks with the splitter instead of
         # staying pinned to the left like the Run/Save rows below it.
         out_row = QtWidgets.QHBoxLayout(); out_row.setSpacing(4)
-        out_row.addWidget(S.LabelRight("Output:")); out_row.addLayout(outr, 1)
+        out_row.addWidget(S.LabelRight("Working dir:")); out_row.addLayout(outr, 1)
         fv.addLayout(out_row)
 
         # ── Run + Save ──
@@ -1678,15 +1771,41 @@ class CalibrationTab(QtWidgets.QWidget):
         self._seed_ty.setValue(float(g.get("ty") or 0.0))
         self._seed_tz.setValue(float(g.get("tz") or 0.0))
         im_trans = g.get("im_trans") or []
-        self._flip_y.setChecked(1 in im_trans)
-        self._flip_z.setChecked(2 in im_trans)
-        self._transp.setChecked(3 in im_trans)
+        if g.get("im_trans_in_file", True):
+            self._flip_y.setChecked(1 in im_trans)
+            self._flip_z.setChecked(2 in im_trans)
+            self._transp.setChecked(3 in im_trans)
+        # else: the file is silent on the transform (a backend-written
+        # calibration.json records none; a .poni has no such concept). The
+        # geometry in it is only meaningful in the frame it was fitted in, so
+        # unticking the boxes here would quietly re-frame it — leave whatever
+        # the user has set and say so in the log.
+        # The distortion coefficients are part of the geometry too: dropping
+        # them on load seeds the next fit from a distortion-free detector and
+        # throws away the harmonics this calibration was refined with. Zeros
+        # are skipped — a zero seed is the default, so carrying all fifteen
+        # would only inflate the "Distortion (n)" count with empty slots.
+        dist = {k: float(v) for k, v in (g.get("distortion") or {}).items()
+                if float(v) != 0.0}
+        if dist:
+            self._seed_dist = dist
+            self._enable_seed(Distortion=True)
+            self._update_seed_dist_label()
         self._seed_note.setText(
             f"Loaded {Path(path).name}: λ={g['wavelength_A']:.5f} Å, px={g['pxY']:.2f} µm, "
             f"BC=({g['BC_y']:.2f}, {g['BC_z']:.2f}), Lsd={g['Lsd']/1000:.3f} mm, "
             f"tx={g.get('tx') or 0.0:.3f}°, ty={g.get('ty') or 0.0:.3f}°, "
             f"tz={g.get('tz') or 0.0:.3f}°.")
         self._log.append(f"Calibration file loaded: {path}")
+        if dist:
+            self._log.append(
+                f"Distortion seeded from file: {len(dist)} non-zero coefficient(s) "
+                f"({', '.join(sorted(dist))}).")
+        if not g.get("im_trans_in_file", True):
+            self._log.append(
+                "Note: this file records no image transform, so Flip Y / Flip Z / "
+                "Transpose were left as they are. The loaded geometry is only valid "
+                "in the frame it was fitted in — check them against that run.")
         if im_trans and im_trans != [c for c in (1, 2, 3) if c in im_trans]:
             self._log.append(
                 f"Note: ImTransOpt order in file ({im_trans}) differs from the "
@@ -1717,7 +1836,11 @@ class CalibrationTab(QtWidgets.QWidget):
         if g.get("ty") is not None:
             self._seed_ty.setValue(float(g["ty"]))
             self._enable_seed(ty=True)
-        if g.get("im_trans") is not None:
+        if g.get("im_trans") is not None and g.get("im_trans_in_file", True):
+            # "im_trans_in_file" is only set by helpers.geometry_fields_from_file
+            # and is False when the source file said nothing about the frame;
+            # the Data Viewer builds its dict from live checkboxes, so it has
+            # no such key and keeps overriding exactly as before.
             im_trans = g["im_trans"] or []
             self._flip_y.setChecked(1 in im_trans)
             self._flip_z.setChecked(2 in im_trans)
@@ -2002,6 +2125,22 @@ class CalibrationTab(QtWidgets.QWidget):
                 "'Frozen-point (high-tilt)' does not support Multi-panel "
                 "detectors yet. Uncheck 'Multi-panel' or choose a "
                 "different pipeline."); return
+        # Resolve scratch before anything runs. Blocking (rather than warning
+        # and carrying on) matches Batch Integrate and is the right call here:
+        # a fit that runs for minutes and only then finds it can't record its
+        # residual map has wasted the user's time and left them with a result
+        # that silently lacks the refinement they asked for.
+        work_dir = self._out_ed.text().strip() or None
+        stem = self._default_save_stem()
+        run_id = "calib_%s_%s" % (
+            time.strftime("%Y%m%d-%H%M%S"), re.sub(r"[^\w.-]", "_", stem))
+        try:
+            scratch = scratch_dir(work_dir, run_id)
+        except OSError as e:
+            QtWidgets.QMessageBox.critical(
+                self, "Working directory not writable", str(e))
+            return
+
         self._calib_cancelled = False
         self._run_btn.setEnabled(False); self._abort_btn.setEnabled(True)
         self._prog.setVisible(True)
@@ -2025,6 +2164,13 @@ class CalibrationTab(QtWidgets.QWidget):
 
         trans = im_trans_codes_from_checkboxes(self._flip_y, self._flip_z, self._transp)
 
+        if work_dir:
+            self._log.append(f"[calibrate] scratch: {scratch}")
+        else:
+            self._log.append(
+                f"[calibrate] No working directory set — intermediates go to "
+                f"{scratch} and are deleted when the GUI exits. Set one to keep them.")
+
         cfg = {
             "wavelength": self._wl.value(),
             "pxY": self._pxY.value(),
@@ -2035,7 +2181,14 @@ class CalibrationTab(QtWidgets.QWidget):
             "lm_max_iter": self._lm_iter.value(),
             "device": self._device.currentText(),
             "build_residual_corr": self._build_rc.isChecked(),
-            "output_dir": self._out_ed.text().strip() or None,
+            # Where machine-generated intermediates go. The user-facing
+            # working directory is `work_dir`; `scratch_dir` is the per-run
+            # leaf inside its .midas_scratch/, which keeps two fits in one
+            # working directory from overwriting each other's generically
+            # named output (residual_corr.bin, calibration.json, panel shifts).
+            "work_dir": work_dir,
+            "scratch_dir": str(scratch),
+            "save_stem": stem,
             "im_trans": trans,
             "mask": self._loader.composite_mask(),
             # None while every window sits at the backend default, which keeps
@@ -2567,6 +2720,27 @@ class CalibrationTab(QtWidgets.QWidget):
                 extra = dict(panel_grid_extra)
                 rcm = getattr(result, "residual_corr_bin_path", None)
                 if rcm and getattr(result, "residual_corr_map", None) is not None:
+                    # Copy the map next to the paramstest and point at the
+                    # copy, for the same reason the panel shifts get a
+                    # <stem>_ sidecar above: the original lives in the
+                    # working directory's .midas_scratch/, which the user is
+                    # explicitly told they may delete at any time. A saved
+                    # instrument file that silently stops working the first
+                    # time someone tidies up is worse than no map at all —
+                    # midas_integrate_v2 treats an unreadable one as fatal.
+                    try:
+                        import shutil
+                        rcm_copy = Path(out_path).with_name(
+                            Path(out_path).stem + "_residual_corr.bin")
+                        if Path(rcm).resolve() != rcm_copy.resolve():
+                            shutil.copyfile(rcm, rcm_copy)
+                        rcm = str(rcm_copy)
+                    except OSError as e:
+                        self._log.append(
+                            f"[calibrate] Warning: couldn't copy the residual map "
+                            f"beside the paramstest ({e}); pointing at the scratch "
+                            f"copy instead, which won't survive deleting "
+                            f"{SCRATCH_DIRNAME}/.")
                     extra["ResidualCorrectionMap"] = rcm
                 if ps_path:
                     extra["PanelShiftsFile"] = str(ps_path)
@@ -2707,6 +2881,16 @@ class CalibrationTab(QtWidgets.QWidget):
     def _set_state(self, state: dict, sidecar_stem: Optional[str] = None) -> None:
         fields = state.get("fields", {})
         apply_dict_to_widgets(self._state_widgets(), fields)
+        # A restored working directory is the user's stored choice, so it is
+        # never silently rewritten to the current default — but it can have
+        # gone stale (project opened on a host without that mount), and
+        # finding that out at Run time is worse than at open time.
+        restored_wd = self._out_ed.text().strip()
+        if restored_wd:
+            reason = check_output_dir_writable(restored_wd)
+            if reason:
+                self._log.append(
+                    f"[calibrate] Warning: restored working directory — {reason}")
         if "seed_en_bc" not in fields and self._manual_seed_check.isChecked():
             # A project saved before the per-parameter seed panel existed:
             # "Use manual seed" meant BC+Lsd+tilts all together, so reproduce
