@@ -742,46 +742,44 @@ class CalibrationTab(QtWidgets.QWidget):
         fv.addWidget(S.hline())
 
         self._out_ed = QtWidgets.QLineEdit(); self._out_ed.setPlaceholderText("Output dir…")
-        self._out_ed.setMaximumWidth(238)   # ~25% narrower than the default rendered width
         warn_if_path_missing(self._out_ed, self, is_output_dir=True)
         bou = _br(); bou.clicked.connect(lambda: self._out_ed.setText(
             QtWidgets.QFileDialog.getExistingDirectory(
                 self, "Output dir", browse_start_dir(self._out_ed.text())) or ""))
-        outr = QtWidgets.QHBoxLayout(); outr.setSpacing(4); outr.addWidget(self._out_ed); outr.addWidget(bou)
+        outr = QtWidgets.QHBoxLayout(); outr.setSpacing(4); outr.addWidget(self._out_ed, 1); outr.addWidget(bou)
         # A Form().row() stretches its field column to fill the footer's full
         # width, so the row grows/shrinks with the splitter instead of
         # staying pinned to the left like the Run/Save rows below it.
         out_row = QtWidgets.QHBoxLayout(); out_row.setSpacing(4)
-        out_row.addWidget(S.LabelRight("Output:")); out_row.addLayout(outr)
-        out_row.addStretch(1)
+        out_row.addWidget(S.LabelRight("Output:")); out_row.addLayout(outr, 1)
         fv.addLayout(out_row)
 
         # ── Run + Save ──
         self._run_btn = S.primary_btn("Run Calibration")
         self._run_btn.clicked.connect(self._on_run_clicked)
-        self._run_btn.setFixedWidth(189)   # ~3x its old 63px (~50% of natural sizeHint 126)
         self._run_btn.setToolTip("Run Calibration")
         self._abort_btn = QtWidgets.QPushButton("Abort")
         self._abort_btn.setEnabled(False)
         self._abort_btn.setToolTip("Cancel: returns control immediately and discards the "
                                    "result. The running computation finishes in the background.")
         self._abort_btn.clicked.connect(self._abort)
+        # Full-width Run with Abort pinned to its right, and the two Save
+        # buttons as equal halves below it — the arrangement this tab had
+        # before the footer was introduced. Upstream centred all four at fixed
+        # pixel widths; that leaves the block floating free of the Output field
+        # it belongs with, and a fixed width cannot follow the splitter or a
+        # different font scale.
         run_row = QtWidgets.QHBoxLayout(); run_row.setSpacing(6)
-        run_row.addStretch(1); run_row.addWidget(self._run_btn); run_row.addWidget(self._abort_btn)
-        run_row.addStretch(1)
+        run_row.addWidget(self._run_btn, 1); run_row.addWidget(self._abort_btn)
         fv.addLayout(run_row)
         self._prog = QtWidgets.QProgressBar(); self._prog.setRange(0, 0); self._prog.setVisible(False)
         fv.addWidget(self._prog)
         self._save_json_btn = QtWidgets.QPushButton("Save .json"); self._save_json_btn.setEnabled(False)
         self._save_json_btn.clicked.connect(self._save_json)
-        self._save_json_btn.setFixedWidth(132)   # ~3x its old 44px (~50% of natural sizeHint 88)
-        self._save_json_btn.setToolTip("Save .json")   # button is narrower than its own text
+        self._save_json_btn.setToolTip("Save .json")
         self._save_ps_btn = QtWidgets.QPushButton("Save paramstest.txt"); self._save_ps_btn.setEnabled(False)
         self._save_ps_btn.clicked.connect(self._save_paramstest)
-        save_row = QtWidgets.QHBoxLayout(); save_row.setSpacing(6)
-        save_row.addStretch(1); save_row.addWidget(self._save_json_btn); save_row.addWidget(self._save_ps_btn)
-        save_row.addStretch(1)
-        fv.addLayout(save_row)
+        fv.addLayout(S.button_grid([self._save_json_btn, self._save_ps_btn], 2))
 
         mid_col = QtWidgets.QWidget()
         mid_v = QtWidgets.QVBoxLayout(mid_col); mid_v.setContentsMargins(0, 0, 0, 0); mid_v.setSpacing(0)

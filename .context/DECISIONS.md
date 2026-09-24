@@ -8,6 +8,23 @@ file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this
 date for the full uncondensed entries if ever needed._
 
+## 2026-09-23 — The Calibrate Run/Save block keeps this fork's full-width layout
+
+Upstream's `6104310` did two things at once: pinned Output/Run/Save into a
+non-scrolling footer, and re-centred all four buttons at fixed pixel widths
+(`189`/`132`). The footer is kept; the centring is reverted to full-width Run +
+Abort and an `S.button_grid(..., 2)` pair of Saves.
+
+Fixed widths cannot follow the splitter or a different font scale — the same
+class of bug `0ecc80a` had just fixed elsewhere — and centring detaches the
+block from the Output field it acts on.
+
+This is a deliberate fork-local divergence, kept as its own commit and placed
+*last* so the branch sent upstream is simply `main~1`: asking the maintainer to
+undo their own design choice does not belong in a PR about filenames. Expect it
+to re-conflict on the next upstream merge; the footer widget itself is not in
+dispute, only the geometry inside it.
+
 ## 2026-09-23 — Saved calibrations are named `<expid>_<image>.instru.*`
 
 Both save paths hardcoded their suggestion — `"calibration.json"` in
