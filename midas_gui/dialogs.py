@@ -351,8 +351,12 @@ class _SaveParamstestDialog(QtWidgets.QDialog):
     keeping all other parameters verbatim.
     """
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, default_out: str = ""):
+        """*default_out* prefills the Output file field (and seeds its Browse
+        dialog). Optional — callers that have no meaningful suggestion, such
+        as the Hydra page, leave it out and get the old blank field."""
         super().__init__(parent)
+        self._default_out = default_out
         self.setWindowTitle("Save paramstest.txt")
         self.setMinimumWidth(540)
         layout = QtWidgets.QVBoxLayout(self)
@@ -373,7 +377,7 @@ class _SaveParamstestDialog(QtWidgets.QDialog):
         form = QtWidgets.QFormLayout(); form.setSpacing(8)
 
         out_row = QtWidgets.QHBoxLayout()
-        self._out_edit = QtWidgets.QLineEdit()
+        self._out_edit = QtWidgets.QLineEdit(default_out)
         self._out_edit.setPlaceholderText("paramstest.txt")
         out_row.addWidget(self._out_edit)
         b_out = QtWidgets.QPushButton("Browse…"); b_out.setFixedWidth(80)
@@ -401,7 +405,8 @@ class _SaveParamstestDialog(QtWidgets.QDialog):
 
     def _browse_out(self):
         p, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save paramstest.txt", "paramstest.txt",
+            self, "Save paramstest.txt",
+            self._out_edit.text().strip() or self._default_out or "paramstest.txt",
             "Text files (*.txt);;All files (*)")
         if p:
             self._out_edit.setText(p)

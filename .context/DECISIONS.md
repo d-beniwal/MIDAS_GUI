@@ -8,6 +8,31 @@ file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this
 date for the full uncondensed entries if ever needed._
 
+## 2026-09-23 — Saved calibrations are named `<expid>_<image>.instru.*`
+
+Both save paths hardcoded their suggestion — `"calibration.json"` in
+`_save_json`, `"paramstest.txt"` in `_SaveParamstestDialog` — as a *bare*
+filename, which makes the dialog open on the process CWD, i.e. wherever the app
+was launched from. Every calibration a user saved therefore had to be renamed and
+moved by hand. `CalibrationTab._default_save_stem()` now suggests
+`<expid>_<calibration image stem>`, and `_default_save_path(suffix)` puts it under
+the Output dir (falling back to the image's own folder).
+
+`.instru.txt` / `.instru.json` is the user's own convention; the string appears
+nowhere else in the codebase. It is only a default — the dialogs stay editable.
+
+Both halves of the stem are optional and independently droppable. The Exp ID
+header is free-form and often blank, and the Data path may not be set yet;
+joining unconditionally would offer `_.instru.txt`, which is worse than either
+half alone. With neither, the suggestion is `calibration`.
+
+Exp ID reaches the tab through the same `set_expid_provider` callback Batch
+Integrate already uses (`app.py` `_build_ui`) rather than a copy of the header
+text, so it tracks edits. `DataLoaderPanel.data_path()` was added as the public
+read side of the existing `set_path()`. `_SaveParamstestDialog`'s new
+`default_out` is keyword-only *and optional*: `hydra_calib_widgets.py` builds the
+same dialog with no meaningful suggestion to offer, and keeps the blank field.
+
 ## 2026-09-23 — Merging upstream 44a0aa1..b25d7e0: which side wins where the two branches both touched the Refine card
 
 Branch `merge/upstream-2026-09-23`, merge base `4a0e8ba`. Upstream (`d-beniwal`)

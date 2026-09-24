@@ -4776,6 +4776,15 @@ class DataLoaderPanel(QtWidgets.QWidget):
             if self._mode == "stream" or Path(str(path)).exists():
                 self._load()
 
+    def data_path(self) -> str:
+        """The path currently typed in the Data card, stripped (may be "").
+
+        Public read side of :meth:`set_path`, for callers that want to name an
+        output after the input it came from — see
+        ``CalibrationTab._default_save_stem``.
+        """
+        return self._path_ed.text().strip()
+
     def n_frames(self) -> int:
         return self._nframes
 

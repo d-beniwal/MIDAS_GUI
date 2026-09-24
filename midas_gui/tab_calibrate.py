@@ -91,6 +91,7 @@ class CalibrationTab(QtWidgets.QWidget):
         self._last_background: Optional[np.ndarray] = None
         self._project_ctx: Optional[project.ProjectContext] = None
         self._pending_log_result = None   # result awaiting _log_to_project once integration finishes
+        self._expid_provider = None       # set by app.py; see set_expid_provider
         self._build_ui()
         self._loader.set_path(DEFAULT_CALIBRANT_TIF)
 
@@ -100,6 +101,52 @@ class CalibrationTab(QtWidgets.QWidget):
     def set_project_context(self, ctx: "project.ProjectContext"):
         self._project_ctx = ctx
         self._hydra_page.set_project_context(ctx)
+
+    def set_expid_provider(self, provider) -> None:
+        """Wired by app.py's MainWindow: ``provider()`` returns the header's
+        current Exp ID (shared app-wide, not owned by this tab). Used only to
+        name saved calibrations — see ``_default_save_stem``."""
+        self._expid_provider = provider
+
+    # ── Default names for saved calibrations ──────────────────────
+
+    def _default_save_stem(self) -> str:
+        """``<expid>_<calibration image stem>`` for the Save dialogs.
+
+        Both halves are best-effort: a blank Exp ID or an empty Data path
+        simply drops that half, so the suggestion degrades to the image stem,
+        to the Exp ID, or — with neither — to "calibration", rather than
+        offering something like ``_.instru.txt``.
+        """
+        parts = []
+        try:
+            expid = (self._expid_provider() or "").strip() if self._expid_provider else ""
+        except Exception:
+            expid = ""
+        if expid:
+            parts.append(expid)
+        data_path = self._loader.data_path()
+        if data_path:
+            # .h5/.tif alike: one suffix off is enough, and a doubled
+            # extension (".ge3.edf") keeps its first half, which is the
+            # distinguishing part of the name.
+            stem = Path(data_path).name.rsplit(".", 1)[0]
+            if stem:
+                parts.append(stem)
+        return "_".join(parts) if parts else "calibration"
+
+    def _default_save_path(self, suffix: str) -> str:
+        """``_default_save_stem()`` + *suffix*, under the Output dir if one is
+        set (else beside the calibration image, else the process CWD).
+
+        Returning a full path rather than a bare filename is what keeps the
+        save dialog from opening on whatever directory the app happens to have
+        been launched from.
+        """
+        out_dir = self._out_ed.text().strip()
+        start = browse_start_dir(out_dir) if out_dir else browse_start_dir(self._loader.data_path())
+        name = self._default_save_stem() + suffix
+        return str(Path(start) / name) if start else name
 
     def import_hydra_from_viewer(self, data: dict):
         self._hydra_page.import_from_viewer(data)
@@ -2420,7 +2467,8 @@ class CalibrationTab(QtWidgets.QWidget):
     def _save_json(self):
         if not self._result: return
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save calibration.json", "calibration.json", "JSON (*.json)")
+            self, "Save calibration.json", self._default_save_path(".instru.json"),
+            "JSON (*.json)")
         if not path: return
         import json
         d = {k: v for k, v in vars(self._result).items()
@@ -2460,7 +2508,7 @@ class CalibrationTab(QtWidgets.QWidget):
     def _save_paramstest(self):
         if not self._result:
             return
-        dlg = _SaveParamstestDialog(self)
+        dlg = _SaveParamstestDialog(self, default_out=self._default_save_path(".instru.txt"))
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return
         out_path = dlg.out_path()

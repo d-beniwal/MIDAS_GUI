@@ -290,8 +290,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Header Exp ID field: any tab that wants it for output-path
         # suggestions reads it live via this callback rather than keeping its
-        # own copy — today just Batch Integrate.
-        for tab in (self._batch_tab,):
+        # own copy — Batch Integrate names its output folder from it, Calibrate
+        # names the files it saves.
+        for tab in (self._batch_tab, self._cal_tab):
             set_provider = getattr(tab, "set_expid_provider", None)
             if set_provider is not None:
                 try:
