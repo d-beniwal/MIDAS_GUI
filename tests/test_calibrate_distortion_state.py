@@ -123,3 +123,62 @@ class TestHydraPage:
         assert b._dist_coeffs == {"iso_R2", "a1"}
         assert not b._ref_dist.isChecked()
         assert b._ref_dist.text() == "Distortion (0/15)"
+
+
+class TestRealProjectFile:
+    """Through an actual project ``.h5``, not just the in-memory state dict.
+
+    The dict-level tests above would still pass if the selection were saved as
+    something JSON could not carry — a ``set`` is the obvious trap here, since
+    that is what ``_dist_coeffs`` is in memory and what ``_refine_flags``
+    already hands the backend. This walks the real path the GUI uses on
+    Ctrl+S and File > Open Project.
+    """
+
+    def test_the_selection_survives_a_save_and_reopen(self, make_tab, tmp_path):
+        from midas_gui import project
+
+        proj = tmp_path / "dist.h5"
+        project.create_project(proj, name="dist")
+
+        a = make_tab()
+        a._ref_dist.setChecked(False)
+        a._dist_coeffs = {"iso_R2", "a1", "phi1"}
+        a._update_dist_label()
+        project.write_gui_workspace(proj, tabs={"Calibrate": a.get_state()})
+
+        state, _sidecars = project.read_workspace_tab(proj, "Calibrate")
+        assert state["dist_coeffs"] == ["a1", "iso_R2", "phi1"]   # a list, not a set
+
+        b = make_tab()
+        b.set_state(state)
+        assert not b._ref_dist.isChecked()
+        assert b._dist_coeffs == {"iso_R2", "a1", "phi1"}
+        # The caption counts what the *run* would refine, so an unticked row
+        # reads (0/15) while still holding the three underneath — re-tick it
+        # and the selection is there, which is the whole point of saving it.
+        assert b._ref_dist.text() == "Distortion (0/15)"
+        b._ref_dist.setChecked(True)
+        assert b._ref_dist.text() == "Distortion (3/15)"
+
+    def test_a_ticked_subset_survives_too(self, make_tab, tmp_path):
+        """The unticked case can pass for the wrong reason — nothing to refine
+        either way. This one has to carry the subset through to be right."""
+        from midas_gui import project
+
+        proj = tmp_path / "dist2.h5"
+        project.create_project(proj, name="dist2")
+
+        a = make_tab()
+        a._ref_dist.setChecked(True)
+        a._dist_coeffs = {"iso_R2", "iso_R4"}
+        a._update_dist_label()
+        project.write_gui_workspace(proj, tabs={"Calibrate": a.get_state()})
+
+        b = make_tab()
+        b.set_state(project.read_workspace_tab(proj, "Calibrate")[0])
+        assert b._ref_dist.isChecked()
+        assert b._dist_coeffs == {"iso_R2", "iso_R4"}
+        assert b._ref_dist.text() == "Distortion (2/15)"
+        # and the run would honour it, not silently widen back out to 15
+        assert b._refine_flags()["distortion_coeffs"] == {"iso_R2", "iso_R4"}
