@@ -8,6 +8,58 @@ file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this
 date for the full uncondensed entries if ever needed._
 
+## 2026-09-24 — The polarization plane is η = 90° (horizontal), and the whole lab-frame chain is pinned by tests
+
+The user, looking at a CeO2 pattern, asked that the polarization correction be
+"consistent with the lab frame view where X-Z plane is the ring plane", and that
+images be "interpreted as how they are plotted and also plotted consistent with
+the MIDAS lab coordinate system".
+
+**MIDAS η is measured from vertical.** `midas_calibrate_v2/forward/geometry.py:209`
+computes `eta = atan2(-XYZ_y, XYZ_z)`, and `lattice.py:87` builds the detector
+coordinate as `Yc = (-Y_pix + BC_y) * pxY`. So η = 0 is straight up (+Z_MIDAS =
++Y_Lab), and η = ±90 is horizontal (∓Y_MIDAS = ±X_Lab). The storage ring's
+X_Lab–Z_Lab plane is horizontal and the beam is polarized in it, so **the
+polarization plane is η = 90, not η = 0.**
+
+**The GUI shipped 0.0.** Three sites — the Corrections widget, the Corrections
+tab, and `batch_cli --pol-plane` — all defaulted to a vertical polarization
+plane. The functional form was right; it was applied a quarter turn away. Since
+the factor goes as `cos(2(η − plane))`, plane = 0 does not merely fail to remove
+a ring's azimuthal modulation — it ADDS it. `midas_integrate_v2` had already
+fixed its own default to 90 on 2026-08-29 and measured it on 1-ID CeO2: plane =
+90 takes a ring's cos(2η) modulation from 2.813 % to 0.744 %, while plane = 0
+makes it 1.84× worse. All three sites now read
+`constants.POL_PLANE_HORIZONTAL_ETA_DEG = 90.0`; ±90 are equivalent (period 180).
+
+**Saved projects keep their own stored value.** A project written before today
+restores `pol_plane = 0.0`, and it is deliberately *not* rewritten — silently
+changing the physics of a reopened project would make old and new runs of the
+same project incomparable with no record of why. Instead `BatchWorker.run()`
+logs the plane and fraction at every run start, and appends "← NOT horizontal;
+η is measured from vertical, so the storage-ring plane is 90°" whenever the
+value is off-plane. The user sees it and decides.
+
+**The rest of the orientation chain was already correct — and is now pinned.**
+Audited end to end against the user's diagram (+Y_Lab up = η 0, +X_Lab left =
+η −90, +Z_Lab = beam into the page): the backend's η, the viewer's screen
+mapping (`disp = d.T` so the array's column axis is pyqtgraph's x, with
+`invertY(False)` putting row 0 at the bottom), the lab-frame compass overlay
+(`build_lab_frame_axes_items`, `x_screen_sign = -1.0`) and the bin-grid spokes
+(`draw_polar_bin_overlay`, `bc + r·(sin η, cos η)`) all agree with each other
+and with the backend. Nothing needed changing; `tests/test_lab_frame_conventions.py`
+now locks it down so nothing can drift.
+
+**Note on writing those tests — two symmetries make the obvious test toothless.**
+Both mistakes worth catching map the spoke set onto itself for natural parameter
+choices: swapping sin for cos sends η → 90° − η, so ANY bin size dividing 90
+(45°, 30°, the four cardinals) draws an invariant set; flipping the sign of the
+Y term sends η → −η, so any η range symmetric about 0 — including the obvious
+−180…180 — is invariant too. The first version of the spoke test used 30° bins
+over −180…180 and passed happily with the axes exchanged. It now uses 20° bins
+over −10…170, and both mutations were confirmed to fail it. Verified by mutation
+testing, not by reading.
+
 ## 2026-09-24 — A named working directory for calibration, and `.midas_scratch/`
 
 Triggered by a live integration failure:

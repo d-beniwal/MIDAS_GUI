@@ -22,7 +22,8 @@ import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
-from midas_gui.constants import COLORMAPS, DISTORTION_NAMES, DEFAULT_COLORMAP, DEVICES
+from midas_gui.constants import (COLORMAPS, DISTORTION_NAMES, DEFAULT_COLORMAP,
+                                 DEVICES, POL_PLANE_HORIZONTAL_ETA_DEG)
 from midas_gui.dialogs import show_error, BrowseFilesDialog
 from midas_gui.helpers import fit_circle_algebraic
 from midas_gui.live_sources import PvaLiveSource, CaLiveSource, create_live_source
@@ -2603,8 +2604,19 @@ class CorrectionFlagsWidget(QtWidgets.QGroupBox):
             "Apply the polarization correction (synchrotron horizontal plane).")
         self.pol_fraction = _fspin(0.0, 1.0, 3, 0.99)
         self.pol_fraction.setFixedWidth(80)
-        self.pol_plane = _fspin(-180.0, 180.0, 1, 0.0, "°")
+        self.pol_fraction.setToolTip(
+            "Polarization fraction: 0 = unpolarized, 1 = fully polarized in the\n"
+            "ring plane. 0.99 is the usual synchrotron value.")
+        self.pol_plane = _fspin(-180.0, 180.0, 1,
+                                POL_PLANE_HORIZONTAL_ETA_DEG, "°")
         self.pol_plane.setFixedWidth(80)
+        self.pol_plane.setToolTip(
+            "Azimuth of the polarization plane, in MIDAS η.\n\n"
+            "MIDAS measures η from VERTICAL, so 90° is horizontal — the\n"
+            "storage ring's X_Lab–Z_Lab plane, which is where the beam is\n"
+            "polarized. That is the default and is almost always right.\n"
+            "0° puts the correction on the vertical axis and makes a ring's\n"
+            "azimuthal modulation worse, not better.")
         form.addRow(self.polar_check)
         form.addRow(_twocol("frac:", self.pol_fraction, "plane η:", self.pol_plane))
 

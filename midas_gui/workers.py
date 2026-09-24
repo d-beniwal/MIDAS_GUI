@@ -1186,6 +1186,21 @@ class BatchWorker(QtCore.QThread):
             mask = (self._mask if not self._im_trans or self._mask is None
                     else _apply_im_trans(self._mask.astype(np.float32), self._im_trans))
 
+            # Say out loud which azimuth the polarization correction is being
+            # applied on. MIDAS η is measured from vertical, so the ring plane
+            # is 90 — a plane of 0 is the one mistake that silently makes a
+            # ring's azimuthal modulation worse instead of removing it, and a
+            # project saved before 2026-09-24 restores the old 0.0 default.
+            pol_mod = (self._corrections or (None, None))[0]
+            if pol_mod is not None:
+                plane = float(getattr(pol_mod, "pol_plane_eta_deg", float("nan")))
+                frac = float(getattr(pol_mod, "pol_fraction", float("nan")))
+                off_plane = not abs(abs(plane) - 90.0) < 1e-6
+                self.log_line.emit(
+                    f"[batch] Polarization: plane η = {plane:g}°, fraction = {frac:g}"
+                    + ("  ← NOT horizontal; η is measured from vertical, so the "
+                       "storage-ring plane is 90°" if off_plane else ""))
+
             if self._context is not None:
                 self.log_line.emit("[batch] Reusing existing detector map…")
                 ctx = self._context

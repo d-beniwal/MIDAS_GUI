@@ -26,6 +26,8 @@ from __future__ import annotations
 import argparse
 import sys
 
+from midas_gui.constants import POL_PLANE_HORIZONTAL_ETA_DEG
+
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -60,7 +62,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--polarization", action="store_true")
     p.add_argument("--pol-fraction", type=float, default=0.99)
-    p.add_argument("--pol-plane", type=float, default=0.0)
+    p.add_argument("--pol-plane", type=float,
+                   default=POL_PLANE_HORIZONTAL_ETA_DEG,
+                   help="Azimuth of the polarization plane in MIDAS eta (deg). "
+                        "MIDAS eta is measured from vertical, so the default 90 "
+                        "is the horizontal ring plane; 0 is vertical.")
     p.add_argument("--solid-angle", action="store_true")
 
     p.add_argument("--variance", action="store_true", help="Compute per-bin sigma")
