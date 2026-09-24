@@ -37,6 +37,8 @@ PIPELINES = [
     ("Four-stage (patchy det.)", "four_stage", True),
     ("Bayesian MAP+Laplace",     "bayesian",   True),    # Phase 2
     ("Joint cake",               "joint",      True),    # Phase 3
+    ("Frozen-point (high-tilt)", "frozen_point", True),  # vendored, see
+                                                          # midas_gui/_vendor/frozen_point_calib
     ("Multi-distance",           "multi",      False),   # multi-image, deferred
 ]
 
@@ -192,6 +194,16 @@ MATERIALS = {
     "AgBH (silver behenate)": dict(kind="dspacing", d_list=[58.380 / n for n in range(1, 11)]),
 }
 
+#: The shipped "dspacing"-kind materials, captured before any user/profile
+#: config overlay can replace MATERIALS. The Preferences material table is
+#: lattice-only: it skips these when populating and carries them forward
+#: verbatim on Save (see prefs_dialog), so a d-spacing entry can never be
+#: removed by a deliberate user edit. Its absence from a saved config
+#: therefore only ever means the config predates it — which is why _apply()
+#: restores the missing ones instead of letting a stale snapshot mask them.
+_BUILTIN_DSPACING_MATERIALS = {n: dict(m) for n, m in MATERIALS.items()
+                               if m.get("kind") == "dspacing"}
+
 
 def calibrant_combo_items() -> list:
     """Unified list for the Calibrate tab's single Calibrant dropdown:
@@ -213,7 +225,8 @@ DEFAULT_KERNEL        = "subpixel2"   # key in KERNELS (integration algorithm)
 DEFAULT_PIPELINE      = "one_shot"    # key in PIPELINES (calibration algorithm)
 DEFAULT_OUTPUT_FORMAT = "csv"         # key in OUTPUT_FORMATS
 DEFAULT_ERROR_MODEL   = "poisson"     # value in ERROR_MODELS
-DEFAULT_COLORMAP      = "hot"         # value in COLORMAPS
+DEFAULT_COLORMAP      = "gray"        # value in COLORMAPS — every image/cake
+                                      # viewer in every tab starts here
 
 # Interface scale (whole-app zoom for HiDPI / 4K monitors). Applied at startup via
 # Qt's QT_SCALE_FACTOR, so the entire layout + fonts scale uniformly. 1.0 suits a
@@ -226,11 +239,11 @@ DEFAULT_UI_SCALE      = 1.0           # multiplier, clamped to [0.5, 4.0] at sta
 # is the subset of OPTIONAL_TABS shown at startup (all optional tabs ship enabled);
 # it is overridable via the per-user config key ``ui.visible_tabs``.
 ALWAYS_TABS = ["Data Viewer", "Mask Builder", "Calibrate", "Batch Integrate"]
-OPTIONAL_TABS = ["Calib. Refinement", "Corrections", "PDF Analysis", "Texture",
-                 "Pump Probe", "Results & Export"]
+OPTIONAL_TABS = ["Calib. Refinement", "Batch Queue", "Corrections", "PDF Analysis",
+                 "Texture", "Pump Probe", "Results & Export"]
 # Optional tabs shown by default. Corrections / PDF Analysis / Texture / Results &
 # Export ship hidden (turn them on in Settings ▸ Preferences ▸ Tabs).
-DEFAULT_VISIBLE_TABS = ["Calib. Refinement", "Pump Probe"]
+DEFAULT_VISIBLE_TABS = ["Calib. Refinement", "Batch Queue", "Pump Probe"]
 
 # ── Beamline devices (Data Viewer ▸ Live Data PV dropdown) ──────────────────────
 # Default detector devices for 20-ID-D, extracted from the beamline's area-detector
@@ -368,6 +381,12 @@ def _apply(cfg: dict) -> None:
             except Exception:
                 pass
         if parsed or cfg["materials"] == {}:
+            # Replace, then re-add any shipped d-spacing material the config
+            # simply never knew about (see _BUILTIN_DSPACING_MATERIALS). A
+            # config written before such a material shipped would otherwise
+            # mask it permanently — the user would never see it offered.
+            for name, m in _BUILTIN_DSPACING_MATERIALS.items():
+                parsed.setdefault(name, dict(m))
             MATERIALS.clear(); MATERIALS.update(parsed)
 
     # calibrants — likewise replace the CALIBRANTS dropdown list when present;
@@ -395,9 +414,14 @@ def _apply(cfg: dict) -> None:
             try:
                 name = str(d.get("name", "")).strip()
                 if name:
+                    # backend/ca_suffix are optional — any profile written
+                    # before these fields existed (or any entry that just
+                    # never sets them) defaults to plain PVA, unchanged.
                     parsed.append({"name": name,
                                     "prefix": str(d.get("prefix", "")).strip(),
-                                    "pva_suffix": str(d.get("pva_suffix", "")).strip()})
+                                    "pva_suffix": str(d.get("pva_suffix", "")).strip(),
+                                    "backend": str(d.get("backend", "pva")).strip().lower() or "pva",
+                                    "ca_suffix": str(d.get("ca_suffix", "image1:")).strip() or "image1:"})
             except Exception:
                 pass
         if parsed or cfg["devices"] == []:

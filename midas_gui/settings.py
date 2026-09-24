@@ -54,7 +54,15 @@ _cache: Optional[dict] = None
 
 
 def _pva(name: str, prefix: str) -> dict:
-    return {"name": name, "prefix": prefix, "pva_suffix": "Pva1:Image"}
+    return {"name": name, "prefix": prefix, "backend": "pva", "pva_suffix": "Pva1:Image"}
+
+
+def _ca(name: str, prefix: str, ca_suffix: str = "image1:") -> dict:
+    """A device read over plain EPICS Channel Access via an areaDetector
+    NDPluginStdArrays plugin (conventionally named "image1:"), for
+    beamlines whose IOC has no NDPluginPva -- see CaLiveSource in
+    midas_gui.live_sources."""
+    return {"name": name, "prefix": prefix, "backend": "ca", "ca_suffix": ca_suffix}
 
 
 # Bundled per-beamline device lists (Data Viewer ▸ Live Data PV dropdown), seeded
@@ -94,6 +102,16 @@ BUNDLED_PROFILES = {
         _pva("pg1", "1idPG1:"),
         _pva("pg5", "1idSP5:"),
         _pva("s1varex1", "1idVarex1:"),
+        _pva("Sim Detector", "midasSim:"),
+    ]},
+    # PLACEHOLDER prefix/plugin -- 17-BM's Varex is only ever driven via
+    # plain Channel Access (cam1/TIFF1/BADPIX1 plugins in the beamline's own
+    # control repo; no NDPluginPva referenced anywhere there). Confirm with
+    # 17-BM staff whether the IOC actually runs an NDPluginStdArrays
+    # instance named "image1:" (e.g. `caget 17bmVarex:image1:UniqueId_RBV`)
+    # before relying on this in a real deployment.
+    "17-BM": {"devices": [
+        _ca("varex", "17bmVarex:"),
         _pva("Sim Detector", "midasSim:"),
     ]},
 }

@@ -36,8 +36,10 @@ from midas_gui.constants import (
 from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _NoScrollComboBox, make_kedge_label, make_pixel_label,
     _load_image, apply_field_corrections, average_field, source_kind,
-    widgets_to_dict, apply_dict_to_widgets, _predict_ring_radii, refresh_combo_items)
-from midas_gui.widgets import PickableImageViewer, LogPanel, CakeViewer, _convert_radial
+    widgets_to_dict, apply_dict_to_widgets, _predict_ring_radii, refresh_combo_items,
+    browse_start_dir, warn_if_path_missing)
+from midas_gui.widgets import (PickableImageViewer, LogPanel, CakeViewer, _convert_radial,
+                               OriginToolButton)
 from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar, HydraProfileViewer
 from midas_gui.hydra_calib_widgets import HydraCalibPanelCard
 from midas_gui.workers import CalibrationWorker, IntegrationWorker
@@ -324,9 +326,11 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._device = _NoScrollComboBox(); self._device.addItems(["cpu", "cuda"])
         av.addLayout(S.Form().row(("E-M iters:", self._n_iter), ("LM iters:", self._lm_iter)))
         self._out_ed = QtWidgets.QLineEdit(); self._out_ed.setPlaceholderText("Output dir…")
+        warn_if_path_missing(self._out_ed, self, is_output_dir=True)
         bou = QtWidgets.QPushButton("…"); bou.setFixedWidth(30)
         bou.clicked.connect(lambda: self._out_ed.setText(
-            QtWidgets.QFileDialog.getExistingDirectory(self, "Output dir") or ""))
+            QtWidgets.QFileDialog.getExistingDirectory(
+                self, "Output dir", browse_start_dir(self._out_ed.text())) or ""))
         outr = QtWidgets.QHBoxLayout(); outr.setSpacing(4); outr.addWidget(self._out_ed, 1); outr.addWidget(bou)
         av.addLayout(S.Form().row(("Device:", self._device)))
         av.addLayout(S.Form().row(("Output:", outr)))
@@ -372,6 +376,10 @@ class HydraCalibrationPage(QtWidgets.QWidget):
                 lambda checked, n=n: self._sync_seed_checkbox("_manual_seed_check", n, checked))
             card._feedback_check.toggled.connect(
                 lambda checked, n=n: self._sync_seed_checkbox("_feedback_check", n, checked))
+            for attr in ("_seed_en_bc", "_seed_en_lsd", "_seed_en_tx",
+                        "_seed_en_ty", "_seed_en_tz"):
+                getattr(card, attr).toggled.connect(
+                    lambda checked, n=n, a=attr: self._sync_seed_checkbox(a, n, checked, block=False))
             self._cards[n] = card
             self._card_stack.addWidget(card)
         lv.addWidget(self._card_stack)
@@ -384,16 +392,16 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._toolbar = HydraDetectorToolbar(include_composite=False)
         self._toolbar.panelChanged.connect(self._on_panel_changed)
         tb = self._img_view._toolbar_layout
+        self._origin_btn = OriginToolButton(self._img_view)
+        tb.addWidget(self._origin_btn)
         tb.addWidget(self._toolbar)
         self._show_rings_check = QtWidgets.QCheckBox("Show rings"); self._show_rings_check.setChecked(True)
+        self._show_rings_check.setToolTip(
+            "Overlay the active panel's predicted rings, drawn through its full "
+            "fitted geometry — tilts and refined distortion both applied.")
         self._show_rings_check.toggled.connect(
             lambda c: self._active_card and self._active_card.set_show_rings(c))
         tb.addWidget(self._show_rings_check)
-        self._corrected_check = QtWidgets.QCheckBox("Corrected")
-        self._corrected_check.setToolTip("Redraw the active panel's rings reflecting its fitted tilt.")
-        self._corrected_check.toggled.connect(
-            lambda c: self._active_card and self._active_card.set_corrected(c))
-        tb.addWidget(self._corrected_check)
         right.addWidget(self._img_view)
 
         bot = QtWidgets.QTabWidget()
@@ -504,9 +512,9 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             chk.blockSignals(True); chk.setChecked(cn == n); chk.blockSignals(False)
         self._active_card = self._cards[n]
         self._active_card.bind_viewer(self._img_view)
-        for chk, getter in ((self._show_rings_check, self._active_card.show_rings_checked),
-                            (self._corrected_check, self._active_card.corrected_checked)):
-            chk.blockSignals(True); chk.setChecked(getter()); chk.blockSignals(False)
+        chk = self._show_rings_check
+        chk.blockSignals(True); chk.setChecked(self._active_card.show_rings_checked())
+        chk.blockSignals(False)
         self._refresh_display()
 
     def _on_card_transform_changed(self, n: int):
@@ -519,20 +527,35 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         if g.get("pxY"):
             self._pxY.setValue(float(g["pxY"]))
 
-    def _sync_seed_checkbox(self, attr: str, src_panel: int, checked: bool):
-        """"Use manual seed" / "Feed result back to seed" are one shared
-        choice across all 4 GE panels (only the seed VALUES — BC/Lsd/tilts —
-        stay independent per panel), so mirror a change on one panel's
-        checkbox onto the other three without re-triggering their own
-        ``toggled`` handlers."""
+    def _sync_seed_checkbox(self, attr: str, src_panel: int, checked: bool,
+                            block: bool = True):
+        """"Use manual seed" / "Feed result back to seed" / each per-parameter
+        seed-enable flag are one shared choice across all 4 GE panels (only
+        the seed VALUES — BC/Lsd/tilts — stay independent per panel), so
+        mirror a change on one panel's checkbox onto the other three.
+
+        ``block`` (default True, matching the original "Use manual seed" /
+        "Feed result back" behaviour) blocks the destination's own
+        ``toggled`` handlers while mirroring. The five per-parameter
+        ``_seed_en_*`` flags pass ``block=False`` instead: each drives that
+        card's own spin-box enable state and seed summary label
+        (``_on_seed_enable_changed``), which must actually run on every
+        mirrored panel, not just the one the user clicked. The equality
+        guard below still prevents runaway recursion — a card whose flag
+        already matches ``checked`` is a no-op, so the cascade this can
+        trigger (each card's own ``toggled`` re-enters this method) settles
+        in at most one pass per panel."""
         for n, card in self._cards.items():
             if n == src_panel:
                 continue
             cb = getattr(card, attr)
             if cb.isChecked() != checked:
-                cb.blockSignals(True)
-                cb.setChecked(checked)
-                cb.blockSignals(False)
+                if block:
+                    cb.blockSignals(True)
+                    cb.setChecked(checked)
+                    cb.blockSignals(False)
+                else:
+                    cb.setChecked(checked)
 
     # ── Per-panel frame sourcing ─────────────────────────────────────
 
@@ -1067,7 +1090,6 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         for n, card in self._cards.items():
             fields = widgets_to_dict(card.state_widgets())
             fields["show_rings"] = card.show_rings_checked()
-            fields["corrected"] = card.corrected_checked()
             cards[n] = fields
         return {
             "anchor_path": self._loader.current_path(),
@@ -1084,6 +1106,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             return
         apply_dict_to_widgets(self._state_widgets(), state.get("fields", {}))
         self._img_view.set_display_state(state.get("img_view"))
+        self._origin_btn.sync()
         for n_key, cv_state in (state.get("cake_views") or {}).items():
             cv = self._cake_views.get(int(n_key))
             if cv is not None:
@@ -1093,11 +1116,9 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             card = self._cards.get(int(n_key))
             if card is None:
                 continue
-            apply_dict_to_widgets(card.state_widgets(), fields)
+            card.apply_state_fields(fields)
             if "show_rings" in fields:
                 card.set_show_rings(bool(fields["show_rings"]))
-            if "corrected" in fields:
-                card.set_corrected(bool(fields["corrected"]))
         anchor = state.get("anchor_path")
         if anchor and Path(anchor).exists():
             self._loader.set_path(anchor)

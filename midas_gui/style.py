@@ -9,7 +9,7 @@ Functionality is unchanged — these only affect appearance and arrangement.
 """
 from __future__ import annotations
 
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets
 
 # ── Palette ─────────────────────────────────────────────────────────────────────
 BG        = "#3c3c3c"   # window / panel background
@@ -30,6 +30,83 @@ MONO_FAMILIES = ["Menlo", "Consolas", "DejaVu Sans Mono", "Courier New"]
 MONO_CSS = ", ".join(f'"{f}"' if " " in f else f for f in MONO_FAMILIES)
 
 
+# ── Fonts for graphics-scene items (overlays, plot axis titles) ─────────────────
+# The application stylesheet below sizes every *widget* in **pixels**
+# ("QWidget { font-size: 12px }"). Qt scales logical pixels by
+# QT_SCALE_FACTOR (see app._apply_ui_scale), so px-sized text tracks the rest of
+# the UI exactly at any interface scale.
+#
+# Items living in a QGraphicsScene — pg.TextItem overlays, pyqtgraph axis
+# titles — do NOT inherit that stylesheet, and the two obvious ways of sizing
+# them both misbehave:
+#
+#   * ``QFont().pointSize()`` on a default-constructed font returns the *system*
+#     size (13 pt on macOS), not the app's 12 px, so scaling "the app font by
+#     1.2" silently produced ~19 px text. On a widget the stylesheet has already
+#     touched, pointSize() comes back -1 instead, and bumping *that* gives a ~1 pt
+#     illegible font (see ROIRibbon's paintEvent, which hit this first).
+#   * A point size anywhere — QFont.setPointSize, or "font-size: 12pt" in the
+#     HTML pyqtgraph feeds its axis-title QGraphicsTextItem — is converted to
+#     pixels through the screen's logical DPI, which QT_SCALE_FACTOR already
+#     moved. The result is scaled twice and grows out of proportion with
+#     everything around it as the interface scale goes up.
+#
+# So: one base size in px, and every overlay/axis font derived from it.
+BASE_FONT_PX = 12        # keep in sync with the QWidget rule in stylesheet()
+
+
+def font_px(factor: float = 1.0, *, bold: bool = False, mono: bool = False) -> QtGui.QFont:
+    """A QFont sized ``factor`` × the app's base UI font, in **pixels**.
+
+    Use for anything drawn into a QGraphicsScene (pg.TextItem overlays, custom
+    paintEvent text) instead of setPointSize — see the note above.
+    """
+    f = QtGui.QFont()
+    if mono:
+        f.setFamilies(list(MONO_FAMILIES))
+        f.setStyleHint(QtGui.QFont.Monospace)
+    f.setPixelSize(max(1, round(BASE_FONT_PX * float(factor))))
+    f.setBold(bold)
+    return f
+
+
+def axis_label_css(color: str, factor: float = 1.0) -> dict:
+    """``setLabel(...)`` style kwargs for a pyqtgraph axis title, sized in px.
+
+    pyqtgraph wraps the title in ``<span style='...'>``; CSS ``px`` is taken
+    literally by QTextDocument (no DPI conversion), so the title scales with
+    the interface exactly like the surrounding widgets do.
+    """
+    return {"color": color, "font-size": f"{max(1, round(BASE_FONT_PX * float(factor)))}px"}
+
+
+def apply_theme(app: QtWidgets.QApplication, checkmark_svg: str,
+                 up_arrow_svg: str = "", down_arrow_svg: str = "") -> None:
+    """Apply the shared Fusion style, dark palette and QSS to *app*.
+
+    Shared by the main GUI and any standalone window (e.g. Auto Attenuation)
+    that should look — and scale with QT_SCALE_FACTOR — identically to it.
+    """
+    app.setStyle("Fusion")
+    pal = QtGui.QPalette()
+    for role, col in [
+        (QtGui.QPalette.Window,          BG),
+        (QtGui.QPalette.WindowText,      TEXT),
+        (QtGui.QPalette.Base,            INPUT_BG),
+        (QtGui.QPalette.AlternateBase,   "#e4e4e4"),
+        (QtGui.QPalette.Text,            INPUT_FG),
+        (QtGui.QPalette.Button,          "#444444"),
+        (QtGui.QPalette.ButtonText,      TEXT),
+        (QtGui.QPalette.Highlight,       ACCENT),
+        (QtGui.QPalette.HighlightedText, "#ffffff"),
+        (QtGui.QPalette.ToolTipBase,     "#2d2d30"),
+        (QtGui.QPalette.ToolTipText,     TEXT),
+    ]:
+        pal.setColor(role, QtGui.QColor(col))
+    app.setPalette(pal)
+    app.setStyleSheet(stylesheet(checkmark_svg, up_arrow_svg, down_arrow_svg))
+
+
 def stylesheet(checkmark_svg: str, up_arrow_svg: str = "", down_arrow_svg: str = "") -> str:
     """Return the full application QSS.
 
@@ -37,7 +114,7 @@ def stylesheet(checkmark_svg: str, up_arrow_svg: str = "", down_arrow_svg: str =
     are the glyphs drawn inside spinbox step buttons and the combo drop-down.
     """
     return f"""
-    QWidget {{ color: {TEXT}; font-size: 12px; }}
+    QWidget {{ color: {TEXT}; font-size: {BASE_FONT_PX}px; }}
     QMainWindow, QScrollArea, QSplitter {{ background: {BG}; }}
     QScrollArea {{ border: none; }}
     QToolTip {{ background: #2d2d30; color: {TEXT}; border: 1px solid {BORDER}; }}
@@ -161,6 +238,18 @@ def stylesheet(checkmark_svg: str, up_arrow_svg: str = "", down_arrow_svg: str =
         background: {ACCENT}; border-color: {ACCENT}; image: url({checkmark_svg});
     }}
     QRadioButton::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; }}
+    /* A disabled box must not render in the live accent fill: a ticked-looking
+       control that ignores clicks reads as a bug in the app, not as "fixed". */
+    QCheckBox:disabled, QRadioButton:disabled {{ color: {MUTED}; }}
+    QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {{
+        border-color: #4a4a4a;
+    }}
+    QCheckBox::indicator:checked:disabled, QGroupBox::indicator:checked:disabled {{
+        background: #4a4a4a; border-color: #4a4a4a;
+    }}
+    QRadioButton::indicator:checked:disabled {{
+        background: #4a4a4a; border-color: #4a4a4a;
+    }}
 
     /* ── Top tab bar (the 9 modules) ──────────────────────────── */
     QTabWidget::pane {{ border: 1px solid {BORDER}; border-radius: 4px; top: -1px; }}
@@ -297,8 +386,8 @@ DANGER_BTN_QSS = (
 class Form(QtWidgets.QGridLayout):
     """A compact label→field grid (Dioptas form style).
 
-    ``row(("Label:", widget), ...)`` adds up to two right-aligned label/field
-    pairs on one line; ``full(widget)`` spans the whole width.
+    ``row(("Label:", widget), ...)`` adds any number of right-aligned
+    label/field pairs on one line; ``full(widget)`` spans the whole width.
     """
     def __init__(self):
         super().__init__()
@@ -318,10 +407,11 @@ class Form(QtWidgets.QGridLayout):
                 self.addLayout(w, self._r, col + 1)
             else:
                 self.addWidget(w, self._r, col + 1)
+            # Every field column shares the row's spare width. Stretching only
+            # columns 1 and 3 left a third pair's field pinned to its minimum
+            # while the first two stretched around it.
+            self.setColumnStretch(col + 1, 1)
             col += 2
-        self.setColumnStretch(1, 1)
-        if len(pairs) > 1:
-            self.setColumnStretch(3, 1)
         self._r += 1
         return self
 

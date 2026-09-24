@@ -10,11 +10,6 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from PyQt5 import QtWidgets
-
-from midas_gui.helpers import geometry_fields_from_file
-from midas_gui.hydra_widgets import HydraFieldSelector
-from midas_gui.tab_view import DataViewerTab
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "test_data" / "gui_synthetic" / "hydra"
 
@@ -25,8 +20,48 @@ FIXTURE_DIR = Path(__file__).resolve().parent.parent / "test_data" / "gui_synthe
 pytestmark = pytest.mark.forked
 
 
+_QT_LOADED = False
+
+# Bound by _load_qt() at fixture time, declared here so static analysis
+# (and the pyflakes diff in the review recipe) can still resolve them.
+QtWidgets = None
+geometry_fields_from_file = HydraFieldSelector = DataViewerTab = None
+
+
+def _load_qt():
+    """Import Qt (and the GUI modules under test, which import it
+    transitively) and publish them as module globals.
+
+    Deliberately NOT done at module level. pytest imports this module during
+    collection, in the *parent* process, while pytest-forked runs each test
+    in a forked child. Importing PyQt5 in the parent initialises macOS
+    CoreFoundation, and CoreFoundation may not be used in a forked child —
+    every test then dies with SIGSEGV ("The process has forked and you
+    cannot use this CoreFoundation functionality safely") before its body
+    runs. Importing from inside the ``app`` fixture happens in the child, so
+    each child initialises CoreFoundation itself, which is legal.
+
+    See .context/STATE.md; ``tests/test_set_raw_frame.py`` is the file this
+    pattern was taken from."""
+    global _QT_LOADED
+    if _QT_LOADED:
+        return
+    from PyQt5 import QtWidgets
+    from midas_gui.helpers import geometry_fields_from_file
+    from midas_gui.hydra_widgets import HydraFieldSelector
+    from midas_gui.tab_view import DataViewerTab
+    _QT_LOADED = True
+    globals().update(
+        QtWidgets=QtWidgets,
+        geometry_fields_from_file=geometry_fields_from_file,
+        HydraFieldSelector=HydraFieldSelector,
+        DataViewerTab=DataViewerTab,
+    )
+
+
 @pytest.fixture(scope="module")
 def app():
+    _load_qt()
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
@@ -87,6 +122,60 @@ def test_hydra_field_selector_sibling_discovery_and_compute(app, tmp_path):
 
     sel.setChecked(False)
     assert sel.field(1) is None   # unchecked -> no correction, even though computed
+    # Uncheck also resets the path/siblings/computed fields outright (mirrors
+    # widgets.FieldSelector) — a stale pick must not survive to the next check.
+    assert sel._path_ed.text().strip() == ""
+    assert sel._sibling_paths == {}
+    assert sel._fields == {}
+
+    sel.setChecked(True)
+    assert sel._path_ed.text().strip() == ""  # no Data-path provider set here — nothing to prefill
+
+
+def test_hydra_field_selector_enter_on_a_missing_path_warns(app, monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
+                         lambda *a, **k: calls.append(a))
+
+    sel = HydraFieldSelector("Dark", default_dataset="exchange/data")
+    missing = tmp_path / "ge1" / "dark.ge1.h5"
+    sel._path_ed.setText(str(missing))
+    sel._path_ed.returnPressed.emit()
+    assert len(calls) == 1
+    assert str(missing) in calls[0][-1]
+
+
+def test_hydra_loader_panel_enter_on_a_missing_path_warns(app, monkeypatch, tmp_path):
+    from midas_gui.hydra_widgets import HydraLoaderPanel
+
+    calls = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
+                         lambda *a, **k: calls.append(a))
+
+    panel = HydraLoaderPanel()
+    missing = tmp_path / "ge1" / "data.ge1.h5"
+    panel._path_ed.setText(str(missing))
+    panel._path_ed.returnPressed.emit()
+    assert len(calls) == 1
+    assert str(missing) in calls[0][-1]
+
+
+def test_hydra_loader_panel_browse_starts_at_the_typed_directory(app, monkeypatch, tmp_path):
+    import midas_gui.hydra_widgets as HW
+
+    seen = {}
+
+    class _FakeDialog:
+        def __init__(self, parent=None, *, title="", modes=(), start_dir=""):
+            seen["start_dir"] = start_dir
+        def exec_(self):
+            return QtWidgets.QDialog.Rejected
+    monkeypatch.setattr(HW, "BrowseFilesDialog", _FakeDialog)
+
+    panel = HW.HydraLoaderPanel()
+    panel._path_ed.setText(str(tmp_path))
+    panel._open_browse_dialog()
+    assert seen["start_dir"] == str(tmp_path)
 
 
 def test_mode_ribbon_switches_pages(app):

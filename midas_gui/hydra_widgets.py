@@ -19,7 +19,7 @@ import pyqtgraph as pg
 
 from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollComboBox, hydra_siblings,
                          hydra_panel_index, is_h5, list_h5_datasets, source_kind,
-                         detect_geometry_from_path)
+                         detect_geometry_from_path, warn_if_path_missing)
 from midas_gui.workers import FieldAverageWorker, ProjectionWorker
 from midas_gui import hydra
 from midas_gui import style as S
@@ -150,6 +150,7 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
         self._pending: set = set()
         self._registry = None            # DataSourceRegistry, set by set_registry()
         self._exclude_label = None       # owning panel's registry label — skip its own entry
+        self._data_path_provider = None  # callable → owning panel's current Data path
 
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(6, 2, 6, 4); outer.setSpacing(2)
@@ -157,6 +158,7 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
         self._body.setVisible(False)
         self.toggled.connect(self._body.setVisible)
         self.toggled.connect(lambda *_: self.fieldsReady.emit())
+        self.toggled.connect(self._on_toggled)
         outer.addWidget(self._body)
         v = QtWidgets.QVBoxLayout(self._body)
         v.setContentsMargins(0, 0, 0, 0); v.setSpacing(3)
@@ -164,6 +166,7 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
         self._path_ed = QtWidgets.QLineEdit()
         self._path_ed.setPlaceholderText("Any one ge1-ge4 panel file…")
         self._path_ed.editingFinished.connect(lambda: self._set_path(self._path_ed.text().strip()))
+        warn_if_path_missing(self._path_ed, self)
         browse = QtWidgets.QToolButton()
         browse.setText("⋯"); browse.setFixedWidth(28)
         browse.setPopupMode(QtWidgets.QToolButton.InstantPopup)
@@ -234,12 +237,54 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
     def _dataset(self) -> str:
         return self._ds_combo.currentText().split("   ")[0].strip() or self._default_dataset
 
+    def set_data_path_provider(self, fn):
+        """`fn()` returns the owning panel's current Data path (str). Used to
+        prefill this field the first time it's checked, and as the Browse…
+        dialog's starting folder while this field has no path of its own —
+        mirrors ``widgets.FieldSelector.set_data_path_provider``."""
+        self._data_path_provider = fn
+
+    def _prefill_from_data(self, checked: bool):
+        """On first check, default this field to the same file/folder as
+        the Hydra page's Data source. A no-op if a path is already set."""
+        if not checked or self._path_ed.text().strip() or self._data_path_provider is None:
+            return
+        src = self._data_path_provider()
+        if src:
+            self._set_path(src)
+
+    def _on_toggled(self, checked: bool):
+        """Mirrors ``widgets.FieldSelector._on_toggled``: checking prefills
+        from the Data source; unchecking resets the path (and every
+        discovered sibling panel) entirely, so a later re-check prefills
+        fresh instead of keeping whatever was picked/computed before."""
+        if checked:
+            self._prefill_from_data(checked)
+        else:
+            self._reset_path()
+
+    def _reset_path(self):
+        """Clear this field back to its empty, uncomputed startup state."""
+        self._workers = {}
+        self._pending = set()
+        self._fields = {}
+        self._sibling_paths = {}
+        for lbl in self._status_lbls.values():
+            lbl.setStyleSheet(self._status_style("none"))
+        self._path_ed.setText("")
+        self._ds_row.setVisible(False)
+        self._ds_combo.setEditText(self._default_dataset)
+        self._status.setText("Not computed.")
+
     def _open_browse_dialog(self):
         # "Multiple files" isn't offered here — the other 3 panels are
         # auto-discovered from one anchor path (helpers.hydra_siblings),
         # which has no way to generalize to an arbitrary per-file pick list.
+        start = self._path_ed.text().strip()
+        if not start and self._data_path_provider is not None:
+            start = self._data_path_provider() or ""
         dlg = BrowseFilesDialog(self, title=f"Select {self.title()}",
-                                modes=("file", "folder", "stem"))
+                                modes=("file", "folder", "stem"), start_dir=start)
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return
         mode = dlg.mode()
@@ -501,6 +546,7 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         self._path_ed.setPlaceholderText("Any one ge1-ge4 panel file…")
         self._path_ed.returnPressed.connect(
             lambda: self._set_path(self._path_ed.text().strip()))
+        warn_if_path_missing(self._path_ed, self)
         row = QtWidgets.QHBoxLayout(); row.setSpacing(4)
         row.addWidget(self._path_ed)
         browse = QtWidgets.QToolButton(); browse.setText("⋯"); browse.setFixedWidth(28)
@@ -569,6 +615,7 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         self._bg_sel = HydraFieldSelector("Background")
         for w in (self._dark_sel, self._bright_sel, self._bg_sel):
             w.fieldsReady.connect(self.fieldsChanged)
+            w.set_data_path_provider(lambda: self._path_ed.text().strip())
             fld.body.addWidget(w)
         lv.addWidget(fld)
 
@@ -644,7 +691,8 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         # Single file only — this panel's frame index comes from one anchor
         # file's own internal frame count (hydra.n_frames_in), not separate
         # per-frame files, so folder/multi/stem selection doesn't apply.
-        dlg = BrowseFilesDialog(self, title="Select Hydra data", modes=("file",))
+        dlg = BrowseFilesDialog(self, title="Select Hydra data", modes=("file",),
+                                start_dir=self._path_ed.text().strip())
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return
         paths = dlg.paths()

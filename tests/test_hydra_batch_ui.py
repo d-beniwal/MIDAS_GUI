@@ -19,12 +19,6 @@ from types import SimpleNamespace
 import h5py
 import numpy as np
 import pytest
-from PyQt5 import QtCore, QtWidgets
-
-import midas_gui.hydra_batch_page as hydra_batch_page_mod
-import midas_gui.hydra_batch_widgets as hydra_batch_widgets_mod
-from midas_gui import project
-from midas_gui.hydra_batch_page import HydraBatchPage
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "test_data" / "gui_synthetic" / "hydra"
 
@@ -36,8 +30,96 @@ FIXTURE_DIR = Path(__file__).resolve().parent.parent / "test_data" / "gui_synthe
 pytestmark = pytest.mark.forked
 
 
+_QT_LOADED = False
+
+# Bound by _load_qt() at fixture time, declared here so static analysis
+# (and the pyflakes diff in the review recipe) can still resolve them.
+QtCore = QtWidgets = None
+hydra_batch_page_mod = hydra_batch_widgets_mod = project = None
+HydraBatchPage = _FakeBatchWorker = None
+
+
+def _load_qt():
+    """Import Qt, the GUI modules under test, and the QObject-subclass fake,
+    publishing them all as module globals.
+
+    Deliberately NOT done at module level. pytest imports this module during
+    collection, in the *parent* process, while pytest-forked runs each test
+    in a forked child. Importing PyQt5 in the parent initialises macOS
+    CoreFoundation, which a forked child may not use — every test then dies
+    with SIGSEGV ("The process has forked and you cannot use this
+    CoreFoundation functionality safely") before its body runs. Importing
+    here means each child does its own first-time init, which is legal.
+
+    ``_FakeBatchWorker`` subclasses ``QtCore.QObject``, so it cannot be
+    defined at module scope either. See .context/STATE.md.
+    """
+    global _QT_LOADED
+    if _QT_LOADED:
+        return
+    from PyQt5 import QtCore, QtWidgets
+    import midas_gui.hydra_batch_page as hydra_batch_page_mod
+    import midas_gui.hydra_batch_widgets as hydra_batch_widgets_mod
+    from midas_gui import project
+    from midas_gui.hydra_batch_page import HydraBatchPage
+
+    class _FakeBatchWorker(QtCore.QObject):
+        """No-op-thread shape for ``BatchRunCoordinator``: finishes on the next
+        event-loop tick instead of a real background thread/file source."""
+        progress = QtCore.pyqtSignal(int, int)
+        frame_done = QtCore.pyqtSignal(str, object, object, object)
+        finished = QtCore.pyqtSignal(dict)
+        failed = QtCore.pyqtSignal(str)
+        log_line = QtCore.pyqtSignal(str)
+        geom_ready = QtCore.pyqtSignal(object)
+
+        #: (panel key inferred from out_dir) -> out_dir passed at construction,
+        #: appended by every instance — tests reset this list before each run.
+        calls: list = []
+        MIN_FRAMES_PER_WORKER = 10   # duck-typed to match BatchRunCoordinator
+
+        def __init__(self, spec, source_cfg, mask, out_dir, fmts, kernel, corrections,
+                     variance_cfg, q_cfg=None, frame_range=None, monitor_file=None,
+                     drift_traj=None, parent=None, dark=None, bright=None, background=None,
+                     bright_mode="divide", weighted=True, context=None, im_trans=(),
+                     run_mode="sequential", n_workers=1):
+            super().__init__(parent)
+            self.out_dir = out_dir
+            _FakeBatchWorker.calls.append(out_dir)
+
+        def isRunning(self) -> bool:
+            return False
+
+        def requestInterruption(self):
+            pass
+
+        def start(self):
+            QtCore.QTimer.singleShot(0, self._finish)
+
+        def _finish(self):
+            r_axis = np.linspace(0, 100, 10)
+            profile = np.ones_like(r_axis)
+            self.progress.emit(1, 1)
+            self.frame_done.emit("0", r_axis, profile, None)
+            self.finished.emit({
+                "n": 1, "r_axis_px": r_axis, "profiles": profile.reshape(1, -1),
+                "sigmas": profile.reshape(1, -1), "frame_ids": ["0"],
+                "out_paths": [f"{self.out_dir}/f0.csv"] if self.out_dir else []})
+
+    _QT_LOADED = True
+    globals().update(
+        QtCore=QtCore, QtWidgets=QtWidgets,
+        hydra_batch_page_mod=hydra_batch_page_mod,
+        hydra_batch_widgets_mod=hydra_batch_widgets_mod,
+        project=project,
+        HydraBatchPage=HydraBatchPage,
+        _FakeBatchWorker=_FakeBatchWorker,
+    )
+
+
 @pytest.fixture(scope="module")
 def app():
+    _load_qt()
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
@@ -60,7 +142,7 @@ def _fake_spec(lsd=200_000.0, pxY=200.0, wavelength_A=0.1729):
 
 
 @pytest.fixture(autouse=True)
-def _stub_spec_builders(monkeypatch):
+def _stub_spec_builders(app, monkeypatch):   # `app` so _load_qt() has run first
     """Spec-building goes through midas_calibrate_v2's real geometry math —
     not what this file tests (it tests GUI wiring/orchestration, mirroring
     tests/test_hydra_calib_ui.py's choice to stub CalibrationWorker/
@@ -75,52 +157,8 @@ def _stub_spec_builders(monkeypatch):
                         lambda path, r_bin, e_bin, r_min=None, r_max=None: _fake_spec())
 
 
-class _FakeBatchWorker(QtCore.QObject):
-    """No-op-thread shape for ``BatchRunCoordinator``: finishes on the next
-    event-loop tick instead of a real background thread/file source."""
-    progress = QtCore.pyqtSignal(int, int)
-    frame_done = QtCore.pyqtSignal(str, object, object, object)
-    finished = QtCore.pyqtSignal(dict)
-    failed = QtCore.pyqtSignal(str)
-    log_line = QtCore.pyqtSignal(str)
-    geom_ready = QtCore.pyqtSignal(object)
-
-    #: (panel key inferred from out_dir) -> out_dir passed at construction,
-    #: appended by every instance — tests reset this list before each run.
-    calls: list = []
-    MIN_FRAMES_PER_WORKER = 10   # duck-typed to match BatchRunCoordinator
-
-    def __init__(self, spec, source_cfg, mask, out_dir, fmts, kernel, corrections,
-                 variance_cfg, q_cfg=None, frame_range=None, monitor_file=None,
-                 drift_traj=None, parent=None, dark=None, bright=None, background=None,
-                 bright_mode="divide", weighted=True, context=None, im_trans=(),
-                 run_mode="sequential", n_workers=1):
-        super().__init__(parent)
-        self.out_dir = out_dir
-        _FakeBatchWorker.calls.append(out_dir)
-
-    def isRunning(self) -> bool:
-        return False
-
-    def requestInterruption(self):
-        pass
-
-    def start(self):
-        QtCore.QTimer.singleShot(0, self._finish)
-
-    def _finish(self):
-        r_axis = np.linspace(0, 100, 10)
-        profile = np.ones_like(r_axis)
-        self.progress.emit(1, 1)
-        self.frame_done.emit("0", r_axis, profile, None)
-        self.finished.emit({
-            "n": 1, "r_axis_px": r_axis, "profiles": profile.reshape(1, -1),
-            "sigmas": profile.reshape(1, -1), "frame_ids": ["0"],
-            "out_paths": [f"{self.out_dir}/f0.csv"] if self.out_dir else []})
-
-
 @pytest.fixture(autouse=True)
-def _stub_worker(monkeypatch):
+def _stub_worker(app, monkeypatch):   # `app` so _load_qt() has run first
     _FakeBatchWorker.calls = []
     monkeypatch.setattr(hydra_batch_page_mod, "BatchRunCoordinator", _FakeBatchWorker)
 

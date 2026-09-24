@@ -22,14 +22,17 @@ from midas_gui.constants import (KERNELS, ERROR_MODELS,
                            DEFAULT_ERROR_MODEL)
 from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_file,
                                geometry_fields_from_file,
-                               resolve_calibration_fields, make_calib_values_button,
+                               resolve_calibration_fields, full_calibration_snapshot,
+                               make_calib_values_button,
                                rmax_corner_px, rmax_edge_px, draw_polar_bin_overlay,
                                _NoScrollSpinBox, _NoScrollComboBox,
                                widgets_to_dict, apply_dict_to_widgets,
-                               check_output_dir_writable)
+                               check_output_dir_writable,
+                               browse_start_dir, warn_if_path_missing)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, DataLoaderPanel, OutputFormatSelector,
-                               ImageViewer, build_lab_frame_axes_items)
+                               ImageViewer, OriginToolButton, build_lab_frame_axes_items,
+                               CakeStackViewer)
 from midas_gui.workers import (BatchWorker, BatchRunCoordinator, apply_q_uniform,
                                DriftWorker, FolderMonitorWorker, write_all_profiles,
                                froot_and_frame_num)
@@ -41,6 +44,73 @@ from midas_gui.cake_params import parse_cake_csv
 from midas_gui import project
 from midas_gui import settings
 from midas_gui import style as S
+
+
+class _RadialBinsDialog(QtWidgets.QDialog):
+    """Δ/min/max for one radial-axis mode (R in px, or Q in Å⁻¹), opened
+    from Batch Integrate's mode-dependent "R bins…"/"Q bins…" button next to
+    the Bin type dropdown. Hosts the tab's own spinboxes directly (not
+    copies) — this is a relocated view of the same widgets ``_build_spec``
+    and GUI-state save/restore already use, not a separate value store.
+    Only the R variant takes Corner/Edge presets; Q has no detector-geometry
+    equivalent."""
+
+    def __init__(self, mode: str, bin_spin, min_spin, max_spin,
+                 corner_btn=None, edge_btn=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Radial (R) bins" if mode == "R" else "Q bins")
+        v = QtWidgets.QVBoxLayout(self)
+        note = QtWidgets.QLabel(
+            "R bin/Rmin/Rmax define the underlying integration grid, in "
+            "detector pixels. Rmax 0 = auto (farthest detector corner from "
+            "the beam centre)." if mode == "R" else
+            "Bin uniformly in Q (Å⁻¹) instead of R, for OUTPUT only — the "
+            "same radial axis, alternate units. The Radial (R) bins still "
+            "set the underlying integration grid; this rebins that result "
+            "into Q.")
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color:{S.MUTED};font-size:10px;padding-bottom:4px")
+        v.addWidget(note)
+        form = S.Form()
+        if corner_btn is not None:
+            preset_row = QtWidgets.QHBoxLayout(); preset_row.setSpacing(4)
+            preset_row.addWidget(QtWidgets.QLabel("Rmax presets:"))
+            preset_row.addWidget(corner_btn); preset_row.addWidget(edge_btn)
+            preset_row.addStretch(1)
+            form.full(preset_row)
+        form.row((f"{mode} bin:", bin_spin))
+        form.row((f"{mode}min:", min_spin))
+        form.row((f"{mode}max:", max_spin))
+        v.addLayout(form)
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        btns.rejected.connect(self.accept); btns.accepted.connect(self.accept)
+        v.addWidget(btns)
+
+
+class _AzimuthalBinsDialog(QtWidgets.QDialog):
+    """Δ/min/max for the azimuthal (η) integration axis, opened from Batch
+    Integrate's "Azimuthal bins…" button. Hosts the tab's own η-bin/min/max
+    spinboxes directly (not copies) — see ``_RadialBinsDialog``."""
+
+    def __init__(self, bin_spin, min_spin, max_spin, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Azimuthal (η) bins")
+        v = QtWidgets.QVBoxLayout(self)
+        note = QtWidgets.QLabel(
+            "η bin controls how the 2-D (η, R) cake is collapsed to a 1-D "
+            "profile (see Azim. avg) and, when Multi-azimuth output is on, "
+            "defines the output sectors themselves.")
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color:{S.MUTED};font-size:10px;padding-bottom:4px")
+        v.addWidget(note)
+        form = S.Form()
+        form.row(("η bin:", bin_spin))
+        form.row(("η min:", min_spin))
+        form.row(("η max:", max_spin))
+        v.addLayout(form)
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        btns.rejected.connect(self.accept); btns.accepted.connect(self.accept)
+        v.addWidget(btns)
 
 
 class BatchTab(QtWidgets.QWidget):
@@ -125,6 +195,17 @@ class BatchTab(QtWidgets.QWidget):
             return
         value = formula(fields["BC_y"], fields["BC_z"], fields["NrPixelsY"], fields["NrPixelsZ"])
         self._r_max.setValue(value)
+
+    def _q_mode_active(self) -> bool:
+        """True when the Bin type dropdown selects Q (rebin the OUTPUT
+        uniformly in Q, not the underlying R-uniform integration grid)."""
+        return self._bin_type.currentData() == "Q"
+
+    def _on_bin_type_changed(self, *_args) -> None:
+        self._radial_bins_btn.setText("Q bins…" if self._q_mode_active() else "R bins…")
+
+    def _open_radial_bins_dialog(self) -> None:
+        (self._q_bins_dialog if self._q_mode_active() else self._r_bins_dialog).exec_()
 
     def _load_cake_csv(self) -> None:
         """"Load cake parameters CSV…" button — applies R_MIN/R_MAX/R_STEP/
@@ -236,6 +317,17 @@ class BatchTab(QtWidgets.QWidget):
         else:
             self._clear_lab_axes()
 
+    def _on_origin_changed(self, *_args) -> None:
+        """Display origin flipped — the compass is drawn in screen terms, so
+        it has to be re-derived rather than carried along by the ViewBox's
+        now-inverted Y axis."""
+        if not self._lab_axes_chk.isChecked():
+            return
+        fields, _ = self._calib_fields_in_use()
+        if not fields or fields.get("BC_y") is None:
+            return
+        self._redraw_lab_axes_if_on(fields["BC_y"], fields["BC_z"])
+
     def _redraw_lab_axes_if_on(self, bc_y: float, bc_z: float) -> None:
         if not self._lab_axes_chk.isChecked():
             return
@@ -308,7 +400,7 @@ class BatchTab(QtWidgets.QWidget):
             "multi_azimuth": self._multi_azimuth_chk,
             "var_check": self._var_check,
             "err_model": self._err_model,
-            "q_check": self._q_check,
+            "bin_type": self._bin_type,
             "q_min": self._q_min,
             "q_max": self._q_max,
             "q_bin": self._q_bin,
@@ -331,6 +423,7 @@ class BatchTab(QtWidgets.QWidget):
             "loader": self._loader.get_state(),
             "det_view": self._det_view.display_state(),
             "waterfall": self._waterfall.display_state(),
+            "cake_stack": self._cake_stack_view.display_state(),
             "hydra": {"active_mode": self._mode_ribbon.mode(),
                       "page": self._hydra_page.get_state() if self._hydra_page else {}},
             "calib_result": project.sanitize_result_dict(self._calib_result),
@@ -343,9 +436,17 @@ class BatchTab(QtWidgets.QWidget):
         # rides along in "fields" but isn't a plain widget — pull it out before
         # the generic apply_dict_to_widgets pass (which would just ignore it).
         fmt_keys = fields.pop("fmt_keys", None)
+        # Likewise "q_check": the boolean the Bin type dropdown replaced —
+        # still emitted by project.integrate_attempt_gui_fields (shared with
+        # HydraBatchPage, which still uses the checkbox) when restoring a
+        # saved integration attempt's provenance.
+        if fields.pop("q_check", None):
+            fields.setdefault("bin_type", "Q")
         apply_dict_to_widgets(self._state_widgets(), fields)
         self._det_view.set_display_state(state.get("det_view"))
+        self._origin_btn.sync()
         self._waterfall.set_display_state(state.get("waterfall"))
+        self._cake_stack_view.set_display_state(state.get("cake_stack"))
         self._corr_widget.set_state(state.get("corr") or {})
         self._fmt.set_state(fmt_keys if fmt_keys is not None else state.get("fmt"))
         hydra_state = state.get("hydra") or {}
@@ -409,22 +510,39 @@ class BatchTab(QtWidgets.QWidget):
         ``_results_arrays`` by the Open Project dialog) — same widget calls
         ``_on_frame`` makes per-frame during a live run, just replayed in one
         shot instead of streamed. Best-effort: a missing/incompatible
-        calibration (for the x-axis re-labelling) never blocks the plots."""
+        calibration (for the x-axis re-labelling) never blocks the plots.
+
+        A multi-azimuth attempt stores ``(n_frames, n_eta, n_r)`` cakes rather
+        than 1-D profiles. Those go to the "Eta-R cakes" tab whole, and the two
+        1-D views get an η-collapse of them (see :meth:`_collapse_cakes`) —
+        feeding the raw cakes to a 1-D viewer used to raise on the first
+        frame, which took the whole restore with it.
+        """
         arrays = meta.get("_results_arrays") or {}
         r_axis = arrays.get("r_axis_px")
         profiles = arrays.get("profiles")
         if r_axis is None or profiles is None or len(profiles) == 0:
             return
+        profiles = np.asarray(profiles)
+        # Clear the views before re-deriving their axis context from this
+        # attempt's calibration — otherwise set_axis_context()'s _restack()
+        # re-plots whatever attempt/run was displayed previously under the
+        # new geometry (see _run()'s identical fix).
+        self._waterfall.reset(r_axis)
+        self._stack_view.reset(r_axis)
+        self._cake_stack_view.clear()
         try:
             spec = self._build_spec()
             axctx = (float(spec.Lsd), float(spec.pxY), float(spec.Wavelength))
             self._waterfall.set_axis_context(*axctx)
             self._stack_view.set_axis_context(*axctx)
+            self._cake_stack_view.set_axis_context(*axctx)
         except Exception:
             pass
-        self._waterfall.reset(r_axis)
-        self._stack_view.reset(r_axis)
         frame_ids = arrays.get("frame_ids") or list(range(len(profiles)))
+        if profiles.ndim == 3:
+            self._restore_cake_stack(meta, r_axis, profiles, frame_ids)
+            profiles = self._collapse_cakes(profiles)
         self._integrated_fids = set()
         for fid, prof in zip(frame_ids, profiles):
             self._waterfall.add_profile(prof)
@@ -432,6 +550,69 @@ class BatchTab(QtWidgets.QWidget):
             self._integrated_fids.add(str(fid))
         self._wf_started = True
         self._view_tabs.setCurrentWidget(self._waterfall)
+
+    def _restore_cake_stack(self, meta: dict, r_axis, cakes, frame_ids) -> None:
+        """Replay a multi-azimuth attempt's stored cakes into the "Eta-R
+        cakes" tab. The η axis isn't a ``results`` array — ``_log_to_project``
+        records it in the attempt's ``extra`` as ``eta_axis_deg`` — so an
+        attempt written before that existed falls back to evenly spaced bins
+        over a full turn, which is what every multi-azimuth run this tab can
+        produce actually uses."""
+        eta_axis = meta.get("eta_axis_deg")
+        n_eta = int(np.asarray(cakes).shape[1])
+        if eta_axis is None or len(eta_axis) != n_eta:
+            step = 360.0 / n_eta
+            eta_axis = -180.0 + step * (np.arange(n_eta) + 0.5)
+        self._cake_stack_view.set_cakes(cakes, r_axis, eta_axis,
+                                        frame_ids=frame_ids)
+
+    @staticmethod
+    def _collapse_cakes(cakes):
+        """``(n_frames, n_eta, n_r)`` → ``(n_frames, n_r)``, averaging each
+        frame's filled η bins.
+
+        The run's *own* collapsed profile is not stored (multi-azimuth mode
+        keeps the cake instead), so this reconstructs one for the Waterfall /
+        Stacked-profiles views. Exact-zero bins are unfilled η/R coverage
+        rather than measured zeros — the same convention ``CakeViewer``'s
+        auto-levelling uses — so they're excluded from the mean instead of
+        dragging it toward zero. It is an approximation of the engine's
+        count-weighted collapse, not a reproduction of it."""
+        arr = np.asarray(cakes, dtype=np.float64)
+        filled = (arr != 0).sum(axis=1)
+        return arr.sum(axis=1) / np.maximum(filled, 1)
+
+    def _on_job_done(self, job) -> None:
+        """``JobQueuePanel``'s ``on_job_done`` callback: a background
+        ``screen`` job runs in a separate process, so its results only ever
+        reach this tab via the ``_bg_job_results.npz`` sidecar
+        ``batch_cli._write_results_sidecar`` leaves in ``job.out_dir`` —
+        reuses ``_populate_plots_from_attempt``'s replay logic, same as
+        restoring a project's saved attempt."""
+        if not job.out_dir:
+            self._log.append(f"[batch] Job {job.session} has no recorded "
+                             f"output folder — can't load its results.")
+            return
+        sidecar = Path(job.out_dir) / "_bg_job_results.npz"
+        if not sidecar.is_file():
+            self._log.append(f"[batch] No results file found for job {job.session} "
+                             f"(expected {sidecar}).")
+            return
+        try:
+            with np.load(sidecar) as npz:
+                arrays = {
+                    "r_axis_px": npz["r_axis_px"],
+                    "profiles": npz["profiles"],
+                    "frame_ids": list(npz["frame_ids"]),
+                }
+                eta_axis_deg = (npz["eta_axis_deg"].tolist()
+                               if "eta_axis_deg" in npz.files else None)
+        except Exception as e:
+            self._log.append(f"[batch] Could not load results for job {job.session}: {e}")
+            return
+        self._populate_plots_from_attempt({"_results_arrays": arrays,
+                                          "eta_axis_deg": eta_axis_deg})
+        self._log.append(f"[batch] Loaded results from background job: {job.session}")
 
     def shutdown(self):
         """Interrupt + bounded-wait every Hydra-page worker on app close —
@@ -553,16 +734,21 @@ class BatchTab(QtWidgets.QWidget):
 
         # Grouped per axis (bin size + range together, plus anything else
         # that's really about that axis) so the relationships are visible
-        # instead of scattered across the card:
-        #   RADIAL:    R bin/Rmin/Rmax, then Q-uniform bins (an alternate
-        #              *output* binning for the same radial axis, not an
-        #              independent thing — R bin/Rmin/Rmax still set the
-        #              underlying integration grid; Q only rebins the
-        #              result, see _run()'s "Always R-uniform..." comment).
-        #   AZIMUTHAL: η bin/η min/η max, then Azim. avg (how η is
-        #              collapsed to 1-D) and Multi-azimuth output (whether
-        #              it's collapsed at all) — both are about the same η
-        #              axis. Maps to a cake_parameters CSV's
+        # instead of scattered across the card. The actual Δ/min/max fields
+        # for each axis live in a popup dialog (opened by the button next to
+        # it) rather than inline — see _RadialBinsDialog/_AzimuthalBinsDialog
+        # below — freeing this card down to the choices that matter at a
+        # glance:
+        #   RADIAL:    Bin type selects which axis the adjacent button edits.
+        #              R bin/Rmin/Rmax always define the underlying
+        #              integration grid; Q only rebins that result for
+        #              OUTPUT (see _run()'s "Always R-uniform..." comment) —
+        #              not an independent axis.
+        #   AZIMUTHAL: η bin/η min/η max live behind "Azimuthal bins…".
+        #              Azim. avg (how η is collapsed to 1-D) and
+        #              Multi-azimuth output (whether it's collapsed at all)
+        #              stay inline — both are about the same η axis. Maps to
+        #              a cake_parameters CSV's
         #              R_MIN/R_MAX/R_STEP/ETA_MIN/ETA_MAX/ETA_STEP
         #              one-for-one (see _load_cake_csv). Rmax 0.0 is the
         #              "auto" sentinel: left untouched, it's passed through
@@ -573,60 +759,58 @@ class BatchTab(QtWidgets.QWidget):
         #              (full circle), matching the backend's own default
         #              (same None-means-"leave the backend default"
         #              contract as Rmin/Rmax).
-        pf.full(_section_label("RADIAL RANGE  (R_MIN / R_MAX / R_STEP)"))
         self._r_bin = _fspin(0.1, 20.0, 2, 1.0, "px")
         self._r_min = _fspin(0.0, 1_000_000.0, 2, 0.0, "px")
         self._r_max = _fspin(0.0, 1_000_000.0, 2, 0.0, "px")
         self._r_max.setToolTip(
             "0 = auto (farthest detector corner from the beam centre).\n"
-            "Use the Corner/Edge buttons (left) to fill in a value, or type your own.")
-        # Corner/Edge sit on their own left-aligned row instead of tacked
-        # onto the Rmax entry — keeps every entry cell in this card the
-        # same width/x-position (a compound Rmax-spinbox+buttons widget
-        # used to be wider than every other row's plain spinbox).
+            "Use the Corner/Edge presets in the R bins dialog, or type your own.")
         self._rmax_corner_btn = QtWidgets.QPushButton("Corner")
         self._rmax_corner_btn.setToolTip("Set Rmax to the farthest detector CORNER from the beam centre.")
         self._rmax_corner_btn.clicked.connect(lambda: self._apply_rmax_preset(rmax_corner_px))
         self._rmax_edge_btn = QtWidgets.QPushButton("Edge")
         self._rmax_edge_btn.setToolTip("Set Rmax to the farthest detector EDGE from the beam centre.")
         self._rmax_edge_btn.clicked.connect(lambda: self._apply_rmax_preset(rmax_edge_px))
-        rmax_btn_row = QtWidgets.QHBoxLayout(); rmax_btn_row.setSpacing(4)
-        rmax_btn_row.addWidget(QtWidgets.QLabel("Rmax presets:"))
-        rmax_btn_row.addWidget(self._rmax_corner_btn); rmax_btn_row.addWidget(self._rmax_edge_btn)
-        rmax_btn_row.addStretch(1)
-        pf.full(rmax_btn_row)
-        pf.row(("R bin:", self._r_bin))
-        pf.row(("Rmin:", self._r_min))
-        pf.row(("Rmax:", self._r_max))
         for w in (self._r_min, self._r_max, self._r_bin):
             w.valueChanged.connect(self._refresh_detector_preview)
-
-        self._q_check = QtWidgets.QCheckBox("Q-uniform bins (instead of R)")
-        self._q_check.setToolTip(
-            "Bin uniformly in Q (Å⁻¹) instead of R (px) for OUTPUT — the same\n"
-            "radial axis, alternate units. R bin/Rmin/Rmax above still set\n"
-            "the underlying integration grid; this rebins that result into Q.")
-        pf.full(self._q_check)
         self._q_min = _fspin(0.0, 100.0, 3, 0.5, "Å⁻¹")
         self._q_max = _fspin(0.0, 100.0, 3, 8.0, "Å⁻¹")
         self._q_bin = _fspin(0.0001, 1.0, 4, 0.01, "Å⁻¹")
-        for w in (self._q_min, self._q_max, self._q_bin):
-            w.setEnabled(False)
-        self._q_check.toggled.connect(lambda c: [w.setEnabled(c) for w in
-                                                 (self._q_min, self._q_max, self._q_bin)])
-        pf.row(("Qmin:", self._q_min))
-        pf.row(("Qmax:", self._q_max))
-        pf.row(("ΔQ:", self._q_bin))
+        self._r_bins_dialog = _RadialBinsDialog(
+            "R", self._r_bin, self._r_min, self._r_max,
+            self._rmax_corner_btn, self._rmax_edge_btn, parent=self)
+        self._q_bins_dialog = _RadialBinsDialog(
+            "Q", self._q_bin, self._q_min, self._q_max, parent=self)
 
-        pf.full(_section_label("AZIMUTHAL RANGE  (ETA_MIN / ETA_MAX / ETA_STEP)"))
+        pf.full(_section_label("RADIAL"))
+        self._bin_type = _NoScrollComboBox()
+        self._bin_type.addItem("Radial", "R")
+        self._bin_type.addItem("Q", "Q")
+        self._bin_type.setToolTip(
+            "Radial — bin uniformly in R (detector pixels).\n"
+            "Q — additionally rebin the OUTPUT uniformly in Q (Å⁻¹); the "
+            "underlying integration grid is still R-uniform.")
+        self._bin_type.currentIndexChanged.connect(self._on_bin_type_changed)
+        self._radial_bins_btn = QtWidgets.QPushButton("R bins…")
+        self._radial_bins_btn.clicked.connect(self._open_radial_bins_dialog)
+        bt_row = QtWidgets.QHBoxLayout(); bt_row.setSpacing(4)
+        bt_row.addWidget(self._bin_type, 1); bt_row.addWidget(self._radial_bins_btn)
+        pf.row(("Bin type:", bt_row))
+
         self._e_bin = _fspin(0.5, 30.0, 1, 5.0, "°")
         self._eta_min = _fspin(-180.0, 180.0, 1, -180.0, "°")
         self._eta_max = _fspin(-180.0, 180.0, 1, 180.0, "°")
-        pf.row(("η bin:", self._e_bin))
-        pf.row(("η min:", self._eta_min))
-        pf.row(("η max:", self._eta_max))
         for w in (self._eta_min, self._eta_max, self._e_bin):
             w.valueChanged.connect(self._refresh_detector_preview)
+        self._azim_bins_dialog = _AzimuthalBinsDialog(
+            self._e_bin, self._eta_min, self._eta_max, parent=self)
+
+        pf.full(_section_label("AZIMUTHAL"))
+        self._azim_bins_btn = QtWidgets.QPushButton("Azimuthal bins…")
+        self._azim_bins_btn.clicked.connect(self._azim_bins_dialog.exec_)
+        azim_btn_row = QtWidgets.QHBoxLayout(); azim_btn_row.setSpacing(4)
+        azim_btn_row.addWidget(self._azim_bins_btn); azim_btn_row.addStretch(1)
+        pf.full(azim_btn_row)
 
         self._azim = _NoScrollComboBox()
         self._azim.addItem("Pixel-weighted", True)
@@ -659,16 +843,6 @@ class BatchTab(QtWidgets.QWidget):
             "azimuthally-averaged profile, leave this box unchecked.")
         integ.body.addWidget(self._multi_azimuth_chk)
 
-        self._grid_chk = QtWidgets.QCheckBox("Show bin grid")
-        self._grid_chk.setToolTip(
-            "Overlay the Rmin/Rmax boundary circles and the full (R, η) "
-            "integration bin grid on the Detector view tab — concentric "
-            "circles at each R-bin edge, spokes at each η-bin edge "
-            "(bounded to η min/max). Thinned to at most ~50 rings / ~72 "
-            "spokes for legibility with fine bin sizes. Unchecking this "
-            "hides the overlay entirely, including Rmin/Rmax.")
-        integ.body.addWidget(self._grid_chk)
-        self._grid_chk.toggled.connect(self._refresh_detector_preview)
         self._var_check = QtWidgets.QCheckBox("Per-bin variance (σ)")
         self._var_check.setToolTip(
             "Compute per-bin σ via the chosen error model.\n"
@@ -737,9 +911,11 @@ class BatchTab(QtWidgets.QWidget):
         # ── Output ──
         out = S.make_card("Output")
         self._out_ed = QtWidgets.QLineEdit(); self._out_ed.setPlaceholderText("Output directory…")
+        warn_if_path_missing(self._out_ed, self, is_output_dir=True)
         orow = QtWidgets.QHBoxLayout(); orow.setSpacing(4); orow.addWidget(self._out_ed, 1)
         bou = _br(); bou.clicked.connect(lambda: self._out_ed.setText(
-            QtWidgets.QFileDialog.getExistingDirectory(self, "Output directory") or "")); orow.addWidget(bou)
+            QtWidgets.QFileDialog.getExistingDirectory(
+                self, "Output directory", browse_start_dir(self._out_ed.text())) or "")); orow.addWidget(bou)
         self._suggest_out_btn = QtWidgets.QPushButton("Suggest")
         self._suggest_out_btn.setToolTip(
             "Fill in <outroot>/<expid>_bc/<file-root>/<detector>/, matching "
@@ -832,12 +1008,31 @@ class BatchTab(QtWidgets.QWidget):
         lv.addStretch(1)
         split.addWidget(scroll)
 
-        # Right: waterfall / stacked-profiles / detector-view tabs + log
-        right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        # Right: waterfall / stacked-profiles / detector-view / logs tabs
+        # A view-only option (not an integration parameter — see
+        # tooltip), so it sits on the Detector-view toolbar next to Origin
+        # rather than in the left Integration card.
+        self._grid_chk = QtWidgets.QCheckBox("Show bin grid")
+        self._grid_chk.setToolTip(
+            "Overlay the Rmin/Rmax boundary circles and the full (R, η) "
+            "integration bin grid on the Detector view tab — concentric "
+            "circles at each R-bin edge, spokes at each η-bin edge "
+            "(bounded to η min/max). Thinned to at most ~50 rings / ~72 "
+            "spokes for legibility with fine bin sizes. Unchecking this "
+            "hides the overlay entirely, including Rmin/Rmax.\n\n"
+            "View-only — has no effect on the integration itself.")
+        self._grid_chk.toggled.connect(self._refresh_detector_preview)
         self._view_tabs = QtWidgets.QTabWidget()
         self._waterfall = WaterfallViewer()
         self._stack_view = StackedProfileViewer()
+        # One (η, R) cake per frame — only filled by a "Multi-azimuth output"
+        # run, which is what produces a per-frame cake instead of the
+        # η-collapsed profile the other two views show.
+        self._cake_stack_view = CakeStackViewer()
         self._det_view = ImageViewer()
+        self._origin_btn = OriginToolButton(self._det_view)
+        self._det_view._toolbar_layout.addWidget(self._origin_btn)
+        self._det_view._toolbar_layout.addWidget(self._grid_chk)
         self._lab_axes_chk = QtWidgets.QCheckBox("Lab-frame axes")
         self._lab_axes_chk.setToolTip(
             "Overlay MIDAS lab-frame axes (X_Lab/Y_Lab), the beam-direction "
@@ -845,6 +1040,10 @@ class BatchTab(QtWidgets.QWidget):
             "calibration's beam centre — same overlay as the Data "
             "Viewer/Calibrate tabs.")
         self._lab_axes_chk.toggled.connect(self._on_lab_axes_toggled)
+        # Flipping the display origin inverts the ViewBox's Y axis; the compass
+        # points at the hutch, not the pixel grid, so it is re-derived rather
+        # than carried along (widgets.build_lab_frame_axes_items).
+        self._det_view.originChanged.connect(self._on_origin_changed)
         self._det_view._toolbar_layout.addWidget(self._lab_axes_chk)
         self._det_view._toolbar_layout.addWidget(QtWidgets.QLabel("Preview: sum first"))
         self._preview_sum_n = _NoScrollSpinBox()
@@ -861,15 +1060,22 @@ class BatchTab(QtWidgets.QWidget):
         self._view_tabs.addTab(self._det_view, "Detector view")
         self._view_tabs.addTab(self._waterfall, "Waterfall")
         self._view_tabs.addTab(self._stack_view, "Stacked profiles")
-        right.addWidget(self._view_tabs)
+        self._view_tabs.addTab(self._cake_stack_view, "Eta-R cakes")
+        # Logs tab: background-job rows (JobQueuePanel) above one shared log
+        # surface, used by both the in-process run and the currently-focused
+        # background job's tailed output.
         self._log = LogPanel()
-        self._log.setMaximumHeight(16_777_215)   # let the splitter size it
-        right.addWidget(self._log)
-        self._job_queue = JobQueuePanel()
-        right.addWidget(self._job_queue)
-        right.setStretchFactor(0, 4); right.setStretchFactor(1, 1); right.setStretchFactor(2, 2)
-        right.setMinimumWidth(320)
-        split.addWidget(right)
+        self._log.setMaximumHeight(16_777_215)   # let the layout size it
+        self._job_queue = JobQueuePanel(self._log, on_job_done=self._on_job_done)
+        self._logs_tab = QtWidgets.QWidget()
+        logs_tab_layout = QtWidgets.QVBoxLayout(self._logs_tab)
+        logs_tab_layout.setContentsMargins(4, 4, 4, 4)
+        logs_tab_layout.setSpacing(4)
+        logs_tab_layout.addWidget(self._job_queue)
+        logs_tab_layout.addWidget(self._log, 1)
+        self._view_tabs.addTab(self._logs_tab, "Logs")
+        self._view_tabs.setMinimumWidth(320)
+        split.addWidget(self._view_tabs)
         split.setStretchFactor(0, 0); split.setStretchFactor(1, 0); split.setStretchFactor(2, 1)
         split.setSizes([286, 361, 950])
 
@@ -891,6 +1097,22 @@ class BatchTab(QtWidgets.QWidget):
             raise FileNotFoundError(f"Calibration file not found: {path}")
         return spec_from_geometry_file(path, r_bin, e_bin, r_min=r_min, r_max=r_max,
                                        eta_min=eta_min, eta_max=eta_max)
+
+    def integration_settings(self) -> dict:
+        """This tab's current binning / kernel / format choices, in the shape
+        the Batch Queue tab's "Copy from Batch Integrate" button consumes.
+
+        Read-only and widget-shaped rather than a spec: the queue applies these
+        to several different calibrations, so it needs the *settings*, not one
+        resolved ``IntegrationSpec``."""
+        return {"kernel": self._kernel.currentData(),
+                "r_bin": self._r_bin.value(), "e_bin": self._e_bin.value(),
+                "r_min": self._r_min.value(), "r_max": self._r_max.value(),
+                "eta_min": self._eta_min.value(), "eta_max": self._eta_max.value(),
+                "fmt": self._fmt.checked_keys(),
+                "weighted": bool(self._azim.currentData()),
+                "chunk_size": self._loader.source_cfg().get("chunk_size") or 0,
+                "combine_op": self._loader.source_cfg().get("combine_op") or "mean"}
 
     def set_expid_provider(self, provider) -> None:
         """Wired by app.py's MainWindow: ``provider()`` returns the header's
@@ -1021,17 +1243,16 @@ class BatchTab(QtWidgets.QWidget):
         self._last_run_out_dir = out_dir
         fmts = self._fmt.checked_keys()
         q_cfg = ({"QMin": self._q_min.value(), "QMax": self._q_max.value(),
-                  "QBinSize": self._q_bin.value()} if self._q_check.isChecked() else None)
+                  "QBinSize": self._q_bin.value()} if self._q_mode_active() else None)
         multi_azimuth = self._multi_azimuth_chk.isChecked()
         if multi_azimuth and q_cfg:
             QtWidgets.QMessageBox.warning(
                 self, "Incompatible options",
                 "Multi-azimuth output isn't supported together with "
-                "Q-uniform bins yet. Uncheck one of them."); return
+                "Q-uniform bins yet. Uncheck Multi-azimuth output, or set "
+                "Bin type back to Radial."); return
         lsd, px, wl = float(spec.Lsd), float(spec.pxY), float(spec.Wavelength)
         _axctx = (lsd, px, wl, "Q" if q_cfg else "R")
-        self._stack_view.set_axis_context(*_axctx)
-        self._waterfall.set_axis_context(*_axctx)
 
         # Dark / bright / background fields (from the loader)
         for sel in self._loader.has_pending_fields():
@@ -1050,6 +1271,19 @@ class BatchTab(QtWidgets.QWidget):
         self._prog.setVisible(True); self._prog.setValue(0)
         self._wf_started = False
         self._integrated_fids = set()
+        # Clear any previous run's views before re-deriving their axis context
+        # from this run's geometry — otherwise set_axis_context()'s _restack()
+        # re-plots stale curves under the new context, and a leftover curve
+        # with no finite data (e.g. an empty/fully-masked profile) sends
+        # pyqtgraph's autoRange() a [nan, nan] range and crashes the run.
+        self._stack_view.reset()
+        self._waterfall.reset()
+        self._cake_stack_view.clear()
+        self._stack_view.set_axis_context(*_axctx)
+        self._waterfall.set_axis_context(*_axctx)
+        # The cake's R axis is never Q-rebinned (multi-azimuth and Q-uniform
+        # are mutually exclusive, rejected above), so it takes no native unit.
+        self._cake_stack_view.set_axis_context(lsd, px, wl)
         self._view_tabs.setCurrentWidget(self._waterfall)
         self._log.append("─" * 40 + "\nStarting batch integration…")
 
@@ -1147,16 +1381,18 @@ class BatchTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(
                 self, "No format", "Check at least one output format first."); return
         multi_azimuth = self._multi_azimuth_chk.isChecked()
-        if multi_azimuth and self._q_check.isChecked():
+        if multi_azimuth and self._q_mode_active():
             QtWidgets.QMessageBox.warning(
                 self, "Incompatible options",
                 "Multi-azimuth output isn't supported together with "
-                "Q-uniform bins yet. Uncheck one of them."); return
-        if self._q_check.isChecked():
+                "Q-uniform bins yet. Uncheck Multi-azimuth output, or set "
+                "Bin type back to Radial."); return
+        if self._q_mode_active():
             QtWidgets.QMessageBox.warning(
                 self, "Not supported in background jobs yet",
                 "Q-uniform bins aren't wired into background jobs yet.\n"
-                "Uncheck it, or use 'Start Integration' for an in-process run."); return
+                "Set Bin type back to Radial, or use 'Start Integration' "
+                "for an in-process run."); return
 
         import tifffile
         from midas_gui.helpers import write_standalone_paramstest
@@ -1233,10 +1469,12 @@ class BatchTab(QtWidgets.QWidget):
         end = frame_range[1] if frame_range[1] is not None else (self._loader.n_frames() or frame_range[0] + 1)
         total = max(1, (end - frame_range[0] + frame_range[2] - 1) // frame_range[2])
 
-        job = self._job_queue.launch(argv, name=out_path.name or "batch", total_frames=total)
+        job = self._job_queue.launch(argv, name=out_path.name or "batch", total_frames=total,
+                                     out_dir=str(out_path))
         if job is not None:
             self._log.append(f"[batch] Launched background job: {job.session} "
-                             f"(see 'Background jobs' panel below)")
+                             f"(see the Logs tab)")
+            self._view_tabs.setCurrentWidget(self._logs_tab)
 
     def _abort(self):
         """Stop the run. First ask the worker to stop cooperatively (clean finish
@@ -1324,13 +1562,39 @@ class BatchTab(QtWidgets.QWidget):
                 self._log.append(msg.rsplit('\n', 1)[-1])
             else:
                 self._save_btn.setEnabled(True)
+        self._update_cake_stack(data)
         self._log_to_project(data)
         QtWidgets.QMessageBox.information(self, "Aborted" if aborted else "Done", msg)
+
+    def _update_cake_stack(self, data) -> None:
+        """Fill (or clear) the "Eta-R cakes" tab from a finished run.
+
+        Only a "Multi-azimuth output" run has cakes to show: that mode makes
+        the worker accumulate each frame's ``cake_2d`` rather than the
+        η-collapsed profile, so ``profiles`` comes back ``(n_frames, n_eta,
+        n_r)`` alongside an ``eta_axis``. Anything else — including an
+        η-collapsed run whose profiles are 2-D — clears the tab rather than
+        leaving the previous run's cakes sitting there looking current.
+        Both ``BatchWorker`` and ``BatchRunCoordinator`` (parallel) return the
+        same payload shape, so this covers either run mode."""
+        profiles = data.get("profiles")
+        eta_axis = data.get("eta_axis")
+        r_axis = data.get("r_axis_px")
+        if (profiles is None or np.asarray(profiles).ndim != 3
+                or eta_axis is None or r_axis is None):
+            self._cake_stack_view.clear()
+            return
+        self._cake_stack_view.set_cakes(profiles, r_axis, eta_axis,
+                                        frame_ids=data.get("frame_ids"))
 
     def _log_to_project(self, data):
         if not self._project_ctx or not self._project_ctx.path:
             return
-        calib_fields, _note = self._calib_fields_in_use()
+        # The whole calibration, not the display subset _calib_fields_in_use
+        # returns — an attempt has to be able to reconstruct the geometry it
+        # ran under (helpers.full_calibration_snapshot).
+        calib_fields, _note = full_calibration_snapshot(
+            self._calib_result, self._use_json_btn.isChecked(), self._json_ed.text())
         calib_ref = None
         if self._use_tab2_btn.isChecked() and self._calib_result is not None:
             calib_ref = getattr(self._calib_result, "_project_attempt_ref", None)
@@ -1370,6 +1634,7 @@ class BatchTab(QtWidgets.QWidget):
             self._loader.set_monitor_active(False)
         self._waterfall.reset()
         self._stack_view.reset()
+        self._cake_stack_view.clear()
         self._integrated_fids = set()
         self._wf_started = False
         self._last_results = None
@@ -1414,7 +1679,16 @@ class BatchTab(QtWidgets.QWidget):
     # ── Folder monitoring (live new-file integration) ──────────────
 
     def _integration_signature(self, src_cfg, kernel, corrections, weighted):
-        """Signature identifying a reusable detector map for the current settings."""
+        """Signature identifying a reusable detector map for the current settings.
+
+        Deliberately does NOT include the data source. ``build_integration_context``
+        takes only (spec, kernel, mask, corrections, weighted) — the detector map
+        is a property of the geometry, not of the frames fed through it — so
+        keying on the source path only threw the map away every time the user
+        pointed the tab at a different file under the same calibration. It does
+        include Eta min/max, which the source terms used to sit next to and
+        which genuinely do change the spec (``_build_spec`` passes them through,
+        and the context's eta axis is derived from them)."""
         if self._use_tab2_btn.isChecked():
             calib = ("tab2", id(self._calib_result))
         else:
@@ -1424,9 +1698,8 @@ class BatchTab(QtWidgets.QWidget):
         pol, sa = corrections
         return (calib, kernel, round(self._r_bin.value(), 4), round(self._e_bin.value(), 4),
                 round(self._r_min.value(), 4), round(self._r_max.value(), 4),
-                bool(weighted), pol is not None, sa is not None, mask_id,
-                src_cfg.get("path"), tuple(src_cfg.get("paths") or ()),
-                src_cfg.get("type"), src_cfg.get("dataset"))
+                round(self._eta_min.value(), 4), round(self._eta_max.value(), 4),
+                bool(weighted), pol is not None, sa is not None, mask_id)
 
     def _cache_geom(self, sig, ctx):
         self._geom_cache = ctx
@@ -1472,7 +1745,7 @@ class BatchTab(QtWidgets.QWidget):
         if variance_cfg and self._corr_widget.any_enabled():
             variance_cfg = None
         q_cfg = ({"QMin": self._q_min.value(), "QMax": self._q_max.value(),
-                  "QBinSize": self._q_bin.value()} if self._q_check.isChecked() else None)
+                  "QBinSize": self._q_bin.value()} if self._q_mode_active() else None)
         _axctx = (float(spec.Lsd), float(spec.pxY), float(spec.Wavelength),
                   "Q" if q_cfg else "R")
         self._stack_view.set_axis_context(*_axctx)

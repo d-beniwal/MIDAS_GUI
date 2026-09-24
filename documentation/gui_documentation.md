@@ -1101,25 +1101,41 @@ an image is loaded warns instead of writing a file (there is no detector size to
 Sits **above the Data card**, collapsed by default behind its own title-bar
 checkbox — check it to reveal the live-PV controls, uncheck to hide them
 again (unchecking also stops an active stream, so a hidden card can never be
-left silently connected). Subscribes directly to an EPICS PVA detector-image
-PV (NTNDArray) and renders each frame **inline in the Data Viewer's own image
-pane** — the same view used for files/folders/HDF5 stacks. Because it feeds
-the normal frame pipeline, all existing Data Viewer analysis keeps working
-live: dark/bright/background/mask corrections, the intensity-range mask,
+left silently connected). Subscribes to a live EPICS detector-image readout
+and renders each frame **inline in the Data Viewer's own image pane** — the
+same view used for files/folders/HDF5 stacks. Because it feeds the normal
+frame pipeline, all existing Data Viewer analysis keeps working live:
+dark/bright/background/mask corrections, the intensity-range mask,
 beam-centre picking, and the radial integration plot all update as new
 frames arrive.
-- **Dependency:** `pvapy` (the EPICS pvAccess client library) is a required,
-  pinned dependency (`pyproject.toml` / `environment.yml`), installed
+- **Two EPICS backends, picked per-device:** each entry in **Preferences ▸
+  Devices** has a `backend` field — `pva` (default) subscribes to a single
+  pvAccess NTNDArray PV, for beamlines whose areaDetector IOC runs an
+  NDPluginPva plugin. `ca` instead reads plain EPICS Channel Access records
+  off an areaDetector **NDPluginStdArrays** plugin (`ArrayData` plus its
+  `ArraySize*_RBV`/`ColorMode_RBV`/`UniqueId_RBV` metadata records), for a
+  beamline whose IOC has no PVA plugin (e.g. 17-BM's Varex detector, which
+  ships as the bundled **17-BM** profile's `varex` device). Both backends
+  share one internal contract (`midas_gui/live_sources.py`:
+  `PvaLiveSource`/`CaLiveSource`) so everything else on this card — buffering,
+  the frame sink, Start/Stop, the B-PILOT bridge below — behaves identically
+  regardless of which one a device uses. Picking a device from the dropdown
+  sets its backend automatically (shown as a small `[PVA]`/`[CA]` label next
+  to the field); typing a PV by hand keeps whichever backend was last picked.
+- **Dependencies:** `pvapy` (PVA) and `pyepics` (CA) are both required,
+  pinned dependencies (`pyproject.toml` / `environment.yml`), installed
   automatically with the rest of the GUI's stack — no separate extra to
-  install. If somehow missing from the active environment, **Start** shows an
-  install hint instead of failing outright.
+  install. If either is somehow missing from the active environment,
+  **Start** shows an install hint instead of failing outright (only the one
+  needed for the currently-selected device's backend is checked).
 - **Live PV** field is an editable dropdown: pick a known device by name (the
   list comes from **Preferences ▸ Devices**, see below) to fill in its full PV
-  automatically, or type any other PV by hand (placeholder shows an example,
-  `20IDFF:Pva1:Image`). **Start** / **Stop** buttons and a status line (stopped
-  / waiting for PV / connected / streaming with frame id / error). GUI updates
-  are throttled to the tab's existing ~16 fps debounce, so a fast PV update
-  rate doesn't overwhelm the interface.
+  automatically (`prefix + PVA suffix` or `prefix + CA suffix`, depending on
+  that device's backend), or type any other PV by hand (placeholder shows an
+  example, `20IDFF:Pva1:Image`). **Start** / **Stop** buttons and a status
+  line (stopped / waiting for PV / connected / streaming with frame id /
+  error). GUI updates are throttled to the tab's existing ~16 fps debounce, so
+  a fast PV update rate doesn't overwhelm the interface.
 - **Sim Detector** is a built-in dropdown entry (PV `midasSim:Pva1:Image`) for
   exercising Live Data with **no beamline hardware**: picking it and clicking
   **Start** lazily launches an in-process fake PVA server
@@ -1535,9 +1551,10 @@ Lsd, and tilt are fit and shown independently.
   across concurrent threads.
 - **Image toolbar**: **GE1 / GE2 / GE3 / GE4** (no Composite — calibration
   is inherently per-panel; see the Data Viewer tab for the windmill
-  composite once all 4 are fitted) plus **Show rings** / **Corrected**,
-  identical in meaning to the single-detector tab's own predicted-ring
-  overlay toggles, applied to whichever panel is active.
+  composite once all 4 are fitted) plus **Show rings**, identical in
+  meaning to the single-detector tab's own predicted-ring overlay toggle,
+  applied to whichever panel is active. As there, the rings are always
+  drawn through the fitted tilts and distortion.
 - **Radial Profile (bottom right)**: one shared multi-curve plot — GE1-4
   are ordinary checkboxes (any combination can be shown at once), same
   style/controls as the Data Viewer tab's Hydra Radial Profile plot
@@ -1747,12 +1764,20 @@ STAGE-1 multi-hypothesis Lsd search and uses your seed as given, so a poor seed 
 more. **First-time** cannot take windows at all and warns if any are set.
 
 ### Predicted-ring overlay (image toolbar)
-After a run, the calibrant's predicted ring radii are drawn in **lime** with a
-red/yellow beam-centre marker. **Show rings** toggles the overlay; **Corrected**
-redraws the same lime rings reshaped through the fitted tilt (tx/ty/tz) instead
-of as plain circles, so you can see how much the geometry actually deviates
-from an untilted detector — the rings still look like the same thin curves,
-just bent, rather than a separate scattered point-cloud.
+After a run, the calibrant's predicted ring positions are drawn in **lime** with a
+red/yellow beam-centre marker. **Show rings** toggles the overlay.
+
+The rings are always drawn through the *full* forward model — the fitted tilts
+(tx/ty/tz) **and** the refined distortion harmonics — so what you see is where the
+calibration says each ring actually lands, not a circle approximating it. On a tilted
+or distorted detector the curves are visibly bent rather than round; at zero tilt and
+zero distortion they reduce exactly to circles about the beam centre. There is no
+longer a **Corrected** toggle: correctness was never a display preference, and having
+it default to off meant the honest overlay was the one you had to go looking for.
+
+One term is left out: the empirical `residual_corr_map` (a smooth sub-pixel ΔR(Y, Z)
+absorbed after the harmonics converge, and present only if you refined **Residual
+map**). When a result carries one, the status text beside the toolbar says so.
 
 ### Run / Abort
 **Run Calibration** launches the worker; **Abort** terminates it and frees the slot so
@@ -1794,16 +1819,10 @@ bottom tab area is fully resizable (drag the horizontal splitter) and the Log fi
 tab.
 
 ### Export
-**Use seed as calibration (no fit)** publishes the **Initial seed** card's geometry as
-the calibration result without running anything. `→ Send to Data Viewer`, `Save .json`
-and `Save paramstest.txt` are otherwise all gated on a completed fit, which left no way
-to use a geometry you had already dialled in by hand — nudging BC/Lsd until the
-predicted ring overlay sits on the measured rings is a legitimate calibration, it just
-isn't a fit. Nothing is refined and no uncertainty exists, so every geometry row in the
-**Results** grid comes out marked `(fixed)` and the Log records that no fit was run.
-Note that a good-looking overlay is weaker evidence than it appears at a long
-sample–detector distance: on a 13.5 m SAXS geometry a 313 mm Lsd error moves the first
-AgBH ring by only ~17 px, so prefer a real fit when you have points to pick.
+`→ Send to Data Viewer`, `Save .json` and `Save paramstest.txt` are all gated on a
+completed fit. To use a geometry you have dialled in by hand rather than fitted, build
+it in the **Data Viewer** tab — its Ring simulation card exists for exactly that, and
+`Geometry: [← Get]` there pulls this tab's calibrated values as a starting point.
 
 **Save calibration.json** and **Save paramstest.txt** (standalone or from a template).
 Both carry the Transforms checkboxes' `ImTransOpt` codes (one `ImTransOpt <code>` line
@@ -2609,12 +2628,13 @@ sync with the header dropdown either way you switch:
   active one is remembered in `<config dir>/profile_meta.json`. Existing single-config
   installs are migrated transparently into a profile named **Default** the first time
   this runs — no data is lost.
-- Three beamline device presets ship bundled and appear in the combo alongside
-  **Default**: **20-ID-D**, **20-ID-E**, **1-ID-E** — each differs only in its
-  **Devices** list (below), so picking one just swaps the Live Data PV dropdown's
-  detectors for that beamline's. They're seeded once, the first time the app runs
-  on a machine; deleting one doesn't bring it back. Fresh installs still start on
-  **Default** (same detectors as 20-ID-D) so existing setups are unaffected.
+- Four beamline device presets ship bundled and appear in the combo alongside
+  **Default**: **20-ID-D**, **20-ID-E**, **1-ID-E**, **17-BM** — each differs only
+  in its **Devices** list (below), so picking one just swaps the Live Data PV
+  dropdown's detectors for that beamline's. They're seeded once, the first time
+  the app runs on a machine; deleting one doesn't bring it back. Fresh installs
+  still start on **Default** (same detectors as 20-ID-D) so existing setups are
+  unaffected.
 - **New…** seeds a blank profile from the shipped built-in defaults.
 - **Duplicate…** seeds a new profile from whatever is currently shown in the dialog
   (including unsaved edits), then switches to it.
@@ -2642,11 +2662,15 @@ with the full shipped defaults** so you edit from a complete starting point:
 - **Paths** — default data / calibration / output files & folders.
 - **Materials** / **Calibrants** — add / remove / modify (name + lattice + SG).
 - **Devices** — the detector devices offered in the Data Viewer's **Live Data**
-  PV dropdown (name, prefix, PVA suffix). The live PV is built as
-  `prefix + PVA suffix`. All PVA suffixes are `Pva1:Image`, plus a built-in
-  **Sim Detector** entry (`midasSim:` prefix) for hardware-free testing — see
-  the Live Data card section above; add / remove / edit rows for your own
-  beamline's devices, or switch to one of the bundled beamline **Profiles**
+  PV dropdown (name, prefix, PVA suffix, backend, CA suffix). `backend` picks
+  which suffix column builds the live PV: `pva` (default, or blank) uses
+  `prefix + PVA suffix`; `ca` uses `prefix + CA suffix` instead — read over
+  plain EPICS Channel Access via an areaDetector **NDPluginStdArrays** plugin,
+  for a beamline whose IOC has no PVA plugin (see the Live Data card section
+  above). All PVA suffixes are `Pva1:Image`; the CA suffix convention is
+  `image1:`. A built-in **Sim Detector** entry (`midasSim:` prefix, PVA) is
+  always included for hardware-free testing; add / remove / edit rows for your
+  own beamline's devices, or switch to one of the bundled beamline **Profiles**
   above instead of hand-editing:
   - **20-ID-D** — `20iddNF` (`20idOR1:`), `s20idPil` (`20idPil:`), `pg4`
     (`1idPG4:`), `20iddTomo` (`20idGH1s:`), `20iddFF` (`20IDFF:`).
@@ -2657,6 +2681,9 @@ with the full shipped defaults** so you edit from a complete starting point:
     (`1idVarex1:`). Names match each detector's variable name in B-PILOT
     (`mpe_bluesky/instrument/devices/`), the beamline's Bluesky/ophyd device
     definitions, so entries are traceable back to source.
+  - **17-BM** — `varex` (`17bmVarex:`, `backend: ca`, CA suffix `image1:`) —
+    **placeholder prefix/plugin name**, pending confirmation with 17-BM staff
+    that the IOC actually runs an NDPluginStdArrays instance at that name.
 - **Menus** — the pixel-size presets and K-edge foils.
 - **Algorithms** — default calibration pipeline, integration kernel, output format,
   error model, colormap/theme.
@@ -2687,7 +2714,10 @@ next launch**.
                     "pixel": 0.1, "bc": 1.0, "tilt": 0.1 },
   "materials":  { "Ni (FCC)": {"a":3.5238,"b":3.5238,"c":3.5238,"alpha":90,"beta":90,"gamma":90,"sg":225} },
   "calibrants": { "CeO2": {"a":5.4116,"b":5.4116,"c":5.4116,"alpha":90,"beta":90,"gamma":90,"sg":225} },
-  "devices": [ {"name": "s20varex1", "prefix": "20IDFF:", "pva_suffix": "Pva1:Image"} ],
+  "devices": [
+    {"name": "s20varex1", "prefix": "20IDFF:", "pva_suffix": "Pva1:Image"},
+    {"name": "varex", "prefix": "17bmVarex:", "backend": "ca", "ca_suffix": "image1:"}
+  ],
   "paths": { "nickel_h5": "/data/mygroup/sample.h5", "calib_file": "/data/mygroup/calibration.json" },
   "ui": { "calibration_pipeline": "one_shot", "integration_kernel": "subpixel2",
           "output_format": "csv", "azimuthal_method": "poisson", "plot_theme": "hot",

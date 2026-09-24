@@ -15,6 +15,7 @@ from PyQt5 import QtWidgets
 
 from midas_gui import settings
 from midas_gui import constants as C
+from midas_gui.helpers import browse_start_dir, warn_if_path_missing
 
 _PATH_ROWS = [
     ("calibrant_tif", "Calibrant TIFF:", "file"),
@@ -27,7 +28,7 @@ _PATH_ROWS = [
     ("pdf_calib", "PDF calibration:", "file"),
 ]
 _MAT_HEADERS = ["name", "a", "b", "c", "α", "β", "γ", "SG"]
-_DEV_HEADERS = ["name", "prefix", "PVA suffix"]
+_DEV_HEADERS = ["name", "prefix", "PVA suffix", "backend", "CA suffix"]
 
 
 def _effective_cfg() -> dict:
@@ -189,6 +190,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         self._paths = {}
         for key, label, kind in _PATH_ROWS:
             ed = QtWidgets.QLineEdit(); self._paths[key] = ed
+            warn_if_path_missing(ed, self)
             b = QtWidgets.QPushButton("…"); b.setFixedWidth(28)
             b.clicked.connect(lambda _=0, e=ed, k=kind: self._browse_path(e, k))
             r = QtWidgets.QHBoxLayout(); r.setSpacing(4); r.addWidget(ed); r.addWidget(b)
@@ -214,9 +216,13 @@ class PreferencesDialog(QtWidgets.QDialog):
     def _build_devices_tab(self):
         w = QtWidgets.QWidget(); v = QtWidgets.QVBoxLayout(w)
         v.addWidget(QtWidgets.QLabel(
-            "Devices offered in the Data Viewer's Live Data PV dropdown. The live "
-            "PV is built as prefix + PVA suffix, e.g. 20IDFF: + Pva1:Image → "
-            "20IDFF:Pva1:Image. You can still type any other PV by hand there."))
+            "Devices offered in the Data Viewer's Live Data PV dropdown. backend "
+            "picks which suffix column builds the live PV: \"pva\" (default) uses "
+            "prefix + PVA suffix (e.g. 20IDFF: + Pva1:Image); \"ca\" uses prefix + "
+            "CA suffix instead (e.g. 17bmVarex: + image1: -- read over plain EPICS "
+            "Channel Access via an areaDetector NDPluginStdArrays plugin, for IOCs "
+            "with no PVA plugin). Leave backend blank for pva. You can still type "
+            "any other PV by hand there."))
         table = QtWidgets.QTableWidget(0, len(_DEV_HEADERS))
         table.setHorizontalHeaderLabels(_DEV_HEADERS)
         table.setColumnWidth(0, 150)
@@ -358,7 +364,13 @@ class PreferencesDialog(QtWidgets.QDialog):
             name = cell(0)
             if not name:
                 continue
-            out.append({"name": name, "prefix": cell(1), "pva_suffix": cell(2)})
+            # A row left blank in the two new columns (i.e. every row that
+            # existed before they were added) resolves to plain PVA,
+            # identical to today's behavior.
+            backend = (cell(3) or "pva").strip().lower()
+            ca_suffix = cell(4) or "image1:"
+            out.append({"name": name, "prefix": cell(1), "pva_suffix": cell(2),
+                        "backend": backend, "ca_suffix": ca_suffix})
         return out
 
     def _pairs(self, table):
@@ -412,7 +424,8 @@ class PreferencesDialog(QtWidgets.QDialog):
         self._dev_table.setRowCount(0)
         for d in cfg.get("devices", []) or []:
             self._add_row(self._dev_table, _DEV_HEADERS,
-                          [d.get("name", ""), d.get("prefix", ""), d.get("pva_suffix", "")])
+                          [d.get("name", ""), d.get("prefix", ""), d.get("pva_suffix", ""),
+                           d.get("backend", ""), d.get("ca_suffix", "")])
         self._px_table.setRowCount(0)
         for p in geo.get("pixel_presets", []) or []:
             self._add_row(self._px_table, ["label", "µm"], list(p))
@@ -504,10 +517,11 @@ class PreferencesDialog(QtWidgets.QDialog):
 
     # ── actions ────────────────────────────────────────────────────────
     def _browse_path(self, edit, kind):
+        start = browse_start_dir(edit.text())
         if kind == "dir":
-            p = QtWidgets.QFileDialog.getExistingDirectory(self, "Select folder")
+            p = QtWidgets.QFileDialog.getExistingDirectory(self, "Select folder", start)
         else:
-            p, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select file")
+            p, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select file", start)
         if p:
             edit.setText(p)
 

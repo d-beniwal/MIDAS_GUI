@@ -21,7 +21,6 @@ import math
 from pathlib import Path
 from typing import Callable, Optional
 
-import numpy as np
 from PyQt5 import QtCore, QtWidgets
 import pyqtgraph as pg
 
@@ -29,10 +28,11 @@ from midas_gui.constants import DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM, DEFAULT_LS
     DEFAULT_BC_Y, DEFAULT_BC_Z
 from midas_gui.helpers import (
     _fspin, im_trans_codes_from_checkboxes, geometry_fields_from_file,
-    _predict_ring_radii, tilted_ring_xy, paramstest_pairs, write_standalone_paramstest,
+    _predict_ring_radii, ring_xy_corrected, distortion_rho_d_um, paramstest_pairs,
+    write_standalone_paramstest, apply_dict_to_widgets,
     _PARAMSTEST_DISTORTION)
 from midas_gui.widgets import ResidualBarChart, _mono_font
-from midas_gui.dialogs import _SaveParamstestDialog, show_error
+from midas_gui.dialogs import _SaveParamstestDialog, ManualSeedDialog, show_error
 from midas_gui import style as S
 
 
@@ -57,9 +57,7 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
         self._viewer = None
         self._log_fn: Optional[Callable[[str], None]] = None
         self._ring_items: list = []
-        self._corrected_ring_items: list = []
         self._show_rings = True
-        self._corrected = False
         self._build_ui()
 
     # ── Wiring ───────────────────────────────────────────────────
@@ -87,7 +85,7 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
                 old.ringFitBC.disconnect(self._on_ring_fit_bc)
             except TypeError:
                 pass
-            for it in self._ring_items + self._corrected_ring_items:
+            for it in self._ring_items:
                 old._iv.removeItem(it)
             old._clear_ring_points()
         self._viewer = viewer
@@ -124,11 +122,17 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
             "or a pyFAI .poni — sets this panel's seed BC/Lsd/tilts + transforms.")
         self._load_seed_btn.clicked.connect(self._load_calib_file)
         seed.body.addWidget(self._load_seed_btn)
+        # "Manual seed…" opens a non-modal per-parameter panel (see
+        # tab_calibrate.CalibrationTab, same design): BC (as one pair — the
+        # backend only accepts BC_y/BC_z together), Lsd, tx, ty, tz can each
+        # be independently ticked "include in seed". `_manual_seed_check` is
+        # kept only as a derived bulk on/off convenience — the owning page's
+        # ``_sync_seed_checkbox`` mirrors it (and the granular flags) across
+        # all 4 panels, and it round-trips old project files.
         self._manual_seed_check = QtWidgets.QCheckBox("Use manual seed")
-        self._manual_seed_check.setToolTip(
-            "Enable BC + Lsd as the LM starting point.\n"
-            "Use Pick BC / Pick Ring on the image to populate BC automatically.")
-        seed.body.addWidget(self._manual_seed_check)
+        self._manual_seed_check.setTristate(True)
+        self._manual_seed_check.setVisible(False)
+        self._syncing_seed_master = False
         self._seed_bcy = _fspin(-99999, 99999, 2, DEFAULT_BC_Y, "px")
         self._seed_bcz = _fspin(-99999, 99999, 2, DEFAULT_BC_Z, "px")
         self._seed_lsd = _fspin(0.001, 1e5, 4, DEFAULT_LSD_UM / 1000.0, " mm")
@@ -136,23 +140,50 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
         self._seed_ty = _fspin(-180, 180, 4, 0.0, "°")
         self._seed_tz = _fspin(-180, 180, 4, 0.0, "°")
         self._seed_tilts = (self._seed_tx, self._seed_ty, self._seed_tz)
+        self._seed_en_bc = QtWidgets.QCheckBox("Beam centre")
+        self._seed_en_lsd = QtWidgets.QCheckBox("Lsd")
+        self._seed_en_tx = QtWidgets.QCheckBox("tx")
+        self._seed_en_ty = QtWidgets.QCheckBox("ty")
+        self._seed_en_tz = QtWidgets.QCheckBox("tz")
+        self._seed_enables = (self._seed_en_bc, self._seed_en_lsd,
+                              self._seed_en_tx, self._seed_en_ty, self._seed_en_tz)
+        self._seed_en_bc.toggled.connect(self._seed_bcy.setEnabled)
+        self._seed_en_bc.toggled.connect(self._seed_bcz.setEnabled)
+        self._seed_en_lsd.toggled.connect(self._seed_lsd.setEnabled)
+        self._seed_en_tx.toggled.connect(self._seed_tx.setEnabled)
+        self._seed_en_ty.toggled.connect(self._seed_ty.setEnabled)
+        self._seed_en_tz.toggled.connect(self._seed_tz.setEnabled)
         for w in (self._seed_bcy, self._seed_bcz, self._seed_lsd, *self._seed_tilts):
             w.setEnabled(False)
-        for w in (self._seed_bcy, self._seed_bcz, self._seed_lsd, *self._seed_tilts):
-            self._manual_seed_check.toggled.connect(w.setEnabled)
-        sfm = S.Form()
-        sfm.row(("BC_y:", self._seed_bcy), ("BC_z:", self._seed_bcz)); sfm.row(("Lsd:", self._seed_lsd))
-        sfm.row(("tx:", self._seed_tx), ("ty:", self._seed_ty)); sfm.row(("tz:", self._seed_tz))
-        seed.body.addLayout(sfm)
+        for cb in self._seed_enables:
+            cb.toggled.connect(self._on_seed_enable_changed)
+        self._manual_seed_check.toggled.connect(self._on_seed_master_toggled)
         self._feedback_check = QtWidgets.QCheckBox("Feed result back to seed")
         self._feedback_check.setChecked(True)
         self._feedback_check.setToolTip(
             "After a calibration, copy the optimized BC / Lsd / tilts / distortion "
             "back into these seed fields so the next run starts from them.")
-        seed.body.addWidget(self._feedback_check)
         self._seed_note = QtWidgets.QLabel("")
         self._seed_note.setStyleSheet(f"color:{S.ACCENT};font-size:10px"); self._seed_note.setWordWrap(True)
-        seed.body.addWidget(self._seed_note)
+        self._seed_dialog = ManualSeedDialog(
+            en_bc=self._seed_en_bc, bcy=self._seed_bcy, bcz=self._seed_bcz,
+            en_lsd=self._seed_en_lsd, lsd=self._seed_lsd,
+            en_tx=self._seed_en_tx, tx=self._seed_tx,
+            en_ty=self._seed_en_ty, ty=self._seed_ty,
+            en_tz=self._seed_en_tz, tz=self._seed_tz,
+            feedback_check=self._feedback_check, note=self._seed_note, parent=self)
+        self._seed_btn = QtWidgets.QPushButton("Manual seed…")
+        self._seed_btn.setToolTip(
+            "Choose which of BC / Lsd / tx / ty / tz to seed this panel's fit "
+            "from. Use Pick BC / Pick Ring on the image to populate BC while "
+            "this is open.")
+        self._seed_btn.clicked.connect(self._open_seed_dialog)
+        seed.body.addWidget(self._seed_btn)
+        self._seed_summary_lbl = QtWidgets.QLabel("")
+        self._seed_summary_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        self._seed_summary_lbl.setWordWrap(True)
+        seed.body.addWidget(self._seed_summary_lbl)
+        self._update_seed_summary()
         lv.addWidget(seed)
         lv.addStretch(1)
 
@@ -198,33 +229,86 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
         return im_trans_codes_from_checkboxes(self._flip_y, self._flip_z, self._transp)
 
     def manual_seed(self) -> Optional[dict]:
-        if not self._manual_seed_check.isChecked():
-            return None
-        return {
-            "BC_y": self._seed_bcy.value(), "BC_z": self._seed_bcz.value(),
-            "Lsd": self._seed_lsd.value() * 1000.0,   # mm display -> µm
-            "tx": self._seed_tx.value(), "ty": self._seed_ty.value(), "tz": self._seed_tz.value(),
-        }
+        """Sparse seed dict (only the parameters ticked "include in seed" are
+        present) for ``calib.run_pipeline`` — see ``calib._resolve_seed``,
+        which fills in whatever's missing from an automatic seed."""
+        manual: dict = {}
+        if self._seed_en_bc.isChecked():
+            manual["BC_y"] = self._seed_bcy.value()
+            manual["BC_z"] = self._seed_bcz.value()
+        if self._seed_en_lsd.isChecked():
+            manual["Lsd"] = self._seed_lsd.value() * 1000.0   # mm display -> µm
+        for en, key, w in ((self._seed_en_tx, "tx", self._seed_tx),
+                           (self._seed_en_ty, "ty", self._seed_ty),
+                           (self._seed_en_tz, "tz", self._seed_tz)):
+            if en.isChecked():
+                manual[key] = w.value()
+        return manual or None
+
+    def _open_seed_dialog(self):
+        self._seed_dialog.show()
+        self._seed_dialog.raise_()
+        self._seed_dialog.activateWindow()
+
+    def _on_seed_enable_changed(self, *_args):
+        self._syncing_seed_master = True
+        try:
+            n_on = sum(cb.isChecked() for cb in self._seed_enables)
+            if n_on == 0:
+                self._manual_seed_check.setCheckState(QtCore.Qt.Unchecked)
+            elif n_on == len(self._seed_enables):
+                self._manual_seed_check.setCheckState(QtCore.Qt.Checked)
+            else:
+                self._manual_seed_check.setCheckState(QtCore.Qt.PartiallyChecked)
+        finally:
+            self._syncing_seed_master = False
+        self._update_seed_summary()
+
+    def _on_seed_master_toggled(self, *_args):
+        if self._syncing_seed_master:
+            return
+        want = self._manual_seed_check.isChecked()   # PartiallyChecked reads as True
+        for cb in self._seed_enables:
+            cb.setChecked(want)
+
+    def _update_seed_summary(self):
+        on = [label for cb, label in zip(
+                  self._seed_enables, ("BC", "Lsd", "tx", "ty", "tz"))
+              if cb.isChecked()]
+        self._seed_summary_lbl.setText(
+            "Seeding: " + ", ".join(on) if on else "Fully automatic (no manual seed)")
+
+    def _enable_seed(self, **flags):
+        by_name = dict(zip(("BC", "Lsd", "tx", "ty", "tz"), self._seed_enables))
+        for name, on in flags.items():
+            if on:
+                by_name[name].setChecked(True)
 
     def seed_from_geometry(self, g: dict):
         """Seed this panel's fields from a geometry dict (calibration file,
         Data Viewer import, or a previous result) — BC/Lsd/tilts/transforms
-        only; shared fields (λ/pixel/calibrant) are the owning page's job."""
+        only; shared fields (λ/pixel/calibrant) are the owning page's job.
+        Only the keys actually present in ``g`` are enabled as seed — a
+        partial geometry (e.g. BC without Lsd) should not silently seed a
+        parameter it never supplied."""
         if not g:
             return
-        self._manual_seed_check.setChecked(True)
-        if g.get("BC_y") is not None:
+        if g.get("BC_y") is not None and g.get("BC_z") is not None:
             self._seed_bcy.setValue(float(g["BC_y"]))
-        if g.get("BC_z") is not None:
             self._seed_bcz.setValue(float(g["BC_z"]))
+            self._enable_seed(BC=True)
         if g.get("Lsd"):
             self._seed_lsd.setValue(float(g["Lsd"]) / 1000.0)
+            self._enable_seed(Lsd=True)
         if g.get("tx") is not None:
             self._seed_tx.setValue(float(g["tx"]))
+            self._enable_seed(tx=True)
         if g.get("ty") is not None:
             self._seed_ty.setValue(float(g["ty"]))
+            self._enable_seed(ty=True)
         if g.get("tz") is not None:
             self._seed_tz.setValue(float(g["tz"]))
+            self._enable_seed(tz=True)
         if g.get("im_trans") is not None:
             im_trans = g["im_trans"] or []
             self._flip_y.setChecked(1 in im_trans)
@@ -232,7 +316,8 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
             self._transp.setChecked(3 in im_trans)
 
     def seed_from_result(self, result):
-        self._manual_seed_check.setChecked(True)
+        """A completed fit is a full geometry — every parameter is enabled."""
+        self._enable_seed(BC=True, Lsd=True, tx=True, ty=True, tz=True)
         self._seed_bcy.setValue(float(result.BC_y))
         self._seed_bcz.setValue(float(result.BC_z))
         self._seed_lsd.setValue(float(result.Lsd) / 1000.0)
@@ -260,13 +345,14 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
     # ── Pick BC / Pick Ring ──────────────────────────────────────────
 
     def _on_bc_picked(self, bc_y, bc_z):
-        self._manual_seed_check.setChecked(True)
+        self._enable_seed(BC=True)
         self._seed_bcy.setValue(bc_y); self._seed_bcz.setValue(bc_z)
-        self._seed_note.setText(f"ge{self.panel_number}: BC set from click — also set Lsd before running.")
+        self._seed_note.setText(
+            f"ge{self.panel_number}: BC set from click — Lsd is auto-seeded unless it's ticked too.")
         self._log(f"ge{self.panel_number}: BC set by click: ({bc_y:.2f}, {bc_z:.2f}) px")
 
     def _on_ring_fit_bc(self, bc_y, bc_z, r_px):
-        self._manual_seed_check.setChecked(True)
+        self._enable_seed(BC=True)
         self._seed_bcy.setValue(bc_y); self._seed_bcz.setValue(bc_z)
         self._seed_note.setText(f"ge{self.panel_number}: BC from ring fit (R={r_px:.1f} px).")
         self._log(f"ge{self.panel_number}: ring fit BC=({bc_y:.2f}, {bc_z:.2f}) px  R={r_px:.1f} px")
@@ -275,33 +361,11 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
 
     def set_show_rings(self, visible: bool):
         self._show_rings = visible
-        active = self._corrected_ring_items if (self._corrected and self._corrected_ring_items) \
-            else self._ring_items
-        for it in active:
+        for it in self._ring_items:
             it.setVisible(visible)
 
     def show_rings_checked(self) -> bool:
         return self._show_rings
-
-    def set_corrected(self, checked: bool):
-        self._corrected = checked
-        if self.result is None:
-            return
-        if checked:
-            for item in self._ring_items:
-                item.setVisible(False)
-            if not self._corrected_ring_items:
-                self._draw_corrected_rings(_predict_ring_radii(self.result))
-            for item in self._corrected_ring_items:
-                item.setVisible(self._show_rings)
-        else:
-            for item in self._corrected_ring_items:
-                item.setVisible(False)
-            for item in self._ring_items:
-                item.setVisible(self._show_rings)
-
-    def corrected_checked(self) -> bool:
-        return self._corrected
 
     def _clear_rings(self):
         if self._viewer is not None:
@@ -309,55 +373,47 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
                 self._viewer._iv.removeItem(it)
         self._ring_items = []
 
-    def _clear_corrected_rings(self):
-        if self._viewer is not None:
-            for it in self._corrected_ring_items:
-                self._viewer._iv.removeItem(it)
-        self._corrected_ring_items = []
-
     def _redraw_rings(self):
         """(Re)draw this panel's fitted rings onto whichever viewer is
         currently bound — called after a fit completes, and again on
-        ``bind_viewer`` so switching back to this panel restores them."""
+        ``bind_viewer`` so switching back to this panel restores them.
+
+        Always through the full forward model — this panel's fitted tilts and
+        refined distortion both applied — matching the single-detector tab,
+        which dropped its "Corrected" tick for the same reason: a ring overlay
+        that has to be switched into correctness is one most users read in its
+        wrong state. ``ring_xy_corrected`` reduces exactly to a circle about
+        the beam centre when there is neither tilt nor distortion to apply.
+        """
         self._clear_rings()
-        self._clear_corrected_rings()
         if self.result is None or self._viewer is None:
             return
         result = self.result
-        radii = _predict_ring_radii(result)
-        th = np.linspace(0, 2 * math.pi, 512)
+        pxY = float(result.pxY)
+        pxZ = float(getattr(result, "pxZ", 0.0) or pxY)
+        rho_d = distortion_rho_d_um(getattr(result, "NrPixelsY", 0),
+                                    getattr(result, "NrPixelsZ", 0),
+                                    result.BC_y, result.BC_z, pxY, pxZ)
+        dist = dict(getattr(result, "distortion", {}) or {})
         pen = pg.mkPen("lime", width=1.2)
         max_r = max(result.NrPixelsY, result.NrPixelsZ)
-        for r in radii:
-            if 0 < r < max_r:
-                item = pg.PlotDataItem(result.BC_y + r * np.cos(th),
-                                       result.BC_z + r * np.sin(th), pen=pen)
-                item.setVisible(self._show_rings and not self._corrected)
-                self._viewer._iv.addItem(item); self._ring_items.append(item)
-        bc = pg.ScatterPlotItem([result.BC_y], [result.BC_z], symbol="o", size=10,
-                                pen=pg.mkPen("yellow", width=2), brush=pg.mkBrush("red"))
-        bc.setVisible(self._show_rings and not self._corrected)
-        self._viewer._iv.addItem(bc); self._ring_items.append(bc)
-        if self._corrected:
-            self._draw_corrected_rings(radii)
-
-    def _draw_corrected_rings(self, radii_px):
-        if self.result is None or self._viewer is None:
-            return
-        result = self.result
-        self._clear_corrected_rings()
-        pen = pg.mkPen("lime", width=1.2)
-        for r in radii_px:
+        for r in (r for r in _predict_ring_radii(result) if 0 < r < max_r):
             try:
-                two_theta_deg = math.degrees(math.atan(r * result.pxY / result.Lsd))
-                ys, zs = tilted_ring_xy(two_theta_deg, result.tx, result.ty, result.tz,
-                                        result.Lsd, result.BC_y, result.BC_z,
-                                        result.pxY, result.pxZ)
+                two_theta_deg = math.degrees(math.atan(r * pxY / float(result.Lsd)))
+                ys, zs = ring_xy_corrected(
+                    two_theta_deg, result.tx, result.ty, result.tz,
+                    float(result.Lsd), result.BC_y, result.BC_z, pxY, pxZ,
+                    distortion=dist, rho_d_um=rho_d)
             except Exception:
+                self._log(f"ge{self.panel_number}: could not project ring at R={r:.1f} px")
                 continue
             item = pg.PlotDataItem(ys, zs, pen=pen)
             item.setVisible(self._show_rings)
-            self._viewer._iv.addItem(item); self._corrected_ring_items.append(item)
+            self._viewer._iv.addItem(item); self._ring_items.append(item)
+        bc = pg.ScatterPlotItem([result.BC_y], [result.BC_z], symbol="o", size=10,
+                                pen=pg.mkPen("yellow", width=2), brush=pg.mkBrush("red"))
+        bc.setVisible(self._show_rings)
+        self._viewer._iv.addItem(bc); self._ring_items.append(bc)
 
     def on_result(self, result):
         """A fresh fitted result for this panel — store it, refresh seed
@@ -474,8 +530,23 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
     def state_widgets(self) -> dict:
         return {
             "flip_y": self._flip_y, "flip_z": self._flip_z, "transp": self._transp,
-            "manual_seed_check": self._manual_seed_check,
+            "manual_seed_check": self._manual_seed_check,   # derived bulk on/off
+            "seed_en_bc": self._seed_en_bc, "seed_en_lsd": self._seed_en_lsd,
+            "seed_en_tx": self._seed_en_tx, "seed_en_ty": self._seed_en_ty,
+            "seed_en_tz": self._seed_en_tz,
             "seed_bcy": self._seed_bcy, "seed_bcz": self._seed_bcz, "seed_lsd": self._seed_lsd,
             "seed_tx": self._seed_tx, "seed_ty": self._seed_ty, "seed_tz": self._seed_tz,
             "feedback_check": self._feedback_check,
         }
+
+    def apply_state_fields(self, fields: dict) -> None:
+        """Restore ``fields`` (as produced by ``widgets_to_dict(state_widgets())``)
+        and reconcile the derived granular/master seed flags — same legacy
+        fallback as ``CalibrationTab._set_state``: a project saved before the
+        per-parameter seed panel existed only has ``manual_seed_check``, which
+        meant BC+Lsd+tilts all together."""
+        apply_dict_to_widgets(self.state_widgets(), fields)
+        if "seed_en_bc" not in fields and self._manual_seed_check.isChecked():
+            self._enable_seed(BC=True, Lsd=True, tx=True, ty=True, tz=True)
+        else:
+            self._on_seed_enable_changed()

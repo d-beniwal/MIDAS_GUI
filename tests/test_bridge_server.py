@@ -26,7 +26,18 @@ def test_resolve_pv_matches_prefix():
         {"name": "a", "prefix": "1idPG4:", "pva_suffix": "Pva1:Image"},
         {"name": "b", "prefix": "20IDFF:", "pva_suffix": "Pva1:Image"},
     ]
-    assert bridge_server.resolve_pv("20IDFF:", devices) == "20IDFF:Pva1:Image"
+    assert bridge_server.resolve_pv("20IDFF:", devices) == ("20IDFF:Pva1:Image", "pva")
+
+
+def test_resolve_pv_no_backend_key_defaults_to_pva():
+    """A device dict predating the backend field must still resolve as PVA."""
+    devices = [{"name": "a", "prefix": "1idPG4:", "pva_suffix": "Pva1:Image"}]
+    assert bridge_server.resolve_pv("1idPG4:", devices) == ("1idPG4:Pva1:Image", "pva")
+
+
+def test_resolve_pv_ca_device_uses_ca_suffix():
+    devices = [{"name": "varex", "prefix": "17bmVarex:", "backend": "ca", "ca_suffix": "image1:"}]
+    assert bridge_server.resolve_pv("17bmVarex:", devices) == ("17bmVarex:image1:", "ca")
 
 
 def test_resolve_pv_no_match_returns_none():
@@ -81,10 +92,11 @@ def test_resolve_and_start_live_wired_in_mainwindow(monkeypatch):
             {"name": "20iddFF", "prefix": "20IDFF:", "pva_suffix": "Pva1:Image"},
         ])
         calls = []
-        monkeypatch.setattr(win._view_tab, "start_live_pv", calls.append)
+        monkeypatch.setattr(win._view_tab, "start_live_pv",
+                             lambda pv, backend="pva": calls.append((pv, backend)))
 
         win._resolve_and_start_live("20IDFF:")
-        assert calls == ["20IDFF:Pva1:Image"]
+        assert calls == [("20IDFF:Pva1:Image", "pva")]
 
         calls.clear()
         win._resolve_and_start_live("no_such_prefix:")

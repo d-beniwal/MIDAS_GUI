@@ -54,6 +54,86 @@ def _make_arrow_svg(direction: str = "down", color: str = "#333333") -> str:
     return f.name.replace("\\", "/")
 
 
+def apply_ui_scale() -> float:
+    """Set QT_SCALE_FACTOR from the configured ``ui.ui_scale`` and enable crisp
+    HiDPI pixmaps. Must run before any QApplication instance exists (Qt only
+    reads QT_SCALE_FACTOR / the AA_UseHighDpiPixmaps attribute at that point).
+
+    Shared by ``app.main()`` and ``auto_attenuation.app.main()`` so a
+    standalone window scales identically to the main GUI at any interface
+    scale. Returns the clamped scale actually applied.
+    """
+    from midas_gui import constants as C
+    try:
+        scale = float(getattr(C, "DEFAULT_UI_SCALE", 1.0) or 1.0)
+    except Exception:
+        scale = 1.0
+    scale = min(4.0, max(0.5, scale))
+    _os.environ["QT_SCALE_FACTOR"] = f"{scale:.4g}"
+    try:
+        QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
+    except Exception:
+        pass
+    return scale
+
+
+def browse_start_dir(path_text: str, fallback: str = "") -> str:
+    """Directory to seed a Browse dialog at, given a path field's current text.
+
+    Returns the typed path itself if it's an existing directory, its parent
+    if that exists, else *fallback*.
+    """
+    text = (path_text or "").strip()
+    if text:
+        p = Path(text)
+        if p.is_dir():
+            return str(p)
+        if p.parent.exists():
+            return str(p.parent)
+    return fallback
+
+
+def path_is_missing(line_edit: QtWidgets.QLineEdit, parent: QtWidgets.QWidget, *,
+                     is_output_dir: bool = False) -> bool:
+    """Check the field's current text and pop up a dialog if it's a
+    non-empty path that doesn't exist on disk; returns whether it popped one.
+
+    Informational ("will be created when you run") for ``is_output_dir=True``,
+    a "Not found" warning otherwise. Empty text never triggers a popup.
+    Use this directly (as an early-return guard) inside a field's own
+    ``returnPressed``/``editingFinished`` handler when that handler already
+    acts on the path — e.g. loading it — so a missing path shows this one
+    friendly message instead of *also* whatever error the load raises. For a
+    field with no such handler, connect ``warn_if_path_missing`` instead.
+    """
+    text = line_edit.text().strip()
+    if not text or Path(text).exists():
+        return False
+    if is_output_dir:
+        QtWidgets.QMessageBox.information(
+            parent, "Output folder",
+            f"This folder does not exist yet:\n\n{text}\n\n"
+            "It will be created when you run.")
+    else:
+        QtWidgets.QMessageBox.warning(
+            parent, "Not found", f"Path not found:\n\n{text}")
+    return True
+
+
+def warn_if_path_missing(line_edit: QtWidgets.QLineEdit,
+                          parent: QtWidgets.QWidget, *,
+                          is_output_dir: bool = False) -> None:
+    """Connect ``line_edit.returnPressed`` to a missing-path check
+    (``path_is_missing``). Purely additive — safe to call alongside any
+    handler the field already has, since Qt fires every connected slot; use
+    this for a field whose existing handler (if any) doesn't itself act on
+    the path (e.g. it only clamps a spinbox range), so there's no risk of a
+    second, less friendly error dialog stacking on top of this one.
+    """
+    line_edit.returnPressed.connect(
+        lambda: path_is_missing(line_edit, parent, is_output_dir=is_output_dir))
+
+
 # ── Image IO ──────────────────────────────────────────────────────────────────
 
 def _load_image(path: str | Path, data_loc: str = "exchange/data",
@@ -454,6 +534,49 @@ def average_field(kind: str, path: str, dataset: str = "exchange/data",
         s, e = _slice(arr.shape[0])
         return arr[s:e + 1].mean(axis=0)
     return arr
+
+
+def read_frame_range(kind: str, path: str, dataset: str = "exchange/data",
+                     idx_start: int = 0, idx_end: int = -1) -> np.ndarray:
+    """Read the raw (N, Y, X) frame stack over an index range, unaveraged.
+
+    Same ``kind``/index-range semantics as :func:`average_field` (which this
+    mirrors), for callers that need the individual frames rather than their
+    mean — e.g. a dead/hot-pixel mask built from per-pixel variance across a
+    dark stack.
+    """
+    def _slice(n: int) -> tuple:
+        s = max(0, int(idx_start))
+        e = n - 1 if idx_end is None or int(idx_end) < 0 else min(int(idx_end), n - 1)
+        return s, e
+
+    if kind == "hdf5":
+        import h5py
+        with h5py.File(str(path), "r") as f:
+            dset = f[dataset]
+            if dset.ndim >= 3:
+                s, e = _slice(dset.shape[0])
+                return np.asarray(dset[s:e + 1], dtype=np.float32)
+            return np.asarray(dset[...], dtype=np.float32)[None, ...]
+
+    if kind == "folder":
+        paths = _collect_frame_paths(path)
+        if not paths:
+            raise ValueError(f"No frames found for '{path}'")
+        s, e = _slice(len(paths))
+        frames = []
+        for p in paths[s:e + 1]:
+            a = _load_image(p).astype(np.float32)
+            a = a[0] if a.ndim == 3 else a       # guard multi-page file in a folder
+            frames.append(a)
+        return np.stack(frames, axis=0)
+
+    # single file
+    arr = _load_image(path).astype(np.float32)
+    if arr.ndim >= 3:
+        s, e = _slice(arr.shape[0])
+        return arr[s:e + 1]
+    return arr[None, ...]
 
 
 def apply_field_corrections(img: np.ndarray, *, dark=None, bright=None,
@@ -904,6 +1027,133 @@ def tilted_ring_xy(two_theta_deg: float, tx: float, ty: float, tz: float,
     eta = np.linspace(0.0, 360.0, n, endpoint=True)
     return _tilt_project_YZ(np.full(n, two_theta_deg), eta, tx, ty, tz,
                              Lsd_um, bc_y, bc_z, pxY_um, pxZ_um)
+
+
+def distortion_rho_d_um(NrPixelsY, NrPixelsZ, bc_y: float, bc_z: float,
+                         pxY_um: float, pxZ_um: float) -> Optional[float]:
+    """The distortion normalisation radius ρ_d, in µm.
+
+    Reproduces ``spec_from_calibration_result``'s own definition exactly —
+    the beam-centre-to-farthest-corner distance in px (measured to ``N-1``,
+    the last pixel index) times the mean pixel pitch. It has to match: the
+    harmonic basis is evaluated at ρ = R_µm / ρ_d, so a ρ_d off by even the
+    pixel pitch rescales every term and the polynomial no longer describes
+    the detector it was fitted on.
+
+    ``None`` when the detector size is unknown (a result that never carried
+    ``NrPixelsY``/``NrPixelsZ``), which callers read as "cannot evaluate
+    distortion here" rather than substituting a guess.
+    """
+    try:
+        NY, NZ = int(NrPixelsY or 0), int(NrPixelsZ or 0)
+    except (TypeError, ValueError):
+        return None
+    if NY <= 0 or NZ <= 0:
+        return None
+    px_mean = 0.5 * (float(pxY_um) + float(pxZ_um or pxY_um))
+    corner_px = math.hypot(max(bc_y, NY - 1 - bc_y), max(bc_z, NZ - 1 - bc_z))
+    return corner_px * px_mean if corner_px > 0 else None
+
+
+def ring_xy_corrected(two_theta_deg: float, tx: float, ty: float, tz: float,
+                       Lsd_um: float, bc_y: float, bc_z: float,
+                       pxY_um: float, pxZ_um: float, *,
+                       distortion: Optional[dict] = None,
+                       rho_d_um: Optional[float] = None, n: int = 400):
+    """Where a ring at ``two_theta_deg`` actually lands on the detector, through
+    the *full* forward model — tilt (:func:`tilted_ring_xy`) **and** the refined
+    distortion harmonics.
+
+    :func:`tilted_ring_xy` answers "where does the undistorted ray hit?". That
+    is not where the ring is drawn on a detector whose calibration refined
+    distortion coefficients, because the backend reports a pixel's radius as
+    ``R_corrected = D(ρ, η) · R_projected`` (``midas_calibrate_v2.forward.
+    geometry.pixel_to_REta``). A ring is the locus of pixels whose *corrected*
+    radius equals the Bragg radius, so this inverts that relation instead of
+    ignoring it.
+
+    Per η, solve ``D(rad/ρ_d, η) · rad = Lsd·tan(2θ)`` for the projected radius
+    ``rad`` by fixed-point iteration — D is within a few percent of 1 for any
+    physical calibration, so the map is a strong contraction and this converges
+    in a handful of passes. The recovered ``rad`` becomes a per-point effective
+    2θ, which :func:`_tilt_project_YZ` then projects exactly as for a ring.
+
+    ``distortion`` is a v2-named coefficient dict (``iso_R2``, ``a1``,
+    ``phi1``, …) as carried by an ``AutoCalibrationResult``; the model itself
+    comes from :mod:`midas_distortion`, the shared leaf ``midas_calibrate_v2``
+    and ``midas_integrate_v2`` both evaluate, so there is one definition of it
+    rather than a second copy here.
+
+    With no coefficients — or no ``rho_d_um`` to normalise them against — the
+    solve is skipped entirely and the result is bit-identical to
+    :func:`tilted_ring_xy`, which is what every untilted/undistorted caller
+    still gets.
+
+    Note: the empirical ``residual_corr_map`` (a smooth per-pixel ΔR the
+    backend adds *after* the harmonics, present only when residual-map
+    refinement was run) is NOT applied here — it is a sub-pixel term and would
+    need the map tensor in a redraw path. Callers that care should say so.
+    """
+    eta = np.linspace(0.0, 360.0, n, endpoint=True)
+    p = _distortion_coeff_vector(distortion)
+    R_target_um = float(Lsd_um) * math.tan(math.radians(float(two_theta_deg)))
+    if p is None or not rho_d_um or rho_d_um <= 0 or R_target_um == 0.0:
+        # Nothing to invert. Pass the requested 2θ straight through rather
+        # than round-tripping it through tan/arctan, so this stays *exactly*
+        # tilted_ring_xy — the reduction property its docstring promises.
+        tt_eff = np.full(n, float(two_theta_deg))
+    else:
+        from midas_distortion import distortion_factor
+        rad = np.full(n, R_target_um, dtype=float)
+        for _ in range(_DISTORTION_SOLVE_ITERS):
+            D = distortion_factor(rad / float(rho_d_um), eta, p)
+            # A non-positive factor is not a physical distortion — bail out
+            # and draw the undistorted ring rather than a folded-over curve.
+            if not np.all(np.isfinite(D)) or np.any(D <= 0.0):
+                rad = np.full(n, R_target_um, dtype=float)
+                break
+            nxt = R_target_um / D
+            converged = np.max(np.abs(nxt - rad)) <= 1e-13 * abs(R_target_um)
+            rad = nxt
+            if converged:
+                break
+        tt_eff = np.degrees(np.arctan(rad / float(Lsd_um)))
+    return _tilt_project_YZ(tt_eff, eta, tx, ty, tz,
+                             Lsd_um, bc_y, bc_z, pxY_um, pxZ_um)
+
+
+def ring_on_image_mask(ys, zs, img_shape):
+    """Boolean mask of the ``(ys, zs)`` ring points that fall on the detector
+    image whose array shape is ``img_shape`` (``(rows, cols, ...)``, i.e.
+    ``(NrPixelsZ, NrPixelsY)``).
+
+    Shared by every ring overlay (Data Viewer, Calibrate) so a predicted ring
+    that swings outside the frame is confined to the pixels a caller can
+    actually check it against, rather than drawn across the empty canvas
+    beside the detector.
+    """
+    nz, ny = img_shape[:2]
+    return (ys >= 0) & (ys <= ny - 1) & (zs >= 0) & (zs <= nz - 1)
+
+
+#: Fixed-point passes in :func:`ring_xy_corrected`. D is a near-unity
+#: multiplier, so this converges to float64 noise in ~5; 20 is headroom for a
+#: badly-scaled coefficient set, and costs nothing on a 400-point ring.
+_DISTORTION_SOLVE_ITERS = 20
+
+
+def _distortion_coeff_vector(distortion: Optional[dict]):
+    """A v2-ordered 15-vector for ``distortion``, or ``None`` when it holds
+    nothing to apply (missing, empty, or every coefficient zero — the common
+    case of a calibration that never refined distortion)."""
+    if not distortion:
+        return None
+    try:
+        from midas_distortion import v2_coeffs_from_named
+        p = v2_coeffs_from_named(distortion)
+    except Exception:
+        return None
+    return p if np.any(p != 0.0) else None
 
 
 def tilted_spoke_xy(two_theta_lo_deg: float, two_theta_hi_deg: float, eta_deg: float,
@@ -1591,6 +1841,46 @@ def resolve_calibration_fields(calib_result, use_file: bool, file_path: str, *,
     return fields, f"From {source_label}."
 
 
+def full_calibration_snapshot(calib_result, use_file: bool, file_path: str, *,
+                              source_label: str = "Tab 2 calibration"):
+    """Every field of the calibration currently selected — not just the
+    display subset :func:`resolve_calibration_fields` returns.
+
+    Same ``(dict | None, note)`` contract as that function, so it is a
+    drop-in wherever the *whole* calibration matters rather than the handful
+    of numbers a user reads off a panel. That is the provenance path: an
+    integration attempt's ``calibration_snapshot`` has to be able to
+    reconstruct the calibration the run actually used, which the 13 display
+    fields cannot (they drop ``_calibrant_name``, ``_panel_unpacked``,
+    ``panel_layout``, the refined-parameter σ / at-limit flags, ...).
+
+    The display fields are overlaid *on top of* the raw result, not merged
+    under it: they are read straight off the same object, so no value can
+    drift, but they also supply defaults a bare result may not carry
+    (``tx/ty/tz`` → 0.0, ``distortion`` → {}, ``im_trans`` → []). Keeping the
+    output a strict superset of ``resolve_calibration_fields``' is what lets
+    every existing reader — ``project.calibration_namespace``,
+    ``render_calib_value_grid``, ``gsas_export`` — consume it unchanged.
+    """
+    fields, note = resolve_calibration_fields(calib_result, use_file, file_path,
+                                              source_label=source_label)
+    if fields is None:
+        return None, note
+    if use_file or calib_result is None:
+        try:
+            result = result_ns_from_geometry_file((file_path or "").strip())
+        except Exception:
+            # Unreadable on the re-parse (it parsed once, for `fields`) —
+            # the display subset is still an honest record. Never block
+            # logging an otherwise-good integration over this.
+            return fields, note
+    else:
+        result = calib_result
+    from midas_gui import project   # deferred: project doesn't import helpers
+    full = project.sanitize_result_dict(result) or {}
+    return {**full, **fields}, note
+
+
 def render_calib_value_grid(grid: "QtWidgets.QGridLayout", note_label: "QtWidgets.QLabel",
                             fields: Optional[dict], note: str) -> None:
     """Populate a read-only 2-column key/value grid of calibration-geometry
@@ -1666,7 +1956,8 @@ class _LogStream(io.TextIOBase):
 def widgets_to_dict(widgets: dict) -> dict:
     """Snapshot a ``{key: widget}`` map into a plain JSON-able dict, by widget type:
     spin boxes → ``.value()``, combo boxes → current text, line edits → ``.text()``,
-    checkable buttons → ``.isChecked()``. Unrecognized widget types are skipped."""
+    checkable buttons (or a checkable ``QGroupBox``) → ``.isChecked()``. Unrecognized
+    widget types are skipped."""
     out = {}
     for key, w in widgets.items():
         if isinstance(w, QtWidgets.QAbstractSpinBox):
@@ -1676,6 +1967,8 @@ def widgets_to_dict(widgets: dict) -> dict:
         elif isinstance(w, QtWidgets.QLineEdit):
             out[key] = w.text()
         elif isinstance(w, QtWidgets.QAbstractButton):
+            out[key] = w.isChecked()
+        elif isinstance(w, QtWidgets.QGroupBox) and w.isCheckable():
             out[key] = w.isChecked()
     return out
 
@@ -1703,6 +1996,8 @@ def apply_dict_to_widgets(widgets: dict, data: dict) -> None:
             elif isinstance(w, QtWidgets.QLineEdit):
                 w.setText(str(val))
             elif isinstance(w, QtWidgets.QAbstractButton):
+                w.setChecked(bool(val))
+            elif isinstance(w, QtWidgets.QGroupBox) and w.isCheckable():
                 w.setChecked(bool(val))
         except Exception:
             pass
@@ -1984,6 +2279,6 @@ def _sep():
     return f
 
 
-def _browse(parent, caption, filt) -> str:
-    p, _ = QtWidgets.QFileDialog.getOpenFileName(parent, caption, "", filt)
+def _browse(parent, caption, filt, start_dir: str = "") -> str:
+    p, _ = QtWidgets.QFileDialog.getOpenFileName(parent, caption, start_dir, filt)
     return p

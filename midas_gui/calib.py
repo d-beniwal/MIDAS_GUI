@@ -107,9 +107,34 @@ def _distortion_coeffs(refine: dict) -> set:
     return set(DISTORTION_NAMES) if bool(refine.get("Distortion", True)) else set()
 
 
-def _manual_seed_dict(manual: dict) -> dict:
-    """Seed dict from a GUI manual_seed: BC/Lsd plus optional tilts + distortion."""
-    seed = {"BC_y": manual["BC_y"], "BC_z": manual["BC_z"], "Lsd": manual["Lsd"]}
+def _resolve_seed(manual: Optional[dict], image: np.ndarray, wavelength: float,
+                  pxY: float, calibrant: str) -> Optional[dict]:
+    """Build a full geometry seed (BC_y, BC_z, Lsd, tx, ty, tz) for the
+    v1-native pipelines (``build_v1_params`` needs concrete numbers to start
+    from regardless of what's actually being *refined*), mixing whichever
+    fields the GUI's per-parameter seed panel enabled with an automatic seed
+    for the rest.
+
+    ``manual`` is *sparse*: only keys the user ticked "include in seed" for
+    are present (BC_y and BC_z always travel together — the backend has no
+    way to seed one without the other). Returns ``None`` only when an
+    automatic seed is needed to fill a gap and it fails; callers already
+    raise their own "auto-seed failed, enable manual seed" error in that
+    case, same as before this function existed.
+    """
+    manual = manual or {}
+    have_bc = "BC_y" in manual and "BC_z" in manual
+    have_lsd = "Lsd" in manual
+    auto = None
+    if not (have_bc and have_lsd):
+        auto = make_seed_safe(image, wavelength, pxY, calibrant)
+        if auto is None:
+            return None
+    seed = {
+        "BC_y": manual["BC_y"] if have_bc else auto.BC_y,
+        "BC_z": manual["BC_z"] if have_bc else auto.BC_z,
+        "Lsd":  manual["Lsd"] if have_lsd else auto.Lsd_um,
+    }
     for k in ("tx", "ty", "tz"):
         if manual.get(k) is not None:
             seed[k] = float(manual[k])
@@ -224,23 +249,6 @@ def build_v1_params(seed, *, wavelength, pxY, pxZ, calibrant, NY, NZ,
     return v1
 
 
-def _seed_for_v1(img, *, wavelength, pxY, calibrant, manual, why: str):
-    """The ``{"BC_y","BC_z","Lsd"}`` seed :func:`build_v1_params` needs.
-
-    Every v1-based route needs this and none of them can auto-seed themselves
-    the way ``calibrate()`` does, so a failed auto-seed has to become an
-    actionable error naming the route that required one — hence ``why``.
-    """
-    if manual:
-        return _manual_seed_dict(manual)
-    s = make_seed_safe(img, wavelength, pxY, calibrant)
-    if s is None:
-        raise RuntimeError(
-            f"Auto-seed failed for {why}. Enable manual seed "
-            "(Pick BC / Pick Ring + Lsd) and retry.")
-    return {"BC_y": s.BC_y, "BC_z": s.BC_z, "Lsd": s.Lsd_um}
-
-
 # ── Normalisation: any pipeline output → AutoCalibrationResult ───────────────────
 
 _PANEL_KEYS = ("panel_delta_yz", "panel_delta_theta", "panel_delta_lsd", "panel_delta_p2")
@@ -328,15 +336,6 @@ def normalize_result(raw, mode: str, *, NY, NZ, pxY, pxZ, wavelength,
     # one_shot+panel_layout was re-routed through four_stage to expose unpacked
     if mode == "one_shot" and hasattr(raw, "stage2"):
         effective_mode = "four_stage"
-    elif mode == "one_shot" and hasattr(raw, "unpacked"):
-        # Partial distortion-coefficient refinement re-routed run_pipeline
-        # through pipelines.single.autocalibrate (see run_pipeline) — a
-        # CalibrationResult, not AutoCalibrationResult; normalize like
-        # first_time's pv.unpacked case.
-        return _auto_result_from_unpacked(
-            raw.unpacked, NY=NY, NZ=NZ, pxY=pxY, pxZ=pxZ, wavelength=wavelength,
-            strain=raw.post_residual_strain_uE, residual_map=raw.residual_corr_map,
-            residual_bin_path=getattr(raw, "_residual_bin_path", None))
     else:
         effective_mode = mode
 
@@ -392,7 +391,40 @@ def normalize_result(raw, mode: str, *, NY, NZ, pxY, pxZ, wavelength,
             _attach_panel_result(result, panel_u, panel_layout, output_dir)
         return result
 
+    if effective_mode == "frozen_point":
+        pv = raw.res   # final PVCalibrationResult, same shape as first_time/four_stage
+        strain = (pv.history[-1].mean_strain_uE
+                  if getattr(pv, "history", None) else None)
+        result = _auto_result_from_unpacked(
+            pv.unpacked, NY=NY, NZ=NZ, pxY=pxY, pxZ=pxZ,
+            wavelength=wavelength, strain=strain)
+        result._frozen_point_converged = raw.converged
+        result._frozen_point_n_iter = raw.n_iter
+        return result
+
     raise ValueError(f"Unsupported pipeline mode for normalisation: {effective_mode}")
+
+
+def effective_pixel_counts(image: np.ndarray, im_trans) -> tuple:
+    """``(NrPixelsY, NrPixelsZ)`` in the frame the pipeline actually solved in.
+
+    Every :func:`run_pipeline` branch fits in the *transformed* frame — either
+    because it pre-transforms itself (:func:`_prep_transformed`) or because the
+    backend applies ``im_trans`` internally — so the counts handed to
+    :func:`normalize_result` have to come from the transformed shape too. Only
+    opcode 3 (transpose) changes the shape, and it swaps Y and Z, so an odd
+    number of them flips the pair; the mirrors (1, 2) leave it alone.
+
+    Getting this wrong is silent and only bites on a **non-square** detector
+    with a transpose active: the fit is fine, but the recorded
+    ``NrPixelsY``/``NrPixelsZ`` describe a detector that was never fitted, and
+    every downstream consumer of the result (integration spec, paramstest
+    export, ring overlays) inherits the mismatch.
+    """
+    NZ, NY = np.asarray(image).shape
+    if tuple(im_trans or ()).count(3) % 2:
+        NY, NZ = NZ, NY
+    return int(NY), int(NZ)
 
 
 def tilt_seed_effective(mode: str, *, panel_layout=None, refine: Optional[dict] = None) -> bool:
@@ -404,10 +436,9 @@ def tilt_seed_effective(mode: str, *, panel_layout=None, refine: Optional[dict] 
     * ``four_stage`` / ``bayesian`` / ``joint`` always seed tilts via
       :func:`build_v1_params` (``CalibrationParams`` takes tx/ty/tz directly).
     * ``one_shot`` seeds tilts the same way when internally routed through
-      ``autocalibrate_four_stage`` (``panel_layout`` set) or
-      ``pipelines.single.autocalibrate`` (distortion refinement restricted to
-      a subset of coefficients) — see the corresponding branches in
-      :func:`run_pipeline`. The *plain* one_shot path calls
+      ``autocalibrate_four_stage`` (``panel_layout`` set) — see the
+      corresponding branch in :func:`run_pipeline`. Every other one_shot case
+      (full, no, or partial distortion refinement) calls
       ``midas_calibrate_v2.calibrate()`` directly, whose ``initial_tx/ty/tz``
       kwargs are silently dropped by :func:`_supported_kwargs` unless the
       installed backend's signature actually exposes them — checked here at
@@ -415,17 +446,19 @@ def tilt_seed_effective(mode: str, *, panel_layout=None, refine: Optional[dict] 
       release adds them (see QUESTIONS_FOR_COLLEAGUES.md item 1).
     * ``first_time`` never passes a tilt seed to ``first_time_calibrate()``
       at all, regardless of backend version.
+    * ``frozen_point`` seeds tilts via :func:`build_v1_params` like the
+      other advanced pipelines — ty/tz become the fit's starting point (and
+      the iterative wrapper's re-centering anchor), and tx is used as a
+      fixed value even though the pipeline never refines it. So a seed is
+      genuinely used here, unlike ``first_time``, even though tx itself
+      never moves.
     """
-    if mode in ("four_stage", "bayesian", "joint"):
+    if mode in ("four_stage", "bayesian", "joint", "frozen_point"):
         return True
     if mode == "first_time":
         return False
     if mode == "one_shot":
         if panel_layout:
-            return True
-        refine = refine or {}
-        coeffs = _distortion_coeffs(refine)
-        if refine.get("Distortion", True) and coeffs and coeffs != set(DISTORTION_NAMES):
             return True
         try:
             import inspect
@@ -470,9 +503,11 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
             # refined panel shifts; normalize_result detects the FourStageResult
             # via its .stage2 attribute and handles it correctly.
             img, dk, pNY, pNZ = _prep_transformed(image, dark, im_trans)
-            seed = _seed_for_v1(img, wavelength=wavelength, pxY=pxY,
-                                calibrant=calibrant, manual=manual,
-                                why="panel calibration (one_shot)")
+            seed = _resolve_seed(manual, img, wavelength, pxY, calibrant)
+            if seed is None:
+                raise RuntimeError(
+                    "Auto-seed failed for panel calibration (one_shot). "
+                    "Enable manual seed (Pick BC / Pick Ring + Lsd) and retry.")
             v1 = build_v1_params(
                 seed, wavelength=wavelength, pxY=pxY, pxZ=pxZ, calibrant=calibrant,
                 NY=pNY, NZ=pNZ, refine=refine, n_iter=n_iter, device=device,
@@ -488,11 +523,11 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
         # CalibrationParams.
         coeffs = _distortion_coeffs(refine)
         reroute = []
-        if refine.get("Distortion", True) and coeffs and coeffs != set(DISTORTION_NAMES):
-            # calibrate() exposes only an all-or-nothing refine_distortion bool
-            # (every p-slot gets the same flag), so a subset would silently
-            # widen to all 15.
-            reroute.append("a distortion-coefficient subset")
+        # A distortion subset used to be rerouted too, on the grounds that
+        # refine_distortion was an all-or-nothing bool. It is not: the kwarg is
+        # Union[bool, str, Sequence[str]], so a partial selection reaches
+        # calibrate() exactly as ticked (see the refine_distortion comment
+        # below). Rerouting for it would cost STAGE-1 for nothing.
         if bool(refine.get("ty", True)) != bool(refine.get("tz", True)):
             # calibrate() takes one refine_tilts bool for both, which the GUI
             # has to compute as (ty or tz) — so refining exactly one of them is
@@ -514,9 +549,12 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
                   f"{', '.join(reroute)}. This skips its STAGE-1 "
                   f"multi-hypothesis Lsd search, so the seed is used as given.")
             img, dk, pNY, pNZ = _prep_transformed(image, dark, im_trans)
-            seed = _seed_for_v1(img, wavelength=wavelength, pxY=pxY,
-                                calibrant=calibrant, manual=manual,
-                                why="one_shot with " + ", ".join(reroute))
+            seed = _resolve_seed(manual, img, wavelength, pxY, calibrant)
+            if seed is None:
+                raise RuntimeError(
+                    "Auto-seed failed for one_shot with "
+                    + ", ".join(reroute) + ". Enable manual seed "
+                    "(Pick BC / Pick Ring + Lsd) and retry.")
             v1 = build_v1_params(
                 seed, wavelength=wavelength, pxY=pxY, pxZ=pxZ, calibrant=calibrant,
                 NY=pNY, NZ=pNZ, refine=refine, n_iter=n_iter, device=device,
@@ -542,7 +580,14 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
             build_residual_corr=bool(cfg.get("build_residual_corr", True)),
             n_iter=n_iter, lm_max_iter=lm_iter, device=device, verbose=True,
             refine_tilts=bool(refine.get("ty", True) or refine.get("tz", True)),
-            refine_distortion=bool(_distortion_coeffs(refine)),
+            # calibrate() accepts a bool OR an explicit list of v2 coefficient
+            # names (Union[bool, str, Sequence[str]] — see
+            # forward.distortion.resolve_distortion_block, which it calls
+            # internally): a partial selection reaches the fit exactly as
+            # ticked, instead of being widened to "refine all 15" the way a
+            # bare bool would. ``coeffs`` is already empty exactly when the
+            # "Distortion" checkbox is off (see _distortion_coeffs).
+            refine_distortion=(sorted(coeffs) if coeffs else False),
         )
         if pxZ:
             kwargs["pxZ"] = pxZ
@@ -550,9 +595,20 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
             kwargs["im_trans"] = im_trans
         # BC + Lsd seed must be supplied together (see bugs_and_fixes Bug 5)
         if manual:
-            kwargs["initial_BC_y"] = manual["BC_y"]
-            kwargs["initial_BC_z"] = manual["BC_z"]
-            kwargs["initial_Lsd"]  = manual["Lsd"]
+            have_bc = "BC_y" in manual and "BC_z" in manual
+            if have_bc:
+                kwargs["initial_BC_y"] = manual["BC_y"]
+                kwargs["initial_BC_z"] = manual["BC_z"]
+            if "Lsd" in manual:
+                kwargs["initial_Lsd"] = manual["Lsd"]
+            elif have_bc:
+                # BC_guess (BC_y+BC_z) bypasses calibrate()'s own auto-seeder
+                # entirely, Lsd included — so BC-only seeding would otherwise
+                # silently start Lsd from the library's 1 m nominal. Auto-seed
+                # once here just for a plausible Lsd instead.
+                auto = make_seed_safe(image, wavelength, pxY, calibrant)
+                if auto is not None and auto.Lsd_um:
+                    kwargs["initial_Lsd"] = auto.Lsd_um
             # Seed tilts only if the installed calibrate() exposes them
             # (_supported_kwargs drops any it does not accept).
             for k in ("tx", "ty", "tz"):
@@ -572,28 +628,47 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
                   "One-shot, Four-stage, Bayesian or Joint-cake for bounded "
                   "refinement.")
         a, b, c, alpha, beta, gamma = _LC.get(calibrant, _LC["CeO2"])
-        return first_time_calibrate(
-            image,
+        kwargs = dict(
             lattice=(a, b, c, alpha, beta, gamma),
             space_group=_SG.get(calibrant, 225),
             wavelength_A=wavelength,
             pixel_size_um=pxY,
             n_pixels_y=NY, n_pixels_z=NZ,
-            lsd_initial_guess_um=(manual["Lsd"] if manual else DEFAULT_LSD_UM),
-            bc_initial_guess=((manual["BC_y"], manual["BC_z"]) if manual else None),
+            lsd_initial_guess_um=((manual or {}).get("Lsd", DEFAULT_LSD_UM)),
+            bc_initial_guess=((manual["BC_y"], manual["BC_z"])
+                              if manual and "BC_y" in manual and "BC_z" in manual
+                              else None),
             dark=dark,
             # first_time_calibrate registers + refines panel shifts correctly
             # on its own (unlike four_stage/bayesian/joint below, which need
             # an explicit panel-aware spec) — it just needs the layout passed.
             panel_layout=panel_layout,
         )
+        # Native im_trans since midas_calibrate_v2 0.15.0: the backend flips
+        # image, dark and panel_mask together and re-derives n_pixels_y/z from
+        # the transformed shape, so this branch hands over the RAW frame and
+        # the codes — exactly like the calibrate() path above — and must NOT
+        # pre-flip via _prep_transformed, which would apply the transform
+        # twice (silently: a double flip looks like a valid image).
+        #
+        # Before 0.15.0 this branch passed no transform at all and no error
+        # was raised, so a first_time calibration on a flipped detector simply
+        # ran in the wrong frame and returned a confident wrong geometry.
+        # Passed unguarded rather than through _supported_kwargs on purpose:
+        # if the installed backend is too old to accept it, a loud TypeError
+        # is the right outcome — silently dropping it is the exact bug above.
+        if im_trans:
+            kwargs["im_trans"] = im_trans
+        return first_time_calibrate(image, **kwargs)
 
     if mode == "four_stage":
         from midas_calibrate_v2.pipelines import autocalibrate_four_stage
         img, dk, pNY, pNZ = _prep_transformed(image, dark, im_trans)
-        seed = _seed_for_v1(img, wavelength=wavelength, pxY=pxY,
-                            calibrant=calibrant, manual=manual,
-                            why="four-stage pipeline")
+        seed = _resolve_seed(manual, img, wavelength, pxY, calibrant)
+        if seed is None:
+            raise RuntimeError(
+                "Auto-seed failed for four-stage pipeline. "
+                "Enable manual seed (Pick BC / Pick Ring + Lsd) and retry.")
         v1 = build_v1_params(
             seed, wavelength=wavelength, pxY=pxY, pxZ=pxZ, calibrant=calibrant,
             NY=pNY, NZ=pNZ, refine=refine, n_iter=n_iter, device=device,
@@ -616,6 +691,34 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
         return autocalibrate_joint(v1, img, dark=dk, panel_layout=panel_layout,
                                    spec=spec)
 
+    if mode == "frozen_point":
+        # Vendored pipeline (see midas_gui/_vendor/frozen_point_calib) — no
+        # native panel_layout support, unlike every other advanced pipeline
+        # above.
+        if panel_layout is not None:
+            raise RuntimeError(
+                "Frozen-point (high-tilt) does not support Multi-panel "
+                "detectors yet. Uncheck 'Multi-panel' or choose a "
+                "different pipeline.")
+        img, dk, pNY, pNZ = _prep_transformed(image, dark, im_trans)
+        if dk is not None:
+            # point_pick() takes no dark argument (only a boolean mask), so
+            # subtract it here — every other branch above hands dark to the
+            # backend natively instead.
+            img = np.clip(img - dk.astype(np.float32), 0, None)
+        # v1.Refine (from build_v1_params, inside _seed_and_v1) already carries
+        # the GUI's Distortion checkboxes for p0..p14 — iterate_frozen_point_
+        # until_stable defers to it exactly like four_stage/bayesian/joint do,
+        # so no separate refine_distortion override is passed here.
+        v1 = _seed_and_v1(img, wavelength, pxY, pxZ, calibrant, pNY, pNZ,
+                          refine, n_iter, device, manual)
+        if device != "cpu":
+            print(f"[calib] note: Frozen-point (high-tilt) always runs on "
+                  f"CPU — ignoring device={device!r}.")
+        from midas_gui._vendor.frozen_point_calib import iterate_frozen_point_until_stable
+        return iterate_frozen_point_until_stable(v1, img, lm_max_iter=lm_iter,
+                                                 verbose=True)
+
     raise ValueError(f"Unknown pipeline mode: {mode}")
 
 
@@ -627,9 +730,10 @@ def _seed_and_v1(image, wavelength, pxY, pxZ, calibrant, NY, NZ,
     — this seeds directly from whatever array is passed in, so the caller is
     responsible for making sure it's the same array that gets solved against.
     """
-    seed = _seed_for_v1(image, wavelength=wavelength, pxY=pxY,
-                        calibrant=calibrant, manual=manual,
-                        why="this pipeline")
+    seed = _resolve_seed(manual, image, wavelength, pxY, calibrant)
+    if seed is None:
+        raise RuntimeError(
+            "Auto-seed failed. Enable manual seed (Pick BC / Pick Ring + Lsd).")
     return build_v1_params(
         seed, wavelength=wavelength, pxY=pxY, pxZ=pxZ, calibrant=calibrant,
         NY=NY, NZ=NZ, refine=refine, n_iter=n_iter, device=device, tols=tols)

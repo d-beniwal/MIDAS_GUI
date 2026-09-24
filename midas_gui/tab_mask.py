@@ -18,7 +18,8 @@ from midas_gui.helpers import (_load_image, _fspin, _NoScrollSpinBox, _browse, i
                                _NoScrollComboBox, list_h5_datasets,
                                widgets_to_dict, apply_dict_to_widgets,
                                new_temp_h5_path, save_stack_h5,
-                               display_text_for_paths)
+                               display_text_for_paths,
+                               browse_start_dir, warn_if_path_missing)
 from midas_gui.widgets import ImageViewer
 from midas_gui.dialogs import show_error
 from midas_gui.workers import MaskComputeWorker
@@ -187,6 +188,7 @@ class MaskTab(QtWidgets.QWidget):
         self._stack_ed.setPlaceholderText(
             "folder / *.tif / .h5 (3-D dataset)   (blank = single image)")
         self._stack_ed.textChanged.connect(self._on_stack_path_changed)
+        warn_if_path_missing(self._stack_ed, self)
         awf.addWidget(QtWidgets.QLabel("Stack (temporal median / temporal constancy):"))
         _sbrowse = QtWidgets.QToolButton(); _sbrowse.setText("⋯"); _sbrowse.setFixedWidth(28)
         _sbrowse.setPopupMode(QtWidgets.QToolButton.InstantPopup)
@@ -320,6 +322,7 @@ class MaskTab(QtWidgets.QWidget):
         srow.addWidget(self._log_project_btn)
         sl.body.addLayout(srow)
         self._load_mask_edit = QtWidgets.QLineEdit(); self._load_mask_edit.setPlaceholderText("Load existing mask…")
+        warn_if_path_missing(self._load_mask_edit, self)
         lrow = QtWidgets.QHBoxLayout(); lrow.setSpacing(4)
         lrow.addWidget(self._load_mask_edit, 1)
         b3 = _br(); b3.clicked.connect(self._browse_load_mask); lrow.addWidget(b3)
@@ -392,30 +395,36 @@ class MaskTab(QtWidgets.QWidget):
 
     def _browse_img(self):
         p = _browse(self, "Open Image",
-                    "Images (*.tif *.tiff *.h5 *.hdf5 *.hdf *.nxs *.ge*);;All (*)")
+                    "Images (*.tif *.tiff *.h5 *.hdf5 *.hdf *.nxs *.ge*);;All (*)",
+                    start_dir=browse_start_dir(self._img_edit.text()))
         if p: self._img_edit.setText(p); self._load_image()
 
     def _browse_save(self):
         p, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save Mask", "mask.tif", "TIFF (*.tif);;All (*)")
+            self, "Save Mask", self._save_edit.text().strip() or "mask.tif",
+            "TIFF (*.tif);;All (*)")
         if p: self._save_edit.setText(p)
 
     def _browse_load_mask(self):
-        p = _browse(self, "Open Mask", "TIFF (*.tif *.tiff);;All (*)")
+        p = _browse(self, "Open Mask", "TIFF (*.tif *.tiff);;All (*)",
+                    start_dir=browse_start_dir(self._load_mask_edit.text()))
         if p: self._load_mask_edit.setText(p); self._load_existing_mask()
 
     def _browse_stack_folder(self):
-        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select stack folder")
+        d = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Select stack folder", browse_start_dir(self._stack_ed.text()))
         if d: self._stack_ed.setText(d)
 
     def _browse_stack_file(self):
         p = _browse(self, "Select stack file (TIFF stack or HDF5)",
-                    "Stacks (*.h5 *.hdf5 *.nxs *.tif *.tiff);;All (*)")
+                    "Stacks (*.h5 *.hdf5 *.nxs *.tif *.tiff);;All (*)",
+                    start_dir=browse_start_dir(self._stack_ed.text()))
         if p: self._stack_ed.setText(p)
 
     def _browse_stack_files(self):
         files, _ = QtWidgets.QFileDialog.getOpenFileNames(
-            self, "Select stack files (multi-select)", "",
+            self, "Select stack files (multi-select)",
+            browse_start_dir(self._stack_ed.text()),
             "Stack frames (*.tif *.tiff *.h5 *.hdf5 *.ge*);;All (*)")
         if not files:
             return

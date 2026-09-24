@@ -14,7 +14,8 @@ import pyqtgraph as pg
 
 from midas_gui.helpers import (_load_image, _fspin, _twocol, _browse, _predict_ring_radii,
                                is_h5, _NoScrollComboBox,
-                               widgets_to_dict, apply_dict_to_widgets)
+                               widgets_to_dict, apply_dict_to_widgets,
+                               browse_start_dir)
 from midas_gui.constants import DEFAULT_NICKEL_FRAME0, DEFAULT_COLORMAP
 from midas_gui.widgets import LogPanel
 from midas_gui.dialogs import show_error
@@ -167,7 +168,8 @@ class TextureTab(QtWidgets.QWidget):
         root.addWidget(self._right_tabs, stretch=1)
 
     def _browse_img(self):
-        p = _browse(self, "Open frame", "Images (*.tif *.tiff *.h5 *.hdf5 *.ge*);;All (*)")
+        p = _browse(self, "Open frame", "Images (*.tif *.tiff *.h5 *.hdf5 *.ge*);;All (*)",
+                    start_dir=browse_start_dir(self._img_ed.text()))
         if p: self._img_ed.setText(p); self._load_img()
 
     def _load_img(self):

@@ -21,11 +21,12 @@ import pyqtgraph as pg
 from midas_gui.constants import DEFAULT_NICKEL_H5
 from midas_gui.helpers import (_fspin, _NoScrollSpinBox,
                          widgets_to_dict, apply_dict_to_widgets, _apply_im_trans)
-from midas_gui.widgets import ProfileViewer, DataLoaderPanel, CakeViewer, build_lab_frame_axes_items
+from midas_gui.widgets import (ProfileViewer, DataLoaderPanel, CakeViewer,
+                              OriginToolButton, build_lab_frame_axes_items)
 from midas_gui.dialogs import show_error
 from midas_gui.roi_tools import ROIImageViewer, ROIRibbon
 from midas_gui.hydra_widgets import HydraModeRibbon
-from midas_gui.hydra_geometry_card import DetectorGeometryCard
+from midas_gui.hydra_geometry_card import DetectorGeometryCard, CAKE_ETA_BIN_DEG
 from midas_gui.hydra_page import HydraViewerPage
 from midas_gui.workers import ProjectionWorker, AllFrameStatsWorker
 from midas_gui import style as S
@@ -39,6 +40,7 @@ _IMASK_MAX = 5_000_000_000
 
 class DataViewerTab(QtWidgets.QWidget):
     pushGeometry = QtCore.pyqtSignal(dict)   # λ/px/Lsd/BC → Calibrate tab
+    pullGeometry = QtCore.pyqtSignal()       # "← Get": pull Calibrate's geometry
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -161,6 +163,9 @@ class DataViewerTab(QtWidgets.QWidget):
             "topn_spin": self._topn_spin,
             "rad_r_bin": self._rad_r_bin,
             "rad_auto": self._rad_auto,
+            "rad_accurate": self._rad_accurate,
+            "cake_r_bin": self._cake_r_bin,
+            "cake_eta_bin": self._cake_eta_bin,
             "lab_axes_on": self._lab_axes_on,
         }
         widgets.update(self._geom_card.state_widgets())
@@ -185,6 +190,7 @@ class DataViewerTab(QtWidgets.QWidget):
         self._hydra_page.set_state(hydra_state.get("page") or {})
         self._loader.set_state(state.get("loader") or {})
         self._viewer.set_display_state(state.get("viewer"))
+        self._origin_btn.sync()   # display_state carries "origin"; the button can't see it change
         self._cake_view.set_display_state(state.get("cake_view"))
         fields = state.get("fields", {})
         calib_path = fields.get("calib_ed")
@@ -302,6 +308,7 @@ class DataViewerTab(QtWidgets.QWidget):
         # ── Ring simulation + calibration load/save (extracted, reusable) ──
         self._geom_card = DetectorGeometryCard()
         self._geom_card.pushGeometry.connect(self.pushGeometry.emit)
+        self._geom_card.pullGeometry.connect(self.pullGeometry.emit)
         self._geom_card.imTransChanged.connect(self._on_im_trans_changed)
         self._geom_card.set_image_source(lambda: self._cur, self._combined_bad_mask)
         self._loader.metadataDetected.connect(self._geom_card.apply_shared_fields)
@@ -314,8 +321,16 @@ class DataViewerTab(QtWidgets.QWidget):
         right.setHandleWidth(8)
         self._viewer = ROIImageViewer()
         self._geom_card.set_viewer(self._viewer)
-        # Top-N brightest-pixel locator (toggle on the image toolbar).
         vtb = self._viewer._toolbar_layout
+        # Display-origin selector — bottom-left (MIDAS convention, the default)
+        # or top-left (what most generic image viewers show).
+        self._origin_btn = OriginToolButton(self._viewer)
+        vtb.addWidget(self._origin_btn)
+        origin_sep = QtWidgets.QFrame()
+        origin_sep.setFrameShape(QtWidgets.QFrame.VLine)
+        origin_sep.setFrameShadow(QtWidgets.QFrame.Sunken)
+        vtb.addWidget(origin_sep)
+        # Top-N brightest-pixel locator (toggle on the image toolbar).
         self._topn_btn = QtWidgets.QPushButton("Top-N pixels"); self._topn_btn.setCheckable(True)
         self._topn_btn.setToolTip(
             "Mark the N highest-intensity pixels on the image (crosshair + circle) "
@@ -358,6 +373,7 @@ class DataViewerTab(QtWidgets.QWidget):
         self._lab_axes_on.toggled.connect(self._on_lab_axes_toggled)
         vtb.addWidget(self._lab_axes_on)
         self._geom_card.geometryChanged.connect(self._redraw_lab_axes_if_on)
+        self._viewer.originChanged.connect(self._redraw_lab_axes_if_on)
         # ROI popups are always-on-top (roi_tools.ROIStatsPopup) so they don't
         # get buried behind the main window; minimizing one tucks it into this
         # ribbon on the viewer's left edge instead of just closing it.
@@ -386,18 +402,42 @@ class DataViewerTab(QtWidgets.QWidget):
             "binning about the beam centre otherwise. Uses the R bin size set "
             "on the Radial Profile tab.")
         self._cake_btn.clicked.connect(self._geom_card.cake_integrate)
-        self._cake_view._toolbar_layout.insertWidget(0, self._cake_btn)
+        # Cake binning is independent of the profile's: it is an on-demand
+        # Calculate, not a live-view refresh, so it can afford finer bins.
+        self._cake_r_bin = _fspin(0.1, 50.0, 2, 1.0, "px"); self._cake_r_bin.setFixedWidth(64)
+        self._cake_r_bin.setToolTip("Radial (R) bin size for the cake, in detector pixels.")
+        self._cake_eta_bin = _fspin(0.05, 45.0, 2, CAKE_ETA_BIN_DEG, "°")
+        self._cake_eta_bin.setFixedWidth(64)
+        self._cake_eta_bin.setToolTip(
+            "Azimuthal (η) bin size for the cake, in degrees. Smaller bins give "
+            "finer η resolution at the cost of counts per bin and compute time.")
+        self._geom_card.set_cake_controls(self._cake_r_bin, self._cake_eta_bin)
+        ctb = self._cake_view._toolbar_layout
+        ctb.insertWidget(0, self._cake_btn)
+        ctb.insertWidget(1, QtWidgets.QLabel("  R bin:"))
+        ctb.insertWidget(2, self._cake_r_bin)
+        ctb.insertWidget(3, QtWidgets.QLabel("η bin:"))
+        ctb.insertWidget(4, self._cake_eta_bin)
         ptb = self._profile_view._toolbar_layout
         self._rad_r_bin = _fspin(0.1, 20.0, 2, 1.0, "px"); self._rad_r_bin.setFixedWidth(56)
         self._rad_r_bin.setToolTip("Radial bin size for the azimuthal average.")
         self._rad_auto = QtWidgets.QCheckBox("Auto"); self._rad_auto.setChecked(True)
         self._rad_auto.setToolTip("Recompute the radial integration when the beam "
                                   "centre or frame changes.")
-        self._geom_card.set_radial_controls(self._rad_r_bin, self._rad_auto)
+        self._rad_accurate = QtWidgets.QCheckBox("Accurate")
+        self._rad_accurate.setToolTip(
+            "Integrate through the full Batch-Integrate pipeline (MIDAS engine, "
+            "subpixel K=2), so detector tilts, pixel size and distortion are all "
+            "properly accounted for.\n"
+            "Off (the default) uses the fast approximate profile, which ignores "
+            "some of those but is quick enough to keep up with the live view.")
+        self._geom_card.set_radial_controls(self._rad_r_bin, self._rad_auto,
+                                            self._rad_accurate)
         self._rad_btn = QtWidgets.QPushButton("Integrate")
         self._rad_btn.clicked.connect(self._geom_card.radial_integrate)
         ptb.insertWidget(3, self._rad_btn)
         ptb.insertWidget(3, self._rad_auto)
+        ptb.insertWidget(3, self._rad_accurate)
         ptb.insertWidget(3, self._rad_r_bin)
         ptb.insertWidget(3, QtWidgets.QLabel("  R bin:"))
         self._radial_help_btn = QtWidgets.QToolButton()
@@ -467,10 +507,9 @@ class DataViewerTab(QtWidgets.QWidget):
             self._loader.stats_panel.set_scope_enabled(True)
         fresh = (self._disp_shape != raw.shape)
         self._disp_shape = raw.shape
-        is_live = self._loader.is_live_frame_update()
         self._cur = self._viewer.set_raw_frame(
             self._loader.corrected(raw), self._im_trans_codes(),
-            autorange=fresh, reset_levels=not is_live)
+            autorange=fresh, reset_levels=fresh)
         if fresh:
             self._autofill_imask_max()
         if self._geom_card.bc_auto_enabled():
@@ -566,7 +605,10 @@ class DataViewerTab(QtWidgets.QWidget):
     # verify orientation/ImTransOpt by checking that a feature lands in the
     # quadrant the overlay predicts. All items are plain pyqtgraph scene
     # items added onto the viewer's ViewBox, so pan/zoom transforms them for
-    # free; they only need rebuilding when the image/beam-centre changes.
+    # free; they only need rebuilding when the image/beam-centre changes — or
+    # when the display origin flips, which inverts the ViewBox's Y axis and so
+    # needs the compass re-derived to keep pointing at the real hutch (see
+    # widgets.build_lab_frame_axes_items).
 
     def _on_lab_axes_toggled(self, checked: bool):
         if checked:
@@ -574,7 +616,7 @@ class DataViewerTab(QtWidgets.QWidget):
         else:
             self._clear_lab_axes()
 
-    def _redraw_lab_axes_if_on(self):
+    def _redraw_lab_axes_if_on(self, *_args):
         if getattr(self, "_lab_axes_on", None) is not None and self._lab_axes_on.isChecked():
             self._draw_lab_axes()
 

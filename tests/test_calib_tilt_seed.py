@@ -12,9 +12,13 @@ from midas_gui.calib import tilt_seed_effective
 from midas_gui.constants import DISTORTION_NAMES
 
 
-@pytest.mark.parametrize("mode", ["four_stage", "bayesian", "joint"])
+@pytest.mark.parametrize("mode", ["four_stage", "bayesian", "joint", "frozen_point"])
 def test_v1_param_pipelines_always_seed_tilts(mode):
-    """These build CalibrationParams, which takes tx/ty/tz directly."""
+    """These build CalibrationParams, which takes tx/ty/tz directly.
+
+    ``frozen_point`` (vendored, see midas_gui/_vendor/frozen_point_calib)
+    genuinely uses a seeded tx too, even though it's never refined by that
+    pipeline — see tilt_seed_effective's docstring."""
     assert tilt_seed_effective(mode) is True
 
 
@@ -33,22 +37,26 @@ def test_one_shot_with_a_panel_layout_routes_through_four_stage():
     assert tilt_seed_effective("one_shot", panel_layout=[{"p": 1}]) is True
 
 
-def test_one_shot_with_partial_distortion_routes_through_single_autocalibrate():
-    """A distortion refinement restricted to a subset of coefficients takes
-    the pipelines.single.autocalibrate branch, which does seed tilts."""
+def test_one_shot_with_partial_distortion_is_the_plain_calibrate_path():
+    """A distortion refinement restricted to a subset of coefficients is no
+    longer re-routed through a v1-native branch (calibrate() takes a partial
+    coefficient list directly, see calib.run_pipeline) — the answer comes
+    from the same backend signature check as every other non-panel one_shot
+    case."""
     refine = {"Distortion": True, "distortion_coeffs": {"iso_R2", "iso_R4"}}
-    assert tilt_seed_effective("one_shot", refine=refine) is True
+    assert tilt_seed_effective("one_shot", refine=refine) is \
+        _backend_exposes_tilt_seeds()
 
 
-def test_one_shot_with_all_distortion_coeffs_is_not_the_subset_branch():
-    """Refining *every* coefficient is the plain path, not the subset one, so
+def test_one_shot_with_all_distortion_coeffs_is_the_same_plain_path():
+    """Refining every coefficient uses the same plain path as a subset, so
     the answer must come from the backend signature check instead."""
     refine = {"Distortion": True, "distortion_coeffs": set(DISTORTION_NAMES)}
     assert tilt_seed_effective("one_shot", refine=refine) is \
         _backend_exposes_tilt_seeds()
 
 
-def test_one_shot_with_distortion_off_is_not_the_subset_branch():
+def test_one_shot_with_distortion_off_is_the_same_plain_path():
     refine = {"Distortion": False}
     assert tilt_seed_effective("one_shot", refine=refine) is \
         _backend_exposes_tilt_seeds()

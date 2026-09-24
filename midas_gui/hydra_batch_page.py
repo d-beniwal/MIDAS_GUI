@@ -35,9 +35,11 @@ from midas_gui.constants import (KERNELS, ERROR_MODELS,
 from midas_gui.helpers import (
     _fspin, _browse, _NoScrollComboBox, _NoScrollSpinBox,
     widgets_to_dict, apply_dict_to_widgets,
-    _load_image, rmax_corner_px, rmax_edge_px, draw_polar_bin_overlay)
+    _load_image, rmax_corner_px, rmax_edge_px, draw_polar_bin_overlay,
+    browse_start_dir, warn_if_path_missing)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
-                               StackedProfileViewer, OutputFormatSelector, ImageViewer)
+                               StackedProfileViewer, OutputFormatSelector, ImageViewer,
+                               OriginToolButton)
 from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar
 from midas_gui.hydra_batch_widgets import HydraBatchPanelCard
 from midas_gui.workers import BatchRunCoordinator, write_all_profiles
@@ -92,6 +94,8 @@ class HydraBatchPage(QtWidgets.QWidget):
         # toolbar-selected panel (see _PanelViewerPair's docstring for why
         # it's never reparented between panels).
         self._det_view = ImageViewer()
+        self._origin_btn = OriginToolButton(self._det_view)
+        self._det_view._toolbar_layout.addWidget(self._origin_btn)
         self._bin_overlay_items: list = []
         self._build_ui()
         self._on_panel_changed(self._toolbar.current())
@@ -224,10 +228,12 @@ class HydraBatchPage(QtWidgets.QWidget):
         # Output (shared base dir — each panel writes to its own ge{n}/ subfolder)
         out = S.make_card("Output  (shared — each panel writes to its own ge{n}/ subfolder)")
         self._out_ed = QtWidgets.QLineEdit(); self._out_ed.setPlaceholderText("Output directory…")
+        warn_if_path_missing(self._out_ed, self, is_output_dir=True)
         orow = QtWidgets.QHBoxLayout(); orow.setSpacing(4); orow.addWidget(self._out_ed, 1)
         bou = QtWidgets.QPushButton("…"); bou.setFixedWidth(30)
         bou.clicked.connect(lambda: self._out_ed.setText(
-            QtWidgets.QFileDialog.getExistingDirectory(self, "Output directory") or "")); orow.addWidget(bou)
+            QtWidgets.QFileDialog.getExistingDirectory(
+                self, "Output directory", browse_start_dir(self._out_ed.text())) or "")); orow.addWidget(bou)
         out.body.addLayout(S.Form().row(("Folder:", orow)))
         self._fmt = OutputFormatSelector()
         out.body.addWidget(self._fmt)
@@ -598,7 +604,9 @@ class HydraBatchPage(QtWidgets.QWidget):
         if not self._project_ctx or not self._project_ctx.path:
             return
         card = self._cards[n]
-        calib_fields, _note = card._calib_fields_in_use()
+        # The whole calibration, not the display subset — an attempt has to be
+        # able to reconstruct the geometry it ran under.
+        calib_fields, _note = card.full_calib_snapshot()
         calib_ref = None
         if not card.using_file():
             calib_ref = getattr(card.result, "_project_attempt_ref", None)
@@ -740,6 +748,7 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._fmt.set_state(fmt_keys if fmt_keys is not None else state.get("fmt"))
         self._loader.set_state(state.get("loader") or {})
         self._det_view.set_display_state(state.get("det_view"))
+        self._origin_btn.sync()
         for n_key, wf_state in (state.get("waterfalls") or {}).items():
             pair = self._viewer_pairs.get(int(n_key))
             if pair is not None:

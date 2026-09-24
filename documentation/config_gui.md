@@ -60,6 +60,15 @@ writes it. **Settings ▸ Open config folder** jumps straight to it.
      γ, SG` (SG = space-group number), **Remove selected**, or edit any cell.
      Materials appear in the Data Viewer's material dropdown; calibrants in the
      Calibrate tab list.
+   - **Devices** — the detectors offered in the Data Viewer's **Live Data** PV
+     dropdown: `name`, `prefix`, `PVA suffix`, `backend`, `CA suffix`. `backend`
+     picks which suffix builds the live PV — `pva` (default, or leave blank)
+     uses `prefix + PVA suffix`; `ca` uses `prefix + CA suffix` instead, read
+     over plain EPICS Channel Access via an areaDetector NDPluginStdArrays
+     plugin, for a beamline whose IOC has no PVA plugin. **Add** a row and
+     fill in the columns that apply to your device's backend, or switch to
+     one of the bundled beamline profiles (**Settings ▸ Profile ▸ …**, or the
+     header dropdown) instead of hand-editing.
    - **Menus** — the pixel-size presets (label + µm) and K-edge foils (element + keV).
    - **Algorithms** — default calibration pipeline, integration kernel, output
      format, error model, and colormap/theme.
@@ -112,6 +121,10 @@ is convenient for a few scalar overrides.
     "calibrant_tif": "", "calibrant_h5": "", "nickel_h5": "", "nickel_dir": "",
     "nickel_frame0": "", "calib_file": "", "pdf_iq_file": "", "pdf_calib": ""
   },
+  "devices": [
+    {"name": "s20varex1", "prefix": "20IDFF:", "pva_suffix": "Pva1:Image"},
+    {"name": "varex", "prefix": "17bmVarex:", "backend": "ca", "ca_suffix": "image1:"}
+  ],
   "ui": {
     "calibration_pipeline": "one_shot", "integration_kernel": "subpixel2",
     "output_format": "csv", "azimuthal_method": "poisson", "plot_theme": "hot",
@@ -130,6 +143,10 @@ is convenient for a few scalar overrides.
   `$ENV_VARS`.
 - **paths** — override the default file/folder each tab opens with. Empty `""` (or
   omit) keeps the built-in.
+- **devices** — the Data Viewer's Live PV dropdown list; live PV = `prefix +`
+  (`pva_suffix` if `backend` is `pva`/omitted, else `ca_suffix` if `backend` is
+  `ca`). Replaces the built-in list wholesale when present, like materials/
+  calibrants above.
 - **ui** — `calibration_pipeline` ∈ `one_shot | first_time | four_stage | bayesian |
   joint`; `integration_kernel` ∈ `hard | subpixel2 | subpixel4 | polygon`;
   `output_format` ∈ `csv | xye | fxye | dat | h5 | 2d_csv`;

@@ -25,16 +25,30 @@ import pyqtgraph as pg
 from midas_gui.constants import COLORMAPS, DISTORTION_NAMES, DEFAULT_COLORMAP, DEVICES
 from midas_gui.dialogs import show_error, BrowseFilesDialog
 from midas_gui.helpers import fit_circle_algebraic
+from midas_gui.live_sources import PvaLiveSource, CaLiveSource, create_live_source
 from midas_gui.sim_detector import DEFAULT_CHANNEL_NAME as _SIM_CHANNEL_NAME
 
 # Default colormap: the configured one if it's a known option, else the first.
 _DEFAULT_CMAP = DEFAULT_COLORMAP if DEFAULT_COLORMAP in COLORMAPS else COLORMAPS[0]
+
+# Which screen corner a viewer draws pixel (0,0) in. Display-only — see
+# ImageViewer.set_origin. MIDAS convention (and every geometry the Calibrate
+# tab fits) is bottom-left, which stays the default everywhere.
+ORIGIN_BOTTOM_LEFT = "bottom-left"
+ORIGIN_TOP_LEFT = "top-left"
+ORIGIN_LABELS = {ORIGIN_BOTTOM_LEFT: "Bottom-left", ORIGIN_TOP_LEFT: "Top-left"}
+# Abbreviated form for the toolbar button itself: the image toolbar is already
+# over-full at the app's default window size (every control in it elides), so a
+# full "Origin: Bottom-left" button would render as "Ori...eft". The dropdown
+# and the tooltip both spell the current choice out in full.
+ORIGIN_SHORT = {ORIGIN_BOTTOM_LEFT: "BL", ORIGIN_TOP_LEFT: "TL"}
 from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollDoubleSpinBox, _fspin, _twocol,
                                _browse, is_h5, list_h5_datasets, _NoScrollComboBox,
                                _load_image, _collect_frame_paths, apply_field_corrections,
                                new_temp_h5_path, save_stack_h5, detect_geometry_from_path,
                                source_kind, display_text_for_paths, _apply_im_trans,
-                               is_dark_like_name)
+                               is_dark_like_name, warn_if_path_missing,
+                               path_is_missing)
 from midas_gui import style as S
 
 
@@ -121,6 +135,11 @@ class ImageViewer(QtWidgets.QWidget):
     """pyqtgraph image viewer with log scale, colormap, vmin/vmax, crosshair,
     pixel-value status bar, and a mask overlay."""
 
+    #: Display origin changed (BL <-> TL). Overlays that are drawn relative to
+    #: the *screen* rather than the pixel grid — the lab-frame compass — must
+    #: be rebuilt on this; everything anchored to (row, col) needs nothing.
+    originChanged = QtCore.pyqtSignal(str)
+
     def __init__(self, parent=None, title=""):
         super().__init__(parent)
         pg.setConfigOptions(background="k", foreground="w")
@@ -143,16 +162,21 @@ class ImageViewer(QtWidgets.QWidget):
         self._cmap.currentTextChanged.connect(self._set_cmap)
         self._cmap.setFixedWidth(90)
         bar.addWidget(self._cmap)
-        bar.addWidget(QtWidgets.QLabel("vmin%:"))
-        self._vmin = _NoScrollSpinBox()
-        self._vmin.setRange(0, 99); self._vmin.setValue(30); self._vmin.setFixedWidth(45)
+        # vmin%/vmax% define the auto-level percentile window that
+        # ``_redisplay`` reads fresh on every redraw. They are deliberately
+        # *not* on the toolbar: the histogram/LUT handles beside the image are
+        # the direct way to set a colour window, and the row is short of space.
+        # They stay real (hidden) spin boxes rather than plain attributes so
+        # ``display_state``/``set_display_state``, the valueChanged wiring and
+        # any caller driving them keep working unchanged.
+        self._vmin = _NoScrollSpinBox(self)
+        self._vmin.setRange(0, 99); self._vmin.setValue(30)
         self._vmin.valueChanged.connect(self._on_percentile_changed)
-        bar.addWidget(self._vmin)
-        bar.addWidget(QtWidgets.QLabel("vmax%:"))
-        self._vmax = _NoScrollSpinBox()
-        self._vmax.setRange(1, 100); self._vmax.setValue(99); self._vmax.setFixedWidth(45)
+        self._vmin.hide()
+        self._vmax = _NoScrollSpinBox(self)
+        self._vmax.setRange(1, 100); self._vmax.setValue(99)
         self._vmax.valueChanged.connect(self._on_percentile_changed)
-        bar.addWidget(self._vmax)
+        self._vmax.hide()
         bar.addStretch(1)
         self._toolbar_layout = bar   # exposed so subclasses can append widgets
         layout.addLayout(bar)
@@ -170,6 +194,7 @@ class ImageViewer(QtWidgets.QWidget):
         # the physical world view of the detector looking downstream from
         # the sample along the beam. Override that default here.
         vb.invertY(False)
+        self._origin = ORIGIN_BOTTOM_LEFT
         layout.addWidget(self._iv, stretch=1)
 
         # Crosshair
@@ -197,6 +222,13 @@ class ImageViewer(QtWidgets.QWidget):
         layout.addWidget(self._coord_bar)
 
         self._data: Optional[np.ndarray] = None
+        # Last cursor position, in image (col, row) coordinates, or None when
+        # the cursor is not over this viewer. Remembered so the readout can be
+        # re-rendered against a *new* frame without the mouse having moved:
+        # during live acquisition frames stream in under a stationary cursor,
+        # and the bar used to fall back to its "Move cursor over image"
+        # placeholder on every one of them.
+        self._hover_xy: Optional[tuple] = None
         self._manual_levels: Optional[tuple] = None
         self._manual_hist_range: Optional[tuple] = None
         self._suspend_level_track = False
@@ -218,9 +250,7 @@ class ImageViewer(QtWidgets.QWidget):
         self._apply_view_limits(data.shape[1], data.shape[0])
         if autorange:
             self._iv.getView().getViewBox().autoRange()
-        self._coord_bar.setText(
-            f"Image {data.shape[1]}×{data.shape[0]} px  |  "
-            "Move cursor over image to inspect pixel values")
+        self._refresh_coord_bar()
 
     def set_raw_frame(self, raw_frame: np.ndarray, im_trans, *,
                        autorange: bool = True, reset_levels: bool = True) -> np.ndarray:
@@ -256,13 +286,40 @@ class ImageViewer(QtWidgets.QWidget):
         self.set_image(frame, autorange=autorange, reset_levels=reset_levels)
         return frame
 
+    def set_origin(self, origin: str) -> None:
+        """Choose which screen corner pixel (0,0) is drawn in.
+
+        Purely a display flip: the pixel readout, every overlay (rings, ROIs,
+        lab-frame axes, Top-N markers) and all saved geometry stay in the same
+        (row, col) frame either way — only the direction the rows are painted
+        in changes. The lab-frame compass is the one overlay that must be
+        *redrawn* rather than merely re-painted, since it points at the hutch
+        and not at the pixel grid; ``originChanged`` fires here so its owner
+        can rebuild it (see ``build_lab_frame_axes_items``). MIDAS convention, and every geometry the Calibrate tab
+        fits, is ``ORIGIN_BOTTOM_LEFT``, which is the default; top-left is
+        offered because most generic image viewers and detector-vendor tools
+        display frames that way, so matching them makes a frame easier to
+        recognise while inspecting it. Unknown values fall back to bottom-left.
+        """
+        origin = ORIGIN_TOP_LEFT if str(origin) == ORIGIN_TOP_LEFT else ORIGIN_BOTTOM_LEFT
+        changed = origin != self._origin
+        self._origin = origin
+        self._iv.getView().getViewBox().invertY(origin == ORIGIN_TOP_LEFT)
+        if changed:
+            self.originChanged.emit(origin)
+
+    def origin(self) -> str:
+        """Current display origin — ``ORIGIN_BOTTOM_LEFT`` or ``ORIGIN_TOP_LEFT``."""
+        return self._origin
+
     def display_state(self) -> dict:
-        """cmap/log/vmin%/vmax% as a plain dict — the one place a caller
+        """cmap/log/vmin%/vmax%/origin as a plain dict — the one place a caller
         that wants to persist "how this viewer is displayed" (e.g. a
         tab's project-state save) should read from, instead of reaching
         into ``_cmap``/``_log``/``_vmin``/``_vmax`` directly."""
         return {"cmap": self._cmap.currentText(), "log": self._log.isChecked(),
-                "vmin": self._vmin.value(), "vmax": self._vmax.value()}
+                "vmin": self._vmin.value(), "vmax": self._vmax.value(),
+                "origin": self._origin}
 
     def set_display_state(self, state: Optional[dict]) -> None:
         """Inverse of :meth:`display_state`. Restoring ``log``/``vmin``/
@@ -294,6 +351,8 @@ class ImageViewer(QtWidgets.QWidget):
                 spin.blockSignals(True)
                 spin.setValue(state[key])
                 spin.blockSignals(False)
+        if state.get("origin"):
+            self.set_origin(state["origin"])
         if self._data is not None:
             self._redisplay()
 
@@ -429,14 +488,94 @@ class ImageViewer(QtWidgets.QWidget):
             mp = vb.mapSceneToView(pos)
             x, y = mp.x(), mp.y()
             self._vl.setPos(x); self._hl.setPos(y)
-            if self._data is not None:
-                ix, iy = int(x), int(y)   # floor, not round (Bug 6)
-                h, w = self._data.shape
+            self._hover_xy = (x, y)
+            self._refresh_coord_bar()
+
+    def leaveEvent(self, ev):
+        """Cursor left the viewer — stop treating the last hovered pixel as
+        live, so incoming frames don't keep updating a readout for a pixel the
+        cursor is no longer on. The text itself is left standing (as it was
+        before) until the next frame or hover replaces it."""
+        self._hover_xy = None
+        super().leaveEvent(ev)
+
+    def _refresh_coord_bar(self):
+        """Re-render the bottom pixel-readout bar from the remembered cursor
+        position against the *current* frame.
+
+        Called from ``_mouse`` and from ``set_image``. The ``set_image`` half is
+        what keeps the readout live during acquisition: frames arrive under a
+        stationary cursor, and pyqtgraph only emits ``sigMouseMoved`` when the
+        mouse actually moves, so re-rendering here is the only way the value
+        under the cursor tracks the incoming data (it used to be reset to the
+        "Move cursor over image" placeholder by every frame instead)."""
+        self._coord_bar.setText(self._coord_text())
+
+    def _coord_text(self) -> str:
+        if self._data is not None:
+            h, w = self._data.shape
+            if self._hover_xy is not None:
+                # floor, not round (Bug 6)
+                ix, iy = int(self._hover_xy[0]), int(self._hover_xy[1])
                 if 0 <= iy < h and 0 <= ix < w:
-                    val = self._data[iy, ix]
-                    self._coord_bar.setText(
-                        f"  x (col) = {ix}    y (row) = {iy}    "
-                        f"intensity = {val:.4g}    (image {w}×{h} px)")
+                    return (f"  x (col) = {ix}    y (row) = {iy}    "
+                            f"intensity = {self._data[iy, ix]:.4g}    "
+                            f"(image {w}×{h} px)")
+            return (f"Image {w}×{h} px  |  "
+                    "Move cursor over image to inspect pixel values")
+        return "Move cursor over image to inspect pixel values"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  OriginToolButton
+# ═════════════════════════════════════════════════════════════════════════════
+
+class OriginToolButton(QtWidgets.QToolButton):
+    """Image-toolbar dropdown choosing an :class:`ImageViewer`'s display origin.
+
+    Owns its own menu and keeps its label in sync with the viewer. A caller
+    that restores a saved display state (which carries ``origin``) behind this
+    button's back must call :meth:`sync` afterwards, since the viewer has no
+    change signal to listen to.
+    """
+
+    def __init__(self, viewer: "ImageViewer", parent=None):
+        super().__init__(parent)
+        self._viewer = viewer
+        self.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        menu = QtWidgets.QMenu(self)
+        group = QtWidgets.QActionGroup(self)
+        group.setExclusive(True)
+        self._actions = {}
+        for value in (ORIGIN_BOTTOM_LEFT, ORIGIN_TOP_LEFT):
+            act = menu.addAction(ORIGIN_LABELS[value])
+            act.setCheckable(True)
+            group.addAction(act)
+            act.triggered.connect(lambda _checked=False, v=value: self._choose(v))
+            self._actions[value] = act
+        self.setMenu(menu)
+        self.sync()
+
+    def _choose(self, origin: str):
+        self._viewer.set_origin(origin)
+        self.sync()
+
+    def sync(self):
+        """Re-read the viewer's origin into this button's label, tooltip and
+        check mark."""
+        origin = self._viewer.origin()
+        label = ORIGIN_LABELS.get(origin, origin)
+        self.setText(f"Origin: {ORIGIN_SHORT.get(origin, label)}")
+        self.setToolTip(
+            "Which corner of the screen pixel (0,0) is drawn in.\n"
+            "For MIDAS calibration, use Bottom-Left origin.\n"
+            f"Currently: {label}.\n"
+            "Display only — pixel coordinates, overlays and any geometry you "
+            "save are unaffected.")
+        act = self._actions.get(origin)
+        if act is not None:
+            act.setChecked(True)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -507,7 +646,8 @@ class PickableImageViewer(ImageViewer):
         self._pick_dsp_btn.toggled.connect(self._on_pick_dsp_toggled)
         pick_bar.addWidget(self._pick_dsp_btn)
 
-        pick_bar.addWidget(QtWidgets.QLabel("Ring #"))
+        self._dsp_ring_lbl = QtWidgets.QLabel("Ring #")
+        pick_bar.addWidget(self._dsp_ring_lbl)
         self._dsp_ring_spin = QtWidgets.QSpinBox()
         self._dsp_ring_spin.setRange(1, 20)
         self._dsp_ring_spin.setValue(1)
@@ -532,6 +672,19 @@ class PickableImageViewer(ImageViewer):
 
         self.layout().insertLayout(1, pick_bar)   # after main toolbar
         self._iv.scene.sigMouseClicked.connect(self._on_scene_clicked)
+
+    def set_dspacing_picking_visible(self, visible: bool):
+        """Show/hide the "Pick d-spacing pts" button and its Ring # selector.
+
+        Manual d-spacing picking only means anything for a non-crystalline
+        (d-spacing-list) calibrant such as AgBH, so both the Data Viewer's
+        geometry card and the Calibrate tab hide these unless one is selected,
+        each driving it from its own calibrant combo. Visible by default, for
+        any viewer that has no calibrant concept to drive it from."""
+        if not visible and self._pick_dsp_btn.isChecked():
+            self._pick_dsp_btn.setChecked(False)   # leaves PICK_DSPACING mode
+        for w in (self._pick_dsp_btn, self._dsp_ring_lbl, self._dsp_ring_spin):
+            w.setVisible(visible)
 
     def _on_pick_bc_toggled(self, checked: bool):
         if checked:
@@ -879,22 +1032,40 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
     view — the caller adds them (``iv.addItem(item)``) and owns removal;
     pan/zoom transforms them for free once added.
 
-    ``iv`` must be a ``pg.ImageView`` whose ViewBox has ``invertY(False)``
-    set, as every image viewer in this app already does
-    (``ImageViewer.__init__``, ``CakeViewer.__init__``) — the MIDAS 'bl'
-    lab-frame convention (+Y_MIDAS = display-left) assumes that.
+    **The compass is invariant to how the image is displayed.** It describes
+    the hutch, not the frame: +Y_Lab (MIDAS +Z) is vertically up in the real
+    world and the beam goes into the screen, whatever the user has done to the
+    picture. So the overlay always renders with +X_Lab pointing screen-left and
+    +Y_Lab screen-up — including when the display origin is top-left, which
+    inverts the ViewBox's Y axis and would otherwise carry the compass upside
+    down with the image. That invariance is the whole point of the overlay: a
+    reference that flipped along with the frame could not be used to check the
+    frame. Image transforms (Flip Y/Z, Transpose) act on the pixel data and
+    never touched these directions; only the beam centre they are anchored at
+    moves, which is correct.
+
+    The caller must rebuild the items when the display origin changes —
+    :class:`ImageViewer` emits ``originChanged`` for exactly that.
     """
     nz, ny = image_shape
-    y_sign = -1.0   # MIDAS 'bl' convention: +Y_MIDAS points display-left
-    # invertY(False) is already applied on every viewer this is used with, so
-    # +Z_MIDAS (increasing pixel row) already renders upward — no extra flip.
-    V = 1.0
+    vb = iv.getView().getViewBox()
+    # Data-axis → screen-direction signs. Everything below is authored in
+    # *screen* terms (sx: +1 = right, sy: +1 = up) and converted to data
+    # offsets at the point of use, so an inverted axis moves the arrows and
+    # leaves the picture the user sees unchanged.
+    try:
+        H = -1.0 if vb.xInverted() else 1.0
+        V = -1.0 if vb.yInverted() else 1.0
+    except Exception:
+        H = V = 1.0
+    # MIDAS 'bl' convention: +Y_MIDAS (= +X_Lab) points display-left.
+    x_screen_sign = -1.0
 
     xl_color, yl_color, zl_color, eta_color = "#FF3B30", "#34C759", "#0A84FF", "#FFA500"
 
     px_w = px_h = 1.0
     try:
-        pw, ph = iv.getView().getViewBox().viewPixelSize()
+        pw, ph = vb.viewPixelSize()
         if pw and ph and pw > 0 and ph > 0:
             px_w, px_h = pw, ph
     except Exception:
@@ -918,36 +1089,45 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
     xl_pen = pg.mkPen(xl_color, width=3.5)
     yl_pen = pg.mkPen(yl_color, width=3.5)
     arc_pen = pg.mkPen(eta_color, width=2.5)
-    label_font = QtGui.QFont(); label_font.setPointSize(13); label_font.setBold(False)
-    glyph_font = QtGui.QFont(); glyph_font.setPointSize(17); glyph_font.setBold(True)
+    # Sized in px off the app's base UI font, so the compass keeps its
+    # proportions at any interface scale — see style.font_px.
+    label_font = S.font_px(1.08)
+    glyph_font = S.font_px(1.42, bold=True)
 
     items: list = []
 
     def add(item):
         items.append(item)
 
-    def shaft_with_head(x0, y0, x1, y1):
-        dx, dy = x1 - x0, y1 - y0
-        length = math.hypot(dx, dy)
-        if length < 1e-9:
-            return [x0, x1], [y0, y1]
-        ux, uy = dx / length, dy / length
-        nx, ny_ = -uy, ux
-        base_x, base_y = x1 - ux * head, y1 - uy * head
-        wing = head * 0.55
-        p1x, p1y = base_x + nx * wing, base_y + ny_ * wing
-        p2x, p2y = base_x - nx * wing, base_y - ny_ * wing
-        return [x0, x1, p1x, x1, p2x], [y0, y1, p1y, y1, p2y]
+    def data_xy(sx: float, sy: float):
+        """A screen-space offset (right-positive, up-positive) from the beam
+        centre, in data coordinates."""
+        return bc_y + H * sx, bc_z + V * sy
 
-    # X_Lab arrow (MIDAS-native Y_MIDAS, display-LEFT) — unaffected by V.
-    xs, ys = shaft_with_head(bc_y, bc_z, bc_y + y_sign * L, bc_z)
+    def shaft_with_head(sx1, sy1):
+        """Arrow from the beam centre to screen offset (sx1, sy1), returned as
+        data-space polyline coordinates."""
+        length = math.hypot(sx1, sy1)
+        if length < 1e-9:
+            x0, y0 = data_xy(0.0, 0.0)
+            return [x0, x0], [y0, y0]
+        ux, uy = sx1 / length, sy1 / length
+        nx, ny_ = -uy, ux
+        base_x, base_y = sx1 - ux * head, sy1 - uy * head
+        wing = head * 0.55
+        pts = [(0.0, 0.0), (sx1, sy1),
+               (base_x + nx * wing, base_y + ny_ * wing), (sx1, sy1),
+               (base_x - nx * wing, base_y - ny_ * wing)]
+        conv = [data_xy(a, b) for a, b in pts]
+        return [c[0] for c in conv], [c[1] for c in conv]
+
+    # X_Lab arrow — screen-LEFT.  Y_Lab arrow — screen-UP.
+    xs, ys = shaft_with_head(x_screen_sign * L, 0.0)
     add(pg.PlotDataItem(xs, ys, pen=xl_pen, connect="all"))
-    # Y_Lab arrow (MIDAS-native Z_MIDAS, display-UP) — flipped by V.
-    xs, ys = shaft_with_head(bc_y, bc_z, bc_y, bc_z + V * L)
+    xs, ys = shaft_with_head(0.0, L)
     add(pg.PlotDataItem(xs, ys, pen=yl_pen, connect="all"))
 
     fm = QtGui.QFontMetrics(label_font)
-    margin_px = 4.0
     # TextItem boxes are drawn at a fixed *screen* size while every position
     # below is in data units, so on a wide/short SAXS strip (auto-fit at a low
     # effective zoom) a box is far wider than the compass it labels. Convert
@@ -973,6 +1153,11 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
     # producing stacked/illegible boxes on narrow SAXS strips. The folded
     # line is set at the same size as every other η label: de-duplicating
     # the boxes was the point, shrinking the text was not.
+    #
+    # TextItem anchors are resolved in *screen* space and are unaffected by an
+    # inverted axis (pyqtgraph counter-transforms the item so the glyphs stay
+    # upright), so every anchor below is a plain screen-space choice — only the
+    # positions go through data_xy.
     label_specs = (
         ("h", "+X<sub>Lab</sub> (+Y<sub>MIDAS</sub>)", "+X_Lab (+Y_MIDAS)",
          xl_color, "η=−90°"),
@@ -986,15 +1171,15 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
         # straddling is what pushed these boxes over the ⊗ glyph and the beam
         # label at low zoom, whatever their font size.
         if axis_kind == "h":
-            dx = y_sign * max(L + head * 0.6, beam_half_w + 0.6 * line_h)
-            dy = 0.0
-            anchor = (0.0 if dx > 0 else 1.0, 0.5)
+            sx = x_screen_sign * max(L + head * 0.6, beam_half_w + 0.6 * line_h)
+            sy = 0.0
+            anchor = (0.0 if sx > 0 else 1.0, 0.5)
         else:
-            dx, dy = 0.0, V * (L + head * 0.35)
-            anchor = (0.5, 1.0 if V > 0 else 0.0)
+            sx, sy = 0.0, L + head * 0.35
+            anchor = (0.5, 1.0)          # box sits above the arrow tip
         lbl = pg.TextItem(html=html, anchor=anchor, border=text_pen, fill=text_fill)
         lbl.setFont(label_font)
-        lbl.setPos(bc_y + dx, bc_z + dy)
+        lbl.setPos(*data_xy(sx, sy))
         add(lbl)
 
     # ⊗ glyph at BC — Z_Lab (MIDAS-native X_MIDAS), the beam direction.
@@ -1003,19 +1188,18 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
     glyph.setPos(bc_y, bc_z)
     add(glyph)
     beam_html = f'<span style="color:{zl_color};">+Z<sub>Lab</sub> (+X<sub>MIDAS</sub>, beam)</span>'
-    x_lbl = pg.TextItem(html=beam_html, anchor=(0.5, 0.0 if V > 0 else 1.0),
+    x_lbl = pg.TextItem(html=beam_html, anchor=(0.5, 0.0),   # box hangs below BC
                         border=text_pen, fill=text_fill)
     x_lbl.setFont(label_font)
-    x_lbl.setPos(bc_y, bc_z - V * beam_gap)
+    x_lbl.setPos(*data_xy(0.0, -beam_gap))
     add(x_lbl)
 
     # η reference marks at the four cardinal angles — 0°/+90°/−90°/180° —
     # using the same convention as pixel_to_REta (η=atan2(-Yc,Zc): η=0 is
-    # +Z_MIDAS/+Y_Lab, straight up) and the same (-y_sign)/V flips as the
-    # X_Lab/Y_Lab arrows above, so these track any lab-frame flip exactly.
-    # A real caking ring/spoke overlay (draw_polar_bin_overlay) reduces to
-    # this same dY=r·sinη, dZ=r·cosη formula at zero tilt — this is just
-    # the always-visible compass, independent of any loaded geometry.
+    # +Z_MIDAS/+Y_Lab, straight up). A real caking ring/spoke overlay
+    # (draw_polar_bin_overlay) reduces to this same dY=r·sinη, dZ=r·cosη
+    # formula at zero tilt — this is just the always-visible compass,
+    # independent of any loaded geometry.
     R_arc = L * 0.85
     tick_inner, tick_outer, label_R = R_arc * 0.92, R_arc * 1.12, R_arc * 1.32
     eta_marks = ((0.0, "η=0°"), (90.0, "η=+90°"), (-90.0, "η=−90°"), (180.0, "η=180°"))
@@ -1029,30 +1213,101 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
     _eta_labeled_on_axis = {0.0, -90.0}
     for eta_deg, label in eta_marks:
         eta_rad = math.radians(eta_deg)
-        ux = (-y_sign) * math.sin(eta_rad)
-        uy = V * math.cos(eta_rad)
-        add(pg.PlotDataItem([bc_y + ux * tick_inner, bc_y + ux * tick_outer],
-                             [bc_z + uy * tick_inner, bc_z + uy * tick_outer],
-                             pen=arc_pen))
+        sx = (-x_screen_sign) * math.sin(eta_rad)   # screen-right component
+        sy = math.cos(eta_rad)                       # screen-up component
+        t0 = data_xy(sx * tick_inner, sy * tick_inner)
+        t1 = data_xy(sx * tick_outer, sy * tick_outer)
+        add(pg.PlotDataItem([t0[0], t1[0]], [t0[1], t1[1]], pen=arc_pen))
         if eta_deg in _eta_labeled_on_axis:
             continue
-        if abs(uy) >= abs(ux):
-            anchor = (0.5, 1.0 if uy > 0 else 0.0)
+        if abs(sy) >= abs(sx):
+            anchor = (0.5, 1.0 if sy > 0 else 0.0)
         else:
-            anchor = (0.0 if ux > 0 else 1.0, 0.5)
+            anchor = (0.0 if sx > 0 else 1.0, 0.5)
         html = f'<span style="color:{eta_color};">{label}</span>'
         lbl = pg.TextItem(html=html, anchor=anchor, border=text_pen, fill=text_fill)
         lbl.setFont(label_font)
         R = eta_label_R.get(eta_deg, label_R)
-        lbl.setPos(bc_y + ux * R, bc_z + uy * R)
+        lbl.setPos(*data_xy(sx * R, sy * R))
         add(lbl)
 
     return items
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  CakeViewer
+#  Radial-unit conversion (R / 2θ / d / Q) + the axis that relabels ticks
+#  with it — shared by CakeViewer and the 1-D waterfall/stacked viewers.
 # ═════════════════════════════════════════════════════════════════════════════
+
+def _convert_radial(x, lsd, px, wl, native, target):
+    """Convert a radial axis between R (px), 2θ (deg), d (Å) and Q (Å⁻¹).
+
+    ``native`` is the unit ``x`` is already in (any of the four); returns ``x``
+    unchanged if the target matches or the geometry (lsd/px/wl) is missing.
+
+    d-spacing diverges on the beam axis (d → ∞ as 2θ → 0), so R = 0 converts
+    to ``inf`` rather than raising — callers that render the value are
+    expected to format non-finite entries (see :class:`_UnitAxis`).
+    """
+    x = np.asarray(x, dtype=float)
+    if target == native or None in (lsd, px, wl):
+        return x
+    lsd, px, wl = float(lsd), float(px), float(wl)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        if native == "Q":
+            tth = 2.0 * np.degrees(np.arcsin(np.clip(x * wl / (4 * math.pi), -1, 1)))
+        elif native == "d":
+            tth = 2.0 * np.degrees(np.arcsin(np.clip(wl / (2.0 * x), -1, 1)))
+        elif native == "2th":
+            tth = x
+        else:  # R px
+            tth = np.degrees(np.arctan(x * px / lsd))
+        if target == "2th":
+            return tth
+        if target == "Q":
+            return 4 * math.pi * np.sin(np.radians(tth) / 2) / wl
+        if target == "d":
+            return wl / (2.0 * np.sin(np.radians(tth) / 2))
+        return lsd * np.tan(np.radians(tth)) / px   # target == "R"
+
+
+_XUNIT_LABEL = {"R": "R (px)", "2th": "2θ (°)", "d": "d (Å)", "Q": "Q (Å⁻¹)"}
+
+
+class _UnitAxis(pg.AxisItem):
+    """Bottom axis that relabels R-pixel tick positions in a chosen radial unit.
+
+    The image/curves stay in their native coordinates; only the tick *labels* are
+    converted, so the axis is exact (no resampling) even for a nonlinear unit."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self._convert = None
+
+    def set_convert(self, fn):
+        self._convert = fn
+        self.picture = None
+        self.update()
+
+    def tickStrings(self, values, scale, spacing):
+        if self._convert is None or not len(values):
+            return super().tickStrings(values, scale, spacing)
+        conv = self._convert(np.asarray(values, dtype=float))
+        # d-spacing is infinite at R = 0 (see _convert_radial) -- "inf" reads
+        # as a bug on an axis, "∞" reads as the physics.
+        return [("∞" if not math.isfinite(v) else f"{v:.4g}") for v in conv]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  CakeViewer / CakeStackViewer  (2-D (η, R) heatmaps)
+# ═════════════════════════════════════════════════════════════════════════════
+
+#: Pan/zoom bound on a cake's η axis, in degrees. η spans a full turn
+#: (−180°…+180°) by construction, so the axis is fixed rather than derived from
+#: whatever range a given cake happens to cover; the extra 5° is breathing room
+#: so the outermost η rows don't sit flush against the frame.
+ETA_VIEW_LIMIT_DEG = 185.0
+
 
 class CakeViewer(QtWidgets.QWidget):
     """2-D azimuthal-integration "cake" heatmap: R (px) on X, η (°) on Y.
@@ -1061,6 +1316,15 @@ class CakeViewer(QtWidgets.QWidget):
     (not detector row/column indices starting at 0) — the image is positioned
     with ``ImageItem.setRect()`` to the actual R/η bin-centre extent rather
     than assumed to start at the origin.
+
+    Y is always η in degrees. X is always *stored* in R pixels, but can be
+    *labelled* in R / 2θ / d / Q once a caller supplies the geometry via
+    :meth:`set_axis_context` — only the tick strings convert (see
+    :class:`_UnitAxis`), so the picture stays the exact integrated bins with
+    no resampling. Until a context is set the selector is hidden and the axis
+    behaves exactly as it always did, which is what keeps the Calibrate tab's
+    and Hydra's cakes (and :class:`RingResidualViewer`, whose X is a ring
+    index rather than a radius) unchanged.
     """
 
     def __init__(self, parent=None):
@@ -1081,21 +1345,46 @@ class CakeViewer(QtWidgets.QWidget):
         self._cmap.currentTextChanged.connect(self._set_cmap)
         self._cmap.setFixedWidth(90)
         bar.addWidget(self._cmap)
-        bar.addWidget(QtWidgets.QLabel("vmin%:"))
-        self._vmin = _NoScrollSpinBox()
-        self._vmin.setRange(0, 99); self._vmin.setValue(30); self._vmin.setFixedWidth(45)
+        # X-axis unit. Appended after the cmap combo rather than inserted at a
+        # fixed index, so RingResidualViewer's insertWidget(1, ...) and the
+        # Data Viewer's insertWidget(0..4, ...) both still land where they mean
+        # to. Hidden until set_axis_context() supplies a geometry to convert
+        # with -- see the class docstring.
+        self._xunit_lbl = QtWidgets.QLabel("  X:")
+        self._xunit_lbl.setVisible(False)
+        bar.addWidget(self._xunit_lbl)
+        self._xunit = _NoScrollComboBox()
+        for _key in ("R", "2th", "d", "Q"):
+            self._xunit.addItem(_XUNIT_LABEL[_key], _key)
+        self._xunit.setToolTip(
+            "Label the x-axis in R (px), 2θ (deg), d-spacing (Å) or Q (Å⁻¹).\n"
+            "Only the tick labels convert — the cake itself is never resampled, "
+            "so what you see is always the integrated bins.")
+        self._xunit.setVisible(False)
+        self._xunit.currentIndexChanged.connect(self._refresh_xaxis)
+        bar.addWidget(self._xunit)
+        # vmin%/vmax% define the auto-level percentile window that
+        # ``_redisplay`` reads fresh on every redraw. They are deliberately
+        # *not* on the toolbar: the histogram/LUT handles beside the image are
+        # the direct way to set a colour window, and the row is short of space.
+        # They stay real (hidden) spin boxes rather than plain attributes so
+        # ``display_state``/``set_display_state``, the valueChanged wiring and
+        # any caller driving them keep working unchanged.
+        self._vmin = _NoScrollSpinBox(self)
+        self._vmin.setRange(0, 99); self._vmin.setValue(30)
         self._vmin.valueChanged.connect(self._redisplay)
-        bar.addWidget(self._vmin)
-        bar.addWidget(QtWidgets.QLabel("vmax%:"))
-        self._vmax = _NoScrollSpinBox()
-        self._vmax.setRange(1, 100); self._vmax.setValue(99); self._vmax.setFixedWidth(45)
+        self._vmin.hide()
+        self._vmax = _NoScrollSpinBox(self)
+        self._vmax.setRange(1, 100); self._vmax.setValue(99)
         self._vmax.valueChanged.connect(self._redisplay)
-        bar.addWidget(self._vmax)
+        self._vmax.hide()
         bar.addStretch(1)
         self._toolbar_layout = bar   # exposed so subclasses/callers can append widgets
         layout.addLayout(bar)
 
-        self._iv = pg.ImageView(view=pg.PlotItem(viewBox=pg.ViewBox()))
+        self._xaxis_item = _UnitAxis(orientation="bottom")
+        self._iv = pg.ImageView(view=pg.PlotItem(
+            viewBox=pg.ViewBox(), axisItems={"bottom": self._xaxis_item}))
         _detach_from_pg_view_registry(self._iv)
         self._iv.ui.roiBtn.hide(); self._iv.ui.menuBtn.hide()
         vb = self._iv.getView().getViewBox()
@@ -1114,6 +1403,11 @@ class CakeViewer(QtWidgets.QWidget):
         vb.setAspectLocked(False)
         self._iv.getView().setLabel("bottom", "R", units="px")
         self._iv.getView().setLabel("left", "η", units="°")
+        # Neither axis wants pyqtgraph's automatic SI prefixing: it relabels a
+        # 2000-px R axis as "kpx" (and would do the same to η in m°/k°), which
+        # is meaningless for detector pixels and degrees. Show the raw unit.
+        for _ax in ("bottom", "left"):
+            self._iv.getView().getAxis(_ax).enableAutoSIPrefix(False)
         layout.addWidget(self._iv, stretch=1)
 
         self._coord_bar = QtWidgets.QLabel("Run an integration to see the (η, R) cake")
@@ -1126,7 +1420,59 @@ class CakeViewer(QtWidgets.QWidget):
         self._cake: Optional[np.ndarray] = None      # (n_eta, n_r)
         self._r_axis: Optional[np.ndarray] = None
         self._eta_axis: Optional[np.ndarray] = None
+        # Geometry for the R → 2θ/d/Q tick relabelling; None until a caller
+        # supplies one through set_axis_context().
+        self._lsd = self._px = self._wl = None
+        # When set, _redisplay leaves the view range alone. Frame-stepping a
+        # CakeStackViewer would otherwise throw away the user's zoom on every
+        # step. Not a _redisplay argument because _redisplay is a slot wired to
+        # toggled/valueChanged, which pass their own payload.
+        self._preserve_view = False
         self._set_cmap(_DEFAULT_CMAP)
+
+    # ── x-axis units (R / 2θ / d / Q) ─────────────────────────────────
+    #
+    # Same contract as WaterfallViewer.set_axis_context: the image keeps its
+    # native R-pixel coordinates (setRect, view limits, the mouse readout's
+    # bin lookup) and only the tick *labels* convert, so the axis is exact for
+    # a nonlinear unit and costs nothing to switch.
+
+    def set_axis_context(self, lsd_um, px_um, wavelength_A):
+        """Provide the run's geometry so the x-axis can be labelled in
+        R / 2θ / d / Q, and reveal the unit selector."""
+        self._lsd, self._px, self._wl = lsd_um, px_um, wavelength_A
+        has_geom = None not in (lsd_um, px_um, wavelength_A)
+        self._xunit_lbl.setVisible(has_geom)
+        self._xunit.setVisible(has_geom)
+        self._refresh_xaxis()
+
+    def x_unit(self) -> str:
+        """The selected radial unit key — ``"R"``, ``"2th"``, ``"d"`` or ``"Q"``."""
+        return self._xunit.currentData() or "R"
+
+    def _refresh_xaxis(self, *_args):
+        unit = self.x_unit()
+        if unit == "R" or None in (self._lsd, self._px, self._wl):
+            self._xaxis_item.set_convert(None)
+            self._iv.getView().setLabel("bottom", "R", units="px")
+            return
+        self._xaxis_item.set_convert(
+            lambda vals, u=unit: _convert_radial(vals, self._lsd, self._px,
+                                                 self._wl, "R", u))
+        # No `units=` — pyqtgraph would SI-prefix it, and _XUNIT_LABEL already
+        # carries the unit in the text.
+        self._iv.getView().setLabel("bottom", _XUNIT_LABEL[unit])
+
+    def _x_label_at(self, r_px: float) -> str:
+        """``r_px`` rendered in the selected unit, for the mouse readout —
+        ``""`` when the selection is plain R (the readout already shows it)."""
+        unit = self.x_unit()
+        if unit == "R" or None in (self._lsd, self._px, self._wl):
+            return ""
+        v = float(_convert_radial(np.asarray([r_px], dtype=float), self._lsd,
+                                  self._px, self._wl, "R", unit)[0])
+        shown = "∞" if not math.isfinite(v) else f"{v:.4g}"
+        return f"   {_XUNIT_LABEL[unit]} = {shown}"
 
     def set_cake(self, cake_2d: np.ndarray, r_axis_px: np.ndarray, eta_axis_deg: np.ndarray):
         self._cake = np.asarray(cake_2d, dtype=np.float32)
@@ -1165,7 +1511,11 @@ class CakeViewer(QtWidgets.QWidget):
         self._iv.getImageItem().setRect(
             QtCore.QRectF(r0, e0, max(r1 - r0, 1e-6), max(e1 - e0, 1e-6)))
         self._apply_view_limits(r0, r1, e0, e1)
-        self._iv.getView().getViewBox().autoRange()
+        if not self._preserve_view:
+            # Same framing as ProfileViewer's radial plot: X pinned to the data
+            # extent with a hair of padding, η shown in full.
+            self._iv.getView().setXRange(min(r0, r1), max(r0, r1), padding=0.02)
+            self._iv.getView().setYRange(min(e0, e1), max(e0, e1), padding=0)
         self._iv.getHistogramWidget().item.setHistogramRange(lo, hi, padding=0.1)
         n_eta, n_r = cake.shape
         self._coord_bar.setText(
@@ -1175,7 +1525,15 @@ class CakeViewer(QtWidgets.QWidget):
     def _apply_view_limits(self, r0: float, r1: float, e0: float, e1: float):
         """Bound pan/zoom to the current cake's (R, η) extent (+ margin), same
         intent as ``ImageViewer._apply_view_limits`` — stops the user
-        scrolling/zooming out into an empty void or losing the cake off-screen."""
+        scrolling/zooming out into an empty void or losing the cake off-screen.
+
+        R uses ProfileViewer's exact bound (15% margin, clamped at 0), so the
+        cake and the radial profile below it pin their shared X axis the same
+        way. η is bounded to :data:`ETA_VIEW_LIMIT_DEG` instead of a fraction
+        of the data range: the axis is a full azimuthal turn whatever the cake
+        happens to span, so a fixed ±185° is the honest frame — the ±5° of
+        slack past a full turn just keeps the top and bottom rows off the edge.
+        """
         if not all(math.isfinite(v) for v in (r0, r1, e0, e1)):
             return
         rmin, rmax = min(r0, r1), max(r0, r1)
@@ -1184,16 +1542,18 @@ class CakeViewer(QtWidgets.QWidget):
             rmax = rmin + 1.0
         if emax <= emin:
             emax = emin + 1.0
-        rpad = 0.5 * (rmax - rmin)
-        epad = 0.5 * (emax - emin)
+        rpad = 0.15 * (rmax - rmin)
+        # min/max so a cake that somehow ran past a full turn is never clipped.
+        elo = min(-ETA_VIEW_LIMIT_DEG, emin)
+        ehi = max(ETA_VIEW_LIMIT_DEG, emax)
         vb = self._iv.getView().getViewBox()
         vb.setLimits(
-            xMin=rmin - rpad, xMax=rmax + rpad,
-            yMin=emin - epad, yMax=emax + epad,
+            xMin=max(0.0, rmin - rpad), xMax=rmax + rpad,
+            yMin=elo, yMax=ehi,
             minXRange=max((rmax - rmin) * 0.01, 1e-6),
             minYRange=max((emax - emin) * 0.01, 1e-6),
             maxXRange=(rmax - rmin) + 2 * rpad,
-            maxYRange=(emax - emin) + 2 * epad,
+            maxYRange=ehi - elo,
         )
 
     def _set_cmap(self, name: str):
@@ -1206,7 +1566,8 @@ class CakeViewer(QtWidgets.QWidget):
         toolbar rather than subclassing it, since its axes are physical
         (R, η) bin coordinates rather than detector row/column indices)."""
         return {"cmap": self._cmap.currentText(), "log": self._log.isChecked(),
-                "vmin": self._vmin.value(), "vmax": self._vmax.value()}
+                "vmin": self._vmin.value(), "vmax": self._vmax.value(),
+                "xunit": self.x_unit()}
 
     def set_display_state(self, state: Optional[dict]) -> None:
         """See ``ImageViewer.set_display_state`` — identical reasoning
@@ -1229,6 +1590,16 @@ class CakeViewer(QtWidgets.QWidget):
                 spin.blockSignals(True)
                 spin.setValue(state[key])
                 spin.blockSignals(False)
+        xunit = state.get("xunit")
+        if xunit is not None:
+            idx = self._xunit.findData(str(xunit))
+            if idx >= 0:
+                self._xunit.blockSignals(True)
+                self._xunit.setCurrentIndex(idx)
+                self._xunit.blockSignals(False)
+                # Signals blocked, so drive the relabelling by hand — same
+                # reason _set_cmap is re-applied explicitly just above.
+                self._refresh_xaxis()
         self._redisplay()
 
     def _mouse(self, evt):
@@ -1250,7 +1621,127 @@ class CakeViewer(QtWidgets.QWidget):
         ir = min(max(ir, 0), n_r - 1); ie = min(max(ie, 0), n_eta - 1)
         val = self._cake[ie, ir]
         self._coord_bar.setText(
-            f"R = {r:.2f} px   η = {eta:.2f}°   intensity = {val:.4g}")
+            f"R = {r:.2f} px{self._x_label_at(r)}   "
+            f"η = {eta:.2f}°   intensity = {val:.4g}")
+
+
+class CakeStackViewer(CakeViewer):
+    """A :class:`CakeViewer` over a *stack* of cakes — one per frame — with a
+    scrubber bar to step between them.
+
+    This is what a multi-azimuth batch integration actually produces: with
+    "Multi-azimuth output" ticked the worker keeps each frame's ``cake_2d``
+    instead of the η-collapsed profile, so the run's result is
+    ``(n_frames, n_eta, n_r)`` on one shared (R, η) grid. The scrubber is
+    hidden for a single-frame stack, so a one-frame run just looks like a
+    plain cake.
+
+    Frame-stepping reuses the inherited ``set_cake`` but suppresses the view
+    reframe (``_preserve_view``): the axes are identical across the stack by
+    construction, so re-fitting the range on every step would only throw away
+    the zoom the user is scrubbing *with*. Levels still auto-scale per frame,
+    matching every other viewer in the app.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._cakes: Optional[np.ndarray] = None    # (n_frames, n_eta, n_r)
+        self._frame_ids: list = []
+        self._frame_idx = 0
+
+        row = QtWidgets.QHBoxLayout()
+        row.setContentsMargins(4, 0, 4, 2)
+        row.setSpacing(4)
+        self._prev_btn = QtWidgets.QToolButton()
+        self._prev_btn.setText("◀")
+        self._prev_btn.setToolTip("Previous frame")
+        self._prev_btn.clicked.connect(lambda: self._step(-1))
+        row.addWidget(self._prev_btn)
+        self._frame_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self._frame_slider.setMinimum(0)
+        self._frame_slider.setPageStep(1)
+        self._frame_slider.valueChanged.connect(self._show_frame)
+        row.addWidget(self._frame_slider, 1)
+        self._next_btn = QtWidgets.QToolButton()
+        self._next_btn.setText("▶")
+        self._next_btn.setToolTip("Next frame")
+        self._next_btn.clicked.connect(lambda: self._step(1))
+        row.addWidget(self._next_btn)
+        self._frame_lbl = QtWidgets.QLabel("")
+        self._frame_lbl.setMinimumWidth(200)
+        # Monospace so the counter doesn't jitter as the digits change, but no
+        # colour override: this bar sits below the plot's dark coordinate strip,
+        # in the light form chrome, so it takes the palette's text colour.
+        self._frame_lbl.setStyleSheet(f"font-family:{S.MONO_CSS};")
+        row.addWidget(self._frame_lbl)
+        self._scrub_bar = QtWidgets.QWidget()
+        self._scrub_bar.setLayout(row)
+        self._scrub_bar.setVisible(False)
+        self.layout().addWidget(self._scrub_bar)
+
+        self._coord_bar.setText(
+            "Run a multi-azimuth integration to see one (η, R) cake per frame")
+
+    def set_cakes(self, cakes, r_axis_px, eta_axis_deg, frame_ids=None):
+        """Show a ``(n_frames, n_eta, n_r)`` stack sharing one (R, η) grid.
+
+        ``frame_ids`` labels the scrubber; it falls back to plain indices.
+        A stack with no frames clears the viewer.
+        """
+        cakes = np.asarray(cakes)
+        if cakes.ndim != 3 or cakes.shape[0] == 0:
+            self.clear()
+            return
+        self._cakes = cakes
+        self._r_axis = np.asarray(r_axis_px, dtype=np.float64)
+        self._eta_axis = np.asarray(eta_axis_deg, dtype=np.float64)
+        ids = list(frame_ids or [])
+        self._frame_ids = [str(v) for v in ids] if len(ids) == cakes.shape[0] else \
+                          [str(i) for i in range(cakes.shape[0])]
+        n = cakes.shape[0]
+        self._scrub_bar.setVisible(n > 1)
+        self._frame_slider.blockSignals(True)
+        self._frame_slider.setMaximum(n - 1)
+        self._frame_slider.setValue(0)
+        self._frame_slider.blockSignals(False)
+        self._frame_idx = 0
+        # First frame of a new stack reframes the view; later steps don't.
+        self._show_frame(0, preserve_view=False)
+
+    def frame_count(self) -> int:
+        return 0 if self._cakes is None else int(self._cakes.shape[0])
+
+    def frame_index(self) -> int:
+        return self._frame_idx
+
+    def clear(self):
+        self._cakes = None
+        self._frame_ids = []
+        self._frame_idx = 0
+        self._scrub_bar.setVisible(False)
+        self._frame_lbl.setText("")
+        super().clear()
+        self._coord_bar.setText(
+            "Run a multi-azimuth integration to see one (η, R) cake per frame")
+
+    def _step(self, delta: int):
+        if self._cakes is None:
+            return
+        self._frame_slider.setValue(
+            min(max(self._frame_idx + delta, 0), self.frame_count() - 1))
+
+    def _show_frame(self, idx: int, preserve_view: bool = True):
+        if self._cakes is None:
+            return
+        idx = min(max(int(idx), 0), self.frame_count() - 1)
+        self._frame_idx = idx
+        self._preserve_view = preserve_view
+        try:
+            self.set_cake(self._cakes[idx], self._r_axis, self._eta_axis)
+        finally:
+            self._preserve_view = False
+        self._frame_lbl.setText(
+            f"frame {idx + 1}/{self.frame_count()} — {self._frame_ids[idx]}")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1644,7 +2135,14 @@ class ProfileViewer(QtWidgets.QWidget):
 
     def set_ring_markers(self, groups, lsd_um=None, px_um=None, wl=None):
         """``groups``: list of ``{"radii": [r_px, ...], "color": "#rrggbb"}`` —
-        one entry per material, each drawn in its own color."""
+        one entry per material, each drawn in its own color.
+
+        A group may also carry ``"labels"``: a list parallel to ``radii``
+        (usually the ring's hkl) written along its marker line, so the peaks in
+        the profile can be read off without cross-referencing the image
+        overlay. A group without ``labels``, or a blank entry in it, draws the
+        bare line as before.
+        """
         self._ring_groups = list(groups)
         self._ring_lsd = lsd_um
         self._ring_px  = px_um
@@ -1786,13 +2284,28 @@ class ProfileViewer(QtWidgets.QWidget):
                 px  = self._ring_px  or self._px
                 wl  = self._ring_wl  or self._wl
                 for group in self._ring_groups:
-                    pen = pg.mkPen(group.get("color", "#f0c060"), width=1.5,
-                                    style=QtCore.Qt.DotLine)
-                    for r in group.get("radii", []):
+                    color = group.get("color", "#f0c060")
+                    pen = pg.mkPen(color, width=1.5, style=QtCore.Qt.DotLine)
+                    labels = list(group.get("labels") or [])
+                    for i, r in enumerate(group.get("radii", [])):
                         x_pos = self._r_to_x(r, idx, lsd, px, wl)
                         if x_pos is None:
                             continue
-                        ln = pg.InfiniteLine(pos=x_pos, angle=90, pen=pen, movable=False)
+                        text = str(labels[i]) if i < len(labels) else ""
+                        # rotateAxis=(1, 0) turns the label along its own line,
+                        # so an hkl reads bottom-to-top beside the marker
+                        # instead of sitting across the neighbouring peaks.
+                        # position parks it near the top of the *view* (not of
+                        # the data), and pyqtgraph keeps it there through
+                        # pan/zoom; 0.88 leaves the whole box clear of the top
+                        # axis rather than letting it poke over the frame.
+                        opts = ({"rotateAxis": (1, 0), "position": 0.88,
+                                 "color": color, "fill": (0, 0, 0, 140)}
+                                if text else None)
+                        ln = pg.InfiniteLine(pos=x_pos, angle=90, pen=pen, movable=False,
+                                             label=text or None, labelOpts=opts)
+                        if text:
+                            ln.label.setFont(S.font_px(0.92))
                         self._plot.addItem(ln)
                         self._ring_lines.append(ln)
         finally:
@@ -2252,6 +2765,8 @@ class FieldSelector(QtWidgets.QGroupBox):
     divide / subtract mode combo.  ``get_field()`` → computed field (or None);
     ``get_mode()`` → "divide" | "subtract".
     """
+    #: emitted whenever the field finishes computing, or the checkbox is
+    #: toggled (turning correction on/off is itself a change).
     fieldReady = QtCore.pyqtSignal()
 
     def __init__(self, title, parent=None, *, with_mode=False,
@@ -2260,18 +2775,22 @@ class FieldSelector(QtWidgets.QGroupBox):
         self.setCheckable(True)
         self.setChecked(False)
         self._with_mode = with_mode
+        self._default_dataset = default_dataset
         self._field = None
         self._worker = None
         self._registry = None          # DataSourceRegistry, set by set_registry()
         self._exclude_label = None     # owning panel's registry label — skip its own entry
         self._buffer_snapshot_file = None   # temp .h5 from importing another tab's buffer
         self._explicit_paths = None    # list[str], set by a Browse… "Multiple files"/"stem" pick
+        self._data_path_provider = None  # callable → owning panel's current Data path
 
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(6, 2, 6, 4); outer.setSpacing(2)
         self._body = QtWidgets.QWidget()
         self._body.setVisible(False)                       # collapsed until enabled
         self.toggled.connect(self._body.setVisible)
+        self.toggled.connect(lambda *_: self.fieldReady.emit())
+        self.toggled.connect(self._on_toggled)
         outer.addWidget(self._body)
         v = QtWidgets.QVBoxLayout(self._body)
         v.setContentsMargins(0, 0, 0, 0); v.setSpacing(3)
@@ -2281,6 +2800,7 @@ class FieldSelector(QtWidgets.QGroupBox):
         self._path_ed.setPlaceholderText("file / folder / .h5")
         self._path_ed.textChanged.connect(self._on_path_changed)
         self._path_ed.editingFinished.connect(self._update_frame_limit)
+        warn_if_path_missing(self._path_ed, self)
         browse = QtWidgets.QToolButton()
         browse.setText("⋯"); browse.setFixedWidth(28)
         browse.setPopupMode(QtWidgets.QToolButton.InstantPopup)
@@ -2359,9 +2879,62 @@ class FieldSelector(QtWidgets.QGroupBox):
             self._path_ed.setToolTip("")
         self._path_ed.blockSignals(False)
 
+    def set_data_path_provider(self, fn):
+        """`fn()` returns the owning panel's current Data path (str). Used to
+        prefill this field the first time it's checked, and as the Browse…
+        dialog's starting folder while this field has no path of its own —
+        so Dark/Bright/Background browsing starts from wherever Data was
+        loaded from, not the app's working directory."""
+        self._data_path_provider = fn
+
+    def _prefill_from_data(self, checked: bool):
+        """On first check, default this field to the same file/folder as
+        the panel's Data source — the common case is a dark/bright/background
+        frame living in the same file or folder as the data itself. A no-op
+        if a path is already set (explicit pick or restored state)."""
+        if not checked or self._raw_source() or self._data_path_provider is None:
+            return
+        src = self._data_path_provider()
+        if not src:
+            return
+        self._set_explicit_paths(None)
+        self._path_ed.setText(src)
+        self._update_frame_limit()
+
+    def _on_toggled(self, checked: bool):
+        """Checking prefills from the current Data source (see
+        ``_prefill_from_data``); unchecking resets the path entirely, so a
+        later re-check prefills fresh instead of silently keeping whatever
+        was picked/computed before. While checked, changing the panel's Data
+        source never touches this field — only the checkbox transition does."""
+        if checked:
+            self._prefill_from_data(checked)
+        else:
+            self._reset_path()
+
+    def _reset_path(self):
+        """Clear this field back to its empty, uncomputed startup state."""
+        self._worker = None
+        self._field = None
+        if self._buffer_snapshot_file is not None:
+            import os
+            try:
+                os.unlink(self._buffer_snapshot_file)
+            except OSError:
+                pass
+            self._buffer_snapshot_file = None
+        self._explicit_paths = None
+        self._path_ed.setText("")   # triggers _on_path_changed (hides ds_row, etc.)
+        self._path_ed.setToolTip("")
+        self._ds_combo.setEditText(self._default_dataset)
+        self._status.setText("Not computed.")
+
     def _open_browse_dialog(self):
+        start = self._path_ed.text().strip()
+        if not start and self._data_path_provider is not None:
+            start = self._data_path_provider() or ""
         dlg = BrowseFilesDialog(self, title=f"Select {self.title()}",
-                                start_dir=self._path_ed.text().strip())
+                                start_dir=start)
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return
         mode = dlg.mode()
@@ -2567,6 +3140,28 @@ class FieldSelector(QtWidgets.QGroupBox):
 
     def get_field(self):
         return self._field if self.isChecked() else None
+
+    def raw_stack(self):
+        """The raw, un-averaged (N, Y, X) frame stack this field was built
+        from, or ``None`` if the field isn't checked, has no backing
+        path (e.g. imported from a live buffer as a single average), or
+        fails to re-read. Used by Auto Attenuation to build a
+        dark-derived dead/hot-pixel mask, which needs per-pixel variance
+        across raw frames rather than the already-averaged field."""
+        if not self.isChecked():
+            return None
+        raw = self._raw_source()
+        if not raw:
+            return None
+        try:
+            from midas_gui.helpers import read_frame_range
+            stack = read_frame_range(
+                self._kind(), raw, self._dataset(),
+                self._start.value(), self._end.value(),
+            )
+        except Exception:
+            return None
+        return stack if stack.shape[0] >= 2 else None
 
     def note_frame_shape(self, frame_shape):
         """Flag inline if this field's shape doesn't match the current data
@@ -2872,8 +3467,12 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
         self._plot = pg.PlotWidget(background="#2b2e35")
         # Min height only (no max) so the splitter above can grow the histogram.
         self._plot.setMinimumHeight(90)
-        self._plot.setLabel("bottom", "intensity", **{"color": "#d0d0d0", "font-size": "12pt"})
-        self._plot.setLabel("left", "log(count+1)", **{"color": "#d0d0d0", "font-size": "12pt"})
+        # Axis titles sized in px off the app's base font (S.axis_label_css) —
+        # a "12pt" here rendered ~1.6x the surrounding UI at scale 1.0 and grew
+        # further with the interface scale, because pt goes through a logical
+        # DPI that QT_SCALE_FACTOR has already moved. See style.font_px.
+        self._plot.setLabel("bottom", "intensity", **S.axis_label_css("#d0d0d0"))
+        self._plot.setLabel("left", "log(count+1)", **S.axis_label_css("#d0d0d0"))
         for ax in ("bottom", "left"):
             self._plot.getAxis(ax).setTextPen("#c8c8c8")
             self._plot.getAxis(ax).setPen("#8a8a8a")
@@ -3025,7 +3624,7 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
             y = np.log10(y + 1.0)
         self._curve.setData(edges, y)
         self._plot.setLabel("left", "log(count+1)" if log else "count",
-                            **{"color": "#d0d0d0", "font-size": "12pt"})
+                            **S.axis_label_css("#d0d0d0"))
         if self._manual_mode:
             # Manual mode is authoritative — hold the user's limits regardless
             # of how the histogram data changed (e.g. a new live frame).
@@ -3045,66 +3644,18 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
         vb.setYRange(-2.0, ymax, padding=0)
 
 
-class PvaLiveSource(QtCore.QObject):
-    """Subscribes to an EPICS PVA image PV (NTNDArray) and emits decoded
-    numpy frames.
+# PvaLiveSource/CaLiveSource live in midas_gui.live_sources (imported above,
+# re-exported here as module attributes) -- see that module's docstring for
+# the shared signal/method contract both backends implement.
 
-    pvapy's ``Channel.monitor()`` delivers callbacks on its own internal
-    thread; this class never touches Qt widgets directly, only emits
-    signals — Qt auto-queues those onto the receiving (GUI) thread."""
 
-    frameReady = QtCore.pyqtSignal(np.ndarray, int)      # image, uniqueId
-    connectionChanged = QtCore.pyqtSignal(bool)
-    error = QtCore.pyqtSignal(str)
-
-    _REQUEST = "field(value,dimension,uniqueId,attribute,codec,uncompressedSize)"
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._channel = None
-        self._AdImageUtility = None
-
-    def start(self, pv_name: str) -> bool:
-        self.stop()
-        try:
-            import pvapy as pva
-            from pvapy.utility.adImageUtility import AdImageUtility
-        except ImportError as e:
-            self.error.emit(f"pvapy not installed: {e}")
-            return False
-        self._AdImageUtility = AdImageUtility
-        try:
-            self._channel = pva.Channel(pv_name)
-            self._channel.setConnectionCallback(self._on_connection)
-            self._channel.monitor(self._on_value, self._REQUEST)
-        except Exception as e:
-            self.error.emit(str(e))
-            self._channel = None
-            return False
-        return True
-
-    def _on_connection(self, is_connected):
-        self.connectionChanged.emit(bool(is_connected))
-
-    def _on_value(self, pv_object):
-        try:
-            image_id, image, *_ = self._AdImageUtility.reshapeNtNdArray(pv_object)
-        except Exception as e:
-            self.error.emit(f"Frame decode failed: {e}")
-            return
-        if image is not None:
-            self.frameReady.emit(np.asarray(image, dtype=np.float32), int(image_id))
-
-    def stop(self):
-        if self._channel is not None:
-            try:
-                self._channel.stopMonitor()
-            except Exception:
-                pass
-            self._channel = None
-
-    def is_active(self) -> bool:
-        return self._channel is not None
+def _device_pv_and_backend(d: dict) -> tuple:
+    """(full_pv, backend) for a ``constants.DEVICES``-style dict. Defensive
+    ``.get()`` defaults (backend->"pva", ca_suffix->"image1:") are what let
+    a device dict predating these fields keep resolving to plain PVA."""
+    backend = str(d.get("backend", "pva")).strip().lower() or "pva"
+    suffix = d.get("ca_suffix", "image1:") if backend == "ca" else d.get("pva_suffix", "")
+    return f"{d.get('prefix', '')}{suffix}", backend
 
 
 class DataLoaderPanel(QtWidgets.QWidget):
@@ -3126,16 +3677,24 @@ class DataLoaderPanel(QtWidgets.QWidget):
     metadataDetected = QtCore.pyqtSignal(dict)  # auto-detected pxY/wavelength_A from a new Data load
 
     def __init__(self, parent=None, *, mode="single", data_dataset="exchange/data",
-                 dark_dataset="exchange/data_dark", allow_live=False):
+                 dark_dataset="exchange/data_dark", allow_live=False,
+                 hide_frame_field=False):
         super().__init__(parent)
         from midas_gui import style as S
         self._mode = mode
+        # "single" mode only: always hide the compact "Frame:" spin, for an
+        # embedding tab that shows a bigger scrubber of its own instead (e.g.
+        # Calibrate's under-viewer slider) — see _setup_navigator. Off by
+        # default so other "single" consumers (e.g. tab_refine.py) are
+        # unaffected.
+        self._hide_frame_field = hide_frame_field
         self._stack = self._paths = self._h5 = None
         self._nframes = 0
         self._cur = None
         self._stream_preview_dirty = True   # "stream" mode only — see current_frame()
         self._preview_sum_n = 1             # "stream" mode only — see set_preview_sum
-        self._live_src: Optional[PvaLiveSource] = None
+        self._live_src: Optional[QtCore.QObject] = None   # PvaLiveSource | CaLiveSource
+        self._live_backend = "pva"     # which backend self._live_src (if any) was built for
         self._registry = None          # DataSourceRegistry, set by bind_registry()
         self._registry_label = ""      # this panel's own label in the registry
         self._explicit_paths = None    # list[str], set by a Browse… "Multiple files"/"stem" pick
@@ -3194,12 +3753,18 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._pv_ed.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
             self._pv_ed.lineEdit().setPlaceholderText("e.g. 20IDFF:Pva1:Image")
             for d in DEVICES:
-                full_pv = f"{d.get('prefix', '')}{d.get('pva_suffix', '')}"
-                self._pv_ed.addItem(d.get("name", ""), full_pv)
+                self._pv_ed.addItem(d.get("name", ""), _device_pv_and_backend(d))
             self._pv_ed.setCurrentIndex(-1)
             self._pv_ed.setEditText("")
             self._pv_ed.activated.connect(self._on_pv_device_picked)
             pv_row.addWidget(self._pv_ed, 1)
+            self._live_backend_lbl = QtWidgets.QLabel("[PVA]")
+            self._live_backend_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+            self._live_backend_lbl.setToolTip(
+                "Which EPICS protocol the Live PV field will be read over — "
+                "set by picking a device above (backend field in Preferences ▸ "
+                "Devices); typing a PV by hand keeps whatever backend was last picked.")
+            pv_row.addWidget(self._live_backend_lbl)
             lvbox.addLayout(pv_row)
             btn_row = QtWidgets.QHBoxLayout(); btn_row.setSpacing(4)
             self._live_start_btn = QtWidgets.QPushButton("Start")
@@ -3251,7 +3816,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._path_ed = QtWidgets.QLineEdit()
         self._path_ed.setPlaceholderText("file / folder / .h5")
         self._path_ed.textChanged.connect(self._on_path_changed)
-        self._path_ed.returnPressed.connect(self._load)
+        self._path_ed.returnPressed.connect(self._on_return_pressed)
         browse = QtWidgets.QToolButton(); browse.setText("⋯"); browse.setFixedWidth(28)
         browse.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         menu = QtWidgets.QMenu(browse)
@@ -3302,7 +3867,9 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._frame_spin.valueChanged.connect(self._set_frame)
             fr = QtWidgets.QHBoxLayout(); fr.setSpacing(4)
             fr.addWidget(QtWidgets.QLabel("Frame:")); fr.addWidget(self._frame_spin); fr.addStretch(1)
-            card.body.addLayout(fr)
+            self._frame_row = QtWidgets.QWidget(); self._frame_row.setLayout(fr)
+            self._frame_row.setVisible(not self._hide_frame_field)
+            card.body.addWidget(self._frame_row)
         else:  # stream
             # start/end are always FILE (scan) numbers, never an index into
             # sub-frames or "Combine sub-frames" chunks — that setting is
@@ -3339,6 +3906,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
             sf.row(("start:", self._fr_start), ("end(0=all):", self._fr_end))
             sf.row(("stride:", self._fr_stride))
             card.body.addLayout(sf)
+            card.body.addWidget(S.hline())
             self._fr_hint = QtWidgets.QLabel("")
             self._fr_hint.setWordWrap(True)
             self._fr_hint.setStyleSheet(f"color:{S.MUTED};font-size:10px;")
@@ -3355,6 +3923,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
             cr.addWidget(QtWidgets.QLabel("Combine sub-frames:"))
             self._combine_chunk = _NoScrollSpinBox()
             self._combine_chunk.setRange(0, 999999); self._combine_chunk.setFixedWidth(64)
+            self._combine_chunk.setValue(1)
             self._combine_chunk.setToolTip(
                 "How many consecutive raw sub-frames in each file to combine "
                 "into one integrated frame (mpe_wf's OME_SUM). 0 = combine "
@@ -3387,6 +3956,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._bg_sel = FieldSelector("Background")
         for w in (self._dark_sel, self._bright_sel, self._bg_sel):
             w.fieldReady.connect(self.fieldsChanged)
+            w.set_data_path_provider(lambda: self._path_ed.text().strip())
             fld.body.addWidget(w)
         lv.addWidget(fld)
 
@@ -3689,6 +4259,18 @@ class DataLoaderPanel(QtWidgets.QWidget):
             except OSError:
                 pass
 
+    def _on_return_pressed(self):
+        """Enter in the path field: warn (and stop) on a path that doesn't
+        exist, rather than letting ``_load()`` attempt it and surface a raw
+        traceback dialog. An explicit multi-file/stem pick's field text is a
+        synthetic display string, not a literal path — nothing to check
+        there. Only the Enter keypress is gated; ``_load()`` itself is
+        called from many other places (Browse, Reload, dataset combo, …)
+        that shouldn't re-run this check."""
+        if not self._explicit_paths and path_is_missing(self._path_ed, self):
+            return
+        self._load()
+
     def _load(self):
         from pathlib import Path
         self._clear_external()
@@ -3880,8 +4462,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._pv_ed.blockSignals(True)
         self._pv_ed.clear()
         for d in DEVICES:
-            full_pv = f"{d.get('prefix', '')}{d.get('pva_suffix', '')}"
-            self._pv_ed.addItem(d.get("name", ""), full_pv)
+            self._pv_ed.addItem(d.get("name", ""), _device_pv_and_backend(d))
         idx = self._pv_ed.findText(prev_text)
         if idx >= 0:
             self._pv_ed.setCurrentIndex(idx)
@@ -3892,21 +4473,40 @@ class DataLoaderPanel(QtWidgets.QWidget):
 
     def _on_pv_device_picked(self, index):
         """Selecting a known device by name fills in its full live PV
-        (prefix + PVA suffix); typing a PV by hand is untouched (this only
-        fires on an explicit dropdown pick, not on text edits)."""
-        pv = self._pv_ed.itemData(index)
+        (prefix + backend-appropriate suffix) and remembers which backend
+        (PVA/CA) it should be read over; typing a PV by hand is untouched
+        (this only fires on an explicit dropdown pick, not on text edits) —
+        it keeps whichever backend was last picked."""
+        data = self._pv_ed.itemData(index)
+        if not data:
+            return
+        pv, backend = data
         if pv:
             self._pv_ed.setEditText(pv)
+        self._live_backend = backend
+        if hasattr(self, "_live_backend_lbl"):
+            self._live_backend_lbl.setText(f"[{backend.upper()}]")
 
     def _start_live(self):
-        try:
-            import pvapy  # noqa: F401
-        except ImportError:
-            QtWidgets.QMessageBox.warning(
-                self, "pvapy not installed",
-                "pvapy is a required dependency but isn't importable in this "
-                "environment.\nReinstall it with:  pip install pvapy==5.4.1")
-            return
+        if self._live_backend == "ca":
+            try:
+                import epics  # noqa: F401
+            except ImportError:
+                QtWidgets.QMessageBox.warning(
+                    self, "pyepics not installed",
+                    "pyepics is a required dependency for CA-backed devices but "
+                    "isn't importable in this environment.\n"
+                    "Reinstall it with:  pip install pyepics==3.5.10")
+                return
+        else:
+            try:
+                import pvapy  # noqa: F401
+            except ImportError:
+                QtWidgets.QMessageBox.warning(
+                    self, "pvapy not installed",
+                    "pvapy is a required dependency but isn't importable in this "
+                    "environment.\nReinstall it with:  pip install pvapy==5.4.1")
+                return
         pv = self._pv_ed.currentText().strip()
         if not pv:
             QtWidgets.QMessageBox.warning(self, "No PV", "Enter a PV name first.")
@@ -3922,8 +4522,15 @@ class DataLoaderPanel(QtWidgets.QWidget):
                 QtWidgets.QMessageBox.warning(
                     self, "Sim Detector failed to start", str(e))
                 return
+        if self._live_src is not None and getattr(self._live_src, "_backend_tag", None) != self._live_backend:
+            # Switching backends mid-session (e.g. PVA device -> CA device) --
+            # the two use structurally different underlying PVs, so the old
+            # instance can't be reused the way one PvaLiveSource always was.
+            self.stop_live()
+            self._live_src = None
         if self._live_src is None:
-            self._live_src = PvaLiveSource(self)
+            self._live_src = create_live_source(self._live_backend, self)
+            self._live_src._backend_tag = self._live_backend
             self._live_src.frameReady.connect(self._on_live_frame)
             self._live_src.connectionChanged.connect(self._on_live_connection)
             self._live_src.error.connect(self._on_live_error)
@@ -3945,21 +4552,26 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._pv_ed.setEnabled(False)
         self._live_status_lbl.setText("Waiting for PV…")
 
-    def start_live_pv(self, pv: str) -> bool:
+    def start_live_pv(self, pv: str, backend: str = "pva") -> bool:
         """Programmatic equivalent of picking `pv` in the Live PV combo and
         clicking Start — used by the MIDAS-bridge QLocalServer (app.py) so
-        another app can trigger Live Data with no clicks in this GUI."""
+        another app can trigger Live Data with no clicks in this GUI.
+        ``backend`` defaults to "pva" to preserve this method's original
+        call signature for any pre-existing caller."""
         if getattr(self, "_pv_ed", None) is None:
             return False  # panel built without allow_live
         if self._live_src is not None and self._live_src.is_active() \
-                and self._pv_ed.currentText().strip() == pv:
-            return True  # already streaming this exact PV
+                and self._pv_ed.currentText().strip() == pv and self._live_backend == backend:
+            return True  # already streaming this exact PV/backend
         if self._live_src is not None and self._live_src.is_active():
             self.stop_live()
         live_card = getattr(self, "_live_card", None)
         if live_card is not None:
             live_card.setChecked(True)  # expand if collapsed
         self._pv_ed.setEditText(pv)
+        self._live_backend = backend
+        if hasattr(self, "_live_backend_lbl"):
+            self._live_backend_lbl.setText(f"[{backend.upper()}]")
         self._start_live()
         return self._live_src is not None and self._live_src.is_active()
 
@@ -4115,6 +4727,23 @@ class DataLoaderPanel(QtWidgets.QWidget):
             frames = [self._get_frame(i) for i in range(self._nframes)]
             return np.stack(frames, axis=0)
         raise RuntimeError("No data loaded")
+
+    def data_source_kind(self) -> str:
+        """Which branch ``full_stack()`` would take right now: ``"buffer"``
+        (live ring buffer, frozen and non-empty, or an imported external
+        buffer), ``"loaded"`` (a static file/folder/HDF5 stack), or
+        ``"none"``. Informational only — loading static data always clears
+        the buffer and starting/using the buffer always clears loaded data
+        (see ``_load``/``_start_live``/``use_external_buffer``), so in
+        practice only one of the two is ever populated at a time."""
+        if self._external is not None:
+            return "buffer"
+        with self._buffer_lock:
+            if self._buffer_frozen and self._buffer:
+                return "buffer"
+        if self._stack is not None or self._h5 is not None or self._paths is not None:
+            return "loaded"
+        return "none"
 
     def average_frames(self, start=0, end=None, step=1):
         """Mean of frames ``start:end:step`` (end None/<=0 = all), streamed one
@@ -4421,6 +5050,11 @@ class DataLoaderPanel(QtWidgets.QWidget):
     def dark(self):
         return self._dark_sel.get_field()
 
+    def dark_raw_stack(self):
+        """Raw (un-averaged) multi-frame dark stack, or None — see
+        ``FieldSelector.raw_stack``."""
+        return self._dark_sel.raw_stack()
+
     def bright(self):
         return self._bright_sel.get_field()
 
@@ -4594,52 +5228,6 @@ class LossCurveViewer(QtWidgets.QWidget):
             return
         self._xs.append(it); self._ys.append(loss)
         self._curve.setData(self._xs, self._ys)
-
-
-def _convert_radial(x, lsd, px, wl, native, target):
-    """Convert a radial axis between R (px), 2θ (deg) and Q (Å⁻¹).
-
-    ``native`` is the unit ``x`` is already in ("R" or "Q"); returns ``x`` unchanged
-    if the target matches or the geometry (lsd/px/wl) is missing.
-    """
-    x = np.asarray(x, dtype=float)
-    if target == native or None in (lsd, px, wl):
-        return x
-    lsd, px, wl = float(lsd), float(px), float(wl)
-    if native == "Q":
-        tth = 2.0 * np.degrees(np.arcsin(np.clip(x * wl / (4 * math.pi), -1, 1)))
-    else:  # R px
-        tth = np.degrees(np.arctan(x * px / lsd))
-    if target == "2th":
-        return tth
-    if target == "Q":
-        return 4 * math.pi * np.sin(np.radians(tth) / 2) / wl
-    return lsd * np.tan(np.radians(tth)) / px   # target == "R"
-
-
-_XUNIT_LABEL = {"R": "R (px)", "2th": "2θ (°)", "Q": "Q (Å⁻¹)"}
-
-
-class _UnitAxis(pg.AxisItem):
-    """Bottom axis that relabels R-pixel tick positions in a chosen radial unit.
-
-    The image/curves stay in their native coordinates; only the tick *labels* are
-    converted, so the axis is exact (no resampling) even for a nonlinear unit."""
-
-    def __init__(self, *a, **k):
-        super().__init__(*a, **k)
-        self._convert = None
-
-    def set_convert(self, fn):
-        self._convert = fn
-        self.picture = None
-        self.update()
-
-    def tickStrings(self, values, scale, spacing):
-        if self._convert is None or not len(values):
-            return super().tickStrings(values, scale, spacing)
-        conv = self._convert(np.asarray(values, dtype=float))
-        return [f"{v:.4g}" for v in conv]
 
 
 class WaterfallViewer(QtWidgets.QWidget):
@@ -5032,7 +5620,7 @@ class StackedProfileViewer(QtWidgets.QWidget):
         self._native_unit = native_unit if native_unit in ("R", "Q") else "R"
         self._restack()
         self._plot.setLabel("bottom", self._xlabel(),
-                            **{"color": self._theme_cfg["fg"], "font-size": "11pt"})
+                            **S.axis_label_css(self._theme_cfg["fg"]))
 
     def _x_display(self, x_native):
         """Convert a native x array to the currently-selected unit."""
@@ -5045,7 +5633,7 @@ class StackedProfileViewer(QtWidgets.QWidget):
     def _on_xunit_changed(self, _=0):
         self._restack()
         self._plot.setLabel("bottom", self._xlabel(),
-                            **{"color": self._theme_cfg["fg"], "font-size": "11pt"})
+                            **S.axis_label_css(self._theme_cfg["fg"]))
 
     def _toggle_grid(self, on: bool):
         self._plot.showGrid(x=on, y=on, alpha=self._theme_cfg["grid_alpha"])
@@ -5090,7 +5678,7 @@ class StackedProfileViewer(QtWidgets.QWidget):
                 self._plot.getAxis(ax_name).setStyle(showValues=False)
         grid_on = self._grid_chk.isChecked()
         self._plot.showGrid(x=grid_on, y=grid_on, alpha=cfg["grid_alpha"])
-        lbl = {"color": cfg["fg"], "font-size": "11pt"}
+        lbl = S.axis_label_css(cfg["fg"])
         self._plot.setLabel("bottom", self._xlabel(), **lbl)
         self._plot.setLabel("left", "Intensity + offset", **lbl)
         try:
@@ -5152,9 +5740,8 @@ class StackedProfileViewer(QtWidgets.QWidget):
             if fin.any():
                 xmins.append(float(xd[fin].min())); xmaxs.append(float(xd[fin].max()))
                 ymins.append(float(yd[fin].min())); ymaxs.append(float(yd[fin].max()))
-        if self._curves:
-            self._plot.autoRange()
         if xmins:
+            self._plot.autoRange()
             self._data_bounds = (min(xmins), max(xmaxs), min(ymins), max(ymaxs))
             self._apply_view_limits(*self._data_bounds)
 
@@ -5187,4 +5774,8 @@ class LogPanel(QtWidgets.QPlainTextEdit):
 
     def append(self, line: str):
         self.appendPlainText(line)
+        self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
+
+    def append_html(self, html: str):
+        self.appendHtml(html)
         self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())

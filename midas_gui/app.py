@@ -62,10 +62,12 @@ def _install_diagnostics() -> None:
 from midas_gui.helpers import _make_checkmark_svg, _make_arrow_svg
 from midas_gui import style as S
 from midas_gui import bridge_server
+from midas_gui.auto_attenuation import refresh_server as auto_att_refresh_server
 from midas_gui.tab_view import DataViewerTab
 from midas_gui.tab_mask import MaskTab
 from midas_gui.tab_calibrate import CalibrationTab
 from midas_gui.tab_batch import BatchTab
+from midas_gui.tab_queue import BatchQueueTab
 from midas_gui.tab_refine import RefinementTab
 from midas_gui.tab_corrections import CorrectionsTab
 from midas_gui.tab_pdf import PDFTab
@@ -115,12 +117,20 @@ class MainWindow(QtWidgets.QMainWindow):
             self._resolve_and_start_live, log_fn=_log)
         self._bridge_server.start()
 
+        # Lets a still-open, detached Auto Attenuation popup ask for a fresh
+        # data/dark/mask snapshot without this GUI ever handing over live
+        # objects — see midas_gui/auto_attenuation/refresh_server.py.
+        self._auto_att_refresh_server = auto_att_refresh_server.AutoAttenuationRefreshServer(
+            self._on_auto_attenuation_refresh_request, log_fn=_log)
+        self._auto_att_refresh_server.start()
+
     def _resolve_and_start_live(self, prefix: str) -> None:
-        pv = bridge_server.resolve_pv(prefix, C.DEVICES)
-        if pv is None:
+        resolved = bridge_server.resolve_pv(prefix, C.DEVICES)
+        if resolved is None:
             _log(f"MIDAS bridge: no DEVICES entry for prefix {prefix!r}")
             return
-        self._view_tab.start_live_pv(pv)
+        pv, backend = resolved
+        self._view_tab.start_live_pv(pv, backend)
 
     def _build_ui(self):
         tabs = QtWidgets.QTabWidget()
@@ -209,6 +219,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._mask_tab   = _tab(MaskTab,         "Mask Builder")
         self._cal_tab    = _tab(CalibrationTab,  "Calibrate")
         self._batch_tab  = _tab(BatchTab,        "Batch Integrate")
+        self._queue_tab  = _tab(BatchQueueTab,   "Batch Queue")
         self._refine_tab = _tab(RefinementTab,   "Calib. Refinement")
         self._corr_tab   = _tab(CorrectionsTab,  "Corrections")
         self._pdf_tab    = _tab(PDFTab,          "PDF Analysis")
@@ -227,6 +238,7 @@ class MainWindow(QtWidgets.QMainWindow):
             (self._cal_tab,    "Calibrate",         True),
             (self._refine_tab, "Calib. Refinement", False),
             (self._batch_tab,  "Batch Integrate",   True),
+            (self._queue_tab,  "Batch Queue",       False),
             (self._corr_tab,   "Corrections",       False),
             (self._pdf_tab,    "PDF Analysis",      False),
             (self._tex_tab,    "Texture",           False),
@@ -309,13 +321,15 @@ class MainWindow(QtWidgets.QMainWindow):
                  "set_mask_from_tab1")
         # Calibration propagation (Tab 2 result → consumers)
         _connect(self._cal_tab, "calibrationDone",
-                 (self._batch_tab, self._mask_tab, self._refine_tab, self._corr_tab,
-                  self._pdf_tab, self._tex_tab, self._pump_tab, self._export_tab),
+                 (self._batch_tab, self._queue_tab, self._mask_tab, self._refine_tab,
+                  self._corr_tab, self._pdf_tab, self._tex_tab, self._pump_tab,
+                  self._export_tab),
                  "set_calibration")
         # Refined geometry (Tab 4) re-broadcasts to the calibration consumers
         _connect(self._refine_tab, "refinedResult",
-                 (self._batch_tab, self._mask_tab, self._corr_tab, self._pdf_tab,
-                  self._tex_tab, self._pump_tab, self._export_tab), "set_calibration")
+                 (self._batch_tab, self._queue_tab, self._mask_tab, self._corr_tab,
+                  self._pdf_tab, self._tex_tab, self._pump_tab, self._export_tab),
+                 "set_calibration")
 
         # Geometry hand-off between Data Viewer (Tab 0) and Calibrate (Tab 2):
         #   Data Viewer "→ Send geometry to Calibrate" pushes its values;
@@ -324,8 +338,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._view_tab.pushGeometry.connect(self._cal_tab.apply_geometry)
             self._cal_tab.pullGeometry.connect(
                 lambda: self._cal_tab.apply_geometry(self._view_tab.get_geometry()))
-            # Calibrate → Data Viewer: push calibrated geometry into the Viewer fields.
+            # Calibrate → Data Viewer: push calibrated geometry into the Viewer
+            # fields — either Calibrate's own "→ Send to Data Viewer", or the
+            # Viewer's "← Get" pulling the same geometry on demand.
             self._cal_tab.sendGeometryToViewer.connect(self._view_tab.set_geometry)
+            self._view_tab.pullGeometry.connect(self._pull_geometry_from_calibrate)
             # Same hand-off, Hydra mode: per-panel geometry, keyed by panel number.
             self._cal_tab.pullHydraFromViewer.connect(
                 lambda: self._cal_tab.import_hydra_from_viewer(self._view_tab.get_hydra_export()))
@@ -337,10 +354,21 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             _log(f"Geometry hand-off wiring failed:\n{traceback.format_exc()}")
 
+        # Batch Queue's "Copy from Batch Integrate" reads that tab's current
+        # binning/format choices live, rather than snapshotting them at startup.
+        try:
+            provider = getattr(self._batch_tab, "integration_settings", None)
+            setter = getattr(self._queue_tab, "set_settings_provider", None)
+            if provider is not None and setter is not None:
+                setter(provider)
+        except Exception:
+            _log(f"Batch Queue settings-provider wiring failed:\n{traceback.format_exc()}")
+
         # FAIR provenance: hand the (initially closed) project context to the
         # tabs that log attempts to it. Defensive, like the wiring above —
         # a placeholder tab (failed to build) simply has no such method.
-        for tab in (self._cal_tab, self._batch_tab, self._mask_tab, self._export_tab):
+        for tab in (self._cal_tab, self._batch_tab, self._queue_tab, self._mask_tab,
+                    self._export_tab):
             setter = getattr(tab, "set_project_context", None)
             if setter is not None:
                 try:
@@ -350,6 +378,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._build_file_menu()
         self._build_menu()
+        self._build_tools_menu()
         self.statusBar().showMessage(
             "Tip: mask → calibrate → (refine) → batch integrate")
         self._project_lbl = QtWidgets.QLabel("Project: none")
@@ -357,6 +386,21 @@ class MainWindow(QtWidgets.QMainWindow):
             "The currently-open FAIR provenance project file (File → New/Open Project…).\n"
             "Calibrate and Batch Integrate runs are logged to it automatically while open.")
         self.statusBar().addPermanentWidget(self._project_lbl)
+
+    def _pull_geometry_from_calibrate(self):
+        """Data Viewer's "← Get" — copy the Calibrate tab's latest calibrated
+        geometry into the Viewer's fields. Same payload as Calibrate's own
+        "→ Send to Data Viewer"; says so plainly when there is no result to
+        pull, rather than silently doing nothing."""
+        g = self._cal_tab.geometry_for_viewer()
+        if not g:
+            QtWidgets.QMessageBox.information(
+                self, "No calibration yet",
+                "The Calibrate tab has no calibration result to send.\n\n"
+                "Run a calibration there first (or load a calibration file "
+                "directly with the Data Viewer's Load/save calibration card).")
+            return
+        self._view_tab.set_geometry(g)
 
     # ── modular tab visibility ─────────────────────────────────────
     _NUMERALS = "⓪①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭"
@@ -671,6 +715,26 @@ class MainWindow(QtWidgets.QMainWindow):
             if calib_attempts:
                 self._cal_tab.apply_project_calibration(calib_attempts)
                 restored.append("Calibrate: " + ", ".join(sorted(calib_attempts)))
+                # apply_project_calibration only redraws the Calibrate tab
+                # itself — it doesn't emit calibrationDone (that signal is
+                # reserved for a just-finished Fit), so consumers wired only
+                # to that signal (Batch Queue chiefly) never learn a result
+                # now exists, and report "No calibration available from the
+                # Calibrate tab yet" even though the tab plainly shows one.
+                # Propagate the restored single-detector result by hand, to
+                # the same consumer list the live signal wiring uses.
+                restored_result = self._cal_tab.get_result()
+                if restored_result is not None:
+                    for t in (self._batch_tab, self._queue_tab, self._mask_tab,
+                              self._refine_tab, self._corr_tab, self._pdf_tab,
+                              self._tex_tab, self._pump_tab, self._export_tab):
+                        setter = getattr(t, "set_calibration", None)
+                        if setter is not None:
+                            try:
+                                setter(restored_result)
+                            except Exception:
+                                _log("Calibration propagation to "
+                                     f"{t} failed:\n{traceback.format_exc()}")
             if integrate_attempts:
                 self._batch_tab.apply_project_integration(integrate_attempts)
                 restored.append("Batch Integrate: " + ", ".join(sorted(integrate_attempts)))
@@ -1071,6 +1135,95 @@ class MainWindow(QtWidgets.QMainWindow):
         act_reload = m.addAction("Reload config")
         act_reload.triggered.connect(self._reload_config)
 
+    def _build_tools_menu(self):
+        """Tools menu: standalone utilities that operate on the current
+        session's data but run as their own process."""
+        m = self.menuBar().addMenu("&Tools")
+        act = m.addAction("Auto Attenuation…")
+        act.triggered.connect(self._open_auto_attenuation)
+
+    def _write_auto_attenuation_snapshot(self, path):
+        """Gather the Data Viewer's current buffer/loaded-data/dark/mask/
+        geometry and write it to *path* as an Auto Attenuation snapshot.
+
+        Shared by the initial launch (``_open_auto_attenuation``) and a
+        running popup's "Refresh from Data Viewer" request (see
+        ``midas_gui/auto_attenuation/refresh_server.py``) — the popup itself
+        never touches these live objects, only this method does. Returns
+        ``(ok, message)``; ``message`` is set only when ``ok`` is False."""
+        loader = getattr(self._view_tab, "_loader", None)
+        if loader is None or loader.n_frames() == 0:
+            return False, "Capture or load a buffer/stack in the Data Viewer first."
+        frames = loader.full_stack()
+        source = loader.data_source_kind()
+        dark = loader.dark()
+        dark_stack = loader.dark_raw_stack()
+        mask = loader.composite_mask()
+        geometry = self._view_tab.get_geometry() or {}
+        wl = float(geometry.get("wavelength_A") or 0.0)
+        energy_keV = (C.HC_KEV_A / wl) if wl > 0 else None
+
+        from midas_gui.auto_attenuation.snapshot import write_snapshot
+        write_snapshot(
+            path, frames=frames, dark=dark, dark_stack=dark_stack,
+            mask=mask, energy_keV=energy_keV, geometry=geometry, source=source,
+        )
+        return True, None
+
+    def _on_auto_attenuation_refresh_request(self, path):
+        """Callback for AutoAttenuationRefreshServer — see that module."""
+        try:
+            return self._write_auto_attenuation_snapshot(path)
+        except Exception:
+            _log(f"Auto Attenuation refresh failed:\n{traceback.format_exc()}")
+            return False, "Refresh failed — see the main GUI's log."
+
+    def _open_auto_attenuation(self):
+        """Snapshot the Data Viewer's buffer/dark/mask/geometry to a temp
+        file and launch the Auto Attenuation popup as a separate, detached
+        process (see midas_gui.auto_attenuation) — it only ever reads that
+        one snapshot, never the live GUI objects, so it can't be crashed by
+        or crash the main GUI, and survives the main GUI closing."""
+        import os
+        fd, path = tempfile.mkstemp(suffix=".npz", prefix="midas_auto_att_")
+        os.close(fd)
+        try:
+            ok, message = self._write_auto_attenuation_snapshot(path)
+            if not ok:
+                os.unlink(path)
+                QtWidgets.QMessageBox.information(self, "Auto Attenuation", message)
+                return
+
+            # QProcess.startDetached(sys.executable, args) is not enough on
+            # its own: sys.executable is the right interpreter, but if this
+            # process can only import midas_gui because its launcher put the
+            # repo root on sys.path (e.g. an un-pip-installed source
+            # checkout run via cwd), a *fresh* child interpreter started with
+            # `-m` has no such head start and fails with "No module named
+            # 'midas_gui'" — seen on a beamline workstation. Prepending
+            # midas_gui's own parent directory to PYTHONPATH makes the child
+            # able to import it however this process could; on a proper pip
+            # install it's already on sys.path, so this is a harmless no-op.
+            import midas_gui as _mg
+            pkg_root = str(Path(_mg.__file__).resolve().parent.parent)
+            env = QtCore.QProcessEnvironment.systemEnvironment()
+            old_pp = env.value("PYTHONPATH")
+            env.insert("PYTHONPATH", pkg_root + (os.pathsep + old_pp if old_pp else ""))
+
+            proc = QtCore.QProcess()
+            proc.setProgram(sys.executable)
+            proc.setArguments(["-m", "midas_gui.auto_attenuation.app", "--snapshot", path])
+            proc.setProcessEnvironment(env)
+            if not proc.startDetached():
+                QtWidgets.QMessageBox.critical(
+                    self, "Auto Attenuation",
+                    "Failed to launch the Auto Attenuation process.")
+        except Exception:
+            _log(f"Auto Attenuation launch failed:\n{traceback.format_exc()}")
+            QtWidgets.QMessageBox.critical(
+                self, "Auto Attenuation",
+                "Failed to launch Auto Attenuation — see log.")
+
     def _open_preferences(self):
         try:
             from midas_gui.prefs_dialog import PreferencesDialog
@@ -1194,6 +1347,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._bridge_server.stop()
         except Exception:
             _log(f"Bridge server shutdown failed:\n{traceback.format_exc()}")
+        try:
+            self._auto_att_refresh_server.stop()
+        except Exception:
+            _log(f"Auto Attenuation refresh server shutdown failed:\n{traceback.format_exc()}")
         super().closeEvent(event)
 
 
@@ -1201,46 +1358,18 @@ def _apply_ui_scale():
     """Set Qt's whole-application scale factor from the configured ui.ui_scale BEFORE
     the QApplication is created, so layout + fonts scale uniformly on HiDPI / 4K
     screens. Must run before any QApplication instance exists."""
-    import os
-    try:
-        scale = float(getattr(C, "DEFAULT_UI_SCALE", 1.0) or 1.0)
-    except Exception:
-        scale = 1.0
-    scale = min(4.0, max(0.5, scale))
+    from midas_gui import helpers
     # In-app setting is authoritative (overwrites any inherited value on restart).
-    os.environ["QT_SCALE_FACTOR"] = f"{scale:.4g}"
+    scale = helpers.apply_ui_scale()
     _log(f"UI scale (QT_SCALE_FACTOR) = {scale:.4g}")
 
 
 def main():
     _install_diagnostics()
     _apply_ui_scale()   # must precede QApplication construction
-    # Crisper icons/pixmaps at non-unit scales (attribute set before QApplication).
-    try:
-        QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
-    except Exception:
-        pass
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     app.setApplicationName("MIDAS GUI")
-    app.setStyle("Fusion")
-
-    pal = QtGui.QPalette()
-    for role, col in [
-        (QtGui.QPalette.Window,          S.BG),
-        (QtGui.QPalette.WindowText,      S.TEXT),
-        (QtGui.QPalette.Base,            S.INPUT_BG),
-        (QtGui.QPalette.AlternateBase,   "#e4e4e4"),
-        (QtGui.QPalette.Text,            S.INPUT_FG),
-        (QtGui.QPalette.Button,          "#444444"),
-        (QtGui.QPalette.ButtonText,      S.TEXT),
-        (QtGui.QPalette.Highlight,       S.ACCENT),
-        (QtGui.QPalette.HighlightedText, "#ffffff"),
-        (QtGui.QPalette.ToolTipBase,     "#2d2d30"),
-        (QtGui.QPalette.ToolTipText,     S.TEXT),
-    ]:
-        pal.setColor(role, QtGui.QColor(col))
-    app.setPalette(pal)
-    app.setStyleSheet(S.stylesheet(_CHECKMARK_SVG, _ARROW_UP_SVG, _ARROW_DOWN_SVG))
+    S.apply_theme(app, _CHECKMARK_SVG, _ARROW_UP_SVG, _ARROW_DOWN_SVG)
 
     win = MainWindow()
     win.show()

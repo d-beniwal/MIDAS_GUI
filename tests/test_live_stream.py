@@ -36,6 +36,63 @@ def test_empty_pv_warns_and_does_not_start(monkeypatch):
     assert panel._live_src is None or not panel._live_src.is_active()
 
 
+def test_picking_a_ca_device_sets_backend_and_label(monkeypatch):
+    """Selecting a device configured with backend "ca" must fill the PV
+    field from prefix+ca_suffix (not pva_suffix) and flip _live_backend."""
+    W, _app = _make_app_and_module()
+    import midas_gui.constants as C
+    monkeypatch.setattr(C, "DEVICES", [
+        {"name": "varex", "prefix": "17bmVarex:", "backend": "ca", "ca_suffix": "image1:"},
+    ])
+    monkeypatch.setattr(W, "DEVICES", C.DEVICES)
+    panel = W.DataLoaderPanel(mode="stack", allow_live=True)
+    assert panel._live_backend == "pva"  # default before any pick
+    panel._pv_ed.setCurrentIndex(0)
+    panel._on_pv_device_picked(0)
+    assert panel._pv_ed.currentText() == "17bmVarex:image1:"
+    assert panel._live_backend == "ca"
+    assert panel._live_backend_lbl.text() == "[CA]"
+
+
+def test_picking_a_pva_device_after_ca_reverts_backend(monkeypatch):
+    W, _app = _make_app_and_module()
+    import midas_gui.constants as C
+    monkeypatch.setattr(C, "DEVICES", [
+        {"name": "varex", "prefix": "17bmVarex:", "backend": "ca", "ca_suffix": "image1:"},
+        {"name": "ff", "prefix": "20IDFF:", "pva_suffix": "Pva1:Image"},
+    ])
+    monkeypatch.setattr(W, "DEVICES", C.DEVICES)
+    panel = W.DataLoaderPanel(mode="stack", allow_live=True)
+    panel._on_pv_device_picked(0)
+    assert panel._live_backend == "ca"
+    panel._on_pv_device_picked(1)
+    assert panel._live_backend == "pva"
+    assert panel._pv_ed.currentText() == "20IDFF:Pva1:Image"
+    assert panel._live_backend_lbl.text() == "[PVA]"
+
+
+def test_start_live_ca_backend_warns_when_pyepics_missing(monkeypatch):
+    W, _app = _make_app_and_module()
+    warned = {}
+    monkeypatch.setattr(
+        W.QtWidgets.QMessageBox, "warning",
+        lambda *a, **k: warned.setdefault("called", True))
+    real_import = __import__
+
+    def fake_import(name, *a, **k):
+        if name == "epics":
+            raise ImportError("no pyepics in this env")
+        return real_import(name, *a, **k)
+    monkeypatch.setattr("builtins.__import__", fake_import)
+
+    panel = W.DataLoaderPanel(mode="stack", allow_live=True)
+    panel._live_backend = "ca"
+    panel._pv_ed.setEditText("17bmVarex:image1:")
+    panel._start_live()
+    assert warned.get("called") is True
+    assert panel._live_src is None
+
+
 def test_refresh_devices_repopulates_from_current_profile(monkeypatch):
     """Data Viewer's Live PV dropdown must pick up a profile switch's device
     list live, not only at construction (the reported bug)."""
@@ -81,6 +138,23 @@ def test_live_frame_updates_current_frame():
     assert panel.n_frames() == 1
     assert panel.current_frame().shape == (8, 6)
     assert got.get("fired") is True
+
+
+def test_data_source_kind_reports_none_loaded_then_buffer():
+    """DataLoaderPanel.data_source_kind() — used by Auto Attenuation's
+    source label — must report 'none' with nothing loaded, 'loaded' for a
+    static in-memory stack, and 'buffer' once a live buffer is frozen."""
+    W, _app = _make_app_and_module()
+    panel = W.DataLoaderPanel(mode="stack", allow_live=True)
+    assert panel.data_source_kind() == "none"
+
+    panel._stack = np.zeros((2, 4, 4), dtype=np.float32)
+    assert panel.data_source_kind() == "loaded"
+
+    with panel._buffer_lock:
+        panel._buffer = [np.zeros((4, 4), dtype=np.float32)]
+        panel._buffer_frozen = True
+    assert panel.data_source_kind() == "buffer"
 
 
 def test_pva_live_source_roundtrip():

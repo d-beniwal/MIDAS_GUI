@@ -531,6 +531,89 @@ def test_batch_tab_logs_to_project_with_calibration_snapshot(app, tmp_path):
         assert att["results/profiles"].shape == (3, 20)
 
 
+# Every key resolve_calibration_fields returns — the snapshot must stay a
+# superset of these, since calibration_namespace/_build_spec/gsas_export and
+# the "View calibration" grid all read them by name.
+_DISPLAY_KEYS = {"wavelength_A", "Lsd", "BC_y", "BC_z", "tx", "ty", "tz",
+                 "pxY", "pxZ", "NrPixelsY", "NrPixelsZ", "distortion", "im_trans"}
+
+
+def _logged_snapshot(tab, tmp_path, name="proj.h5"):
+    """Run BatchTab._log_to_project against a fresh project and hand back the
+    calibration_snapshot it recorded."""
+    proj_path = str(tmp_path / name)
+    project.create_project(proj_path)
+    ctx = project.ProjectContext()
+    ctx.path = proj_path
+    tab.set_project_context(ctx)
+    tab._last_run_inputs = {"src_cfg": {}, "kernel": "subpixel4"}
+    tab._last_run_fields = {"mask": None, "mask_is_file_backed": False}
+    tab._log_to_project({"n": 1, "aborted": False,
+                         "profiles": np.zeros((1, 8), dtype=np.float32)})
+    meta = project.read_attempt(proj_path, "/analysis/integrate/single/attempt_0001")
+    return meta["calibration_snapshot"]
+
+
+def test_integration_attempt_records_the_whole_tab2_calibration(app, tmp_path):
+    """The snapshot is the full calibration result, not the display subset —
+    an attempt has to be able to reconstruct the geometry it ran under."""
+    from midas_gui.tab_batch import BatchTab
+
+    tab = BatchTab()
+    tab._calib_result = _fake_result()
+    tab._use_tab2_btn.setChecked(True)
+
+    snap = _logged_snapshot(tab, tmp_path)
+    assert _DISPLAY_KEYS <= set(snap)                     # still a superset
+    # ...plus everything the display subset used to drop.
+    assert snap["_calibrant_name"] == "CeO2"
+    assert snap["post_residual_strain_uE"] == pytest.approx(12.3)
+    assert snap["seed_seconds"] == pytest.approx(0.1)
+    assert snap["refine_seconds"] == pytest.approx(1.2)
+    # Torch-tensor fields are still dropped (sanitize_result_dict's rule).
+    assert "residual_corr_map" not in snap
+    # And it round-trips back into a usable calibration.
+    ns = project.calibration_namespace(snap)
+    assert ns.Lsd == pytest.approx(200000.0)
+    assert ns._calibrant_name == "CeO2"
+
+
+def test_integration_attempt_records_the_whole_file_calibration(app, tmp_path):
+    """Same for the "From file" source — the geometry file is re-parsed into a
+    full result rather than only its display fields."""
+    from midas_gui.tab_batch import BatchTab
+
+    calib_json = tmp_path / "calibration.json"
+    calib_json.write_text(json.dumps({
+        "NrPixelsY": 2048, "NrPixelsZ": 2048, "pxY": 200.0, "pxZ": 200.0,
+        "Lsd": 200000.0, "BC_y": 1024.0, "BC_z": 1020.0,
+        "tx": 0.0, "ty": 0.1, "tz": -0.2, "wavelength_A": 0.1729,
+        "distortion": {}, "im_trans": [1]}))
+
+    tab = BatchTab()
+    tab._use_json_btn.setChecked(True)
+    tab._json_ed.setText(str(calib_json))
+
+    snap = _logged_snapshot(tab, tmp_path)
+    assert _DISPLAY_KEYS <= set(snap)
+    assert snap["Lsd"] == pytest.approx(200000.0)
+    assert snap["ty"] == pytest.approx(0.1)
+    assert snap["im_trans"] == [1]
+    # residual_corr_bin_path comes from the full result, not the display fields.
+    assert "residual_corr_bin_path" in snap
+
+
+def test_integration_attempt_snapshot_is_none_without_a_calibration(app, tmp_path):
+    """No calibration selected — the attempt is still logged, with a null
+    snapshot rather than a crash."""
+    from midas_gui.tab_batch import BatchTab
+
+    tab = BatchTab()
+    tab._use_json_btn.setChecked(True)
+    tab._json_ed.setText("")
+    assert _logged_snapshot(tab, tmp_path) is None
+
+
 def test_read_attempt_results_roundtrip(tmp_path):
     path = str(tmp_path / "proj.h5")
     project.create_project(path)
@@ -750,10 +833,8 @@ def test_apply_project_calibration_single_detector(app, tmp_path):
     # Rings are redrawn from the stored result immediately (no image was
     # loaded here — loader_state's path doesn't exist — so the radial
     # profile/cake, which need an actual image, are correctly skipped).
-    # With the manual seed card active it owns the overlay, so _draw_rings
-    # delegates to the seed preview and the items land in _seed_ring_items.
     assert cal_tab._result is not None
-    assert len(cal_tab._ring_items) + len(cal_tab._seed_ring_items) > 0
+    assert len(cal_tab._ring_items) > 0
 
 
 def test_apply_project_mask_restores_fields_and_mask(app, tmp_path):
@@ -891,3 +972,71 @@ def test_hash_paths_in_adds_hash_for_existing_files(tmp_path):
     assert out["path_hash"]["method"] == "sha256_full"
     assert out["nested"]["path_hash"]["method"] == "sha256_full"
     assert "path_hash" not in out["missing"]
+
+
+# ── injectable environment snapshot (Batch Queue writes one project per sample) ──
+
+def _minimal_payload():
+    return {"n": 1, "profiles": np.ones((1, 4), dtype=np.float32),
+            "r_axis_px": np.arange(4, dtype=np.float32), "sigmas": None,
+            "frame_ids": ["f0"], "out_paths": [], "aborted": False}
+
+
+def test_integration_attempt_uses_an_injected_environment(tmp_path):
+    """A caller logging N attempts in a row supplies one snapshot for all of
+    them — environment_snapshot() shells out to git and sysctl with 2 s
+    timeouts, which is fine once and wasteful per sample."""
+    path = str(tmp_path / "proj.h5")
+    project.create_project(path)
+    env = {"midas_gui_version": "test", "python_version": "3.x", "marker": "injected"}
+
+    project.append_integration_attempt(
+        path, "single", inputs={}, finished_payload=_minimal_payload(),
+        environment=env)
+
+    with h5py.File(path, "r") as f:
+        meta = json.loads(f["analysis/integrate/single/attempt_0001/metadata"][()])
+    assert meta["environment"] == env
+
+
+def test_integration_attempt_still_takes_its_own_environment_by_default(tmp_path):
+    """Omitting the kwarg must behave exactly as before it existed."""
+    path = str(tmp_path / "proj.h5")
+    project.create_project(path)
+    project.append_integration_attempt(
+        path, "single", inputs={}, finished_payload=_minimal_payload())
+
+    with h5py.File(path, "r") as f:
+        meta = json.loads(f["analysis/integrate/single/attempt_0001/metadata"][()])
+    env = meta["environment"]
+    assert isinstance(env, dict) and "python_version" in env and "workstation" in env
+    assert env.get("marker") is None
+
+
+def test_an_injected_environment_does_not_leak_into_other_attempt_kinds(tmp_path):
+    """Only the integration attempt grew the kwarg; calibration attempts keep
+    computing their own."""
+    path = str(tmp_path / "proj.h5")
+    project.create_project(path)
+    ref = project.append_calibration_attempt(
+        path, "single", cfg={}, result=_fake_result(), loader_state={})
+    with h5py.File(path, "r") as f:
+        meta = json.loads(f[ref]["metadata"][()])
+    assert "python_version" in meta["environment"]
+
+
+def test_repeated_attempts_accumulate_for_a_per_sample_project(tmp_path):
+    """The Batch Queue's re-run behaviour: a second run over the same sample
+    appends attempt_0002 rather than replacing attempt_0001."""
+    path = str(tmp_path / "scan_001.h5")
+    project.create_project(path, name="scan_001")
+    first = project.append_integration_attempt(
+        path, "single", inputs={}, finished_payload=_minimal_payload())
+    second = project.append_integration_attempt(
+        path, "single", inputs={}, finished_payload=_minimal_payload())
+
+    assert first == "/analysis/integrate/single/attempt_0001"
+    assert second == "/analysis/integrate/single/attempt_0002"
+    with h5py.File(path, "r") as f:
+        assert sorted(f["analysis/integrate/single"]) == ["attempt_0001", "attempt_0002"]
+        assert f["analysis/integrate/single"].attrs["latest"] == "attempt_0002"

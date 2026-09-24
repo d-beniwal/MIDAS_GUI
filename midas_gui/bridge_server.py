@@ -86,10 +86,15 @@ class BridgeServer(QtCore.QObject):
         self._on_live_pv_prefix(prefix)
 
 
-def resolve_pv(prefix: str, devices) -> str | None:
-    """Return ``prefix + pva_suffix`` for the ``devices`` entry matching
-    ``prefix``, or None if no entry matches (caller should log + no-op)."""
+def resolve_pv(prefix: str, devices) -> tuple[str, str] | None:
+    """Return ``(prefix + suffix, backend)`` for the ``devices`` entry
+    matching ``prefix`` -- ``suffix`` is ``ca_suffix`` or ``pva_suffix``
+    depending on that entry's ``backend`` (default "pva", for entries that
+    predate the field) -- or None if no entry matches (caller should log +
+    no-op)."""
     match = next((d for d in devices if d.get("prefix") == prefix), None)
     if match is None:
         return None
-    return prefix + match.get("pva_suffix", "")
+    backend = str(match.get("backend", "pva")).strip().lower() or "pva"
+    suffix = match.get("ca_suffix", "image1:") if backend == "ca" else match.get("pva_suffix", "")
+    return prefix + suffix, backend

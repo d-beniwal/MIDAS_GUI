@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os as _os
 from pathlib import Path
 from typing import Optional
 
@@ -50,6 +51,15 @@ class DistortionRefineDialog(QtWidgets.QDialog):
     preset buttons auto-select a coefficient set (see
     :data:`midas_gui.constants.DISTORTION_PRESETS`).  ``selected()`` returns the
     set of checked v2 coefficient names.
+
+    Each fold's amplitude (``a{k}``) and phase (``phi{k}``) are kept ticked
+    together: ``midas_calibrate_v2.forward.distortion.resolve_distortion_block``
+    rejects one without the other ("an amplitude without its phase is not a
+    meaningful degree of freedom, and a phase without its amplitude has zero
+    gradient"), so letting the GUI produce that selection is just a deferred,
+    less legible version of the same error. The three isotropic terms
+    (``iso_R2/4/6``) carry no such constraint and stay independently
+    toggleable.
     """
 
     def __init__(self, selected=None, parent=None):
@@ -57,12 +67,15 @@ class DistortionRefineDialog(QtWidgets.QDialog):
         self.setWindowTitle("Distortion parameters to refine")
         self.setMinimumWidth(360)
         selected = set(selected or [])
+        self._syncing_pair = False
 
         layout = QtWidgets.QVBoxLayout(self)
         info = QtWidgets.QLabel(
             "Choose which distortion harmonics the calibration refines.  Use a "
             "preset to select a whole η-fold ladder, or tick coefficients "
-            "individually.")
+            "individually.  Each fold's amplitude and phase are linked — "
+            "ticking one ticks the other, since the backend refuses one "
+            "without the other.")
         info.setWordWrap(True)
         info.setStyleSheet("color:#bbb;font-size:11px;padding-bottom:6px;")
         layout.addWidget(info)
@@ -94,12 +107,31 @@ class DistortionRefineDialog(QtWidgets.QDialog):
                 grid.addWidget(cb, r, col)
                 col += 1
         layout.addLayout(grid)
+        # Wire amplitude/phase pairs after every box exists (each handler
+        # needs to look up its partner by name).
+        for k in range(1, 7):
+            a, phi = self._boxes[f"a{k}"], self._boxes[f"phi{k}"]
+            a.toggled.connect(lambda checked, other=phi: self._sync_pair(other, checked))
+            phi.toggled.connect(lambda checked, other=a: self._sync_pair(other, checked))
 
         btns = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
+
+    def _sync_pair(self, other: QtWidgets.QCheckBox, checked: bool):
+        """Mirror a fold's amplitude/phase checkbox onto its partner.
+
+        Guarded by ``_syncing_pair`` so the partner's own ``toggled`` (fired
+        by ``setChecked`` below) doesn't bounce back and re-enter this."""
+        if self._syncing_pair or other.isChecked() == checked:
+            return
+        self._syncing_pair = True
+        try:
+            other.setChecked(checked)
+        finally:
+            self._syncing_pair = False
 
     def _apply_preset(self, coeffs):
         want = set(coeffs)
@@ -109,6 +141,148 @@ class DistortionRefineDialog(QtWidgets.QDialog):
     def selected(self) -> set:
         """Set of checked coefficient names (v2 harmonic names)."""
         return {nm for nm, cb in self._boxes.items() if cb.isChecked()}
+
+
+class DistortionSeedDialog(QtWidgets.QDialog):
+    """Per-coefficient seed *values* for the 15 distortion coefficients.
+
+    Companion to :class:`DistortionRefineDialog`, which only picks which
+    coefficients to refine. This lets a distortion known ahead of time —
+    carried over from a previous calibration of the same detector, or
+    measured independently — be typed in as a starting point, the same way
+    BC/Lsd/tilts already can be. Grouped by η-fold like the refine dialog,
+    but no amplitude/phase pairing is enforced: unlike refining, seeding
+    only one of a pair is meaningful (the other simply starts at 0), so
+    each row is independently toggleable.
+
+    Only ticked coefficients are returned by :meth:`values`; an unticked
+    one is left out of the seed entirely, which is exactly as if this
+    dialog had never touched it (the fit then starts it at 0).
+    """
+
+    def __init__(self, values=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Distortion seed values")
+        self.setMinimumWidth(660)
+        values = dict(values or {})
+
+        layout = QtWidgets.QVBoxLayout(self)
+        info = QtWidgets.QLabel(
+            "Tick a coefficient to seed the fit's starting point from the "
+            "value beside it — e.g. a detector's distortion measured or "
+            "fitted previously. Anything left unticked starts at 0, the "
+            "way it always has.")
+        info.setWordWrap(True)
+        info.setStyleSheet("color:#bbb;font-size:11px;padding-bottom:6px;")
+        layout.addWidget(info)
+
+        grid = QtWidgets.QGridLayout(); grid.setSpacing(4)
+        groups = [("Isotropic (fold 0)", DISTORTION_ISO)]
+        groups += [(f"Fold {k}", [f"a{k}", f"phi{k}"]) for k in range(1, 7)]
+        self._boxes: dict = {}
+        for r, (title, names) in enumerate(groups):
+            grid.addWidget(QtWidgets.QLabel(f"<b>{title}</b>"), r, 0)
+            for c, nm in enumerate(names, start=1):
+                cb = QtWidgets.QCheckBox(nm)
+                cb.setChecked(nm in values)
+                spin = QtWidgets.QDoubleSpinBox()
+                spin.setRange(-1e5, 1e5); spin.setDecimals(6)
+                spin.setValue(float(values.get(nm, 0.0)))
+                spin.setMaximumWidth(100)
+                spin.setEnabled(cb.isChecked())
+                cb.toggled.connect(spin.setEnabled)
+                pair = QtWidgets.QWidget()
+                prow = QtWidgets.QHBoxLayout(pair)
+                prow.setContentsMargins(0, 0, 0, 0); prow.setSpacing(2)
+                prow.addWidget(cb); prow.addWidget(spin)
+                grid.addWidget(pair, r, c)
+                self._boxes[nm] = (cb, spin)
+        layout.addLayout(grid)
+
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def values(self) -> dict:
+        """``{coefficient_name: value}`` for every ticked row only."""
+        return {nm: spin.value() for nm, (cb, spin) in self._boxes.items()
+                if cb.isChecked()}
+
+
+class ManualSeedDialog(QtWidgets.QDialog):
+    """Per-parameter "include in seed" panel behind a "Manual seed…" button.
+
+    Deliberately non-modal: Pick BC / Pick Ring live as toolbar buttons on the
+    image viewer, not in this dialog, so a modal window here would block the
+    exact workflow the seed card exists to support (click Pick BC, then click
+    a point on the image). Rather than own copies of the value/enable widgets
+    and copy them in/out, this dialog *reparents* the caller's own widgets
+    into its layout at construction time — so a pick made on the image while
+    the dialog is open updates it immediately, no sync step needed, and
+    there is nothing to accept/cancel (edits already apply live, exactly
+    like the inline fields this replaces).
+
+    ``en_bc`` gates the BC_y/BC_z pair together (the backend takes them as a
+    pair or not at all — see ``calib._resolve_seed`` — so one checkbox is
+    correct here, not two). ``en_dist``/``dist_btn`` (optional — omitted by
+    callers that predate per-coefficient distortion seeding, e.g. Hydra's
+    per-panel seed dialog) add a "Distortion" row whose values live behind
+    ``dist_btn``'s own dialog rather than inline, since 15 coefficients
+    don't fit this grid.
+    """
+
+    def __init__(self, *, en_bc, bcy, bcz, en_lsd, lsd, en_tx, tx, en_ty, ty,
+                en_tz, tz, en_dist=None, dist_btn=None,
+                feedback_check=None, note=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Manual seed")
+        self.setModal(False)
+        self.setMinimumWidth(320)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        info = QtWidgets.QLabel(
+            "Tick a parameter to start the fit from the value beside it. "
+            "Anything left unticked is determined automatically, the way it "
+            "always has been — ticking only Lsd, say, leaves the beam centre "
+            "on the auto-seeder.")
+        info.setWordWrap(True)
+        info.setStyleSheet("color:#bbb;font-size:11px;padding-bottom:6px;")
+        layout.addWidget(info)
+
+        grid = QtWidgets.QGridLayout(); grid.setSpacing(6)
+        r = 0
+        grid.addWidget(en_bc, r, 0)
+        grid.addWidget(QtWidgets.QLabel("BC_y:"), r, 1); grid.addWidget(bcy, r, 2)
+        grid.addWidget(QtWidgets.QLabel("BC_z:"), r, 3); grid.addWidget(bcz, r, 4)
+        r += 1
+        grid.addWidget(en_lsd, r, 0)
+        grid.addWidget(QtWidgets.QLabel("Lsd:"), r, 1); grid.addWidget(lsd, r, 2)
+        r += 1
+        for en, w, label in ((en_tx, tx, "tx:"), (en_ty, ty, "ty:"), (en_tz, tz, "tz:")):
+            grid.addWidget(en, r, 0)
+            grid.addWidget(QtWidgets.QLabel(label), r, 1); grid.addWidget(w, r, 2)
+            r += 1
+        if en_dist is not None:
+            grid.addWidget(en_dist, r, 0)
+            grid.addWidget(QtWidgets.QLabel("Distortion:"), r, 1)
+            if dist_btn is not None:
+                grid.addWidget(dist_btn, r, 2)
+            r += 1
+        layout.addLayout(grid)
+
+        if feedback_check is not None:
+            layout.addWidget(feedback_check)
+        if note is not None:
+            layout.addWidget(note)
+
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        btns.rejected.connect(self.close)
+        close_btn = btns.button(QtWidgets.QDialogButtonBox.Close)
+        if close_btn is not None:
+            close_btn.clicked.connect(self.close)
+        layout.addWidget(btns)
 
 
 #: Limit rows: slot name → (label, default unit, default window,
@@ -1038,3 +1212,355 @@ class ProjectHistoryDialog(QtWidgets.QDialog):
             self._detail.setPlainText(json.dumps(meta, indent=2, default=str))
         except Exception as e:
             self._detail.setPlainText(f"Could not read this attempt's metadata:\n{e}")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  AddSamplesDialog  (Batch Queue)
+# ═════════════════════════════════════════════════════════════════════════════
+
+#: How deep "Find samples below…" walks. A beamtime tree is a handful of levels;
+#: an unbounded walk on a network mount is a way to hang the UI for minutes.
+_SAMPLE_SCAN_MAX_DEPTH = 6
+
+#: Single-frame file suffixes that make a directory a sample. ``.ge*`` is
+#: matched by prefix instead, since it carries a panel number (.ge1 … .ge4).
+_FRAME_SUFFIXES = {".tif", ".tiff", ".cbf", ".edf"}
+
+
+def _folder_frame_count(folder) -> int:
+    """Frame files sitting directly in ``folder`` — what makes it a sample."""
+    return _count_frame_files(str(folder))
+
+
+def _is_dark_dir(name: str) -> bool:
+    """Whether a *directory* name looks like a darks collection.
+
+    ``helpers.is_dark_like_name`` is tuned for file names — its regex requires
+    ``dark`` to end at a ``_``/``.``/end boundary, so it catches ``dark.tif``
+    and ``..._dark_before_009242.vrx.h5`` but not a directory called
+    ``darks``. That plural is a common folder name in exactly the
+    one-folder-per-sample layout this scan exists to serve, so it is matched
+    here as well. Widened locally rather than in the shared helper, whose
+    file-level semantics several other call sites depend on."""
+    from midas_gui.helpers import is_dark_like_name
+    return is_dark_like_name(name) or name.strip().lower() in ("darks", "dark_frames")
+
+
+def find_samples_below(root, max_depth: int = _SAMPLE_SCAN_MAX_DEPTH,
+                       skip_darks: bool = True) -> list:
+    """Every sample at or below ``root``: each HDF5 file, and each directory
+    holding at least one frame file.
+
+    This is the "one folder per sample" case in one action — point it at a
+    beamtime directory and it finds the lot. Pure enough to test on a temp
+    tree: it returns plain ``(path, kind)`` pairs and builds no widgets.
+
+    Dark-like names (``helpers.is_dark_like_name``) are skipped by default,
+    matching ``DataLoaderPanel.source_cfg``'s rule that a *scanned* selection
+    drops darks while an explicit hand-pick keeps them — beamline convention
+    puts dark frames in the same folder as the scan they bracket."""
+    from midas_gui.helpers import is_dark_like_name
+    root = Path(str(root))
+    if not root.is_dir():
+        return []
+    found: list = []
+    root_depth = len(root.parts)
+    for dirpath, dirnames, filenames in _os.walk(str(root)):
+        here = Path(dirpath)
+        if len(here.parts) - root_depth >= max_depth:
+            dirnames[:] = []
+        dirnames.sort()
+        if skip_darks:
+            dirnames[:] = [d for d in dirnames if not _is_dark_dir(d)]
+        h5s, frames = [], 0
+        for name in sorted(filenames):
+            if skip_darks and is_dark_like_name(name):
+                continue
+            suffix = Path(name).suffix.lower()
+            if suffix in H5_EXTS:
+                h5s.append(str(here / name))
+            elif suffix in _FRAME_SUFFIXES or suffix.startswith(".ge"):
+                frames += 1
+        found.extend((p, "hdf5") for p in h5s)
+        # A directory is a sample only on the strength of its own loose frame
+        # files — a parent that merely *contains* sample folders is not one.
+        if frames and not (skip_darks and _is_dark_dir(here.name)):
+            found.append((str(here), "folder"))
+    return found
+
+
+class AddSamplesDialog(QtWidgets.QDialog):
+    """Pick many Batch Queue samples at once — HDF5 files and frame folders.
+
+    A sample is one HDF5 container or one directory of frames, and a real
+    beamtime has both kinds scattered across several directories. Neither
+    existing browser can express that: ``BrowseFilesDialog``'s "Multiple
+    files" mode explicitly skips directories, and its "Full folder" mode
+    returns the *navigated-into* directory rather than a selection, so
+    folders can only ever be taken one at a time. Rather than thread a fifth
+    return shape through that class — four call sites depend on its current
+    four — this is its own dialog, sharing only the address-bar + tree idiom.
+
+    Three ways to add, because picking dozens of samples any one way is
+    tedious:
+
+    * select any mix of folders and HDF5 files in the tree (ctrl/shift-click
+      or rubber-band drag) and press **Add selected**;
+    * **Find samples below…**, which walks the current directory and adds
+      every HDF5 file and every frame-holding folder it finds;
+    * drag them in from Finder.
+
+    Picks accumulate in the staging list, so you can navigate elsewhere and
+    keep adding — the list, not the current directory, is the result.
+
+    The tree deliberately shows only directories and HDF5 files. A lone
+    ``.tif`` is not a sample (its *folder* is), and showing thousands of them
+    would bury the folders that are.
+    """
+
+    def __init__(self, parent=None, start_dir: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle("Add samples")
+        self.resize(900, 560)
+        self._current_dir = ""
+        self._entries: list = []      # [(path, kind)] in insertion order
+
+        layout = QtWidgets.QVBoxLayout(self)
+
+        addr_row = QtWidgets.QHBoxLayout(); addr_row.setSpacing(4)
+        up = QtWidgets.QToolButton(); up.setText("⬆"); up.setToolTip("Up one level")
+        up.clicked.connect(self._go_up)
+        self._path_ed = QtWidgets.QLineEdit()
+        self._path_ed.returnPressed.connect(
+            lambda: self._navigate(self._path_ed.text().strip()))
+        addr_row.addWidget(up)
+        addr_row.addWidget(self._path_ed, 1)
+        layout.addLayout(addr_row)
+
+        split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+
+        left = QtWidgets.QWidget()
+        lv = QtWidgets.QVBoxLayout(left)
+        lv.setContentsMargins(0, 0, 0, 0); lv.setSpacing(4)
+        self._model = QtWidgets.QFileSystemModel(self)
+        self._model.setRootPath("")
+        # Directories + HDF5 only (see the class docstring). QFileSystemModel
+        # never filters directories out by name filters, so this leaves every
+        # folder navigable while hiding the frame files inside them.
+        self._model.setNameFilters(sorted("*" + e for e in H5_EXTS))
+        self._model.setNameFilterDisables(False)
+        self._tree = QtWidgets.QTreeView()
+        self._tree.setModel(self._model)
+        self._tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self._tree.setSortingEnabled(True)
+        self._tree.sortByColumn(0, QtCore.Qt.AscendingOrder)
+        self._tree.setColumnWidth(0, self._tree.columnWidth(0) * 2)
+        self._tree.doubleClicked.connect(self._on_double_clicked)
+        self._tree.selectionModel().selectionChanged.connect(self._update_info)
+        lv.addWidget(self._tree, 1)
+        tree_btns = QtWidgets.QHBoxLayout(); tree_btns.setSpacing(4)
+        self._add_btn = QtWidgets.QPushButton("Add selected →")
+        self._add_btn.setToolTip(
+            "Add every selected folder and HDF5 file as a sample.\n"
+            "Ctrl/⌘-click, shift-click or drag a box to select several.")
+        self._add_btn.clicked.connect(self._add_selected)
+        self._scan_btn = QtWidgets.QPushButton("Find samples below…")
+        self._scan_btn.setToolTip(
+            "Walk this folder and add every HDF5 file and every folder that "
+            "directly holds frame files.\nDark-named files and folders are "
+            "skipped.")
+        self._scan_btn.clicked.connect(self._scan_below)
+        tree_btns.addWidget(self._add_btn); tree_btns.addWidget(self._scan_btn)
+        tree_btns.addStretch(1)
+        lv.addLayout(tree_btns)
+        split.addWidget(left)
+
+        right = QtWidgets.QWidget()
+        rv = QtWidgets.QVBoxLayout(right)
+        rv.setContentsMargins(0, 0, 0, 0); rv.setSpacing(4)
+        rv.addWidget(QtWidgets.QLabel("<b>Samples to add</b>"))
+        self._list = _SampleDropList(self)
+        self._list.pathsDropped.connect(self._add_paths)
+        self._list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self._list.setToolTip("Drag files or folders here from Finder, too.")
+        rv.addWidget(self._list, 1)
+        list_btns = QtWidgets.QHBoxLayout(); list_btns.setSpacing(4)
+        rm = QtWidgets.QPushButton("Remove"); rm.clicked.connect(self._remove_selected)
+        clear = QtWidgets.QPushButton("Clear"); clear.clicked.connect(self._clear)
+        list_btns.addWidget(rm); list_btns.addWidget(clear); list_btns.addStretch(1)
+        rv.addLayout(list_btns)
+        split.addWidget(right)
+        split.setSizes([520, 380])
+        layout.addWidget(split, 1)
+
+        self._info = QtWidgets.QLabel("")
+        self._info.setStyleSheet("color:#9a9a9a;font-size:10px")
+        self._info.setWordWrap(True)
+        layout.addWidget(self._info)
+
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        self._ok_btn = btns.button(QtWidgets.QDialogButtonBox.Ok)
+        self._ok_btn.setText("Add")
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+        self._navigate(start_dir or str(PROJECT_ROOT))
+        self._refresh()
+
+    # ── navigation ───────────────────────────────────────────────
+
+    def _navigate(self, path: str):
+        p = Path(path) if path else Path.home()
+        if not p.is_dir():
+            p = p.parent if p.exists() else Path.home()
+        self._current_dir = str(p)
+        self._path_ed.blockSignals(True)
+        self._path_ed.setText(self._current_dir)
+        self._path_ed.blockSignals(False)
+        self._tree.setRootIndex(self._model.index(self._current_dir))
+        self._update_info()
+
+    def _go_up(self):
+        d = QtCore.QDir(self._current_dir)
+        if d.cdUp():
+            self._navigate(d.absolutePath())
+
+    def _on_double_clicked(self, index):
+        if self._model.isDir(index):
+            self._navigate(self._model.filePath(index))
+
+    # ── adding ───────────────────────────────────────────────────
+
+    def _selected_paths(self) -> list:
+        sel = self._tree.selectionModel()
+        return [] if sel is None else [self._model.filePath(i) for i in sel.selectedRows()]
+
+    def _add_selected(self):
+        self._add_paths(self._selected_paths())
+
+    def _scan_below(self):
+        found = find_samples_below(self._current_dir)
+        if not found:
+            self._info.setText(f"No samples found below {self._current_dir}.")
+            return
+        self._add_entries(found)
+
+    def _add_paths(self, paths):
+        """Add arbitrary paths — from the tree, or dropped from Finder.
+
+        A dropped frame *file* is resolved to its containing folder, since
+        that folder is the sample. Anything unreadable is ignored rather than
+        erroring: a multi-item drop is all-or-nothing otherwise."""
+        entries = []
+        for raw in paths:
+            p = Path(str(raw))
+            if p.is_dir():
+                entries.append((str(p), "folder"))
+            elif p.suffix.lower() in H5_EXTS:
+                entries.append((str(p), "hdf5"))
+            elif p.is_file():
+                entries.append((str(p.parent), "folder"))
+        self._add_entries(entries)
+
+    def _add_entries(self, entries):
+        known = {path for path, _kind in self._entries}
+        added = 0
+        for path, kind in entries:
+            if path in known:
+                continue
+            known.add(path)
+            self._entries.append((path, kind))
+            added += 1
+        self._refresh()
+        if added:
+            self._info.setText(f"Added {added} sample(s).")
+        elif entries:
+            self._info.setText("Already in the list.")
+
+    def _remove_selected(self):
+        for item in self._list.selectedItems():
+            path = item.data(QtCore.Qt.UserRole)
+            self._entries = [e for e in self._entries if e[0] != path]
+        self._refresh()
+
+    def _clear(self):
+        self._entries = []
+        self._refresh()
+
+    # ── display ──────────────────────────────────────────────────
+
+    def _refresh(self):
+        self._list.clear()
+        for path, kind in self._entries:
+            if kind == "hdf5":
+                label = f"📄  {Path(path).name}"
+            else:
+                label = f"📁  {Path(path).name}    ({_folder_frame_count(path)} frames)"
+            item = QtWidgets.QListWidgetItem(label)
+            item.setData(QtCore.Qt.UserRole, path)
+            item.setToolTip(path)
+            self._list.addItem(item)
+        self._ok_btn.setEnabled(bool(self._entries))
+        self._update_info()
+
+    def _update_info(self, *_args):
+        n_sel = len(self._selected_paths())
+        self._info.setText(
+            f"{len(self._entries)} sample(s) staged"
+            + (f"; {n_sel} selected in the tree." if n_sel else "."))
+
+    # ── result ───────────────────────────────────────────────────
+
+    def samples(self) -> list:
+        """The staged picks as ``batch_queue.Sample`` objects, in the order
+        they were added. HDF5 samples get their frame dataset detected here,
+        once, rather than on every tree repaint."""
+        from midas_gui.batch_queue import KIND_HDF5, Sample, detect_dataset
+        out = []
+        for path, kind in self._entries:
+            dataset = detect_dataset(path) if kind == KIND_HDF5 else None
+            out.append(Sample(path=path, kind=kind, dataset=dataset))
+        return out
+
+
+class _SampleDropList(QtWidgets.QListWidget):
+    """The staging list, accepting files and folders dropped from Finder.
+
+    The app had no drag-and-drop anywhere before this, so there is no house
+    style to follow; this is the minimal ``text/uri-list`` handler. Local
+    files only — a dragged URL from a browser has no path to integrate."""
+
+    pathsDropped = QtCore.pyqtSignal(list)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+
+    @staticmethod
+    def _local_paths(event) -> list:
+        mime = event.mimeData()
+        if not mime.hasUrls():
+            return []
+        return [u.toLocalFile() for u in mime.urls() if u.isLocalFile()]
+
+    def dragEnterEvent(self, event):
+        if self._local_paths(event):
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if self._local_paths(event):
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        paths = self._local_paths(event)
+        if not paths:
+            super().dropEvent(event)
+            return
+        event.acceptProposedAction()
+        self.pathsDropped.emit(paths)
