@@ -1304,7 +1304,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         """Explain how the radial-integration plot's profile is computed."""
         QtWidgets.QMessageBox.information(
             self, "Radial integration — how it's calculated",
-            "The plot shows intensity vs. radius: the azimuthal (angular) average "
+            "The plot shows intensity vs. radius: the azimuthal (angular) mean "
             "of the image about the beam centre, grouped into rings of width "
             "\"R bin\".\n\n"
             "\"Accurate\" ticked: the full Batch-Integrate pipeline runs — the "
@@ -1327,7 +1327,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             "calibration card.")
 
     def radial_integrate(self):
-        """Azimuthal average of the current frame.
+        """Azimuthal mean of the current frame.
 
         Fast path (the default): the MIDAS engine with the hard-binning kernel
         when a calibration file is loaded or a tilt is dialled into the

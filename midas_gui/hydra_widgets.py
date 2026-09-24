@@ -132,7 +132,8 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
     path is entered for any *one* ge panel's field file and the other 3 are
     auto-discovered via ``helpers.hydra_siblings`` — exactly like
     ``HydraLoaderPanel``'s own main data path — then each panel's field is
-    averaged independently (``workers.FieldAverageWorker``, one per panel).
+    reduced to a mean independently (``workers.FieldAverageWorker``, one per
+    panel).
     """
     #: emitted whenever any panel's field finishes computing, or the
     #: checkbox is toggled (turning correction on/off is itself a change).
@@ -201,11 +202,11 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
 
         self._start = _NoScrollSpinBox(); self._start.setRange(0, 0); self._start.setFixedWidth(50)
         self._end = _NoScrollSpinBox(); self._end.setRange(0, 0); self._end.setFixedWidth(50)
-        self._end.setToolTip("Last frame index to average (inclusive), applied to every panel.")
+        self._end.setToolTip("Last frame index in the mean (inclusive), applied to every panel.")
         self._nfr_lbl = QtWidgets.QLabel("")
         self._nfr_lbl.setStyleSheet("color:#9a9a9a;font-size:10px")
         ir = QtWidgets.QHBoxLayout(); ir.setSpacing(4)
-        ir.addWidget(QtWidgets.QLabel("avg")); ir.addWidget(self._start)
+        ir.addWidget(QtWidgets.QLabel("mean")); ir.addWidget(self._start)
         ir.addWidget(QtWidgets.QLabel("–")); ir.addWidget(self._end)
         ir.addWidget(self._nfr_lbl)
         if with_mode:
@@ -303,7 +304,7 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
         panel's own folder starting with `stem` — sibling *folders* are
         discovered via `hydra_siblings` (needs a real existing path), then
         `folder*` is appended per panel; the resulting glob strings flow
-        through the existing folder-kind averaging unchanged."""
+        through the existing folder-kind frame mean unchanged."""
         if not folder or not stem:
             return
         self._path_ed.setText(str(Path(folder) / (stem + "*")))
@@ -380,7 +381,7 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
             return 0
 
     def _update_frame_limit(self, *_):
-        """Clamp the avg-range spinboxes to the (first found panel's) frame
+        """Clamp the mean-range spinboxes to the (first found panel's) frame
         count — every panel of a synchronized Hydra scan has the same
         number of frames, so one reference path is enough."""
         ref = next(iter(self._sibling_paths.values()), self._path_ed.text().strip())
@@ -632,7 +633,7 @@ class HydraLoaderPanel(QtWidgets.QWidget):
                 mask_card.body.addWidget(sel)
             lv.addWidget(mask_card)
 
-        # ── Projection (stack max/sum/average, all panels + composite) ──
+        # ── Projection (stack max/sum/mean, all panels + composite) ──
         # Built here (owns the projection logic/state) but NOT added to this
         # panel's own layout — HydraViewerPage places this card at the top
         # of the middle panel instead (see projection_card()), mirroring
@@ -641,7 +642,7 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         m_row = QtWidgets.QHBoxLayout(); m_row.setSpacing(8)
         m_row.addWidget(S.LabelRight("Method:"))
         self._proj_method = {}
-        for meth in ("max", "sum", "average"):
+        for meth in ("max", "sum", "mean"):
             rb = QtWidgets.QRadioButton(meth.capitalize()); m_row.addWidget(rb)
             self._proj_method[meth] = rb
         self._proj_method["max"].setChecked(True)
@@ -806,7 +807,7 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         if changed:
             self.frameChanged.emit(i)
 
-    # ── Projection (stack max/sum/average, all panels + composite) ─
+    # ── Projection (stack max/sum/mean, all panels + composite) ─
 
     def _apply_project_style(self, active: bool):
         """Green highlight on "Project stack" while a projection is being

@@ -656,7 +656,7 @@ def source_kind(path) -> str:
     "file" — the ``kind`` argument ``average_field``/``FieldAverageWorker``
     need to know how to read it. An explicit ``list[str]`` of paths (an
     arbitrary multi-file selection) is treated as "folder" too — both are
-    "a set of single-frame files to average/stack over"."""
+    "a set of single-frame files to take the mean of / stack over"."""
     if isinstance(path, list):
         return "folder"
     if Path(path).is_dir() or any(c in path for c in "*?"):
@@ -668,12 +668,12 @@ def source_kind(path) -> str:
 
 def average_field(kind: str, path: str, dataset: str = "exchange/data",
                   idx_start: int = 0, idx_end: int = -1) -> np.ndarray:
-    """Build a single 2-D field by averaging over an index range.
+    """Build a single 2-D field as the mean over an index range.
 
     kind:
-      "file"   — a single image file; if it holds a 3-D stack, average [start..end].
-      "folder" — a folder or *.tif glob; average frames [start..end] across files.
-      "hdf5"   — average dataset[start..end+1] if 3-D, else the 2-D dataset.
+      "file"   — a single image file; if it holds a 3-D stack, mean [start..end].
+      "folder" — a folder or *.tif glob; mean frames [start..end] across files.
+      "hdf5"   — mean dataset[start..end+1] if 3-D, else the 2-D dataset.
 
     idx_end = -1 means "through the last frame" (inclusive).
     """

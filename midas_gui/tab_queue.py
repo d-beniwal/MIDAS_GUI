@@ -102,7 +102,7 @@ class CorrectionsDialog(QtWidgets.QDialog):
             h = QtWidgets.QHBoxLayout(row)
             h.setContentsMargins(0, 0, 0, 0); h.setSpacing(4)
             ed = QtWidgets.QLineEdit(getattr(node, key) or "")
-            ed.setPlaceholderText("file or folder — averaged before use")
+            ed.setPlaceholderText("file or folder — mean taken before use")
             warn_if_path_missing(ed, self)
             btn = QtWidgets.QToolButton(); btn.setText("…")
             btn.clicked.connect(lambda _c=False, e=ed: self._browse(e))
@@ -459,7 +459,7 @@ class BatchQueueTab(QtWidgets.QWidget):
         # HDF5 holding a scan of distinct points). 0 (combine the whole file
         # into one) is for a detector writing several raw exposures per scan
         # point, and must be chosen deliberately: left at 0 by default, an
-        # HDF5 holding N distinct scan points was silently averaged into ONE
+        # HDF5 holding N distinct scan points was silently reduced to ONE mean
         # profile — ten frames in, one CSV out, no error.
         self._combine_chunk = _NoScrollSpinBox()
         self._combine_chunk.setRange(0, 999999)
@@ -478,7 +478,7 @@ class BatchQueueTab(QtWidgets.QWidget):
         form.row(("Combine sub-frames:", self._combine_chunk), ("op:", self._combine_op))
         self._fmt = OutputFormatSelector()
         integ.body.addWidget(self._fmt)
-        self._weighted = QtWidgets.QCheckBox("Azimuthal averaging (weighted)")
+        self._weighted = QtWidgets.QCheckBox("Azimuthal mean (weighted)")
         self._weighted.setChecked(True)
         integ.body.addWidget(self._weighted)
         rv.addWidget(integ)

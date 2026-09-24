@@ -416,16 +416,16 @@ class CalibrationTab(QtWidgets.QWidget):
         self._thr_max.valueChanged.connect(self._on_threshold_changed)
         lv.addWidget(thr)
 
-        # ── Average frames (hdf5 / folder) ──
+        # ── Mean of frames (hdf5 / folder) ──
         # Checkable QGroupBox (like "Multi-panel detector" below): the on/off
         # toggle lives in the heading itself rather than a separate checkbox
         # in the body. `_avg_check` is the groupbox itself — it already has
         # isChecked()/setChecked()/toggled, so every existing caller (state
         # save/restore included, see helpers.widgets_to_dict) works unchanged.
-        avgc = QtWidgets.QGroupBox("Average frames in single image")
+        avgc = QtWidgets.QGroupBox("Mean of frames in single image")
         avgc.setCheckable(True); avgc.setChecked(False)
         avgc.setToolTip(
-            "Average a range of frames into one image used for calibration. "
+            "Take the mean of a range of frames into one image used for calibration. "
             "Requires a multi-frame source.")
         avgc_body = QtWidgets.QVBoxLayout(avgc)
         avgc_body.setContentsMargins(8, 6, 8, 6); avgc_body.setSpacing(5)
@@ -1120,10 +1120,10 @@ class CalibrationTab(QtWidgets.QWidget):
             return out
         return self._image
 
-    # ── Average frames ────────────────────────────────────────────
+    # ── Mean of frames ────────────────────────────────────────────
 
     def _source_image(self):
-        """Base image for calibration: averaged frames if enabled, else current.
+        """Base image for calibration: the frame mean if enabled, else current.
 
         Deliberately raw (uncorrected, untransformed) — this feeds both the
         on-screen preview (via ``_show_calib_image``, which applies dark/
@@ -1133,14 +1133,14 @@ class CalibrationTab(QtWidgets.QWidget):
         internally. Pre-correcting here would double-apply them for the real
         run."""
         if self._avg_check.isChecked() and self._loader.n_frames() > 1:
-            avg = self._loader.average_frames(
+            mean = self._loader.mean_frames(
                 self._avg_start.value(), self._avg_end.value())
-            if avg is not None:
-                return avg
+            if mean is not None:
+                return mean
         return self._loader.current_frame()
 
     def _sync_avg_controls(self):
-        """Enable/disable the averaging card and clamp spin ranges to the source."""
+        """Enable/disable the frame-mean card and clamp spin ranges to the source."""
         n = self._loader.n_frames()
         multi = n > 1
         self._avg_card.setEnabled(multi)
@@ -1155,13 +1155,13 @@ class CalibrationTab(QtWidgets.QWidget):
     def _update_avg_note(self):
         n = self._loader.n_frames()
         if n <= 1:
-            self._avg_note.setText("Single-frame source — averaging unavailable.")
+            self._avg_note.setText("Single-frame source — frame mean unavailable.")
             return
         start = self._avg_start.value()
         end = self._avg_end.value() or n
         end = min(end, n)
         cnt = len(range(max(0, start), end))
-        self._avg_note.setText(f"{cnt} of {n} frames averaged (start={start}, "
+        self._avg_note.setText(f"mean of {cnt} of {n} frames (start={start}, "
                                f"end={end}).")
 
     def _on_avg_toggled(self, on):

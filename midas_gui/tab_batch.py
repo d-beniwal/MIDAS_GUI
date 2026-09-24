@@ -98,7 +98,7 @@ class _AzimuthalBinsDialog(QtWidgets.QDialog):
         v = QtWidgets.QVBoxLayout(self)
         note = QtWidgets.QLabel(
             "η bin controls how the 2-D (η, R) cake is collapsed to a 1-D "
-            "profile (see Azim. avg) and, when Multi-azimuth output is on, "
+            "profile (see Azim. mean) and, when Multi-azimuth output is on, "
             "defines the output sectors themselves.")
         note.setWordWrap(True)
         note.setStyleSheet(f"color:{S.MUTED};font-size:10px;padding-bottom:4px")
@@ -568,7 +568,7 @@ class BatchTab(QtWidgets.QWidget):
 
     @staticmethod
     def _collapse_cakes(cakes):
-        """``(n_frames, n_eta, n_r)`` → ``(n_frames, n_r)``, averaging each
+        """``(n_frames, n_eta, n_r)`` → ``(n_frames, n_r)``, taking the mean of
         frame's filled η bins.
 
         The run's *own* collapsed profile is not stored (multi-azimuth mode
@@ -720,7 +720,7 @@ class BatchTab(QtWidgets.QWidget):
             return lbl
 
         # One Form for every label:value row in this card (Kernel through
-        # Azim. avg) — a QGridLayout sizes its label column to the widest
+        # Azim. mean) — a QGridLayout sizes its label column to the widest
         # label added to THAT SAME instance, so splitting R/Q/Eta into
         # separate Form()s (as an earlier pass did) left each section's
         # entry cells starting at a slightly different x depending on its
@@ -745,7 +745,7 @@ class BatchTab(QtWidgets.QWidget):
         #              OUTPUT (see _run()'s "Always R-uniform..." comment) —
         #              not an independent axis.
         #   AZIMUTHAL: η bin/η min/η max live behind "Azimuthal bins…".
-        #              Azim. avg (how η is collapsed to 1-D) and
+        #              Azim. mean (how η is collapsed to 1-D) and
         #              Multi-azimuth output (whether it's collapsed at all)
         #              stay inline — both are about the same η axis. Maps to
         #              a cake_parameters CSV's
@@ -821,13 +821,13 @@ class BatchTab(QtWidgets.QWidget):
             "  coverage / off-detector beam centres and independent of η-bin size.\n"
             "• η-bin mean — unweighted mean of the per-η-bin means (can distort the\n"
             "  profile with a coarse η bin when the beam centre is off the detector).")
-        pf.row(("Azim. avg:", self._azim))
+        pf.row(("Azim. mean:", self._azim))
         integ.body.addLayout(pf)
 
         self._multi_azimuth_chk = QtWidgets.QCheckBox("Multi-azimuth output (cake)")
         self._multi_azimuth_chk.setToolTip(
             "Keep every azimuthal (η) sector as a SEPARATE output profile "
-            "instead of collapsing to one full-circle-averaged profile per "
+            "instead of collapsing to one full-circle mean profile per "
             "frame. Reuses the η bin/η range above to define the sectors.\n\n"
             "Off by default — η bin already defaults to 5° over the full "
             "360° (72 internal bins) purely to control collapse-weighting "
@@ -840,7 +840,7 @@ class BatchTab(QtWidgets.QWidget):
             "it unchecked — that just collapses the sectors to one trivial "
             "360°-wide sector, still written as a (1-row) cake instead of a "
             "plain profile, and HDF5 output is still skipped. For a real "
-            "azimuthally-averaged profile, leave this box unchecked.")
+            "azimuthal-mean profile, leave this box unchecked.")
         integ.body.addWidget(self._multi_azimuth_chk)
 
         self._var_check = QtWidgets.QCheckBox("Per-bin variance (σ)")

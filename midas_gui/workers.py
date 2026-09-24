@@ -404,11 +404,11 @@ def write_frame_profiles(base, file_fmts, r_px, prof, sigma, lsd, px, wl,
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  Dark / bright / background field averaging
+#  Dark / bright / background field mean
 # ═════════════════════════════════════════════════════════════════════════════
 
 class FieldAverageWorker(QtCore.QThread):
-    """Average a dark/bright/background field off the GUI thread.
+    """Reduce a dark/bright/background field to its mean off the GUI thread.
 
     kind ∈ {"file","folder","hdf5"}; index range is inclusive (end=-1 → last).
     """
@@ -662,7 +662,7 @@ class MaskComputeWorker(QtCore.QThread):
 # ═════════════════════════════════════════════════════════════════════════════
 
 class ProjectionWorker(QtCore.QThread):
-    """Load a frame stack and reduce it (max/sum/average) off the GUI thread.
+    """Load a frame stack and reduce it (max/sum/mean) off the GUI thread.
 
     Loading a multi-GB stack + the reduction can take seconds-to-minutes; doing it
     here keeps the Data Viewer responsive. Field corrections (dark/bright/background)
@@ -692,7 +692,10 @@ class ProjectionWorker(QtCore.QThread):
             if self._nframes and self._nframes > 0:
                 data = data[:self._nframes]
             n_used = data.shape[self._axis]
-            fn = {"max": np.max, "sum": np.sum, "average": np.mean}[self._method]
+            # "average" kept as an alias so an older caller's method string
+            # still resolves; the UI only ever sends "mean".
+            fn = {"max": np.max, "sum": np.sum,
+                  "mean": np.mean, "average": np.mean}[self._method]
             proj = np.squeeze(fn(data, axis=self._axis))
             if proj.ndim != 2:
                 raise ValueError(f"Result is {proj.ndim}-D after projecting axis "
@@ -1616,7 +1619,7 @@ class PumpProbeWorker(QtCore.QThread):
 
     @staticmethod
     def _group_and_difference(profiles, delays, ref_delays):
-        """Average repeats per delay → I_by_delay; subtract the reference (mean over
+        """Take the mean of repeats per delay → I_by_delay; subtract the reference (mean over
         ``ref_delays`` if given, else all negative delays, else the earliest delay)
         → ΔI(q, delay). Returns a dict of stacked arrays keyed by delay order."""
         uniq = sorted(set(delays.tolist()))
@@ -1853,7 +1856,7 @@ class _HDF5StackGlobSource:
         return out
 
     def metadata_for_index(self, idx: int) -> dict:
-        """Chunk-averaged metadata (Temperature/Pressure/StorageRing current)
+        """Chunk-mean metadata (Temperature/Pressure/StorageRing current)
         for combined frame ``idx``, in the same flattened index space as
         ``get(idx)``/``__iter__``.
 
