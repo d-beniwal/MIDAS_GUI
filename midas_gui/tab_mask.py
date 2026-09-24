@@ -55,6 +55,11 @@ class MaskTab(QtWidgets.QWidget):
         self._registry = None            # DataSourceRegistry, set by bind_registry()
         self._stack_snapshot_file = None  # temp .h5 from importing another tab's buffer
         self._stack_files: Optional[list] = None  # explicit multi-select stack files, or None
+        # Multi-frame Image source (folder of frames / multi-page TIFF / 3-D HDF5
+        # dataset / multi-frame .geN): None means the Image field is a plain 2-D
+        # single image. See ``_detect_multiframe``/``_get_frame_array``.
+        self._img_frames: Optional[dict] = None
+        self._img_frame_idx: int = 0
         self._project_ctx = None
         self._build_ui()
         if Path(self._img_edit.text().strip() or "x").exists():
@@ -74,6 +79,10 @@ class MaskTab(QtWidgets.QWidget):
         raw = self._img_edit.text().strip()
         if not raw:
             return None
+        if self._img_frames is not None and self._img_frames["kind"] == "files":
+            # A folder isn't itself loadable elsewhere — hand over the
+            # specific frame file currently shown instead.
+            raw = self._img_frames["paths"][self._img_frame_idx]
         return {"kind": "path", "path": raw,
                 "dataset": self._h5loc_edit.currentText().strip() if is_h5(raw) else None,
                 "field": "data", "label": "Mask Builder"}
@@ -115,6 +124,7 @@ class MaskTab(QtWidgets.QWidget):
         _img_browse.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         self._img_menu = QtWidgets.QMenu(_img_browse)
         self._img_menu.addAction("File…", self._browse_img)
+        self._img_menu.addAction("Folder…", self._browse_img_folder)
         self._img_menu.addSeparator()
         self._img_import_menu = self._img_menu.addMenu("Import from…")
         self._img_import_menu.aboutToShow.connect(self._populate_mask_image_import_menu)
@@ -129,6 +139,27 @@ class MaskTab(QtWidgets.QWidget):
         ds = QtWidgets.QHBoxLayout(); ds.setSpacing(4)
         ds.addWidget(self._h5loc_lbl); ds.addWidget(self._h5loc_edit, 1)
         img.body.addLayout(ds)
+        # Frame navigator — shown only when the Image field resolves to more
+        # than one frame (a folder of files, a multi-page TIFF, a 3-D HDF5
+        # dataset, or a multi-frame .geN file).
+        self._frame_nav_row = QtWidgets.QWidget()
+        fnl = QtWidgets.QHBoxLayout(self._frame_nav_row)
+        fnl.setContentsMargins(0, 0, 0, 0); fnl.setSpacing(4)
+        fnl.addWidget(QtWidgets.QLabel("Frame:"))
+        self._frame_prev_btn = QtWidgets.QPushButton("◀"); self._frame_prev_btn.setFixedWidth(28)
+        self._frame_prev_btn.clicked.connect(lambda: self._frame_spin.stepBy(-1))
+        fnl.addWidget(self._frame_prev_btn)
+        self._frame_spin = _NoScrollSpinBox(); self._frame_spin.setRange(1, 1)
+        self._frame_spin.valueChanged.connect(self._on_frame_spin_changed)
+        fnl.addWidget(self._frame_spin)
+        self._frame_count_lbl = QtWidgets.QLabel("/ 1")
+        fnl.addWidget(self._frame_count_lbl)
+        self._frame_next_btn = QtWidgets.QPushButton("▶"); self._frame_next_btn.setFixedWidth(28)
+        self._frame_next_btn.clicked.connect(lambda: self._frame_spin.stepBy(1))
+        fnl.addWidget(self._frame_next_btn)
+        fnl.addStretch(1)
+        self._frame_nav_row.setVisible(False)
+        img.body.addWidget(self._frame_nav_row)
         self._img_edit.textChanged.connect(self._on_img_path_changed)
         self._img_edit.returnPressed.connect(self._load_image)
         self._h5loc_edit.currentIndexChanged.connect(
@@ -144,6 +175,15 @@ class MaskTab(QtWidgets.QWidget):
         self._upper = _fspin(0, 5e9, 0, 1_048_575)
         self._upper.setToolTip("Pixels > this value are masked. Auto-filled from dtype on load.")
         thr.body.addLayout(S.Form().row(("pixel ≤", self._lower), ("pixel >", self._upper)))
+        self._thresh_proj_combo = _NoScrollComboBox()
+        self._thresh_proj_combo.addItems(["Current frame", "Average", "Sum", "Max"])
+        self._thresh_proj_combo.setEnabled(False)
+        self._thresh_proj_combo.setToolTip(
+            "When the Image above is a folder or a multi-frame file, build the\n"
+            "threshold mask from a projection across every frame instead of only\n"
+            "the frame shown by the Frame navigator. 'Current frame' (the only\n"
+            "choice for a plain single image) uses just that one frame.")
+        thr.body.addLayout(S.Form().row(("Projection:", self._thresh_proj_combo)))
         lv.addWidget(thr)
 
         # ── 2 · Statistical auto-mask (spatial + temporal, independent) ──
@@ -399,6 +439,11 @@ class MaskTab(QtWidgets.QWidget):
                     start_dir=browse_start_dir(self._img_edit.text()))
         if p: self._img_edit.setText(p); self._load_image()
 
+    def _browse_img_folder(self):
+        d = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Select image folder", browse_start_dir(self._img_edit.text()))
+        if d: self._img_edit.setText(d); self._load_image()
+
     def _browse_save(self):
         p, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, "Save Mask", self._save_edit.text().strip() or "mask.tif",
@@ -549,21 +594,168 @@ class MaskTab(QtWidgets.QWidget):
         if not path or not Path(path).exists():
             QtWidgets.QMessageBox.warning(self, "Error", "File not found."); return
         try:
-            data_loc = self._h5loc_edit.currentText().split("   ")[0].strip() or "exchange/data"
-            import tifffile
-            raw = tifffile.imread(path) if Path(path).suffix.lower() in (".tif", ".tiff") \
-                  else _load_image(path, data_loc=data_loc)
-            self._orig_dtype = raw.dtype
-            self._image = raw.astype(np.float32)
-            sentinel = _SENTINELS.get(np.dtype(raw.dtype).name)
-            if sentinel is not None:
-                self._upper.setValue(float(sentinel))
-            self._viewer.set_image(self._image)
-            self._stat_lbl.setText(
-                f"Loaded: {self._image.shape[1]}×{self._image.shape[0]}  dtype={raw.dtype}  "
-                f"range [{raw.min():.0f}, {raw.max():.0f}]")
+            if Path(path).is_dir():
+                self._load_image_folder(path)
+            else:
+                self._load_image_file(path)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Load error", str(e))
+
+    def _load_image_folder(self, folder: str):
+        """A folder of single-frame files — one frame per file, ordered like
+        the section-2 Stack folder loader."""
+        paths = []
+        for ext in ("*.tif", "*.tiff", "*.h5", "*.hdf5", "*.ge*"):
+            paths.extend(sorted(Path(folder).glob(ext)))
+        paths = [str(p) for p in paths]
+        if not paths:
+            raise ValueError(
+                "No image files (*.tif/*.tiff/*.h5/*.hdf5/*.ge*) found in folder.")
+        self._img_frames = {"kind": "files", "paths": paths, "n": len(paths)}
+        self._update_frame_nav(len(paths))
+        self._load_frame(0)
+
+    def _load_image_file(self, path: str):
+        data_loc = self._h5loc_edit.currentText().split("   ")[0].strip() or "exchange/data"
+        kind, n, extra = self._detect_multiframe(path, data_loc)
+        if kind is not None and n > 1:
+            if kind == "array_tiff":
+                import tifffile
+                self._img_frames = {"kind": "array", "data": np.asarray(tifffile.imread(path)), "n": n}
+            elif kind == "h5":
+                self._img_frames = {"kind": "h5", "path": path, "dataset": extra, "n": n}
+            elif kind == "ge":
+                self._img_frames = {"kind": "ge", "path": path, "n": n}
+            self._update_frame_nav(n)
+            self._load_frame(0)
+            return
+        self._img_frames = None
+        self._update_frame_nav(1)
+        import tifffile
+        raw = tifffile.imread(path) if Path(path).suffix.lower() in (".tif", ".tiff") \
+              else _load_image(path, data_loc=data_loc)
+        self._set_loaded_image(raw)
+
+    def _detect_multiframe(self, path: str, h5_dataset: Optional[str] = None):
+        """Return ``(kind, n, extra)`` for a single file that holds more than
+        one frame — a multi-page TIFF, a 3-D HDF5 dataset, or a multi-frame
+        raw ``.geN`` file — or ``(None, 1, None)`` for a plain 2-D image.
+        Only peeks at shape/page-count/file-size, never loads pixel data."""
+        ext = Path(path).suffix.lower()
+        if ext in (".tif", ".tiff"):
+            import tifffile
+            # tifffile may pack a small (N, H, W) stack into a single strip
+            # under ONE page — len(tf.pages) then reports 1 even for N>1 — so
+            # the series shape (metadata only, no pixel data read) is the
+            # reliable frame count, not the page count.
+            with tifffile.TiffFile(path) as tf:
+                shape = tf.series[0].shape if tf.series else tf.pages[0].shape
+            return ("array_tiff", int(shape[0]), None) if len(shape) >= 3 else (None, 1, None)
+        if is_h5(path):
+            import h5py
+            dloc = h5_dataset or "exchange/data"
+            try:
+                with h5py.File(path, "r") as f:
+                    if dloc not in f:
+                        return (None, 1, None)
+                    ndim, shape0 = f[dloc].ndim, f[dloc].shape[0]
+            except Exception:
+                return (None, 1, None)
+            return ("h5", int(shape0), dloc) if ndim >= 3 else (None, 1, None)
+        if ".ge" in Path(path).name.lower():
+            n_bytes = Path(path).stat().st_size - 8192
+            if n_bytes <= 0:
+                return (None, 1, None)
+            n_pixels = n_bytes // 2   # uint16
+            for side in (2048, 4096, 1024, 512):
+                if n_pixels >= side * side and n_pixels % (side * side) == 0:
+                    return ("ge", n_pixels // (side * side), None)
+            return (None, 1, None)
+        return (None, 1, None)
+
+    def _get_frame_array(self, idx: int) -> np.ndarray:
+        """The raw (pre-``astype(float32)``-in-``_set_loaded_image``) 2-D
+        array for frame ``idx`` of the current multi-frame Image source."""
+        meta = self._img_frames
+        kind = meta["kind"]
+        if kind == "files":
+            return _load_image(meta["paths"][idx])
+        if kind == "array":
+            return meta["data"][idx]
+        if kind == "h5":
+            return _load_image(meta["path"], data_loc=meta["dataset"], frame=idx)
+        if kind == "ge":
+            return _load_image(meta["path"], frame=idx)
+        raise ValueError(f"unknown frame source kind {kind!r}")
+
+    def _update_frame_nav(self, n: int):
+        multi = n > 1
+        self._frame_nav_row.setVisible(multi)
+        self._frame_prev_btn.setEnabled(multi)
+        self._frame_next_btn.setEnabled(multi)
+        self._frame_spin.blockSignals(True)
+        self._frame_spin.setRange(1, max(1, n))
+        self._frame_spin.setValue(1)
+        self._frame_spin.blockSignals(False)
+        self._frame_count_lbl.setText(f"/ {n}")
+        # Projection only means something across >1 frame — otherwise force
+        # (and lock) "Current frame" so the threshold step is unambiguous.
+        self._thresh_proj_combo.setEnabled(multi)
+        if not multi:
+            self._thresh_proj_combo.setCurrentText("Current frame")
+
+    def _on_frame_spin_changed(self, val: int):
+        if self._img_frames is None:
+            return
+        self._load_frame(val - 1)
+
+    def _load_frame(self, idx: int):
+        if self._img_frames is None:
+            return
+        n = self._img_frames["n"]
+        idx = max(0, min(idx, n - 1))
+        self._img_frame_idx = idx
+        raw = self._get_frame_array(idx)
+        self._frame_spin.blockSignals(True)
+        self._frame_spin.setValue(idx + 1)
+        self._frame_spin.blockSignals(False)
+        self._set_loaded_image(raw)
+
+    def _set_loaded_image(self, raw: np.ndarray):
+        self._orig_dtype = raw.dtype
+        self._image = raw.astype(np.float32)
+        sentinel = _SENTINELS.get(np.dtype(raw.dtype).name)
+        if sentinel is not None:
+            self._upper.setValue(float(sentinel))
+        self._viewer.set_image(self._image)
+        n = self._img_frames["n"] if self._img_frames is not None else 1
+        frame_info = f"  frame {self._img_frame_idx + 1}/{n}" if n > 1 else ""
+        self._stat_lbl.setText(
+            f"Loaded: {self._image.shape[1]}×{self._image.shape[0]}  dtype={raw.dtype}  "
+            f"range [{raw.min():.0f}, {raw.max():.0f}]{frame_info}")
+
+    def _threshold_source_image(self) -> np.ndarray:
+        """The 2-D image the threshold step (section 1) is computed against:
+        a projection across every frame of the Image source when a folder/
+        multi-frame source is loaded AND a projection is selected, otherwise
+        just the currently-displayed frame (``self._image``)."""
+        proj = self._thresh_proj_combo.currentText()
+        if self._img_frames is None or proj == "Current frame" or self._img_frames["n"] <= 1:
+            return self._image
+        n = self._img_frames["n"]
+        self._stat_prog.setText(f"Building {proj.lower()} projection across {n} frames…")
+        QtWidgets.QApplication.processEvents()
+        if proj == "Max":
+            acc = np.asarray(self._get_frame_array(0), dtype=np.float32).copy()
+            for i in range(1, n):
+                np.maximum(acc, self._get_frame_array(i), out=acc)
+            return acc
+        acc = np.zeros(self._image.shape, dtype=np.float64)
+        for i in range(n):
+            acc += self._get_frame_array(i)
+        if proj == "Average":
+            acc /= n
+        return acc.astype(np.float32)
 
     def _on_show_overlay(self, visible: bool):
         self._viewer.set_overlay_visible(visible)
@@ -574,12 +766,12 @@ class MaskTab(QtWidgets.QWidget):
         if self._mask_worker and self._mask_worker.isRunning():
             return
         lower = self._lower.value(); upper = self._upper.value()
-        img = self._image
-        thresh_mask = np.zeros(img.shape, dtype=np.uint8)
+        thresh_img = self._threshold_source_image()
+        thresh_mask = np.zeros(thresh_img.shape, dtype=np.uint8)
         if lower > -1e9:
-            thresh_mask |= (img <= lower).astype(np.uint8)
+            thresh_mask |= (thresh_img <= lower).astype(np.uint8)
         if upper > 0:
-            thresh_mask |= (img > upper).astype(np.uint8)
+            thresh_mask |= (thresh_img > upper).astype(np.uint8)
         self._thresh_mask = thresh_mask
 
         methods = {}
@@ -993,6 +1185,7 @@ class MaskTab(QtWidgets.QWidget):
             "path": self._img_edit.text().strip() or None,
             "h5_dataset": self._h5loc_edit.currentText().strip() if is_h5(self._img_edit.text().strip()) else None,
             "stack_files": self._stack_files,
+            "img_frame_idx": self._img_frame_idx if self._img_frames is not None else None,
         }
         try:
             ref = project.append_mask_attempt(
@@ -1016,6 +1209,9 @@ class MaskTab(QtWidgets.QWidget):
         if img_path and Path(img_path).exists():
             self._img_edit.setText(img_path)
             self._load_image()
+            frame_idx = loader_state.get("img_frame_idx")
+            if frame_idx is not None and self._img_frames is not None:
+                self._load_frame(int(frame_idx))
         apply_dict_to_widgets(self._state_widgets(), fields)
         self._stack_files = list(loader_state.get("stack_files") or []) or None
         if mask_array is not None:
@@ -1048,6 +1244,7 @@ class MaskTab(QtWidgets.QWidget):
             "h5_dataset": self._h5loc_edit,
             "lower": self._lower,
             "upper": self._upper,
+            "thresh_proj_combo": self._thresh_proj_combo,
             "spatial_check": self._spatial_check,
             "temporal_check": self._temporal_check,
             "k_sigma": self._k_sigma,
@@ -1083,6 +1280,8 @@ class MaskTab(QtWidgets.QWidget):
                   "viewer": self._viewer.display_state()}
         if self._stack_files:
             state["stack_files"] = self._stack_files
+        if self._img_frames is not None:
+            state["img_frame_idx"] = self._img_frame_idx
         if self._mask is not None and sidecar_stem:
             try:
                 import tifffile
@@ -1101,6 +1300,9 @@ class MaskTab(QtWidgets.QWidget):
             self._img_edit.setText(img_path)
             if Path(img_path).exists():
                 self._load_image()
+                frame_idx = state.get("img_frame_idx")
+                if frame_idx is not None and self._img_frames is not None:
+                    self._load_frame(int(frame_idx))
         apply_dict_to_widgets(self._state_widgets(), fields)
         self._viewer.set_display_state(state.get("viewer"))
         self._stack_files = list(state["stack_files"]) if state.get("stack_files") else None
