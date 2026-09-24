@@ -97,6 +97,9 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._origin_btn = OriginToolButton(self._det_view)
         self._det_view._toolbar_layout.addWidget(self._origin_btn)
         self._bin_overlay_items: list = []
+        # (panel, shape, im_trans) the shared Detector view is framed for —
+        # see _refresh_active_detector_preview.
+        self._det_view_framed_for = None
         self._build_ui()
         self._on_panel_changed(self._toolbar.current())
 
@@ -408,8 +411,17 @@ class HydraBatchPage(QtWidgets.QWidget):
         if path is not None:
             try:
                 frame = _load_image(path, self._loader.dataset(), self._loader.frame_index())
+                # Only re-frame when the picture itself changes (panel switch,
+                # detector size, transform) — not on every Rmin/Rmax/bin or
+                # Show-bin-grid toggle, all of which route through here and
+                # would otherwise autoRange() the user's pan/zoom away. Same
+                # fix as the single-detector Batch Integrate tab.
+                codes = tuple(card.resolved_im_trans() or ())
+                framed_for = (n, tuple(frame.shape), codes)
+                fresh = framed_for != self._det_view_framed_for
                 self._det_view.set_raw_frame(frame, card.resolved_im_trans(),
-                                              autorange=True, reset_levels=True)
+                                              autorange=fresh, reset_levels=fresh)
+                self._det_view_framed_for = framed_for
             except Exception:
                 pass
         fields, _ = card._calib_fields_in_use()

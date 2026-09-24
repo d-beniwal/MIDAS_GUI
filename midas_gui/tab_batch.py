@@ -130,6 +130,10 @@ class BatchTab(QtWidgets.QWidget):
         self._axis_items: list = []          # Lab-frame axes overlay on _det_view
         self._last_shape_mismatch_logged: Optional[tuple] = None
         self._last_calib_fail_note: Optional[str] = None
+        # (shape, im_trans) the Detector view is currently framed for — see
+        # _refresh_detector_preview for why the view is only re-framed when
+        # this changes.
+        self._det_view_framed_for: Optional[tuple] = None
         # Built lazily on first switch to Hydra mode: it owns 8 pyqtgraph
         # widgets (4 WaterfallViewer + 4 StackedProfileViewer), and most
         # sessions never touch Hydra Batch Integrate — see .context/DECISIONS.md's
@@ -257,8 +261,22 @@ class BatchTab(QtWidgets.QWidget):
             # see widgets.ImageViewer.set_raw_frame for why every such
             # display goes through that one function instead of each call
             # site flip-then-set_image-ing on its own.
+            # Re-frame the view (and re-level) only when the displayed image
+            # is genuinely different. Every Rmin/Rmax/R-bin/η-bin/Show-bin-grid
+            # control routes through this same refresh, and autoRange() throws
+            # away whatever pan/zoom the user had set — ticking "Show bin grid"
+            # on a zoomed-out view snapped it back to a tight fit, which reads
+            # as the overlay having zoomed the image in. reset_levels would
+            # likewise discard a manual colour-scale window. The Data Viewer
+            # and Calibrate tab already pass autorange=False for refreshes
+            # that aren't new data; this is the same rule, keyed on what
+            # actually changes the picture's extent.
+            codes = tuple((fields or {}).get("im_trans") or ())
+            framed_for = (tuple(frame.shape), codes)
+            fresh = framed_for != self._det_view_framed_for
             self._det_view.set_raw_frame(frame, (fields or {}).get("im_trans"),
-                                          autorange=True, reset_levels=True)
+                                          autorange=fresh, reset_levels=fresh)
+            self._det_view_framed_for = framed_for
         if not fields or fields.get("BC_y") is None or fields.get("NrPixelsY") is None:
             # No visible sign otherwise that the overlay silently isn't being
             # drawn (e.g. "From file" pointing at a saved *project* .json
