@@ -1267,7 +1267,19 @@ class BatchWorker(QtCore.QThread):
                 from midas_integrate_v2.io.zarr_gsas import write_gsas_zarr_zip
                 zarr_dir = self._out_dir / "zarr"
                 zarr_dir.mkdir(parents=True, exist_ok=True)
-                zarr_bin_area = count_cake(geom, self._kernel, spec.NrPixelsZ, spec.NrPixelsY)
+                # /REtaMap row 3 is documented as the per-bin summed area
+                # weight, "a property of the geometry alone" — so it has to be
+                # the plain-kernel pixel-area count even on the corrections
+                # path, where ctx["geom"] is deliberately None.  corr_counts is
+                # not a substitute: it is normalised through the soft-bin kernel
+                # and folds in the polarization / solid-angle factors, neither
+                # of which belongs in an area.  Build a geometry here purely for
+                # the count, so a Zarr written with corrections on carries the
+                # same BinArea as one written with them off.
+                zarr_geom = (geom if geom is not None
+                             else build_geom(spec, self._kernel, mask))
+                zarr_bin_area = count_cake(zarr_geom, self._kernel,
+                                           spec.NrPixelsZ, spec.NrPixelsY)
                 zarr_prov_entry = provenance.build_entry(
                     'midas_gui.batch_integrate',
                     inputs=[self._src.get('path')] if self._src.get('path') else [],
