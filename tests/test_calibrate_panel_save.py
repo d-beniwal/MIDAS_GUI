@@ -268,7 +268,7 @@ def test_crystalline_at_limit_flags_a_fit_stopped_by_its_window(app):
 
 
 def test_default_save_stem_joins_expid_and_calibration_image(app, tmp_path):
-    """The user's own convention: <expid>_<image name>.instru.txt/.json, so a
+    """The user's own convention: <expid>_<image name>.instr.txt/.json, so a
     saved instrument file says at a glance which experiment and which
     calibration exposure it came from."""
     from midas_gui.tab_calibrate import CalibrationTab
@@ -280,14 +280,14 @@ def test_default_save_stem_joins_expid_and_calibration_image(app, tmp_path):
     tab._loader.set_path(str(img), load=False)
 
     assert tab._default_save_stem() == "park_may26_ceo2_000123"
-    assert tab._default_save_path(".instru.json").endswith(
-        "park_may26_ceo2_000123.instru.json")
+    assert tab._default_save_path(".instr.json").endswith(
+        "park_may26_ceo2_000123.instr.json")
 
 
 def test_default_save_stem_drops_whichever_half_is_missing(app, tmp_path):
     """Neither half is guaranteed: the Exp ID header is free-form and may be
     blank, and the Data path may not be set yet. A missing half is dropped
-    rather than joined as an empty string — "_.instru.txt" would be a worse
+    rather than joined as an empty string — "_.instr.txt" would be a worse
     suggestion than either half alone."""
     from midas_gui.tab_calibrate import CalibrationTab
 
@@ -321,10 +321,10 @@ def test_default_save_path_prefers_the_output_dir_then_the_image_folder(app, tmp
     tab._loader.set_path(str(img), load=False)
 
     tab._out_ed.setText("")
-    assert Path(tab._default_save_path(".instru.txt")).parent == img_dir
+    assert Path(tab._default_save_path(".instr.txt")).parent == img_dir
 
     tab._out_ed.setText(str(out_dir))
-    assert Path(tab._default_save_path(".instru.txt")).parent == out_dir
+    assert Path(tab._default_save_path(".instr.txt")).parent == out_dir
 
 
 def test_save_paramstest_dialog_prefills_the_suggested_name(app):
@@ -334,6 +334,6 @@ def test_save_paramstest_dialog_prefills_the_suggested_name(app):
     dialog with no suggestion to offer."""
     from midas_gui.dialogs import _SaveParamstestDialog
 
-    dlg = _SaveParamstestDialog(default_out="/tmp/park_may26_ceo2.instru.txt")
-    assert dlg.out_path() == "/tmp/park_may26_ceo2.instru.txt"
+    dlg = _SaveParamstestDialog(default_out="/tmp/park_may26_ceo2.instr.txt")
+    assert dlg.out_path() == "/tmp/park_may26_ceo2.instr.txt"
     assert _SaveParamstestDialog().out_path() == ""

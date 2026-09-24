@@ -131,7 +131,7 @@ class CalibrationTab(QtWidgets.QWidget):
         Both halves are best-effort: a blank Exp ID or an empty Data path
         simply drops that half, so the suggestion degrades to the image stem,
         to the Exp ID, or — with neither — to "calibration", rather than
-        offering something like ``_.instru.txt``.
+        offering something like ``_.instr.txt``.
         """
         parts = []
         try:
@@ -2618,7 +2618,7 @@ class CalibrationTab(QtWidgets.QWidget):
     def _save_json(self):
         if not self._result: return
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save calibration.json", self._default_save_path(".instru.json"),
+            self, "Save calibration.json", self._default_save_path(".instr.json"),
             "JSON (*.json)")
         if not path: return
         import json
@@ -2659,7 +2659,7 @@ class CalibrationTab(QtWidgets.QWidget):
     def _save_paramstest(self):
         if not self._result:
             return
-        dlg = _SaveParamstestDialog(self, default_out=self._default_save_path(".instru.txt"))
+        dlg = _SaveParamstestDialog(self, default_out=self._default_save_path(".instr.txt"))
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return
         out_path = dlg.out_path()

@@ -121,7 +121,7 @@ undo their own design choice does not belong in a PR about filenames. Expect it
 to re-conflict on the next upstream merge; the footer widget itself is not in
 dispute, only the geometry inside it.
 
-## 2026-09-23 — Saved calibrations are named `<expid>_<image>.instru.*`
+## 2026-09-23 — Saved calibrations are named `<expid>_<image>.instr.*`
 
 Both save paths hardcoded their suggestion — `"calibration.json"` in
 `_save_json`, `"paramstest.txt"` in `_SaveParamstestDialog` — as a *bare*
@@ -131,12 +131,17 @@ moved by hand. `CalibrationTab._default_save_stem()` now suggests
 `<expid>_<calibration image stem>`, and `_default_save_path(suffix)` puts it under
 the Output dir (falling back to the image's own folder).
 
-`.instru.txt` / `.instru.json` is the user's own convention; the string appears
+`.instr.txt` / `.instr.json` is the user's own convention; the string appears
 nowhere else in the codebase. It is only a default — the dialogs stay editable.
+
+**Amended 2026-09-24:** the suffix was `.instru.*` as first shipped; renamed to
+`.instr.*` at the user's request. Nothing reads the suffix back — no glob, no
+dialog filter keys on it — so the rename is confined to the two default strings
+and their tests. Files already saved under the old name still open normally.
 
 Both halves of the stem are optional and independently droppable. The Exp ID
 header is free-form and often blank, and the Data path may not be set yet;
-joining unconditionally would offer `_.instru.txt`, which is worse than either
+joining unconditionally would offer `_.instr.txt`, which is worse than either
 half alone. With neither, the suggestion is `calibration`.
 
 Exp ID reaches the tab through the same `set_expid_provider` callback Batch
