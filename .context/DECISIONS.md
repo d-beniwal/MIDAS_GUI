@@ -8,6 +8,101 @@ file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this
 date for the full uncondensed entries if ever needed._
 
+## 2026-09-25 — Data Viewer: folder format filter, under-viewer frame scrubber, profile-file lineout; app-wide frame-nav slider/button visibility
+
+Three Data Viewer requests plus a visibility fix applied everywhere a
+frame-navigation slider exists.
+
+**Folder format filter is a `DataLoaderPanel` opt-in (`folder_format_filter`),
+not a Data-Viewer-only special case.** `helpers._collect_frame_paths`'s
+folder-glob loop was factored into `_folder_format_groups(folder) ->
+{label: [paths]}` (TIFF/HDF5/GE/CBF/EDF), reused by both the unfiltered
+default path and a new `ext_group` filter param. The panel builds a
+"Format:" combo (shown only when more than one group is actually present)
+gated behind the new constructor flag so Calibrate/Mask Builder/Batch/Refine
+— every other `DataLoaderPanel` consumer — are unaffected; only
+`tab_view.py` passes `folder_format_filter=True`.
+
+**Frame scrubber relocation reused an existing pattern instead of
+inventing one.** `tab_calibrate.py` already solved "scrubber under the
+viewer, loader's own nav hidden" for its `mode="single"` loader
+(`_build_frame_scrub_bar` + `hide_frame_field=True`), itself modeled on
+`widgets.CakeStackViewer`'s scrub bar. Copied verbatim for `tab_view.py`'s
+`mode="stack"` loader — required one small `widgets.py` fix:
+`hide_frame_field` only ever gated `mode=="single"`'s frame row, never
+`mode=="stack"`'s `_nav_row`, so a stack-mode consumer had no way to hide
+its loader's own nav row before this. Extended to cover both modes; no
+other stack-mode consumer exists yet, so no behavior change elsewhere.
+
+**Profile-file loading is a separate control in the Radial Profile tab,
+not an overload of the Data/Image field** — confirmed with the user before
+building. Mirrors `tab_pdf.py`'s existing "I(Q) source" combo. Keeps the
+shared `DataLoaderPanel` untouched for this feature (lower risk than
+teaching it to recognize non-image extensions) at the cost of one
+tab-local `_profile_file_mode` flag that `_on_loader_data`/`_on_fields_changed`
+must check before touching the image viewer.
+
+**Axis-unit handling for a loaded 2θ/Q-native file (`.xye`/`.fxye`/`.dat`)
+without a calibration attached.** `ProfileViewer` always stored/plotted
+`r_px` and converted to 2θ/Q via `_r_to_x` using live lsd/px/wl — feeding it
+a native 2θ/Q axis directly (relabeling only) would have silently
+mislabeled the plot as "R (px)" whenever `_lsd` is `None`. Rather than
+gate the whole file-lineout feature on requiring a calibration up front (the
+ask was to plot immediately), `set_profile` gained an optional `native_unit`
+param: when set, `_replot` skips the r_px conversion, plots the stored axis
+as-is, and locks the R/2θ/Q combo onto the matching entry (still reused for
+ring-marker placement, since the combo's `currentIndex()` is what that code
+already reads). Once a calibration supplies real lsd/px/wl,
+`helpers.native_axis_to_r_px` (algebraic inverse of `_r_to_x`) converts the
+loaded axis back to genuine r_px and the profile is re-plotted through the
+normal (non-native) path — full unit toggle and ring overlay "for free".
+Extension → native unit follows `workers.write_profile`'s own dispatch
+(`.csv`→r_px, `.xye`/`.fxye`→2θ, `.dat`→Q) so a file this app wrote round-trips
+correctly.
+
+**Real gap found while wiring ring simulation to the no-image case:**
+`DetectorGeometryCard._simulate()` — the only place a material's ring radii
+(`m["_rings"]`) ever get computed — hard-required an image
+(`if img is None: QMessageBox.warning(...); return`), even though the ring
+math (`simulate_rings`/`simulate_rings_from_dspacings`) only needs
+wavelength/Lsd/pixel-size/d-spacing, never pixel data; the image check
+exists only to gate the *separate* on-image overlay (`_redraw_rings`, which
+already has its own independent `img is None` guard). Split the computation
+loop into `_compute_material_rings()` (reused, verbatim behavior, by
+`_simulate`) and added `simulate_rings_without_image()`, which computes rings
+and calls `_refresh_profile_markers()` directly — `tab_view.py` calls it
+whenever a profile file is loaded or `geometryChanged` fires while in
+file-lineout mode, since the normal image-gated call chain
+(`_on_sim_param_changed` → `_simulate`) never reaches it with no image
+loaded. `_refresh_profile_markers()` itself already needed no image (drew
+straight from cached `_rings` + lsd/px/wl) — confirmed by reading before
+building on it, not assumed.
+
+**App-wide frame-nav slider/button visibility.** Separately requested:
+every "iterate over frames" slider (Data Viewer, Calibrate, Mask Builder,
+Hydra's `mode="nav"` loader, `CakeStackViewer`, and `DataLoaderPanel`'s own
+`mode="stack"` nav row) plus its ◀/▶ buttons. Several of the ◀/▶ buttons are
+plain `QToolButton`s, which have no default background/border at all
+(native/flat) — nearly invisible against the dark theme — and the global
+`QSlider::groove` is a dark `#2a2a2d` that barely contrasts with the panel
+background it sits on. Fixed via one pair of `objectName`s
+(`frameNavBtn`/`frameNavSlider`) applied at each of the ~9 construction
+sites, with one new ID-scoped QSS block in `style.py` (accent-gradient
+button, brighter `#707070` groove) — deliberately scoped to those names
+rather than a blanket `QToolButton {}`/`QSlider {}` rule, so unrelated
+QToolButtons (help "?", browse "⋯", ROI ribbon) and threshold sliders
+(`_thr_slider` in Mask Builder/Calibrate) are untouched.
+
+**Verified:** new `tests/test_dataviewer_format_filter.py` (7),
+`test_dataviewer_frame_scrub.py` (5), `test_dataviewer_profile_file.py` (12)
+— not fork-isolated (same SIGSEGV-on-fork reason as `test_view_tab_controls.py`).
+11 touched/related test files green per-file on a clean `HOME`
+(`test_hydra_ui/_calib_ui/_batch_ui`, `test_manual_dspacing_calib_ui`,
+`test_mask_folder_frames`, `test_ring_projection`, `test_hydra_geometry`,
+`test_helpers`, `test_viewer_*`, `test_batch_data_source` included). `pyflakes
+midas_gui/*.py` 38→37 (the one change: `Path` in `tab_view.py` went from
+unused to used). Offscreen screenshot confirmed the new button/slider colors.
+
 ## 2026-09-24 — Mask Builder: multi-frame Image detection peeks metadata only; threshold projection defaults to "current frame"
 
 Commit `d224c97`.

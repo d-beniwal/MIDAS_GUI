@@ -1,7 +1,7 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-09-24 (Mask Builder folder/multi-frame Image + threshold projection)_
+_Last updated: 2026-09-25 (Data Viewer folder-format filter/scrubber/profile-file + app-wide frame-nav slider styling)_
 
 ## Now working on
 
@@ -27,6 +27,41 @@ Open follow-ups, none blocking:
   `git fetch origin 'refs/pull/*/head:refs/remotes/origin/pr/*'`.
 
 ## Recently completed
+
+**2026-09-25 — Data Viewer: folder format filter, under-viewer frame
+scrubber, profile-file lineout; app-wide frame-nav slider/button styling.**
+- Image folder loads can be filtered to one detected format via a new
+  "Format:" combo (`helpers._folder_format_groups`, opt-in
+  `DataLoaderPanel(folder_format_filter=True)`, Data Viewer only).
+- Frame scrubber moved from the left loader column to directly under the
+  image viewer (`tab_view._build_frame_scrub_bar`, copies `tab_calibrate.py`
+  /`CakeStackViewer`'s pattern); `hide_frame_field` now also hides
+  `DataLoaderPanel`'s `mode="stack"` nav row (previously "single"-only).
+- Radial Profile tab gained "Source: Detector frame / Profile file…" to load
+  an existing `.csv/.xye/.dat/.fxye` integration output directly
+  (`helpers.load_profile_file`, generalized off the PDF tab's reader).
+  `helpers.native_axis_to_r_px` converts a 2θ/Q-native file to r_px once a
+  calibration is attached; without one it plots in its native unit with the
+  R/2θ/Q toggle locked (new `ProfileViewer.set_profile(...,
+  native_unit=...)`). Image viewer stays blank in this mode.
+- Found + fixed along the way: `DetectorGeometryCard._simulate()` (ring-radius
+  computation) hard-required an image it never actually used the pixels of —
+  new `simulate_rings_without_image()` (shares `_compute_material_rings()`
+  with `_simulate`) lets ring overlays work with no image loaded.
+- Separately requested: every frame-nav ◀/▶ button + slider app-wide (Data
+  Viewer, Calibrate, Mask Builder, Hydra `mode="nav"` loader,
+  `CakeStackViewer`, `DataLoaderPanel`'s own stack-mode row) now carries
+  `objectName` `frameNavBtn`/`frameNavSlider`, styled in `style.py` — several
+  were plain `QToolButton`s with no default border/background, nearly
+  invisible on the dark theme.
+- New `tests/test_dataviewer_format_filter.py` (7),
+  `test_dataviewer_frame_scrub.py` (5), `test_dataviewer_profile_file.py`
+  (12) — **not** fork-isolated, same reason as `test_view_tab_controls.py`
+  (a forked `DataViewerTab`-building test SIGSEGVs on this machine).
+**Verified:** 11 touched/related test files green per-file on a clean
+`HOME`; `pyflakes midas_gui/*.py` 38→37 (only change: `Path` in
+`tab_view.py` went from unused to used); offscreen screenshot confirmed the
+new button/slider colors. Full detail in DECISIONS.md.
 
 **2026-09-24 (`d224c97`) — Mask Builder: folder/multi-frame Image loading +
 threshold-mask projection.** The Image field now accepts a folder of
@@ -176,30 +211,10 @@ rings that stay put, and a two-way geometry hand-off.** Six requested changes:
 **Verified:** 21-file per-file sweep green, zero new pyflakes warnings vs.
 HEAD, offscreen screenshots of all three toolbars + the card column.
 
-**2026-09-09 — Manual d-spacing (AgBH/SAXS) fit made trustworthy.** Reported
-as *"calibration runs away and the AgBH rings are significantly off"* on a
-13.5 m SAXS geometry; root cause was identifiability, not a solver bug (at
-small 2θ, Lsd/BC/tilt are near-degenerate). d-spacing calibrants default to
-**BC-only** refinement, the fit reports per-parameter **1σ** +
-`at_limit`/`clamped`/`method`, and a **Limits…** dialog bounds a parameter to a
-window around its seed (`lm`→`trf`; unbounded stays bit-identical). Same
-session: lab-frame compass, ring labels on the visible arc, mismatched
-correction fields skipped-and-flagged instead of fatal, Batch persisting its
-Tab-2 calibration result. (**"Use seed as calibration (no fit)"** also landed
-here and was removed again 2026-09-11 — see above.) Full detail in DECISIONS.md.
-
-**2026-09-04 (`549e96f`) + 2026-09-02/03 (`092fbba`, `46e0fec`) — Jun-Sang Park's
-(`junspark`) PR #7 reviewed, fixed, covered by tests and merged in two halves**
-(36 commits, ~+5500/−580 over ~30 files; PR closed). Strain Cake tab, job queue,
-peak-fit panel, provenance, per-frame zarr cake, batch CLI, Batch Integrate
-output-folder/Exp-ID/preflight work, HDF5 stack fixes. Shipped with zero test
-changes; +108 tests added. Two real regressions caught only by holding a
-per-file baseline first — silent frame loss from zero-padding normalisation
-(`scan_1`/`scan_01`/`scan_001` collapsing onto one output file) and a stale
-import git could not see. Full detail in DECISIONS.md and
-`documentation/development_history.md`.
-
-_(Older entries — `fd7f67a` Workstation provenance + Hydra Overall-Cake
+_(Older entries — 2026-09-09 manual d-spacing (AgBH/SAXS) fit trustworthiness
+(BC-only default refinement, per-parameter 1σ, Limits… dialog), 2026-09-04
+Jun-Sang Park's PR #7 (Strain Cake tab, job queue, peak-fit panel,
+provenance, batch CLI; +108 tests), `fd7f67a` Workstation provenance + Hydra Overall-Cake
 per-panel `tx` rotation fix + Batch Integrate Rmin/Rmax + Detector-view
 preview, `18c9b77` crash-safe project saves (staging-group swap + rolling
 `.bak`) + Save-As analysis-history choice + Open-Project unsaved-changes
