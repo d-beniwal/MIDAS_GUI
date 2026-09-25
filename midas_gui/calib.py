@@ -815,7 +815,19 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
         if device != "cpu":
             print(f"[calib] note: Frozen-point (high-tilt) always runs on "
                   f"CPU — ignoring device={device!r}.")
-        from midas_calibrate_v2.pipelines import iterate_frozen_point_until_stable
+        try:
+            from midas_calibrate_v2.pipelines import iterate_frozen_point_until_stable
+        except ImportError as e:      # backend older than the pipeline's release
+            from importlib.metadata import PackageNotFoundError, version
+            try:
+                have = version("midas-calibrate-v2")
+            except PackageNotFoundError:
+                have = "unknown"
+            raise RuntimeError(
+                "Frozen-point (high-tilt) needs the frozen-point pipeline from "
+                f"midas-calibrate-v2, which the installed {have} does not "
+                "provide. Upgrade the backend, or choose a different pipeline."
+            ) from e
         return iterate_frozen_point_until_stable(v1, img, lm_max_iter=lm_iter,
                                                  verbose=True)
 
