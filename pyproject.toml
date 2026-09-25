@@ -102,10 +102,10 @@ dependencies = [
     # `ab_sensitive_mask`, `orientation_maps.py`); nothing midas_gui imports
     # changed. No numpy 1.26.4 / torch 2.4.0 / numba 0.59.1 / zarr<3 movement
     # -- pip confirmed the three are the only packages that move.
-    "midas-calibrate-v2==0.17.0",
+    "midas-calibrate-v2==0.22.0",
     "midas-integrate-v2==0.7.1",
     "midas-calibrate==0.5.0",
-    "midas-hkls==0.11.0",
+    "midas-hkls==0.15.0",
     "midas-distortion==0.2.0",
     "midas-pdf==0.3.0",           # public PyPI package used by the PDF tab (pdf_backend.py)
     # ── Transitive MIDAS deps pinned explicitly (pulled in by midas-calibrate-v2 /
@@ -120,9 +120,9 @@ dependencies = [
     # requires midas-saxs>=0.1.0 -> midas-transforms>=0.10.0 -> midas-stress
     # >=0.11.0. Not imported by midas_gui directly; pinned here for the same
     # reproducibility reason as the block above.
-    "midas-saxs==0.1.1",
+    "midas-saxs==0.1.2",
     "midas-transforms==0.10.0",
-    "midas-stress==0.14.0",
+    "midas-stress==0.14.1",
     "zarr==2.18.7",               # required by midas-integrate/-peakfit/-zipper; was already
                                   # pulled in transitively before this pin bump (unpinned), so
                                   # this just makes an existing dependency explicit.

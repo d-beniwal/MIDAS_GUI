@@ -1,8 +1,10 @@
-"""Proves the vendored frozen-point pipeline (``midas_gui._vendor.
-frozen_point_calib`` — see that package's ``__init__.py`` for provenance)
-still behaves like the upstream branch it was copied from, i.e. that
-re-pointing its imports at the installed ``midas_calibrate_v2==0.17.0``
-instead of the branch's own in-repo modules changed nothing observable.
+"""Numerical regression test for the "frozen_point" (high-tilt) calibration
+pipeline, now shipped natively by ``midas_calibrate_v2.pipelines`` (this
+pipeline used to live in a vendored copy under
+``midas_gui/_vendor/frozen_point_calib`` while it was still on an
+unreleased upstream branch; that branch merged and shipped as part of
+``midas_calibrate_v2``, so midas_gui now calls the real package directly —
+see ``midas_gui/calib.py``'s ``frozen_point`` branch).
 
 Adapted (trimmed) from the source branch's own
 ``packages/midas_calibrate_v2/tests/test_frozen_point.py``: paints clean,
@@ -10,10 +12,10 @@ well-separated Gaussian ring spots at a known, deliberately tilted geometry
 and checks the pipeline recovers it from both a nearby seed and a genuinely
 blind one.
 
-Also covers the 2026-09-14 distortion-support update: both functions now
-defer to ``v1_params.Refine["p0".."p14"]`` for distortion refinement (like
-every sibling pipeline) instead of ``iterate_frozen_point_until_stable``
-force-freezing all 15 coefficients regardless of it.
+Also covers the distortion-support behavior: both functions defer to
+``v1_params.Refine["p0".."p14"]`` for distortion refinement (like every
+sibling pipeline) rather than force-freezing all 15 coefficients regardless
+of it.
 """
 from __future__ import annotations
 
@@ -23,7 +25,7 @@ import pytest
 from midas_calibrate.params import CalibrationParams
 from midas_calibrate.rings import build_ring_table
 
-from midas_gui._vendor.frozen_point_calib import (
+from midas_calibrate_v2.pipelines import (
     autocalibrate_frozen_point, iterate_frozen_point_until_stable,
 )
 

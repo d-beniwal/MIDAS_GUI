@@ -2123,6 +2123,7 @@ class ProfileViewer(QtWidgets.QWidget):
         self._wl = self._lsd = self._px = None
         self._ring_groups: list = []   # [{"radii": [...], "color": "#hex"}, ...]
         self._ring_lsd = self._ring_px = self._ring_wl = None
+        self._ring_width_px = 1.5
 
     def set_profile(self, r_px, profile, *, sigma=None, wavelength_A=None,
                     lsd_um=None, px_um=None):
@@ -2134,7 +2135,7 @@ class ProfileViewer(QtWidgets.QWidget):
         self._px     = px_um
         self._replot()
 
-    def set_ring_markers(self, groups, lsd_um=None, px_um=None, wl=None):
+    def set_ring_markers(self, groups, lsd_um=None, px_um=None, wl=None, width=1.5):
         """``groups``: list of ``{"radii": [r_px, ...], "color": "#rrggbb"}`` —
         one entry per material, each drawn in its own color.
 
@@ -2143,11 +2144,16 @@ class ProfileViewer(QtWidgets.QWidget):
         the profile can be read off without cross-referencing the image
         overlay. A group without ``labels``, or a blank entry in it, draws the
         bare line as before.
+
+        ``width`` is the marker line thickness, so a caller can keep it in
+        sync with the sibling ring overlay on the image (e.g. the Data
+        Viewer's "Ring width" spinbox).
         """
         self._ring_groups = list(groups)
         self._ring_lsd = lsd_um
         self._ring_px  = px_um
         self._ring_wl  = wl
+        self._ring_width_px = width
         self._replot()
 
     def _r_to_x(self, r_px, idx, lsd, px, wl):
@@ -2286,7 +2292,7 @@ class ProfileViewer(QtWidgets.QWidget):
                 wl  = self._ring_wl  or self._wl
                 for group in self._ring_groups:
                     color = group.get("color", "#f0c060")
-                    pen = pg.mkPen(color, width=1.5, style=QtCore.Qt.DotLine)
+                    pen = pg.mkPen(color, width=self._ring_width_px, style=QtCore.Qt.DotLine)
                     labels = list(group.get("labels") or [])
                     for i, r in enumerate(group.get("radii", [])):
                         x_pos = self._r_to_x(r, idx, lsd, px, wl)

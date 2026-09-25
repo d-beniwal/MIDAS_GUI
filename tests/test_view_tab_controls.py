@@ -8,10 +8,13 @@ child. Run plain, these pass — see ``.context/STATE.md``.
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 from PyQt5 import QtWidgets
 
+from midas_gui.helpers import tilted_ring_xy
 from midas_gui.hydra_geometry_card import (ACCURATE_KERNEL, CAKE_ETA_BIN_DEG,
                                            FAST_KERNEL)
 from midas_gui.tab_view import DataViewerTab
@@ -454,6 +457,32 @@ def test_clear_leaves_the_click_picked_radius_ring_alone(framed):
     card._sim_clear_btn.click()
     assert card._ring_items == []
     assert card._picked_r == 42.0 and card._pick_ring_item is not None
+
+
+def test_picked_ring_follows_the_tilt_like_material_rings_do(framed):
+    """The profile's radius is a flat-panel Bragg radius (``ProfileViewer.
+    _x_to_r``); on a tilted geometry the true ring at that angle is not a
+    circle about the beam centre, so the click-picked ring must go through
+    the same ``tilted_ring_xy`` projection ``_redraw_rings`` uses for
+    material rings, or it visibly drifts from the peak it is meant to mark."""
+    card = framed._geom_card
+    card._ty.setValue(5.0)
+    card._tz.setValue(-3.0)
+    card.on_radius_clicked(42.0)
+    ys, zs = card._pick_ring_item.getData()
+
+    lsd_um, px = card._lsd_um(), card._px.value()
+    bc_y, bc_z = card._bcy.value(), card._bcz.value()
+    two_theta_deg = math.degrees(math.atan2(42.0 * px, lsd_um))
+    exp_ys, exp_zs = tilted_ring_xy(two_theta_deg, 0.0, 5.0, -3.0,
+                                     lsd_um, bc_y, bc_z, px, px)
+    np.testing.assert_allclose(ys, exp_ys)
+    np.testing.assert_allclose(zs, exp_zs)
+
+    # and it must actually have moved off the naive circle, or this would
+    # pass even with the old bug for a geometry where the two coincide.
+    plain_r = np.hypot(ys - bc_y, zs - bc_z)
+    assert not np.allclose(plain_r, 42.0)
 
 
 # ── Manual color-scale survives frame navigation ─────────────────────

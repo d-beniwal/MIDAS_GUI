@@ -277,6 +277,34 @@ Fixed on both axes, deliberately:
   `QRadioButton` / `QGroupBox` indicators. The structural fix handles this one
   card; the stylesheet gap would have produced the same illusion anywhere else a
   box is disabled rather than hidden.
+## 2026-09-24 — Mask Builder: multi-frame Image detection peeks metadata only; threshold projection defaults to "current frame"
+
+Commit `d224c97`.
+
+**Frame-count detection never reads pixel data.** `_detect_multiframe()`
+answers "how many frames does this path have" from `tifffile`'s
+`series[0].shape` (not `len(tf.pages)` — a small `(N,H,W)` stack can pack
+into one TIFF page, so page count under-reports), an HDF5 dataset's
+`.shape[0]` via a plain `h5py.File` open (no read), or a `.geN` file's byte
+size minus the 8192-byte header divided by candidate square-detector sizes
+(2048/4096/1024/512 px). All are O(1) metadata reads so opening a large
+Image path to just *check* frame count stays cheap.
+
+**Threshold defaults to the displayed frame, not a full-frame reduction.**
+"Current frame" is the default and the only choice for a plain single image
+(Projection combo disabled + forced). Requested this way because reducing
+across every frame by default silently changes what section-1 thresholds
+against without the user asking — the Projection combo makes the behaviour
+explicit and opt-in. `Average`/`Sum` accumulate in float64 to avoid overflow
+across many frames; `Max` uses `np.maximum(..., out=acc)` in float32 since
+there's no summation to overflow.
+
+**Frame source dict (`self._img_frames`) has four `kind`s** (`files`, `array`,
+`h5`, `ge`) rather than eagerly loading every frame into memory — each
+`_get_frame_array(idx)` call reads (or slices, for the in-memory `array`
+case from a small multi-page TIFF) exactly one frame on demand, so a folder
+of many large frames or a big HDF5 stack doesn't blow up memory just because
+the Frame navigator is open.
 
 ## 2026-09-22 — Batch Integrate: clear views before re-deriving axis context, not after
 
