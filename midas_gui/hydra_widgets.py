@@ -573,8 +573,11 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         if self._mode == "nav":
             nav_row = QtWidgets.QHBoxLayout(); nav_row.setSpacing(4)
             self._prev_btn = QtWidgets.QPushButton("◀"); self._prev_btn.setFixedWidth(28)
+            self._prev_btn.setObjectName("frameNavBtn")
             self._next_btn = QtWidgets.QPushButton("▶"); self._next_btn.setFixedWidth(28)
+            self._next_btn.setObjectName("frameNavBtn")
             self._frame_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+            self._frame_slider.setObjectName("frameNavSlider")
             self._frame_spin = _NoScrollSpinBox(); self._frame_spin.setFixedWidth(60)
             self._prev_btn.clicked.connect(lambda: self._set_frame(self._frame - 1))
             self._next_btn.clicked.connect(lambda: self._set_frame(self._frame + 1))

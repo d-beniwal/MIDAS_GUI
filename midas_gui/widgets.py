@@ -48,7 +48,7 @@ from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollDoubleSpinBox, _fspin,
                                new_temp_h5_path, save_stack_h5, detect_geometry_from_path,
                                source_kind, display_text_for_paths, _apply_im_trans,
                                is_dark_like_name, warn_if_path_missing,
-                               path_is_missing)
+                               path_is_missing, _folder_format_groups)
 from midas_gui import style as S
 
 
@@ -1654,16 +1654,19 @@ class CakeStackViewer(CakeViewer):
         row.setSpacing(4)
         self._prev_btn = QtWidgets.QToolButton()
         self._prev_btn.setText("◀")
+        self._prev_btn.setObjectName("frameNavBtn")
         self._prev_btn.setToolTip("Previous frame")
         self._prev_btn.clicked.connect(lambda: self._step(-1))
         row.addWidget(self._prev_btn)
         self._frame_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self._frame_slider.setObjectName("frameNavSlider")
         self._frame_slider.setMinimum(0)
         self._frame_slider.setPageStep(1)
         self._frame_slider.valueChanged.connect(self._show_frame)
         row.addWidget(self._frame_slider, 1)
         self._next_btn = QtWidgets.QToolButton()
         self._next_btn.setText("▶")
+        self._next_btn.setObjectName("frameNavBtn")
         self._next_btn.setToolTip("Next frame")
         self._next_btn.clicked.connect(lambda: self._step(1))
         row.addWidget(self._next_btn)
@@ -2063,6 +2066,12 @@ class ProfileViewer(QtWidgets.QWidget):
 
     radiusClicked = QtCore.pyqtSignal(float)   # picked radius in px
 
+    # Axis-combo index a ``set_profile(..., native_unit=...)`` caller's unit
+    # corresponds to — used to lock the combo onto (and label the plot as)
+    # whatever unit an already-native-axis profile (e.g. a loaded 2θ/Q file
+    # with no geometry available to convert it into r_px) was given in.
+    _NATIVE_UNIT_IDX = {"two_theta_deg": 1, "q_invA": 2}
+
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QtWidgets.QVBoxLayout(self)
@@ -2120,18 +2129,33 @@ class ProfileViewer(QtWidgets.QWidget):
 
         self._r_px = self._prof = self._sigma = None
         self._wl = self._lsd = self._px = None
+        self._native_unit = None   # see set_profile's native_unit
         self._ring_groups: list = []   # [{"radii": [...], "color": "#hex"}, ...]
         self._ring_lsd = self._ring_px = self._ring_wl = None
         self._ring_width_px = 1.5
 
     def set_profile(self, r_px, profile, *, sigma=None, wavelength_A=None,
-                    lsd_um=None, px_um=None):
+                    lsd_um=None, px_um=None, native_unit=None):
+        """``native_unit``: ``None`` (default — ``r_px`` is a real pixel
+        radius, full R/2θ/Q toggle available, unaffected for every existing
+        caller) or ``"two_theta_deg"``/``"q_invA"`` when the caller has no
+        geometry to convert an already-native (e.g. loaded from a 2θ- or
+        Q-native profile file) axis into r_px — the combo is locked onto
+        that unit instead."""
         self._r_px   = np.asarray(r_px)
         self._prof   = np.asarray(profile)
         self._sigma  = np.asarray(sigma) if sigma is not None else None
         self._wl     = wavelength_A
         self._lsd    = lsd_um
         self._px     = px_um
+        self._native_unit = native_unit
+        if native_unit in self._NATIVE_UNIT_IDX:
+            self._xaxis.blockSignals(True)
+            self._xaxis.setCurrentIndex(self._NATIVE_UNIT_IDX[native_unit])
+            self._xaxis.blockSignals(False)
+            self._xaxis.setEnabled(False)
+        else:
+            self._xaxis.setEnabled(True)
         self._replot()
 
     def set_ring_markers(self, groups, lsd_um=None, px_um=None, wl=None, width=1.5):
@@ -2218,7 +2242,14 @@ class ProfileViewer(QtWidgets.QWidget):
         if self._r_px is None:
             return
         idx = self._xaxis.currentIndex()
-        if idx == 0 or self._lsd is None:
+        if self._native_unit in self._NATIVE_UNIT_IDX:
+            # Already in this unit (e.g. a loaded 2θ/Q profile file with no
+            # geometry to convert it) — plot as-is; set_profile locked the
+            # combo onto the matching idx, so the ring-marker loop below
+            # (which also reads `idx`) converts ring radii into the same unit.
+            x = self._r_px
+            self._plot.setLabel("bottom", ["R (px)", "2θ (°)", "Q (Å⁻¹)"][idx])
+        elif idx == 0 or self._lsd is None:
             x = self._r_px
             self._plot.setLabel("bottom", "R (px)")
         else:
@@ -3684,16 +3715,21 @@ class DataLoaderPanel(QtWidgets.QWidget):
 
     def __init__(self, parent=None, *, mode="single", data_dataset="exchange/data",
                  dark_dataset="exchange/data_dark", allow_live=False,
-                 hide_frame_field=False):
+                 hide_frame_field=False, folder_format_filter=False):
         super().__init__(parent)
         from midas_gui import style as S
         self._mode = mode
-        # "single" mode only: always hide the compact "Frame:" spin, for an
-        # embedding tab that shows a bigger scrubber of its own instead (e.g.
-        # Calibrate's under-viewer slider) — see _setup_navigator. Off by
-        # default so other "single" consumers (e.g. tab_refine.py) are
-        # unaffected.
+        # Hide this panel's own compact frame controls (the "single" mode
+        # "Frame:" spin, or the "stack" mode prev/slider/next/spin row), for
+        # an embedding tab that shows a bigger scrubber of its own instead
+        # (e.g. Calibrate's / the Data Viewer's under-viewer slider) — see
+        # _setup_navigator. Off by default so other consumers (e.g.
+        # tab_refine.py, Batch's "stream" mode) are unaffected.
         self._hide_frame_field = hide_frame_field
+        # Offer a "Format:" filter when a loaded folder mixes file types —
+        # only the Data Viewer turns this on (see helpers._folder_format_groups).
+        self._folder_format_filter = folder_format_filter
+        self._folder_format = None   # selected group label, or None = "All"
         self._stack = self._paths = self._h5 = None
         self._nframes = 0
         self._cur = None
@@ -3851,12 +3887,27 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._ds_row.setVisible(False)
         card.body.addWidget(self._ds_row)
 
+        # Folder "Format:" filter (opt-in, folder_format_filter=True) — shown
+        # only once a loaded folder actually mixes more than one known file
+        # type (see _refresh_folder_format_row / helpers._folder_format_groups).
+        if self._folder_format_filter:
+            self._fmt_row = QtWidgets.QWidget()
+            fmr = QtWidgets.QHBoxLayout(self._fmt_row); fmr.setContentsMargins(0, 0, 0, 0); fmr.setSpacing(4)
+            self._fmt_combo = _NoScrollComboBox()
+            self._fmt_combo.currentTextChanged.connect(self._on_folder_format_changed)
+            fmr.addWidget(QtWidgets.QLabel("Format:")); fmr.addWidget(self._fmt_combo, 1)
+            self._fmt_row.setVisible(False)
+            card.body.addWidget(self._fmt_row)
+
         # Mode-specific frame controls
         self._frame_spin = _NoScrollSpinBox(); self._frame_spin.setRange(0, 0)
         if mode == "stack":
             self._slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+            self._slider.setObjectName("frameNavSlider")
             self._prev_btn = QtWidgets.QPushButton("◀"); self._prev_btn.setFixedWidth(30)
+            self._prev_btn.setObjectName("frameNavBtn")
             self._next_btn = QtWidgets.QPushButton("▶"); self._next_btn.setFixedWidth(30)
+            self._next_btn.setObjectName("frameNavBtn")
             self._nframes_lbl = QtWidgets.QLabel("/ 0")
             self._frame_spin.setFixedWidth(64)
             self._slider.valueChanged.connect(self._set_frame)
@@ -3868,6 +3919,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
             nav.addWidget(self._frame_spin); nav.addWidget(self._nframes_lbl); nav.addWidget(self._next_btn)
             self._nav_row = QtWidgets.QWidget(); self._nav_row.setLayout(nav)
             self._nav_row.setEnabled(False)
+            self._nav_row.setVisible(not self._hide_frame_field)
             card.body.addWidget(self._nav_row)
         elif mode == "single":
             self._frame_spin.valueChanged.connect(self._set_frame)
@@ -4122,6 +4174,8 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._stem_filter = None
         h5 = is_h5(p)
         self._ds_row.setVisible(h5)
+        if self._folder_format_filter:
+            self._fmt_row.setVisible(False)
         self._update_combine_visibility()
         if h5 and Path(p).exists():
             try:
@@ -4141,7 +4195,34 @@ class DataLoaderPanel(QtWidgets.QWidget):
                 self._ds_combo.blockSignals(False)
 
     def _collect_paths(self, raw) -> list:
-        return _collect_frame_paths(raw)
+        ext_group = self._folder_format if self._folder_format_filter else None
+        return _collect_frame_paths(raw, ext_group=ext_group)
+
+    def _refresh_folder_format_row(self, folder):
+        """(Re)populate the "Format:" combo from the file formats actually
+        present in `folder` — shown only when there's a real choice to make
+        (more than one format found)."""
+        groups = _folder_format_groups(folder)
+        self._fmt_combo.blockSignals(True)
+        self._fmt_combo.clear()
+        self._fmt_combo.addItem("All")
+        for label in groups:
+            self._fmt_combo.addItem(label)
+        idx = self._fmt_combo.findText(self._folder_format or "All")
+        if idx < 0:
+            self._folder_format = None
+            idx = 0
+        self._fmt_combo.setCurrentIndex(idx)
+        self._fmt_combo.blockSignals(False)
+        self._fmt_row.setVisible(len(groups) > 1)
+
+    def _on_folder_format_changed(self, text):
+        new_format = None if text in ("", "All") else text
+        if new_format == self._folder_format:
+            return
+        self._folder_format = new_format
+        if self._nframes:
+            self._load()
 
     # ── cross-tab data sharing (data_bridge.DataSourceRegistry) ─────
     def bind_registry(self, registry, label: str):
@@ -4305,6 +4386,8 @@ class DataLoaderPanel(QtWidgets.QWidget):
         try:
             self._stack = self._paths = self._h5 = None; self._nframes = 0
             self._reset_buffer()
+            if self._folder_format_filter:
+                self._fmt_row.setVisible(False)
             if isinstance(raw, list):
                 paths = self._collect_paths(raw)
                 if not paths:
@@ -4312,6 +4395,8 @@ class DataLoaderPanel(QtWidgets.QWidget):
                 self._paths = paths; self._nframes = len(paths)
                 kind = f"{self._nframes} file(s) selected"
             elif Path(raw).is_dir() or any(ch in raw for ch in "*?"):
+                if self._folder_format_filter and Path(raw).is_dir():
+                    self._refresh_folder_format_row(raw)
                 paths = self._collect_paths(raw)
                 if not paths:
                     QtWidgets.QMessageBox.warning(self, "Empty", "No frames found."); return
@@ -5149,6 +5234,8 @@ class DataLoaderPanel(QtWidgets.QWidget):
         }
         if self._explicit_paths:
             st["explicit_paths"] = list(self._explicit_paths)
+        if self._folder_format_filter and self._folder_format:
+            st["folder_format"] = self._folder_format
         if self._mode == "stream" and self._stem_filter:
             st["stem_filter"] = self._stem_filter
         if self._mode == "stream":
@@ -5174,6 +5261,8 @@ class DataLoaderPanel(QtWidgets.QWidget):
         explicit = state.get("explicit_paths")
         stem_filter = state.get("stem_filter") if self._mode == "stream" else None
         path = state.get("path", "")
+        if self._folder_format_filter:
+            self._folder_format = state.get("folder_format")
         if explicit:
             self._set_explicit_paths(list(explicit))
             if state.get("dataset"):

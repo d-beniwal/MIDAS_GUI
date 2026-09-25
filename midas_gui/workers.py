@@ -20,7 +20,7 @@ from midas_gui import calib
 from midas_gui import provenance
 from midas_gui.helpers import (_LogStream, _load_image, _apply_im_trans, _build_spec,
                                _spec_from_json, average_field, apply_field_corrections,
-                               read_hdf5_stack_combined)
+                               read_hdf5_stack_combined, load_profile_file)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -2843,35 +2843,6 @@ def _to_np(x):
                       dtype=np.float64)
 
 
-def _load_iq_file(path: str):
-    """Load a pre-integrated I(Q) file → (Q, I, sigma_or_None).
-
-    Tolerates comma- or whitespace-separated 2- or 3-column data with a leading
-    comment/header line (``#`` comments skipped; a non-numeric first row is too).
-    """
-    with open(path, "r") as fh:
-        first = ""
-        for line in fh:
-            s = line.strip()
-            if s and not s.startswith("#"):
-                first = s
-                break
-    delim = "," if "," in first else None
-    try:
-        float(first.split(delim)[0] if delim else first.split()[0])
-        skip = 0
-    except ValueError:
-        skip = 1
-    arr = np.loadtxt(path, delimiter=delim, comments="#", skiprows=skip)
-    arr = np.atleast_2d(arr)
-    if arr.shape[1] < 2:
-        raise ValueError(f"I(Q) file needs ≥2 columns (Q, I); got {arr.shape[1]}.")
-    q = arr[:, 0].astype(np.float64)
-    intensity = arr[:, 1].astype(np.float64)
-    sigma = arr[:, 2].astype(np.float64) if arr.shape[1] >= 3 else None
-    return q, intensity, sigma
-
-
 def _fit_subtraction_scale(I_meas, I_empty, q, comp, wavelength_A, q_min, q_max):
     """Least-squares empty-cell scale ``s`` (and offset ``c``).
 
@@ -2963,7 +2934,7 @@ class PDFWorker(QtCore.QThread):
             if not path or not Path(path).exists():
                 raise FileNotFoundError(f"I(Q) file not found: {path!r}")
             self.log_line.emit(f"[pdf] loading I(Q) from {Path(path).name}")
-            q, I, sig = _load_iq_file(path)
+            q, I, sig = load_profile_file(path)
             return q, I, sig
 
         # image mode — integrate the frame (with Poisson variance for σ_I)
@@ -3022,7 +2993,7 @@ class PDFWorker(QtCore.QThread):
                 bg_path = bg_cfg.get("iq_file", "")
                 if not bg_path or not Path(bg_path).exists():
                     raise FileNotFoundError(f"Empty-cell I(Q) file not found: {bg_path!r}")
-                q_bg, I_bg, sig_bg = _load_iq_file(bg_path)
+                q_bg, I_bg, sig_bg = load_profile_file(bg_path)
                 if q_bg.shape != q.shape or not np.allclose(q_bg, q):
                     sig_bg_interp = (np.interp(q, q_bg, sig_bg) if sig_bg is not None else None)
                     I_bg = np.interp(q, q_bg, I_bg)
