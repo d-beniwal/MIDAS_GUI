@@ -8,6 +8,69 @@ file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this
 date for the full uncondensed entries if ever needed._
 
+## 2026-09-24 — Zarr Viewer: live-verified, promoted out of "work in progress"
+
+Follow-up to the two entries immediately below. Once visible-by-default (see
+the entry right below this one) and enabled in Preferences ▸ Tabs on a real
+X11 session, opened a real `.vrx.ave.zarr.zip` from a finished Batch
+Integrate run at 20-ID-E (`PUP_AML_stubbins_sep26_bc/...`): tree populated
+correctly (`InstrumentParameters`, `OmegaSumFrame`, `REtaMap`, `SumFrames`),
+selected `OmegaSumFrame/LastFrameNumber_0` and it plotted (R bin vs. Eta,
+viridis, 2-D map), and the metadata/attributes panel showed that array's real
+attrs (`FirstOme`, `LastFrameNumber`, `Pressure`/`Temperature` as `NaN`,
+etc.) correctly.
+
+Promoted out of "work in progress" in `README.md` (tabs 0–5 now read as
+verified, 6–10 as WIP) and dropped the `*(work in progress)*` marker from
+`documentation/gui_documentation.md`'s §8. Still an `OPTIONAL_TAB`, not moved
+into `ALWAYS_TABS` — verified-and-visible-by-default is exactly the tier
+Calib. Refinement/Batch Queue/Pump Probe already occupy, and there's no
+reason to promote it further than that.
+
+## 2026-09-24 — Zarr Viewer: promoted to visible-by-default, moved next to Batch Integrate
+
+Follow-up to the entry immediately below: after landing hidden-by-default,
+asked to make it "a permanent tab next to the batch integration tab." Two
+changes, both narrower than they could have been:
+
+- **Visible, not pinned.** Added to `DEFAULT_VISIBLE_TABS` alongside Calib.
+  Refinement/Batch Queue/Pump Probe — shown out of the box, no Preferences
+  trip required. Deliberately *not* moved into `ALWAYS_TABS` (the hard-pinned,
+  can't-hide-it tier reserved for Data Viewer/Mask Builder/Calibrate/Batch
+  Integrate — tabs the app can't function without): it's still an
+  `OPTIONAL_TAB`, so it can still be hidden from Preferences ▸ Tabs like any
+  of the other three default-visible optional tabs, and it still isn't
+  claiming to be "verified" — Pump Probe is proof that default-visible and
+  work-in-progress aren't mutually exclusive in this codebase already.
+- **Position:** moved in `app.py`'s `_tab_specs` (and its construction line)
+  to sit immediately after Batch Integrate, before Batch Queue.
+
+**Real finding surfaced while doing this:** `DEFAULT_VISIBLE_TABS` is
+overlaid from the active profile's saved config at import time
+(`constants.reload_from_config()`), and on this machine the `20-ID-E` and
+`Default` profiles both have an explicit `ui.visible_tabs` saved from before
+even **Batch Queue** existed as a default-visible tab — so neither Batch
+Queue nor (now) Zarr Viewer will actually appear for this user until they
+re-save Preferences ▸ Tabs once, regardless of what ships in code. Left the
+live profile JSON files alone (editing a real, in-use per-user config file
+outside the repo isn't this branch's call to make); told the user directly
+instead.
+
+Knock-on effect on testing: this means `constants.DEFAULT_VISIBLE_TABS` is
+*not* a reliable thing to assert against in a test that runs on a real
+machine with a real saved profile — it reads whatever that profile last
+saved, not what the code ships. `constants.shipped_defaults()` is the
+existing, already-provided escape hatch (a pristine pre-overlay snapshot),
+so `tests/test_tab_zarrviewer.py`'s registration tests read
+`shipped_defaults()["ui"]["visible_tabs"]` instead of the live global. This
+also explains — more precisely than the existing "tab-count assertion vs.
+WIP-tab gating" note — *why* `test_app_builds_offscreen` is a known
+pre-existing failure on this machine: the same stale saved profile makes the
+live tab count disagree with what `ALWAYS_TABS`/`DEFAULT_VISIBLE_TABS` claim
+at assertion time. Not fixed here (that test's own hermeticity is a broader,
+separate concern — `tests/conftest.py` isolates nothing about
+`~/.config/midas_gui/`), just diagnosed precisely and worked around locally.
+
 ## 2026-09-24 — Zarr Viewer: a standalone top-level tab, matplotlib, hidden pending a live check
 
 Ported `mpe_wf_saxs_waxs/gui_view_zarr.py` (a zarr tree browser + plot canvas

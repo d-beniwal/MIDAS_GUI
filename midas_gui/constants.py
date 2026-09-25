@@ -240,11 +240,13 @@ DEFAULT_UI_SCALE      = 1.0           # multiplier, clamped to [0.5, 4.0] at sta
 ALWAYS_TABS = ["Data Viewer", "Mask Builder", "Calibrate", "Batch Integrate"]
 OPTIONAL_TABS = ["Calib. Refinement", "Batch Queue", "Zarr Viewer", "Corrections",
                  "PDF Analysis", "Texture", "Pump Probe", "Results & Export"]
-# Optional tabs shown by default. Zarr Viewer / Corrections / PDF Analysis / Texture /
-# Results & Export ship hidden (turn them on in Settings ▸ Preferences ▸ Tabs) — Zarr
-# Viewer is a straight port of an already-working standalone tool, but its
-# integration as a tab here hasn't had a live GUI check yet (see .context/DECISIONS.md).
-DEFAULT_VISIBLE_TABS = ["Calib. Refinement", "Batch Queue", "Pump Probe"]
+# Optional tabs shown by default. Corrections / PDF Analysis / Texture / Results &
+# Export ship hidden (turn them on in Settings ▸ Preferences ▸ Tabs). Zarr Viewer
+# ships visible, right next to Batch Integrate in app.py's _tab_specs — verified
+# live (see .context/DECISIONS.md) — but is still a toggleable OPTIONAL_TAB, not
+# one of the four hard-pinned ALWAYS_TABS, so it can still be hidden from
+# Preferences ▸ Tabs like any other optional tab.
+DEFAULT_VISIBLE_TABS = ["Calib. Refinement", "Batch Queue", "Zarr Viewer", "Pump Probe"]
 
 # ── Beamline devices (Data Viewer ▸ Live Data PV dropdown) ──────────────────────
 # Default detector devices for 20-ID-D, extracted from the beamline's area-detector

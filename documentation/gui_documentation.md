@@ -2109,7 +2109,7 @@ theme is active) and **label font size** (`− font +`).
 
 ---
 
-## 8. Zarr Viewer  *(work in progress)*
+## 8. Zarr Viewer
 
 Browse and plot any MIDAS `.zarr.zip` — the same file format Batch Integrate's
 own "zarr" output writes (§7) and `midas_gui/gsas_export.py`'s GSAS-II export

@@ -81,20 +81,45 @@ def tab(app):
 
 # ── Tab registration ─────────────────────────────────────────────────────
 
-def test_zarr_viewer_is_a_hidden_by_default_optional_tab():
+def _shipped_visible_tabs():
+    """The code-shipped DEFAULT_VISIBLE_TABS, independent of whatever the
+    machine's own active profile has saved to ~/.config/midas_gui/ — a real
+    profile's own ``ui.visible_tabs`` (once saved, e.g. from an older
+    Preferences ▸ Tabs session that predates a newly-added default-visible
+    tab) overrides the live ``constants.DEFAULT_VISIBLE_TABS`` global at
+    import time (see ``constants.reload_from_config()``), so asserting
+    against that global directly would make this test's outcome depend on
+    whichever machine/profile happens to run it. ``shipped_defaults()`` is
+    the escape hatch constants.py itself provides for exactly this."""
+    return C.shipped_defaults()["ui"]["visible_tabs"]
+
+
+def test_zarr_viewer_is_visible_by_default_but_still_an_optional_tab():
+    """Shown out of the box (constants.DEFAULT_VISIBLE_TABS), same tier as
+    Calib. Refinement/Batch Queue/Pump Probe — but still a toggleable
+    OPTIONAL_TAB, not one of the four hard-pinned ALWAYS_TABS, so it can
+    still be hidden from Preferences ▸ Tabs like any of those."""
     assert "Zarr Viewer" in C.OPTIONAL_TABS
-    assert "Zarr Viewer" not in C.DEFAULT_VISIBLE_TABS
+    assert "Zarr Viewer" not in C.ALWAYS_TABS
+    assert "Zarr Viewer" in _shipped_visible_tabs()
 
 
-def test_zarr_viewer_shows_up_once_toggled_visible(app):
+def test_zarr_viewer_shows_up_with_default_visibility_next_to_batch_integrate(app):
     import midas_gui.app as app_mod
     win = app_mod.MainWindow()
-    before = win.centralWidget().count()
-    win.apply_tab_visibility(list(C.DEFAULT_VISIBLE_TABS) + ["Zarr Viewer"])
-    after = win.centralWidget().count()
-    assert after == before + 1
-    names = [win.centralWidget().tabText(i) for i in range(after)]
+    win.apply_tab_visibility(_shipped_visible_tabs())
+    names = [win.centralWidget().tabText(i) for i in range(win.centralWidget().count())]
     assert any(n.endswith("Zarr Viewer") for n in names)
+    batch_idx = next(i for i, n in enumerate(names) if n.endswith("Batch Integrate"))
+    assert names[batch_idx + 1].endswith("Zarr Viewer")
+
+
+def test_zarr_viewer_can_still_be_hidden_like_any_optional_tab(app):
+    import midas_gui.app as app_mod
+    win = app_mod.MainWindow()
+    win.apply_tab_visibility([t for t in _shipped_visible_tabs() if t != "Zarr Viewer"])
+    names = [win.centralWidget().tabText(i) for i in range(win.centralWidget().count())]
+    assert not any(n.endswith("Zarr Viewer") for n in names)
 
 
 # ── Empty state ──────────────────────────────────────────────────────────

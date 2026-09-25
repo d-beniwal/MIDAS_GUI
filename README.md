@@ -167,14 +167,10 @@ always shown, the rest can be toggled on as you need them.
 | 9 | **Pump Probe** | Time-resolved (TR-XRD) delay pooling, ΔI(q, delay) heatmaps, kinetics, and mean-pattern views |
 | 10 | **Results & Export** | One-click export of calibration/mask/profiles/G(r)/pole figures + a provenance block for methods sections |
 
-> **Status:** Tabs **0–4** (Data Viewer, Mask Builder, Calibrate, Calib.
-> Refinement, Batch Integrate) are verified and ready to use. Tabs **5–10**
-> (Zarr Viewer, Corrections & Physics, PDF Analysis, Texture, Pump Probe,
-> Results & Export) are a **work in progress** and continue to be refined —
-> Zarr Viewer is the exception in spirit if not in label: its underlying
-> code has been in daily use as a standalone tool (`mpe_wf_saxs_waxs/
-> gui_view_zarr.py`) for a while, so only its integration as a tab *here*
-> is unverified, not the browsing/plotting logic itself.
+> **Status:** Tabs **0–5** (Data Viewer, Mask Builder, Calibrate, Calib.
+> Refinement, Batch Integrate, Zarr Viewer) are verified and ready to use.
+> Tabs **6–10** (Corrections & Physics, PDF Analysis, Texture, Pump Probe,
+> Results & Export) are a **work in progress** and continue to be refined.
 
 The full user manual — every field, tool tip, and configuration option — is
 in [`documentation/gui_documentation.md`](documentation/gui_documentation.md)
