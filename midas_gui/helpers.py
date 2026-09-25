@@ -167,7 +167,8 @@ _COMBINE_OPS = {
 
 
 def read_hdf5_stack_combined(path, dataset: str, *, chunk_size: Optional[int] = None,
-                             op: str = "mean") -> list:
+                             op: str = "mean", raw_start: Optional[int] = None,
+                             raw_end: Optional[int] = None) -> list:
     """Read an HDF5 ``(N, H, W)`` (or plain ``(H, W)``) dataset and combine
     consecutive raw sub-frames into one or more 2-D frames.
 
@@ -183,6 +184,14 @@ def read_hdf5_stack_combined(path, dataset: str, *, chunk_size: Optional[int] = 
 
     ``op`` is one of "mean" (default) / "sum" / "max" / "median".
 
+    ``raw_start``/``raw_end`` (0-based, inclusive, both optional) restrict
+    which raw sub-frames are read/combined at all — e.g. ``raw_start=2,
+    raw_end=7`` on a 10-frame dataset combines only frames 2..7, ignoring
+    0, 1, 8 and 9 entirely, applied BEFORE chunking. Ignored for a plain
+    2-D dataset (nothing to sub-select). An empty effective range (e.g.
+    ``raw_start`` past the dataset's last frame) returns ``[]`` rather than
+    raising.
+
     Returns a list of 2-D ``float32`` arrays (length 1 for the common
     whole-file case). A plain 2-D dataset returns ``[dataset]``
     unchanged, ``chunk_size``/``op`` ignored.
@@ -194,10 +203,15 @@ def read_hdf5_stack_combined(path, dataset: str, *, chunk_size: Optional[int] = 
         if dset.ndim == 2:
             return [np.asarray(dset[...], dtype=np.float32)]
         n = dset.shape[0]
-        size = chunk_size if chunk_size else n
+        lo = max(0, raw_start) if raw_start is not None else 0
+        hi = min(n - 1, raw_end) if raw_end is not None else n - 1
+        n_eff = hi - lo + 1
+        if n_eff <= 0:
+            return []
+        size = chunk_size if chunk_size else n_eff
         out = []
-        for start in range(0, n, size):
-            stack = np.asarray(dset[start:start + size], dtype=np.float32)
+        for start in range(0, n_eff, size):
+            stack = np.asarray(dset[lo + start:lo + start + size], dtype=np.float32)
             out.append(combine(stack).astype(np.float32))
         return out
 

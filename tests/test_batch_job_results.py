@@ -48,6 +48,38 @@ def _cake_payload(n_frames=4):
             "frame_ids": [f"f{i}" for i in range(n_frames)]}
 
 
+# ── batch_cli._source_cfg (argv -> source dict, pure logic, no Qt) ──────
+
+def _parse_source_args(extra):
+    from midas_gui import batch_cli
+    parser = batch_cli._build_arg_parser()
+    base = ["--calib-file", "c.json", "--out-dir", "o"]
+    return parser.parse_args(base + extra)
+
+
+def test_source_cfg_hdf5_forwards_frame_start_end():
+    """The "hdf5" branch was the only one of the four source types that
+    didn't forward --frame-start/--frame-end into the returned cfg dict —
+    needed now that a single-file HDF5 source's start/end mean a raw
+    sub-frame range within that one file (see
+    widgets.DataLoaderPanel.source_cfg's "hdf5" branch), matching how the
+    other three source types already forward them (as scan-number bounds)."""
+    from midas_gui import batch_cli
+    args = _parse_source_args([
+        "--source-type", "hdf5", "--source-path", "scan.h5",
+        "--frame-start", "2", "--frame-end", "7"])
+    cfg = batch_cli._source_cfg(args)
+    assert cfg["type"] == "hdf5"
+    assert (cfg["frame_start"], cfg["frame_end"]) == (2, 7)
+
+
+def test_source_cfg_hdf5_frame_bounds_default_to_none():
+    from midas_gui import batch_cli
+    args = _parse_source_args(["--source-type", "hdf5", "--source-path", "scan.h5"])
+    cfg = batch_cli._source_cfg(args)
+    assert cfg["frame_start"] is None and cfg["frame_end"] is None
+
+
 # ── batch_cli._write_results_sidecar (pure logic, no Qt) ────────────────
 
 def test_write_results_sidecar_round_trips_1d(tmp_path):

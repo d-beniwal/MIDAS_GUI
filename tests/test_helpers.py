@@ -270,6 +270,53 @@ def test_read_hdf5_stack_combined_ragged_last_chunk(tmp_path):
     np.testing.assert_allclose(out[-1], data[4:].mean(axis=0), rtol=1e-6)
 
 
+def test_read_hdf5_stack_combined_raw_start_end_filters_before_chunking(tmp_path):
+    """raw_start/raw_end restrict which raw sub-frames are combined at all,
+    applied BEFORE chunk_size splits whatever survives — frames outside the
+    range are never read into a chunk."""
+    from midas_gui.helpers import read_hdf5_stack_combined
+    path, data = _stack_file(tmp_path, 10)
+    out = read_hdf5_stack_combined(path, "exchange/data", chunk_size=3,
+                                   op="sum", raw_start=2, raw_end=7)
+    assert len(out) == 2
+    np.testing.assert_allclose(out[0], data[2:5].sum(axis=0), rtol=1e-6)
+    np.testing.assert_allclose(out[1], data[5:8].sum(axis=0), rtol=1e-6)
+
+
+def test_read_hdf5_stack_combined_raw_start_end_default_unbounded(tmp_path):
+    """A one-sided bound leaves the other side unbounded (start defaults to
+    0, end defaults to the dataset's last frame)."""
+    from midas_gui.helpers import read_hdf5_stack_combined
+    path, data = _stack_file(tmp_path, 6)
+    out_start = read_hdf5_stack_combined(path, "exchange/data", raw_start=4)
+    np.testing.assert_allclose(out_start[0], data[4:].mean(axis=0), rtol=1e-6)
+    out_end = read_hdf5_stack_combined(path, "exchange/data", raw_end=1)
+    np.testing.assert_allclose(out_end[0], data[:2].mean(axis=0), rtol=1e-6)
+
+
+def test_read_hdf5_stack_combined_raw_start_past_end_is_empty(tmp_path):
+    """An out-of-range/empty effective slice returns [] rather than raising
+    (e.g. a ZeroDivisionError-shaped `range(..., step=0)`)."""
+    from midas_gui.helpers import read_hdf5_stack_combined
+    path, _data = _stack_file(tmp_path, 5)
+    assert read_hdf5_stack_combined(path, "exchange/data", raw_start=10) == []
+    assert read_hdf5_stack_combined(path, "exchange/data", chunk_size=2, raw_start=10) == []
+
+
+def test_read_hdf5_stack_combined_raw_bounds_ignored_for_2d(tmp_path):
+    """A plain (H,W) dataset has nothing to sub-select — raw_start/raw_end
+    are ignored, same as chunk_size/op already are."""
+    h5py = pytest.importorskip("h5py")
+    from midas_gui.helpers import read_hdf5_stack_combined
+    img = np.arange(12, dtype=np.float32).reshape(3, 4)
+    with h5py.File(tmp_path / "flat2.h5", "w") as f:
+        f.create_dataset("exchange/data", data=img)
+    out = read_hdf5_stack_combined(tmp_path / "flat2.h5", "exchange/data",
+                                   raw_start=5, raw_end=9)
+    assert len(out) == 1
+    np.testing.assert_allclose(out[0], img)
+
+
 def test_read_hdf5_stack_combined_passes_2d_through(tmp_path):
     """A plain (H,W) dataset is already one frame; chunk_size/op are ignored."""
     h5py = pytest.importorskip("h5py")

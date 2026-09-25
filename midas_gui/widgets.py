@@ -3938,16 +3938,23 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._frame_row.setVisible(not self._hide_frame_field)
             card.body.addWidget(self._frame_row)
         else:  # stream
-            # start/end are always FILE (scan) numbers, never an index into
-            # sub-frames or "Combine sub-frames" chunks — that setting is
-            # completely orthogonal, controlling only how each file's own
-            # internal sub-frames combine into output frames. _autofill_
-            # frame_range keeps the live label below in sync with whichever
-            # case applies:
+            # start/end are FILE (scan) numbers for a multi-file selection,
+            # never an index into sub-frames or "Combine sub-frames" chunks —
+            # that setting is completely orthogonal, controlling only how
+            # each file's own internal sub-frames combine into output
+            # frames. _autofill_frame_range keeps the live label below in
+            # sync with whichever case applies:
             # • Several files (multi-select / folder / stem-recursive) →
             #   start/end are the smallest/largest scan number among them.
-            # • A single file → start/end lock to its own scan number (equal),
-            #   since there's exactly one file and nothing to range over.
+            # • A single file, non-unify_combine panel → start/end lock to
+            #   its own scan number (equal), since there's exactly one file
+            #   and nothing to range over.
+            # • A single file, unify_combine panel (Batch Integrate) → the
+            #   one exception: there's still no scan-number range to pick
+            #   from, but "Combine sub-frames" can now split the file's own
+            #   raw sub-frame stack into several output frames, so start/end
+            #   instead filter WHICH raw sub-frames (0-based, inclusive)
+            #   survive, before chunking.
             _fr_tip = (
                 "The scan/file NUMBER to start/end at (parsed from filenames "
                 "like ..._009243.vrx.h5 → 9243), not a frame index — end is "
@@ -3955,11 +3962,16 @@ class DataLoaderPanel(QtWidgets.QWidget):
                 "• Several files (folder / multi-select / stem search) → set "
                 "these to pick a sub-range of scan numbers; both default to "
                 "the full min…max found.\n"
-                "• A single file → start/end always equal that file's own "
-                "scan number and are disabled, since there's only one file "
-                "to process. Use 'Combine sub-frames' below to control how "
-                "its internal sub-frames combine into output frames — that's "
-                "unrelated to start/end.\n"
+                "• A single file (Pump Probe / a plain stream panel) → "
+                "start/end always equal that file's own scan number and are "
+                "disabled, since there's only one file to process. Use "
+                "'Combine sub-frames' below to control how its internal "
+                "sub-frames combine into output frames — that's unrelated "
+                "to start/end.\n"
+                "• A single file (Batch Integrate) → start/end instead pick "
+                "a 0-based RAW SUB-FRAME range (inclusive) within that one "
+                "file, bounded to its actual sub-frame count, applied "
+                "BEFORE 'Combine sub-frames' below chunks whatever survives.\n"
                 "• Other frame-indexed sources (e.g. a single multi-frame "
                 "stack) fall back to a plain 0-based index, end exclusive, "
                 "0 = all.")
@@ -4465,13 +4477,16 @@ class DataLoaderPanel(QtWidgets.QWidget):
         """A "Combine sub-frames" control (chunk size/op) changed — the
         cached preview frame (if any caller has asked for one via
         current_frame()) no longer reflects the current settings, and for a
-        single hdf5 source, start/end's displayed range (combined-frame
+        single hdf5 source, start/end's displayed hint (combined-frame
         count) depends on chunk_size too — see _autofill_frame_range's
         "combined-frame index" branch — so it needs recomputing here, not
-        just on source-path change."""
+        just on source-path change. ``reset_values=False``: start/end are
+        the user's own data-range pick, orthogonal to how sub-frames get
+        combined, so this must only refresh the hint text/bounds, never
+        snap start/end back to the full range."""
         if self._raw_source():
             self._stream_preview_dirty = True
-            self._autofill_frame_range()
+            self._autofill_frame_range(reset_values=False)
             self.dataChanged.emit()
 
     def _on_fields_changed_stream(self) -> None:
@@ -4961,11 +4976,22 @@ class DataLoaderPanel(QtWidgets.QWidget):
         from pathlib import Path
         raw = self._raw_source()
         if isinstance(raw, str) and is_h5(raw) and Path(raw).is_file():
-            return {"type": "hdf5", "path": raw, "dataset": self._dataset(),
-                    "chunk_size": (self._combine_chunk.value() or None)
-                                 if hasattr(self, "_combine_chunk") else None,
-                    "combine_op": (self._combine_op_combo.currentData()
-                                  if hasattr(self, "_combine_op_combo") else "mean")}
+            cfg = {"type": "hdf5", "path": raw, "dataset": self._dataset(),
+                   "chunk_size": (self._combine_chunk.value() or None)
+                                if hasattr(self, "_combine_chunk") else None,
+                   "combine_op": (self._combine_op_combo.currentData()
+                                 if hasattr(self, "_combine_op_combo") else "mean")}
+            if self._unify_combine:
+                # A single file has no scan-NUMBER range to filter by (see
+                # _frame_number_bounds, used by the multi-file types below) —
+                # instead these are a 0-based inclusive RAW SUB-FRAME range
+                # within this one file, always concrete (the raw count is
+                # always known up front here, unlike a scan-number range, so
+                # no "0 = unbounded" sentinel is needed — see
+                # _autofill_frame_range).
+                cfg["frame_start"] = self._fr_start.value()
+                cfg["frame_end"] = self._fr_end.value()
+            return cfg
         paths = raw if isinstance(raw, list) else (_collect_frame_paths(raw) if raw else [])
         # Drop dark acquisitions swept in by a folder/stem selection (the
         # beamline stores them alongside the scan they bracket) — see
@@ -5126,15 +5152,40 @@ class DataLoaderPanel(QtWidgets.QWidget):
         except Exception:
             return None
 
-    def _autofill_frame_range(self):
+    @staticmethod
+    def _single_hdf5_raw_count(path, dataset) -> int:
+        """True raw sub-frame count of one HDF5 file's dataset — header read
+        only (see ``workers._HDF5StackGlobSource._stat``), no pixel decode —
+        used by ``_autofill_frame_range`` to bound a unify_combine panel's
+        start/end spinboxes to this one file's own raw sub-frame range.
+        Returns ``0`` if the file/dataset can't be inspected."""
+        try:
+            from midas_gui.workers import _HDF5StackGlobSource
+            src = _HDF5StackGlobSource([path], dataset)
+            src._ensure_stats()
+            return int(src._raw_ns[0])
+        except Exception:
+            return 0
+
+    def _autofill_frame_range(self, reset_values: bool = True):
         """Fill start/end with the full valid range for the current source
         and describe what they mean, so the range can't silently select
-        nothing. start/end are always FILE (scan) numbers, never a sub-frame
-        or "Combine sub-frames"-chunk index — that setting is orthogonal.
-        Multi-file → min/max scan number among the files; single file →
-        locked equal to that one file's own scan number (parsed via
-        ``workers.froot_and_frame_num``), since there's only one file and
-        nothing to range over regardless of its internal chunk count."""
+        nothing. For every source EXCEPT a unify_combine panel's single HDF5
+        file, start/end are FILE (scan) numbers, never a sub-frame or
+        "Combine sub-frames"-chunk index — that setting is orthogonal.
+        Multi-file → min/max scan number among the files; single file (a
+        non-unify_combine panel) → locked equal to that one file's own scan
+        number (parsed via ``workers.froot_and_frame_num``), since there's
+        only one file and nothing to range over regardless of its internal
+        chunk count. A unify_combine panel's single file is the one
+        exception: there, start/end instead pick a 0-based inclusive RAW
+        SUB-FRAME range within that file (see the ``elif`` branch below).
+
+        ``reset_values=False`` (used when only "Combine sub-frames"
+        chunk/op changed, via ``_on_combine_changed``): recompute bounds and
+        the hint text only, leaving whatever start/end the user already
+        picked untouched — that range is a pick into the loaded data and is
+        orthogonal to how sub-frames get combined into output frames."""
         if self._mode != "stream" or not hasattr(self, "_fr_start"):
             return
         from pathlib import Path
@@ -5148,14 +5199,17 @@ class DataLoaderPanel(QtWidgets.QWidget):
         for w in (self._fr_start, self._fr_end):
             w.blockSignals(True)
         try:
-            # Reset from any previous single-combined-frame lock (below) so
-            # switching to a source that DOES have a real range to pick
-            # doesn't leave the controls stuck disabled.
+            # Reset from any previous single-file lock (below) so switching
+            # to a source that DOES have a real range to pick doesn't leave
+            # the controls stuck disabled or range-limited.
             self._fr_start.setEnabled(True)
             self._fr_end.setEnabled(True)
             self._fr_stride.setEnabled(True)
+            self._fr_start.setRange(0, 999999)
+            self._fr_end.setRange(0, 999999)
             if nums:
-                self._fr_start.setValue(min(nums)); self._fr_end.setValue(max(nums))
+                if reset_values:
+                    self._fr_start.setValue(min(nums)); self._fr_end.setValue(max(nums))
                 pfx = f"{self._file_prefix}_" if self._file_prefix else ""
                 extra = ""
                 n_dark = getattr(self, "_n_dark_skipped", 0)
@@ -5186,34 +5240,68 @@ class DataLoaderPanel(QtWidgets.QWidget):
                     f"start/end = file numbers ({len(nums)} files: {pfx}"
                     f"{min(nums):06d} … {pfx}{max(nums):06d}), end inclusive.{extra}")
             elif cfg.get("type") == "hdf5" and cfg.get("path"):
-                # start/end are always FILE numbers (see the "nums" branch
-                # above for the multi-file case) — never an index into this
-                # file's own sub-frames or "Combine sub-frames" chunks, which
-                # is an orthogonal setting. A single file is one file, so
-                # start=end=its own scan number and there's nothing to range
-                # over regardless of how many combined output frames
-                # "Combine sub-frames" below turns it into — frame_range()
-                # special-cases this via these widgets' disabled state
-                # rather than a literal index lookup.
                 froot, num, _tag = froot_and_frame_num(Path(cfg["path"]).stem, -1)
                 shown = num if num >= 0 else 0
-                self._fr_start.setValue(shown); self._fr_end.setValue(shown)
-                self._fr_stride.setValue(1)
-                self._fr_start.setEnabled(False)
-                self._fr_end.setEnabled(False)
-                self._fr_stride.setEnabled(False)
-                n = 0
-                try:
-                    from midas_gui.workers import _open_source_cfg
-                    n = int(getattr(_open_source_cfg(cfg), "n_frames", 0) or 0)
-                except Exception:
+                if self._unify_combine:
+                    # A single file has no scan-NUMBER range to pick from —
+                    # there's only one. Instead let start/end filter this
+                    # file's own raw sub-frames directly (0-based, inclusive),
+                    # applied BEFORE "Combine sub-frames" below chunks
+                    # whatever survives the filter.
+                    n_raw = self._single_hdf5_raw_count(cfg["path"], cfg.get("dataset", "frames"))
+                    hi = max(n_raw - 1, 0)
+                    self._fr_start.setRange(0, hi); self._fr_end.setRange(0, hi)
+                    if reset_values:
+                        self._fr_start.setValue(0); self._fr_end.setValue(hi)
+                        self._fr_stride.setValue(1)
+                    self._fr_start.setEnabled(n_raw > 1)
+                    self._fr_end.setEnabled(n_raw > 1)
+                    self._fr_stride.setEnabled(False)
+                    n_out = 0
+                    try:
+                        from midas_gui.workers import _open_source_cfg
+                        # Re-fetch cfg: with reset_values, start/end were
+                        # just reset to the full 0..hi range above, so the
+                        # stale `cfg` captured before that would report a
+                        # stale count either way.
+                        n_out = int(getattr(_open_source_cfg(self.source_cfg()),
+                                            "n_frames", 0) or 0)
+                    except Exception:
+                        n_out = 0
+                    produces = (f", produces {n_out} combined output frame(s) via "
+                               "'Combine sub-frames' below" if n_out and n_out != n_raw else "")
+                    self._fr_hint.setText(
+                        f"Single file (scan point {shown:06d}), {n_raw} raw "
+                        "sub-frame(s) — start/end pick a 0-based sub-frame "
+                        f"range (inclusive) within it{produces}.")
+                else:
+                    # start/end are always FILE numbers (see the "nums"
+                    # branch above for the multi-file case) — never an index
+                    # into this file's own sub-frames or "Combine sub-frames"
+                    # chunks, which is an orthogonal setting. A single file
+                    # is one file, so start=end=its own scan number and
+                    # there's nothing to range over regardless of how many
+                    # combined output frames "Combine sub-frames" below turns
+                    # it into — frame_range() special-cases this via these
+                    # widgets' disabled state rather than a literal index
+                    # lookup.
+                    self._fr_start.setValue(shown); self._fr_end.setValue(shown)
+                    self._fr_stride.setValue(1)
+                    self._fr_start.setEnabled(False)
+                    self._fr_end.setEnabled(False)
+                    self._fr_stride.setEnabled(False)
                     n = 0
-                produces = (f" (produces {n} combined output frames via "
-                            f"'Combine sub-frames' below)" if n > 1 else "")
-                self._fr_hint.setText(
-                    f"Single file (scan point {shown:06d}){produces} — the "
-                    "whole file is always processed as one source; nothing "
-                    "to select here.")
+                    try:
+                        from midas_gui.workers import _open_source_cfg
+                        n = int(getattr(_open_source_cfg(cfg), "n_frames", 0) or 0)
+                    except Exception:
+                        n = 0
+                    produces = (f" (produces {n} combined output frames via "
+                                f"'Combine sub-frames' below)" if n > 1 else "")
+                    self._fr_hint.setText(
+                        f"Single file (scan point {shown:06d}){produces} — the "
+                        "whole file is always processed as one source; nothing "
+                        "to select here.")
             else:
                 self._fr_hint.setText("")
         finally:

@@ -394,9 +394,6 @@ def test_unify_combine_source_cfg_gains_chunk_and_frame_bounds_for_tiff(tmp_path
     # is baked into source_cfg() instead (see workers._open_source_cfg).
     assert panel.frame_range() == (0, None, 1)
 
-    # Changing "Combine sub-frames" re-autofills start/end back to the full
-    # range (pre-existing DataLoaderPanel._on_combine_changed behavior, not
-    # unify_combine-specific) — so narrow the range AFTER setting chunk_size.
     panel._combine_chunk.setValue(2)
     panel._fr_start.setValue(9242)
     panel._fr_end.setValue(9244)
@@ -407,6 +404,16 @@ def test_unify_combine_source_cfg_gains_chunk_and_frame_bounds_for_tiff(tmp_path
     src = wk._open_source_cfg(cfg2)
     assert src.n_frames == 2
     assert [fid for fid, _ in src] == ["scan_009242.frame_0_1", "scan_009244"]
+
+    # Regression: changing "Combine sub-frames" (chunk size or op) AFTER
+    # start/end were narrowed must NOT snap them back to the full range —
+    # that pick is the user's own data-range selection, orthogonal to how
+    # sub-frames combine (DataLoaderPanel._on_combine_changed).
+    panel._combine_op_combo.setCurrentIndex(
+        panel._combine_op_combo.findData("sum"))
+    assert (panel._fr_start.value(), panel._fr_end.value()) == (9242, 9244)
+    panel._combine_chunk.setValue(3)
+    assert (panel._fr_start.value(), panel._fr_end.value()) == (9242, 9244)
 
 
 def test_unify_combine_explicit_multi_file_pick_gains_frame_bounds(tmp_path):
@@ -448,6 +455,99 @@ def test_unify_combine_hdf5_stack_glob_also_gains_frame_bounds(tmp_path):
     src = wk._open_source_cfg(cfg2)
     # Only the middle file survives the filter -> its own 4 combined chunks.
     assert src.n_frames == 4
+
+
+# ── unify_combine: single HDF5 file's start/end filter its own raw sub-frames ──
+
+def test_unify_combine_single_hdf5_file_start_end_span_full_raw_count(tmp_path):
+    """A single bare HDF5 file has no scan-NUMBER range (there's only one
+    file) — a unify_combine panel instead bounds start/end to the file's own
+    raw sub-frame count and defaults to the full range."""
+    pytest.importorskip("h5py")
+    W, _app = _make_app_and_module()
+    p = tmp_path / "scan_009243.h5"
+    _make_h5_stack(p, n_raw=10)
+
+    panel = W.DataLoaderPanel(mode="stream", unify_combine=True)
+    panel._path_ed.setText(str(p))
+    panel._autofill_frame_range()
+
+    assert panel.source_cfg()["type"] == "hdf5"
+    assert panel._fr_start.minimum() == 0 and panel._fr_start.maximum() == 9
+    assert panel._fr_end.minimum() == 0 and panel._fr_end.maximum() == 9
+    assert panel._fr_start.isEnabled() and panel._fr_end.isEnabled()
+    assert (panel._fr_start.value(), panel._fr_end.value()) == (0, 9)
+
+    cfg = panel.source_cfg()
+    assert (cfg["frame_start"], cfg["frame_end"]) == (0, 9)
+    assert panel.frame_range() == (0, None, 1)
+
+    import midas_gui.workers as wk
+    # chunk_size defaults to 1 (no combining) -> one output frame per raw
+    # sub-frame, all 10 survive the unfiltered (0, 9) range.
+    assert wk._open_source_cfg(cfg).n_frames == 10
+
+
+def test_unify_combine_single_hdf5_file_start_end_filter_raw_subframes(tmp_path):
+    """Narrowing start/end filters the file's raw sub-frames BEFORE
+    "Combine sub-frames" chunks whatever survives — a 10-raw-frame file
+    restricted to [2, 7] with chunk_size=3 combines only 2..4 and 5..7."""
+    pytest.importorskip("h5py")
+    W, _app = _make_app_and_module()
+    p = tmp_path / "scan_009243.h5"
+    _make_h5_stack(p, n_raw=10)
+
+    panel = W.DataLoaderPanel(mode="stream", unify_combine=True)
+    panel._path_ed.setText(str(p))
+    panel._combine_chunk.setValue(3)
+    panel._autofill_frame_range()
+    panel._fr_start.setValue(2)
+    panel._fr_end.setValue(7)
+
+    cfg = panel.source_cfg()
+    assert (cfg["frame_start"], cfg["frame_end"], cfg["chunk_size"]) == (2, 7, 3)
+
+    import midas_gui.workers as wk
+    src = wk._open_source_cfg(cfg)
+    assert src.n_frames == 2
+    assert [fid for fid, _ in src] == ["scan_009243.frame_2_4", "scan_009243.frame_5_7"]
+
+
+def test_unify_combine_single_hdf5_file_single_raw_frame_disables_start_end(tmp_path):
+    """A single raw sub-frame (nothing to range over) disables start/end,
+    same spirit as the pre-existing scan-number lock for a non-unify_combine
+    panel — just gated on the raw count instead of the file count."""
+    pytest.importorskip("h5py")
+    W, _app = _make_app_and_module()
+    p = tmp_path / "scan_009243.h5"
+    _make_h5_stack(p, n_raw=1)
+
+    panel = W.DataLoaderPanel(mode="stream", unify_combine=True)
+    panel._path_ed.setText(str(p))
+    panel._autofill_frame_range()
+
+    assert not panel._fr_start.isEnabled()
+    assert not panel._fr_end.isEnabled()
+    assert (panel._fr_start.value(), panel._fr_end.value()) == (0, 0)
+
+
+def test_unify_combine_off_single_hdf5_file_keeps_legacy_scan_number_lock(tmp_path):
+    """Every non-unify_combine consumer (Pump Probe, a bare-constructed
+    panel) must keep today's behavior byte-identical: start/end lock to the
+    file's own scan number and are disabled, regardless of raw frame count."""
+    pytest.importorskip("h5py")
+    W, _app = _make_app_and_module()
+    p = tmp_path / "scan_009243.h5"
+    _make_h5_stack(p, n_raw=10)
+
+    panel = W.DataLoaderPanel(mode="stream")
+    panel._path_ed.setText(str(p))
+    panel._autofill_frame_range()
+
+    assert not panel._fr_start.isEnabled()
+    assert not panel._fr_end.isEnabled()
+    assert (panel._fr_start.value(), panel._fr_end.value()) == (9243, 9243)
+    assert "frame_start" not in panel.source_cfg()
 
 
 def test_resolve_worker_count_shrinks_to_minimum_ten_per_worker():

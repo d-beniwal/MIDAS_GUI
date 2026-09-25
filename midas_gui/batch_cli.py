@@ -53,12 +53,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--kernel", default="subpixel2",
                    choices=["hard", "subpixel2", "subpixel4", "polygon"])
 
-    # frame-start/frame-end are FILE/SCAN NUMBERS (parsed from filenames), not
-    # frame indices — None (the default, unset) means unbounded on that side.
-    # Ignored for a single "hdf5" source (nothing to range over — see
-    # widgets.DataLoaderPanel.source_cfg). chunk-size/combine-op mirror the
-    # GUI's "Combine sub-frames" control: 0 = combine everything selected
-    # into one frame, 1 (default) = no combining.
+    # frame-start/frame-end are FILE/SCAN NUMBERS (parsed from filenames) for
+    # every multi-file source-type, not frame indices — None (the default,
+    # unset) means unbounded on that side. For a single "hdf5" source they
+    # instead mean a 0-based inclusive RAW SUB-FRAME range within that one
+    # file (see widgets.DataLoaderPanel.source_cfg's "hdf5" branch), applied
+    # before chunk-size combines whatever survives. chunk-size/combine-op
+    # mirror the GUI's "Combine sub-frames" control: 0 = combine everything
+    # selected into one frame, 1 (default) = no combining.
     p.add_argument("--frame-start", type=int, default=None)
     p.add_argument("--frame-end", type=int, default=None)
     p.add_argument("--chunk-size", type=int, default=1)
@@ -99,7 +101,8 @@ def _source_cfg(args) -> dict:
     if args.source_type == "hdf5":
         if not args.source_path:
             raise SystemExit("--source-path is required for --source-type hdf5")
-        return {"type": "hdf5", "path": args.source_path, "dataset": args.dataset, **combine}
+        return {"type": "hdf5", "path": args.source_path, "dataset": args.dataset,
+                "frame_start": args.frame_start, "frame_end": args.frame_end, **combine}
     if args.source_type == "tiff_list":
         if not args.source_paths:
             raise SystemExit("--source-paths is required for --source-type tiff_list")
