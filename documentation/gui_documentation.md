@@ -2079,6 +2079,20 @@ text names whichever formats are currently checked (e.g. "Output format:
 CSV, XYE ▾") so the selection is visible without opening the menu — the
 checkboxes themselves no longer take up permanent space in the Output
 card.
+
+**Zarr's environmental metadata (stopgap).** The `zarr` output format's
+per-frame `OmegaSumFrame` attrs, and its `provenance_history` entry, also try
+to carry the real beam-monitor ion chamber (`I0`, and `I` when the setup has
+one) and sample-stage motor positions — not just Temperature/Pressure. Since
+the file's own `active_instrument` field is currently always empty at this
+beamline (a known, open DAQ-side gap — not something this GUI can read
+around), **which hutch a source belongs to is inferred from its path**
+(`varexE`/`varexD`, case-insensitive) rather than read from the file. An
+unrecognized path attempts none of this — same graceful "not available for
+this source" behavior Temperature/Pressure already have. Full per-station
+mapping, and why each simplification was chosen, is in
+`.context/DECISIONS.md`.
+
 Right panel: live **Waterfall** and **Stacked profiles** — both have an **x**
 selector to show the axis in **R (px) / 2θ (°) / Q (Å⁻¹)** (converted from the run's
 calibration). Both plots are bounded to their own data extent (like the main image

@@ -1361,13 +1361,14 @@ class BatchWorker(QtCore.QThread):
                     # chunk included, with the frames it covers visible in
                     # the filename.
                     zarr_path = zarr_dir / f"{fid}.ave.zarr.zip"
-                    # Instrument metadata (temperature/pressure/storage-ring
-                    # current), when the source can provide it (HDF5 stacks
-                    # only — see _HDF5StackGlobSource.metadata_for_index) —
-                    # always the mean across this chunk's raw sub-frames,
-                    # regardless of the pixel combine op, and already
-                    # aligned to the light-frame timestamps rather than a
-                    # longer light+dark metadata array.
+                    # Instrument metadata (temperature/pressure/ion-chamber/
+                    # sample-motor positions), when the source can provide it
+                    # (HDF5 stacks only — see
+                    # _HDF5StackGlobSource.metadata_for_index) — always the
+                    # mean across this chunk's raw sub-frames, regardless of
+                    # the pixel combine op, and already aligned to the
+                    # light-frame timestamps rather than a longer
+                    # light+dark metadata array.
                     meta = None
                     get_meta = getattr(source, "metadata_for_index", None)
                     if get_meta is not None:
@@ -1375,22 +1376,47 @@ class BatchWorker(QtCore.QThread):
                             meta = get_meta(abs_i)
                         except Exception:
                             meta = None
-                    temps = pressures = currents = None
+                    temps = pressures = currents = currents_i0 = None
+                    ring_current = sample_motors = None
                     if meta:
                         if meta.get("temperature") is not None:
                             temps = [meta["temperature"]]
                         if meta.get("pressure") is not None:
                             pressures = [meta["pressure"]]
-                        if meta.get("current") is not None:
-                            currents = [meta["current"]]
+                        # Real beam-monitor ion chambers (stopgap per-hutch
+                        # mapping — see _HDF5StackGlobSource._ION_CHAMBER_H5_PATHS)
+                        # go into the writer's own I/I0 slots. Storage-ring
+                        # current is a different quantity entirely — it used
+                        # to be mistakenly written into the "I" slot; it now
+                        # rides along in the provenance entry's `extra`
+                        # instead (below), not in the zarr's own attrs.
+                        if meta.get("ion_chamber_i") is not None:
+                            currents = [meta["ion_chamber_i"]]
+                        if meta.get("ion_chamber_i0") is not None:
+                            currents_i0 = [meta["ion_chamber_i0"]]
+                        ring_current = meta.get("current")
+                        sample_motors = {k[len("motor:"):]: v
+                                        for k, v in meta.items()
+                                        if k.startswith("motor:") and v is not None}
                     try:
                         write_gsas_zarr_zip(
                             zarr_path, [cake_2d], spec=spec,
                             omegas=[float(abs_i)], bin_area=zarr_bin_area,
                             temperatures=temps, pressures=pressures,
-                            currents=currents)
+                            currents=currents, currents_i0=currents_i0)
                         try:
-                            provenance.append_to_zip(zarr_path, zarr_prov_entry)
+                            # Per-frame provenance: the shared zarr_prov_entry
+                            # (built once, run-level) plus whatever per-frame
+                            # environment this specific frame actually had —
+                            # a shallow copy so different frames' entries
+                            # don't share (and silently overwrite) `extra`.
+                            frame_extra = dict(zarr_prov_entry.get("extra") or {})
+                            if ring_current is not None:
+                                frame_extra["storage_ring_current_mA"] = ring_current
+                            if sample_motors:
+                                frame_extra["sample_motors"] = sample_motors
+                            frame_prov_entry = dict(zarr_prov_entry, extra=frame_extra)
+                            provenance.append_to_zip(zarr_path, frame_prov_entry)
                         except Exception:
                             self.log_line.emit(
                                 f"[batch] note: provenance stamp on {zarr_path.name} "
@@ -1709,7 +1735,37 @@ class _HDF5StackGlobSource:
     _METADATA_H5_PATHS = {
         "temperature": "instrument/GSAS2_PVS/Temperature",
         "pressure": "instrument/GSAS2_PVS/Pressure",
-        "current": "instrument/StorageRing/SRCurrent",
+        "current": "instrument/StorageRing/SRCurrent",  # storage-ring current (mA) —
+        # NOT a beam monitor; see ion_chamber_i0/i below for the real thing.
+    }
+
+    #: Real beam-monitor ion chambers, by hutch — stopgap mapping, from the
+    #: beamline's own confirmation (cross-checked against
+    #: ~/mnt/s1b/bluesky_dev/mpe_xml/20ide_instr_attributes_trans.xml) rather
+    #: than the HDF5 file's own ``active_instrument`` (documented upstream as
+    #: currently always empty, so it can't be used to pick a hutch). D hutch
+    #: has no transmission monitor yet, hence no "i" entry there. E hutch's
+    #: "i" is itself setup-dependent (a pin diode, "D2PD", when present; a
+    #: dedicated SAXS ion chamber doesn't exist yet) — ``_read_metadata``'s
+    #: existing "path declared but absent in this file" handling already
+    #: degrades that to None gracefully, which doubles as the auto-detect.
+    #: Station A is deliberately excluded: no sample sits in its beam path,
+    #: so its scalers (however I0/I1-suggestive their names) aren't a
+    #: per-sample monitor pair.
+    _ION_CHAMBER_H5_PATHS = {
+        "D": {"ion_chamber_i0": "instrument/Scalers/D/IC2"},
+        "E": {"ion_chamber_i0": "instrument/Scalers/E/US_IC",
+              "ion_chamber_i": "instrument/Scalers/E/D2PD"},
+    }
+
+    #: Sample-motion-system motor groups, by hutch. E hutch has two
+    #: coexisting sub-configs (HL/HR) with no reliable way to tell which is
+    #: physically in use for a given file (same active_instrument gap, one
+    #: level down) — captured both rather than guessing; see
+    #: ``_read_sample_motors``.
+    _SAMPLE_MOTOR_H5_GROUPS = {
+        "D": ["instrument/SMS/D/HR"],
+        "E": ["instrument/SMS/E/HL", "instrument/SMS/E/HR"],
     }
 
     def __init__(self, paths, dataset: str, *, chunk_size=None, op: str = "mean"):
@@ -1721,6 +1777,32 @@ class _HDF5StackGlobSource:
         self._counts: Optional[list] = None    # per-file combined-frame count
         self._raw_ns: Optional[list] = None    # per-file raw (pre-combine) sub-frame count
         self._metadata_cache: dict = {}   # path index -> {name: np.ndarray|None}
+        self._hutch = self._resolve_hutch()
+
+    def _resolve_hutch(self) -> Optional[str]:
+        """Stopgap hutch detection: the HDF5 file's own ``active_instrument``
+        is documented as always empty upstream (no reliable per-file signal),
+        so infer it from the source path instead — ``varexE``/``varexD`` in
+        the folder name, case-insensitive, checked against the first
+        selected path. ``None`` (unrecognized layout) means every
+        ion-chamber/sample-motor field below is simply skipped, same as any
+        other "not available for this source" case."""
+        if not self._paths:
+            return None
+        text = str(self._paths[0]).lower()
+        if "varexe" in text:
+            return "E"
+        if "varexd" in text:
+            return "D"
+        return None
+
+    def _metadata_h5_paths(self) -> dict:
+        """Flat ``{key: h5_path}`` table for this source's hutch: the fixed
+        temperature/pressure/current entries plus whichever ion-chamber
+        entries apply (none, for an unrecognized hutch)."""
+        paths = dict(self._METADATA_H5_PATHS)
+        paths.update(self._ION_CHAMBER_H5_PATHS.get(self._hutch, {}))
+        return paths
 
     def _stat(self, i: int) -> tuple:
         """``(n_chunks, raw_n)`` for file ``i`` — from its dataset shape
@@ -1830,25 +1912,49 @@ class _HDF5StackGlobSource:
         ``_stat``. Missing datasets/unreadable files come back as ``None``
         per key rather than raising, since not every source has this
         metadata (e.g. a non-VAREX HDF5 schema, or a differently-named
-        instrument group)."""
+        instrument group). Keys prefixed ``motor:`` are per-channel
+        sample-motion-system positions (see ``_read_sample_motors``); every
+        other key is a single scalar-per-acquisition quantity."""
         cached = self._metadata_cache.get(i)
         if cached is not None:
             return cached
-        out = {k: None for k in self._METADATA_H5_PATHS}
+        metadata_h5_paths = self._metadata_h5_paths()
+        out = {k: None for k in metadata_h5_paths}
         try:
             import h5py
             self._ensure_stats()
             n_data = self._raw_ns[i]
             with h5py.File(str(self._paths[i]), "r") as f:
                 n_aligned = self._metadata_frame_count(f, n_data)
-                for key, h5_path in self._METADATA_H5_PATHS.items():
+                for key, h5_path in metadata_h5_paths.items():
                     if h5_path in f:
                         arr = np.asarray(f[h5_path][()], dtype=np.float64)
                         if arr.ndim == 1 and arr.size >= n_aligned:
                             out[key] = arr[:n_aligned]
+                out.update(self._read_sample_motors(f, n_aligned))
         except Exception:
             pass
         self._metadata_cache[i] = out
+        return out
+
+    def _read_sample_motors(self, f, n_aligned: int) -> dict:
+        """Every channel under this hutch's sample-motion-system group(s)
+        (``_SAMPLE_MOTOR_H5_GROUPS``), keyed ``"motor:<group-leaf>/<channel>"``
+        (e.g. ``"motor:HR/samX"``) so E hutch's two coexisting sub-configs
+        (HL/HR — no reliable way to tell which is physically in use for a
+        given file, same gap as hutch detection itself) don't collide.
+        Channel names vary between groups (D's HR set differs from E's), so
+        this discovers them from the file rather than hardcoding a list."""
+        out: dict = {}
+        for group_path in self._SAMPLE_MOTOR_H5_GROUPS.get(self._hutch, []):
+            if group_path not in f:
+                continue
+            leaf = group_path.rsplit("/", 1)[-1]
+            group = f[group_path]
+            for channel in group.keys():
+                arr = np.asarray(group[channel][()], dtype=np.float64)
+                if arr.ndim == 1 and arr.size >= n_aligned:
+                    out[f"motor:{leaf}/{channel}"] = arr[:n_aligned]
         return out
 
     def metadata_for_index(self, idx: int) -> dict:

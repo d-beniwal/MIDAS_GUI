@@ -8,6 +8,71 @@ file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this
 date for the full uncondensed entries if ever needed._
 
+## 2026-09-25 — Real ion-chamber + sample-motor metadata in zarr output (stopgap)
+
+While checking the (separately-branched) Zarr Viewer tab against a real
+`.ave.zarr.zip`, the user asked why the file had no ion-chamber or
+sample-manipulation-system metadata. Traced the actual bug and gathered the
+real per-station facts directly from the user plus the beamline's own
+HDF5-layout docs (`~/mnt/s1b/bluesky_dev/mpe_xml/docs/hdf5_layout_overview.md`)
+and attribute-translation XML (`20ide_instr_attributes_trans.xml`).
+
+**The bug.** `GSASZarrWriter` (the shared `midas_integrate_v2` writer) has two
+real per-frame beam-monitor slots, `"I"`/`"I0"` (GSAS-II's ion-chamber-
+intensity convention). MIDAS_GUI never read an actual ion chamber — it read
+**storage-ring current** (`instrument/StorageRing/SRCurrent`) and wrote that
+into `"I"` instead; `"I0"` was never populated at all. What looked like a
+beam-monitor reading in the file (`"I": 200.025`) was APS ring current in mA.
+Sample-stage motor positions had no code path anywhere — not read, not
+written, not attempted. (`GSAS2_PVS/Temperature`/`Pressure` reading NaN,
+separately, is *not* a MIDAS_GUI bug: the raw source file has NaN there too,
+confirmed against the same layout docs — "Placeholder PVs... until
+repointed.")
+
+**Real per-station mapping** (I0 = incident, I = transmitted):
+
+| Hutch | I0 | I |
+|---|---|---|
+| D | `instrument/Scalers/D/IC2` (confirmed: `IC2D` = `20dT1:TM:Current1`, the first TetrAMM channel) | doesn't exist yet |
+| E | `instrument/Scalers/E/US_IC` | setup-dependent: `instrument/Scalers/E/D2PD` (pin diode) when present, else none |
+| A | n/a | n/a — no sample in station A's beam path; its `IC4_foil_I0`/`IC5_foil_I1` names are misleading for this purpose, not a per-sample monitor pair |
+
+Sample-stage motors (`instrument/SMS/<hutch>/...`): D has one config (`HR`);
+E has two coexisting ones (`HL`, `HR`) with no reliable signal for which is
+physically in use — on the one real file checked, `HL`'s channels held real
+values and `HR`'s were all NaN, i.e. the data itself already shows which was
+active. Captured both rather than guessing, for exactly that reason.
+
+**Why hutch detection is path-based, not file-based.** The file's own
+`active_instrument` field (meant to say which hutch/station produced it) is
+empty in every real file checked, and is independently documented as a known,
+open gap in the same beamline docs repo ("`active_instrument` is currently
+empty. Populating it from Bluesky would let downstream tooling select an
+analysis pipeline automatically.") — so it can't be read from the file today.
+Resolved instead from the source path containing `varexE`/`varexD`
+(case-insensitive), one level in `_HDF5StackGlobSource._resolve_hutch()`.
+
+**Explicitly a stopgap** (the user's own framing) — three simplifications,
+deliberately not built out further:
+- No Preferences UI for any of this; no configurable station/monitor mapping.
+- E hutch's `I` is auto-detected (present only when `D2PD` exists in the
+  file) rather than made user-configurable, even though which channel is
+  "the" transmission monitor is genuinely setup-dependent.
+- E's `HL`/`HR` ambiguity is resolved by capturing both, not by picking one.
+
+**Where each field landed.** Real ion-chamber I/I0 go into the writer's
+existing `currents`/`currents_i0` slots (`write_gsas_zarr_zip` already
+accepted `currents_i0`; nothing in MIDAS_GUI ever passed it before). Storage
+current relocates to the provenance entry's `extra['storage_ring_current_mA']`
+instead of the `"I"` slot it was squatting in. Sample motors have no writer
+slot at all (`GSASZarrWriter` only knows temperature/pressure/current/
+current_i0), so they go into `extra['sample_motors']` — `provenance.py`
+needed no code change, since `build_entry(..., extra=...)` already accepts an
+arbitrary dict verbatim. `zarr_prov_entry` used to be built once and reused
+verbatim for every frame in a run; since ring current and sample motors are
+per-frame quantities, each frame's `append_to_zip` call now uses a shallow
+copy with a per-frame `extra`, not the shared object.
+
 ## 2026-09-24 — Upstream's frozen-point native-pipeline switch outruns the pinned backend; guarded, not reverted
 
 Merging `upstream/main` brought in `1893e97 Drop vendored frozen_point_calib now
