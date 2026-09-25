@@ -25,9 +25,17 @@ import pytest
 from midas_calibrate.params import CalibrationParams
 from midas_calibrate.rings import build_ring_table
 
-from midas_calibrate_v2.pipelines import (
-    autocalibrate_frozen_point, iterate_frozen_point_until_stable,
-)
+# The frozen-point pipeline moved out of this repo's _vendor/ and into the
+# backend, but it only appears in midas-calibrate-v2 releases newer than the
+# 0.17.0 environment.yml currently pins. Skip rather than abort collection, the
+# same way the midas_integrate dependency below is handled.
+_pipelines = pytest.importorskip("midas_calibrate_v2.pipelines")
+autocalibrate_frozen_point = getattr(_pipelines, "autocalibrate_frozen_point", None)
+iterate_frozen_point_until_stable = getattr(
+    _pipelines, "iterate_frozen_point_until_stable", None)
+if autocalibrate_frozen_point is None or iterate_frozen_point_until_stable is None:
+    pytest.skip("installed midas-calibrate-v2 predates the frozen-point pipeline",
+                allow_module_level=True)
 
 pytest.importorskip("midas_integrate")
 
