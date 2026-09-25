@@ -8,6 +8,101 @@ file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this
 date for the full uncondensed entries if ever needed._
 
+## 2026-09-24 — Zarr Viewer: a standalone top-level tab, matplotlib, hidden pending a live check
+
+Ported `mpe_wf_saxs_waxs/gui_view_zarr.py` (a zarr tree browser + plot canvas
+for MIDAS `.zarr.zip` files) in as `tab_zarrviewer.ZarrViewerTab`, at the
+user's request, once the terminology/lab-frame PR was out the door.
+
+**Placement: asked, didn't assume.** The screenshot that prompted this showed
+Batch Integrate's own results tab bar (Detector view / Waterfall / Stacked
+profiles / Eta-R cakes / Logs — `tab_batch.py`'s `_view_tabs`), which reads as
+a plausible home for "a new tab in ___". Asked directly rather than guessing;
+the answer was a **standalone top-level app tab**, not a Batch Integrate
+sub-tab — a general-purpose `.zarr.zip` browser, not tied to any one run.
+Toggled from Preferences ▸ Tabs like Corrections/PDF/Texture, added to
+`constants.OPTIONAL_TABS` and `app.py`'s `_tab_specs` right after Batch
+Integrate/Batch Queue (it's a consumer of Batch Integrate's output) and
+before Corrections.
+
+**Matplotlib, not pyqtgraph.** Same call `peak_fit_panel.py` already made and
+documented for the same reason: no existing pyqtgraph-based zarr
+tree/attribute browser to build on, and matplotlib is already an environment
+dependency. This is MIDAS_GUI's second embedded matplotlib canvas.
+
+**Ships hidden.** Not added to `DEFAULT_VISIBLE_TABS` — the underlying
+browsing/plotting logic has been in daily use as a standalone tool for a
+while, but its integration as a tab *here* hasn't had eyes on a live
+rendering yet (this repo's standing constraint: the Qt GUI can't be verified
+beyond an offscreen import/build check without an X11/VNC session). Same
+treatment as every other WIP tab — flip it on in Preferences once confirmed
+live, or ask for `DEFAULT_VISIBLE_TABS` to be updated.
+
+**Kept vs. dropped from the source** (see the new file's own docstring for
+the full list): kept every control and all plotting/axis-conversion logic
+method-for-method. Dropped the standalone `QMainWindow` shell (window title,
+font-size combo, Exit button — the app's own tab chrome and
+`constants.DEFAULT_UI_SCALE` already cover this), the `PySide6`/`QT_BACKEND`
+fallback (PyQt5 only, like everywhere else in this app), and any
+`closeEvent`-driven store cleanup (a tab widget embedded in the main window's
+`QTabWidget` never reliably receives its own `closeEvent` — only top-level
+windows do — so that would have been dead code; `_load_file` already closes
+the previous `zarr.ZipStore` before opening the next one, which is the part
+that actually matters). No cross-tab wiring and no saved-project state: it's
+opened via its own file dialog, and none of its plot/display state is
+meaningful to persist into a Project file.
+
+**Tests build a real fixture rather than a fake store.** `test_tab_zarrviewer.py`
+reuses `test_batch_zarr_output.py`'s `BatchWorker` fixture-building pattern to
+produce one real `.ave.zarr.zip`, so the tests exercise the actual production
+schema (real `REtaMap`, real group layout) instead of an invented one.
+
+**While in there: provenance field parity with mpe_wf.** Before trusting the
+viewer against real files, diffed `midas_gui/provenance.py` field-by-field
+against its source, mpe_wf_saxs_waxs's own `provenance.py` — see the entry
+immediately below for that finding. The zarr array/group schema itself needed
+no reconciliation (same shared backend writer, verified empirically).
+
+## 2026-09-24 — Provenance: script/script_sha256/tag brought into parity with mpe_wf
+
+Asked to make sure the zarr writer's "metadata and provenance structure and
+content are identical to the development in mpe_wf_saxs_waxs" (prompted by
+building the Zarr Viewer above against real output). Two things to check,
+kept separate since they have very different answers:
+
+**The zarr array/group schema** (`REtaMap`, `InstrumentParameters/<key>`,
+`Omegas`, `provenance_history`) needed no reconciliation at all — both
+projects' single-panel `.zarr.zip` files go through the same shared backend
+writer, `midas_integrate_v2.io.zarr_gsas.write_gsas_zarr_zip` (`gsas_export.py`
+calls it directly, and Batch Integrate's "zarr" output format goes through
+it via `workers.py`), so it's identical by construction. Verified empirically
+rather than trusted: built a real fixture via `BatchWorker` and confirmed its
+tree matches what mpe_wf's own `combine_hydra_zarr.py` expects from every
+panel it merges (that script's docstring spells out the exact schema it
+requires — a strong independent check).
+
+**The `provenance_history` entry schema** (`midas_gui/provenance.py`,
+originally ported from mpe_wf's own `provenance.py`) did have two real,
+unintentional gaps, found by a field-by-field diff of the two `build_entry()`/
+`_git_rev()` implementations:
+- `script`/`script_sha256` — the running entry-point's resolved path and
+  content hash, letting a reader tell a locally-modified/uncommitted script
+  apart from the git commit recorded alongside it. Added.
+- `tag` on `_git_rev()` — the nearest reachable annotated git tag, separate
+  from `describe`'s "N commits past a tag" form. Added.
+
+Everything else that differs between the two files — MIDAS_GUI's
+`midas_gui`/`backends` fields replacing mpe_wf's `git`/`mpe_wf`/`midas`
+git-repo trio, and no standalone `git` field — is the *already-documented*,
+deliberate one-repo/PyPI-backend adaptation from when `provenance.py` was
+first ported (MIDAS_GUI doesn't vendor a MIDAS git checkout, so backend
+identity is PyPI package versions instead of a second repo's git info; a
+separate `git` field would be redundant with `midas_gui` here anyway, since
+there's only ever the one repo). Not a gap, so left alone. Also didn't port
+mpe_wf's `read_cake_csv()`: MIDAS_GUI already has the equivalent
+(`cake_params.parse_cake_csv`) in its own module — an existing deliberate
+refactor, not a missing function.
+
 ## 2026-09-24 — Upstream's frozen-point native-pipeline switch outruns the pinned backend; guarded, not reverted
 
 Merging `upstream/main` brought in `1893e97 Drop vendored frozen_point_calib now
