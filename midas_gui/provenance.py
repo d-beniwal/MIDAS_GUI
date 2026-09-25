@@ -11,6 +11,21 @@ installed package versions instead of a second repo's git info; and MIDAS_GUI
 writes to both zarr (new cake output) and HDF5 (existing project/Batch
 Integrate output), so there are two storage adapters instead of one.
 
+2026-09-25: brought ``script``/``script_sha256`` (in ``build_entry``) and
+``tag`` (in ``_git_rev``) back into parity with the source's fields — a
+direct field-by-field diff against mpe_wf_saxs_waxs's ``provenance.py``
+turned these up as the only unintentional gaps; everything else that
+differs (``midas_gui``/``backends`` replacing ``git``/``mpe_wf``/``midas``,
+and no standalone ``git`` field) is the deliberate, already-documented
+one-repo/PyPI-backend adaptation above, not a gap. The zarr array/group
+schema itself (``REtaMap``, ``InstrumentParameters/<key>``, ``Omegas``,
+``provenance_history``) needed no reconciliation: both projects' single-panel
+``.zarr.zip`` files go through the same shared backend writer
+(``midas_integrate_v2.io.zarr_gsas.write_gsas_zarr_zip`` — see
+``midas_gui/gsas_export.py``'s docstring), so it's identical by
+construction, verified against mpe_wf's own ``combine_hydra_zarr.py``
+(which expects exactly this layout from every panel it merges).
+
 Public entry points
 --------------------
 build_entry(tool, *, inputs=(), cake_params=None, instrument_params=None,
@@ -78,6 +93,8 @@ def build_entry(tool: str,
     else:
         command_str = str(command)
 
+    script = os.path.realpath(sys.argv[0]) if sys.argv and sys.argv[0] else ''
+
     entry = {
         'tool':         tool,
         'utc_time':     datetime.now(timezone.utc).isoformat(timespec='seconds'),
@@ -85,6 +102,8 @@ def build_entry(tool: str,
         'user':         _safe_user(),
         'cwd':          os.getcwd(),
         'command':      command_str,
+        'script':       script,
+        'script_sha256': _file_sha256(script) if script and os.path.isfile(script) else None,
         'midas_gui':    _repo_info(_resolve_midas_gui_dir()),
         'backends':     _backend_versions(),
         'python':       sys.version.split()[0],
@@ -283,12 +302,18 @@ def _git_rev(repo_dir: str) -> dict | None:
         describe = subprocess.run(
             ['git', '-C', repo_dir, 'describe', '--tags', '--always', '--dirty'],
             capture_output=True, text=True, timeout=2).stdout.strip()
+        # Latest annotated tag reachable, if any (separate from describe so
+        # callers can distinguish "tagged exactly" vs "N commits past").
+        tag = subprocess.run(
+            ['git', '-C', repo_dir, 'describe', '--tags', '--abbrev=0'],
+            capture_output=True, text=True, timeout=2).stdout.strip()
         return {
             'commit':   rev.stdout.strip(),
             'short':    short,
             'branch':   branch or None,
             'dirty':    bool(dirty),
             'describe': describe or None,
+            'tag':      tag or None,
         }
     except (OSError, subprocess.TimeoutExpired):
         return None

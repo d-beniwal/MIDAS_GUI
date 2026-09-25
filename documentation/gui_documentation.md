@@ -27,7 +27,7 @@ a Detector-view preview, single-detector and Hydra. Summary:
 Previously (2026-08-31): Analysis provenance now records the workstation it
 ran on; Hydra's Overall Eta vs R Cake now correctly spans the full
 azimuthal range. Summary:
-- **Workstation provenance** (§16/§17): every Mask/Calibrate/Batch
+- **Workstation provenance** (§17/§17): every Mask/Calibrate/Batch
   Integrate attempt's recorded `environment` snapshot gains a
   `workstation` block — hostname, OS name/release/version, CPU model,
   logical/physical core counts, and total RAM — so a project file can be
@@ -50,7 +50,7 @@ azimuthal range. Summary:
 
 Previously (2026-08-29): Batch Integrate gets an opt-in **Multi-azimuth
 output (cake)** checkbox — see §7 "Integration" — and Results & Export gets
-an **Export for GSAS-II** feature — see §12. Summary:
+an **Export for GSAS-II** feature — see §13. Summary:
 - **Multi-azimuth output (cake)** (off by default, §7): `midas_integrate_v2`
   already returns a full `(η, R)` cake per frame for every kernel — Batch
   Integrate was always collapsing it to one full-circle profile before
@@ -60,9 +60,9 @@ an **Export for GSAS-II** feature — see §12. Summary:
   Left off, nothing changes — η bin's default (5° over 360°, 72 internal
   bins) is only ever used for the existing collapse-weighting, not output
   shape, so no existing run's result size is affected.
-- **Export for GSAS-II** (§12): writes one chosen Batch-Integrate attempt as
+- **Export for GSAS-II** (§13): writes one chosen Batch-Integrate attempt as
   a native MIDAS-format zarr, directly importable by GSAS-II's own MIDAS
-  zarr reader, plus a provenance sidecar — see §12 for scope/limits.)
+  zarr reader, plus a provenance sidecar — see §13 for scope/limits.)
 
 **Previously:** (2026-08-29, Mask Builder no longer has its own
 Flip Y/Flip Z/Transpose **Transforms** checkboxes — see §4. Masks it produces
@@ -79,7 +79,7 @@ transformed geometry.)
 now lists **Single detector**/**Hydra** headings with one **Calibrate** row
 and one **Batch Integrate** row each, instead of cramming both into one grid
 row per panel; **GUI Workspace** tabs are now indented under **Select all**
-to show it isn't a tab itself. See §16 for full detail. Also: Project `.h5`
+to show it isn't a tab itself. See §17 for full detail. Also: Project `.h5`
 schema redesign — `gui_workspace` (modular, per-tab) + `analysis` (mask/
 calibrate/integrate FAIR history) — and a unified Open Project dialog.
 Summary:
@@ -197,7 +197,7 @@ re-scan) — its info line reads `Source: N file(s) — <shared folder>`. See
 popup" for detail.)
 
 **Previously:** (2026-08-28, Workspace and Project are merged into one
-`.h5` file — see §16 "File ▸ Project (session + FAIR provenance)" for full
+`.h5` file — see §17 "File ▸ Project (session + FAIR provenance)" for full
 detail. Summary:
 - `Ctrl+S`/`Ctrl+Shift+S`/`Ctrl+O` now save/save-as/open **one Project
   file**: your session (every tab's live fields) lives in its `workspace`
@@ -233,13 +233,13 @@ per-panel shifts + grid geometry — now reach downstream integration
 properly: see Tab 2 "Export" for detail.)
 
 **Previously:** (2026-08-27, Error dialogs across every tab no longer
-truncate the underlying error — see §13 "Common UI Conventions" for detail.
+truncate the underlying error — see §14 "Common UI Conventions" for detail.
 A failure now shows a one-line summary with a **Show Details…** button
 revealing the complete traceback, and the same complete text is written to
 that tab's log panel, not just the dialog.)
 
 **Previously:** (2026-08-26, Project records are now more self-sufficient,
-and two Hydra plots gained an Overall/summed view — see §5, §15-§17 for
+and two Hydra plots gained an Overall/summed view — see §5, §16-§17 for
 full detail. Summary:
 - A Project attempt's mask is embedded (compressed) only when it includes
   something hand-drawn/computed in Mask Builder — a mask assembled purely
@@ -261,7 +261,7 @@ full detail. Summary:
   next to its Radial Profile (previously cake was only available in
   Calibrate).
 - Both a saved **Workspace** and a **Project** now record the active
-  beamline **Profile** (§15) alongside them, and restore it automatically
+  beamline **Profile** (§16) alongside them, and restore it automatically
   on load/open if it still exists locally.
 None of this renames or removes any existing Project `.h5` field — every
 addition is a new, optional dataset/attribute, so older project files keep
@@ -281,7 +281,7 @@ reading exactly as before.
 **Previously:** (2026-08-26, File menu reworked around a clearer Project/
 Workspace mental model, with a recent-files list, an unsaved-changes
 indicator, autosave/crash-recovery, and a built-in provenance browser — see
-§16 "File ▸ Save/Load Workspace" and §17 "File ▸ Project (FAIR
+§17 "File ▸ Save/Load Workspace" and §17 "File ▸ Project (FAIR
 provenance)" for the full detail. Summary:
 - "GUI State" is renamed **Workspace** everywhere in the UI (same
   `Ctrl+S`/`Ctrl+Shift+S`/`Ctrl+O` shortcuts, same JSON file format —
@@ -370,7 +370,7 @@ immediately — previously these kept the *old* profile's list until the app
 was restarted. Seeded numeric/path defaults (wavelength, pixel size, Lsd,
 beam-centre, default files) are unchanged — they still only seed a field
 once when a tab is built, so in-progress edits are never overwritten by a
-profile switch. See §15 "Profiles".)
+profile switch. See §16 "Profiles".)
 
 **Previously:** (2026-08-25, A prominent **Profile: [combo ▼]** dropdown now
 sits at the top-left of the main window, in the same row as the tab bar —
@@ -378,7 +378,7 @@ switching profiles is instant, no more digging into Preferences. The
 **Hydra** option on Data Viewer/Calibrate/Batch Integrate's mode ribbon now
 only appears when the active profile is **1-ID-E** — the only beamline with
 that detector — falling back to Single detector automatically if you switch
-away while Hydra mode is active. See §15 "Profiles" and §3 "Mode ribbon".)
+away while Hydra mode is active. See §16 "Profiles" and §3 "Mode ribbon".)
 
 **Previously:** (2026-08-24, File ▸ **Open Project…** now offers to
 *populate* the GUI from the project's own recorded attempts, not just make
@@ -637,15 +637,16 @@ strict `<` — a pixel exactly equal to the lower bound is no longer masked)
 5. [Calibrate](#5-tab-2--calibrate)
 6. [Calibration Refinement](#6-tab-3--calibration-refinement)
 7. [Batch Integrate](#7-tab-4--batch-integrate)
-8. [Corrections & Physics](#8-tab-5--corrections--physics)
-9. [PDF Analysis](#9-tab-6--pdf-analysis)
-10. [Texture / Pole Figure](#10-tab-7--texture--pole-figure)
-11. [Pump Probe (time-resolved / TR-XRD)](#11-pump-probe-time-resolved--tr-xrd)
-12. [Results & Export](#12-results--export)
-13. [Common UI Conventions](#13-common-ui-conventions)
-14. [Packaging, Deployment & Diagnostics](#14-packaging-deployment--diagnostics)
-15. [Configuration & Defaults](#15-configuration--defaults)
-16. [File ▸ Project (session + FAIR provenance)](#16-file--project-session--fair-provenance)
+8. [Zarr Viewer](#8-zarr-viewer)
+9. [Corrections & Physics](#9-tab-5--corrections--physics)
+10. [PDF Analysis](#10-tab-6--pdf-analysis)
+11. [Texture / Pole Figure](#11-tab-7--texture--pole-figure)
+12. [Pump Probe (time-resolved / TR-XRD)](#12-pump-probe-time-resolved--tr-xrd)
+13. [Results & Export](#13-results--export)
+14. [Common UI Conventions](#14-common-ui-conventions)
+15. [Packaging, Deployment & Diagnostics](#15-packaging-deployment--diagnostics)
+16. [Configuration & Defaults](#16-configuration--defaults)
+17. [File ▸ Project (session + FAIR provenance)](#17-file--project-session--fair-provenance)
 
 ---
 
@@ -670,7 +671,7 @@ Pump Probe, Results & Export) are optional and can be shown/hidden from **Settin
 Preferences ▸ Tabs**. By default only **Calib. Refinement** and **Pump Probe** are
 shown; Corrections, PDF Analysis, Texture and Results & Export ship **hidden** — turn
 them on when you need them. The choice is saved per-user (`ui.visible_tabs`) and applies
-immediately — see §15. Hidden tabs are only removed from the tab bar; they stay
+immediately — see §16. Hidden tabs are only removed from the tab bar; they stay
 constructed, so cross-tab wiring and state are preserved.
 
 **Cross-tab shared state.** When Tab 2 (Calibrate) produces a result it is
@@ -850,7 +851,7 @@ A narrow vertical strip at the very left edge of the tab switches between
 **Single detector** (the view described below — unchanged) and **Hydra**
 (the 1-ID-E 4-panel GE detector view). The two modes are independent:
 switching does not share data or geometry between them. **The Hydra option
-only appears when the active profile (top-left header dropdown — see §15
+only appears when the active profile (top-left header dropdown — see §16
 "Profiles") is 1-ID-E**, the only beamline with that detector; on any other
 profile the ribbon shows Single detector only, and switching away from
 1-ID-E while Hydra mode is active falls back to Single detector
@@ -1183,7 +1184,7 @@ frames arrive.
   level range or its own zoom (or the cmap dropdown) is remembered and reapplied
   to every new incoming live frame instead of being reset to the vmin%/vmax%
   percentile defaults. Editing vmin%/vmax%, toggling Log/Linear, or loading a
-  new file/frame/dataset switches back to auto-levels — see §13 for the general
+  new file/frame/dataset switches back to auto-levels — see §14 for the general
   rule shared by every image viewer in the app.
 - **B-PILOT auto-start bridge**: on launch, MIDAS GUI opens a local-socket
   server (`midas_gui/bridge_server.py`) that lets **B-PILOT** (a separate
@@ -1507,7 +1508,7 @@ removes them.
 Save the combined mask as TIFF (0 = good, 1 = bad); loading a TIFF applies immediately.
 A **Log to Project** button next to Save records the current mask — its full
 parameters and the resulting compressed mask array — as a new FAIR-provenance
-attempt in the currently-open project (see §16), enabled once a mask exists.
+attempt in the currently-open project (see §17), enabled once a mask exists.
 Unlike Calibrate/Batch Integrate there's no single "run finished" moment to
 log from automatically (a mask can come from Compute, Load, hand-drawn
 shapes, or any combination), so this is an explicit, click-when-ready action.
@@ -1525,7 +1526,7 @@ detector** (the view described below — unchanged) and **Hydra** (per-panel
 calibration for the 1-ID-E 4-panel GE detector). The two modes are
 independent: switching does not share data or geometry between them. As on
 the Data Viewer tab, **Hydra only appears when the active profile is
-1-ID-E** (see §3 "Mode ribbon", §15 "Profiles").
+1-ID-E** (see §3 "Mode ribbon", §16 "Profiles").
 
 ### Hydra mode (4-panel GE detector)
 
@@ -1933,7 +1934,7 @@ preview** (Radial Profile / Eta vs R Cake) and **Batch Integrate**'s "Use Tab 2
 calibration" run both apply the panel corrections automatically; loading a saved
 calibration file back in (Batch Integrate's "Load calibration file", or anywhere else
 that reads a paramstest/json geometry file) round-trips the same panel fields. A
-calibration attempt logged to a **Project** (`.h5`, see §16) also embeds the refined
+calibration attempt logged to a **Project** (`.h5`, see §17) also embeds the refined
 panel-shift values directly — reopening the project and populating Tab 2 from a
 recorded multi-panel attempt regenerates a real `_panelshifts.txt` next to the project
 file and points the restored result at it, so the panel correction survives even if
@@ -1968,7 +1969,7 @@ between **Single detector** (the view described below — unchanged) and
 **Hydra** (per-panel integration for the 1-ID-E 4-panel GE detector). The
 two modes are independent: switching does not share data or geometry
 between them. As on the other two tabs, **Hydra only appears when the
-active profile is 1-ID-E** (see §3 "Mode ribbon", §15 "Profiles").
+active profile is 1-ID-E** (see §3 "Mode ribbon", §16 "Profiles").
 
 ### Hydra mode (4-panel GE detector)
 
@@ -2073,7 +2074,7 @@ popup per panel, next to each `ge{n}` card's calibration-source radios.
 | **Azim. mean** | How the (η, R) cake becomes a 1-D profile: **Pixel-weighted** (default) `Σ(mean·count)/Σ(count)` — independent of η-bin size and robust to partial azimuthal coverage / **off-detector beam centres**; or **η-bin mean (legacy)** — the unweighted mean of per-η-bin means, which can distort with a coarse η bin when the beam centre is off the detector. |
 | Per-bin variance (σ) | Error model poisson / azimuthal / hybrid (ignored when corrections are on → σ = √I). |
 | Q-uniform bins | Integrate in R then rebin onto a uniform-Q grid (Qmin, Qmax, ΔQ). |
-| **Multi-azimuth output (cake)** | Off by default. Keeps every azimuthal (η) sector from the η bin/range above as a **separate** output profile per frame (`profiles`/`sigmas` become `(n_frames, n_eta, n_r)`) instead of collapsing to one full-circle mean profile — needed for per-azimuth GSAS-II/texture work. Off, η bin still exists (default 5° over the full 360°, i.e. 72 internal bins) but is used only to control the collapse's weighting resolution, so turning this on repurposes that same field rather than changing any existing run's output. Text-format Save/live writes become one file per `(frame, η bin)`, named `<id>_etaNNN.<fmt>`; HDF5 output is skipped in this mode (`write_h5` expects one profile per frame) — use the text formats or the GSAS-II zarr export (§12) instead. Not yet combinable with Q-uniform bins. |
+| **Multi-azimuth output (cake)** | Off by default. Keeps every azimuthal (η) sector from the η bin/range above as a **separate** output profile per frame (`profiles`/`sigmas` become `(n_frames, n_eta, n_r)`) instead of collapsing to one full-circle mean profile — needed for per-azimuth GSAS-II/texture work. Off, η bin still exists (default 5° over the full 360°, i.e. 72 internal bins) but is used only to control the collapse's weighting resolution, so turning this on repurposes that same field rather than changing any existing run's output. Text-format Save/live writes become one file per `(frame, η bin)`, named `<id>_etaNNN.<fmt>`; HDF5 output is skipped in this mode (`write_h5` expects one profile per frame) — use the text formats or the GSAS-II zarr export (§REVISIT) instead. Not yet combinable with Q-uniform bins. |
 | **Show bin grid** | Off by default. Overlays the full (R, η) integration bin grid — concentric circles at each R-bin edge, spokes at each η-bin edge — on the **Detector view** tab, thinned to at most ~50 rings / ~72 spokes so a fine bin size stays legible. |
 
 A new **Detector view** tab (alongside Waterfall/Stacked profiles — one page-level
@@ -2204,7 +2205,7 @@ data source is loaded, mirroring `mpe_wf_saxs_waxs`'s own
   than all formats side by side in one folder.
 - The header-level **Exp ID** field (top of the window, next to the
   Profile selector) is a free-text label — e.g. `park_may26` — used as the
-  fallback expid for Suggest above and saved with the Project (§16) and
+  fallback expid for Suggest above and saved with the Project (§17) and
   across restarts (last-used value, independent of Profile).
 - The Calibrate tab's **Working dir** (§5) is derived from the same `_bc`
   convention but is deliberately *not* the same folder: it stops at the bare
@@ -2252,7 +2253,66 @@ theme is active) and **label font size** (`− font +`).
 
 ---
 
-## 8. Tab 5 — Corrections & Physics  *(work in progress)*
+## 8. Zarr Viewer
+
+Browse and plot any MIDAS `.zarr.zip` — the same file format Batch Integrate's
+own "zarr" output writes (§7) and `midas_gui/gsas_export.py`'s GSAS-II export
+produces, via the shared `midas_integrate_v2.io.zarr_gsas.write_gsas_zarr_zip`
+backend, so a file this tab opens needs no format-detection step. Ported from
+`mpe_wf_saxs_waxs/gui_view_zarr.py`.
+
+**Layout.** A tree of the file's groups/arrays on the left; a matplotlib plot
+canvas, display controls, and a metadata/attributes inspector on the right.
+
+**Tree.** Click a group to see its attributes; click an array to plot it.
+Groups are shown bold; arrays show their shape and dtype inline.
+
+**Plotting, by array rank:**
+- **0-D** — the scalar value is appended to the metadata pane as text.
+- **1-D** — a line plot. The Y-axis label is drawn from the array's own
+  `Header`/`Units` attributes when present (e.g. `Omegas` → "Degrees").
+- **2-D** — either a "2-D map" (image/pcolormesh) or, for an integration-shaped
+  array (`(nR, nEta)` matching the file's own `REtaMap`), "1-D lines" — one
+  line per azimuth bin, chosen via the **Azimuth bins** field (`0,5,10` or
+  `all`).
+- **3-D** — a **slice selector** (axis-0 index) picks one 2-D slice, then
+  plotted the same way as the 2-D case above. Selecting the file's own
+  `REtaMap` array this way steps through its five channels (Radius, 2θ, Eta,
+  BinArea, Q).
+
+**Display controls:**
+- **Colormap** / **Scale** (Linear/Log/Sqrt) / **Clim lo/hi** (blank = auto
+  1st/99th percentile) — **Lock** preserves the current Clim across array/slice
+  changes so successive images share a color scale.
+- **Xlim lo/hi** — manual x-axis range; **Lock zoom** preserves the full
+  current view (x *and* y) across array/slice/option changes, so panning or
+  zooming with the matplotlib toolbar carries over to the next plot.
+- **X axis** — R bin / 2θ (deg) / Q (Å⁻¹) / d (Å), computed by averaging the
+  matching channel of the file's own `REtaMap` array (or `REtaMap_corrected`,
+  preferred automatically when present) across the other axis. Falls back to
+  plain R-bin indices when no REtaMap is found or its shape doesn't match the
+  selected array.
+- **REtaMap** selector — choose `REtaMap` vs `REtaMap_corrected` when a file
+  has both (a distortion-corrected file typically does).
+
+**Metadata & attributes.** Selecting the root, a group, or an array shows a
+header summary (shape/dtype/chunks for an array; child count for a group), an
+expandable attribute tree, and a JSON-pretty-printed raw value pane — click any
+attribute (including nested list/dict entries) to see its full value.
+`provenance_history` — the append-only list every MIDAS_GUI/mpe_wf_saxs_waxs
+writer appends to (§17) — shows up here at the root.
+
+**File-format assumptions**, inherited from the source tool and shared with
+mpe_wf_saxs_waxs's own zarr toolchain: a root `REtaMap` array, shape
+`(5, nR, nEta)`, channel order Radius/2θ/Eta/BinArea/Q; an optional
+`REtaMap_corrected` of the same shape; wavelength from
+`InstrumentParameters/Lam`. Any file `write_gsas_zarr_zip` produces —
+including everything Batch Integrate's "zarr" output format and the GSAS-II
+export write — already matches this.
+
+---
+
+## 9. Tab 5 — Corrections & Physics  *(work in progress)*
 
 Preview physics corrections on a single frame (auto-loads on browse). Pixel-domain:
 polarization, solid angle, empty subtraction. Profile-domain: cylindrical absorption
@@ -2272,7 +2332,7 @@ is flagged in place if it stops resolving.
 
 ---
 
-## 9. Tab 6 — PDF Analysis
+## 10. Tab 6 — PDF Analysis
 
 Polyatomic **total-scattering** workflow, powered by the `midas_pdf` backend:
 I(Q) → Faber-Ziman structure function S(Q) → pair-distribution G(r) (Stage 1:
@@ -2524,7 +2584,7 @@ parsing uses `geometry_fields_from_file` / `result_ns_from_geometry_file`
 
 ---
 
-## 10. Tab 7 — Texture / Pole Figure  *(work in progress)*
+## 11. Tab 7 — Texture / Pole Figure  *(work in progress)*
 
 Per-ring azimuthal analysis for preferred orientation. Controls: calibration source,
 sample frame, R/η bins, ring index, χ (tilt) / φ (rotation). **Compute Pole Figure**
@@ -2534,7 +2594,7 @@ format.
 
 ---
 
-## 11. Pump Probe (time-resolved / TR-XRD)
+## 12. Pump Probe (time-resolved / TR-XRD)
 
 Analyses time-resolved (pump-probe) diffraction the way the TRR group does: a folder of
 raw detector frames is pooled by a filename prefix, the pump-probe **delay** is parsed
@@ -2607,7 +2667,7 @@ plots, matching the reference workflow.
 
 ---
 
-## 12. Results & Export  *(work in progress)*
+## 13. Results & Export  *(work in progress)*
 
 Session summary + one-click export. Checkboxes select which products (calibration.json,
 paramstest.txt, mask.tif, integrated profiles, G(r), pole figures, session log) to copy
@@ -2638,7 +2698,7 @@ attempt and what to change, rather than exporting something silently wrong.
 
 ---
 
-## 13. Common UI Conventions
+## 14. Common UI Conventions
 
 - **Browse = load.** Selecting a file/folder (or pressing Enter in a path field) loads
   it immediately; there are no separate "Load" buttons. HDF5 dataset / frame-index
@@ -2680,7 +2740,7 @@ attempt and what to change, rather than exporting something silently wrong.
 
 ---
 
-## 14. Packaging, Deployment & Diagnostics
+## 15. Packaging, Deployment & Diagnostics
 
 **Packaging.** `midas-gui` is a MIDAS-style package: `pyproject.toml` (BSD-3-Clause),
 a `tests/` smoke suite, and `release.sh` for cutting versioned releases (see
@@ -2702,7 +2762,7 @@ ever "pops up and dies" (typically on Windows), send that log file.
 
 ---
 
-## 15. Configuration & Defaults
+## 16. Configuration & Defaults
 
 Every default in the GUI — detector geometry, data/output paths, ring-simulation
 **materials**, **calibrants**, the **pixel-preset** and **K-edge** menus, the
@@ -2856,10 +2916,10 @@ next launch**.
 
 ---
 
-## 16. File ▸ Project (session + FAIR provenance)
+## 17. File ▸ Project (session + FAIR provenance)
 
 A **Project** is a single, long-lived `.h5` file with two top-level headers
-— beyond a saved **profile** of defaults (§15):
+— beyond a saved **profile** of defaults (§16):
 
 - **`gui_workspace`** — the live, in-progress state of every tab, stored
   **modularly, one group per tab** (Data Viewer, Mask Builder, Calibrate,
@@ -2958,7 +3018,7 @@ tab is restored as typed. In addition, **path-backed data is reloaded from disk*
 same way it loads when you type/browse to a path by hand — images, masks-by-path,
 dark/bright/background frames, and HDF5 datasets all re-read their file automatically
 after a state load (guarded so a moved/deleted file is skipped quietly rather than
-popping a warning). The beamline **Profile** (§15) active at save time is recorded
+popping a warning). The beamline **Profile** (§16) active at save time is recorded
 alongside the tab fields and restored the same way a manual profile switch would be
 (header combo synced, tab visibility and calibrant/device dropdowns refreshed) — if it
 still exists locally and differs from the one currently active; otherwise this is
@@ -3012,7 +3072,7 @@ it, since there's no path to hash — a **mask attempt** itself (`analysis/
 mask`) always embeds its resulting mask array, compressed, since recording
 that array *is* the point of logging one. Each record also carries the
 midas-gui / MIDAS package versions active at the time, **plus the beamline
-Profile active for that run** (see §15), **plus a workstation snapshot** —
+Profile active for that run** (see §16), **plus a workstation snapshot** —
 hostname, OS name/release/version, CPU model, logical/physical core
 counts, and total RAM — recorded automatically, so a run can always be
 traced back to exactly which machine it was analyzed on, even long
