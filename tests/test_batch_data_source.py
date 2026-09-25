@@ -342,6 +342,114 @@ def test_frame_range_multi_file_hdf5_spans_all_files_with_combine_chunk(tmp_path
     assert panel.frame_range() == (0, 12, 1)
 
 
+# ── unify_combine (Batch Integrate): stride replaced by "Combine sub-frames" ──
+
+def _make_tiff_files(tmp_path, nums):
+    tifffile = pytest.importorskip("tifffile")
+    paths = []
+    for n in nums:
+        p = tmp_path / f"scan_{n:06d}.tif"
+        tifffile.imwrite(str(p), np.zeros((3, 3), dtype=np.float32))
+        paths.append(str(p))
+    return paths
+
+
+def test_unify_combine_off_by_default_matches_plain_panel():
+    """Every existing "stream" consumer (Pump Probe, and a bare-constructed
+    panel like the other tests in this file) must see byte-identical
+    source_cfg()/frame_range() behavior — unify_combine defaults to False."""
+    W, _app = _make_app_and_module()
+    plain = W.DataLoaderPanel(mode="stream")
+    default = W.DataLoaderPanel(mode="stream", unify_combine=False)
+    for panel in (plain, default):
+        panel._path_ed.setText("/tmp/x")
+        assert panel.source_cfg() == {"type": "tiff_glob", "path": "/tmp/x"}
+        assert not panel._unify_combine
+
+
+def test_unify_combine_hides_stride_shows_combine_for_tiff_folder(tmp_path):
+    W, _app = _make_app_and_module()
+    _make_tiff_files(tmp_path, [9241, 9242, 9243])
+    panel = W.DataLoaderPanel(mode="stream", unify_combine=True)
+    # The stride spinbox still exists (frame_range()'s shape relies on it)
+    # but is never added to a layout for a unify_combine panel.
+    assert panel._fr_stride.parent() is None
+    panel._path_ed.setText(str(tmp_path))
+    panel._update_combine_visibility()
+    assert not panel._combine_row.isHidden()   # visible even for a TIFF folder
+
+
+def test_unify_combine_source_cfg_gains_chunk_and_frame_bounds_for_tiff(tmp_path):
+    W, _app = _make_app_and_module()
+    _make_tiff_files(tmp_path, [9241, 9242, 9243, 9244, 9245])
+    panel = W.DataLoaderPanel(mode="stream", unify_combine=True)
+    panel._path_ed.setText(str(tmp_path))
+    panel._autofill_frame_range()
+
+    cfg = panel.source_cfg()
+    assert cfg["type"] == "tiff_glob"
+    assert cfg["chunk_size"] == 1 and cfg["combine_op"] == "mean"
+    assert (cfg["frame_start"], cfg["frame_end"]) == (9241, 9245)
+    # unify_combine always short-circuits frame_range() — filtering/chunking
+    # is baked into source_cfg() instead (see workers._open_source_cfg).
+    assert panel.frame_range() == (0, None, 1)
+
+    # Changing "Combine sub-frames" re-autofills start/end back to the full
+    # range (pre-existing DataLoaderPanel._on_combine_changed behavior, not
+    # unify_combine-specific) — so narrow the range AFTER setting chunk_size.
+    panel._combine_chunk.setValue(2)
+    panel._fr_start.setValue(9242)
+    panel._fr_end.setValue(9244)
+    cfg2 = panel.source_cfg()
+    assert (cfg2["frame_start"], cfg2["frame_end"], cfg2["chunk_size"]) == (9242, 9244, 2)
+
+    import midas_gui.workers as wk
+    src = wk._open_source_cfg(cfg2)
+    assert src.n_frames == 2
+    assert [fid for fid, _ in src] == ["scan_009242.frame_0_1", "scan_009244"]
+
+
+def test_unify_combine_explicit_multi_file_pick_gains_frame_bounds(tmp_path):
+    W, _app = _make_app_and_module()
+    paths = _make_tiff_files(tmp_path, [10, 11, 12])
+    panel = W.DataLoaderPanel(mode="stream", unify_combine=True)
+    panel._set_explicit_paths(paths)
+    panel._autofill_frame_range()
+    cfg = panel.source_cfg()
+    assert cfg["type"] == "tiff_list"
+    assert cfg["paths"] == paths
+    assert (cfg["frame_start"], cfg["frame_end"]) == (10, 12)
+
+
+def test_unify_combine_hdf5_stack_glob_also_gains_frame_bounds(tmp_path):
+    pytest.importorskip("h5py")
+    W, _app = _make_app_and_module()
+    paths = []
+    for num in (9251, 9253, 9255):
+        p = tmp_path / f"C611_017Fe_1_load3_{num:06d}.vrx.h5"
+        _make_h5_stack(p, n_raw=10)
+        paths.append(str(p))
+
+    panel = W.DataLoaderPanel(mode="stream", unify_combine=True)
+    panel._set_explicit_paths(paths)
+    panel._combine_chunk.setValue(3)
+    panel._autofill_frame_range()
+
+    cfg = panel.source_cfg()
+    assert cfg["type"] == "hdf5_stack_glob"
+    assert (cfg["frame_start"], cfg["frame_end"]) == (9251, 9255)
+    assert panel.frame_range() == (0, None, 1)
+
+    panel._fr_start.setValue(9253)
+    panel._fr_end.setValue(9253)
+    cfg2 = panel.source_cfg()
+
+    import midas_gui.workers as wk
+    src = wk._open_source_cfg(cfg2)
+    # Only the middle file survives the filter -> its own 4 combined chunks.
+    assert src.n_frames == 4
+
+
 def test_resolve_worker_count_shrinks_to_minimum_ten_per_worker():
     import midas_gui.workers as wk
     # plenty of frames — full requested count survives

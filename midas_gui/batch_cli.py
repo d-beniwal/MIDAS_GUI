@@ -38,10 +38,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--r-min", type=float, default=None, help="Rmin (px); default backend auto")
     p.add_argument("--r-max", type=float, default=None, help="Rmax (px); default backend auto")
 
-    p.add_argument("--source-type", required=True, choices=["tiff_glob", "hdf5", "tiff_list"])
+    p.add_argument("--source-type", required=True,
+                   choices=["tiff_glob", "hdf5", "tiff_list", "hdf5_stack_glob"])
     p.add_argument("--source-path", help="Folder/glob (tiff_glob) or file path (hdf5)")
-    p.add_argument("--source-paths", nargs="+", help="Explicit file list (tiff_list)")
-    p.add_argument("--dataset", default="frames", help="HDF5 dataset path (hdf5 source only)")
+    p.add_argument("--source-paths", nargs="+",
+                   help="Explicit file list (tiff_list / hdf5_stack_glob)")
+    p.add_argument("--dataset", default="frames",
+                   help="HDF5 dataset path (hdf5 / hdf5_stack_glob sources only)")
 
     p.add_argument("--out-dir", required=True)
     p.add_argument("--fmts", default="csv",
@@ -50,9 +53,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--kernel", default="subpixel2",
                    choices=["hard", "subpixel2", "subpixel4", "polygon"])
 
-    p.add_argument("--frame-start", type=int, default=0)
+    # frame-start/frame-end are FILE/SCAN NUMBERS (parsed from filenames), not
+    # frame indices — None (the default, unset) means unbounded on that side.
+    # Ignored for a single "hdf5" source (nothing to range over — see
+    # widgets.DataLoaderPanel.source_cfg). chunk-size/combine-op mirror the
+    # GUI's "Combine sub-frames" control: 0 = combine everything selected
+    # into one frame, 1 (default) = no combining.
+    p.add_argument("--frame-start", type=int, default=None)
     p.add_argument("--frame-end", type=int, default=None)
-    p.add_argument("--frame-stride", type=int, default=1)
+    p.add_argument("--chunk-size", type=int, default=1)
+    p.add_argument("--combine-op", default="mean",
+                   choices=["mean", "sum", "max", "median"])
 
     p.add_argument("--multi-azimuth", action="store_true")
     p.add_argument("--weighted", dest="weighted", action="store_true", default=True)
@@ -79,18 +90,27 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 
 def _source_cfg(args) -> dict:
+    combine = {"chunk_size": args.chunk_size or None, "combine_op": args.combine_op}
     if args.source_type == "tiff_glob":
         if not args.source_path:
             raise SystemExit("--source-path is required for --source-type tiff_glob")
-        return {"type": "tiff_glob", "path": args.source_path}
+        return {"type": "tiff_glob", "path": args.source_path,
+                "frame_start": args.frame_start, "frame_end": args.frame_end, **combine}
     if args.source_type == "hdf5":
         if not args.source_path:
             raise SystemExit("--source-path is required for --source-type hdf5")
-        return {"type": "hdf5", "path": args.source_path, "dataset": args.dataset}
+        return {"type": "hdf5", "path": args.source_path, "dataset": args.dataset, **combine}
     if args.source_type == "tiff_list":
         if not args.source_paths:
             raise SystemExit("--source-paths is required for --source-type tiff_list")
-        return {"type": "tiff_list", "paths": list(args.source_paths)}
+        return {"type": "tiff_list", "paths": list(args.source_paths),
+                "frame_start": args.frame_start, "frame_end": args.frame_end, **combine}
+    if args.source_type == "hdf5_stack_glob":
+        if not args.source_paths:
+            raise SystemExit("--source-paths is required for --source-type hdf5_stack_glob")
+        return {"type": "hdf5_stack_glob", "paths": list(args.source_paths),
+                "dataset": args.dataset,
+                "frame_start": args.frame_start, "frame_end": args.frame_end, **combine}
     raise SystemExit(f"Unknown --source-type: {args.source_type}")
 
 
@@ -169,12 +189,15 @@ def main(argv=None) -> int:
     fmts = [f.strip() for f in args.fmts.split(",") if f.strip()]
     corrections = _build_corrections(args)
     variance_cfg = {"error_model": args.error_model} if args.variance else None
-    frame_range = (args.frame_start, args.frame_end, args.frame_stride)
+    # No frame_range kwarg: start/end/chunk_size filtering is baked into
+    # src_cfg itself (see _source_cfg) and applied by workers._open_source_cfg
+    # before the source is opened — BatchWorker defaults frame_range to
+    # (0, None, 1), i.e. "process everything the source yields."
 
     worker = BatchWorker(
         spec, src_cfg, mask, args.out_dir, fmts, args.kernel,
         corrections, variance_cfg,
-        frame_range=frame_range, monitor_file=args.monitor_file,
+        monitor_file=args.monitor_file,
         dark=dark, bright=bright, background=background, bright_mode=args.bright_mode,
         weighted=args.weighted, multi_azimuth=args.multi_azimuth,
         im_trans=tuple(spec.TransOpt or ()))

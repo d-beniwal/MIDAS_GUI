@@ -1063,13 +1063,52 @@ class IntegrationWorker(QtCore.QThread):
 #  Batch integration worker (Tab 3)
 # ═════════════════════════════════════════════════════════════════════════════
 
+def _filter_paths_by_frame_number(paths, frame_start, frame_end):
+    """Keep only the paths whose parsed scan/file number falls in
+    ``[frame_start, frame_end]`` (inclusive; a ``None`` bound is unbounded on
+    that side) — the ``workers``-side counterpart of
+    ``widgets.DataLoaderPanel``'s start/end spinboxes for a Batch Integrate
+    ``unify_combine`` panel (see ``source_cfg()``'s ``frame_start``/
+    ``frame_end`` keys).
+
+    A no-op (returns ``paths`` unchanged) when both bounds are ``None`` —
+    which is always true for a config built by a non-``unify_combine`` panel,
+    since it never sets these keys — or when any path's number can't be
+    parsed, mirroring ``DataLoaderPanel._file_numbers()``'s own
+    all-or-nothing rule (filtering only ever applies when EVERY file in the
+    selection carries a parseable number)."""
+    if frame_start is None and frame_end is None:
+        return list(paths)
+    nums = []
+    for p in paths:
+        _root, num, _tag = froot_and_frame_num(Path(p).stem, -1)
+        if num < 0:
+            return list(paths)
+        nums.append(num)
+    lo = frame_start if frame_start is not None else min(nums)
+    hi = frame_end if frame_end is not None else max(nums)
+    return [p for p, n in zip(paths, nums) if lo <= n <= hi]
+
+
 def _open_source_cfg(cfg):
     """Open a ``DataLoaderPanel.source_cfg()`` descriptor as a frame source.
     Shared by ``BatchWorker._open_source`` and ``BatchRunCoordinator`` (which
     needs a frame count up front, before any ``BatchWorker`` exists, to split
     a Batch-Parallel run into chunks)."""
     from midas_integrate_v2.streaming import TIFFGlobSource, HDF5FrameSource
+    # A "unify_combine" panel (Batch Integrate) embeds chunk_size/frame_start/
+    # frame_end directly in a tiff_glob/tiff_list cfg — route those through
+    # _ChunkCombinedFileSource instead of the plain sources below, which know
+    # nothing about either. Absent for every other "stream" consumer (Pump
+    # Probe, bare-constructed panels), so this is a no-op there.
+    tiff_unify = cfg["type"] in ("tiff_glob", "tiff_list") and (
+        "chunk_size" in cfg or "frame_start" in cfg or "frame_end" in cfg)
     if cfg["type"] == "tiff_glob":
+        if tiff_unify:
+            paths = _filter_paths_by_frame_number(
+                _list_tiff_files(cfg["path"]), cfg.get("frame_start"), cfg.get("frame_end"))
+            return _ChunkCombinedFileSource(
+                paths, chunk_size=cfg.get("chunk_size") or None, op=cfg.get("combine_op", "mean"))
         return TIFFGlobSource(cfg["path"])
     if cfg["type"] == "hdf5":
         # Route through _HDF5StackGlobSource (single-element path list) rather
@@ -1080,10 +1119,20 @@ def _open_source_cfg(cfg):
             [cfg["path"]], cfg.get("dataset", "frames"),
             chunk_size=cfg.get("chunk_size") or None, op=cfg.get("combine_op", "mean"))
     if cfg["type"] == "tiff_list":
+        if tiff_unify:
+            paths = _filter_paths_by_frame_number(
+                cfg["paths"], cfg.get("frame_start"), cfg.get("frame_end"))
+            return _ChunkCombinedFileSource(
+                paths, chunk_size=cfg.get("chunk_size") or None, op=cfg.get("combine_op", "mean"))
         return _ExplicitTIFFSource(cfg["paths"])
     if cfg["type"] == "hdf5_stack_glob":
+        # Filtering is a no-op (returns paths unchanged) unless frame_start/
+        # frame_end are actually present — i.e. only for a unify_combine
+        # panel's cfg — so this is safe for every existing caller too.
+        paths = _filter_paths_by_frame_number(
+            cfg["paths"], cfg.get("frame_start"), cfg.get("frame_end"))
         return _HDF5StackGlobSource(
-            cfg["paths"], cfg.get("dataset", "exchange/data"),
+            paths, cfg.get("dataset", "exchange/data"),
             chunk_size=cfg.get("chunk_size") or None, op=cfg.get("combine_op", "mean"))
     raise ValueError(f"Unknown source type: {cfg['type']}")
 
@@ -1678,6 +1727,80 @@ class _ExplicitTIFFSource:
         p = self._paths[idx]
         img = _load_image(p).astype(np.float64)
         return p.stem, (img[0] if img.ndim == 3 else img)
+
+
+class _ChunkCombinedFileSource:
+    """Iterate over an arbitrary, already-resolved ``list[str]`` of
+    single-frame files (TIFF/``.ge*``), combining every ``chunk_size``
+    consecutive FILES into one output frame via ``helpers._COMBINE_OPS`` —
+    the TIFF-family counterpart of ``_HDF5StackGlobSource``'s "Combine
+    sub-frames", for a Batch Integrate ``unify_combine`` panel (see
+    ``widgets.DataLoaderPanel.source_cfg``'s ``chunk_size``/``combine_op``
+    on the ``"tiff_glob"``/``"tiff_list"`` types).
+
+    Unlike ``_HDF5StackGlobSource`` — where each file already holds several
+    raw sub-frames and chunking never crosses a file boundary — a TIFF-family
+    file holds exactly ONE raw frame, so there is no smaller unit to group
+    within a file; chunking here groups consecutive FILES instead, freely
+    crossing file boundaries. Any start/end file-number filtering the caller
+    wants has already been applied to ``paths`` before construction (see
+    ``_open_source_cfg``/``_filter_paths_by_frame_number``), so chunk
+    boundaries here always start counting from ``paths[0]``.
+
+    ``chunk_size`` falsy (``None``/``0``) combines every file in ``paths``
+    into a single output frame, mirroring ``read_hdf5_stack_combined``'s
+    "whole file" convention. ``chunk_size == 1`` (the default) combines
+    nothing — one output frame per file, identical to ``_ExplicitTIFFSource``/
+    ``TIFFGlobSource``, including frame ids (bare filename stem).
+
+    A multi-file chunk's fid is ``"<first_file_stem>.frame_<start>_<end>"``
+    (``start``/``end`` the chunk's 0-based, INCLUSIVE file-index range within
+    THIS source's own — already start/end-filtered — ``paths``, not a global
+    index) — the same ``.frame_<start>_<end>`` convention
+    ``_HDF5StackGlobSource`` mints for its own multi-frame chunks, so
+    ``froot_and_frame_num`` recovers the first file's own scan number and
+    keeps chunks distinct exactly the way it already does there."""
+
+    def __init__(self, paths, *, chunk_size=None, op: str = "mean"):
+        self._paths = [Path(p) for p in paths]
+        self._chunk_size = int(chunk_size) if chunk_size else (len(self._paths) or 1)
+        from midas_gui.helpers import _COMBINE_OPS
+        self._combine = _COMBINE_OPS.get(op, _COMBINE_OPS["mean"])
+
+    @property
+    def n_frames(self) -> int:
+        n = len(self._paths)
+        return -(-n // self._chunk_size) if n else 0
+
+    def _group(self, k: int) -> list:
+        start = k * self._chunk_size
+        return self._paths[start:start + self._chunk_size]
+
+    def _fid(self, k: int, group: list) -> str:
+        if len(group) == 1:
+            return group[0].stem
+        start = k * self._chunk_size
+        return f"{group[0].stem}.frame_{start}_{start + len(group) - 1}"
+
+    def _read(self, group: list) -> np.ndarray:
+        imgs = []
+        for p in group:
+            img = _load_image(p).astype(np.float64)
+            imgs.append(img[0] if img.ndim == 3 else img)
+        if len(imgs) == 1:
+            return imgs[0]
+        return self._combine(np.stack(imgs, axis=0)).astype(np.float64)
+
+    def __iter__(self):
+        for k in range(self.n_frames):
+            group = self._group(k)
+            yield self._fid(k, group), self._read(group)
+
+    def get(self, idx: int):
+        group = self._group(idx)
+        if not group:
+            raise IndexError(idx)
+        return self._fid(idx, group), self._read(group)
 
 
 class _HDF5StackGlobSource:
