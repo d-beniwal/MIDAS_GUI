@@ -6,6 +6,8 @@ it does silently destroy the record of how a dataset was produced — which is
 the entire point of the feature — so the round-trips are worth pinning.
 """
 import json
+import os
+import sys
 
 import pytest
 
@@ -17,7 +19,8 @@ from midas_gui import cake_params, provenance
 def test_build_entry_records_the_standard_fields():
     entry = provenance.build_entry("midas_gui.test", command=["prog", "--x"])
     for key in ("tool", "utc_time", "host", "user", "cwd", "command",
-                "midas_gui", "backends", "python", "zarr", "inputs"):
+                "script", "script_sha256", "midas_gui", "backends", "python",
+                "zarr", "inputs"):
         assert key in entry, f"missing {key}"
     assert entry["tool"] == "midas_gui.test"
     assert entry["command"] == "prog --x"
@@ -27,6 +30,40 @@ def test_build_entry_records_the_standard_fields():
     assert "cake_params" not in entry
     assert "instrument_params" not in entry
     assert "extra" not in entry
+
+
+def test_build_entry_records_the_running_script_and_its_checksum():
+    """``script``/``script_sha256`` — parity with mpe_wf_saxs_waxs's
+    provenance.py, which records the entry-point script's resolved path and
+    content hash so a later reader can tell a modified/uncommitted script
+    apart from the git commit recorded alongside it."""
+    entry = provenance.build_entry("t")
+    # sys.argv[0] under pytest resolves to a real, existing file (pytest's
+    # own launcher/module), so this should hash successfully rather than
+    # come back None — that only happens for a script path that doesn't
+    # exist on disk (see test below).
+    assert entry["script"]
+    assert os.path.isfile(entry["script"])
+    assert entry["script_sha256"]
+    assert len(entry["script_sha256"]) == 64  # hex sha256
+
+
+def test_build_entry_script_sha256_is_none_when_script_path_is_missing(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["/no/such/script.py"])
+    entry = provenance.build_entry("t")
+    assert entry["script"] == "/no/such/script.py"
+    assert entry["script_sha256"] is None
+
+
+def test_git_rev_includes_a_tag_field():
+    """``tag`` — parity with mpe_wf_saxs_waxs's ``_git_rev``: the nearest
+    reachable annotated tag, separate from ``describe``'s "N commits past a
+    tag" form. This repo carries no tags, so it's legitimately None rather
+    than absent."""
+    repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(provenance.__file__)))
+    info = provenance._repo_info(repo_dir)
+    assert info is not None
+    assert "tag" in info
 
 
 def test_build_entry_embeds_optional_blocks():
