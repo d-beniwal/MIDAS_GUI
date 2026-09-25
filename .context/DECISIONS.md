@@ -8,6 +8,85 @@ file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this
 date for the full uncondensed entries if ever needed._
 
+## 2026-09-26 — Batch Integrate: "stride" replaced by "Combine sub-frames" (now applies to HDF5 and TIFF alike)
+
+Consolidated two frame-selection controls that had drifted: `start`/`end`
+(file/scan numbers) plus a `stride` spinbox always shown, and a separate
+"Combine sub-frames" (chunk size + mean/sum/max/median op) shown only for
+HDF5 sources. Requested change: keep start/end, drop stride, and make
+Combine sub-frames apply the same way to a TIFF/`.ge*` folder as to HDF5.
+
+**Scoped via a new `DataLoaderPanel(unify_combine=False)` flag, not a global
+change to the shared widget.** `DataLoaderPanel` (`mode="stream"`) is also
+embedded by Pump Probe (`tab_pumpprobe.py`), which genuinely depends on
+today's `stride` to subsample its own pooled per-delay frame list
+(`self._frames[start:end:stride]`), unrelated to HDF5/combine. Only
+`tab_batch.py` passes `unify_combine=True`; every other consumer (Pump Probe,
+bare-constructed test panels) is byte-for-byte unchanged — the `stride:` row
+stays, the combine row stays HDF5-only-gated. Confirmed with the user before
+implementing (the alternative — dropping stride everywhere — would have
+silently regressed Pump Probe).
+
+**TIFF "combine" groups consecutive FILES, since each file already is one
+raw frame with nothing smaller inside it to group** — unlike HDF5, where
+chunking groups raw sub-frames *within* one file and never crosses a file
+boundary (that stays intact for `hdf5`/`hdf5_stack_glob`, unchanged). New
+`workers._ChunkCombinedFileSource` mirrors `_HDF5StackGlobSource`: chunk_size
+falsy → combine everything into one frame, `1` (default) → no combining
+(identical output/ids to before this existed). A multi-file chunk's fid is
+`"<first_stem>.frame_<start>_<end>"` — reusing `_HDF5StackGlobSource`'s exact
+`.frame_<start>_<end>` suffix convention so `froot_and_frame_num` recovers
+the first file's real scan number instead of inventing a new naming scheme.
+
+**Start/end filtering moved from a post-hoc index range into `source_cfg()`
+itself.** For a `unify_combine` panel, `source_cfg()` now embeds the raw
+file-number bounds as `frame_start`/`frame_end` (alongside `chunk_size`/
+`combine_op`, now also on `tiff_glob`/`tiff_list`, not just HDF5 types), and
+`frame_range()` always returns `(0, None, 1)` — filtering is applied by a new
+`workers._filter_paths_by_frame_number` inside `_open_source_cfg`, *before*
+chunking, so a narrowed range always restarts chunk-counting at its own
+start (e.g. start mid-list → chunk 0 begins there, not at global file 0).
+This sidesteps needing a HDF5-style "file-index → combined-frame-index"
+translation for TIFF (where chunks cross file boundaries, unlike HDF5's
+per-file-only chunks) — filter first, then chunk what's left, always from
+index 0. `_hdf5_multi_file_counts`'s existing translation logic is untouched
+and still used for any non-`unify_combine` HDF5 multi-file source.
+
+**Fixed two adjacent bugs while touching this code, both flagged rather than
+silently rolled in:** (1) a background "Run as background job" invocation
+(`batch_cli.py`) had no `--chunk-size`/`--combine-op` flags at all — Combine
+sub-frames was silently ignored for any background run; (2) `tab_batch.py`'s
+`_run_as_job` mis-routed a multi-file HDF5 pick (`hdf5_stack_glob`) through
+`--source-type tiff_list` (no `hdf5_stack_glob` branch existed) — background
+jobs for a multi-file HDF5 scan were already wrong before this change.
+`batch_cli.py` gained `hdf5_stack_glob` support and `--frame-start`/
+`--frame-end` are now file/scan-number bounds (matching the GUI), replacing
+`--frame-stride`.
+
+**MONITOR gains one more disqualifying condition**: it already refused
+non-`tiff_glob` sources; now also refuses when Combine sub-frames ≠ 1 or a
+start/end filter is active, since live-combining newly-arrived frames isn't
+supported (would need buffering logic out of scope for this change).
+
+**Project restore** (`project.integrate_attempt_loader_state`) now reads the
+new `frame_start`/`frame_end` keys from a saved attempt's `src_cfg` when
+present (a `unify_combine` attempt's own `frame_range` is always
+`(0, None, 1)`, so it carries no real information), falling back to parsing
+the legacy `frame_range` tuple for projects saved before this change.
+
+New tests: `test_batch_data_source.py` (6, unify_combine on/off parity +
+TIFF/HDF5 filter+chunk source_cfg shapes), `test_frame_naming.py` (9,
+`_ChunkCombinedFileSource`/`_filter_paths_by_frame_number`), `test_project.py`
+(1, new vs. legacy restore path). All existing HDF5 multi-file combine tests
+(`test_frame_range_multi_file_hdf5_spans_all_files_with_combine_chunk` etc.)
+needed zero changes — confirms the non-`unify_combine` path is untouched.
+**Verified:** 13 touched/related test files green per-file on a clean `HOME`
+(the one pre-existing failure, `test_project.py`'s
+`test_apply_project_calibration_single_detector` pyqtgraph-teardown SIGABRT,
+reproduces on clean HEAD too); `pyflakes midas_gui/*.py` unchanged at 37;
+offscreen screenshot of the Batch Integrate loader card confirmed the stride
+row is gone and Combine sub-frames shows for a plain TIFF folder.
+
 ## 2026-09-25 — Data Viewer: folder format filter, under-viewer frame scrubber, profile-file lineout; app-wide frame-nav slider/button visibility
 
 Three Data Viewer requests plus a visibility fix applied everywhere a

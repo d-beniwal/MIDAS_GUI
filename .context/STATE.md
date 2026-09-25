@@ -1,7 +1,7 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-09-25 (Data Viewer folder-format filter/scrubber/profile-file + app-wide frame-nav slider styling)_
+_Last updated: 2026-09-26 (Batch Integrate: stride replaced by unified "Combine sub-frames" for HDF5 + TIFF)_
 
 ## Now working on
 
@@ -27,6 +27,30 @@ Open follow-ups, none blocking:
   `git fetch origin 'refs/pull/*/head:refs/remotes/origin/pr/*'`.
 
 ## Recently completed
+
+**2026-09-26 — Batch Integrate: "stride" replaced by unified "Combine
+sub-frames" (HDF5 + TIFF alike).** `DataLoaderPanel`'s start/end/stride +
+HDF5-only "Combine sub-frames" consolidated into one control: stride is gone
+(the panel gains a new opt-in `unify_combine=True`, used only by
+`tab_batch.py`; Pump Probe's own loader instance keeps stride untouched —
+see DECISIONS for why the flag exists at all). Combine sub-frames now applies
+to a TIFF/`.ge*` folder too, via new `workers._ChunkCombinedFileSource`
+(groups consecutive FILES, mirroring `_HDF5StackGlobSource`'s within-file
+chunking). Start/end filtering moved from a post-hoc index range into
+`source_cfg()` itself (`frame_start`/`frame_end`, new
+`workers._filter_paths_by_frame_number`), applied *before* chunking so a
+narrowed range always restarts chunk-counting at its own start.
+Opportunistic fixes in the same touched code: background "Run as background
+job" (`batch_cli.py`) previously had no `--chunk-size`/`--combine-op` at all
+(silently ignored); `tab_batch.py`'s `_run_as_job` mis-routed multi-file HDF5
+through `--source-type tiff_list` (now has its own `hdf5_stack_glob` branch).
+MONITOR now also refuses when combine/filtering is active (live-combining
+isn't supported). New tests: `test_batch_data_source.py` (+6),
+`test_frame_naming.py` (+9), `test_project.py` (+1) — all existing HDF5
+multi-file combine tests needed zero changes.
+**Verified:** 13 touched/related test files green per-file on a clean `HOME`
+(one pre-existing unrelated SIGABRT); `pyflakes` unchanged at 37; offscreen
+screenshot confirmed the new layout. Full detail in DECISIONS.md.
 
 **2026-09-25 — Data Viewer: folder format filter, under-viewer frame
 scrubber, profile-file lineout; app-wide frame-nav slider/button styling.**
@@ -77,18 +101,6 @@ and locked to "Current frame" for a plain single image. Frame index
 persists in both mask-attempt provenance and sidecar state. New
 `tests/test_mask_folder_frames.py` (10 tests, forked per the pyqtgraph
 teardown-crash pattern).
-
-**2026-09-22 (`eebce45`) — Batch Integrate run/restore crash from stale
-views under a new axis context.** `_run()` and `_restore_run()` called
-`set_axis_context()`/`_restack()` while the waterfall/stack view still held
-the *previous* run's or attempt's curves; a leftover curve with no finite
-data (empty/fully-masked profile) sent pyqtgraph's `autoRange()` a
-`[nan, nan]` range and crashed. Fix: `reset()`/`clear()` all three views
-(`_stack_view`, `_waterfall`, `_cake_stack_view`) *before* re-deriving axis
-context, in both call sites. Also `StackedProfileViewer.autoRange()` was
-called even when no curve had finite data — now gated on `xmins` being
-non-empty. `tests/test_hydra_batch_ui.py` green (clean `HOME`); no test
-changes.
 
 **2026-09-11 (later) — One honest ring overlay, Batch's cakes made visible,
 and the whole calibration in the provenance record.** Two commits.
@@ -211,7 +223,9 @@ rings that stay put, and a two-way geometry hand-off.** Six requested changes:
 **Verified:** 21-file per-file sweep green, zero new pyflakes warnings vs.
 HEAD, offscreen screenshots of all three toolbars + the card column.
 
-_(Older entries — 2026-09-09 manual d-spacing (AgBH/SAXS) fit trustworthiness
+_(Older entries — `eebce45` Batch Integrate run/restore crash from stale
+views under a new axis context (reset stack/waterfall/cake views before
+re-deriving axis context), 2026-09-09 manual d-spacing (AgBH/SAXS) fit trustworthiness
 (BC-only default refinement, per-parameter 1σ, Limits… dialog), 2026-09-04
 Jun-Sang Park's PR #7 (Strain Cake tab, job queue, peak-fit panel,
 provenance, batch CLI; +108 tests), `fd7f67a` Workstation provenance + Hydra Overall-Cake
