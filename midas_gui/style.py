@@ -309,6 +309,31 @@ def stylesheet(checkmark_svg: str, up_arrow_svg: str = "", down_arrow_svg: str =
     QSlider::handle:horizontal {{
         background: {ACCENT}; width: 12px; margin: -5px 0; border-radius: 6px;
     }}
+    /* Frame-navigation prev/next + slider (Data Viewer, Calibrate, Mask
+       Builder, Hydra GE-panel nav, Batch's "Eta-R cakes" stack) — several of
+       these prev/next buttons are plain QToolButtons with no default
+       background/border at all (native/flat), and the generic slider groove
+       above is barely visible against a dark panel; give every one of them
+       (tagged via objectName, not every QSlider/QToolButton in the app) one
+       clearly "this scrubs frames" look. */
+    QToolButton#frameNavBtn, QPushButton#frameNavBtn {{
+        color: white; font-weight: bold;
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {ACCENT}, stop:1 {ACCENT_D});
+        border: 1px solid {ACCENT_D}; border-radius: 4px;
+        min-width: 22px; min-height: 20px; padding: 2px;
+    }}
+    QToolButton#frameNavBtn:hover, QPushButton#frameNavBtn:hover {{ border: 1px solid {HOVER}; }}
+    QToolButton#frameNavBtn:pressed, QPushButton#frameNavBtn:pressed {{ background: {ACCENT_D}; }}
+    QToolButton#frameNavBtn:disabled, QPushButton#frameNavBtn:disabled {{
+        background: #555; color: {MUTED}; border-color: #4a4a4a;
+    }}
+    QSlider#frameNavSlider::groove:horizontal {{
+        height: 6px; background: #707070; border: 1px solid #8a8a8a; border-radius: 3px;
+    }}
+    QSlider#frameNavSlider::handle:horizontal {{
+        background: {ACCENT}; width: 14px; margin: -6px 0; border-radius: 7px;
+        border: 1px solid {ACCENT_D};
+    }}
     QScrollBar:vertical {{ background: #2f2f2f; width: 11px; margin: 0; border: none; }}
     QScrollBar::handle:vertical {{ background: #5a5a5a; border-radius: 5px; min-height: 24px; }}
     QScrollBar::handle:vertical:hover {{ background: #707070; }}

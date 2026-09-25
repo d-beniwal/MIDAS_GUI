@@ -472,6 +472,12 @@ class DetectorGeometryCard(QtWidgets.QWidget):
 
     # ── Public geometry API (mirrors the pre-extraction DataViewerTab API) ──
 
+    def has_calibration(self) -> bool:
+        """Whether a calibration file is currently loaded (as opposed to only
+        the manual Ring-simulation widgets holding whatever values they were
+        left at) — see ``set_calib_path``/``_load_calibration``."""
+        return self._calib_geom is not None
+
     def get_geometry(self) -> dict:
         """Current manual geometry — λ (Å), pixel (µm), Lsd (µm), beam centre (px).
 
@@ -1009,11 +1015,15 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             self._maybe_auto_radial()
             self.geometryChanged.emit()
 
-    def _simulate(self):
-        img = self._image_provider()
-        if img is None:
-            QtWidgets.QMessageBox.warning(self, "No image", "Load data first."); return
-        lines, errors, any_rings = [], [], False
+    def _compute_material_rings(self):
+        """(Re)compute every enabled material's ring positions (``_rings``)
+        from the current wavelength/Lsd/pixel-size/max-2θ — pure geometry
+        (d-spacing + wavelength + detector distance/pixel size), no image
+        needed. Returns ``(errors, any_rings)``. Split out of ``_simulate``
+        so ``simulate_rings_without_image`` can reuse the same computation
+        without that method's image requirement (which exists only for the
+        on-image overlay ``_redraw_rings`` draws afterwards)."""
+        errors, any_rings = [], False
         for m in self._materials:
             m["_rings"] = []
             if not m["enabled"]:
@@ -1034,6 +1044,28 @@ class DetectorGeometryCard(QtWidgets.QWidget):
                 continue
             m["_rings"] = rings
             any_rings = True
+        return errors, any_rings
+
+    def simulate_rings_without_image(self):
+        """Compute every enabled material's rings and refresh the profile-view
+        markers, without requiring an image — used by the Data Viewer's Radial
+        Profile "Load profile file" mode, where there is no image to overlay
+        rings on but the profile markers (which need only the geometry, not
+        detector pixels) should still reflect the current
+        materials/wavelength/Lsd/pixel size."""
+        self._compute_material_rings()
+        self._refresh_profile_markers()
+
+    def _simulate(self):
+        img = self._image_provider()
+        if img is None:
+            QtWidgets.QMessageBox.warning(self, "No image", "Load data first."); return
+        errors, any_rings = self._compute_material_rings()
+        lines = []
+        for m in self._materials:
+            if not m["enabled"] or not m.get("_rings"):
+                continue
+            rings = m["_rings"]
             lines.append(f"{m['name']}: {len(rings)} rings")
             lines.append(f"{'hkl':>10}  {'2θ(°)':>7}  {'d(Å)':>7}  {'R(px)':>8}")
             for r in rings:

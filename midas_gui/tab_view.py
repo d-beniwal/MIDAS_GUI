@@ -19,8 +19,10 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
 from midas_gui.constants import DEFAULT_NICKEL_H5
-from midas_gui.helpers import (_fspin, _NoScrollSpinBox,
-                         widgets_to_dict, apply_dict_to_widgets, _apply_im_trans)
+from midas_gui.helpers import (_fspin, _NoScrollSpinBox, _NoScrollComboBox,
+                         widgets_to_dict, apply_dict_to_widgets, _apply_im_trans,
+                         load_profile_file, profile_file_axis_kind,
+                         native_axis_to_r_px, PROFILE_FILE_FILTER)
 from midas_gui.widgets import (ProfileViewer, DataLoaderPanel, CakeViewer,
                               OriginToolButton, build_lab_frame_axes_items)
 from midas_gui.dialogs import show_error
@@ -53,6 +55,10 @@ class DataViewerTab(QtWidgets.QWidget):
         self._stats_all_frames_dirty = False        # a request arrived while one was running
         self._topn_items: list = []                # scatter overlays for Top-N pixels
         self._axis_items: list = []                # lab-frame axes overlay items
+        # Radial Profile tab showing a loaded profile file instead of the live
+        # detector frame — see _on_profile_source_changed/_render_loaded_profile.
+        self._profile_file_mode = False
+        self._loaded_profile = None                 # (x, y, sigma_or_None, x_kind) or None
         # Throttle rapid dataChanged bursts (slider drag, fast live streaming)
         # into one heavy refresh per interval. A single-shot QTimer is used as
         # a throttle, not a trailing-edge debounce: _on_data_changed() below
@@ -223,7 +229,12 @@ class DataViewerTab(QtWidgets.QWidget):
         self._mode_stack.addWidget(split); self._hsplit = split
 
         # ── LEFT: data loader (stack mode) ──
-        self._loader = DataLoaderPanel(mode="stack", allow_live=True)
+        # hide_frame_field=True: this tab shows its own scrubber under the
+        # image viewer instead (see _build_frame_scrub_bar), mirroring
+        # tab_calibrate.py. folder_format_filter=True: offer a "Format:"
+        # filter when a loaded folder mixes file types.
+        self._loader = DataLoaderPanel(mode="stack", allow_live=True,
+                                       hide_frame_field=True, folder_format_filter=True)
         self._loader.setMinimumWidth(200)
         self._loader.dataChanged.connect(self._on_data_changed)
         self._loader.fieldsChanged.connect(self._on_fields_changed)
@@ -373,6 +384,7 @@ class DataViewerTab(QtWidgets.QWidget):
         self._lab_axes_on.toggled.connect(self._on_lab_axes_toggled)
         vtb.addWidget(self._lab_axes_on)
         self._geom_card.geometryChanged.connect(self._redraw_lab_axes_if_on)
+        self._geom_card.geometryChanged.connect(self._on_profile_geometry_changed)
         self._viewer.originChanged.connect(self._redraw_lab_axes_if_on)
         # ROI popups are always-on-top (roi_tools.ROIStatsPopup) so they don't
         # get buried behind the main window; minimizing one tucks it into this
@@ -384,7 +396,12 @@ class DataViewerTab(QtWidgets.QWidget):
         vc_layout.setContentsMargins(0, 0, 0, 0); vc_layout.setSpacing(0)
         vc_layout.addWidget(self._roi_ribbon)
         vc_layout.addWidget(self._viewer, 1)
-        right.addWidget(viewer_container)
+        img_container = QtWidgets.QWidget()
+        icl = QtWidgets.QVBoxLayout(img_container)
+        icl.setContentsMargins(0, 0, 0, 0); icl.setSpacing(0)
+        icl.addWidget(viewer_container, 1)
+        icl.addWidget(self._build_frame_scrub_bar())
+        right.addWidget(img_container)
 
         # Radial integration (azimuthal mean around the beam centre).
         self._profile_view = ProfileViewer()
@@ -419,6 +436,26 @@ class DataViewerTab(QtWidgets.QWidget):
         ctb.insertWidget(3, QtWidgets.QLabel("η bin:"))
         ctb.insertWidget(4, self._cake_eta_bin)
         ptb = self._profile_view._toolbar_layout
+        # Source: the live detector frame's own radial integration (default), or
+        # a pre-integrated profile file (csv/xye/dat/fxye — Batch Integrate's own
+        # output formats) loaded and plotted directly, with the image viewer left
+        # empty — a calibration can still be attached for ring simulation on top.
+        self._prof_source = _NoScrollComboBox()
+        self._prof_source.addItem("Detector frame", "image")
+        self._prof_source.addItem("Profile file…", "file")
+        self._prof_source.setToolTip(
+            "Detector frame: integrate the loaded image (default).\n"
+            "Profile file…: load an existing radial-integration output file "
+            "(.csv/.xye/.dat/.fxye) and plot it directly — no image needed.")
+        self._prof_source.currentIndexChanged.connect(self._on_profile_source_changed)
+        self._prof_source_lbl = QtWidgets.QLabel("")
+        self._prof_source_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        prof_src_sep = QtWidgets.QFrame()
+        prof_src_sep.setFrameShape(QtWidgets.QFrame.VLine)
+        prof_src_sep.setFrameShadow(QtWidgets.QFrame.Sunken)
+        ptb.insertWidget(0, self._prof_source)
+        ptb.insertWidget(1, self._prof_source_lbl)
+        ptb.insertWidget(2, prof_src_sep)
         self._rad_r_bin = _fspin(0.1, 20.0, 2, 1.0, "px"); self._rad_r_bin.setFixedWidth(56)
         self._rad_r_bin.setToolTip("Radial bin size for the azimuthal mean.")
         self._rad_auto = QtWidgets.QCheckBox("Auto"); self._rad_auto.setChecked(True)
@@ -485,6 +522,59 @@ class DataViewerTab(QtWidgets.QWidget):
 
     # ── Loading ───────────────────────────────────────────────────
 
+    def _build_frame_scrub_bar(self) -> QtWidgets.QWidget:
+        """Prev/slider/next scrubber shown under the image viewer once the
+        loaded source (HDF5 dataset / TIFF folder / stack) has more than one
+        frame — replaces the loader panel's own compact nav row, which this
+        tab keeps hidden (``DataLoaderPanel(hide_frame_field=True)``),
+        mirroring ``tab_calibrate.py``'s identical scrubber (itself modeled
+        on ``widgets.CakeStackViewer``'s scrub bar in Batch Integrate's
+        "Eta-R cakes" tab)."""
+        row = QtWidgets.QHBoxLayout()
+        row.setContentsMargins(4, 2, 4, 2); row.setSpacing(4)
+        self._frame_prev_btn = QtWidgets.QToolButton(); self._frame_prev_btn.setText("◀")
+        self._frame_prev_btn.setObjectName("frameNavBtn")
+        self._frame_prev_btn.setToolTip("Previous frame")
+        self._frame_prev_btn.clicked.connect(lambda: self._step_frame(-1))
+        row.addWidget(self._frame_prev_btn)
+        self._frame_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self._frame_slider.setObjectName("frameNavSlider")
+        self._frame_slider.setMinimum(0)
+        self._frame_slider.setPageStep(1)
+        self._frame_slider.valueChanged.connect(self._loader.set_frame)
+        row.addWidget(self._frame_slider, 1)
+        self._frame_next_btn = QtWidgets.QToolButton(); self._frame_next_btn.setText("▶")
+        self._frame_next_btn.setObjectName("frameNavBtn")
+        self._frame_next_btn.setToolTip("Next frame")
+        self._frame_next_btn.clicked.connect(lambda: self._step_frame(1))
+        row.addWidget(self._frame_next_btn)
+        self._frame_lbl = QtWidgets.QLabel("")
+        self._frame_lbl.setMinimumWidth(90)
+        row.addWidget(self._frame_lbl)
+        self._frame_scrub_bar = QtWidgets.QWidget()
+        self._frame_scrub_bar.setLayout(row)
+        self._frame_scrub_bar.setVisible(False)
+        return self._frame_scrub_bar
+
+    def _step_frame(self, delta: int):
+        n = self._loader.n_frames()
+        if n <= 1:
+            return
+        self._frame_slider.setValue(
+            min(max(self._frame_slider.value() + delta, 0), n - 1))
+
+    def _sync_frame_scrub_bar(self):
+        n = self._loader.n_frames()
+        self._frame_scrub_bar.setVisible(n > 1)
+        if n <= 1:
+            return
+        idx = self._loader.frame_index()
+        self._frame_slider.blockSignals(True)
+        self._frame_slider.setRange(0, n - 1)
+        self._frame_slider.setValue(idx)
+        self._frame_slider.blockSignals(False)
+        self._frame_lbl.setText(f"frame {idx + 1}/{n}")
+
     def _on_data_changed(self):
         """Loader's dataChanged fired — throttle into at most one refresh per
         interval instead of restarting (and so indefinitely deferring) the
@@ -496,6 +586,10 @@ class DataViewerTab(QtWidgets.QWidget):
     def _on_loader_data(self):
         """Data loaded or frame changed in the loader — refresh the display,
         applying dark/bright/background corrections."""
+        if self._profile_file_mode:
+            self._frame_scrub_bar.setVisible(False)
+            return
+        self._sync_frame_scrub_bar()
         raw = self._loader.current_frame()
         if raw is None:
             return
@@ -529,6 +623,8 @@ class DataViewerTab(QtWidgets.QWidget):
     def _on_fields_changed(self):
         """Dark/bright/background/mask changed — recompute the corrected image and
         refresh the overlay + radial integration (no autorange, no autofill)."""
+        if self._profile_file_mode:
+            return
         raw = self._loader.current_frame()
         if raw is None:
             return
@@ -597,6 +693,86 @@ class DataViewerTab(QtWidgets.QWidget):
     def _on_radius_clicked(self, r_px: float):
         """A radius was clicked on the profile — draw its ring on the image."""
         self._info_lbl.setText(self._geom_card.on_radius_clicked(r_px))
+
+    # ── Radial Profile "Source" — a loaded profile file, in place of the
+    # live detector frame's own integration ────────────────────────────
+
+    def _on_profile_source_changed(self, _idx: int):
+        if self._prof_source.currentData() != "file":
+            self._exit_profile_file_mode()
+            return
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Load profile file", "", PROFILE_FILE_FILTER)
+        if not path:
+            self._prof_source.blockSignals(True)
+            self._prof_source.setCurrentIndex(0)
+            self._prof_source.blockSignals(False)
+            return
+        self._load_profile_file(path)
+
+    def _load_profile_file(self, path: str):
+        try:
+            x, y, sigma = load_profile_file(path)
+        except Exception:
+            import traceback
+            show_error(self, "Profile load error", traceback.format_exc())
+            self._prof_source.blockSignals(True)
+            self._prof_source.setCurrentIndex(0)
+            self._prof_source.blockSignals(False)
+            return
+        self._loaded_profile = (x, y, sigma, profile_file_axis_kind(path))
+        self._profile_file_mode = True
+        self._prof_source_lbl.setText(Path(path).name)
+        # No image in this mode — blank the viewer (pyqtgraph's own
+        # ImageView.clear(), which only touches the displayed image, not the
+        # overlay/crosshair items added separately) and clear self._cur so
+        # every existing image-dependent guard (radial_integrate, Top-N,
+        # lab-frame axes, …) already no-ops correctly with no further changes.
+        self._cur = None
+        self._viewer._iv.clear()
+        self._viewer._data = None
+        self._viewer._refresh_coord_bar()
+        self._frame_scrub_bar.setVisible(False)
+        self._geom_card.simulate_rings_without_image()
+        self._render_loaded_profile()
+
+    def _exit_profile_file_mode(self):
+        if not self._profile_file_mode:
+            return
+        self._loaded_profile = None
+        self._profile_file_mode = False
+        self._prof_source_lbl.setText("")
+        self._on_loader_data()
+
+    def _render_loaded_profile(self):
+        """Plot the loaded profile file: straight through if it's already in
+        R_px, converted (with full ring/unit-toggle support) if a calibration
+        is attached, or in its own native axis (locked, no ring overlay)
+        otherwise — see helpers.native_axis_to_r_px."""
+        if self._loaded_profile is None:
+            return
+        x, y, sigma, x_kind = self._loaded_profile
+        if x_kind == "r_px":
+            self._profile_view.set_profile(x, y, sigma=sigma)
+            return
+        if self._geom_card.has_calibration():
+            geo = self._geom_card.get_geometry()
+            lsd_um, px_um, wl = geo["Lsd"], geo["pxY"], geo["wavelength_A"]
+            r_px = native_axis_to_r_px(x, x_kind, lsd_um, px_um, wl)
+            self._profile_view.set_profile(r_px, y, sigma=sigma,
+                                           wavelength_A=wl, lsd_um=lsd_um, px_um=px_um)
+        else:
+            self._profile_view.set_profile(x, y, sigma=sigma, native_unit=x_kind)
+
+    def _on_profile_geometry_changed(self):
+        """Calibration/material/geometry changed while a profile file is
+        loaded — immediately upgrade a native-axis plot to a converted,
+        ring-annotated one (or vice versa if the calibration was cleared),
+        and keep the ring markers themselves in sync (the normal image-driven
+        "Simulate rings" flow never runs with no image loaded)."""
+        if self._profile_file_mode:
+            self._geom_card.simulate_rings_without_image()
+            self._render_loaded_profile()
 
     # ── Lab-frame axes overlay ───────────────────────────────────────
     #

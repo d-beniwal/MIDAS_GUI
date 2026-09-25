@@ -616,25 +616,139 @@ def is_dark_like_name(path) -> bool:
     return bool(_DARK_NAME_RE.search(Path(str(path)).name))
 
 
-def _collect_frame_paths(raw) -> list:
+# Known image-file formats a folder load will pick up, in the fixed order
+# their paths are concatenated in (see _collect_frame_paths) — grouped under
+# one label per format so widgets.DataLoaderPanel's optional "Format:" filter
+# can offer only the formats actually present in a given folder.
+_FOLDER_FORMAT_GROUPS = {
+    "TIFF": ("*.tif", "*.tiff"),
+    "HDF5": ("*.h5", "*.hdf5"),
+    "GE": ("*.ge*",),
+    "CBF": ("*.cbf",),
+    "EDF": ("*.edf",),
+}
+
+
+def _folder_format_groups(folder) -> dict:
+    """Which of ``_FOLDER_FORMAT_GROUPS`` are present in ``folder``, each
+    mapped to its sorted matching paths (as ``str``) — empty groups omitted.
+    Used both by ``_collect_frame_paths`` (to filter) and by
+    ``widgets.DataLoaderPanel`` (to populate its "Format:" combo with only
+    the formats a given folder actually has)."""
+    p = Path(folder)
+    out = {}
+    for label, patterns in _FOLDER_FORMAT_GROUPS.items():
+        paths = []
+        for ext in patterns:
+            paths.extend(sorted(p.glob(ext)))
+        if paths:
+            out[label] = [str(x) for x in paths]
+    return out
+
+
+def _collect_frame_paths(raw, ext_group: Optional[str] = None) -> list:
     """Frames from a folder or a *.tif glob (sorted).  Mirrors tab_view logic.
 
     ``raw`` may also be an already-resolved ``list[str]`` of explicit paths
     (an arbitrary multi-file selection from ``dialogs.BrowseFilesDialog``,
-    which has no single string/glob representation) — returned as-is."""
+    which has no single string/glob representation) — returned as-is.
+
+    ``ext_group`` restricts a folder listing to one label from
+    ``_FOLDER_FORMAT_GROUPS`` (e.g. ``"TIFF"``); ``None`` (the default) keeps
+    the original behavior of merging every known format, in the same fixed
+    per-format order as before."""
     if isinstance(raw, list):
         return raw
     import glob as _glob
     p = Path(raw)
     if p.is_dir():
+        groups = _folder_format_groups(p)
+        if ext_group and ext_group in groups:
+            return groups[ext_group]
         out = []
-        for ext in ("*.tif", "*.tiff", "*.h5", "*.hdf5", "*.ge*", "*.cbf", "*.edf"):
-            out.extend(sorted(p.glob(ext)))
-        return [str(x) for x in out]
+        for paths in groups.values():
+            out.extend(paths)
+        return out
     # recursive=True only changes behavior when the pattern contains "**"
     # (the filestem-filter case, widgets.DataLoaderPanel._raw_source) — a
     # plain glob without it is unaffected.
     return sorted(_glob.glob(raw, recursive=True))
+
+
+# ── Pre-integrated 1-D profile files (Batch Integrate's own output formats) ──
+
+# Which axis a given extension's first column holds, matching workers.py's
+# write_profile dispatch (write_csv → R_px, write_xye/write_fxye → 2θ in
+# degrees, write_dat → Q in inverse angstrom).
+_PROFILE_EXT_KIND = {
+    ".csv": "r_px",
+    ".dat": "q_invA",
+    ".xye": "two_theta_deg",
+    ".fxye": "two_theta_deg",
+}
+
+PROFILE_FILE_FILTER = "Profile files (*.csv *.xye *.dat *.fxye);;All files (*)"
+
+
+def profile_file_axis_kind(path) -> str:
+    """Which physical axis ``path``'s first column holds, from its
+    extension — ``"r_px"``, ``"two_theta_deg"``, or ``"q_invA"``. Unknown
+    extensions default to ``"r_px"`` (the plain 2/3-column case)."""
+    return _PROFILE_EXT_KIND.get(Path(path).suffix.lower(), "r_px")
+
+
+def load_profile_file(path: str):
+    """Load a pre-integrated 1-D profile file → ``(x, y, sigma_or_None)``.
+
+    Tolerates comma- or whitespace-separated 2- or 3-column data with a
+    leading comment/header line (``#`` comments skipped; a non-numeric first
+    row is too) — round-trips ``workers.write_csv``'s comma format,
+    ``workers.write_dat``'s whitespace format, and ``workers.write_xye``'s
+    space-delimited 3-column format unchanged. What ``x`` physically means
+    (R_px / 2θ / Q) is not this function's concern — see
+    ``profile_file_axis_kind``."""
+    with open(path, "r") as fh:
+        first = ""
+        for line in fh:
+            s = line.strip()
+            if s and not s.startswith("#"):
+                first = s
+                break
+    delim = "," if "," in first else None
+    try:
+        float(first.split(delim)[0] if delim else first.split()[0])
+        skip = 0
+    except ValueError:
+        skip = 1
+    arr = np.loadtxt(path, delimiter=delim, comments="#", skiprows=skip)
+    arr = np.atleast_2d(arr)
+    if arr.shape[1] < 2:
+        raise ValueError(f"Profile file needs >=2 columns (x, y); got {arr.shape[1]}.")
+    x = arr[:, 0].astype(np.float64)
+    y = arr[:, 1].astype(np.float64)
+    sigma = arr[:, 2].astype(np.float64) if arr.shape[1] >= 3 else None
+    return x, y, sigma
+
+
+def native_axis_to_r_px(x, x_kind: str, lsd_um: float, px_um: float,
+                        wavelength_A: Optional[float] = None):
+    """Convert a profile file's native x-axis back into detector-pixel
+    radius, the algebraic inverse of ``widgets.ProfileViewer._r_to_x`` — lets
+    a loaded 2θ/Q-native file be plotted through the normal ``set_profile``
+    path (full R/2θ/Q toggle, ring overlay) once a calibration supplies the
+    geometry needed to place it there."""
+    x = np.asarray(x, dtype=np.float64)
+    if x_kind == "r_px":
+        return x
+    if x_kind == "two_theta_deg":
+        two_theta = np.radians(x)
+    elif x_kind == "q_invA":
+        if not wavelength_A:
+            raise ValueError("q_invA -> r_px conversion needs a wavelength.")
+        two_theta = 2.0 * np.arcsin(np.clip(x * wavelength_A / (4 * math.pi), -1.0, 1.0))
+    else:
+        raise ValueError(f"Unknown profile axis kind: {x_kind!r}")
+    return (lsd_um / px_um) * np.tan(two_theta)
 
 
 def display_text_for_paths(paths: list) -> str:
