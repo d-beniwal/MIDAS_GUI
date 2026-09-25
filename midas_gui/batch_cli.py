@@ -26,6 +26,12 @@ from __future__ import annotations
 import argparse
 import sys
 
+import midas_gui._paths  # noqa: F401  (KMP_DUPLICATE_LIB_OK / HDF5_USE_FILE_LOCKING env vars —
+# this entry point never goes through app.py's import chain, so without this
+# import it got neither: a long-running background job reading HDF5 over an
+# NFS-mounted beamline share was just as exposed to the file-locking hang
+# _paths.py now guards against as the interactive GUI is.)
+
 from midas_gui.constants import POL_PLANE_HORIZONTAL_ETA_DEG
 
 

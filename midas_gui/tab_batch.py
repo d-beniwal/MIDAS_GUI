@@ -153,6 +153,11 @@ class BatchTab(QtWidgets.QWidget):
         self._loader.dataChanged.connect(self._refresh_detector_preview)
         self._loader.dataChanged.connect(self._maybe_autofill_output_dir)
         self._loader.fieldsChanged.connect(self._refresh_detector_preview)
+        # "stream" mode's preview frame is fetched off the GUI thread (see
+        # DataLoaderPanel._start_preview_worker) — dataChanged/fieldsChanged
+        # above just kick that background read off; this is what actually
+        # re-draws the Detector view once the real frame lands.
+        self._loader.previewFrameReady.connect(self._refresh_detector_preview)
         self._use_tab2_btn.toggled.connect(self._refresh_detector_preview)
         self._json_ed.textChanged.connect(lambda *_: self._refresh_detector_preview())
         self._use_tab2_btn.toggled.connect(self._update_calib_src_enabled)
@@ -251,8 +256,11 @@ class BatchTab(QtWidgets.QWidget):
         loaded — calibration commonly arrives before data does."""
         # current_frame() already applies dark/bright/background correction
         # to each constituent frame before any "Preview: sum first N"
-        # summing (see DataLoaderPanel._peek_stream_frame) — correcting
-        # again here would double-apply it.
+        # summing (see DataLoaderPanel._start_preview_worker) — correcting
+        # again here would double-apply it. In "stream" mode this may return
+        # a stale (or None) frame immediately while a fresh one is fetched
+        # off the GUI thread in the background — previewFrameReady re-calls
+        # this method once that lands, so the view still ends up current.
         frame = self._loader.current_frame()
         fields, note = self._calib_fields_in_use()
         if frame is not None:

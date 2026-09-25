@@ -3725,6 +3725,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
     monitorToggled = QtCore.pyqtSignal(bool)  # MONITOR button toggled (stream mode)
     bufferInvalidated = QtCore.pyqtSignal()   # this panel's own buffer was reset
     metadataDetected = QtCore.pyqtSignal(dict)  # auto-detected pxY/wavelength_A from a new Data load
+    previewFrameReady = QtCore.pyqtSignal()   # "stream" mode: an async preview frame finished (or failed)
 
     def __init__(self, parent=None, *, mode="single", data_dataset="exchange/data",
                  dark_dataset="exchange/data_dark", allow_live=False,
@@ -3748,6 +3749,8 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._cur = None
         self._stream_preview_dirty = True   # "stream" mode only — see current_frame()
         self._preview_sum_n = 1             # "stream" mode only — see set_preview_sum
+        self._preview_worker = None         # "stream" mode only — in-flight StreamPreviewWorker, if any
+        self._preview_worker_stale = False  # a new dirty trigger arrived while one was already running
         self._live_src: Optional[QtCore.QObject] = None   # PvaLiveSource | CaLiveSource
         self._live_backend = "pva"     # which backend self._live_src (if any) was built for
         self._registry = None          # DataSourceRegistry, set by bind_registry()
@@ -4036,7 +4039,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._mask_sel.maskChanged.connect(self.fieldsChanged)
         lv.addWidget(self._mask_sel)
 
-        # "stream" mode's cached preview frame (_peek_stream_frame) now
+        # "stream" mode's cached preview frame (_start_preview_worker) now
         # bakes dark/bright/background correction in — a field changing
         # after a preview was already cached must invalidate it too, or a
         # caller like Batch Integrate's Detector view would keep showing
@@ -4380,10 +4383,10 @@ class DataLoaderPanel(QtWidgets.QWidget):
         if self._mode == "stream":
             # No in-memory load of the whole dataset (that's the point of
             # stream mode for large scans) — just mark the cached preview
-            # frame stale. current_frame() does the actual (cheap-if-
+            # frame stale. current_frame() kicks off the actual (cheap-if-
             # unneeded, since Pump Probe's "stream" loader never calls it)
-            # one-frame "peek" lazily, on first ask — see current_frame /
-            # _peek_stream_frame.
+            # background preview fetch lazily, on first ask — see
+            # current_frame / _start_preview_worker.
             if isinstance(raw, list):
                 text = f"Source: {len(raw)} file(s) — {display_text_for_paths(raw)}"
             elif self._stem_filter:
@@ -4475,39 +4478,83 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._preview_sum_n = n
             self._stream_preview_dirty = True
 
-    def _peek_stream_frame(self):
-        """Fetch, dark/bright/background-correct, and sum the first
-        ``self._preview_sum_n`` frames the current "stream"-mode source
-        would yield, for a caller's preview (e.g. Batch Integrate's
-        Detector view overlay) — without eagerly loading the whole dataset
-        the way "stack"/"single" mode does. Opens the exact same source the
-        real run will use (``workers._open_source_cfg``), so e.g. a VAREX
-        multi-file source previews its actual combined-per-file frames, not
-        a raw sub-frame. Correction is applied to each constituent frame
-        BEFORE summing (matching how the real batch run corrects every
-        frame independently) — correcting only the final sum once would
-        subtract just one dark frame's worth from an N-times-larger signal,
-        making it look like dark subtraction barely did anything for N>1.
-        Returns None if no source is set or it can't be opened (e.g. an
-        incomplete pick, or a transient read error)."""
+    def _start_preview_worker(self):
+        """Fetch and correct the "stream"-mode preview sum off the GUI
+        thread (:class:`workers.StreamPreviewWorker`), for a caller's
+        preview (e.g. Batch Integrate's Detector view overlay) — without
+        eagerly loading the whole dataset the way "stack"/"single" mode
+        does, and without blocking the GUI while it reads.
+
+        Confirmed necessary, not just theoretical: this used to run
+        synchronously right here (``_peek_stream_frame``) and froze the
+        whole app with no recovery against a real multi-file VAREX HDF5
+        source over an NFS-mounted beamline share — HDF5's file locking can
+        hang indefinitely on such mounts, not just run slowly (separately
+        fixed too — see ``midas_gui/_paths.py``'s ``HDF5_USE_FILE_LOCKING``).
+
+        Only one worker runs at a time — see ``current_frame()``'s dirty
+        check and ``_preview_worker_stale``: a new trigger that arrives
+        while one is already in flight just flags it for a fresh restart
+        once this one finishes, rather than piling up concurrent reads
+        against the same (possibly slow) storage.
+        """
         cfg = self.source_cfg()
         if not (cfg.get("path") or cfg.get("paths")):
-            return None
-        try:
-            from midas_gui.workers import _open_source_cfg
-            source = _open_source_cfg(cfg)
-            total = getattr(source, "n_frames", 0)
-            if total == 0:
-                return None
-            n = max(1, min(self._preview_sum_n, total))
-            acc = None
-            for i in range(n):
-                _fid, img = source.get(i)
-                img = self.corrected(np.asarray(img, dtype=np.float64))
-                acc = img if acc is None else acc + img
-            return acc.astype(np.float32)
-        except Exception:
-            return None
+            self._cur = None
+            self._nframes = 0
+            self.previewFrameReady.emit()
+            return
+        from midas_gui.workers import StreamPreviewWorker
+        # Deliberately unparented (no parent=self): a QThread parented to a
+        # QWidget is destroyed the instant that widget is (Qt's normal
+        # parent-owns-children cascade) — including while it's still
+        # running, which is a fatal "QThread: Destroyed while thread is
+        # still running" abort, not a graceful stop. PyQt keeps a *running*
+        # QThread's wrapper alive on its own even with no parent and no
+        # remaining Python reference (specifically to prevent this), so the
+        # explicit self._preview_worker reference below plus the finished/
+        # failed slots dropping it are enough for correct cleanup once it's
+        # actually done — regardless of what happens to this panel/its
+        # owning tab in the meantime. Found via a real crash: constructing
+        # any BatchTab starts a preview read of the nickel-standard default
+        # path, and a parented worker aborted the process whenever a test
+        # finished before that (normally fast, but not instant) read did.
+        worker = StreamPreviewWorker(
+            cfg, self._preview_sum_n, dark=self.dark(), bright=self.bright(),
+            background=self.background(), bright_mode=self.bright_mode())
+        worker.finished.connect(self._on_preview_worker_done)
+        worker.failed.connect(self._on_preview_worker_failed)
+        self._preview_worker = worker
+        worker.start()
+
+    def _on_preview_worker_done(self, frame) -> None:
+        """``StreamPreviewWorker.finished`` — runs on the GUI thread (queued
+        cross-thread signal), so it's the safe place for the one part of the
+        old ``corrected()`` call the worker itself couldn't do: updating each
+        field selector's mismatch-warning label (a QWidget mutation)."""
+        self._preview_worker = None
+        if frame is not None:
+            frame_shape = np.asarray(frame).shape
+            for sel in (self._dark_sel, self._bright_sel, self._bg_sel):
+                sel.note_frame_shape(frame_shape)
+        self._cur = frame
+        self._nframes = 1 if frame is not None else 0
+        self._restart_preview_worker_if_stale_else_notify()
+
+    def _on_preview_worker_failed(self, _msg: str) -> None:
+        """An incomplete pick or a transient read error — same as the old
+        synchronous path's bare ``except Exception: return None``."""
+        self._preview_worker = None
+        self._cur = None
+        self._nframes = 0
+        self._restart_preview_worker_if_stale_else_notify()
+
+    def _restart_preview_worker_if_stale_else_notify(self) -> None:
+        if self._preview_worker_stale:
+            self._preview_worker_stale = False
+            self._start_preview_worker()
+        else:
+            self.previewFrameReady.emit()
 
     def _setup_navigator(self):
         hi = max(0, self._nframes - 1)
@@ -4899,20 +4946,28 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._set_frame(i)
 
     def current_frame(self):
-        """Raw (uncorrected) current 2-D frame, or None.
+        """Raw (uncorrected) current 2-D frame, or None — except "stream"
+        mode, whose preview is corrected (see ``_start_preview_worker``).
 
-        "stream" mode fetches this lazily, on first ask, from
-        ``_peek_stream_frame`` — cached until ``_stream_preview_dirty`` is
-        set again (on a source or "Combine sub-frames" change). Pump Probe
-        also uses "stream" mode but never calls this, so the (sometimes
-        multi-second, for a large multi-frame HDF5) peek only ever happens
+        "stream" mode fetches this asynchronously: a dirty flag (set on a
+        source or "Combine sub-frames" change) kicks off a background
+        :class:`workers.StreamPreviewWorker` and this call returns
+        immediately with whatever's currently cached (``None`` on first ask,
+        or the previous preview while a fresh one is computing) — never
+        blocks. ``previewFrameReady`` fires once the real result lands; a
+        caller that wants the up-to-date preview connects to that rather
+        than polling this. Pump Probe also uses "stream" mode but never
+        calls this, so the read this triggers (sometimes multi-second, for a
+        large multi-frame HDF5, or on slow/NFS storage) only ever happens
         for a caller that actually wants a preview (Batch Integrate's
         Detector view)."""
         if self._mode == "stream":
             if getattr(self, "_stream_preview_dirty", True):
-                self._cur = self._peek_stream_frame()
-                self._nframes = 1 if self._cur is not None else 0
                 self._stream_preview_dirty = False
+                if self._preview_worker is not None:
+                    self._preview_worker_stale = True
+                else:
+                    self._start_preview_worker()
             return self._cur
         if self._nframes == 0:
             return None

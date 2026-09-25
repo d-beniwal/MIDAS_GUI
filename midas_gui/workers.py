@@ -429,6 +429,69 @@ class FieldAverageWorker(QtCore.QThread):
             self.failed.emit(traceback.format_exc())
 
 
+class StreamPreviewWorker(QtCore.QThread):
+    """Fetch and dark/bright/background-correct the "stream"-mode preview sum
+    off the GUI thread — the file-reading half of what
+    ``widgets.DataLoaderPanel._peek_stream_frame`` used to do entirely on the
+    main thread.
+
+    Opens the exact same source the real batch run will use
+    (``_open_source_cfg``), reads ``min(preview_sum_n, n_frames)`` frames,
+    correcting each one BEFORE summing (matching the real run's per-frame
+    correction — correcting only the final sum would subtract just one
+    dark frame's worth from an N-times-larger signal) via the same
+    ``apply_field_corrections`` used everywhere else, not
+    ``DataLoaderPanel.corrected()`` itself — that method also updates each
+    field selector's mismatch-warning label, which is a QWidget mutation and
+    must stay on the GUI thread; the caller re-does that one check itself,
+    once, against this result's shape, in its ``finished`` slot.
+
+    Confirmed necessary against a real hang, not just theoretical: a
+    multi-file VAREX HDF5 source over an NFS-mounted beamline share froze
+    the whole app with no recovery when this ran synchronously (see
+    .context/DECISIONS.md, 2026-09-25) — HDF5's file locking can hang
+    indefinitely on such mounts, not just run slowly, and even with that
+    hang separately fixed (HDF5_USE_FILE_LOCKING=FALSE — see midas_gui/
+    _paths.py), a large multi-frame combine over real network storage can
+    still take long enough that it belongs off the GUI thread regardless.
+    """
+    finished = QtCore.pyqtSignal(object)   # np.ndarray (float32) or None
+    failed   = QtCore.pyqtSignal(str)
+
+    def __init__(self, cfg: dict, preview_sum_n: int,
+                dark=None, bright=None, background=None,
+                bright_mode: str = "divide", parent=None):
+        super().__init__(parent)
+        self._cfg = dict(cfg)
+        self._preview_sum_n = max(1, int(preview_sum_n))
+        self._dark, self._bright, self._background = dark, bright, background
+        self._bright_mode = bright_mode
+
+    def run(self):
+        try:
+            if not (self._cfg.get("path") or self._cfg.get("paths")):
+                self.finished.emit(None)
+                return
+            source = _open_source_cfg(self._cfg)
+            total = getattr(source, "n_frames", 0)
+            if total == 0:
+                self.finished.emit(None)
+                return
+            n = min(self._preview_sum_n, total)
+            acc = None
+            for i in range(n):
+                _fid, img = source.get(i)
+                img = np.asarray(img, dtype=np.float64)
+                if self._dark is not None or self._bright is not None or self._background is not None:
+                    img = apply_field_corrections(
+                        img, dark=self._dark, bright=self._bright,
+                        bright_mode=self._bright_mode, background=self._background)
+                acc = img if acc is None else acc + img
+            self.finished.emit(acc.astype(np.float32))
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  Mask workers
 # ═════════════════════════════════════════════════════════════════════════════

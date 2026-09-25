@@ -8,6 +8,83 @@ file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this
 date for the full uncondensed entries if ever needed._
 
+## 2026-09-25 — Batch Integrate froze completely: HDF5-over-NFS locking hang, plus backgrounding the preview read
+
+Live report: picking a 17-file HDF5 source (10-frame "Combine sub-frames",
+network-mounted) for Data, then checking Dark, made the Dark checkbox itself
+stop responding to clicks — not slow, genuinely stuck, confirmed by trying
+uncheck/recheck and getting nothing.
+
+**Root cause 1 — the actual freeze.** Checking Dark fires
+`FieldSelector.toggled` → `fieldReady` → `DataLoaderPanel.fieldsChanged` →
+`BatchTab._refresh_detector_preview()` → `current_frame()`, which for
+"stream" mode used to run `_peek_stream_frame()` **synchronously on the GUI
+thread** — real file I/O, no QThread. Its own docstring already admitted
+this could take "sometimes multi-second"; a 17-file network-mounted HDF5
+source measured a lot longer than that. But the user's report ("completely
+frozen", not just slow) pointed at something worse than slow I/O: HDF5
+`flock()`s every file it opens, and on many NFS servers/clients that lock is
+never granted — the call hangs *indefinitely*, not just slowly. Fixed at
+the source: `midas_gui/_paths.py` now sets `HDF5_USE_FILE_LOCKING=FALSE`
+(via `setdefault`, so a user needing locking left on can still override it)
+— the standard, documented workaround, safe here since this is a
+read-only/single-writer workflow where the corruption risk locking exists
+to prevent doesn't apply.
+
+**Found along the way:** `midas_gui/batch_cli.py` (the headless "Run as
+background job" runner) never imported `midas_gui._paths` at all — a
+standalone entry point that never goes through `app.py`'s import chain, so
+a long-running background job reading the exact same NFS-mounted HDF5 data
+got *neither* this fix *nor* the existing `KMP_DUPLICATE_LIB_OK` protection.
+Fixed the same way `app.py` does it — one import, first thing.
+
+**Root cause 1 alone doesn't make freezes impossible** — even with locking
+disabled, a large multi-frame combine over merely-slow (not broken) network
+storage can still block the GUI for a real, user-visible stretch. So also:
+backgrounded the preview read itself. `workers.StreamPreviewWorker` does the
+file-reading + per-frame correction (dark/bright/background, applied before
+summing — matching the real batch run's per-frame correction, same as
+before) off the GUI thread; `DataLoaderPanel.current_frame()` now returns
+immediately (cached/stale/`None`) and kicks off the worker rather than
+blocking, with a new `previewFrameReady` signal firing once the real result
+lands (`BatchTab` connects it straight to `_refresh_detector_preview`). Only
+one worker runs at a time — a second dirty trigger arriving mid-flight just
+flags a restart rather than piling up concurrent reads against the same
+storage.
+
+**A second, more dangerous bug found while fixing the first.** The obvious
+first cut parented `StreamPreviewWorker` to the panel (`parent=self`).
+That's exactly wrong for a QThread: Qt's parent-owns-children cascade
+destroys a QThread the instant its parent widget is — including while
+`run()` is still executing, which is a fatal "QThread: Destroyed while
+thread is still running" abort, not a graceful stop. Every `BatchTab`
+construction starts a preview read of the nickel-standard default path
+(`self._loader.set_path(DEFAULT_NICKEL_DIR)` in `__init__`) — previously
+synchronous and finished before `__init__` even returned, so this had never
+been a real hazard before. Backgrounding it turned "constructing a
+`BatchTab`" into "starts a real background thread," and the full suite
+caught it immediately: ~35 unrelated tests (`test_geom_cache_key`,
+`test_batch_output_dir`, `test_batch_cake_stack`, `test_batch_job_results`,
+…) that merely build a `BatchTab` for other purposes started crashing with
+SIGABRT/SIGSEGV — whichever test's teardown raced past the thread finishing.
+Fix: construct the worker unparented. PyQt keeps a *running* QThread's
+wrapper alive on its own with no parent and no remaining Python reference,
+specifically to prevent this — the explicit `self._preview_worker`
+reference plus the `finished`/`failed` slots dropping it are enough for
+correct cleanup once it's actually done, regardless of what happens to the
+panel/its owning tab in the meantime. Full suite confirmed back to the
+3-failure baseline twice in a row after the fix.
+
+Tests: `tests/test_paths_env.py` (new) pins the env-var default, a user
+override, and the `batch_cli.py` regression specifically, each via a fresh
+subprocess (env vars set at import time can't be re-tested in an
+already-running interpreter). `tests/test_batch_stream_preview.py` (new)
+pins `StreamPreviewWorker`'s correct-before-summing behavior and error
+handling standalone, plus the full async contract through
+`DataLoaderPanel`: `current_frame()` never blocks, `previewFrameReady`
+fires once real, dark correction is baked in, and a second dirty trigger
+mid-flight doesn't spawn a second worker.
+
 ## 2026-09-25 — Real ion-chamber + sample-motor metadata in zarr output (stopgap)
 
 While checking the (separately-branched) Zarr Viewer tab against a real
