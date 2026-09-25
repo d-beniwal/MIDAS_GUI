@@ -8,6 +8,50 @@ file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this
 date for the full uncondensed entries if ever needed._
 
+## 2026-09-24 — Upstream's frozen-point native-pipeline switch outruns the pinned backend; guarded, not reverted
+
+Merging `upstream/main` brought in `1893e97 Drop vendored frozen_point_calib now
+that midas-calibrate-v2 ships it natively`, which deletes the vendored
+`midas_gui/_vendor/frozen_point_calib` and calls
+`midas_calibrate_v2.pipelines.iterate_frozen_point_until_stable` directly. That
+function does not exist in **0.17.0**, the version `environment.yml` currently
+pins (PyPI's latest at merge time is **0.22.0** — the pipeline shipped somewhere
+in between; not yet bisected). Unguarded, this breaks collection of
+`tests/test_frozen_point_vendor.py` outright (`ImportError` at import time) and
+makes `calib.py`'s `frozen_point` branch raise a bare `ImportError` with no
+guidance if a user ever picks that pipeline from the GUI.
+
+**Guarded, not reverted.** This is a maintainer's own commit to their own repo,
+made against a newer backend than what's pinned here — reverting it inside a PR
+back to that repo would be presumptuous, and the right fix (bumping
+`midas-calibrate-v2`) is `environment.yml`'s call, not this branch's. So:
+
+- `midas_gui/calib.py`'s `frozen_point` branch now imports
+  `iterate_frozen_point_until_stable` in a `try/except ImportError`, raising a
+  `RuntimeError` that names the installed version (via
+  `importlib.metadata.version`) and says to upgrade the backend or choose a
+  different pipeline, instead of surfacing a bare `ImportError` from a
+  now-deleted vendor path.
+- `tests/test_frozen_point_vendor.py` uses `pytest.importorskip` plus a
+  `getattr(..., None)` check on both `autocalibrate_frozen_point` and
+  `iterate_frozen_point_until_stable`, skipping the whole module rather than
+  aborting collection when either is absent.
+- `tests/test_calib_frozen_point.py`'s two tests that monkeypatch
+  `midas_calibrate_v2.pipelines.iterate_frozen_point_until_stable` directly
+  (`test_frozen_point_subtracts_dark_and_dispatches`,
+  `test_frozen_point_logs_note_for_non_cpu_device`) get the same
+  `skipif(getattr(...) is None)` treatment — they were failing with
+  `AttributeError` from `monkeypatch.setattr`, not from anything this branch's
+  own changes touched; confirmed by reproducing the same failure against the
+  merge commit before any guard was added.
+
+Net effect on the pinned 0.17.0 environment: Frozen-point (high-tilt) is
+selectable in the GUI but errors with a clear message rather than a traceback;
+the three tests above skip with a stated reason instead of failing red. Nothing
+here silently disables the feature or changes its behavior once the backend
+catches up — the guards fall away on their own the day `environment.yml` bumps
+past whichever release added the native pipeline.
+
 ## 2026-09-24 — Mask Builder: multi-frame Image detection peeks metadata only; threshold projection defaults to "current frame"
 
 Commit `d224c97`.
