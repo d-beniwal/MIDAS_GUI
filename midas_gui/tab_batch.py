@@ -680,7 +680,11 @@ class BatchTab(QtWidgets.QWidget):
         self._mode_stack.addWidget(split); self._hsplit = split
 
         # ── LEFT: data loader (streaming source + dark/bright/bg + mask) ──
-        self._loader = DataLoaderPanel(mode="stream")
+        # unify_combine=True: start/end + "Combine sub-frames" apply the same
+        # way to HDF5 and TIFF-family sources here, replacing "stride" — see
+        # widgets.DataLoaderPanel's unify_combine docs. Pump Probe embeds the
+        # same panel WITHOUT this flag and keeps the old stride behavior.
+        self._loader = DataLoaderPanel(mode="stream", unify_combine=True)
         self._loader.setMinimumWidth(200)
         split.addWidget(self._loader)
 
@@ -1410,16 +1414,28 @@ class BatchTab(QtWidgets.QWidget):
         elif src_cfg["type"] == "hdf5":
             argv += ["--source-type", "hdf5", "--source-path", src_cfg["path"],
                      "--dataset", src_cfg.get("dataset", "frames")]
+        elif src_cfg["type"] == "hdf5_stack_glob":
+            argv += ["--source-type", "hdf5_stack_glob", "--source-paths", *src_cfg["paths"],
+                     "--dataset", src_cfg.get("dataset", "exchange/data")]
         else:
             argv += ["--source-type", "tiff_list", "--source-paths", *src_cfg["paths"]]
 
         argv += ["--out-dir", str(out_path), "--fmts", ",".join(fmts),
                  "--kernel", self._kernel.currentData()]
 
-        frame_range = self._loader.frame_range()
-        argv += ["--frame-start", str(frame_range[0]), "--frame-stride", str(frame_range[2])]
-        if frame_range[1] is not None:
-            argv += ["--frame-end", str(frame_range[1])]
+        # start/end are FILE/SCAN NUMBERS (batch_cli.py's --frame-start/
+        # --frame-end match this meaning now); chunk_size/combine_op are
+        # "Combine sub-frames" — both baked into src_cfg by a unify_combine
+        # panel (see widgets.DataLoaderPanel.source_cfg), so just forward
+        # them verbatim rather than going through frame_range() (which is
+        # always (0, None, 1) for this panel — see its docstring).
+        chunk_size = src_cfg.get("chunk_size")
+        argv += ["--chunk-size", str(chunk_size if chunk_size is not None else 0),
+                 "--combine-op", src_cfg.get("combine_op") or "mean"]
+        if src_cfg.get("frame_start") is not None:
+            argv += ["--frame-start", str(src_cfg["frame_start"])]
+        if src_cfg.get("frame_end") is not None:
+            argv += ["--frame-end", str(src_cfg["frame_end"])]
 
         if multi_azimuth:
             argv += ["--multi-azimuth"]
@@ -1452,8 +1468,14 @@ class BatchTab(QtWidgets.QWidget):
         if monitor_file:
             argv += ["--monitor-file", monitor_file]
 
-        end = frame_range[1] if frame_range[1] is not None else (self._loader.n_frames() or frame_range[0] + 1)
-        total = max(1, (end - frame_range[0] + frame_range[2] - 1) // frame_range[2])
+        # Progress-bar estimate only — reopen the (already start/end-filtered,
+        # chunk-combined) source the same way the job itself will, rather
+        # than frame_range() (always (0, None, 1) for this panel).
+        try:
+            from midas_gui.workers import _open_source_cfg
+            total = int(_open_source_cfg(src_cfg).n_frames) or 1
+        except Exception:
+            total = self._loader.n_frames() or 1
 
         job = self._job_queue.launch(argv, name=out_path.name or "batch", total_frames=total,
                                      out_dir=str(out_path))
@@ -1712,6 +1734,16 @@ class BatchTab(QtWidgets.QWidget):
                 "for new TIFF frames — select a folder or a filestem pick as "
                 "the data source (HDF5 sources and an explicit multi-file "
                 "pick can't be monitored — there's no folder to watch).")
+            self._loader.set_monitor_active(False); return
+        if (src_cfg.get("chunk_size") not in (None, 1)
+                or src_cfg.get("frame_start") is not None
+                or src_cfg.get("frame_end") is not None):
+            QtWidgets.QMessageBox.warning(
+                self, "Not supported with MONITOR",
+                "MONITOR processes newly-arrived frames live, one at a time, "
+                "so it can't combine them or restrict them to a file-number "
+                "range. Reset 'Combine sub-frames' to 1 and start/end to the "
+                "full range to use MONITOR.")
             self._loader.set_monitor_active(False); return
         try:
             spec = self._build_spec()

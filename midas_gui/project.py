@@ -829,7 +829,15 @@ def integrate_attempt_gui_fields(meta: dict) -> dict:
 def integrate_attempt_loader_state(meta: dict) -> dict:
     """The subset of an integration attempt's ``inputs`` that
     ``DataLoaderPanel.set_state()`` (stream mode) understands: path/dataset
-    plus the frame range as ``fr_start``/``fr_end``/``fr_stride``."""
+    plus the frame range as ``fr_start``/``fr_end``/``fr_stride``, and
+    "Combine sub-frames" as ``combine_chunk``/``combine_op``.
+
+    A ``unify_combine`` panel's (Batch Integrate's) ``src_cfg`` carries the
+    real start/end filter directly as ``frame_start``/``frame_end`` — its
+    ``inputs["frame_range"]`` is always ``(0, None, 1)`` (see
+    ``widgets.DataLoaderPanel.frame_range``), so those keys are preferred
+    when present. Falls back to parsing the legacy ``frame_range`` tuple for
+    projects saved before this existed."""
     inputs = meta.get("inputs") or {}
     src = inputs.get("src_cfg") or {}
     out = {}
@@ -837,14 +845,23 @@ def integrate_attempt_loader_state(meta: dict) -> dict:
         out["path"] = src["path"]
     if src.get("dataset"):
         out["dataset"] = src["dataset"]
-    frame_range = inputs.get("frame_range")
-    if frame_range:
-        start, end, stride = (list(frame_range) + [None, None, None])[:3]
-        if start is not None:
-            out["fr_start"] = start
-        out["fr_end"] = end if end is not None else 0
-        if stride is not None:
-            out["fr_stride"] = stride
+    if "frame_start" in src or "frame_end" in src:
+        if src.get("frame_start") is not None:
+            out["fr_start"] = src["frame_start"]
+        out["fr_end"] = src["frame_end"] if src.get("frame_end") is not None else 0
+    else:
+        frame_range = inputs.get("frame_range")
+        if frame_range:
+            start, end, stride = (list(frame_range) + [None, None, None])[:3]
+            if start is not None:
+                out["fr_start"] = start
+            out["fr_end"] = end if end is not None else 0
+            if stride is not None:
+                out["fr_stride"] = stride
+    if src.get("chunk_size") is not None:
+        out["combine_chunk"] = src["chunk_size"]
+    if src.get("combine_op"):
+        out["combine_op"] = src["combine_op"]
     return out
 
 

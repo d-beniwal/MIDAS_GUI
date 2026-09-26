@@ -9,11 +9,14 @@ The naming convention itself (``<froot>_<NNNNNN><tag>``, mirroring
 mpe_wf_saxs_waxs's output names) is a deliberate change from the older
 "write the frame id verbatim" behaviour — see ``frame_output_base``.
 """
+from pathlib import Path
+
 import numpy as np
 import pytest
 
 from midas_gui.workers import (
-    froot_and_frame_num, frame_output_base, _HDF5StackGlobSource)
+    froot_and_frame_num, frame_output_base, _HDF5StackGlobSource,
+    _ChunkCombinedFileSource, _filter_paths_by_frame_number)
 
 
 # ── froot_and_frame_num: parsing ─────────────────────────────────────────────
@@ -186,3 +189,83 @@ def test_hdf5_stack_glob_source_indexes_across_files(tmp_path):
         ["a.frame_0_1", "a.frame_2_3", "b.frame_0_1", "b.frame_2_3"]
     with pytest.raises(IndexError):
         src.get(4)
+
+
+# ── _ChunkCombinedFileSource / _filter_paths_by_frame_number ────────────────
+# The TIFF-family counterpart of _HDF5StackGlobSource for a Batch Integrate
+# unify_combine panel — see widgets.DataLoaderPanel.source_cfg's chunk_size/
+# frame_start/frame_end on the "tiff_glob"/"tiff_list" types.
+
+def _write_tiff_files(tmp_path, nums):
+    tifffile = pytest.importorskip("tifffile")
+    paths = []
+    for i, n in enumerate(nums):
+        p = tmp_path / f"scan_{n:06d}.tif"
+        tifffile.imwrite(str(p), np.full((3, 3), i, dtype=np.float32))
+        paths.append(str(p))
+    return paths
+
+
+def test_chunk_combined_file_source_default_matches_one_frame_per_file(tmp_path):
+    """chunk_size=1 (the default) combines nothing — same ids/values as an
+    uncombined per-file source, so a unify_combine panel's default doesn't
+    change anything for a plain folder pick."""
+    paths = _write_tiff_files(tmp_path, [1, 2, 3])
+    src = _ChunkCombinedFileSource(paths, chunk_size=1)
+    assert src.n_frames == 3
+    ids = [fid for fid, _ in src]
+    assert ids == ["scan_000001", "scan_000002", "scan_000003"]
+
+
+def test_chunk_combined_file_source_groups_consecutive_files(tmp_path):
+    paths = _write_tiff_files(tmp_path, [1, 2, 3, 4, 5])
+    src = _ChunkCombinedFileSource(paths, chunk_size=2, op="sum")
+    assert src.n_frames == 3
+    ids = [fid for fid, _ in src]
+    # A trailing partial group of 1 keeps the plain stem, like _HDF5StackGlobSource.
+    assert ids == ["scan_000001.frame_0_1", "scan_000003.frame_2_3", "scan_000005"]
+    _, img = src.get(0)
+    np.testing.assert_allclose(img, 0 + 1, rtol=1e-6)   # values 0,1 summed
+    _, img = src.get(1)
+    np.testing.assert_allclose(img, 2 + 3, rtol=1e-6)
+
+
+def test_chunk_combined_file_source_falsy_chunk_size_combines_everything(tmp_path):
+    paths = _write_tiff_files(tmp_path, [1, 2, 3])
+    src = _ChunkCombinedFileSource(paths, chunk_size=None, op="mean")
+    assert src.n_frames == 1
+    fid, img = src.get(0)
+    assert fid == "scan_000001.frame_0_2"
+    np.testing.assert_allclose(img, np.mean([0, 1, 2]), rtol=1e-6)
+
+
+def test_chunk_combined_file_source_get_out_of_range_raises(tmp_path):
+    paths = _write_tiff_files(tmp_path, [1, 2])
+    src = _ChunkCombinedFileSource(paths, chunk_size=1)
+    with pytest.raises(IndexError):
+        src.get(2)
+
+
+def test_filter_paths_by_frame_number_keeps_range_inclusive(tmp_path):
+    paths = _write_tiff_files(tmp_path, [9241, 9242, 9243, 9244, 9245])
+    kept = _filter_paths_by_frame_number(paths, 9242, 9244)
+    assert [Path(p).stem for p in kept] == ["scan_009242", "scan_009243", "scan_009244"]
+
+
+def test_filter_paths_by_frame_number_unbounded_side_is_none():
+    paths = ["scan_000010.tif", "scan_000020.tif", "scan_000030.tif"]
+    assert _filter_paths_by_frame_number(paths, 20, None) == paths[1:]
+    assert _filter_paths_by_frame_number(paths, None, 20) == paths[:2]
+
+
+def test_filter_paths_by_frame_number_both_none_is_a_no_op():
+    paths = ["a_1.tif", "b_2.tif"]
+    assert _filter_paths_by_frame_number(paths, None, None) == paths
+
+
+def test_filter_paths_by_frame_number_falls_back_on_unparseable_name():
+    """Mirrors DataLoaderPanel._file_numbers()'s all-or-nothing rule: if even
+    one file's number can't be parsed, filtering is skipped entirely rather
+    than silently dropping files with no way to compare them."""
+    paths = ["scan_000010.tif", "not_numeric.tif", "scan_000030.tif"]
+    assert _filter_paths_by_frame_number(paths, 15, 25) == paths

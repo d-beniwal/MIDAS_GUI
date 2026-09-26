@@ -717,6 +717,37 @@ def test_integrate_attempt_gui_fields_and_loader_state():
     assert project.integrate_attempt_loader_state(meta)["fr_end"] == 0
 
 
+def test_integrate_attempt_loader_state_prefers_unify_combine_frame_bounds():
+    """A unify_combine (Batch Integrate) attempt's src_cfg carries the real
+    start/end filter as frame_start/frame_end directly — its frame_range is
+    always (0, None, 1) (see widgets.DataLoaderPanel.frame_range), so those
+    keys must win over the (uninformative) legacy frame_range parsing."""
+    meta = {
+        "inputs": {
+            "src_cfg": {"type": "tiff_glob", "path": "/data/scan",
+                       "frame_start": 9242, "frame_end": 9244,
+                       "chunk_size": 3, "combine_op": "sum"},
+            "kernel": "subpixel2", "fmt": "csv",
+            "frame_range": [0, None, 1],   # would otherwise wrongly say "all"
+        },
+    }
+    loader = project.integrate_attempt_loader_state(meta)
+    assert loader == {"path": "/data/scan", "fr_start": 9242, "fr_end": 9244,
+                      "combine_chunk": 3, "combine_op": "sum"}
+
+    # frame_start omitted (single-file hdf5 case) -> no fr_start key, but
+    # frame_end is still present (None) so the "new-style" branch is taken.
+    meta2 = {"inputs": {"src_cfg": {"type": "hdf5", "path": "/data/ge1.h5",
+                                     "dataset": "exchange/data",
+                                     "frame_end": None, "chunk_size": None,
+                                     "combine_op": "mean"}}}
+    loader2 = project.integrate_attempt_loader_state(meta2)
+    assert "fr_start" not in loader2
+    assert loader2["fr_end"] == 0
+    assert loader2["combine_op"] == "mean"
+    assert "combine_chunk" not in loader2   # chunk_size None -> not written
+
+
 def test_calibration_namespace_has_expected_attributes():
     ns = project.calibration_namespace(
         {"Lsd": 200000.0, "wavelength_A": 0.1729, "BC_y": 1024.0, "BC_z": 1024.0,
