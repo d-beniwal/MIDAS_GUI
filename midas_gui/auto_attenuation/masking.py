@@ -18,7 +18,7 @@ def subtract_dark(data, dark):
     data : numpy.ndarray
         Detector data, 2D (Y, X) or 3D (N, Y, X).
     dark : numpy.ndarray
-        Dark frame(s), 2D (Y, X) or 3D (M, Y, X); if 3D, averaged along
+        Dark frame(s), 2D (Y, X) or 3D (M, Y, X); if 3D, the mean is taken along
         axis 0 first.
     """
     if dark.ndim == 3:
@@ -59,7 +59,7 @@ def create_dark_mask(dark_frames, n_sigma=5, local_window=101):
     n_sigma : float
         Local standard deviations above the local mean to flag a pixel hot.
     local_window : int
-        Side length (forced odd) of the local averaging window.
+        Side length (forced odd) of the local mean window.
 
     Returns
     -------

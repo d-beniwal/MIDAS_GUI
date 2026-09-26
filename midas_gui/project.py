@@ -758,6 +758,21 @@ def calib_attempt_gui_fields(meta: dict) -> dict:
     return {k: v for k, v in fields.items() if v is not None}
 
 
+def calib_attempt_dist_coeffs(meta: dict) -> Optional[list]:
+    """The attempt's per-coefficient distortion selection, as sorted v2
+    harmonic names — the companion to ``calib_attempt_gui_fields``'
+    ``ref_dist``, which is only the on/off tick and says nothing about which
+    of the fifteen harmonics were free. Recorded as a set by
+    ``CalibrationTab._refine_flags`` and written out sorted by
+    ``_json_default``. ``None`` — not ``[]`` — when the attempt predates the
+    per-coefficient selector, so the caller leaves its own default in place
+    rather than restoring a fit that refines nothing."""
+    coeffs = ((meta.get("cfg") or {}).get("refine") or {}).get("distortion_coeffs")
+    if coeffs is None:
+        return None
+    return sorted(str(c) for c in coeffs)
+
+
 def calib_attempt_loader_state(meta: dict) -> dict:
     """The subset of a calibration attempt's ``loader_state`` that
     ``DataLoaderPanel.set_state()`` understands (single-detector mode)."""

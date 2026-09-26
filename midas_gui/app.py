@@ -67,6 +67,7 @@ from midas_gui.tab_view import DataViewerTab
 from midas_gui.tab_mask import MaskTab
 from midas_gui.tab_calibrate import CalibrationTab
 from midas_gui.tab_batch import BatchTab
+from midas_gui.tab_zarrviewer import ZarrViewerTab
 from midas_gui.tab_queue import BatchQueueTab
 from midas_gui.tab_refine import RefinementTab
 from midas_gui.tab_corrections import CorrectionsTab
@@ -219,6 +220,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._mask_tab   = _tab(MaskTab,         "Mask Builder")
         self._cal_tab    = _tab(CalibrationTab,  "Calibrate")
         self._batch_tab  = _tab(BatchTab,        "Batch Integrate")
+        self._zarr_tab   = _tab(ZarrViewerTab,   "Zarr Viewer")
         self._queue_tab  = _tab(BatchQueueTab,   "Batch Queue")
         self._refine_tab = _tab(RefinementTab,   "Calib. Refinement")
         self._corr_tab   = _tab(CorrectionsTab,  "Corrections")
@@ -238,6 +240,7 @@ class MainWindow(QtWidgets.QMainWindow):
             (self._cal_tab,    "Calibrate",         True),
             (self._refine_tab, "Calib. Refinement", False),
             (self._batch_tab,  "Batch Integrate",   True),
+            (self._zarr_tab,   "Zarr Viewer",       False),
             (self._queue_tab,  "Batch Queue",       False),
             (self._corr_tab,   "Corrections",       False),
             (self._pdf_tab,    "PDF Analysis",      False),
@@ -290,8 +293,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Header Exp ID field: any tab that wants it for output-path
         # suggestions reads it live via this callback rather than keeping its
-        # own copy — today just Batch Integrate.
-        for tab in (self._batch_tab,):
+        # own copy — Batch Integrate names its output folder from it, Calibrate
+        # names the files it saves.
+        for tab in (self._batch_tab, self._cal_tab):
             set_provider = getattr(tab, "set_expid_provider", None)
             if set_provider is not None:
                 try:
@@ -713,7 +717,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 meta["_results_arrays"] = project.read_attempt_results(path, ref)
                 integrate_attempts[k] = meta
             if calib_attempts:
-                self._cal_tab.apply_project_calibration(calib_attempts)
+                # Fields only when the workspace didn't already restore them —
+                # see apply_project_calibration's restore_fields.
+                self._cal_tab.apply_project_calibration(
+                    calib_attempts, restore_fields="Calibrate" not in tab_names)
                 restored.append("Calibrate: " + ", ".join(sorted(calib_attempts)))
                 # apply_project_calibration only redraws the Calibrate tab
                 # itself — it doesn't emit calibrationDone (that signal is

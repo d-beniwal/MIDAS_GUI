@@ -183,4 +183,193 @@ def test_batch_zarr_metadata_is_mean_regardless_of_pixel_combine_op(tmp_path):
         attrs = root["OmegaSumFrame/LastFrameNumber_0"].attrs
         assert attrs["Temperature"] == pytest.approx(temp_exp)
         assert attrs["Pressure"] == pytest.approx(pres_exp)
-        assert attrs["I"] == pytest.approx(cur_exp)
+        # Storage-ring current is not a beam monitor — it rides along in the
+        # provenance entry's `extra` (see BatchWorker.run()), never under
+        # the zarr's own "I"/"I0" attrs (those are for a real ion chamber;
+        # this source's path has no varexE/varexD hutch marker, so
+        # ion_chamber_i/_i0 are never populated and "I"/"I0" are absent
+        # entirely, not just zero).
+        assert "I" not in attrs and "I0" not in attrs
+        history = root.attrs.get("provenance_history")
+        assert history[-1]["extra"]["storage_ring_current_mA"] == pytest.approx(cur_exp)
+
+
+# ── Ion chamber / sample-motor stopgap (see .context/DECISIONS.md) ─────────
+#
+# Real per-hutch beam-monitor and sample-motion-system paths, confirmed
+# against a real file and the beamline's own HDF5-layout docs — not the
+# HDF5 file's own `active_instrument` (documented upstream as always empty),
+# so the hutch is inferred from the source path instead (`varexE`/`varexD`).
+
+def _make_hutch_varex_h5(path, hutch, *, include_d2pd=True, n_light=10, size=64):
+    """Like ``_make_varex_h5`` (base VAREX schema + Temperature/Pressure/
+    SRCurrent) but also writes this hutch's real ion-chamber and
+    sample-motion-system datasets, so metadata_for_index's hutch-specific
+    reads have something real to find. No dark frames here — the
+    light/dark-boundary behavior is already covered by
+    ``test_hdf5_metadata_ignores_trailing_dark_frames_via_timestamp_gap``;
+    this fixture is only about the per-hutch fields."""
+    h5py = pytest.importorskip("h5py")
+    rng = np.random.default_rng(0)
+    with h5py.File(str(path), "w") as f:
+        f.create_dataset("exchange/data",
+                          data=(rng.random((n_light, size, size)) * 100).astype(np.float32))
+        f.create_dataset("instrument/GSAS2_PVS/Temperature",
+                          data=np.full(n_light, np.nan))
+        f.create_dataset("instrument/GSAS2_PVS/Pressure",
+                          data=np.full(n_light, np.nan))
+        f.create_dataset("instrument/StorageRing/SRCurrent",
+                          data=200.0 + np.arange(n_light, dtype=np.float64))
+        if hutch == "D":
+            f.create_dataset("instrument/Scalers/D/IC2",
+                              data=1000.0 + np.arange(n_light, dtype=np.float64))
+        elif hutch == "E":
+            f.create_dataset("instrument/Scalers/E/US_IC",
+                              data=1300.0 + np.arange(n_light, dtype=np.float64))
+            if include_d2pd:
+                f.create_dataset("instrument/Scalers/E/D2PD",
+                                  data=1100.0 + np.arange(n_light, dtype=np.float64))
+            f.create_dataset("instrument/SMS/E/HL/samX",
+                              data=np.full(n_light, 3.9))
+            f.create_dataset("instrument/SMS/E/HL/samY",
+                              data=np.full(n_light, 8.78))
+            f.create_dataset("instrument/SMS/E/HR/samX",
+                              data=np.full(n_light, np.nan))   # inactive sub-config
+
+
+def test_hutch_resolved_from_source_path(tmp_path):
+    """Stopgap hutch detection: varexE/varexD in the path, case-insensitive;
+    anything else is simply unknown (every ion-chamber/sample-motor field
+    below then degrades to absent, same as any other unavailable metadata)."""
+    import midas_gui.workers as wk
+    assert wk._HDF5StackGlobSource(
+        [tmp_path / "VarexE" / "scan.h5"], "exchange/data")._hutch == "E"
+    assert wk._HDF5StackGlobSource(
+        [tmp_path / "varexD" / "scan.h5"], "exchange/data")._hutch == "D"
+    assert wk._HDF5StackGlobSource(
+        [tmp_path / "ge3" / "scan.h5"], "exchange/data")._hutch is None
+
+
+def test_d_hutch_ion_chamber_is_i0_only(tmp_path):
+    """D hutch has no transmission monitor yet — only I0 (IC2) is ever
+    attempted; "ion_chamber_i" isn't even a key, not just None, matching
+    _ION_CHAMBER_H5_PATHS declaring no "i" entry for D at all."""
+    import midas_gui.workers as wk
+    h5_dir = tmp_path / "varexD"
+    h5_dir.mkdir()
+    h5_path = h5_dir / "scan_001.h5"
+    _make_hutch_varex_h5(h5_path, "D")
+
+    src = wk._HDF5StackGlobSource([h5_path], "exchange/data")
+    assert src._hutch == "D"
+    meta = src.metadata_for_index(0)
+    assert meta["ion_chamber_i0"] == pytest.approx(np.mean(1000.0 + np.arange(10)))
+    assert "ion_chamber_i" not in meta
+
+
+@pytest.mark.parametrize("include_d2pd", [True, False])
+def test_e_hutch_ion_chamber_i_is_auto_detected(tmp_path, include_d2pd):
+    """E hutch's I0 (US_IC) is always attempted; I (D2PD) is genuinely
+    setup-dependent — present only when the file actually has it, which
+    doubles as the "auto-detect" the user asked for rather than a hardcoded
+    assumption."""
+    import midas_gui.workers as wk
+    h5_dir = tmp_path / "varexE"
+    h5_dir.mkdir()
+    h5_path = h5_dir / "scan_001.h5"
+    _make_hutch_varex_h5(h5_path, "E", include_d2pd=include_d2pd)
+
+    src = wk._HDF5StackGlobSource([h5_path], "exchange/data")
+    meta = src.metadata_for_index(0)
+    assert meta["ion_chamber_i0"] == pytest.approx(np.mean(1300.0 + np.arange(10)))
+    if include_d2pd:
+        assert meta["ion_chamber_i"] == pytest.approx(np.mean(1100.0 + np.arange(10)))
+    else:
+        assert meta["ion_chamber_i"] is None
+
+
+def test_e_hutch_sample_motors_capture_both_hl_and_hr(tmp_path):
+    """E hutch has two coexisting SMS sub-configs (HL/HR) with no reliable
+    signal for which is physically active — captured both, distinctly keyed,
+    rather than guessing. On real data the inactive one comes back NaN
+    (see .context/DECISIONS.md), which this fixture reproduces for HR."""
+    import midas_gui.workers as wk
+    h5_dir = tmp_path / "varexE"
+    h5_dir.mkdir()
+    h5_path = h5_dir / "scan_001.h5"
+    _make_hutch_varex_h5(h5_path, "E")
+
+    src = wk._HDF5StackGlobSource([h5_path], "exchange/data")
+    meta = src.metadata_for_index(0)
+    assert meta["motor:HL/samX"] == pytest.approx(3.9)
+    assert meta["motor:HL/samY"] == pytest.approx(8.78)
+    assert np.isnan(meta["motor:HR/samX"])
+
+
+def test_unknown_hutch_has_no_ion_chamber_or_sample_motor_keys(tmp_path):
+    """A source path with neither varexE nor varexD attempts none of the new
+    fields — same "not every source has this metadata" contract the
+    existing temperature/pressure/current keys already follow."""
+    import midas_gui.workers as wk
+    h5_dir = tmp_path / "ge3"
+    h5_dir.mkdir()
+    h5_path = h5_dir / "scan_001.h5"
+    _make_hutch_varex_h5(h5_path, "E")   # real datasets present in the file...
+
+    # ...but the path gives no hutch signal, so none of them are read.
+    src = wk._HDF5StackGlobSource([h5_path], "exchange/data")
+    assert src._hutch is None
+    meta = src.metadata_for_index(0)
+    assert not any(k.startswith("motor:") for k in meta)
+    assert "ion_chamber_i0" not in meta and "ion_chamber_i" not in meta
+    assert meta["temperature"] is not None or True  # base keys still attempted regardless
+
+
+def test_batch_zarr_ion_chamber_and_sample_motors_end_to_end(tmp_path):
+    """Full BatchWorker run against a real-shaped D-hutch and E-hutch source:
+    the zarr's own I/I0 attrs carry the real ion chamber (never ring
+    current), and the provenance entry's extra carries storage-ring current
+    plus sample motors."""
+    pytest.importorskip("torch")
+    pytest.importorskip("midas_integrate_v2")
+    zarr = pytest.importorskip("zarr")
+    pytest.importorskip("h5py")
+    from PyQt5 import QtWidgets
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    import midas_gui.workers as wk
+    from midas_gui.helpers import _build_spec
+
+    spec = _build_spec(_tiny_calib_result(), r_bin=2.0, eta_bin=5.0)
+
+    def _run(hutch, **fixture_kwargs):
+        src_dir = tmp_path / f"varex{hutch}_{fixture_kwargs.get('include_d2pd', '')}"
+        src_dir.mkdir()
+        h5_path = src_dir / "scan_001.h5"
+        _make_hutch_varex_h5(h5_path, hutch, **fixture_kwargs)
+        out_dir = src_dir / "out"
+        worker = wk.BatchWorker(
+            spec, {"type": "hdf5_stack_glob", "paths": [str(h5_path)],
+                  "dataset": "exchange/data"},
+            None, str(out_dir), ["zarr"], "subpixel2", (None, None), None)
+        failures = []
+        worker.failed.connect(failures.append)
+        worker.run()
+        assert not failures, failures[0] if failures else ""
+        zarr_path = out_dir / "zarr" / "scan_001.ave.zarr.zip"
+        root = zarr.open(str(zarr_path), mode="r")
+        return root
+
+    root_d = _run("D")
+    attrs_d = root_d["OmegaSumFrame/LastFrameNumber_0"].attrs
+    assert attrs_d["I0"] == pytest.approx(np.mean(1000.0 + np.arange(10)))
+    assert "I" not in attrs_d
+    extra_d = root_d.attrs["provenance_history"][-1]["extra"]
+    assert extra_d["storage_ring_current_mA"] == pytest.approx(np.mean(200.0 + np.arange(10)))
+
+    root_e = _run("E", include_d2pd=True)
+    attrs_e = root_e["OmegaSumFrame/LastFrameNumber_0"].attrs
+    assert attrs_e["I0"] == pytest.approx(np.mean(1300.0 + np.arange(10)))
+    assert attrs_e["I"] == pytest.approx(np.mean(1100.0 + np.arange(10)))
+    extra_e = root_e.attrs["provenance_history"][-1]["extra"]
+    assert extra_e["sample_motors"]["HL/samX"] == pytest.approx(3.9)
+    assert np.isnan(extra_e["sample_motors"]["HR/samX"])

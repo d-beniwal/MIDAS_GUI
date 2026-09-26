@@ -26,6 +26,14 @@ from __future__ import annotations
 import argparse
 import sys
 
+import midas_gui._paths  # noqa: F401  (KMP_DUPLICATE_LIB_OK / HDF5_USE_FILE_LOCKING env vars —
+# this entry point never goes through app.py's import chain, so without this
+# import it got neither: a long-running background job reading HDF5 over an
+# NFS-mounted beamline share was just as exposed to the file-locking hang
+# _paths.py now guards against as the interactive GUI is.)
+
+from midas_gui.constants import POL_PLANE_HORIZONTAL_ETA_DEG
+
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -73,7 +81,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--polarization", action="store_true")
     p.add_argument("--pol-fraction", type=float, default=0.99)
-    p.add_argument("--pol-plane", type=float, default=0.0)
+    p.add_argument("--pol-plane", type=float,
+                   default=POL_PLANE_HORIZONTAL_ETA_DEG,
+                   help="Azimuth of the polarization plane in MIDAS eta (deg). "
+                        "MIDAS eta is measured from vertical, so the default 90 "
+                        "is the horizontal ring plane; 0 is vertical.")
     p.add_argument("--solid-angle", action="store_true")
 
     p.add_argument("--variance", action="store_true", help="Compute per-bin sigma")

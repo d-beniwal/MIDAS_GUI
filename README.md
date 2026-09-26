@@ -160,16 +160,17 @@ always shown, the rest can be toggled on as you need them.
 | 2 | **Calibrate** | One-shot / first-time / four-stage / Bayesian / joint-cake pipelines; multi-panel detector; per-coefficient distortion refinement; ring residuals |
 | 3 | **Calib. Refinement** | Derivative-free Nelder-Mead optimization against an η-uniformity loss |
 | 4 | **Batch Integrate** | Hard / subpixel / polygon kernels; monitor normalisation; frame stride; drift correction; live folder monitoring; auto-suggested per-format output folders; publication-quality waterfall/stacked-profile plots |
-| 5 | **Corrections & Physics** | Polarization, solid-angle, absorption, Compton preview; per-pixel learnable gain training |
-| 6 | **PDF Analysis** | Composition-weighted I(Q) → S(Q) → F(Q) → G(r) total-scattering reduction with σ propagation and optional scale/background refinement |
-| 7 | **Texture** | Per-ring azimuthal extraction and stereographic pole-figure projection (POPLA export) |
-| 8 | **Pump Probe** | Time-resolved (TR-XRD) delay pooling, ΔI(q, delay) heatmaps, kinetics, and mean-pattern views |
-| 9 | **Results & Export** | One-click export of calibration/mask/profiles/G(r)/pole figures + a provenance block for methods sections |
+| 5 | **Zarr Viewer** | Browse/plot any `.zarr.zip` — tree of groups/arrays; 1-D/2-D/3-D plots with colormap/scale/clim controls; R bin/2θ/Q/d axis conversion via the file's own REtaMap; metadata/attributes inspector |
+| 6 | **Corrections & Physics** | Polarization, solid-angle, absorption, Compton preview; per-pixel learnable gain training |
+| 7 | **PDF Analysis** | Composition-weighted I(Q) → S(Q) → F(Q) → G(r) total-scattering reduction with σ propagation and optional scale/background refinement |
+| 8 | **Texture** | Per-ring azimuthal extraction and stereographic pole-figure projection (POPLA export) |
+| 9 | **Pump Probe** | Time-resolved (TR-XRD) delay pooling, ΔI(q, delay) heatmaps, kinetics, and mean-pattern views |
+| 10 | **Results & Export** | One-click export of calibration/mask/profiles/G(r)/pole figures + a provenance block for methods sections |
 
-> **Status:** Tabs **0–4** (Data Viewer, Mask Builder, Calibrate, Calib.
-> Refinement, Batch Integrate) are verified and ready to use. Tabs **5–9**
-> (Corrections & Physics, PDF Analysis, Texture, Pump Probe, Results &
-> Export) are a **work in progress** and continue to be refined.
+> **Status:** Tabs **0–5** (Data Viewer, Mask Builder, Calibrate, Calib.
+> Refinement, Batch Integrate, Zarr Viewer) are verified and ready to use.
+> Tabs **6–10** (Corrections & Physics, PDF Analysis, Texture, Pump Probe,
+> Results & Export) are a **work in progress** and continue to be refined.
 
 The full user manual — every field, tool tip, and configuration option — is
 in [`documentation/gui_documentation.md`](documentation/gui_documentation.md)

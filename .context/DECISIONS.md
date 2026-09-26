@@ -87,6 +87,620 @@ reproduces on clean HEAD too); `pyflakes midas_gui/*.py` unchanged at 37;
 offscreen screenshot of the Batch Integrate loader card confirmed the stride
 row is gone and Combine sub-frames shows for a plain TIFF folder.
 
+## 2026-09-25 — Batch Integrate froze completely: HDF5-over-NFS locking hang, plus backgrounding the preview read
+
+Live report: picking a 17-file HDF5 source (10-frame "Combine sub-frames",
+network-mounted) for Data, then checking Dark, made the Dark checkbox itself
+stop responding to clicks — not slow, genuinely stuck, confirmed by trying
+uncheck/recheck and getting nothing.
+
+**Root cause 1 — the actual freeze.** Checking Dark fires
+`FieldSelector.toggled` → `fieldReady` → `DataLoaderPanel.fieldsChanged` →
+`BatchTab._refresh_detector_preview()` → `current_frame()`, which for
+"stream" mode used to run `_peek_stream_frame()` **synchronously on the GUI
+thread** — real file I/O, no QThread. Its own docstring already admitted
+this could take "sometimes multi-second"; a 17-file network-mounted HDF5
+source measured a lot longer than that. But the user's report ("completely
+frozen", not just slow) pointed at something worse than slow I/O: HDF5
+`flock()`s every file it opens, and on many NFS servers/clients that lock is
+never granted — the call hangs *indefinitely*, not just slowly. Fixed at
+the source: `midas_gui/_paths.py` now sets `HDF5_USE_FILE_LOCKING=FALSE`
+(via `setdefault`, so a user needing locking left on can still override it)
+— the standard, documented workaround, safe here since this is a
+read-only/single-writer workflow where the corruption risk locking exists
+to prevent doesn't apply.
+
+**Found along the way:** `midas_gui/batch_cli.py` (the headless "Run as
+background job" runner) never imported `midas_gui._paths` at all — a
+standalone entry point that never goes through `app.py`'s import chain, so
+a long-running background job reading the exact same NFS-mounted HDF5 data
+got *neither* this fix *nor* the existing `KMP_DUPLICATE_LIB_OK` protection.
+Fixed the same way `app.py` does it — one import, first thing.
+
+**Root cause 1 alone doesn't make freezes impossible** — even with locking
+disabled, a large multi-frame combine over merely-slow (not broken) network
+storage can still block the GUI for a real, user-visible stretch. So also:
+backgrounded the preview read itself. `workers.StreamPreviewWorker` does the
+file-reading + per-frame correction (dark/bright/background, applied before
+summing — matching the real batch run's per-frame correction, same as
+before) off the GUI thread; `DataLoaderPanel.current_frame()` now returns
+immediately (cached/stale/`None`) and kicks off the worker rather than
+blocking, with a new `previewFrameReady` signal firing once the real result
+lands (`BatchTab` connects it straight to `_refresh_detector_preview`). Only
+one worker runs at a time — a second dirty trigger arriving mid-flight just
+flags a restart rather than piling up concurrent reads against the same
+storage.
+
+**A second, more dangerous bug found while fixing the first.** The obvious
+first cut parented `StreamPreviewWorker` to the panel (`parent=self`).
+That's exactly wrong for a QThread: Qt's parent-owns-children cascade
+destroys a QThread the instant its parent widget is — including while
+`run()` is still executing, which is a fatal "QThread: Destroyed while
+thread is still running" abort, not a graceful stop. Every `BatchTab`
+construction starts a preview read of the nickel-standard default path
+(`self._loader.set_path(DEFAULT_NICKEL_DIR)` in `__init__`) — previously
+synchronous and finished before `__init__` even returned, so this had never
+been a real hazard before. Backgrounding it turned "constructing a
+`BatchTab`" into "starts a real background thread," and the full suite
+caught it immediately: ~35 unrelated tests (`test_geom_cache_key`,
+`test_batch_output_dir`, `test_batch_cake_stack`, `test_batch_job_results`,
+…) that merely build a `BatchTab` for other purposes started crashing with
+SIGABRT/SIGSEGV — whichever test's teardown raced past the thread finishing.
+Fix: construct the worker unparented. PyQt keeps a *running* QThread's
+wrapper alive on its own with no parent and no remaining Python reference,
+specifically to prevent this — the explicit `self._preview_worker`
+reference plus the `finished`/`failed` slots dropping it are enough for
+correct cleanup once it's actually done, regardless of what happens to the
+panel/its owning tab in the meantime. Full suite confirmed back to the
+3-failure baseline twice in a row after the fix.
+
+Tests: `tests/test_paths_env.py` (new) pins the env-var default, a user
+override, and the `batch_cli.py` regression specifically, each via a fresh
+subprocess (env vars set at import time can't be re-tested in an
+already-running interpreter). `tests/test_batch_stream_preview.py` (new)
+pins `StreamPreviewWorker`'s correct-before-summing behavior and error
+handling standalone, plus the full async contract through
+`DataLoaderPanel`: `current_frame()` never blocks, `previewFrameReady`
+fires once real, dark correction is baked in, and a second dirty trigger
+mid-flight doesn't spawn a second worker.
+
+## 2026-09-25 — Real ion-chamber + sample-motor metadata in zarr output (stopgap)
+
+While checking the (separately-branched) Zarr Viewer tab against a real
+`.ave.zarr.zip`, the user asked why the file had no ion-chamber or
+sample-manipulation-system metadata. Traced the actual bug and gathered the
+real per-station facts directly from the user plus the beamline's own
+HDF5-layout docs (`~/mnt/s1b/bluesky_dev/mpe_xml/docs/hdf5_layout_overview.md`)
+and attribute-translation XML (`20ide_instr_attributes_trans.xml`).
+
+**The bug.** `GSASZarrWriter` (the shared `midas_integrate_v2` writer) has two
+real per-frame beam-monitor slots, `"I"`/`"I0"` (GSAS-II's ion-chamber-
+intensity convention). MIDAS_GUI never read an actual ion chamber — it read
+**storage-ring current** (`instrument/StorageRing/SRCurrent`) and wrote that
+into `"I"` instead; `"I0"` was never populated at all. What looked like a
+beam-monitor reading in the file (`"I": 200.025`) was APS ring current in mA.
+Sample-stage motor positions had no code path anywhere — not read, not
+written, not attempted. (`GSAS2_PVS/Temperature`/`Pressure` reading NaN,
+separately, is *not* a MIDAS_GUI bug: the raw source file has NaN there too,
+confirmed against the same layout docs — "Placeholder PVs... until
+repointed.")
+
+**Real per-station mapping** (I0 = incident, I = transmitted):
+
+| Hutch | I0 | I |
+|---|---|---|
+| D | `instrument/Scalers/D/IC2` (confirmed: `IC2D` = `20dT1:TM:Current1`, the first TetrAMM channel) | doesn't exist yet |
+| E | `instrument/Scalers/E/US_IC` | setup-dependent: `instrument/Scalers/E/D2PD` (pin diode) when present, else none |
+| A | n/a | n/a — no sample in station A's beam path; its `IC4_foil_I0`/`IC5_foil_I1` names are misleading for this purpose, not a per-sample monitor pair |
+
+Sample-stage motors (`instrument/SMS/<hutch>/...`): D has one config (`HR`);
+E has two coexisting ones (`HL`, `HR`) with no reliable signal for which is
+physically in use — on the one real file checked, `HL`'s channels held real
+values and `HR`'s were all NaN, i.e. the data itself already shows which was
+active. Captured both rather than guessing, for exactly that reason.
+
+**Why hutch detection is path-based, not file-based.** The file's own
+`active_instrument` field (meant to say which hutch/station produced it) is
+empty in every real file checked, and is independently documented as a known,
+open gap in the same beamline docs repo ("`active_instrument` is currently
+empty. Populating it from Bluesky would let downstream tooling select an
+analysis pipeline automatically.") — so it can't be read from the file today.
+Resolved instead from the source path containing `varexE`/`varexD`
+(case-insensitive), one level in `_HDF5StackGlobSource._resolve_hutch()`.
+
+**Explicitly a stopgap** (the user's own framing) — three simplifications,
+deliberately not built out further:
+- No Preferences UI for any of this; no configurable station/monitor mapping.
+- E hutch's `I` is auto-detected (present only when `D2PD` exists in the
+  file) rather than made user-configurable, even though which channel is
+  "the" transmission monitor is genuinely setup-dependent.
+- E's `HL`/`HR` ambiguity is resolved by capturing both, not by picking one.
+
+**Where each field landed.** Real ion-chamber I/I0 go into the writer's
+existing `currents`/`currents_i0` slots (`write_gsas_zarr_zip` already
+accepted `currents_i0`; nothing in MIDAS_GUI ever passed it before). Storage
+current relocates to the provenance entry's `extra['storage_ring_current_mA']`
+instead of the `"I"` slot it was squatting in. Sample motors have no writer
+slot at all (`GSASZarrWriter` only knows temperature/pressure/current/
+current_i0), so they go into `extra['sample_motors']` — `provenance.py`
+needed no code change, since `build_entry(..., extra=...)` already accepts an
+arbitrary dict verbatim. `zarr_prov_entry` used to be built once and reused
+verbatim for every frame in a run; since ring current and sample motors are
+per-frame quantities, each frame's `append_to_zip` call now uses a shallow
+copy with a per-frame `extra`, not the shared object.
+
+## 2026-09-24 — Zarr Viewer: live-verified, promoted out of "work in progress"
+
+Follow-up to the two entries immediately below. Once visible-by-default (see
+the entry right below this one) and enabled in Preferences ▸ Tabs on a real
+X11 session, opened a real `.vrx.ave.zarr.zip` from a finished Batch
+Integrate run at 20-ID-E (`PUP_AML_stubbins_sep26_bc/...`): tree populated
+correctly (`InstrumentParameters`, `OmegaSumFrame`, `REtaMap`, `SumFrames`),
+selected `OmegaSumFrame/LastFrameNumber_0` and it plotted (R bin vs. Eta,
+viridis, 2-D map), and the metadata/attributes panel showed that array's real
+attrs (`FirstOme`, `LastFrameNumber`, `Pressure`/`Temperature` as `NaN`,
+etc.) correctly.
+
+Promoted out of "work in progress" in `README.md` (tabs 0–5 now read as
+verified, 6–10 as WIP) and dropped the `*(work in progress)*` marker from
+`documentation/gui_documentation.md`'s §8. Still an `OPTIONAL_TAB`, not moved
+into `ALWAYS_TABS` — verified-and-visible-by-default is exactly the tier
+Calib. Refinement/Batch Queue/Pump Probe already occupy, and there's no
+reason to promote it further than that.
+
+## 2026-09-24 — Zarr Viewer: promoted to visible-by-default, moved next to Batch Integrate
+
+Follow-up to the entry immediately below: after landing hidden-by-default,
+asked to make it "a permanent tab next to the batch integration tab." Two
+changes, both narrower than they could have been:
+
+- **Visible, not pinned.** Added to `DEFAULT_VISIBLE_TABS` alongside Calib.
+  Refinement/Batch Queue/Pump Probe — shown out of the box, no Preferences
+  trip required. Deliberately *not* moved into `ALWAYS_TABS` (the hard-pinned,
+  can't-hide-it tier reserved for Data Viewer/Mask Builder/Calibrate/Batch
+  Integrate — tabs the app can't function without): it's still an
+  `OPTIONAL_TAB`, so it can still be hidden from Preferences ▸ Tabs like any
+  of the other three default-visible optional tabs, and it still isn't
+  claiming to be "verified" — Pump Probe is proof that default-visible and
+  work-in-progress aren't mutually exclusive in this codebase already.
+- **Position:** moved in `app.py`'s `_tab_specs` (and its construction line)
+  to sit immediately after Batch Integrate, before Batch Queue.
+
+**Real finding surfaced while doing this:** `DEFAULT_VISIBLE_TABS` is
+overlaid from the active profile's saved config at import time
+(`constants.reload_from_config()`), and on this machine the `20-ID-E` and
+`Default` profiles both have an explicit `ui.visible_tabs` saved from before
+even **Batch Queue** existed as a default-visible tab — so neither Batch
+Queue nor (now) Zarr Viewer will actually appear for this user until they
+re-save Preferences ▸ Tabs once, regardless of what ships in code. Left the
+live profile JSON files alone (editing a real, in-use per-user config file
+outside the repo isn't this branch's call to make); told the user directly
+instead.
+
+Knock-on effect on testing: this means `constants.DEFAULT_VISIBLE_TABS` is
+*not* a reliable thing to assert against in a test that runs on a real
+machine with a real saved profile — it reads whatever that profile last
+saved, not what the code ships. `constants.shipped_defaults()` is the
+existing, already-provided escape hatch (a pristine pre-overlay snapshot),
+so `tests/test_tab_zarrviewer.py`'s registration tests read
+`shipped_defaults()["ui"]["visible_tabs"]` instead of the live global. This
+also explains — more precisely than the existing "tab-count assertion vs.
+WIP-tab gating" note — *why* `test_app_builds_offscreen` is a known
+pre-existing failure on this machine: the same stale saved profile makes the
+live tab count disagree with what `ALWAYS_TABS`/`DEFAULT_VISIBLE_TABS` claim
+at assertion time. Not fixed here (that test's own hermeticity is a broader,
+separate concern — `tests/conftest.py` isolates nothing about
+`~/.config/midas_gui/`), just diagnosed precisely and worked around locally.
+
+## 2026-09-24 — Zarr Viewer: a standalone top-level tab, matplotlib, hidden pending a live check
+
+Ported `mpe_wf_saxs_waxs/gui_view_zarr.py` (a zarr tree browser + plot canvas
+for MIDAS `.zarr.zip` files) in as `tab_zarrviewer.ZarrViewerTab`, at the
+user's request, once the terminology/lab-frame PR was out the door.
+
+**Placement: asked, didn't assume.** The screenshot that prompted this showed
+Batch Integrate's own results tab bar (Detector view / Waterfall / Stacked
+profiles / Eta-R cakes / Logs — `tab_batch.py`'s `_view_tabs`), which reads as
+a plausible home for "a new tab in ___". Asked directly rather than guessing;
+the answer was a **standalone top-level app tab**, not a Batch Integrate
+sub-tab — a general-purpose `.zarr.zip` browser, not tied to any one run.
+Toggled from Preferences ▸ Tabs like Corrections/PDF/Texture, added to
+`constants.OPTIONAL_TABS` and `app.py`'s `_tab_specs` right after Batch
+Integrate/Batch Queue (it's a consumer of Batch Integrate's output) and
+before Corrections.
+
+**Matplotlib, not pyqtgraph.** Same call `peak_fit_panel.py` already made and
+documented for the same reason: no existing pyqtgraph-based zarr
+tree/attribute browser to build on, and matplotlib is already an environment
+dependency. This is MIDAS_GUI's second embedded matplotlib canvas.
+
+**Ships hidden.** Not added to `DEFAULT_VISIBLE_TABS` — the underlying
+browsing/plotting logic has been in daily use as a standalone tool for a
+while, but its integration as a tab *here* hasn't had eyes on a live
+rendering yet (this repo's standing constraint: the Qt GUI can't be verified
+beyond an offscreen import/build check without an X11/VNC session). Same
+treatment as every other WIP tab — flip it on in Preferences once confirmed
+live, or ask for `DEFAULT_VISIBLE_TABS` to be updated.
+
+**Kept vs. dropped from the source** (see the new file's own docstring for
+the full list): kept every control and all plotting/axis-conversion logic
+method-for-method. Dropped the standalone `QMainWindow` shell (window title,
+font-size combo, Exit button — the app's own tab chrome and
+`constants.DEFAULT_UI_SCALE` already cover this), the `PySide6`/`QT_BACKEND`
+fallback (PyQt5 only, like everywhere else in this app), and any
+`closeEvent`-driven store cleanup (a tab widget embedded in the main window's
+`QTabWidget` never reliably receives its own `closeEvent` — only top-level
+windows do — so that would have been dead code; `_load_file` already closes
+the previous `zarr.ZipStore` before opening the next one, which is the part
+that actually matters). No cross-tab wiring and no saved-project state: it's
+opened via its own file dialog, and none of its plot/display state is
+meaningful to persist into a Project file.
+
+**Tests build a real fixture rather than a fake store.** `test_tab_zarrviewer.py`
+reuses `test_batch_zarr_output.py`'s `BatchWorker` fixture-building pattern to
+produce one real `.ave.zarr.zip`, so the tests exercise the actual production
+schema (real `REtaMap`, real group layout) instead of an invented one.
+
+**While in there: provenance field parity with mpe_wf.** Before trusting the
+viewer against real files, diffed `midas_gui/provenance.py` field-by-field
+against its source, mpe_wf_saxs_waxs's own `provenance.py` — see the entry
+immediately below for that finding. The zarr array/group schema itself needed
+no reconciliation (same shared backend writer, verified empirically).
+
+## 2026-09-24 — Provenance: script/script_sha256/tag brought into parity with mpe_wf
+
+Asked to make sure the zarr writer's "metadata and provenance structure and
+content are identical to the development in mpe_wf_saxs_waxs" (prompted by
+building the Zarr Viewer above against real output). Two things to check,
+kept separate since they have very different answers:
+
+**The zarr array/group schema** (`REtaMap`, `InstrumentParameters/<key>`,
+`Omegas`, `provenance_history`) needed no reconciliation at all — both
+projects' single-panel `.zarr.zip` files go through the same shared backend
+writer, `midas_integrate_v2.io.zarr_gsas.write_gsas_zarr_zip` (`gsas_export.py`
+calls it directly, and Batch Integrate's "zarr" output format goes through
+it via `workers.py`), so it's identical by construction. Verified empirically
+rather than trusted: built a real fixture via `BatchWorker` and confirmed its
+tree matches what mpe_wf's own `combine_hydra_zarr.py` expects from every
+panel it merges (that script's docstring spells out the exact schema it
+requires — a strong independent check).
+
+**The `provenance_history` entry schema** (`midas_gui/provenance.py`,
+originally ported from mpe_wf's own `provenance.py`) did have two real,
+unintentional gaps, found by a field-by-field diff of the two `build_entry()`/
+`_git_rev()` implementations:
+- `script`/`script_sha256` — the running entry-point's resolved path and
+  content hash, letting a reader tell a locally-modified/uncommitted script
+  apart from the git commit recorded alongside it. Added.
+- `tag` on `_git_rev()` — the nearest reachable annotated git tag, separate
+  from `describe`'s "N commits past a tag" form. Added.
+
+Everything else that differs between the two files — MIDAS_GUI's
+`midas_gui`/`backends` fields replacing mpe_wf's `git`/`mpe_wf`/`midas`
+git-repo trio, and no standalone `git` field — is the *already-documented*,
+deliberate one-repo/PyPI-backend adaptation from when `provenance.py` was
+first ported (MIDAS_GUI doesn't vendor a MIDAS git checkout, so backend
+identity is PyPI package versions instead of a second repo's git info; a
+separate `git` field would be redundant with `midas_gui` here anyway, since
+there's only ever the one repo). Not a gap, so left alone. Also didn't port
+mpe_wf's `read_cake_csv()`: MIDAS_GUI already has the equivalent
+(`cake_params.parse_cake_csv`) in its own module — an existing deliberate
+refactor, not a missing function.
+
+## 2026-09-24 — Upstream's frozen-point native-pipeline switch outruns the pinned backend; guarded, not reverted
+
+Merging `upstream/main` brought in `1893e97 Drop vendored frozen_point_calib now
+that midas-calibrate-v2 ships it natively`, which deletes the vendored
+`midas_gui/_vendor/frozen_point_calib` and calls
+`midas_calibrate_v2.pipelines.iterate_frozen_point_until_stable` directly. That
+function does not exist in **0.17.0**, the version `environment.yml` currently
+pins (PyPI's latest at merge time is **0.22.0** — the pipeline shipped somewhere
+in between; not yet bisected). Unguarded, this breaks collection of
+`tests/test_frozen_point_vendor.py` outright (`ImportError` at import time) and
+makes `calib.py`'s `frozen_point` branch raise a bare `ImportError` with no
+guidance if a user ever picks that pipeline from the GUI.
+
+**Guarded, not reverted.** This is a maintainer's own commit to their own repo,
+made against a newer backend than what's pinned here — reverting it inside a PR
+back to that repo would be presumptuous, and the right fix (bumping
+`midas-calibrate-v2`) is `environment.yml`'s call, not this branch's. So:
+
+- `midas_gui/calib.py`'s `frozen_point` branch now imports
+  `iterate_frozen_point_until_stable` in a `try/except ImportError`, raising a
+  `RuntimeError` that names the installed version (via
+  `importlib.metadata.version`) and says to upgrade the backend or choose a
+  different pipeline, instead of surfacing a bare `ImportError` from a
+  now-deleted vendor path.
+- `tests/test_frozen_point_vendor.py` uses `pytest.importorskip` plus a
+  `getattr(..., None)` check on both `autocalibrate_frozen_point` and
+  `iterate_frozen_point_until_stable`, skipping the whole module rather than
+  aborting collection when either is absent.
+- `tests/test_calib_frozen_point.py`'s two tests that monkeypatch
+  `midas_calibrate_v2.pipelines.iterate_frozen_point_until_stable` directly
+  (`test_frozen_point_subtracts_dark_and_dispatches`,
+  `test_frozen_point_logs_note_for_non_cpu_device`) get the same
+  `skipif(getattr(...) is None)` treatment — they were failing with
+  `AttributeError` from `monkeypatch.setattr`, not from anything this branch's
+  own changes touched; confirmed by reproducing the same failure against the
+  merge commit before any guard was added.
+
+Net effect on the pinned 0.17.0 environment: Frozen-point (high-tilt) is
+selectable in the GUI but errors with a clear message rather than a traceback;
+the three tests above skip with a stated reason instead of failing red. Nothing
+here silently disables the feature or changes its behavior once the backend
+catches up — the guards fall away on their own the day `environment.yml` bumps
+past whichever release added the native pipeline.
+
+## 2026-09-24 — The polarization plane is η = 90° (horizontal), and the whole lab-frame chain is pinned by tests
+
+The user, looking at a CeO2 pattern, asked that the polarization correction be
+"consistent with the lab frame view where X-Z plane is the ring plane", and that
+images be "interpreted as how they are plotted and also plotted consistent with
+the MIDAS lab coordinate system".
+
+**MIDAS η is measured from vertical.** `midas_calibrate_v2/forward/geometry.py:209`
+computes `eta = atan2(-XYZ_y, XYZ_z)`, and `lattice.py:87` builds the detector
+coordinate as `Yc = (-Y_pix + BC_y) * pxY`. So η = 0 is straight up (+Z_MIDAS =
++Y_Lab), and η = ±90 is horizontal (∓Y_MIDAS = ±X_Lab). The storage ring's
+X_Lab–Z_Lab plane is horizontal and the beam is polarized in it, so **the
+polarization plane is η = 90, not η = 0.**
+
+**The GUI shipped 0.0.** Three sites — the Corrections widget, the Corrections
+tab, and `batch_cli --pol-plane` — all defaulted to a vertical polarization
+plane. The functional form was right; it was applied a quarter turn away. Since
+the factor goes as `cos(2(η − plane))`, plane = 0 does not merely fail to remove
+a ring's azimuthal modulation — it ADDS it. `midas_integrate_v2` had already
+fixed its own default to 90 on 2026-08-29 and measured it on 1-ID CeO2: plane =
+90 takes a ring's cos(2η) modulation from 2.813 % to 0.744 %, while plane = 0
+makes it 1.84× worse. All three sites now read
+`constants.POL_PLANE_HORIZONTAL_ETA_DEG = 90.0`; ±90 are equivalent (period 180).
+
+**Saved projects keep their own stored value.** A project written before today
+restores `pol_plane = 0.0`, and it is deliberately *not* rewritten — silently
+changing the physics of a reopened project would make old and new runs of the
+same project incomparable with no record of why. Instead `BatchWorker.run()`
+logs the plane and fraction at every run start, and appends "← NOT horizontal;
+η is measured from vertical, so the storage-ring plane is 90°" whenever the
+value is off-plane. The user sees it and decides.
+
+**The rest of the orientation chain was already correct — and is now pinned.**
+Audited end to end against the user's diagram (+Y_Lab up = η 0, +X_Lab left =
+η −90, +Z_Lab = beam into the page): the backend's η, the viewer's screen
+mapping (`disp = d.T` so the array's column axis is pyqtgraph's x, with
+`invertY(False)` putting row 0 at the bottom), the lab-frame compass overlay
+(`build_lab_frame_axes_items`, `x_screen_sign = -1.0`) and the bin-grid spokes
+(`draw_polar_bin_overlay`, `bc + r·(sin η, cos η)`) all agree with each other
+and with the backend. Nothing needed changing; `tests/test_lab_frame_conventions.py`
+now locks it down so nothing can drift.
+
+**Note on writing those tests — two symmetries make the obvious test toothless.**
+Both mistakes worth catching map the spoke set onto itself for natural parameter
+choices: swapping sin for cos sends η → 90° − η, so ANY bin size dividing 90
+(45°, 30°, the four cardinals) draws an invariant set; flipping the sign of the
+Y term sends η → −η, so any η range symmetric about 0 — including the obvious
+−180…180 — is invariant too. The first version of the spoke test used 30° bins
+over −180…180 and passed happily with the axes exchanged. It now uses 20° bins
+over −10…170, and both mutations were confirmed to fail it. Verified by mutation
+testing, not by reading.
+
+## 2026-09-24 — A named working directory for calibration, and `.midas_scratch/`
+
+Triggered by a live integration failure:
+
+```
+FileNotFoundError: ResidualCorrectionMap
+'/net/s20iddata/export/s20a/PUP_AML_stubbins_sep26_bc/residual_corr.bin'
+is set but cannot be read
+```
+
+Three separate problems behind one traceback, fixed separately.
+
+**1. A returned path is a claim, not a fact.** `calibrate()` mints
+`residual_corr_bin_path` from `output_dir` alone
+(`midas_calibrate_v2/pipelines/auto.py:680-683`) and returns it at `:976`
+without checking the file exists — but it only *builds* the map when
+`build_residual_corr` is on, and disables map building outright for any
+multi-panel fit (`:702-703`). Untick "Build residual map", or run Hydra, and
+the result names a file nothing wrote, which `midas_integrate_v2` treats as
+fatal. `calib._confirm_residual_bin` is now a single choke point on
+`normalize_result`'s way out: a path naming no file becomes `None`. Downstream,
+`helpers._drop_missing_residual_map` degrades an unreadable map to "no map"
+rather than raising. The earlier reroute-only fix did not cover this path.
+
+**2. Scratch had nowhere to live.** `residual_corr.bin` and
+`panel_shifts.txt` landed either in the user's *data* directory or, with the
+Output field blank, in a `tempfile.mkstemp` file they could never find again.
+Neither is tidy, and the user asked for neither. There is now one working
+directory per calibration, and every intermediate goes in
+`<workdir>/.midas_scratch/<run-id>/` — deletable wholesale, because everything
+in it is re-derivable and every deliberate save still goes through a file
+dialog. The GUI never deletes it: an analysis folder that empties itself
+between sessions is its own kind of surprise.
+
+The Calibrate tab's existing `Output:` field was *repurposed* rather than
+joined by a second one. It had no deliberate outputs — every real save went
+through a dialog — so it was already a working directory in all but name and
+default. The state key stays `out_ed` so pre-change projects still restore.
+
+Per-run and per-panel leaves are not decoration: everything the backend writes
+there is generically named (`residual_corr.bin`, `calibration.json`,
+`panel_shifts.txt`), so two fits sharing a folder overwrote each other and four
+parallel Hydra panels raced. The fit-time `panel_shifts.txt` also picked up the
+`<stem>_panelshifts.txt` naming the *save* path had used for this reason since
+`test_calibrate_panel_save.py` was written; only the fit path had missed it.
+
+**3. `_bc` recognition must precede the positional derivation.** Batch's
+`_suggest_output_dir` reads expid/detector/outroot *positionally*, assuming
+mpe_wf's four-deep `<outroot>/<expid>/<detector>/<froot>/<files>`. That is
+correct for what Batch is pointed at, and wrong here. The user's `.h5` sits
+*directly inside* an already-`_bc` directory, three levels below the mount, so
+the positional read calls `export` the expid and proposes
+`/net/s20iddata/export_bc` — a sibling of the mount root nobody can create.
+So `suggest_working_dir` checks for a `_bc` ancestor **first** (which also
+happens to be demonstrably writable — the data is sitting in it), and only then
+falls back to the positional read and the header Exp ID. It deliberately has no
+fallback into the data tree: a working directory inside the raw data is exactly
+the littering this feature exists to stop, and an empty field that makes the
+user choose is the better answer.
+
+Batch's behaviour is unchanged. The shared parse was extracted to
+`helpers.bc_path_parts`, with `suggest_integration_output_dir` (Batch's full
+`/<froot>/<detector>` tail) and `suggest_working_dir` (the bare `_bc` root) as
+the two callers. `tests/test_batch_output_dir.py` was written as
+characterization *before* the refactor — the function had zero coverage — so
+the extraction is provably behaviour-preserving, including the case that pins
+Batch still producing `/net/s20iddata/export_bc` for the user's real path.
+
+**An unwritable candidate is never pre-filled.** Autofill runs
+`check_output_dir_writable` and, on failure, leaves the field empty and logs
+the reason once — a path that looks accepted and then fails at Run time is
+worse than no path. The Suggest button *does* fill it, with the warning: there
+the user asked, so they get the answer and the reason it won't work. Restoring
+a project logs a warning for a stored directory that has gone stale (a host
+without that mount) rather than silently rewriting it — it is the user's choice
+to correct. At Run time an unwritable working directory blocks the fit rather
+than warning and carrying on: a fit that runs for minutes and only then finds
+it cannot record its residual map has wasted the user's time and left them a
+result silently missing the refinement they asked for.
+
+`scratch_dir()` **raises** `OSError` carrying that reason rather than returning
+`None`, for the same reason — a silent fallback is how the original bug got
+this far. With no working directory set it falls back to one `mkdtemp` per
+process, removed at exit, so a blank field is never fatal and never litters.
+
+**Folder designation elsewhere.** `tab_corrections.py` was the one tab the user
+named that had no folder field at all (only a save dialog); it got one on the
+established idiom. `tab_batch`, `tab_export` and `tab_queue` already had theirs.
+`tab_pdf.py` and `tab_texture.py` also lack one and were deliberately left out —
+both are work-in-progress per the README.
+
+**Out of scope, deliberately:** `app.py`'s `~/midas_gui_error.log` and
+`job_queue.py`'s `~/.midas_gui/jobs/` stay in `$HOME`. Both are app-lifetime
+rather than per-calibration state, and the job store must stay at a stable path
+to be adoptable across GUI instances.
+
+## 2026-09-23 — The Calibrate Run/Save block keeps this fork's full-width layout
+
+Upstream's `6104310` did two things at once: pinned Output/Run/Save into a
+non-scrolling footer, and re-centred all four buttons at fixed pixel widths
+(`189`/`132`). The footer is kept; the centring is reverted to full-width Run +
+Abort and an `S.button_grid(..., 2)` pair of Saves.
+
+Fixed widths cannot follow the splitter or a different font scale — the same
+class of bug `0ecc80a` had just fixed elsewhere — and centring detaches the
+block from the Output field it acts on.
+
+This is a deliberate fork-local divergence, kept as its own commit and placed
+*last* so the branch sent upstream is simply `main~1`: asking the maintainer to
+undo their own design choice does not belong in a PR about filenames. Expect it
+to re-conflict on the next upstream merge; the footer widget itself is not in
+dispute, only the geometry inside it.
+
+## 2026-09-23 — Saved calibrations are named `<expid>_<image>.instr.*`
+
+Both save paths hardcoded their suggestion — `"calibration.json"` in
+`_save_json`, `"paramstest.txt"` in `_SaveParamstestDialog` — as a *bare*
+filename, which makes the dialog open on the process CWD, i.e. wherever the app
+was launched from. Every calibration a user saved therefore had to be renamed and
+moved by hand. `CalibrationTab._default_save_stem()` now suggests
+`<expid>_<calibration image stem>`, and `_default_save_path(suffix)` puts it under
+the Output dir (falling back to the image's own folder).
+
+`.instr.txt` / `.instr.json` is the user's own convention; the string appears
+nowhere else in the codebase. It is only a default — the dialogs stay editable.
+
+**Amended 2026-09-24:** the suffix was `.instru.*` as first shipped; renamed to
+`.instr.*` at the user's request. Nothing reads the suffix back — no glob, no
+dialog filter keys on it — so the rename is confined to the two default strings
+and their tests. Files already saved under the old name still open normally.
+
+Both halves of the stem are optional and independently droppable. The Exp ID
+header is free-form and often blank, and the Data path may not be set yet;
+joining unconditionally would offer `_.instr.txt`, which is worse than either
+half alone. With neither, the suggestion is `calibration`.
+
+Exp ID reaches the tab through the same `set_expid_provider` callback Batch
+Integrate already uses (`app.py` `_build_ui`) rather than a copy of the header
+text, so it tracks edits. `DataLoaderPanel.data_path()` was added as the public
+read side of the existing `set_path()`. `_SaveParamstestDialog`'s new
+`default_out` is keyword-only *and optional*: `hydra_calib_widgets.py` builds the
+same dialog with no meaningful suggestion to offer, and keeps the blank field.
+
+## 2026-09-23 — Merging upstream 44a0aa1..b25d7e0: which side wins where the two branches both touched the Refine card
+
+Branch `merge/upstream-2026-09-23`, merge base `4a0e8ba`. Upstream (`d-beniwal`)
+and this fork both worked the Calibrate tab's Refine card after PR #8 landed, so
+the conflicts were semantic, not textual. Recording which side won and why,
+because in three of the four cases the losing side is the *newer* code.
+
+**Upstream's `_resolve_seed()` supersedes this fork's `_seed_for_v1()`.** Both
+existed to stop the "manual seed or `make_seed_safe()`" block from being copied a
+fourth time in `calib.py`. Upstream's is strictly better: it handles a *sparse*
+manual seed (BC pair alone, or Lsd alone, or tilts alone) rather than requiring
+the full set, and it returns `None` on auto-seed failure so each caller can raise
+an error naming its own pipeline. Adopted at all four call sites. `_seed_for_v1`
+was deleted rather than kept alongside — it called `_manual_seed_dict`, which
+upstream removed outright, so the helper was already a latent `NameError` in
+anything that reached it.
+
+**This fork's interleaved limits grid supersedes upstream's `_limits_host` /
+`_limits_na_lbl`.** Upstream reflowed the refine checkboxes into a compact 2x3
+grid with the limits in a block underneath. Two reasons that block loses:
+
+1. It still carries the label *"the MIDAS calibrate backend takes no bounds
+   arguments, so there is nothing to pass them to."* That claim is false and this
+   fork disproved it (see 2026-09-09): `CalibrationParams.tolLsd/tolBC/tolTilts/
+   tolWavelength/tolDistortion` become hard `(lo, hi)` box constraints in
+   `midas_calibrate/param_vector.py:bounds()`. Crystalline fits have always been
+   bounded, invisibly, at defaults nobody chose.
+2. A compact grid has nowhere to hang a per-parameter window. The whole point of
+   the layout here is one row per parameter — "refine this?" in column 0 and the
+   +/- window bounding that same parameter on the rest of the line — so the two
+   decisions about one parameter are read together.
+
+Upstream's `rfl_bottom` row is kept as-is: Distortion needs its "..." button for
+the per-coefficient dialog, and Residual map is an output rather than a fit
+parameter, so neither belongs on a parameter row. Upstream's test
+`test_refine_card_lays_out_as_three_rows` was rewritten to
+`test_refine_card_interleaves_each_flag_with_its_window` against the surviving
+layout, keeping upstream's bottom-row assertion verbatim.
+
+**`refine_distortion` accepts a sequence, so the distortion-subset reroute is
+gone.** This fork rerouted plain One-shot through `pipelines.single.autocalibrate`
+whenever only a *subset* of distortion coefficients was ticked, on the belief that
+`calibrate()`'s `refine_distortion` was an all-or-nothing bool. Upstream found
+otherwise, and the installed signature confirms it:
+`refine_distortion: Union[bool, str, Sequence[str]] = True`. A partial selection
+reaches `calibrate()` exactly as ticked. That clause was therefore not just
+redundant but harmful — rerouting skips `calibrate()`'s STAGE-1 multi-hypothesis
+Lsd search, so it was paying a real accuracy cost for nothing. Removed; the other
+three reroute conditions (only one of ty/tz refined, Lsd or BC held fixed,
+non-default parameter limits) stand, because `calibrate()` genuinely has no
+`refine_lsd`/`refine_bc` kwarg and its `refine_tilts` is a single bool covering
+both tilts.
+
+**A disabled checkbox is not a label — fixed structurally and in the
+stylesheet.** The user reported two check marks against Distortion and no way to
+untick either. Cause: the limits column named each row with the *text of its own
+opt-in checkbox*, and crystalline rows hide the opt-in (their window always
+applies) — so the row was kept visible-but-disabled purely to caption itself.
+`QCheckBox::indicator:checked` paints the accent fill with no `:disabled`
+variant, so a disabled ticked box is pixel-identical to a live one. It looked
+ticked, it looked clickable, it did nothing.
+
+Fixed on both axes, deliberately:
+
+- *Structural:* the row name is now its own `QLabel` beside the box
+  (`_limit_name_lbls`), the box carries no text, and crystalline mode hides the
+  box outright. Labels are mode-aware via `_XTAL_ROW_LABEL` — only `distortion`
+  needs one, since every other crystalline row is named by its refine checkbox in
+  column 0, and reusing the manual fit's `"BC_y"` would misname a window
+  (`tolBC`) that covers both centre coordinates.
+- *Defensive:* `style.py` gained `:disabled` states for `QCheckBox` /
+  `QRadioButton` / `QGroupBox` indicators. The structural fix handles this one
+  card; the stylesheet gap would have produced the same illusion anywhere else a
+  box is disabled rather than hidden.
+
 ## 2026-09-25 — Data Viewer: folder format filter, under-viewer frame scrubber, profile-file lineout; app-wide frame-nav slider/button visibility
 
 Three Data Viewer requests plus a visibility fix applied everywhere a
@@ -542,6 +1156,93 @@ image; it never belonged inside the ring model.
 `tab_calibrate.py` (new public `geometry_for_viewer()`, shared by its own
 "→ Send to Data Viewer" and the Viewer's new "← Get" pull), `app.py`; new
 `tests/test_view_tab_controls.py` (27 tests).
+## 2026-09-09 (later) — Crystalline calibrants DO have parameter bounds; the earlier claim was wrong
+
+The entry below shipped a label saying "Parameter limits are not available for
+this calibrant: the MIDAS calibrate backend takes no bounds arguments, so there
+is nothing to pass them to." **That is false**, and it was written from an
+incomplete check (`calibrate()`'s own signature) rather than from the params
+object the solve actually uses.
+
+`midas_calibrate.params.CalibrationParams` carries `tolLsd` / `tolBC` /
+`tolTilts` / `tolDistortion` / `tolWavelength`, and
+`midas_calibrate/param_vector.py:bounds()` turns each into a hard
+`(value − tol, value + tol)` box constraint on the LM solve. So crystalline fits
+were **already bounded all along** — at defaults nobody chose and nobody could
+see: ±15 mm on Lsd, ±20 px on BC, ±3° on tilt, ±0.001 Å on λ. On the reported
+13.5 m SAXS geometry that Lsd window is ±0.1 %.
+
+Lesson worth keeping: "the backend does not support X" needs checking against
+the object the solver consumes, not only the entry point's signature. The GUI
+builds `CalibrationParams` itself in `build_v1_params`, so anything that
+dataclass carries was always reachable.
+
+**Presentation: always-on rows showing the effective values, not opt-in
+checkboxes.** For the manual fit an unticked row means *unbounded*, which is
+true there. For the crystalline backend "off" would mean "backend default", and
+a user reading it as unbounded is exactly the misconception that produced the
+wrong label in the first place. So crystalline rows are always active, have no
+enable checkbox, and are prefilled from `tol_defaults()` — read off the
+installed dataclass rather than hardcoded, so a backend release that retunes
+them cannot leave the GUI displaying stale windows.
+
+The backend's granularity is coarser than the manual fit's — one window for both
+BC coordinates, one for both refined tilts, one for all fifteen distortion slots,
+and `refine_mask` never refines tx — so the surplus rows are hidden rather than
+left as controls that would silently do nothing. The tilt row spans ty/tz in the
+grid so it does not read as bounding only ty.
+
+**Rerouting One-shot rather than leaving its flags inert.** Plain One-shot calls
+`calibrate()`, which builds its own `CalibrationParams` (no tol* kwarg) and
+hardcodes `Refine={"Lsd": True, "BC": True, ...}` (`auto.py:619`). Three things
+it therefore cannot express: a non-default window, a held Lsd/BC, and refining
+exactly one of ty/tz (its single `refine_tilts` bool is computed as `ty or tz`).
+Each now routes through `build_v1_params` + `pipelines.single.autocalibrate` —
+the escape hatch this file already used for a distortion subset, for exactly the
+same reason. Rejected the alternative of warning that the checkboxes do nothing:
+the mechanism to make them work already existed and was one branch away.
+
+The trade-off is real and is logged rather than hidden: the v1 route skips
+`calibrate()`'s STAGE-1 multi-hypothesis Lsd search and uses the seed as given.
+`first_time` still cannot be bounded at all (it takes neither a
+`CalibrationParams` nor a tol* kwarg — it has its own `tilt_prior_deg` /
+`half_window_px` on a different footing) and warns when limits are set.
+
+**Seed arrow steps follow the window** at 10 % of the full range (±15 mm → 3 mm,
+±2 mm → 0.4 mm). A window is a statement about how far a value can sensibly
+move, which is a better step than a constant; rows with no window fall back to
+the `DEFAULT_STEP_*` preferences.
+
+**A visible window is not enough: report when the fit lands on one.** Showing
+the bounds fixes half the problem; a fit that *stops* at its bound is reporting
+the bound rather than a measurement, and looked identical to a converged one.
+The manual fit already said this via `at_limit`; the crystalline path now does
+too (`_crystalline_at_limit`), marked `(at limit)` in the results grid and named
+in the Log. Computed GUI-side by comparing the fitted value against seed ± the
+effective window, because the backend returns no active-set information.
+
+Two deliberate silences there. Parameters held fixed are never flagged — they
+never moved, so a window cannot have stopped them, and flagging them would put
+noise on exactly the rows the user already knows are pinned. And an auto-seeded
+run reports nothing at all: the window is centred on a seed the GUI never sees,
+so there is no honest comparison to make. Both are cases where saying nothing
+beats guessing.
+
+The windows in force are also logged at the start of each run, next to the
+refine summary — the card shows whatever is set *now*, which is not necessarily
+what a given run used.
+
+Not done: emitting `tolLsd`/`tolBC`/`tolTilts` into paramstest.txt, which
+`midas_calibrate/params.py:214` does parse. `paramstest_pairs` is deliberately
+generated by the backend's own writer so the readout matches the file byte for
+byte; adding rows would break that invariant for a provenance gain the project
+record already covers (the windows travel in the attempt's `cfg`).
+
+Also fixed here: `_limit_bounds()` (which feeds the manual fit) was not
+mode-filtered, so once crystalline rows became always-on it would have handed
+their windows to a solver that never runs. `dialogs.ParameterLimitsDialog` was
+dead code — superseded by the inline column, only its row table and
+`limit_window()` were ever imported — and is deleted.
 
 ## 2026-09-09 — Manual d-spacing fit: BC-only default, parameter limits, and σ reporting
 
@@ -1504,3 +2205,44 @@ structure and deleted it; the build-critical `midas_pdf` reference stack
 was *moved* (not summarized) to `.context/reference/midas_pdf/` — too
 detailed to lose. Discarded as stale: `CLAUDE_original_scratch.md` and
 `claude/gui_documentation.md` (a strict subset of the shipped doc).
+
+## 2026-09-24 — The Distortion selection is project state, and the workspace outranks an attempt
+
+Reported from the beamline: untick Distortion, save the project, reopen — and it
+comes back ticked at 15/15. Three independent faults, all of which had to go:
+
+1. **`_dist_coeffs` was never serialized.** `ref_dist` (the tick) was in
+   `_state_widgets()`, but the set of harmonics it gates has no widget, so
+   `widgets_to_dict` could not see it and nothing else wrote it out. A reopened
+   project silently refined all fifteen whatever the user had picked. Fixed the
+   way `seed_dist` already was: a top-level key in `get_state()`. Restored as
+   `None`-means-absent, so a pre-existing project keeps the constructor default
+   rather than being narrowed to "refine nothing".
+
+2. **The caption went stale.** `apply_dict_to_widgets` restores with signals
+   blocked, and `_update_dist_label()` is the only writer of the
+   `Distortion (n/15)` text — so a freshly built tab kept its `(15/15)` caption
+   next to a checkbox that had just been restored to unticked. `_set_state` now
+   calls it unconditionally, not only when the new key is present: the caption
+   is wrong after *any* restore, including of an old project.
+
+3. **The attempt replay clobbered the workspace.** `_open_project_selection`
+   restores the GUI Workspace first and then, if the user also ticked a
+   calibration attempt in the picker, replays that attempt's fields over the
+   top. Those fields are strictly staler — the workspace is written at Ctrl+S,
+   the attempt when the fit ran — so the replay reverted every input the user
+   had touched since their last run, which is what actually put the tick back.
+
+The precedence rule is the part worth arguing. `apply_project_calibration` grew
+`restore_fields`, and Open Project passes `False` when the Calibrate tab's
+workspace was restored in the same action. The workspace is a superset of the
+attempt's fields *and* newer, so the field replay was pure loss; what the attempt
+uniquely carries — the embedded cake/profile arrays and the materialized panel
+shifts — is in the result half, which still runs either way. Opening an attempt
+without its workspace is unchanged and now restores the coefficient subset too,
+via `project.calib_attempt_dist_coeffs()`; the set was already in the stored
+metadata (`_json_default` sorts sets to lists), just never read back.
+
+Not done: the same precedence question applies to Batch Integrate's
+`apply_project_integration`, which has the identical shape. Left alone — no
+report against it, and the fix belongs with evidence of the symptom.

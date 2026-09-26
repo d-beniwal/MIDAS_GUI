@@ -146,13 +146,19 @@ class MaterialDialog(QtWidgets.QDialog):
         v.addLayout(S.Form().row(("Preset:", self._preset)))
 
         latt0 = _FALLBACK_LATTICE if material.get("kind") == "dspacing" else material
-        _LW, _AW = 78, 66     # compact lattice / angle-SG cell widths
-        self._a = _fspin(0.1, 100.0, 3, latt0["a"]); self._a.setFixedWidth(_LW)
-        self._b = _fspin(0.1, 100.0, 3, latt0["b"]); self._b.setFixedWidth(_LW)
-        self._c = _fspin(0.1, 100.0, 3, latt0["c"]); self._c.setFixedWidth(_LW)
-        self._al = _fspin(1.0, 179.0, 2, latt0["alpha"]); self._al.setFixedWidth(_AW)
-        self._be = _fspin(1.0, 179.0, 2, latt0["beta"]); self._be.setFixedWidth(_AW)
-        self._ga = _fspin(1.0, 179.0, 2, latt0["gamma"]); self._ga.setFixedWidth(_AW)
+        # 5 decimals on the cell edges, not 3. Several presets are published to
+        # that precision (LaB6 4.15692, Si 5.43102, W 3.16525) and a 3-decimal
+        # spinbox does not merely display them short — setValue() rounds, so
+        # opening this dialog and pressing OK wrote the rounded value back.
+        # 5 covers every entry in MATERIALS exactly; angles get the matching
+        # widening even though the presets are all whole degrees.
+        _LW, _AW = 104, 92    # compact lattice / angle-SG cell widths
+        self._a = _fspin(0.1, 100.0, 5, latt0["a"]); self._a.setFixedWidth(_LW)
+        self._b = _fspin(0.1, 100.0, 5, latt0["b"]); self._b.setFixedWidth(_LW)
+        self._c = _fspin(0.1, 100.0, 5, latt0["c"]); self._c.setFixedWidth(_LW)
+        self._al = _fspin(1.0, 179.0, 4, latt0["alpha"]); self._al.setFixedWidth(_AW)
+        self._be = _fspin(1.0, 179.0, 4, latt0["beta"]); self._be.setFixedWidth(_AW)
+        self._ga = _fspin(1.0, 179.0, 4, latt0["gamma"]); self._ga.setFixedWidth(_AW)
         self._sg = _NoScrollSpinBox(); self._sg.setRange(1, 230); self._sg.setValue(latt0["sg"])
         self._sg.setFixedWidth(_AW)
         self._cubic = QtWidgets.QCheckBox("Cubic (a=b=c, α=β=γ=90°)")
@@ -192,7 +198,12 @@ class MaterialDialog(QtWidgets.QDialog):
 
     @staticmethod
     def _format_d_list(d_list) -> str:
-        return " ".join(f"{d:.4f}" for d in d_list)
+        # 6 decimals, not 4, for the same reason as the cell edges above: the
+        # text here is re-parsed on OK, so the displayed precision *is* the
+        # stored precision. A harmonic series divides into repeating decimals
+        # (AgBH's 58.380/9 = 6.486666…), which 4 decimals rounded away at
+        # 3e-5 A per round-trip.
+        return " ".join(f"{d:.6f}" for d in d_list)
 
     def _current_mode(self) -> str:
         name = self._preset.currentText()
@@ -1343,7 +1354,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         """Explain how the radial-integration plot's profile is computed."""
         QtWidgets.QMessageBox.information(
             self, "Radial integration — how it's calculated",
-            "The plot shows intensity vs. radius: the azimuthal (angular) average "
+            "The plot shows intensity vs. radius: the azimuthal (angular) mean "
             "of the image about the beam centre, grouped into rings of width "
             "\"R bin\".\n\n"
             "\"Accurate\" ticked: the full Batch-Integrate pipeline runs — the "
@@ -1366,7 +1377,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             "calibration card.")
 
     def radial_integrate(self):
-        """Azimuthal average of the current frame.
+        """Azimuthal mean of the current frame.
 
         Fast path (the default): the MIDAS engine with the hard-binning kernel
         when a calibration file is loaded or a tilt is dialled into the

@@ -22,7 +22,8 @@ import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
-from midas_gui.constants import COLORMAPS, DISTORTION_NAMES, DEFAULT_COLORMAP, DEVICES
+from midas_gui.constants import (COLORMAPS, DISTORTION_NAMES, DEFAULT_COLORMAP,
+                                 DEVICES, POL_PLANE_HORIZONTAL_ETA_DEG)
 from midas_gui.dialogs import show_error, BrowseFilesDialog
 from midas_gui.helpers import fit_circle_algebraic
 from midas_gui.live_sources import PvaLiveSource, CaLiveSource, create_live_source
@@ -1778,7 +1779,7 @@ class RingResidualViewer(CakeViewer):
     (so 1-D and 2-D always agree on the same underlying measurement), or
     "Peak of collapsed profile" repeats the higher-SNR single-peak-search
     :func:`collapsed_profile_ring_residual` does on the pre-azimuthally-
-    averaged profile (loses per-η detail, more robust for weak/spotty
+    mean profile (loses per-η detail, more robust for weak/spotty
     rings). The Model source only ever has an η-mean reduction — its cake
     is already a smoothed residual model, not raw intensity, so there's no
     "collapsed profile" for it.
@@ -1813,10 +1814,10 @@ class RingResidualViewer(CakeViewer):
         self._ring1d_method.addItem("η-mean of cake", "eta_mean")
         self._ring1d_method.addItem("Peak of collapsed profile", "collapsed_profile")
         self._ring1d_method.setToolTip(
-            "η-mean of cake: average the per-η ring residuals shown in 2-D\n"
+            "η-mean of cake: the mean of the per-η ring residuals shown in 2-D\n"
             "mode — 1-D and 2-D always agree.\n"
             "Peak of collapsed profile: one peak search on the azimuthally-\n"
-            "averaged profile (higher SNR, no η resolution).")
+            "mean profile (higher SNR, no η resolution).")
         self._ring1d_method.currentIndexChanged.connect(self._redisplay)
         self._toolbar_layout.insertWidget(4, self._ring1d_method)
 
@@ -2458,9 +2459,9 @@ def ring_azimuth_residual(cake_2d, r_axis_px, ring_radii_px, window_px: float = 
     The peak position is parabolic-interpolated around the discrete argmax
     (3-point quadratic fit through it and its two neighbors), not just the
     bin centre the plain argmax lands on. ``ResidualBarChart`` gets away
-    with a raw argmax because it acts on the azimuthally-**averaged**
+    with a raw argmax because it acts on the azimuthal-**mean**
     profile — pooling the whole ring's signal smooths the result enough
-    that R-bin quantization isn't visible. Averaged over only one η row's
+    that R-bin quantization isn't visible. Over only one η row's
     worth of pixels, that same discretization dominates: without subpixel
     refinement, adjacent η rows mostly round to the *same* R-bin (a flat,
     uniform-looking ring) with occasional whole-bin-width jumps between
@@ -2640,8 +2641,19 @@ class CorrectionFlagsWidget(QtWidgets.QGroupBox):
             "Apply the polarization correction (synchrotron horizontal plane).")
         self.pol_fraction = _fspin(0.0, 1.0, 3, 0.99)
         self.pol_fraction.setFixedWidth(80)
-        self.pol_plane = _fspin(-180.0, 180.0, 1, 0.0, "°")
+        self.pol_fraction.setToolTip(
+            "Polarization fraction: 0 = unpolarized, 1 = fully polarized in the\n"
+            "ring plane. 0.99 is the usual synchrotron value.")
+        self.pol_plane = _fspin(-180.0, 180.0, 1,
+                                POL_PLANE_HORIZONTAL_ETA_DEG, "°")
         self.pol_plane.setFixedWidth(80)
+        self.pol_plane.setToolTip(
+            "Azimuth of the polarization plane, in MIDAS η.\n\n"
+            "MIDAS measures η from VERTICAL, so 90° is horizontal — the\n"
+            "storage ring's X_Lab–Z_Lab plane, which is where the beam is\n"
+            "polarized. That is the default and is almost always right.\n"
+            "0° puts the correction on the vertical axis and makes a ring's\n"
+            "azimuthal modulation worse, not better.")
         form.addRow(self.polar_check)
         form.addRow(_twocol("frac:", self.pol_fraction, "plane η:", self.pol_plane))
 
@@ -2797,7 +2809,8 @@ class FieldSelector(QtWidgets.QGroupBox):
 
     A checkable group; its body is hidden while unchecked so three of these stay
     compact.  Browsing a file or folder (⋯ menu) auto-computes the field: a single
-    file, a folder / *.tif glob, or an HDF5 dataset averaged over an index range
+    file, a folder / *.tif glob, or an HDF5 dataset reduced to a mean over an
+    index range
     that is clamped to the number of frames available.  The bright variant adds a
     divide / subtract mode combo.  ``get_field()`` → computed field (or None);
     ``get_mode()`` → "divide" | "subtract".
@@ -2864,11 +2877,11 @@ class FieldSelector(QtWidgets.QGroupBox):
         # Index range (clamped to available frames) + optional mode, on one row
         self._start = _NoScrollSpinBox(); self._start.setRange(0, 0); self._start.setFixedWidth(50)
         self._end = _NoScrollSpinBox(); self._end.setRange(0, 0); self._end.setFixedWidth(50)
-        self._end.setToolTip("Last frame index to average (inclusive).")
+        self._end.setToolTip("Last frame index in the mean (inclusive).")
         self._nfr_lbl = QtWidgets.QLabel("")
         self._nfr_lbl.setStyleSheet("color:#9a9a9a;font-size:10px")
         ir = QtWidgets.QHBoxLayout(); ir.setSpacing(4)
-        ir.addWidget(QtWidgets.QLabel("avg")); ir.addWidget(self._start)
+        ir.addWidget(QtWidgets.QLabel("mean")); ir.addWidget(self._start)
         ir.addWidget(QtWidgets.QLabel("–")); ir.addWidget(self._end)
         ir.addWidget(self._nfr_lbl)
         if with_mode:
@@ -3136,7 +3149,7 @@ class FieldSelector(QtWidgets.QGroupBox):
         self._nfr_lbl.setText(f"/ {hi}")
         for sp in (self._start, self._end):
             sp.blockSignals(True); sp.setMaximum(hi); sp.blockSignals(False)
-        # default the end to the last frame (average the whole stack)
+        # default the end to the last frame (mean over the whole stack)
         if self._end.value() == 0 or self._end.value() > hi:
             self._end.blockSignals(True); self._end.setValue(hi); self._end.blockSignals(False)
         if self._start.value() > hi:
@@ -3179,12 +3192,12 @@ class FieldSelector(QtWidgets.QGroupBox):
         return self._field if self.isChecked() else None
 
     def raw_stack(self):
-        """The raw, un-averaged (N, Y, X) frame stack this field was built
+        """The raw, per-frame (N, Y, X) stack this field was built
         from, or ``None`` if the field isn't checked, has no backing
-        path (e.g. imported from a live buffer as a single average), or
+        path (e.g. imported from a live buffer as a single mean), or
         fails to re-read. Used by Auto Attenuation to build a
         dark-derived dead/hot-pixel mask, which needs per-pixel variance
-        across raw frames rather than the already-averaged field."""
+        across raw frames rather than the field's mean."""
         if not self.isChecked():
             return None
         raw = self._raw_source()
@@ -3712,6 +3725,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
     monitorToggled = QtCore.pyqtSignal(bool)  # MONITOR button toggled (stream mode)
     bufferInvalidated = QtCore.pyqtSignal()   # this panel's own buffer was reset
     metadataDetected = QtCore.pyqtSignal(dict)  # auto-detected pxY/wavelength_A from a new Data load
+    previewFrameReady = QtCore.pyqtSignal()   # "stream" mode: an async preview frame finished (or failed)
 
     def __init__(self, parent=None, *, mode="single", data_dataset="exchange/data",
                  dark_dataset="exchange/data_dark", allow_live=False,
@@ -3744,6 +3758,8 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._cur = None
         self._stream_preview_dirty = True   # "stream" mode only — see current_frame()
         self._preview_sum_n = 1             # "stream" mode only — see set_preview_sum
+        self._preview_worker = None         # "stream" mode only — in-flight StreamPreviewWorker, if any
+        self._preview_worker_stale = False  # a new dirty trigger arrived while one was already running
         self._live_src: Optional[QtCore.QObject] = None   # PvaLiveSource | CaLiveSource
         self._live_backend = "pva"     # which backend self._live_src (if any) was built for
         self._registry = None          # DataSourceRegistry, set by bind_registry()
@@ -4057,7 +4073,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._mask_sel.maskChanged.connect(self.fieldsChanged)
         lv.addWidget(self._mask_sel)
 
-        # "stream" mode's cached preview frame (_peek_stream_frame) now
+        # "stream" mode's cached preview frame (_start_preview_worker) now
         # bakes dark/bright/background correction in — a field changing
         # after a preview was already cached must invalidate it too, or a
         # caller like Batch Integrate's Detector view would keep showing
@@ -4408,10 +4424,10 @@ class DataLoaderPanel(QtWidgets.QWidget):
         if self._mode == "stream":
             # No in-memory load of the whole dataset (that's the point of
             # stream mode for large scans) — just mark the cached preview
-            # frame stale. current_frame() does the actual (cheap-if-
+            # frame stale. current_frame() kicks off the actual (cheap-if-
             # unneeded, since Pump Probe's "stream" loader never calls it)
-            # one-frame "peek" lazily, on first ask — see current_frame /
-            # _peek_stream_frame.
+            # background preview fetch lazily, on first ask — see
+            # current_frame / _start_preview_worker.
             if isinstance(raw, list):
                 text = f"Source: {len(raw)} file(s) — {display_text_for_paths(raw)}"
             elif self._stem_filter:
@@ -4506,39 +4522,83 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._preview_sum_n = n
             self._stream_preview_dirty = True
 
-    def _peek_stream_frame(self):
-        """Fetch, dark/bright/background-correct, and sum the first
-        ``self._preview_sum_n`` frames the current "stream"-mode source
-        would yield, for a caller's preview (e.g. Batch Integrate's
-        Detector view overlay) — without eagerly loading the whole dataset
-        the way "stack"/"single" mode does. Opens the exact same source the
-        real run will use (``workers._open_source_cfg``), so e.g. a VAREX
-        multi-file source previews its actual combined-per-file frames, not
-        a raw sub-frame. Correction is applied to each constituent frame
-        BEFORE summing (matching how the real batch run corrects every
-        frame independently) — correcting only the final sum once would
-        subtract just one dark frame's worth from an N-times-larger signal,
-        making it look like dark subtraction barely did anything for N>1.
-        Returns None if no source is set or it can't be opened (e.g. an
-        incomplete pick, or a transient read error)."""
+    def _start_preview_worker(self):
+        """Fetch and correct the "stream"-mode preview sum off the GUI
+        thread (:class:`workers.StreamPreviewWorker`), for a caller's
+        preview (e.g. Batch Integrate's Detector view overlay) — without
+        eagerly loading the whole dataset the way "stack"/"single" mode
+        does, and without blocking the GUI while it reads.
+
+        Confirmed necessary, not just theoretical: this used to run
+        synchronously right here (``_peek_stream_frame``) and froze the
+        whole app with no recovery against a real multi-file VAREX HDF5
+        source over an NFS-mounted beamline share — HDF5's file locking can
+        hang indefinitely on such mounts, not just run slowly (separately
+        fixed too — see ``midas_gui/_paths.py``'s ``HDF5_USE_FILE_LOCKING``).
+
+        Only one worker runs at a time — see ``current_frame()``'s dirty
+        check and ``_preview_worker_stale``: a new trigger that arrives
+        while one is already in flight just flags it for a fresh restart
+        once this one finishes, rather than piling up concurrent reads
+        against the same (possibly slow) storage.
+        """
         cfg = self.source_cfg()
         if not (cfg.get("path") or cfg.get("paths")):
-            return None
-        try:
-            from midas_gui.workers import _open_source_cfg
-            source = _open_source_cfg(cfg)
-            total = getattr(source, "n_frames", 0)
-            if total == 0:
-                return None
-            n = max(1, min(self._preview_sum_n, total))
-            acc = None
-            for i in range(n):
-                _fid, img = source.get(i)
-                img = self.corrected(np.asarray(img, dtype=np.float64))
-                acc = img if acc is None else acc + img
-            return acc.astype(np.float32)
-        except Exception:
-            return None
+            self._cur = None
+            self._nframes = 0
+            self.previewFrameReady.emit()
+            return
+        from midas_gui.workers import StreamPreviewWorker
+        # Deliberately unparented (no parent=self): a QThread parented to a
+        # QWidget is destroyed the instant that widget is (Qt's normal
+        # parent-owns-children cascade) — including while it's still
+        # running, which is a fatal "QThread: Destroyed while thread is
+        # still running" abort, not a graceful stop. PyQt keeps a *running*
+        # QThread's wrapper alive on its own even with no parent and no
+        # remaining Python reference (specifically to prevent this), so the
+        # explicit self._preview_worker reference below plus the finished/
+        # failed slots dropping it are enough for correct cleanup once it's
+        # actually done — regardless of what happens to this panel/its
+        # owning tab in the meantime. Found via a real crash: constructing
+        # any BatchTab starts a preview read of the nickel-standard default
+        # path, and a parented worker aborted the process whenever a test
+        # finished before that (normally fast, but not instant) read did.
+        worker = StreamPreviewWorker(
+            cfg, self._preview_sum_n, dark=self.dark(), bright=self.bright(),
+            background=self.background(), bright_mode=self.bright_mode())
+        worker.finished.connect(self._on_preview_worker_done)
+        worker.failed.connect(self._on_preview_worker_failed)
+        self._preview_worker = worker
+        worker.start()
+
+    def _on_preview_worker_done(self, frame) -> None:
+        """``StreamPreviewWorker.finished`` — runs on the GUI thread (queued
+        cross-thread signal), so it's the safe place for the one part of the
+        old ``corrected()`` call the worker itself couldn't do: updating each
+        field selector's mismatch-warning label (a QWidget mutation)."""
+        self._preview_worker = None
+        if frame is not None:
+            frame_shape = np.asarray(frame).shape
+            for sel in (self._dark_sel, self._bright_sel, self._bg_sel):
+                sel.note_frame_shape(frame_shape)
+        self._cur = frame
+        self._nframes = 1 if frame is not None else 0
+        self._restart_preview_worker_if_stale_else_notify()
+
+    def _on_preview_worker_failed(self, _msg: str) -> None:
+        """An incomplete pick or a transient read error — same as the old
+        synchronous path's bare ``except Exception: return None``."""
+        self._preview_worker = None
+        self._cur = None
+        self._nframes = 0
+        self._restart_preview_worker_if_stale_else_notify()
+
+    def _restart_preview_worker_if_stale_else_notify(self) -> None:
+        if self._preview_worker_stale:
+            self._preview_worker_stale = False
+            self._start_preview_worker()
+        else:
+            self.previewFrameReady.emit()
 
     def _setup_navigator(self):
         hi = max(0, self._nframes - 1)
@@ -4880,7 +4940,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
             return "loaded"
         return "none"
 
-    def average_frames(self, start=0, end=None, step=1):
+    def mean_frames(self, start=0, end=None, step=1):
         """Mean of frames ``start:end:step`` (end None/<=0 = all), streamed one
         frame at a time so large folders / HDF5 stacks stay memory-safe.
 
@@ -4911,6 +4971,15 @@ class DataLoaderPanel(QtWidgets.QWidget):
             if self._mode == "stream" or Path(str(path)).exists():
                 self._load()
 
+    def data_path(self) -> str:
+        """The path currently typed in the Data card, stripped (may be "").
+
+        Public read side of :meth:`set_path`, for callers that want to name an
+        output after the input it came from — see
+        ``CalibrationTab._default_save_stem``.
+        """
+        return self._path_ed.text().strip()
+
     def n_frames(self) -> int:
         return self._nframes
 
@@ -4921,20 +4990,28 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._set_frame(i)
 
     def current_frame(self):
-        """Raw (uncorrected) current 2-D frame, or None.
+        """Raw (uncorrected) current 2-D frame, or None — except "stream"
+        mode, whose preview is corrected (see ``_start_preview_worker``).
 
-        "stream" mode fetches this lazily, on first ask, from
-        ``_peek_stream_frame`` — cached until ``_stream_preview_dirty`` is
-        set again (on a source or "Combine sub-frames" change). Pump Probe
-        also uses "stream" mode but never calls this, so the (sometimes
-        multi-second, for a large multi-frame HDF5) peek only ever happens
+        "stream" mode fetches this asynchronously: a dirty flag (set on a
+        source or "Combine sub-frames" change) kicks off a background
+        :class:`workers.StreamPreviewWorker` and this call returns
+        immediately with whatever's currently cached (``None`` on first ask,
+        or the previous preview while a fresh one is computing) — never
+        blocks. ``previewFrameReady`` fires once the real result lands; a
+        caller that wants the up-to-date preview connects to that rather
+        than polling this. Pump Probe also uses "stream" mode but never
+        calls this, so the read this triggers (sometimes multi-second, for a
+        large multi-frame HDF5, or on slow/NFS storage) only ever happens
         for a caller that actually wants a preview (Batch Integrate's
         Detector view)."""
         if self._mode == "stream":
             if getattr(self, "_stream_preview_dirty", True):
-                self._cur = self._peek_stream_frame()
-                self._nframes = 1 if self._cur is not None else 0
                 self._stream_preview_dirty = False
+                if self._preview_worker is not None:
+                    self._preview_worker_stale = True
+                else:
+                    self._start_preview_worker()
             return self._cur
         if self._nframes == 0:
             return None
@@ -5312,7 +5389,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
         return self._dark_sel.get_field()
 
     def dark_raw_stack(self):
-        """Raw (un-averaged) multi-frame dark stack, or None — see
+        """Raw per-frame multi-frame dark stack, or None — see
         ``FieldSelector.raw_stack``."""
         return self._dark_sel.raw_stack()
 

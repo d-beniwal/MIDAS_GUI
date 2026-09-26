@@ -28,14 +28,14 @@ from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_
                                _NoScrollSpinBox, _NoScrollComboBox,
                                widgets_to_dict, apply_dict_to_widgets,
                                check_output_dir_writable,
+                               suggest_integration_output_dir,
                                browse_start_dir, warn_if_path_missing)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, DataLoaderPanel, OutputFormatSelector,
                                ImageViewer, OriginToolButton, build_lab_frame_axes_items,
                                CakeStackViewer)
 from midas_gui.workers import (BatchWorker, BatchRunCoordinator, apply_q_uniform,
-                               DriftWorker, FolderMonitorWorker, write_all_profiles,
-                               froot_and_frame_num)
+                               DriftWorker, FolderMonitorWorker, write_all_profiles)
 from midas_gui.dialogs import show_error
 from midas_gui.hydra_widgets import HydraModeRibbon
 from midas_gui.hydra_batch_page import HydraBatchPage
@@ -98,7 +98,7 @@ class _AzimuthalBinsDialog(QtWidgets.QDialog):
         v = QtWidgets.QVBoxLayout(self)
         note = QtWidgets.QLabel(
             "η bin controls how the 2-D (η, R) cake is collapsed to a 1-D "
-            "profile (see Azim. avg) and, when Multi-azimuth output is on, "
+            "profile (see Azim. mean) and, when Multi-azimuth output is on, "
             "defines the output sectors themselves.")
         note.setWordWrap(True)
         note.setStyleSheet(f"color:{S.MUTED};font-size:10px;padding-bottom:4px")
@@ -130,6 +130,10 @@ class BatchTab(QtWidgets.QWidget):
         self._axis_items: list = []          # Lab-frame axes overlay on _det_view
         self._last_shape_mismatch_logged: Optional[tuple] = None
         self._last_calib_fail_note: Optional[str] = None
+        # (shape, im_trans) the Detector view is currently framed for — see
+        # _refresh_detector_preview for why the view is only re-framed when
+        # this changes.
+        self._det_view_framed_for: Optional[tuple] = None
         # Built lazily on first switch to Hydra mode: it owns 8 pyqtgraph
         # widgets (4 WaterfallViewer + 4 StackedProfileViewer), and most
         # sessions never touch Hydra Batch Integrate — see .context/DECISIONS.md's
@@ -149,6 +153,11 @@ class BatchTab(QtWidgets.QWidget):
         self._loader.dataChanged.connect(self._refresh_detector_preview)
         self._loader.dataChanged.connect(self._maybe_autofill_output_dir)
         self._loader.fieldsChanged.connect(self._refresh_detector_preview)
+        # "stream" mode's preview frame is fetched off the GUI thread (see
+        # DataLoaderPanel._start_preview_worker) — dataChanged/fieldsChanged
+        # above just kick that background read off; this is what actually
+        # re-draws the Detector view once the real frame lands.
+        self._loader.previewFrameReady.connect(self._refresh_detector_preview)
         self._use_tab2_btn.toggled.connect(self._refresh_detector_preview)
         self._json_ed.textChanged.connect(lambda *_: self._refresh_detector_preview())
         self._use_tab2_btn.toggled.connect(self._update_calib_src_enabled)
@@ -247,8 +256,11 @@ class BatchTab(QtWidgets.QWidget):
         loaded — calibration commonly arrives before data does."""
         # current_frame() already applies dark/bright/background correction
         # to each constituent frame before any "Preview: sum first N"
-        # summing (see DataLoaderPanel._peek_stream_frame) — correcting
-        # again here would double-apply it.
+        # summing (see DataLoaderPanel._start_preview_worker) — correcting
+        # again here would double-apply it. In "stream" mode this may return
+        # a stale (or None) frame immediately while a fresh one is fetched
+        # off the GUI thread in the background — previewFrameReady re-calls
+        # this method once that lands, so the view still ends up current.
         frame = self._loader.current_frame()
         fields, note = self._calib_fields_in_use()
         if frame is not None:
@@ -257,8 +269,22 @@ class BatchTab(QtWidgets.QWidget):
             # see widgets.ImageViewer.set_raw_frame for why every such
             # display goes through that one function instead of each call
             # site flip-then-set_image-ing on its own.
+            # Re-frame the view (and re-level) only when the displayed image
+            # is genuinely different. Every Rmin/Rmax/R-bin/η-bin/Show-bin-grid
+            # control routes through this same refresh, and autoRange() throws
+            # away whatever pan/zoom the user had set — ticking "Show bin grid"
+            # on a zoomed-out view snapped it back to a tight fit, which reads
+            # as the overlay having zoomed the image in. reset_levels would
+            # likewise discard a manual colour-scale window. The Data Viewer
+            # and Calibrate tab already pass autorange=False for refreshes
+            # that aren't new data; this is the same rule, keyed on what
+            # actually changes the picture's extent.
+            codes = tuple((fields or {}).get("im_trans") or ())
+            framed_for = (tuple(frame.shape), codes)
+            fresh = framed_for != self._det_view_framed_for
             self._det_view.set_raw_frame(frame, (fields or {}).get("im_trans"),
-                                          autorange=True, reset_levels=True)
+                                          autorange=fresh, reset_levels=fresh)
+            self._det_view_framed_for = framed_for
         if not fields or fields.get("BC_y") is None or fields.get("NrPixelsY") is None:
             # No visible sign otherwise that the overlay silently isn't being
             # drawn (e.g. "From file" pointing at a saved *project* .json
@@ -568,7 +594,7 @@ class BatchTab(QtWidgets.QWidget):
 
     @staticmethod
     def _collapse_cakes(cakes):
-        """``(n_frames, n_eta, n_r)`` → ``(n_frames, n_r)``, averaging each
+        """``(n_frames, n_eta, n_r)`` → ``(n_frames, n_r)``, taking the mean of
         frame's filled η bins.
 
         The run's *own* collapsed profile is not stored (multi-azimuth mode
@@ -724,7 +750,7 @@ class BatchTab(QtWidgets.QWidget):
             return lbl
 
         # One Form for every label:value row in this card (Kernel through
-        # Azim. avg) — a QGridLayout sizes its label column to the widest
+        # Azim. mean) — a QGridLayout sizes its label column to the widest
         # label added to THAT SAME instance, so splitting R/Q/Eta into
         # separate Form()s (as an earlier pass did) left each section's
         # entry cells starting at a slightly different x depending on its
@@ -749,7 +775,7 @@ class BatchTab(QtWidgets.QWidget):
         #              OUTPUT (see _run()'s "Always R-uniform..." comment) —
         #              not an independent axis.
         #   AZIMUTHAL: η bin/η min/η max live behind "Azimuthal bins…".
-        #              Azim. avg (how η is collapsed to 1-D) and
+        #              Azim. mean (how η is collapsed to 1-D) and
         #              Multi-azimuth output (whether it's collapsed at all)
         #              stay inline — both are about the same η axis. Maps to
         #              a cake_parameters CSV's
@@ -825,13 +851,13 @@ class BatchTab(QtWidgets.QWidget):
             "  coverage / off-detector beam centres and independent of η-bin size.\n"
             "• η-bin mean — unweighted mean of the per-η-bin means (can distort the\n"
             "  profile with a coarse η bin when the beam centre is off the detector).")
-        pf.row(("Azim. avg:", self._azim))
+        pf.row(("Azim. mean:", self._azim))
         integ.body.addLayout(pf)
 
         self._multi_azimuth_chk = QtWidgets.QCheckBox("Multi-azimuth output (cake)")
         self._multi_azimuth_chk.setToolTip(
             "Keep every azimuthal (η) sector as a SEPARATE output profile "
-            "instead of collapsing to one full-circle-averaged profile per "
+            "instead of collapsing to one full-circle mean profile per "
             "frame. Reuses the η bin/η range above to define the sectors.\n\n"
             "Off by default — η bin already defaults to 5° over the full "
             "360° (72 internal bins) purely to control collapse-weighting "
@@ -844,7 +870,7 @@ class BatchTab(QtWidgets.QWidget):
             "it unchecked — that just collapses the sectors to one trivial "
             "360°-wide sector, still written as a (1-row) cake instead of a "
             "plain profile, and HDF5 output is still skipped. For a real "
-            "azimuthally-averaged profile, leave this box unchecked.")
+            "azimuthal-mean profile, leave this box unchecked.")
         integ.body.addWidget(self._multi_azimuth_chk)
 
         self._var_check = QtWidgets.QCheckBox("Per-bin variance (σ)")
@@ -1125,28 +1151,17 @@ class BatchTab(QtWidgets.QWidget):
         self._expid_provider = provider
 
     def _suggest_output_dir(self) -> Optional[Path]:
-        """Best-effort ``<outroot>/<expid>_bc/<file-root>/<detector>/``,
-        mirroring mpe_wf_saxs_waxs's own ``outroot/<expid>_bc/<froot>/
-        <detector>/`` output-folder convention (``~/mnt/<station>/
-        <expid>_bc/<froot>/<detector>/`` — e.g. beamline home
-        ``/home/beams/S20IDUSER`` for 20-ID, ``/home/beams/S1IDUSER`` for
-        1-ID; ``~`` itself is just whatever directory the source path
-        happens to live under, this function never hardcodes it).
+        """Best-effort ``<outroot>/<expid>_bc/<froot>/<detector>/`` off the
+        loaded source path.
 
-        Raw data is read from mpe_wf's fixed ``<outroot>/<expid>/<detector>/
-        <froot>/<files>`` layout — four directories deep counting the
-        file's own containing folder — so ``expid``/``detector``/``outroot``
-        are read *positionally* off the loaded source path rather than
-        asked of the user: the whole point of "Suggest" is to read this off
-        the data that's actually loaded, not require someone to first type
-        the Exp ID into the header field before the button works. (The
-        header's Exp ID field feeds other things — see
-        ``set_expid_provider`` — but is intentionally not required here.)
-        When the source doesn't have that much directory depth (e.g. files
-        sitting directly under a flat folder), falls back to ``<source
-        folder>/<froot>/`` with no detector/expid segments — still correct,
-        just missing the pieces we have no way to locate. Returns ``None``
-        when no source is loaded yet."""
+        The layout parse itself lives in ``helpers.bc_path_parts`` (shared with
+        the Calibrate tab's working-directory suggestion, which composes a
+        different tail from the same parse — see
+        ``helpers.suggest_working_dir``). The header's Exp ID field feeds other
+        things (see ``set_expid_provider``) but is intentionally not required
+        here: the whole point of "Suggest" is to read the convention off the
+        data that's actually loaded. Returns None when no source is loaded.
+        """
         src_cfg = self._loader.source_cfg()
         rep = src_cfg.get("path")
         if not rep:
@@ -1154,37 +1169,8 @@ class BatchTab(QtWidgets.QWidget):
             rep = paths[0] if paths else None
         if not rep:
             return None
-        p = Path(rep)
-        name = p.name
-        if any(c in name for c in "*?["):
-            # A glob pattern ("<folder>/<stem>*"), not a real file — take the
-            # literal prefix before the first wildcard as the stem.
-            import re
-            name = re.split(r"[*?\[]", name, maxsplit=1)[0].rstrip("_-.") or name
-        else:
-            name = p.stem
-        froot, _num, _tag = froot_and_frame_num(name, 0)
-
-        # froot_dir = the folder actually holding the files (often
-        # froot-named itself); its parent is <detector>, and <expid> is one
-        # level above that — mpe_wf's layout puts them at this fixed depth
-        # regardless of what any of these folders happen to be named.
-        froot_dir = p.parent
-        ancestors = froot_dir.parents
-        if len(ancestors) >= 3:
-            detector = ancestors[0].name
-            expid = ancestors[1].name
-            outroot = ancestors[2]
-            return outroot / f"{expid}_bc" / froot / detector
-
-        # Not enough directory depth to locate expid/detector positionally
-        # — fall back to the typed Exp ID header field if there is one,
-        # else just <source folder>/<froot>/. Guard against duplicating
-        # froot when the source folder is itself named after it (the common
-        # "<froot>/<froot>_NNNNNN.tif" layout).
         expid = self._expid_provider().strip() if self._expid_provider else ""
-        root = froot_dir / f"{expid}_bc" if expid else froot_dir
-        return root if root.name == froot else root / froot
+        return suggest_integration_output_dir(rep, expid_fallback=expid)
 
     def _apply_suggested_output_dir(self):
         suggested = self._suggest_output_dir()

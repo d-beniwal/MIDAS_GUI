@@ -22,6 +22,8 @@ import pytest
 
 import h5py
 
+from midas_gui.helpers import SCRATCH_DIRNAME
+
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "test_data" / "gui_synthetic" / "hydra"
 
 # Run each test in this file in its own forked subprocess (pytest-forked):
@@ -226,6 +228,12 @@ def test_hydra_calib_run_orchestration_and_results_switching(app, fixture_availa
     page.set_project_context(project.ProjectContext())
     page._project_ctx.path = proj_path
     _load_and_seed(page, fixture_available)
+    # Pin the working directory rather than leaning on whatever the autofill
+    # ladder derives from the fixture tree — this test is about scratch
+    # separation, not about where the default comes from.
+    work = tmp_path / "wd"
+    work.mkdir()
+    page._out_ed.setText(str(work))
     # The synthetic fixture's ps_ge{1..4}.txt files all share the same
     # nominal BC (128, 128) by design (built for geometry/composite tests,
     # not distinct panel positions) — give each panel a distinct seed BC
@@ -277,6 +285,16 @@ def test_hydra_calib_run_orchestration_and_results_switching(app, fixture_availa
     ok = _pump(app, lambda: not page._workers and not page._pending_panels)
     assert ok, "parallel run did not complete"
     assert all(page._cards[n].result is not None for n in (1, 2, 3, 4))
+    # Four workers in flight against one working directory: every file the
+    # backend writes there is generically named (residual_corr.bin,
+    # calibration.json), so a shared scratch folder is a race. Each panel gets
+    # its own leaf, and all four sit under the one run folder inside
+    # .midas_scratch/ so the run is still deletable as a unit.
+    scratches = {n: Path(page._last_cfgs[n]["scratch_dir"]) for n in (1, 2, 3, 4)}
+    assert len(set(scratches.values())) == 4
+    assert len({d.parent for d in scratches.values()}) == 1
+    assert all(d.parent.parent == work / SCRATCH_DIRNAME
+               for d in scratches.values())
 
     with h5py.File(proj_path, "r") as f:
         for n in (1, 2, 3, 4):

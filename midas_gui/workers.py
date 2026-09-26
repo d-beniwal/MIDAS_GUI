@@ -404,11 +404,11 @@ def write_frame_profiles(base, file_fmts, r_px, prof, sigma, lsd, px, wl,
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  Dark / bright / background field averaging
+#  Dark / bright / background field mean
 # ═════════════════════════════════════════════════════════════════════════════
 
 class FieldAverageWorker(QtCore.QThread):
-    """Average a dark/bright/background field off the GUI thread.
+    """Reduce a dark/bright/background field to its mean off the GUI thread.
 
     kind ∈ {"file","folder","hdf5"}; index range is inclusive (end=-1 → last).
     """
@@ -425,6 +425,69 @@ class FieldAverageWorker(QtCore.QThread):
             field = average_field(self._kind, self._path, self._dataset,
                                   self._start, self._end)
             self.finished.emit(np.asarray(field, dtype=np.float32))
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
+class StreamPreviewWorker(QtCore.QThread):
+    """Fetch and dark/bright/background-correct the "stream"-mode preview sum
+    off the GUI thread — the file-reading half of what
+    ``widgets.DataLoaderPanel._peek_stream_frame`` used to do entirely on the
+    main thread.
+
+    Opens the exact same source the real batch run will use
+    (``_open_source_cfg``), reads ``min(preview_sum_n, n_frames)`` frames,
+    correcting each one BEFORE summing (matching the real run's per-frame
+    correction — correcting only the final sum would subtract just one
+    dark frame's worth from an N-times-larger signal) via the same
+    ``apply_field_corrections`` used everywhere else, not
+    ``DataLoaderPanel.corrected()`` itself — that method also updates each
+    field selector's mismatch-warning label, which is a QWidget mutation and
+    must stay on the GUI thread; the caller re-does that one check itself,
+    once, against this result's shape, in its ``finished`` slot.
+
+    Confirmed necessary against a real hang, not just theoretical: a
+    multi-file VAREX HDF5 source over an NFS-mounted beamline share froze
+    the whole app with no recovery when this ran synchronously (see
+    .context/DECISIONS.md, 2026-09-25) — HDF5's file locking can hang
+    indefinitely on such mounts, not just run slowly, and even with that
+    hang separately fixed (HDF5_USE_FILE_LOCKING=FALSE — see midas_gui/
+    _paths.py), a large multi-frame combine over real network storage can
+    still take long enough that it belongs off the GUI thread regardless.
+    """
+    finished = QtCore.pyqtSignal(object)   # np.ndarray (float32) or None
+    failed   = QtCore.pyqtSignal(str)
+
+    def __init__(self, cfg: dict, preview_sum_n: int,
+                dark=None, bright=None, background=None,
+                bright_mode: str = "divide", parent=None):
+        super().__init__(parent)
+        self._cfg = dict(cfg)
+        self._preview_sum_n = max(1, int(preview_sum_n))
+        self._dark, self._bright, self._background = dark, bright, background
+        self._bright_mode = bright_mode
+
+    def run(self):
+        try:
+            if not (self._cfg.get("path") or self._cfg.get("paths")):
+                self.finished.emit(None)
+                return
+            source = _open_source_cfg(self._cfg)
+            total = getattr(source, "n_frames", 0)
+            if total == 0:
+                self.finished.emit(None)
+                return
+            n = min(self._preview_sum_n, total)
+            acc = None
+            for i in range(n):
+                _fid, img = source.get(i)
+                img = np.asarray(img, dtype=np.float64)
+                if self._dark is not None or self._bright is not None or self._background is not None:
+                    img = apply_field_corrections(
+                        img, dark=self._dark, bright=self._bright,
+                        bright_mode=self._bright_mode, background=self._background)
+                acc = img if acc is None else acc + img
+            self.finished.emit(acc.astype(np.float32))
         except Exception:
             self.failed.emit(traceback.format_exc())
 
@@ -662,7 +725,7 @@ class MaskComputeWorker(QtCore.QThread):
 # ═════════════════════════════════════════════════════════════════════════════
 
 class ProjectionWorker(QtCore.QThread):
-    """Load a frame stack and reduce it (max/sum/average) off the GUI thread.
+    """Load a frame stack and reduce it (max/sum/mean) off the GUI thread.
 
     Loading a multi-GB stack + the reduction can take seconds-to-minutes; doing it
     here keeps the Data Viewer responsive. Field corrections (dark/bright/background)
@@ -692,7 +755,10 @@ class ProjectionWorker(QtCore.QThread):
             if self._nframes and self._nframes > 0:
                 data = data[:self._nframes]
             n_used = data.shape[self._axis]
-            fn = {"max": np.max, "sum": np.sum, "average": np.mean}[self._method]
+            # "average" kept as an alias so an older caller's method string
+            # still resolves; the UI only ever sends "mean".
+            fn = {"max": np.max, "sum": np.sum,
+                  "mean": np.mean, "average": np.mean}[self._method]
             proj = np.squeeze(fn(data, axis=self._axis))
             if proj.ndim != 2:
                 raise ValueError(f"Result is {proj.ndim}-D after projecting axis "
@@ -826,7 +892,8 @@ class CalibrationWorker(QtCore.QThread):
                 pxY=self._cfg["pxY"], pxZ=self._cfg.get("pxZ"),
                 wavelength=self._cfg["wavelength"],
                 panel_layout=self._cfg.get("panel_layout"),
-                output_dir=self._cfg.get("output_dir"))
+                scratch=self._cfg.get("scratch_dir"),
+                stem=self._cfg.get("save_stem", ""))
             result._calibrant_name = self._cfg["calibrant"]
             self.finished.emit(result)
         except Exception:
@@ -1239,6 +1306,21 @@ class BatchWorker(QtCore.QThread):
             mask = (self._mask if not self._im_trans or self._mask is None
                     else _apply_im_trans(self._mask.astype(np.float32), self._im_trans))
 
+            # Say out loud which azimuth the polarization correction is being
+            # applied on. MIDAS η is measured from vertical, so the ring plane
+            # is 90 — a plane of 0 is the one mistake that silently makes a
+            # ring's azimuthal modulation worse instead of removing it, and a
+            # project saved before 2026-09-24 restores the old 0.0 default.
+            pol_mod = (self._corrections or (None, None))[0]
+            if pol_mod is not None:
+                plane = float(getattr(pol_mod, "pol_plane_eta_deg", float("nan")))
+                frac = float(getattr(pol_mod, "pol_fraction", float("nan")))
+                off_plane = not abs(abs(plane) - 90.0) < 1e-6
+                self.log_line.emit(
+                    f"[batch] Polarization: plane η = {plane:g}°, fraction = {frac:g}"
+                    + ("  ← NOT horizontal; η is measured from vertical, so the "
+                       "storage-ring plane is 90°" if off_plane else ""))
+
             if self._context is not None:
                 self.log_line.emit("[batch] Reusing existing detector map…")
                 ctx = self._context
@@ -1320,7 +1402,19 @@ class BatchWorker(QtCore.QThread):
                 from midas_integrate_v2.io.zarr_gsas import write_gsas_zarr_zip
                 zarr_dir = self._out_dir / "zarr"
                 zarr_dir.mkdir(parents=True, exist_ok=True)
-                zarr_bin_area = count_cake(geom, self._kernel, spec.NrPixelsZ, spec.NrPixelsY)
+                # /REtaMap row 3 is documented as the per-bin summed area
+                # weight, "a property of the geometry alone" — so it has to be
+                # the plain-kernel pixel-area count even on the corrections
+                # path, where ctx["geom"] is deliberately None.  corr_counts is
+                # not a substitute: it is normalised through the soft-bin kernel
+                # and folds in the polarization / solid-angle factors, neither
+                # of which belongs in an area.  Build a geometry here purely for
+                # the count, so a Zarr written with corrections on carries the
+                # same BinArea as one written with them off.
+                zarr_geom = (geom if geom is not None
+                             else build_geom(spec, self._kernel, mask))
+                zarr_bin_area = count_cake(zarr_geom, self._kernel,
+                                           spec.NrPixelsZ, spec.NrPixelsY)
                 zarr_prov_entry = provenance.build_entry(
                     'midas_gui.batch_integrate',
                     inputs=[self._src.get('path')] if self._src.get('path') else [],
@@ -1418,13 +1512,14 @@ class BatchWorker(QtCore.QThread):
                     # chunk included, with the frames it covers visible in
                     # the filename.
                     zarr_path = zarr_dir / f"{fid}.ave.zarr.zip"
-                    # Instrument metadata (temperature/pressure/storage-ring
-                    # current), when the source can provide it (HDF5 stacks
-                    # only — see _HDF5StackGlobSource.metadata_for_index) —
-                    # always the mean across this chunk's raw sub-frames,
-                    # regardless of the pixel combine op, and already
-                    # aligned to the light-frame timestamps rather than a
-                    # longer light+dark metadata array.
+                    # Instrument metadata (temperature/pressure/ion-chamber/
+                    # sample-motor positions), when the source can provide it
+                    # (HDF5 stacks only — see
+                    # _HDF5StackGlobSource.metadata_for_index) — always the
+                    # mean across this chunk's raw sub-frames, regardless of
+                    # the pixel combine op, and already aligned to the
+                    # light-frame timestamps rather than a longer
+                    # light+dark metadata array.
                     meta = None
                     get_meta = getattr(source, "metadata_for_index", None)
                     if get_meta is not None:
@@ -1432,22 +1527,47 @@ class BatchWorker(QtCore.QThread):
                             meta = get_meta(abs_i)
                         except Exception:
                             meta = None
-                    temps = pressures = currents = None
+                    temps = pressures = currents = currents_i0 = None
+                    ring_current = sample_motors = None
                     if meta:
                         if meta.get("temperature") is not None:
                             temps = [meta["temperature"]]
                         if meta.get("pressure") is not None:
                             pressures = [meta["pressure"]]
-                        if meta.get("current") is not None:
-                            currents = [meta["current"]]
+                        # Real beam-monitor ion chambers (stopgap per-hutch
+                        # mapping — see _HDF5StackGlobSource._ION_CHAMBER_H5_PATHS)
+                        # go into the writer's own I/I0 slots. Storage-ring
+                        # current is a different quantity entirely — it used
+                        # to be mistakenly written into the "I" slot; it now
+                        # rides along in the provenance entry's `extra`
+                        # instead (below), not in the zarr's own attrs.
+                        if meta.get("ion_chamber_i") is not None:
+                            currents = [meta["ion_chamber_i"]]
+                        if meta.get("ion_chamber_i0") is not None:
+                            currents_i0 = [meta["ion_chamber_i0"]]
+                        ring_current = meta.get("current")
+                        sample_motors = {k[len("motor:"):]: v
+                                        for k, v in meta.items()
+                                        if k.startswith("motor:") and v is not None}
                     try:
                         write_gsas_zarr_zip(
                             zarr_path, [cake_2d], spec=spec,
                             omegas=[float(abs_i)], bin_area=zarr_bin_area,
                             temperatures=temps, pressures=pressures,
-                            currents=currents)
+                            currents=currents, currents_i0=currents_i0)
                         try:
-                            provenance.append_to_zip(zarr_path, zarr_prov_entry)
+                            # Per-frame provenance: the shared zarr_prov_entry
+                            # (built once, run-level) plus whatever per-frame
+                            # environment this specific frame actually had —
+                            # a shallow copy so different frames' entries
+                            # don't share (and silently overwrite) `extra`.
+                            frame_extra = dict(zarr_prov_entry.get("extra") or {})
+                            if ring_current is not None:
+                                frame_extra["storage_ring_current_mA"] = ring_current
+                            if sample_motors:
+                                frame_extra["sample_motors"] = sample_motors
+                            frame_prov_entry = dict(zarr_prov_entry, extra=frame_extra)
+                            provenance.append_to_zip(zarr_path, frame_prov_entry)
                         except Exception:
                             self.log_line.emit(
                                 f"[batch] note: provenance stamp on {zarr_path.name} "
@@ -1672,7 +1792,7 @@ class PumpProbeWorker(QtCore.QThread):
 
     @staticmethod
     def _group_and_difference(profiles, delays, ref_delays):
-        """Average repeats per delay → I_by_delay; subtract the reference (mean over
+        """Take the mean of repeats per delay → I_by_delay; subtract the reference (mean over
         ``ref_delays`` if given, else all negative delays, else the earliest delay)
         → ΔI(q, delay). Returns a dict of stacked arrays keyed by delay order."""
         uniq = sorted(set(delays.tolist()))
@@ -1840,7 +1960,37 @@ class _HDF5StackGlobSource:
     _METADATA_H5_PATHS = {
         "temperature": "instrument/GSAS2_PVS/Temperature",
         "pressure": "instrument/GSAS2_PVS/Pressure",
-        "current": "instrument/StorageRing/SRCurrent",
+        "current": "instrument/StorageRing/SRCurrent",  # storage-ring current (mA) —
+        # NOT a beam monitor; see ion_chamber_i0/i below for the real thing.
+    }
+
+    #: Real beam-monitor ion chambers, by hutch — stopgap mapping, from the
+    #: beamline's own confirmation (cross-checked against
+    #: ~/mnt/s1b/bluesky_dev/mpe_xml/20ide_instr_attributes_trans.xml) rather
+    #: than the HDF5 file's own ``active_instrument`` (documented upstream as
+    #: currently always empty, so it can't be used to pick a hutch). D hutch
+    #: has no transmission monitor yet, hence no "i" entry there. E hutch's
+    #: "i" is itself setup-dependent (a pin diode, "D2PD", when present; a
+    #: dedicated SAXS ion chamber doesn't exist yet) — ``_read_metadata``'s
+    #: existing "path declared but absent in this file" handling already
+    #: degrades that to None gracefully, which doubles as the auto-detect.
+    #: Station A is deliberately excluded: no sample sits in its beam path,
+    #: so its scalers (however I0/I1-suggestive their names) aren't a
+    #: per-sample monitor pair.
+    _ION_CHAMBER_H5_PATHS = {
+        "D": {"ion_chamber_i0": "instrument/Scalers/D/IC2"},
+        "E": {"ion_chamber_i0": "instrument/Scalers/E/US_IC",
+              "ion_chamber_i": "instrument/Scalers/E/D2PD"},
+    }
+
+    #: Sample-motion-system motor groups, by hutch. E hutch has two
+    #: coexisting sub-configs (HL/HR) with no reliable way to tell which is
+    #: physically in use for a given file (same active_instrument gap, one
+    #: level down) — captured both rather than guessing; see
+    #: ``_read_sample_motors``.
+    _SAMPLE_MOTOR_H5_GROUPS = {
+        "D": ["instrument/SMS/D/HR"],
+        "E": ["instrument/SMS/E/HL", "instrument/SMS/E/HR"],
     }
 
     def __init__(self, paths, dataset: str, *, chunk_size=None, op: str = "mean",
@@ -1861,6 +2011,32 @@ class _HDF5StackGlobSource:
         self._counts: Optional[list] = None    # per-file combined-frame count
         self._raw_ns: Optional[list] = None    # per-file raw (pre-combine) sub-frame count
         self._metadata_cache: dict = {}   # path index -> {name: np.ndarray|None}
+        self._hutch = self._resolve_hutch()
+
+    def _resolve_hutch(self) -> Optional[str]:
+        """Stopgap hutch detection: the HDF5 file's own ``active_instrument``
+        is documented as always empty upstream (no reliable per-file signal),
+        so infer it from the source path instead — ``varexE``/``varexD`` in
+        the folder name, case-insensitive, checked against the first
+        selected path. ``None`` (unrecognized layout) means every
+        ion-chamber/sample-motor field below is simply skipped, same as any
+        other "not available for this source" case."""
+        if not self._paths:
+            return None
+        text = str(self._paths[0]).lower()
+        if "varexe" in text:
+            return "E"
+        if "varexd" in text:
+            return "D"
+        return None
+
+    def _metadata_h5_paths(self) -> dict:
+        """Flat ``{key: h5_path}`` table for this source's hutch: the fixed
+        temperature/pressure/current entries plus whichever ion-chamber
+        entries apply (none, for an unrecognized hutch)."""
+        paths = dict(self._METADATA_H5_PATHS)
+        paths.update(self._ION_CHAMBER_H5_PATHS.get(self._hutch, {}))
+        return paths
 
     def _raw_bounds(self, n: int) -> tuple:
         """0-based inclusive ``(lo, hi)`` raw sub-frame bounds within a file
@@ -1989,29 +2165,53 @@ class _HDF5StackGlobSource:
         ``_stat``. Missing datasets/unreadable files come back as ``None``
         per key rather than raising, since not every source has this
         metadata (e.g. a non-VAREX HDF5 schema, or a differently-named
-        instrument group)."""
+        instrument group). Keys prefixed ``motor:`` are per-channel
+        sample-motion-system positions (see ``_read_sample_motors``); every
+        other key is a single scalar-per-acquisition quantity."""
         cached = self._metadata_cache.get(i)
         if cached is not None:
             return cached
-        out = {k: None for k in self._METADATA_H5_PATHS}
+        metadata_h5_paths = self._metadata_h5_paths()
+        out = {k: None for k in metadata_h5_paths}
         try:
             import h5py
             self._ensure_stats()
             n_data = self._raw_ns[i]
             with h5py.File(str(self._paths[i]), "r") as f:
                 n_aligned = self._metadata_frame_count(f, n_data)
-                for key, h5_path in self._METADATA_H5_PATHS.items():
+                for key, h5_path in metadata_h5_paths.items():
                     if h5_path in f:
                         arr = np.asarray(f[h5_path][()], dtype=np.float64)
                         if arr.ndim == 1 and arr.size >= n_aligned:
                             out[key] = arr[:n_aligned]
+                out.update(self._read_sample_motors(f, n_aligned))
         except Exception:
             pass
         self._metadata_cache[i] = out
         return out
 
+    def _read_sample_motors(self, f, n_aligned: int) -> dict:
+        """Every channel under this hutch's sample-motion-system group(s)
+        (``_SAMPLE_MOTOR_H5_GROUPS``), keyed ``"motor:<group-leaf>/<channel>"``
+        (e.g. ``"motor:HR/samX"``) so E hutch's two coexisting sub-configs
+        (HL/HR — no reliable way to tell which is physically in use for a
+        given file, same gap as hutch detection itself) don't collide.
+        Channel names vary between groups (D's HR set differs from E's), so
+        this discovers them from the file rather than hardcoding a list."""
+        out: dict = {}
+        for group_path in self._SAMPLE_MOTOR_H5_GROUPS.get(self._hutch, []):
+            if group_path not in f:
+                continue
+            leaf = group_path.rsplit("/", 1)[-1]
+            group = f[group_path]
+            for channel in group.keys():
+                arr = np.asarray(group[channel][()], dtype=np.float64)
+                if arr.ndim == 1 and arr.size >= n_aligned:
+                    out[f"motor:{leaf}/{channel}"] = arr[:n_aligned]
+        return out
+
     def metadata_for_index(self, idx: int) -> dict:
-        """Chunk-averaged metadata (Temperature/Pressure/StorageRing current)
+        """Chunk-mean metadata (Temperature/Pressure/StorageRing current)
         for combined frame ``idx``, in the same flattened index space as
         ``get(idx)``/``__iter__``.
 

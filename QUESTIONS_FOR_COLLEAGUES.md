@@ -4,7 +4,33 @@ Running log of things to raise about MIDAS_GUI / MIDAS backend behavior.
 
 ---
 
-## 1. Why are the tx/ty/tz initial guesses ignored during calibration?
+## 1. Why are the tx/ty/tz initial guesses ignored during calibration? — **RESOLVED**
+
+**Resolved 2026-09-24 by the backend.** The installed `midas-calibrate-v2` 0.17.0
+exposes `initial_tx`/`initial_ty`/`initial_tz` on `calibrate()`, defaulting to
+`0.0` — exactly the Tier 2 ask below, signature and default included. Nothing in
+the GUI had to change: `calib.tilt_seed_effective()` was deliberately written to
+introspect the installed signature at call time rather than hardcode today's
+answer, so `_supported_kwargs()` now passes the seed through on the plain
+One-shot path and the pre-run "your tilt seed will be dropped" warning stopped
+firing by itself.
+
+Two caveats before treating this as closed for good:
+
+* **Not yet confirmed against a real fit.** That the kwargs are accepted is
+  verified; that a seeded tilt measurably moves the solution is not. Worth one
+  deliberate run with an obviously-wrong tilt seed to confirm the answer shifts.
+* **First-time is still unseeded.** `first_time_calibrate()` never gets a tilt
+  seed from the GUI at all, independent of this fix, and
+  `tilt_seed_effective("first_time")` still returns False. If that pipeline
+  should honour a seed, it is a separate ask.
+
+The original question and its investigation are kept below, unedited, because
+the per-pipeline branch map is still accurate and still the reason
+`tilt_seed_effective()` is shaped the way it is.
+
+### Original question
+
 
 While running a one-shot calibration from the GUI, the log printed:
 
