@@ -20,8 +20,19 @@ diffs their structure.
 A ``<out_path>.provenance.json`` sidecar carries, in addition, the attempt's
 full metadata (params, hashed input paths, environment snapshot, calibration
 snapshot) verbatim plus a few export-specific fields — attempt-level history
-the Batch Integrate path has no equivalent for, and mirroring the
-``.samprm``/``.instprm`` sidecar convention ``G2pwd_MIDAS.py`` already uses.
+the Batch Integrate path has no equivalent for.
+
+That sidecar is for us, not for GSAS-II, and is deliberately invisible to it.
+GSAS-II does read two sidecars, but they are plain text at
+``os.path.splitext(filename)[0]`` — i.e. ``<stem>.zarr.samprm`` and
+``<stem>.zarr.instprm`` — and anything in them OVERRIDES the zip. We write
+neither, so nothing here can perturb a GSAS-II import. Worth knowing if that
+changes: ``.samprm`` is the only route by which sample metadata reaches a
+GSAS-II histogram at all. ``readMidas`` does read ``Temperature``/``Pressure``
+off each ``OmegaSumFrame`` dataset's attrs (which we write), but then assigns
+them into ``sampleprmList``, a list of tuples — a ``TypeError`` swallowed by a
+bare ``except``, so those values are dropped upstream. Its other default worth
+noting: an un-annotated histogram gets ``InstrName = 'APS 1-ID'``.
 
 Scope (v1): single-detector Batch Integrate attempts only, R-uniform binning
 only (a Q-uniform attempt's stored ``r_axis_px`` is Q-rebinned, not a simple
@@ -177,9 +188,10 @@ def export_gsas_zarr(project_path, panel_key: str, attempt_ref: str, out_path) -
 
     # The sidecar stays: it carries the attempt's own metadata (stored params,
     # calibration snapshot, frame ids) that has no equivalent on the Batch
-    # Integrate path, and it mirrors the .samprm/.instprm convention
-    # G2pwd_MIDAS.py already expects. It is an addition to the in-zip entry,
-    # not the place the geometry lives any more.
+    # Integrate path. It is an addition to the in-zip entry, not the place the
+    # geometry lives any more — and it is ours, not GSAS-II's: the sidecars
+    # G2pwd_MIDAS.py reads are <stem>.zarr.samprm/.instprm, which we do not
+    # write. See the module docstring.
     provenance = dict(meta)
     provenance["source_project"] = str(Path(project_path).resolve())
     provenance["panel_key"] = panel_key

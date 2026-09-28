@@ -666,13 +666,20 @@ Data Viewer (inspect) → Mask Builder → Calibrate → [Refine] → Batch Inte
 ```
 
 **Modular tabs.** Data Viewer, Mask Builder, Calibrate and Batch Integrate are always
-shown; the remaining tabs (Calibration Refinement, Corrections, PDF Analysis, Texture,
-Pump Probe, Results & Export) are optional and can be shown/hidden from **Settings ▸
-Preferences ▸ Tabs**. By default only **Calib. Refinement** and **Pump Probe** are
-shown; Corrections, PDF Analysis, Texture and Results & Export ship **hidden** — turn
-them on when you need them. The choice is saved per-user (`ui.visible_tabs`) and applies
-immediately — see §16. Hidden tabs are only removed from the tab bar; they stay
-constructed, so cross-tab wiring and state are preserved.
+shown; the remaining tabs (Calib. Refinement, Batch Queue, Zarr Viewer, Corrections,
+PDF Analysis, Texture, Pump Probe, Results & Export) are optional and can be
+shown/hidden from **Settings ▸ Preferences ▸ Tabs**. By default **Calib. Refinement**,
+**Batch Queue**, **Zarr Viewer** and **Pump Probe** are shown; Corrections, PDF
+Analysis, Texture and Results & Export ship **hidden** — turn them on when you need
+them. The choice is saved per-user (`ui.visible_tabs`) and applies immediately — see
+§16. Hidden tabs are only removed from the tab bar; they stay constructed, so
+cross-tab wiring and state are preserved.
+
+Every optional tab also carries an **✕** on its own label — clicking it is the same
+act as unchecking that tab in Preferences ▸ Tabs, writes the same `ui.visible_tabs`
+key, and sticks across restarts. The four always-on tabs have no ✕. Because closing
+only removes the tab from the bar, a closed tab comes back with its state intact (a
+loaded file, a running queue) when you turn it on again.
 
 **Cross-tab shared state.** When Tab 2 (Calibrate) produces a result it is
 automatically propagated to all downstream tabs. When Tab 1 (Mask Builder) computes
@@ -2730,6 +2737,36 @@ provenance (params, hashed input paths, environment snapshot, calibration
 snapshot) verbatim — attempt-level history the Batch Integrate path has no
 equivalent for, kept alongside rather than inside so the zip's structure
 stays exactly what GSAS-II expects.
+
+**What GSAS-II actually reads** (from its own `G2pwd_MIDAS.py`, checked
+against the current upstream source): the three groups its validator
+requires — `InstrumentParameters`, `REtaMap`, `OmegaSumFrame` — and within
+them only `REtaMap` rows 1/2/3 (2θ, η, bin area, where area == 0 is the
+mask), each `OmegaSumFrame/<k>` array plus its `Number Of Frames Summed` /
+`FirstOme` / `LastOme` / `Temperature` / `Pressure` attrs, and
+`InstrumentParameters/<key>[0]` (with `Polariz`→`Polariz.`, `SH_L`→`SH/L`,
+and `Distance` read as Gonio. radius, µm→mm). We write all of it.
+
+Three things follow that are easy to get wrong:
+
+- **Our `.provenance.json` is invisible to GSAS-II, by design.** GSAS-II does
+  read sidecars, but plain-text ones at `<name>.zarr.samprm` /
+  `<name>.zarr.instprm`, and whatever is in them *overrides* the zip. We
+  write neither, so nothing we put beside a file can perturb an import.
+- **Temperature/Pressure don't currently survive the import**, through no
+  fault of the file: `readMidas` reads them off the attrs and then assigns
+  into a list of tuples, a `TypeError` caught by a bare `except`. `.samprm`
+  is today the only route by which sample metadata reaches a GSAS-II
+  histogram.
+- **GSAS-II defaults `InstrName` to `'APS 1-ID'`**, so an un-annotated 20-ID
+  histogram silently claims the wrong beamline until you set it.
+
+A zarr written elsewhere in the APS toolchain may carry a much larger
+metadata tree (`instrument/GSAS2_PVS/*`, `misc/*`, `Detector/*`,
+`StorageRing/*`). Despite the name, GSAS-II reads none of it — that tree is
+an EPICS PV snapshot the areaDetector plugin writes into the *source HDF5*,
+copied forward by MIDAS's `integrator.py`. See `.context/DECISIONS.md`
+(2026-09-28) for the full comparison.
 
 Single-detector only for v1 (Hydra composite is a possible fast-follow). Not
 yet supported: an attempt run with Q-uniform bins (its stored radial axis is
