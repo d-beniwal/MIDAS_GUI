@@ -9,11 +9,19 @@ rebuild the inputs that writer needs (a spec, a per-frame cake, a bin-area
 array) from ONE attempt already logged in a midas-gui project file — the
 project's append-only attempt history is never touched or exported wholesale.
 
-A ``<out_path>.provenance.json`` sidecar carries the attempt's full metadata
-(params, hashed input paths, environment snapshot, calibration snapshot)
-verbatim, plus a few export-specific fields — mirroring the ``.samprm``/
-``.instprm`` sidecar convention ``G2pwd_MIDAS.py`` already uses, so it adds
-zero risk to the zip's internal structure.
+Layout parity with Batch Integrate is a requirement, not a coincidence: a
+``.zarr.zip`` must read the same way whichever path wrote it. Both call the
+same backend writer, so the arrays and groups match by construction; the
+``provenance_history`` entry in the root attrs — including the
+``instrument_params`` geometry snapshot — is stamped here to match too. See
+``tests/test_zarr_layout_parity.py``, which writes one file by each path and
+diffs their structure.
+
+A ``<out_path>.provenance.json`` sidecar carries, in addition, the attempt's
+full metadata (params, hashed input paths, environment snapshot, calibration
+snapshot) verbatim plus a few export-specific fields — attempt-level history
+the Batch Integrate path has no equivalent for, and mirroring the
+``.samprm``/``.instprm`` sidecar convention ``G2pwd_MIDAS.py`` already uses.
 
 Scope (v1): single-detector Batch Integrate attempts only, R-uniform binning
 only (a Q-uniform attempt's stored ``r_axis_px`` is Q-rebinned, not a simple
@@ -33,6 +41,7 @@ import h5py
 import numpy as np
 
 from midas_gui import project
+from midas_gui import provenance as prov
 from midas_gui.helpers import _build_spec, _apply_im_trans
 from midas_gui.workers import build_integration_context
 
@@ -135,6 +144,42 @@ def export_gsas_zarr(project_path, panel_key: str, attempt_ref: str, out_path) -
                         omegas=[float(i) for i in range(n_frames)],
                         bin_area=bin_area)
 
+    # provenance_history inside the zip, in the same shape Batch Integrate
+    # writes it. Both paths run the same backend writer, so the arrays and
+    # groups already matched; until this, the provenance did not — Batch
+    # Integrate stamped a build_entry() into the root attrs while this path
+    # wrote only the sidecar below, so which path produced a file changed
+    # where (and whether) you could read its geometry back.
+    try:
+        entry = prov.build_entry(
+            'midas_gui.gsas_export',
+            inputs=[str(project_path)],
+            cake_params={
+                'RMin': float(spec.RMin), 'RMax': float(spec.RMax),
+                'RBinSize': float(spec.RBinSize), 'EtaMin': float(spec.EtaMin),
+                'EtaMax': float(spec.EtaMax), 'EtaBinSize': float(spec.EtaBinSize),
+            },
+            instrument_params=prov.instrument_params_from_spec(spec),
+            extra={
+                'kernel': kernel, 'weighted': True,
+                'multi_azimuth': bool(multi_azimuth),
+                'n_frames': int(n_frames),
+                'source_project': str(Path(project_path).resolve()),
+                'panel_key': panel_key, 'attempt_ref': attempt_ref,
+            },
+        )
+        prov.append_to_zip(out_path, entry)
+    except Exception:
+        # Best-effort, exactly as in Batch Integrate: a failed stamp must not
+        # cost the user an export that otherwise succeeded. The sidecar below
+        # is written either way.
+        pass
+
+    # The sidecar stays: it carries the attempt's own metadata (stored params,
+    # calibration snapshot, frame ids) that has no equivalent on the Batch
+    # Integrate path, and it mirrors the .samprm/.instprm convention
+    # G2pwd_MIDAS.py already expects. It is an addition to the in-zip entry,
+    # not the place the geometry lives any more.
     provenance = dict(meta)
     provenance["source_project"] = str(Path(project_path).resolve())
     provenance["panel_key"] = panel_key

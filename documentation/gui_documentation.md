@@ -2238,6 +2238,29 @@ this source" behavior Temperature/Pressure already have. Full per-station
 mapping, and why each simplification was chosen, is in
 `.context/DECISIONS.md`.
 
+**The calibration that produced a zarr is recorded in it.** A `.zarr.zip`
+always contained the geometry, but only *applied* — baked into `REtaMap`'s
+per-bin Radius/2θ/Eta/Q columns, recoverable only by inverting the map. The
+one readable trace was `InstrumentParameters/`, and that holds just
+`Distance` (Lsd) and `Lam`; its other entries (`U`/`V`/`W`, `Polariz`,
+`SH_L`, `X`/`Y`/`Z`) are **GSAS-II peak-profile defaults written by the
+backend, not anything MIDAS refined** — easy to mistake for fit output. The
+`provenance_history` entry now carries an `instrument_params` block with the
+geometry actually used: `Lsd`, `BC_y`/`BC_z`, `tx`/`ty`/`tz`, `pxY`/`pxZ`,
+`NrPixelsY`/`NrPixelsZ`, `Wavelength`, `RhoD`, the `TransOpt` flips, all
+fifteen distortion harmonics (recorded even when zero — "no distortion" is a
+statement worth being able to read back), and, when in use, the panel
+layout and the residual-correction map path.
+
+**Both zarr paths write the same layout.** Batch Integrate's `zarr` format
+and the GSAS-II export (§13) call the same backend writer, so their arrays
+and groups always matched; their provenance did not — the export path used
+to stamp nothing inside the zip, only a sidecar. Both now write an identical
+`provenance_history` entry shape, `instrument_params` included, differing
+only in the `tool` field that names the writer.
+`tests/test_zarr_layout_parity.py` writes a file by each path and diffs
+them, so the two can't drift apart again unnoticed.
+
 Right panel: live **Waterfall** and **Stacked profiles** — both have an **x**
 selector to show the axis in **R (px) / 2θ (°) / Q (Å⁻¹)** (converted from the run's
 calibration). Both plots are bounded to their own data extent (like the main image
@@ -2698,11 +2721,15 @@ zarr file**. Uses `midas_integrate_v2.io.zarr_gsas.write_gsas_zarr_zip`
 directly, so the layout is bit-for-bit what MIDAS's own C integrator
 produces — not a GUI-specific approximation. Works whether the attempt used
 plain (single full-circle profile) or Multi-azimuth (cake) Batch Integrate
-output (§7); degenerates to one azimuth in the plain case. A
+output (§7); degenerates to one azimuth in the plain case. The zip's root
+attrs carry a `provenance_history` entry in exactly the shape Batch
+Integrate writes (§7), `instrument_params` geometry snapshot included, so a
+file reads the same way whichever path produced it. In addition, a
 `<name>.zarr.zip.provenance.json` sidecar carries the attempt's full
 provenance (params, hashed input paths, environment snapshot, calibration
-snapshot) verbatim, alongside — never inside — the zip, so the zip's
-structure stays exactly what GSAS-II expects.
+snapshot) verbatim — attempt-level history the Batch Integrate path has no
+equivalent for, kept alongside rather than inside so the zip's structure
+stays exactly what GSAS-II expects.
 
 Single-detector only for v1 (Hydra composite is a possible fast-follow). Not
 yet supported: an attempt run with Q-uniform bins (its stored radial axis is

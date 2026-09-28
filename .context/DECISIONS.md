@@ -8,6 +8,76 @@ file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this
 date for the full uncondensed entries if ever needed._
 
+## 2026-09-28 — A zarr records the calibration that made it, and both writers agree on layout
+
+Asked where calibration parameters live in a `.zarr.zip`. They did not, in any
+readable form. What a file actually carried:
+
+- `InstrumentParameters/` — `Distance` (Lsd) and `Lam`, and that is all of the
+  fit. Its other entries (`Polariz`, `SH_L`, `U`/`V`/`W`, `X`/`Y`/`Z`) are
+  GSAS-II peak-profile defaults the backend writer emits regardless; on a real
+  file they read `U/V/W = 1.163/-0.126/0.063`, the stock GSAS values. They look
+  like calibration output and are not.
+- `REtaMap` — the full geometry, but *applied*: beam centre, tilts, distortion
+  and pixel size exist only as their effect on each bin's Radius/2θ/Eta/Q.
+  Recovering `tx` means inverting the map.
+- root `provenance_history` — cake params, backend versions, input sha256. No
+  geometry.
+
+So `BC_y`/`BC_z`, `tx`/`ty`/`tz`, `pxY`/`pxZ`, `NrPixelsY`/`NrPixelsZ` and the
+fifteen distortion harmonics were unrecoverable from the file. You could ask
+"what did this calibration do to each bin" but not "what calibration was this".
+
+Fixed by `provenance.instrument_params_from_spec(spec)`, passed to
+`build_entry(instrument_params=...)` at every zarr-writing call site. Three
+choices worth recording:
+
+- **Read off the live spec, not a paramstest file.** `read_instrument_params`
+  already parsed a geometry snapshot from disk, but a file says what someone
+  wrote earlier; the spec is what the integration is about to run with. The
+  new function is its companion, not its replacement.
+- **All fifteen distortion harmonics, always, even at zero.** Fifteen zeros is
+  noise, but an absent key cannot distinguish "no distortion was applied" from
+  "this writer did not record distortion". Zeros are a positive statement.
+  Panel fields and the residual-correction map stay conditional — those really
+  are absent from a plain single-panel geometry rather than zero.
+- **Coerce on the way out.** Geometry comes off `IntegrationSpec` as 0-dim
+  torch tensors, which no JSON attr accepts. `_plain()` handles tensor/array/
+  list and degrades anything unrecognised to `str` rather than raising — a
+  provenance stamp is best-effort and must never fail the write it describes.
+
+### Layout parity is now a tested contract
+
+Follow-on ask: whichever path writes a zarr, the layout must be identical. The
+two paths — `workers.BatchWorker` and `gsas_export.export_gsas_zarr` — call the
+same backend writer, so arrays and groups always matched by construction. The
+provenance did not:
+
+| | Batch Integrate | GSAS export (before) |
+|---|---|---|
+| provenance | `provenance_history` in the root attrs | sidecar `.provenance.json` only |
+| entry shape | real `build_entry()` | bare `dict(meta)` from the attempt |
+
+A file's history therefore lived in a different *place* and a different *shape*
+depending on who wrote it, and the export path's zip was anonymous from the
+inside. `export_gsas_zarr` now stamps a matching `build_entry()` into the zip.
+
+**The sidecar stays.** It was tempting to drop it as redundant, but it carries
+the attempt's own metadata — stored params, calibration snapshot, frame ids —
+which the Batch Integrate path has no equivalent for, and it mirrors the
+`.samprm`/`.instprm` convention `G2pwd_MIDAS.py` already expects. It is an
+addition to the in-zip entry, not the place geometry lives any more.
+
+`tests/test_zarr_layout_parity.py` drives both real writers over one geometry
+and diffs the result: same groups/arrays, same provenance entry key set, same
+`instrument_params`, same per-frame attr keys, differing only in the `tool`
+field that names the writer. Confirmed to fail 7/10 against the pre-change tree
+— a parity test that only ever passed would be worth nothing.
+
+Per-frame `I`/`I0`/`Temperature`/`Pressure` on the Batch path are deliberately
+*not* required of the export path: that is data an HDF5 source has and a logged
+attempt does not, which is a data difference, not a layout one.
+
 ## 2026-09-26 — Batch Integrate: "stride" replaced by "Combine sub-frames" (now applies to HDF5 and TIFF alike)
 
 Consolidated two frame-selection controls that had drifted: `start`/`end`

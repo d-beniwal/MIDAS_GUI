@@ -1423,6 +1423,7 @@ class BatchWorker(QtCore.QThread):
                         'RBinSize': float(spec.RBinSize), 'EtaMin': float(spec.EtaMin),
                         'EtaMax': float(spec.EtaMax), 'EtaBinSize': float(spec.EtaBinSize),
                     },
+                    instrument_params=provenance.instrument_params_from_spec(spec),
                     extra={
                         'kernel': self._kernel, 'weighted': self._weighted,
                         'multi_azimuth': self._multi_azimuth,
@@ -1630,6 +1631,7 @@ class BatchWorker(QtCore.QThread):
                     'RBinSize': float(spec.RBinSize), 'EtaMin': float(spec.EtaMin),
                     'EtaMax': float(spec.EtaMax), 'EtaBinSize': float(spec.EtaBinSize),
                 },
+                instrument_params=provenance.instrument_params_from_spec(spec),
                 extra={
                     'kernel': self._kernel, 'weighted': self._weighted,
                     'multi_azimuth': self._multi_azimuth,
