@@ -8,6 +8,98 @@ file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this
 date for the full uncondensed entries if ever needed._
 
+## 2026-09-28 — The source HDF5's `instrument/` tree is copied into the zarr wholesale
+
+**Question that started it.** "How come other instrument parameters from the
+HDF5 file are not available?" — comparing the Zarr Viewer's tree against the
+source file's much richer one in VS Code.
+
+**Why they were missing.** Not a bug, an architectural consequence. MIDAS's
+own pipeline gets these PVs into its output via an intermediate step:
+`ffGenerateZipRefactor._copy_hdf5_group_to_zarr` builds an "input zarr"
+holding the whole HDF5 tree, and `integrator.py:_enrich_zarr_with_metadata`
+re-copies the parts it wants into the final file. MIDAS_GUI skips that
+intermediate entirely — it reads frames plus six named scalars straight into
+memory and calls `write_gsas_zarr_zip`. That writer has no slot for arbitrary
+metadata: only `instrument_params` (a flat `str→float` that becomes
+`InstrumentParameters/`) and the per-frame `temperatures`/`pressures`/
+`currents`/`currents_i0` lists. So everything else stopped at the HDF5.
+
+**Decided: copy all of `instrument/`, not a curated subset** (user's choice
+from an explicit either/or). Mirrors what `_enrich_zarr_with_metadata` does.
+Measured against the user's real file: `instrument/` is 295 datasets and
+**23.5 KiB**, `active_instrument/` another 5 and 1.2 KiB — negligible against
+a 332 MB source, and it never needs revisiting when the DAQ adds a PV.
+GSAS-II ignores unknown groups (see the entry below), so it cannot affect an
+import. `misc/` is deliberately not copied: it is empty in practice, and its
+one real dataset (`NDArrayTimeStamp`) is *consumed* here rather than
+forwarded. `exchange/`/`NDArray` are the image data, already in the file as
+cakes.
+
+**The alignment rule is ours, not MIDAS's, and this is the part to remember.**
+`_enrich_zarr_with_metadata` decides "is this a per-frame array?" by testing
+`len(arr) == total_frames`. On real 20-ID files **that matches nothing at
+all**: the DAQ records one metadata sample per *acquisition*, lights and darks
+together in one flat array, so a 10-frame scan carries length-20 metadata.
+Copying at raw length would be wrong and averaging on a length match would
+never fire. So the copy takes an explicit `n_aligned` from
+`workers._HDF5StackGlobSource._metadata_frame_count` — the light-block length
+recovered from the timestamp gap, already in use for Temperature/Pressure —
+and matches `size >= n_aligned` against that instead. Anyone porting this
+back upstream, or comparing outputs against a MIDAS-produced file, needs to
+know the two pipelines answer this question differently.
+
+**Decided: the export path reconstructs the same tree from the recorded
+source path** (also the user's explicit choice). `tests/test_zarr_layout_parity.py`
+asserts both writers produce the same layout; a copy on the Batch Integrate
+path alone would have broken that the first time someone exported an
+HDF5-backed attempt. It turned out `project.append_integration_attempt`
+already records `inputs.src_cfg` — paths included — so no new field was
+needed. `gsas_export._source_metadata_snapshot` rebuilds the source through
+`workers._open_source_cfg` rather than reimplementing chunk arithmetic, which
+is the only way to be sure its notion of "which raw sub-frames are behind
+output frame *i*" matches what Batch Integrate already wrote. It returns
+`None` — export proceeds without the tree — for a TIFF attempt, a source
+that has since moved, or frames spanning several HDF5 files, since a single
+snapshot cannot honestly represent two files' PVs and picking one would
+mislabel the rest.
+
+**Measured cost, since it scales with frame count and nobody asked about it
+up front:** about **+0.15 s and +130 KiB per output frame** on a 300-PV tree.
+The bytes are overwhelmingly zarr's per-array bookkeeping (a `.zarray` JSON
+plus a chunk file for each of ~300 length-1 arrays), not the 23.5 KiB of
+actual readings; the time is the repack, since a zip can't be edited in
+place. Negligible on a 10-frame scan, roughly +9 min and +0.5 GB on a
+3600-frame one. Deliberately left with **no opt-out**: the decision was to
+copy the tree, and a switch nobody asked for is a setting to maintain and a
+second behaviour to reason about. If the cost does bite, the cheapest fix
+that keeps the chosen layout is a config key (default on) gating the copy —
+not a different representation, because a single JSON blob in the root attrs
+would be ~1 KiB and instant but would no longer match what MIDAS writes,
+which is the whole point of the choice.
+
+**`provenance.rewrite_zip` was factored out of `append_to_zip`.** A zip-backed
+zarr can't be edited in place, so every after-the-fact change costs a full
+extract/repack. The metadata copy and the provenance stamp are two such
+changes to the same file, per output frame. `rewrite_zip(path, mutate)` hands
+the extracted directory to a callback and `stamp_extracted` is the
+in-directory half of the old function, so the two edits share one pass.
+`append_to_zip` is now a two-line wrapper and its behaviour is unchanged.
+
+**Known limits, recorded so they aren't rediscovered:** `active_instrument` is
+five empty strings in every real file checked (a documented upstream DAQ gap —
+the same one that forces hutch detection to key off `varexE`/`varexD` in the
+source path); `misc` is empty; `Encoders` has no datasets. The copy is
+therefore mostly `instrument/` in practice, and `active_instrument` is
+included on the bet that it starts carrying meaning for free once the DAQ
+fills it in.
+
+**Not done, and worth not forgetting:** mpe_wf's `qa/test_zarr_metadata.py`
+asserts top-level `misc`/`Detector`/`StorageRing` groups in a MIDAS output.
+`_enrich_zarr_with_metadata` does not write those, and `PROVENANCE.md:186`
+concedes that test never runs against a real MIDAS-produced file. Do not
+treat it as a contract this repo has to satisfy.
+
 ## 2026-09-28 — What GSAS-II actually reads from a MIDAS zarr (and why `GSAS2_PVS` is a red herring)
 
 Asked to make our zarr carry full provenance *and* whatever metadata GSAS-II

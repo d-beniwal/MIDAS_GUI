@@ -220,3 +220,71 @@ def test_the_export_sidecar_is_still_written_alongside(tmp_path, app):
     out = _write_via_export(tmp_path, app)
     assert (tmp_path / "export.zarr.zip.provenance.json").exists()
     assert out.exists()
+
+
+# ── The instrument/ tree, which only an HDF5 source has ──────────────────
+
+def test_both_paths_copy_the_same_instrument_tree_from_the_same_hdf5(tmp_path, app):
+    """A TIFF source has no instrument metadata, so the fixtures above can't
+    see this: when the frames *did* come from a detector HDF5, both writers
+    must carry its ``instrument/`` PV snapshot forward, and carry the same
+    one. Batch Integrate has the open source in hand; the export path has to
+    reconstruct it from the attempt's recorded ``src_cfg``, which is the
+    whole reason that gets logged.
+    """
+    pytest.importorskip("torch")
+    pytest.importorskip("h5py")
+    pytest.importorskip("zarr")
+    import midas_gui.workers as wk
+    from midas_gui import project
+    from midas_gui.gsas_export import export_gsas_zarr
+    from midas_gui.helpers import _build_spec
+    from tests.test_h5_metadata_copy import _make_h5
+
+    h5_path = tmp_path / "scan_001.h5"
+    temperature = _make_h5(h5_path, n_light=4, n_dark=4, size=64)
+    src_cfg = {"type": "hdf5_stack_glob", "paths": [str(h5_path)],
+               "dataset": "exchange/data", "chunk_size": None,
+               "combine_op": "mean"}
+
+    spec = _build_spec(project.calibration_namespace(dict(_CALIB)), R_BIN, 360.0)
+    out = tmp_path / "batch_out"
+    worker = wk.BatchWorker(spec, dict(src_cfg), None, out, ["zarr"],
+                            "subpixel2", (None, None), None, multi_azimuth=False)
+    failures = []
+    worker.failed.connect(failures.append)
+    worker.run()
+    assert not failures, failures[0]
+    batch = _open(sorted((out / "zarr").glob("*.zarr.zip"))[0])
+
+    # One frame, so the export's single OmegaSumFrame lines up with the one
+    # combined frame Batch Integrate wrote — same alignment, same averages.
+    proj = str(tmp_path / "proj.h5")
+    project.create_project(proj)
+    n_r = spec.n_r_bins
+    profiles = np.abs(np.random.rand(1, n_r)) + 1.0
+    ref = project.append_integration_attempt(
+        proj, "single",
+        inputs={"kernel": "subpixel2", "r_bin": R_BIN, "e_bin": 360.0,
+                "q_cfg": None, "src_cfg": src_cfg},
+        finished_payload={"n": 1, "profiles": profiles,
+                          "r_axis_px": spec.RMin + spec.RBinSize * (np.arange(n_r) + 0.5),
+                          "sigmas": np.sqrt(profiles), "frame_ids": ["a"],
+                          "aborted": False},
+        calibration_snapshot=dict(_CALIB),
+        extra={"n_eta_bins": 1, "eta_axis_deg": None})
+    export = _open(export_gsas_zarr(proj, "single", ref,
+                                    tmp_path / "export.zarr.zip"))
+
+    def instrument_members(g):
+        return {m for m in _members(g)
+                if m.startswith(("instrument/", "active_instrument/"))}
+
+    assert instrument_members(batch), "Batch Integrate copied no instrument tree"
+    assert instrument_members(batch) == instrument_members(export)
+    # Not just the same skeleton — the same values, averaged over the same
+    # light-frame block (4 lights, not the 8 acquisitions in the file).
+    for g in (batch, export):
+        assert g["instrument/GSAS2_PVS/Temperature"][0] == pytest.approx(
+            temperature[:4].mean())
+        assert g["instrument/HRM/energy"][0] == pytest.approx(71.676)

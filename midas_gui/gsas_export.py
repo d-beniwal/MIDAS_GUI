@@ -51,6 +51,7 @@ from typing import Optional
 import h5py
 import numpy as np
 
+from midas_gui import h5_metadata
 from midas_gui import project
 from midas_gui import provenance as prov
 from midas_gui.helpers import _build_spec, _apply_im_trans
@@ -63,6 +64,50 @@ def _read_embedded_mask(project_path, ref: str) -> Optional[np.ndarray]:
         if grp is None or "mask" not in grp:
             return None
         return grp["mask"][()]
+
+
+def _source_metadata_snapshot(meta: dict, n_frames: int):
+    """The source HDF5's ``instrument/`` tree for an already-logged attempt,
+    aligned to the ``n_frames`` this export is about to write.
+
+    ``None`` whenever there is nothing to copy or no confident way to copy it:
+    a TIFF-backed attempt, an attempt whose recorded source files have since
+    moved, or one whose frames span several HDF5 files (a single snapshot
+    can't honestly represent two files' PVs, and picking one would silently
+    mislabel the rest). Reopening the recorded source is reconstruction after
+    the fact, so it fails quietly and the export goes out without the tree
+    rather than not going out at all.
+
+    Frame alignment is delegated to ``_HDF5StackGlobSource`` rather than
+    recomputed here: rebuilding the source from the same ``src_cfg`` the run
+    used is the only way to be sure this export's notion of "which raw
+    sub-frames are behind output frame i" matches the one Batch Integrate
+    already wrote into the per-frame stores.
+    """
+    src_cfg = ((meta.get("inputs") or {}).get("src_cfg")) or {}
+    if src_cfg.get("type") not in ("hdf5", "hdf5_stack_glob"):
+        return None
+    try:
+        from midas_gui.workers import _open_source_cfg
+        source = _open_source_cfg(dict(src_cfg))
+        get_ctx = getattr(source, "h5_context_for_index", None)
+        if get_ctx is None:
+            return None
+        contexts = [get_ctx(i) for i in range(int(n_frames))]
+    except Exception:
+        return None
+    if not contexts:
+        return None
+    paths = {c["path"] for c in contexts}
+    if len(paths) != 1:
+        return None
+    path = contexts[0]["path"]
+    ranges = [c["frame_ranges"][0] for c in contexts]
+    datasets = h5_metadata.snapshot(path, frame_ranges=ranges,
+                                    n_aligned=contexts[0]["n_aligned"])
+    if not datasets:
+        return None
+    return {"path": path, "datasets": datasets}
 
 
 def export_gsas_zarr(project_path, panel_key: str, attempt_ref: str, out_path) -> Path:
@@ -179,7 +224,22 @@ def export_gsas_zarr(project_path, panel_key: str, attempt_ref: str, out_path) -
                 'panel_key': panel_key, 'attempt_ref': attempt_ref,
             },
         )
-        prov.append_to_zip(out_path, entry)
+        # Batch Integrate copies the source HDF5's instrument/ PV snapshot into
+        # every store it writes; this path copies the same tree from the same
+        # file, so a reader can't tell which writer produced a given archive.
+        # The attempt already records where the frames came from (its
+        # inputs.src_cfg), which is the only reason this is reconstructible
+        # after the fact at all.
+        snap = _source_metadata_snapshot(meta, n_frames)
+        if snap:
+            entry.setdefault('extra', {})['source_h5'] = snap['path']
+
+        def _mutate(extracted, _snap=snap, _e=entry):
+            if _snap:
+                h5_metadata.write_into_extracted(extracted, _snap['datasets'])
+            prov.stamp_extracted(extracted, _e)
+
+        prov.rewrite_zip(out_path, _mutate)
     except Exception:
         # Best-effort, exactly as in Batch Integrate: a failed stamp must not
         # cost the user an export that otherwise succeeded. The sidecar below

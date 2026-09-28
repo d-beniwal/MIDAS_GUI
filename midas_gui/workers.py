@@ -17,6 +17,7 @@ from PyQt5 import QtCore
 
 import midas_gui._paths  # noqa: F401  (sys.path setup before MIDAS imports)
 from midas_gui import calib
+from midas_gui import h5_metadata
 from midas_gui import provenance
 from midas_gui.helpers import (_LogStream, _load_image, _apply_im_trans, _build_spec,
                                _spec_from_json, average_field, apply_field_corrections,
@@ -1398,6 +1399,7 @@ class BatchWorker(QtCore.QThread):
             # Precompute what's shared across every per-frame write once,
             # up front, rather than repeating it per frame.
             zarr_dir = zarr_bin_area = zarr_prov_entry = write_gsas_zarr_zip = None
+            h5_trees: dict = {}   # source path -> its instrument/ tree, read once
             if want_zarr:
                 from midas_integrate_v2.io.zarr_gsas import write_gsas_zarr_zip
                 zarr_dir = self._out_dir / "zarr"
@@ -1528,6 +1530,17 @@ class BatchWorker(QtCore.QThread):
                             meta = get_meta(abs_i)
                         except Exception:
                             meta = None
+                    # Where this frame came from, so the source file's whole
+                    # instrument/ PV snapshot can be copied forward into the
+                    # archive (see h5_metadata). HDF5 stacks only — a TIFF
+                    # source has no such tree and leaves this None.
+                    h5_ctx = None
+                    get_ctx = getattr(source, "h5_context_for_index", None)
+                    if get_ctx is not None:
+                        try:
+                            h5_ctx = get_ctx(abs_i)
+                        except Exception:
+                            h5_ctx = None
                     temps = pressures = currents = currents_i0 = None
                     ring_current = sample_motors = None
                     if meta:
@@ -1567,8 +1580,34 @@ class BatchWorker(QtCore.QThread):
                                 frame_extra["storage_ring_current_mA"] = ring_current
                             if sample_motors:
                                 frame_extra["sample_motors"] = sample_motors
+                            # The instrument/ copy and the provenance stamp are
+                            # two edits to a closed zip, and a zip can't be
+                            # edited in place — so they share one extract /
+                            # repack pass rather than each paying for its own.
+                            snap = {}
+                            if h5_ctx:
+                                frame_extra["source_h5"] = h5_ctx["path"]
+                                # The tree is the same for every frame of a
+                                # given file; only the per-frame averaging
+                                # differs. Read once per file, align per
+                                # frame — a few hundred datasets reopened
+                                # for every output frame would cost more
+                                # than the integration.
+                                tree = h5_trees.get(h5_ctx["path"])
+                                if tree is None:
+                                    tree = h5_metadata.read_tree(h5_ctx["path"])
+                                    h5_trees[h5_ctx["path"]] = tree
+                                snap = h5_metadata.align(
+                                    tree, h5_ctx["frame_ranges"],
+                                    h5_ctx["n_aligned"])
                             frame_prov_entry = dict(zarr_prov_entry, extra=frame_extra)
-                            provenance.append_to_zip(zarr_path, frame_prov_entry)
+
+                            def _mutate(extracted, _snap=snap, _e=frame_prov_entry):
+                                if _snap:
+                                    h5_metadata.write_into_extracted(extracted, _snap)
+                                provenance.stamp_extracted(extracted, _e)
+
+                            provenance.rewrite_zip(zarr_path, _mutate)
                         except Exception:
                             self.log_line.emit(
                                 f"[batch] note: provenance stamp on {zarr_path.name} "
@@ -2013,6 +2052,7 @@ class _HDF5StackGlobSource:
         self._counts: Optional[list] = None    # per-file combined-frame count
         self._raw_ns: Optional[list] = None    # per-file raw (pre-combine) sub-frame count
         self._metadata_cache: dict = {}   # path index -> {name: np.ndarray|None}
+        self._aligned_cache: dict = {}   # path index -> light-frame count
         self._hutch = self._resolve_hutch()
 
     def _resolve_hutch(self) -> Optional[str]:
@@ -2181,6 +2221,7 @@ class _HDF5StackGlobSource:
             n_data = self._raw_ns[i]
             with h5py.File(str(self._paths[i]), "r") as f:
                 n_aligned = self._metadata_frame_count(f, n_data)
+                self._aligned_cache[i] = n_aligned
                 for key, h5_path in metadata_h5_paths.items():
                     if h5_path in f:
                         arr = np.asarray(f[h5_path][()], dtype=np.float64)
@@ -2211,6 +2252,47 @@ class _HDF5StackGlobSource:
                 if arr.ndim == 1 and arr.size >= n_aligned:
                     out[f"motor:{leaf}/{channel}"] = arr[:n_aligned]
         return out
+
+    def _aligned_count(self, i: int) -> int:
+        """How many leading metadata entries in file ``i`` belong to real
+        light frames — ``_metadata_frame_count`` memoised, so callers that
+        only want the alignment (``h5_context_for_index``) don't have to pull
+        the whole per-key metadata dict to get at it."""
+        cached = self._aligned_cache.get(i)
+        if cached is not None:
+            return cached
+        self._ensure_stats()
+        n = self._raw_ns[i]
+        try:
+            import h5py
+            with h5py.File(str(self._paths[i]), "r") as f:
+                n = self._metadata_frame_count(f, n)
+        except Exception:
+            pass
+        self._aligned_cache[i] = n
+        return n
+
+    def h5_context_for_index(self, idx: int) -> dict:
+        """Which source file combined frame ``idx`` came from, and which raw
+        sub-frames of it — everything ``h5_metadata.snapshot`` needs to copy
+        that file's ``instrument/`` tree forward with its per-frame arrays
+        averaged over the right window.
+
+        Separate from ``metadata_for_index`` because that one answers "what
+        were the six named scalars for this frame" (values, already reduced)
+        while this answers "where did this frame come from" (a location), and
+        the bulk copy needs the location.
+        """
+        self._ensure_stats()
+        remaining = idx
+        for i, p in enumerate(self._paths):
+            n_here = self._counts[i]
+            if remaining < n_here:
+                start, end = self._chunk_range(remaining, self._raw_ns[i])
+                return {"path": str(p), "frame_ranges": [(start, end)],
+                        "n_aligned": self._aligned_count(i)}
+            remaining -= n_here
+        raise IndexError(idx)
 
     def metadata_for_index(self, idx: int) -> dict:
         """Chunk-mean metadata (Temperature/Pressure/StorageRing current)

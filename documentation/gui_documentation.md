@@ -2245,6 +2245,44 @@ this source" behavior Temperature/Pressure already have. Full per-station
 mapping, and why each simplification was chosen, is in
 `.context/DECISIONS.md`.
 
+**The source HDF5's instrument metadata comes along.** A VAREX/areaDetector
+file arrives with a few hundred EPICS PVs snapshotted under `instrument/` at
+acquisition time — motor positions, slit gaps, monochromator angles,
+insertion-device gap, every scaler channel. MIDAS's own pipeline carries them
+into its output (`integrator.py:_enrich_zarr_with_metadata`); MIDAS_GUI reads
+frames straight into memory and so used to drop all of them, leaving the
+`.zarr.zip` with only what the backend writer has named slots for. It now
+reopens the source file after the write and copies `instrument/` and
+`active_instrument/` in wholesale — nothing curated, so a PV the DAQ adds
+tomorrow comes along without a code change. A real tree is about 24 KiB,
+negligible against a 300 MB source.
+
+Three things to know about it:
+
+- **HDF5 sources only.** A TIFF stack has no such tree; nothing is copied and
+  nothing is missing.
+- **Per-frame arrays are averaged, not copied raw.** A 1-D array with one
+  entry per acquisition is reduced to one value per output frame, over exactly
+  the raw sub-frames that frame combines. It is aligned to the *light* block,
+  found via the timestamp gap — the DAQ records lights and darks in one flat
+  array, so a 10-frame scan carries length-20 metadata and a naive
+  length-match would blend the dark tail into every average.
+- **GSAS-II never reads any of it.** Its importer looks at
+  `InstrumentParameters`/`REtaMap`/`OmegaSumFrame` and ignores every other
+  group, so this is pure provenance: it cannot perturb an import, and it is
+  not a substitute for one (see §13).
+- **It is not free, and the cost scales with frame count.** Measured on a
+  300-PV tree: about **+0.15 s and +130 KiB per output frame**. The bytes are
+  mostly zarr's own per-array bookkeeping, not the ~24 KiB of readings, and
+  the time is the archive repack — a zip can't be edited in place, so the
+  several hundred extra members have to be written out with it. On a
+  10-frame scan you won't notice; on a 3600-frame one that is roughly nine
+  extra minutes and half a gigabyte across the run.
+
+The GSAS-II export (§13) copies the same tree from the same file, reopening it
+via the source path recorded in the attempt's `inputs.src_cfg`, so which
+writer produced a given archive still isn't visible in its layout.
+
 **The calibration that produced a zarr is recorded in it.** A `.zarr.zip`
 always contained the geometry, but only *applied* — baked into `REtaMap`'s
 per-bin Radius/2θ/Eta/Q columns, recoverable only by inverting the map. The

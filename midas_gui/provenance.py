@@ -141,12 +141,18 @@ def append_to_zarr_group(root, entry: dict) -> None:
 
 # ── Writing into an existing .zarr.zip ─────────────────────────────────
 
-def append_to_zip(zarr_zip_path: str | Path, entry: dict) -> None:
-    """Append ``entry`` to the provenance_history of an existing zip-backed
-    zarr store on disk. Extracts the archive into a temp directory,
-    rewrites .zattrs at the root, then repacks deterministically.
+def rewrite_zip(zarr_zip_path: str | Path, mutate) -> None:
+    """Extract a ``.zarr.zip``, hand the directory to ``mutate``, repack it.
 
-    Atomic on the destination: writes to ``<path>.provtmp`` then renames.
+    A zip-backed zarr store can't be edited in place, so every after-the-fact
+    change to one costs a full extract/repack. ``mutate`` receives the
+    extracted root as a ``Path`` and may do anything it likes to it — stamp
+    provenance, add whole groups — which is the point: a caller with several
+    changes to make pays for one pass instead of one per change.
+
+    Atomic on the destination: writes to ``<path>.provtmp`` then renames, so
+    an interrupted run leaves the original intact rather than a half-written
+    archive.
     """
     path = Path(zarr_zip_path)
     if not path.is_file():
@@ -159,34 +165,54 @@ def append_to_zip(zarr_zip_path: str | Path, entry: dict) -> None:
         with zipfile.ZipFile(path, 'r') as zf:
             zf.extractall(extracted)
 
-        zattrs_path = extracted / '.zattrs'
-        attrs = {}
-        if zattrs_path.is_file():
-            try:
-                with open(zattrs_path) as f:
-                    attrs = json.load(f)
-            except (OSError, json.JSONDecodeError):
-                attrs = {}
-        history = list(attrs.get('provenance_history', []))
-        history.append(entry)
-        attrs['provenance_history'] = history
-        zgroup_path = extracted / '.zgroup'
-        if not zgroup_path.is_file():
-            with open(zgroup_path, 'w') as f:
-                json.dump({'zarr_format': 2}, f)
-        with open(zattrs_path, 'w') as f:
-            json.dump(attrs, f, indent=2)
+        mutate(extracted)
 
         new_zip = path.with_suffix(path.suffix + '.provtmp')
         with zipfile.ZipFile(new_zip, 'w',
                               compression=zipfile.ZIP_DEFLATED,
                               allowZip64=True) as zf:
-            for root_dir, _dirs, files in os.walk(extracted):
-                for fname in files:
+            for root_dir, _dirs, files in sorted(os.walk(extracted)):
+                for fname in sorted(files):
                     abs_path = Path(root_dir) / fname
                     arcname = abs_path.relative_to(extracted).as_posix()
                     zf.write(abs_path, arcname)
         os.replace(new_zip, path)
+
+
+def stamp_extracted(extracted_dir: str | Path, entry: dict) -> None:
+    """Append ``entry`` to the root ``.zattrs`` of an extracted zarr store.
+
+    The in-directory half of :func:`append_to_zip`, split out so it can be
+    composed with other edits inside a single :func:`rewrite_zip` pass.
+    """
+    extracted = Path(extracted_dir)
+    zattrs_path = extracted / '.zattrs'
+    attrs = {}
+    if zattrs_path.is_file():
+        try:
+            with open(zattrs_path) as f:
+                attrs = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            attrs = {}
+    history = list(attrs.get('provenance_history', []))
+    history.append(entry)
+    attrs['provenance_history'] = history
+    zgroup_path = extracted / '.zgroup'
+    if not zgroup_path.is_file():
+        with open(zgroup_path, 'w') as f:
+            json.dump({'zarr_format': 2}, f)
+    with open(zattrs_path, 'w') as f:
+        json.dump(attrs, f, indent=2)
+
+
+def append_to_zip(zarr_zip_path: str | Path, entry: dict) -> None:
+    """Append ``entry`` to the provenance_history of an existing zip-backed
+    zarr store on disk. Extracts the archive into a temp directory,
+    rewrites .zattrs at the root, then repacks deterministically.
+
+    Atomic on the destination: writes to ``<path>.provtmp`` then renames.
+    """
+    rewrite_zip(zarr_zip_path, lambda extracted: stamp_extracted(extracted, entry))
 
 
 # ── Writing into an HDF5 file/group ─────────────────────────────────────
