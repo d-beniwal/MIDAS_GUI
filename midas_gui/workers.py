@@ -18,6 +18,7 @@ from PyQt5 import QtCore
 import midas_gui._paths  # noqa: F401  (sys.path setup before MIDAS imports)
 from midas_gui import calib
 from midas_gui import provenance
+from midas_gui import settings
 from midas_gui.helpers import (_LogStream, _load_image, _apply_im_trans, _build_spec,
                                _spec_from_json, average_field, apply_field_corrections,
                                read_hdf5_stack_combined, load_profile_file)
@@ -153,11 +154,21 @@ def frame_output_base(out_dir, fid, fallback_idx: int, used: set):
 
 def stamp_h5_provenance(h5_path, entry: dict) -> None:
     """Reopen ``h5_path`` (already written by ``midas_integrate_v2.write_h5``)
-    and append a provenance entry to its root attrs. Best-effort: a failure
-    here shouldn't take down an otherwise-successful batch run."""
+    and append a provenance entry to its root attrs (``provenance_history``,
+    the cross-tool JSON-in-attrs convention — see ``provenance.py``), AND
+    mirror the resulting history into a root-level ``provenance_history``
+    *dataset*, so it shows up in a plain ``h5ls``/tree view without needing
+    to inspect attributes — the attrs form is easy to miss (confirmed: it
+    was already there, just invisible to a quick look). Best-effort: a
+    failure here shouldn't take down an otherwise-successful batch run."""
     import h5py
     with h5py.File(str(h5_path), 'a') as h5:
         provenance.append_to_hdf5_attrs(h5, entry)
+        history_json = h5.attrs['provenance_history']
+        if 'provenance_history' in h5:
+            del h5['provenance_history']
+        ds = h5.create_dataset('provenance_history', data=history_json)
+        ds.attrs['format'] = 'JSON list of provenance entries (see midas_gui/provenance.py)'
 
 
 def build_geom(spec, kernel: str, mask):
@@ -1349,6 +1360,19 @@ class BatchWorker(QtCore.QThread):
                         'kernel': self._kernel, 'weighted': self._weighted,
                         'multi_azimuth': self._multi_azimuth,
                         'n_frames': 1, 'frame_range': list(self._frame_range),
+                        # Widen provenance to match what a project attempt
+                        # already records (see .context/DECISIONS.md) — safe
+                        # to embed here since GSAS-II's own reader
+                        # (G2pwd_MIDAS.py) never inspects zarr/HDF5 attrs,
+                        # only the REtaMap/OmegaSumFrame/InstrumentParameters
+                        # sections this entry has nothing to do with.
+                        'calibration_snapshot': self._calibration_snapshot,
+                        'mask_present': self._mask is not None,
+                        'bright_mode': self._bright_mode,
+                        'monitor_file': self._monitor_file,
+                        'q_cfg': self._q_cfg,
+                        'src_cfg': self._src,
+                        'active_profile': settings.active_profile(),
                     },
                 )
 
@@ -1539,6 +1563,18 @@ class BatchWorker(QtCore.QThread):
                     'kernel': self._kernel, 'weighted': self._weighted,
                     'multi_azimuth': self._multi_azimuth,
                     'n_frames': len(all_profiles), 'frame_range': list(self._frame_range),
+                    # Same widening as zarr_prov_entry above — see that
+                    # comment for why this is safe.
+                    'calibration_snapshot': self._calibration_snapshot,
+                    'mask_present': self._mask is not None,
+                    'bright_mode': self._bright_mode,
+                    'monitor_file': self._monitor_file,
+                    'q_cfg': self._q_cfg,
+                    'src_cfg': self._src,
+                    'active_profile': settings.active_profile(),
+                    # Known only now the frame loop has finished — the project's
+                    # own attempt record carries the same field.
+                    'aborted': aborted,
                 },
             )
 
@@ -1561,7 +1597,6 @@ class BatchWorker(QtCore.QThread):
                                               if all_cake_sigmas else None),
                             r_axis=r_ax, eta_axis=eta_ax, frame_ids=frame_ids,
                             spec=spec, bin_area=cake_bin_area,
-                            calibration_snapshot=self._calibration_snapshot,
                             kernel=self._kernel, weighted=self._weighted,
                             cake_params={
                                 'RMin': float(spec.RMin), 'RMax': float(spec.RMax),
@@ -1570,6 +1605,9 @@ class BatchWorker(QtCore.QThread):
                                 'EtaBinSize': float(spec.EtaBinSize),
                             })
                         try:
+                            # out_paths is only fully known here (every zarr
+                            # sibling from this run, plus this h5's own path).
+                            prov_entry['extra']['out_paths'] = out_paths + [str(h5_path)]
                             stamp_h5_provenance(h5_path, prov_entry)
                         except Exception:
                             self.log_line.emit(
@@ -1589,6 +1627,7 @@ class BatchWorker(QtCore.QThread):
                                frame_ids=frame_ids,
                                sigmas=np.array(all_sigmas))
                     try:
+                        prov_entry['extra']['out_paths'] = out_paths + [str(h5_path)]
                         stamp_h5_provenance(h5_path, prov_entry)
                     except Exception:
                         self.log_line.emit(
@@ -2386,7 +2425,9 @@ def write_all_profiles(out_dir, fmts, r_axis, profiles, sigmas, frame_ids,
         try:
             entry = provenance.build_entry(
                 'midas_gui.batch_integrate.save',
-                extra={'n_frames': len(frame_ids)})
+                extra={'n_frames': len(frame_ids),
+                      'calibration_snapshot': calibration_snapshot,
+                      'active_profile': settings.active_profile()})
             stamp_h5_provenance(h5_path, entry)
         except Exception:
             pass   # best-effort — a failed stamp shouldn't fail the save
@@ -2402,11 +2443,15 @@ def write_all_profiles(out_dir, fmts, r_axis, profiles, sigmas, frame_ids,
                 write_cake_h5(
                     h5_path, cake=profiles, cake_sigma=sigmas, r_axis=r_axis,
                     eta_axis=eta_axis, frame_ids=frame_ids, spec=spec,
-                    bin_area=bin_area, calibration_snapshot=calibration_snapshot,
-                    kernel=kernel, weighted=weighted, cake_params=cake_params)
+                    bin_area=bin_area, kernel=kernel, weighted=weighted,
+                    cake_params=cake_params)
                 entry = provenance.build_entry(
                     'midas_gui.batch_integrate.save',
-                    extra={'n_frames': len(frame_ids), 'multi_azimuth': True})
+                    extra={'n_frames': len(frame_ids), 'multi_azimuth': True,
+                          'calibration_snapshot': calibration_snapshot,
+                          'kernel': kernel, 'weighted': weighted,
+                          'cake_params': cake_params,
+                          'active_profile': settings.active_profile()})
                 stamp_h5_provenance(h5_path, entry)
                 out_paths.append(str(h5_path))
             except Exception:

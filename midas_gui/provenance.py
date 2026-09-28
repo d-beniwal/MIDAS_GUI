@@ -172,12 +172,15 @@ def append_to_hdf5_attrs(h5_group, entry: dict) -> None:
     h5py attrs don't support a native list-of-dict, so the history is kept
     as a JSON string (matching mpe_wf_saxs_waxs's repair_hdf5_frames.py
     precedent, generalized from one entry to an appended list for
-    consistency with the zarr side above).
+    consistency with the zarr side above). Indented (``indent=2``, matching
+    ``project.py``'s own ``metadata`` dataset) rather than one compact line —
+    a single unbroken line is unreadable in an HDF5 viewer's string preview
+    (confirmed with VS Code's H5Web).
     """
     raw = h5_group.attrs.get('provenance_history')
     history = json.loads(raw) if raw else []
     history.append(entry)
-    h5_group.attrs['provenance_history'] = json.dumps(history, default=str)
+    h5_group.attrs['provenance_history'] = json.dumps(history, indent=2, default=str)
 
 
 # ── Configuration snapshot parser ──────────────────────────────────────
