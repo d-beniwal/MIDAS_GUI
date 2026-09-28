@@ -2009,6 +2009,24 @@ def full_calibration_snapshot(calib_result, use_file: bool, file_path: str, *,
     return {**full, **fields}, note
 
 
+def collapse_cake_eta(cakes) -> np.ndarray:
+    """``(n_frames, n_eta, n_r)`` → ``(n_frames, n_r)``, averaging each
+    frame's filled eta bins.
+
+    Shared by ``tab_batch.BatchTab._collapse_cakes`` (reconstructing a
+    profile for the Waterfall/Stacked-profiles views, since multi-azimuth
+    mode keeps the cake instead of the run's own collapsed profile) and
+    ``cake_hdf5.write_cake_h5``'s fallback when no real engine-collapsed
+    profile is available. Exact-zero bins are unfilled eta/R coverage rather
+    than measured zeros — the same convention ``CakeViewer``'s auto-levelling
+    uses — so they're excluded from the mean instead of dragging it toward
+    zero. It is an approximation of the engine's count-weighted collapse,
+    not a reproduction of it."""
+    arr = np.asarray(cakes, dtype=np.float64)
+    filled = (arr != 0).sum(axis=1)
+    return arr.sum(axis=1) / np.maximum(filled, 1)
+
+
 def render_calib_value_grid(grid: "QtWidgets.QGridLayout", note_label: "QtWidgets.QLabel",
                             fields: Optional[dict], note: str) -> None:
     """Populate a read-only 2-column key/value grid of calibration-geometry

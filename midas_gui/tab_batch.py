@@ -23,6 +23,7 @@ from midas_gui.constants import (KERNELS, ERROR_MODELS,
 from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_file,
                                geometry_fields_from_file,
                                resolve_calibration_fields, full_calibration_snapshot,
+                               collapse_cake_eta,
                                make_calib_values_button,
                                rmax_corner_px, rmax_edge_px, draw_polar_bin_overlay,
                                _NoScrollSpinBox, _NoScrollComboBox,
@@ -141,6 +142,9 @@ class BatchTab(QtWidgets.QWidget):
         self._last_run_fields: dict = {}
         self._last_results: Optional[dict] = None   # for the Save button — see _on_done
         self._last_axis_ctx: Optional[tuple] = None  # (lsd, px, wl) for the Save button
+        self._last_spec = None       # IntegrationSpec for the Save button — see _save_results
+        self._last_kernel = None
+        self._last_weighted = None
         self._last_run_out_dir: Optional[str] = None  # set in _run() — see _on_done
         self._expid_provider = None  # () -> str, wired by app.py's MainWindow — see set_expid_provider
         self._project_ctx: Optional[project.ProjectContext] = None
@@ -569,18 +573,9 @@ class BatchTab(QtWidgets.QWidget):
     @staticmethod
     def _collapse_cakes(cakes):
         """``(n_frames, n_eta, n_r)`` → ``(n_frames, n_r)``, averaging each
-        frame's filled η bins.
-
-        The run's *own* collapsed profile is not stored (multi-azimuth mode
-        keeps the cake instead), so this reconstructs one for the Waterfall /
-        Stacked-profiles views. Exact-zero bins are unfilled η/R coverage
-        rather than measured zeros — the same convention ``CakeViewer``'s
-        auto-levelling uses — so they're excluded from the mean instead of
-        dragging it toward zero. It is an approximation of the engine's
-        count-weighted collapse, not a reproduction of it."""
-        arr = np.asarray(cakes, dtype=np.float64)
-        filled = (arr != 0).sum(axis=1)
-        return arr.sum(axis=1) / np.maximum(filled, 1)
+        frame's filled η bins — see ``helpers.collapse_cake_eta`` (shared
+        with ``cake_hdf5.write_cake_h5``'s own fallback)."""
+        return collapse_cake_eta(cakes)
 
     def _on_job_done(self, job) -> None:
         """``JobQueuePanel``'s ``on_job_done`` callback: a background
@@ -1321,11 +1316,23 @@ class BatchTab(QtWidgets.QWidget):
             "multi_azimuth": multi_azimuth,
         }
         self._last_axis_ctx = (lsd, px, wl)
+        # Stashed for the Save button, which runs long after this method
+        # returns and has no other way to recover the geometry/kernel this
+        # run used (needed for cake_hdf5.write_cake_h5 on a multi-azimuth
+        # save — see _save_results).
+        self._last_spec = spec
+        self._last_kernel = kernel
+        self._last_weighted = weighted
         mask = self._loader.composite_mask()
         self._last_run_fields = {
             "mask": mask,
             "mask_is_file_backed": mask is not None and not self._loader.has_live_mask_source(),
         }
+        # The whole calibration, not just the display subset — an integration
+        # attempt's provenance already embeds this (see _log_to_project); the
+        # cake HDF5 writer embeds the same snapshot directly in the file.
+        calib_snapshot, _calib_note = full_calibration_snapshot(
+            self._calib_result, self._use_json_btn.isChecked(), self._json_ed.text())
 
         self._worker = BatchRunCoordinator(
             spec, src_cfg, self._loader.composite_mask(), out_dir, fmts, kernel,
@@ -1334,7 +1341,7 @@ class BatchTab(QtWidgets.QWidget):
             drift_traj=drift_traj, parent=self,
             dark=dark, bright=bright, background=background, bright_mode=bright_mode,
             weighted=weighted, context=context, im_trans=self._resolved_im_trans(),
-            multi_azimuth=multi_azimuth,
+            multi_azimuth=multi_azimuth, calibration_snapshot=calib_snapshot,
             run_mode=self._run_mode.currentData(), n_workers=self._n_workers.value())
         self._worker.progress.connect(self._on_progress)
         self._worker.frame_done.connect(self._on_frame)
@@ -1687,12 +1694,30 @@ class BatchTab(QtWidgets.QWidget):
                 "checked; re-run with that (or an Output folder + 2D CSV "
                 "checked) to get that format.")
         lsd, px, wl = self._last_axis_ctx
+        # Available whenever a run actually produced these results (see
+        # _start_batch's stashing) — geometry for cake_hdf5.write_cake_h5 on
+        # a multi-azimuth save. BinArea is left unpopulated here (no cheap
+        # geometry rebuild post-run); everything else is full-fidelity.
+        last_spec = self._last_spec
+        cake_params = None
+        if last_spec is not None:
+            cake_params = {
+                'RMin': float(last_spec.RMin), 'RMax': float(last_spec.RMax),
+                'RBinSize': float(last_spec.RBinSize),
+                'EtaMin': float(last_spec.EtaMin), 'EtaMax': float(last_spec.EtaMax),
+                'EtaBinSize': float(last_spec.EtaBinSize),
+            }
+        calib_snapshot, _calib_note = full_calibration_snapshot(
+            self._calib_result, self._use_json_btn.isChecked(), self._json_ed.text())
         try:
             paths = write_all_profiles(
                 out_dir, fmts, self._last_results["r_axis_px"],
                 self._last_results["profiles"], self._last_results["sigmas"],
                 self._last_results["frame_ids"], lsd, px, wl,
-                eta_axis=self._last_results.get("eta_axis"))
+                eta_axis=self._last_results.get("eta_axis"),
+                spec=last_spec, calibration_snapshot=calib_snapshot,
+                kernel=self._last_kernel, weighted=self._last_weighted,
+                cake_params=cake_params)
         except Exception as e:
             show_error(self, "Save failed", str(e), log=self._log, log_prefix="\nERROR:\n")
             return

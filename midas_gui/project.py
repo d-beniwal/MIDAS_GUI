@@ -391,7 +391,11 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _json_default(obj):
+def json_default(obj):
+    """``json.dumps(..., default=...)`` handler for the numpy/Path/set values
+    that show up in calibration results and other GUI state — shared with
+    ``cake_hdf5.py`` so a stamped calibration snapshot uses the same
+    JSON-safety guarantee as project files."""
     if isinstance(obj, np.integer):
         return int(obj)
     if isinstance(obj, np.floating):
@@ -403,6 +407,9 @@ def _json_default(obj):
     if isinstance(obj, Path):
         return str(obj)
     return str(obj)
+
+
+_json_default = json_default   # back-compat alias for existing call sites
 
 
 def _hash_paths_in(obj):
