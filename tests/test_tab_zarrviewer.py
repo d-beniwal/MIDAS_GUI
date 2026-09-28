@@ -104,14 +104,17 @@ def test_zarr_viewer_is_visible_by_default_but_still_an_optional_tab():
     assert "Zarr Viewer" in _shipped_visible_tabs()
 
 
-def test_zarr_viewer_shows_up_with_default_visibility_next_to_batch_integrate(app):
+def test_zarr_viewer_shows_up_with_default_visibility_after_batch_queue(app):
+    """Last in the shipped run of tabs, right after Batch Queue — you queue
+    the integrations, then you open what they wrote. It sat after Batch
+    Integrate until b9fba11 moved it one place later."""
     import midas_gui.app as app_mod
     win = app_mod.MainWindow()
     win.apply_tab_visibility(_shipped_visible_tabs())
     names = [win.centralWidget().tabText(i) for i in range(win.centralWidget().count())]
     assert any(n.endswith("Zarr Viewer") for n in names)
-    batch_idx = next(i for i, n in enumerate(names) if n.endswith("Batch Integrate"))
-    assert names[batch_idx + 1].endswith("Zarr Viewer")
+    queue_idx = next(i for i, n in enumerate(names) if n.endswith("Batch Queue"))
+    assert names[queue_idx + 1].endswith("Zarr Viewer")
 
 
 def test_zarr_viewer_can_still_be_hidden_like_any_optional_tab(app):
