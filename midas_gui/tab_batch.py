@@ -29,6 +29,7 @@ from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_
                                widgets_to_dict, apply_dict_to_widgets,
                                check_output_dir_writable,
                                suggest_integration_output_dir,
+                               suggest_working_dir, bc_path_parts,
                                browse_start_dir, warn_if_path_missing)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, DataLoaderPanel, OutputFormatSelector,
@@ -40,7 +41,7 @@ from midas_gui.dialogs import show_error
 from midas_gui.hydra_widgets import HydraModeRibbon
 from midas_gui.hydra_batch_page import HydraBatchPage
 from midas_gui.job_queue import JobQueuePanel
-from midas_gui.cake_params import parse_cake_csv
+from midas_gui.cake_params import parse_cake_csv, write_cake_csv
 from midas_gui import project
 from midas_gui import settings
 from midas_gui import style as S
@@ -113,6 +114,163 @@ class _AzimuthalBinsDialog(QtWidgets.QDialog):
         v.addWidget(btns)
 
 
+class _CakeParamsDialog(QtWidgets.QDialog):
+    """Every column of an mpe_wf_saxs_waxs ``cake_parameters`` CSV in one
+    place, with Load and Save — the counterpart of that project's own
+    cake-parameter window (``archive/gui_config_cake_params.py``), whose file
+    format ``cake_params.parse_cake_csv``/``write_cake_csv`` read and write.
+
+    The same values are also reachable from "R bins…", "Azimuthal bins…" and
+    the loader's Combine sub-frames, and those stay: mid-run you want the one
+    axis you are adjusting, not all nine. This is the other view — the file as
+    a file.
+
+    Unlike those two dialogs, this one keeps its OWN spinboxes and copies
+    values in and out. They can host the tab's real widgets because each such
+    widget appears in exactly one of them; a widget has one parent, so adding
+    ``_r_min`` here as well would silently reparent it out of
+    ``_RadialBinsDialog``. Copying also gives Apply something to mean: open
+    this, try numbers, close, and the next run is untouched.
+    """
+
+    # (CSV key, row label, BatchTab attribute). OME_SUM is the exception —
+    # it lives on the loader, not the tab, so _target() resolves it by hand.
+    SPEC = (
+        ("R_MIN",     "R_MIN  (R min)",                "_r_min"),
+        ("R_MAX",     "R_MAX  (R max)",                "_r_max"),
+        ("R_STEP",    "R_STEP  (R bin)",               "_r_bin"),
+        ("ETA_MIN",   "ETA_MIN  (η min)",              "_eta_min"),
+        ("ETA_MAX",   "ETA_MAX  (η max)",              "_eta_max"),
+        ("ETA_STEP",  "ETA_STEP  (η bin)",             "_e_bin"),
+        ("OME_SUM",   "OME_SUM  (Combine sub-frames)", None),
+        ("OME_START", "OME_START  (not applied)",      "_ome_start"),
+        ("OME_STEP",  "OME_STEP  (not applied)",       "_ome_step"),
+    )
+
+    def __init__(self, tab, parent=None):
+        super().__init__(parent or tab)
+        self._tab = tab
+        self.setWindowTitle("Cake parameters")
+        v = QtWidgets.QVBoxLayout(self)
+        note = QtWidgets.QLabel(
+            "The nine columns of an mpe_wf cake_parameters CSV. The first "
+            "seven are this tab's own R/η binning plus the loader's Combine "
+            "sub-frames, gathered here — editing them here or in "
+            "'R bins…'/'Azimuthal bins…' is the same setting either way. "
+            "OME_START/OME_STEP are omega-series bookkeeping for mpe_wf's "
+            "integration backend and have no equivalent in this pipeline: "
+            "they are carried through load and save so a file round-trips "
+            "intact, and applied to nothing.")
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color:{S.MUTED};font-size:10px;padding-bottom:4px")
+        v.addWidget(note)
+
+        self._spins: dict = {}
+        form = S.Form()
+        for key, label, _attr in self.SPEC:
+            spin = self._mirror(self._target(key))
+            self._spins[key] = spin
+            form.row((label + ":", spin))
+        v.addLayout(form)
+
+        btns = QtWidgets.QDialogButtonBox()
+        load_btn = btns.addButton("Load CSV…", QtWidgets.QDialogButtonBox.ActionRole)
+        save_btn = btns.addButton("Save CSV…", QtWidgets.QDialogButtonBox.ActionRole)
+        apply_btn = btns.addButton(QtWidgets.QDialogButtonBox.Apply)
+        close_btn = btns.addButton(QtWidgets.QDialogButtonBox.Close)
+        load_btn.setToolTip("Read a cake_parameters CSV into these fields "
+                            "(header row + last data row).")
+        save_btn.setToolTip("Write these nine values as a cake_parameters CSV, "
+                            "in the layout mpe_wf's own tools read.")
+        load_btn.clicked.connect(self._on_load)
+        save_btn.clicked.connect(self._on_save)
+        apply_btn.clicked.connect(self.apply_to_tab)
+        close_btn.clicked.connect(self.accept)
+        v.addWidget(btns)
+
+    # ── which widget each key really lives in ──────────────────────────
+    def _target(self, key):
+        """The tab widget this key is a view of, or None when there isn't one
+        — OME_SUM needs a loader with a Combine sub-frames spin, which not
+        every source mode has."""
+        if key == "OME_SUM":
+            return getattr(self._tab._loader, "_combine_chunk", None)
+        attr = next((a for k, _l, a in self.SPEC if k == key), None)
+        return getattr(self._tab, attr, None) if attr else None
+
+    @staticmethod
+    def _mirror(target):
+        """A spinbox matching the range and precision of the field it stands
+        in for, so this dialog can't accept a value the tab would silently
+        clamp on the way back."""
+        if isinstance(target, QtWidgets.QSpinBox):
+            s = _NoScrollSpinBox()
+            s.setRange(target.minimum(), target.maximum())
+            s.setSingleStep(target.singleStep())
+            s.setSuffix(target.suffix())
+            return s
+        s = _fspin(-1e9, 1e9, 4, 0.0)
+        if isinstance(target, QtWidgets.QDoubleSpinBox):
+            s.setRange(target.minimum(), target.maximum())
+            s.setDecimals(target.decimals())
+            s.setSuffix(target.suffix())
+        return s
+
+    # ── copy in / copy out ─────────────────────────────────────────────
+    def load_from_tab(self) -> None:
+        for key, spin in self._spins.items():
+            target = self._target(key)
+            if target is not None:
+                spin.setValue(target.value())
+            # A key with nowhere to go is shown greyed rather than hidden —
+            # it is still a column this dialog will write.
+            spin.setEnabled(target is not None)
+
+    def apply_to_tab(self) -> None:
+        for key, spin in self._spins.items():
+            target = self._target(key)
+            if target is None:
+                continue
+            if isinstance(target, QtWidgets.QSpinBox):
+                target.setValue(int(round(spin.value())))
+            else:
+                target.setValue(float(spin.value()))
+        self._tab._refresh_cake_summary()
+
+    def values(self) -> dict:
+        return {k: float(s.value()) for k, s in self._spins.items()}
+
+    def showEvent(self, ev):
+        # Re-read every time rather than once at construction: the fields move
+        # from the two bins dialogs, a project restore, or an Rmax auto-fill.
+        self.load_from_tab()
+        super().showEvent(ev)
+
+    # ── the two file buttons ───────────────────────────────────────────
+    def _on_load(self) -> None:
+        # Deliberately the tab's own loader, so the dialog's Load and the
+        # pre-existing code path are one function with one set of rules.
+        self._tab._load_cake_csv()
+        self.load_from_tab()
+
+    def _on_save(self) -> None:
+        # Apply first: a file that disagrees with the tab it was saved from is
+        # worse than no file at all.
+        self.apply_to_tab()
+        default = self._tab._suggest_cake_csv_path()
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save cake parameters CSV", str(default), "CSV (*.csv);;All (*)")
+        if not path:
+            return
+        try:
+            write_cake_csv(path, self.values())
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(
+                self, "Cake CSV", f"Could not write:\n{path}\n\n{e}")
+            return
+        self._tab._log.append(f"[batch] Saved cake parameters to {path}")
+
+
 class BatchTab(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -147,6 +305,7 @@ class BatchTab(QtWidgets.QWidget):
         self._last_axis_ctx: Optional[tuple] = None  # (lsd, px, wl) for the Save button
         self._last_run_out_dir: Optional[str] = None  # set in _run() — see _on_done
         self._expid_provider = None  # () -> str, wired by app.py's MainWindow — see set_expid_provider
+        self._cake_dialog = None  # built on first use — see _open_cake_params_dialog
         self._project_ctx: Optional[project.ProjectContext] = None
         self._build_ui()
         self._loader.monitorToggled.connect(self._toggle_monitor)
@@ -220,8 +379,13 @@ class BatchTab(QtWidgets.QWidget):
         """"Load cake parameters CSV…" button — applies R_MIN/R_MAX/R_STEP/
         ETA_MIN/ETA_MAX/ETA_STEP/OME_SUM from an mpe_wf_saxs_waxs-style
         cake_parameters CSV (see cake_params.parse_cake_csv) to the matching
-        fields. OME_START/OME_STEP have no equivalent in this pipeline and
-        are intentionally not applied to anything (see the button's tooltip)."""
+        fields. OME_START/OME_STEP have no equivalent in this pipeline; they
+        land in the two invisible spins so a file can be re-saved intact, and
+        are applied to nothing (see the button's tooltip).
+
+        Reached both from ``_CakeParamsDialog``'s Load button and, before that
+        dialog existed, directly from the calibration card — one function, so
+        both routes obey the same rules."""
         path = _browse(self, "Open cake parameters CSV", "CSV (*.csv);;All (*)")
         if not path:
             return
@@ -252,8 +416,69 @@ class BatchTab(QtWidgets.QWidget):
         if "OME_SUM" in values and hasattr(self._loader, "_combine_chunk"):
             self._loader._combine_chunk.setValue(int(values["OME_SUM"]))
             applied.append(f"OME_SUM={int(values['OME_SUM'])} -> Combine sub-frames")
+        if "OME_START" in values:
+            self._ome_start.setValue(values["OME_START"])
+            applied.append(f"OME_START={values['OME_START']:g} (carried, not applied)")
+        if "OME_STEP" in values:
+            self._ome_step.setValue(values["OME_STEP"])
+            applied.append(f"OME_STEP={values['OME_STEP']:g} (carried, not applied)")
         self._log.append(f"[batch] Loaded cake parameters from {path}: {', '.join(applied) or '(nothing recognized)'}")
         self._refresh_cake_summary()
+
+    def _open_cake_params_dialog(self) -> None:
+        """"Cake parameters…" — built on first use and kept, like the two bins
+        dialogs, so it holds its position on screen between openings. It
+        re-reads the tab in ``showEvent``, so a stale instance can't show
+        stale numbers."""
+        if self._cake_dialog is None:
+            self._cake_dialog = _CakeParamsDialog(self, parent=self)
+        self._cake_dialog.show()
+        self._cake_dialog.raise_()
+        self._cake_dialog.activateWindow()
+
+    def _suggest_cake_csv_path(self) -> Path:
+        """Where a cake_parameters CSV would go if the mpe_wf convention were
+        followed — ``<expid>_bc/cake_parameters.<beamline>.<detector>.csv``.
+
+        A *suggestion* for the Save-As dialog, nothing more. mpe_wf's own
+        editor writes this path silently, but it runs as ``S20IDUSER`` and we
+        do not; putting the same path in a file dialog shows the user where
+        their file is about to land in a shared beamline tree before it lands
+        there. Pure path arithmetic — nothing is created here.
+
+        ``suggest_working_dir`` rather than ``suggest_integration_output_dir``
+        because the CSV belongs to the analysis root, not to one scan's
+        per-detector output folder, and because it recognises a ``_bc``
+        directory the data already sits in (see its docstring). Falls back
+        through the Output directory field and the source folder to the home
+        directory, so this always returns somewhere the dialog can open.
+        """
+        src_cfg = self._loader.source_cfg()
+        rep = src_cfg.get("path")
+        if not rep:
+            paths = src_cfg.get("paths") or []
+            rep = paths[0] if paths else None
+        expid = self._expid_provider().strip() if self._expid_provider else ""
+        parts = bc_path_parts(rep, expid_fallback=expid) if rep else None
+        detector = (parts.detector if parts and parts.detector else "detector")
+        # mpe_wf spells the beamline with neither dashes nor case: 20-ID-E is
+        # "20ide" in its DETECTORS_BY_BEAMLINE and in every filename it writes.
+        beamline = settings.active_profile().lower().replace("-", "")
+        # Every candidate is checked for existence, and the ladder ends at
+        # home. The positional derivation inside bc_path_parts is correct for
+        # the full mpe_wf layout and invents a plausible-looking sibling for
+        # anything shallower, and the Output directory field is a suggestion
+        # that may not have been created yet either; opening the save dialog
+        # on a path nobody has made, inside a shared beamline tree, invites
+        # creating it by accident.
+        candidates = [
+            suggest_working_dir(rep, expid_fallback=expid) if rep else None,
+            browse_start_dir(self._out_ed.text(), fallback="") or None,
+            Path(rep).parent if rep else None,
+        ]
+        directory = next((Path(c) for c in candidates
+                          if c and Path(c).is_dir()), Path.home())
+        return directory / f"cake_parameters.{beamline}.{detector}.csv"
 
     def _cake_summary_text(self) -> str:
         """One line carrying every value a cake_parameters CSV can set, read
@@ -466,6 +691,9 @@ class BatchTab(QtWidgets.QWidget):
             "r_max": self._r_max,
             "eta_min": self._eta_min,
             "eta_max": self._eta_max,
+            # Invisible, and applied to nothing — see where they're built.
+            "ome_start": self._ome_start,
+            "ome_step": self._ome_step,
             "grid_chk": self._grid_chk,
             "lab_axes_chk": self._lab_axes_chk,
             "preview_sum_n": self._preview_sum_n,
@@ -770,16 +998,17 @@ class BatchTab(QtWidgets.QWidget):
         # the same fields — see helpers.make_calib_values_button.
         calib_view_btn = make_calib_values_button(self._calib_fields_in_use)
         cal.body.addWidget(calib_view_btn, 0, QtCore.Qt.AlignLeft)
-        cake_csv_btn = QtWidgets.QPushButton("Load cake parameters CSV…")
+        cake_csv_btn = QtWidgets.QPushButton("Cake parameters…")
         cake_csv_btn.setToolTip(
-            "Load R_MIN/R_MAX/R_STEP/ETA_MIN/ETA_MAX/ETA_STEP/OME_SUM from a "
-            "cake_parameters CSV (mpe_wf_saxs_waxs convention — header row + "
-            "last data row wins) into the fields below. OME_SUM fills the "
-            "loader's 'Combine sub-frames' chunk size (only meaningful for a "
-            "multi-file HDF5 source). OME_START/OME_STEP are omega-series "
-            "bookkeeping for a different integration backend and have no "
-            "equivalent here — not applied to anything.")
-        cake_csv_btn.clicked.connect(self._load_cake_csv)
+            "Show all nine cake_parameters columns "
+            "(R_MIN/R_MAX/R_STEP/ETA_MIN/ETA_MAX/ETA_STEP/OME_SUM/OME_START/"
+            "OME_STEP) in one editor, and load or save them as an "
+            "mpe_wf_saxs_waxs-style CSV. OME_SUM is the loader's 'Combine "
+            "sub-frames' chunk size (only meaningful for a multi-file HDF5 "
+            "source). OME_START/OME_STEP are omega-series bookkeeping for a "
+            "different integration backend and have no equivalent here — "
+            "carried through load and save, applied to nothing.")
+        cake_csv_btn.clicked.connect(self._open_cake_params_dialog)
         cal.body.addWidget(cake_csv_btn, 0, QtCore.Qt.AlignLeft)
         # The cake parameters themselves are behind two popups and the loader
         # card; this is the only place all of them are visible at once, and
@@ -790,7 +1019,8 @@ class BatchTab(QtWidgets.QWidget):
         self._cake_lbl.setToolTip(
             "The cake parameters currently in force, wherever they came from "
             "(CSV, typed by hand, restored with a project, or auto-filled). "
-            "Edit them in 'R bins…' / 'Azimuthal bins…' below.")
+            "Edit them all together in 'Cake parameters…' above, or one axis "
+            "at a time in 'R bins…' / 'Azimuthal bins…' below.")
         cal.body.addWidget(self._cake_lbl)
         lv.addWidget(cal)
 
@@ -892,6 +1122,17 @@ class BatchTab(QtWidgets.QWidget):
             w.valueChanged.connect(self._refresh_detector_preview)
         self._azim_bins_dialog = _AzimuthalBinsDialog(
             self._e_bin, self._eta_min, self._eta_max, parent=self)
+        # Not dead widgets, and deliberately in no layout: OME_START/OME_STEP
+        # are two of the nine columns an mpe_wf cake_parameters CSV must carry
+        # (its reader rejects a missing or empty one), but they drive mpe_wf's
+        # own integration backend and have no counterpart in
+        # midas_integrate_v2's IntegrationSpec. Holding them in spinboxes
+        # rather than plain floats is what lets _state_widgets() round-trip
+        # them through Save/Load GUI State for free, and gives
+        # _CakeParamsDialog a real range to mirror. Only that dialog shows
+        # them. See cake_params.py's module docstring.
+        self._ome_start = _fspin(-1e6, 1e6, 4, 0.0)
+        self._ome_step = _fspin(-1e6, 1e6, 4, 0.0)
         for _w in (self._r_min, self._r_max, self._r_bin, self._eta_min,
                    self._eta_max, self._e_bin, self._q_min, self._q_max,
                    self._q_bin):

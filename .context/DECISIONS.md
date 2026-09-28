@@ -8,6 +8,56 @@ file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this
 date for the full uncondensed entries if ever needed._
 
+## 2026-09-28 — Cake parameters get one editor that mirrors, not one that hosts
+
+**Question that started it.** "It will be good to have the ability to change
+the integration / caking parameters and save (like the mpe_wf gui)." Batch
+Integrate could already *read* an mpe_wf `cake_parameters` CSV, but could not
+write one, and the nine values it carries were scattered across three places:
+R behind `R bins…`, η behind `Azimuthal bins…`, `OME_SUM` over on the loader
+card, and `OME_START`/`OME_STEP` parsed then discarded.
+
+**Why `_CakeParamsDialog` copies values instead of hosting the tab's widgets.**
+`_RadialBinsDialog` and `_AzimuthalBinsDialog` each *contain* the real
+spinboxes — `_r_min` genuinely lives inside the radial dialog's layout. That
+works only because each of those widgets has exactly one home; a widget has
+one parent, so adding `_r_min` to a third dialog's layout would silently
+reparent it out of `_RadialBinsDialog`, and the R bins popup would come up
+empty. So the new dialog keeps its own spinboxes and copies in on `showEvent`
+and out on Apply. That constraint turned out to be a feature: Apply now means
+something, and you can open the editor, try numbers, and close without having
+touched the next run. The mirrors copy their target's range, decimals and
+suffix so the dialog can't accept a value the tab would silently clamp.
+
+**Why `OME_START`/`OME_STEP` are invisible widgets rather than plain floats.**
+They drive mpe_wf's integration backend and have no counterpart in
+`midas_integrate_v2`'s `IntegrationSpec`, so they are applied to nothing —
+but mpe_wf's reader rejects a missing or empty column, so a CSV we write has
+to carry them. Holding them in two `_fspin`s that are in no layout means
+`_state_widgets()` round-trips them through Save/Load GUI State for free, and
+gives the dialog a real range to mirror, with no new persistence code. They
+are the sort of thing a later reader deletes as dead widgets, so the comment
+where they're built says why they exist.
+
+**Why Save does not reproduce mpe_wf's silent write.** mpe_wf's editor writes
+straight to `/home/beams/S20IDUSER/mnt/s20a/<expid>_bc/cake_parameters.<bl>.<det>.csv`
+with no prompt. It can, because it runs as `S20IDUSER`; this GUI runs as
+whoever launched it, into the same shared beamline tree. So the same path is
+*suggested* in a Save-As dialog instead — and only when that directory already
+exists. `bc_path_parts`'s positional derivation is right for the full four-deep
+mpe_wf layout and invents a plausible-looking sibling for anything shallower
+(the failure `helpers.suggest_working_dir` documents); seeding a save dialog on
+a path nobody has made, inside a shared tree, invites creating it by accident.
+The ladder falls back through the Output directory field and the source folder
+to `Path.home()`, all existence-checked.
+
+**Scope.** Deliberately the nine cake keys and nothing else — kernel,
+corrections and output formats already round-trip through Save/Load GUI State.
+Keeping the file to mpe_wf's exact nine columns is the whole point:
+`tests/test_provenance.py` asserts a plain `csv.DictReader` (what their tools
+use) sees exactly `CAKE_KEYS` in order, because our own reader is lenient
+enough that reading our own file back would prove nothing.
+
 ## 2026-09-28 — The source HDF5's `instrument/` tree is copied into the zarr wholesale
 
 **Question that started it.** "How come other instrument parameters from the
