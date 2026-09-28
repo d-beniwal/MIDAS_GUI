@@ -232,21 +232,68 @@ class BatchTab(QtWidgets.QWidget):
             return
         applied = []
         if "R_MIN" in values:
-            self._r_min.setValue(values["R_MIN"]); applied.append("R_MIN")
+            self._r_min.setValue(values["R_MIN"])
+            applied.append(f"R_MIN={values['R_MIN']:g}")
         if "R_MAX" in values:
-            self._r_max.setValue(values["R_MAX"]); applied.append("R_MAX")
+            self._r_max.setValue(values["R_MAX"])
+            applied.append(f"R_MAX={values['R_MAX']:g}")
         if "R_STEP" in values:
-            self._r_bin.setValue(values["R_STEP"]); applied.append("R_STEP")
+            self._r_bin.setValue(values["R_STEP"])
+            applied.append(f"R_STEP={values['R_STEP']:g}")
         if "ETA_MIN" in values:
-            self._eta_min.setValue(values["ETA_MIN"]); applied.append("ETA_MIN")
+            self._eta_min.setValue(values["ETA_MIN"])
+            applied.append(f"ETA_MIN={values['ETA_MIN']:g}")
         if "ETA_MAX" in values:
-            self._eta_max.setValue(values["ETA_MAX"]); applied.append("ETA_MAX")
+            self._eta_max.setValue(values["ETA_MAX"])
+            applied.append(f"ETA_MAX={values['ETA_MAX']:g}")
         if "ETA_STEP" in values:
-            self._e_bin.setValue(values["ETA_STEP"]); applied.append("ETA_STEP")
+            self._e_bin.setValue(values["ETA_STEP"])
+            applied.append(f"ETA_STEP={values['ETA_STEP']:g}")
         if "OME_SUM" in values and hasattr(self._loader, "_combine_chunk"):
             self._loader._combine_chunk.setValue(int(values["OME_SUM"]))
-            applied.append("OME_SUM -> Combine sub-frames")
+            applied.append(f"OME_SUM={int(values['OME_SUM'])} -> Combine sub-frames")
         self._log.append(f"[batch] Loaded cake parameters from {path}: {', '.join(applied) or '(nothing recognized)'}")
+        self._refresh_cake_summary()
+
+    def _cake_summary_text(self) -> str:
+        """One line carrying every value a cake_parameters CSV can set, read
+        back off the widgets that actually hold them.
+
+        Those fields live behind the "R bins…"/"Azimuthal bins…" popups and,
+        for OME_SUM, over in the loader card, so after a CSV load there was
+        nowhere to see at a glance what had landed. This is that glance. It
+        reads the widgets rather than the CSV on purpose: it is then equally
+        true for values typed by hand, restored from a project, or auto-filled
+        (Rmax) once a calibration resolves — "currently loaded", not "last
+        imported"."""
+        rmax = self._r_max.value()
+        parts = [
+            f"R {self._r_min.value():g}–{'auto' if rmax <= 0 else format(rmax, 'g')} px"
+            f"  ΔR {self._r_bin.value():g} px",
+            f"η {self._eta_min.value():g}…{self._eta_max.value():g}°"
+            f"  Δη {self._e_bin.value():g}°",
+        ]
+        if self._q_mode_active():
+            parts.append(f"Q out {self._q_min.value():g}–{self._q_max.value():g}"
+                         f"  ΔQ {self._q_bin.value():g} Å⁻¹")
+        chunk = getattr(self._loader, "_combine_chunk", None)
+        if chunk is not None and int(chunk.value()) > 1:
+            parts.append(f"sum {int(chunk.value())} sub-frames")
+        return "   ".join(parts)
+
+    def _refresh_cake_summary(self, *_args) -> None:
+        """Keep the cake-parameter summary label in step with the fields.
+
+        Best-effort: this is wired to a lot of signals, some of which can fire
+        while the tab is still being built, and a summary label is never worth
+        taking the tab down for."""
+        lbl = getattr(self, "_cake_lbl", None)
+        if lbl is None:
+            return
+        try:
+            lbl.setText(self._cake_summary_text())
+        except Exception:
+            pass
 
     def _refresh_detector_preview(self, *_args) -> None:
         """Refresh the Detector-view tab's frame + Rmin/Rmax/bin-grid overlay —
@@ -734,6 +781,17 @@ class BatchTab(QtWidgets.QWidget):
             "equivalent here — not applied to anything.")
         cake_csv_btn.clicked.connect(self._load_cake_csv)
         cal.body.addWidget(cake_csv_btn, 0, QtCore.Qt.AlignLeft)
+        # The cake parameters themselves are behind two popups and the loader
+        # card; this is the only place all of them are visible at once, and
+        # the only feedback that a CSV load actually changed anything.
+        self._cake_lbl = QtWidgets.QLabel()
+        self._cake_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        self._cake_lbl.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self._cake_lbl.setToolTip(
+            "The cake parameters currently in force, wherever they came from "
+            "(CSV, typed by hand, restored with a project, or auto-filled). "
+            "Edit them in 'R bins…' / 'Azimuthal bins…' below.")
+        cal.body.addWidget(self._cake_lbl)
         lv.addWidget(cal)
 
         # ── Integration ──
@@ -834,6 +892,15 @@ class BatchTab(QtWidgets.QWidget):
             w.valueChanged.connect(self._refresh_detector_preview)
         self._azim_bins_dialog = _AzimuthalBinsDialog(
             self._e_bin, self._eta_min, self._eta_max, parent=self)
+        for _w in (self._r_min, self._r_max, self._r_bin, self._eta_min,
+                   self._eta_max, self._e_bin, self._q_min, self._q_max,
+                   self._q_bin):
+            _w.valueChanged.connect(self._refresh_cake_summary)
+        self._bin_type.currentIndexChanged.connect(self._refresh_cake_summary)
+        _chunk = getattr(self._loader, "_combine_chunk", None)
+        if _chunk is not None:
+            _chunk.valueChanged.connect(self._refresh_cake_summary)
+        self._refresh_cake_summary()
 
         pf.full(_section_label("AZIMUTHAL"))
         self._azim_bins_btn = QtWidgets.QPushButton("Azimuthal bins…")
