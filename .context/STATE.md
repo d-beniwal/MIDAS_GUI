@@ -1,19 +1,26 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-09-28 (✕-to-close on optional tabs; the real GSAS-II
-zarr contract written down; the source HDF5's whole `instrument/` PV tree
-now copied into every zarr both writers produce)_
+_Last updated: 2026-09-29 (OME_START/OME_STEP become a real per-frame ω in
+the zarr and the combined HDF5; `main` pushed to `origin`; two new upstream
+commits waiting to be merged)_
 
 ## Now working on
 
-**Merging upstream `44a0aa1..b25d7e0` on `merge/upstream-2026-09-23`.** All
-conflicts resolved; which side won where is in DECISIONS 2026-09-23. Upstream
-had also reworked the Refine card, so the reconciliation is semantic rather
-than textual: upstream's `_resolve_seed` in, this fork's interleaved limits
-grid in, upstream's `_limits_host`/`_limits_na_lbl` block out, and this fork's
-distortion-subset reroute out (`refine_distortion` takes a `Sequence[str]`, so
-the reroute cost STAGE-1 for nothing).
+**Syncing with the canonical `d-beniwal/MIDAS_GUI`.** The
+`44a0aa1..b25d7e0` merge has landed on `main` (DECISIONS 2026-09-23 records
+which side won where, and why that reconciliation was semantic rather than
+textual). Upstream has since added two commits, both dated 2026-09-28 and both
+in Batch Integrate:
+
+- `31e904c` — multi-azimuth HDF5 (cake) output.
+- `61feeb3` — simplified cake HDF5 layout, 2θ/d/Q axes, wider provenance.
+
+They land on exactly the code the omega work below just rewrote (`workers.py`'s
+combined-HDF5 writer and its `extra_datasets`, `tab_batch.py`'s two run sites),
+so expect another semantic reconciliation. Nothing fetched into a working
+branch yet — `main` is **37 ahead / 2 behind** `upstream/main`, and in sync
+with `origin/main`.
 
 Open follow-ups, none blocking:
 - `documentation/calibration_unification_plan.md` — the three Calibrate UI
@@ -35,6 +42,51 @@ Open follow-ups, none blocking:
   `git fetch origin 'refs/pull/*/head:refs/remotes/origin/pr/*'`.
 
 ## Recently completed
+
+**2026-09-29 — Omega: a real rotation angle on every frame, and in the
+zarr.** `1117cc1`, pushed to `origin/main` along with the eight commits that
+had been sitting local (the 2026-09-28 entry below said "nothing pushed"; that
+is no longer true).
+
+- The cake CSV's `OME_START`/`OME_STEP` stop being carried-and-ignored. One
+  formula covers every case — `ω = OME_START + mean(raw sub-frame indices of
+  the frame) × OME_STEP` — which reduces exactly to mpe_wf's own
+  `ome_start + (idx*ome_sum + (ome_sum−1)/2)*ome_step`, and to the mean of the
+  collapsed window when the loader combined everything into one frame.
+  `cake_params.omega_for_window`/`omega_series` own it.
+- The raw indices are **global across the run**, from new
+  `raw_window_for_index` methods on `_HDF5StackGlobSource` and
+  `_ChunkCombinedFileSource` (sources without one fall back to `(i, i)`), so
+  Batch-Parallel chunks agree on ω.
+- Two new inputs in the Cake parameters dialog, outside the nine CSV columns:
+  an editable **omega channel** combo (blank = the computed ramp; populated
+  from the loaded HDF5 by new `helpers.list_h5_1d_datasets`) and an
+  **averaged/summed** override that gives every frame the one run-wide mean.
+- Where it lands: the zarr's `/Omegas` (both writers), the combined HDF5's
+  `omegas` dataset, the attempt record (`results/omegas`), and the Save button's
+  `integrated.h5`. The export path *stores* rather than recomputes, and tags
+  the provenance entry with `omega_source` = recorded / recomputed from
+  `omega_cfg` / unavailable.
+- **Behaviour change:** `/Omegas` used to hold the frame index labelled as
+  degrees. An unconfigured run now writes `[0.0, 0.0, …]` — a stationary sample
+  really is at ω = 0, and that is a better wrong answer than an index.
+  Deliberate; see DECISIONS 2026-09-29.
+- `PoleFigureWorker` was left alone — making it ω-aware across a series is the
+  next piece, and now has a correct angle to stand on.
+
+**Verified:** full suite 1073 passed / 2 failed, both the known pre-existing
+pair (`test_pva_live_source_roundtrip`, `test_apply_project_calibration_single_detector`);
+48 new tests across five files, one new (`tests/test_omega_windows.py`), and a
+re-run of the ten files touched after that suite started (190 passed). Offscreen
+check confirmed the summary line, the dialog round trip, and `SPEC` still being
+exactly `CAKE_KEYS`. Note `test_app_builds_offscreen`, which CLAUDE.md lists as
+a third known failure, passed both times here — its tab-count assertion depends
+on the active profile's tab set, so CLAUDE.md was left as-is rather than
+rewritten off two green runs.
+**Not verified with eyes on it:** still no live X11 session. Wants a real 20-ID
+rotation scan — load its cake CSV, confirm `OME_START`/`OME_STEP` no longer
+read "not applied", run a short batch with zarr on, check `/Omegas` in the Zarr
+Viewer, then tick the override and confirm every frame reports the one angle.
 
 **2026-09-28 — The source HDF5's `instrument/` tree reaches the zarr; an ✕
 closes any optional tab.** Three commits, all local, nothing pushed.
