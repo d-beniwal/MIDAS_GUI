@@ -189,11 +189,15 @@ def main(argv=None) -> int:
     from PyQt5 import QtWidgets
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([sys.argv[0]])
 
-    from midas_gui.helpers import spec_from_geometry_file
+    from midas_gui.helpers import spec_from_geometry_file, full_calibration_snapshot
     from midas_gui.workers import BatchWorker
 
     spec = spec_from_geometry_file(args.calib_file, args.r_bin, args.eta_bin,
                                    r_min=args.r_min, r_max=args.r_max)
+    # (None, True, path) is the "file-only, no live CalibrationResult" call
+    # pattern full_calibration_snapshot already supports (it builds a
+    # duck-typed result via helpers.result_ns_from_geometry_file itself).
+    calib_snapshot, _calib_note = full_calibration_snapshot(None, True, args.calib_file)
     src_cfg = _source_cfg(args)
     mask = _load_field(args.mask)
     if mask is not None:
@@ -215,7 +219,7 @@ def main(argv=None) -> int:
         monitor_file=args.monitor_file,
         dark=dark, bright=bright, background=background, bright_mode=args.bright_mode,
         weighted=args.weighted, multi_azimuth=args.multi_azimuth,
-        im_trans=tuple(spec.TransOpt or ()))
+        im_trans=tuple(spec.TransOpt or ()), calibration_snapshot=calib_snapshot)
 
     exit_code = [0]
 

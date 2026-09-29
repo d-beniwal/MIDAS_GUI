@@ -264,3 +264,46 @@ def test_the_combined_hdf5_carries_the_omegas_alongside_the_profiles(app, in_dir
     with h5py.File(h5_path, "r") as f:
         key = next(k for k in f if k.lower() == "omegas")
         np.testing.assert_allclose(np.asarray(f[key]).ravel(), [1.0, 3.0, 5.0])
+
+
+def test_the_cake_hdf5_carries_the_omegas_too(app, in_dir):
+    """Multi-azimuth mode writes ``cake_hdf5.write_cake_h5`` instead of
+    ``midas_integrate_v2.write_h5`` (upstream's cake layout), and a pole
+    figure over a rotation series reads that file — so the angle has to be
+    in it, not only in the 1-D sibling."""
+    h5py = pytest.importorskip("h5py")
+    out = in_dir / "out"
+    _run(app, in_dir, ["h5"], multi_azimuth=True, n_frames=3, out_dir=out,
+         omega_cfg={"start": 1.0, "step": 2.0, "channel": "",
+                    "collapse": False})
+    h5_path = next((out / "h5").glob("*.h5"))
+    with h5py.File(h5_path, "r") as f:
+        assert f["cake"].ndim == 3, "not the cake layout"
+        np.testing.assert_allclose(np.asarray(f["omegas"]), [1.0, 3.0, 5.0])
+        assert f["omegas"].attrs["units"] == "degree"
+
+
+def test_the_cake_hdf5_survives_physics_corrections(app, in_dir):
+    """The corrections path leaves ``ctx["geom"]`` None on purpose, and the
+    cake HDF5's BinArea is computed from a geometry — handing that None
+    straight to ``count_cake`` is the same ``AttributeError`` the zarr branch
+    already had to be fixed for (see
+    ``test_zarr_survives_physics_corrections_and_keeps_the_same_bin_area``).
+    A geometry is built for the count, so the area is there either way."""
+    h5py = pytest.importorskip("h5py")
+    from midas_integrate_v2 import PolarizationCorrection, SolidAngleCorrection
+
+    def _area(out, corrections):
+        _run(app, in_dir, ["h5"], multi_azimuth=True, n_frames=1, out_dir=out,
+             corrections=corrections)
+        with h5py.File(next((out / "h5").glob("*.h5")), "r") as f:
+            return np.asarray(f["bin_area"])
+
+    on = _area(in_dir / "out_corr",
+               (PolarizationCorrection(pol_fraction=0.99,
+                                       pol_plane_eta_deg=0.0),
+                SolidAngleCorrection()))
+    off = _area(in_dir / "out_plain", (None, None))
+
+    assert np.any(on > 0), "bin_area came out empty"
+    np.testing.assert_array_equal(on, off)

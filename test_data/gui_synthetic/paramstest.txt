@@ -1,0 +1,33 @@
+Lsd 121001.586672
+BC 9.997914 9.990216
+tx 0.000000
+ty 0.001872
+tz -0.004168
+p0 0
+p1 0
+p2 0
+p3 0
+p4 0
+p5 0
+p6 0
+p7 0
+p8 0
+p9 0
+p10 0
+p11 0
+p12 0
+p13 0
+p14 0
+Parallax 0.000000
+Wavelength 0.390000
+px 75.000000
+NrPixelsY 1028
+NrPixelsZ 512
+RhoD 1135.051572
+SpaceGroup 225
+LatticeConstant 5.411600 5.411600 5.411600 90.000000 90.000000 90.000000
+RBinSize 0.25
+EtaBinSize 5
+RMin 0.000000
+RMax 15.134021
+MaxRingRad 1101.000024

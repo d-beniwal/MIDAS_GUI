@@ -806,6 +806,29 @@ def native_axis_to_r_px(x, x_kind: str, lsd_um: float, px_um: float,
     return (lsd_um / px_um) * np.tan(two_theta)
 
 
+def radial_axes_from_r_px(r_px, lsd_um: float, px_um: float,
+                          wavelength_A: Optional[float] = None) -> dict:
+    """Forward-convert a detector-pixel radial axis into 2θ/d/Q — the
+    algebraic inverse of :func:`native_axis_to_r_px`, and the same formulas
+    as ``widgets._convert_radial``'s R-native branch, so the numbers agree
+    with what the rest of the GUI already calls "2θ"/"d"/"Q" for the same
+    geometry. Used by ``cake_hdf5.write_cake_h5`` to store companion axes
+    alongside ``r_px``.
+
+    Always returns ``"two_theta_deg"``; ``"d_angstrom"``/``"q_invA"`` are
+    only added when ``wavelength_A`` is given (both undefined without one).
+    ``d_angstrom`` is ``+inf`` at ``r_px == 0`` (2θ = 0), matching
+    ``widgets._UnitAxis``'s convention for the beam axis."""
+    r_px = np.asarray(r_px, dtype=np.float64)
+    two_theta = np.arctan(r_px * px_um / lsd_um)
+    out = {"two_theta_deg": np.degrees(two_theta)}
+    if wavelength_A:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            out["d_angstrom"] = wavelength_A / (2.0 * np.sin(two_theta / 2.0))
+        out["q_invA"] = 4.0 * math.pi * np.sin(two_theta / 2.0) / wavelength_A
+    return out
+
+
 def display_text_for_paths(paths: list) -> str:
     """Text a Data/Dark/Bright/Background/Stack field should show after an
     explicit multi-file Browse… pick (``dialogs.BrowseFilesDialog`` "Multiple
@@ -2260,6 +2283,24 @@ def full_calibration_snapshot(calib_result, use_file: bool, file_path: str, *,
     from midas_gui import project   # deferred: project doesn't import helpers
     full = project.sanitize_result_dict(result) or {}
     return {**full, **fields}, note
+
+
+def collapse_cake_eta(cakes) -> np.ndarray:
+    """``(n_frames, n_eta, n_r)`` → ``(n_frames, n_r)``, averaging each
+    frame's filled eta bins.
+
+    Shared by ``tab_batch.BatchTab._collapse_cakes`` (reconstructing a
+    profile for the Waterfall/Stacked-profiles views, since multi-azimuth
+    mode keeps the cake instead of the run's own collapsed profile) and
+    ``cake_hdf5.write_cake_h5``'s fallback when no real engine-collapsed
+    profile is available. Exact-zero bins are unfilled eta/R coverage rather
+    than measured zeros — the same convention ``CakeViewer``'s auto-levelling
+    uses — so they're excluded from the mean instead of dragging it toward
+    zero. It is an approximation of the engine's count-weighted collapse,
+    not a reproduction of it."""
+    arr = np.asarray(cakes, dtype=np.float64)
+    filled = (arr != 0).sum(axis=1)
+    return arr.sum(axis=1) / np.maximum(filled, 1)
 
 
 def render_calib_value_grid(grid: "QtWidgets.QGridLayout", note_label: "QtWidgets.QLabel",

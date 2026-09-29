@@ -19,6 +19,7 @@ import midas_gui._paths  # noqa: F401  (sys.path setup before MIDAS imports)
 from midas_gui import calib
 from midas_gui import h5_metadata
 from midas_gui import provenance
+from midas_gui import settings
 from midas_gui.helpers import (_LogStream, _load_image, _apply_im_trans, _build_spec,
                                _spec_from_json, average_field, apply_field_corrections,
                                read_hdf5_stack_combined, load_profile_file)
@@ -154,11 +155,21 @@ def frame_output_base(out_dir, fid, fallback_idx: int, used: set):
 
 def stamp_h5_provenance(h5_path, entry: dict) -> None:
     """Reopen ``h5_path`` (already written by ``midas_integrate_v2.write_h5``)
-    and append a provenance entry to its root attrs. Best-effort: a failure
-    here shouldn't take down an otherwise-successful batch run."""
+    and append a provenance entry to its root attrs (``provenance_history``,
+    the cross-tool JSON-in-attrs convention — see ``provenance.py``), AND
+    mirror the resulting history into a root-level ``provenance_history``
+    *dataset*, so it shows up in a plain ``h5ls``/tree view without needing
+    to inspect attributes — the attrs form is easy to miss (confirmed: it
+    was already there, just invisible to a quick look). Best-effort: a
+    failure here shouldn't take down an otherwise-successful batch run."""
     import h5py
     with h5py.File(str(h5_path), 'a') as h5:
         provenance.append_to_hdf5_attrs(h5, entry)
+        history_json = h5.attrs['provenance_history']
+        if 'provenance_history' in h5:
+            del h5['provenance_history']
+        ds = h5.create_dataset('provenance_history', data=history_json)
+        ds.attrs['format'] = 'JSON list of provenance entries (see midas_gui/provenance.py)'
 
 
 def build_geom(spec, kernel: str, mask):
@@ -1226,8 +1237,12 @@ class BatchWorker(QtCore.QThread):
                  frame_range=None, frame_indices=None, monitor_file=None,
                  drift_traj=None, parent=None,
                  dark=None, bright=None, background=None, bright_mode="divide",
-                 weighted=True, context=None, im_trans=(), multi_azimuth=False):
+                 weighted=True, context=None, im_trans=(), multi_azimuth=False,
+                 calibration_snapshot=None):
         super().__init__(parent)
+        # Full calibration (helpers.full_calibration_snapshot), embedded
+        # verbatim in cake-mode HDF5 output — see cake_hdf5.write_cake_h5.
+        self._calibration_snapshot = calibration_snapshot
         self._context = context              # prebuilt integration context or None
         self._spec = spec                    # always R-uniform (Q handled by rebinning)
         self._weighted = weighted            # pixel-weighted azimuthal mean (vs η-bin mean)
@@ -1445,6 +1460,10 @@ class BatchWorker(QtCore.QThread):
             r_ax = ctx["r_ax"]; eta_ax = ctx["eta_ax"]
             want_zarr = "zarr" in self._fmts and self._out_dir is not None
             want_cake = ("2d_csv" in self._fmts) or self._multi_azimuth or want_zarr
+            # Combined multi-azimuth HDF5 (cake_hdf5.write_cake_h5), written once
+            # at the end of run() alongside/instead of the zarr-per-frame output.
+            want_h5_cake = (self._multi_azimuth and "h5" in self._fmts
+                            and self._out_dir is not None)
             need_sigma = True   # xye/fxye require σ; always provide it
             if self._multi_azimuth and self._q_cfg:
                 # Q-rebinning (rebin_R_to_Q) only handles a 1-D profile; combining
@@ -1505,10 +1524,14 @@ class BatchWorker(QtCore.QThread):
             # Two parallel lists that used to be one. all_frame_idx holds
             # 0-based FRAME INDICES and feeds only the combined-HDF5 stem's
             # <lo>_<hi> token below; all_omegas holds real DEGREES and feeds
-            # the zarr. They were the same list back when the zarr's /Omegas
-            # was filled with frame indices — which is the bug this splits.
+            # the zarr and both HDF5 writers. They were the same list back
+            # when the zarr's /Omegas was filled with frame indices — which
+            # is the bug this splits.
             all_frame_idx = []
             all_omegas = []   # degrees, one per processed frame (like frame_ids)
+            # Real engine-collapsed 1-D lineout per frame, multi-azimuth mode
+            # only — see cake_hdf5.write_cake_h5's collapsed_profiles/sigmas.
+            all_cake_profiles, all_cake_sigmas = [], []
             proc_idx = 0  # index into monitor_vals for processed frames only
 
             # Zarr is written ONE FILE PER COMBINED OUTPUT FRAME as it's
@@ -1521,23 +1544,29 @@ class BatchWorker(QtCore.QThread):
             # up front, rather than repeating it per frame.
             zarr_dir = zarr_bin_area = zarr_prov_entry = write_gsas_zarr_zip = None
             h5_trees: dict = {}   # source path -> its instrument/ tree, read once
+            # Shared by the zarr writer below and cake_hdf5.write_cake_h5 at
+            # the end of run() — computed once, whichever wants it first.
+            #
+            # /REtaMap row 3 is documented as the per-bin summed area weight,
+            # "a property of the geometry alone" — so it has to be the
+            # plain-kernel pixel-area count even on the corrections path,
+            # where ctx["geom"] is deliberately None.  corr_counts is not a
+            # substitute: it is normalised through the soft-bin kernel and
+            # folds in the polarization / solid-angle factors, neither of
+            # which belongs in an area.  Build a geometry here purely for the
+            # count, so a Zarr (or cake HDF5) written with corrections on
+            # carries the same BinArea as one written with them off.
+            cake_bin_area = None
+            if want_zarr or want_h5_cake:
+                cake_geom = (geom if geom is not None
+                             else build_geom(spec, self._kernel, mask))
+                cake_bin_area = count_cake(cake_geom, self._kernel,
+                                           spec.NrPixelsZ, spec.NrPixelsY)
             if want_zarr:
                 from midas_integrate_v2.io.zarr_gsas import write_gsas_zarr_zip
                 zarr_dir = self._out_dir / "zarr"
                 zarr_dir.mkdir(parents=True, exist_ok=True)
-                # /REtaMap row 3 is documented as the per-bin summed area
-                # weight, "a property of the geometry alone" — so it has to be
-                # the plain-kernel pixel-area count even on the corrections
-                # path, where ctx["geom"] is deliberately None.  corr_counts is
-                # not a substitute: it is normalised through the soft-bin kernel
-                # and folds in the polarization / solid-angle factors, neither
-                # of which belongs in an area.  Build a geometry here purely for
-                # the count, so a Zarr written with corrections on carries the
-                # same BinArea as one written with them off.
-                zarr_geom = (geom if geom is not None
-                             else build_geom(spec, self._kernel, mask))
-                zarr_bin_area = count_cake(zarr_geom, self._kernel,
-                                           spec.NrPixelsZ, spec.NrPixelsY)
+                zarr_bin_area = cake_bin_area   # see the comment where it's built
                 zarr_prov_entry = provenance.build_entry(
                     'midas_gui.batch_integrate',
                     inputs=[self._src.get('path')] if self._src.get('path') else [],
@@ -1551,6 +1580,19 @@ class BatchWorker(QtCore.QThread):
                         'kernel': self._kernel, 'weighted': self._weighted,
                         'multi_azimuth': self._multi_azimuth,
                         'n_frames': 1, 'frame_range': list(self._frame_range),
+                        # Widen provenance to match what a project attempt
+                        # already records (see .context/DECISIONS.md) — safe
+                        # to embed here since GSAS-II's own reader
+                        # (G2pwd_MIDAS.py) never inspects zarr/HDF5 attrs,
+                        # only the REtaMap/OmegaSumFrame/InstrumentParameters
+                        # sections this entry has nothing to do with.
+                        'calibration_snapshot': self._calibration_snapshot,
+                        'mask_present': self._mask is not None,
+                        'bright_mode': self._bright_mode,
+                        'monitor_file': self._monitor_file,
+                        'q_cfg': self._q_cfg,
+                        'src_cfg': self._src,
+                        'active_profile': settings.active_profile(),
                     },
                 )
 
@@ -1619,13 +1661,23 @@ class BatchWorker(QtCore.QThread):
                 if self._multi_azimuth and cake_2d is not None:
                     all_profiles.append(cake_2d)
                     all_sigmas.append(cake_sigma)
+                    # The real engine-collapsed 1-D lineout — discarded above
+                    # in favour of the raw cake, but cake_hdf5.write_cake_h5
+                    # wants it (a true collapse, not the masked-eta-mean
+                    # approximation reconstructed later for the plot tabs).
+                    all_cake_profiles.append(prof)
+                    all_cake_sigmas.append(sigma)
                 else:
                     all_profiles.append(prof)
                     all_sigmas.append(sigma)
                 frame_omega = float(omega_of(abs_i))
                 all_omegas.append(frame_omega)
-                if want_zarr and cake_2d is not None:
+                if (want_zarr or self._multi_azimuth) and cake_2d is not None:
+                    # Feeds the <lo>_<hi> token in the combined HDF5 stem,
+                    # which both the plain and the cake writer below use —
+                    # so it is not zarr-only.
                     all_frame_idx.append(float(abs_i))
+                if want_zarr and cake_2d is not None:
                     # One zarr per combined output frame, written immediately
                     # rather than accumulated — `fid` already carries the
                     # right per-chunk identity (a bare file stem when
@@ -1798,17 +1850,61 @@ class BatchWorker(QtCore.QThread):
                     'kernel': self._kernel, 'weighted': self._weighted,
                     'multi_azimuth': self._multi_azimuth,
                     'n_frames': len(all_profiles), 'frame_range': list(self._frame_range),
+                    # Same widening as zarr_prov_entry above — see that
+                    # comment for why this is safe.
+                    'calibration_snapshot': self._calibration_snapshot,
+                    'mask_present': self._mask is not None,
+                    'bright_mode': self._bright_mode,
+                    'monitor_file': self._monitor_file,
+                    'q_cfg': self._q_cfg,
+                    'src_cfg': self._src,
+                    'active_profile': settings.active_profile(),
+                    # Known only now the frame loop has finished — the project's
+                    # own attempt record carries the same field.
+                    'aborted': aborted,
                 },
             )
 
-            # HDF5: single file with the full stack — skipped in multi-azimuth mode,
-            # midas_integrate_v2.write_h5 expects a 1-D profile per frame.
+            # HDF5: single file with the full stack. Multi-azimuth mode writes
+            # the cake-capable layout (cake_hdf5.write_cake_h5); otherwise the
+            # plain 1-D midas_integrate_v2.write_h5 path, unchanged.
             if self._out_dir is not None and "h5" in self._fmts:
                 if self._multi_azimuth:
-                    self.log_line.emit(
-                        "[batch] Note: HDF5 output isn't written in multi-azimuth "
-                        "mode (write_h5 expects one profile per frame) — use the "
-                        "text formats or GSAS-II zarr export instead.")
+                    h5_dir = self._out_dir / "h5"
+                    h5_dir.mkdir(parents=True, exist_ok=True)
+                    h5_path = h5_dir / f"{combined_stem}.h5"
+                    try:
+                        from midas_gui.cake_hdf5 import write_cake_h5
+                        write_cake_h5(
+                            h5_path, cake=np.array(all_profiles),
+                            cake_sigma=np.array(all_sigmas),
+                            collapsed_profiles=(np.array(all_cake_profiles)
+                                                if all_cake_profiles else None),
+                            collapsed_sigmas=(np.array(all_cake_sigmas)
+                                              if all_cake_sigmas else None),
+                            r_axis=r_ax, eta_axis=eta_ax, frame_ids=frame_ids,
+                            omegas=all_omegas,
+                            spec=spec, bin_area=cake_bin_area,
+                            kernel=self._kernel, weighted=self._weighted,
+                            cake_params={
+                                'RMin': float(spec.RMin), 'RMax': float(spec.RMax),
+                                'RBinSize': float(spec.RBinSize),
+                                'EtaMin': float(spec.EtaMin), 'EtaMax': float(spec.EtaMax),
+                                'EtaBinSize': float(spec.EtaBinSize),
+                            })
+                        try:
+                            # out_paths is only fully known here (every zarr
+                            # sibling from this run, plus this h5's own path).
+                            prov_entry['extra']['out_paths'] = out_paths + [str(h5_path)]
+                            stamp_h5_provenance(h5_path, prov_entry)
+                        except Exception:
+                            self.log_line.emit(
+                                f"[batch] note: provenance stamp on {h5_path.name} "
+                                "failed (non-fatal):\n" + traceback.format_exc())
+                        out_paths.append(str(h5_path))
+                    except Exception:
+                        self.log_line.emit(
+                            "[batch] cake HDF5 output failed:\n" + traceback.format_exc())
                 else:
                     h5_dir = self._out_dir / "h5"
                     h5_dir.mkdir(parents=True, exist_ok=True)
@@ -1824,6 +1920,7 @@ class BatchWorker(QtCore.QThread):
                                extra_datasets={"omegas": np.asarray(
                                    all_omegas, dtype=np.float64)})
                     try:
+                        prov_entry['extra']['out_paths'] = out_paths + [str(h5_path)]
                         stamp_h5_provenance(h5_path, prov_entry)
                     except Exception:
                         self.log_line.emit(
@@ -2760,7 +2857,9 @@ def _split_into_chunks(indices: list, n_chunks: int) -> list:
 
 
 def write_all_profiles(out_dir, fmts, r_axis, profiles, sigmas, frame_ids,
-                       lsd, px, wl, eta_axis=None, omegas=None) -> list:
+                       lsd, px, wl, eta_axis=None, spec=None, bin_area=None,
+                       calibration_snapshot=None, kernel=None, weighted=None,
+                       cake_params=None, omegas=None) -> list:
     """Write every frame's already-computed lineout to disk, in every format
     in ``fmts``. Backs the batch tabs' **Save** button — writing results that
     already exist in memory, independent of whether an output directory was
@@ -2776,9 +2875,10 @@ def write_all_profiles(out_dir, fmts, r_axis, profiles, sigmas, frame_ids,
     ``"2d_csv"`` (per-frame cake) is silently skipped when ``profiles`` is
     2-D — per-frame cake arrays aren't retained in memory after a run unless
     multi-azimuth mode was on; re-run with an output directory and 2D CSV
-    checked to get that format. ``"h5"`` is silently skipped when ``profiles``
-    is 3-D (``midas_integrate_v2.write_h5`` expects one profile per frame).
-    Returns the list of paths written.
+    checked to get that format. ``"h5"`` when ``profiles`` is 3-D is written
+    via ``cake_hdf5.write_cake_h5`` when ``spec`` is supplied (the caller has
+    the ``IntegrationSpec`` the run used); silently skipped, as before, when
+    it isn't. Returns the list of paths written.
     """
     import midas_integrate_v2 as m
     out_dir = Path(out_dir)
@@ -2818,11 +2918,37 @@ def write_all_profiles(out_dir, fmts, r_axis, profiles, sigmas, frame_ids,
         try:
             entry = provenance.build_entry(
                 'midas_gui.batch_integrate.save',
-                extra={'n_frames': len(frame_ids)})
+                extra={'n_frames': len(frame_ids),
+                      'calibration_snapshot': calibration_snapshot,
+                      'active_profile': settings.active_profile()})
             stamp_h5_provenance(h5_path, entry)
         except Exception:
             pass   # best-effort — a failed stamp shouldn't fail the save
         out_paths.append(str(h5_path))
+    elif "h5" in fmts and len(frame_ids) and multi:
+        if spec is None:
+            pass   # no IntegrationSpec available — same silent skip as before
+        else:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            h5_path = out_dir / "integrated.h5"
+            try:
+                from midas_gui.cake_hdf5 import write_cake_h5
+                write_cake_h5(
+                    h5_path, cake=profiles, cake_sigma=sigmas, r_axis=r_axis,
+                    eta_axis=eta_axis, frame_ids=frame_ids, spec=spec,
+                    bin_area=bin_area, kernel=kernel, weighted=weighted,
+                    cake_params=cake_params, omegas=omegas)
+                entry = provenance.build_entry(
+                    'midas_gui.batch_integrate.save',
+                    extra={'n_frames': len(frame_ids), 'multi_azimuth': True,
+                          'calibration_snapshot': calibration_snapshot,
+                          'kernel': kernel, 'weighted': weighted,
+                          'cake_params': cake_params,
+                          'active_profile': settings.active_profile()})
+                stamp_h5_provenance(h5_path, entry)
+                out_paths.append(str(h5_path))
+            except Exception:
+                pass   # best-effort — a failed cake HDF5 write shouldn't fail the save
     return out_paths
 
 
@@ -2881,7 +3007,8 @@ class BatchRunCoordinator(QtCore.QObject):
                  frame_range=None, monitor_file=None, drift_traj=None,
                  dark=None, bright=None, background=None, bright_mode="divide",
                  weighted=True, context=None, im_trans=(), multi_azimuth=False,
-                 run_mode="sequential", n_workers=1, parent=None):
+                 run_mode="sequential", n_workers=1, parent=None,
+                 calibration_snapshot=None):
         super().__init__(parent)
         self._args = dict(
             spec=spec, source_cfg=source_cfg, mask=mask, out_dir=out_dir, fmts=fmts,
@@ -2890,7 +3017,7 @@ class BatchRunCoordinator(QtCore.QObject):
             frame_range=frame_range, monitor_file=monitor_file,
             drift_traj=drift_traj, dark=dark, bright=bright, background=background,
             bright_mode=bright_mode, weighted=weighted, im_trans=im_trans,
-            multi_azimuth=multi_azimuth)
+            multi_azimuth=multi_azimuth, calibration_snapshot=calibration_snapshot)
         self._context = context
         self._run_mode = run_mode if run_mode == "batch_parallel" else "sequential"
         self._n_workers_requested = max(1, int(n_workers))
@@ -3044,22 +3171,33 @@ class BatchRunCoordinator(QtCore.QObject):
         out_dir = self._args["out_dir"]
         fmts = self._args["fmts"] or []
         if out_dir and "h5" in fmts and merged_profiles:
-            if multi_azimuth:
+            try:
+                spec = self._args["spec"]
+                kernel = self._args["kernel"]
+                bin_area = cake_params = None
+                if multi_azimuth:
+                    # Not carried over from any one chunk worker (each built its
+                    # own geometry independently) — rebuilt once here so the
+                    # combined cake HDF5 still gets a real, non-zero BinArea row.
+                    geom = build_geom(spec, kernel, self._args["mask"])
+                    bin_area = count_cake(geom, kernel, spec.NrPixelsZ, spec.NrPixelsY)
+                    cake_params = {
+                        'RMin': float(spec.RMin), 'RMax': float(spec.RMax),
+                        'RBinSize': float(spec.RBinSize),
+                        'EtaMin': float(spec.EtaMin), 'EtaMax': float(spec.EtaMax),
+                        'EtaBinSize': float(spec.EtaBinSize),
+                    }
+                h5_paths = write_all_profiles(
+                    out_dir, ["h5"], r_axis, merged_profiles, merged_sigmas, merged_ids,
+                    float(spec.Lsd), float(spec.pxY), float(spec.Wavelength),
+                    eta_axis=eta_axis, spec=spec, bin_area=bin_area,
+                    calibration_snapshot=self._args.get("calibration_snapshot"),
+                    kernel=kernel, weighted=self._args.get("weighted"),
+                    cake_params=cake_params, omegas=merged_omegas)
+                merged_out.extend(h5_paths)
+            except Exception:
                 self.log_line.emit(
-                    "[batch] Note: combined HDF5 output isn't written in "
-                    "multi-azimuth mode — use the text formats or GSAS-II "
-                    "zarr export instead.")
-            else:
-                try:
-                    spec = self._args["spec"]
-                    h5_paths = write_all_profiles(
-                        out_dir, ["h5"], r_axis, merged_profiles, merged_sigmas, merged_ids,
-                        float(spec.Lsd), float(spec.pxY), float(spec.Wavelength),
-                        omegas=merged_omegas)
-                    merged_out.extend(h5_paths)
-                except Exception:
-                    self.log_line.emit(
-                        "[batch] combined HDF5 write failed:\n" + traceback.format_exc())
+                    "[batch] combined HDF5 write failed:\n" + traceback.format_exc())
         self.finished.emit({
             "n": len(merged_profiles), "r_axis_px": r_axis,
             "profiles": np.array(merged_profiles) if merged_profiles else np.array([]),
