@@ -2123,7 +2123,8 @@ written into the file:
 
 The resulting angles go into the zarr's `/Omegas` (which the backend labels
 `Units: Degrees`), into an `omegas` dataset alongside the profiles in the
-combined HDF5, and into the logged attempt — so a GSAS-II export of that
+combined HDF5 (both layouts — the plain 1-D one and the multi-azimuth cake
+file, see the Output formats section below), and into the logged attempt — so a GSAS-II export of that
 attempt re-exports with the same angles the run used, including a measured
 channel the export path can no longer reach. Each run logs one
 `[batch] omega: …` line naming the source it actually used.
@@ -2163,7 +2164,7 @@ auto-filled.
 | **Azim. mean** | How the (η, R) cake becomes a 1-D profile: **Pixel-weighted** (default) `Σ(mean·count)/Σ(count)` — independent of η-bin size and robust to partial azimuthal coverage / **off-detector beam centres**; or **η-bin mean (legacy)** — the unweighted mean of per-η-bin means, which can distort with a coarse η bin when the beam centre is off the detector. |
 | Per-bin variance (σ) | Error model poisson / azimuthal / hybrid (ignored when corrections are on → σ = √I). |
 | Q-uniform bins | Integrate in R then rebin onto a uniform-Q grid (Qmin, Qmax, ΔQ). |
-| **Multi-azimuth output (cake)** | Off by default. Keeps every azimuthal (η) sector from the η bin/range above as a **separate** output profile per frame (`profiles`/`sigmas` become `(n_frames, n_eta, n_r)`) instead of collapsing to one full-circle mean profile — needed for per-azimuth GSAS-II/texture work. Off, η bin still exists (default 5° over the full 360°, i.e. 72 internal bins) but is used only to control the collapse's weighting resolution, so turning this on repurposes that same field rather than changing any existing run's output. Text-format Save/live writes become one file per `(frame, η bin)`, named `<id>_etaNNN.<fmt>`; HDF5 output is skipped in this mode (`write_h5` expects one profile per frame) — use the text formats or the GSAS-II zarr export (§REVISIT) instead. Not yet combinable with Q-uniform bins. |
+| **Multi-azimuth output (cake)** | Off by default. Keeps every azimuthal (η) sector from the η bin/range above as a **separate** output profile per frame (`profiles`/`sigmas` become `(n_frames, n_eta, n_r)`) instead of collapsing to one full-circle mean profile — needed for per-azimuth GSAS-II/texture work. Off, η bin still exists (default 5° over the full 360°, i.e. 72 internal bins) but is used only to control the collapse's weighting resolution, so turning this on repurposes that same field rather than changing any existing run's output. Text-format Save/live writes become one file per `(frame, η bin)`, named `<id>_etaNNN.<fmt>`; HDF5 output switches to the cake layout below (`midas_gui/cake_hdf5.py`) rather than being skipped, since `midas_integrate_v2.write_h5` only accepts a 1-D profile per frame. Not yet combinable with Q-uniform bins. |
 | **Show bin grid** | Off by default. Overlays the full (R, η) integration bin grid — concentric circles at each R-bin edge, spokes at each η-bin edge — on the **Detector view** tab, thinned to at most ~50 rings / ~72 spokes so a fine bin size stays legible. |
 
 A new **Detector view** tab (alongside Waterfall/Stacked profiles — one page-level
@@ -2313,6 +2314,22 @@ text names whichever formats are currently checked (e.g. "Output format:
 CSV, XYE ▾") so the selection is visible without opening the menu — the
 checkboxes themselves no longer take up permanent space in the Output
 card.
+
+**HDF5 in multi-azimuth mode — the cake layout.** With **Multi-azimuth
+output (cake)** on, the combined HDF5 is written by `midas_gui/cake_hdf5.py`
+instead of `midas_integrate_v2.write_h5`, which only accepts a 1-D profile per
+frame. It is a flat file — every dataset at a root-level path, no NeXus
+nesting — holding `cake`/`cake_sigma` `(N, n_eta, n_r)`, the real
+engine-collapsed `profiles`/`sigmas`, the `r_px`/`two_theta_deg`/`d_angstrom`/
+`q_invA` radial axes, `eta_deg`, `frame_ids`, `omegas` (degrees, one per frame
+— see §7's OME_START/OME_STEP), and the `bin_area` pixel-count weight. The
+stored cake is reweighted by each bin's share of that area, so
+`cake.sum(axis=eta)` reproduces `profiles` exactly. This is a GUI-native
+archive, **not** a GSAS-II input: GSAS-II's importer only ever opens
+`.zarr.zip`, so nothing here mirrors the zarr `REtaMap`/`OmegaSumFrame`
+convention. Provenance is stamped afterwards, in the root attrs *and*
+mirrored into a root-level `provenance_history` dataset so it shows up in a
+plain `h5ls`/tree view.
 
 **Zarr's environmental metadata (stopgap).** The `zarr` output format's
 per-frame `OmegaSumFrame` attrs, and its `provenance_history` entry, also try

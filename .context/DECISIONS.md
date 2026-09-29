@@ -8,6 +8,52 @@ file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this
 date for the full uncondensed entries if ever needed._
 
+## 2026-09-29 — Merging upstream's cake HDF5: which side won, and why
+
+Upstream (`d-beniwal/MIDAS_GUI`) added two commits on 2026-09-28 —
+`31e904c` (multi-azimuth HDF5 output, new `midas_gui/cake_hdf5.py`) and
+`61feeb3` (flatter cake layout, 2θ/d/Q axes, wider provenance). They land on
+the same code the omega work had just rewritten. Merged on
+`merge/upstream-2026-09-29`; only `workers.py` and `tab_batch.py` conflicted.
+
+**Taken from upstream wholesale**: `cake_hdf5.write_cake_h5` and everything
+that feeds it, the `calibration_snapshot` widening of both provenance
+entries, `provenance_history` as a dataset as well as attrs (invisible in a
+tree view otherwise), `json.dumps(..., indent=2)`, `project.json_default` as
+a public name, and `helpers.collapse_cake_eta` — this fork had the identical
+implementation inline in `tab_batch._collapse_cakes`, so the shared helper
+simply wins and the local copy delegates.
+
+**Taken from this fork**: the whole omega feature. Upstream's own
+`all_omegas` is frame *indices*, feeding the combined-HDF5 stem's `<lo>_<hi>`
+token; this fork had already split that list in two for exactly the reason
+upstream's rename would have re-hidden. So upstream's list became
+`all_frame_idx` here, and its append condition was widened to the union
+(`(want_zarr or multi_azimuth) and cake_2d is not None`) — upstream needs it
+in cake mode for the stem, this fork needed it in zarr mode, and both are
+now satisfied without either behaviour changing.
+
+**A real bug avoided in the merge.** Upstream hoisted the BinArea count out
+of the `want_zarr` branch so the cake HDF5 could share it — but hoisted the
+version that passes `geom` straight to `count_cake`. On the corrections path
+`ctx["geom"]` is deliberately `None`, and this fork had already fixed that
+crash for the zarr branch (build a plain-kernel geometry purely for the
+count; see the 2026-09-13 entry on why `corr_counts` is not a substitute).
+Resolving to upstream's structure with this fork's geometry fallback keeps
+both: one shared `cake_bin_area`, computed safely.
+`test_the_cake_hdf5_survives_physics_corrections` pins it, mirroring the zarr
+test that exists for the same reason.
+
+**One thing added rather than merged.** `write_cake_h5` gained an `omegas`
+argument and writes a root-level `omegas` dataset (degrees, `units` attr),
+dropped rather than padded on a length mismatch. Upstream's cake file is a
+GUI-native archive and explicitly the thing a pole figure over a rotation
+series would read, so leaving the angle out of it would have made the fork's
+own invariant — the angle reaches every output — false in exactly the mode
+that needs it most. Threaded from `BatchWorker`'s `all_omegas`, from
+`write_all_profiles`' new `omegas=` on the cake branch, and from
+`BatchRunCoordinator`'s merged write.
+
 ## 2026-09-29 — Omega becomes a real angle, and `/Omegas` stops being an index
 
 **What was actually wrong.** Both zarr writers filled the per-frame omega axis

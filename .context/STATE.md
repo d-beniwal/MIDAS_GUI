@@ -2,25 +2,25 @@
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
 _Last updated: 2026-09-29 (OME_START/OME_STEP become a real per-frame ω in
-the zarr and the combined HDF5; `main` pushed to `origin`; two new upstream
-commits waiting to be merged)_
+the zarr and both HDF5 layouts; `main` pushed to `origin`; upstream's cake
+HDF5 merged on `merge/upstream-2026-09-29`)_
 
 ## Now working on
 
-**Syncing with the canonical `d-beniwal/MIDAS_GUI`.** The
-`44a0aa1..b25d7e0` merge has landed on `main` (DECISIONS 2026-09-23 records
-which side won where, and why that reconciliation was semantic rather than
-textual). Upstream has since added two commits, both dated 2026-09-28 and both
-in Batch Integrate:
+**Syncing with the canonical `d-beniwal/MIDAS_GUI` — merged, not yet on
+`main`.** The `44a0aa1..b25d7e0` merge landed earlier (DECISIONS 2026-09-23).
+Upstream then added two commits, both 2026-09-28 and both in Batch Integrate:
+`31e904c` (multi-azimuth HDF5 cake output, new `midas_gui/cake_hdf5.py`) and
+`61feeb3` (flatter cake layout, 2θ/d/Q axes, wider provenance). They are
+merged on **`merge/upstream-2026-09-29`**; only `workers.py` and
+`tab_batch.py` conflicted, and DECISIONS 2026-09-29 records which side won
+where — including the BinArea crash upstream would have reintroduced on the
+corrections path, and `write_cake_h5` gaining an `omegas` dataset so the
+fork's angle reaches the cake file too.
 
-- `31e904c` — multi-azimuth HDF5 (cake) output.
-- `61feeb3` — simplified cake HDF5 layout, 2θ/d/Q axes, wider provenance.
-
-They land on exactly the code the omega work below just rewrote (`workers.py`'s
-combined-HDF5 writer and its `extra_datasets`, `tab_batch.py`'s two run sites),
-so expect another semantic reconciliation. Nothing fetched into a working
-branch yet — `main` is **37 ahead / 2 behind** `upstream/main`, and in sync
-with `origin/main`.
+What is left: merge that branch into `main` and push. `main` itself is in
+sync with `origin/main` and was 37 ahead / 2 behind `upstream/main` before
+this merge.
 
 Open follow-ups, none blocking:
 - `documentation/calibration_unification_plan.md` — the three Calibrate UI
