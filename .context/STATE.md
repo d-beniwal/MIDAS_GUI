@@ -2,25 +2,22 @@
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
 _Last updated: 2026-09-29 (OME_START/OME_STEP become a real per-frame ω in
-the zarr and both HDF5 layouts; `main` pushed to `origin`; upstream's cake
-HDF5 merged on `merge/upstream-2026-09-29`)_
+the zarr and both HDF5 layouts; upstream's cake HDF5 merged; `main` is level
+with `origin` and with the canonical)_
 
 ## Now working on
 
-**Syncing with the canonical `d-beniwal/MIDAS_GUI` — merged, not yet on
-`main`.** The `44a0aa1..b25d7e0` merge landed earlier (DECISIONS 2026-09-23).
-Upstream then added two commits, both 2026-09-28 and both in Batch Integrate:
-`31e904c` (multi-azimuth HDF5 cake output, new `midas_gui/cake_hdf5.py`) and
-`61feeb3` (flatter cake layout, 2θ/d/Q axes, wider provenance). They are
-merged on **`merge/upstream-2026-09-29`**; only `workers.py` and
-`tab_batch.py` conflicted, and DECISIONS 2026-09-29 records which side won
-where — including the BinArea crash upstream would have reintroduced on the
-corrections path, and `write_cake_h5` gaining an `omegas` dataset so the
-fork's angle reaches the cake file too.
+**Nothing mid-flight.** `main` is level with `origin/main` and **0 behind
+`upstream/main`** (40 ahead) — in sync with the canonical as of upstream's
+`61feeb3`. What the last two pieces of work want next, in the order they
+matter:
 
-What is left: merge that branch into `main` and push. `main` itself is in
-sync with `origin/main` and was 37 ahead / 2 behind `upstream/main` before
-this merge.
+- **Eyes on a live run** (needs your X11/VNC session — see the "Not verified"
+  lines below). The omega walkthrough is the one with something real to
+  check: a 20-ID rotation scan's `/Omegas` against the angles you expect.
+- **Metadata provenance**, which you said you'd keep testing against.
+- `PoleFigureWorker` is still single-frame and takes χ/φ from its cfg. Making
+  it ω-aware across a series is the piece the omega work exists to enable.
 
 Open follow-ups, none blocking:
 - `documentation/calibration_unification_plan.md` — the three Calibrate UI
@@ -42,6 +39,34 @@ Open follow-ups, none blocking:
   `git fetch origin 'refs/pull/*/head:refs/remotes/origin/pr/*'`.
 
 ## Recently completed
+
+**2026-09-29 — Upstream's cake HDF5, merged.** `cc1045d` (merge) and
+`43c672c` (docs), pushed. Upstream's two 2026-09-28 Batch Integrate commits —
+`31e904c` (multi-azimuth HDF5 output, new `midas_gui/cake_hdf5.py`) and
+`61feeb3` (flatter layout, 2θ/d/Q axes, wider provenance) — land on exactly
+the code the omega work had rewritten. Only `workers.py` and `tab_batch.py`
+conflicted; DECISIONS 2026-09-29 records which side won where. Three things
+worth knowing without opening that entry:
+
+- Upstream's `all_omegas` is frame *indices* (the combined-HDF5 `<lo>_<hi>`
+  stem); this fork had already split that list in two, so upstream's became
+  `all_frame_idx` and its append condition widened to the union of both
+  guards. No behaviour on either side changed.
+- Upstream hoisted the BinArea count out of the `want_zarr` branch to share
+  it with the cake writer, but hoisted the version that hands `geom` straight
+  to `count_cake` — `None` on the corrections path, the crash this fork had
+  already fixed for zarr. Resolved to upstream's structure with this fork's
+  geometry fallback.
+- `write_cake_h5` gained an `omegas` dataset, so the fork's angle reaches the
+  cake file too — that file is what a pole figure over a rotation series
+  would read.
+
+**Verified:** full suite 1089 passed / 2 failed (the same known pair) /
+3 skipped, with upstream's own `tests/test_batch_cake_h5.py` (+12) green and
+two new tests of ours pinning the cake file's omegas and its survival of the
+corrections path.
+**Not verified with eyes on it:** the cake HDF5 has never been opened in a
+viewer here, and no live run has produced one.
 
 **2026-09-29 — Omega: a real rotation angle on every frame, and in the
 zarr.** `1117cc1`, pushed to `origin/main` along with the eight commits that
