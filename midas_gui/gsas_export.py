@@ -110,6 +110,43 @@ def _source_metadata_snapshot(meta: dict, n_frames: int):
     return {"path": path, "datasets": datasets}
 
 
+def _omegas_for_attempt(results: dict, inputs: dict, n_frames: int):
+    """``(omegas, source_label)`` for a logged attempt's frames.
+
+    Three cases, in descending order of trust:
+
+    1. The attempt recorded ``results/omegas`` — the angles the run actually
+       stamped into its own output. Used verbatim, which is the only way a
+       *measured* omega channel can survive into this path at all: the
+       channel is read off the raw frames, and nothing here reopens them.
+    2. No stored angles, but the attempt recorded an ``omega_cfg``: rebuild
+       the computed OME_START/OME_STEP ramp. Frame ``i`` here is an OUTPUT
+       frame, so this is only exact when no sub-frame combining was in play
+       — hence the label, so a reader can tell.
+    3. Neither (an attempt logged before omega was recorded at all): zeros.
+       NOT ``range(n_frames)``, which is what this function replaced — that
+       wrote frame indices into an axis the backend labels "Degrees", and
+       reproducing it here would keep the wrong number alive in files
+       written from now on. An unrecorded angle is better reported as 0 and
+       named as unavailable in the provenance entry.
+    """
+    stored = results.get("omegas")
+    if stored is not None and len(stored) == n_frames:
+        return [float(v) for v in stored], "recorded"
+
+    cfg = (inputs or {}).get("omega_cfg") or {}
+    start = float(cfg.get("start") or 0.0)
+    step = float(cfg.get("step") or 0.0)
+    if cfg:
+        from midas_gui.cake_params import omega_series
+        windows = [(i, i) for i in range(n_frames)]
+        return (omega_series(start, step, windows,
+                             collapse=bool(cfg.get("collapse"))),
+                "recomputed from omega_cfg")
+
+    return [0.0] * n_frames, "unavailable"
+
+
 def export_gsas_zarr(project_path, panel_key: str, attempt_ref: str, out_path) -> Path:
     """Write a MIDAS-native GSAS-II ``.zarr.zip`` (+ provenance sidecar) from
     one integration attempt. Returns the zarr path actually written.
@@ -196,9 +233,9 @@ def export_gsas_zarr(project_path, panel_key: str, attempt_ref: str, out_path) -
     n_frames = profiles.shape[0]
     cakes = (profiles[i] if multi_azimuth else profiles[i][None, :]
              for i in range(n_frames))
+    omegas, omega_source = _omegas_for_attempt(results, inputs, n_frames)
     write_gsas_zarr_zip(out_path, cakes, spec=spec,
-                        omegas=[float(i) for i in range(n_frames)],
-                        bin_area=bin_area)
+                        omegas=omegas, bin_area=bin_area)
 
     # provenance_history inside the zip, in the same shape Batch Integrate
     # writes it. Both paths run the same backend writer, so the arrays and
@@ -222,6 +259,7 @@ def export_gsas_zarr(project_path, panel_key: str, attempt_ref: str, out_path) -
                 'n_frames': int(n_frames),
                 'source_project': str(Path(project_path).resolve()),
                 'panel_key': panel_key, 'attempt_ref': attempt_ref,
+                'omega_source': omega_source,
             },
         )
         # Batch Integrate copies the source HDF5's instrument/ PV snapshot into

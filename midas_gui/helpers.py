@@ -611,6 +611,47 @@ def list_h5_datasets(path: str | Path) -> list:
     return items
 
 
+# Name fragments that mark a 1-D dataset as the measured rotation angle,
+# most specific first. Taken verbatim from mpe_wf_saxs_waxs
+# (``gui_data_explorer.py``'s ``_OMEGA_HINTS``), which uses the same list to
+# pre-select an omega stream, so the two GUIs rank the same file the same way.
+_OMEGA_HINTS = ("/omegas", "samry", "omega")
+
+
+def list_h5_1d_datasets(path: str | Path) -> list:
+    """Return ``[(name, length), …]`` for every 1-D dataset in an HDF5 file,
+    with omega-looking names first (see ``_OMEGA_HINTS``).
+
+    The 1-D sibling of :func:`list_h5_datasets`, which lists the ≥2-D
+    (image) datasets. This one populates the omega-channel picker in Batch
+    Integrate's cake-parameters dialog: a rotation stage writes one angle per
+    raw sub-frame into a flat array alongside the frames.
+
+    The hint only ORDERS the list — nothing is auto-selected. A wrong channel
+    silently relabels every frame's angle, so picking one stays the user's
+    deliberate act; mpe_wf's own picker is likewise ``allow_none=True`` with a
+    blank default.
+    """
+    import h5py
+    items: list = []
+
+    def _visit(name, obj):
+        if isinstance(obj, h5py.Dataset) and obj.ndim == 1:
+            items.append((name, int(obj.shape[0])))
+
+    with h5py.File(str(path), "r") as f:
+        f.visititems(_visit)
+
+    def _rank(item):
+        low = "/" + item[0].lower()
+        for i, hint in enumerate(_OMEGA_HINTS):
+            if hint in low:
+                return (i, item[0])
+        return (len(_OMEGA_HINTS), item[0])
+
+    return sorted(items, key=_rank)
+
+
 _DARK_NAME_RE = re.compile(r'(^|[_.])dark([_.]|$)|_dark_(before|after)\b', re.IGNORECASE)
 
 

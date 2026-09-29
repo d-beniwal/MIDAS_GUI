@@ -8,6 +8,76 @@ file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this
 date for the full uncondensed entries if ever needed._
 
+## 2026-09-29 — Omega becomes a real angle, and `/Omegas` stops being an index
+
+**What was actually wrong.** Both zarr writers filled the per-frame omega axis
+with `float(frame_index)`, and the backend stores that as `/Omegas` with
+`attrs {"Units": "Degrees"}`. So every zarr this app had ever written recorded
+frame counts as angles. Nothing downstream read it (`gsas_ii_refine.py`
+doesn't), which is why it survived — but the next piece of work is peak fits
+and pole figures, where omega is the independent variable, and those cannot be
+built on an axis that is silently an index. Meanwhile the cake CSV's
+`OME_START`/`OME_STEP` — the real rotation, fetched at the beamline off
+`20idaSoft:userTran9.H`/`.I` — were parsed, round-tripped, and applied to
+nothing (see the 2026-09-28 entry, which deliberately left them inert).
+
+**Why one formula instead of mpe_wf's three cases.** `gui_data_explorer.py`
+handles no-combining, `OME_SUM = n`, and collapse-everything as separate
+expressions. All three are the same statement:
+
+    omega(frame) = OME_START + mean(raw sub-frame indices of that frame) * OME_STEP
+
+written as `start + 0.5*(lo+hi)*step` over the frame's inclusive raw window.
+For `OME_SUM = n` this is algebraically `ome_start + (idx*ome_sum +
+(ome_sum-1)/2)*ome_step`, mpe_wf verbatim — pinned by a test that runs both
+expressions over several `n`. The user's "averaged or summed" requirement then
+isn't a branch at all: it falls out of the window spanning the run. Three
+cases would have been three places for the sign of a reverse scan or an
+off-by-one on a short last chunk to go wrong independently.
+
+**Why the raw indices are global, not per-file.** A rotation scan split over
+147 VAREX files keeps rotating; file 2's frames are at higher angles, so its
+raw indices have to continue rather than restart. The same reasoning makes
+them *absolute* rather than per-worker: in Batch-Parallel mode each chunk sees
+only its slice, and `abs_i` is already the absolute output-frame index in both
+`_iter_frames` branches, so the window — and therefore the angle — is
+reproducible regardless of which chunk computed it. The collapse override
+deliberately takes its run-wide window from `source.n_frames` for the same
+reason; taking it from the frames a worker happens to iterate would make two
+chunks disagree about the single collapsed angle. A measured omega channel
+wants the opposite (a per-file 1-D dataset is indexed file-locally), hence
+`omega_channel_window` as a separate method rather than a flag on the first.
+
+**Why `OME_START = OME_STEP = 0` is a genuine 0.0 and not a sentinel.** A
+stationary sample really is at ω = 0, and the alternative — treating the
+default as "unset" and falling back — is exactly how the frame index got in
+there. 0.0 is a far better wrong answer than an index if the user forgot to
+set the keys. The cost is a visible behaviour change for anyone who never
+opens the cake editor, so it is called out in the docs and a `[batch] omega:`
+line names the source on every run.
+
+**Why omegas are stored in the logged attempt rather than recomputed at
+export.** A measured omega channel is read off the raw frames, and the
+GSAS-II export path never reopens them — recomputing would silently downgrade
+a measured angle to the computed ramp. So `results/omegas` rides along with
+`frame_ids`. Legacy attempts that predate it fall back to recomputing from a
+recorded `omega_cfg`, and failing that to zeros — deliberately *not* to
+`range(n_frames)`, which would reintroduce the bug on the one path that still
+had it. Which of the three happened is recorded as `omega_source` in the
+provenance `extra`, because a stored 0.0 and an unrecorded 0.0 are the same
+number and a reader has to be able to tell them apart. A stored list whose
+length doesn't match the frames is discarded rather than padded: angles are
+matched positionally, and a misfiled angle is worse than a missing one.
+
+**Why the combined HDF5 gets `extra_datasets={"omegas": …}` rather than a
+`ProfileMetadata` field.** It is per-frame data, not a per-run scalar, and
+`m.write_h5` already accepts exactly that. Same length rule as above — the
+branch skips rather than pads.
+
+**What was left alone.** `PoleFigureWorker` is still single-frame and takes
+χ/φ from its own cfg; making it omega-aware across a series is the work this
+entry exists to make possible, not part of it.
+
 ## 2026-09-28 — Cake parameters get one editor that mirrors, not one that hosts
 
 **Question that started it.** "It will be good to have the ability to change

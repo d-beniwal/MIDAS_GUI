@@ -2084,7 +2084,7 @@ already have elsewhere on this tab, gathered together:
 | `R_MIN` / `R_MAX` / `R_STEP` | **R bins…** (Integration → Bin type) |
 | `ETA_MIN` / `ETA_MAX` / `ETA_STEP` | **Azimuthal bins…** |
 | `OME_SUM` | the data loader's **Combine sub-frames** |
-| `OME_START` / `OME_STEP` | nowhere — see below |
+| `OME_START` / `OME_STEP` | nowhere else — they drive the per-frame ω, see below |
 
 Editing a value here or in the corresponding popup is the same setting either
 way; **Apply** is what pushes the editor's numbers back onto the tab, so you
@@ -2092,10 +2092,48 @@ can open it, try values, and close without having changed the next run. The
 `R bins…` / `Azimuthal bins…` popups stay for adjusting one axis mid-run;
 this is the view of the whole file at once.
 
-`OME_START` and `OME_STEP` are omega-series bookkeeping for mpe_wf's own
-integration backend and have no counterpart in `midas_integrate_v2` — they are
-carried through Load and Save (and through Save/Load GUI State) so a file
-round-trips intact, and are **applied to nothing** here.
+#### `OME_START` / `OME_STEP` — the rotation angle on every frame
+
+These two describe the rotation the frames were collected over: `OME_START` is
+the angle of raw sub-frame 0, `OME_STEP` the increment per raw sub-frame. (At
+the beamline mpe_wf reads them straight off `20idaSoft:userTran9.H` and `.I`.)
+`midas_integrate_v2` itself knows nothing about rotation, but the zarr writer
+takes a per-frame omega, so Batch Integrate turns the two into angles:
+
+> **ω(frame) = `OME_START` + mean(the raw sub-frame indices that frame was
+> built from) × `OME_STEP`**
+
+The raw indices are counted globally across the whole run, so a scan split
+over several files keeps rotating rather than restarting at each file, and a
+raw-frame filter shifts the angles rather than rebasing them. That one
+expression covers every case: with no combining (`OME_SUM` = 1) it is
+`OME_START + k·OME_STEP`; with `OME_SUM` = *n* it reproduces mpe_wf's own
+`ome_start + (idx·ome_sum + (ome_sum−1)/2)·ome_step` exactly; with `OME_SUM` =
+0 ("combine everything selected into one frame") it is the mean angle the
+collapsed exposure actually covered.
+
+Two more controls sit under the nine columns in the same editor. They are
+**not** CSV columns — they are saved and restored with the GUI state, not
+written into the file:
+
+| Control | What it does |
+|---|---|
+| **Omega channel** | An editable drop-down listing the 1-D datasets in the loaded HDF5, with omega-looking names (`/omegas`, `samry`, `omega`) sorted to the top. Pick one to use the *measured* angle instead of the computed ramp, reduced over each output frame's window the same way the pixels are. Blank — the default — falls back to `OME_START`/`OME_STEP`; nothing is ever auto-selected, the name hint only orders the list. A channel that turns out to be missing or unreadable logs one line and falls back to the ramp rather than failing the run. |
+| **Averaged/summed — one ω for all frames** | The override for data that was averaged or summed *outside* this loader (pre-averaged TIFFs, or frames that are already sums while `OME_SUM` still reads 1): every output frame gets the single run-wide mean angle instead of its own position in a ramp the pixels no longer have. When the combining happened here (`OME_SUM` = 0) the one window already spans the run, so the override changes nothing. |
+
+The resulting angles go into the zarr's `/Omegas` (which the backend labels
+`Units: Degrees`), into an `omegas` dataset alongside the profiles in the
+combined HDF5, and into the logged attempt — so a GSAS-II export of that
+attempt re-exports with the same angles the run used, including a measured
+channel the export path can no longer reach. Each run logs one
+`[batch] omega: …` line naming the source it actually used.
+
+**Leaving both at 0 now means a genuine ω = 0 on every frame**, not "unset" —
+a stationary sample really is at zero. This is a visible change for anyone who
+never opens this editor: `/Omegas` used to be filled with the frame index
+(`0, 1, 2, …`) labelled as degrees, and is now all zeros until you set the two
+keys. Nothing downstream read it yet, which is why the old behaviour went
+unnoticed, but peak fits and pole figures take ω as the independent variable.
 
 **Save** always goes through a Save-As dialog, pre-filled with
 `<expid>_bc/cake_parameters.<beamline>.<detector>.csv` — mpe_wf's own filename
@@ -2111,7 +2149,8 @@ there.
 
 Immediately below the button, a muted one-line summary shows the cake
 parameters currently in force (R range/bin, η range/bin, Q output range when
-Q-uniform bins are on, and the sub-frame sum when it's greater than 1),
+Q-uniform bins are on, the sub-frame sum when it's greater than 1, and the
+omega source when it isn't the default zero),
 wherever they came from — CSV, typed by hand, restored with a project, or
 auto-filled.
 

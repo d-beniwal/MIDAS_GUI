@@ -46,7 +46,7 @@ def app():
 
 
 def _run(app, tmp_path, fmts, *, multi_azimuth=False, n_frames=2, out_dir=None,
-         corrections=(None, None)):
+         corrections=(None, None), omega_cfg=None):
     pytest.importorskip("torch")
     pytest.importorskip("midas_integrate_v2")
     import midas_gui.workers as wk
@@ -56,7 +56,8 @@ def _run(app, tmp_path, fmts, *, multi_azimuth=False, n_frames=2, out_dir=None,
     spec = _build_spec(_tiny_calib_result(), r_bin=2.0, eta_bin=45.0)
     worker = wk.BatchWorker(
         spec, {"type": "tiff_list", "paths": paths}, None, out_dir, fmts,
-        "subpixel2", corrections, None, multi_azimuth=multi_azimuth)
+        "subpixel2", corrections, None, multi_azimuth=multi_azimuth,
+        omega_cfg=omega_cfg)
     results, failures, logs = {}, [], []
     worker.finished.connect(results.update)
     worker.failed.connect(failures.append)
@@ -178,3 +179,88 @@ def test_default_formats_produce_no_zarr(app, in_dir):
     out = in_dir / "out"
     _run(app, in_dir, ["csv"], out_dir=out)
     assert not list(out.rglob("*.zarr*"))
+
+
+# ── /Omegas: a real rotation angle, not the frame index ─────────────────────
+
+def _omegas_in(out):
+    zarr = pytest.importorskip("zarr")
+    vals = []
+    for path in sorted((out / "zarr").glob("*.zarr.zip")):
+        root = zarr.open(zarr.ZipStore(str(path), mode="r"), mode="r")
+        vals.extend(np.asarray(root["Omegas"]).ravel().tolist())
+    return vals
+
+
+def test_zarr_omegas_come_from_ome_start_and_ome_step(app, in_dir):
+    """The point of the whole omega feature: ``/Omegas`` carries the angles
+    the cake CSV describes. Each TIFF is one raw frame, so frame k is at
+    ``OME_START + k·OME_STEP``."""
+    out = in_dir / "out"
+    _run(app, in_dir, ["zarr"], n_frames=3, out_dir=out,
+         omega_cfg={"start": 5.0, "step": 0.25, "channel": "",
+                    "collapse": False})
+    assert _omegas_in(out) == pytest.approx([5.0, 5.25, 5.5])
+
+
+def test_zarr_omegas_default_to_zero_rather_than_the_frame_index(app, in_dir):
+    """The regression this feature exists to prevent. Before it, an
+    unconfigured run wrote ``[0, 1, 2]`` into a dataset the backend labels
+    ``Units: Degrees`` — frame counts masquerading as angles. A stationary
+    sample is at ω = 0, so zeros are the honest answer."""
+    out = in_dir / "out"
+    _run(app, in_dir, ["zarr"], n_frames=3, out_dir=out)
+    got = _omegas_in(out)
+    assert got == [0.0, 0.0, 0.0]
+    assert got != [0.0, 1.0, 2.0]
+
+
+def test_zarr_omegas_collapse_to_one_angle_when_the_override_is_set(app, in_dir):
+    """"These images were averaged or summed": every frame reports the mean
+    angle of the whole run instead of its own position in a ramp it no longer
+    has. Mean of raw 0…2 at 0.25°/frame from 5.0 is 5.25."""
+    out = in_dir / "out"
+    _run(app, in_dir, ["zarr"], n_frames=3, out_dir=out,
+         omega_cfg={"start": 5.0, "step": 0.25, "channel": "",
+                    "collapse": True})
+    assert _omegas_in(out) == pytest.approx([5.25, 5.25, 5.25])
+
+
+def test_the_omega_source_is_named_in_the_run_log(app, in_dir):
+    """Every zarr this app writes changed its ``/Omegas`` with this feature,
+    so a run has to say out loud which angles it used — otherwise a default
+    run's zeros are indistinguishable from a misconfigured one's."""
+    out = in_dir / "out"
+    _, logs = _run(app, in_dir, ["zarr"], n_frames=2, out_dir=out,
+                   omega_cfg={"start": 5.0, "step": 0.25, "channel": "",
+                              "collapse": False})
+    line = next(l for l in logs if l.startswith("[batch] omega:"))
+    assert "5" in line and "0.25" in line
+
+
+def test_the_finished_payload_carries_one_omega_per_frame(app, in_dir):
+    """``frame_ids`` and ``omegas`` are read positionally against each other
+    downstream (the combined HDF5, the logged attempt, the GSAS-II export),
+    so they must stay the same length even when zarr output is off — the
+    omega must not be computed inside the zarr branch."""
+    out = in_dir / "out"
+    results, _ = _run(app, in_dir, ["csv"], n_frames=3, out_dir=out,
+                      omega_cfg={"start": 1.0, "step": 2.0, "channel": "",
+                                 "collapse": False})
+    assert results["omegas"] == pytest.approx([1.0, 3.0, 5.0])
+    assert len(results["omegas"]) == len(results["frame_ids"])
+
+
+def test_the_combined_hdf5_carries_the_omegas_alongside_the_profiles(app, in_dir):
+    """Where a downstream peak fit will look for the angle. Written as an
+    ``extra_datasets`` entry rather than a ``ProfileMetadata`` field, since
+    it is per-frame data, not a per-run scalar."""
+    h5py = pytest.importorskip("h5py")
+    out = in_dir / "out"
+    _run(app, in_dir, ["h5"], n_frames=3, out_dir=out,
+         omega_cfg={"start": 1.0, "step": 2.0, "channel": "",
+                    "collapse": False})
+    h5_path = next((out / "h5").glob("*.h5"))
+    with h5py.File(h5_path, "r") as f:
+        key = next(k for k in f if k.lower() == "omegas")
+        np.testing.assert_allclose(np.asarray(f[key]).ravel(), [1.0, 3.0, 5.0])
