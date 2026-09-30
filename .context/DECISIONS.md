@@ -32,6 +32,52 @@ aid must never be the reason startup fails.
 adding a dev tool to a beamline environment mid-session is a bigger change
 than eleven lines in the launcher.
 
+## 2026-09-29 — Reading one frame must cost one chunk: finishing the _HDF5StackGlobSource fix
+
+`_HDF5StackGlobSource` was fixed once already, for *counting*: `n_frames`
+used to decode every selected file, so a run looked hung before it started
+(that fix is in the class docstring). Reading was left on the old shape —
+`get(idx)` called `read_hdf5_stack_combined`, which decodes every chunk of
+the owning file and returns the list, then kept one element.
+
+Measured on the user's own data (`…_029531.vrx.h5`, `exchange/data`
+(1442, 2880, 2880) uint16 uncompressed, 23.9 GB, NFS): **~230 s and ~1.9 GB
+resident to return one 33 MB frame**. Now 415 MB and ~4 s. Two callers paid
+it: the Detector-view preview, which asks for exactly one frame (the user's
+"takes a really long time to show the pattern"), and each parallel
+`BatchWorker` chunk — four workers start at four different offsets, so a
+cache keyed on "the current file" helps none of them, and the run reads the
+file about four times over.
+
+**Decided: one definition of the chunking, used by both readers.**
+`helpers._stack_chunk_bounds(n, k, …)` is now the only place that says where
+chunk *k* starts and ends; `read_hdf5_stack_combined` (all chunks) and the
+new `read_hdf5_stack_chunk` (exactly one) both go through it. This is not
+tidiness — `_stat` derives the chunk *count* from the dataset shape alone,
+and that only stays honest while the chunking rule has a single definition.
+With bounds shared, `get`/`__iter__` can take `n_chunks` from the header
+counts instead of `len(frames)`, which is what made the whole-file decode
+structurally necessary before.
+
+**Kept `read_hdf5_stack_combined` rather than deleting it.** It is a correct,
+well-tested, generally useful helper; the bug was a caller using a
+whole-file read for random access, not the function. Its remaining
+production use is none, and that is fine — the source class no longer has a
+whole-file path to fall back into.
+
+**Decided: the cache holds one chunk, not one file.** Chunk-at-a-time would
+be worse than the bug if a sequential pass re-read anything, so
+`test_iterating_reads_each_chunk_exactly_once` pins that `__iter__` still
+costs the file exactly once. Both `__iter__` and a chunked `BatchWorker`
+walk frames in order, so one chunk of lookahead is all either needs.
+
+**Tests assert slices, not seconds.** Wall-clock and byte counts are not
+assertable, so `tests/test_stack_chunk_reads.py` proxies `h5py.File` and
+records every `dset[a:b]` taken — "reads one chunk" becomes an exact set
+comparison. Four of the eleven fail against the old implementation; the rest
+pin frame-for-frame equivalence with it, because a faster wrong answer is
+not the deliverable.
+
 ## 2026-09-29 — Merging upstream's cake HDF5: which side won, and why
 
 Upstream (`d-beniwal/MIDAS_GUI`) added two commits on 2026-09-28 —

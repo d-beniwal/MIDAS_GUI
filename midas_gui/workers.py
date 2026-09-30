@@ -22,7 +22,7 @@ from midas_gui import provenance
 from midas_gui import settings
 from midas_gui.helpers import (_LogStream, _load_image, _apply_im_trans, _build_spec,
                                _spec_from_json, average_field, apply_field_corrections,
-                               read_hdf5_stack_combined, load_profile_file)
+                               read_hdf5_stack_chunk, load_profile_file)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -2232,10 +2232,19 @@ class _HDF5StackGlobSource:
     ``BatchWorker`` asks for before a run even starts — read and combine
     every selected file up front: for a 147-file VAREX scan that is tens of
     GB of I/O and RAM before the first frame is integrated, so the run
-    looked hung (no progress, no output, no error). The pixel cache is
-    likewise bounded to the most recently used file, since both ``__iter__``
-    and a chunked ``BatchWorker`` walk the files in order and the old
-    unbounded dict retained every decoded file for the life of the run."""
+    looked hung (no progress, no output, no error).
+
+    Reading has the same rule, and it took a second pass to finish the job:
+    counting stopped decoding, but ``get(idx)`` still decoded the whole
+    OWNING file to return one frame from it, so a single-file 1442-sub-frame
+    VAREX pick cost 23.9 GB (~230 s over NFS) per first access — the
+    Detector-view preview and every parallel ``BatchWorker`` chunk each paid
+    it. ``_combined_one(i, k)`` now reads only chunk ``k``'s raw sub-frames.
+    The pixel cache is bounded to that one most recently used chunk (it was
+    the most recent whole file, and before that an unbounded dict retaining
+    every decoded file for the life of the run); ``__iter__`` and a chunked
+    ``BatchWorker`` both walk frames in order, so one chunk is all the
+    lookahead either needs."""
 
     #: HDF5 paths for the per-acquisition scalars mpe_wf/GSAS-II's zarr
     #: schema carries — fixed regardless of ``dataset`` (the cake-source
@@ -2291,7 +2300,7 @@ class _HDF5StackGlobSource:
         # survivors, so every other construction site leaves these None.
         self._raw_start = raw_start
         self._raw_end = raw_end
-        self._cache: dict = {}   # path index -> list[np.ndarray] (most-recent file only)
+        self._cache: dict = {}   # (path index, chunk index) -> np.ndarray (most-recent chunk only)
         self._counts: Optional[list] = None    # per-file combined-frame count
         self._raw_ns: Optional[list] = None    # per-file raw (pre-combine) sub-frame count
         self._metadata_cache: dict = {}   # path index -> {name: np.ndarray|None}
@@ -2363,14 +2372,29 @@ class _HDF5StackGlobSource:
             self._counts = [s[0] for s in stats]
             self._raw_ns = [s[1] for s in stats]
 
-    def _combined(self, i: int) -> list:
-        cached = self._cache.get(i)
+    def _combined_one(self, i: int, k: int):
+        """Combined frame ``k`` of file ``i``, or ``None`` when ``k`` is past
+        that file's last chunk.
+
+        Reads only chunk ``k``'s raw sub-frames. The whole-file
+        ``read_hdf5_stack_combined`` this replaced decoded every chunk and
+        cached the list, so ``get(0)`` on a 1442-sub-frame VAREX file read all
+        23.9 GB (~230 s over NFS) and held ~1.9 GB, to return one 33 MB frame
+        — the Detector-view preview and the first frame of every parallel
+        ``BatchWorker`` chunk each paid that in full. Same bug as the
+        decode-to-count one in the class docstring, on the pixel path rather
+        than the header path; fixing counting alone left it live.
+        """
+        key = (i, k)
+        cached = self._cache.get(key)
         if cached is None:
-            cached = read_hdf5_stack_combined(
-                self._paths[i], self._dataset,
+            cached = read_hdf5_stack_chunk(
+                self._paths[i], self._dataset, k,
                 chunk_size=self._chunk_size, op=self._op,
                 raw_start=self._raw_start, raw_end=self._raw_end)
-            self._cache = {i: cached}   # keep only the current file
+            if cached is None:
+                return None
+            self._cache = {key: cached}   # one chunk at a time
         return cached
 
     @property
@@ -2621,10 +2645,12 @@ class _HDF5StackGlobSource:
     def __iter__(self):
         self._ensure_stats()
         for i, p in enumerate(self._paths):
-            frames = self._combined(i)
-            n_raw = self._raw_ns[i]
-            for k, img in enumerate(frames):
-                yield self._fid(p, k, len(frames), n_raw), img.astype(np.float64)
+            n_here, n_raw = self._counts[i], self._raw_ns[i]
+            for k in range(n_here):
+                img = self._combined_one(i, k)
+                if img is None:   # header count disagreed with the real read
+                    break
+                yield self._fid(p, k, n_here, n_raw), img.astype(np.float64)
 
     def get(self, idx: int):
         # Locate the owning file from the header-only counts, so only THAT
@@ -2637,11 +2663,11 @@ class _HDF5StackGlobSource:
         for i, p in enumerate(self._paths):
             n_here = self._counts[i]
             if remaining < n_here:
-                frames = self._combined(i)
-                if remaining >= len(frames):   # header count disagreed with the real read
+                img = self._combined_one(i, remaining)
+                if img is None:   # header count disagreed with the real read
                     raise IndexError(idx)
-                return (self._fid(p, remaining, len(frames), self._raw_ns[i]),
-                        frames[remaining].astype(np.float64))
+                return (self._fid(p, remaining, n_here, self._raw_ns[i]),
+                        img.astype(np.float64))
             remaining -= n_here
         raise IndexError(idx)
 

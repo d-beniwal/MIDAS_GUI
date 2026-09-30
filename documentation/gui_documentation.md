@@ -2174,6 +2174,18 @@ boundary circles always overlaid (once a calibration resolves), plus the bin
 grid when **Show bin grid** is checked — lets you confirm the excluded
 region/binning geometry visually before running a batch.
 
+**On a large sub-frame stack the preview now appears in seconds, not minutes.**
+Showing one frame used to decode the whole file it lives in: on a 1442-sub-frame
+VAREX file (2880x2880 uint16, 23.9 GB) that was about **230 s and ~1.9 GB of
+memory to draw a single 33 MB frame**, and the same cost was paid again by each
+parallel worker at the start of a batch run. Only the sub-frames behind the
+requested frame are read now — the same file previews in about **4 s / 415 MB**,
+and the frame count still comes from the HDF5 header without reading any pixels
+at all. Nothing about the output changes: frames, their ids and the resulting
+filenames are identical to before. This is the same defect behind a run that
+looked frozen before it logged anything; that half was fixed earlier, for
+counting only.
+
 ### Physics corrections
 Polarization and solid-angle (pixel-domain, via `integrate_with_corrections`).
 
