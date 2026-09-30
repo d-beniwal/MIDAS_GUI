@@ -45,7 +45,8 @@ def app():
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
-def _run(app, tmp_path, fmts, *, multi_azimuth=False, n_frames=2, out_dir=None):
+def _run(app, tmp_path, fmts, *, multi_azimuth=False, n_frames=2, out_dir=None,
+         corrections=(None, None)):
     pytest.importorskip("torch")
     pytest.importorskip("midas_integrate_v2")
     import midas_gui.workers as wk
@@ -55,7 +56,7 @@ def _run(app, tmp_path, fmts, *, multi_azimuth=False, n_frames=2, out_dir=None):
     spec = _build_spec(_tiny_calib_result(), r_bin=2.0, eta_bin=45.0)
     worker = wk.BatchWorker(
         spec, {"type": "tiff_list", "paths": paths}, None, out_dir, fmts,
-        "subpixel2", (None, None), None, multi_azimuth=multi_azimuth)
+        "subpixel2", corrections, None, multi_azimuth=multi_azimuth)
     results, failures, logs = {}, [], []
     worker.finished.connect(results.update)
     worker.failed.connect(failures.append)
@@ -97,6 +98,41 @@ def test_zarr_output_works_with_multi_azimuth_off(app, in_dir):
     root = zarr.open(zarr.ZipStore(str(path), mode="r"), mode="r")
     cake = np.asarray(root["OmegaSumFrame"]["LastFrameNumber_0"])
     assert cake.ndim == 2 and min(cake.shape) > 1
+
+
+def test_zarr_survives_physics_corrections_and_keeps_the_same_bin_area(app, in_dir):
+    """Polarization / solid-angle make build_integration_context leave ``geom``
+    None on purpose, and the zarr branch used to hand that None straight to
+    ``count_cake`` — ``AttributeError: 'NoneType' object has no attribute
+    'n_pixels_z'``, reported from a live run.
+
+    BinArea (/REtaMap row 3) is documented as a property of the geometry alone,
+    so the store written with corrections on must carry byte-identical areas to
+    the one written with them off.  That is the whole reason the fix builds a
+    geometry rather than reusing the corrections path's own counts cake, which
+    is normalised differently and folds the correction factors in.
+    """
+    zarr = pytest.importorskip("zarr")
+    from midas_integrate_v2 import PolarizationCorrection, SolidAngleCorrection
+
+    def _bin_area(out, corrections):
+        _run(app, in_dir, ["zarr"], n_frames=1, out_dir=out,
+             corrections=corrections)
+        path = next((out / "zarr").glob("*.zarr.zip"))
+        root = zarr.open(zarr.ZipStore(str(path), mode="r"), mode="r")
+        return np.asarray(root["REtaMap"])[3]
+
+    # pol_plane_eta_deg=0 deliberately, NOT the real 90: BinArea must be a
+    # property of the geometry alone, so a physically wrong plane still has to
+    # leave it untouched. See constants.POL_PLANE_HORIZONTAL_ETA_DEG.
+    on = _bin_area(in_dir / "out_corr",
+                   (PolarizationCorrection(pol_fraction=0.99,
+                                           pol_plane_eta_deg=0.0),
+                    SolidAngleCorrection()))
+    off = _bin_area(in_dir / "out_plain", (None, None))
+
+    assert np.any(on > 0), "BinArea row came out empty"
+    np.testing.assert_array_equal(on, off)
 
 
 def test_zarr_is_stamped_with_batch_provenance(app, in_dir):

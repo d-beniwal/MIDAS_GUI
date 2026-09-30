@@ -16,7 +16,8 @@ import pyqtgraph as pg
 from midas_gui.helpers import (_load_image, _fspin, _twocol, _browse, is_h5,
                                widgets_to_dict, apply_dict_to_widgets,
                                browse_start_dir, warn_if_path_missing)
-from midas_gui.constants import DEFAULT_NICKEL_FRAME0
+from midas_gui.constants import (DEFAULT_NICKEL_FRAME0,
+                                 POL_PLANE_HORIZONTAL_ETA_DEG)
 from midas_gui.widgets import LogPanel
 from midas_gui.dialogs import show_error
 from midas_gui.workers import CorrectionPreviewWorker, LearnableGainWorker
@@ -133,7 +134,8 @@ class CorrectionsTab(QtWidgets.QWidget):
         grp_px = QtWidgets.QGroupBox("Pixel-domain corrections")
         pf = QtWidgets.QFormLayout(grp_px); pf.setSpacing(4)
         self._pol_chk = QtWidgets.QCheckBox("Polarization")
-        self._pol_frac = _fspin(0.0, 1.0, 3, 0.99); self._pol_plane = _fspin(-180, 180, 1, 0.0, "°")
+        self._pol_frac = _fspin(0.0, 1.0, 3, 0.99); self._pol_plane = _fspin(-180, 180, 1,
+                                                  POL_PLANE_HORIZONTAL_ETA_DEG, "°")
         pf.addRow(self._pol_chk)
         pf.addRow(_twocol("frac:", self._pol_frac, "plane:", self._pol_plane))
         self._sa_chk = QtWidgets.QCheckBox("Solid angle (tilt-aware)")

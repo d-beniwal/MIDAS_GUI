@@ -1231,6 +1231,28 @@ quadrant the overlay predicts. The overlay redraws automatically whenever
 the beam centre, tilt, calibration, or displayed image changes, and stays
 anchored under pan/zoom since it's drawn directly on the image view.
 
+**The convention, stated once.** η is measured **from vertical**, positive
+towards screen-right:
+
+| η | direction on screen | lab axis |
+|---|---|---|
+| 0° | up | +Y_Lab (+Z_MIDAS) |
+| +90° | right | −Y_MIDAS (−X_Lab) |
+| 180° | down | −Y_Lab |
+| −90° | left | +Y_MIDAS (+X_Lab) |
+
+with +Z_Lab (+X_MIDAS), the beam, going into the page. The displayed image
+follows it: the array's **column** index runs left→right and its **row** index
+runs bottom→top (row 0 is at the bottom, matching the MIDAS origin). The bin-grid
+spokes, this compass, and the backend's own `eta = atan2(-Yc, Zc)` are all the
+same convention, and `tests/test_lab_frame_conventions.py` asserts that they
+stay that way.
+
+What the GUI cannot check for you is whether the *file* was written in that
+frame. Load a known pattern, turn the overlay on, and confirm a feature you can
+identify lands where the compass says it should; if it doesn't, fix it with
+ImTransOpt before calibrating or applying corrections, not after.
+
 ### Region-of-interest (ROI) tool (image toolbar)
 A **ROI: Box / Line** row sits on the image toolbar, alongside a
 **Clear ROIs** button. Click Box or Line to arm it, then click-drag on the
@@ -2063,6 +2085,28 @@ region/binning geometry visually before running a batch.
 
 ### Physics corrections
 Polarization and solid-angle (pixel-domain, via `integrate_with_corrections`).
+
+**Polarization plane — MIDAS η is measured from VERTICAL.** The **Plane** spin
+box is the azimuth of the polarization plane in MIDAS η, and it defaults to
+**90°**, which is *horizontal*: the storage ring's X_Lab–Z_Lab plane, where the
+beam is polarized. This is almost always the right value at an APS beamline.
+
+The trap is that 0° looks like the horizontal answer and is not. η = 0 is
+straight **up** (+Z_MIDAS / +Y_Lab); η = ±90 is horizontal (∓Y_MIDAS / ±X_Lab).
+Because the correction goes as `cos(2(η − plane))`, setting the plane to 0
+doesn't merely fail to flatten a ring's azimuthal intensity variation — it
+roughly doubles it. (±90 are equivalent; the factor has period 180° in the
+plane.) The GUI shipped a 0.0 default before 2026-09-24, so **a project saved
+before then restores its own stored 0.0** rather than being silently rewritten;
+the batch log prints the plane and fraction at every run start and flags an
+off-plane value, so check that line if you are re-running old work.
+
+**Fraction** is the polarized fraction: 0 = unpolarized, 1 = fully polarized in
+the ring plane. 0.99 is the usual synchrotron value and is the default.
+
+It is up to you to load images consistent with the lab frame — see
+[Lab-frame axes overlay](#lab-frame-axes-overlay-image-toolbar) for how to check
+that with your own data before trusting a correction.
 
 ### Monitor normalisation
 Divide each processed frame's profile/σ by a per-frame scalar from a text file (one

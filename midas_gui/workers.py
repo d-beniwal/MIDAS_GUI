@@ -1258,6 +1258,21 @@ class BatchWorker(QtCore.QThread):
             mask = (self._mask if not self._im_trans or self._mask is None
                     else _apply_im_trans(self._mask.astype(np.float32), self._im_trans))
 
+            # Say out loud which azimuth the polarization correction is being
+            # applied on. MIDAS η is measured from vertical, so the ring plane
+            # is 90 — a plane of 0 is the one mistake that silently makes a
+            # ring's azimuthal modulation worse instead of removing it, and a
+            # project saved before 2026-09-24 restores the old 0.0 default.
+            pol_mod = (self._corrections or (None, None))[0]
+            if pol_mod is not None:
+                plane = float(getattr(pol_mod, "pol_plane_eta_deg", float("nan")))
+                frac = float(getattr(pol_mod, "pol_fraction", float("nan")))
+                off_plane = not abs(abs(plane) - 90.0) < 1e-6
+                self.log_line.emit(
+                    f"[batch] Polarization: plane η = {plane:g}°, fraction = {frac:g}"
+                    + ("  ← NOT horizontal; η is measured from vertical, so the "
+                       "storage-ring plane is 90°" if off_plane else ""))
+
             if self._context is not None:
                 self.log_line.emit("[batch] Reusing existing detector map…")
                 ctx = self._context
@@ -1344,9 +1359,22 @@ class BatchWorker(QtCore.QThread):
             zarr_dir = zarr_bin_area = zarr_prov_entry = write_gsas_zarr_zip = None
             # Shared by the zarr writer below and cake_hdf5.write_cake_h5 at
             # the end of run() — computed once, whichever wants it first.
+            #
+            # /REtaMap row 3 (and cake_hdf5's own BinArea) is documented as the
+            # per-bin summed area weight, "a property of the geometry alone" —
+            # so it has to be the plain-kernel pixel-area count even on the
+            # corrections path, where ctx["geom"] is deliberately None.
+            # corr_counts is not a substitute: it is normalised through the
+            # soft-bin kernel and folds in the polarization / solid-angle
+            # factors, neither of which belongs in an area. Build a geometry
+            # here purely for the count, so either output written with
+            # corrections on carries the same BinArea as one written with them
+            # off — shared by BOTH consumers below, not just zarr, since
+            # count_cake(None, ...) crashes identically for want_h5_cake.
             cake_bin_area = None
             if want_zarr or want_h5_cake:
-                cake_bin_area = count_cake(geom, self._kernel, spec.NrPixelsZ, spec.NrPixelsY)
+                cake_geom = geom if geom is not None else build_geom(spec, self._kernel, mask)
+                cake_bin_area = count_cake(cake_geom, self._kernel, spec.NrPixelsZ, spec.NrPixelsY)
             if want_zarr:
                 from midas_integrate_v2.io.zarr_gsas import write_gsas_zarr_zip
                 zarr_dir = self._out_dir / "zarr"

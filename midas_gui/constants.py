@@ -11,6 +11,26 @@ import os
 CALIBRANTS = ["CeO2", "LaB6", "Si", "Al2O3"]
 COLORMAPS  = ["hot", "gray", "viridis", "inferno", "plasma", "turbo"]
 
+# Azimuth of the polarization plane, in MIDAS η (degrees).
+#
+# MIDAS η is ``atan2(-Yc, Zc)`` — measured from VERTICAL — so η = 0 is straight
+# up (+Z_MIDAS / +Y_Lab) and η = ±90 is horizontal (±Y_MIDAS / ∓X_Lab). The
+# storage ring's X_Lab–Z_Lab plane is horizontal and the beam is polarized in
+# it, so the polarization plane is η = 90, NOT η = 0. (±90 are equivalent: the
+# factor goes as cos(2(η − plane)), period 180°.)
+#
+# The GUI shipped 0.0 here until 2026-09-24, which put the correction on the
+# vertical axis — the right functional form applied a quarter turn away, which
+# ADDS the azimuthal modulation it exists to remove. midas_integrate_v2 fixed
+# its own default to 90 on 2026-08-29 and measured the difference on 1-ID CeO2:
+# plane = 90 takes a ring's cos(2η) modulation 2.813 % → 0.744 %, while plane =
+# 0 makes it 1.84× worse. See that package's POL_PLANE_HORIZONTAL_ETA_DEG
+# docstring for how the convention was established three independent ways.
+#
+# Set 0.0 to reproduce GUI output from before 2026-09-24, or the measured
+# azimuth for a beamline whose polarization is not horizontal.
+POL_PLANE_HORIZONTAL_ETA_DEG = 90.0
+
 # Output formats for the batch tab (label → short key)
 OUTPUT_FORMATS = {
     "CSV  (R, I, σ)":          "csv",
