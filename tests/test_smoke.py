@@ -221,3 +221,100 @@ def test_pumpprobe_grouping():
     assert res["delays"] == [-1.0, 1.0]
     assert np.allclose(res["reference"], [1.05, 1.05, 1.05])
     assert np.allclose(res["dI"][1], [1.05, 2.05, 3.05])
+
+
+def test_optional_tabs_are_closable_and_pinned_ones_are_not():
+    """Every optional tab carries an ✕; the four ALWAYS_TABS have theirs
+    stripped, so the set of tabs you can close is exactly the set Preferences ▸
+    Tabs lets you uncheck."""
+    QtWidgets = pytest.importorskip("PyQt5.QtWidgets")
+    try:
+        import midas_gui.app as app_mod
+        import midas_gui.constants as C
+    except Exception as exc:
+        pytest.skip(f"midas_gui.app needs the full MIDAS stack: {exc}")
+    # Held in a local: a bare expression lets the QApplication be collected
+    # mid-test, and MainWindow() then aborts the interpreter.
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    assert app is not None
+    win = app_mod.MainWindow()
+    win.apply_tab_visibility(C.OPTIONAL_TABS)
+
+    tabs = win.centralWidget()
+    bar = tabs.tabBar()
+    assert tabs.tabsClosable()
+    pinned_names = set(C.ALWAYS_TABS)
+    for i in range(tabs.count()):
+        name = tabs.tabText(i).split("  ", 1)[-1]
+        has_x = any(bar.tabButton(i, side) is not None
+                    for side in (QtWidgets.QTabBar.RightSide,
+                                 QtWidgets.QTabBar.LeftSide))
+        assert has_x is (name not in pinned_names), name
+
+
+def test_closing_an_optional_tab_hides_it_and_persists_the_rest(monkeypatch):
+    """Clicking ✕ drops that one tab, keeps every other visible tab, and writes
+    the reduced set to ui.visible_tabs — the same key Preferences writes, so the
+    two can't disagree. The save is intercepted: this must never touch the
+    machine's real ~/.config/midas_gui profile."""
+    QtWidgets = pytest.importorskip("PyQt5.QtWidgets")
+    try:
+        import midas_gui.app as app_mod
+        import midas_gui.constants as C
+        from midas_gui import settings
+    except Exception as exc:
+        pytest.skip(f"midas_gui.app needs the full MIDAS stack: {exc}")
+    # Held in a local: a bare expression lets the QApplication be collected
+    # mid-test, and MainWindow() then aborts the interpreter.
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    assert app is not None
+
+    saved = {}
+    monkeypatch.setattr(settings, "load_config",
+                        lambda **kw: {"paths": {"outroot": "/tmp/keepme"}})
+    monkeypatch.setattr(settings, "save_user_config", lambda cfg: saved.update(cfg))
+    monkeypatch.setattr(C, "reload_from_config", lambda: None)
+
+    win = app_mod.MainWindow()
+    win.apply_tab_visibility(C.OPTIONAL_TABS)
+    tabs = win.centralWidget()
+    victim = "Zarr Viewer"
+    idx = next(i for i in range(tabs.count()) if tabs.tabText(i).endswith(victim))
+    win._close_optional_tab(idx)
+
+    names = [tabs.tabText(i).split("  ", 1)[-1] for i in range(tabs.count())]
+    assert victim not in names
+    assert set(C.ALWAYS_TABS) <= set(names)
+    assert set(names) == set(C.ALWAYS_TABS) | (set(C.OPTIONAL_TABS) - {victim})
+
+    assert saved["ui"]["visible_tabs"] == [n for n in C.OPTIONAL_TABS if n != victim]
+    # Read-modify-write, not replace: an unrelated key already in the overlay
+    # must survive being written back.
+    assert saved["paths"]["outroot"] == "/tmp/keepme"
+
+
+def test_a_pinned_tab_cannot_be_closed_even_if_the_signal_reaches_it(monkeypatch):
+    """The stripped ✕ is cosmetic and per-index; the guard in
+    _close_optional_tab is what actually protects the four pinned tabs."""
+    QtWidgets = pytest.importorskip("PyQt5.QtWidgets")
+    try:
+        import midas_gui.app as app_mod
+        import midas_gui.constants as C
+        from midas_gui import settings
+    except Exception as exc:
+        pytest.skip(f"midas_gui.app needs the full MIDAS stack: {exc}")
+    # Held in a local: a bare expression lets the QApplication be collected
+    # mid-test, and MainWindow() then aborts the interpreter.
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    assert app is not None
+    monkeypatch.setattr(settings, "save_user_config",
+                        lambda cfg: pytest.fail("a pinned tab must not persist anything"))
+
+    win = app_mod.MainWindow()
+    win.apply_tab_visibility(C.OPTIONAL_TABS)
+    tabs = win.centralWidget()
+    before = tabs.count()
+    idx = next(i for i in range(tabs.count())
+               if tabs.tabText(i).endswith("Batch Integrate"))
+    win._close_optional_tab(idx)
+    assert tabs.count() == before

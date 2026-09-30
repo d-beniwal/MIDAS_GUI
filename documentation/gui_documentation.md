@@ -666,13 +666,20 @@ Data Viewer (inspect) → Mask Builder → Calibrate → [Refine] → Batch Inte
 ```
 
 **Modular tabs.** Data Viewer, Mask Builder, Calibrate and Batch Integrate are always
-shown; the remaining tabs (Calibration Refinement, Corrections, PDF Analysis, Texture,
-Pump Probe, Results & Export) are optional and can be shown/hidden from **Settings ▸
-Preferences ▸ Tabs**. By default only **Calib. Refinement** and **Pump Probe** are
-shown; Corrections, PDF Analysis, Texture and Results & Export ship **hidden** — turn
-them on when you need them. The choice is saved per-user (`ui.visible_tabs`) and applies
-immediately — see §16. Hidden tabs are only removed from the tab bar; they stay
-constructed, so cross-tab wiring and state are preserved.
+shown; the remaining tabs (Calib. Refinement, Batch Queue, Zarr Viewer, Corrections,
+PDF Analysis, Texture, Pump Probe, Results & Export) are optional and can be
+shown/hidden from **Settings ▸ Preferences ▸ Tabs**. By default **Calib. Refinement**,
+**Batch Queue**, **Zarr Viewer** and **Pump Probe** are shown; Corrections, PDF
+Analysis, Texture and Results & Export ship **hidden** — turn them on when you need
+them. The choice is saved per-user (`ui.visible_tabs`) and applies immediately — see
+§16. Hidden tabs are only removed from the tab bar; they stay constructed, so
+cross-tab wiring and state are preserved.
+
+Every optional tab also carries an **✕** on its own label — clicking it is the same
+act as unchecking that tab in Preferences ▸ Tabs, writes the same `ui.visible_tabs`
+key, and sticks across restarts. The four always-on tabs have no ✕. Because closing
+only removes the tab from the bar, a closed tab comes back with its state intact (a
+loaded file, a running queue) when you turn it on again.
 
 **Cross-tab shared state.** When Tab 2 (Calibrate) produces a result it is
 automatically propagated to all downstream tabs. When Tab 1 (Mask Builder) computes
@@ -2238,6 +2245,67 @@ this source" behavior Temperature/Pressure already have. Full per-station
 mapping, and why each simplification was chosen, is in
 `.context/DECISIONS.md`.
 
+**The source HDF5's instrument metadata comes along.** A VAREX/areaDetector
+file arrives with a few hundred EPICS PVs snapshotted under `instrument/` at
+acquisition time — motor positions, slit gaps, monochromator angles,
+insertion-device gap, every scaler channel. MIDAS's own pipeline carries them
+into its output (`integrator.py:_enrich_zarr_with_metadata`); MIDAS_GUI reads
+frames straight into memory and so used to drop all of them, leaving the
+`.zarr.zip` with only what the backend writer has named slots for. It now
+reopens the source file after the write and copies `instrument/` and
+`active_instrument/` in wholesale — nothing curated, so a PV the DAQ adds
+tomorrow comes along without a code change. A real tree is about 24 KiB,
+negligible against a 300 MB source.
+
+Three things to know about it:
+
+- **HDF5 sources only.** A TIFF stack has no such tree; nothing is copied and
+  nothing is missing.
+- **Per-frame arrays are averaged, not copied raw.** A 1-D array with one
+  entry per acquisition is reduced to one value per output frame, over exactly
+  the raw sub-frames that frame combines. It is aligned to the *light* block,
+  found via the timestamp gap — the DAQ records lights and darks in one flat
+  array, so a 10-frame scan carries length-20 metadata and a naive
+  length-match would blend the dark tail into every average.
+- **GSAS-II never reads any of it.** Its importer looks at
+  `InstrumentParameters`/`REtaMap`/`OmegaSumFrame` and ignores every other
+  group, so this is pure provenance: it cannot perturb an import, and it is
+  not a substitute for one (see §13).
+- **It is not free, and the cost scales with frame count.** Measured on a
+  300-PV tree: about **+0.15 s and +130 KiB per output frame**. The bytes are
+  mostly zarr's own per-array bookkeeping, not the ~24 KiB of readings, and
+  the time is the archive repack — a zip can't be edited in place, so the
+  several hundred extra members have to be written out with it. On a
+  10-frame scan you won't notice; on a 3600-frame one that is roughly nine
+  extra minutes and half a gigabyte across the run.
+
+The GSAS-II export (§13) copies the same tree from the same file, reopening it
+via the source path recorded in the attempt's `inputs.src_cfg`, so which
+writer produced a given archive still isn't visible in its layout.
+
+**The calibration that produced a zarr is recorded in it.** A `.zarr.zip`
+always contained the geometry, but only *applied* — baked into `REtaMap`'s
+per-bin Radius/2θ/Eta/Q columns, recoverable only by inverting the map. The
+one readable trace was `InstrumentParameters/`, and that holds just
+`Distance` (Lsd) and `Lam`; its other entries (`U`/`V`/`W`, `Polariz`,
+`SH_L`, `X`/`Y`/`Z`) are **GSAS-II peak-profile defaults written by the
+backend, not anything MIDAS refined** — easy to mistake for fit output. The
+`provenance_history` entry now carries an `instrument_params` block with the
+geometry actually used: `Lsd`, `BC_y`/`BC_z`, `tx`/`ty`/`tz`, `pxY`/`pxZ`,
+`NrPixelsY`/`NrPixelsZ`, `Wavelength`, `RhoD`, the `TransOpt` flips, all
+fifteen distortion harmonics (recorded even when zero — "no distortion" is a
+statement worth being able to read back), and, when in use, the panel
+layout and the residual-correction map path.
+
+**Both zarr paths write the same layout.** Batch Integrate's `zarr` format
+and the GSAS-II export (§13) call the same backend writer, so their arrays
+and groups always matched; their provenance did not — the export path used
+to stamp nothing inside the zip, only a sidecar. Both now write an identical
+`provenance_history` entry shape, `instrument_params` included, differing
+only in the `tool` field that names the writer.
+`tests/test_zarr_layout_parity.py` writes a file by each path and diffs
+them, so the two can't drift apart again unnoticed.
+
 Right panel: live **Waterfall** and **Stacked profiles** — both have an **x**
 selector to show the axis in **R (px) / 2θ (°) / Q (Å⁻¹)** (converted from the run's
 calibration). Both plots are bounded to their own data extent (like the main image
@@ -2698,11 +2766,45 @@ zarr file**. Uses `midas_integrate_v2.io.zarr_gsas.write_gsas_zarr_zip`
 directly, so the layout is bit-for-bit what MIDAS's own C integrator
 produces — not a GUI-specific approximation. Works whether the attempt used
 plain (single full-circle profile) or Multi-azimuth (cake) Batch Integrate
-output (§7); degenerates to one azimuth in the plain case. A
+output (§7); degenerates to one azimuth in the plain case. The zip's root
+attrs carry a `provenance_history` entry in exactly the shape Batch
+Integrate writes (§7), `instrument_params` geometry snapshot included, so a
+file reads the same way whichever path produced it. In addition, a
 `<name>.zarr.zip.provenance.json` sidecar carries the attempt's full
 provenance (params, hashed input paths, environment snapshot, calibration
-snapshot) verbatim, alongside — never inside — the zip, so the zip's
-structure stays exactly what GSAS-II expects.
+snapshot) verbatim — attempt-level history the Batch Integrate path has no
+equivalent for, kept alongside rather than inside so the zip's structure
+stays exactly what GSAS-II expects.
+
+**What GSAS-II actually reads** (from its own `G2pwd_MIDAS.py`, checked
+against the current upstream source): the three groups its validator
+requires — `InstrumentParameters`, `REtaMap`, `OmegaSumFrame` — and within
+them only `REtaMap` rows 1/2/3 (2θ, η, bin area, where area == 0 is the
+mask), each `OmegaSumFrame/<k>` array plus its `Number Of Frames Summed` /
+`FirstOme` / `LastOme` / `Temperature` / `Pressure` attrs, and
+`InstrumentParameters/<key>[0]` (with `Polariz`→`Polariz.`, `SH_L`→`SH/L`,
+and `Distance` read as Gonio. radius, µm→mm). We write all of it.
+
+Three things follow that are easy to get wrong:
+
+- **Our `.provenance.json` is invisible to GSAS-II, by design.** GSAS-II does
+  read sidecars, but plain-text ones at `<name>.zarr.samprm` /
+  `<name>.zarr.instprm`, and whatever is in them *overrides* the zip. We
+  write neither, so nothing we put beside a file can perturb an import.
+- **Temperature/Pressure don't currently survive the import**, through no
+  fault of the file: `readMidas` reads them off the attrs and then assigns
+  into a list of tuples, a `TypeError` caught by a bare `except`. `.samprm`
+  is today the only route by which sample metadata reaches a GSAS-II
+  histogram.
+- **GSAS-II defaults `InstrName` to `'APS 1-ID'`**, so an un-annotated 20-ID
+  histogram silently claims the wrong beamline until you set it.
+
+A zarr written elsewhere in the APS toolchain may carry a much larger
+metadata tree (`instrument/GSAS2_PVS/*`, `misc/*`, `Detector/*`,
+`StorageRing/*`). Despite the name, GSAS-II reads none of it — that tree is
+an EPICS PV snapshot the areaDetector plugin writes into the *source HDF5*,
+copied forward by MIDAS's `integrator.py`. See `.context/DECISIONS.md`
+(2026-09-28) for the full comparison.
 
 Single-detector only for v1 (Hydra composite is a possible fast-follow). Not
 yet supported: an attempt run with Q-uniform bins (its stored radial axis is

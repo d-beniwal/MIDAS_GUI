@@ -9,11 +9,30 @@ rebuild the inputs that writer needs (a spec, a per-frame cake, a bin-area
 array) from ONE attempt already logged in a midas-gui project file — the
 project's append-only attempt history is never touched or exported wholesale.
 
-A ``<out_path>.provenance.json`` sidecar carries the attempt's full metadata
-(params, hashed input paths, environment snapshot, calibration snapshot)
-verbatim, plus a few export-specific fields — mirroring the ``.samprm``/
-``.instprm`` sidecar convention ``G2pwd_MIDAS.py`` already uses, so it adds
-zero risk to the zip's internal structure.
+Layout parity with Batch Integrate is a requirement, not a coincidence: a
+``.zarr.zip`` must read the same way whichever path wrote it. Both call the
+same backend writer, so the arrays and groups match by construction; the
+``provenance_history`` entry in the root attrs — including the
+``instrument_params`` geometry snapshot — is stamped here to match too. See
+``tests/test_zarr_layout_parity.py``, which writes one file by each path and
+diffs their structure.
+
+A ``<out_path>.provenance.json`` sidecar carries, in addition, the attempt's
+full metadata (params, hashed input paths, environment snapshot, calibration
+snapshot) verbatim plus a few export-specific fields — attempt-level history
+the Batch Integrate path has no equivalent for.
+
+That sidecar is for us, not for GSAS-II, and is deliberately invisible to it.
+GSAS-II does read two sidecars, but they are plain text at
+``os.path.splitext(filename)[0]`` — i.e. ``<stem>.zarr.samprm`` and
+``<stem>.zarr.instprm`` — and anything in them OVERRIDES the zip. We write
+neither, so nothing here can perturb a GSAS-II import. Worth knowing if that
+changes: ``.samprm`` is the only route by which sample metadata reaches a
+GSAS-II histogram at all. ``readMidas`` does read ``Temperature``/``Pressure``
+off each ``OmegaSumFrame`` dataset's attrs (which we write), but then assigns
+them into ``sampleprmList``, a list of tuples — a ``TypeError`` swallowed by a
+bare ``except``, so those values are dropped upstream. Its other default worth
+noting: an un-annotated histogram gets ``InstrName = 'APS 1-ID'``.
 
 Scope (v1): single-detector Batch Integrate attempts only, R-uniform binning
 only (a Q-uniform attempt's stored ``r_axis_px`` is Q-rebinned, not a simple
@@ -32,7 +51,9 @@ from typing import Optional
 import h5py
 import numpy as np
 
+from midas_gui import h5_metadata
 from midas_gui import project
+from midas_gui import provenance as prov
 from midas_gui.helpers import _build_spec, _apply_im_trans
 from midas_gui.workers import build_integration_context
 
@@ -43,6 +64,50 @@ def _read_embedded_mask(project_path, ref: str) -> Optional[np.ndarray]:
         if grp is None or "mask" not in grp:
             return None
         return grp["mask"][()]
+
+
+def _source_metadata_snapshot(meta: dict, n_frames: int):
+    """The source HDF5's ``instrument/`` tree for an already-logged attempt,
+    aligned to the ``n_frames`` this export is about to write.
+
+    ``None`` whenever there is nothing to copy or no confident way to copy it:
+    a TIFF-backed attempt, an attempt whose recorded source files have since
+    moved, or one whose frames span several HDF5 files (a single snapshot
+    can't honestly represent two files' PVs, and picking one would silently
+    mislabel the rest). Reopening the recorded source is reconstruction after
+    the fact, so it fails quietly and the export goes out without the tree
+    rather than not going out at all.
+
+    Frame alignment is delegated to ``_HDF5StackGlobSource`` rather than
+    recomputed here: rebuilding the source from the same ``src_cfg`` the run
+    used is the only way to be sure this export's notion of "which raw
+    sub-frames are behind output frame i" matches the one Batch Integrate
+    already wrote into the per-frame stores.
+    """
+    src_cfg = ((meta.get("inputs") or {}).get("src_cfg")) or {}
+    if src_cfg.get("type") not in ("hdf5", "hdf5_stack_glob"):
+        return None
+    try:
+        from midas_gui.workers import _open_source_cfg
+        source = _open_source_cfg(dict(src_cfg))
+        get_ctx = getattr(source, "h5_context_for_index", None)
+        if get_ctx is None:
+            return None
+        contexts = [get_ctx(i) for i in range(int(n_frames))]
+    except Exception:
+        return None
+    if not contexts:
+        return None
+    paths = {c["path"] for c in contexts}
+    if len(paths) != 1:
+        return None
+    path = contexts[0]["path"]
+    ranges = [c["frame_ranges"][0] for c in contexts]
+    datasets = h5_metadata.snapshot(path, frame_ranges=ranges,
+                                    n_aligned=contexts[0]["n_aligned"])
+    if not datasets:
+        return None
+    return {"path": path, "datasets": datasets}
 
 
 def export_gsas_zarr(project_path, panel_key: str, attempt_ref: str, out_path) -> Path:
@@ -135,6 +200,58 @@ def export_gsas_zarr(project_path, panel_key: str, attempt_ref: str, out_path) -
                         omegas=[float(i) for i in range(n_frames)],
                         bin_area=bin_area)
 
+    # provenance_history inside the zip, in the same shape Batch Integrate
+    # writes it. Both paths run the same backend writer, so the arrays and
+    # groups already matched; until this, the provenance did not — Batch
+    # Integrate stamped a build_entry() into the root attrs while this path
+    # wrote only the sidecar below, so which path produced a file changed
+    # where (and whether) you could read its geometry back.
+    try:
+        entry = prov.build_entry(
+            'midas_gui.gsas_export',
+            inputs=[str(project_path)],
+            cake_params={
+                'RMin': float(spec.RMin), 'RMax': float(spec.RMax),
+                'RBinSize': float(spec.RBinSize), 'EtaMin': float(spec.EtaMin),
+                'EtaMax': float(spec.EtaMax), 'EtaBinSize': float(spec.EtaBinSize),
+            },
+            instrument_params=prov.instrument_params_from_spec(spec),
+            extra={
+                'kernel': kernel, 'weighted': True,
+                'multi_azimuth': bool(multi_azimuth),
+                'n_frames': int(n_frames),
+                'source_project': str(Path(project_path).resolve()),
+                'panel_key': panel_key, 'attempt_ref': attempt_ref,
+            },
+        )
+        # Batch Integrate copies the source HDF5's instrument/ PV snapshot into
+        # every store it writes; this path copies the same tree from the same
+        # file, so a reader can't tell which writer produced a given archive.
+        # The attempt already records where the frames came from (its
+        # inputs.src_cfg), which is the only reason this is reconstructible
+        # after the fact at all.
+        snap = _source_metadata_snapshot(meta, n_frames)
+        if snap:
+            entry.setdefault('extra', {})['source_h5'] = snap['path']
+
+        def _mutate(extracted, _snap=snap, _e=entry):
+            if _snap:
+                h5_metadata.write_into_extracted(extracted, _snap['datasets'])
+            prov.stamp_extracted(extracted, _e)
+
+        prov.rewrite_zip(out_path, _mutate)
+    except Exception:
+        # Best-effort, exactly as in Batch Integrate: a failed stamp must not
+        # cost the user an export that otherwise succeeded. The sidecar below
+        # is written either way.
+        pass
+
+    # The sidecar stays: it carries the attempt's own metadata (stored params,
+    # calibration snapshot, frame ids) that has no equivalent on the Batch
+    # Integrate path. It is an addition to the in-zip entry, not the place the
+    # geometry lives any more — and it is ours, not GSAS-II's: the sidecars
+    # G2pwd_MIDAS.py reads are <stem>.zarr.samprm/.instprm, which we do not
+    # write. See the module docstring.
     provenance = dict(meta)
     provenance["source_project"] = str(Path(project_path).resolve())
     provenance["panel_key"] = panel_key

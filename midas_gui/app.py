@@ -220,8 +220,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._mask_tab   = _tab(MaskTab,         "Mask Builder")
         self._cal_tab    = _tab(CalibrationTab,  "Calibrate")
         self._batch_tab  = _tab(BatchTab,        "Batch Integrate")
-        self._zarr_tab   = _tab(ZarrViewerTab,   "Zarr Viewer")
         self._queue_tab  = _tab(BatchQueueTab,   "Batch Queue")
+        self._zarr_tab   = _tab(ZarrViewerTab,   "Zarr Viewer")
         self._refine_tab = _tab(RefinementTab,   "Calib. Refinement")
         self._corr_tab   = _tab(CorrectionsTab,  "Corrections")
         self._pdf_tab    = _tab(PDFTab,          "PDF Analysis")
@@ -240,14 +240,22 @@ class MainWindow(QtWidgets.QMainWindow):
             (self._cal_tab,    "Calibrate",         True),
             (self._refine_tab, "Calib. Refinement", False),
             (self._batch_tab,  "Batch Integrate",   True),
-            (self._zarr_tab,   "Zarr Viewer",       False),
             (self._queue_tab,  "Batch Queue",       False),
+            (self._zarr_tab,   "Zarr Viewer",       False),
             (self._corr_tab,   "Corrections",       False),
             (self._pdf_tab,    "PDF Analysis",      False),
             (self._tex_tab,    "Texture",           False),
             (self._pump_tab,   "Pump Probe",        False),
             (self._export_tab, "Results & Export",  False),
         ]
+        # An ✕ on every optional tab. Closing one is the same act as unchecking
+        # it in Preferences ▸ Tabs: the widget survives (cross-tab wiring holds
+        # references to all twelve), it just leaves the bar, and the new set is
+        # written to the active profile so it sticks across restarts. Closable
+        # is a property of the bar rather than of one tab, so the four pinned
+        # tabs have their button stripped in apply_tab_visibility.
+        tabs.setTabsClosable(True)
+        tabs.tabCloseRequested.connect(self._close_optional_tab)
         self.apply_tab_visibility()
         self.apply_hydra_visibility()
 
@@ -418,6 +426,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if visible is None:
             visible = getattr(C, "DEFAULT_VISIBLE_TABS", None) or []
         visible = set(visible)
+        # Remembered in tab_specs order so _close_optional_tab can subtract one
+        # name from the set that is actually on screen, rather than re-reading a
+        # config file that a live apply (Preferences' "apply now") may predate.
+        self._visible_optional = [name for _w, name, always in self._tab_specs
+                                  if not always and name in visible]
         current = self._tabs.currentWidget()
         self._tabs.clear()
         i = 0
@@ -425,12 +438,66 @@ class MainWindow(QtWidgets.QMainWindow):
             if not (always or name in visible):
                 continue
             prefix = self._NUMERALS[i] if i < len(self._NUMERALS) else str(i)
-            self._tabs.addTab(widget, f"{prefix}  {name}")
+            idx = self._tabs.addTab(widget, f"{prefix}  {name}")
+            if always:
+                self._strip_close_button(idx)
             i += 1
         # keep the previously-selected tab focused if it is still shown
         idx = self._tabs.indexOf(current) if current is not None else -1
         if idx >= 0:
             self._tabs.setCurrentIndex(idx)
+
+    def _strip_close_button(self, index: int) -> None:
+        """Take the ✕ off a pinned tab, so the four ALWAYS_TABS can't be closed.
+
+        Which side the style puts the button on is platform-dependent (left on
+        macOS, right elsewhere), so clear both rather than guessing at one."""
+        bar = self._tabs.tabBar()
+        for side in (QtWidgets.QTabBar.RightSide, QtWidgets.QTabBar.LeftSide):
+            if bar.tabButton(index, side) is not None:
+                bar.setTabButton(index, side, None)
+
+    def _close_optional_tab(self, index: int) -> None:
+        """Hide the optional tab whose ✕ was clicked, and remember the choice.
+
+        Nothing is destroyed — this is exactly ``apply_tab_visibility`` with one
+        name removed, so the tab's in-memory state (a loaded file, a running
+        queue) is still there when it is turned back on from Preferences ▸ Tabs.
+
+        Pinned tabs have no ✕ to click, but the guard stays: a stripped button
+        is a per-index cosmetic, and anything that reaches ``tabCloseRequested``
+        another way (a re-styled bar, a future shortcut) must not be able to
+        close one of the four."""
+        widget = self._tabs.widget(index)
+        match = next(((n, a) for w, n, a in self._tab_specs if w is widget), None)
+        if match is None:
+            return
+        name, always = match
+        if always:
+            return
+        remaining = [n for n in getattr(self, "_visible_optional", []) if n != name]
+        self.apply_tab_visibility(remaining)
+        self._persist_visible_tabs(remaining)
+
+    def _persist_visible_tabs(self, visible) -> None:
+        """Write the optional-tab set to the active profile's ``ui.visible_tabs``
+        — the same key Preferences ▸ Tabs writes, so the two stay one setting
+        rather than two that can disagree.
+
+        Read-modify-write, because ``save_user_config`` replaces the whole
+        overlay file and the rest of it belongs to other settings. Best-effort:
+        a read-only config directory must not turn closing a tab into an error
+        dialog, so a failure is logged and the close still holds for this
+        session."""
+        try:
+            cfg = dict(settings.load_config() or {})
+            ui = dict(cfg.get("ui") or {})
+            ui["visible_tabs"] = list(visible)
+            cfg["ui"] = ui
+            settings.save_user_config(cfg)
+            C.reload_from_config()
+        except Exception as e:
+            _log(f"tab close: could not persist ui.visible_tabs ({e})")
 
     # ── header Exp ID field ─────────────────────────────────────────
     def expid(self) -> str:

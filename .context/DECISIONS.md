@@ -8,6 +8,238 @@ file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this
 date for the full uncondensed entries if ever needed._
 
+## 2026-09-28 — The source HDF5's `instrument/` tree is copied into the zarr wholesale
+
+**Question that started it.** "How come other instrument parameters from the
+HDF5 file are not available?" — comparing the Zarr Viewer's tree against the
+source file's much richer one in VS Code.
+
+**Why they were missing.** Not a bug, an architectural consequence. MIDAS's
+own pipeline gets these PVs into its output via an intermediate step:
+`ffGenerateZipRefactor._copy_hdf5_group_to_zarr` builds an "input zarr"
+holding the whole HDF5 tree, and `integrator.py:_enrich_zarr_with_metadata`
+re-copies the parts it wants into the final file. MIDAS_GUI skips that
+intermediate entirely — it reads frames plus six named scalars straight into
+memory and calls `write_gsas_zarr_zip`. That writer has no slot for arbitrary
+metadata: only `instrument_params` (a flat `str→float` that becomes
+`InstrumentParameters/`) and the per-frame `temperatures`/`pressures`/
+`currents`/`currents_i0` lists. So everything else stopped at the HDF5.
+
+**Decided: copy all of `instrument/`, not a curated subset** (user's choice
+from an explicit either/or). Mirrors what `_enrich_zarr_with_metadata` does.
+Measured against the user's real file: `instrument/` is 295 datasets and
+**23.5 KiB**, `active_instrument/` another 5 and 1.2 KiB — negligible against
+a 332 MB source, and it never needs revisiting when the DAQ adds a PV.
+GSAS-II ignores unknown groups (see the entry below), so it cannot affect an
+import. `misc/` is deliberately not copied: it is empty in practice, and its
+one real dataset (`NDArrayTimeStamp`) is *consumed* here rather than
+forwarded. `exchange/`/`NDArray` are the image data, already in the file as
+cakes.
+
+**The alignment rule is ours, not MIDAS's, and this is the part to remember.**
+`_enrich_zarr_with_metadata` decides "is this a per-frame array?" by testing
+`len(arr) == total_frames`. On real 20-ID files **that matches nothing at
+all**: the DAQ records one metadata sample per *acquisition*, lights and darks
+together in one flat array, so a 10-frame scan carries length-20 metadata.
+Copying at raw length would be wrong and averaging on a length match would
+never fire. So the copy takes an explicit `n_aligned` from
+`workers._HDF5StackGlobSource._metadata_frame_count` — the light-block length
+recovered from the timestamp gap, already in use for Temperature/Pressure —
+and matches `size >= n_aligned` against that instead. Anyone porting this
+back upstream, or comparing outputs against a MIDAS-produced file, needs to
+know the two pipelines answer this question differently.
+
+**Decided: the export path reconstructs the same tree from the recorded
+source path** (also the user's explicit choice). `tests/test_zarr_layout_parity.py`
+asserts both writers produce the same layout; a copy on the Batch Integrate
+path alone would have broken that the first time someone exported an
+HDF5-backed attempt. It turned out `project.append_integration_attempt`
+already records `inputs.src_cfg` — paths included — so no new field was
+needed. `gsas_export._source_metadata_snapshot` rebuilds the source through
+`workers._open_source_cfg` rather than reimplementing chunk arithmetic, which
+is the only way to be sure its notion of "which raw sub-frames are behind
+output frame *i*" matches what Batch Integrate already wrote. It returns
+`None` — export proceeds without the tree — for a TIFF attempt, a source
+that has since moved, or frames spanning several HDF5 files, since a single
+snapshot cannot honestly represent two files' PVs and picking one would
+mislabel the rest.
+
+**Measured cost, since it scales with frame count and nobody asked about it
+up front:** about **+0.15 s and +130 KiB per output frame** on a 300-PV tree.
+The bytes are overwhelmingly zarr's per-array bookkeeping (a `.zarray` JSON
+plus a chunk file for each of ~300 length-1 arrays), not the 23.5 KiB of
+actual readings; the time is the repack, since a zip can't be edited in
+place. Negligible on a 10-frame scan, roughly +9 min and +0.5 GB on a
+3600-frame one. Deliberately left with **no opt-out**: the decision was to
+copy the tree, and a switch nobody asked for is a setting to maintain and a
+second behaviour to reason about. If the cost does bite, the cheapest fix
+that keeps the chosen layout is a config key (default on) gating the copy —
+not a different representation, because a single JSON blob in the root attrs
+would be ~1 KiB and instant but would no longer match what MIDAS writes,
+which is the whole point of the choice.
+
+**`provenance.rewrite_zip` was factored out of `append_to_zip`.** A zip-backed
+zarr can't be edited in place, so every after-the-fact change costs a full
+extract/repack. The metadata copy and the provenance stamp are two such
+changes to the same file, per output frame. `rewrite_zip(path, mutate)` hands
+the extracted directory to a callback and `stamp_extracted` is the
+in-directory half of the old function, so the two edits share one pass.
+`append_to_zip` is now a two-line wrapper and its behaviour is unchanged.
+
+**Known limits, recorded so they aren't rediscovered:** `active_instrument` is
+five empty strings in every real file checked (a documented upstream DAQ gap —
+the same one that forces hutch detection to key off `varexE`/`varexD` in the
+source path); `misc` is empty; `Encoders` has no datasets. The copy is
+therefore mostly `instrument/` in practice, and `active_instrument` is
+included on the bet that it starts carrying meaning for free once the DAQ
+fills it in.
+
+**Not done, and worth not forgetting:** mpe_wf's `qa/test_zarr_metadata.py`
+asserts top-level `misc`/`Detector`/`StorageRing` groups in a MIDAS output.
+`_enrich_zarr_with_metadata` does not write those, and `PROVENANCE.md:186`
+concedes that test never runs against a real MIDAS-produced file. Do not
+treat it as a contract this repo has to satisfy.
+
+## 2026-09-28 — What GSAS-II actually reads from a MIDAS zarr (and why `GSAS2_PVS` is a red herring)
+
+Asked to make our zarr carry full provenance *and* whatever metadata GSAS-II
+needs, with mpe_wf's `instrument/GSAS2_PVS/*` container cited as the reference
+for the latter. Investigated before changing anything, because this is a file
+format an external tool consumes.
+
+**Read the real importer.** Fetched `GSASII/imports/G2pwd_MIDAS.py` from
+AdvancedPhotonSource/GSAS-II `main` rather than relying on the reconstruction
+in `tests/test_gsas_export.py`. Its `ContentsValidator` is one line —
+`midassections = ('InstrumentParameters', 'REtaMap', 'OmegaSumFrame')` — and
+`readMidas` touches only:
+
+- `REtaMap` rows 1/2/3 (2theta, eta, bin area; row 3 == 0 is the mask)
+- `OmegaSumFrame/<k>` arrays, and their attrs `Number Of Frames Summed`,
+  `FirstOme`, `LastOme`, `Temperature`, `Pressure`
+- `InstrumentParameters/<key>[0]`, renaming `Polariz`→`Polariz.` and
+  `SH_L`→`SH/L`, and reading `Distance` as Gonio. radius (microns → mm)
+- optional text sidecars `<stem>.samprm` / `<stem>.instprm`, which OVERRIDE
+  the zip
+
+**We already satisfy all of it.** Every group, array and attr in that list is
+written by the shared backend writer plus our ion-chamber/temperature stopgap.
+No gap on the GSAS-II side.
+
+**`GSAS2_PVS` is named for GSAS-II but GSAS-II never opens it.** It is not a
+MIDAS construct at all: mpe_wf's own `PROVENANCE.md` records `/instrument/*`,
+`/misc/*`, `/StorageRing/*`, `/Detector/*` (~230 scalar arrays) as an EPICS PV
+snapshot written into the **source detector HDF5** by the areaDetector plugin
+at acquisition time, copied HDF5→zarr by `ffGenerateZipRefactor.py` and
+re-copied by `integrator.py:_enrich_zarr_with_metadata()` (in the local MIDAS
+checkout at `FF_HEDM/workflows/integrator.py:595`). Verbatim, not computed.
+Replicating that tree would buy richer provenance and *nothing* for GSAS-II.
+
+Two further caveats, both worth recording because they are invisible from the
+outside and would otherwise be rediscovered the hard way:
+
+- `readMidas` does read `Temperature`/`Pressure` off the per-frame attrs, then
+  does `sampleprmList['Temperature'] = ...` — but `sampleprmList` is a *list of
+  tuples*, so that is a `TypeError`, swallowed by a bare `except`. The values
+  we write are dropped upstream. `.samprm` is today the only route by which
+  sample metadata reaches a GSAS-II histogram.
+- GSAS-II's default `InstrName` is `'APS 1-ID'`. An un-annotated 20-ID
+  histogram silently claims the wrong beamline.
+
+**What this means for the ask.** The real GSAS-II-facing gap is not a zarr
+container — it is the `.samprm`/`.instprm` pair we do not write. Our
+`gsas_export.py` docstring claimed the `.provenance.json` sidecar "mirrors the
+`.samprm`/`.instprm` convention"; it does not (wrong extension *and* wrong
+stem — GSAS-II wants `os.path.splitext(filename)[0] + '.samprm'`, i.e.
+`<stem>.zarr.samprm`). Corrected that docstring in place rather than leaving a
+claim that reads as "we write these".
+
+Deliberately **not** implemented yet, pending a decision: writing `.samprm`
+(InstrName, Temperature, Pressure) and `.instprm`, and/or copying the raw
+HDF5's `instrument/` group forward the way `_enrich_zarr_with_metadata` does.
+The second is feasible here despite having no intermediate zarr — MIDAS_GUI
+reads the same source HDF5 and already chunk-averages per-frame metadata in
+`_HDF5StackGlobSource`, which is the same rule that function applies. Both add
+files or groups to every export, so they are the user's call, not a quiet
+change.
+
+One caution on treating mpe_wf's `qa/test_zarr_metadata.py` as the schema of
+record: it asserts top-level `misc`/`Detector`/`StorageRing`, but
+`_enrich_zarr_with_metadata` copies only `instrument/` and
+`measurement/process/scan_parameters`. mpe_wf's own `PROVENANCE.md` says that
+QA file runs against a synthetic fixture and "has no actual round-trip coverage
+of [the MIDAS pipeline's] output, only of its own assumptions about what it
+produces". Parts of that contract may be aspirational.
+
+## 2026-09-28 — A zarr records the calibration that made it, and both writers agree on layout
+
+Asked where calibration parameters live in a `.zarr.zip`. They did not, in any
+readable form. What a file actually carried:
+
+- `InstrumentParameters/` — `Distance` (Lsd) and `Lam`, and that is all of the
+  fit. Its other entries (`Polariz`, `SH_L`, `U`/`V`/`W`, `X`/`Y`/`Z`) are
+  GSAS-II peak-profile defaults the backend writer emits regardless; on a real
+  file they read `U/V/W = 1.163/-0.126/0.063`, the stock GSAS values. They look
+  like calibration output and are not.
+- `REtaMap` — the full geometry, but *applied*: beam centre, tilts, distortion
+  and pixel size exist only as their effect on each bin's Radius/2θ/Eta/Q.
+  Recovering `tx` means inverting the map.
+- root `provenance_history` — cake params, backend versions, input sha256. No
+  geometry.
+
+So `BC_y`/`BC_z`, `tx`/`ty`/`tz`, `pxY`/`pxZ`, `NrPixelsY`/`NrPixelsZ` and the
+fifteen distortion harmonics were unrecoverable from the file. You could ask
+"what did this calibration do to each bin" but not "what calibration was this".
+
+Fixed by `provenance.instrument_params_from_spec(spec)`, passed to
+`build_entry(instrument_params=...)` at every zarr-writing call site. Three
+choices worth recording:
+
+- **Read off the live spec, not a paramstest file.** `read_instrument_params`
+  already parsed a geometry snapshot from disk, but a file says what someone
+  wrote earlier; the spec is what the integration is about to run with. The
+  new function is its companion, not its replacement.
+- **All fifteen distortion harmonics, always, even at zero.** Fifteen zeros is
+  noise, but an absent key cannot distinguish "no distortion was applied" from
+  "this writer did not record distortion". Zeros are a positive statement.
+  Panel fields and the residual-correction map stay conditional — those really
+  are absent from a plain single-panel geometry rather than zero.
+- **Coerce on the way out.** Geometry comes off `IntegrationSpec` as 0-dim
+  torch tensors, which no JSON attr accepts. `_plain()` handles tensor/array/
+  list and degrades anything unrecognised to `str` rather than raising — a
+  provenance stamp is best-effort and must never fail the write it describes.
+
+### Layout parity is now a tested contract
+
+Follow-on ask: whichever path writes a zarr, the layout must be identical. The
+two paths — `workers.BatchWorker` and `gsas_export.export_gsas_zarr` — call the
+same backend writer, so arrays and groups always matched by construction. The
+provenance did not:
+
+| | Batch Integrate | GSAS export (before) |
+|---|---|---|
+| provenance | `provenance_history` in the root attrs | sidecar `.provenance.json` only |
+| entry shape | real `build_entry()` | bare `dict(meta)` from the attempt |
+
+A file's history therefore lived in a different *place* and a different *shape*
+depending on who wrote it, and the export path's zip was anonymous from the
+inside. `export_gsas_zarr` now stamps a matching `build_entry()` into the zip.
+
+**The sidecar stays.** It was tempting to drop it as redundant, but it carries
+the attempt's own metadata — stored params, calibration snapshot, frame ids —
+which the Batch Integrate path has no equivalent for, and it mirrors the
+`.samprm`/`.instprm` convention `G2pwd_MIDAS.py` already expects. It is an
+addition to the in-zip entry, not the place geometry lives any more.
+
+`tests/test_zarr_layout_parity.py` drives both real writers over one geometry
+and diffs the result: same groups/arrays, same provenance entry key set, same
+`instrument_params`, same per-frame attr keys, differing only in the `tool`
+field that names the writer. Confirmed to fail 7/10 against the pre-change tree
+— a parity test that only ever passed would be worth nothing.
+
+Per-frame `I`/`I0`/`Temperature`/`Pressure` on the Batch path are deliberately
+*not* required of the export path: that is data an HDF5 source has and a logged
+attempt does not, which is a data difference, not a layout one.
+
 ## 2026-09-26 — Batch Integrate: "stride" replaced by "Combine sub-frames" (now applies to HDF5 and TIFF alike)
 
 Consolidated two frame-selection controls that had drifted: `start`/`end`
