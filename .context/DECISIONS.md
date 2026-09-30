@@ -8,6 +8,93 @@ file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this
 date for the full uncondensed entries if ever needed._
 
+## 2026-09-30 — PR #11 (junspark) merged into `main`: 8 staged checkpoints, not one big merge
+
+**Why staged rather than a single merge.** PR #11 was titled "Major
+documentation update" but was actually 48 commits / 67 files / +12405/-709
+lines — a new Zarr Viewer tab, a cake-parameters editor, omega tracking
+through Batch Integrate, several Calibrate/Corrections fixes, and a
+tab-close-button feature. The explicit concern was GUI layout: with one
+merge, a button/field/arrangement regression anywhere in that diff would
+have been nearly impossible to isolate. Instead `main` was advanced through
+the PR's own commit sequence in 8 checkpoints (grouped by the PR's already-
+atomic commit boundaries), each on a disposable `merge/pr11-staged` branch,
+with a targeted test run + `pyflakes` diff + stale-import grep + an offscreen
+screenshot pass after every checkpoint, before advancing to the next.
+`main` was never touched until all 8 were validated.
+
+**Mechanics.** `main` was a full ancestor of `origin/pr/11`'s tip (junspark
+periodically merges `main` back into his branch), so the *final* PR head was
+a clean fast-forward — but every *intermediate* checkpoint commit was not
+(his early commits predate our later `main` commits), so each checkpoint was
+a real 3-way merge, not `--ff-only`. Conflicts were almost always in
+`.context/STATE.md`/`DECISIONS.md` (both sides narrating their own recent
+work) and resolved as a straight concatenation — newest dated entries first,
+since both files are append-only/newest-first and the two branches' new
+entries never actually overlapped in time. Two exceptions needed real
+reading rather than mechanical concatenation, both in `workers.py`: see the
+two bug entries below.
+
+**Checkpoint table** (commit ranges into `origin/pr/11`, oldest to newest):
+
+| CP | Ends at | Content |
+|----|---------|---------|
+| 1 | `8f578a6` | Calibrate: seed spinbox steps, real ± parameter windows for crystalline calibrants, full-width Run/Save, named working dir + `.midas_scratch/`, `.instr.*` suffix, Distortion-selection persistence |
+| 2 | `1f25933` | Terminology: "average"/"avg"/"ave" → "mean" across 11 files (labels/tooltips/one method rename, no behavior change) |
+| 3 | `8e1a7f1` | Batch "Show bin grid" no longer resets pan/zoom; Corrections polarization plane default 0°→90° (physically correct, horizontal ring plane) |
+| 4 | `6f9c7c7` | Frozen-point backend guards (net-zero vs. our `main`, already had it via an earlier upstream merge); provenance `script`/`script_sha256`/`tag` fields |
+| 5 | `3e0e6c2` | **New Zarr Viewer tab**, visible-by-default; Batch's stream-mode preview read moved off the GUI thread (`StreamPreviewWorker`) to fix a real HDF5-over-NFS freeze; `HDF5_USE_FILE_LOCKING=FALSE` |
+| 6 | `35a7b8b` | Zarr Viewer moved after Batch Queue in the tab bar; ✕-to-close on every optional tab (with a legible custom icon); GSAS-II zarr contract + source HDF5 instrument-tree carry-through |
+| 7 | `6ef8e75` | Cake-parameters editor dialog (all 9 `cake_parameters` CSV columns in one place) |
+| 8 | `7ccf0fb` (PR head) | Omega (rotation-angle) tracking end-to-end: cake-summary/loader-hint readouts, background-job omega fix, 2D-CSV fix, chunk-read perf fix, freeze diagnostics (`kill -USR1`) |
+
+**Three real bugs found during the merge, not present in either branch alone:**
+
+1. **Checkpoint 1** — Frozen-point (high-tilt) silently ignores the Refine
+   card's ± tolerance window: `calib.py`'s `_seed_and_v1` call in that branch
+   is missing `tols=tols`, unlike the identical bayesian/joint call one block
+   above. Not a backend limitation (`spec_from_v1_params` reads `v1.tol*` the
+   same way regardless of pipeline) — a one-line omission. Disclosed with a
+   console warning (matching `first_time`'s existing, genuine disclosure)
+   rather than fixed inline, per instruction; the real fix is still open
+   (see STATE.md).
+2. **Checkpoint 3 merge conflict** — the PR's own zarr-crash fix
+   (`count_cake(None, ...)` when a physics correction leaves `geom` deliberately
+   `None`) only patched the zarr output path. Our own more-recent multi-azimuth
+   HDF5 "cake" output (`want_h5_cake`) shared the exact same crash, unpatched —
+   Multi-azimuth output + HDF5 + any physics correction together would have
+   crashed Batch Integrate. Fixed by sharing one geometry-fallback computation
+   between both consumers. Reproduced the crash on the unpatched code and
+   confirmed the fix via a standalone smoke run (no existing test covered this
+   combination). Checkpoint 8 independently re-derived the identical fix while
+   merging upstream on their side — confirms it was the correct fix, not just
+   a workaround.
+3. **Checkpoint 8** — `tests/test_viewer_origin_and_readout.py` (pre-existing,
+   untouched by the PR) went from 100% reliable to a ~50% reproducible
+   SIGSEGV/SIGBUS. Root cause: checkpoint 5's async `StreamPreviewWorker`
+   moved `BatchTab`'s default-preview read to a background `QThread`; that
+   thread's lazy `midas_integrate_v2` import (which pulls in `torch`) can be
+   the *first* torch import in the process when a test constructs a bare
+   `BatchTab()` as the first heavy widget — racing the main thread's own
+   import machinery inside torch's C-extension init. An `isRunning()`/`wait()`
+   mitigation was tried first and didn't help (confirming the race is inside
+   torch's init, not about thread lifetime). A real app never hits this,
+   since some earlier-constructed tab (Calibrate, via `midas_calibrate_v2`)
+   has always imported torch on the main thread first. Fixed by pre-warming
+   the import in the test itself. Verified 10/10 clean runs after, vs. 5/10
+   before.
+
+**Verified overall:** full 75-file per-file `pytest` sweep on a clean `HOME`
+green except the one known pre-existing `test_apply_project_calibration_
+single_detector` SIGABRT (present on clean `main` too — see 2026-08-30 entry).
+`pyflakes midas_gui/*.py` unchanged at 39 throughout (new warnings, when any
+appeared, were always the same pre-existing "intentional side-effect import"
+pattern applied to a new file). No stale imports or accidental deletions at
+any checkpoint (checked via `git ls-tree` diffs, not just `git status`). Every
+tab's content below the tab bar pixel-diffed byte-identical against a
+pre-merge baseline screenshot except where a checkpoint's own commits said it
+should differ.
+
 ## 2026-09-29 — A frozen GUI has to be able to tell us where it is stuck
 
 Two "the GUI is hanging" reports in one day, and neither could be answered.
