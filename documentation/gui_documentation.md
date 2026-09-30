@@ -1647,6 +1647,15 @@ iters, device, output dir) and Multi-panel detector groups are collapsible.
 A **Refining: … Fixed: …** line above the checkboxes states the current selection in
 words, so what the fit will actually vary is readable without decoding six checkboxes.
 
+Both halves of the Distortion row — the tick and the per-coefficient selection behind
+the **…** — are saved with the project and restored on reopen. Where the GUI Workspace
+and a recorded calibration attempt are both restored in one **File ▸ Open Project…**,
+the workspace wins for every input field: it was saved when you pressed Ctrl+S, whereas
+the attempt records what the fit used when it ran, so the workspace is the later of the
+two. The attempt still supplies its fitted result, cake and panel shifts. Opening an
+attempt *without* its workspace restores that run's fields, including the exact
+coefficient subset it refined.
+
 The defaults differ by calibrant kind, and the two sets are remembered separately.
 A crystalline calibrant fills the detector with rings and constrains Lsd and tilt
 well, so it starts at **Lsd + BC + ty + tz**. A d-spacing calibrant is fit from a
@@ -1713,16 +1722,55 @@ determined at all, prints:
 
 This warns, never blocks — loose data may be exactly what you meant to fit.
 
-**Limits…** (Refine card, d-spacing calibrants only) bounds a refined parameter to a
-window around its current seed, for holding a quantity you already know — a measured
-sample–detector distance — near its true value while the fit determines the rest. One
-row per parameter: `[enable] [± value] [unit]`, with a live preview of the resulting
-range. The unit is either `%` of the seed or the parameter's own absolute unit;
-tilts default to absolute because they seed at 0°, where a percentage window would
-pin the parameter exactly (a degenerate percentage window falls back to the row's
-absolute default rather than pinning it). All rows start off, so an untouched dialog
-leaves the fit exactly as it was. The button label shows how many are set. Limits
-apply to the manual fit only — the crystalline backend takes no bounds arguments.
+**Limits** (the ± column in the Refine card) bounds a parameter to a window around its
+seed, for holding a quantity you already know — a measured sample–detector distance —
+near its true value while the fit determines the rest. Each row is `[± value] [unit]`,
+with a live readout of the resulting range. The unit is either `%` of the seed or the
+parameter's own absolute unit; tilts default to absolute because they seed at 0°, where
+a percentage window would pin the parameter exactly (a degenerate percentage window
+falls back to the row's absolute default rather than pinning it).
+
+Both calibrant kinds are bounded, but they mean different things, so the column is
+shaped for each.
+
+*Manual (d-spacing) fit* — one row per free parameter, each with an **enable
+checkbox**. All rows start off, so an untouched card leaves the fit unbounded on the
+Levenberg–Marquardt path it has always used; ticking any row switches the solver to
+trust-region reflective.
+
+*Crystalline calibrants* — the MIDAS backend **always** bounds the fit
+(`CalibrationParams.tolLsd` and friends become hard `(lo, hi)` constraints on the LM
+solve), so there is no "off" state to offer: an untouched CeO2 fit already runs at
+**±15 mm** on Lsd, **±20 px** on the beam centre, **±3°** on tilt, **±0.001 Å** on λ
+and **±0.01** on the distortion coefficients. The rows are therefore always active and
+prefilled with the windows actually in force, so the card shows the real constraint
+rather than inviting you to add one. The backend's windows are coarser than the manual
+fit's — one value covers both beam-centre coordinates, one covers both refined tilts,
+and one covers all fifteen distortion slots — so those rows are merged, and `tx` has no
+row at all because this backend never refines it.
+
+Tightening a window also **shrinks that seed field's arrow step**, to 10 % of the full
+range: at ±15 mm the Lsd arrows move 3 mm, at ±2 mm they move 0.4 mm. Rows with no
+window in force fall back to the steps set in Preferences.
+
+**When the fit stops on a bound**, the parameter is reporting the bound rather than a
+measurement — a window that is visible but silently binding is barely better than an
+invisible one. Any such parameter is marked `(at limit)` in the **Results** grid and
+named in the Log, with a prompt to widen the window or check the seed. This needs the
+window's centre to be known, so it is reported for a run with **Use manual seed** on;
+an auto-seeded run is centred on a seed the GUI never sees, and reports nothing rather
+than guessing. Parameters you held fixed are never flagged — they never moved. The Log
+also records the windows in force at the start of each run, so a run's own record says
+what bounded it rather than only the card, which shows whatever is set now.
+
+One consequence worth knowing: `midas_calibrate_v2.calibrate()`, which the plain
+**One-shot** pipeline calls, accepts no window arguments and hardcodes Lsd and the beam
+centre as refined. So editing a limit, unchecking **Lsd** or **BC**, or refining exactly
+one of **ty**/**tz** makes the GUI route One-shot through the same lower-level routine
+the Four-stage / Bayesian / Joint pipelines use, which honours all of them. The Log says
+when this happens and why. The trade-off is that this route skips `calibrate()`'s
+STAGE-1 multi-hypothesis Lsd search and uses your seed as given, so a poor seed matters
+more. **First-time** cannot take windows at all and warns if any are set.
 
 ### Predicted-ring overlay (image toolbar)
 After a run, the calibrant's predicted ring positions are drawn in **lime** with a
@@ -1739,6 +1787,51 @@ it default to off meant the honest overlay was the one you had to go looking for
 One term is left out: the empirical `residual_corr_map` (a smooth sub-pixel ΔR(Y, Z)
 absorbed after the harmonics converge, and present only if you refined **Residual
 map**). When a result carries one, the status text beside the toolbar says so.
+
+### Working directory
+The **Working dir:** field (bottom of the left panel, with a **…** browse
+button and **Suggest**) is the one place calibration writes on its own. Deliberate saves
+are unaffected — **Save calibration.json** and **Save paramstest.txt** still ask
+where to put the file — but everything generated along the way goes here.
+
+Intermediates land in a `.midas_scratch/` subfolder inside it, one folder per
+run (and, in Hydra mode, one per panel inside that): the residual-correction
+map, the fit-time `<name>_panelshifts.txt`, and the backend's own scratch
+output. Everything in `.midas_scratch/` is re-derivable and safe to delete
+whenever you like — the GUI never deletes it for you, so a run's intermediates
+are still there when you come back to them.
+
+The field fills itself when you load data, following this order:
+
+1. the folder the data sits in, if its name ends in `_bc`;
+2. the nearest folder above it whose name ends in `_bc`;
+3. mpe_wf's convention read off the path — `<outroot>/<expid>_bc`, derived from
+   the standard `<outroot>/<expid>/<detector>/<froot>/<files>` layout;
+4. `<data folder>/<expid>_bc`, using the Exp ID from the header;
+5. otherwise **nothing** — the field stays empty and you pick a folder.
+
+An already-`_bc` folder wins over the positional reading because data does not
+always sit four levels deep: a file directly inside an `…_sep26_bc` directory
+read positionally would propose a folder next to the mount root that nobody can
+create. Note this is *not* the same default as Batch Integrate, which appends
+`/<froot>/<detector>/` to the same `_bc` root — calibration writes one run's
+scratch, not a tree of per-detector outputs.
+
+Autofill never overwrites a path you typed yourself, and never fills in a
+folder it can't write to — if the derived default isn't writable it is left out
+and the Log says why. **Suggest** re-derives it on demand, so a default you
+cleared or overwrote is always recoverable; unlike autofill it fills the field
+even when the folder isn't writable, and warns, so you can see what it picked.
+
+Leaving the field empty is allowed: intermediates then go to a temporary folder
+that is deleted when the GUI exits, and the Log says so. You lose the residual
+map and the fit-time panel shifts on exit unless you Save.
+
+If the folder can't be written to, **Run Calibration** stops before starting
+rather than discovering it minutes later with a finished fit that has quietly
+failed to record its residual map. Reopening a project whose stored working
+directory no longer resolves (a different machine, a mount that isn't there)
+logs a warning at open time — the stored path is left alone for you to correct.
 
 ### Run / Abort
 **Run Calibration** launches the worker; **Abort** terminates it and frees the slot so
@@ -1802,9 +1895,10 @@ a saved paramstest.txt or calibration.json is immediately usable standalone. Thi
 sidecar is (re)written **at Save time**, next to wherever the `.json`/`.txt` actually
 lands — so it always travels with the file you saved, rather than pointing back at the
 possibly-temporary file the live Fit run first wrote it to (Fit itself writes into
-whatever Output folder is set; with no Output folder, panel shifts land in an
-anonymous temp file and the Log says so explicitly, as a reminder that Save is needed
-to make them permanent). Each saved file gets its own uniquely-named sidecar (derived
+`.midas_scratch/` inside the **Working dir** — see above; with no working directory
+set, panel shifts land in a temporary folder that is deleted when the GUI exits and
+the Log says so explicitly, as a reminder that Save is needed to make them
+permanent). Each saved file gets its own uniquely-named sidecar (derived
 from that file's own name), so saving several calibrations into the same folder never
 has them overwrite each other's panel data. If a saved calibration/paramstest and its
 sidecar are later copied or moved together to somewhere the originally-recorded path
@@ -2068,6 +2162,12 @@ data source is loaded, mirroring `mpe_wf_saxs_waxs`'s own
   Profile selector) is a free-text label — e.g. `park_may26` — used as the
   fallback expid for Suggest above and saved with the Project (§16) and
   across restarts (last-used value, independent of Profile).
+- The Calibrate tab's **Working dir** (§5) is derived from the same `_bc`
+  convention but is deliberately *not* the same folder: it stops at the bare
+  `<expid>_bc` root, without the `/<froot>/<detector>/` tail, and it prefers
+  an existing `_bc` folder in the path over the positional reading. Batch
+  keeps the positional reading, which is correct for the layout Batch is
+  pointed at. See §5's "Working directory" for why they differ.
 
 ### Output formats — checkbox list behind a popup button (multi-select)
 Click the **Output format ▾** button to reveal a checkbox per format —
@@ -2119,6 +2219,12 @@ Also hosts **per-pixel gain training (LearnableGain)**: from a clean reference f
 a drifted frame, learn a spatial gain map `g_i = 1 + scale·r_i` by minimising
 `MSE(profile) + unity·Σ(g−1)² + smooth·TV(g)`; save as NPZ and apply with
 `corrected = raw / gain_map`.
+
+An **Output:** field (text + **…** browse button, in the gain card) sets where the save dialog
+opens, so a trained gain map doesn't default to whatever directory the app was
+launched from. It's a starting directory only — **Save gain map** still asks,
+and you can put the file anywhere. The path is saved with the tab's state, and
+is flagged in place if it stops resolving.
 
 ---
 

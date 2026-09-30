@@ -238,6 +238,18 @@ def stylesheet(checkmark_svg: str, up_arrow_svg: str = "", down_arrow_svg: str =
         background: {ACCENT}; border-color: {ACCENT}; image: url({checkmark_svg});
     }}
     QRadioButton::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; }}
+    /* A disabled box must not render in the live accent fill: a ticked-looking
+       control that ignores clicks reads as a bug in the app, not as "fixed". */
+    QCheckBox:disabled, QRadioButton:disabled {{ color: {MUTED}; }}
+    QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {{
+        border-color: #4a4a4a;
+    }}
+    QCheckBox::indicator:checked:disabled, QGroupBox::indicator:checked:disabled {{
+        background: #4a4a4a; border-color: #4a4a4a;
+    }}
+    QRadioButton::indicator:checked:disabled {{
+        background: #4a4a4a; border-color: #4a4a4a;
+    }}
 
     /* ── Top tab bar (the 9 modules) ──────────────────────────── */
     QTabWidget::pane {{ border: 1px solid {BORDER}; border-radius: 4px; top: -1px; }}

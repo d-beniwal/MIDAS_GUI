@@ -72,6 +72,7 @@ class CorrectionsTab(QtWidgets.QWidget):
             "gain_lr": self._gain_lr,
             "gain_unity_w": self._gain_unity_w,
             "gain_smooth_w": self._gain_smooth_w,
+            "out_ed": self._out_ed,
         }
 
     def get_state(self) -> dict:
@@ -182,6 +183,21 @@ class CorrectionsTab(QtWidgets.QWidget):
         self._gain_unity_w = _fspin(0.0, 1e6, 5, 1e-4); self._gain_smooth_w = _fspin(0.0, 1e6, 5, 1e-3)
         gf2.addRow(_twocol("unity_w:", self._gain_unity_w, "smooth_w:", self._gain_smooth_w))
         gv.addLayout(gf2)
+        # Output folder. Without one the Save dialog below opens on a bare
+        # filename, i.e. wherever the app happened to be launched from —
+        # the same problem the Calibrate tab's save dialogs already fixed.
+        self._out_ed = QtWidgets.QLineEdit()
+        self._out_ed.setPlaceholderText("Output folder…")
+        self._out_ed.setToolTip("Folder the gain map's Save dialog opens on.")
+        warn_if_path_missing(self._out_ed, self, is_output_dir=True)
+        bou = QtWidgets.QPushButton("…"); bou.setFixedWidth(30)
+        bou.clicked.connect(lambda: self._out_ed.setText(
+            QtWidgets.QFileDialog.getExistingDirectory(
+                self, "Output folder", browse_start_dir(self._out_ed.text())) or ""))
+        outr = QtWidgets.QHBoxLayout(); outr.setSpacing(4)
+        outr.addWidget(QtWidgets.QLabel("Output:"))
+        outr.addWidget(self._out_ed, 1); outr.addWidget(bou)
+        gv.addLayout(outr)
         self._gain_train_btn = QtWidgets.QPushButton("Train Gain")
         self._gain_train_btn.setEnabled(False)
         self._gain_train_btn.clicked.connect(self._train_gain)
@@ -304,8 +320,11 @@ class CorrectionsTab(QtWidgets.QWidget):
 
     def _save_gain_map(self):
         if self._gain_map is None: return
+        from pathlib import Path
+        out = self._out_ed.text().strip()
+        start = str(Path(browse_start_dir(out) or ".") / "gain_map.npz")
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save gain map", "gain_map.npz", "NumPy (*.npz)")
+            self, "Save gain map", start, "NumPy (*.npz)")
         if not path: return
         np.savez_compressed(path, gain_map=self._gain_map)
         self._log.append(f"[gain] saved: {path}")

@@ -290,8 +290,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Header Exp ID field: any tab that wants it for output-path
         # suggestions reads it live via this callback rather than keeping its
-        # own copy — today just Batch Integrate.
-        for tab in (self._batch_tab,):
+        # own copy — Batch Integrate names its output folder from it, Calibrate
+        # names the files it saves.
+        for tab in (self._batch_tab, self._cal_tab):
             set_provider = getattr(tab, "set_expid_provider", None)
             if set_provider is not None:
                 try:
@@ -713,7 +714,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 meta["_results_arrays"] = project.read_attempt_results(path, ref)
                 integrate_attempts[k] = meta
             if calib_attempts:
-                self._cal_tab.apply_project_calibration(calib_attempts)
+                # Fields only when the workspace didn't already restore them —
+                # see apply_project_calibration's restore_fields.
+                self._cal_tab.apply_project_calibration(
+                    calib_attempts, restore_fields="Calibrate" not in tab_names)
                 restored.append("Calibrate: " + ", ".join(sorted(calib_attempts)))
                 # apply_project_calibration only redraws the Calibrate tab
                 # itself — it doesn't emit calibrationDone (that signal is

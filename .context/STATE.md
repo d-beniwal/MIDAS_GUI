@@ -1,11 +1,19 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-09-26 (Batch Integrate: stride replaced by unified "Combine sub-frames" for HDF5 + TIFF)_
+_Last updated: 2026-09-30 (merging PR #11 (junspark) into main via staged checkpoints — see DECISIONS)_
 
 ## Now working on
 
-Nothing in progress.
+**Merging PR #11 (junspark, 48 commits) into `main` in ~8 GUI-safe
+checkpoints on `merge/pr11-staged`**, testing + offscreen-screenshotting
+after each so a layout regression is pinned to a small commit range instead
+of the whole 12k-line PR. Currently past checkpoint 1 (Calibrate polish
+through `8f578a6`). Their branch already merged our `main` back into itself
+periodically, so each checkpoint is a real (non-fast-forward) 3-way merge
+against their commit; only the final PR head is a clean fast-forward. Plan
+lives in this session; full checkpoint table + rationale in DECISIONS once
+the merge completes.
 
 Open follow-ups, none blocking:
 - `documentation/calibration_unification_plan.md` — the three Calibrate UI
@@ -222,6 +230,24 @@ rings that stay put, and a two-way geometry hand-off.** Six requested changes:
 `tab_calibrate.py`, `app.py`; new `tests/test_view_tab_controls.py` (31 tests).
 **Verified:** 21-file per-file sweep green, zero new pyflakes warnings vs.
 HEAD, offscreen screenshots of all three toolbars + the card column.
+**2026-09-09 (later) — Parameter limits for crystalline calibrants; One-shot
+refine flags made real.** The "limits are not available for this calibrant"
+label shipped in the entry below was **wrong**: `CalibrationParams` carries
+`tolLsd`/`tolBC`/`tolTilts`/`tolDistortion`/`tolWavelength` and
+`param_vector.bounds()` makes them hard LM box constraints, so crystalline fits
+were already bounded at invisible defaults (±15 mm / ±20 px / ±3°). The Refine
+card now shows those windows, always-on and prefilled from the installed
+backend, merged to the backend's coarser granularity (one BC window, one tilt
+window, no tx). Plain One-shot is rerouted through
+`build_v1_params` + `pipelines.single.autocalibrate` whenever `calibrate()`
+cannot express what was asked — a custom window, a held Lsd/BC, or exactly one
+of ty/tz — which also makes those checkboxes genuinely control the fit for the
+first time. Seed arrow steps now follow the window (10 % of the full range).
+**Files:** `calib.py` (`tol_defaults`/`tols_are_default`/`_resolve_seed`,
+`build_v1_params(tols=)`, reroute), `tab_calibrate.py` (`_sync_limits_mode`,
+`_crystalline_tols`, `_sync_seed_steps`), `dialogs.py` (distortion row; dead
+`ParameterLimitsDialog` deleted), tests in `test_calibrate_panel_save.py` and
+`test_manual_dspacing_calib_ui.py`. Docs: DECISIONS + `gui_documentation.md` §5.
 
 _(Older entries — `eebce45` Batch Integrate run/restore crash from stale
 views under a new axis context (reset stack/waterfall/cake views before

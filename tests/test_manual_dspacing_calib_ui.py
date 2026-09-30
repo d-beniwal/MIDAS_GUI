@@ -477,27 +477,101 @@ def test_each_calibrant_kind_keeps_its_own_refine_flags(app):
     assert _flags(tab)["ty"] is False             # crystalline edit remembered
 
 
-def test_limits_button_is_manual_fit_only(app):
-    """The crystalline backend takes no bounds kwargs, so the control is
-    hidden for it — and the distortion row, which the manual fit cannot do,
-    is hidden the other way round."""
+def test_limits_column_is_shaped_per_calibrant_kind(app):
+    """Both kinds bound their fit, at different granularity.
+
+    ``CalibrationParams`` carries one window for both centre coordinates and
+    one for both refined tilts, and never refines tx, so those rows are hidden
+    for a crystalline calibrant and a distortion row (which the manual fit has
+    no model for) takes their place.
+    """
     import midas_gui.tab_calibrate as tab_calibrate_mod
     tab = tab_calibrate_mod.CalibrationTab()
 
+    def shown():
+        return {n for n, cells in tab._limit_row_cells.items()
+                if not cells[2].isHidden()}
+
     tab._cal.setCurrentIndex(tab._cal.findText("CeO2"))
-    assert tab._limits_host.isHidden()
-    assert not tab._limits_na_lbl.isHidden()   # says *why* it is gone
+    assert shown() == {"Lsd", "BC_y", "ty", "wavelength_A", "distortion"}
     assert not tab._dist_row.isHidden()
+    # Always applied, so the opt-in checkbox would state something false —
+    # including on the distortion row, which used to keep a disabled box
+    # visible purely to caption itself and so read as a live, ticked control.
+    assert all(tab._limit_widgets[n][0].isHidden()
+               for n in ("Lsd", "BC_y", "ty", "wavelength_A", "distortion"))
+    assert tab._limit_name_lbls["distortion"].text() == "Distortion"
+    assert not tab._limit_name_lbls["distortion"].isHidden()
+    assert all(tab._limit_widgets[n][0].isChecked()
+               for n in ("Lsd", "BC_y", "ty", "wavelength_A", "distortion"))
 
     tab._cal.setCurrentIndex(tab._cal.findText("AgBH (silver behenate)"))
-    assert not tab._limits_host.isHidden()
-    assert tab._limits_na_lbl.isHidden()
+    assert shown() == {"Lsd", "BC_y", "BC_z", "ty", "tz", "tx", "wavelength_A"}
     assert tab._dist_row.isHidden()
+    # The manual fit's own rows do get a live box, and BC_y/BC_z keep the
+    # sub-labels that tell the two apart under the single "BC" refine box.
+    assert not tab._limit_widgets["BC_y"][0].isHidden()
+    assert tab._limit_name_lbls["BC_y"].text() == "BC_y"
+    # ...and opt-in again, so an untouched card leaves the manual fit unbounded.
+    assert not any(cb.isChecked() for cb, _s, _c in tab._limit_widgets.values())
+    assert tab._limit_bounds() == (None, [])
+
+
+def test_crystalline_limits_show_the_windows_actually_in_force(app):
+    """The crystalline windows always apply, so the card is prefilled from the
+    backend's own defaults and reports no override until one is edited."""
+    import midas_gui.tab_calibrate as tab_calibrate_mod
+    from midas_gui.calib import tol_defaults
+    tab = tab_calibrate_mod.CalibrationTab()
+    tab._cal.setCurrentIndex(tab._cal.findText("CeO2"))
+    d = tol_defaults()
+
+    assert tab._limit_widgets["Lsd"][1].value() == pytest.approx(d["tolLsd"] / 1000.0)
+    assert tab._limit_widgets["BC_y"][1].value() == pytest.approx(d["tolBC"])
+    assert tab._limit_widgets["ty"][1].value() == pytest.approx(d["tolTilts"])
+    # Untouched defaults ask the backend for nothing it would not already do,
+    # which is what keeps run_pipeline on the plain calibrate() path.
+    assert tab._crystalline_tols() is None
+    assert "Always applied" in tab._limits_note.text()
+
+    tab._manual_seed_check.setChecked(True)
+    tab._seed_lsd.setValue(1000.0)
+    _set_limit(tab, "Lsd", 2.0, "mm")
+    tols = tab._crystalline_tols()
+    assert tols is not None
+    assert tols["tolLsd"] == pytest.approx(2000.0)        # mm entered, µm stored
+    assert tols["tolBC"] == pytest.approx(d["tolBC"])     # untouched rows ride along
+
+
+def test_seed_step_follows_the_limit_window(app):
+    """A window states how far a value can sensibly move, so it is a better
+    arrow step than a fixed constant."""
+    import midas_gui.tab_calibrate as tab_calibrate_mod
+    from midas_gui.constants import DEFAULT_STEP_LSD_MM
+    tab = tab_calibrate_mod.CalibrationTab()
+    tab._cal.setCurrentIndex(tab._cal.findText("CeO2"))
+    tab._manual_seed_check.setChecked(True)
+    tab._seed_lsd.setValue(1000.0)
+
+    _set_limit(tab, "Lsd", 5.0, "mm")
+    # 10% of the full ±5 mm span.
+    assert tab._seed_lsd.singleStep() == pytest.approx(1.0)
+    # The merged crystalline BC window drives both centre boxes.
+    _set_limit(tab, "BC_y", 20.0, "px")
+    assert tab._seed_bcy.singleStep() == pytest.approx(4.0)
+    assert tab._seed_bcz.singleStep() == pytest.approx(4.0)
+
+    # No window in force -> back to the configured constant.
+    tab._cal.setCurrentIndex(tab._cal.findText("AgBH (silver behenate)"))
+    assert tab._seed_lsd.singleStep() == pytest.approx(DEFAULT_STEP_LSD_MM)
 
 
 def test_limit_bounds_conversion_and_zero_value_guard(app):
     import midas_gui.tab_calibrate as tab_calibrate_mod
     tab = tab_calibrate_mod.CalibrationTab()
+    # _limit_bounds() feeds the manual d-spacing fit, which only runs for a
+    # d-spacing calibrant — crystalline windows go through _crystalline_tols().
+    tab._cal.setCurrentIndex(tab._cal.findText("AgBH (silver behenate)"))
     tab._manual_seed_check.setChecked(True)
     tab._seed_lsd.setValue(13500.0)     # mm in the UI, µm in the fit
     tab._seed_bcy.setValue(129.0)
@@ -527,6 +601,7 @@ def test_seed_relative_limits_are_dropped_when_the_manual_seed_is_off(app):
     the wavelength, which is always live, is kept."""
     import midas_gui.tab_calibrate as tab_calibrate_mod
     tab = tab_calibrate_mod.CalibrationTab()
+    tab._cal.setCurrentIndex(tab._cal.findText("AgBH (silver behenate)"))
     tab._manual_seed_check.setChecked(False)
     tab._wl.setValue(0.173)
     _set_limit(tab, "Lsd", 5.0, "%")
@@ -810,17 +885,44 @@ def _grid_rows(grid):
     return {r: [w for _c, w in sorted(cells)] for r, cells in rows.items()}
 
 
-def test_refine_card_lays_out_as_three_rows(app):
-    """Lsd/BC/Wavelength, then the tilts — their own tightly-spaced grid —
-    then the two whole-image refinements in a separate grid (needs a wider
-    "…" button column, so it keeps its own spacing) — instead of one
-    control per line."""
+def test_refine_card_interleaves_each_flag_with_its_window(app):
+    """One row per parameter: the "refine?" checkbox in column 0 and the +/-
+    window bounding that same parameter on the rest of the line, so the two
+    decisions about one parameter read together.
+
+    This replaces an earlier compact 2x3 refine grid with the limits in a
+    separate block below it. That block had nowhere to hang a per-parameter
+    window, and it captioned the crystalline case "the MIDAS calibrate backend
+    takes no bounds arguments" -- which is false: CalibrationParams.tol* become
+    hard box constraints in midas_calibrate/param_vector.py:bounds().
+    """
     import midas_gui.tab_calibrate as tab_calibrate_mod
     tab = tab_calibrate_mod.CalibrationTab()
     rows = _grid_rows(tab._refine_grid)
-    assert len(rows) == 2, f"expected 2 rows, got {sorted(rows)}"
-    assert rows[0] == [tab._ref_lsd, tab._ref_bc, tab._ref_wl]
-    assert rows[1] == [tab._ref_ty, tab._ref_tz, tab._ref_tx]
+    order = ("Lsd", "BC_y", "BC_z", "ty", "tz", "tx", "wavelength_A",
+             "distortion")
+    # Header, one row per parameter, then the trailing note.
+    assert sorted(rows) == list(range(len(order) + 2)), f"got {sorted(rows)}"
+    assert rows[0] == [tab._limits_hdr]
+    assert rows[len(order) + 1] == [tab._limits_note]
+
+    for r, name in enumerate(order, start=1):
+        assert tab._limit_row_index[name] == r, f"{name} on row {r}?"
+        _cb, spin, combo = tab._limit_widgets[name]
+        assert spin in rows[r] and combo in rows[r], \
+            f"{name}'s window is not on its own row"
+
+    # The refine flag leads its parameter's row. BC's single box frees both
+    # centre coordinates, so it spans the pair and anchors on BC_y; distortion
+    # and BC_z have no box of their own in this grid.
+    for name, box in (("Lsd", tab._ref_lsd), ("BC_y", tab._ref_bc),
+                      ("ty", tab._ref_ty), ("tz", tab._ref_tz),
+                      ("tx", tab._ref_tx), ("wavelength_A", tab._ref_wl)):
+        assert rows[tab._limit_row_index[name]][0] is box, f"{name} unflagged"
+
+    # Distortion's refine box stays below the grid: it carries the "..."
+    # button for the per-coefficient dialog, and Residual map is an output,
+    # not a fit parameter, so neither belongs on a parameter row.
     bottom_rows = _grid_rows(tab._refine_grid_bottom)
     assert len(bottom_rows) == 1, f"expected 1 row, got {sorted(bottom_rows)}"
     assert bottom_rows[0] == [tab._dist_row, tab._build_rc]
