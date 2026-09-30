@@ -2975,6 +2975,32 @@ from hard-aborting on an exception inside a slot. Each tab is built in isolation
 that fails becomes an error placeholder instead of taking the window down. If the app
 ever "pops up and dies" (typically on Windows), send that log file.
 
+**Freeze diagnostics (`kill -USR1`).** A crash leaves a traceback; a *freeze*
+leaves nothing, and the moment the window stops repainting is exactly the
+moment you can no longer ask the app anything. `launch.py` therefore arms a
+`SIGUSR1` handler at startup (Linux/macOS; Windows has no `SIGUSR1`, so the
+guard skips it). While the GUI is unresponsive, from another terminal:
+
+```
+pgrep -u $USER -f launch.py          # or -f midas-gui
+kill -USR1 <pid>
+tail -60 ~/midas_gui_hang.log
+```
+
+Every thread's Python stack is appended to `~/midas_gui_hang.log`, naming the
+exact call that is blocking the event loop. The process is **not** killed or
+interrupted — unlike `faulthandler`'s fatal-error handlers, this one only
+prints, so you can signal a stuck GUI repeatedly and watch whether the stack
+moves (slow but progressing) or stays put (genuinely wedged). It is inert
+until signalled and costs nothing at runtime.
+
+Worth knowing what is *not* a freeze: Batch Integrate's Detector-view preview
+is fetched by a background `StreamPreviewWorker` and never blocks the event
+loop, and the ω mapping readout reads HDF5 headers only (no pixels),
+coalesced through a 150 ms timer and skipped entirely when the source has not
+changed. A window that stops repainting during either is a bug worth a stack
+dump, not expected behaviour.
+
 ---
 
 ## 16. Configuration & Defaults

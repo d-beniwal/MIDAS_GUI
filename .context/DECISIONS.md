@@ -8,6 +8,30 @@ file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this
 date for the full uncondensed entries if ever needed._
 
+## 2026-09-29 — A frozen GUI has to be able to tell us where it is stuck
+
+Two "the GUI is hanging" reports in one day, and neither could be answered.
+The first had a real cause (the Detector-view preview read the whole file);
+the second could not be reproduced at all — the full file-selection path,
+timed offscreen against the same 24 GB VAREX file, costs 0.27 s for
+`list_h5_datasets` and milliseconds for everything after it, and the preview
+that used to block now runs in a `StreamPreviewWorker`. Guessing from a
+screenshot is not a diagnosis, and every guess costs a beamline round trip.
+
+So `launch.py` now arms `faulthandler.register(SIGUSR1, all_threads=True,
+chain=False)`. `kill -USR1 <pid>` appends every thread's stack to
+`~/midas_gui_hang.log` **without** killing or interrupting the process, which
+is the whole point: the fatal-error handlers `app.py` already installs only
+fire on a crash, and a freeze is not a crash. Signalling twice shows whether
+the stack is moving. It is inert until signalled, guarded on `hasattr(signal,
+"SIGUSR1")` for Windows, and wrapped in a bare `except` because a debugging
+aid must never be the reason startup fails.
+
+`py-spy` would also have worked and needs no code, but it is not in the
+`midas-gui` env and `environment.yml` is the source of truth for that env —
+adding a dev tool to a beamline environment mid-session is a bigger change
+than eleven lines in the launcher.
+
 ## 2026-09-29 — Merging upstream's cake HDF5: which side won, and why
 
 Upstream (`d-beniwal/MIDAS_GUI`) added two commits on 2026-09-28 —
