@@ -2177,6 +2177,13 @@ attempt re-exports with the same angles the run used, including a measured
 channel the export path can no longer reach. Each run logs one
 `[batch] omega: …` line naming the source it actually used.
 
+Both run paths carry these settings: **Start Integration** passes them
+in-process, and **Run as background job** serialises them onto the
+`batch_cli` command line as `--ome-start` / `--ome-step` / `--ome-channel` /
+`--ome-collapse`. Start and step are always on that command line, even at the
+0/0 default, so the launched command echoed into the **Logs** tab always
+states the angles the detached job will record.
+
 **Leaving both at 0 now means a genuine ω = 0 on every frame**, not "unset" —
 a stationary sample really is at zero. This is a visible change for anyone who
 never opens this editor: `/Omegas` used to be filled with the frame index

@@ -2055,6 +2055,20 @@ class BatchTab(QtWidgets.QWidget):
             argv += ["--multi-azimuth"]
         argv += ["--weighted"] if bool(self._azim.currentData()) else ["--no-weighted"]
 
+        # Rotation angle. Emitted from the same _omega_cfg() the in-process
+        # run uses, so both paths write identical omegas for identical
+        # settings — this argv is the only channel a background job has to
+        # learn them, and omitting it silently wrote ω=0 on every frame.
+        # start/step go out unconditionally (even at 0/0, which is a real
+        # angle, not "unset") so the launched command line in the Logs tab
+        # always states the angles the job will record.
+        ome = self._omega_cfg()
+        argv += ["--ome-start", str(ome["start"]), "--ome-step", str(ome["step"])]
+        if ome["channel"]:
+            argv += ["--ome-channel", ome["channel"]]
+        if ome["collapse"]:
+            argv += ["--ome-collapse"]
+
         if self._corr_widget.polar_check.isChecked():
             argv += ["--polarization",
                      "--pol-fraction", str(self._corr_widget.pol_fraction.value()),

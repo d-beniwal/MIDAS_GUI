@@ -75,6 +75,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--combine-op", default="mean",
                    choices=["mean", "sum", "max", "median"])
 
+    # Rotation angle per output frame. These mirror the Batch Integrate tab's
+    # own omega widgets one-for-one (see tab_batch.BatchTab._omega_cfg), so a
+    # background job records the same angles an in-process run of the same
+    # settings would. Defaulting start/step to 0.0 is not a sentinel for
+    # "unset": it is a genuine 0 deg on every frame, which is the right answer
+    # for a stationary sample (see cake_params.omega_for_window).
+    p.add_argument("--ome-start", type=float, default=0.0,
+                   help="OME_START: omega (deg) of raw sub-frame 0")
+    p.add_argument("--ome-step", type=float, default=0.0,
+                   help="OME_STEP: omega increment (deg) per raw sub-frame")
+    p.add_argument("--ome-channel", default="",
+                   help="1-D HDF5 dataset holding a measured omega per raw "
+                        "sub-frame; blank falls back to --ome-start/--ome-step")
+    p.add_argument("--ome-collapse", action="store_true",
+                   help="Averaged/summed data: give every output frame the one "
+                        "run-wide mean omega instead of a per-frame value")
+
     p.add_argument("--multi-azimuth", action="store_true")
     p.add_argument("--weighted", dest="weighted", action="store_true", default=True)
     p.add_argument("--no-weighted", dest="weighted", action="store_false")
@@ -127,6 +144,17 @@ def _source_cfg(args) -> dict:
                 "dataset": args.dataset,
                 "frame_start": args.frame_start, "frame_end": args.frame_end, **combine}
     raise SystemExit(f"Unknown --source-type: {args.source_type}")
+
+
+def _omega_cfg(args) -> dict:
+    """The rotation half of the run configuration, in the shape
+    ``BatchWorker`` takes it. Mirrors ``BatchTab._omega_cfg`` exactly — the two
+    must stay the same shape or a background job and an in-process run of the
+    same settings write different angles, which is the bug this function
+    exists to prevent."""
+    return {"start": float(args.ome_start), "step": float(args.ome_step),
+            "channel": (args.ome_channel or "").strip(),
+            "collapse": bool(args.ome_collapse)}
 
 
 def _load_field(path):
@@ -219,6 +247,7 @@ def main(argv=None) -> int:
         monitor_file=args.monitor_file,
         dark=dark, bright=bright, background=background, bright_mode=args.bright_mode,
         weighted=args.weighted, multi_azimuth=args.multi_azimuth,
+        omega_cfg=_omega_cfg(args),
         im_trans=tuple(spec.TransOpt or ()), calibration_snapshot=calib_snapshot)
 
     exit_code = [0]

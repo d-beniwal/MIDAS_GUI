@@ -213,6 +213,43 @@ comparison. Four of the eleven fail against the old implementation; the rest
 pin frame-for-frame equivalence with it, because a faster wrong answer is
 not the deliverable.
 
+## 2026-09-29 — Omega on the background-job path: serialise the config, don't re-derive it
+
+The omega feature shipped wired into `BatchTab._run` only. `_run_as_job`
+builds an argv for a detached `python -m midas_gui.batch_cli`, and that argv
+carried no omega flags, so every background job wrote ω = 0 on every frame
+regardless of the Cake parameters. Found from a real 20-ID run whose log said
+`OME_START=0, OME_STEP=0` while the tab's summary read `Δω 1°/sub-frame`.
+
+**Why it was invisible.** Nothing could raise. From inside `BatchWorker` an
+unpassed `omega_cfg` and a genuine stationary 0°/0° are the same thing — which
+is a *deliberate* earlier decision (see the "0/0 is a real angle, not a
+sentinel" entry), and the right one: a sentinel would have made a stationary
+sample unrepresentable. The cost is that the config must be proven to arrive,
+because its absence is indistinguishable from a valid value. That is a
+testing obligation, not a reason to reintroduce a sentinel.
+
+**Decided: one shape, serialised, never recomputed.** `batch_cli._omega_cfg`
+mirrors `BatchTab._omega_cfg` key-for-key and the tab emits from that same
+method, rather than the CLI re-deriving angles from a cake CSV it would have
+to be handed separately. Two derivations of the same quantity is how the
+paths drifted apart in the first place, and the measured-channel case cannot
+be re-derived from a CSV at all.
+
+**Decided: `--ome-start`/`--ome-step` go out unconditionally**, including at
+0/0 where they are no-ops. The launched command line is echoed into the Logs
+tab and is the only window a user has into a detached job's configuration; an
+omitted flag is precisely what made this bug unobservable. Channel and
+collapse stay conditional — they have an unambiguous "off" spelling.
+
+**The regression guard is a round trip, not two half-assertions.**
+`tests/test_batch_cli_omega.py` drives the real argv builder and feeds its
+output to the real CLI parser, asserting `batch_cli._omega_cfg(parsed) ==
+tab._omega_cfg()`. Asserting "the tab emits a flag" and "the CLI parses a
+flag" separately is exactly the pair of green tests that would have coexisted
+with this bug. `batch_cli.py` had no tests of its own beyond `_source_cfg`,
+which is why this path was the one that rotted.
+
 ## 2026-09-29 — Merging upstream's cake HDF5: which side won, and why
 
 Upstream (`d-beniwal/MIDAS_GUI`) added two commits on 2026-09-28 —
