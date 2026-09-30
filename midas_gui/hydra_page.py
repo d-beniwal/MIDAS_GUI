@@ -113,7 +113,7 @@ class HydraViewerPage(QtWidgets.QWidget):
         self._profile_view = HydraProfileViewer()
         self._rad_r_bin = _fspin(0.1, 20.0, 2, 1.0, "px"); self._rad_r_bin.setFixedWidth(56)
         self._rad_r_bin.setToolTip(
-            "Radial bin size for the azimuthal average — shared across all "
+            "Radial bin size for the azimuthal mean — shared across all "
             "Hydra panels and the composite.")
         self._rad_auto = QtWidgets.QCheckBox("Auto"); self._rad_auto.setChecked(True)
         self._rad_auto.setToolTip("Recompute each panel's radial integration when "
@@ -282,7 +282,7 @@ class HydraViewerPage(QtWidgets.QWidget):
     def _reseed_composite_card_if_needed(self, big_det_size: int, active_panels: dict):
         """Seed the composite card's beam centre at the canvas centre (the
         composite is registered so its own geometric centre IS BigDetSize/2)
-        the first time this canvas size is seen. Lsd is averaged across the
+        the first time this canvas size is seen. Lsd is the mean across the
         contributing panels (they're all roughly the same sample-to-detector
         distance on a real Hydra rig); wavelength comes from whichever ge
         card was loaded first, since DetectorState itself has no wavelength

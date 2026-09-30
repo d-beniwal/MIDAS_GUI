@@ -235,7 +235,7 @@ class AutoAttenuationDialog(QtWidgets.QMainWindow):
         self.chk_dark_mask.setToolTip(
             "" if has_dark_stack else
             "Requires a dark source with multiple raw frames captured "
-            "(not just a single averaged dark)."
+            "(not just a single mean dark)."
         )
 
         self.chk_user_mask.setChecked(has_mask)

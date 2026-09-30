@@ -6,7 +6,7 @@ mounting differs per panel), its own initial seed (BC/Lsd/tilts — each GE
 panel has a physically independent beam centre), Pick BC/Pick Ring wiring,
 and its own fitted result + rings + Ring-Residuals chart + Results grid.
 Everything shared across all 4 panels (pipeline, wavelength/pixel/calibrant,
-refine-parameter choice, threshold, averaging, advanced settings) lives on
+refine-parameter choice, threshold, frame mean, advanced settings) lives on
 ``HydraCalibrationPage`` instead — this card only owns what is genuinely
 independent per physical panel.
 

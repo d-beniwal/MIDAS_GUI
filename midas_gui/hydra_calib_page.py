@@ -5,7 +5,7 @@ composition: a shared ``HydraLoaderPanel`` for data, one small
 ``HydraCalibPanelCard`` per GE panel (Transforms + seed + fitted result,
 each genuinely independent per physical panel — see that module's
 docstring), and shared "recipe" cards (Pipeline, Detector & Calibrant,
-Threshold, Average frames, Refine parameters, Advanced) applied identically
+Threshold, Mean of frames, Refine parameters, Advanced) applied identically
 to every panel's fit, since it's the same beam and the same choice of what
 to refine for all 4.
 
@@ -16,11 +16,11 @@ Parallel (all workers started at once — see ``workers.CalibrationWorker``'s
 
 Deliberately does NOT surface ``HydraLoaderPanel.projection_card()`` — the
 single-detector Calibrate tab has no stack-projection feature either (it
-only offers frame averaging), and ``HydraLoaderPanel.projected(n)`` returns
+only offers a frame mean), and ``HydraLoaderPanel.projected(n)`` returns
 an *already* dark/bright/background-corrected frame, which would be
 double-corrected if handed to ``CalibrationWorker`` (which expects a raw
-frame and applies bright/background itself). Averaging frames instead
-(the "Average frames" card below) mirrors the single-detector tab exactly.
+frame and applies bright/background itself). Taking a frame mean instead
+(the "Mean of frames" card below) mirrors the single-detector tab exactly.
 """
 from __future__ import annotations
 
@@ -277,9 +277,9 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._thr_max.valueChanged.connect(self._on_threshold_changed)
         lv.addWidget(thr)
 
-        # Average frames (shared range — panels are synchronized frames of one scan)
-        avgc = S.make_card("Average frames  (shared range)")
-        self._avg_check = QtWidgets.QCheckBox("Average frames into a single image")
+        # Mean of frames (shared range — panels are synchronized frames of one scan)
+        avgc = S.make_card("Mean of frames  (shared range)")
+        self._avg_check = QtWidgets.QCheckBox("Combine frames into a single mean image")
         avgc.body.addWidget(self._avg_check)
         self._avg_start = _NoScrollSpinBox(); self._avg_start.setRange(0, 999999)
         self._avg_end = _NoScrollSpinBox(); self._avg_end.setRange(0, 999999)
@@ -631,14 +631,14 @@ class HydraCalibrationPage(QtWidgets.QWidget):
     def _avg_index_range(self, n_frames: int) -> tuple:
         """(start, end_inclusive) for ``helpers.average_field``, translated
         from the start/end(0=all, exclusive) spinbox convention shared with
-        the single-detector Calibrate tab's Average-frames card."""
+        the single-detector Calibrate tab's Mean-of-frames card."""
         end = n_frames if self._avg_end.value() <= 0 else min(self._avg_end.value(), n_frames)
         start = max(0, self._avg_start.value())
         return start, max(start, end - 1)
 
     def _panel_raw_image(self, n: int) -> Optional[np.ndarray]:
         """Raw (uncorrected, untransformed) source image for panel ``n`` —
-        averaged over a frame range if enabled, else the current frame.
+        the mean over a frame range if enabled, else the current frame.
         Deliberately raw: ``CalibrationWorker`` applies bright/background/
         transforms itself (see module docstring)."""
         path = self._loader.siblings().get(n)
@@ -687,11 +687,11 @@ class HydraCalibrationPage(QtWidgets.QWidget):
     def _update_avg_note(self):
         n = self._loader.n_frames()
         if n <= 1:
-            self._avg_note.setText("Single-frame source — averaging unavailable.")
+            self._avg_note.setText("Single-frame source — frame mean unavailable.")
             return
         start = self._avg_start.value(); end = self._avg_end.value() or n; end = min(end, n)
         cnt = len(range(max(0, start), end))
-        self._avg_note.setText(f"{cnt} of {n} frames averaged (start={start}, end={end}).")
+        self._avg_note.setText(f"mean of {cnt} of {n} frames (start={start}, end={end}).")
 
     def _on_threshold_toggled(self, on: bool):
         for w in (self._thr_min, self._thr_max, self._thr_slider, self._thr_val):

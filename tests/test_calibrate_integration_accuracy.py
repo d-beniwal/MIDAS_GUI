@@ -121,7 +121,7 @@ def test_the_accurate_kernel_is_the_one_batch_integrate_uses():
 def test_the_profile_is_pixel_count_weighted_not_an_eta_bin_mean(
         calibrate_result, geometry, frame):
     """The two collapses differ wherever η coverage is uneven. Pinning which
-    one ran keeps the Azim. avg default ("Pixel-weighted") honest."""
+    one ran keeps the Azim. mean default ("Pixel-weighted") honest."""
     import torch
     from midas_gui.helpers import _build_spec
     from midas_gui.workers import build_geom, integrate_frame

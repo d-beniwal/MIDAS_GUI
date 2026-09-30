@@ -262,7 +262,7 @@ class DataViewerTab(QtWidgets.QWidget):
         m_row = QtWidgets.QHBoxLayout(); m_row.setSpacing(8)
         m_row.addWidget(S.LabelRight("Method:"))
         self._proj_method = {}
-        for meth in ("max", "sum", "average"):
+        for meth in ("max", "sum", "mean"):
             rb = QtWidgets.QRadioButton(meth.capitalize()); m_row.addWidget(rb)
             self._proj_method[meth] = rb
         self._proj_method["max"].setChecked(True)
@@ -403,7 +403,7 @@ class DataViewerTab(QtWidgets.QWidget):
         icl.addWidget(self._build_frame_scrub_bar())
         right.addWidget(img_container)
 
-        # Radial integration (azimuthal average around the beam centre).
+        # Radial integration (azimuthal mean around the beam centre).
         self._profile_view = ProfileViewer()
         self._profile_view.radiusClicked.connect(self._on_radius_clicked)
         self._geom_card.set_profile_view(self._profile_view)
@@ -457,7 +457,7 @@ class DataViewerTab(QtWidgets.QWidget):
         ptb.insertWidget(1, self._prof_source_lbl)
         ptb.insertWidget(2, prof_src_sep)
         self._rad_r_bin = _fspin(0.1, 20.0, 2, 1.0, "px"); self._rad_r_bin.setFixedWidth(56)
-        self._rad_r_bin.setToolTip("Radial bin size for the azimuthal average.")
+        self._rad_r_bin.setToolTip("Radial bin size for the azimuthal mean.")
         self._rad_auto = QtWidgets.QCheckBox("Auto"); self._rad_auto.setChecked(True)
         self._rad_auto.setToolTip("Recompute the radial integration when the beam "
                                   "centre or frame changes.")

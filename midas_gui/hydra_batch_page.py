@@ -143,7 +143,7 @@ class HydraBatchPage(QtWidgets.QWidget):
         intf = S.Form()
         intf.row(("Kernel:", self._kernel))
         intf.row(("R bin:", self._r_bin), ("η bin:", self._e_bin))
-        intf.row(("Azim. avg:", self._azim))
+        intf.row(("Azim. mean:", self._azim))
         integ.body.addLayout(intf)
         # Rmin/Rmax — shared across panels like R bin/η bin; Corner/Edge
         # presets compute from whichever panel is currently selected in the

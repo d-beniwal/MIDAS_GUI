@@ -493,7 +493,7 @@ modes (Four-stage, Bayesian, Joint-cake, panel-layout, partial
 distortion-coefficient selection) silently transformed the image internally
 while the seed beam centre and detector dimensions stayed untransformed;
 **→ Send to Data Viewer** now carries the Transforms state too. Also: the
-Average frames card's **skip** (stride) control was removed — **start**/
+Mean-of-frames card's **skip** (stride) control was removed — **start**/
 **end (0=all)** remain.) (2026-08-17, Data Viewer, Mask Builder, and Calibrate tabs all
 gain matching **Transforms: Flip Y / Flip Z / Transpose** checkboxes applying
 MIDAS's `ImTransOpt` image transform to the raw detector frame before
@@ -1353,7 +1353,7 @@ integration runs, only when the tilt/distortion-aware MIDAS engine path is
 in effect — the fast geometry-free circle-binning fallback has no cake to
 show).
 
-Below the image is a live **azimuthal average about the beam centre** (`R bin`,
+Below the image is a live **azimuthal mean about the beam centre** (`R bin`,
 `Integrate`, and an `Auto` toggle that recomputes on frame/BC/mask change) — geometry-free
 circle binning by default, or the tilt/distortion-aware MIDAS engine when a full
 geometry is in effect (a loaded calibration file, or non-zero ty/tz in the
@@ -1521,8 +1521,8 @@ Lsd, and tilt are fit and shown independently.
   (BC, Lsd, tilts, Transforms) straight from the Data Viewer tab's Hydra
   page, so you don't have to re-browse or re-pick beam centres you've
   already set up there. This mode has no stack-projection feature (like the
-  single-detector Calibrate tab) — use **Average frames** below instead.
-- **Detector & Calibrant, Threshold, Average frames, Refine parameters,
+  single-detector Calibrate tab) — use **Mean of frames** below instead.
+- **Detector & Calibrant, Threshold, Mean of frames, Refine parameters,
   Advanced (middle panel, shared across ge1–ge4)**: one copy of each,
   identical in meaning to the single-detector tab's own cards, applied to
   every panel's fit. There is no **Multi-panel detector** (tiled sub-panel
@@ -1620,8 +1620,8 @@ seed fields, so a follow-up run starts from the previous solution. *Seed tilts a
 honoured by the Four-stage / advanced pipelines; the One-shot / First-time paths seed
 tilts only if the installed backend exposes initial-tilt options.*
 
-### Average frames
-For a multi-frame source (HDF5 / folder), **Average frames into a single image** builds
+### Mean of frames
+For a multi-frame source (HDF5 / folder), **Combine frames into a single mean image** builds
 the mean of a frame range and calibrates on that. **start** / **end (0 = all)** select
 the range. The card is disabled for single-frame sources; the preview updates
 live as the options change.
@@ -1839,7 +1839,7 @@ you can immediately start a new run (the calibration is one uninterruptible libr
 call, so abort hard-terminates the worker thread rather than waiting).
 
 ### Results (right panel, bottom tabs)
-Radial Profile (with ring markers and an **Azim. avg** selector — see Tab 4), **Eta
+Radial Profile (with ring markers and an **Azim. mean** selector — see Tab 4), **Eta
 vs R Cake**, Ring Residuals bar chart, **Results**, and Log. Integration runs
 automatically after calibration. The **Eta vs R Cake** tab shows the same
 integration as a 2-D heatmap instead of collapsed to a 1-D curve — R (px) on the
@@ -2048,10 +2048,10 @@ popup per panel, next to each `ge{n}` card's calibration-source radios.
 | Kernel | Hard (fastest) · Subpixel K=2 · Subpixel K=4 · Polygon (exact). |
 | R bin (px) / η bin (°) | Radial and azimuthal bin sizes. |
 | **Rmin / Rmax (px)** | Exclude an inner (e.g. beamstop shadow) or outer radial region from integration. Rmin defaults to 0. Rmax defaults to 0, meaning **auto** — left at 0 it's passed through unset so the backend picks the farthest-detector-corner radius itself (same value the **Corner** button below fills in); once a calibration is resolved, Rmax auto-fills to that corner value the first time (a manual edit or preset click after that always wins). **Corner** sets Rmax to the farthest detector corner from the beam centre; **Edge** sets it to the farthest straight detector edge (smaller than Corner — excludes the corner regions beyond it). |
-| **Azim. avg** | How the (η, R) cake becomes a 1-D profile: **Pixel-weighted** (default) `Σ(mean·count)/Σ(count)` — independent of η-bin size and robust to partial azimuthal coverage / **off-detector beam centres**; or **η-bin mean (legacy)** — the unweighted mean of per-η-bin means, which can distort with a coarse η bin when the beam centre is off the detector. |
+| **Azim. mean** | How the (η, R) cake becomes a 1-D profile: **Pixel-weighted** (default) `Σ(mean·count)/Σ(count)` — independent of η-bin size and robust to partial azimuthal coverage / **off-detector beam centres**; or **η-bin mean (legacy)** — the unweighted mean of per-η-bin means, which can distort with a coarse η bin when the beam centre is off the detector. |
 | Per-bin variance (σ) | Error model poisson / azimuthal / hybrid (ignored when corrections are on → σ = √I). |
 | Q-uniform bins | Integrate in R then rebin onto a uniform-Q grid (Qmin, Qmax, ΔQ). |
-| **Multi-azimuth output (cake)** | Off by default. Keeps every azimuthal (η) sector from the η bin/range above as a **separate** output profile per frame (`profiles`/`sigmas` become `(n_frames, n_eta, n_r)`) instead of collapsing to one full-circle-averaged profile — needed for per-azimuth GSAS-II/texture work. Off, η bin still exists (default 5° over the full 360°, i.e. 72 internal bins) but is used only to control the collapse's weighting resolution, so turning this on repurposes that same field rather than changing any existing run's output. Text-format Save/live writes become one file per `(frame, η bin)`, named `<id>_etaNNN.<fmt>`; HDF5 output is skipped in this mode (`write_h5` expects one profile per frame) — use the text formats or the GSAS-II zarr export (§12) instead. Not yet combinable with Q-uniform bins. |
+| **Multi-azimuth output (cake)** | Off by default. Keeps every azimuthal (η) sector from the η bin/range above as a **separate** output profile per frame (`profiles`/`sigmas` become `(n_frames, n_eta, n_r)`) instead of collapsing to one full-circle mean profile — needed for per-azimuth GSAS-II/texture work. Off, η bin still exists (default 5° over the full 360°, i.e. 72 internal bins) but is used only to control the collapse's weighting resolution, so turning this on repurposes that same field rather than changing any existing run's output. Text-format Save/live writes become one file per `(frame, η bin)`, named `<id>_etaNNN.<fmt>`; HDF5 output is skipped in this mode (`write_h5` expects one profile per frame) — use the text formats or the GSAS-II zarr export (§12) instead. Not yet combinable with Q-uniform bins. |
 | **Show bin grid** | Off by default. Overlays the full (R, η) integration bin grid — concentric circles at each R-bin edge, spokes at each η-bin edge — on the **Detector view** tab, thinned to at most ~50 rings / ~72 spokes so a fine bin size stays legible. |
 
 A new **Detector view** tab (alongside Waterfall/Stacked profiles — one page-level

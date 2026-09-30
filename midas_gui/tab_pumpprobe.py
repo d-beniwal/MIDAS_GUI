@@ -4,7 +4,8 @@ Analyses time-resolved diffraction the way the TRR group does: a folder of raw
 detector frames named ``PREFIX-<fshw>fshw<delay>delay<id>.tif`` is pooled by a
 prefix glob, the pump-probe **delay** (seconds) is parsed from each filename, every
 frame is integrated to I(q) with the MIDAS engine (the same core as Batch Integrate,
-driven by a calibration), repeats per delay are averaged, and a reference (mean of
+driven by a calibration), repeats per delay are combined into a mean, and a
+reference (mean of
 the pre-time-zero / negative delays) is subtracted → ΔI(q, delay).  Four views:
 
   1. ΔI heatmap        — q (or 2θ / R) vs delay, diverging colour, + reference lineout
