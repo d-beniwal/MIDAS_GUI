@@ -14,6 +14,18 @@ import pytest
 
 from midas_gui import calib
 
+# Two of the tests below (dispatch/dark-subtract and the non-cpu log note)
+# monkeypatch midas_calibrate_v2.pipelines.iterate_frozen_point_until_stable —
+# a real attribute only on releases newer than the 0.17.0 environment.yml
+# currently pins (see tests/test_frozen_point_vendor.py for the same gap).
+# Skip just those two rather than the whole module: the rest (panel_layout
+# rejection, result normalization) don't touch that import.
+_needs_frozen_point_pipeline = pytest.mark.skipif(
+    getattr(__import__("midas_calibrate_v2.pipelines", fromlist=["pipelines"]),
+            "iterate_frozen_point_until_stable", None) is None,
+    reason="installed midas-calibrate-v2 predates the frozen-point pipeline",
+)
+
 
 def _base_cfg(**extra):
     cfg = {
@@ -32,6 +44,7 @@ def test_frozen_point_rejects_panel_layout():
         calib.run_pipeline("frozen_point", image, None, cfg)
 
 
+@_needs_frozen_point_pipeline
 def test_frozen_point_subtracts_dark_and_dispatches(monkeypatch):
     image = np.full((4, 4), 10.0, dtype=np.float32)
     dark = np.full((4, 4), 3.0, dtype=np.float32)
@@ -64,6 +77,7 @@ def test_frozen_point_subtracts_dark_and_dispatches(monkeypatch):
     assert (captured["img"] >= 0).all()
 
 
+@_needs_frozen_point_pipeline
 def test_frozen_point_logs_note_for_non_cpu_device(monkeypatch, capsys):
     image = np.zeros((4, 4), dtype=np.float32)
     monkeypatch.setattr(calib, "_seed_and_v1", lambda *a, **k: SimpleNamespace())

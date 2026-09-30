@@ -210,6 +210,350 @@ there's no summation to overflow.
 case from a small multi-page TIFF) exactly one frame on demand, so a folder
 of many large frames or a big HDF5 stack doesn't blow up memory just because
 the Frame navigator is open.
+## 2026-09-25 — Batch Integrate froze completely: HDF5-over-NFS locking hang, plus backgrounding the preview read
+
+Live report: picking a 17-file HDF5 source (10-frame "Combine sub-frames",
+network-mounted) for Data, then checking Dark, made the Dark checkbox itself
+stop responding to clicks — not slow, genuinely stuck, confirmed by trying
+uncheck/recheck and getting nothing.
+
+**Root cause 1 — the actual freeze.** Checking Dark fires
+`FieldSelector.toggled` → `fieldReady` → `DataLoaderPanel.fieldsChanged` →
+`BatchTab._refresh_detector_preview()` → `current_frame()`, which for
+"stream" mode used to run `_peek_stream_frame()` **synchronously on the GUI
+thread** — real file I/O, no QThread. Its own docstring already admitted
+this could take "sometimes multi-second"; a 17-file network-mounted HDF5
+source measured a lot longer than that. But the user's report ("completely
+frozen", not just slow) pointed at something worse than slow I/O: HDF5
+`flock()`s every file it opens, and on many NFS servers/clients that lock is
+never granted — the call hangs *indefinitely*, not just slowly. Fixed at
+the source: `midas_gui/_paths.py` now sets `HDF5_USE_FILE_LOCKING=FALSE`
+(via `setdefault`, so a user needing locking left on can still override it)
+— the standard, documented workaround, safe here since this is a
+read-only/single-writer workflow where the corruption risk locking exists
+to prevent doesn't apply.
+
+**Found along the way:** `midas_gui/batch_cli.py` (the headless "Run as
+background job" runner) never imported `midas_gui._paths` at all — a
+standalone entry point that never goes through `app.py`'s import chain, so
+a long-running background job reading the exact same NFS-mounted HDF5 data
+got *neither* this fix *nor* the existing `KMP_DUPLICATE_LIB_OK` protection.
+Fixed the same way `app.py` does it — one import, first thing.
+
+**Root cause 1 alone doesn't make freezes impossible** — even with locking
+disabled, a large multi-frame combine over merely-slow (not broken) network
+storage can still block the GUI for a real, user-visible stretch. So also:
+backgrounded the preview read itself. `workers.StreamPreviewWorker` does the
+file-reading + per-frame correction (dark/bright/background, applied before
+summing — matching the real batch run's per-frame correction, same as
+before) off the GUI thread; `DataLoaderPanel.current_frame()` now returns
+immediately (cached/stale/`None`) and kicks off the worker rather than
+blocking, with a new `previewFrameReady` signal firing once the real result
+lands (`BatchTab` connects it straight to `_refresh_detector_preview`). Only
+one worker runs at a time — a second dirty trigger arriving mid-flight just
+flags a restart rather than piling up concurrent reads against the same
+storage.
+
+**A second, more dangerous bug found while fixing the first.** The obvious
+first cut parented `StreamPreviewWorker` to the panel (`parent=self`).
+That's exactly wrong for a QThread: Qt's parent-owns-children cascade
+destroys a QThread the instant its parent widget is — including while
+`run()` is still executing, which is a fatal "QThread: Destroyed while
+thread is still running" abort, not a graceful stop. Every `BatchTab`
+construction starts a preview read of the nickel-standard default path
+(`self._loader.set_path(DEFAULT_NICKEL_DIR)` in `__init__`) — previously
+synchronous and finished before `__init__` even returned, so this had never
+been a real hazard before. Backgrounding it turned "constructing a
+`BatchTab`" into "starts a real background thread," and the full suite
+caught it immediately: ~35 unrelated tests (`test_geom_cache_key`,
+`test_batch_output_dir`, `test_batch_cake_stack`, `test_batch_job_results`,
+…) that merely build a `BatchTab` for other purposes started crashing with
+SIGABRT/SIGSEGV — whichever test's teardown raced past the thread finishing.
+Fix: construct the worker unparented. PyQt keeps a *running* QThread's
+wrapper alive on its own with no parent and no remaining Python reference,
+specifically to prevent this — the explicit `self._preview_worker`
+reference plus the `finished`/`failed` slots dropping it are enough for
+correct cleanup once it's actually done, regardless of what happens to the
+panel/its owning tab in the meantime. Full suite confirmed back to the
+3-failure baseline twice in a row after the fix.
+
+Tests: `tests/test_paths_env.py` (new) pins the env-var default, a user
+override, and the `batch_cli.py` regression specifically, each via a fresh
+subprocess (env vars set at import time can't be re-tested in an
+already-running interpreter). `tests/test_batch_stream_preview.py` (new)
+pins `StreamPreviewWorker`'s correct-before-summing behavior and error
+handling standalone, plus the full async contract through
+`DataLoaderPanel`: `current_frame()` never blocks, `previewFrameReady`
+fires once real, dark correction is baked in, and a second dirty trigger
+mid-flight doesn't spawn a second worker.
+
+## 2026-09-25 — Real ion-chamber + sample-motor metadata in zarr output (stopgap)
+
+While checking the (separately-branched) Zarr Viewer tab against a real
+`.ave.zarr.zip`, the user asked why the file had no ion-chamber or
+sample-manipulation-system metadata. Traced the actual bug and gathered the
+real per-station facts directly from the user plus the beamline's own
+HDF5-layout docs (`~/mnt/s1b/bluesky_dev/mpe_xml/docs/hdf5_layout_overview.md`)
+and attribute-translation XML (`20ide_instr_attributes_trans.xml`).
+
+**The bug.** `GSASZarrWriter` (the shared `midas_integrate_v2` writer) has two
+real per-frame beam-monitor slots, `"I"`/`"I0"` (GSAS-II's ion-chamber-
+intensity convention). MIDAS_GUI never read an actual ion chamber — it read
+**storage-ring current** (`instrument/StorageRing/SRCurrent`) and wrote that
+into `"I"` instead; `"I0"` was never populated at all. What looked like a
+beam-monitor reading in the file (`"I": 200.025`) was APS ring current in mA.
+Sample-stage motor positions had no code path anywhere — not read, not
+written, not attempted. (`GSAS2_PVS/Temperature`/`Pressure` reading NaN,
+separately, is *not* a MIDAS_GUI bug: the raw source file has NaN there too,
+confirmed against the same layout docs — "Placeholder PVs... until
+repointed.")
+
+**Real per-station mapping** (I0 = incident, I = transmitted):
+
+| Hutch | I0 | I |
+|---|---|---|
+| D | `instrument/Scalers/D/IC2` (confirmed: `IC2D` = `20dT1:TM:Current1`, the first TetrAMM channel) | doesn't exist yet |
+| E | `instrument/Scalers/E/US_IC` | setup-dependent: `instrument/Scalers/E/D2PD` (pin diode) when present, else none |
+| A | n/a | n/a — no sample in station A's beam path; its `IC4_foil_I0`/`IC5_foil_I1` names are misleading for this purpose, not a per-sample monitor pair |
+
+Sample-stage motors (`instrument/SMS/<hutch>/...`): D has one config (`HR`);
+E has two coexisting ones (`HL`, `HR`) with no reliable signal for which is
+physically in use — on the one real file checked, `HL`'s channels held real
+values and `HR`'s were all NaN, i.e. the data itself already shows which was
+active. Captured both rather than guessing, for exactly that reason.
+
+**Why hutch detection is path-based, not file-based.** The file's own
+`active_instrument` field (meant to say which hutch/station produced it) is
+empty in every real file checked, and is independently documented as a known,
+open gap in the same beamline docs repo ("`active_instrument` is currently
+empty. Populating it from Bluesky would let downstream tooling select an
+analysis pipeline automatically.") — so it can't be read from the file today.
+Resolved instead from the source path containing `varexE`/`varexD`
+(case-insensitive), one level in `_HDF5StackGlobSource._resolve_hutch()`.
+
+**Explicitly a stopgap** (the user's own framing) — three simplifications,
+deliberately not built out further:
+- No Preferences UI for any of this; no configurable station/monitor mapping.
+- E hutch's `I` is auto-detected (present only when `D2PD` exists in the
+  file) rather than made user-configurable, even though which channel is
+  "the" transmission monitor is genuinely setup-dependent.
+- E's `HL`/`HR` ambiguity is resolved by capturing both, not by picking one.
+
+**Where each field landed.** Real ion-chamber I/I0 go into the writer's
+existing `currents`/`currents_i0` slots (`write_gsas_zarr_zip` already
+accepted `currents_i0`; nothing in MIDAS_GUI ever passed it before). Storage
+current relocates to the provenance entry's `extra['storage_ring_current_mA']`
+instead of the `"I"` slot it was squatting in. Sample motors have no writer
+slot at all (`GSASZarrWriter` only knows temperature/pressure/current/
+current_i0), so they go into `extra['sample_motors']` — `provenance.py`
+needed no code change, since `build_entry(..., extra=...)` already accepts an
+arbitrary dict verbatim. `zarr_prov_entry` used to be built once and reused
+verbatim for every frame in a run; since ring current and sample motors are
+per-frame quantities, each frame's `append_to_zip` call now uses a shallow
+copy with a per-frame `extra`, not the shared object.
+
+## 2026-09-24 — Zarr Viewer: live-verified, promoted out of "work in progress"
+
+Follow-up to the two entries immediately below. Once visible-by-default (see
+the entry right below this one) and enabled in Preferences ▸ Tabs on a real
+X11 session, opened a real `.vrx.ave.zarr.zip` from a finished Batch
+Integrate run at 20-ID-E (`PUP_AML_stubbins_sep26_bc/...`): tree populated
+correctly (`InstrumentParameters`, `OmegaSumFrame`, `REtaMap`, `SumFrames`),
+selected `OmegaSumFrame/LastFrameNumber_0` and it plotted (R bin vs. Eta,
+viridis, 2-D map), and the metadata/attributes panel showed that array's real
+attrs (`FirstOme`, `LastFrameNumber`, `Pressure`/`Temperature` as `NaN`,
+etc.) correctly.
+
+Promoted out of "work in progress" in `README.md` (tabs 0–5 now read as
+verified, 6–10 as WIP) and dropped the `*(work in progress)*` marker from
+`documentation/gui_documentation.md`'s §8. Still an `OPTIONAL_TAB`, not moved
+into `ALWAYS_TABS` — verified-and-visible-by-default is exactly the tier
+Calib. Refinement/Batch Queue/Pump Probe already occupy, and there's no
+reason to promote it further than that.
+
+## 2026-09-24 — Zarr Viewer: promoted to visible-by-default, moved next to Batch Integrate
+
+Follow-up to the entry immediately below: after landing hidden-by-default,
+asked to make it "a permanent tab next to the batch integration tab." Two
+changes, both narrower than they could have been:
+
+- **Visible, not pinned.** Added to `DEFAULT_VISIBLE_TABS` alongside Calib.
+  Refinement/Batch Queue/Pump Probe — shown out of the box, no Preferences
+  trip required. Deliberately *not* moved into `ALWAYS_TABS` (the hard-pinned,
+  can't-hide-it tier reserved for Data Viewer/Mask Builder/Calibrate/Batch
+  Integrate — tabs the app can't function without): it's still an
+  `OPTIONAL_TAB`, so it can still be hidden from Preferences ▸ Tabs like any
+  of the other three default-visible optional tabs, and it still isn't
+  claiming to be "verified" — Pump Probe is proof that default-visible and
+  work-in-progress aren't mutually exclusive in this codebase already.
+- **Position:** moved in `app.py`'s `_tab_specs` (and its construction line)
+  to sit immediately after Batch Integrate, before Batch Queue.
+
+**Real finding surfaced while doing this:** `DEFAULT_VISIBLE_TABS` is
+overlaid from the active profile's saved config at import time
+(`constants.reload_from_config()`), and on this machine the `20-ID-E` and
+`Default` profiles both have an explicit `ui.visible_tabs` saved from before
+even **Batch Queue** existed as a default-visible tab — so neither Batch
+Queue nor (now) Zarr Viewer will actually appear for this user until they
+re-save Preferences ▸ Tabs once, regardless of what ships in code. Left the
+live profile JSON files alone (editing a real, in-use per-user config file
+outside the repo isn't this branch's call to make); told the user directly
+instead.
+
+Knock-on effect on testing: this means `constants.DEFAULT_VISIBLE_TABS` is
+*not* a reliable thing to assert against in a test that runs on a real
+machine with a real saved profile — it reads whatever that profile last
+saved, not what the code ships. `constants.shipped_defaults()` is the
+existing, already-provided escape hatch (a pristine pre-overlay snapshot),
+so `tests/test_tab_zarrviewer.py`'s registration tests read
+`shipped_defaults()["ui"]["visible_tabs"]` instead of the live global. This
+also explains — more precisely than the existing "tab-count assertion vs.
+WIP-tab gating" note — *why* `test_app_builds_offscreen` is a known
+pre-existing failure on this machine: the same stale saved profile makes the
+live tab count disagree with what `ALWAYS_TABS`/`DEFAULT_VISIBLE_TABS` claim
+at assertion time. Not fixed here (that test's own hermeticity is a broader,
+separate concern — `tests/conftest.py` isolates nothing about
+`~/.config/midas_gui/`), just diagnosed precisely and worked around locally.
+
+## 2026-09-24 — Zarr Viewer: a standalone top-level tab, matplotlib, hidden pending a live check
+
+Ported `mpe_wf_saxs_waxs/gui_view_zarr.py` (a zarr tree browser + plot canvas
+for MIDAS `.zarr.zip` files) in as `tab_zarrviewer.ZarrViewerTab`, at the
+user's request, once the terminology/lab-frame PR was out the door.
+
+**Placement: asked, didn't assume.** The screenshot that prompted this showed
+Batch Integrate's own results tab bar (Detector view / Waterfall / Stacked
+profiles / Eta-R cakes / Logs — `tab_batch.py`'s `_view_tabs`), which reads as
+a plausible home for "a new tab in ___". Asked directly rather than guessing;
+the answer was a **standalone top-level app tab**, not a Batch Integrate
+sub-tab — a general-purpose `.zarr.zip` browser, not tied to any one run.
+Toggled from Preferences ▸ Tabs like Corrections/PDF/Texture, added to
+`constants.OPTIONAL_TABS` and `app.py`'s `_tab_specs` right after Batch
+Integrate/Batch Queue (it's a consumer of Batch Integrate's output) and
+before Corrections.
+
+**Matplotlib, not pyqtgraph.** Same call `peak_fit_panel.py` already made and
+documented for the same reason: no existing pyqtgraph-based zarr
+tree/attribute browser to build on, and matplotlib is already an environment
+dependency. This is MIDAS_GUI's second embedded matplotlib canvas.
+
+**Ships hidden.** Not added to `DEFAULT_VISIBLE_TABS` — the underlying
+browsing/plotting logic has been in daily use as a standalone tool for a
+while, but its integration as a tab *here* hasn't had eyes on a live
+rendering yet (this repo's standing constraint: the Qt GUI can't be verified
+beyond an offscreen import/build check without an X11/VNC session). Same
+treatment as every other WIP tab — flip it on in Preferences once confirmed
+live, or ask for `DEFAULT_VISIBLE_TABS` to be updated.
+
+**Kept vs. dropped from the source** (see the new file's own docstring for
+the full list): kept every control and all plotting/axis-conversion logic
+method-for-method. Dropped the standalone `QMainWindow` shell (window title,
+font-size combo, Exit button — the app's own tab chrome and
+`constants.DEFAULT_UI_SCALE` already cover this), the `PySide6`/`QT_BACKEND`
+fallback (PyQt5 only, like everywhere else in this app), and any
+`closeEvent`-driven store cleanup (a tab widget embedded in the main window's
+`QTabWidget` never reliably receives its own `closeEvent` — only top-level
+windows do — so that would have been dead code; `_load_file` already closes
+the previous `zarr.ZipStore` before opening the next one, which is the part
+that actually matters). No cross-tab wiring and no saved-project state: it's
+opened via its own file dialog, and none of its plot/display state is
+meaningful to persist into a Project file.
+
+**Tests build a real fixture rather than a fake store.** `test_tab_zarrviewer.py`
+reuses `test_batch_zarr_output.py`'s `BatchWorker` fixture-building pattern to
+produce one real `.ave.zarr.zip`, so the tests exercise the actual production
+schema (real `REtaMap`, real group layout) instead of an invented one.
+
+**While in there: provenance field parity with mpe_wf.** Before trusting the
+viewer against real files, diffed `midas_gui/provenance.py` field-by-field
+against its source, mpe_wf_saxs_waxs's own `provenance.py` — see the entry
+immediately below for that finding. The zarr array/group schema itself needed
+no reconciliation (same shared backend writer, verified empirically).
+
+## 2026-09-24 — Provenance: script/script_sha256/tag brought into parity with mpe_wf
+
+Asked to make sure the zarr writer's "metadata and provenance structure and
+content are identical to the development in mpe_wf_saxs_waxs" (prompted by
+building the Zarr Viewer above against real output). Two things to check,
+kept separate since they have very different answers:
+
+**The zarr array/group schema** (`REtaMap`, `InstrumentParameters/<key>`,
+`Omegas`, `provenance_history`) needed no reconciliation at all — both
+projects' single-panel `.zarr.zip` files go through the same shared backend
+writer, `midas_integrate_v2.io.zarr_gsas.write_gsas_zarr_zip` (`gsas_export.py`
+calls it directly, and Batch Integrate's "zarr" output format goes through
+it via `workers.py`), so it's identical by construction. Verified empirically
+rather than trusted: built a real fixture via `BatchWorker` and confirmed its
+tree matches what mpe_wf's own `combine_hydra_zarr.py` expects from every
+panel it merges (that script's docstring spells out the exact schema it
+requires — a strong independent check).
+
+**The `provenance_history` entry schema** (`midas_gui/provenance.py`,
+originally ported from mpe_wf's own `provenance.py`) did have two real,
+unintentional gaps, found by a field-by-field diff of the two `build_entry()`/
+`_git_rev()` implementations:
+- `script`/`script_sha256` — the running entry-point's resolved path and
+  content hash, letting a reader tell a locally-modified/uncommitted script
+  apart from the git commit recorded alongside it. Added.
+- `tag` on `_git_rev()` — the nearest reachable annotated git tag, separate
+  from `describe`'s "N commits past a tag" form. Added.
+
+Everything else that differs between the two files — MIDAS_GUI's
+`midas_gui`/`backends` fields replacing mpe_wf's `git`/`mpe_wf`/`midas`
+git-repo trio, and no standalone `git` field — is the *already-documented*,
+deliberate one-repo/PyPI-backend adaptation from when `provenance.py` was
+first ported (MIDAS_GUI doesn't vendor a MIDAS git checkout, so backend
+identity is PyPI package versions instead of a second repo's git info; a
+separate `git` field would be redundant with `midas_gui` here anyway, since
+there's only ever the one repo). Not a gap, so left alone. Also didn't port
+mpe_wf's `read_cake_csv()`: MIDAS_GUI already has the equivalent
+(`cake_params.parse_cake_csv`) in its own module — an existing deliberate
+refactor, not a missing function.
+
+## 2026-09-24 — Upstream's frozen-point native-pipeline switch outruns the pinned backend; guarded, not reverted
+
+Merging `upstream/main` brought in `1893e97 Drop vendored frozen_point_calib now
+that midas-calibrate-v2 ships it natively`, which deletes the vendored
+`midas_gui/_vendor/frozen_point_calib` and calls
+`midas_calibrate_v2.pipelines.iterate_frozen_point_until_stable` directly. That
+function does not exist in **0.17.0**, the version `environment.yml` currently
+pins (PyPI's latest at merge time is **0.22.0** — the pipeline shipped somewhere
+in between; not yet bisected). Unguarded, this breaks collection of
+`tests/test_frozen_point_vendor.py` outright (`ImportError` at import time) and
+makes `calib.py`'s `frozen_point` branch raise a bare `ImportError` with no
+guidance if a user ever picks that pipeline from the GUI.
+
+**Guarded, not reverted.** This is a maintainer's own commit to their own repo,
+made against a newer backend than what's pinned here — reverting it inside a PR
+back to that repo would be presumptuous, and the right fix (bumping
+`midas-calibrate-v2`) is `environment.yml`'s call, not this branch's. So:
+
+- `midas_gui/calib.py`'s `frozen_point` branch now imports
+  `iterate_frozen_point_until_stable` in a `try/except ImportError`, raising a
+  `RuntimeError` that names the installed version (via
+  `importlib.metadata.version`) and says to upgrade the backend or choose a
+  different pipeline, instead of surfacing a bare `ImportError` from a
+  now-deleted vendor path.
+- `tests/test_frozen_point_vendor.py` uses `pytest.importorskip` plus a
+  `getattr(..., None)` check on both `autocalibrate_frozen_point` and
+  `iterate_frozen_point_until_stable`, skipping the whole module rather than
+  aborting collection when either is absent.
+- `tests/test_calib_frozen_point.py`'s two tests that monkeypatch
+  `midas_calibrate_v2.pipelines.iterate_frozen_point_until_stable` directly
+  (`test_frozen_point_subtracts_dark_and_dispatches`,
+  `test_frozen_point_logs_note_for_non_cpu_device`) get the same
+  `skipif(getattr(...) is None)` treatment — they were failing with
+  `AttributeError` from `monkeypatch.setattr`, not from anything this branch's
+  own changes touched; confirmed by reproducing the same failure against the
+  merge commit before any guard was added.
+
+Net effect on the pinned 0.17.0 environment: Frozen-point (high-tilt) is
+selectable in the GUI but errors with a clear message rather than a traceback;
+the three tests above skip with a stated reason instead of failing red. Nothing
+here silently disables the feature or changes its behavior once the backend
+catches up — the guards fall away on their own the day `environment.yml` bumps
+past whichever release added the native pipeline.
+
 ## 2026-09-24 — The polarization plane is η = 90° (horizontal), and the whole lab-frame chain is pinned by tests
 
 The user, looking at a CeO2 pattern, asked that the polarization correction be

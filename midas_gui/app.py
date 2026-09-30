@@ -67,6 +67,7 @@ from midas_gui.tab_view import DataViewerTab
 from midas_gui.tab_mask import MaskTab
 from midas_gui.tab_calibrate import CalibrationTab
 from midas_gui.tab_batch import BatchTab
+from midas_gui.tab_zarrviewer import ZarrViewerTab
 from midas_gui.tab_queue import BatchQueueTab
 from midas_gui.tab_refine import RefinementTab
 from midas_gui.tab_corrections import CorrectionsTab
@@ -219,6 +220,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._mask_tab   = _tab(MaskTab,         "Mask Builder")
         self._cal_tab    = _tab(CalibrationTab,  "Calibrate")
         self._batch_tab  = _tab(BatchTab,        "Batch Integrate")
+        self._zarr_tab   = _tab(ZarrViewerTab,   "Zarr Viewer")
         self._queue_tab  = _tab(BatchQueueTab,   "Batch Queue")
         self._refine_tab = _tab(RefinementTab,   "Calib. Refinement")
         self._corr_tab   = _tab(CorrectionsTab,  "Corrections")
@@ -238,6 +240,7 @@ class MainWindow(QtWidgets.QMainWindow):
             (self._cal_tab,    "Calibrate",         True),
             (self._refine_tab, "Calib. Refinement", False),
             (self._batch_tab,  "Batch Integrate",   True),
+            (self._zarr_tab,   "Zarr Viewer",       False),
             (self._queue_tab,  "Batch Queue",       False),
             (self._corr_tab,   "Corrections",       False),
             (self._pdf_tab,    "PDF Analysis",      False),
