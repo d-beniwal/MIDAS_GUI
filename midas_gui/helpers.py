@@ -166,6 +166,67 @@ _COMBINE_OPS = {
 }
 
 
+def _stack_chunk_bounds(n: int, k: int, *, chunk_size: Optional[int],
+                        raw_start: Optional[int], raw_end: Optional[int]):
+    """Inclusive 0-based ``(lo, hi)`` raw sub-frame bounds of combined chunk
+    ``k`` in an ``n``-sub-frame stack, or ``None`` when ``k`` is past the end
+    (or the ``raw_start``/``raw_end`` filter leaves nothing).
+
+    The single source of truth for this arithmetic: both
+    ``read_hdf5_stack_combined`` (all chunks) and ``read_hdf5_stack_chunk``
+    (exactly one) go through it, so a whole-file read and a single-chunk read
+    of the same file can never disagree about where chunk ``k`` starts — and
+    ``workers._HDF5StackGlobSource._stat`` can keep deriving the chunk COUNT
+    from the dataset shape alone, which only stays honest while the chunking
+    rule has one definition.
+    """
+    lo = max(0, raw_start) if raw_start is not None else 0
+    hi = min(n - 1, raw_end) if raw_end is not None else n - 1
+    n_eff = hi - lo + 1
+    if n_eff <= 0 or k < 0:
+        return None
+    size = chunk_size if chunk_size else n_eff
+    start = lo + k * size
+    if start > hi:
+        return None
+    return start, min(start + size - 1, hi)
+
+
+def read_hdf5_stack_chunk(path, dataset: str, k: int, *,
+                          chunk_size: Optional[int] = None, op: str = "mean",
+                          raw_start: Optional[int] = None,
+                          raw_end: Optional[int] = None):
+    """One combined frame — chunk ``k`` — out of an HDF5 sub-frame stack,
+    reading ONLY that chunk's raw sub-frames.
+
+    Same chunking, filtering and ``op`` semantics as
+    ``read_hdf5_stack_combined``; the difference is cost. That function
+    decodes every chunk and returns the list, so asking it for one frame of a
+    1442-sub-frame VAREX file reads all 23.9 GB (~230 s over NFS) and holds
+    ~1.9 GB of combined frames, to hand back 33 MB. Random access into a
+    large stack — a Detector-view preview, a parallel ``BatchWorker`` chunk
+    starting mid-file — must not pay for the frames it never asked for.
+
+    Returns a 2-D ``float32`` array, or ``None`` when ``k`` is past the last
+    chunk. A plain 2-D dataset is the single chunk 0 and is passed through
+    unchanged (``chunk_size``/``op`` ignored), matching
+    ``read_hdf5_stack_combined``'s ``[dataset]``.
+    """
+    import h5py
+    combine = _COMBINE_OPS.get(op, _COMBINE_OPS["mean"])
+    with h5py.File(str(path), "r") as f:
+        dset = f[dataset]
+        if dset.ndim == 2:
+            return np.asarray(dset[...], dtype=np.float32) if k == 0 else None
+        bounds = _stack_chunk_bounds(int(dset.shape[0]), k, chunk_size=chunk_size,
+                                     raw_start=raw_start, raw_end=raw_end)
+        if bounds is None:
+            return None
+        start, end = bounds
+        stack = np.asarray(dset[start:end + 1], dtype=np.float32)
+        return combine(stack).astype(np.float32)
+
+
 def read_hdf5_stack_combined(path, dataset: str, *, chunk_size: Optional[int] = None,
                              op: str = "mean", raw_start: Optional[int] = None,
                              raw_end: Optional[int] = None) -> list:
@@ -202,17 +263,18 @@ def read_hdf5_stack_combined(path, dataset: str, *, chunk_size: Optional[int] = 
         dset = f[dataset]
         if dset.ndim == 2:
             return [np.asarray(dset[...], dtype=np.float32)]
-        n = dset.shape[0]
-        lo = max(0, raw_start) if raw_start is not None else 0
-        hi = min(n - 1, raw_end) if raw_end is not None else n - 1
-        n_eff = hi - lo + 1
-        if n_eff <= 0:
-            return []
-        size = chunk_size if chunk_size else n_eff
+        n = int(dset.shape[0])
         out = []
-        for start in range(0, n_eff, size):
-            stack = np.asarray(dset[lo + start:lo + start + size], dtype=np.float32)
+        k = 0
+        while True:
+            bounds = _stack_chunk_bounds(n, k, chunk_size=chunk_size,
+                                         raw_start=raw_start, raw_end=raw_end)
+            if bounds is None:
+                break
+            start, end = bounds
+            stack = np.asarray(dset[start:end + 1], dtype=np.float32)
             out.append(combine(stack).astype(np.float32))
+            k += 1
         return out
 
 
@@ -609,6 +671,47 @@ def list_h5_datasets(path: str | Path) -> list:
     with h5py.File(str(path), "r") as f:
         f.visititems(_visit)
     return items
+
+
+# Name fragments that mark a 1-D dataset as the measured rotation angle,
+# most specific first. Taken verbatim from mpe_wf_saxs_waxs
+# (``gui_data_explorer.py``'s ``_OMEGA_HINTS``), which uses the same list to
+# pre-select an omega stream, so the two GUIs rank the same file the same way.
+_OMEGA_HINTS = ("/omegas", "samry", "omega")
+
+
+def list_h5_1d_datasets(path: str | Path) -> list:
+    """Return ``[(name, length), …]`` for every 1-D dataset in an HDF5 file,
+    with omega-looking names first (see ``_OMEGA_HINTS``).
+
+    The 1-D sibling of :func:`list_h5_datasets`, which lists the ≥2-D
+    (image) datasets. This one populates the omega-channel picker in Batch
+    Integrate's cake-parameters dialog: a rotation stage writes one angle per
+    raw sub-frame into a flat array alongside the frames.
+
+    The hint only ORDERS the list — nothing is auto-selected. A wrong channel
+    silently relabels every frame's angle, so picking one stays the user's
+    deliberate act; mpe_wf's own picker is likewise ``allow_none=True`` with a
+    blank default.
+    """
+    import h5py
+    items: list = []
+
+    def _visit(name, obj):
+        if isinstance(obj, h5py.Dataset) and obj.ndim == 1:
+            items.append((name, int(obj.shape[0])))
+
+    with h5py.File(str(path), "r") as f:
+        f.visititems(_visit)
+
+    def _rank(item):
+        low = "/" + item[0].lower()
+        for i, hint in enumerate(_OMEGA_HINTS):
+            if hint in low:
+                return (i, item[0])
+        return (len(_OMEGA_HINTS), item[0])
+
+    return sorted(items, key=_rank)
 
 
 _DARK_NAME_RE = re.compile(r'(^|[_.])dark([_.]|$)|_dark_(before|after)\b', re.IGNORECASE)

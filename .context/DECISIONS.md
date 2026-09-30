@@ -8,6 +8,364 @@ file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this
 date for the full uncondensed entries if ever needed._
 
+## 2026-09-29 — A frozen GUI has to be able to tell us where it is stuck
+
+Two "the GUI is hanging" reports in one day, and neither could be answered.
+The first had a real cause (the Detector-view preview read the whole file);
+the second could not be reproduced at all — the full file-selection path,
+timed offscreen against the same 24 GB VAREX file, costs 0.27 s for
+`list_h5_datasets` and milliseconds for everything after it, and the preview
+that used to block now runs in a `StreamPreviewWorker`. Guessing from a
+screenshot is not a diagnosis, and every guess costs a beamline round trip.
+
+So `launch.py` now arms `faulthandler.register(SIGUSR1, all_threads=True,
+chain=False)`. `kill -USR1 <pid>` appends every thread's stack to
+`~/midas_gui_hang.log` **without** killing or interrupting the process, which
+is the whole point: the fatal-error handlers `app.py` already installs only
+fire on a crash, and a freeze is not a crash. Signalling twice shows whether
+the stack is moving. It is inert until signalled, guarded on `hasattr(signal,
+"SIGUSR1")` for Windows, and wrapped in a bare `except` because a debugging
+aid must never be the reason startup fails.
+
+`py-spy` would also have worked and needs no code, but it is not in the
+`midas-gui` env and `environment.yml` is the source of truth for that env —
+adding a dev tool to a beamline environment mid-session is a bigger change
+than eleven lines in the launcher.
+
+## 2026-09-29 — The ω readout must not put a filesystem walk on every signal
+
+`_recompute_omega_span` derives its mapping line from the real source
+(`_open_source_cfg` → `raw_window_for_index`) rather than from arithmetic on
+the raw count, so the readout cannot drift from what a run computes. That is
+the right call and it stays — but it means the readout opens an HDF5 header
+per file, on the GUI thread, and it was wired directly to `dataChanged` and
+to "Combine sub-frames" `valueChanged`. Both fire several times for one user
+action, and holding a spin box fires once per step; a folder pick multiplies
+each firing by the file count. Measured: ~1 ms for one file (plus a one-time
+2.3 s lazy import inside `_open_source_cfg`, which the run would pay anyway),
+but that scales linearly with the pick.
+
+Two defences, both cheap. A 150 ms single-shot `QTimer` coalesces a burst
+into one walk, and a cfg-keyed short circuit makes a repeat refresh for an
+unchanged source free. Deliberately *not* moved to a background thread: the
+readout must be correct before the user can press Start, and a walk that is
+already ~1 ms for the common case does not justify the lifecycle of another
+worker.
+
+This was found while chasing the second hang report. It is not that hang —
+the timings above rule it out — but it was a real per-signal cost on the path
+the report pointed at, and it is the kind that only shows up on the big
+folder picks the beamline actually uses.
+
+## 2026-09-29 — ω restarts at every file, and both ω paths share one window
+
+Reverses the origin rule set when per-frame ω landed a few days earlier. The
+computed ramp counted raw sub-frames **globally** across a multi-file pick, so
+file 2 continued file 1's rotation. The argument for that was continuity: a
+scan split across files is one sweep, and restarting the count would make two
+files look like two sweeps at the same angles.
+
+Two things were wrong with it.
+
+*It disagreed with the measured channel.* `_omega_resolver`'s `_measured`
+branch reads a 1-D omega dataset **stored inside each file**, indexed from 0
+in each, so it has no choice but file-local indices. The ramp therefore ran in
+a different coordinate system from the channel it is supposed to be the
+fallback for — documented on both sides as correct, which is how it survived.
+
+*And the global count was not even reliable.* `_filter_paths_by_frame_number`
+drops files **before** `_HDF5StackGlobSource` is constructed, so the cumulative
+offset could only count the files that survived the filter. Dropping leading
+files silently rebased the whole ramp — the exact behaviour the documented
+rule ("a filter shifts the angles rather than rebasing them") promised would
+not happen. The global rule could not be made true without pushing the filter
+down into the source, which is a much larger change for a worse answer.
+
+So: **ω is measured from raw sub-frame 0 of the rotation the frame came
+from.** An HDF5 sub-frame stack *is* one rotation, so each file restarts at
+`OME_START`. One-frame-per-file data (TIFF, `.ge*`) is not — a single such
+file is one exposure and only the series is a rotation — so
+`_ChunkCombinedFileSource` still counts across the selection. The two classes
+now differ on purpose, and each says why in its docstring.
+
+Mechanically the point is that there is exactly **one** window function left:
+`raw_window_for_index` returns `omega_channel_window(idx)[1:]` rather than
+repeating the walk. Two implementations that must index the same axis is the
+defect that was just removed; leaving two copies of the walk would invite it
+back. `tests/test_omega_windows.py` pins that identity for every frame across
+six chunking/filter configurations, because the failure it prevents (the two
+drifting apart) reads off the end of a later file's array instead of raising.
+
+Still correct under Batch-Parallel: the window is a pure function of the
+absolute frame index and the per-file header counts, both identical in every
+worker, so two workers cannot disagree about a frame's angle.
+
+The user chose this reading when the inconsistency was put to them. The
+GUI now states the resulting mapping rather than leaving it implicit — see
+the next entry.
+
+## 2026-09-29 — Saying that frame numbers and angles are one axis
+
+`start`/`end`/**Combine sub-frames** count raw sub-frames; `OME_START`/
+`OME_STEP`/`OME_SUM` put degrees on the same sub-frames. The app never said
+so, and the user asked for the two to be made consistent *and visible*.
+
+Consistency was largely already there and worth recording as such: `OME_SUM`
+is not mirrored into the cake dialog, it **is** the loader's
+`_combine_chunk` widget, read and written in place — so it cannot drift. What
+was missing was the statement.
+
+Decided (with the user): labels stay as they are — on a multi-file pick
+`start`/`end` really are file numbers, so renaming them "sub-frame" would be
+wrong — and the correspondence goes into readouts and tooltips instead, in
+**both** places it is operated: the cake summary line and the loader's range
+hint.
+
+Two judgements inside that:
+
+*The summary states both rates.* `Δω 0.25°/sub-frame = 6.25°/frame` is the
+whole point — combining 25 sub-frames makes consecutive output frames
+25×`OME_STEP` apart, and that multiplication is what a user gets wrong.
+
+*The "not set" state is called out.* A loaded rotation with `OME_START`/
+`OME_STEP` both 0 gets a genuine 0.0 per frame (deliberately — a stationary
+sample really is at 0°), so nothing downstream looks wrong. That is exactly
+the state a real run was in when its `/Omegas` came out all zero. The line
+says `ω 0° on all 58 frames (OME_START/OME_STEP not set)` rather than
+silently rendering a flat ramp.
+
+`DataLoaderPanel` is shared with tabs that have no cake parameters, so it does
+not learn about ω: `set_omega_hint_fn(fn)` takes a callable from whoever owns
+the angles (the pattern `set_preview_sum`/`set_tab1_mask` already use), and
+unset the hint text is byte-identical. The tail is re-rendered separately from
+the hint body so an `OME_START` edit costs no file access — the windows are
+cached when the *source* changes, and the angles are arithmetic over them.
+
+## 2026-09-29 — 2D CSV wrote nothing, and reported that it had
+
+`want_cake` includes `"2d_csv" in self._fmts`, so the cake **was** computed;
+the write site then threw it away with
+`cake_2d=(cake_2d if self._multi_azimuth else None)`, `write_profile`'s
+`elif fmt == "2d_csv" and cake_2d is not None` fell through to nothing, and
+the caller appended `<base>.2d_csv` to the reported paths — a file that was
+never written, under a name that does not exist in either mode (the real one
+is `<base>_cake.csv`). A run with the format checked and multi-azimuth off
+produced an empty `2d_csv/` folder and a success message.
+
+Root cause was an overloaded flag: `cake_2d is not None` meant both "a cake is
+available" and "fan out one lineout per η bin". The Batch write site wanted
+the second gated on the checkbox and had no way to say so except by
+withholding the cake. Split into an explicit `per_eta` parameter, defaulting
+to the old `cake_2d is not None and cake_sigma is not None` so every other
+caller is untouched.
+
+`write_profile` now **raises** for `2d_csv` with no cake rather than returning
+quietly. The one legitimate cake-less caller — `write_all_profiles`, the Save
+button's in-memory path after a 1-D run — excludes the format itself and both
+call sites already log a note explaining why, so nothing reaches the raise by
+accident. A silent no-op in a writer is worth converting to a loud failure
+precisely because this one cost a real run its output without anyone noticing
+until the folder was opened.
+
+## 2026-09-29 — Reading one frame must cost one chunk: finishing the _HDF5StackGlobSource fix
+
+`_HDF5StackGlobSource` was fixed once already, for *counting*: `n_frames`
+used to decode every selected file, so a run looked hung before it started
+(that fix is in the class docstring). Reading was left on the old shape —
+`get(idx)` called `read_hdf5_stack_combined`, which decodes every chunk of
+the owning file and returns the list, then kept one element.
+
+Measured on the user's own data (`…_029531.vrx.h5`, `exchange/data`
+(1442, 2880, 2880) uint16 uncompressed, 23.9 GB, NFS): **~230 s and ~1.9 GB
+resident to return one 33 MB frame**. Now 415 MB and ~4 s. Two callers paid
+it: the Detector-view preview, which asks for exactly one frame (the user's
+"takes a really long time to show the pattern"), and each parallel
+`BatchWorker` chunk — four workers start at four different offsets, so a
+cache keyed on "the current file" helps none of them, and the run reads the
+file about four times over.
+
+**Decided: one definition of the chunking, used by both readers.**
+`helpers._stack_chunk_bounds(n, k, …)` is now the only place that says where
+chunk *k* starts and ends; `read_hdf5_stack_combined` (all chunks) and the
+new `read_hdf5_stack_chunk` (exactly one) both go through it. This is not
+tidiness — `_stat` derives the chunk *count* from the dataset shape alone,
+and that only stays honest while the chunking rule has a single definition.
+With bounds shared, `get`/`__iter__` can take `n_chunks` from the header
+counts instead of `len(frames)`, which is what made the whole-file decode
+structurally necessary before.
+
+**Kept `read_hdf5_stack_combined` rather than deleting it.** It is a correct,
+well-tested, generally useful helper; the bug was a caller using a
+whole-file read for random access, not the function. Its remaining
+production use is none, and that is fine — the source class no longer has a
+whole-file path to fall back into.
+
+**Decided: the cache holds one chunk, not one file.** Chunk-at-a-time would
+be worse than the bug if a sequential pass re-read anything, so
+`test_iterating_reads_each_chunk_exactly_once` pins that `__iter__` still
+costs the file exactly once. Both `__iter__` and a chunked `BatchWorker`
+walk frames in order, so one chunk of lookahead is all either needs.
+
+**Tests assert slices, not seconds.** Wall-clock and byte counts are not
+assertable, so `tests/test_stack_chunk_reads.py` proxies `h5py.File` and
+records every `dset[a:b]` taken — "reads one chunk" becomes an exact set
+comparison. Four of the eleven fail against the old implementation; the rest
+pin frame-for-frame equivalence with it, because a faster wrong answer is
+not the deliverable.
+
+## 2026-09-29 — Omega on the background-job path: serialise the config, don't re-derive it
+
+The omega feature shipped wired into `BatchTab._run` only. `_run_as_job`
+builds an argv for a detached `python -m midas_gui.batch_cli`, and that argv
+carried no omega flags, so every background job wrote ω = 0 on every frame
+regardless of the Cake parameters. Found from a real 20-ID run whose log said
+`OME_START=0, OME_STEP=0` while the tab's summary read `Δω 1°/sub-frame`.
+
+**Why it was invisible.** Nothing could raise. From inside `BatchWorker` an
+unpassed `omega_cfg` and a genuine stationary 0°/0° are the same thing — which
+is a *deliberate* earlier decision (see the "0/0 is a real angle, not a
+sentinel" entry), and the right one: a sentinel would have made a stationary
+sample unrepresentable. The cost is that the config must be proven to arrive,
+because its absence is indistinguishable from a valid value. That is a
+testing obligation, not a reason to reintroduce a sentinel.
+
+**Decided: one shape, serialised, never recomputed.** `batch_cli._omega_cfg`
+mirrors `BatchTab._omega_cfg` key-for-key and the tab emits from that same
+method, rather than the CLI re-deriving angles from a cake CSV it would have
+to be handed separately. Two derivations of the same quantity is how the
+paths drifted apart in the first place, and the measured-channel case cannot
+be re-derived from a CSV at all.
+
+**Decided: `--ome-start`/`--ome-step` go out unconditionally**, including at
+0/0 where they are no-ops. The launched command line is echoed into the Logs
+tab and is the only window a user has into a detached job's configuration; an
+omitted flag is precisely what made this bug unobservable. Channel and
+collapse stay conditional — they have an unambiguous "off" spelling.
+
+**The regression guard is a round trip, not two half-assertions.**
+`tests/test_batch_cli_omega.py` drives the real argv builder and feeds its
+output to the real CLI parser, asserting `batch_cli._omega_cfg(parsed) ==
+tab._omega_cfg()`. Asserting "the tab emits a flag" and "the CLI parses a
+flag" separately is exactly the pair of green tests that would have coexisted
+with this bug. `batch_cli.py` had no tests of its own beyond `_source_cfg`,
+which is why this path was the one that rotted.
+
+## 2026-09-29 — Merging upstream's cake HDF5: which side won, and why
+
+Upstream (`d-beniwal/MIDAS_GUI`) added two commits on 2026-09-28 —
+`31e904c` (multi-azimuth HDF5 output, new `midas_gui/cake_hdf5.py`) and
+`61feeb3` (flatter cake layout, 2θ/d/Q axes, wider provenance). They land on
+the same code the omega work had just rewritten. Merged on
+`merge/upstream-2026-09-29`; only `workers.py` and `tab_batch.py` conflicted.
+
+**Taken from upstream wholesale**: `cake_hdf5.write_cake_h5` and everything
+that feeds it, the `calibration_snapshot` widening of both provenance
+entries, `provenance_history` as a dataset as well as attrs (invisible in a
+tree view otherwise), `json.dumps(..., indent=2)`, `project.json_default` as
+a public name, and `helpers.collapse_cake_eta` — this fork had the identical
+implementation inline in `tab_batch._collapse_cakes`, so the shared helper
+simply wins and the local copy delegates.
+
+**Taken from this fork**: the whole omega feature. Upstream's own
+`all_omegas` is frame *indices*, feeding the combined-HDF5 stem's `<lo>_<hi>`
+token; this fork had already split that list in two for exactly the reason
+upstream's rename would have re-hidden. So upstream's list became
+`all_frame_idx` here, and its append condition was widened to the union
+(`(want_zarr or multi_azimuth) and cake_2d is not None`) — upstream needs it
+in cake mode for the stem, this fork needed it in zarr mode, and both are
+now satisfied without either behaviour changing.
+
+**A real bug avoided in the merge.** Upstream hoisted the BinArea count out
+of the `want_zarr` branch so the cake HDF5 could share it — but hoisted the
+version that passes `geom` straight to `count_cake`. On the corrections path
+`ctx["geom"]` is deliberately `None`, and this fork had already fixed that
+crash for the zarr branch (build a plain-kernel geometry purely for the
+count; see the 2026-09-13 entry on why `corr_counts` is not a substitute).
+Resolving to upstream's structure with this fork's geometry fallback keeps
+both: one shared `cake_bin_area`, computed safely.
+`test_the_cake_hdf5_survives_physics_corrections` pins it, mirroring the zarr
+test that exists for the same reason.
+
+**One thing added rather than merged.** `write_cake_h5` gained an `omegas`
+argument and writes a root-level `omegas` dataset (degrees, `units` attr),
+dropped rather than padded on a length mismatch. Upstream's cake file is a
+GUI-native archive and explicitly the thing a pole figure over a rotation
+series would read, so leaving the angle out of it would have made the fork's
+own invariant — the angle reaches every output — false in exactly the mode
+that needs it most. Threaded from `BatchWorker`'s `all_omegas`, from
+`write_all_profiles`' new `omegas=` on the cake branch, and from
+`BatchRunCoordinator`'s merged write.
+
+## 2026-09-29 — Omega becomes a real angle, and `/Omegas` stops being an index
+
+**What was actually wrong.** Both zarr writers filled the per-frame omega axis
+with `float(frame_index)`, and the backend stores that as `/Omegas` with
+`attrs {"Units": "Degrees"}`. So every zarr this app had ever written recorded
+frame counts as angles. Nothing downstream read it (`gsas_ii_refine.py`
+doesn't), which is why it survived — but the next piece of work is peak fits
+and pole figures, where omega is the independent variable, and those cannot be
+built on an axis that is silently an index. Meanwhile the cake CSV's
+`OME_START`/`OME_STEP` — the real rotation, fetched at the beamline off
+`20idaSoft:userTran9.H`/`.I` — were parsed, round-tripped, and applied to
+nothing (see the 2026-09-28 entry, which deliberately left them inert).
+
+**Why one formula instead of mpe_wf's three cases.** `gui_data_explorer.py`
+handles no-combining, `OME_SUM = n`, and collapse-everything as separate
+expressions. All three are the same statement:
+
+    omega(frame) = OME_START + mean(raw sub-frame indices of that frame) * OME_STEP
+
+written as `start + 0.5*(lo+hi)*step` over the frame's inclusive raw window.
+For `OME_SUM = n` this is algebraically `ome_start + (idx*ome_sum +
+(ome_sum-1)/2)*ome_step`, mpe_wf verbatim — pinned by a test that runs both
+expressions over several `n`. The user's "averaged or summed" requirement then
+isn't a branch at all: it falls out of the window spanning the run. Three
+cases would have been three places for the sign of a reverse scan or an
+off-by-one on a short last chunk to go wrong independently.
+
+**Why the raw indices are global, not per-file.** A rotation scan split over
+147 VAREX files keeps rotating; file 2's frames are at higher angles, so its
+raw indices have to continue rather than restart. The same reasoning makes
+them *absolute* rather than per-worker: in Batch-Parallel mode each chunk sees
+only its slice, and `abs_i` is already the absolute output-frame index in both
+`_iter_frames` branches, so the window — and therefore the angle — is
+reproducible regardless of which chunk computed it. The collapse override
+deliberately takes its run-wide window from `source.n_frames` for the same
+reason; taking it from the frames a worker happens to iterate would make two
+chunks disagree about the single collapsed angle. A measured omega channel
+wants the opposite (a per-file 1-D dataset is indexed file-locally), hence
+`omega_channel_window` as a separate method rather than a flag on the first.
+
+**Why `OME_START = OME_STEP = 0` is a genuine 0.0 and not a sentinel.** A
+stationary sample really is at ω = 0, and the alternative — treating the
+default as "unset" and falling back — is exactly how the frame index got in
+there. 0.0 is a far better wrong answer than an index if the user forgot to
+set the keys. The cost is a visible behaviour change for anyone who never
+opens the cake editor, so it is called out in the docs and a `[batch] omega:`
+line names the source on every run.
+
+**Why omegas are stored in the logged attempt rather than recomputed at
+export.** A measured omega channel is read off the raw frames, and the
+GSAS-II export path never reopens them — recomputing would silently downgrade
+a measured angle to the computed ramp. So `results/omegas` rides along with
+`frame_ids`. Legacy attempts that predate it fall back to recomputing from a
+recorded `omega_cfg`, and failing that to zeros — deliberately *not* to
+`range(n_frames)`, which would reintroduce the bug on the one path that still
+had it. Which of the three happened is recorded as `omega_source` in the
+provenance `extra`, because a stored 0.0 and an unrecorded 0.0 are the same
+number and a reader has to be able to tell them apart. A stored list whose
+length doesn't match the frames is discarded rather than padded: angles are
+matched positionally, and a misfiled angle is worse than a missing one.
+
+**Why the combined HDF5 gets `extra_datasets={"omegas": …}` rather than a
+`ProfileMetadata` field.** It is per-frame data, not a per-run scalar, and
+`m.write_h5` already accepts exactly that. Same length rule as above — the
+branch skips rather than pads.
+
+**What was left alone.** `PoleFigureWorker` is still single-frame and takes
+χ/φ from its own cfg; making it omega-aware across a series is the work this
+entry exists to make possible, not part of it.
+
 ## 2026-09-28 — Cake parameters get one editor that mirrors, not one that hosts
 
 **Question that started it.** "It will be good to have the ability to change

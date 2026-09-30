@@ -3,8 +3,12 @@
 Covers the two things that are easy to break silently: that the dialog's own
 spinboxes really are a two-way mirror of the tab's widgets (it copies rather
 than hosting them — see ``_CakeParamsDialog``'s docstring for why it has to),
-and that ``OME_START``/``OME_STEP`` survive a full load → edit → save cycle
-despite being applied to nothing anywhere in this pipeline.
+and that ``OME_START``/``OME_STEP`` survive a full load → edit → save cycle.
+
+The dialog also hosts the two omega controls that are NOT CSV columns — the
+measured-channel combo and the averaged/summed override — and keeping those
+out of ``SPEC`` while still round-tripping them is its own trap, so both
+halves of that are pinned below.
 
 Qt import discipline per STATE.md: import inside fixtures, never at module
 scope.
@@ -95,7 +99,7 @@ def test_mirror_spins_inherit_the_range_of_what_they_stand_in_for(tab, dialog):
 
 def test_ome_start_and_step_survive_a_full_round_trip(tab, dialog, tmp_path, monkeypatch):
     """Loaded from a CSV, carried through the dialog, written back out
-    unchanged — even though nothing in this pipeline reads them."""
+    unchanged — the two values Batch Integrate turns into every frame's ω."""
     from midas_gui import cake_params, tab_batch
     src = tmp_path / "in.csv"
     _write(src, R_MIN=10, R_STEP=2, OME_START=1.75, OME_STEP=0.25)
@@ -181,3 +185,64 @@ def test_the_dialog_covers_every_csv_column_in_order(dialog):
     from midas_gui.cake_params import CAKE_KEYS
     assert tuple(k for k, _l, _a in type(dialog).SPEC) == CAKE_KEYS
     assert tuple(dialog._spins) == CAKE_KEYS
+
+
+# ── the two omega controls that are not CSV columns ──────────────────────
+
+def test_the_omega_channel_and_override_mirror_both_ways(tab, dialog):
+    """They live on the tab and the dialog copies them, exactly like the nine
+    spinboxes — so an edit only lands when the user hits apply."""
+    tab._ome_channel.setEditText("measurement/omegas")
+    tab._ome_collapse.setChecked(True)
+    dialog.load_from_tab()
+    assert dialog._extras["_ome_channel"].currentText() == "measurement/omegas"
+    assert dialog._extras["_ome_collapse"].isChecked() is True
+
+    dialog._extras["_ome_channel"].setEditText("other/ome")
+    dialog._extras["_ome_collapse"].setChecked(False)
+    assert tab._ome_channel.currentText() == "measurement/omegas", "not yet"
+    dialog.apply_to_tab()
+    assert tab._ome_channel.currentText() == "other/ome"
+    assert tab._ome_collapse.isChecked() is False
+
+
+def test_the_omega_controls_stay_out_of_the_csv(tab, dialog):
+    """``write_cake_csv`` takes ``dialog.values()``; a channel name is not a
+    number and mpe_wf's reader would choke on a tenth column, so these two
+    must never reach it. ``SPEC`` being the only source of ``values()`` is
+    what enforces that — this asserts the consequence."""
+    from midas_gui.cake_params import CAKE_KEYS
+    tab._ome_channel.setEditText("measurement/omegas")
+    tab._ome_collapse.setChecked(True)
+    dialog.load_from_tab()
+    assert set(dialog.values()) == set(CAKE_KEYS)
+
+
+def test_the_omega_controls_round_trip_through_gui_state(tab):
+    """A combo and a checkbox, not floats — ``widgets_to_dict`` handles both
+    already, but only if they are registered in ``_state_widgets``."""
+    tab._ome_channel.setEditText("measurement/omegas")
+    tab._ome_collapse.setChecked(True)
+    state = tab.get_state()
+    other = type(tab)()
+    other.set_state(state)
+    assert other._ome_channel.currentText() == "measurement/omegas"
+    assert other._ome_collapse.isChecked() is True
+
+
+def test_the_run_config_reports_what_the_widgets_say(tab):
+    """``_omega_cfg`` is the one place the UI meets ``BatchWorker``; a typo
+    here would silently give every run the defaults."""
+    tab._ome_start.setValue(5.0)
+    tab._ome_step.setValue(0.25)
+    tab._ome_channel.setEditText("  measurement/omegas  ")
+    tab._ome_collapse.setChecked(True)
+    assert tab._omega_cfg() == {"start": 5.0, "step": 0.25,
+                                "channel": "measurement/omegas",
+                                "collapse": True}
+
+
+def test_an_unconfigured_tab_asks_for_zero_degrees(tab):
+    """Not ``None``, not a sentinel — the defaults are a stationary sample."""
+    assert tab._omega_cfg() == {"start": 0.0, "step": 0.0,
+                                "channel": "", "collapse": False}

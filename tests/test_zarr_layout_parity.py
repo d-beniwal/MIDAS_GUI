@@ -26,6 +26,11 @@ _CALIB = dict(
 )
 R_BIN = 1.0
 
+#: Both paths are driven over the same two-frame rotation so ``/Omegas`` can
+#: be diffed as data, not just as a present-or-absent array.
+OMEGA_CFG = {"start": 5.0, "step": 0.25, "channel": "", "collapse": False}
+OMEGAS = (5.0, 5.25)
+
 
 @pytest.fixture(scope="module")
 def app():
@@ -81,7 +86,7 @@ def _write_via_batch(tmp_path, app):
     out = tmp_path / "batch_out"
     worker = wk.BatchWorker(spec, {"type": "tiff_list", "paths": paths}, None,
                             out, ["zarr"], "subpixel2", (None, None), None,
-                            multi_azimuth=False)
+                            multi_azimuth=False, omega_cfg=OMEGA_CFG)
     failures = []
     worker.failed.connect(failures.append)
     worker.run()
@@ -111,7 +116,8 @@ def _write_via_export(tmp_path, app):
                 "q_cfg": None},
         finished_payload={"n": 2, "profiles": profiles, "r_axis_px": r_axis_px,
                           "sigmas": np.sqrt(profiles),
-                          "frame_ids": ["a", "b"], "aborted": False},
+                          "frame_ids": ["a", "b"],
+                          "omegas": list(OMEGAS), "aborted": False},
         calibration_snapshot=dict(_CALIB),
         extra={"n_eta_bins": 1, "eta_axis_deg": None})
     return export_gsas_zarr(proj, "single", ref, tmp_path / "export.zarr.zip")
@@ -288,3 +294,97 @@ def test_both_paths_copy_the_same_instrument_tree_from_the_same_hdf5(tmp_path, a
         assert g["instrument/GSAS2_PVS/Temperature"][0] == pytest.approx(
             temperature[:4].mean())
         assert g["instrument/HRM/energy"][0] == pytest.approx(71.676)
+
+
+# ── /Omegas: the same angles whichever path wrote them ───────────────────
+
+def test_both_paths_write_the_same_angle_for_the_same_frame(both):
+    """Batch Integrate computes ω from OME_START/OME_STEP as it goes; the
+    export path replays what the logged attempt recorded. They are different
+    mechanisms and must land on the same number, or re-exporting a run
+    silently moves every peak.
+
+    Compared frame-by-frame rather than array-to-array because the two paths
+    legitimately write different numbers of frames per store — one each for
+    Batch Integrate, all of them for the export."""
+    batch, export = both
+    assert np.asarray(batch["Omegas"]).ravel()[0] == \
+        pytest.approx(np.asarray(export["Omegas"]).ravel()[0])
+
+
+def test_both_paths_write_the_angles_the_run_was_actually_at(both):
+    """Parity with each other is not enough — they could agree on the wrong
+    thing (they used to agree on the frame index)."""
+    batch, export = both
+    assert np.asarray(batch["Omegas"]).ravel().tolist() == \
+        pytest.approx([OMEGAS[0]])
+    assert np.asarray(export["Omegas"]).ravel().tolist() == \
+        pytest.approx(list(OMEGAS))
+
+
+def test_the_export_records_where_its_angles_came_from(both):
+    """Three provenance-visible outcomes — recorded, recomputed, or
+    unavailable — because a stored 0.0 and an unrecorded 0.0 are the same
+    number and a reader has to be able to tell them apart."""
+    _batch, export = both
+    assert _prov(export)["extra"]["omega_source"] == "recorded"
+
+
+def _export_attempt(tmp_path, app, *, payload_extra=None, inputs_extra=None):
+    """One logged attempt → one exported store, with control over what the
+    attempt did and didn't record."""
+    pytest.importorskip("torch")
+    pytest.importorskip("zarr")
+    from midas_gui import project
+    from midas_gui.gsas_export import export_gsas_zarr
+    from midas_gui.helpers import _build_spec
+
+    proj = str(tmp_path / "proj.h5")
+    project.create_project(proj)
+    spec = _build_spec(project.calibration_namespace(dict(_CALIB)),
+                       R_BIN, 360.0)
+    r_axis_px = spec.RMin + spec.RBinSize * (np.arange(spec.n_r_bins) + 0.5)
+    profiles = np.abs(np.random.rand(2, spec.n_r_bins)) + 1.0
+    inputs = {"kernel": "subpixel2", "r_bin": R_BIN, "e_bin": 360.0,
+              "q_cfg": None}
+    inputs.update(inputs_extra or {})
+    payload = {"n": 2, "profiles": profiles, "r_axis_px": r_axis_px,
+               "sigmas": np.sqrt(profiles), "frame_ids": ["a", "b"],
+               "aborted": False}
+    payload.update(payload_extra or {})
+    ref = project.append_integration_attempt(
+        proj, "single", inputs=inputs, finished_payload=payload,
+        calibration_snapshot=dict(_CALIB),
+        extra={"n_eta_bins": 1, "eta_axis_deg": None})
+    return _open(export_gsas_zarr(proj, "single", ref,
+                                  tmp_path / "export.zarr.zip"))
+
+
+def test_a_legacy_attempt_recomputes_its_angles_from_the_recorded_config(
+        tmp_path, app):
+    """An attempt logged before per-frame omegas were stored still recorded
+    its ``omega_cfg``, so the computed ramp can be rebuilt exactly."""
+    g = _export_attempt(tmp_path, app, inputs_extra={"omega_cfg": OMEGA_CFG})
+    assert np.asarray(g["Omegas"]).ravel().tolist() == pytest.approx(list(OMEGAS))
+    assert _prov(g)["extra"]["omega_source"] == "recomputed from omega_cfg"
+
+
+def test_an_attempt_with_no_omega_record_exports_zeros_not_indices(
+        tmp_path, app):
+    """The oldest attempts have neither. Writing ``range(n_frames)`` into a
+    dataset the backend labels ``Units: Degrees`` is what this whole feature
+    removed, so the fallback must not reintroduce it on the export path."""
+    g = _export_attempt(tmp_path, app)
+    got = np.asarray(g["Omegas"]).ravel().tolist()
+    assert got == [0.0, 0.0]
+    assert got != [0.0, 1.0]
+    assert _prov(g)["extra"]["omega_source"] == "unavailable"
+
+
+def test_a_stored_omega_list_of_the_wrong_length_is_not_trusted(tmp_path, app):
+    """Angles are matched to frames positionally; a short list would silently
+    misfile every frame after the gap, so it has to be discarded rather than
+    padded."""
+    g = _export_attempt(tmp_path, app, payload_extra={"omegas": [5.0]})
+    assert np.asarray(g["Omegas"]).ravel().tolist() == [0.0, 0.0]
+    assert _prov(g)["extra"]["omega_source"] == "unavailable"

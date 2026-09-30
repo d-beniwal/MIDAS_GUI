@@ -2084,7 +2084,7 @@ already have elsewhere on this tab, gathered together:
 | `R_MIN` / `R_MAX` / `R_STEP` | **R bins…** (Integration → Bin type) |
 | `ETA_MIN` / `ETA_MAX` / `ETA_STEP` | **Azimuthal bins…** |
 | `OME_SUM` | the data loader's **Combine sub-frames** |
-| `OME_START` / `OME_STEP` | nowhere — see below |
+| `OME_START` / `OME_STEP` | nowhere else — they drive the per-frame ω, see below |
 
 Editing a value here or in the corresponding popup is the same setting either
 way; **Apply** is what pushes the editor's numbers back onto the tab, so you
@@ -2092,10 +2092,104 @@ can open it, try values, and close without having changed the next run. The
 `R bins…` / `Azimuthal bins…` popups stay for adjusting one axis mid-run;
 this is the view of the whole file at once.
 
-`OME_START` and `OME_STEP` are omega-series bookkeeping for mpe_wf's own
-integration backend and have no counterpart in `midas_integrate_v2` — they are
-carried through Load and Save (and through Save/Load GUI State) so a file
-round-trips intact, and are **applied to nothing** here.
+#### `OME_START` / `OME_STEP` — the rotation angle on every frame
+
+These two describe the rotation the frames were collected over: `OME_START` is
+the angle of raw sub-frame 0, `OME_STEP` the increment per raw sub-frame. (At
+the beamline mpe_wf reads them straight off `20idaSoft:userTran9.H` and `.I`.)
+`midas_integrate_v2` itself knows nothing about rotation, but the zarr writer
+takes a per-frame omega, so Batch Integrate turns the two into angles:
+
+> **ω(frame) = `OME_START` + mean(the raw sub-frame indices that frame was
+> built from) × `OME_STEP`**
+
+The raw indices are counted **from the start of the rotation the frame came
+from**, and one HDF5 sub-frame stack is one rotation — so on a multi-file pick
+each file restarts at `OME_START` rather than continuing the previous file's
+ramp. One-frame-per-file data (TIFF, `.ge*`) is the other way round: a single
+such file is not a rotation, the series is, so there the whole selection is
+counted through. A raw-frame filter *shifts* the angles rather than rebasing
+them in both cases: skipping the first ten sub-frames does not move where the
+rotation began, so the survivors keep the angles they physically had.
+
+Counting per file is also what lets the computed ramp and a **measured**
+omega channel (below) mean the same thing. A measured channel is a 1-D dataset
+stored inside each file and indexed from 0 in each, so it has no choice but to
+be file-local; the ramp is aligned to it rather than the other way round, and
+both now read the same window for a given frame.
+
+That one expression covers every case: with no combining (`OME_SUM` = 1) it is
+`OME_START + k·OME_STEP`; with `OME_SUM` = *n* it reproduces mpe_wf's own
+`ome_start + (idx·ome_sum + (ome_sum−1)/2)·ome_step` exactly; with `OME_SUM` =
+0 ("combine everything selected into one frame") it is the mean angle the
+collapsed exposure actually covered.
+
+#### Frame numbers and angles are the same axis
+
+`start` / `end` / **Combine sub-frames** in the data loader and
+`OME_START` / `OME_STEP` / `OME_SUM` in the cake parameters describe *one*
+thing — the raw sub-frames of the acquisition. One set counts them, the other
+puts degrees on them, and `OME_SUM` **is** the **Combine sub-frames** spin box
+(the editor edits that widget, not a copy of it, so the two cannot disagree).
+
+Two readouts now state the correspondence for whatever is loaded, so the
+conversion never has to be done in your head:
+
+* The **cake summary line** under *Cake parameters…* gains a second line:
+
+  ```
+  R 0–auto px  ΔR 1 px   η -180…180°  Δη 5°   sum 25 sub-frames (OME_SUM)   ω 0°  Δω 0.25°/sub-frame = 6.25°/frame
+     sub-frames 0…1441 → ω 0°…360.25°   58 frame(s)
+  ```
+
+  The `Δω …/sub-frame = …/frame` pair is the easily-missed multiplication:
+  combining 25 sub-frames leaves consecutive *output* frames 25 × `OME_STEP`
+  apart. On a multi-file pick the line says *of each file* and *in every
+  file*, matching the per-file rule above. If a rotation is loaded and no
+  angles are configured, it says so outright —
+  `ω 0° on all 58 frames (OME_START/OME_STEP not set)` — which is the state
+  that otherwise produces a perfectly valid-looking run of all-zero `/Omegas`.
+  With a measured channel picked, it names the channel instead of inventing a
+  range from the unused ramp.
+
+* The **start/end hint** in the data loader card gains the short form of the
+  same thing — `… → ω 0°…360.25°` — right under the boxes where the
+  sub-frame range is set.
+
+Both are recomputed from the source's own frame windows, so they cannot report
+a range the run will not produce; editing `OME_START` or `OME_STEP` re-renders
+them without re-reading any file.
+
+Two more controls sit under the nine columns in the same editor. They are
+**not** CSV columns — they are saved and restored with the GUI state, not
+written into the file:
+
+| Control | What it does |
+|---|---|
+| **Omega channel** | An editable drop-down listing the 1-D datasets in the loaded HDF5, with omega-looking names (`/omegas`, `samry`, `omega`) sorted to the top. Pick one to use the *measured* angle instead of the computed ramp, reduced over each output frame's window the same way the pixels are. Blank — the default — falls back to `OME_START`/`OME_STEP`; nothing is ever auto-selected, the name hint only orders the list. A channel that turns out to be missing or unreadable logs one line and falls back to the ramp rather than failing the run. |
+| **Averaged/summed — one ω for all frames** | The override for data that was averaged or summed *outside* this loader (pre-averaged TIFFs, or frames that are already sums while `OME_SUM` still reads 1): every output frame gets the single run-wide mean angle instead of its own position in a ramp the pixels no longer have. When the combining happened here (`OME_SUM` = 0) the one window already spans the run, so the override changes nothing. |
+
+The resulting angles go into the zarr's `/Omegas` (which the backend labels
+`Units: Degrees`), into an `omegas` dataset alongside the profiles in the
+combined HDF5 (both layouts — the plain 1-D one and the multi-azimuth cake
+file, see the Output formats section below), and into the logged attempt — so a GSAS-II export of that
+attempt re-exports with the same angles the run used, including a measured
+channel the export path can no longer reach. Each run logs one
+`[batch] omega: …` line naming the source it actually used.
+
+Both run paths carry these settings: **Start Integration** passes them
+in-process, and **Run as background job** serialises them onto the
+`batch_cli` command line as `--ome-start` / `--ome-step` / `--ome-channel` /
+`--ome-collapse`. Start and step are always on that command line, even at the
+0/0 default, so the launched command echoed into the **Logs** tab always
+states the angles the detached job will record.
+
+**Leaving both at 0 now means a genuine ω = 0 on every frame**, not "unset" —
+a stationary sample really is at zero. This is a visible change for anyone who
+never opens this editor: `/Omegas` used to be filled with the frame index
+(`0, 1, 2, …`) labelled as degrees, and is now all zeros until you set the two
+keys. Nothing downstream read it yet, which is why the old behaviour went
+unnoticed, but peak fits and pole figures take ω as the independent variable.
 
 **Save** always goes through a Save-As dialog, pre-filled with
 `<expid>_bc/cake_parameters.<beamline>.<detector>.csv` — mpe_wf's own filename
@@ -2111,7 +2205,8 @@ there.
 
 Immediately below the button, a muted one-line summary shows the cake
 parameters currently in force (R range/bin, η range/bin, Q output range when
-Q-uniform bins are on, and the sub-frame sum when it's greater than 1),
+Q-uniform bins are on, the sub-frame sum when it's greater than 1, and the
+omega source when it isn't the default zero),
 wherever they came from — CSV, typed by hand, restored with a project, or
 auto-filled.
 
@@ -2124,7 +2219,7 @@ auto-filled.
 | **Azim. mean** | How the (η, R) cake becomes a 1-D profile: **Pixel-weighted** (default) `Σ(mean·count)/Σ(count)` — independent of η-bin size and robust to partial azimuthal coverage / **off-detector beam centres**; or **η-bin mean (legacy)** — the unweighted mean of per-η-bin means, which can distort with a coarse η bin when the beam centre is off the detector. |
 | Per-bin variance (σ) | Error model poisson / azimuthal / hybrid (ignored when corrections are on → σ = √I). |
 | Q-uniform bins | Integrate in R then rebin onto a uniform-Q grid (Qmin, Qmax, ΔQ). |
-| **Multi-azimuth output (cake)** | Off by default. Keeps every azimuthal (η) sector from the η bin/range above as a **separate** output profile per frame (`profiles`/`sigmas` become `(n_frames, n_eta, n_r)`) instead of collapsing to one full-circle mean profile — needed for per-azimuth GSAS-II/texture work. Off, η bin still exists (default 5° over the full 360°, i.e. 72 internal bins) but is used only to control the collapse's weighting resolution, so turning this on repurposes that same field rather than changing any existing run's output. Text-format Save/live writes become one file per `(frame, η bin)`, named `<id>_etaNNN.<fmt>`; HDF5 output is skipped in this mode (`write_h5` expects one profile per frame) — use the text formats or the GSAS-II zarr export (§REVISIT) instead. Not yet combinable with Q-uniform bins. |
+| **Multi-azimuth output (cake)** | Off by default. Keeps every azimuthal (η) sector from the η bin/range above as a **separate** output profile per frame (`profiles`/`sigmas` become `(n_frames, n_eta, n_r)`) instead of collapsing to one full-circle mean profile — needed for per-azimuth GSAS-II/texture work. Off, η bin still exists (default 5° over the full 360°, i.e. 72 internal bins) but is used only to control the collapse's weighting resolution, so turning this on repurposes that same field rather than changing any existing run's output. Text-format Save/live writes become one file per `(frame, η bin)`, named `<id>_etaNNN.<fmt>`; HDF5 output switches to the cake layout below (`midas_gui/cake_hdf5.py`) rather than being skipped, since `midas_integrate_v2.write_h5` only accepts a 1-D profile per frame. Not yet combinable with Q-uniform bins. |
 | **Show bin grid** | Off by default. Overlays the full (R, η) integration bin grid — concentric circles at each R-bin edge, spokes at each η-bin edge — on the **Detector view** tab, thinned to at most ~50 rings / ~72 spokes so a fine bin size stays legible. |
 
 A new **Detector view** tab (alongside Waterfall/Stacked profiles — one page-level
@@ -2133,6 +2228,18 @@ panel is toolbar-selected) shows the current source frame with the Rmin/Rmax
 boundary circles always overlaid (once a calibration resolves), plus the bin
 grid when **Show bin grid** is checked — lets you confirm the excluded
 region/binning geometry visually before running a batch.
+
+**On a large sub-frame stack the preview now appears in seconds, not minutes.**
+Showing one frame used to decode the whole file it lives in: on a 1442-sub-frame
+VAREX file (2880x2880 uint16, 23.9 GB) that was about **230 s and ~1.9 GB of
+memory to draw a single 33 MB frame**, and the same cost was paid again by each
+parallel worker at the start of a batch run. Only the sub-frames behind the
+requested frame are read now — the same file previews in about **4 s / 415 MB**,
+and the frame count still comes from the HDF5 header without reading any pixels
+at all. Nothing about the output changes: frames, their ids and the resulting
+filenames are identical to before. This is the same defect behind a run that
+looked frozen before it logged anything; that half was fixed earlier, for
+counting only.
 
 ### Physics corrections
 Polarization and solid-angle (pixel-domain, via `integrate_with_corrections`).
@@ -2274,6 +2381,35 @@ text names whichever formats are currently checked (e.g. "Output format:
 CSV, XYE ▾") so the selection is visible without opening the menu — the
 checkboxes themselves no longer take up permanent space in the Output
 card.
+
+**2D-CSV (η×R cake) — one file per frame, in either mode.** Each frame's
+whole cake is written to `2d_csv/<frame>_cake.csv`: a header row of R values
+and one row per η bin, prefixed by that bin's centre angle. It is a picture of
+the cake rather than a lineout, so **Multi-azimuth output** does not change
+it — that checkbox controls whether the *other* formats fan out into one file
+per η bin (`<frame>_etaNNN.<fmt>`), and 2D-CSV is written the same way with it
+on or off. (Until 2026-09-29 it was written only with multi-azimuth on: with
+the box off the run produced an empty `2d_csv/` folder while still reporting a
+file — under the wrong name at that. If you have a run whose `2d_csv/` folder
+is empty, that is the bug, and re-running is all that is needed.) The one case
+where it genuinely cannot be produced is **Save** after a 1-D run, which is
+explained above.
+
+**HDF5 in multi-azimuth mode — the cake layout.** With **Multi-azimuth
+output (cake)** on, the combined HDF5 is written by `midas_gui/cake_hdf5.py`
+instead of `midas_integrate_v2.write_h5`, which only accepts a 1-D profile per
+frame. It is a flat file — every dataset at a root-level path, no NeXus
+nesting — holding `cake`/`cake_sigma` `(N, n_eta, n_r)`, the real
+engine-collapsed `profiles`/`sigmas`, the `r_px`/`two_theta_deg`/`d_angstrom`/
+`q_invA` radial axes, `eta_deg`, `frame_ids`, `omegas` (degrees, one per frame
+— see §7's OME_START/OME_STEP), and the `bin_area` pixel-count weight. The
+stored cake is reweighted by each bin's share of that area, so
+`cake.sum(axis=eta)` reproduces `profiles` exactly. This is a GUI-native
+archive, **not** a GSAS-II input: GSAS-II's importer only ever opens
+`.zarr.zip`, so nothing here mirrors the zarr `REtaMap`/`OmegaSumFrame`
+convention. Provenance is stamped afterwards, in the root attrs *and*
+mirrored into a root-level `provenance_history` dataset so it shows up in a
+plain `h5ls`/tree view.
 
 **Zarr's environmental metadata (stopgap).** The `zarr` output format's
 per-frame `OmegaSumFrame` attrs, and its `provenance_history` entry, also try
@@ -2918,6 +3054,32 @@ installed package (no `sys.path` manipulation).
 from hard-aborting on an exception inside a slot. Each tab is built in isolation — a tab
 that fails becomes an error placeholder instead of taking the window down. If the app
 ever "pops up and dies" (typically on Windows), send that log file.
+
+**Freeze diagnostics (`kill -USR1`).** A crash leaves a traceback; a *freeze*
+leaves nothing, and the moment the window stops repainting is exactly the
+moment you can no longer ask the app anything. `launch.py` therefore arms a
+`SIGUSR1` handler at startup (Linux/macOS; Windows has no `SIGUSR1`, so the
+guard skips it). While the GUI is unresponsive, from another terminal:
+
+```
+pgrep -u $USER -f launch.py          # or -f midas-gui
+kill -USR1 <pid>
+tail -60 ~/midas_gui_hang.log
+```
+
+Every thread's Python stack is appended to `~/midas_gui_hang.log`, naming the
+exact call that is blocking the event loop. The process is **not** killed or
+interrupted — unlike `faulthandler`'s fatal-error handlers, this one only
+prints, so you can signal a stuck GUI repeatedly and watch whether the stack
+moves (slow but progressing) or stays put (genuinely wedged). It is inert
+until signalled and costs nothing at runtime.
+
+Worth knowing what is *not* a freeze: Batch Integrate's Detector-view preview
+is fetched by a background `StreamPreviewWorker` and never blocks the event
+loop, and the ω mapping readout reads HDF5 headers only (no pixels),
+coalesced through a 150 ms timer and skipped entirely when the source has not
+changed. A window that stops repainting during either is a bug worth a stack
+dump, not expected behaviour.
 
 ---
 

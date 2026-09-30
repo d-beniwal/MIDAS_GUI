@@ -682,7 +682,7 @@ class HydraBatchPage(QtWidgets.QWidget):
                 paths = write_all_profiles(
                     Path(out_dir) / f"ge{n}", fmts, results["r_axis_px"],
                     results["profiles"], results["sigmas"], results["frame_ids"],
-                    lsd, px, wl)
+                    lsd, px, wl, omegas=results.get("omegas"))
                 total += len(paths)
             except Exception:
                 import traceback as _tb

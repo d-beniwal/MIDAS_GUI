@@ -31,7 +31,8 @@ from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_
                                check_output_dir_writable,
                                suggest_integration_output_dir,
                                suggest_working_dir, bc_path_parts,
-                               browse_start_dir, warn_if_path_missing)
+                               browse_start_dir, warn_if_path_missing,
+                               is_h5, list_h5_1d_datasets)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, DataLoaderPanel, OutputFormatSelector,
                                ImageViewer, OriginToolButton, build_lab_frame_axes_items,
@@ -42,7 +43,8 @@ from midas_gui.dialogs import show_error
 from midas_gui.hydra_widgets import HydraModeRibbon
 from midas_gui.hydra_batch_page import HydraBatchPage
 from midas_gui.job_queue import JobQueuePanel
-from midas_gui.cake_params import parse_cake_csv, write_cake_csv
+from midas_gui.cake_params import (parse_cake_csv, write_cake_csv,
+                                   omega_for_window)
 from midas_gui import project
 from midas_gui import settings
 from midas_gui import style as S
@@ -144,8 +146,23 @@ class _CakeParamsDialog(QtWidgets.QDialog):
         ("ETA_MAX",   "ETA_MAX  (η max)",              "_eta_max"),
         ("ETA_STEP",  "ETA_STEP  (η bin)",             "_e_bin"),
         ("OME_SUM",   "OME_SUM  (Combine sub-frames)", None),
-        ("OME_START", "OME_START  (not applied)",      "_ome_start"),
-        ("OME_STEP",  "OME_STEP  (not applied)",       "_ome_step"),
+        ("OME_START", "OME_START  (ω of raw frame 0)", "_ome_start"),
+        ("OME_STEP",  "OME_STEP  (ω per raw sub-frame)", "_ome_step"),
+    )
+
+    # Two controls that are NOT CSV columns and must stay out of SPEC — the
+    # file mpe_wf reads has exactly nine, and
+    # test_the_dialog_covers_every_csv_column_in_order is what keeps that
+    # true. (BatchTab attribute, row label, tooltip.)
+    EXTRA = (
+        ("_ome_channel", "Omega channel:",
+         "A 1-D dataset in the source HDF5 holding the measured rotation, "
+         "read per frame instead of the OME_START/OME_STEP ramp. Blank "
+         "falls back to OME_START/OME_STEP."),
+        ("_ome_collapse", "Averaged / summed:",
+         "These images were averaged or summed outside this app, so the "
+         "per-frame ramp does not describe them — give every frame the one "
+         "mean ω of the whole run instead."),
     )
 
     def __init__(self, tab, parent=None):
@@ -158,10 +175,11 @@ class _CakeParamsDialog(QtWidgets.QDialog):
             "seven are this tab's own R/η binning plus the loader's Combine "
             "sub-frames, gathered here — editing them here or in "
             "'R bins…'/'Azimuthal bins…' is the same setting either way. "
-            "OME_START/OME_STEP are omega-series bookkeeping for mpe_wf's "
-            "integration backend and have no equivalent in this pipeline: "
-            "they are carried through load and save so a file round-trips "
-            "intact, and applied to nothing.")
+            "OME_START/OME_STEP are the rotation: ω of raw sub-frame 0, and "
+            "the increment per raw sub-frame. Each integrated frame is "
+            "stamped with the ω at the middle of the raw frames it was built "
+            "from, and that angle is written to the zarr and the combined "
+            "HDF5. Both zero means every frame is recorded at ω = 0°.")
         note.setWordWrap(True)
         note.setStyleSheet(f"color:{S.MUTED};font-size:10px;padding-bottom:4px")
         v.addWidget(note)
@@ -172,6 +190,21 @@ class _CakeParamsDialog(QtWidgets.QDialog):
             spin = self._mirror(self._target(key))
             self._spins[key] = spin
             form.row((label + ":", spin))
+        # The two non-CSV omega controls, below a separator so the nine
+        # columns above still read as "the file".
+        line = QtWidgets.QFrame()
+        line.setFrameShape(QtWidgets.QFrame.HLine)
+        line.setStyleSheet(f"color:{S.MUTED}")
+        form.full(line)
+        self._ome_channel = QtWidgets.QComboBox()
+        self._ome_channel.setEditable(True)
+        self._ome_collapse = QtWidgets.QCheckBox("one ω for all frames")
+        self._extras = {"_ome_channel": self._ome_channel,
+                        "_ome_collapse": self._ome_collapse}
+        for attr, label, tip in self.EXTRA:
+            w = self._extras[attr]
+            w.setToolTip(tip)
+            form.row((label, w))
         v.addLayout(form)
 
         btns = QtWidgets.QDialogButtonBox()
@@ -226,6 +259,38 @@ class _CakeParamsDialog(QtWidgets.QDialog):
             # A key with nowhere to go is shown greyed rather than hidden —
             # it is still a column this dialog will write.
             spin.setEnabled(target is not None)
+        self._refresh_channels()
+        self._ome_channel.setEditText(self._tab._ome_channel.currentText())
+        self._ome_collapse.setChecked(self._tab._ome_collapse.isChecked())
+
+    def _refresh_channels(self) -> None:
+        """Offer the 1-D datasets of the loaded HDF5, omega-ish names first.
+
+        Rebuilt on every open because the loaded source changes underneath
+        this dialog. The combo stays editable and the current text is
+        preserved across the rebuild, so a path typed by hand — or one from
+        a file that isn't loaded right now — survives; the list is a
+        convenience, not the set of legal answers."""
+        typed = self._ome_channel.currentText()
+        self._ome_channel.blockSignals(True)
+        try:
+            self._ome_channel.clear()
+            self._ome_channel.addItem("")   # blank = use OME_START/OME_STEP
+            cfg = {}
+            try:
+                cfg = self._tab._loader.source_cfg() or {}
+            except Exception:
+                pass
+            path = cfg.get("path")
+            if path and is_h5(path):
+                try:
+                    for name, _n in list_h5_1d_datasets(path):
+                        self._ome_channel.addItem(name)
+                except Exception:
+                    pass
+            self._ome_channel.setEditText(typed)
+        finally:
+            self._ome_channel.blockSignals(False)
 
     def apply_to_tab(self) -> None:
         for key, spin in self._spins.items():
@@ -236,6 +301,8 @@ class _CakeParamsDialog(QtWidgets.QDialog):
                 target.setValue(int(round(spin.value())))
             else:
                 target.setValue(float(spin.value()))
+        self._tab._ome_channel.setEditText(self._ome_channel.currentText().strip())
+        self._tab._ome_collapse.setChecked(self._ome_collapse.isChecked())
         self._tab._refresh_cake_summary()
 
     def values(self) -> dict:
@@ -310,11 +377,31 @@ class BatchTab(QtWidgets.QWidget):
         self._last_run_out_dir: Optional[str] = None  # set in _run() — see _on_done
         self._expid_provider = None  # () -> str, wired by app.py's MainWindow — see set_expid_provider
         self._cake_dialog = None  # built on first use — see _open_cake_params_dialog
+        # Raw sub-frame windows of the loaded source, for the ω readouts —
+        # see _recompute_omega_span (refreshed on source change only).
+        self._omega_span: Optional[dict] = None
+        # The source_cfg the cached span was built from, so a repeat signal
+        # for an unchanged source costs nothing (see _recompute_omega_span).
+        self._omega_span_key: Optional[str] = None
+        # Coalesces bursts: a folder pick walks every file's HDF5 header, and
+        # dataChanged/valueChanged can fire several times for one user
+        # action (and once per step while a spin box is held down). Without
+        # this the GUI thread would repeat that walk for each of them.
+        self._omega_span_timer = QtCore.QTimer(self)
+        self._omega_span_timer.setSingleShot(True)
+        self._omega_span_timer.setInterval(150)
+        self._omega_span_timer.timeout.connect(self._recompute_omega_span)
         self._project_ctx: Optional[project.ProjectContext] = None
         self._build_ui()
         self._loader.monitorToggled.connect(self._toggle_monitor)
         self._loader.dataChanged.connect(self._refresh_detector_preview)
         self._loader.dataChanged.connect(self._maybe_autofill_output_dir)
+        # The ω readouts follow the data: a new source changes which raw
+        # sub-frames exist, and therefore which angles they map to.
+        self._loader.dataChanged.connect(self._schedule_omega_span)
+        # …and the loader's own range hint gets the angular half of its
+        # range from us — it counts sub-frames and knows nothing about ω.
+        self._loader.set_omega_hint_fn(self._omega_hint_tail)
         self._loader.fieldsChanged.connect(self._refresh_detector_preview)
         # "stream" mode's preview frame is fetched off the GUI thread (see
         # DataLoaderPanel._start_preview_worker) — dataChanged/fieldsChanged
@@ -383,9 +470,9 @@ class BatchTab(QtWidgets.QWidget):
         """"Load cake parameters CSV…" button — applies R_MIN/R_MAX/R_STEP/
         ETA_MIN/ETA_MAX/ETA_STEP/OME_SUM from an mpe_wf_saxs_waxs-style
         cake_parameters CSV (see cake_params.parse_cake_csv) to the matching
-        fields. OME_START/OME_STEP have no equivalent in this pipeline; they
-        land in the two invisible spins so a file can be re-saved intact, and
-        are applied to nothing (see the button's tooltip).
+        fields. OME_START/OME_STEP land in the two invisible spins, from
+        where they become each frame's recorded rotation angle at run time
+        (see ``_omega_cfg`` and ``cake_params.omega_for_window``).
 
         Reached both from ``_CakeParamsDialog``'s Load button and, before that
         dialog existed, directly from the calibration card — one function, so
@@ -422,10 +509,10 @@ class BatchTab(QtWidgets.QWidget):
             applied.append(f"OME_SUM={int(values['OME_SUM'])} -> Combine sub-frames")
         if "OME_START" in values:
             self._ome_start.setValue(values["OME_START"])
-            applied.append(f"OME_START={values['OME_START']:g} (carried, not applied)")
+            applied.append(f"OME_START={values['OME_START']:g}°")
         if "OME_STEP" in values:
             self._ome_step.setValue(values["OME_STEP"])
-            applied.append(f"OME_STEP={values['OME_STEP']:g} (carried, not applied)")
+            applied.append(f"OME_STEP={values['OME_STEP']:g}°/sub-frame")
         self._log.append(f"[batch] Loaded cake parameters from {path}: {', '.join(applied) or '(nothing recognized)'}")
         self._refresh_cake_summary()
 
@@ -506,9 +593,182 @@ class BatchTab(QtWidgets.QWidget):
             parts.append(f"Q out {self._q_min.value():g}–{self._q_max.value():g}"
                          f"  ΔQ {self._q_bin.value():g} Å⁻¹")
         chunk = getattr(self._loader, "_combine_chunk", None)
-        if chunk is not None and int(chunk.value()) > 1:
-            parts.append(f"sum {int(chunk.value())} sub-frames")
-        return "   ".join(parts)
+        n_sum = int(chunk.value()) if chunk is not None else 1
+        if n_sum > 1:
+            # Named as OME_SUM here because it IS OME_SUM: the cake dialog's
+            # row for it edits this very spin box rather than a copy of it
+            # (see _open_cake_params_dialog), and a user who has only seen
+            # the CSV has no other way to find that out.
+            parts.append(f"sum {n_sum} sub-frames (OME_SUM)")
+        # Rotation is shown only when there is one. A run at a fixed angle is
+        # the common case and "ω 0–0°" would be noise on every line.
+        chan = self._ome_channel.currentText().strip()
+        step = self._ome_step.value()
+        if chan:
+            parts.append(f"ω from {chan}")
+        elif step or self._ome_start.value():
+            part = f"ω {self._ome_start.value():g}°  Δω {step:g}°/sub-frame"
+            # The multiplication that is easy to get wrong: combining N
+            # sub-frames leaves consecutive OUTPUT frames N·OME_STEP apart,
+            # not OME_STEP apart. Both rates, side by side, whenever they
+            # differ.
+            if n_sum > 1 and step:
+                part += f" = {step * n_sum:g}°/frame"
+            parts.append(part)
+        if self._ome_collapse.isChecked():
+            parts.append("ω averaged")
+        line = "   ".join(parts)
+        mapping = self._omega_map_text()
+        return line + ("\n   " + mapping if mapping else "")
+
+    def _omega_map_text(self) -> str:
+        """Second summary line: which raw sub-frames become which angles.
+
+        This is the whole point of the pair of readouts. ``start``/``end``
+        and "Combine sub-frames" in the loader card count raw sub-frames;
+        OME_START/OME_STEP/OME_SUM assign degrees to those same sub-frames.
+        They are one axis in two coordinate systems, and nothing in the GUI
+        used to say so — so state it for the data actually loaded: the raw
+        range on the left, the angles it produces on the right, the frame
+        count in between.
+
+        Pure arithmetic on ``self._omega_span``, which is refreshed only
+        when the SOURCE changes (see ``_recompute_omega_span``), so typing
+        in OME_START re-renders this without touching a file. Returns ``""``
+        when there is nothing to say — no source loaded, or one this app
+        cannot ask for a sub-frame window."""
+        span = getattr(self, "_omega_span", None)
+        if not span or span.get("n", 0) < 1:
+            return ""
+        n = span["n"]
+        lo, hi = span["first"][0], span["last"][1]
+        # On a multi-file pick each file restarts at OME_START (one HDF5
+        # sub-frame stack is one rotation — see
+        # workers._HDF5StackGlobSource.omega_channel_window), so the range
+        # is the range WITHIN a file and the angles repeat per file. Saying
+        # "0…1441" flat there would claim a single continuous ramp.
+        each = span.get("multi_file")
+        where = " of each file" if each else ""
+        chan = self._ome_channel.currentText().strip()
+        if chan:
+            return (f"sub-frames {lo}…{hi}{where} → ω read per frame from "
+                    f"'{chan}'   {n} frame(s)")
+        start, step = self._ome_start.value(), self._ome_step.value()
+        if not step and not start and n > 1:
+            # The state that produced the all-zero /Omegas in a real run: a
+            # rotation loaded, no angles configured. omega_for_window
+            # returns a genuine 0.0 for it and the output looks fine, so
+            # this is the only place it can be noticed.
+            return (f"sub-frames {lo}…{hi}{where} → ω 0° on all {n} frames "
+                    "(OME_START/OME_STEP not set)")
+        if self._ome_collapse.isChecked():
+            one = omega_for_window(start, step, lo, hi)
+            return (f"sub-frames {lo}…{hi}{where} → one ω {one:g}° for all "
+                    f"{n} frame(s) (ω averaged)")
+        a = omega_for_window(start, step, *span["first"])
+        b = omega_for_window(start, step, *span["last"])
+        rep = " in every file" if each else ""
+        return (f"sub-frames {lo}…{hi}{where} → ω {a:g}°…{b:g}°{rep}   "
+                f"{n} frame(s)"
+                + ("   (each file restarts at OME_START)" if each else ""))
+
+    def _omega_hint_tail(self) -> str:
+        """The one-clause ω tail appended to the loader's start/end hint —
+        see ``widgets.DataLoaderPanel.set_omega_hint_fn``.
+
+        The loader card counts sub-frames and deliberately knows nothing
+        about angles; this puts the angular reading of its own range next to
+        it, in the place where the range is set. Deliberately terse — the
+        cake summary carries the detail — and empty when no source is
+        loaded, which is what keeps the hint byte-identical in every tab
+        that never sets a hint function."""
+        span = getattr(self, "_omega_span", None)
+        if not span or span.get("n", 0) < 1:
+            return ""
+        chan = self._ome_channel.currentText().strip()
+        if chan:
+            return f"→ ω read from '{chan}'."
+        start, step = self._ome_start.value(), self._ome_step.value()
+        if not step and not start:
+            return "→ ω 0° (OME_START/OME_STEP not set in the cake parameters)."
+        lo, hi = span["first"][0], span["last"][1]
+        if self._ome_collapse.isChecked():
+            return f"→ one ω {omega_for_window(start, step, lo, hi):g}° (averaged)."
+        a = omega_for_window(start, step, *span["first"])
+        b = omega_for_window(start, step, *span["last"])
+        per = " in each file" if span.get("multi_file") else ""
+        return f"→ ω {a:g}°…{b:g}°{per}."
+
+    def _schedule_omega_span(self, *_args) -> None:
+        """Ask for a span refresh soon, coalescing a burst into one walk.
+
+        Everything this is wired to can fire repeatedly for a single user
+        action, and on a folder pick each firing would re-open every file's
+        header on the GUI thread. Best-effort: if the timer is gone (teardown)
+        just do the work inline."""
+        t = getattr(self, "_omega_span_timer", None)
+        if t is None:
+            self._recompute_omega_span()
+            return
+        t.start()
+
+    def _recompute_omega_span(self, *_args) -> None:
+        """Re-read the loaded source's raw sub-frame windows, then re-render
+        both ω readouts.
+
+        Header reads only (``_open_source_cfg`` → ``_ensure_stats`` never
+        decodes a pixel), and only on a change of SOURCE or of "Combine
+        sub-frames" — both of which already pay for exactly this walk in the
+        loader itself. Editing OME_START/OME_STEP does not come through
+        here: the readouts recompute their angles from the cached windows,
+        so a spin box can be dragged without touching the filesystem.
+
+        The windows come from the source rather than from arithmetic on the
+        raw count so that the readout cannot disagree with the run: a short
+        final chunk, a start/end filter and the per-file restart are all
+        decided in ``raw_window_for_index``, which is what the run uses
+        too."""
+        span = key = None
+        try:
+            from midas_gui.workers import _open_source_cfg
+            cfg = self._loader.source_cfg()
+            # Same source as last time — the windows cannot have moved, and
+            # on a many-file pick re-deriving them is the expensive part.
+            key = repr(sorted(cfg.items(), key=lambda kv: kv[0]))
+            if key == self._omega_span_key:
+                return
+            src = _open_source_cfg(cfg)
+            n = int(getattr(src, "n_frames", 0) or 0)
+            win = getattr(src, "raw_window_for_index", None)
+            if n > 0 and win is not None:
+                span = {"n": n,
+                        "first": tuple(int(v) for v in win(0)),
+                        "last": tuple(int(v) for v in win(n - 1)),
+                        "multi_file": len(cfg.get("paths") or []) > 1}
+        except Exception:
+            # A live/PVA source, nothing loaded yet, an unreadable file — all
+            # ordinary, and all mean the same thing here: no mapping to show.
+            span = None
+            key = None
+        self._omega_span = span
+        self._omega_span_key = key if span is not None else None
+        self._refresh_cake_summary()
+        try:
+            self._loader.refresh_omega_hint()
+        except Exception:
+            pass
+
+    def _omega_cfg(self) -> dict:
+        """The rotation half of a run's configuration, in the shape
+        ``BatchWorker``/``BatchRunCoordinator`` take it — assembled here so
+        both run sites (and the recorded attempt inputs) agree by
+        construction, the same way ``q_cfg`` is."""
+        return {
+            "start": float(self._ome_start.value()),
+            "step": float(self._ome_step.value()),
+            "channel": self._ome_channel.currentText().strip(),
+            "collapse": bool(self._ome_collapse.isChecked()),
+        }
 
     def _refresh_cake_summary(self, *_args) -> None:
         """Keep the cake-parameter summary label in step with the fields.
@@ -521,6 +781,16 @@ class BatchTab(QtWidgets.QWidget):
             return
         try:
             lbl.setText(self._cake_summary_text())
+        except Exception:
+            pass
+
+    def _refresh_omega_hint(self, *_args) -> None:
+        """Re-render the loader's range hint alone, without re-reading the
+        source — the angles change, the sub-frame windows behind them do
+        not. Best-effort, like ``_refresh_cake_summary``: a hint is never
+        worth taking the tab down for."""
+        try:
+            self._loader.refresh_omega_hint()
         except Exception:
             pass
 
@@ -695,9 +965,11 @@ class BatchTab(QtWidgets.QWidget):
             "r_max": self._r_max,
             "eta_min": self._eta_min,
             "eta_max": self._eta_max,
-            # Invisible, and applied to nothing — see where they're built.
+            # Invisible; the run's rotation — see where they're built.
             "ome_start": self._ome_start,
             "ome_step": self._ome_step,
+            "ome_channel": self._ome_channel,
+            "ome_collapse": self._ome_collapse,
             "grid_chk": self._grid_chk,
             "lab_axes_chk": self._lab_axes_chk,
             "preview_sum_n": self._preview_sum_n,
@@ -875,7 +1147,12 @@ class BatchTab(QtWidgets.QWidget):
     def _collapse_cakes(cakes):
         """``(n_frames, n_eta, n_r)`` → ``(n_frames, n_r)``, averaging each
         frame's filled η bins — see ``helpers.collapse_cake_eta`` (shared
-        with ``cake_hdf5.write_cake_h5``'s own fallback)."""
+        with ``cake_hdf5.write_cake_h5``'s own fallback).
+
+        The run's *own* collapsed profile is not stored (multi-azimuth mode
+        keeps the cake instead), so this reconstructs one for the Waterfall /
+        Stacked-profiles views. It is an approximation of the engine's
+        count-weighted collapse, not a reproduction of it."""
         return collapse_cake_eta(cakes)
 
     def _on_job_done(self, job) -> None:
@@ -1000,15 +1277,20 @@ class BatchTab(QtWidgets.QWidget):
             "OME_STEP) in one editor, and load or save them as an "
             "mpe_wf_saxs_waxs-style CSV. OME_SUM is the loader's 'Combine "
             "sub-frames' chunk size (only meaningful for a multi-file HDF5 "
-            "source). OME_START/OME_STEP are omega-series bookkeeping for a "
-            "different integration backend and have no equivalent here — "
-            "carried through load and save, applied to nothing.")
+            "source). OME_START/OME_STEP are the rotation — every integrated "
+            "frame is stamped with the ω of the raw frames it was built "
+            "from, and that angle goes into the zarr and the combined HDF5. "
+            "Also here: a measured omega channel, and the averaged/summed "
+            "override.")
         cake_csv_btn.clicked.connect(self._open_cake_params_dialog)
         cal.body.addWidget(cake_csv_btn, 0, QtCore.Qt.AlignLeft)
         # The cake parameters themselves are behind two popups and the loader
         # card; this is the only place all of them are visible at once, and
         # the only feedback that a CSV load actually changed anything.
         self._cake_lbl = QtWidgets.QLabel()
+        # Two lines since the sub-frame↔ω mapping joined it, and the
+        # second one is long — wrap rather than clip it in a narrow panel.
+        self._cake_lbl.setWordWrap(True)
         self._cake_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         self._cake_lbl.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         self._cake_lbl.setToolTip(
@@ -1117,25 +1399,40 @@ class BatchTab(QtWidgets.QWidget):
             w.valueChanged.connect(self._refresh_detector_preview)
         self._azim_bins_dialog = _AzimuthalBinsDialog(
             self._e_bin, self._eta_min, self._eta_max, parent=self)
-        # Not dead widgets, and deliberately in no layout: OME_START/OME_STEP
-        # are two of the nine columns an mpe_wf cake_parameters CSV must carry
-        # (its reader rejects a missing or empty one), but they drive mpe_wf's
-        # own integration backend and have no counterpart in
-        # midas_integrate_v2's IntegrationSpec. Holding them in spinboxes
-        # rather than plain floats is what lets _state_widgets() round-trip
-        # them through Save/Load GUI State for free, and gives
-        # _CakeParamsDialog a real range to mirror. Only that dialog shows
-        # them. See cake_params.py's module docstring.
+        # Not dead widgets, and deliberately in no layout: these four are
+        # the run's rotation, and only _CakeParamsDialog shows them.
+        # OME_START/OME_STEP are two of the nine columns an mpe_wf
+        # cake_parameters CSV must carry (its reader rejects a missing or
+        # empty one); the channel and the averaged/summed flag are this
+        # app's own and are not written to the CSV. Holding all four as
+        # widgets rather than plain attributes is what lets
+        # _state_widgets() round-trip them through Save/Load GUI State for
+        # free, and gives the dialog a real range to mirror. They are read
+        # at run time into BatchWorker's omega_cfg — see _omega_cfg().
         self._ome_start = _fspin(-1e6, 1e6, 4, 0.0)
         self._ome_step = _fspin(-1e6, 1e6, 4, 0.0)
+        self._ome_channel = QtWidgets.QComboBox()
+        self._ome_channel.setEditable(True)
+        self._ome_collapse = QtWidgets.QCheckBox()
         for _w in (self._r_min, self._r_max, self._r_bin, self._eta_min,
                    self._eta_max, self._e_bin, self._q_min, self._q_max,
-                   self._q_bin):
+                   self._q_bin, self._ome_start, self._ome_step):
             _w.valueChanged.connect(self._refresh_cake_summary)
+        self._ome_channel.currentTextChanged.connect(self._refresh_cake_summary)
+        self._ome_collapse.toggled.connect(self._refresh_cake_summary)
+        # The loader's hint carries the same angles, so it follows the same
+        # four widgets. No file is touched — see _omega_hint_tail.
+        for _w in (self._ome_start, self._ome_step):
+            _w.valueChanged.connect(self._refresh_omega_hint)
+        self._ome_channel.currentTextChanged.connect(self._refresh_omega_hint)
+        self._ome_collapse.toggled.connect(self._refresh_omega_hint)
         self._bin_type.currentIndexChanged.connect(self._refresh_cake_summary)
         _chunk = getattr(self._loader, "_combine_chunk", None)
         if _chunk is not None:
-            _chunk.valueChanged.connect(self._refresh_cake_summary)
+            # OME_SUM: changes the number of output frames and every
+            # frame's window, so the whole span is restated, not just the
+            # summary text (_recompute_omega_span refreshes both).
+            _chunk.valueChanged.connect(self._schedule_omega_span)
         self._refresh_cake_summary()
 
         pf.full(_section_label("AZIMUTHAL"))
@@ -1537,6 +1834,7 @@ class BatchTab(QtWidgets.QWidget):
         fmts = self._fmt.checked_keys()
         q_cfg = ({"QMin": self._q_min.value(), "QMax": self._q_max.value(),
                   "QBinSize": self._q_bin.value()} if self._q_mode_active() else None)
+        omega_cfg = self._omega_cfg()
         multi_azimuth = self._multi_azimuth_chk.isChecked()
         if multi_azimuth and q_cfg:
             QtWidgets.QMessageBox.warning(
@@ -1604,7 +1902,8 @@ class BatchTab(QtWidgets.QWidget):
         self._last_run_inputs = {
             "src_cfg": src_cfg, "kernel": kernel, "fmt": fmts,
             "frame_range": frame_range, "monitor_file": monitor_file,
-            "q_cfg": q_cfg, "weighted": weighted, "bright_mode": bright_mode,
+            "q_cfg": q_cfg, "omega_cfg": omega_cfg,
+            "weighted": weighted, "bright_mode": bright_mode,
             "mask_sources": self._loader.get_state().get("mask"),
             "r_bin": self._r_bin.value(), "e_bin": self._e_bin.value(),
             "multi_azimuth": multi_azimuth,
@@ -1630,7 +1929,7 @@ class BatchTab(QtWidgets.QWidget):
 
         self._worker = BatchRunCoordinator(
             spec, src_cfg, self._loader.composite_mask(), out_dir, fmts, kernel,
-            corrections, variance_cfg, q_cfg=q_cfg,
+            corrections, variance_cfg, q_cfg=q_cfg, omega_cfg=omega_cfg,
             frame_range=frame_range, monitor_file=monitor_file,
             drift_traj=drift_traj, parent=self,
             dark=dark, bright=bright, background=background, bright_mode=bright_mode,
@@ -1755,6 +2054,20 @@ class BatchTab(QtWidgets.QWidget):
         if multi_azimuth:
             argv += ["--multi-azimuth"]
         argv += ["--weighted"] if bool(self._azim.currentData()) else ["--no-weighted"]
+
+        # Rotation angle. Emitted from the same _omega_cfg() the in-process
+        # run uses, so both paths write identical omegas for identical
+        # settings — this argv is the only channel a background job has to
+        # learn them, and omitting it silently wrote ω=0 on every frame.
+        # start/step go out unconditionally (even at 0/0, which is a real
+        # angle, not "unset") so the launched command line in the Logs tab
+        # always states the angles the job will record.
+        ome = self._omega_cfg()
+        argv += ["--ome-start", str(ome["start"]), "--ome-step", str(ome["step"])]
+        if ome["channel"]:
+            argv += ["--ome-channel", ome["channel"]]
+        if ome["collapse"]:
+            argv += ["--ome-collapse"]
 
         if self._corr_widget.polar_check.isChecked():
             argv += ["--polarization",
@@ -2011,7 +2324,10 @@ class BatchTab(QtWidgets.QWidget):
                 eta_axis=self._last_results.get("eta_axis"),
                 spec=last_spec, calibration_snapshot=calib_snapshot,
                 kernel=self._last_kernel, weighted=self._last_weighted,
-                cake_params=cake_params)
+                cake_params=cake_params,
+                # Same angles the run's own HDF5 got — Save must not produce
+                # a quietly omega-less copy of the same results.
+                omegas=self._last_results.get("omegas"))
         except Exception as e:
             show_error(self, "Save failed", str(e), log=self._log, log_prefix="\nERROR:\n")
             return

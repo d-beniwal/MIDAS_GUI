@@ -299,3 +299,88 @@ def test_write_cake_csv_overwrites_rather_than_appends(tmp_path):
     cake_params.write_cake_csv(str(p), {"R_MIN": 2.0})
     assert len(p.read_text().strip().splitlines()) == 2
     assert cake_params.parse_cake_csv(str(p))["R_MIN"] == 2.0
+
+
+# ── cake_params.omega_for_window / omega_series ──────────────────────────────
+
+def test_omega_reproduces_mpe_wfs_own_expression_for_every_ome_sum():
+    """The compatibility assertion for the whole omega feature.
+
+    ``gui_data_explorer.py`` computes an integrated frame's angle as
+    ``ome_start + (idx*ome_sum + (ome_sum-1)/2) * ome_step``. We compute the
+    mean of the frame's inclusive raw window instead — one expression for
+    every case, including ones mpe_wf spells out separately. The two must
+    agree on the case they share, or a file caked here and a file caked there
+    put the same peak at different angles."""
+    start, step = 3.5, 0.2
+    for ome_sum in (1, 2, 3, 5, 10):
+        for idx in range(4):
+            lo = idx * ome_sum
+            hi = lo + ome_sum - 1
+            mine = cake_params.omega_for_window(start, step, lo, hi)
+            theirs = start + (idx * ome_sum + (ome_sum - 1) / 2.0) * step
+            assert mine == pytest.approx(theirs), (ome_sum, idx)
+
+
+def test_omega_of_a_single_raw_frame_is_the_plain_ramp():
+    """``OME_SUM = 1``: window ``(k, k)``, so no averaging term at all."""
+    for k in range(5):
+        assert cake_params.omega_for_window(10.0, 0.5, k, k) == \
+            pytest.approx(10.0 + 0.5 * k)
+
+
+def test_omega_of_a_collapsed_run_is_the_mean_of_the_window():
+    """``OME_SUM = 0`` — this app's "combine everything selected into one
+    frame". The single output frame covers raw 0…N-1, and the angle it should
+    be filed under is the middle of the exposure, not its start."""
+    n = 11
+    got = cake_params.omega_for_window(0.0, 1.0, 0, n - 1)
+    assert got == pytest.approx((n - 1) / 2.0)
+
+
+def test_omega_of_an_unconfigured_run_is_a_genuine_zero():
+    """Both keys at their default 0 is a *stationary sample at ω = 0*, not a
+    sentinel for "unset" — deliberately, because the alternative the zarr
+    writer used to fall back to was the frame index, and an index labelled
+    "Degrees" is a far worse wrong answer than 0.0."""
+    for lo, hi in ((0, 0), (7, 7), (0, 999)):
+        assert cake_params.omega_for_window(0.0, 0.0, lo, hi) == 0.0
+
+
+def test_omega_handles_a_reverse_scan_without_special_casing():
+    """A negative ``OME_STEP`` is a scan running backwards; the same
+    arithmetic has to produce a descending series, not an absolute value."""
+    series = cake_params.omega_series(90.0, -0.25, [(k, k) for k in range(4)])
+    assert series == pytest.approx([90.0, 89.75, 89.5, 89.25])
+
+
+def test_omega_series_maps_each_window_independently():
+    windows = [(0, 1), (2, 3), (4, 5)]
+    assert cake_params.omega_series(1.0, 2.0, windows) == \
+        pytest.approx([2.0, 6.0, 10.0])
+
+
+def test_omega_series_collapse_gives_every_frame_the_run_wide_mean():
+    """The "these images were averaged or summed" override: the per-frame
+    windows describe a ramp the pixels no longer have, so all of them collapse
+    onto the union window's single angle."""
+    windows = [(0, 1), (2, 3), (4, 5)]
+    got = cake_params.omega_series(1.0, 2.0, windows, collapse=True)
+    assert got == pytest.approx([6.0, 6.0, 6.0])       # mean of 0…5 = 2.5
+    assert len(set(got)) == 1
+
+
+def test_omega_series_collapse_is_a_noop_when_the_loader_already_collapsed():
+    """``OME_SUM = 0`` produces one window spanning the run, so ticking the
+    override on top of it must not change the answer — the two routes to "one
+    frame for everything" have to agree."""
+    plain = cake_params.omega_series(1.0, 2.0, [(0, 5)])
+    forced = cake_params.omega_series(1.0, 2.0, [(0, 5)], collapse=True)
+    assert plain == pytest.approx(forced)
+
+
+def test_omega_series_of_no_frames_is_empty_rather_than_raising():
+    """The collapse branch takes a ``min``/``max`` over the windows; an
+    aborted run reaching it with nothing must not raise."""
+    assert cake_params.omega_series(1.0, 2.0, []) == []
+    assert cake_params.omega_series(1.0, 2.0, [], collapse=True) == []

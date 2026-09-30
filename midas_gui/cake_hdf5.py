@@ -36,7 +36,8 @@ def write_cake_h5(path, *, cake, cake_sigma, r_axis, eta_axis, frame_ids,
                   weighted: Optional[bool] = None,
                   cake_params: Optional[dict] = None,
                   collapsed_profiles: Optional[np.ndarray] = None,
-                  collapsed_sigmas: Optional[np.ndarray] = None) -> Path:
+                  collapsed_sigmas: Optional[np.ndarray] = None,
+                  omegas=None) -> Path:
     """Write one flat HDF5 file holding every frame's cake plus a real 1-D
     profile. Calibration/run provenance is NOT written here — the caller
     stamps it afterward via ``provenance.build_entry``/``stamp_h5_provenance``
@@ -71,6 +72,15 @@ def write_cake_h5(path, *, cake, cake_sigma, r_axis, eta_axis, frame_ids,
     omitted, a masked eta-mean over the (unweighted) ``cake`` is used
     instead (see ``helpers.collapse_cake_eta``) — an approximation, not a
     reproduction, of the engine's own collapse.
+
+    ``omegas`` (``(N,)``, degrees): the rotation angle of each frame, from
+    the cake CSV's ``OME_START``/``OME_STEP`` (see
+    ``cake_params.omega_for_window``) or a measured channel. Written as a
+    root-level ``omegas`` dataset — a pole figure or a peak fit over a
+    rotation series needs one angle per frame, in frame order, and this file
+    is the GUI-native archive such a step would read. Dropped rather than
+    padded when the length disagrees with ``cake``'s frame count: a
+    misaligned angle is worse than no angle.
 
     ``bin_area`` (pixel-count cake from ``workers.count_cake``), accepted as
     either ``(n_eta, n_r)`` or ``(n_r, n_eta)``: the per-bin pixel-count
@@ -166,6 +176,11 @@ def write_cake_h5(path, *, cake, cake_sigma, r_axis, eta_axis, frame_ids,
 
         ds = f.create_dataset("eta_deg", data=np.asarray(eta_axis, dtype=np.float64))
         ds.attrs["units"] = "degree"
+
+        if omegas is not None and len(omegas) == n_frames:
+            ds = f.create_dataset("omegas", data=np.asarray(omegas, dtype=np.float64))
+            ds.attrs["units"] = "degree"
+            ds.attrs["long_name"] = "rotation angle per frame"
 
         ds = f.create_dataset("profiles", data=collapsed_profiles, compression="gzip")
         ds.attrs["units"] = "counts"

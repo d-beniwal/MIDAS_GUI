@@ -684,7 +684,7 @@ def read_attempt(project_path, ref: str) -> dict:
 
 def read_attempt_results(project_path, ref: str) -> dict:
     """The embedded 1-D result arrays for an *integration* attempt
-    (``profiles``/``r_axis_px``/``sigmas``/``frame_ids``) — these live as
+    (``profiles``/``r_axis_px``/``sigmas``/``omegas``/``frame_ids``) — these live as
     raw HDF5 datasets under ``<ref>/results``, separate from the JSON
     ``metadata`` blob ``read_attempt`` returns (see
     ``append_integration_attempt``). Returns {} if the attempt has no
@@ -695,7 +695,7 @@ def read_attempt_results(project_path, ref: str) -> dict:
         if grp is None:
             return {}
         out = {}
-        for key in ("profiles", "r_axis_px", "sigmas"):
+        for key in ("profiles", "r_axis_px", "sigmas", "omegas"):
             if key in grp:
                 out[key] = grp[key][()]
         if "frame_ids" in grp:
@@ -903,6 +903,7 @@ def append_integration_attempt(project_path, panel_key, *, inputs, finished_payl
     r_axis = payload.pop("r_axis_px", None)
     sigmas = payload.pop("sigmas", None)
     frame_ids = payload.pop("frame_ids", None)
+    omegas = payload.pop("omegas", None)
     embed_mask = mask is not None and not mask_is_file_backed
 
     metadata = {
@@ -942,6 +943,11 @@ def append_integration_attempt(project_path, panel_key, *, inputs, finished_payl
             _write_array(res_grp, "sigmas", sigmas)
         if frame_ids is not None:
             res_grp.create_dataset("frame_ids", data=np.array(list(frame_ids), dtype=h5py.string_dtype()))
+        # Stored rather than recomputed at export time: a measured omega
+        # channel is read off the frames, and the export path never reopens
+        # them. See gsas_export.export_gsas_zarr.
+        if omegas is not None and len(omegas):
+            _write_array(res_grp, "omegas", np.asarray(omegas, dtype=np.float64))
 
     with h5py.File(project_path, "a") as f:
         grp = f.require_group(f"analysis/integrate/{panel_key}")

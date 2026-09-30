@@ -22,7 +22,7 @@ from midas_gui import provenance
 from midas_gui import settings
 from midas_gui.helpers import (_LogStream, _load_image, _apply_im_trans, _build_spec,
                                _spec_from_json, average_field, apply_field_corrections,
-                               read_hdf5_stack_combined, load_profile_file)
+                               read_hdf5_stack_chunk, load_profile_file)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -366,7 +366,16 @@ def write_profile(base, fmt, r_px, prof, sigma, lsd, px, wl,
         m.write_fxye(str(base) + ".fxye", r_axis=two_theta_cd, intensity=prof, sigma=sig)
     elif fmt == "dat":
         m.write_dat(str(base) + ".dat", q_axis_invA=q, intensity=prof, sigma=sig)
-    elif fmt == "2d_csv" and cake_2d is not None:
+    elif fmt == "2d_csv":
+        if cake_2d is None:
+            # Was a silent no-op, and cost a real run its 2D CSVs: the caller
+            # gated the cake on multi-azimuth mode, so with that off nothing
+            # was written while the path was still reported as written. The
+            # cake is always available here (see BatchWorker's want_cake,
+            # which includes "2d_csv"), so reaching this is a bug in the
+            # caller and says so rather than producing an empty output dir.
+            raise ValueError("2d_csv output needs the (eta, R) cake; "
+                             "none was passed to write_profile")
         out_path = str(base) + "_cake.csv"
         n_eta, n_r = cake_2d.shape
         eta_vals = eta_axis if eta_axis is not None else np.arange(n_eta, dtype=float)
@@ -379,22 +388,36 @@ def write_profile(base, fmt, r_px, prof, sigma, lsd, px, wl,
 
 
 def write_frame_profiles(base, file_fmts, r_px, prof, sigma, lsd, px, wl,
-                         cake_2d=None, cake_sigma=None, eta_axis=None) -> list:
+                         cake_2d=None, cake_sigma=None, eta_axis=None,
+                         per_eta=None) -> list:
     """Write one frame's 1-D output file(s) in every format in ``file_fmts``
-    (``"2d_csv"``/``"h5"`` excluded — callers handle those separately).
+    (``"h5"`` excluded — callers handle that separately).
 
-    Without ``cake_2d``: writes ``prof``/``sigma`` once, as always.
+    ``per_eta`` (multi-azimuth/"cake" mode — see the "Multi-azimuth output
+    (cake)" checkbox in Batch Integrate) writes one file *per azimuthal (η)
+    bin*, named ``<base>_etaNNN.<fmt>``, each a genuine 1-D lineout for that
+    sector; ``prof``/``sigma`` (the η-collapsed full-circle profile) are not
+    written in that mode. Otherwise ``prof``/``sigma`` are written once per
+    format, as always.
 
-    With ``cake_2d``/``cake_sigma`` (multi-azimuth/"cake" mode — see the
-    "Multi-azimuth output (cake)" checkbox in Batch Integrate): writes one
-    file *per azimuthal (η) bin* instead, named ``<base>_etaNNN.<fmt>``, each
-    a genuine 1-D lineout for that sector — ``prof``/``sigma`` (the
-    η-collapsed full-circle profile) are not written in this mode. ``"2d_csv"``
-    in ``file_fmts`` is honored separately as the one whole-cake file, unaffected.
-    Returns the list of paths written.
+    ``"2d_csv"`` is the one whole-cake file, ``<base>_cake.csv``, and is
+    written in BOTH modes whenever ``cake_2d`` is supplied — it is a picture
+    of the cake, not a lineout, so per-η fan-out does not apply to it.
+
+    ``per_eta`` defaults to ``cake_2d is not None and cake_sigma is not
+    None``, which is what the presence of a cake used to mean on its own.
+    That overload is why 2D CSV silently produced nothing: a caller with a
+    cake but multi-azimuth off had no way to say "write the cake file, don't
+    fan out", so it passed no cake at all and ``2d_csv`` fell through to
+    nothing while still being counted as written. Pass ``per_eta``
+    explicitly and the two decisions stay separate. Returns the list of paths
+    actually written.
     """
     paths = []
-    if cake_2d is not None and cake_sigma is not None:
+    have_cake = cake_2d is not None
+    if per_eta is None:
+        per_eta = have_cake and cake_sigma is not None
+    if per_eta and have_cake and cake_sigma is not None:
         n_eta = cake_2d.shape[0]
         eta_ax = eta_axis if eta_axis is not None else np.arange(n_eta, dtype=float)
         for k in range(n_eta):
@@ -410,6 +433,18 @@ def write_frame_profiles(base, file_fmts, r_px, prof, sigma, lsd, px, wl,
             paths.append(str(base) + "_cake.csv")
     else:
         for f in file_fmts:
+            if f == "2d_csv":
+                # Skipped, not silently mis-reported, when there is genuinely
+                # no cake to write (write_all_profiles' in-memory Save path
+                # for a 1-D run — it excludes the format itself and logs).
+                if not have_cake:
+                    continue
+                # eta_axis may be None; write_profile falls back to bin
+                # indices for it, the same as in the fan-out branch.
+                write_profile(Path(base), "2d_csv", r_px, prof, sigma,
+                              lsd, px, wl, cake_2d=cake_2d, eta_axis=eta_axis)
+                paths.append(str(base) + "_cake.csv")
+                continue
             write_profile(Path(base), f, r_px, prof, sigma, lsd, px, wl)
             paths.append(str(base) + "." + f)
     return paths
@@ -1233,7 +1268,7 @@ class BatchWorker(QtCore.QThread):
     geom_ready = QtCore.pyqtSignal(object)   # integration context (for reuse/caching)
 
     def __init__(self, spec, source_cfg, mask, out_dir, fmts, kernel,
-                 corrections, variance_cfg, q_cfg=None,
+                 corrections, variance_cfg, q_cfg=None, omega_cfg=None,
                  frame_range=None, frame_indices=None, monitor_file=None,
                  drift_traj=None, parent=None,
                  dark=None, bright=None, background=None, bright_mode="divide",
@@ -1262,6 +1297,12 @@ class BatchWorker(QtCore.QThread):
         self._corrections = corrections      # (pol, sa)
         self._variance_cfg = variance_cfg    # dict or None
         self._q_cfg = q_cfg                  # {"QMin","QMax","QBinSize"} or None
+        # {"start","step","channel","collapse"} or None — the rotation each
+        # frame was collected at, written to the zarr's /Omegas and the
+        # combined HDF5. None means start=step=0.0: a genuine 0° on every
+        # frame (see cake_params.omega_for_window), which is the right answer
+        # for a stationary sample and an honest one for an unconfigured run.
+        self._omega_cfg = dict(omega_cfg or {})
         # frame_range: (start, end_exclusive_or_None, stride) — None means all frames.
         # Ignored when frame_indices is given (an explicit random-access chunk —
         # see BatchRunCoordinator, which splits one run across several BatchWorkers).
@@ -1303,6 +1344,117 @@ class BatchWorker(QtCore.QThread):
             if (abs_i - fr_start) % fr_stride != 0:
                 continue
             yield abs_i, fid, img
+
+    def _omega_resolver(self, source):
+        """``(fn(abs_i) -> float, description)`` for this run's rotation angle.
+
+        Built once per run rather than branched per frame, so the choice of
+        source — computed ramp, measured channel, collapsed single angle —
+        is made (and logged) in one place, and the inner loop just calls a
+        function.
+
+        The computed ramp is ``cake_params.omega_for_window`` over the raw
+        sub-frame window each output frame was built from. Sources that
+        cannot report a window (``_ExplicitTIFFSource``, and the backend's
+        own ``TIFFGlobSource``/``HDF5FrameSource``) fall back to
+        ``(abs_i, abs_i)``, which is exactly right for one-frame-per-file
+        data and means neither backend class had to grow a method.
+        """
+        from midas_gui import cake_params
+
+        cfg = self._omega_cfg
+        start = float(cfg.get("start") or 0.0)
+        step = float(cfg.get("step") or 0.0)
+        channel = str(cfg.get("channel") or "").strip()
+        collapse = bool(cfg.get("collapse"))
+
+        window_fn = getattr(source, "raw_window_for_index", None)
+
+        def _window(abs_i):
+            if window_fn is None:
+                return abs_i, abs_i
+            try:
+                return window_fn(abs_i)
+            except Exception:
+                return abs_i, abs_i
+
+        if collapse:
+            # One angle for every frame: the middle of the whole run. Taken
+            # from the SOURCE's full extent (frame 0 … n_frames-1), not from
+            # the frames this worker iterates — in Batch-Parallel mode each
+            # worker sees only its own chunk, and two chunks that each
+            # averaged over their own slice would report different angles for
+            # what the user said was one averaged exposure.
+            #
+            # On a multi-file pick these are file-LOCAL indices (each file
+            # restarts at OME_START — see omega_channel_window), so the
+            # "run-wide" middle is the middle of the local index range. That
+            # is the right answer for the single-file, single-exposure case
+            # this override exists for, and there is no better one for a
+            # selection whose files each own a separate rotation.
+            try:
+                n_total = int(source.n_frames)
+            except Exception:
+                n_total = 0
+            lo = _window(0)[0] if n_total else 0
+            hi = _window(n_total - 1)[1] if n_total else 0
+            one = cake_params.omega_for_window(start, step, lo, hi)
+            return (lambda abs_i, _v=one: _v), (
+                f"averaged/summed override — one ω={one:g}° for every frame")
+
+        if channel:
+            local_fn = getattr(source, "omega_channel_window", None)
+            if local_fn is not None:
+                cache = {}
+                failed = []
+
+                def _measured(abs_i):
+                    # The same file-local window the computed ramp uses
+                    # (see omega_channel_window) — a measured omega channel
+                    # is a 1-D dataset stored per file, indexed from 0 in
+                    # each, and the ramp was aligned to that rather than the
+                    # other way round. What this call adds is the file.
+                    try:
+                        path, lo, hi = local_fn(abs_i)
+                        arr = cache.get(path)
+                        if arr is None:
+                            import h5py
+                            with h5py.File(path, "r") as f:
+                                arr = np.asarray(f[channel][()], dtype=np.float64).ravel()
+                            cache.clear()   # one file at a time, like _combined
+                            cache[path] = arr
+                        hi = min(int(hi), arr.size - 1)
+                        if int(lo) > hi:
+                            raise IndexError(abs_i)
+                        # Arithmetic mean over the window regardless of the
+                        # pixel combine op, for the same reason
+                        # metadata_for_index uses one: an angle is a sample of
+                        # where the sample was, not a detector count.
+                        return float(np.mean(arr[int(lo):hi + 1]))
+                    except Exception:
+                        if not failed:
+                            failed.append(True)
+                            self.log_line.emit(
+                                f"[batch] omega channel '{channel}' unreadable — "
+                                f"falling back to OME_START/OME_STEP "
+                                f"({start:g}, {step:g}).")
+                        lo, hi = _window(abs_i)
+                        return cake_params.omega_for_window(start, step, lo, hi)
+
+                return _measured, f"measured channel '{channel}'"
+            self.log_line.emit(
+                f"[batch] omega channel '{channel}' ignored — this source type "
+                f"has no per-file metadata; using OME_START/OME_STEP.")
+
+        def _computed(abs_i):
+            lo, hi = _window(abs_i)
+            return cake_params.omega_for_window(start, step, lo, hi)
+
+        if start == 0.0 and step == 0.0:
+            desc = "OME_START=0, OME_STEP=0 — every frame recorded at ω=0°"
+        else:
+            desc = f"computed from OME_START={start:g}, OME_STEP={step:g}"
+        return _computed, desc
 
     def run(self):
         try:
@@ -1378,6 +1530,7 @@ class BatchWorker(QtCore.QThread):
                     self.log_line.emit(f"[batch] monitor file error: {e}")
 
             source = self._open_source()
+            omega_of, omega_desc = self._omega_resolver(source)
             total = (len(self._frame_indices) if self._frame_indices is not None
                      else source.n_frames)
             range_desc = (f"chunk of {total} frame(s)" if self._frame_indices is not None
@@ -1390,6 +1543,10 @@ class BatchWorker(QtCore.QThread):
                 f"{range_desc} | "
                 f"monitor={'yes' if monitor_vals else 'no'} | "
                 f"drift={'on' if self._drift_traj else 'off'}")
+            # Worth a line of its own: every run now stamps a rotation angle
+            # into its zarr and HDF5, including runs whose user never opened
+            # the cake dialog, so what it used should not have to be inferred.
+            self.log_line.emit(f"[batch] omega: {omega_desc}")
             if self._drift_traj is not None:
                 self.log_line.emit(
                     f"[batch] drift trajectory: {len(self._drift_traj.frame_indices)} knots  "
@@ -1406,7 +1563,14 @@ class BatchWorker(QtCore.QThread):
             aborted = False
             all_profiles, all_sigmas, frame_ids, out_paths = [], [], [], []
             used_names: set = set()   # frame_output_stem collision guard
-            all_omegas = []   # still needed below for h5's <lo>_<hi> combined-stem
+            # Two parallel lists that used to be one. all_frame_idx holds
+            # 0-based FRAME INDICES and feeds only the combined-HDF5 stem's
+            # <lo>_<hi> token below; all_omegas holds real DEGREES and feeds
+            # the zarr and both HDF5 writers. They were the same list back
+            # when the zarr's /Omegas was filled with frame indices — which
+            # is the bug this splits.
+            all_frame_idx = []
+            all_omegas = []   # degrees, one per processed frame (like frame_ids)
             # Real engine-collapsed 1-D lineout per frame, multi-azimuth mode
             # only — see cake_hdf5.write_cake_h5's collapsed_profiles/sigmas.
             all_cake_profiles, all_cake_sigmas = [], []
@@ -1548,10 +1712,13 @@ class BatchWorker(QtCore.QThread):
                 else:
                     all_profiles.append(prof)
                     all_sigmas.append(sigma)
-                if self._multi_azimuth and cake_2d is not None:
-                    # Needed by both the zarr writer below and the combined
-                    # cake HDF5 writer at the end of run() — not zarr-only.
-                    all_omegas.append(float(abs_i))
+                frame_omega = float(omega_of(abs_i))
+                all_omegas.append(frame_omega)
+                if (want_zarr or self._multi_azimuth) and cake_2d is not None:
+                    # Feeds the <lo>_<hi> token in the combined HDF5 stem,
+                    # which both the plain and the cake writer below use —
+                    # so it is not zarr-only.
+                    all_frame_idx.append(float(abs_i))
                 if want_zarr and cake_2d is not None:
                     # One zarr per combined output frame, written immediately
                     # rather than accumulated — `fid` already carries the
@@ -1616,7 +1783,7 @@ class BatchWorker(QtCore.QThread):
                     try:
                         write_gsas_zarr_zip(
                             zarr_path, [cake_2d], spec=spec,
-                            omegas=[float(abs_i)], bin_area=zarr_bin_area,
+                            omegas=[frame_omega], bin_area=zarr_bin_area,
                             temperatures=temps, pressures=pressures,
                             currents=currents, currents_i0=currents_i0)
                         try:
@@ -1691,15 +1858,20 @@ class BatchWorker(QtCore.QThread):
                         fmt_dir.mkdir(parents=True, exist_ok=True)
                         out_paths.extend(write_frame_profiles(
                             fmt_dir / stem, [fmt], r_ax, prof, sigma, cur_lsd, px, wl,
-                            cake_2d=(cake_2d if self._multi_azimuth else None),
-                            cake_sigma=(cake_sigma if self._multi_azimuth else None),
-                            eta_axis=eta_ax))
+                            # The cake goes over unconditionally — want_cake
+                            # already computed one whenever 2d_csv is among
+                            # the formats — and multi-azimuth decides only
+                            # whether to fan out per η. Gating the cake
+                            # itself on multi-azimuth is what made 2D CSV a
+                            # no-op with that checkbox off.
+                            cake_2d=cake_2d, cake_sigma=cake_sigma,
+                            eta_axis=eta_ax, per_eta=self._multi_azimuth))
 
             # Combined h5 output name: <original-source-stem>.<start>_<end>
             # .cake — h5 remains one file for the whole run (unlike zarr,
             # written per-frame above), so it still needs an explicit
             # frame-index range. start/end are the actual processed 0-based
-            # frame indices (all_omegas), matching what per-frame lineout
+            # frame indices (all_frame_idx), matching what per-frame lineout
             # files already use via froot_and_frame_num(fid, abs_i) above.
             src_path = self._src.get('path')
             if src_path:
@@ -1708,8 +1880,8 @@ class BatchWorker(QtCore.QThread):
                 src_paths = self._src.get('paths') or []
                 out_stem = (froot_and_frame_num(Path(src_paths[0]).stem, -1)[0]
                             if src_paths else "integrated")
-            lo = int(min(all_omegas)) if all_omegas else 0
-            hi = int(max(all_omegas)) if all_omegas else 0
+            lo = int(min(all_frame_idx)) if all_frame_idx else 0
+            hi = int(max(all_frame_idx)) if all_frame_idx else 0
             combined_stem = f"{out_stem}.{lo:06d}_{hi:06d}.cake"
 
             prov_entry = provenance.build_entry(
@@ -1758,6 +1930,7 @@ class BatchWorker(QtCore.QThread):
                             collapsed_sigmas=(np.array(all_cake_sigmas)
                                               if all_cake_sigmas else None),
                             r_axis=r_ax, eta_axis=eta_ax, frame_ids=frame_ids,
+                            omegas=all_omegas,
                             spec=spec, bin_area=cake_bin_area,
                             kernel=self._kernel, weighted=self._weighted,
                             cake_params={
@@ -1787,7 +1960,12 @@ class BatchWorker(QtCore.QThread):
                                profiles=np.array(all_profiles),
                                r_axis=r_ax,
                                frame_ids=frame_ids,
-                               sigmas=np.array(all_sigmas))
+                               sigmas=np.array(all_sigmas),
+                               # One rotation angle per profile, same order —
+                               # see write_all_profiles for why this is an
+                               # extra dataset rather than a metadata field.
+                               extra_datasets={"omegas": np.asarray(
+                                   all_omegas, dtype=np.float64)})
                     try:
                         prov_entry['extra']['out_paths'] = out_paths + [str(h5_path)]
                         stamp_h5_provenance(h5_path, prov_entry)
@@ -1807,6 +1985,7 @@ class BatchWorker(QtCore.QThread):
                 "profiles": np.array(all_profiles) if all_profiles else np.array([]),
                 "sigmas": np.array(all_sigmas) if all_sigmas else np.array([]),
                 "frame_ids": frame_ids,
+                "omegas": all_omegas,
                 "out_paths": out_paths,
                 "aborted": aborted,
                 "multi_azimuth": self._multi_azimuth,
@@ -2045,6 +2224,30 @@ class _ChunkCombinedFileSource:
         start = k * self._chunk_size
         return f"{group[0].stem}.frame_{start}_{start + len(group) - 1}"
 
+    def raw_window_for_index(self, idx: int) -> tuple:
+        """Inclusive, 0-based raw-frame range output frame ``idx`` was built
+        from, counted across the whole selection — what
+        ``cake_params.omega_for_window`` needs to turn OME_START/OME_STEP
+        into an angle.
+
+        A TIFF-family file holds exactly one raw frame, so the "raw index"
+        of a file is just its position in ``paths``, and chunking groups
+        whole files: the window is the chunk's own file-index range.
+
+        Note this counts across the whole selection, where
+        ``_HDF5StackGlobSource`` restarts at every file. The two are not
+        inconsistent — the rule in both is that ω is measured from raw
+        sub-frame 0 of the rotation. An HDF5 sub-frame stack IS one
+        rotation, whereas one-frame-per-file data only becomes a rotation as
+        a series, so here the selection is the rotation and ``paths[0]`` is
+        its start (``paths`` is already the start/end filtered list — see the
+        class docstring)."""
+        group = self._group(idx)
+        if not group:
+            raise IndexError(idx)
+        start = idx * self._chunk_size
+        return start, start + len(group) - 1
+
     def _read(self, group: list) -> np.ndarray:
         imgs = []
         for p in group:
@@ -2083,10 +2286,19 @@ class _HDF5StackGlobSource:
     ``BatchWorker`` asks for before a run even starts — read and combine
     every selected file up front: for a 147-file VAREX scan that is tens of
     GB of I/O and RAM before the first frame is integrated, so the run
-    looked hung (no progress, no output, no error). The pixel cache is
-    likewise bounded to the most recently used file, since both ``__iter__``
-    and a chunked ``BatchWorker`` walk the files in order and the old
-    unbounded dict retained every decoded file for the life of the run."""
+    looked hung (no progress, no output, no error).
+
+    Reading has the same rule, and it took a second pass to finish the job:
+    counting stopped decoding, but ``get(idx)`` still decoded the whole
+    OWNING file to return one frame from it, so a single-file 1442-sub-frame
+    VAREX pick cost 23.9 GB (~230 s over NFS) per first access — the
+    Detector-view preview and every parallel ``BatchWorker`` chunk each paid
+    it. ``_combined_one(i, k)`` now reads only chunk ``k``'s raw sub-frames.
+    The pixel cache is bounded to that one most recently used chunk (it was
+    the most recent whole file, and before that an unbounded dict retaining
+    every decoded file for the life of the run); ``__iter__`` and a chunked
+    ``BatchWorker`` both walk frames in order, so one chunk is all the
+    lookahead either needs."""
 
     #: HDF5 paths for the per-acquisition scalars mpe_wf/GSAS-II's zarr
     #: schema carries — fixed regardless of ``dataset`` (the cake-source
@@ -2142,7 +2354,7 @@ class _HDF5StackGlobSource:
         # survivors, so every other construction site leaves these None.
         self._raw_start = raw_start
         self._raw_end = raw_end
-        self._cache: dict = {}   # path index -> list[np.ndarray] (most-recent file only)
+        self._cache: dict = {}   # (path index, chunk index) -> np.ndarray (most-recent chunk only)
         self._counts: Optional[list] = None    # per-file combined-frame count
         self._raw_ns: Optional[list] = None    # per-file raw (pre-combine) sub-frame count
         self._metadata_cache: dict = {}   # path index -> {name: np.ndarray|None}
@@ -2214,14 +2426,29 @@ class _HDF5StackGlobSource:
             self._counts = [s[0] for s in stats]
             self._raw_ns = [s[1] for s in stats]
 
-    def _combined(self, i: int) -> list:
-        cached = self._cache.get(i)
+    def _combined_one(self, i: int, k: int):
+        """Combined frame ``k`` of file ``i``, or ``None`` when ``k`` is past
+        that file's last chunk.
+
+        Reads only chunk ``k``'s raw sub-frames. The whole-file
+        ``read_hdf5_stack_combined`` this replaced decoded every chunk and
+        cached the list, so ``get(0)`` on a 1442-sub-frame VAREX file read all
+        23.9 GB (~230 s over NFS) and held ~1.9 GB, to return one 33 MB frame
+        — the Detector-view preview and the first frame of every parallel
+        ``BatchWorker`` chunk each paid that in full. Same bug as the
+        decode-to-count one in the class docstring, on the pixel path rather
+        than the header path; fixing counting alone left it live.
+        """
+        key = (i, k)
+        cached = self._cache.get(key)
         if cached is None:
-            cached = read_hdf5_stack_combined(
-                self._paths[i], self._dataset,
+            cached = read_hdf5_stack_chunk(
+                self._paths[i], self._dataset, k,
                 chunk_size=self._chunk_size, op=self._op,
                 raw_start=self._raw_start, raw_end=self._raw_end)
-            self._cache = {i: cached}   # keep only the current file
+            if cached is None:
+                return None
+            self._cache = {key: cached}   # one chunk at a time
         return cached
 
     @property
@@ -2388,6 +2615,56 @@ class _HDF5StackGlobSource:
             remaining -= n_here
         raise IndexError(idx)
 
+    def omega_channel_window(self, idx: int) -> tuple:
+        """``(path, lo, hi)`` — the inclusive, FILE-LOCAL, 0-based raw
+        sub-frame range combined frame ``idx`` was built from, and the file
+        it came from.
+
+        This is the one rotation window in this class: both consumers of an
+        angle go through it. ``_chunk_range`` answers it per file, in that
+        file's own absolute (unfiltered) raw indices, so the
+        ``raw_start``/``raw_end`` filter SHIFTS the angles rather than
+        rebasing them — OME_START is the angle of raw sub-frame 0 of the
+        file, and skipping the first ten sub-frames does not move where that
+        file's rotation began.
+
+        **Each file restarts at OME_START.** One HDF5 sub-frame stack is one
+        rotation, so the index is deliberately local and the walk carries no
+        cumulative offset. It used to: ``raw_window_for_index`` added every
+        preceding file's raw count to make one continuous ramp across a
+        multi-file pick, which meant the computed OME_START/OME_STEP ramp and
+        a MEASURED omega channel — a 1-D dataset stored per file, indexed
+        from 0 in each, which therefore has no choice but to be file-local —
+        ran in two different coordinate systems, and that a file-number
+        filter silently rebased the ramp (the dropped files were gone before
+        this class saw them, so their sub-frames could not be counted).
+        One window removes both discrepancies.
+
+        Still safe in Batch-Parallel mode, where each chunk worker sees only
+        its own slice: the window is a pure function of ``idx`` and the
+        header counts, both identical in every worker, so two workers cannot
+        disagree about a frame's angle."""
+        self._ensure_stats()
+        remaining = idx
+        for i, p in enumerate(self._paths):
+            n_here = self._counts[i]
+            if remaining < n_here:
+                start, end = self._chunk_range(remaining, self._raw_ns[i])
+                return str(p), start, end
+            remaining -= n_here
+        raise IndexError(idx)
+
+    def raw_window_for_index(self, idx: int) -> tuple:
+        """The same window as ``omega_channel_window``, without the file —
+        what ``cake_params.omega_for_window`` needs to turn OME_START/
+        OME_STEP into an angle.
+
+        Defined in terms of it rather than repeating the walk: the computed
+        ramp and a measured channel must index the same axis, and the surest
+        way to keep them doing so is to leave only one place that decides
+        what the axis is."""
+        return self.omega_channel_window(idx)[1:]
+
     def metadata_for_index(self, idx: int) -> dict:
         """Chunk-mean metadata (Temperature/Pressure/StorageRing current)
         for combined frame ``idx``, in the same flattened index space as
@@ -2422,10 +2699,12 @@ class _HDF5StackGlobSource:
     def __iter__(self):
         self._ensure_stats()
         for i, p in enumerate(self._paths):
-            frames = self._combined(i)
-            n_raw = self._raw_ns[i]
-            for k, img in enumerate(frames):
-                yield self._fid(p, k, len(frames), n_raw), img.astype(np.float64)
+            n_here, n_raw = self._counts[i], self._raw_ns[i]
+            for k in range(n_here):
+                img = self._combined_one(i, k)
+                if img is None:   # header count disagreed with the real read
+                    break
+                yield self._fid(p, k, n_here, n_raw), img.astype(np.float64)
 
     def get(self, idx: int):
         # Locate the owning file from the header-only counts, so only THAT
@@ -2438,11 +2717,11 @@ class _HDF5StackGlobSource:
         for i, p in enumerate(self._paths):
             n_here = self._counts[i]
             if remaining < n_here:
-                frames = self._combined(i)
-                if remaining >= len(frames):   # header count disagreed with the real read
+                img = self._combined_one(i, remaining)
+                if img is None:   # header count disagreed with the real read
                     raise IndexError(idx)
-                return (self._fid(p, remaining, len(frames), self._raw_ns[i]),
-                        frames[remaining].astype(np.float64))
+                return (self._fid(p, remaining, n_here, self._raw_ns[i]),
+                        img.astype(np.float64))
             remaining -= n_here
         raise IndexError(idx)
 
@@ -2660,7 +2939,7 @@ def _split_into_chunks(indices: list, n_chunks: int) -> list:
 def write_all_profiles(out_dir, fmts, r_axis, profiles, sigmas, frame_ids,
                        lsd, px, wl, eta_axis=None, spec=None, bin_area=None,
                        calibration_snapshot=None, kernel=None, weighted=None,
-                       cake_params=None) -> list:
+                       cake_params=None, omegas=None) -> list:
     """Write every frame's already-computed lineout to disk, in every format
     in ``fmts``. Backs the batch tabs' **Save** button — writing results that
     already exist in memory, independent of whether an output directory was
@@ -2705,8 +2984,17 @@ def write_all_profiles(out_dir, fmts, r_axis, profiles, sigmas, frame_ids,
     if "h5" in fmts and len(frame_ids) and not multi:
         out_dir.mkdir(parents=True, exist_ok=True)
         h5_path = out_dir / "integrated.h5"
+        # The per-frame rotation angle rides along as an extra dataset
+        # rather than a ProfileMetadata field: write_h5 has no omega of its
+        # own, and a downstream peak fit or pole figure needs one value per
+        # profile, in the same order. Skipped rather than padded when the
+        # lengths disagree — a misaligned angle is worse than none.
+        extras = None
+        if omegas is not None and len(omegas) == len(frame_ids):
+            extras = {"omegas": np.asarray(omegas, dtype=np.float64)}
         m.write_h5(str(h5_path), profiles=profiles, r_axis=r_axis,
-                   frame_ids=frame_ids, sigmas=sigmas)
+                   frame_ids=frame_ids, sigmas=sigmas,
+                   extra_datasets=extras)
         try:
             entry = provenance.build_entry(
                 'midas_gui.batch_integrate.save',
@@ -2729,7 +3017,7 @@ def write_all_profiles(out_dir, fmts, r_axis, profiles, sigmas, frame_ids,
                     h5_path, cake=profiles, cake_sigma=sigmas, r_axis=r_axis,
                     eta_axis=eta_axis, frame_ids=frame_ids, spec=spec,
                     bin_area=bin_area, kernel=kernel, weighted=weighted,
-                    cake_params=cake_params)
+                    cake_params=cake_params, omegas=omegas)
                 entry = provenance.build_entry(
                     'midas_gui.batch_integrate.save',
                     extra={'n_frames': len(frame_ids), 'multi_azimuth': True,
@@ -2795,7 +3083,7 @@ class BatchRunCoordinator(QtCore.QObject):
     MIN_FRAMES_PER_WORKER = 10
 
     def __init__(self, spec, source_cfg, mask, out_dir, fmts, kernel,
-                 corrections, variance_cfg, q_cfg=None,
+                 corrections, variance_cfg, q_cfg=None, omega_cfg=None,
                  frame_range=None, monitor_file=None, drift_traj=None,
                  dark=None, bright=None, background=None, bright_mode="divide",
                  weighted=True, context=None, im_trans=(), multi_azimuth=False,
@@ -2805,7 +3093,8 @@ class BatchRunCoordinator(QtCore.QObject):
         self._args = dict(
             spec=spec, source_cfg=source_cfg, mask=mask, out_dir=out_dir, fmts=fmts,
             kernel=kernel, corrections=corrections, variance_cfg=variance_cfg,
-            q_cfg=q_cfg, frame_range=frame_range, monitor_file=monitor_file,
+            q_cfg=q_cfg, omega_cfg=omega_cfg,
+            frame_range=frame_range, monitor_file=monitor_file,
             drift_traj=drift_traj, dark=dark, bright=bright, background=background,
             bright_mode=bright_mode, weighted=weighted, im_trans=im_trans,
             multi_azimuth=multi_azimuth, calibration_snapshot=calibration_snapshot)
@@ -2895,7 +3184,8 @@ class BatchRunCoordinator(QtCore.QObject):
         if self._interrupted:
             self.finished.emit({"n": 0, "r_axis_px": ctx.get("r_ax"),
                                 "profiles": np.array([]), "sigmas": np.array([]),
-                                "frame_ids": [], "out_paths": [], "aborted": True})
+                                "frame_ids": [], "omegas": [],
+                                "out_paths": [], "aborted": True})
             return
         self.geom_ready.emit(ctx)
         self._live_order = [i for chunk in self._chunks for i in chunk]
@@ -2942,6 +3232,7 @@ class BatchRunCoordinator(QtCore.QObject):
         aborted = False
         r_axis = None
         eta_axis = None
+        merged_omegas = []
         for cw in self._chunk_workers:
             d = self._chunk_results[id(cw)]
             if d.get("profiles") is not None and len(d["profiles"]):
@@ -2949,6 +3240,7 @@ class BatchRunCoordinator(QtCore.QObject):
             if d.get("sigmas") is not None and len(d["sigmas"]):
                 merged_sigmas.extend(d["sigmas"])
             merged_ids.extend(d.get("frame_ids") or [])
+            merged_omegas.extend(d.get("omegas") or [])
             merged_out.extend(d.get("out_paths") or [])
             aborted = aborted or d.get("aborted", False)
             if r_axis is None:
@@ -2981,7 +3273,7 @@ class BatchRunCoordinator(QtCore.QObject):
                     eta_axis=eta_axis, spec=spec, bin_area=bin_area,
                     calibration_snapshot=self._args.get("calibration_snapshot"),
                     kernel=kernel, weighted=self._args.get("weighted"),
-                    cake_params=cake_params)
+                    cake_params=cake_params, omegas=merged_omegas)
                 merged_out.extend(h5_paths)
             except Exception:
                 self.log_line.emit(
@@ -2990,7 +3282,8 @@ class BatchRunCoordinator(QtCore.QObject):
             "n": len(merged_profiles), "r_axis_px": r_axis,
             "profiles": np.array(merged_profiles) if merged_profiles else np.array([]),
             "sigmas": np.array(merged_sigmas) if merged_sigmas else np.array([]),
-            "frame_ids": merged_ids, "out_paths": merged_out, "aborted": aborted,
+            "frame_ids": merged_ids, "omegas": merged_omegas,
+            "out_paths": merged_out, "aborted": aborted,
             "multi_azimuth": multi_azimuth, "eta_axis": eta_axis,
         })
 
