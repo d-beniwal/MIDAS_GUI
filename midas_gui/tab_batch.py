@@ -43,7 +43,8 @@ from midas_gui.dialogs import show_error
 from midas_gui.hydra_widgets import HydraModeRibbon
 from midas_gui.hydra_batch_page import HydraBatchPage
 from midas_gui.job_queue import JobQueuePanel
-from midas_gui.cake_params import parse_cake_csv, write_cake_csv
+from midas_gui.cake_params import (parse_cake_csv, write_cake_csv,
+                                   omega_for_window)
 from midas_gui import project
 from midas_gui import settings
 from midas_gui import style as S
@@ -376,11 +377,31 @@ class BatchTab(QtWidgets.QWidget):
         self._last_run_out_dir: Optional[str] = None  # set in _run() — see _on_done
         self._expid_provider = None  # () -> str, wired by app.py's MainWindow — see set_expid_provider
         self._cake_dialog = None  # built on first use — see _open_cake_params_dialog
+        # Raw sub-frame windows of the loaded source, for the ω readouts —
+        # see _recompute_omega_span (refreshed on source change only).
+        self._omega_span: Optional[dict] = None
+        # The source_cfg the cached span was built from, so a repeat signal
+        # for an unchanged source costs nothing (see _recompute_omega_span).
+        self._omega_span_key: Optional[str] = None
+        # Coalesces bursts: a folder pick walks every file's HDF5 header, and
+        # dataChanged/valueChanged can fire several times for one user
+        # action (and once per step while a spin box is held down). Without
+        # this the GUI thread would repeat that walk for each of them.
+        self._omega_span_timer = QtCore.QTimer(self)
+        self._omega_span_timer.setSingleShot(True)
+        self._omega_span_timer.setInterval(150)
+        self._omega_span_timer.timeout.connect(self._recompute_omega_span)
         self._project_ctx: Optional[project.ProjectContext] = None
         self._build_ui()
         self._loader.monitorToggled.connect(self._toggle_monitor)
         self._loader.dataChanged.connect(self._refresh_detector_preview)
         self._loader.dataChanged.connect(self._maybe_autofill_output_dir)
+        # The ω readouts follow the data: a new source changes which raw
+        # sub-frames exist, and therefore which angles they map to.
+        self._loader.dataChanged.connect(self._schedule_omega_span)
+        # …and the loader's own range hint gets the angular half of its
+        # range from us — it counts sub-frames and knows nothing about ω.
+        self._loader.set_omega_hint_fn(self._omega_hint_tail)
         self._loader.fieldsChanged.connect(self._refresh_detector_preview)
         # "stream" mode's preview frame is fetched off the GUI thread (see
         # DataLoaderPanel._start_preview_worker) — dataChanged/fieldsChanged
@@ -572,19 +593,170 @@ class BatchTab(QtWidgets.QWidget):
             parts.append(f"Q out {self._q_min.value():g}–{self._q_max.value():g}"
                          f"  ΔQ {self._q_bin.value():g} Å⁻¹")
         chunk = getattr(self._loader, "_combine_chunk", None)
-        if chunk is not None and int(chunk.value()) > 1:
-            parts.append(f"sum {int(chunk.value())} sub-frames")
+        n_sum = int(chunk.value()) if chunk is not None else 1
+        if n_sum > 1:
+            # Named as OME_SUM here because it IS OME_SUM: the cake dialog's
+            # row for it edits this very spin box rather than a copy of it
+            # (see _open_cake_params_dialog), and a user who has only seen
+            # the CSV has no other way to find that out.
+            parts.append(f"sum {n_sum} sub-frames (OME_SUM)")
         # Rotation is shown only when there is one. A run at a fixed angle is
         # the common case and "ω 0–0°" would be noise on every line.
         chan = self._ome_channel.currentText().strip()
+        step = self._ome_step.value()
         if chan:
             parts.append(f"ω from {chan}")
-        elif self._ome_step.value() or self._ome_start.value():
-            parts.append(f"ω {self._ome_start.value():g}°"
-                         f"  Δω {self._ome_step.value():g}°/sub-frame")
+        elif step or self._ome_start.value():
+            part = f"ω {self._ome_start.value():g}°  Δω {step:g}°/sub-frame"
+            # The multiplication that is easy to get wrong: combining N
+            # sub-frames leaves consecutive OUTPUT frames N·OME_STEP apart,
+            # not OME_STEP apart. Both rates, side by side, whenever they
+            # differ.
+            if n_sum > 1 and step:
+                part += f" = {step * n_sum:g}°/frame"
+            parts.append(part)
         if self._ome_collapse.isChecked():
             parts.append("ω averaged")
-        return "   ".join(parts)
+        line = "   ".join(parts)
+        mapping = self._omega_map_text()
+        return line + ("\n   " + mapping if mapping else "")
+
+    def _omega_map_text(self) -> str:
+        """Second summary line: which raw sub-frames become which angles.
+
+        This is the whole point of the pair of readouts. ``start``/``end``
+        and "Combine sub-frames" in the loader card count raw sub-frames;
+        OME_START/OME_STEP/OME_SUM assign degrees to those same sub-frames.
+        They are one axis in two coordinate systems, and nothing in the GUI
+        used to say so — so state it for the data actually loaded: the raw
+        range on the left, the angles it produces on the right, the frame
+        count in between.
+
+        Pure arithmetic on ``self._omega_span``, which is refreshed only
+        when the SOURCE changes (see ``_recompute_omega_span``), so typing
+        in OME_START re-renders this without touching a file. Returns ``""``
+        when there is nothing to say — no source loaded, or one this app
+        cannot ask for a sub-frame window."""
+        span = getattr(self, "_omega_span", None)
+        if not span or span.get("n", 0) < 1:
+            return ""
+        n = span["n"]
+        lo, hi = span["first"][0], span["last"][1]
+        # On a multi-file pick each file restarts at OME_START (one HDF5
+        # sub-frame stack is one rotation — see
+        # workers._HDF5StackGlobSource.omega_channel_window), so the range
+        # is the range WITHIN a file and the angles repeat per file. Saying
+        # "0…1441" flat there would claim a single continuous ramp.
+        each = span.get("multi_file")
+        where = " of each file" if each else ""
+        chan = self._ome_channel.currentText().strip()
+        if chan:
+            return (f"sub-frames {lo}…{hi}{where} → ω read per frame from "
+                    f"'{chan}'   {n} frame(s)")
+        start, step = self._ome_start.value(), self._ome_step.value()
+        if not step and not start and n > 1:
+            # The state that produced the all-zero /Omegas in a real run: a
+            # rotation loaded, no angles configured. omega_for_window
+            # returns a genuine 0.0 for it and the output looks fine, so
+            # this is the only place it can be noticed.
+            return (f"sub-frames {lo}…{hi}{where} → ω 0° on all {n} frames "
+                    "(OME_START/OME_STEP not set)")
+        if self._ome_collapse.isChecked():
+            one = omega_for_window(start, step, lo, hi)
+            return (f"sub-frames {lo}…{hi}{where} → one ω {one:g}° for all "
+                    f"{n} frame(s) (ω averaged)")
+        a = omega_for_window(start, step, *span["first"])
+        b = omega_for_window(start, step, *span["last"])
+        rep = " in every file" if each else ""
+        return (f"sub-frames {lo}…{hi}{where} → ω {a:g}°…{b:g}°{rep}   "
+                f"{n} frame(s)"
+                + ("   (each file restarts at OME_START)" if each else ""))
+
+    def _omega_hint_tail(self) -> str:
+        """The one-clause ω tail appended to the loader's start/end hint —
+        see ``widgets.DataLoaderPanel.set_omega_hint_fn``.
+
+        The loader card counts sub-frames and deliberately knows nothing
+        about angles; this puts the angular reading of its own range next to
+        it, in the place where the range is set. Deliberately terse — the
+        cake summary carries the detail — and empty when no source is
+        loaded, which is what keeps the hint byte-identical in every tab
+        that never sets a hint function."""
+        span = getattr(self, "_omega_span", None)
+        if not span or span.get("n", 0) < 1:
+            return ""
+        chan = self._ome_channel.currentText().strip()
+        if chan:
+            return f"→ ω read from '{chan}'."
+        start, step = self._ome_start.value(), self._ome_step.value()
+        if not step and not start:
+            return "→ ω 0° (OME_START/OME_STEP not set in the cake parameters)."
+        lo, hi = span["first"][0], span["last"][1]
+        if self._ome_collapse.isChecked():
+            return f"→ one ω {omega_for_window(start, step, lo, hi):g}° (averaged)."
+        a = omega_for_window(start, step, *span["first"])
+        b = omega_for_window(start, step, *span["last"])
+        per = " in each file" if span.get("multi_file") else ""
+        return f"→ ω {a:g}°…{b:g}°{per}."
+
+    def _schedule_omega_span(self, *_args) -> None:
+        """Ask for a span refresh soon, coalescing a burst into one walk.
+
+        Everything this is wired to can fire repeatedly for a single user
+        action, and on a folder pick each firing would re-open every file's
+        header on the GUI thread. Best-effort: if the timer is gone (teardown)
+        just do the work inline."""
+        t = getattr(self, "_omega_span_timer", None)
+        if t is None:
+            self._recompute_omega_span()
+            return
+        t.start()
+
+    def _recompute_omega_span(self, *_args) -> None:
+        """Re-read the loaded source's raw sub-frame windows, then re-render
+        both ω readouts.
+
+        Header reads only (``_open_source_cfg`` → ``_ensure_stats`` never
+        decodes a pixel), and only on a change of SOURCE or of "Combine
+        sub-frames" — both of which already pay for exactly this walk in the
+        loader itself. Editing OME_START/OME_STEP does not come through
+        here: the readouts recompute their angles from the cached windows,
+        so a spin box can be dragged without touching the filesystem.
+
+        The windows come from the source rather than from arithmetic on the
+        raw count so that the readout cannot disagree with the run: a short
+        final chunk, a start/end filter and the per-file restart are all
+        decided in ``raw_window_for_index``, which is what the run uses
+        too."""
+        span = key = None
+        try:
+            from midas_gui.workers import _open_source_cfg
+            cfg = self._loader.source_cfg()
+            # Same source as last time — the windows cannot have moved, and
+            # on a many-file pick re-deriving them is the expensive part.
+            key = repr(sorted(cfg.items(), key=lambda kv: kv[0]))
+            if key == self._omega_span_key:
+                return
+            src = _open_source_cfg(cfg)
+            n = int(getattr(src, "n_frames", 0) or 0)
+            win = getattr(src, "raw_window_for_index", None)
+            if n > 0 and win is not None:
+                span = {"n": n,
+                        "first": tuple(int(v) for v in win(0)),
+                        "last": tuple(int(v) for v in win(n - 1)),
+                        "multi_file": len(cfg.get("paths") or []) > 1}
+        except Exception:
+            # A live/PVA source, nothing loaded yet, an unreadable file — all
+            # ordinary, and all mean the same thing here: no mapping to show.
+            span = None
+            key = None
+        self._omega_span = span
+        self._omega_span_key = key if span is not None else None
+        self._refresh_cake_summary()
+        try:
+            self._loader.refresh_omega_hint()
+        except Exception:
+            pass
 
     def _omega_cfg(self) -> dict:
         """The rotation half of a run's configuration, in the shape
@@ -609,6 +781,16 @@ class BatchTab(QtWidgets.QWidget):
             return
         try:
             lbl.setText(self._cake_summary_text())
+        except Exception:
+            pass
+
+    def _refresh_omega_hint(self, *_args) -> None:
+        """Re-render the loader's range hint alone, without re-reading the
+        source — the angles change, the sub-frame windows behind them do
+        not. Best-effort, like ``_refresh_cake_summary``: a hint is never
+        worth taking the tab down for."""
+        try:
+            self._loader.refresh_omega_hint()
         except Exception:
             pass
 
@@ -1106,6 +1288,9 @@ class BatchTab(QtWidgets.QWidget):
         # card; this is the only place all of them are visible at once, and
         # the only feedback that a CSV load actually changed anything.
         self._cake_lbl = QtWidgets.QLabel()
+        # Two lines since the sub-frame↔ω mapping joined it, and the
+        # second one is long — wrap rather than clip it in a narrow panel.
+        self._cake_lbl.setWordWrap(True)
         self._cake_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         self._cake_lbl.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         self._cake_lbl.setToolTip(
@@ -1235,10 +1420,19 @@ class BatchTab(QtWidgets.QWidget):
             _w.valueChanged.connect(self._refresh_cake_summary)
         self._ome_channel.currentTextChanged.connect(self._refresh_cake_summary)
         self._ome_collapse.toggled.connect(self._refresh_cake_summary)
+        # The loader's hint carries the same angles, so it follows the same
+        # four widgets. No file is touched — see _omega_hint_tail.
+        for _w in (self._ome_start, self._ome_step):
+            _w.valueChanged.connect(self._refresh_omega_hint)
+        self._ome_channel.currentTextChanged.connect(self._refresh_omega_hint)
+        self._ome_collapse.toggled.connect(self._refresh_omega_hint)
         self._bin_type.currentIndexChanged.connect(self._refresh_cake_summary)
         _chunk = getattr(self._loader, "_combine_chunk", None)
         if _chunk is not None:
-            _chunk.valueChanged.connect(self._refresh_cake_summary)
+            # OME_SUM: changes the number of output frames and every
+            # frame's window, so the whole span is restated, not just the
+            # summary text (_recompute_omega_span refreshes both).
+            _chunk.valueChanged.connect(self._schedule_omega_span)
         self._refresh_cake_summary()
 
         pf.full(_section_label("AZIMUTHAL"))

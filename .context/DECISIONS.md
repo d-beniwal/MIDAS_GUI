@@ -32,6 +32,31 @@ aid must never be the reason startup fails.
 adding a dev tool to a beamline environment mid-session is a bigger change
 than eleven lines in the launcher.
 
+## 2026-09-29 — The ω readout must not put a filesystem walk on every signal
+
+`_recompute_omega_span` derives its mapping line from the real source
+(`_open_source_cfg` → `raw_window_for_index`) rather than from arithmetic on
+the raw count, so the readout cannot drift from what a run computes. That is
+the right call and it stays — but it means the readout opens an HDF5 header
+per file, on the GUI thread, and it was wired directly to `dataChanged` and
+to "Combine sub-frames" `valueChanged`. Both fire several times for one user
+action, and holding a spin box fires once per step; a folder pick multiplies
+each firing by the file count. Measured: ~1 ms for one file (plus a one-time
+2.3 s lazy import inside `_open_source_cfg`, which the run would pay anyway),
+but that scales linearly with the pick.
+
+Two defences, both cheap. A 150 ms single-shot `QTimer` coalesces a burst
+into one walk, and a cfg-keyed short circuit makes a repeat refresh for an
+unchanged source free. Deliberately *not* moved to a background thread: the
+readout must be correct before the user can press Start, and a walk that is
+already ~1 ms for the common case does not justify the lifecycle of another
+worker.
+
+This was found while chasing the second hang report. It is not that hang —
+the timings above rule it out — but it was a real per-signal cost on the path
+the report pointed at, and it is the kind that only shows up on the big
+folder picks the beamline actually uses.
+
 ## 2026-09-29 — ω restarts at every file, and both ω paths share one window
 
 Reverses the origin rule set when per-frame ω landed a few days earlier. The
@@ -78,6 +103,43 @@ worker, so two workers cannot disagree about a frame's angle.
 The user chose this reading when the inconsistency was put to them. The
 GUI now states the resulting mapping rather than leaving it implicit — see
 the next entry.
+
+## 2026-09-29 — Saying that frame numbers and angles are one axis
+
+`start`/`end`/**Combine sub-frames** count raw sub-frames; `OME_START`/
+`OME_STEP`/`OME_SUM` put degrees on the same sub-frames. The app never said
+so, and the user asked for the two to be made consistent *and visible*.
+
+Consistency was largely already there and worth recording as such: `OME_SUM`
+is not mirrored into the cake dialog, it **is** the loader's
+`_combine_chunk` widget, read and written in place — so it cannot drift. What
+was missing was the statement.
+
+Decided (with the user): labels stay as they are — on a multi-file pick
+`start`/`end` really are file numbers, so renaming them "sub-frame" would be
+wrong — and the correspondence goes into readouts and tooltips instead, in
+**both** places it is operated: the cake summary line and the loader's range
+hint.
+
+Two judgements inside that:
+
+*The summary states both rates.* `Δω 0.25°/sub-frame = 6.25°/frame` is the
+whole point — combining 25 sub-frames makes consecutive output frames
+25×`OME_STEP` apart, and that multiplication is what a user gets wrong.
+
+*The "not set" state is called out.* A loaded rotation with `OME_START`/
+`OME_STEP` both 0 gets a genuine 0.0 per frame (deliberately — a stationary
+sample really is at 0°), so nothing downstream looks wrong. That is exactly
+the state a real run was in when its `/Omegas` came out all zero. The line
+says `ω 0° on all 58 frames (OME_START/OME_STEP not set)` rather than
+silently rendering a flat ramp.
+
+`DataLoaderPanel` is shared with tabs that have no cake parameters, so it does
+not learn about ω: `set_omega_hint_fn(fn)` takes a callable from whoever owns
+the angles (the pattern `set_preview_sum`/`set_tab1_mask` already use), and
+unset the hint text is byte-identical. The tail is re-rendered separately from
+the hint body so an `OME_START` edit costs no file access — the windows are
+cached when the *source* changes, and the angles are arithmetic over them.
 
 ## 2026-09-29 — 2D CSV wrote nothing, and reported that it had
 

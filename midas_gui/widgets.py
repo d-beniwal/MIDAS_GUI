@@ -3990,7 +3990,14 @@ class DataLoaderPanel(QtWidgets.QWidget):
                 "BEFORE 'Combine sub-frames' below chunks whatever survives.\n"
                 "• Other frame-indexed sources (e.g. a single multi-frame "
                 "stack) fall back to a plain 0-based index, end exclusive, "
-                "0 = all.")
+                "0 = all.\n"
+                "\n"
+                "This is the same axis the cake parameters put DEGREES on: "
+                "OME_START/OME_STEP assign an angle to each of these raw "
+                "sub-frames, and OME_SUM is 'Combine sub-frames' below. Two "
+                "coordinate systems, one rotation — Batch Integrate's cake "
+                "summary line spells the correspondence out for whatever is "
+                "loaded.")
             self._fr_start = _NoScrollSpinBox(); self._fr_start.setRange(0, 999999); self._fr_start.setFixedWidth(64)
             self._fr_start.setToolTip("First frame (inclusive).\n\n" + _fr_tip)
             self._fr_end = _NoScrollSpinBox(); self._fr_end.setRange(0, 999999); self._fr_end.setFixedWidth(64)
@@ -4036,7 +4043,13 @@ class DataLoaderPanel(QtWidgets.QWidget):
                 "TIFF/.ge* folder pick (each such file already holds exactly "
                 "one raw frame). 0 = combine everything selected into one "
                 "frame; 1 = no combining (the default, one frame per raw "
-                "sub-frame/file, same as before this setting existed).")
+                "sub-frame/file, same as before this setting existed).\n"
+                "\n"
+                "This spin box IS the cake parameters' OME_SUM — the 'Cake "
+                "parameters…' dialog edits this widget rather than a copy, "
+                "so the two can never disagree. It therefore also sets the "
+                "angular spacing of the OUTPUT frames: consecutive frames "
+                "are OME_SUM × OME_STEP apart, not OME_STEP apart.")
             self._combine_op_combo = _NoScrollComboBox()
             self._combine_op_combo.addItem("Mean", "mean")
             self._combine_op_combo.addItem("Sum", "sum")
@@ -4508,6 +4521,52 @@ class DataLoaderPanel(QtWidgets.QWidget):
     def _on_fields_changed_stream(self) -> None:
         if self._mode == "stream":
             self._stream_preview_dirty = True
+
+    def set_omega_hint_fn(self, fn) -> None:
+        """Supply ``fn() -> str`` — one short clause appended to the
+        start/end range hint, or ``""`` for none.
+
+        The panel counts raw sub-frames (or file numbers); rotation angles
+        belong to whoever owns the cake parameters, which is one tab, not
+        this shared widget. So the tab hands in a callable instead of the
+        panel learning about ω: unset — every other tab — the hint text is
+        byte-identical to what it has always been.
+
+        ``fn`` is called on every re-render, including from
+        :meth:`refresh_omega_hint`, so it must be cheap: no file reads.
+        Batch Integrate's implementation is arithmetic on windows it
+        cached when the source last changed (``tab_batch._omega_hint_tail``)."""
+        self._omega_hint_fn = fn
+        self._apply_frame_hint()
+
+    def refresh_omega_hint(self) -> None:
+        """Re-render the range hint's ω tail alone.
+
+        For the owner to call when its angles change but the data has not —
+        this re-runs ``fn`` against the hint text already built, rather than
+        re-deriving the range (which means reopening the source)."""
+        self._apply_frame_hint()
+
+    def _set_frame_hint(self, text: str) -> None:
+        """Set the start/end hint's own text, keeping it separate from the ω
+        tail so the tail can be re-rendered without rebuilding this half."""
+        self._fr_hint_base = text
+        self._apply_frame_hint()
+
+    def _apply_frame_hint(self) -> None:
+        if not hasattr(self, "_fr_hint"):
+            return
+        base = getattr(self, "_fr_hint_base", "")
+        fn = getattr(self, "_omega_hint_fn", None)
+        tail = ""
+        # No base means no source described yet — a bare angle clause hanging
+        # under an empty hint would read as an error message.
+        if base and fn is not None:
+            try:
+                tail = (fn() or "").strip()
+            except Exception:
+                tail = ""
+        self._fr_hint.setText(base + ("  " + tail if tail else ""))
 
     def set_preview_sum(self, n: int) -> None:
         """"stream" mode only: how many of the source's leading frames
@@ -5313,7 +5372,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
                     if n:
                         extra += (f"  (produces {n} combined output frame(s) via "
                                   "'Combine sub-frames' below)")
-                self._fr_hint.setText(
+                self._set_frame_hint(
                     f"start/end = file numbers ({len(nums)} files: {pfx}"
                     f"{min(nums):06d} … {pfx}{max(nums):06d}), end inclusive.{extra}")
             elif cfg.get("type") == "hdf5" and cfg.get("path"):
@@ -5347,7 +5406,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
                         n_out = 0
                     produces = (f", produces {n_out} combined output frame(s) via "
                                "'Combine sub-frames' below" if n_out and n_out != n_raw else "")
-                    self._fr_hint.setText(
+                    self._set_frame_hint(
                         f"Single file (scan point {shown:06d}), {n_raw} raw "
                         "sub-frame(s) — start/end pick a 0-based sub-frame "
                         f"range (inclusive) within it{produces}.")
@@ -5375,12 +5434,12 @@ class DataLoaderPanel(QtWidgets.QWidget):
                         n = 0
                     produces = (f" (produces {n} combined output frames via "
                                 f"'Combine sub-frames' below)" if n > 1 else "")
-                    self._fr_hint.setText(
+                    self._set_frame_hint(
                         f"Single file (scan point {shown:06d}){produces} — the "
                         "whole file is always processed as one source; nothing "
                         "to select here.")
             else:
-                self._fr_hint.setText("")
+                self._set_frame_hint("")
         finally:
             for w in (self._fr_start, self._fr_end):
                 w.blockSignals(False)

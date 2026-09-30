@@ -2124,6 +2124,42 @@ That one expression covers every case: with no combining (`OME_SUM` = 1) it is
 0 ("combine everything selected into one frame") it is the mean angle the
 collapsed exposure actually covered.
 
+#### Frame numbers and angles are the same axis
+
+`start` / `end` / **Combine sub-frames** in the data loader and
+`OME_START` / `OME_STEP` / `OME_SUM` in the cake parameters describe *one*
+thing — the raw sub-frames of the acquisition. One set counts them, the other
+puts degrees on them, and `OME_SUM` **is** the **Combine sub-frames** spin box
+(the editor edits that widget, not a copy of it, so the two cannot disagree).
+
+Two readouts now state the correspondence for whatever is loaded, so the
+conversion never has to be done in your head:
+
+* The **cake summary line** under *Cake parameters…* gains a second line:
+
+  ```
+  R 0–auto px  ΔR 1 px   η -180…180°  Δη 5°   sum 25 sub-frames (OME_SUM)   ω 0°  Δω 0.25°/sub-frame = 6.25°/frame
+     sub-frames 0…1441 → ω 0°…360.25°   58 frame(s)
+  ```
+
+  The `Δω …/sub-frame = …/frame` pair is the easily-missed multiplication:
+  combining 25 sub-frames leaves consecutive *output* frames 25 × `OME_STEP`
+  apart. On a multi-file pick the line says *of each file* and *in every
+  file*, matching the per-file rule above. If a rotation is loaded and no
+  angles are configured, it says so outright —
+  `ω 0° on all 58 frames (OME_START/OME_STEP not set)` — which is the state
+  that otherwise produces a perfectly valid-looking run of all-zero `/Omegas`.
+  With a measured channel picked, it names the channel instead of inventing a
+  range from the unused ramp.
+
+* The **start/end hint** in the data loader card gains the short form of the
+  same thing — `… → ω 0°…360.25°` — right under the boxes where the
+  sub-frame range is set.
+
+Both are recomputed from the source's own frame windows, so they cannot report
+a range the run will not produce; editing `OME_START` or `OME_STEP` re-renders
+them without re-reading any file.
+
 Two more controls sit under the nine columns in the same editor. They are
 **not** CSV columns — they are saved and restored with the GUI state, not
 written into the file:
