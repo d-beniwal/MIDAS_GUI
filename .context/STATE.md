@@ -1,23 +1,22 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-09-29 (OME_START/OME_STEP become a real per-frame ω in
-the zarr and both HDF5 layouts; upstream's cake HDF5 merged; `main` is level
-with `origin` and with the canonical)_
+_Last updated: 2026-09-29 (ω confirmed correct in a live zarr; ω now restarts
+per file and is stated on screen; three independent bugs fixed — 2D CSV, the
+background-job ω, and a whole-file read per frame)_
 
 ## Now working on
 
-**Nothing mid-flight.** `main` is level with `origin/main` and **0 behind
-`upstream/main`** (40 ahead) — in sync with the canonical as of upstream's
-`61feeb3`. What the last two pieces of work want next, in the order they
-matter:
+**Nothing mid-flight.** Six commits landed 2026-09-29 (below) and are pushed.
+What comes next, in the order it matters:
 
-- **Eyes on a live run** (needs your X11/VNC session — see the "Not verified"
-  lines below). The omega walkthrough is the one with something real to
-  check: a 20-ID rotation scan's `/Omegas` against the angles you expect.
+- **`PoleFigureWorker`** is still single-frame and takes χ/φ from its cfg.
+  Making it ω-aware across a series is the piece the whole omega arc exists to
+  enable, and it now has a correct, verified angle to stand on.
+- **Eyes on the cake HDF5** (needs your X11/VNC session). It has still never
+  been opened in a viewer here — the one remaining eyes-on item now that the
+  zarr's `/Omegas` are confirmed.
 - **Metadata provenance**, which you said you'd keep testing against.
-- `PoleFigureWorker` is still single-frame and takes χ/φ from its cfg. Making
-  it ω-aware across a series is the piece the omega work exists to enable.
 
 Open follow-ups, none blocking:
 - `documentation/calibration_unification_plan.md` — the three Calibrate UI
@@ -31,14 +30,62 @@ Open follow-ups, none blocking:
 - `test_apply_project_calibration_single_detector` still hits the known
   pyqtgraph teardown SIGABRT (reproduces on clean HEAD; not ours).
 
-- Still untested (ROADMAP.md): `job_queue.py`, `peak_fit_panel.py`,
-  `batch_cli.py`.
+- Still untested (ROADMAP.md): `job_queue.py`, `peak_fit_panel.py`.
+  `batch_cli.py` now has `tests/test_batch_cli_omega.py`, which covers the
+  omega flags and the tab→argv→cfg round trip but nothing else in the file.
 - Branch cleanup done 2026-09-10: `pr-7-strain-cake`, `test-fork-imports` and
   the four fetched `refs/remotes/origin/pr/*` refs are gone; only `main` and
   `origin/main` remain. Re-fetch any PR head with
   `git fetch origin 'refs/pull/*/head:refs/remotes/origin/pr/*'`.
 
 ## Recently completed
+
+**2026-09-29 — ω verified live, then made to say what it means; three bugs
+out.** Six commits, `4c7b776`…`dc24f12`, pushed. You confirmed a real run's
+zarr `/Omegas` are correct — that closes the live-verification item the omega
+work had been carrying, and everything below was written on top of it.
+
+- **ω restarts at every file** (`236ffa0`). The global ramp meant the computed
+  `OME_START`/`OME_STEP` ramp and a *measured* ω channel indexed two different
+  axes for the same frame, and a file-number filter silently rebased the ramp
+  anyway (dropped files were gone before the source saw them). One rule now:
+  ω is measured from raw sub-frame 0 of the rotation the frame came from — an
+  HDF5 sub-frame stack is one rotation, a one-frame-per-file series is one.
+  `raw_window_for_index` is now literally `omega_channel_window(idx)[1:]`, so
+  there is one place that decides what the axis is.
+- **The GUI says frame numbers and angles are the same axis** (`1bb4341`).
+  The cake summary line and the loader's range hint both map the sub-frame
+  range to the angle range, spelling out Δω/sub-frame **vs** Δω/frame — the
+  `OME_SUM` multiplication nobody should have to do in their head. A loaded
+  rotation with no angles set now says so rather than quietly producing
+  all-zero `/Omegas`. `DataLoaderPanel` still knows nothing about ω; it takes
+  a callable (`set_omega_hint_fn`), so every other tab's hint is unchanged.
+- **Background jobs wrote ω = 0** (`dc24f12`). The `batch_cli` argv carried no
+  omega flags at all, so "Run as background job" recorded zeros while Start
+  Integration recorded the right angles, and nothing could report it. Fixed by
+  serialising the config rather than re-deriving it; start/step go out even at
+  0/0 so the command line in the Logs tab always states what the job will
+  record.
+- **2D CSV wrote nothing with multi-azimuth off** (`6ed405d`), and reported a
+  file it had not written, under the wrong name. `cake_2d is not None` had
+  come to mean both "a cake exists" and "fan out per η"; those are now
+  separate, and `write_profile` raises rather than no-op'ing.
+- **One frame no longer costs a whole-file decode** (`520ae44`). Previewing
+  one frame of the 1442-sub-frame VAREX file (23.9 GB) read all of it: ~230 s
+  and ~1.9 GB to draw 33 MB, paid again by every parallel worker. Now ~4 s /
+  415 MB. This is the second half of the fix whose first half (counting
+  without decoding) landed earlier.
+- **`kill -USR1` dumps every thread's stack** to `~/midas_gui_hang.log`
+  (`4c7b776`) — a freeze leaves no traceback, and that is exactly when the app
+  can no longer be asked anything.
+
+**Verified:** full suite 1,149 collected, 2 failed / 3 skipped — the same
+known pair (`test_pva_live_source_roundtrip`, a system `libstdc++` CXXABI
+mismatch, and `test_apply_project_calibration_single_detector`, the pyqtgraph
+teardown SIGABRT) and the same three skips. Four new test files, ~890 lines.
+**Not verified with eyes on it:** the two new readouts have not been seen
+rendered — they are pinned by `tests/test_omega_readout.py` at the text level
+only, and the exact wording in a narrow panel wants a look.
 
 **2026-09-29 — Upstream's cake HDF5, merged.** `cc1045d` (merge) and
 `43c672c` (docs), pushed. Upstream's two 2026-09-28 Batch Integrate commits —
@@ -79,10 +126,11 @@ is no longer true).
   `ome_start + (idx*ome_sum + (ome_sum−1)/2)*ome_step`, and to the mean of the
   collapsed window when the loader combined everything into one frame.
   `cake_params.omega_for_window`/`omega_series` own it.
-- The raw indices are **global across the run**, from new
-  `raw_window_for_index` methods on `_HDF5StackGlobSource` and
-  `_ChunkCombinedFileSource` (sources without one fall back to `(i, i)`), so
-  Batch-Parallel chunks agree on ω.
+- The raw indices come from new `raw_window_for_index` methods on
+  `_HDF5StackGlobSource` and `_ChunkCombinedFileSource` (sources without one
+  fall back to `(i, i)`). **Superseded the same day** — they were global
+  across the run; `236ffa0` makes the HDF5 one restart at every file. See the
+  entry above.
 - Two new inputs in the Cake parameters dialog, outside the nine CSV columns:
   an editable **omega channel** combo (blank = the computed ramp; populated
   from the loaded HDF5 by new `helpers.list_h5_1d_datasets`) and an
@@ -108,10 +156,10 @@ exactly `CAKE_KEYS`. Note `test_app_builds_offscreen`, which CLAUDE.md lists as
 a third known failure, passed both times here — its tab-count assertion depends
 on the active profile's tab set, so CLAUDE.md was left as-is rather than
 rewritten off two green runs.
-**Not verified with eyes on it:** still no live X11 session. Wants a real 20-ID
-rotation scan — load its cake CSV, confirm `OME_START`/`OME_STEP` no longer
-read "not applied", run a short batch with zarr on, check `/Omegas` in the Zarr
-Viewer, then tick the override and confirm every frame reports the one angle.
+**Verified live 2026-09-29:** a real run's zarr `/Omegas` are the angles
+expected. Not walked through: the averaged/summed override (every frame
+reporting the one run-wide angle) and a measured ω channel picked from the
+combo — both still only pinned by tests.
 
 **2026-09-28 — The source HDF5's `instrument/` tree reaches the zarr; an ✕
 closes any optional tab.** Three commits, all local, nothing pushed.
