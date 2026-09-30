@@ -441,6 +441,8 @@ class MainWindow(QtWidgets.QMainWindow):
             idx = self._tabs.addTab(widget, f"{prefix}  {name}")
             if always:
                 self._strip_close_button(idx)
+            else:
+                self._attach_close_button(idx, name)
             i += 1
         # keep the previously-selected tab focused if it is still shown
         idx = self._tabs.indexOf(current) if current is not None else -1
@@ -456,6 +458,61 @@ class MainWindow(QtWidgets.QMainWindow):
         for side in (QtWidgets.QTabBar.RightSide, QtWidgets.QTabBar.LeftSide):
             if bar.tabButton(index, side) is not None:
                 bar.setTabButton(index, side, None)
+
+    # Flat, borderless, and coloured from the palette so it reads the same on
+    # whatever style the desktop supplies. Kept muted until hover so a row of
+    # them doesn't compete with the tab labels for attention.
+    _CLOSE_BTN_QSS = (
+        "QToolButton { border: none; background: transparent; padding: 0px;"
+        " color: palette(mid); font-size: 12px; font-weight: bold; }"
+        "QToolButton:hover { color: palette(highlight); }"
+        "QToolButton:pressed { color: palette(bright-text); }"
+    )
+
+    def _attach_close_button(self, index: int, name: str) -> None:
+        """Put our own ✕ on an optional tab, replacing the style's close icon.
+
+        With ``setTabsClosable(True)`` alone, Qt draws whatever pixmap the
+        active style supplies for ``SP_TabCloseButton``. On this desktop that
+        comes out as a heavy angular mark that doesn't read as "close" at tab
+        size. A text ✕ in a flat QToolButton looks the same on every style
+        and at every DPI, for the cost of one small widget per optional tab.
+
+        The click closes by NAME, not by the index passed in here:
+        ``apply_tab_visibility`` rebuilds the whole bar, so an index baked into
+        the connection goes stale as soon as any other tab is shown or hidden.
+        It is also deferred a tick — handling it inline would have
+        ``apply_tab_visibility`` delete this very button while its own
+        ``clicked`` signal is still being emitted."""
+        bar = self._tabs.tabBar()
+        side = bar.style().styleHint(
+            QtWidgets.QStyle.SH_TabBar_CloseButtonPosition, None, bar)
+        try:
+            side = QtWidgets.QTabBar.ButtonPosition(side)
+        except Exception:
+            side = QtWidgets.QTabBar.RightSide
+        btn = QtWidgets.QToolButton(bar)
+        btn.setText("\u2715")
+        btn.setToolTip(f"Close {name}  \u2014  turn it back on in Preferences \u25b8 Tabs")
+        btn.setAutoRaise(True)
+        btn.setFocusPolicy(QtCore.Qt.NoFocus)
+        btn.setCursor(QtCore.Qt.ArrowCursor)
+        btn.setFixedSize(14, 14)
+        btn.setStyleSheet(self._CLOSE_BTN_QSS)
+        btn.clicked.connect(
+            lambda _checked=False, n=name: QtCore.QTimer.singleShot(
+                0, lambda: self._close_optional_tab_by_name(n)))
+        self._strip_close_button(index)
+        bar.setTabButton(index, side, btn)
+
+    def _close_optional_tab_by_name(self, name: str) -> None:
+        """Hide the optional tab called ``name``. See ``_close_optional_tab``."""
+        always = next((a for _w, n, a in self._tab_specs if n == name), True)
+        if always:
+            return
+        remaining = [n for n in getattr(self, "_visible_optional", []) if n != name]
+        self.apply_tab_visibility(remaining)
+        self._persist_visible_tabs(remaining)
 
     def _close_optional_tab(self, index: int) -> None:
         """Hide the optional tab whose ✕ was clicked, and remember the choice.
@@ -475,9 +532,7 @@ class MainWindow(QtWidgets.QMainWindow):
         name, always = match
         if always:
             return
-        remaining = [n for n in getattr(self, "_visible_optional", []) if n != name]
-        self.apply_tab_visibility(remaining)
-        self._persist_visible_tabs(remaining)
+        self._close_optional_tab_by_name(name)
 
     def _persist_visible_tabs(self, visible) -> None:
         """Write the optional-tab set to the active profile's ``ui.visible_tabs``

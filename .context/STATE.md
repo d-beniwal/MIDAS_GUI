@@ -36,6 +36,34 @@ Open follow-ups, none blocking:
 
 ## Recently completed
 
+**2026-09-28 — The source HDF5's `instrument/` tree reaches the zarr; an ✕
+closes any optional tab.** Three commits, all local, nothing pushed.
+
+- `7414502` — every optional tab gets an ✕ that is the same act as unchecking
+  it in Preferences ▸ Tabs (widget kept, choice persisted to the active
+  profile); the four pinned tabs have theirs stripped. Same commit wrote down
+  what GSAS-II's importer *actually* reads from a MIDAS zarr and corrected a
+  factually wrong claim in `gsas_export.py`'s docstring about the sidecar
+  convention.
+- `35a7b8b` — new `midas_gui/h5_metadata.py` copies `instrument/` +
+  `active_instrument/` out of the source HDF5 and into the finished
+  `.zarr.zip`, wholesale, from both writers (Batch Integrate and the GSAS-II
+  export, the latter rebuilding the source from the attempt's recorded
+  `src_cfg`). `provenance.rewrite_zip`/`stamp_extracted` factored out so the
+  copy and the provenance stamp share one extract/repack pass.
+  **Costs ~0.15 s and ~130 KiB per output frame** — see DECISIONS for why
+  there is deliberately no opt-out, and what the cheapest one would be if the
+  cost turns out to bite on a long scan.
+
+**Verified:** full suite green apart from the two known pre-existing failures
+(`test_pva_live_source_roundtrip`, the system libstdc++ CXXABI mismatch; and
+`test_apply_project_calibration_single_detector`, the pyqtgraph teardown
+SIGABRT). New tests: `tests/test_h5_metadata_copy.py` (+7),
+`tests/test_zarr_layout_parity.py` (+1 cross-writer instrument-tree test),
+`tests/test_smoke.py` (+3 tab-close tests).
+**Not verified with eyes on it:** no live X11 session — the ✕ and the
+enriched Zarr Viewer tree still want a look on a real run.
+
 **2026-09-26 — Batch Integrate: "stride" replaced by unified "Combine
 sub-frames" (HDF5 + TIFF alike).** `DataLoaderPanel`'s start/end/stride +
 HDF5-only "Combine sub-frames" consolidated into one control: stride is gone

@@ -49,3 +49,38 @@ def parse_cake_csv(path: str) -> Optional[dict]:
         return d if d else None
     except Exception:
         return None
+
+
+def write_cake_csv(path: str, values: dict) -> None:
+    """Write a cake_parameters CSV: header row + one data row, all nine
+    ``CAKE_KEYS`` in order.
+
+    Deliberately the same shape mpe_wf's own editor produces (a
+    ``csv.DictWriter`` over its ``PARAMS`` keys, ``writeheader()`` then one
+    row, opened ``"w"``), so a file written here is interchangeable with one
+    written there — this app can only claim to speak the format if the round
+    trip goes both ways.
+
+    Every key is written, defaulting to ``0``: mpe_wf's editor refuses an
+    empty field on save and its reader would turn a blank cell into a
+    ``ValueError``, so an omitted key has to become a number rather than an
+    empty string. Values go through ``%g``, which keeps ``1.0`` as ``1`` and
+    ``-180.0`` as ``-180``, matching the hand-written files in circulation
+    rather than decorating them with trailing zeros.
+
+    Overwrites: ``parse_cake_csv`` reads the *last* data row precisely so a
+    file can be appended to as a running log, but the mpe_wf editor rewrites
+    rather than appends, and a config the user just saved should read back as
+    what they saved.
+    """
+    row = {}
+    for key in CAKE_KEYS:
+        v = values.get(key, 0)
+        try:
+            row[key] = "%g" % float(v)
+        except (TypeError, ValueError):
+            row[key] = "0"
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(CAKE_KEYS))
+        writer.writeheader()
+        writer.writerow(row)

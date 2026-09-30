@@ -242,3 +242,60 @@ def test_parse_cake_csv_returns_none_when_unusable(tmp_path, content):
 def test_parse_cake_csv_returns_none_for_a_missing_path(tmp_path):
     assert cake_params.parse_cake_csv(str(tmp_path / "nope.csv")) is None
     assert cake_params.parse_cake_csv("") is None
+
+
+# ── cake_params.write_cake_csv ───────────────────────────────────────────────
+
+def test_write_cake_csv_round_trips_every_key(tmp_path):
+    p = tmp_path / "cake_parameters.csv"
+    values = {"R_MIN": 10.0, "R_MAX": 2032.0, "R_STEP": 1.5,
+              "ETA_MIN": -180.0, "ETA_MAX": 90.0, "ETA_STEP": 5.0,
+              "OME_SUM": 10.0, "OME_START": 0.25, "OME_STEP": 0.1}
+    cake_params.write_cake_csv(str(p), values)
+    back = cake_params.parse_cake_csv(str(p))
+    assert back == values
+
+
+def test_write_cake_csv_matches_the_mpe_wf_column_layout(tmp_path):
+    """The compatibility assertion: a plain ``csv.DictReader`` — which is what
+    mpe_wf's own tools use — sees exactly ``CAKE_KEYS``, in order, in one data
+    row. Our reader is deliberately lenient (case-insensitive, last row wins);
+    theirs is not, so reading it back with ours would prove nothing."""
+    import csv as _csv
+    p = tmp_path / "cake_parameters.20ide.s20varex2.csv"
+    cake_params.write_cake_csv(str(p), {k: 1 for k in cake_params.CAKE_KEYS})
+    with p.open(newline="") as f:
+        reader = _csv.DictReader(f)
+        rows = list(reader)
+    assert tuple(reader.fieldnames) == cake_params.CAKE_KEYS
+    assert len(rows) == 1
+
+
+def test_write_cake_csv_defaults_missing_keys_to_zero(tmp_path):
+    """Not an empty cell: mpe_wf's reader turns a blank into a ValueError and
+    its editor refuses to save one, so an omitted key has to be a number."""
+    p = tmp_path / "c.csv"
+    cake_params.write_cake_csv(str(p), {"R_MIN": 5.0})
+    assert p.read_text().splitlines()[1] == "5,0,0,0,0,0,0,0,0"
+    assert cake_params.parse_cake_csv(str(p))["OME_STEP"] == 0.0
+
+
+def test_write_cake_csv_writes_whole_numbers_without_a_decimal_point(tmp_path):
+    """``%g``, matching the hand-written files already in circulation rather
+    than decorating 1.0 into 1.000000."""
+    p = tmp_path / "c.csv"
+    cake_params.write_cake_csv(
+        str(p), {"R_MIN": 0.0, "R_MAX": 2032.0, "R_STEP": 1.0,
+                 "ETA_MIN": -180.0, "ETA_MAX": 180.0, "ETA_STEP": 5.0,
+                 "OME_SUM": 10, "OME_START": 0, "OME_STEP": 0})
+    assert p.read_text().splitlines()[1] == "0,2032,1,-180,180,5,10,0,0"
+
+
+def test_write_cake_csv_overwrites_rather_than_appends(tmp_path):
+    """``parse_cake_csv`` reads the last data row so a file *can* be a running
+    log, but a config the user just saved must read back as what they saved."""
+    p = tmp_path / "c.csv"
+    cake_params.write_cake_csv(str(p), {"R_MIN": 1.0})
+    cake_params.write_cake_csv(str(p), {"R_MIN": 2.0})
+    assert len(p.read_text().strip().splitlines()) == 2
+    assert cake_params.parse_cake_csv(str(p))["R_MIN"] == 2.0

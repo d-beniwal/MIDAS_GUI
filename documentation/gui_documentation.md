@@ -2072,6 +2072,49 @@ parameter grid alongside a note line reporting that source (or any
 file-read error) — never just the note on its own. Hydra mode has the same
 popup per panel, next to each `ge{n}` card's calibration-source radios.
 
+### Cake parameters… (middle, under "View calibration")
+
+A **Cake parameters…** button opens a small editor holding all nine columns
+of an `mpe_wf_saxs_waxs`-style `cake_parameters` CSV in one place, with
+**Load CSV… / Save CSV… / Apply / Close**. Seven of them are fields you
+already have elsewhere on this tab, gathered together:
+
+| CSV column | Where it otherwise lives |
+|---|---|
+| `R_MIN` / `R_MAX` / `R_STEP` | **R bins…** (Integration → Bin type) |
+| `ETA_MIN` / `ETA_MAX` / `ETA_STEP` | **Azimuthal bins…** |
+| `OME_SUM` | the data loader's **Combine sub-frames** |
+| `OME_START` / `OME_STEP` | nowhere — see below |
+
+Editing a value here or in the corresponding popup is the same setting either
+way; **Apply** is what pushes the editor's numbers back onto the tab, so you
+can open it, try values, and close without having changed the next run. The
+`R bins…` / `Azimuthal bins…` popups stay for adjusting one axis mid-run;
+this is the view of the whole file at once.
+
+`OME_START` and `OME_STEP` are omega-series bookkeeping for mpe_wf's own
+integration backend and have no counterpart in `midas_integrate_v2` — they are
+carried through Load and Save (and through Save/Load GUI State) so a file
+round-trips intact, and are **applied to nothing** here.
+
+**Save** always goes through a Save-As dialog, pre-filled with
+`<expid>_bc/cake_parameters.<beamline>.<detector>.csv` — mpe_wf's own filename
+convention, with the beamline token taken from the active profile (`20-ID-E` →
+`20ide`) and the detector from the loaded source path. mpe_wf writes that path
+silently because it runs as `S20IDUSER`; this GUI runs as you, so it shows the
+path before writing into a shared beamline directory. The suggestion only ever
+names a directory that already exists, falling back through the Output
+directory field and the source folder to your home directory — nothing is
+created until you save. The file itself is the same nine-column, header-plus-
+one-row layout mpe_wf's tools read, so it is interchangeable with one written
+there.
+
+Immediately below the button, a muted one-line summary shows the cake
+parameters currently in force (R range/bin, η range/bin, Q output range when
+Q-uniform bins are on, and the sub-frame sum when it's greater than 1),
+wherever they came from — CSV, typed by hand, restored with a project, or
+auto-filled.
+
 ### Integration
 | Field | Description |
 |---|---|
