@@ -1385,6 +1385,13 @@ class BatchWorker(QtCore.QThread):
             # worker sees only its own chunk, and two chunks that each
             # averaged over their own slice would report different angles for
             # what the user said was one averaged exposure.
+            #
+            # On a multi-file pick these are file-LOCAL indices (each file
+            # restarts at OME_START — see omega_channel_window), so the
+            # "run-wide" middle is the middle of the local index range. That
+            # is the right answer for the single-file, single-exposure case
+            # this override exists for, and there is no better one for a
+            # selection whose files each own a separate rotation.
             try:
                 n_total = int(source.n_frames)
             except Exception:
@@ -1402,11 +1409,11 @@ class BatchWorker(QtCore.QThread):
                 failed = []
 
                 def _measured(abs_i):
-                    # File-LOCAL window: a measured omega channel is a 1-D
-                    # dataset stored per file, indexed from 0 in each, so the
-                    # global window the computed ramp uses would read the
-                    # wrong entries (or off the end) in every file but the
-                    # first.
+                    # The same file-local window the computed ramp uses
+                    # (see omega_channel_window) — a measured omega channel
+                    # is a 1-D dataset stored per file, indexed from 0 in
+                    # each, and the ramp was aligned to that rather than the
+                    # other way round. What this call adds is the file.
                     try:
                         path, lo, hi = local_fn(abs_i)
                         arr = cache.get(path)
@@ -2218,16 +2225,23 @@ class _ChunkCombinedFileSource:
         return f"{group[0].stem}.frame_{start}_{start + len(group) - 1}"
 
     def raw_window_for_index(self, idx: int) -> tuple:
-        """Inclusive, global, 0-based raw-frame range output frame ``idx``
-        was built from — what ``cake_params.omega_for_window`` needs to turn
-        OME_START/OME_STEP into an angle.
+        """Inclusive, 0-based raw-frame range output frame ``idx`` was built
+        from, counted across the whole selection — what
+        ``cake_params.omega_for_window`` needs to turn OME_START/OME_STEP
+        into an angle.
 
         A TIFF-family file holds exactly one raw frame, so the "raw index"
         of a file is just its position in ``paths``, and chunking groups
-        whole files: the window is the chunk's own file-index range. Already
-        global, because ``paths`` is this source's entire (already start/end
-        filtered) list and chunk 0 starts at ``paths[0]`` — see the class
-        docstring."""
+        whole files: the window is the chunk's own file-index range.
+
+        Note this counts across the whole selection, where
+        ``_HDF5StackGlobSource`` restarts at every file. The two are not
+        inconsistent — the rule in both is that ω is measured from raw
+        sub-frame 0 of the rotation. An HDF5 sub-frame stack IS one
+        rotation, whereas one-frame-per-file data only becomes a rotation as
+        a series, so here the selection is the rotation and ``paths[0]`` is
+        its start (``paths`` is already the start/end filtered list — see the
+        class docstring)."""
         group = self._group(idx)
         if not group:
             raise IndexError(idx)
@@ -2601,46 +2615,35 @@ class _HDF5StackGlobSource:
             remaining -= n_here
         raise IndexError(idx)
 
-    def raw_window_for_index(self, idx: int) -> tuple:
-        """Inclusive, GLOBAL, 0-based raw sub-frame range combined frame
-        ``idx`` was built from — what ``cake_params.omega_for_window`` needs
-        to turn OME_START/OME_STEP into an angle.
-
-        ``_chunk_range`` already answers this per file, in that file's own
-        absolute (unfiltered) raw indices; all this adds is the running
-        offset of every preceding file's TRUE raw count, so a scan spread
-        over several files keeps one continuous rotation ramp instead of
-        restarting at OME_START in every file.
-
-        Counting from the true raw index 0 — not from the first frame this
-        run happens to integrate — is what makes a ``frame_start`` filter
-        SHIFT the angles rather than rebase them: OME_START is the angle of
-        raw sub-frame 0 of the acquisition, and skipping the first ten raw
-        frames does not move where the rotation began. It is also why this
-        is safe in Batch-Parallel mode, where each chunk worker sees only
-        its own slice: the index is absolute, so two workers cannot disagree
-        about a frame's angle."""
-        self._ensure_stats()
-        offset = 0
-        remaining = idx
-        for i in range(len(self._paths)):
-            n_here = self._counts[i]
-            if remaining < n_here:
-                start, end = self._chunk_range(remaining, self._raw_ns[i])
-                return offset + start, offset + end
-            remaining -= n_here
-            offset += self._raw_ns[i]
-        raise IndexError(idx)
-
     def omega_channel_window(self, idx: int) -> tuple:
-        """``(path, lo, hi)`` — the FILE-LOCAL inclusive raw range for
-        combined frame ``idx``, and the file it is in.
+        """``(path, lo, hi)`` — the inclusive, FILE-LOCAL, 0-based raw
+        sub-frame range combined frame ``idx`` was built from, and the file
+        it came from.
 
-        The global window ``raw_window_for_index`` returns is the right
-        thing for a computed OME_START/OME_STEP ramp, and the wrong thing
-        for a measured omega channel: such a channel is a 1-D dataset
-        stored per file, indexed from 0 in each, so it has to be read with
-        file-local indices. Same walk, minus the offset."""
+        This is the one rotation window in this class: both consumers of an
+        angle go through it. ``_chunk_range`` answers it per file, in that
+        file's own absolute (unfiltered) raw indices, so the
+        ``raw_start``/``raw_end`` filter SHIFTS the angles rather than
+        rebasing them — OME_START is the angle of raw sub-frame 0 of the
+        file, and skipping the first ten sub-frames does not move where that
+        file's rotation began.
+
+        **Each file restarts at OME_START.** One HDF5 sub-frame stack is one
+        rotation, so the index is deliberately local and the walk carries no
+        cumulative offset. It used to: ``raw_window_for_index`` added every
+        preceding file's raw count to make one continuous ramp across a
+        multi-file pick, which meant the computed OME_START/OME_STEP ramp and
+        a MEASURED omega channel — a 1-D dataset stored per file, indexed
+        from 0 in each, which therefore has no choice but to be file-local —
+        ran in two different coordinate systems, and that a file-number
+        filter silently rebased the ramp (the dropped files were gone before
+        this class saw them, so their sub-frames could not be counted).
+        One window removes both discrepancies.
+
+        Still safe in Batch-Parallel mode, where each chunk worker sees only
+        its own slice: the window is a pure function of ``idx`` and the
+        header counts, both identical in every worker, so two workers cannot
+        disagree about a frame's angle."""
         self._ensure_stats()
         remaining = idx
         for i, p in enumerate(self._paths):
@@ -2650,6 +2653,17 @@ class _HDF5StackGlobSource:
                 return str(p), start, end
             remaining -= n_here
         raise IndexError(idx)
+
+    def raw_window_for_index(self, idx: int) -> tuple:
+        """The same window as ``omega_channel_window``, without the file —
+        what ``cake_params.omega_for_window`` needs to turn OME_START/
+        OME_STEP into an angle.
+
+        Defined in terms of it rather than repeating the walk: the computed
+        ramp and a measured channel must index the same axis, and the surest
+        way to keep them doing so is to leave only one place that decides
+        what the axis is."""
+        return self.omega_channel_window(idx)[1:]
 
     def metadata_for_index(self, idx: int) -> dict:
         """Chunk-mean metadata (Temperature/Pressure/StorageRing current)

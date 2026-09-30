@@ -32,6 +32,53 @@ aid must never be the reason startup fails.
 adding a dev tool to a beamline environment mid-session is a bigger change
 than eleven lines in the launcher.
 
+## 2026-09-29 — ω restarts at every file, and both ω paths share one window
+
+Reverses the origin rule set when per-frame ω landed a few days earlier. The
+computed ramp counted raw sub-frames **globally** across a multi-file pick, so
+file 2 continued file 1's rotation. The argument for that was continuity: a
+scan split across files is one sweep, and restarting the count would make two
+files look like two sweeps at the same angles.
+
+Two things were wrong with it.
+
+*It disagreed with the measured channel.* `_omega_resolver`'s `_measured`
+branch reads a 1-D omega dataset **stored inside each file**, indexed from 0
+in each, so it has no choice but file-local indices. The ramp therefore ran in
+a different coordinate system from the channel it is supposed to be the
+fallback for — documented on both sides as correct, which is how it survived.
+
+*And the global count was not even reliable.* `_filter_paths_by_frame_number`
+drops files **before** `_HDF5StackGlobSource` is constructed, so the cumulative
+offset could only count the files that survived the filter. Dropping leading
+files silently rebased the whole ramp — the exact behaviour the documented
+rule ("a filter shifts the angles rather than rebasing them") promised would
+not happen. The global rule could not be made true without pushing the filter
+down into the source, which is a much larger change for a worse answer.
+
+So: **ω is measured from raw sub-frame 0 of the rotation the frame came
+from.** An HDF5 sub-frame stack *is* one rotation, so each file restarts at
+`OME_START`. One-frame-per-file data (TIFF, `.ge*`) is not — a single such
+file is one exposure and only the series is a rotation — so
+`_ChunkCombinedFileSource` still counts across the selection. The two classes
+now differ on purpose, and each says why in its docstring.
+
+Mechanically the point is that there is exactly **one** window function left:
+`raw_window_for_index` returns `omega_channel_window(idx)[1:]` rather than
+repeating the walk. Two implementations that must index the same axis is the
+defect that was just removed; leaving two copies of the walk would invite it
+back. `tests/test_omega_windows.py` pins that identity for every frame across
+six chunking/filter configurations, because the failure it prevents (the two
+drifting apart) reads off the end of a later file's array instead of raising.
+
+Still correct under Batch-Parallel: the window is a pure function of the
+absolute frame index and the per-file header counts, both identical in every
+worker, so two workers cannot disagree about a frame's angle.
+
+The user chose this reading when the inconsistency was put to them. The
+GUI now states the resulting mapping rather than leaving it implicit — see
+the next entry.
+
 ## 2026-09-29 — 2D CSV wrote nothing, and reported that it had
 
 `want_cake` includes `"2d_csv" in self._fmts`, so the cake **was** computed;

@@ -98,9 +98,13 @@ def omega_for_window(start: float, step: float,
     """Rotation angle of one integrated frame, in degrees.
 
     ``raw_lo``/``raw_hi`` are the INCLUSIVE 0-based raw sub-frame indices
-    that frame was built from, counted globally from the start of the
-    acquisition (see ``workers._HDF5StackGlobSource.raw_window_for_index``).
-    The angle is the one at the middle of that window::
+    that frame was built from, counted from the start of the rotation the
+    frame belongs to — for an HDF5 sub-frame stack that is the file the
+    frame came from, each file being one rotation; for one-frame-per-file
+    data it is the whole selection (see
+    ``workers._HDF5StackGlobSource.omega_channel_window`` and
+    ``workers._ChunkCombinedFileSource.raw_window_for_index``). The angle is
+    the one at the middle of that window::
 
         omega = OME_START + mean(raw_lo … raw_hi) * OME_STEP
 

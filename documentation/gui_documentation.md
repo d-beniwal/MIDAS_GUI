@@ -2103,10 +2103,22 @@ takes a per-frame omega, so Batch Integrate turns the two into angles:
 > **ω(frame) = `OME_START` + mean(the raw sub-frame indices that frame was
 > built from) × `OME_STEP`**
 
-The raw indices are counted globally across the whole run, so a scan split
-over several files keeps rotating rather than restarting at each file, and a
-raw-frame filter shifts the angles rather than rebasing them. That one
-expression covers every case: with no combining (`OME_SUM` = 1) it is
+The raw indices are counted **from the start of the rotation the frame came
+from**, and one HDF5 sub-frame stack is one rotation — so on a multi-file pick
+each file restarts at `OME_START` rather than continuing the previous file's
+ramp. One-frame-per-file data (TIFF, `.ge*`) is the other way round: a single
+such file is not a rotation, the series is, so there the whole selection is
+counted through. A raw-frame filter *shifts* the angles rather than rebasing
+them in both cases: skipping the first ten sub-frames does not move where the
+rotation began, so the survivors keep the angles they physically had.
+
+Counting per file is also what lets the computed ramp and a **measured**
+omega channel (below) mean the same thing. A measured channel is a 1-D dataset
+stored inside each file and indexed from 0 in each, so it has no choice but to
+be file-local; the ramp is aligned to it rather than the other way round, and
+both now read the same window for a given frame.
+
+That one expression covers every case: with no combining (`OME_SUM` = 1) it is
 `OME_START + k·OME_STEP`; with `OME_SUM` = *n* it reproduces mpe_wf's own
 `ome_start + (idx·ome_sum + (ome_sum−1)/2)·ome_step` exactly; with `OME_SUM` =
 0 ("combine everything selected into one frame") it is the mean angle the

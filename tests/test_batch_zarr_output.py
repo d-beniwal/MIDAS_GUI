@@ -238,6 +238,123 @@ def test_the_omega_source_is_named_in_the_run_log(app, in_dir):
     assert "5" in line and "0.25" in line
 
 
+def _make_hdf5_stack(tmp_path, n_files=2, n_raw=6, size=64, numbered=False):
+    """``n_files`` HDF5 sub-frame stacks — the multi-file case the per-file ω
+    origin is about. ``numbered`` names them ``scan_000001.h5`` … so
+    ``frame_start``/``frame_end`` (which are FILE numbers for this source
+    type) have something to parse."""
+    h5py = pytest.importorskip("h5py")
+    rng = np.random.default_rng(1)
+    paths = []
+    for f, stem in enumerate("abcdefgh"[:n_files]):
+        p = tmp_path / (f"scan_{f + 1:06d}.h5" if numbered else f"{stem}.h5")
+        with h5py.File(p, "w") as h:
+            h.create_dataset("exchange/data",
+                             data=(rng.random((n_raw, size, size)) * 100 + 10
+                                   ).astype(np.float32))
+        paths.append(str(p))
+    return paths
+
+
+def _run_stack(app, tmp_path, fmts, *, out_dir, omega_cfg, chunk_size=2,
+               n_files=2, n_raw=6):
+    pytest.importorskip("torch")
+    pytest.importorskip("midas_integrate_v2")
+    import midas_gui.workers as wk
+    from midas_gui.helpers import _build_spec
+
+    paths = _make_hdf5_stack(tmp_path / "in", n_files=n_files, n_raw=n_raw)
+    spec = _build_spec(_tiny_calib_result(), r_bin=2.0, eta_bin=45.0)
+    worker = wk.BatchWorker(
+        spec, {"type": "hdf5_stack_glob", "paths": paths,
+               "dataset": "exchange/data", "chunk_size": chunk_size},
+        None, out_dir, fmts, "subpixel2", (None, None), None,
+        multi_azimuth=False, omega_cfg=omega_cfg)
+    results, failures = {}, []
+    worker.finished.connect(results.update)
+    worker.failed.connect(failures.append)
+    worker.run()
+    assert not failures, failures[0]
+    return results
+
+
+def test_each_hdf5_file_restarts_the_rotation_at_ome_start(app, in_dir):
+    """One HDF5 sub-frame stack is one rotation, so the second file's first
+    frame sits at OME_START again rather than continuing the first file's
+    ramp (see ``.context/DECISIONS.md``, 2026-09-29). With 6 raw sub-frames
+    per file combined 2 at a time, each file gives the same three angles.
+
+    This is the assertion a global ramp would fail: it would produce
+    5.875/6.375/6.875 for the second file."""
+    out = in_dir / "out"
+    res = _run_stack(app, in_dir, ["zarr"], out_dir=out,
+                     omega_cfg={"start": 5.0, "step": 0.25, "channel": "",
+                                "collapse": False})
+    per_file = [5.125, 5.625, 6.125]
+    assert res["omegas"] == pytest.approx(per_file * 2)
+    assert sorted(_omegas_in(out)) == pytest.approx(sorted(per_file * 2))
+
+
+def test_a_raw_sub_frame_filter_shifts_the_angles_rather_than_rebasing_them(app, in_dir):
+    """A single-file pick is where start/end filter RAW SUB-FRAMES. ω is the
+    angle of the sub-frames a frame actually holds, so dropping the first two
+    starts the series two steps in — at 5.625, not back at OME_START."""
+    pytest.importorskip("torch")
+    import midas_gui.workers as wk
+    from midas_gui.helpers import _build_spec
+
+    path = _make_hdf5_stack(in_dir / "in", n_files=1)[0]
+    spec = _build_spec(_tiny_calib_result(), r_bin=2.0, eta_bin=45.0)
+    worker = wk.BatchWorker(
+        spec, {"type": "hdf5", "path": path, "dataset": "exchange/data",
+               "chunk_size": 2, "frame_start": 2, "frame_end": 5},
+        None, in_dir / "out", ["csv"], "subpixel2", (None, None), None,
+        multi_azimuth=False,
+        omega_cfg={"start": 5.0, "step": 0.25, "channel": "",
+                   "collapse": False})
+    res, failures = {}, []
+    worker.finished.connect(res.update)
+    worker.failed.connect(failures.append)
+    worker.run()
+    assert not failures, failures[0]
+    assert res["omegas"] == pytest.approx([5.625, 6.125])
+
+
+def test_dropping_leading_files_does_not_move_the_surviving_angles(app, in_dir):
+    """On a multi-file pick start/end are FILE numbers, and the files are
+    dropped before the ω code ever sees them. Under the old global ramp the
+    survivors were then renumbered from zero, so filtering out file 1
+    silently moved file 2's angles down onto file 1's — the exact thing the
+    documented rule said could not happen. Per-file origin makes the
+    survivors' angles independent of what was filtered out."""
+    pytest.importorskip("torch")
+    import midas_gui.workers as wk
+    from midas_gui.helpers import _build_spec
+
+    paths = _make_hdf5_stack(in_dir / "in", n_files=2, numbered=True)
+    spec = _build_spec(_tiny_calib_result(), r_bin=2.0, eta_bin=45.0)
+
+    def run(**filt):
+        worker = wk.BatchWorker(
+            spec, {"type": "hdf5_stack_glob", "paths": paths,
+                   "dataset": "exchange/data", "chunk_size": 2, **filt},
+            None, None, [], "subpixel2", (None, None), None,
+            multi_azimuth=False,
+            omega_cfg={"start": 5.0, "step": 0.25, "channel": "",
+                       "collapse": False})
+        res, failures = {}, []
+        worker.finished.connect(res.update)
+        worker.failed.connect(failures.append)
+        worker.run()
+        assert not failures, failures[0]
+        return res["omegas"]
+
+    both = run()
+    second_only = run(frame_start=2, frame_end=2)
+    assert both == pytest.approx([5.125, 5.625, 6.125] * 2)
+    assert second_only == pytest.approx([5.125, 5.625, 6.125])
+
+
 def test_the_finished_payload_carries_one_omega_per_frame(app, in_dir):
     """``frame_ids`` and ``omegas`` are read positionally against each other
     downstream (the combined HDF5, the logged attempt, the GSAS-II export),
