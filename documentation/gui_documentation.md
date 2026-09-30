@@ -2327,6 +2327,19 @@ CSV, XYE ▾") so the selection is visible without opening the menu — the
 checkboxes themselves no longer take up permanent space in the Output
 card.
 
+**2D-CSV (η×R cake) — one file per frame, in either mode.** Each frame's
+whole cake is written to `2d_csv/<frame>_cake.csv`: a header row of R values
+and one row per η bin, prefixed by that bin's centre angle. It is a picture of
+the cake rather than a lineout, so **Multi-azimuth output** does not change
+it — that checkbox controls whether the *other* formats fan out into one file
+per η bin (`<frame>_etaNNN.<fmt>`), and 2D-CSV is written the same way with it
+on or off. (Until 2026-09-29 it was written only with multi-azimuth on: with
+the box off the run produced an empty `2d_csv/` folder while still reporting a
+file — under the wrong name at that. If you have a run whose `2d_csv/` folder
+is empty, that is the bug, and re-running is all that is needed.) The one case
+where it genuinely cannot be produced is **Save** after a 1-D run, which is
+explained above.
+
 **HDF5 in multi-azimuth mode — the cake layout.** With **Multi-azimuth
 output (cake)** on, the combined HDF5 is written by `midas_gui/cake_hdf5.py`
 instead of `midas_integrate_v2.write_h5`, which only accepts a 1-D profile per

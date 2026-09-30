@@ -366,7 +366,16 @@ def write_profile(base, fmt, r_px, prof, sigma, lsd, px, wl,
         m.write_fxye(str(base) + ".fxye", r_axis=two_theta_cd, intensity=prof, sigma=sig)
     elif fmt == "dat":
         m.write_dat(str(base) + ".dat", q_axis_invA=q, intensity=prof, sigma=sig)
-    elif fmt == "2d_csv" and cake_2d is not None:
+    elif fmt == "2d_csv":
+        if cake_2d is None:
+            # Was a silent no-op, and cost a real run its 2D CSVs: the caller
+            # gated the cake on multi-azimuth mode, so with that off nothing
+            # was written while the path was still reported as written. The
+            # cake is always available here (see BatchWorker's want_cake,
+            # which includes "2d_csv"), so reaching this is a bug in the
+            # caller and says so rather than producing an empty output dir.
+            raise ValueError("2d_csv output needs the (eta, R) cake; "
+                             "none was passed to write_profile")
         out_path = str(base) + "_cake.csv"
         n_eta, n_r = cake_2d.shape
         eta_vals = eta_axis if eta_axis is not None else np.arange(n_eta, dtype=float)
@@ -379,22 +388,36 @@ def write_profile(base, fmt, r_px, prof, sigma, lsd, px, wl,
 
 
 def write_frame_profiles(base, file_fmts, r_px, prof, sigma, lsd, px, wl,
-                         cake_2d=None, cake_sigma=None, eta_axis=None) -> list:
+                         cake_2d=None, cake_sigma=None, eta_axis=None,
+                         per_eta=None) -> list:
     """Write one frame's 1-D output file(s) in every format in ``file_fmts``
-    (``"2d_csv"``/``"h5"`` excluded — callers handle those separately).
+    (``"h5"`` excluded — callers handle that separately).
 
-    Without ``cake_2d``: writes ``prof``/``sigma`` once, as always.
+    ``per_eta`` (multi-azimuth/"cake" mode — see the "Multi-azimuth output
+    (cake)" checkbox in Batch Integrate) writes one file *per azimuthal (η)
+    bin*, named ``<base>_etaNNN.<fmt>``, each a genuine 1-D lineout for that
+    sector; ``prof``/``sigma`` (the η-collapsed full-circle profile) are not
+    written in that mode. Otherwise ``prof``/``sigma`` are written once per
+    format, as always.
 
-    With ``cake_2d``/``cake_sigma`` (multi-azimuth/"cake" mode — see the
-    "Multi-azimuth output (cake)" checkbox in Batch Integrate): writes one
-    file *per azimuthal (η) bin* instead, named ``<base>_etaNNN.<fmt>``, each
-    a genuine 1-D lineout for that sector — ``prof``/``sigma`` (the
-    η-collapsed full-circle profile) are not written in this mode. ``"2d_csv"``
-    in ``file_fmts`` is honored separately as the one whole-cake file, unaffected.
-    Returns the list of paths written.
+    ``"2d_csv"`` is the one whole-cake file, ``<base>_cake.csv``, and is
+    written in BOTH modes whenever ``cake_2d`` is supplied — it is a picture
+    of the cake, not a lineout, so per-η fan-out does not apply to it.
+
+    ``per_eta`` defaults to ``cake_2d is not None and cake_sigma is not
+    None``, which is what the presence of a cake used to mean on its own.
+    That overload is why 2D CSV silently produced nothing: a caller with a
+    cake but multi-azimuth off had no way to say "write the cake file, don't
+    fan out", so it passed no cake at all and ``2d_csv`` fell through to
+    nothing while still being counted as written. Pass ``per_eta``
+    explicitly and the two decisions stay separate. Returns the list of paths
+    actually written.
     """
     paths = []
-    if cake_2d is not None and cake_sigma is not None:
+    have_cake = cake_2d is not None
+    if per_eta is None:
+        per_eta = have_cake and cake_sigma is not None
+    if per_eta and have_cake and cake_sigma is not None:
         n_eta = cake_2d.shape[0]
         eta_ax = eta_axis if eta_axis is not None else np.arange(n_eta, dtype=float)
         for k in range(n_eta):
@@ -410,6 +433,18 @@ def write_frame_profiles(base, file_fmts, r_px, prof, sigma, lsd, px, wl,
             paths.append(str(base) + "_cake.csv")
     else:
         for f in file_fmts:
+            if f == "2d_csv":
+                # Skipped, not silently mis-reported, when there is genuinely
+                # no cake to write (write_all_profiles' in-memory Save path
+                # for a 1-D run — it excludes the format itself and logs).
+                if not have_cake:
+                    continue
+                # eta_axis may be None; write_profile falls back to bin
+                # indices for it, the same as in the fan-out branch.
+                write_profile(Path(base), "2d_csv", r_px, prof, sigma,
+                              lsd, px, wl, cake_2d=cake_2d, eta_axis=eta_axis)
+                paths.append(str(base) + "_cake.csv")
+                continue
             write_profile(Path(base), f, r_px, prof, sigma, lsd, px, wl)
             paths.append(str(base) + "." + f)
     return paths
@@ -1816,9 +1851,14 @@ class BatchWorker(QtCore.QThread):
                         fmt_dir.mkdir(parents=True, exist_ok=True)
                         out_paths.extend(write_frame_profiles(
                             fmt_dir / stem, [fmt], r_ax, prof, sigma, cur_lsd, px, wl,
-                            cake_2d=(cake_2d if self._multi_azimuth else None),
-                            cake_sigma=(cake_sigma if self._multi_azimuth else None),
-                            eta_axis=eta_ax))
+                            # The cake goes over unconditionally — want_cake
+                            # already computed one whenever 2d_csv is among
+                            # the formats — and multi-azimuth decides only
+                            # whether to fan out per η. Gating the cake
+                            # itself on multi-azimuth is what made 2D CSV a
+                            # no-op with that checkbox off.
+                            cake_2d=cake_2d, cake_sigma=cake_sigma,
+                            eta_axis=eta_ax, per_eta=self._multi_azimuth))
 
             # Combined h5 output name: <original-source-stem>.<start>_<end>
             # .cake — h5 remains one file for the whole run (unlike zarr,

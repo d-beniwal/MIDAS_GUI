@@ -32,6 +32,32 @@ aid must never be the reason startup fails.
 adding a dev tool to a beamline environment mid-session is a bigger change
 than eleven lines in the launcher.
 
+## 2026-09-29 — 2D CSV wrote nothing, and reported that it had
+
+`want_cake` includes `"2d_csv" in self._fmts`, so the cake **was** computed;
+the write site then threw it away with
+`cake_2d=(cake_2d if self._multi_azimuth else None)`, `write_profile`'s
+`elif fmt == "2d_csv" and cake_2d is not None` fell through to nothing, and
+the caller appended `<base>.2d_csv` to the reported paths — a file that was
+never written, under a name that does not exist in either mode (the real one
+is `<base>_cake.csv`). A run with the format checked and multi-azimuth off
+produced an empty `2d_csv/` folder and a success message.
+
+Root cause was an overloaded flag: `cake_2d is not None` meant both "a cake is
+available" and "fan out one lineout per η bin". The Batch write site wanted
+the second gated on the checkbox and had no way to say so except by
+withholding the cake. Split into an explicit `per_eta` parameter, defaulting
+to the old `cake_2d is not None and cake_sigma is not None` so every other
+caller is untouched.
+
+`write_profile` now **raises** for `2d_csv` with no cake rather than returning
+quietly. The one legitimate cake-less caller — `write_all_profiles`, the Save
+button's in-memory path after a 1-D run — excludes the format itself and both
+call sites already log a note explaining why, so nothing reaches the raise by
+accident. A silent no-op in a writer is worth converting to a loud failure
+precisely because this one cost a real run its output without anyone noticing
+until the folder was opened.
+
 ## 2026-09-29 — Reading one frame must cost one chunk: finishing the _HDF5StackGlobSource fix
 
 `_HDF5StackGlobSource` was fixed once already, for *counting*: `n_frames`
