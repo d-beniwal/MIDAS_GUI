@@ -4363,3 +4363,34 @@ class DriftWorker(QtCore.QThread):
             self.finished.emit(traj)
         except Exception:
             self.failed.emit(traceback.format_exc())
+
+
+class SolveCellWorker(QtCore.QThread):
+    """Runs one Solve Cell pipeline stage (ingest/diamond_filter/ab_initio/
+    refine) off the GUI thread. See midas_gui/solve_cell/pipeline.py — this
+    worker is a thin dispatcher, no pipeline logic lives here."""
+    log_line = QtCore.pyqtSignal(str)
+    finished = QtCore.pyqtSignal(object)
+    failed   = QtCore.pyqtSignal(str)
+
+    def __init__(self, stage: str, cfg: dict, parent=None):
+        super().__init__(parent)
+        self._stage = stage
+        self._cfg = cfg
+
+    def run(self):
+        import sys
+        old_out, old_err = sys.stdout, sys.stderr
+        stream = _LogStream(self.log_line)
+        sys.stdout = sys.stderr = stream
+        try:
+            from midas_gui.solve_cell import pipeline
+            result = pipeline.run_stage(self._stage, self._cfg)
+            self.finished.emit(result)
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+        finally:
+            if sys.stdout is stream:
+                sys.stdout = old_out
+            if sys.stderr is stream:
+                sys.stderr = old_err

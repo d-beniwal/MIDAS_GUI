@@ -93,6 +93,10 @@ test_data/out_temp.txt
 /test_data/test_out/
 /test_data/projects/
 /test_data_bc/
+# Solve Cell tab: raw DAC frames + calibration used for local smoke-testing
+# ingest, not referenced by the committed regression tests (those point at
+# an external path) -- too large to ship (~320 MB).
+/test_data/s20idd_tz14/
 
 # Internal-only documentation (kept local, not published to GitHub)
 documentation/pdf_calculation_explained.md

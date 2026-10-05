@@ -166,11 +166,13 @@ always shown, the rest can be toggled on as you need them.
 | 8 | **Texture** | Per-ring azimuthal extraction and stereographic pole-figure projection (POPLA export) |
 | 9 | **Pump Probe** | Time-resolved (TR-XRD) delay pooling, ΔI(q, delay) heatmaps, kinetics, and mean-pattern views |
 | 10 | **Results & Export** | One-click export of calibration/mask/profiles/G(r)/pole figures + a provenance block for methods sections |
+| 11 | **Solve Cell** | Deterministic unit-cell solving from DAC diffraction frames: ingest → diamond/anvil filter → blind ab-initio indexing → free UB/cell refinement (Phase 1: single detector panel, geometry supplied directly) |
 
 > **Status:** Tabs **0–5** (Data Viewer, Mask Builder, Calibrate, Calib.
 > Refinement, Batch Integrate, Zarr Viewer) are verified and ready to use.
-> Tabs **6–10** (Corrections & Physics, PDF Analysis, Texture, Pump Probe,
-> Results & Export) are a **work in progress** and continue to be refined.
+> Tabs **6–11** (Corrections & Physics, PDF Analysis, Texture, Pump Probe,
+> Results & Export, Solve Cell) are a **work in progress** and continue to be
+> refined.
 
 The full user manual — every field, tool tip, and configuration option — is
 in [`documentation/gui_documentation.md`](documentation/gui_documentation.md)

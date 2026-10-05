@@ -113,3 +113,27 @@ numcodecs==0.15.1                # zarr's codec backend; same "already transitiv
                                   # explicit" situation as zarr above
 hdf5plugin==7.0.0
 psutil==7.2.2
+
+# ── Solve Cell tab backend (2026-10-04) ─────────────────────────────────────
+# midas-defect: raw-frame ingest (background subtraction, 3-D blob finding)
+# and detector forward/inverse geometry (pixel<->qlab<->qsample). Its own
+# pyproject.toml floor for midas-hkls is >=0.15.0 -- already satisfied by the
+# midas-hkls==0.15.0 pin above, so that pin is NOT bumped to >=0.16.0 here
+# (the original handoff doc asked for it, but every function the Solve Cell
+# tab calls -- index_ab_initio, refine_ub_from_gvectors, holohedry_from_fit,
+# to_conventional -- is confirmed present and working in 0.15.0). No numba
+# dependency at all (confirmed via pyproject.toml + source grep), and its
+# numpy>=1.20/torch>=2.0 floors are already satisfied by the pins above.
+midas-defect==0.9.0
+# midas-defect's own direct dependencies (pulled in transitively) -- pinned
+# explicitly for the same reproducibility reason as the block above.
+midas-ddd==0.1.2
+midas-diffract==0.9.0
+midas-index==0.10.0
+midas-invert==0.2.0
+# Was previously unpinned/floating in this repo (no prior pandas line here or
+# in environment.yml) -- installing midas-defect pulled latest (3.0.6) with
+# no regressions found against this repo's own test suite (pandas-touching
+# subset + full test_smoke.py, several runs). Pinned explicitly now rather
+# than left to float, matching every other dependency in this file.
+pandas==3.0.6

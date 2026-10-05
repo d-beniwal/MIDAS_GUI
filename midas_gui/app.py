@@ -75,6 +75,7 @@ from midas_gui.tab_pdf import PDFTab
 from midas_gui.tab_texture import TextureTab
 from midas_gui.tab_pumpprobe import PumpProbeTab
 from midas_gui.tab_export import ExportTab
+from midas_gui.tab_solve_cell import SolveCellTab
 from midas_gui import constants as C
 from midas_gui import project
 from midas_gui import settings
@@ -228,6 +229,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._tex_tab    = _tab(TextureTab,      "Texture")
         self._pump_tab   = _tab(PumpProbeTab,    "Pump Probe")
         self._export_tab = _tab(ExportTab,       "Results & Export")
+        self._solve_cell_tab = _tab(SolveCellTab, "Solve Cell")
 
         # All tabs are always CONSTRUCTED (cross-tab wiring below relies on the
         # attributes existing); modular visibility only controls which are ADDED to
@@ -247,6 +249,7 @@ class MainWindow(QtWidgets.QMainWindow):
             (self._tex_tab,    "Texture",           False),
             (self._pump_tab,   "Pump Probe",        False),
             (self._export_tab, "Results & Export",  False),
+            (self._solve_cell_tab, "Solve Cell",     False),
         ]
         # An ✕ on every optional tab. Closing one is the same act as unchecking
         # it in Preferences ▸ Tabs: the widget survives (cross-tab wiring holds
@@ -1425,7 +1428,7 @@ class MainWindow(QtWidgets.QMainWindow):
         live QThread at interpreter exit is a common hard-crash cause."""
         tab_attrs = ("_view_tab", "_mask_tab", "_cal_tab", "_refine_tab",
                      "_batch_tab", "_corr_tab", "_pdf_tab", "_tex_tab",
-                     "_pump_tab", "_export_tab")
+                     "_pump_tab", "_export_tab", "_solve_cell_tab")
         threads = []
         for a in tab_attrs:
             tab = getattr(self, a, None)

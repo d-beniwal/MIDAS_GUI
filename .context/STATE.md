@@ -1,13 +1,43 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-10-01 (Calibrate: ring prediction bounded by true detector coverage, not a fixed 30° — see DECISIONS)_
+_Last updated: 2026-10-04 (Solve Cell: removed the editable "Panel geometry" box and det_x/eiger_y/eiger_z — geometry now comes only from a loaded calibration file — see below and DECISIONS)_
 
 ## Now working on
 
-Nothing in progress.
+Nothing in progress. Solve Cell Phase 1 (single panel, known geometry) is
+landed, now with: per-panel UI (tabs, `PanelCard`, extensible to several
+panels), geometry sourced *only* from "Load calibration file…" (no manual
+entry — the editable Lsd/BC/tilt/wavelength/px/nrpixels/det_x/eiger_y/
+eiger_z box is gone; `geometry_cfg()` raises until a file is loaded),
+dark/bright/background/mask actually applied in `_stage_ingest` (previously
+wired in the UI but discarded), and an explicit frame-index→omega window per
+panel (replacing the old flat frame-0-is-omega_first assumption) — frames
+outside the window are excluded, not extrapolated. Phase 2+ (geometry-
+resolution tiers keyed on detector stage position, multi-panel pooling
+across panels, multi-domain separation, diagnostics suite) is open future
+work per `documentation/solve_cell_handoff.md` §10 — not started; the stage
+buttons still only ever run against the one currently-active panel tab.
 
 Open follow-ups, none blocking:
+- **Solve Cell (new, 2026-10-04)**: Phase 1 only. No raw HDF5 from the
+  reference spinel/Ge-oP32 analyses is available on this machine (lives only
+  on the beamline cluster) — the ingest stage is only smoke-tested against
+  synthetic frames, never against real raw frames end-to-end. The
+  diamond-filter/ab-initio/refine stages ARE regression-tested against real
+  spinel panel 1+2 CSVs already on disk and reproduce the known cell. A real
+  raw-frame ingest run (on the beamline machine, or with a locally copied
+  raw file) is still owed before trusting that stage on real data.
+- **Solve Cell panels (new, 2026-10-04)**: dark/bright/background correction
+  is applied via a small duplicated `_apply_stack_corrections` in
+  `solve_cell/pipeline.py` rather than importing `helpers.
+  apply_field_corrections` — deliberate, to keep the module free of
+  `midas_gui` imports (its own documented portability boundary); not yet
+  cross-checked numerically against the GUI's own `apply_field_corrections`
+  beyond the synthetic unit test. Multi-panel pooling (ingest run per panel,
+  then combined downstream) is still Phase 2 — today each of Diamond
+  Filter/Ab-initio/Refine only ever sees the single currently-active panel's
+  ingest output, even with several panel tabs configured.
 - **From junspark's own STATE.md (2026-09-29), carried forward**: `PoleFigureWorker`
   is still single-frame and takes χ/φ from its cfg — making it ω-aware across a
   series is the piece the whole omega arc (landed in this merge) exists to
@@ -39,6 +69,55 @@ Open follow-ups, none blocking:
   `git fetch origin 'refs/pull/*/head:refs/remotes/origin/pr/*'`.
 
 ## Recently completed
+
+**2026-10-04 — New "Solve Cell" tab (Phase 1): single-panel, known-geometry
+deterministic unit-cell solving.** First slice of
+`documentation/solve_cell_handoff.md`'s multi-phase build: ingest (raw
+frames → background-subtracted 3-D blobs → g-vectors, via `midas_defect`) →
+diamond/anvil 2θ-proximity filter → blind ab-initio indexing → free UB/cell
+refinement (both via `midas_hkls`). Per user decision, the pipeline logic
+lives embedded at `midas_gui/solve_cell/pipeline.py` rather than as a new
+standalone package — but that module has zero `midas_gui`/PyQt5 imports by
+design, so lifting it into a standalone `midas_solve_cell` package later is a
+plain directory move. `midas_gui/tab_solve_cell.py` (`SolveCellTab`) is the
+thin Qt frontend; `workers.SolveCellWorker` is the one-worker-per-stage
+`QThread` dispatcher (handoff §4.3's own template). Registered as a new
+optional tab (ships hidden, like Corrections/PDF/Texture/Results & Export).
+New dependency: `midas-defect==0.9.0` (pinned in requirements.txt/
+environment.yml); pulled in `pandas` as a transitive dependency that was
+previously unpinned/floating in this repo — now pinned explicitly too
+(`pandas==3.0.6`), verified against a broad pandas-touching test subset with
+no regressions found.
+
+**g-vector convention is the single most important correctness point** (see
+the pipeline module's own docstring): `midas_defect` natively produces
+`q = 2π/d`; `index_ab_initio` accepts `two_pi=True` but *always* returns
+`UB`/`cell` in `1/d` regardless of the flag; `refine_ub_from_gvectors` has
+**no** `two_pi` parameter at all and returns whatever convention its input
+carries. One conversion boundary (`_to_inverse_d`) handles this, right before
+the refine call. Caught one real bug implementing this: initially called
+`to_conventional_from_fit` (a covariance-tolerance-aware variant) instead of
+the validated reference scripts' own plain `to_conventional(fit.cell)` — the
+covariance-derived tolerance was too strict on real 2-panel spinel data and
+missed the cubic symmetry the plain default-window search correctly finds
+(reproducing the known `a≈7.9672 Å`). Fixed to match the reference exactly.
+
+**Verified:** `tests/test_solve_cell_pipeline.py` (18 tests, no Qt) includes
+real-data regression tests against the already-computed spinel panel 1 and
+panel 1+2 `spots_g*.csv` files (present locally even though the raw HDF5
+frames that produced them are not — those live only on the beamline
+cluster), reproducing the known `a≈7.9672 Å` cell within a generous band;
+`tests/test_solve_cell_ui.py` (8 tests, forked, Qt). Both green per-file.
+Full per-file sweep of touched existing files (`app.py`, `constants.py`,
+`workers.py`, `test_smoke.py` ×3, plus a pandas-touching subset: `test_
+project.py`, `test_batch_data_source.py`, `test_batch_cake_h5.py`, `test_
+batch_queue_model.py`, `test_2d_csv_output.py`, `test_queue_policy.py`,
+`test_batch_job_results.py`) green except the one known pre-existing
+`test_apply_project_calibration_single_detector` SIGABRT. `pyflakes` clean on
+every new file, zero new warnings on touched files.
+**Not verified with eyes on it beyond an offscreen screenshot:** no live run
+against real raw frames (none available locally); the GUI has not been
+driven end-to-end by a human against a real dataset.
 
 **2026-10-01 — Calibrate: predicted rings now bounded by true detector
 coverage, not a fixed 30°.** `helpers._predict_ring_radii` generated

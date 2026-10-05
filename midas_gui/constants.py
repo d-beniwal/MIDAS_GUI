@@ -259,9 +259,9 @@ DEFAULT_UI_SCALE      = 1.0           # multiplier, clamped to [0.5, 4.0] at sta
 # it is overridable via the per-user config key ``ui.visible_tabs``.
 ALWAYS_TABS = ["Data Viewer", "Mask Builder", "Calibrate", "Batch Integrate"]
 OPTIONAL_TABS = ["Calib. Refinement", "Batch Queue", "Zarr Viewer", "Corrections",
-                 "PDF Analysis", "Texture", "Pump Probe", "Results & Export"]
+                 "PDF Analysis", "Texture", "Pump Probe", "Results & Export", "Solve Cell"]
 # Optional tabs shown by default. Corrections / PDF Analysis / Texture / Results &
-# Export ship hidden (turn them on in Settings ▸ Preferences ▸ Tabs). Zarr Viewer
+# Export / Solve Cell ship hidden (turn them on in Settings ▸ Preferences ▸ Tabs). Zarr Viewer
 # ships visible, right next to Batch Integrate in app.py's _tab_specs — verified
 # live (see .context/DECISIONS.md) — but is still a toggleable OPTIONAL_TAB, not
 # one of the four hard-pinned ALWAYS_TABS, so it can still be hidden from

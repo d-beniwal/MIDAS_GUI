@@ -3,6 +3,222 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-04 (latest) — Solve Cell: "Panel geometry" box removed; geometry comes only from a loaded calibration file; det_x/eiger_y/eiger_z dropped
+
+Two related simplifications to `PanelCard` (`midas_gui/tab_solve_cell.py`),
+both user-requested after reviewing the just-landed per-panel calibration
+loader:
+
+- **The editable "Panel geometry" `QGroupBox`** (Lsd/BC_y/BC_z/ty/tz/tx/
+  wavelength/px size/nrpixels_y/nrpixels_z spinboxes) is gone. Geometry now
+  comes *only* from "Load calibration file…" — `PanelCard._geometry` is
+  `None` until a file is loaded, `geometry_cfg()` raises `RuntimeError` if
+  called before that, and `has_calibration()` lets the tab pre-flight-check
+  before running Ingest (`QtWidgets.QMessageBox.warning("No calibration
+  loaded", ...)`, same pattern as the existing "no raw data" check). The
+  loaded-file summary note (`_calib_note`) is now the only way to see the
+  loaded values — it already showed them in prose, just gained the
+  NrPixelsY/Z pair it was missing. No manual-entry fallback was requested or
+  kept — Phase 1's design is "every panel always has its own calibration
+  file," so a typed-in-geometry escape hatch would just be an unused, never-
+  validated code path.
+- **`det_x`/`eiger_y`/`eiger_z` dropped entirely** (`PanelCard.det_coords()`
+  removed; `solve_pipeline.panel_dir_name(panel_id, det_x, eiger_y, eiger_z)`
+  → `panel_dir_name(panel_id)`, output folder name
+  `panel_01_-195_10_30` → `panel_01`). These are detector **stage/motor**
+  positions, not geometry — they only have a use in the handoff's §5.1
+  Phase 2+ geometry-*resolution* tiers (tier 1: exact lookup of a stage
+  position in a ceria/LaB6 `batch_summary.csv`-style calibration table; tier
+  2: OLS regression of Lsd/BC vs. stage position when no exact anchor
+  exists; tier 3: self-calibration fallback) — i.e. they exist to let a
+  panel's geometry be *inferred* when no calibration was taken at that exact
+  position. Phase 1's actual design is "every panel always loads its own
+  full calibration file," which makes tier 1 trivially and always satisfied
+  and tiers 2/3 structurally unreachable — so the stage-position bookkeeping
+  they'd key off of has no present use. If a future phase adds a mode where
+  a panel runs *without* its own calibration file (interpolating one
+  instead), `det_x`/`eiger_y`/`eiger_z` (or whatever stage-position fields
+  that mode needs) would need to be reintroduced then, scoped to that
+  feature specifically — not kept speculatively now. `documentation/
+  solve_cell_handoff.md` is left as-is (it documents the full multi-phase
+  spec, including this now-explicitly-deferred Phase 2+ direction).
+
+**Verified**: `tests/test_solve_cell_ui.py` (17, up from 16 — added a
+dedicated "no calibration loaded" preflight-warning test, reworked 3 others
+that touched now-removed spinboxes to go through `_load_calib_file`/
+`has_calibration()`/`geometry_cfg()` instead) and `tests/test_solve_cell_
+pipeline.py` (21, `panel_dir_name` test updated to the new 1-arg signature)
+both green per-file on a clean `HOME`; `tests/test_smoke.py` unaffected
+(13/13). `pyflakes` clean on both touched files, no leftover references to
+any removed attribute (`_det_x`/`_eiger_y`/`_eiger_z`/`_lsd`/`_bcy`/`_bcz`/
+`_ty`/`_tz`/`_tx`/`_wavelength`/`_pxum`/`_nry`/`_nrz`/`det_coords` all grep
+clean). Offscreen screenshots confirm the Calibration box now reads directly
+into the Data loader with no geometry box between them, both before and
+after loading a file (the note's prose summary, including pixel dimensions,
+renders correctly).
+
+## 2026-10-04 (later) — Solve Cell: per-panel calibration-file load, real dark/bright/background/mask, frame↔omega window
+
+Four changes to the Phase 1 tab, all still single-active-panel scope (Phase 2
+multi-panel pooling untouched):
+
+- **Panel geometry is now a `PanelCard` per detector panel**
+  (`midas_gui/tab_solve_cell.py`), held in a `QTabWidget` (`self._panel_tabs`)
+  with a "+" corner button to add another and ✕ to close one (refused below
+  one panel). Mirrors `HydraCalibrationPage`'s `_cards` dict pattern
+  (`hydra_calib_page.py`). Only one panel is used today — the stage buttons
+  (Ingest/Diamond/Ab-initio/Refine) always run against
+  `self._panel_tabs.currentWidget()` — but the data model and UI are already
+  shaped for several, per the handoff's Phase 2 direction. User confirmed
+  tabs (not a list+single-editor) as the UI shape.
+- **"Load calibration file…" reuses `helpers.geometry_fields_from_file`**
+  (the same loader every other tab already uses — Calibrate, Hydra, Batch,
+  PDF, Pump Probe, Queue) rather than a new parser. `tx` stays fixed at 0 for
+  the pipeline (unchanged Phase 1 scope — handoff §5.1.1) even when the file
+  carries a non-zero value; that value is now shown read-only with a log note
+  rather than silently dropped, so a user loading a tilted-tx calibration
+  isn't misled into thinking it's in effect.
+- **Dark/Bright/Background/Mask are now actually applied.** They were always
+  present on the tab's `DataLoaderPanel` but `_stage_ingest` never read them —
+  `cfg["frames"]` was `full_stack()`'s raw output, period. Fixed by passing
+  the raw dark/bright/background 2-D fields (`loader.dark()`/`bright()`/
+  `bright_mode()`/`background()`) through `cfg["corrections"]`, applied by a
+  new `pipeline._apply_stack_corrections` **after** sentinel-pixel zeroing —
+  order matters: the raw sentinel marker (`SENTINEL = 4294967295`) must be
+  detected and zeroed before any correction arithmetic touches it, and
+  separately, routing frames through a dark/bright-corrected float32 cast
+  *before* that check breaks the sentinel's exact-integer-equality test
+  (float32 cannot represent `2**32 - 1` exactly — it rounds to `2**32`).
+  `_apply_stack_corrections` is a deliberate duplicate of
+  `midas_gui.helpers.apply_field_corrections` (same dark→bright→background→
+  clip order), not an import of it — `solve_cell/pipeline.py`'s own docstring
+  requires zero `midas_gui` imports so it stays liftable into a standalone
+  `midas_solve_cell` package by a plain directory move; importing a GUI
+  module's helper would defeat that. `loader.composite_mask()` is similarly
+  now unioned into `_stage_ingest`'s internal mask via a new
+  `mask.user_mask` cfg key.
+- **Frame↔omega mapping replaced the flat ramp.** The old
+  `omega_first_deg`/`omega_step_deg` pair assumed frame index 0 of whatever
+  was loaded was always `omega_first` — wrong whenever a loaded stack doesn't
+  start exactly at the rotation's first frame. Replaced (clean rename, no
+  back-compat alias — Phase 1 has no external consumers of the old keys
+  besides this repo's own tests) with `omega_ref_frame_idx`/`omega_ref_deg`/
+  `omega_last_frame_idx`/`omega_step_deg`: frame `omega_ref_frame_idx` is
+  defined to be at `omega_ref_deg`, stepping by `omega_step_deg`; loaded
+  frames outside `[omega_ref_frame_idx, omega_last_frame_idx]` are **excluded
+  from ingest entirely** (user-confirmed — no extrapolation), via a boolean
+  window mask applied to the raw stack before any other processing in
+  `_stage_ingest`. `summary["n_outside_omega_window"]`/`n_frames_loaded`
+  record how many were dropped, printed during a run.
+
+**Verified**: `tests/test_solve_cell_pipeline.py` (21 tests: the 2 pre-existing
+ingest tests updated to the new geometry keys, 3 new — omega-window exclusion,
+user_mask union, dark correction) and `tests/test_solve_cell_ui.py` (16 tests:
+8 new — default single panel, add/remove panel refusing-below-one,
+active-panel switch changing `_geometry_cfg()`, calibration-file load
+populating fields, non-zero-tx display-only note, bad-file error path) both
+green per-file. `pyflakes` clean on both touched files. Offscreen screenshots
+confirmed the panel tabs, the embedded Data/Dark/Bright/Background/Mask
+loader, the omega-mapping group's note, and a loaded calibration file's
+summary note all render as intended.
+**Not verified**: `_apply_stack_corrections` against real raw frames (only a
+synthetic dark-offset unit test); no live run with a real detector's raw
+dark/bright/background fields.
+
+## 2026-10-04 — Solve Cell tab, Phase 1: scope and architecture decisions
+
+Context: `documentation/solve_cell_handoff.md` specifies turning two
+already-validated interactive analyses (`spinel_DAC_solve_cell`,
+`Ge_oP32_c1_solve_cell`, at `/Users/dbeniwal/ANL-research/S3ID_data/2026-2/
+analysis/` on this machine) into a deterministic GUI pipeline. The handoff
+explicitly lists open questions not to silently guess on (§9) and proposes a
+5-phase build order (§10); user confirmed two of those before any code was
+written:
+
+1. **Backend shape: embedded in `midas_gui/`, not a standalone package** —
+   but `midas_gui/solve_cell/pipeline.py` has zero `midas_gui.*`/PyQt5
+   imports by design (only numpy/pandas/torch/midas_defect/midas_hkls/
+   stdlib), specifically so a future `midas_solve_cell` package extraction is
+   a plain directory move, not a rewrite. User's own framing: push real
+   computation into existing MIDAS packages, keep new code to the minimum
+   needed to wire them together.
+2. **Scope: Phase 1 only this round** — single detector panel, geometry
+   supplied directly (no 3-tier geometry resolution), blind ab-initio +
+   free refinement, basic result display. No multi-panel pooling, no
+   multi-domain separation, no diagnostics suite beyond refined cell +
+   holohedry verdict. Phases 2–5 are explicitly future work.
+
+**g-vector convention boundary** (handoff §5.0, confirmed by direct source
+reads of both packages before writing any pipeline code): `midas_defect`'s
+`pixel_to_qlab`/`qlab_to_qsample` produce `q = 2π/d` natively.
+`midas_hkls.ab_initio.index_ab_initio` accepts `two_pi=True` but *always*
+returns `.UB`/`.cell` in `1/d` regardless of the flag — confirmed from its
+source, not just the docstring. `midas_hkls.ub_refine.refine_ub_from_gvectors`
+has **no** `two_pi` parameter at all and returns whatever convention its
+input carries. One helper, `_to_inverse_d`, does the `g / 2π` conversion
+(and `sigma_g / 2π`) at the single point this matters: immediately before the
+refine call. Getting this wrong was the handoff's own documented
+most-common bug class (a cell wrong by exactly 2π, false triclinic verdict).
+
+**Bug caught during implementation, not before it**: the refine stage
+initially called `midas_hkls.conventional.to_conventional_from_fit` (a
+fit-covariance-aware variant) instead of the validated reference scripts'
+own plain `to_conventional(fit.cell)` call. On real 2-panel spinel data this
+produced a wrong "triclinic, no centering" verdict — the covariance-derived
+tolerance was tighter than the data could support and missed the cubic
+symmetry the plain 2%-default-window search correctly finds (reproducing
+`a≈7.9672 Å`). Lesson, stated plainly: when a newer/fancier library function
+exists alongside the one an already-validated reference pipeline actually
+calls, match the reference's own call exactly rather than assuming the newer
+one is strictly better — verify against real data before trusting either.
+Fixed by reverting to `to_conventional(fit.cell)`; both single-panel and
+2-panel real-data regression tests pass with this fix.
+
+**Diamond-line table: computed, not reused from another experiment's CSV.**
+The reference scripts filtered diamond contamination against a precomputed
+2θ-line CSV built for a *different* experiment's wavelength. This
+implementation instead computes diamond's allowed-reflection 2θ lines
+on the fly from its known cubic cell (`a=3.5667 Å`, exposed as an override)
+and the standard Fd-3m selection rule (h,k,l all odd, or all even with
+h+k+l ≡ 0 mod 4), verified against textbook lines ((111)/(220)/(311)/(400)
+allowed, (200)/(222) forbidden) and cross-checked against the real reference
+panel 1 diamond-flagged CSV (close agreement, not byte-identical — expected,
+since the reference's table came from a different wavelength's precomputed
+list). This makes the "physics only, reusable across any dataset" property
+the handoff wanted actually hold for an arbitrary wavelength, rather than
+only for the exact experiment the reference CSV was built for.
+
+**Dependency fallout: `pandas` was unpinned in this repo and nobody had
+noticed.** `grep` found no `pandas` line in `requirements.txt` or
+`environment.yml` before this change — it was only ever a transitive
+dependency of the already-pinned MIDAS backends, floating at whatever
+version happened to resolve. Installing `midas-defect==0.9.0` (whose own
+floor is `pandas>=1.5`) pulled in the current PyPI latest, **3.0.6** — a
+major version bump. Verified no regression before accepting it: a
+pandas-heavy existing-test subset (`test_project.py`, `test_batch_data_
+source.py`, `test_batch_cake_h5.py`, `test_batch_queue_model.py`,
+`test_2d_csv_output.py`, `test_queue_policy.py`, `test_batch_job_results.py`)
+plus `test_smoke.py` ×3 all green except the one known pre-existing
+`test_apply_project_calibration_single_detector` SIGABRT. Pinned explicitly
+now (`pandas==3.0.6`) in both files rather than left floating, matching this
+repo's own stated pinning discipline for every other dependency.
+**Not bumping `midas-hkls` past the already-pinned 0.15.0**: the handoff
+doc asked for `>=0.16.0`, but `midas_defect`'s own `pyproject.toml` floor is
+`>=0.15.0`, and every function Phase 1 calls (`index_ab_initio`,
+`refine_ub_from_gvectors`, `holohedry_from_fit`, `to_conventional`) is
+confirmed present and working in the installed 0.15.0 — the stricter floor
+in the handoff isn't load-bearing for anything this phase actually calls.
+
+**Testing without raw data**: the raw HDF5 frames referenced by the
+reference `panels.json` live only on the beamline cluster, not on this
+machine — confirmed by checking `raw_path` existence directly. The ingest
+stage is therefore only smoke-tested against small synthetic frame stacks
+(proves the shape/schema plumbing, not the science). The diamond-filter →
+ab-initio → refine portion *is* regression-tested against real,
+already-computed spinel panel 1 and panel 1+2 `spots_g*.csv` files that ARE
+present locally, reproducing the known `a≈7.9672 Å` cell — real-data
+coverage for most of the pipeline despite no raw-frame access.
+
 ## 2026-10-01 — Ring prediction bound by detector geometry, not a flat 30°
 
 Reported symptom: after a Calibrate fit, the image overlay and the radial
