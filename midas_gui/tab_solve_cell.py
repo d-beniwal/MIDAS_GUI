@@ -25,10 +25,19 @@ from typing import Optional
 
 import numpy as np
 from PyQt5 import QtCore, QtWidgets
-import pyqtgraph as pg
 
-from midas_gui.helpers import _fspin, _twocol, _NoScrollSpinBox
-from midas_gui.widgets import DataLoaderPanel, LogPanel
+import matplotlib
+matplotlib.use("Qt5Agg")
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas  # noqa: E402
+from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavToolbar  # noqa: E402
+from matplotlib.figure import Figure  # noqa: E402
+# matplotlib >=3.4 auto-registers the '3d' projection on import; no explicit
+# mpl_toolkits.mplot3d import needed (verified against the pinned 3.8.4).
+
+from midas_gui.helpers import (
+    _fspin, _twocol, _NoScrollSpinBox, widgets_to_dict, apply_dict_to_widgets,
+)
+from midas_gui.widgets import DataLoaderPanel, ImageViewer, LogPanel
 from midas_gui.workers import SolveCellWorker
 from midas_gui.dialogs import show_error
 from midas_gui.solve_cell import pipeline as solve_pipeline
@@ -48,6 +57,7 @@ class PanelCard(QtWidgets.QWidget):
         self.loader = DataLoaderPanel(mode="stack")
         self.loader.setMinimumWidth(200)
         self._geometry: Optional[dict] = None
+        self._calib_path: Optional[str] = None
         self._build_ui(panel_id)
 
     def _build_ui(self, panel_id: int):
@@ -100,7 +110,6 @@ class PanelCard(QtWidgets.QWidget):
         lv.addStretch(1)
 
     def _load_calib_file(self):
-        from midas_gui.helpers import geometry_fields_from_file
         from midas_gui.constants import DEFAULT_CALIB_FILE
         start = DEFAULT_CALIB_FILE if Path(DEFAULT_CALIB_FILE).exists() else ""
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -108,10 +117,18 @@ class PanelCard(QtWidgets.QWidget):
             "Calibration (*.json *.txt *.poni);;All files (*)")
         if not path:
             return
+        self._load_calib_from_path(path)
+
+    def _load_calib_from_path(self, path: str) -> bool:
+        """Shared by the file-dialog handler above and :meth:`set_state`'s
+        project restore -- both end up loading a calibration file the same
+        way. Returns True on success (and remembers *path* so a project save
+        can reload it later)."""
+        from midas_gui.helpers import geometry_fields_from_file
         try:
             g = geometry_fields_from_file(path)
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Load failed", str(e)); return
+            QtWidgets.QMessageBox.critical(self, "Load failed", str(e)); return False
 
         nry = int(g["NrPixelsY"]) if g.get("NrPixelsY") else None
         nrz = int(g["NrPixelsZ"]) if g.get("NrPixelsZ") else None
@@ -121,6 +138,7 @@ class PanelCard(QtWidgets.QWidget):
             "wavelength_A": float(g["wavelength_A"]), "px_um": float(g["pxY"]),
             "nrpixels_y": nry, "nrpixels_z": nrz,
         }
+        self._calib_path = path
 
         tx = float(g.get("tx") or 0.0)
         note = (f"Loaded {Path(path).name}: λ={g['wavelength_A']:.5f} Å, "
@@ -131,6 +149,7 @@ class PanelCard(QtWidgets.QWidget):
         if tx != 0.0:
             note += f" Note: file's tx={tx:.3f}° is not used by the Phase 1 pipeline (fixed at 0)."
         self._calib_note.setText(note)
+        return True
 
     def panel_id(self) -> int:
         return self._panel_id.value()
@@ -156,6 +175,30 @@ class PanelCard(QtWidgets.QWidget):
             "bright_mode": self.loader.bright_mode(), "background": self.loader.background(),
         }
 
+    # ── GUI state (project save/restore) ───────────────────────────
+
+    def _state_widgets(self) -> dict:
+        return {
+            "panel_id": self._panel_id,
+            "ome_first_idx": self._ome_first_idx, "ome_first_deg": self._ome_first_deg,
+            "ome_last_idx": self._ome_last_idx, "ome_step": self._ome_step,
+        }
+
+    def get_state(self) -> dict:
+        state = {"fields": widgets_to_dict(self._state_widgets()), "loader": self.loader.get_state()}
+        if self._calib_path:
+            state["calib_path"] = self._calib_path
+        return state
+
+    def set_state(self, state: dict):
+        if not state:
+            return
+        apply_dict_to_widgets(self._state_widgets(), state.get("fields", {}))
+        self.loader.set_state(state.get("loader") or {})
+        calib_path = state.get("calib_path")
+        if calib_path and Path(calib_path).exists():
+            self._load_calib_from_path(calib_path)
+
 
 class SolveCellTab(QtWidgets.QWidget):
     def __init__(self, parent=None):
@@ -170,7 +213,11 @@ class SolveCellTab(QtWidgets.QWidget):
         self._pooled_dir: Optional[Path] = None
         self._panels: dict[int, PanelCard] = {}
         self._next_panel_id = 1
+        self._ingest_preview: Optional[dict] = None
+        self._det_view_framed_for = None
+        self._det_view_shape = None
         self._build_ui()
+        self._refresh_detector_preview()
 
     # ── UI ──────────────────────────────────────────────────────────
 
@@ -243,6 +290,18 @@ class SolveCellTab(QtWidgets.QWidget):
         self._gap_bridge = _NoScrollSpinBox(); self._gap_bridge.setRange(0, 1000)
         self._gap_bridge.setValue(solve_pipeline.GAP_BRIDGE_DEFAULT)
         iv.addRow(_twocol("split_ratio:", self._split_ratio, "gap_bridge:", self._gap_bridge))
+        self._sector_candidates_ed = QtWidgets.QLineEdit(
+            ",".join(str(n) for n in solve_pipeline.SECTOR_CANDIDATES_DEFAULT))
+        self._sector_candidates_ed.setToolTip(
+            "Azimuth-sector counts choose_sectors() grid-searches to pick a "
+            "background model -- each candidate is a full per-frame pass "
+            "over the whole stack (the dominant cost of Ingest at full "
+            "detector resolution). Once a prior run's log line "
+            "('choose_sectors: n_sectors=N') tells you what a given "
+            "panel/geometry wants, narrow this to just that one value to "
+            "skip the other candidates on every later ingest. Blank or "
+            "unparseable falls back to the default search.")
+        iv.addRow("sector candidates:", self._sector_candidates_ed)
         self._ingest_btn = S.primary_btn("Run Ingest")
         self._ingest_btn.clicked.connect(self._run_ingest)
         iv.addRow(self._ingest_btn)
@@ -304,22 +363,12 @@ class SolveCellTab(QtWidgets.QWidget):
         mv.addStretch(1)
         split.addWidget(mid_scroll)
 
-        # ── RIGHT: reciprocal-space scatter + log ──
+        # ── RIGHT: tabbed views (3-D reciprocal-space map, Detector) + log ──
         right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        self._scatter_plot = pg.PlotWidget(background="#111111")
-        self._scatter_plot.setLabel("left", "qy (Å⁻¹)")
-        self._scatter_plot.setLabel("bottom", "qx (Å⁻¹)")
-        self._scatter_plot.showGrid(x=True, y=True, alpha=0.2)
-        self._scatter_plot.setAspectLocked(True)
-        self._scatter_all = pg.ScatterPlotItem([], [], symbol="o", size=4,
-                                               brush=pg.mkBrush(150, 150, 150, 150), pen=None)
-        self._scatter_diamond = pg.ScatterPlotItem([], [], symbol="o", size=5,
-                                                    brush=pg.mkBrush("#ff3030"), pen=None)
-        self._scatter_indexed = pg.ScatterPlotItem([], [], symbol="o", size=5,
-                                                    brush=pg.mkBrush("#4da3ff"), pen=None)
-        for item in (self._scatter_all, self._scatter_diamond, self._scatter_indexed):
-            self._scatter_plot.addItem(item)
-        right.addWidget(self._scatter_plot)
+        self._view_tabs = QtWidgets.QTabWidget()
+        self._build_recip_map_tab()
+        self._build_detector_tab()
+        right.addWidget(self._view_tabs)
 
         self._log = LogPanel()
         self._log.setMaximumHeight(16_777_215)
@@ -330,12 +379,200 @@ class SolveCellTab(QtWidgets.QWidget):
         split.setStretchFactor(0, 0); split.setStretchFactor(1, 0); split.setStretchFactor(2, 1)
         split.setSizes([360, 400, 900])
 
+        # Connected last, once self._det_stage/_det_view etc. already exist --
+        # setCurrentIndex() below fires this synchronously, and the first
+        # panel tab is added (via _add_panel(), which calls setCurrentIndex)
+        # earlier in this same method, before the Detector tab is built.
+        self._panel_tabs.currentChanged.connect(self._refresh_detector_preview)
+
+    def _build_recip_map_tab(self):
+        """3-D qx/qy/qz reciprocal-space scatter. pyqtgraph has no 3-D
+        equivalent without the ``PyOpenGL`` dependency (not installed, and a
+        new native dependency this project has reason to be cautious about --
+        see the unresolved Windows midas_calibrate_v2 import issue in
+        STATE.md); matplotlib is already pinned and already used this way
+        twice (``peak_fit_panel.py``, ``tab_zarrviewer.py``) -- this is the
+        third embedded matplotlib canvas, same pattern."""
+        self._recip_fig = Figure(figsize=(5, 4))
+        self._recip_canvas = FigureCanvas(self._recip_fig)
+        self._recip_ax = self._recip_fig.add_subplot(111, projection="3d")
+        self._reset_recip_axes()
+        toolbar = NavToolbar(self._recip_canvas, self)
+
+        tab = QtWidgets.QWidget()
+        tv = QtWidgets.QVBoxLayout(tab); tv.setContentsMargins(0, 0, 0, 0); tv.setSpacing(0)
+        tv.addWidget(toolbar)
+        tv.addWidget(self._recip_canvas, stretch=1)
+        self._view_tabs.addTab(tab, "Reciprocal space map")
+
+    def _reset_recip_axes(self):
+        ax = self._recip_ax
+        ax.clear()
+        ax.set_xlabel("qx (Å⁻¹)"); ax.set_ylabel("qy (Å⁻¹)"); ax.set_zlabel("qz (Å⁻¹)")
+        # Origin marker -- always drawn (even with no spots yet) so the q=0
+        # reference point is never ambiguous once real data is scattered on
+        # top of it.
+        ax.scatter([0], [0], [0], c="red", marker="+", s=160, linewidths=2, depthshade=False)
+
+    def _update_recip_plot(self, all_xyz=None, diamond_xyz=None, indexed_xyz=None):
+        """Each ``*_xyz`` is an optional ``(x, y, z)`` tuple of 1-D arrays.
+        Full replot per call -- cheap at the spot counts this tab deals with,
+        same redraw-on-update pattern as the other two embedded-matplotlib
+        views in this codebase."""
+        self._reset_recip_axes()
+        for xyz, color, size in (
+            (all_xyz, "#969696", 8), (diamond_xyz, "#ff3030", 14), (indexed_xyz, "#4da3ff", 14),
+        ):
+            if xyz is not None and len(xyz[0]):
+                self._recip_ax.scatter(xyz[0], xyz[1], xyz[2], c=color, s=size, depthshade=True)
+        self._recip_canvas.draw_idle()
+
+    def _build_detector_tab(self):
+        """Shows the active panel's actual 2-D detector frame at a chosen
+        ingest processing stage -- Raw/Corrected read live from the panel's
+        ``DataLoaderPanel`` (no Ingest run needed). Calculated background/Mask
+        show what Ingest captured into its ``preview`` result (see
+        ``pipeline._stage_ingest``): a single frame (``preview_frame_index``,
+        held because keeping the whole subtracted stack around on the GUI
+        side would reintroduce the memory pressure the ingest-performance
+        fixes just removed) and a max-over-rotation projection (one 2-D
+        reduction over the stack ``choose_sectors`` already fully
+        materializes internally, so it costs nothing extra to compute before
+        that stack is discarded). The max projection is the one actually
+        worth looking at to judge the background model -- a real reflection
+        only satisfies the diffraction condition for a handful of frames out
+        of hundreds, so the single-frame view is almost always near-empty
+        even when the subtraction worked correctly (confirmed on real
+        Ge-oP32 c1 data, see DECISIONS)."""
+        tab = QtWidgets.QWidget()
+        dv = QtWidgets.QVBoxLayout(tab); dv.setContentsMargins(4, 4, 4, 4); dv.setSpacing(4)
+
+        toolbar = QtWidgets.QHBoxLayout()
+        toolbar.addWidget(QtWidgets.QLabel("Stage:"))
+        self._det_stage = QtWidgets.QComboBox()
+        self._det_stage.addItems([
+            "Raw", "Corrected", "Calculated background (after Ingest)",
+            "Calculated background -- max over rotation (after Ingest)",
+            "Mask (after Ingest)",
+        ])
+        self._det_stage.setToolTip(
+            "Raw/Corrected update live from this panel's loaded data and "
+            "dark/bright/background fields, no Ingest run needed. The "
+            "single-frame Calculated background view is usually near-empty "
+            "-- a real reflection only satisfies the diffraction condition "
+            "for a handful of frames out of hundreds -- so prefer the max-"
+            "over-rotation view to actually judge whether the background "
+            "model worked. Both (and Mask) show what the last Ingest run "
+            "captured; the single-frame one uses the frame index from the "
+            "scrub bar below at the moment Run Ingest was clicked.")
+        self._det_stage.currentIndexChanged.connect(self._refresh_detector_preview)
+        toolbar.addWidget(self._det_stage)
+        toolbar.addStretch(1)
+        dv.addLayout(toolbar)
+
+        self._det_view = ImageViewer(title="")
+        dv.addWidget(self._det_view, stretch=1)
+        dv.addWidget(self._build_detector_scrub_bar())
+        self._view_tabs.addTab(tab, "Detector")
+
+    def _build_detector_scrub_bar(self) -> QtWidgets.QWidget:
+        """Same ◀/▶/slider convention as ``tab_view.py``/``tab_calibrate.py``'s
+        local ``_build_frame_scrub_bar`` (``objectName`` ``frameNavBtn``/
+        ``frameNavSlider``, styled app-wide in ``style.py``)."""
+        bar = QtWidgets.QWidget()
+        hl = QtWidgets.QHBoxLayout(bar); hl.setContentsMargins(0, 0, 0, 0); hl.setSpacing(4)
+        prev_btn = QtWidgets.QToolButton(); prev_btn.setObjectName("frameNavBtn")
+        prev_btn.setText("◀"); prev_btn.clicked.connect(lambda: self._step_detector_frame(-1))
+        self._det_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self._det_slider.setObjectName("frameNavSlider")
+        self._det_slider.valueChanged.connect(self._on_detector_slider_changed)
+        next_btn = QtWidgets.QToolButton(); next_btn.setObjectName("frameNavBtn")
+        next_btn.setText("▶"); next_btn.clicked.connect(lambda: self._step_detector_frame(1))
+        self._det_frame_lbl = QtWidgets.QLabel("—")
+        self._det_frame_lbl.setStyleSheet(f"color:{S.MUTED};font-size:11px")
+        hl.addWidget(prev_btn); hl.addWidget(self._det_slider, stretch=1); hl.addWidget(next_btn)
+        hl.addWidget(self._det_frame_lbl)
+        return bar
+
+    def _step_detector_frame(self, delta: int):
+        self._det_slider.setValue(self._det_slider.value() + delta)
+
+    def _on_detector_slider_changed(self, i: int):
+        if self._det_stage.currentIndex() in (0, 1):   # Raw / Corrected
+            panel = self._active_panel()
+            if panel is not None:
+                panel.loader.set_frame(i)
+        self._refresh_detector_preview()
+
+    def _refresh_detector_preview(self, *_args):
+        panel = self._active_panel()
+        if panel is None:
+            return
+        stage = self._det_stage.currentIndex()
+        if stage in (0, 1):
+            n = panel.loader.n_frames()
+            self._det_slider.setEnabled(n > 1)
+            self._det_slider.blockSignals(True)
+            self._det_slider.setRange(0, max(n - 1, 0))
+            self._det_slider.setValue(panel.loader.frame_index())
+            self._det_slider.blockSignals(False)
+            frame = panel.loader.current_frame()
+            if frame is not None and stage == 1:
+                frame = panel.loader.corrected(frame)
+            self._det_frame_lbl.setText(f"frame {panel.loader.frame_index()}/{max(n - 1, 0)}"
+                                        if n else "no data loaded")
+            self._set_detector_image(frame, stage)
+        else:
+            self._det_slider.setEnabled(False)
+            preview = self._ingest_preview
+            if preview is None:
+                self._det_frame_lbl.setText("Run Ingest to populate")
+                self._set_detector_image(None, stage)
+                return
+            if stage == 2:
+                arr = preview["background_subtracted"]
+                self._det_frame_lbl.setText(
+                    f"frame {preview['frame_index']} of the kept stack, from the last Ingest run "
+                    "-- a single frame is usually near-empty, see the max-projection view")
+            elif stage == 3:
+                arr = preview["background_subtracted_max_projection"]
+                self._det_frame_lbl.setText("max over every kept/live frame, from the last Ingest run")
+            else:
+                arr = preview["mask"].astype(np.float32)
+                self._det_frame_lbl.setText("detector mask, from the last Ingest run")
+            self._set_detector_image(arr, stage)
+
+    def _set_detector_image(self, frame, stage: int):
+        """``autorange`` (pan/zoom) only resets when the frame *shape*
+        changes -- switching Stage combo entries alone (e.g. Raw <-> Corrected,
+        same detector, same zoom) must not reset the view the user zoomed
+        into. ``reset_levels`` (color window) still resets per-stage, since
+        Calculated background/Mask carry a genuinely different data range
+        than Raw/Corrected and a stale color window would just look blank."""
+        shape = None if frame is None else tuple(frame.shape)
+        zoom_fresh = shape != self._det_view_shape
+        framed_for = (shape, stage)
+        levels_fresh = framed_for != self._det_view_framed_for
+        if frame is not None:
+            self._det_view.set_raw_frame(frame, None, autorange=zoom_fresh, reset_levels=levels_fresh)
+        self._det_view_shape = shape
+        self._det_view_framed_for = framed_for
+
     # ── panel management ───────────────────────────────────────────
 
-    def _add_panel(self) -> PanelCard:
-        panel_id = self._next_panel_id
-        self._next_panel_id += 1
+    def _add_panel(self, panel_id: Optional[int] = None) -> PanelCard:
+        """``panel_id`` is normally auto-assigned (the "+" button); project
+        restore (:meth:`set_state`) passes the saved id explicitly so a
+        reopened project's panel numbering matches what was saved."""
+        if panel_id is None:
+            panel_id = self._next_panel_id
+        self._next_panel_id = max(self._next_panel_id, panel_id + 1)
         card = PanelCard(panel_id)
+        # Live-refresh the Detector tab (Raw/Corrected only) as this panel's
+        # data/frame-index or dark/bright/background/mask fields change --
+        # same signals tab_batch.py's own Detector view refreshes from.
+        card.loader.dataChanged.connect(self._refresh_detector_preview)
+        card.loader.fieldsChanged.connect(self._refresh_detector_preview)
         self._panels[panel_id] = card
         idx = self._panel_tabs.addTab(card, f"Panel {panel_id}")
         self._panel_tabs.setCurrentIndex(idx)
@@ -352,6 +589,7 @@ class SolveCellTab(QtWidgets.QWidget):
         if panel_id is not None:
             del self._panels[panel_id]
         card.deleteLater()
+        self._refresh_detector_preview()
 
     def _active_panel(self) -> PanelCard:
         return self._panel_tabs.currentWidget()
@@ -375,7 +613,67 @@ class SolveCellTab(QtWidgets.QWidget):
         self._prog.setVisible(False)
         show_error(self, f"Solve Cell: {stage_label} failed", msg, log=self._log, log_prefix="\nERROR:\n")
 
+    # ── GUI state (project save/restore) ───────────────────────────
+
+    def _stage_state_widgets(self) -> dict:
+        return {
+            "proj_dir": self._proj_ed,
+            "low_count": self._low_count, "mask_grow": self._mask_grow,
+            "blob_thresh": self._blob_thresh, "blob_minvol": self._blob_minvol,
+            "split_ratio": self._split_ratio, "gap_bridge": self._gap_bridge,
+            "sector_candidates": self._sector_candidates_ed,
+            "diamond_a": self._diamond_a, "contam_tol": self._contam_tol,
+            "sigma_g": self._sigma_g, "min_refl": self._min_refl, "tol_override": self._tol_override,
+        }
+
+    def get_state(self) -> dict:
+        """Panel configuration + stage parameters only. Like every other
+        tab's project save (see ``MainWindow._apply_workspace_state``'s own
+        docstring), Ingest/Diamond filter/Ab-initio/Refine results are not
+        recomputed on restore -- their inputs are restored so a single click
+        of each stage's own Run button reproduces them."""
+        active_id = next((pid for pid, c in self._panels.items() if c is self._active_panel()), None)
+        return {
+            "fields": widgets_to_dict(self._stage_state_widgets()),
+            "panels": {str(pid): card.get_state() for pid, card in self._panels.items()},
+            "active_panel": active_id,
+            "next_panel_id": self._next_panel_id,
+        }
+
+    def set_state(self, state: dict):
+        if not state:
+            return
+        apply_dict_to_widgets(self._stage_state_widgets(), state.get("fields", {}))
+        panels_state = state.get("panels") or {}
+        if panels_state:
+            for card in list(self._panels.values()):
+                idx = self._panel_tabs.indexOf(card)
+                if idx >= 0:
+                    self._panel_tabs.removeTab(idx)
+                card.deleteLater()
+            self._panels.clear()
+            for pid_key, pstate in sorted(panels_state.items(), key=lambda kv: int(kv[0])):
+                pid = int(pid_key)
+                card = self._add_panel(panel_id=pid)
+                card.set_state(pstate)
+        if "next_panel_id" in state:
+            self._next_panel_id = max(self._next_panel_id, int(state["next_panel_id"]))
+        active = state.get("active_panel")
+        if active is not None and int(active) in self._panels:
+            idx = self._panel_tabs.indexOf(self._panels[int(active)])
+            if idx >= 0:
+                self._panel_tabs.setCurrentIndex(idx)
+        self._refresh_detector_preview()
+
     # ── stage 1: ingest ─────────────────────────────────────────────
+
+    def _sector_candidates_cfg(self) -> tuple:
+        text = self._sector_candidates_ed.text().strip()
+        try:
+            vals = tuple(int(x.strip()) for x in text.split(",") if x.strip())
+        except ValueError:
+            vals = ()
+        return vals if vals else solve_pipeline.SECTOR_CANDIDATES_DEFAULT
 
     def _run_ingest(self):
         if self._worker is not None and self._worker.isRunning():
@@ -385,11 +683,11 @@ class SolveCellTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(
                 self, "No calibration loaded",
                 "Load a calibration file for this panel first."); return
-        try:
-            frames = panel.loader.full_stack()
-        except RuntimeError:
-            QtWidgets.QMessageBox.warning(self, "No raw data", "Load raw frames first."); return
-        if frames is None or len(frames) == 0:
+        # Cheap, metadata-only check -- the real read (full_stack(), ~10 GB for
+        # an HDF5-backed stack at full detector resolution) happens inside the
+        # worker thread below, not here on the GUI thread, so the window
+        # doesn't freeze with no progress shown while it runs.
+        if panel.loader.data_source_kind() == "none":
             QtWidgets.QMessageBox.warning(self, "No raw data", "Load raw frames first."); return
         for sel in panel.loader.has_pending_fields():
             QtWidgets.QMessageBox.warning(
@@ -406,13 +704,22 @@ class SolveCellTab(QtWidgets.QWidget):
         self._panel_dir = panel_dir
 
         cfg = {
-            "frames": frames, "geometry": panel.geometry_cfg(),
+            "frames_loader": panel.loader.full_stack, "geometry": panel.geometry_cfg(),
             "corrections": panel.corrections_cfg(),
             "mask": {"low_count_threshold": self._low_count.value(), "grow": self._mask_grow.value(),
                      "user_mask": panel.loader.composite_mask()},
             "blobs": {"threshold": self._blob_thresh.value(), "min_vol": self._blob_minvol.value(),
-                      "split_ratio": self._split_ratio.value(), "gap_bridge": self._gap_bridge.value()},
+                      "split_ratio": self._split_ratio.value(), "gap_bridge": self._gap_bridge.value(),
+                      "sector_candidates": self._sector_candidates_cfg()},
             "panel_dir": panel_dir,
+            # Best-effort: the loader's frame index is into the ORIGINALLY
+            # loaded stack, while the pipeline's preview_frame_index is into
+            # the kept stack after the omega window + live-frame filtering --
+            # these only coincide exactly when nothing was dropped. Harmless
+            # either way: _stage_ingest clamps it into range, and the
+            # returned preview["frame_index"] says which kept-stack frame was
+            # actually captured, which the Detector tab labels honestly.
+            "preview_frame_index": panel.loader.frame_index(),
         }
         self._ingest_btn.setEnabled(False)
         self._prog.setVisible(True)
@@ -430,12 +737,14 @@ class SolveCellTab(QtWidgets.QWidget):
         self._ingest_status.setText(f"{n} spots (n_frames≥2)")
         self._log.append(f"Ingest complete: {n} candidate spots.")
         self._diamond_btn.setEnabled(n > 0)
-        self._scatter_diamond.setData([], []); self._scatter_indexed.setData([], [])
         if n:
-            self._scatter_all.setData(self._spots_df["qsample_x"].to_numpy(),
-                                      self._spots_df["qsample_y"].to_numpy())
+            df = self._spots_df
+            self._update_recip_plot(all_xyz=(df["qsample_x"].to_numpy(), df["qsample_y"].to_numpy(),
+                                             df["qsample_z"].to_numpy()))
         else:
-            self._scatter_all.setData([], [])
+            self._update_recip_plot()
+        self._ingest_preview = result.get("preview")
+        self._refresh_detector_preview()
 
     # ── stage 2: diamond filter ─────────────────────────────────────
 
@@ -472,9 +781,11 @@ class SolveCellTab(QtWidgets.QWidget):
         flagged = result["flagged_df"]
         diamond_rows = flagged[flagged["is_diamond"]]
         candidate_rows = flagged[~flagged["is_diamond"]]
-        self._scatter_all.setData([], [])
-        self._scatter_diamond.setData(diamond_rows["qsample_x"].to_numpy(), diamond_rows["qsample_y"].to_numpy())
-        self._scatter_indexed.setData(candidate_rows["qsample_x"].to_numpy(), candidate_rows["qsample_y"].to_numpy())
+        self._update_recip_plot(
+            diamond_xyz=(diamond_rows["qsample_x"].to_numpy(), diamond_rows["qsample_y"].to_numpy(),
+                        diamond_rows["qsample_z"].to_numpy()),
+            indexed_xyz=(candidate_rows["qsample_x"].to_numpy(), candidate_rows["qsample_y"].to_numpy(),
+                        candidate_rows["qsample_z"].to_numpy()))
 
     # ── stage 3: ab-initio index ────────────────────────────────────
 
@@ -516,8 +827,9 @@ class SolveCellTab(QtWidgets.QWidget):
 
         mask = self._ab_initio_raw.indexed_mask
         g = self._g_2pi
-        self._scatter_all.setData(g[~mask, 0], g[~mask, 1])
-        self._scatter_indexed.setData(g[mask, 0], g[mask, 1])
+        self._update_recip_plot(
+            all_xyz=(g[~mask, 0], g[~mask, 1], g[~mask, 2]),
+            indexed_xyz=(g[mask, 0], g[mask, 1], g[mask, 2]))
 
     # ── stage 4: refine ─────────────────────────────────────────────
 

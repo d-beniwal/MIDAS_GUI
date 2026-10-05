@@ -38,6 +38,7 @@ TWO_PI = 2.0 * math.pi
 
 # Defaults mirror the validated reference analyses (handoff §5.0's threshold
 # table) -- every one of these is also an exposed, overridable GUI field.
+SECTOR_CANDIDATES_DEFAULT = (1, 8, 24, 48, 96)   # matches midas_defect.ingest.choose_sectors's own default
 LIVE_FRAMES_FRAC_DEFAULT = 0.002
 LOW_COUNT_THRESHOLD_DEFAULT = 0.0   # NOT midas_defect's own default of 20 --
                                      # see _stage_ingest docstring.
@@ -82,6 +83,14 @@ def _apply_stack_corrections(frames: np.ndarray, corr: dict) -> np.ndarray:
     over the frame axis instead of per-2D-frame, rather than imported --
     this module must stay free of ``midas_gui`` imports (see module
     docstring) to stay liftable into a standalone package.
+
+    Operates in-place on ``frames`` (returned, not copied) and keeps
+    everything in ``float32`` -- at full detector resolution and a few
+    hundred frames, each `out = out - x`-style reassignment used to allocate
+    a brand-new full-stack-sized array; with dark+bright+background all
+    configured that was 3-4 extra multi-GB allocations per ingest run for no
+    reason, on top of doubling the footprint via float64. See
+    DECISIONS 2026-10-04 (ingest performance).
     """
     dark, bright, background = corr.get("dark"), corr.get("bright"), corr.get("background")
     if dark is None and bright is None and background is None:
@@ -91,7 +100,7 @@ def _apply_stack_corrections(frames: np.ndarray, corr: dict) -> np.ndarray:
     def _checked(field, label):
         if field is None:
             return None
-        arr = np.asarray(field, dtype=np.float64)
+        arr = np.asarray(field, dtype=np.float32)
         if arr.shape != frame_shape:
             print(f"[solve-cell] ingest: {label} shape {arr.shape} != frame shape "
                   f"{frame_shape} -- skipped")
@@ -101,20 +110,22 @@ def _apply_stack_corrections(frames: np.ndarray, corr: dict) -> np.ndarray:
     out = frames
     d = _checked(dark, "dark")
     if d is not None:
-        out = out - d[None, :, :]
+        out -= d[None, :, :]
     b = _checked(bright, "bright")
     if b is not None:
         if d is not None:
             b = b - d
         if corr.get("bright_mode", "divide") == "subtract":
-            out = out - b[None, :, :]
+            out -= b[None, :, :]
         else:
             b = np.clip(b, 1e-9, None)
-            out = out / b[None, :, :] * float(np.mean(b))
+            out /= b[None, :, :]
+            out *= float(np.mean(b))
     g = _checked(background, "background")
     if g is not None:
-        out = out - g[None, :, :]
-    return np.clip(out, 0.0, None)
+        out -= g[None, :, :]
+    np.clip(out, 0.0, None, out=out)
+    return out
 
 
 def run_stage(stage: str, cfg: dict) -> dict:
@@ -141,9 +152,18 @@ def _stage_ingest(cfg: dict) -> dict:
     nrpixels_y, nrpixels_z, omega_ref_frame_idx, omega_ref_deg,
     omega_last_frame_idx, omega_step_deg), ``mask`` ({low_count_threshold,
     grow, optional user_mask}), ``blobs`` ({threshold, min_vol, split_ratio,
-    gap_bridge, core_frac}), optional ``live_frames`` ({frac_of_median}),
+    gap_bridge, core_frac, optional sector_candidates -- passed to
+    ``choose_sectors`` as its azimuth-sector grid search, defaults to its own
+    ``SECTOR_CANDIDATES_DEFAULT``; narrowing this once a panel/geometry's
+    winning ``n_sectors`` is known skips the other candidates' full-stack
+    passes on later runs}), optional ``live_frames`` ({frac_of_median}),
     optional ``sentinel``, optional ``panel_dir`` (Path -- if given, writes
-    ``spots_g.csv``/``ingest_summary.json`` there).
+    ``spots_g.csv``/``ingest_summary.json`` there), optional
+    ``preview_frame_index`` (int, default 0, clamped to the live/kept stack --
+    which single frame's background-subtracted image + the detector mask are
+    captured into the returned ``preview`` key, for a GUI's Detector view;
+    only one frame is kept, not the whole subtracted stack, to avoid holding
+    a second full-size copy in memory).
 
     Frame/omega pairing: frame index ``omega_ref_frame_idx`` is defined to be
     at ``omega_ref_deg``, with every frame stepping by ``omega_step_deg``.
@@ -171,7 +191,7 @@ def _stage_ingest(cfg: dict) -> dict:
     exposed, not silently hardcoded either way.
     """
     import torch
-    from midas_defect.ingest import build_mask, choose_sectors, find_blobs_3d, live_frames, subtract_background
+    from midas_defect.ingest import build_mask, choose_sectors, find_blobs_3d, live_frames
     from midas_defect.geometry import Geometry, detector_angle_maps, pixel_to_qlab, qlab_to_qsample
 
     geom_cfg = cfg["geometry"]
@@ -198,7 +218,7 @@ def _stage_ingest(cfg: dict) -> dict:
           f"[{ref_idx}, {last_idx}] ({n_outside_omega_window} excluded), "
           f"Lsd={geom_cfg['Lsd']:.2f} um, wavelength={geom_cfg['wavelength_A']:.6f} A")
 
-    frames = frames_raw.astype(np.float64)
+    frames = frames_raw.astype(np.float32)
     is_sentinel = frames_raw == sentinel
     is_sentinel_persistent = is_sentinel.all(axis=0)
     frames[is_sentinel] = 0.0
@@ -243,13 +263,44 @@ def _stage_ingest(cfg: dict) -> dict:
     blob_cfg = cfg.get("blobs", {})
     threshold = blob_cfg.get("threshold", BLOB_THRESHOLD_DEFAULT)
     min_vol = blob_cfg.get("min_vol", BLOB_MIN_VOL_DEFAULT)
+    sector_candidates = tuple(blob_cfg.get("sector_candidates", SECTOR_CANDIDATES_DEFAULT))
 
-    # choose_sectors already returns a subtracted .stack, but the reference
-    # analysis re-runs subtract_background explicitly at the chosen
-    # n_sectors -- matched here verbatim rather than "optimized" away.
-    bg_choice = choose_sectors(frames, tth_deg, az_deg, mask, threshold=threshold, min_vol=min_vol)
-    print(f"[solve-cell] choose_sectors: n_sectors={bg_choice.n_sectors}")
-    sub = subtract_background(frames, tth_deg, az_deg, mask, n_sectors=bg_choice.n_sectors)
+    # choose_sectors grid-searches `sector_candidates`, each a full per-frame
+    # subtract_background + count_signed_blobs pass -- the dominant ingest
+    # cost at full detector resolution (measured: minutes per candidate).
+    # Its winning BackgroundChoice.stack IS subtract_background's output at
+    # that n_sectors (verified bit-identical) -- previously this stage threw
+    # that away and reran subtract_background a 6th time "to match the
+    # reference scripts verbatim"; that rerun is redundant, not a behavior
+    # difference, so it's gone. See DECISIONS 2026-10-04 (ingest performance).
+    bg_choice = choose_sectors(frames, tth_deg, az_deg, mask, threshold=threshold, min_vol=min_vol,
+                               candidates=sector_candidates)
+    print(f"[solve-cell] choose_sectors: n_sectors={bg_choice.n_sectors} "
+          f"(candidates={sector_candidates})")
+    sub = bg_choice.stack
+
+    preview_idx = int(cfg.get("preview_frame_index", 0))
+    preview_idx = min(max(preview_idx, 0), len(sub) - 1) if len(sub) else 0
+    preview = {
+        "frame_index": preview_idx,
+        "background_subtracted": np.array(sub[preview_idx]) if len(sub) else None,
+        # A single frame is a poor background-subtraction diagnostic for a
+        # rotation series: a real Bragg reflection only satisfies the
+        # diffraction condition for a handful of frames out of hundreds, so
+        # an arbitrary single frame is, more often than not, almost entirely
+        # at the background floor even when the subtraction worked
+        # correctly -- confirmed on real data (Ge-oP32 c1 panel 06): a
+        # prominent spot's frame still has a 90th-percentile unmasked value
+        # of ~3 counts, reading as "no background" to the eye even though a
+        # ~1800-count spot is present a few pixels wide. The max projection
+        # collapses every kept/live frame's spots (and any residual
+        # structure) into one image. `sub` is already the full subtracted
+        # stack fully materialized by `choose_sectors` above -- this is one
+        # extra reduction over an array already in memory, not a new
+        # full-stack copy.
+        "background_subtracted_max_projection": np.asarray(sub.max(axis=0)) if len(sub) else None,
+        "mask": np.array(mask),
+    }
 
     spots, counts = find_blobs_3d(
         sub, mask, threshold=threshold, min_vol=min_vol,
@@ -300,7 +351,7 @@ def _stage_ingest(cfg: dict) -> dict:
         (panel_dir / "ingest_summary.json").write_text(json.dumps(summary, indent=2))
         print(f"[solve-cell] wrote {panel_dir / 'spots_g.csv'}")
 
-    return {"spots_df": spots, "summary": summary, "panel_dir": panel_dir}
+    return {"spots_df": spots, "summary": summary, "panel_dir": panel_dir, "preview": preview}
 
 
 # ═════════════════════════════════════════════════════════════════════════════

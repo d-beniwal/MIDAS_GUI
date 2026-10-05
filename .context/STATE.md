@@ -1,7 +1,7 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-10-04 (Solve Cell: removed the editable "Panel geometry" box and det_x/eiger_y/eiger_z — geometry now comes only from a loaded calibration file — see below and DECISIONS)_
+_Last updated: 2026-10-04 (Solve Cell: real-raw-data ingest run against Ge-oP32 c1 confirms ingest math is correct; Detector tab gained a max-over-rotation projection view — see below and DECISIONS)_
 
 ## Now working on
 
@@ -20,14 +20,21 @@ work per `documentation/solve_cell_handoff.md` §10 — not started; the stage
 buttons still only ever run against the one currently-active panel tab.
 
 Open follow-ups, none blocking:
-- **Solve Cell (new, 2026-10-04)**: Phase 1 only. No raw HDF5 from the
-  reference spinel/Ge-oP32 analyses is available on this machine (lives only
-  on the beamline cluster) — the ingest stage is only smoke-tested against
-  synthetic frames, never against real raw frames end-to-end. The
-  diamond-filter/ab-initio/refine stages ARE regression-tested against real
-  spinel panel 1+2 CSVs already on disk and reproduce the known cell. A real
-  raw-frame ingest run (on the beamline machine, or with a locally copied
-  raw file) is still owed before trusting that stage on real data.
+- **Solve Cell ingest, real-raw-data gap closed (2026-10-04).** The GUI's
+  `_stage_ingest` was run against a real raw HDF5
+  (`DAC_Ge_op32_c1/LaB6_exp0p02_slit0p3_002_EigPos_-75_10_30_000001.h5`,
+  this machine's local S3ID_data copy of the Ge-oP32 c1 beamtime), the
+  `frame_omega_pairing_calculated.csv` frame/omega window, and the matching
+  ceria calibration file — this dataset is panel 6 of the already-validated
+  `Ge_oP32_c1_solve_cell` reference analysis. Result reproduced the
+  reference closely (`n_sectors=1`, 583 vs. 584 kept blobs). The one real
+  issue found was a Detector-view diagnostic gap, not an ingest bug — see
+  DECISIONS 2026-10-04 (latest, 2): a single previewed frame is almost
+  always near-empty for a sparse rotation series regardless of whether the
+  background model worked, which read to the user as "background almost
+  non-existent." Fixed with a new max-over-rotation projection view. The
+  diamond-filter/ab-initio/refine stages remain regression-tested against
+  real spinel panel 1+2 CSVs (unchanged, still reproduce the known cell).
 - **Solve Cell panels (new, 2026-10-04)**: dark/bright/background correction
   is applied via a small duplicated `_apply_stack_corrections` in
   `solve_cell/pipeline.py` rather than importing `helpers.
@@ -69,6 +76,94 @@ Open follow-ups, none blocking:
   `git fetch origin 'refs/pull/*/head:refs/remotes/origin/pr/*'`.
 
 ## Recently completed
+
+**2026-10-04 (latest) — Solve Cell: project save/restore wired up (was
+missing entirely), Detector tab's "Background-subtracted" renamed to
+"Calculated background," pan/zoom no longer resets on a Stage combo switch,
+red cross marks q=0 on the 3-D reciprocal-space map.** All four were
+user-reported after using the tab. The project-save gap was a genuine bug,
+not a design choice: `SolveCellTab`/`PanelCard` had no `get_state`/
+`set_state` at all, so `app.py`'s generic per-tab save/restore loop silently
+skipped them — now fixed, following the same contract every other tab uses
+(configuration only; Ingest/Diamond/Ab-initio/Refine results are not
+recomputed on restore, same as every other tab). Full detail, including why
+the zoom-vs-levels split works the way it does, in DECISIONS.
+**Verified:** `tests/test_solve_cell_ui.py` 28/28 (+6), `tests/
+test_solve_cell_pipeline.py` 24/24 (unaffected), `test_smoke.py` 13/13 on
+retry (first run's 11 SIGABRTs were the documented pre-existing teardown
+flake, unrelated tests). `pyflakes` clean. Offscreen screenshots confirmed
+the origin cross and the renamed combo label.
+**Not verified:** no real Ingest run available locally to see the renamed
+stage against real data (same raw-HDF5 gap as below); save/restore checked
+via direct `get_state`/`set_state` round trip, not a literal `.h5` file
+write/read (generic and already covered elsewhere — see DECISIONS).
+
+**2026-10-04 — Solve Cell: ingest performance fixes, 3-D reciprocal-space
+map, new Detector view.** Profiling `Run Ingest` on a real 2880×2880, ~587-
+frame DAC dataset found the dominant cost isn't the obvious float64 upcast —
+it's `choose_sectors()` (`midas_defect.ingest`) grid-searching 5 azimuth-
+sector candidates `(1,8,24,48,96)`, each a full per-frame
+`subtract_background` + `count_signed_blobs` pass (measured ~50+ min total),
+plus `_stage_ingest` **redundantly rerunning `subtract_background` a 6th
+time** at the winning sector count even though `choose_sectors` already
+computed and discarded that exact result (verified bit-identical before
+removing it). Fixed everything short of the one upstream-only fix
+(parallelizing `midas_defect`'s internal per-frame loop — out of scope, no
+MIDAS-side changes right now):
+- `sub = bg_choice.stack` replaces the redundant rerun (`pipeline.py`).
+- New `blobs.sector_candidates` cfg override (GUI: "sector candidates"
+  field, default `1,8,24,48,96`) lets a narrowed search skip candidates once
+  a panel/geometry's winning `n_sectors` is already known from a prior run's
+  log line.
+- `float64` → `float32` throughout ingest/corrections, and
+  `_apply_stack_corrections` now mutates in place (`out -= d` etc. instead of
+  `out = out - d`) instead of allocating a new full-stack array per
+  correction step — on this machine's 36 GB RAM, the old float64 stack alone
+  (~39 GB for 587×2880²) exceeded physical memory before any corrections
+  were even applied.
+- The raw-stack disk read (`DataLoaderPanel.full_stack()`, ~10 GB for an
+  HDF5 source) moved off the GUI thread: `tab_solve_cell.py` now passes
+  `cfg["frames_loader"]` (the unbound method) instead of a materialized
+  array, and `workers.SolveCellWorker.run()` resolves it inside the worker
+  thread before dispatching to `pipeline.run_stage` — the GUI no longer
+  freezes with no progress shown during that read. `pipeline.py`'s own
+  `cfg["frames"]` contract is unchanged.
+
+Also two visualization asks, both on the Solve Cell tab's right-hand results
+panel (now a `QTabWidget`, `self._view_tabs`):
+- **Reciprocal space map** upgraded from a 2-D qx/qy `pyqtgraph` scatter to a
+  true 3-D qx/qy/qz plot — `matplotlib`'s `mplot3d` embedded via
+  `FigureCanvasQTAgg` (this project's third embedded matplotlib canvas, same
+  pattern as `peak_fit_panel.py`/`tab_zarrviewer.py`), not
+  `pyqtgraph.opengl` — `PyOpenGL` isn't installed and would be a new native
+  dependency this project has reason to be cautious about (see the
+  unresolved Windows `midas_calibrate_v2` import issue below). Free
+  mouse-drag rotation, zero new dependencies. The handoff doc (§9.2) had
+  flagged this exact choice as an open question deferred to Phase 5; decided
+  here since the feature was explicitly requested now.
+- New **"Detector"** tab: shows the active panel's real 2-D detector frame
+  at a chosen stage (Raw/Corrected read live from `DataLoaderPanel.
+  current_frame()`/`.corrected()`, no Ingest run needed — wired to its
+  `dataChanged`/`fieldsChanged` signals, the same live-refresh pattern
+  `tab_batch.py`'s own "Detector view" already uses; Background-subtracted/
+  Mask come from a new `preview` key `_stage_ingest` returns — exactly one
+  frame's subtracted image + the mask, not the whole stack, to avoid
+  reintroducing the memory pressure just fixed above). Frame-nav scrub bar
+  reuses the app-wide `frameNavBtn`/`frameNavSlider` convention.
+
+New tests: `tests/test_solve_cell_pipeline.py` (+3: sector-candidates
+override, preview capture, preview clamping), `tests/test_solve_cell_ui.py`
+(+5: view-tabs exist, 3-D plot update doesn't raise, stage-switch with no
+data doesn't raise, Detector tracks active-panel switch, sector-candidates
+parsing). **Verified:** both files green per-file (24 + 22 tests), full
+`test_smoke.py` green, `pyflakes midas_gui/*.py` unchanged at 39 warnings
+(none new). Offscreen screenshots confirmed the 3-D plot renders with real
+spot data and all four Detector stages (Raw/Corrected/Background-subtracted/
+Mask) render correctly end-to-end on synthetic frames.
+**Not verified:** no real 587-frame dataset is available in-repo to re-time
+the actual ingest wall-clock speedup; the synthetic benchmarks from the
+profiling session are the basis for the fix, not a before/after timing on
+real data.
 
 **2026-10-04 — New "Solve Cell" tab (Phase 1): single-panel, known-geometry
 deterministic unit-cell solving.** First slice of

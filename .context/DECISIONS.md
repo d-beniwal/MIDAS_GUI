@@ -3,7 +3,222 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
-## 2026-10-04 (latest) — Solve Cell: "Panel geometry" box removed; geometry comes only from a loaded calibration file; det_x/eiger_y/eiger_z dropped
+## 2026-10-04 (latest, 2) — Solve Cell: "background almost non-existent" was a Detector-view diagnostic gap, not an ingest bug; added a max-over-rotation projection
+
+User-reported after running Ingest for real on
+`DAC_Ge_op32_c1/LaB6_exp0p02_slit0p3_002_EigPos_-75_10_30_000001.h5` (frame
+window from `frame_omega_pairing_calculated.csv`, calibration
+`ceria_25p5kev_-75_10_30.txt`): "the background it generated was almost
+non-existent." Investigated by actually running the GUI's own
+`pipeline._stage_ingest` against this exact raw file/calibration (this
+dataset happens to be panel 6 of the already-validated
+`Ge_oP32_c1_solve_cell` reference analysis, whose `01_ingest.py` script
+reference-run reproduced a known-good result against it) rather than reading
+code and guessing.
+
+**Conclusion: the ingest math is correct, not a bug.** The GUI pipeline
+reproduced the reference analysis closely on this real file: `n_sectors=1`
+(matches), 583 kept blobs / 719 final spots vs. the reference's 584 kept
+blobs (the handful-of-blobs difference is consistent with float32 vs.
+float64 and the live-frame-scoped vs. whole-window-scoped persistent-sentinel
+mask — not investigated further, not the reported symptom). The real cause
+is the Detector tab's "Calculated background" preview: it only ever shows
+ONE arbitrary frame of the subtracted stack (`preview_frame_index`, taken
+from wherever the loader's scrub bar happened to sit when Run Ingest was
+clicked — frame 0 by default). Measured directly on this real data: frame
+300 of the kept stack has an unmasked-pixel median of 0.0 and a 90th
+percentile of only 3.0 counts, with a single ~1800-count spot a few pixels
+wide — autoscaled, that reads to the eye as "nothing here" even though the
+subtraction worked and real signal exists. This isn't a corner case: a given
+Bragg reflection only satisfies the diffraction condition for a handful of
+frames out of hundreds, so an arbitrary single frame is, more often than
+not, at the background floor by construction, regardless of whether the
+background model is any good.
+
+**Fix: a max-intensity projection across the kept/live stack**, computed
+once in `pipeline._stage_ingest` as `sub.max(axis=0)` right after
+`choose_sectors` returns (`sub = bg_choice.stack` is already the full
+subtracted stack, fully materialized in memory at that point — this is one
+reduction over an array that already exists, not a new full-stack copy, so
+it doesn't reintroduce the memory pressure the 2026-10-04 ingest-performance
+fixes removed). New preview key `background_subtracted_max_projection`.
+Detector tab gained a new combo entry, "Calculated background -- max over
+rotation (after Ingest)", between the existing single-frame entry and Mask;
+tooltip now steers the user toward the projection as the one that actually
+answers "did the background subtraction work," with the single-frame view
+kept only for per-frame/per-pixel detail. Verified visually offscreen with a
+synthetic case shaped like the real data (Poisson noise floor + sparse
+spots): the single-frame view autoscales to ~0.6 counts and shows pure
+noise, the max-projection view autoscales to the real spot amplitude and
+shows all four spots clearly.
+
+**Verified:** `tests/test_solve_cell_pipeline.py` (+2: the max projection
+sees a spot absent from the requested single frame; the existing preview
+shape test extended to the new key) and `tests/test_solve_cell_ui.py` (+1:
+selecting the new combo stage renders the projection array, not the single
+frame) both green per-file (27/27, 29/29). `pyflakes` clean on both touched
+files. `tests/test_smoke.py` 13/13 on a clean `HOME`.
+**Not verified:** no screenshot against the real Ge-oP32 c1 data itself (the
+offscreen check used a synthetic stand-in shaped like the measured real
+statistics, not the real array, to avoid re-running the multi-minute
+real-data ingest a second time just for a screenshot) — the real-data run's
+printed diagnostics (`n_sectors=1`, 583/719 counts, the frame-300 percentile
+numbers above) are the actual evidence this fix is aimed at the right
+problem.
+
+## 2026-10-04 (latest) — Solve Cell: project save/restore, Detector tab rename + zoom-preserving stage switch, origin cross on the 3-D map
+
+Three small follow-ups from actually using the Phase 1 tab after the
+ingest-performance session below.
+
+- **Project save/restore wired up.** `SolveCellTab`/`PanelCard` had no
+  `get_state`/`set_state` at all — `app.py`'s per-tab save loop
+  (`_serialize_workspace`/`_apply_workspace_state`) silently skips any tab
+  missing those two methods, so Solve Cell's panel configuration was never
+  written into a saved `.h5` project and reopening one always came back to a
+  single empty default panel. Added both, following the same contract (and
+  `widgets_to_dict`/`apply_dict_to_widgets` helpers) every other tab already
+  uses. Restores configuration only, not computed results — Ingest/Diamond
+  filter/Ab-initio/Refine outputs are not recomputed, matching the
+  documented convention for every other tab (`MainWindow.
+  _apply_workspace_state`'s own docstring: re-click the stage's own button
+  to reproduce them). `PanelCard`'s calibration is file-path-loaded rather
+  than typed in (2026-10-04 entry below), so its state just remembers the
+  loaded path and replays it through new `_load_calib_from_path` (factored
+  out of `_load_calib_file` so the dialog handler and the restore path share
+  one implementation) — a project saved before that calibration file was
+  moved or deleted degrades to "no calibration loaded" (the same state a
+  fresh panel starts in), not a crash. Panels are user-added/removed
+  (unlike `HydraCalibrationPage`'s fixed panel-card set), so there is no
+  existing by-index slot to restore into — `set_state` tears down every
+  current panel tab and rebuilds from the saved panel-id-keyed dict instead.
+- **Detector tab: "Background-subtracted" renamed to "Calculated
+  background."** User-reported after looking at a real run's rendered
+  preview: what's shown reads as a single background image, not a
+  subtracted signal. Confirmed from `midas_defect.ingest.
+  subtract_background`'s own source that the underlying array
+  (`pipeline._stage_ingest`'s `bg_choice.stack`) genuinely is
+  frame-minus-background, not the background map itself — but the UI label
+  was still misleading regardless of what's technically correct, so renamed
+  it. Combo text + tooltip only; the internal `preview[
+  "background_subtracted"]` dict key is untouched (tests and `pipeline.py`
+  both key off it, and that name is still accurate there).
+- **Detector tab: pan/zoom no longer resets on a Stage combo switch.**
+  `_set_detector_image`'s one "is this a fresh frame" flag folded `stage`
+  into its identity tuple, so switching Raw↔Corrected (same detector, same
+  zoom) looked exactly like loading a brand-new image and `autorange()`'d
+  every time — undoing a zoom the user had just set up to compare stages.
+  Split into two independent flags: `autorange` now keys only on frame
+  *shape* (a zoom reset only makes sense when the detector size actually
+  changes), while `reset_levels` still keys on `(shape, stage)` as before —
+  the color window SHOULD still reset per stage, since Background-subtracted/
+  Mask carry genuinely different data ranges than Raw/Corrected and reusing
+  a stale level window would just render blank.
+- **Reciprocal-space map: red cross at q=0.** Drawn inside
+  `_reset_recip_axes` (not `_update_recip_plot`) so it persists across every
+  replot, including the empty pre-Ingest state — one
+  `ax.scatter([0],[0],[0], marker="+", c="red")` call, no new state to track.
+
+**Verified:** `tests/test_solve_cell_ui.py` (+6, 28/28 green per-file): a
+`get_state`/`set_state` round trip across two panels with different loaded
+calibrations and stage-widget values (including which panel was active),
+an empty-state no-op, the renamed combo label, the autorange/reset_levels
+split via a monkeypatched `set_raw_frame` spy, and two origin-cross
+presence checks (axes-reset state, and alongside real scattered data).
+`tests/test_solve_cell_pipeline.py` (24/24, unaffected). `test_smoke.py`:
+first run showed 11 SIGABRTs, all in tests unrelated to this change
+(pump-probe, tab-closing, colormap, …) — re-ran green 13/13 on a fresh
+`HOME`, confirming the documented pre-existing non-deterministic
+interpreter-teardown flake (STATE.md), not a regression. `pyflakes` clean
+on `tab_solve_cell.py`. Offscreen screenshots confirmed the red origin
+cross renders among real scattered points and the Detector combo now reads
+"Calculated background (after Ingest)".
+**Not verified:** no real Ingest run available locally to eyeball the
+renamed stage's actual preview image against a real background (same
+raw-HDF5 availability gap as the ingest-performance entry below); the
+save/restore fix is exercised via the `get_state`/`set_state` round trip
+directly rather than through an actual `.h5` project file write/read —
+`project.write_gui_workspace`/`read_workspace_tab` are generic and already
+covered by other tabs' own tests (same convention every other tab's state
+test follows, e.g. `test_calibrate_state_restore.py`), so this isn't
+considered a gap the way the ingest one is.
+
+## 2026-10-04 — Solve Cell ingest performance; 3-D q-map via matplotlib not pyqtgraph.opengl; new Detector view design
+
+**Performance root cause, found by profiling (not guessing).** The intuitive
+suspect for slow `Run Ingest` was the full-stack `float64` upcast. Measuring
+on a real 2880×2880, ~587-frame dataset showed the actual dominant cost is
+`choose_sectors()` (`midas_defect.ingest`): it grid-searches 5 azimuth-sector
+candidates `(1,8,24,48,96)`, each a full per-frame `subtract_background` +
+`count_signed_blobs` pass (measured ~660ms–1.4s/frame depending on sector
+count → ~50+ minutes total for the search alone). On top of that,
+`_stage_ingest` was **redundantly rerunning `subtract_background` a 6th
+time** at the winning `n_sectors`, even though `choose_sectors` already
+computed and threw away that exact result as `BackgroundChoice.stack` — a
+leftover comment claimed this matched "the reference scripts verbatim," but
+the two calls have identical arguments to a deterministic function, so the
+claim implies they're identical, not that the duplication is load-bearing.
+**Verified bit-identical** (`np.array_equal`) on synthetic data before
+removing it — not assumed from reading the code.
+
+- Fixed in-repo: `sub = bg_choice.stack` (removes the redundant pass);
+  `blobs.sector_candidates` GUI/cfg override (lets a narrowed search skip
+  candidates once a panel/geometry's winning count is known); `float64` →
+  `float32` + in-place arithmetic in `_apply_stack_corrections` (the old
+  float64 stack alone was ~39 GB for this dataset size, exceeding this
+  machine's 36 GB RAM); the `DataLoaderPanel.full_stack()` disk read (~10 GB
+  for an HDF5 source) moved from the GUI thread into
+  `SolveCellWorker.run()`, via a new `cfg["frames_loader"]` convention
+  (worker resolves it into `cfg["frames"]` on its own thread) rather than
+  changing `pipeline.py`'s contract.
+- **Explicitly NOT fixed**: `subtract_background`'s per-frame Python loop is
+  embarrassingly parallel and would gain ~8–10x on a 12-core machine, but
+  that loop lives inside `midas_defect`, not this repo — out of scope right
+  now per explicit user instruction ("can't do anything there right now").
+  Worth an upstream feature request later, same pattern as the
+  `midas_integrate_backend_limitations` memory tracks for other backends.
+
+**3-D reciprocal-space map: matplotlib `mplot3d`, not `pyqtgraph.opengl`.**
+`documentation/solve_cell_handoff.md` §9.2 had already named both options as
+an open question and deferred the decision to Phase 5. Decided now (feature
+was explicitly requested) in favor of matplotlib because: (a) `PyOpenGL`
+(required by `pyqtgraph.opengl.GLScatterPlotItem`) is not installed in this
+environment and would be a new native-extension dependency — this project
+already has one open, unresolved native-dependency/Windows import failure
+(the `lheald` `midas_calibrate_v2` issue in STATE.md), so a new native dep
+for a visualization feature is a worse risk/reward trade than necessary; (b)
+matplotlib is already a pinned dependency and already used for exactly this
+"pyqtgraph can't do it" situation twice in this codebase
+(`peak_fit_panel.py`, `tab_zarrviewer.py`), so this is the third instance of
+an established pattern, not a new one; (c) `mplot3d` gives free mouse-drag
+rotation with zero extra code. Verified matplotlib 3.8.4 (the pinned
+version) auto-registers the `'3d'` projection on import — no explicit
+`mpl_toolkits.mplot3d` import needed, confirmed by testing rather than
+assumed, which also meant dropping that import avoided a new pyflakes
+warning for an otherwise-legitimate side-effect import.
+
+**Detector view: no existing spec, designed to match `tab_batch.py`'s own
+"Detector view" precedent rather than inventing a new pattern.** The handoff
+doc has zero mention of a detector-frame preview (confirmed by search before
+designing). `midas_gui/tab_batch.py` already has an almost identically-named
+feature (`self._det_view = ImageViewer()`, added to its own `self._view_tabs`
+`QTabWidget`) wired to `DataLoaderPanel.dataChanged`/`fieldsChanged` for live
+refresh — reused that exact pattern rather than building a bespoke one or
+falling back to a manual "Refresh" button (the original plan's fallback,
+written before this precedent was found; upgraded once `dataChanged`/
+`fieldsChanged` were confirmed to exist on `DataLoaderPanel`). Raw/Corrected
+read live from the loader (no Ingest run needed, matching Batch's own
+"preview before you commit to a real run" philosophy); Background-subtracted/
+Mask can only come from an actual Ingest run (the background model needs the
+whole stack), so `_stage_ingest` gained a `preview_frame_index` cfg key and
+returns a `preview` dict holding exactly **one** frame's subtracted image +
+the mask — deliberately not the whole subtracted stack, which would
+reintroduce the memory pressure this same change was fixing. The frame index
+requested is the loader's own current frame index (into the *originally
+loaded* stack); the pipeline clamps it into the *kept* stack (post omega-
+window + live-frame filtering) and reports which index it actually used, so
+when frames are dropped the Detector tab's label is still honest ("frame N
+of the kept stack") rather than silently wrong.
 
 Two related simplifications to `PanelCard` (`midas_gui/tab_solve_cell.py`),
 both user-requested after reviewing the just-landed per-panel calibration

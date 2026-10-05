@@ -258,6 +258,45 @@ def test_load_calib_file_shows_but_does_not_use_nonzero_tx(tab, monkeypatch):
     assert "tx" not in panel.geometry_cfg()
 
 
+# ── reciprocal-space map (3-D) / Detector view ──────────────────────────
+
+def test_view_tabs_have_recip_map_and_detector(tab):
+    titles = [tab._view_tabs.tabText(i) for i in range(tab._view_tabs.count())]
+    assert "Reciprocal space map" in titles
+    assert "Detector" in titles
+    assert tab._recip_ax.name == "3d"
+
+
+def test_update_recip_plot_accepts_xyz_tuples_without_raising(tab):
+    import numpy as np
+    x, y, z = np.array([0.1, 0.2]), np.array([0.3, 0.4]), np.array([0.5, 0.6])
+    tab._update_recip_plot(all_xyz=(x, y, z), diamond_xyz=(x, y, z), indexed_xyz=(x, y, z))
+    tab._update_recip_plot()   # all-None (e.g. zero spots) must not raise either
+
+
+def test_detector_stage_switch_with_no_data_loaded_does_not_raise(tab):
+    for i in range(tab._det_stage.count()):
+        tab._det_stage.setCurrentIndex(i)
+    assert "Run Ingest" in tab._det_frame_lbl.text() or "no data" in tab._det_frame_lbl.text()
+
+
+def test_detector_tab_tracks_active_panel_switch(tab):
+    tab._det_stage.setCurrentIndex(0)   # Raw
+    tab._add_panel()
+    assert tab._det_slider.isEnabled() is False   # fresh panel, no data loaded
+
+
+def test_sector_candidates_cfg_defaults_and_parses_override(tab):
+    from midas_gui.solve_cell import pipeline as P
+    assert tab._sector_candidates_cfg() == P.SECTOR_CANDIDATES_DEFAULT
+    tab._sector_candidates_ed.setText("8, 24")
+    assert tab._sector_candidates_cfg() == (8, 24)
+    tab._sector_candidates_ed.setText("not a number")
+    assert tab._sector_candidates_cfg() == P.SECTOR_CANDIDATES_DEFAULT
+    tab._sector_candidates_ed.setText("")
+    assert tab._sector_candidates_cfg() == P.SECTOR_CANDIDATES_DEFAULT
+
+
 def test_load_calib_file_reports_error_on_bad_file(tab, monkeypatch):
     from PyQt5 import QtWidgets
     bad_dir = Path(tempfile.mkdtemp(prefix="mg_solvecell_bad_"))
@@ -272,3 +311,135 @@ def test_load_calib_file_reports_error_on_bad_file(tab, monkeypatch):
                         staticmethod(lambda *a: critical.setdefault("hit", True)))
     tab._active_panel()._load_calib_file()
     assert critical.get("hit") is True
+
+
+# ── GUI state (project save/restore) ────────────────────────────────────
+
+def test_get_state_set_state_round_trips_panels_and_stage_fields(tab, monkeypatch):
+    from PyQt5 import QtWidgets
+    path1 = _write_calib_json(Lsd=111.0)
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog, "getOpenFileName",
+        staticmethod(lambda *a, **k: (path1, "")))
+    first = tab._active_panel()
+    first._load_calib_file()
+    first._ome_first_deg.setValue(5.0)
+
+    path2 = _write_calib_json(Lsd=222.0)
+    second = tab._add_panel()
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog, "getOpenFileName",
+        staticmethod(lambda *a, **k: (path2, "")))
+    second._load_calib_file()
+
+    tab._proj_ed.setText("/tmp/some_solve_cell_project")
+    tab._low_count.setValue(12.5)
+    tab._sector_candidates_ed.setText("8,24")
+
+    state = tab.get_state()
+
+    restored = type(tab)()
+    restored.set_state(state)
+
+    assert restored._panel_tabs.count() == 2
+    ids = sorted(tab._panels.keys())
+    restored_ids = sorted(restored._panels.keys())
+    assert restored_ids == ids
+    restored_first = restored._panels[ids[0]]
+    restored_second = restored._panels[ids[1]]
+    assert restored_first.has_calibration() and restored_second.has_calibration()
+    assert restored_first.geometry_cfg()["Lsd"] == pytest.approx(111.0)
+    assert restored_second.geometry_cfg()["Lsd"] == pytest.approx(222.0)
+    assert restored_first._ome_first_deg.value() == pytest.approx(5.0)
+    assert restored._proj_ed.text() == "/tmp/some_solve_cell_project"
+    assert restored._low_count.value() == pytest.approx(12.5)
+    assert restored._sector_candidates_cfg() == (8, 24)
+    # `second` was the active panel when get_state() ran -- restore must
+    # reproduce that, not default back to the first tab.
+    assert restored._panel_tabs.currentWidget() is restored_second
+
+
+def test_set_state_with_no_panels_key_leaves_default_panel_alone(tab):
+    tab.set_state({})
+    assert tab._panel_tabs.count() == 1
+    tab.set_state({"fields": {"low_count": 3.0}})
+    assert tab._low_count.value() == pytest.approx(3.0)
+    assert tab._panel_tabs.count() == 1
+
+
+# ── Detector tab: renamed stage + zoom preserved across stage switch ────
+
+def test_detector_stage_background_label_says_calculated_background(tab):
+    items = [tab._det_stage.itemText(i) for i in range(tab._det_stage.count())]
+    assert "Calculated background (after Ingest)" in items
+    assert not any("Background-subtracted" in t for t in items)
+
+
+def test_detector_max_projection_stage_shows_spot_absent_from_single_frame(tab):
+    """A spot only present on one frame must still render on the max-
+    projection stage even when the captured single-frame preview has none --
+    the real failure mode reported against Ge-oP32 c1 data, where the
+    single-frame view read as "no background computed"."""
+    import numpy as np
+
+    single = np.zeros((8, 8), dtype=np.float32)
+    projection = np.zeros((8, 8), dtype=np.float32)
+    projection[3, 3] = 500.0
+    tab._ingest_preview = {
+        "frame_index": 3,
+        "background_subtracted": single,
+        "background_subtracted_max_projection": projection,
+        "mask": np.zeros((8, 8), dtype=bool),
+    }
+    items = [tab._det_stage.itemText(i) for i in range(tab._det_stage.count())]
+    max_proj_idx = next(i for i, t in enumerate(items) if "max over rotation" in t)
+
+    seen = {}
+
+    def fake_set_raw_frame(frame, im_trans, **kw):
+        seen["frame"] = frame
+        return frame
+
+    tab._det_view.set_raw_frame = fake_set_raw_frame
+    tab._det_stage.setCurrentIndex(max_proj_idx)
+    assert seen["frame"][3, 3] == 500.0
+    assert "max over every kept" in tab._det_frame_lbl.text()
+
+
+def test_set_detector_image_preserves_zoom_across_stage_switch_same_shape(tab):
+    import numpy as np
+    calls = []
+
+    def fake_set_raw_frame(frame, im_trans, *, autorange=True, reset_levels=True):
+        calls.append({"autorange": autorange, "reset_levels": reset_levels})
+        return frame
+
+    tab._det_view.set_raw_frame = fake_set_raw_frame
+    frame = np.zeros((10, 10), dtype=np.float32)
+
+    tab._set_detector_image(frame, 0)   # first draw of this shape
+    tab._set_detector_image(frame, 1)   # same shape, different stage
+    tab._set_detector_image(frame, 2)   # same shape, yet another stage
+    assert calls[0]["autorange"] is True
+    assert calls[1]["autorange"] is False   # zoom must not reset on a stage switch
+    assert calls[1]["reset_levels"] is True  # color window still refreshes per stage
+    assert calls[2]["autorange"] is False
+
+    bigger = np.zeros((20, 20), dtype=np.float32)
+    tab._set_detector_image(bigger, 2)
+    assert calls[3]["autorange"] is True   # a genuinely new detector size does reset zoom
+
+
+# ── reciprocal-space map: red origin cross ──────────────────────────────
+
+def test_recip_axes_always_show_a_red_origin_cross(tab):
+    assert len(tab._recip_ax.collections) == 1
+    fc = tab._recip_ax.collections[0].get_facecolor()
+    assert fc[0][0] > 0.9 and fc[0][1] < 0.1 and fc[0][2] < 0.1
+
+
+def test_update_recip_plot_keeps_origin_marker_alongside_data(tab):
+    import numpy as np
+    x, y, z = np.array([0.1]), np.array([0.2]), np.array([0.3])
+    tab._update_recip_plot(all_xyz=(x, y, z))
+    assert len(tab._recip_ax.collections) == 2

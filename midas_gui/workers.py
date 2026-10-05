@@ -4368,7 +4368,17 @@ class DriftWorker(QtCore.QThread):
 class SolveCellWorker(QtCore.QThread):
     """Runs one Solve Cell pipeline stage (ingest/diamond_filter/ab_initio/
     refine) off the GUI thread. See midas_gui/solve_cell/pipeline.py — this
-    worker is a thin dispatcher, no pipeline logic lives here."""
+    worker is a thin dispatcher, no pipeline logic lives here.
+
+    ``cfg["frames_loader"]`` (a zero-arg callable, e.g. a ``DataLoaderPanel``'s
+    ``full_stack`` bound method) is resolved into ``cfg["frames"]`` here, on
+    this thread, rather than by the GUI caller before starting the worker —
+    for an HDF5-backed stack that read can be ~10 GB of synchronous disk I/O,
+    and doing it on the GUI thread froze the window with no progress shown
+    for the whole read before "Running ingest…" even had a chance to mean
+    anything. ``pipeline.py`` itself is untouched: it still just expects
+    ``cfg["frames"]`` to already be an array.
+    """
     log_line = QtCore.pyqtSignal(str)
     finished = QtCore.pyqtSignal(object)
     failed   = QtCore.pyqtSignal(str)
@@ -4384,6 +4394,9 @@ class SolveCellWorker(QtCore.QThread):
         stream = _LogStream(self.log_line)
         sys.stdout = sys.stderr = stream
         try:
+            if "frames_loader" in self._cfg and "frames" not in self._cfg:
+                loader = self._cfg.pop("frames_loader")
+                self._cfg["frames"] = loader()
             from midas_gui.solve_cell import pipeline
             result = pipeline.run_stage(self._stage, self._cfg)
             self.finished.emit(result)

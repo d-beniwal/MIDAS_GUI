@@ -301,6 +301,103 @@ def test_ingest_applies_dark_correction_before_blob_finding(tmp_path):
     assert len(out["spots_df"]) >= 1
 
 
+def test_ingest_honors_sector_candidates_override(tmp_path):
+    """A narrowed `blobs.sector_candidates` should be the only count
+    choose_sectors considers -- cuts the full-stack search proportionally
+    once a panel/geometry's winning n_sectors is already known."""
+    rng = np.random.default_rng(5)
+    n_frames, nz, ny = 20, 64, 64
+    frames = rng.poisson(2.0, size=(n_frames, nz, ny)).astype(np.uint32)
+    frames[8:12, 30:34, 30:34] += 500
+    geometry = {
+        "Lsd": 150000.0, "BC_y": 32.0, "BC_z": 32.0, "ty": 0.0, "tz": 0.0,
+        "wavelength_A": 0.5, "px_um": 75.0, "nrpixels_y": ny, "nrpixels_z": nz,
+        "omega_ref_frame_idx": 0, "omega_ref_deg": -10.0,
+        "omega_last_frame_idx": n_frames - 1, "omega_step_deg": 1.0,
+    }
+    out = P._stage_ingest({
+        "frames": frames, "geometry": geometry,
+        "mask": {"low_count_threshold": 0.0, "grow": 1},
+        "blobs": {"threshold": 100.0, "min_vol": 4, "sector_candidates": (8,)},
+    })
+    assert out["summary"]["n_sectors"] == 8
+
+
+def test_ingest_preview_captures_requested_frame_background_subtracted_and_mask(tmp_path):
+    rng = np.random.default_rng(6)
+    n_frames, nz, ny = 20, 64, 64
+    frames = rng.poisson(2.0, size=(n_frames, nz, ny)).astype(np.uint32)
+    frames[8:12, 30:34, 30:34] += 500
+    geometry = {
+        "Lsd": 150000.0, "BC_y": 32.0, "BC_z": 32.0, "ty": 0.0, "tz": 0.0,
+        "wavelength_A": 0.5, "px_um": 75.0, "nrpixels_y": ny, "nrpixels_z": nz,
+        "omega_ref_frame_idx": 0, "omega_ref_deg": -10.0,
+        "omega_last_frame_idx": n_frames - 1, "omega_step_deg": 1.0,
+    }
+    out = P._stage_ingest({
+        "frames": frames, "geometry": geometry,
+        "mask": {"low_count_threshold": 0.0, "grow": 1},
+        "blobs": {"threshold": 100.0, "min_vol": 4},
+        "preview_frame_index": 3,
+    })
+    preview = out["preview"]
+    assert preview["frame_index"] == 3
+    assert preview["background_subtracted"].shape == (nz, ny)
+    assert preview["background_subtracted_max_projection"].shape == (nz, ny)
+    assert preview["mask"].shape == (nz, ny)
+    assert preview["mask"].dtype == bool
+
+
+def test_ingest_preview_max_projection_sees_a_spot_absent_from_the_requested_frame(tmp_path):
+    """The single-frame preview is a poor background-subtraction diagnostic:
+    a spot present in frame 9 is invisible in a single-frame preview of frame
+    3 (which has no spot), but the max projection must still show it -- this
+    is the real-data failure mode reported against Ge-oP32 c1 (STATE.md/
+    DECISIONS 2026-10-04): a near-empty single-frame view reading as "no
+    background computed" even though the subtraction worked."""
+    rng = np.random.default_rng(8)
+    n_frames, nz, ny = 20, 64, 64
+    frames = rng.poisson(2.0, size=(n_frames, nz, ny)).astype(np.uint32)
+    frames[9, 30:34, 30:34] += 500   # spot only on frame 9
+    geometry = {
+        "Lsd": 150000.0, "BC_y": 32.0, "BC_z": 32.0, "ty": 0.0, "tz": 0.0,
+        "wavelength_A": 0.5, "px_um": 75.0, "nrpixels_y": ny, "nrpixels_z": nz,
+        "omega_ref_frame_idx": 0, "omega_ref_deg": -10.0,
+        "omega_last_frame_idx": n_frames - 1, "omega_step_deg": 1.0,
+    }
+    out = P._stage_ingest({
+        "frames": frames, "geometry": geometry,
+        "mask": {"low_count_threshold": 0.0, "grow": 1},
+        "blobs": {"threshold": 100.0, "min_vol": 4},
+        "preview_frame_index": 3,
+    })
+    preview = out["preview"]
+    assert preview["frame_index"] == 3
+    assert preview["background_subtracted"].max() < 100.0   # no spot on frame 3
+    proj = preview["background_subtracted_max_projection"]
+    assert proj.shape == (nz, ny)
+    assert proj.max() > 100.0   # frame 9's spot survives into the projection
+
+
+def test_ingest_preview_clamps_out_of_range_frame_index(tmp_path):
+    rng = np.random.default_rng(7)
+    n_frames, nz, ny = 10, 32, 32
+    frames = rng.poisson(1.0, size=(n_frames, nz, ny)).astype(np.uint32)
+    geometry = {
+        "Lsd": 150000.0, "BC_y": 16.0, "BC_z": 16.0, "ty": 0.0, "tz": 0.0,
+        "wavelength_A": 0.5, "px_um": 75.0, "nrpixels_y": ny, "nrpixels_z": nz,
+        "omega_ref_frame_idx": 0, "omega_ref_deg": 0.0,
+        "omega_last_frame_idx": n_frames - 1, "omega_step_deg": 1.0,
+    }
+    out = P._stage_ingest({
+        "frames": frames, "geometry": geometry,
+        "mask": {"low_count_threshold": 0.0, "grow": 1},
+        "blobs": {"threshold": 1000.0, "min_vol": 4},
+        "preview_frame_index": 9999,
+    })
+    assert 0 <= out["preview"]["frame_index"] < n_frames
+
+
 def test_run_stage_dispatches_and_rejects_unknown_stage():
     with pytest.raises(ValueError, match="unknown solve-cell stage"):
         P.run_stage("not_a_real_stage", {})
