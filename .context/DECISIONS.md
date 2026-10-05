@@ -3,6 +3,307 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-05 (latest, 3) — Solve Cell: reciprocal-space viewer Panel/Crystal
+color modes, unindexed toggle, stats
+
+User-requested: a Panel color mode (spots colored by detector panel), a
+Crystal color mode (each domain plus diamond/gasket spots shown separately),
+a show/hide toggle for unindexed/spurious spots, and a stats breakdown that
+updates on every mode/toggle change.
+
+- **Diamond/gasket is not "unindexed/spurious" and is never hidden by the
+  toggle.** The request names them as separate concepts ("diamond or Re
+  gasket spots... shown separately" vs. "unindexed/spurious spots... option
+  to hide/show") — diamond is a *known*, physically-identified category
+  (`is_diamond`), whereas "unindexed/spurious" means genuinely unclassified
+  (not diamond, not claimed by any solved domain). The toggle therefore only
+  ever gates the leftover/unclaimed population.
+- **Diamond spots needed a new persistent `self._flagged_df`.** Before this
+  change, `_on_diamond_done` only kept a local `flagged` variable and
+  `self._candidate_df` — so diamond-flagged spots vanished from the plot the
+  moment Ab-initio or Refine ran (those redraw from `g_2pi`/domain data,
+  which never included diamond rows). Persisting the full post-filter table
+  is the one real data-model gap this closes; it costs nothing extra since
+  it's the same dataframe `_stage_diamond_filter` already returns.
+- **Panel-mode coloring reuses whatever dataframe/array already carries
+  `panel_id`, rather than mapping back through `spots_df`'s original index.**
+  `_stage_diamond_filter`'s `candidate_df = spots[~is_diamond].reset_index(
+  drop=True)` deliberately resets the index (so `claimed_index` values are
+  `candidate_df`-local positions, not `spots_df` row labels) — but
+  `panel_id` is a plain column that survives that reset untouched. So rather
+  than reconstructing a `candidate_df`-position → `spots_df`-original-index
+  mapping (which would've been needed to join back to `self._spots_df`),
+  every category (diamond rows, each domain's claimed rows, leftover rows)
+  just carries its own `panel_id` values directly: domains gained a new
+  `"panel_ids"` array alongside their existing `"xyz"`, fetched once at
+  domain-creation time via `candidate_df.loc[claimed_index, "panel_id"]`.
+  Simpler and avoids a second index-bookkeeping scheme alongside the
+  existing `_claimed_index` union.
+- **Panel mode defaults to index 0 (shown before Crystal) in the combo** —
+  it's useful immediately after Ingest, before any crystal has been solved,
+  unlike Crystal mode which has nothing interesting to show until at least a
+  diamond filter has run.
+- **No `pipeline.py` changes.** Every column needed (`panel_id`,
+  `is_diamond`, `qsample_x/y/z`) already existed; this is purely a
+  `tab_solve_cell.py` display-layer change. `_update_recip_plot`'s own
+  signature/behavior is untouched — the new `_refresh_recip_view()` sits one
+  layer above it, replacing the ad hoc `_update_recip_plot(...)` call sites
+  after Ingest/pooled-Ingest/Diamond Filter; `_update_multidomain_plot()` is
+  kept as a thin delegating wrapper so existing callers/tests needed no
+  changes.
+
+## 2026-10-05 (latest, 2) — Solve Cell: multi-panel pooled ingest
+
+User-requested: "implement the combination of multiple panels together in
+the ingest stage when multiple panels are provided along with their
+independent calibration" — the Phase 2 "multi-panel pooling" item STATE.md/
+`solve_cell_handoff.md` §10 had been carrying as open since Phase 1 landed.
+
+- **Why plain concatenation of independently-ingested panels is correct,
+  not an approximation.** `_stage_ingest` already converts each panel's own
+  blobs to `qsample` via `qlab_to_qsample` at that panel's own geometry and
+  the shared omega axis — i.e. into the ONE sample-frame coordinate system
+  every panel of the same rotation series shares, regardless of where that
+  panel physically sits. So pooling needs no new geometry math: ingest each
+  panel on its own, then concatenate. This isn't a new hypothesis — the
+  existing two-panel spinel regression test
+  (`test_ab_initio_and_refine_reproduce_known_spinel_cell_two_panels`)
+  already demonstrated exactly this, one stage downstream, by concatenating
+  two panels' own post-ingest `spots_g_candidate.csv` files and recovering a
+  cell closer to the known 6-panel pooled result than either panel alone.
+  New `test_pooling_by_concatenation_recovers_known_cell_without_real_
+  reference_data` pins the same invariant with synthetic data so it isn't
+  only checked when gated real reference files happen to be present locally.
+- **New `pipeline._stage_ingest_pooled` stage, not new logic in the GUI
+  worker.** Considered having `tab_solve_cell.py`/`workers.SolveCellWorker`
+  loop over panels and call the existing single-panel `"ingest"` stage N
+  times, combining results in the GUI. Rejected: `run_stage` is documented
+  as "the sole entry point a worker thread calls," and a pure pipeline
+  function keeps the combine logic unit-testable without Qt (see the new
+  tests in `test_solve_cell_pipeline.py`) and keeps `workers.py` completely
+  unchanged — no new branching there at all, since `cfg["panels"]` has no
+  top-level `frames_loader` key, so the existing single-panel resolution
+  code path in `SolveCellWorker.run()` naturally no-ops for the pooled case.
+- **Per-panel raw-frame loading is sequential and discarded between panels,
+  not resolved eagerly up front.** A pooled cfg's `frames_loader` callables
+  are resolved ONE AT A TIME inside `_stage_ingest_pooled` itself (a
+  deliberate, documented deviation from the single-panel stage's contract,
+  where the caller resolves `frames_loader` before calling `run_stage`) —
+  resolving every panel's loader before starting would hold every
+  configured panel's full raw stack in memory simultaneously, multiplying
+  by panel count the exact memory pressure the 2026-10-04 single-panel
+  ingest performance fix already had to solve (a 587-frame 2880² float64
+  stack alone was ~39 GB on a 36 GB machine). New
+  `test_ingest_pooled_drops_each_panels_frame_stack_before_loading_the_next`
+  pins this by confirming each panel's cfg dict no longer references its
+  resolved frame array once that panel's own `_stage_ingest` call returns.
+- **A not-ready panel tab is skipped, not blocking.** `_run_ingest` checks
+  every configured panel (not just the active one) for its own calibration +
+  data + no pending fields; panels missing one of those are logged and
+  excluded rather than raising a blocking dialog — a user can keep an extra
+  scratch/unconfigured panel tab around without it breaking the main run.
+  With exactly one ready panel the single-panel `"ingest"` stage is used
+  unchanged (same cfg shape as before Phase 2, verified by the pre-existing
+  test suite staying green with no edits).
+- **Diamond filter/ab-initio/refine/index-remaining-spots needed ZERO
+  changes.** They were already panel-agnostic, operating purely on whatever
+  `spots_df`/`candidate_df` ingest handed them — pooling only had to happen
+  once, at the ingest boundary.
+- **The Detector tab had one real latent bug this surfaced**: it kept a
+  single `self._ingest_preview`/implicit "last ingest run" preview with no
+  per-panel awareness, so switching panel tabs after ingesting panel A and
+  looking at "Calculated background" would have silently shown panel A's
+  preview mislabeled as panel B's. Fixed as part of this work (not a separate
+  task) since per-panel preview correctness is central to what multi-panel
+  support means: new `_ingest_preview_by_panel` dict keyed by panel id,
+  consulted first by `_refresh_detector_preview`, with the old single
+  `_ingest_preview` kept as a fallback (and still directly settable, as an
+  existing test does). The spot overlay (`_update_spot_overlay`) similarly
+  now filters a pooled `spots_df` to the active panel's own `panel_id`
+  before drawing — `row`/`col` are per-panel pixel coordinates, so pooled
+  rows from another panel must never be drawn on this panel's frame.
+- **Provenance logging**: a pooled run logs one ingest attempt per panel,
+  under that panel's own `panel_key`, exactly as a single-panel run would
+  have — a pooled run is just every ready panel's own ingest executed back
+  to back, so its FAIR provenance record reads the same way. No schema
+  change to `project.append_solve_cell_ingest_attempt` was needed (it
+  already writes whatever columns a `spots_df` carries, so the new
+  `panel_id` column is harmless there too).
+
+**Verified**: `tests/test_solve_cell_pipeline.py` 34/34 (+6: tagging/
+concatenation, per-panel-dir + pooled-dir writing, sequential frame-loading
+discipline, empty-panel-list error, synthetic two-panel cell recovery,
+`run_stage` dispatch), `tests/test_solve_cell_ui.py` 52/52 (+8: pooled vs.
+single-panel dispatch routing, not-ready-panel skip, pooled completion
+handler, panel-filtered spot overlay, per-panel pooled provenance write),
+`tests/test_project.py` 29/30 (the one known pre-existing
+`test_apply_project_calibration_single_detector` SIGABRT),
+`tests/test_smoke.py` 13/13 — all per-file on a clean `HOME` (a combined
+`tests/` run hit the documented `--forked`/`--basetemp` race, not a
+regression — confirmed by rerunning the affected files individually, all
+green). `pyflakes` clean on every touched file. A real, non-mocked two-panel
+run through an actual `QThread`-backed `SolveCellWorker` (offscreen Qt,
+synthetic frames, each panel its own calibration file) confirmed the
+combined `spots_df` carries both panel ids with the right per-panel spot
+counts and the correct "N spots across 2 panels" status text.
+**One hazard found and fixed while writing the UI tests**: `_add_panel()`
+switches the active panel tab to the newly-added one, so a test that adds a
+second (deliberately unconfigured) panel and then calls `_run_ingest()`
+without switching back hits `_run_ingest`'s own active-panel calibration
+guard against that unconfigured panel — which opens a REAL, blocking
+`QtWidgets.QMessageBox.warning` dialog if the test didn't also monkeypatch
+it, hanging the forked test process indefinitely. Not a product bug (a real
+user would simply be looking at the tab they meant to configure), but worth
+remembering for any future test that adds a panel and then drives ingest.
+
+## 2026-10-05 — Solve Cell: repeatable leftover-spot re-indexing (multi-domain), scope decisions
+
+User-requested: round 1 only ever produces one refined cell, discarding
+whatever `index_ab_initio` doesn't assign (`AbInitioResult.indexed_mask`) —
+in real DAC data this leftover pool can be large (54% in the Ge-oP32
+reference case) and often a second diffracting domain, not noise. Added a
+repeatable "Index remaining spots" step. Scope was narrowed with the user
+via explicit questions before implementation (handoff §9.3 had flagged this
+exact multi-domain UX as an open question not to default silently on):
+
+- **Known-cell method = from-scratch random-orientation search, not a
+  cheaper "test against round 1's own UB."** Confirmed first, by reading
+  `midas_hkls.cell_constrained`/`cell_series` in full, that no existing
+  function does "known cell, unknown orientation, find the match" —
+  everything in both modules requires `hkl` already assigned per g-vector.
+  So this is genuinely new code: `pipeline._stage_index_known_cell`
+  implements the handoff's §5.4.2 pseudocode close to verbatim
+  (`_random_rotation_search`: chunked `Rotation.random` + vectorized hkl
+  residual check), gated by a null test (identical search against
+  direction-scrambled g-vectors — same `|g|`, randomized direction) that
+  must be cleared by both an absolute floor (`min_accept`, default 20) and a
+  z-score (default 5.0) before the match is trusted, then a free refine
+  (cell **and** orientation both open — the seed is a hypothesis per the
+  handoff, never a constraint) from the winning seed. A negative result
+  (`success=False`) is a normal, reported outcome, not an exception —
+  verified both directions on synthetic data (recovers a planted second
+  domain's cell; correctly refuses a pure-noise leftover pool).
+- **B-matrix built from `midas_hkls`'s public `Lattice.
+  reciprocal_cartesian_vectors()`, not a locally re-derived formula.**
+  `cell_constrained.py`'s own `_B_of` does exactly this (private, so not
+  imported directly) — reusing the public `Lattice` class gets the same
+  validated crystallography without a second unvalidated copy of the
+  triclinic B-matrix math, and without depending on a private API.
+- **Known cell = always the most recently solved domain's own refined
+  cell** (not a materials-list picker, not manual entry) — the smallest
+  useful version first, confirmed with the user; a materials-list source
+  would be natural future work if asked for, not implied here.
+- **Fully repeatable, one unified domain list — not a single second
+  result slot.** Round 1's own refine result becomes "Domain 1" in a new
+  `QListWidget` (`tab_solve_cell.py`), not kept specially separate from
+  later rounds; each further "Index Remaining Spots" success appends
+  another domain. Re-running Refine (round 1) **replaces** Domain 1 rather
+  than appending a duplicate (`_replace_domain` recomputes the claimed-index
+  union from scratch across every domain) — otherwise two button clicks of
+  an existing control would silently double-claim the same reflections.
+- **Session-only — no new `project.py` persistence for any round**,
+  matching today's diamond-filter/ab-initio/refine (only ingest is
+  persisted, per the 2026-10-05 (earlier) entry below). Persisting every
+  round's result would touch `project.py` meaningfully and was explicitly
+  deferred as a separate, larger follow-up rather than bundled in here.
+- **Leftover tracking lives entirely in the GUI tab, not in `pipeline.py`.**
+  The approved plan called for echoing a `candidate_index` array out of
+  `_stage_ab_initio`'s return dict so leftover rows could be recovered by
+  label — dropped during implementation as unnecessary: the GUI already
+  holds the exact `candidate_df`/`leftover_df` object it hands to any
+  ab-initio call (round 1 or a later "free" round), and `_stage_ab_initio`
+  performs no row reordering/filtering, so `leftover_df.index` already *is*
+  the correspondence without the pipeline needing to say so again.
+  `self._claimed_index` (a growing `pd.Index`, built via `.union()` without
+  ever importing `pandas` directly in `tab_solve_cell.py`) is the single
+  source of truth for "already spoken for"; `_on_diamond_done` resets it
+  along with the whole domain list whenever a new `candidate_df` is
+  produced, since `_stage_diamond_filter` always rebuilds that frame with a
+  fresh `0..N-1` index — a stale `_claimed_index` from a previous run could
+  otherwise silently claim the wrong rows of the new one.
+
+**Verified:** `tests/test_solve_cell_pipeline.py` (+3: known-cell search
+recovers a synthetic second domain's cell, rejects a pure-noise pool,
+refuses below its `min_accept` floor without searching — 32/32 green
+per-file), `tests/test_solve_cell_ui.py` (+12: domain bookkeeping/leftover
+exclusion, no double-claiming across domains, round-1 rerun replaces rather
+than duplicates, negative/positive "index remaining" outcomes, multi-domain
+3-D plot update, diamond-filter rerun resets stale domain state — 47/47
+green per-file). `pyflakes` clean on every touched file. Offscreen
+screenshot of a real (non-mocked) two-round run — synthetic two-domain pool,
+actual `pipeline.run_stage` calls for ab_initio/refine/index_known_cell —
+confirmed the domain list shows two entries and the 3-D plot renders them in
+two distinct colors (blue/orange) plus grey leftover.
+**Not verified:** no real multi-domain DAC dataset available locally to
+confirm the known-cell search's default `n_search`/`min_accept`/`z_thresh`
+are well-tuned against real (not synthetic) leftover-pool statistics — the
+Ge-oP32 c1 reference run that motivated this feature has not itself been
+re-run with "Index Remaining Spots" against its own large leftover pool.
+
+## 2026-10-05 — Solve Cell: spot-circle semantics (nearest frame only, not blob-width span), and ingest-only project persistence (not diamond/ab-initio/refine)
+
+Two scope decisions made while implementing "circle ingest spots on the
+Detector view as you scrub frames" + "save ingest results into the project":
+
+**Spot visibility = exact nearest-frame match, not a blob-width window.**
+Each ingest spot is a 3-D blob with an `n_frames` width (it can genuinely
+span a few consecutive frames), and its `frame` column is a fractional
+centroid. Asked the user directly whether a spot's circle should render only
+on its single nearest frame (rounded centroid) or stay visible across its
+whole blob span (`frame ± n_frames/2`). Chose nearest-frame-only: simpler,
+and literally what "closest frame" means per spot — each spot's rounded
+centroid frame already *is* its closest frame, no extra windowing logic
+needed. A spot's circle appears and disappears as the scrub bar crosses that
+one frame, which is the expected behavior for a rotation series (a given
+reflection is only "on" a detector frame for a narrow angular range).
+
+**`loaded_frame_idx` added to `spots_df` rather than doing the frame-index
+conversion in the GUI via an omega round-trip.** `spots_df["frame"]` indexes
+the *kept* stack (after the omega-window + `live_frames` filtering
+`_stage_ingest` already does), while a GUI's `DataLoaderPanel.frame_index()`
+indexes the *originally loaded* stack — two different axes. The omega
+column alone (`omega = omega_ref_deg + (loaded_idx − omega_ref_frame_idx) ×
+omega_step_deg`) is in principle enough to invert back to a loaded index,
+but that's fragile (breaks at `omega_step_deg == 0`, a real case — a
+stationary/still exposure) and duplicates logic `_stage_ingest` already has
+inline as `omega_window_mask`/`live_mask`. Instead `_stage_ingest` computes
+`kept_loaded_idx = idx_loaded[omega_window_mask][live_mask]` — pure index
+bookkeeping over arrays it already holds, no new computation — and uses it
+to add `spots_df["loaded_frame_idx"]` and `preview["loaded_frame_index"]`.
+One robust, explicit mapping instead of an implicit affine assumption
+re-derived in two places.
+
+**Project persistence scoped to the ingest stage only.** The user's request
+named "the solve-cell ingest results" specifically, matching how Batch
+Integrate logs its own results via `project.append_integration_attempt`.
+Diamond filter/ab-initio/refine stay session-only (as they already were) —
+not an oversight, a deliberate scope cut; extending the same
+`append_*_attempt` pattern to the later stages is natural future work if
+asked for, not implied by this request.
+
+**`inputs` for the new `project.append_solve_cell_ingest_attempt` call is
+rebuilt fresh from panel/widget state in `_log_ingest_to_project`, not
+reused from the `cfg` dict handed to `SolveCellWorker`.** That dict is
+mutated in place by `SolveCellWorker.run()` (`cfg.pop("frames_loader")` /
+`cfg["frames"] = loader()`, resolving the lazy loader into the fully
+materialized raw stack array, on the worker thread) — by the time
+`_on_ingest_done` runs, the tab's own reference to that same dict object
+would carry a multi-GB array if reused for logging. Geometry/corrections/
+mask/blob-param values are all still trivially re-readable straight off
+`PanelCard`/the stage-param widgets at that point, so there's no need to
+thread a separate "loggable inputs" snapshot through the worker at all.
+
+**`spots_df` embedded whole as one compound HDF5 dataset** (new
+`project._write_dataframe`/`_read_dataframe`, `df.to_records(index=False)`)
+rather than one dataset per column, unlike `append_integration_attempt`'s
+column-by-column `results/profiles`/`results/r_axis_px`/etc. `spots_df`'s
+schema comes from `midas_defect.ingest.find_blobs_3d`'s `SPOT_COLUMNS` plus
+columns `_stage_ingest` appends itself — both can grow over time, and a
+whole-dataframe embed stays correct without touching `project.py` when they
+do, at the cost of a slightly less self-describing HDF5 layout (a reader
+needs `np.asarray(dset)`'s field names, not a flat list of sibling
+datasets).
+
 ## 2026-10-04 (latest, 2) — Solve Cell: "background almost non-existent" was a Detector-view diagnostic gap, not an ingest bug; added a max-over-rotation projection
 
 User-reported after running Ingest for real on

@@ -958,6 +958,75 @@ def append_integration_attempt(project_path, panel_key, *, inputs, finished_payl
     return f"/analysis/integrate/{panel_key}/{name}"
 
 
+def _write_dataframe(group, name: str, df) -> None:
+    """Embed a pandas DataFrame whole as one compound HDF5 dataset, rather
+    than column-by-column — a Solve Cell ``spots_df``'s schema comes from
+    ``midas_defect`` and can grow, so this stays correct without edits here."""
+    arr = np.asarray(df.to_records(index=False))
+    kwargs = dict(compression="gzip", compression_opts=4, chunks=True) if arr.size > 0 else {}
+    group.create_dataset(name, data=arr, **kwargs)
+
+
+def _read_dataframe(group, name: str):
+    import pandas as pd
+    return pd.DataFrame(np.asarray(group[name][()]))
+
+
+def append_solve_cell_ingest_attempt(project_path, panel_key, *, inputs, summary,
+                                      spots_df, mask: Optional[np.ndarray] = None,
+                                      extra: Optional[dict] = None) -> str:
+    """Append one Solve Cell ingest-stage result to
+    ``/analysis/solve_cell/<panel_key>/attempt_NNNN`` — same append-only,
+    crash-safe pattern as :func:`append_integration_attempt`. Diamond
+    filter/ab-initio/refine results are not logged here; this covers the
+    ingest stage only (the spot table + run summary)."""
+    metadata = {
+        "timestamp_utc": _now_iso(),
+        "panel_key": panel_key,
+        "inputs": _hash_paths_in(inputs or {}),
+        "summary": summary,
+        "n_spots": int(len(spots_df)) if spots_df is not None else 0,
+        "environment": environment_snapshot(),
+        "mask_present": mask is not None,
+    }
+    if extra:
+        metadata.update(extra)
+
+    def _build(att):
+        att.create_dataset("metadata", data=json.dumps(metadata, indent=2, default=_json_default))
+        att.attrs["timestamp_utc"] = metadata["timestamp_utc"]
+        att.attrs["n_spots"] = metadata["n_spots"]
+        if mask is not None:
+            _write_array(att, "mask", mask)
+        res_grp = att.create_group("results")
+        if spots_df is not None:
+            _write_dataframe(res_grp, "spots", spots_df)
+
+    with h5py.File(project_path, "a") as f:
+        grp = f.require_group(f"analysis/solve_cell/{panel_key}")
+        name = _next_attempt_name(grp)
+        _stage_and_swap(grp, name, _build)
+        grp.attrs["latest"] = name
+
+    return f"/analysis/solve_cell/{panel_key}/{name}"
+
+
+def read_solve_cell_ingest_results(project_path, ref: str) -> dict:
+    """The embedded ``spots_df`` for a Solve Cell ingest attempt (see
+    :func:`append_solve_cell_ingest_attempt`), given a ref such as
+    ``/analysis/solve_cell/panel_01/attempt_0001``. ``{}`` if this attempt
+    has no ``results`` group (shouldn't happen for one logged by that
+    function, but mirrors :func:`read_attempt_results`'s own defensiveness)."""
+    with h5py.File(project_path, "r") as f:
+        grp = f.get(f"{ref.lstrip('/')}/results")
+        if grp is None:
+            return {}
+        out = {}
+        if "spots" in grp:
+            out["spots_df"] = _read_dataframe(grp, "spots")
+        return out
+
+
 def analysis_summary(project_path) -> dict:
     """Attempt counts per kind/panel: ``{"mask": n, "calibrate": {panel:
     n}, "integrate": {panel: n}}``. Empty kinds/panels are omitted, so a

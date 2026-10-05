@@ -323,6 +323,53 @@ def test_append_integration_attempt_embeds_profiles_and_links_calibration(tmp_pa
         assert meta["out_paths"] == ["/tmp/out/frame_0.csv"]
 
 
+def test_append_solve_cell_ingest_attempt_embeds_spots_and_round_trips(tmp_path):
+    import pandas as pd
+    path = str(tmp_path / "proj.h5")
+    project.create_project(path)
+
+    spots_df = pd.DataFrame({
+        "row": [10.0, 20.0], "col": [5.0, 15.0], "frame": [1.0, 3.0],
+        "loaded_frame_idx": [1, 3], "two_theta_deg": [5.0, 6.0],
+    })
+    mask = np.zeros((4, 4), dtype=bool)
+    mask[0, 0] = True
+
+    ref = project.append_solve_cell_ingest_attempt(
+        path, "panel_01", inputs={"geometry": {"Lsd": 150000.0}},
+        summary={"n_spots": 2, "n_sectors": 8}, spots_df=spots_df, mask=mask)
+
+    assert ref == "/analysis/solve_cell/panel_01/attempt_0001"
+    with h5py.File(path, "r") as f:
+        att = f["analysis/solve_cell/panel_01/attempt_0001"]
+        assert att.attrs["n_spots"] == 2
+        assert bool(att["mask"][0, 0])
+        meta = json.loads(att["metadata"][()])
+        assert meta["summary"]["n_sectors"] == 8
+        assert meta["panel_key"] == "panel_01"
+
+    out = project.read_solve_cell_ingest_results(path, ref)
+    restored = out["spots_df"]
+    assert list(restored["loaded_frame_idx"]) == [1, 3]
+    assert restored["two_theta_deg"].tolist() == pytest.approx([5.0, 6.0])
+
+
+def test_append_solve_cell_ingest_attempt_handles_empty_spots_df(tmp_path):
+    import pandas as pd
+    path = str(tmp_path / "proj.h5")
+    project.create_project(path)
+    spots_df = pd.DataFrame({
+        "row": pd.Series(dtype=float), "col": pd.Series(dtype=float),
+        "loaded_frame_idx": pd.Series(dtype="int64"),
+    })
+
+    ref = project.append_solve_cell_ingest_attempt(
+        path, "panel_01", inputs={}, summary={"n_spots": 0}, spots_df=spots_df)
+
+    out = project.read_solve_cell_ingest_results(path, ref)
+    assert len(out["spots_df"]) == 0
+
+
 def test_create_project_overwrite_backs_up_and_replaces(tmp_path):
     path = str(tmp_path / "proj.h5")
     project.create_project(path, name="original")

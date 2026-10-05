@@ -21,7 +21,18 @@ Build-critical reference for maintaining the PDF tab:
   NN-residual augmenter, per-ring δr_k JSON sidecar export, full custom-calibrant UI.
 - **Batch:** per-frame outlier rejection (cosmic-ray / azimuthal σ-clip in
   batch), Compton/empty/absorption in batch, Zarr/GE/EDF sources, soft
-  (autograd) kernel.
+  (autograd) kernel. **Multi-azimuth + Q-uniform bins** (2026-10-05): still
+  blocked (`workers.py:1510-1516` raises; `tab_batch.py` warns pre-run) —
+  not a hard limitation, just unimplemented. `rebin_R_to_Q` only rebins a
+  1-D profile; every eta row of the cake shares the same `r_ax`, so the same
+  interpolation could run per-row to produce a `(n_eta, n_q)` cake. Would
+  also need: `cake_sigma`'s per-bin weighting to survive the interpolation,
+  the "true engine-collapsed" 1-D profile re-derived post-rebin (currently
+  captured separately from the raw cake sum), `write_cake_h5`'s stored
+  r/Q axis labeling updated, and the `tab_batch.py` guard dialog + its test
+  removed. Note `write_cake_h5` already stores Q as a non-uniform companion
+  axis today regardless (`radial_axes_from_r_px`) — this item is only about
+  making the bin *spacing* uniform in Q.
 - **Corrections:** empty-scale LBFGS refine, absorption-param refine.
 - **Refinement:** ProfileMSE / PeakPosition losses, multi-distance, in-tab
   Laplace UQ, energy-sweep drift.

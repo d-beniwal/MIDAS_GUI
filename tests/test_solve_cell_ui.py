@@ -96,6 +96,90 @@ def test_run_ingest_warns_when_no_raw_data_loaded(tab, monkeypatch):
     assert tab._worker is None
 
 
+def _make_panel_ready(panel, monkeypatch, lsd=1000.0):
+    """Fakes 'this panel has calibration + raw data loaded + nothing
+    pending' without a real DataLoaderPanel data source -- same technique
+    test_live_stream.py's own data_source_kind tests use."""
+    from PyQt5 import QtWidgets
+    path = _write_calib_json(Lsd=lsd)
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog, "getOpenFileName",
+        staticmethod(lambda *a, **k: (path, "")))
+    panel._load_calib_file()
+    monkeypatch.setattr(panel.loader, "data_source_kind", lambda: "loaded")
+    monkeypatch.setattr(panel.loader, "has_pending_fields", lambda: [])
+    monkeypatch.setattr(panel.loader, "full_stack", lambda: None)
+    monkeypatch.setattr(panel.loader, "composite_mask", lambda: None)
+    monkeypatch.setattr(panel.loader, "frame_index", lambda: 0)
+
+
+class _CapturingWorker:
+    """Records the (stage, cfg) a tab tries to launch a SolveCellWorker
+    with, without starting a real QThread -- these tests only check
+    dispatch/cfg-building logic, not the pipeline itself (covered in
+    test_solve_cell_pipeline.py)."""
+    instances: list = []
+
+    def __init__(self, stage, cfg, parent=None):
+        self.stage = stage
+        self.cfg = cfg
+        self.log_line = _Signal()
+        self.finished = _Signal()
+        self.failed = _Signal()
+        _CapturingWorker.instances.append(self)
+
+    def start(self):
+        pass
+
+    def isRunning(self):
+        return False
+
+
+class _Signal:
+    """Bare .connect()-only stand-in -- _CapturingWorker never emits, so
+    nothing needs to actually fire."""
+    def connect(self, *_a, **_k):
+        pass
+
+
+def test_run_ingest_pools_every_ready_panel(tab, monkeypatch):
+    from midas_gui import tab_solve_cell
+    first = tab._active_panel()
+    _make_panel_ready(first, monkeypatch, lsd=111.0)
+    second = tab._add_panel()
+    _make_panel_ready(second, monkeypatch, lsd=222.0)
+    first_id, second_id = sorted(tab._panels.keys())
+
+    _CapturingWorker.instances.clear()
+    monkeypatch.setattr(tab_solve_cell, "SolveCellWorker", _CapturingWorker)
+    tab._run_ingest()
+
+    assert len(_CapturingWorker.instances) == 1
+    worker = _CapturingWorker.instances[0]
+    assert worker.stage == "ingest_pooled"
+    panel_ids = sorted(p["panel_id"] for p in worker.cfg["panels"])
+    assert panel_ids == [first_id, second_id]
+    assert worker.cfg["pooled_dir"] is None   # no project folder set
+
+
+def test_run_ingest_skips_a_not_ready_panel_and_uses_single_stage(tab, monkeypatch):
+    from midas_gui import tab_solve_cell
+    first = tab._active_panel()
+    _make_panel_ready(first, monkeypatch)
+    tab._add_panel()   # second panel left unconfigured -- no calibration, no data
+    tab._panel_tabs.setCurrentWidget(first)   # _add_panel() switches the active tab to it
+
+    _CapturingWorker.instances.clear()
+    monkeypatch.setattr(tab_solve_cell, "SolveCellWorker", _CapturingWorker)
+    tab._run_ingest()
+
+    assert len(_CapturingWorker.instances) == 1
+    worker = _CapturingWorker.instances[0]
+    assert worker.stage == "ingest"
+    assert "panels" not in worker.cfg
+    assert "not ready" in tab._log.toPlainText()
+
+
 def test_run_diamond_filter_warns_before_ingest(tab, monkeypatch):
     from PyQt5 import QtWidgets
     warned = {}
@@ -443,3 +527,453 @@ def test_update_recip_plot_keeps_origin_marker_alongside_data(tab):
     x, y, z = np.array([0.1]), np.array([0.2]), np.array([0.3])
     tab._update_recip_plot(all_xyz=(x, y, z))
     assert len(tab._recip_ax.collections) == 2
+
+
+# ── Detector tab: spot overlay ───────────────────────────────────────────
+
+def test_spot_scatter_item_is_added_to_the_detector_view(tab):
+    import pyqtgraph as pg
+    assert isinstance(tab._spot_scatter, pg.ScatterPlotItem)
+    assert tab._spot_scatter.scene() is not None
+
+
+def test_update_spot_overlay_shows_only_spots_on_the_matching_loaded_frame(tab):
+    import pandas as pd
+    tab._spots_df = pd.DataFrame({
+        "row": [1.0, 2.0, 3.0], "col": [10.0, 20.0, 30.0],
+        "loaded_frame_idx": [2, 2, 5],
+    })
+    tab._update_spot_overlay(0, 2)
+    assert len(tab._spot_scatter.data) == 2
+    assert sorted(tab._spot_scatter.data["x"]) == [10.0, 20.0]
+
+    tab._update_spot_overlay(0, 5)
+    assert len(tab._spot_scatter.data) == 1
+    assert tab._spot_scatter.data["x"][0] == 30.0
+
+    tab._update_spot_overlay(1, 99)   # no spot at this frame
+    assert len(tab._spot_scatter.data) == 0
+
+
+def test_update_spot_overlay_shows_every_spot_on_max_projection_stage(tab):
+    import pandas as pd
+    tab._spots_df = pd.DataFrame({
+        "row": [1.0, 2.0], "col": [10.0, 20.0], "loaded_frame_idx": [2, 5],
+    })
+    tab._update_spot_overlay(3, None)
+    assert len(tab._spot_scatter.data) == 2
+
+
+def test_update_spot_overlay_shows_nothing_on_mask_stage(tab):
+    import pandas as pd
+    tab._spots_df = pd.DataFrame({
+        "row": [1.0], "col": [10.0], "loaded_frame_idx": [2],
+    })
+    tab._update_spot_overlay(4, 2)
+    assert len(tab._spot_scatter.data) == 0
+
+
+def test_update_spot_overlay_handles_no_ingest_result_without_raising(tab):
+    assert tab._spots_df is None
+    tab._update_spot_overlay(0, 3)   # must not raise
+    assert len(tab._spot_scatter.data) == 0
+
+
+def test_update_spot_overlay_filters_to_the_active_panel_when_pooled(tab):
+    """row/col are per-panel pixel coordinates -- a pooled spots_df must only
+    ever show the ACTIVE panel's own spots on its detector frame, never
+    another panel's, even if they happen to share a loaded_frame_idx."""
+    import pandas as pd
+    second = tab._add_panel()
+    first_id, second_id = sorted(tab._panels.keys())
+    tab._spots_df = pd.DataFrame({
+        "panel_id": [first_id, second_id],
+        "row": [1.0, 9.0], "col": [10.0, 90.0], "loaded_frame_idx": [2, 2],
+    })
+    tab._panel_tabs.setCurrentWidget(tab._panels[first_id])
+    tab._update_spot_overlay(0, 2)
+    assert len(tab._spot_scatter.data) == 1
+    assert tab._spot_scatter.data["x"][0] == 10.0
+
+    tab._panel_tabs.setCurrentWidget(second)
+    tab._update_spot_overlay(0, 2)
+    assert len(tab._spot_scatter.data) == 1
+    assert tab._spot_scatter.data["x"][0] == 90.0
+
+
+# ── multi-panel pooled ingest: completion handler + provenance ──────────
+
+def test_on_ingest_pooled_done_updates_combined_state(tab):
+    import numpy as np
+    import pandas as pd
+    first = tab._active_panel()
+    second = tab._add_panel()
+    first_id, second_id = sorted(tab._panels.keys())
+
+    spots = pd.DataFrame({
+        "panel_id": [first_id, first_id, second_id],
+        "qsample_x": [0.1, 0.2, 0.3], "qsample_y": [0.0, 0.1, 0.2],
+        "qsample_z": [0.0, 0.0, 0.1], "loaded_frame_idx": [1, 2, 3],
+    })
+    preview1 = {"mask": np.zeros((4, 4), dtype=bool)}
+    preview2 = {"mask": np.ones((4, 4), dtype=bool)}
+    result = {
+        "spots_df": spots,
+        "summary": {"n_panels": 2, "panel_ids": [first_id, second_id], "n_spots_total": 3},
+        "per_panel": {
+            first_id: {"summary": {"n_spots": 2}, "preview": preview1},
+            second_id: {"summary": {"n_spots": 1}, "preview": preview2},
+        },
+    }
+    tab._on_ingest_pooled_done(result)
+
+    assert tab._spots_df is spots
+    assert "panel 2" in tab._ingest_status.text() or str(second_id) in tab._ingest_status.text()
+    assert tab._diamond_btn.isEnabled()
+    assert tab._ingest_preview_by_panel[first_id] is preview1
+    assert tab._ingest_preview_by_panel[second_id] is preview2
+    assert "pooled" in tab._log.toPlainText().lower()
+
+
+# ── Project logging (FAIR provenance) ────────────────────────────────────
+
+def test_log_ingest_to_project_is_a_noop_without_a_project_open(tab):
+    import pandas as pd
+    tab._spots_df = pd.DataFrame({"row": [1.0], "col": [2.0], "loaded_frame_idx": [0]})
+    tab._log_ingest_to_project({"summary": {"n_spots": 1}, "preview": {}})   # must not raise
+    assert "Logged ingest" not in tab._log.toPlainText()
+
+
+def test_log_ingest_to_project_writes_a_solve_cell_attempt(tab, monkeypatch):
+    import h5py
+    import pandas as pd
+    from PyQt5 import QtWidgets
+    from midas_gui import project
+
+    calib_path = _write_calib_json()
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog, "getOpenFileName",
+        staticmethod(lambda *a, **k: (calib_path, "")))
+    tab._active_panel()._load_calib_file()
+
+    proj_dir = Path(tempfile.mkdtemp(prefix="mg_solvecell_project_"))
+    _SCRATCH.append(proj_dir)
+    proj_path = str(proj_dir / "proj.h5")
+    project.create_project(proj_path)
+    ctx = project.ProjectContext()
+    ctx.path = proj_path
+    tab.set_project_context(ctx)
+
+    tab._spots_df = pd.DataFrame({"row": [1.0], "col": [2.0], "loaded_frame_idx": [3]})
+    tab._log_ingest_to_project({"summary": {"n_spots": 1}, "preview": {"mask": None}})
+
+    with h5py.File(proj_path, "r") as f:
+        assert "analysis/solve_cell" in f
+        panel_key = next(iter(f["analysis/solve_cell"].keys()))
+        att = f[f"analysis/solve_cell/{panel_key}/attempt_0001"]
+        assert att.attrs["n_spots"] == 1
+    assert "Logged ingest to project" in tab._log.toPlainText()
+
+
+def test_log_pooled_ingest_to_project_writes_one_attempt_per_panel(tab, monkeypatch):
+    import h5py
+    import pandas as pd
+    from PyQt5 import QtWidgets
+    from midas_gui import project
+    from midas_gui.solve_cell import pipeline as solve_pipeline
+
+    first = tab._active_panel()
+    calib1 = _write_calib_json(Lsd=111.0)
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog, "getOpenFileName",
+        staticmethod(lambda *a, **k: (calib1, "")))
+    first._load_calib_file()
+    second = tab._add_panel()
+    calib2 = _write_calib_json(Lsd=222.0)
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog, "getOpenFileName",
+        staticmethod(lambda *a, **k: (calib2, "")))
+    second._load_calib_file()
+    first_id, second_id = sorted(tab._panels.keys())
+
+    proj_dir = Path(tempfile.mkdtemp(prefix="mg_solvecell_project_pooled_"))
+    _SCRATCH.append(proj_dir)
+    proj_path = str(proj_dir / "proj.h5")
+    project.create_project(proj_path)
+    ctx = project.ProjectContext()
+    ctx.path = proj_path
+    tab.set_project_context(ctx)
+
+    result = {
+        "per_panel": {
+            first_id: {"summary": {"n_spots": 2}, "preview": {"mask": None},
+                       "spots_df": pd.DataFrame({"row": [1.0], "col": [2.0]})},
+            second_id: {"summary": {"n_spots": 5}, "preview": {"mask": None},
+                       "spots_df": pd.DataFrame({"row": [3.0], "col": [4.0]})},
+        }
+    }
+    tab._log_pooled_ingest_to_project(result)
+
+    with h5py.File(proj_path, "r") as f:
+        key1 = solve_pipeline.panel_dir_name(first_id)
+        key2 = solve_pipeline.panel_dir_name(second_id)
+        assert f[f"analysis/solve_cell/{key1}/attempt_0001"].attrs["n_spots"] == 1
+        assert f[f"analysis/solve_cell/{key2}/attempt_0001"].attrs["n_spots"] == 1
+    assert tab._log.toPlainText().count("Logged ingest to project") == 2
+
+
+# ── multi-domain: "Index remaining spots" (leftover re-indexing) ──────────
+
+def _fake_candidate_df(n=10, panel_ids=None):
+    import numpy as np
+    import pandas as pd
+    data = {
+        "qsample_x": np.linspace(0.1, 1.0, n), "qsample_y": np.linspace(0.2, 1.1, n),
+        "qsample_z": np.linspace(0.3, 1.2, n),
+    }
+    if panel_ids is not None:
+        data["panel_id"] = panel_ids
+    return pd.DataFrame(data)
+
+
+def _fake_refine_result(a=5.43):
+    return {
+        "cell": [a, a, a, 90.0, 90.0, 90.0], "cell_sigma": [0.01] * 6,
+        "conventional_cell": [a, a, a], "conventional_system": "cubic",
+        "holohedry_system": "cubic", "holohedry_order": 48,
+        "rms_drlv": 0.02, "n_reflections": 5,
+    }
+
+
+def test_leftover_method_combo_toggles_known_cell_params_visibility(tab):
+    assert tab._kc_params.isHidden()
+    tab._leftover_method.setCurrentIndex(1)
+    assert not tab._kc_params.isHidden()
+    tab._leftover_method.setCurrentIndex(0)
+    assert tab._kc_params.isHidden()
+
+
+def test_leftover_status_and_button_disabled_with_no_domains(tab):
+    tab._candidate_df = _fake_candidate_df(10)
+    tab._update_leftover_status()
+    assert "10 spot" in tab._leftover_status.text()
+    assert not tab._leftover_btn.isEnabled()   # no domain claimed anything yet
+
+
+def test_add_domain_excludes_claimed_rows_from_leftover(tab):
+    df = _fake_candidate_df(10)
+    tab._candidate_df = df
+    xyz = (df["qsample_x"].to_numpy()[:4], df["qsample_y"].to_numpy()[:4], df["qsample_z"].to_numpy()[:4])
+    tab._add_domain("free (ab-initio)", _fake_refine_result(), df.index[:4], xyz)
+
+    assert tab._domain_list.count() == 1
+    leftover = tab._leftover_df()
+    assert len(leftover) == 6
+    assert tab._leftover_btn.isEnabled()
+
+
+def test_two_domains_never_double_claim_the_same_row(tab):
+    df = _fake_candidate_df(10)
+    tab._candidate_df = df
+    xyz = (df["qsample_x"].to_numpy(), df["qsample_y"].to_numpy(), df["qsample_z"].to_numpy())
+    tab._add_domain("free (ab-initio)", _fake_refine_result(), df.index[:4], (xyz[0][:4], xyz[1][:4], xyz[2][:4]))
+    leftover_before = tab._leftover_df()
+    assert len(leftover_before) == 6
+
+    # Second domain only claims rows out of what was actually left over.
+    claim2 = leftover_before.index[:3]
+    tab._add_domain("known structure", _fake_refine_result(5.0),
+                    claim2, (xyz[0][:3], xyz[1][:3], xyz[2][:3]))
+    assert tab._domain_list.count() == 2
+    leftover_after = tab._leftover_df()
+    assert len(leftover_after) == 3
+    assert not set(claim2).intersection(set(leftover_after.index))
+
+
+def test_on_refine_done_replaces_round1_domain_instead_of_duplicating(tab):
+    class _FakeAbInitio:
+        def __init__(self, mask):
+            self.indexed_mask = mask
+
+    df = _fake_candidate_df(10)
+    tab._candidate_df = df
+    tab._g_2pi = df[["qsample_x", "qsample_y", "qsample_z"]].to_numpy()
+
+    import numpy as np
+    mask1 = np.array([True] * 4 + [False] * 6)
+    tab._ab_initio_raw = _FakeAbInitio(mask1)
+    tab._on_refine_done({"refine_result": _fake_refine_result(5.43)})
+    assert tab._domain_list.count() == 1
+    assert len(tab._leftover_df()) == 6
+
+    # Re-running Refine (e.g. after re-running ab-initio with a different
+    # result) must replace Domain 1, not append a second one.
+    mask2 = np.array([True] * 6 + [False] * 4)
+    tab._ab_initio_raw = _FakeAbInitio(mask2)
+    tab._on_refine_done({"refine_result": _fake_refine_result(5.44)})
+    assert tab._domain_list.count() == 1
+    assert len(tab._leftover_df()) == 4
+
+
+def test_on_leftover_known_cell_done_negative_result_adds_no_domain(tab):
+    tab._leftover_pending_df = _fake_candidate_df(5)
+    tab._on_leftover_known_cell_done({
+        "success": False, "notes": ["no second domain found"],
+        "diagnostics": {"best_n": 2, "null_mean": 1.5, "z_score": 0.4},
+    })
+    assert tab._domain_list.count() == 0
+    assert "No new domain found" in tab._leftover_run_status.text()
+    assert tab._leftover_btn.isEnabled()
+
+
+def test_on_leftover_known_cell_done_success_adds_a_domain(tab):
+    import numpy as np
+    df = _fake_candidate_df(10)
+    tab._candidate_df = df
+    tab._leftover_pending_df = df
+    tab._leftover_g_2pi = df[["qsample_x", "qsample_y", "qsample_z"]].to_numpy()
+    mask = np.array([True] * 3 + [False] * 7)
+    result = dict(_fake_refine_result(5.43), success=True, indexed_mask=mask, n_indexed=3)
+    tab._on_leftover_known_cell_done(result)
+    assert tab._domain_list.count() == 1
+    assert len(tab._leftover_df()) == 7
+
+
+def test_update_multidomain_plot_with_several_domains_does_not_raise(tab):
+    df = _fake_candidate_df(10)
+    tab._candidate_df = df
+    xyz = (df["qsample_x"].to_numpy(), df["qsample_y"].to_numpy(), df["qsample_z"].to_numpy())
+    tab._add_domain("free (ab-initio)", _fake_refine_result(5.43), df.index[:4],
+                    (xyz[0][:4], xyz[1][:4], xyz[2][:4]))
+    tab._add_domain("known structure", _fake_refine_result(5.0), df.index[4:7],
+                    (xyz[0][4:7], xyz[1][4:7], xyz[2][4:7]))
+    tab._update_multidomain_plot()   # must not raise with 2 domains + leftover
+
+
+def test_on_domain_selected_populates_result_grid(tab):
+    df = _fake_candidate_df(10)
+    tab._candidate_df = df
+    xyz = (df["qsample_x"].to_numpy()[:4], df["qsample_y"].to_numpy()[:4], df["qsample_z"].to_numpy()[:4])
+    tab._add_domain("free (ab-initio)", _fake_refine_result(5.43), df.index[:4], xyz)
+    tab._on_domain_selected(0)
+    assert tab._param_grid.count() > 0
+
+
+def test_run_index_remaining_warns_when_nothing_left_over(tab, monkeypatch):
+    from PyQt5 import QtWidgets
+    warned = {}
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
+                        staticmethod(lambda *a: warned.setdefault("hit", True)))
+    tab._candidate_df = None
+    tab._run_index_remaining()
+    assert warned.get("hit") is True
+    assert tab._worker is None
+
+
+def test_on_diamond_done_resets_stale_domain_state(tab):
+    df = _fake_candidate_df(10)
+    tab._candidate_df = df
+    xyz = (df["qsample_x"].to_numpy()[:4], df["qsample_y"].to_numpy()[:4], df["qsample_z"].to_numpy()[:4])
+    tab._add_domain("free (ab-initio)", _fake_refine_result(), df.index[:4], xyz)
+    assert tab._domain_list.count() == 1
+
+    new_candidate = _fake_candidate_df(6)
+    tab._on_diamond_done({
+        "candidate_df": new_candidate,
+        "flagged_df": new_candidate.assign(is_diamond=False),
+        "summary": {"n_diamond_flagged": 0, "n_spots": 6, "n_kept": 6},
+    })
+    assert tab._domain_list.count() == 0
+    assert tab._claimed_index is None
+    assert not tab._leftover_btn.isEnabled()
+
+
+# ── reciprocal-space map: Panel/Crystal color modes, unindexed toggle, stats ──
+
+def test_recip_mode_and_unindexed_checkbox_defaults(tab):
+    assert [tab._recip_mode.itemText(i) for i in range(tab._recip_mode.count())] == ["Panel", "Crystal"]
+    assert tab._recip_mode.currentIndex() == 0
+    assert tab._recip_show_unindexed.isChecked() is True
+
+
+def test_refresh_recip_view_does_not_raise_with_no_data(tab):
+    tab._refresh_recip_view()
+    tab._recip_mode.setCurrentIndex(1)
+    tab._refresh_recip_view()
+    assert tab._recip_stats.text() != ""
+
+
+def test_panel_mode_single_panel_no_panel_id_column_buckets_as_single_panel(tab):
+    tab._spots_df = _fake_candidate_df(4)   # no panel_id column
+    tab._refresh_recip_view()
+    assert "(single panel): 4 spots" in tab._recip_stats.text()
+    assert "Total: 4 spots" in tab._recip_stats.text()
+
+
+def test_panel_mode_pooled_two_panels_stats(tab):
+    from midas_gui.solve_cell import pipeline as solve_pipeline
+    tab._spots_df = _fake_candidate_df(5, panel_ids=[1, 1, 1, 2, 2])
+    tab._refresh_recip_view()
+    text = tab._recip_stats.text()
+    assert f"{solve_pipeline.panel_dir_name(1)}: 3 spots" in text
+    assert f"{solve_pipeline.panel_dir_name(2)}: 2 spots" in text
+    assert "Total: 5 spots" in text
+
+
+def test_panel_mode_hides_unindexed_when_checkbox_unchecked(tab):
+    tab._spots_df = _fake_candidate_df(5, panel_ids=[1, 1, 1, 2, 2])
+    tab._recip_show_unindexed.setChecked(False)
+    text = tab._recip_stats.text()
+    assert "Total: 0 spots" in text
+    assert "(5 unindexed hidden)" in text
+
+
+def test_crystal_mode_shows_diamond_domain_and_unindexed_lines(tab):
+    flagged = _fake_candidate_df(10).assign(is_diamond=[True] * 3 + [False] * 7)
+    candidate = flagged[~flagged["is_diamond"]].reset_index(drop=True)
+    tab._flagged_df = flagged
+    tab._candidate_df = candidate
+    xyz = (candidate["qsample_x"].to_numpy()[:4], candidate["qsample_y"].to_numpy()[:4],
+           candidate["qsample_z"].to_numpy()[:4])
+    tab._add_domain("free (ab-initio)", _fake_refine_result(5.43), candidate.index[:4], xyz)
+    tab._recip_mode.setCurrentIndex(1)
+    tab._refresh_recip_view()
+    text = tab._recip_stats.text()
+    assert "Domain 1 (free (ab-initio)): 4 spots, a=5.43" in text
+    assert "Diamond/gasket: 3 spots" in text
+    assert "Unindexed: 3 spots" in text
+    assert "hidden" not in text
+
+    tab._recip_show_unindexed.setChecked(False)
+    assert "Unindexed: 3 spots (hidden)" in tab._recip_stats.text()
+
+
+def test_domain_with_panel_ids_buckets_with_its_panel_in_panel_mode(tab):
+    from midas_gui.solve_cell import pipeline as solve_pipeline
+    candidate = _fake_candidate_df(6, panel_ids=[1, 1, 1, 2, 2, 2])
+    tab._candidate_df = candidate
+    claimed_index = candidate.index[:3]   # all panel 1
+    xyz = (candidate["qsample_x"].to_numpy()[:3], candidate["qsample_y"].to_numpy()[:3],
+           candidate["qsample_z"].to_numpy()[:3])
+    panel_ids = candidate.loc[claimed_index, "panel_id"].to_numpy()
+    tab._add_domain("free (ab-initio)", _fake_refine_result(), claimed_index, xyz, panel_ids)
+    tab._refresh_recip_view()   # Panel mode is the default
+    text = tab._recip_stats.text()
+    assert f"{solve_pipeline.panel_dir_name(1)}: 3 spots" in text
+    assert f"{solve_pipeline.panel_dir_name(2)}: 3 spots" in text   # 3 leftover, still panel 2
+    assert "Total: 6 spots" in text
+
+
+def test_mode_switch_and_checkbox_toggle_trigger_refresh(tab, monkeypatch):
+    calls = []
+    monkeypatch.setattr(tab, "_refresh_recip_view", lambda: calls.append(1))
+    tab._recip_mode.setCurrentIndex(1)
+    tab._recip_show_unindexed.setChecked(False)
+    assert len(calls) == 2
+
+
+def test_update_multidomain_plot_still_delegates_to_refresh(tab, monkeypatch):
+    calls = []
+    monkeypatch.setattr(tab, "_refresh_recip_view", lambda: calls.append(1))
+    tab._update_multidomain_plot()
+    assert calls == [1]

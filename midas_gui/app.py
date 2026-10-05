@@ -383,7 +383,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # tabs that log attempts to it. Defensive, like the wiring above —
         # a placeholder tab (failed to build) simply has no such method.
         for tab in (self._cal_tab, self._batch_tab, self._queue_tab, self._mask_tab,
-                    self._export_tab):
+                    self._export_tab, self._solve_cell_tab):
             setter = getattr(tab, "set_project_context", None)
             if setter is not None:
                 try:

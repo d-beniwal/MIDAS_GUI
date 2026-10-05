@@ -220,8 +220,49 @@ def test_ingest_handles_zero_spots_without_crashing(tmp_path):
         "blobs": {"threshold": 1000.0, "min_vol": 4},
     })
     assert len(out["spots_df"]) == 0
-    for col in ("qsample_x", "qsample_y", "qsample_z", "two_theta_deg"):
+    for col in ("qsample_x", "qsample_y", "qsample_z", "two_theta_deg", "loaded_frame_idx"):
         assert col in out["spots_df"].columns
+
+
+def test_ingest_loaded_frame_idx_maps_kept_index_back_to_originally_loaded_index(tmp_path):
+    """spots_df['frame'] indexes the KEPT stack (after the omega window +
+    live_frames filtering); 'loaded_frame_idx' must map each spot back to
+    the index a GUI's DataLoaderPanel.frame_index() uses -- the ORIGINALLY
+    loaded stack. A window with ref_idx > 0 makes the two diverge, so an
+    accidental identity mapping (the bug this column exists to fix) would be
+    caught here."""
+    rng = np.random.default_rng(42)
+    n_frames, nz, ny = 20, 64, 64
+    frames = rng.poisson(2.0, size=(n_frames, nz, ny)).astype(np.uint32)
+    frames[8:12, 30:34, 30:34] += 500   # spot lives in ORIGINALLY loaded frames 8-11
+
+    geometry = {
+        "Lsd": 150000.0, "BC_y": 32.0, "BC_z": 32.0, "ty": 0.0, "tz": 0.0,
+        "wavelength_A": 0.5, "px_um": 75.0, "nrpixels_y": ny, "nrpixels_z": nz,
+        "omega_ref_frame_idx": 5, "omega_ref_deg": 0.0,
+        "omega_last_frame_idx": 14, "omega_step_deg": 1.0,
+    }
+    out = P._stage_ingest({
+        "frames": frames, "geometry": geometry,
+        "mask": {"low_count_threshold": 0.0, "grow": 1},
+        "blobs": {"threshold": 100.0, "min_vol": 4},
+        "preview_frame_index": 3,   # a KEPT-stack index (see _stage_ingest's own docstring)
+    })
+    spots = out["spots_df"]
+    assert len(spots) > 0
+    assert out["summary"]["n_live"] == out["summary"]["n_frames"], (
+        "this test assumes live_frames keeps every windowed frame on this "
+        "synthetic stack -- if that ever changes the shift-by-ref_idx "
+        "arithmetic below no longer holds")
+    assert "loaded_frame_idx" in spots.columns
+    # No live-frame filtering here, so kept index -> loaded index is a plain
+    # +5 shift (the window's ref_idx) -- not the identity, and in-range.
+    expected = spots["frame"].round().astype(int) + 5
+    assert list(spots["loaded_frame_idx"]) == list(expected)
+    assert spots["loaded_frame_idx"].between(8, 11).all()
+
+    # kept index 3 -> loaded index 3 + ref_idx(5) == 8.
+    assert out["preview"]["loaded_frame_index"] == 8
 
 
 def test_ingest_excludes_frames_outside_omega_window(tmp_path):
@@ -396,6 +437,218 @@ def test_ingest_preview_clamps_out_of_range_frame_index(tmp_path):
         "preview_frame_index": 9999,
     })
     assert 0 <= out["preview"]["frame_index"] < n_frames
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Multi-panel pooled ingest
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _synthetic_panel_cfg(rng, spot_at=(8, 12, 30, 34), panel_dir=None):
+    n_frames, nz, ny = 20, 64, 64
+    frames = rng.poisson(2.0, size=(n_frames, nz, ny)).astype(np.uint32)
+    f0, f1, p0, p1 = spot_at
+    frames[f0:f1, p0:p1, p0:p1] += 500
+    geometry = {
+        "Lsd": 150000.0, "BC_y": 32.0, "BC_z": 32.0, "ty": 0.0, "tz": 0.0,
+        "wavelength_A": 0.5, "px_um": 75.0, "nrpixels_y": ny, "nrpixels_z": nz,
+        "omega_ref_frame_idx": 0, "omega_ref_deg": -10.0,
+        "omega_last_frame_idx": n_frames - 1, "omega_step_deg": 1.0,
+    }
+    cfg = {
+        "frames": frames, "geometry": geometry,
+        "mask": {"low_count_threshold": 0.0, "grow": 1},
+        "blobs": {"threshold": 100.0, "min_vol": 4},
+    }
+    if panel_dir is not None:
+        cfg["panel_dir"] = panel_dir
+    return cfg
+
+
+def test_ingest_pooled_concatenates_every_panel_tagged_by_panel_id(tmp_path):
+    rng = np.random.default_rng(10)
+    panel1 = _synthetic_panel_cfg(rng, panel_dir=tmp_path / "panel_01" / "data")
+    panel1["panel_id"] = 1
+    panel2 = _synthetic_panel_cfg(rng, panel_dir=tmp_path / "panel_02" / "data")
+    panel2["panel_id"] = 2
+
+    out = P._stage_ingest_pooled({"panels": [panel1, panel2], "pooled_dir": tmp_path / "pooled"})
+
+    spots = out["spots_df"]
+    assert "panel_id" in spots.columns
+    assert set(spots["panel_id"].unique()) == {1, 2}
+    assert len(spots) == len(out["per_panel"][1]["spots_df"]) + len(out["per_panel"][2]["spots_df"])
+    assert out["summary"]["n_panels"] == 2
+    assert out["summary"]["n_spots_total"] == len(spots)
+    # Each panel still writes its own per-panel outputs (unchanged _stage_ingest behavior)...
+    assert (tmp_path / "panel_01" / "data" / "spots_g.csv").exists()
+    assert (tmp_path / "panel_02" / "data" / "spots_g.csv").exists()
+    # ...plus the new pooled combined output.
+    assert (tmp_path / "pooled" / "spots_g_pooled.csv").exists()
+    assert (tmp_path / "pooled" / "ingest_summary.json").exists()
+
+
+def test_ingest_pooled_drops_each_panels_frame_stack_before_loading_the_next():
+    """frames_loader resolution must happen ONE PANEL AT A TIME -- a pooled
+    run that resolved every panel's frames_loader up front would hold every
+    panel's full raw stack in memory simultaneously, exactly the memory
+    pressure the single-panel ingest performance fix already had to solve."""
+    rng = np.random.default_rng(11)
+    live_loaders = []
+
+    def _make_loader(frames):
+        def _loader():
+            live_loaders.append(frames)
+            return frames
+
+        return _loader
+
+    cfg1 = _synthetic_panel_cfg(rng)
+    frames1 = cfg1.pop("frames")
+    cfg1["frames_loader"] = _make_loader(frames1)
+    cfg1["panel_id"] = 1
+    cfg2 = _synthetic_panel_cfg(rng)
+    frames2 = cfg2.pop("frames")
+    cfg2["frames_loader"] = _make_loader(frames2)
+    cfg2["panel_id"] = 2
+
+    out = P._stage_ingest_pooled({"panels": [cfg1, cfg2]})
+    assert len(live_loaders) == 2   # both loaders WERE called...
+    assert "panel_id" in out["spots_df"].columns
+    # ...but neither panel's cfg dict still references its resolved stack
+    # afterward (cleared by _stage_ingest_pooled right after that panel's
+    # own _stage_ingest call returns).
+    assert "frames" not in cfg1 and "frames" not in cfg2
+
+
+def test_ingest_pooled_raises_on_empty_panel_list():
+    with pytest.raises(ValueError, match="no panels"):
+        P._stage_ingest_pooled({"panels": []})
+
+
+def test_pooling_by_concatenation_recovers_known_cell_without_real_reference_data():
+    """Confirms, with synthetic data that needs no gated local reference
+    files, the same invariant ``test_ab_initio_and_refine_reproduce_known_
+    spinel_cell_two_panels`` already confirms with real data: concatenating
+    two panels' own g-vector sets and refining once recovers the shared
+    known cell -- this is the physical justification
+    ``pipeline._stage_ingest_pooled``'s own docstring gives for why plain
+    concatenation of independently-ingested panels is correct (qsample is
+    already in the one shared sample frame regardless of panel position)."""
+    from midas_hkls import Lattice
+
+    rng = np.random.default_rng(12)
+    cell = (5.43, 5.43, 5.43, 90.0, 90.0, 90.0)
+    B = np.asarray(Lattice(*cell).reciprocal_cartesian_vectors())
+    hkl = rng.integers(-5, 6, size=(400, 3))
+    hkl = hkl[np.any(hkl != 0, axis=1)]
+    g_1d = (B @ hkl.T).T
+    g_2pi = g_1d * P.TWO_PI
+
+    def _candidate_df(g):
+        return pd.DataFrame({
+            "qsample_x": g[:, 0], "qsample_y": g[:, 1], "qsample_z": g[:, 2],
+        })
+
+    # Split the same lattice's reflections across two "panels" -- stands in
+    # for two independently-ingested panels of the SAME crystal/orientation,
+    # which is what pooling assumes (handoff §5.5, not §5.6's multi-domain
+    # case).
+    half = len(g_2pi) // 2
+    panel1 = {"spots_df": _candidate_df(g_2pi[:half])}
+    panel2 = {"spots_df": _candidate_df(g_2pi[half:])}
+    pooled = pd.concat([panel1["spots_df"], panel2["spots_df"]], ignore_index=True)
+
+    ab_out = P._stage_ab_initio({"candidate_df": pooled, "sigma_g": 5e-3, "min_reflections": 20})
+    assert ab_out["ab_initio_result"]["success"], ab_out["ab_initio_result"]["notes"]
+    refine_out = P._stage_refine({
+        "ab_initio_raw": ab_out["ab_initio_raw"], "g_2pi": ab_out["g_2pi"], "sigma_g": 5e-3,
+    })
+    a_conventional = max(refine_out["refine_result"]["conventional_cell"][:3])
+    assert a_conventional == pytest.approx(5.43, rel=0.05)
+
+
+def test_run_stage_dispatches_ingest_pooled():
+    rng = np.random.default_rng(13)
+    panel = _synthetic_panel_cfg(rng)
+    panel["panel_id"] = 1
+    out = P.run_stage("ingest_pooled", {"panels": [panel]})
+    assert "panel_id" in out["spots_df"].columns
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Stage 5: index a leftover pool against a known cell (unknown orientation)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _synthetic_known_cell_leftover_pool(rng, cell=(5.43, 5.43, 5.43, 90.0, 90.0, 90.0),
+                                         n_noise=150, hkl_range=6):
+    """A leftover g-vector pool shaped like handoff §5.6's trigger case: a
+    second domain of a KNOWN cell at a random, unrelated orientation, mixed
+    in with pure-noise g-vectors (spots genuinely not from any lattice)."""
+    from scipy.spatial.transform import Rotation
+
+    B0 = P._bmatrix_from_cell(cell, two_pi=False)
+    R_true = Rotation.random(random_state=rng).as_matrix()
+    UB_true = R_true @ B0
+    hkl = rng.integers(-hkl_range, hkl_range + 1, size=(500, 3)).astype(float)
+    hkl = hkl[np.any(hkl != 0, axis=1)]
+    g_domain = (UB_true @ hkl.T).T
+    g_domain = g_domain[np.linalg.norm(g_domain, axis=1) < 1.2]
+
+    dirs = rng.normal(size=(n_noise, 3))
+    dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
+    g_noise = dirs * rng.uniform(0.1, 1.2, size=n_noise)[:, None]
+
+    g_2pi = np.vstack([g_domain, g_noise]) * P.TWO_PI
+    rng.shuffle(g_2pi)
+    return g_2pi, cell, len(g_domain)
+
+
+def test_index_known_cell_recovers_second_domain_orientation():
+    rng = np.random.default_rng(0)
+    g_2pi, cell, n_domain = _synthetic_known_cell_leftover_pool(rng)
+
+    out = P._stage_index_known_cell({
+        "g_2pi": g_2pi, "known_cell": cell, "tol": 0.1,
+        "n_search": 20_000, "min_accept": 15, "n_null_draws": 5,
+        "rng_seed": 1,
+    })
+    assert out["success"], out.get("notes")
+    assert out["cell"][0] == pytest.approx(cell[0], rel=0.02)
+    # The random-orientation seed is only approximately right, so the coarse
+    # residual filter typically catches a plausible fraction (not all) of
+    # the domain's reflections before the free refine snaps onto the exact
+    # orientation -- a meaningfully sized chunk, well above the acceptance
+    # floor, not just the bare minimum needed to pass.
+    assert out["n_indexed"] >= 0.25 * n_domain
+    assert out["diagnostics"]["z_score"] > P.RANDOM_SEARCH_Z_THRESH_DEFAULT
+
+
+def test_index_known_cell_rejects_pure_noise_pool():
+    """Negative-result case (handoff §5.6 step 4): a leftover pool with no
+    second domain at all must come back success=False, not a spurious cell."""
+    rng = np.random.default_rng(0)
+    n_noise = 200
+    dirs = rng.normal(size=(n_noise, 3))
+    dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
+    g_2pi = (dirs * rng.uniform(0.1, 1.2, size=n_noise)[:, None]) * P.TWO_PI
+
+    out = P._stage_index_known_cell({
+        "g_2pi": g_2pi, "known_cell": (5.43, 5.43, 5.43, 90.0, 90.0, 90.0),
+        "tol": 0.1, "n_search": 20_000, "min_accept": 15, "n_null_draws": 5,
+        "rng_seed": 2,
+    })
+    assert out["success"] is False
+    assert out["notes"]
+
+
+def test_index_known_cell_refuses_below_min_accept_floor_without_searching():
+    out = P._stage_index_known_cell({
+        "g_2pi": np.zeros((5, 3)), "known_cell": (5.0, 5.0, 5.0, 90.0, 90.0, 90.0),
+        "min_accept": 15,
+    })
+    assert out["success"] is False
+    assert out["indexed_mask"].sum() == 0
+    assert "below the floor" in out["notes"][0]
 
 
 def test_run_stage_dispatches_and_rejects_unknown_stage():
