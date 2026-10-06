@@ -2812,14 +2812,16 @@ class FieldSelector(QtWidgets.QGroupBox):
     file, a folder / *.tif glob, or an HDF5 dataset reduced to a mean over an
     index range
     that is clamped to the number of frames available.  The bright variant adds a
-    divide / subtract mode combo.  ``get_field()`` → computed field (or None);
-    ``get_mode()`` → "divide" | "subtract".
+    divide / subtract mode combo; the background variant (``with_scale=True``)
+    adds a "scale:" factor (default 1) that multiplies the field before it is
+    subtracted.  ``get_field()`` → computed field, scaled (or None);
+    ``get_mode()`` → "divide" | "subtract"; ``get_scale()`` → the scale factor.
     """
     #: emitted whenever the field finishes computing, or the checkbox is
     #: toggled (turning correction on/off is itself a change).
     fieldReady = QtCore.pyqtSignal()
 
-    def __init__(self, title, parent=None, *, with_mode=False,
+    def __init__(self, title, parent=None, *, with_mode=False, with_scale=False,
                  default_dataset="exchange/data"):
         super().__init__(title, parent)
         self.setCheckable(True)
@@ -2884,14 +2886,22 @@ class FieldSelector(QtWidgets.QGroupBox):
         ir.addWidget(QtWidgets.QLabel("mean")); ir.addWidget(self._start)
         ir.addWidget(QtWidgets.QLabel("–")); ir.addWidget(self._end)
         ir.addWidget(self._nfr_lbl)
+        ir.addStretch(1)
         if with_mode:
             self._mode = _NoScrollComboBox()
             self._mode.addItems(["Flat-field divide", "Subtract"])
             self._mode.setFixedWidth(104)
-            ir.addStretch(1); ir.addWidget(self._mode)
+            ir.addWidget(self._mode)
         else:
             self._mode = None
-            ir.addStretch(1)
+        if with_scale:
+            self._scale = _fspin(0.0, 1e9, 3, 1.0)
+            self._scale.setToolTip(
+                "Multiply this field by this factor before it is subtracted.")
+            self._scale.valueChanged.connect(lambda *_: self.fieldReady.emit())
+            ir.addWidget(QtWidgets.QLabel("scale:")); ir.addWidget(self._scale)
+        else:
+            self._scale = None
         v.addLayout(ir)
 
         # Compute + status
@@ -3189,7 +3199,14 @@ class FieldSelector(QtWidgets.QGroupBox):
         return self.isChecked() and self._field is None
 
     def get_field(self):
-        return self._field if self.isChecked() else None
+        if not self.isChecked() or self._field is None:
+            return None
+        if self._scale is None:
+            return self._field
+        return self._field * self._scale.value()
+
+    def get_scale(self) -> float:
+        return self._scale.value() if self._scale is not None else 1.0
 
     def raw_stack(self):
         """The raw, per-frame (N, Y, X) stack this field was built
@@ -3249,6 +3266,8 @@ class FieldSelector(QtWidgets.QGroupBox):
             st["explicit_paths"] = list(self._explicit_paths)
         if self._mode is not None:
             st["mode"] = self._mode.currentIndex()
+        if self._scale is not None:
+            st["scale"] = self._scale.value()
         return st
 
     def set_state(self, state: dict):
@@ -3278,6 +3297,8 @@ class FieldSelector(QtWidgets.QGroupBox):
             self._end.setValue(int(state["end"]))
         if self._mode is not None and "mode" in state:
             self._mode.setCurrentIndex(int(state["mode"]))
+        if self._scale is not None and "scale" in state:
+            self._scale.setValue(float(state["scale"]))
         self.setChecked(bool(state.get("checked", False)))
         if self.isChecked() and (explicit or path):
             self._compute()
@@ -4074,7 +4095,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
         fld = S.make_card("Dark / Bright / Background")
         self._dark_sel = FieldSelector("Dark", default_dataset=dark_dataset)
         self._bright_sel = FieldSelector("Bright", with_mode=True)
-        self._bg_sel = FieldSelector("Background")
+        self._bg_sel = FieldSelector("Background", with_scale=True)
         for w in (self._dark_sel, self._bright_sel, self._bg_sel):
             w.fieldReady.connect(self.fieldsChanged)
             w.set_data_path_provider(lambda: self._path_ed.text().strip())
