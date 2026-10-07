@@ -26,14 +26,15 @@ from midas_gui.constants import (
 from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _predict_ring_radii, _NoScrollComboBox,
     make_kedge_label, make_pixel_label, ring_xy_corrected, distortion_rho_d_um,
-    ring_on_image_mask, refresh_combo_items, rmax_corner_px,
+    ring_on_image_mask, refresh_combo_items, rmax_corner_px, apply_radial_threshold,
+    default_radial_threshold_points, median_intensity_near_bc,
     widgets_to_dict, apply_dict_to_widgets, im_trans_codes_from_checkboxes,
     paramstest_pairs, parse_dspacing_text, browse_start_dir, warn_if_path_missing,
     suggest_working_dir, check_output_dir_writable, scratch_dir, SCRATCH_DIRNAME)
 from midas_gui.widgets import (
     PickableImageViewer, ProfileViewer, LogPanel, DataLoaderPanel, CakeViewer,
     RingResidualViewer, OriginToolButton, build_lab_frame_axes_items,
-    ring_azimuth_residual)
+    ring_azimuth_residual, RadialThresholdEditor)
 from midas_gui.workers import CalibrationWorker, IntegrationWorker, ManualDspacingCalibWorker
 from midas_gui.dialogs import (_SaveParamstestDialog, DistortionRefineDialog,
                                 DistortionSeedDialog, ManualSeedDialog,
@@ -388,32 +389,34 @@ class CalibrationTab(QtWidgets.QWidget):
         lv.addWidget(manual)
 
         # ── Threshold (calibration image only) ──
-        thr = S.make_card("Apply threshold to calibration image")
+        thr = S.make_card("Radially adaptive threshold (interactive curve in r from BC)")
         thr.setCheckable(True); thr.setChecked(False)
         thr.setToolTip(
-            "When on, pixels dimmer than the slider value are set to 0 in the image\n"
-            "fed to the calibration pipeline (and the live preview). Useful to drop\n"
-            "background / weak pixels before calibrating.")
+            "When on, a pixel is set to 0 in the image fed to the calibration\n"
+            "pipeline (and the live preview) if it is dimmer than the curve\n"
+            "plotted below at its distance r (px) from the current beam centre\n"
+            "(Seed card BC, as set by typing, Pick BC, or Pick Ring).")
         self._thr_check = thr
-        self._thr_min = _fspin(-1e9, 1e9, 0, 0.0)
-        self._thr_min.setMaximumWidth(52)
-        self._thr_max = _fspin(-1e9, 1e9, 0, 65535.0)
-        self._thr_max.setMaximumWidth(83)
-        self._thr_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self._thr_slider.setRange(0, 1000); self._thr_slider.setValue(0)
-        self._thr_val = QtWidgets.QLabel("threshold = —")
-        self._thr_val.setStyleSheet(f"color:{S.ACCENT};font-size:11px")
-        srow = QtWidgets.QHBoxLayout(); srow.setSpacing(6)
-        srow.addWidget(self._thr_min); srow.addWidget(self._thr_slider, 9); srow.addStretch(1)
-        srow.addWidget(self._thr_max)
-        thr.body.addLayout(srow)
-        thr.body.addWidget(self._thr_val)
-        for w in (self._thr_min, self._thr_max, self._thr_slider, self._thr_val):
-            w.setEnabled(False)
+        self._thr_editor = RadialThresholdEditor()
+        self._thr_editor.set_editable(False)
+
+        self._thr_dialog = QtWidgets.QDialog(self, QtCore.Qt.Window)
+        self._thr_dialog.setWindowTitle("Radially adaptive threshold curve")
+        self._thr_dialog.resize(700, 480)
+        dlg_layout = QtWidgets.QVBoxLayout(self._thr_dialog)
+        thr_hint = QtWidgets.QLabel(
+            "Drag points to reshape · double-click empty space to add · "
+            "double-click a point to remove (min 2) · scroll/drag to zoom the\n"
+            "Y-axis (X is fixed to the detector's radius range)")
+        thr_hint.setStyleSheet(f"color:{S.MUTED};font-size:10px"); thr_hint.setWordWrap(True)
+        dlg_layout.addWidget(thr_hint)
+        dlg_layout.addWidget(self._thr_editor)
+
+        thr_btn = QtWidgets.QPushButton("Adjust curve…")
+        thr_btn.clicked.connect(self._open_threshold_dialog)
+        thr.body.addWidget(thr_btn)
         thr.toggled.connect(self._on_threshold_toggled)
-        self._thr_slider.valueChanged.connect(self._on_threshold_changed)
-        self._thr_min.valueChanged.connect(self._on_threshold_changed)
-        self._thr_max.valueChanged.connect(self._on_threshold_changed)
+        self._thr_editor.pointsChanged.connect(self._on_threshold_points_changed)
         lv.addWidget(thr)
 
         # ── Mean of frames (hdf5 / folder) ──
@@ -1056,21 +1059,36 @@ class CalibrationTab(QtWidgets.QWidget):
 
     def _on_loader_data(self):
         """New frame / data from the loader — refresh the calibration image, the
-        threshold-slider range, and the display."""
+        threshold curve's default points, and the display."""
         self._sync_frame_scrub_bar()
         self._sync_avg_controls()
         self._image = self._source_image()
         if self._image is None:
             return
-        lo, hi = float(np.nanmin(self._image)), float(np.nanmax(self._image))
-        for w in (self._thr_min, self._thr_max, self._thr_slider):
-            w.blockSignals(True)
-        self._thr_min.setValue(max(0.0, lo)); self._thr_max.setValue(hi)
-        self._thr_slider.setValue(0)
-        for w in (self._thr_min, self._thr_max, self._thr_slider):
-            w.blockSignals(False)
-        self._update_threshold_label()
+        self._reset_threshold_defaults()
         self._show_calib_image(autorange=True)
+
+    def _reset_threshold_defaults(self):
+        """Re-derive radial-threshold default points for a newly loaded
+        image: a steep drop from an outlier-resistant near-BC brightness
+        reference (``helpers.median_intensity_near_bc`` — not the raw max,
+        which can be a single saturated/hot pixel) to 0 by a fraction of the
+        detector's corner radius from the current seed BC (see
+        ``helpers.default_radial_threshold_points``). The same reference
+        also sets the curve editor's default Y-axis view ceiling."""
+        nz, ny = self._image.shape[:2]
+        bc_y, bc_z = self._seed_bcy.value(), self._seed_bcz.value()
+        rmax = rmax_corner_px(bc_y, bc_z, ny, nz)
+        y_ref = median_intensity_near_bc(self._image, bc_y, bc_z, r_max=10.0)
+        radii, values = default_radial_threshold_points(y_ref, rmax)
+        self._thr_editor.set_domain(rmax)
+        self._thr_editor.set_points(radii, values)
+        self._thr_editor.set_y_view(y_ref)
+
+    def _open_threshold_dialog(self):
+        self._thr_dialog.show()
+        self._thr_dialog.raise_()
+        self._thr_dialog.activateWindow()
 
     def _on_fields_changed(self):
         """Dark/bright/background changed — refresh the calibration preview
@@ -1103,24 +1121,14 @@ class CalibrationTab(QtWidgets.QWidget):
 
     # ── Threshold (calibration image only) ────────────────────────
 
-    def _threshold_value(self) -> float:
-        lo, hi = self._thr_min.value(), self._thr_max.value()
-        if hi <= lo:
-            return hi
-        return lo + (self._thr_slider.value() / 1000.0) * (hi - lo)
-
-    def _update_threshold_label(self):
-        self._thr_val.setText(f"< {self._threshold_value():.4g} → 0")
-
     def _calib_image(self):
-        """Image fed to the calibration pipeline: thresholded copy if enabled."""
+        """Image fed to the calibration pipeline: radially-thresholded copy if enabled."""
         if self._image is None:
             return None
         if self._thr_check.isChecked():
-            thr = self._threshold_value()
-            out = self._image.copy()
-            out[self._image < thr] = 0.0
-            return out
+            radii, values = self._thr_editor.points()
+            return apply_radial_threshold(
+                self._image, self._seed_bcy.value(), self._seed_bcz.value(), radii, values)
         return self._image
 
     # ── Mean of frames ────────────────────────────────────────────
@@ -1734,13 +1742,10 @@ class CalibrationTab(QtWidgets.QWidget):
         self._axis_items.extend(items)
 
     def _on_threshold_toggled(self, on: bool):
-        for w in (self._thr_min, self._thr_max, self._thr_slider, self._thr_val):
-            w.setEnabled(on)
-        self._update_threshold_label()
+        self._thr_editor.set_editable(on)
         self._show_calib_image(autorange=False)
 
-    def _on_threshold_changed(self, *_):
-        self._update_threshold_label()
+    def _on_threshold_points_changed(self):
         if self._thr_check.isChecked():
             self._show_calib_image(autorange=False)
 
@@ -1860,18 +1865,16 @@ class CalibrationTab(QtWidgets.QWidget):
         self._log.append("Geometry pulled from Data Viewer tab.")
 
     def _on_bc_picked(self, bc_y, bc_z):
-        self._enable_seed(BC=True)
-        self._seed_bcy.setValue(bc_y); self._seed_bcz.setValue(bc_z)
-        self._seed_note.setText("BC set from click — Lsd is auto-seeded unless it's ticked too.")
-        self._log.append(f"BC set by click: ({bc_y:.2f}, {bc_z:.2f}) px — BC seed enabled")
-
-    def _on_ring_fit_bc(self, bc_y, bc_z, r_px):
-        self._enable_seed(BC=True)
         self._seed_bcy.setValue(bc_y); self._seed_bcz.setValue(bc_z)
         self._seed_note.setText(
-            f"BC from ring fit (R={r_px:.1f} px). Lsd is auto-seeded unless it's ticked too.")
-        self._log.append(
-            f"Ring fit: BC=({bc_y:.2f}, {bc_z:.2f}) px  R={r_px:.1f} px — BC seed enabled")
+            "BC value set from click — tick Manual seed yourself to use it in the fit.")
+        self._log.append(f"BC set by click: ({bc_y:.2f}, {bc_z:.2f}) px")
+
+    def _on_ring_fit_bc(self, bc_y, bc_z, r_px):
+        self._seed_bcy.setValue(bc_y); self._seed_bcz.setValue(bc_z)
+        self._seed_note.setText(
+            f"BC value from ring fit (R={r_px:.1f} px) — tick Manual seed yourself to use it.")
+        self._log.append(f"Ring fit: BC=({bc_y:.2f}, {bc_z:.2f}) px  R={r_px:.1f} px")
 
     # ── Manual d-spacing ring-picking fit (non-crystalline calibrants) ──
 
@@ -2786,8 +2789,6 @@ class CalibrationTab(QtWidgets.QWidget):
             "flip_z": self._flip_z,
             "transp": self._transp,
             "thr_check": self._thr_check,
-            "thr_min": self._thr_min,
-            "thr_max": self._thr_max,
             "avg_check": self._avg_check,
             "avg_start": self._avg_start,
             "avg_end": self._avg_end,
@@ -2843,6 +2844,9 @@ class CalibrationTab(QtWidgets.QWidget):
                  "loader": self._loader.get_state(),
                  "img_view": self._img_view.display_state(),
                  "img_picks": self._img_view.pick_state(),
+                 # Threshold curve points — "thr_check" (in "fields") is only
+                 # the on/off tick; the curve itself has no widget of its own.
+                 "thr_points": self._thr_editor.pick_state(),
                  "cake_view": self._cake_view.display_state(),
                  "hydra": {"active_mode": self._mode_ribbon.mode(),
                            "page": self._hydra_page.get_state()},
@@ -2890,6 +2894,11 @@ class CalibrationTab(QtWidgets.QWidget):
     def _set_state(self, state: dict, sidecar_stem: Optional[str] = None) -> None:
         fields = state.get("fields", {})
         apply_dict_to_widgets(self._state_widgets(), fields)
+        # apply_dict_to_widgets restores "thr_check" with signals blocked, so
+        # the threshold editor's editable/visual state never resyncs on its
+        # own — do it explicitly (its actual points are restored below, once
+        # the loader has finished re-deriving fresh-image defaults).
+        self._on_threshold_toggled(self._thr_check.isChecked())
         # A restored working directory is the user's stored choice, so it is
         # never silently rewritten to the current default — but it can have
         # gone stale (project opened on a host without that mount), and
@@ -2941,6 +2950,7 @@ class CalibrationTab(QtWidgets.QWidget):
         self._img_view.set_display_state(state.get("img_view"))
         self._origin_btn.sync()
         self._img_view.set_pick_state(state.get("img_picks"))
+        self._thr_editor.set_pick_state(state.get("thr_points"))
         self._cake_view.set_display_state(state.get("cake_view"))
         hydra_state = state.get("hydra") or {}
         self._mode_ribbon.set_mode(hydra_state.get("active_mode", "single"))

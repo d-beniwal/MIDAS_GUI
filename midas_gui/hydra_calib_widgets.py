@@ -345,16 +345,17 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
     # ── Pick BC / Pick Ring ──────────────────────────────────────────
 
     def _on_bc_picked(self, bc_y, bc_z):
-        self._enable_seed(BC=True)
         self._seed_bcy.setValue(bc_y); self._seed_bcz.setValue(bc_z)
         self._seed_note.setText(
-            f"ge{self.panel_number}: BC set from click — Lsd is auto-seeded unless it's ticked too.")
+            f"ge{self.panel_number}: BC value set from click — "
+            "tick Manual seed yourself to use it in the fit.")
         self._log(f"ge{self.panel_number}: BC set by click: ({bc_y:.2f}, {bc_z:.2f}) px")
 
     def _on_ring_fit_bc(self, bc_y, bc_z, r_px):
-        self._enable_seed(BC=True)
         self._seed_bcy.setValue(bc_y); self._seed_bcz.setValue(bc_z)
-        self._seed_note.setText(f"ge{self.panel_number}: BC from ring fit (R={r_px:.1f} px).")
+        self._seed_note.setText(
+            f"ge{self.panel_number}: BC value from ring fit (R={r_px:.1f} px) — "
+            "tick Manual seed yourself to use it.")
         self._log(f"ge{self.panel_number}: ring fit BC=({bc_y:.2f}, {bc_z:.2f}) px  R={r_px:.1f} px")
 
     # ── Rings ────────────────────────────────────────────────────────

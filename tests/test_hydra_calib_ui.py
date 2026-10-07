@@ -215,6 +215,43 @@ def test_hydra_calib_page_wiring_and_pick_isolation(app, fixture_available):
     page._cards[4]._feedback_check.setChecked(False)
     assert all(not page._cards[n]._feedback_check.isChecked() for n in (1, 2, 3, 4))
 
+    # Radially-adaptive threshold: toggling enables the curve editor, and
+    # _calib_image_for uses the CALLED panel's own BC, not a shared one.
+    assert page._thr_editor.isEnabled() is False
+    page._thr_check.setChecked(True)
+    assert page._thr_editor.isEnabled() is True
+
+    img = np.full((60, 60), 5.0, dtype=np.float32)
+    page._thr_editor.set_domain(50.0)
+    page._thr_editor.set_points([0.0, 5.0], [10.0, 0.0])
+    page._cards[1]._seed_bcy.setValue(10.0); page._cards[1]._seed_bcz.setValue(10.0)
+    page._cards[2]._seed_bcy.setValue(50.0); page._cards[2]._seed_bcz.setValue(50.0)
+    out1 = page._calib_image_for(img, 1)
+    out2 = page._calib_image_for(img, 2)
+    assert out1[10, 10] == 0.0 and out1[50, 50] == 5.0
+    assert out2[50, 50] == 0.0 and out2[10, 10] == 5.0
+    page._thr_check.setChecked(False)
+
+    # Pick BC / Pick Ring on a panel set its BC value but must not activate
+    # that panel's Manual-seed "Beam centre" checkbox (the user must tick it
+    # themselves — see .context/DECISIONS.md). Explicitly cleared here since
+    # the bulk-checkbox exercise above left it ticked.
+    card2 = page._cards[2]
+    card2._seed_en_bc.setChecked(False)
+    assert card2._seed_en_bc.isChecked() is False
+    style_before = card2._seed_btn.styleSheet()
+    card2._on_bc_picked(77.0, 88.0)
+    assert card2._seed_bcy.value() == pytest.approx(77.0)
+    assert card2._seed_bcz.value() == pytest.approx(88.0)
+    assert card2._seed_en_bc.isChecked() is False
+    assert card2._seed_btn.styleSheet() == style_before
+
+    card2._on_ring_fit_bc(5.0, 6.0, 20.0)
+    assert card2._seed_bcy.value() == pytest.approx(5.0)
+    assert card2._seed_bcz.value() == pytest.approx(6.0)
+    assert card2._seed_en_bc.isChecked() is False
+    assert card2._seed_btn.styleSheet() == style_before
+
 
 def test_hydra_calib_run_orchestration_and_results_switching(app, fixture_available, tmp_path):
     """Sequential run: independent per-panel BCs. Parallel run: all 4

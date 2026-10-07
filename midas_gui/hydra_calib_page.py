@@ -39,10 +39,11 @@ from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _NoScrollComboBox, make_kedge_label, make_pixel_label,
     _load_image, apply_field_corrections, average_field, source_kind,
     widgets_to_dict, apply_dict_to_widgets, _predict_ring_radii, refresh_combo_items,
-    browse_start_dir, warn_if_path_missing, suggest_working_dir,
-    check_output_dir_writable, scratch_dir, SCRATCH_DIRNAME)
+    browse_start_dir, warn_if_path_missing, suggest_working_dir, rmax_corner_px,
+    check_output_dir_writable, scratch_dir, SCRATCH_DIRNAME, apply_radial_threshold,
+    default_radial_threshold_points, median_intensity_near_bc)
 from midas_gui.widgets import (PickableImageViewer, LogPanel, CakeViewer, _convert_radial,
-                               OriginToolButton)
+                               OriginToolButton, RadialThresholdEditor)
 from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar, HydraProfileViewer
 from midas_gui.hydra_calib_widgets import HydraCalibPanelCard
 from midas_gui.workers import CalibrationWorker, IntegrationWorker
@@ -255,26 +256,35 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             (make_pixel_label(self._pxY, "Pixel:", also=self._pxZ_spin), prow)))
         lv.addWidget(det)
 
-        # Threshold (shared value; applied to whichever panel's own image is active/fit)
-        thr = S.make_card("Threshold  (pixels below → 0, shared)")
+        # Threshold (shared card; radial origin is whichever panel is active's own BC)
+        thr = S.make_card("Radially adaptive threshold  (interactive curve in r from BC, shared)")
         self._thr_check = QtWidgets.QCheckBox("Apply threshold to calibration image")
+        self._thr_check.setToolTip(
+            "When on, a pixel is set to 0 if it is dimmer than the curve\n"
+            "plotted below at its distance r (px) from the active panel's own\n"
+            "beam centre (Seed BC, as set by typing, Pick BC, or Pick Ring).")
         thr.body.addWidget(self._thr_check)
-        self._thr_min = _fspin(-1e9, 1e9, 1, 0.0)
-        self._thr_max = _fspin(-1e9, 1e9, 1, 65535.0)
-        thr.body.addLayout(S.Form().row(("slider min:", self._thr_min), ("max:", self._thr_max)))
-        self._thr_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self._thr_slider.setRange(0, 1000); self._thr_slider.setValue(0)
-        self._thr_val = QtWidgets.QLabel("threshold = —")
-        self._thr_val.setStyleSheet(f"color:{S.ACCENT};font-size:11px")
-        srow = QtWidgets.QHBoxLayout(); srow.setSpacing(6)
-        srow.addWidget(self._thr_slider, 1); srow.addWidget(self._thr_val)
-        thr.body.addLayout(srow)
-        for w in (self._thr_min, self._thr_max, self._thr_slider, self._thr_val):
-            w.setEnabled(False)
+        self._thr_editor = RadialThresholdEditor()
+        self._thr_editor.set_editable(False)
+
+        self._thr_dialog = QtWidgets.QDialog(self, QtCore.Qt.Window)
+        self._thr_dialog.setWindowTitle("Radially adaptive threshold curve")
+        self._thr_dialog.resize(700, 480)
+        dlg_layout = QtWidgets.QVBoxLayout(self._thr_dialog)
+        thr_hint = QtWidgets.QLabel(
+            "Drag points to reshape, centred on the ACTIVE panel's own beam\n"
+            "centre · double-click empty space to add a point · double-click\n"
+            "a point to remove it (min 2) · scroll/drag to zoom the Y-axis\n"
+            "(X is fixed to the detector's radius range)")
+        thr_hint.setStyleSheet(f"color:{S.MUTED};font-size:10px"); thr_hint.setWordWrap(True)
+        dlg_layout.addWidget(thr_hint)
+        dlg_layout.addWidget(self._thr_editor)
+
+        thr_btn = QtWidgets.QPushButton("Adjust curve…")
+        thr_btn.clicked.connect(self._open_threshold_dialog)
+        thr.body.addWidget(thr_btn)
         self._thr_check.toggled.connect(self._on_threshold_toggled)
-        self._thr_slider.valueChanged.connect(self._on_threshold_changed)
-        self._thr_min.valueChanged.connect(self._on_threshold_changed)
-        self._thr_max.valueChanged.connect(self._on_threshold_changed)
+        self._thr_editor.pointsChanged.connect(self._on_threshold_points_changed)
         lv.addWidget(thr)
 
         # Mean of frames (shared range — panels are synchronized frames of one scan)
@@ -558,9 +568,11 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             self._wl.setValue(float(detected["wavelength_A"]))
         if "pxY" in detected:
             self._pxY.setValue(float(detected["pxY"]))
+        self._reset_threshold_defaults_for_active_panel()
         self._refresh_display()
 
     def _on_frame_changed(self, _idx: int):
+        self._reset_threshold_defaults_for_active_panel()
         self._refresh_display()
 
     def _on_fields_changed(self):
@@ -584,6 +596,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         chk = self._show_rings_check
         chk.blockSignals(True); chk.setChecked(self._active_card.show_rings_checked())
         chk.blockSignals(False)
+        self._reset_threshold_defaults_for_active_panel()
         self._refresh_display()
 
     def _on_card_transform_changed(self, n: int):
@@ -653,23 +666,17 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         except Exception:
             return None
 
-    def _threshold_value(self) -> float:
-        lo, hi = self._thr_min.value(), self._thr_max.value()
-        if hi <= lo:
-            return hi
-        return lo + (self._thr_slider.value() / 1000.0) * (hi - lo)
-
-    def _update_threshold_label(self):
-        self._thr_val.setText(f"< {self._threshold_value():.4g} → 0")
-
-    def _calib_image_for(self, img):
+    def _calib_image_for(self, img, n: int):
+        """Radially-thresholded copy of panel ``n``'s raw image if enabled,
+        centred on that panel's own beam centre (its Seed BC spinboxes)."""
         if img is None:
             return None
         if self._thr_check.isChecked():
-            thr = self._threshold_value()
-            out = img.copy()
-            out[img < thr] = 0.0
-            return out
+            card = self._cards.get(n)
+            bc_y = card._seed_bcy.value() if card is not None else 0.0
+            bc_z = card._seed_bcz.value() if card is not None else 0.0
+            radii, values = self._thr_editor.points()
+            return apply_radial_threshold(img, bc_y, bc_z, radii, values)
         return img
 
     def _sync_avg_controls(self):
@@ -694,26 +701,52 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._avg_note.setText(f"mean of {cnt} of {n} frames (start={start}, end={end}).")
 
     def _on_threshold_toggled(self, on: bool):
-        for w in (self._thr_min, self._thr_max, self._thr_slider, self._thr_val):
-            w.setEnabled(on)
-        self._update_threshold_label()
+        self._thr_editor.set_editable(on)
         self._refresh_display()
 
-    def _on_threshold_changed(self, *_):
-        self._update_threshold_label()
+    def _on_threshold_points_changed(self):
         if self._thr_check.isChecked():
             self._refresh_display()
+
+    def _open_threshold_dialog(self):
+        self._thr_dialog.show()
+        self._thr_dialog.raise_()
+        self._thr_dialog.activateWindow()
 
     def _on_avg_toggled(self, on):
         for w in (self._avg_start, self._avg_end):
             w.setEnabled(on)
         self._update_avg_note()
+        self._reset_threshold_defaults_for_active_panel()
         self._refresh_display()
 
     def _on_avg_changed(self, *_):
         self._update_avg_note()
         if self._avg_check.isChecked():
+            self._reset_threshold_defaults_for_active_panel()
             self._refresh_display()
+
+    def _reset_threshold_defaults_for_active_panel(self):
+        """Re-derive radial-threshold default points for the now-active
+        panel's raw image (see ``helpers.default_radial_threshold_points``).
+        Called only when the underlying raw image actually changes (new
+        data, new frame, panel switch, frame-mean range) — never from the
+        threshold curve's own points, or dragging them would be pointless
+        (immediately overwritten by this same derivation)."""
+        if self._active_card is None:
+            return
+        n = self._active_card.panel_number
+        raw = self._panel_raw_image(n)
+        if raw is None:
+            return
+        nz, ny = raw.shape[:2]
+        bc_y, bc_z = self._active_card._seed_bcy.value(), self._active_card._seed_bcz.value()
+        rmax = rmax_corner_px(bc_y, bc_z, ny, nz)
+        y_ref = median_intensity_near_bc(raw, bc_y, bc_z, r_max=10.0)
+        radii, values = default_radial_threshold_points(y_ref, rmax)
+        self._thr_editor.set_domain(rmax)
+        self._thr_editor.set_points(radii, values)
+        self._thr_editor.set_y_view(y_ref)
 
     def _refresh_display(self):
         if self._active_card is None:
@@ -722,14 +755,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         raw = self._panel_raw_image(n)
         if raw is None:
             return
-        lo, hi = float(np.nanmin(raw)), float(np.nanmax(raw))
-        for w in (self._thr_min, self._thr_max, self._thr_slider):
-            w.blockSignals(True)
-        self._thr_min.setValue(max(0.0, lo)); self._thr_max.setValue(hi)
-        for w in (self._thr_min, self._thr_max, self._thr_slider):
-            w.blockSignals(False)
-        self._update_threshold_label()
-        img = self._calib_image_for(raw)
+        img = self._calib_image_for(raw, n)
         img = apply_field_corrections(
             img, dark=self._loader.dark(n), bright=self._loader.bright(n),
             bright_mode=self._loader.bright_mode(), background=self._loader.background(n))
@@ -848,7 +874,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             if self._run_mode() == "sequential":
                 self._start_next_sequential()
             return
-        image = self._calib_image_for(raw)
+        image = self._calib_image_for(raw, n)
         dark = self._loader.dark(n)
         bright = self._loader.bright(n)
         background = self._loader.background(n)
@@ -962,7 +988,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
     # ── Integration / residual chart ───────────────────────────────
 
     def _run_integration(self, n: int, result):
-        image = self._calib_image_for(self._panel_raw_image(n))
+        image = self._calib_image_for(self._panel_raw_image(n), n)
         if image is None:
             return
         if self._int_workers.get(n) is not None and self._int_workers[n].isRunning():
@@ -1172,7 +1198,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         return {
             "pipeline": self._pipeline, "wl": self._wl, "cal": self._cal,
             "pxY": self._pxY, "pxZ_check": self._pxZ_check, "pxZ_spin": self._pxZ_spin,
-            "thr_check": self._thr_check, "thr_min": self._thr_min, "thr_max": self._thr_max,
+            "thr_check": self._thr_check,
             "avg_check": self._avg_check, "avg_start": self._avg_start, "avg_end": self._avg_end,
             "ref_lsd": self._ref_lsd, "ref_bc": self._ref_bc, "ref_ty": self._ref_ty,
             "ref_tz": self._ref_tz, "ref_tx": self._ref_tx, "ref_wl": self._ref_wl,
@@ -1199,12 +1225,18 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             "cards": cards,
             # No widget of its own — see CalibrationTab.get_state's copy.
             "dist_coeffs": sorted(self._dist_coeffs),
+            "thr_points": self._thr_editor.pick_state(),
         }
 
     def set_state(self, state: dict):
         if not state:
             return
         apply_dict_to_widgets(self._state_widgets(), state.get("fields", {}))
+        # Unlike CalibrationTab's checkable QGroupBox, this card's "Apply
+        # threshold" is a plain QCheckBox with no native enable-cascade, so
+        # the editor's editable/visual state needs this explicit resync.
+        self._on_threshold_toggled(self._thr_check.isChecked())
+        self._thr_editor.set_pick_state(state.get("thr_points"))
         dist_coeffs = state.get("dist_coeffs")
         if dist_coeffs is not None:
             self._dist_coeffs = set(dist_coeffs)

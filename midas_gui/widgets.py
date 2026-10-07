@@ -49,7 +49,7 @@ from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollDoubleSpinBox, _fspin,
                                new_temp_h5_path, save_stack_h5, detect_geometry_from_path,
                                source_kind, display_text_for_paths, _apply_im_trans,
                                is_dark_like_name, warn_if_path_missing,
-                               path_is_missing, _folder_format_groups)
+                               path_is_missing, _folder_format_groups, radial_spline_values)
 from midas_gui import style as S
 
 
@@ -2541,6 +2541,235 @@ def collapsed_profile_ring_residual(r_axis_px, profile, ring_radii_px,
         resid.append(r_obs - float(r_pred))
         kept_radii.append(float(r_pred))
     return np.array(resid, dtype=float), kept_radii
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  RadialThresholdEditor  (NEW — interactive drag-point threshold curve)
+# ═════════════════════════════════════════════════════════════════════════════
+
+class RadialThresholdEditor(QtWidgets.QWidget):
+    """Interactive free-form curve editor: draggable points (x = radius from
+    BC in px, y = threshold intensity) connected by the monotone-cubic
+    spline through them (``helpers.radial_spline_values`` — the same
+    function that builds the actual per-pixel mask, so the drawn curve and
+    the applied threshold can never disagree).
+
+    Drag a point to move it (x clamped between its neighbours so points
+    can't cross or collide; y clamped to ``>= _Y_FLOOR`` only — a point MAY
+    sit above its neighbour, producing a non-monotonic "bump", by deliberate
+    design: this is a free-form curve, not a decay-only one). Double-click
+    empty plot space to add a point; double-click an existing point to
+    remove it (kept within ``MIN_POINTS``/``MAX_POINTS``).
+
+    The Y-axis is log-scaled (``_Y_FLOOR = 1.0`` intensity is the log-scale
+    "zero") and user-zoomable; the X-axis is hard-locked to ``[0, r_domain]``
+    (see :meth:`set_domain`) — pyqtgraph's own log mode auto-transforms
+    ``self._curve`` (a ``PlotDataItem``) for display, but NOT arbitrary
+    items like ``pg.TargetItem``, so every point's position is stored and
+    read back through :meth:`_log_y`/:meth:`_real_y` manually; the public
+    API (``points()``, ``set_points()``, ``pick_state()``) always deals in
+    real intensity units — the log transform is purely an internal
+    rendering detail.
+    """
+
+    pointsChanged = QtCore.pyqtSignal()   # drag, add, or remove
+
+    MIN_POINTS = 2
+    MAX_POINTS = 10
+    _MIN_GAP_FRAC = 0.01     # min radius gap between neighbour knots, as a fraction of the r-domain
+    _Y_FLOOR = 1.0           # intensity floor; log10(1) == 0, the log-scale "zero"
+    _Y_CEIL = 1e9            # generous ceiling, just to block pathological values
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._plot = pg.PlotWidget(background="k")
+        self._plot.setLabel("bottom", "R (px)")
+        self._plot.setLabel("left", "Threshold intensity")
+        self._plot.showGrid(x=True, y=True, alpha=0.2)
+        self._plot.setLogMode(y=True)
+        vb = self._plot.getPlotItem().getViewBox()
+        vb.setMouseEnabled(x=False, y=True)   # X is locked to the detector's radius range
+        self._plot.enableAutoRange(pg.ViewBox.YAxis, False)
+        layout.addWidget(self._plot)
+
+        self._curve = self._plot.plot([], [], pen=pg.mkPen("#ff7800", width=2))
+        self._targets: list = []   # pg.TargetItem, always kept sorted by current r
+        self._editable = True
+        self._r_domain = 100.0
+        self._plot.scene().sigMouseClicked.connect(self._on_plot_clicked)
+        self.set_points([0.0, 100.0], [self._Y_FLOOR, self._Y_FLOOR])
+        self.set_y_view(self._Y_FLOOR * 10)
+
+    # ── log/real intensity conversion (display-only — see class docstring) ──
+
+    @classmethod
+    def _log_y(cls, real_y: float) -> float:
+        return math.log10(max(float(real_y), cls._Y_FLOOR))
+
+    @classmethod
+    def _real_y(cls, log_y: float) -> float:
+        return 10.0 ** float(log_y)
+
+    # ── public API ──────────────────────────────────────────────────
+
+    def set_domain(self, r_max: float):
+        """Fix the plotted x-range to ``[0, r_max]`` (called whenever the
+        detector/BC geometry changes, so the curve always spans the real
+        detector) and lock it there — the X-axis is not user-pannable or
+        -zoomable (see ``vb.setMouseEnabled`` in ``__init__``)."""
+        self._r_domain = max(float(r_max), 1.0)
+        vb = self._plot.getPlotItem().getViewBox()
+        vb.setLimits(xMin=0.0, xMax=self._r_domain)
+        self._plot.setXRange(0.0, self._r_domain, padding=0.0)
+        self._redraw_curve()
+
+    def set_y_view(self, y_max_real: float) -> None:
+        """Set the default Y-axis view to ``[_Y_FLOOR, y_max_real]`` (log
+        scale). Unlike X, this is only the STARTING view — the user can
+        still zoom/pan it with the mouse; this is not called again on every
+        drag, only when the curve's defaults are (re)computed, so a
+        mid-drag manual zoom is never overridden.
+
+        ``padding=0`` on the low side: pyqtgraph's symmetric ``padding=0.05``
+        would pad *below* ``log10(_Y_FLOOR) == 0`` too, showing the view
+        start under 1 even though 1 is meant to be the hard log-scale floor.
+        The 5% headroom is instead added only to the top."""
+        y_max_real = max(float(y_max_real), self._Y_FLOOR * 10)
+        top = self._log_y(self._Y_FLOOR) + 1.05 * (self._log_y(y_max_real) - self._log_y(self._Y_FLOOR))
+        self._plot.setYRange(self._log_y(self._Y_FLOOR), top, padding=0.0)
+
+    def set_points(self, radii, values) -> None:
+        """Replace every control point (programmatic reset — e.g. a fresh
+        image load, or a restored project — does NOT emit ``pointsChanged``,
+        same convention as the old spinboxes' blocked-signal resets)."""
+        for t in self._targets:
+            self._plot.removeItem(t)
+        self._targets = []
+        order = np.argsort(np.asarray(radii, dtype=float))
+        radii_s = np.asarray(radii, dtype=float)[order]
+        values_s = np.asarray(values, dtype=float)[order]
+        self._r_domain = max(self._r_domain, float(radii_s[-1]) if len(radii_s) else 1.0)
+        for r, y in zip(radii_s, values_s):
+            self._targets.append(self._make_target(float(r), float(y)))
+        self._plot.setXRange(0.0, self._r_domain, padding=0.0)
+        self._restyle()
+        self._redraw_curve()
+
+    def points(self):
+        """Current control points as ``(radii, values)``, sorted by radius,
+        in real intensity units (never log)."""
+        if not self._targets:
+            return np.array([]), np.array([])
+        radii = np.array([t.pos().x() for t in self._targets])
+        values = np.array([self._real_y(t.pos().y()) for t in self._targets])
+        return radii, values
+
+    def set_editable(self, on: bool) -> None:
+        self._editable = bool(on)
+        self.setEnabled(self._editable)
+        for t in self._targets:
+            t.movable = self._editable
+        self._restyle()
+
+    def pick_state(self) -> dict:
+        """Point state for project/session round-tripping (see
+        ``PickableImageViewer.pick_state`` for the same convention)."""
+        radii, values = self.points()
+        return {"radii": [float(x) for x in radii], "values": [float(y) for y in values]}
+
+    def set_pick_state(self, state: Optional[dict]) -> None:
+        if not state:
+            return
+        radii, values = state.get("radii"), state.get("values")
+        if radii and values and len(radii) == len(values) and len(radii) >= self.MIN_POINTS:
+            self.set_points(radii, values)
+
+    # ── internals ───────────────────────────────────────────────────
+
+    def _make_target(self, r: float, real_y: float) -> "pg.TargetItem":
+        t = pg.TargetItem(pos=(r, self._log_y(real_y)), size=11, movable=self._editable,
+                          label=lambda x, ly: f"r={x:.0f}\nthr={self._real_y(ly):.3g}")
+        self._plot.addItem(t)
+        t.sigPositionChanged.connect(self._on_target_moved)
+        return t
+
+    def _min_gap(self) -> float:
+        return max(self._r_domain * self._MIN_GAP_FRAC, 0.5)
+
+    def _on_target_moved(self, target) -> None:
+        try:
+            idx = self._targets.index(target)
+        except ValueError:
+            return
+        gap = self._min_gap()
+        lo = self._targets[idx - 1].pos().x() + gap if idx > 0 else 0.0
+        hi = (self._targets[idx + 1].pos().x() - gap if idx < len(self._targets) - 1
+              else self._r_domain)
+        pos = target.pos()
+        x = min(max(pos.x(), lo), max(lo, hi))
+        real_y = min(max(self._real_y(pos.y()), self._Y_FLOOR), self._Y_CEIL)
+        log_y = self._log_y(real_y)
+        if x != pos.x() or log_y != pos.y():
+            target.blockSignals(True)
+            target.setPos(x, log_y)
+            target.blockSignals(False)
+        self._redraw_curve()
+        self.pointsChanged.emit()
+
+    def _redraw_curve(self) -> None:
+        if not self._targets:
+            self._curve.setData([], [])
+            return
+        xs = np.linspace(0.0, self._r_domain, 200)
+        radii, values = self.points()
+        ys = np.clip(radial_spline_values(xs, radii, values), self._Y_FLOOR, None)
+        self._curve.setData(xs, ys)
+
+    def _restyle(self) -> None:
+        curve_color = "#ff7800" if self._editable else "#666666"
+        point_color = "#ffb380" if self._editable else "#888888"
+        self._curve.setPen(pg.mkPen(curve_color, width=2))
+        for t in self._targets:
+            t.setPen(pg.mkPen(point_color))
+            t.setBrush(pg.mkBrush(point_color))
+
+    def _on_plot_clicked(self, event) -> None:
+        if not self._editable or not event.double():
+            return
+        vb = self._plot.getPlotItem().getViewBox()
+        if not vb.sceneBoundingRect().contains(event.scenePos()):
+            return
+        hit_items = self._plot.scene().items(event.scenePos())
+        hit = next((t for t in self._targets if t in hit_items), None)
+        if hit is not None:
+            self._remove_point(hit)
+            return
+        pos = vb.mapSceneToView(event.scenePos())
+        self._add_point(pos.x(), self._real_y(pos.y()))
+
+    def _add_point(self, r: float, real_y: float) -> None:
+        if len(self._targets) >= self.MAX_POINTS:
+            return
+        r = min(max(float(r), 0.0), self._r_domain)
+        real_y = min(max(float(real_y), self._Y_FLOOR), self._Y_CEIL)
+        gap = self._min_gap()
+        if any(abs(r - t.pos().x()) < gap for t in self._targets):
+            return
+        self._targets.append(self._make_target(r, real_y))
+        self._targets.sort(key=lambda t: t.pos().x())
+        self._restyle()
+        self._redraw_curve()
+        self.pointsChanged.emit()
+
+    def _remove_point(self, target) -> None:
+        if len(self._targets) <= self.MIN_POINTS:
+            return
+        self._plot.removeItem(target)
+        self._targets.remove(target)
+        self._redraw_curve()
+        self.pointsChanged.emit()
 
 
 # ═════════════════════════════════════════════════════════════════════════════

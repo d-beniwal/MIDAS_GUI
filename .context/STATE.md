@@ -1,7 +1,7 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-10-01 (Calibrate: ring prediction bounded by true detector coverage, not a fixed 30° — see DECISIONS)_
+_Last updated: 2026-10-07 (Calibrate: threshold curve editor popped into a dialog, log Y-axis floored at 1, X locked to detector range — see DECISIONS)_
 
 ## Now working on
 
@@ -39,6 +39,97 @@ Open follow-ups, none blocking:
   `git fetch origin 'refs/pull/*/head:refs/remotes/origin/pr/*'`.
 
 ## Recently completed
+
+**2026-10-07 (later) — Threshold curve popped into a dialog; log Y-axis
+floored at 1; X locked to the detector's radius range.** The embedded
+`RadialThresholdEditor` (below) was cramped in the narrow card column, so it
+now lives in a non-modal `QDialog` opened via an "Adjust curve…" button —
+the card itself is just checkbox + button now. Non-modal (`.show()`, never
+`.exec_()`), so the rest of the tab stays usable and the main image preview
+keeps updating live while it's open (unchanged `pointsChanged` wiring — same
+long-lived editor instance, just reparented). Y-axis is now log-scaled via
+`setLogMode(y=True)`; since that only auto-transforms `PlotDataItem`s (our
+curve) and NOT `pg.TargetItem`s (confirmed empirically), every point's
+position is stored/read as `(r, log10(real_y))` internally via new
+`_log_y`/`_real_y` — the public API (`points()`/`set_points()`/
+`pick_state()`) is unchanged, still real units only. Floor is 1.0 (not 0) —
+"y min can be 1 i.e. 0 on log scale," so 1 count stands in for "zero."
+X-axis: `vb.setMouseEnabled(x=False, y=True)` + `vb.setLimits(xMin=0,
+xMax=r_domain)` — genuinely not pannable/zoomable; Y keeps native zoom, with
+a new `set_y_view(y_max)` only setting the *default* view (not reasserted on
+every drag). Default Y ceiling (and the default curve's top point) now comes
+from new `helpers.median_intensity_near_bc(img, bc_y, bc_z, r_max=10)` — the
+median near BC, not the raw image max, which could be a single saturated
+pixel dominating the whole default scale. New tests in
+`test_radial_threshold_editor.py` (floor/log-roundtrip/axis-lock) and
+`test_helpers.py` (`median_intensity_near_bc`). Full rationale in DECISIONS
+2026-10-07 (later).
+**Verified:** all touched/new test files green per-file on a clean `HOME`;
+`pyflakes` unchanged (39 warnings); `get_state()`/`set_state()` round-trip
+re-confirmed on both tab classes; offscreen screenshots confirm the compact
+card and a correctly-rendered log-scale popup (10/100/1000 tick labels,
+curve bottoming out at 1).
+
+**2026-10-07 — Power-law threshold superseded by an interactive drag-point
+curve (`widgets.RadialThresholdEditor`), no formula at all.** Spinbox-driven
+parametric curves weren't effective for the user to shape a threshold by
+feel; chose a free-form curve (not a fit of the old formula to dragged
+points) when asked, including allowing a dragged point to sit above its
+neighbour (a "bump" — fully free-form, no monotonicity constraint). Both the
+Calibrate tab and Hydra page's threshold card are now a `pg.PlotWidget` (x =
+radius px, y = intensity) holding 2–10 draggable `pg.TargetItem` control
+points connected by a monotone-cubic (PCHIP) spline through them, flat
+beyond the first/last knot. New `helpers.radial_spline_values`/
+`radial_spline_threshold_map`/`default_radial_threshold_points` replace
+`radial_power_threshold_map` wholesale; `apply_radial_threshold` keeps its
+name, now takes `(radii, values)` arrays. The widget's own drawn curve and
+the real per-pixel mask call the exact same interpolation function, so they
+can never disagree. Drag clamps: radius against neighbours (can't cross),
+y to `>= 0` only. Double-click empty space adds a point, double-click an
+existing point removes it. `set_editable(False)` disables the whole widget
+(`QWidget.setEnabled`, covers drag/pan/zoom/double-click for free) and
+recolors it gray — needed because custom `QGraphicsView` painting doesn't
+pick up Qt's native disabled look. State: the curve's points have no widget
+of their own, so they round-trip via a new `thr_points` top-level key in
+`get_state()`/`set_state()`, following `PickableImageViewer.pick_state()`'s
+exact precedent; an old saved project missing that key just keeps fresh
+defaults. One real bug fixed while wiring this up: Hydra's "Apply threshold"
+is a plain `QCheckBox` with no native enable-cascade (unlike the
+single-detector tab's checkable `QGroupBox`), so its `set_state()` needed an
+explicit resync call or a restored checked state left the editor looking
+disabled. Full rationale in DECISIONS 2026-10-07. New
+`tests/test_radial_threshold_editor.py` (10 tests, drives the widget via
+`TargetItem.setPos()` directly — no `QTest` mouse-event simulation exists in
+this suite); `test_helpers.py`, `test_calib_radial_threshold.py`,
+`test_hydra_calib_ui.py` updated for the new function/widget.
+**Verified:** all touched/new test files green per-file on a clean `HOME`;
+`pyflakes` unchanged (39 warnings, same list); `get_state()`/`set_state()`
+round-trip of `thr_points` confirmed by direct script on both tab classes;
+offscreen screenshots confirm the plot renders with labeled draggable
+points and the disabled state is visibly dimmed.
+
+**2026-10-06 (later) — Radial Gaussian threshold superseded by a 4-knob
+power-law step (peak/floor/r0/steepness). Superseded the very next day by
+the drag-point curve above** — kept here only as a one-line pointer; no
+part of this design survives (spinboxes, formula, and
+`radial_power_threshold_map` are all gone). Full rationale in DECISIONS
+2026-10-06 (later), for history only.
+
+**2026-10-06 — Calibrate: scalar threshold replaced with a radial Gaussian
+(amplitude/location/scale from BC); Pick BC/Ring no longer auto-activates
+Manual seed. Superseded later the same day by the power-law entry above** —
+kept here only for the Pick-BC/Pick-Ring "don't auto-activate Manual seed"
+half of this change, which is still current: `_on_bc_picked`/
+`_on_ring_fit_bc` (both tabs) no longer call `_enable_seed(BC=True)`; a pick
+only populates the BC value, the user must tick Manual seed themselves.
+Also still current: Hydra's `_reset_threshold_defaults_for_active_panel()`,
+called only when the underlying raw image actually changes (extracted after
+finding `_refresh_display()` used to recompute threshold defaults on every
+call, including from editing those very fields). Full rationale in DECISIONS
+2026-10-06.
+**Verified:** all touched/new test files green per-file on a clean `HOME`;
+`pyflakes` unchanged (same pre-existing warnings only); offscreen screenshots
+of both new threshold cards confirmed the 3-spinbox layout.
 
 **2026-10-01 — Calibrate: predicted rings now bounded by true detector
 coverage, not a fixed 30°.** `helpers._predict_ring_radii` generated

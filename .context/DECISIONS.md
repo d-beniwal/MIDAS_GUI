@@ -3,6 +3,291 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-07 (later) — Threshold curve editor popped into a dialog; log Y-axis; X locked to detector range
+
+Requested change (same day as the drag-point-curve entry below): the
+embedded curve editor took up too much of the narrow card column and was
+cramped to work with precisely. Moved `RadialThresholdEditor` out of the
+inline card into a non-modal `QDialog` (`Qt.Window` flags, so it has its own
+title bar/min/max), opened via a new "Adjust curve…" button; the card itself
+now holds just the checkbox and that button. The dialog is never `.exec_()`'d
+(`.show()`/`.raise_()`/`.activateWindow()` only), so the rest of the tab
+stays interactive and the main image preview keeps updating live while it's
+open — the existing `pointsChanged → _on_threshold_points_changed →
+_show_calib_image()/_refresh_display()` wiring needed no changes at all,
+since it's the same long-lived `RadialThresholdEditor` instance, just
+reparented into the dialog's layout instead of the card's. Closing the
+dialog's window (✕) just hides it (default `QDialog` behaviour, no
+`WA_DeleteOnClose`); the button reopens the same instance with its points
+intact.
+
+**Y-axis is now log-scaled, floored at intensity 1 (not 0).** Per
+clarification: "the y min can be 1 i.e. 0 on log scale" — `log10(1) == 0`,
+so 1 count stands in for "zero" on the log display; no value below it is
+representable. Key implementation fact, confirmed empirically before
+writing any code: pyqtgraph's `PlotWidget.setLogMode(y=True)` auto-transforms
+`PlotDataItem`s (our `self._curve`, built via `.plot()`) for display, but
+does **NOT** transform arbitrary items like `pg.TargetItem` — a `TargetItem`
+positioned at real-valued `(r, y)` under a log-mode `ViewBox` lands at the
+wrong scene position entirely. So every `TargetItem`'s position is now
+stored and read back as `(r, log10(real_y))` manually via two tiny
+classmethods (`_log_y`/`_real_y`); the *public* API (`points()`,
+`set_points()`, `pick_state()`) is untouched and still deals purely in real
+intensity units — the log transform is purely an internal rendering detail,
+confirmed by `test_y_values_round_trip_through_log_display`.
+`_on_target_moved`/`_add_point` clamp the **real** value to
+`[_Y_FLOOR=1.0, _Y_CEIL=1e9]` before converting back to log for display/
+storage — the ceiling just blocks pathological values, it's not a usability
+limit (see below).
+
+**X-axis hard-locked to `[0, r_domain]`, Y-axis user-zoomable — this was
+the actual "max Y changeable, max X not" requirement.** `vb.setMouseEnabled(x=False,
+y=True)` plus `vb.setLimits(xMin=0, xMax=r_domain)` in `set_domain()`: X
+genuinely cannot be panned/zoomed by the user (matches "limit the x-axis to
+a minimum of R=0 and maximum equal to the max R in the image range," with no
+exception). Y keeps native mouse pan/zoom; a new `set_y_view(y_max_real)`
+sets only the *default/starting* view (`[1, y_max_real]` in log space, via
+`setYRange`) whenever the curve's defaults are (re)computed — not on every
+drag, so a mid-session manual zoom is never clobbered. Y autorange was
+turned off (`enableAutoRange(YAxis, False)`) so this explicit view sticks.
+
+**Default Y ceiling = median intensity within r<=10px of BC, not the raw
+image max.** New `helpers.median_intensity_near_bc(img, bc_y, bc_z, r_max)`
+— outlier-resistant (a single saturated/hot pixel, which the raw
+`np.nanmax` the curve's defaults used until today, would otherwise dominate
+the whole default view and curve shape). This reference is now used for
+BOTH the default curve's top point (`default_radial_threshold_points`'s
+`hi` argument — signature unchanged, only what both tabs pass in changed)
+and the Y-view's default ceiling, so the default curve is always fully
+visible within its own default view. Wired into both
+`tab_calibrate.py::_reset_threshold_defaults` and
+`hydra_calib_page.py::_reset_threshold_defaults_for_active_panel`.
+
+New tests in `tests/test_radial_threshold_editor.py` (floor-at-1 not 0, log/
+real round-trip, X mouse-disabled/Y mouse-enabled, `set_domain` locks
+`xLimits`) and `tests/test_helpers.py` (`median_intensity_near_bc`: uses
+only pixels within `r_max`, falls back to `nanmax` when the mask is empty).
+Existing threshold tests needed only a floor-value comment fix (`0.0` →
+`1.0`) since the behavior they check (far corner pixel value 5.0 survives
+thresholding) is numerically unchanged by the floor.
+
+**Verified:** all touched/new test files green per-file on a clean `HOME`;
+`pyflakes` unchanged (39 warnings, same list); `get_state()`/`set_state()`
+round-trip of `thr_points` re-confirmed on both tab classes (values now
+correctly floor to 1.0 on restore); offscreen screenshots confirm the
+card is now compact (checkbox + button only) and the popped-out dialog
+renders a proper log Y-axis (10, 100, 1000 tick labels) with the curve
+correctly bottoming out at 1.
+
+## 2026-10-07 — Power-law threshold superseded by an interactive drag-point curve (no formula at all)
+
+Requested change: spinbox-driven parametric curves (first Gaussian, then a
+4-knob power-law step, both landed the day before) weren't effective for the
+user to actually shape a threshold by feel — "I instead want something
+wherein I can actually see the plot and control it clearly... drag the graph
+as I want and parameters are calculated automatically." Asked to choose
+between fitting the existing power-law formula to dragged points, or a
+free-form spline with no underlying parametric family at all: **chose
+free-form**. Also explicitly chose to allow a dragged point to sit above its
+neighbour (a non-monotonic "bump"), rather than clamping the curve to only
+decay outward — fully free-form, matching "drag however you want" literally.
+
+Replaced the whole 4-spinbox (peak/floor/r0/steepness) UI with a new
+`widgets.RadialThresholdEditor`: a `pg.PlotWidget` (x = radius px, y =
+intensity) holding 2–10 draggable `pg.TargetItem` control points connected by
+a monotone-cubic (PCHIP) spline that passes exactly through every point, flat
+beyond the first/last knot (clip-then-interpolate — no extrapolation
+overshoot). `helpers.radial_power_threshold_map` is gone; new
+`helpers.radial_spline_values`/`radial_spline_threshold_map` are the one
+implementation the widget's drawn curve and the actual per-pixel mask both
+call, so they can never disagree. `apply_radial_threshold` keeps its name,
+now takes `(radii, values)` arrays instead of 4 scalars.
+
+**Why `pg.TargetItem` over a hand-rolled drag implementation**: nothing in
+this codebase had a draggable-point pattern before (confirmed by grep —
+every existing `movable=True`-capable pyqtgraph item in this repo is
+constructed `movable=False`); `TargetItem` gives `sigPositionChanged` (live,
+during drag) / `sigPositionChangeFinished` and a plain `.movable` attribute
+for free, which is far more robust than manually hit-testing mouse events on
+a `ScatterPlotItem`.
+
+**Interaction design**: dragging clamps a point's radius between its
+immediate neighbours (can't cross or collide) and its y to `>= 0`, but
+**never clamps y against a neighbour** — bumps are allowed, per the explicit
+choice above. Double-click on empty plot space adds a point at the clicked
+(r, y); double-click an existing point removes it (floor of
+`MIN_POINTS = 2`, ceiling `MAX_POINTS = 10`). `set_editable(False)` disables
+the whole widget (blocking drag/pan/zoom/double-click for free via
+`QWidget.setEnabled`) and recolors the curve/points to gray — custom
+`QGraphicsView` painting doesn't pick up Qt's native disabled palette, so
+this is the only way the off state is actually visible.
+
+**Defaults**: `helpers.default_radial_threshold_points(hi, rmax)` places 4
+points at r-fractions `(0, 0.10, 0.25, 0.60)` of the corner radius and
+y-fractions `(1.0, 0.5, 0.1, 0.0)` of the image max — a steep-drop-then-flat
+starting shape to drag from, reusing the exact same two scalars
+(`rmax_corner_px`, `np.nanmax`) every earlier version's defaults used.
+
+**State**: the 4 widget-backed keys (`thr_peak/thr_floor/thr_r0/thr_order`)
+are gone from both tabs' `_state_widgets()`; the curve's points have no
+widget of their own, so they round-trip via a new `thr_points` top-level key
+in `get_state()`/`set_state()`, following `PickableImageViewer.pick_state()`/
+`set_pick_state()`'s exact precedent (`widgets.py`) — same shape already
+used for `dist_coeffs`. An old saved project missing `thr_points` just keeps
+the freshly-computed defaults (`set_pick_state` is a no-op on falsy input),
+same tolerance already established for `dist_coeffs`. One real fix found
+while wiring this up: `hydra_calib_page.py`'s "Apply threshold" is a plain
+`QCheckBox` (unlike `tab_calibrate.py`'s checkable `QGroupBox`, which gets a
+native enable-cascade for free), so its `set_state()` needed an explicit
+`self._on_threshold_toggled(self._thr_check.isChecked())` call after
+restoring fields, or a restored checked-but-blocked-signals state would
+leave the editor looking/behaving disabled until manually re-toggled.
+
+New `tests/test_radial_threshold_editor.py` (10 tests) drives the widget via
+its public methods and by calling `TargetItem.setPos()` directly (fires the
+real `sigPositionChanged` handler) — this codebase has no `QTest`-based
+mouse-event simulation anywhere, so the double-click add/remove scene-hit-
+test plumbing itself is checked only via an offscreen screenshot, the same
+tier of coverage already accepted for `PickableImageViewer`'s own
+click-to-pick wiring. `tests/test_helpers.py`, `tests/test_calib_radial_
+threshold.py`, `tests/test_hydra_calib_ui.py` updated for the new
+function/widget.
+
+**Verified:** all touched/new test files green per-file on a clean `HOME`;
+`pyflakes` unchanged (39 warnings, same list, before/after); `get_state()`/
+`set_state()` round-trip of `thr_points` confirmed by direct script on both
+`CalibrationTab` and `HydraCalibrationPage`; offscreen screenshots confirm
+the plot renders with labeled draggable points, and the disabled state is
+visibly dimmed (gray curve/points) on both tabs.
+
+## 2026-10-06 (later) — Radial Gaussian threshold superseded by a 4-knob power-law step (peak/floor/r0/steepness)
+
+Requested change (same day as the Gaussian entry below, before it had settled
+in): the Gaussian gave no independent control over how fast it decays, what
+value it flattens out to, or at what radius — it only had amplitude/
+location/scale, and a Gaussian's tail always decays toward 0, never to a
+settable floor. Replaced with
+`thr(r) = floor + (peak - floor) / (1 + (r/r0)**(2*order))` — a
+Butterworth-filter-style power-law roll-off, in new
+`helpers.radial_power_threshold_map` (same call sites, replacing
+`radial_gaussian_threshold_map` wholesale; `apply_radial_threshold` keeps its
+name but takes the new 4 params).
+
+Why this family over a plain logistic/sigmoid or a piecewise flat-ramp-flat:
+a sigmoid only has 2 effective degrees of freedom (location, width) and
+always produces the same symmetric S-curve shape, just stretched/shifted — it
+can't vary the *shape* of the roll-off itself, only its scale. The power-law
+form's `order` exponent is a genuine shape knob: `order≈1` gives a gentle,
+wide, Lorentzian-like decay spread over a broad radius range; `order≈8+`
+collapses the transition into an almost rectangular step right at `r0`. One
+number sweeps from "soft blob" to "hard cutoff" — the widest variety of
+curves achievable from a minimal, interactive knob set — while staying a
+single smooth formula (no piecewise clamping, same `np.hypot`/vectorized
+style as the Gaussian it replaces). `r0` is exactly the radius where
+`thr(r0) == (peak+floor)/2`, which is what "flattens out at this radius"
+means in practice (within a few `r0`-widths either side it's visually flat
+at `peak` or `floor`).
+
+Widget/state rename to match: `_thr_amp/_thr_loc/_thr_scale` →
+`_thr_peak/_thr_floor/_thr_r0/_thr_order` in both `tab_calibrate.py` and
+`hydra_calib_page.py` (saved-state keys `thr_amp/thr_loc/thr_scale` →
+`thr_peak/thr_floor/thr_r0/thr_order` — `apply_dict_to_widgets` restores
+field-by-field with per-key try/except, so an old project missing the new
+keys just keeps the fresh-image defaults rather than erroring). Defaults on
+a new image: `peak`=image max, `floor`=0 (reproduces the old Gaussian's
+decay-to-0 default behaviour), `r0`=0.15×corner-radius-from-BC (same
+heuristic constant the old `scale` default used), `order`=2.0 (moderate,
+not aggressively sharp). Requested separately: every threshold spinbox (and
+its form label, via a small `_lbl()` helper building a tooltipped
+`S.LabelRight`) now carries a tooltip explaining what that specific knob
+does, so hovering any one of peak/floor/r0/steepness explains it in place —
+not just the card-level tooltip the Gaussian version had.
+
+New tests replace the Gaussian ones in `tests/test_helpers.py`
+(peak-at-r=0/decay-to-floor, `r0` is literally the half-max radius, higher
+`order` is a sharper transition, non-positive `r0`/`order` don't raise) and
+`tests/test_calib_radial_threshold.py` (4 spinboxes enable/disable, same
+BC-origin behaviour). `tests/test_hydra_calib_ui.py`'s existing wiring test
+updated in place (still capped at 2 test functions for the pyqtgraph-
+teardown-crash reason documented in that file).
+
+**Verified:** all touched/new test files green per-file on a clean `HOME`;
+`pyflakes` unchanged (same pre-existing warnings only, byte-identical list
+before/after); offscreen screenshots of both cards confirm the 2×2 field
+layout, the live formula label, and non-empty per-field tooltips.
+
+## 2026-10-06 — Calibrate threshold replaced with a radial Gaussian; Pick BC/Ring no longer auto-activates Manual seed
+
+Requested change: the scalar "pixels below X → 0" threshold on both the
+single-detector Calibrate tab and the Hydra multi-panel page is too blunt for
+a real detector frame, where the direct-beam/near-centre region is much
+brighter than the periphery. Replaced with a per-pixel floor that is a
+Gaussian in radius from the beam centre: `thr(r) = amplitude *
+exp(-0.5*((r-location)/scale)**2)`, with `location=0` (peak at BC) by
+default. New shared helpers `helpers.radial_gaussian_threshold_map` /
+`apply_radial_threshold` — the one piece of code genuinely shared between the
+two otherwise-independent (duplicated) Calibrate/Hydra threshold
+implementations.
+
+BC source: always the *current* seed BC spinbox value
+(`CalibrationTab._seed_bcy/_bcz`, or each `HydraCalibPanelCard`'s own), read
+regardless of whether that panel's "Beam centre" manual-seed checkbox is
+ticked — the same fields Pick BC/Pick Ring/typing/project-restore all write
+into. This is what makes "the threshold's origin comes from Pick BC/Pick
+Ring" true without reactivating manual seed (see next paragraph). On Hydra,
+BC is per-panel, so `_calib_image_for(img, n)` gained an explicit panel
+argument (it previously relied on `self._active_card`, which doesn't exist
+at every one of its 3 call sites — `_start_panel_worker`/`_run_integration`
+already had `n` in scope regardless).
+
+Separately: `_on_bc_picked`/`_on_ring_fit_bc` (both single-detector and
+per-panel Hydra versions) used to call `self._enable_seed(BC=True)`, ticking
+("turning green") the Manual-seed BC checkbox as a side effect of a pick.
+Requested behaviour: a pick should only populate the BC value; the user must
+tick Manual seed themselves to use it in a fit. Removed the `_enable_seed`
+call from all four handlers (tab_calibrate.py ×2, hydra_calib_widgets.py
+×2); no test asserted the old auto-enable behaviour (confirmed by grep), so
+this was a clean removal with reworded note/log text.
+
+Bug found and fixed while wiring the Hydra side: `HydraCalibrationPage
+._refresh_display()` used to unconditionally recompute `_thr_min`/`_thr_max`
+from the active panel's raw image on *every* call — including from
+`_on_threshold_changed`, i.e. the handler fired by the user editing those
+very fields. Editing them was a no-op: the value snapped back to the raw
+image's min/max on the next event-loop tick. Harmless-ish for 2 fields where
+the slider was the only thing that actually varied, but fatal for the new
+3-parameter design (amplitude/location/scale all stomped on every edit,
+making the feature non-interactive). Fixed by extracting
+`_reset_threshold_defaults_for_active_panel()` and calling it only where the
+underlying raw image actually changes (new data, new frame, panel switch,
+frame-mean range) — never from the threshold fields' own `valueChanged`.
+Verified with a direct repro (set amplitude/location/scale, confirm they
+hold) before and after.
+
+Project-file compatibility: `_state_widgets()` keys `"thr_min"/"thr_max"`
+replaced with `"thr_amp"/"thr_loc"/"thr_scale"` in both tabs. Confirmed safe
+via `apply_dict_to_widgets` (iterates the widget dict, not the saved data,
+and wraps each restore in `try/except: pass`) — an old project file's
+retired keys are silently ignored, no crash; the threshold on/off state
+survives, amplitude/location/scale are regenerated rather than restored. No
+compatibility shim needed.
+
+New tests: `tests/test_helpers.py` (+6, the two new pure-numpy helpers),
+`tests/test_calib_radial_threshold.py` (new file, 5 tests, single-detector
+tab, `pytest.mark.forked` per the pyqtgraph-teardown-on-2nd-CalibrationTab
+crash), and assertions folded into `tests/test_hydra_calib_ui.py`'s existing
+wiring test (that file is hard-capped at 2 test functions — see its module
+docstring — so new coverage goes into the existing ones, not new functions).
+**Verified:** all touched/new test files green per-file on a clean `HOME`
+(`test_helpers.py` 79, `test_calib_radial_threshold.py` 5,
+`test_hydra_calib_ui.py` 2, plus `test_calib_manual_seed.py`,
+`test_calibrate_panel_save.py`, `test_calibrate_state_restore.py`,
+`test_calib_file_load_fidelity.py`, `test_calibrate_distortion_state.py`,
+`test_calib_tilt_seed.py`, `test_manual_dspacing_calib_ui.py`, `test_smoke.py`
+— all unaffected); `pyflakes` identical to baseline (same pre-existing
+warnings only, confirmed via `git stash`); offscreen screenshots of both new
+threshold cards confirmed the 3-spinbox layout renders correctly.
+
 ## 2026-10-01 — Ring prediction bound by detector geometry, not a flat 30°
 
 Reported symptom: after a Calibrate fit, the image overlay and the radial
