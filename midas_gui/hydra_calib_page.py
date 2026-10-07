@@ -500,6 +500,29 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._ref_dist = QtWidgets.QCheckBox("Distortion"); self._ref_dist.setChecked(True)
         self._build_rc = QtWidgets.QCheckBox("Residual map"); self._build_rc.setChecked(True)
 
+        # Let each Manual seed row say what the fit will actually do with
+        # that parameter -- the same wiring tab_calibrate does, and the
+        # reason the single-detector dialog explains itself while this one
+        # came up blank. Reported twice: "the manual seed selections about
+        # what to refine information do not get translated to the
+        # mainwindow."
+        #
+        # Deliberately NOT a two-way sync. Seeding and refining are separate
+        # decisions (seeding something you do NOT refine is how you pin it
+        # to a measured value -- which is exactly what tx is for here).
+        # Showing the refine state on each row is what stops the two panels
+        # merely LOOKING like they disagree.
+        #
+        # All four cards get the page's own boxes because the Refine choice
+        # is one setting for all four fits. Wired here, after the Refine
+        # checkboxes above exist, rather than inside the per-panel card loop
+        # above (which runs before this card is built).
+        for card in self._cards.values():
+            card._seed_dialog.set_refine_boxes(
+                {"BC": self._ref_bc, "Lsd": self._ref_lsd, "tx": self._ref_tx,
+                 "ty": self._ref_ty, "tz": self._ref_tz,
+                 "Distortion": self._ref_dist})
+
         # One row per parameter: the refine checkbox on the left, and the
         # backend's always-applied ± tolerance window on the right — Hydra is
         # crystalline-only, so there is exactly one (always-on) kind of
