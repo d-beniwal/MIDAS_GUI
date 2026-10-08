@@ -118,6 +118,7 @@ class CalibrationTab(QtWidgets.QWidget):
         # control_api.op_calibrate_get_job, which reads this (not a dialog)
         # to report an async projection failure back to the caller.
         self._last_proj_error: Optional[str] = None
+        self._blank_skip_path = None      # file whose blank opening frame was skipped
         self._build_ui()
         self._loader.set_path(DEFAULT_CALIBRANT_TIF)
         # Connected after the bundled demo image loads above, deliberately
@@ -1109,6 +1110,52 @@ class CalibrationTab(QtWidgets.QWidget):
             return
         self._reset_threshold_defaults()
         self._show_calib_image(autorange=True)
+        self._skip_blank_opening_frame()
+
+    def _skip_blank_opening_frame(self):
+        """Step off a blank opening frame, once, when a file is first loaded.
+
+        A Pixirad arms one frame before it starts counting, so frame 1 of
+        every ``.pixi.h5`` is all zeros and this tab would otherwise open on
+        a correct, entirely black picture of nothing. Reported twice from
+        1-ID as "the file does not load" even after the warning below was
+        added -- naming the problem still left the user to fix it, and an
+        empty canvas is a bad first impression of a file that is fine.
+
+        Deliberately narrow:
+
+        * **Once per file.** Keyed on the data path, so stepping back onto
+          the blank frame on purpose is respected rather than undone --
+          fighting the frame control would be worse than the blank canvas.
+        * **Only forward one frame.** The dud is the first readout, not an
+          arbitrary run of them; scanning for the first non-empty frame
+          would read an unbounded part of a large stack on every load. If
+          frame 2 is blank too, the warning stands and says so.
+        * **Never while a stack projection is active**, where the displayed
+          image is not a single frame and the Projection card's own controls
+          are what matters.
+
+        The move is announced in the note rather than done silently: a tab
+        that quietly shows frame 2 while the stepper reads 2/10 is honest
+        only if it says why it is not on 1.
+        """
+        if self._proj_active:
+            return
+        path = self._loader.data_path()
+        if not path or path == self._blank_skip_path:
+            return
+        self._blank_skip_path = path
+        if (self._image is None or np.any(self._image)
+                or self._loader.n_frames() <= 1
+                or self._loader.frame_index() != 0):
+            return
+        self._loader.set_frame(1)
+        if self._image is not None and np.any(self._image):
+            self._blank_note.setVisible(True)
+            self._blank_note.setText(
+                "Frame 1 was entirely zero — showing frame 2 instead. Some "
+                "detectors (Pixirad) leave their first frame blank; step back "
+                "if you need it.")
 
     # ── Mask overlay ─────────────────────────────────────────────
 
@@ -2128,6 +2175,7 @@ class CalibrationTab(QtWidgets.QWidget):
         blank = img is not None and img.size and not np.any(img)
         lbl.setVisible(bool(blank))
         if not blank:
+            lbl.setText("")      # no stale message behind a hidden label
             return
         n = self._loader.n_frames()
         if getattr(self, "_proj_active", False):
