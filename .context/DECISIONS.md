@@ -3,6 +3,54 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-08 (later) — Hydra calibration gets a page-level "Save All", one file per panel
+
+**Problem.** The single-detector Calibrate tab has an always-visible Save
+footer (Save .json / Save paramstest.txt). Hydra's equivalent existed —
+each `HydraCalibPanelCard` already had its own Save .json/paramstest.txt
+buttons — but they lived inside that panel's Results tab, which only shows
+the currently-*active* panel. Saving all 4 panels meant: switch to ge1,
+open Results, click Save, fill in a path; switch to ge2; repeat ×4. Reported
+as "there is no option to save the calibration results" — true in spirit,
+since nothing surfaced it at the page level the way the single-detector tab
+does.
+
+**Decision.** Add a page-level "Save All" row to the Run card (same place
+as the single-detector tab's footer), enabled once ANY panel has a fitted
+result, that writes one file per *fitted* panel in one click:
+- `_save_all_json`: one `QFileDialog.getExistingDirectory` picks a folder,
+  then `<stem>_ge<N>.instr.json` is written for every panel with a result.
+- `_save_all_paramstest`: one `_SaveParamstestDialog` (template optional)
+  picks a base output path, then each panel's file is derived from it via
+  `_panel_tagged_path()`.
+
+Kept the existing per-panel buttons rather than removing them — saving just
+one panel after re-seeding it is still a real use case, and they're now
+implemented in terms of the same `write_json`/`write_paramstest` methods
+Save All calls, so there is exactly one code path per format, not two.
+
+**Why `_panel_tagged_path()` exists at all.** The obvious one-liner —
+`base.with_name(f"{base.stem}_ge{n}{base.suffix}")` — is wrong for this
+app's own filenames. `Path.stem`/`.suffix` split on the *last* dot only, so
+for `run.instr.txt` that gives stem=`run.instr`, suffix=`.txt`, and the
+one-liner produces `run.instr_ge1.txt` — the `_ge1` tag lands in the middle
+of `instr.txt`, not before it. Every save path in this codebase
+(`CalibrationTab`/Hydra alike) uses the two-part `.instr.json`/`.instr.txt`
+suffix, so this was going to bite on the very first real save, not an edge
+case. `_panel_tagged_path()` special-cases those two suffixes (plus plain
+`.txt`/`.json`) before falling back to `Path`'s own split. Caught by a test
+that uses the real default suffix (`.instr.txt`), not a sanitized `.txt` —
+an earlier draft of the test independently re-derived the (also wrong)
+expected name with the same one-liner and passed despite the bug; fixed by
+asserting against `_panel_tagged_path()` itself instead of reimplementing
+its logic in the test.
+
+**Not done:** no attempt to merge all 4 panels into one combined file —
+the user asked for the opposite ("we should get one separate file for each
+ge panel"), and a combined paramstest.txt has no meaning for 4 independent
+detectors with no shared panel_layout (unlike the single-detector tab's
+*internal* multi-panel grid, which this is not).
+
 ## 2026-10-08 — "Feed result back to seed" was silently promoting unrefined parameters into a locked manual seed; fixed in both Calibrate tabs, Hydra's seed state made visible
 
 Root-caused a real failure: a Hydra calibration on `connoly_oct26` data

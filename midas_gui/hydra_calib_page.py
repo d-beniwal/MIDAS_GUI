@@ -48,10 +48,30 @@ from midas_gui.widgets import (PickableImageViewer, LogPanel, CakeViewer, _conve
 from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar, HydraProfileViewer
 from midas_gui.hydra_calib_widgets import HydraCalibPanelCard
 from midas_gui.workers import CalibrationWorker, IntegrationWorker
-from midas_gui.dialogs import DistortionRefineDialog
+from midas_gui.dialogs import DistortionRefineDialog, _SaveParamstestDialog
 from midas_gui import project
 from midas_gui import settings
 from midas_gui import style as S
+
+
+_KNOWN_CALIB_SUFFIXES = (".instr.txt", ".instr.json", ".txt", ".json")
+
+
+def _panel_tagged_path(base: Path, n: int) -> Path:
+    """Insert ``_ge<n>`` before *base*'s extension, for "Save All"'s one
+    chosen output path becoming one real path per panel.
+
+    Treats the two-part ``.instr.txt``/``.instr.json`` suffixes this app
+    writes (and plain ``.txt``/``.json``) as a single unit —
+    ``Path.stem``/``.suffix`` only split the last dot, which would turn
+    ``run.instr.txt`` into ``run.instr_ge1.txt`` instead of the intended
+    ``run_ge1.instr.txt``.
+    """
+    name = base.name
+    for suf in _KNOWN_CALIB_SUFFIXES:
+        if name.endswith(suf):
+            return base.with_name(f"{name[:-len(suf)]}_ge{n}{suf}")
+    return base.with_name(f"{base.stem}_ge{n}{base.suffix}")
 
 
 def _resample_rows_to_eta_grid(cake: np.ndarray, src_eta: np.ndarray,
@@ -394,6 +414,23 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         run_card.body.addLayout(run_row)
         self._prog = QtWidgets.QProgressBar(); self._prog.setRange(0, 0); self._prog.setVisible(False)
         run_card.body.addWidget(self._prog)
+        # Save All — one .json/paramstest.txt per panel that has a fitted
+        # result, named `<stem>_ge<N>.instr.*` (see _save_all_json/
+        # _save_all_paramstest). Each panel's own Results tab still has its
+        # own Save .json/paramstest.txt buttons for saving just that one
+        # panel; these mirror CalibrationTab's always-visible Save footer
+        # for the common case of saving every panel at once.
+        self._save_all_json_btn = QtWidgets.QPushButton("Save All .json")
+        self._save_all_json_btn.setEnabled(False)
+        self._save_all_json_btn.setToolTip(
+            "Write one calibration.json per panel with a fitted result.")
+        self._save_all_json_btn.clicked.connect(self._save_all_json)
+        self._save_all_ps_btn = QtWidgets.QPushButton("Save All paramstest.txt")
+        self._save_all_ps_btn.setEnabled(False)
+        self._save_all_ps_btn.setToolTip(
+            "Write one paramstest.txt per panel with a fitted result.")
+        self._save_all_ps_btn.clicked.connect(self._save_all_paramstest)
+        run_card.body.addLayout(S.button_grid([self._save_all_json_btn, self._save_all_ps_btn], 2))
         lv.addWidget(run_card)
 
         # Always-visible seed-status banner — unlike each card's own seed
@@ -568,6 +605,100 @@ class HydraCalibrationPage(QtWidgets.QWidget):
                     f"[hydra] No working directory filled in — {reason}")
             return
         self._set_working_dir(d)
+
+    # ── Save All (one file per panel) ────────────────────────────────
+
+    def _default_save_stem(self) -> str:
+        """``<expid>_<calibration image stem>`` — same convention as
+        ``CalibrationTab._default_save_stem``, off this page's own loaded
+        data path. The per-panel ``_ge<N>`` suffix is added by the caller,
+        not here, since this stem is shared by all four panels' files."""
+        parts = []
+        try:
+            expid = (self._expid_provider() or "").strip() if self._expid_provider else ""
+        except Exception:
+            expid = ""
+        if expid:
+            parts.append(expid)
+        data_path = self._loader.current_path()
+        if data_path:
+            stem = Path(data_path).name.rsplit(".", 1)[0]
+            if stem:
+                parts.append(stem)
+        return "_".join(parts) if parts else "calibration"
+
+    def _default_save_path(self, suffix: str) -> str:
+        """``_default_save_stem()`` + *suffix*, under the working directory
+        if one is set (else beside the loaded data, else the process CWD).
+        Same reasoning as ``CalibrationTab._default_save_path``: a full path
+        keeps the save dialog from opening on whatever directory the app
+        happens to have been launched from."""
+        out_dir = self._out_ed.text().strip()
+        start = browse_start_dir(out_dir) if out_dir else browse_start_dir(self._loader.current_path())
+        name = self._default_save_stem() + suffix
+        return str(Path(start) / name) if start else name
+
+    def _fitted_panels(self) -> list:
+        return [n for n in (1, 2, 3, 4) if self._cards[n].result is not None]
+
+    def _update_save_all_enabled(self):
+        enabled = bool(self._fitted_panels())
+        self._save_all_json_btn.setEnabled(enabled)
+        self._save_all_ps_btn.setEnabled(enabled)
+
+    def _save_all_json(self):
+        panels = self._fitted_panels()
+        if not panels:
+            return
+        out_dir = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Save All calibration.json — choose a folder",
+            browse_start_dir(self._out_ed.text().strip() or self._loader.current_path()))
+        if not out_dir:
+            return
+        stem = self._default_save_stem()
+        saved, errors = [], []
+        for n in panels:
+            path = Path(out_dir) / f"{stem}_ge{n}.instr.json"
+            try:
+                self._cards[n].write_json(path)
+                saved.append(str(path))
+                self._log.append(f"[ge{n}] saved {path}")
+            except Exception:
+                import traceback
+                errors.append(f"ge{n}: {traceback.format_exc()}")
+                self._log.append(f"[ge{n}] save calibration.json error:\n{traceback.format_exc()}")
+        msg = "\n".join(saved) if saved else "No files were written."
+        if errors:
+            msg += "\n\nFailed:\n" + "\n".join(errors)
+        QtWidgets.QMessageBox.information(self, "Save All .json", msg)
+
+    def _save_all_paramstest(self):
+        panels = self._fitted_panels()
+        if not panels:
+            return
+        dlg = _SaveParamstestDialog(self, default_out=self._default_save_path(".instr.txt"))
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        out_path = dlg.out_path()
+        if not out_path:
+            QtWidgets.QMessageBox.warning(self, "No output", "Please specify an output file."); return
+        tmpl_path = dlg.template_path()
+        base = Path(out_path)
+        saved, errors = [], []
+        for n in panels:
+            path_n = _panel_tagged_path(base, n)
+            try:
+                self._cards[n].write_paramstest(path_n, tmpl_path)
+                saved.append(str(path_n))
+                self._log.append(f"[ge{n}] paramstest.txt saved: {path_n}")
+            except Exception:
+                import traceback
+                errors.append(f"ge{n}: {traceback.format_exc()}")
+                self._log.append(f"[ge{n}] save paramstest error:\n{traceback.format_exc()}")
+        msg = "\n".join(saved) if saved else "No files were written."
+        if errors:
+            msg += "\n\nFailed:\n" + "\n".join(errors)
+        QtWidgets.QMessageBox.information(self, "Save All paramstest.txt", msg)
 
     def _on_siblings_changed(self, siblings: dict):
         self._toolbar.set_available(siblings.keys())
@@ -948,6 +1079,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         result.im_trans = card.im_trans_codes()
         result._calibrant_name = self._cal.currentText()
         card.on_result(result, refine=self._last_cfgs.get(n, {}).get("refine"))
+        self._update_save_all_enabled()
         self._log.append(f"[ge{n}] done — Lsd={result.Lsd/1000:.3f} mm")
         self._pending_log_results[n] = result
         self._run_integration(n, result)
@@ -1190,6 +1322,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         if card is None:
             return
         card.on_result(result)
+        self._update_save_all_enabled()
         if results_arrays and results_arrays.get("profile") is not None:
             self._profile_view.set_curve(
                 f"ge{n}", results_arrays["r_axis_px"], results_arrays["profile"],

@@ -292,7 +292,7 @@ def test_hydra_calib_page_wiring_and_pick_isolation(app, fixture_available):
     assert card2._seed_btn.styleSheet() == style_before
 
 
-def test_hydra_calib_run_orchestration_and_results_switching(app, fixture_available, tmp_path):
+def test_hydra_calib_run_orchestration_and_results_switching(app, fixture_available, tmp_path, monkeypatch):
     """Sequential run: independent per-panel BCs. Parallel run: all 4
     workers started up-front. Results/Ring-Residuals tabs switch with the
     active panel. All against ONE page instance (see module docstring).
@@ -319,6 +319,10 @@ def test_hydra_calib_run_orchestration_and_results_switching(app, fixture_availa
         page._cards[n]._seed_bcy.setValue(100.0 + n)
         page._cards[n]._seed_bcz.setValue(100.0 + n)
 
+    # No fitted panels yet — Save All starts disabled.
+    assert not page._save_all_json_btn.isEnabled()
+    assert not page._save_all_ps_btn.isEnabled()
+
     page._run_mode_combo.setCurrentIndex(0)   # Sequential
     page._run_all()
     ok = _pump(app, lambda: not page._workers and not page._pending_panels)
@@ -328,6 +332,35 @@ def test_hydra_calib_run_orchestration_and_results_switching(app, fixture_availa
     bcs = {n: (r.BC_y, r.BC_z) for n, r in results.items()}
     assert len(set(bcs.values())) > 1, "panels should not all share the same fitted BC"
     assert page._run_btn.isEnabled() and not page._abort_btn.isEnabled()
+
+    # Save All: one file per panel with a fitted result, named <stem>_ge<N>,
+    # matching CalibrationTab's always-visible Save footer but producing a
+    # separate file per panel rather than one combined file.
+    assert page._save_all_json_btn.isEnabled() and page._save_all_ps_btn.isEnabled()
+    json_dir = tmp_path / "out_json"; json_dir.mkdir()
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getExistingDirectory",
+                        staticmethod(lambda *a, **k: str(json_dir)))
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    page._save_all_json()
+    stem = page._default_save_stem()
+    for n in (1, 2, 3, 4):
+        assert (json_dir / f"{stem}_ge{n}.instr.json").is_file()
+
+    class _FakeSaveDlg:
+        def __init__(self, parent=None, default_out=""):
+            self._out = default_out
+        def exec_(self):
+            return QtWidgets.QDialog.Accepted
+        def out_path(self):
+            return self._out
+        def template_path(self):
+            return ""
+
+    monkeypatch.setattr(hydra_calib_page_mod, "_SaveParamstestDialog", _FakeSaveDlg)
+    page._save_all_paramstest()
+    base = Path(page._default_save_path(".instr.txt"))
+    for n in (1, 2, 3, 4):
+        assert hydra_calib_page_mod._panel_tagged_path(base, n).is_file()
 
     with h5py.File(proj_path, "r") as f:
         for n in (1, 2, 3, 4):

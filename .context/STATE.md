@@ -1,7 +1,7 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-10-08 ("Feed result back to seed" fixed to only promote actually-refined parameters, in both Calibrate tabs; Hydra's manual-seed state now has an always-visible status banner; see DECISIONS)_
+_Last updated: 2026-10-08 (Hydra calibration page gained page-level "Save All" — one .json/paramstest.txt per fitted panel; see DECISIONS)_
 
 ## Now working on
 
@@ -39,6 +39,34 @@ Open follow-ups, none blocking:
   `git fetch origin 'refs/pull/*/head:refs/remotes/origin/pr/*'`.
 
 ## Recently completed
+
+**2026-10-08 (later) — Hydra calibration: page-level "Save All .json" /
+"Save All paramstest.txt", one file per panel.** Requested directly ("there
+is no option to save the calibration results [in Hydra]... make it match
+the single detector tab... one separate file for each ge panel"). Per-panel
+Save .json/paramstest.txt buttons already existed on each
+`HydraCalibPanelCard`'s Results tab (reachable only by switching the active
+panel and saving one at a time) — refactored their bodies into
+`write_json`/`write_paramstest` methods so the same code runs without a
+dialog, then added a "Save All" row to the Run card (always visible, next
+to Run/Abort, mirroring `CalibrationTab`'s footer) that writes every fitted
+panel's file at once: `<stem>_ge<N>.instr.json` into a chosen folder, or
+`<stem>_ge<N>.instr.txt` (optionally from a template) derived from one
+chosen output path via new `_panel_tagged_path()` — which treats
+`.instr.txt`/`.instr.json` as one suffix rather than letting
+`Path.stem`/`.suffix`'s single-dot split mangle them. `stem` comes from new
+`HydraCalibrationPage._default_save_stem()`, the same `<expid>_<data stem>`
+convention as `CalibrationTab`'s. Buttons stay disabled until at least one
+panel has a fitted result (`_fitted_panels()`/`_update_save_all_enabled()`,
+wired into both `_on_panel_done` and `display_stored_result` so a reopened
+project's restored results also enable them); a failure on one panel is
+collected and reported without blocking the others. New assertions in
+`tests/test_hydra_calib_ui.py`'s existing run-orchestration test (no new
+pyqtgraph-building test function — see that file's module docstring).
+**Verified:** `test_hydra_calib_ui.py`/`test_hydra_batch_ui.py`/
+`test_calibrate_panel_save.py`/`test_smoke.py` green per-file on a clean
+`HOME`; `pyflakes` unchanged (40, same pre-existing warnings only);
+offscreen screenshot confirms the new row's placement and disabled state.
 
 **2026-10-08 — "Feed result back to seed" was silently locking in unrefined
 parameters; fixed, and Hydra's manual-seed state is now visible without

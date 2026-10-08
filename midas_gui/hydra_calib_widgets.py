@@ -514,6 +514,18 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
             "distortion": dict(getattr(r, "distortion", {}) or {}),
             "im_trans": list(getattr(r, "im_trans", []) or [])})
 
+    def write_json(self, path) -> None:
+        """Write this panel's result to *path* as calibration.json — same
+        shape as ``CalibrationTab._save_json``, minus the panel-shifts
+        sidecar (a Hydra panel is a single detector, never a multi-panel
+        grid). Shared by the interactive ``_save_json`` button and
+        ``HydraCalibrationPage``'s page-level "Save All"."""
+        import json
+        d = {k: v for k, v in vars(self.result).items()
+             if not k.startswith("_") and not hasattr(v, "numpy")}
+        d.pop("residual_corr_map", None); d.pop("iter_history", None)
+        Path(path).write_text(json.dumps(d, indent=2, default=str))
+
     def _save_json(self):
         if not self.result:
             return
@@ -522,12 +534,28 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
             f"ge{self.panel_number}_calibration.json", "JSON (*.json)")
         if not path:
             return
-        import json
-        d = {k: v for k, v in vars(self.result).items()
-             if not k.startswith("_") and not hasattr(v, "numpy")}
-        d.pop("residual_corr_map", None); d.pop("iter_history", None)
-        Path(path).write_text(json.dumps(d, indent=2, default=str))
+        self.write_json(path)
         self._log(f"ge{self.panel_number}: saved {path}")
+
+    def write_paramstest(self, out_path, tmpl_path=None) -> None:
+        """Write this panel's result to *out_path* as paramstest.txt — from
+        *tmpl_path* if given (geometry/distortion injected, everything else
+        carried verbatim), else a standalone file. Shared by the interactive
+        ``_save_paramstest`` button and ``HydraCalibrationPage``'s
+        page-level "Save All". Raises on failure; callers decide how to
+        report it (interactively vs. collected across panels)."""
+        if tmpl_path:
+            if not Path(tmpl_path).exists():
+                raise FileNotFoundError(f"Template not found: {tmpl_path}")
+            from midas_calibrate_v2.compat.to_v1 import ff_paramstest_from_auto_result
+            ff_paramstest_from_auto_result(self.result, tmpl_path, out_path)
+            im_trans = getattr(self.result, "im_trans", None)
+            if im_trans:
+                with open(out_path, "a") as _f:
+                    for code in im_trans:
+                        _f.write(f"ImTransOpt {int(code)}\n")
+        else:
+            write_standalone_paramstest(self.result, out_path)
 
     def _save_paramstest(self):
         if not self.result:
@@ -538,20 +566,8 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
         out_path = dlg.out_path()
         if not out_path:
             QtWidgets.QMessageBox.warning(self, "No output", "Please specify an output file."); return
-        tmpl_path = dlg.template_path()
         try:
-            if tmpl_path:
-                if not Path(tmpl_path).exists():
-                    raise FileNotFoundError(f"Template not found: {tmpl_path}")
-                from midas_calibrate_v2.compat.to_v1 import ff_paramstest_from_auto_result
-                ff_paramstest_from_auto_result(self.result, tmpl_path, out_path)
-                im_trans = getattr(self.result, "im_trans", None)
-                if im_trans:
-                    with open(out_path, "a") as _f:
-                        for code in im_trans:
-                            _f.write(f"ImTransOpt {int(code)}\n")
-            else:
-                write_standalone_paramstest(self.result, out_path)
+            self.write_paramstest(out_path, dlg.template_path())
             self._log(f"ge{self.panel_number}: paramstest.txt saved: {out_path}")
         except Exception:
             import traceback
