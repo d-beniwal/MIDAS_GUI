@@ -1664,27 +1664,44 @@ class CalibrationTab(QtWidgets.QWidget):
     # ── Seed feedback from a result ───────────────────────────────
 
     def _seed_from_result(self, result):
-        """Copy optimized geometry from a result into the seed fields — a
-        completed fit is a full geometry, so every parameter is enabled."""
-        self._enable_seed(BC=True, Lsd=True, tx=True, ty=True, tz=True)
-        self._seed_bcy.setValue(float(result.BC_y))
-        self._seed_bcz.setValue(float(result.BC_z))
-        self._seed_lsd.setValue(float(result.Lsd) / 1000.0)   # µm → mm
-        self._seed_tx.setValue(float(getattr(result, "tx", 0.0) or 0.0))
-        self._seed_ty.setValue(float(getattr(result, "ty", 0.0) or 0.0))
-        self._seed_tz.setValue(float(getattr(result, "tz", 0.0) or 0.0))
-        if getattr(result, "wavelength_A", None):
+        """Copy optimized geometry from a result into the seed fields — but
+        only the parameters this fit actually refined. An unrefined
+        parameter's value in ``result`` is just whatever was fed in as a
+        fixed constant, not new information from this fit; promoting it
+        would silently turn "held fixed this one time" into "locked seed
+        for every future run" with no visible sign it happened (see
+        DECISIONS: the connoly_oct26 Hydra calibration that locked tx at a
+        different nonsense value per panel this way)."""
+        refine = self._last_refine_flags or {}
+        promoted = []
+        if refine.get("BC"):
+            self._enable_seed(BC=True)
+            self._seed_bcy.setValue(float(result.BC_y))
+            self._seed_bcz.setValue(float(result.BC_z))
+            promoted.append(f"BC=({result.BC_y:.1f}, {result.BC_z:.1f}) px")
+        if refine.get("Lsd"):
+            self._enable_seed(Lsd=True)
+            self._seed_lsd.setValue(float(result.Lsd) / 1000.0)   # µm → mm
+            promoted.append(f"Lsd={float(result.Lsd) / 1000:.3f} mm")
+        for key, spin in (("tx", self._seed_tx), ("ty", self._seed_ty), ("tz", self._seed_tz)):
+            if refine.get(key):
+                self._enable_seed(**{key: True})
+                spin.setValue(float(getattr(result, key, 0.0) or 0.0))
+                promoted.append(f"{key}={float(getattr(result, key, 0.0) or 0.0):.2f}°")
+        if refine.get("Wavelength") and getattr(result, "wavelength_A", None):
             self._wl.setValue(float(result.wavelength_A))
-        self._seed_dist = dict(getattr(result, "distortion", {}) or {})
-        if self._seed_dist:
-            self._enable_seed(Distortion=True)
+            promoted.append(f"λ={float(result.wavelength_A):.5f} Å")
+        if refine.get("Distortion"):
+            self._seed_dist = dict(getattr(result, "distortion", {}) or {})
+            if self._seed_dist:
+                self._enable_seed(Distortion=True)
+                promoted.append("Distortion")
         self._update_seed_dist_label()
-        self._seed_note.setText(
-            f"Seed updated from the last fit: BC=({result.BC_y:.1f}, {result.BC_z:.1f}) px, "
-            f"Lsd={float(result.Lsd) / 1000:.3f} mm, "
-            f"tx={float(getattr(result, 'tx', 0.0) or 0.0):.2f}°, "
-            f"ty={float(getattr(result, 'ty', 0.0) or 0.0):.2f}°, "
-            f"tz={float(getattr(result, 'tz', 0.0) or 0.0):.2f}°.")
+        if promoted:
+            self._seed_note.setText("Seed updated from the last fit: " + ", ".join(promoted) + ".")
+        else:
+            self._seed_note.setText(
+                "Last fit refined no seedable parameters — seed left unchanged.")
 
     def _im_trans_codes(self) -> list:
         """Ordered MIDAS ImTransOpt codes from the Transforms checkboxes."""
@@ -2241,13 +2258,14 @@ class CalibrationTab(QtWidgets.QWidget):
     def _abort(self):
         """Abort the running calibration and free the slot immediately.
 
-        The pipeline is one uninterruptible library call, so we cannot stop it
-        cleanly mid-flight — and ``terminate()`` on a thread inside native
-        torch/scipy code can corrupt the interpreter.  So we *detach* instead:
-        disconnect the worker's signals (its result is discarded), orphan the thread
-        (kept alive so its QObject isn't GC'd while the C thread winds down on its
-        own), and clear ``self._worker`` so a fresh run can start right away. The
-        worker restores stdout/stderr itself, guarded so it won't clobber a new run."""
+        A ``CalibrationWorker`` run (see ``workers.py``) is a separate OS
+        process, so ``requestInterruption()`` really kills it rather than
+        merely detaching from it — unlike ``ManualDspacingCalibWorker``
+        (still an in-process QThread; its own uninterruptible scipy call is
+        short enough that this has never been worth a subprocess). Either
+        way we disconnect the worker's signals first (its result, if any
+        still arrives, is discarded) and clear ``self._worker`` so a fresh
+        run can start right away."""
         w = self._worker
         if not (w and w.isRunning()):
             return
@@ -2257,15 +2275,14 @@ class CalibrationTab(QtWidgets.QWidget):
                 sig.disconnect()
             except Exception:
                 pass
-        w.requestInterruption()       # honoured if/when the library call yields
+        w.requestInterruption()
         self._orphans.append(w)
         self._worker = None           # free the slot so _run can start again now
         self._run_btn.setEnabled(True)
         self._on_dspacing_picks_changed()   # restore correct manual-fit button state
         self._abort_btn.setEnabled(False); self._abort_btn.setText("Abort")
         self._prog.setVisible(False)
-        self._log.append("Calibration aborted — you can start a new run now "
-                         "(a background thread may still be winding down).")
+        self._log.append("Calibration aborted.")
 
     _GEOMETRY_REFINE_KEYS = ("Lsd", "BC", "tx", "ty", "tz", "Wavelength")
 

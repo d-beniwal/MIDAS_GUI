@@ -9,10 +9,11 @@ Threshold, Mean of frames, Refine parameters, Advanced) applied identically
 to every panel's fit, since it's the same beam and the same choice of what
 to refine for all 4.
 
-Calibration for the panels currently loaded can run Sequentially (one
-``CalibrationWorker`` at a time — full per-line log capture, safe) or in
-Parallel (all workers started at once — see ``workers.CalibrationWorker``'s
-``capture_stdout`` flag for why parallel runs skip fine-grained log capture).
+Calibration for the panels currently loaded can run Sequentially (one panel
+at a time) or in Parallel (all panels started at once). Both are equally
+safe to log in full: ``workers.CalibrationWorker`` runs each panel's
+calibration in its own OS process, so N panels in flight at once each own
+their own real stdout rather than racing on one process-global stream.
 
 Deliberately does NOT surface ``HydraLoaderPanel.projection_card()`` — the
 single-detector Calibrate tab has no stack-projection feature either (it
@@ -395,6 +396,16 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         run_card.body.addWidget(self._prog)
         lv.addWidget(run_card)
 
+        # Always-visible seed-status banner — unlike each card's own seed
+        # summary (only visible for whichever one panel is currently shown),
+        # this reflects the shared seed-enable state across all 4 panels
+        # (mirrored by _sync_seed_checkbox) so it's never necessary to open
+        # the Manual seed… dialog, or switch panels, just to see whether a
+        # manual seed is about to be used in the next Run All.
+        self._seed_status_lbl = QtWidgets.QLabel("Seed: automatic")
+        self._seed_status_lbl.setWordWrap(True)
+        lv.addWidget(self._seed_status_lbl)
+
         # Per-panel: Transforms + Initial seed, switched with the active panel
         self._card_stack = QtWidgets.QStackedWidget()
         for n in (1, 2, 3, 4):
@@ -411,8 +422,10 @@ class HydraCalibrationPage(QtWidgets.QWidget):
                         "_seed_en_ty", "_seed_en_tz"):
                 getattr(card, attr).toggled.connect(
                     lambda checked, n=n, a=attr: self._sync_seed_checkbox(a, n, checked, block=False))
+            card.seedStateChanged.connect(self._refresh_seed_status)
             self._cards[n] = card
             self._card_stack.addWidget(card)
+        self._refresh_seed_status()
         lv.addWidget(self._card_stack)
         lv.addStretch(1)
         split.addWidget(scroll)
@@ -639,6 +652,26 @@ class HydraCalibrationPage(QtWidgets.QWidget):
                 else:
                     cb.setChecked(checked)
 
+    def _refresh_seed_status(self):
+        """Update the always-visible seed banner. Reads panel 1's card only
+        — ``_sync_seed_checkbox`` mirrors every seed-enable flag across all
+        4 panels by design, so any one card's enable state represents all
+        of them (the seed *values* differ per panel, the on/off choice does
+        not)."""
+        card = self._cards.get(1)
+        if card is None:
+            return
+        on = [label for cb, label in zip(
+                  card._seed_enables, ("BC", "Lsd", "tx", "ty", "tz"))
+              if cb.isChecked()]
+        if on:
+            self._seed_status_lbl.setText(
+                "Seed (manual, shared across panels): " + ", ".join(on))
+            self._seed_status_lbl.setStyleSheet(f"color:{S.ACCENT};font-size:11px;font-weight:bold")
+        else:
+            self._seed_status_lbl.setText("Seed: automatic")
+            self._seed_status_lbl.setStyleSheet(f"color:{S.MUTED};font-size:11px")
+
     # ── Per-panel frame sourcing ─────────────────────────────────────
 
     def _avg_index_range(self, n_frames: int) -> tuple:
@@ -855,7 +888,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         if mode == "parallel":
             pending, self._pending_panels = list(self._pending_panels), []
             for n in pending:
-                self._start_panel_worker(n, capture_stdout=False)
+                self._start_panel_worker(n)
         else:
             self._start_next_sequential()
 
@@ -864,9 +897,9 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             self._maybe_finish_run()
             return
         n = self._pending_panels.pop(0)
-        self._start_panel_worker(n, capture_stdout=True)
+        self._start_panel_worker(n)
 
-    def _start_panel_worker(self, n: int, capture_stdout: bool):
+    def _start_panel_worker(self, n: int):
         card = self._cards[n]
         raw = self._panel_raw_image(n)
         if raw is None:
@@ -900,7 +933,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         mode = self._pipeline.currentData()
         worker = CalibrationWorker(
             mode, image, dark, cfg, parent=self, bright=bright, background=background,
-            bright_mode=bright_mode, capture_stdout=capture_stdout)
+            bright_mode=bright_mode)
         worker.log_line.connect(lambda line, n=n: self._log.append(f"[ge{n}] {line}"))
         worker.finished.connect(lambda result, n=n: self._on_panel_done(n, result))
         worker.failed.connect(lambda msg, n=n: self._on_panel_fail(n, msg))
@@ -914,7 +947,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         card = self._cards[n]
         result.im_trans = card.im_trans_codes()
         result._calibrant_name = self._cal.currentText()
-        card.on_result(result)
+        card.on_result(result, refine=self._last_cfgs.get(n, {}).get("refine"))
         self._log.append(f"[ge{n}] done — Lsd={result.Lsd/1000:.3f} mm")
         self._pending_log_results[n] = result
         self._run_integration(n, result)
@@ -967,6 +1000,11 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._log.append("Hydra calibration run complete.")
 
     def _abort_all(self):
+        """Stop every in-flight panel. Each panel's ``CalibrationWorker`` runs
+        in its own OS process (see ``workers.CalibrationWorker``), so
+        ``requestInterruption()`` really kills it — unlike the old in-process
+        QThread version, there is nothing left "winding down" after this
+        returns."""
         if not self._workers:
             return
         self._calib_cancelled = True
@@ -982,8 +1020,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._pending_panels = []
         self._run_btn.setEnabled(True); self._abort_btn.setEnabled(False)
         self._prog.setVisible(False)
-        self._log.append("Hydra calibration aborted — a background thread per panel "
-                         "may still be winding down.")
+        self._log.append("Hydra calibration aborted.")
 
     # ── Integration / residual chart ───────────────────────────────
 

@@ -49,6 +49,10 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
     imTransChanged = QtCore.pyqtSignal()
     #: "→ Send to Data Viewer" clicked, with this panel's number + geometry.
     sendToViewer = QtCore.pyqtSignal(int, dict)
+    #: this panel's seed enable state (which of BC/Lsd/tx/ty/tz are ticked)
+    #: changed — the owning page uses this to refresh its always-visible
+    #: seed-status banner without anyone having to open the seed dialog.
+    seedStateChanged = QtCore.pyqtSignal()
 
     def __init__(self, panel_number: int, parent=None):
         super().__init__(parent)
@@ -277,6 +281,9 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
               if cb.isChecked()]
         self._seed_summary_lbl.setText(
             "Seeding: " + ", ".join(on) if on else "Fully automatic (no manual seed)")
+        self._seed_summary_lbl.setStyleSheet(
+            f"color:{S.ACCENT if on else S.MUTED};font-size:10px")
+        self.seedStateChanged.emit()
 
     def _enable_seed(self, **flags):
         by_name = dict(zip(("BC", "Lsd", "tx", "ty", "tz"), self._seed_enables))
@@ -315,16 +322,36 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
             self._flip_z.setChecked(2 in im_trans)
             self._transp.setChecked(3 in im_trans)
 
-    def seed_from_result(self, result):
-        """A completed fit is a full geometry — every parameter is enabled."""
-        self._enable_seed(BC=True, Lsd=True, tx=True, ty=True, tz=True)
-        self._seed_bcy.setValue(float(result.BC_y))
-        self._seed_bcz.setValue(float(result.BC_z))
-        self._seed_lsd.setValue(float(result.Lsd) / 1000.0)
-        self._seed_tx.setValue(float(getattr(result, "tx", 0.0) or 0.0))
-        self._seed_ty.setValue(float(getattr(result, "ty", 0.0) or 0.0))
-        self._seed_tz.setValue(float(getattr(result, "tz", 0.0) or 0.0))
-        self._seed_note.setText("Seed updated from the last calibration result.")
+    def seed_from_result(self, result, refine: dict):
+        """Copy optimized geometry into the seed fields — but only the
+        parameters this fit actually refined. An unrefined parameter's value
+        in ``result`` is just whatever was fed in as a fixed constant, not
+        new information from this fit; promoting it would silently turn
+        "held fixed this one time" into a locked seed for every future run,
+        on every panel (``_sync_seed_checkbox`` mirrors the enable flags
+        across all 4 panels by design) — see DECISIONS for the
+        connoly_oct26 run this broke, where tx ended up locked at a
+        different nonsense value per panel."""
+        promoted = []
+        if refine.get("BC"):
+            self._enable_seed(BC=True)
+            self._seed_bcy.setValue(float(result.BC_y))
+            self._seed_bcz.setValue(float(result.BC_z))
+            promoted.append(f"BC=({result.BC_y:.1f}, {result.BC_z:.1f}) px")
+        if refine.get("Lsd"):
+            self._enable_seed(Lsd=True)
+            self._seed_lsd.setValue(float(result.Lsd) / 1000.0)
+            promoted.append(f"Lsd={float(result.Lsd) / 1000:.3f} mm")
+        for key, spin in (("tx", self._seed_tx), ("ty", self._seed_ty), ("tz", self._seed_tz)):
+            if refine.get(key):
+                self._enable_seed(**{key: True})
+                spin.setValue(float(getattr(result, key, 0.0) or 0.0))
+                promoted.append(f"{key}={float(getattr(result, key, 0.0) or 0.0):.2f}°")
+        if promoted:
+            self._seed_note.setText("Seed updated from the last fit: " + ", ".join(promoted) + ".")
+        else:
+            self._seed_note.setText(
+                "Last fit refined no seedable parameters — seed left unchanged.")
 
     def _load_calib_file(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -416,14 +443,19 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
         bc.setVisible(self._show_rings)
         self._viewer._iv.addItem(bc); self._ring_items.append(bc)
 
-    def on_result(self, result):
-        """A fresh fitted result for this panel — store it, refresh seed
-        (if 'feed back' is on), redraw rings (if bound to the viewer), and
-        populate the Results grid."""
+    def on_result(self, result, refine: Optional[dict] = None):
+        """A result for this panel — store it, redraw rings (if bound to the
+        viewer), and populate the Results grid. Seed feedback (if 'feed
+        back' is on) only runs when ``refine`` is given, i.e. this is a
+        fresh fit that just completed in this session, as opposed to a
+        historical result redrawn from a reopened project
+        (``HydraCalibrationPage.display_stored_result``, which calls this
+        with no ``refine``) — a stored result must never silently become
+        tomorrow's seed."""
         self.result = result
-        if self._feedback_check.isChecked():
+        if refine is not None and self._feedback_check.isChecked():
             try:
-                self.seed_from_result(result)
+                self.seed_from_result(result, refine)
             except Exception:
                 pass
         self._redraw_rings()

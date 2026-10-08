@@ -3,6 +3,184 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-08 — "Feed result back to seed" was silently promoting unrefined parameters into a locked manual seed; fixed in both Calibrate tabs, Hydra's seed state made visible
+
+Root-caused a real failure: a Hydra calibration on `connoly_oct26` data
+(project `hydra_8oct2026.h5`) produced garbage geometry on every panel —
+rings nowhere near the data, basin-escape/strain-cap diagnostics failing
+across the board. The saved project showed each panel's `tx` locked at a
+different, non-physical value (180°, 27.3°, 117.8°, 180°) despite `tx` not
+being in that run's Refine list — it couldn't have come from this fit, so it
+was carried forward from an earlier exploratory run (plausibly one with `tx`
+and the full 15-term anisotropic distortion set free, on data with only
+~80° (22%) azimuthal ring coverage per panel — the backend's own diagnostics
+say outright this is too narrow to determine the anisotropic terms, a
+textbook setup for a degenerate/basin-escape fit).
+
+**Mechanism**: `seed_from_result()` (`hydra_calib_widgets.py`'s
+`HydraCalibPanelCard` and `tab_calibrate.py`'s `CalibrationTab`, identical
+pattern in both) runs after every completed fit when "Feed result back to
+seed" is checked (default **on**), and used to unconditionally call
+`self._enable_seed(BC=True, Lsd=True, tx=True, ty=True, tz=True)` —
+regardless of which parameters were actually free in that run. An unrefined
+parameter's value in the result is just whatever was fed in as a fixed
+constant, not new information, so promoting it silently converted "held
+fixed this one time" into "locked seed for every future run," with no
+visible sign it happened. Hydra compounds this: `_sync_seed_checkbox()`
+mirrors each `_seed_en_*` enable flag across all 4 panels by design ("one
+shared choice across all 4 GE panels," only the seed *values* stay
+independent), so one panel's bad promotion spreads the *enabled* state to
+all three siblings — consistent with every panel showing the same five
+flags on, with four different (and in ge1/ge4's case, identical-but-still-
+nonsense 180°) tx values.
+
+**Fix**: both `_seed_from_result` (`tab_calibrate.py`) and `seed_from_result`
+(`hydra_calib_widgets.py`) now gate each parameter's promotion on whether it
+was actually in that run's `refine` flags (`self._last_refine_flags` for the
+single-detector tab, already captured at run-launch time; a new `refine`
+argument threaded through Hydra's `HydraCalibPanelCard.on_result()` from
+`HydraCalibrationPage._on_panel_done`'s `self._last_cfgs[n]["refine"]`).
+Critically, `on_result()`'s `refine` defaults to `None`, and seed promotion
+is skipped entirely when it is — so `display_stored_result()` (project
+restore / panel-switch redraw, which calls `on_result(result)` with no
+`refine`) can never silently turn a historical result into tomorrow's seed.
+This mirrors the single-detector tab's existing `_display_stored_result`,
+which already only restores Distortion coefficients inline and never calls
+the full `_seed_from_result` for exactly this reason — Hydra didn't have
+that same restraint until now.
+
+**Visibility** (requested alongside the fix): `_update_seed_summary()`'s
+existing per-card label now colors itself `S.ACCENT` (orange) when any
+parameter is seeded instead of blending into the muted help text, and a new
+always-visible one-line banner (`HydraCalibrationPage._seed_status_lbl`,
+above the per-panel card stack) shows the shared seed state regardless of
+which of the 4 panels is currently displayed — "Seed: automatic" or
+"Seed (manual, shared across panels): BC, Lsd, …" — so a manual seed can
+never again go unnoticed without opening the "Manual seed…" dialog. Driven
+by a new `HydraCalibPanelCard.seedStateChanged` signal.
+
+**Confirmed, not changed**: Hydra's per-panel "Manual seed…" dialog already
+existed before this fix (verified headlessly via screenshot) — each
+`HydraCalibPanelCard` builds and owns its own `ManualSeedDialog` instance
+over its own checkboxes/spinboxes, and `CalibrationTab` holds one
+`HydraCalibrationPage` with 4 independent cards, none of which share a
+widget or any other state with the single-detector tab's own seed controls.
+The bug was never cross-tab contamination — it was within-Hydra, across
+different runs/datasets in the same live session.
+
+**Standing rule** (tripwire for future widgets, not a fix to an existing
+leak — the above confirms this already holds everywhere checked today): a
+control's value or enabled state must never be read from, or silently
+written into, the other Calibrate mode (single-detector ↔ Hydra) unless
+that same control is independently present and was explicitly set *in that
+mode*. Feeding a result back into a panel's own seed, and
+`_sync_seed_checkbox`'s mirroring across Hydra's own 4 panels, are both
+fine — crossing between the two Calibrate *modes* is not.
+
+New tests: `tests/test_calibrate_panel_save.py` (`test_seed_from_result_skips_unrefined_tx`,
+`test_seed_from_result_with_nothing_refined_leaves_seed_untouched`),
+`tests/test_hydra_calib_ui.py` (extended `test_hydra_calib_page_wiring_and_pick_isolation`
+with the gated-promotion + no-`refine` + status-banner assertions, same one-page-per-test-function
+pattern as the rest of that file).
+`tests/test_manual_dspacing_calib_ui.py::test_fitted_tilt_reaches_the_overlay_with_the_seed_card_on`
+updated: it calls `_seed_from_result` directly without going through
+`_run_manual_fit()`, so it now sets `_last_refine_flags` itself (ticking
+`ref_ty` explicitly, since AgBH's default d-spacing refine state is
+BC-only) — same precedent `test_calibrate_panel_save.py` already used for
+other `_last_refine_flags`-dependent direct calls.
+**Verified**: all touched/new test files green per-file on a clean `HOME`;
+`pyflakes` unchanged (same pre-existing warnings only, confirmed by diffing
+against unmodified HEAD); the pre-existing `test_apply_project_calibration_single_detector`
+pyqtgraph-teardown SIGABRT reproduced identically on unmodified HEAD (not a
+regression); headless screenshots confirm the new banner renders correctly
+in both states.
+
+## 2026-10-07 (latest) — Calibration moved from an in-process QThread to a subprocess (calib_cli.py), both single-detector and Hydra
+
+Requested directly: "the separate qt processes are not stable with the gui"
+for calibration specifically, with Batch Integrate's "Run as background job"
+(`batch_cli.py`) cited as existing precedent. Followed a same-day,
+unattended investigation (user unavailable) that had already shown the
+*apparent* Hydra ge2 "hang" wasn't actually a hang (see the ge1/ge2 timing
+entries this same day in STATE's history) — but that investigation also
+surfaced real, independent reasons `CalibrationWorker` running in-process was
+worth moving regardless: a calibration pipeline call is one uninterruptible
+native torch/scipy call that can run for minutes, so `QThread.terminate()`
+inside one risks corrupting the whole GUI process — the old `_abort()`/
+`_abort_all()` could therefore only *detach* (orphan the thread, discard its
+result), never actually stop the work. Hydra's Parallel mode also had to
+disable per-panel log capture (`capture_stdout=False`) to avoid several
+concurrent QThreads racing on one process-global `sys.stdout`.
+
+**Design**: new `midas_gui/calib_cli.py` (`python -m midas_gui.calib_cli
+--job-dir <dir>`), the calibration counterpart of `batch_cli.py` but
+simpler — no detached `screen` session (job_queue.py's mechanism, built so a
+batch job can outlive the GUI); calibration stays tied to the GUI's
+lifetime exactly like the old QThread did, just via a `QProcess` the GUI
+waits on and streams from instead of waiting on a thread. No PyQt import in
+`calib_cli.py` at all — unlike `BatchWorker`, `calib.run_pipeline`/
+`normalize_result` are plain functions, not a QThread subclass, so no
+`QApplication` instance is needed to construct anything.
+
+Hand-off is two files in the run's own scratch leaf (same directory
+`residual_corr.bin`/`calibration.json` already land in, so nothing new to
+clean up): `calib_job.json` (mode + the same cfg dict `run_pipeline` has
+always taken, JSON-safe — `workers._json_default` turns the one non-native
+value, `refine["distortion_coeffs"]`'s `set`, into a sorted list; `calib.
+_distortion_coeffs` already accepts either) and `calib_job.npz` (image +
+whichever of dark/bright/background/mask apply — `mask` moves out of cfg
+into the npz since it's an array). On success, `calib_cli.py` pickles the
+normalized result to `calib_result.pkl` — plain pickle, not a JSON
+sanitizer, since the result is a real `AutoCalibrationResult` (numpy arrays,
+a `residual_corr_map` torch tensor, dynamically-attached fields like
+`_calibrant_name`/`panel_shifts_path`) that downstream code needs at full
+fidelity, not a lossy flattened copy. The one thing `calib_cli.py` does
+before pickling that the old in-process worker never had to: `residual_corr_
+map.detach().cpu()` — it must leave the process CPU-resident and off the
+autograd graph, since the GUI process may not share a CUDA context (or have
+a GPU at all).
+
+`workers.CalibrationWorker` is now a `QtCore.QObject`, not a `QThread` —
+duck-types `start()`/`isRunning()`/`requestInterruption()` plus the same
+`log_line`/`finished`/`failed` signals, so neither `tab_calibrate.py` nor
+`hydra_calib_page.py` needed to change their wiring, only drop the now-
+meaningless `capture_stdout` kwarg from both the single-detector call site
+(never passed it) and Hydra's `_start_panel_worker`/`_run_all`/
+`_start_next_sequential` (always passed it). `requestInterruption()` is now
+a real `QProcess.kill()` — both tabs' abort methods needed only a docstring/
+log-message update ("aborted" instead of "aborted — may still be winding
+down"), not a behavior change, since they already just call
+`requestInterruption()` + disconnect + orphan.
+
+**Verified directly against real `test_data/s1ide` ge1/ge2 data** (not just
+mocked): a real ~147s successful single-detector-style run through the new
+worker (BC/Lsd matching known-good truth), a real failure path (unknown
+pipeline mode, traceback streamed live via `log_line` and surfaced in
+`failed`), a real `requestInterruption()` kill mid-run, and — the capability
+this change actually unlocks — **two real ge1+ge2 calibrations run
+concurrently through two genuinely separate OS processes, each returning its
+own full captured log (17 lines each) and correct, non-cross-contaminated
+result**, something Hydra's Parallel mode could never do before (it had to
+give up captured logs to avoid the stdout race). New `tests/
+test_calibration_subprocess.py` (10 tests): `_write_calib_job`'s JSON/npz
+round-trip (including the set→list distortion-coeffs conversion and that it
+doesn't mutate the caller's cfg), `calib_cli.main()`'s success/failure paths
+with the backend mocked (fast), and the worker's real-subprocess contract
+(spawn, live log streaming, failure signal, kill) using a fast-failing
+unknown-mode job rather than a multi-minute real fit.
+
+`helpers._LogStream` (the `sys.stdout`/`stderr`-redirecting class the old
+worker used) is now dead code — deleted, along with the `import io` it was
+the only user of; nothing else in the repo ever referenced it.
+
+**Verified no regression**: pyflakes diff is +1 over baseline (exactly the
+one expected `midas_gui._paths imported but unused` warning on the new CLI
+file — the same accepted pattern `batch_cli.py` already carries). Every
+test file touching `workers.py` passes individually; a combined run of 17 of
+them showed the same pre-existing `--forked`-races-with-many-tests failures
+STATE.md already documents (confirmed identical on unmodified HEAD, not
+introduced by this change — see the "trust per-file isolated runs" rule).
+
 ## 2026-10-07 (later) — Threshold curve editor popped into a dialog; log Y-axis; X locked to detector range
 
 Requested change (same day as the drag-point-curve entry below): the

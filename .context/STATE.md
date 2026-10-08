@@ -1,7 +1,7 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-10-07 (Calibrate: threshold curve editor popped into a dialog, log Y-axis floored at 1, X locked to detector range — see DECISIONS)_
+_Last updated: 2026-10-08 ("Feed result back to seed" fixed to only promote actually-refined parameters, in both Calibrate tabs; Hydra's manual-seed state now has an always-visible status banner; see DECISIONS)_
 
 ## Now working on
 
@@ -39,6 +39,70 @@ Open follow-ups, none blocking:
   `git fetch origin 'refs/pull/*/head:refs/remotes/origin/pr/*'`.
 
 ## Recently completed
+
+**2026-10-08 — "Feed result back to seed" was silently locking in unrefined
+parameters; fixed, and Hydra's manual-seed state is now visible without
+opening a dialog.** Root-caused a real bad calibration (connoly_oct26 Hydra
+data, all 4 panels producing garbage geometry): `tx` was locked at a
+different non-physical value per panel (180°/27.3°/117.8°/180°) despite not
+being in that run's Refine list — carried forward from an earlier
+exploratory run by `seed_from_result()`, which used to promote ALL of
+BC/Lsd/tx/ty/tz into the manual seed after every fit regardless of what was
+actually refined (same bug, same code shape, in both `tab_calibrate.py` and
+`hydra_calib_widgets.py`). Hydra compounds it further: `_sync_seed_checkbox`
+mirrors each seed-enable flag across all 4 panels by design, so one panel's
+bad promotion spreads to all three siblings. Fixed: both tabs' feedback now
+gate each parameter's promotion on that run's own refine flags; Hydra's
+`HydraCalibPanelCard.on_result()` gained a `refine` parameter that defaults
+to `None`, so `display_stored_result()` (project restore) — which calls it
+with no `refine` — can never again silently promote a historical result
+into tomorrow's seed, matching the single-detector tab's existing restraint
+on its own project-restore path. Separately requested: manual-seed status is
+now visible without opening "Manual seed…" — the per-panel summary label
+turns orange when active, and a new always-visible page-level banner shows
+the shared state regardless of which panel is displayed. Confirmed (not
+changed): Hydra's per-panel seed dialog already existed and was already
+fully independent from the single-detector tab's (separate widget instances
+throughout) — the bug was within-Hydra across runs, never cross-tab.
+New/updated tests in `test_calibrate_panel_save.py`, `test_hydra_calib_ui.py`,
+`test_manual_dspacing_calib_ui.py`. Full rationale in DECISIONS 2026-10-08.
+**Verified:** all touched/new test files green per-file on a clean `HOME`;
+`pyflakes` unchanged; headless screenshots confirm the new banner in both
+states; the pre-existing `test_apply_project_calibration_single_detector`
+SIGABRT reproduced identically on unmodified HEAD (not a regression).
+
+**2026-10-07 (latest) — Calibration (single-detector + every Hydra panel)
+moved from an in-process QThread to a subprocess.** Requested directly
+("the separate qt processes are not stable with the gui… there's already
+precedence for this in the batch integrate tab"), done unattended. New
+`midas_gui/calib_cli.py` (`python -m midas_gui.calib_cli --job-dir <dir>`) —
+`batch_cli.py`'s pattern, simpler (no detached `screen` session; stays tied
+to the GUI's lifetime like the old QThread did). `workers.CalibrationWorker`
+is now a `QtCore.QObject` wrapping a `QProcess`, duck-typing `start()`/
+`isRunning()`/`requestInterruption()` so neither tab's wiring changed beyond
+dropping the now-meaningless `capture_stdout` kwarg. Hand-off is
+`calib_job.json`+`calib_job.npz` in the run's own scratch leaf in, a pickled
+`calib_result.pkl` (CPU-detached `residual_corr_map`) out. Two real,
+independent wins this unlocks: `requestInterruption()` is now a genuine
+`QProcess.kill()` (the old abort could only orphan an uninterruptible
+QThread and hope), and Hydra's Parallel mode no longer needs
+`capture_stdout=False` — every panel's calibration is a real separate
+process with its own real stdout, so full per-panel log capture is always
+safe now. `helpers._LogStream` (now dead) and its `import io` deleted.
+**Verified live** against real `test_data/s1ide` ge1/ge2 data: a real ~147s
+successful run (BC/Lsd matching known truth), a real failure path (log
+streamed live, traceback in `failed`), a real mid-run kill, and two real
+calibrations run concurrently through two genuine OS processes with full,
+non-cross-contaminated per-panel logs and results — not possible before
+this change. New `tests/test_calibration_subprocess.py` (10 tests, backend
+mocked for the fast paths, a real fast-failing subprocess for the worker's
+QProcess contract). Full rationale in DECISIONS 2026-10-07 (latest).
+**Verified:** pyflakes +1 over baseline (exactly the one expected
+`_paths`-unused warning the new CLI file carries, same pattern as
+`batch_cli.py`); every test file touching `workers.py` green per-file; a
+combined-run failure set reproduced identically on unmodified HEAD (the
+documented pre-existing `--forked`-races-with-many-tests flakiness, not a
+regression).
 
 **2026-10-07 (later) — Threshold curve popped into a dialog; log Y-axis
 floored at 1; X locked to the detector's radius range.** The embedded

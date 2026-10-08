@@ -1,12 +1,11 @@
 """Module-level helpers: image IO, transforms, ring prediction, spec building,
-log stream, and the no-scroll spinbox / two-column layout widgets used everywhere.
+and the no-scroll spinbox / two-column layout widgets used everywhere.
 
 These are ported verbatim from midas_workflow_gui_v3.py (the frozen template) so
 the established conventions in context/design_rules.md are preserved exactly.
 """
 from __future__ import annotations
 
-import io
 import math
 import re
 from pathlib import Path
@@ -2510,22 +2509,6 @@ def render_calib_value_grid(grid: "QtWidgets.QGridLayout", note_label: "QtWidget
         grid.addWidget(kl, row, col * 2, QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
         grid.addWidget(vl, row, col * 2 + 1, QtCore.Qt.AlignVCenter)
     grid.setColumnStretch(ncols * 2 + 1, 1)
-
-
-# ── Log stream (redirect verbose stdout to a Qt signal) ─────────────────────────
-
-class _LogStream(io.TextIOBase):
-    def __init__(self, sig):
-        super().__init__()
-        self._sig = sig
-
-    def write(self, s):
-        if s.strip():
-            self._sig.emit(s.rstrip())
-        return len(s)
-
-    def flush(self):
-        pass
 
 
 # ── GUI-state serialization (Save/Load GUI State) ────────────────────────────────
