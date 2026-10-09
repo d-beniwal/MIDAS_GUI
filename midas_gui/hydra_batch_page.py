@@ -1137,11 +1137,16 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._log.append(f"[combine] merging {len(sets)} frame(s) across "
                          f"{len(panels)} panels…")
         done = 0
+        # Collected rather than logged per frame: the caking is one setting
+        # for the whole run, so a non-tiling set says the same thing once per
+        # frame and would bury the rest of the log on a long scan.
+        warned = set()
         for group in sets:
             try:
                 out = hydra_zarr_combine.combine_panel_zarrs(
                     group,
-                    hydra_zarr_combine.default_combined_path(group, out_dir))
+                    hydra_zarr_combine.default_combined_path(group, out_dir),
+                    warn=lambda m: warned.add(m))
             except Exception as exc:
                 self._log.append(
                     f"[combine] {Path(group[sorted(group)[0]]).name}: {exc}")
@@ -1151,6 +1156,10 @@ class HydraBatchPage(QtWidgets.QWidget):
                 self._log.append(f"[combine]   → {out}")
         self._log.append(f"[combine] wrote {done}/{len(sets)} combined "
                          f"archive(s).")
+        for msg in sorted(warned):
+            self._log.append(f"[combine] WARNING: {msg} — the merged eta "
+                             f"axis has a hole in it, and nothing about the "
+                             f"file's shape will show you that.")
 
     def _save_results(self):
         """Write every panel's already-computed lineouts to disk — mirrors
