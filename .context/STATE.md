@@ -1,7 +1,7 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-10-08 (Hydra calibration page gained page-level "Save All" — one .json/paramstest.txt per fitted panel; see DECISIONS)_
+_Last updated: 2026-10-08 (Hydra calibration page's layout brought to parity with the single-detector Calibrate tab — Refine "Limits" grid added, card order/footer/checkable-card conventions matched; see DECISIONS)_
 
 ## Now working on
 
@@ -39,6 +39,73 @@ Open follow-ups, none blocking:
   `git fetch origin 'refs/pull/*/head:refs/remotes/origin/pr/*'`.
 
 ## Recently completed
+
+**2026-10-08 (latest) — Hydra calibration page's layout brought to parity
+with the single-detector Calibrate tab.** Requested directly ("the layout of
+the hydra calibration tab is very different... positioning of manual is
+very different, the options to define tolerances is not there... I want the
+hydra calibration tab layout to be exactly the same as single detector
+except hydra-specific features should stay as they are"). A research pass
+diffed the two tabs section-by-section first; scope was narrowed with the
+user (declined: non-crystalline/d-spacing calibrant support, per-coefficient
+Distortion seeding in the per-panel Manual-seed dialog — both stay Hydra's
+existing crystalline-only / BC-Lsd-tilts-only shape). Four changes, all in
+`hydra_calib_page.py`:
+- **Refine "Limits" grid, previously entirely absent.** Added the same
+  always-on ± tolerance windows (Lsd/BC/ty+tz-merged/Wavelength/Distortion,
+  `tx` excluded — the crystalline backend never bounds it) that
+  `CalibrationTab`'s crystalline mode has, reusing `dialogs.
+  PARAMETER_LIMIT_ROWS`/`limit_window` and `calib.tol_defaults`/
+  `tols_are_default` directly. Hydra needed no dsp/xtal mode-switching
+  machinery (`CalibrationTab._sync_limits_mode`) since it's crystalline-only
+  — new `_crystalline_tols(card)` takes the panel card explicitly, because
+  the tolerance *windows* are shared across all 4 panels but each is
+  centred on *that panel's own* seed. Wired into `_build_cfg` as
+  `cfg["tols"]` (`calib.py`'s `run_pipeline` already reads this key — no
+  backend-call changes needed) and into `_state_widgets()` for project
+  round-trip.
+- **Per-panel "Initial seed" card stack moved up**, from after Run (bottom
+  of the page) to between Mean-of-frames and Refine parameters — where
+  `CalibrationTab`'s own "Initial seed" card sits. This was the concrete
+  shape of "positioning of manual is very different": a user had to scroll
+  past Threshold/Mean/Refine/Advanced/Run just to reach the seed controls.
+- **Fixed footer.** Working dir/Run/Abort/progress/Save All moved out of
+  the scrollable column into a pinned footer (mirrors `CalibrationTab`'s
+  `mid_col`/footer split). Working dir was previously nested inside the
+  collapsed-by-default "Advanced" group — a real bug, not just a layout
+  mismatch: the field (and Run, which needs it) was disabled until the user
+  opened Advanced. Run-mode (Sequential/Parallel) stayed in the footer,
+  beside Run/Abort, since it's Hydra-specific.
+- **Pattern-matched three smaller mismatches:** Threshold and Mean-of-frames
+  are now checkable `QGroupBox`es (card title is the on/off toggle) instead
+  of a plain card with an internal checkbox, matching `CalibrationTab`
+  exactly; the λ/Calibrant row is hand-built (no `S.Form().row()`, which
+  stretches the two fields apart as the panel widens — same fix
+  `CalibrationTab` already carries with its own explanatory comment); the
+  Pixel row's spin boxes lost their stretch factor so they stay packed next
+  to their checkbox instead of drifting apart on a wide panel.
+
+Left alone, confirmed Hydra-specific: per-panel Transforms card (forced —
+transforms are per-panel, calibrant is shared), frame navigation living in
+the loader panel rather than a scrub bar under the viewer, panel-selector
+toolbar, Save All, seed-status banner, Eta-R cake Overall toggle, per-panel
+Results/Ring-Residuals stacks, no Multi-panel-detector group. Not done this
+pass (noted, not requested): the single-detector viewer toolbar's
+`_ring_status` label and "Lab-frame axes" toggle have no Hydra counterpart.
+
+New assertions added to both of `tests/test_hydra_calib_ui.py`'s existing
+test functions (no new pyqtgraph-building test — see that file's module
+docstring): Limits defaults match `calib.tol_defaults()`, per-panel
+centering, `_crystalline_tols()` None-at-defaults, `_build_cfg()["tols"]`
+wiring, `get_state()`/`set_state()` round-trip, and the card-stack's new
+position relative to the Refine card.
+**Verified:** `test_hydra_calib_ui.py`/`test_hydra_ui.py`/
+`test_hydra_batch_ui.py`/`test_calibrate_panel_save.py`/`test_smoke.py`/
+`test_manual_dspacing_calib_ui.py` green per-file on a clean `HOME`;
+`pyflakes` unchanged (same two pre-existing warnings only, both in
+untouched files/lines); offscreen screenshots of both tabs side-by-side
+confirm matching card order and that Working dir/Run/Save are enabled
+without opening Advanced (previously disabled by default in Hydra).
 
 **2026-10-08 (later) — Hydra calibration: page-level "Save All .json" /
 "Save All paramstest.txt", one file per panel.** Requested directly ("there

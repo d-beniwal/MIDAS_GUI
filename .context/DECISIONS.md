@@ -3,6 +3,89 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-08 (latest) — Hydra calibration page's layout matched to the single-detector Calibrate tab, scope negotiated up front
+
+**Problem.** `HydraCalibrationPage` was built as a parallel implementation of
+`CalibrationTab`, and drifted from it over time: different card order,
+different widget conventions (checkbox-in-card vs. checkable-card-title),
+and one whole feature (the Refine card's per-parameter ± tolerance "Limits"
+controls) missing outright. Reported directly: "I want the hydra calibration
+tab layout to be exactly the same as single detector except hydra-specific
+features should stay as they are."
+
+**Scoping, before touching code.** A full section-by-section diff turned up
+more differences than the user had named, several of which are genuinely
+ambiguous between "bug to fix" and "forced by Hydra's 4-panel structure."
+Rather than guess, four judgment calls were put back to the user:
+- **Refine Limits grid** — confirmed in scope (explicitly named).
+- **Non-crystalline/d-spacing calibrant support** (manual ring-picking,
+  which single-detector has and Hydra lacks) — **declined**. This is a
+  materially bigger feature (ring-picking per panel, d-spacing fit math),
+  not a layout parity fix, and was never asked for.
+- **Per-coefficient Distortion seeding** in the per-panel Manual-seed dialog
+  (`dialogs.py` already documents this omission as deliberate, not an
+  oversight) — **declined**, for the same reason.
+- **Footer/Advanced restructuring** (Working dir trapped in collapsed
+  Advanced; Run/Save in a scrollable card instead of a fixed footer) vs.
+  **frame-nav/Transforms-card unification** (Hydra's loader has its own
+  frame slider instead of a scrub bar under the viewer; Transforms is a
+  per-panel card instead of folded into Detector & Calibrant) — the first
+  pair are straightforward bugs, the second pair are forced by Hydra
+  actually having 4 independent frame sources/mountings. User chose: fix
+  the footer, leave the forced differences alone.
+
+**Why the Limits grid needed no dsp/xtal mode-switching.** `CalibrationTab`
+carries `_sync_limits_mode`/`_LIMIT_ROWS_DSP`/`_LIMIT_ROWS_XTAL` because it
+supports both a manual/d-spacing fit (opt-in, per-axis windows) and a
+crystalline one (always-on, coarser windows). Hydra is crystalline-only by
+the scoping decision above, so only the xtal shape was ported: one row per
+refine parameter (Lsd/BC/ty+tz-merged/Wavelength), always on, no opt-in
+checkbox, plus a standalone Distortion row — `tx` gets no window at all
+(the crystalline backend never refines or bounds it). Reused
+`dialogs.PARAMETER_LIMIT_ROWS`/`limit_window` and
+`calib.tol_defaults`/`tols_are_default` as-is; no backend-facing code
+changed.
+
+**Why `_crystalline_tols` takes the panel card as a parameter.**
+`CalibrationTab`'s version reads its own seed widgets directly — there's
+only one seed. Hydra shares the tolerance *windows* across all 4 panels (one
+Refine card) but each panel's fit must be centred on *its own* seed
+(BC/Lsd/tilts genuinely differ panel to panel), so `_crystalline_tols(card)`
+reads `card._seed_lsd`/`_seed_bcy`/`_seed_ty` for the centre and the
+page's own shared spin/combo for the window. `card=None` (used only by
+`_update_limits_note` for the live note label, never by an actual run)
+falls back to a 0.0 centre, which `limit_window`'s own degenerate-value
+handling already treats safely for a "%" unit.
+
+**Why the per-panel card stack moved instead of being split in two.**
+`HydraCalibPanelCard` bundles Transforms + Initial seed as one widget
+(deliberately — see that module's docstring). Splitting it so Transforms
+could live inline with Detector & Calibrant (matching single-detector's
+exact sub-structure) would be a bigger refactor for a cosmetic win; instead
+the whole card stack's *position* in the page moved up, from after
+Run/Advanced to between Mean-of-frames and Refine — the same slot
+`CalibrationTab`'s own "Initial seed" card occupies. This was the concrete
+shape of "positioning of manual is very different": previously you had to
+scroll past Threshold/Mean/Refine/Advanced/Run to reach it.
+
+**The Working-dir-inside-Advanced issue was a real bug, not a style
+mismatch.** A checkable `QGroupBox` disables its children when unchecked, so
+with "Advanced" collapsed by default (as it always has been), Working dir —
+and by extension Run, which depends on it being set or defaulted — read as
+disabled on first open of the Hydra page. Moving it to the new fixed footer
+(mirroring `CalibrationTab`'s `mid_col`/footer split) fixes this as a side
+effect of the positioning work, not as a separate patch.
+
+**Verified:** `test_hydra_calib_ui.py` (both existing test functions
+extended — no new pyqtgraph-building test, per that file's module
+docstring), `test_hydra_ui.py`, `test_hydra_batch_ui.py`,
+`test_calibrate_panel_save.py`, `test_smoke.py`,
+`test_manual_dspacing_calib_ui.py` all green per-file on a clean `HOME`;
+`pyflakes` unchanged; offscreen screenshots of both the Hydra and
+single-detector pages side-by-side (same window, same size) confirm matching
+card order top-to-bottom and that Working dir/Run/Save render enabled on
+first open.
+
 ## 2026-10-08 (later) — Hydra calibration gets a page-level "Save All", one file per panel
 
 **Problem.** The single-detector Calibrate tab has an always-visible Save
