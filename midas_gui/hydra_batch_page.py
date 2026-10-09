@@ -45,7 +45,8 @@ from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                OriginToolButton, build_lab_frame_axes_items)
 from midas_gui.hydra_widgets import (HydraLoaderPanel, HydraDetectorToolbar,
                                      panel_color)
-from midas_gui.hydra_batch_widgets import HydraBatchPanelCard
+from midas_gui.hydra_batch_widgets import (HydraBatchPanelCard,
+                                           HydraCakingSummary)
 from midas_gui import hydra_zarr_combine
 from midas_gui.workers import BatchRunCoordinator, write_all_profiles
 from midas_gui import cake_params
@@ -100,6 +101,7 @@ class HydraBatchPage(QtWidgets.QWidget):
         #: image would be judged "not fresh" and never reach the viewer.
         self._composite_build_id = 0
         self._composite_note = None      # last reason, for log de-duplication
+        self._composite_panels: list = []  # panels actually on the canvas
         #: Output path this page last filled in itself; see
         #: _maybe_autofill_output_dir. Set before the UI is built, since
         #: loading data fires siblingsChanged, which auto-fills.
@@ -376,8 +378,24 @@ class HydraBatchPage(QtWidgets.QWidget):
                 lambda *_, n=n: self._on_panel_calibration_changed(n))
             card._json_ed.textChanged.connect(
                 lambda *_, n=n: self._on_panel_calibration_changed(n))
+            # The caking spins drive BOTH this panel's overlay and its
+            # region on the composite. cakingChanged was emitted all along
+            # and nothing on this page connected it, so every Rmin/Rmax/eta
+            # edit left the Detector view showing the previous values until
+            # some unrelated refresh happened to fire.
+            #
+            # No invalidate_composite(): caking does not change the PICTURE,
+            # only what is drawn over it, and a rebuild is a ~1 s GUI-thread
+            # remap per keystroke.
+            card.cakingChanged.connect(self._on_panel_caking_changed)
             card.cakeLoadRequested.connect(self._load_cake_csv)
             card.cakeSaveRequested.connect(self._save_cake_csv)
+        # A 5th page in the stack, for the Composite selection. The four
+        # panel cards each answer "what is THIS panel caked to"; the one
+        # view that is about all four had no card of its own and simply
+        # held whichever panel was last open.
+        self._cake_summary = HydraCakingSummary()
+        self._card_stack.addWidget(self._cake_summary)
         lv.addWidget(self._card_stack)
         lv.addStretch(1)
         split.addWidget(scroll)
@@ -498,6 +516,8 @@ class HydraBatchPage(QtWidgets.QWidget):
             # Raise the Detector view: selecting Composite has no other
             # meaning on this page, and the build is gated on that tab being
             # visible, so without this the click would appear to do nothing.
+            self._card_stack.setCurrentWidget(self._cake_summary)
+            self._refresh_cake_summary()
             self._top_tabs.setCurrentWidget(self._det_view)
             self._refresh_detector_preview(None)
             return
@@ -569,6 +589,32 @@ class HydraBatchPage(QtWidgets.QWidget):
         for it in self._axis_items:
             self._det_view._iv.removeItem(it)
         self._axis_items.clear()
+
+    def _refresh_cake_summary(self) -> None:
+        """Re-read all four cards into the summary table.
+
+        Pulled from the cards on every refresh rather than pushed on change:
+        the table has no state of its own to drift, and four spin boxes'
+        worth of signals into one read is cheaper to reason about than four
+        incremental updates.
+        """
+        cakes = {n: card.caking() for n, card in sorted(self._cards.items())}
+        on_canvas = set(self._composite_panels or ())
+        missing = {n for n in cakes if on_canvas and n not in on_canvas}
+        self._cake_summary.refresh(cakes, missing=missing)
+
+    def _on_panel_caking_changed(self, n: int) -> None:
+        """One panel's caking moved: redraw whichever view is showing it.
+
+        The composite draws all four regions at once, so it is stale after a
+        change to ANY panel -- including one that is not the selected panel.
+        """
+        key = self._toolbar.current()
+        if key and self._panel_num(key) is None:
+            self._refresh_cake_summary()
+            self._refresh_detector_preview(None)
+        else:
+            self._refresh_detector_preview(n)
 
     def _on_panel_calibration_changed(self, n: int) -> None:
         """One panel's calibration source changed: its own overlay is stale,
@@ -770,6 +816,10 @@ class HydraBatchPage(QtWidgets.QWidget):
             return
         self._composite_img = comp
         self._big_det_size = big
+        # Which panels are ON the canvas, in draw order -- the caking
+        # overlay must not draw a region for a panel the compositor
+        # skipped for want of a calibration.
+        self._composite_panels = sorted(active)
         self._composite_build_id += 1
         self._composite_note = None
         # Which panels actually made it in is otherwise invisible -- "why is
@@ -814,9 +864,8 @@ class HydraBatchPage(QtWidgets.QWidget):
         except Exception:
             return
         self._det_view_framed_for = framed_for
-        draw_polar_bin_overlay(
-            self._det_view, self._bin_overlay_items,
-            bc_y=0.0, bc_z=0.0, r_min=0.0, r_max=0.0, r_bin=1.0, e_bin=5.0)
+        self._refresh_cake_summary()     # _composite_panels is known now
+        self._draw_composite_caking(getattr(self._det_view, "_data", None))
         # All four beam centres register onto ONE canvas point, and for a
         # registered composite that point IS the canvas centre -- the same
         # rule hydra_page._reseed_composite_card_if_needed seeds its
@@ -829,7 +878,82 @@ class HydraBatchPage(QtWidgets.QWidget):
         if bc is None:
             self._clear_lab_axes()
         else:
-            self._redraw_lab_axes_if_on(*bc)
+            # tx=0 and not a panel's roll: the compositor's remap already
+            # takes each panel's roll out, which is what makes one compass
+            # legal for all four here.
+            self._redraw_lab_axes_if_on(*bc, tx=0.0)
+
+    def _draw_composite_caking(self, img) -> None:
+        """Every panel's caking region, in that panel's colour, on one canvas.
+
+        This is the view the per-panel ones cannot give you: four regions
+        that are SUPPOSED to pave the azimuth between them, drawn in one
+        frame where a gap or an overlap between neighbours is a thing you
+        can see rather than a thing you work out from four pairs of spin
+        boxes. connolly_oct26 shipped a merged zarr with a 10 deg hole in it
+        because ge4 was caked from 40 where ge3 ends at 30, and nothing on
+        screen said so (see midas_gui/hydra_zarr_combine.eta_tiling_problem,
+        which now says it in the log).
+
+        The geometry is shared, which is what makes one overlay frame legal
+        here: the compositor registers every beam centre onto the canvas
+        centre, remaps every panel at the same pixel pitch, and takes the
+        in-plane rotation tx out. So a panel's R in its own pixels is just
+        R / COMPOSITE_DISPLAY_STEP in built pixels -- the same scaling
+        hydra_page._reseed_composite_card_if_needed applies to the composite
+        card's own geometry. Eta needs no mapping at all: the canvas IS the
+        lab frame the eta convention is defined in, which is why the lab
+        axes drawn just below this land where they do.
+
+        Drawn UNTILTED on purpose. The remap removes tx but not ty/tz, and
+        four panels do not share one tilt to forward-project rings through,
+        so there is no single tilt-aware answer to give. This is the
+        registration preview _build_composite_if_needed already says it is;
+        the per-panel views remain the authority on where a bin edge truly
+        falls.
+        """
+        bc = self._composite_axes_bc(img)
+        if bc is None:
+            self._clear_bin_overlay()
+            return
+        bc_y, bc_z = bc
+        step = float(max(1, int(hydra.COMPOSITE_DISPLAY_STEP)))
+        drawn = False
+        for n in self._composite_panels:
+            card = self._cards.get(n)
+            if card is None:
+                continue
+            cake = card.caking()
+            if not cake["R_MAX"]:
+                # 0 = "auto, resolve per panel from its own corner". That
+                # answer is a per-panel pixel count and the composite is not
+                # the place to invent one; the panel's own view fills it in.
+                continue
+            draw_polar_bin_overlay(
+                self._det_view, self._bin_overlay_items,
+                bc_y=bc_y, bc_z=bc_z,
+                r_min=cake["R_MIN"] / step, r_max=cake["R_MAX"] / step,
+                r_bin=max(cake["R_STEP"] / step, 1e-9),
+                e_bin=cake["ETA_STEP"],
+                eta_min=cake["ETA_MIN"], eta_max=cake["ETA_MAX"],
+                show_grid=self._grid_chk.isChecked(), color=panel_color(n),
+                # Only the FIRST clears: the four regions stack into the one
+                # items list that the next call still tears down whole.
+                clear=not drawn)
+            drawn = True
+        if not drawn:
+            self._clear_bin_overlay()
+
+    def _clear_bin_overlay(self) -> None:
+        """Tear down the bin overlay via the drawing call itself.
+
+        ``r_max=0`` returns before drawing anything but AFTER the clear, so
+        the items list is emptied by the same code path that fills it --
+        there is no second place that has to know what was added.
+        """
+        draw_polar_bin_overlay(
+            self._det_view, self._bin_overlay_items,
+            bc_y=0.0, bc_z=0.0, r_min=0.0, r_max=0.0, r_bin=1.0, e_bin=5.0)
 
     def _refresh_detector_preview(self, n: int) -> None:
         """Refresh the (single, page-level) Detector-view tab's frame +
