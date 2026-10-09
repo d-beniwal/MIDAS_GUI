@@ -1499,6 +1499,22 @@ def _json_default(obj):
     raise TypeError(f"not JSON-serializable in a calibration cfg: {type(obj)!r}")
 
 
+def _pythonpath_with_repo_root(existing: str = "") -> str:
+    """``existing`` with this package's parent directory prepended.
+
+    What lets a spawned ``python -m midas_gui.<mod>`` find the package from
+    any working directory. Already-present entries are not duplicated, and an
+    empty ``existing`` yields just the root (no stray separator, which the
+    interpreter would read as "the current directory").
+    """
+    import os
+    root = str(Path(__file__).resolve().parent.parent)
+    parts = [p for p in (existing or "").split(os.pathsep) if p]
+    if root in parts:
+        return os.pathsep.join(parts)
+    return os.pathsep.join([root] + parts)
+
+
 def _write_calib_job(job_dir: Path, mode: str, image, dark, cfg: dict,
                      bright=None, background=None, bright_mode: str = "divide") -> None:
     """Write ``calib_job.json``/``calib_job.npz`` into ``job_dir`` for
@@ -1588,6 +1604,20 @@ class CalibrationWorker(QtCore.QObject):
         self._job_dir = job_dir
 
         proc = QtCore.QProcess(self)
+        # `-m midas_gui.calib_cli` resolves the package off sys.path[0], which
+        # for -m is the CURRENT DIRECTORY -- the GUI's cwd, inherited here.
+        # Launching the GUI by absolute path from anywhere but the repo root
+        # (e.g. `python /opt/MIDAS_GUI/launch.py` run from a data folder, which
+        # works fine for the GUI itself because launch.py's own directory goes
+        # on sys.path) therefore killed every calibration with
+        # "No module named 'midas_gui'". job_queue.launch already pins this for
+        # background jobs with an explicit cd; this spawn site did not.
+        # PYTHONPATH rather than setWorkingDirectory: it fixes the import
+        # without moving the cwd out from under any relative path the backend
+        # might resolve.
+        env = QtCore.QProcessEnvironment.systemEnvironment()
+        env.insert("PYTHONPATH", _pythonpath_with_repo_root(env.value("PYTHONPATH", "")))
+        proc.setProcessEnvironment(env)
         proc.setProcessChannelMode(QtCore.QProcess.MergedChannels)
         # `-m midas_gui.calib_cli` only resolves the `midas_gui` package when
         # the process's cwd is the repo root (that's what puts the repo root
