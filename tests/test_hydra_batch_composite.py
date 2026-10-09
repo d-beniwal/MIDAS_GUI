@@ -133,34 +133,71 @@ def test_fewer_than_two_calibrated_panels_builds_nothing(app, fixture_available)
     assert page._composite_img is None
 
 
-def test_the_composite_carries_no_single_panel_overlay(app, fixture_available):
-    """Rmin/Rmax and the bin grid are drawn around ONE panel's beam centre in
-    that panel's pixel frame. On the BigDet canvas those coordinates mean
-    nothing, so they are cleared — an overlay in a plausible wrong place is
-    worse than none. The Rmax presets go dead for the same reason."""
+def test_the_composite_draws_every_panels_caking_not_one(app, fixture_available):
+    """This used to clear the overlay outright, reasoning that Rmin/Rmax
+    live in ONE panel's pixel frame and mean nothing on the BigDet canvas.
+    That was true of drawing a single panel's region there, and false of the
+    canvas: it is registered, so all four regions share one frame and can be
+    drawn together (asked for as "showing the caking parameter on the
+    composite view").
+
+    Still nothing while Show bin grid is off, which is the default -- the
+    toggle gates the whole overlay, composite included.
+    """
     page = _calibrated_page(app, fixture_available)
     before = {n: page._cards[n].caking() for n in (1, 2, 3, 4)}
     page._toolbar.set_current("composite")
     app.processEvents()
+    assert page._bin_overlay_items == [], "grid is off by default"
 
-    assert page._bin_overlay_items == []
-    # Caking lives on the cards now, so there is no shared Rmax for a
-    # composite canvas to fill -- but assert it explicitly, because the
-    # auto-Rmax resolution in the per-panel path would be a plausible place
-    # for a BigDet corner distance to leak into a panel's real setting.
+    page._grid_chk.setChecked(True)
+    app.processEvents()
+    assert page._bin_overlay_items, "no caking drawn on the composite"
+
+    # The per-panel path resolves an auto Rmax from the panel's own corner.
+    # Running that against the BigDet canvas would write a composite corner
+    # distance into a panel's real setting, which is the leak worth pinning.
     assert {n: page._cards[n].caking() for n in (1, 2, 3, 4)} == before
 
 
-def test_switching_to_composite_keeps_the_per_panel_stacks_put(app, fixture_available):
-    """Neither stack has a composite entry. Holding the last panel keeps its
-    calibration card editable — which is the thing that rebuilds the view."""
+def test_switching_to_composite_shows_the_all_panels_caking_card(app, fixture_available):
+    """The card stack gained a composite entry: a table of all four panels'
+    caking (asked for as "I cannot see the ge1-ge4 caking parameters in one
+    show"). It used to hold the last panel's card, so the one view that is
+    about all four showed the numbers for exactly one of them.
+
+    The RESULTS stack still holds its panel — it has no composite entry, and
+    inventing a blank one would read as "this panel has nothing".
+    """
     page = _calibrated_page(app, fixture_available)
     page._toolbar.set_current("ge3")
     app.processEvents()
     page._toolbar.set_current("composite")
     app.processEvents()
-    assert page._card_stack.currentWidget() is page._cards[3]
+    assert page._card_stack.currentWidget() is page._cake_summary
     assert page._viewer_stack.currentWidget() is page._viewer_pairs[3]
+
+    page._toolbar.set_current("ge2")
+    app.processEvents()
+    assert page._card_stack.currentWidget() is page._cards[2], \
+        "picking a panel again must bring its own card back"
+
+
+def test_the_bin_grid_toggle_follows_the_visible_caking_card(app, fixture_available):
+    """Asked for at 1-ID-E: "this button can go to caking card." One
+    checkbox, reparented -- not five kept in sync."""
+    page = _calibrated_page(app, fixture_available)
+    page._toolbar.set_current("ge3")
+    app.processEvents()
+    assert page._grid_chk.parentWidget() is page._cards[3]._cake_card
+
+    page._toolbar.set_current("composite")
+    app.processEvents()
+    assert page._grid_chk.parentWidget() is not page._cards[3]._cake_card
+    # isHidden(), not isVisible(): nothing under an unshown top-level is
+    # "visible", but Qt's setParent DOES hide a reparented widget, which is
+    # the regression worth catching.
+    assert not page._grid_chk.isHidden(), "reparenting must not hide it"
 
 
 # ── lab-frame axes ───────────────────────────────────────────────────────
