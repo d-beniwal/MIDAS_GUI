@@ -204,7 +204,12 @@ class HydraBatchPage(QtWidgets.QWidget):
             "edge. Thinned to at most ~50 rings / ~72 spokes for "
             "legibility with fine bin sizes. Unchecking this hides the "
             "overlay entirely, including Rmin/Rmax.")
-        integ.body.addWidget(self._grid_chk)
+        # NOT added to the shared recipe card: it draws the caking values
+        # and belongs beside them. It stays ONE widget -- the single source
+        # of truth _state_widgets persists -- and is moved into whichever
+        # caking card is currently showing (_place_grid_toggle), rather
+        # than copied per panel, which would need four checkboxes kept in
+        # sync for no gain.
         self._grid_chk.toggled.connect(self._refresh_active_detector_preview)
         self._var_check = QtWidgets.QCheckBox("Per-bin variance (σ)")
         self._var_check.setToolTip(
@@ -395,8 +400,12 @@ class HydraBatchPage(QtWidgets.QWidget):
         # view that is about all four had no card of its own and simply
         # held whichever panel was last open.
         self._cake_summary = HydraCakingSummary()
+        # The table forwards edits rather than holding values: the panel's
+        # own spin box is still what the run reads, and what clamps.
+        self._cake_summary.cakingEdited.connect(self._on_summary_cake_edited)
         self._card_stack.addWidget(self._cake_summary)
         lv.addWidget(self._card_stack)
+        self._place_grid_toggle(self._cards[1])
         lv.addStretch(1)
         split.addWidget(scroll)
 
@@ -503,6 +512,22 @@ class HydraBatchPage(QtWidgets.QWidget):
         except ValueError:
             return None
 
+    def _place_grid_toggle(self, host) -> None:
+        """Move the shared bin-grid toggle into ``host``'s caking card.
+
+        One widget, reparented, rather than one per card: the checkbox is
+        page-level state (``_state_widgets`` persists it by identity), and
+        four copies would have to be kept in step with each other for no
+        benefit. Qt reparents on addWidget, but the OLD layout would still
+        hold an item pointing at it, so it is removed explicitly first.
+        """
+        chk = self._grid_chk
+        old = chk.parentWidget().layout() if chk.parentWidget() else None
+        if old is not None:
+            old.removeWidget(chk)
+        host.cake_extras_layout().addWidget(chk)
+        chk.show()
+
     def _on_panel_changed(self, key: str):
         n = self._panel_num(key)
         if n is None:                      # composite
@@ -517,11 +542,13 @@ class HydraBatchPage(QtWidgets.QWidget):
             # meaning on this page, and the build is gated on that tab being
             # visible, so without this the click would appear to do nothing.
             self._card_stack.setCurrentWidget(self._cake_summary)
+            self._place_grid_toggle(self._cake_summary)
             self._refresh_cake_summary()
             self._top_tabs.setCurrentWidget(self._det_view)
             self._refresh_detector_preview(None)
             return
         self._card_stack.setCurrentWidget(self._cards[n])
+        self._place_grid_toggle(self._cards[n])
         self._viewer_stack.setCurrentWidget(self._viewer_pairs[n])
         self._refresh_detector_preview(n)
 
@@ -589,6 +616,19 @@ class HydraBatchPage(QtWidgets.QWidget):
         for it in self._axis_items:
             self._det_view._iv.removeItem(it)
         self._axis_items.clear()
+
+    def _on_summary_cake_edited(self, n: int, key: str, value: float) -> None:
+        """Apply an edit made in the all-panels table to that panel's card.
+
+        set_caking emits cakingChanged, which repaints this table from the
+        cards -- so the clamped value is what ends up on screen, and the
+        overlay and the coverage line follow in the same step.
+        """
+        card = self._cards.get(n)
+        if card is None:
+            return
+        card.set_caking({key: value})
+        self._refresh_cake_summary()     # also covers a clamped no-op
 
     def _refresh_cake_summary(self) -> None:
         """Re-read all four cards into the summary table.
@@ -886,14 +926,13 @@ class HydraBatchPage(QtWidgets.QWidget):
     def _draw_composite_caking(self, img) -> None:
         """Every panel's caking region, in that panel's colour, on one canvas.
 
-        This is the view the per-panel ones cannot give you: four regions
-        that are SUPPOSED to pave the azimuth between them, drawn in one
-        frame where a gap or an overlap between neighbours is a thing you
-        can see rather than a thing you work out from four pairs of spin
-        boxes. connolly_oct26 shipped a merged zarr with a 10 deg hole in it
-        because ge4 was caked from 40 where ge3 ends at 30, and nothing on
-        screen said so (see midas_gui/hydra_zarr_combine.eta_tiling_problem,
-        which now says it in the log).
+        This is the view the per-panel ones cannot give you: what the four
+        regions cover BETWEEN them, in one frame, rather than as four pairs
+        of spin boxes to hold in your head. Whether they meet, overlap or
+        leave a wedge is then something you can see -- which is a question
+        about the experiment, not about file integrity: a non-tiling set
+        merges and integrates perfectly well (see
+        hydra_zarr_combine.eta_tiling_problem).
 
         The geometry is shared, which is what makes one overlay frame legal
         here: the compositor registers every beam centre onto the canvas
@@ -1289,9 +1328,15 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._log.append(f"[combine] wrote {done}/{len(sets)} combined "
                          f"archive(s).")
         for msg in sorted(warned):
-            self._log.append(f"[combine] WARNING: {msg} — the merged eta "
-                             f"axis has a hole in it, and nothing about the "
-                             f"file's shape will show you that.")
+            # Deliberately a note, not a warning. The archive is correct:
+            # eta travels per column in REtaMap, so an uncovered wedge is
+            # absent rather than misindexed, and I vs 2θ/q/d is unaffected
+            # for every eta the file does have. The only consequence is
+            # that cake_params carries the per-panel ranges instead of one
+            # EtaMin/EtaMax span.
+            self._log.append(f"[combine] note: {msg}. Merged as usual; "
+                             f"cake_params records the per-panel eta ranges "
+                             f"rather than one span.")
 
     def _save_results(self):
         """Write every panel's already-computed lineouts to disk — mirrors
