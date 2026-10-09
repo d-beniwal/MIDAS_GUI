@@ -1187,7 +1187,32 @@ def _install_manual_axis_capture(plot_widget: "pg.PlotWidget", callback):
 #  Lab-frame axes overlay  (shared builder — see tab_view.py / tab_calibrate.py)
 # ═════════════════════════════════════════════════════════════════════════════
 
-def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> list:
+def lab_eta_screen_dir(eta_deg: float, tx: float = 0.0,
+                       x_screen_sign: float = -1.0):
+    """Unit screen direction ``(right+, up+)`` of lab azimuth ``eta_deg`` on a
+    panel rolled by ``tx`` degrees about the beam.
+
+    The η convention is ``pixel_to_REta``'s -- η=0 is +Y_Lab (MIDAS +Z),
+    straight up on an unrolled panel, and η increases towards +Y_MIDAS. A
+    roll turns the picture under the hutch, so a lab ray at η images at
+    in-plane angle η − tx; see ``helpers.pixel_eta_deg``, which records that
+    offset as measured against the backend rather than derived.
+
+    Module level, and not a closure inside
+    :func:`build_lab_frame_axes_items`, so the compass's idea of where η
+    points can be tested against ``pixel_eta_deg`` without standing up a
+    pyqtgraph view -- these two disagreeing is exactly the bug this
+    argument was added to fix.
+
+    At ``tx=0`` this is ``(sin η, cos η)``, which is what every direction in
+    the compass used to be written out as by hand.
+    """
+    a = math.radians(float(eta_deg)) - math.radians(float(tx or 0.0))
+    return (-x_screen_sign) * math.sin(a), math.cos(a)
+
+
+def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float,
+                               tx: float = 0.0) -> list:
     """MIDAS lab-frame axes overlay: X_Lab/Y_Lab compass, beam-direction
     (Z_Lab) ⊗ glyph, and an η sweep arc, anchored at (bc_y, bc_z) — lets a
     user verify orientation/ImTransOpt by checking a feature lands in the
@@ -1200,7 +1225,7 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
     **The compass is invariant to how the image is displayed.** It describes
     the hutch, not the frame: +Y_Lab (MIDAS +Z) is vertically up in the real
     world and the beam goes into the screen, whatever the user has done to the
-    picture. So the overlay always renders with +X_Lab pointing screen-left and
+    picture. So the overlay renders with +X_Lab pointing screen-left and
     +Y_Lab screen-up — including when the display origin is top-left, which
     inverts the ViewBox's Y axis and would otherwise carry the compass upside
     down with the image. That invariance is the whole point of the overlay: a
@@ -1208,6 +1233,22 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
     frame. Image transforms (Flip Y/Z, Transpose) act on the pixel data and
     never touched these directions; only the beam centre they are anchored at
     moves, which is correct.
+
+    ``tx`` is the detector's installation ROLL about the beam, in degrees,
+    and it is the one thing that genuinely does turn this compass. Rolling
+    the panel does not move the hutch, but it moves where the hutch lands in
+    the picture: a lab ray at azimuth η images at in-plane angle η − tx (the
+    relation ``helpers.pixel_eta_deg`` records as measured against the
+    backend). Drawn without it, every arrow and every η tick is a full tx
+    out — at 1-ID-E the four Hydra panels are installed at tx = 300/30/120/210,
+    so on ge1 the compass claimed η=0 was straight up when the integration
+    puts η=0 sixty degrees round from there, and the caking sector (which IS
+    tx-aware, via ``tilted_spoke_xy``) appeared to contradict the labels
+    beside it.
+
+    It defaults to 0 because most detectors are unrolled and because every
+    direction below is derived from the same helper: at tx=0 the compass is
+    exactly what it was before this argument existed.
 
     The caller must rebuild the items when the display origin changes —
     :class:`ImageViewer` emits ``originChanged`` for exactly that.
@@ -1225,6 +1266,16 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
         H = V = 1.0
     # MIDAS 'bl' convention: +Y_MIDAS (= +X_Lab) points display-left.
     x_screen_sign = -1.0
+
+    def lab_dir(eta_deg: float):
+        return lab_eta_screen_dir(eta_deg, tx, x_screen_sign)
+
+    def anchor_for(sx: float, sy: float):
+        """Anchor the label box on the edge facing the beam centre, so it
+        grows AWAY from the compass instead of straddling the arrow tip."""
+        if abs(sy) >= abs(sx):
+            return (0.5, 1.0 if sy > 0 else 0.0)
+        return (0.0 if sx > 0 else 1.0, 0.5)
 
     xl_color, yl_color, zl_color, eta_color = "#FF3B30", "#34C759", "#0A84FF", "#FFA500"
 
@@ -1286,10 +1337,13 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
         conv = [data_xy(a, b) for a, b in pts]
         return [c[0] for c in conv], [c[1] for c in conv]
 
-    # X_Lab arrow — screen-LEFT.  Y_Lab arrow — screen-UP.
-    xs, ys = shaft_with_head(x_screen_sign * L, 0.0)
+    # X_Lab (lab η=−90) and Y_Lab (lab η=0): screen-left and screen-up on an
+    # unrolled panel, turned by −tx on a rolled one.
+    xdx, xdy = lab_dir(-90.0)
+    ydx, ydy = lab_dir(0.0)
+    xs, ys = shaft_with_head(xdx * L, xdy * L)
     add(pg.PlotDataItem(xs, ys, pen=xl_pen, connect="all"))
-    xs, ys = shaft_with_head(0.0, L)
+    xs, ys = shaft_with_head(ydx * L, ydy * L)
     add(pg.PlotDataItem(xs, ys, pen=yl_pen, connect="all"))
 
     fm = QtGui.QFontMetrics(label_font)
@@ -1324,24 +1378,16 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
     # upright), so every anchor below is a plain screen-space choice — only the
     # positions go through data_xy.
     label_specs = (
-        ("h", "+X<sub>Lab</sub> (+Y<sub>MIDAS</sub>)", "+X_Lab (+Y_MIDAS)",
-         xl_color, "η=−90°"),
-        ("v", "+Y<sub>Lab</sub> (+Z<sub>MIDAS</sub>)", "+Y_Lab (+Z_MIDAS)",
-         yl_color, "η=0°"))
-    for axis_kind, html_body, _plain, axis_color, eta_label in label_specs:
+        (-90.0, max(L + head * 0.6, beam_half_w + 0.6 * line_h),
+         "+X<sub>Lab</sub> (+Y<sub>MIDAS</sub>)", xl_color, "η=−90°"),
+        (0.0, L + head * 0.35,
+         "+Y<sub>Lab</sub> (+Z<sub>MIDAS</sub>)", yl_color, "η=0°"))
+    for axis_eta, radius, html_body, axis_color, eta_label in label_specs:
         html = (f'<span style="color:{axis_color};">{html_body}</span>'
                 f'<br><span style="color:{eta_color};">{eta_label}</span>')
-        # Anchor each box on the edge facing the beam centre, so it grows
-        # *away* from the compass instead of straddling the arrow tip — that
-        # straddling is what pushed these boxes over the ⊗ glyph and the beam
-        # label at low zoom, whatever their font size.
-        if axis_kind == "h":
-            sx = x_screen_sign * max(L + head * 0.6, beam_half_w + 0.6 * line_h)
-            sy = 0.0
-            anchor = (0.0 if sx > 0 else 1.0, 0.5)
-        else:
-            sx, sy = 0.0, L + head * 0.35
-            anchor = (0.5, 1.0)          # box sits above the arrow tip
+        dx, dy = lab_dir(axis_eta)
+        sx, sy = dx * radius, dy * radius
+        anchor = anchor_for(sx, sy)
         lbl = pg.TextItem(html=html, anchor=anchor, border=text_pen, fill=text_fill)
         lbl.setFont(label_font)
         lbl.setPos(*data_xy(sx, sy))
@@ -1377,18 +1423,13 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
     # boxes above — draw only their tick marks here, not a second label.
     _eta_labeled_on_axis = {0.0, -90.0}
     for eta_deg, label in eta_marks:
-        eta_rad = math.radians(eta_deg)
-        sx = (-x_screen_sign) * math.sin(eta_rad)   # screen-right component
-        sy = math.cos(eta_rad)                       # screen-up component
+        sx, sy = lab_dir(eta_deg)
         t0 = data_xy(sx * tick_inner, sy * tick_inner)
         t1 = data_xy(sx * tick_outer, sy * tick_outer)
         add(pg.PlotDataItem([t0[0], t1[0]], [t0[1], t1[1]], pen=arc_pen))
         if eta_deg in _eta_labeled_on_axis:
             continue
-        if abs(sy) >= abs(sx):
-            anchor = (0.5, 1.0 if sy > 0 else 0.0)
-        else:
-            anchor = (0.0 if sx > 0 else 1.0, 0.5)
+        anchor = anchor_for(sx, sy)
         html = f'<span style="color:{eta_color};">{label}</span>'
         lbl = pg.TextItem(html=html, anchor=anchor, border=text_pen, fill=text_fill)
         lbl.setFont(label_font)

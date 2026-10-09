@@ -527,14 +527,21 @@ class HydraBatchPage(QtWidgets.QWidget):
         if self._lab_axes_chk.isChecked():
             self._refresh_active_detector_preview()
 
-    def _redraw_lab_axes_if_on(self, bc_y: float, bc_z: float) -> None:
+    def _redraw_lab_axes_if_on(self, bc_y: float, bc_z: float,
+                               tx: float = 0.0) -> None:
+        """``tx`` is the panel's installation roll. Without it the compass
+        puts η=0 straight up on a panel whose η=0 is a full tx round from
+        there -- and at 1-ID-E the four Hydra panels are rolled 300/30/120/
+        210, so all four read wrong, each by a different amount, while the
+        caking sector beside them (tx-aware) was right."""
         if not self._lab_axes_chk.isChecked():
             return
         self._clear_lab_axes()
         img = self._det_view._data
         if img is None:
             return
-        items = build_lab_frame_axes_items(self._det_view._iv, img.shape, bc_y, bc_z)
+        items = build_lab_frame_axes_items(self._det_view._iv, img.shape,
+                                           bc_y, bc_z, tx=tx)
         for it in items:
             self._det_view._iv.addItem(it)
         self._axis_items.extend(items)
@@ -887,7 +894,8 @@ class HydraBatchPage(QtWidgets.QWidget):
             tx=fields.get("tx") or 0.0, ty=fields.get("ty") or 0.0,
             tz=fields.get("tz") or 0.0, lsd_um=fields.get("Lsd"),
             pxY_um=fields.get("pxY"), pxZ_um=fields.get("pxZ"))
-        self._redraw_lab_axes_if_on(fields["BC_y"], fields["BC_z"])
+        self._redraw_lab_axes_if_on(fields["BC_y"], fields["BC_z"],
+                                    tx=fields.get("tx") or 0.0)
 
     # ── Run ────────────────────────────────────────────────────────
 

@@ -789,7 +789,8 @@ class HydraViewerPage(QtWidgets.QWidget):
         if bcy is None or bcz is None:
             return
         items = build_lab_frame_axes_items(
-            self._viewer._iv, img.shape, float(bcy), float(bcz))
+            self._viewer._iv, img.shape, float(bcy), float(bcz),
+            tx=float(geo.get("tx") or 0.0))
         for it in items:
             self._viewer._iv.addItem(it)
         self._axis_items.extend(items)
