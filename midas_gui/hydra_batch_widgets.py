@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets
 
 from midas_gui.helpers import (
     _browse, _build_spec, spec_from_geometry_file, resolve_calibration_fields,
@@ -37,6 +37,112 @@ from midas_gui.helpers import (
     rmax_corner_px, rmax_edge_px)
 from midas_gui.hydra_widgets import panel_color
 from midas_gui import style as S
+
+
+class HydraCakingSummary(QtWidgets.QWidget):
+    """All four panels' caking in one table, plus the azimuth they add up to.
+
+    Asked for at 1-ID-E: "I cannot see the ge1-ge4 caking parameters in one
+    show like the mpe_wf_saxs_waxs." Selecting Composite used to leave
+    whichever panel's card was last open, so the one view that is ABOUT all
+    four panels showed the numbers for exactly one of them.
+
+    Read-only on purpose. The six spin boxes on each panel's card stay the
+    single source of truth -- a second set of editable fields over the same
+    values is a synchronisation bug waiting to be written, and this table's
+    job is to let you compare four panels at a glance, which editing does
+    not help with.
+
+    The coverage line is the point of putting them side by side. Four panels
+    that each look reasonable alone can still fail to pave the azimuth
+    between them, and that is invisible one card at a time: connolly_oct26
+    integrated and merged a 10 deg hole (ge4 caked from 40 where ge3 ends at
+    30) with nothing on screen to say so.
+    """
+
+    #: Columns, in cake_parameters CSV order.
+    COLS = (("R_MIN", "Rmin"), ("R_MAX", "Rmax"), ("R_STEP", "R bin"),
+            ("ETA_MIN", "ηmin"), ("ETA_MAX", "ηmax"), ("ETA_STEP", "η bin"))
+
+    def __init__(self, panels=(1, 2, 3, 4), parent=None):
+        super().__init__(parent)
+        self._panels = tuple(panels)
+        lv = QtWidgets.QVBoxLayout(self)
+        lv.setContentsMargins(0, 0, 0, 0)
+        card = S.make_card("ge1–ge4 — caking (all panels)")
+        self._table = QtWidgets.QTableWidget(len(self._panels),
+                                             len(self.COLS) + 1)
+        self._table.setHorizontalHeaderLabels(
+            ["panel"] + [lbl for _k, lbl in self.COLS])
+        self._table.verticalHeader().setVisible(False)
+        self._table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self._table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self._table.setAlternatingRowColors(True)
+        hh = self._table.horizontalHeader()
+        hh.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+        hh.setStretchLastSection(True)
+        # Four rows and no scrolling: the table is a readout, not a list.
+        self._table.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self._table.setSizePolicy(QtWidgets.QSizePolicy.Preferred,
+                                  QtWidgets.QSizePolicy.Fixed)
+        card.body.addWidget(self._table)
+        self._coverage = QtWidgets.QLabel("")
+        self._coverage.setWordWrap(True)
+        card.body.addWidget(self._coverage)
+        lv.addWidget(card)
+        lv.addStretch(1)
+
+    def _fit_height(self) -> None:
+        h = self._table.horizontalHeader().height() + 2
+        for r in range(self._table.rowCount()):
+            h += self._table.rowHeight(r)
+        self._table.setFixedHeight(h)
+
+    def refresh(self, cakes: dict, *, missing=()) -> None:
+        """``cakes`` maps panel number -> that panel's six values.
+
+        ``missing`` names panels the compositor left out for want of a
+        calibration; they are shown greyed rather than dropped, so the table
+        never silently becomes a three-panel table.
+        """
+        for row, n in enumerate(self._panels):
+            colour = panel_color(n)
+            head = QtWidgets.QTableWidgetItem(f"ge{n}")
+            head.setForeground(QtGui.QColor(colour))
+            if n in missing:
+                head.setText(f"ge{n} (not on canvas)")
+            self._table.setItem(row, 0, head)
+            cake = cakes.get(n) or {}
+            for col, (key, _lbl) in enumerate(self.COLS, start=1):
+                v = cake.get(key)
+                txt = "—" if v is None else (
+                    f"{v:g}" if key.startswith("ETA") else f"{v:g}")
+                item = QtWidgets.QTableWidgetItem(txt)
+                item.setTextAlignment(QtCore.Qt.AlignRight
+                                      | QtCore.Qt.AlignVCenter)
+                self._table.setItem(row, col, item)
+        self._fit_height()
+        self._coverage.setText(self._coverage_text(cakes))
+
+    def _coverage_text(self, cakes: dict) -> str:
+        """One sentence on whether the four sectors pave the azimuth."""
+        from midas_gui.hydra_zarr_combine import eta_tiling_problem
+        per = {f"ge{n}": {"EtaMin": c.get("ETA_MIN"),
+                          "EtaMax": c.get("ETA_MAX")}
+               for n, c in sorted((cakes or {}).items()) if c}
+        order = sorted(per)
+        if len(order) < 2:
+            return ""
+        total = sum(per[p]["EtaMax"] - per[p]["EtaMin"] for p in order)
+        problem = eta_tiling_problem(per, order)
+        if problem:
+            self._coverage.setStyleSheet("color:#FFA500;font-size:11px")
+            return (f"⚠ {problem}. Total azimuth {total:g}° across "
+                    f"{len(order)} panels — the merged zarr's eta axis will "
+                    f"have a hole in it that its shape will not show.")
+        self._coverage.setStyleSheet("color:#34C759;font-size:11px")
+        return (f"Panels tile edge to edge; total azimuth {total:g}° across "
+                f"{len(order)} panels.")
 
 
 class HydraBatchPanelCard(QtWidgets.QWidget):
