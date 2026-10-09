@@ -46,6 +46,7 @@ from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
 from midas_gui.hydra_widgets import (HydraLoaderPanel, HydraDetectorToolbar,
                                      panel_color)
 from midas_gui.hydra_batch_widgets import HydraBatchPanelCard
+from midas_gui import hydra_zarr_combine
 from midas_gui.workers import BatchRunCoordinator, write_all_profiles
 from midas_gui import cake_params
 from midas_gui import hydra
@@ -270,6 +271,21 @@ class HydraBatchPage(QtWidgets.QWidget):
         out.body.addLayout(S.Form().row(("Folder:", orow)))
         self._fmt = OutputFormatSelector()
         out.body.addWidget(self._fmt)
+        self._combine_zarr_chk = QtWidgets.QCheckBox(
+            "Combine panels into one zarr (eta-concatenated)")
+        self._combine_zarr_chk.setChecked(True)
+        self._combine_zarr_chk.setToolTip(
+            "After every panel finishes, merge each frame's four per-panel "
+            "zarr archives into one, concatenated along eta — the same "
+            "archive mpe_wf_saxs_waxs's combine_hydra_zarr.py produces "
+            "(ported; see midas_gui/hydra_zarr_combine.py).\n\n"
+            "Written beside the ge1 archive it came from, with the panel "
+            "token replaced: <froot>_<NNNNNN>.ge1.zarr.zip becomes "
+            "<froot>_<NNNNNN>.ge1234.zarr.zip.\n\n"
+            "Needs Zarr among the output formats and an Output folder. A "
+            "frame any panel did not write is skipped rather than merged "
+            "from a partial set, which would be silently short on eta.")
+        out.body.addWidget(self._combine_zarr_chk)
         lv.addWidget(out)
 
         # Run controls — two independent levels of parallelism:
@@ -1085,6 +1101,56 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._save_btn.setEnabled(bool(self._last_results))
         self._prog.setVisible(False)
         self._log.append("Hydra batch integration run complete.")
+        self._combine_panel_zarrs_if_wanted()
+
+    def _combine_panel_zarrs_if_wanted(self) -> None:
+        """Merge each frame's four per-panel zarrs into one, eta-concatenated.
+
+        Runs after every panel is done, because it needs all four. Synchronous
+        on the GUI thread: it is pure array concatenation over archives that
+        were just written, and it only runs once per run rather than per
+        frame. Any failure is reported per frame and does not stop the rest --
+        a bad frame should not cost the run its other output.
+        """
+        if not getattr(self, "_combine_zarr_chk", None) \
+                or not self._combine_zarr_chk.isChecked():
+            return
+        if "zarr" not in (self._fmt.checked_keys() or []):
+            return
+        out_dir = self._out_ed.text().strip()
+        if not out_dir:
+            return
+        panels = sorted(self._cards)
+        if len(panels) < 2:
+            return
+        try:
+            sets = hydra_zarr_combine.find_panel_zarr_sets(
+                out_dir, [f"ge{n}" for n in panels])
+        except Exception as exc:
+            self._log.append(f"[combine] could not scan for panel zarrs: {exc}")
+            return
+        if not sets:
+            self._log.append(
+                "[combine] no frame had an archive from every panel — "
+                "nothing to combine.")
+            return
+        self._log.append(f"[combine] merging {len(sets)} frame(s) across "
+                         f"{len(panels)} panels…")
+        done = 0
+        for group in sets:
+            try:
+                out = hydra_zarr_combine.combine_panel_zarrs(
+                    group,
+                    hydra_zarr_combine.default_combined_path(group, out_dir))
+            except Exception as exc:
+                self._log.append(
+                    f"[combine] {Path(group[sorted(group)[0]]).name}: {exc}")
+                continue
+            done += 1
+            if done == 1 or done == len(sets):
+                self._log.append(f"[combine]   → {out}")
+        self._log.append(f"[combine] wrote {done}/{len(sets)} combined "
+                         f"archive(s).")
 
     def _save_results(self):
         """Write every panel's already-computed lineouts to disk — mirrors
