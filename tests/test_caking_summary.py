@@ -1,13 +1,16 @@
-"""All four panels' caking in one table, with a verdict on the azimuth.
+"""All four panels' caking in one editable table, plus their total azimuth.
 
 Asked for at 1-ID-E: "I cannot see the ge1-ge4 caking parameters in one show
-like the mpe_wf_saxs_waxs." Selecting Composite held whichever panel's card
-was last open, so the view that is ABOUT all four panels showed one.
+like the mpe_wf_saxs_waxs", then "let's make this editable."
 
-The coverage line is the part that earns the widget. Four panels can each
-look fine alone and still leave a wedge nobody integrates -- connolly_oct26
-shipped a merged zarr with a 10 deg hole in it (ge4 caked from 40 where ge3
-ends at 30), and no single card could have shown that.
+The coverage line is a readout, not a verdict. A non-tiling set still merges
+and integrates correctly -- the merge concatenates and REtaMap carries every
+column's own eta -- so these tests pin that it is reported WITHOUT claiming
+anything is broken.
+
+Editing does not store a value here: the cell emits cakingEdited and the
+page applies it to that panel's spin box, which clamps. These tests cover
+the emitting half; the clamping half belongs to the card.
 """
 from __future__ import annotations
 
@@ -62,7 +65,18 @@ def test_the_gap_is_named_not_merely_totalled(Summary):
     w.refresh(GAPPED)
     txt = w._coverage.text()
     assert "10 deg gap" in txt and "ge3" in txt and "ge4" in txt
-    assert "350" in txt, "the total azimuth is part of the verdict"
+    assert "350" in txt, "the total azimuth is part of the readout"
+
+
+def test_a_gap_is_reported_without_claiming_anything_is_broken(Summary):
+    """The merge concatenates and REtaMap carries each column's eta, so an
+    uncovered wedge is absent rather than wrong."""
+    w = Summary()
+    w.refresh(GAPPED)
+    txt = w._coverage.text().lower()
+    assert "unaffected" in txt
+    for alarm in ("⚠", "hole", "warning", "error", "wrong"):
+        assert alarm not in txt
 
 
 def test_a_tiling_set_reports_a_full_turn_and_no_warning(Summary):
@@ -70,7 +84,7 @@ def test_a_tiling_set_reports_a_full_turn_and_no_warning(Summary):
     w.refresh(TILED)
     txt = w._coverage.text()
     assert "360" in txt and "tile" in txt
-    assert "gap" not in txt and "⚠" not in txt
+    assert "gap" not in txt
 
 
 def test_the_warning_and_the_all_clear_are_told_apart_by_colour(Summary):
@@ -104,6 +118,62 @@ def test_a_panel_with_no_caking_shows_a_dash_rather_than_a_zero(Summary):
     w = Summary()
     w.refresh({1: _cake(120.0, 210.0)})
     assert _texts(w)[1][1] == "—"
+
+
+# ── editing ─────────────────────────────────────────────────────────────
+def _edit(w, row, col, text):
+    w._table.item(row, col).setText(text)
+
+
+def test_an_edited_cell_is_forwarded_as_panel_key_value(Summary):
+    w = Summary()
+    w.refresh(GAPPED)
+    seen = []
+    w.cakingEdited.connect(lambda n, k, v: seen.append((n, k, v)))
+    _edit(w, 3, 4, "30")                      # ge4 row, ηmin column
+    assert seen == [(4, "ETA_MIN", 30.0)]
+
+
+def test_repainting_the_table_is_not_mistaken_for_an_edit(Summary):
+    """refresh writes every cell; without the guard each write would read
+    as a user edit and loop straight back through the card."""
+    w = Summary()
+    w.refresh(GAPPED)
+    seen = []
+    w.cakingEdited.connect(lambda *a: seen.append(a))
+    w.refresh(TILED)
+    assert seen == []
+
+
+def test_text_that_is_not_a_number_is_restored_not_forwarded(Summary):
+    w = Summary()
+    w.refresh(GAPPED)
+    seen = []
+    w.cakingEdited.connect(lambda *a: seen.append(a))
+    _edit(w, 0, 1, "banana")
+    assert seen == []
+    assert w._table.item(0, 1).text() == "440", "the last painted value is back"
+
+
+def test_the_panel_name_column_cannot_be_edited(Summary):
+    from PyQt5 import QtCore
+    w = Summary()
+    w.refresh(GAPPED)
+    assert not (w._table.item(0, 0).flags() & QtCore.Qt.ItemIsEditable)
+
+
+def test_a_cell_with_no_value_behind_it_cannot_be_edited(Summary):
+    from PyQt5 import QtCore
+    w = Summary()
+    w.refresh({1: _cake(120.0, 210.0)})
+    assert not (w._table.item(1, 1).flags() & QtCore.Qt.ItemIsEditable)
+
+
+def test_a_value_cell_can_be_edited(Summary):
+    from PyQt5 import QtCore
+    w = Summary()
+    w.refresh(GAPPED)
+    assert w._table.item(0, 1).flags() & QtCore.Qt.ItemIsEditable
 
 
 def test_one_panel_alone_gets_no_coverage_verdict(Summary):

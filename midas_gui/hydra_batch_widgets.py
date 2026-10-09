@@ -40,25 +40,41 @@ from midas_gui import style as S
 
 
 class HydraCakingSummary(QtWidgets.QWidget):
-    """All four panels' caking in one table, plus the azimuth they add up to.
+    """All four panels' caking in one editable table, plus their total azimuth.
 
     Asked for at 1-ID-E: "I cannot see the ge1-ge4 caking parameters in one
     show like the mpe_wf_saxs_waxs." Selecting Composite used to leave
     whichever panel's card was last open, so the one view that is ABOUT all
     four panels showed the numbers for exactly one of them.
 
-    Read-only on purpose. The six spin boxes on each panel's card stay the
-    single source of truth -- a second set of editable fields over the same
-    values is a synchronisation bug waiting to be written, and this table's
-    job is to let you compare four panels at a glance, which editing does
-    not help with.
+    Editable. It was read-only first, on the reasoning that the per-panel
+    spin boxes should stay the single source of truth; they still are. This
+    table does not hold a value of its own -- an edit is forwarded as
+    ``cakingEdited`` and APPLIED TO THE PANEL'S SPIN BOX, which then clamps
+    it to that field's real range and emits ``cakingChanged`` like any other
+    edit. The table is repainted from the cards afterwards, so what you read
+    back is what the card accepted, not what you typed: enter 500 in an
+    η bin and the cell settles at 360.
 
-    The coverage line is the point of putting them side by side. Four panels
-    that each look reasonable alone can still fail to pave the azimuth
-    between them, and that is invisible one card at a time: connolly_oct26
-    integrated and merged a 10 deg hole (ge4 caked from 40 where ge3 ends at
-    30) with nothing on screen to say so.
+    That round trip is the whole design. The alternative -- a second set of
+    fields holding their own copy -- is the synchronisation bug the
+    read-only version was avoiding, and forwarding avoids it just as well
+    while still letting you fix a gap in the row that shows it to you.
+
+    The coverage line is the point of putting them side by side: what the
+    four panels cover BETWEEN them is invisible one card at a time. It is a
+    readout, not a verdict -- a set that does not tile is not an error. The
+    merge concatenates and REtaMap carries each column's own eta, so an
+    uncovered wedge is absent rather than wrong, I against 2theta/q/d is
+    unaffected for every eta present, and the gap may be exactly what the
+    geometry calls for. The one thing it rules out is summarising the result
+    with a single EtaMin/EtaMax pair.
     """
+
+    #: One panel's caking field was edited here: (panel, CAKE_KEY, value).
+    #: The PAGE applies it to that panel's card -- the same division of
+    #: labour as cakeLoadRequested, and what keeps the card authoritative.
+    cakingEdited = QtCore.pyqtSignal(int, str, float)
 
     #: Columns, in cake_parameters CSV order.
     COLS = (("R_MIN", "Rmin"), ("R_MAX", "Rmax"), ("R_STEP", "R bin"),
@@ -67,6 +83,8 @@ class HydraCakingSummary(QtWidgets.QWidget):
     def __init__(self, panels=(1, 2, 3, 4), parent=None):
         super().__init__(parent)
         self._panels = tuple(panels)
+        #: Last painted text per cell, so a non-numeric edit can be undone.
+        self._shown: dict = {}
         lv = QtWidgets.QVBoxLayout(self)
         lv.setContentsMargins(0, 0, 0, 0)
         card = S.make_card("ge1–ge4 — caking (all panels)")
@@ -75,8 +93,21 @@ class HydraCakingSummary(QtWidgets.QWidget):
         self._table.setHorizontalHeaderLabels(
             ["panel"] + [lbl for _k, lbl in self.COLS])
         self._table.verticalHeader().setVisible(False)
-        self._table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self._table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self._table.setEditTriggers(
+            QtWidgets.QAbstractItemView.DoubleClicked
+            | QtWidgets.QAbstractItemView.EditKeyPressed
+            | QtWidgets.QAbstractItemView.AnyKeyPressed)
+        self._table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectItems)
+        self._table.setToolTip(
+            "Double-click a value to edit it. The edit is applied to that "
+            "panel's own caking field, which clamps it to that field's "
+            "range — so the cell may settle on a different number than you "
+            "typed.")
+        # Repopulation writes items, which emits itemChanged; without this
+        # guard every refresh would read as a user edit and loop back
+        # through the card.
+        self._loading = False
+        self._table.itemChanged.connect(self._on_item_changed)
         self._table.setAlternatingRowColors(True)
         hh = self._table.horizontalHeader()
         hh.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
@@ -86,17 +117,54 @@ class HydraCakingSummary(QtWidgets.QWidget):
         self._table.setSizePolicy(QtWidgets.QSizePolicy.Preferred,
                                   QtWidgets.QSizePolicy.Fixed)
         card.body.addWidget(self._table)
+        self._cake_extras = QtWidgets.QVBoxLayout()
+        self._cake_extras.setContentsMargins(0, 0, 0, 0)
+        card.body.addLayout(self._cake_extras)
         self._coverage = QtWidgets.QLabel("")
         self._coverage.setWordWrap(True)
         card.body.addWidget(self._coverage)
         lv.addWidget(card)
         lv.addStretch(1)
 
+    def cake_extras_layout(self):
+        """Same contract as HydraBatchPanelCard's -- the bin-grid toggle
+        follows the visible caking card, and this is a caking card."""
+        return self._cake_extras
+
     def _fit_height(self) -> None:
         h = self._table.horizontalHeader().height() + 2
         for r in range(self._table.rowCount()):
             h += self._table.rowHeight(r)
         self._table.setFixedHeight(h)
+
+    def _on_item_changed(self, item) -> None:
+        """Forward a committed cell edit to the panel that owns it.
+
+        A value the field cannot take is not rejected here: it is handed to
+        the spin box, which clamps, and the resulting repaint shows what was
+        actually taken. Text that is not a number at all is a typo rather
+        than a value, so the cell is simply restored.
+        """
+        if self._loading:
+            return
+        row, col = item.row(), item.column()
+        if col == 0 or row >= len(self._panels):
+            return
+        try:
+            value = float(item.text().strip())
+        except (TypeError, ValueError):
+            self._restore(row, col)
+            return
+        key = self.COLS[col - 1][0]
+        self.cakingEdited.emit(self._panels[row], key, value)
+
+    def _restore(self, row: int, col: int) -> None:
+        """Put back the last value this table was painted with."""
+        self._loading = True
+        try:
+            self._table.item(row, col).setText(self._shown.get((row, col), "—"))
+        finally:
+            self._loading = False
 
     def refresh(self, cakes: dict, *, missing=()) -> None:
         """``cakes`` maps panel number -> that panel's six values.
@@ -105,12 +173,22 @@ class HydraCakingSummary(QtWidgets.QWidget):
         calibration; they are shown greyed rather than dropped, so the table
         never silently becomes a three-panel table.
         """
+        self._loading = True
+        try:
+            self._repaint(cakes, missing)
+        finally:
+            self._loading = False
+        self._fit_height()
+        self._coverage.setText(self._coverage_text(cakes))
+
+    def _repaint(self, cakes: dict, missing) -> None:
         for row, n in enumerate(self._panels):
             colour = panel_color(n)
             head = QtWidgets.QTableWidgetItem(f"ge{n}")
             head.setForeground(QtGui.QColor(colour))
             if n in missing:
                 head.setText(f"ge{n} (not on canvas)")
+            head.setFlags(head.flags() & ~QtCore.Qt.ItemIsEditable)
             self._table.setItem(row, 0, head)
             cake = cakes.get(n) or {}
             for col, (key, _lbl) in enumerate(self.COLS, start=1):
@@ -120,9 +198,12 @@ class HydraCakingSummary(QtWidgets.QWidget):
                 item = QtWidgets.QTableWidgetItem(txt)
                 item.setTextAlignment(QtCore.Qt.AlignRight
                                       | QtCore.Qt.AlignVCenter)
+                if v is None:
+                    # No caking to edit: a panel with no card behind it has
+                    # nothing to forward an edit to.
+                    item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable)
                 self._table.setItem(row, col, item)
-        self._fit_height()
-        self._coverage.setText(self._coverage_text(cakes))
+                self._shown[(row, col)] = txt
 
     def _coverage_text(self, cakes: dict) -> str:
         """One sentence on whether the four sectors pave the azimuth."""
@@ -136,10 +217,12 @@ class HydraCakingSummary(QtWidgets.QWidget):
         total = sum(per[p]["EtaMax"] - per[p]["EtaMin"] for p in order)
         problem = eta_tiling_problem(per, order)
         if problem:
-            self._coverage.setStyleSheet("color:#FFA500;font-size:11px")
-            return (f"⚠ {problem}. Total azimuth {total:g}° across "
-                    f"{len(order)} panels — the merged zarr's eta axis will "
-                    f"have a hole in it that its shape will not show.")
+            # Informational blue, not warning orange: nothing is broken.
+            self._coverage.setStyleSheet("color:#8AB4F8;font-size:11px")
+            return (f"{problem}. Total azimuth {total:g}° across "
+                    f"{len(order)} panels — integration and the combined "
+                    f"zarr are unaffected (eta travels per column); "
+                    f"cake_params just records the per-panel ranges.")
         self._coverage.setStyleSheet("color:#34C759;font-size:11px")
         return (f"Panels tile edge to edge; total azimuth {total:g}° across "
                 f"{len(order)} panels.")
@@ -207,7 +290,7 @@ class HydraBatchPanelCard(QtWidgets.QWidget):
         # ── Caking (this panel only) ──
         n = self.panel_number
         colour = panel_color(n)
-        cake = S.make_card(f"ge{n} — caking")
+        cake = self._cake_card = S.make_card(f"ge{n} — caking")
         # The colour is the same one this panel's radial curve and its
         # overlay use, so the card, the plot and the picture agree about
         # which panel is which without reading a label.
@@ -259,7 +342,7 @@ class HydraBatchPanelCard(QtWidgets.QWidget):
             "a blank cell into a ValueError.")
         save_btn.clicked.connect(lambda: self.cakeSaveRequested.emit(self.panel_number))
         csv_row.addWidget(load_btn); csv_row.addWidget(save_btn); csv_row.addStretch(1)
-        cake.body.addLayout(csv_row)
+        cake.body.addLayout(csv_row)   # after the extras slot below
         # Which file these numbers came from. Without it the six spin boxes
         # look identical whether they were loaded from a workflow CSV, typed
         # by hand, or left at defaults -- and the run is driven by whatever
@@ -275,6 +358,11 @@ class HydraBatchPanelCard(QtWidgets.QWidget):
             w.valueChanged.connect(lambda *_: self.cakingChanged.emit(self.panel_number))
             w.valueChanged.connect(self._mark_cake_edited)
         lv.addWidget(cake)
+        #: Where the page parks the shared "Show bin grid" toggle while this
+        #: card is the visible one -- see HydraBatchPage._place_grid_toggle.
+        self._cake_extras = QtWidgets.QVBoxLayout()
+        self._cake_extras.setContentsMargins(0, 0, 0, 0)
+        cake.body.addLayout(self._cake_extras)
 
         # ── Run progress (this panel only) ──
         prog_card = S.make_card(f"ge{self.panel_number} — progress")
@@ -286,6 +374,12 @@ class HydraBatchPanelCard(QtWidgets.QWidget):
         lv.addWidget(prog_card)
 
         lv.addStretch(1)
+
+    def cake_extras_layout(self):
+        """Layout inside this panel's caking card for page-level widgets
+        that belong WITH the caking values rather than with the shared
+        processing recipe -- currently just the bin-grid toggle."""
+        return self._cake_extras
 
     @staticmethod
     def _colour_key_label(colour: str, n: int) -> QtWidgets.QLabel:

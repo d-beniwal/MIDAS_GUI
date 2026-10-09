@@ -223,13 +223,23 @@ def eta_tiling_problem(per_panel: dict, panels, tol: float = 1e-6):
     """``None`` if the panels' eta ranges tile edge to edge in PANEL ORDER,
     else a sentence naming the first gap or overlap.
 
-    Hydra's panels are meant to pave the azimuth: each one's EtaMax is the
-    next one's EtaMin, modulo the 360 deg wrap that makes ge1's 210 and ge2's
-    -150 the same ray. When they do, the merged eta axis is one continuous
-    sweep. When they do not, the concatenated axis has a hole in it that
-    NOTHING about the file's shape reveals -- the columns simply close over
-    the missing wedge, and a plot of intensity against column index looks
-    perfectly healthy -- so it is worth saying out loud.
+    Hydra's panels usually pave the azimuth: each one's EtaMax is the next
+    one's EtaMin, modulo the 360 deg wrap that makes ge1's 210 and ge2's
+    -150 the same ray.
+
+    A set that does NOT tile is not an error and does not make the merged
+    archive wrong. The merge is a concatenation, and every column's eta
+    travels with it in REtaMap, so an uncovered wedge is simply ABSENT --
+    not misindexed, not shifted. I against 2theta/q/d for each eta the file
+    does have is exactly as correct as it would be with a full turn, and a
+    gap may be entirely deliberate (a panel's real coverage, a masked
+    region).
+
+    What it does rule out is describing the result with ONE (EtaMin, EtaMax)
+    pair, which is the only reason this is computed: such a pair would
+    assert a continuous sweep the file does not contain. Callers use it to
+    decide whether that summary is sayable, and to mention the discontinuity
+    in passing -- not to refuse anything.
     """
     spans = []
     for p in panels:
@@ -294,7 +304,10 @@ def _aggregate_cake_params(per_panel: dict, panels) -> Optional[dict]:
             continue
         if lo_k.lower().startswith("eta"):
             if broken:
-                continue           # saying -150..210 of a file with a hole
+                # One pair cannot describe a wrapped or gapped sweep. The
+                # exact per-panel ranges are kept in the merge entry's
+                # extra.cake_params_per_panel, which loses nothing.
+                continue
             out[lo_k], out[hi_k] = _merged_eta_span(per_panel, panels)
         else:
             out[lo_k], out[hi_k] = min(los), max(his)
@@ -349,8 +362,8 @@ def _merge_provenance(root, zs, panels, paths, out_path):
     append this merge. Four streams stay distinguishable rather than one
     overwriting the others.
 
-    Returns the eta-tiling problem, if any, so the caller can say it out loud
-    -- it is recorded in the merge entry either way, but a line in the file's
+    Returns the eta-tiling note, if any, so the caller can mention it -- it
+    is recorded in the merge entry either way, but a line in the file's
     attributes is not something anyone reads at the beamline.
     """
     merged, per_cake, per_instr = [], {}, {}
@@ -391,11 +404,11 @@ def combine_panel_zarrs(panel_paths: dict, out_path=None, warn=None) -> Path:
     Raises ``ValueError`` naming the first disagreement, before writing
     anything, so a half-merged archive is never left behind.
 
-    ``warn`` is an optional ``str -> None`` sink for things that are worth a
-    human's attention but are not grounds to refuse the merge -- eta ranges
-    that do not tile being the one that matters. The archive is still written:
-    the panels' caking is the user's to set, and a file with a known hole in
-    its azimuth is more useful than no file plus an exception.
+    ``warn`` is an optional ``str -> None`` sink for remarks about the
+    result -- currently only that the panels' eta ranges do not tile. That
+    is a note, not a defect: see :func:`eta_tiling_problem` for why a
+    non-contiguous set still merges correctly. Nothing here refuses a merge
+    over it.
     """
     import zarr
     panels = sorted(panel_paths)
