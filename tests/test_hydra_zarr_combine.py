@@ -25,16 +25,30 @@ NR, NETA, NFRAMES = 7, 3, 2
 MPE_WF = Path("/home/beams3/PARKJS/opt/mpe_wf_saxs_waxs/combine_hydra_zarr.py")
 
 
-def _panel_zarr(path, panel, *, with_ir=True, n_eta=NETA, n_r=NR, omegas=None):
+#: The windmill tiling a real Hydra run writes, panel by panel: four 90 deg
+#: sectors that meet edge to edge, ge1's 210 being ge2's -150 once wrapped.
+#: The ORIGINAL fixture here invented ``ETA_MIN``/``ETA_MAX`` keys and gave
+#: the four panels nested ranges (-10..10, -20..20, ...) that tile nothing.
+#: Both mistakes hid a live bug: the aggregation keyed off a ``_MIN`` suffix
+#: no writer in this app emits, so on real archives it never ran at all.
+#: Fixtures now use the spelling and the geometry that real files have.
+PANEL_ETA = {"ge1": (120.0, 210.0), "ge2": (-150.0, -60.0),
+             "ge3": (-60.0, 30.0), "ge4": (30.0, 120.0)}
+
+
+def _panel_zarr(path, panel, *, with_ir=True, n_eta=NETA, n_r=NR, omegas=None,
+                eta=None):
     """One synthetic panel archive in the layout the combiner expects."""
     idx = int(panel[2:])
+    eta_lo, eta_hi = eta if eta is not None else PANEL_ETA[panel]
     store = zarr.ZipStore(str(path), mode="w")
     root = zarr.group(store)
     root.attrs.put({"source": "test", "provenance_history": [
-        {"tool": "integrate", "cake_params": {"ETA_MIN": -10.0 * idx,
-                                              "ETA_MAX": 10.0 * idx,
-                                              "R_MIN": 5.0, "R_MAX": 900.0,
-                                              "R_STEP": 1.0}}]})
+        {"tool": "integrate", "cake_params": {"EtaMin": eta_lo,
+                                              "EtaMax": eta_hi,
+                                              "EtaBinSize": 10.0,
+                                              "RMin": 5.0, "RMax": 900.0,
+                                              "RBinSize": 1.0}}]})
     root.create_dataset("Omegas",
                         data=np.arange(NFRAMES, dtype=float) if omegas is None
                         else np.asarray(omegas, dtype=float))
@@ -129,12 +143,62 @@ def test_every_panels_history_is_carried_forward_and_tagged(panels, tmp_path):
     assert hist[-1]["tool"] == "midas_gui.hydra_zarr_combine"
 
 
-def test_the_merge_entry_spans_every_panels_eta_range(panels, tmp_path):
-    """The merged file really does cover -40..40, so saying so is honest."""
+def test_the_merge_entry_spans_the_sweep_the_file_actually_covers(panels,
+                                                                  tmp_path):
+    """Four tiling 90 deg panels make one 360 deg sweep, and it runs PAST
+    180: the axis is 120 -> 480, not the last panel's EtaMax of 120."""
     got = _read(combine_panel_zarrs(panels, tmp_path / "m.zarr.zip"))
     cake = got["attrs"]["provenance_history"][-1]["cake_params"]
-    assert cake["ETA_MIN"] == -40.0 and cake["ETA_MAX"] == 40.0
-    assert cake["R_STEP"] == 1.0, "a value all panels agree on is carried through"
+    assert (cake["EtaMin"], cake["EtaMax"]) == (120.0, 480.0)
+    assert cake["RMin"] == 5.0 and cake["RMax"] == 900.0
+    assert cake["RBinSize"] == 1.0, "a value all panels agree on carries through"
+    assert got["attrs"]["provenance_history"][-1]["extra"][
+        "eta_tiling_problem"] is None
+
+
+def test_a_gap_in_the_tiling_drops_the_eta_span_and_is_reported(tmp_path):
+    """connolly_oct26 ge1234, exactly: ge4 was caked from 40 where ge3 ends
+    at 30, so the merged archive is one 10 deg bin short of a full turn --
+    35 eta columns, not 36. Nothing about a (3520, 35) array says so, and
+    reporting EtaMin=-150/EtaMax=210 would actively assert the hole is not
+    there. The span is dropped and the gap named instead."""
+    paths, seen = {}, []
+    for p in PANELS:
+        lo, hi = PANEL_ETA[p]
+        if p == "ge4":
+            lo = 40.0                       # the typo, one bin too high
+        paths[p] = str(_panel_zarr(tmp_path / f"s_000001.{p}.zarr.zip", p,
+                                   eta=(lo, hi)))
+    out = combine_panel_zarrs(paths, tmp_path / "m.zarr.zip",
+                              warn=seen.append)
+    cake = _read(out)["attrs"]["provenance_history"][-1]["cake_params"]
+    assert "EtaMin" not in cake and "EtaMax" not in cake
+    assert cake["RMin"] == 5.0, "R is unaffected -- it does not wrap"
+    assert len(seen) == 1
+    assert "10 deg gap" in seen[0] and "ge3" in seen[0] and "ge4" in seen[0]
+
+
+def test_an_overlap_is_caught_as_well_as_a_gap(tmp_path):
+    paths, seen = {}, []
+    for p in PANELS:
+        lo, hi = PANEL_ETA[p]
+        if p == "ge4":
+            lo = 10.0                       # 20 deg back over ge3
+        paths[p] = str(_panel_zarr(tmp_path / f"s_000001.{p}.zarr.zip", p,
+                                   eta=(lo, hi)))
+    combine_panel_zarrs(paths, tmp_path / "m.zarr.zip", warn=seen.append)
+    assert len(seen) == 1 and "20 deg overlap" in seen[0]
+
+
+def test_a_non_tiling_set_is_still_written(tmp_path):
+    """A hole is the user's caking to fix; refusing to write would cost them
+    the other 350 degrees they did ask for."""
+    paths = {p: str(_panel_zarr(tmp_path / f"s_000001.{p}.zarr.zip", p,
+                                eta=(40.0, 120.0) if p == "ge4"
+                                else PANEL_ETA[p]))
+             for p in PANELS}
+    out = combine_panel_zarrs(paths, tmp_path / "m.zarr.zip")
+    assert Path(out).is_file(), "no warn sink must not mean no archive"
 
 
 # ── validation refuses before writing ────────────────────────────────────

@@ -73,7 +73,8 @@ def default_combined_path(panel_paths: dict, out_dir=None) -> Optional[Path]:
     panels = sorted(panel_paths)
     first = Path(panel_paths[panels[0]])
     tag = build_panel_tag(panels)
-    name = (first.name.replace(panels[0], tag, 1) if panels[0] in first.name
+    tok = f".{panels[0]}."
+    name = (first.name.replace(tok, f".{tag}.", 1) if tok in first.name
             else f"{first.stem}.{tag}{first.suffix}")
     if out_dir:
         return Path(out_dir) / name
@@ -104,13 +105,19 @@ def find_panel_zarr_sets(out_dir, panels) -> list:
     first_dir = root / first / "zarr"
     if not first_dir.is_dir():
         return []
+    # The panel token must appear DOT-DELIMITED, as frame_output_stem writes
+    # it. A bare `first in a.name` also matched a combined `...ge1234...`
+    # archive left in ge1/zarr/ by an older build that defaulted the output
+    # beside its input -- it was then treated as a ge1 frame whose siblings
+    # would be named `ge2234`. Harmless only because those never exist.
+    tok = f".{first}."
     sets = []
     for a in sorted(first_dir.glob("*.zarr.zip")):
-        if first not in a.name:
+        if tok not in a.name:
             continue
         group = {first: str(a)}
         for p in panels[1:]:
-            cand = root / p / "zarr" / a.name.replace(first, p)
+            cand = root / p / "zarr" / a.name.replace(tok, f".{p}.")
             if cand.is_file():
                 group[p] = str(cand)
         if len(group) == len(panels):
@@ -187,22 +194,110 @@ def validate(panels, zs):
     return ir_keys, osf_keys, eta_widths
 
 
+#: ``(min_key, max_key)`` pairs, in both the CamelCase spelling every writer
+#: in this app actually emits (``EtaMin``) and the underscored one that only
+#: ever appeared in this module's own tests (``ETA_MIN``).
+#:
+#: Matching on a ``_MIN``/``_MAX`` SUFFIX alone -- which is what this did --
+#: missed every real archive: nothing the GUI writes is spelled that way, so
+#: the span logic never ran on live data, and ``EtaMin``/``EtaMax`` fell
+#: through to the "all panels agree" branch, disagreed (as hydra panels must,
+#: covering different sectors), and were dropped from the merged file
+#: entirely. ``RMin``/``RMax`` survived only because every panel shares them.
+_SPAN_PAIRS = (("EtaMin", "EtaMax"), ("ETA_MIN", "ETA_MAX"),
+               ("RMin", "RMax"), ("R_MIN", "R_MAX"))
+
+
+def _eta_bounds(block: dict):
+    """``(lo, hi)`` from either spelling, or ``None``."""
+    if not block:
+        return None
+    lo = block.get("EtaMin", block.get("ETA_MIN"))
+    hi = block.get("EtaMax", block.get("ETA_MAX"))
+    if lo is None or hi is None:
+        return None
+    return float(lo), float(hi)
+
+
+def eta_tiling_problem(per_panel: dict, panels, tol: float = 1e-6):
+    """``None`` if the panels' eta ranges tile edge to edge in PANEL ORDER,
+    else a sentence naming the first gap or overlap.
+
+    Hydra's panels are meant to pave the azimuth: each one's EtaMax is the
+    next one's EtaMin, modulo the 360 deg wrap that makes ge1's 210 and ge2's
+    -150 the same ray. When they do, the merged eta axis is one continuous
+    sweep. When they do not, the concatenated axis has a hole in it that
+    NOTHING about the file's shape reveals -- the columns simply close over
+    the missing wedge, and a plot of intensity against column index looks
+    perfectly healthy -- so it is worth saying out loud.
+    """
+    spans = []
+    for p in panels:
+        b = _eta_bounds(per_panel.get(p))
+        if b is None:
+            return None            # nothing to check against
+        spans.append((p, b[0], b[1]))
+    if len(spans) < 2:
+        return None
+    prev_panel, _, prev_hi = spans[0]
+    end = prev_hi
+    for panel, lo, hi in spans[1:]:
+        step = (lo - end) % 360.0
+        off = min(step, 360.0 - step)
+        if off > tol:
+            kind = "gap" if step <= 180.0 else "overlap"
+            return (f"eta ranges do not tile: {off:g} deg {kind} between "
+                    f"{prev_panel} (ends {prev_hi:g}) and {panel} "
+                    f"(starts {lo:g})")
+        end += hi - lo
+        prev_panel, prev_hi = panel, hi
+    return None
+
+
+def _merged_eta_span(per_panel: dict, panels):
+    """``(start, end)`` of the concatenated eta axis, unwrapped.
+
+    Only meaningful once ``eta_tiling_problem`` has returned ``None``. The end
+    is the start plus the summed widths rather than the last panel's EtaMax,
+    because the sweep runs past 180 and back around: this dataset's four
+    90 deg panels read 120 -> 480, not 120 -> 120.
+    """
+    bounds = [_eta_bounds(per_panel.get(p)) for p in panels]
+    start = bounds[0][0]
+    return start, start + sum(hi - lo for lo, hi in bounds)
+
+
 def _aggregate_cake_params(per_panel: dict, panels) -> Optional[dict]:
-    """One cake_params block that honestly describes the MERGED file: eta and
-    R span the union across panels, identical values are carried through, and
-    anything that genuinely differs is dropped rather than misreported."""
+    """One cake_params block that honestly describes the MERGED file.
+
+    Values every panel agrees on are carried through. A (min, max) pair is
+    reported as the span the merged file actually covers -- but for eta only
+    when the panels tile, because a min and a max taken across ranges that
+    wrap, overlap or leave a hole describe a sweep the file does not contain.
+    """
     blocks = [per_panel[p] for p in panels if per_panel.get(p)]
     if not blocks:
         return None
+    paired = {k for pair in _SPAN_PAIRS for k in pair}
     out = {}
     for k in sorted({k for b in blocks for k in b}):
+        if k in paired:
+            continue
         vals = [b[k] for b in blocks if k in b]
-        if k.endswith("_MIN"):
-            out[k] = min(vals)
-        elif k.endswith("_MAX"):
-            out[k] = max(vals)
-        elif all(v == vals[0] for v in vals):
+        if all(v == vals[0] for v in vals):
             out[k] = vals[0]
+    broken = eta_tiling_problem(per_panel, panels)
+    for lo_k, hi_k in _SPAN_PAIRS:
+        los = [b[lo_k] for b in blocks if lo_k in b]
+        his = [b[hi_k] for b in blocks if hi_k in b]
+        if not los or not his:
+            continue
+        if lo_k.lower().startswith("eta"):
+            if broken:
+                continue           # saying -150..210 of a file with a hole
+            out[lo_k], out[hi_k] = _merged_eta_span(per_panel, panels)
+        else:
+            out[lo_k], out[hi_k] = min(los), max(his)
     return out
 
 
@@ -249,10 +344,15 @@ def _write_merged(root, zs, panels, ir_keys, osf_keys) -> None:
             zarr.copy(zs[0][grp], root, name=grp)
 
 
-def _merge_provenance(root, zs, panels, paths, out_path) -> None:
+def _merge_provenance(root, zs, panels, paths, out_path):
     """Carry every panel's prior history forward, tagged by source panel, and
     append this merge. Four streams stay distinguishable rather than one
-    overwriting the others."""
+    overwriting the others.
+
+    Returns the eta-tiling problem, if any, so the caller can say it out loud
+    -- it is recorded in the merge entry either way, but a line in the file's
+    attributes is not something anyone reads at the beamline.
+    """
     merged, per_cake, per_instr = [], {}, {}
     for panel, z in zip(panels, zs):
         hist = list(z.attrs.get("provenance_history", []) or [])
@@ -268,6 +368,7 @@ def _merge_provenance(root, zs, panels, paths, out_path) -> None:
                    if isinstance(e, dict) and e.get("instrument_params")), None)
         if ip:
             per_instr[panel] = ip
+    broken = eta_tiling_problem(per_cake, panels)
     merged.append({
         "tool": "midas_gui.hydra_zarr_combine",
         "timestamp_iso": datetime.datetime.now(
@@ -277,16 +378,24 @@ def _merge_provenance(root, zs, panels, paths, out_path) -> None:
         "extra": {"panels": list(panels),
                   "cake_params_per_panel": per_cake,
                   "instrument_params_per_panel": per_instr,
+                  "eta_tiling_problem": broken,
                   "out": str(out_path)},
     })
     root.attrs["provenance_history"] = merged
+    return broken
 
 
-def combine_panel_zarrs(panel_paths: dict, out_path=None) -> Path:
+def combine_panel_zarrs(panel_paths: dict, out_path=None, warn=None) -> Path:
     """Merge ``{panel: zarr.zip path}`` into one archive; returns its path.
 
     Raises ``ValueError`` naming the first disagreement, before writing
     anything, so a half-merged archive is never left behind.
+
+    ``warn`` is an optional ``str -> None`` sink for things that are worth a
+    human's attention but are not grounds to refuse the merge -- eta ranges
+    that do not tile being the one that matters. The archive is still written:
+    the panels' caking is the user's to set, and a file with a known hole in
+    its azimuth is more useful than no file plus an exception.
     """
     import zarr
     panels = sorted(panel_paths)
@@ -306,7 +415,9 @@ def combine_panel_zarrs(panel_paths: dict, out_path=None) -> Path:
         with tempfile.TemporaryDirectory(prefix="midas_gui_combine_") as tmp:
             root = zarr.group(zarr.DirectoryStore(tmp))
             _write_merged(root, zs, panels, ir_keys, osf_keys)
-            _merge_provenance(root, zs, panels, paths, out_path)
+            broken = _merge_provenance(root, zs, panels, paths, out_path)
+            if broken and warn:
+                warn(broken)
             _zip_directory(Path(tmp), out_path)
     finally:
         for s in stores:
