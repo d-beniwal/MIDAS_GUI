@@ -87,7 +87,13 @@ def axis_conversions(r_px, lsd, px, wl):
     return two_theta, two_theta * 100.0, q
 
 
-_FID_NUM_RE = re.compile(r'^(?P<froot>.+?)_(?P<num>\d+)(?P<tag>[^_\d]*)$')
+# The tag excludes '_' but NOT digits: '_' is what forces the match onto
+# the LAST underscore-number group, while barring digits made a detector
+# tag that ends in one unparseable. '..._1s_003502.ge1' then matched
+# nothing at all and fell back to (whole stem, fallback_idx, '') -- so
+# every .geN output folder and filename carried the file number that
+# should have been split off, while .pixi/.vrx (no digit) were fine.
+_FID_NUM_RE = re.compile(r'^(?P<froot>.+?)_(?P<num>\d+)(?P<tag>[^_]*)$')
 # A trailing "_c<NN>" chunk suffix, as minted by _HDF5StackGlobSource when one
 # multi-frame HDF5 file is split into several combined chunks.
 _FID_CHUNK_RE = re.compile(r'^(?P<rest>.+)_c(?P<chunk>\d+)$')
