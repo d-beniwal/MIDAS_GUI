@@ -129,12 +129,12 @@ def test_feeding_the_result_back_does_not_silence_the_warning(tab):
     bad = _result(tab, Lsd=2_382_051.0)
     assert tab._crystalline_at_limit(bad) == {"Lsd"}
 
-    # ...now the feedback lands, exactly as _on_done does it. _seed_from_result
-    # only promotes what the run actually refined (main's own fix for the
-    # related tx-erasing bug — see test_tx_azimuth_range.py), so tell it Lsd
-    # was a free parameter, same as the beamline run this reproduces.
+    # ...now the feedback lands, exactly as _on_done does it. Since the
+    # upstream merge, _seed_from_result promotes only what the last run
+    # actually refined, read from _last_refine_flags. The premise of this
+    # test is that the feedback DOES land on Lsd, so the flags have to say so.
     tab._feedback_check.setChecked(True)
-    tab._last_refine_flags = {"Lsd": True}
+    tab._last_refine_flags = {"BC": True, "Lsd": True, "ty": True, "tz": True}
     tab._seed_from_result(bad)
     assert tab._seed_lsd.value() == pytest.approx(2382.051)   # seed is gone
 
