@@ -720,10 +720,41 @@ class HydraLoaderPanel(QtWidgets.QWidget):
             self._fr_end.setToolTip("Last frame (exclusive). 0 = all frames.")
             self._fr_stride = _NoScrollSpinBox(); self._fr_stride.setRange(1, 100000)
             self._fr_stride.setValue(1); self._fr_stride.setFixedWidth(64)
+            # Chunking. The single-detector loader has had this since the
+            # beginning and Hydra never did, so a Hydra rotation could only
+            # ever be integrated one raw sub-frame at a time: source_cfg
+            # carried no chunk_size, and OME_SUM out of a cake_parameters
+            # CSV had nowhere to land. Same widget, same meaning, same
+            # mpe_wf key.
+            self._combine_chunk = _NoScrollSpinBox()
+            self._combine_chunk.setRange(0, 999999)
+            self._combine_chunk.setValue(1); self._combine_chunk.setFixedWidth(64)
+            self._combine_chunk.setToolTip(
+                "How many consecutive raw sub-frames make ONE integrated "
+                "frame (mpe_wf's OME_SUM). 1 = no combining.\n\n"
+                "0 = combine every frame in the file into one.\n\n"
+                "Applies to all four panels: they are synchronised frames "
+                "of one scan, so a chunk is a chunk for every panel.")
+            self._combine_op = _NoScrollComboBox()
+            for lbl, key in (("Mean", "mean"), ("Sum", "sum"),
+                             ("Max", "max"), ("Median", "median")):
+                self._combine_op.addItem(lbl, key)
+            self._combine_op.setToolTip(
+                "How the sub-frames in a chunk are reduced to one image.")
+            cr = QtWidgets.QHBoxLayout(); cr.setSpacing(4)
+            cr.addWidget(self._combine_chunk)
+            cr.addWidget(QtWidgets.QLabel("op:"))
+            cr.addWidget(self._combine_op)
+            cr.addStretch(1)
             sf = S.Form()
             sf.row(("start:", self._fr_start), ("end(0=all):", self._fr_end))
             sf.row(("stride:", self._fr_stride))
+            sf.row(("combine sub-frames:", cr))
             card.body.addLayout(sf)
+            for w in (self._combine_chunk, self._combine_op):
+                sig = (w.valueChanged if hasattr(w, "valueChanged")
+                       else w.currentIndexChanged)
+                sig.connect(lambda *_: self.fieldsChanged.emit())
 
         self._info_lbl = QtWidgets.QLabel("")
         self._info_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
@@ -1183,9 +1214,30 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         """Streaming source descriptor for ``BatchWorker``, for panel ``n`` —
         mirrors ``widgets.DataLoaderPanel.source_cfg()``."""
         path = self._siblings.get(n, "")
+        chunk = (self._combine_chunk.value()
+                 if hasattr(self, "_combine_chunk") else None)
+        op = (self._combine_op.currentData()
+              if hasattr(self, "_combine_op") else "mean")
+        # `chunk or None` EXACTLY as DataLoaderPanel.source_cfg writes it,
+        # not a mapping of my own: 0 is the "combine everything" sentinel
+        # and reaches _open_source_cfg as None, whose meaning differs
+        # between an HDF5 pick and a TIFF/.ge* one (see the Combine
+        # sub-frames tooltip). Mirroring the verified path is what keeps
+        # Hydra and single-detector chunking the same thing.
         if source_kind(path) == "hdf5":
-            return {"type": "hdf5", "path": path, "dataset": self.DATASET}
-        return {"type": "tiff_glob", "path": path}
+            return {"type": "hdf5", "path": path, "dataset": self.DATASET,
+                    "chunk_size": (chunk or None), "combine_op": op}
+        return {"type": "tiff_glob", "path": path,
+                "chunk_size": (chunk or None), "combine_op": op}
+
+    def combine_chunk(self) -> int:
+        """Raw sub-frames per integrated frame (mpe_wf's OME_SUM)."""
+        return (self._combine_chunk.value()
+                if hasattr(self, "_combine_chunk") else 1)
+
+    def set_combine_chunk(self, n) -> None:
+        if hasattr(self, "_combine_chunk") and n is not None:
+            self._combine_chunk.setValue(int(n))
 
     def frame_range(self) -> tuple:
         """Shared (start, end_or_None, stride) — Hydra panels are
@@ -1209,6 +1261,8 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         return {
             "fr_start": self._fr_start.value(), "fr_end": self._fr_end.value(),
             "fr_stride": self._fr_stride.value(),
+            "combine_chunk": self._combine_chunk.value(),
+            "combine_op": self._combine_op.currentIndex(),
             "masks": {n: sel.get_state() for n, sel in self._mask_sels.items()},
             "panels": sorted(n for n, cb in self._status_lbls.items()
                              if cb.isChecked()),
@@ -1228,6 +1282,10 @@ class HydraLoaderPanel(QtWidgets.QWidget):
             self._fr_end.setValue(int(state["fr_end"]))
         if "fr_stride" in state:
             self._fr_stride.setValue(int(state["fr_stride"]))
+        if "combine_chunk" in state:
+            self._combine_chunk.setValue(int(state["combine_chunk"]))
+        if "combine_op" in state:
+            self._combine_op.setCurrentIndex(int(state["combine_op"]))
         for n_key, mstate in (state.get("masks") or {}).items():
             sel = self._mask_sels.get(int(n_key))
             if sel is not None:
