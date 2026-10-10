@@ -120,6 +120,15 @@ class HydraCakingSummary(QtWidgets.QWidget):
         self._cake_extras = QtWidgets.QVBoxLayout()
         self._cake_extras.setContentsMargins(0, 0, 0, 0)
         card.body.addLayout(self._cake_extras)
+        # Separate from the coverage line and ABOVE it: a range past the
+        # +/-180 wrap silently loses data, which the coverage line's
+        # "does it tile" question does not cover and must not be confused
+        # with -- that one is a readout, this one is a defect.
+        self._wrap_warn = QtWidgets.QLabel("")
+        self._wrap_warn.setWordWrap(True)
+        self._wrap_warn.setStyleSheet("color:#FFA500;font-size:11px")
+        self._wrap_warn.setVisible(False)
+        card.body.addWidget(self._wrap_warn)
         self._coverage = QtWidgets.QLabel("")
         self._coverage.setWordWrap(True)
         card.body.addWidget(self._coverage)
@@ -180,6 +189,8 @@ class HydraCakingSummary(QtWidgets.QWidget):
             self._loading = False
         self._fit_height()
         self._coverage.setText(self._coverage_text(cakes))
+        self._wrap_warn.setText(self._wrap_text(cakes))
+        self._wrap_warn.setVisible(bool(self._wrap_warn.text()))
 
     def _repaint(self, cakes: dict, missing) -> None:
         for row, n in enumerate(self._panels):
@@ -204,6 +215,17 @@ class HydraCakingSummary(QtWidgets.QWidget):
                     item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable)
                 self._table.setItem(row, col, item)
                 self._shown[(row, col)] = txt
+
+    def _wrap_text(self, cakes: dict) -> str:
+        """Bins the backend can never fill, named before a run rather than
+        found as a band of zeros in the output afterwards."""
+        from midas_gui.hydra_zarr_combine import eta_beyond_branch_cut
+        per = {f"ge{n}": {"EtaMin": c.get("ETA_MIN"),
+                          "EtaMax": c.get("ETA_MAX"),
+                          "EtaBinSize": c.get("ETA_STEP")}
+               for n, c in sorted((cakes or {}).items()) if c}
+        msg = eta_beyond_branch_cut(per, sorted(per))
+        return f"⚠ {msg}" if msg else ""
 
     def _coverage_text(self, cakes: dict) -> str:
         """One sentence on whether the four sectors pave the azimuth."""
