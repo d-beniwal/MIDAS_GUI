@@ -79,7 +79,8 @@ def _load_qt():
         MIN_FRAMES_PER_WORKER = 10   # duck-typed to match BatchRunCoordinator
 
         def __init__(self, spec, source_cfg, mask, out_dir, fmts, kernel, corrections,
-                     variance_cfg, q_cfg=None, frame_range=None, monitor_file=None,
+                     variance_cfg, q_cfg=None, omega_cfg=None, frame_range=None,
+                     monitor_file=None,
                      drift_traj=None, parent=None, dark=None, bright=None, background=None,
                      bright_mode="divide", weighted=True, context=None, im_trans=(),
                      run_mode="sequential", n_workers=1):
