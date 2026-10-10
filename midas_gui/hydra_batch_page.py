@@ -106,6 +106,8 @@ class HydraBatchPage(QtWidgets.QWidget):
         #: Multi-scan batch (a recursive folder pick). Empty / None for the
         #: ordinary one-scan run, which then behaves exactly as before.
         self._scan_queue: list = []
+        #: True while a parallel scan's panels are still being started.
+        self._launching = False
         self._scan_total = 0
         self._scan_pos = 0
         self._active_scan: "Optional[dict]" = None
@@ -1376,8 +1378,18 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._pending_panels = sorted(self._active_scan)
         if mode == "parallel":
             pending, self._pending_panels = list(self._pending_panels), []
-            for n in pending:
-                self._start_panel_worker(n)
+            # Held until every panel has been launched. _start_panel_worker
+            # can finish synchronously (a skip), and _maybe_finish_run then
+            # saw no workers and no pending and declared the scan done --
+            # combining, and with a queue behind it starting the NEXT scan
+            # while this one's ge2/ge3/ge4 had not been started yet.
+            self._launching = True
+            try:
+                for n in pending:
+                    self._start_panel_worker(n)
+            finally:
+                self._launching = False
+            self._maybe_finish_run()
         else:
             self._start_next_sequential()
 
@@ -1467,7 +1479,11 @@ class HydraBatchPage(QtWidgets.QWidget):
             self._skip_panel(n, f"calibration error: {e}")
             return
         src_cfg = self._source_cfg_for(n)
-        if not src_cfg.get("path"):
+        # `paths` OR `path`: a folder's worth of frames is an
+        # hdf5_stack_glob/tiff_list, which carries a LIST and no "path" at
+        # all. Testing only "path" skipped every multi-file panel as
+        # "no data" -- the whole point of the folder fan-out.
+        if not (src_cfg.get("path") or src_cfg.get("paths")):
             self._skip_panel(n, "no data")
             return
 
@@ -1606,7 +1622,7 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._maybe_finish_run()
 
     def _maybe_finish_run(self):
-        if self._workers or self._pending_panels:
+        if self._workers or self._pending_panels or getattr(self, "_launching", False):
             return
         # One scan's four panels are done: combine THIS scan, then move on.
         # The combine has to run per scan, not once at the end, because each

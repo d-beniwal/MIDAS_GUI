@@ -157,3 +157,71 @@ def test_the_chunk_settings_reach_a_multi_file_source(planned):
 def test_a_panel_absent_from_the_scan_yields_no_path(planned):
     planned._active_scan = {1: ["/r/a_ge1.h5"]}
     assert planned._source_cfg_for(3) == {"path": ""}
+
+
+# ── three faults from one real run, all silent ─────────────────────────
+#     Starting Hydra batch integration (parallel)…
+#     [ge1] no data — skipped
+#     [combine] no frame had an archive from every panel — nothing to combine.
+#     Hydra batch integration run complete.
+#
+# One panel named, three never mentioned, and a "complete" run that wrote
+# nothing.
+
+def test_picking_one_file_still_runs_all_four_panels(app, tmp_path):
+    """A pick of one ge1 file IS a four-panel scan — the premise of Hydra
+    mode. Handing the run the raw selection instead of its siblings gave a
+    plan containing only ge1."""
+    from midas_gui.hydra_batch_page import HydraBatchPage
+    files = _tree(tmp_path, steps=((0, range(4057, 4060)),))
+    one = [f for f in files if f.endswith("_004057.ge1.h5")]
+    page = HydraBatchPage()
+    page._loader.set_selection(one)
+    plan = page._scan_plan()
+    assert len(plan) == 1
+    assert sorted(plan[0][1]) == [1, 2, 3, 4], "siblings must be expanded"
+
+
+def test_expanding_an_already_complete_pick_is_idempotent(app, tmp_path):
+    from midas_gui.hydra_batch_page import HydraBatchPage
+    files = _tree(tmp_path, steps=((0, range(4057, 4060)),))
+    page = HydraBatchPage()
+    page._loader.set_selection(files)
+    panels = page._scan_plan()[0][1]
+    assert [len(panels[k]) for k in sorted(panels)] == [3, 3, 3, 3], \
+        "re-expanding must not duplicate files"
+
+
+def test_a_multi_file_panel_is_not_mistaken_for_no_data(app, tmp_path):
+    """hdf5_stack_glob carries `paths` and no `path` at all. Testing only
+    `path` skipped every multi-file panel as "no data" — i.e. exactly the
+    folder fan-out this feature exists for."""
+    from midas_gui.hydra_batch_page import HydraBatchPage
+    files = _tree(tmp_path, steps=((0, range(4057, 4062)),))
+    page = HydraBatchPage()
+    page._loader.set_selection(files)
+    page._active_scan = page._scan_plan()[0][1]
+    for n in (1, 2, 3, 4):
+        cfg = page._source_cfg_for(n)
+        assert cfg.get("path") or cfg.get("paths"), f"ge{n} read as no data"
+
+
+def test_a_parallel_scan_does_not_finish_while_it_is_still_launching(app,
+                                                                     tmp_path):
+    """_start_panel_worker can finish synchronously (a skip), and
+    _maybe_finish_run then saw no workers and no pending and called the
+    scan done — combining, and with a queue behind it starting the NEXT
+    scan while this one's other panels had not been started."""
+    from midas_gui.hydra_batch_page import HydraBatchPage
+    page = HydraBatchPage()
+    finished = []
+    page._finish_whole_run = lambda: finished.append(1)
+    page._launching = True
+    page._workers = {}
+    page._pending_panels = []
+    page._scan_queue = []
+    page._maybe_finish_run()
+    assert not finished, "must not finish mid-launch"
+    page._launching = False
+    page._maybe_finish_run()
+    assert finished, "and must finish once launching is done"

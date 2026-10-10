@@ -937,12 +937,35 @@ class HydraLoaderPanel(QtWidgets.QWidget):
             self._scan_lbl.setText(""); self._scan_lbl.setVisible(False)
 
     def selected_files(self) -> list:
-        """Every picked file, or the anchor's own sibling set if the pick
-        was an ordinary single file. One entry per FILE, ungrouped."""
-        got = [p for p in (getattr(self, "_selection", None) or [])]
-        if got:
-            return got
-        return sorted((self.siblings() or {}).values())
+        """Every file the run should read, one entry per FILE, ungrouped.
+
+        EXPANDED to siblings. A pick of one ge1 file is still a four-panel
+        scan -- that is the whole premise of Hydra mode, and the loader has
+        always done the expansion. Returning the raw selection instead gave
+        the run a plan containing only ge1, which came out as
+
+            [ge1] no data — skipped
+            [combine] no frame had an archive from every panel
+
+        because the other three were never in it. A recursive pick already
+        contains all four, and re-expanding it is idempotent.
+
+        Narrowed to the TICKED panels, so unticking ge3 means ge3 is not
+        read -- the same contract ``siblings()`` has.
+        """
+        want = set(self.siblings() or {})
+        picked = [p for p in (getattr(self, "_selection", None) or [])]
+        if not picked:
+            picked = sorted((self.siblings() or {}).values())
+        out = set()
+        for p in picked:
+            fam = hydra_siblings(p) or {}
+            if not fam:
+                continue
+            for n, q in fam.items():
+                if not want or n in want:
+                    out.add(str(q))
+        return sorted(out)
 
     # ── cross-tab data sharing (data_bridge.DataSourceRegistry) ─────
     def bind_registry(self, registry, label: str):
