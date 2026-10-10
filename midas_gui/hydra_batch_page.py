@@ -40,7 +40,7 @@ from midas_gui.helpers import (
     _load_image, rmax_corner_px, rmax_edge_px, draw_polar_bin_overlay,
     browse_start_dir, warn_if_path_missing, suggest_panel_base_output_dir, check_output_dir_writable,
     suggest_working_dir, bc_path_parts, source_kind, is_h5,
-    list_h5_1d_datasets, group_paths_by_output_dir)
+    list_h5_1d_datasets, _folder_output_dir)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, OutputFormatSelector, ImageViewer,
                                OriginToolButton, build_lab_frame_axes_items)
@@ -1416,15 +1416,50 @@ class HydraBatchPage(QtWidgets.QWidget):
         files = self._loader.selected_files()
         if not files:
             return []
+        typed = self._out_ed.text().strip()
         expid = self._expid_provider().strip() if self._expid_provider else ""
-        groups = group_paths_by_output_dir(
-            files, out_dir=(self._out_ed.text().strip() or None),
-            expid_fallback=expid, derive=suggest_panel_base_output_dir)
+
+        # Group by the folder of each file's ge1-NORMALISED path, not by its
+        # own parent. Both Hydra layouts are real: all four panels together
+        # in a scan folder (connolly_oct26's load steps) and one folder per
+        # panel (.../ge1/panel.ge1.h5). Grouping on the raw parent is right
+        # for the first and splits a single scan into four for the second.
+        # Normalising collapses both to one key per scan.
+        groups: dict = {}
+        for f in files:
+            norm = hydra.sibling_for_panel(f, 1) or f
+            groups.setdefault(str(Path(norm).parent), []).append(f)
+
+        if len(groups) == 1:
+            # The Output box is authoritative for a single scan, as it has
+            # always been: each panel appends its own ge{n} to it.
+            only = next(iter(groups.values()))
+            out = typed or _folder_output_dir(
+                [hydra.sibling_for_panel(f, 1) or f for f in only],
+                expid, suggest_panel_base_output_dir)
+            return [(str(out or ""), hydra.split_by_panel(only))]
+
+        derived = {k: _folder_output_dir(
+                       [hydra.sibling_for_panel(f, 1) or f for f in v],
+                       expid, suggest_panel_base_output_dir)
+                   for k, v in groups.items()}
+        # A box equal to one group's own derived dir is a STALE AUTOFILL,
+        # not a chosen root -- reading it as a root is what nested
+        # load_step_1's output inside load_step_0.
+        keys = [str(d) for d in derived.values() if d is not None]
+        custom = bool(typed) and typed not in keys
         plan = []
-        for out_dir, group_files in groups:
-            panels = hydra.split_by_panel(group_files)
-            if panels:
-                plan.append((str(out_dir) if out_dir else "", panels))
+        for k in sorted(groups):
+            d = derived.get(k)
+            if custom and d is not None and keys:
+                common = (Path(os.path.commonpath(keys)) if len(keys) > 1
+                          else Path(keys[0]).parent)
+                out = Path(typed) / Path(str(d)).relative_to(common)
+            elif d is not None:
+                out = Path(str(d))
+            else:
+                out = Path(typed) if typed else None
+            plan.append((str(out or ""), hydra.split_by_panel(groups[k])))
         return plan
 
     def _source_cfg_for(self, n: int) -> dict:
