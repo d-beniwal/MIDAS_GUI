@@ -218,6 +218,44 @@ class HydraBatchPage(QtWidgets.QWidget):
         # than copied per panel, which would need four checkboxes kept in
         # sync for no gain.
         self._grid_chk.toggled.connect(self._refresh_active_detector_preview)
+        # Rotation. SHARED, not per panel: there is one goniometer, and all
+        # four panels see the same omega for a given frame. mpe_wf's
+        # cake_parameters CSV carries OME_* per detector, redundantly.
+        #
+        # This page had no rotation controls at all, so it never passed an
+        # omega_cfg and BatchWorker fell through to start=step=0 -- every
+        # frame recorded at omega=0, which is precisely the all-zero /Omegas
+        # the single-detector tab goes out of its way to warn about. A
+        # single-frame scan never notices; a rotation scan is simply wrong.
+        ome_row = QtWidgets.QHBoxLayout(); ome_row.setSpacing(4)
+        self._ome_start = _fspin(-100000.0, 100000.0, 4, 0.0, "°")
+        self._ome_step = _fspin(-100000.0, 100000.0, 6, 0.0, "°")
+        self._ome_start.setToolTip(
+            "OME_START — ω of raw sub-frame 0.\n\nShared across ge1–ge4: "
+            "one rotation stage, one angle per frame.")
+        self._ome_step.setToolTip(
+            "OME_STEP — ω advanced per raw sub-frame (the omega bin size).\n\n"
+            "Left at 0 with OME_START 0, every frame is written to the zarr's "
+            "/Omegas as 0°, which is right only for a stationary scan.")
+        self._ome_collapse = QtWidgets.QCheckBox("one ω per frame (averaged)")
+        self._ome_collapse.setToolTip(
+            "Record each output frame's ω as the mean over the raw "
+            "sub-frames it combines, rather than the first one's.")
+        ome_row.addWidget(QtWidgets.QLabel("ω start:"))
+        ome_row.addWidget(self._ome_start)
+        ome_row.addWidget(QtWidgets.QLabel("ω step:"))
+        ome_row.addWidget(self._ome_step)
+        integ.body.addLayout(ome_row)
+        integ.body.addWidget(self._ome_collapse)
+        self._ome_lbl = QtWidgets.QLabel("")
+        self._ome_lbl.setWordWrap(True)
+        self._ome_lbl.setStyleSheet("color:#8AB4F8;font-size:10px")
+        integ.body.addWidget(self._ome_lbl)
+        for w in (self._ome_start, self._ome_step):
+            w.valueChanged.connect(lambda *_: self._refresh_omega_note())
+        self._ome_collapse.toggled.connect(lambda *_: self._refresh_omega_note())
+        self._refresh_omega_note()
+
         self._var_check = QtWidgets.QCheckBox("Per-bin variance (σ)")
         self._var_check.setToolTip(
             "Compute per-bin σ via the chosen error model.\n"
@@ -802,10 +840,28 @@ class HydraBatchPage(QtWidgets.QWidget):
         # (its loader takes a frame RANGE, not a combine count). Saying so
         # beats dropping them silently -- the file carries them and the user
         # may be expecting them to land somewhere.
-        ome = {k: values.get(k) for k in ("OME_SUM", "OME_START", "OME_STEP")}
-        extra = {k: v for k, v in ome.items() if v}
-        note = (f"  (ignored {', '.join(f'{k}={v:g}' for k, v in extra.items())} "
-                f"— no rotation controls on this page)") if extra else ""
+        # OME_START/OME_STEP now have somewhere to land -- the shared
+        # rotation row -- so they are APPLIED rather than reported and
+        # dropped. OME_SUM still has none: this loader takes a frame range,
+        # not a combine count, so it is carried through on save but cannot
+        # be honoured.
+        applied, ignored = [], []
+        for key, spin in (("OME_START", self._ome_start),
+                          ("OME_STEP", self._ome_step)):
+            v = values.get(key)
+            if v is not None:
+                spin.setValue(float(v))
+                applied.append(f"{key}={float(v):g}")
+        self._cake_ome_sum = values.get("OME_SUM")
+        if values.get("OME_SUM"):
+            ignored.append(f"OME_SUM={float(values['OME_SUM']):g}")
+        self._refresh_omega_note()
+        note = ""
+        if applied:
+            note += f"  (rotation: {', '.join(applied)})"
+        if ignored:
+            note += (f"  (ignored {', '.join(ignored)} — this page takes a "
+                     f"frame range, not a combine count)")
         self._log.append(f"[hydra batch] ge{n}: caking loaded from "
                          f"{Path(path).name}{note}")
 
@@ -862,9 +918,18 @@ class HydraBatchPage(QtWidgets.QWidget):
         if not path:
             return
         try:
-            # Only the six: write_cake_csv fills OME_* with 0, which is what
-            # mpe_wf's reader needs (a blank cell is a ValueError there).
-            cake_params.write_cake_csv(path, card.caking())
+            # The six caking fields PLUS the rotation. write_cake_csv fills
+            # anything absent with 0, which is what mpe_wf's reader needs (a
+            # blank cell is a ValueError there) -- but writing 0 for a
+            # rotation the user has set would hand the workflow back a file
+            # saying the stage never moved. OME_SUM is carried through from
+            # whatever was loaded, since this page cannot produce one.
+            values = dict(card.caking())
+            values["OME_START"] = self._ome_start.value()
+            values["OME_STEP"] = self._ome_step.value()
+            if getattr(self, "_cake_ome_sum", None):
+                values["OME_SUM"] = self._cake_ome_sum
+            cake_params.write_cake_csv(path, values)
         except Exception as exc:
             self._log.append(f"[hydra batch] ge{n}: could not write {path}: {exc}")
             return
@@ -1151,6 +1216,26 @@ class HydraBatchPage(QtWidgets.QWidget):
 
     # ── Run ────────────────────────────────────────────────────────
 
+    def _refresh_omega_note(self) -> None:
+        """Say what ω the run will record — all-zero is the quiet failure."""
+        start, step = self._ome_start.value(), self._ome_step.value()
+        if not start and not step:
+            self._ome_lbl.setText(
+                "ω 0° on every frame — set ω start / ω step for a rotation "
+                "scan, or the zarr's /Omegas is all zeros.")
+        else:
+            self._ome_lbl.setText(
+                f"ω {start:g}° at raw sub-frame 0, {step:g}° per sub-frame"
+                + ("  ·  averaged per output frame"
+                   if self._ome_collapse.isChecked() else ""))
+
+    def omega_cfg(self) -> dict:
+        """The rotation, in BatchWorker's vocabulary. Shared by all panels."""
+        return {"start": self._ome_start.value(),
+                "step": self._ome_step.value(),
+                "channel": "",
+                "collapse": self._ome_collapse.isChecked()}
+
     def _run_mode(self) -> str:
         return self._run_mode_combo.currentData() or "sequential"
 
@@ -1367,7 +1452,8 @@ class HydraBatchPage(QtWidgets.QWidget):
 
         worker = BatchRunCoordinator(
             spec, src_cfg, mask, out_dir, fmts, kernel, corrections, variance_cfg,
-            q_cfg=q_cfg, frame_range=frame_range, monitor_file=monitor_file, parent=self,
+            q_cfg=q_cfg, omega_cfg=self.omega_cfg(),
+            frame_range=frame_range, monitor_file=monitor_file, parent=self,
             dark=dark, bright=bright, background=background, bright_mode=bright_mode,
             weighted=weighted, context=context, im_trans=card.resolved_im_trans(),
             run_mode=self._frame_run_mode.currentData(), n_workers=self._n_workers.value())
@@ -1614,6 +1700,8 @@ class HydraBatchPage(QtWidgets.QWidget):
     def _state_widgets(self) -> dict:
         return {
             "kernel": self._kernel, "grid_chk": self._grid_chk,
+            "ome_start": self._ome_start, "ome_step": self._ome_step,
+            "ome_collapse": self._ome_collapse,
             "lab_axes_chk": self._lab_axes_chk,
             "azim": self._azim, "var_check": self._var_check, "err_model": self._err_model,
             "q_check": self._q_check, "q_min": self._q_min, "q_max": self._q_max,
