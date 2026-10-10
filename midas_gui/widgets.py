@@ -346,6 +346,11 @@ class ImageViewer(QtWidgets.QWidget):
         self._lab_tf = tf
         for it in (self._iv.getImageItem(), self._overlay):
             self.apply_lab_transform(it)
+        # The picture has moved -- on a panel whose beam centre is off the
+        # frame it can move clean outside the old bounds. Limits computed
+        # before the rotation would pin the view to where the image USED to
+        # be; see _apply_view_limits.
+        self.refresh_view_limits()
         self.labRotationChanged.emit()
 
     def lab_transform(self):
@@ -457,21 +462,76 @@ class ImageViewer(QtWidgets.QWidget):
             self._redisplay()
 
     def _apply_view_limits(self, w: int, h: int):
-        """Bound pan/zoom to a sane region around the image so the user can't
-        scroll/zoom out into an empty void or lose the image off-screen."""
+        """Bound pan/zoom to a sane region around the CONTENT so the user
+        can't scroll out into an empty void -- but can always reach
+        everything that is actually drawn.
+
+        The bound used to be ``(0, 0, w, h)`` plus half the image span --
+        the raw ARRAY shape, which is only where the picture is when it is
+        drawn untransformed at the origin. ``set_lab_rotation`` puts the
+        ImageItem through a rotation about the beam centre, and that beam
+        centre can be off the panel entirely, so the displayed image can
+        land nowhere near the array's nominal rectangle.
+
+        A Hydra ge4 opened on the Calibrate tab is the case that forced
+        this: tx = 210 deg about BC = (2387, 2190) on a 2048x2048 frame
+        sends the picture to x in [2751, 5548], while the limits computed
+        from w and h stopped at 3072. Eleven percent of the image width was
+        reachable and the rest could not be panned to at all -- reported as
+        "I still cannot scroll over to see ge4 detector image", with the
+        black expanse on screen being empty canvas where the array's
+        rectangle used to be.
+
+        So the box comes from ``childrenBounds``, which reports where the
+        items ACTUALLY are, transforms included, and needs no knowledge of
+        what they are -- overlays drawn around an off-panel centre come
+        along for free. The array rectangle is only the fallback, for before
+        anything is in the view. Items are often added after the frame, so a
+        caller that adds more should call :meth:`refresh_view_limits`;
+        ``set_lab_rotation`` already does.
+
+        Zoom-IN granularity stays keyed to the image span, not the bounds:
+        how far you may magnify is a property of the pixels, and letting a
+        far-flung overlay coarsen it would be a regression everywhere else.
+        """
         if w <= 0 or h <= 0:
             return
+        self._limit_img_wh = (int(w), int(h))
         span = max(w, h)
-        pad = span * 0.5
+        x_lo, y_lo, x_hi, y_hi = 0.0, 0.0, float(w), float(h)
         vb = self._iv.getView().getViewBox()
+        try:
+            (cx_lo, cx_hi), (cy_lo, cy_hi) = vb.childrenBounds()
+            if (cx_lo is not None and cx_hi is not None
+                    and math.isfinite(cx_lo) and math.isfinite(cx_hi)
+                    and cy_lo is not None and cy_hi is not None
+                    and math.isfinite(cy_lo) and math.isfinite(cy_hi)
+                    and cx_hi > cx_lo and cy_hi > cy_lo):
+                x_lo, x_hi, y_lo, y_hi = cx_lo, cx_hi, cy_lo, cy_hi
+        except Exception:
+            pass                         # no items yet, or a pg version quirk
+        pad = max(x_hi - x_lo, y_hi - y_lo, span) * 0.5
         vb.setLimits(
-            xMin=-pad, xMax=w + pad,
-            yMin=-pad, yMax=h + pad,
+            xMin=x_lo - pad, xMax=x_hi + pad,
+            yMin=y_lo - pad, yMax=y_hi + pad,
             minXRange=max(span * 0.01, 2.0),
             minYRange=max(span * 0.01, 2.0),
-            maxXRange=w + 2 * pad,
-            maxYRange=h + 2 * pad,
+            maxXRange=(x_hi - x_lo) + 2 * pad,
+            maxYRange=(y_hi - y_lo) + 2 * pad,
         )
+
+    def refresh_view_limits(self) -> None:
+        """Recompute the pan/zoom bounds for the items now in the view.
+
+        Overlays are added after the frame, so the limits set by
+        ``set_image`` cannot have seen them. A caller that draws geometry
+        reaching outside the detector -- calibration rings around an
+        off-panel beam centre being the case that forced this -- calls this
+        once it has finished adding items. A no-op before any image.
+        """
+        wh = getattr(self, "_limit_img_wh", None)
+        if wh:
+            self._apply_view_limits(*wh)
 
     def set_mask_overlay(self, mask: Optional[np.ndarray]):
         if mask is None:
