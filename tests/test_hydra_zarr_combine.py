@@ -438,6 +438,85 @@ def test_an_entry_this_module_has_never_heard_of_is_still_carried(tmp_path):
         "carrying it silently is the same bug in a new coat"
 
 
+def _with_extra(tmp_path, name, data_for, *, eta=None):
+    """Four panels, each carrying an extra top-level array."""
+    paths = {}
+    for p in PANELS:
+        path = tmp_path / f"s_000001.{p}.zarr.zip"
+        _panel_zarr(path, p, n_eta=(1 if eta else NETA),
+                    eta=(eta[p] if eta else None))
+        store = zarr.ZipStore(str(path), mode="a")
+        zarr.group(store).create_dataset(name, data=data_for(p))
+        store.close()
+        paths[p] = str(path)
+    return paths
+
+
+#: One 10 deg bin on each cardinal -- "I only produce cakes along the main
+#: directions 0, 90, 180, and -90 deg, each with 10 deg eta bin size." Every
+#: panel then has nEta=1, which is what breaks a naive shape test.
+CARDINAL_ETA = {"ge1": (175.0, 185.0), "ge2": (-95.0, -85.0),
+                "ge3": (-5.0, 5.0), "ge4": (85.0, 95.0)}
+
+
+def test_cardinal_only_caking_merges_one_bin_per_panel(tmp_path):
+    paths = {p: str(_panel_zarr(tmp_path / f"s_000001.{p}.zarr.zip", p,
+                                n_eta=1, eta=CARDINAL_ETA[p]))
+             for p in PANELS}
+    out = combine_panel_zarrs(paths, tmp_path / "m.zarr.zip")
+    got = _read(out)
+    assert got["osf"]["FrameNr_0"].shape == (NR, len(PANELS))
+    assert list(got["osf"]["FrameNr_0"][0, :]) == [1.0, 2.0, 3.0, 4.0]
+
+
+def test_at_one_bin_per_panel_a_non_caked_array_is_not_concatenated(tmp_path):
+    """The trailing-axis test is only worth something when the widths say
+    something. Cake four cardinals at one bin each and EVERY panel has
+    nEta=1, so an unrelated (3, 1) array matches [1,1,1,1] -- and was
+    concatenated into a (3, 4) fabrication before this was guarded."""
+    paths = _with_extra(tmp_path, "NotACake",
+                        lambda p: np.full((3, 1), float(int(p[2:]))),
+                        eta=CARDINAL_ETA)
+    seen = []
+    out = combine_panel_zarrs(paths, tmp_path / "m.zarr.zip", warn=seen.append)
+    store = zarr.ZipStore(str(out), mode="r")
+    try:
+        got = zarr.group(store)["NotACake"][...]
+    finally:
+        store.close()
+    assert got.shape == (3, 1), "shape says it is not a cake; do not stack it"
+    assert any("NotACake (from ge1)" in m for m in seen), \
+        "and say which rule was applied"
+
+
+def test_at_one_bin_per_panel_a_real_cake_is_still_concatenated(tmp_path):
+    """The guard must not cost the genuine article: same leading dims as
+    the caked arrays already in the file means it IS one."""
+    paths = _with_extra(tmp_path, "AlsoACake",
+                        lambda p: np.full((NR, 1), float(int(p[2:]))),
+                        eta=CARDINAL_ETA)
+    seen = []
+    out = combine_panel_zarrs(paths, tmp_path / "m.zarr.zip", warn=seen.append)
+    store = zarr.ZipStore(str(out), mode="r")
+    try:
+        got = zarr.group(store)["AlsoACake"][...]
+    finally:
+        store.close()
+    assert got.shape == (NR, len(PANELS))
+    assert any("AlsoACake (eta-concatenated)" in m for m in seen)
+
+
+def test_a_one_dimensional_array_is_never_treated_as_a_cake(tmp_path):
+    paths = _with_extra(tmp_path, "AVector",
+                        lambda p: np.arange(NETA, dtype=float))
+    out = combine_panel_zarrs(paths, tmp_path / "m.zarr.zip")
+    store = zarr.ZipStore(str(out), mode="r")
+    try:
+        assert zarr.group(store)["AVector"].shape == (NETA,)
+    finally:
+        store.close()
+
+
 def test_an_entry_only_some_panels_have_is_left_out_and_named(tmp_path):
     paths, seen = {}, []
     for p in PANELS:
