@@ -365,21 +365,78 @@ def _zip_directory(src_dir: Path, out_zip: Path) -> None:
                 zf.write(abs_path, abs_path.relative_to(src_dir).as_posix())
 
 
+def _caked_leading_shapes(zs, eta_widths) -> set:
+    """Leading dimensions (everything but the eta axis) of the arrays we
+    already KNOW are caked per eta, as seen in panel 0.
+
+    Used to recognise a caked array when the eta widths alone cannot. A
+    caked array in this layout is ``(nR, nEta)`` or ``(C, nR, nEta)``, so
+    its leading dims are shared with SumFrames / an OmegaSumFrame member /
+    REtaMap, whatever the azimuth happens to be.
+    """
+    out = set()
+    z0, w0 = zs[0], eta_widths[0]
+    for name in ("SumFrames", "REtaMap"):
+        sh = getattr(z0.get(name, None), "shape", None)
+        if sh and sh[-1] == w0:
+            out.add(tuple(sh[:-1]))
+    for grp in ("IntegrationResult", "OmegaSumFrame"):
+        if grp in z0:
+            for k in sorted(z0[grp].keys())[:1]:
+                sh = z0[grp][k].shape
+                if sh and sh[-1] == w0:
+                    out.add(tuple(sh[:-1]))
+    return out
+
+
+def _is_eta_caked(name, zs, eta_widths, caked_leading) -> bool:
+    """Is this unrecognised array binned per eta, and therefore to be
+    concatenated rather than copied?
+
+    The test is the trailing axis matching each panel's eta width -- but
+    that test is only worth anything when the widths say something. Cake
+    only the four cardinal directions, one 10 deg bin each, and EVERY panel
+    has nEta=1: an unrelated ``(3, 1)`` array then matches [1,1,1,1] and
+    gets concatenated into a ``(3, 4)`` fabrication. Measured, on exactly
+    that input, before this guard existed.
+
+    So when the widths are uniform the array must also be SHAPED like the
+    caked arrays in the same file -- same leading dims as SumFrames,
+    REtaMap or an OmegaSumFrame member. Non-uniform widths (the usual
+    windmill, 9/9/9/8) are discriminating on their own.
+
+    Guessing wrong in the cautious direction costs a copy of panel 0's
+    values and a line in the log saying so. Guessing wrong the other way
+    invents data. They are not symmetric.
+    """
+    shapes = [z[name].shape for z in zs]
+    if any(len(sh) < 2 for sh in shapes):
+        return False                     # a 1-D array is a vector, not a cake
+    if any(sh[-1] != w for sh, w in zip(shapes, eta_widths)):
+        return False
+    if len({tuple(sh[:-1]) for sh in shapes}) != 1:
+        return False                     # leading dims must agree to stack
+    if len(set(eta_widths)) == 1:
+        return tuple(shapes[0][:-1]) in caked_leading
+    return True
+
+
 def _carry_unhandled(root, zs, panels, eta_widths) -> list:
     """Copy across anything this module does not write by name.
 
-    Returns the names it carried, so the caller can say what they were:
+    Returns the names it carried AND how, so the caller can say so:
     silence is how SumFrames and active_instrument were lost in the first
     place, and the next release's addition should not go the same way.
 
-    An array whose LAST axis is this panel's eta width is an eta-caked
-    product by construction, so it is concatenated like the rest. Anything
-    else is taken from panel 0 -- the conservative choice, since inventing
-    a merge rule for an array whose meaning is unknown is how you get a
-    quietly wrong archive.
+    Arrays recognised as eta-caked (see :func:`_is_eta_caked`) are
+    concatenated like the rest. Everything else is taken from panel 0 --
+    the conservative choice, since inventing a merge rule for an array
+    whose meaning is unknown is how you get a quietly wrong archive rather
+    than a visibly incomplete one.
     """
     import zarr
     carried = []
+    caked_leading = _caked_leading_shapes(zs, eta_widths)
     for name in sorted(zs[0].keys()):
         if name in _NAMED or name in root:
             continue
@@ -387,18 +444,16 @@ def _carry_unhandled(root, zs, panels, eta_widths) -> list:
             continue                     # partial: leave it out, say so
         obj = zs[0][name]
         shape = getattr(obj, "shape", None)
-        if (shape and len(shape) >= 1
-                and all(z[name].shape[-1] == w
-                        for z, w in zip(zs, eta_widths))):
+        if shape is None:
+            zarr.copy(obj, root, name=name)
+            carried.append(f"{name}/ (from {panels[0]})")
+        elif _is_eta_caked(name, zs, eta_widths, caked_leading):
             root.create_dataset(name, data=np.concatenate(
                 [z[name][...] for z in zs], axis=len(shape) - 1))
             carried.append(f"{name} (eta-concatenated)")
-        elif shape is not None:
+        else:
             root.create_dataset(name, data=obj[...])
             carried.append(f"{name} (from {panels[0]})")
-        else:
-            zarr.copy(obj, root, name=name)
-            carried.append(f"{name}/ (from {panels[0]})")
     return carried
 
 
