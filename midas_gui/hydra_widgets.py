@@ -22,7 +22,7 @@ from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollComboBox, _fspin, hydr
                          detect_geometry_from_path, warn_if_path_missing)
 from midas_gui.workers import FieldAverageWorker, ProjectionWorker
 from midas_gui import hydra
-from midas_gui.hydra import group_into_scans
+from midas_gui.hydra import panel_for_file
 from midas_gui import style as S
 from midas_gui.dialogs import BrowseFilesDialog
 from midas_gui.widgets import _convert_radial, _XUNIT_LABEL, MaskSelector, _fmt_source_desc
@@ -647,7 +647,7 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         self._scan_lbl.setStyleSheet("color:#8AB4F8;font-size:10px")
         self._scan_lbl.setVisible(False)
         card.body.addWidget(self._scan_lbl)
-        self._scans: list = []
+        self._selection: list = []
 
         # One tick per panel: which GE files make up this Hydra array.
         # Checkboxes rather than a dropdown because the four choices are
@@ -890,43 +890,40 @@ class HydraLoaderPanel(QtWidgets.QWidget):
                            if p.is_file())
         if not paths:
             return
-        self.set_scans(group_into_scans(paths))
+        self.set_selection(paths)
 
-    def set_scans(self, scans: list) -> None:
-        """Adopt a list of ``{panel: path}`` sets; the first is the anchor.
+    def set_selection(self, paths) -> None:
+        """Adopt a flat file selection; its first panel file is the anchor.
 
-        The loader stays a single-scan thing -- one anchor drives the
-        preview, the frame slider and the field selectors -- and the extra
-        scans ride alongside for the batch run to walk. Keeping it that way
-        is what lets every existing single-scan path work untouched.
+        Deliberately NOT grouped here. How a selection splits into batches
+        is the <expid>_bc/<froot> convention's question, answered by
+        ``helpers.group_paths_by_output_dir`` -- by SOURCE FOLDER, so one
+        run covers exactly what picking that folder by hand covers, darks
+        included. The loader's job is to say what was picked.
         """
-        scans = [s for s in (scans or []) if s]
-        self._scans = scans
-        if not scans:
-            self._scan_lbl.setText("")
+        paths = sorted(str(p) for p in (paths or []))
+        self._selection = [p for p in paths if panel_for_file(p) is not None]
+        if not self._selection:
+            self._scan_lbl.setText(""); self._scan_lbl.setVisible(False)
             return
-        first = scans[0]
-        self._set_path(first[sorted(first)[0]])
-        if len(scans) > 1:
+        self._set_path(self._selection[0])
+        folders = {str(Path(p).parent) for p in self._selection}
+        if len(folders) > 1:
             self._scan_lbl.setText(
-                f"{len(scans)} scans selected — the run processes all of "
-                f"them, each to its own output folder. Showing the first.")
+                f"{len(self._selection)} files across {len(folders)} folders "
+                f"— each folder is integrated as one scan, to its own output "
+                f"directory. Showing the first.")
             self._scan_lbl.setVisible(True)
         else:
-            self._scan_lbl.setText("")
-            self._scan_lbl.setVisible(False)
+            self._scan_lbl.setText(""); self._scan_lbl.setVisible(False)
 
-    def scans(self) -> list:
-        """Every selected scan as ``{panel: path}``, the anchor first.
-
-        One entry for an ordinary single-file pick, so a caller can always
-        iterate this and never needs to branch on how the data was chosen.
-        """
-        got = [s for s in (getattr(self, "_scans", None) or []) if s]
+    def selected_files(self) -> list:
+        """Every picked file, or the anchor's own sibling set if the pick
+        was an ordinary single file. One entry per FILE, ungrouped."""
+        got = [p for p in (getattr(self, "_selection", None) or [])]
         if got:
             return got
-        sib = self.siblings() or {}
-        return [dict(sib)] if sib else []
+        return sorted((self.siblings() or {}).values())
 
     # ── cross-tab data sharing (data_bridge.DataSourceRegistry) ─────
     def bind_registry(self, registry, label: str):

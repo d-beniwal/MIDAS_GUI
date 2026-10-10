@@ -40,7 +40,7 @@ from midas_gui.helpers import (
     _load_image, rmax_corner_px, rmax_edge_px, draw_polar_bin_overlay,
     browse_start_dir, warn_if_path_missing, suggest_panel_base_output_dir, check_output_dir_writable,
     suggest_working_dir, bc_path_parts, source_kind, is_h5,
-    list_h5_1d_datasets)
+    list_h5_1d_datasets, group_paths_by_output_dir)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, OutputFormatSelector, ImageViewer,
                                OriginToolButton, build_lab_frame_axes_items)
@@ -1330,7 +1330,7 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._geom_sig[n] = sig
 
     def _run_all(self):
-        scans = self._loader.scans()
+        scans = self._scan_plan()
         if not scans:
             QtWidgets.QMessageBox.warning(self, "No data", "Load Hydra panel data first.")
             return
@@ -1344,16 +1344,18 @@ class HydraBatchPage(QtWidgets.QWidget):
         # One queue entry per scan. A single-scan pick makes a queue of one
         # and takes the identical path, which is what keeps every existing
         # run byte-for-byte what it was.
-        bases = self._out_bases_for_scans(scans)
-        self._scan_queue = [(dict(sc), b) for sc, b in zip(scans, bases)]
+        self._scan_queue = [(panels, out_dir) for out_dir, panels in scans]
         self._scan_total = len(self._scan_queue)
         self._scan_pos = 0
         if self._scan_total > 1:
             self._log.append(
-                "─" * 40 + f"\n{self._scan_total} scans selected — each is "
-                f"integrated in turn, to its own output folder:")
-            for sc, b in self._scan_queue:
-                self._log.append(f"    {Path(sc[sorted(sc)[0]]).parent}  →  {b}")
+                "─" * 40 + f"\n{self._scan_total} folders selected — each is "
+                f"integrated as one scan, to its own output directory:")
+            for panels, out_dir in self._scan_queue:
+                src = Path(panels[sorted(panels)[0]][0]).parent
+                n_f = sum(len(v) for v in panels.values())
+                self._log.append(
+                    f"    {src}  ({n_f} files, {len(panels)} panels)  →  {out_dir}")
         self._start_next_scan()
 
     def _start_next_scan(self) -> None:
@@ -1367,7 +1369,7 @@ class HydraBatchPage(QtWidgets.QWidget):
         mode = self._run_mode()
         where = (f" [scan {self._scan_pos}/{self._scan_total}]"
                  if self._scan_total > 1 else "")
-        rep = self._active_scan[sorted(self._active_scan)[0]]
+        rep = self._active_scan[sorted(self._active_scan)[0]][0]
         self._log.append(
             "─" * 40 + f"\nStarting Hydra batch integration ({mode}){where}…"
             + (f"\n  {Path(rep).parent}" if self._scan_total > 1 else ""))
@@ -1379,52 +1381,39 @@ class HydraBatchPage(QtWidgets.QWidget):
         else:
             self._start_next_sequential()
 
-    def _out_bases_for_scans(self, scans: list) -> list:
-        """One output base per scan, GUARANTEED distinct.
+    def _scan_plan(self) -> list:
+        """``[(out_dir, {panel: [paths]}), ...]`` — one entry per SOURCE
+        FOLDER, in the layout picking that folder by hand would produce.
 
-        The <expid>_bc/<froot> convention reads froot off each file's own
-        path, so a selection spanning folders implies many output dirs
-        rather than one -- the single-detector tab learned that in 9302e64,
-        where 23 load steps landed in the first one's directory.
+        Delegates the hard half to ``helpers.group_paths_by_output_dir``,
+        which the single-detector tab already uses for exactly this and
+        which gets three things right that a hand-rolled version did not:
 
-        But froot deliberately EXCLUDES the file number (499a250), so two
-        load steps holding ..._003502 and ..._003503 of the same stem derive
-        the SAME froot and would collide right back into one directory --
-        the original bug wearing a different hat. Colliding bases are
-        therefore qualified by their source folder, and if that still
-        collides (two scans in one folder) by the file number, which is
-        what distinguishes them in the first place.
-
-        A single scan keeps using the Output box exactly as typed. With
-        several, the box is the ROOT they fan out beneath, so setting it
-        stays meaningful and the layout matches picking each folder by hand.
+        * a folder is ONE batch. Grouping per ge1/ge2/ge3/ge4 quartet made
+          every frame file its own scan -- thirteen output directories for
+          one load step.
+        * names come from ``_folder_output_dir``'s convention rather than
+          from disambiguating derived names against each other, which
+          produced
+          ``APS_4130_C_load_step_0_APS_4130_C_load_step_0_APS_4130_C_load_step_0_004057.ge1``.
+        * an Output box holding a value one of the groups already derives
+          is a STALE autofill, not a chosen root, so each group uses its own
+          directory. Treating it as a root is what put load_step_1's output
+          inside load_step_0.
         """
-        typed = self._out_ed.text().strip()
-        if len(scans) <= 1:
-            return [typed]
+        files = self._loader.selected_files()
+        if not files:
+            return []
         expid = self._expid_provider().strip() if self._expid_provider else ""
-        reps = [sc[sorted(sc)[0]] for sc in scans]
-        names, parents, nums = [], [], []
-        for rep in reps:
-            derived = suggest_panel_base_output_dir(rep, expid_fallback=expid)
-            names.append(Path(str(derived)).name if derived
-                         else Path(rep).parent.name)
-            parents.append(Path(rep).parent.name)
-            nums.append(Path(rep).name)
-        # Qualify only what actually clashes, so the common case keeps the
-        # plain <froot> name a user would recognise.
-        dupes = {n for n in names if names.count(n) > 1}
-        out = []
-        for name, parent, num in zip(names, parents, nums):
-            if name in dupes:
-                name = f"{parent}_{name}" if parent else name
-            out.append(name)
-        still = {n for n in out if out.count(n) > 1}
-        if still:
-            out = [f"{n}_{Path(num).stem}" if n in still else n
-                   for n, num in zip(out, nums)]
-        root = Path(typed) if typed else None
-        return [str(root / n) if root else n for n in out]
+        groups = group_paths_by_output_dir(
+            files, out_dir=(self._out_ed.text().strip() or None),
+            expid_fallback=expid, derive=suggest_panel_base_output_dir)
+        plan = []
+        for out_dir, group_files in groups:
+            panels = hydra.split_by_panel(group_files)
+            if panels:
+                plan.append((str(out_dir) if out_dir else "", panels))
+        return plan
 
     def _source_cfg_for(self, n: int) -> dict:
         """Streaming descriptor for panel ``n`` of the scan being run.
@@ -1436,13 +1425,25 @@ class HydraBatchPage(QtWidgets.QWidget):
         scan = getattr(self, "_active_scan", None)
         if not scan:
             return self._loader.source_cfg(n)
-        path = scan.get(n, "")
-        if not path:
+        paths = list(scan.get(n) or [])
+        if not paths:
             return {"path": ""}
-        if source_kind(path) == "hdf5":
-            return {"type": "hdf5", "path": path,
-                    "dataset": self._loader.DATASET}
-        return {"type": "tiff_glob", "path": path}
+        base = self._loader.source_cfg(n)      # chunk_size / combine_op / dataset
+        chunk = base.get("chunk_size")
+        op = base.get("combine_op", "mean")
+        if len(paths) == 1 and source_kind(paths[0]) == "hdf5":
+            return {"type": "hdf5", "path": paths[0],
+                    "dataset": self._loader.DATASET,
+                    "chunk_size": chunk, "combine_op": op}
+        if all(source_kind(p) == "hdf5" for p in paths):
+            # Several HDF5 files are a stack glob, exactly as the
+            # single-detector loader describes a multi-file pick -- one
+            # scan point per file, each with its own sub-frame stack.
+            return {"type": "hdf5_stack_glob", "paths": paths,
+                    "dataset": self._loader.DATASET,
+                    "chunk_size": chunk, "combine_op": op}
+        return {"type": "tiff_list", "paths": paths,
+                "chunk_size": chunk, "combine_op": op}
 
     def _start_next_sequential(self):
         if not self._pending_panels:

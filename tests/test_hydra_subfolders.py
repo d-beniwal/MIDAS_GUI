@@ -1,76 +1,40 @@
-"""Hydra can take a tree of scans, not just one file.
+"""A Hydra batch is a FOLDER, and its output is one directory.
 
-Reported at 1-ID-E: "In hydra mode, I do not get an option to look at all
-the subfolders like in the case of single panel mode."
+Reported at 1-ID-E, looking at connolly_oct26_bc/APS_4130_C_load_step_0:
+"In this folder there should be ge1, ge2, ge3, and ge4 folder ... There
+should also be a ge1234 zarr file in the APS_4130_C_load_step_0 folder.
+There should not be files / folders related to other froot / file prefix."
 
-It was deliberate but narrow — the Hydra picker was modes=("file",) because
-one scan is ONE anchor file whose frames come from its own internal count,
-not from separate per-frame files. But a beamline root is often nothing but
-per-load-step subfolders, each holding its own ge1–ge4 set, and there was
-no way to say "all of them". The single-detector tab learned the same
-lesson in 9302e64, where 23 load steps landed in one output directory.
+What the first version of the fan-out actually produced there:
+
+    APS_4130_C_load_step_0/
+      APS_4130_C_load_step_0_APS_4130_C_load_step_0_APS_4130_C_load_step_0_004057.ge1/
+      ... one per file number ...
+      APS_4130_C_load_step_1_APS_4130_C_load_step_1_..._004072.ge1/
+
+Three faults, all from grouping per ge1-ge4 QUARTET instead of per source
+folder, and from deriving names by disambiguating them against each other
+instead of from the convention:
+
+  * thirteen output directories for one load step, one per frame file
+  * names repeated three times over
+  * load_step_1's output nested inside load_step_0, because the Output box
+    held a value the grouper could not recognise as its own derived dir
+    and so read as a chosen root
+
+helpers.group_paths_by_output_dir already got all three right for the
+single-detector tab. Hydra now uses it, passing the panel-base deriver
+because each of its panels appends its own ge{n}/.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
-from midas_gui.hydra import group_into_scans, panel_for_file, scan_key
+from midas_gui.hydra import panel_for_file, split_by_panel
 
-
-def _tree(n_steps=3, panels=(1, 2, 3, 4)):
-    out = []
-    for s in range(n_steps):
-        for p in panels:
-            out.append(f"/root/load_step_{s}/scan_{s:06d}.ge{p}.h5")
-    return sorted(out)
-
-
-# ── grouping a flat list back into scans ────────────────────────────────
-def test_four_files_per_folder_are_one_scan_not_four():
-    scans = group_into_scans(_tree())
-    assert len(scans) == 3
-    assert all(sorted(sc) == [1, 2, 3, 4] for sc in scans)
-
-
-def test_scans_come_back_in_path_order():
-    """The dialog hands over a sorted list; load_step_0 must run first."""
-    scans = group_into_scans(_tree())
-    firsts = [Path(sc[1]).parent.name for sc in scans]
-    assert firsts == ["load_step_0", "load_step_1", "load_step_2"]
-
-
-def test_every_panel_of_a_scan_shares_one_key():
-    keys = {scan_key(f"/r/s_000001.ge{n}.h5") for n in (1, 2, 3, 4)}
-    assert len(keys) == 1
-
-
-def test_a_file_with_no_panel_token_is_ignored():
-    scans = group_into_scans(_tree() + ["/root/notes.txt", "/root/README"])
-    assert len(scans) == 3
-
-
-def test_a_partial_set_is_kept_as_partial_not_completed_from_disk():
-    """Built from the SELECTION: a scan whose ge3 was not picked comes back
-    with three panels rather than quietly gaining a fourth nobody chose."""
-    scans = group_into_scans(["/r/a_ge1.h5", "/r/a_ge2.h5", "/r/b_ge1.h5"])
-    assert sorted(len(sc) for sc in scans) == [1, 2]
-
-
-def test_an_empty_or_junk_selection_yields_nothing():
-    assert group_into_scans([]) == []
-    assert group_into_scans(["/r/notes.txt"]) == []
-
-
-def test_one_file_still_yields_exactly_one_scan():
-    """The single-pick path must stay a queue of one, so the run never has
-    to branch on how the data was chosen."""
-    scans = group_into_scans(["/r/s_000001.ge2.h5"])
-    assert len(scans) == 1 and scans[0] == {2: "/r/s_000001.ge2.h5"}
-
-
-# ── the page's per-scan output layout ───────────────────────────────────
 pytestmark = pytest.mark.forked
 
 
@@ -80,67 +44,116 @@ def app():
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
-def test_each_scan_gets_its_own_output_folder(app, tmp_path):
-    """The <expid>_bc/<froot> convention reads froot off each file's own
-    path, so many folders mean many output dirs. Applying it once is the
-    bug 9302e64 fixed for single detectors."""
+def _tree(root, steps=((0, range(4057, 4070)), (1, range(4072, 4078)))):
+    """connolly_oct26's real shape: load-step folders of many frame files."""
+    h5py = pytest.importorskip("h5py")
+    import numpy as np
+    files = []
+    for step, nums in steps:
+        d = Path(root) / f"APS_4130_C_load_step_{step}"
+        d.mkdir(parents=True, exist_ok=True)
+        for num in nums:
+            for p in (1, 2, 3, 4):
+                f = d / f"APS_4130_C_load_step_{step}_{num:06d}.ge{p}.h5"
+                with h5py.File(f, "w") as h:
+                    h.create_dataset("exchange/data",
+                                     data=np.zeros((1, 4, 4), "f4"))
+                files.append(str(f))
+    return files
+
+
+# ── a folder's files split into four parallel frame lists ──────────────
+def test_every_file_of_a_panel_is_a_frame_of_one_scan(tmp_path):
+    files = _tree(tmp_path)
+    step0 = [f for f in files if "load_step_0" in f]
+    panels = split_by_panel(step0)
+    assert sorted(panels) == [1, 2, 3, 4]
+    assert all(len(v) == 13 for v in panels.values()), \
+        "thirteen frame files per panel, not thirteen scans"
+
+
+def test_files_with_no_panel_token_are_ignored(tmp_path):
+    panels = split_by_panel(["/r/a_ge1.h5", "/r/notes.txt"])
+    assert sorted(panels) == [1]
+
+
+def test_the_frames_of_a_panel_come_back_in_order(tmp_path):
+    files = _tree(tmp_path, steps=((0, range(4057, 4062)),))
+    got = split_by_panel(files)[1]
+    assert got == sorted(got)
+
+
+# ── one output directory per folder, named by the convention ───────────
+@pytest.fixture
+def planned(app, tmp_path):
     from midas_gui.hydra_batch_page import HydraBatchPage
+    files = _tree(tmp_path)
     page = HydraBatchPage()
-    page._out_ed.setText(str(tmp_path / "out"))
-    bases = page._out_bases_for_scans(group_into_scans(_tree()))
-    assert len(set(bases)) == 3, "three scans must not share one output dir"
-    assert all(str(tmp_path / "out") in b for b in bases), \
-        "the typed Output box is the root they fan out beneath"
+    page._loader.set_selection(files)
+    return page
 
 
-def test_scans_whose_froot_is_identical_are_still_kept_apart(app, tmp_path):
-    """froot deliberately excludes the file number (499a250), so two load
-    steps of the same stem derive the SAME froot. Left alone that is the
-    original bug again: everything in one directory."""
-    from midas_gui.hydra_batch_page import HydraBatchPage
-    page = HydraBatchPage()
-    page._out_ed.setText(str(tmp_path / "out"))
-    sel = []
-    for step, num in ((0, 3502), (1, 3503), (2, 3504)):
-        for p in (1, 2, 3, 4):
-            sel.append(f"/root/load_step_{step}/CeO2_1s_{num:06d}.ge{p}.h5")
-    bases = page._out_bases_for_scans(group_into_scans(sorted(sel)))
-    assert len(set(bases)) == 3, bases
-    assert any("load_step_1" in b for b in bases), \
-        "the source folder is what tells them apart"
+def test_one_output_directory_per_load_step(planned):
+    plan = planned._scan_plan()
+    assert len(plan) == 2, "two folders, two batches — not one per file"
+    assert len({out for out, _ in plan}) == 2
 
 
-def test_two_scans_in_one_folder_are_told_apart_by_file_number(app, tmp_path):
-    """Same folder AND same froot — only the number is left."""
-    from midas_gui.hydra_batch_page import HydraBatchPage
-    page = HydraBatchPage()
-    page._out_ed.setText(str(tmp_path / "out"))
-    sel = [f"/root/run/CeO2_1s_{num:06d}.ge{p}.h5"
-           for num in (3502, 3503) for p in (1, 2, 3, 4)]
-    bases = page._out_bases_for_scans(group_into_scans(sorted(sel)))
-    assert len(set(bases)) == 2, bases
+def test_the_directory_is_named_for_its_own_load_step(planned):
+    for out_dir, panels in planned._scan_plan():
+        src = Path(panels[1][0]).parent.name
+        assert Path(out_dir).name == src, (out_dir, src)
 
 
-def test_a_single_scan_uses_the_output_box_exactly_as_typed(app, tmp_path):
-    from midas_gui.hydra_batch_page import HydraBatchPage
-    page = HydraBatchPage()
-    page._out_ed.setText(str(tmp_path / "out"))
-    one = group_into_scans(["/r/s_000001.ge1.h5"])
-    assert page._out_bases_for_scans(one) == [str(tmp_path / "out")]
+def test_the_name_is_not_repeated_three_times_over(planned):
+    """APS_4130_C_load_step_0_APS_4130_C_load_step_0_APS_4130_C_load_step_0_…"""
+    for out_dir, _ in planned._scan_plan():
+        name = Path(out_dir).name
+        assert name.count("APS_4130_C_load_step") == 1, name
+        assert ".ge" not in name, "a file name must not become a directory"
 
 
-def test_the_source_descriptor_follows_the_active_scan(app):
-    from midas_gui.hydra_batch_page import HydraBatchPage
-    page = HydraBatchPage()
-    page._active_scan = {1: "/r/load_step_1/s.ge1.h5", 2: "/r/load_step_1/s.ge2.h5"}
-    cfg = page._source_cfg_for(1)
-    assert cfg["path"] == "/r/load_step_1/s.ge1.h5"
-    assert cfg["type"] == "hdf5"
-    assert page._source_cfg_for(3) == {"path": ""}, "a panel not in this scan"
+def test_a_stale_autofilled_output_box_does_not_nest_the_others_in_it(planned):
+    """The box auto-fills from the first file, so it holds load_step_0's own
+    directory. Reading that as a chosen root is what put load_step_1's
+    output inside load_step_0."""
+    auto = planned._suggest_output_dir()
+    planned._out_ed.setText(str(auto))
+    outs = [str(o) for o, _ in planned._scan_plan()]
+    assert len({Path(o).parent for o in outs}) == 1, \
+        "the two load steps must be siblings, not nested"
+    assert not any(Path(o) != Path(str(auto)) and str(auto) in o for o in outs)
 
 
-def test_with_no_active_scan_the_loader_is_still_the_authority(app):
-    from midas_gui.hydra_batch_page import HydraBatchPage
-    page = HydraBatchPage()
-    page._active_scan = None
-    assert page._source_cfg_for(1) == page._loader.source_cfg(1)
+def test_a_genuinely_custom_root_still_fans_out_under_it(planned, tmp_path):
+    root = tmp_path / "elsewhere"
+    planned._out_ed.setText(str(root))
+    outs = [str(o) for o, _ in planned._scan_plan()]
+    assert all(str(root) in o for o in outs)
+    assert len(set(outs)) == 2
+
+
+# ── the panels' sources ─────────────────────────────────────────────────
+def test_a_panel_with_many_files_becomes_a_stack_glob(planned):
+    plan = planned._scan_plan()
+    planned._active_scan = plan[0][1]
+    cfg = planned._source_cfg_for(1)
+    assert cfg["type"] == "hdf5_stack_glob"
+    assert len(cfg["paths"]) == 13
+
+
+def test_a_single_file_panel_stays_a_plain_hdf5_source(planned, tmp_path):
+    planned._active_scan = {1: [str(next(tmp_path.rglob("*_004057.ge1.h5")))]}
+    assert planned._source_cfg_for(1)["type"] == "hdf5"
+
+
+def test_the_chunk_settings_reach_a_multi_file_source(planned):
+    planned._loader._combine_chunk.setValue(3)
+    plan = planned._scan_plan()
+    planned._active_scan = plan[0][1]
+    assert planned._source_cfg_for(1)["chunk_size"] == 3
+
+
+def test_a_panel_absent_from_the_scan_yields_no_path(planned):
+    planned._active_scan = {1: ["/r/a_ge1.h5"]}
+    assert planned._source_cfg_for(3) == {"path": ""}

@@ -134,47 +134,25 @@ def sibling_for_panel(path, n: int) -> Optional[str]:
     return None if out == str(path) else out
 
 
-def scan_key(path) -> Optional[str]:
-    """A key shared by all four panels of ONE scan, or ``None``.
+def split_by_panel(paths) -> dict:
+    """``{panel: [paths]}`` for one source folder's files.
 
-    Every member of a set differs only in its ``ge<n>`` tokens, so rewriting
-    them all to ge1 collapses the set to one string. Used to group a flat
-    file list back into the scans it came from.
-    """
-    n = panel_for_file(path)
-    if n is None:
-        return None
-    return sibling_for_panel(path, 1) or str(path)
+    A Hydra batch is a FOLDER, not a file: every ge1 file in it is a frame
+    of the same scan, and the four panels are four parallel frame lists.
+    Files with no ge token are ignored; they cannot belong to a panel.
 
-
-def group_into_scans(paths) -> list:
-    """``[{panel: path}, ...]`` -- one entry per distinct ge1-ge4 set.
-
-    A recursive folder pick returns a flat list of frame files, which for
-    Hydra is four files per scan, not four scans. This puts them back
-    together.
-
-    Built from the SELECTION rather than by re-globbing the disk: what was
-    picked is what runs. A scan whose ge3 was not in the pick comes back
-    with three panels and says so by its length, instead of quietly gaining
-    a fourth that nobody chose.
-
-    Order is the order the scans first appear in ``paths``, so a sorted
-    input (which is what the dialog hands over) yields scans in path order
-    -- load_step_0 before load_step_1 -- rather than in dict-hash order.
-    Files with no ge token are ignored; they cannot belong to a set.
+    This replaced a per-FILE grouping that treated each ge1/ge2/ge3/ge4
+    quartet as its own scan. On a load step holding thirteen frame files
+    that produced thirteen output directories where one was wanted -- and
+    the names, disambiguated against each other, came out as
+    ``APS_4130_C_load_step_0_APS_4130_C_load_step_0_APS_4130_C_load_step_0_004057.ge1``.
     """
     out: dict = {}
-    for p in paths or ():
-        key, n = scan_key(p), panel_for_file(p)
-        if key is None or n is None:
-            continue
-        out.setdefault(key, {})
-        # First wins: two files claiming the same panel of the same scan is
-        # a selection that cannot be resolved, and silently taking the last
-        # would depend on iteration order.
-        out[key].setdefault(n, str(p))
-    return list(out.values())
+    for p in sorted(str(x) for x in (paths or ())):
+        n = panel_for_file(p)
+        if n is not None:
+            out.setdefault(n, []).append(p)
+    return out
 
 
 def inv_coord_base(tx_deg: float, big_det_size: int, px: float, step: int = 1):
