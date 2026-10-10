@@ -93,6 +93,8 @@ def axis_conversions(r_px, lsd, px, wl):
 # nothing at all and fell back to (whole stem, fallback_idx, '') -- so
 # every .geN output folder and filename carried the file number that
 # should have been split off, while .pixi/.vrx (no digit) were fine.
+from midas_gui import eta_wrap
+
 _FID_NUM_RE = re.compile(r'^(?P<froot>.+?)_(?P<num>\d+)(?P<tag>[^_]*)$')
 # A trailing "_c<NN>" chunk suffix, as minted by _HDF5StackGlobSource when one
 # multi-frame HDF5 file is split into several combined chunks.
@@ -358,7 +360,7 @@ def corrections_counts(spec):
 
 def integrate_frame(img_t, spec, geom, kernel, corrections, variance_cfg,
                     need_sigma: bool, corr_counts=None, return_cake=False,
-                    weighted: bool = False, cnt_cake=None):
+                    weighted: bool = False, cnt_cake=None, eta_take=None):
     """Integrate one frame, returning (profile, sigma_or_None) or
     (profile, sigma, cake_2d, cake_sigma_2d).
 
@@ -367,6 +369,13 @@ def integrate_frame(img_t, spec, geom, kernel, corrections, variance_cfg,
         cake (pass corr_counts to avoid recomputing it per frame)
       - variance enabled     → integrate_<kernel>_with_variance (σ from error model)
       - otherwise            → plain kernel integration
+
+    ``eta_take`` selects eta rows out of the binned cake before anything is
+    derived from it — the whole-circle detour that
+    :func:`midas_gui.eta_wrap.plan_eta` uses to serve a range crossing
+    ±180. It is applied to the CAKE, so the 1-D profile, the σ and the
+    2-D output all see only the bins that were asked for. ``None`` (every
+    range that does not cross) is a straight pass-through.
 
     ``weighted`` collapses the (η, R) cake to 1-D with a pixel-count-weighted mean
     (robust to partial azimuthal coverage / off-detector beam centres) instead of the
@@ -387,7 +396,9 @@ def integrate_frame(img_t, spec, geom, kernel, corrections, variance_cfg,
     if pol is not None or sa is not None:
         int2d = m.integrate_with_corrections(
             img_t, spec, polarization=pol, solid_angle=sa).detach().cpu().numpy()
-        counts = corr_counts if corr_counts is not None else corrections_counts(spec)
+        int2d = eta_wrap.apply_take(int2d, eta_take)
+        counts = corr_counts if corr_counts is not None else eta_wrap.apply_take(
+            corrections_counts(spec), eta_take)
         with np.errstate(invalid="ignore", divide="ignore"):
             norm = np.where(counts > 0.5, int2d / counts, np.nan)
         prof = _profile_from_cake(norm, count_cake=counts if weighted else None)
@@ -404,8 +415,8 @@ def integrate_frame(img_t, spec, geom, kernel, corrections, variance_cfg,
             "polygon":   m.integrate_polygon_with_variance,
         }.get(kernel, m.integrate_subpixel_with_variance)
         mean2d, sig2d = fn(img_t, geom, error_model=em)
-        mean_np = mean2d.detach().cpu().numpy()
-        sig_np  = sig2d.detach().cpu().numpy()
+        mean_np = eta_wrap.apply_take(mean2d.detach().cpu().numpy(), eta_take)
+        sig_np = eta_wrap.apply_take(sig2d.detach().cpu().numpy(), eta_take)
         prof = _profile_from_cake(mean_np, count_cake=cnt_cake if weighted else None)
         # σ of the η-mean: sqrt(Σσ²)/N over valid η bins
         var = np.nansum(sig_np ** 2, axis=0)
@@ -423,7 +434,7 @@ def integrate_frame(img_t, spec, geom, kernel, corrections, variance_cfg,
         "polygon": m.integrate_polygon,
     }.get(kernel, m.integrate_subpixel)
     int2d = fn(img_t, geom, normalize=True)
-    cake_np = int2d.detach().cpu().numpy()
+    cake_np = eta_wrap.apply_take(int2d.detach().cpu().numpy(), eta_take)
     prof = _profile_from_cake(cake_np, count_cake=cnt_cake if weighted else None)
     sigma = np.sqrt(np.maximum(prof, 0.0)) if need_sigma else None
     if return_cake:
@@ -443,16 +454,47 @@ def build_integration_context(spec, kernel: str, mask, corrections, weighted: bo
     lsd, px, wl = float(spec.Lsd), float(spec.pxY), float(spec.Wavelength)
     pol, sa = corrections
     corr_on = pol is not None or sa is not None
-    geom = None if corr_on else build_geom(spec, kernel, mask)
-    r_ax = compute_r_axis(spec)
-    corr_counts = corrections_counts(spec) if corr_on else None
-    cnt = (count_cake(geom, kernel, spec.NrPixelsZ, spec.NrPixelsY)
+    # An eta range crossing +/-180 cannot be binned directly: no kernel wraps,
+    # so every bin centred past the cut comes back empty and its pixels are
+    # dropped. eta_wrap.plan_eta turns it into a whole-circle binning plus the
+    # columns to lift out, which is exact. `take` is None for everything that
+    # does not cross -- the ordinary case -- and then nothing below changes.
+    plan = eta_wrap.plan_eta(spec.EtaMin, spec.EtaMax, spec.EtaBinSize)
+    bin_spec = spec
+    if plan.take is not None:
+        bin_spec = replace_spec_eta(spec, plan.bin_min, plan.bin_max)
+        bin_spec.validate()
+    geom = None if corr_on else build_geom(bin_spec, kernel, mask)
+    r_ax = compute_r_axis(bin_spec)
+    corr_counts = corrections_counts(bin_spec) if corr_on else None
+    cnt = (count_cake(geom, kernel, bin_spec.NrPixelsZ, bin_spec.NrPixelsY)
            if (weighted and not corr_on) else None)
-    n_eta = spec.n_eta_bins
-    eta_ax = float(spec.EtaMin) + float(spec.EtaBinSize) * (np.arange(n_eta) + 0.5)
-    return {"spec": spec, "geom": geom, "r_ax": r_ax, "corr_counts": corr_counts,
+    # The count cakes are consumed alongside a cake that has ALREADY been cut
+    # down to the requested columns, so they have to be cut the same way.
+    corr_counts = eta_wrap.apply_take(corr_counts, plan.take)
+    cnt = eta_wrap.apply_take(cnt, plan.take)
+    # The axis is the caller's own request, unwrapped: 125..205, not
+    # 125..175 then -175..-155. The data is in that order; so is this.
+    eta_ax = plan.centres
+    return {"spec": spec, "bin_spec": bin_spec, "eta_take": plan.take,
+            "eta_plan_problem": plan.problem,
+            "geom": geom, "r_ax": r_ax, "corr_counts": corr_counts,
             "cnt": cnt, "eta_ax": eta_ax, "lsd": lsd, "px": px, "wl": wl,
             "corr_on": corr_on}
+
+
+def replace_spec_eta(spec, eta_min: float, eta_max: float):
+    """``spec`` with a different eta range and nothing else touched.
+
+    A shallow copy rather than a mutation: the caller's spec is the record of
+    what was ASKED for -- it is what labels the output and what the run's
+    provenance quotes -- while the copy is only what the binner is told.
+    """
+    import copy
+    out = copy.copy(spec)
+    out.EtaMin = float(eta_min)
+    out.EtaMax = float(eta_max)
+    return out
 
 
 class _GsasHeader:
@@ -2448,6 +2490,7 @@ class BatchWorker(QtCore.QThread):
                                                 self._corrections, self._weighted)
             self.geom_ready.emit(ctx)
             geom = ctx["geom"]; corr_on = ctx["corr_on"]
+            eta_take = ctx["eta_take"]
             corr_counts = ctx["corr_counts"]; cnt = ctx["cnt"]
             r_ax = ctx["r_ax"]; eta_ax = ctx["eta_ax"]
             want_zarr = "zarr" in self._fmts and self._out_dir is not None
@@ -2646,10 +2689,18 @@ class BatchWorker(QtCore.QThread):
                 if self._drift_traj is not None:
                     cur_spec = _spec_from_trajectory(self._spec, self._drift_traj, abs_i)
                     cur_lsd  = float(cur_spec.Lsd)
-                    cur_geom = None if corr_on else build_geom(cur_spec, self._kernel, mask)
-                    cur_cc   = corrections_counts(cur_spec) if corr_on else None
-                    cur_cnt  = (count_cake(cur_geom, self._kernel, cur_spec.NrPixelsZ,
-                                           cur_spec.NrPixelsY)
+                    # Same eta range as the context's, so the same plan: bin
+                    # the circle and take the requested columns. Without this
+                    # the drift path would quietly undo the fix per frame.
+                    cur_bin  = (cur_spec if eta_take is None else
+                                replace_spec_eta(cur_spec, eta_wrap.ETA_LO,
+                                                 eta_wrap.ETA_HI))
+                    cur_geom = None if corr_on else build_geom(cur_bin, self._kernel, mask)
+                    cur_cc   = (eta_wrap.apply_take(corrections_counts(cur_bin), eta_take)
+                                if corr_on else None)
+                    cur_cnt  = (eta_wrap.apply_take(
+                                    count_cake(cur_geom, self._kernel, cur_bin.NrPixelsZ,
+                                               cur_bin.NrPixelsY), eta_take)
                                 if (self._weighted and not corr_on) else None)
                 else:
                     cur_spec = spec
@@ -2663,12 +2714,14 @@ class BatchWorker(QtCore.QThread):
                     prof, sigma, cake_2d, cake_sigma = integrate_frame(
                         img_t, cur_spec, cur_geom, self._kernel, self._corrections,
                         self._variance_cfg, need_sigma, corr_counts=cur_cc,
+                        eta_take=eta_take,
                         return_cake=True, weighted=self._weighted, cnt_cake=cur_cnt)
                 else:
                     cake_2d = None; cake_sigma = None
                     prof, sigma = integrate_frame(
                         img_t, cur_spec, cur_geom, self._kernel, self._corrections,
                         self._variance_cfg, need_sigma, corr_counts=cur_cc,
+                        eta_take=eta_take,
                         weighted=self._weighted, cnt_cake=cur_cnt)
 
                 if sigma is None:
@@ -3028,6 +3081,7 @@ class PumpProbeWorker(QtCore.QThread):
                 ctx = build_integration_context(spec, self._kernel, mask,
                                                 self._corrections, self._weighted)
             geom = ctx["geom"]; corr_counts = ctx["corr_counts"]; cnt = ctx["cnt"]
+            eta_take = ctx["eta_take"]
             r_ax = ctx["r_ax"]
 
             rebin_unit = rebin_cfg_parts(self._q_cfg)[0]
@@ -3057,7 +3111,7 @@ class PumpProbeWorker(QtCore.QThread):
                 img_t = torch.from_numpy(img.astype(np.float64))
                 prof, _ = integrate_frame(
                     img_t, spec, geom, self._kernel, self._corrections,
-                    None, False, corr_counts=corr_counts,
+                    None, False, corr_counts=corr_counts, eta_take=eta_take,
                     weighted=self._weighted, cnt_cake=cnt)
                 if self._q_cfg:
                     prof, _ = rebin_R_to_grid(compute_r_axis(spec), prof, None,
@@ -3795,6 +3849,7 @@ class FolderMonitorWorker(QtCore.QThread):
                                                 self._corrections, self._weighted)
             self.geom_ready.emit(ctx)
             geom = ctx["geom"]; corr_counts = ctx["corr_counts"]; cnt = ctx["cnt"]
+            eta_take = ctx["eta_take"]
             lsd, px, wl = ctx["lsd"], ctx["px"], ctx["wl"]
             r_ax = ctx["r_ax"]
             out_grid = None
@@ -3840,6 +3895,7 @@ class FolderMonitorWorker(QtCore.QThread):
                     prof, sigma = integrate_frame(
                         img_t, spec, geom, self._kernel, self._corrections,
                         self._variance_cfg, True, corr_counts=corr_counts,
+                        eta_take=eta_take,
                         weighted=self._weighted, cnt_cake=cnt)
                     if sigma is None:
                         sigma = np.sqrt(np.maximum(prof, 0.0))

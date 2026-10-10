@@ -546,60 +546,55 @@ def test_sumframes_missing_from_only_some_panels_is_refused(tmp_path):
 
 # ── eta past the +/-180 wrap ────────────────────────────────────────────
 # "ge1 eta range is odd in that ge1 eta should be spanning 120 to 210 deg",
-# then "ge2 eta range looks ok", "ge3 looks ok", "ge4 eta also looks ok".
-# ge1 is the only one of the four whose range crosses the branch cut, and
-# its bins at 185/195/205 came back identically zero across all 3520 R
-# bins. pixel_to_REta types eta as "[-180, 180)" -- those bins cannot be
-# filled by any pixel, so 1,027,309 real pixels (33% of ge1's in-range
-# area) were dropped from the integration with nothing said.
+# then "ge2 eta range looks ok", "ge3 looks ok", "ge4 eta also looks ok" --
+# ge1 was the only one crossing the branch cut, and its bins at 185/195/205
+# came back identically zero.
+#
+# That is now SERVED, not merely detected: eta_wrap bins the whole circle
+# and lifts the requested bins out of it (tests/test_eta_wrap.py). What
+# remains reportable is only what that cannot do.
 
-def test_a_range_past_180_is_reported_with_the_bins_that_cannot_fill(panels,
-                                                                     tmp_path):
+def test_the_windmill_range_is_no_longer_reported_as_a_problem(panels,
+                                                               tmp_path):
+    """ge1's 120..210 is the case this all started from, and one run now
+    fills it. Reporting it would be telling the user about a defect that
+    is no longer there."""
     seen = []
     combine_panel_zarrs(panels, tmp_path / "m.zarr.zip", warn=seen.append)
-    msg = [m for m in seen if "180" in m and "empty" in m]
-    assert len(msg) == 1, "the wrap must be called out on its own"
-    assert "ge1" in msg[0]
-    for centre in ("185", "195", "205"):
-        assert centre in msg[0], "name the bins, not just the panel"
+    assert not [m for m in seen if "wrap" in m or "empty" in m]
 
 
-def test_the_panels_that_do_not_cross_are_not_implicated(panels, tmp_path):
-    seen = []
-    combine_panel_zarrs(panels, tmp_path / "m.zarr.zip", warn=seen.append)
-    msg = next(m for m in seen if "180" in m and "empty" in m)
-    for ok in ("ge2", "ge3", "ge4"):
-        assert ok not in msg
-
-
-def test_a_set_wholly_inside_the_cut_says_nothing(tmp_path):
-    inside = {"ge1": (120.0, 180.0), "ge2": (-150.0, -60.0),
-              "ge3": (-60.0, 30.0), "ge4": (30.0, 120.0)}
-    paths = {p: str(_panel_zarr(tmp_path / f"s_000001.{p}.zarr.zip", p,
-                                eta=inside[p])) for p in PANELS}
-    seen = []
-    combine_panel_zarrs(paths, tmp_path / "m.zarr.zip", warn=seen.append)
-    assert not [m for m in seen if "empty" in m]
-
-
-def test_the_check_is_shared_with_the_gui_not_reimplemented(panels, tmp_path):
-    """The table and the archive must not be able to disagree about which
-    bins are unfillable."""
+def test_a_bin_straddling_the_seam_is_still_reported(tmp_path):
+    """A 10 deg bin centred on 180 spans 175..185, half on each side of the
+    cut. No single floor() binning can fill it and the whole-circle detour
+    cannot either -- it would need two sub-bins recombined by pixel count.
+    Said out loud rather than returned half empty."""
     from midas_gui.hydra_zarr_combine import eta_beyond_branch_cut
-    per = {"ge1": {"EtaMin": 120.0, "EtaMax": 210.0, "EtaBinSize": 10.0}}
-    assert eta_beyond_branch_cut(per, ["ge1"]) is not None
-    per["ge1"]["EtaMax"] = 180.0
-    assert eta_beyond_branch_cut(per, ["ge1"]) is None
-
-
-def test_exactly_180_is_outside_and_minus_180_is_inside(tmp_path):
-    """pixel_to_REta is [-180, 180): -180 is attainable, +180 is not. A bin
-    CENTRE is what has to land inside, not the range edge."""
-    from midas_gui.hydra_zarr_combine import eta_beyond_branch_cut
-    # centres 175, 185 -> one unfillable
-    per = {"ge1": {"EtaMin": 170.0, "EtaMax": 190.0, "EtaBinSize": 10.0}}
+    per = {"ge1": {"EtaMin": 175.0, "EtaMax": 185.0, "EtaBinSize": 10.0}}
     msg = eta_beyond_branch_cut(per, ["ge1"])
-    assert msg is not None and "185" in msg and "175" not in msg
-    # centres -175, -165 -> both fine
-    per = {"ge1": {"EtaMin": -180.0, "EtaMax": -160.0, "EtaBinSize": 10.0}}
-    assert eta_beyond_branch_cut(per, ["ge1"]) is None
+    assert msg is not None and "ge1" in msg
+
+
+def test_a_grid_that_does_not_divide_the_circle_is_still_reported(tmp_path):
+    from midas_gui.hydra_zarr_combine import eta_beyond_branch_cut
+    per = {"ge1": {"EtaMin": 120.0, "EtaMax": 210.0, "EtaBinSize": 7.0}}
+    assert eta_beyond_branch_cut(per, ["ge1"]) is not None
+
+
+def test_a_servable_wrapped_range_says_nothing(tmp_path):
+    from midas_gui.hydra_zarr_combine import eta_beyond_branch_cut
+    for lo, hi in ((120.0, 210.0), (170.0, 190.0), (-190.0, -170.0)):
+        per = {"ge1": {"EtaMin": lo, "EtaMax": hi, "EtaBinSize": 10.0}}
+        assert eta_beyond_branch_cut(per, ["ge1"]) is None, (lo, hi)
+
+
+def test_the_check_is_shared_with_the_integrator_not_reimplemented(tmp_path):
+    """The table, the archive and the binner must not be able to disagree
+    about what is servable."""
+    from midas_gui.eta_wrap import plan_eta
+    from midas_gui.hydra_zarr_combine import eta_beyond_branch_cut
+    for lo, hi, step in ((120.0, 210.0, 10.0), (175.0, 185.0, 10.0),
+                         (120.0, 210.0, 7.0), (-60.0, 30.0, 10.0)):
+        per = {"ge1": {"EtaMin": lo, "EtaMax": hi, "EtaBinSize": step}}
+        reported = eta_beyond_branch_cut(per, ["ge1"]) is not None
+        assert reported == (plan_eta(lo, hi, step).problem is not None)
