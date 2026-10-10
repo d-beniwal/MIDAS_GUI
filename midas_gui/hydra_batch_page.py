@@ -227,6 +227,15 @@ class HydraBatchPage(QtWidgets.QWidget):
         # frame recorded at omega=0, which is precisely the all-zero /Omegas
         # the single-detector tab goes out of its way to warn about. A
         # single-frame scan never notices; a rotation scan is simply wrong.
+        # In a container, not loose in this card: it is MOVED to sit under
+        # whichever caking card is showing (_place_shared_cake_widgets), the
+        # same treatment the bin-grid toggle got. Asked for twice while
+        # looking at the caking table -- "omega bin size is not available
+        # here" -- and a control the run depends on being two cards away
+        # from where you look for it is not available in any useful sense.
+        self._ome_box = QtWidgets.QWidget()
+        ome_v = QtWidgets.QVBoxLayout(self._ome_box)
+        ome_v.setContentsMargins(0, 0, 0, 0); ome_v.setSpacing(2)
         ome_row = QtWidgets.QHBoxLayout(); ome_row.setSpacing(4)
         self._ome_start = _fspin(-100000.0, 100000.0, 4, 0.0, "°")
         self._ome_step = _fspin(-100000.0, 100000.0, 6, 0.0, "°")
@@ -245,12 +254,13 @@ class HydraBatchPage(QtWidgets.QWidget):
         ome_row.addWidget(self._ome_start)
         ome_row.addWidget(QtWidgets.QLabel("ω step:"))
         ome_row.addWidget(self._ome_step)
-        integ.body.addLayout(ome_row)
-        integ.body.addWidget(self._ome_collapse)
+        ome_row.addStretch(1)
+        ome_v.addLayout(ome_row)
+        ome_v.addWidget(self._ome_collapse)
         self._ome_lbl = QtWidgets.QLabel("")
         self._ome_lbl.setWordWrap(True)
         self._ome_lbl.setStyleSheet("color:#8AB4F8;font-size:10px")
-        integ.body.addWidget(self._ome_lbl)
+        ome_v.addWidget(self._ome_lbl)
         for w in (self._ome_start, self._ome_step):
             w.valueChanged.connect(lambda *_: self._refresh_omega_note())
         self._ome_collapse.toggled.connect(lambda *_: self._refresh_omega_note())
@@ -465,7 +475,7 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._cake_summary.cakingEdited.connect(self._on_summary_cake_edited)
         self._card_stack.addWidget(self._cake_summary)
         lv.addWidget(self._card_stack)
-        self._place_grid_toggle(self._cards[1])
+        self._place_shared_cake_widgets(self._cards[1])
         lv.addStretch(1)
         split.addWidget(scroll)
 
@@ -572,21 +582,30 @@ class HydraBatchPage(QtWidgets.QWidget):
         except ValueError:
             return None
 
-    def _place_grid_toggle(self, host) -> None:
-        """Move the shared bin-grid toggle into ``host``'s caking card.
+    def _place_shared_cake_widgets(self, host) -> None:
+        """Move the page-level caking widgets into ``host``'s caking card.
 
-        One widget, reparented, rather than one per card: the checkbox is
-        page-level state (``_state_widgets`` persists it by identity), and
-        four copies would have to be kept in step with each other for no
-        benefit. Qt reparents on addWidget, but the OLD layout would still
-        hold an item pointing at it, so it is removed explicitly first.
+        The bin-grid toggle and the rotation row are both page-level state
+        that belongs WITH the caking values rather than with the processing
+        recipe -- one draws them, the other is the ninth, tenth and
+        eleventh cake_parameters fields. Each is one widget, reparented to
+        follow the visible card, rather than one copy per card: they are
+        persisted by identity in ``_state_widgets``, and five copies would
+        have to be kept in step with each other for no benefit.
+
+        Qt reparents on addWidget, but the OLD layout would still hold an
+        item pointing at the widget, so it is removed explicitly first.
         """
-        chk = self._grid_chk
-        old = chk.parentWidget().layout() if chk.parentWidget() else None
-        if old is not None:
-            old.removeWidget(chk)
-        host.cake_extras_layout().addWidget(chk)
-        chk.show()
+        for w in (self._ome_box, self._grid_chk):
+            old = w.parentWidget().layout() if w.parentWidget() else None
+            if old is not None:
+                old.removeWidget(w)
+            host.cake_extras_layout().addWidget(w)
+            w.show()
+
+    #: Kept so older callers (and tests) do not break on the rename.
+    def _place_grid_toggle(self, host) -> None:
+        self._place_shared_cake_widgets(host)
 
     def _on_panel_changed(self, key: str):
         n = self._panel_num(key)
@@ -602,13 +621,13 @@ class HydraBatchPage(QtWidgets.QWidget):
             # meaning on this page, and the build is gated on that tab being
             # visible, so without this the click would appear to do nothing.
             self._card_stack.setCurrentWidget(self._cake_summary)
-            self._place_grid_toggle(self._cake_summary)
+            self._place_shared_cake_widgets(self._cake_summary)
             self._refresh_cake_summary()
             self._top_tabs.setCurrentWidget(self._det_view)
             self._refresh_detector_preview(None)
             return
         self._card_stack.setCurrentWidget(self._cards[n])
-        self._place_grid_toggle(self._cards[n])
+        self._place_shared_cake_widgets(self._cards[n])
         self._viewer_stack.setCurrentWidget(self._viewer_pairs[n])
         self._refresh_detector_preview(n)
 

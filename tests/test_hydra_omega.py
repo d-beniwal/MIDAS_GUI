@@ -127,3 +127,60 @@ def test_the_rotation_is_page_level_not_per_panel(page):
 
 def test_the_rotation_is_saved_with_the_page_state(page):
     assert {"ome_start", "ome_step", "ome_collapse"} <= set(page._state_widgets())
+
+
+# ── where it is, which is the half that was actually reported ───────────
+def _card_title(w):
+    c = w.parentWidget()
+    while c is not None and not hasattr(c, "title"):
+        c = c.parentWidget()
+    return c.title() if c is not None else ""
+
+
+def test_the_rotation_row_sits_in_the_caking_card_not_two_cards_away(page):
+    """First put in the shared Integration card — correct, shared, and
+    nowhere near where it was asked for. Reported twice as "omega bin size
+    is not available here" / "I still don't see the omega step ... option",
+    both times while looking at the caking table."""
+    page.show()
+    page._toolbar.set_available([1, 2, 3, 4])
+    page._on_panel_changed("ge1")
+    assert "caking" in _card_title(page._ome_start)
+
+
+def test_it_follows_whichever_caking_card_is_showing(page):
+    page.show()
+    page._toolbar.set_available([1, 2, 3, 4])
+    for key, want in (("ge3", "ge3 — caking"), ("ge4", "ge4 — caking")):
+        page._on_panel_changed(key)
+        assert _card_title(page._ome_start) == want
+
+
+def test_it_is_on_the_composite_card_too(page):
+    """The all-panels view is where it was asked for, and ω is shared, so
+    that is exactly where it belongs."""
+    page.show()
+    page._toolbar.set_available([1, 2, 3, 4])
+    page._on_panel_changed("composite")
+    assert "all panels" in _card_title(page._ome_start)
+    assert page._ome_start.isVisible() and page._ome_step.isVisible()
+
+
+def test_it_travels_with_the_grid_toggle_and_neither_is_left_behind(page):
+    page.show()
+    page._toolbar.set_available([1, 2, 3, 4])
+    for key in ("ge1", "composite", "ge2"):
+        page._on_panel_changed(key)
+        assert _card_title(page._ome_start) == _card_title(page._grid_chk)
+        assert not page._ome_start.isHidden()
+
+
+def test_reparenting_does_not_cost_it_its_value(page):
+    page.show()
+    page._toolbar.set_available([1, 2, 3, 4])
+    page._ome_start.setValue(7.25)
+    page._ome_step.setValue(0.05)
+    page._on_panel_changed("composite")
+    page._on_panel_changed("ge4")
+    assert page.omega_cfg()["start"] == pytest.approx(7.25)
+    assert page.omega_cfg()["step"] == pytest.approx(0.05)
