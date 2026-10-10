@@ -5213,3 +5213,118 @@ metadata (`_json_default` sorts sets to lists), just never read back.
 Not done: the same precedence question applies to Batch Integrate's
 `apply_project_integration`, which has the identical shape. Left alone — no
 report against it, and the fix belongs with evidence of the symptom.
+
+## 2026-10-09/10 — Hydra Batch Integrate: a batch is a FOLDER, and eta wraps
+
+A long beamline session at 1-ID-E (connolly_oct26). Four decisions worth
+keeping; the rest is in `git log` for the ~25 commits on
+`calibrate-parameter-table-and-limits`.
+
+### An eta range may cross ±180, and the backend cannot bin one
+
+`midas_calibrate_v2`'s `pixel_to_REta` types its output
+`eta_deg: azimuth (deg, [-180, 180))`, and every `midas_integrate_v2`
+kernel assigns a pixel with a bare `floor((Eta - EtaMin)/EtaBinSize)` plus
+a range test. None of them wraps — `polygon`'s `wraparound` is a different
+thing, one PIXEL whose corners straddle the seam.
+
+So ge1's 120..210, which is the azimuth that panel physically subtends,
+asked for bins centred at 185/195/205 that no pixel can land in. They came
+back identically zero and their pixels were not accumulated anywhere:
+**1,027,309 of 3,091,116 in-range pixels, 33.2% of the panel**, silently
+discarded. Only ge1 crossed the cut, so only ge1 was affected — which is
+exactly how it presented ("ge1 eta range is odd", ge2/ge3/ge4 "look ok").
+
+`midas_gui.eta_wrap` bins the WHOLE CIRCLE and lifts the requested bins out
+of it in the requested order, relabelling with the caller's unwrapped
+centres. Verified bit-identical against integrating the two halves
+separately, on all three kernels. `plan_eta` returns `take=None` for every
+range that does not cross, and on that path nothing changes.
+
+It will NOT serve a bin that straddles the seam (a 10° bin centred on 180
+spans 175..185); that needs two sub-bins recombined by pixel count. It is
+declined by name rather than returned half empty. **This matters for
+cardinal-direction caking**: 0/90/−90 are fine, 180 must be asked for with
+an edge on the seam (170..180 and −180..−170).
+
+Anything derived alongside the cake must take the same `eta_take` — the
+bin area did not, and a 36-row area against a 9-row cake made
+`GSASZarrWriter` reject the pair, leaving a 136-byte empty ge1 archive that
+then took the four-panel combine down with it. One `bin_area_for` now owns
+that question.
+
+### A Hydra batch is a source FOLDER, not a ge1–ge4 quartet
+
+The first fan-out grouped by sibling-set, so every frame file became its
+own scan: thirteen output directories for one load step, names repeated
+three times over (`APS_4130_C_load_step_0_APS_4130_C_load_step_0_...ge1`),
+and load_step_1's output nested inside load_step_0.
+
+`helpers.group_paths_by_output_dir` had solved all three for the
+single-detector tab in 9302e64 — its docstring names the nesting bug as the
+thing it exists to prevent — and a parallel, worse version was written
+instead. The lesson is the general one: when the convention already has an
+answer, reuse it rather than re-deriving it.
+
+Hydra cannot reuse it wholesale, though, because **both layouts are real**:
+
+    .../APS_4130_C_load_step_0/..._004057.ge1.h5   (panels together)
+    .../ge1/APS_4130_C_load_step_0/..._004057.ge1.h5   (panel above scan)
+
+Grouping on a file's own parent is right for the first and splits one scan
+into four for the second. Grouping is therefore by the parent of the
+**ge1-normalised** path, which collapses both to one key per scan.
+
+Two contracts that are easy to break and are now pinned by tests:
+
+* a pick of ONE file is still a four-panel scan — the selection is expanded
+  through `hydra_siblings`, narrowed to the ticked panels.
+* the **Output box is authoritative for a single scan** (each panel appends
+  its own `ge{n}/`). `group_paths_by_output_dir` prefers the DERIVED dir for
+  a single group, which is right for the single-detector tab — whose box
+  auto-fills from that same derivation — and turns a typed `.../out` into
+  `.../out/panel.ge1/ge1` here. Only a multi-scan selection fans out, and
+  it keeps the stale-autofill rule.
+
+Hydra passes `derive=suggest_panel_base_output_dir` (`<expid>_bc/<froot>`)
+rather than the default `suggest_integration_output_dir`
+(`<expid>_bc/<froot>/<det>`). That hook is not cosmetic: the
+"stale autofill or chosen root" test compares the Output box against the
+derived dirs, so a caller deriving one convention while the grouper assumes
+another can never match, is read as a custom root, and nests.
+
+### The combiner must not have a hardcoded list of what to carry
+
+`hydra_zarr_combine` reproduced the reference script's group list and wrote
+exactly those names, dropping anything else without a word — so every
+merged archive was missing `SumFrames`, an `(nR, nEta)` array, i.e. primary
+data, plus `active_instrument/`. The two names were the symptom; the silent
+list was the bug. `_carry_unhandled` now takes everything not written by
+name and REPORTS what it did, because carrying something silently is the
+same bug in a new coat.
+
+Its shape test leans deliberately: declining to concatenate something that
+really was caked costs a copy and a log line, while concatenating something
+that was not invents an array. At one eta bin per panel the trailing-axis
+test says nothing (widths are `[1,1,1,1]`), so the array must also share
+leading dims with the known caked arrays.
+
+A non-contiguous eta axis is NOT a defect — the merge concatenates and
+REtaMap carries every column's own eta, so an uncovered wedge is absent
+rather than misindexed. The only thing it rules out is summarising the
+result with one `(EtaMin, EtaMax)` pair.
+
+### Process note
+
+Three consecutive full suite runs were killed mid-flight to turn around
+urgent fixes. Each kill was individually defensible; the aggregate was not.
+`test_hydra_batch_ui` had been red since the omega commit for about an hour
+without anyone knowing. `--forked` re-imports the package per test
+subprocess, so a mid-run edit invalidates the whole run — if a fix cannot
+wait, kill the suite deliberately and re-run after, rather than editing
+under it.
+
+Three of this session's bugs survived a passing suite because the fixtures
+used invented key names (`ETA_MIN` where every writer emits `EtaMin`) or
+geometry that tiles nothing. A fixture that does not look like real data is
+not evidence.
