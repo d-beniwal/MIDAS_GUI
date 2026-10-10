@@ -155,10 +155,44 @@ def _check(condition: bool, msg: str) -> None:
         raise ValueError(msg)
 
 
-def validate(panels, zs):
+#: Groups a per-panel archive must have for the merge to mean anything.
+_REQUIRED = ("OmegaSumFrame", "Omegas", "REtaMap", "InstrumentParameters")
+
+
+def _check_usable(panels, zs, paths) -> None:
+    """Fail with a sentence, not a bare KeyError, on an unusable archive.
+
+    A panel whose integration failed leaves a valid but EMPTY zip -- 136
+    bytes, no groups -- and the first thing to touch it raised
+    ``KeyError('OmegaSumFrame')``, which reached the run log as the single
+    word ``'OmegaSumFrame'``. That says nothing about which panel, nothing
+    about why, and nothing about where to look.
+    """
+    for panel, z, path in zip(panels, zs, paths):
+        absent = [g for g in _REQUIRED if g not in z]
+        if not absent:
+            continue
+        try:
+            size = Path(path).stat().st_size
+        except OSError:
+            size = -1
+        empty = not list(z.keys())
+        raise ValueError(
+            f"{panel}'s archive is not usable: {Path(path).name} has no "
+            + ", ".join(absent)
+            + (f" (the file is {size} bytes and holds nothing — that panel's "
+               f"integration almost certainly failed; its error is in the run "
+               f"log above)" if empty else
+               f" (the file is {size} bytes; it holds "
+               f"{', '.join(sorted(z.keys())) or 'nothing'})"))
+
+
+def validate(panels, zs, paths=None):
     """``(ir_keys, osf_keys, eta_widths)``, or raise naming the first
     disagreement. Nothing is written until this passes."""
     p0 = panels[0]
+    if paths is not None:
+        _check_usable(panels, zs, paths)
     has_ir = ["IntegrationResult" in z for z in zs]
     if any(has_ir) and not all(has_ir):
         missing = [panels[i] for i, h in enumerate(has_ir) if not h]
@@ -600,7 +634,7 @@ def combine_panel_zarrs(panel_paths: dict, out_path=None, warn=None) -> Path:
     stores = [zarr.ZipStore(str(p), mode="r") for p in paths]
     try:
         zs = [zarr.group(s) for s in stores]
-        ir_keys, osf_keys, eta_widths = validate(panels, zs)
+        ir_keys, osf_keys, eta_widths = validate(panels, zs, paths)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="midas_gui_combine_") as tmp:
             root = zarr.group(zarr.DirectoryStore(tmp))
