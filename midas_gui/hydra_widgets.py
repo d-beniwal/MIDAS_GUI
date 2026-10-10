@@ -249,6 +249,67 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
     def _dataset(self) -> str:
         return self._ds_combo.currentText().split("   ")[0].strip() or self._default_dataset
 
+    def get_state(self) -> dict:
+        """Everything needed to put this field back, mirroring
+        ``widgets.FieldSelector.get_state``.
+
+        The Hydra loader saved the frame range, the masks and the panel
+        ticks and NOT this, so a project reopened with Dark ticked and a
+        file chosen came back with neither -- reported as "dark file
+        settings are not getting saved in the integrator". The computed
+        field itself is not saved: it is four arrays derived from a file
+        that is still on disk, so it is recomputed on restore.
+        """
+        st = {
+            "checked": self.isChecked(),
+            "path": self._path_ed.text(),
+            # `is not None`, NOT truthiness: PyQt5's QComboBox implements
+            # __len__, so a combo with no items yet is FALSY and the plain
+            # `if self._ds_combo` dropped the dataset on exactly the case
+            # that matters -- a path whose datasets have not been probed.
+            "dataset": (self._ds_combo.currentText()
+                        if self._ds_combo is not None else ""),
+            "start": self._start.value(),
+            "end": self._end.value(),
+        }
+        if self._mode_combo is not None:
+            st["mode"] = self._mode_combo.currentIndex()
+        if self._scale is not None:
+            st["scale"] = self._scale.value()
+        return st
+
+    def set_state(self, state: dict) -> None:
+        """Restore and, if it was on, recompute -- the same "re-trigger the
+        tab's own pipeline" rule the single-detector selector follows. A
+        checkbox that comes back ticked over an uncomputed field would claim
+        a correction that is not being applied."""
+        if not state:
+            return
+        path = (state.get("path") or "").strip()
+        if path:
+            self._set_path(path)
+        ds = state.get("dataset")
+        if ds and self._ds_combo is not None:
+            self._ds_combo.setEditText(ds)
+        # Widen before setting: the range caps come from probing the file,
+        # which may not have been possible yet, and a saved value silently
+        # clamped to 0 would quietly average the wrong frames.
+        hi = max(self._start.maximum(), int(state.get("start", 0) or 0),
+                 int(state.get("end", 0) or 0))
+        self._start.setMaximum(hi)
+        self._end.setMaximum(hi)
+        if "start" in state:
+            self._start.setValue(int(state["start"]))
+        if "end" in state:
+            self._end.setValue(int(state["end"]))
+        if self._mode_combo is not None and "mode" in state:
+            self._mode_combo.setCurrentIndex(int(state["mode"]))
+        if self._scale is not None and "scale" in state:
+            self._scale.setValue(float(state["scale"]))
+        self.setChecked(bool(state.get("checked", False)))
+        if self.isChecked() and path:
+            self._compute_all()
+
     def set_data_path_provider(self, fn):
         """`fn()` returns the owning panel's current Data path (str). Used to
         prefill this field the first time it's checked, and as the Browse…
@@ -1086,6 +1147,11 @@ class HydraLoaderPanel(QtWidgets.QWidget):
             "masks": {n: sel.get_state() for n, sel in self._mask_sels.items()},
             "panels": sorted(n for n, cb in self._status_lbls.items()
                              if cb.isChecked()),
+            # Dark / bright / background were simply absent here, so they
+            # were not in any project or session this page ever saved.
+            "fields": {k: sel.get_state() for k, sel in
+                       (("dark", self._dark_sel), ("bright", self._bright_sel),
+                        ("background", self._bg_sel))},
         }
 
     def set_state(self, state: dict):
@@ -1101,6 +1167,9 @@ class HydraLoaderPanel(QtWidgets.QWidget):
             sel = self._mask_sels.get(int(n_key))
             if sel is not None:
                 sel.set_state(mstate)
+        for key, sel in (("dark", self._dark_sel), ("bright", self._bright_sel),
+                         ("background", self._bg_sel)):
+            sel.set_state((state.get("fields") or {}).get(key))
         # Panel selection. This can only ever NARROW what the current path
         # actually has: a saved tick for a panel not on disk must not
         # re-enable a box no file can back, so the found set still gates it.
