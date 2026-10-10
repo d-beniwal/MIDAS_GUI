@@ -849,7 +849,35 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         else:
             extra = "" if sel == found else f"  \u00b7  {sel} selected"
             self._info_lbl.setText(
-                f"Found {found}/4 panels{extra}  \u00b7  {self._n_frames} frame(s)")
+                f"Found {found}/4 panels{extra}  \u00b7  "
+                f"{self._selection_summary()}")
+
+    def _selection_summary(self) -> str:
+        """Frames the RUN will read, not frames in the anchor file.
+
+        ``_n_frames`` is ``hydra.n_frames_in(anchor)`` -- one file's own
+        sub-frame count, which is what drives the frame slider and is the
+        right number for it. As the status line it is wrong the moment a
+        pick covers more than one file per panel: choosing a folder of
+        fourteen 3-frame files reported "3 frame(s)", which reads exactly
+        like the other thirteen were ignored.
+
+        Counted per PANEL, because the four panels are the same frames
+        seen four times; the run integrates each panel over its own files.
+        Unreadable files are skipped rather than failing the label -- a
+        status line must not be the thing that breaks the loader.
+        """
+        mine = [p for p in (getattr(self, "_selection", None) or [])
+                if panel_for_file(p) == panel_for_file(self.current_path())]
+        if len(mine) <= 1:
+            return f"{self._n_frames} frame(s)"
+        total = 0
+        for p in mine:
+            try:
+                total += int(hydra.n_frames_in(p, self.DATASET))
+            except Exception:
+                continue
+        return f"{len(mine)} files  \u00b7  {total} frame(s) per panel"
 
     @staticmethod
     def _status_style(found: bool) -> str:

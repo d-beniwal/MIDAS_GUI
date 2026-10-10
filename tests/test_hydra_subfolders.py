@@ -225,3 +225,73 @@ def test_a_parallel_scan_does_not_finish_while_it_is_still_launching(app,
     page._launching = False
     page._maybe_finish_run()
     assert finished, "and must finish once launching is done"
+
+
+# ── the per-panel-root layout, and what the status line claims ─────────
+# "chose 1x folder but the files in it were not processed."
+#
+# The real tree puts the panel ABOVE the scan folder:
+#     connolly_oct26/ge1/APS_4130_C_load_step_0/..._004057.ge1.h5
+# so a "Full folder" pick lands inside ge1 and names 14 files.
+
+def _panel_root_tree(root, n_files=14, n_sub=3):
+    h5py = pytest.importorskip("h5py")
+    import numpy as np
+    picked = []
+    for p in (1, 2, 3, 4):
+        d = Path(root) / f"ge{p}" / "APS_4130_C_load_step_0"
+        d.mkdir(parents=True, exist_ok=True)
+        for num in range(4057, 4057 + n_files):
+            f = d / f"APS_4130_C_load_step_0_{num:06d}.ge{p}.h5"
+            with h5py.File(f, "w") as h:
+                h.create_dataset("exchange/data",
+                                 data=np.zeros((n_sub, 4, 4), "f4"))
+            if p == 1:
+                picked.append(str(f))
+    return picked
+
+
+def test_a_pick_inside_ge1_still_finds_the_other_three_panels(app, tmp_path):
+    """The ge token is in the FOLDER here, not only the filename."""
+    from midas_gui.hydra_batch_page import HydraBatchPage
+    picked = _panel_root_tree(tmp_path)
+    page = HydraBatchPage()
+    page._loader.set_selection(picked)
+    plan = page._scan_plan()
+    assert len(plan) == 1, "four panel folders are ONE scan, not four"
+    panels = plan[0][1]
+    assert sorted(panels) == [1, 2, 3, 4]
+    assert [len(panels[k]) for k in sorted(panels)] == [14, 14, 14, 14]
+
+
+def test_that_pick_opens_as_one_source_of_every_frame(app, tmp_path):
+    from midas_gui.workers import _open_source_cfg
+    from midas_gui.hydra_batch_page import HydraBatchPage
+    picked = _panel_root_tree(tmp_path, n_files=5, n_sub=3)
+    page = HydraBatchPage()
+    page._loader.set_selection(picked)
+    page._active_scan = page._scan_plan()[0][1]
+    src = _open_source_cfg(page._source_cfg_for(1))
+    assert src.n_frames == 15, "5 files x 3 sub-frames"
+
+
+def test_the_status_line_counts_the_selection_not_the_anchor(app, tmp_path):
+    """_n_frames is the ANCHOR file's own sub-frame count — right for the
+    frame slider, wrong as a status line the moment a pick covers more
+    than one file. It read "3 frame(s)" for fourteen 3-frame files, which
+    reads exactly like the other thirteen were ignored."""
+    from midas_gui.hydra_batch_page import HydraBatchPage
+    picked = _panel_root_tree(tmp_path, n_files=14, n_sub=3)
+    page = HydraBatchPage()
+    page._loader.set_selection(picked)
+    txt = page._loader._info_lbl.text()
+    assert "14 files" in txt and "42 frame(s)" in txt, txt
+
+
+def test_a_single_file_pick_still_reads_as_before(app, tmp_path):
+    from midas_gui.hydra_batch_page import HydraBatchPage
+    picked = _panel_root_tree(tmp_path, n_files=2, n_sub=3)
+    page = HydraBatchPage()
+    page._loader.set_path(picked[0])
+    txt = page._loader._info_lbl.text()
+    assert "3 frame(s)" in txt and "files" not in txt, txt
