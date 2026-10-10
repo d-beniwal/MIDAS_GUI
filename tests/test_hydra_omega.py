@@ -184,3 +184,107 @@ def test_reparenting_does_not_cost_it_its_value(page):
     page._on_panel_changed("ge4")
     assert page.omega_cfg()["start"] == pytest.approx(7.25)
     assert page.omega_cfg()["step"] == pytest.approx(0.05)
+
+
+# ── chunking, and what the frames are in angle or position ─────────────
+# "we need to be able to designate how to chunk the frames and what those
+# frames are in angle or position. ... This is a solution that exists for
+# the single panel batch integration."
+#
+# It did, and Hydra had neither half: source_cfg carried no chunk_size, so
+# a rotation could only be integrated one raw sub-frame at a time, and
+# there was no way to read the MEASURED angle instead of assuming a ramp.
+
+@pytest.fixture
+def rot_page(app, tmp_path):
+    """A page on a four-panel file with a real motor channel in it."""
+    h5py = pytest.importorskip("h5py")
+    import numpy as np
+    from midas_gui.hydra_batch_page import HydraBatchPage
+    for n in (1, 2, 3, 4):
+        with h5py.File(tmp_path / f"rot_000001.ge{n}.h5", "w") as h:
+            h.create_dataset("exchange/data", data=np.zeros((12, 8, 8), "f4"))
+            h.create_dataset("measurement/scan/samRY",
+                             data=np.linspace(0.0, 1.1, 12))
+    page = HydraBatchPage()
+    page.show()
+    page._loader.set_path(str(tmp_path / "rot_000001.ge1.h5"))
+    return page
+
+
+def test_the_chunk_size_reaches_the_source(rot_page):
+    rot_page._loader._combine_chunk.setValue(3)
+    assert rot_page._source_cfg_for(1)["chunk_size"] == 3
+
+
+def test_the_chunk_size_is_encoded_exactly_as_single_detector_does_it(rot_page):
+    """`chunk or None`, not a mapping of our own. 0 is the "combine
+    everything" sentinel and must reach the source as None, whose meaning
+    differs between an HDF5 and a TIFF pick — so Hydra mirrors the verified
+    path rather than re-deriving it."""
+    rot_page._loader._combine_chunk.setValue(1)
+    assert rot_page._source_cfg_for(1)["chunk_size"] == 1
+    rot_page._loader._combine_chunk.setValue(0)
+    assert rot_page._source_cfg_for(1)["chunk_size"] is None
+
+
+def test_the_combine_op_reaches_the_source(rot_page):
+    rot_page._loader._combine_op.setCurrentIndex(1)       # Sum
+    assert rot_page._source_cfg_for(1)["combine_op"] == "sum"
+
+
+def test_the_chunk_is_the_same_for_every_panel(rot_page):
+    """Synchronised frames of one scan: a chunk is a chunk for all four."""
+    rot_page._loader._combine_chunk.setValue(4)
+    sizes = {rot_page._source_cfg_for(n)["chunk_size"] for n in (1, 2, 3, 4)}
+    assert sizes == {4}
+
+
+def test_the_files_own_channels_are_offered_as_omega_sources(rot_page):
+    offered = [rot_page._ome_channel.itemText(i)
+               for i in range(rot_page._ome_channel.count())]
+    assert "measurement/scan/samRY" in offered
+    assert "" in offered, "blank must stay available — it means 'use the ramp'"
+
+
+def test_a_chosen_channel_reaches_the_omega_cfg(rot_page):
+    rot_page._ome_channel.setCurrentText("measurement/scan/samRY")
+    assert rot_page.omega_cfg()["channel"] == "measurement/scan/samRY"
+
+
+def test_a_channel_overrides_the_ramp_in_the_note(rot_page):
+    rot_page._ome_start.setValue(2.0)
+    rot_page._ome_step.setValue(0.1)
+    rot_page._ome_channel.setCurrentText("measurement/scan/samRY")
+    assert "read per frame" in rot_page._ome_lbl.text()
+    rot_page._ome_channel.setCurrentText("")
+    assert "sub-frame" in rot_page._ome_lbl.text()
+
+
+def test_a_hand_typed_channel_survives_a_repopulate(rot_page):
+    """The list is a convenience, not the set of legal answers."""
+    rot_page._ome_channel.setCurrentText("/some/other/motor")
+    rot_page._populate_omega_channels()
+    assert rot_page._ome_channel.currentText() == "/some/other/motor"
+
+
+def test_ome_sum_from_a_csv_now_lands_on_the_chunk_spin(rot_page, tmp_path):
+    """It used to be read and reported as unhonoured, because the page had
+    no combine count to put it in."""
+    from midas_gui import cake_params
+    from PyQt5 import QtWidgets
+    import unittest.mock as _m
+    f = tmp_path / "cake_parameters.1ide.ge1.csv"
+    cake_params.write_cake_csv(str(f), {
+        "R_MIN": 440.0, "R_MAX": 2200.0, "R_STEP": 0.5,
+        "ETA_MIN": 120.0, "ETA_MAX": 210.0, "ETA_STEP": 10.0,
+        "OME_SUM": 5, "OME_START": 1.0, "OME_STEP": 0.02})
+    with _m.patch.object(QtWidgets.QFileDialog, "getOpenFileName",
+                         staticmethod(lambda *a, **k: (str(f), ""))):
+        rot_page._load_cake_csv(1)
+    assert rot_page._loader.combine_chunk() == 5
+
+
+def test_the_chunk_is_saved_with_the_loader_state(rot_page):
+    rot_page._loader._combine_chunk.setValue(6)
+    assert rot_page._loader.get_state()["combine_chunk"] == 6

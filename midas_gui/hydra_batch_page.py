@@ -39,7 +39,8 @@ from midas_gui.helpers import (
     widgets_to_dict, apply_dict_to_widgets,
     _load_image, rmax_corner_px, rmax_edge_px, draw_polar_bin_overlay,
     browse_start_dir, warn_if_path_missing, suggest_panel_base_output_dir, check_output_dir_writable,
-    suggest_working_dir, bc_path_parts, source_kind)
+    suggest_working_dir, bc_path_parts, source_kind, is_h5,
+    list_h5_1d_datasets)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, OutputFormatSelector, ImageViewer,
                                OriginToolButton, build_lab_frame_axes_items)
@@ -246,6 +247,20 @@ class HydraBatchPage(QtWidgets.QWidget):
             "OME_STEP — ω advanced per raw sub-frame (the omega bin size).\n\n"
             "Left at 0 with OME_START 0, every frame is written to the zarr's "
             "/Omegas as 0°, which is right only for a stationary scan.")
+        # Measured, rather than assumed from a ramp. "What those frames are
+        # in angle or position": a 1-D dataset in the source HDF5 holding
+        # the real rotation (or a motor position) per frame. Read per frame
+        # INSTEAD of the OME_START/OME_STEP ramp, which only describes a
+        # scan that stepped perfectly. Editable because the list is a
+        # convenience, not the set of legal answers.
+        self._ome_channel = _NoScrollComboBox()
+        self._ome_channel.setEditable(True)
+        self._ome_channel.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self._ome_channel.setToolTip(
+            "A 1-D dataset in the source HDF5 holding the measured rotation "
+            "or position, read per frame instead of the ω start / ω step "
+            "ramp.\n\nBlank falls back to the ramp.")
         self._ome_collapse = QtWidgets.QCheckBox("one ω per frame (averaged)")
         self._ome_collapse.setToolTip(
             "Record each output frame's ω as the mean over the raw "
@@ -256,6 +271,10 @@ class HydraBatchPage(QtWidgets.QWidget):
         ome_row.addWidget(self._ome_step)
         ome_row.addStretch(1)
         ome_v.addLayout(ome_row)
+        chan_row = QtWidgets.QHBoxLayout(); chan_row.setSpacing(4)
+        chan_row.addWidget(QtWidgets.QLabel("ω from channel:"))
+        chan_row.addWidget(self._ome_channel, 1)
+        ome_v.addLayout(chan_row)
         ome_v.addWidget(self._ome_collapse)
         self._ome_lbl = QtWidgets.QLabel("")
         self._ome_lbl.setWordWrap(True)
@@ -264,6 +283,8 @@ class HydraBatchPage(QtWidgets.QWidget):
         for w in (self._ome_start, self._ome_step):
             w.valueChanged.connect(lambda *_: self._refresh_omega_note())
         self._ome_collapse.toggled.connect(lambda *_: self._refresh_omega_note())
+        self._ome_channel.currentTextChanged.connect(
+            lambda *_: self._refresh_omega_note())
         self._refresh_omega_note()
 
         self._var_check = QtWidgets.QCheckBox("Per-bin variance (σ)")
@@ -518,6 +539,7 @@ class HydraBatchPage(QtWidgets.QWidget):
 
     def _on_siblings_changed(self, siblings: dict):
         self._toolbar.set_available(siblings.keys())
+        self._populate_omega_channels()
         self.invalidate_composite()      # different panels / different files
         self._maybe_autofill_output_dir()
         self._refresh_active_detector_preview()
@@ -872,8 +894,11 @@ class HydraBatchPage(QtWidgets.QWidget):
                 spin.setValue(float(v))
                 applied.append(f"{key}={float(v):g}")
         self._cake_ome_sum = values.get("OME_SUM")
-        if values.get("OME_SUM"):
-            ignored.append(f"OME_SUM={float(values['OME_SUM']):g}")
+        if values.get("OME_SUM") is not None:
+            # It has somewhere to land now -- the loader's combine spin --
+            # so it is applied rather than reported as unhonoured.
+            self._loader.set_combine_chunk(values["OME_SUM"])
+            applied.append(f"OME_SUM={float(values['OME_SUM']):g}")
         self._refresh_omega_note()
         note = ""
         if applied:
@@ -946,8 +971,7 @@ class HydraBatchPage(QtWidgets.QWidget):
             values = dict(card.caking())
             values["OME_START"] = self._ome_start.value()
             values["OME_STEP"] = self._ome_step.value()
-            if getattr(self, "_cake_ome_sum", None):
-                values["OME_SUM"] = self._cake_ome_sum
+            values["OME_SUM"] = self._loader.combine_chunk()
             cake_params.write_cake_csv(path, values)
         except Exception as exc:
             self._log.append(f"[hydra batch] ge{n}: could not write {path}: {exc}")
@@ -1235,8 +1259,36 @@ class HydraBatchPage(QtWidgets.QWidget):
 
     # ── Run ────────────────────────────────────────────────────────
 
+    def _populate_omega_channels(self) -> None:
+        """Offer the anchor file's 1-D datasets as ω sources.
+
+        Whatever is typed survives the rebuild: a channel named by hand, or
+        one from a file that is not loaded right now, is still a legal
+        answer -- the list is a convenience.
+        """
+        typed = self._ome_channel.currentText()
+        self._ome_channel.blockSignals(True)
+        try:
+            self._ome_channel.clear()
+            self._ome_channel.addItem("")      # blank = use the ramp
+            path = self._loader.current_path()
+            if path and is_h5(path):
+                try:
+                    for name, _n in list_h5_1d_datasets(path):
+                        self._ome_channel.addItem(name)
+                except Exception:
+                    pass                        # unreadable: typing still works
+            self._ome_channel.setCurrentText(typed)
+        finally:
+            self._ome_channel.blockSignals(False)
+        self._refresh_omega_note()
+
     def _refresh_omega_note(self) -> None:
         """Say what ω the run will record — all-zero is the quiet failure."""
+        chan = self._ome_channel.currentText().strip()
+        if chan:
+            self._ome_lbl.setText(f"ω read per frame from '{chan}'.")
+            return
         start, step = self._ome_start.value(), self._ome_step.value()
         if not start and not step:
             self._ome_lbl.setText(
@@ -1252,7 +1304,7 @@ class HydraBatchPage(QtWidgets.QWidget):
         """The rotation, in BatchWorker's vocabulary. Shared by all panels."""
         return {"start": self._ome_start.value(),
                 "step": self._ome_step.value(),
-                "channel": "",
+                "channel": self._ome_channel.currentText().strip(),
                 "collapse": self._ome_collapse.isChecked()}
 
     def _run_mode(self) -> str:
@@ -1720,7 +1772,7 @@ class HydraBatchPage(QtWidgets.QWidget):
         return {
             "kernel": self._kernel, "grid_chk": self._grid_chk,
             "ome_start": self._ome_start, "ome_step": self._ome_step,
-            "ome_collapse": self._ome_collapse,
+            "ome_collapse": self._ome_collapse, "ome_channel": self._ome_channel,
             "lab_axes_chk": self._lab_axes_chk,
             "azim": self._azim, "var_check": self._var_check, "err_model": self._err_model,
             "q_check": self._q_check, "q_min": self._q_min, "q_max": self._q_max,
