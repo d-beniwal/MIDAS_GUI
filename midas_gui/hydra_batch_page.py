@@ -263,10 +263,18 @@ class HydraBatchPage(QtWidgets.QWidget):
             "A 1-D dataset in the source HDF5 holding the measured rotation "
             "or position, read per frame instead of the ω start / ω step "
             "ramp.\n\nBlank falls back to the ramp.")
-        self._ome_collapse = QtWidgets.QCheckBox("one ω per frame (averaged)")
+        # "one ω for ALL frames", which is what it does -- tab_batch's
+        # wording. The first label, "one ω per frame (averaged)", described
+        # chunk averaging, which is a different thing the run does anyway;
+        # this is the collapse OVERRIDE, a single constant for the whole
+        # run. And it is tested before the channel in _omega_resolver, so
+        # ticking it silently discards a chosen omega channel.
+        self._ome_collapse = QtWidgets.QCheckBox("one ω for all frames")
         self._ome_collapse.setToolTip(
-            "Record each output frame's ω as the mean over the raw "
-            "sub-frames it combines, rather than the first one's.")
+            "These images were averaged or summed outside this app, so no "
+            "per-frame angle describes them: give EVERY frame the one ω at "
+            "the middle of the run.\n\nOverrides the ω channel — tick it "
+            "only when there is genuinely one exposure.")
         ome_row.addWidget(QtWidgets.QLabel("ω start:"))
         ome_row.addWidget(self._ome_start)
         ome_row.addWidget(QtWidgets.QLabel("ω step:"))
@@ -286,6 +294,11 @@ class HydraBatchPage(QtWidgets.QWidget):
             w.valueChanged.connect(lambda *_: self._refresh_omega_note())
         self._ome_collapse.toggled.connect(lambda *_: self._refresh_omega_note())
         self._ome_channel.currentTextChanged.connect(
+            lambda *_: self._refresh_omega_note())
+        # The chunk lives on the loader, two columns away, and decides what
+        # each frame's ω averages over -- "so in this case, how are the
+        # frames chunked?" could not be answered from this card.
+        self._loader._combine_chunk.valueChanged.connect(
             lambda *_: self._refresh_omega_note())
         self._refresh_omega_note()
 
@@ -1287,9 +1300,20 @@ class HydraBatchPage(QtWidgets.QWidget):
 
     def _refresh_omega_note(self) -> None:
         """Say what ω the run will record — all-zero is the quiet failure."""
+        chunk = self._loader.combine_chunk()
+        per = (f"{chunk} raw sub-frames per output frame"
+               if chunk and chunk != 1 else
+               "every raw sub-frame" if chunk == 1 else
+               "every sub-frame of a file combined into one")
+        if self._ome_collapse.isChecked():
+            self._ome_lbl.setText(
+                "one ω for ALL frames (the middle of the run) — this "
+                "overrides the ω channel and the ramp.")
+            return
         chan = self._ome_channel.currentText().strip()
         if chan:
-            self._ome_lbl.setText(f"ω read per frame from '{chan}'.")
+            self._ome_lbl.setText(
+                f"ω read per frame from '{chan}', averaged over {per}.")
             return
         start, step = self._ome_start.value(), self._ome_step.value()
         if not start and not step:
@@ -1299,8 +1323,7 @@ class HydraBatchPage(QtWidgets.QWidget):
         else:
             self._ome_lbl.setText(
                 f"ω {start:g}° at raw sub-frame 0, {step:g}° per sub-frame"
-                + ("  ·  averaged per output frame"
-                   if self._ome_collapse.isChecked() else ""))
+                f"  ·  {per}")
 
     def omega_cfg(self) -> dict:
         """The rotation, in BatchWorker's vocabulary. Shared by all panels."""
