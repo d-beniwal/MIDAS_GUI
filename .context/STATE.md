@@ -1057,6 +1057,47 @@ Flip-Z/Multi-panel fix — trimmed here; full detail in
   local-config flake (stale `visible_tabs` count) — hit again this session,
   confirmed unrelated to the truncation fix.
 
+## Hydra Batch Integrate — current shape (2026-10-10)
+
+- A batch is a source FOLDER. Scans are grouped by the parent of each
+  file's **ge1-normalised** path, so both real layouts collapse to one key:
+  panels together in a scan folder, and panel-above-scan
+  (`.../ge1/APS_4130_C_load_step_0/...`). See DECISIONS 2026-10-09/10.
+- The Output box is authoritative for a SINGLE scan; each panel appends its
+  own `ge{n}/`. Only a multi-scan pick fans out.
+- A pick of one file is still a four-panel scan (expanded via
+  `hydra_siblings`, narrowed to the ticked panels).
+- Caking, rotation and the bin-grid toggle all live on the caking card and
+  follow whichever one is showing (per-panel or the all-panels composite).
+- An eta range crossing ±180 is served by binning the whole circle and
+  selecting back down (`midas_gui.eta_wrap`). A bin that STRADDLES the seam
+  is declined, not half-filled.
+
+### Not verified against real data
+
+- The multi-scan queue has never completed with real frames. Grouping,
+  output fan-out and source descriptors are tested; four panels walked
+  through several folders to completion is not.
+- The tx-aware lab compass has never been seen rendered. It is pinned
+  against `pixel_eta_deg` at every Hydra roll, which is the strongest
+  headless check available.
+- The omega ramp/channel has not been driven by a real rotation scan —
+  confirm `/Omegas` ramps rather than sitting at zero.
+
+### Known wrong, not yet fixed
+
+- The rotation card's **"one ω per frame (averaged)"** checkbox is
+  mislabelled. It means one ω for the WHOLE RUN, and it is checked before
+  the channel in `_omega_resolver`, so ticking it silently discards a
+  chosen omega channel. `tab_batch` labels the same control "one ω for all
+  frames", which is the accurate wording.
+- The caking card does not show the current chunk size, so "how are the
+  frames chunked" cannot be answered from the card the rotation lives on
+  (it is the loader's `combine sub-frames` spin).
+- `tab_batch`, `tab_view` and `tab_calibrate` still pass `tx=0` to
+  `build_lab_frame_axes_items`. A single rolled detector has the same
+  compass bug Hydra had; the mechanism is in place, the wiring is not.
+
 ## Standing rules (from memory)
 
 - Commit history is the record of recent work — see `git log`. Docs
