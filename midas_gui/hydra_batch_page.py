@@ -400,6 +400,21 @@ class HydraBatchPage(QtWidgets.QWidget):
         # view that is about all four had no card of its own and simply
         # held whichever panel was last open.
         self._cake_summary = HydraCakingSummary()
+        self._load4_btn = QtWidgets.QPushButton("Load 4 panel calibrations…")
+        self._load4_btn.setToolTip(
+            "Pick ONE panel's calibration file. The other three are found "
+            "beside it by rewriting the ge<n> in its path — the same rule "
+            "the cake_parameters CSVs follow, and the one the files are "
+            "written under.\n\n"
+            "Any panel whose file is not there is named rather than skipped "
+            "quietly: a composite built from three real calibrations and one "
+            "stale one looks plausible and is wrong.")
+        self._load4_btn.clicked.connect(self._load_four_calibrations)
+        self._cake_summary.top_extras_layout().addWidget(self._load4_btn)
+        self._load4_lbl = QtWidgets.QLabel("")
+        self._load4_lbl.setStyleSheet("color:#9a9a9a;font-size:10px")
+        self._load4_lbl.setWordWrap(True)
+        self._cake_summary.top_extras_layout().addWidget(self._load4_lbl)
         # The table forwards edits rather than holding values: the panel's
         # own spin box is still what the run reads, and what clamps.
         self._cake_summary.cakingEdited.connect(self._on_summary_cake_edited)
@@ -629,6 +644,73 @@ class HydraBatchPage(QtWidgets.QWidget):
             return
         card.set_caking({key: value})
         self._refresh_cake_summary()     # also covers a clamped no-op
+
+    def _load_four_calibrations(self) -> None:
+        """One pick, four panels — from the Composite view.
+
+        Asked for at 1-ID-E: "we should be able to load the calibration file
+        from composite. Pick one for one panel and find others automatically
+        by pattern. If file that matches the pattern does not exist alert."
+
+        The Composite view is the one that needs all four calibrations at
+        once -- it cannot be built without them -- and it was the one view
+        with no way to supply them, since the per-panel cards are hidden
+        behind it.
+
+        A missing sibling is an ALERT, not a log line. Loading three of four
+        and carrying on leaves the fourth panel on whatever it had before,
+        which is how a composite ends up built from one stale calibration
+        and still looks entirely plausible.
+        """
+        start = ""
+        try:
+            start = browse_start_dir(self._loader.current_path() or "")
+        except Exception:
+            pass
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Pick ONE panel's calibration — the rest are matched by name",
+            start, "Calibration (*.json *.poni *.txt);;All (*)")
+        if not path:
+            return
+        picked = hydra.panel_for_file(path)
+        if picked is None:
+            QtWidgets.QMessageBox.warning(
+                self, "Which panel is this?",
+                f"{Path(path).name}\n\nhas no 'ge1'–'ge4' in its path, so it "
+                f"cannot be matched to a panel or used to name the other "
+                f"three. Load it from that panel's own card instead.")
+            return
+        wanted = sorted(self._loader.siblings() or {}) or [1, 2, 3, 4]
+        found, missing = {}, []
+        for n in wanted:
+            cand = path if n == picked else hydra.sibling_for_panel(path, n)
+            if cand and Path(cand).exists():
+                found[n] = cand
+            else:
+                missing.append((n, cand))
+        for n, p in sorted(found.items()):
+            card = self._cards.get(n)
+            if card is not None:
+                card.set_calibration_file(p)
+        self._load4_lbl.setText(
+            f"from ge{picked}: loaded " + ", ".join(f"ge{n}" for n in sorted(found))
+            + (f"  ·  missing " + ", ".join(f"ge{n}" for n, _ in missing)
+               if missing else ""))
+        self._log.append(
+            f"[hydra batch] calibration from ge{picked}: loaded "
+            + ", ".join(f"ge{n}" for n in sorted(found))
+            + (f"; no file for " + ", ".join(f"ge{n}" for n, _ in missing)
+               if missing else ""))
+        if missing:
+            lines = "\n".join(
+                f"  ge{n}:  {c or '(no ge token to rewrite)'}" for n, c in missing)
+            QtWidgets.QMessageBox.warning(
+                self, "Some panel calibrations were not found",
+                f"Picked ge{picked}:\n  {path}\n\n"
+                f"Loaded: {', '.join(f'ge{n}' for n in sorted(found)) or 'none'}\n\n"
+                f"These were expected beside it and are not there:\n{lines}\n\n"
+                f"Those panels keep whatever calibration they already had — "
+                f"check them before building the composite or running.")
 
     def _refresh_cake_summary(self) -> None:
         """Re-read all four cards into the summary table.

@@ -87,6 +87,12 @@ class HydraCakingSummary(QtWidgets.QWidget):
         self._shown: dict = {}
         lv = QtWidgets.QVBoxLayout(self)
         lv.setContentsMargins(0, 0, 0, 0)
+        # Slot above the table for page-level widgets belonging to the
+        # composite view as a whole rather than to caking -- the one-pick
+        # calibration loader. Owned by the page, like the bin-grid toggle.
+        self._top_extras = QtWidgets.QVBoxLayout()
+        self._top_extras.setContentsMargins(0, 0, 0, 0)
+        lv.addLayout(self._top_extras)
         card = S.make_card("ge1–ge4 — caking (all panels)")
         self._table = QtWidgets.QTableWidget(len(self._panels),
                                              len(self.COLS) + 1)
@@ -134,6 +140,10 @@ class HydraCakingSummary(QtWidgets.QWidget):
         card.body.addWidget(self._coverage)
         lv.addWidget(card)
         lv.addStretch(1)
+
+    def top_extras_layout(self):
+        """Layout above the caking table, for composite-wide controls."""
+        return self._top_extras
 
     def cake_extras_layout(self):
         """Same contract as HydraBatchPanelCard's -- the bin-grid toggle
@@ -469,6 +479,17 @@ class HydraBatchPanelCard(QtWidgets.QWidget):
             self.cakingChanged.emit(self.panel_number)
 
     # ── Calibration source ──────────────────────────────────────────
+
+    def set_calibration_file(self, path: str) -> None:
+        """Point this panel at a calibration FILE and select that source.
+
+        The radio follows the text on its own (the _json_ed hook in
+        _build_ui), but setting it here too makes the intent explicit at the
+        call site rather than a side effect two hundred lines away.
+        """
+        self._json_ed.setText(str(path or ""))
+        if str(path or "").strip():
+            self._use_file_btn.setChecked(True)
 
     def set_calibration(self, result):
         """A Hydra panel fit finished on the Calibrate tab — adopt it as
