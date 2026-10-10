@@ -12,6 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numcodecs
 import numpy as np
 import pytest
 
@@ -37,7 +38,7 @@ PANEL_ETA = {"ge1": (120.0, 210.0), "ge2": (-150.0, -60.0),
 
 
 def _panel_zarr(path, panel, *, with_ir=True, n_eta=NETA, n_r=NR, omegas=None,
-                eta=None):
+                eta=None, with_sumframes=True):
     """One synthetic panel archive in the layout the combiner expects."""
     idx = int(panel[2:])
     eta_lo, eta_hi = eta if eta is not None else PANEL_ETA[panel]
@@ -61,6 +62,14 @@ def _panel_zarr(path, panel, *, with_ir=True, n_eta=NETA, n_r=NR, omegas=None,
             g.create_dataset(f"FrameNr_{f}",
                              data=np.full((n_r, n_eta), float(idx)))
     root.create_dataset("REtaMap", data=np.full((2, n_r, n_eta), float(idx)))
+    # Both of these are in every real archive and both were being dropped:
+    # SumFrames is an (nR, nEta) caked array, i.e. primary data.
+    if with_sumframes:
+        root.create_dataset("SumFrames",
+                            data=np.full((n_r, n_eta), float(idx)))
+    ai = root.create_group("active_instrument")
+    ai.create_dataset("ExpID", data=np.array(["connolly_oct26"], dtype=object),
+                      object_codec=numcodecs.VLenUTF8())
     inst = root.create_group("instrument")
     inst.create_dataset("energy", data=np.array([80.725]))
     store.close()
@@ -355,3 +364,100 @@ def test_frames_come_back_in_order(tmp_path):
     assert [Path(s["ge1"]).name for s in sets] == [
         "scan_000001.ge1.zarr.zip", "scan_000002.ge1.zarr.zip",
         "scan_000003.ge1.zarr.zip"]
+
+
+# ── nothing in a source archive may vanish ──────────────────────────────
+# connolly_oct26's merged file was missing SumFrames and active_instrument:
+# _write_merged reproduced a hardcoded group list from the reference script
+# and dropped everything else without a word. The two names were the
+# symptom; the silent list was the bug.
+
+def _read_top(path):
+    store = zarr.ZipStore(str(path), mode="r")
+    try:
+        return sorted(zarr.group(store).keys())
+    finally:
+        store.close()
+
+
+def test_the_merged_file_has_every_top_level_entry_a_panel_had(panels, tmp_path):
+    out = combine_panel_zarrs(panels, tmp_path / "m.zarr.zip")
+    src = _read_top(panels["ge1"])
+    assert set(src) <= set(_read_top(out)), "a source entry went missing"
+
+
+def test_sumframes_is_eta_concatenated_like_the_other_caked_arrays(panels,
+                                                                   tmp_path):
+    """(nR, nEta) per panel -> (nR, sum nEta). It is primary data, not
+    metadata: copying panel 0's would have been just as wrong as dropping
+    it."""
+    out = combine_panel_zarrs(panels, tmp_path / "m.zarr.zip")
+    store = zarr.ZipStore(str(out), mode="r")
+    try:
+        sf = zarr.group(store)["SumFrames"][...]
+        assert sf.shape == (NR, NETA * len(PANELS))
+        # each panel's block carries its own idx, in panel order
+        for i, p in enumerate(PANELS):
+            block = sf[:, i * NETA:(i + 1) * NETA]
+            assert np.all(block == float(int(p[2:])))
+    finally:
+        store.close()
+
+
+def test_active_instrument_is_carried_verbatim(panels, tmp_path):
+    out = combine_panel_zarrs(panels, tmp_path / "m.zarr.zip")
+    store = zarr.ZipStore(str(out), mode="r")
+    try:
+        assert zarr.group(store)["active_instrument"]["ExpID"][0] \
+            == "connolly_oct26"
+    finally:
+        store.close()
+
+
+def test_an_entry_this_module_has_never_heard_of_is_still_carried(tmp_path):
+    """The regression guard that outlives the two names above: a future
+    MIDAS release adding a dataset must not lose it silently."""
+    paths, seen = {}, []
+    for p in PANELS:
+        path = tmp_path / f"s_000001.{p}.zarr.zip"
+        _panel_zarr(path, p)
+        store = zarr.ZipStore(str(path), mode="a")
+        zarr.group(store).create_dataset(
+            "SomethingNew", data=np.full((NR, NETA), float(int(p[2:]))))
+        store.close()
+        paths[p] = str(path)
+    out = combine_panel_zarrs(paths, tmp_path / "m.zarr.zip", warn=seen.append)
+    store = zarr.ZipStore(str(out), mode="r")
+    try:
+        got = zarr.group(store)["SomethingNew"][...]
+    finally:
+        store.close()
+    assert got.shape == (NR, NETA * len(PANELS)), \
+        "an (nR, nEta) array is eta-caked by construction"
+    assert any("SomethingNew" in m for m in seen), \
+        "carrying it silently is the same bug in a new coat"
+
+
+def test_an_entry_only_some_panels_have_is_left_out_and_named(tmp_path):
+    paths, seen = {}, []
+    for p in PANELS:
+        path = tmp_path / f"s_000001.{p}.zarr.zip"
+        _panel_zarr(path, p)
+        if p == "ge1":
+            store = zarr.ZipStore(str(path), mode="a")
+            zarr.group(store).create_dataset("OnlyGe1", data=np.zeros(3))
+            store.close()
+        paths[p] = str(path)
+    out = combine_panel_zarrs(paths, tmp_path / "m.zarr.zip", warn=seen.append)
+    assert "OnlyGe1" not in _read_top(out)
+    assert any("OnlyGe1" in m for m in seen)
+
+
+def test_sumframes_missing_from_only_some_panels_is_refused(tmp_path):
+    """Same rule as IntegrationResult: absent from all, or present in all.
+    A partial set is a mistake worth stopping for."""
+    paths = {p: str(_panel_zarr(tmp_path / f"s_000001.{p}.zarr.zip", p,
+                                with_sumframes=(p != "ge3")))
+             for p in PANELS}
+    with pytest.raises(ValueError, match="SumFrames"):
+        combine_panel_zarrs(paths, tmp_path / "m.zarr.zip")

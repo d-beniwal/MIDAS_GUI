@@ -7,12 +7,25 @@ code reads, so it is reproduced exactly:
 
   ``IntegrationResult/<key>``   axis=1   (nR, nEta) -> (nR, sum nEta)
   ``OmegaSumFrame/<key>``       axis=1   (nR, nEta) -> (nR, sum nEta)
+  ``SumFrames``                 axis=1   (nR, nEta) -> (nR, sum nEta)
   ``REtaMap``                   axis=2   (C, nR, nEta) -> (C, nR, sum nEta)
   ``Omegas``                    copied from panel 0 (validated identical)
   ``InstrumentParameters/<key>`` stacked into a length-N array, one entry per
                                 panel, order recorded in ``.attrs['panels']``
-  ``instrument/``/``measurement/`` copied verbatim from panel 0
+  ``instrument/``, ``measurement/``, ``active_instrument/``
+                                copied verbatim from panel 0
   root attrs                    panel 0's, plus ``combined_panels``
+  anything else                 carried by ``_carry_unhandled``: an array
+                                whose last axis is the panel's eta width is
+                                concatenated on it, otherwise taken from
+                                panel 0 -- and NAMED through ``warn``
+
+The last line is there because the first version of this file reproduced a
+hardcoded group list and dropped everything else without a word.
+``SumFrames`` -- an (nR, nEta) caked array, i.e. primary data -- and
+``active_instrument/`` were both missing from every archive it wrote. A
+list that silently loses whatever the next MIDAS release adds is the bug;
+the two names it was missing were only the symptom.
 
 ``Distance`` legitimately differs between hydra panels, which is why
 InstrumentParameters values are stacked rather than required to agree -- only
@@ -41,7 +54,19 @@ from typing import Optional
 import numpy as np
 
 #: Groups copied across untouched from the first panel.
-_VERBATIM_GROUPS = ("instrument", "measurement")
+_VERBATIM_GROUPS = ("instrument", "measurement", "active_instrument")
+
+#: Top-level ARRAYS that are caked per eta, like the members of
+#: ``IntegrationResult``/``OmegaSumFrame``, and so concatenate the same way.
+#: ``SumFrames`` is (nR, nEta) and was being dropped on the floor.
+_ETA_CONCAT_ARRAYS = ("SumFrames",)
+
+#: Everything written by name below. Anything in a source archive that is
+#: NOT here goes through the catch-all in :func:`_carry_unhandled`, because
+#: a hardcoded list silently loses whatever the next MIDAS release adds --
+#: which is exactly how SumFrames and active_instrument went missing.
+_NAMED = ("Omegas", "REtaMap", "InstrumentParameters", "IntegrationResult",
+          "OmegaSumFrame") + _ETA_CONCAT_ARRAYS + _VERBATIM_GROUPS
 
 
 def build_panel_tag(panels) -> str:
@@ -188,6 +213,20 @@ def validate(panels, zs):
         _check(ki == ip0, f"InstrumentParameters keys differ between {p0} "
                           f"and {panels[i]}")
 
+    for name in _ETA_CONCAT_ARRAYS:
+        present = [name in z for z in zs]
+        if any(present) and not all(present):
+            absent = [panels[i] for i, h in enumerate(present) if not h]
+            raise ValueError(
+                f"{name} is present in some panels but missing in others: "
+                f"missing in {absent}. All panels must agree.")
+        if all(present):
+            n0 = zs[0][name].shape[0]
+            for i in range(1, len(zs)):
+                si = zs[i][name].shape
+                _check(si[0] == n0, f"{name} first-dim differs: {p0}={n0}, "
+                                    f"{panels[i]}={si[0]}")
+
     src = "IntegrationResult" if ir_keys else "OmegaSumFrame"
     key = (ir_keys or osf_keys)[0]
     eta_widths = [z[src][key].shape[1] for z in zs]
@@ -326,7 +365,44 @@ def _zip_directory(src_dir: Path, out_zip: Path) -> None:
                 zf.write(abs_path, abs_path.relative_to(src_dir).as_posix())
 
 
-def _write_merged(root, zs, panels, ir_keys, osf_keys) -> None:
+def _carry_unhandled(root, zs, panels, eta_widths) -> list:
+    """Copy across anything this module does not write by name.
+
+    Returns the names it carried, so the caller can say what they were:
+    silence is how SumFrames and active_instrument were lost in the first
+    place, and the next release's addition should not go the same way.
+
+    An array whose LAST axis is this panel's eta width is an eta-caked
+    product by construction, so it is concatenated like the rest. Anything
+    else is taken from panel 0 -- the conservative choice, since inventing
+    a merge rule for an array whose meaning is unknown is how you get a
+    quietly wrong archive.
+    """
+    import zarr
+    carried = []
+    for name in sorted(zs[0].keys()):
+        if name in _NAMED or name in root:
+            continue
+        if not all(name in z for z in zs):
+            continue                     # partial: leave it out, say so
+        obj = zs[0][name]
+        shape = getattr(obj, "shape", None)
+        if (shape and len(shape) >= 1
+                and all(z[name].shape[-1] == w
+                        for z, w in zip(zs, eta_widths))):
+            root.create_dataset(name, data=np.concatenate(
+                [z[name][...] for z in zs], axis=len(shape) - 1))
+            carried.append(f"{name} (eta-concatenated)")
+        elif shape is not None:
+            root.create_dataset(name, data=obj[...])
+            carried.append(f"{name} (from {panels[0]})")
+        else:
+            zarr.copy(obj, root, name=name)
+            carried.append(f"{name}/ (from {panels[0]})")
+    return carried
+
+
+def _write_merged(root, zs, panels, ir_keys, osf_keys, eta_widths) -> list:
     import zarr
     attrs = dict(zs[0].attrs)
     attrs["combined_panels"] = list(panels)
@@ -352,9 +428,18 @@ def _write_merged(root, zs, panels, ir_keys, osf_keys) -> None:
     root.create_dataset("REtaMap", data=np.concatenate(
         [z["REtaMap"][...] for z in zs], axis=2))
 
+    # Top-level caked arrays: same (nR, nEta) layout as the group members
+    # above, so the same axis-1 concatenation.
+    for name in _ETA_CONCAT_ARRAYS:
+        if all(name in z for z in zs):
+            root.create_dataset(name, data=np.concatenate(
+                [z[name][...] for z in zs], axis=1))
+
     for grp in _VERBATIM_GROUPS:
         if grp in zs[0]:
             zarr.copy(zs[0][grp], root, name=grp)
+
+    return _carry_unhandled(root, zs, panels, eta_widths)
 
 
 def _merge_provenance(root, zs, panels, paths, out_path):
@@ -423,14 +508,25 @@ def combine_panel_zarrs(panel_paths: dict, out_path=None, warn=None) -> Path:
     stores = [zarr.ZipStore(str(p), mode="r") for p in paths]
     try:
         zs = [zarr.group(s) for s in stores]
-        ir_keys, osf_keys, _eta = validate(panels, zs)
+        ir_keys, osf_keys, eta_widths = validate(panels, zs)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="midas_gui_combine_") as tmp:
             root = zarr.group(zarr.DirectoryStore(tmp))
-            _write_merged(root, zs, panels, ir_keys, osf_keys)
+            carried = _write_merged(root, zs, panels, ir_keys, osf_keys,
+                                    eta_widths)
             broken = _merge_provenance(root, zs, panels, paths, out_path)
-            if broken and warn:
-                warn(broken)
+            if warn:
+                if broken:
+                    warn(broken)
+                if carried:
+                    warn("carried across unrecognised entries: "
+                         + ", ".join(carried))
+                dropped = sorted(
+                    k for k in zs[0].keys()
+                    if k not in root and not all(k in z for z in zs))
+                if dropped:
+                    warn("left out, present in some panels but not all: "
+                         + ", ".join(dropped))
             _zip_directory(Path(tmp), out_path)
     finally:
         for s in stores:
