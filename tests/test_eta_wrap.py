@@ -207,3 +207,49 @@ def test_a_range_inside_the_cut_is_bit_identical_to_before(wrapped_bits):
     assert float(ctx["bin_spec"].EtaMin) == -150.0
     assert float(ctx["bin_spec"].EtaMax) == -60.0
     assert cake.shape[0] == 9
+
+
+# ── the bin area has to match the cake, or nothing gets written ─────────
+# Reported from 1-ID-E as "it looks like the combined file is not getting
+# written". ge1's archive was 136 bytes -- a valid, empty zip -- while
+# ge2/ge3/ge4 were ~660 KB, and the combine then failed on it.
+#
+# Cause: the bin area was built straight from the request while the CAKE is
+# built on the whole circle and cut back down, so a 120..210 request at
+# 10 deg produced 36 rows of area against a 9-row cake. GSASZarrWriter
+# rejects the pair, the batch worker's handler drops the writer, and the
+# archive closes empty. Only ge1 crossed the cut, so only ge1 broke.
+
+def test_the_bin_area_has_the_same_eta_rows_as_the_cake(wrapped_bits):
+    from midas_gui.workers import bin_area_for
+    from midas_gui.helpers import spec_from_geometry_file
+    for lo, hi in ((120.0, 210.0), (-150.0, -60.0), (120.0, 180.0)):
+        spec = spec_from_geometry_file(str(FIXTURE), 4.0, 10.0, r_min=10.0,
+                                       r_max=120.0, eta_min=lo, eta_max=hi)
+        ctx, cake = wrapped_bits(lo, hi)
+        area = bin_area_for(spec, "hard", None, geom=ctx["geom"])
+        assert area.shape[0] == spec.n_eta_bins == cake.shape[0], (lo, hi)
+
+
+def test_the_bin_area_is_not_zero_for_the_bins_past_the_wrap(wrapped_bits):
+    """Shape alone is not enough: built from the bare request those three
+    rows would be present and empty, which is the same lost data wearing a
+    different hat."""
+    from midas_gui.workers import bin_area_for
+    from midas_gui.helpers import spec_from_geometry_file
+    spec = spec_from_geometry_file(str(FIXTURE), 4.0, 10.0, r_min=10.0,
+                                   r_max=120.0, eta_min=120.0, eta_max=210.0)
+    area = bin_area_for(spec, "hard", None)
+    assert area.shape[0] == 9
+    assert all(np.nansum(area[i]) > 0 for i in range(6, 9)), \
+        "bins 185/195/205 must carry real pixel counts"
+
+
+def test_bin_area_for_leaves_an_ordinary_range_alone(wrapped_bits):
+    from midas_gui.workers import bin_area_for, count_cake, build_geom
+    from midas_gui.helpers import spec_from_geometry_file
+    spec = spec_from_geometry_file(str(FIXTURE), 4.0, 10.0, r_min=10.0,
+                                   r_max=120.0, eta_min=-150.0, eta_max=-60.0)
+    direct = count_cake(build_geom(spec, "hard", None), "hard",
+                        spec.NrPixelsZ, spec.NrPixelsY)
+    assert np.array_equal(bin_area_for(spec, "hard", None), direct)

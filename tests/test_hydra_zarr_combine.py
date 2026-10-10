@@ -598,3 +598,34 @@ def test_the_check_is_shared_with_the_integrator_not_reimplemented(tmp_path):
         per = {"ge1": {"EtaMin": lo, "EtaMax": hi, "EtaBinSize": step}}
         reported = eta_beyond_branch_cut(per, ["ge1"]) is not None
         assert reported == (plan_eta(lo, hi, step).problem is not None)
+
+
+# ── an unusable panel archive must say so in words ─────────────────────
+def test_an_empty_panel_archive_is_named_not_raised_as_a_bare_keyerror():
+    """A panel whose integration failed leaves a valid but EMPTY zip. The
+    first thing to touch it raised KeyError('OmegaSumFrame'), which reached
+    the run log as the single word 'OmegaSumFrame' -- no panel, no reason,
+    nowhere to look. Reported from 1-ID-E exactly that way."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        paths = {p: str(_panel_zarr(tmp / f"s_000001.{p}.zarr.zip", p))
+                 for p in PANELS}
+        # ge1 as the failed run leaves it: a zip with nothing in it.
+        empty = tmp / "s_000001.ge1.zarr.zip"
+        store = zarr.ZipStore(str(empty), mode="w")
+        zarr.group(store)
+        store.close()
+        paths["ge1"] = str(empty)
+        with pytest.raises(ValueError) as e:
+            combine_panel_zarrs(paths, tmp / "m.zarr.zip")
+    msg = str(e.value)
+    assert "ge1" in msg, "name the panel"
+    assert "OmegaSumFrame" in msg
+    assert "bytes" in msg, "say how big the file is"
+    assert "run log" in msg, "say where its error is"
+
+
+def test_a_complete_set_is_not_slowed_down_by_the_check(panels, tmp_path):
+    out = combine_panel_zarrs(panels, tmp_path / "m.zarr.zip")
+    assert Path(out).is_file()

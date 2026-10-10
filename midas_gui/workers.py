@@ -219,6 +219,28 @@ def build_geom(spec, kernel: str, mask):
     return SubpixelBinGeometry.from_spec(spec, K=K, mask=mask)
 
 
+def bin_area_for(spec, kernel: str, mask=None, geom=None) -> np.ndarray:
+    """Pixel-count ("bin area") cake with the same eta rows as the DATA cake.
+
+    Not simply ``count_cake(build_geom(spec, ...))``: when the requested eta
+    range crosses +/-180 the data is binned on the whole circle and cut back
+    down (see :mod:`midas_gui.eta_wrap`), so an area built straight from the
+    request has the wrong number of rows -- 36 against 9 for a 120..210
+    request at 10 deg. GSASZarrWriter rejects that pair, which is how a ge1
+    archive came out as a 136-byte empty zip and took the four-panel combine
+    with it.
+
+    ``geom`` is the already-built binning geometry when the caller has one;
+    it must be the geometry for the PLAN, not for the bare spec.
+    """
+    plan = eta_wrap.plan_eta(spec.EtaMin, spec.EtaMax, spec.EtaBinSize)
+    bspec = (spec if plan.take is None
+             else replace_spec_eta(spec, plan.bin_min, plan.bin_max))
+    g = geom if geom is not None else build_geom(bspec, kernel, mask)
+    return eta_wrap.apply_take(
+        count_cake(g, kernel, bspec.NrPixelsZ, bspec.NrPixelsY), plan.take)
+
+
 def _profile_from_cake(cake_np: np.ndarray, count_cake: Optional[np.ndarray] = None) -> np.ndarray:
     """Collapse an (η, R) cake to a 1-D profile.
 
@@ -2489,7 +2511,7 @@ class BatchWorker(QtCore.QThread):
                                                 self._corrections, self._weighted)
             self.geom_ready.emit(ctx)
             geom = ctx["geom"]; corr_on = ctx["corr_on"]
-            eta_take = ctx["eta_take"]
+            eta_take = ctx["eta_take"]; bin_spec = ctx["bin_spec"]
             corr_counts = ctx["corr_counts"]; cnt = ctx["cnt"]
             r_ax = ctx["r_ax"]; eta_ax = ctx["eta_ax"]
             want_zarr = "zarr" in self._fmts and self._out_dir is not None
@@ -2606,8 +2628,15 @@ class BatchWorker(QtCore.QThread):
             # count_cake(None, ...) crashes identically for want_h5_cake.
             cake_bin_area = None
             if want_zarr or want_h5_cake:
-                cake_geom = geom if geom is not None else build_geom(spec, self._kernel, mask)
-                cake_bin_area = count_cake(cake_geom, self._kernel, spec.NrPixelsZ, spec.NrPixelsY)
+                # bin_spec / eta_take, exactly as the cake itself is made.
+                # This read `spec`/`geom` and so produced a bin area with the
+                # BINNING's eta rows, which for a range crossing +/-180 is the
+                # whole circle: 36 rows of area against a 9-row cake.
+                # GSASZarrWriter rejected the pair, the handler below dropped
+                # the writer, and ge1 came out a 136-byte empty archive --
+                # which then took the four-panel combine down with it.
+                cake_bin_area = bin_area_for(spec, self._kernel, mask,
+                                             geom=geom)
             h5_trees: dict = {}   # source path -> its instrument/ tree, read once
             if want_zarr:
                 zarr_dir = self._out_dir / "zarr"
@@ -4394,8 +4423,9 @@ class BatchRunCoordinator(QtCore.QObject):
                     # Not carried over from any one chunk worker (each built its
                     # own geometry independently) — rebuilt once here so the
                     # combined cake HDF5 still gets a real, non-zero BinArea row.
-                    geom = build_geom(spec, kernel, self._args["mask"])
-                    bin_area = count_cake(geom, kernel, spec.NrPixelsZ, spec.NrPixelsY)
+                    # Through bin_area_for, so a wrapped eta range gets a
+                    # real area for the bins past the cut instead of zeros.
+                    bin_area = bin_area_for(spec, kernel, self._args["mask"])
                     cake_params = {
                         'RMin': float(spec.RMin), 'RMax': float(spec.RMax),
                         'RBinSize': float(spec.RBinSize),
