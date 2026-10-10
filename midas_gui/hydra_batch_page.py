@@ -39,7 +39,7 @@ from midas_gui.helpers import (
     widgets_to_dict, apply_dict_to_widgets,
     _load_image, rmax_corner_px, rmax_edge_px, draw_polar_bin_overlay,
     browse_start_dir, warn_if_path_missing, suggest_panel_base_output_dir, check_output_dir_writable,
-    suggest_working_dir, bc_path_parts)
+    suggest_working_dir, bc_path_parts, source_kind)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, OutputFormatSelector, ImageViewer,
                                OriginToolButton, build_lab_frame_axes_items)
@@ -102,6 +102,13 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._composite_build_id = 0
         self._composite_note = None      # last reason, for log de-duplication
         self._composite_panels: list = []  # panels actually on the canvas
+        #: Multi-scan batch (a recursive folder pick). Empty / None for the
+        #: ordinary one-scan run, which then behaves exactly as before.
+        self._scan_queue: list = []
+        self._scan_total = 0
+        self._scan_pos = 0
+        self._active_scan: "Optional[dict]" = None
+        self._active_out_base: "Optional[str]" = None
         #: Output path this page last filled in itself; see
         #: _maybe_autofill_output_dir. Set before the UI is built, since
         #: loading data fires siblingsChanged, which auto-fills.
@@ -1167,8 +1174,8 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._geom_sig[n] = sig
 
     def _run_all(self):
-        siblings = self._loader.siblings()
-        if not siblings:
+        scans = self._loader.scans()
+        if not scans:
             QtWidgets.QMessageBox.warning(self, "No data", "Load Hydra panel data first.")
             return
         if self._workers:
@@ -1177,18 +1184,109 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._run_cancelled = False
         self._run_btn.setEnabled(False); self._abort_btn.setEnabled(True)
         self._save_btn.setEnabled(False)
-        self._last_results = {}
         self._prog.setVisible(True)
+        # One queue entry per scan. A single-scan pick makes a queue of one
+        # and takes the identical path, which is what keeps every existing
+        # run byte-for-byte what it was.
+        bases = self._out_bases_for_scans(scans)
+        self._scan_queue = [(dict(sc), b) for sc, b in zip(scans, bases)]
+        self._scan_total = len(self._scan_queue)
+        self._scan_pos = 0
+        if self._scan_total > 1:
+            self._log.append(
+                "─" * 40 + f"\n{self._scan_total} scans selected — each is "
+                f"integrated in turn, to its own output folder:")
+            for sc, b in self._scan_queue:
+                self._log.append(f"    {Path(sc[sorted(sc)[0]]).parent}  →  {b}")
+        self._start_next_scan()
+
+    def _start_next_scan(self) -> None:
+        """Begin the next queued scan, or wind the run up."""
+        if self._run_cancelled or not self._scan_queue:
+            self._finish_whole_run()
+            return
+        self._active_scan, self._active_out_base = self._scan_queue.pop(0)
+        self._scan_pos += 1
+        self._last_results = {}
         mode = self._run_mode()
-        self._log.append("─" * 40 + f"\nStarting Hydra batch integration ({mode})…")
-        panels = sorted(siblings)
-        self._pending_panels = list(panels)
+        where = (f" [scan {self._scan_pos}/{self._scan_total}]"
+                 if self._scan_total > 1 else "")
+        rep = self._active_scan[sorted(self._active_scan)[0]]
+        self._log.append(
+            "─" * 40 + f"\nStarting Hydra batch integration ({mode}){where}…"
+            + (f"\n  {Path(rep).parent}" if self._scan_total > 1 else ""))
+        self._pending_panels = sorted(self._active_scan)
         if mode == "parallel":
             pending, self._pending_panels = list(self._pending_panels), []
             for n in pending:
                 self._start_panel_worker(n)
         else:
             self._start_next_sequential()
+
+    def _out_bases_for_scans(self, scans: list) -> list:
+        """One output base per scan, GUARANTEED distinct.
+
+        The <expid>_bc/<froot> convention reads froot off each file's own
+        path, so a selection spanning folders implies many output dirs
+        rather than one -- the single-detector tab learned that in 9302e64,
+        where 23 load steps landed in the first one's directory.
+
+        But froot deliberately EXCLUDES the file number (499a250), so two
+        load steps holding ..._003502 and ..._003503 of the same stem derive
+        the SAME froot and would collide right back into one directory --
+        the original bug wearing a different hat. Colliding bases are
+        therefore qualified by their source folder, and if that still
+        collides (two scans in one folder) by the file number, which is
+        what distinguishes them in the first place.
+
+        A single scan keeps using the Output box exactly as typed. With
+        several, the box is the ROOT they fan out beneath, so setting it
+        stays meaningful and the layout matches picking each folder by hand.
+        """
+        typed = self._out_ed.text().strip()
+        if len(scans) <= 1:
+            return [typed]
+        expid = self._expid_provider().strip() if self._expid_provider else ""
+        reps = [sc[sorted(sc)[0]] for sc in scans]
+        names, parents, nums = [], [], []
+        for rep in reps:
+            derived = suggest_panel_base_output_dir(rep, expid_fallback=expid)
+            names.append(Path(str(derived)).name if derived
+                         else Path(rep).parent.name)
+            parents.append(Path(rep).parent.name)
+            nums.append(Path(rep).name)
+        # Qualify only what actually clashes, so the common case keeps the
+        # plain <froot> name a user would recognise.
+        dupes = {n for n in names if names.count(n) > 1}
+        out = []
+        for name, parent, num in zip(names, parents, nums):
+            if name in dupes:
+                name = f"{parent}_{name}" if parent else name
+            out.append(name)
+        still = {n for n in out if out.count(n) > 1}
+        if still:
+            out = [f"{n}_{Path(num).stem}" if n in still else n
+                   for n, num in zip(out, nums)]
+        root = Path(typed) if typed else None
+        return [str(root / n) if root else n for n in out]
+
+    def _source_cfg_for(self, n: int) -> dict:
+        """Streaming descriptor for panel ``n`` of the scan being run.
+
+        Falls back to the loader when no scan is active (an interactive
+        preview, or anything that runs before the queue exists), so the
+        loader stays the one place that knows how to read a path.
+        """
+        scan = getattr(self, "_active_scan", None)
+        if not scan:
+            return self._loader.source_cfg(n)
+        path = scan.get(n, "")
+        if not path:
+            return {"path": ""}
+        if source_kind(path) == "hdf5":
+            return {"type": "hdf5", "path": path,
+                    "dataset": self._loader.DATASET}
+        return {"type": "tiff_glob", "path": path}
 
     def _start_next_sequential(self):
         if not self._pending_panels:
@@ -1211,7 +1309,7 @@ class HydraBatchPage(QtWidgets.QWidget):
         except Exception as e:
             self._skip_panel(n, f"calibration error: {e}")
             return
-        src_cfg = self._loader.source_cfg(n)
+        src_cfg = self._source_cfg_for(n)
         if not src_cfg.get("path"):
             self._skip_panel(n, "no data")
             return
@@ -1222,7 +1320,9 @@ class HydraBatchPage(QtWidgets.QWidget):
                         if self._var_check.isChecked() else None)
         if variance_cfg and self._corr_widget.any_enabled():
             variance_cfg = None
-        base_out = self._out_ed.text().strip()
+        base_out = (self._active_out_base
+                    if self._active_out_base is not None
+                    else self._out_ed.text().strip())
         out_dir = str(Path(base_out) / f"ge{n}") if base_out else None
         fmts = self._fmt.checked_keys()
         q_cfg = ({"QMin": self._q_min.value(), "QMax": self._q_max.value(),
@@ -1350,11 +1450,30 @@ class HydraBatchPage(QtWidgets.QWidget):
     def _maybe_finish_run(self):
         if self._workers or self._pending_panels:
             return
+        # One scan's four panels are done: combine THIS scan, then move on.
+        # The combine has to run per scan, not once at the end, because each
+        # scan writes into its own folder and the merge is a property of a
+        # folder's ge1..ge4.
+        self._combine_panel_zarrs_if_wanted()
+        if self._scan_queue and not self._run_cancelled:
+            self._start_next_scan()
+            return
+        self._finish_whole_run()
+
+    def _finish_whole_run(self) -> None:
+        self._active_scan = None
+        self._active_out_base = None
         self._run_btn.setEnabled(True); self._abort_btn.setEnabled(False)
         self._save_btn.setEnabled(bool(self._last_results))
         self._prog.setVisible(False)
-        self._log.append("Hydra batch integration run complete.")
-        self._combine_panel_zarrs_if_wanted()
+        if self._scan_total > 1:
+            self._log.append(
+                f"Hydra batch integration complete — {self._scan_pos}/"
+                f"{self._scan_total} scan(s).")
+        else:
+            self._log.append("Hydra batch integration run complete.")
+        self._scan_total = 0
+        self._scan_pos = 0
 
     def _combine_panel_zarrs_if_wanted(self) -> None:
         """Merge each frame's four per-panel zarrs into one, eta-concatenated.
@@ -1370,7 +1489,9 @@ class HydraBatchPage(QtWidgets.QWidget):
             return
         if "zarr" not in (self._fmt.checked_keys() or []):
             return
-        out_dir = self._out_ed.text().strip()
+        out_dir = (self._active_out_base
+                   if self._active_out_base
+                   else self._out_ed.text().strip())
         if not out_dir:
             return
         panels = sorted(self._cards)

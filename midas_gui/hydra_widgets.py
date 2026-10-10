@@ -23,6 +23,7 @@ from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollComboBox, _fspin, hydr
                          best_default_dataset_index)
 from midas_gui.workers import FieldAverageWorker, ProjectionWorker
 from midas_gui import hydra
+from midas_gui.hydra import group_into_scans
 from midas_gui import style as S
 from midas_gui.dialogs import BrowseFilesDialog
 from midas_gui.widgets import _convert_radial, _XUNIT_LABEL, MaskSelector, _fmt_source_desc
@@ -656,6 +657,15 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         browse.setMenu(menu)
         row.addWidget(browse)
         card.body.addLayout(row)
+        # Says so when the pick was a TREE rather than one scan. The path
+        # box can only ever show the anchor, so without this a 23-scan
+        # selection and a 1-scan selection look identical.
+        self._scan_lbl = QtWidgets.QLabel("")
+        self._scan_lbl.setWordWrap(True)
+        self._scan_lbl.setStyleSheet("color:#8AB4F8;font-size:10px")
+        self._scan_lbl.setVisible(False)
+        card.body.addWidget(self._scan_lbl)
+        self._scans: list = []
 
         # One tick per panel: which GE files make up this Hydra array.
         # Checkboxes rather than a dropdown because the four choices are
@@ -840,16 +850,71 @@ class HydraLoaderPanel(QtWidgets.QWidget):
             w.setEnabled(enabled)
 
     def _open_browse_dialog(self):
-        # Single file only — this panel's frame index comes from one anchor
-        # file's own internal frame count (hydra.n_frames_in), not separate
-        # per-frame files, so folder/multi/stem selection doesn't apply.
-        dlg = BrowseFilesDialog(self, title="Select Hydra data", modes=("file",),
+        """Pick one scan, or a tree of them.
+
+        A single Hydra scan is ONE anchor file -- its frames come from that
+        file's own internal count (hydra.n_frames_in), not from separate
+        per-frame files -- which is why this offered "file" and nothing
+        else. But a beamline root is often nothing but per-load-step
+        subfolders, each holding its own ge1-ge4 set, and there was no way
+        to say "all of them": reported as "in hydra mode, I do not get an
+        option to look at all the subfolders like in the case of single
+        panel mode".
+
+        "files" is in the modes purely so the dialog offers "Include
+        subfolders" (it gates the checkbox on a caller that can consume a
+        file list). What comes back flat is regrouped into scans here --
+        four files per scan, not four scans -- and the first becomes the
+        anchor the previews and the dark fields work against.
+        """
+        dlg = BrowseFilesDialog(self, title="Select Hydra data",
+                                modes=("file", "files", "folder"),
                                 start_dir=self._path_ed.text().strip())
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return
-        paths = dlg.paths()
-        if paths:
-            self._set_path(paths[0])
+        paths = list(dlg.paths())
+        if not paths and dlg.mode() == "folder" and not dlg.recursive():
+            paths = sorted(str(p) for p in Path(dlg.folder()).iterdir()
+                           if p.is_file())
+        if not paths:
+            return
+        self.set_scans(group_into_scans(paths))
+
+    def set_scans(self, scans: list) -> None:
+        """Adopt a list of ``{panel: path}`` sets; the first is the anchor.
+
+        The loader stays a single-scan thing -- one anchor drives the
+        preview, the frame slider and the field selectors -- and the extra
+        scans ride alongside for the batch run to walk. Keeping it that way
+        is what lets every existing single-scan path work untouched.
+        """
+        scans = [s for s in (scans or []) if s]
+        self._scans = scans
+        if not scans:
+            self._scan_lbl.setText("")
+            return
+        first = scans[0]
+        self._set_path(first[sorted(first)[0]])
+        if len(scans) > 1:
+            self._scan_lbl.setText(
+                f"{len(scans)} scans selected — the run processes all of "
+                f"them, each to its own output folder. Showing the first.")
+            self._scan_lbl.setVisible(True)
+        else:
+            self._scan_lbl.setText("")
+            self._scan_lbl.setVisible(False)
+
+    def scans(self) -> list:
+        """Every selected scan as ``{panel: path}``, the anchor first.
+
+        One entry for an ordinary single-file pick, so a caller can always
+        iterate this and never needs to branch on how the data was chosen.
+        """
+        got = [s for s in (getattr(self, "_scans", None) or []) if s]
+        if got:
+            return got
+        sib = self.siblings() or {}
+        return [dict(sib)] if sib else []
 
     # ── cross-tab data sharing (data_bridge.DataSourceRegistry) ─────
     def bind_registry(self, registry, label: str):
