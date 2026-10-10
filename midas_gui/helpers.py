@@ -523,7 +523,7 @@ def suggest_integration_output_dir(data_path, *, expid_fallback: str = "") -> Op
             else parts.root / parts.froot)
 
 
-def _folder_output_dir(files, expid_fallback: str = ""):
+def _folder_output_dir(files, expid_fallback: str = "", derive=None):
     """The one output dir a SOURCE FOLDER's files imply.
 
     ``suggest_integration_output_dir`` reads the froot off each file's own
@@ -542,8 +542,9 @@ def _folder_output_dir(files, expid_fallback: str = ""):
     count is a three-way tie, still lands on the scan.
     """
     counts = {}
+    derive = derive or suggest_integration_output_dir
     for f in files:
-        d = suggest_integration_output_dir(f, expid_fallback=expid_fallback)
+        d = derive(f, expid_fallback=expid_fallback)
         if d is not None:
             counts[str(d)] = counts.get(str(d), 0) + 1
     if not counts:
@@ -551,7 +552,8 @@ def _folder_output_dir(files, expid_fallback: str = ""):
     return Path(min(counts, key=lambda k: (-counts[k], len(k), k)))
 
 
-def group_paths_by_output_dir(paths, *, out_dir=None, expid_fallback: str = "") -> list:
+def group_paths_by_output_dir(paths, *, out_dir=None, expid_fallback: str = "",
+                              derive=None) -> list:
     """Split a file selection into ``[(out_dir, [paths]), ...]`` -- one entry
     per SOURCE FOLDER, each with the output directory that folder implies.
 
@@ -577,6 +579,16 @@ def group_paths_by_output_dir(paths, *, out_dir=None, expid_fallback: str = "") 
 
     A selection inside ONE folder returns a single entry -- every
     non-recursive pick -- which is the caller's existing one-run path.
+
+    ``derive`` picks which convention names a folder's directory, defaulting
+    to :func:`suggest_integration_output_dir` (``<expid>_bc/<froot>/<det>``).
+    Hydra passes :func:`suggest_panel_base_output_dir` instead, because each
+    of its four panels appends its OWN ``ge{n}/`` segment -- and the hook
+    matters for more than the name: the "is this Output box a stale autofill
+    or a chosen root" test compares the box against the derived dirs, so a
+    caller deriving one convention while the grouper assumed another never
+    matches, is read as a custom root, and nests every folder's output
+    inside the first one's.
     """
     paths = [str(x) for x in paths or []]
     if not paths:
@@ -587,13 +599,13 @@ def group_paths_by_output_dir(paths, *, out_dir=None, expid_fallback: str = "") 
         by_folder.setdefault(str(Path(f).parent), []).append(f)
     if len(by_folder) == 1:
         only = next(iter(by_folder.values()))
-        return [(_folder_output_dir(only, expid_fallback)
+        return [(_folder_output_dir(only, expid_fallback, derive)
                  or (Path(out_dir) if out_dir else None), only)]
 
     resolved = []          # (derived_dir_or_None, files)
     for folder in sorted(by_folder):
         files = by_folder[folder]
-        resolved.append((_folder_output_dir(files, expid_fallback), files))
+        resolved.append((_folder_output_dir(files, expid_fallback, derive), files))
 
     keys = [str(d) for d, _ in resolved if d is not None]
     custom = bool(out_dir) and str(out_dir) not in keys
