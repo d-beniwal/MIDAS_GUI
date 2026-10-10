@@ -68,10 +68,31 @@ def test_a_configured_rotation_reports_itself_instead(page):
     assert "5" in txt and "0.1" in txt
 
 
-def test_the_note_follows_the_collapse_toggle(page):
-    page._ome_start.setValue(5.0)
+def test_the_collapse_control_says_what_it_actually_does(page):
+    """It was labelled "one ω per frame (averaged)", which describes chunk
+    averaging -- a different thing the run does anyway. It is the collapse
+    OVERRIDE: one constant for the whole run, tested BEFORE the channel in
+    _omega_resolver, so ticking it silently discards a chosen channel."""
+    assert page._ome_collapse.text() == "one ω for all frames"
+    page._ome_channel.setCurrentText("measurement/scan/samRY")
     page._ome_collapse.setChecked(True)
-    assert "averaged" in page._ome_lbl.text()
+    txt = page._ome_lbl.text()
+    assert "ALL frames" in txt
+    assert "overrides" in txt, "the user must be told the channel is ignored"
+
+
+def test_the_note_says_what_each_omega_averages_over(page):
+    """"So in this case, how are the frames chunked?" — asked while looking
+    at this card, where the chunk spin is not."""
+    page._loader._combine_chunk.setValue(5)
+    page._ome_channel.setCurrentText("measurement/scan/samRY")
+    assert "5 raw sub-frames" in page._ome_lbl.text()
+
+
+def test_the_note_tracks_the_chunk_spin_two_columns_away(page):
+    page._ome_channel.setCurrentText("measurement/scan/samRY")
+    page._loader._combine_chunk.setValue(7)
+    assert "7 raw sub-frames" in page._ome_lbl.text()
 
 
 # ── the CSV round-trip stops losing the rotation ────────────────────────
