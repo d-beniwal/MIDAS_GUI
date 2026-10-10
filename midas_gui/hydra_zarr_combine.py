@@ -311,27 +311,20 @@ def _eta_bin_size(block: dict):
 
 
 def eta_beyond_branch_cut(per_panel: dict, panels):
-    """Panels asking for eta outside [-180, 180), or ``None``.
+    """Panels whose eta request cannot be served, or ``None``.
 
-    The backend reports a pixel's azimuth with ``atan2``: ``pixel_to_REta``
-    types it ``eta_deg: azimuth (deg, [-180, 180))``. No pixel can come back
-    at 185 deg, so a bin CENTRED at 185 can never be filled -- it is not
-    sparse or vignetted, it is unreachable by construction, and it comes out
-    identically zero with nothing said.
+    Crossing the +/-180 wrap is no longer a problem in itself:
+    ``midas_gui.eta_wrap`` bins the whole circle and lifts the requested
+    bins out of it, so ge1's 120..210 now comes back full in one run. This
+    reports only what that cannot do -- a grid that does not divide the
+    circle from -180, or a BIN that straddles the seam (a 10 deg bin
+    centred on 180 spans 175..185, half on each side, and no single
+    floor() binning can fill it).
 
-    Measured on connolly_oct26's ge1, caked 120..210 because that is the
-    azimuth the panel physically subtends (geometry puts it at 131.8..207.0
-    for R up to 2200): bins 185, 195 and 205 were all zero across every one
-    of 3520 R bins. Three of nine -- 30 deg of requested azimuth, about 27
-    of it real diffraction the panel did record. The other three panels do
-    not cross the cut and are clean, which is exactly how it presented:
-    "ge1 eta range is odd", "ge2 eta range looks ok", "ge3 looks ok".
-
-    A range straddling the cut cannot be expressed as one interval in
-    [-180, 180), so this cannot be silently rewritten -- 120..210 is
-    120..180 TOGETHER WITH -180..-150, which is two runs or a backend that
-    accepts wrapped ranges. Saying so is the useful thing.
+    Delegates to ``plan_eta`` rather than re-deriving the rule, so the GUI
+    and the integrator cannot disagree about what is servable.
     """
+    from midas_gui.eta_wrap import plan_eta
     bad = []
     for p in panels:
         b = per_panel.get(p) or {}
@@ -339,17 +332,10 @@ def eta_beyond_branch_cut(per_panel: dict, panels):
         step = _eta_bin_size(b)
         if bounds is None or not step:
             continue
-        lo, hi = bounds
-        n = int(round((hi - lo) / step))
-        dead = [lo + step * (i + 0.5) for i in range(max(n, 0))]
-        dead = [c for c in dead if not (-180.0 <= c < 180.0)]
-        if dead:
-            bad.append(f"{p} ({lo:g}..{hi:g}) has {len(dead)} bin(s) outside "
-                       f"[-180, 180): {', '.join(f'{c:g}' for c in dead)}")
-    if not bad:
-        return None
-    return ("eta requested past the +/-180 wrap, where the backend can "
-            "return no pixels — these bins come out empty: " + "; ".join(bad))
+        problem = plan_eta(bounds[0], bounds[1], step).problem
+        if problem:
+            bad.append(f"{p}: {problem}")
+    return "; ".join(bad) if bad else None
 
 
 def _merged_eta_span(per_panel: dict, panels):

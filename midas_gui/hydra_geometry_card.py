@@ -1631,10 +1631,15 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         # path silently fell back to circle binning (see radial_integrate /
         # cake_integrate) — which drops the tilt correction and splits every
         # peak on a tilted geometry.
+        # bin_spec / eta_take, not the bare spec: when the requested eta
+        # range crosses +/-180 the geometry above was built for the whole
+        # circle, and the cake has to be cut back down to the bins that were
+        # asked for -- otherwise this gets 36 rows where it expects 9 (see
+        # midas_gui.eta_wrap).
         prof, _, cake_2d, _ = integrate_frame(
-            img_t, spec, ctx["geom"], kernel, (None, None), None, False,
-            corr_counts=ctx["corr_counts"], return_cake=True,
-            weighted=True, cnt_cake=ctx["cnt"])
+            img_t, ctx["bin_spec"], ctx["geom"], kernel, (None, None), None,
+            False, corr_counts=ctx["corr_counts"], return_cake=True,
+            weighted=True, cnt_cake=ctx["cnt"], eta_take=ctx["eta_take"])
         if set_cake and self._cake_view is not None:
             n_eta = spec.n_eta_bins
             eta_ax = float(spec.EtaMin) + float(spec.EtaBinSize) * (np.arange(n_eta) + 0.5)
