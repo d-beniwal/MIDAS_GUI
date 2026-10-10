@@ -265,8 +265,8 @@ class HydraViewerPage(QtWidgets.QWidget):
         (``…_ge3.instr.txt``) both work, and a run folder that happens to
         contain "ge1" does not out-vote the file's own name.
         """
-        hits = cls._PANEL_IN_NAME.findall(str(path))
-        return int(hits[-1]) if hits else None
+        from midas_gui.hydra import panel_for_file
+        return panel_for_file(path)
 
     def _load_four_calibrations(self):
         """Pick up to four panel calibrations at once and apply each to its
@@ -338,11 +338,10 @@ class HydraViewerPage(QtWidgets.QWidget):
         for n in (1, 2, 3, 4):
             if n in chosen:
                 continue
+            from midas_gui.hydra import sibling_for_panel
             for have_n, have_p in sorted(chosen.items()):
-                cand = self._PANEL_IN_NAME.sub(
-                    lambda m, _n=n: m.group(0)[:-len(m.group(1))] + str(_n),
-                    str(have_p))
-                if cand != str(have_p) and Path(cand).exists():
+                cand = sibling_for_panel(have_p, n)
+                if cand and Path(cand).exists():
                     chosen[n] = cand
                     filled.add(n)
                     break

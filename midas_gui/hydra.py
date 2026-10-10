@@ -17,6 +17,7 @@ numbers), used only until a real per-panel calibration file is loaded.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -98,6 +99,39 @@ def compute_inv_coords(bc_y: float, bc_z: float, tx_deg: float,
     y_pix = bc_y - Y_det / px
     z_pix = bc_z + Z_det / px
     return z_pix.astype(np.float32), y_pix.astype(np.float32)
+
+
+#: ``ge<n>`` anywhere in a path. Panel calibrations are written as a set and
+#: named alike, so one file names its siblings.
+PANEL_IN_NAME = re.compile(r"ge\s*([1-4])\b", re.IGNORECASE)
+
+
+def panel_for_file(path) -> Optional[int]:
+    """Which panel a file belongs to, or ``None``.
+
+    Read from the LAST ``ge<n>`` in the full path, so a per-panel folder
+    (``.../ge3/calib.txt``) and a per-panel filename (``..._ge3.instr.txt``)
+    both work, and a run folder that happens to contain "ge1" does not
+    out-vote the file's own name.
+    """
+    hits = PANEL_IN_NAME.findall(str(path))
+    return int(hits[-1]) if hits else None
+
+
+def sibling_for_panel(path, n: int) -> Optional[str]:
+    """``path`` with its panel token rewritten to ``n``, or ``None`` if it
+    carries no token (or already is that panel's).
+
+    Every occurrence is rewritten, not just the last, so a layout that puts
+    the panel in BOTH the folder and the filename
+    (``.../ge3/scan_ge3.instr.txt``) comes out consistent.
+
+    Says nothing about whether the result exists; callers check, because a
+    name that can be formed and a file that is there are different claims.
+    """
+    out = PANEL_IN_NAME.sub(
+        lambda m, _n=n: m.group(0)[:-len(m.group(1))] + str(_n), str(path))
+    return None if out == str(path) else out
 
 
 def inv_coord_base(tx_deg: float, big_det_size: int, px: float, step: int = 1):
