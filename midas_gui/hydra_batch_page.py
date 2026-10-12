@@ -137,6 +137,27 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._det_view = ImageViewer()
         self._origin_btn = OriginToolButton(self._det_view)
         self._det_view._toolbar_layout.addWidget(self._origin_btn)
+        # Same slot the single-detector tab uses: origin, grid, lab axes.
+        # Both are GLOBAL, view-level toggles -- they change what the
+        # Detector view draws, not what the integration computes -- so they
+        # belong together, and in one fixed place.
+        #
+        # This used to be reparented into whichever caking card was showing,
+        # on the reasoning that it draws the caking values. That made a
+        # single shared toggle LOOK per-panel while actually being global,
+        # and made the widget physically migrate across the page on every
+        # ge1->ge2 switch. Toolbar instead (2026-10-12), matching
+        # tab_batch.py and `Lab-frame axes` right beside it.
+        self._grid_chk = QtWidgets.QCheckBox("Show bin grid")
+        self._grid_chk.setToolTip(
+            "Overlay the Rmin/Rmax boundary circles and the full (R, η) "
+            "integration bin grid on each panel's Detector view tab — "
+            "concentric circles at each R-bin edge, spokes at each η-bin "
+            "edge. Thinned to at most ~50 rings / ~72 spokes for "
+            "legibility with fine bin sizes. Unchecking this hides the "
+            "overlay entirely, including Rmin/Rmax.")
+        self._grid_chk.toggled.connect(self._refresh_active_detector_preview)
+        self._det_view._toolbar_layout.addWidget(self._grid_chk)
         self._lab_axes_chk = QtWidgets.QCheckBox("Lab-frame axes")
         self._lab_axes_chk.setToolTip(
             "Overlay MIDAS lab-frame axes (X_Lab/Y_Lab), the beam-direction "
@@ -208,21 +229,6 @@ class HydraBatchPage(QtWidgets.QWidget):
         # HydraBatchPanelCard (see its module docstring). What stays shared
         # is the processing recipe -- kernel, azimuthal weighting, variance,
         # Q-uniform bins -- none of which mpe_wf models per detector either.
-        self._grid_chk = QtWidgets.QCheckBox("Show bin grid")
-        self._grid_chk.setToolTip(
-            "Overlay the Rmin/Rmax boundary circles and the full (R, η) "
-            "integration bin grid on each panel's Detector view tab — "
-            "concentric circles at each R-bin edge, spokes at each η-bin "
-            "edge. Thinned to at most ~50 rings / ~72 spokes for "
-            "legibility with fine bin sizes. Unchecking this hides the "
-            "overlay entirely, including Rmin/Rmax.")
-        # NOT added to the shared recipe card: it draws the caking values
-        # and belongs beside them. It stays ONE widget -- the single source
-        # of truth _state_widgets persists -- and is moved into whichever
-        # caking card is currently showing (_place_grid_toggle), rather
-        # than copied per panel, which would need four checkboxes kept in
-        # sync for no gain.
-        self._grid_chk.toggled.connect(self._refresh_active_detector_preview)
         # Rotation. SHARED, not per panel: there is one goniometer, and all
         # four panels see the same omega for a given frame. mpe_wf's
         # cake_parameters CSV carries OME_* per detector, redundantly.
@@ -732,29 +738,29 @@ class HydraBatchPage(QtWidgets.QWidget):
             return None
 
     def _place_shared_cake_widgets(self, host) -> None:
-        """Move the page-level caking widgets into ``host``'s caking card.
+        """Move the rotation row into ``host``'s caking card.
 
-        The bin-grid toggle and the rotation row are both page-level state
-        that belongs WITH the caking values rather than with the processing
-        recipe -- one draws them, the other is the ninth, tenth and
-        eleventh cake_parameters fields. Each is one widget, reparented to
-        follow the visible card, rather than one copy per card: they are
-        persisted by identity in ``_state_widgets``, and five copies would
-        have to be kept in step with each other for no benefit.
+        The rotation row is page-level state that belongs WITH the caking
+        values rather than with the processing recipe -- it is the ninth,
+        tenth and eleventh cake_parameters fields. It is one widget,
+        reparented to follow the visible card rather than copied per card:
+        it is persisted by identity in ``_state_widgets``, and five copies
+        would have to be kept in step with each other for no benefit.
+
+        The bin-grid toggle used to ride along here too. It does not any
+        more -- it is a view-level toggle, not a caking value, and it now
+        lives in the Detector view toolbar beside `Lab-frame axes`, where
+        the single-detector tab has always kept it (2026-10-12).
 
         Qt reparents on addWidget, but the OLD layout would still hold an
         item pointing at the widget, so it is removed explicitly first.
         """
-        for w in (self._ome_box, self._grid_chk):
+        for w in (self._ome_box,):
             old = w.parentWidget().layout() if w.parentWidget() else None
             if old is not None:
                 old.removeWidget(w)
             host.cake_extras_layout().addWidget(w)
             w.show()
-
-    #: Kept so older callers (and tests) do not break on the rename.
-    def _place_grid_toggle(self, host) -> None:
-        self._place_shared_cake_widgets(host)
 
     def _on_panel_changed(self, key: str):
         n = self._panel_num(key)

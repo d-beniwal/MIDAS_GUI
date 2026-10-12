@@ -183,21 +183,42 @@ def test_switching_to_composite_shows_the_all_panels_caking_card(app, fixture_av
         "picking a panel again must bring its own card back"
 
 
-def test_the_bin_grid_toggle_follows_the_visible_caking_card(app, fixture_available):
-    """Asked for at 1-ID-E: "this button can go to caking card." One
-    checkbox, reparented -- not five kept in sync."""
+def test_the_bin_grid_toggle_stays_in_the_detector_view_toolbar(app, fixture_available):
+    """It used to follow the visible caking card -- asked for at 1-ID-E as
+    "this button can go to caking card" -- and this test asserted that.
+
+    Reversed 2026-10-12, on the later ask to unify the Hydra and
+    single-detector pages. The toggle is GLOBAL (one widget, shared by all
+    four panels, persisted by identity in _state_widgets) and it changes
+    what the Detector view DRAWS, not what the integration computes. Living
+    inside a per-panel caking card made a global control look per-panel,
+    and made it physically migrate across the page on every panel switch.
+    It now sits beside `Lab-frame axes` in the toolbar, which is the other
+    global view toggle and where tab_batch.py has always kept it.
+    """
     page = _calibrated_page(app, fixture_available)
+    bar = page._det_view._toolbar_layout
+
+    def in_toolbar():
+        return page._grid_chk in [bar.itemAt(i).widget() for i in range(bar.count())]
+
+    assert in_toolbar()
+    for key in ("ge3", "composite", "ge1"):
+        page._toolbar.set_current(key)
+        app.processEvents()
+        assert in_toolbar(), f"the toggle moved out of the toolbar on {key}"
+        assert page._grid_chk.parentWidget() is page._det_view
+        # isHidden(), not isVisible(): nothing under an unshown top-level is
+        # "visible", but Qt's setParent DOES hide a reparented widget, which
+        # is the regression worth catching.
+        assert not page._grid_chk.isHidden()
+
+    # The rotation row genuinely IS a caking value (OME_* are
+    # cake_parameters fields), so it still follows the visible card -- the
+    # reparenting machinery did not go away, only this one passenger.
     page._toolbar.set_current("ge3")
     app.processEvents()
-    assert page._grid_chk.parentWidget() is page._cards[3]._cake_card
-
-    page._toolbar.set_current("composite")
-    app.processEvents()
-    assert page._grid_chk.parentWidget() is not page._cards[3]._cake_card
-    # isHidden(), not isVisible(): nothing under an unshown top-level is
-    # "visible", but Qt's setParent DOES hide a reparented widget, which is
-    # the regression worth catching.
-    assert not page._grid_chk.isHidden(), "reparenting must not hide it"
+    assert page._ome_box.parentWidget() is page._cards[3]._cake_card
 
 
 # ── lab-frame axes ───────────────────────────────────────────────────────

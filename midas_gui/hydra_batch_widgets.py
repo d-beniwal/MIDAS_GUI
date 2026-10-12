@@ -391,7 +391,7 @@ class HydraBatchPanelCard(QtWidgets.QWidget):
             w.valueChanged.connect(self._mark_cake_edited)
         lv.addWidget(cake)
         #: Where the page parks the shared "Show bin grid" toggle while this
-        #: card is the visible one -- see HydraBatchPage._place_grid_toggle.
+        #: card is the visible one -- see HydraBatchPage._place_shared_cake_widgets.
         self._cake_extras = QtWidgets.QVBoxLayout()
         self._cake_extras.setContentsMargins(0, 0, 0, 0)
         cake.body.addLayout(self._cake_extras)
