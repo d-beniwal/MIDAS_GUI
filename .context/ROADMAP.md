@@ -255,6 +255,40 @@ makes a long run SAFE, the others make it correct.
 
 ### 1. `batch_cli` learns Hydra, so the Hydra page gets "Run as background job"
 
+**DONE 2026-10-12.** Built as designed below. What the design did not
+anticipate, recorded here because both were found the hard way:
+
+* **A panel that cannot resolve its calibration is SKIPPED, not fatal.**
+  Loading one panel's file pulls in all four siblings, so two uncalibrated
+  panels is the ordinary state of a two-panel run. The in-process path has
+  always skipped them (`_start_panel_worker` -> `_skip_panel`); the first
+  cut of `_run_as_job` showed a modal error and refused the whole job, so
+  the two paths disagreed about the identical setup. Only "no usable panel
+  at all" is an error. The combine step then names ONLY the panels that
+  actually ran — naming a skipped one makes `find_panel_zarr_sets` wait for
+  an archive nobody writes, every frame looks incomplete, and the merge
+  reports "wrote 0/0", which reads like success.
+* **`eta_min`/`eta_max` had no CLI flag at all**, because the
+  single-detector tab integrates the full circle and never needed them. A
+  Hydra job without them silently integrates all 360° on every panel and
+  looks plausible. Same class of bug as the omega one on `tab_batch`. Also
+  added `--frame-range-*`, kept deliberately distinct from the existing
+  `--frame-start/--frame-end` file-number filter.
+* **A `QMessageBox` in a test hangs forked pytest forever** at 0% CPU with
+  no output — it does not fail. `tests/test_hydra_batch_job.py` has a
+  `dialogs` fixture for this; the hang cost 12 min to diagnose once.
+* `Rmax = 0.0` (the documented "auto" sentinel) is unreachable on this page
+  once a calibration is set — the card re-derives it from that panel's own
+  geometry, overriding both `set_caking` and a direct `setValue(0)`.
+
+Also wired: commands are recorded to the run-log tree AND to
+`<root>/logs/<session>.commands.log` beside the data, the latter following
+the MPE SAXS/WAXS workflow's convention (a scan folder ends as
+`xy/ zarr/ mat/ logs/`). `~/.midas_gui/jobs/<session>.sh` already held the
+chain but is keyed by session name in a directory nobody browses.
+
+Original design, kept because it is still what the code does:
+
 Decided 2026-10-12: **use the same job deployment interface as the
 single-detector tab, with panels always SEQUENTIAL.**
 
@@ -335,3 +369,36 @@ across 189 folders a single mis-selection is invisible.
 `dark_candidates` already computes a `why` string ("preceding
 dark_before"). Record the resolved path AND that reason in the provenance
 entry, which turns an assumption into something checkable per scan.
+
+### 4. Two things worth taking from `mpe_wf_saxs_waxs`
+
+Compared 2026-10-12, prompted by "a lot of this question about paths have
+been sorted out there". The headline is reassuring: **the output path
+convention already agrees.** `mpe_paths.get_output_dir()` is
+`<root>/<expid>_bc/<froot>/<detector>/`, which is exactly what this GUI
+writes. The two codebases arrived at it independently; neither needs to
+change.
+
+`/home/beams3/PARKJS/opt/mpe_wf_saxs_waxs/combine_hydra_zarr.py` is a
+SECOND, independent four-panel combine. It is not a duplicate of
+`midas_gui/hydra_zarr_combine.py` and the two should not be merged
+casually — the GUI's background path must produce byte-identical output to
+its in-process path, which is why `hydra_combine_cli` wraps the GUI's own
+module. But two things it records are strictly better:
+
+* **`InstrumentParameters` stacked as a length-N array**, one entry per
+  panel, with the order in `attrs['panels']`. `Distance` legitimately
+  differs per panel on a hydra — and on 2026-10-12 ge1 turned out to have
+  been physically moved ~24 px between the Oct 6 calibration and the Oct 8
+  data, which a per-panel record in the merged file would have made
+  obvious at a glance.
+* **Per-panel provenance carry-forward** — all four panels' prior
+  histories kept, each entry tagged `source_panel`, with
+  `extra.cake_params_per_panel` / `extra.instrument_params_per_panel`
+  alongside an honest aggregate. Ours keeps an `eta_sorted` flag and the
+  per-panel cake_params but drops the upstream histories.
+
+Also note its `consolidate_xy_and_cleanup` sweeps EVERY file it finds in a
+per-detector folder into `logs/`. The background job's `_bg_job_*`
+sidecars are written to the SCAN ROOT, not inside `ge{n}/`, so that sweep
+does not relocate them — keep it that way.
