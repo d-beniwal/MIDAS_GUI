@@ -83,7 +83,14 @@ def _load_qt():
                      monitor_file=None,
                      drift_traj=None, parent=None, dark=None, bright=None, background=None,
                      bright_mode="divide", weighted=True, context=None, im_trans=(),
-                     run_mode="sequential", n_workers=1, zarr_grouping="frame"):
+                     run_mode="sequential", n_workers=1, zarr_grouping="frame",
+                     **kw):
+            # **kw, not a fixed list: BatchRunCoordinator keeps gaining
+            # options (multi_azimuth and ion_csv_extras arrived with the
+            # Hydra/single-detector parity work), and a stub that models a
+            # NARROWER signature than the thing it replaces fails the caller
+            # for a reason that has nothing to do with the caller -- the
+            # same trap _stub_spec_builders already carries a note about.
             super().__init__(parent)
             self.out_dir = out_dir
             _FakeBatchWorker.calls.append(out_dir)
