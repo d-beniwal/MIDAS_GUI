@@ -615,6 +615,7 @@ class HydraBatchPage(QtWidgets.QWidget):
     def _set_output_dir_suggested(self, suggested) -> None:
         self._out_ed.setText(str(suggested))
         self._autofilled_out = str(suggested)
+        self._out_state_was_legacy = False   # we own the box again
         self._refresh_output_mismatch()
         reason = check_output_dir_writable(suggested)
         if reason:
@@ -648,8 +649,12 @@ class HydraBatchPage(QtWidgets.QWidget):
         current = self._out_ed.text().strip()
         marker = getattr(self, "_autofilled_out", None)
         if current and current != (marker or ""):
-            if marker is not None:
-                return                      # a choice made in this session
+            # ONLY a legacy restore, not merely "no marker": a fresh page
+            # starts with marker None too, so a path typed into one would
+            # otherwise be overwritten -- which is the opposite of the rule
+            # this function exists to keep.
+            if not getattr(self, "_out_state_was_legacy", False):
+                return
             suggested = self._suggest_output_dir()
             if suggested is None or Path(current).name == Path(str(suggested)).name:
                 return
@@ -1982,6 +1987,9 @@ class HydraBatchPage(QtWidgets.QWidget):
         # rides along in "fields" but isn't a plain widget — see BatchTab.set_state.
         fmt_keys = fields.pop("fmt_keys", None)
         apply_dict_to_widgets(self._state_widgets(), fields)
+        # A project saved before the marker existed has no key at all --
+        # that absence, not a None value, is what marks it legacy.
+        self._out_state_was_legacy = "autofilled_out" not in state
         self._autofilled_out = state.get("autofilled_out")
         self._corr_widget.set_state(state.get("corr") or {})
         self._fmt.set_state(fmt_keys if fmt_keys is not None else state.get("fmt"))

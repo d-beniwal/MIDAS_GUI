@@ -368,3 +368,26 @@ def test_a_matching_box_says_nothing(app, tmp_path):
     page = HydraBatchPage()
     page._loader.set_path(new)
     assert page._out_mismatch_lbl.isHidden()
+
+
+def test_only_a_legacy_restore_lets_the_box_be_replaced(app, tmp_path):
+    """A project saved before _autofilled_out existed has no key at all,
+    and that ABSENCE is what marks it legacy. A fresh page also starts
+    with no marker, so keying on the marker alone overwrote a path typed
+    into one — the opposite of the rule."""
+    from midas_gui.hydra_batch_page import HydraBatchPage
+    new = _one_scan(tmp_path, "4130_D_load_step_0")
+
+    legacy = HydraBatchPage()
+    legacy.set_state({"fields": {"out_ed": "/x/APS_4130_C_load_step_0"}})
+    assert legacy._out_state_was_legacy
+    legacy._loader.set_path(new)
+    assert Path(legacy._out_ed.text()).name == "4130_D_load_step_0"
+
+    modern = HydraBatchPage()
+    modern.set_state({"fields": {"out_ed": "/x/APS_4130_C_load_step_0"},
+                      "autofilled_out": None})
+    assert not modern._out_state_was_legacy
+    modern._loader.set_path(new)
+    assert modern._out_ed.text() == "/x/APS_4130_C_load_step_0", \
+        "a recorded choice is never overwritten"
