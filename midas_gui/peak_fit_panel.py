@@ -37,129 +37,15 @@ import matplotlib.cm  # noqa: E402
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas  # noqa: E402
 from matplotlib.figure import Figure  # noqa: E402
 
-# ── CSV parsing (verbatim from mpe_wf_saxs_waxs/gui_data_explorer.py) ──────
-
-_PEAK_FIT_NAME_RX = re.compile(
-    r'img=(?P<img>\d+)\s+omega=(?P<omega>[-+]?\d+\.?\d*)\s+eta=(?P<eta>[-+]?\d+\.?\d*)')
-
-# Pulls the sibling-file number out of the leading file basename in the CSV
-# "name" column, e.g. "C611_017Fe_1_load9_010128.vrx.zarr.zip img=0 omega=..."
-# -> 10128.
-_PEAK_FIT_FILE_RX = re.compile(
-    r'^(?P<base>.+?)_(?P<num>\d{4,7})(?:\.[^.]+)?(?:\.h5|\.zarr\.zip|\.zarr)\b')
-
-_PEAK_FIT_PARAM_KEYS = (
-    "int", "pos", "sig", "gam",
-    "esd-int", "esd-pos", "esd-sig", "esd-gam",
-)
-_PEAK_FIT_PARAM_LABELS = {
-    "int": "Intensity",
-    "pos": "Position (2θ °)",
-    "sig": "Width σ",
-    "gam": "Width γ",
-    "esd-int": "Intensity ESD",
-    "esd-pos": "Position ESD",
-    "esd-sig": "Width σ ESD",
-    "esd-gam": "Width γ ESD",
-}
-_PEAK_FIT_EXTRA_COLS = (("Rwp", "Rwp"), ("GOF", "GOF"))
-
-
-def parse_peak_fit_csv(path: str) -> Optional[dict]:
-    """Parse a GSAS-2 sequential peak-fit CSV into numpy arrays.
-
-    Returns a dict with the common per-row arrays plus only the
-    ``<param><peak>`` arrays whose columns actually exist in the header.
-    ``peak_indices`` lists the integer peak indices detected from ``pos<N>``
-    columns; ``params`` flags which of int/pos/sig/gam appear.
-    Returns None when the file is missing or unparseable.
-    """
-    if not path or not os.path.isfile(path):
-        return None
-    try:
-        with open(path, newline="") as fh:
-            reader = csv.DictReader(fh)
-            fieldnames = list(reader.fieldnames or [])
-            rows = list(reader)
-    except Exception:
-        return None
-    if not rows or not fieldnames:
-        return None
-
-    pk_rx = re.compile(r"^pos(\d+)$")
-    peak_indices = sorted({int(m.group(1))
-                           for h in fieldnames
-                           for m in [pk_rx.match(h.strip())] if m})
-    if not peak_indices:
-        pk_rx_int = re.compile(r"^int(\d+)$")
-        peak_indices = sorted({int(m.group(1))
-                               for h in fieldnames
-                               for m in [pk_rx_int.match(h.strip())] if m})
-    if not peak_indices:
-        peak_indices = [0]
-
-    header_set = {h.strip() for h in fieldnames}
-    params = {k: any(f"{k}{i}" in header_set for i in peak_indices)
-              for k in _PEAK_FIT_PARAM_KEYS}
-
-    n = len(rows)
-    omega = np.full(n, np.nan)
-    eta = np.full(n, np.nan)
-    img_idx = np.full(n, -1, dtype=int)
-    file_num = np.full(n, -1, dtype=int)
-    use = np.ones(n, dtype=bool)
-    rwp = np.full(n, np.nan)
-    gof = np.full(n, np.nan)
-    arrays: dict = {
-        f"{p}{i}": np.full(n, np.nan)
-        for p in _PEAK_FIT_PARAM_KEYS if params[p]
-        for i in peak_indices
-    }
-
-    for k, row in enumerate(rows):
-        nm = row.get("name", "")
-        m = _PEAK_FIT_NAME_RX.search(nm)
-        if m:
-            try:
-                omega[k] = float(m.group("omega"))
-                eta[k] = float(m.group("eta"))
-                img_idx[k] = int(m.group("img"))
-            except ValueError:
-                pass
-        fm = _PEAK_FIT_FILE_RX.match(nm)
-        if fm:
-            try:
-                file_num[k] = int(fm.group("num"))
-            except ValueError:
-                pass
-        try:
-            use[k] = row.get("Use", "True").strip().lower() not in ("false", "0", "")
-        except (AttributeError, ValueError):
-            pass
-        try:
-            rwp[k] = float(row.get("Rwp", "nan") or "nan")
-        except ValueError:
-            pass
-        try:
-            gof[k] = float(row.get("GOF", "nan") or "nan")
-        except ValueError:
-            pass
-        for key in arrays:
-            try:
-                arrays[key][k] = float(row.get(key, "nan") or "nan")
-            except ValueError:
-                pass
-
-    return {
-        "rows": n,
-        "omega": omega, "eta": eta, "img_idx": img_idx,
-        "file_num": file_num,
-        "use": use, "Rwp": rwp, "GOF": gof,
-        "peak_indices": peak_indices,
-        "params": params,
-        **arrays,
-    }
-
+# ── CSV parsing and reducers ──────────────────────────────────────────
+# MOVED to peak_fit_data.py so the Data Explorer tab can use the same
+# parser without importing this module (which pulls in Qt and calls
+# matplotlib.use at import). Re-exported here under the original names:
+# `from midas_gui.peak_fit_panel import parse_peak_fit_csv` still works,
+# and the two copies that briefly existed cannot drift apart.
+from midas_gui.peak_fit_data import (  # noqa: E402
+    parse_peak_fit_csv, _PEAK_FIT_NAME_RX, _PEAK_FIT_FILE_RX,
+    _PEAK_FIT_PARAM_KEYS, _PEAK_FIT_PARAM_LABELS, _PEAK_FIT_EXTRA_COLS)
 
 def read_h5_dataset(h5_path: str, ds_path: str):
     """Read a 1-D dataset by HDF5 path; return None on failure."""
