@@ -183,3 +183,62 @@ def test_no_source_emits_preview_ready_immediately_with_none_frame():
     assert frame is None
     assert seen   # no source to read at all -> resolved synchronously, no worker
     assert panel._preview_worker is None
+
+
+# ── leading blank (detector arming) frames ───────────────────────────────
+# A Pixirad arms one frame before it starts counting, so frame 0 of every
+# .pixi.h5 is identically zero. The preview read index 0 unconditionally,
+# so Batch Integrate's Detector view showed a picture of nothing on real
+# 1-ID-E data -- autoscaled to a degenerate ~1e-6 range that reads as
+# corrupt rather than blank. Reported as "I am not sure what the image is
+# being generated... this looks fine on the data viewer tab."
+
+def _run_preview(cfg, n=1):
+    QtWidgets, _app = _make_app()
+    import midas_gui.workers as wk
+    worker = wk.StreamPreviewWorker(cfg, preview_sum_n=n)
+    out = {}
+    worker.finished.connect(lambda f: out.update(frame=f))
+    worker.failed.connect(lambda m: out.update(error=m))
+    worker.start(); worker.wait(5000)
+    QtWidgets.QApplication.processEvents()
+    assert "error" not in out, out.get("error")
+    return out["frame"]
+
+
+def test_a_leading_blank_arming_frame_is_stepped_over_in_the_preview(tmp_path):
+    paths = [_make_tiff(tmp_path, "f0.tif", 0.0),      # arming frame
+             _make_tiff(tmp_path, "f1.tif", 10.0),
+             _make_tiff(tmp_path, "f2.tif", 20.0)]
+    cfg = {"type": "tiff_list", "paths": paths}
+    assert np.allclose(_run_preview(cfg, 1), 10.0), "preview still shows the blank"
+    # ...and the sum starts from the first real frame, not from the blank,
+    # so asking for 2 gets two frames' worth of signal.
+    assert np.allclose(_run_preview(cfg, 2), 30.0)
+
+
+def test_only_leading_blanks_are_skipped_not_a_blank_further_in(tmp_path):
+    """A zero frame in the middle is data, not arming -- summing must keep
+    it, or the preview silently misrepresents the run."""
+    paths = [_make_tiff(tmp_path, "f0.tif", 5.0),
+             _make_tiff(tmp_path, "f1.tif", 0.0),
+             _make_tiff(tmp_path, "f2.tif", 7.0)]
+    assert np.allclose(_run_preview({"type": "tiff_list", "paths": paths}, 3), 12.0)
+
+
+def test_an_all_blank_source_still_shows_a_frame_rather_than_failing(tmp_path):
+    """Nothing to find within the scan bound: fall back to frame 0 and show
+    the blank, rather than erroring or emitting None."""
+    paths = [_make_tiff(tmp_path, f"f{i}.tif", 0.0) for i in range(3)]
+    frame = _run_preview({"type": "tiff_list", "paths": paths}, 1)
+    assert frame is not None and np.allclose(frame, 0.0)
+
+
+def test_the_blank_scan_is_bounded(tmp_path):
+    """It must not hunt through a whole dark run over NFS -- a long leading
+    run of blanks past the bound falls back to frame 0."""
+    import midas_gui.workers as wk
+    n_blank = wk._PREVIEW_BLANK_SCAN + 3
+    paths = [_make_tiff(tmp_path, f"b{i}.tif", 0.0) for i in range(n_blank)]
+    paths.append(_make_tiff(tmp_path, "real.tif", 99.0))
+    assert np.allclose(_run_preview({"type": "tiff_list", "paths": paths}, 1), 0.0)
