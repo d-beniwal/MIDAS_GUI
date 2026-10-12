@@ -309,3 +309,43 @@ def test_ome_sum_from_a_csv_now_lands_on_the_chunk_spin(rot_page, tmp_path):
 def test_the_chunk_is_saved_with_the_loader_state(rot_page):
     rot_page._loader._combine_chunk.setValue(6)
     assert rot_page._loader.get_state()["combine_chunk"] == 6
+
+
+# ── state must survive a project written by either tab ─────────────────
+def test_combine_op_accepts_the_key_a_project_actually_stores(app):
+    """Loading connolly_oct26_waxs.h5 died with
+
+        ValueError: invalid literal for int() with base 10: 'mean'
+
+    and took the whole "populate from project" with it. get_state stored
+    an INDEX under a key the single-detector tab already uses for the
+    STRING, and an integrate attempt carries state between them."""
+    from midas_gui.hydra_widgets import HydraLoaderPanel
+    for val, want in (("mean", "mean"), ("sum", "sum"), ("max", "max")):
+        ldr = HydraLoaderPanel(mode="stream")
+        ldr.set_state({"combine_op": val})
+        assert ldr._combine_op.currentData() == want
+
+
+def test_combine_op_still_reads_a_legacy_index(app):
+    from midas_gui.hydra_widgets import HydraLoaderPanel
+    ldr = HydraLoaderPanel(mode="stream")
+    ldr.set_state({"combine_op": 1})
+    assert ldr._combine_op.currentData() == "sum"
+
+
+def test_an_unusable_combine_op_does_not_take_the_restore_down(app):
+    from midas_gui.hydra_widgets import HydraLoaderPanel
+    for junk in ("nonsense", None, 99, -1):
+        ldr = HydraLoaderPanel(mode="stream")
+        ldr.set_state({"combine_op": junk})      # must not raise
+        assert ldr._combine_op.currentData() == "mean"
+
+
+def test_combine_op_round_trips_as_the_key(app):
+    from midas_gui.hydra_widgets import HydraLoaderPanel
+    a = HydraLoaderPanel(mode="stream")
+    a._combine_op.setCurrentIndex(2)
+    b = HydraLoaderPanel(mode="stream")
+    b.set_state(a.get_state())
+    assert b._combine_op.currentData() == a._combine_op.currentData()

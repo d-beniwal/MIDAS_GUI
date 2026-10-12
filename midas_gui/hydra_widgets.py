@@ -1290,7 +1290,11 @@ class HydraLoaderPanel(QtWidgets.QWidget):
             "fr_start": self._fr_start.value(), "fr_end": self._fr_end.value(),
             "fr_stride": self._fr_stride.value(),
             "combine_chunk": self._combine_chunk.value(),
-            "combine_op": self._combine_op.currentIndex(),
+            # The KEY ("mean"/"sum"/...), not the index: an index is
+            # meaningless if the item order ever changes, and the single-
+            # detector tab already stores this key under the same name --
+            # so a state written by either side must be readable by both.
+            "combine_op": self._combine_op.currentData(),
             "masks": {n: sel.get_state() for n, sel in self._mask_sels.items()},
             "panels": sorted(n for n, cb in self._status_lbls.items()
                              if cb.isChecked()),
@@ -1313,7 +1317,21 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         if "combine_chunk" in state:
             self._combine_chunk.setValue(int(state["combine_chunk"]))
         if "combine_op" in state:
-            self._combine_op.setCurrentIndex(int(state["combine_op"]))
+            # Accepts the key OR a legacy index. A project written before
+            # this stored an index, and the single-detector tab's state --
+            # which reaches here through a shared integrate attempt --
+            # stores the key, so int() on it raised
+            # ValueError: invalid literal for int() with base 10: 'mean'
+            # and took the whole "populate from project" down with it.
+            want = state["combine_op"]
+            idx = self._combine_op.findData(str(want))
+            if idx < 0:
+                try:
+                    idx = int(want)
+                except (TypeError, ValueError):
+                    idx = -1
+            if 0 <= idx < self._combine_op.count():
+                self._combine_op.setCurrentIndex(idx)
         for n_key, mstate in (state.get("masks") or {}).items():
             sel = self._mask_sels.get(int(n_key))
             if sel is not None:
