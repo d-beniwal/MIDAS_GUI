@@ -21,8 +21,10 @@ import pyqtgraph as pg
 from midas_gui.constants import DEFAULT_NICKEL_H5
 from midas_gui.helpers import (_fspin, _NoScrollSpinBox, _NoScrollComboBox,
                          widgets_to_dict, apply_dict_to_widgets, _apply_im_trans,
+                         pixel_readout_text,
                          load_profile_file, profile_file_axis_kind,
-                         native_axis_to_r_px, PROFILE_FILE_FILTER)
+                         native_axis_to_r_px, PROFILE_FILE_FILTER,
+                         browse_start_dir)
 from midas_gui.widgets import (ProfileViewer, DataLoaderPanel, CakeViewer,
                               OriginToolButton, build_lab_frame_axes_items)
 from midas_gui.dialogs import show_error
@@ -43,6 +45,7 @@ _IMASK_MAX = 5_000_000_000
 class DataViewerTab(QtWidgets.QWidget):
     pushGeometry = QtCore.pyqtSignal(dict)   # λ/px/Lsd/BC → Calibrate tab
     pullGeometry = QtCore.pyqtSignal()       # "← Get": pull Calibrate's geometry
+    imTransChanged = QtCore.pyqtSignal(list)  # ImTransOpt codes → Mask Builder
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -130,8 +133,81 @@ class DataViewerTab(QtWidgets.QWidget):
         """Ordered MIDAS ImTransOpt codes from the Transforms checkboxes."""
         return self._geom_card.im_trans_codes()
 
+    # -- Default names for saved calibrations --------------------------
+    # Deliberately the same shape as CalibrationTab._default_save_stem /
+    # _default_save_path: a geometry saved here and one saved there describe
+    # the same detector, so they should not be named by different rules.
+
+    def set_expid_provider(self, provider) -> None:
+        """Wired by app.py's MainWindow; ``provider()`` is the header's Exp
+        ID. Used only to name saved calibrations."""
+        self._expid_provider = provider
+
+    def _default_save_stem(self) -> str:
+        """``<expid>_<data file stem>``, degrading to whichever half exists.
+
+        Both halves are best-effort: a blank Exp ID or no loaded data drops
+        that half rather than producing a name like ``_.instr.txt``.
+        """
+        parts = []
+        try:
+            provider = getattr(self, "_expid_provider", None)
+            expid = (provider() or "").strip() if provider else ""
+        except Exception:
+            expid = ""
+        if expid:
+            parts.append(expid)
+        data_path = self._loader.data_path()
+        if data_path:
+            # One suffix off, so a doubled extension (".ge3.h5") keeps the
+            # half that distinguishes it.
+            stem = Path(data_path).name.rsplit(".", 1)[0]
+            if stem:
+                parts.append(stem)
+        return "_".join(parts) if parts else "calibration"
+
+    def _default_save_path(self, suffix: str) -> str:
+        """Full path for a Save dialog, so it opens beside the data rather
+        than wherever the app was launched from."""
+        start = browse_start_dir(self._loader.data_path())
+        name = self._default_save_stem() + suffix
+        return str(Path(start) / name) if start else name
+
+    def _sync_lab_rotation(self):
+        """Draw the frame as the detector is mounted, per the card's tx.
+
+        A display transform only — ``ImageViewer.set_lab_rotation`` keeps
+        every pick, ROI and saved geometry in panel (row, col) space, and is
+        identity for the unrolled detectors that are the normal case.
+        """
+        g = self.get_geometry() or {}
+        self._viewer.set_lab_rotation(float(g.get("tx") or 0.0),
+                                       g.get("BC_y"), g.get("BC_z"))
+
+    def _radial_readout(self, col, row) -> str:
+        """2θ / Q / d / η under the cursor — see
+        ``widgets.ImageViewer.set_radial_readout_fn``.
+
+        The displayed frame is already in the geometry's own orientation
+        (every path here goes through ``set_raw_frame`` with these same
+        ``im_trans`` codes), and ``(col, row)`` arrives in panel space even
+        when the picture is drawn rolled (``ImageViewer.panel_xy`` inverts
+        the lab rotation at the hover boundary), so the hovered pixel needs
+        no remapping here. ``tx`` rides along in the geometry dict and
+        ``pixel_readout_text`` uses it for η — without it the status bar
+        names an azimuth a full tx away from the cake axis the pixel is
+        actually binned into.
+        """
+        return pixel_readout_text(col, row, self.get_geometry())
+
     def _on_im_trans_changed(self):
-        """Transform checkbox toggled — re-apply to the current frame + refresh."""
+        """Transform checkbox toggled — re-apply to the current frame + refresh.
+
+        Also re-broadcast the codes: the Mask Builder paints the detector in
+        this tab's orientation so the two do not disagree about which way up
+        it is while you pick pixels to throw away (app.py wires it).
+        """
+        self.imTransChanged.emit(list(self._im_trans_codes()))
         if self._is_projection and getattr(self, "_proj_raw", None) is not None:
             self._cur = self._viewer.set_raw_frame(
                 self._proj_raw, self._im_trans_codes(), autorange=False)
@@ -318,6 +394,7 @@ class DataViewerTab(QtWidgets.QWidget):
 
         # ── Ring simulation + calibration load/save (extracted, reusable) ──
         self._geom_card = DetectorGeometryCard()
+        self._geom_card.set_save_name_provider(self._default_save_path)
         self._geom_card.pushGeometry.connect(self.pushGeometry.emit)
         self._geom_card.pullGeometry.connect(self.pullGeometry.emit)
         self._geom_card.imTransChanged.connect(self._on_im_trans_changed)
@@ -331,6 +408,11 @@ class DataViewerTab(QtWidgets.QWidget):
         right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         right.setHandleWidth(8)
         self._viewer = ROIImageViewer()
+        self._viewer.set_radial_readout_fn(self._radial_readout)
+        # The geometry card owns BC/Lsd/tilts; the cursor does not move when
+        # one of them is edited, so the readout has to be told.
+        self._geom_card.geometryChanged.connect(
+            lambda: self._viewer._refresh_coord_bar())
         self._geom_card.set_viewer(self._viewer)
         vtb = self._viewer._toolbar_layout
         # Display-origin selector — bottom-left (MIDAS convention, the default)
@@ -385,6 +467,12 @@ class DataViewerTab(QtWidgets.QWidget):
         vtb.addWidget(self._lab_axes_on)
         self._geom_card.geometryChanged.connect(self._redraw_lab_axes_if_on)
         self._geom_card.geometryChanged.connect(self._on_profile_geometry_changed)
+        # tx is the panel's installation roll about the beam, so a non-zero
+        # one means the frame as stored is not the frame as mounted. Drawing
+        # it unrotated puts the picture in a different coordinate system from
+        # every number beside it.
+        self._geom_card.geometryChanged.connect(self._sync_lab_rotation)
+        self._sync_lab_rotation()
         self._viewer.originChanged.connect(self._redraw_lab_axes_if_on)
         # ROI popups are always-on-top (roi_tools.ROIStatsPopup) so they don't
         # get buried behind the main window; minimizing one tucks it into this

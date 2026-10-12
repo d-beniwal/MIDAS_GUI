@@ -430,15 +430,47 @@ def _hash_paths_in(obj):
     return obj
 
 
+def _jsonable(v):
+    """Sets to sorted lists, recursively; everything else untouched.
+
+    JSON has no set, and neither do HDF5 attributes, so a set-valued result
+    field breaks every consumer of this dict at once. ``fit_at_limit`` is
+    one (``workers.py`` builds it with ``set(fit["at_limit"])``), and it
+    made session autosave fail silently every few minutes -- 1724 logged
+    "Object of type set is not JSON serializable" tracebacks from a single
+    run of experiments, each one a crash-recovery draft that was never
+    written.
+
+    Fixed at the serialization boundary rather than at that one field: the
+    result object comes from the backend and grows attributes between
+    releases, so the next set-valued one would reintroduce exactly this.
+    Sorted, not arbitrary order, so a saved project does not churn between
+    runs that fitted the same thing.
+    """
+    if isinstance(v, (set, frozenset)):
+        return sorted(v, key=str)
+    if isinstance(v, dict):
+        return {k: _jsonable(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_jsonable(x) for x in v]
+    return v
+
+
 def sanitize_result_dict(result) -> Optional[dict]:
     """Full result fields, including the underscore-prefixed extras the
     GUI bolts on (_calibrant_name, _panel_unpacked, ...) — unlike the
     existing GUI-state sidecar JSON, nothing is dropped here except
     torch-tensor fields (duck-typed via a '.numpy' attribute), which are
-    large and already referenced separately (residual_corr_bin_path)."""
+    large and already referenced separately (residual_corr_bin_path).
+
+    Sets are converted to sorted lists on the way out (see
+    :func:`_jsonable`) — they are the one common Python type with no JSON
+    or HDF5 representation, and a single one anywhere in the result takes
+    the whole autosave down."""
     if result is None:
         return None
-    return {k: v for k, v in vars(result).items() if not hasattr(v, "numpy")}
+    return {k: _jsonable(v) for k, v in vars(result).items()
+            if not hasattr(v, "numpy")}
 
 
 def _write_array(group, name, arr):
@@ -819,17 +851,40 @@ def integrate_attempt_gui_fields(meta: dict) -> dict:
         fmt_keys = [k for k in fmt_keys if k in valid_keys]
         if fmt_keys:
             fields["fmt_keys"] = fmt_keys
+    # Stored by its short key; the combo is populated by display label, so
+    # translate the same way kernel/fmt do above. Absent (every project saved
+    # before zarr grouping existed) leaves the widget at its "frame" default,
+    # which is the behaviour those attempts actually ran under.
+    zg_label = {"frame": "One zarr per output frame",
+                "file": "One zarr per source file",
+                "run": "One zarr for the whole run"}.get(inputs.get("zarr_grouping"))
+    if zg_label:
+        fields["zarr_grouping"] = zg_label
+    # Beam-monitor CSV column groups. Absent in every project saved before
+    # the CSV existed, which correctly leaves both boxes unticked — those
+    # attempts ran with the default columns only.
+    ion_extras = inputs.get("ion_csv_extras")
+    if ion_extras is not None:
+        ion_extras = set(ion_extras)
+        fields["ion_env_chk"] = "env" in ion_extras
+        fields["ion_motors_chk"] = "motors" in ion_extras
     if inputs.get("monitor_file"):
         fields["mon_ed"] = inputs["monitor_file"]
-    q_cfg = inputs.get("q_cfg")
-    if q_cfg:
-        fields["q_check"] = True
-        if q_cfg.get("QMin") is not None:
-            fields["q_min"] = q_cfg["QMin"]
-        if q_cfg.get("QMax") is not None:
-            fields["q_max"] = q_cfg["QMax"]
-        if q_cfg.get("QBinSize") is not None:
-            fields["q_bin"] = q_cfg["QBinSize"]
+    # Output rebin. Saved as "q_cfg" in every project -- the key predates
+    # 2theta -- so rebin_cfg_parts is what decides which unit it actually
+    # was: a dict with no "unit" is the legacy Q-only spelling.
+    # "q_check" is still emitted for HydraBatchPage, which has a checkbox
+    # where Batch Integrate now has a three-way Bin type dropdown (whose
+    # set_state translates a bare q_check back into bin_type="Q").
+    if inputs.get("q_cfg"):
+        from midas_gui.workers import rebin_cfg_parts
+        unit, lo, hi, step = rebin_cfg_parts(inputs["q_cfg"])
+        prefix = {"Q": "q", "2th": "tth"}[unit]
+        fields["bin_type"] = unit
+        fields["q_check"] = unit == "Q"
+        for name, value in (("min", lo), ("max", hi), ("bin", step)):
+            if value is not None:
+                fields[f"{prefix}_{name}"] = value
     return fields
 
 

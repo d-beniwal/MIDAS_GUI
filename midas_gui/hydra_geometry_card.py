@@ -303,6 +303,9 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         super().__init__(parent)
         self._show_rotate = show_rotate
         self._materials: list = []
+        #: What a calibration load wrote into the geometry boxes; see
+        #: _snapshot_calib_baseline.
+        self._calib_widget_baseline: Optional[dict] = None
         self._ring_items: list = []
         self._label_items: list = []
         self._pick_ring_item = None
@@ -324,6 +327,10 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         self._profile_view = None
         self._cake_view = None
         self._image_provider: Callable[[], Optional[np.ndarray]] = lambda: None
+        self._detected_px: Optional[float] = None   # px size the data implies
+        #: ``fn(suffix) -> full path`` for the Save dialogs; see
+        #: set_save_name_provider.
+        self._save_name_provider: Optional[Callable[[str], Optional[str]]] = None
         self._mask_provider: Optional[Callable[[np.ndarray], Optional[np.ndarray]]] = None
         self._rad_r_bin: Optional[QtWidgets.QDoubleSpinBox] = None
         self._rad_auto: Optional[QtWidgets.QCheckBox] = None
@@ -339,6 +346,21 @@ class DetectorGeometryCard(QtWidgets.QWidget):
                           mask_provider: Optional[Callable[[np.ndarray], Optional[np.ndarray]]] = None):
         self._image_provider = image_provider
         self._mask_provider = mask_provider
+
+    def set_save_name_provider(self, fn: Optional[Callable[[str], Optional[str]]]):
+        """Supply ``fn(suffix) -> full default path`` for the Save dialogs.
+
+        Without it the dialogs open on bare names (``paramstest.txt``) in
+        whatever directory the app was launched from, so every save is a
+        navigate-and-type. The Calibrate tab has named its files
+        ``<expid>_<data stem><suffix>`` beside the data for a while
+        (``CalibrationTab._default_save_path``); this lets the Data Viewer and
+        the Hydra panels do the same instead of each inventing one.
+
+        Optional, and failures fall back to the bare name, so a card with no
+        provider behaves exactly as before.
+        """
+        self._save_name_provider = fn
 
     def set_profile_view(self, profile_view):
         self._profile_view = profile_view
@@ -479,10 +501,26 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         return self._calib_geom is not None
 
     def get_geometry(self) -> dict:
-        """Current manual geometry — λ (Å), pixel (µm), Lsd (µm), beam centre (px).
+        """Current geometry — λ (Å), pixel (µm), Lsd (µm), beam centre (px).
 
-        Lsd is entered in mm (display) but always returned/used in µm."""
-        return {
+        Lsd is entered in mm (display) but always returned/used in µm.
+
+        ``tx`` and the distortion coefficients have no field on this card, so
+        they come from the loaded calibration file if there is one. They used
+        to be dropped here, which meant "Send →" quietly delivered a geometry
+        missing the panel's installation azimuth: load a Hydra paramstest at
+        tx=300 with 13 refined coefficients, press Send, and the Calibrate
+        tab received neither. The values were on screen in the summary line
+        the whole time, which is what made it read as Send having done
+        nothing.
+
+        A key is included only when it is actually known. The receiver
+        (``tab_calibrate.apply_geometry``) treats a present key as a value to
+        seed and tick, so sending a fabricated 0 would pin the fit to the
+        wrong azimuth -- the same failure that erased tx on result feedback.
+        Absent means unknown, and the auto-seeder handles it.
+        """
+        g = {
             "wavelength_A": self._wl.value(),
             "pxY": self._px.value(),
             "Lsd": self._lsd_um(),
@@ -492,6 +530,11 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             "tz": self._tz.value(),
             "im_trans": self.im_trans_codes(),
         }
+        g["tx"] = self._tx.value()
+        cal = self._calib_geom or {}
+        if cal.get("distortion"):
+            g["distortion"] = dict(cal["distortion"])
+        return g
 
     def _lsd_um(self) -> float:
         """Lsd in µm (internal unit) from the mm display field."""
@@ -521,6 +564,14 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             v = fields.get(key)
             if v is not None:
                 w.blockSignals(True); w.setValue(float(v)); w.blockSignals(False)
+        # What the DATA says the pixel size is, kept separately from the box:
+        # loading a calibration afterwards overwrites the box, and a geometry
+        # saved from that card would then describe the calibration's detector
+        # rather than the one on screen. Only used to warn at save time --
+        # detection covers a handful of detectors and a refined pixel size is
+        # legitimately not the nominal one, so it must not override anything.
+        if fields.get("pxY") is not None:
+            self._detected_px = float(fields["pxY"])
         if self._sim_btn.isChecked() and self._image_provider() is not None:
             self._simulate()
         else:
@@ -533,8 +584,8 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             return
         for w, key, scale in ((self._wl, "wavelength_A", 1.0), (self._px, "pxY", 1.0),
                               (self._lsd, "Lsd", 0.001), (self._bcy, "BC_y", 1.0),
-                              (self._bcz, "BC_z", 1.0), (self._ty, "ty", 1.0),
-                              (self._tz, "tz", 1.0)):
+                              (self._bcz, "BC_z", 1.0), (self._tx, "tx", 1.0),
+                              (self._ty, "ty", 1.0), (self._tz, "tz", 1.0)):
             v = g.get(key)
             if v is not None:
                 w.blockSignals(True); w.setValue(float(v) * scale); w.blockSignals(False)
@@ -550,6 +601,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             or (g.get("NrPixelsY") and g.get("NrPixelsZ"))
         if has_full:
             self._apply_full_geometry_dict(g)
+            self._snapshot_calib_baseline()
         self._after_geometry_change()
 
     def _apply_full_geometry_dict(self, g: dict):
@@ -569,8 +621,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         }
         img = self._image_provider()
         if not (geom["NrPixelsY"] and geom["NrPixelsZ"]) and img is not None:
-            nz, ny = img.shape
-            geom["NrPixelsY"], geom["NrPixelsZ"] = ny, nz
+            geom["NrPixelsY"], geom["NrPixelsZ"] = self._raw_pixel_counts(img)
         required = ("wavelength_A", "Lsd", "BC_y", "BC_z", "pxY",
                     "NrPixelsY", "NrPixelsZ")
         if any(not geom.get(k) for k in required):
@@ -691,10 +742,24 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         self._bc_auto.toggled.connect(lambda c: (self._bcy.setEnabled(not c), self._bcz.setEnabled(not c)))
         ring.body.addLayout(S.Form().row(("BC_y:", self._bcy), ("BC_z:", self._bcz)))
 
+        # tx is the panel's installation azimuth ABOUT THE BEAM, not a small
+        # alignment tilt like ty/tz -- hence the full circle, and hence it
+        # does not bend the rings at all: rotating about the beam maps a ring
+        # (a circle centred on the beam) onto itself. What it does set is
+        # where the panel sits in the lab frame, so the image is drawn
+        # rotated by it and the eta readout agrees with the integration.
+        # Without it the display was a detector-plane view labelled with lab
+        # axes, and every eta was out by exactly tx.
+        self._tx = _fspin(-360.0, 360.0, 2, 0.0, "°", step=DEFAULT_STEP_TILT)
+        self._tx.setToolTip(
+            "Installation azimuth of the panel about the beam (0-360°). "
+            "Rotates the displayed image into the lab frame; the ring "
+            "radii are unchanged by it.")
         self._ty = _fspin(-180.0, 180.0, 2, 0.0, "°", step=DEFAULT_STEP_TILT)
         self._tz = _fspin(-180.0, 180.0, 2, 0.0, "°", step=DEFAULT_STEP_TILT)
         self._ty.setToolTip("Detector tilt about the Y axis — bends the simulated rings.")
         self._tz.setToolTip("Detector tilt about the Z axis — bends the simulated rings.")
+        ring.body.addLayout(S.Form().row(("tx:", self._tx)))
         ring.body.addLayout(S.Form().row(("ty:", self._ty), ("tz:", self._tz)))
 
         # Two-way geometry hand-off with the Calibrate tab.
@@ -802,6 +867,12 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         self._bcz.valueChanged.connect(self._on_bc_changed)
         self._ty.valueChanged.connect(self._on_bc_changed)
         self._tz.valueChanged.connect(self._on_bc_changed)
+        # tx was added to this card without this line, so it fed
+        # get_geometry() while notifying nobody: editing the roll left the
+        # pixel readout's η, the lab-frame compass, the radial profile and
+        # (once the viewer gained one) the lab-frame image rotation all
+        # sitting on the previous value until some *other* field was touched.
+        self._tx.valueChanged.connect(self._on_bc_changed)
 
     # ── Materials list ───────────────────────────────────────────
 
@@ -1192,15 +1263,33 @@ class DetectorGeometryCard(QtWidgets.QWidget):
 
     # ── Beam-centre picking / radial integration ──────────────────
 
+    def _set_bc(self, bc_y, bc_z):
+        """Move the beam centre to (bc_y, bc_z) as ONE change.
+
+        Setting the two spins separately fires valueChanged twice, so every
+        pick cost two full passes of _on_bc_changed -- and downstream, in
+        Hydra, two rebuilds of a 44-megapixel four-panel composite on the GUI
+        thread. The first of those ran at a geometry nobody asked for: the new
+        bc_y paired with the OLD bc_z. So this is not only half the work, it
+        drops a rebuild at a beam centre that never existed.
+        """
+        self._bcy.blockSignals(True); self._bcz.blockSignals(True)
+        try:
+            self._bcy.setValue(bc_y)
+            self._bcz.setValue(bc_z)
+        finally:
+            self._bcy.blockSignals(False); self._bcz.blockSignals(False)
+        self._on_bc_changed()
+
     def _on_bc_picked(self, bc_y, bc_z):
         """Single-click BC pick from the image (PickableImageViewer)."""
         self._bc_auto.setChecked(False)
-        self._bcy.setValue(bc_y); self._bcz.setValue(bc_z)   # triggers _on_bc_changed
+        self._set_bc(bc_y, bc_z)
 
     def _on_ring_fit_bc(self, bc_y, bc_z, r_px):
         """BC from a 3+ point circle fit on a ring (PickableImageViewer)."""
         self._bc_auto.setChecked(False)
-        self._bcy.setValue(bc_y); self._bcz.setValue(bc_z)   # triggers _on_bc_changed
+        self._set_bc(bc_y, bc_z)
 
     def _on_bc_changed(self, *_):
         """Beam centre (or a tilt) edited manually or by a pick — refresh
@@ -1307,7 +1396,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         return {
             "wavelength_A": self._wl.value(), "Lsd": self._lsd_um(),
             "BC_y": self._bcy.value(), "BC_z": self._bcz.value(),
-            "tx": 0.0, "ty": ty, "tz": tz,
+            "tx": self._tx.value(), "ty": ty, "tz": tz,
             "pxY": px, "pxZ": px,
             "NrPixelsY": ny, "NrPixelsZ": nz, "distortion": {},
             "im_trans": list(self.im_trans_codes()),
@@ -1344,7 +1433,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         return {
             "wavelength_A": self._wl.value(), "Lsd": self._lsd_um(),
             "BC_y": self._bcy.value(), "BC_z": self._bcz.value(),
-            "tx": 0.0, "ty": self._ty.value(), "tz": self._tz.value(),
+            "tx": self._tx.value(), "ty": self._ty.value(), "tz": self._tz.value(),
             "pxY": px, "pxZ": px,
             "NrPixelsY": ny, "NrPixelsZ": nz, "distortion": {},
             "im_trans": list(self.im_trans_codes()),
@@ -1542,10 +1631,15 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         # path silently fell back to circle binning (see radial_integrate /
         # cake_integrate) — which drops the tilt correction and splits every
         # peak on a tilted geometry.
+        # bin_spec / eta_take, not the bare spec: when the requested eta
+        # range crosses +/-180 the geometry above was built for the whole
+        # circle, and the cake has to be cut back down to the bins that were
+        # asked for -- otherwise this gets 36 rows where it expects 9 (see
+        # midas_gui.eta_wrap).
         prof, _, cake_2d, _ = integrate_frame(
-            img_t, spec, ctx["geom"], kernel, (None, None), None, False,
-            corr_counts=ctx["corr_counts"], return_cake=True,
-            weighted=True, cnt_cake=ctx["cnt"])
+            img_t, ctx["bin_spec"], ctx["geom"], kernel, (None, None), None,
+            False, corr_counts=ctx["corr_counts"], return_cake=True,
+            weighted=True, cnt_cake=ctx["cnt"], eta_take=ctx["eta_take"])
         if set_cake and self._cake_view is not None:
             n_eta = spec.n_eta_bins
             eta_ax = float(spec.EtaMin) + float(spec.EtaBinSize) * (np.arange(n_eta) + 0.5)
@@ -1698,7 +1792,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             try:
                 self._calib_geom = geometry_fields_from_file(path)
                 d = self._calib_geom
-                for w, key in ((self._ty, "ty"), (self._tz, "tz")):
+                for w, key in ((self._tx, "tx"), (self._ty, "ty"), (self._tz, "tz")):
                     v = d.get(key)
                     if v is not None:
                         w.blockSignals(True); w.setValue(float(v)); w.blockSignals(False)
@@ -1713,10 +1807,34 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             self._calib_lbl.setText(
                 f"Loaded {Path(path).suffix or 'file'} — " + "  ".join(parts)
                 + f"  ·  {mode}")
+            self._snapshot_calib_baseline()
             self._after_geometry_change()
         except Exception:
             import traceback
             show_error(self, "Calibration load error", traceback.format_exc())
+
+    def _raw_pixel_counts(self, img) -> Optional[tuple]:
+        """``(NrPixelsY, NrPixelsZ)`` of the *raw* detector frame behind ``img``.
+
+        ``image_provider`` hands back the display-oriented frame (this card's
+        Transforms checkboxes already applied), but every geometry dict here
+        pairs raw-frame pixel counts with a separate ``im_trans`` the backend
+        applies itself — see the un-transform in :meth:`_radial_from_geometry`
+        before it builds a spec. Only opcode 3 (transpose) changes the shape,
+        and it swaps Y and Z, so an odd number of them flips the pair; the
+        mirrors (1, 2) leave it alone. Same rule as
+        :func:`calib.effective_pixel_counts`, in the opposite direction.
+
+        Silent on a square detector, which is why it went unnoticed: it only
+        bites on a non-square one (e.g. a 1024x402 Pixirad) with a transpose
+        active.
+        """
+        if img is None:
+            return None
+        nz, ny = np.asarray(img).shape
+        if tuple(self.im_trans_codes() or ()).count(3) % 2:
+            ny, nz = nz, ny
+        return int(ny), int(nz)
 
     def get_full_geometry(self) -> Optional[dict]:
         """Public alias for ``_export_geom`` — the best-available full
@@ -1727,25 +1845,82 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         return self._export_geom()
 
     def _export_geom(self) -> Optional[dict]:
-        """Full geometry dict for calibration export: the loaded calibration's
-        geometry if present (carries tilts/distortion/detector size from the
-        file), otherwise one built from the current manual / Ring-simulation
-        fields (tx=0, distortion empty)."""
-        if self._calib_geom is not None:
-            geom = dict(self._calib_geom)
-            geom["im_trans"] = self.im_trans_codes()   # current checkboxes win
-            return geom
+        """Full geometry dict for calibration export and for whoever owns this
+        card (the Hydra page syncs it into a ``hydra.DetectorState``).
+
+        A loaded calibration supplies what no widget can -- distortion
+        coefficients and the detector size -- and the **live fields win over
+        it**, because the fields are what the user can see and edit.
+
+        This used to return ``self._calib_geom`` wholesale, which made every
+        geometry box on the card inert the moment a calibration was loaded.
+        On the Hydra page that is always: each panel loads a bundled
+        ``ps_ge{n}.txt`` at startup, so editing tx/ty/tz or the beam centre
+        there changed nothing at all and the boxes displayed values the
+        composite was not using. Measured before the fix: panel 1's box read
+        0.00 while the composite placed it at 296.885 deg, and typing 138 into
+        the box left both numbers untouched.
+
+        Loading writes the file's values into those same widgets (see
+        :meth:`set_geometry` and :meth:`_load_calibration`), so straight after
+        a load the override is a no-op and only a deliberate edit diverges.
+        """
+        base = dict(self._calib_geom) if self._calib_geom is not None else None
         img = self._image_provider()
-        if img is None:
+        if base is None and img is None:
             return None
-        nz, ny = img.shape
         px = self._px.value()
-        return {
+        live = {
             "wavelength_A": self._wl.value(), "Lsd": self._lsd_um(),
             "BC_y": self._bcy.value(), "BC_z": self._bcz.value(),
-            "tx": 0.0, "ty": self._ty.value(), "tz": self._tz.value(),
-            "pxY": px, "pxZ": px, "NrPixelsY": ny, "NrPixelsZ": nz,
-            "distortion": {}, "im_trans": self.im_trans_codes(),
+            "tx": self._tx.value(), "ty": self._ty.value(), "tz": self._tz.value(),
+            "pxY": px, "im_trans": self.im_trans_codes(),
+        }
+        counts = self._raw_pixel_counts(img)
+        if base is None:
+            ny, nz = counts
+            return {**live, "pxZ": px, "NrPixelsY": ny, "NrPixelsZ": nz,
+                    "distortion": {}}
+        # Override only the fields the user has actually MOVED since the
+        # calibration was loaded, compared against what the load itself wrote
+        # into each box -- not against the file's value. The boxes are
+        # fixed-decimal (tx has 2), so a file's 296.885 displays as 296.88 and
+        # "the widget always wins" would quietly round a calibrated roll by
+        # 0.005 deg, about 0.15 px out at the edge of a Hydra panel. Comparing
+        # against the baseline makes an untouched box mean exactly nothing.
+        baseline = self._calib_widget_baseline or {}
+        geom = dict(base)
+        for key, val in live.items():
+            if key not in baseline or baseline[key] != val:
+                geom[key] = val
+        # One px box against a file that may carry a non-square pair: only a
+        # changed box means "square pixels, this size". An untouched one must
+        # not flatten pxZ onto pxY behind the user's back.
+        if "pxY" in geom and abs(float(base.get("pxY") or px) - px) > 1e-9:
+            geom["pxZ"] = px
+        # The detector SIZE is the one field that must follow the data rather
+        # than the loaded calibration. It has no live widget, so the loop above
+        # can never override it, and a geometry loaded from another detector
+        # used to be exported with that detector's size -- a CeO2 GE
+        # calibration (2048x2048, 200 um) loaded here and re-saved against
+        # Pixirad frames wrote "NrPixelsY/Z 2048" beside the edited 62 um
+        # pixel, and Batch Integrate then died inside the backend with
+        # "image shape (402, 1024) does not match geometry (2048, 2048)".
+        # The on-screen frame is ground truth about how big the detector is;
+        # the file can only be stale about it.
+        if counts is not None and (geom.get("NrPixelsY"), geom.get("NrPixelsZ")) != counts:
+            geom["NrPixelsY"], geom["NrPixelsZ"] = counts
+        return geom
+
+    def _snapshot_calib_baseline(self) -> None:
+        """Remember what a calibration load just put into each geometry box,
+        so :meth:`_export_geom` can tell an untouched box from an edited one
+        without fighting the boxes' display precision."""
+        self._calib_widget_baseline = {
+            "wavelength_A": self._wl.value(), "Lsd": self._lsd_um(),
+            "BC_y": self._bcy.value(), "BC_z": self._bcz.value(),
+            "tx": self._tx.value(), "ty": self._ty.value(), "tz": self._tz.value(),
+            "pxY": self._px.value(), "im_trans": self.im_trans_codes(),
         }
 
     def _save_calibration(self, kind: str):
@@ -1756,11 +1931,19 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "No geometry", "Load data first.")
             return
         specs = {
-            "json": ("Save calibration.json", "calibration.json", "JSON (*.json)"),
-            "paramstest": ("Save MIDAS parameter file", "paramstest.txt", "Text (*.txt)"),
-            "poni": ("Save calibration.poni", "calibration.poni", "PONI (*.poni)"),
+            "json": ("Save calibration.json", "calibration.json",
+                     ".instr.json", "JSON (*.json)"),
+            "paramstest": ("Save MIDAS parameter file", "paramstest.txt",
+                           ".instr.txt", "Text (*.txt)"),
+            "poni": ("Save calibration.poni", "calibration.poni",
+                     ".poni", "PONI (*.poni)"),
         }
-        title, default_name, filt = specs[kind]
+        title, default_name, suffix, filt = specs[kind]
+        if self._save_name_provider is not None:
+            try:
+                default_name = self._save_name_provider(suffix) or default_name
+            except Exception:
+                pass      # naming is a convenience; never block a save
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, title, default_name, filt)
         if not path:
             return
@@ -1786,4 +1969,29 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             import traceback
             show_error(self, "Save failed", traceback.format_exc())
             return
-        QtWidgets.QMessageBox.information(self, "Saved", f"Calibration saved to:\n{path}")
+        # A saved geometry must describe the detector on screen, not the one
+        # whose calibration happens to be loaded on the card. The array size
+        # is corrected automatically (see _export_geom) because the frame is
+        # unarguable about it; the pixel size is only flagged, because
+        # detection knows a handful of detectors and a refined pixel is
+        # legitimately not the nominal one. Both are reported, so re-using one
+        # detector's geometry for another is never silent.
+        notes = []
+        loaded = self._calib_geom or {}
+        if loaded and (loaded.get("NrPixelsY"), loaded.get("NrPixelsZ")) != \
+                (geom.get("NrPixelsY"), geom.get("NrPixelsZ")):
+            notes.append(
+                f"Array size written as {geom['NrPixelsY']}x{geom['NrPixelsZ']} px, "
+                f"taken from the loaded frame — the calibration on this card is for "
+                f"a {loaded.get('NrPixelsY')}x{loaded.get('NrPixelsZ')} px detector. "
+                f"Its distortion terms (and the RhoD they are normalised by) were "
+                f"fit on that detector; check they belong to this one.")
+        written_px = float(geom.get("pxY") or 0.0)
+        if self._detected_px and abs(written_px - self._detected_px) > 1e-6:
+            notes.append(
+                f"Pixel size written as {written_px:g} µm, but this data's detector "
+                f"reads as {self._detected_px:g} µm. Set the px box to the right "
+                f"value and save again if that is not deliberate.")
+        note = ("\n\n" + "\n\n".join(notes)) if notes else ""
+        QtWidgets.QMessageBox.information(
+            self, "Saved", f"Calibration saved to:\n{path}{note}")

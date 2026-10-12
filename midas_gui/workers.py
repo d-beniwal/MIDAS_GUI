@@ -28,11 +28,13 @@ from PyQt5 import QtCore
 import midas_gui._paths  # noqa: F401  (sys.path setup before MIDAS imports)
 from midas_gui import calib_cli
 from midas_gui import h5_metadata
+from midas_gui import ion_csv
 from midas_gui import provenance
 from midas_gui import settings
 from midas_gui.helpers import (_load_image, _apply_im_trans, _build_spec,
                                _spec_from_json, average_field, apply_field_corrections,
-                               read_hdf5_stack_chunk, load_profile_file)
+                               read_hdf5_stack_chunk, load_profile_file,
+                               CORRECTION_SUFFIX, CORRECTION_EXT)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -40,11 +42,27 @@ from midas_gui.helpers import (_load_image, _apply_im_trans, _build_spec,
 # ═════════════════════════════════════════════════════════════════════════════
 
 def apply_q_uniform(spec, q_cfg: Optional[dict]):
-    """Activate native Q-uniform binning on a spec when requested."""
+    """Activate the backend's NATIVE Q-uniform binning on a spec.
+
+    Deliberately unused. ``IntegrationSpec`` really does carry
+    QMin/QMax/QBinSize and a ``q_mode_active`` property that redefines
+    ``n_r_bins``, but this GUI does not take that route: every Q (and 2θ)
+    run integrates R-uniform and rebins the finished 1-D profile — see
+    :func:`rebin_grid_and_r` / :func:`rebin_R_to_grid`.
+
+    Kept because the native mode exists and may be worth revisiting, but do
+    not wire it up casually: the two routes disagree about what the axis
+    travelling with a profile *is*. The rebin route carries R in pixels
+    (the native mode would carry Q), and every downstream consumer —
+    writers, waterfall, stack view, the GSAS-II export guard — assumes
+    pixels. Getting that wrong is what produced the 2θ = 180° plots fixed
+    in 4cb7aaa."""
     if q_cfg:
-        spec.QMin     = float(q_cfg["QMin"])
-        spec.QMax     = float(q_cfg["QMax"])
-        spec.QBinSize = float(q_cfg["QBinSize"])
+        unit, lo, hi, step = rebin_cfg_parts(q_cfg)
+        if unit != "Q":
+            raise ValueError(
+                f"native spec binning exists for Q only, not {unit!r}")
+        spec.QMin, spec.QMax, spec.QBinSize = float(lo), float(hi), float(step)
     return spec
 
 
@@ -68,7 +86,15 @@ def axis_conversions(r_px, lsd, px, wl):
     return two_theta, two_theta * 100.0, q
 
 
-_FID_NUM_RE = re.compile(r'^(?P<froot>.+?)_(?P<num>\d+)(?P<tag>[^_\d]*)$')
+# The tag excludes '_' but NOT digits: '_' is what forces the match onto
+# the LAST underscore-number group, while barring digits made a detector
+# tag that ends in one unparseable. '..._1s_003502.ge1' then matched
+# nothing at all and fell back to (whole stem, fallback_idx, '') -- so
+# every .geN output folder and filename carried the file number that
+# should have been split off, while .pixi/.vrx (no digit) were fine.
+from midas_gui import eta_wrap
+
+_FID_NUM_RE = re.compile(r'^(?P<froot>.+?)_(?P<num>\d+)(?P<tag>[^_]*)$')
 # A trailing "_c<NN>" chunk suffix, as minted by _HDF5StackGlobSource when one
 # multi-frame HDF5 file is split into several combined chunks.
 _FID_CHUNK_RE = re.compile(r'^(?P<rest>.+)_c(?P<chunk>\d+)$')
@@ -193,6 +219,28 @@ def build_geom(spec, kernel: str, mask):
     return SubpixelBinGeometry.from_spec(spec, K=K, mask=mask)
 
 
+def bin_area_for(spec, kernel: str, mask=None, geom=None) -> np.ndarray:
+    """Pixel-count ("bin area") cake with the same eta rows as the DATA cake.
+
+    Not simply ``count_cake(build_geom(spec, ...))``: when the requested eta
+    range crosses +/-180 the data is binned on the whole circle and cut back
+    down (see :mod:`midas_gui.eta_wrap`), so an area built straight from the
+    request has the wrong number of rows -- 36 against 9 for a 120..210
+    request at 10 deg. GSASZarrWriter rejects that pair, which is how a ge1
+    archive came out as a 136-byte empty zip and took the four-panel combine
+    with it.
+
+    ``geom`` is the already-built binning geometry when the caller has one;
+    it must be the geometry for the PLAN, not for the bare spec.
+    """
+    plan = eta_wrap.plan_eta(spec.EtaMin, spec.EtaMax, spec.EtaBinSize)
+    bspec = (spec if plan.take is None
+             else replace_spec_eta(spec, plan.bin_min, plan.bin_max))
+    g = geom if geom is not None else build_geom(bspec, kernel, mask)
+    return eta_wrap.apply_take(
+        count_cake(g, kernel, bspec.NrPixelsZ, bspec.NrPixelsY), plan.take)
+
+
 def _profile_from_cake(cake_np: np.ndarray, count_cake: Optional[np.ndarray] = None) -> np.ndarray:
     """Collapse an (η, R) cake to a 1-D profile.
 
@@ -227,26 +275,94 @@ def count_cake(geom, kernel: str, NrPixelsZ: int, NrPixelsY: int) -> np.ndarray:
     return fn(ones, geom, normalize=False).detach().cpu().numpy()
 
 
-def q_grid_and_r(q_cfg, lsd, px, wl):
-    """Uniform-Q bin centres + the matching R(px) for each Q (for axis/writers)."""
-    n = max(1, int(round((q_cfg["QMax"] - q_cfg["QMin"]) / q_cfg["QBinSize"])))
-    qgrid = q_cfg["QMin"] + q_cfg["QBinSize"] * (np.arange(n) + 0.5)
-    two_theta = 2.0 * np.arcsin(np.clip(qgrid * wl / (4 * math.pi), -1, 1))
-    r_of_q = lsd * np.tan(two_theta) / px
-    return qgrid, r_of_q
+#: Output radial units this app can rebin an R-uniform profile onto.
+REBIN_UNITS = ("Q", "2th")
+
+#: Display names for those units, for log lines and user-facing messages.
+#: ``None`` (no rebin configured) reads as "off" so callers can index this
+#: unconditionally.
+_REBIN_LABEL = {None: "off", "Q": "Q", "2th": "2θ"}
 
 
-def rebin_R_to_Q(r_ax, prof, sigma, qgrid, lsd, px, wl):
-    """Rebin an R-uniform profile/σ onto a uniform-Q grid (the kernels don't do Q-mode).
+def rebin_cfg_parts(cfg) -> tuple:
+    """``(unit, lo, hi, step)`` from an output-rebin config.
 
-    See analyze_workflows/workflow_analysis.md (P0-2): integrate R-uniform then interpolate
-    onto uniform Q so rings land at the correct Q.
+    The canonical form is self-describing::
+
+        {"unit": "Q" | "2th", "min": float, "max": float, "step": float}
+
+    with ``min``/``max``/``step`` in that unit's own terms (Å⁻¹ for Q,
+    degrees for 2θ). The legacy Q-only spelling — ``QMin``/``QMax``/
+    ``QBinSize`` and no ``unit`` — is still accepted and read as Q, so
+    projects saved before 2θ existed keep loading.
+
+    This is the only place that knows the dict's shape; everything else goes
+    through here.
+
+    (The transport keyword is still named ``q_cfg`` throughout the workers
+    and in saved projects' ``inputs``. It predates 2θ and renaming it would
+    reach the on-disk project schema for naming alone — the dict itself says
+    which unit it is.)"""
+    if not cfg:
+        return None, None, None, None
+    unit = cfg.get("unit", "Q")
+    if "min" in cfg:
+        lo, hi, step = cfg["min"], cfg["max"], cfg["step"]
+    else:                                   # legacy Q-only spelling
+        lo, hi, step = cfg["QMin"], cfg["QMax"], cfg["QBinSize"]
+    if unit not in REBIN_UNITS:
+        raise ValueError(f"unknown output rebin unit {unit!r}; "
+                         f"expected one of {REBIN_UNITS}")
+    return unit, float(lo), float(hi), float(step)
+
+
+def _r_px_of(values, unit, lsd, px, wl) -> np.ndarray:
+    """R in detector pixels for an array of radial positions in ``unit``."""
+    values = np.asarray(values, dtype=float)
+    if unit == "Q":
+        two_theta = 2.0 * np.arcsin(np.clip(values * wl / (4 * math.pi), -1, 1))
+    else:                                   # "2th", already an angle
+        two_theta = np.radians(values)
+    return lsd * np.tan(two_theta) / px
+
+
+def _unit_of_r_px(r_px, unit, lsd, px, wl) -> np.ndarray:
+    """The inverse of :func:`_r_px_of`: pixels → ``unit``."""
+    two_theta = np.arctan(np.asarray(r_px, dtype=float) * px / lsd)   # radians
+    if unit == "Q":
+        return 4 * math.pi * np.sin(two_theta / 2) / wl
+    return np.degrees(two_theta)
+
+
+def rebin_grid_and_r(cfg, lsd, px, wl):
+    """Output bin centres + the matching R(px) for each — ``(grid, r_of_grid)``.
+
+    ``grid`` is uniform in the config's unit (Q in Å⁻¹, or 2θ in degrees);
+    ``r_of_grid`` is where each of those bins sits on the detector, in
+    pixels. The second value is the axis that travels onward with the
+    rebinned profile — writers, the waterfall and the stack view all expect
+    pixels, so this is R, *not* the grid. See :func:`apply_q_uniform`.
     """
-    q_of_r = 4 * math.pi * np.sin(np.radians(np.degrees(np.arctan(r_ax * px / lsd))) / 2) / wl
-    order = np.argsort(q_of_r)
-    prof_q = np.interp(qgrid, q_of_r[order], prof[order])
-    sig_q = np.interp(qgrid, q_of_r[order], sigma[order]) if sigma is not None else None
-    return prof_q, sig_q
+    unit, lo, hi, step = rebin_cfg_parts(cfg)
+    n = max(1, int(round((hi - lo) / step)))
+    grid = lo + step * (np.arange(n) + 0.5)
+    return grid, _r_px_of(grid, unit, lsd, px, wl)
+
+
+def rebin_R_to_grid(r_ax, prof, sigma, grid, lsd, px, wl, unit="Q"):
+    """Rebin an R-uniform profile/σ onto a grid uniform in ``unit``.
+
+    The integration kernels only bin uniformly in R (there is no 2θ mode at
+    all, and the native Q mode is unused — see :func:`apply_q_uniform`), so
+    uniform-Q and uniform-2θ output are produced here: integrate R-uniform,
+    convert this run's R axis into the target unit, and interpolate onto the
+    requested grid so rings land at the correct Q / 2θ.
+    """
+    x_of_r = _unit_of_r_px(r_ax, unit, lsd, px, wl)
+    order = np.argsort(x_of_r)
+    prof_x = np.interp(grid, x_of_r[order], prof[order])
+    sig_x = np.interp(grid, x_of_r[order], sigma[order]) if sigma is not None else None
+    return prof_x, sig_x
 
 
 def corrections_counts(spec):
@@ -265,7 +381,7 @@ def corrections_counts(spec):
 
 def integrate_frame(img_t, spec, geom, kernel, corrections, variance_cfg,
                     need_sigma: bool, corr_counts=None, return_cake=False,
-                    weighted: bool = False, cnt_cake=None):
+                    weighted: bool = False, cnt_cake=None, eta_take=None):
     """Integrate one frame, returning (profile, sigma_or_None) or
     (profile, sigma, cake_2d, cake_sigma_2d).
 
@@ -274,6 +390,13 @@ def integrate_frame(img_t, spec, geom, kernel, corrections, variance_cfg,
         cake (pass corr_counts to avoid recomputing it per frame)
       - variance enabled     → integrate_<kernel>_with_variance (σ from error model)
       - otherwise            → plain kernel integration
+
+    ``eta_take`` selects eta rows out of the binned cake before anything is
+    derived from it — the whole-circle detour that
+    :func:`midas_gui.eta_wrap.plan_eta` uses to serve a range crossing
+    ±180. It is applied to the CAKE, so the 1-D profile, the σ and the
+    2-D output all see only the bins that were asked for. ``None`` (every
+    range that does not cross) is a straight pass-through.
 
     ``weighted`` collapses the (η, R) cake to 1-D with a pixel-count-weighted mean
     (robust to partial azimuthal coverage / off-detector beam centres) instead of the
@@ -294,7 +417,9 @@ def integrate_frame(img_t, spec, geom, kernel, corrections, variance_cfg,
     if pol is not None or sa is not None:
         int2d = m.integrate_with_corrections(
             img_t, spec, polarization=pol, solid_angle=sa).detach().cpu().numpy()
-        counts = corr_counts if corr_counts is not None else corrections_counts(spec)
+        int2d = eta_wrap.apply_take(int2d, eta_take)
+        counts = corr_counts if corr_counts is not None else eta_wrap.apply_take(
+            corrections_counts(spec), eta_take)
         with np.errstate(invalid="ignore", divide="ignore"):
             norm = np.where(counts > 0.5, int2d / counts, np.nan)
         prof = _profile_from_cake(norm, count_cake=counts if weighted else None)
@@ -311,8 +436,8 @@ def integrate_frame(img_t, spec, geom, kernel, corrections, variance_cfg,
             "polygon":   m.integrate_polygon_with_variance,
         }.get(kernel, m.integrate_subpixel_with_variance)
         mean2d, sig2d = fn(img_t, geom, error_model=em)
-        mean_np = mean2d.detach().cpu().numpy()
-        sig_np  = sig2d.detach().cpu().numpy()
+        mean_np = eta_wrap.apply_take(mean2d.detach().cpu().numpy(), eta_take)
+        sig_np = eta_wrap.apply_take(sig2d.detach().cpu().numpy(), eta_take)
         prof = _profile_from_cake(mean_np, count_cake=cnt_cake if weighted else None)
         # σ of the η-mean: sqrt(Σσ²)/N over valid η bins
         var = np.nansum(sig_np ** 2, axis=0)
@@ -330,7 +455,7 @@ def integrate_frame(img_t, spec, geom, kernel, corrections, variance_cfg,
         "polygon": m.integrate_polygon,
     }.get(kernel, m.integrate_subpixel)
     int2d = fn(img_t, geom, normalize=True)
-    cake_np = int2d.detach().cpu().numpy()
+    cake_np = eta_wrap.apply_take(int2d.detach().cpu().numpy(), eta_take)
     prof = _profile_from_cake(cake_np, count_cake=cnt_cake if weighted else None)
     sigma = np.sqrt(np.maximum(prof, 0.0)) if need_sigma else None
     if return_cake:
@@ -350,16 +475,84 @@ def build_integration_context(spec, kernel: str, mask, corrections, weighted: bo
     lsd, px, wl = float(spec.Lsd), float(spec.pxY), float(spec.Wavelength)
     pol, sa = corrections
     corr_on = pol is not None or sa is not None
-    geom = None if corr_on else build_geom(spec, kernel, mask)
-    r_ax = compute_r_axis(spec)
-    corr_counts = corrections_counts(spec) if corr_on else None
-    cnt = (count_cake(geom, kernel, spec.NrPixelsZ, spec.NrPixelsY)
+    # An eta range crossing +/-180 cannot be binned directly: no kernel wraps,
+    # so every bin centred past the cut comes back empty and its pixels are
+    # dropped. eta_wrap.plan_eta turns it into a whole-circle binning plus the
+    # columns to lift out, which is exact. `take` is None for everything that
+    # does not cross -- the ordinary case -- and then nothing below changes.
+    plan = eta_wrap.plan_eta(spec.EtaMin, spec.EtaMax, spec.EtaBinSize)
+    bin_spec = spec
+    if plan.take is not None:
+        bin_spec = replace_spec_eta(spec, plan.bin_min, plan.bin_max)
+        bin_spec.validate()
+    geom = None if corr_on else build_geom(bin_spec, kernel, mask)
+    r_ax = compute_r_axis(bin_spec)
+    corr_counts = corrections_counts(bin_spec) if corr_on else None
+    cnt = (count_cake(geom, kernel, bin_spec.NrPixelsZ, bin_spec.NrPixelsY)
            if (weighted and not corr_on) else None)
-    n_eta = spec.n_eta_bins
-    eta_ax = float(spec.EtaMin) + float(spec.EtaBinSize) * (np.arange(n_eta) + 0.5)
-    return {"spec": spec, "geom": geom, "r_ax": r_ax, "corr_counts": corr_counts,
+    # The count cakes are consumed alongside a cake that has ALREADY been cut
+    # down to the requested columns, so they have to be cut the same way.
+    corr_counts = eta_wrap.apply_take(corr_counts, plan.take)
+    cnt = eta_wrap.apply_take(cnt, plan.take)
+    # The axis is the caller's own request, unwrapped: 125..205, not
+    # 125..175 then -175..-155. The data is in that order; so is this.
+    eta_ax = plan.centres
+    return {"spec": spec, "bin_spec": bin_spec, "eta_take": plan.take,
+            "eta_plan_problem": plan.problem,
+            "geom": geom, "r_ax": r_ax, "corr_counts": corr_counts,
             "cnt": cnt, "eta_ax": eta_ax, "lsd": lsd, "px": px, "wl": wl,
             "corr_on": corr_on}
+
+
+def replace_spec_eta(spec, eta_min: float, eta_max: float):
+    """``spec`` with a different eta range and nothing else touched.
+
+    A shallow copy rather than a mutation: the caller's spec is the record of
+    what was ASKED for -- it is what labels the output and what the run's
+    provenance quotes -- while the copy is only what the binner is told.
+    """
+    import copy
+    out = copy.copy(spec)
+    out.EtaMin = float(eta_min)
+    out.EtaMax = float(eta_max)
+    return out
+
+
+class _GsasHeader:
+    """Header stand-in for ``midas_integrate_v2``'s ``ProfileMetadata``.
+
+    The backend writers only ever call ``to_header_lines()`` on whatever is
+    passed as ``metadata=``, and ``ProfileMetadata``'s own rendering is a JSON
+    blob — which GSAS-II cannot read. Its SAXS reader
+    (``G2sad_xye.txt_XRayReaderClass``) recovers the wavelength by scanning for
+    a line containing ``=`` whose key half contains ``wave``, then doing
+    ``float(line.split("=")[1])``; failing that it silently keeps its default
+    of 1.5428 A (Cu Ka). So a ``.dat`` written with no such line loads into
+    GSAS-II as a lab-source pattern regardless of the energy it was taken at,
+    and every Q-dependent quantity downstream of it is wrong.
+
+    That parse dictates the format: exactly one ``=`` on the line, and a bare
+    number after it with no units appended.
+    """
+
+    def __init__(self, lines):
+        self._lines = list(lines)
+
+    def to_header_lines(self, prefix: str = "# "):
+        return [prefix + line for line in self._lines]
+
+
+def _dat_header(wl):
+    """Header lines for a ``.dat``, or ``None`` when there is nothing to say."""
+    try:
+        wl_f = float(wl)
+    except (TypeError, ValueError):
+        return None
+    # A zero/garbage wavelength written out would read back as a real one; let
+    # GSAS-II fall back to its own default instead of asserting a wrong number.
+    if not np.isfinite(wl_f) or wl_f <= 0.0:
+        return None
+    return _GsasHeader([f"wavelength = {wl_f:.8g}"])
 
 
 def write_profile(base, fmt, r_px, prof, sigma, lsd, px, wl,
@@ -375,7 +568,8 @@ def write_profile(base, fmt, r_px, prof, sigma, lsd, px, wl,
     elif fmt == "fxye":
         m.write_fxye(str(base) + ".fxye", r_axis=two_theta_cd, intensity=prof, sigma=sig)
     elif fmt == "dat":
-        m.write_dat(str(base) + ".dat", q_axis_invA=q, intensity=prof, sigma=sig)
+        m.write_dat(str(base) + ".dat", q_axis_invA=q, intensity=prof,
+                    sigma=sig, metadata=_dat_header(wl))
     elif fmt == "2d_csv":
         if cake_2d is None:
             # Was a silent no-op, and cost a real run its 2D CSVs: the caller
@@ -486,6 +680,12 @@ class FieldAverageWorker(QtCore.QThread):
             self.failed.emit(traceback.format_exc())
 
 
+#: How many leading frames StreamPreviewWorker will step over looking for
+#: a non-blank one. Small on purpose: it exists for detectors that arm a
+#: frame or two (Pixirad arms exactly one), not to hunt through a dark run.
+_PREVIEW_BLANK_SCAN = 8
+
+
 class StreamPreviewWorker(QtCore.QThread):
     """Fetch and dark/bright/background-correct the "stream"-mode preview sum
     off the GUI thread — the file-reading half of what
@@ -534,9 +734,35 @@ class StreamPreviewWorker(QtCore.QThread):
             if total == 0:
                 self.finished.emit(None)
                 return
-            n = min(self._preview_sum_n, total)
+            # Step over leading all-zero frames. A Pixirad arms one frame
+            # before it starts counting, so frame 0 of every .pixi.h5 is
+            # identically zero -- and the preview read it unconditionally,
+            # so the Detector view showed a picture of nothing, autoscaled
+            # to a degenerate ~1e-6 range that looks like corrupt data
+            # rather than a blank frame. (widgets._first_raw_frame_is_blank
+            # already knew this, but only the single-HDF5 sub-frame range
+            # consulted it; a multi-file stream never did.)
+            #
+            # DISPLAY ONLY -- it does not change which frames the run
+            # integrates. That stays opt-in, deliberately: an all-zero frame
+            # is not reliably an arming frame (see DECISIONS 2026-10-08), and
+            # silently dropping a real observation of zero from the DATA
+            # would be a different and much worse bug than a dull preview.
+            # Skipping it from a PICTURE costs nothing either way.
+            #
+            # Bounded: a genuinely dark dataset must not turn one preview
+            # into a scan of the whole stream over NFS.
+            start = 0
+            for probe in range(min(_PREVIEW_BLANK_SCAN, total)):
+                _fid, img = source.get(probe)
+                if np.any(np.asarray(img)):
+                    start = probe
+                    break
+            else:
+                start = 0          # all blank within the bound -- show frame 0
+            n = min(self._preview_sum_n, total - start)
             acc = None
-            for i in range(n):
+            for i in range(start, start + n):
                 _fid, img = source.get(i)
                 img = np.asarray(img, dtype=np.float64)
                 if self._dark is not None or self._bright is not None or self._background is not None:
@@ -834,6 +1060,486 @@ class ProjectionWorker(QtCore.QThread):
             self.failed.emit(traceback.format_exc())
 
 
+class BatchCorrectionWorker(QtCore.QThread):
+    """Reduce every selected HDF5 file's sub-frame stack and write the result
+    back out as HDF5 — the engine of the Batch Correction tab.
+
+    One output file per input file PER OP, holding that file's reduced
+    chunks as a single ``(M, H, W)`` float32 dataset, in a
+    ``dark_subtracted_<op>`` subfolder of the chosen output directory.
+    Chunks never cross a file boundary, which is what makes the per-file
+    output well defined in the first place.
+
+    Several ops cost one pass, not several: reading a sub-frame off disk and
+    correcting it is the same work whichever op consumes it, so mean, median,
+    sum and max are all computed from one read (see
+    ``frame_correct.reduce_chunk_multi``).
+
+    Everything numeric lives in ``midas_gui.frame_correct``; this class is
+    the Qt shell around it — threading, progress, cancellation, and the
+    per-file bookkeeping (dark resolution, metadata alignment) that has to
+    happen once per file rather than once per chunk.
+
+    Memory is bounded by ONE chunk plus one output stack, never a whole input
+    file: each chunk reads only its own raw sub-frames through an h5py slice.
+    That is the same lesson ``_HDF5StackGlobSource`` records the hard way —
+    decoding a whole 1442-sub-frame VAREX file to produce one frame cost
+    23.9 GB and ~230 s over NFS.
+
+    All GUI-derived inputs (the loader's dark/bright/background arrays, the
+    output settings) are captured by the caller before construction, so
+    ``run()`` touches no Qt widget.
+    """
+    progress = QtCore.pyqtSignal(int, int, str)   # done, total, message
+    fileDone = QtCore.pyqtSignal(str)             # output path just written
+    finished = QtCore.pyqtSignal(list)            # every output path
+    failed   = QtCore.pyqtSignal(str)
+
+    def __init__(self, paths, dataset: str, *, chunk_size=None, op="mean",
+                 out_dir: str, suffix: str = CORRECTION_SUFFIX,
+                 out_ext: str = CORRECTION_EXT,
+                 out_dataset: str = "exchange/data",
+                 dark=None, bright=None, background=None,
+                 bright_mode: str = "divide", auto_dark: bool = True,
+                 dark_dataset: str = "exchange/data_dark",
+                 clip_negatives: bool = True, compression=None,
+                 level: int = 4, shuffle: bool = False,
+                 out_dtype: str = "float32",
+                 ion_csv_extras=(),
+                 raw_start=None, raw_end=None, write_monitor_csvs: bool = True,
+                 parent=None):
+        super().__init__(parent)
+        self._paths = [Path(p) for p in paths]
+        self._dataset, self._out_dataset = dataset, out_dataset
+        self._chunk_size = chunk_size
+        # Accept a bare string or a list, so a single-op caller reads the
+        # same as it always did.
+        self._ops = [op] if isinstance(op, str) else list(op)
+        self._out_dir, self._suffix = Path(out_dir), suffix
+        self._out_ext = out_ext if out_ext.startswith(".") else "." + out_ext
+        self._dark, self._bright, self._background = dark, bright, background
+        self._bright_mode = bright_mode
+        self._auto_dark, self._dark_dataset = auto_dark, dark_dataset
+        self._clip = clip_negatives
+        self._compression, self._level, self._shuffle = compression, level, shuffle
+        # On-disk dtype for the corrected stack. Applied by
+        # frame_correct.cast_for_output immediately before create_dataset,
+        # never upstream — see its docstring for why unsigned needs care.
+        # Imported here rather than at module scope, like every other
+        # frame_correct use in this file.
+        from midas_gui.frame_correct import OUTPUT_DTYPES
+        self._out_dtype = out_dtype if out_dtype in OUTPUT_DTYPES else "float32"
+        # Per-frame beam-monitor sidecar. Always written — it is small, and
+        # the value it carries is the one SAXS normalises against. Only which
+        # OPTIONAL columns it carries is a choice; write_ion_csv already
+        # skips the file entirely when there is no real data behind it.
+        self._ion_csv_extras = set(ion_csv_extras or ())
+        self._raw_start, self._raw_end = raw_start, raw_end
+        # False only when a BatchCorrectionCoordinator is driving several of
+        # these over disjoint slices of ONE file list. A monitor CSV is per
+        # froot -- one scan, many numbered files -- so two workers holding
+        # different files of the same scan would each write the same
+        # <froot>_<detector>_bc.csv with half the rows in it. The rows are
+        # left on self._monitor_rows instead and the coordinator merges them
+        # and writes once. See DECISIONS 2026-10-07.
+        self._write_monitor_csvs_on_finish = bool(write_monitor_csvs)
+        #: froot -> {"rows": [...], "notes": [...]}, readable after finished.
+        self._monitor_rows: dict = {}
+        self._cancel = False
+
+    def _collect_monitor_rows(self, acc: dict, path, tree, ranges, *,
+                              n_light: int, n_dark: int,
+                              subtracted_dark: str = "") -> None:
+        """Add one file's per-frame monitor rows to its froot's bucket.
+
+        Grouped by froot rather than per file because a froot is the unit a
+        measurement is actually thought about in — one scan, many numbered
+        files — and one CSV per file left the folder with as many sidecars
+        as exposures.
+        """
+        from midas_gui.frame_correct import split_scan_name
+        hutch = ion_csv.resolve_hutch(path, settings.active_profile())
+        # The acquisition timestamps live outside the instrument/ tree that
+        # gets copied into the output, so read them separately — they are
+        # the cross-check on which block of scaler entries is the lights.
+        csv_tree = dict(tree)
+        try:
+            csv_tree.update(h5_metadata.read_tree(path, groups=("NDArray",)))
+        except Exception:
+            pass
+        rows, note = ion_csv.rows_from_tree(
+            csv_tree, hutch, frame_ranges=ranges, n_light=n_light,
+            n_dark=n_dark, source=Path(path).name,
+            subtracted_dark=subtracted_dark)
+        froot = split_scan_name(Path(path).name).froot or Path(path).stem
+        bucket = acc.setdefault(froot, {"rows": [], "notes": []})
+        bucket["rows"].extend(rows)
+        if note:
+            bucket["notes"].append(f"{Path(path).name}: {note}")
+
+    def _write_monitor_csvs(self, acc: dict, done: int, total: int) -> None:
+        """One ``<froot>_<detector>_bc.csv`` per froot.
+
+        Written one level ABOVE the output directory. The output folder is
+        per-detector (``…/<froot>/<detector>/``) while the monitor readings
+        are a property of the exposure, shared by every detector that saw
+        it — so the froot level is where one file serves them all.
+        """
+        if not acc or self._out_dir is None:
+            return
+        det = self._out_dir.name
+        dest_dir = self._out_dir.parent or self._out_dir
+        for froot, bucket in sorted(acc.items()):
+            name = "_".join(p for p in (froot, det) if p) + ion_csv.SUFFIX_BATCH_CORRECTION
+            try:
+                written = ion_csv.write_ion_csv(
+                    dest_dir / name, bucket["rows"],
+                    extras=self._ion_csv_extras)
+            except Exception:
+                self.progress.emit(done, total,
+                                   f"{name}: monitor CSV failed — "
+                                   + traceback.format_exc(limit=1).strip())
+                continue
+            if written:
+                for note in bucket["notes"]:
+                    self.progress.emit(done, total, f"  light/dark — {note}")
+                self.progress.emit(done, total, f"beam monitors: {written}")
+            else:
+                self.progress.emit(
+                    done, total,
+                    f"{froot}: no beam-monitor data to write "
+                    "(unrecognised hutch, or no live channel)")
+
+    def cancel(self):
+        """Ask the run to stop. Checked between chunks, so the file being
+        written finishes its current chunk rather than leaving a torn
+        dataset — the partial file is simply never written."""
+        self._cancel = True
+
+    def _out_path(self, src: Path, op: str) -> Path:
+        """``<out_dir>/dark_subtracted_<op>/<source stem><suffix><ext>`` —
+        ``dark_subtracted_mean/AgBeH_10s_000021_cor.h5`` by default.
+
+        The op is in the FOLDER rather than the filename so a mean and a max
+        of the same scan can't land on top of each other, while each file's
+        own name still matches its source. Which op produced a given file is
+        also recorded inside it, as the ``midas_gui_combine_op`` attribute.
+
+        The stem keeps EVERYTHING before the final extension — the detector
+        tag included::
+
+            AgBeH_10s_000021.h5        ->  AgBeH_10s_000021_cor.h5
+            CeO2_030319.vrx.h5         ->  CeO2_030319.vrx_cor.h5
+            testing100_000009.eiger2.h5 -> testing100_000009.eiger2_cor.h5
+
+        An earlier rule split the whole dotted tail off, on the reasoning
+        that a detector tag no longer describes a derived file. That was
+        wrong in practice: the tag is how one froot's VAREX and Eiger
+        reductions stay apart, and a beamline reading the output folder
+        expects the source name back. Not every source carries a tag
+        (``AgBeH_10s_000021.h5`` has none), which is exactly why the rule
+        has to preserve whatever is there rather than assume a shape.
+        """
+        from midas_gui.helpers import correction_subdir
+        base = src.stem
+        return (self._out_dir / correction_subdir(op)
+                / f"{base}{self._suffix}{self._out_ext}")
+
+    def _plan(self) -> list:
+        """``[(path, [(lo, hi), …])]`` — every file's chunk ranges, from
+        dataset SHAPE alone (one h5py header read each, no pixels). Done up
+        front so the progress bar has a real total instead of counting up to
+        an unknown end."""
+        import h5py
+        from midas_gui.frame_correct import chunk_ranges
+        plan = []
+        for path in self._paths:
+            with h5py.File(str(path), "r") as f:
+                dset = f[self._dataset]
+                if dset.ndim == 2:
+                    plan.append((path, [(0, 0)]))
+                    continue
+                plan.append((path, chunk_ranges(
+                    int(dset.shape[0]), chunk_size=self._chunk_size,
+                    raw_start=self._raw_start, raw_end=self._raw_end)))
+        return plan
+
+    def run(self):
+        try:
+            import h5py
+            from midas_gui.frame_correct import (reduce_chunk_multi, resolve_dark,
+                                                 write_corrected_h5)
+            plan = self._plan()
+            total = sum(len(ranges) for _p, ranges in plan)
+            if total == 0:
+                self.failed.emit(
+                    "Nothing to do: the selected frame range leaves no sub-frames.")
+                return
+            done = 0
+            outputs = []
+            #: froot -> {"rows": [...], "det": str, "dir": Path, "notes": []}
+            metadata_rows = self._monitor_rows
+            for path, ranges in plan:
+                if self._cancel:
+                    break
+                tree = h5_metadata.read_tree(path)
+                frames = {op: [] for op in self._ops}
+                with h5py.File(str(path), "r") as f:
+                    dset = f[self._dataset]
+                    n_raw = int(dset.shape[0]) if dset.ndim == 3 else 1
+                    # Dark acquisitions share the metadata axis with the
+                    # lights (one sample per detector acquisition), so their
+                    # count is what says the per-acquisition arrays are twice
+                    # as long as the image stack. See ion_csv.split_light_dark.
+                    _dk = f.get(self._dark_dataset)
+                    n_dark_frames = (int(_dk.shape[0])
+                                     if _dk is not None and _dk.ndim == 3 else 0)
+                    shape = tuple(dset.shape[-2:])
+                    # One dark per file, resolved once — see
+                    # frame_correct.resolve_dark for the ladder and the real
+                    # data it was derived from. `why` is logged so the choice
+                    # can be audited afterwards instead of trusted.
+                    dark, why = resolve_dark(
+                        path, dark_dataset=self._dark_dataset, shape=shape,
+                        fallback=self._dark, auto=self._auto_dark)
+                    self.progress.emit(done, total, f"{path.name}: dark = {why}")
+                    n_aligned = _HDF5StackGlobSource._metadata_frame_count(f, n_raw)
+                    for lo, hi in ranges:
+                        if self._cancel:
+                            break
+                        raw = (np.asarray(dset[lo:hi + 1], dtype=np.float32)
+                               if dset.ndim == 3 else
+                               np.asarray(dset[...], dtype=np.float32)[None])
+                        # stats: blank sub-frames are dropped from the
+                        # combine (see frame_correct.reduce_chunk_multi) and
+                        # that has to be said, not just done -- the whole
+                        # reason it is a fix is that averaging them in was
+                        # wrong silently.
+                        cstats: dict = {}
+                        combined = reduce_chunk_multi(
+                            raw, self._ops, dark=dark, bright=self._bright,
+                            bright_mode=self._bright_mode,
+                            background=self._background,
+                            clip_negatives=self._clip, stats=cstats)
+                        for op, plane in combined.items():
+                            frames[op].append(plane)
+                        done += 1
+                        n_blank = cstats.get("blank_skipped") or 0
+                        if cstats.get("all_blank"):
+                            note = "  — every raw frame blank, output is zeros"
+                        elif n_blank:
+                            note = (f"  — skipped {n_blank} blank raw "
+                                    f"frame(s) of {hi - lo + 1}")
+                        else:
+                            note = ""
+                        self.progress.emit(
+                            done, total,
+                            f"{path.name}  chunk "
+                            f"{len(frames[self._ops[0]])}/{len(ranges)} "
+                            f"(raw {lo}–{hi}){note}")
+                if self._cancel:
+                    break
+                aligned = h5_metadata.align(tree, ranges, n_aligned)
+                # Accumulate this file's monitor rows under its froot; the
+                # CSV is written once per froot after the loop, not per file.
+                try:
+                    self._collect_monitor_rows(
+                        metadata_rows, path, tree, ranges, n_light=n_raw,
+                        n_dark=n_dark_frames,
+                        # The dark the IMAGES were corrected with, which the
+                        # resolver may well have taken from a sibling file.
+                        subtracted_dark=why)
+                except Exception:
+                    # A sidecar must never cost the user the reduction that
+                    # already succeeded.
+                    self.progress.emit(
+                        done, total,
+                        f"{path.name}: monitor metadata failed — "
+                        + traceback.format_exc(limit=1).strip())
+                for op in self._ops:
+                    out = write_corrected_h5(
+                        self._out_path(path, op), frames[op],
+                        dataset=self._out_dataset, metadata=aligned,
+                        frame_ranges=ranges,
+                        attrs={"midas_gui_source": str(path),
+                               "midas_gui_combine_op": op,
+                               "midas_gui_chunk_size": int(self._chunk_size or 0),
+                               "midas_gui_dark": why},
+                        provenance_entry=provenance.build_entry(
+                            "batch_correction", inputs=[str(path)],
+                            compute_checksums=False,
+                            extra={"op": op,
+                                   "chunk_size": int(self._chunk_size or 0),
+                                   "dark": why,
+                                   "clip_negatives": bool(self._clip)}),
+                        compression=self._compression, level=self._level,
+                        shuffle=self._shuffle, dtype=self._out_dtype,
+                        log=lambda msg: self.progress.emit(done, total, msg))
+                    outputs.append(out)
+                    self.fileDone.emit(out)
+            if self._write_monitor_csvs_on_finish:
+                self._write_monitor_csvs(metadata_rows, done, total)
+            if self._cancel:
+                self.progress.emit(done, total,
+                                   f"Cancelled — {len(outputs)} file(s) written.")
+            self.finished.emit(outputs)
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
+class BatchCorrectionCoordinator(QtCore.QObject):
+    """Runs one Batch Correction job either as a single
+    ``BatchCorrectionWorker`` ("sequential") or as several concurrent ones,
+    each given a disjoint slice of the FILE list ("parallel").
+
+    Exposes the same signal surface as ``BatchCorrectionWorker``
+    (``progress``, ``fileDone``, ``finished``, ``failed``) plus
+    ``start()``/``isRunning()``/``cancel()``/``wait()``, so
+    ``BatchCorrectionTab`` can construct this in place of the worker with no
+    change to its wiring -- the same contract ``BatchRunCoordinator`` has
+    with ``BatchTab``.
+
+    Files are the unit of work because they share nothing: chunks never
+    cross a file boundary, and each input yields its own output per method,
+    so no two workers can collide on a path. (Chunk-level splitting within
+    one file would complicate the writer for no gain -- these runs are
+    hundreds of files.)
+
+    Threads, not OS processes, for the same reason ``BatchRunCoordinator``
+    gives: h5py releases the GIL on reads and numpy on the reduction, so
+    this gets real multi-core throughput while staying in-process, with no
+    pickling and no cross-process progress plumbing.
+    """
+    progress = QtCore.pyqtSignal(int, int, str)
+    fileDone = QtCore.pyqtSignal(str)
+    finished = QtCore.pyqtSignal(list)
+    failed   = QtCore.pyqtSignal(str)
+
+    def __init__(self, paths, *, out_dir, n_workers: int = 1, parent=None,
+                 **worker_kwargs):
+        super().__init__(parent)
+        self._paths = [Path(p) for p in paths]
+        self._out_dir = Path(out_dir)
+        self._kwargs = worker_kwargs
+        self._n = max(1, min(int(n_workers), len(self._paths) or 1))
+        self._workers: list = []
+        self._outputs: list = []
+        self._done_counts: dict = {}
+        self._totals: dict = {}
+        self._failed_once = False
+        self._finished_count = 0
+        self._started = False
+
+    # ── the same surface BatchCorrectionWorker offers ───────────────────
+    def isRunning(self) -> bool:
+        return any(w.isRunning() for w in self._workers)
+
+    def cancel(self):
+        for w in self._workers:
+            w.cancel()
+
+    def wait(self, *a):
+        for w in self._workers:
+            w.wait(*a)
+        return True
+
+    @staticmethod
+    def _slices(paths, n) -> list:
+        """``n`` contiguous, near-equal, non-empty slices of ``paths``.
+
+        Contiguous rather than round-robin so one scan's numbered files
+        mostly stay with one worker -- it does not affect correctness (the
+        CSVs are merged either way) but it keeps each worker reading a
+        locality-friendly run of files off the share.
+        """
+        out, lo = [], 0
+        for i in range(n):
+            hi = lo + len(paths) // n + (1 if i < len(paths) % n else 0)
+            if hi > lo:
+                out.append(paths[lo:hi])
+            lo = hi
+        return out
+
+    def start(self):
+        if self._started:
+            return
+        self._started = True
+        groups = self._slices(self._paths, self._n)
+        if not groups:
+            self.finished.emit([])
+            return
+        for i, group in enumerate(groups):
+            # Deliberately UNPARENTED. A QThread that is a Qt child is
+            # destroyed by the C++ parent-owns-children cascade the instant
+            # its parent is -- including while it is still running, which is
+            # a fatal "QThread: Destroyed while thread is still running"
+            # abort rather than an exception, and which PyQt's keep-alive
+            # for running threads does not save you from. self._workers
+            # below is the only reference these need, and it outlives them.
+            # See DataLoaderPanel._start_preview_worker for the same note.
+            w = BatchCorrectionWorker(
+                group, out_dir=str(self._out_dir),
+                # Every child collects rows; only this object writes them.
+                write_monitor_csvs=False, **self._kwargs)
+            w.progress.connect(lambda d, tt, m, k=i: self._on_progress(k, d, tt, m))
+            w.fileDone.connect(self.fileDone.emit)
+            w.finished.connect(lambda outs, k=i: self._on_child_finished(k, outs))
+            w.failed.connect(self._on_child_failed)
+            self._workers.append(w)
+        for w in self._workers:
+            w.start()
+
+    # ── fan-in ──────────────────────────────────────────────────────────
+    def _on_progress(self, key, done, total, msg):
+        self._done_counts[key] = done
+        self._totals[key] = total
+        self.progress.emit(sum(self._done_counts.values()),
+                           sum(self._totals.values()), msg)
+
+    def _on_child_failed(self, msg):
+        """First failure wins and stops the rest. Reported once: N workers
+        hitting the same bad share would otherwise raise N dialogs."""
+        if not self._failed_once:
+            self._failed_once = True
+            self.failed.emit(msg)
+        self.cancel()
+
+    def _on_child_finished(self, _key, outputs):
+        self._outputs.extend(outputs)
+        self._finished_count += 1
+        if self._finished_count < len(self._workers):
+            return
+        if not self._failed_once:
+            self._write_merged_monitor_csvs()
+        self.finished.emit(self._outputs)
+
+    def _write_merged_monitor_csvs(self):
+        """One CSV per froot, from every worker's rows together.
+
+        Rows carry source_file/frame_start/frame_end (DECISIONS 2026-10-06),
+        so the merge is a concatenate and sort -- which also restores the
+        file order the split broke.
+        """
+        merged: dict = {}
+        for w in self._workers:
+            for froot, bucket in (w._monitor_rows or {}).items():
+                dest = merged.setdefault(froot, {"rows": [], "notes": []})
+                dest["rows"].extend(bucket.get("rows") or [])
+                dest["notes"].extend(bucket.get("notes") or [])
+        for bucket in merged.values():
+            bucket["rows"].sort(
+                key=lambda r: (str(r.get("source_file") or ""),
+                               r.get("kind") != "dark",
+                               int(r.get("frame_start") or 0)))
+            bucket["notes"].sort()
+        if not merged or not self._workers:
+            return
+        total = sum(self._totals.values())
+        # Any child can write them -- _write_monitor_csvs only reads
+        # self._out_dir, which every child shares with this coordinator.
+        self._workers[0]._write_monitor_csvs(merged, total, total)
+
+
 class AllFrameStatsWorker(QtCore.QThread):
     """Compute unmasked pixel values across an entire stack off the GUI thread.
 
@@ -893,6 +1599,22 @@ def _json_default(obj):
     if isinstance(obj, np.generic):
         return obj.item()
     raise TypeError(f"not JSON-serializable in a calibration cfg: {type(obj)!r}")
+
+
+def _pythonpath_with_repo_root(existing: str = "") -> str:
+    """``existing`` with this package's parent directory prepended.
+
+    What lets a spawned ``python -m midas_gui.<mod>`` find the package from
+    any working directory. Already-present entries are not duplicated, and an
+    empty ``existing`` yields just the root (no stray separator, which the
+    interpreter would read as "the current directory").
+    """
+    import os
+    root = str(Path(__file__).resolve().parent.parent)
+    parts = [p for p in (existing or "").split(os.pathsep) if p]
+    if root in parts:
+        return os.pathsep.join(parts)
+    return os.pathsep.join([root] + parts)
 
 
 def _write_calib_job(job_dir: Path, mode: str, image, dark, cfg: dict,
@@ -984,6 +1706,20 @@ class CalibrationWorker(QtCore.QObject):
         self._job_dir = job_dir
 
         proc = QtCore.QProcess(self)
+        # `-m midas_gui.calib_cli` resolves the package off sys.path[0], which
+        # for -m is the CURRENT DIRECTORY -- the GUI's cwd, inherited here.
+        # Launching the GUI by absolute path from anywhere but the repo root
+        # (e.g. `python /opt/MIDAS_GUI/launch.py` run from a data folder, which
+        # works fine for the GUI itself because launch.py's own directory goes
+        # on sys.path) therefore killed every calibration with
+        # "No module named 'midas_gui'". job_queue.launch already pins this for
+        # background jobs with an explicit cd; this spawn site did not.
+        # PYTHONPATH rather than setWorkingDirectory: it fixes the import
+        # without moving the cwd out from under any relative path the backend
+        # might resolve.
+        env = QtCore.QProcessEnvironment.systemEnvironment()
+        env.insert("PYTHONPATH", _pythonpath_with_repo_root(env.value("PYTHONPATH", "")))
+        proc.setProcessEnvironment(env)
         proc.setProcessChannelMode(QtCore.QProcess.MergedChannels)
         proc.readyReadStandardOutput.connect(self._on_stdout)
         proc.finished.connect(self._on_process_finished)
@@ -1112,6 +1848,10 @@ class ManualDspacingCalibWorker(QtCore.QThread):
                 NrPixelsY=self._NY, NrPixelsZ=self._NZ,
                 wavelength_A=fit["wavelength_A"], post_residual_strain_uE=None,
                 _calibrant_name=self._material_name, _d_list=list(self._d_list),
+                # The d-spacings the fit actually consumed -- the picked rings,
+                # not the material's whole table. Reported in paramstest.txt for
+                # a calibrant that has no crystal structure to report instead.
+                _d_used=sorted({float(pk[2]) for pk in self._picks}, reverse=True),
             )
             result.fit_sigma = dict(fit["sigma"])
             result.fit_at_limit = set(fit["at_limit"])
@@ -1335,6 +2075,134 @@ def _open_source_cfg(cfg):
     raise ValueError(f"Unknown source type: {cfg['type']}")
 
 
+class _ZarrGroupWriter:
+    """One open ``.zarr.zip`` plus the per-frame bookkeeping its closing
+    needs — the unit of ``BatchWorker``'s ``zarr_grouping``.
+
+    Frames are handed to the backend's ``GSASZarrWriter`` AS THEY ARE
+    PRODUCED rather than collected and written at the end: that class
+    "flushes the running OmegaSumFrame chunk every omega_sum_frames, so a
+    long scan never has to be held in memory", and buffering a rotation's
+    worth of ``(n_eta, n_r)`` cakes to hand ``write_gsas_zarr_zip`` a list
+    would throw that away (a 1442-frame group at 72×1000 float64 is ~830 MB).
+    Peak memory is therefore the same as the one-archive-per-frame path.
+
+    ``omega_sum_frames`` is deliberately left at its default 1. It chunks
+    ALREADY-INTEGRATED frames inside the archive and is not OME_SUM, which
+    "Combine sub-frames" has applied upstream before integration — setting it
+    from OME_SUM would collapse the same axis twice.
+
+    Provenance and the source ``instrument/`` tree are applied once at
+    :meth:`close`, in a single ``provenance.rewrite_zip`` pass per archive
+    (strictly fewer extract/repack cycles than the per-frame path, which paid
+    for one per frame).
+    """
+
+    def __init__(self, path: Path, *, spec, bin_area, prov_entry, log):
+        from midas_integrate_v2.io.zarr_gsas import GSASZarrWriter
+        self.path = Path(path)
+        self._spec = spec
+        self._prov_entry = prov_entry
+        self._log = log
+        self._w = GSASZarrWriter(self.path, spec=spec, bin_area=bin_area)
+        self.n_frames = 0
+        # Per-frame environment, accumulated for the one closing stamp.
+        self._ring_currents: list = []
+        self._sample_motors: list = []
+        # Per-frame (first_raw, last_raw) windows into ONE source file, which
+        # is what h5_metadata.align reduces "one entry per output frame"
+        # from. Set to None the moment a second source file appears: a group
+        # spanning several files has no single instrument/ tree to align.
+        self._h5_path: Optional[str] = None
+        self._frame_ranges: Optional[list] = []
+        self._n_aligned: Optional[int] = None
+        self._multi_source = False
+
+    def add(self, cake, *, omega, meta, h5_ctx):
+        """Stream one integrated cake in, recording what its closing stamp
+        will need. ``meta`` is ``metadata_for_index``'s dict (or None) and
+        ``h5_ctx`` is ``h5_context_for_index``'s (or None)."""
+        temp = press = cur = cur_i0 = None
+        ring = motors = None
+        if meta:
+            temp = meta.get("temperature")
+            press = meta.get("pressure")
+            # Real beam-monitor ion chambers go in the writer's own I/I0
+            # slots; storage-ring current is a different quantity and rides
+            # in the provenance entry instead (see the per-frame path this
+            # replaced, and 77a0ea1).
+            cur = meta.get("ion_chamber_i")
+            cur_i0 = meta.get("ion_chamber_i0")
+            ring = meta.get("current")
+            motors = {k[len("motor:"):]: v for k, v in meta.items()
+                      if k.startswith("motor:") and v is not None}
+        self._w.add_frame(cake, omega=omega, temperature=temp, pressure=press,
+                          current=cur, current_i0=cur_i0)
+        self.n_frames += 1
+        self._ring_currents.append(ring)
+        self._sample_motors.append(motors or None)
+        if h5_ctx:
+            if self._h5_path is None:
+                self._h5_path = h5_ctx["path"]
+                self._n_aligned = h5_ctx["n_aligned"]
+            if h5_ctx["path"] != self._h5_path:
+                self._multi_source = True
+                self._frame_ranges = None
+            elif self._frame_ranges is not None:
+                self._frame_ranges.extend(h5_ctx["frame_ranges"])
+
+    def close(self, h5_trees: dict, *, rename_to: Optional[Path] = None) -> Path:
+        """Finish the archive, stamp it, optionally rename it, return its
+        final path. ``h5_trees`` is the caller's source-path -> tree cache:
+        the tree is the same for every frame of a file and costs a few
+        hundred dataset reads, so it is read once per file, not per group."""
+        self._w.close()
+        try:
+            extra = dict(self._prov_entry.get("extra") or {})
+            extra["n_frames"] = self.n_frames
+            # One frame keeps the scalar shape the per-frame path wrote, so
+            # existing readers of a "frame"-grouped archive see no change;
+            # a real group reports one value per frame.
+            if any(v is not None for v in self._ring_currents):
+                extra["storage_ring_current_mA"] = (
+                    self._ring_currents[0] if self.n_frames == 1
+                    else list(self._ring_currents))
+            if any(self._sample_motors):
+                extra["sample_motors"] = (
+                    self._sample_motors[0] if self.n_frames == 1
+                    else list(self._sample_motors))
+            snap = {}
+            if self._h5_path:
+                extra["source_h5"] = self._h5_path
+                if self._multi_source:
+                    self._log(
+                        f"[batch] note: {self.path.name} groups frames from "
+                        "several source files — instrument/ tree not copied "
+                        "(no single file to align it to).")
+                else:
+                    tree = h5_trees.get(self._h5_path)
+                    if tree is None:
+                        tree = h5_metadata.read_tree(self._h5_path)
+                        h5_trees[self._h5_path] = tree
+                    snap = h5_metadata.align(tree, self._frame_ranges,
+                                             self._n_aligned)
+            entry = dict(self._prov_entry, extra=extra)
+
+            def _mutate(extracted, _snap=snap, _e=entry):
+                if _snap:
+                    h5_metadata.write_into_extracted(extracted, _snap)
+                provenance.stamp_extracted(extracted, _e)
+
+            provenance.rewrite_zip(self.path, _mutate)
+        except Exception:
+            self._log(f"[batch] note: provenance stamp on {self.path.name} "
+                      "failed (non-fatal):\n" + traceback.format_exc())
+        if rename_to is not None and rename_to != self.path:
+            self.path.replace(rename_to)
+            self.path = Path(rename_to)
+        return self.path
+
+
 class BatchWorker(QtCore.QThread):
     progress   = QtCore.pyqtSignal(int, int)
     frame_done = QtCore.pyqtSignal(str, object, object, object)  # id, r_axis, prof, sigma
@@ -1349,11 +2217,18 @@ class BatchWorker(QtCore.QThread):
                  drift_traj=None, parent=None,
                  dark=None, bright=None, background=None, bright_mode="divide",
                  weighted=True, context=None, im_trans=(), multi_azimuth=False,
-                 calibration_snapshot=None):
+                 calibration_snapshot=None, zarr_grouping="frame",
+                 ion_csv_extras=()):
         super().__init__(parent)
         # Full calibration (helpers.full_calibration_snapshot), embedded
         # verbatim in cake-mode HDF5 output — see cake_hdf5.write_cake_h5.
         self._calibration_snapshot = calibration_snapshot
+        # How many combined output frames share one .zarr.zip: "frame" (one
+        # archive each, the original mpe_wf-parity behaviour), "file" (one
+        # per source file — one per ROTATION, the same unit ω is measured
+        # from, see the sources' zarr_group_key) or "run" (one for the lot).
+        self._zarr_grouping = (zarr_grouping or "frame") if zarr_grouping in (
+            "frame", "file", "run") else "frame"
         self._context = context              # prebuilt integration context or None
         self._spec = spec                    # always R-uniform (Q handled by rebinning)
         self._weighted = weighted            # pixel-weighted azimuthal mean (vs η-bin mean)
@@ -1364,6 +2239,10 @@ class BatchWorker(QtCore.QThread):
         # azimuthal sectors, keeping one profile per (frame, η bin) instead of
         # collapsing to one full-circle profile per frame.
         self._multi_azimuth = bool(multi_azimuth)
+        # Optional column groups for the per-frame beam-monitor CSV
+        # ("env", "motors"). The CSV itself is always written; only its
+        # optional columns are a choice. See midas_gui.ion_csv.
+        self._ion_csv_extras = set(ion_csv_extras or ())
         self._src  = source_cfg
         self._mask = mask
         self._out_dir = Path(out_dir) if out_dir else None
@@ -1397,6 +2276,96 @@ class BatchWorker(QtCore.QThread):
 
     def _open_source(self):
         return _open_source_cfg(self._src)
+
+    def _monitor_rows_for_run(self, source) -> list:
+        """Beam-monitor rows for this run, built by the SAME function Batch
+        Correction uses (:func:`ion_csv.rows_from_tree`).
+
+        The two tabs write the same kind of sidecar about the same scan, so
+        the files should differ only in the ``_bi``/``_bc`` tail. They did
+        not: this path used ``rows_from_metas``, which resolved ion chambers
+        through ``ION_CHAMBER_H5_PATHS[hutch]`` -- ``US_IC``/``D2PD`` for
+        hutch E -- and a 1-ID file carries neither, so the _bi.csv came out
+        with no ion-chamber columns at all beside a _bc.csv holding 29
+        channels and 23 gains. It also keyed rows by a bare ordinal and
+        never wrote the shutter-closed dark row.
+
+        Only ``_HDF5StackGlobSource`` offers ``monitor_inputs`` (it is also
+        the only source with per-frame metadata at all, so no other source
+        ever produced one of these files); anything else yields no rows and
+        ``write_ion_csv`` then writes nothing, as before.
+        """
+        inputs = getattr(source, "monitor_inputs", None)
+        if inputs is None:
+            return []
+        rows = []
+        for path, ranges, n_light, n_dark in inputs():
+            hutch = ion_csv.resolve_hutch(path, settings.active_profile())
+            # Acquisition timestamps live outside instrument/ and are the
+            # cross-check on which block of scaler entries is the lights --
+            # same read Batch Correction does for the same reason.
+            tree = h5_metadata.read_tree(path)
+            try:
+                tree.update(h5_metadata.read_tree(path, groups=("NDArray",)))
+            except Exception:
+                pass
+            got, note = ion_csv.rows_from_tree(
+                tree, hutch, frame_ranges=ranges, n_light=n_light,
+                n_dark=n_dark, source=Path(path).name)
+            rows.extend(got)
+            if note:
+                self.log_line.emit(f"[batch] monitors {Path(path).name}: {note}")
+        return rows
+
+    def _ion_csv_name(self) -> str:
+        """``<froot>_<detector>_bi.csv`` — the same shape Batch Correction
+        uses for its own monitor sidecar, differing only in the tag.
+
+        The froot comes from the SOURCE file's name rather than from
+        ``_run_out_stem()``, which carries the first frame's id
+        (``gC_1s_ICtweak_000017.000000``) and would put a frame number in
+        a filename that describes the whole run.
+        """
+        from midas_gui.frame_correct import split_scan_name
+        src = self._src.get("path") or (self._src.get("paths") or [None])[0]
+        froot = split_scan_name(Path(src).name).froot if src else ""
+        det = self._out_dir.name if self._out_dir is not None else ""
+        stem = "_".join(p for p in (froot, det) if p) or "run"
+        return stem + ion_csv.SUFFIX_BATCH_INTEGRATE
+
+    def _run_out_stem(self) -> str:
+        """The run-level output stem: the source file's own stem, or the
+        shared file root of a multi-file pick. Shared by the combined cake
+        HDF5's ``<stem>.<lo>_<hi>.cake`` name and a "run"-grouped zarr, so
+        the two name the same run the same way."""
+        src_path = self._src.get('path')
+        if src_path:
+            return Path(src_path).stem
+        src_paths = self._src.get('paths') or []
+        return (froot_and_frame_num(Path(src_paths[0]).stem, -1)[0]
+                if src_paths else "integrated")
+
+    def _zarr_group_path(self, zarr_dir: Path, fid: str, group_key) -> tuple:
+        """``(path_to_open, rename_pending)`` for a new zarr group.
+
+        A group keyed on a real source file is named after it the moment it
+        opens — ``<stem>.ave.zarr.zip``, the same name the per-frame path
+        gave a file whose chunking produced exactly one output.
+
+        A group that spans the run instead (``"run"`` grouping, or ``"file"``
+        on one-frame-per-file data, where the selection is the rotation) has
+        no such name, and takes the combined HDF5's ``<stem>.<lo>_<hi>``
+        form so a second run over a different frame range cannot overwrite
+        the first. That range is only known once the loop ends, so the
+        archive is built under ``.part`` and renamed on close — which also
+        leaves an obviously-incomplete file behind if a run dies mid-write,
+        rather than a plausible-looking one."""
+        if self._zarr_grouping == "frame" or group_key is None:
+            return zarr_dir / f"{fid}.ave.zarr.zip", False
+        key_path = Path(str(group_key))
+        if self._zarr_grouping == "file" and key_path.is_file():
+            return zarr_dir / f"{key_path.stem}.ave.zarr.zip", False
+        return zarr_dir / f"{self._run_out_stem()}.ave.zarr.zip.part", True
 
     def _iter_frames(self, source):
         """Yield ``(abs_i, fid, img)`` for the frames this worker should process.
@@ -1574,6 +2543,7 @@ class BatchWorker(QtCore.QThread):
                                                 self._corrections, self._weighted)
             self.geom_ready.emit(ctx)
             geom = ctx["geom"]; corr_on = ctx["corr_on"]
+            eta_take = ctx["eta_take"]; bin_spec = ctx["bin_spec"]
             corr_counts = ctx["corr_counts"]; cnt = ctx["cnt"]
             r_ax = ctx["r_ax"]; eta_ax = ctx["eta_ax"]
             want_zarr = "zarr" in self._fmts and self._out_dir is not None
@@ -1583,16 +2553,18 @@ class BatchWorker(QtCore.QThread):
             want_h5_cake = (self._multi_azimuth and "h5" in self._fmts
                             and self._out_dir is not None)
             need_sigma = True   # xye/fxye require σ; always provide it
+            rebin_unit = rebin_cfg_parts(self._q_cfg)[0]
             if self._multi_azimuth and self._q_cfg:
-                # Q-rebinning (rebin_R_to_Q) only handles a 1-D profile; combining
-                # it with per-azimuth cake output isn't supported yet — the UI
-                # already blocks this combination before starting the worker.
+                # The rebin (rebin_R_to_grid) only handles a 1-D profile;
+                # combining it with per-azimuth cake output isn't supported
+                # yet — the UI already blocks this before starting the worker.
                 raise RuntimeError(
                     "Multi-azimuth output isn't supported together with "
-                    "Q-uniform bins yet.")
-            # Q-uniform handled by rebinning the R-uniform profile (kernels lack Q-mode)
+                    f"{_REBIN_LABEL[rebin_unit]}-uniform bins yet.")
+            # Uniform Q / 2theta come from rebinning the R-uniform profile
+            # (the kernels only bin in R) -- see rebin_R_to_grid.
             if self._q_cfg:
-                qgrid, r_ax = q_grid_and_r(self._q_cfg, lsd, px, wl)
+                out_grid, r_ax = rebin_grid_and_r(self._q_cfg, lsd, px, wl)
 
             # Monitor normalisation: load per-frame scalars if a file was provided
             monitor_vals = None
@@ -1615,7 +2587,7 @@ class BatchWorker(QtCore.QThread):
                 f"[batch] {total} frames | kernel={self._kernel} | "
                 f"corrections={'on' if corr_on else 'off'} | "
                 f"variance={'on' if self._variance_cfg else 'off'} | "
-                f"q_uniform={'on (rebinned)' if self._q_cfg else 'off'} | "
+                f"rebin={_REBIN_LABEL[rebin_unit] + ' (uniform)' if self._q_cfg else 'off'} | "
                 f"{range_desc} | "
                 f"monitor={'yes' if monitor_vals else 'no'} | "
                 f"drift={'on' if self._drift_traj else 'off'}")
@@ -1647,20 +2619,31 @@ class BatchWorker(QtCore.QThread):
             # is the bug this splits.
             all_frame_idx = []
             all_omegas = []   # degrees, one per processed frame (like frame_ids)
+            # (abs frame index, metadata dict|None) per processed frame, for
+            # the run-level beam-monitor CSV written after the loop.
+            ion_meta: list = []
             # Real engine-collapsed 1-D lineout per frame, multi-azimuth mode
             # only — see cake_hdf5.write_cake_h5's collapsed_profiles/sigmas.
             all_cake_profiles, all_cake_sigmas = [], []
             proc_idx = 0  # index into monitor_vals for processed frames only
 
-            # Zarr is written ONE FILE PER COMBINED OUTPUT FRAME as it's
-            # produced (below, inside the loop) rather than bundled into one
-            # zarr for the whole run — mirrors mpe_wf's own one-zarr-per-
-            # scan-point convention, extended so a file that "Combine
-            # sub-frames" splits into several chunks gets one zarr per
-            # chunk too (see `fid`'s naming in _HDF5StackGlobSource._fid).
-            # Precompute what's shared across every per-frame write once,
-            # up front, rather than repeating it per frame.
-            zarr_dir = zarr_bin_area = zarr_prov_entry = write_gsas_zarr_zip = None
+            # How many combined output frames share one .zarr.zip, written as
+            # they are produced (below, inside the loop):
+            #   "frame" — one archive each. The original behaviour, mirroring
+            #             mpe_wf's one-zarr-per-scan-point convention and
+            #             extended so a file that "Combine sub-frames" splits
+            #             into chunks gets one per chunk (see `fid`'s naming
+            #             in _HDF5StackGlobSource._fid).
+            #   "file"  — one per ROTATION, via the sources' zarr_group_key:
+            #             one HDF5 sub-frame stack, or a whole TIFF selection.
+            #   "run"   — one for every frame processed.
+            # A source with no zarr_group_key (plain TIFFGlobSource/
+            # HDF5FrameSource, outside Batch Integrate) can only do "frame".
+            # Precompute what's shared across every write once, up front.
+            zarr_dir = zarr_bin_area = zarr_prov_entry = None
+            zarr_group_key_fn = None
+            zarr_writer: Optional[_ZarrGroupWriter] = None
+            zarr_open_key = None
             # Shared by the zarr writer below and cake_hdf5.write_cake_h5 at
             # the end of run() — computed once, whichever wants it first.
             #
@@ -1677,14 +2660,29 @@ class BatchWorker(QtCore.QThread):
             # count_cake(None, ...) crashes identically for want_h5_cake.
             cake_bin_area = None
             if want_zarr or want_h5_cake:
-                cake_geom = geom if geom is not None else build_geom(spec, self._kernel, mask)
-                cake_bin_area = count_cake(cake_geom, self._kernel, spec.NrPixelsZ, spec.NrPixelsY)
+                # bin_spec / eta_take, exactly as the cake itself is made.
+                # This read `spec`/`geom` and so produced a bin area with the
+                # BINNING's eta rows, which for a range crossing +/-180 is the
+                # whole circle: 36 rows of area against a 9-row cake.
+                # GSASZarrWriter rejected the pair, the handler below dropped
+                # the writer, and ge1 came out a 136-byte empty archive --
+                # which then took the four-panel combine down with it.
+                cake_bin_area = bin_area_for(spec, self._kernel, mask,
+                                             geom=geom)
             h5_trees: dict = {}   # source path -> its instrument/ tree, read once
             if want_zarr:
-                from midas_integrate_v2.io.zarr_gsas import write_gsas_zarr_zip
                 zarr_dir = self._out_dir / "zarr"
                 zarr_dir.mkdir(parents=True, exist_ok=True)
                 zarr_bin_area = cake_bin_area
+                if self._zarr_grouping == "file":
+                    zarr_group_key_fn = getattr(source, "zarr_group_key", None)
+                    if zarr_group_key_fn is None:
+                        self.log_line.emit(
+                            "[batch] note: this source cannot say which "
+                            "rotation a frame belongs to — writing one zarr "
+                            "per frame instead of one per source file.")
+                elif self._zarr_grouping == "run":
+                    zarr_group_key_fn = lambda _i: "<run>"   # noqa: E731
                 zarr_prov_entry = provenance.build_entry(
                     'midas_gui.batch_integrate',
                     inputs=[self._src.get('path')] if self._src.get('path') else [],
@@ -1713,6 +2711,24 @@ class BatchWorker(QtCore.QThread):
                         'active_profile': settings.active_profile(),
                     },
                 )
+            zarr_rename_pending = False
+
+            def _close_zarr_group() -> Path:
+                """Finish the open archive and clear the group state, giving
+                a run-spanning group its final ``<lo>_<hi>`` name now that
+                the processed range is known. Returns the path written."""
+                nonlocal zarr_writer, zarr_open_key, zarr_rename_pending
+                final = None
+                if zarr_rename_pending:
+                    lo = int(min(all_frame_idx)) if all_frame_idx else 0
+                    hi = int(max(all_frame_idx)) if all_frame_idx else 0
+                    final = zarr_dir / (f"{self._run_out_stem()}."
+                                        f"{lo:06d}_{hi:06d}.ave.zarr.zip")
+                path = zarr_writer.close(h5_trees, rename_to=final)
+                zarr_writer = None
+                zarr_open_key = None
+                zarr_rename_pending = False
+                return path
 
             for abs_i, fid, img in self._iter_frames(source):
                 # Cooperative abort — stop cleanly, keeping frames already done.
@@ -1733,10 +2749,18 @@ class BatchWorker(QtCore.QThread):
                 if self._drift_traj is not None:
                     cur_spec = _spec_from_trajectory(self._spec, self._drift_traj, abs_i)
                     cur_lsd  = float(cur_spec.Lsd)
-                    cur_geom = None if corr_on else build_geom(cur_spec, self._kernel, mask)
-                    cur_cc   = corrections_counts(cur_spec) if corr_on else None
-                    cur_cnt  = (count_cake(cur_geom, self._kernel, cur_spec.NrPixelsZ,
-                                           cur_spec.NrPixelsY)
+                    # Same eta range as the context's, so the same plan: bin
+                    # the circle and take the requested columns. Without this
+                    # the drift path would quietly undo the fix per frame.
+                    cur_bin  = (cur_spec if eta_take is None else
+                                replace_spec_eta(cur_spec, eta_wrap.ETA_LO,
+                                                 eta_wrap.ETA_HI))
+                    cur_geom = None if corr_on else build_geom(cur_bin, self._kernel, mask)
+                    cur_cc   = (eta_wrap.apply_take(corrections_counts(cur_bin), eta_take)
+                                if corr_on else None)
+                    cur_cnt  = (eta_wrap.apply_take(
+                                    count_cake(cur_geom, self._kernel, cur_bin.NrPixelsZ,
+                                               cur_bin.NrPixelsY), eta_take)
                                 if (self._weighted and not corr_on) else None)
                 else:
                     cur_spec = spec
@@ -1750,12 +2774,14 @@ class BatchWorker(QtCore.QThread):
                     prof, sigma, cake_2d, cake_sigma = integrate_frame(
                         img_t, cur_spec, cur_geom, self._kernel, self._corrections,
                         self._variance_cfg, need_sigma, corr_counts=cur_cc,
+                        eta_take=eta_take,
                         return_cake=True, weighted=self._weighted, cnt_cake=cur_cnt)
                 else:
                     cake_2d = None; cake_sigma = None
                     prof, sigma = integrate_frame(
                         img_t, cur_spec, cur_geom, self._kernel, self._corrections,
                         self._variance_cfg, need_sigma, corr_counts=cur_cc,
+                        eta_take=eta_take,
                         weighted=self._weighted, cnt_cake=cur_cnt)
 
                 if sigma is None:
@@ -1771,9 +2797,9 @@ class BatchWorker(QtCore.QThread):
                             cake_2d = cake_2d / mon
                             cake_sigma = cake_sigma / abs(mon)
 
-                if self._q_cfg:   # rebin R-uniform → uniform Q (not combined with cake mode)
-                    prof, sigma = rebin_R_to_Q(compute_r_axis(spec), prof, sigma,
-                                               qgrid, lsd, px, wl)
+                if self._q_cfg:   # R-uniform → uniform Q/2θ (not combined with cake mode)
+                    prof, sigma = rebin_R_to_grid(compute_r_axis(spec), prof, sigma,
+                                                  out_grid, lsd, px, wl, rebin_unit)
                 # The live waterfall/stacked view always gets the η-collapsed profile,
                 # in both modes — only the accumulated/stored result differs.
                 if self._multi_azimuth and cake_2d is not None:
@@ -1790,39 +2816,43 @@ class BatchWorker(QtCore.QThread):
                     all_sigmas.append(sigma)
                 frame_omega = float(omega_of(abs_i))
                 all_omegas.append(frame_omega)
+                # Instrument metadata (temperature/pressure/ion-chamber/
+                # sample-motor positions), when the source can provide it
+                # (HDF5 stacks only — see
+                # _HDF5StackGlobSource.metadata_for_index) — always the mean
+                # across this chunk's raw sub-frames, regardless of the pixel
+                # combine op, and already aligned to the light-frame
+                # timestamps rather than a longer light+dark metadata array.
+                #
+                # Read here rather than inside the zarr branch below: the
+                # beam-monitor CSV is worth having whichever output formats
+                # are ticked, and zarr is not one of the defaults.
+                meta = None
+                get_meta = getattr(source, "metadata_for_index", None)
+                if get_meta is not None:
+                    try:
+                        meta = get_meta(abs_i)
+                    except Exception:
+                        meta = None
+                ion_meta.append((abs_i, meta))
                 if (want_zarr or self._multi_azimuth) and cake_2d is not None:
                     # Feeds the <lo>_<hi> token in the combined HDF5 stem,
                     # which both the plain and the cake writer below use —
                     # so it is not zarr-only.
                     all_frame_idx.append(float(abs_i))
                 if want_zarr and cake_2d is not None:
-                    # One zarr per combined output frame, written immediately
-                    # rather than accumulated — `fid` already carries the
-                    # right per-chunk identity (a bare file stem when
-                    # "Combine sub-frames" produces one output per file, or
-                    # "<stem>.frame_<start>_<end>" per chunk — the actual raw
-                    # sub-frame range it combines — when it splits a file
-                    # into several, see _HDF5StackGlobSource._fid), so this
-                    # naturally yields one zarr per image stack, and however
-                    # many the chunking splits it into, uneven remainder
-                    # chunk included, with the frames it covers visible in
-                    # the filename.
-                    zarr_path = zarr_dir / f"{fid}.ave.zarr.zip"
-                    # Instrument metadata (temperature/pressure/ion-chamber/
-                    # sample-motor positions), when the source can provide it
-                    # (HDF5 stacks only — see
-                    # _HDF5StackGlobSource.metadata_for_index) — always the
-                    # mean across this chunk's raw sub-frames, regardless of
-                    # the pixel combine op, and already aligned to the
-                    # light-frame timestamps rather than a longer
-                    # light+dark metadata array.
-                    meta = None
-                    get_meta = getattr(source, "metadata_for_index", None)
-                    if get_meta is not None:
-                        try:
-                            meta = get_meta(abs_i)
-                        except Exception:
-                            meta = None
+                    # Which archive this frame belongs to. Under "frame"
+                    # grouping (and for any source that cannot name a
+                    # rotation) there is no key function and `fid` is used
+                    # instead, so every frame opens and closes its own
+                    # archive and the behaviour is exactly the per-frame one
+                    # this replaced — `fid` already carries the right
+                    # per-chunk identity (a bare file stem when "Combine
+                    # sub-frames" produces one output per file, or
+                    # "<stem>.frame_<start>_<end>" per chunk, see
+                    # _HDF5StackGlobSource._fid).
+                    group_key = (zarr_group_key_fn(abs_i)
+                                 if zarr_group_key_fn is not None else fid)
                     # Where this frame came from, so the source file's whole
                     # instrument/ PV snapshot can be copied forward into the
                     # archive (see h5_metadata). HDF5 stacks only — a TIFF
@@ -1834,82 +2864,35 @@ class BatchWorker(QtCore.QThread):
                             h5_ctx = get_ctx(abs_i)
                         except Exception:
                             h5_ctx = None
-                    temps = pressures = currents = currents_i0 = None
-                    ring_current = sample_motors = None
-                    if meta:
-                        if meta.get("temperature") is not None:
-                            temps = [meta["temperature"]]
-                        if meta.get("pressure") is not None:
-                            pressures = [meta["pressure"]]
-                        # Real beam-monitor ion chambers (stopgap per-hutch
-                        # mapping — see _HDF5StackGlobSource._ION_CHAMBER_H5_PATHS)
-                        # go into the writer's own I/I0 slots. Storage-ring
-                        # current is a different quantity entirely — it used
-                        # to be mistakenly written into the "I" slot; it now
-                        # rides along in the provenance entry's `extra`
-                        # instead (below), not in the zarr's own attrs.
-                        if meta.get("ion_chamber_i") is not None:
-                            currents = [meta["ion_chamber_i"]]
-                        if meta.get("ion_chamber_i0") is not None:
-                            currents_i0 = [meta["ion_chamber_i0"]]
-                        ring_current = meta.get("current")
-                        sample_motors = {k[len("motor:"):]: v
-                                        for k, v in meta.items()
-                                        if k.startswith("motor:") and v is not None}
                     try:
-                        write_gsas_zarr_zip(
-                            zarr_path, [cake_2d], spec=spec,
-                            omegas=[frame_omega], bin_area=zarr_bin_area,
-                            temperatures=temps, pressures=pressures,
-                            currents=currents, currents_i0=currents_i0)
-                        try:
-                            # Per-frame provenance: the shared zarr_prov_entry
-                            # (built once, run-level) plus whatever per-frame
-                            # environment this specific frame actually had —
-                            # a shallow copy so different frames' entries
-                            # don't share (and silently overwrite) `extra`.
-                            frame_extra = dict(zarr_prov_entry.get("extra") or {})
-                            if ring_current is not None:
-                                frame_extra["storage_ring_current_mA"] = ring_current
-                            if sample_motors:
-                                frame_extra["sample_motors"] = sample_motors
-                            # The instrument/ copy and the provenance stamp are
-                            # two edits to a closed zip, and a zip can't be
-                            # edited in place — so they share one extract /
-                            # repack pass rather than each paying for its own.
-                            snap = {}
-                            if h5_ctx:
-                                frame_extra["source_h5"] = h5_ctx["path"]
-                                # The tree is the same for every frame of a
-                                # given file; only the per-frame averaging
-                                # differs. Read once per file, align per
-                                # frame — a few hundred datasets reopened
-                                # for every output frame would cost more
-                                # than the integration.
-                                tree = h5_trees.get(h5_ctx["path"])
-                                if tree is None:
-                                    tree = h5_metadata.read_tree(h5_ctx["path"])
-                                    h5_trees[h5_ctx["path"]] = tree
-                                snap = h5_metadata.align(
-                                    tree, h5_ctx["frame_ranges"],
-                                    h5_ctx["n_aligned"])
-                            frame_prov_entry = dict(zarr_prov_entry, extra=frame_extra)
-
-                            def _mutate(extracted, _snap=snap, _e=frame_prov_entry):
-                                if _snap:
-                                    h5_metadata.write_into_extracted(extracted, _snap)
-                                provenance.stamp_extracted(extracted, _e)
-
-                            provenance.rewrite_zip(zarr_path, _mutate)
-                        except Exception:
-                            self.log_line.emit(
-                                f"[batch] note: provenance stamp on {zarr_path.name} "
-                                "failed (non-fatal):\n" + traceback.format_exc())
-                        out_paths.append(str(zarr_path))
+                        if zarr_writer is not None and group_key != zarr_open_key:
+                            out_paths.append(str(_close_zarr_group()))
+                        if zarr_writer is None:
+                            open_path, pending = self._zarr_group_path(
+                                zarr_dir, fid, group_key)
+                            zarr_writer = _ZarrGroupWriter(
+                                open_path, spec=spec, bin_area=zarr_bin_area,
+                                prov_entry=zarr_prov_entry,
+                                log=self.log_line.emit)
+                            zarr_open_key = group_key
+                            zarr_rename_pending = pending
+                        zarr_writer.add(cake_2d, omega=frame_omega,
+                                        meta=meta, h5_ctx=h5_ctx)
                     except Exception:
                         self.log_line.emit(
                             f"[batch] zarr cake output for {fid!r} failed:\n"
                             + traceback.format_exc())
+                        # Drop the half-written group rather than keep adding
+                        # to a writer that may be in an undefined state; the
+                        # next frame starts a fresh one.
+                        if zarr_writer is not None:
+                            try:
+                                zarr_writer.close(h5_trees)
+                            except Exception:
+                                pass
+                            zarr_writer = None
+                            zarr_open_key = None
+                            zarr_rename_pending = False
                 frame_ids.append(fid)
                 self.frame_done.emit(fid, r_ax, prof, sigma)
                 self.progress.emit(proc_idx + 1, total)
@@ -1943,22 +2926,57 @@ class BatchWorker(QtCore.QThread):
                             cake_2d=cake_2d, cake_sigma=cake_sigma,
                             eta_axis=eta_ax, per_eta=self._multi_azimuth))
 
+            # The last group has no following frame to close it — including
+            # when the loop broke on an abort, where the frames already
+            # integrated still belong in a readable archive.
+            if zarr_writer is not None:
+                try:
+                    out_paths.append(str(_close_zarr_group()))
+                except Exception:
+                    self.log_line.emit(
+                        "[batch] zarr cake output for the final group failed:\n"
+                        + traceback.format_exc())
+
             # Combined h5 output name: <original-source-stem>.<start>_<end>
-            # .cake — h5 remains one file for the whole run (unlike zarr,
-            # written per-frame above), so it still needs an explicit
-            # frame-index range. start/end are the actual processed 0-based
-            # frame indices (all_frame_idx), matching what per-frame lineout
-            # files already use via froot_and_frame_num(fid, abs_i) above.
-            src_path = self._src.get('path')
-            if src_path:
-                out_stem = Path(src_path).stem
-            else:
-                src_paths = self._src.get('paths') or []
-                out_stem = (froot_and_frame_num(Path(src_paths[0]).stem, -1)[0]
-                            if src_paths else "integrated")
+            # .cake — h5 remains one file for the whole run, so it still needs
+            # an explicit frame-index range. start/end are the actual
+            # processed 0-based frame indices (all_frame_idx), matching what
+            # per-frame lineout files already use via
+            # froot_and_frame_num(fid, abs_i) above. A "run"-grouped zarr
+            # shares both the stem and the range — see _zarr_group_path.
+            out_stem = self._run_out_stem()
             lo = int(min(all_frame_idx)) if all_frame_idx else 0
             hi = int(max(all_frame_idx)) if all_frame_idx else 0
             combined_stem = f"{out_stem}.{lo:06d}_{hi:06d}.cake"
+
+            # Per-frame beam-monitor CSV. ONE file for the whole run, and
+            # placed/named exactly as Batch Correction places its own (see
+            # BatchCorrectionWorker._write_ion_csvs): beside the detector
+            # folder rather than inside it, as
+            # ``<froot>_<detector>_bi.csv``. The two tabs write the same
+            # kind of sidecar about the same scan, so reading one should
+            # not mean learning a second convention — it used to be
+            # ``<stem>.<lo>_<hi>.ioncham.csv`` one level further down, and
+            # a re-run over a different frame range left a second file
+            # beside the first rather than replacing it.
+            if self._out_dir is not None and ion_meta:
+                try:
+                    written = ion_csv.write_ion_csv(
+                        self._out_dir.parent / self._ion_csv_name(),
+                        self._monitor_rows_for_run(source),
+                        extras=self._ion_csv_extras)
+                    if written:
+                        out_paths.append(written)
+                        self.log_line.emit(f"[batch] beam monitors: {written}")
+                    else:
+                        self.log_line.emit(
+                            "[batch] no beam-monitor data for this source "
+                            "(unrecognised hutch, or no live channel) — "
+                            "no monitor CSV written")
+                except Exception:
+                    # Never cost the user a finished run over a sidecar.
+                    self.log_line.emit("[batch] monitor CSV failed:\n"
+                                       + traceback.format_exc())
 
             prov_entry = provenance.build_entry(
                 'midas_gui.batch_integrate',
@@ -2123,10 +3141,12 @@ class PumpProbeWorker(QtCore.QThread):
                 ctx = build_integration_context(spec, self._kernel, mask,
                                                 self._corrections, self._weighted)
             geom = ctx["geom"]; corr_counts = ctx["corr_counts"]; cnt = ctx["cnt"]
+            eta_take = ctx["eta_take"]
             r_ax = ctx["r_ax"]
 
+            rebin_unit = rebin_cfg_parts(self._q_cfg)[0]
             if self._q_cfg:
-                qgrid, r_ax = q_grid_and_r(self._q_cfg, lsd, px, wl)
+                out_grid, r_ax = rebin_grid_and_r(self._q_cfg, lsd, px, wl)
             two_theta, _, q_ax = axis_conversions(r_ax, lsd, px, wl)
 
             fields_on = (self._dark is not None or self._bright is not None
@@ -2135,7 +3155,7 @@ class PumpProbeWorker(QtCore.QThread):
             self.log_line.emit(
                 f"[pump] {total} frames | kernel={self._kernel} | "
                 f"corrections={'on' if ctx['corr_on'] else 'off'} | "
-                f"q_uniform={'on' if self._q_cfg else 'off'} | "
+                f"rebin={_REBIN_LABEL[rebin_unit] if self._q_cfg else 'off'} | "
                 f"fields={'on' if fields_on else 'off'}")
 
             profiles, delays = [], []
@@ -2151,11 +3171,11 @@ class PumpProbeWorker(QtCore.QThread):
                 img_t = torch.from_numpy(img.astype(np.float64))
                 prof, _ = integrate_frame(
                     img_t, spec, geom, self._kernel, self._corrections,
-                    None, False, corr_counts=corr_counts,
+                    None, False, corr_counts=corr_counts, eta_take=eta_take,
                     weighted=self._weighted, cnt_cake=cnt)
                 if self._q_cfg:
-                    prof, _ = rebin_R_to_Q(compute_r_axis(spec), prof, None,
-                                           qgrid, lsd, px, wl)
+                    prof, _ = rebin_R_to_grid(compute_r_axis(spec), prof, None,
+                                              out_grid, lsd, px, wl, rebin_unit)
                 if self._norm_range is not None:
                     prof = self._normalize(prof, q_ax, self._norm_range)
                 profiles.append(prof); delays.append(float(delay))
@@ -2324,6 +3344,20 @@ class _ChunkCombinedFileSource:
         start = idx * self._chunk_size
         return start, start + len(group) - 1
 
+    def zarr_group_key(self, idx: int) -> str:
+        """Which zarr archive output frame ``idx`` belongs to under "one zarr
+        per source file" — see ``BatchWorker``'s ``zarr_grouping``.
+
+        A zarr group is one ROTATION, the same unit ω is measured from, so
+        this is deliberately the same answer ``raw_window_for_index`` is
+        counted against: one-frame-per-file data only becomes a rotation as a
+        series, so the whole selection is one group and the key is constant.
+        (``_HDF5StackGlobSource`` returns the source file instead, because
+        there one file already IS one rotation.)"""
+        if not self._group(idx):
+            raise IndexError(idx)
+        return "<selection>"
+
     def _read(self, group: list) -> np.ndarray:
         imgs = []
         for p in group:
@@ -2380,41 +3414,13 @@ class _HDF5StackGlobSource:
     #: schema carries — fixed regardless of ``dataset`` (the cake-source
     #: dataset the user picked), since these live under the file's
     #: ``instrument/`` group, not under ``exchange/``.
-    _METADATA_H5_PATHS = {
-        "temperature": "instrument/GSAS2_PVS/Temperature",
-        "pressure": "instrument/GSAS2_PVS/Pressure",
-        "current": "instrument/StorageRing/SRCurrent",  # storage-ring current (mA) —
-        # NOT a beam monitor; see ion_chamber_i0/i below for the real thing.
-    }
-
-    #: Real beam-monitor ion chambers, by hutch — stopgap mapping, from the
-    #: beamline's own confirmation (cross-checked against
-    #: ~/mnt/s1b/bluesky_dev/mpe_xml/20ide_instr_attributes_trans.xml) rather
-    #: than the HDF5 file's own ``active_instrument`` (documented upstream as
-    #: currently always empty, so it can't be used to pick a hutch). D hutch
-    #: has no transmission monitor yet, hence no "i" entry there. E hutch's
-    #: "i" is itself setup-dependent (a pin diode, "D2PD", when present; a
-    #: dedicated SAXS ion chamber doesn't exist yet) — ``_read_metadata``'s
-    #: existing "path declared but absent in this file" handling already
-    #: degrades that to None gracefully, which doubles as the auto-detect.
-    #: Station A is deliberately excluded: no sample sits in its beam path,
-    #: so its scalers (however I0/I1-suggestive their names) aren't a
-    #: per-sample monitor pair.
-    _ION_CHAMBER_H5_PATHS = {
-        "D": {"ion_chamber_i0": "instrument/Scalers/D/IC2"},
-        "E": {"ion_chamber_i0": "instrument/Scalers/E/US_IC",
-              "ion_chamber_i": "instrument/Scalers/E/D2PD"},
-    }
-
-    #: Sample-motion-system motor groups, by hutch. E hutch has two
-    #: coexisting sub-configs (HL/HR) with no reliable way to tell which is
-    #: physically in use for a given file (same active_instrument gap, one
-    #: level down) — captured both rather than guessing; see
-    #: ``_read_sample_motors``.
-    _SAMPLE_MOTOR_H5_GROUPS = {
-        "D": ["instrument/SMS/D/HR"],
-        "E": ["instrument/SMS/E/HL", "instrument/SMS/E/HR"],
-    }
+    #: Per-frame instrument metadata, by hutch. The tables themselves live in
+    #: :mod:`midas_gui.ion_csv`, which the Batch Correction path also reads
+    #: them from — one mapping rather than two that can drift. Kept as class
+    #: attributes so existing references (and tests) still resolve.
+    _METADATA_H5_PATHS = ion_csv.METADATA_H5_PATHS
+    _ION_CHAMBER_H5_PATHS = ion_csv.ION_CHAMBER_H5_PATHS
+    _SAMPLE_MOTOR_H5_GROUPS = ion_csv.SAMPLE_MOTOR_H5_GROUPS
 
     def __init__(self, paths, dataset: str, *, chunk_size=None, op: str = "mean",
                  raw_start=None, raw_end=None):
@@ -2438,29 +3444,16 @@ class _HDF5StackGlobSource:
         self._hutch = self._resolve_hutch()
 
     def _resolve_hutch(self) -> Optional[str]:
-        """Stopgap hutch detection: the HDF5 file's own ``active_instrument``
-        is documented as always empty upstream (no reliable per-file signal),
-        so infer it from the source path instead — ``varexE``/``varexD`` in
-        the folder name, case-insensitive, checked against the first
-        selected path. ``None`` (unrecognized layout) means every
-        ion-chamber/sample-motor field below is simply skipped, same as any
-        other "not available for this source" case."""
-        if not self._paths:
-            return None
-        text = str(self._paths[0]).lower()
-        if "varexe" in text:
-            return "E"
-        if "varexd" in text:
-            return "D"
-        return None
+        """This source's hutch, from the first selected path, falling back to
+        the active profile — see :func:`midas_gui.ion_csv.resolve_hutch`."""
+        return ion_csv.resolve_hutch(self._paths[0] if self._paths else None,
+                                     settings.active_profile())
 
     def _metadata_h5_paths(self) -> dict:
         """Flat ``{key: h5_path}`` table for this source's hutch: the fixed
         temperature/pressure/current entries plus whichever ion-chamber
         entries apply (none, for an unrecognized hutch)."""
-        paths = dict(self._METADATA_H5_PATHS)
-        paths.update(self._ION_CHAMBER_H5_PATHS.get(self._hutch, {}))
-        return paths
+        return ion_csv.metadata_h5_paths(self._hutch)
 
     def _raw_bounds(self, n: int) -> tuple:
         """0-based inclusive ``(lo, hi)`` raw sub-frame bounds within a file
@@ -2741,6 +3734,59 @@ class _HDF5StackGlobSource:
         what the axis is."""
         return self.omega_channel_window(idx)[1:]
 
+    def zarr_group_key(self, idx: int) -> str:
+        """Which zarr archive output frame ``idx`` belongs to under "one zarr
+        per source file" — see ``BatchWorker``'s ``zarr_grouping``.
+
+        A zarr group is one ROTATION, and here one file IS one rotation, so
+        the key is the source file. Defined through ``omega_channel_window``
+        for the same reason ``raw_window_for_index`` is: that walk is already
+        the single place deciding which rotation a frame belongs to, and
+        grouping must not get to disagree with the angle."""
+        return self.omega_channel_window(idx)[0]
+
+    def monitor_inputs(self) -> list:
+        """Per source file, ``(path, ranges, n_light, n_dark)`` -- exactly the
+        shape :func:`ion_csv.rows_from_tree` takes, and exactly what
+        ``BatchCorrectionWorker._collect_monitor_rows`` already builds.
+
+        Exists so Batch Integrate's sidecar comes out of the SAME row builder
+        as Batch Correction's rather than a second one that merely agrees.
+        They had diverged badly: ``rows_from_metas`` resolved ion chambers
+        through ``ION_CHAMBER_H5_PATHS[hutch]`` -- ``US_IC``/``D2PD`` for
+        hutch E -- and a 1-ID file carries neither, so the _bi.csv had no
+        ion-chamber columns at all while the _bc.csv beside it had 29
+        channels. It also keyed rows by a bare ordinal and never wrote the
+        dark row.
+
+        ``ranges`` are the same raw sub-frame spans ``_fid`` embeds in each
+        frame id, so a CSV row and the output frame it describes name the
+        same thing. ``n_dark`` is read from the dark dataset rather than
+        inferred, since ``split_light_dark`` uses it to decide which block of
+        a flat metadata array is the lights.
+        """
+        self._ensure_stats()
+        out = []
+        for i, path in enumerate(self._paths):
+            n_raw = int(self._raw_ns[i])
+            ranges = [self._chunk_range(k, n_raw) for k in range(int(self._counts[i]))]
+            n_dark = 0
+            try:
+                import h5py
+                with h5py.File(str(path), "r") as f:
+                    # "<dataset>_dark" is the VAREX/Eiger convention; the
+                    # literal fallback covers a source pointed at a
+                    # differently-named light dataset in the same file.
+                    for cand in (f"{self._dataset}_dark", "exchange/data_dark"):
+                        dk = f.get(cand)
+                        if dk is not None and getattr(dk, "ndim", 0) == 3:
+                            n_dark = int(dk.shape[0])
+                            break
+            except Exception:
+                n_dark = 0
+            out.append((path, ranges, n_raw, n_dark))
+        return out
+
     def metadata_for_index(self, idx: int) -> dict:
         """Chunk-mean metadata (Temperature/Pressure/StorageRing current)
         for combined frame ``idx``, in the same flattened index space as
@@ -2863,11 +3909,13 @@ class FolderMonitorWorker(QtCore.QThread):
                                                 self._corrections, self._weighted)
             self.geom_ready.emit(ctx)
             geom = ctx["geom"]; corr_counts = ctx["corr_counts"]; cnt = ctx["cnt"]
+            eta_take = ctx["eta_take"]
             lsd, px, wl = ctx["lsd"], ctx["px"], ctx["wl"]
             r_ax = ctx["r_ax"]
-            qgrid = None
+            out_grid = None
+            rebin_unit = rebin_cfg_parts(self._q_cfg)[0]
             if self._q_cfg:
-                qgrid, r_ax = q_grid_and_r(self._q_cfg, lsd, px, wl)
+                out_grid, r_ax = rebin_grid_and_r(self._q_cfg, lsd, px, wl)
             fields_on = (dark is not None or bright is not None
                          or background is not None)
             save_fmts = [f for f in self._fmts if f in ("csv", "xye", "fxye", "dat")]
@@ -2907,12 +3955,13 @@ class FolderMonitorWorker(QtCore.QThread):
                     prof, sigma = integrate_frame(
                         img_t, spec, geom, self._kernel, self._corrections,
                         self._variance_cfg, True, corr_counts=corr_counts,
+                        eta_take=eta_take,
                         weighted=self._weighted, cnt_cake=cnt)
                     if sigma is None:
                         sigma = np.sqrt(np.maximum(prof, 0.0))
                     if self._q_cfg:
-                        prof, sigma = rebin_R_to_Q(compute_r_axis(spec), prof, sigma,
-                                                   qgrid, lsd, px, wl)
+                        prof, sigma = rebin_R_to_grid(compute_r_axis(spec), prof, sigma,
+                                                      out_grid, lsd, px, wl, rebin_unit)
                     self._seen.add(fid)
                     count += 1
                     self.frame_done.emit(fid, r_ax, prof, sigma)
@@ -2993,6 +4042,55 @@ def resolve_worker_count(n_items: int, requested: int, min_per_worker: int) -> i
     requested = max(1, int(requested))
     min_per_worker = max(1, int(min_per_worker))
     return min(requested, max(1, int(n_items) // min_per_worker))
+
+
+def _split_into_chunks_on_groups(indices: list, n_chunks: int, key_fn) -> list:
+    """Like :func:`_split_into_chunks`, but no chunk boundary may fall inside
+    a run of indices sharing a ``key_fn(idx)``.
+
+    Batch-Parallel splits purely by count, which is fine while every output
+    frame writes its own zarr but not once several share one archive: two
+    workers handed halves of the same source file would open the same
+    ``.zarr.zip`` path and race. Whole groups per worker removes the
+    collision by construction, at the cost of capping parallelism at the
+    number of groups (a 3-file folder uses 3 workers however many were
+    asked for).
+
+    Groups are formed from CONSECUTIVE equal keys, not by gathering every
+    index with the same key: the frame order is the source's own, so a
+    repeated key after a gap would mean the source interleaves rotations,
+    and silently reordering frames to suit the writer would be worse than
+    writing two archives. Concatenating the chunks back in order reproduces
+    ``indices`` exactly, exactly as the unaligned splitter promises."""
+    groups: list = []
+    for i in indices:
+        k = key_fn(i)
+        if groups and groups[-1][0] == k:
+            groups[-1][1].append(i)
+        else:
+            groups.append((k, [i]))
+    n_chunks = max(1, min(int(n_chunks), len(groups)))
+    if not groups:
+        return []
+    # Distribute whole groups so chunk sizes stay as even as the group sizes
+    # allow: walk the groups, starting a new chunk once the current one has
+    # taken its share of the remaining frames.
+    chunks: list = []
+    remaining_frames = sum(len(g[1]) for g in groups)
+    remaining_chunks = n_chunks
+    cur: list = []
+    for gi, (_k, members) in enumerate(groups):
+        cur.extend(members)
+        groups_left = len(groups) - gi - 1
+        if remaining_chunks > 1 and groups_left >= remaining_chunks - 1 and \
+                len(cur) >= remaining_frames // remaining_chunks:
+            chunks.append(cur)
+            remaining_frames -= len(cur)
+            remaining_chunks -= 1
+            cur = []
+    if cur:
+        chunks.append(cur)
+    return chunks
 
 
 def _split_into_chunks(indices: list, n_chunks: int) -> list:
@@ -3164,7 +4262,8 @@ class BatchRunCoordinator(QtCore.QObject):
                  dark=None, bright=None, background=None, bright_mode="divide",
                  weighted=True, context=None, im_trans=(), multi_azimuth=False,
                  run_mode="sequential", n_workers=1, parent=None,
-                 calibration_snapshot=None):
+                 calibration_snapshot=None, zarr_grouping="frame",
+                 ion_csv_extras=()):
         super().__init__(parent)
         self._args = dict(
             spec=spec, source_cfg=source_cfg, mask=mask, out_dir=out_dir, fmts=fmts,
@@ -3173,7 +4272,8 @@ class BatchRunCoordinator(QtCore.QObject):
             frame_range=frame_range, monitor_file=monitor_file,
             drift_traj=drift_traj, dark=dark, bright=bright, background=background,
             bright_mode=bright_mode, weighted=weighted, im_trans=im_trans,
-            multi_azimuth=multi_azimuth, calibration_snapshot=calibration_snapshot)
+            multi_azimuth=multi_azimuth, calibration_snapshot=calibration_snapshot,
+            zarr_grouping=zarr_grouping, ion_csv_extras=ion_csv_extras)
         self._context = context
         self._run_mode = run_mode if run_mode == "batch_parallel" else "sequential"
         self._n_workers_requested = max(1, int(n_workers))
@@ -3240,7 +4340,27 @@ class BatchRunCoordinator(QtCore.QObject):
         if n_workers <= 1:
             self._start_sequential()
             return
-        self._chunks = _split_into_chunks(indices, n_workers)
+        # Several frames sharing one zarr archive must not be split across
+        # workers — see _split_into_chunks_on_groups. "run" grouping yields a
+        # single group and so a single chunk, which falls through to the
+        # sequential path below rather than needing a case of its own.
+        grouping = self._args.get("zarr_grouping", "frame")
+        key_fn = (getattr(source, "zarr_group_key", None)
+                  if grouping == "file" else
+                  (lambda _i: "<run>") if grouping == "run" else None)
+        if "zarr" in (self._args.get("fmts") or ()) and key_fn is not None:
+            self._chunks = _split_into_chunks_on_groups(indices, n_workers, key_fn)
+            if len(self._chunks) < n_workers:
+                self.log_line.emit(
+                    f"[batch] zarr grouping={grouping}: a group cannot be "
+                    f"split across workers — using {len(self._chunks)} "
+                    f"worker(s) rather than {n_workers}.")
+            if len(self._chunks) <= 1:
+                self._chunks = []
+                self._start_sequential()
+                return
+        else:
+            self._chunks = _split_into_chunks(indices, n_workers)
         self.log_line.emit(
             f"[batch] Batch Parallel: {len(indices)} frames across "
             f"{len(self._chunks)} workers ({[len(c) for c in self._chunks]})")
@@ -3335,8 +4455,9 @@ class BatchRunCoordinator(QtCore.QObject):
                     # Not carried over from any one chunk worker (each built its
                     # own geometry independently) — rebuilt once here so the
                     # combined cake HDF5 still gets a real, non-zero BinArea row.
-                    geom = build_geom(spec, kernel, self._args["mask"])
-                    bin_area = count_cake(geom, kernel, spec.NrPixelsZ, spec.NrPixelsY)
+                    # Through bin_area_for, so a wrapped eta range gets a
+                    # real area for the bins past the cut instead of zeros.
+                    bin_area = bin_area_for(spec, kernel, self._args["mask"])
                     cake_params = {
                         'RMin': float(spec.RMin), 'RMax': float(spec.RMax),
                         'RBinSize': float(spec.RBinSize),

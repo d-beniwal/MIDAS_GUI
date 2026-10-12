@@ -140,10 +140,29 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
         self._seed_bcy = _fspin(-99999, 99999, 2, DEFAULT_BC_Y, "px")
         self._seed_bcz = _fspin(-99999, 99999, 2, DEFAULT_BC_Z, "px")
         self._seed_lsd = _fspin(0.001, 1e5, 4, DEFAULT_LSD_UM / 1000.0, " mm")
-        self._seed_tx = _fspin(-180, 180, 4, 0.0, "°")
+        # tx is the panel's installation azimuth about the beam, not a small
+        # alignment tilt like ty/tz: real fitted Hydra geometries run the whole
+        # way round (the bundled example is 27.3 / 117.8 / 207.5 / 296.885).  A
+        # +/-180 range made three of those four untypable, and -- worse --
+        # setValue clamps silently, so loading such a file turned 296.885 into
+        # 180 with nothing said.  ty/tz stay at +/-180; they are sub-degree.
+        self._seed_tx = _fspin(-360, 360, 4, 0.0, "°")
+        self._seed_tx.setToolTip(
+            "This panel's installation angle about the beam (0-360°).\n\n"
+            "Unlike BC/Lsd/ty/tz this is an INPUT, not a fitted value: a "
+            "powder ring pattern is unchanged by rotating a panel about the "
+            "beam, so no calibrant can determine it. Every pipeline holds it "
+            "at whatever you seed here.\n\n"
+            "Take it from the installation geometry or an existing "
+            "paramstest (a 1-ID-E windmill runs ~90° apart, e.g. 27.3 / "
+            "117.8 / 207.5 / 296.885). It sets each panel's η and where "
+            "the panel lands in the composite — leaving all four at 0 "
+            "piles every panel onto one wedge.")
         self._seed_ty = _fspin(-180, 180, 4, 0.0, "°")
         self._seed_tz = _fspin(-180, 180, 4, 0.0, "°")
         self._seed_tilts = (self._seed_tx, self._seed_ty, self._seed_tz)
+        for _w in self._seed_tilts:
+            _w.setMaximumWidth(76)
         self._seed_en_bc = QtWidgets.QCheckBox("Beam centre")
         self._seed_en_lsd = QtWidgets.QCheckBox("Lsd")
         self._seed_en_tx = QtWidgets.QCheckBox("tx")
@@ -151,16 +170,25 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
         self._seed_en_tz = QtWidgets.QCheckBox("tz")
         self._seed_enables = (self._seed_en_bc, self._seed_en_lsd,
                               self._seed_en_tx, self._seed_en_ty, self._seed_en_tz)
-        self._seed_en_bc.toggled.connect(self._seed_bcy.setEnabled)
-        self._seed_en_bc.toggled.connect(self._seed_bcz.setEnabled)
-        self._seed_en_lsd.toggled.connect(self._seed_lsd.setEnabled)
-        self._seed_en_tx.toggled.connect(self._seed_tx.setEnabled)
-        self._seed_en_ty.toggled.connect(self._seed_ty.setEnabled)
-        self._seed_en_tz.toggled.connect(self._seed_tz.setEnabled)
-        for w in (self._seed_bcy, self._seed_bcz, self._seed_lsd, *self._seed_tilts):
-            w.setEnabled(False)
+        #: Seed tick -> the widget(s) it gates. Synced from the ticks rather
+        #: than wired as toggled->setEnabled, for the reason spelled out in
+        #: tab_calibrate's copy: a restore sets the ticks with signals
+        #: BLOCKED, so the signal never fires and the boxes stay greyed out
+        #: under a checked box.
+        self._seed_gated = (
+            (self._seed_en_bc, (self._seed_bcy, self._seed_bcz)),
+            (self._seed_en_lsd, (self._seed_lsd,)),
+            (self._seed_en_tx, (self._seed_tx,)),
+            (self._seed_en_ty, (self._seed_ty,)),
+            (self._seed_en_tz, (self._seed_tz,)),
+        )
+        self._sync_seed_enabled()
         for cb in self._seed_enables:
             cb.toggled.connect(self._on_seed_enable_changed)
+        # The summary now reports values, so it has to follow them too.
+        for _sp in (self._seed_bcy, self._seed_bcz, self._seed_lsd,
+                    self._seed_tx, self._seed_ty, self._seed_tz):
+            _sp.valueChanged.connect(lambda *_: self._update_seed_summary())
         self._manual_seed_check.toggled.connect(self._on_seed_master_toggled)
         self._feedback_check = QtWidgets.QCheckBox("Feed result back to seed")
         self._feedback_check.setChecked(True)
@@ -180,7 +208,10 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
         self._seed_btn.setToolTip(
             "Choose which of BC / Lsd / tx / ty / tz to seed this panel's fit "
             "from. Use Pick BC / Pick Ring on the image to populate BC while "
-            "this is open.")
+            "this is open.\n\n"
+            "Which parameters are ticked is shared by all four panels; the "
+            "VALUES are this panel's own — that is how four panels get "
+            "seeded the same way with their own distinct geometry.")
         self._seed_btn.clicked.connect(self._open_seed_dialog)
         seed.body.addWidget(self._seed_btn)
         self._seed_summary_lbl = QtWidgets.QLabel("")
@@ -266,7 +297,17 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
                 self._manual_seed_check.setCheckState(QtCore.Qt.PartiallyChecked)
         finally:
             self._syncing_seed_master = False
+        self._sync_seed_enabled()
         self._update_seed_summary()
+
+    def _sync_seed_enabled(self):
+        """A seed value box is editable exactly when its tick is on — derived
+        from the checkbox's current state, so a signal-blocked restore cannot
+        leave the two disagreeing."""
+        for cb, widgets in self._seed_gated:
+            on = cb.isChecked()
+            for w in widgets:
+                w.setEnabled(on)
 
     def _on_seed_master_toggled(self, *_args):
         if self._syncing_seed_master:
@@ -276,14 +317,49 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
             cb.setChecked(want)
 
     def _update_seed_summary(self):
-        on = [label for cb, label in zip(
+        """Name the seeded parameters AND show what they are set to.
+
+        Names alone ("Seeding: BC, Lsd, tx") meant the only way to see a
+        panel's tx was to open its Manual seed dialog, one panel at a time
+        -- asked at the beamline as "I do not know what Tx they are
+        getting". tx is reported whether or not it is ticked, because it is
+        used either way: unticked means 0.0, and four panels at 0.0 is the
+        state that piles every panel onto one wedge, so a silent default is
+        exactly the one worth showing.
+        """
+        vals = {
+            "BC": f"BC ({self._seed_bcy.value():.1f}, {self._seed_bcz.value():.1f})",
+            "Lsd": f"Lsd {self._seed_lsd.value():.3f} mm",
+            "tx": f"tx {self._seed_tx.value():g}°",
+            "ty": f"ty {self._seed_ty.value():g}°",
+            "tz": f"tz {self._seed_tz.value():g}°",
+        }
+        on = [vals[label] for cb, label in zip(
                   self._seed_enables, ("BC", "Lsd", "tx", "ty", "tz"))
               if cb.isChecked()]
-        self._seed_summary_lbl.setText(
-            "Seeding: " + ", ".join(on) if on else "Fully automatic (no manual seed)")
+        head = ("Seeding: " + "  ·  ".join(on) if on
+                else "Fully automatic (no manual seed)")
+        if self._seed_en_tx.isChecked():
+            tx_note = "tx is held at this value (never refined)."
+        elif abs(self._seed_tx.value()) > 1e-9:
+            tx_note = (f"tx {self._seed_tx.value():g}° is NOT ticked, so the fit "
+                       f"uses 0° — tick tx to use it.")
+        else:
+            tx_note = ("tx 0° (not set). This panel will land at the same "
+                       "azimuth as every other panel left at 0.")
+        self._seed_summary_lbl.setText(head + "\n" + tx_note)
+        # Styling and the signal are upstream's (cda7336); the two-line body
+        # above is ours. Not a pick between them: upstream made the summary
+        # noticeable and made the page able to react to it, we made it say
+        # what tx will actually do. Both survive.
         self._seed_summary_lbl.setStyleSheet(
             f"color:{S.ACCENT if on else S.MUTED};font-size:10px")
         self.seedStateChanged.emit()
+
+    def seed_tx_value(self) -> float:
+        """The tx this panel's fit will actually use: the seeded angle, or
+        0.0 when tx is not ticked. Read by the page's panel overview."""
+        return self._seed_tx.value() if self._seed_en_tx.isChecked() else 0.0
 
     def _enable_seed(self, **flags):
         by_name = dict(zip(("BC", "Lsd", "tx", "ty", "tz"), self._seed_enables))
@@ -331,7 +407,18 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
         on every panel (``_sync_seed_checkbox`` mirrors the enable flags
         across all 4 panels by design) — see DECISIONS for the
         connoly_oct26 run this broke, where tx ended up locked at a
-        different nonsense value per panel."""
+        different nonsense value per panel.
+
+        ``tx`` is the sharpest case, and worth keeping the local finding
+        for: no Hydra pipeline refines it today, so ``result.tx`` can only
+        repeat the seed or -- where the pipeline does not carry it, as
+        ``first_time`` does not -- report 0 for a panel that is physically
+        at 296.885 deg. Writing that back silently replaced the measured
+        azimuth with 0 on every Run, and because the tx tick then read as
+        "not set", the next fit ran at the wrong azimuth without saying so.
+        The ``refine``-driven rule above covers it along with every other
+        parameter, which is why the earlier tx-only guard
+        (``helpers.result_refined_tx``) is not needed here."""
         promoted = []
         if refine.get("BC"):
             self._enable_seed(BC=True)
@@ -472,8 +559,16 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
             self._r_diag.setText("Could not render parameter grid — see log.")
             self._log(f"ge{self.panel_number} param grid error:\n{_tb.format_exc()}")
         s = getattr(result, "post_residual_strain_uE", None)
-        strain_txt = f"{s:.1f} µε" if s else "n/a"
-        self._r_diag.setText(f"Post-refine strain: {strain_txt}")
+        seed_s = getattr(result, "seed_seconds", 0.0) or 0.0
+        ref_s = getattr(result, "refine_seconds", 0.0) or 0.0
+        # Same line the single-detector tab shows (tab_calibrate._on_done),
+        # plus the strain restated in parts-per-1e-4. The beamline's working
+        # figure of merit for the old mpe_wf workflow is "a few parts in
+        # 1e-4"; this readout was in microstrain only, so comparing against
+        # that baseline meant a mental factor of 100 every time.
+        strain_txt = f"{s:.1f} µε ({s / 100.0:.2f}e-4)" if s else "n/a"
+        self._r_diag.setText(f"Post-refine strain: {strain_txt}    ·    "
+                             f"timing: seed={seed_s:.1f} s, refine={ref_s:.1f} s")
         self._to_view_btn.setEnabled(True)
         self._save_json_btn.setEnabled(True)
         self._save_ps_btn.setEnabled(True)

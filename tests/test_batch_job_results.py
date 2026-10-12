@@ -271,3 +271,85 @@ def test_job_queue_panel_wired_into_batch_tab_calls_populate(tab, tmp_path):
     tab._job_queue._on_job_done(job)  # simulate what _finalize_job would call
 
     assert tab._waterfall._nrows == 3
+
+
+# ── the finished job's screenlog reaches the shared log tree ────────────
+#
+# A background job already had a log, but in ~/.midas_gui/jobs — a fixed
+# location job adoption scans after a GUI restart, so it cannot move. It is
+# copied into ~/midas_runs/midas_screen_logs/<beamline>/<expid>/ instead,
+# where the in-process run writes its own. Without that, which run mode you
+# happened to use would decide whether your log was findable.
+
+def test_a_finished_job_log_is_copied_into_the_screen_log_tree(tab, tmp_path,
+                                                               monkeypatch):
+    from midas_gui import run_log
+    root = tmp_path / "midas_screen_logs"
+    monkeypatch.setattr(run_log, "LOG_ROOT", root)
+
+    live = tmp_path / "jobs" / "midasgui_batch_42.screenlog"
+    live.parent.mkdir(parents=True)
+    live.write_text("[launcher] DONE exit=0\n")
+
+    tab.set_expid_provider(lambda: "brown_sep26")
+    tab._archive_job_log(SimpleNamespace(logfile=str(live),
+                                         session="midasgui_batch_42"))
+
+    copies = list(root.rglob("*.screenlog"))
+    assert len(copies) == 1
+    assert copies[0].read_text() == "[launcher] DONE exit=0\n"
+    assert "midasgui_batch_42" in copies[0].name
+    assert "brown_sep26" in copies[0].parts
+    assert live.is_file(), "the live log must stay put for job adoption"
+
+
+def test_archiving_a_missing_job_log_is_a_no_op(tab, tmp_path, monkeypatch):
+    """A log is a record of work, not the work."""
+    from midas_gui import run_log
+    root = tmp_path / "midas_screen_logs"
+    monkeypatch.setattr(run_log, "LOG_ROOT", root)
+    tab.set_expid_provider(lambda: "e")
+    tab._archive_job_log(SimpleNamespace(logfile="/nonexistent/x.screenlog",
+                                         session="s"))      # must not raise
+    assert not root.exists()
+
+
+# ── the sidecar is opt-in, and only the reachable step writes one ───────
+# JobQueuePanel records ONE out_dir per job (the first step's), so in a
+# chained multi-folder job only that step's _bg_job_results.npz can ever be
+# opened by "Load results". It used to be written unconditionally by every
+# step: a real 196-folder sweep left 196 of them, 826 MB, on a beamline
+# share, 195 unreachable from the UI.
+
+def test_the_sidecar_is_off_unless_asked_for():
+    from midas_gui import batch_cli
+    base = ["--calib-file", "c", "--out-dir", "o",
+            "--source-type", "hdf5", "--source-path", "s.h5"]
+    assert batch_cli._build_arg_parser().parse_args(base).results_sidecar is False
+    assert batch_cli._build_arg_parser().parse_args(
+        base + ["--results-sidecar"]).results_sidecar is True
+
+
+def test_only_the_first_chained_step_is_asked_to_write_one(tmp_path, monkeypatch):
+    """Driven through the real argv builder: the flag must land on the step
+    whose out_dir the queue row records, and on no other."""
+    QtWidgets = pytest.importorskip("PyQt5.QtWidgets")
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    import midas_gui.job_queue as jq
+
+    seen = {}
+    monkeypatch.setattr(
+        jq.JobQueuePanel, "launch",
+        lambda self, argv, **kw: seen.update(
+            first=argv, rest=list(kw.get("extra_argvs") or [])) or None)
+
+    # Three folders -> three invocations, one flagged.
+    argvs = [["python", "-m", "midas_gui.batch_cli", "--out-dir", f"/o/{d}"]
+             for d in "abc"]
+    argvs[0] = argvs[0] + ["--results-sidecar"]
+    jq.JobQueuePanel.launch(None, argvs[0], name="x", total_frames=1,
+                            out_dir="/o/a", extra_argvs=argvs[1:])
+
+    assert "--results-sidecar" in seen["first"]
+    assert not any("--results-sidecar" in a for a in seen["rest"]), (
+        "a step the UI cannot reach was still asked to write a sidecar")

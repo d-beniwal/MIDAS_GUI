@@ -1,24 +1,78 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-10-08 (Hydra calibration page's layout brought to parity with the single-detector Calibrate tab — Refine "Limits" grid added, card order/footer/checkable-card conventions matched; see DECISIONS)_
+_Last updated: 2026-10-12 (merged upstream/main: Hydra CALIBRATION page brought to layout parity. Local side: Hydra BATCH INTEGRATE background jobs + the same parity pass — 2θ bins, multi-azimuth, ion-CSV extras, preview sum, grid toggle to the toolbar — plus the arming-frame preview fix and the results-sidecar cleanup.)_
 
 ## Now working on
 
-Nothing in progress.
+**Hydra Batch Integrate caught up with the single-detector tab
+(2026-10-12).** Two strands finished the same day, both at the beamline
+during connolly_oct26:
+
+* **Background jobs.** The Hydra page can now run detached, with the same
+  button, the same JobQueuePanel (Reattach / Cancel / live tail) and the
+  same one-session-many-steps chaining as the single-detector tab. A scan
+  becomes one `batch_cli` invocation per panel, sequentially, then
+  `hydra_combine_cli`. Commands are recorded to the run-log tree AND to
+  `<root>/logs/<session>.commands.log` beside the data.
+* **Layout/feature parity.** The two detector-view toolbars are now
+  identical. Hydra gained 2θ-uniform output (it previously could not emit
+  2θ AT ALL), multi-azimuth, the ion-CSV extras and Preview-sum; the log
+  and job rows became permanent on the single-detector tab. See
+  DECISIONS 2026-10-12 for the bug/gap vs forced-by-four-panels sort.
+
+Also fixed: Batch Integrate's Detector view was drawing the Pixirad's
+all-zero arming frame, which autoscaled into something that looked like
+corrupt data; and background jobs no longer scatter `_bg_job_results.npz`
+sidecars the UI cannot open (826 MB on one 196-folder sweep).
+
+Needing you, in the order it matters:
+- **Delete two sets of stale files on the share.** This host cannot — NFS
+  maps it to a different principal (`touch` fails even in a `drwxrwsrwx`
+  dir), so run these from wherever the GUI writes from:
+  `find /home/s1c/connolly_oct26_bc -name '_bg_job_results.npz' -type f -delete`
+  (196 files, 826 MB) and the bigger one, 55,157 stale per-frame archives
+  from the Oct 10 run sitting beside today's correct per-file output in the
+  same `zarr/` folders:
+  `find /home/s1c/connolly_oct26_bc -path '*/pixirad/*' -name '*.pixi.frame_*.zarr.zip' -delete`.
+  Anything globbing `*/pixirad/zarr/*.zarr.zip` currently mixes the two.
+- **The ge1234 combined view.** Asked for and NOT built: Waterfall /
+  Stacked profiles / Eta-R cakes tabs on the Hydra page showing the MERGED
+  archive (the per-panel view stays). Needs a reader for the merged zarr
+  and a frame cap — an 834-frame merged cake is >1 GB.
+- **A PR upstream.** See below.
+- **Eyes on a real Batch Correction run.** Verified only against synthetic
+  two-file stacks plus a name-level replay of the real share. What needs a
+  live run: that the Log names a sensible dark for each file of a multi-file
+  VAREX scan, that the reduced frames look right loaded back into the Data
+  Viewer, and that the output HDF5 opens downstream.
+- **Push, then open the next PR upstream.** Upstream's staged-checkpoint
+  method worked well on 48 commits; this one is small enough not to need it.
+- **Eyes on a real zarr-grouping run.** The `Fe9Cr_KGT6038_after_failure_ff`
+  folder with Dark set to both bracketing dark files, grouping *per source
+  file*, should give 3 archives rather than 435. Verified only against
+  synthetic two-file stacks, and the combo has never been seen rendered.
+- **Eyes on the cake HDF5.** Still never opened in a viewer here — the one
+  remaining eyes-on item now that the zarr's `/Omegas` are confirmed.
+- **`PoleFigureWorker`** is still single-frame and takes χ/φ from its cfg.
+  Making it ω-aware across a series is the piece the whole omega arc exists to
+  enable, and it now has a correct, verified angle to stand on.
+- **Metadata provenance**, which you said you'd keep testing against.
 
 Open follow-ups, none blocking:
-- **From junspark's own STATE.md (2026-09-29), carried forward**: `PoleFigureWorker`
-  is still single-frame and takes χ/φ from its cfg — making it ω-aware across a
-  series is the piece the whole omega arc (landed in this merge) exists to
-  enable, and it now has a correct, verified angle to stand on. The cake HDF5 has
-  still never been opened in a real viewer (needs an X11/VNC session). Metadata
-  provenance was flagged as something to keep testing against.
-- The Frozen-point (high-tilt) pipeline still doesn't forward the Refine card's
-  ± tolerance window to the backend (`calib.py`'s `_seed_and_v1` call in that
-  branch is missing `tols=tols`, unlike the identical bayesian/joint call
-  above it) — disclosed with a console warning for now; the real one-line fix
-  is still open. See DECISIONS 2026-09-30.
+- Frozen-point (high-tilt) does not forward the Refine card's ± tolerance
+  window: `calib.py`'s `_seed_and_v1` call in that branch is missing
+  `tols=tols`, unlike the identical bayesian/joint call above it. Upstream
+  found this reading our checkpoint 1 and disclosed it with a console warning
+  (`f279030`, now merged here) rather than fixing it. **Checked 2026-10-01 and
+  deliberately left as a warning**: the v1→spec mapping is pipeline-independent
+  (the installed 0.17.0's `compat/from_v1.py` reads `v1.tolLsd`/`tolBC`/
+  `tolTilts` with no branching), so the one-liner is almost certainly right —
+  but whether `iterate_frozen_point_until_stable` honours those bounds cannot
+  be tested here, because 0.17.0 ships **no frozen-point pipeline at all**.
+  That is the same gap `tests/test_frozen_point_vendor.py` already skips on.
+  Fix it when a backend that has the pipeline is installed, not before.
+  See DECISIONS 2026-09-30.
 - `documentation/calibration_unification_plan.md` — the three Calibrate UI
   surfaces (`tab_calibrate.py`, `hydra_calib_page.py`,
   `hydra_geometry_card.py`) have drifted; Hydra has none of the d-spacing
@@ -27,12 +81,30 @@ Open follow-ups, none blocking:
   by the actual seed geometry, which is the more honest axis.
 - Test suite needs two runs to cover: `--forked` races with `--basetemp`,
   unforked segfaults on multiple `CalibrationTab`s. See DECISIONS 2026-09-09.
-- `test_apply_project_calibration_single_detector` still hits the known
-  pyqtgraph teardown SIGABRT (reproduces on clean HEAD; not ours).
+- **Counting the suite:** a `--forked` run prints no `N passed` summary line
+  at all — `test_apply_project_calibration_single_detector`'s SIGABRT emits a
+  `Fatal Python error: Aborted` dump that swallows it, and counting the `.`
+  progress characters undercounts for the same reason (the dump breaks the
+  line format). Get the total from
+  `pytest tests/ --collect-only -q | awk -F': ' '/^tests\/.*: [0-9]+$/{n+=$2} END{print n}'`
+  and subtract the failures/skips the short summary does print. Suite counts
+  recorded before 2026-10-03 came from the progress-character method and are
+  therefore too low.
+- `test_apply_project_calibration_single_detector` hits the known pyqtgraph
+  teardown SIGABRT (reproduces on clean HEAD; not ours). **It is intermittent,
+  not constant** — the full 2026-10-03 run passed it. Treat a single green run
+  as weak evidence either way.
 
 - Still untested (ROADMAP.md): `job_queue.py`, `peak_fit_panel.py`.
-  `batch_cli.py` now has `tests/test_batch_cli_omega.py`, which covers the
-  omega flags and the tab→argv→cfg round trip but nothing else in the file.
+  `batch_cli.py` now has `tests/test_batch_cli_omega.py` and
+  `tests/test_batch_cli_zarr_grouping.py`, which cover the omega flags, the
+  zarr-grouping flag and the tab→argv→cfg round trip for both — but nothing
+  else in the file.
+- `test_pva_live_source_roundtrip`'s symptom has changed: as of 2026-09-30 it
+  fails on an image-content mismatch rather than only the `libstdc++` CXXABI
+  import error recorded below (the import error still appears at HEAD). Same
+  test, same pre-existing status — it fails identically on clean HEAD — but
+  the recorded cause is no longer the whole story.
 - Branch cleanup done 2026-09-10: `pr-7-strain-cake`, `test-fork-imports` and
   the four fetched `refs/remotes/origin/pr/*` refs are gone; only `main` and
   `origin/main` remain. Re-fetch any PR head with
@@ -290,6 +362,249 @@ call, including from editing those very fields). Full rationale in DECISIONS
 `pyflakes` unchanged (same pre-existing warnings only); offscreen screenshots
 of both new threshold cards confirmed the 3-spinbox layout.
 
+
+**2026-10-06 — Bin type: Radial / Q / 2θ, everywhere.** Two asks closed
+together, because they turned out to be one thing. "Q-uniform bins aren't
+wired into background jobs yet" was a guard in ``_run_as_job``; "we also want
+even 2theta case" was a missing unit. Both resolve to the same observation:
+**Q-uniform was never a backend binning mode here.** ``IntegrationSpec`` does
+carry ``QMin``/``QMax``/``QBinSize``, but ``workers.apply_q_uniform`` has
+never been called — every Q run integrates R-uniform and resamples the
+finished 1-D profile. There is no 2θ equivalent in the backend at all, so
+2θ could only be a rebin too, which makes the two units the same operation
+with different grid math.
+
+So: one generalised pair (``rebin_grid_and_r`` / ``rebin_R_to_grid``) in
+place of the Q-only pair, a self-describing config
+(``{"unit", "min", "max", "step"}``, legacy ``QMin``/... still read as Q), a
+three-way **Bin type** dropdown in Batch Integrate, and four ``--rebin-*``
+flags on ``batch_cli`` so a background job and a Start Integration run of
+the same settings produce the same profile. The four worker call sites kept
+their shape. Hydra and Pump-probe keep their Q-only checkbox; the helpers
+are unit-generic, so adding 2θ there later is a combo swap.
+
+Caught along the way: **``hydra_batch_page`` carried the same axis bug as
+``tab_batch``** — ``_axctx = (..., "Q" if q_cfg else "R")``, the thing that
+produced 2θ = 180° plots. 4cb7aaa fixed one of the two occurrences; the
+source guard now scans both files. Still refused, with either unit:
+multi-azimuth (the rebin handles 1-D only) and GSAS-II export of a rebinned
+attempt — both messages now name the selected unit.
+
+One deliberate numerical change: the old ``rebin_R_to_Q`` did
+``radians(degrees(arctan(...)))``, a round-trip that cancels in algebra but
+not in floating point. Q results move by ~1 ulp and are slightly more
+accurate. See DECISIONS 2026-10-06 (latest).
+
+**2026-10-05 — Batch Correction.** Asked for at the beamline: average /
+median / sum / max over a designated number of frames per file, with
+appropriate background subtraction, written out as HDF5. New optional tab
+(ships hidden), `midas_gui/frame_correct.py`, and
+`workers.BatchCorrectionWorker`.
+
+Most of it is reuse: `helpers._COMBINE_OPS` already had all four ops
+including median, `helpers._stack_chunk_bounds` already owned the per-file
+chunk arithmetic, `DataLoaderPanel(unify_combine=True)` already surfaces the
+"Combine sub-frames: N / op:" row, and `h5_metadata.align` already averages
+per-frame metadata over each chunk. Genuinely new: the correction ORDER, the
+dark ladder, and an HDF5 writer (`h5_metadata.write_into_hdf5`).
+
+- **Correct per sub-frame, combine, clip once.** Only `sum` makes it
+  visible — correcting the combined frame subtracts one dark from an
+  N-times-larger signal. mean/max/median agree either way (monotone
+  per-pixel maps commute with max/median), so one path serves all four. The
+  clip is deferred because it is not linear and would bias a sum upward.
+- **The dark is resolved per FILE, as the nearest preceding `dark_before`.**
+  The first design was folder-wide ("first data number − 1"), which
+  surveying the real share proved wrong: darks are re-measured mid-scan, so
+  a folder is a series of bracketed segments. 936/936 real data files have a
+  preceding `dark_before` (median 8 files away, max 121); a folder-wide rule
+  would have been right only for the first segment.
+- **Both corpora are replayed as tests**, skipping when the share isn't
+  mounted: 936 real files on `/home/beams/S20IDUSER/mnt/s20a` and 191 of 192
+  historical runs from `~/midas_runs/midas_screen_logs`. The 192nd is named
+  in `MANUAL_OVERRIDE_LOGS` — an operator `-P` override pointing at another
+  scan's folder, unknowable from filenames — rather than hidden behind a
+  loosened assertion.
+- Output carries `frame_ranges`, the chunk-averaged `instrument/` tree, the
+  dark that was used, and a provenance stamp. Compression is optional
+  (none/gzip/lzf + shuffle), chunked one frame per HDF5 chunk.
+- HDF5 input only; a TIFF/GE selection says why rather than silently
+  grouping consecutive files.
+
+Same day, from beamline feedback: methods are now **checkboxes, not a
+dropdown** — any combination of Mean/Median/Sum/Max in one run, each into
+its own `dark_subtracted_<op>/` leaf of Batch Integrate's output folder, and
+all computed from **one pass** over the data. A **Suggest** button fills the
+convention. Found and fixed a shared-widget trap while doing it: `end(0=all)`
+is only true for a non-unify panel, so `end = 0` in Batch Integrate / Batch
+Correction silently clamped the window to sub-frame 0 — relabelled, and the
+tab now prints "N raw → M output frame(s)".
+
+Cross-checked against the beamline's own `BatchCorrection.m`, which
+independently confirms the `N × dark` ordering. Four deliberate differences
+from it are recorded in DECISIONS (no zero-clipping there, `CorrectBadPixels`,
+`FramesToIgnore`, and the SAXS variant's per-second normalisation).
+
+Suite: **1,626 collected, 1,620 passed**, 3 failures, 3 known skips.
+`test_app_builds_offscreen` is the third failure and is **config-driven, not
+code-driven**: it asserts `count == len(ALWAYS_TABS) + len(DEFAULT_VISIBLE_TABS)`,
+but a saved `ui.visible_tabs` overlays `DEFAULT_VISIBLE_TABS` with a list that
+*includes* the four ALWAYS tabs, so the sum double-counts them. It passes with
+a clean `HOME`, and breaks for any user who has ever toggled a tab in
+Preferences. Pre-existing (CLAUDE.md already lists it); the fix is to compare
+against `shipped_defaults()` or against the tab set rather than a count.
+
+**2026-10-03 — the Mask Builder shows the detector the same way up as
+everything else.** Reported from the beamline: the displayed image should
+apply the Data Viewer's flips. It was the one image surface still painting
+the raw array, so the detector appeared mirrored relative to every other
+tab while you picked which pixels to throw away.
+
+**Display only, and that distinction is the whole design.** The mask this
+tab computes, saves and emits stays raw-frame, because
+Calibrate/Batch/Integrate pre-flip it themselves (DECISIONS 2026-08-25);
+a mask that arrived pre-flipped would be flipped twice. Pinned directly:
+`maskReady`'s payload is asserted byte-identical across all 8 code
+combinations.
+
+- **Propagation** — `DataViewerTab.imTransChanged(list)` → `app.py`'s
+  existing `_connect` broadcast, the same mechanism as `maskReady` and
+  `calibrationDone`. Plus a one-shot push after project restore, because
+  tabs restore in dict order and the Mask tab can be rebuilt before the
+  Data Viewer knows its transforms.
+- **Drawn shapes stay on the same detector pixels.** Each ROI is re-placed
+  from the old painted frame into the new one by new
+  `helpers.map_roi_state`, rather than left at the same screen position
+  (which would silently re-aim a mask you had already built). Picked points
+  move with it; a half-drawn freeform polygon is cancelled, having no
+  anchor yet.
+- **`helpers.map_point_xy`** is the continuous-coordinate sibling of
+  `im_trans_map_point`. A flip of *geometry* is `x -> W - x`, not
+  `W - 1 - x`: index `c` covers `[c, c+1]`, so using the index form on an
+  edge coordinate shifts every shape half a pixel.
+- **`_apply_shapes`** rasterises in display space then inverse-maps with
+  `_apply_im_trans(drawn, reversed(codes))` — the idiom `workers.py`
+  already uses to bring an azimuthal-clip mask back to raw.
+- **The pixel readout now composes both legs** — undo the display
+  transform to raw, then apply `result.im_trans` — instead of assuming the
+  tab's codes and the calibration's agree.
+
+**Worth recording, because it nearly went the other way.** The first
+version of the ROI test compared rasters and failed on a 45°-rotated rect
+by *exactly* 0.5 px. That was not a placement bug: a reflection reverses
+the polygon's winding and Qt's scanline fill breaks ties differently.
+Loosening the tolerance would have made it pass and would equally have
+hidden a real half-pixel shift — the one bug worth catching here. Replaced
+with an exact geometric assertion (the mapped ROI's corners must equal the
+point-mapped corners, 1e-6, immune to rasterisation) plus a structural
+interior check. `map_roi_state`'s handedness rule — anchor at the mapped
+`(0, h)` corner for an odd number of reflections — is what that test
+actually proves.
+
+**Verified:** 1,501 collected, **2 failed, 3 skipped** (1,496 passed) — the
+known set exactly. 257 new tests in `tests/test_mask_display_transform.py`.
+An offscreen whole-app check confirms toggling Flip Y / Transpose on the
+Data Viewer moves the Mask tab's codes and display shape live.
+**Not verified with eyes on it:** nothing here has been seen rendered —
+whether the red overlay still lands on the module gaps after a flip, and
+whether a pre-drawn ROI visibly stays on its pixels, both want a look.
+
+**2026-10-03 — the pixel readout says where you are in reciprocal space.**
+Asked for at the beamline as "re-add the q/2θ readout". Checked first: it
+was never there. `ImageViewer._coord_text` has carried x/y/intensity and
+nothing else since `9640a3b`; the R/2θ/d/Q display that does exist is the
+**cake** viewer's (`widgets.py`) and the profile viewer's x-unit selector.
+So this is new, built to the same end.
+
+- **2θ, Q, d and η** now follow x/y/intensity in the bar under every image
+  viewer that has geometry — Calibrate, Data Viewer, Batch's Detector view
+  and Mask Builder.
+- **2θ is tilt-aware**, via the existing `helpers._pixel_to_two_theta_deg`
+  (exact closed-form inverse of `_tilt_project_YZ`) — no new maths. Pinned
+  by a round-trip test: forward-project a ring at a known 2θ through
+  `tilted_ring_xy` at four tilt settings, read every pixel back, assert it
+  returns that 2θ. So the bar and the ring overlay cannot disagree.
+- **η matches the backend's `pixel_to_REta`** — `atan2(-Yc, Zc)`, η = 0
+  straight up (+Z). New `helpers.pixel_eta_deg`, with the four cardinal
+  directions pinned, because the sin/cos-swap failure mode puts every value
+  90° out and still looks plausible.
+- **`ImageViewer.set_radial_readout_fn(fn)`** keeps `widgets.py`
+  geometry-free, exactly as `DataLoaderPanel.set_omega_hint_fn` does for ω:
+  the tab hands in a callable. Unset, the bar is byte-identical to before —
+  asserted, since four existing readout tests depend on it. A raising `fn`
+  degrades to the plain readout rather than taking the status bar down.
+- **Calibrate works before a fit**, off the live seed boxes, tagged
+  `(seed)` so the number never quietly changes meaning when a result lands.
+  That is the case the feature exists for: knowing 2θ *while* picking
+  d-spacing points. Seed edits, Pick BC, "Send →" and the result all
+  refresh it — the cursor does not move when any of them fire, and
+  `sigMouseMoved` only emits on real motion (the same staleness that bit
+  the Limits note in `86c1b27`).
+- **Mask Builder needed a frame hop.** It displays the raw detector image
+  on purpose while the calibration's beam centre lives in the transformed
+  frame, so a hovered pixel is carried across by new
+  `helpers.im_trans_map_point` (the point-wise counterpart to
+  `_apply_im_trans`, which only ever handled arrays) before any geometry
+  touches it. Proven against `_apply_im_trans` for all 13 code
+  permutations on a *non-square* array, which is what catches a transpose
+  that fails to swap the bounds. If the loaded image does not match the
+  detector the calibration was fit on, the reciprocal-space fields are
+  dropped rather than guessed — same guard as the mask overlay in
+  `bc1c370`.
+- Batch caches its geometry and drops the cache in
+  `_refresh_detector_preview`: its "From file" source parses a calibration
+  file, which must not happen at cursor-move rate.
+
+**Verified:** 1,244 collected, **2 failed, 3 skipped** (1,239 passed) — the
+known set exactly. 49 new tests (42 in `tests/test_pixel_readout.py`, 7
+appended to `tests/test_viewer_origin_and_readout.py`). Offscreen
+whole-app check confirms all four viewers have the callable bound and
+Calibrate renders a seeded clause.
+**Not verified with eyes on it:** the bar is now ~150 characters with all
+four quantities, and this toolbar is already noted as eliding at the app's
+default window width. Wants a look at real width; dropping 2θ to 3 decimals
+is the cheap trim if it reads badly.
+
+**2026-10-03 — upstream's ring-coverage commit merged back, plus a
+housekeeping pass.** `1c5c9af` (merge) and the cleanup commit on top of it,
+both local. Upstream's `6030371` (predicted rings bounded by true detector
+coverage rather than a fixed 30°) was the only commit of theirs we did not
+have. It touches `helpers.py`/`tab_calibrate.py`/`hydra_calib_widgets.py` —
+the same `tab_calibrate.py` the three Calibrate fixes below had just
+rewritten — but git auto-merged everything except `STATE.md`, and the
+auto-merge was checked by hand rather than trusted: the `rmax_corner_px`
+import, the `_draw_rings` bound, and this fork's mask-overlay work all
+landed intact. `max_two_theta_deg` was also spot-checked numerically (a
+centred 2048² detector at Lsd 200 mm gives 55°, off-centre 69°, short-Lsd
+71° — all far past the old hardcoded 30°, which is the bug it fixes).
+
+Housekeeping in the same pass:
+- `tab_batch.py`'s unused local `spec` in `_run_as_job` (the one pyflakes
+  warning PR #7 introduced, tracked in ROADMAP) is gone. The *call* stays —
+  it is the pre-flight that reports a bad calibration before a detached job
+  launches — with a comment saying so, since the bare call now looks
+  pointless. An AST sweep for other unused locals turned up only
+  tuple-unpack/loop targets (which pyflakes does not flag) and
+  `batch_cli.py`'s deliberate `app = QApplication(...)` GC anchor; nothing
+  else was touched.
+- ROADMAP reconciled: the pyflakes item removed, and the PR#7 coverage item
+  corrected from three uncovered modules to two — `batch_cli.py` picked up
+  `test_batch_cli_omega.py` and `test_batch_cli_zarr_grouping.py` along the
+  way and nobody had updated the entry.
+- Pruned `.scratch/`, `.pytest_cache/`, every `__pycache__/` and five stale
+  `/tmp/mg_suite_*` basetemps. All gitignored; nothing tracked was touched.
+
+**Verified:** full suite on the merged tree — 1,195 collected, **2 failed, 3
+skipped** (so 1,190 passed), the known set exactly (`test_pva_live_source_roundtrip`,
+`test_apply_project_calibration_single_detector`, and the three
+frozen-point skips). Worth recording: the *pre-merge* baseline run passed
+`test_apply_project_calibration_single_detector` and this one failed it, on
+the same tree-modulo-cleanup — that failure is **intermittent**, so a single
+green run is not evidence it is fixed.
+**Not verified with eyes on it:** nothing new on screen — the merge changes
+which rings get predicted on a wide/short-Lsd geometry, and that has not
+been seen rendered.
+
 **2026-10-01 — Calibrate: predicted rings now bounded by true detector
 coverage, not a fixed 30°.** `helpers._predict_ring_radii` generated
 candidate rings from the calibrant's wavelength/d-spacings with a hardcoded
@@ -311,6 +626,43 @@ clipped a few farther rings even after the generation-side fix. New test
 `HOME` (helpers/manual-dspacing-ui/manual-fit-conditioning/batch-queue-ui/
 hydra-calib-ui), plus `test_smoke.py`; `pyflakes` unchanged (same
 pre-existing warnings only).
+
+**2026-09-30 — one zarr per rotation, not one per frame.** `4ec0174`,
+committed 2026-10-01, not pushed. The
+`zarr` format wrote one archive per combined output frame; the folder that
+prompted this (three 1442-sub-frame VAREX files at `OME_SUM 10`) would have
+produced 435 single-cake archives. A **Zarr grouping** combo in the Output
+card now offers *per output frame* (unchanged default), *per source file* and
+*per run*.
+
+- **A group is one rotation — the same unit ω is measured from.**
+  `_HDF5StackGlobSource.zarr_group_key` is defined as
+  `omega_channel_window(idx)[0]`, exactly as `raw_window_for_index` is
+  `omega_channel_window(idx)[1:]`, so an archive cannot disagree with the
+  angles inside it. TIFF/`.ge*` returns a constant: that selection is the
+  rotation.
+- **Streams, does not buffer.** Uses the backend's `GSASZarrWriter`
+  (`add_frame`/`close`) through a new `_ZarrGroupWriter`, so peak memory is
+  one frame — buffering a 1442-frame group would have cost ~830 MB.
+- **Batch Parallel splits on group boundaries** (`_split_into_chunks_on_groups`),
+  since two workers would otherwise open the same `.zarr.zip`. Caps workers at
+  the group count; "run" grouping falls through to sequential.
+- **Both run paths carry it** — `--zarr-grouping` on the `batch_cli` argv, with
+  a round-trip test, which is the direct lesson of the 2026-09-29 ω bug below.
+- Provenance moved from per frame to per group (fewer repack passes);
+  `h5_metadata.align` already took a sequence of frame ranges and needed no
+  change. A "run" group over several files skips the `instrument/` copy and
+  logs it rather than guessing.
+- Touched: `workers.py`, `tab_batch.py`, `widgets.py` (new
+  `OutputFormatSelector.changed`), `batch_cli.py`, `project.py`,
+  `tests/test_batch_zarr_output.py`, new
+  `tests/test_batch_cli_zarr_grouping.py`, `documentation/gui_documentation.md`
+  §7, `.context/DECISIONS.md`.
+- Suite: **1178 collected** (was 1149 — 29 new), same two known failures
+  (`test_apply_project_calibration_single_detector`,
+  `test_pva_live_source_roundtrip`) and three known skips. Both failures
+  reproduce on clean HEAD. The new tests were confirmed to fail against HEAD
+  in a throwaway worktree before being called done.
 
 **2026-09-30 — PR #11 (junspark) merged into `main`: 48 commits, 8 staged
 checkpoints, 3 real bugs found and fixed along the way.** Full rationale,
@@ -788,6 +1140,100 @@ Flip-Z/Multi-panel fix — trimmed here; full detail in
 - `test_smoke.py::test_app_builds_offscreen` has a pre-existing, unrelated
   local-config flake (stale `visible_tabs` count) — hit again this session,
   confirmed unrelated to the truncation fix.
+
+## Hydra Batch Integrate — current shape (2026-10-10)
+
+- A batch is a source FOLDER. Scans are grouped by the parent of each
+  file's **ge1-normalised** path, so both real layouts collapse to one key:
+  panels together in a scan folder, and panel-above-scan
+  (`.../ge1/APS_4130_C_load_step_0/...`). See DECISIONS 2026-10-09/10.
+- The Output box is authoritative for a SINGLE scan; each panel appends its
+  own `ge{n}/`. Only a multi-scan pick fans out.
+- A pick of one file is still a four-panel scan (expanded via
+  `hydra_siblings`, narrowed to the ticked panels).
+- Caking, rotation and the bin-grid toggle all live on the caking card and
+  follow whichever one is showing (per-panel or the all-panels composite).
+- An eta range crossing ±180 is served by binning the whole circle and
+  selecting back down (`midas_gui.eta_wrap`). A bin that STRADDLES the seam
+  is declined, not half-filled.
+
+### Not verified against real data
+
+- The multi-scan queue has never completed with real frames. Grouping,
+  output fan-out and source descriptors are tested; four panels walked
+  through several folders to completion is not.
+- The tx-aware lab compass has never been seen rendered. It is pinned
+  against `pixel_eta_deg` at every Hydra roll, which is the strongest
+  headless check available.
+- The omega ramp/channel has not been driven by a real rotation scan —
+  confirm `/Omegas` ramps rather than sitting at zero.
+
+### Settled: the merged eta axis is sorted into [-180, 180)
+
+Was "the Zarr Viewer's eta axis reads past 360". Chosen 2026-10-12, after
+checking the inputs rather than the plotting code: **wrap and sort in the
+combine**, not in the viewer.
+
+Diagnosed on `4130_D_load_step_8_time_step_0`, reported as "ge1 is the
+issue, its eta range is inconsistent with the caking input". It was not.
+Every panel matched its CSV exactly:
+
+| panel | `cake_parameters.1ide.geN.csv` | stored centres |
+|---|---|---|
+| ge1 | `120…210` step 10 | 125…205 (9) |
+| ge2 | `-150…-60` | -145…-65 (9) |
+| ge3 | `-60…30` | -55…25 (9) |
+| ge4 | `40…120` | 45…115 (8) |
+
+ge1 is written past the cut because **its CSV asks for 210**, and that is
+the standing 1-ID-E convention, not a slip: `raghavan_jul25` ge1 is
+130…205, `brugger_apr26` 125…200, `stock_jul25` 130…205. `eta_wrap` then
+labels the columns with the caller's own requested centres, which is where
+185/195/205 come from. The sawtooth was a *storage-order* artefact of
+concatenating in panel order, not a labelling error in any panel.
+
+`hydra_zarr_combine.plan_eta_order` now wraps the merged axis into
+`[-180, 180)` and sorts it — a permutation plus a relabel of REtaMap's eta
+plane, applied to every caked array at once. Verified on the real archive:
+`-175…175` strictly ascending, `SumFrames` bit-identical to the old array
+under that permutation, total counts unchanged. `_unwrap_eta` then returns
+it untouched, so the viewer stops saying "(unwrapped)" and stops plotting
+to 475. It is still needed for archives written before this.
+
+It declines — leaving the merge exactly as it was — when the axis is
+already ascending, when REtaMap has no eta plane, and when two columns
+share an azimuth (overlapping panels have no one right order).
+
+Also confirmed here, and previously only reasoned about: **`eta_wrap`'s
+full-circle-then-select really does work on real data.** All nine ge1
+columns carry signal, 185 included, at 100% non-zero bins.
+
+### The 10 deg hole at eta~35 in connolly_oct26 is deliberate
+
+ge4 is caked 40…120 where the other three span 90 deg, so the four cover
+350 of 360 and the merged archive has 35 columns, not 36. **That wedge is
+physically shadowed** (confirmed 2026-10-12) — the CSV is correct and the
+tiling note is behaving as designed by reporting rather than refusing.
+Do not "fix" ge4 to 30…120. Sorting makes the gap visible as a 20 deg step
+in the axis, where before it was hidden inside the sawtooth.
+
+Note that older experiments used 75 deg panels with deliberate 15 deg
+gaps at every junction (`raghavan_jul25`, `stock_jul25`), so a
+non-tiling Hydra set is the norm at this station, not an anomaly.
+
+### Known wrong, not yet fixed
+
+- The rotation card's **"one ω per frame (averaged)"** checkbox is
+  mislabelled. It means one ω for the WHOLE RUN, and it is checked before
+  the channel in `_omega_resolver`, so ticking it silently discards a
+  chosen omega channel. `tab_batch` labels the same control "one ω for all
+  frames", which is the accurate wording.
+- The caking card does not show the current chunk size, so "how are the
+  frames chunked" cannot be answered from the card the rotation lives on
+  (it is the loader's `combine sub-frames` spin).
+- `tab_batch`, `tab_view` and `tab_calibrate` still pass `tx=0` to
+  `build_lab_frame_axes_items`. A single rolled detector has the same
+  compass bug Hydra had; the mechanism is in place, the wiring is not.
 
 ## Standing rules (from memory)
 

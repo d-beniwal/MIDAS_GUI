@@ -3,6 +3,95 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-12 — Hydra/single-detector Batch Integrate brought to parity, and the preview was showing an arming frame
+
+**Scope.** Asked for as "make the single detector and hydra detector views
+more uniform / unified", after the Hydra page got a background-job button.
+Scoped the way upstream scoped the calibration-page equivalent (923c5f4,
+merged the same day): diff the two pages section by section, then sort each
+difference into BUG/GAP (fix) or FORCED BY HYDRA HAVING FOUR PANELS (leave),
+and put the genuinely ambiguous ones back to the user rather than guess.
+
+What that diff found, beyond what had been named:
+
+| difference | verdict |
+|---|---|
+| log in a tab vs a permanent bottom panel | bug — fixed (e5aecbe) |
+| **Bin type was a Q-only checkbox** | **gap — Hydra could not emit 2θ at all** |
+| Multi-azimuth output (cake) absent | gap — added |
+| Ring current / T / P + Sample motors absent | gap — added |
+| Preview: sum first N absent | gap — added |
+| `Show bin grid` in a caking card vs the toolbar | judgment call — user chose toolbar |
+| Drift correction absent | declined, as upstream declined ring-picking |
+| nested Per-panel results vs flat tabs | forced by four panels |
+| per-panel calibration cards | forced by four panels |
+
+"Bayesian σ estimate" looked like a ninth item and is not: it belongs to
+the Drift correction card, so it leaves with drift.
+
+**The bin-grid toggle reversed an earlier explicit request.** It had been
+moved INTO the caking card on a direct beamline ask ("this button can go to
+caking card"), and the later unification ask reverses that. Recorded because
+the test that pinned the old behaviour is now rewritten, and the reason the
+second decision beat the first should outlive both: there is exactly ONE
+toggle, shared by four panels and persisted by identity, so living in a
+per-panel card made a global control look per-panel — and the reparenting
+existed only to maintain that illusion, at the cost of the widget physically
+migrating across the page on every panel switch. It controls what the view
+DRAWS, like `Lab-frame axes`, which was already in the toolbar on both pages.
+
+**Two things that would have gone wrong quietly, both caught by tests:**
+
+* A project saved before Bin type existed carries `q_check` and no
+  `bin_type`. Dropped, a Q-uniform run reopens as **Radial** — same numbers
+  on screen, different output. `set_state` translates it. And the migration
+  has to write the combo's DISPLAY TEXT ("Radial"), not its `"R"` userData,
+  because `apply_dict_to_widgets` matches combos with `findText` — and it
+  blocks signals, so `_on_bin_type_changed` must then be called by hand or a
+  restored 2θ project shows its Q boxes live and its 2θ boxes dead.
+* `test_hydra_omega` asserted the rotation row and the grid toggle travel
+  together. Moving one broke it, and I missed it: I grepped tests for
+  `_place_grid_toggle` but not for `_grid_chk`. Found by the full suite.
+  The lesson is to grep for the WIDGET, not only the helper that moved it.
+
+**The Detector view was drawing the detector's arming frame.** Reported as
+"I am not sure what the image is being generated... this looks fine on the
+data viewer tab": a black 1024x402 picture with the scale topping out at
+3e-06. Not corrupt — a picture of nothing:
+
+    get(0) -> ..._005134.pixi.frame_0_0  max=0     nonzero=0
+    get(1) -> ..._005134.pixi.frame_1_1  max=52    nonzero=75740
+
+A Pixirad arms one frame before counting, so frame 0 of every .pixi.h5 is
+identically zero, and `StreamPreviewWorker` read index 0 unconditionally;
+pyqtgraph autoscaled a constant array to a degenerate range, which reads as
+corruption rather than as blankness. `widgets._first_raw_frame_is_blank`
+already knew the detector does this, but ONLY the single-HDF5 sub-frame
+range consulted it — a multi-file stream never did, and neither did the
+preview on any path. Now stepped over, bounded by `_PREVIEW_BLANK_SCAN=8`.
+
+DISPLAY ONLY, deliberately. Which frames a RUN integrates stays opt-in (see
+2026-10-08): an all-zero frame is not reliably an arming frame, and silently
+dropping a real observation of zero from the data would be a worse bug than
+a dull preview. A blank frame in the MIDDLE is still summed; a test pins it.
+
+**The results sidecar was written where nobody could read it.** `batch_cli`
+wrote `_bg_job_results.npz` into every `--out-dir`, but `JobQueuePanel`
+records ONE out_dir per job (the first step's), so every later step of a
+chained job wrote a file the UI could not open. A real 196-folder pixirad
+sweep left 196 of them, 826 MB, of which 1 was reachable. Now opt-in
+(`--results-sidecar`), passed by the GUI for the first step only; a direct
+CLI invocation writes none, which is right — there is no GUI there to load
+them.
+
+**Verified:** full suite green apart from the five known pre-existing
+failures. `test_every_method_survives_the_split`, which failed once this
+morning and is NOT on that list, does not reproduce against the finished
+tree — it was environmental. Note that `test_batch_stream_preview.py` fails
+*entirely* in a partial run and passes in a full one, so the four new
+blank-frame tests there can only be judged by a full run.
+
+
 ## 2026-10-08 (latest) — Hydra calibration page's layout matched to the single-detector Calibrate tab, scope negotiated up front
 
 **Problem.** `HydraCalibrationPage` was built as a parallel implementation of
@@ -85,6 +174,42 @@ docstring), `test_hydra_ui.py`, `test_hydra_batch_ui.py`,
 single-detector pages side-by-side (same window, same size) confirm matching
 card order top-to-bottom and that Working dir/Run/Save render enabled on
 first open.
+
+
+## 2026-10-08 — A profile that maps to no hutch writes no CSV at all
+
+``ion_csv._PROFILE_HUTCH`` listed only 20-ID-E and 20-ID-D. On any other
+profile ``resolve_hutch`` returned None, ``scaler_channels`` returned [],
+no rows were built, and **no beam-monitor CSV was written** — while the run
+reported success. Nobody on 1-ID-E had ever got one.
+
+The omission was deliberate and asserted: ``("1-ID-E", None), # a different
+beamline that merely ends in E``. That was a guess about a station nobody
+had opened a file from, and it was wrong — 2026-10 1-ID files carry
+``instrument/Scalers/{B,C,E}`` with IC1-IC8/S1/S2/T under E. Reversed on
+that evidence, and the evidence is now in the test instead of the bare
+assertion.
+
+**One letter per profile is the whole mapping**, because
+``scaler_channels`` reads the channel list from the FILE: 1-ID-E records
+IC1-IC8 where 20-ID-E records US_IC/DS_IC, and neither needs an entry of
+its own. 17-BM stays unmapped deliberately — its group has not been seen,
+and a CSV of the wrong channels is worse than no CSV.
+
+**This is also what the three "pre-existing" ``test_batch_correction_parallel``
+failures were**, recorded in CLAUDE.md the day before as unexplained. They
+assert on the merged CSV and inherited the machine's active profile, so they
+went red when the GUI was switched to 1-ID-E and looked like flakiness. They
+now pin the profile. The general lesson is worth more than the fix: a test
+that reads global GUI state fails for reasons unrelated to the code it
+covers, and will be blamed on whatever changed most recently.
+
+**Observed while verifying, not a GUI matter.** On a real 1-ID file the
+scaler arrays are length-64 against 64 image frames (so the per-frame
+alignment is right) but every entry is identical — IC1 reads exactly 4866
+on all 64. That looks latched rather than sampled per frame. The CSV
+reports it faithfully; whether the DAQ should be updating it is a beamline
+question, and matters before anyone normalises against these.
 
 ## 2026-10-08 (later) — Hydra calibration gets a page-level "Save All", one file per panel
 
@@ -225,6 +350,169 @@ against unmodified HEAD); the pre-existing `test_apply_project_calibration_singl
 pyqtgraph-teardown SIGABRT reproduced identically on unmodified HEAD (not a
 regression); headless screenshots confirm the new banner renders correctly
 in both states.
+
+## 2026-10-07 — The CSV says which dark was subtracted
+
+Closes the follow-up left open when the beam-monitor dark became a row
+(2026-10-06, below): the CSV's ``kind="dark"`` row is the dark block
+*inside the file it describes*, while the dark actually subtracted from the
+images is whatever ``frame_correct.resolve_dark``'s ladder picked — usually
+the nearest ``_dark_before`` sibling, i.e. a different acquisition.
+
+Both are real and they are **different measurements**, so the fix is not to
+choose one. The monitor readings genuinely are this file's own
+shutter-closed block; the images genuinely were corrected with something
+else. Writing only the first and calling it "the dark" invited a reader to
+compare a chunk against a baseline that was never subtracted.
+
+``rows_from_tree`` now takes ``subtracted_dark`` — the resolver's own
+``why`` string, already computed a few lines earlier in
+``BatchCorrectionWorker`` and already logged — and writes it as a
+``subtracted_dark`` column **on the dark row only**. On the dark row,
+because it is a statement about what the baseline is; repeating it per
+chunk would be the width-doubling the ``<channel>_dark`` companion columns
+were removed for. And, like ``kind``, the column appears only when some row
+carries one, so the Batch Integrate path (``rows_from_metas``, which has no
+dark row and no resolver) does not grow a column of blanks that would read
+as a missing value rather than an absent concept.
+
+No change to how the dark is chosen or applied — only to whether the CSV
+admits which one it was.
+
+## 2026-10-07 — One parameter table on the single-detector Calibrate tab
+
+"I don't understand what the manual seed window actually adds. All that
+functionality can be done through the refine parameters panel."
+
+Nearly right. The "Manual seed…" popup held the *initial values*, which did
+exist nowhere else — but the refine flags and ± windows beside them were
+duplicated from a card two cards below. Decisions about the same eight
+parameters, split across two surfaces that could not be seen at once.
+
+The popup was pure packaging: ``ManualSeedDialog`` **reparents** the caller's
+own widgets rather than owning copies, so removing it was a layout move, not
+a behaviour change. ``_state_widgets()`` keys stayed valid untouched because
+``widgets_to_dict``/``apply_dict_to_widgets`` dispatch on ``isinstance`` and
+never look at ``parentWidget()``.
+
+**The two tick columns did not collapse into one.** All four pairings of
+(seeded, refined) mean something different, and ``(seeded, not refined)`` —
+"held at this value" — is how a panel is pinned to a measured azimuth. That
+is the whole tx workflow. Merging to a single tick would have deleted it.
+
+Layout: ``name | seed tick | refine tick | start value | ± window | units``,
+with a muted full-width sub-row per parameter carrying the outcome text. The
+left column is a 260px-minimum ``QScrollArea``, so width is the scarce
+resource and height is cheap; the sub-row keeps the long outcome strings
+("refined, from this value") out of the control row. Several widths were
+measured and rejected along the way — a 7-column layout came to 643px, and
+putting the outcome on the window line 452px.
+
+``ty``/``tz`` share one crystalline tilt window. Said in the row's caption
+("ty + tz ±") rather than by spanning the cell: a parameter owns *three*
+grid lines here, so a span reaches across ``tz``'s own value box and draws
+over it.
+
+**Scope: the single-detector tab only.** The intended workflow is to
+calibrate each GE panel individually here, then port the results into the
+Hydra tab, which becomes a composite viewer and caking planner rather than a
+calibration surface. So ``ManualSeedDialog`` stays in ``dialogs.py`` for the
+Hydra panel card, and no shared/parameterised row widget was built — that
+would be speculative work for a surface slated to stop calibrating. Extract
+one later if a second caller actually appears. This supersedes the part of
+``documentation/calibration_unification_plan.md`` that assumes both surfaces
+remain calibration UIs and should converge.
+
+**tx is an input to the display now, not just to the fit.** It is a panel
+installation azimuth about the beam (0-360°), not a small tilt, and is never
+refined by a powder pipeline — a powder pattern is invariant under rotation
+about the beam, and upstream declined ``refine_tx`` because of the gauge
+orbit ``(tx, phi_k) -> (tx+d, phi_k+k*d)``. Two consequences that cost real
+time to pin down:
+
+- *Rings cannot see tx.* They are circles about the beam centre; measured
+  0.000 px displacement at matched azimuth. An early claim that "tx has no
+  effect on the display" was wrong all the same — it is correct for ring
+  radii and false for eta, where the backend includes tx and the GUI did
+  not, leaving the readout off by exactly tx.
+- *Feeding a result back must not erase tx.* ``_seed_from_result`` now
+  writes tx only when ``result_refined_tx(result)`` says the fit actually
+  floated it (a 1-sigma is reported for free parameters only), rather than
+  never writing it — which would have broken the manual d-spacing path,
+  the one pipeline that does refine tx.
+
+## 2026-10-07 — Calibration ± windows bound an iteration, not the answer
+
+Reported from the beamline: "Lsd was set to 2390mm with +/-2 mm but the value
+converged to 2382 mm." The limits were being applied. They do not mean what
+the card said they mean.
+
+``midas_calibrate_v2/pipelines/single.py`` re-centres every refined
+parameter's bounds on each E-M iterate before the next LM call ("Bounds move
+with the value"), so ``tol*`` is a per-iteration trust region and a railing
+fit walks one full window per iteration. Total excursion is ``n_iter x tol``.
+Confirmed to the micron against two runs: ±2 mm x 4 iterations landed
+2382051.00 µm from a 2390051.00 seed, and ±1 mm x 4 landed 2386351.79 from
+2390351.79. Every iteration stepped by exactly ``-tol``.
+
+**Three separate problems came out of this, fixed separately.**
+
+**1. The wording was the actual defect.** The note read "Always applied,
+centred on the seed" and the header "the MIDAS backend always bounds the fit
+to a ± window around the seed". Both describe a bound on the answer. A
+reader who believes them concludes the limits are broken and stops trusting
+the card — which is what happened. The note now says "re-centred every E-M
+iteration" and quotes the real envelope.
+
+**2. The at-limit warning could never fire.** ``_crystalline_at_limit``
+already existed to catch exactly this, and had never fired in practice:
+``_on_done`` applies "Feed result back to seed" *before* calling it, and it
+read the seed spin boxes live. Feedback had just overwritten them with this
+very result, so it compared the result against itself — difference 0. The
+default is for feedback to be on, so the check was dead for the common case.
+Runs now snapshot centre/tolerances/seeded-state in ``_last_limit_ctx``
+before anything can disturb them. The widget fallback is kept so the method
+still works before any run.
+
+*Generalisation worth remembering:* any post-run check that reads an input
+widget is suspect while result-feedback exists. The widgets are outputs by
+then.
+
+**3. A hard cap, because the physics needs one.** The four Hydra GE panels
+sit on one frame at a fixed sample distance, so a per-panel Lsd cannot
+deviate more than ~5 mm. Honest labelling does not help there; the constraint
+has to bind. Opt-in tick on the limits card divides each ``tol*`` by
+``n_iter`` before building the config, so ``n`` re-centred iterations cannot
+carry the answer past the number typed. Exact, not approximate — each
+iteration moves at most one window.
+
+Chosen over the alternatives:
+
+- *Set ``n_iter = 1``.* Makes window == bound exactly, but throws away the
+  peak re-extraction loop that makes the calibration good.
+- *Clamp after the fact and refit.* Re-implements the backend's loop in the
+  GUI, and the second fit starts from a geometry the first one rejected.
+- *Ask upstream for ``Parameter.hard_bounds``.* The right fix, and logged as
+  ``QUESTIONS_FOR_COLLEAGUES.md`` item 8 — but it needs a backend release and
+  the beamline needs this now.
+
+Off by default, because it shrinks *every* per-iteration trust region by
+``n``, which slows a parameter that legitimately needs to travel (a bad BC
+seed). Applied uniformly to all rows rather than Lsd alone: a per-row cap
+column would be a third tick per parameter on a card already fighting for
+width, and the rows that matter are capped together in practice.
+
+Under a cap the at-limit threshold moves from one window to the cap itself.
+Railing a round or two is *how* a capped fit crosses its allowed span, so the
+uncapped "railed at least once" test would cry wolf on every healthy run.
+
+**Also found en route:** ``_seed_namespace`` passed ``_d_list=None``, so the
+seed-ring preview computed zero rings for every d-spacing calibrant — it
+drew nothing, which is precisely the "my geometry was dropped" reading the
+preview exists to prevent. The test that should have caught it passed because
+its "no image loaded" premise was false (the constructor loads the bundled
+demo frame); the empty overlay came from the missing d-list, not the missing
+image. Two bugs cancelling.
 
 ## 2026-10-07 (latest) — Calibration moved from an in-process QThread to a subprocess (calib_cli.py), both single-detector and Hydra
 
@@ -597,6 +885,309 @@ docstring — so new coverage goes into the existing ones, not new functions).
 warnings only, confirmed via `git stash`); offscreen screenshots of both new
 threshold cards confirmed the 3-spinbox layout renders correctly.
 
+## 2026-10-06 (latest) — One output rebin, two units; Q and 2θ are not backend modes
+
+
+Two asks: "Q-uniform bins aren't wired into background jobs yet" (a guard in
+``_run_as_job``) and "I think we also want even 2theta case."
+
+**Q-uniform was never a backend binning mode in this GUI.**
+``IntegrationSpec`` genuinely carries ``QMin``/``QMax``/``QBinSize`` and a
+``q_mode_active`` property that redefines ``n_r_bins``, and
+``workers.apply_q_uniform`` is the hook for it — but nothing has ever called
+it. Every Q run integrates R-uniform and resamples the finished 1-D profile.
+The backend has no 2θ equivalent at all, so 2θ could only ever be a rebin
+too. That makes the two units *the same operation with different grid math*,
+which is why this is one generalised pair (``rebin_grid_and_r`` /
+``rebin_R_to_grid``) rather than a second parallel path beside the Q one.
+The four worker call sites kept their shape; only the grid construction and
+the forward/inverse unit conversion differ.
+
+``apply_q_uniform`` is kept, not deleted — the native mode is real and may
+be worth revisiting — but it now raises on a non-Q config and carries a
+warning. The two routes **disagree about what the axis travelling with a
+profile is**: the rebin route carries R in pixels, the native route would
+carry Q, and every downstream consumer (writers, waterfall, stack view, the
+GSAS-II guard) assumes pixels. Confusing those is exactly what produced the
+2θ = 180° plots fixed in 4cb7aaa. Anyone wiring up the native mode has to
+fix all of them at once.
+
+**The config dict gained a unit; the transport keyword did not get renamed.**
+Canonical form is ``{"unit": "Q"|"2th", "min", "max", "step"}``, with the
+legacy Q-only spelling (``QMin``/``QMax``/``QBinSize``, no ``unit``) still
+read as Q so saved projects keep loading. ``rebin_cfg_parts`` is the only
+place that knows either shape. The *keyword* is still ``q_cfg=`` in the
+worker signatures and ``inputs["q_cfg"]`` in saved projects: renaming it
+reaches a ``queue_runner`` dataclass field, ~15 keyword call sites across 8
+modules and the on-disk project schema, all for naming alone, with a missed
+site surfacing as a ``TypeError`` in a path as rarely exercised as
+Pump-probe. The dict is what gets logged and inspected, and it now says
+``'unit': '2th'`` plainly.
+
+**``hydra_batch_page`` carried the same axis bug as ``tab_batch``** and was
+fixed with it — same ``BatchRunCoordinator``, same rebin, same R-px axis.
+4cb7aaa only caught one of the two. The source guard in
+``tests/test_batch_cake_stack.py`` now scans both files, because the thing
+that let this sit was that the expression was greppable but nobody grepped
+past the first hit.
+
+**Scope.** Batch Integrate gets the three-way Bin type dropdown; Hydra and
+Pump-probe keep their Q-only checkbox. The shared helpers are unit-generic,
+so adding 2θ there later is a combo swap, not plumbing. Multi-azimuth is
+still refused with either unit (the rebin handles a 1-D profile only), and
+GSAS-II export still refuses a rebinned attempt — both messages now name
+whichever unit is selected.
+
+One deliberate numerical change: the old ``rebin_R_to_Q`` computed
+``radians(degrees(arctan(...)))``, a round-trip that cancels mathematically
+but not in floating point. The generalised form stays in radians. Q results
+move by ~1 ulp (rel. 2.6e-16 across a full axis) and are, if anything,
+slightly more accurate; ``test_radial_rebin`` pins the agreement.
+
+## 2026-10-06 (later) — A CSV row is identified by file + raw frame range
+
+Follow-up to the entry below: "instead of chunk, let's do file name,
+frame#start, frame#end in the csv file output."
+
+``rows_from_tree`` identified a row by a bare ordinal (``frame``). That is
+not unique: ``workers`` accumulates rows per FROOT, so one CSV holds rows
+from several source files and ``frame 0`` appears once per file. The row's
+real identity is its file plus the raw sub-frame range it was built from —
+which is also exactly what the output HDF5 records in ``frame_ranges``, so
+the CSV and the image stack now say the same thing in the same terms.
+
+So Batch Correction's index columns are ``kind, source_file, frame_start,
+frame_end``.
+
+``kind`` is kept rather than folded away, for a correctness reason rather
+than a cosmetic one: the dark row's range and a light chunk's range can
+coincide (a whole-file chunk of a 10-light/10-dark file is 0–9 for both),
+so without ``kind`` the two rows would be indistinguishable. The dark row's
+range is over the dark acquisition block's own sub-frames — the dark images
+are not written out, so there is no output frame for it to index against.
+
+Batch Integrate is deliberately untouched: ``rows_from_metas`` still emits
+``frame, source_file`` and has no raw range to report. ``_INDEX_COLUMNS``
+is now a fixed header order from which each column is included only when
+some row actually carries it, so neither producer grows the other's blank
+columns. Both headers are pinned by tests.
+
+---
+
+## 2026-10-06 — The beam-monitor CSV puts the dark on its own row
+
+Asked for directly: "let's have the dark on one row and other chunk
+separated to separate rows."
+
+``ion_csv.rows_from_tree`` already emitted one row per output chunk. What it
+also did was give every scaler channel a ``<channel>_dark`` companion
+COLUMN, so a 12-channel source produced 24 measurement columns and each
+chunk row repeated the same shutter-closed reading. That reads as though
+the dark varied per chunk. It does not: the dark block is one acquisition.
+
+So the dark is now one row, ``kind="dark"``, carrying the mean over the
+WHOLE dark block under the same column names the lights use — directly
+comparable down a column instead of across a row, and the table halves in
+width (27 columns to 15 on a real E-hutch file). It leads the file, so the
+baseline is the first thing read rather than something to scroll right for.
+
+Two details worth keeping:
+
+* The dark is averaged over its whole block, not chunk-averaged. Chunk
+  boundaries are a property of the light frames; splitting the dark along
+  them would invent structure the acquisition does not have.
+* ``kind`` appears only when some row has one. ``rows_from_metas`` (the
+  Batch Integrate path) has no dark row, and a column of blanks there would
+  read as a missing value rather than an absent concept.
+
+``DARK_SUFFIX`` is retained as a module constant but is no longer used by
+anything, so an external importer still resolves.
+
+**Not done, and worth knowing.** The CSV's dark row is the dark block
+*inside the same file*. Batch Correction's SUBTRACTED dark may be a
+different acquisition entirely — the ladder prefers the nearest
+``_dark_before`` sibling (DECISIONS 2026-10-05). When those differ, the CSV
+is describing the file's own dark, not the one that was subtracted. The
+subtracted one is named in the Log and in the output's ``midas_gui_dark``
+attribute. Reconciling the two is a real follow-up, not an oversight.
+
+*Closed 2026-10-07 — see "The CSV says which dark was subtracted" below.*
+
+---
+
+## 2026-10-05 (later) — Batch Correction: per-op folders, and the MATLAB cross-check
+
+Three follow-ups the same day, all from beamline feedback.
+
+### Several methods per run, one folder each
+
+The method is now chosen by checkboxes on the tab, not by the loader's
+single-choice "op:" dropdown. That dropdown is HIDDEN here
+(``DataLoaderPanel.set_combine_op_visible(False)``) rather than merely
+ignored: the first cut left it on screen, and a dead control sitting
+immediately beside the live one is indistinguishable from a second,
+contradictory setting — it was asked about within the hour. The chunk-size
+spin beside it stays, since that genuinely is the panel's to own.
+``_chunk_settings()`` no longer returns ``combine_op`` either, for the same
+reason: a value nobody consumes is how the dropdown came to look
+meaningful. Batch Integrate is untouched — the dropdown is live there. Each selected method
+writes a full set of outputs into
+``<out_dir>/dark_subtracted_<op>/``, a leaf of Batch Integrate's own output
+folder — so reduced frames sit beside the cakes, and a mean and a max of the
+same scan cannot overwrite each other. ``helpers.suggest_correction_output_dir``
+therefore returns the integration folder itself rather than appending a
+segment; ``helpers.correction_subdir(op)`` supplies the leaf.
+
+Several methods cost ONE pass, not one each
+(``frame_correct.reduce_chunk_multi``): reading a sub-frame off disk and
+correcting it is the same work whichever op consumes it, and it dominates
+the arithmetic. Only ``median`` forces the corrected stack to be kept, so
+memory is one plane per op otherwise. ``reduce_chunk`` is now a thin wrapper
+over it, which keeps a single implementation of the ordering rule.
+
+### "end(0=all)" was a lie for this panel
+
+Reported as "how come this is only yielding 1 frame?" — a 20-sub-frame file
+with Combine sub-frames = 5 produced one output frame. Cause: for a
+``unify_combine`` panel, ``start``/``end`` are baked straight into
+``source_cfg()`` and taken LITERALLY (raw sub-frame indices for a single
+HDF5 file, file numbers for a multi-file pick). "0 = all" is only true for a
+NON-unify panel, where ``frame_range()`` special-cases ``hi > 0``. So
+``end = 0`` clamped the window to sub-frame 0 alone and the combine had
+nothing to combine.
+
+The label is shared, so the fix is in ``widgets.DataLoaderPanel``: it now
+reads plain ``end:`` for a unify_combine panel and keeps ``end(0=all):``
+only where that is actually true. Batch Integrate benefits identically — it
+had the same trap. Batch Correction additionally prints "N raw sub-frame(s)
+→ M output frame(s)" under the Output card and flags a window that
+collapses to one frame, because a silently-correct-looking run is the
+failure mode here.
+
+### Cross-checked against the beamline's own MATLAB
+
+``~/matlab/matlab_tools/image-processing/BatchCorrection.m`` (driven by
+``~/mnt/s1b/__eval/projects_parkjs/BatchCorrection_*.m``) is the
+long-standing reference implementation. It independently confirms the
+ordering decision recorded in the entry below:
+
+```matlab
+im_bkg = (sum of all background frames) ./ ct      % dark = MEAN
+...
+sum_data = sum_data - im_bkg*length(FramesToCorrect);   % N x dark
+ave_data = sum_data./length(FramesToCorrect);
+```
+
+So: dark is the mean over the dark file's frames (as ours is), and a summed
+output loses ``N × dark``, not one (as ours does). It writes ``.sum`` and
+``.ave`` — our Sum and Mean — encoding the op in the extension where we
+encode it in the folder.
+
+Four differences, deliberately not closed here, recorded so they are not
+rediscovered as bugs:
+
+1. **The MATLAB does not clip at zero.** Ours defaults to clipping, matching
+   ``apply_field_corrections`` and the rest of this GUI, and exposes a
+   checkbox. Worth a beamline decision about which default is right.
+2. **``CorrectBadPixels``** is applied to the combined frame there. We have
+   no bad-pixel step in this tab (masking lives in the Mask Builder).
+3. **``FramesToIgnore``** drops arbitrary individual frames; our start/end
+   window is contiguous only.
+4. **The SAXS real-time variant normalises by exposure time**
+   (``.../saxs-waxs/BatchCorrection_RT_function.m``:
+   ``imdata_per_sec = imdata_ave / exptime``) and counts the frames that
+   actually exist rather than those promised by metadata. We do neither.
+
+---
+
+## 2026-10-05 — Batch Correction: correct per sub-frame, and pick the dark per file
+
+New feature (asked for at the beamline): reduce each HDF5 file's sub-frame
+stack to one frame per group of N sub-frames — mean/median/sum/max — with
+dark/bright/background correction, written back out as HDF5, one output file
+per input file. New `midas_gui/frame_correct.py` + `tab_batch_correct.py` +
+`workers.BatchCorrectionWorker`. Two decisions are worth the ink.
+
+### 1. Corrections are applied per raw sub-frame, and the clip is deferred
+
+The order is: correct each sub-frame with `clip_negative=False`, combine,
+then clip the combined frame once.
+
+The obvious alternative — combine, then correct — is wrong for `sum` and
+only for `sum`: an N-frame sum must lose `N × dark`, and correcting
+afterwards loses one. This is the same bug `workers.StreamPreviewWorker`
+already documents avoiding for its preview sum. For `mean`/`max`/`median`
+the two orders agree exactly, because dark subtraction and a flat-field
+divide are monotone per-pixel maps and `max`/`median` commute with any such
+map. So the per-sub-frame rule is correct for all four and there is no
+per-op branching in `reduce_chunk`.
+
+The clip is separated out because it is *not* linear: clipping each
+sub-frame at zero before summing discards the negative half of the read
+noise and biases the sum upward, while clipping once at the end is unbiased
+for `sum`/`mean` and (clip being monotone) identical for `max`/`median`.
+Clipping once at the end is therefore uniformly right, and is also what
+makes an "untick to see negative pixels" option meaningful for checking
+whether a dark over-subtracts.
+
+`mean`/`sum`/`max` accumulate one frame at a time rather than materialising
+a corrected stack — a 10-frame chunk of 2880² in float64 is 660 MB, paid on
+every chunk of a long run. `median` has no streaming form and does
+materialise, in float32.
+
+### 2. The dark is resolved PER FILE, as the nearest preceding `dark_before`
+
+The first design (from the screenlog corpus alone) was "the bracketing dark:
+`<froot>_dark_before_<first data number − 1>`". Surveying the real data
+proved that wrong, and the correction matters:
+
+* The 198 caking screenlogs in `~/midas_runs/midas_screen_logs` gave 192
+  resolved runs, and **192/192 read the dark from `exchange/data_dark`** —
+  so there is no separate dark image format to support, only the question of
+  which file holds it. Two patterns, ~50/50: a `<froot>_dark_before` sibling,
+  or the data file's own `data_dark`.
+* The 160 VAREX scan folders still on
+  `/home/beams/S20IDUSER/mnt/s20a/*/varex*/` showed what the logs could not:
+  **darks are re-measured throughout a scan.** A folder is a series of
+  segments, each of the form `dark_before … data … dark_after`.
+  `Fe9Cr_KGT6038_load1_waxs` alone holds 11 `dark_before` and 8 `dark_after`
+  files among its data. Of the 936 data files in the 56 dark-bearing
+  folders, **936 have a preceding `dark_before`**, at a median distance of 8
+  files and a maximum of 121. The other 102 folders carry none at all (the
+  self-dark convention).
+
+So a folder-wide rule would be right only for a scan's first segment and
+would hand a stale dark to the ~900 files after it. The per-file rule —
+nearest preceding `dark_before`, then nearest following `dark_after`, then
+the file's own `data_dark`, then the loader's Dark field — reproduces the
+logged choice whenever a scan has one segment, so it is compatible with the
+log corpus rather than a departure from it. `dark_after` never appears in
+the logs but is common on disk; it is handled anyway.
+
+Both corpora are replayed as tests (`tests/test_dark_autodetect.py`), which
+skip when the share isn't mounted. They currently pass at 936/936 real files
+and 191/192 logged runs. The one exception is named explicitly in
+`MANUAL_OVERRIDE_LOGS` rather than hidden behind a loosened assertion: that
+operator passed an explicit `-P` override pointing at a *different scan's*
+folder, at a file with no dark marker in its name. No filesystem rule can
+recover that, and none should guess — a deliberate cross-scan dark is what
+the loader's own Dark field (`resolve_dark(auto=False)`) is for. A second
+such case will fail the test rather than pass unnoticed.
+
+The chosen dark is named in the Log per file and stored in the output's
+`midas_gui_dark` attribute, so a run is auditable afterwards rather than
+trusted.
+
+### Scope
+
+HDF5 input only. "Chunks restart at every file" has no meaning for TIFF/GE,
+where a file holds exactly one frame and there is no sub-frame stack to
+group; a TIFF selection says so rather than silently applying the
+consecutive-*file* grouping `workers._ChunkCombinedFileSource` implements
+for Batch Integrate. That remains available if it is ever wanted here.
+
+---
+
 ## 2026-10-01 — Ring prediction bound by detector geometry, not a flat 30°
 
 Reported symptom: after a Calibrate fit, the image overlay and the radial
@@ -659,6 +1250,81 @@ _Condensed 2026-08-31 (~2150 → ~500 lines): cut verification transcripts,
 file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this
 date for the full uncondensed entries if ever needed._
+
+## 2026-09-30 — One zarr per rotation, not one per frame
+
+Batch Integrate wrote the `zarr` format one archive per combined output
+frame. That was deliberate — mpe_wf writes one zarr per scan point, and we
+extended it so a file split by "Combine sub-frames" got one per chunk — but
+it was parity with a convention, not a requirement, and it does not scale.
+The folder that prompted this (three 1442-sub-frame VAREX files at
+`OME_SUM 10`) would have produced **435 single-cake archives**. Asked for one
+per source HDF5 instead.
+
+Nothing downstream forced per-frame. GSAS-II's `readMidas` validates only
+`InstrumentParameters` / `REtaMap` / `OmegaSumFrame` (see the 2026-09-26
+entry), all multi-frame by construction; the Zarr Viewer slices any leading
+axis; MIDAS's own native output is multi-frame. Per-frame was a default
+nobody had chosen.
+
+**Grouping reuses the rotation key rather than inventing a second one.**
+A group is one rotation — the same unit ω is measured from — so
+`_HDF5StackGlobSource.zarr_group_key` is defined as
+`omega_channel_window(idx)[0]`, exactly as `raw_window_for_index` is defined
+as `omega_channel_window(idx)[1:]`. One walk decides which rotation a frame
+belongs to, and both the angle and the archive read it. Had grouping done
+its own file walk, a future change to one would silently desynchronise an
+archive from the angles inside it. `_ChunkCombinedFileSource` returns a
+constant for the same reason its ω window counts across the selection:
+one-frame-per-file data only becomes a rotation as a series.
+
+**Streaming, not buffering.** The obvious implementation — collect a
+rotation's cakes and hand `write_gsas_zarr_zip` a list — would have cost
+~830 MB for a 1442-frame group at 72x1000 float64. The backend already
+exposes `GSASZarrWriter` (context manager, `add_frame`/`close`), which
+`write_gsas_zarr_zip` is itself a thin wrapper over and whose docstring
+promises "a long scan never has to be held in memory". Holding one open
+writer per group keeps peak memory identical to the per-frame path. This is
+why the work is a `_ZarrGroupWriter` owning a writer rather than a list.
+
+`omega_sum_frames` is deliberately left at 1. It chunks ALREADY-INTEGRATED
+frames inside the archive; `OME_SUM` collapses raw sub-frames before
+integration. They are different axes and feeding one from the other would
+collapse the same data twice. Noted because the names invite exactly that
+mistake.
+
+**Provenance moved from per frame to per group**, which is strictly cheaper
+(one extract/repack per archive, not per frame) and is what
+`h5_metadata.align` was built for — it already reduced "one entry per output
+frame" from a *sequence* of frame ranges and needed no change, only to be
+handed the whole group's ranges. `storage_ring_current_mA`/`sample_motors`
+stay scalars for a single-frame group so a "frame"-grouped archive is
+byte-comparable with what shipped before, and become per-frame lists
+otherwise. A "run" group spanning several source files has no single
+`instrument/` tree to align, so the copy is skipped and logged rather than
+guessing which file's tree to use.
+
+**Batch Parallel splits on group boundaries** (`_split_into_chunks_on_groups`).
+The count-based splitter would hand two workers halves of one source file and
+they would open the same `.zarr.zip` path. Alignment caps parallelism at the
+number of groups — a 3-file folder uses 3 workers, not 8 — which is a real
+throughput cost, accepted because the alternatives were worse: forcing
+sequential loses all cores, and refusing the combination is a dead end. Groups
+are formed from CONSECUTIVE equal keys, not by gathering every index with a
+given key: reordering frames to suit the writer would be a worse bug than
+writing two archives for an interleaved source.
+
+**Default stays "frame".** Every project file and script written so far ran
+under it, and a silent change to what a re-run produces is not worth the
+convenience. The combo is in `_state_widgets` so it persists with the rest of
+the GUI state, and `project.integrate_attempt_gui_fields` falls back to
+"frame" for attempts recorded before it existed — which is what those
+attempts actually ran.
+
+The CLI flag (`--zarr-grouping`) and the argv emission went in with the
+feature, not after it. That is the direct lesson of the 2026-09-29 omega
+entry below: a setting wired into only the in-process path is invisible, not
+an error — the background job just quietly does something else.
 
 ## 2026-09-30 — PR #11 (junspark) merged into `main`: 8 staged checkpoints, not one big merge
 
@@ -3624,3 +4290,118 @@ metadata (`_json_default` sorts sets to lists), just never read back.
 Not done: the same precedence question applies to Batch Integrate's
 `apply_project_integration`, which has the identical shape. Left alone — no
 report against it, and the fix belongs with evidence of the symptom.
+
+## 2026-10-09/10 — Hydra Batch Integrate: a batch is a FOLDER, and eta wraps
+
+A long beamline session at 1-ID-E (connolly_oct26). Four decisions worth
+keeping; the rest is in `git log` for the ~25 commits on
+`calibrate-parameter-table-and-limits`.
+
+### An eta range may cross ±180, and the backend cannot bin one
+
+`midas_calibrate_v2`'s `pixel_to_REta` types its output
+`eta_deg: azimuth (deg, [-180, 180))`, and every `midas_integrate_v2`
+kernel assigns a pixel with a bare `floor((Eta - EtaMin)/EtaBinSize)` plus
+a range test. None of them wraps — `polygon`'s `wraparound` is a different
+thing, one PIXEL whose corners straddle the seam.
+
+So ge1's 120..210, which is the azimuth that panel physically subtends,
+asked for bins centred at 185/195/205 that no pixel can land in. They came
+back identically zero and their pixels were not accumulated anywhere:
+**1,027,309 of 3,091,116 in-range pixels, 33.2% of the panel**, silently
+discarded. Only ge1 crossed the cut, so only ge1 was affected — which is
+exactly how it presented ("ge1 eta range is odd", ge2/ge3/ge4 "look ok").
+
+`midas_gui.eta_wrap` bins the WHOLE CIRCLE and lifts the requested bins out
+of it in the requested order, relabelling with the caller's unwrapped
+centres. Verified bit-identical against integrating the two halves
+separately, on all three kernels. `plan_eta` returns `take=None` for every
+range that does not cross, and on that path nothing changes.
+
+It will NOT serve a bin that straddles the seam (a 10° bin centred on 180
+spans 175..185); that needs two sub-bins recombined by pixel count. It is
+declined by name rather than returned half empty. **This matters for
+cardinal-direction caking**: 0/90/−90 are fine, 180 must be asked for with
+an edge on the seam (170..180 and −180..−170).
+
+Anything derived alongside the cake must take the same `eta_take` — the
+bin area did not, and a 36-row area against a 9-row cake made
+`GSASZarrWriter` reject the pair, leaving a 136-byte empty ge1 archive that
+then took the four-panel combine down with it. One `bin_area_for` now owns
+that question.
+
+### A Hydra batch is a source FOLDER, not a ge1–ge4 quartet
+
+The first fan-out grouped by sibling-set, so every frame file became its
+own scan: thirteen output directories for one load step, names repeated
+three times over (`APS_4130_C_load_step_0_APS_4130_C_load_step_0_...ge1`),
+and load_step_1's output nested inside load_step_0.
+
+`helpers.group_paths_by_output_dir` had solved all three for the
+single-detector tab in 9302e64 — its docstring names the nesting bug as the
+thing it exists to prevent — and a parallel, worse version was written
+instead. The lesson is the general one: when the convention already has an
+answer, reuse it rather than re-deriving it.
+
+Hydra cannot reuse it wholesale, though, because **both layouts are real**:
+
+    .../APS_4130_C_load_step_0/..._004057.ge1.h5   (panels together)
+    .../ge1/APS_4130_C_load_step_0/..._004057.ge1.h5   (panel above scan)
+
+Grouping on a file's own parent is right for the first and splits one scan
+into four for the second. Grouping is therefore by the parent of the
+**ge1-normalised** path, which collapses both to one key per scan.
+
+Two contracts that are easy to break and are now pinned by tests:
+
+* a pick of ONE file is still a four-panel scan — the selection is expanded
+  through `hydra_siblings`, narrowed to the ticked panels.
+* the **Output box is authoritative for a single scan** (each panel appends
+  its own `ge{n}/`). `group_paths_by_output_dir` prefers the DERIVED dir for
+  a single group, which is right for the single-detector tab — whose box
+  auto-fills from that same derivation — and turns a typed `.../out` into
+  `.../out/panel.ge1/ge1` here. Only a multi-scan selection fans out, and
+  it keeps the stale-autofill rule.
+
+Hydra passes `derive=suggest_panel_base_output_dir` (`<expid>_bc/<froot>`)
+rather than the default `suggest_integration_output_dir`
+(`<expid>_bc/<froot>/<det>`). That hook is not cosmetic: the
+"stale autofill or chosen root" test compares the Output box against the
+derived dirs, so a caller deriving one convention while the grouper assumes
+another can never match, is read as a custom root, and nests.
+
+### The combiner must not have a hardcoded list of what to carry
+
+`hydra_zarr_combine` reproduced the reference script's group list and wrote
+exactly those names, dropping anything else without a word — so every
+merged archive was missing `SumFrames`, an `(nR, nEta)` array, i.e. primary
+data, plus `active_instrument/`. The two names were the symptom; the silent
+list was the bug. `_carry_unhandled` now takes everything not written by
+name and REPORTS what it did, because carrying something silently is the
+same bug in a new coat.
+
+Its shape test leans deliberately: declining to concatenate something that
+really was caked costs a copy and a log line, while concatenating something
+that was not invents an array. At one eta bin per panel the trailing-axis
+test says nothing (widths are `[1,1,1,1]`), so the array must also share
+leading dims with the known caked arrays.
+
+A non-contiguous eta axis is NOT a defect — the merge concatenates and
+REtaMap carries every column's own eta, so an uncovered wedge is absent
+rather than misindexed. The only thing it rules out is summarising the
+result with one `(EtaMin, EtaMax)` pair.
+
+### Process note
+
+Three consecutive full suite runs were killed mid-flight to turn around
+urgent fixes. Each kill was individually defensible; the aggregate was not.
+`test_hydra_batch_ui` had been red since the omega commit for about an hour
+without anyone knowing. `--forked` re-imports the package per test
+subprocess, so a mid-run edit invalidates the whole run — if a fix cannot
+wait, kill the suite deliberately and re-run after, rather than editing
+under it.
+
+Three of this session's bugs survived a passing suite because the fixtures
+used invented key names (`ETA_MIN` where every writer emits `EtaMin`) or
+geometry that tiles nothing. A fixture that does not look like real data is
+not evidence.

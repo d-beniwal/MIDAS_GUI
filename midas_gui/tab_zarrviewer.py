@@ -103,6 +103,46 @@ def _build_tree(node, parent_item: QtWidgets.QTreeWidgetItem):
 # Matplotlib canvas widget
 # ─────────────────────────────────────────────────────────────────────────
 
+def _unwrap_eta(y):
+    """``(axis, was_unwrapped)`` — an eta axis matplotlib can derive cell
+    edges from.
+
+    Needed only for archives written before ``hydra_zarr_combine`` sorted
+    the merged axis; those come out monotonic and are returned untouched
+    by the first test below. What follows describes the older ones.
+
+    A four-panel combined archive concatenates its panels in panel order,
+    and ge1's caking range at 1-ID-E is written PAST the cut (EtaMin=120,
+    EtaMax=210, and ``eta_wrap`` labels its columns with those requested
+    centres, 125..205 -- not wrapped into [-180, 180) as the other three
+    panels happen to be). So the merged axis reads 125..205, then jumps to
+    -145, then -55, then 45 -- physically one continuous sweep,
+    numerically a sawtooth. pcolormesh
+    treats its coordinates as cell CENTRES and infers the edges from the
+    spacing, so at each jump it inferred a 350 deg cell and said so:
+
+        UserWarning: The input coordinates to pcolormesh are interpreted
+        as cell centers, but are not monotonically increasing or
+        decreasing.
+
+    Unwrapping turns it back into the sweep it is (125 -> 475), which is
+    both monotonic and the physically honest picture: the panels really do
+    continue into one another. An axis that is already monotonic is
+    returned untouched, so a single-panel archive plots exactly as before.
+    """
+    arr = np.asarray(y, dtype=float)
+    if arr.ndim != 1 or arr.size < 3:
+        return y, False
+    d = np.diff(arr)
+    if np.all(d > 0) or np.all(d < 0):
+        return y, False
+    out = np.unwrap(arr, period=360.0)
+    d2 = np.diff(out)
+    if np.all(d2 > 0) or np.all(d2 < 0):
+        return out, True
+    return y, False       # not an angle wrap; leave it and let mpl warn
+
+
 class PlotCanvas(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -303,6 +343,9 @@ class PlotCanvas(QtWidgets.QWidget):
         if x_coords is not None and y_coords is not None:
             # pcolormesh expects Z[row, col] = Z[y_idx, x_idx]
             # data shape is (nR, nEta); x_coords→R axis, y_coords→eta axis
+            y_coords, unwrapped = _unwrap_eta(y_coords)
+            if unwrapped:
+                ylabel = f"{ylabel} (unwrapped)"
             self._im = ax.pcolormesh(
                 x_coords, y_coords, d.T,
                 cmap=cmap, norm=norm, shading="auto",

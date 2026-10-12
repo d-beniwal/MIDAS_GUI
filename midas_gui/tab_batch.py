@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import sys
+import datetime as _dt
 from pathlib import Path
 from typing import Optional
 
@@ -23,12 +24,13 @@ from midas_gui.constants import (KERNELS, ERROR_MODELS,
 from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_file,
                                geometry_fields_from_file,
                                resolve_calibration_fields, full_calibration_snapshot,
+                               pixel_readout_text,
                                collapse_cake_eta,
                                make_calib_values_button,
                                rmax_corner_px, rmax_edge_px, draw_polar_bin_overlay,
                                _NoScrollSpinBox, _NoScrollComboBox,
                                widgets_to_dict, apply_dict_to_widgets,
-                               check_output_dir_writable,
+                               check_output_dir_writable, group_paths_by_output_dir,
                                suggest_integration_output_dir,
                                suggest_working_dir, bc_path_parts,
                                browse_start_dir, warn_if_path_missing,
@@ -37,7 +39,7 @@ from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, DataLoaderPanel, OutputFormatSelector,
                                ImageViewer, OriginToolButton, build_lab_frame_axes_items,
                                CakeStackViewer)
-from midas_gui.workers import (BatchWorker, BatchRunCoordinator, apply_q_uniform,
+from midas_gui.workers import (BatchWorker, BatchRunCoordinator, REBIN_UNITS,
                                DriftWorker, FolderMonitorWorker, write_all_profiles)
 from midas_gui.dialogs import show_error
 from midas_gui.hydra_widgets import HydraModeRibbon
@@ -46,32 +48,46 @@ from midas_gui.job_queue import JobQueuePanel
 from midas_gui.cake_params import (parse_cake_csv, write_cake_csv,
                                    omega_for_window)
 from midas_gui import project
+from midas_gui import run_log
 from midas_gui import settings
 from midas_gui import style as S
 
 
 class _RadialBinsDialog(QtWidgets.QDialog):
-    """Δ/min/max for one radial-axis mode (R in px, or Q in Å⁻¹), opened
-    from Batch Integrate's mode-dependent "R bins…"/"Q bins…" button next to
-    the Bin type dropdown. Hosts the tab's own spinboxes directly (not
-    copies) — this is a relocated view of the same widgets ``_build_spec``
-    and GUI-state save/restore already use, not a separate value store.
-    Only the R variant takes Corner/Edge presets; Q has no detector-geometry
+    """Δ/min/max for one radial-axis mode (R in px, Q in Å⁻¹, or 2θ in
+    degrees), opened from Batch Integrate's mode-dependent
+    "R bins…"/"Q bins…"/"2θ bins…" button next to the Bin type dropdown.
+    Hosts the tab's own spinboxes directly (not copies) — this is a
+    relocated view of the same widgets ``_build_spec`` and GUI-state
+    save/restore already use, not a separate value store. Only the R variant
+    takes Corner/Edge presets; Q and 2θ have no detector-geometry
     equivalent."""
+
+    #: Window title, axis label prefix and explanatory note, per mode.
+    _MODES = {
+        "R": ("Radial (R) bins", "R",
+              "R bin/Rmin/Rmax define the underlying integration grid, in "
+              "detector pixels. Rmax 0 = auto (farthest detector corner from "
+              "the beam centre)."),
+        "Q": ("Q bins", "Q",
+              "Bin uniformly in Q (Å⁻¹) instead of R, for OUTPUT only — the "
+              "same radial axis, alternate units. The Radial (R) bins still "
+              "set the underlying integration grid; this rebins that result "
+              "into Q."),
+        "2th": ("2θ bins", "2θ",
+                "Bin uniformly in 2θ (degrees) instead of R, for OUTPUT only "
+                "— the same radial axis, alternate units. The Radial (R) bins "
+                "still set the underlying integration grid; this rebins that "
+                "result into 2θ. Unlike Q, this needs no wavelength."),
+    }
 
     def __init__(self, mode: str, bin_spin, min_spin, max_spin,
                  corner_btn=None, edge_btn=None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Radial (R) bins" if mode == "R" else "Q bins")
+        title, label, note_text = self._MODES[mode]
+        self.setWindowTitle(title)
         v = QtWidgets.QVBoxLayout(self)
-        note = QtWidgets.QLabel(
-            "R bin/Rmin/Rmax define the underlying integration grid, in "
-            "detector pixels. Rmax 0 = auto (farthest detector corner from "
-            "the beam centre)." if mode == "R" else
-            "Bin uniformly in Q (Å⁻¹) instead of R, for OUTPUT only — the "
-            "same radial axis, alternate units. The Radial (R) bins still "
-            "set the underlying integration grid; this rebins that result "
-            "into Q.")
+        note = QtWidgets.QLabel(note_text)
         note.setWordWrap(True)
         note.setStyleSheet(f"color:{S.MUTED};font-size:10px;padding-bottom:4px")
         v.addWidget(note)
@@ -82,9 +98,9 @@ class _RadialBinsDialog(QtWidgets.QDialog):
             preset_row.addWidget(corner_btn); preset_row.addWidget(edge_btn)
             preset_row.addStretch(1)
             form.full(preset_row)
-        form.row((f"{mode} bin:", bin_spin))
-        form.row((f"{mode}min:", min_spin))
-        form.row((f"{mode}max:", max_spin))
+        form.row((f"{label} bin:", bin_spin))
+        form.row((f"{label} min:", min_spin))
+        form.row((f"{label} max:", max_spin))
         v.addLayout(form)
         btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
         btns.rejected.connect(self.accept); btns.accepted.connect(self.accept)
@@ -198,6 +214,12 @@ class _CakeParamsDialog(QtWidgets.QDialog):
         form.full(line)
         self._ome_channel = QtWidgets.QComboBox()
         self._ome_channel.setEditable(True)
+        # Without this the popup is only as wide as the closed combo and
+        # Qt elides the MIDDLE of every entry — "instrum...R/samRy" — which
+        # is exactly the part that distinguishes one container from
+        # another (.../D/HR/ vs .../E/HL/). See _widen_popup.
+        self._ome_channel.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self._ome_collapse = QtWidgets.QCheckBox("one ω for all frames")
         self._extras = {"_ome_channel": self._ome_channel,
                         "_ome_collapse": self._ome_collapse}
@@ -221,6 +243,26 @@ class _CakeParamsDialog(QtWidgets.QDialog):
         apply_btn.clicked.connect(self.apply_to_tab)
         close_btn.clicked.connect(self.accept)
         v.addWidget(btns)
+
+    @staticmethod
+    def _widen_popup(combo, cap: int = 900) -> None:
+        """Size the drop-down list to its longest entry.
+
+        A QComboBox popup inherits the width of the closed box, and Qt
+        elides anything longer — in the middle, which for an HDF5 path is
+        the only part that differs between entries
+        (``instrument/SMS/D/HR/samRy`` against
+        ``instrument/SMS/E/HL/samRy`` both render as
+        ``instrum...R/samRy``). Widen the VIEW rather than the combo so the
+        form layout is unaffected, and cap it so a pathological name can't
+        push the popup off-screen; entries longer than the cap keep their
+        full text as a tooltip.
+        """
+        fm = combo.fontMetrics()
+        widest = max((fm.boundingRect(combo.itemText(i)).width()
+                      for i in range(combo.count())), default=0)
+        if widest:
+            combo.view().setMinimumWidth(min(widest + 40, cap))
 
     # ── which widget each key really lives in ──────────────────────────
     def _target(self, key):
@@ -286,8 +328,12 @@ class _CakeParamsDialog(QtWidgets.QDialog):
                 try:
                     for name, _n in list_h5_1d_datasets(path):
                         self._ome_channel.addItem(name)
+                        self._ome_channel.setItemData(
+                            self._ome_channel.count() - 1, name,
+                            QtCore.Qt.ToolTipRole)
                 except Exception:
                     pass
+            self._widen_popup(self._ome_channel)
             self._ome_channel.setEditText(typed)
         finally:
             self._ome_channel.blockSignals(False)
@@ -344,9 +390,17 @@ class BatchTab(QtWidgets.QWidget):
         super().__init__(parent)
         self._worker = None
         self._orphans: list = []       # aborted workers kept alive until they wind down
+        # A recursive pick spans several source folders, each implying its
+        # own output dir; they run as a queue of separate batches. Empty for
+        # every single-folder run, which is what keeps that path unchanged.
+        self._pending_groups: list = []
+        self._group_tally = None
         self._drift_worker = None
         self._drift_traj = None
         self._calib_result = None
+        # Geometry behind the Detector-view pixel readout, resolved lazily and
+        # dropped by _refresh_detector_preview; see _radial_readout.
+        self._readout_geom = None
         self._wf_started = False
         self._monitor_worker = None
         self._integrated_fids: set = set()   # frame ids already displayed (batch + monitor)
@@ -392,6 +446,12 @@ class BatchTab(QtWidgets.QWidget):
         self._omega_span_timer.setInterval(150)
         self._omega_span_timer.timeout.connect(self._recompute_omega_span)
         self._project_ctx: Optional[project.ProjectContext] = None
+        #: The exact Output-folder string this tab last filled in by itself
+        #: (auto-fill or the Suggest button). Lets _maybe_autofill_output_dir
+        #: tell its own leftover from a path the user chose -- see there.
+        #: Must exist before _build_ui: the loader opens the bundled sample
+        #: data during construction, which fires dataChanged, which auto-fills.
+        self._autofilled_out: Optional[str] = None
         self._build_ui()
         self._loader.monitorToggled.connect(self._toggle_monitor)
         self._loader.dataChanged.connect(self._refresh_detector_preview)
@@ -455,16 +515,51 @@ class BatchTab(QtWidgets.QWidget):
         value = formula(fields["BC_y"], fields["BC_z"], fields["NrPixelsY"], fields["NrPixelsZ"])
         self._r_max.setValue(value)
 
-    def _q_mode_active(self) -> bool:
-        """True when the Bin type dropdown selects Q (rebin the OUTPUT
-        uniformly in Q, not the underlying R-uniform integration grid)."""
-        return self._bin_type.currentData() == "Q"
+    #: Which (min, max, step) spin trio belongs to each output rebin unit.
+    #: Keeps _rebin_cfg/_refresh_cake_summary from re-deciding it separately.
+    _REBIN_SPINS = {
+        "Q":   lambda s: (s._q_min, s._q_max, s._q_bin),
+        "2th": lambda s: (s._tth_min, s._tth_max, s._tth_bin),
+    }
+
+    def _rebin_unit(self):
+        """The OUTPUT rebin unit the Bin type dropdown selects — ``"Q"``,
+        ``"2th"``, or ``None`` for plain Radial.
+
+        "Radial" means no rebin at all: the profile is kept on the
+        R-uniform grid the kernels integrated onto. The other two rebin that
+        result (see ``workers.rebin_R_to_grid``); neither changes the
+        underlying integration grid, which is always R-uniform."""
+        unit = self._bin_type.currentData()
+        return unit if unit in REBIN_UNITS else None
+
+    def _rebin_cfg(self):
+        """This tab's output-rebin config for the workers, or ``None``.
+
+        The spin trio is chosen by the selected unit; the dict is the
+        self-describing form ``workers.rebin_cfg_parts`` reads."""
+        unit = self._rebin_unit()
+        if unit is None:
+            return None
+        lo, hi, step = self._REBIN_SPINS[unit](self)
+        return {"unit": unit, "min": lo.value(), "max": hi.value(),
+                "step": step.value()}
+
+    def _rebin_label(self) -> str:
+        """Display name of the selected rebin unit, for user-facing text."""
+        return {None: "Radial", "Q": "Q", "2th": "2θ"}[self._rebin_unit()]
+
+    def _rebin_bins_dialog(self):
+        """The bins dialog the "… bins…" button should open right now."""
+        return {None: self._r_bins_dialog, "Q": self._q_bins_dialog,
+                "2th": self._tth_bins_dialog}[self._rebin_unit()]
 
     def _on_bin_type_changed(self, *_args) -> None:
-        self._radial_bins_btn.setText("Q bins…" if self._q_mode_active() else "R bins…")
+        label = {None: "R", "Q": "Q", "2th": "2θ"}[self._rebin_unit()]
+        self._radial_bins_btn.setText(f"{label} bins…")
 
     def _open_radial_bins_dialog(self) -> None:
-        (self._q_bins_dialog if self._q_mode_active() else self._r_bins_dialog).exec_()
+        self._rebin_bins_dialog().exec_()
 
     def _load_cake_csv(self) -> None:
         """"Load cake parameters CSV…" button — applies R_MIN/R_MAX/R_STEP/
@@ -589,9 +684,12 @@ class BatchTab(QtWidgets.QWidget):
             f"η {self._eta_min.value():g}…{self._eta_max.value():g}°"
             f"  Δη {self._e_bin.value():g}°",
         ]
-        if self._q_mode_active():
-            parts.append(f"Q out {self._q_min.value():g}–{self._q_max.value():g}"
-                         f"  ΔQ {self._q_bin.value():g} Å⁻¹")
+        _unit = self._rebin_unit()
+        if _unit is not None:
+            _lo, _hi, _step = self._REBIN_SPINS[_unit](self)
+            _name, _u = {"Q": ("Q", "Å⁻¹"), "2th": ("2θ", "°")}[_unit]
+            parts.append(f"{_name} out {_lo.value():g}–{_hi.value():g}"
+                         f"  Δ{_name} {_step.value():g} {_u}")
         chunk = getattr(self._loader, "_combine_chunk", None)
         n_sum = int(chunk.value()) if chunk is not None else 1
         if n_sum > 1:
@@ -794,12 +892,36 @@ class BatchTab(QtWidgets.QWidget):
         except Exception:
             pass
 
+    def _radial_readout(self, col, row) -> str:
+        """2θ / Q / d / η under the cursor — see
+        ``widgets.ImageViewer.set_radial_readout_fn``.
+
+        Reads the cached geometry rather than resolving the calibration on
+        every hover: the "From file" source parses a file, which this must
+        not do at cursor-move rate. ``_refresh_detector_preview`` drops the
+        cache whenever the calibration source changes.
+
+        The preview is drawn with ``set_raw_frame`` under this same
+        calibration's ``im_trans``, so the hovered pixel is already in the
+        geometry's frame.
+        """
+        if self._readout_geom is None:
+            fields, _note = self._calib_fields_in_use()
+            self._readout_geom = fields or {}
+        return pixel_readout_text(col, row, self._readout_geom)
+
     def _refresh_detector_preview(self, *_args) -> None:
         """Refresh the Detector-view tab's frame + Rmin/Rmax/bin-grid overlay —
         called on new/changed data, a calibration-source change, or any of
         the Rmin/Rmax/R-bin/η-bin/Show-bin-grid controls changing. The Rmax
         auto-fill and overlay must not depend on a frame already being
         loaded — calibration commonly arrives before data does."""
+        # The calibration may have changed under us (this is the hub every
+        # source change routes through), so the readout's cached geometry is
+        # no longer trustworthy. Dropping it here keeps _radial_readout free
+        # of file IO on the hover path.
+        self._readout_geom = None
+        self._det_view._refresh_coord_bar()
         # current_frame() already applies dark/bright/background correction
         # to each constituent frame before any "Preview: sum first N"
         # summing (see DataLoaderPanel._start_preview_worker) — correcting
@@ -939,6 +1061,13 @@ class BatchTab(QtWidgets.QWidget):
     def _ensure_hydra_page(self) -> HydraBatchPage:
         if self._hydra_page is None:
             self._hydra_page = HydraBatchPage()
+            # app.py wires the Exp ID provider onto this tab at startup, but
+            # the Hydra page is built lazily and so cannot be in that loop.
+            # Forward it here, or its output suggestion falls back to reading
+            # the expid positionally off the path -- right in the common
+            # layout, wrong wherever that layout is not 4 deep.
+            if self._expid_provider is not None:
+                self._hydra_page.set_expid_provider(self._expid_provider)
             self._mode_stack.addWidget(self._hydra_page)
             if self._project_ctx is not None:
                 self._hydra_page.set_project_context(self._project_ctx)
@@ -952,6 +1081,31 @@ class BatchTab(QtWidgets.QWidget):
         this tab's own Hydra Batch Integrate page (building it on first use)."""
         self._ensure_hydra_page().set_panel_calibration(n, result)
 
+    def _sync_zarr_grouping_enabled(self):
+        """Grey the grouping combo out while "zarr" is unchecked — it is the
+        only format it affects."""
+        on = "zarr" in self._fmt.checked_keys()
+        self._zarr_grouping.setEnabled(on)
+        self._zarr_grouping.setToolTip(
+            self._zarr_grouping_tip if on else
+            "Only applies to Zarr output — tick Zarr in Output format to "
+            "choose how many frames share one archive.")
+
+    def _zarr_grouping_key(self) -> str:
+        """"frame" | "file" | "run" — what ``BatchWorker``'s
+        ``zarr_grouping`` expects, from the combo's item data."""
+        return self._zarr_grouping.currentData() or "frame"
+
+    def _ion_csv_extras(self) -> tuple:
+        """Optional beam-monitor CSV column groups, as the tuple
+        ``ion_csv.write_ion_csv`` expects. Collapsed into ONE value rather
+        than a kwarg per checkbox: a new batch option has to be threaded
+        through four independent run constructors (in-process, as-job argv,
+        CLI, queue), so each extra kwarg is paid for four times over."""
+        return tuple(k for k, chk in (("env", self._ion_env_chk),
+                                      ("motors", self._ion_motors_chk))
+                     if chk.isChecked())
+
     # ── GUI state (Save/Load GUI State) ─────────────────────────────
     def _state_widgets(self) -> dict:
         return {
@@ -959,6 +1113,9 @@ class BatchTab(QtWidgets.QWidget):
             "use_json_btn": self._use_json_btn,
             "json_ed": self._json_ed,
             "kernel": self._kernel,
+            # Single-value widget, so widgets_to_dict persists it for free —
+            # unlike OutputFormatSelector, which is excluded from this map.
+            "zarr_grouping": self._zarr_grouping,
             "r_bin": self._r_bin,
             "e_bin": self._e_bin,
             "r_min": self._r_min,
@@ -975,12 +1132,17 @@ class BatchTab(QtWidgets.QWidget):
             "preview_sum_n": self._preview_sum_n,
             "azim": self._azim,
             "multi_azimuth": self._multi_azimuth_chk,
+            "ion_env_chk": self._ion_env_chk,
+            "ion_motors_chk": self._ion_motors_chk,
             "var_check": self._var_check,
             "err_model": self._err_model,
             "bin_type": self._bin_type,
             "q_min": self._q_min,
             "q_max": self._q_max,
             "q_bin": self._q_bin,
+            "tth_min": self._tth_min,
+            "tth_max": self._tth_max,
+            "tth_bin": self._tth_bin,
             "mon_ed": self._mon_ed,
             "drift_chk": self._drift_chk,
             "drift_anchor_ed": self._drift_anchor_ed,
@@ -1162,6 +1324,7 @@ class BatchTab(QtWidgets.QWidget):
         ``batch_cli._write_results_sidecar`` leaves in ``job.out_dir`` —
         reuses ``_populate_plots_from_attempt``'s replay logic, same as
         restoring a project's saved attempt."""
+        self._archive_job_log(job)
         if not job.out_dir:
             self._log.append(f"[batch] Job {job.session} has no recorded "
                              f"output folder — can't load its results.")
@@ -1371,20 +1534,32 @@ class BatchTab(QtWidgets.QWidget):
         self._q_min = _fspin(0.0, 100.0, 3, 0.5, "Å⁻¹")
         self._q_max = _fspin(0.0, 100.0, 3, 8.0, "Å⁻¹")
         self._q_bin = _fspin(0.0001, 1.0, 4, 0.01, "Å⁻¹")
+        # 2theta's counterpart. Capped just under 90 deg: R = Lsd*tan(2th)/px
+        # diverges at 90 and is meaningless beyond it, so the spin box is
+        # where that limit is stated rather than a runtime error.
+        self._tth_min = _fspin(0.0, 89.999, 4, 0.0, "°")
+        self._tth_max = _fspin(0.0, 89.999, 4, 10.0, "°")
+        self._tth_bin = _fspin(0.0001, 10.0, 4, 0.01, "°")
         self._r_bins_dialog = _RadialBinsDialog(
             "R", self._r_bin, self._r_min, self._r_max,
             self._rmax_corner_btn, self._rmax_edge_btn, parent=self)
         self._q_bins_dialog = _RadialBinsDialog(
             "Q", self._q_bin, self._q_min, self._q_max, parent=self)
+        self._tth_bins_dialog = _RadialBinsDialog(
+            "2th", self._tth_bin, self._tth_min, self._tth_max, parent=self)
 
         pf.full(_section_label("RADIAL"))
         self._bin_type = _NoScrollComboBox()
         self._bin_type.addItem("Radial", "R")
         self._bin_type.addItem("Q", "Q")
+        self._bin_type.addItem("2θ", "2th")
         self._bin_type.setToolTip(
             "Radial — bin uniformly in R (detector pixels).\n"
-            "Q — additionally rebin the OUTPUT uniformly in Q (Å⁻¹); the "
-            "underlying integration grid is still R-uniform.")
+            "Q — additionally rebin the OUTPUT uniformly in Q (Å⁻¹).\n"
+            "2θ — additionally rebin the OUTPUT uniformly in 2θ (degrees).\n"
+            "In all three the underlying integration grid is R-uniform; Q "
+            "and 2θ resample that result, and the axis stored alongside a "
+            "profile stays R in pixels.")
         self._bin_type.currentIndexChanged.connect(self._on_bin_type_changed)
         self._radial_bins_btn = QtWidgets.QPushButton("R bins…")
         self._radial_bins_btn.clicked.connect(self._open_radial_bins_dialog)
@@ -1392,7 +1567,7 @@ class BatchTab(QtWidgets.QWidget):
         bt_row.addWidget(self._bin_type, 1); bt_row.addWidget(self._radial_bins_btn)
         pf.row(("Bin type:", bt_row))
 
-        self._e_bin = _fspin(0.5, 30.0, 1, 5.0, "°")
+        self._e_bin = _fspin(0.5, 360.0, 1, 5.0, "°")
         self._eta_min = _fspin(-180.0, 180.0, 1, -180.0, "°")
         self._eta_max = _fspin(-180.0, 180.0, 1, 180.0, "°")
         for w in (self._eta_min, self._eta_max, self._e_bin):
@@ -1416,7 +1591,8 @@ class BatchTab(QtWidgets.QWidget):
         self._ome_collapse = QtWidgets.QCheckBox()
         for _w in (self._r_min, self._r_max, self._r_bin, self._eta_min,
                    self._eta_max, self._e_bin, self._q_min, self._q_max,
-                   self._q_bin, self._ome_start, self._ome_step):
+                   self._q_bin, self._tth_min, self._tth_max, self._tth_bin,
+                   self._ome_start, self._ome_step):
             _w.valueChanged.connect(self._refresh_cake_summary)
         self._ome_channel.currentTextChanged.connect(self._refresh_cake_summary)
         self._ome_collapse.toggled.connect(self._refresh_cake_summary)
@@ -1560,8 +1736,70 @@ class BatchTab(QtWidgets.QWidget):
         self._suggest_out_btn.clicked.connect(self._apply_suggested_output_dir)
         orow.addWidget(self._suggest_out_btn)
         out.body.addLayout(S.Form().row(("Folder:", orow)))
+        # A multi-folder selection does not write here; it writes to one
+        # directory per source folder. Leaving a single load step's path in
+        # the box said the opposite, which is how the flattening went
+        # unnoticed in the first place.
+        self._out_multi_lbl = QtWidgets.QLabel("")
+        self._out_multi_lbl.setWordWrap(True)
+        self._out_multi_lbl.setStyleSheet("color:#e0a030;font-size:10px")
+        self._out_multi_lbl.setVisible(False)
+        out.body.addWidget(self._out_multi_lbl)
         self._fmt = OutputFormatSelector()
         out.body.addWidget(self._fmt)
+        # How many output frames share one .zarr.zip. A rotation's worth of
+        # frames in one archive is the useful default for a folder of
+        # multi-sub-frame files — three 1442-sub-frame files at OME_SUM 10
+        # otherwise produce 435 single-cake archives — but per-frame stays
+        # the default because it is what every existing project recorded.
+        self._zarr_grouping = _NoScrollComboBox()
+        for _label, _key in (("One zarr per output frame", "frame"),
+                             ("One zarr per source file", "file"),
+                             ("One zarr for the whole run", "run")):
+            self._zarr_grouping.addItem(_label, _key)
+        self._zarr_grouping_tip = (
+            "How many integrated frames share one .zarr.zip.\n"
+            "Per source file groups by ROTATION — the same unit omega is "
+            "measured from, so one HDF5 sub-frame stack (or, for one-frame-"
+            "per-file data, the whole selection) becomes one archive.\n"
+            "Batch Parallel cannot split a group across workers, so grouping "
+            "caps the worker count at the number of groups.")
+        self._zarr_grouping_row = S.Form().row(("Zarr grouping:", self._zarr_grouping))
+        out.body.addLayout(self._zarr_grouping_row)
+        # Disabled rather than hidden while zarr is off: a control that
+        # silently does nothing is worse than one that says why it can't.
+        self._fmt.changed.connect(self._sync_zarr_grouping_enabled)
+        self._sync_zarr_grouping_enabled()
+
+        # Per-frame beam-monitor CSV. Always written (it is small, and I0 is
+        # what SAXS normalises against); these only add OPTIONAL columns, so
+        # there is no on/off box to leave in the wrong state. See
+        # midas_gui.ion_csv for why a column with no live data anywhere is
+        # dropped rather than written blank.
+        ion_lbl = QtWidgets.QLabel(
+            "Ion-chamber CSV — written automatically, one row per frame "
+            "(frame, I0, I, transmission). Also include:")
+        ion_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        ion_lbl.setWordWrap(True)
+        out.body.addWidget(ion_lbl)
+        self._ion_env_chk = QtWidgets.QCheckBox("Ring current / T / P")
+        self._ion_env_chk.setToolTip(
+            "Add storage-ring current (mA), temperature and pressure "
+            "columns.\n"
+            "Older 20-ID files carry placeholder PVs that read NaN for "
+            "temperature and pressure; a column that is NaN on every frame "
+            "is dropped rather than written as a wall of 'nan'.")
+        self._ion_motors_chk = QtWidgets.QCheckBox("Sample motors")
+        self._ion_motors_chk.setToolTip(
+            "Add one column per sample-stage channel.\n"
+            "E hutch has two coexisting sub-configs (HL/HR) with no reliable "
+            "flag for which is in use; both are read, and the inactive one "
+            "is all-NaN and therefore dropped. The data says which was live.")
+        ion_row = QtWidgets.QHBoxLayout(); ion_row.setSpacing(6)
+        ion_row.addWidget(self._ion_env_chk)
+        ion_row.addWidget(self._ion_motors_chk)
+        ion_row.addStretch(1)
+        out.body.addLayout(ion_row)
         lv.addWidget(out)
 
         # ── Run mode ──
@@ -1644,12 +1882,15 @@ class BatchTab(QtWidgets.QWidget):
         # rather than in the left Integration card.
         self._grid_chk = QtWidgets.QCheckBox("Show bin grid")
         self._grid_chk.setToolTip(
-            "Overlay the Rmin/Rmax boundary circles and the full (R, η) "
-            "integration bin grid on the Detector view tab — concentric "
-            "circles at each R-bin edge, spokes at each η-bin edge "
-            "(bounded to η min/max). Thinned to at most ~50 rings / ~72 "
-            "spokes for legibility with fine bin sizes. Unchecking this "
-            "hides the overlay entirely, including Rmin/Rmax.\n\n"
+            "Overlay the (R, η) integration bin grid on the Detector view "
+            "tab: the Rmin/Rmax boundaries, an arc at each R-bin edge and "
+            "a spoke at each η-bin edge.\n\n"
+            "Everything is bounded to η min/max, so the overlay covers the "
+            "region actually being integrated — a limited azimuth draws an "
+            "annulus sector, not the whole ring.\n\n"
+            "Thinned to at most ~50 arcs / ~72 spokes for legibility with "
+            "fine bin sizes. Unchecking this hides the overlay entirely, "
+            "including Rmin/Rmax.\n\n"
             "View-only — has no effect on the integration itself.")
         self._grid_chk.toggled.connect(self._refresh_detector_preview)
         self._view_tabs = QtWidgets.QTabWidget()
@@ -1660,6 +1901,7 @@ class BatchTab(QtWidgets.QWidget):
         # η-collapsed profile the other two views show.
         self._cake_stack_view = CakeStackViewer()
         self._det_view = ImageViewer()
+        self._det_view.set_radial_readout_fn(self._radial_readout)
         self._origin_btn = OriginToolButton(self._det_view)
         self._det_view._toolbar_layout.addWidget(self._origin_btn)
         self._det_view._toolbar_layout.addWidget(self._grid_chk)
@@ -1691,21 +1933,36 @@ class BatchTab(QtWidgets.QWidget):
         self._view_tabs.addTab(self._waterfall, "Waterfall")
         self._view_tabs.addTab(self._stack_view, "Stacked profiles")
         self._view_tabs.addTab(self._cake_stack_view, "Eta-R cakes")
-        # Logs tab: background-job rows (JobQueuePanel) above one shared log
-        # surface, used by both the in-process run and the currently-focused
+        # Background-job rows (JobQueuePanel) above one shared log surface,
+        # used by both the in-process run and the currently-focused
         # background job's tailed output.
+        #
+        # PERMANENTLY VISIBLE beneath the view tabs rather than being a
+        # "Logs" tab of its own (which is what this was until 2026-10-12).
+        # A tab hides exactly the thing you want in view while watching a
+        # run: the log is where every warning, skip and failure is reported,
+        # and a background job's progress row is only actionable — Reattach,
+        # Cancel — if you can see it without first leaving the plot you are
+        # looking at. The Hydra page has always laid it out this way; this
+        # makes the two pages match.
         self._log = LogPanel()
         self._log.setMaximumHeight(16_777_215)   # let the layout size it
         self._job_queue = JobQueuePanel(self._log, on_job_done=self._on_job_done)
-        self._logs_tab = QtWidgets.QWidget()
-        logs_tab_layout = QtWidgets.QVBoxLayout(self._logs_tab)
-        logs_tab_layout.setContentsMargins(4, 4, 4, 4)
-        logs_tab_layout.setSpacing(4)
-        logs_tab_layout.addWidget(self._job_queue)
-        logs_tab_layout.addWidget(self._log, 1)
-        self._view_tabs.addTab(self._logs_tab, "Logs")
         self._view_tabs.setMinimumWidth(320)
-        split.addWidget(self._view_tabs)
+        right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        right.addWidget(self._view_tabs)
+        log_host = QtWidgets.QWidget()
+        log_box = QtWidgets.QVBoxLayout(log_host)
+        log_box.setContentsMargins(0, 0, 0, 0)
+        log_box.setSpacing(4)
+        log_box.addWidget(self._job_queue)
+        log_box.addWidget(self._log, 1)
+        right.addWidget(log_host)
+        # A splitter, not a fixed layout: the log is permanent but its share
+        # is the user's call — dragged tall to read a traceback, or down to
+        # a sliver while watching the plots.
+        right.setStretchFactor(0, 4); right.setStretchFactor(1, 1)
+        split.addWidget(right)
         split.setStretchFactor(0, 0); split.setStretchFactor(1, 0); split.setStretchFactor(2, 1)
         split.setSizes([286, 361, 950])
 
@@ -1763,39 +2020,153 @@ class BatchTab(QtWidgets.QWidget):
         data that's actually loaded. Returns None when no source is loaded.
         """
         src_cfg = self._loader.source_cfg()
+        expid = self._expid_provider().strip() if self._expid_provider else ""
+        # Spanning folders, there is no single answer -- suggest the root they
+        # share. group_paths_by_output_dir rebases onto it and reproduces the
+        # per-folder dirs exactly, so the field stays both honest and usable.
+        dirs = self._output_group_dirs()
+        if len(dirs) > 1:
+            import os
+            return Path(os.path.commonpath([str(d) for d in dirs]))
         rep = src_cfg.get("path")
         if not rep:
             paths = src_cfg.get("paths") or []
             rep = paths[0] if paths else None
         if not rep:
             return None
-        expid = self._expid_provider().strip() if self._expid_provider else ""
         return suggest_integration_output_dir(rep, expid_fallback=expid)
 
+    def _output_group_dirs(self) -> list:
+        """The output directories the current selection implies -- one per
+        source folder, empty when nothing is loaded. More than one means a
+        run will fan out rather than write to the Output field itself."""
+        try:
+            src_cfg = self._loader.source_cfg()
+        except Exception:
+            return []
+        paths = src_cfg.get("paths") or []
+        if len(paths) < 2:
+            return []
+        expid = self._expid_provider().strip() if self._expid_provider else ""
+        groups = group_paths_by_output_dir(paths, out_dir=None, expid_fallback=expid)
+        return [d for d, _f in groups if d is not None]
+
+    def _update_output_multi_hint(self) -> None:
+        """Say, next to the Output field, when the run will fan out."""
+        lbl = getattr(self, "_out_multi_lbl", None)
+        if lbl is None:
+            return
+        dirs = self._output_group_dirs()
+        if len(dirs) > 1:
+            lbl.setText(
+                f"Selection spans {len(dirs)} source folders — output does NOT "
+                f"go to this folder. Each source folder gets its own "
+                f"&lt;froot&gt;/&lt;detector&gt; directory under it, e.g. "
+                f"{Path(dirs[0]).parent.name}/{Path(dirs[0]).name}. "
+                f"A background job runs them in order within one session.")
+            lbl.setVisible(True)
+        else:
+            lbl.setVisible(False)
+
+    def _set_output_dir_suggested(self, suggested) -> None:
+        """Write a path WE derived into the Output field, and remember it.
+
+        Recording it is what lets a later data load tell this tab's own
+        leftover from a folder the user typed or browsed to (see
+        :meth:`_maybe_autofill_output_dir`). Everything that fills the field
+        on the GUI's own initiative goes through here; the … browse button
+        and project/session restore deliberately do not, so what they put
+        there is treated as the user's and never overwritten.
+        """
+        self._out_ed.setText(str(suggested))
+        self._autofilled_out = str(suggested)
+        reason = check_output_dir_writable(suggested)
+        if reason:
+            self._log.append(f"[batch] Warning: {reason}")
+
     def _apply_suggested_output_dir(self):
+        """The Suggest button: overwrite whatever is there, on request."""
         suggested = self._suggest_output_dir()
         if suggested is not None:
-            self._out_ed.setText(str(suggested))
-            reason = check_output_dir_writable(suggested)
-            if reason:
-                self._log.append(f"[batch] Warning: {reason}")
+            self._set_output_dir_suggested(suggested)
         else:
             self._log.append("[batch] No data source loaded yet — nothing to suggest.")
 
     def _maybe_autofill_output_dir(self):
-        """Auto-fill the Output folder once a source loads, unless the user
-        already typed/picked one — unlike mpe_wf's own GUIs (which only ever
-        hint via placeholder text and never auto-fill), MIDAS_GUI fills this
-        in live since there's no separate confirm-and-launch step to catch
-        a wrong guess."""
-        if self._out_ed.text().strip():
-            return
+        """Keep the Output folder pointing at the loaded source's own
+        ``<outroot>/<expid>_bc/<froot>/<detector>``, without ever discarding a
+        folder the user chose.
+
+        This used to fill only while the field was empty, which in practice
+        meant never: the loader opens the bundled sample data during
+        construction, so by the time any real data was loaded the field
+        already held the sample's path and the guard returned early. Measured
+        on a fresh tab -- the field read
+        ``…/MIDAS_GUI_bc/nickel_tifs/test_data`` and stayed there through
+        every subsequent load, so results went to whatever folder the last
+        run (or the sample data) had named.
+
+        So the test is now provenance, not emptiness: replace the value when
+        it is still the one we put there, leave it alone the moment the user
+        has typed or browsed to something of their own. Clearing the field by
+        hand asks for a fresh suggestion, which is the obvious reading of an
+        emptied box.
+
+        Unlike mpe_wf's own GUIs (which only hint via placeholder text and
+        never auto-fill), MIDAS_GUI fills this in live since there's no
+        separate confirm-and-launch step to catch a wrong guess.
+        """
+        current = self._out_ed.text().strip()
+        if current and current != (self._autofilled_out or ""):
+            return                      # the user's own choice -- never touch
         suggested = self._suggest_output_dir()
-        if suggested is not None:
-            self._out_ed.setText(str(suggested))
-            reason = check_output_dir_writable(suggested)
-            if reason:
-                self._log.append(f"[batch] Warning: {reason}")
+        if suggested is None or str(suggested) == current:
+            self._update_output_multi_hint()
+            return
+        self._set_output_dir_suggested(suggested)
+        self._update_output_multi_hint()
+
+    def _confirm_detector_size(self, spec) -> bool:
+        """Catch a calibration whose detector size does not match the data
+        BEFORE the run starts. Returns False to cancel.
+
+        Without this the mismatch surfaces as a bare backend exception part
+        way into the batch -- "image shape (402, 1024) does not match geometry
+        (2048, 2048)" out of midas_integrate_v2.binning.subpixel -- which says
+        nothing about which of the two is wrong or where to fix it. The
+        Detector-view tab already logs a warning when it has a frame to
+        compare, but that is a line in the Logs pane, not something that stops
+        a run being launched.
+
+        Only advisory: a transposed non-square detector can legitimately read
+        either way round, so both orientations are accepted, and an
+        unreadable/absent preview frame never blocks the run.
+        """
+        try:
+            frame = self._loader.current_frame()
+            if frame is None:
+                return True
+            shape = tuple(int(v) for v in frame.shape[-2:])
+            NY, NZ = int(spec.NrPixelsY), int(spec.NrPixelsZ)
+        except Exception:
+            return True       # a preflight check must never be what breaks a run
+        if shape in ((NZ, NY), (NY, NZ)):
+            return True
+        btn = QtWidgets.QMessageBox.warning(
+            self, "Detector size mismatch",
+            f"The calibration describes a {NY}x{NZ} px detector, but the data "
+            f"is {shape[1]}x{shape[0]} px.\n\n"
+            f"Integration will fail in the backend with \"image shape {shape} "
+            f"does not match geometry ({NZ}, {NY})\".\n\n"
+            f"This usually means the geometry was saved while a calibration "
+            f"for a different detector was loaded \u2014 the detector size "
+            f"(and the RhoD the distortion terms are normalised by) came from "
+            f"that calibration rather than from this data. Re-save the "
+            f"geometry in the Data Viewer with this data loaded, or pick a "
+            f"calibration that matches.",
+            QtWidgets.QMessageBox.Cancel | QtWidgets.QMessageBox.Ignore,
+            QtWidgets.QMessageBox.Cancel)
+        return btn == QtWidgets.QMessageBox.Ignore
 
     def _run(self):
         if self._worker and self._worker.isRunning():
@@ -1816,6 +2187,9 @@ class BatchTab(QtWidgets.QWidget):
                 self, "No data",
                 "Select a data folder/glob, HDF5 file, or file selection."); return
 
+        if not self._confirm_detector_size(spec):
+            return
+
         kernel = self._kernel.currentData()
         corrections = self._corr_widget.build_corrections()
         variance_cfg = ({"error_model": self._err_model.currentText()}
@@ -1825,6 +2199,30 @@ class BatchTab(QtWidgets.QWidget):
             variance_cfg = None
 
         out_dir = self._out_ed.text().strip() or None
+        # The <expid>_bc/<froot>/<detector> convention reads froot off each
+        # file's OWN path, so a selection spanning folders implies several
+        # output dirs. Applying it once sent every load step's output to the
+        # first file's folder; run one batch per folder instead, which is the
+        # layout picking each folder by hand already produces. A selection
+        # implying one dir yields one group and the original code path.
+        if not self._pending_groups:
+            groups = group_paths_by_output_dir(
+                src_cfg.get("paths") or [], out_dir=out_dir)
+            if len(groups) > 1:
+                self._pending_groups = list(groups)
+                self._group_tally = {"total": len(groups), "done": 0, "frames": 0}
+                self._log.append(
+                    f"[batch] Selection spans {len(groups)} source folders — "
+                    f"running one batch per folder, each to its own output dir.")
+        if self._pending_groups:
+            gdir, gpaths = self._pending_groups.pop(0)
+            src_cfg = dict(src_cfg)
+            src_cfg["paths"] = list(gpaths)
+            if gdir:
+                out_dir = str(gdir)
+            done = self._group_tally["total"] - len(self._pending_groups)
+            self._log.append(f"[batch] folder {done}/{self._group_tally['total']}: "
+                             f"{len(gpaths)} file(s) → {out_dir}")
         if out_dir:
             reason = check_output_dir_writable(out_dir)
             if reason:
@@ -1832,18 +2230,28 @@ class BatchTab(QtWidgets.QWidget):
                 return
         self._last_run_out_dir = out_dir
         fmts = self._fmt.checked_keys()
-        q_cfg = ({"QMin": self._q_min.value(), "QMax": self._q_max.value(),
-                  "QBinSize": self._q_bin.value()} if self._q_mode_active() else None)
+        q_cfg = self._rebin_cfg()
         omega_cfg = self._omega_cfg()
         multi_azimuth = self._multi_azimuth_chk.isChecked()
         if multi_azimuth and q_cfg:
             QtWidgets.QMessageBox.warning(
                 self, "Incompatible options",
-                "Multi-azimuth output isn't supported together with "
-                "Q-uniform bins yet. Uncheck Multi-azimuth output, or set "
-                "Bin type back to Radial."); return
+                f"Multi-azimuth output isn't supported together with "
+                f"{self._rebin_label()}-uniform bins yet. Uncheck "
+                f"Multi-azimuth output, or set Bin type back to Radial."); return
         lsd, px, wl = float(spec.Lsd), float(spec.pxY), float(spec.Wavelength)
-        _axctx = (lsd, px, wl, "Q" if q_cfg else "R")
+        # Native unit is R px in ALL THREE modes. Q- and 2θ-uniform are
+        # rebins of an R-uniform integration (workers.rebin_R_to_grid), and
+        # the axis that travels with a rebinned profile is
+        # workers.rebin_grid_and_r's SECOND return value — the R in pixels
+        # of each output bin — not the Q/2θ grid itself. Declaring "Q"
+        # here told _convert_radial to read
+        # those pixel values as Å⁻¹: x·λ/4π then exceeds 1 for any real
+        # radius, clips, and every bin comes out at 2θ = 180° exactly, which
+        # converts back to R = Lsd·tan(180°)/px ≈ -2.26e-11. That is the
+        # flat-line waterfall and the 2θ = 180 lineout reported from the
+        # beamline, and the profiles themselves were never wrong.
+        _axctx = (lsd, px, wl, "R")
 
         # Dark / bright / background fields (from the loader)
         for sel in self._loader.has_pending_fields():
@@ -1877,6 +2285,13 @@ class BatchTab(QtWidgets.QWidget):
         self._cake_stack_view.set_axis_context(lsd, px, wl)
         self._view_tabs.setCurrentWidget(self._waterfall)
         self._log.append("─" * 40 + "\nStarting batch integration…")
+        self._open_screen_log("integrate", {
+            "Formats": ", ".join(self._fmt.checked_keys()) or "(none)",
+            "Kernel": self._kernel.currentData(),
+            "Output": self._out_ed.text().strip() or "(none)",
+            "Zarr group": self._zarr_grouping_key(),
+            "Run mode": self._run_mode.currentData(),
+        })
 
         # Frame range (from the loader)
         frame_range = self._loader.frame_range()
@@ -1907,6 +2322,8 @@ class BatchTab(QtWidgets.QWidget):
             "mask_sources": self._loader.get_state().get("mask"),
             "r_bin": self._r_bin.value(), "e_bin": self._e_bin.value(),
             "multi_azimuth": multi_azimuth,
+            "zarr_grouping": self._zarr_grouping_key(),
+            "ion_csv_extras": list(self._ion_csv_extras()),
         }
         self._last_axis_ctx = (lsd, px, wl)
         # Stashed for the Save button, which runs long after this method
@@ -1935,12 +2352,14 @@ class BatchTab(QtWidgets.QWidget):
             dark=dark, bright=bright, background=background, bright_mode=bright_mode,
             weighted=weighted, context=context, im_trans=self._resolved_im_trans(),
             multi_azimuth=multi_azimuth, calibration_snapshot=calib_snapshot,
+            zarr_grouping=self._zarr_grouping_key(),
+            ion_csv_extras=self._ion_csv_extras(),
             run_mode=self._run_mode.currentData(), n_workers=self._n_workers.value())
         self._worker.progress.connect(self._on_progress)
         self._worker.frame_done.connect(self._on_frame)
         self._worker.finished.connect(self._on_done)
         self._worker.failed.connect(self._on_fail)
-        self._worker.log_line.connect(self._log.append)
+        self._worker.log_line.connect(self._emit)
         self._worker.geom_ready.connect(lambda ctx, s=sig: self._cache_geom(s, ctx))
         self._worker.start()
 
@@ -1951,6 +2370,11 @@ class BatchTab(QtWidgets.QWidget):
         disk first: the background process (a fresh `python -m
         midas_gui.batch_cli`) has no access to this GUI's live state."""
         try:
+            # Called for validation — the background process rebuilds its own
+            # spec from the snapshot on disk, so this one never reaches the
+            # job itself; it is only what reports a bad calibration (and, just
+            # below, a detector-size mismatch) up front, rather than letting
+            # the detached job fail where nobody sees it.
             spec = self._build_spec()
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Calibration error", str(e)); return
@@ -1960,6 +2384,12 @@ class BatchTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(
                 self, "No data",
                 "Select a data folder/glob, HDF5 file, or file selection."); return
+
+        # Same up-front check as the foreground run -- more important here,
+        # not less: a detached job that dies on frame 1 fails where nobody is
+        # watching for it.
+        if not self._confirm_detector_size(spec):
+            return
 
         out_dir = self._out_ed.text().strip()
         if not out_dir:
@@ -1971,6 +2401,21 @@ class BatchTab(QtWidgets.QWidget):
         if reason:
             QtWidgets.QMessageBox.critical(self, "Output folder not writable", reason)
             return
+        # A selection spanning source folders maps to one output dir per
+        # folder (see _run / group_paths_by_output_dir). batch_cli takes a
+        # single --out-dir, so each folder needs its own invocation; they are
+        # chained into ONE screen session rather than launched as N competing
+        # jobs. out_dir itself stays the root for the job's shared sidecar
+        # files (calibration snapshot, mask, dark/bright) and its queue entry.
+        groups = group_paths_by_output_dir(
+            src_cfg.get("paths") or [], out_dir=out_dir)
+        if len(groups) > 1:
+            targets = list(groups)
+        else:
+            # One folder, or a glob/single-file source with no path list:
+            # exactly the single-run command this has always produced.
+            targets = [(Path(out_dir), src_cfg.get("paths") or [])]
+
         out_path = Path(out_dir)
         out_path.mkdir(parents=True, exist_ok=True)
 
@@ -1985,18 +2430,13 @@ class BatchTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(
                 self, "No format", "Check at least one output format first."); return
         multi_azimuth = self._multi_azimuth_chk.isChecked()
-        if multi_azimuth and self._q_mode_active():
+        rebin_cfg = self._rebin_cfg()
+        if multi_azimuth and rebin_cfg:
             QtWidgets.QMessageBox.warning(
                 self, "Incompatible options",
-                "Multi-azimuth output isn't supported together with "
-                "Q-uniform bins yet. Uncheck Multi-azimuth output, or set "
-                "Bin type back to Radial."); return
-        if self._q_mode_active():
-            QtWidgets.QMessageBox.warning(
-                self, "Not supported in background jobs yet",
-                "Q-uniform bins aren't wired into background jobs yet.\n"
-                "Set Bin type back to Radial, or use 'Start Integration' "
-                "for an in-process run."); return
+                f"Multi-azimuth output isn't supported together with "
+                f"{self._rebin_label()}-uniform bins yet. Uncheck "
+                f"Multi-azimuth output, or set Bin type back to Radial."); return
 
         import tifffile
         from midas_gui.helpers import write_standalone_paramstest
@@ -2023,19 +2463,33 @@ class BatchTab(QtWidgets.QWidget):
         if self._r_max.value():
             argv += ["--r-max", str(self._r_max.value())]
 
-        if src_cfg["type"] == "tiff_glob":
-            argv += ["--source-type", "tiff_glob", "--source-path", src_cfg["path"]]
-        elif src_cfg["type"] == "hdf5":
-            argv += ["--source-type", "hdf5", "--source-path", src_cfg["path"],
-                     "--dataset", src_cfg.get("dataset", "frames")]
-        elif src_cfg["type"] == "hdf5_stack_glob":
-            argv += ["--source-type", "hdf5_stack_glob", "--source-paths", *src_cfg["paths"],
-                     "--dataset", src_cfg.get("dataset", "exchange/data")]
-        else:
-            argv += ["--source-type", "tiff_list", "--source-paths", *src_cfg["paths"]]
+        # The source files and the output dir are the ONLY per-folder parts;
+        # everything else below is shared, so these are appended last, once
+        # per target. A glob/single-file source has no per-folder split and
+        # ignores gpaths entirely.
+        def _target_args(gpaths, gdir):
+            a = []
+            if src_cfg["type"] == "tiff_glob":
+                a += ["--source-type", "tiff_glob", "--source-path", src_cfg["path"]]
+            elif src_cfg["type"] == "hdf5":
+                a += ["--source-type", "hdf5", "--source-path", src_cfg["path"],
+                      "--dataset", src_cfg.get("dataset", "frames")]
+            elif src_cfg["type"] == "hdf5_stack_glob":
+                a += ["--source-type", "hdf5_stack_glob", "--source-paths", *gpaths,
+                      "--dataset", src_cfg.get("dataset", "exchange/data")]
+            else:
+                a += ["--source-type", "tiff_list", "--source-paths", *gpaths]
+            return a + ["--out-dir", str(gdir)]
 
-        argv += ["--out-dir", str(out_path), "--fmts", ",".join(fmts),
-                 "--kernel", self._kernel.currentData()]
+        argv += ["--fmts", ",".join(fmts), "--kernel", self._kernel.currentData()]
+        # Output rebin (Bin type = Q or 2theta). The underlying integration
+        # grid is still R-uniform in every case -- these only resample the
+        # finished profile, exactly as the in-process run does.
+        if rebin_cfg:
+            argv += ["--rebin-unit", rebin_cfg["unit"],
+                     "--rebin-min", str(rebin_cfg["min"]),
+                     "--rebin-max", str(rebin_cfg["max"]),
+                     "--rebin-step", str(rebin_cfg["step"])]
 
         # start/end are FILE/SCAN NUMBERS (batch_cli.py's --frame-start/
         # --frame-end match this meaning now); chunk_size/combine_op are
@@ -2068,6 +2522,16 @@ class BatchTab(QtWidgets.QWidget):
             argv += ["--ome-channel", ome["channel"]]
         if ome["collapse"]:
             argv += ["--ome-collapse"]
+        # Same reasoning as the omega block above: the job cannot see the
+        # combo, so an omitted flag would silently fall back to per-frame
+        # archives and the two run paths would disagree.
+        argv += ["--zarr-grouping", self._zarr_grouping_key()]
+        # Same reasoning again: the job cannot see the checkboxes, so an
+        # omitted flag would quietly drop the optional columns on this path
+        # only, and the two run modes would disagree about the same run.
+        extras = self._ion_csv_extras()
+        if extras:
+            argv += ["--ion-csv-extras", ",".join(extras)]
 
         if self._corr_widget.polar_check.isChecked():
             argv += ["--polarization",
@@ -2105,18 +2569,37 @@ class BatchTab(QtWidgets.QWidget):
         except Exception:
             total = self._loader.n_frames() or 1
 
-        job = self._job_queue.launch(argv, name=out_path.name or "batch", total_frames=total,
-                                     out_dir=str(out_path))
+        argvs = [argv + _target_args(gp, gd) for gd, gp in targets]
+        # The results sidecar on the FIRST step only. JobQueuePanel records
+        # one out_dir per job -- targets[0] -- so that is the only step whose
+        # _bg_job_results.npz "Load results" can ever open. Writing one per
+        # step put 196 of them (826 MB) on a beamline share for a 196-folder
+        # sweep, 195 of which were unreachable from the UI.
+        argvs[0] = argvs[0] + ["--results-sidecar"]
+        job = self._job_queue.launch(
+            argvs[0], name=out_path.name or "batch", total_frames=total,
+            out_dir=str(targets[0][0]), extra_argvs=argvs[1:])
         if job is not None:
             self._log.append(f"[batch] Launched background job: {job.session} "
-                             f"(see the Logs tab)")
-            self._view_tabs.setCurrentWidget(self._logs_tab)
+                             f"(see the Background jobs panel below)")
+            if len(targets) > 1:
+                self._log.append(
+                    f"[batch] Selection spans {len(targets)} source folders — "
+                    f"the job runs one integration per folder, in order, "
+                    f"each to its own output dir:")
+                for gd, gp in targets:
+                    self._log.append(f"[batch]     {len(gp):>4} file(s) → {gd}")
+            # No tab to switch to any more — the job row and the log are
+            # both permanently visible below the view tabs.
 
     def _abort(self):
         """Stop the run. First ask the worker to stop cooperatively (clean finish
         with a summary); if it does not stop quickly, detach + terminate it and free
         the slot so a new run can start immediately (the orphaned thread winds down
         on its own). Frames already integrated were written to disk as the run went."""
+        # Abort means the sweep, not just the folder in flight -- otherwise
+        # the next group would start the moment this one stopped.
+        self._pending_groups = []
         w = self._worker
         if not (w and w.isRunning()):
             return
@@ -2157,18 +2640,115 @@ class BatchTab(QtWidgets.QWidget):
         self._run_btn.setEnabled(True)
         self._abort_btn.setEnabled(False); self._abort_btn.setText("Abort")
 
+    # ── persistent run log (see midas_gui.run_log) ──────────────────
+
+    def _emit(self, msg: str) -> None:
+        """One line to the Log tab and to this run's on-disk screen log."""
+        self._log.append(msg)
+        if getattr(self, "_screen_log", None) is not None:
+            self._screen_log.write(msg)
+
+    def _open_screen_log(self, kind: str, fields: dict):
+        """Start a run log under ~/midas_runs/midas_screen_logs/<beamline>/
+        <expid>/. Best-effort — a log that cannot be opened costs one line in
+        the Log tab, never the run."""
+        from midas_gui import settings
+        profile = settings.active_profile()
+        expid = self._expid_provider().strip() if self._expid_provider else ""
+        try:
+            src = (self._loader.source_cfg() or {}).get("path")
+        except Exception:
+            src = None
+        self._screen_log = run_log.open_log(
+            kind, profile=profile, expid=expid,
+            stem=Path(src).stem if src else "")
+        if self._screen_log.path is None:
+            self._log.append("[batch] Note: no run log written — "
+                             + (self._screen_log.error or "could not open it"))
+            return
+        if not expid:
+            self._log.append(f"[batch] Note: Exp ID is blank, so this run's "
+                             f"log is filed under {run_log.NO_EXPID}/.")
+        self._screen_log.header("MIDAS GUI — Batch Integrate",
+                                {"Beamline": profile,
+                                 "Experiment": expid or "(blank)",
+                                 "Started": _dt.datetime.now().isoformat(
+                                     timespec="seconds"),
+                                 **fields})
+        self._log.append(f"[batch] Run log: {self._screen_log.path}")
+
+    def _close_screen_log(self) -> None:
+        if getattr(self, "_screen_log", None) is not None:
+            self._screen_log.close()
+            self._screen_log = None
+
+    def _archive_job_log(self, job) -> None:
+        """Copy a finished background job's screenlog into the same tree the
+        in-process run writes to.
+
+        The live file has to stay in JOBS_DIR — job adoption after a GUI
+        restart scans that one fixed location (see job_queue.JOBS_DIR) — so
+        this copies rather than moves. Without it, which run mode you happened
+        to use would decide whether your log was findable.
+        """
+        try:
+            src = Path(getattr(job, "logfile", "") or "")
+            if not src.is_file():
+                return
+            from midas_gui import settings
+            expid = self._expid_provider().strip() if self._expid_provider else ""
+            dest = run_log.log_path("integrate_job",
+                                    profile=settings.active_profile(),
+                                    expid=expid, stem=job.session)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(src.read_bytes())
+            self._log.append(f"[batch] Run log: {dest}")
+        except Exception as exc:
+            self._log.append(f"[batch] Could not archive the job log: {exc}")
+
     def _on_done(self, data):
+        tally = self._group_tally
+        if tally is not None:
+            tally["done"] += 1
+            tally["frames"] += int(data.get("n") or 0)
+            if self._pending_groups and not data.get("aborted", False):
+                self._log.append(
+                    f"[batch] folder {tally['done']}/{tally['total']} done — "
+                    f"{data.get('n')} frames")
+                self._update_cake_stack(data)
+                self._log_to_project(data)
+                # Through the event loop, not directly: this is the finishing
+                # worker's own signal, and _run() reassigns self._worker.
+                QtCore.QTimer.singleShot(0, self._run)
+                return
+            # Last folder, or an abort that ends the sweep: fall through and
+            # report the whole sweep rather than just this folder.
+            self._pending_groups = []
+            self._group_tally = None
+            data = dict(data)
+            data["n"] = tally["frames"]
+            data["_n_folders"] = tally["total"]
         self._reset_run_buttons(); self._prog.setVisible(False)
+        self._close_screen_log()
         n = data["n"]; out = data.get("out_paths", [])
         aborted = data.get("aborted", False)
         verb = "aborted after" if aborted else "Done —"
         msg = f"{verb} {n} frames integrated"
+        # The sweep's shape belongs in the summary whether or not the run
+        # handed back any paths -- it is the thing that distinguishes this
+        # from a single-folder run.
+        if data.get("_n_folders"):
+            msg += f" across {data['_n_folders']} folders"
         if out:
             # Output is now split into per-format subfolders (csv/xye/.../h5/zarr)
             # under the chosen Output dir — report that dir, not one file's
             # own parent, so the message doesn't just name whichever format
             # happened to run last.
-            msg += f"\nSaved to: {self._out_ed.text().strip() or Path(out[0]).parent}"
+            if data.get("_n_folders"):
+                msg += ("\nSaved to one output dir per source folder "
+                        "(see the log for each).")
+            else:
+                msg += f"\nSaved to: {self._out_ed.text().strip() or Path(out[0]).parent}"
         if (self._last_run_inputs.get("multi_azimuth")
                 and "h5" in (self._last_run_inputs.get("fmt") or [])):
             msg += ("\nNote: HDF5 wasn't written — it isn't supported in "
@@ -2254,6 +2834,9 @@ class BatchTab(QtWidgets.QWidget):
 
     def _on_fail(self, msg):
         self._reset_run_buttons(); self._prog.setVisible(False)
+        if getattr(self, "_screen_log", None) is not None:
+            self._screen_log.write("ERROR:\n" + msg)
+        self._close_screen_log()
         show_error(self, "Integration failed", msg, log=self._log, log_prefix="\nERROR:\n")
 
     def _clear_results(self):
@@ -2411,10 +2994,9 @@ class BatchTab(QtWidgets.QWidget):
                         if self._var_check.isChecked() else None)
         if variance_cfg and self._corr_widget.any_enabled():
             variance_cfg = None
-        q_cfg = ({"QMin": self._q_min.value(), "QMax": self._q_max.value(),
-                  "QBinSize": self._q_bin.value()} if self._q_mode_active() else None)
-        _axctx = (float(spec.Lsd), float(spec.pxY), float(spec.Wavelength),
-                  "Q" if q_cfg else "R")
+        q_cfg = self._rebin_cfg()
+        # "R" in both modes — see the note at the other set_axis_context site.
+        _axctx = (float(spec.Lsd), float(spec.pxY), float(spec.Wavelength), "R")
         self._stack_view.set_axis_context(*_axctx)
         self._waterfall.set_axis_context(*_axctx)
         weighted = bool(self._azim.currentData())

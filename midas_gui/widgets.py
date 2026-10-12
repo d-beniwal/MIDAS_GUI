@@ -141,6 +141,11 @@ class ImageViewer(QtWidgets.QWidget):
     #: be rebuilt on this; everything anchored to (row, col) needs nothing.
     originChanged = QtCore.pyqtSignal(str)
 
+    #: The lab-frame rotation changed. Overlays the owner draws itself (the
+    #: predicted rings, the lab-frame compass) must be re-transformed or
+    #: rebuilt on this; the viewer re-transforms its own.
+    labRotationChanged = QtCore.pyqtSignal()
+
     def __init__(self, parent=None, title=""):
         super().__init__(parent)
         pg.setConfigOptions(background="k", foreground="w")
@@ -222,6 +227,9 @@ class ImageViewer(QtWidgets.QWidget):
             "font-size:12px; padding:2px 6px; border-top:1px solid #444;")
         layout.addWidget(self._coord_bar)
 
+        #: Panel-pixel -> lab-frame display map, or None for "unrolled".
+        #: See :meth:`set_lab_rotation`.
+        self._lab_tf = None
         self._data: Optional[np.ndarray] = None
         # Last cursor position, in image (col, row) coordinates, or None when
         # the cursor is not over this viewer. Remembered so the readout can be
@@ -230,6 +238,9 @@ class ImageViewer(QtWidgets.QWidget):
         # and the bar used to fall back to its "Move cursor over image"
         # placeholder on every one of them.
         self._hover_xy: Optional[tuple] = None
+        # Optional owner-supplied fn(col, row) -> str appended to the readout.
+        # See set_radial_readout_fn.
+        self._radial_readout_fn = None
         self._manual_levels: Optional[tuple] = None
         self._manual_hist_range: Optional[tuple] = None
         self._suspend_level_track = False
@@ -278,14 +289,106 @@ class ImageViewer(QtWidgets.QWidget):
         ``self._cur = viewer.set_raw_frame(raw, im_trans)`` in one line.
 
         Use plain ``set_image`` instead when the array is already in its
-        final display orientation (e.g. Mask Builder, which deliberately
-        works in raw-frame space throughout — see ``tab_mask.py``) or has
-        no associated calibration geometry at all.
+        final display orientation, or has no associated calibration geometry
+        at all. The Mask Builder used to be the standing exception — it
+        worked in raw-frame space throughout — but it now comes through here
+        too, mirroring the Data Viewer's codes, so the detector is not shown
+        one way up in one tab and another way up in the next. Its *mask*
+        is still raw-frame; only the picture is transformed. See
+        ``tab_mask.set_display_transform``.
         """
         codes = tuple(im_trans or ())
         frame = _apply_im_trans(raw_frame, codes) if codes else raw_frame
         self.set_image(frame, autorange=autorange, reset_levels=reset_levels)
         return frame
+
+    def set_lab_rotation(self, tx_deg: float, bc_y: float, bc_z: float) -> None:
+        """Draw the frame as the detector is actually mounted.
+
+        ``tx`` is the panel's installation azimuth about the beam, not a small
+        tilt, so a rolled panel's image is a rolled picture of the lab. Left
+        unrotated, the display disagrees with the coordinate system every
+        other number on screen is quoted in.
+
+        A display transform only, in the spirit of :meth:`set_origin`:
+        **nothing stored, emitted or fitted leaves panel (row, col) space.**
+        The rotation goes on the ``ImageItem``, which buys two things for
+        free. ``pyqtgraph``'s ROI machinery already routes through that item
+        (``roi.getArrayRegion(data.T, imgitem)``, and ``_raster_roi_mask``'s
+        ``imgitem.mapFromScene(...)``), so box/line ROIs keep working with no
+        changes at all; and ``mapFromView`` gives an exact inverse for the
+        pick/readout boundary rather than a hand-rolled one.
+
+        The map is MEASURED against ``helpers._tilt_project_YZ`` rather than
+        derived on paper (8 azimuths, max error 2e-13 px)::
+
+            lab_Y = BC_y + dY*cos(tx) + dZ*sin(tx)
+            lab_Z = BC_z - dY*sin(tx) + dZ*cos(tx)      d = panel - BC
+
+        A whole turn is identity, so an unrolled detector -- every detector
+        that has ever worked here -- gets ``None`` and a byte-identical path.
+        """
+        tf = None
+        if bc_y is not None and bc_z is not None:
+            try:
+                a = math.radians(float(tx_deg) % 360.0)
+            except (TypeError, ValueError):
+                a = 0.0
+            if abs(a) > 1e-12 and abs(a - 2 * math.pi) > 1e-12:
+                c, sn = math.cos(a), math.sin(a)
+                by, bz = float(bc_y), float(bc_z)
+                tf = QtGui.QTransform(c, -sn, sn, c,
+                                       by - c * by - sn * bz,
+                                       bz + sn * by - c * bz)
+        if tf == self._lab_tf:
+            return
+        self._lab_tf = tf
+        for it in (self._iv.getImageItem(), self._overlay):
+            self.apply_lab_transform(it)
+        # The picture has moved -- on a panel whose beam centre is off the
+        # frame it can move clean outside the old bounds. Limits computed
+        # before the rotation would pin the view to where the image USED to
+        # be; see _apply_view_limits.
+        self.refresh_view_limits()
+        self.labRotationChanged.emit()
+
+    def lab_transform(self):
+        """The panel->lab display map, or ``None`` when the frame is drawn
+        unrotated. Owners that place their own overlays in panel pixel
+        coordinates pass each one to :meth:`apply_lab_transform`."""
+        return self._lab_tf
+
+    def apply_lab_transform(self, item) -> None:
+        """Put ``item`` -- positioned in panel pixel coordinates -- into the
+        lab frame alongside the image.
+
+        Needed by anything added straight to the ViewBox rather than through
+        the ImageItem. NOT for the lab-frame compass, which already points at
+        the hutch, nor for the cursor crosshairs, which track the pointer in
+        view space.
+        """
+        if item is None:
+            return
+        try:
+            item.setTransform(self._lab_tf if self._lab_tf is not None
+                              else QtGui.QTransform())
+        except Exception:
+            pass    # not every pg item accepts one; never take the view down
+
+    def panel_xy(self, view_pt):
+        """A point in view coordinates as panel ``(col, row)``.
+
+        The one inverse in the codebase: every pick and the pixel readout
+        come through here, so everything downstream keeps working in the
+        frame the geometry is fitted and saved in.
+        """
+        if self._lab_tf is not None:
+            try:
+                p = self._iv.getImageItem().mapFromView(view_pt)
+                return p.x(), p.y()
+            except Exception:
+                pass
+        return view_pt.x(), view_pt.y()
 
     def set_origin(self, origin: str) -> None:
         """Choose which screen corner pixel (0,0) is drawn in.
@@ -358,21 +461,76 @@ class ImageViewer(QtWidgets.QWidget):
             self._redisplay()
 
     def _apply_view_limits(self, w: int, h: int):
-        """Bound pan/zoom to a sane region around the image so the user can't
-        scroll/zoom out into an empty void or lose the image off-screen."""
+        """Bound pan/zoom to a sane region around the CONTENT so the user
+        can't scroll out into an empty void -- but can always reach
+        everything that is actually drawn.
+
+        The bound used to be ``(0, 0, w, h)`` plus half the image span --
+        the raw ARRAY shape, which is only where the picture is when it is
+        drawn untransformed at the origin. ``set_lab_rotation`` puts the
+        ImageItem through a rotation about the beam centre, and that beam
+        centre can be off the panel entirely, so the displayed image can
+        land nowhere near the array's nominal rectangle.
+
+        A Hydra ge4 opened on the Calibrate tab is the case that forced
+        this: tx = 210 deg about BC = (2387, 2190) on a 2048x2048 frame
+        sends the picture to x in [2751, 5548], while the limits computed
+        from w and h stopped at 3072. Eleven percent of the image width was
+        reachable and the rest could not be panned to at all -- reported as
+        "I still cannot scroll over to see ge4 detector image", with the
+        black expanse on screen being empty canvas where the array's
+        rectangle used to be.
+
+        So the box comes from ``childrenBounds``, which reports where the
+        items ACTUALLY are, transforms included, and needs no knowledge of
+        what they are -- overlays drawn around an off-panel centre come
+        along for free. The array rectangle is only the fallback, for before
+        anything is in the view. Items are often added after the frame, so a
+        caller that adds more should call :meth:`refresh_view_limits`;
+        ``set_lab_rotation`` already does.
+
+        Zoom-IN granularity stays keyed to the image span, not the bounds:
+        how far you may magnify is a property of the pixels, and letting a
+        far-flung overlay coarsen it would be a regression everywhere else.
+        """
         if w <= 0 or h <= 0:
             return
+        self._limit_img_wh = (int(w), int(h))
         span = max(w, h)
-        pad = span * 0.5
+        x_lo, y_lo, x_hi, y_hi = 0.0, 0.0, float(w), float(h)
         vb = self._iv.getView().getViewBox()
+        try:
+            (cx_lo, cx_hi), (cy_lo, cy_hi) = vb.childrenBounds()
+            if (cx_lo is not None and cx_hi is not None
+                    and math.isfinite(cx_lo) and math.isfinite(cx_hi)
+                    and cy_lo is not None and cy_hi is not None
+                    and math.isfinite(cy_lo) and math.isfinite(cy_hi)
+                    and cx_hi > cx_lo and cy_hi > cy_lo):
+                x_lo, x_hi, y_lo, y_hi = cx_lo, cx_hi, cy_lo, cy_hi
+        except Exception:
+            pass                         # no items yet, or a pg version quirk
+        pad = max(x_hi - x_lo, y_hi - y_lo, span) * 0.5
         vb.setLimits(
-            xMin=-pad, xMax=w + pad,
-            yMin=-pad, yMax=h + pad,
+            xMin=x_lo - pad, xMax=x_hi + pad,
+            yMin=y_lo - pad, yMax=y_hi + pad,
             minXRange=max(span * 0.01, 2.0),
             minYRange=max(span * 0.01, 2.0),
-            maxXRange=w + 2 * pad,
-            maxYRange=h + 2 * pad,
+            maxXRange=(x_hi - x_lo) + 2 * pad,
+            maxYRange=(y_hi - y_lo) + 2 * pad,
         )
+
+    def refresh_view_limits(self) -> None:
+        """Recompute the pan/zoom bounds for the items now in the view.
+
+        Overlays are added after the frame, so the limits set by
+        ``set_image`` cannot have seen them. A caller that draws geometry
+        reaching outside the detector -- calibration rings around an
+        off-panel beam centre being the case that forced this -- calls this
+        once it has finished adding items. A no-op before any image.
+        """
+        wh = getattr(self, "_limit_img_wh", None)
+        if wh:
+            self._apply_view_limits(*wh)
 
     def set_mask_overlay(self, mask: Optional[np.ndarray]):
         if mask is None:
@@ -487,9 +645,11 @@ class ImageViewer(QtWidgets.QWidget):
         vb = self._iv.getView().getViewBox()
         if self._iv.getView().sceneBoundingRect().contains(pos):
             mp = vb.mapSceneToView(pos)
-            x, y = mp.x(), mp.y()
-            self._vl.setPos(x); self._hl.setPos(y)
-            self._hover_xy = (x, y)
+            # The crosshair follows the pointer, so it stays in view space;
+            # the readout indexes the array, so it must come back to panel
+            # space. Identical when the frame is drawn unrotated.
+            self._vl.setPos(mp.x()); self._hl.setPos(mp.y())
+            self._hover_xy = self.panel_xy(mp)
             self._refresh_coord_bar()
 
     def leaveEvent(self, ev):
@@ -499,6 +659,29 @@ class ImageViewer(QtWidgets.QWidget):
         before) until the next frame or hover replaces it."""
         self._hover_xy = None
         super().leaveEvent(ev)
+
+    def set_radial_readout_fn(self, fn) -> None:
+        """Supply ``fn(col, row) -> str`` — one clause appended to the pixel
+        readout (2θ / Q / d / η), or ``""`` for none.
+
+        Same arrangement as :meth:`DataLoaderPanel.set_omega_hint_fn`, and for
+        the same reason: placing a pixel in reciprocal space needs a
+        calibration, which belongs to the tab, not to this shared widget.
+        Unset — the default, and every viewer that has no geometry — the bar
+        is byte-identical to what it has always been.
+
+        ``fn`` is called on every hover (rate-limited to 60 Hz by the
+        viewer's ``SignalProxy``) and on every incoming frame, so it must be
+        cheap: no file reads. ``helpers.pixel_readout_text`` is the intended
+        implementation. Exceptions are swallowed and the plain readout shown
+        instead — a half-edited geometry must not take the status bar down.
+
+        Call :meth:`_refresh_coord_bar` after the geometry behind ``fn``
+        changes: the cursor does not move when a fit lands, and
+        ``sigMouseMoved`` only fires on actual motion.
+        """
+        self._radial_readout_fn = fn
+        self._refresh_coord_bar()
 
     def _refresh_coord_bar(self):
         """Re-render the bottom pixel-readout bar from the remembered cursor
@@ -519,9 +702,16 @@ class ImageViewer(QtWidgets.QWidget):
                 # floor, not round (Bug 6)
                 ix, iy = int(self._hover_xy[0]), int(self._hover_xy[1])
                 if 0 <= iy < h and 0 <= ix < w:
+                    extra = ""
+                    if self._radial_readout_fn is not None:
+                        try:
+                            extra = self._radial_readout_fn(ix, iy) or ""
+                        except Exception:
+                            extra = ""
                     return (f"  x (col) = {ix}    y (row) = {iy}    "
                             f"intensity = {self._data[iy, ix]:.4g}    "
-                            f"(image {w}×{h} px)")
+                            + (f"{extra}    " if extra else "")
+                            + f"(image {w}×{h} px)")
             return (f"Image {w}×{h} px  |  "
                     "Move cursor over image to inspect pixel values")
         return "Move cursor over image to inspect pixel values"
@@ -611,6 +801,9 @@ class PickableImageViewer(ImageViewer):
         self._ring_fit_item    = None
         self._ring_fit_center  = None
         self._bc_click_item    = None
+        # Markers are placed in panel pixels and carried into the lab frame
+        # by the shared transform, so they must be re-stamped when it moves.
+        self.labRotationChanged.connect(self._retransform_pick_items)
         self._dsp_pts:         list = []
         #: One entry per pick, each a tuple of the plot items drawn for it
         #: (see _add_dspacing_point) — not a flat item list, so undo/clear
@@ -745,7 +938,10 @@ class PickableImageViewer(ImageViewer):
             return
         vb  = self._iv.getView().getViewBox()
         pos = vb.mapSceneToView(event.scenePos())
-        x, y = pos.x(), pos.y()
+        # Back to panel pixels before anything downstream sees it: the marker
+        # items are placed in panel space and carry the lab transform, and
+        # bcPicked/ringFitBC feed a fit that works in panel space throughout.
+        x, y = self.panel_xy(pos)
         if self._pick_mode == self.PICK_BC:
             self._set_bc_marker(x, y)
             self.bcPicked.emit(x, y)
@@ -755,13 +951,27 @@ class PickableImageViewer(ImageViewer):
         elif self._pick_mode == self.PICK_DSPACING:
             self._add_dspacing_point(x, y)
 
+    def _add_panel_item(self, item):
+        """Add an overlay positioned in panel pixel coordinates."""
+        self._iv.addItem(item)
+        self.apply_lab_transform(item)
+        return item
+
+    def _retransform_pick_items(self):
+        for it in (self._bc_click_item, self._ring_fit_item,
+                   self._ring_fit_center, *self._ring_pt_items):
+            self.apply_lab_transform(it)
+        for items in self._dsp_pt_items:
+            for it in items:
+                self.apply_lab_transform(it)
+
     def _set_bc_marker(self, x: float, y: float):
         if self._bc_click_item is not None:
             self._iv.removeItem(self._bc_click_item)
         self._bc_click_item = pg.ScatterPlotItem(
             [x], [y], symbol="+", size=20,
             pen=pg.mkPen("#00aaff", width=2.5), brush=pg.mkBrush(0, 0, 0, 0))
-        self._iv.addItem(self._bc_click_item)
+        self._add_panel_item(self._bc_click_item)
         self._clear_ring_btn.setEnabled(True)
 
     def _add_ring_point(self, x: float, y: float):
@@ -770,7 +980,7 @@ class PickableImageViewer(ImageViewer):
             [x], [y], symbol="o", size=10,
             pen=pg.mkPen("#2a7fd4", width=1.5),
             brush=pg.mkBrush(42, 127, 212, 180))
-        self._iv.addItem(dot)
+        self._add_panel_item(dot)
         self._ring_pt_items.append(dot)
         self._undo_btn.setEnabled(True)
         self._clear_ring_btn.setEnabled(True)
@@ -834,7 +1044,7 @@ class PickableImageViewer(ImageViewer):
                                   pen=pg.mkPen(color, width=1.5), brush=None)
         items = (halo, core)
         for it in items:
-            self._iv.addItem(it)
+            self._add_panel_item(it)
         self._dsp_pt_items.append(items)
         self._undo_btn.setEnabled(True)
         self._clear_ring_btn.setEnabled(True)
@@ -923,13 +1133,13 @@ class PickableImageViewer(ImageViewer):
         if self._ring_fit_item is not None:
             self._iv.removeItem(self._ring_fit_item)
         self._ring_fit_item = pg.PlotDataItem(xs, ys, pen=pen)
-        self._iv.addItem(self._ring_fit_item)
+        self._add_panel_item(self._ring_fit_item)
         if self._ring_fit_center is not None:
             self._iv.removeItem(self._ring_fit_center)
         self._ring_fit_center = pg.ScatterPlotItem(
             [cx], [cy], symbol="+", size=18,
             pen=pg.mkPen("#2a7fd4", width=2.5), brush=pg.mkBrush(0, 0, 0, 0))
-        self._iv.addItem(self._ring_fit_center)
+        self._add_panel_item(self._ring_fit_center)
         self._pick_status.setText(
             f"{n} pts | fit: BC=({cx:.1f}, {cy:.1f})  R={r:.1f} px → seed updated")
         self.ringFitBC.emit(cx, cy, r)
@@ -1023,7 +1233,32 @@ def _install_manual_axis_capture(plot_widget: "pg.PlotWidget", callback):
 #  Lab-frame axes overlay  (shared builder — see tab_view.py / tab_calibrate.py)
 # ═════════════════════════════════════════════════════════════════════════════
 
-def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> list:
+def lab_eta_screen_dir(eta_deg: float, tx: float = 0.0,
+                       x_screen_sign: float = -1.0):
+    """Unit screen direction ``(right+, up+)`` of lab azimuth ``eta_deg`` on a
+    panel rolled by ``tx`` degrees about the beam.
+
+    The η convention is ``pixel_to_REta``'s -- η=0 is +Y_Lab (MIDAS +Z),
+    straight up on an unrolled panel, and η increases towards +Y_MIDAS. A
+    roll turns the picture under the hutch, so a lab ray at η images at
+    in-plane angle η − tx; see ``helpers.pixel_eta_deg``, which records that
+    offset as measured against the backend rather than derived.
+
+    Module level, and not a closure inside
+    :func:`build_lab_frame_axes_items`, so the compass's idea of where η
+    points can be tested against ``pixel_eta_deg`` without standing up a
+    pyqtgraph view -- these two disagreeing is exactly the bug this
+    argument was added to fix.
+
+    At ``tx=0`` this is ``(sin η, cos η)``, which is what every direction in
+    the compass used to be written out as by hand.
+    """
+    a = math.radians(float(eta_deg)) - math.radians(float(tx or 0.0))
+    return (-x_screen_sign) * math.sin(a), math.cos(a)
+
+
+def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float,
+                               tx: float = 0.0) -> list:
     """MIDAS lab-frame axes overlay: X_Lab/Y_Lab compass, beam-direction
     (Z_Lab) ⊗ glyph, and an η sweep arc, anchored at (bc_y, bc_z) — lets a
     user verify orientation/ImTransOpt by checking a feature lands in the
@@ -1036,7 +1271,7 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
     **The compass is invariant to how the image is displayed.** It describes
     the hutch, not the frame: +Y_Lab (MIDAS +Z) is vertically up in the real
     world and the beam goes into the screen, whatever the user has done to the
-    picture. So the overlay always renders with +X_Lab pointing screen-left and
+    picture. So the overlay renders with +X_Lab pointing screen-left and
     +Y_Lab screen-up — including when the display origin is top-left, which
     inverts the ViewBox's Y axis and would otherwise carry the compass upside
     down with the image. That invariance is the whole point of the overlay: a
@@ -1044,6 +1279,22 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
     frame. Image transforms (Flip Y/Z, Transpose) act on the pixel data and
     never touched these directions; only the beam centre they are anchored at
     moves, which is correct.
+
+    ``tx`` is the detector's installation ROLL about the beam, in degrees,
+    and it is the one thing that genuinely does turn this compass. Rolling
+    the panel does not move the hutch, but it moves where the hutch lands in
+    the picture: a lab ray at azimuth η images at in-plane angle η − tx (the
+    relation ``helpers.pixel_eta_deg`` records as measured against the
+    backend). Drawn without it, every arrow and every η tick is a full tx
+    out — at 1-ID-E the four Hydra panels are installed at tx = 300/30/120/210,
+    so on ge1 the compass claimed η=0 was straight up when the integration
+    puts η=0 sixty degrees round from there, and the caking sector (which IS
+    tx-aware, via ``tilted_spoke_xy``) appeared to contradict the labels
+    beside it.
+
+    It defaults to 0 because most detectors are unrolled and because every
+    direction below is derived from the same helper: at tx=0 the compass is
+    exactly what it was before this argument existed.
 
     The caller must rebuild the items when the display origin changes —
     :class:`ImageViewer` emits ``originChanged`` for exactly that.
@@ -1061,6 +1312,16 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
         H = V = 1.0
     # MIDAS 'bl' convention: +Y_MIDAS (= +X_Lab) points display-left.
     x_screen_sign = -1.0
+
+    def lab_dir(eta_deg: float):
+        return lab_eta_screen_dir(eta_deg, tx, x_screen_sign)
+
+    def anchor_for(sx: float, sy: float):
+        """Anchor the label box on the edge facing the beam centre, so it
+        grows AWAY from the compass instead of straddling the arrow tip."""
+        if abs(sy) >= abs(sx):
+            return (0.5, 1.0 if sy > 0 else 0.0)
+        return (0.0 if sx > 0 else 1.0, 0.5)
 
     xl_color, yl_color, zl_color, eta_color = "#FF3B30", "#34C759", "#0A84FF", "#FFA500"
 
@@ -1122,10 +1383,13 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
         conv = [data_xy(a, b) for a, b in pts]
         return [c[0] for c in conv], [c[1] for c in conv]
 
-    # X_Lab arrow — screen-LEFT.  Y_Lab arrow — screen-UP.
-    xs, ys = shaft_with_head(x_screen_sign * L, 0.0)
+    # X_Lab (lab η=−90) and Y_Lab (lab η=0): screen-left and screen-up on an
+    # unrolled panel, turned by −tx on a rolled one.
+    xdx, xdy = lab_dir(-90.0)
+    ydx, ydy = lab_dir(0.0)
+    xs, ys = shaft_with_head(xdx * L, xdy * L)
     add(pg.PlotDataItem(xs, ys, pen=xl_pen, connect="all"))
-    xs, ys = shaft_with_head(0.0, L)
+    xs, ys = shaft_with_head(ydx * L, ydy * L)
     add(pg.PlotDataItem(xs, ys, pen=yl_pen, connect="all"))
 
     fm = QtGui.QFontMetrics(label_font)
@@ -1160,24 +1424,16 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
     # upright), so every anchor below is a plain screen-space choice — only the
     # positions go through data_xy.
     label_specs = (
-        ("h", "+X<sub>Lab</sub> (+Y<sub>MIDAS</sub>)", "+X_Lab (+Y_MIDAS)",
-         xl_color, "η=−90°"),
-        ("v", "+Y<sub>Lab</sub> (+Z<sub>MIDAS</sub>)", "+Y_Lab (+Z_MIDAS)",
-         yl_color, "η=0°"))
-    for axis_kind, html_body, _plain, axis_color, eta_label in label_specs:
+        (-90.0, max(L + head * 0.6, beam_half_w + 0.6 * line_h),
+         "+X<sub>Lab</sub> (+Y<sub>MIDAS</sub>)", xl_color, "η=−90°"),
+        (0.0, L + head * 0.35,
+         "+Y<sub>Lab</sub> (+Z<sub>MIDAS</sub>)", yl_color, "η=0°"))
+    for axis_eta, radius, html_body, axis_color, eta_label in label_specs:
         html = (f'<span style="color:{axis_color};">{html_body}</span>'
                 f'<br><span style="color:{eta_color};">{eta_label}</span>')
-        # Anchor each box on the edge facing the beam centre, so it grows
-        # *away* from the compass instead of straddling the arrow tip — that
-        # straddling is what pushed these boxes over the ⊗ glyph and the beam
-        # label at low zoom, whatever their font size.
-        if axis_kind == "h":
-            sx = x_screen_sign * max(L + head * 0.6, beam_half_w + 0.6 * line_h)
-            sy = 0.0
-            anchor = (0.0 if sx > 0 else 1.0, 0.5)
-        else:
-            sx, sy = 0.0, L + head * 0.35
-            anchor = (0.5, 1.0)          # box sits above the arrow tip
+        dx, dy = lab_dir(axis_eta)
+        sx, sy = dx * radius, dy * radius
+        anchor = anchor_for(sx, sy)
         lbl = pg.TextItem(html=html, anchor=anchor, border=text_pen, fill=text_fill)
         lbl.setFont(label_font)
         lbl.setPos(*data_xy(sx, sy))
@@ -1213,18 +1469,13 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float) -> lis
     # boxes above — draw only their tick marks here, not a second label.
     _eta_labeled_on_axis = {0.0, -90.0}
     for eta_deg, label in eta_marks:
-        eta_rad = math.radians(eta_deg)
-        sx = (-x_screen_sign) * math.sin(eta_rad)   # screen-right component
-        sy = math.cos(eta_rad)                       # screen-up component
+        sx, sy = lab_dir(eta_deg)
         t0 = data_xy(sx * tick_inner, sy * tick_inner)
         t1 = data_xy(sx * tick_outer, sy * tick_outer)
         add(pg.PlotDataItem([t0[0], t1[0]], [t0[1], t1[1]], pen=arc_pen))
         if eta_deg in _eta_labeled_on_axis:
             continue
-        if abs(sy) >= abs(sx):
-            anchor = (0.5, 1.0 if sy > 0 else 0.0)
-        else:
-            anchor = (0.0 if sx > 0 else 1.0, 0.5)
+        anchor = anchor_for(sx, sy)
         html = f'<span style="color:{eta_color};">{label}</span>'
         lbl = pg.TextItem(html=html, anchor=anchor, border=text_pen, fill=text_fill)
         lbl.setFont(label_font)
@@ -2949,6 +3200,10 @@ class OutputFormatSelector(QtWidgets.QWidget):
     ``CorrectionFlagsWidget``) since that only understands single-value
     widgets — callers wire ``get_state()``/``set_state()`` directly instead.
     """
+    #: emitted whenever the checked set changes, so dependent controls (the
+    #: Batch tab's zarr-grouping combo, which only means anything while
+    #: "zarr" is checked) can follow it without polling.
+    changed = QtCore.pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2996,6 +3251,7 @@ class OutputFormatSelector(QtWidgets.QWidget):
         else:
             names = ", ".join(self._short_names[k] for k in self._checks if k in keys)
             self._btn.setText(f"Output format: {names} ▾")
+        self.changed.emit()
 
     def checked_keys(self) -> list:
         return [key for key, cb in self._checks.items() if cb.isChecked()]
@@ -3233,6 +3489,11 @@ class FieldSelector(QtWidgets.QGroupBox):
                 return
             self._set_explicit_paths(None)
             self._path_ed.setText(paths[0])
+        elif mode == "folder" and dlg.recursive():
+            paths = dlg.paths()
+            if not paths:
+                return
+            self._set_explicit_paths(paths)
         elif mode == "folder":
             self._set_explicit_paths(None)
             self._path_ed.setText(dlg.folder())
@@ -4261,7 +4522,17 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._fr_stride = _NoScrollSpinBox(); self._fr_stride.setRange(1, 100000); self._fr_stride.setValue(1); self._fr_stride.setFixedWidth(64)
             self._fr_stride.setToolTip("Take every Nth frame (1 = every frame).\n\n" + _fr_tip)
             sf = S.Form()
-            sf.row(("start:", self._fr_start), ("end(0=all):", self._fr_end))
+            # "0 = all" is true only for a NON-unify panel, where
+            # frame_range() special-cases `hi > 0` (see there). A
+            # unify_combine panel bakes start/end straight into
+            # source_cfg(), where 0 is taken literally — as raw sub-frame 0
+            # for a single HDF5 file, or file number 0 (matching nothing)
+            # for a multi-file pick. Advertising "0=all" there sent a user
+            # to a single-sub-frame window that silently nullified
+            # "Combine sub-frames".
+            sf.row(("start:", self._fr_start),
+                   ("end:" if self._unify_combine else "end(0=all):",
+                    self._fr_end))
             if not self._unify_combine:
                 sf.row(("stride:", self._fr_stride))
             card.body.addLayout(sf)
@@ -4291,9 +4562,17 @@ class DataLoaderPanel(QtWidgets.QWidget):
                 "integrated frame (mpe_wf's OME_SUM): sub-frames WITHIN one "
                 "HDF5 file for an HDF5 source, or consecutive FILES for a "
                 "TIFF/.ge* folder pick (each such file already holds exactly "
-                "one raw frame). 0 = combine everything selected into one "
-                "frame; 1 = no combining (the default, one frame per raw "
-                "sub-frame/file, same as before this setting existed).\n"
+                "one raw frame). 1 = no combining (the default, one frame "
+                "per raw sub-frame/file, same as before this setting "
+                "existed).\n"
+                "\n"
+                "0 = combine the whole unit, which differs by source because "
+                "the unit does: for an HDF5 source it is EVERY SUB-FRAME IN "
+                "EACH FILE, giving one output frame per file whatever its "
+                "frame count (chunking never crosses a file boundary) \u2014 "
+                "mpe_wf's --avg-full-stack. For a TIFF/.ge* pick there is "
+                "nothing smaller than a file to group, so 0 combines EVERY "
+                "SELECTED FILE into a single output frame.\n"
                 "\n"
                 "This spin box IS the cake parameters' OME_SUM — the 'Cake "
                 "parameters…' dialog edits this widget rather than a copy, "
@@ -4306,7 +4585,8 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._combine_op_combo.addItem("Max", "max")
             self._combine_op_combo.addItem("Median", "median")
             cr.addWidget(self._combine_chunk)
-            cr.addWidget(QtWidgets.QLabel("op:")); cr.addWidget(self._combine_op_combo)
+            self._combine_op_lbl = QtWidgets.QLabel("op:")
+            cr.addWidget(self._combine_op_lbl); cr.addWidget(self._combine_op_combo)
             cr.addStretch(1)
             self._combine_row.setVisible(self._unify_combine)
             card.body.addWidget(self._combine_row)
@@ -4442,6 +4722,12 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._set_explicit_paths(None)
             self._set_stem_filter(None, None)
             self._path_ed.setText(paths[0])
+        elif mode == "folder" and dlg.recursive():
+            paths = dlg.paths()
+            if not paths:
+                return
+            self._set_stem_filter(None, None)
+            self._set_explicit_paths(paths)
         elif mode == "folder":
             self._set_explicit_paths(None)
             self._set_stem_filter(None, None)
@@ -4462,6 +4748,24 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._set_explicit_paths(paths)
         self._update_combine_visibility()
         self._load()
+
+    def set_combine_op_visible(self, visible: bool) -> None:
+        """Show or hide the "op:" selector beside "Combine sub-frames".
+
+        For a consumer that chooses the combine method itself rather than
+        reading it off this panel — Batch Correction, where the method is a
+        set of checkboxes because one run can produce several. Leaving the
+        dropdown on screen there put a dead control immediately beside the
+        live one, which is exactly as confusing as it sounds. The chunk-size
+        spin stays either way: that is still this panel's to own.
+
+        ``source_cfg()`` keeps emitting ``combine_op`` regardless, so a
+        hidden selector changes nothing for any other consumer.
+        """
+        for widget in (getattr(self, "_combine_op_lbl", None),
+                       getattr(self, "_combine_op_combo", None)):
+            if widget is not None:
+                widget.setVisible(bool(visible))
 
     def _update_combine_visibility(self):
         """Show the "Combine sub-frames" row (stream mode only) whenever the
@@ -5538,6 +5842,50 @@ class DataLoaderPanel(QtWidgets.QWidget):
         except Exception:
             return None
 
+    def _uneven_subframe_warning(self, cfg) -> str:
+        """``""`` or a warning that the selected files hold different
+        numbers of raw sub-frames.
+
+        "Combine sub-frames: N" is applied per file, so when the files
+        disagree about how many sub-frames they have, one N covers a
+        different fraction of each — 12 of 12 in one file and 12 of 20 in
+        the next, with the remainder becoming a short final chunk whose
+        exposure is not comparable to the rest. That is invisible from the
+        file list and silently produces output frames of unequal weight, so
+        it is worth saying before a run rather than after.
+        """
+        if not cfg or cfg.get("type") != "hdf5_stack_glob":
+            return ""
+        paths = cfg.get("paths") or []
+        if len(paths) < 2:
+            return ""
+        counts = self._hdf5_multi_file_raw_counts(paths, cfg.get("dataset"))
+        if not counts or len(set(counts)) < 2:
+            return ""
+        lo, hi = min(counts), max(counts)
+        return (f"  ⚠ sub-frame count differs between files ({lo}–{hi}); "
+                f"'Combine sub-frames' covers a different fraction of each.")
+
+    @staticmethod
+    def _hdf5_multi_file_raw_counts(paths, dataset):
+        """Per-file RAW sub-frame count for a multi-file HDF5 pick — header
+        reads only, same single pass ``_hdf5_multi_file_counts`` makes.
+
+        Separate from that helper because the two answer different
+        questions: it reports how many COMBINED frames each file yields
+        (which "Combine sub-frames" makes uniform by construction), while
+        this reports how many raw sub-frames each file HAS, which is what
+        tells you whether one chunk size means the same thing across the
+        selection. Returns ``None`` when the source can't be inspected.
+        """
+        try:
+            from midas_gui.workers import _HDF5StackGlobSource
+            src = _HDF5StackGlobSource(paths, dataset)
+            src._ensure_stats()
+            return list(src._raw_ns or [])
+        except Exception:
+            return None
+
     @staticmethod
     def _single_hdf5_raw_count(path, dataset) -> int:
         """True raw sub-frame count of one HDF5 file's dataset — header read
@@ -5552,6 +5900,36 @@ class DataLoaderPanel(QtWidgets.QWidget):
             return int(src._raw_ns[0])
         except Exception:
             return 0
+
+    @staticmethod
+    def _first_raw_frame_is_blank(path, dataset) -> bool:
+        """Is sub-frame 0 of this HDF5 entirely zero?
+
+        A Pixirad arms one frame before it starts counting, so frame 0 of
+        every ``.pixi.h5`` is all zeros and averaging it in scales the result
+        by (n-1)/n -- 10% over ten frames, 33% over three. Measured on 1-ID-E
+        air_80p725keV_3s_003512: the reduced output came out exactly 10/9 low.
+
+        Keyed on the frame's own content rather than the detector name, so
+        it is right for any detector that does this and -- more importantly
+        -- does NOT silently drop a good first frame from one that does not.
+        The GE panels in the same experiment record ten real frames; starting
+        them at 1 would throw one away every run.
+
+        Costs one frame's pixel read per source change, unlike
+        :meth:`_single_hdf5_raw_count` next to it, which is header-only.
+        Worth it: the alternative is being wrong by 10% in silence.
+        """
+        try:
+            import h5py
+            import numpy as np
+            with h5py.File(str(path), "r") as f:
+                dset = f[dataset]
+                if getattr(dset, "ndim", 0) != 3 or dset.shape[0] < 2:
+                    return False
+                return not np.any(dset[0])
+        except Exception:
+            return False      # unreadable: say nothing, start at 0 as before
 
     def _autofill_frame_range(self, reset_values: bool = True):
         """Fill start/end with the full valid range for the current source
@@ -5607,6 +5985,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
                 missing = (max(nums) - min(nums) + 1) - len(nums)
                 if missing > 0:
                     extra += f"  ⚠ {missing} number(s) missing in this range (gaps)."
+                extra += self._uneven_subframe_warning(cfg)
                 if self._unify_combine and (self._combine_chunk.value() != 1):
                     n = 0
                     try:
@@ -5638,7 +6017,12 @@ class DataLoaderPanel(QtWidgets.QWidget):
                     hi = max(n_raw - 1, 0)
                     self._fr_start.setRange(0, hi); self._fr_end.setRange(0, hi)
                     if reset_values:
-                        self._fr_start.setValue(0); self._fr_end.setValue(hi)
+                        # Start at 1 when frame 0 is a blank arming frame --
+                        # see _first_raw_frame_is_blank. The user can still
+                        # type 0 to get it back; this only moves the default.
+                        lo0 = 1 if (hi >= 1 and self._first_raw_frame_is_blank(
+                            cfg["path"], cfg.get("dataset", "frames"))) else 0
+                        self._fr_start.setValue(lo0); self._fr_end.setValue(hi)
                         self._fr_stride.setValue(1)
                     self._fr_start.setEnabled(n_raw > 1)
                     self._fr_end.setEnabled(n_raw > 1)
@@ -6092,6 +6476,25 @@ class StackedProfileViewer(QtWidgets.QWidget):
     _PUB_PALETTE = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e",
                     "#8c564b", "#e377c2", "#17becf", "#bcbd22", "#7f7f7f"]
 
+    #: Y-axis scalings. SAXS is the case that forced these: an AgBeh profile
+    #: runs 12000 counts to ~0 inside the first 0.05 A^-1, so on a linear
+    #: axis the entire pattern is one spike against a flat line.
+    #:
+    #: Each entry carries its own default stack spacing and suffix, because
+    #: "spacing" means something different per scale: 500 counts is a
+    #: sensible linear offset and an absurd one in decades. Switching scale
+    #: swaps the spinbox over, remembering what each scale was last set to.
+    #:
+    #: The transform is applied to the profile BEFORE the stack offset is
+    #: added (see _restack). log10(I + offset) is not the same curve shifted
+    #: -- it compresses each successive frame more than the last, so a stack
+    #: would fan closed towards the top.
+    _Y_SCALES = {
+        "Linear":     dict(label="Intensity + offset",        spacing=500.0, suffix="  cts"),
+        "log₁₀(I)":   dict(label="log₁₀(Intensity) + offset", spacing=0.5,   suffix="  dec"),
+        "√I":         dict(label="√Intensity + offset",       spacing=10.0,  suffix="  √cts"),
+    }
+
     # Two saved plot configurations. "White (publication)" is the default; "Dark"
     # preserves the original on-screen look.
     _THEMES = {
@@ -6129,6 +6532,30 @@ class StackedProfileViewer(QtWidgets.QWidget):
                                      "Needs the run's calibration for the conversion.")
         self._xunit_combo.currentIndexChanged.connect(self._on_xunit_changed)
         bar.addWidget(self._xunit_combo)
+        self._logx_chk = QtWidgets.QCheckBox("log x")
+        self._logx_chk.setToolTip(
+            "Log-scale the x axis. Non-positive x (Q = 0, R = 0) has no "
+            "logarithm and is dropped from the curve rather than clamped "
+            "to something it is not.")
+        self._logx_chk.toggled.connect(self._on_logx_toggled)
+        bar.addWidget(self._logx_chk)
+        bar.addWidget(QtWidgets.QLabel("y:"))
+        self._yscale_combo = _NoScrollComboBox()
+        for name in self._Y_SCALES:
+            self._yscale_combo.addItem(name, name)
+        self._yscale_combo.setToolTip(
+            "Intensity scaling.\n\n"
+            "log₁₀ — the SAXS default: several decades of intensity in one "
+            "view.\n"
+            "√I — between linear and log. Lifts weak peaks without "
+            "flattening strong ones, and (counting statistics being "
+            "Poisson) gives roughly uniform noise, so scatter looks the "
+            "same everywhere instead of exploding at low signal.\n\n"
+            "Values with no image under the transform (I ≤ 0 for log, "
+            "I < 0 for √) are dropped, not clamped. Each scale keeps its "
+            "own stack spacing.")
+        self._yscale_combo.currentIndexChanged.connect(self._on_yscale_changed)
+        bar.addWidget(self._yscale_combo)
         bar.addWidget(QtWidgets.QLabel("theme:"))
         self._theme_combo = _NoScrollComboBox()
         self._theme_combo.addItems(list(self._THEMES.keys()))
@@ -6376,6 +6803,55 @@ class StackedProfileViewer(QtWidgets.QWidget):
 
     # ── internal ─────────────────────────────────────────────────────
 
+    def _y_display(self, p):
+        """Profile values under the selected y scaling.
+
+        Values with no image under the transform are returned as NaN rather
+        than clamped: pyqtgraph breaks the line there, which says "nothing
+        measurable here", where clamping to a floor would draw a plateau the
+        detector never saw. Background-subtracted SAXS goes negative
+        routinely, so this is the normal case, not the edge one.
+        """
+        mode = self._yscale_combo.currentData() or "Linear"
+        arr = np.asarray(p, dtype=float)
+        if mode == "Linear":
+            return arr
+        with np.errstate(invalid="ignore", divide="ignore"):
+            if mode.startswith("log"):
+                return np.where(arr > 0, np.log10(np.where(arr > 0, arr, 1.0)), np.nan)
+            return np.where(arr >= 0, np.sqrt(np.where(arr >= 0, arr, 0.0)), np.nan)
+
+    def _on_yscale_changed(self, *_a):
+        """Swap the stack spacing over with the scale, and relabel.
+
+        Carrying one spacing across scales is what makes this feel broken:
+        500 is a reasonable linear offset and 500 decades is not, so the
+        stack would fly apart on the first switch. Each scale remembers
+        what it was last set to.
+        """
+        mode = self._yscale_combo.currentData() or "Linear"
+        prev = getattr(self, "_yscale_prev", "Linear")
+        if not hasattr(self, "_spacing_by_scale"):
+            self._spacing_by_scale = {k: v["spacing"] for k, v in self._Y_SCALES.items()}
+        self._spacing_by_scale[prev] = float(self._spacing.value())
+        self._yscale_prev = mode
+        spec = self._Y_SCALES[mode]
+        self._spacing.blockSignals(True)
+        self._spacing.setSuffix(spec["suffix"])
+        self._spacing.setDecimals(0 if mode == "Linear" else 2)
+        self._spacing.setSingleStep(100.0 if mode == "Linear" else 0.5)
+        self._spacing.setValue(self._spacing_by_scale[mode])
+        self._spacing.blockSignals(False)
+        self._plot.setLabel("left", spec["label"])
+        self._restack()
+
+    def _on_logx_toggled(self, checked: bool):
+        """pyqtgraph logs the x data itself, which also gives proper decade
+        ticks — worth having on a publication plot. Y stays manual because
+        of the stack offset (see _restack)."""
+        self._plot.getPlotItem().setLogMode(x=bool(checked), y=False)
+        self._restack()
+
     def _restack(self, _=None):
         """Redraw all curves + inline labels (offsets, spacing, x-unit)."""
         spacing = float(self._spacing.value())
@@ -6383,18 +6859,55 @@ class StackedProfileViewer(QtWidgets.QWidget):
         for i, (curve, r, p) in enumerate(
                 zip(self._curves, self._r_axes, self._profiles)):
             xd = self._x_display(r)
-            yd = p + i * spacing
-            curve.setData(xd, yd)
-            if i < len(self._labels) and xd.size:
-                self._labels[i].setPos(float(xd[0]), float(p[0] + i * spacing))
-            fin = np.isfinite(xd) & np.isfinite(yd)
+            # Transform THEN offset. log10(I + offset) fans the stack closed
+            # towards the top; log10(I) + offset keeps every frame the same
+            # distance apart, which is the whole point of a stack.
+            yd = self._y_display(p) + i * spacing
+            # Bounds in the coordinates the ViewBox actually uses: with log x
+            # that is log10(x), so setLimits gets log-space numbers and does
+            # not pin the view to the wrong decade.
+            xb = np.log10(np.where(xd > 0, xd, np.nan)) if self._logx_chk.isChecked() else xd
+            fin = np.isfinite(xb) & np.isfinite(yd)
             if fin.any():
-                xmins.append(float(xd[fin].min())); xmaxs.append(float(xd[fin].max()))
+                curve.setData(xd, yd)
+                xmins.append(float(xb[fin].min())); xmaxs.append(float(xb[fin].max()))
                 ymins.append(float(yd[fin].min())); ymaxs.append(float(yd[fin].max()))
+            else:
+                # Nothing finite anywhere in this profile — an all
+                # non-positive frame under a log y scale, which _y_display
+                # maps to NaN on purpose. Handing that to the curve leaves
+                # the PlotDataItem's internal ScatterPlotItem reporting
+                # nanmin/nanmax bounds, and ONE such curve is enough to make
+                # a later autoRange resolve to [nan, nan] however healthy
+                # every other curve is. There is nothing to draw either way.
+                curve.setData([], [])
+            if i < len(self._labels) and fin.any():
+                j = int(np.argmax(fin))     # first point that is actually on screen
+                self._labels[i].setPos(float(xd[j]), float(yd[j]))
         if xmins:
-            self._plot.autoRange()
             self._data_bounds = (min(xmins), max(xmaxs), min(ymins), max(ymaxs))
+            self._show_finite_range(*self._data_bounds)
             self._apply_view_limits(*self._data_bounds)
+
+    def _show_finite_range(self, xmin, xmax, ymin, ymax):
+        """Frame the finite data directly, instead of via ``autoRange``.
+
+        ``autoRange`` re-derives the extent by unioning every item in the
+        plot, which is both redundant — the caller has just measured it from
+        the finite points — and fragile, because an item whose bounds are
+        NaN poisons the union and ``ViewBox.setRange`` then raises
+        ``Cannot set range [nan, nan]``. Setting the measured numbers asks
+        pyqtgraph to rediscover nothing.
+        """
+        if xmax <= xmin:
+            xmax = xmin + 1.0
+        if ymax <= ymin:
+            ymax = ymin + 1.0
+        xpad = 0.05 * (xmax - xmin)
+        ypad = 0.05 * (ymax - ymin)
+        self._plot.getPlotItem().getViewBox().setRange(
+            xRange=(xmin - xpad, xmax + xpad),
+            yRange=(ymin - ypad, ymax + ypad), padding=0)
 
     def _apply_view_limits(self, xmin, xmax, ymin, ymax):
         """Bound pan/zoom to the stacked profiles' combined data (+ margin),
@@ -6409,7 +6922,12 @@ class StackedProfileViewer(QtWidgets.QWidget):
         xpad = 0.15 * (xmax - xmin)
         ypad = 0.15 * (ymax - ymin)
         vb = self._plot.getPlotItem().getViewBox()
-        vb.setLimits(xMin=max(0.0, xmin - xpad), xMax=xmax + xpad,
+        # No max(0.0, ...) on xMin here: in log x the axis is
+        # legitimately negative (Q = 0.01 is -2), and clamping it to 0
+        # would pin the view to the wrong end of the data.
+        x_floor = (xmin - xpad if self._logx_chk.isChecked()
+                   else max(0.0, xmin - xpad))
+        vb.setLimits(xMin=x_floor, xMax=xmax + xpad,
                      yMin=ymin - ypad, yMax=ymax + ypad,
                      maxXRange=(xmax - xmin) + 2 * xpad,
                      maxYRange=(ymax - ymin) + 2 * ypad)

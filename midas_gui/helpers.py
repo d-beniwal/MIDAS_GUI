@@ -365,12 +365,20 @@ _AUTO_DETECT_PROFILES = {"1-ID-E", "20-ID-D", "20-ID-E"}
 _DETECTOR_FILENAME_TAGS = (
     (".ge1", "ge"), (".ge2", "ge"), (".ge3", "ge"), (".ge4", "ge"), (".ge5", "ge"),
     (".vrx", "vrx"),
-    (".pxrd", "pxrd"),
+    (".pxrd", "pxrd"), (".pixi", "pxrd"),
     (".pmg", "pimega"),
 )
-# Pixel size (µm) for each recognized detector tag. No entry for "pxrd" —
-# Pixirad is identified but its pixel size isn't auto-populated (not given).
-_DETECTOR_PIXEL_UM = {"ge": 200.0, "vrx": 150.0, "pimega": 55.0}
+# Pixel size (µm) for each recognized detector tag.
+#
+# "pxrd" was long listed without a size, so a Pixirad was identified but its
+# pixel size never auto-populated. Both halves of that bit the 1-ID-E SAXS
+# setup on 2026-10-08: files there are written ".pixi", which this table did
+# not match at all, so loading one left the px box holding whatever the
+# previously-loaded calibration had put there (200 µm, from a GE) — and a
+# geometry saved from that card described the GE's pixel, not the Pixirad's.
+# 62 µm is the PIXIRAD CdTe pitch and is already what constants.PIXEL_PRESETS
+# offers under "Pixirad".
+_DETECTOR_PIXEL_UM = {"ge": 200.0, "vrx": 150.0, "pimega": 55.0, "pxrd": 62.0}
 # HDF5 dataset holding the beam energy (keV) used to derive wavelength, on the
 # beamlines above — confirmed as the authoritative source over the other
 # energy-like datasets present in these files (HRM/IDEnergy readbacks, which
@@ -512,6 +520,177 @@ def suggest_integration_output_dir(data_path, *, expid_fallback: str = "") -> Op
         return parts.root / parts.froot / parts.detector
     return (parts.root if parts.root.name == parts.froot
             else parts.root / parts.froot)
+
+
+def _folder_output_dir(files, expid_fallback: str = "", derive=None):
+    """The one output dir a SOURCE FOLDER's files imply.
+
+    ``suggest_integration_output_dir`` reads the froot off each file's own
+    NAME, so one folder yields several: a load step's darks are
+    ``..._dark_before``/``..._dark_after`` and derive directories of their
+    own. Picking a folder by hand puts all of them in one place, so grouping
+    must too. Cannot be answered by passing the folder itself -- the
+    positional parse assumes the last component is a file, and a directory
+    path comes back scrambled (``s1c_bc/Faber_A_restart4_load_step/
+    connolly_oct26``).
+
+    Chosen by agreement: the directory most of the folder's files imply,
+    breaking a tie on the shortest path. Scan frames outnumber the two
+    darks, and a dark's froot is the scan's froot plus a suffix, so both
+    rules point the same way -- and a 1-scan-plus-2-darks folder, where the
+    count is a three-way tie, still lands on the scan.
+    """
+    counts = {}
+    derive = derive or suggest_integration_output_dir
+    for f in files:
+        d = derive(f, expid_fallback=expid_fallback)
+        if d is not None:
+            counts[str(d)] = counts.get(str(d), 0) + 1
+    if not counts:
+        return None
+    return Path(min(counts, key=lambda k: (-counts[k], len(k), k)))
+
+
+def group_paths_by_output_dir(paths, *, out_dir=None, expid_fallback: str = "",
+                              derive=None) -> list:
+    """Split a file selection into ``[(out_dir, [paths]), ...]`` -- one entry
+    per SOURCE FOLDER, each with the output directory that folder implies.
+
+    A recursive "Full folder" pick spans many source folders, and the
+    ``<expid>_bc/<froot>/<detector>`` convention derives the output dir from
+    each file's own path, so the selection maps to many dirs rather than
+    one. Applying it once writes every subfolder's output into whichever
+    folder the first file implied -- reported from 1-ID-E as every load step
+    landing in one directory.
+
+    Grouping is by containing folder, not by derived directory, so one run
+    covers exactly what picking that folder by hand covers (its darks
+    included -- see :func:`_folder_output_dir`).
+
+    ``out_dir`` is the Output field as it stands:
+
+    * unset, or equal to a directory one of the groups already derives (i.e.
+      the value the field auto-filled to from one file), it is a stale
+      single-folder guess and each group uses its own derived directory.
+    * anything else is a deliberate choice of root, and the groups are placed
+      under it at the same relative positions they have to each other, so a
+      custom root fans out rather than collapsing.
+
+    A selection inside ONE folder returns a single entry -- every
+    non-recursive pick -- which is the caller's existing one-run path.
+
+    ``derive`` picks which convention names a folder's directory, defaulting
+    to :func:`suggest_integration_output_dir` (``<expid>_bc/<froot>/<det>``).
+    Hydra passes :func:`suggest_panel_base_output_dir` instead, because each
+    of its four panels appends its OWN ``ge{n}/`` segment -- and the hook
+    matters for more than the name: the "is this Output box a stale autofill
+    or a chosen root" test compares the box against the derived dirs, so a
+    caller deriving one convention while the grouper assumed another never
+    matches, is read as a custom root, and nests every folder's output
+    inside the first one's.
+    """
+    paths = [str(x) for x in paths or []]
+    if not paths:
+        return []
+
+    by_folder = {}
+    for f in paths:
+        by_folder.setdefault(str(Path(f).parent), []).append(f)
+    if len(by_folder) == 1:
+        only = next(iter(by_folder.values()))
+        return [(_folder_output_dir(only, expid_fallback, derive)
+                 or (Path(out_dir) if out_dir else None), only)]
+
+    resolved = []          # (derived_dir_or_None, files)
+    for folder in sorted(by_folder):
+        files = by_folder[folder]
+        resolved.append((_folder_output_dir(files, expid_fallback, derive), files))
+
+    keys = [str(d) for d, _ in resolved if d is not None]
+    custom = bool(out_dir) and str(out_dir) not in keys
+    if custom and keys:
+        import os
+        common = Path(os.path.commonpath(keys)) if len(keys) > 1 else Path(keys[0]).parent
+        rebase = lambda d: Path(out_dir) / Path(str(d)).relative_to(common)
+    else:
+        rebase = lambda d: Path(str(d))
+
+    groups = [((rebase(d) if d is not None
+                else (Path(out_dir) if out_dir else None)), files)
+              for d, files in resolved]
+    groups.sort(key=lambda g: str(g[0]))
+    return groups
+
+
+#: Batch Correction's per-op subfolder under the integration output dir —
+#: ``dark_subtracted_mean``, ``dark_subtracted_max``, … Named for what the
+#: files in it are, the same way Batch Integrate's output is split into
+#: per-format subfolders, so a froot's reduced frames and its cakes sit side
+#: by side instead of one burying the other. The op is in the folder name
+#: because one run can produce several: a mean and a max of the same scan
+#: must not land on top of each other.
+CORRECTION_SUBDIR_PREFIX = "dark_subtracted"
+
+
+def correction_subdir(op: str) -> str:
+    """``dark_subtracted_<op>`` — one output folder per combine method."""
+    return f"{CORRECTION_SUBDIR_PREFIX}_{str(op).lower()}"
+
+#: Tail of a Batch Correction output filename: ``<stem>_cor.hdf5``, i.e. the
+#: source name with its whole dotted extension replaced (see
+#: ``BatchCorrectionWorker._out_path``, which strips a detector tag like
+#: ``.vrx`` along with the extension — it no longer describes the file).
+#: ``.hdf5`` is in ``H5_EXTS``, so the result loads straight back into any tab.
+#: Both are editable per run; these are only the defaults.
+CORRECTION_SUFFIX = "_cor"
+CORRECTION_EXT = ".h5"
+
+
+def suggest_panel_base_output_dir(data_path, *, expid_fallback: str = "") -> Optional[Path]:
+    """``<outroot>/<expid>_bc/<froot>`` — the SHARED base for a Hydra run.
+
+    Deliberately :func:`suggest_integration_output_dir` minus its
+    ``<detector>`` tail. The Hydra page's Output field is one directory for
+    all four panels and each panel appends its own ``ge{n}/`` (see
+    ``HydraBatchPage._run_panel``), so including the detector segment here
+    would produce ``…/<froot>/ge1/ge1``.
+
+    The representative path is any one panel's file: every panel of a Hydra
+    set shares a froot and an outroot, and differs only in the detector.
+
+    The detector tag is also stripped off the END of the froot when it is
+    there. ``bc_path_parts`` reads the froot off the file name, which at
+    1-ID carries it -- ``test_chamber_003516.ge1`` -- and a *shared* base
+    called ``…/test_chamber_003516.ge1/`` holding ge2, ge3 and ge4 names the
+    whole set after one panel. Single-detector output keeps the tag, which
+    is right there: it has exactly one detector and the tag says which.
+    """
+    parts = bc_path_parts(data_path, expid_fallback=expid_fallback)
+    if parts is None:
+        return None
+    froot = parts.froot
+    if parts.detector and froot.lower().endswith("." + parts.detector.lower()):
+        froot = froot[: -(len(parts.detector) + 1)]
+    if parts.positional:
+        return parts.root / froot
+    return (parts.root if parts.root.name == froot
+            else parts.root / froot)
+
+
+def suggest_correction_output_dir(data_path, *, expid_fallback: str = "") -> Optional[Path]:
+    """``<outroot>/<expid>_bc/<froot>/<detector>`` — the PARENT Batch
+    Correction writes its per-op folders into, giving e.g.
+    ``…/<detector>/dark_subtracted_mean/``.
+
+    Deliberately :func:`suggest_integration_output_dir` itself rather than a
+    parse of its own, so the two tabs can never disagree about where a
+    froot's analysis output lives — Batch Correction only adds a leaf (see
+    :func:`correction_subdir`). The ``<detector>`` segment is kept (the
+    shorthand for this convention usually omits it): a scan recorded on two
+    detectors would otherwise write both reductions into one folder, where
+    the filenames alone do not distinguish them.
+    """
+    return suggest_integration_output_dir(data_path, expid_fallback=expid_fallback)
 
 
 def suggest_working_dir(data_path, *, expid_fallback: str = "") -> Optional[Path]:
@@ -1390,6 +1569,32 @@ def fit_geometry_from_ring_picks(picks, wavelength_A: float, pxY_um: float,
     }
 
 
+def result_refined_tx(result) -> bool:
+    """Whether this fit actually refined ``tx``, and so whether ``result.tx``
+    carries information worth feeding back into the seed.
+
+    Almost always ``False``. ``tx`` is a panel's installation azimuth about
+    the beam, not an alignment tilt, and every powder pipeline freezes it on
+    purpose: it reaches a ring radius only through the azimuthal distortion
+    harmonics, so ``(tx, phi_k) -> (tx + d, phi_k + k*d)`` is an exact gauge
+    orbit and refining it corrupts all six phases with no residual signature
+    (``midas_calibrate_v2.forward.geometry``; enforced at
+    ``compat/from_v1.py``, ``_add(s, "tx", v1.tx, refined=False)``).
+
+    The one exception is the manual d-spacing fit, which refines ``tx`` as an
+    ordinary free parameter when its Refine box is ticked
+    (:func:`fit_geometry_from_ring_picks`). That fit reports a 1-sigma for
+    each free parameter and only for those, so the presence of a ``tx`` sigma
+    is the fit's own statement that it refined ``tx`` -- which beats asking
+    the UI what was ticked, since a ticked box the solver dropped would lie.
+
+    Written as a question about the result rather than about the pipeline so
+    that a surface which later grows a d-spacing route gets the right answer
+    without a second copy of this reasoning.
+    """
+    return "tx" in (getattr(result, "fit_sigma", None) or {})
+
+
 def _fit_parameter_sigma(jac, resid_vec, free_names) -> dict:
     """1-sigma estimates for the free parameters of a ``least_squares`` solve,
     from the usual linearised covariance ``inv(J.T @ J) * s^2`` with
@@ -1456,7 +1661,8 @@ def _tilt_project_YZ(two_theta_deg: np.ndarray, eta_deg: np.ndarray,
 
 def tilted_ring_xy(two_theta_deg: float, tx: float, ty: float, tz: float,
                     Lsd_um: float, bc_y: float, bc_z: float,
-                    pxY_um: float, pxZ_um: float, n: int = 400):
+                    pxY_um: float, pxZ_um: float, n: int = 400,
+                    eta_min: float = 0.0, eta_max: float = 360.0):
     """Forward-project a diffraction ring at ``two_theta_deg`` through the tilt
     geometry (tx/ty/tz, degrees) onto detector pixel coordinates.
 
@@ -1467,8 +1673,14 @@ def tilted_ring_xy(two_theta_deg: float, tx: float, ty: float, tz: float,
     plain circle ``bc + r*(sin η, cos η)`` when tx=ty=tz=0, since it inverts
     the same ray/tilt-plane geometry as
     ``midas_integrate_v2.forward.pixels.pixel_to_REta_from_spec``.
+
+    ``eta_min``/``eta_max`` draw an ARC instead of the whole ring, for a
+    caller depicting an integration region that does not span the full
+    azimuth. The default is the full turn, so every existing caller — the
+    calibration-ring overlays, which show where the rings ARE rather than
+    which part is integrated — is unchanged.
     """
-    eta = np.linspace(0.0, 360.0, n, endpoint=True)
+    eta = np.linspace(float(eta_min), float(eta_max), n, endpoint=True)
     return _tilt_project_YZ(np.full(n, two_theta_deg), eta, tx, ty, tz,
                              Lsd_um, bc_y, bc_z, pxY_um, pxZ_um)
 
@@ -1634,6 +1846,185 @@ def _pixel_to_two_theta_deg(Y_px, Z_px, Lsd_um: float, bc_y: float, bc_z: float,
     Pz = Yc * y_hat[2] + Zc * z_hat[2]
     norm = np.sqrt(Px ** 2 + Py ** 2 + Pz ** 2)
     return np.degrees(np.arccos(np.clip(Px / norm, -1.0, 1.0)))
+
+
+def pixel_eta_deg(Y_px, Z_px, bc_y: float, bc_z: float,
+                  pxY_um: float, pxZ_um: float, tx: float = 0.0):
+    """Azimuth η (degrees) of pixel(s) about the beam centre.
+
+    Matches the backend's ``pixel_to_REta`` — ``atan2(-Yc, Zc)`` with
+    ``Yc = (bc_y - Y) * pxY`` and ``Zc = (Z - bc_z) * pxZ`` — so η = 0 is
+    straight **up** (+Z), not along +Y, and η increases towards +Y. The same
+    convention the η spokes are drawn in (see the note in ``draw_bin_grid``);
+    swapping the arguments puts every value 90° out.
+
+    ``tx`` is the panel's installation roll about the beam. It is a pure
+    offset here: MEASURED against ``midas_calibrate_v2.forward.geometry.
+    pixel_to_REta`` at five pixels and three rolls, the backend's η is
+    exactly this detector-plane angle plus tx, wrapped to (-180, 180].
+    It defaults to 0 because η was flat for a long time and most detectors
+    are unrolled, but a rolled panel binned without it is reported a full tx
+    away from the cake axis it actually lands in — at 1-ID with tx=120° the
+    status bar read η = -120.28° for a pixel the integration puts at
+    -0.28°.
+
+    Still deliberately flat in ty/tz: η names which spoke of the cake a pixel
+    falls in, and the cake's η binning is this in-plane angle. 2θ is the
+    quantity that must be tilt-corrected, and
+    :func:`_pixel_to_two_theta_deg` is where that happens.
+    """
+    Yc = (bc_y - np.asarray(Y_px, dtype=float)) * pxY_um
+    Zc = (np.asarray(Z_px, dtype=float) - bc_z) * pxZ_um
+    eta = np.degrees(np.arctan2(-Yc, Zc))
+    if tx:
+        eta = (eta + float(tx) + 180.0) % 360.0 - 180.0
+    return eta
+
+
+def im_trans_map_point(col, row, shape, codes):
+    """Map an image *point* through MIDAS transform codes — the point-wise
+    counterpart of :func:`_apply_im_trans`, which only transforms arrays.
+
+    ``shape`` is the ``(rows, cols)`` of the image the point is currently
+    in; a transpose changes it, so it is tracked across the sequence.
+    Returns ``(col, row)`` in the transformed frame.
+
+    Exists for the Mask Builder, which displays the **raw** detector image
+    on purpose while a calibration's beam centre lives in the transformed
+    frame — so a hovered point has to be carried into that frame before any
+    geometry is applied to it.
+    """
+    n_rows, n_cols = int(shape[0]), int(shape[1])
+    col, row = int(col), int(row)
+    for c in codes or ():
+        if c == 1:                       # flipY — image[:, ::-1]
+            col = n_cols - 1 - col
+        elif c == 2:                     # flipZ — image[::-1, :]
+            row = n_rows - 1 - row
+        elif c == 3:                     # transpose — image.T
+            col, row = row, col
+            n_rows, n_cols = n_cols, n_rows
+    return col, row
+
+
+def map_point_xy(x: float, y: float, shape, codes):
+    """Map a *continuous* (x=col, y=row) position through MIDAS transform
+    codes, returning ``(x, y, n_cols, n_rows)`` — the position plus the frame
+    extent it now lives in.
+
+    The continuous sibling of :func:`im_trans_map_point`, which works in
+    whole-pixel indices. Geometry drawn over an image (ROI corners, polygon
+    vertices) is continuous, and a flip there is ``x -> W - x``, not
+    ``W - 1 - x``: index ``c`` covers ``[c, c+1]``, and reversing the axis
+    sends that span to ``[W-c-1, W-c]``. Using the index form on an edge
+    coordinate shifts every shape half a pixel.
+    """
+    n_rows, n_cols = float(shape[0]), float(shape[1])
+    for c in codes or ():
+        if c == 1:                       # flipY — columns reverse
+            x = n_cols - x
+        elif c == 2:                     # flipZ — rows reverse
+            y = n_rows - y
+        elif c == 3:                     # transpose
+            x, y = y, x
+            n_rows, n_cols = n_cols, n_rows
+    return x, y, n_cols, n_rows
+
+
+def map_roi_state(pos, size, angle_deg: float, shape, codes):
+    """Re-place a rotatable rectangular ROI so it covers the same detector
+    pixels after ``codes`` are applied to the image under it.
+
+    Takes and returns pyqtgraph's own ``(pos, size, angle)`` description: an
+    origin corner, a local ``(w, h)`` extent, and a rotation in degrees
+    measured as ``atan2`` of the local +x axis in parent coordinates (CCW,
+    verified against ``RectROI.mapToParent``). Covers ``RectROI``,
+    ``EllipseROI`` and ``CircleROI``; a ``PolyLineROI`` maps its vertices
+    with :func:`map_point_xy` instead.
+
+    Every MIDAS transform is a reflection (flipY, flipZ and transpose each
+    have determinant −1), so an odd number of them flips the handedness of
+    the ROI's local frame. Anchoring the result at the mapped origin corner
+    would then put the rectangle on the wrong side of its own origin — the
+    shape would look right only for an even number of codes. So the anchor
+    moves to the mapped ``(0, h)`` corner in that case, which restores a
+    right-handed frame with the same ``(w, h)``.
+
+    Lengths are preserved (the maps are orthogonal), so ``size`` is returned
+    unchanged even across a transpose.
+    """
+    w, h = float(size[0]), float(size[1])
+    a = math.radians(float(angle_deg or 0.0))
+    ca, sa = math.cos(a), math.sin(a)
+    x0, y0 = float(pos[0]), float(pos[1])
+    # Local +x is (cos a, sin a); local +y is that turned +90°.
+    corners = {
+        "c00": (x0, y0),
+        "c10": (x0 + w * ca, y0 + w * sa),
+        "c01": (x0 - h * sa, y0 + h * ca),
+    }
+    mapped = {k: map_point_xy(x, y, shape, codes)[:2]
+              for k, (x, y) in corners.items()}
+    e1 = (mapped["c10"][0] - mapped["c00"][0],
+          mapped["c10"][1] - mapped["c00"][1])
+    n_reflections = sum(1 for c in (codes or ()) if c in (1, 2, 3))
+    anchor = mapped["c00"] if n_reflections % 2 == 0 else mapped["c01"]
+    return (list(anchor), [w, h],
+            math.degrees(math.atan2(e1[1], e1[0])))
+
+
+def _fmt_g(v: float, nd: int) -> str:
+    """Fixed-point with trailing zeros trimmed, or an em dash when the value
+    is not finite (d-spacing diverges on the beam axis)."""
+    if v is None or not math.isfinite(v):
+        return "—"
+    return f"{v:.{nd}f}".rstrip("0").rstrip(".") or "0"
+
+
+def pixel_readout_text(col, row, geom: dict) -> str:
+    """One status-bar clause naming 2θ / Q / d / η at pixel ``(col, row)``.
+
+    ``geom`` is the geometry dict the tabs already build (``Lsd`` in µm,
+    ``BC_y``/``BC_z`` in px, ``pxY``/optional ``pxZ`` in µm, optional
+    ``tx``/``ty``/``tz`` in degrees, optional ``wavelength_A``). Returns
+    ``""`` when the geometry cannot place the pixel at all (no Lsd, no beam
+    centre or no pixel size), which is what keeps a viewer with no
+    calibration rendering byte-identically to before this existed.
+
+    Degrades per quantity rather than all-or-nothing: without a wavelength
+    there is no Q or d, but 2θ and η are still well defined, so those are
+    shown alone. d is reported as an em dash on the beam axis, where it
+    diverges.
+
+    Pure and cheap — no Qt, no IO. It is called on every hover (rate-limited
+    to 60 Hz by the viewer's ``SignalProxy``), so it must stay that way.
+    """
+    if not geom:
+        return ""
+    lsd = geom.get("Lsd")
+    bc_y, bc_z = geom.get("BC_y"), geom.get("BC_z")
+    pxY = geom.get("pxY") or geom.get("px")
+    if None in (lsd, bc_y, bc_z, pxY) or float(lsd) <= 0 or float(pxY) <= 0:
+        return ""
+    pxZ = geom.get("pxZ") or pxY
+    tt = float(_pixel_to_two_theta_deg(
+        col, row, float(lsd), float(bc_y), float(bc_z),
+        float(geom.get("tx") or 0.0), float(geom.get("ty") or 0.0),
+        float(geom.get("tz") or 0.0), float(pxY), float(pxZ)))
+    eta = float(pixel_eta_deg(col, row, float(bc_y), float(bc_z),
+                              float(pxY), float(pxZ),
+                              float(geom.get("tx") or 0.0)))
+    parts = [f"2θ = {_fmt_g(tt, 4)}°"]
+    wl = geom.get("wavelength_A")
+    if wl and float(wl) > 0:
+        wl = float(wl)
+        sin_th = math.sin(math.radians(tt) / 2.0)
+        q = 4.0 * math.pi * sin_th / wl
+        d = wl / (2.0 * sin_th) if sin_th > 0 else math.inf
+        parts.append(f"Q = {_fmt_g(q, 4)} Å⁻¹")
+        parts.append(f"d = {_fmt_g(d, 4)} Å")
+    parts.append(f"η = {_fmt_g(eta, 2)}°")
+    return "    ".join(parts)
 
 
 def read_geometry(path: str | Path) -> dict:
@@ -1916,12 +2307,21 @@ def draw_polar_bin_overlay(viewer, items: list, *, bc_y: float, bc_z: float,
                            tx: float = 0.0, ty: float = 0.0, tz: float = 0.0,
                            lsd_um: Optional[float] = None,
                            pxY_um: Optional[float] = None,
-                           pxZ_um: Optional[float] = None) -> None:
-    """If ``show_grid``, draw the Rmin/Rmax exclusion-boundary circles
-    (skipping any non-positive radius) plus the full polar (R, η) bin
-    grid — concentric circles at each radial-bin edge plus spokes at each
+                           pxZ_um: Optional[float] = None,
+                           color: Optional[str] = None,
+                           clear: bool = True) -> None:
+    """If ``show_grid``, draw the Rmin/Rmax boundaries plus the polar
+    (R, η) bin grid — arcs at each radial-bin edge plus spokes at each
     η-bin edge, both thinned to at most ``max_rings``/``max_spokes`` — onto
     ``viewer._iv``. Nothing is drawn when ``show_grid`` is false.
+
+    **The arcs are bounded to ``eta_min``/``eta_max``, like the spokes.**
+    They used to be full circles regardless, so integrating a limited
+    azimuth drew a grid over the whole detector and the overlay claimed a
+    region far larger than the one being binned. The grid depicts the
+    integration region, so it has to stop where the region does; with the
+    spokes at η min and η max already drawn, the result closes as the
+    annulus sector it actually is.
 
     ``tx``/``ty``/``tz`` (deg) + ``lsd_um``/``pxY_um``/``pxZ_um`` are
     optional: when the detector has a non-trivial tilt AND all three
@@ -1941,21 +2341,43 @@ def draw_polar_bin_overlay(viewer, items: list, *, bc_y: float, bc_z: float,
     uses for calibration rings.
     """
     import pyqtgraph as pg
-    for it in items:
-        viewer._iv.removeItem(it)
-    items.clear()
+    if clear:
+        for it in items:
+            viewer._iv.removeItem(it)
+        items.clear()
+    # ``color`` keys the whole overlay to one detector. Four panels' caking
+    # regions on one composite canvas are only readable if each is drawn in
+    # the colour that panel already has everywhere else (see
+    # hydra_widgets.panel_color); ``clear=False`` is what lets them stack
+    # into a single `items` list that one later call still tears down.
+    # Default stays the original orange/blue so every existing caller is
+    # pixel-identical.
+    bound_color = color or "orange"
+    grid_color = color or (120, 180, 255)
     if r_max <= 0:
         return
     tilt_aware = (bool(lsd_um) and bool(pxY_um) and bool(pxZ_um)
                   and (abs(tx) > 1e-9 or abs(ty) > 1e-9 or abs(tz) > 1e-9))
-    th = np.linspace(0, 2 * math.pi, 256)
+    # Clamp to a sane sweep: a non-positive or wrapped span means "no limit
+    # given", and anything at or past a full turn is the whole ring.
+    span = float(eta_max) - float(eta_min)
+    if not (0.0 < span < 360.0 - 1e-9):
+        arc_lo, arc_hi = 0.0, 360.0
+    else:
+        arc_lo, arc_hi = float(eta_min), float(eta_max)
+    # Same parameterisation as the spokes below — bc + r*(sin η, cos η),
+    # η = 0 straight up. The old full-circle path swept bc + r*(cos, sin),
+    # which traces the SAME circle and so was harmless while the sweep was
+    # a whole turn; as an arc it would be a quarter turn out of place.
+    arc = np.radians(np.linspace(arc_lo, arc_hi, 256))
 
     def _ring_xy(r):
         if tilt_aware:
             two_theta = math.degrees(math.atan(r * pxY_um / lsd_um))
             return tilted_ring_xy(two_theta, tx, ty, tz, lsd_um, bc_y, bc_z,
-                                   pxY_um, pxZ_um, n=256)
-        return bc_y + r * np.cos(th), bc_z + r * np.sin(th)
+                                   pxY_um, pxZ_um, n=256,
+                                   eta_min=arc_lo, eta_max=arc_hi)
+        return bc_y + r * np.sin(arc), bc_z + r * np.cos(arc)
 
     def _circle(r, pen):
         Y, Z = _ring_xy(r)
@@ -1967,9 +2389,42 @@ def draw_polar_bin_overlay(viewer, items: list, *, bc_y: float, bc_z: float,
         return
 
     if r_min > 0:
-        _circle(r_min, pg.mkPen("orange", width=1.2, style=QtCore.Qt.DashLine))
-    _circle(r_max, pg.mkPen("orange", width=1.5))
-    grid_pen = pg.mkPen((120, 180, 255), width=0.8)
+        _circle(r_min, pg.mkPen(bound_color, width=1.2, style=QtCore.Qt.DashLine))
+    _circle(r_max, pg.mkPen(bound_color, width=1.5))
+    def _spoke_xy(eta):
+        if tilt_aware:
+            tt_lo = math.degrees(math.atan(r_min * pxY_um / lsd_um))
+            tt_hi = math.degrees(math.atan(r_max * pxY_um / lsd_um))
+            return tilted_spoke_xy(tt_lo, tt_hi, float(eta), tx, ty, tz,
+                                   lsd_um, bc_y, bc_z, pxY_um, pxZ_um)
+        # bc + r*(sin η, cos η) — same convention tilted_spoke_xy reduces
+        # to at zero tilt (and pixel_to_REta's eta=atan2(-Yc,Zc)): η=0 is
+        # straight up (+Z), not along +Y. cos/sin here (not sin/cos)
+        # would draw each η spoke 90° off from where it actually is.
+        th_r = math.radians(float(eta))
+        return ([bc_y + r_min * math.sin(th_r), bc_y + r_max * math.sin(th_r)],
+                [bc_z + r_min * math.cos(th_r), bc_z + r_max * math.cos(th_r)])
+
+    def _spoke(eta, pen):
+        Y, Z = _spoke_xy(eta)
+        item = pg.PlotDataItem(Y, Z, pen=pen)
+        viewer._iv.addItem(item); items.append(item)
+
+    # The two ends of the azimuth, told apart by line style. A caked region
+    # is directional -- eta runs from start to end -- and with both edges
+    # drawn identically there is nothing to say which way round it goes, or
+    # which edge you just moved. Same grammar as the radial pair above:
+    # the LOWER bound dashes, the UPPER is solid. Drawn in the boundary
+    # colour at boundary width so they read as limits, not as grid lines.
+    #
+    # Only when the sweep is actually limited: at a full turn the two
+    # coincide and a "start" marker would be an arbitrary ray across the
+    # image.
+    if 0.0 < (float(eta_max) - float(eta_min)) < 360.0 - 1e-9:
+        _spoke(eta_min, pg.mkPen(bound_color, width=1.2, style=QtCore.Qt.DashLine))
+        _spoke(eta_max, pg.mkPen(bound_color, width=1.5))
+
+    grid_pen = pg.mkPen(grid_color, width=0.8)
     for r in _thinned_bin_edges(r_min, r_max, r_bin, max_rings):
         if r_min < r < r_max:
             _circle(r, grid_pen)
@@ -1977,21 +2432,7 @@ def draw_polar_bin_overlay(viewer, items: list, *, bc_y: float, bc_z: float,
     if eta_max - eta_min >= 360.0 - 1e-6:
         eta_edges = eta_edges[eta_edges < eta_max - 1e-9]   # drop the wraparound duplicate
     for eta in eta_edges:
-        if tilt_aware:
-            tt_lo = math.degrees(math.atan(r_min * pxY_um / lsd_um))
-            tt_hi = math.degrees(math.atan(r_max * pxY_um / lsd_um))
-            Y, Z = tilted_spoke_xy(tt_lo, tt_hi, float(eta), tx, ty, tz,
-                                    lsd_um, bc_y, bc_z, pxY_um, pxZ_um)
-        else:
-            # bc + r*(sin η, cos η) — same convention tilted_spoke_xy reduces
-            # to at zero tilt (and pixel_to_REta's eta=atan2(-Yc,Zc)): η=0 is
-            # straight up (+Z), not along +Y. cos/sin here (not sin/cos)
-            # would draw each η spoke 90° off from where it actually is.
-            th_r = math.radians(float(eta))
-            Y = [bc_y + r_min * math.sin(th_r), bc_y + r_max * math.sin(th_r)]
-            Z = [bc_z + r_min * math.cos(th_r), bc_z + r_max * math.cos(th_r)]
-        item = pg.PlotDataItem(Y, Z, pen=grid_pen)
-        viewer._iv.addItem(item); items.append(item)
+        _spoke(eta, grid_pen)
 
 
 def _drop_missing_residual_map(spec):
@@ -2066,6 +2507,43 @@ def _spec_from_json(path: str, r_bin: float, eta_bin: float):
 _PARAMSTEST_DISTORTION = {v1: v2 for v2, v1 in _V2_TO_V1.items()}
 
 
+def _crystallography(cal) -> dict:
+    """``SpaceGroup``/``LatticeConstant`` kwargs for a calibrant, or ``{}``.
+
+    A d-spacing calibrant (AgBH, ``Custom d-spacings…``) is not a crystal and
+    has no cell to report. This used to be ``_SG.get(cal, 225)`` /
+    ``_LC.get(cal, _LC["CeO2"])``, which filled both fields with *ceria's*
+    values — so calibrating on silver behenate wrote ``SpaceGroup 225`` and
+    ``LatticeConstant 5.4116 …`` into paramstest.txt, and the Results panel
+    (which reads that same file back) displayed a ceria structure for a run
+    that never saw any ceria. Returning ``{}`` leaves both at
+    ``CalibrationParams``' own unset defaults instead of asserting a structure
+    that does not exist; see ``_record_dspacing_calibrant`` for what is
+    reported in their place.
+    """
+    from midas_gui.constants import _SG, _LC
+    lattice = _LC.get(cal)
+    if lattice is None:
+        return {}
+    return dict(SpaceGroup=_SG.get(cal, 225), LatticeConstant=lattice)
+
+
+def _record_dspacing_calibrant(p, cal, result) -> None:
+    """Name the calibrant and report the d-spacings the fit used, for a
+    calibrant with no crystal structure. No-op for a crystalline one, whose
+    SpaceGroup/LatticeConstant already say what it was."""
+    from midas_gui.constants import _LC
+    if _LC.get(cal) is not None:
+        return
+    p.extra["Calibrant"] = cal
+    # Prefer the rings actually picked over the material's full table: a
+    # 10-entry AgBH list fitted from 3 rings should report the 3.
+    d_used = (getattr(result, "_d_used", None)
+              or getattr(result, "_d_list", None) or [])
+    if len(d_used):
+        p.extra["DSpacings"] = " ".join(f"{float(d):.6f}" for d in d_used)
+
+
 def write_standalone_paramstest(result, path, *, extra=None):
     """Write a v1 ``paramstest.txt`` from an AutoCalibrationResult (no geometry
     dependency on a live pipeline). Single implementation shared by the Calibrate
@@ -2081,8 +2559,9 @@ def write_standalone_paramstest(result, path, *, extra=None):
     p = CalibrationParams(
         NrPixelsY=NY, NrPixelsZ=NZ, pxY=pxY, pxZ=pxZ, Lsd=result.Lsd,
         BC_y=result.BC_y, BC_z=result.BC_z, tx=result.tx, ty=result.ty, tz=result.tz,
-        Wavelength=result.wavelength_A, SpaceGroup=_SG.get(cal, 225),
-        LatticeConstant=_LC.get(cal, _LC["CeO2"]), RhoD=RhoD, MaxRingRad=RhoD * 0.97)
+        Wavelength=result.wavelength_A, **_crystallography(cal),
+        RhoD=RhoD, MaxRingRad=RhoD * 0.97)
+    _record_dspacing_calibrant(p, cal, result)
     for v2n, v1n in _V2_TO_V1.items():
         val = (result.distortion or {}).get(v2n)
         if val is not None:

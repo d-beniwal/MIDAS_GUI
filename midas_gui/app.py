@@ -67,6 +67,7 @@ from midas_gui.tab_view import DataViewerTab
 from midas_gui.tab_mask import MaskTab
 from midas_gui.tab_calibrate import CalibrationTab
 from midas_gui.tab_batch import BatchTab
+from midas_gui.tab_batch_correct import BatchCorrectionTab
 from midas_gui.tab_zarrviewer import ZarrViewerTab
 from midas_gui.tab_queue import BatchQueueTab
 from midas_gui.tab_refine import RefinementTab
@@ -220,6 +221,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._mask_tab   = _tab(MaskTab,         "Mask Builder")
         self._cal_tab    = _tab(CalibrationTab,  "Calibrate")
         self._batch_tab  = _tab(BatchTab,        "Batch Integrate")
+        self._bcorr_tab  = _tab(BatchCorrectionTab, "Batch Correction")
         self._queue_tab  = _tab(BatchQueueTab,   "Batch Queue")
         self._zarr_tab   = _tab(ZarrViewerTab,   "Zarr Viewer")
         self._refine_tab = _tab(RefinementTab,   "Calib. Refinement")
@@ -239,6 +241,7 @@ class MainWindow(QtWidgets.QMainWindow):
             (self._mask_tab,   "Mask Builder",      True),
             (self._cal_tab,    "Calibrate",         True),
             (self._refine_tab, "Calib. Refinement", False),
+            (self._bcorr_tab,  "Batch Correction",  False),
             (self._batch_tab,  "Batch Integrate",   True),
             (self._queue_tab,  "Batch Queue",       False),
             (self._zarr_tab,   "Zarr Viewer",       False),
@@ -268,7 +271,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for tab, label in (
             (self._view_tab, "Data Viewer"), (self._cal_tab, "Calibrate"),
             (self._refine_tab, "Calib. Refinement"), (self._batch_tab, "Batch Integrate"),
-            (self._pump_tab, "Pump Probe"),
+            (self._bcorr_tab, "Batch Correction"), (self._pump_tab, "Pump Probe"),
         ):
             loader = getattr(tab, "_loader", None)
             if loader is not None:
@@ -303,7 +306,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # suggestions reads it live via this callback rather than keeping its
         # own copy — Batch Integrate names its output folder from it, Calibrate
         # names the files it saves.
-        for tab in (self._batch_tab, self._cal_tab):
+        for tab in (self._batch_tab, self._cal_tab, self._bcorr_tab,
+                    self._view_tab):
             set_provider = getattr(tab, "set_expid_provider", None)
             if set_provider is not None:
                 try:
@@ -331,6 +335,12 @@ class MainWindow(QtWidgets.QMainWindow):
                   self._corr_tab, self._pdf_tab, self._tex_tab, self._pump_tab,
                   self._export_tab),
                  "set_mask_from_tab1")
+        # Display orientation: the Mask Builder paints the detector the way
+        # the Data Viewer does, so the two never disagree about which way up
+        # it is. Display only — the mask stays raw-frame (see
+        # tab_mask.set_display_transform).
+        _connect(self._view_tab, "imTransChanged",
+                 (self._mask_tab, self._bcorr_tab), "set_display_transform")
         # Calibration propagation (Tab 2 result → consumers)
         _connect(self._cal_tab, "calibrationDone",
                  (self._batch_tab, self._queue_tab, self._mask_tab, self._refine_tab,
@@ -1231,6 +1241,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 except Exception:
                     _log(f"Session restore failed for tab '{name}':\n{traceback.format_exc()}")
                     errors.append(name)
+        # Tabs restore in dict order, so the Mask Builder may have been
+        # rebuilt before the Data Viewer knew its transforms. Push them once
+        # now rather than depending on that order.
+        try:
+            codes = self._view_tab._im_trans_codes()
+            self._mask_tab.set_display_transform(codes)
+            self._bcorr_tab.set_display_transform(codes)
+        except Exception:
+            _log(f"Display-transform sync after restore failed:\n"
+                 f"{traceback.format_exc()}")
         active = data.get("active_tab")
         widget = name_to_widget.get(active) if active else None
         idx = self._tabs.indexOf(widget) if widget is not None else -1

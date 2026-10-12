@@ -17,6 +17,7 @@ numbers), used only until a real per-panel calibration file is loaded.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -28,6 +29,27 @@ from midas_gui.helpers import (_load_image, _apply_im_trans, geometry_fields_fro
                          apply_field_corrections)
 
 _GEOMETRY_DIR = Path(__file__).parent / "hydra_default_geometry"
+
+
+#: Decimation factor for a composite built for DISPLAY.
+#:
+#: The windmill canvas for a real four-panel GE array is 6656x6656 -- 44.3
+#: megapixels, several times any screen, rebuilt synchronously on the GUI
+#: thread. Building it every second pixel costs a quarter of the work
+#: (remap 2.09 s -> ~0.5 s, composite max 1.61 s -> ~0.4 s, autolevel
+#: 0.49 s -> ~0.12 s) for an image still larger than the widget showing it.
+#:
+#: Shared by the Data Viewer's Hydra page and Batch Integrate's.
+#:
+#: This is display resolution only, and it is NOT a shortcut taken behind a
+#: measurement's back: the "Composite" radial curve sums the per-panel
+#: profiles rather than integrating this image (see _refresh_composite_curve),
+#: and Calibrate imports per-panel geometries, not this canvas (see
+#: export_for_calibration). What does read it -- the composite card's own
+#: overlays and radial integration -- is kept correct by scaling that card's
+#: pixel size, beam centre and NrPixels to match, in
+#: _reseed_composite_card_if_needed. Set to 1 for a full-resolution canvas.
+COMPOSITE_DISPLAY_STEP = 2
 
 
 def default_param_file(panel: int) -> Path:
@@ -77,6 +99,102 @@ def compute_inv_coords(bc_y: float, bc_z: float, tx_deg: float,
     y_pix = bc_y - Y_det / px
     z_pix = bc_z + Z_det / px
     return z_pix.astype(np.float32), y_pix.astype(np.float32)
+
+
+#: ``ge<n>`` anywhere in a path. Panel calibrations are written as a set and
+#: named alike, so one file names its siblings.
+PANEL_IN_NAME = re.compile(r"ge\s*([1-4])\b", re.IGNORECASE)
+
+
+def panel_for_file(path) -> Optional[int]:
+    """Which panel a file belongs to, or ``None``.
+
+    Read from the LAST ``ge<n>`` in the full path, so a per-panel folder
+    (``.../ge3/calib.txt``) and a per-panel filename (``..._ge3.instr.txt``)
+    both work, and a run folder that happens to contain "ge1" does not
+    out-vote the file's own name.
+    """
+    hits = PANEL_IN_NAME.findall(str(path))
+    return int(hits[-1]) if hits else None
+
+
+def sibling_for_panel(path, n: int) -> Optional[str]:
+    """``path`` with its panel token rewritten to ``n``, or ``None`` if it
+    carries no token (or already is that panel's).
+
+    Every occurrence is rewritten, not just the last, so a layout that puts
+    the panel in BOTH the folder and the filename
+    (``.../ge3/scan_ge3.instr.txt``) comes out consistent.
+
+    Says nothing about whether the result exists; callers check, because a
+    name that can be formed and a file that is there are different claims.
+    """
+    out = PANEL_IN_NAME.sub(
+        lambda m, _n=n: m.group(0)[:-len(m.group(1))] + str(_n), str(path))
+    return None if out == str(path) else out
+
+
+def split_by_panel(paths) -> dict:
+    """``{panel: [paths]}`` for one source folder's files.
+
+    A Hydra batch is a FOLDER, not a file: every ge1 file in it is a frame
+    of the same scan, and the four panels are four parallel frame lists.
+    Files with no ge token are ignored; they cannot belong to a panel.
+
+    This replaced a per-FILE grouping that treated each ge1/ge2/ge3/ge4
+    quartet as its own scan. On a load step holding thirteen frame files
+    that produced thirteen output directories where one was wanted -- and
+    the names, disambiguated against each other, came out as
+    ``APS_4130_C_load_step_0_APS_4130_C_load_step_0_APS_4130_C_load_step_0_004057.ge1``.
+    """
+    out: dict = {}
+    for p in sorted(str(x) for x in (paths or ())):
+        n = panel_for_file(p)
+        if n is not None:
+            out.setdefault(n, []).append(p)
+    return out
+
+
+def inv_coord_base(tx_deg: float, big_det_size: int, px: float, step: int = 1):
+    """The beam-centre-INDEPENDENT half of :func:`compute_inv_coords`, as
+    ``(Z_det/px, Y_det/px)``.
+
+    ``step`` builds the canvas decimated by that factor -- sampling every
+    ``step``-th output pixel, so the result is exactly the full grid's
+    ``[::step, ::step]`` and the field of view is unchanged. A canvas pixel
+    then spans ``step`` detector pixels, which is why a caller that keeps
+    geometry alongside the image must also scale its pixel size, beam
+    centre and NrPixels (see ``hydra_page._reseed_composite_card_if_needed``).
+
+    Look at the last two lines above: ``bc_y``/``bc_z`` are a plain additive
+    offset, and everything expensive -- two 6656x6656 meshgrids and the
+    rotation -- depends only on tx, canvas size and pixel size. Splitting
+    the two apart is what lets a beam-centre change reuse the grid instead
+    of rebuilding it; see ``DetectorState.get_inv_coords``.
+
+    Returned arrays are treated as READ-ONLY and shared: the caller adds its
+    own beam centre, which allocates the result it then hands to
+    ``remap_to_composite``.
+    """
+    bds = int(big_det_size)
+    step = max(1, int(step))
+    half = bds * 0.5
+    tx_rad = math.radians(tx_deg)
+    c, s = math.cos(tx_rad), math.sin(tx_rad)
+
+    # arange(bds)[::step], written directly so the grid is never materialised
+    # at full size -- the whole point is not to allocate 44 Mpx to throw
+    # three quarters of it away.
+    n_out = (bds + step - 1) // step
+    yo = (np.arange(n_out, dtype=np.float32) * step)
+    zo = (np.arange(n_out, dtype=np.float32) * step)
+    Yo, Zo = np.meshgrid(yo, zo)
+
+    Y_lab = (half - Yo) * px
+    Z_lab = (Zo - half) * px
+    Y_det = Y_lab * c + Z_lab * s
+    Z_det = -Y_lab * s + Z_lab * c
+    return (Z_det / px).astype(np.float32), (Y_det / px).astype(np.float32)
 
 
 def apply_panel_rotation(image: np.ndarray, angle_deg: float) -> np.ndarray:
@@ -171,7 +289,7 @@ class DetectorState:
     bright_mode: str = "divide"
     background: Optional[np.ndarray] = None
     proj_raw: Optional[np.ndarray] = None
-    _inv_coords: Optional[tuple] = None
+    _base_coords: Optional[tuple] = None
     _inv_cache_key: tuple = ()
 
     def load_from_geometry_dict(self, fields: dict, calib_path: str = "") -> None:
@@ -186,24 +304,40 @@ class DetectorState:
         if fields.get("NrPixelsY") is not None: self.ny = int(fields["NrPixelsY"])
         if fields.get("NrPixelsZ") is not None: self.nz = int(fields["NrPixelsZ"])
         self.im_trans_opts = list(fields.get("im_trans") or [])
-        self._inv_coords = None
+        self._base_coords = None
         self._inv_cache_key = ()
 
     def load_default(self, panel: int) -> None:
         self.load_from_geometry_dict(geometry_fields_from_file(str(default_param_file(panel))))
 
-    def get_inv_coords(self, big_det_size: int) -> tuple:
-        key = (self.bc_y, self.bc_z, self.tx, int(big_det_size), float(self.px))
-        if self._inv_cache_key == key and self._inv_coords is not None:
-            return self._inv_coords
-        rows, cols = compute_inv_coords(self.bc_y, self.bc_z, self.tx,
-                                        big_det_size, self.px)
-        self._inv_coords = (rows, cols)
-        self._inv_cache_key = key
-        return self._inv_coords
+    def get_inv_coords(self, big_det_size: int, step: int = 1) -> tuple:
+        """Sampling grids for this panel's place in the composite.
+
+        What is cached is the BC-independent grid, not the finished one. The
+        old cache key included bc_y/bc_z, so moving the beam centre -- which
+        is what Pick BC does, and what scrubbing the BC spins does on every
+        step -- was always a miss, and a miss rebuilds two 44-megapixel
+        meshgrids per panel: 11.4 s for four panels, on the GUI thread, for
+        an answer that differs from the cached one by a constant.
+
+        Keying on (tx, size, px) instead makes a beam-centre change an array
+        add, measured at 0.33 s for four panels against 11.42 s to rebuild.
+        Memory is unchanged: the panel holds one pair of 6656x6656 float32
+        grids either way, and the add's result is transient -- consumed by
+        ``remap_to_composite`` and dropped.
+        """
+        key = (round(float(self.tx), 6), int(big_det_size),
+               round(float(self.px), 6), max(1, int(step)))
+        if self._inv_cache_key != key or self._base_coords is None:
+            self._base_coords = inv_coord_base(self.tx, big_det_size, self.px, step)
+            self._inv_cache_key = key
+        z_base, y_base = self._base_coords
+        # Same arithmetic, same order, same dtype as compute_inv_coords'
+        # last two lines -- just with the costly half hoisted out.
+        return self.bc_z + z_base, self.bc_y - y_base
 
     def get_remapped_frame(self, frame_idx: int, dataset: str,
-                           big_det_size: int) -> np.ndarray:
+                           big_det_size: int, step: int = 1) -> np.ndarray:
         if self.proj_raw is not None:
             # Already corrected + projected by ProjectionWorker — same
             # precedent as the single-detector tab's _on_projection_done.
@@ -217,7 +351,7 @@ class DetectorState:
                                               bright_mode=self.bright_mode,
                                               background=self.background)
         img = _apply_im_trans(img, tuple(self.im_trans_opts))
-        rows, cols = self.get_inv_coords(big_det_size)
+        rows, cols = self.get_inv_coords(big_det_size, step)
         return remap_to_composite(img, rows, cols)
 
 
@@ -225,7 +359,7 @@ _big_det_size_cache: dict = {}
 
 
 def build_windmill_composite(siblings: dict, frame_idx: int, dataset: str,
-                             states: dict, op: str = "max"):
+                             states: dict, op: str = "max", step: int = 1):
     """Composite `frame_idx` from every panel in `siblings` (panel number ->
     file path) into one BC/tilt-registered BigDet frame, using `states` as a
     persistent cache of DetectorState per panel (geometry + inverse-
@@ -254,8 +388,12 @@ def build_windmill_composite(siblings: dict, frame_idx: int, dataset: str,
         big_det_size = autopick_big_det_size(active)
         _big_det_size_cache[key] = big_det_size
 
-    remapped = [st.get_remapped_frame(frame_idx, dataset, big_det_size)
+    remapped = [st.get_remapped_frame(frame_idx, dataset, big_det_size, step)
                for st in active]
+    # big_det_size is the canvas's FULL-RESOLUTION extent, which is what
+    # describes the field of view; at step > 1 the returned image is
+    # correspondingly smaller. Callers that pass step must scale any geometry
+    # they keep beside the image.
     return composite(remapped, op=op), big_det_size
 
 

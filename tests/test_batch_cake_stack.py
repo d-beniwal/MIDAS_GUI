@@ -331,3 +331,76 @@ def test_cake_display_state_is_persisted_by_the_tab(tab):
     fresh = type(tab)()
     fresh.set_state(state)
     assert fresh._cake_stack_view.x_unit() == "d"
+
+
+# ── Q-uniform: the axis the views are told they have ────────────────────
+
+def test_q_uniform_profiles_carry_an_R_axis_not_a_Q_one():
+    """Reported as "2theta is 180 deg" and a waterfall x-axis of -2.264e-11.
+
+    Q-uniform is a REBIN of an R-uniform integration, and the axis that
+    travels with the rebinned profile is rebin_grid_and_r's second return
+    value — the R in PIXELS of each Q bin — not the Q grid. Telling
+    the views the native unit was "Q" made _convert_radial read those pixel
+    values as inverse angstroms: x·λ/4π exceeds 1 for any real radius, so
+    it clips and every bin lands on 2θ = 180° exactly, which converts back
+    to R = Lsd·tan(180°)/px ≈ -2.26e-11.
+    """
+    from midas_gui.widgets import _convert_radial
+    from midas_gui.workers import rebin_grid_and_r
+
+    lsd, px, wl = 13866027.0, 75.0, 0.13060
+    qgrid, r_of_q = rebin_grid_and_r(
+        {"QMin": 0.5, "QMax": 8.0, "QBinSize": 0.01}, lsd, px, wl)
+
+    # The bug, reproduced exactly.
+    wrong = _convert_radial(r_of_q, lsd, px, wl, "Q", "2th")
+    assert np.allclose(wrong, 180.0), "the reported symptom no longer reproduces"
+    assert _convert_radial(r_of_q, lsd, px, wl, "Q", "R")[0] == \
+        pytest.approx(-2.2641e-11, rel=1e-3)
+
+    # Read as what it is, every unit comes out physical and Q round-trips.
+    tth = _convert_radial(r_of_q, lsd, px, wl, "R", "2th")
+    assert 0.0 < tth.min() < tth.max() < 20.0
+    assert np.allclose(_convert_radial(r_of_q, lsd, px, wl, "R", "Q"), qgrid,
+                       rtol=1e-9)
+
+
+@pytest.mark.parametrize("module", ["tab_batch.py", "hydra_batch_page.py"])
+def test_no_tab_declares_Q_as_the_native_axis_unit(module):
+    """The fix at its source. Both tabs that can run a Q-uniform batch had
+    the same expression; hydra_batch_page kept it for a while after
+    tab_batch was fixed (4cb7aaa), so the guard scans both."""
+    from pathlib import Path
+    src = Path(__file__).resolve().parents[1] / "midas_gui" / module
+    assert '"Q" if q_cfg else "R"' not in src.read_text(), \
+        f"{module}: a set_axis_context site still labels the R-px axis as Q"
+
+
+def test_the_batch_tab_has_exactly_the_two_known_axis_context_sites():
+    """A third would be a site nobody has checked declares "R"."""
+    from pathlib import Path
+    src = Path(__file__).resolve().parents[1] / "midas_gui" / "tab_batch.py"
+    assert src.read_text().count("_axctx = ") == 2
+
+
+def test_2theta_uniform_profiles_also_carry_an_R_axis():
+    """The 180° symptom must not reappear in the unit added after the fix:
+    a 2θ rebin carries R in pixels too, and reading those pixels as degrees
+    would put every bin past the detector."""
+    from midas_gui.widgets import _convert_radial
+    from midas_gui.workers import rebin_grid_and_r
+
+    lsd, px, wl = 13866027.0, 75.0, 0.13060
+    grid, r_of_grid = rebin_grid_and_r(
+        {"unit": "2th", "min": 0.5, "max": 9.0, "step": 0.01}, lsd, px, wl)
+
+    # Read as what it is, the axis round-trips to the 2theta grid exactly.
+    assert np.allclose(
+        _convert_radial(r_of_grid, lsd, px, wl, "R", "2th"), grid, rtol=1e-12)
+    # Read as degrees (the analogous mistake), it stops being a radial axis
+    # at all: tan() wraps every 180 deg, so 1630..29266 "degrees" scatters
+    # into huge values of both signs instead of rising monotonically.
+    wrong = _convert_radial(r_of_grid, lsd, px, wl, "2th", "R")
+    assert np.any(np.diff(wrong) < 0) and wrong.min() < 0, \
+        "misreading the axis as degrees should not yield a plausible radius"

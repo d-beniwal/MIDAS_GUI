@@ -231,10 +231,29 @@ class ManualSeedDialog(QtWidgets.QDialog):
     per-panel seed dialog) add a "Distortion" row whose values live behind
     ``dist_btn``'s own dialog rather than inline, since 15 coefficients
     don't fit this grid.
+
+    ``refine_boxes`` (optional) maps a row key — "BC"/"Lsd"/"tx"/"ty"/"tz"/
+    "Distortion" — to the caller's *Refine* checkbox for that parameter.
+    Given them, each row gains a live label saying what the fit will actually
+    do with it. Seeding and refining are independent choices and all four
+    pairings mean something different, so the two panels showing different
+    ticks is correct — but it reads as a contradiction without this.
     """
 
+    #: (refined?, seeded?) -> what the fit does with the parameter. Phrased
+    #: as an outcome rather than echoing the tick, because the pairing is the
+    #: part that is not obvious: seeding a parameter you are NOT refining is
+    #: how you pin it to a measured value, which is a real calibration move
+    #: and the reason these two panels are not simply wired together.
+    _OUTCOME = {
+        (True, True): "refined, from this value",
+        (True, False): "refined, auto-seeded",
+        (False, True): "held at this value",
+        (False, False): "held at default",
+    }
+
     def __init__(self, *, en_bc, bcy, bcz, en_lsd, lsd, en_tx, tx, en_ty, ty,
-                en_tz, tz, en_dist=None, dist_btn=None,
+                en_tz, tz, en_dist=None, dist_btn=None, refine_boxes=None,
                 feedback_check=None, note=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Manual seed")
@@ -250,27 +269,63 @@ class ManualSeedDialog(QtWidgets.QDialog):
         info.setWordWrap(True)
         info.setStyleSheet("color:#bbb;font-size:11px;padding-bottom:6px;")
         layout.addWidget(info)
+        self._refine_boxes: dict = {}
+        self._status_lbls: dict = {}
+        self._seed_boxes: dict = {}
+        # Written by set_refine_boxes, which the caller can only call once
+        # its Refine card exists — in tab_calibrate that is built after this
+        # dialog, so the rows are laid out now and wired up later.
+        self._refine_hint = QtWidgets.QLabel(
+            "Seeding and refining are separate choices. Ticking a parameter "
+            "here only says where the fit STARTS; whether it is then free to "
+            "move is the Refine parameters card. Seeding something you are "
+            "not refining is how you pin it to a measured value.")
+        self._refine_hint.setWordWrap(True)
+        self._refine_hint.setStyleSheet(
+            "color:#888;font-size:10px;padding-bottom:6px;")
+        self._refine_hint.setVisible(False)
+        layout.addWidget(self._refine_hint)
 
         grid = QtWidgets.QGridLayout(); grid.setSpacing(6)
+
+        def status(key, en, row):
+            """Reserve this row's "what the fit will do" label. It stays
+            empty, and costs nothing, until set_refine_boxes fills it."""
+            lbl = QtWidgets.QLabel("")
+            grid.addWidget(lbl, row, 5)
+            self._status_lbls[key] = lbl
+            self._seed_boxes[key] = en
+            en.toggled.connect(self._sync_status)
+
+        # Row order is PARAMETER_LIMIT_ROWS' order, which is also the Refine
+        # card's and _REFINE_BOXES'. Reading the same parameter at a
+        # different height in the two panels is what made them look like
+        # they disagreed; they are independent choices (see _refine_hint),
+        # which is exactly why they have to line up.
         r = 0
+        grid.addWidget(en_lsd, r, 0)
+        grid.addWidget(QtWidgets.QLabel("Lsd:"), r, 1); grid.addWidget(lsd, r, 2)
+        status("Lsd", en_lsd, r)
+        r += 1
         grid.addWidget(en_bc, r, 0)
         grid.addWidget(QtWidgets.QLabel("BC_y:"), r, 1); grid.addWidget(bcy, r, 2)
         grid.addWidget(QtWidgets.QLabel("BC_z:"), r, 3); grid.addWidget(bcz, r, 4)
-        r += 1
-        grid.addWidget(en_lsd, r, 0)
-        grid.addWidget(QtWidgets.QLabel("Lsd:"), r, 1); grid.addWidget(lsd, r, 2)
+        status("BC", en_bc, r)
         r += 1
         for en, w, label in ((en_tx, tx, "tx:"), (en_ty, ty, "ty:"), (en_tz, tz, "tz:")):
             grid.addWidget(en, r, 0)
             grid.addWidget(QtWidgets.QLabel(label), r, 1); grid.addWidget(w, r, 2)
+            status(label.rstrip(":"), en, r)
             r += 1
         if en_dist is not None:
             grid.addWidget(en_dist, r, 0)
             grid.addWidget(QtWidgets.QLabel("Distortion:"), r, 1)
             if dist_btn is not None:
                 grid.addWidget(dist_btn, r, 2)
+            status("Distortion", en_dist, r)
             r += 1
         layout.addLayout(grid)
+        self._sync_status()
 
         if feedback_check is not None:
             layout.addWidget(feedback_check)
@@ -283,6 +338,34 @@ class ManualSeedDialog(QtWidgets.QDialog):
         if close_btn is not None:
             close_btn.clicked.connect(self.close)
         layout.addWidget(btns)
+
+    def set_refine_boxes(self, boxes: dict) -> None:
+        """Attach the caller's Refine checkboxes, keyed as in ``_OUTCOME``'s
+        rows. Separate from ``__init__`` because a caller may build this
+        dialog before its Refine card exists."""
+        self._refine_boxes = {k: v for k, v in (boxes or {}).items()
+                              if k in self._status_lbls}
+        self._refine_hint.setVisible(bool(self._refine_boxes))
+        for box in self._refine_boxes.values():
+            box.toggled.connect(self._sync_status)
+        self._sync_status()
+
+    def _sync_status(self, *_args):
+        """Repaint every row's outcome from the live Refine and seed ticks."""
+        for key, lbl in self._status_lbls.items():
+            if key not in self._refine_boxes:
+                continue
+            refined = self._refine_boxes[key].isChecked()
+            seeded = self._seed_boxes[key].isChecked()
+            lbl.setText(self._OUTCOME[(refined, seeded)])
+            lbl.setStyleSheet(
+                "font-size:10px;color:" + ("#d7861f" if refined else "#8a8a8a"))
+
+    def showEvent(self, event):
+        """The Refine card stays editable while this non-modal dialog is
+        closed, so refresh on every open rather than only at construction."""
+        self._sync_status()
+        super().showEvent(event)
 
 
 #: Limit rows: slot name → (label, default unit, default window,
@@ -856,16 +939,49 @@ _NON_H5_NAME_FILTERS = ["*.tif", "*.tiff", "*.ge*", "*.cbf", "*.edf"]
 _ALL_NAME_FILTERS = _NON_H5_NAME_FILTERS + _H5_NAME_FILTERS
 
 
-def _count_frame_files(folder: str) -> int:
-    """How many frame files (TIFF-family or HDF5, see ``_ALL_NAME_FILTERS``)
-    sit directly in ``folder`` — used for the Full-folder/Filestem preview."""
+def _find_frame_files(folder: str, recursive: bool = False) -> list:
+    """Frame files (TIFF-family or HDF5, see ``_ALL_NAME_FILTERS``) in
+    ``folder`` — directly in it, or anywhere beneath it when ``recursive``.
+
+    A beamline folder is often nothing but per-load-step subfolders, with no
+    frame directly in it at all; recursing is how "Full folder" reaches those.
+    The result is a sorted, de-duplicated list, so a file matching two
+    patterns is not processed twice.
+    """
     p = Path(folder)
     if not p.is_dir():
-        return 0
-    n = 0
+        return []
+    glob = p.rglob if recursive else p.glob
+    out = set()
     for pat in _ALL_NAME_FILTERS:
-        n += sum(1 for _ in p.glob(pat))
-    return n
+        out.update(str(m) for m in glob(pat) if m.is_file())
+    return sorted(out)
+
+
+def _count_frame_files(folder: str, recursive: bool = False) -> int:
+    """How many frame files ``_find_frame_files`` would return."""
+    return len(_find_frame_files(folder, recursive))
+
+
+def _froot_of(path) -> str:
+    """The scan root of a detector filename — ``Cu_tensile_cracked`` from
+    ``Cu_tensile_cracked_001382.h5``.
+
+    What "Files sharing a name stem" is actually for. Auto-filling the
+    field with ``Path(...).stem`` instead put the file NUMBER in the stem,
+    so the pattern matched exactly the one file that was clicked and the
+    mode quietly degenerated into "Single file" — the froot is the part the
+    siblings share. Uses ``workers.froot_and_frame_num``, the same parse the
+    output-naming convention is read with, so a detector tag and a mid-stem
+    number are handled identically here and there. Falls back to the plain
+    stem for a name with no trailing number.
+    """
+    from midas_gui.workers import froot_and_frame_num   # dialogs<-workers cycle
+    stem = Path(str(path)).stem
+    try:
+        return froot_and_frame_num(stem, -1)[0] or stem
+    except Exception:
+        return stem
 
 
 class BrowseFilesDialog(QtWidgets.QDialog):
@@ -911,11 +1027,15 @@ class BrowseFilesDialog(QtWidgets.QDialog):
         self.setWindowTitle(title)
         self.resize(760, 520)
         modes = tuple(modes)
+        self._modes = modes
         self._mode = modes[0]
         self._current_dir = ""
         self._folder = ""
         self._stem = ""
         self._paths: list = []
+        self._recursive_result = False
+        self._sweep_key = None          # memo for the recursive sweep only
+        self._sweep: list = []
 
         layout = QtWidgets.QVBoxLayout(self)
 
@@ -966,6 +1086,22 @@ class BrowseFilesDialog(QtWidgets.QDialog):
         sr.addWidget(self._stem_ed, 1)
         self._stem_row.setVisible(False)
         layout.addWidget(self._stem_row)
+
+        # Recursion turns a folder pick into an explicit file list, so it is
+        # only offered where the caller can actually consume one -- i.e. where
+        # "files" is among the modes on offer. The Hydra panel cards take a
+        # single path or a stem and pass modes without "files", so they never
+        # see this box.
+        self._recursive_chk = QtWidgets.QCheckBox("Include subfolders")
+        self._recursive_chk.setToolTip(
+            "Find frame files anywhere beneath this folder, not just directly "
+            "in it.\n\nThe result is a fixed list of the files present when "
+            "you press OK, so a folder still being written to by a running "
+            "scan is not picked up live.")
+        self._recursive_chk.toggled.connect(
+            lambda *_: (self._update_info(), self._update_ok_enabled()))
+        self._recursive_chk.setVisible(False)
+        layout.addWidget(self._recursive_chk)
 
         self._info = QtWidgets.QLabel("")
         self._info.setStyleSheet("color:#9a9a9a;font-size:10px")
@@ -1028,6 +1164,8 @@ class BrowseFilesDialog(QtWidgets.QDialog):
             self._tree.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self._model.setNameFilterDisables(False)
         self._stem_row.setVisible(self._mode == "stem")
+        self._recursive_chk.setVisible(
+            self._mode == "folder" and "files" in self._modes)
         self._tree.clearSelection()
         self._update_info()
         self._update_ok_enabled()
@@ -1060,9 +1198,34 @@ class BrowseFilesDialog(QtWidgets.QDialog):
         if self._mode == "stem":
             files = self._selected_files()
             if len(files) == 1 and not self._stem_ed.text().strip():
-                self._stem_ed.setText(Path(files[0]).stem)
+                self._stem_ed.setText(_froot_of(files[0]))
         self._update_info()
         self._update_ok_enabled()
+
+    def _recursive(self) -> bool:
+        """Is the recursive sweep active right now? Checked against the mode
+        and the offered modes rather than widget visibility, which is False
+        until the dialog is actually shown (and in offscreen tests)."""
+        return (self._mode == "folder" and "files" in self._modes
+                and self._recursive_chk.isChecked())
+
+    def _frame_files(self) -> list:
+        """Frame files for the current folder under the current recursion
+        setting. The recursive sweep walks a whole tree over NFS, so it is
+        memoised per (folder, recursive); the plain glob is cheap and stays
+        live so a folder being written to still reports a growing count."""
+        if not self._recursive():
+            return _find_frame_files(self._current_dir, False)
+        key = (self._current_dir, True)
+        if self._sweep_key != key:
+            self._sweep_key, self._sweep = key, _find_frame_files(*key)
+        return self._sweep
+
+    def _n_subfolders(self) -> int:
+        try:
+            return sum(1 for c in Path(self._current_dir).iterdir() if c.is_dir())
+        except OSError:
+            return 0
 
     def _update_info(self):
         if self._mode == "file":
@@ -1072,12 +1235,27 @@ class BrowseFilesDialog(QtWidgets.QDialog):
             n = len(self._selected_files())
             self._info.setText(
                 f"{n} file(s) selected." if n else
-                "Select one or more files (TIFF-family or HDF5 — an HDF5 file "
-                "here is treated as one detector-frame source, not unpacked "
-                "into all its own internal frames).")
+                "Select one or more files — Ctrl-click to add, Shift-click "
+                "for a run. (TIFF-family or HDF5; an HDF5 file here is "
+                "treated as one detector-frame source, not unpacked into "
+                "all its own internal frames.)")
         elif self._mode == "folder":
-            n = _count_frame_files(self._current_dir)
-            self._info.setText(f"{n} frame file(s) found in this folder.")
+            n = len(self._frame_files())
+            if self._recursive():
+                self._info.setText(
+                    f"{n} frame file(s) found in this folder and everything "
+                    f"beneath it. They are taken as one fixed list, read when "
+                    f"you press OK — a folder still filling up is not followed.")
+            else:
+                msg = f"{n} frame file(s) found in this folder."
+                # A beamline folder is often only per-load-step subfolders, so
+                # "0 found" here is the normal case rather than a mistake; say
+                # where the frames actually are instead of leaving a dead end.
+                n_sub = self._n_subfolders()
+                if not n and n_sub and "files" in self._modes:
+                    msg += (f" It holds {n_sub} subfolder(s) — tick "
+                            f"\u201cInclude subfolders\u201d to search those too.")
+                self._info.setText(msg)
         elif self._mode == "stem":
             n = len(self._stem_matches())
             self._info.setText(
@@ -1091,6 +1269,11 @@ class BrowseFilesDialog(QtWidgets.QDialog):
             ok = len(self._selected_files()) >= 1
         elif self._mode == "folder":
             ok = bool(self._current_dir) and Path(self._current_dir).is_dir()
+            # A plain folder pick may legitimately be empty -- it can be watched
+            # as a run fills it. A recursive pick freezes the list at OK, so an
+            # empty one can only ever process nothing.
+            if ok and self._recursive():
+                ok = bool(self._frame_files())
         else:  # stem
             ok = len(self._stem_matches()) >= 1
         self._ok_btn.setEnabled(ok)
@@ -1100,6 +1283,9 @@ class BrowseFilesDialog(QtWidgets.QDialog):
             self._paths = self._selected_files()
         elif self._mode == "folder":
             self._folder = self._current_dir
+            self._recursive_result = self._recursive()
+            if self._recursive_result:
+                self._paths = self._frame_files()
         elif self._mode == "stem":
             self._paths = self._stem_matches()
             self._stem = self._stem_ed.text().strip()
@@ -1117,6 +1303,16 @@ class BrowseFilesDialog(QtWidgets.QDialog):
     def folder(self) -> str:
         """The chosen directory, for "folder" mode."""
         return self._folder
+
+    def recursive(self) -> bool:
+        """True when "Full folder" was confirmed with "Include subfolders".
+
+        ``mode()`` is still ``"folder"`` -- the user did pick a folder -- but
+        the caller must consume ``paths()`` rather than ``folder()``, because a
+        single-directory glob cannot express a tree. The list is frozen at the
+        moment OK was pressed.
+        """
+        return self._recursive_result
 
     def stem(self) -> tuple:
         """(folder, stem) for "stem" mode — Hydra callers re-run sibling

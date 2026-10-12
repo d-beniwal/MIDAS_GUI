@@ -249,8 +249,26 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         lv = QtWidgets.QVBoxLayout(inner); lv.setContentsMargins(2, 2, 2, 2); lv.setSpacing(8)
         scroll.setWidget(inner)
 
+        # The model, stated rather than implied. Asked for at the beamline:
+        # "what does it mean shared parameters? Are ge1 - GE4 in hydra
+        # sharing one set of parameters?" -- the cards below were already
+        # marked "(shared)", and that was exactly what misled: "shared"
+        # reads as one value for all four detectors, i.e. a joint fit, when
+        # it means one recipe driving four independent fits.
+        banner = QtWidgets.QLabel(
+            "<b>Four independent fits — one per panel.</b> The panels are "
+            "NOT treated as a single detector. Cards marked <i>same for all "
+            "4 fits</i> set the inputs each fit uses; the fitted geometry "
+            "(BC, Lsd, ty, tz, distortion) is per-panel and lives on the "
+            "ge1–ge4 card below, as does each panel's result.")
+        banner.setWordWrap(True)
+        banner.setStyleSheet(
+            f"color:{S.MUTED};font-size:10px;border:1px solid {S.ACCENT};"
+            "border-radius:3px;padding:5px;")
+        lv.addWidget(banner)
+
         # Pipeline
-        pipe = S.make_card("Pipeline")
+        pipe = S.make_card("Pipeline  (all 4 panels)")
         self._pipeline = _NoScrollComboBox()
         for label, key, enabled in PIPELINES:
             self._pipeline.addItem(label, key)
@@ -263,7 +281,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         lv.addWidget(pipe)
 
         # Detector & Calibrant (shared — same beam/detector model for all 4 panels)
-        det = S.make_card("Detector & Calibrant  (shared across ge1–ge4)")
+        det = S.make_card("Detector & Calibrant  (all 4 panels)")
         self._wl = _fspin(0.001, 10.0, 5, DEFAULT_WAVELENGTH, "Å")
         self._cal = _NoScrollComboBox(); self._cal.addItems(CALIBRANTS); self._cal.setMaximumWidth(150)
         # A Form().row() stretches every field column equally, which spreads
@@ -349,6 +367,18 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         for w in (self._avg_start, self._avg_end):
             w.valueChanged.connect(self._on_avg_changed)
         lv.addWidget(avgc)
+        # Which panels are in play, what tx each will use, and which one is
+        # running. Asked for at the beamline in one breath: "it is unclear
+        # what parameters are dedicated to each GE panel ... which panel is
+        # being fitted ... and I do not know what Tx they are getting."
+        # The per-panel card below shows one panel at a time, so none of
+        # those three were answerable without clicking through all four.
+        self._panels_lbl = QtWidgets.QLabel("")
+        self._panels_lbl.setWordWrap(True)
+        self._panels_lbl.setTextFormat(QtCore.Qt.RichText)
+        self._panels_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px;")
+        lv.addWidget(self._panels_lbl)
+
 
         # Always-visible seed-status banner — unlike each card's own seed
         # summary (only visible for whichever one panel is currently shown),
@@ -359,6 +389,11 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._seed_status_lbl = QtWidgets.QLabel("Seed: automatic")
         self._seed_status_lbl.setWordWrap(True)
         lv.addWidget(self._seed_status_lbl)
+
+        self._panel_hdr = QtWidgets.QLabel("")
+        self._panel_hdr.setStyleSheet(
+            f"color:{S.ACCENT};font-size:11px;font-weight:bold;padding-top:4px;")
+        lv.addWidget(self._panel_hdr)
 
         # Per-panel: Transforms + Initial seed, switched with the active
         # panel — positioned here (between Mean of frames and Refine
@@ -379,6 +414,8 @@ class HydraCalibrationPage(QtWidgets.QWidget):
                         "_seed_en_ty", "_seed_en_tz"):
                 getattr(card, attr).toggled.connect(
                     lambda checked, n=n, a=attr: self._sync_seed_checkbox(a, n, checked, block=False))
+            card._seed_tx.valueChanged.connect(lambda *_: self._update_panels_overview())
+            card._seed_en_tx.toggled.connect(lambda *_: self._update_panels_overview())
             card.seedStateChanged.connect(self._refresh_seed_status)
             self._cards[n] = card
             self._card_stack.addWidget(card)
@@ -386,12 +423,43 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         lv.addWidget(self._card_stack)
 
         # Refine parameters (shared)
-        refc = S.make_card("Refine parameters  (shared)")
+        refc = S.make_card("Refine parameters  (all 4 panels)")
+        # "(shared)" read as one value for all four detectors; "(same for
+        # all 4 fits)" was asked about too ("What does this mean?"). The
+        # distinction is which-knobs-are-free versus what-they-settle-at,
+        # and a card title cannot carry it -- so spell it out once, here.
+        ref_note = QtWidgets.QLabel(
+            "Which parameters are free to move. The same choice is used for "
+            "every panel — each panel still fits its <b>own</b> values.")
+        ref_note.setWordWrap(True)
+        ref_note.setStyleSheet(f"color:{S.MUTED};font-size:10px;padding-bottom:3px;")
+        refc.body.addWidget(ref_note)
+        rfl = QtWidgets.QGridLayout(); rfl.setSpacing(4)
         self._ref_lsd = QtWidgets.QCheckBox("Lsd"); self._ref_lsd.setChecked(True)
         self._ref_bc = QtWidgets.QCheckBox("BC"); self._ref_bc.setChecked(True)
         self._ref_ty = QtWidgets.QCheckBox("ty"); self._ref_ty.setChecked(True)
         self._ref_tz = QtWidgets.QCheckBox("tz"); self._ref_tz.setChecked(True)
         self._ref_tx = QtWidgets.QCheckBox("tx")
+        # Not refinable from a powder calibrant, and not by any Hydra route:
+        # a Debye-Scherrer pattern is azimuthally symmetric about the beam,
+        # so rotating a panel about it maps the rings onto themselves. The
+        # backend states the same thing in the gauge language -- with the
+        # azimuthal harmonics free, (tx, phi_k) -> (tx + d, phi_k + k*d) is
+        # an exact gauge orbit -- and freezes tx in compat/from_v1.py for
+        # EVERY powder pipeline. Hydra has no manual d-spacing route (the
+        # single-detector tab does, which is why its own tx tick stays
+        # live), so here the box could never do anything. Left visible and
+        # disabled rather than removed: the parameter is real and seeded
+        # per panel, and a silently-missing row invites the question of
+        # whether tx is being refined behind your back.
+        self._ref_tx.setEnabled(False)
+        self._ref_tx.setToolTip(
+            "tx cannot be refined from a powder calibrant — the ring pattern "
+            "is unchanged by rotating a panel about the beam, so there is "
+            "nothing in the data to fit. Supply it per panel in Manual seed "
+            "from the installation geometry; it is held at that value. "
+            "(Determine it from grain spots or Friedel-pair omega splitting "
+            "if you need to measure it.)")
         self._ref_wl = QtWidgets.QCheckBox("Wavelength")
         self._ref_dist = QtWidgets.QCheckBox("Distortion"); self._ref_dist.setChecked(True)
         self._build_rc = QtWidgets.QCheckBox("Residual map"); self._build_rc.setChecked(True)
@@ -478,6 +546,19 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._ref_dist.toggled.connect(self._update_limits_note)
         refc.body.addLayout(rfl_bottom)
         lv.addWidget(refc)
+
+        # Let each Manual seed row say what the fit will actually do with
+        # that parameter. Deliberately AFTER the Refine card is built:
+        # upstream moved the per-panel stack ABOVE it, so self._ref_* do
+        # not exist yet while the cards are being constructed. Still
+        # one-way -- seeding and refining are separate decisions (seeding
+        # something you do NOT refine is how you pin tx to a measured
+        # value, which is exactly what tx is for here).
+        for _card in self._cards.values():
+            _card._seed_dialog.set_refine_boxes(
+                {"BC": self._ref_bc, "Lsd": self._ref_lsd, "tx": self._ref_tx,
+                 "ty": self._ref_ty, "tz": self._ref_tz,
+                 "Distortion": self._ref_dist})
         self._update_dist_label()
         self._update_limits_note()
 
@@ -605,7 +686,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             lambda _active: self._refresh_composite_curve())
         ptb = self._profile_view._toolbar_layout
         self._cal_r_bin = _fspin(0.1, 20.0, 2, 1.0, "px"); self._cal_r_bin.setFixedWidth(78)
-        self._cal_eta_bin = _fspin(0.5, 30.0, 1, 5.0, "°"); self._cal_eta_bin.setFixedWidth(64)
+        self._cal_eta_bin = _fspin(0.5, 360.0, 1, 5.0, "°"); self._cal_eta_bin.setFixedWidth(64)
         self._cal_azim = _NoScrollComboBox()
         self._cal_azim.addItem("Pixel-weighted", True)
         self._cal_azim.addItem("η-bin mean", False)
@@ -720,6 +801,52 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             return
         self._set_working_dir(d)
 
+    def _strain_bit(self, n: int) -> str:
+        """This panel's post-refine pseudo-strain, once it has one.
+
+        Shown in microstrain AND parts-per-1e-4 because the beamline's
+        standing figure of merit from the old mpe_wf workflow is "a few
+        parts in 1e-4", while the GUI reported microstrain only --
+        comparing a run against that baseline meant a factor of 100 in your
+        head, four times over. One line for all four panels is the point:
+        judging a Hydra calibration means comparing panels, and the
+        per-panel card shows one at a time.
+        """
+        res = getattr(self._cards.get(n), "result", None)
+        s = getattr(res, "post_residual_strain_uE", None) if res is not None else None
+        if not s:
+            return ""
+        return f" <b>{s:.0f} µε</b> ({s / 100.0:.2f}e-4)"
+
+    def _update_panels_overview(self, running: Optional[int] = None):
+        """One line naming every panel that will be fitted and the tx it
+        will use, with the running one marked.
+
+        ``running`` is the panel currently being fitted, or None. Panels
+        found on disk but unticked are listed as excluded rather than
+        omitted -- "ge3 is missing from this list" and "ge3 was left out on
+        purpose" must not look the same.
+        """
+        if not hasattr(self, "_panels_lbl"):
+            return
+        selected = self._loader.siblings()
+        found = self._loader.found_siblings()
+        if not found:
+            self._panels_lbl.setText("")
+            return
+        bits = []
+        for n in sorted(found):
+            if n not in selected:
+                bits.append(f"<span style='color:#777'>ge{n} excluded</span>")
+                continue
+            tx = self._cards[n].seed_tx_value()
+            mark = " ▶ fitting" if running == n else ""
+            warn = "" if abs(tx) > 1e-9 else " <b>(tx not set)</b>"
+            bits.append(f"ge{n} tx {tx:g}°{warn}{mark}{self._strain_bit(n)}")
+        n_sel = len(selected)
+        head = (f"<b>Fitting {n_sel} panel{'' if n_sel == 1 else 's'} "
+                f"independently</b> — ")
+        self._panels_lbl.setText(head + " &nbsp;·&nbsp; ".join(bits))
     # ── Save All (one file per panel) ────────────────────────────────
 
     def _default_save_stem(self) -> str:
@@ -816,6 +943,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
 
     def _on_siblings_changed(self, siblings: dict):
         self._toolbar.set_available(siblings.keys())
+        self._update_panels_overview()
         # Safe to autofill straight off the load signal here, unlike
         # CalibrationTab: this page never loads a bundled demo image in
         # __init__, so there is no packaged path to derive a bogus default from.
@@ -840,6 +968,9 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         n = int(key[2])
         if self._active_card is not None:
             self._active_card.bind_viewer(None)
+        if hasattr(self, "_panel_hdr"):
+            self._panel_hdr.setText(
+                f"ge{n} — this panel only (transforms, seed, result)")
         self._card_stack.setCurrentWidget(self._cards[n])
         self._resid_stack.setCurrentWidget(self._cards[n].residual_chart)
         self._results_stack.setCurrentWidget(self._cards[n].results_widget)
@@ -1206,6 +1337,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._start_panel_worker(n)
 
     def _start_panel_worker(self, n: int):
+        self._update_panels_overview(running=n)
         card = self._cards[n]
         raw = self._panel_raw_image(n)
         if raw is None:
