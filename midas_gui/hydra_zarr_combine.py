@@ -53,6 +53,14 @@ from typing import Optional
 
 import numpy as np
 
+#: How far two panels' recorded omegas may differ and still be taken as
+#: the same rotation. They are synchronised frames of one stage, read per
+#: panel from each file's own measured channel, so they agree to the
+#: encoder's precision rather than to the bit. Generous on purpose: the
+#: question this guards is "are these the same scan", not "is the stage
+#: accurate", and the cost of a false reject is no combined archive at all.
+OMEGA_TOL_DEG = 1e-3
+
 #: Groups copied across untouched from the first panel.
 _VERBATIM_GROUPS = ("instrument", "measurement", "active_instrument")
 
@@ -256,11 +264,31 @@ def validate(panels, zs, paths=None):
         _check(s[0] == nR_osf, f"OmegaSumFrame first-dim differs: "
                                f"{p0}={nR_osf}, {panels[i]}={s[0]}")
 
-    om0 = zs[0]["Omegas"][...]
+    # Omegas are compared with a TOLERANCE, not exactly. The four panels
+    # are synchronised frames of one rotation, so they describe the same
+    # angles -- but each panel's omega is now read from its OWN file's
+    # measured channel (instrument/SMS/E/HL/RotX), and two recordings of
+    # one stage agree to the encoder's precision, not to the bit. Exact
+    # equality rejected a perfectly good four-panel set with
+    # "Omegas differ between ge1 and ge2" and wrote 0/1 archives.
+    #
+    # The merged file takes panel 0's, which is as arbitrary and as
+    # correct as any other member of a set this close together.
+    om0 = np.asarray(zs[0]["Omegas"][...], dtype=float)
     for i in range(1, len(zs)):
-        omi = zs[i]["Omegas"][...]
-        _check(om0.shape == omi.shape and np.array_equal(om0, omi),
-               f"Omegas differ between {p0} and {panels[i]}")
+        omi = np.asarray(zs[i]["Omegas"][...], dtype=float)
+        _check(om0.shape == omi.shape,
+               f"Omegas have different lengths: {p0}={om0.shape}, "
+               f"{panels[i]}={omi.shape} — the panels did not integrate the "
+               f"same number of frames")
+        if om0.size and not np.allclose(om0, omi, rtol=0.0,
+                                        atol=OMEGA_TOL_DEG, equal_nan=True):
+            worst = float(np.nanmax(np.abs(om0 - omi)))
+            _check(False,
+                   f"Omegas differ between {p0} and {panels[i]} by up to "
+                   f"{worst:g}° (tolerance {OMEGA_TOL_DEG:g}°) — that is more "
+                   f"than two readings of one rotation should disagree, so "
+                   f"these look like different scans")
 
     rem0 = zs[0]["REtaMap"].shape
     for i in range(1, len(zs)):

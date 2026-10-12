@@ -674,3 +674,33 @@ def test_the_shared_name_rule_reads_the_name_not_the_folder(tmp_path):
     from midas_gui.hydra_zarr_combine import panel_for_name
     assert panel_for_name("4130_D_load_step_0.ave.zarr.zip") is None
     assert panel_for_name("scan_005122.ge2.ave.zarr.zip") == 2
+
+
+# ── two readings of one rotation are not bit-identical ─────────────────
+# A real run: four panels integrated, then
+#     [combine] ..._005120.ge1.000000_000063.ave.zarr.zip:
+#               Omegas differ between ge1 and ge2
+#     [combine] wrote 0/1 combined archive(s).
+# Each panel's omega is now read from its OWN file's measured channel, so
+# they agree to the encoder's precision, not to the bit. Exact equality
+# rejected a perfectly good set.
+
+def test_encoder_jitter_between_panels_is_not_a_mismatch(tmp_path):
+    om = np.linspace(0.0, 6.3, NFRAMES)
+    paths = {p: str(_panel_zarr(tmp_path / f"s_000001.{p}.zarr.zip", p,
+                                omegas=om + 1e-7 * int(p[2:])))
+             for p in PANELS}
+    out = combine_panel_zarrs(paths, tmp_path / "m.zarr.zip")
+    assert Path(out).is_file()
+
+
+def test_a_genuinely_different_rotation_is_still_refused(tmp_path):
+    om = np.linspace(0.0, 6.3, NFRAMES)
+    paths = {p: str(_panel_zarr(tmp_path / f"s_000001.{p}.zarr.zip", p,
+                                omegas=om + (0.5 if p == "ge3" else 0.0)))
+             for p in PANELS}
+    with pytest.raises(ValueError) as e:
+        combine_panel_zarrs(paths, tmp_path / "m.zarr.zip")
+    msg = str(e.value)
+    assert "ge3" in msg and "0.5" in msg, msg
+    assert "different scans" in msg, "say what the disagreement means"
