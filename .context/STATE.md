@@ -1084,21 +1084,58 @@ Flip-Z/Multi-panel fix — trimmed here; full detail in
 - The omega ramp/channel has not been driven by a real rotation scan —
   confirm `/Omegas` ramps rather than sitting at zero.
 
-### Open: the Zarr Viewer's eta axis reads past 360
+### Settled: the merged eta axis is sorted into [-180, 180)
 
-A four-panel combined archive covers 350 deg across the +/-180 cut, so the
-stored eta is a sawtooth (125..205, -145..-65, -55..25, 45..115).
-`tab_zarrviewer._unwrap_eta` makes it monotonic so pcolormesh can derive
-cell edges, which plots it as 125 -> 475. Faithful, and reported as "eta
-range is incorrect": 475 deg is not an angle anyone quotes.
+Was "the Zarr Viewer's eta axis reads past 360". Chosen 2026-10-12, after
+checking the inputs rather than the plotting code: **wrap and sort in the
+combine**, not in the viewer.
 
-Three options, and the user has NOT yet chosen -- do not guess, the wrong
-numeric convention has been picked twice in this area already:
+Diagnosed on `4130_D_load_step_8_time_step_0`, reported as "ge1 is the
+issue, its eta range is inconsistent with the caking input". It was not.
+Every panel matched its CSV exactly:
 
-1. leave it (honest about continuity, unconventional numbers)
-2. keep the positions monotonic but WRAP THE TICK LABELS back into
-   (-180, 180] -- identical picture, conventional numbers. Probably right.
-3. plot against bin index and put eta in the hover readout
+| panel | `cake_parameters.1ide.geN.csv` | stored centres |
+|---|---|---|
+| ge1 | `120…210` step 10 | 125…205 (9) |
+| ge2 | `-150…-60` | -145…-65 (9) |
+| ge3 | `-60…30` | -55…25 (9) |
+| ge4 | `40…120` | 45…115 (8) |
+
+ge1 is written past the cut because **its CSV asks for 210**, and that is
+the standing 1-ID-E convention, not a slip: `raghavan_jul25` ge1 is
+130…205, `brugger_apr26` 125…200, `stock_jul25` 130…205. `eta_wrap` then
+labels the columns with the caller's own requested centres, which is where
+185/195/205 come from. The sawtooth was a *storage-order* artefact of
+concatenating in panel order, not a labelling error in any panel.
+
+`hydra_zarr_combine.plan_eta_order` now wraps the merged axis into
+`[-180, 180)` and sorts it — a permutation plus a relabel of REtaMap's eta
+plane, applied to every caked array at once. Verified on the real archive:
+`-175…175` strictly ascending, `SumFrames` bit-identical to the old array
+under that permutation, total counts unchanged. `_unwrap_eta` then returns
+it untouched, so the viewer stops saying "(unwrapped)" and stops plotting
+to 475. It is still needed for archives written before this.
+
+It declines — leaving the merge exactly as it was — when the axis is
+already ascending, when REtaMap has no eta plane, and when two columns
+share an azimuth (overlapping panels have no one right order).
+
+Also confirmed here, and previously only reasoned about: **`eta_wrap`'s
+full-circle-then-select really does work on real data.** All nine ge1
+columns carry signal, 185 included, at 100% non-zero bins.
+
+### The 10 deg hole at eta~35 in connolly_oct26 is deliberate
+
+ge4 is caked 40…120 where the other three span 90 deg, so the four cover
+350 of 360 and the merged archive has 35 columns, not 36. **That wedge is
+physically shadowed** (confirmed 2026-10-12) — the CSV is correct and the
+tiling note is behaving as designed by reporting rather than refusing.
+Do not "fix" ge4 to 30…120. Sorting makes the gap visible as a 20 deg step
+in the axis, where before it was hidden inside the sawtooth.
+
+Note that older experiments used 75 deg panels with deliberate 15 deg
+gaps at every junction (`raghavan_jul25`, `stock_jul25`), so a
+non-tiling Hydra set is the norm at this station, not an anomaly.
 
 ### Known wrong, not yet fixed
 

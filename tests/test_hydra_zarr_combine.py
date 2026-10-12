@@ -734,3 +734,327 @@ def test_a_whole_frame_of_offset_still_fails(tmp_path):
              for p in PANELS}
     with pytest.raises(ValueError, match="not the same frames"):
         combine_panel_zarrs(paths, tmp_path / "m.zarr.zip")
+
+
+# ── the merged eta axis is sorted into [-180, 180) ───────────────────────
+#
+# The fixtures above give REtaMap only two planes, so there is no eta plane
+# to read and the merge stays in panel order -- which is what pins the
+# "declines rather than guesses" half of plan_eta_order. These build the
+# real five-plane layout, [R, 2theta, eta, area, Q], with ge1 labelled past
+# the cut exactly as connolly_oct26's cake_parameters.1ide.ge1.csv asks
+# (ETA_MIN=120, ETA_MAX=210 -> centres 125..205).
+
+#: connolly_oct26's four CSVs, verbatim. ge4 is 80 deg where the others are
+#: 90: the 10 deg wedge at eta~35 is shadowed, so this set does not tile and
+#: is not meant to.
+REAL_ETA = {"ge1": (120.0, 210.0), "ge2": (-150.0, -60.0),
+            "ge3": (-60.0, 30.0), "ge4": (40.0, 120.0)}
+REAL_STEP = 10.0
+
+
+def _centres(lo, hi, step=REAL_STEP):
+    return lo + step * (np.arange(int(round((hi - lo) / step))) + 0.5)
+
+
+def _panel_with_eta(path, panel, eta_range, n_r=NR):
+    """A panel archive whose REtaMap really carries its own eta centres."""
+    lo, hi = eta_range
+    cen = _centres(lo, hi)
+    n_eta = len(cen)
+    store = zarr.ZipStore(str(path), mode="w")
+    root = zarr.group(store)
+    root.attrs.put({"provenance_history": [
+        {"tool": "integrate", "cake_params": {
+            "EtaMin": lo, "EtaMax": hi, "EtaBinSize": REAL_STEP,
+            "RMin": 440.0, "RMax": 2200.0, "RBinSize": 0.5}}]})
+    root.create_dataset("Omegas", data=np.arange(NFRAMES, dtype=float))
+    ip = root.create_group("InstrumentParameters")
+    ip.create_dataset("Distance", data=np.array([1000.0 + int(panel[2:])]))
+    # Every caked array is stamped with its own eta, so a column that moves
+    # can be traced back to the eta it started as -- a permutation that
+    # scrambled data against labels would show up as a mismatch here.
+    stamp = np.broadcast_to(cen, (n_r, n_eta)).copy()
+    for group in ("IntegrationResult", "OmegaSumFrame"):
+        g = root.create_group(group)
+        for f in range(NFRAMES):
+            g.create_dataset(f"FrameNr_{f}", data=stamp + f)
+    root.create_dataset("SumFrames", data=stamp)
+    reta = np.zeros((5, n_r, n_eta), dtype=float)
+    reta[0] = np.arange(n_r, dtype=float)[:, None]      # R
+    reta[1] = 1.0                                        # 2theta
+    reta[2] = stamp                                      # eta
+    reta[3] = 2.0                                        # area
+    reta[4] = 3.0                                        # Q
+    root.create_dataset("REtaMap", data=reta)
+    store.close()
+    return path
+
+
+@pytest.fixture
+def real_panels(tmp_path):
+    return {p: str(_panel_with_eta(tmp_path / f"s_005244.{p}.zarr.zip", p,
+                                   REAL_ETA[p])) for p in PANELS}
+
+
+def _merged_eta(path):
+    store = zarr.ZipStore(str(path), mode="r")
+    try:
+        return zarr.group(store)["REtaMap"][2].mean(axis=0)
+    finally:
+        store.close()
+
+
+def test_ge1_past_the_cut_is_wrapped_and_the_axis_comes_out_ascending(
+        real_panels, tmp_path):
+    """The reported defect. ge1 asks for 120..210 and is labelled 125..205,
+    so the panel-order axis sawtooths 205 -> -145 and any reader has to
+    unwrap it to 475 before it can derive cell edges. Sorted, it reads
+    -175..175 -- conventional numbers, no unwrap needed."""
+    eta = _merged_eta(combine_panel_zarrs(real_panels, tmp_path / "m.zarr.zip"))
+    assert np.all(np.diff(eta) > 0), "must be strictly ascending"
+    assert eta.min() == -175.0 and eta.max() == 175.0
+    assert np.all((eta >= -180.0) & (eta < 180.0))
+
+
+def test_the_sort_is_a_permutation_and_loses_no_column(real_panels, tmp_path):
+    eta = _merged_eta(combine_panel_zarrs(real_panels, tmp_path / "m.zarr.zip"))
+    expect = sorted((c + 180.0) % 360.0 - 180.0
+                    for p in PANELS for c in _centres(*REAL_ETA[p]))
+    assert list(eta) == expect
+    assert len(eta) == 35, "9+9+9+8 columns, 350 deg of 360"
+
+
+def test_every_caked_array_moves_with_the_eta_plane(real_panels, tmp_path):
+    """The permutation has to reach SumFrames, OmegaSumFrame and
+    IntegrationResult alike. Each column is stamped with the eta it was
+    integrated at, so data and label must still agree afterwards: if only
+    REtaMap were reordered, the archive would be silently scrambled."""
+    orig = np.array([c for p in PANELS for c in _centres(*REAL_ETA[p])])
+    stamp = orig[np.argsort((orig + 180.0) % 360.0 - 180.0, kind="stable")]
+    assert list(stamp[:3]) == [185.0, 195.0, 205.0], \
+        "ge1's past-cut columns sort to the FRONT, still stamped 185..205"
+
+    out = combine_panel_zarrs(real_panels, tmp_path / "m.zarr.zip")
+    store = zarr.ZipStore(str(out), mode="r")
+    try:
+        z = zarr.group(store)
+        assert list(z["SumFrames"][0]) == list(stamp)
+        for group in ("IntegrationResult", "OmegaSumFrame"):
+            for f in range(NFRAMES):
+                assert list(z[group][f"FrameNr_{f}"][0]) == list(stamp + f), \
+                    f"{group}/FrameNr_{f}"
+    finally:
+        store.close()
+
+
+def test_the_gap_the_sort_exposes_is_still_reported_as_a_gap(real_panels,
+                                                             tmp_path):
+    """Sorting changes where the columns sit, not what was asked for, so
+    the tiling check still reads the requested ranges in panel order and
+    still names ge3 -> ge4. The span stays dropped: one pair cannot
+    describe an axis with a hole in it, sorted or not."""
+    seen = []
+    out = combine_panel_zarrs(real_panels, tmp_path / "m.zarr.zip",
+                              warn=seen.append)
+    entry = _read(out)["attrs"]["provenance_history"][-1]
+    assert "10 deg gap" in entry["extra"]["eta_tiling_problem"]
+    assert "ge3" in entry["extra"]["eta_tiling_problem"]
+    assert "EtaMin" not in entry["cake_params"]
+    assert entry["extra"]["eta_sorted"] is True
+    assert any("wrapped into [-180, 180) and sorted" in m for m in seen)
+
+
+def test_a_set_that_paves_the_circle_spans_minus180_to_180(tmp_path):
+    """With ge4's shadowed wedge included the four panels tile exactly, and
+    the span then describes the sorted axis: -180..180, not 120..480."""
+    full = dict(REAL_ETA, ge4=(30.0, 120.0))
+    paths = {p: str(_panel_with_eta(tmp_path / f"s.{p}.zarr.zip", p, full[p]))
+             for p in PANELS}
+    out = combine_panel_zarrs(paths, tmp_path / "m.zarr.zip")
+    entry = _read(out)["attrs"]["provenance_history"][-1]
+    assert entry["extra"]["eta_tiling_problem"] is None
+    assert (entry["cake_params"]["EtaMin"],
+            entry["cake_params"]["EtaMax"]) == (-180.0, 180.0)
+    assert len(_merged_eta(out)) == 36, "a full turn of 10 deg bins"
+
+
+def test_an_already_ascending_axis_is_left_exactly_alone(tmp_path):
+    """ge2+ge3+ge4 never cross the cut, so there is nothing to fix and the
+    columns must stay in panel order -- the no-op path."""
+    order = ["ge2", "ge3", "ge4"]
+    paths = {p: str(_panel_with_eta(tmp_path / f"s.{p}.zarr.zip", p,
+                                    REAL_ETA[p])) for p in order}
+    out = combine_panel_zarrs(paths, tmp_path / "m.zarr.zip")
+    eta = _merged_eta(out)
+    assert list(eta) == [c for p in order for c in _centres(*REAL_ETA[p])]
+    assert _read(out)["attrs"]["provenance_history"][-1]["extra"][
+        "eta_sorted"] is False
+
+
+def test_overlapping_panels_are_left_in_panel_order(tmp_path):
+    """Two columns at the same azimuth have no one right order, and
+    interleaving them would be a fabrication. plan_eta_order declines and
+    the merge is exactly what it was before this feature existed."""
+    over = dict(REAL_ETA, ge4=(10.0, 120.0))     # 20 deg back over ge3
+    paths = {p: str(_panel_with_eta(tmp_path / f"s.{p}.zarr.zip", p, over[p]))
+             for p in PANELS}
+    out = combine_panel_zarrs(paths, tmp_path / "m.zarr.zip")
+    eta = _merged_eta(out)
+    assert list(eta) == [c for p in PANELS for c in _centres(*over[p])]
+    assert _read(out)["attrs"]["provenance_history"][-1]["extra"][
+        "eta_sorted"] is False
+
+
+def test_a_two_plane_retamap_cannot_be_sorted_and_is_not(panels, tmp_path):
+    """No eta plane, no order. The merge must still work."""
+    got = _read(combine_panel_zarrs(panels, tmp_path / "m.zarr.zip"))
+    row = got["osf"]["FrameNr_0"][0]
+    assert list(row) == [1.0] * NETA + [2.0] * NETA + [3.0] * NETA + [4.0] * NETA
+    assert got["attrs"]["provenance_history"][-1]["extra"][
+        "eta_sorted"] is False
+
+
+def _add_corrected(path, panel, eta_range, scale=1.0):
+    """Bolt a REtaMap_corrected onto a panel, as upstream MIDAS does."""
+    lo, hi = eta_range
+    cen = _centres(lo, hi)
+    store = zarr.ZipStore(str(path), mode="a")
+    try:
+        root = zarr.group(store)
+        reta = np.zeros((5, NR, len(cen)), dtype=float)
+        reta[2] = np.broadcast_to(cen, (NR, len(cen)))
+        reta[4] = scale
+        root.create_dataset("REtaMap_corrected", data=reta)
+    finally:
+        store.close()
+    return path
+
+
+def test_a_carried_retamap_variant_is_relabelled_not_just_reordered(tmp_path):
+    """The Zarr Viewer PREFERS REtaMap_corrected when it is present. Sorting
+    its columns while leaving its eta plane saying 185 would plot the sorted
+    cake against stale labels -- a non-monotonic axis the viewer would then
+    unwrap all over again, which is worse than never sorting."""
+    paths = {}
+    for p in PANELS:
+        f = _panel_with_eta(tmp_path / f"s.{p}.zarr.zip", p, REAL_ETA[p])
+        paths[p] = str(_add_corrected(f, p, REAL_ETA[p]))
+    seen = []
+    out = combine_panel_zarrs(paths, tmp_path / "m.zarr.zip", warn=seen.append)
+    store = zarr.ZipStore(str(out), mode="r")
+    try:
+        z = zarr.group(store)
+        corr = z["REtaMap_corrected"][2].mean(axis=0)
+        assert np.all(np.diff(corr) > 0), "must be ascending like REtaMap"
+        assert list(corr) == list(z["REtaMap"][2].mean(axis=0)), \
+            "both maps describe the same columns, so both must agree"
+        assert corr.min() == -175.0 and corr.max() == 175.0
+    finally:
+        store.close()
+    assert any("REtaMap_corrected" in m and "wrapped and sorted" in m
+               for m in seen), seen
+
+
+def test_a_carried_non_retamap_cake_is_reordered_but_never_relabelled(tmp_path):
+    """Only a REtaMap variant holds eta AS DATA. Rewriting a plane of
+    anything else that happens to be (5, nR, nEta) would corrupt it."""
+    paths = {}
+    for p in PANELS:
+        f = _panel_with_eta(tmp_path / f"s.{p}.zarr.zip", p, REAL_ETA[p])
+        store = zarr.ZipStore(str(f), mode="a")
+        try:
+            cen = _centres(*REAL_ETA[p])
+            arr = np.zeros((5, NR, len(cen)), dtype=float)
+            arr[2] = np.broadcast_to(cen, (NR, len(cen)))   # looks like eta
+            zarr.group(store).create_dataset("SomeOtherMap", data=arr)
+        finally:
+            store.close()
+        paths[p] = str(f)
+    out = combine_panel_zarrs(paths, tmp_path / "m.zarr.zip")
+    store = zarr.ZipStore(str(out), mode="r")
+    try:
+        z = zarr.group(store)
+        other = z["SomeOtherMap"][2].mean(axis=0)
+        # Reordered to match the rest of the file, but its VALUES are the
+        # originals: 185..205 still read 185..205.
+        assert other.max() == 205.0, "untouched values"
+        assert list(other[:3]) == [185.0, 195.0, 205.0], \
+            "moved to the front with its columns, not relabelled"
+    finally:
+        store.close()
+
+
+# ── the combined name when no panel token is in it ───────────────────────
+#
+# "One zarr for the whole scan" (the default grouping) names each panel's
+# archive from the froot, which has the detector token split off — so all
+# four are called the same thing and there is no ".ge1." to substitute.
+# Seen on a real 189-folder run:
+#
+#   4130_D_load_step_0.000000_000833.ave.zarr.ge1234.zip
+#
+# The tag landed after ".ave.zarr", so the file did not end in ".zarr.zip"
+# like everything beside it and no glob for "*.ge1234.*.zarr.zip" matched.
+
+from midas_gui.hydra_zarr_combine import insert_panel_tag
+
+
+@pytest.mark.parametrize("given,expect", [
+    # the real one: run grouping, froot + frame range, no token
+    ("4130_D_load_step_0.000000_000833.ave.zarr.zip",
+     "4130_D_load_step_0.ge1234.000000_000833.ave.zarr.zip"),
+    # run grouping with no frame range
+    ("my_scan.ave.zarr.zip", "my_scan.ge1234.ave.zarr.zip"),
+    # bare .zarr.zip
+    ("my_scan.000000_000009.zarr.zip",
+     "my_scan.ge1234.000000_000009.zarr.zip"),
+    # a froot that itself ends in digits must not be mistaken for a range
+    ("scan_003502.ave.zarr.zip", "scan_003502.ge1234.ave.zarr.zip"),
+])
+def test_the_tag_goes_where_the_panel_token_would_have_been(given, expect):
+    assert insert_panel_tag(given, "ge1234") == expect
+
+
+@pytest.mark.parametrize("name", [
+    "4130_D_load_step_0.000000_000833.ave.zarr.zip",
+    "my_scan.ave.zarr.zip",
+    "my_scan.000000_000009.zarr.zip",
+])
+def test_the_combined_name_still_ends_in_zarr_zip(name):
+    """The tail is the contract — downstream globs key off it."""
+    assert insert_panel_tag(name, "ge1234").endswith(".zarr.zip")
+
+
+def test_a_tokenless_run_archive_gets_a_findable_name(tmp_path):
+    """End to end through default_combined_path, the way the batch calls it:
+    all four panels share one basename under their own ge{n}/zarr/."""
+    froot = tmp_path / "expid_bc" / "4130_D_load_step_0"
+    shared = "4130_D_load_step_0.000000_000833.ave.zarr.zip"
+    ps = {p: str(froot / p / "zarr" / shared) for p in PANELS}
+    out = default_combined_path(ps)
+    assert out.name == "4130_D_load_step_0.ge1234.000000_000833.ave.zarr.zip"
+    assert out.parent == froot, "still a sibling of ge1..ge4"
+    assert out.name.endswith(".zarr.zip")
+    assert list(froot.glob("*.ge1234.*.zarr.zip")) == [] or True
+    # the glob that missed the old name must match the new one
+    import fnmatch
+    assert fnmatch.fnmatch(out.name, "*.ge1234.*.zarr.zip")
+
+
+def test_the_old_broken_name_is_not_produced_any_more(tmp_path):
+    froot = tmp_path / "scan"
+    ps = {p: str(froot / p / "zarr" / "scan.000000_000833.ave.zarr.zip")
+          for p in PANELS}
+    out = default_combined_path(ps)
+    assert not out.name.endswith(".ge1234.zip"), out.name
+    assert ".ave.zarr.ge1234." not in out.name, out.name
+
+
+def test_a_name_that_does_have_a_token_is_untouched(tmp_path):
+    """Per-file grouping still substitutes in place — unchanged behaviour."""
+    froot = tmp_path / "scan"
+    ps = {p: str(froot / p / "zarr" / f"scan_005244.{p}.000000_000063.ave.zarr.zip")
+          for p in PANELS}
+    out = default_combined_path(ps)
+    assert out.name == "scan_005244.ge1234.000000_000063.ave.zarr.zip"

@@ -107,10 +107,17 @@ def _unwrap_eta(y):
     """``(axis, was_unwrapped)`` — an eta axis matplotlib can derive cell
     edges from.
 
+    Needed only for archives written before ``hydra_zarr_combine`` sorted
+    the merged axis; those come out monotonic and are returned untouched
+    by the first test below. What follows describes the older ones.
+
     A four-panel combined archive concatenates its panels in panel order,
-    and each panel reports its own eta wrapped into [-180, 180). So the
-    merged axis reads 125..205, then jumps to -145, then -55, then 45 --
-    physically one continuous sweep, numerically a sawtooth. pcolormesh
+    and ge1's caking range at 1-ID-E is written PAST the cut (EtaMin=120,
+    EtaMax=210, and ``eta_wrap`` labels its columns with those requested
+    centres, 125..205 -- not wrapped into [-180, 180) as the other three
+    panels happen to be). So the merged axis reads 125..205, then jumps to
+    -145, then -55, then 45 -- physically one continuous sweep,
+    numerically a sawtooth. pcolormesh
     treats its coordinates as cell CENTRES and infers the edges from the
     spacing, so at each jump it inferred a 350 deg cell and said so:
 
