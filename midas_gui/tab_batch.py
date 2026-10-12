@@ -2570,6 +2570,12 @@ class BatchTab(QtWidgets.QWidget):
             total = self._loader.n_frames() or 1
 
         argvs = [argv + _target_args(gp, gd) for gd, gp in targets]
+        # The results sidecar on the FIRST step only. JobQueuePanel records
+        # one out_dir per job -- targets[0] -- so that is the only step whose
+        # _bg_job_results.npz "Load results" can ever open. Writing one per
+        # step put 196 of them (826 MB) on a beamline share for a 196-folder
+        # sweep, 195 of which were unreachable from the UI.
+        argvs[0] = argvs[0] + ["--results-sidecar"]
         job = self._job_queue.launch(
             argvs[0], name=out_path.name or "batch", total_frames=total,
             out_dir=str(targets[0][0]), extra_argvs=argvs[1:])

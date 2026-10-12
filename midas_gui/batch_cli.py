@@ -13,7 +13,8 @@ Prints two kinds of structured lines to stdout, unbuffered:
                                           command after this process exits,
                                           not by this module itself.
 
-On success, also writes ``_bg_job_results.npz`` into ``--out-dir`` — the
+With ``--results-sidecar``, also writes ``_bg_job_results.npz`` into
+``--out-dir`` — the
 arrays ``BatchTab._populate_plots_from_attempt`` needs to fill the
 Waterfall/Stacked-profiles/Eta-R cakes tabs. This process has no Qt signals
 reaching the GUI that launched it (it's a detached `screen` session), and
@@ -162,6 +163,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--monitor-file", default=None,
                    help="Text file, one monitor value per line")
+
+    # Off by default. It is a GUI artefact -- the arrays the Background jobs
+    # panel's "Load results" button needs -- and useless to anyone running
+    # this CLI directly. More to the point, JobQueuePanel records ONE out_dir
+    # per job (the first step's), so in a chained multi-folder job only that
+    # step's sidecar is ever reachable: a 196-folder sweep wrote 196 of them,
+    # 826 MB, of which 195 could not be opened from the UI at all. The GUI
+    # now passes this for the first step only.
+    p.add_argument("--results-sidecar", action="store_true",
+                   help="Write _bg_job_results.npz into --out-dir for the "
+                        "GUI's 'Load results' button (default: off)")
     return p
 
 
@@ -341,7 +353,7 @@ def main(argv=None) -> int:
         n = data.get("n", 0)
         out = data.get("out_paths") or []
         print(f"[batch] FINISHED n={n} out_paths={len(out)}", flush=True)
-        if not data.get("aborted") and exit_code[0] == 0:
+        if args.results_sidecar and not data.get("aborted") and exit_code[0] == 0:
             try:
                 _write_results_sidecar(args.out_dir, data)
             except Exception as e:

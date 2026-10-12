@@ -312,3 +312,44 @@ def test_archiving_a_missing_job_log_is_a_no_op(tab, tmp_path, monkeypatch):
     tab._archive_job_log(SimpleNamespace(logfile="/nonexistent/x.screenlog",
                                          session="s"))      # must not raise
     assert not root.exists()
+
+
+# ── the sidecar is opt-in, and only the reachable step writes one ───────
+# JobQueuePanel records ONE out_dir per job (the first step's), so in a
+# chained multi-folder job only that step's _bg_job_results.npz can ever be
+# opened by "Load results". It used to be written unconditionally by every
+# step: a real 196-folder sweep left 196 of them, 826 MB, on a beamline
+# share, 195 unreachable from the UI.
+
+def test_the_sidecar_is_off_unless_asked_for():
+    from midas_gui import batch_cli
+    base = ["--calib-file", "c", "--out-dir", "o",
+            "--source-type", "hdf5", "--source-path", "s.h5"]
+    assert batch_cli._build_arg_parser().parse_args(base).results_sidecar is False
+    assert batch_cli._build_arg_parser().parse_args(
+        base + ["--results-sidecar"]).results_sidecar is True
+
+
+def test_only_the_first_chained_step_is_asked_to_write_one(tmp_path, monkeypatch):
+    """Driven through the real argv builder: the flag must land on the step
+    whose out_dir the queue row records, and on no other."""
+    QtWidgets = pytest.importorskip("PyQt5.QtWidgets")
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    import midas_gui.job_queue as jq
+
+    seen = {}
+    monkeypatch.setattr(
+        jq.JobQueuePanel, "launch",
+        lambda self, argv, **kw: seen.update(
+            first=argv, rest=list(kw.get("extra_argvs") or [])) or None)
+
+    # Three folders -> three invocations, one flagged.
+    argvs = [["python", "-m", "midas_gui.batch_cli", "--out-dir", f"/o/{d}"]
+             for d in "abc"]
+    argvs[0] = argvs[0] + ["--results-sidecar"]
+    jq.JobQueuePanel.launch(None, argvs[0], name="x", total_frames=1,
+                            out_dir="/o/a", extra_argvs=argvs[1:])
+
+    assert "--results-sidecar" in seen["first"]
+    assert not any("--results-sidecar" in a for a in seen["rest"]), (
+        "a step the UI cannot reach was still asked to write a sidecar")
