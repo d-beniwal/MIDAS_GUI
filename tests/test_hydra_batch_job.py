@@ -32,6 +32,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "test_data" / "gui_synthetic" / "hydra"
@@ -409,6 +410,25 @@ def test_the_launched_argvs_carry_each_panels_own_caking_and_calibration(
     page._run_as_job()
     assert not captured, "multi-azimuth + Q-uniform should not have launched"
     assert any("Incompatible" in str(d[1]) for d in dialogs), dialogs
+
+    # "Preview: sum first N" — a display aid, and the last toolbar control
+    # the single-detector tab had and this page lacked. Exercised against a
+    # real multi-frame stack: the bundled fixture holds exactly ONE frame,
+    # so it can only ever prove the overrun path.
+    import h5py
+    stack = tmp_path / "stack.h5"
+    with h5py.File(stack, "w") as f:
+        f.create_dataset("exchange/data",
+                         data=np.ones((3, 4, 4), dtype=np.float32))
+    page._preview_sum_n.setValue(1)
+    assert float(np.sum(page._preview_frame(str(stack)))) == 16.0
+    page._preview_sum_n.setValue(3)
+    assert float(np.sum(page._preview_frame(str(stack)))) == 48.0
+    # Asking for more frames than exist sums what is there rather than
+    # raising -- _load_image raises IndexError past the end of the stack.
+    page._preview_sum_n.setValue(999)
+    assert float(np.sum(page._preview_frame(str(stack)))) == 48.0
+    page._preview_sum_n.setValue(1)
 
     combine = hydra_combine_cli._build_arg_parser().parse_args(steps[2][3:])
     assert combine.panels == ["ge1", "ge2"], (
