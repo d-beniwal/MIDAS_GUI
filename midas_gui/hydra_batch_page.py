@@ -35,14 +35,14 @@ from PyQt5 import QtCore, QtWidgets
 
 from midas_gui.constants import (KERNELS, ERROR_MODELS,
                                  DEFAULT_KERNEL, DEFAULT_ERROR_MODEL)
-from midas_gui.helpers import (
+from midas_gui.helpers import (collapse_cake_eta,
     _fspin, _browse, _NoScrollComboBox, _NoScrollSpinBox,
     widgets_to_dict, apply_dict_to_widgets,
     _load_image, rmax_corner_px, rmax_edge_px, draw_polar_bin_overlay,
     browse_start_dir, warn_if_path_missing, suggest_panel_base_output_dir, check_output_dir_writable,
     suggest_working_dir, bc_path_parts, source_kind, is_h5,
     list_h5_1d_datasets, _folder_output_dir)
-from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
+from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer, CakeStackViewer,
                                StackedProfileViewer, OutputFormatSelector, ImageViewer,
                                OriginToolButton, build_lab_frame_axes_items)
 from midas_gui.hydra_widgets import (HydraLoaderPanel, HydraDetectorToolbar,
@@ -677,6 +677,22 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._top_tabs = QtWidgets.QTabWidget()
         self._top_tabs.addTab(self._viewer_stack, "Per-panel results")
         self._top_tabs.addTab(self._det_view, "Detector view")
+        # The MERGED ge1234 result, which had no view anywhere: this page
+        # showed four per-panel results, and the archive a Hydra run
+        # actually produces -- the only place all four panels' eta coverage
+        # appears on one continuous axis, ge1's +/-180 crossing included --
+        # had to be opened outside the GUI. The per-panel tab stays: one
+        # panel at a time is still how you check a single panel's
+        # calibration, which is a different question from what the run
+        # produced.
+        self._merged_waterfall = WaterfallViewer()
+        self._merged_stack = StackedProfileViewer()
+        self._merged_cakes = CakeStackViewer()
+        self._top_tabs.addTab(self._merged_waterfall, "Waterfall")
+        self._top_tabs.addTab(self._merged_stack, "Stacked profiles")
+        self._top_tabs.addTab(self._merged_cakes, "Eta-R cakes")
+        #: path of the merged archive currently on display, if any
+        self._merged_shown = None
         # Build the composite on the way IN to the Detector view, and not at
         # all while Per-panel results is showing: a ~1 s GUI-thread remap for
         # pixels behind another tab is the cost this gate exists to avoid.
@@ -2461,6 +2477,7 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._log.append(f"[combine] merging {len(sets)} frame(s) across "
                          f"{len(panels)} panels…")
         done = 0
+        last_out = None
         # Collected rather than logged per frame: the caking is one setting
         # for the whole run, so a non-tiling set says the same thing once per
         # frame and would bury the rest of the log on a long scan.
@@ -2478,8 +2495,15 @@ class HydraBatchPage(QtWidgets.QWidget):
             done += 1
             if done == 1 or done == len(sets):
                 self._log.append(f"[combine]   → {out}")
+            last_out = out
         self._log.append(f"[combine] wrote {done}/{len(sets)} combined "
                          f"archive(s).")
+        # Show the last one written. With the default "one zarr per scan"
+        # grouping there is exactly one, which is the natural thing to
+        # display; with per-file grouping the others are on disk and named
+        # in the log above.
+        if done:
+            self._populate_merged_views(last_out)
         for msg in sorted(warned):
             # Deliberately a note, not a warning. The archive is correct:
             # eta travels per column in REtaMap, so an uncovered wedge is
@@ -2490,6 +2514,81 @@ class HydraBatchPage(QtWidgets.QWidget):
             self._log.append(f"[combine] note: {msg}. Merged as usual; "
                              f"cake_params records the per-panel eta ranges "
                              f"rather than one span.")
+
+    def _merged_axis_context(self):
+        """``((lsd, px, wl), "")`` for converting the merged view's R
+        axis, or ``(None, reason)`` when it cannot be offered.
+
+        The merged archive's R rows are shared across panels (``validate``
+        requires it), but 2theta at a given R depends on that panel's own
+        Lsd. With the four panels at genuinely different distances there is
+        no single conversion that is right for all of them, so the view
+        stays in pixels rather than offering a 2theta axis that is correct
+        for one quarter of the data and quietly wrong for the rest.
+        """
+        lsds, pxs, wls = [], [], []
+        for n in sorted(self._cards):
+            try:
+                spec = self._cards[n].resolved_spec()
+            except Exception:
+                continue
+            lsds.append(float(spec.Lsd)); pxs.append(float(spec.pxY))
+            wls.append(float(spec.Wavelength))
+        if not lsds:
+            return None, "no panel calibration is loaded"
+        # 0.1% of the distance -- well inside a real panel-to-panel offset
+        # and well outside fit noise on the same nominal distance.
+        if max(lsds) - min(lsds) > 1e-3 * max(lsds):
+            return None, (f"the panels are at different distances "
+                          f"({min(lsds):.0f}–{max(lsds):.0f} µm)")
+        return (lsds[0], pxs[0], wls[0]), ""
+
+    def _populate_merged_views(self, path) -> None:
+        """Fill the Waterfall / Stacked profiles / Eta-R cakes tabs from a
+        merged ge1234 archive. Best effort -- a view that cannot be drawn
+        costs a log line, never the run."""
+        try:
+            cakes, r_axis, eta_axis, ids, truncated = \
+                hydra_zarr_combine.read_merged_cakes(path)
+        except Exception as exc:
+            self._log.append(f"[combine] could not read back {Path(path).name} "
+                             f"for display: {exc}")
+            return
+        profiles = collapse_cake_eta(cakes)
+        ctx, why = self._merged_axis_context()
+        for view in (self._merged_waterfall, self._merged_stack, self._merged_cakes):
+            try:
+                view.clear()
+            except Exception:
+                pass
+            if ctx is not None:
+                try:
+                    # "R": the stored axis is R in pixels in every case, and
+                    # ctx is only how to convert it -- same contract as the
+                    # per-panel views and tab_batch.
+                    view.set_axis_context(*ctx, "R")
+                except Exception:
+                    pass
+        self._merged_waterfall.reset(r_axis)
+        self._merged_stack.reset(r_axis)
+        for prof, fid in zip(profiles, ids):
+            self._merged_waterfall.add_profile(prof)
+            self._merged_stack.add_profile(r_axis, prof, label=fid)
+        self._merged_cakes.set_cakes(cakes, r_axis, eta_axis, frame_ids=ids)
+        self._merged_shown = str(path)
+        note = (f"  (first {len(ids)} of {len(ids) + truncated} frames; "
+                f"the rest are on disk)" if truncated else "")
+        self._log.append(
+            f"[combine] showing {Path(path).name} in Waterfall / Stacked "
+            f"profiles / Eta-R cakes{note}")
+        if ctx is None:
+            # Said once per populate, and it says WHICH reason: "no
+            # calibration loaded" and "the panels really are at different
+            # distances" look the same from the viewer and mean quite
+            # different things.
+            self._log.append(
+                f"[combine] note: {why}, so the merged view stays in R (px) "
+                f"— no single 2θ axis would be right for all four panels.")
 
     def _save_results(self):
         """Write every panel's already-computed lineouts to disk — mirrors

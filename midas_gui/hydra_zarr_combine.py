@@ -958,3 +958,73 @@ def combine_panel_zarrs(panel_paths: dict, out_path=None, warn=None) -> Path:
             except Exception:
                 pass
     return out_path
+
+
+# ── reading a merged archive back ────────────────────────────────────────
+# The combine's own output has never been viewable in the GUI: the Hydra
+# page shows four per-panel results, and the merged ge1234 archive -- the
+# thing a Hydra run actually produces, and the only place all four panels'
+# eta coverage appears on one continuous axis -- had to be opened
+# externally. This is the read side of that.
+
+_RETAMAP_R_PLANE = 0
+
+#: Default ceiling on frames loaded for display. A merged cake is four
+#: panels wide, so an 834-frame sample scan at 3520 R bins is over a
+#: gigabyte in float64 -- enough to take the GUI down for a picture nobody
+#: can read 834 rows of anyway.
+MERGED_VIEW_FRAME_CAP = 200
+
+
+def _frame_sort_key(name: str):
+    """Sort ``LastFrameNumber_7`` before ``LastFrameNumber_10``.
+
+    The keys are minted with a plain integer suffix, so lexical order puts
+    10 before 7 and the frame axis comes out shuffled -- which looks like
+    noise in a waterfall rather than like a sorting bug.
+    """
+    m = re.search(r"(\d+)\s*$", name)
+    return (0, int(m.group(1))) if m else (1, 0)
+
+
+def read_merged_cakes(path, max_frames: Optional[int] = MERGED_VIEW_FRAME_CAP):
+    """``(cakes, r_axis_px, eta_axis_deg, frame_ids, truncated)`` from a
+    merged archive.
+
+    ``cakes`` is ``(n_frames, n_eta, n_r)`` -- the shape
+    ``widgets.CakeStackViewer.set_cakes`` takes. The stored arrays are
+    ``(nR, nEta)``, so each is transposed on the way out.
+
+    Axes come from ``REtaMap``, not from a reconstructed linspace: the
+    merged eta axis is the concatenation of four panels' own ranges, which
+    need not tile evenly and (for ge1 at 1-ID-E) crosses the +/-180 branch
+    cut, so an assumed uniform grid would be wrong in exactly the case this
+    view exists to show.
+
+    ``truncated`` is the number of frames NOT returned, so a caller can say
+    so rather than silently showing part of a scan.
+    """
+    import zarr          # lazily, as everywhere else in this module
+    store = zarr.ZipStore(str(path), mode="r")
+    try:
+        z = zarr.group(store)
+        if "OmegaSumFrame" not in z or "REtaMap" not in z:
+            raise ValueError(f"not a merged archive (no OmegaSumFrame/REtaMap): {path}")
+        keys = sorted(z["OmegaSumFrame"].keys(), key=_frame_sort_key)
+        if not keys:
+            raise ValueError(f"no frames in {path}")
+        truncated = 0
+        if max_frames is not None and len(keys) > max_frames:
+            truncated = len(keys) - max_frames
+            keys = keys[:max_frames]
+        cakes = np.stack([np.asarray(z["OmegaSumFrame"][k], dtype=np.float64).T
+                          for k in keys])
+        rmap = np.asarray(z["REtaMap"], dtype=np.float64)
+        r_axis = rmap[_RETAMAP_R_PLANE].mean(axis=1)
+        eta_axis = rmap[_RETAMAP_ETA_PLANE].mean(axis=0)
+        return cakes, r_axis, eta_axis, list(keys), truncated
+    finally:
+        try:
+            store.close()
+        except Exception:
+            pass
