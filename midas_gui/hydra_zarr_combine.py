@@ -9,6 +9,9 @@ code reads, so it is reproduced exactly:
   ``OmegaSumFrame/<key>``       axis=1   (nR, nEta) -> (nR, sum nEta)
   ``SumFrames``                 axis=1   (nR, nEta) -> (nR, sum nEta)
   ``REtaMap``                   axis=2   (C, nR, nEta) -> (C, nR, sum nEta)
+
+...then the eta axis is put in ascending order, in ``[-180, 180)``. See
+:func:`plan_eta_order` for why, and for the cases it declines.
   ``Omegas``                    copied from panel 0 (validated identical)
   ``InstrumentParameters/<key>`` stacked into a length-N array, one entry per
                                 panel, order recorded in ``.attrs['panels']``
@@ -105,6 +108,50 @@ def build_panel_tag(panels) -> str:
     return "_".join(panels)
 
 
+#: The frame-range segment a run-grouped archive carries before its
+#: suffixes, e.g. the ``.000000_000833`` in
+#: ``<froot>.000000_000833.ave.zarr.zip``.
+_RANGE_RE = re.compile(r"\.\d+_\d+$")
+
+#: Suffix tails a caked archive ends in, longest first — the tag goes in
+#: FRONT of these, never between them.
+_ZARR_TAILS = (".ave.zarr.zip", ".zarr.zip", ".zip")
+
+
+def insert_panel_tag(name: str, tag: str) -> str:
+    """Put ``tag`` where the panel token sits in a per-file name.
+
+    "One zarr for the whole scan" names every panel's archive from the
+    froot, which by definition has the detector token split off — so all
+    four panels write the SAME basename and there is no ``.ge1.`` to
+    substitute. The fallback that shipped inserted before the final suffix
+    only, ``<froot>.<lo>_<hi>.ave.zarr`` + ``.ge1234`` + ``.zip``:
+
+        4130_D_load_step_0.000000_000833.ave.zarr.ge1234.zip
+
+    which reads as a zip of a zarr of ge1234, does not end in
+    ``.zarr.zip`` the way every other archive does, and is missed by any
+    glob looking for ``*.ge1234.*.zarr.zip``. Measured on a real 189-folder
+    run.
+
+    The tag belongs exactly where the token sits in the per-file names
+    beside it: straight after the froot, BEFORE the frame range and before
+    the ``.ave.zarr.zip`` tail.
+
+        4130_D_load_step_0.ge1234.000000_000833.ave.zarr.zip
+    """
+    for tail in _ZARR_TAILS:
+        if name.endswith(tail):
+            stem = name[:-len(tail)]
+            break
+    else:
+        stem, tail = name, ""
+    m = _RANGE_RE.search(stem)
+    if m:
+        return f"{stem[:m.start()]}.{tag}{m.group(0)}{tail}"
+    return f"{stem}.{tag}{tail}"
+
+
 def default_combined_path(panel_paths: dict, out_dir=None) -> Optional[Path]:
     """Where the merged archive goes for a ``{panel: path}`` mapping.
 
@@ -115,6 +162,10 @@ def default_combined_path(panel_paths: dict, out_dir=None) -> Optional[Path]:
 
     The name is the first panel's with its token replaced by the combined
     tag: ``..._003502.ge1.zarr.zip`` -> ``..._003502.ge1234.zarr.zip``.
+    When the per-panel name carries no token — "one zarr for the whole
+    scan", where all four share a basename — :func:`insert_panel_tag` puts
+    the tag in the same place the token would have been, so the result
+    still ends in ``.zarr.zip``.
 
     ``out_dir`` is that froot directory when the caller knows it. Otherwise
     it is recovered from the panel path's own ``<out>/<panel>/zarr/<name>``
@@ -128,7 +179,7 @@ def default_combined_path(panel_paths: dict, out_dir=None) -> Optional[Path]:
     tag = build_panel_tag(panels)
     tok = f".{panels[0]}."
     name = (first.name.replace(tok, f".{tag}.", 1) if tok in first.name
-            else f"{first.stem}.{tag}{first.suffix}")
+            else insert_panel_tag(first.name, tag))
     if out_dir:
         return Path(out_dir) / name
     parent = first.parent
@@ -414,6 +465,93 @@ def eta_tiling_problem(per_panel: dict, panels, tol: float = 1e-6):
     return None
 
 
+#: Plane of ``REtaMap`` holding each bin's azimuth. The layout is
+#: ``[R, 2theta, eta, area, Q]``, and plane 2 is read as eta everywhere else
+#: in this app too (``tab_zarrviewer._get_integration_axes``, the GSAS
+#: export, ``test_gsas_export``) -- this is not a local guess.
+_RETAMAP_ETA_PLANE = 2
+
+
+def wrap_eta(a):
+    """Fold angles into ``[-180, 180)``, the range the backend reports in.
+
+    The same half-open interval as ``eta_wrap.ETA_LO``/``ETA_HI``, so the
+    two modules cannot disagree about where the cut falls.
+    """
+    return (np.asarray(a, dtype=float) + 180.0) % 360.0 - 180.0
+
+
+def merged_eta_axis(zs):
+    """Each merged column's azimuth, in panel order, or ``None``.
+
+    Read from ``REtaMap``'s eta plane rather than from the panels'
+    ``cake_params``, because the plane is what the file actually says and
+    what every reader plots against. A request and a label can differ --
+    ``eta_wrap`` deliberately relabels ge1's columns with the caller's own
+    unwrapped centres -- and it is the label that has to come out sorted.
+    """
+    out = []
+    for z in zs:
+        rm = z.get("REtaMap", None)
+        if rm is None or len(rm.shape) != 3 or rm.shape[0] <= _RETAMAP_ETA_PLANE:
+            return None
+        out.append(np.asarray(rm[_RETAMAP_ETA_PLANE]).mean(axis=0))
+    return np.concatenate(out) if out else None
+
+
+def plan_eta_order(eta_axis):
+    """``(order, wrapped)`` sorting a merged eta axis, or ``(None, None)``.
+
+    A four-panel merge concatenates in PANEL order, and at 1-ID-E ge1's
+    caking range is written past the cut (``ETA_MIN=120, ETA_MAX=210``, a
+    convention every experiment on this machine shares). So the merged axis
+    reads 125..205, then jumps to -145, then -55, then 45: one continuous
+    sweep, stored as a sawtooth. Downstream that forced every reader to
+    unwrap it before it could derive cell edges, and the unwrapped axis
+    then ran to 475 deg -- faithful, and not an angle anyone quotes.
+
+    Wrapping ge1's three past-cut columns back to -175..-155 and sorting
+    makes the axis monotonic in conventional numbers, with no column
+    gained, lost or altered: this is a PERMUTATION plus a relabel of the
+    eta plane, and the data in each column is untouched.
+
+    Declines, leaving the merge exactly as it was, when:
+
+    * the axis is already strictly monotonic -- nothing to fix, and a
+      single-panel ge1 archive keeps the unwrapped centres ``eta_wrap``
+      deliberately gave it;
+    * any value is non-finite, so the order is not defined;
+    * sorting does not make it STRICTLY increasing, i.e. two columns share
+      an azimuth. Overlapping panels have no one right order and quietly
+      interleaving them would be a fabrication.
+    """
+    if eta_axis is None:
+        return None, None
+    arr = np.asarray(eta_axis, dtype=float)
+    if arr.ndim != 1 or arr.size < 2 or not np.all(np.isfinite(arr)):
+        return None, None
+    d = np.diff(arr)
+    if np.all(d > 0) or np.all(d < 0):
+        return None, None
+    wrapped = wrap_eta(arr)
+    order = np.argsort(wrapped, kind="stable")
+    if not np.all(np.diff(wrapped[order]) > 0):
+        return None, None
+    return order, wrapped
+
+
+def apply_eta_order(arr, order):
+    """Reorder an eta-caked array's LAST axis.
+
+    Every caked array in this layout -- ``(nR, nEta)`` and
+    ``(C, nR, nEta)`` alike -- carries eta last, so one indexing expression
+    covers them all. ``None`` passes straight through.
+    """
+    if order is None or arr is None:
+        return arr
+    return np.asarray(arr)[..., order]
+
+
 def _eta_bin_size(block: dict):
     if not block:
         return None
@@ -449,20 +587,43 @@ def eta_beyond_branch_cut(per_panel: dict, panels):
     return "; ".join(bad) if bad else None
 
 
-def _merged_eta_span(per_panel: dict, panels):
+def _merged_eta_span(per_panel: dict, panels, start=None):
     """``(start, end)`` of the concatenated eta axis, unwrapped.
 
     Only meaningful once ``eta_tiling_problem`` has returned ``None``. The end
     is the start plus the summed widths rather than the last panel's EtaMax,
     because the sweep runs past 180 and back around: this dataset's four
     90 deg panels read 120 -> 480, not 120 -> 120.
+
+    ``start`` overrides panel 0's EtaMin. Sorting the merged axis does not
+    change the sweep, only where it is cut, so the same summed width then
+    runs from the first SORTED bin's lower edge: -180 -> 180 rather than
+    120 -> 480 for a set that paves the circle.
     """
     bounds = [_eta_bounds(per_panel.get(p)) for p in panels]
-    start = bounds[0][0]
+    if start is None:
+        start = bounds[0][0]
     return start, start + sum(hi - lo for lo, hi in bounds)
 
 
-def _aggregate_cake_params(per_panel: dict, panels) -> Optional[dict]:
+def _sorted_eta_start(per_panel: dict, panels, merged_eta):
+    """Lower edge of the first bin on the sorted axis, or ``None``.
+
+    ``None`` when the panels disagree about bin size, since then the first
+    centre does not imply an edge and guessing one would put the span half
+    a bin out.
+    """
+    if merged_eta is None or not len(merged_eta):
+        return None
+    steps = {_eta_bin_size(per_panel.get(p)) for p in panels}
+    steps.discard(None)
+    if len(steps) != 1:
+        return None
+    return float(merged_eta[0]) - steps.pop() / 2.0
+
+
+def _aggregate_cake_params(per_panel: dict, panels,
+                           sorted_start=None) -> Optional[dict]:
     """One cake_params block that honestly describes the MERGED file.
 
     Values every panel agrees on are carried through. A (min, max) pair is
@@ -493,7 +654,8 @@ def _aggregate_cake_params(per_panel: dict, panels) -> Optional[dict]:
                 # exact per-panel ranges are kept in the merge entry's
                 # extra.cake_params_per_panel, which loses nothing.
                 continue
-            out[lo_k], out[hi_k] = _merged_eta_span(per_panel, panels)
+            out[lo_k], out[hi_k] = _merged_eta_span(per_panel, panels,
+                                                    sorted_start)
         else:
             out[lo_k], out[hi_k] = min(los), max(his)
     return out
@@ -567,7 +729,20 @@ def _is_eta_caked(name, zs, eta_widths, caked_leading) -> bool:
     return True
 
 
-def _carry_unhandled(root, zs, panels, eta_widths) -> list:
+def _is_retamap_like(name: str, data) -> bool:
+    """Does this carried array hold per-bin eta in :data:`_RETAMAP_ETA_PLANE`?
+
+    Keyed on the NAME, deliberately. Shape alone cannot tell a corrected
+    REtaMap from any other ``(C, nR, nEta)`` array, and rewriting a plane
+    of something that merely looks similar would corrupt it -- the one
+    direction this module has consistently refused to guess in.
+    """
+    return (name.startswith("REtaMap")
+            and getattr(data, "ndim", 0) == 3
+            and data.shape[0] > _RETAMAP_ETA_PLANE)
+
+
+def _carry_unhandled(root, zs, panels, eta_widths, order=None) -> list:
     """Copy across anything this module does not write by name.
 
     Returns the names it carried AND how, so the caller can say so:
@@ -579,6 +754,13 @@ def _carry_unhandled(root, zs, panels, eta_widths) -> list:
     the conservative choice, since inventing a merge rule for an array
     whose meaning is unknown is how you get a quietly wrong archive rather
     than a visibly incomplete one.
+
+    A carried ``REtaMap`` VARIANT is relabelled as well as reordered. This
+    app never writes one, but ``REtaMap_corrected`` comes through from
+    upstream and the Zarr Viewer PREFERS it over ``REtaMap`` when present
+    -- so reordering its columns while leaving its eta plane saying 185
+    would plot the sorted cake against stale labels, which is worse than
+    not sorting at all.
     """
     import zarr
     carried = []
@@ -594,20 +776,35 @@ def _carry_unhandled(root, zs, panels, eta_widths) -> list:
             zarr.copy(obj, root, name=name)
             carried.append(f"{name}/ (from {panels[0]})")
         elif _is_eta_caked(name, zs, eta_widths, caked_leading):
-            root.create_dataset(name, data=np.concatenate(
-                [z[name][...] for z in zs], axis=len(shape) - 1))
-            carried.append(f"{name} (eta-concatenated)")
+            data = np.concatenate([z[name][...] for z in zs],
+                                  axis=len(shape) - 1)
+            note = "eta-concatenated"
+            if order is not None and _is_retamap_like(name, data):
+                data[_RETAMAP_ETA_PLANE] = wrap_eta(data[_RETAMAP_ETA_PLANE])
+                note = "eta-concatenated, eta plane wrapped and sorted"
+            root.create_dataset(name, data=apply_eta_order(data, order))
+            carried.append(f"{name} ({note})")
         else:
             root.create_dataset(name, data=obj[...])
             carried.append(f"{name} (from {panels[0]})")
     return carried
 
 
-def _write_merged(root, zs, panels, ir_keys, osf_keys, eta_widths) -> list:
+def _write_merged(root, zs, panels, ir_keys, osf_keys, eta_widths):
+    """Write the merged archive; returns ``(carried, merged_eta, sorted)``.
+
+    ``merged_eta`` is the eta axis as WRITTEN -- sorted and wrapped when
+    :func:`plan_eta_order` accepted, panel-order otherwise -- so the
+    provenance entry can describe the file rather than the request.
+    """
     import zarr
     attrs = dict(zs[0].attrs)
     attrs["combined_panels"] = list(panels)
     root.attrs.put(attrs)
+
+    # Decided once, from the concatenated axis, and applied to every caked
+    # array below. Deriving it per array would risk two of them disagreeing.
+    order, wrapped = plan_eta_order(merged_eta_axis(zs))
 
     root.create_dataset("Omegas", data=zs[0]["Omegas"][...])
 
@@ -623,27 +820,36 @@ def _write_merged(root, zs, panels, ir_keys, osf_keys, eta_widths) -> list:
             continue
         g = root.create_group(group)
         for k in keys:
-            g.create_dataset(k, data=np.concatenate(
-                [z[group][k][...] for z in zs], axis=1))
+            g.create_dataset(k, data=apply_eta_order(np.concatenate(
+                [z[group][k][...] for z in zs], axis=1), order))
 
-    root.create_dataset("REtaMap", data=np.concatenate(
-        [z["REtaMap"][...] for z in zs], axis=2))
+    reta = np.concatenate([z["REtaMap"][...] for z in zs], axis=2)
+    if order is not None:
+        # Relabel before reordering: the plane has to SAY -175 where it
+        # said 185, or the sorted axis would carry the old numbers and the
+        # file would be self-contradictory.
+        reta[_RETAMAP_ETA_PLANE] = wrap_eta(reta[_RETAMAP_ETA_PLANE])
+        reta = apply_eta_order(reta, order)
+    root.create_dataset("REtaMap", data=reta)
 
     # Top-level caked arrays: same (nR, nEta) layout as the group members
     # above, so the same axis-1 concatenation.
     for name in _ETA_CONCAT_ARRAYS:
         if all(name in z for z in zs):
-            root.create_dataset(name, data=np.concatenate(
-                [z[name][...] for z in zs], axis=1))
+            root.create_dataset(name, data=apply_eta_order(np.concatenate(
+                [z[name][...] for z in zs], axis=1), order))
 
     for grp in _VERBATIM_GROUPS:
         if grp in zs[0]:
             zarr.copy(zs[0][grp], root, name=grp)
 
-    return _carry_unhandled(root, zs, panels, eta_widths)
+    carried = _carry_unhandled(root, zs, panels, eta_widths, order)
+    merged_eta = wrapped[order] if order is not None else merged_eta_axis(zs)
+    return carried, merged_eta, order is not None
 
 
-def _merge_provenance(root, zs, panels, paths, out_path):
+def _merge_provenance(root, zs, panels, paths, out_path,
+                      merged_eta=None, eta_sorted=False):
     """Carry every panel's prior history forward, tagged by source panel, and
     append this merge. Four streams stay distinguishable rather than one
     overwriting the others.
@@ -669,17 +875,23 @@ def _merge_provenance(root, zs, panels, paths, out_path):
             per_instr[panel] = ip
     broken = eta_tiling_problem(per_cake, panels)
     beyond = eta_beyond_branch_cut(per_cake, panels)
+    # The tiling check reads the REQUESTED ranges in panel order, so it is
+    # unaffected by how the columns ended up stored -- a gap is a property
+    # of the inputs, not of the ordering.
+    sorted_start = (_sorted_eta_start(per_cake, panels, merged_eta)
+                    if eta_sorted else None)
     merged.append({
         "tool": "midas_gui.hydra_zarr_combine",
         "timestamp_iso": datetime.datetime.now(
             datetime.timezone.utc).isoformat(),
         "inputs": [str(p) for p in paths],
-        "cake_params": _aggregate_cake_params(per_cake, panels),
+        "cake_params": _aggregate_cake_params(per_cake, panels, sorted_start),
         "extra": {"panels": list(panels),
                   "cake_params_per_panel": per_cake,
                   "instrument_params_per_panel": per_instr,
                   "eta_tiling_problem": broken,
                   "eta_beyond_branch_cut": beyond,
+                  "eta_sorted": bool(eta_sorted),
                   "out": str(out_path)},
     })
     root.attrs["provenance_history"] = merged
@@ -715,15 +927,20 @@ def combine_panel_zarrs(panel_paths: dict, out_path=None, warn=None) -> Path:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="midas_gui_combine_") as tmp:
             root = zarr.group(zarr.DirectoryStore(tmp))
-            carried = _write_merged(root, zs, panels, ir_keys, osf_keys,
-                                    eta_widths)
+            carried, merged_eta, eta_sorted = _write_merged(
+                root, zs, panels, ir_keys, osf_keys, eta_widths)
             broken, beyond = _merge_provenance(root, zs, panels, paths,
-                                               out_path)
+                                               out_path, merged_eta,
+                                               eta_sorted)
             if warn:
                 if beyond:
                     warn(beyond)
                 if broken:
                     warn(broken)
+                if eta_sorted:
+                    warn(f"eta axis wrapped into [-180, 180) and sorted: "
+                         f"{merged_eta[0]:g}…{merged_eta[-1]:g}° "
+                         f"({len(merged_eta)} columns, panel data unchanged)")
                 if carried:
                     warn("carried across unrecognised entries: "
                          + ", ".join(carried))
