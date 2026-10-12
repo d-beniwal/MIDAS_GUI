@@ -360,6 +360,35 @@ def test_the_launched_argvs_carry_each_panels_own_caking_and_calibration(
     assert len(filed) == 1, f"run-log tree entry missing: {filed}"
     assert "midas_gui.hydra_combine_cli" in filed[0].read_text()
 
+    # Bin type reaches the job as the self-describing rebin trio. 2θ is the
+    # point: this page had a Q-only checkbox until 2026-10-12 and could not
+    # express 2θ-uniform output at all, while the single-detector tab could.
+    page._bin_type.setCurrentIndex(2)          # 2θ
+    assert page._rebin_unit() == "2th"
+    captured.clear()
+    page._run_as_job()
+    a2 = batch_cli._build_arg_parser().parse_args(captured["argv"][3:])
+    assert a2.rebin_unit == "2th"
+    assert (a2.rebin_min, a2.rebin_max, a2.rebin_step) == (
+        page._tth_min.value(), page._tth_max.value(), page._tth_bin.value())
+    # Radial means no rebin at all, not a rebin with default numbers.
+    page._bin_type.setCurrentIndex(0)
+    captured.clear()
+    page._run_as_job()
+    assert "--rebin-unit" not in captured["argv"]
+
+    # A project saved before Bin type existed carried a Q-only checkbox;
+    # dropping it would silently reopen a Q run as Radial.
+    page.set_state({"fields": {"q_check": True}})
+    assert page._rebin_unit() == "Q", "legacy q_check did not migrate"
+    assert page._q_min.isEnabled() and not page._tth_min.isEnabled(), (
+        "restoring state must also re-grey the unused spin trio")
+    page.set_state({"fields": {"q_check": False}})
+    assert page._rebin_unit() is None
+    # An explicit bin_type always wins over a stale legacy key.
+    page.set_state({"fields": {"q_check": True, "bin_type": "2θ"}})
+    assert page._rebin_unit() == "2th"
+
     combine = hydra_combine_cli._build_arg_parser().parse_args(steps[2][3:])
     assert combine.panels == ["ge1", "ge2"], (
         "the combine must name only the panels that actually ran — naming a "

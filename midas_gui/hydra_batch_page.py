@@ -51,7 +51,7 @@ from midas_gui.hydra_batch_widgets import (HydraBatchPanelCard,
                                            HydraCakingSummary)
 from midas_gui.job_queue import JobQueuePanel
 from midas_gui import hydra_zarr_combine
-from midas_gui.workers import BatchRunCoordinator, write_all_profiles
+from midas_gui.workers import BatchRunCoordinator, write_all_profiles, REBIN_UNITS
 from midas_gui import cake_params
 from midas_gui import hydra
 from midas_gui import project
@@ -322,18 +322,43 @@ class HydraBatchPage(QtWidgets.QWidget):
         vrow = QtWidgets.QHBoxLayout(); vrow.setSpacing(6)
         vrow.addWidget(self._var_check); vrow.addWidget(self._err_model, 1)
         integ.body.addLayout(vrow)
-        self._q_check = QtWidgets.QCheckBox("Q-uniform bins")
-        self._q_check.setToolTip("Bin uniformly in Q (Å⁻¹) instead of R (px).")
-        integ.body.addWidget(self._q_check)
+        # Output rebin. A three-way Bin type, matching tab_batch.py --
+        # this was a Q-only checkbox, so the Hydra page could not produce
+        # 2theta-uniform output AT ALL while the single-detector tab could
+        # (added there with the "one output rebin, two units" work; see
+        # DECISIONS 2026-10-06). Same vocabulary, same semantics: the
+        # integration grid is always R-uniform and these resample the
+        # finished profile (workers.rebin_R_to_grid).
+        self._bin_type = _NoScrollComboBox()
+        self._bin_type.addItem("Radial", "R")
+        self._bin_type.addItem("Q", "Q")
+        self._bin_type.addItem("2θ", "2th")
+        self._bin_type.setToolTip(
+            "Radial — bin uniformly in R (detector pixels).\n"
+            "Q — additionally rebin the OUTPUT uniformly in Q (Å⁻¹).\n"
+            "2θ — additionally rebin the OUTPUT uniformly in 2θ (degrees).\n"
+            "In all three the underlying integration grid is R-uniform; Q "
+            "and 2θ resample that result, and the axis stored alongside a "
+            "profile stays R in pixels.\n\n"
+            "Shared by all four panels, like the rest of this card.")
+        self._bin_type.currentIndexChanged.connect(self._on_bin_type_changed)
+        bt = S.Form(); bt.row(("Bin type:", self._bin_type))
+        integ.body.addLayout(bt)
         self._q_min = _fspin(0.0, 100.0, 3, 0.5, "Å⁻¹")
         self._q_max = _fspin(0.0, 100.0, 3, 8.0, "Å⁻¹")
         self._q_bin = _fspin(0.0001, 1.0, 4, 0.01, "Å⁻¹")
-        for w in (self._q_min, self._q_max, self._q_bin):
-            w.setEnabled(False)
-        self._q_check.toggled.connect(lambda c: [w.setEnabled(c) for w in
-                                                 (self._q_min, self._q_max, self._q_bin)])
-        qf = S.Form(); qf.row(("Qmin:", self._q_min), ("Qmax:", self._q_max)); qf.row(("ΔQ:", self._q_bin))
-        integ.body.addLayout(qf)
+        self._tth_min = _fspin(0.0, 89.999, 4, 0.0, "°")
+        self._tth_max = _fspin(0.0, 89.999, 4, 10.0, "°")
+        self._tth_bin = _fspin(0.0001, 10.0, 4, 0.01, "°")
+        self._q_form = S.Form()
+        self._q_form.row(("Qmin:", self._q_min), ("Qmax:", self._q_max))
+        self._q_form.row(("ΔQ:", self._q_bin))
+        self._tth_form = S.Form()
+        self._tth_form.row(("2θmin:", self._tth_min), ("2θmax:", self._tth_max))
+        self._tth_form.row(("Δ2θ:", self._tth_bin))
+        integ.body.addLayout(self._q_form)
+        integ.body.addLayout(self._tth_form)
+        self._on_bin_type_changed()
         lv.addWidget(integ)
 
         # Corrections (shared)
@@ -1450,6 +1475,57 @@ class HydraBatchPage(QtWidgets.QWidget):
                 "channel": self._ome_channel.currentText().strip(),
                 "collapse": self._ome_collapse.isChecked()}
 
+    #: unit -> the (min, max, step) spin trio that configures it. Mirrors
+    #: ``tab_batch.BatchTab._REBIN_SPINS`` so the two pages cannot drift
+    #: apart on what a unit means.
+    _REBIN_SPINS = {
+        "Q":   lambda s: (s._q_min, s._q_max, s._q_bin),
+        "2th": lambda s: (s._tth_min, s._tth_max, s._tth_bin),
+    }
+
+    def _rebin_unit(self):
+        """The OUTPUT rebin unit the Bin type dropdown selects — ``"Q"``,
+        ``"2th"``, or ``None`` for plain Radial.
+
+        "Radial" means no rebin at all: the profile stays on the R-uniform
+        grid the kernels integrated onto. The other two rebin that result
+        (``workers.rebin_R_to_grid``); neither changes the underlying
+        integration grid, which is always R-uniform. Shared across the four
+        panels, like everything else on the recipe card."""
+        unit = self._bin_type.currentData()
+        return unit if unit in REBIN_UNITS else None
+
+    def _rebin_cfg(self):
+        """This page's output-rebin config for the workers, or ``None``.
+
+        The self-describing ``{"unit", "min", "max", "step"}`` form that
+        ``workers.rebin_cfg_parts`` reads — NOT the legacy Q-only
+        ``QMin``/``QMax``/``QBinSize`` spelling this page used to emit.
+        Both are still accepted by the workers, but only the new one can
+        express 2theta."""
+        unit = self._rebin_unit()
+        if unit is None:
+            return None
+        lo, hi, step = self._REBIN_SPINS[unit](self)
+        return {"unit": unit, "min": lo.value(), "max": hi.value(),
+                "step": step.value()}
+
+    def _rebin_label(self) -> str:
+        """Display name of the selected rebin unit, for user-facing text."""
+        return {None: "Radial", "Q": "Q", "2th": "2θ"}[self._rebin_unit()]
+
+    def _on_bin_type_changed(self, *_args) -> None:
+        """Enable only the trio that the selected unit actually uses.
+
+        Both trios stay VISIBLE rather than one being hidden: hiding a form
+        row relayouts the card and makes it jump height as you change unit,
+        and a greyed row still tells you what the other unit would ask for.
+        """
+        unit = self._rebin_unit()
+        for u, pick in self._REBIN_SPINS.items():
+            for w in pick(self):
+                w.setEnabled(u == unit)
+
     def _run_mode(self) -> str:
         return self._run_mode_combo.currentData() or "sequential"
 
@@ -1802,14 +1878,12 @@ class HydraBatchPage(QtWidgets.QWidget):
         sends its omega and zarr-grouping flags unconditionally too.
         """
         a = []
-        if self._q_check.isChecked():
-            # The page's Q widgets are the legacy Q-only spelling of an
-            # output rebin (workers.rebin_cfg_parts accepts both); batch_cli
-            # takes the self-describing form.
-            a += ["--rebin-unit", "Q",
-                  "--rebin-min", str(self._q_min.value()),
-                  "--rebin-max", str(self._q_max.value()),
-                  "--rebin-step", str(self._q_bin.value())]
+        rebin = self._rebin_cfg()
+        if rebin:
+            a += ["--rebin-unit", rebin["unit"],
+                  "--rebin-min", str(rebin["min"]),
+                  "--rebin-max", str(rebin["max"]),
+                  "--rebin-step", str(rebin["step"])]
         a += ["--weighted"] if bool(self._azim.currentData()) else ["--no-weighted"]
         ome = self.omega_cfg()
         a += ["--ome-start", str(ome["start"]), "--ome-step", str(ome["step"])]
@@ -2050,8 +2124,10 @@ class HydraBatchPage(QtWidgets.QWidget):
                     else self._out_ed.text().strip())
         out_dir = str(Path(base_out) / f"ge{n}") if base_out else None
         fmts = self._fmt.checked_keys()
-        q_cfg = ({"QMin": self._q_min.value(), "QMax": self._q_max.value(),
-                  "QBinSize": self._q_bin.value()} if self._q_check.isChecked() else None)
+        # Self-describing {"unit", "min", "max", "step"} now, not the
+        # legacy Q-only dict -- it is the only spelling that can say 2theta.
+        # workers.rebin_cfg_parts reads both, so nothing downstream changed.
+        q_cfg = self._rebin_cfg()
 
         pair = self._viewer_pairs[n]
         lsd, px, wl = float(spec.Lsd), float(spec.pxY), float(spec.Wavelength)
@@ -2379,7 +2455,9 @@ class HydraBatchPage(QtWidgets.QWidget):
             "zarr_grouping": self._zarr_grouping,
             "lab_axes_chk": self._lab_axes_chk,
             "azim": self._azim, "var_check": self._var_check, "err_model": self._err_model,
-            "q_check": self._q_check, "q_min": self._q_min, "q_max": self._q_max,
+            "bin_type": self._bin_type, "q_min": self._q_min, "q_max": self._q_max,
+            "tth_min": self._tth_min, "tth_max": self._tth_max,
+            "tth_bin": self._tth_bin,
             "q_bin": self._q_bin, "mon_ed": self._mon_ed, "out_ed": self._out_ed,
             "zarr_grouping": self._zarr_grouping,
             "run_mode": self._run_mode_combo, "frame_run_mode": self._frame_run_mode,
@@ -2412,7 +2490,20 @@ class HydraBatchPage(QtWidgets.QWidget):
         # A project-attempt's "fmt_keys" (see project.integrate_attempt_gui_fields)
         # rides along in "fields" but isn't a plain widget — see BatchTab.set_state.
         fmt_keys = fields.pop("fmt_keys", None)
+        # Bin type was a Q-only checkbox ("q_check") until 2026-10-12. A
+        # project saved then carries no "bin_type", and dropping its q_check
+        # on the floor would silently reopen a Q-uniform run as Radial --
+        # same numbers on screen, different output. Translate instead.
+        # The combo's DISPLAY TEXT, not its userData: apply_dict_to_widgets
+        # matches combos with findText.
+        legacy_q = fields.pop("q_check", None)
+        if legacy_q is not None and "bin_type" not in fields:
+            fields["bin_type"] = "Q" if legacy_q else "Radial"
         apply_dict_to_widgets(self._state_widgets(), fields)
+        # apply_dict_to_widgets blocks signals, so the handler that greys the
+        # unused spin trio never ran -- a restored 2θ project would show its
+        # Q boxes live and its 2θ boxes dead.
+        self._on_bin_type_changed()
         # A project saved before the marker existed has no key at all --
         # that absence, not a None value, is what marks it legacy.
         self._out_state_was_legacy = "autofilled_out" not in state
