@@ -1084,6 +1084,22 @@ Flip-Z/Multi-panel fix — trimmed here; full detail in
 - The omega ramp/channel has not been driven by a real rotation scan —
   confirm `/Omegas` ramps rather than sitting at zero.
 
+### Open: the Zarr Viewer's eta axis reads past 360
+
+A four-panel combined archive covers 350 deg across the +/-180 cut, so the
+stored eta is a sawtooth (125..205, -145..-65, -55..25, 45..115).
+`tab_zarrviewer._unwrap_eta` makes it monotonic so pcolormesh can derive
+cell edges, which plots it as 125 -> 475. Faithful, and reported as "eta
+range is incorrect": 475 deg is not an angle anyone quotes.
+
+Three options, and the user has NOT yet chosen -- do not guess, the wrong
+numeric convention has been picked twice in this area already:
+
+1. leave it (honest about continuity, unconventional numbers)
+2. keep the positions monotonic but WRAP THE TICK LABELS back into
+   (-180, 180] -- identical picture, conventional numbers. Probably right.
+3. plot against bin index and put eta in the hover readout
+
 ### Known wrong, not yet fixed
 
 - The rotation card's **"one ω per frame (averaged)"** checkbox is
