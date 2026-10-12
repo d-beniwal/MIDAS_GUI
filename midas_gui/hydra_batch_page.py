@@ -173,6 +173,22 @@ class HydraBatchPage(QtWidgets.QWidget):
         # re-derived rather than carried along.
         self._det_view.originChanged.connect(self._on_origin_changed)
         self._det_view._toolbar_layout.addWidget(self._lab_axes_chk)
+        # Last in the toolbar, as on the single-detector tab.
+        self._det_view._toolbar_layout.addWidget(
+            QtWidgets.QLabel("Preview: sum first"))
+        self._preview_sum_n = _NoScrollSpinBox()
+        self._preview_sum_n.setRange(1, 999); self._preview_sum_n.setValue(1)
+        self._preview_sum_n.setFixedWidth(50)
+        self._preview_sum_n.setToolTip(
+            "Detector-view preview only — never affects the real batch run. "
+            "Sums this many frames from the current index before display, "
+            "to boost signal enough to see the actual diffraction pattern "
+            "beneath detector-readout artifacts that dominate a single "
+            "frame.\n\n"
+            "Read synchronously here, one frame at a time, so keep it small "
+            "on an NFS-mounted share.")
+        self._preview_sum_n.valueChanged.connect(self._on_preview_sum_changed)
+        self._det_view._toolbar_layout.addWidget(self._preview_sum_n)
         self._axis_items: list = []
         self._bin_overlay_items: list = []
         # (panel, shape, im_trans) the shared Detector view is framed for —
@@ -1420,7 +1436,7 @@ class HydraBatchPage(QtWidgets.QWidget):
         path = self._loader.siblings().get(n)
         if path is not None:
             try:
-                frame = _load_image(path, self._loader.dataset(), self._loader.frame_index())
+                frame = self._preview_frame(path)
                 # Only re-frame when the picture itself changes (panel switch,
                 # detector size, transform) — not on every Rmin/Rmax/bin or
                 # Show-bin-grid toggle, all of which route through here and
@@ -1569,6 +1585,39 @@ class HydraBatchPage(QtWidgets.QWidget):
         for u, pick in self._REBIN_SPINS.items():
             for w in pick(self):
                 w.setEnabled(u == unit)
+
+    def _preview_frame(self, path):
+        """The Detector-view preview image for ``path`` — one frame, or the
+        sum of the first N from the current index when "Preview: sum first"
+        asks for more.
+
+        Display aid only; it never touches the real batch run, exactly as
+        on the single-detector tab. A single weak frame can be dominated by
+        detector-readout artifacts that hide the diffraction pattern, and
+        summing a handful boosts the real signal enough to see it.
+
+        Read synchronously, unlike the single-detector tab, which pushes
+        this onto a StreamPreviewWorker. That page's loader owns a preview
+        pipeline with dark/bright correction to apply; this one already
+        reads its single frame straight off disk on every panel switch
+        (see _refresh_detector_preview), so summing N just does that N
+        times. Keep N small over NFS -- each frame is a separate read.
+        """
+        ds, i0 = self._loader.dataset(), self._loader.frame_index()
+        n = max(1, int(self._preview_sum_n.value()))
+        total = None
+        for i in range(i0, i0 + n):
+            try:
+                f = _load_image(path, ds, i)
+            except Exception:
+                break          # ran off the end of the stack; sum what we got
+            total = np.asarray(f, dtype=np.float64) if total is None else total + f
+        if total is None:      # not even the first frame read -- let the
+            return _load_image(path, ds, i0)   # caller's handler report it
+        return total
+
+    def _on_preview_sum_changed(self, _n: int) -> None:
+        self._refresh_active_detector_preview()
 
     def _ion_csv_extras(self) -> tuple:
         """Optional beam-monitor CSV column groups, as the tuple
@@ -2540,6 +2589,7 @@ class HydraBatchPage(QtWidgets.QWidget):
             "lab_axes_chk": self._lab_axes_chk,
             "azim": self._azim, "var_check": self._var_check, "err_model": self._err_model,
             "multi_azimuth": self._multi_azimuth_chk,
+            "preview_sum_n": self._preview_sum_n,
             "ion_env_chk": self._ion_env_chk,
             "ion_motors_chk": self._ion_motors_chk,
             "bin_type": self._bin_type, "q_min": self._q_min, "q_max": self._q_max,
