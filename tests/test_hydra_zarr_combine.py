@@ -1058,3 +1058,84 @@ def test_a_name_that_does_have_a_token_is_untouched(tmp_path):
           for p in PANELS}
     out = default_combined_path(ps)
     assert out.name == "scan_005244.ge1234.000000_000063.ave.zarr.zip"
+
+
+# ── reading a merged archive back for display ────────────────────────────
+# The combine's own output had no view in the GUI: the Hydra page showed
+# four per-panel results, and the merged ge1234 archive -- the only place
+# all four panels' eta coverage appears on one continuous axis -- had to be
+# opened externally. read_merged_cakes is the read side of that.
+
+def _write_merged(tmp_path, n_frames=3, n_r=5, n_eta=4, keys=None):
+    """A minimal merged-shaped archive: OmegaSumFrame/(nR, nEta) + REtaMap."""
+    import zarr
+    out = tmp_path / "m.zarr.zip"
+    store = zarr.ZipStore(str(out), mode="w")
+    z = zarr.group(store)
+    osf = z.create_group("OmegaSumFrame")
+    keys = keys or [f"LastFrameNumber_{i}" for i in range(n_frames)]
+    for i, k in enumerate(keys):
+        osf[k] = np.full((n_r, n_eta), float(i + 1))
+    rmap = np.zeros((5, n_r, n_eta))
+    rmap[0] = np.arange(n_r)[:, None] * 10.0            # plane 0 = R
+    rmap[2] = np.linspace(-175, 175, n_eta)[None, :]    # plane 2 = eta
+    z["REtaMap"] = rmap
+    store.close()
+    return out
+
+
+def test_read_merged_cakes_returns_the_shape_the_cake_viewer_takes(tmp_path):
+    """Stored as (nR, nEta) per frame; CakeStackViewer.set_cakes wants
+    (n_frames, n_eta, n_r), so each frame is transposed on the way out."""
+    from midas_gui import hydra_zarr_combine as hz
+    cakes, r, eta, ids, trunc = hz.read_merged_cakes(_write_merged(tmp_path))
+    assert cakes.shape == (3, 4, 5)
+    assert r.shape == (5,) and eta.shape == (4,)
+    assert trunc == 0 and len(ids) == 3
+
+
+def test_the_axes_come_from_retamap_not_a_reconstructed_linspace(tmp_path):
+    """The merged eta axis is four panels' own ranges concatenated. It need
+    not tile evenly, and for ge1 at 1-ID-E it crosses the +/-180 branch cut
+    -- an assumed uniform grid would be wrong in exactly the case this view
+    exists to show."""
+    from midas_gui import hydra_zarr_combine as hz
+    _c, r, eta, _i, _t = hz.read_merged_cakes(_write_merged(tmp_path))
+    assert np.allclose(r, [0, 10, 20, 30, 40])
+    assert eta[0] == pytest.approx(-175.0) and eta[-1] == pytest.approx(175.0)
+
+
+def test_frames_are_ordered_numerically_not_lexically(tmp_path):
+    """LastFrameNumber_10 sorts before _7 lexically, which shuffles the
+    frame axis -- and a shuffled waterfall reads as noise, not as a sorting
+    bug."""
+    from midas_gui import hydra_zarr_combine as hz
+    keys = [f"LastFrameNumber_{i}" for i in (0, 7, 10, 2)]
+    _c, _r, _e, ids, _t = hz.read_merged_cakes(_write_merged(
+        tmp_path, n_frames=4, keys=keys))
+    assert ids == ["LastFrameNumber_0", "LastFrameNumber_2",
+                   "LastFrameNumber_7", "LastFrameNumber_10"]
+
+
+def test_the_frame_cap_truncates_and_says_by_how_much(tmp_path):
+    """A merged cake is four panels wide; an 834-frame scan at 3520 R bins
+    is over a gigabyte. Truncation must be reported, not silent."""
+    from midas_gui import hydra_zarr_combine as hz
+    cakes, _r, _e, ids, trunc = hz.read_merged_cakes(
+        _write_merged(tmp_path, n_frames=10), max_frames=4)
+    assert cakes.shape[0] == 4 and len(ids) == 4 and trunc == 6
+    # ...and None means "load it all", for a caller that knows it is small.
+    cakes, _r, _e, _i, trunc = hz.read_merged_cakes(
+        _write_merged(tmp_path, n_frames=10), max_frames=None)
+    assert cakes.shape[0] == 10 and trunc == 0
+
+
+def test_a_non_merged_archive_is_refused_by_name(tmp_path):
+    import zarr
+    from midas_gui import hydra_zarr_combine as hz
+    out = tmp_path / "plain.zarr.zip"
+    store = zarr.ZipStore(str(out), mode="w")
+    zarr.group(store)["something_else"] = np.zeros((2, 2))
+    store.close()
+    with pytest.raises(ValueError, match="not a merged archive"):
+        hz.read_merged_cakes(out)

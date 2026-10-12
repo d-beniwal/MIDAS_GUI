@@ -436,3 +436,48 @@ def test_the_launched_argvs_carry_each_panels_own_caking_and_calibration(
         "skipped one makes every frame look incomplete and merges nothing")
     assert Path(combine.out_dir) == Path(parsed["ge1"].out_dir).parent, (
         "the combine must run at scan level, beside the ge{n}/ folders")
+
+
+def test_the_merged_view_tabs_exist_and_fill_from_a_merged_archive(app, tmp_path):
+    """The Hydra page showed four per-panel results and had no view of the
+    archive a Hydra run actually produces. These three tabs are that view;
+    Per-panel results stays, because one panel at a time is still how you
+    check a single panel's calibration.
+
+    One page, per this file's header and the pyqtgraph teardown history.
+    """
+    import zarr
+    from midas_gui import hydra_zarr_combine as hz
+
+    page = HydraBatchPage()
+    assert [page._top_tabs.tabText(i) for i in range(page._top_tabs.count())] == [
+        "Per-panel results", "Detector view",
+        "Waterfall", "Stacked profiles", "Eta-R cakes"]
+
+    merged = tmp_path / "s.ge1234.ave.zarr.zip"
+    store = zarr.ZipStore(str(merged), mode="w")
+    z = zarr.group(store)
+    osf = z.create_group("OmegaSumFrame")
+    for i in range(3):
+        osf[f"LastFrameNumber_{i}"] = np.full((6, 4), float(i + 1))
+    rmap = np.zeros((5, 6, 4))
+    rmap[0] = np.arange(6)[:, None] * 10.0
+    rmap[2] = np.linspace(-175, 175, 4)[None, :]
+    z["REtaMap"] = rmap
+    store.close()
+
+    page._populate_merged_views(str(merged))
+    assert page._merged_shown == str(merged)
+    log = page._log.toPlainText()
+    assert "s.ge1234.ave.zarr.zip" in log
+
+    # No calibration is loaded, so the R axis cannot be converted -- and the
+    # note must say THAT, not blame panel distances, which is a different
+    # situation that looks identical from the viewer.
+    ctx, why = page._merged_axis_context()
+    assert ctx is None and "no panel calibration" in why
+    assert "no panel calibration" in log
+
+    # A bad path is a log line, never an exception out of the combine step.
+    page._populate_merged_views(str(tmp_path / "nope.zarr.zip"))
+    assert "could not read back" in page._log.toPlainText()
