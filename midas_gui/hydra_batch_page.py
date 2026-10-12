@@ -1658,8 +1658,22 @@ class HydraBatchPage(QtWidgets.QWidget):
         # tab_batch.py -- see 4cb7aaa and
         # tests/test_batch_cake_stack.py::test_q_uniform_profiles_carry_an_R_axis_not_a_Q_one
         _axctx = (lsd, px, wl, "R")
-        pair.waterfall.set_axis_context(*_axctx)
-        pair.stack_view.set_axis_context(*_axctx)
+        # Telling the two viewers what units to label is cosmetic, but it
+        # sits on the QUEUE's critical path: this method is reached from a
+        # worker's finished signal via _maybe_finish_run -> _start_next_scan,
+        # so an exception raised here does not just spoil a plot -- it stops
+        # the remaining panels launching and the run never advances. A
+        # 189-folder batch died after ONE folder when a profile with no
+        # finite points made pyqtgraph's autoRange resolve to [nan, nan]
+        # (fixed in StackedProfileViewer._restack too, but the queue must
+        # not depend on every view bug having been found first).
+        for _view in (pair.waterfall, pair.stack_view):
+            try:
+                _view.set_axis_context(*_axctx)
+            except Exception as exc:            # noqa: BLE001 — see above
+                self._log.append(
+                    f"[ge{n}] axis units not applied to the viewer ({exc}); "
+                    f"integration continues")
         pair.wf_started = False
         self._integrated_fids[n] = set()
 

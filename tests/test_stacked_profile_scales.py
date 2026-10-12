@@ -153,3 +153,91 @@ def test_toggling_scales_and_log_x_never_raises(view):
         for on in (True, False, True):
             view._logx_chk.setChecked(on)
     assert True
+
+
+# ── an all-NaN curve must not be able to break the view ──────────────────
+#
+# Found the hard way: a 189-folder Hydra batch died after ONE folder with
+#
+#   File "widgets.py", line 6878, in _restack
+#     self._plot.autoRange()
+#   Exception: Cannot set range [nan, nan]
+#
+# preceded by two "All-NaN slice encountered" warnings from pyqtgraph's
+# ScatterPlotItem. _y_display maps non-positive values to NaN on purpose,
+# so a frame that is non-positive EVERYWHERE becomes an all-NaN curve. The
+# bounds guard below it is `if xmins:` — satisfied as soon as ONE curve has
+# finite data — but autoRange unions every item in the plot, and a
+# PlotDataItem's internal ScatterPlotItem reports nanmin/nanmax. One dead
+# curve among healthy ones was enough.
+#
+# This matters far beyond the plot: _restack runs from set_axis_context,
+# which hydra_batch_page calls in _start_panel_worker, which is reached
+# from a worker's finished signal. The exception stopped the QUEUE.
+
+def _dead():
+    """A frame with nothing representable under a log scale."""
+    q = np.linspace(0.01, 1.3, 200)
+    return q, np.full(200, -1.0)
+
+
+def test_a_frame_with_no_finite_points_does_not_break_restack(app):
+    from midas_gui.widgets import StackedProfileViewer
+    v = StackedProfileViewer()
+    q, good = _saxs()
+    v.add_profile(q, good, "good")
+    v.add_profile(*_dead(), "dead")          # all negative -> all NaN on log
+    v._yscale_combo.setCurrentText(LOG)      # calls _restack
+    v._restack()                             # and again, explicitly
+    xr, yr = v._plot.getPlotItem().getViewBox().viewRange()
+    assert all(np.isfinite(val) for val in (*xr, *yr)), (xr, yr)
+
+
+def test_the_live_axis_entry_point_is_safe_too(app):
+    """set_axis_context is what the batch page calls per panel; that is the
+    path that actually died."""
+    from midas_gui.widgets import StackedProfileViewer
+    v = StackedProfileViewer()
+    v.add_profile(*_dead(), "dead")
+    v._yscale_combo.setCurrentText(LOG)
+    v.set_axis_context(2391423.0, 200.0, 0.15359, "R")   # must not raise
+
+
+def test_every_frame_dead_leaves_the_view_alone(app):
+    """No finite data at all: nothing to frame, and still no exception."""
+    from midas_gui.widgets import StackedProfileViewer
+    v = StackedProfileViewer()
+    for i in range(3):
+        v.add_profile(*_dead(), f"dead{i}")
+    v._yscale_combo.setCurrentText(LOG)
+    v._restack()
+
+
+def test_a_dead_curve_is_emptied_rather_than_drawn_as_nan(app):
+    """The fix at source: an all-NaN curve is what makes the internal
+    ScatterPlotItem report NaN bounds, so it is given no points instead."""
+    from midas_gui.widgets import StackedProfileViewer
+    v = StackedProfileViewer()
+    q, good = _saxs()
+    v.add_profile(q, good, "good")
+    v.add_profile(*_dead(), "dead")
+    v._yscale_combo.setCurrentText(LOG)
+    v._restack()
+    xd, _yd = v._curves[1].getData()
+    assert xd is None or len(xd) == 0, "dead curve still carries NaN points"
+    xd0, _ = v._curves[0].getData()
+    assert xd0 is not None and len(xd0) > 0, "the healthy curve was dropped too"
+
+
+def test_the_healthy_curve_still_sets_the_range(app):
+    """Emptying the dead curve must not shrink the view to nothing."""
+    from midas_gui.widgets import StackedProfileViewer
+    v = StackedProfileViewer()
+    q, good = _saxs()
+    v.add_profile(q, good, "good")
+    v.add_profile(*_dead(), "dead")
+    v._yscale_combo.setCurrentText(LOG)
+    v._restack()
+    xmin, xmax, ymin, ymax = v._data_bounds
+    assert xmax > xmin and ymax > ymin
+    assert xmin >= q.min() - 1e-6 and xmax <= q.max() + 1e-6
