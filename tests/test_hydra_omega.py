@@ -187,13 +187,29 @@ def test_it_is_on_the_composite_card_too(page):
     assert page._ome_start.isVisible() and page._ome_step.isVisible()
 
 
-def test_it_travels_with_the_grid_toggle_and_neither_is_left_behind(page):
+def test_the_rotation_row_travels_and_is_never_left_behind(page):
+    """It used to be asserted as travelling WITH the bin-grid toggle, which
+    rode in the same reparenting call.
+
+    They parted ways on 2026-10-12: the grid toggle is a view-level control
+    (it changes what the Detector view DRAWS) and moved to the toolbar with
+    `Lab-frame axes`, while the rotation row genuinely is a caking value --
+    OME_START/OME_STEP are cake_parameters fields -- so it still follows the
+    visible caking card. Both halves are pinned here, because "they travel
+    together" is exactly the assumption that is no longer true.
+    """
     page.show()
     page._toolbar.set_available([1, 2, 3, 4])
+    bar = page._det_view._toolbar_layout
+    in_toolbar = lambda w: w in [bar.itemAt(i).widget() for i in range(bar.count())]
     for key in ("ge1", "composite", "ge2"):
         page._on_panel_changed(key)
-        assert _card_title(page._ome_start) == _card_title(page._grid_chk)
+        # Follows the visible card, and is not hidden by the reparent.
+        assert _card_title(page._ome_start) == _card_title(page._ome_step)
         assert not page._ome_start.isHidden()
+        # The grid toggle stays put instead.
+        assert in_toolbar(page._grid_chk), f"grid toggle moved on {key}"
+        assert not page._grid_chk.isHidden()
 
 
 def test_reparenting_does_not_cost_it_its_value(page):
