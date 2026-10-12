@@ -3,6 +3,95 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-12 — Hydra/single-detector Batch Integrate brought to parity, and the preview was showing an arming frame
+
+**Scope.** Asked for as "make the single detector and hydra detector views
+more uniform / unified", after the Hydra page got a background-job button.
+Scoped the way upstream scoped the calibration-page equivalent (923c5f4,
+merged the same day): diff the two pages section by section, then sort each
+difference into BUG/GAP (fix) or FORCED BY HYDRA HAVING FOUR PANELS (leave),
+and put the genuinely ambiguous ones back to the user rather than guess.
+
+What that diff found, beyond what had been named:
+
+| difference | verdict |
+|---|---|
+| log in a tab vs a permanent bottom panel | bug — fixed (e5aecbe) |
+| **Bin type was a Q-only checkbox** | **gap — Hydra could not emit 2θ at all** |
+| Multi-azimuth output (cake) absent | gap — added |
+| Ring current / T / P + Sample motors absent | gap — added |
+| Preview: sum first N absent | gap — added |
+| `Show bin grid` in a caking card vs the toolbar | judgment call — user chose toolbar |
+| Drift correction absent | declined, as upstream declined ring-picking |
+| nested Per-panel results vs flat tabs | forced by four panels |
+| per-panel calibration cards | forced by four panels |
+
+"Bayesian σ estimate" looked like a ninth item and is not: it belongs to
+the Drift correction card, so it leaves with drift.
+
+**The bin-grid toggle reversed an earlier explicit request.** It had been
+moved INTO the caking card on a direct beamline ask ("this button can go to
+caking card"), and the later unification ask reverses that. Recorded because
+the test that pinned the old behaviour is now rewritten, and the reason the
+second decision beat the first should outlive both: there is exactly ONE
+toggle, shared by four panels and persisted by identity, so living in a
+per-panel card made a global control look per-panel — and the reparenting
+existed only to maintain that illusion, at the cost of the widget physically
+migrating across the page on every panel switch. It controls what the view
+DRAWS, like `Lab-frame axes`, which was already in the toolbar on both pages.
+
+**Two things that would have gone wrong quietly, both caught by tests:**
+
+* A project saved before Bin type existed carries `q_check` and no
+  `bin_type`. Dropped, a Q-uniform run reopens as **Radial** — same numbers
+  on screen, different output. `set_state` translates it. And the migration
+  has to write the combo's DISPLAY TEXT ("Radial"), not its `"R"` userData,
+  because `apply_dict_to_widgets` matches combos with `findText` — and it
+  blocks signals, so `_on_bin_type_changed` must then be called by hand or a
+  restored 2θ project shows its Q boxes live and its 2θ boxes dead.
+* `test_hydra_omega` asserted the rotation row and the grid toggle travel
+  together. Moving one broke it, and I missed it: I grepped tests for
+  `_place_grid_toggle` but not for `_grid_chk`. Found by the full suite.
+  The lesson is to grep for the WIDGET, not only the helper that moved it.
+
+**The Detector view was drawing the detector's arming frame.** Reported as
+"I am not sure what the image is being generated... this looks fine on the
+data viewer tab": a black 1024x402 picture with the scale topping out at
+3e-06. Not corrupt — a picture of nothing:
+
+    get(0) -> ..._005134.pixi.frame_0_0  max=0     nonzero=0
+    get(1) -> ..._005134.pixi.frame_1_1  max=52    nonzero=75740
+
+A Pixirad arms one frame before counting, so frame 0 of every .pixi.h5 is
+identically zero, and `StreamPreviewWorker` read index 0 unconditionally;
+pyqtgraph autoscaled a constant array to a degenerate range, which reads as
+corruption rather than as blankness. `widgets._first_raw_frame_is_blank`
+already knew the detector does this, but ONLY the single-HDF5 sub-frame
+range consulted it — a multi-file stream never did, and neither did the
+preview on any path. Now stepped over, bounded by `_PREVIEW_BLANK_SCAN=8`.
+
+DISPLAY ONLY, deliberately. Which frames a RUN integrates stays opt-in (see
+2026-10-08): an all-zero frame is not reliably an arming frame, and silently
+dropping a real observation of zero from the data would be a worse bug than
+a dull preview. A blank frame in the MIDDLE is still summed; a test pins it.
+
+**The results sidecar was written where nobody could read it.** `batch_cli`
+wrote `_bg_job_results.npz` into every `--out-dir`, but `JobQueuePanel`
+records ONE out_dir per job (the first step's), so every later step of a
+chained job wrote a file the UI could not open. A real 196-folder pixirad
+sweep left 196 of them, 826 MB, of which 1 was reachable. Now opt-in
+(`--results-sidecar`), passed by the GUI for the first step only; a direct
+CLI invocation writes none, which is right — there is no GUI there to load
+them.
+
+**Verified:** full suite green apart from the five known pre-existing
+failures. `test_every_method_survives_the_split`, which failed once this
+morning and is NOT on that list, does not reproduce against the finished
+tree — it was environmental. Note that `test_batch_stream_preview.py` fails
+*entirely* in a partial run and passes in a full one, so the four new
+blank-frame tests there can only be judged by a full run.
+
+
 ## 2026-10-08 (latest) — Hydra calibration page's layout matched to the single-detector Calibrate tab, scope negotiated up front
 
 **Problem.** `HydraCalibrationPage` was built as a parallel implementation of

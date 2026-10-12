@@ -1,28 +1,46 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-10-12 (merged upstream/main: Hydra calibration page brought to layout parity with the single-detector Calibrate tab. Local side: Hydra Batch Integrate background jobs, permanent log/job panel on Batch Integrate, merged-eta sort, Batch Correction, three-way Bin type, Pixirad fixes.)_
+_Last updated: 2026-10-12 (merged upstream/main: Hydra CALIBRATION page brought to layout parity. Local side: Hydra BATCH INTEGRATE background jobs + the same parity pass — 2θ bins, multi-azimuth, ion-CSV extras, preview sum, grid toggle to the toolbar — plus the arming-frame preview fix and the results-sidecar cleanup.)_
 
 ## Now working on
 
-**Batch Correction landed (2026-10-05); Bin type went three-way
-(2026-10-06); AgBeh calibration still open.** Batch Correction is a new
-optional tab: chunked frame reduction (mean/median/sum/max over N sub-frames
-per file) with field correction, HDF5 out. Batch Integrate's Bin type now
-offers Radial / Q / 2θ, in background jobs as well as in-process. See
-"Recently completed" and DECISIONS 2026-10-05 / 2026-10-06.
+**Hydra Batch Integrate caught up with the single-detector tab
+(2026-10-12).** Two strands finished the same day, both at the beamline
+during connolly_oct26:
 
-**Clearing the decks before the next push.** PR #11 is behind us — upstream
-merged all 48 of our commits on 2026-09-30 as eight staged checkpoints ending
-at our `7ccf0fb`, then added follow-ups, all merged back here (`3bcba7f`,
-then `1c5c9af` for their ring-coverage commit). Since then: three Calibrate
-fixes reported from the beamline, and a housekeeping pass (ROADMAP reconciled,
-the PR#7 pyflakes nit fixed, scratch dirs pruned).
+* **Background jobs.** The Hydra page can now run detached, with the same
+  button, the same JobQueuePanel (Reattach / Cancel / live tail) and the
+  same one-session-many-steps chaining as the single-detector tab. A scan
+  becomes one `batch_cli` invocation per panel, sequentially, then
+  `hydra_combine_cli`. Commands are recorded to the run-log tree AND to
+  `<root>/logs/<session>.commands.log` beside the data.
+* **Layout/feature parity.** The two detector-view toolbars are now
+  identical. Hydra gained 2θ-uniform output (it previously could not emit
+  2θ AT ALL), multi-azimuth, the ion-CSV extras and Preview-sum; the log
+  and job rows became permanent on the single-detector tab. See
+  DECISIONS 2026-10-12 for the bug/gap vs forced-by-four-panels sort.
 
-`main` is **43 commits ahead of `origin/main` and nothing is pushed.** That is
-the next action and it needs your word, since it is also the next PR upstream.
+Also fixed: Batch Integrate's Detector view was drawing the Pixirad's
+all-zero arming frame, which autoscaled into something that looked like
+corrupt data; and background jobs no longer scatter `_bg_job_results.npz`
+sidecars the UI cannot open (826 MB on one 196-folder sweep).
 
 Needing you, in the order it matters:
+- **Delete two sets of stale files on the share.** This host cannot — NFS
+  maps it to a different principal (`touch` fails even in a `drwxrwsrwx`
+  dir), so run these from wherever the GUI writes from:
+  `find /home/s1c/connolly_oct26_bc -name '_bg_job_results.npz' -type f -delete`
+  (196 files, 826 MB) and the bigger one, 55,157 stale per-frame archives
+  from the Oct 10 run sitting beside today's correct per-file output in the
+  same `zarr/` folders:
+  `find /home/s1c/connolly_oct26_bc -path '*/pixirad/*' -name '*.pixi.frame_*.zarr.zip' -delete`.
+  Anything globbing `*/pixirad/zarr/*.zarr.zip` currently mixes the two.
+- **The ge1234 combined view.** Asked for and NOT built: Waterfall /
+  Stacked profiles / Eta-R cakes tabs on the Hydra page showing the MERGED
+  archive (the per-panel view stays). Needs a reader for the merged zarr
+  and a frame cap — an 834-frame merged cake is >1 GB.
+- **A PR upstream.** See below.
 - **Eyes on a real Batch Correction run.** Verified only against synthetic
   two-file stacks plus a name-level replay of the real share. What needs a
   live run: that the Log names a sensible dark for each file of a multi-file
