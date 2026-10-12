@@ -27,6 +27,7 @@ tab and can be added later if needed; see ``.context/DECISIONS.md``.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -48,6 +49,7 @@ from midas_gui.hydra_widgets import (HydraLoaderPanel, HydraDetectorToolbar,
                                      panel_color)
 from midas_gui.hydra_batch_widgets import (HydraBatchPanelCard,
                                            HydraCakingSummary)
+from midas_gui.job_queue import JobQueuePanel
 from midas_gui import hydra_zarr_combine
 from midas_gui.workers import BatchRunCoordinator, write_all_profiles
 from midas_gui import cake_params
@@ -483,6 +485,22 @@ class HydraBatchPage(QtWidgets.QWidget):
         run_row.addWidget(self._abort_btn, 1)
         run_row.addWidget(self._save_btn, 1)
         run_card.body.addLayout(run_row)
+        # Same control, same wording, same mechanism as the single-detector
+        # tab's (tab_batch.BatchTab._run_as_job) — the deployment interface is
+        # deliberately identical between the two pages.
+        self._run_job_btn = QtWidgets.QPushButton("Run as background job")
+        self._run_job_btn.setToolTip(
+            "Linux only. Runs this same integration in a detached `screen` "
+            "session instead of in-process — survives closing this GUI. Each "
+            "scan runs its panels one after another (python -m "
+            "midas_gui.batch_cli, once per panel) and then the four-panel "
+            "combine (python -m midas_gui.hydra_combine_cli), all in the one "
+            "session. Needs an Output folder (calibration snapshots, masks "
+            "and dark/bright are written there for the job to read).\n"
+            "Progress/log/reattach/cancel are tracked in the 'Background "
+            "jobs' panel below.")
+        self._run_job_btn.clicked.connect(self._run_as_job)
+        run_card.body.addWidget(self._run_job_btn)
         self._prog = QtWidgets.QProgressBar(); self._prog.setRange(0, 0); self._prog.setVisible(False)
         run_card.body.addWidget(self._prog)
         lv.addWidget(run_card)
@@ -576,6 +594,12 @@ class HydraBatchPage(QtWidgets.QWidget):
         right.addWidget(self._top_tabs)
         self._log = LogPanel()
         self._log.setMaximumHeight(16_777_215)
+        # Background-job rows above the shared log, exactly as the
+        # single-detector tab lays its Logs tab out: one row per job, with
+        # progress, "Reattach" (copies `screen -r <session>`), Cancel and
+        # live tailing of that job's screenlog into the log below.
+        self._job_queue = JobQueuePanel(self._log)
+        right.addWidget(self._job_queue)
         right.addWidget(self._log)
         right.setStretchFactor(0, 4); right.setStretchFactor(1, 1)
         right.setMinimumWidth(320)
@@ -1471,6 +1495,382 @@ class HydraBatchPage(QtWidgets.QWidget):
                     f"    {src}  ({n_f} files, {len(panels)} panels)  →  {out_dir}")
         self._start_next_scan()
 
+    def _run_as_job(self):
+        """Launch this same Hydra integration as a detached background
+        `screen` job (see job_queue.JobQueuePanel) instead of running
+        in-process — survives closing this GUI.
+
+        The single-detector counterpart is ``tab_batch.BatchTab._run_as_job``
+        and this deliberately mirrors it: same button, same queue panel, same
+        one-session-many-steps mechanism. The only structural difference is
+        what a step is. There, a selection spanning source folders becomes one
+        ``batch_cli`` invocation per folder; here each scan additionally
+        becomes one invocation PER PANEL (``batch_cli`` integrates a single
+        detector and knows nothing about Hydra) followed by one
+        ``hydra_combine_cli`` call that merges that scan's four archives::
+
+            scan 1:  batch_cli --out-dir <scan1>/ge1  (ge1 calib, ge1 caking)
+                     batch_cli --out-dir <scan1>/ge2
+                     batch_cli --out-dir <scan1>/ge3
+                     batch_cli --out-dir <scan1>/ge4
+                     hydra_combine_cli --out-dir <scan1>
+            scan 2:  ...
+
+        all chained into ONE session. Panels run sequentially within a scan,
+        which is what makes this work with no new concurrency machinery —
+        and the in-process "Panels: parallel" mode stays available for
+        interactive runs.
+
+        Everything the detached process needs is written to disk first: it
+        has no access to this GUI's live state, and Hydra needs four of most
+        things (calibration, mask, dark/bright) rather than one.
+        """
+        scans = self._scan_plan()
+        if not scans:
+            QtWidgets.QMessageBox.warning(
+                self, "No data", "Load Hydra panel data first.")
+            return
+        panels = sorted({n for _d, pl in scans for n in pl})
+        if not panels:
+            QtWidgets.QMessageBox.warning(
+                self, "No data", "No panel has any files selected.")
+            return
+
+        fmts = self._fmt.checked_keys()
+        if not fmts:
+            QtWidgets.QMessageBox.warning(
+                self, "No format", "Check at least one output format first.")
+            return
+
+        # Resolve every panel's calibration up front — a detached job that
+        # dies on frame 1 fails where nobody is watching for it.
+        #
+        # A panel that cannot resolve is SKIPPED, not fatal, because that is
+        # what the in-process run does (_start_panel_worker -> _skip_panel):
+        # loading one panel's file pulls in all four siblings, so three
+        # uncalibrated panels is the ordinary state of a two-panel run, and
+        # refusing the whole job for it would make the two paths disagree
+        # about the same setup. Only "no panel at all" is an error.
+        skipped = []
+        usable = []
+        for n in panels:
+            try:
+                self._cards[n].resolved_spec()
+            except Exception as e:
+                skipped.append((n, str(e)))
+            else:
+                usable.append(n)
+        if not usable:
+            QtWidgets.QMessageBox.critical(
+                self, "Calibration error",
+                "No panel has a usable calibration:\n\n"
+                + "\n".join(f"ge{n}: {msg}" for n, msg in skipped))
+            return
+        panels = usable
+
+        missing = [d for d, _pl in scans if not d]
+        if missing:
+            QtWidgets.QMessageBox.warning(
+                self, "Output folder required",
+                "Background jobs need an Output folder — the job writes its "
+                "calibration snapshots and results there.")
+            return
+
+        # Shared sidecars live at the common root of the scan directories:
+        # for one scan that is the scan's own folder (where the
+        # single-detector tab puts them), for many it is the tree they fan
+        # out beneath. Deliberately NOT the Output box, which may hold a
+        # stale autofill equal to one group's own directory (see _scan_plan)
+        # and would then bury the shared files inside the first load step.
+        dirs = [str(d) for d, _pl in scans]
+        root = Path(os.path.commonpath(dirs) if len(dirs) > 1 else dirs[0])
+        reason = check_output_dir_writable(str(root))
+        if reason:
+            QtWidgets.QMessageBox.critical(
+                self, "Output folder not writable", reason)
+            return
+        root.mkdir(parents=True, exist_ok=True)
+
+        import tifffile
+        from midas_gui.helpers import write_standalone_paramstest
+
+        # ── per-panel argv prefixes (everything except source and out-dir) ──
+        base: dict = {}
+        for n in panels:
+            card = self._cards[n]
+            if card.using_file():
+                calib_path = card.file_path()
+                if not calib_path or not Path(calib_path).exists():
+                    QtWidgets.QMessageBox.critical(
+                        self, "Calibration error",
+                        f"ge{n}: calibration file not found: {calib_path}")
+                    return
+            else:
+                if card.result is None:
+                    QtWidgets.QMessageBox.critical(
+                        self, "Calibration error",
+                        f"ge{n}: no calibration from the Calibrate tab. "
+                        "Run its Hydra fit first.")
+                    return
+                calib_path = root / f"_bg_job_calibration_ge{n}.txt"
+                write_standalone_paramstest(card.result, calib_path)
+
+            c = card.caking()
+            a = [sys.executable, "-m", "midas_gui.batch_cli",
+                 "--calib-file", str(calib_path),
+                 "--r-bin", str(c["R_STEP"]), "--eta-bin", str(c["ETA_STEP"])]
+            if c["R_MIN"]:
+                a += ["--r-min", str(c["R_MIN"])]
+            if c["R_MAX"]:            # 0.0 is the "auto" sentinel, not a radius
+                a += ["--r-max", str(c["R_MAX"])]
+            # Always sent, unlike R: a panel's wedge is the whole point of
+            # Hydra, and an omitted flag means the full circle rather than
+            # "unchanged" — ge1's range even straddles the ±180 branch cut.
+            a += ["--eta-min", str(c["ETA_MIN"]), "--eta-max", str(c["ETA_MAX"])]
+            a += ["--fmts", ",".join(fmts), "--kernel", self._kernel.currentData()]
+            a += self._shared_job_args()
+
+            mask = self._loader.composite_mask(n)
+            if mask is not None:
+                p = root / f"_bg_job_mask_ge{n}.tif"
+                tifffile.imwrite(str(p), mask.astype("uint8"))
+                a += ["--mask", str(p)]
+            for name, arr in (("dark", self._loader.dark(n)),
+                              ("bright", self._loader.bright(n)),
+                              ("background", self._loader.background(n))):
+                if arr is not None:
+                    p = root / f"_bg_job_{name}_ge{n}.tif"
+                    tifffile.imwrite(str(p), np.asarray(arr, dtype=np.float32))
+                    a += [f"--{name}", str(p)]
+            if self._loader.dark(n) is not None or self._loader.bright(n) is not None:
+                a += ["--bright-mode", self._loader.bright_mode()]
+            base[n] = a
+
+        # ── one step per (scan, panel), plus a combine per scan ──
+        combine = (getattr(self, "_combine_zarr_chk", None) is not None
+                   and self._combine_zarr_chk.isChecked()
+                   and "zarr" in fmts)
+        argvs = []
+        for out_dir, panel_paths in scans:
+            ran = []
+            for n in sorted(panel_paths):
+                paths = list(panel_paths.get(n) or [])
+                if not paths or n not in base:
+                    continue
+                argvs.append(base[n] + self._source_job_args(n, paths)
+                             + ["--out-dir", str(Path(out_dir) / f"ge{n}")])
+                ran.append(n)
+            # Only the panels this scan actually integrates. Naming a skipped
+            # panel would make find_panel_zarr_sets look for an archive that
+            # is never written, and every frame would then be "incomplete"
+            # and silently merge nothing.
+            if combine and len(ran) >= 2:
+                argvs.append([sys.executable, "-m", "midas_gui.hydra_combine_cli",
+                              "--out-dir", str(out_dir),
+                              "--panels", *[f"ge{n}" for n in ran]])
+        if not argvs:
+            QtWidgets.QMessageBox.warning(
+                self, "No data", "No panel of any selected scan has files.")
+            return
+
+        # Progress-bar denominator only. JobQueuePanel reads the LAST
+        # PROGRESS line's numerator, which resets at each step, so the
+        # meaningful total is ONE panel-step's frame count — the same choice
+        # the single-detector tab makes for a multi-folder job.
+        total = 1
+        try:
+            from midas_gui.workers import _open_source_cfg
+            first_n = sorted(scans[0][1])[0]
+            total = int(_open_source_cfg(
+                self._source_cfg_for_paths(first_n, scans[0][1][first_n])
+            ).n_frames) or 1
+        except Exception:
+            pass
+
+        job = self._job_queue.launch(
+            argvs[0], name=root.name or "hydra", total_frames=total,
+            out_dir=str(Path(scans[0][0]) / f"ge{sorted(scans[0][1])[0]}"),
+            extra_argvs=argvs[1:])
+        if job is None:
+            return
+        self._log.append(
+            f"[hydra] Launched background job: {job.session}\n"
+            f"[hydra]   reattach with:  screen -r {job.session}")
+        self._log.append(
+            f"[hydra] {len(scans)} scan(s) x {len(panels)} panel(s)"
+            + (" + combine" if combine else "")
+            + f" = {len(argvs)} step(s), run in order in that one session.")
+        for n, msg in skipped:
+            # Same outcome as an in-process run's _skip_panel, and said
+            # before the job starts rather than discovered in the screenlog.
+            self._log.append(f"[hydra] ge{n} skipped — {msg}")
+        self._log.append(f"[hydra] shared sidecars (calibration/mask/fields): {root}")
+        for out_dir, panel_paths in scans[:10]:
+            n_f = sum(len(v) for v in panel_paths.values())
+            self._log.append(
+                f"[hydra]     {n_f:>5} file(s), {len(panel_paths)} panel(s) → {out_dir}")
+        if len(scans) > 10:
+            self._log.append(f"[hydra]     … and {len(scans) - 10} more")
+        self._write_job_command_log(job, argvs, scans, panels, skipped, root)
+
+    def _write_job_command_log(self, job, argvs, scans, panels, skipped, root) -> None:
+        """Record WHAT WAS RUN, in the two places someone will look for it.
+
+        ``JobQueuePanel.launch`` already writes the chain to
+        ``~/.midas_gui/jobs/<session>.sh`` and its output to
+        ``<session>.screenlog``, but both are keyed by session name in a
+        directory nobody browses — answering "what did I actually run on this
+        dataset?" months later means knowing the session name first. So the
+        same command list also goes to:
+
+        * the run-log tree (``~/midas_runs/midas_screen_logs/<beamline>/
+          <expid>/``), which is where this GUI's other long runs are filed
+          and is organised by experiment rather than by session; and
+        * ``<root>/logs/``, beside the data, which is the convention the MPE
+          SAXS/WAXS workflow established (a scan folder ends up as
+          ``xy/ zarr/ mat/ logs/``).
+
+        Best effort throughout — ``run_log.open_log`` returns a discarding
+        log rather than raising, and the ``logs/`` copy is wrapped, because a
+        job that has already been launched must not be reported as failed
+        over a log file.
+        """
+        import shlex
+        from midas_gui import run_log
+
+        lines = [f"[{i}/{len(argvs)}] " + " ".join(shlex.quote(str(c)) for c in a)
+                 for i, a in enumerate(argvs, 1)]
+        fields = {
+            "Session": job.session,
+            "Reattach": f"screen -r {job.session}",
+            "Scans": len(scans),
+            "Panels": ", ".join(f"ge{n}" for n in panels) or "(none)",
+            "Skipped": ", ".join(f"ge{n}" for n, _ in skipped) or "(none)",
+            "Steps": len(argvs),
+            "Output root": str(root),
+            "Job script": f"~/.midas_gui/jobs/{job.session}.sh",
+            "Job stdout": f"~/.midas_gui/jobs/{job.session}.screenlog",
+        }
+        title = "MIDAS GUI — Hydra Batch Integrate (background job)"
+
+        expid = self._expid_provider().strip() if self._expid_provider else ""
+        log = run_log.open_log("hydra_integrate", profile=settings.active_profile(),
+                               expid=expid, stem=root.name)
+        if log.path is None:
+            self._log.append("[hydra] Note: no run log written — "
+                             + (log.error or "could not open it"))
+        else:
+            log.header(title, fields)
+            for line in lines:
+                log.write(line)
+            log.close()
+            self._log.append(f"[hydra] Run log: {log.path}")
+            if not expid:
+                self._log.append(f"[hydra] Note: Exp ID is blank, so this run's "
+                                 f"log is filed under {run_log.NO_EXPID}/.")
+
+        try:
+            logs_dir = Path(root) / "logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            beside = logs_dir / f"{job.session}.commands.log"
+            with open(beside, "w", encoding="utf-8") as fh:
+                fh.write("=" * 40 + f"\n{title}\n" + "=" * 40 + "\n")
+                for k, v in fields.items():
+                    fh.write(f"{k:<13}: {v}\n")
+                fh.write("=" * 40 + "\n")
+                fh.write("\n".join(lines) + "\n")
+            self._log.append(f"[hydra] Commands: {beside}")
+        except OSError as exc:
+            self._log.append(f"[hydra] Note: could not write {root}/logs/ "
+                             f"command log ({exc}); the job is unaffected.")
+
+    def _shared_job_args(self) -> list:
+        """The run settings that are the same for every panel and every scan
+        — corrections, rotation, binning mode, frame subsetting. Split out of
+        ``_run_as_job`` only so the per-panel loop there stays readable.
+
+        Every one of these is sent explicitly, even at its default: the
+        detached process cannot see the widgets, so an omitted flag silently
+        falls back to the CLI's own default and the two run paths disagree
+        about the same run. That class of bug is why the single-detector tab
+        sends its omega and zarr-grouping flags unconditionally too.
+        """
+        a = []
+        if self._q_check.isChecked():
+            # The page's Q widgets are the legacy Q-only spelling of an
+            # output rebin (workers.rebin_cfg_parts accepts both); batch_cli
+            # takes the self-describing form.
+            a += ["--rebin-unit", "Q",
+                  "--rebin-min", str(self._q_min.value()),
+                  "--rebin-max", str(self._q_max.value()),
+                  "--rebin-step", str(self._q_bin.value())]
+        a += ["--weighted"] if bool(self._azim.currentData()) else ["--no-weighted"]
+        ome = self.omega_cfg()
+        a += ["--ome-start", str(ome["start"]), "--ome-step", str(ome["step"])]
+        if ome.get("channel"):
+            a += ["--ome-channel", ome["channel"]]
+        if ome.get("collapse"):
+            a += ["--ome-collapse"]
+        a += ["--zarr-grouping", self._zarr_grouping.currentData() or "run"]
+        if self._corr_widget.polar_check.isChecked():
+            a += ["--polarization",
+                  "--pol-fraction", str(self._corr_widget.pol_fraction.value()),
+                  "--pol-plane", str(self._corr_widget.pol_plane.value())]
+        if self._corr_widget.solid_check.isChecked():
+            a += ["--solid-angle"]
+        if self._var_check.isChecked() and not self._corr_widget.any_enabled():
+            a += ["--variance", "--error-model", self._err_model.currentText()]
+        # The loader's Frames start/end/stride subsets the OUTPUT frames a
+        # source yields, which is batch_cli's --frame-range-* trio, not the
+        # --frame-start/--frame-end file-number filter. Sent only when it is
+        # not the "everything" default, so an ordinary job's command line
+        # stays as short as the single-detector one.
+        fr = self._loader.frame_range() or (0, None, 1)
+        if tuple(fr) != (0, None, 1):
+            a += ["--frame-range-start", str(int(fr[0] or 0))]
+            if fr[1] is not None:
+                a += ["--frame-range-end", str(int(fr[1]))]
+            if (fr[2] or 1) != 1:
+                a += ["--frame-range-stride", str(int(fr[2]))]
+        mon = self._mon_ed.text().strip()
+        if mon:
+            a += ["--monitor-file", mon]
+        return a
+
+    def _source_cfg_for_paths(self, n: int, paths: list) -> dict:
+        """``_source_cfg_for``'s body with the path list supplied rather than
+        read from the active scan — the background path plans every scan up
+        front, so it cannot go through ``_active_scan``."""
+        saved = getattr(self, "_active_scan", None)
+        self._active_scan = {n: list(paths)}
+        try:
+            return self._source_cfg_for(n)
+        finally:
+            self._active_scan = saved
+
+    def _source_job_args(self, n: int, paths: list) -> list:
+        """``--source-type`` and friends for one panel of one scan, derived
+        from the very same ``_source_cfg_for`` the in-process run uses, so
+        both paths read the identical files the identical way."""
+        cfg = self._source_cfg_for_paths(n, paths)
+        kind = cfg.get("type")
+        if kind == "hdf5":
+            a = ["--source-type", "hdf5", "--source-path", cfg["path"],
+                 "--dataset", cfg.get("dataset", "frames")]
+        elif kind == "hdf5_stack_glob":
+            a = ["--source-type", "hdf5_stack_glob",
+                 "--source-paths", *cfg["paths"],
+                 "--dataset", cfg.get("dataset", "exchange/data")]
+        else:
+            a = ["--source-type", "tiff_list", "--source-paths", *cfg["paths"]]
+        # "Combine sub-frames", baked into the cfg by the loader. chunk_size
+        # None means "combine everything selected into one frame", which the
+        # CLI spells 0 (see batch_cli's --chunk-size).
+        chunk = cfg.get("chunk_size")
+        a += ["--chunk-size", str(chunk if chunk is not None else 0),
+              "--combine-op", cfg.get("combine_op") or "mean"]
+        return a
+
     def _start_next_scan(self) -> None:
         """Begin the next queued scan, or wind the run up."""
         if self._run_cancelled or not self._scan_queue:
@@ -1956,6 +2356,12 @@ class HydraBatchPage(QtWidgets.QWidget):
         close (picked up by ``MainWindow._stop_all_workers``'s generic
         ``tab.shutdown()`` hook via ``BatchTab.shutdown``)."""
         self._abort_all()
+        # Stops polling/tailing only. Background jobs' screen sessions keep
+        # running — that is the entire point of launching them detached.
+        try:
+            self._job_queue.shutdown()
+        except Exception:
+            pass
 
     # ── GUI state ────────────────────────────────────────────────────
 
