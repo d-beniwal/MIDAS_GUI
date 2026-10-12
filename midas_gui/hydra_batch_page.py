@@ -1892,6 +1892,19 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._prog.setVisible(False)
         self._log.append("Hydra batch integration aborted — a background thread per panel "
                          "may still be winding down. Frames already integrated were saved.")
+        # The combine runs from _maybe_finish_run, which an abort never
+        # reaches: the workers' signals are disconnected and they are
+        # orphaned, so `finished` never arrives. That is the right call --
+        # merging a set whose panels stopped at different frames would
+        # produce a quietly uneven archive -- but it has to be SAID, or a
+        # cancelled run just looks like the combine silently failed.
+        if (getattr(self, "_combine_zarr_chk", None)
+                and self._combine_zarr_chk.isChecked()
+                and "zarr" in (self._fmt.checked_keys() or [])):
+            self._log.append(
+                "[combine] skipped — an aborted scan's panels stop at "
+                "different frames, so there is no complete set to merge. "
+                "Re-run the scan to get its ge1234 archive.")
 
     def shutdown(self):
         """Interrupt + orphan any still-running per-panel workers on app
