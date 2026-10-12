@@ -680,6 +680,12 @@ class FieldAverageWorker(QtCore.QThread):
             self.failed.emit(traceback.format_exc())
 
 
+#: How many leading frames StreamPreviewWorker will step over looking for
+#: a non-blank one. Small on purpose: it exists for detectors that arm a
+#: frame or two (Pixirad arms exactly one), not to hunt through a dark run.
+_PREVIEW_BLANK_SCAN = 8
+
+
 class StreamPreviewWorker(QtCore.QThread):
     """Fetch and dark/bright/background-correct the "stream"-mode preview sum
     off the GUI thread — the file-reading half of what
@@ -728,9 +734,35 @@ class StreamPreviewWorker(QtCore.QThread):
             if total == 0:
                 self.finished.emit(None)
                 return
-            n = min(self._preview_sum_n, total)
+            # Step over leading all-zero frames. A Pixirad arms one frame
+            # before it starts counting, so frame 0 of every .pixi.h5 is
+            # identically zero -- and the preview read it unconditionally,
+            # so the Detector view showed a picture of nothing, autoscaled
+            # to a degenerate ~1e-6 range that looks like corrupt data
+            # rather than a blank frame. (widgets._first_raw_frame_is_blank
+            # already knew this, but only the single-HDF5 sub-frame range
+            # consulted it; a multi-file stream never did.)
+            #
+            # DISPLAY ONLY -- it does not change which frames the run
+            # integrates. That stays opt-in, deliberately: an all-zero frame
+            # is not reliably an arming frame (see DECISIONS 2026-10-08), and
+            # silently dropping a real observation of zero from the DATA
+            # would be a different and much worse bug than a dull preview.
+            # Skipping it from a PICTURE costs nothing either way.
+            #
+            # Bounded: a genuinely dark dataset must not turn one preview
+            # into a scan of the whole stream over NFS.
+            start = 0
+            for probe in range(min(_PREVIEW_BLANK_SCAN, total)):
+                _fid, img = source.get(probe)
+                if np.any(np.asarray(img)):
+                    start = probe
+                    break
+            else:
+                start = 0          # all blank within the bound -- show frame 0
+            n = min(self._preview_sum_n, total - start)
             acc = None
-            for i in range(n):
+            for i in range(start, start + n):
                 _fid, img = source.get(i)
                 img = np.asarray(img, dtype=np.float64)
                 if self._dark is not None or self._bright is not None or self._background is not None:
