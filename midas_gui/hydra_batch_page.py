@@ -359,6 +359,22 @@ class HydraBatchPage(QtWidgets.QWidget):
         integ.body.addLayout(self._q_form)
         integ.body.addLayout(self._tth_form)
         self._on_bin_type_changed()
+        # Same control, same wording as tab_batch.py -- it was simply absent
+        # here, and nothing about four panels prevents it (each panel writes
+        # its own cake into its own ge{n}/ folder, exactly as it writes its
+        # own profile).
+        self._multi_azimuth_chk = QtWidgets.QCheckBox("Multi-azimuth output (cake)")
+        self._multi_azimuth_chk.setToolTip(
+            "Keep every azimuthal (η) sector as a SEPARATE output profile "
+            "instead of collapsing to one mean profile per frame. Reuses "
+            "each panel's own η bin/η range to define the sectors.\n\n"
+            "Off by default — η bin already exists to control "
+            "collapse-weighting resolution; turning this on repurposes that "
+            "same setting to also define real output granularity, so every "
+            "existing run's result size is unaffected unless you opt in.\n\n"
+            "Needed for per-azimuth GSAS-II/texture analysis. Not supported "
+            "together with Q- or 2θ-uniform bins.")
+        integ.body.addWidget(self._multi_azimuth_chk)
         lv.addWidget(integ)
 
         # Corrections (shared)
@@ -450,6 +466,34 @@ class HydraBatchPage(QtWidgets.QWidget):
             "frame any panel did not write is skipped rather than merged "
             "from a partial set, which would be silently short on eta.")
         out.body.addWidget(self._combine_zarr_chk)
+        # Optional beam-monitor CSV columns. Written per panel, beside the
+        # per-panel CSV this page already produces (<froot>_ge{n}_bi.csv) --
+        # the control was simply missing here, so those extra columns could
+        # not be asked for on a Hydra run at all.
+        ion_note = QtWidgets.QLabel(
+            "Ion-chamber CSV — written automatically, one row per frame "
+            "(frame, I0, I, transmission). Also include:")
+        ion_note.setWordWrap(True)
+        ion_note.setStyleSheet(f"color:{S.MUTED};font-size:10px;")
+        out.body.addWidget(ion_note)
+        self._ion_env_chk = QtWidgets.QCheckBox("Ring current / T / P")
+        self._ion_env_chk.setToolTip(
+            "Add storage-ring current (mA), temperature and pressure "
+            "columns.\n"
+            "Older 20-ID files carry placeholder PVs that read NaN for "
+            "temperature and pressure; a column that is NaN on every frame "
+            "is dropped rather than written as a wall of 'nan'.")
+        self._ion_motors_chk = QtWidgets.QCheckBox("Sample motors")
+        self._ion_motors_chk.setToolTip(
+            "Add one column per sample-stage channel.\n"
+            "E hutch has two coexisting sub-configs (HL/HR) with no reliable "
+            "flag for which is in use; both are read, and the inactive one "
+            "is all-NaN and therefore dropped. The data says which was live.")
+        ion_row = QtWidgets.QHBoxLayout(); ion_row.setSpacing(6)
+        ion_row.addWidget(self._ion_env_chk)
+        ion_row.addWidget(self._ion_motors_chk)
+        ion_row.addStretch(1)
+        out.body.addLayout(ion_row)
         lv.addWidget(out)
 
         # Run controls — two independent levels of parallelism:
@@ -1526,6 +1570,16 @@ class HydraBatchPage(QtWidgets.QWidget):
             for w in pick(self):
                 w.setEnabled(u == unit)
 
+    def _ion_csv_extras(self) -> tuple:
+        """Optional beam-monitor CSV column groups, as the tuple
+        ``ion_csv.write_ion_csv`` expects — same accessor, same vocabulary
+        as ``tab_batch.BatchTab._ion_csv_extras``. Collapsed into ONE value
+        rather than a kwarg per checkbox: each extra kwarg has to be
+        threaded through the in-process run AND the as-job argv."""
+        return tuple(k for k, chk in (("env", self._ion_env_chk),
+                                      ("motors", self._ion_motors_chk))
+                     if chk.isChecked())
+
     def _run_mode(self) -> str:
         return self._run_mode_combo.currentData() or "sequential"
 
@@ -1554,6 +1608,16 @@ class HydraBatchPage(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "No data", "Load Hydra panel data first.")
             return
         if self._workers:
+            return
+        # Same guard the single-detector tab applies: the two are not
+        # supported together yet, and discovering that per panel mid-run
+        # (or, worse, in a detached job's log) is no way to find out.
+        if self._multi_azimuth_chk.isChecked() and self._rebin_cfg():
+            QtWidgets.QMessageBox.warning(
+                self, "Incompatible options",
+                f"Multi-azimuth output isn't supported together with "
+                f"{self._rebin_label()}-uniform bins yet. Uncheck "
+                f"Multi-azimuth output, or set Bin type back to Radial.")
             return
         self._orphans = [o for o in self._orphans if o.isRunning()]
         self._run_cancelled = False
@@ -1622,6 +1686,16 @@ class HydraBatchPage(QtWidgets.QWidget):
         if not fmts:
             QtWidgets.QMessageBox.warning(
                 self, "No format", "Check at least one output format first.")
+            return
+        # Same guard the single-detector tab applies: the two are not
+        # supported together yet, and discovering that per panel mid-run
+        # (or, worse, in a detached job's log) is no way to find out.
+        if self._multi_azimuth_chk.isChecked() and self._rebin_cfg():
+            QtWidgets.QMessageBox.warning(
+                self, "Incompatible options",
+                f"Multi-azimuth output isn't supported together with "
+                f"{self._rebin_label()}-uniform bins yet. Uncheck "
+                f"Multi-azimuth output, or set Bin type back to Radial.")
             return
 
         # Resolve every panel's calibration up front — a detached job that
@@ -1892,6 +1966,14 @@ class HydraBatchPage(QtWidgets.QWidget):
         if ome.get("collapse"):
             a += ["--ome-collapse"]
         a += ["--zarr-grouping", self._zarr_grouping.currentData() or "run"]
+        if self._multi_azimuth_chk.isChecked():
+            a += ["--multi-azimuth"]
+        # Same reasoning as the flags above: the job cannot see the
+        # checkboxes, so an omitted flag would quietly drop the optional
+        # columns on this path only and the two run modes would disagree.
+        extras = self._ion_csv_extras()
+        if extras:
+            a += ["--ion-csv-extras", ",".join(extras)]
         if self._corr_widget.polar_check.isChecked():
             a += ["--polarization",
                   "--pol-fraction", str(self._corr_widget.pol_fraction.value()),
@@ -2187,6 +2269,8 @@ class HydraBatchPage(QtWidgets.QWidget):
             dark=dark, bright=bright, background=background, bright_mode=bright_mode,
             weighted=weighted, context=context, im_trans=card.resolved_im_trans(),
             run_mode=self._frame_run_mode.currentData(), n_workers=self._n_workers.value(),
+            multi_azimuth=self._multi_azimuth_chk.isChecked(),
+            ion_csv_extras=list(self._ion_csv_extras()),
             zarr_grouping=self._zarr_grouping.currentData() or "run")
         worker.progress.connect(lambda done, total, n=n: self._cards[n].set_progress(done, total))
         worker.frame_done.connect(
@@ -2455,6 +2539,9 @@ class HydraBatchPage(QtWidgets.QWidget):
             "zarr_grouping": self._zarr_grouping,
             "lab_axes_chk": self._lab_axes_chk,
             "azim": self._azim, "var_check": self._var_check, "err_model": self._err_model,
+            "multi_azimuth": self._multi_azimuth_chk,
+            "ion_env_chk": self._ion_env_chk,
+            "ion_motors_chk": self._ion_motors_chk,
             "bin_type": self._bin_type, "q_min": self._q_min, "q_max": self._q_max,
             "tth_min": self._tth_min, "tth_max": self._tth_max,
             "tth_bin": self._tth_bin,

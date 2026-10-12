@@ -389,6 +389,27 @@ def test_the_launched_argvs_carry_each_panels_own_caking_and_calibration(
     page.set_state({"fields": {"q_check": True, "bin_type": "2θ"}})
     assert page._rebin_unit() == "2th"
 
+    # Multi-azimuth and the ion-CSV extras were absent from this page
+    # entirely, so they could not be asked for on a Hydra run at all.
+    page._bin_type.setCurrentIndex(0)            # Radial (see the guard below)
+    page._multi_azimuth_chk.setChecked(True)
+    page._ion_env_chk.setChecked(True)
+    page._ion_motors_chk.setChecked(True)
+    captured.clear()
+    page._run_as_job()
+    a3 = batch_cli._build_arg_parser().parse_args(captured["argv"][3:])
+    assert a3.multi_azimuth is True
+    assert a3.ion_csv_extras == "env,motors"
+
+    # ...and the same incompatibility the single-detector tab enforces, so
+    # it is caught before launch rather than in a detached job's log.
+    page._bin_type.setCurrentIndex(1)            # Q
+    captured.clear()
+    dialogs.clear()
+    page._run_as_job()
+    assert not captured, "multi-azimuth + Q-uniform should not have launched"
+    assert any("Incompatible" in str(d[1]) for d in dialogs), dialogs
+
     combine = hydra_combine_cli._build_arg_parser().parse_args(steps[2][3:])
     assert combine.panels == ["ge1", "ge2"], (
         "the combine must name only the panels that actually ran — naming a "
