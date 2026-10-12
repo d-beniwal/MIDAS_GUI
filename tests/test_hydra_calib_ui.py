@@ -291,6 +291,59 @@ def test_hydra_calib_page_wiring_and_pick_isolation(app, fixture_available):
     assert card2._seed_en_bc.isChecked() is False
     assert card2._seed_btn.styleSheet() == style_before
 
+    # Refine "Limits": always-on crystalline tolerance windows, matching
+    # tab_calibrate.CalibrationTab's own _LIMIT_ROWS_XTAL rows — previously
+    # entirely absent from this page (see .context/DECISIONS.md).
+    from midas_gui.calib import tol_defaults
+    assert set(page._limit_widgets) == {"Lsd", "BC_y", "ty", "wavelength_A", "distortion"}
+    d = tol_defaults()
+    spin, combo = page._limit_widgets["Lsd"]
+    assert spin.value() == pytest.approx(d["tolLsd"] / 1000.0)
+    assert combo.currentText() == "mm"
+    spin, combo = page._limit_widgets["BC_y"]
+    assert spin.value() == pytest.approx(d["tolBC"]) and combo.currentText() == "px"
+    # At defaults, every panel's run stays on the plain (unbounded-override)
+    # path — only an actual edit should force the bounded one.
+    assert page._crystalline_tols(page._cards[1]) is None
+    page._limit_widgets["Lsd"][0].setValue(5.0)   # mm, half the backend default
+    page._limit_widgets["Lsd"][1].setCurrentText("mm")
+    tols = page._crystalline_tols(page._cards[1])
+    assert tols is not None and tols["tolLsd"] == pytest.approx(5000.0)
+    # Centred on the PANEL's own seed, not a page-wide one: BC_y uses a "%"
+    # window here, so two panels with different seed BCs get different tols.
+    page._limit_widgets["BC_y"][1].setCurrentText("%")
+    page._limit_widgets["BC_y"][0].setValue(10.0)   # 10%
+    page._cards[1]._seed_bcy.setValue(100.0)
+    page._cards[2]._seed_bcy.setValue(200.0)
+    t1 = page._crystalline_tols(page._cards[1])["tolBC"]
+    t2 = page._crystalline_tols(page._cards[2])["tolBC"]
+    assert t1 == pytest.approx(10.0) and t2 == pytest.approx(20.0)
+    cfg = page._build_cfg(page._cards[1])
+    assert cfg["tols"] == page._crystalline_tols(page._cards[1])
+
+    # Round-trips through project get_state/set_state like any other field.
+    state = page.get_state()
+    assert {"limit_Lsd_val", "limit_Lsd_unit", "limit_BC_y_val"} <= set(state["fields"])
+    page2 = HydraCalibrationPage()
+    page2.set_state(state)
+    assert page2._limit_widgets["Lsd"][0].value() == pytest.approx(5.0)
+    assert page2._limit_widgets["BC_y"][1].currentText() == "%"
+
+    # Positioning: the per-panel card stack (Transforms + Initial seed) sits
+    # before Refine parameters in the scrollable column — mirroring where
+    # tab_calibrate.CalibrationTab's own "Initial seed" card sits, not after
+    # Run (see .context/DECISIONS.md). Also confirms Working dir/Run/Save
+    # are NOT in the scrollable column at all (they're in the fixed footer).
+    scroll = page.findChild(QtWidgets.QScrollArea)
+    widgets = [scroll.widget().layout().itemAt(i).widget()
+              for i in range(scroll.widget().layout().count())]
+    widgets = [w for w in widgets if w is not None]
+    refine_card = next(w for w in widgets
+                       if isinstance(w, QtWidgets.QGroupBox)
+                       and w.title().startswith("Refine parameters"))
+    assert widgets.index(page._card_stack) < widgets.index(refine_card)
+    assert page._run_btn not in widgets and page._out_ed not in widgets
+
 
 def test_hydra_calib_run_orchestration_and_results_switching(app, fixture_available, tmp_path, monkeypatch):
     """Sequential run: independent per-panel BCs. Parallel run: all 4
@@ -402,6 +455,9 @@ def test_hydra_calib_run_orchestration_and_results_switching(app, fixture_availa
     scratches = {n: Path(page._last_cfgs[n]["scratch_dir"]) for n in (1, 2, 3, 4)}
     assert len(set(scratches.values())) == 4
     assert len({d.parent for d in scratches.values()}) == 1
+    # "tols" rides along on every panel's cfg (None at backend defaults,
+    # which this run never touched).
+    assert all(page._last_cfgs[n]["tols"] is None for n in (1, 2, 3, 4))
     assert all(d.parent.parent == work / SCRATCH_DIRNAME
                for d in scratches.values())
 
