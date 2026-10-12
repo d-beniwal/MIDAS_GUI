@@ -695,12 +695,42 @@ def test_encoder_jitter_between_panels_is_not_a_mismatch(tmp_path):
 
 
 def test_a_genuinely_different_rotation_is_still_refused(tmp_path):
-    om = np.linspace(0.0, 6.3, NFRAMES)
+    """Offset by more than one step — the panels are not on the same
+    frames. (The threshold is the STEP, so the offset has to be stated
+    relative to it, not as an absolute angle.)"""
+    step = 0.064
+    om = np.arange(NFRAMES, dtype=float) * step
     paths = {p: str(_panel_zarr(tmp_path / f"s_000001.{p}.zarr.zip", p,
-                                omegas=om + (0.5 if p == "ge3" else 0.0)))
+                                omegas=om + (step * 3 if p == "ge3" else 0.0)))
              for p in PANELS}
     with pytest.raises(ValueError) as e:
         combine_panel_zarrs(paths, tmp_path / "m.zarr.zip")
     msg = str(e.value)
-    assert "ge3" in msg and "0.5" in msg, msg
-    assert "different scans" in msg, "say what the disagreement means"
+    assert "ge3" in msg and "not the same frames" in msg, msg
+
+
+def test_the_tolerance_scales_with_the_omega_step(tmp_path):
+    """Measured on a real set: ge3/ge4 matched ge1 exactly and ge2 differed
+    on ONE frame of 64 by 0.0321 deg against a 0.064 deg step — half a
+    step, mean 0.0005. An encoder reading, not a different scan, and a
+    fixed 1e-3 deg tolerance rejected the whole four-panel set over it."""
+    step = 0.064
+    om = np.arange(NFRAMES, dtype=float) * step
+    glitch = om.copy()
+    glitch[1] += step / 2.0
+    paths = {p: str(_panel_zarr(tmp_path / f"s_000001.{p}.zarr.zip", p,
+                                omegas=glitch if p == "ge2" else om))
+             for p in PANELS}
+    assert Path(combine_panel_zarrs(paths, tmp_path / "m.zarr.zip")).is_file()
+
+
+def test_a_whole_frame_of_offset_still_fails(tmp_path):
+    """Below one step the panels describe the same frames; a step or more
+    means they are offset by a frame, which is a real problem."""
+    step = 0.064
+    om = np.arange(NFRAMES, dtype=float) * step
+    paths = {p: str(_panel_zarr(tmp_path / f"s_000001.{p}.zarr.zip", p,
+                                omegas=om + (step * 1.5 if p == "ge2" else 0)))
+             for p in PANELS}
+    with pytest.raises(ValueError, match="not the same frames"):
+        combine_panel_zarrs(paths, tmp_path / "m.zarr.zip")
