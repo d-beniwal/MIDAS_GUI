@@ -629,3 +629,48 @@ def test_an_empty_panel_archive_is_named_not_raised_as_a_bare_keyerror():
 def test_a_complete_set_is_not_slowed_down_by_the_check(panels, tmp_path):
     out = combine_panel_zarrs(panels, tmp_path / "m.zarr.zip")
     assert Path(out).is_file()
+
+
+# ── "one zarr for the whole scan" names every panel the same ───────────
+# _run_out_stem names a run-grouped archive from the FROOT, which by
+# definition has the panel token split off -- so all four panels write the
+# same basename into their own ge{n}/zarr/. Requiring ".ge1." in the name
+# found nothing, and the combine said "no frame had an archive from every
+# panel" about a run that had four.
+
+def test_a_run_grouped_set_is_matched_by_shared_name(tmp_path):
+    from midas_gui.hydra_zarr_combine import find_panel_zarr_sets
+    for p in PANELS:
+        d = tmp_path / p / "zarr"
+        d.mkdir(parents=True)
+        (d / "4130_D_load_step_0.ave.zarr.zip").touch()
+    got = find_panel_zarr_sets(tmp_path, PANELS)
+    assert len(got) == 1 and sorted(got[0]) == PANELS
+
+
+def test_a_per_frame_set_is_still_matched_by_substitution(tmp_path):
+    from midas_gui.hydra_zarr_combine import find_panel_zarr_sets
+    for p in PANELS:
+        d = tmp_path / p / "zarr"
+        d.mkdir(parents=True)
+        (d / f"scan_005122.{p}.ave.zarr.zip").touch()
+    got = find_panel_zarr_sets(tmp_path, PANELS)
+    assert len(got) == 1 and sorted(got[0]) == PANELS
+
+
+def test_an_archive_naming_another_panel_does_not_lead_a_set(tmp_path):
+    """A stray ...ge3... in ge1/zarr/ is not ge1's to match siblings from."""
+    from midas_gui.hydra_zarr_combine import find_panel_zarr_sets
+    for p in PANELS:
+        (tmp_path / p / "zarr").mkdir(parents=True)
+    (tmp_path / "ge1" / "zarr" / "scan_005122.ge3.ave.zarr.zip").touch()
+    assert find_panel_zarr_sets(tmp_path, PANELS) == []
+
+
+def test_the_shared_name_rule_reads_the_name_not_the_folder(tmp_path):
+    """Every archive lives under ge{n}/zarr/, so a whole-path test would
+    see a token on all of them and the shared-name scheme could never be
+    recognised."""
+    from midas_gui.hydra_zarr_combine import panel_for_name
+    assert panel_for_name("4130_D_load_step_0.ave.zarr.zip") is None
+    assert panel_for_name("scan_005122.ge2.ave.zarr.zip") == 2

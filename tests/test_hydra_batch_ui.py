@@ -83,7 +83,7 @@ def _load_qt():
                      monitor_file=None,
                      drift_traj=None, parent=None, dark=None, bright=None, background=None,
                      bright_mode="divide", weighted=True, context=None, im_trans=(),
-                     run_mode="sequential", n_workers=1):
+                     run_mode="sequential", n_workers=1, zarr_grouping="frame"):
             super().__init__(parent)
             self.out_dir = out_dir
             _FakeBatchWorker.calls.append(out_dir)

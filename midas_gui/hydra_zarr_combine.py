@@ -138,16 +138,44 @@ def find_panel_zarr_sets(out_dir, panels) -> list:
     tok = f".{first}."
     sets = []
     for a in sorted(first_dir.glob("*.zarr.zip")):
-        if tok not in a.name:
-            continue
+        # Two naming schemes reach this, and both are legitimate:
+        #
+        #   per-frame / per-file grouping -> <froot>_<NNNNNN>.ge1.ave.zarr.zip
+        #       the panel token is IN the name, and a sibling is a
+        #       substitution of it.
+        #   "one zarr for the whole scan"  -> <froot>.ave.zarr.zip
+        #       _run_out_stem names it from the froot, which by definition
+        #       has the panel token split off, so all four panels write the
+        #       SAME basename into their own ge{n}/zarr/. Requiring the
+        #       token here found nothing and the combine reported "no frame
+        #       had an archive from every panel" on a run that had four.
+        if tok in a.name:
+            sibling = lambda p, _n=a.name: _n.replace(tok, f".{p}.")
+        elif panel_for_name(a.name) is None:
+            sibling = lambda p, _n=a.name: _n
+        else:
+            continue            # names another panel; not ge1's to lead
         group = {first: str(a)}
         for p in panels[1:]:
-            cand = root / p / "zarr" / a.name.replace(tok, f".{p}.")
+            cand = root / p / "zarr" / sibling(p)
             if cand.is_file():
                 group[p] = str(cand)
         if len(group) == len(panels):
             sets.append(group)
     return sets
+
+
+def panel_for_name(name: str):
+    """The ge<n> a BARE FILENAME claims, or ``None``.
+
+    Deliberately not ``hydra.panel_for_file``, which reads the whole path:
+    here the question is whether the NAME carries a token, with the folder
+    (always ``ge{n}/zarr/``) excluded -- otherwise every archive would look
+    like it named a panel and the shared-name scheme could never be
+    recognised.
+    """
+    hits = re.findall(r"ge\s*([1-4])\b", name, flags=re.IGNORECASE)
+    return int(hits[-1]) if hits else None
 
 
 def _check(condition: bool, msg: str) -> None:
