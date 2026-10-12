@@ -369,6 +369,30 @@ class HydraBatchPage(QtWidgets.QWidget):
         out.body.addLayout(S.Form().row(("Folder:", orow)))
         self._fmt = OutputFormatSelector()
         out.body.addWidget(self._fmt)
+        # How many integrated frames share one archive. The Hydra page never
+        # passed this, so BatchWorker fell through to its "frame" default
+        # and wrote ONE .zarr.zip per frame: a 834-frame scan came out as
+        # 834 archives per panel, which is both not what anyone wants and
+        # slow -- every archive is opened, written and closed on its own,
+        # and the four-panel combine then has 834 sets to merge instead of
+        # one. Reported as "I would like these frames saved into 1 zarr
+        # file ... the job might be stuck on the first one".
+        self._zarr_grouping = _NoScrollComboBox()
+        for _label, _key in (("One zarr for the whole scan", "run"),
+                             ("One zarr per source file", "file"),
+                             ("One zarr per output frame", "frame")):
+            self._zarr_grouping.addItem(_label, _key)
+        self._zarr_grouping.setToolTip(
+            "How many integrated frames share one .zarr.zip.\n\n"
+            "Per source file groups by ROTATION — the same unit omega is "
+            "measured from, so one HDF5 sub-frame stack becomes one "
+            "archive.\n\n"
+            "Per output frame is one archive per frame: rarely wanted on a "
+            "multi-frame scan, and the reason a 834-frame run looked stuck.")
+        # "run" first and therefore the default, unlike the single-detector
+        # tab: a Hydra scan is a rotation and its frames belong together,
+        # and the four-panel combine wants one archive per panel to merge.
+        out.body.addLayout(S.Form().row(("Zarr grouping:", self._zarr_grouping)))
         self._combine_zarr_chk = QtWidgets.QCheckBox(
             "Combine panels into one zarr (eta-concatenated)")
         self._combine_zarr_chk.setChecked(True)
@@ -1602,7 +1626,8 @@ class HydraBatchPage(QtWidgets.QWidget):
             frame_range=frame_range, monitor_file=monitor_file, parent=self,
             dark=dark, bright=bright, background=background, bright_mode=bright_mode,
             weighted=weighted, context=context, im_trans=card.resolved_im_trans(),
-            run_mode=self._frame_run_mode.currentData(), n_workers=self._n_workers.value())
+            run_mode=self._frame_run_mode.currentData(), n_workers=self._n_workers.value(),
+            zarr_grouping=self._zarr_grouping.currentData() or "run")
         worker.progress.connect(lambda done, total, n=n: self._cards[n].set_progress(done, total))
         worker.frame_done.connect(
             lambda fid, r_ax, prof, sigma, n=n: self._on_frame(n, fid, r_ax, prof, sigma))
@@ -1848,6 +1873,7 @@ class HydraBatchPage(QtWidgets.QWidget):
             "kernel": self._kernel, "grid_chk": self._grid_chk,
             "ome_start": self._ome_start, "ome_step": self._ome_step,
             "ome_collapse": self._ome_collapse, "ome_channel": self._ome_channel,
+            "zarr_grouping": self._zarr_grouping,
             "lab_axes_chk": self._lab_axes_chk,
             "azim": self._azim, "var_check": self._var_check, "err_model": self._err_model,
             "q_check": self._q_check, "q_min": self._q_min, "q_max": self._q_max,
