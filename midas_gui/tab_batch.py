@@ -1933,21 +1933,36 @@ class BatchTab(QtWidgets.QWidget):
         self._view_tabs.addTab(self._waterfall, "Waterfall")
         self._view_tabs.addTab(self._stack_view, "Stacked profiles")
         self._view_tabs.addTab(self._cake_stack_view, "Eta-R cakes")
-        # Logs tab: background-job rows (JobQueuePanel) above one shared log
-        # surface, used by both the in-process run and the currently-focused
+        # Background-job rows (JobQueuePanel) above one shared log surface,
+        # used by both the in-process run and the currently-focused
         # background job's tailed output.
+        #
+        # PERMANENTLY VISIBLE beneath the view tabs rather than being a
+        # "Logs" tab of its own (which is what this was until 2026-10-12).
+        # A tab hides exactly the thing you want in view while watching a
+        # run: the log is where every warning, skip and failure is reported,
+        # and a background job's progress row is only actionable — Reattach,
+        # Cancel — if you can see it without first leaving the plot you are
+        # looking at. The Hydra page has always laid it out this way; this
+        # makes the two pages match.
         self._log = LogPanel()
         self._log.setMaximumHeight(16_777_215)   # let the layout size it
         self._job_queue = JobQueuePanel(self._log, on_job_done=self._on_job_done)
-        self._logs_tab = QtWidgets.QWidget()
-        logs_tab_layout = QtWidgets.QVBoxLayout(self._logs_tab)
-        logs_tab_layout.setContentsMargins(4, 4, 4, 4)
-        logs_tab_layout.setSpacing(4)
-        logs_tab_layout.addWidget(self._job_queue)
-        logs_tab_layout.addWidget(self._log, 1)
-        self._view_tabs.addTab(self._logs_tab, "Logs")
         self._view_tabs.setMinimumWidth(320)
-        split.addWidget(self._view_tabs)
+        right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        right.addWidget(self._view_tabs)
+        log_host = QtWidgets.QWidget()
+        log_box = QtWidgets.QVBoxLayout(log_host)
+        log_box.setContentsMargins(0, 0, 0, 0)
+        log_box.setSpacing(4)
+        log_box.addWidget(self._job_queue)
+        log_box.addWidget(self._log, 1)
+        right.addWidget(log_host)
+        # A splitter, not a fixed layout: the log is permanent but its share
+        # is the user's call — dragged tall to read a traceback, or down to
+        # a sliver while watching the plots.
+        right.setStretchFactor(0, 4); right.setStretchFactor(1, 1)
+        split.addWidget(right)
         split.setStretchFactor(0, 0); split.setStretchFactor(1, 0); split.setStretchFactor(2, 1)
         split.setSizes([286, 361, 950])
 
@@ -2560,7 +2575,7 @@ class BatchTab(QtWidgets.QWidget):
             out_dir=str(targets[0][0]), extra_argvs=argvs[1:])
         if job is not None:
             self._log.append(f"[batch] Launched background job: {job.session} "
-                             f"(see the Logs tab)")
+                             f"(see the Background jobs panel below)")
             if len(targets) > 1:
                 self._log.append(
                     f"[batch] Selection spans {len(targets)} source folders — "
@@ -2568,7 +2583,8 @@ class BatchTab(QtWidgets.QWidget):
                     f"each to its own output dir:")
                 for gd, gp in targets:
                     self._log.append(f"[batch]     {len(gp):>4} file(s) → {gd}")
-            self._view_tabs.setCurrentWidget(self._logs_tab)
+            # No tab to switch to any more — the job row and the log are
+            # both permanently visible below the view tabs.
 
     def _abort(self):
         """Stop the run. First ask the worker to stop cooperatively (clean finish
