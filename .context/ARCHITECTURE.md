@@ -199,3 +199,63 @@ becomes a placeholder; signal wiring guarded by `_connect`.
   `development_history.md`, `implementation_details.md`,
   `pdf_calculation_explained.md`, `config_gui.md` — each with a `.pdf` rebuilt
   via pandoc + headless-Chrome.
+
+# Where Batch Integrate writes, and what it never touches
+
+Verified empirically (2026-10-12), not just read off the code: every
+source open in `helpers`/`hydra` is `h5py.File(..., "r")`, the one
+append-mode HDF5 write (`workers.stamp_h5_provenance`) reopens a file
+`midas_integrate_v2.write_h5` has just written, and a planned run's output
+directories were asserted to lie outside the raw tree with the raw tree's
+sizes and mtimes unchanged.
+
+**Raw data is read-only to this app.** Nothing in the batch path writes
+into, beside, or under the directory holding the frame files.
+
+### The output root is a sibling of the raw tree
+
+    /data/connolly_oct26/...          <- raw, never written to
+    /data/connolly_oct26_bc/...       <- all output
+
+`<parent>_bc` comes from `helpers.suggest_integration_output_dir` /
+`suggest_panel_base_output_dir` (the `bc_path_parts` convention).
+
+### Hydra Batch Integrate, one scan
+
+`<out>` is the **Output box**, which is authoritative for a single scan.
+Each panel appends its own `ge{n}/`:
+
+    <out>/                                  e.g. ..._bc/4130_D_load_step_0/
+      ge1/
+        csv/     <froot>_<NNNNNN>.ge1.csv           per-frame lineouts
+        zarr/    <froot>.<lo>_<hi>.ave.zarr.zip     grouping "run" (default)
+                 <froot>_<NNNNNN>.ge1.ave.zarr.zip  grouping "file"
+                 ..._.ge1.frame_<i>_<i>.ave.zarr.zip  grouping "frame"
+        h5/      <froot>_<NNNNNN>.ge1.h5
+      ge2/ ge3/ ge4/        same shape
+      <froot>_ge{n}_bi.csv  per-panel beam-monitor CSV (one level up)
+      <froot>.ge1234.ave.zarr.zip   the four-panel combine, at scan level
+
+The combined archive is a property of the RUN, not of a detector, so it
+sits beside the `ge{n}/` folders rather than inside one.
+
+### Several scans
+
+One output directory per source folder, named by the convention and
+guaranteed distinct. With the Output box set, the box is the root they fan
+out beneath — EXCEPT when it holds a value one of the groups already
+derives, which is a stale autofill rather than a chosen root (that
+distinction is what stops `load_step_1`'s output nesting inside
+`load_step_0`). The whole fan-out is logged before the first worker
+starts; nothing is written until past that point.
+
+### Things worth knowing
+
+- The Output box is **checked against the loaded data** and flags a
+  mismatch in orange. It is authoritative, so a stale value silently
+  redirects output into the previous dataset's folder — this happened.
+- **Zarr grouping** defaults to "One zarr for the whole scan". Per-frame
+  grouping on an 834-frame scan writes 834 archives per panel and is
+  usually a mistake.
+- The **combine runs only when all four panels of a scan finish**. An
+  aborted scan produces no `ge1234` archive, by design, and says so.
