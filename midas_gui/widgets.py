@@ -7020,21 +7020,51 @@ class StackedProfileViewer(QtWidgets.QWidget):
             # towards the top; log10(I) + offset keeps every frame the same
             # distance apart, which is the whole point of a stack.
             yd = self._y_display(p) + i * spacing
-            curve.setData(xd, yd)
-            if i < len(self._labels) and xd.size:
-                self._labels[i].setPos(float(xd[0]), float(yd[0]))
             # Bounds in the coordinates the ViewBox actually uses: with log x
             # that is log10(x), so setLimits gets log-space numbers and does
             # not pin the view to the wrong decade.
             xb = np.log10(np.where(xd > 0, xd, np.nan)) if self._logx_chk.isChecked() else xd
             fin = np.isfinite(xb) & np.isfinite(yd)
             if fin.any():
+                curve.setData(xd, yd)
                 xmins.append(float(xb[fin].min())); xmaxs.append(float(xb[fin].max()))
                 ymins.append(float(yd[fin].min())); ymaxs.append(float(yd[fin].max()))
+            else:
+                # Nothing finite anywhere in this profile — an all
+                # non-positive frame under a log y scale, which _y_display
+                # maps to NaN on purpose. Handing that to the curve leaves
+                # the PlotDataItem's internal ScatterPlotItem reporting
+                # nanmin/nanmax bounds, and ONE such curve is enough to make
+                # a later autoRange resolve to [nan, nan] however healthy
+                # every other curve is. There is nothing to draw either way.
+                curve.setData([], [])
+            if i < len(self._labels) and fin.any():
+                j = int(np.argmax(fin))     # first point that is actually on screen
+                self._labels[i].setPos(float(xd[j]), float(yd[j]))
         if xmins:
-            self._plot.autoRange()
             self._data_bounds = (min(xmins), max(xmaxs), min(ymins), max(ymaxs))
+            self._show_finite_range(*self._data_bounds)
             self._apply_view_limits(*self._data_bounds)
+
+    def _show_finite_range(self, xmin, xmax, ymin, ymax):
+        """Frame the finite data directly, instead of via ``autoRange``.
+
+        ``autoRange`` re-derives the extent by unioning every item in the
+        plot, which is both redundant — the caller has just measured it from
+        the finite points — and fragile, because an item whose bounds are
+        NaN poisons the union and ``ViewBox.setRange`` then raises
+        ``Cannot set range [nan, nan]``. Setting the measured numbers asks
+        pyqtgraph to rediscover nothing.
+        """
+        if xmax <= xmin:
+            xmax = xmin + 1.0
+        if ymax <= ymin:
+            ymax = ymin + 1.0
+        xpad = 0.05 * (xmax - xmin)
+        ypad = 0.05 * (ymax - ymin)
+        self._plot.getPlotItem().getViewBox().setRange(
+            xRange=(xmin - xpad, xmax + xpad),
+            yRange=(ymin - ypad, ymax + ypad), padding=0)
 
     def _apply_view_limits(self, xmin, xmax, ymin, ymax):
         """Bound pan/zoom to the stacked profiles' combined data (+ margin),
