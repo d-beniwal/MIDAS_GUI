@@ -629,10 +629,36 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._set_output_dir_suggested(suggested)
 
     def _maybe_autofill_output_dir(self):
-        """Replace a path we filled in; never one the user chose."""
+        """Replace a path we filled in; never one the user chose.
+
+        With one exception, learned the hard way twice. A project saved
+        BEFORE _autofilled_out was persisted restores a box with no marker,
+        so the box looks hand-typed and the autofill backs off forever --
+        and because the box is authoritative for a single scan, the run
+        then writes this dataset's output into the previous dataset's
+        folder. That is how APS_4130_C_load_step_0 came to hold
+        4130_D_load_step_0's ge1..ge4.
+
+        So when there is NO marker at all (only a legacy restore produces
+        that; a real edit in this session always sets one) and the box
+        disagrees with what the loaded data implies, the box is replaced
+        and the swap is logged. A path that matches the data is left alone,
+        and so is any box in a session where the marker exists.
+        """
         current = self._out_ed.text().strip()
-        if current and current != (getattr(self, "_autofilled_out", None) or ""):
-            return
+        marker = getattr(self, "_autofilled_out", None)
+        if current and current != (marker or ""):
+            if marker is not None:
+                return                      # a choice made in this session
+            suggested = self._suggest_output_dir()
+            if suggested is None or Path(current).name == Path(str(suggested)).name:
+                return
+            self._log.append(
+                f"[hydra batch] Output folder '{Path(current).name}' does not "
+                f"match the loaded data — replaced with "
+                f"'{Path(str(suggested)).name}'. (A project saved before this "
+                f"was recorded cannot say whether the old path was chosen or "
+                f"auto-filled; re-type it if it was deliberate.)")
         suggested = self._suggest_output_dir()
         if suggested is None or str(suggested) == current:
             return
