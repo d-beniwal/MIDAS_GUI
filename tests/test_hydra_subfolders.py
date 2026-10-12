@@ -295,3 +295,76 @@ def test_a_single_file_pick_still_reads_as_before(app, tmp_path):
     page._loader.set_path(picked[0])
     txt = page._loader._info_lbl.text()
     assert "3 frame(s)" in txt and "files" not in txt, txt
+
+
+# ── a stale Output box silently redirects the run ──────────────────────
+# "the run produced APS_4130_C_load_step_0 even though I specified
+#  .../ge1/4130_D_load_step_0/4130_D_load_step_0_005120.ge1.h5"
+#
+# The box is AUTHORITATIVE for a single scan, so a leftover value does not
+# merely look wrong — it writes this dataset's output into another's
+# folder. _autofilled_out (the "did WE fill this in" marker) was a plain
+# attribute while out_ed was persisted, so after any restore the box read
+# as a deliberate choice and _maybe_autofill_output_dir returned early
+# forever.
+
+def _one_scan(tmp_path, step):
+    h5py = pytest.importorskip("h5py")
+    import numpy as np
+    for p in (1, 2, 3, 4):
+        d = Path(tmp_path) / f"ge{p}" / step
+        d.mkdir(parents=True, exist_ok=True)
+        with h5py.File(d / f"{step}_005120.ge{p}.h5", "w") as h:
+            h.create_dataset("exchange/data", data=np.zeros((2, 4, 4), "f4"))
+    return str(Path(tmp_path) / "ge1" / step / f"{step}_005120.ge1.h5")
+
+
+def test_the_autofill_marker_survives_a_restore(app, tmp_path):
+    from midas_gui.hydra_batch_page import HydraBatchPage
+    old = _one_scan(tmp_path, "APS_4130_C_load_step_0")
+    new = _one_scan(tmp_path, "4130_D_load_step_0")
+    a = HydraBatchPage()
+    a._loader.set_path(old)
+    assert "APS_4130_C_load_step_0" in a._out_ed.text()
+    state = a.get_state()
+    assert "autofilled_out" in state, "the marker is not a widget"
+
+    b = HydraBatchPage()
+    b.set_state(state)
+    b._loader.set_path(new)
+    assert Path(b._out_ed.text()).name == "4130_D_load_step_0", \
+        "a restored autofill must still re-fill for new data"
+
+
+def test_a_hand_typed_box_is_respected_but_flagged(app, tmp_path):
+    """A path the user chose is never overwritten — so the warning is the
+    only thing standing between them and output in the wrong dataset."""
+    from midas_gui.hydra_batch_page import HydraBatchPage
+    new = _one_scan(tmp_path, "4130_D_load_step_0")
+    page = HydraBatchPage()
+    page._out_ed.setText("/somewhere/APS_4130_C_load_step_0")
+    page._loader.set_path(new)
+    assert page._out_ed.text() == "/somewhere/APS_4130_C_load_step_0"
+    assert not page._out_mismatch_lbl.isHidden()
+    txt = page._out_mismatch_lbl.text()
+    assert "APS_4130_C_load_step_0" in txt and "4130_D_load_step_0" in txt
+
+
+def test_clearing_the_box_re_fills_it_and_clears_the_warning(app, tmp_path):
+    from midas_gui.hydra_batch_page import HydraBatchPage
+    new = _one_scan(tmp_path, "4130_D_load_step_0")
+    page = HydraBatchPage()
+    page._out_ed.setText("/somewhere/APS_4130_C_load_step_0")
+    page._loader.set_path(new)
+    page._out_ed.setText("")
+    page._loader.set_path(new)
+    assert Path(page._out_ed.text()).name == "4130_D_load_step_0"
+    assert page._out_mismatch_lbl.isHidden()
+
+
+def test_a_matching_box_says_nothing(app, tmp_path):
+    from midas_gui.hydra_batch_page import HydraBatchPage
+    new = _one_scan(tmp_path, "4130_D_load_step_0")
+    page = HydraBatchPage()
+    page._loader.set_path(new)
+    assert page._out_mismatch_lbl.isHidden()

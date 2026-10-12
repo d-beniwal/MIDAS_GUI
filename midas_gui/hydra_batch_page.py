@@ -367,6 +367,15 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._suggest_out_btn.clicked.connect(self._apply_suggested_output_dir)
         orow.addWidget(self._suggest_out_btn)
         out.body.addLayout(S.Form().row(("Folder:", orow)))
+        # The box is AUTHORITATIVE for a single scan, so a stale one does
+        # not merely look wrong -- it silently writes this dataset's output
+        # into another's folder. Loading 4130_D_load_step_0 with the box
+        # still on APS_4130_C_load_step_0 did exactly that.
+        self._out_mismatch_lbl = QtWidgets.QLabel("")
+        self._out_mismatch_lbl.setWordWrap(True)
+        self._out_mismatch_lbl.setStyleSheet("color:#FFA500;font-size:10px")
+        self._out_mismatch_lbl.setVisible(False)
+        out.body.addWidget(self._out_mismatch_lbl)
         self._fmt = OutputFormatSelector()
         out.body.addWidget(self._fmt)
         # How many integrated frames share one archive. The Hydra page never
@@ -579,6 +588,7 @@ class HydraBatchPage(QtWidgets.QWidget):
     def _on_siblings_changed(self, siblings: dict):
         self._toolbar.set_available(siblings.keys())
         self._populate_omega_channels()
+        self._refresh_output_mismatch()
         self.invalidate_composite()      # different panels / different files
         self._maybe_autofill_output_dir()
         self._refresh_active_detector_preview()
@@ -605,6 +615,7 @@ class HydraBatchPage(QtWidgets.QWidget):
     def _set_output_dir_suggested(self, suggested) -> None:
         self._out_ed.setText(str(suggested))
         self._autofilled_out = str(suggested)
+        self._refresh_output_mismatch()
         reason = check_output_dir_writable(suggested)
         if reason:
             self._log.append(f"[hydra] Warning: {reason}")
@@ -626,6 +637,28 @@ class HydraBatchPage(QtWidgets.QWidget):
         if suggested is None or str(suggested) == current:
             return
         self._set_output_dir_suggested(suggested)
+
+    def _refresh_output_mismatch(self) -> None:
+        """Say so when the Output box does not describe the loaded data.
+
+        Checked regardless of how the box got its value -- a restored
+        project, a hand-typed path, or an autofill left over from the last
+        dataset all land the same way, and the box being authoritative for
+        a single scan means any of them silently redirects the output.
+        """
+        lbl = getattr(self, "_out_mismatch_lbl", None)
+        if lbl is None:
+            return
+        current = self._out_ed.text().strip()
+        suggested = self._suggest_output_dir()
+        bad = bool(current and suggested
+                   and Path(current).name != Path(str(suggested)).name)
+        lbl.setVisible(bad)
+        if bad:
+            lbl.setText(
+                f"⚠ Output folder is named for '{Path(current).name}' but "
+                f"the loaded data implies '{Path(str(suggested)).name}'. "
+                f"The run writes where this box says — clear it to re-fill.")
 
     @staticmethod
     def _panel_num(key) -> "Optional[int]":
@@ -1878,6 +1911,7 @@ class HydraBatchPage(QtWidgets.QWidget):
             "azim": self._azim, "var_check": self._var_check, "err_model": self._err_model,
             "q_check": self._q_check, "q_min": self._q_min, "q_max": self._q_max,
             "q_bin": self._q_bin, "mon_ed": self._mon_ed, "out_ed": self._out_ed,
+            "zarr_grouping": self._zarr_grouping,
             "run_mode": self._run_mode_combo, "frame_run_mode": self._frame_run_mode,
             "n_workers": self._n_workers,
         }
@@ -1887,6 +1921,10 @@ class HydraBatchPage(QtWidgets.QWidget):
             "anchor_path": self._loader.current_path(),
             "active_panel": self._toolbar.current(),
             "fields": widgets_to_dict(self._state_widgets()),
+            # NOT a widget, and without it every restored Output box reads
+            # as a path the user chose -- so _maybe_autofill_output_dir
+            # returns early forever and the box stays on the last dataset.
+            "autofilled_out": self._autofilled_out,
             "corr": self._corr_widget.get_state(),
             "fmt": self._fmt.get_state(),
             "loader": self._loader.get_state(),
@@ -1905,6 +1943,7 @@ class HydraBatchPage(QtWidgets.QWidget):
         # rides along in "fields" but isn't a plain widget — see BatchTab.set_state.
         fmt_keys = fields.pop("fmt_keys", None)
         apply_dict_to_widgets(self._state_widgets(), fields)
+        self._autofilled_out = state.get("autofilled_out")
         self._corr_widget.set_state(state.get("corr") or {})
         self._fmt.set_state(fmt_keys if fmt_keys is not None else state.get("fmt"))
         self._loader.set_state(state.get("loader") or {})
