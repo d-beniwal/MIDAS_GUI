@@ -245,3 +245,93 @@ unreachable through `calibrate()` even though `forward/geometry.py` models it.
 additive/backward-compatible: `initial_tx/ty/tz` on `calibrate()`, an `im_trans`
 field on `CalibrationSpec` (or the kwarg on all pipelines), one shared transform
 helper factored out of `auto.py:418-439`, and `im_trans` recorded on the result.
+
+## Hydra Batch Integrate: background jobs, naming, dark provenance
+
+Three pieces of work in the same code (`workers.py` / `batch_cli.py` /
+`hydra_batch_page.py`), found during the connolly_oct26 beamtime
+(2026-10-12). Listed in the order they should be done — the first is what
+makes a long run SAFE, the others make it correct.
+
+### 1. `batch_cli` learns Hydra, so the Hydra page gets "Run as background job"
+
+Decided 2026-10-12: **use the same job deployment interface as the
+single-detector tab, with panels always SEQUENTIAL.**
+
+Today the Hydra page has no background option, and nothing in DECISIONS
+explains the omission — it was never built, not ruled out. The button on
+`tab_batch.py:1856` is only a launcher for `python -m midas_gui.batch_cli`
+in a detached `screen` session; `batch_cli` has no concept of panels
+(grep it for `panel`/`hydra`/`ge1` — nothing), so there is nothing for a
+Hydra button to launch.
+
+This matters beyond convenience. A 189-folder run is ~17 h in-process, so
+the GUI's own Qt/pyqtgraph code sits on the critical path of the job: that
+is exactly how commit 1db9d31's `Cannot set range [nan, nan]` stopped a
+real run after ONE folder. Headless there is no view to update and that
+whole class of failure cannot occur — and the run survives closing the
+GUI, logging out, or X dropping.
+
+The mechanism is already there and needs no new concurrency. `_run_as_job`
+ALREADY chains one `batch_cli` invocation per source folder into a single
+screen session (a selection spanning folders maps to one `--out-dir`
+each). Sequential panels makes Hydra the same shape:
+
+    per scan:  batch_cli --out-dir <out>/ge1 ... (ge1 calib, ge1 eta range)
+               batch_cli ... ge2
+               batch_cli ... ge3
+               batch_cli ... ge4
+               <combine step>            -> hydra_zarr_combine.combine_panel_zarrs
+
+all chained into ONE screen session, as the multi-folder case already is.
+The combine needs a CLI entry of its own; `combine_panel_zarrs` is already
+a clean function taking `{panel: path}`.
+
+Everything the detached process needs must be on disk first — the job has
+no access to live GUI state. The single-detector path already writes a
+calibration snapshot, mask and dark/bright; Hydra needs four of each, plus
+the per-panel caking ranges (which are per panel, not shared — see
+`hydra_batch_widgets`).
+
+### 2. Archive naming
+
+Wanted (decided 2026-10-12, modelled on the pixirad output, which is one
+archive per raw file holding one lineout per frame):
+
+    4130_D_load_step_0_005120.ge1234.h5.ave.zarr.zip
+
+Raw filename kept INCLUDING `.h5`, panel token -> `ge1234`, no frame range
+and no chunk suffix (both redundant once grouping is per source file), and
+the `ave` segment derived from `combine_op` rather than hardcoded.
+
+`.ave.` is hardcoded at `workers.py` 2332, 2335, 2336, 2694 while the UI
+offers Max and Median (`widgets.py` 4585-4586) — so a median or max
+combine is written today into a file named `.ave.`. The op IS recorded
+inside as `midas_gui_combine_op`, so nothing is lost, but the NAME LIES.
+
+`workers.py:2918`'s `.cake` sibling shares this convention deliberately
+(see `_run_out_stem`) and must change with it. ~13 name assertions in
+tests/{test_batch_zarr_output,test_batch_zarr_gsas,test_h5_metadata_copy,
+test_tab_zarrviewer}.py; the 112 in test_hydra_zarr_combine.py are
+hand-built and unaffected.
+
+Note the content is ALREADY right — this is purely the filename. The
+combined archive holds `OmegaSumFrame/LastFrameNumber_<i>` per frame, each
+(nR, n_eta summed over panels), exactly like pixirad's (nR, 1).
+
+### 3. Record which dark was applied
+
+`resolve_dark`/`dark_candidates` pick the nearest PRECEDING `dark_before`
+(then a following `dark_after` for a file that precedes every
+`dark_before`), a ladder derived from the 198-file screenlog corpus and
+replayed by `test_dark_autodetect`. The logic is sound.
+
+But the resolved dark is NOT recorded anywhere in the output: the run log
+says only `field corrections: dark=y`, and a search of a real archive's
+whole `provenance_history` for any dark reference finds nothing. So
+"was the appropriate dark applied?" cannot be answered after the fact —
+across 189 folders a single mis-selection is invisible.
+
+`dark_candidates` already computes a `why` string ("preceding
+dark_before"). Record the resolved path AND that reason in the provenance
+entry, which turns an assumption into something checkable per scan.
