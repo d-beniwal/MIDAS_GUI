@@ -1,7 +1,7 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-10-08 (merge of two independent lines of work: Hydra calibration page's layout brought to parity with the single-detector Calibrate tab, and Solve Cell phases 1-3 through the reciprocal-space viewer's Panel/Crystal color modes — see DECISIONS)_
+_Last updated: 2026-10-09 (Solve Cell: known-structure indexing at stage 3 and stage 5, plus a legend on the reciprocal-space plot — see DECISIONS)_
 
 ## Now working on
 
@@ -66,6 +66,37 @@ Open follow-ups, none blocking:
   `git fetch origin 'refs/pull/*/head:refs/remotes/origin/pr/*'`.
 
 ## Recently completed
+
+**2026-10-09 (latest) — Solve Cell: known-structure indexing at stage 3
+("Index") and stage 5 ("Index remaining spots"), plus a legend on the
+reciprocal-space plot.** Requested directly: a choice between blind
+ab-initio and a user-typed lattice cell + space group right after
+ingest/diamond-filter, the same choice (with a "fill from previous
+refinement" convenience) at the leftover-spot stage, and a legend so plot
+colors are explained on the plot itself, not only in the side stats text.
+Reused the existing `_stage_index_known_cell` search+refine algorithm
+unchanged for both new paths (it already only cares about whatever `g_2pi`
+pool it's given); space group is diagnostic-only (a post-hoc systematic-
+absence sanity check, user's explicit choice over integrating it into the
+search) via new `_systematic_absence_diagnostics` and an optional
+`space_group` cfg key, fully backward compatible. New shared
+`_build_known_structure_form()` widget (lattice a–γ + space group + search
+tuning) used at both stages; stage 5 gained an explicit "Fill from latest
+domain" button replacing the old implicit auto-reuse. Every
+`ax.scatter(...)` on the 3-D plot now carries a `label=`, with
+`ax.legend(...)` added once per redraw when there's anything to show. Caught
+and fixed a pre-existing cosmetic bug along the way: unconstrained-width
+`_NoScrollSpinBox`es in a bare `QFormLayout.addRow(...)` rendered their
+right-aligned value off past the visible scroll edge. Full rationale in
+DECISIONS 2026-10-09.
+**Verified:** `test_solve_cell_pipeline.py` 42/42 (+4), `test_solve_cell_ui.py`
+73/73 (+10, +1 updated), `test_smoke.py` 13/13, all on a clean `HOME`;
+`pyflakes` unchanged on both touched source files. Offscreen screenshots
+confirmed both new forms, the "Fill from latest domain" button, and a
+correctly-labeled legend in both Panel and Crystal color modes.
+**Not verified:** no real raw-HDF5 dataset available locally for an
+end-to-end known-structure solve against real data (same longstanding gap
+as every other Solve Cell entry here).
 
 **2026-10-08 (latest) — Hydra calibration page's layout brought to parity
 with the single-detector Calibrate tab.** Requested directly ("the layout of

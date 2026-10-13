@@ -3,6 +3,106 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-09 — Solve Cell: user-supplied known-structure indexing at stage 3 and stage 5; space group is diagnostic-only; reciprocal-space plot gets a legend
+
+**Problem.** The only "known structure" path anywhere in Solve Cell was
+stage 5's narrow "reuse latest domain's cell" option
+(`_stage_index_known_cell`) -- there was no way to type in a literature/
+expected lattice cell + space group at the *main* indexing stage (stage 3
+was blind ab-initio only), and no way to re-enter a cell manually at stage 5
+either. Separately, the 3-D reciprocal-space plot's colors were only ever
+explained in a side text label, never on the plot itself.
+
+**Space group: diagnostic-only, not search-integrated (user's explicit
+choice).** `midas_hkls.ub_refine.refine_ub_from_gvectors` and the existing
+random-orientation search have no notion of space group at all; the two
+options put to the user were (a) use the declared space group only as a
+post-hoc systematic-absence sanity check on the accepted match, leaving the
+validated cell-only search/refine untouched, or (b) integrate it into the
+search itself (filter/score orientations by systematic absence), which is
+more rigorous but a materially more invasive, harder-to-validate change.
+User picked (a). Implemented as `_systematic_absence_diagnostics` in
+`solve_cell/pipeline.py`: given the accepted integer `hkl`s and a
+`SpaceGroup.from_number(...)`, counts what fraction are systematically
+absent for that space group and appends a note above a 5% threshold. Wired
+into `_stage_index_known_cell` via a new optional `space_group` cfg key
+(backward compatible -- omitting it adds none of the new result fields, so
+stage 5's original "Free"/leftover-cell behavior is unaffected when no
+space group is given). An unresolvable space-group number degrades to a
+note rather than raising.
+
+**No materials-preset dropdown (user's explicit choice).** `constants.
+MATERIALS` already has the right `{a,b,c,alpha,beta,gamma,sg}` shape and was
+the obvious reuse candidate (flagged as an open question in handoff §9.4),
+but a Solve Cell "known structure" is normally the user's own sample, not a
+calibration standard -- manual entry only, no preset wiring.
+
+**Reused `_stage_index_known_cell` as-is for stage 3, not a new stage.** The
+function already only cares about whatever `g_2pi` pool it's handed -- it
+was written for a *leftover* pool but has no leftover-specific logic -- so
+stage 3's "Known structure" mode (a first, round-1 solve) dispatches the
+exact same `"index_known_cell"` stage against the full diamond-filtered
+`candidate_df`'s g-vectors instead. `_stage_ab_initio`/`_stage_refine`
+(the "Free" path) are completely untouched. Since known-structure indexing
+already includes its own refine internally, stage 3's known-structure
+success handler (`_on_index_known_structure_done`) feeds straight into
+`_add_domain`/`_replace_domain` the same way `_on_refine_done` does for
+Free mode -- stage 4 ("Refine") is simply not needed for this path and its
+button is explicitly disabled when a known-structure run starts.
+
+**Shared lattice+space-group+search-tuning form, two independent
+instances.** `_build_known_structure_form()` builds a fresh widget set per
+call (`self._ks3`, `self._ks5` dicts) -- same pattern as the pre-existing
+`_kc_*` spinboxes it replaces, just factored out since stage 3 and stage 5
+now both need it. Stage 5 additionally gets a "Fill from latest domain"
+button (`_fill_ks5_from_latest_domain`) that copies the most recently
+solved domain's own refined cell into the six lattice fields on click --
+this replaces the old combo item "Known structure (reuse latest domain's
+cell)", which did this same copy *implicitly and automatically* with no way
+to override the cell. The explicit button directly matches what was asked:
+"the choice to fill the crystal using result from previous refinement" --
+a choice, not an automatic default. Space group is left untouched by the
+fill (a free refinement carries no space-group information).
+
+**Cosmetic bug caught and fixed while building the shared form**: a bare
+`QFormLayout.addRow("label:", spinbox)` with no `setMaximumWidth` stretches
+the field to fill the whole column; combined with `_NoScrollSpinBox`'s
+right-aligned text, the value rendered pixels past the visible edge of the
+scrollable middle column (confirmed via an offscreen screenshot -- the
+space-group and min-accept fields were blank until capped to the same
+104px `_fspin()` uses). This same unconstrained-width pattern already
+existed on the pre-existing `_kc_min_accept`/`_kc_n_search` fields this form
+replaces; worth knowing if a similar blank-spinbox report ever comes up
+elsewhere in this tab.
+
+**Legend added directly to the matplotlib 3-D plot**, not just the stats
+text: every `ax.scatter(...)` call in `_update_recip_plot` now carries a
+`label=`, and `ax.legend(...)` is called once at the end only if at least
+one labeled artist was actually drawn (avoids matplotlib's empty-legend
+warning on a blank plot). The origin `+` marker is deliberately left
+unlabeled -- it is a fixed reference point, not a spot category, consistent
+with the stats label already not mentioning q=0.
+
+**Verified:** `tests/test_solve_cell_pipeline.py` (42/42, +4 new: P1/no-
+violation, SG225/significant-violation, invalid-SG-number-degrades,
+space_group-key-omitted-is-unaffected), `tests/test_solve_cell_ui.py`
+(73/73, +10 new + 1 updated for the renamed `_ks5` widget: method-combo
+visibility toggling at both stages, known-structure dispatch cfg, round-1
+domain replace-not-duplicate for the known-structure path, systematic-
+absence note logged, "Fill from latest domain" populates/enables correctly,
+stage-5 known-structure cfg now reads the spinboxes + space_group, legend
+presence/absence/contents in both empty and populated cases), `test_smoke.py`
+(13/13). `pyflakes` unchanged on both touched source files (the two
+pre-existing unused-variable warnings in `test_solve_cell_ui.py` predate
+this change, confirmed via `git stash`). Offscreen screenshots confirmed:
+stage 3's method combo + known-structure form, stage 5's "Fill from latest
+domain" button + form, and a visible, correctly-labeled legend in both
+Panel and Crystal color modes on synthetic multi-domain/multi-panel data --
+plus catching and fixing the blank-spinbox rendering bug above.
+**Not verified with real data**: no raw HDF5 dataset available locally to
+run a true end-to-end known-structure solve (same longstanding gap as every
+other Solve Cell entry in this file).
+
 ## 2026-10-08 (latest) — Hydra calibration page's layout matched to the single-detector Calibrate tab, scope negotiated up front
 
 **Problem.** `HydraCalibrationPage` was built as a parallel implementation of

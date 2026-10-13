@@ -726,13 +726,59 @@ def _random_rotation_search(B0: np.ndarray, g_work: np.ndarray, n: int,
     return best_n, best_UB
 
 
+def _systematic_absence_diagnostics(hkl_int: np.ndarray, space_group: int) -> dict:
+    """Post-hoc, diagnostic-only check: of the reflections a known-cell
+    search accepted, how many have an ``hkl`` that is systematically absent
+    for the user-declared space group? This does NOT feed back into the
+    search or the refinement -- the search stays the validated, cell-only
+    random-orientation search (see ``_stage_index_known_cell``'s own
+    docstring); a high violation fraction is only ever reported as a note so
+    the user can judge whether the declared space group is actually
+    consistent with the data. Returns a dict with ``space_group_number``,
+    ``space_group_hm_symbol`` (``None`` if the number could not be resolved),
+    ``space_group_n_absent_violations``, ``space_group_violation_fraction``,
+    and ``notes`` (a list, usually empty)."""
+    from midas_hkls.space_group import SpaceGroup
+
+    notes = []
+    try:
+        sg = SpaceGroup.from_number(int(space_group))
+    except Exception as exc:
+        notes.append(f"space group {space_group} could not be resolved ({exc}) -- "
+                     "skipping systematic-absence check.")
+        return {"space_group_number": int(space_group), "space_group_hm_symbol": None,
+                "space_group_n_absent_violations": None,
+                "space_group_violation_fraction": None, "notes": notes}
+
+    n_total = len(hkl_int)
+    n_absent = sum(
+        1 for h, k, l in hkl_int.astype(int)
+        if sg.is_systematically_absent(int(h), int(k), int(l))
+    )
+    fraction = n_absent / n_total if n_total else 0.0
+    if fraction > 0.05:
+        notes.append(
+            f"{fraction * 100:.0f}% of matched reflections are systematically absent "
+            f"for space group {sg.number} ({sg.hm_symbol}) -- the declared space group "
+            "may not match this data.")
+    return {"space_group_number": sg.number, "space_group_hm_symbol": sg.hm_symbol,
+            "space_group_n_absent_violations": n_absent,
+            "space_group_violation_fraction": fraction, "notes": notes}
+
+
 def _stage_index_known_cell(cfg: dict) -> dict:
-    """``cfg`` keys: ``g_2pi`` (leftover candidate pool, Nx3, 2*pi/d
+    """``cfg`` keys: ``g_2pi`` (the candidate pool to index -- either a fresh
+    diamond-filtered candidate pool, for a first known-structure solve, or a
+    leftover pool once other domains have been removed; Nx3, 2*pi/d
     convention -- same as every other stage's ``g_2pi``), ``known_cell``
-    (a, b, c, alpha, beta, gamma -- typically a previously solved domain's
-    own refined cell), optional ``tol``, ``n_search``, ``chunk``,
-    ``min_accept``, ``n_null_draws``, ``z_thresh``, ``rng_seed``, optional
-    ``sigma_g``, optional ``pooled_dir``.
+    (a, b, c, alpha, beta, gamma -- typically a literature/expected cell, or
+    a previously solved domain's own refined cell), optional ``space_group``
+    (an International Tables space-group number, 1-230 -- used ONLY as a
+    post-hoc systematic-absence sanity check on the accepted match, never to
+    constrain the search itself; see ``_systematic_absence_diagnostics``),
+    optional ``tol``, ``n_search``, ``chunk``, ``min_accept``,
+    ``n_null_draws``, ``z_thresh``, ``rng_seed``, optional ``sigma_g``,
+    optional ``pooled_dir``.
 
     No ``midas_hkls`` function does this already (confirmed:
     ``cell_constrained``/``cell_series`` both require ``hkl`` already
@@ -831,6 +877,11 @@ def _stage_index_known_cell(cfg: dict) -> dict:
         "conventional_centring_index": int(conv.centring_index),
         "diagnostics": diagnostics, "notes": [],
     }
+    space_group = cfg.get("space_group")
+    if space_group is not None:
+        sg_diag = _systematic_absence_diagnostics(hkl_int, space_group)
+        result["notes"].extend(sg_diag.pop("notes"))
+        result.update(sg_diag)
     print(f"[solve-cell] index_known_cell: cell={tuple(round(v, 4) for v in result['cell'])} "
           f"rms_drlv={result['rms_drlv']:.5f} holohedry={holo.system}")
 

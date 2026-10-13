@@ -392,18 +392,41 @@ class SolveCellTab(QtWidgets.QWidget):
         dv.addRow(self._diamond_status)
         mv.addWidget(grp_dia)
 
-        grp_ab = QtWidgets.QGroupBox("3. Ab-initio index")
+        grp_ab = QtWidgets.QGroupBox("3. Index")
         av = QtWidgets.QFormLayout(grp_ab); av.setSpacing(4)
+        self._index_method = QtWidgets.QComboBox()
+        self._index_method.addItems(["Free (ab-initio)", "Known structure"])
+        self._index_method.setToolTip(
+            "Free: blind ab-initio indexing (no cell/space-group hint), "
+            "followed by a free refinement in step 4. Known structure: "
+            "search for an orientation of a lattice cell you supply among "
+            "the diamond-filtered candidates -- indexing and refinement "
+            "happen together in one run, so step 4 is not needed for this "
+            "mode. The declared space group is used only as a post-hoc "
+            "systematic-absence sanity check, never to constrain the "
+            "search itself.")
+        self._index_method.currentIndexChanged.connect(self._on_index_method_changed)
+        av.addRow("method:", self._index_method)
+
+        self._ab_free_params = QtWidgets.QWidget()
+        afp = QtWidgets.QFormLayout(self._ab_free_params)
+        afp.setContentsMargins(0, 0, 0, 0); afp.setSpacing(4)
         self._sigma_g = _fspin(1e-5, 1.0, 5, solve_pipeline.SIGMA_G_DEFAULT, "Å⁻¹")
         self._min_refl = _NoScrollSpinBox(); self._min_refl.setRange(4, 100000)
         self._min_refl.setValue(solve_pipeline.MIN_REFLECTIONS_DEFAULT)
-        av.addRow(_twocol("sigma_g:", self._sigma_g, "min_reflections:", self._min_refl))
+        afp.addRow(_twocol("sigma_g:", self._sigma_g, "min_reflections:", self._min_refl))
         self._tol_override = _fspin(0.0, 1.0, 3, 0.0)
         self._tol_override.setSpecialValueText("(library default)")
-        av.addRow("tol override:", self._tol_override)
-        self._ab_btn = S.primary_btn("Run Ab-initio Index")
+        afp.addRow("tol override:", self._tol_override)
+        av.addRow(self._ab_free_params)
+
+        self._ks3 = self._build_known_structure_form()
+        av.addRow(self._ks3["widget"])
+        self._on_index_method_changed(0)
+
+        self._ab_btn = S.primary_btn("Run Indexing")
         self._ab_btn.setEnabled(False)
-        self._ab_btn.clicked.connect(self._run_ab_initio)
+        self._ab_btn.clicked.connect(self._run_index)
         av.addRow(self._ab_btn)
         self._ab_status = QtWidgets.QLabel("—")
         self._ab_status.setStyleSheet(f"color:{S.MUTED};font-size:11px")
@@ -437,30 +460,30 @@ class SolveCellTab(QtWidgets.QWidget):
         self._leftover_status.setStyleSheet(f"color:{S.MUTED};font-size:11px")
         lv2.addRow("remaining:", self._leftover_status)
         self._leftover_method = QtWidgets.QComboBox()
-        self._leftover_method.addItems([
-            "Free (ab-initio)", "Known structure (reuse latest domain's cell)"])
+        self._leftover_method.addItems(["Free (ab-initio)", "Known structure"])
         self._leftover_method.setToolTip(
             "Free: re-run blind ab-initio indexing (step 3) + refine (step 4) "
             "on whatever is still unassigned -- for a genuinely different, "
-            "unknown structure. Known structure: search for an orientation of "
-            "the most recently solved domain's own cell among the leftover "
-            "spots -- for a second grain/domain of the SAME material at a "
-            "different orientation (handoff §5.4.2/§5.6). A match is only "
-            "accepted if it clearly beats a null test against scrambled "
-            "spots; a negative result just means no further domain was found.")
+            "unknown structure. Known structure: search for an orientation "
+            "of a lattice cell you supply (type it in, or click 'Fill from "
+            "latest domain' to reuse the most recently solved domain's own "
+            "cell) among the leftover spots -- for a second grain/domain of "
+            "the same material at a different orientation (handoff "
+            "§5.4.2/§5.6). A match is only accepted if it clearly beats a "
+            "null test against scrambled spots; a negative result just "
+            "means no further domain was found.")
         self._leftover_method.currentIndexChanged.connect(self._on_leftover_method_changed)
         lv2.addRow("method:", self._leftover_method)
-        self._kc_params = QtWidgets.QWidget()
-        kcf = QtWidgets.QFormLayout(self._kc_params); kcf.setContentsMargins(0, 0, 0, 0); kcf.setSpacing(4)
-        self._kc_n_search = _NoScrollSpinBox(); self._kc_n_search.setRange(1_000, 5_000_000)
-        self._kc_n_search.setSingleStep(10_000)
-        self._kc_n_search.setValue(solve_pipeline.RANDOM_SEARCH_N_DEFAULT)
-        self._kc_tol = _fspin(0.01, 1.0, 3, solve_pipeline.RANDOM_SEARCH_TOL_DEFAULT)
-        kcf.addRow(_twocol("search count:", self._kc_n_search, "tol:", self._kc_tol))
-        self._kc_min_accept = _NoScrollSpinBox(); self._kc_min_accept.setRange(3, 100_000)
-        self._kc_min_accept.setValue(solve_pipeline.RANDOM_SEARCH_MIN_ACCEPT_DEFAULT)
-        kcf.addRow("min accept:", self._kc_min_accept)
-        lv2.addRow(self._kc_params)
+        self._ks5 = self._build_known_structure_form()
+        self._ks5_fill_btn = QtWidgets.QPushButton("Fill from latest domain")
+        self._ks5_fill_btn.setEnabled(False)
+        self._ks5_fill_btn.setToolTip(
+            "Copy the most recently solved domain's own refined cell into "
+            "the fields below (space group is left as-is -- a free "
+            "refinement carries no space-group information).")
+        self._ks5_fill_btn.clicked.connect(self._fill_ks5_from_latest_domain)
+        self._ks5["form"].insertRow(0, self._ks5_fill_btn)
+        lv2.addRow(self._ks5["widget"])
         self._on_leftover_method_changed(0)
         self._leftover_btn = S.primary_btn("Index Remaining Spots")
         self._leftover_btn.setEnabled(False)
@@ -560,21 +583,32 @@ class SolveCellTab(QtWidgets.QWidget):
 
     def _update_recip_plot(self, all_xyz=None, diamond_xyz=None, indexed_xyz=None, groups=None):
         """Each ``*_xyz`` is an optional ``(x, y, z)`` tuple of 1-D arrays.
-        ``groups`` is an optional list of ``(xyz, color)`` pairs drawn after
-        the three legacy slots -- used once more than one domain has been
-        solved (:meth:`_update_multidomain_plot`), one color per domain.
-        Full replot per call -- cheap at the spot counts this tab deals with,
-        same redraw-on-update pattern as the other two embedded-matplotlib
-        views in this codebase."""
+        ``groups`` is an optional list of ``(xyz, color, label)`` triples
+        drawn after the three legacy slots -- used once more than one domain
+        has been solved (:meth:`_update_multidomain_plot`), one color per
+        domain. Every drawn scatter carries a ``label`` so a legend tying
+        color to category/domain/panel can be built from whatever ended up
+        with data this call (see the ``ax.legend(...)`` below) -- without
+        this, colors were only ever explained in the separate stats text
+        label, never on the plot itself. Full replot per call -- cheap at the
+        spot counts this tab deals with, same redraw-on-update pattern as the
+        other two embedded-matplotlib views in this codebase."""
         self._reset_recip_axes()
-        for xyz, color, size in (
-            (all_xyz, "#969696", 8), (diamond_xyz, "#ff3030", 14), (indexed_xyz, "#4da3ff", 14),
+        for xyz, color, size, label in (
+            (all_xyz, "#969696", 8, "Unindexed/spurious"),
+            (diamond_xyz, "#ff3030", 14, "Diamond/gasket"),
+            (indexed_xyz, "#4da3ff", 14, "Ab-initio indexed"),
         ):
             if xyz is not None and len(xyz[0]):
-                self._recip_ax.scatter(xyz[0], xyz[1], xyz[2], c=color, s=size, depthshade=True)
-        for xyz, color in (groups or []):
+                self._recip_ax.scatter(xyz[0], xyz[1], xyz[2], c=color, s=size,
+                                        depthshade=True, label=label)
+        for xyz, color, label in (groups or []):
             if xyz is not None and len(xyz[0]):
-                self._recip_ax.scatter(xyz[0], xyz[1], xyz[2], c=color, s=14, depthshade=True)
+                self._recip_ax.scatter(xyz[0], xyz[1], xyz[2], c=color, s=14,
+                                        depthshade=True, label=label)
+        handles, labels = self._recip_ax.get_legend_handles_labels()
+        if handles:
+            self._recip_ax.legend(handles, labels, loc="upper left", fontsize=8, framealpha=0.6)
         self._recip_canvas.draw_idle()
 
     def _update_multidomain_plot(self):
@@ -646,7 +680,8 @@ class SolveCellTab(QtWidgets.QWidget):
         n_unindexed_total = len(self._unindexed_df()) if self._unindexed_df() is not None else 0
 
         if self._recip_mode.currentIndex() == 1:  # Crystal
-            groups = [(d["xyz"], self._DOMAIN_COLORS[i % len(self._DOMAIN_COLORS)])
+            groups = [(d["xyz"], self._DOMAIN_COLORS[i % len(self._DOMAIN_COLORS)],
+                       f"{d['label']} ({d['method']})")
                       for i, d in enumerate(self._domains)]
             diamond_xyz = self._xyz_cols(diamond_df) if diamond_df is not None and len(diamond_df) else None
             unindexed_xyz = self._xyz_cols(unindexed_df) if unindexed_df is not None and len(unindexed_df) else None
@@ -669,8 +704,8 @@ class SolveCellTab(QtWidgets.QWidget):
             sources.append((*self._xyz_cols(unindexed_df), self._panel_ids_col(unindexed_df)))
         buckets = self._bucket_by_panel(sources)
 
-        groups = [(xyz, self._DOMAIN_COLORS[i % len(self._DOMAIN_COLORS)])
-                  for i, (_, xyz) in enumerate(sorted(buckets.items(), key=lambda kv: (kv[0] is None, kv[0])))]
+        groups = [(xyz, self._DOMAIN_COLORS[i % len(self._DOMAIN_COLORS)], self._panel_label(key))
+                  for i, (key, xyz) in enumerate(sorted(buckets.items(), key=lambda kv: (kv[0] is None, kv[0])))]
         self._update_recip_plot(groups=groups)
 
         total = sum(len(xyz[0]) for xyz in buckets.values())
@@ -926,7 +961,7 @@ class SolveCellTab(QtWidgets.QWidget):
     # ── GUI state (project save/restore) ───────────────────────────
 
     def _stage_state_widgets(self) -> dict:
-        return {
+        widgets = {
             "proj_dir": self._proj_ed,
             "low_count": self._low_count, "mask_grow": self._mask_grow,
             "blob_thresh": self._blob_thresh, "blob_minvol": self._blob_minvol,
@@ -934,7 +969,12 @@ class SolveCellTab(QtWidgets.QWidget):
             "sector_candidates": self._sector_candidates_ed,
             "diamond_a": self._diamond_a, "contam_tol": self._contam_tol,
             "sigma_g": self._sigma_g, "min_refl": self._min_refl, "tol_override": self._tol_override,
+            "index_method": self._index_method, "leftover_method": self._leftover_method,
         }
+        for prefix, ks in (("ks3", self._ks3), ("ks5", self._ks5)):
+            for key in ("a", "b", "c", "alpha", "beta", "gamma", "sg", "n_search", "tol", "min_accept"):
+                widgets[f"{prefix}_{key}"] = ks[key]
+        return widgets
 
     def get_state(self) -> dict:
         """Panel configuration + stage parameters only. Like every other
@@ -1208,6 +1248,7 @@ class SolveCellTab(QtWidgets.QWidget):
         self._round1_domain_index = None
         self._domain_list.clear()
         self._leftover_btn.setEnabled(False)
+        self._ks5_fill_btn.setEnabled(False)
         self._leftover_status.setText("—")
         self._leftover_run_status.setText("—")
         self._candidate_df = result["candidate_df"]
@@ -1221,7 +1262,79 @@ class SolveCellTab(QtWidgets.QWidget):
         self._ab_btn.setEnabled(len(self._candidate_df) > 0)
         self._refresh_recip_view()
 
-    # ── stage 3: ab-initio index ────────────────────────────────────
+    # ── stage 3: index (blind ab-initio, or a user-supplied known cell) ──
+
+    def _build_known_structure_form(self) -> dict:
+        """Lattice-parameter + space-group entry, plus the known-cell
+        search-tuning fields, shared by stage 3's 'Known structure' index
+        mode and stage 5's 'Index remaining spots'. Each call builds a fresh
+        set of spinboxes -- stage 3 and stage 5 keep fully independent
+        values. Returns ``{"widget": <container>, "form": <its QFormLayout>,
+        "a"/"b"/"c"/"alpha"/"beta"/"gamma": cell spinboxes, "sg": space-group
+        spinbox, "n_search"/"tol"/"min_accept": search-tuning spinboxes}``."""
+        host = QtWidgets.QWidget()
+        f = QtWidgets.QFormLayout(host); f.setContentsMargins(0, 0, 0, 0); f.setSpacing(4)
+
+        def _row(pairs):
+            h = QtWidgets.QHBoxLayout(); h.setSpacing(4); h.setContentsMargins(0, 0, 0, 0)
+            for label, w in pairs:
+                lw = QtWidgets.QLabel(label)
+                lw.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+                h.addWidget(lw); h.addWidget(w)
+            h.addStretch(1)
+            return h
+
+        a = _fspin(0.1, 1000.0, 4, 5.0, "Å")
+        b = _fspin(0.1, 1000.0, 4, 5.0, "Å")
+        c = _fspin(0.1, 1000.0, 4, 5.0, "Å")
+        f.addRow(_row([("a:", a), ("b:", b), ("c:", c)]))
+        alpha = _fspin(1.0, 179.0, 2, 90.0, "°")
+        beta = _fspin(1.0, 179.0, 2, 90.0, "°")
+        gamma = _fspin(1.0, 179.0, 2, 90.0, "°")
+        f.addRow(_row([("α:", alpha), ("β:", beta), ("γ:", gamma)]))
+
+        # Capped to the same width _fspin() uses -- a bare QFormLayout field
+        # widget otherwise stretches to fill the whole column, and with
+        # right-aligned text (_NoScrollSpinBox's default) the value renders
+        # off past the visible edge of this scrollable middle column.
+        sg = _NoScrollSpinBox(); sg.setRange(1, 230); sg.setValue(1)
+        sg.setMaximumWidth(104)
+        sg.setToolTip(
+            "International Tables space-group number. Used only as a "
+            "post-hoc systematic-absence sanity check on the accepted "
+            "match -- it does NOT constrain the orientation search itself, "
+            "which uses the cell above only.")
+        f.addRow("space group:", sg)
+
+        n_search = _NoScrollSpinBox(); n_search.setRange(1_000, 5_000_000)
+        n_search.setSingleStep(10_000)
+        n_search.setValue(solve_pipeline.RANDOM_SEARCH_N_DEFAULT)
+        n_search.setMaximumWidth(104)
+        tol = _fspin(0.01, 1.0, 3, solve_pipeline.RANDOM_SEARCH_TOL_DEFAULT)
+        f.addRow(_twocol("search count:", n_search, "tol:", tol))
+        min_accept = _NoScrollSpinBox(); min_accept.setRange(3, 100_000)
+        min_accept.setValue(solve_pipeline.RANDOM_SEARCH_MIN_ACCEPT_DEFAULT)
+        min_accept.setMaximumWidth(104)
+        f.addRow("min accept:", min_accept)
+
+        return {"widget": host, "form": f, "a": a, "b": b, "c": c,
+                "alpha": alpha, "beta": beta, "gamma": gamma, "sg": sg,
+                "n_search": n_search, "tol": tol, "min_accept": min_accept}
+
+    @staticmethod
+    def _known_structure_cell(ks: dict) -> tuple:
+        return (ks["a"].value(), ks["b"].value(), ks["c"].value(),
+                ks["alpha"].value(), ks["beta"].value(), ks["gamma"].value())
+
+    def _on_index_method_changed(self, index: int):
+        self._ab_free_params.setVisible(index == 0)
+        self._ks3["widget"].setVisible(index == 1)
+
+    def _run_index(self):
+        if self._index_method.currentIndex() == 0:
+            self._run_ab_initio()
+        else:
+            self._run_known_structure_index()
 
     def _run_ab_initio(self):
         if self._worker is not None and self._worker.isRunning():
@@ -1242,6 +1355,66 @@ class SolveCellTab(QtWidgets.QWidget):
         self._worker.finished.connect(self._on_ab_initio_done)
         self._worker.failed.connect(lambda msg: self._on_stage_fail("Ab-initio index", msg, self._ab_btn))
         self._worker.start()
+
+    def _run_known_structure_index(self):
+        if self._worker is not None and self._worker.isRunning():
+            return
+        if self._candidate_df is None or len(self._candidate_df) == 0:
+            QtWidgets.QMessageBox.warning(self, "No candidates", "Run Diamond Filter first."); return
+        known_cell = self._known_structure_cell(self._ks3)
+        self._known_structure_g_2pi = self._candidate_df[
+            ["qsample_x", "qsample_y", "qsample_z"]].to_numpy()
+        cfg = {
+            "g_2pi": self._known_structure_g_2pi, "known_cell": known_cell,
+            "space_group": self._ks3["sg"].value(),
+            "tol": self._ks3["tol"].value(), "n_search": self._ks3["n_search"].value(),
+            "min_accept": self._ks3["min_accept"].value(),
+            "sigma_g": self._sigma_g.value(), "pooled_dir": self._pooled_dir,
+        }
+        self._ab_btn.setEnabled(False)
+        self._refine_btn.setEnabled(False)
+        self._prog.setVisible(True)
+        self._log.append(
+            "─" * 40 + f"\nIndexing (known structure, cell="
+            f"{tuple(round(v, 4) for v in known_cell)})…")
+        self._worker = SolveCellWorker("index_known_cell", cfg, parent=self)
+        self._worker.log_line.connect(self._log.append)
+        self._worker.finished.connect(self._on_index_known_structure_done)
+        self._worker.failed.connect(lambda msg: self._on_stage_fail("Index", msg, self._ab_btn))
+        self._worker.start()
+
+    def _on_index_known_structure_done(self, result: dict):
+        self._ab_btn.setEnabled(True); self._prog.setVisible(False)
+        if not result.get("success"):
+            notes = "; ".join(result.get("notes", [])) or "no notes"
+            diag = result.get("diagnostics", {})
+            self._ab_status.setText(f"No match found: {notes}")
+            self._log.append(f"Known-structure index: negative result -- {notes}")
+            if diag:
+                self._log.append(
+                    f"  best_n={diag.get('best_n')} null_mean={diag.get('null_mean', 0):.1f} "
+                    f"z={diag.get('z_score', float('nan')):.2f}")
+            return
+        mask = result["indexed_mask"]
+        claimed_index = self._candidate_df.index[mask]
+        g_2pi = self._known_structure_g_2pi
+        xyz = (g_2pi[mask, 0], g_2pi[mask, 1], g_2pi[mask, 2])
+        panel_ids = (self._candidate_df.loc[claimed_index, "panel_id"].to_numpy()
+                     if "panel_id" in self._candidate_df.columns else None)
+        self._ab_status.setText(
+            f"success=True  indexed {int(mask.sum())}/{len(self._candidate_df)}, "
+            f"a={result['cell'][0]:.4g} Å, rms_drlv={result['rms_drlv']:.4g}")
+        self._log.append(
+            f"Known-structure index: cell={tuple(round(v, 4) for v in result['cell'])} "
+            f"rms_drlv={result['rms_drlv']:.5f}")
+        for note in result.get("notes", []):
+            self._log.append(f"  note: {note}")
+        if self._round1_domain_index is not None:
+            self._replace_domain(self._round1_domain_index, "known structure (manual)",
+                                  result, claimed_index, xyz, panel_ids)
+        else:
+            self._round1_domain_index = self._add_domain(
+                "known structure (manual)", result, claimed_index, xyz, panel_ids)
 
     def _on_ab_initio_done(self, result: dict):
         self._ab_btn.setEnabled(True); self._prog.setVisible(False)
@@ -1387,11 +1560,19 @@ class SolveCellTab(QtWidgets.QWidget):
         n = 0 if df is None else len(df)
         self._leftover_status.setText(f"{n} spot(s) not yet assigned to a domain")
         self._leftover_btn.setEnabled(n > 0 and len(self._domains) > 0)
+        self._ks5_fill_btn.setEnabled(len(self._domains) > 0)
 
     # ── stage 5: index remaining spots ──────────────────────────────
 
     def _on_leftover_method_changed(self, index: int):
-        self._kc_params.setVisible(index == 1)
+        self._ks5["widget"].setVisible(index == 1)
+
+    def _fill_ks5_from_latest_domain(self):
+        if not self._domains:
+            return
+        cell = self._domains[-1]["result"]["cell"]
+        for key, val in zip(("a", "b", "c", "alpha", "beta", "gamma"), cell):
+            self._ks5[key].setValue(val)
 
     def _run_index_remaining(self):
         if self._worker is not None and self._worker.isRunning():
@@ -1416,15 +1597,16 @@ class SolveCellTab(QtWidgets.QWidget):
             self._worker.log_line.connect(self._log.append)
             self._worker.finished.connect(self._on_leftover_ab_initio_done)
         else:
-            known_cell = self._domains[-1]["result"]["cell"]
+            known_cell = self._known_structure_cell(self._ks5)
             self._log.append(
                 "─" * 40 + f"\nIndexing remaining spots (known structure, cell="
                 f"{tuple(round(v, 4) for v in known_cell)})…")
             self._leftover_g_2pi = leftover[["qsample_x", "qsample_y", "qsample_z"]].to_numpy()
             cfg = {
                 "g_2pi": self._leftover_g_2pi, "known_cell": known_cell,
-                "tol": self._kc_tol.value(), "n_search": self._kc_n_search.value(),
-                "min_accept": self._kc_min_accept.value(),
+                "space_group": self._ks5["sg"].value(),
+                "tol": self._ks5["tol"].value(), "n_search": self._ks5["n_search"].value(),
+                "min_accept": self._ks5["min_accept"].value(),
                 "sigma_g": self._sigma_g_used or solve_pipeline.SIGMA_G_DEFAULT,
                 "pooled_dir": self._pooled_dir,
             }
@@ -1499,4 +1681,6 @@ class SolveCellTab(QtWidgets.QWidget):
         self._log.append(
             f"Index remaining spots: new domain (known structure), "
             f"cell={tuple(round(v, 4) for v in result['cell'])}")
+        for note in result.get("notes", []):
+            self._log.append(f"  note: {note}")
         self._add_domain("known structure", result, claimed_index, xyz, panel_ids)

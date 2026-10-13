@@ -746,11 +746,11 @@ def _fake_refine_result(a=5.43):
 
 
 def test_leftover_method_combo_toggles_known_cell_params_visibility(tab):
-    assert tab._kc_params.isHidden()
+    assert tab._ks5["widget"].isHidden()
     tab._leftover_method.setCurrentIndex(1)
-    assert not tab._kc_params.isHidden()
+    assert not tab._ks5["widget"].isHidden()
     tab._leftover_method.setCurrentIndex(0)
-    assert tab._kc_params.isHidden()
+    assert tab._ks5["widget"].isHidden()
 
 
 def test_leftover_status_and_button_disabled_with_no_domains(tab):
@@ -977,3 +977,149 @@ def test_update_multidomain_plot_still_delegates_to_refresh(tab, monkeypatch):
     monkeypatch.setattr(tab, "_refresh_recip_view", lambda: calls.append(1))
     tab._update_multidomain_plot()
     assert calls == [1]
+
+
+# ── stage 3: known-structure index mode ──────────────────────────────
+
+def test_index_method_combo_toggles_free_vs_known_structure_form(tab):
+    assert not tab._ab_free_params.isHidden()
+    assert tab._ks3["widget"].isHidden()
+    tab._index_method.setCurrentIndex(1)
+    assert tab._ab_free_params.isHidden()
+    assert not tab._ks3["widget"].isHidden()
+    tab._index_method.setCurrentIndex(0)
+    assert not tab._ab_free_params.isHidden()
+    assert tab._ks3["widget"].isHidden()
+
+
+def test_run_known_structure_index_dispatches_index_known_cell_with_candidate_pool(tab, monkeypatch):
+    from midas_gui import tab_solve_cell
+    df = _fake_candidate_df(10)
+    tab._candidate_df = df
+    tab._index_method.setCurrentIndex(1)
+    tab._ks3["a"].setValue(4.0); tab._ks3["b"].setValue(4.0); tab._ks3["c"].setValue(4.0)
+    tab._ks3["sg"].setValue(225)
+
+    _CapturingWorker.instances.clear()
+    monkeypatch.setattr(tab_solve_cell, "SolveCellWorker", _CapturingWorker)
+    tab._run_index()
+
+    assert len(_CapturingWorker.instances) == 1
+    worker = _CapturingWorker.instances[0]
+    assert worker.stage == "index_known_cell"
+    assert worker.cfg["known_cell"] == (4.0, 4.0, 4.0, 90.0, 90.0, 90.0)
+    assert worker.cfg["space_group"] == 225
+    assert len(worker.cfg["g_2pi"]) == 10
+
+
+def test_on_index_known_structure_done_negative_result_adds_no_domain(tab):
+    tab._candidate_df = _fake_candidate_df(5)
+    tab._on_index_known_structure_done({
+        "success": False, "notes": ["no match found"],
+        "diagnostics": {"best_n": 1, "null_mean": 0.8, "z_score": 0.1},
+    })
+    assert tab._domain_list.count() == 0
+    assert "No match found" in tab._ab_status.text()
+
+
+def test_on_index_known_structure_done_success_replaces_round1_domain(tab):
+    import numpy as np
+    df = _fake_candidate_df(10)
+    tab._candidate_df = df
+    tab._known_structure_g_2pi = df[["qsample_x", "qsample_y", "qsample_z"]].to_numpy()
+
+    mask1 = np.array([True] * 4 + [False] * 6)
+    result1 = dict(_fake_refine_result(5.43), success=True, indexed_mask=mask1, notes=[])
+    tab._on_index_known_structure_done(result1)
+    assert tab._domain_list.count() == 1
+    assert len(tab._leftover_df()) == 6
+
+    # Re-running known-structure indexing (round 1) replaces Domain 1 rather
+    # than appending a second one -- same contract as _on_refine_done.
+    mask2 = np.array([True] * 6 + [False] * 4)
+    result2 = dict(_fake_refine_result(5.44), success=True, indexed_mask=mask2, notes=[])
+    tab._on_index_known_structure_done(result2)
+    assert tab._domain_list.count() == 1
+    assert len(tab._leftover_df()) == 4
+
+
+def test_on_index_known_structure_done_logs_systematic_absence_note(tab):
+    import numpy as np
+    df = _fake_candidate_df(5)
+    tab._candidate_df = df
+    tab._known_structure_g_2pi = df[["qsample_x", "qsample_y", "qsample_z"]].to_numpy()
+    mask = np.array([True] * 3 + [False] * 2)
+    result = dict(_fake_refine_result(), success=True, indexed_mask=mask,
+                  notes=["40% of matched reflections are systematically absent for "
+                         "space group 225 (Fm-3m) -- the declared space group may not "
+                         "match this data."])
+    tab._on_index_known_structure_done(result)
+    assert "systematically absent" in tab._log.toPlainText()
+
+
+# ── stage 5: "Fill from latest domain" + space-group cfg ─────────────
+
+def test_fill_ks5_from_latest_domain_populates_cell_fields(tab):
+    df = _fake_candidate_df(10)
+    tab._candidate_df = df
+    xyz = (df["qsample_x"].to_numpy()[:4], df["qsample_y"].to_numpy()[:4], df["qsample_z"].to_numpy()[:4])
+    assert not tab._ks5_fill_btn.isEnabled()
+    tab._add_domain("free (ab-initio)", _fake_refine_result(5.43), df.index[:4], xyz)
+    assert tab._ks5_fill_btn.isEnabled()
+
+    tab._fill_ks5_from_latest_domain()
+    assert tab._ks5["a"].value() == pytest.approx(5.43)
+    assert tab._ks5["alpha"].value() == pytest.approx(90.0)
+
+
+def test_run_index_remaining_known_structure_reads_ks5_fields_and_space_group(tab, monkeypatch):
+    from midas_gui import tab_solve_cell
+    df = _fake_candidate_df(10)
+    tab._candidate_df = df
+    xyz = (df["qsample_x"].to_numpy()[:4], df["qsample_y"].to_numpy()[:4], df["qsample_z"].to_numpy()[:4])
+    tab._add_domain("free (ab-initio)", _fake_refine_result(5.43), df.index[:4], xyz)
+
+    tab._leftover_method.setCurrentIndex(1)
+    tab._ks5["b"].setValue(6.0)
+    tab._ks5["sg"].setValue(221)
+
+    _CapturingWorker.instances.clear()
+    monkeypatch.setattr(tab_solve_cell, "SolveCellWorker", _CapturingWorker)
+    tab._run_index_remaining()
+
+    assert len(_CapturingWorker.instances) == 1
+    worker = _CapturingWorker.instances[0]
+    assert worker.stage == "index_known_cell"
+    assert worker.cfg["known_cell"][1] == pytest.approx(6.0)
+    assert worker.cfg["space_group"] == 221
+
+
+# ── reciprocal-space plot legend ──────────────────────────────────────
+
+def test_update_recip_plot_has_no_legend_when_nothing_drawn(tab):
+    tab._update_recip_plot()
+    assert tab._recip_ax.get_legend() is None
+
+
+def test_update_recip_plot_legend_names_each_drawn_group(tab):
+    import numpy as np
+    xyz = (np.array([0.1]), np.array([0.2]), np.array([0.3]))
+    tab._update_recip_plot(diamond_xyz=xyz, groups=[(xyz, "#4da3ff", "Domain 1 (free (ab-initio))")])
+    legend = tab._recip_ax.get_legend()
+    assert legend is not None
+    texts = {t.get_text() for t in legend.get_texts()}
+    assert "Diamond/gasket" in texts
+    assert "Domain 1 (free (ab-initio))" in texts
+
+
+def test_refresh_recip_view_crystal_mode_legend_names_domains(tab):
+    df = _fake_candidate_df(10)
+    tab._candidate_df = df
+    xyz = (df["qsample_x"].to_numpy()[:4], df["qsample_y"].to_numpy()[:4], df["qsample_z"].to_numpy()[:4])
+    tab._add_domain("free (ab-initio)", _fake_refine_result(5.43), df.index[:4], xyz)
+    tab._recip_mode.setCurrentIndex(1)
+    tab._refresh_recip_view()
+    legend = tab._recip_ax.get_legend()
+    assert legend is not None
+    texts = {t.get_text() for t in legend.get_texts()}
+    assert "Domain 1 (free (ab-initio))" in texts

@@ -651,6 +651,70 @@ def test_index_known_cell_refuses_below_min_accept_floor_without_searching():
     assert "below the floor" in out["notes"][0]
 
 
+def test_index_known_cell_space_group_p1_has_no_violations():
+    """Space group 1 (P1) imposes no systematic absences at all -- every
+    accepted reflection is 'allowed', so the diagnostic-only check should
+    report a zero violation fraction and add no note."""
+    rng = np.random.default_rng(0)
+    g_2pi, cell, _ = _synthetic_known_cell_leftover_pool(rng)
+
+    out = P._stage_index_known_cell({
+        "g_2pi": g_2pi, "known_cell": cell, "space_group": 1, "tol": 0.1,
+        "n_search": 20_000, "min_accept": 15, "n_null_draws": 5, "rng_seed": 1,
+    })
+    assert out["success"], out.get("notes")
+    assert out["space_group_number"] == 1
+    assert out["space_group_violation_fraction"] == pytest.approx(0.0)
+    assert out["space_group_n_absent_violations"] == 0
+    assert out["notes"] == []
+
+
+def test_index_known_cell_space_group_flags_significant_violation_fraction():
+    """Space group 225 (Fm-3m, FCC) forbids any mixed-parity (h,k,l) --
+    against a domain indexed with no centering constraint at all, most
+    matched reflections should violate it, and that should be reported as a
+    note (diagnostic-only: the search/refine result itself is unaffected)."""
+    rng = np.random.default_rng(0)
+    g_2pi, cell, _ = _synthetic_known_cell_leftover_pool(rng)
+
+    out = P._stage_index_known_cell({
+        "g_2pi": g_2pi, "known_cell": cell, "space_group": 225, "tol": 0.1,
+        "n_search": 20_000, "min_accept": 15, "n_null_draws": 5, "rng_seed": 1,
+    })
+    assert out["success"], out.get("notes")
+    assert out["space_group_number"] == 225
+    assert out["space_group_violation_fraction"] > 0.3
+    assert any("systematically absent" in n for n in out["notes"])
+
+
+def test_index_known_cell_invalid_space_group_degrades_to_note_not_exception():
+    rng = np.random.default_rng(0)
+    g_2pi, cell, _ = _synthetic_known_cell_leftover_pool(rng)
+
+    out = P._stage_index_known_cell({
+        "g_2pi": g_2pi, "known_cell": cell, "space_group": 9999, "tol": 0.1,
+        "n_search": 20_000, "min_accept": 15, "n_null_draws": 5, "rng_seed": 1,
+    })
+    assert out["success"], out.get("notes")
+    assert out["space_group_hm_symbol"] is None
+    assert any("could not be resolved" in n for n in out["notes"])
+
+
+def test_index_known_cell_without_space_group_key_is_unaffected():
+    """Backward compatibility: omitting ``space_group`` entirely (today's
+    only usage, the leftover-spot re-indexing path before this change) adds
+    none of the new fields."""
+    rng = np.random.default_rng(0)
+    g_2pi, cell, _ = _synthetic_known_cell_leftover_pool(rng)
+
+    out = P._stage_index_known_cell({
+        "g_2pi": g_2pi, "known_cell": cell, "tol": 0.1,
+        "n_search": 20_000, "min_accept": 15, "n_null_draws": 5, "rng_seed": 1,
+    })
+    assert out["success"], out.get("notes")
+    assert "space_group_number" not in out
+
+
 def test_run_stage_dispatches_and_rejects_unknown_stage():
     with pytest.raises(ValueError, match="unknown solve-cell stage"):
         P.run_stage("not_a_real_stage", {})
