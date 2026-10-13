@@ -353,3 +353,89 @@ def test_only_the_first_chained_step_is_asked_to_write_one(tmp_path, monkeypatch
     assert "--results-sidecar" in seen["first"]
     assert not any("--results-sidecar" in a for a in seen["rest"]), (
         "a step the UI cannot reach was still asked to write a sidecar")
+
+
+# ── end-of-job email notification ───────────────────────────────────────
+# A background job can run for many hours in a detached screen session and
+# nothing told you when it ended -- the GUI crashed mid-sweep today and the
+# loss went unnoticed for hours. _finalize_job already runs exactly once per
+# job and already knows the exit code, so that is where this hangs.
+
+def _job(tmp_path, status="Done", exit_code=0, log_lines=()):
+    from midas_gui.job_queue import Job
+    lf = tmp_path / "j.screenlog"
+    lf.write_text("\n".join(log_lines) + ("\n" if log_lines else ""))
+    j = Job(session="midasgui_x", logfile=str(lf),
+            meta_path=str(tmp_path / "j.json"), name="scan_sweep",
+            total_frames=10, out_dir=str(tmp_path / "out"))
+    j.status, j.exit_code = status, exit_code
+    j.step, j.n_steps = 7, 40
+    return j
+
+
+def test_the_notification_names_the_job_and_how_far_it_got(tmp_path):
+    from midas_gui import job_queue as jq
+    sent = {}
+
+    def fake_run(argv, **kw):
+        sent.update(argv=argv, body=kw.get("input", ""))
+        return None
+
+    assert jq.send_job_notification(_job(tmp_path), "me@example.com",
+                                    _runner=fake_run) is True
+    assert sent["argv"][0] == "mail"
+    assert "me@example.com" in sent["argv"]
+    subject = sent["argv"][sent["argv"].index("-s") + 1]
+    assert "Done" in subject and "scan_sweep" in subject
+    assert "midasgui_x" in sent["body"]
+    assert "7/40" in sent["body"], "progress missing from the body"
+
+
+def test_error_lines_are_carried_into_the_body(tmp_path):
+    """So the mail is actionable without opening the log on the host."""
+    from midas_gui import job_queue as jq
+    sent = {}
+    job = _job(tmp_path, status="Failed (1)", exit_code=1, log_lines=[
+        "[batch] PROGRESS 1/10", "[batch] ERROR: calibration file not found",
+        "[batch] PROGRESS 2/10", "Traceback (most recent call last):"])
+    jq.send_job_notification(job, "me@example.com",
+                             _runner=lambda a, **k: sent.update(body=k.get("input", "")))
+    assert "calibration file not found" in sent["body"]
+    assert "Traceback" in sent["body"]
+    assert "PROGRESS 1/10" not in sent["body"], "ordinary progress is not an error"
+
+
+def test_no_address_means_no_mail(tmp_path):
+    from midas_gui import job_queue as jq
+    called = []
+    for addr in ("", "   ", None):
+        assert jq.send_job_notification(
+            _job(tmp_path), addr, _runner=lambda *a, **k: called.append(1)) is False
+    assert not called
+
+
+def test_a_broken_mail_system_cannot_hurt_a_finished_job(tmp_path):
+    """The contract. The job is already over by the time this runs, so
+    there is no outcome left to protect -- and a notifier that could raise
+    would turn a successful sweep into a traceback in the GUI."""
+    from midas_gui import job_queue as jq
+
+    def explode(*a, **k):
+        raise OSError("no mail transport agent")
+
+    assert jq.send_job_notification(
+        _job(tmp_path), "me@example.com", _runner=explode) is False
+
+
+def test_the_setting_round_trips_and_defaults_to_off(tmp_path, monkeypatch):
+    """Blank means no mail, so an operator who never configures it is never
+    surprised by outbound traffic from a beamline host."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import importlib
+    from midas_gui import settings
+    importlib.reload(settings)
+    assert settings.get_notify_email() == ""
+    settings.set_notify_email("  a@b.com  ")
+    assert settings.get_notify_email() == "a@b.com", "not stripped"
+    settings.set_notify_email("")
+    assert settings.get_notify_email() == ""

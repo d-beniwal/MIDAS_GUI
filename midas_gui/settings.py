@@ -383,6 +383,23 @@ def set_apexa_repo_path(value: str) -> None:
     _write_json(_meta_path(), meta)
 
 
+def get_notify_email() -> str:
+    """Address to notify when a background job ends, or "" for no mail.
+
+    Deliberately global rather than per-profile: it is a property of the
+    person sitting at the machine, not of the beamline station they happen
+    to have selected, and nobody wants to re-enter it after switching
+    profiles mid-beamtime.
+    """
+    return read_json(_meta_path()).get("notify_email", "")
+
+
+def set_notify_email(value: str) -> None:
+    meta = read_json(_meta_path())
+    meta["notify_email"] = (value or "").strip()
+    _write_json(_meta_path(), meta)
+
+
 # ── recent files (Projects / Workspaces) ─────────────────────────────────────
 # Deliberately global (not stored inside a profile) — a recently-opened
 # project/workspace should stay "recent" regardless of which beamline Profile

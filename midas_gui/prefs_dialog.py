@@ -309,6 +309,28 @@ class PreferencesDialog(QtWidgets.QDialog):
         f.addRow("Output format:", self._ui_fmt)
         f.addRow("Error model:", self._ui_err)
         f.addRow("Colormap / theme:", self._ui_cmap)
+
+        # Background-job notification. Not part of the saved config dict:
+        # it is a property of the person at the machine rather than of the
+        # beamline profile, so it rides settings.get/set_notify_email like
+        # the Exp ID does, and applies immediately instead of on restart.
+        self._notify_email = QtWidgets.QLineEdit()
+        self._notify_email.setPlaceholderText("you@example.com  (blank = no mail)")
+        try:
+            self._notify_email.setText(settings.get_notify_email())
+        except Exception:
+            pass
+        self._notify_email.setToolTip(
+            "Email one short report when a background job ends — status, "
+            "exit code, how far it got, and the last few lines mentioning "
+            "an error.\n\n"
+            "Sent through the local `mail` command, so it depends on this "
+            "machine being able to relay to your address. Acceptance by the "
+            "local mail system is not the same as delivery; check once that "
+            "a message actually arrives.\n\n"
+            "Best effort: a mail failure is logged and never affects the "
+            "job, which has already finished by the time this is sent.")
+        f.addRow("Notify on job end:", self._notify_email)
         self._tabs.addTab(w, "Algorithms")
 
     def _build_tabs_tab(self):
@@ -716,6 +738,13 @@ class PreferencesDialog(QtWidgets.QDialog):
 
     def _save(self):
         cfg = self._assemble()
+        # Applied immediately and stored outside the profile config — see
+        # _build_algorithms_tab. Saved before the config write so a failure
+        # there does not lose an address the user just typed.
+        try:
+            settings.set_notify_email(self._notify_email.text())
+        except Exception:
+            pass
         try:
             path = settings.save_user_config(cfg)
         except Exception as e:

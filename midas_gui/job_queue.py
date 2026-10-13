@@ -192,6 +192,65 @@ def _parallel_script(repo_root, units, max_parallel: int) -> str:
     return "\n".join(out)
 
 
+
+def _tail_errors(logfile: str, limit: int = 8) -> list:
+    """The last few lines that look like trouble, for the notification body.
+
+    Grepped out of the screenlog rather than tracked as the job runs: the
+    launcher is a detached shell and this panel only ever sees the log, so
+    the log is the single source of truth about what went wrong.
+    """
+    try:
+        text = Path(logfile).read_text(errors="replace")
+    except OSError:
+        return []
+    hits = [ln.strip() for ln in text.splitlines()
+            if re.search(r"error|traceback|exception|failed", ln, re.I)]
+    return hits[-limit:]
+
+
+def send_job_notification(job: "Job", address: str, *, _runner=None) -> bool:
+    """Mail one line about a finished job. Returns True if it was handed off.
+
+    Best effort by contract: a mail system that is missing, misconfigured or
+    slow must cost a log line and nothing else. The job has already finished
+    by the time this runs -- there is no outcome left to protect, and a
+    notifier that could wedge the GUI would be worse than no notifier.
+
+    Delivery is NOT confirmed. ``mail`` returning 0 means the local MTA
+    accepted the message, not that it reached the recipient; a lab host
+    relaying to an external domain may still be dropped at the far end.
+    The wording in the log says "sent" rather than "delivered" for that
+    reason.
+    """
+    address = (address or "").strip()
+    if not address:
+        return False
+    errs = _tail_errors(job.logfile)
+    body = [
+        f"Job:      {job.name}",
+        f"Session:  {job.session}",
+        f"Status:   {job.status}",
+        f"Exit:     {job.exit_code if job.exit_code is not None else 'unknown'}",
+        f"Progress: {job.step}/{job.n_steps} "
+        + ("units" if job.parallel else "steps"),
+        f"Output:   {job.out_dir or '(not recorded)'}",
+        f"Log:      {job.logfile}",
+    ]
+    if errs:
+        body += ["", f"Last {len(errs)} line(s) mentioning an error:"] + \
+                [f"  {e}" for e in errs]
+    subject = f"MIDAS job {job.status}: {job.name}"
+    runner = _runner or subprocess.run
+    try:
+        runner(["mail", "-s", subject, address],
+               input="\n".join(body) + "\n", text=True,
+               timeout=30, capture_output=True)
+        return True
+    except Exception:
+        return False
+
+
 class JobQueuePanel(QtWidgets.QWidget):
     """Embeddable panel: a "Refresh" bar and a scrollable list of active-job
     rows (most recent first). Log output for the most recently focused job's
@@ -676,6 +735,24 @@ class JobQueuePanel(QtWidgets.QWidget):
             self._append_log(f"[launcher] session ended ({job.status}).")
         if job.status == "Done" and self._on_job_done is not None:
             self._on_job_done(job)
+        self._notify_job_ended(job)
+
+    def _notify_job_ended(self, job: Job) -> None:
+        """Mail the configured address, if there is one. Never raises --
+        a background job that has already finished must not be reported as
+        broken because the mail system is."""
+        try:
+            from midas_gui import settings
+            address = settings.get_notify_email()
+        except Exception:
+            return
+        if not address:
+            return
+        ok = send_job_notification(job, address)
+        self._append_log(
+            f"[launcher] notification sent to {address}" if ok else
+            f"[launcher] could not send the notification to {address} "
+            f"(the job itself is unaffected)")
 
     def _parse_exit_from_logfile(self, logfile: str) -> Optional[int]:
         if not logfile or not os.path.isfile(logfile):
