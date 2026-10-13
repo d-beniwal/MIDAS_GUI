@@ -64,38 +64,27 @@ def read_h5_dataset(h5_path: str, ds_path: str):
 
 # ── Minimal catalog adapter (replaces mpe_wf's much larger MetadataCatalog) ─
 
-class PeakFitCatalog(QtCore.QObject):
-    """Owns exactly what ``PeakFitPanel`` needs: a peak-fit CSV path (lazily
-    parsed and memoized via ``csv_cache()``) plus an optional primary HDF5
-    source path (for the Real-space view's samX/samY lookup)."""
-    catalogChanged = QtCore.pyqtSignal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.primary_path: str = ""
-        self.aux_h5_path: str = ""
-        self._csv_path: str = ""
-        self._cache: Optional[dict] = None
-        self._cache_path: Optional[str] = None
-
-    def set_peak_fit_csv(self, path: str) -> None:
-        self._csv_path = path or ""
-        self._cache = None
-        self.catalogChanged.emit()
-
-    def set_primary_source(self, path: str) -> None:
-        self.primary_path = path or ""
-        self.catalogChanged.emit()
-
-    def set_aux_h5_path(self, path: str) -> None:
-        self.aux_h5_path = path or ""
-        self.catalogChanged.emit()
-
-    def csv_cache(self) -> Optional[dict]:
-        if self._cache is None or self._cache_path != self._csv_path:
-            self._cache = parse_peak_fit_csv(self._csv_path)
-            self._cache_path = self._csv_path
-        return self._cache
+# ``PeakFitCatalog`` was a small purpose-built adapter here: a peak-fit
+# CSV path plus an optional primary/aux HDF5 path, written deliberately
+# rather than porting mpe_wf's much larger MetadataCatalog, because this
+# panel only ever touches catalogChanged / csv_cache() / primary_path /
+# aux_h5_path.
+#
+# The full catalog arrived with the Data Explorer port (2026-10-13), and
+# keeping both would have left two QObjects in one process with the same
+# signal name and overlapping method names -- where wiring the wrong one
+# gives you a silently empty combo instead of an error. MetadataCatalog
+# is a strict superset of the five names above, so this is now an alias.
+#
+# What that cost: the real catalog's set_primary_source used to walk the
+# whole file synchronously. It no longer does (metadata_catalog's
+# _ensure_scanned), which is what makes the alias free for this panel --
+# it never calls list_streams, so it never triggers a walk at all.
+#
+# The panel's OWN simplifications are untouched and still correct: no
+# MetadataStreamPicker/colour override, and HDF5-only reads in the
+# Real-space view. Those were panel decisions, not catalog ones.
+from midas_gui.metadata_catalog import MetadataCatalog as PeakFitCatalog  # noqa: E402
 
 
 # ── Panel ────────────────────────────────────────────────────────────────

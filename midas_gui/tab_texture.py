@@ -65,7 +65,7 @@ class TextureTab(QtWidgets.QWidget):
     def get_state(self) -> dict:
         return {
             "fields": widgets_to_dict(self._state_widgets()),
-            "peak_fit_csv": self._peak_fit_catalog._csv_path,
+            "peak_fit_csv": self._peak_fit_catalog.peak_fit_csv_path,
             "peak_fit_primary": self._peak_fit_catalog.primary_path,
         }
 
