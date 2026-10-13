@@ -32,7 +32,8 @@ from midas_gui import provenance
 from midas_gui import settings
 from midas_gui.helpers import (_load_image, _apply_im_trans, _build_spec,
                                _spec_from_json, average_field, apply_field_corrections,
-                               read_hdf5_stack_chunk, load_profile_file, _LogStream)
+                               read_hdf5_stack_chunk, load_profile_file, _LogStream,
+                               reduce_frames_batched)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -782,54 +783,47 @@ class MaskComputeWorker(QtCore.QThread):
 # ═════════════════════════════════════════════════════════════════════════════
 
 class ProjectionWorker(QtCore.QThread):
-    """Load a frame stack and reduce it (max/sum/mean) off the GUI thread.
+    """Reduce a frame stack (max/sum/mean) off the GUI thread, batched and
+    with each frame corrected BEFORE it's folded into the reduction.
 
-    Loading a multi-GB stack + the reduction can take seconds-to-minutes; doing it
-    here keeps the Data Viewer responsive. Field corrections (dark/bright/background)
-    are captured on the GUI thread and applied to the projected image.
+    ``batch_iter_fn(start, end)`` must return an iterable of raw ``(b,H,W)``
+    batches (e.g. ``DataLoaderPanel.iter_raw_batches``/
+    ``hydra.iter_stack_batches``) — reading/correcting one batch at a time
+    keeps peak memory bounded to one batch instead of the whole stack, while
+    still being vectorized (not a per-frame Python loop). See
+    ``helpers.reduce_frames_batched`` for the actual correct-then-reduce
+    logic this worker just drives off the GUI thread.
     """
     finished = QtCore.pyqtSignal(object, str)   # corrected 2-D image, info string
     failed   = QtCore.pyqtSignal(str)
 
-    def __init__(self, full_stack_fn, method, axis, skip, nframes=0, *, dark=None, bright=None,
-                 background=None, bright_mode="divide", parent=None):
+    def __init__(self, batch_iter_fn, total_frames, method, skip, nframes=0, *,
+                 dark=None, bright=None, background=None, bright_mode="divide", parent=None):
         super().__init__(parent)
-        self._full_stack = full_stack_fn
-        self._method, self._axis, self._skip, self._nframes = method, axis, skip, nframes
+        self._batch_iter_fn = batch_iter_fn
+        self._total_frames = total_frames
+        self._method, self._skip, self._nframes = method, skip, nframes
         self._dark, self._bright, self._background = dark, bright, background
         self._bright_mode = bright_mode
 
     def run(self):
         try:
-            data = np.asarray(self._full_stack())
-            if self._axis >= data.ndim:
-                raise ValueError(f"Axis {self._axis} invalid for {data.ndim}-D data.")
-            if self._skip > 0:
-                if self._skip >= data.shape[0]:
-                    raise ValueError(f"Skip frames ({self._skip}) ≥ stack size "
-                                     f"({data.shape[0]}).")
-                data = data[self._skip:]
-            if self._nframes and self._nframes > 0:
-                data = data[:self._nframes]
-            n_used = data.shape[self._axis]
-            # "average" kept as an alias so an older caller's method string
-            # still resolves; the UI only ever sends "mean".
-            fn = {"max": np.max, "sum": np.sum,
-                  "mean": np.mean, "average": np.mean}[self._method]
-            proj = np.squeeze(fn(data, axis=self._axis))
+            start = max(0, self._skip)
+            if start >= self._total_frames:
+                raise ValueError(f"Skip frames ({start}) ≥ stack size "
+                                 f"({self._total_frames}).")
+            end = (self._total_frames if not self._nframes or self._nframes <= 0
+                  else min(start + self._nframes, self._total_frames))
+            proj, n_used = reduce_frames_batched(
+                self._batch_iter_fn(start, end), self._method,
+                dark=self._dark, bright=self._bright,
+                background=self._background, bright_mode=self._bright_mode)
             if proj.ndim != 2:
-                raise ValueError(f"Result is {proj.ndim}-D after projecting axis "
-                                 f"{self._axis}; pick an axis that leaves a 2-D image.")
-            if self._dark is not None or self._bright is not None or self._background is not None:
-                out = apply_field_corrections(
-                    proj, dark=self._dark, bright=self._bright,
-                    bright_mode=self._bright_mode, background=self._background).astype(np.float32)
-            else:
-                out = proj.astype(np.float32)
+                raise ValueError(f"Result is {proj.ndim}-D; expected a 2-D image.")
             info = (f"{self._method.capitalize()} projection ({n_used} frames"
                     f"{f', skipped {self._skip}' if self._skip else ''}) → {proj.shape}  "
                     f"[{np.nanmin(proj):.3g}, {np.nanmax(proj):.3g}]")
-            self.finished.emit(out, info)
+            self.finished.emit(proj, info)
         except Exception:
             self.failed.emit(traceback.format_exc())
 

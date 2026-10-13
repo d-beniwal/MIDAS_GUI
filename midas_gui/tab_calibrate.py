@@ -35,7 +35,8 @@ from midas_gui.widgets import (
     PickableImageViewer, ProfileViewer, LogPanel, DataLoaderPanel, CakeViewer,
     RingResidualViewer, OriginToolButton, build_lab_frame_axes_items,
     ring_azimuth_residual, RadialThresholdEditor)
-from midas_gui.workers import CalibrationWorker, IntegrationWorker, ManualDspacingCalibWorker
+from midas_gui.workers import (CalibrationWorker, IntegrationWorker,
+                               ManualDspacingCalibWorker, ProjectionWorker)
 from midas_gui.dialogs import (_SaveParamstestDialog, DistortionRefineDialog,
                                 DistortionSeedDialog, ManualSeedDialog,
                                 PARAMETER_LIMIT_ROWS, limit_window, show_error)
@@ -97,6 +98,9 @@ class CalibrationTab(QtWidgets.QWidget):
         self._pending_log_result = None   # result awaiting _log_to_project once integration finishes
         self._expid_provider = None       # set by app.py; see set_expid_provider
         self._wd_declined = ""            # last unwritable candidate, logged once
+        self._proj_active: bool = False               # a stack projection feeds the pipeline
+        self._proj_image: Optional[np.ndarray] = None  # already dark/bright/background-corrected
+        self._proj_worker: Optional[ProjectionWorker] = None
         self._build_ui()
         self._loader.set_path(DEFAULT_CALIBRANT_TIF)
         # Connected after the bundled demo image loads above, deliberately
@@ -419,46 +423,42 @@ class CalibrationTab(QtWidgets.QWidget):
         self._thr_editor.pointsChanged.connect(self._on_threshold_points_changed)
         lv.addWidget(thr)
 
-        # ── Mean of frames (hdf5 / folder) ──
-        # Checkable QGroupBox (like "Multi-panel detector" below): the on/off
-        # toggle lives in the heading itself rather than a separate checkbox
-        # in the body. `_avg_check` is the groupbox itself — it already has
-        # isChecked()/setChecked()/toggled, so every existing caller (state
-        # save/restore included, see helpers.widgets_to_dict) works unchanged.
-        avgc = QtWidgets.QGroupBox("Mean of frames in single image")
-        avgc.setCheckable(True); avgc.setChecked(False)
-        avgc.setToolTip(
-            "Take the mean of a range of frames into one image used for calibration. "
-            "Requires a multi-frame source.")
-        avgc_body = QtWidgets.QVBoxLayout(avgc)
-        avgc_body.setContentsMargins(8, 6, 8, 6); avgc_body.setSpacing(5)
-        avgc.body = avgc_body
-        self._avg_check = avgc
-        self._avg_start = _NoScrollSpinBox(); self._avg_start.setRange(0, 999999)
-        self._avg_end = _NoScrollSpinBox(); self._avg_end.setRange(0, 999999)
-        self._avg_end.setToolTip("Last frame (exclusive). 0 = all frames.")
-        for w in (self._avg_start, self._avg_end):
-            w.setEnabled(False)
-            w.setFixedWidth(69)   # ~50% narrower than the default rendered width
-        # Plain grid (not S.Form) with the stretch pushed onto a trailing
-        # empty column, so start/end stay packed left with just the row's
-        # own spacing between them instead of being spread across the card.
-        afm = QtWidgets.QGridLayout(); afm.setHorizontalSpacing(6); afm.setVerticalSpacing(5)
-        afm.setContentsMargins(0, 0, 0, 0)
-        afm.addWidget(S.LabelRight("start:"), 0, 0)
-        afm.addWidget(self._avg_start, 0, 1)
-        afm.addWidget(S.LabelRight("end(0=all):"), 0, 2)
-        afm.addWidget(self._avg_end, 0, 3)
-        afm.setColumnStretch(4, 1)
-        avgc.body.addLayout(afm)
-        self._avg_note = QtWidgets.QLabel("")
-        self._avg_note.setStyleSheet("color:#9a9a9a;font-size:10px"); self._avg_note.setWordWrap(True)
-        avgc.body.addWidget(self._avg_note)
-        self._avg_card = avgc
-        self._avg_check.toggled.connect(self._on_avg_toggled)
-        for w in (self._avg_start, self._avg_end):
-            w.valueChanged.connect(self._on_avg_changed)
-        lv.addWidget(avgc)
+        # ── Projection (hdf5 / folder) ──
+        # Mirrors the Data Viewer's own "Projection" card (tab_view.py) —
+        # same Method/Skip/N-frames controls and "Project stack" button,
+        # async via ProjectionWorker. Unlike Data Viewer (which just swaps
+        # what the viewer displays), the projected image also becomes the
+        # pipeline's input image — see _source_image/_run.
+        projc = S.make_card("Projection")
+        projc.setToolTip(
+            "Project (max/sum/mean) a range of frames into one image used "
+            "for calibration. Requires a multi-frame source.")
+        m_row = QtWidgets.QHBoxLayout(); m_row.setSpacing(8)
+        m_row.addWidget(S.LabelRight("Method:"))
+        self._proj_method = {}
+        for meth in ("max", "sum", "mean"):
+            rb = QtWidgets.QRadioButton(meth.capitalize()); m_row.addWidget(rb)
+            self._proj_method[meth] = rb
+        self._proj_method["max"].setChecked(True)
+        m_row.addStretch(1)
+        projc.body.addLayout(m_row)
+        self._proj_skip = _NoScrollSpinBox(); self._proj_skip.setRange(0, 999999)
+        self._proj_nframes = _NoScrollSpinBox(); self._proj_nframes.setRange(0, 999999)
+        self._proj_nframes.setToolTip("Number of frames to project. 0 = all.")
+        pf = S.Form()
+        pf.row(("Skip frames:", self._proj_skip), ("N frames (0=all):", self._proj_nframes))
+        projc.body.addLayout(pf)
+        self._proj_btn = QtWidgets.QPushButton("Project stack")
+        self._proj_btn.clicked.connect(self._project)
+        self._proj_clear_btn = QtWidgets.QPushButton("Use current frame")
+        self._proj_clear_btn.clicked.connect(self._on_project_clear)
+        projc.body.addLayout(S.button_grid([self._proj_btn, self._proj_clear_btn], 2))
+        self._proj_note = QtWidgets.QLabel("")
+        self._proj_note.setStyleSheet("color:#9a9a9a;font-size:10px"); self._proj_note.setWordWrap(True)
+        projc.body.addWidget(self._proj_note)
+        self._proj_card = projc
+        projc.setEnabled(False)
+        lv.addWidget(projc)
 
         # ── Initial seed ──
         # "Manual seed…" opens a non-modal per-parameter panel (ManualSeedDialog):
@@ -1061,7 +1061,7 @@ class CalibrationTab(QtWidgets.QWidget):
         """New frame / data from the loader — refresh the calibration image, the
         threshold curve's default points, and the display."""
         self._sync_frame_scrub_bar()
-        self._sync_avg_controls()
+        self._sync_proj_controls()
         self._image = self._source_image()
         if self._image is None:
             return
@@ -1131,64 +1131,76 @@ class CalibrationTab(QtWidgets.QWidget):
                 self._image, self._seed_bcy.value(), self._seed_bcz.value(), radii, values)
         return self._image
 
-    # ── Mean of frames ────────────────────────────────────────────
+    # ── Projection ──────────────────────────────────────────────────
 
     def _source_image(self):
-        """Base image for calibration: the frame mean if enabled, else current.
+        """Base image for calibration: the stack projection if active, else
+        the current raw frame.
 
-        Deliberately raw (uncorrected, untransformed) — this feeds both the
-        on-screen preview (via ``_show_calib_image``, which applies dark/
-        bright/background and the Transforms checkboxes for display only) and
-        the actual pipeline run, where ``CalibrationWorker`` applies bright/
-        background, the same transform, and the backend subtracts dark
-        internally. Pre-correcting here would double-apply them for the real
-        run."""
-        if self._avg_check.isChecked() and self._loader.n_frames() > 1:
-            mean = self._loader.mean_frames(
-                self._avg_start.value(), self._avg_end.value())
-            if mean is not None:
-                return mean
+        The projection is already dark/bright/background-corrected — each
+        contributing frame is corrected before being folded into the
+        reduction (see ``helpers.reduce_frames_batched``). The plain
+        current-frame path stays raw (uncorrected, untransformed):
+        ``CalibrationWorker``/``_run_integration`` apply bright/background
+        and the same transform, and the backend subtracts dark internally.
+        Mixing the two — pre-correcting a raw frame here, or re-correcting
+        an already-corrected projection downstream — would double-apply
+        corrections, so ``_run``/``_run_integration`` gate on
+        ``_proj_active`` to pass ``None`` for dark/bright/background
+        whenever the projection is the source."""
+        if self._proj_active and self._proj_image is not None:
+            return self._proj_image
         return self._loader.current_frame()
 
-    def _sync_avg_controls(self):
-        """Enable/disable the frame-mean card and clamp spin ranges to the source."""
+    def _sync_proj_controls(self):
+        """Enable/disable the Projection card for the current source, and
+        drop a stale projection on any new data / frame-navigation event."""
         n = self._loader.n_frames()
-        multi = n > 1
-        self._avg_card.setEnabled(multi)
-        if not multi and self._avg_check.isChecked():
-            self._avg_check.blockSignals(True); self._avg_check.setChecked(False)
-            self._avg_check.blockSignals(False)
-        hi = max(0, n)
-        for w in (self._avg_start, self._avg_end):
-            w.blockSignals(True); w.setRange(0, hi); w.blockSignals(False)
-        self._update_avg_note()
+        self._proj_card.setEnabled(n > 1)
+        if self._proj_active:
+            self._on_project_clear()
 
-    def _update_avg_note(self):
-        n = self._loader.n_frames()
-        if n <= 1:
-            self._avg_note.setText("Single-frame source — frame mean unavailable.")
+    def _project(self):
+        if self._loader.n_frames() <= 1:
+            QtWidgets.QMessageBox.warning(self, "No stack", "Projection needs a stack."); return
+        if self._proj_worker and self._proj_worker.isRunning():
             return
-        start = self._avg_start.value()
-        end = self._avg_end.value() or n
-        end = min(end, n)
-        cnt = len(range(max(0, start), end))
-        self._avg_note.setText(f"mean of {cnt} of {n} frames (start={start}, "
-                               f"end={end}).")
+        method = next(m for m, b in self._proj_method.items() if b.isChecked())
+        skip = self._proj_skip.value()
+        nframes = self._proj_nframes.value()
+        self._proj_note.setText("Projecting stack (corrections applied per frame)…")
+        self._proj_btn.setEnabled(False)
+        self._proj_worker = ProjectionWorker(
+            self._loader.iter_raw_batches, self._loader.n_frames(), method, skip, nframes,
+            dark=self._loader.dark(), bright=self._loader.bright(),
+            background=self._loader.background(), bright_mode=self._loader.bright_mode(),
+            parent=self)
+        self._proj_worker.finished.connect(self._on_project_done)
+        self._proj_worker.failed.connect(self._on_project_failed)
+        self._proj_worker.start()
 
-    def _on_avg_toggled(self, on):
-        for w in (self._avg_start, self._avg_end):
-            w.setEnabled(on)
-        self._update_avg_note()
+    def _on_project_done(self, img, info):
+        self._proj_btn.setEnabled(True)
+        self._proj_image = img
+        self._proj_active = True
+        self._proj_note.setText(info)
+        self._image = self._source_image()
+        if self._image is not None:
+            self._reset_threshold_defaults()
+            self._show_calib_image(autorange=True)
+
+    def _on_project_failed(self, msg):
+        self._proj_btn.setEnabled(True)
+        self._proj_note.setText("Projection failed.")
+        show_error(self, "Projection error", msg)
+
+    def _on_project_clear(self):
+        self._proj_active = False
+        self._proj_image = None
+        self._proj_note.setText("")
         self._image = self._source_image()
         if self._image is not None:
             self._show_calib_image(autorange=False)
-
-    def _on_avg_changed(self, *_):
-        self._update_avg_note()
-        if self._avg_check.isChecked():
-            self._image = self._source_image()
-            if self._image is not None:
-                self._show_calib_image(autorange=False)
 
     # ── Distortion coefficient selection ──────────────────────────
 
@@ -1716,11 +1728,15 @@ class CalibrationTab(QtWidgets.QWidget):
 
     def _show_calib_image(self, autorange: bool = False):
         """Render the preview: dark/bright/background-corrected and Transforms-
-        applied for display only (``self._image``/``_calib_image()`` stay raw —
-        see ``_source_image``). ``CalibrationWorker`` applies the same transform
-        to the array actually fed to the calibration pipeline."""
+        applied for display only (``self._image``/``_calib_image()`` stay raw
+        when sourced from the current frame — see ``_source_image``).
+        ``CalibrationWorker`` applies the same transform to the array
+        actually fed to the calibration pipeline. When a projection is
+        active, ``_calib_image()`` is already fully corrected, so it is NOT
+        passed through ``self._loader.corrected()`` again."""
         if self._image is not None:
-            img = self._loader.corrected(self._calib_image())
+            base = self._calib_image()
+            img = base if self._proj_active else self._loader.corrected(base)
             self._img_view.set_raw_frame(img, self._im_trans_codes(),
                                           autorange=autorange, reset_levels=autorange)
         self._redraw_lab_axes_if_on()
@@ -2140,6 +2156,10 @@ class CalibrationTab(QtWidgets.QWidget):
         bright = self._loader.bright()
         background = self._loader.background()
         bright_mode = self._loader.bright_mode()
+        if self._proj_active:
+            # Already baked into self._proj_image (see _source_image) — pass
+            # none of these on, or the pipeline would double-correct.
+            self._dark = bright = background = None
 
         mode = self._pipeline.currentData()
         if mode == "frozen_point" and self._panel_grp.isChecked():
@@ -2589,11 +2609,18 @@ class CalibrationTab(QtWidgets.QWidget):
             return
         im_trans = tuple(im_trans_codes_from_checkboxes(
             self._flip_y, self._flip_z, self._transp))
+        # Already-corrected projection (see _source_image) must not be
+        # corrected a second time here — same guard as _run()'s CalibrationWorker.
+        dark = bright = background = None
+        if not self._proj_active:
+            dark = self._loader.dark()
+            bright = self._loader.bright()
+            background = self._loader.background()
         self._int_worker = IntegrationWorker(
-            result, image, self._loader.dark(), im_trans,
+            result, image, dark, im_trans,
             r_bin=self._cal_r_bin.value(), eta_bin=self._cal_eta_bin.value(),
             mask=self._loader.composite_mask(), parent=self,
-            bright=self._loader.bright(), background=self._loader.background(),
+            bright=bright, background=background,
             bright_mode=self._loader.bright_mode(),
             weighted=bool(self._cal_azim.currentData()))
         self._int_worker.log_line.connect(self._log.append)
@@ -2806,9 +2833,11 @@ class CalibrationTab(QtWidgets.QWidget):
             "flip_z": self._flip_z,
             "transp": self._transp,
             "thr_check": self._thr_check,
-            "avg_check": self._avg_check,
-            "avg_start": self._avg_start,
-            "avg_end": self._avg_end,
+            "proj_skip": self._proj_skip,
+            "proj_nframes": self._proj_nframes,
+            "proj_method_max": self._proj_method["max"],
+            "proj_method_sum": self._proj_method["sum"],
+            "proj_method_mean": self._proj_method["mean"],
             "manual_seed_check": self._manual_seed_check,   # derived bulk on/off — see _on_seed_enable_changed
             "seed_en_bc": self._seed_en_bc,
             "seed_en_lsd": self._seed_en_lsd,

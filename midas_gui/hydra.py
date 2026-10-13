@@ -109,6 +109,32 @@ def load_full_stack(path: str, dataset: str) -> np.ndarray:
         return np.asarray(f[dataset][()], dtype=np.float32)
 
 
+def iter_stack_batches(path: str, dataset: str, start: int = 0, end=None,
+                       batch_size=None):
+    """Memory-bounded batched read of one Hydra panel's HDF5 stack —
+    ``load_full_stack``'s streaming counterpart, for ``workers.
+    ProjectionWorker`` via ``helpers.reduce_frames_batched``. Opens the file
+    once and slices ``dataset[lo:hi]`` per batch instead of reading the whole
+    stack into memory."""
+    import h5py
+    with h5py.File(str(path), "r") as f:
+        dset = f[dataset]
+        n = int(dset.shape[0]) if dset.ndim >= 3 else 1
+        end = n if end is None else min(end, n)
+        start = max(0, start)
+        if start >= end:
+            return
+        if batch_size is None:
+            frame_nbytes = dset.dtype.itemsize * dset.shape[-1] * dset.shape[-2]
+            batch_size = max(8, min(256, (256 * 1024 * 1024) // max(1, frame_nbytes)))
+        if dset.ndim < 3:
+            yield np.asarray(dset[...], dtype=np.float32)[None, ...]
+            return
+        for lo in range(start, end, batch_size):
+            hi = min(lo + batch_size, end)
+            yield np.asarray(dset[lo:hi], dtype=np.float32)
+
+
 def remap_to_composite(image: np.ndarray, row_coords: np.ndarray,
                        col_coords: np.ndarray, cval: float = np.nan) -> np.ndarray:
     return map_coordinates(image, [row_coords, col_coords],

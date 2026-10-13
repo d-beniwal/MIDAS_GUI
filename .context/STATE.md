@@ -1,11 +1,47 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-10-09 (Solve Cell: known-structure indexing at stage 3 and stage 5, plus a legend on the reciprocal-space plot — see DECISIONS)_
+_Last updated: 2026-10-13 (Calibrate tab: "Mean of frames" replaced with a Data-Viewer-style Projection card (max/sum/mean); ProjectionWorker now corrects each frame before reducing, everywhere it's used — see DECISIONS)_
 
 ## Now working on
 
 Nothing in progress.
+
+**2026-10-13 — Calibrate tab's "Mean of frames" replaced with a Projection
+card (max/sum/mean), same mechanics as the Data Viewer; correction order
+fixed everywhere `ProjectionWorker` is used.** Single-detector
+`tab_calibrate.py` only (Hydra calibration page's own "Mean of frames"
+untouched, by request). `ProjectionWorker` (shared by Data Viewer + Hydra
+Viewer) now corrects each frame *before* folding it into the reduction,
+batched for memory safety (new `DataLoaderPanel.iter_raw_batches`/
+`hydra.iter_stack_batches`, new `helpers.reduce_frames_batched`) rather than
+reducing raw frames and correcting the single result once (today's old
+order, which is a provable no-op for `max` but silently wrong for `sum` —
+the background/dark offset was applied once total instead of once per
+frame). Fixed a real latent bug along the way: `apply_field_corrections`'s
+shape guard compared a batch's full shape against a 2-D field instead of
+just the trailing two dims, so it would have silently skipped every batched
+correction. `CalibrationTab._run()`/`_run_integration()` both pass
+`dark=bright=background=None` downstream when a projection is active (it's
+already fully corrected) to avoid double-correcting. See DECISIONS
+2026-10-13 for the full design and why `sum`/`mean`/`max` behave differently
+under the order change.
+**Verified:** `tests/test_calibrate_projection.py` (new, 7 tests, incl. one
+end-to-end real-`ProjectionWorker` run), `tests/test_helpers.py` (+9:
+batch-shape-check fix, `reduce_frames_batched` correctness incl. the
+order-change proofs for sum/max), plus the full existing Calibrate/Hydra/
+Data-Viewer test surface re-run green per-file on a clean `HOME`
+(`test_calib_radial_threshold`, `test_calibrate_workdir`,
+`test_calibrate_panel_save`, `test_calibrate_state_restore`,
+`test_manual_dspacing_calib_ui`, `test_calibration_subprocess`, `test_smoke`,
+`test_hydra_ui`, `test_hydra_calib_ui`, `test_hydra_batch_ui`,
+`test_view_tab_controls` — the last two per their own documented non-forked/
+forked quirks in this same file). `pyflakes` unchanged (40 warnings,
+whole-package count, before and after). Offscreen screenshot confirmed the
+new card's layout (Method radios, Skip/N-frames, Project/Use-current-frame
+buttons) in the position "Mean of frames" used to occupy.
+**Not verified with eyes on it:** no real multi-frame HDF5 dataset exercised
+live through the new card (only a synthetic TIFF stack in tests/screenshot).
 
 Open follow-ups, none blocking:
 - **Solve Cell Phase 2+ still open** (`documentation/solve_cell_handoff.md` §10): geometry-resolution tiers keyed on detector stage position, self-cal fallback, bootstrap CI/axis-doubling on the pooled fit, further multi-domain separation, and the diagnostics suite are all still future work beyond what's landed (per-panel UI, calibration-file-only geometry, dark/bright/background/mask in `_stage_ingest`, explicit frame-index→omega window, multi-panel pooled ingest, leftover-spot re-indexing, and the reciprocal-space viewer's Panel/Crystal color modes).

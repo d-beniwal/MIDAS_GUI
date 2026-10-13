@@ -857,7 +857,8 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         self._proj_workers = {}
         for n, path in self._siblings.items():
             w = ProjectionWorker(
-                lambda p=path: hydra.load_full_stack(p, self.DATASET), method, 0, skip, nframes,
+                lambda s, e, p=path: hydra.iter_stack_batches(p, self.DATASET, s, e),
+                hydra.n_frames_in(path, self.DATASET), method, skip, nframes,
                 dark=self.dark(n), bright=self.bright(n), background=self.background(n),
                 bright_mode=self.bright_mode(), parent=self)
             w.finished.connect(lambda img, info, n=n: self._on_one_projected(n, img, info))

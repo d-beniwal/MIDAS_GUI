@@ -3,6 +3,117 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-13 — Calibrate tab: "Mean of frames" replaced with a Projection card; ProjectionWorker corrects each frame before reducing, everywhere it's used
+
+**Problem.** The Calibrate tab's "Mean of frames in single image" card only
+offered a mean over a frame range (`DataLoaderPanel.mean_frames`), unlike the
+Data Viewer's "Projection" card (max/sum/mean). Requested: replace it with
+the same Projection mechanics, output feeding the calibration pipeline the
+way the mean used to. Separately requested: whenever dark/bright/background
+correction is applied, projection should happen *after* each frame is
+corrected individually, not once after reducing.
+
+**Scope, per explicit user choices (asked via clarifying questions):**
+(1) single-detector `tab_calibrate.py` only — Hydra's own "Mean of frames
+(shared range)" card (`hydra_calib_page.py`, built on `helpers.average_field`
+rather than `DataLoaderPanel.mean_frames`) is untouched, a separate future
+task if ever wanted; (2) the correction-order fix applies everywhere the
+shared `workers.ProjectionWorker` is used — i.e. it also changes Data
+Viewer's and Hydra Viewer's existing Projection features as a side effect of
+fixing the one worker class they share, not just the new Calibrate card;
+(3) batching is vectorized per-batch (not a per-frame Python loop), bounded
+in memory, not a full-stack eager load — the user noted corrections are
+broadcastable 2-D fields applied to a whole batch at once, so per-frame
+streaming would be "very inefficient."
+
+**Why the correction order matters, and why it affects each method
+differently (verified algebraically, not just asserted).** Dark/bright/
+background correction is a per-pixel, per-frame-identical affine map
+`out = a·raw + b` (a>0), optionally followed by one `clip(·, 0, None)`.
+A monotonic transform commutes with `max` exactly, clip included — so `max`
+projections are **numerically unchanged** by this refactor; it was never
+actually a bug for `max`, only for `sum` (and a narrow case of `mean`).
+`sum`: summing `n` already-corrected frames applies the background/dark
+offset once per frame (physically correct — each real frame really did
+carry that offset); correcting the raw sum once (today's old order) applies
+it exactly once regardless of `n` — a real, large, guaranteed-wrong-by-a-
+factor-of-`n` bug for background/dark terms specifically (bright's
+multiplicative term is unaffected by sum/mean order, only by clipping).
+`mean` is identical to the old order algebraically (`mean(a·x+b) = a·mean(x)+b`)
+*unless* at least one individual frame's corrected value would go negative
+and get clipped — the old order never had a chance to clip per-frame, so
+this is the subtle divergence case. Test suite pins all three: `max` as a
+no-regression check against the old order, `sum` as the headline
+"must differ, and differ by exactly this much" regression, `mean` with a
+deliberately-dim synthetic frame for the clip-divergence case.
+
+**New shared primitives, reused by all three `ProjectionWorker` call sites
+(Data Viewer, Hydra Viewer, Calibrate).**
+- `helpers.reduce_frames_batched(batch_iter, method, *, dark=, bright=,
+  background=, bright_mode=)` — consumes `(B,H,W)` batches, applies
+  `apply_field_corrections` per batch (vectorized), folds each corrected
+  batch into a running accumulator (`max`→`np.maximum`; `sum`/`mean`→always
+  a running **sum**, divided by the true total frame count once at the end
+  — never an average-of-batch-means, which breaks the moment the final batch
+  is a different size). Reuses the existing `_COMBINE_OPS` dict rather than
+  adding a third hardcoded max/sum dispatch table.
+- Fixed a real, previously-latent bug found while building this:
+  `apply_field_corrections`'s shape guard compared `arr.shape != out.shape`,
+  which is correct for a single 2-D frame but breaks the instant `out` is a
+  batch `(B,H,W)` — every batched correction would have been silently
+  skipped as "mismatched shape". Changed to compare against
+  `out.shape[-2:]`; a no-op for every pre-existing 2-D caller (confirmed by
+  grep — every other caller in the repo only ever passes single frames).
+- `DataLoaderPanel.iter_raw_batches(start, end, batch_size=None)` (new,
+  `widgets.py`) and `hydra.iter_stack_batches(path, dataset, start, end,
+  batch_size=None)` (new) — memory-bounded batched reads, dispatching on the
+  same source "kinds" `full_stack()`/`load_full_stack()` already use. The
+  HDF5 branch is the one with a real win: opens `h5py.File` **once** for the
+  generator's lifetime and slices `dset[lo:hi]` per batch, instead of
+  `full_stack()`'s `f[dset][()]` (whole dataset into RAM) or `_get_frame()`'s
+  open-close-per-frame. Default batch size: peek one frame's `nbytes`,
+  target ~256 MiB/batch, clamped to [8, 256] frames — no existing
+  memory-fraction-based auto-sizing convention in this codebase to reuse
+  (the batch/integrate pipeline's `chunk_size` is always user-specified),
+  and deliberately NOT based on live `psutil` memory (would make summation
+  order, and so floating-point results, depend on system load).
+  `DataLoaderPanel.mean_frames()` is now dead code (confirmed single caller
+  was `tab_calibrate.py`) — deleted.
+- `ProjectionWorker` (`workers.py`) constructor changed from
+  `(full_stack_fn, method, axis, skip, nframes, ...)` to `(batch_iter_fn,
+  total_frames, method, skip, nframes, ...)` — `axis` was always `0` at
+  both pre-existing call sites, so dropped; `total_frames` is needed up
+  front (no more eager load to read `.shape[0]` off of). No test anywhere
+  constructed/mocked `ProjectionWorker` (confirmed by repo-wide grep), so
+  this was a free signature change.
+
+**Calibrate tab wiring (`tab_calibrate.py`).** New state: `_proj_active`,
+`_proj_image` (always fully corrected once set), `_proj_worker`. `_source_
+image()` returns the projection when active, else the raw current frame —
+same contract shape as the old mean-of-frames branch. Because the
+projection is pre-corrected, both consumers that separately apply dark/
+bright/background must skip doing so again when `_proj_active`:
+`_run()` (the actual `CalibrationWorker` fit) and, easy to miss,
+`_run_integration()` (the post-fit profile/cake preview and "Re-integrate" —
+an independent second consumer of `self._dark`/`self._loader.bright()`/
+`.background()` that would otherwise double-correct the preview even though
+the fit itself was correct). `_show_calib_image()` likewise skips
+`self._loader.corrected(...)` when showing an active projection, for the
+same reason. Not persisted across project save/restore: `_proj_active`/
+`_proj_image` — same precedent as the Data Viewer not persisting its own
+projected result; the Method radios and skip/n-frames values ARE persisted
+(each radio registered individually under its own key in `_state_widgets()`,
+following the existing precedent in `tab_refine.py` for persisting a
+radio-button group — `widgets_to_dict`/`apply_dict_to_widgets` already
+handle `QRadioButton` with no changes needed, since it's a `QAbstractButton`).
+A stale projection is dropped on any new data load or frame-navigation event
+(`_sync_proj_controls`, called from `_on_loader_data` where `_sync_avg_
+controls` used to be) — mirrors the Data Viewer's own `_on_loader_data`
+unconditionally resetting its projection state.
+
+**Verified:** see STATE.md 2026-10-13 for the full test-file sweep and
+screenshot confirmation.
+
 ## 2026-10-09 — Solve Cell: user-supplied known-structure indexing at stage 3 and stage 5; space group is diagnostic-only; reciprocal-space plot gets a legend
 
 **Problem.** The only "known structure" path anywhere in Solve Cell was

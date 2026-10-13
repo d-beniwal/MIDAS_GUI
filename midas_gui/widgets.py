@@ -5249,25 +5249,61 @@ class DataLoaderPanel(QtWidgets.QWidget):
             return "loaded"
         return "none"
 
-    def mean_frames(self, start=0, end=None, step=1):
-        """Mean of frames ``start:end:step`` (end None/<=0 = all), streamed one
-        frame at a time so large folders / HDF5 stacks stay memory-safe.
+    _PROJECTION_BATCH_BYTES = 256 * 1024 * 1024
+    _PROJECTION_BATCH_MIN = 8
+    _PROJECTION_BATCH_MAX = 256
 
-        Returns a float32 2-D array, or None if no data / no frames selected.
+    def _default_batch_size(self, start: int) -> int:
+        frame = self._get_frame(start)
+        nbytes = max(1, frame.nbytes)
+        return max(self._PROJECTION_BATCH_MIN,
+                  min(self._PROJECTION_BATCH_MAX, self._PROJECTION_BATCH_BYTES // nbytes))
+
+    def iter_raw_batches(self, start=0, end=None, batch_size=None):
+        """Yield raw, uncorrected ``(b,H,W)`` batches covering ``[start, end)``.
+
+        Memory-bounded for HDF5/folder sources (opens the HDF5 file once and
+        slices it, rather than ``full_stack()``'s eager whole-dataset read);
+        for an already-in-RAM source (live buffer / loaded TIFF stack) this
+        just bounds how much is corrected/reduced per step. Used by
+        ``workers.ProjectionWorker`` via ``helpers.reduce_frames_batched``.
         """
-        if self._nframes == 0:
-            return None
-        end = self._nframes if (end is None or end <= 0) else min(int(end), self._nframes)
-        start = max(0, int(start))
-        step = max(1, int(step))
-        acc, n = None, 0
-        for i in range(start, end, step):
-            a = self._get_frame(i).astype(np.float64)
-            acc = a if acc is None else acc + a
-            n += 1
-        if n == 0:
-            return None
-        return (acc / n).astype(np.float32)
+        if self._external is not None:
+            yield from self._external.iter_raw_batches(start, end, batch_size)
+            return
+        n = self._nframes
+        end = n if end is None else min(end, n)
+        start = max(0, start)
+        if start >= end:
+            return
+        if batch_size is None:
+            batch_size = self._default_batch_size(start)
+        with self._buffer_lock:
+            frames = list(self._buffer) if (self._buffer_frozen and self._buffer) else None
+        if frames is not None:
+            arr = np.stack([np.asarray(f, dtype=np.float32) for f in frames], axis=0)
+            for lo in range(start, end, batch_size):
+                yield arr[lo:min(lo + batch_size, end)]
+            return
+        if self._stack is not None:
+            for lo in range(start, end, batch_size):
+                yield np.asarray(self._stack[lo:min(lo + batch_size, end)], dtype=np.float32)
+            return
+        if self._h5 is not None:
+            import h5py
+            path, dset_name, _ = self._h5
+            with h5py.File(path, "r") as f:
+                dset = f[dset_name]
+                for lo in range(start, end, batch_size):
+                    hi = min(lo + batch_size, end)
+                    yield np.asarray(dset[lo:hi], dtype=np.float32)
+            return
+        if self._paths is not None:
+            for lo in range(start, end, batch_size):
+                hi = min(lo + batch_size, end)
+                yield np.stack([self._get_frame(i) for i in range(lo, hi)], axis=0)
+            return
+        raise RuntimeError("No data loaded")
 
     # ── public API ────────────────────────────────────────────────
     def set_path(self, path, dataset=None, *, load=True):

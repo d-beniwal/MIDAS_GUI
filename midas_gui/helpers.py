@@ -1022,6 +1022,10 @@ def apply_field_corrections(img: np.ndarray, *, dark=None, bright=None,
     left over from reusing a session saved against a different detector) is
     skipped rather than raising — mirrors ``MaskSelector.composite_mask()``'s
     "skip + warn" handling of a mismatched mask source.
+
+    ``img`` may also be a stack ``(B,H,W)`` — each field is still 2-D and is
+    broadcast across the batch axis (checked against ``img``'s trailing two
+    dimensions, not its full shape).
     """
     import warnings
     out = np.asarray(img, dtype=np.float64)
@@ -1030,10 +1034,10 @@ def apply_field_corrections(img: np.ndarray, *, dark=None, bright=None,
         if field is None:
             return None
         arr = np.asarray(field, dtype=np.float64)
-        if arr.shape != out.shape:
+        if arr.shape != out.shape[-2:]:
             warnings.warn(
                 f"apply_field_corrections: {label} shape {arr.shape} != "
-                f"image shape {out.shape} — skipped", RuntimeWarning, stacklevel=2)
+                f"image shape {out.shape[-2:]} — skipped", RuntimeWarning, stacklevel=2)
             return None
         return arr
 
@@ -1055,6 +1059,50 @@ def apply_field_corrections(img: np.ndarray, *, dark=None, bright=None,
     if clip_negative:
         out = np.clip(out, 0.0, None)
     return out
+
+
+def reduce_frames_batched(batch_iter, method: str, *, dark=None, bright=None,
+                          background=None, bright_mode: str = "divide"):
+    """Project a frame stack (max/sum/mean) with each frame corrected
+    BEFORE it's folded into the reduction, one batch at a time so peak
+    memory is one batch, not the whole stack.
+
+    ``batch_iter`` yields ``(B,H,W)`` raw arrays (e.g. from
+    ``DataLoaderPanel.iter_raw_batches``/``hydra.iter_stack_batches``).
+    Correction is applied per batch via ``apply_field_corrections``
+    (vectorized across the batch), then each corrected batch is folded into
+    a running accumulator — ``max`` via ``np.maximum``, ``sum``/``mean`` via
+    a running sum (never an average of per-batch means, which would be wrong
+    once the final batch is a different size) divided by the true total
+    frame count once at the end for ``mean``.
+
+    Returns ``(result: np.ndarray float32 2-D, n_used: int)``. Raises
+    ``ValueError`` if ``batch_iter`` yields no frames.
+    """
+    method = "mean" if method == "average" else method
+    corrected_fields = dark is not None or bright is not None or background is not None
+    acc = None
+    n_used = 0
+    for batch in batch_iter:
+        batch = np.asarray(batch)
+        if batch.ndim != 3 or batch.shape[0] == 0:
+            continue
+        if corrected_fields:
+            batch = apply_field_corrections(
+                batch, dark=dark, bright=bright, bright_mode=bright_mode,
+                background=background)
+        if method == "max":
+            reduced = _COMBINE_OPS["max"](batch)
+            acc = reduced if acc is None else np.maximum(acc, reduced)
+        else:
+            reduced = _COMBINE_OPS["sum"](batch)
+            acc = reduced if acc is None else acc + reduced
+        n_used += batch.shape[0]
+    if acc is None or n_used == 0:
+        raise ValueError("No frames to reduce")
+    if method == "mean":
+        acc = acc / n_used
+    return acc.astype(np.float32), n_used
 
 
 # ── Ring prediction (calibrant → ring radii in px) ──────────────────────────────

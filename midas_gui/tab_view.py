@@ -660,7 +660,7 @@ class DataViewerTab(QtWidgets.QWidget):
         self._info_lbl.setText("Projecting stack…")
         self._proj_btn.setEnabled(False)
         self._proj_worker = ProjectionWorker(
-            self._loader.full_stack, method, 0, skip, nframes,
+            self._loader.iter_raw_batches, self._loader.n_frames(), method, skip, nframes,
             dark=self._loader.dark(), bright=self._loader.bright(),
             background=self._loader.background(), bright_mode=self._loader.bright_mode(),
             parent=self)

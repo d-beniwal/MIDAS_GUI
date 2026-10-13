@@ -772,6 +772,104 @@ def test_apply_field_corrections_skips_mismatched_shape_instead_of_raising():
     assert np.allclose(out2, 9.0)   # matching-shape dark still applies normally
 
 
+def test_apply_field_corrections_broadcasts_2d_fields_over_a_batch():
+    """``reduce_frames_batched`` calls ``apply_field_corrections`` on a
+    ``(B,H,W)`` batch with 2-D dark/bright/background fields — the shape
+    guard must compare against the image's trailing two dims, not its full
+    shape, or every batched call is skipped as "mismatched"."""
+    from midas_gui.helpers import apply_field_corrections
+
+    batch = np.full((4, 10, 10), 5.0)
+    dark = np.full((10, 10), 1.0)
+    background = np.full((10, 10), 0.5)
+
+    out = apply_field_corrections(batch, dark=dark, background=background)
+    assert out.shape == (4, 10, 10)
+    assert np.allclose(out, 5.0 - 1.0 - 0.5)
+
+
+def test_reduce_frames_batched_max_matches_numpy_max_across_batches():
+    from midas_gui.helpers import reduce_frames_batched
+
+    frames = np.arange(5 * 4 * 4, dtype=np.float32).reshape(5, 4, 4)
+
+    def batches():
+        yield frames[0:2]
+        yield frames[2:5]
+
+    out, n_used = reduce_frames_batched(batches(), "max")
+    assert n_used == 5
+    assert np.array_equal(out, frames.max(axis=0))
+
+
+def test_reduce_frames_batched_sum_and_mean_not_averaged_of_batch_means():
+    """A naive "average the per-batch reductions" is wrong once the final
+    batch is a different size — this must accumulate a running sum and
+    divide by the TRUE total count once at the end."""
+    from midas_gui.helpers import reduce_frames_batched
+
+    frames = np.arange(5 * 3 * 3, dtype=np.float32).reshape(5, 3, 3)
+
+    def batches(bs):
+        for lo in range(0, 5, bs):
+            yield frames[lo:lo + bs]
+
+    out_sum, n_sum = reduce_frames_batched(batches(2), "sum")
+    assert n_sum == 5
+    assert np.allclose(out_sum, frames.sum(axis=0))
+
+    out_mean, n_mean = reduce_frames_batched(batches(2), "mean")
+    assert n_mean == 5
+    assert np.allclose(out_mean, frames.mean(axis=0))
+
+
+def test_reduce_frames_batched_raises_on_no_frames():
+    from midas_gui.helpers import reduce_frames_batched
+
+    with pytest.raises(ValueError):
+        reduce_frames_batched(iter(()), "max")
+
+
+def test_reduce_frames_batched_corrects_each_frame_before_reducing():
+    """The whole point of this refactor: each frame is corrected BEFORE
+    being folded into the reduction, not once after. For ``sum`` this
+    produces a very different (and physically correct) result than
+    correcting the final reduced image once — the background offset must
+    appear once per frame, not once total."""
+    from midas_gui.helpers import reduce_frames_batched, apply_field_corrections
+
+    n = 4
+    frames = np.stack([np.full((3, 3), 10.0 + i) for i in range(n)], axis=0)
+    background = np.full((3, 3), 2.0)
+
+    out_sum, n_used = reduce_frames_batched(iter([frames]), "sum", background=background)
+    assert n_used == n
+    # Correct-then-reduce: sum of (frame_i - background) for each frame.
+    expected = sum((f - background) for f in frames)
+    assert np.allclose(out_sum, expected)
+
+    # This must differ from the old "reduce raw, correct once" order, which
+    # applied the background offset exactly once regardless of frame count.
+    old_order = apply_field_corrections(frames.sum(axis=0), background=background)
+    assert not np.allclose(out_sum, old_order)
+
+
+def test_reduce_frames_batched_max_is_order_invariant():
+    """Unlike sum, max under a monotone per-pixel correction (affine, same
+    for every frame) commutes with the reduction — correcting each frame
+    first and taking max must equal taking max first and correcting once."""
+    from midas_gui.helpers import reduce_frames_batched, apply_field_corrections
+
+    rng = np.random.default_rng(0)
+    frames = rng.uniform(0, 100, size=(6, 5, 5)).astype(np.float32)
+    dark = rng.uniform(0, 5, size=(5, 5)).astype(np.float32)
+    background = rng.uniform(0, 5, size=(5, 5)).astype(np.float32)
+
+    out_new, _ = reduce_frames_batched(iter([frames]), "max", dark=dark, background=background)
+    out_old = apply_field_corrections(frames.max(axis=0), dark=dark, background=background)
+    assert np.allclose(out_new, out_old)
+
+
 # ── browse_start_dir / warn_if_path_missing ──────────────────────────────
 
 def test_browse_start_dir_existing_directory_is_used_directly(tmp_path):
