@@ -174,3 +174,74 @@ def test_a_single_folder_job_renders_exactly_as_before(qapp):
     assert j.progress.format() == "%v / %m frames"
     assert j.progress.maximum() == 877
     assert j.progress.value() == 300
+
+
+# ── process-level fan-out (_parallel_script) ─────────────────────────────
+# A chained job ran strictly one step at a time, so a Hydra sweep used ~4
+# cores of the 96 on the processing host. These pin the generated shell:
+# units overlap, a unit's tail waits for its own parallel part and nothing
+# else, and one failure neither stops the rest nor is swallowed.
+#
+# Generated in the shell rather than threaded inside batch_cli on purpose:
+# BatchRunCoordinator needs a Qt event loop, and in a detached screen
+# session a signal that never arrives is a job that hangs forever, which is
+# worse than one that is slow.
+
+def _run_script(tmp_path, units, max_parallel, name="s.sh"):
+    import subprocess
+    from midas_gui.job_queue import _parallel_script
+    p = tmp_path / name
+    p.write_text("#!/bin/bash\n" + _parallel_script(str(tmp_path), units,
+                                                    max_parallel) + "\n")
+    r = subprocess.run(["bash", str(p)], capture_output=True, text=True,
+                       timeout=120)
+    return r.stdout
+
+
+def test_a_units_tail_runs_after_its_own_parallel_part(tmp_path):
+    """The combine must see all of its scan's panels — and only wait for
+    those, not for every other scan in the job."""
+    out = _run_script(tmp_path, [
+        {"parallel": [["echo", "p1"], ["echo", "p2"]], "then": [["echo", "combine"]]},
+    ], 1)
+    assert out.index("p1") < out.index("combine")
+    assert out.index("p2") < out.index("combine")
+
+
+def test_units_actually_overlap(tmp_path):
+    """The point of the whole change. Four one-second units take ~4s at
+    MAXJ=1 and ~1s at MAXJ=4; compare the two rather than timing one, so a
+    slow machine cannot make this flaky."""
+    import time
+    units = [{"parallel": [["sleep", "0.6"]], "then": []} for _ in range(4)]
+    t0 = time.time(); _run_script(tmp_path, units, 1, "seq.sh"); seq = time.time() - t0
+    t1 = time.time(); _run_script(tmp_path, units, 4, "par.sh"); par = time.time() - t1
+    assert par < seq - 1.0, f"no speedup: sequential {seq:.1f}s vs parallel {par:.1f}s"
+
+
+def test_one_failing_step_neither_stops_the_rest_nor_is_swallowed(tmp_path):
+    """Each unit runs in a background subshell, so `rc=$?` inside it would
+    be set in a child and lost — failures go to a temp file instead."""
+    out = _run_script(tmp_path, [
+        {"parallel": [["false"], ["echo", "sibling-ok"]], "then": [["echo", "tail-ok"]]},
+        {"parallel": [["echo", "later-unit-ok"]], "then": []},
+    ], 2)
+    assert "sibling-ok" in out and "tail-ok" in out and "later-unit-ok" in out
+    assert "DONE exit=1" in out, "a failed step must still fail the job"
+
+
+def test_an_all_clean_parallel_job_exits_zero(tmp_path):
+    out = _run_script(tmp_path, [{"parallel": [["true"]], "then": [["true"]]}], 2)
+    assert "DONE exit=0" in out
+
+
+def test_units_announce_themselves_for_the_progress_bar(tmp_path):
+    """JobQueuePanel counts 'unit N/M done' lines. They arrive out of order
+    under concurrency, which is why it counts them instead of reading the
+    last number."""
+    import re
+    out = _run_script(tmp_path, [
+        {"parallel": [["echo", "a"]], "then": []},
+        {"parallel": [["echo", "b"]], "then": []},
+    ], 2)
+    assert len(re.findall(r"\[launcher\] unit \d+/2 done", out)) == 2
