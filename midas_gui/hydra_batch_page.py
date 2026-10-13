@@ -592,6 +592,32 @@ class HydraBatchPage(QtWidgets.QWidget):
             "jobs' panel below.")
         self._run_job_btn.clicked.connect(self._run_as_job)
         run_card.body.addWidget(self._run_job_btn)
+        # How many SCANS a background job runs at once. Panels within a scan
+        # always run together (they are independent and a scan's combine
+        # waits only for its own), so the process count is roughly this x4.
+        #
+        # Background-job only, and deliberately separate from the two
+        # in-process Run-mode controls above: those drive threads inside
+        # this GUI, this drives separate OS processes in the detached
+        # session, where there is no GIL and no shared Qt state.
+        jp_row = QtWidgets.QHBoxLayout(); jp_row.setSpacing(6)
+        jp_row.addWidget(QtWidgets.QLabel("Background job — scans at once:"))
+        self._job_scans = _NoScrollSpinBox()
+        self._job_scans.setRange(1, 64)
+        self._job_scans.setValue(1)
+        self._job_scans.setToolTip(
+            "How many scans a background job processes concurrently. Each "
+            "scan runs all of its panels at once, so the number of "
+            "processes is about this times the panel count.\n\n"
+            "1 keeps the old strictly-sequential behaviour. Raising it is "
+            "the main reason to use a background job on a big sweep: the "
+            "in-process run is limited to one scan at a time.\n\n"
+            "The ceiling is usually the output filesystem, not CPU — a scan "
+            "writes a few thousand small files, so try 4 before 16 and "
+            "watch whether the rate actually improves.")
+        jp_row.addWidget(self._job_scans)
+        jp_row.addStretch(1)
+        run_card.body.addLayout(jp_row)
         self._prog = QtWidgets.QProgressBar(); self._prog.setRange(0, 0); self._prog.setVisible(False)
         run_card.body.addWidget(self._prog)
         lv.addWidget(run_card)
@@ -1871,24 +1897,33 @@ class HydraBatchPage(QtWidgets.QWidget):
         combine = (getattr(self, "_combine_zarr_chk", None) is not None
                    and self._combine_zarr_chk.isChecked()
                    and "zarr" in fmts)
-        argvs = []
+        # One UNIT per scan: its panels run concurrently, then its combine.
+        # That is the real dependency shape -- four independent panels, and
+        # a merge that needs all four -- so the launcher can overlap them
+        # without any ordering risk (job_queue._parallel_script).
+        units, argvs = [], []
         for out_dir, panel_paths in scans:
-            ran = []
+            ran, par = [], []
             for n in sorted(panel_paths):
                 paths = list(panel_paths.get(n) or [])
                 if not paths or n not in base:
                     continue
-                argvs.append(base[n] + self._source_job_args(n, paths)
-                             + ["--out-dir", str(Path(out_dir) / f"ge{n}")])
+                par.append(base[n] + self._source_job_args(n, paths)
+                           + ["--out-dir", str(Path(out_dir) / f"ge{n}")])
                 ran.append(n)
+            if not par:
+                continue
+            tail = []
             # Only the panels this scan actually integrates. Naming a skipped
             # panel would make find_panel_zarr_sets look for an archive that
             # is never written, and every frame would then be "incomplete"
             # and silently merge nothing.
             if combine and len(ran) >= 2:
-                argvs.append([sys.executable, "-m", "midas_gui.hydra_combine_cli",
-                              "--out-dir", str(out_dir),
-                              "--panels", *[f"ge{n}" for n in ran]])
+                tail.append([sys.executable, "-m", "midas_gui.hydra_combine_cli",
+                             "--out-dir", str(out_dir),
+                             "--panels", *[f"ge{n}" for n in ran]])
+            units.append({"parallel": par, "then": tail})
+            argvs.extend(par + tail)
         if not argvs:
             QtWidgets.QMessageBox.warning(
                 self, "No data", "No panel of any selected scan has files.")
@@ -1908,19 +1943,25 @@ class HydraBatchPage(QtWidgets.QWidget):
         except Exception:
             pass
 
+        n_par = max(1, int(self._job_scans.value()))
         job = self._job_queue.launch(
             argvs[0], name=root.name or "hydra", total_frames=total,
             out_dir=str(Path(scans[0][0]) / f"ge{sorted(scans[0][1])[0]}"),
-            extra_argvs=argvs[1:])
+            units=units, max_parallel=n_par)
         if job is None:
             return
         self._log.append(
             f"[hydra] Launched background job: {job.session}\n"
             f"[hydra]   reattach with:  screen -r {job.session}")
         self._log.append(
-            f"[hydra] {len(scans)} scan(s) x {len(panels)} panel(s)"
+            f"[hydra] {len(units)} scan(s) x {len(panels)} panel(s)"
             + (" + combine" if combine else "")
-            + f" = {len(argvs)} step(s), run in order in that one session.")
+            + f" = {len(argvs)} step(s) in that one session.")
+        self._log.append(
+            f"[hydra] {n_par} scan(s) at a time, panels within a scan all at "
+            f"once — up to ~{n_par * max(1, len(panels))} processes. Each "
+            f"scan's combine waits for its own four panels, not for the "
+            f"whole run.")
         for n, msg in skipped:
             # Same outcome as an in-process run's _skip_panel, and said
             # before the job starts rather than discovered in the screenlog.
@@ -2689,6 +2730,7 @@ class HydraBatchPage(QtWidgets.QWidget):
             "azim": self._azim, "var_check": self._var_check, "err_model": self._err_model,
             "multi_azimuth": self._multi_azimuth_chk,
             "preview_sum_n": self._preview_sum_n,
+            "job_scans": self._job_scans,
             "ion_env_chk": self._ion_env_chk,
             "ion_motors_chk": self._ion_motors_chk,
             "bin_type": self._bin_type, "q_min": self._q_min, "q_max": self._q_max,

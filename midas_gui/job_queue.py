@@ -44,6 +44,11 @@ _SESSION_PREFIX = "midasgui_batch_"
 _PROGRESS_RE = re.compile(r"\[(?:batch|correct)\] PROGRESS (\d+)/(\d+)")
 #: Emitted by JobQueuePanel.launch between chained per-folder runs.
 _STEP_RE = re.compile(r"\[launcher\] step (\d+)/(\d+)")
+# A parallel job reports units finishing, not steps starting -- and they
+# finish out of order, so the LAST line seen is not the highest. Progress
+# counts how many "done" lines have appeared rather than trusting their
+# numbering (see JobQueuePanel._update_job_progress).
+_UNIT_DONE_RE = re.compile(r"\[launcher\] unit (\d+)/(\d+) done")
 _DONE_RE = re.compile(r"\[launcher\] DONE exit=(\d+)")
 
 _LOG_RULES = [
@@ -77,6 +82,11 @@ class Job:
     step: int = 0
     n_steps: int = 1
     step_total: int = 1
+    #: Set when the launcher ran units CONCURRENTLY (see _parallel_script).
+    #: Units finish out of order, so progress counts completions in
+    #: units_done rather than reading the last unit number off the log.
+    parallel: bool = False
+    units_done: int = 0
     out_dir: str = ""                # where the job writes results — see
                                       # batch_cli._write_results_sidecar and
                                       # JobQueuePanel's on_job_done callback
@@ -113,6 +123,73 @@ def _screen_session_alive(session: str) -> bool:
 def _sanitize(name: str) -> str:
     name = re.sub(r"[^A-Za-z0-9._-]", "_", name.strip()) or "job"
     return name[:80]
+
+
+
+def _parallel_script(repo_root, units, max_parallel: int) -> str:
+    """Bash for ``units`` run with real process-level concurrency.
+
+    A *unit* is ``{"parallel": [argv, ...], "then": [argv, ...]}``: the
+    ``parallel`` commands all start at once, a barrier waits for them, then
+    the ``then`` commands run in order. That is exactly a Hydra scan -- four
+    panels that are independent, followed by a combine that needs all four.
+    ``max_parallel`` bounds how many UNITS are in flight, so the real process
+    count is roughly ``max_parallel * len(parallel)``.
+
+    PROCESSES, not threads, and generated in the shell rather than inside
+    Python. The alternative was to teach batch_cli to drive
+    BatchRunCoordinator, which needs a Qt event loop in a process that
+    deliberately has none -- and in a detached screen session a signal that
+    never arrives is a job that hangs forever instead of failing, which is
+    strictly worse than one that is slow. Here every step is the same
+    single-threaded batch_cli invocation that already works, one step
+    crashing cannot wedge the others, and there is no GIL in the picture.
+
+    Failures are collected in a temp file rather than a variable: each unit
+    runs in a background subshell, so an `rc=$?` inside it would be set in a
+    child and lost. The file is removed on the way out; its existence at the
+    end is what makes the exit code non-zero.
+    """
+    jobs = max(1, int(max_parallel or 1))
+    total = len(units)
+    out = [
+        f"cd {shlex.quote(str(repo_root))} || exit 1",
+        'fail_file="$(mktemp)"',
+        f"MAXJ={jobs}",
+        "",
+        "# Block until a slot frees. `wait -n` needs bash 4.3+ (RHEL 9 is 5.x).",
+        "sem() {",
+        '  while [ "$(jobs -rp | wc -l)" -ge "$MAXJ" ]; do wait -n 2>/dev/null || break; done',
+        "}",
+        "",
+    ]
+    for i, unit in enumerate(units, 1):
+        par = list(unit.get("parallel") or [])
+        tail = list(unit.get("then") or [])
+        body = [f'  echo "[launcher] unit {i}/{total} start"']
+        for a in par:
+            line = " ".join(shlex.quote(str(c)) for c in a)
+            body.append('  { ' + line + ' ; } || echo 1 >> "$fail_file" &')
+        if par:
+            body.append("  wait")
+        for a in tail:
+            line = " ".join(shlex.quote(str(c)) for c in a)
+            body.append('  { ' + line + ' ; } || echo 1 >> "$fail_file"')
+        body.append(f'  echo "[launcher] unit {i}/{total} done"')
+        out.append(f"unit_{i}() {{")
+        out.extend(body)
+        out.append("}")
+    out.append("")
+    for i in range(1, total + 1):
+        out.append(f"sem; unit_{i} &")
+    out += [
+        "wait",
+        'rc=0; [ -s "$fail_file" ] && rc=1',
+        'rm -f "$fail_file"',
+        'echo "[launcher] DONE exit=$rc"',
+        "sleep 3",
+    ]
+    return "\n".join(out)
 
 
 class JobQueuePanel(QtWidgets.QWidget):
@@ -187,7 +264,9 @@ class JobQueuePanel(QtWidgets.QWidget):
     # ── Launch ───────────────────────────────────────────────────────
 
     def launch(self, argv: list, *, name: str, total_frames: int,
-              out_dir: str = "", extra_argvs: Optional[list] = None) -> Optional[Job]:
+              out_dir: str = "", extra_argvs: Optional[list] = None,
+              units: Optional[list] = None,
+              max_parallel: int = 1) -> Optional[Job]:
         """Launch ``argv`` (e.g. ``[sys.executable, "-m", "midas_gui.batch_cli", ...]``)
         in a fresh detached ``screen`` session. Returns the new ``Job``, or
         ``None`` if ``screen`` isn't available or a same-named session is
@@ -237,18 +316,21 @@ class JobQueuePanel(QtWidgets.QWidget):
         # GUI itself happened to have, so pin it explicitly here rather
         # than relying on that.
         repo_root = Path(__file__).resolve().parent.parent
-        argvs = [argv] + list(extra_argvs or [])
-        # `|| rc=$?` rather than `&&`: one folder failing must not silently
-        # cancel the folders after it, but the job must still report failure.
-        steps = []
-        for _i, _a in enumerate(argvs, 1):
-            _line = " ".join(shlex.quote(str(c)) for c in _a)
-            if len(argvs) > 1:
-                steps.append(f'echo "[launcher] step {_i}/{len(argvs)}"')
-            steps.append("{ " + _line + " ; } || rc=$?")
-        inner = "; ".join(steps)
-        wrapped = (f'cd {shlex.quote(str(repo_root))} && rc=0; {inner}; '
-                   f'echo "[launcher] DONE exit=$rc"; sleep 3')
+        if units:
+            wrapped = _parallel_script(repo_root, units, max_parallel)
+        else:
+            argvs = [argv] + list(extra_argvs or [])
+            # `|| rc=$?` rather than `&&`: one folder failing must not silently
+            # cancel the folders after it, but the job must still report failure.
+            steps = []
+            for _i, _a in enumerate(argvs, 1):
+                _line = " ".join(shlex.quote(str(c)) for c in _a)
+                if len(argvs) > 1:
+                    steps.append(f'echo "[launcher] step {_i}/{len(argvs)}"')
+                steps.append("{ " + _line + " ; } || rc=$?")
+            inner = "; ".join(steps)
+            wrapped = (f'cd {shlex.quote(str(repo_root))} && rc=0; {inner}; '
+                       f'echo "[launcher] DONE exit=$rc"; sleep 3')
         # Hand the script to bash as a FILE, not as a -c string. Linux caps a
         # single argv element at MAX_ARG_STRLEN (128 KiB), and the command is
         # one element: an 877-file selection is ~80 KB of paths and fit, but
@@ -516,6 +598,14 @@ class JobQueuePanel(QtWidgets.QWidget):
         text = data.decode("utf-8", errors="replace")
         for m in _STEP_RE.finditer(text):
             job.step, job.n_steps = int(m.group(1)), int(m.group(2))
+        # Parallel units complete out of order, so count completions rather
+        # than reading the last number -- "unit 7/40 done" arriving after
+        # "unit 12/40 done" must not move the bar backwards.
+        for m in _UNIT_DONE_RE.finditer(text):
+            job.units_done += 1
+            job.n_steps = int(m.group(2))
+            job.step = job.units_done
+            job.parallel = True
         last_done = last_total = None
         for m in _PROGRESS_RE.finditer(text):
             last_done, last_total = int(m.group(1)), int(m.group(2))
@@ -547,7 +637,15 @@ class JobQueuePanel(QtWidgets.QWidget):
             done = max(0, job.step - 1) + min(1.0, max(0.0, frac))
             bar.setRange(0, job.n_steps * 100)
             bar.setValue(int(round(done * 100)))
-            bar.setFormat(f"folder {job.step}/{job.n_steps} \u2014 "
+            noun = "unit" if job.parallel else "folder"
+            if job.parallel:
+                # Frame counts from concurrent units interleave in one log,
+                # so "n/total frames" would be a mix of several scans.
+                bar.setRange(0, max(1, job.n_steps))
+                bar.setValue(job.step)
+                bar.setFormat(f"unit {job.step}/{job.n_steps} (%p%)")
+                return
+            bar.setFormat(f"{noun} {job.step}/{job.n_steps} \u2014 "
                           f"{job.seen_frames}/{job.step_total} frames (%p%)")
         else:
             bar.setRange(0, max(1, job.total_frames))

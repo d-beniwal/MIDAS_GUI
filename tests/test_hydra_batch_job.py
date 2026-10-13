@@ -266,9 +266,14 @@ def test_the_launched_argvs_carry_each_panels_own_caking_and_calibration(
 
     captured = {}
 
-    def _fake_launch(self, argv, *, name, total_frames, out_dir="", extra_argvs=None):
+    def _fake_launch(self, argv, *, name, total_frames, out_dir="", **kw):
+        # **kw, not a fixed list: launch() grew units/max_parallel when the
+        # launcher learned to run scans concurrently, and a stub narrower
+        # than the thing it replaces fails the caller for a reason that has
+        # nothing to do with what is being tested.
         captured.update(argv=argv, name=name, total_frames=total_frames,
-                        out_dir=out_dir, extra=list(extra_argvs or []))
+                        out_dir=out_dir, units=kw.get("units") or [],
+                        max_parallel=kw.get("max_parallel", 1))
         return SimpleNamespace(session="midasgui_test_session")
 
     monkeypatch.setattr(job_queue_mod.JobQueuePanel, "launch", _fake_launch)
@@ -304,7 +309,9 @@ def test_the_launched_argvs_carry_each_panels_own_caking_and_calibration(
     # refusing the whole job.
     assert not dialogs, f"a modal dialog aborted the job: {dialogs}"
 
-    steps = [captured["argv"]] + captured["extra"]
+    # Flatten the per-scan units back into the step list this test reasons
+    # about: each unit is {parallel: [panels], then: [combine]}.
+    steps = [a for u in captured["units"] for a in (u["parallel"] + u["then"])]
     kinds = [s[2] for s in steps]      # [exe, "-m", module, ...]
     assert kinds[:2] == ["midas_gui.batch_cli"] * 2, kinds
     assert kinds[2] == "midas_gui.hydra_combine_cli", (
@@ -368,7 +375,8 @@ def test_the_launched_argvs_carry_each_panels_own_caking_and_calibration(
     assert page._rebin_unit() == "2th"
     captured.clear()
     page._run_as_job()
-    a2 = batch_cli._build_arg_parser().parse_args(captured["argv"][3:])
+    a2 = batch_cli._build_arg_parser().parse_args(
+        captured["units"][0]["parallel"][0][3:])
     assert a2.rebin_unit == "2th"
     assert (a2.rebin_min, a2.rebin_max, a2.rebin_step) == (
         page._tth_min.value(), page._tth_max.value(), page._tth_bin.value())
@@ -376,7 +384,7 @@ def test_the_launched_argvs_carry_each_panels_own_caking_and_calibration(
     page._bin_type.setCurrentIndex(0)
     captured.clear()
     page._run_as_job()
-    assert "--rebin-unit" not in captured["argv"]
+    assert "--rebin-unit" not in captured["units"][0]["parallel"][0]
 
     # A project saved before Bin type existed carried a Q-only checkbox;
     # dropping it would silently reopen a Q run as Radial.
@@ -398,7 +406,8 @@ def test_the_launched_argvs_carry_each_panels_own_caking_and_calibration(
     page._ion_motors_chk.setChecked(True)
     captured.clear()
     page._run_as_job()
-    a3 = batch_cli._build_arg_parser().parse_args(captured["argv"][3:])
+    a3 = batch_cli._build_arg_parser().parse_args(
+        captured["units"][0]["parallel"][0][3:])
     assert a3.multi_azimuth is True
     assert a3.ion_csv_extras == "env,motors"
 
@@ -481,3 +490,55 @@ def test_the_merged_view_tabs_exist_and_fill_from_a_merged_archive(app, tmp_path
     # A bad path is a log line, never an exception out of the combine step.
     page._populate_merged_views(str(tmp_path / "nope.zarr.zip"))
     assert "could not read back" in page._log.toPlainText()
+
+
+def test_a_background_job_is_emitted_as_concurrent_per_scan_units(
+        app, monkeypatch, tmp_path, dialogs):
+    """A Hydra scan is four independent panels plus a combine that needs
+    all four — so it is one UNIT, not five chained steps.
+
+    This was strictly sequential, which on a 96-core processing host used
+    about four of them. The launcher now overlaps whole scans; the shape
+    asserted here is what makes that safe, because a scan's combine waits
+    for its own panels and for nothing else.
+    """
+    if not FIXTURE_DIR.exists():
+        pytest.skip("test_data/gui_synthetic/hydra/ fixture not present")
+    import midas_gui.job_queue as job_queue_mod
+
+    cap = {}
+    monkeypatch.setattr(
+        job_queue_mod.JobQueuePanel, "launch",
+        lambda self, argv, **kw: (cap.update(kw), SimpleNamespace(session="s"))[1])
+
+    page = HydraBatchPage()
+    page._loader.set_path(str(FIXTURE_DIR / "ge1" / "panel.ge1.h5"))
+    for n in (1, 2):
+        page._cards[n]._json_ed.setText(str(FIXTURE_DIR / f"ge{n}" / f"ps_ge{n}.txt"))
+    for _k, _cb in page._fmt._checks.items():
+        _cb.setChecked(_k == "zarr")
+    page._combine_zarr_chk.setChecked(True)
+    page._out_ed.setText(str(tmp_path))
+    page._job_scans.setValue(5)
+    page._run_as_job()
+
+    units = cap.get("units")
+    assert units, f"no units emitted: {sorted(cap)}"
+    assert cap["max_parallel"] == 5, "the scans-at-once control did not reach launch()"
+    # The old flat chaining must be gone, or steps would run twice.
+    assert not cap.get("extra_argvs")
+
+    unit = units[0]
+    panels = [a[a.index("--out-dir") + 1].rsplit("/", 1)[-1]
+              for a in unit["parallel"]]
+    assert panels == ["ge1", "ge2"], panels
+    assert all("midas_gui.batch_cli" in a for a in unit["parallel"])
+    assert len(unit["then"]) == 1
+    assert "midas_gui.hydra_combine_cli" in unit["then"][0]
+
+    # And the generated shell really gates the combine on this scan's own
+    # panels — the property the whole fan-out depends on.
+    script = job_queue_mod._parallel_script("/repo", units, 5)
+    body = script[script.index("unit_1()"):]
+    assert body.index("wait") < body.index("hydra_combine_cli"), (
+        "the combine is not gated behind its panels")
