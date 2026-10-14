@@ -27,6 +27,7 @@ from PyQt5 import QtCore
 
 import midas_gui._paths  # noqa: F401  (sys.path setup before MIDAS imports)
 from midas_gui import calib_cli
+from midas_gui.constants import PROJECT_ROOT
 from midas_gui import h5_metadata
 from midas_gui import provenance
 from midas_gui import settings
@@ -979,6 +980,13 @@ class CalibrationWorker(QtCore.QObject):
 
         proc = QtCore.QProcess(self)
         proc.setProcessChannelMode(QtCore.QProcess.MergedChannels)
+        # `-m midas_gui.calib_cli` only resolves the `midas_gui` package when
+        # the process's cwd is the repo root (that's what puts the repo root
+        # on sys.path[0] for `-m`) on an install where midas_gui isn't a
+        # pip-installed package — otherwise this inherits whatever cwd the
+        # GUI itself happens to have. Same fix as job_queue.py's background
+        # jobs, which hit this for the identical reason.
+        proc.setWorkingDirectory(str(PROJECT_ROOT))
         proc.readyReadStandardOutput.connect(self._on_stdout)
         proc.finished.connect(self._on_process_finished)
         proc.errorOccurred.connect(self._on_process_error)

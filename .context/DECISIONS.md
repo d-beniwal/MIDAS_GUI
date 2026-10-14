@@ -3,6 +3,47 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-14 — Fixed: Hydra/single-detector calibration subprocess crashed on the beamline with `ModuleNotFoundError: No module named 'midas_gui'`
+
+**Problem.** User reported this exact error on a beamline deployment (every
+Hydra panel's calibration subprocess failing): `.../envs/midas-gui/bin/
+python: Error while finding module specification for 'midas_gui.calib_cli'
+(ModuleNotFoundError: No module named 'midas_gui')`. The 2026-10-07 move of
+calibration to a subprocess (`workers.CalibrationWorker`, see that date's
+entry) launches it as `QProcess(sys.executable, ["-m",
+"midas_gui.calib_cli", ...])` with no explicit working directory.
+
+**Root cause.** On an install where `midas_gui` is run from a source
+checkout rather than pip-installed into the env, `python -m
+midas_gui.calib_cli` only resolves the package because `-m` inserts the
+*current working directory* onto `sys.path[0]` — it needs cwd to be the repo
+root. `QProcess` with no `setWorkingDirectory()` call inherits whatever cwd
+the GUI process happens to have, which is not guaranteed to be the repo
+root (and evidently isn't, on this beamline deployment). `job_queue.py`'s
+background Batch Integrate jobs hit this exact issue already and fixed it
+(`cd {repo_root} && ...` in the wrapped shell command it hands to `screen`,
+with a comment explaining why) — `CalibrationWorker` was the one caller of
+this pattern that never got the same fix, because it predates nothing: it
+was simply missed when the subprocess move landed on 2026-10-07.
+
+**Fix.** `CalibrationWorker.start()` now calls
+`proc.setWorkingDirectory(str(constants.PROJECT_ROOT))` before `proc.start(
+...)` — `constants.PROJECT_ROOT` is the exact same `Path(__file__).resolve()
+.parent.parent` computation `job_queue.py` duplicates inline, so this reuses
+it instead of adding a third copy. No change needed to `calib_cli.py` itself
+or to Hydra/single-detector calling code — this is purely how the subprocess
+is launched.
+
+**Verified:** `tests/test_calibration_subprocess.py` (10/10),
+`tests/test_hydra_calib_ui.py`, `tests/test_smoke.py` green on a clean
+`HOME`; `pyflakes workers.py` unchanged (same 5 pre-existing warnings, none
+on the touched lines).
+**Not verified:** no access to the actual beamline machine from here — the
+fix is confirmed correct by code inspection + matching `job_queue.py`'s
+already-working equivalent, not by reproducing the failure locally (this
+machine's own `midas-gui` conda env does have the package pip-installed, so
+the bug doesn't reproduce here at all).
+
 ## 2026-10-13 — Calibrate tab: "Mean of frames" replaced with a Projection card; ProjectionWorker corrects each frame before reducing, everywhere it's used
 
 **Problem.** The Calibrate tab's "Mean of frames in single image" card only

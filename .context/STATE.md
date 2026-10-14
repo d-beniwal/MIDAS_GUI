@@ -1,11 +1,28 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-10-13 (Calibrate tab: "Mean of frames" replaced with a Data-Viewer-style Projection card (max/sum/mean); ProjectionWorker now corrects each frame before reducing, everywhere it's used — see DECISIONS)_
+_Last updated: 2026-10-14 (fixed a real beamline-reported bug: calibration subprocess failed with `ModuleNotFoundError: No module named 'midas_gui'` on installs that run from a source checkout rather than pip-install — see DECISIONS)_
 
 ## Now working on
 
 Nothing in progress.
+
+**2026-10-14 — Fixed: Hydra/single-detector calibration subprocess crashed
+on the beamline (`ModuleNotFoundError: No module named 'midas_gui'`).**
+User-reported from a real beamline session. `workers.CalibrationWorker`
+(the 2026-10-07 subprocess move) launched `python -m midas_gui.calib_cli`
+via `QProcess` with no working directory set, so on an install running from
+a source checkout (not pip-installed) it inherited whatever cwd the GUI
+process happened to have instead of the repo root `-m` needs to resolve the
+package — `job_queue.py`'s background jobs hit and fixed this identical
+issue already (`cd {repo_root} && ...`) but `CalibrationWorker` was missed.
+Fixed with one line: `proc.setWorkingDirectory(str(constants.PROJECT_ROOT))`.
+**Verified:** `test_calibration_subprocess.py` (10/10), `test_hydra_calib_ui.py`,
+`test_smoke.py` green on a clean `HOME`; `pyflakes` unchanged.
+**Not verified live on the actual beamline machine** (no access from here;
+this machine's own env has `midas_gui` pip-installed so the bug doesn't
+reproduce locally — confirmed correct by matching `job_queue.py`'s
+already-working equivalent fix instead).
 
 **2026-10-13 — Calibrate tab's "Mean of frames" replaced with a Projection
 card (max/sum/mean), same mechanics as the Data Viewer; correction order
