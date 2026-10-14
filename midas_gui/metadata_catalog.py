@@ -39,6 +39,7 @@ import numpy as np
 from PyQt5 import QtCore
 
 from midas_gui.peak_fit_data import (
+    _PEAK_FIT_EXTRA_COLS, _PEAK_FIT_PARAM_KEYS, _PEAK_FIT_PARAM_LABELS,
     parse_peak_fit_csv, peak_fit_omega_eta_grid, peak_fit_per_frame,
     peak_fit_per_frame_at_eta)
 from midas_gui.stream_sources import (
