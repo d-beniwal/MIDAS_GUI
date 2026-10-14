@@ -147,3 +147,25 @@ def test_csv_cache_is_memoized_and_follows_the_path(app, tmp_path):
     assert first is not None and c.csv_cache() is first, "not memoized"
     c.set_peak_fit_csv("")
     assert c.csv_cache() is None, "cache survived the path being cleared"
+
+
+def test_listing_streams_with_a_peak_fit_csv_loaded(app, tmp_path):
+    """Regression: list_streams builds one stream per (peak, param) using
+    three private tables from peak_fit_data, and the port's import block
+    named none of them -- so this raised NameError the moment a CSV was
+    set. The S2 tests all listed streams OR set a CSV, never both, which
+    is exactly the gap that let it through.
+    """
+    from midas_gui.metadata_catalog import MetadataCatalog
+    src = _h5(tmp_path, **{"measurement/samX": np.arange(6.0)})
+    csv = tmp_path / "fit.csv"
+    csv.write_text("name,Use,pos1,int1\n" + "\n".join(
+        f"img={i} omega={i}.0 eta=0.0,True,{5 + i * 0.1},{100 + i}"
+        for i in range(6)) + "\n")
+    c = MetadataCatalog()
+    c.set_primary_source(src)
+    c.set_peak_fit_csv(str(csv))
+    streams = c.list_streams()
+    kinds = {s.kind for s in streams}
+    assert "1d" in kinds and "csv" in kinds, kinds
+    assert any("pos" in s.key for s in streams), "no peak-fit param stream"
