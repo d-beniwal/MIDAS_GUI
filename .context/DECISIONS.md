@@ -5328,3 +5328,85 @@ Three of this session's bugs survived a passing suite because the fixtures
 used invented key names (`ETA_MIN` where every writer emits `EtaMin`) or
 geometry that tiles nothing. A fixture that does not look like real data is
 not evidence.
+
+## Fitting the same peak twice, on purpose
+
+`peak_fit_midas.py` + `peak_fit_cli.py` fit one pseudo-Voigt per
+(frame, eta) lineout with `midas_peakfit.lm_generic` and write the
+GSAS-II sequential peak-fit CSV format.
+
+The format choice is the whole point: `peak_fit_data.parse_peak_fit_csv`
+reads it unchanged, so a MIDAS fit and a GSAS-II fit of the same scan
+load into the same Data Explorer view and can be differenced row by row.
+
+### Why a second fitter at all
+
+A fitted peak position is a model's answer, not a measurement. On
+`connolly_oct26/4130_D_load_step_4` the GSAS-II 2theta map carried hard
+vertical stripes at frames 12, 23, 34, 45, 56 of every file and every
+eta — +6.6 mdeg, 4.9 sigma, perfectly reproducible. Refitting the same
+lineouts here gave -0.05 mdeg (-0.1 sigma). A model-free centroid gave
++0.08 mdeg against 3.2 mdeg of scatter, and the raw lineouts at those
+frames differ from their neighbours by +0.33 sigma — i.e. not at all.
+
+At those frames GSAS-II's peak is also 40% narrower in `sig`, its
+background 25% more tilted, and its esds SMALLER, while Rwp and GOF
+medians are normal. That is a second local minimum of the same model,
+not a bad data point, which is why no quality column flags it: a GOF>15
+cut catches 7% of the bad rows and 4,279 good ones.
+
+The conclusion that matters for the tab: a peak-fit CSV cannot be
+audited from inside itself. The only check that worked was an
+independent fit of the same lineouts.
+
+### The unit convention is load-bearing
+
+`sig` is a Gaussian VARIANCE in centidegrees**2, `gam` a Lorentzian FWHM
+in centidegrees, the offset is converted to centidegrees, and the
+profile is unit-area with Thompson-Cox-Hastings mixing. Get any of that
+wrong and every fit still converges and still reports a plausible
+position while every width is out by a factor of 10^4.
+`test_the_profile_reproduces_a_published_gsas_ii_peak_height` pins it
+against a real GSAS-II row rather than against our own arithmetic.
+
+### What may and may not be compared across codes
+
+`pos`/`int`/`sig`/`gam` parameterise the same function and are
+comparable. `Rwp`, `GOF` and every `esd-*` depend on the WEIGHTS, and
+the weights are not a property of the data — GSAS-II takes them from
+the ESD array in its project file, which we cannot see. Here they are
+Poisson, `w = 1/max(y,1)`.
+
+This is why `write_peak_fit_csv` also writes a `.meta.json`: fit window
+and weighting are not columns in this format, and without them two
+peak-fit CSVs cannot honestly be differenced. Reading a MIDAS GOF of
+0.26 as "30x better than GSAS-II's 7.9" is the specific mistake the
+sidecar exists to prevent.
+
+### Two seeding bugs worth remembering
+
+Both produced `rc = 0` — converged — with wrong answers.
+
+* The width was seeded from the second moment of the
+  background-subtracted lineout. In a window seven FWHM wide that is a
+  property of the window, not the peak: it came out 11x too wide and
+  the solver settled into a local minimum with 0.04 deg of position
+  scatter. It is now seeded by counting points above half maximum.
+* Bounds were fixed decade-wide boxes (`sig in [1e-4, 5000]`). Under the
+  sigmoid reparam the solver's step in a parameter scales with its box
+  width, so an absurd box makes every step in that parameter absurd.
+  Width and intensity bounds are now a factor of 30 either side of the
+  data-derived seed.
+
+The round-trip test that caught both is the one that asserts GOF ~ 1 on
+synthetic Poisson data — it validates the weighting and the degrees of
+freedom together, and neither failure mode moved Rwp enough to notice.
+
+### Batched by eta, not by file
+
+Every archive in a scan shares one REtaMap, so a given eta column has a
+single 2theta grid and all `n_files x n_frames` lineouts at that eta
+solve in one LM call. 29,120 fits in 108 s on CPU. It also bounds peak
+memory by one eta column rather than by the scan — and only the ~55 R
+bins inside the fit window are read, not all 3,520, which is the
+difference between 14 MB and 820 MB for a scan this size.
