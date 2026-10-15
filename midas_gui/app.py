@@ -69,6 +69,7 @@ from midas_gui.tab_calibrate import CalibrationTab
 from midas_gui.tab_batch import BatchTab
 from midas_gui.tab_batch_correct import BatchCorrectionTab
 from midas_gui.tab_zarrviewer import ZarrViewerTab
+from midas_gui.tab_data_explorer import DataExplorerTab
 from midas_gui.tab_queue import BatchQueueTab
 from midas_gui.tab_refine import RefinementTab
 from midas_gui.tab_corrections import CorrectionsTab
@@ -224,6 +225,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._bcorr_tab  = _tab(BatchCorrectionTab, "Batch Correction")
         self._queue_tab  = _tab(BatchQueueTab,   "Batch Queue")
         self._zarr_tab   = _tab(ZarrViewerTab,   "Zarr Viewer")
+        self._dexp_tab   = _tab(DataExplorerTab, "Data Explorer")
         self._refine_tab = _tab(RefinementTab,   "Calib. Refinement")
         self._corr_tab   = _tab(CorrectionsTab,  "Corrections")
         self._pdf_tab    = _tab(PDFTab,          "PDF Analysis")
@@ -245,6 +247,7 @@ class MainWindow(QtWidgets.QMainWindow):
             (self._batch_tab,  "Batch Integrate",   True),
             (self._queue_tab,  "Batch Queue",       False),
             (self._zarr_tab,   "Zarr Viewer",       False),
+            (self._dexp_tab,   "Data Explorer",     False),
             (self._corr_tab,   "Corrections",       False),
             (self._pdf_tab,    "PDF Analysis",      False),
             (self._tex_tab,    "Texture",           False),

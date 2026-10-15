@@ -260,15 +260,18 @@ DEFAULT_UI_SCALE      = 1.0           # multiplier, clamped to [0.5, 4.0] at sta
 # it is overridable via the per-user config key ``ui.visible_tabs``.
 ALWAYS_TABS = ["Data Viewer", "Mask Builder", "Calibrate", "Batch Integrate"]
 OPTIONAL_TABS = ["Calib. Refinement", "Batch Correction", "Batch Queue",
-                 "Zarr Viewer", "Corrections", "PDF Analysis", "Texture",
-                 "Pump Probe", "Results & Export"]
+                 "Zarr Viewer", "Data Explorer", "Corrections",
+                 "PDF Analysis", "Texture", "Pump Probe", "Results & Export"]
 # Optional tabs shown by default. Batch Correction / Corrections / PDF Analysis /
 # Texture / Results & Export ship hidden (turn them on in Settings ▸
 # Preferences ▸ Tabs). Zarr Viewer
 # ships visible, right next to Batch Integrate in app.py's _tab_specs — verified
 # live (see .context/DECISIONS.md) — but is still a toggleable OPTIONAL_TAB, not
 # one of the four hard-pinned ALWAYS_TABS, so it can still be hidden from
-# Preferences ▸ Tabs like any other optional tab.
+# Preferences ▸ Tabs like any other optional tab. Data Explorer sits beside it
+# (both answer "open what the pipeline wrote") but ships HIDDEN: Zarr Viewer
+# earned its default slot by being verified against live data, and this one
+# has not been yet.
 DEFAULT_VISIBLE_TABS = ["Calib. Refinement", "Batch Queue", "Zarr Viewer", "Pump Probe"]
 
 # ── Beamline devices (Data Viewer ▸ Live Data PV dropdown) ──────────────────────
