@@ -371,6 +371,26 @@ class RealSpacePanel(QtWidgets.QWidget):
                 out[ax] = int(w['n'].value())
         return out
 
+    def _manual_points(self) -> int:
+        """How many scan points a manual grid describes.
+
+        ``max(grid total, frames in the primary source)``, and the first
+        term is why: a manual grid is how you describe a scan that SPANS
+        FILES, so its total is routinely larger than any one file. A
+        13 x 64 raster lives in thirteen 64-frame files, and taking the
+        frame count would generate 64 points with the slow axis stuck on
+        its first value -- one line instead of a grid.
+
+        The other term matters for the opposite case: a single manual axis
+        of 10 points against a 100-frame source means "X cycles every 10",
+        not "plot 10 points", so the frame count wins there.
+        """
+        total = 1
+        shape = self._manual_shape()
+        for ax in self.AXES:
+            total *= shape.get(ax, 1)
+        return max(total, infer_frame_count(self._catalog.primary_path) or 0)
+
     def _manual_axis_values(self, axis: str, n_points: int
                             ) -> Optional[np.ndarray]:
         """A manual axis evaluated over ``n_points`` scan points.
@@ -411,9 +431,14 @@ class RealSpacePanel(QtWidgets.QWidget):
             tail = '  (frame count unknown)'
         elif frames == total:
             tail = f'  (source has {frames} frames)'
+        elif total > frames and total % frames == 0:
+            # The spanning case, and the normal one for a file-per-row
+            # raster: 13 x 64 across thirteen 64-frame files. Not an error.
+            tail = (f'  — the source holds {frames} of them, so this grid '
+                    f'spans {total // frames} files')
         else:
-            tail = (f'  — but the source has {frames} frames, '
-                    f'so this grid does not match it')
+            tail = (f'  — but the source has {frames} frames, which this '
+                    f'grid does not divide evenly')
         self._manual_note.setText(
             f'implies {parts} = {total} points{tail}   •   '
             f'X varies fastest, then Y, then Z')
@@ -424,13 +449,7 @@ class RealSpacePanel(QtWidgets.QWidget):
         # explicit instruction, and it is the only option at all when the
         # source carries no motor tree.
         if axis in self._manual_shape():
-            n = infer_frame_count(self._catalog.primary_path)
-            if not n:
-                total = 1
-                for a in self.AXES:
-                    total *= self._manual_shape().get(a, 1)
-                n = total
-            return self._manual_axis_values(axis, n)
+            return self._manual_axis_values(axis, self._manual_points())
         ds_path = self._axis_path(axis)
         if not ds_path:
             return None

@@ -38,11 +38,20 @@ def tab(app):
 
 def test_it_is_an_optional_tab_that_ships_hidden(app):
     """Zarr Viewer earned its default-visible slot by being verified
-    against live data; this has not been, so it ships off."""
+    against live data; this has not been, so it ships off.
+
+    Asserted against shipped_defaults(), NOT the live
+    constants.DEFAULT_VISIBLE_TABS: a saved profile's ui.visible_tabs
+    overrides that global at import (constants.reload_from_config), so the
+    moment anyone ticks this tab in Preferences the global contains it and
+    a test reading it would fail on their machine only. Same escape hatch
+    test_tab_zarrviewer.py uses, and this test did fail exactly that way
+    once the tab was enabled for real.
+    """
     from midas_gui import constants as C
     assert "Data Explorer" in C.OPTIONAL_TABS
     assert "Data Explorer" not in C.ALWAYS_TABS
-    assert "Data Explorer" not in C.DEFAULT_VISIBLE_TABS
+    assert "Data Explorer" not in C.shipped_defaults()["ui"]["visible_tabs"]
 
 
 def test_it_appears_next_to_zarr_viewer_when_enabled(app):
@@ -51,7 +60,8 @@ def test_it_appears_next_to_zarr_viewer_when_enabled(app):
     from midas_gui.app import MainWindow
     from midas_gui import constants as C
     w = MainWindow()
-    w.apply_tab_visibility(list(C.DEFAULT_VISIBLE_TABS) + ["Data Explorer"])
+    w.apply_tab_visibility(
+        list(C.shipped_defaults()["ui"]["visible_tabs"]) + ["Data Explorer"])
     names = [w._tabs.tabText(i) for i in range(w._tabs.count())]
     i = next(k for k, n in enumerate(names) if "Data Explorer" in n)
     assert "Zarr Viewer" in names[i - 1], names
@@ -182,3 +192,51 @@ def test_a_manual_axis_beats_the_dataset_picker(app, tmp_path):
     assert vals is not None and not np.allclose(vals, 99.0), (
         "the dataset won over the manual grid")
     assert np.allclose(vals, np.arange(6.0))
+
+
+def test_a_manual_grid_spans_files_rather_than_one_file_s_frames(app, tmp_path):
+    """Regression, found on real data at the beamline.
+
+    A manual grid is how you describe a scan that SPANS FILES -- a 13 x 64
+    raster lives in thirteen 64-frame files. _read_axis took its point
+    count from the primary source's frame count, so it generated 64 points
+    with the slow axis stuck on its first value: one line instead of a
+    grid, with no error anywhere.
+    """
+    h5py = pytest.importorskip("h5py")
+    from midas_gui.tab_data_explorer import DataExplorerTab
+    src = tmp_path / "one_of_thirteen.h5"
+    with h5py.File(src, "w") as f:
+        f.create_dataset("exchange/data", data=np.zeros((64, 2, 2)))
+    t = _fresh(_alive)
+    t.set_source(str(src))
+    app.processEvents()
+    p = t._real
+    _manual(p, "x", 0.2758, 0.12059, 64)
+    _manual(p, "y", 1.4490, 0.33333, 13)
+
+    assert p._manual_points() == 832, "fell back to one file's frame count"
+    y = p._read_axis("y")
+    assert y.size == 832
+    assert len(np.unique(np.round(y, 5))) == 13, "the slow axis never advanced"
+    x = p._read_axis("x")
+    assert np.allclose(x[:64], x[64:128]), "the fast axis is not cycling"
+    assert "spans 13 files" in p._manual_note.text()
+
+
+def test_a_single_manual_axis_still_cycles_over_every_frame(app, tmp_path):
+    """The opposite intent, and why the point count is a max() rather than
+    just the grid total: one axis of 10 points against 100 frames means
+    "X repeats every 10", not "only plot 10 points"."""
+    h5py = pytest.importorskip("h5py")
+    src = tmp_path / "hundred.h5"
+    with h5py.File(src, "w") as f:
+        f.create_dataset("exchange/data", data=np.zeros((100, 2, 2)))
+    t = _fresh(_alive)
+    t.set_source(str(src))
+    app.processEvents()
+    p = t._real
+    _manual(p, "x", 0.0, 1.0, 10)
+    assert p._manual_points() == 100
+    x = p._read_axis("x")
+    assert x.size == 100 and np.allclose(x[:10], x[10:20])
