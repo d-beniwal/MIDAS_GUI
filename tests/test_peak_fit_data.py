@@ -141,3 +141,71 @@ def test_per_frame_at_eta_selects_within_tolerance(tmp_path):
                                 _row(0, 0.0, 0.0, 7.0)))
     out = peak_fit_per_frame_at_eta(c, 1, "pos", 0.0, 1, atol_deg=0.5)
     assert out[0] == pytest.approx(7.0), "picked the wrong eta row"
+
+
+# ── multi-file exports ──────────────────────────────────────────────────
+# GSAS-II numbers img= from 0 in every file, so a 13-file CSV has thirteen
+# frames called 0. Both of these were found on real beamline data, where a
+# 13 x 64 raster rendered as a single coloured row with the other twelve
+# blank and no error anywhere.
+
+def test_the_file_regex_survives_this_projects_own_archive_names(tmp_path):
+    """The source's pattern allowed ONE extension segment before the
+    container. This project writes two -- `.ge1234` AND the combine-op
+    `.ave` -- so its own output failed to parse and every row looked like
+    it came from an unknown file."""
+    from midas_gui.peak_fit_data import _PEAK_FIT_FILE_RX as RX
+    for name, want in [
+            ("4130_D_load_step_4_005180.ge1234.ave.zarr.zip", "005180"),
+            ("4130_D_load_step_4_005180.ge1234.median.zarr.zip", "005180"),
+            ("4130_D_load_step_4_005180.ge1.zarr.zip", "005180"),
+            ("scan_010128.vrx.zarr.zip", "010128"),
+            ("scan_010128.h5", "010128")]:
+        m = RX.match(name)
+        assert m and m.group("num") == want, f"{name} -> {m and m.group('num')}"
+
+
+def _multi_file_csv(tmp_path, files=3, frames=4, etas=2):
+    rows = []
+    for fi in range(files):
+        for im in range(frames):
+            for e in range(etas):
+                nm = (f"scan_{5180+fi:06d}.ge1234.ave.zarr.zip "
+                      f"img={im} omega=999.0 eta={-175.0 + e*10:.1f}")
+                rows.append(f"{nm},True,{10.0 + fi},100,0.1,0.2,2.5,1.1")
+    p = tmp_path / "multi.csv"
+    p.write_text(_HEADER + "\n" + "\n".join(rows) + "\n")
+    return str(p), files * frames
+
+
+def test_frames_are_numbered_across_files_not_within_one(tmp_path):
+    from midas_gui.peak_fit_data import parse_peak_fit_csv
+    path, total = _multi_file_csv(tmp_path)
+    c = parse_peak_fit_csv(path)
+    assert np.unique(c["file_num"]).size == 3
+    g = c["global_idx"]
+    assert g.min() == 0 and g.max() == total - 1
+    assert np.unique(g).size == total, "frames from different files collided"
+
+
+def test_a_per_frame_reduction_covers_every_file(tmp_path):
+    """The symptom: with img_idx restarting per file, only the first
+    file's frames got values and the rest of the scan came back NaN."""
+    from midas_gui.peak_fit_data import parse_peak_fit_csv, peak_fit_per_frame
+    path, total = _multi_file_csv(tmp_path)
+    c = parse_peak_fit_csv(path)
+    out = peak_fit_per_frame(c, 1, "pos", "mean", total)
+    assert np.all(np.isfinite(out)), (
+        f"only {int(np.sum(np.isfinite(out)))}/{total} frames got a value")
+    # pos was written as 10+file_index, so each file's block must differ
+    assert np.allclose(out[:4], 10.0) and np.allclose(out[4:8], 11.0)
+
+
+def test_a_single_file_csv_is_unchanged(tmp_path):
+    """global_idx must be a no-op for the single-file case, or the Texture
+    tab's peak-fit panel changes behaviour for no reason."""
+    from midas_gui.peak_fit_data import parse_peak_fit_csv
+    c = parse_peak_fit_csv(_csv(tmp_path,
+                                _row(0, 0.0, 0.0, 5.0),
+                                _row(1, 1.0, 0.0, 6.0)))
+    assert np.array_equal(c["global_idx"], c["img_idx"])
