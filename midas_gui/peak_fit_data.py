@@ -38,7 +38,7 @@ _PEAK_FIT_NAME_RX = re.compile(
 # → 10128. Mirrors DataExplorerWidget._SIB_RX so peak-fit rows can be matched
 # to spanned files even when some files have no fits (skipped frames).
 _PEAK_FIT_FILE_RX = re.compile(
-    r'^(?P<base>.+?)_(?P<num>\d{4,7})(?:\.[^.]+)?'
+    r'^(?P<base>.+?)_(?P<num>\d{4,7})(?:\.[^.]+)*?'
     r'(?:\.h5|\.zarr\.zip|\.zarr)\b'
 )
 
@@ -149,11 +149,40 @@ def parse_peak_fit_csv(path: str) -> dict | None:
         'rows': n,
         'omega': omega, 'eta': eta, 'img_idx': img_idx,
         'file_num': file_num,
+        'global_idx': _global_frame_index(img_idx, file_num),
         'use': use, 'Rwp': rwp, 'GOF': gof,
         'peak_indices': peak_indices,
         'params': params,
         **arrays,
     }
+
+
+def _global_frame_index(img_idx, file_num):
+    """A frame index unique ACROSS files, not merely within one.
+
+    GSAS-II numbers ``img=`` from 0 in every file it exports, so a 13-file
+    CSV has thirteen frames called 0. Anything plotting per-frame over a
+    whole scan needs them told apart, or twelve-thirteenths of the points
+    come back NaN -- which is exactly what a file-spanning raster looked
+    like: one coloured row and the rest blank.
+
+    ``rank(file) * frames_per_file + img``. Returns ``img_idx`` unchanged
+    for a single-file CSV, or when no filename could be parsed, so an
+    export that never spanned behaves precisely as before.
+    """
+    img = np.asarray(img_idx)
+    if file_num is None:
+        return img
+    fn = np.asarray(file_num, dtype=float)
+    good = ~np.isnan(fn)
+    if not np.any(good) or np.unique(fn[good]).size < 2:
+        return img
+    per = int(np.nanmax(img)) + 1
+    rank = {f: i for i, f in enumerate(np.unique(fn[good]))}
+    out = img.astype(np.int64).copy()
+    for k in np.nonzero(good)[0]:
+        out[k] = rank[fn[k]] * per + img[k]
+    return out
 
 
 def peak_fit_per_frame(cache: dict, peak: int, param: str,
@@ -169,7 +198,11 @@ def peak_fit_per_frame(cache: dict, peak: int, param: str,
     vals = cache.get(key)
     if vals is None:
         return None
-    img = cache.get('img_idx')
+    # global_idx so a multi-file CSV fills the whole scan rather than just
+    # the frames of its first file -- see _global_frame_index.
+    img = cache.get('global_idx')
+    if img is None:
+        img = cache.get('img_idx')
     use = cache.get('use')
     if img is None:
         return None
@@ -224,7 +257,11 @@ def peak_fit_per_frame_at_eta(cache: dict, peak: int, param: str,
     """
     key = param if param in ('Rwp', 'GOF') else f'{param}{peak}'
     vals = cache.get(key)
-    img = cache.get('img_idx')
+    # global_idx so a multi-file CSV fills the whole scan rather than just
+    # the frames of its first file -- see _global_frame_index.
+    img = cache.get('global_idx')
+    if img is None:
+        img = cache.get('img_idx')
     use = cache.get('use')
     et = cache.get('eta')
     if vals is None or img is None or et is None:
