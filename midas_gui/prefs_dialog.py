@@ -51,7 +51,7 @@ def _effective_cfg() -> dict:
             "k_edge_foils": [list(k) for k in C.K_EDGE_FOILS],
         },
         "viewer_steps": {
-            "wavelength": C.DEFAULT_STEP_WAVELENGTH, "two_theta": C.DEFAULT_STEP_TWO_THETA,
+            "wavelength": C.DEFAULT_STEP_WAVELENGTH,
             "lsd_mm": C.DEFAULT_STEP_LSD_MM, "pixel": C.DEFAULT_STEP_PIXEL,
             "bc": C.DEFAULT_STEP_BC, "tilt": C.DEFAULT_STEP_TILT,
         },
@@ -170,13 +170,11 @@ class PreferencesDialog(QtWidgets.QDialog):
             return s
 
         self._st_wl   = step_spin(5)
-        self._st_2t   = step_spin(3)
         self._st_lsd  = step_spin(4)
         self._st_px   = step_spin(3)
         self._st_bc   = step_spin(3)
         self._st_tilt = step_spin(4)
         f.addRow("λ step (Å):", self._st_wl)
-        f.addRow("max 2θ step (°):", self._st_2t)
         f.addRow("Lsd step (mm):", self._st_lsd)
         f.addRow("Pixel size step (µm):", self._st_px)
         f.addRow("BC_y / BC_z step (px):", self._st_bc)
@@ -395,7 +393,6 @@ class PreferencesDialog(QtWidgets.QDialog):
         self._g_bcz.setText(str(geo.get("bc_z", "")))
         steps = cfg.get("viewer_steps", {}) or {}
         self._st_wl.setValue(float(steps.get("wavelength", C.DEFAULT_STEP_WAVELENGTH) or C.DEFAULT_STEP_WAVELENGTH))
-        self._st_2t.setValue(float(steps.get("two_theta", C.DEFAULT_STEP_TWO_THETA) or C.DEFAULT_STEP_TWO_THETA))
         self._st_lsd.setValue(float(steps.get("lsd_mm", C.DEFAULT_STEP_LSD_MM) or C.DEFAULT_STEP_LSD_MM))
         self._st_px.setValue(float(steps.get("pixel", C.DEFAULT_STEP_PIXEL) or C.DEFAULT_STEP_PIXEL))
         self._st_bc.setValue(float(steps.get("bc", C.DEFAULT_STEP_BC) or C.DEFAULT_STEP_BC))
@@ -482,7 +479,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         geo["pixel_presets"] = self._pairs(self._px_table)
         geo["k_edge_foils"] = self._pairs(self._ke_table)
         viewer_steps = {
-            "wavelength": self._st_wl.value(), "two_theta": self._st_2t.value(),
+            "wavelength": self._st_wl.value(),
             "lsd_mm": self._st_lsd.value(), "pixel": self._st_px.value(),
             "bc": self._st_bc.value(), "tilt": self._st_tilt.value(),
         }
@@ -572,10 +569,12 @@ class PreferencesDialog(QtWidgets.QDialog):
             self._refresh_profile_combo()
             return
         self._reload_after_profile_change()
-        QtWidgets.QMessageBox.information(
-            self, "Profile switched",
-            f"Now using profile '{name}'. Most values apply immediately; a few "
-            "(e.g. spin-box step sizes) only take effect after a restart.")
+        msg = (f"Now using profile '{name}'. Most values apply immediately; a few "
+               "(e.g. spin-box step sizes) only take effect after a restart.")
+        if self._mw is not None and hasattr(self._mw, "_offer_restart"):
+            self._mw._offer_restart(msg)
+        else:
+            QtWidgets.QMessageBox.information(self, "Profile switched", msg)
 
     def _new_profile(self):
         name, ok = QtWidgets.QInputDialog.getText(self, "New profile", "Profile name:")
@@ -700,17 +699,19 @@ class PreferencesDialog(QtWidgets.QDialog):
                 applied_live = True
         except Exception:
             pass
-        note = ("Tab visibility applied now; restart the GUI for other changes to apply."
-                if applied_live else "Restart the GUI to apply.")
-        # If the interface scale changed, offer an immediate relaunch (it's a
+        # If the interface scale changed, mention that specifically (it's a
         # startup-only setting — QT_SCALE_FACTOR is read before the QApplication).
         scale_changed = abs(float(cfg["ui"].get("ui_scale", 1.0))
                             - float(getattr(C, "DEFAULT_UI_SCALE", 1.0) or 1.0)) > 1e-6
-        if scale_changed and self._mw is not None and hasattr(self._mw, "restart_app"):
-            self.accept()
-            self._mw._offer_restart(
-                f"Saved. Interface scale set to {cfg['ui']['ui_scale']:g}×.")
-            return
-        QtWidgets.QMessageBox.information(
-            self, "Saved", f"Saved as your defaults:\n{path}\n\n{note}")
+        if scale_changed:
+            note = f"Interface scale set to {cfg['ui']['ui_scale']:g}×."
+        elif applied_live:
+            note = "Tab visibility applied now; other changes still need a restart."
+        else:
+            note = "Changes need a restart to apply."
         self.accept()
+        if self._mw is not None and hasattr(self._mw, "_offer_restart"):
+            self._mw._offer_restart(f"Saved as your defaults:\n{path}\n\n{note}")
+        else:
+            QtWidgets.QMessageBox.information(
+                self, "Saved", f"Saved as your defaults:\n{path}\n\n{note}")

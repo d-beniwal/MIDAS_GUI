@@ -3,6 +3,210 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-16 (latest, 2) — Ring simulation: "max 2θ" → "N rings", hard-capped to the image's actual reach
+
+**Requested directly**: "change this to N_rings... which dictates the
+maximum number of lines that will be drawn for each material. This should
+also cut down the number of rings generated in the dropdown for each
+material. Also, we never want rings that are completely out of the image
+view even if the Nr of rings is set to a large value."
+
+**Design.** Two independent constraints compose into one generation step
+(`DetectorGeometryCard._compute_material_rings`):
+1. A hard 2θ ceiling from the *image itself* — `_ring_generation_max_two_theta()`
+   calls the existing `helpers.max_two_theta_deg(bc_y, bc_z, ny, nz, lsd_um,
+   px_um)` (already used by `_predict_ring_radii` for the calibration-result
+   ring overlay) to get the true farthest-corner 2θ the bound image can
+   reach. Any ring beyond this is geometrically guaranteed to miss the
+   rectangle entirely (the whole rectangle lies within that corner distance
+   of the beam centre), so capping generation here is exact, not a heuristic
+   — and it was already the correct bound for the *drawing* step's own
+   per-ring "misses the detector entirely" skip (`_ring_label_pos` returning
+   `None` in `_redraw_rings`); this just moves the same test earlier, into
+   generation, so it also governs the per-material ring-checklist dropdown
+   (which iterates `material["_rings"]` directly with no visibility filter
+   of its own) and the N-rings count itself. No image bound yet → 180°
+   (every Bragg-reachable ring), matching `_predict_ring_radii`'s own
+   fallback.
+2. `rings[:n_rings]` after that cap — rings are already sorted ascending by
+   radius, so this keeps the innermost N regardless of how far out #2 above
+   would otherwise allow generation to run.
+
+Order matters: capping by image reach *before* truncating to N means N never
+"spends" a slot on a ring nobody could ever see, and a geometry whose first
+reflection is already off-frame correctly reports zero rings rather than N
+unviewable ones.
+
+**Field removal, not repurposing.** `_max2t` (angle spinbox) is fully
+replaced by `_n_rings` (`_NoScrollSpinBox`, int, default
+`constants.DEFAULT_N_RINGS=10`) rather than reusing the old widget/key with
+new semantics — a stale saved GUI state's `max2t: 25.0` restored into an
+`n_rings` field would be meaningless (and `QSpinBox.setValue` wants an int).
+The Preferences "max 2θ step (°)" row/`DEFAULT_STEP_TWO_THETA` constant went
+with it: an integer ring count has no useful per-click step to configure.
+
+**Removed the `_ring_info` plain-text ring report** (`QPlainTextEdit` under
+the Simulate button) in the same session, on request — it was listing every
+material's computed rings as text, now fully superseded by the per-material
+collapsible ring checklist dropdown from the 2026-10-16 (earlier) entry
+below. `_simulate()` keeps surfacing computation *errors* via the existing
+`show_error` dialog; it no longer builds a success-case report string at all.
+
+**Test fixture fragility uncovered, fixed at the root.**
+`tests/test_view_tab_controls.py`'s `framed` fixture resets `_bcy`/`_bcz`/
+`_ty`/`_tz` every test but never touched `_wl`/`_lsd`/`_px` — harmless before
+today because the fixed-angle `max2t` field made ring *generation*
+independent of the image/beam-centre entirely (only *drawing* checked image
+bounds). Once generation itself became image-bound, the ring-simulation
+tests started failing: the shared module-scoped `tab` fixture carries state
+across tests in file order, and an earlier test
+(`test_an_unedited_widget_keeps_the_calibrations_full_precision`) parks
+`_wl`/`_lsd`/`_px` at an exotic loaded-calibration's values
+(0.173 Å / 1068.6 mm / 150 µm) and never restores them. Against the
+fixture's tiny 192×192 synthetic frame, that leaked geometry's farthest-
+corner 2θ is ~1.09° — smaller than Ni(FCC)'s very first reflection (~4.87° at
+that wavelength) — so every material ring was correctly (if unhelpfully)
+generation-capped to nothing, and `_any_material_rings()` went false.
+Verified by temporarily printing the live widget values mid-suite (not
+guessing) before concluding this was fixture leakage rather than a cap bug.
+Fixed by pinning `_wl=0.39`/`_lsd=30.0 mm`/`_px=75.0` in `framed` itself —
+chosen so Ni(FCC)'s innermost rings genuinely land inside the 192 px frame
+across every bc/Lsd value the ring-simulation tests exercise — which also
+closes the latent fragility for good (every test using `framed` now starts
+from a fully clean geometry, not whatever a `framed`-using test two hundred
+lines earlier happened to leave behind).
+
+**Verified:** `tests/test_view_tab_controls.py` 33/33, `tests/test_hydra_ui.py`
+16/16 (`--forked`, shared-field-sync test updated for the renamed
+`max2theta`→`n_rings` key), `tests/test_helpers.py`, `tests/test_ca_live_view.py`
+(exercises `prefs_dialog`, which lost the "max 2θ step" row) — all green.
+`pyflakes` unchanged (one pre-existing, unrelated `hydra_geometry_card.py`
+warning, confirmed present on unmodified HEAD too).
+**Not verified:** no live beamline session to eyeball the renamed field,
+tooltip, or dropdown row count against a real detector frame/geometry.
+
+## 2026-10-16 — Data Viewer Hydra: cross-panel ring-visual sync + per-ring checkboxes; app-wide restart-and-resume; Dark default-container fix
+
+**Requested directly**, four independent asks in one session.
+
+1. **Material/ring-visual settings (materials list, Rings/Labels checkboxes,
+   ring thickness) now sync across all 5 Hydra Data Viewer panels (ge1-4 +
+   composite).** Previously each of `HydraViewerPage`'s 5
+   `DetectorGeometryCard` instances held fully independent state — exactly
+   the problem the existing `get_shared_fields`/`apply_shared_fields`/
+   `_sync_shared_fields` machinery already solved for λ/max2θ/px, so this
+   reuses that shape verbatim rather than inventing a new one: a new
+   `ringSettingsChanged` signal (deliberately separate from `geometryChanged`
+   so the two syncs can't false-trigger each other), `get_ring_settings()`/
+   `apply_ring_settings()` on the card, and `_sync_ring_settings()` on the
+   page with its own `_syncing_ring_settings` re-entrancy guard. Scoped to
+   the Data Viewer tab only — `HydraCalibrationPage`/`HydraCalibPanelCard`
+   use an intentionally separate, simpler ring mechanism (single calibrant,
+   no material list) and weren't touched. GUI-state restore
+   (`get_state`/`set_state`) deliberately keeps restoring each card's saved
+   materials independently, exactly as before — a project saved before this
+   change may have diverged per-card, and restore shouldn't silently
+   collapse that; the new sync only applies going forward from the next
+   interactive edit.
+2. **Per-ring show/hide checkboxes, default all-shown.** Each material gained
+   a persistent `ring_enabled: dict[str, bool]` (plain, non-underscore field
+   so it rides along in `materials_state()`/`set_materials()` and therefore
+   the sync above, unlike the transient `_rings` list which is recomputed
+   from scratch on every geometry edit). Rings are keyed by a stable
+   `_ring_key(r)` (hkl string, or `order<N>` for d-spacing materials) so the
+   flag survives recomputation. UI is a collapsible per-material checklist
+   (▸/▾ toggle, collapsed by default) rather than always-expanded, to keep
+   the Ring simulation card usable with several materials loaded — user's
+   explicit choice over an always-expanded list.
+   - **Bug found and fixed along the way:** `DetectorGeometryCard.
+     set_materials()`'s widget-clearing loop (`QVBoxLayout.takeAt()` +
+     `widget.deleteLater()`) only detaches the widget from the layout's
+     bookkeeping — `deleteLater()`'s actual C++ destruction is deferred to
+     the next event-loop pass, so a widget can remain visibly on screen
+     (just unmanaged by the layout) until then. Harmless when `set_materials`
+     was called rarely (GUI-state restore only); became visibly broken
+     (duplicate-looking material rows) once ring-visual sync (above) started
+     calling it on every cross-panel update. Fixed everywhere this pattern
+     appears (`set_materials`, `_refresh_ring_checklist`, `_delete_material`)
+     by calling `widget.setParent(None)` before `deleteLater()`, which
+     detaches it from the visible tree immediately. Caught by an offscreen
+     screenshot during manual verification, not by the unit tests (which
+     only checked `self._materials`/`materials_state()`, not the actual
+     widget tree) — worth remembering for future Qt layout-rebuild code.
+3. **"Restart now and resume" for Preferences/profile changes.** Several
+   places already said "restart to apply" but just left it there
+   (`prefs_dialog._on_profile_switch`'s info box, `_save`'s generic restart
+   note, `app._reload_config`) or said nothing at all (`app.
+   _on_header_profile_changed`). Rather than build new persistence, this
+   reuses the existing autosave-draft/crash-recovery machinery wholesale:
+   `restart_app(resume=True)` calls a new `_save_autosave_draft_for_restart`
+   (same `_serialize_workspace` call `_autosave_tick` already makes, same
+   `settings.autosave_draft_path()` destination) and marks the draft
+   `__auto_resume__` + `project_path`; `maybe_offer_restore_autosave()`
+   checks for that marker first and applies it immediately with **no**
+   "Restore unsaved session?" prompt (the user already opted in by clicking
+   "Restart now" in `_offer_restart`) before falling through to the
+   unchanged genuine-crash-recovery path. Scope question (asked the user):
+   "profile switching only" vs. "any Preferences change that needs a
+   restart" — chose the broader one (user's pick), so `_save`'s generic
+   branch and `_reload_config` got the same treatment, not just the two
+   profile-switch call sites. Deliberately did NOT add the offer to the
+   shared `on_profile_changed()` tail itself — it's also called from
+   `_restore_active_profile()` during non-interactive project/workspace load
+   and directly by `tests/test_smoke.py`, where a modal restart prompt would
+   be wrong (and would hang the test). The offer lives only at the four
+   interactive call sites. `restart_app()` itself (the actual
+   `QProcess.startDetached`/`QApplication.quit()`) was deliberately never
+   invoked in a test — it would quit the shared test `QApplication` — only
+   the draft-writing half and the silent-resume read-back are covered.
+4. **Dark-file default HDF5 container = most frames, when the dark file
+   differs from the data file.** `FieldSelector`/`HydraFieldSelector`'s
+   dataset-combo default (on first load, when the remembered dataset name
+   isn't present) was "first dataset in file order with ndim>=3" — fine for
+   the common case of a companion `exchange/data_dark` inside the same file
+   as the data, risky for a genuinely separate dark file with an arbitrary
+   layout (could silently pick a near-empty calibration dataset instead of
+   the real dark stack). New `helpers.best_default_dataset_index(items,
+   prefer_max_frames)` picks the eligible entry with the largest `shape[0]`
+   when asked; a new `prefer_most_frames` constructor flag (Dark only — the
+   user asked specifically about dark, not Bright/Background) combined with
+   the already-existing `_data_path_provider` callable (previously used only
+   to prefill the field) decides at the single shared call site in each
+   class whether the dark path equals the Data path (keep old behaviour) or
+   differs (prefer most frames). Exactly two construction sites in the whole
+   app (`DataLoaderPanel`/`HydraLoaderPanel`), so this one change covers
+   every tab that loads a dark file (Data Viewer, Calibrate, Batch Integrate,
+   Pump-Probe, Refine, Solve Cell single-detector; Data Viewer/Calibrate/
+   Batch Integrate Hydra) without touching each tab.
+
+**Verified:** new tests — `test_hydra_ui.py` (cross-panel material/ring-visual
+sync, per-ring toggle + `materials_state()`/`set_materials()` round-trip +
+sync, Dark-container preference for `HydraFieldSelector`), `test_helpers.py`
+(`best_default_dataset_index`, single-detector `FieldSelector` dark
+preference), `test_workspace_ux.py` (silent auto-resume draft vs. the
+existing crash-recovery prompt path), `test_ca_live_view.py` (restart-offer
+wiring for both `prefs_dialog` call sites) — all green. Full touched-file
+sweep (`test_hydra_calib_ui`, `test_hydra_batch_ui`, `test_hydra_chirality`,
+`test_hydra_geometry`, `test_hydra_overall_cake`, `test_smoke`,
+`test_set_raw_frame`, `test_project`, `test_ca_live_view`) re-run per-file on
+a clean `HOME`; three already-pre-existing flakes reconfirmed identical on
+unmodified `main` before concluding they weren't regressions
+(`test_hydra_chirality::test_composite_markers_render_at_correct_chirality`
+and `test_ca_live_view`'s two device-list tests SIGSEGV only when forced
+through `--forked`, which isn't this file's normal mode;
+`test_project::test_apply_project_calibration_single_detector` SIGABRT).
+`pyflakes` shows no new warnings over the baseline. Offscreen screenshots
+confirmed the per-ring checklist renders/expands correctly and that the
+duplicate-row bug (found during this same verification pass) is fixed.
+**Not verified:** no live beamline session to exercise the actual
+`QProcess`-based relaunch end-to-end.
+
+**STATE.md housekeeping (same session):** trimmed ~400 lines of
+2026-09-09–09-30 dated "Recently completed" entries that were pure
+changelog duplication of this same content already in this file
+(append-only, newest-first) — per the global STATE.md size convention nothing
+was lost, just de-duplicated.
+
 ## 2026-10-16 — Hydra Calibrate: single-panel save, "Load calibration file…" cascades to siblings, bidirectional all-panel Data Viewer transfer
 
 **Requested directly**, three related asks, each verified against the live

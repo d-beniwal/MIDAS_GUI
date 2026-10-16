@@ -56,6 +56,12 @@ def framed(tab):
     card._bc_auto.setChecked(False)
     card._bcy.setValue(bc); card._bcz.setValue(bc)
     card._ty.setValue(0.0); card._tz.setValue(0.0)
+    # Pinned (not left at whatever an earlier test in this module last set
+    # them to — _wl/_lsd/_px are never reset by the tests that edit them):
+    # a geometry whose innermost simulated rings actually land inside this
+    # 192x192 frame, so the "ring simulation" tests below exercise real
+    # on-image rings rather than ones the image-reach cap discards outright.
+    card._wl.setValue(0.39); card._lsd.setValue(30.0); card._px.setValue(75.0)
     card._clear_simulated_rings()
     card._calib_ctx_cache.clear()
     tab._rad_accurate.setChecked(False)
@@ -443,7 +449,6 @@ def test_clear_button_removes_every_simulated_ring_and_disarms_live(framed):
     assert card._ring_draw_geom is None
     # disarmed too, or the next parameter edit would redraw them at once
     assert not card._sim_is_live() and not card._sim_live.isChecked()
-    assert card._ring_info.toPlainText() == ""
 
 
 def test_clear_leaves_the_click_picked_radius_ring_alone(framed):

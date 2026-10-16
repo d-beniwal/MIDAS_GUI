@@ -24,7 +24,7 @@ import pyqtgraph as pg
 
 from midas_gui.constants import (MATERIALS, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM,
                            DEFAULT_LSD_UM, DEFAULT_BC_Y, DEFAULT_BC_Z, DEFAULT_RING_WIDTH,
-                           DEFAULT_STEP_WAVELENGTH, DEFAULT_STEP_TWO_THETA,
+                           DEFAULT_N_RINGS, DEFAULT_STEP_WAVELENGTH,
                            DEFAULT_STEP_LSD_MM, DEFAULT_STEP_PIXEL, DEFAULT_STEP_BC,
                            DEFAULT_STEP_TILT)
 from midas_gui.dialogs import show_error
@@ -36,7 +36,7 @@ from midas_gui.helpers import (_fspin, _NoScrollSpinBox, _browse,
                          write_poni, write_standalone_paramstest,
                          im_trans_codes_from_checkboxes, _apply_im_trans,
                          parse_dspacing_text, ring_on_image_mask as _ring_on_image_mask,
-                         browse_start_dir)
+                         max_two_theta_deg, browse_start_dir)
 from midas_gui.workers import build_integration_context, integrate_frame
 from midas_gui import style as S
 
@@ -298,6 +298,13 @@ class DetectorGeometryCard(QtWidgets.QWidget):
     pullGeometry = QtCore.pyqtSignal()        # "← Get" (geometry ← Calibrate) clicked
     imTransChanged = QtCore.pyqtSignal()      # a Flip Y/Flip Z/Transpose checkbox toggled
     geometryChanged = QtCore.pyqtSignal()     # BC/tilt/calibration changed (edit, pick, or file load)
+    #: Materials list (add/remove/enable/color/lattice/per-ring visibility) or
+    #: the Rings/Labels/thickness controls changed interactively — an owner
+    #: with several cards (HydraViewerPage) mirrors this onto its other cards,
+    #: see get_ring_settings/apply_ring_settings. Not emitted by
+    #: set_materials() itself (used for both GUI-state restore and applying a
+    #: sync from an owner) to avoid feedback loops.
+    ringSettingsChanged = QtCore.pyqtSignal()
 
     def __init__(self, parent=None, *, show_rotate: bool = False,
                  show_calib_handoff: bool = True):
@@ -305,8 +312,15 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         self._show_rotate = show_rotate
         self._show_calib_handoff = show_calib_handoff
         self._materials: list = []
+        self._loading_materials = False   # True while set_materials() runs
         self._ring_items: list = []
         self._label_items: list = []
+        #: Parallel to _ring_items/_label_items — whether each item's own
+        #: ring is individually enabled (see ring_enabled/_ring_key), so
+        #: _set_rings_visible can combine it with the master Rings/Labels
+        #: checkboxes without a full _redraw_rings.
+        self._ring_item_enabled: list = []
+        self._label_item_enabled: list = []
         self._pick_ring_item = None
         self._picked_r: Optional[float] = None
         self._calib_geom: Optional[dict] = None
@@ -499,15 +513,15 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         """Lsd in µm (internal unit) from the mm display field."""
         return self._lsd.value() * 1000.0
 
-    # ── Shared-field sync (Hydra: λ / max 2θ / px mirrored across panels) ──
+    # ── Shared-field sync (Hydra: λ / N rings / px mirrored across panels) ──
 
     def get_shared_fields(self) -> dict:
-        """λ, max 2θ, and pixel size — the 3 fields an owner (the Hydra page)
+        """λ, N rings, and pixel size — the 3 fields an owner (the Hydra page)
         may mirror across several cards, since the same X-ray beam and GE
         detector model make them physically identical for every panel."""
         return {
             "wavelength_A": self._wl.value(),
-            "max2theta": self._max2t.value(),
+            "n_rings": self._n_rings.value(),
             "pxY": self._px.value(),
         }
 
@@ -516,17 +530,59 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         this card's own change signals (the owner already knows it's
         propagating a sync) — then refresh exactly as ``_on_sim_param_changed``
         would for a direct edit: resimulate if live ring simulation is on
-        (ring radii themselves depend on λ/px/max2θ, not just their on-image
+        (ring radii themselves depend on λ/px/N rings, not just their on-image
         position), otherwise redraw/reintegrate with the new values."""
-        for w, key in ((self._wl, "wavelength_A"), (self._max2t, "max2theta"),
+        for w, key in ((self._wl, "wavelength_A"), (self._n_rings, "n_rings"),
                        (self._px, "pxY")):
             v = fields.get(key)
             if v is not None:
-                w.blockSignals(True); w.setValue(float(v)); w.blockSignals(False)
+                w.blockSignals(True); w.setValue(type(w.value())(v)); w.blockSignals(False)
         if self._sim_btn.isChecked() and self._image_provider() is not None:
             self._simulate()
         else:
             self._after_geometry_change()
+
+    # ── Ring-settings sync (Hydra: materials/Rings/Labels/thickness mirrored
+    #    across panels — same broadcast shape as the shared-field sync above,
+    #    driven by ``ringSettingsChanged`` instead of ``geometryChanged``) ──
+
+    def get_ring_settings(self) -> dict:
+        """Materials list + Rings/Labels/thickness — the ring-visual state an
+        owner (the Hydra page) may mirror across several cards."""
+        return {
+            "materials": self.materials_state(),
+            "show_rings": self._show_rings.isChecked(),
+            "show_labels": self._show_labels.isChecked(),
+            "ring_width": self._ring_width.value(),
+        }
+
+    def apply_ring_settings(self, settings: dict):
+        """Apply a ring-settings dict from another card without re-emitting
+        this card's own ``ringSettingsChanged`` (the owner already knows it's
+        propagating a sync). If this card already had a ring overlay, its
+        rings are recomputed (pure geometry — this card's own λ/Lsd/px/BC/
+        tilt are untouched) and redrawn/reintegrated with the new materials;
+        a card with no overlay yet just gets the new materials/checkbox
+        state silently, matching today's per-card "nothing to show until
+        Simulate" behaviour."""
+        had_rings = self._any_material_rings()
+        materials = settings.get("materials")
+        if materials is not None:
+            self.set_materials(materials)
+        for w, key in ((self._show_rings, "show_rings"), (self._show_labels, "show_labels")):
+            v = settings.get(key)
+            if v is not None:
+                w.blockSignals(True); w.setChecked(bool(v)); w.blockSignals(False)
+        if settings.get("ring_width") is not None:
+            self._ring_width.blockSignals(True)
+            self._ring_width.setValue(float(settings["ring_width"]))
+            self._ring_width.blockSignals(False)
+        if had_rings or self._sim_is_live():
+            self._compute_material_rings()
+            self._refresh_ring_checklists()
+        self._redraw_rings()
+        self._refresh_profile_markers()
+        self._maybe_auto_radial()
 
     def set_geometry(self, g: dict):
         """Replace the manual-geometry fields from a geometry dict (e.g. the Calibrate
@@ -593,7 +649,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             "wl": self._wl,
             "lsd": self._lsd,
             "px": self._px,
-            "max2t": self._max2t,
+            "n_rings": self._n_rings,
             "bc_auto": self._bc_auto,
             "bcy": self._bcy,
             "bcz": self._bcz,
@@ -653,9 +709,16 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         self._lsd = _fspin(0.001, 1e6, 3, DEFAULT_LSD_UM / 1000.0, " mm", step=DEFAULT_STEP_LSD_MM)
         self._lsd.setFixedWidth(120)
         self._px = _fspin(0.1, 1e6, 2, DEFAULT_PIXEL_UM, "µm", step=DEFAULT_STEP_PIXEL)
-        self._max2t = _fspin(0.001, 180.0, 1, 25.0, "°", step=DEFAULT_STEP_TWO_THETA)
+        self._n_rings = _NoScrollSpinBox()
+        self._n_rings.setRange(1, 200)
+        self._n_rings.setValue(DEFAULT_N_RINGS)
+        self._n_rings.setMaximumWidth(104)
+        self._n_rings.setToolTip(
+            "Maximum number of rings simulated per material (innermost first). "
+            "Rings that would fall entirely outside the current image are never "
+            "drawn, no matter how high this is set.")
         geo = S.Form()
-        geo.row((make_kedge_label(self._wl, "λ:"), self._wl), ("max 2θ:", self._max2t))
+        geo.row((make_kedge_label(self._wl, "λ:"), self._wl), ("N rings:", self._n_rings))
         geo.row(("Lsd:", self._lsd), (make_pixel_label(self._px, "px:"), self._px))
         ring.body.addLayout(geo)
 
@@ -726,13 +789,16 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         ctl = QtWidgets.QHBoxLayout()
         self._show_rings = QtWidgets.QCheckBox("Rings"); self._show_rings.setChecked(True)
         self._show_rings.toggled.connect(self._set_rings_visible)
+        self._show_rings.toggled.connect(self.ringSettingsChanged.emit)
         self._show_labels = QtWidgets.QCheckBox("Labels"); self._show_labels.setChecked(True)
         self._show_labels.toggled.connect(self._set_rings_visible)
+        self._show_labels.toggled.connect(self.ringSettingsChanged.emit)
         self._ring_width = _fspin(0.5, 10.0, 1, DEFAULT_RING_WIDTH, "px")
         self._ring_width.setToolTip("Line thickness of the simulated rings on the image.")
         self._ring_width.setMaximumWidth(80)
         self._ring_width.valueChanged.connect(self._redraw_rings)
         self._ring_width.valueChanged.connect(self._refresh_profile_markers)
+        self._ring_width.valueChanged.connect(self.ringSettingsChanged.emit)
         ctl.addWidget(self._show_rings); ctl.addWidget(self._show_labels)
         ctl.addSpacing(8)
         ctl.addWidget(QtWidgets.QLabel("thickness:"))
@@ -761,12 +827,8 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         sim_row.addWidget(self._sim_live)
         sim_row.addWidget(self._sim_clear_btn)
         ring.body.addLayout(sim_row)
-        for w in (self._wl, self._lsd, self._px, self._max2t):
+        for w in (self._wl, self._lsd, self._px, self._n_rings):
             w.valueChanged.connect(self._on_sim_param_changed)
-        self._ring_info = QtWidgets.QPlainTextEdit(); self._ring_info.setReadOnly(True)
-        self._ring_info.setMaximumHeight(140)
-        self._ring_info.setStyleSheet(f"font-family:{S.MONO_CSS};font-size:10px")
-        ring.body.addWidget(self._ring_info)
         # Transforms sits above Ring simulation: in the Data Viewer the card
         # column is Projection → this card, so this puts Transforms between
         # Projection and Ring simulation, where it belongs (it describes the
@@ -837,6 +899,10 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         return m
 
     def _build_material_row(self, material: dict) -> QtWidgets.QWidget:
+        outer = QtWidgets.QWidget()
+        ov = QtWidgets.QVBoxLayout(outer)
+        ov.setContentsMargins(0, 0, 0, 0); ov.setSpacing(2)
+
         row = QtWidgets.QWidget()
         h = QtWidgets.QHBoxLayout(row)
         h.setContentsMargins(0, 0, 0, 0); h.setSpacing(4)
@@ -857,13 +923,42 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             "border:none; padding:0;}")
         name_btn.setToolTip("Edit this material's lattice, space group, and name")
         name_btn.clicked.connect(lambda _, m=material, nb=name_btn: self._edit_material(m, nb))
+        # Collapsible per-ring show/hide checklist — collapsed by default so
+        # several materials stay compact; expands to one checkbox per
+        # simulated ring (populated by _refresh_ring_checklist once rings
+        # exist — see _simulate/apply_ring_settings).
+        expand_btn = QtWidgets.QToolButton()
+        expand_btn.setCheckable(True)
+        expand_btn.setAutoRaise(True)
+        expand_btn.setText("▸")
+        expand_btn.setToolTip("Show/hide this material's individual rings")
         del_btn = QtWidgets.QPushButton("✕")
         del_btn.setFixedSize(20, 20)
         del_btn.setToolTip("Remove this material")
-        del_btn.clicked.connect(lambda _, m=material, r=row: self._delete_material(m, r))
-        h.addWidget(chk); h.addWidget(swatch); h.addWidget(name_btn, 1); h.addWidget(del_btn)
-        row._del_btn = del_btn
-        return row
+        del_btn.clicked.connect(lambda _, m=material: self._delete_material(m, outer))
+        h.addWidget(chk); h.addWidget(swatch); h.addWidget(name_btn, 1)
+        h.addWidget(expand_btn); h.addWidget(del_btn)
+
+        ring_list = QtWidgets.QWidget()
+        ring_list_layout = QtWidgets.QVBoxLayout(ring_list)
+        ring_list_layout.setContentsMargins(22, 0, 0, 2); ring_list_layout.setSpacing(1)
+        ring_list.setVisible(False)
+        expand_btn.toggled.connect(
+            lambda on, rl=ring_list, b=expand_btn: self._set_ring_list_expanded(rl, b, on))
+
+        ov.addWidget(row)
+        ov.addWidget(ring_list)
+        outer._del_btn = del_btn
+        outer._expand_btn = expand_btn
+        outer._ring_list_layout = ring_list_layout
+        return outer
+
+    @staticmethod
+    def _set_ring_list_expanded(ring_list: QtWidgets.QWidget,
+                                btn: QtWidgets.QToolButton, on: bool):
+        ring_list.setVisible(on)
+        count = ring_list.layout().count()
+        btn.setText(f"▾ {count}" if on else f"▸ {count}")
 
     def _update_material_delete_buttons(self):
         many = len(self._materials) > 1
@@ -873,33 +968,114 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             if row is not None:
                 row._del_btn.setEnabled(many)
 
+    def _refresh_ring_checklists(self):
+        """Rebuild every material's per-ring checklist from its freshly
+        computed ``_rings`` — call after anything that runs
+        ``_compute_material_rings`` (``_simulate``,
+        ``simulate_rings_without_image``, ``apply_ring_settings``). Relies on
+        ``self._materials`` and ``self._materials_box``'s widgets staying in
+        the same order (true throughout — both are only ever appended/removed
+        together, see ``_add_material``/``_delete_material``/``set_materials``)."""
+        for i, m in enumerate(self._materials):
+            item = self._materials_box.itemAt(i)
+            row = item.widget() if item is not None else None
+            if row is not None:
+                self._refresh_ring_checklist(m, row)
+
+    def _refresh_ring_checklist(self, material: dict, row: QtWidgets.QWidget):
+        layout = row._ring_list_layout
+        while layout.count():
+            w = layout.takeAt(0).widget()
+            if w is not None:
+                # setParent(None) immediately detaches it from the visible
+                # widget tree — deleteLater() alone only unschedules it from
+                # this layout; the actual C++ object (and its on-screen
+                # presence) survives until the event loop gets around to the
+                # deferred delete, which can leave a stale row visible for a
+                # moment if this runs again before that happens (it does,
+                # often, once ring settings sync across panels).
+                w.setParent(None)
+                w.deleteLater()
+        rings = material.get("_rings") or []
+        if not rings:
+            placeholder = QtWidgets.QLabel("Simulate rings to list them here.")
+            placeholder.setStyleSheet("color:#888; font-size:10px;")
+            layout.addWidget(placeholder)
+        for r in rings:
+            label = f"n{r['order']}" if r["hkl"] is None else str(tuple(r["hkl"]))
+            chk = QtWidgets.QCheckBox(
+                f"{label}   2θ={r['two_theta_deg']:.2f}°   d={r['d_spacing']:.4f} Å")
+            chk.setChecked(r.get("enabled", True))
+            key = self._ring_key(r)
+            chk.toggled.connect(
+                lambda checked, m=material, k=key: self._on_ring_enabled_toggled(m, k, checked))
+            layout.addWidget(chk)
+        self._set_ring_list_expanded(row._ring_list_layout.parentWidget(),
+                                     row._expand_btn, row._expand_btn.isChecked())
+
+    def _on_ring_enabled_toggled(self, material: dict, key: str, checked: bool):
+        """One ring's checkbox toggled — persist the flag on the material
+        (survives the next ``_compute_material_rings``), update the matching
+        already-computed ring in place (no resimulate needed), and refresh
+        both the image overlay and the radial-profile markers. Emits
+        ``ringSettingsChanged`` so the preference rides along in the
+        cross-panel sync (Task 1) — it's just another ``materials_state()``
+        field."""
+        material.setdefault("ring_enabled", {})[key] = checked
+        for r in material.get("_rings") or []:
+            if self._ring_key(r) == key:
+                r["enabled"] = checked
+        self._redraw_rings()
+        self._refresh_profile_markers()
+        self.ringSettingsChanged.emit()
+
     def _add_material(self, name: Optional[str] = None):
         material = self._new_material_defaults(name)
         self._materials.append(material)
         self._materials_box.addWidget(self._build_material_row(material))
         self._update_material_delete_buttons()
+        self._refresh_ring_checklists()
         self._on_sim_param_changed()
+        if not self._loading_materials:
+            self.ringSettingsChanged.emit()
 
     def set_materials(self, materials: list):
-        """Replace the whole materials list (e.g. from a loaded GUI state)."""
-        for i in reversed(range(self._materials_box.count())):
-            item = self._materials_box.takeAt(i)
-            w = item.widget() if item is not None else None
-            if w is not None:
-                w.deleteLater()
-        self._materials = []
-        for md in materials:
-            m = dict(md)
-            m.setdefault("preset", "Custom")
-            m.setdefault("cubic", False)
-            m.setdefault("enabled", True)
-            m.setdefault("color", _MATERIAL_COLORS[len(self._materials) % len(_MATERIAL_COLORS)])
-            self._materials.append(m)
-            self._materials_box.addWidget(self._build_material_row(m))
-        if not self._materials:
-            self._add_material("Ni (FCC)")
-        self._update_material_delete_buttons()
-        self._sync_dspacing_picking()
+        """Replace the whole materials list (e.g. from a loaded GUI state, or
+        an owner applying another card's settings — see
+        ``apply_ring_settings``). Deliberately does not emit
+        ``ringSettingsChanged`` itself (``_loading_materials`` suppresses it
+        from ``_add_material``'s fallback call below) — both callers decide
+        for themselves whether a sync/notification is appropriate."""
+        self._loading_materials = True
+        try:
+            for i in reversed(range(self._materials_box.count())):
+                item = self._materials_box.takeAt(i)
+                w = item.widget() if item is not None else None
+                if w is not None:
+                    # setParent(None) immediately detaches it from the
+                    # visible widget tree, instead of leaving a stale row
+                    # on screen until deleteLater()'s deferred delete runs —
+                    # this now fires on every cross-panel ring-settings sync
+                    # (apply_ring_settings), not just an occasional GUI-state
+                    # restore, so a lingering old row became visible.
+                    w.setParent(None)
+                    w.deleteLater()
+            self._materials = []
+            for md in materials:
+                m = dict(md)
+                m.setdefault("preset", "Custom")
+                m.setdefault("cubic", False)
+                m.setdefault("enabled", True)
+                m.setdefault("color", _MATERIAL_COLORS[len(self._materials) % len(_MATERIAL_COLORS)])
+                self._materials.append(m)
+                self._materials_box.addWidget(self._build_material_row(m))
+            if not self._materials:
+                self._add_material("Ni (FCC)")
+            self._update_material_delete_buttons()
+            self._refresh_ring_checklists()
+            self._sync_dspacing_picking()
+        finally:
+            self._loading_materials = False
 
     def _on_material_enabled(self, material: dict, checked: bool):
         """A material's enabled tick only changes which already-simulated
@@ -911,6 +1087,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         if self._any_material_rings():
             self._redraw_rings()
         self._on_sim_param_changed()
+        self.ringSettingsChanged.emit()
 
     def _pick_material_color(self, material: dict, swatch_btn: QtWidgets.QPushButton):
         col = QtWidgets.QColorDialog.getColor(QtGui.QColor(material["color"]), self, "Ring color")
@@ -920,6 +1097,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         swatch_btn.setStyleSheet(self._swatch_style(material["color"]))
         self._redraw_rings()
         self._refresh_profile_markers()
+        self.ringSettingsChanged.emit()
 
     def _edit_material(self, material: dict, name_btn: QtWidgets.QPushButton):
         dlg = MaterialDialog(material, self)
@@ -927,15 +1105,18 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             dlg.apply_to(material)
             name_btn.setText(material["name"])
             self._on_sim_param_changed()
+            self.ringSettingsChanged.emit()
 
     def _delete_material(self, material: dict, row: QtWidgets.QWidget):
         if len(self._materials) <= 1:
             return
         self._materials.remove(material)
         self._materials_box.removeWidget(row)
+        row.setParent(None)
         row.deleteLater()
         self._update_material_delete_buttons()
         self._on_sim_param_changed()
+        self.ringSettingsChanged.emit()
 
     def _any_material_rings(self) -> bool:
         return any(m.get("_rings") for m in self._materials)
@@ -1000,7 +1181,6 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         self._ring_draw_geom = None
         self._clear_rings()
         self._refresh_profile_markers()
-        self._ring_info.setPlainText("")
 
     def _on_sim_param_changed(self, *_):
         """Material/lattice/geometry field edited — resimulate while live mode is on.
@@ -1023,14 +1203,57 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             self._maybe_auto_radial()
             self.geometryChanged.emit()
 
+    @staticmethod
+    def _ring_key(r: dict) -> str:
+        """Stable identity for one ring across recomputation (hkl/order are
+        unchanged by a geometry edit) — used to persist per-ring show/hide
+        across ``_compute_material_rings`` calls (see ``ring_enabled``).
+        A plain string, not a tuple, so it round-trips through the
+        JSON/HDF5-backed saved GUI state the same as every other material
+        field."""
+        if r.get("hkl") is not None:
+            return ",".join(str(x) for x in r["hkl"])
+        return f"order{r['order']}"
+
+    def _ring_generation_max_two_theta(self) -> float:
+        """Hard 2θ ceiling for ring generation: the farthest point the
+        current image actually reaches, so a ring that would fall entirely
+        outside the frame is never generated — and so never spends one of
+        the N-rings slots — no matter how high N rings is set. Falls back
+        to 180° (every Bragg-reachable ring) when there's no image yet to
+        bound against."""
+        img = self._image_provider()
+        if img is None:
+            return 180.0
+        nz, ny = img.shape[:2]
+        try:
+            return max_two_theta_deg(self._bcy.value(), self._bcz.value(), ny, nz,
+                                     self._lsd_um(), self._px.value())
+        except Exception:
+            return 180.0
+
     def _compute_material_rings(self):
         """(Re)compute every enabled material's ring positions (``_rings``)
-        from the current wavelength/Lsd/pixel-size/max-2θ — pure geometry
+        from the current wavelength/Lsd/pixel-size — pure geometry
         (d-spacing + wavelength + detector distance/pixel size), no image
         needed. Returns ``(errors, any_rings)``. Split out of ``_simulate``
         so ``simulate_rings_without_image`` can reuse the same computation
         without that method's image requirement (which exists only for the
-        on-image overlay ``_redraw_rings`` draws afterwards)."""
+        on-image overlay ``_redraw_rings`` draws afterwards).
+
+        Rings are generated out to ``_ring_generation_max_two_theta()`` (the
+        image's physical reach, when an image is bound) and then truncated
+        to the innermost ``N rings`` — so N rings never pulls in a ring
+        that's completely off the current frame, and the per-material
+        dropdown never lists more than N rings either.
+
+        Each ring also gets an ``enabled`` flag from the material's
+        persistent ``ring_enabled`` map (keyed by ``_ring_key``, default
+        True — all rings shown) — the per-ring show/hide checkbox toggles
+        that map, not anything on these (recomputed-from-scratch) ring
+        dicts themselves."""
+        max_2theta = self._ring_generation_max_two_theta()
+        n_rings = self._n_rings.value()
         errors, any_rings = [], False
         for m in self._materials:
             m["_rings"] = []
@@ -1040,18 +1263,22 @@ class DetectorGeometryCard(QtWidgets.QWidget):
                 if m.get("kind") == "dspacing":
                     rings = simulate_rings_from_dspacings(
                         m["d_list"], self._wl.value(), self._lsd_um(),
-                        self._px.value(), self._max2t.value())
+                        self._px.value(), max_2theta)
                 else:
                     lattice = dict(a=m["a"], b=m["b"], c=m["c"],
                                    alpha=m["alpha"], beta=m["beta"], gamma=m["gamma"])
                     rings = simulate_rings(lattice, m["sg"], self._wl.value(),
-                                           self._lsd_um(), self._px.value(), self._max2t.value())
+                                           self._lsd_um(), self._px.value(), max_2theta)
             except Exception:
                 import traceback
                 errors.append(f"{m['name']}: {traceback.format_exc().splitlines()[-1]}")
                 continue
+            rings = rings[:n_rings]
+            ring_enabled = m.get("ring_enabled") or {}
+            for r in rings:
+                r["enabled"] = ring_enabled.get(self._ring_key(r), True)
             m["_rings"] = rings
-            any_rings = True
+            any_rings = any_rings or bool(rings)
         return errors, any_rings
 
     def simulate_rings_without_image(self):
@@ -1063,44 +1290,31 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         materials/wavelength/Lsd/pixel size."""
         self._compute_material_rings()
         self._refresh_profile_markers()
+        self._refresh_ring_checklists()
 
     def _simulate(self):
         img = self._image_provider()
         if img is None:
             QtWidgets.QMessageBox.warning(self, "No image", "Load data first."); return
         errors, any_rings = self._compute_material_rings()
-        lines = []
-        for m in self._materials:
-            if not m["enabled"] or not m.get("_rings"):
-                continue
-            rings = m["_rings"]
-            lines.append(f"{m['name']}: {len(rings)} rings")
-            lines.append(f"{'hkl':>10}  {'2θ(°)':>7}  {'d(Å)':>7}  {'R(px)':>8}")
-            for r in rings:
-                label = f"n{r['order']}" if r["hkl"] is None else str(tuple(r["hkl"]))
-                lines.append(f"{label:>10}  {r['two_theta_deg']:7.3f}  "
-                             f"{r['d_spacing']:7.4f}  {r['radius_px']:8.1f}")
-            lines.append("")
         # Freeze the placement parameters this simulation was run with, so a
         # later BC/tilt edit cannot silently move rings that are no longer
         # being recomputed (only live mode re-runs _simulate).
         self._ring_draw_geom = self._current_ring_geom() if any_rings else None
         self._after_geometry_change()
+        self._refresh_ring_checklists()
         if errors:
-            lines.append("Errors:"); lines.extend(errors)
-        if not any_rings and not errors:
-            lines = ["No enabled materials."]
-        self._ring_info.setPlainText("\n".join(lines).rstrip())
-        if errors and not any_rings:
             show_error(self, "Simulation error", "\n".join(errors))
 
     def _clear_rings(self):
         if self._viewer is None:
             self._ring_items.clear(); self._label_items.clear()
+            self._ring_item_enabled.clear(); self._label_item_enabled.clear()
             return
         for it in self._ring_items + self._label_items:
             self._viewer._iv.removeItem(it)
         self._ring_items.clear(); self._label_items.clear()
+        self._ring_item_enabled.clear(); self._label_item_enabled.clear()
 
     def _current_ring_geom(self) -> dict:
         """The placement parameters the ring overlay is drawn with."""
@@ -1172,30 +1386,35 @@ class DetectorGeometryCard(QtWidgets.QWidget):
                 on = _ring_on_image_mask(ys, zs, img.shape)
                 ys_clip = np.where(on, ys, np.nan)
                 zs_clip = np.where(on, zs, np.nan)
+                ring_on = r.get("enabled", True)
                 item = pg.PlotDataItem(ys_clip, zs_clip, pen=pen, connect="finite")
-                item.setVisible(vis_r)
-                self._viewer._iv.addItem(item); self._ring_items.append(item)
+                item.setVisible(vis_r and ring_on)
+                self._viewer._iv.addItem(item)
+                self._ring_items.append(item); self._ring_item_enabled.append(ring_on)
                 label_y, label_z, anchor = placement
                 txt = pg.TextItem(label, color=m["color"], anchor=anchor)
                 txt.setFont(label_font)
                 txt.setPos(label_y, label_z)
-                txt.setVisible(vis_l)
-                self._viewer._iv.addItem(txt); self._label_items.append(txt)
+                txt.setVisible(vis_l and ring_on)
+                self._viewer._iv.addItem(txt)
+                self._label_items.append(txt); self._label_item_enabled.append(ring_on)
         # Beam-centre marker — always the *live* beam centre, not the frozen
         # one the rings were drawn with, so a BC edit is visibly reflected.
+        # Not tied to any one ring, so always individually "enabled".
         bc = pg.ScatterPlotItem([self._bcy.value()], [self._bcz.value()],
                                 symbol="+", size=16,
                                 pen=pg.mkPen("#00cfff", width=2), brush=pg.mkBrush(0, 0, 0, 0))
         bc.setVisible(vis_r)
-        self._viewer._iv.addItem(bc); self._ring_items.append(bc)
+        self._viewer._iv.addItem(bc)
+        self._ring_items.append(bc); self._ring_item_enabled.append(True)
 
     def _set_rings_visible(self, *_):
         vis_r = self._show_rings.isChecked()
         vis_l = self._show_labels.isChecked() and vis_r
-        for it in self._ring_items:
-            it.setVisible(vis_r)
-        for it in self._label_items:
-            it.setVisible(vis_l)
+        for it, on in zip(self._ring_items, self._ring_item_enabled):
+            it.setVisible(vis_r and on)
+        for it, on in zip(self._label_items, self._label_item_enabled):
+            it.setVisible(vis_l and on)
         if self._pick_ring_item is not None:
             self._pick_ring_item.setVisible(vis_r)
         self._refresh_profile_markers()
@@ -1269,14 +1488,17 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             return
         # Same hkl/order text as the on-image ring labels, so a peak in the
         # profile and the arc it came from carry the identical name. Hidden
-        # together with the image overlay: unchecking "Rings" should clear
-        # the profile markers too, not just the on-image arcs.
-        groups = [{"radii": [r["radius_px"] for r in m["_rings"]],
+        # together with the image overlay: unchecking "Rings" (or an
+        # individual ring's own checkbox) should clear the profile markers
+        # too, not just the on-image arcs.
+        def _visible_rings(m):
+            return [r for r in (m.get("_rings") or []) if r.get("enabled", True)]
+        groups = [{"radii": [r["radius_px"] for r in _visible_rings(m)],
                    "labels": [f"n{r['order']}" if r["hkl"] is None
                               else "".join(str(x) for x in r["hkl"])
-                              for r in m["_rings"]],
+                              for r in _visible_rings(m)],
                    "color": m["color"]}
-                  for m in self._materials if m["enabled"] and m.get("_rings")
+                  for m in self._materials if m["enabled"] and _visible_rings(m)
                   ] if self._show_rings.isChecked() else []
         self._profile_view.set_ring_markers(
             groups, self._lsd_um(), self._px.value(), self._wl.value(),

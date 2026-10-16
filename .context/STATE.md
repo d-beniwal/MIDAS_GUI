@@ -1,11 +1,96 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-10-16 (Hydra Calibrate: single-panel save, calibration-file cascading load, bidirectional all-panel Data Viewer transfer — see DECISIONS)_
+_Last updated: 2026-10-16 (Ring simulation: "max 2θ" replaced by "N rings" + a hard image-reach cap; ring-info text box removed — see DECISIONS)_
 
 ## Now working on
 
 Nothing in progress.
+
+**2026-10-16 (latest, 2) — Data Viewer "Ring simulation": max 2θ field
+replaced by an N-rings count (default 10), and ring generation is now hard-
+capped to whatever the current image can actually show.** Requested directly,
+two parts. `DetectorGeometryCard._max2t` (a 2θ-angle spinbox) is gone,
+replaced by `_n_rings` (`_NoScrollSpinBox`, range 1–200, default
+`constants.DEFAULT_N_RINGS=10`) — shared-field sync
+(`get_shared_fields`/`apply_shared_fields`, key renamed `max2theta`→
+`n_rings`), `state_widgets()` (key `max2t`→`n_rings`), and the Preferences
+"max 2θ step" row/constant (`DEFAULT_STEP_TWO_THETA`) all removed with it (an
+integer ring count has no meaningful step preference). New
+`_ring_generation_max_two_theta()` returns the true farthest-corner 2θ the
+bound image can reach (`helpers.max_two_theta_deg`, already used by
+`_predict_ring_radii` for the same purpose) — 180° (every Bragg-reachable
+ring) when there's no image yet. `_compute_material_rings` generates out to
+that cap, then truncates to the innermost N rings, so a ring that would be
+completely off-frame can never be generated regardless of how high N is set,
+and the per-material checklist dropdown never lists more than N rings either.
+Also removed the `_ring_info` `QPlainTextEdit` report box under the Simulate
+button (superseded by the per-material ring checklist dropdown from the
+previous entry); `_simulate()` now only surfaces computation errors via the
+existing error dialog.
+**Verified:** `tests/test_view_tab_controls.py` (33/33 — the `framed` fixture
+was found to leak `_wl`/`_lsd`/`_px` from an earlier test in the same module
+onto later ones via the shared module-scoped `tab`, which the old fixed-angle
+field never surfaced; now pins those three fields to values that actually put
+Ni(FCC)'s innermost rings inside the fixture's 192×192 synthetic frame),
+`tests/test_hydra_ui.py` (16/16, `--forked`, shared-field-sync test updated
+for the renamed key), `tests/test_helpers.py`, `tests/test_ca_live_view.py`
+(exercises `prefs_dialog`) all green; `pyflakes` shows only the one
+pre-existing unrelated `hydra_geometry_card.py` warning.
+**Not verified:** no live beamline session to eyeball the renamed field/
+tooltip or the dropdown's new row count against a real detector frame.
+
+**2026-10-16 — Four requested fixes: Hydra Data Viewer material/ring-visual
+sync across panels, per-ring show/hide checkboxes, "restart now and resume"
+for Preferences/profile changes, and a smarter Dark-file default container.**
+Four independent asks in one session — see DECISIONS for the full design
+per item.
+1. `DetectorGeometryCard` gained `ringSettingsChanged`/`get_ring_settings`/
+   `apply_ring_settings`, mirroring the existing λ/max2θ/px shared-field
+   sync pattern (`HydraViewerPage._sync_shared_fields`) with a new
+   `_sync_ring_settings` — picking a material or toggling Rings/Labels/
+   thickness on any one of the 5 Hydra panels (ge1-4 + composite) now
+   mirrors onto all the others, including radial-integration markers.
+   Scoped to the Data Viewer tab only (`HydraCalibrationPage` keeps its own
+   separate, simpler ring mechanism).
+2. Each ring now carries a persistent `ring_enabled` flag on its material
+   (keyed by a stable `_ring_key`, default all-shown), with a collapsible
+   per-material checklist (one checkbox per ring) in the Ring simulation
+   card. Found and fixed a real bug along the way: `set_materials()`'s
+   widget-clearing loop only did `takeAt()+deleteLater()`, which can leave a
+   stale row visibly on screen until the deferred delete runs — harmless
+   when called rarely (GUI-state restore) but visible once the new sync
+   calls it on every cross-panel update. Fixed with `setParent(None)` before
+   `deleteLater()` everywhere this pattern appears.
+3. `MainWindow.restart_app()`/`_offer_restart()` gained a `resume` option
+   that snapshots the full session into the existing autosave-draft
+   mechanism (marked `__auto_resume__`) before relaunching;
+   `maybe_offer_restore_autosave()` applies that marked draft silently (no
+   "Restore unsaved session?" prompt — the user already opted in). Wired
+   into every place that already said "restart needed" but didn't offer
+   one: profile switch (header combo + Preferences dialog), Preferences
+   "Save as my defaults", and "Reload config".
+4. `FieldSelector`/`HydraFieldSelector` gained `prefer_most_frames` (Dark
+   only), using new `helpers.best_default_dataset_index()`: when the Dark
+   file differs from the Data file, the default HDF5 container is now the
+   one with the most frames instead of the first one found in file order.
+**Verified:** new tests in `test_hydra_ui.py` (cross-panel sync, per-ring
+toggle + round-trip, Dark container preference), `test_helpers.py`
+(`best_default_dataset_index`, single-detector `FieldSelector`),
+`test_workspace_ux.py` (silent auto-resume draft), `test_ca_live_view.py`
+(restart offer wiring) — all green, plus the full touched-file sweep
+(`test_hydra_calib_ui`, `test_hydra_batch_ui`, `test_hydra_chirality`,
+`test_hydra_geometry`, `test_hydra_overall_cake`, `test_smoke`,
+`test_set_raw_frame`), `--forked` where that's the file's normal mode.
+`pyflakes` shows no new warnings. Offscreen screenshots confirmed the
+per-ring checklist renders/expands correctly and the duplicate-row bug is
+gone.
+**Not verified:** no live beamline session to exercise the actual restart/
+relaunch (`QProcess.startDetached` + `QApplication.quit()`) end-to-end —
+`restart_app()` itself was deliberately not called in tests to avoid
+quitting the shared test QApplication; only its draft-writing half
+(`_save_autosave_draft_for_restart`) and the silent-resume read-back are
+covered.
 
 **2026-10-16 — Hydra Calibrate: "Save Current Panel" buttons, "Load
 calibration file…" cascades to sibling panels, bidirectional all-panel Data
@@ -731,401 +816,7 @@ clipped a few farther rings even after the generation-side fix. New test
 hydra-calib-ui), plus `test_smoke.py`; `pyflakes` unchanged (same
 pre-existing warnings only).
 
-**2026-09-30 — PR #11 (junspark) merged into `main`: 48 commits, 8 staged
-checkpoints, 3 real bugs found and fixed along the way.** Full rationale,
-per-checkpoint GUI-risk table and verification detail in DECISIONS. Headline
-additions: new Zarr Viewer tab (visible by default), a cake-parameters editor
-dialog, omega (rotation-angle) tracking end-to-end through Batch Integrate,
-✕-to-close on every optional tab, the horizontal polarization-plane fix, and
-assorted Calibrate/Corrections polish. `main` was never touched mid-flight —
-everything happened on a disposable `merge/pr11-staged` branch, checkpoint by
-checkpoint, with a test sweep + offscreen screenshot diff after each before
-advancing. Full 75-file per-file sweep is green except the one known
-pre-existing `test_apply_project_calibration_single_detector` SIGABRT.
-
-**2026-09-29 — ω verified live, then made to say what it means; three bugs
-out.** Six commits, `4c7b776`…`dc24f12`, pushed. You confirmed a real run's
-zarr `/Omegas` are correct — that closes the live-verification item the omega
-work had been carrying, and everything below was written on top of it.
-
-- **ω restarts at every file** (`236ffa0`). The global ramp meant the computed
-  `OME_START`/`OME_STEP` ramp and a *measured* ω channel indexed two different
-  axes for the same frame, and a file-number filter silently rebased the ramp
-  anyway (dropped files were gone before the source saw them). One rule now:
-  ω is measured from raw sub-frame 0 of the rotation the frame came from — an
-  HDF5 sub-frame stack is one rotation, a one-frame-per-file series is one.
-  `raw_window_for_index` is now literally `omega_channel_window(idx)[1:]`, so
-  there is one place that decides what the axis is.
-- **The GUI says frame numbers and angles are the same axis** (`1bb4341`).
-  The cake summary line and the loader's range hint both map the sub-frame
-  range to the angle range, spelling out Δω/sub-frame **vs** Δω/frame — the
-  `OME_SUM` multiplication nobody should have to do in their head. A loaded
-  rotation with no angles set now says so rather than quietly producing
-  all-zero `/Omegas`. `DataLoaderPanel` still knows nothing about ω; it takes
-  a callable (`set_omega_hint_fn`), so every other tab's hint is unchanged.
-- **Background jobs wrote ω = 0** (`dc24f12`). The `batch_cli` argv carried no
-  omega flags at all, so "Run as background job" recorded zeros while Start
-  Integration recorded the right angles, and nothing could report it. Fixed by
-  serialising the config rather than re-deriving it; start/step go out even at
-  0/0 so the command line in the Logs tab always states what the job will
-  record.
-- **2D CSV wrote nothing with multi-azimuth off** (`6ed405d`), and reported a
-  file it had not written, under the wrong name. `cake_2d is not None` had
-  come to mean both "a cake exists" and "fan out per η"; those are now
-  separate, and `write_profile` raises rather than no-op'ing.
-- **One frame no longer costs a whole-file decode** (`520ae44`). Previewing
-  one frame of the 1442-sub-frame VAREX file (23.9 GB) read all of it: ~230 s
-  and ~1.9 GB to draw 33 MB, paid again by every parallel worker. Now ~4 s /
-  415 MB. This is the second half of the fix whose first half (counting
-  without decoding) landed earlier.
-- **`kill -USR1` dumps every thread's stack** to `~/midas_gui_hang.log`
-  (`4c7b776`) — a freeze leaves no traceback, and that is exactly when the app
-  can no longer be asked anything.
-
-**Verified:** full suite 1,149 collected, 2 failed / 3 skipped — the same
-known pair (`test_pva_live_source_roundtrip`, a system `libstdc++` CXXABI
-mismatch, and `test_apply_project_calibration_single_detector`, the pyqtgraph
-teardown SIGABRT) and the same three skips. Four new test files, ~890 lines.
-**Not verified with eyes on it:** the two new readouts have not been seen
-rendered — they are pinned by `tests/test_omega_readout.py` at the text level
-only, and the exact wording in a narrow panel wants a look.
-
-**2026-09-29 — Upstream's cake HDF5, merged.** `cc1045d` (merge) and
-`43c672c` (docs), pushed. Upstream's two 2026-09-28 Batch Integrate commits —
-`31e904c` (multi-azimuth HDF5 output, new `midas_gui/cake_hdf5.py`) and
-`61feeb3` (flatter layout, 2θ/d/Q axes, wider provenance) — land on exactly
-the code the omega work had rewritten. Only `workers.py` and `tab_batch.py`
-conflicted; DECISIONS 2026-09-29 records which side won where. Three things
-worth knowing without opening that entry:
-
-- Upstream's `all_omegas` is frame *indices* (the combined-HDF5 `<lo>_<hi>`
-  stem); this fork had already split that list in two, so upstream's became
-  `all_frame_idx` and its append condition widened to the union of both
-  guards. No behaviour on either side changed.
-- Upstream hoisted the BinArea count out of the `want_zarr` branch to share
-  it with the cake writer, but hoisted the version that hands `geom` straight
-  to `count_cake` — `None` on the corrections path, the crash this fork had
-  already fixed for zarr. Resolved to upstream's structure with this fork's
-  geometry fallback.
-- `write_cake_h5` gained an `omegas` dataset, so the fork's angle reaches the
-  cake file too — that file is what a pole figure over a rotation series
-  would read.
-
-**Verified:** full suite 1089 passed / 2 failed (the same known pair) /
-3 skipped, with upstream's own `tests/test_batch_cake_h5.py` (+12) green and
-two new tests of ours pinning the cake file's omegas and its survival of the
-corrections path.
-**Not verified with eyes on it:** the cake HDF5 has never been opened in a
-viewer here, and no live run has produced one.
-
-**2026-09-29 — Omega: a real rotation angle on every frame, and in the
-zarr.** `1117cc1`, pushed to `origin/main` along with the eight commits that
-had been sitting local (the 2026-09-28 entry below said "nothing pushed"; that
-is no longer true).
-
-- The cake CSV's `OME_START`/`OME_STEP` stop being carried-and-ignored. One
-  formula covers every case — `ω = OME_START + mean(raw sub-frame indices of
-  the frame) × OME_STEP` — which reduces exactly to mpe_wf's own
-  `ome_start + (idx*ome_sum + (ome_sum−1)/2)*ome_step`, and to the mean of the
-  collapsed window when the loader combined everything into one frame.
-  `cake_params.omega_for_window`/`omega_series` own it.
-- The raw indices come from new `raw_window_for_index` methods on
-  `_HDF5StackGlobSource` and `_ChunkCombinedFileSource` (sources without one
-  fall back to `(i, i)`). **Superseded the same day** — they were global
-  across the run; `236ffa0` makes the HDF5 one restart at every file. See the
-  entry above.
-- Two new inputs in the Cake parameters dialog, outside the nine CSV columns:
-  an editable **omega channel** combo (blank = the computed ramp; populated
-  from the loaded HDF5 by new `helpers.list_h5_1d_datasets`) and an
-  **averaged/summed** override that gives every frame the one run-wide mean.
-- Where it lands: the zarr's `/Omegas` (both writers), the combined HDF5's
-  `omegas` dataset, the attempt record (`results/omegas`), and the Save button's
-  `integrated.h5`. The export path *stores* rather than recomputes, and tags
-  the provenance entry with `omega_source` = recorded / recomputed from
-  `omega_cfg` / unavailable.
-- **Behaviour change:** `/Omegas` used to hold the frame index labelled as
-  degrees. An unconfigured run now writes `[0.0, 0.0, …]` — a stationary sample
-  really is at ω = 0, and that is a better wrong answer than an index.
-  Deliberate; see DECISIONS 2026-09-29.
-- `PoleFigureWorker` was left alone — making it ω-aware across a series is the
-  next piece, and now has a correct angle to stand on.
-
-**Verified:** full suite 1073 passed / 2 failed, both the known pre-existing
-pair (`test_pva_live_source_roundtrip`, `test_apply_project_calibration_single_detector`);
-48 new tests across five files, one new (`tests/test_omega_windows.py`), and a
-re-run of the ten files touched after that suite started (190 passed). Offscreen
-check confirmed the summary line, the dialog round trip, and `SPEC` still being
-exactly `CAKE_KEYS`. Note `test_app_builds_offscreen`, which CLAUDE.md lists as
-a third known failure, passed both times here — its tab-count assertion depends
-on the active profile's tab set, so CLAUDE.md was left as-is rather than
-rewritten off two green runs.
-**Verified live 2026-09-29:** a real run's zarr `/Omegas` are the angles
-expected. Not walked through: the averaged/summed override (every frame
-reporting the one run-wide angle) and a measured ω channel picked from the
-combo — both still only pinned by tests.
-
-**2026-09-28 — The source HDF5's `instrument/` tree reaches the zarr; an ✕
-closes any optional tab.** Three commits, all local, nothing pushed.
-
-- `7414502` — every optional tab gets an ✕ that is the same act as unchecking
-  it in Preferences ▸ Tabs (widget kept, choice persisted to the active
-  profile); the four pinned tabs have theirs stripped. Same commit wrote down
-  what GSAS-II's importer *actually* reads from a MIDAS zarr and corrected a
-  factually wrong claim in `gsas_export.py`'s docstring about the sidecar
-  convention.
-- `35a7b8b` — new `midas_gui/h5_metadata.py` copies `instrument/` +
-  `active_instrument/` out of the source HDF5 and into the finished
-  `.zarr.zip`, wholesale, from both writers (Batch Integrate and the GSAS-II
-  export, the latter rebuilding the source from the attempt's recorded
-  `src_cfg`). `provenance.rewrite_zip`/`stamp_extracted` factored out so the
-  copy and the provenance stamp share one extract/repack pass.
-  **Costs ~0.15 s and ~130 KiB per output frame** — see DECISIONS for why
-  there is deliberately no opt-out, and what the cheapest one would be if the
-  cost turns out to bite on a long scan.
-
-**Verified:** full suite green apart from the two known pre-existing failures
-(`test_pva_live_source_roundtrip`, the system libstdc++ CXXABI mismatch; and
-`test_apply_project_calibration_single_detector`, the pyqtgraph teardown
-SIGABRT). New tests: `tests/test_h5_metadata_copy.py` (+7),
-`tests/test_zarr_layout_parity.py` (+1 cross-writer instrument-tree test),
-`tests/test_smoke.py` (+3 tab-close tests).
-**Not verified with eyes on it:** no live X11 session — the ✕ and the
-enriched Zarr Viewer tree still want a look on a real run.
-
-**2026-09-26 — Batch Integrate: "stride" replaced by unified "Combine
-sub-frames" (HDF5 + TIFF alike).** `DataLoaderPanel`'s start/end/stride +
-HDF5-only "Combine sub-frames" consolidated into one control: stride is gone
-(the panel gains a new opt-in `unify_combine=True`, used only by
-`tab_batch.py`; Pump Probe's own loader instance keeps stride untouched —
-see DECISIONS for why the flag exists at all). Combine sub-frames now applies
-to a TIFF/`.ge*` folder too, via new `workers._ChunkCombinedFileSource`
-(groups consecutive FILES, mirroring `_HDF5StackGlobSource`'s within-file
-chunking). Start/end filtering moved from a post-hoc index range into
-`source_cfg()` itself (`frame_start`/`frame_end`, new
-`workers._filter_paths_by_frame_number`), applied *before* chunking so a
-narrowed range always restarts chunk-counting at its own start.
-Opportunistic fixes in the same touched code: background "Run as background
-job" (`batch_cli.py`) previously had no `--chunk-size`/`--combine-op` at all
-(silently ignored); `tab_batch.py`'s `_run_as_job` mis-routed multi-file HDF5
-through `--source-type tiff_list` (now has its own `hdf5_stack_glob` branch).
-MONITOR now also refuses when combine/filtering is active (live-combining
-isn't supported). New tests: `test_batch_data_source.py` (+6),
-`test_frame_naming.py` (+9), `test_project.py` (+1) — all existing HDF5
-multi-file combine tests needed zero changes.
-**Verified:** 13 touched/related test files green per-file on a clean `HOME`
-(one pre-existing unrelated SIGABRT); `pyflakes` unchanged at 37; offscreen
-screenshot confirmed the new layout. Full detail in DECISIONS.md.
-
-**2026-09-25 — Data Viewer: folder format filter, under-viewer frame
-scrubber, profile-file lineout; app-wide frame-nav slider/button styling.**
-- Image folder loads can be filtered to one detected format via a new
-  "Format:" combo (`helpers._folder_format_groups`, opt-in
-  `DataLoaderPanel(folder_format_filter=True)`, Data Viewer only).
-- Frame scrubber moved from the left loader column to directly under the
-  image viewer (`tab_view._build_frame_scrub_bar`, copies `tab_calibrate.py`
-  /`CakeStackViewer`'s pattern); `hide_frame_field` now also hides
-  `DataLoaderPanel`'s `mode="stack"` nav row (previously "single"-only).
-- Radial Profile tab gained "Source: Detector frame / Profile file…" to load
-  an existing `.csv/.xye/.dat/.fxye` integration output directly
-  (`helpers.load_profile_file`, generalized off the PDF tab's reader).
-  `helpers.native_axis_to_r_px` converts a 2θ/Q-native file to r_px once a
-  calibration is attached; without one it plots in its native unit with the
-  R/2θ/Q toggle locked (new `ProfileViewer.set_profile(...,
-  native_unit=...)`). Image viewer stays blank in this mode.
-- Found + fixed along the way: `DetectorGeometryCard._simulate()` (ring-radius
-  computation) hard-required an image it never actually used the pixels of —
-  new `simulate_rings_without_image()` (shares `_compute_material_rings()`
-  with `_simulate`) lets ring overlays work with no image loaded.
-- Separately requested: every frame-nav ◀/▶ button + slider app-wide (Data
-  Viewer, Calibrate, Mask Builder, Hydra `mode="nav"` loader,
-  `CakeStackViewer`, `DataLoaderPanel`'s own stack-mode row) now carries
-  `objectName` `frameNavBtn`/`frameNavSlider`, styled in `style.py` — several
-  were plain `QToolButton`s with no default border/background, nearly
-  invisible on the dark theme.
-- New `tests/test_dataviewer_format_filter.py` (7),
-  `test_dataviewer_frame_scrub.py` (5), `test_dataviewer_profile_file.py`
-  (12) — **not** fork-isolated, same reason as `test_view_tab_controls.py`
-  (a forked `DataViewerTab`-building test SIGSEGVs on this machine).
-**Verified:** 11 touched/related test files green per-file on a clean
-`HOME`; `pyflakes midas_gui/*.py` 38→37 (only change: `Path` in
-`tab_view.py` went from unused to used); offscreen screenshot confirmed the
-new button/slider colors. Full detail in DECISIONS.md.
-
-**2026-09-24 (`d224c97`) — Mask Builder: folder/multi-frame Image loading +
-threshold-mask projection.** The Image field now accepts a folder of
-single-frame files, a multi-page TIFF, a 3-D HDF5 dataset, or a multi-frame
-`.geN` file (new `_detect_multiframe`, peeks shape/page-count/file-size
-only, never loads pixel data), with a Frame navigator (◀/▶ + spinbox) to
-step through them — same pattern as the existing section-2 Stack folder
-loader. New Projection combo (Current frame / Average / Sum / Max) lets the
-threshold step (section 1, `_compute`/`_threshold_source_image`) build its
-mask from a reduction across every frame instead of just the frame shown,
-since a per-frame threshold on one noisy frame is often unreliable; disabled
-and locked to "Current frame" for a plain single image. Frame index
-persists in both mask-attempt provenance and sidecar state. New
-`tests/test_mask_folder_frames.py` (10 tests, forked per the pyqtgraph
-teardown-crash pattern).
-
-**2026-09-11 (later) — One honest ring overlay, Batch's cakes made visible,
-and the whole calibration in the provenance record.** Two commits.
-- **`54cdd48` Calibrate.** The predicted-ring overlay is *always* the full
-  forward model — fitted tilt **and** refined distortion — and the "Corrected"
-  tick is gone from both the single-detector tab and the Hydra calib page
-  (with its saved state). It was off by default and applied tilt only, so on a
-  distortion-refined detector both of its states drew rings off the measured
-  ones, which reads as a bad calibration rather than a bad overlay. New
-  `helpers.ring_xy_corrected` inverts the backend's own
-  `R_corrected = D(ρ,η)·R` by fixed-point iteration, calling `midas_distortion`
-  rather than copying the model; `helpers.distortion_rho_d_um` reproduces
-  `spec_from_calibration_result`'s normalisation radius exactly. Reduces
-  bit-exactly to `tilted_ring_xy` (and so to a circle) with nothing to apply.
-  The status line now names what was applied and says when the empirical
-  `residual_corr_map` is *not* drawn. Also: the seed overlay carries fed-back
-  distortion (fresh fit **and** project restore — it silently drew tilt-only
-  rings before); **"Use seed as calibration (no fit)" removed** (superseded by
-  the Data Viewer's Ring simulation card + `Geometry: [← Get]`); d-spacing pick
-  controls hidden for crystalline calibrants, and leaving a d-spacing calibrant
-  cancels an active pick mode; Refine card compacted to three rows with Limits
-  as its own block, Seed/Advanced three-per-row, `S.Form.row` stretching every
-  field column; `IntegrationWorker` float64 end-to-end (it narrowed to float32
-  and widened back, so the Calibrate preview differed from the Batch run it
-  previews). New `tests/test_ring_projection.py` (11, every drawn point fed
-  back through `pixel_to_REta`) and `tests/test_calibrate_integration_accuracy.py`
-  (4, pinning the Calibrate profile equal to the Data Viewer's accurate path).
-- **`f44314d` Batch Integrate.** A multi-azimuth run's per-frame `(η, R)` cakes
-  were computed, written to disk and embedded in the project — and shown
-  nowhere; reopening such a project *raised* (2-D cake rows fed to the 1-D
-  waterfall buffer). New `CakeStackViewer` + an "Eta-R cakes" view tab, frame
-  scrubber, zoom preserved across steps; the 1-D views get an η-collapse over
-  filled bins; a non-multi-azimuth run clears the tab rather than showing stale
-  cakes. `CakeViewer`'s x-axis can be labelled R / 2θ / d / Q — tick strings
-  only, no resampling, d → "∞" at R = 0 — and the selector stays hidden until a
-  caller supplies geometry, which is what leaves Calibrate, Hydra and
-  `RingResidualViewer` untouched. Separately, an attempt's
-  `calibration_snapshot` is now the whole calibration via new
-  `helpers.full_calibration_snapshot` (a strict superset of the display
-  fields, so every existing reader is unchanged). New
-  `tests/test_batch_cake_stack.py` (21) + 2 in `test_project.py`.
-**Verified:** the 5 touched/new test files pass per-file on a clean `HOME`
-(11/4/21/23, and `test_project.py` 42 pass + the known
-`test_apply_project_calibration_single_detector` SIGABRT); `pyflakes
-midas_gui/*.py` 35 warnings before and after, line numbers only.
-
-**2026-09-11 — MIDAS backends bumped to current PyPI latest; the tilt/im_trans
-issue this repo filed came back fixed.** `midas-calibrate-v2` 0.13.0→**0.17.0**,
-`midas-hkls` 0.10.0→0.11.0, `midas-stress` 0.13.0→0.14.0 (the rest of the set was
-already latest; nothing else moves — numpy/torch/numba/zarr untouched). The
-calibrate-v2 jump is upstream implementing
-`.context/issue_draft_calibrate_v2_tilt_imtrans.md` nearly whole: `initial_tx/ty/tz`
-on `calibrate()`, `CalibrationSpec.im_trans` reaching every pipeline via one shared
-`io/transforms.apply_im_trans`, `im_trans` recorded on the result and carried into
-`IntegrationSpec.TransOpt`, and `first_time_calibrate` gaining both. **ROADMAP P3-1
-and P3-4 closed**; P3-2/P3-3 re-checked, still open.
-- **`calib._prep_transformed()` deliberately kept.** 0.15.0 introduces a silent
-  double-transform for callers that pre-transform, but the GUI is not exposed: its
-  specs come from `build_v1_params`, which sets no `ImTransOpt`, so `spec.im_trans`
-  is `()` and every pipeline's `if spec.im_trans:` guard is false. Verified, plus
-  `apply_im_trans` proven bit-identical to `helpers._apply_im_trans` on all 8 opcode
-  combos. Removing the workaround is optional cleanup and must be done whole (delete
-  `_prep_transformed` **and** set `v1.extra["ImTransOpt"]` in the same change) — see
-  DECISIONS 2026-09-11.
-- **Behaviour change to know about:** `initial_tx/ty/tz`, which the one_shot branch
-  has always passed speculatively and `_supported_kwargs` silently dropped, now take
-  effect. Also inherited: RhoD µm unit fixes, `use_diplib` defaulting False,
-  distortion phase bounds ±90→±180.
-- **`requirements.txt` was two bumps stale** (the 2026-09-08 bump never reached it),
-  so it and `pip install .` installed different backends. Regenerated in sync; all
-  three pin files now cross-checked against the installed env.
-- **`first_time` now gets the transform (same session).** That branch had never
-  passed one — a first_time calibration on a flipped detector ran in the wrong
-  frame, silently. It now forwards the codes and hands over the RAW frame (the
-  backend flips image/dark/panel_mask and re-derives `n_pixels_y/z`, so it must not
-  also pre-flip). Fixing it exposed a wider bug: `workers.CalibrationWorker` read
-  `NZ, NY = image.shape` off the **raw** image, so on a non-square detector with a
-  transpose every non-plain-one_shot mode recorded `NrPixelsY/Z` for a detector it
-  never fitted — now `calib.effective_pixel_counts()`. New
-  `tests/test_first_time_im_trans.py` (19 tests, mutation-checked).
-  **Still open:** first_time is not passed a *tilt* seed, which 0.17.0 now accepts
-  (`initial_tx` + `tilt_prior_deg`→ty/tz); `test_calib_tilt_seed.py`'s "at any
-  backend version" wording is stale.
-- **Verified:** 43-file per-file sweep byte-identical before/after (same one
-  pre-existing `test_smoke` local-config failure, 10/10 under a clean `HOME`); all 46
-  modules import. One sweep run had `test_live_stream.py` exit 139 — the documented
-  pyqtgraph teardown flake, not this work (5/5 green on re-run; that file imports
-  neither changed module).
-
-**2026-09-10 — Data Viewer: accurate integration on demand,
-rings that stay put, and a two-way geometry hand-off.** Six requested changes:
-- **"Accurate" tick** above the radial profile (off by default) switches it
-  from the fast path (circle binning, or the engine's `hard` kernel once a
-  calibration/tilt exists — the live-view-capable default, unchanged) to the
-  **Batch-Integrate pipeline verbatim**: geometry synthesized from the live
-  widgets even at zero tilt, `subpixel2` kernel.
-- **Eta-vs-R Cake** gained its own `R bin` / `η bin` spinboxes next to
-  `Calculate` (defaults 1.00 px / 5.00°, i.e. what it computed before) and now
-  *always* runs the accurate pipeline. Because the two bin independently,
-  `radial_integrate` no longer fills the cake as a by-product once
-  `set_cake_controls` is bound (Hydra binds none, keeps the old behaviour).
-  The single engine-context slot became a bounded 6-entry cache keyed on
-  kernel + both bin sizes.
-- **Simulate rings** is a plain button + `live` tick + `✕` again. A one-shot
-  click leaves the button orange and **freezes** the overlay at the parameters
-  it was simulated with (`_ring_draw_geom`) — fixes rings drifting on a BC/tilt
-  edit while not live. Green only when live is armed; `✕` clears the simulated
-  rings and disarms (leaves the click-picked magenta ring).
-- **"Pick d-spacing pts" + "Ring #"** are hidden unless an *enabled* material
-  is `kind == "dspacing"` (AgBH, custom lists), via new
-  `PickableImageViewer.set_dspacing_picking_visible()`. Visible by default, so
-  the Calibrate tab is untouched.
-- **Transforms card** moved between Projection and Ring simulation (inside the
-  card, so Hydra's panel cards match).
-- **`Geometry: [Send →] [← Get]`** replaces the single Send button; `← Get`
-  pulls via new `CalibrationTab.geometry_for_viewer()` (shared with Calibrate's
-  own "→ Send to Data Viewer") and says so plainly when there is no result.
-**Files:** `hydra_geometry_card.py`, `tab_view.py`, `widgets.py`,
-`tab_calibrate.py`, `app.py`; new `tests/test_view_tab_controls.py` (31 tests).
-**Verified:** 21-file per-file sweep green, zero new pyflakes warnings vs.
-HEAD, offscreen screenshots of all three toolbars + the card column.
-**2026-09-09 (later) — Parameter limits for crystalline calibrants; One-shot
-refine flags made real.** The "limits are not available for this calibrant"
-label shipped in the entry below was **wrong**: `CalibrationParams` carries
-`tolLsd`/`tolBC`/`tolTilts`/`tolDistortion`/`tolWavelength` and
-`param_vector.bounds()` makes them hard LM box constraints, so crystalline fits
-were already bounded at invisible defaults (±15 mm / ±20 px / ±3°). The Refine
-card now shows those windows, always-on and prefilled from the installed
-backend, merged to the backend's coarser granularity (one BC window, one tilt
-window, no tx). Plain One-shot is rerouted through
-`build_v1_params` + `pipelines.single.autocalibrate` whenever `calibrate()`
-cannot express what was asked — a custom window, a held Lsd/BC, or exactly one
-of ty/tz — which also makes those checkboxes genuinely control the fit for the
-first time. Seed arrow steps now follow the window (10 % of the full range).
-**Files:** `calib.py` (`tol_defaults`/`tols_are_default`/`_resolve_seed`,
-`build_v1_params(tols=)`, reroute), `tab_calibrate.py` (`_sync_limits_mode`,
-`_crystalline_tols`, `_sync_seed_steps`), `dialogs.py` (distortion row; dead
-`ParameterLimitsDialog` deleted), tests in `test_calibrate_panel_save.py` and
-`test_manual_dspacing_calib_ui.py`. Docs: DECISIONS + `gui_documentation.md` §5.
-
-_(Older entries — `eebce45` Batch Integrate run/restore crash from stale
-views under a new axis context (reset stack/waterfall/cake views before
-re-deriving axis context), 2026-09-09 manual d-spacing (AgBH/SAXS) fit trustworthiness
-(BC-only default refinement, per-parameter 1σ, Limits… dialog), 2026-09-04
-Jun-Sang Park's PR #7 (Strain Cake tab, job queue, peak-fit panel,
-provenance, batch CLI; +108 tests), `fd7f67a` Workstation provenance + Hydra Overall-Cake
-per-panel `tx` rotation fix + Batch Integrate Rmin/Rmax + Detector-view
-preview, `18c9b77` crash-safe project saves (staging-group swap + rolling
-`.bak`) + Save-As analysis-history choice + Open-Project unsaved-changes
-guard, `d84c58e` Batch Multi-azimuth cake output + Export for
-GSAS-II + MIDAS backend bump + `pytest-forked` isolation, `5954a57` Mask Builder raw-detector-space fix (removed
-double-transform bug), `0332683` Batch-Parallel live-view frame-ordering fix,
-`21faaf8` Project schema redesign (`gui_workspace` + `analysis`) + unified
-Open Project dialog, `c67ad1b` multi-panel calibration refinement fix +
-persistence, `e6f2e50` Output-format/Run-mode popups, `a27790a` Batch
-Integrate cosmetic overhaul + Batch-Parallel workers, `ae3b665` merged
-Workspace+Project into one `.h5`, `af8066f` Batch Browse… parity,
-`a54f796`/`ac13797` Browse… popup (multi-file/folder/name-stem + polish),
-`101558a` Calibrate Multi-panel→downstream-integration feed, `ccce056`
-Flip-Z/Multi-panel fix — trimmed here; full detail in
-`documentation/development_history.md`.)_
+_Older entries (2026-09-09 through 2026-09-30) trimmed here per the global STATE.md size convention — full detail, newest first, lives in `.context/DECISIONS.md`._
 
 ## Open questions / blockers
 

@@ -673,6 +673,27 @@ def list_h5_datasets(path: str | Path) -> list:
     return items
 
 
+def best_default_dataset_index(items: list, prefer_max_frames: bool = False) -> int:
+    """Pick a sensible default dataset index among ``items`` (``[(name,
+    shape), …]``, e.g. from :func:`list_h5_datasets`), used when the
+    caller's remembered dataset name isn't present in the newly-loaded file.
+
+    Eligible datasets are those with ``ndim >= 3`` (a per-frame stack).
+    ``prefer_max_frames=False`` keeps the original behaviour of picking the
+    first eligible entry in file order. ``prefer_max_frames=True`` instead
+    picks the eligible entry with the largest frame count (``shape[0]``) —
+    for a Dark field pointed at a different file than the main data, where
+    "first in file order" risks landing on a near-empty calibration dataset
+    instead of the real dark-frame stack. Falls back to index 0 if no
+    dataset is eligible."""
+    eligible = [i for i, (_, shape) in enumerate(items) if len(shape) >= 3]
+    if not eligible:
+        return 0
+    if prefer_max_frames:
+        return max(eligible, key=lambda i: items[i][1][0])
+    return eligible[0]
+
+
 # Name fragments that mark a 1-D dataset as the measured rotation angle,
 # most specific first. Taken verbatim from mpe_wf_saxs_waxs
 # (``gui_data_explorer.py``'s ``_OMEGA_HINTS``), which uses the same list to

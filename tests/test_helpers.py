@@ -17,6 +17,88 @@ def app():
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
+def test_best_default_dataset_index_first_eligible_by_default():
+    from midas_gui.helpers import best_default_dataset_index
+
+    items = [("meta/info", (3,)), ("exchange/data", (50, 8, 8)),
+             ("exchange/data_dark", (5, 8, 8))]
+    assert best_default_dataset_index(items) == 1   # first ndim>=3 entry
+
+
+def test_best_default_dataset_index_prefers_most_frames_when_asked():
+    from midas_gui.helpers import best_default_dataset_index
+
+    # The first-in-file-order eligible entry ("calib/tiny") is NOT the one
+    # with the most frames — exactly the case a Dark file pointed at an
+    # arbitrary, separate HDF5 can hit.
+    items = [("meta/info", (3,)), ("calib/tiny", (2, 8, 8)),
+             ("exchange/data_dark", (500, 8, 8))]
+    assert best_default_dataset_index(items, prefer_max_frames=True) == 2
+    # Without the flag, keeps the original first-eligible behaviour.
+    assert best_default_dataset_index(items, prefer_max_frames=False) == 1
+
+
+def test_best_default_dataset_index_falls_back_to_zero_when_none_eligible():
+    from midas_gui.helpers import best_default_dataset_index
+
+    items = [("meta/a", (3,)), ("meta/b", (8,))]
+    assert best_default_dataset_index(items) == 0
+    assert best_default_dataset_index(items, prefer_max_frames=True) == 0
+
+
+def test_field_selector_dark_prefers_most_frames_when_file_differs_from_data(app, tmp_path):
+    """FieldSelector("Dark", prefer_most_frames=True): when the dark file is
+    a different file than Data, the default dataset picked is the one with
+    the most frames, not the first one found — see
+    helpers.best_default_dataset_index."""
+    import h5py
+    from midas_gui.widgets import FieldSelector
+
+    data_path = tmp_path / "data.h5"
+    with h5py.File(data_path, "w") as f:
+        f.create_dataset("exchange/data", data=np.zeros((20, 4, 4), dtype=np.float32))
+
+    other_path = tmp_path / "other_dark.h5"
+    with h5py.File(other_path, "w") as f:
+        f.create_dataset("calib/tiny", data=np.zeros((2, 4, 4), dtype=np.float32))
+        f.create_dataset("exchange/data_dark", data=np.zeros((500, 4, 4), dtype=np.float32))
+
+    sel = FieldSelector("Dark", default_dataset="exchange/data_dark", prefer_most_frames=True)
+    sel.set_data_path_provider(lambda: str(data_path))
+    sel._path_ed.setText(str(other_path))
+    assert sel._ds_combo.currentText().split("   ")[0].strip() == "exchange/data_dark"
+
+    # A dataset NOT named after default_dataset still prefers the one with
+    # the most frames (the fallback path this feature actually targets).
+    other_path2 = tmp_path / "other_dark2.h5"
+    with h5py.File(other_path2, "w") as f:
+        f.create_dataset("calib/tiny", data=np.zeros((2, 4, 4), dtype=np.float32))
+        f.create_dataset("raw/big_stack", data=np.zeros((500, 4, 4), dtype=np.float32))
+    sel._path_ed.setText(str(other_path2))
+    assert sel._ds_combo.currentText().split("   ")[0].strip() == "raw/big_stack"
+
+
+def test_field_selector_dark_keeps_first_eligible_when_same_file_as_data(app, tmp_path):
+    """The common case — dark lives in the same file as the data (e.g. a
+    companion exchange/data_dark dataset) — keeps the original "first
+    eligible dataset" behaviour, not the most-frames one."""
+    import h5py
+    from midas_gui.widgets import FieldSelector
+
+    shared_path = tmp_path / "shared.h5"
+    with h5py.File(shared_path, "w") as f:
+        f.create_dataset("calib/tiny", data=np.zeros((2, 4, 4), dtype=np.float32))
+        f.create_dataset("exchange/data", data=np.zeros((500, 4, 4), dtype=np.float32))
+
+    sel = FieldSelector("Dark", default_dataset="no_such_dataset", prefer_most_frames=True)
+    sel.set_data_path_provider(lambda: str(shared_path))
+    sel._path_ed.setText(str(shared_path))
+    # First eligible (ndim>=3) dataset in file order is calib/tiny, even
+    # though exchange/data has far more frames — this is the same file as
+    # Data, so the most-frames preference does not apply.
+    assert sel._ds_combo.currentText().split("   ")[0].strip() == "calib/tiny"
+
+
 def test_refresh_combo_items_preserves_existing_selection(app):
     from midas_gui.helpers import _NoScrollComboBox, refresh_combo_items
 

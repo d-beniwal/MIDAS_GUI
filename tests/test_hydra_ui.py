@@ -165,6 +165,38 @@ def test_hydra_field_selector_background_scale(app, tmp_path):
         assert np.allclose(sel.field(n), float(n) * 10.0 * 2.0)
 
 
+def test_hydra_field_selector_dark_prefers_most_frames_when_file_differs_from_data(app, tmp_path):
+    """Mirrors the single-detector FieldSelector test in test_helpers.py:
+    HydraFieldSelector("Dark", prefer_most_frames=True) defaults to the
+    dataset with the most frames when the dark file differs from Data, but
+    keeps the original first-eligible-dataset pick when it's the same file."""
+    import h5py
+
+    data_path = tmp_path / "data.h5"
+    with h5py.File(data_path, "w") as f:
+        f.create_dataset("exchange/data", data=np.zeros((20, 4, 4), dtype=np.float32))
+
+    other_path = tmp_path / "other_dark.h5"
+    with h5py.File(other_path, "w") as f:
+        f.create_dataset("calib/tiny", data=np.zeros((2, 4, 4), dtype=np.float32))
+        f.create_dataset("raw/big_stack", data=np.zeros((500, 4, 4), dtype=np.float32))
+
+    sel = HydraFieldSelector("Dark", default_dataset="no_such_dataset", prefer_most_frames=True)
+    sel.set_data_path_provider(lambda: str(data_path))
+    sel._set_path(str(other_path))
+    assert sel._ds_combo.currentText().split("   ")[0].strip() == "raw/big_stack"
+
+    # Same file as Data -> original first-eligible behaviour, not most-frames.
+    shared_path = tmp_path / "shared.h5"
+    with h5py.File(shared_path, "w") as f:
+        f.create_dataset("calib/tiny", data=np.zeros((2, 4, 4), dtype=np.float32))
+        f.create_dataset("exchange/data", data=np.zeros((500, 4, 4), dtype=np.float32))
+    sel2 = HydraFieldSelector("Dark", default_dataset="no_such_dataset", prefer_most_frames=True)
+    sel2.set_data_path_provider(lambda: str(shared_path))
+    sel2._set_path(str(shared_path))
+    assert sel2._ds_combo.currentText().split("   ")[0].strip() == "calib/tiny"
+
+
 def test_hydra_field_selector_enter_on_a_missing_path_warns(app, monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
@@ -323,21 +355,21 @@ def test_hydra_composite_builds_with_matched_calibration(app, fixture_available)
     assert r_before.shape != r_after.shape or not np.allclose(
         np.nan_to_num(prof_before), np.nan_to_num(prof_after))
 
-    # (2) shared λ/max2θ/px sync across ge1-4 + composite
+    # (2) shared λ/N rings/px sync across ge1-4 + composite
     src = hp._cards["ge2"]
     new_wl = src._wl.value() + 0.01
     new_px = src._px.value() + 5.0
-    new_max2t = src._max2t.value() + 2.0
+    new_n_rings = src._n_rings.value() + 2
     src._wl.setValue(new_wl)
     src._px.setValue(new_px)
-    src._max2t.setValue(new_max2t)
+    src._n_rings.setValue(new_n_rings)
     app.processEvents()
 
     for key in ("ge1", "ge3", "ge4", "composite"):
         c = hp._cards[key]
         assert c._wl.value() == pytest.approx(new_wl)
         assert c._px.value() == pytest.approx(new_px)
-        assert c._max2t.value() == pytest.approx(new_max2t)
+        assert c._n_rings.value() == new_n_rings
 
 
 def test_hydra_profile_plot_shows_all_four_curves_plus_composite(app, fixture_available):
@@ -482,5 +514,82 @@ def test_hydra_page_send_get_calibrate_is_page_level_all_panels(app, fixture_ava
     assert len(warnings) == 1
     tab.import_from_calibrate(fake_payload)
     assert len(warnings) == 1   # no new warning — this one actually applied
+
+
+def test_hydra_material_and_ring_visuals_sync_across_panels(app, fixture_available):
+    """Picking a material / toggling Rings, Labels, thickness on one Hydra
+    panel mirrors onto every other panel (ge1-4 + composite) — the ring-
+    visual counterpart of the shared λ/max2θ/px sync, see
+    DetectorGeometryCard.get_ring_settings/apply_ring_settings and
+    HydraViewerPage._sync_ring_settings."""
+    tab = DataViewerTab()
+    tab._mode_ribbon.set_mode("hydra")
+    hp = tab._hydra_page
+    hp._loader.set_path(str(fixture_available / "ge1" / "panel.ge1.h5"))
+    app.processEvents()
+
+    src = hp._cards["ge2"]
+    src._add_material("BCC steel (α-Fe)")
+    src._show_rings.setChecked(False)
+    src._show_labels.setChecked(False)
+    src._ring_width.setValue(src._ring_width.value() + 1.0)
+    app.processEvents()
+
+    expected_names = [m["name"] for m in src._materials]
+    for key in ("ge1", "ge3", "ge4", "composite"):
+        c = hp._cards[key]
+        assert [m["name"] for m in c._materials] == expected_names
+        assert c._show_rings.isChecked() is False
+        assert c._show_labels.isChecked() is False
+        assert c._ring_width.value() == pytest.approx(src._ring_width.value())
+
+    # Re-enabling Rings on a different panel mirrors back onto ge2 as well.
+    hp._cards["ge1"]._show_rings.setChecked(True)
+    app.processEvents()
+    assert src._show_rings.isChecked() is True
+
+
+def test_hydra_per_ring_checkbox_hides_just_that_ring(app, fixture_available):
+    """Each simulated ring gets its own show/hide checkbox (default: all
+    shown) — toggling one off only hides that ring's arc/label/profile
+    marker, persists through a materials_state()/set_materials() round
+    trip, and mirrors across panels via the same ring-settings sync as
+    materials/Rings/Labels (see _ring_key/_on_ring_enabled_toggled)."""
+    tab = DataViewerTab()
+    tab._mode_ribbon.set_mode("hydra")
+    hp = tab._hydra_page
+    hp._loader.set_path(str(fixture_available / "ge1" / "panel.ge1.h5"))
+    app.processEvents()
+
+    card = hp._cards["ge1"]
+    card._simulate()
+    app.processEvents()
+    material = card._materials[0]
+    rings = material["_rings"]
+    assert len(rings) > 1, "fixture geometry should predict more than one ring"
+    assert all(r["enabled"] for r in rings)   # default: all rings shown
+
+    key = card._ring_key(rings[0])
+    card._on_ring_enabled_toggled(material, key, False)
+    app.processEvents()
+
+    assert material["ring_enabled"][key] is False
+    toggled = next(r for r in material["_rings"] if card._ring_key(r) == key)
+    assert toggled["enabled"] is False
+    others = [r for r in material["_rings"] if card._ring_key(r) != key]
+    assert all(r["enabled"] for r in others)
+
+    # Round-trips through materials_state()/set_materials() (saved GUI state).
+    state = card.materials_state()
+    card2 = hp._cards["ge3"]
+    card2.set_materials(state)
+    card2._simulate()
+    app.processEvents()
+    m2 = card2._materials[0]
+    toggled2 = next(r for r in m2["_rings"] if card2._ring_key(r) == key)
+    assert toggled2["enabled"] is False
+
+    # The toggle also rode along in the cross-panel ring-settings sync.
+    assert hp._cards["ge2"]._materials[0]["ring_enabled"].get(key) is False
 
 

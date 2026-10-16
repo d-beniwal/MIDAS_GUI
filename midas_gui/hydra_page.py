@@ -81,6 +81,7 @@ class HydraViewerPage(QtWidgets.QWidget):
         self._disp_key = None                    # (shape, active key) — fresh-display detection
         self._active_card: Optional[DetectorGeometryCard] = None
         self._syncing_shared = False             # re-entrancy guard for _sync_shared_fields
+        self._syncing_ring_settings = False      # re-entrancy guard for _sync_ring_settings
         self._build_ui()
         self._on_panel_changed(self._toolbar.current())
 
@@ -180,6 +181,10 @@ class HydraViewerPage(QtWidgets.QWidget):
                 n = int(key[2])
                 card.geometryChanged.connect(lambda n=n: self._on_card_geometry_changed(n))
                 card.imTransChanged.connect(lambda n=n: self._on_card_geometry_changed(n))
+            # Materials/Rings/Labels/thickness are mirrored across all 5
+            # cards (including composite — symmetric, unlike the geometry
+            # sync above) — see _sync_ring_settings.
+            card.ringSettingsChanged.connect(lambda key=key: self._sync_ring_settings(key))
             self._cards[key] = card
             self._card_stack.addWidget(card)
         split.addWidget(scroll)
@@ -434,6 +439,30 @@ class HydraViewerPage(QtWidgets.QWidget):
                     card.apply_shared_fields(shared)
         finally:
             self._syncing_shared = False
+
+    def _sync_ring_settings(self, source_key: str):
+        """Mirror the materials list + Rings/Labels/thickness from the card
+        at `source_key` onto every other card (ge1-4 + composite) — see
+        DetectorGeometryCard.get_ring_settings/apply_ring_settings. Guarded
+        by `_syncing_ring_settings` so applying the value to a sibling
+        (which itself would otherwise re-emit ringSettingsChanged) doesn't
+        recurse into another sync."""
+        if self._syncing_ring_settings:
+            return
+        src = self._cards.get(source_key)
+        if src is None:
+            return
+        ring_settings = src.get_ring_settings()
+        self._syncing_ring_settings = True
+        try:
+            for key in self._SHARED_FIELD_KEYS:
+                if key == source_key:
+                    continue
+                card = self._cards.get(key)
+                if card is not None:
+                    card.apply_ring_settings(ring_settings)
+        finally:
+            self._syncing_ring_settings = False
 
     def _refresh_profile_curves(self, force: bool = False):
         """(Re)load every available panel's frame and — if Auto is on (or

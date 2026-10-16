@@ -19,7 +19,8 @@ import pyqtgraph as pg
 
 from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollComboBox, _fspin, hydra_siblings,
                          hydra_panel_index, is_h5, list_h5_datasets, source_kind,
-                         detect_geometry_from_path, warn_if_path_missing)
+                         detect_geometry_from_path, warn_if_path_missing,
+                         best_default_dataset_index)
 from midas_gui.workers import FieldAverageWorker, ProjectionWorker
 from midas_gui import hydra
 from midas_gui import style as S
@@ -141,11 +142,12 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
     fieldsReady = QtCore.pyqtSignal()
 
     def __init__(self, title, parent=None, *, with_mode=False, with_scale=False,
-                 default_dataset="exchange/data"):
+                 default_dataset="exchange/data", prefer_most_frames=False):
         super().__init__(title, parent)
         self.setCheckable(True)
         self.setChecked(False)
         self._default_dataset = default_dataset
+        self._prefer_most_frames = prefer_most_frames
         self._fields: dict = {}          # panel -> np.ndarray
         self._sibling_paths: dict = {}   # panel -> path
         self._workers: dict = {}         # panel -> FieldAverageWorker (kept alive)
@@ -254,6 +256,21 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
         mirrors ``widgets.FieldSelector.set_data_path_provider``."""
         self._data_path_provider = fn
 
+    def _is_data_path(self, p: str) -> bool:
+        """Mirrors ``widgets.FieldSelector._is_data_path``: is *p* the same
+        file as the owning panel's current Data path?"""
+        if self._data_path_provider is None:
+            return False
+        data_path = self._data_path_provider() or ""
+        if not data_path:
+            return False
+        import os
+        try:
+            return os.path.normpath(os.path.abspath(p)) == \
+                os.path.normpath(os.path.abspath(data_path))
+        except Exception:
+            return False
+
     def _prefill_from_data(self, checked: bool):
         """On first check, default this field to the same file/folder as
         the Hydra page's Data source. A no-op if a path is already set."""
@@ -355,7 +372,8 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
                 idx = next((i for i in range(self._ds_combo.count())
                             if self._ds_combo.itemData(i) == keep), -1)
                 if idx < 0:
-                    idx = next((i for i, (n, s) in enumerate(items) if len(s) >= 3), 0)
+                    prefer_max = self._prefer_most_frames and not self._is_data_path(path)
+                    idx = best_default_dataset_index(items, prefer_max)
                 self._ds_combo.setCurrentIndex(idx)
                 self._ds_combo.blockSignals(False)
         self._update_frame_limit()
@@ -631,7 +649,8 @@ class HydraLoaderPanel(QtWidgets.QWidget):
 
         # ── Dark / Bright / Background (sibling-aware, one pick per field) ──
         fld = S.make_card("Dark / Bright / Background")
-        self._dark_sel = HydraFieldSelector("Dark", default_dataset="exchange/data_dark")
+        self._dark_sel = HydraFieldSelector("Dark", default_dataset="exchange/data_dark",
+                                            prefer_most_frames=True)
         self._bright_sel = HydraFieldSelector("Bright", with_mode=True)
         self._bg_sel = HydraFieldSelector("Background", with_scale=True)
         for w in (self._dark_sel, self._bright_sel, self._bg_sel):

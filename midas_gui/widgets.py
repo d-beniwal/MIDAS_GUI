@@ -49,7 +49,8 @@ from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollDoubleSpinBox, _fspin,
                                new_temp_h5_path, save_stack_h5, detect_geometry_from_path,
                                source_kind, display_text_for_paths, _apply_im_trans,
                                is_dark_like_name, warn_if_path_missing,
-                               path_is_missing, _folder_format_groups, radial_spline_values)
+                               path_is_missing, _folder_format_groups, radial_spline_values,
+                               best_default_dataset_index)
 from midas_gui import style as S
 
 
@@ -3051,12 +3052,13 @@ class FieldSelector(QtWidgets.QGroupBox):
     fieldReady = QtCore.pyqtSignal()
 
     def __init__(self, title, parent=None, *, with_mode=False, with_scale=False,
-                 default_dataset="exchange/data"):
+                 default_dataset="exchange/data", prefer_most_frames=False):
         super().__init__(title, parent)
         self.setCheckable(True)
         self.setChecked(False)
         self._with_mode = with_mode
         self._default_dataset = default_dataset
+        self._prefer_most_frames = prefer_most_frames
         self._field = None
         self._worker = None
         self._registry = None          # DataSourceRegistry, set by set_registry()
@@ -3175,6 +3177,25 @@ class FieldSelector(QtWidgets.QGroupBox):
         so Dark/Bright/Background browsing starts from wherever Data was
         loaded from, not the app's working directory."""
         self._data_path_provider = fn
+
+    def _is_data_path(self, p: str) -> bool:
+        """Is *p* the same file/folder as the owning panel's current Data
+        path? Used to tell a genuinely separate Dark file (where "first
+        dataset found" risks picking a near-empty container) from the common
+        case of a companion dark dataset inside the same file as the data
+        (where the existing default_dataset/first-found behaviour already
+        does the right thing)."""
+        if self._data_path_provider is None:
+            return False
+        data_path = self._data_path_provider() or ""
+        if not data_path:
+            return False
+        import os
+        try:
+            return os.path.normpath(os.path.abspath(p)) == \
+                os.path.normpath(os.path.abspath(data_path))
+        except Exception:
+            return False
 
     def _prefill_from_data(self, checked: bool):
         """On first check, default this field to the same file/folder as
@@ -3345,7 +3366,8 @@ class FieldSelector(QtWidgets.QGroupBox):
                 idx = next((i for i in range(self._ds_combo.count())
                             if self._ds_combo.itemData(i) == keep), -1)
                 if idx < 0:
-                    idx = next((i for i, (n, s) in enumerate(items) if len(s) >= 3), 0)
+                    prefer_max = self._prefer_most_frames and not self._is_data_path(p)
+                    idx = best_default_dataset_index(items, prefer_max)
                 self._ds_combo.setCurrentIndex(idx)
                 self._ds_combo.blockSignals(False)
         self._update_frame_limit()
@@ -4322,7 +4344,8 @@ class DataLoaderPanel(QtWidgets.QWidget):
 
         # ── Dark / Bright / Background ──
         fld = S.make_card("Dark / Bright / Background")
-        self._dark_sel = FieldSelector("Dark", default_dataset=dark_dataset)
+        self._dark_sel = FieldSelector("Dark", default_dataset=dark_dataset,
+                                       prefer_most_frames=True)
         self._bright_sel = FieldSelector("Bright", with_mode=True)
         self._bg_sel = FieldSelector("Background", with_scale=True)
         for w in (self._dark_sel, self._bright_sel, self._bg_sel):

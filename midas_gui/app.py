@@ -595,6 +595,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         C.reload_from_config()
         self.on_profile_changed()
+        self._offer_restart(
+            f"Now using profile '{name}'. Most values apply immediately; a few "
+            "(e.g. spin-box step sizes) only take effect after a restart.")
 
     def on_profile_changed(self):
         """Common tail for any profile switch, whichever UI triggered it
@@ -1136,6 +1139,22 @@ class MainWindow(QtWidgets.QMainWindow):
         if not draft.is_file():
             return
         try:
+            data = json.loads(draft.read_text())
+        except Exception:
+            data = None
+        if data is not None and data.get("__auto_resume__"):
+            # An intentional restart_app(resume=True) (a Preferences/profile
+            # change the user chose to apply now) — the user already opted
+            # in when they clicked "Restart now", so resume silently instead
+            # of asking "Restore unsaved session?" again.
+            self._apply_workspace_state(data, sidecars={})
+            project_path = data.get("project_path")
+            if project_path:
+                self._set_project_path(project_path)
+            self._update_window_title()
+            self._clear_autosave_draft()
+            return
+        try:
             when = datetime.fromtimestamp(draft.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
             when = "an earlier session"
@@ -1389,18 +1408,44 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Save failed", str(e)); return
         self._offer_restart(f"Interface scale set to {val:g}×.")
 
-    def _offer_restart(self, msg):
-        """Ask to relaunch now so a startup-only setting (e.g. UI scale) applies."""
+    def _offer_restart(self, msg, *, resume: bool = True):
+        """Ask to relaunch now so a startup-only setting (e.g. UI scale, a
+        saved Preferences change, a profile switch) applies. When `resume`
+        (the default), the current session's full state is snapshotted
+        before relaunch and silently reapplied on the new instance — see
+        `restart_app`/`maybe_offer_restore_autosave`."""
+        tail = ("\n\nRestart the GUI now to apply? Your current session will "
+                "be restored automatically." if resume else
+                "\n\nRestart the GUI now to apply?")
         if QtWidgets.QMessageBox.question(
-                self, "Restart to apply",
-                f"{msg}\n\nRestart the GUI now to apply?",
+                self, "Restart to apply", f"{msg}{tail}",
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
                 QtWidgets.QMessageBox.Yes) == QtWidgets.QMessageBox.Yes:
-            self.restart_app()
+            self.restart_app(resume=resume)
 
-    def restart_app(self):
-        """Relaunch a fresh instance (which re-reads the scale) and close this one.
-        Uses QProcess so the new process is detached from this one."""
+    def _save_autosave_draft_for_restart(self) -> None:
+        """Snapshot the full session (every tab, like `_autosave_tick`) and
+        mark it for silent auto-resume on the next launch — used by an
+        intentional `restart_app(resume=True)`, as opposed to the crash-
+        recovery draft `_autosave_tick` writes periodically."""
+        state, _errors = self._serialize_workspace(quiet=True)
+        state["__auto_resume__"] = True
+        state["project_path"] = self._project_ctx.path
+        draft = settings.autosave_draft_path()
+        try:
+            draft.parent.mkdir(parents=True, exist_ok=True)
+            draft.write_text(json.dumps(state, indent=2))
+        except Exception:
+            _log(f"Pre-restart session save failed:\n{traceback.format_exc()}")
+
+    def restart_app(self, *, resume: bool = False):
+        """Relaunch a fresh instance (which re-reads the scale/config) and
+        close this one. Uses QProcess so the new process is detached from
+        this one. When `resume`, the current session is snapshotted first so
+        the new instance comes back with the same tabs/data loaded instead
+        of starting blank — see `_save_autosave_draft_for_restart`."""
+        if resume:
+            self._save_autosave_draft_for_restart()
         try:
             self._stop_all_workers()
         except Exception:
@@ -1424,9 +1469,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _reload_config(self):
         settings.reload()
-        QtWidgets.QMessageBox.information(
-            self, "Config reloaded",
-            "Config re-read from disk. Restart the GUI for changes to take full effect.")
+        self._offer_restart("Config re-read from disk.")
 
     # ── clean shutdown ─────────────────────────────────────────────
     def _stop_all_workers(self):

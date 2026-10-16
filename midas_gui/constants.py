@@ -133,12 +133,12 @@ DEFAULT_LSD_UM     = 121_000.0 # µm
 DEFAULT_BC_Y       = 10.0      # px (test data beam centre)
 DEFAULT_BC_Z       = 10.0      # px
 DEFAULT_RING_WIDTH = 2.0       # px (simulated-ring pen width on the image)
+DEFAULT_N_RINGS    = 10        # max rings simulated per material
 
 # Data Viewer ▸ Ring simulation card: spin-box step size (up/down-arrow increment)
 # per field. Overridable via the per-user config key "viewer_steps"
 # (Preferences ▸ Data Viewer).
 DEFAULT_STEP_WAVELENGTH = 0.01   # Å      (λ)
-DEFAULT_STEP_TWO_THETA  = 1.0    # deg    (max 2θ)
 DEFAULT_STEP_LSD_MM     = 1.0    # mm     (Lsd)
 DEFAULT_STEP_PIXEL      = 0.1    # µm     (pixel size)
 DEFAULT_STEP_BC         = 1.0    # px     (BC_y / BC_z)
@@ -351,7 +351,6 @@ def _apply(cfg: dict) -> None:
     # Data Viewer spin-box step sizes
     steps = cfg.get("viewer_steps", {}) or {}
     _set_num(steps, "wavelength", "DEFAULT_STEP_WAVELENGTH")
-    _set_num(steps, "two_theta", "DEFAULT_STEP_TWO_THETA")
     _set_num(steps, "lsd_mm", "DEFAULT_STEP_LSD_MM")
     _set_num(steps, "pixel", "DEFAULT_STEP_PIXEL")
     _set_num(steps, "bc", "DEFAULT_STEP_BC")
@@ -488,7 +487,7 @@ _SHIPPED = {
         "k_edge_foils": [list(k) for k in K_EDGE_FOILS],
     },
     "viewer_steps": {
-        "wavelength": DEFAULT_STEP_WAVELENGTH, "two_theta": DEFAULT_STEP_TWO_THETA,
+        "wavelength": DEFAULT_STEP_WAVELENGTH,
         "lsd_mm": DEFAULT_STEP_LSD_MM, "pixel": DEFAULT_STEP_PIXEL,
         "bc": DEFAULT_STEP_BC, "tilt": DEFAULT_STEP_TILT,
     },

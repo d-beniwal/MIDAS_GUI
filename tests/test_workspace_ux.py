@@ -207,6 +207,40 @@ def test_maybe_offer_restore_autosave_decline_and_accept(
     win._project_ctx.path = None
 
 
+def test_restart_resume_draft_applies_silently_without_prompting(
+        win, tmp_path, monkeypatch, no_modal_dialogs):
+    """restart_app(resume=True)'s draft (written by
+    _save_autosave_draft_for_restart, marked __auto_resume__) is applied by
+    maybe_offer_restore_autosave immediately, with NO "Restore unsaved
+    session?" confirmation — the user already opted in by clicking "Restart
+    now" in _offer_restart — unlike the genuine crash-recovery draft path
+    covered by test_maybe_offer_restore_autosave_decline_and_accept."""
+    MB = no_modal_dialogs
+    draft = tmp_path / "restart_draft.json"
+    monkeypatch.setattr(settings, "autosave_draft_path", lambda: draft)
+
+    asked = []
+    monkeypatch.setattr(MB, "question",
+                         staticmethod(lambda *a, **k: asked.append(True) or MB.No))
+
+    save_path = str(tmp_path / "proj_for_restart.h5")
+    project.create_project(save_path)
+    win._set_project_path(save_path)
+
+    win._save_autosave_draft_for_restart()
+    assert draft.is_file()
+
+    win._set_project_path(None)   # simulate the fresh relaunched instance
+    win.maybe_offer_restore_autosave()
+
+    assert asked == []                            # no confirmation prompt
+    assert win._project_ctx.path == save_path     # restored, not left "Untitled"
+    assert not draft.exists()
+
+    win._set_project_path(None)
+    win._set_workspace_dirty(False)   # leave a clean baseline for later tests
+
+
 # ── Open-Project unsaved-changes guard (_confirm_ok_to_switch_project) ───────
 def test_confirm_ok_to_switch_project_clean_state_is_ok(win):
     win._set_workspace_dirty(False)
