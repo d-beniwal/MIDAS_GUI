@@ -362,6 +362,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self._cal_tab.pullHydraFromViewer.connect(
                 lambda: self._cal_tab.import_hydra_from_viewer(self._view_tab.get_hydra_export()))
             self._cal_tab.sendHydraGeometryToViewer.connect(self._view_tab.set_hydra_panel_geometry)
+            # Same hand-off, the other direction: the Data Viewer's own Hydra
+            # page's "→ Send to Calibrate"/"← Get from Calibrate" (all 4
+            # panels at once, mirroring the above pair rather than each
+            # panel's now-removed individual Send/Get).
+            self._view_tab.pushHydraToCalibrate.connect(self._cal_tab.import_hydra_from_viewer)
+            self._view_tab.pullHydraFromCalibrate.connect(
+                lambda: self._view_tab.import_from_calibrate(self._cal_tab.get_hydra_export_for_viewer()))
             # Calibrate (Hydra mode) → Batch Integrate (Hydra mode): a panel's
             # fit auto-populates that panel's calibration source as soon as it
             # finishes, mirroring the single-detector calibrationDone wiring.

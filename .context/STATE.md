@@ -1,11 +1,35 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-10-14 (fixed a real beamline-reported bug: calibration subprocess failed with `ModuleNotFoundError: No module named 'midas_gui'` on installs that run from a source checkout rather than pip-install — see DECISIONS)_
+_Last updated: 2026-10-16 (Hydra Calibrate: single-panel save, calibration-file cascading load, bidirectional all-panel Data Viewer transfer — see DECISIONS)_
 
 ## Now working on
 
 Nothing in progress.
+
+**2026-10-16 — Hydra Calibrate: "Save Current Panel" buttons, "Load
+calibration file…" cascades to sibling panels, bidirectional all-panel Data
+Viewer ↔ Calibrate geometry transfer.** Requested directly, three asks;
+research against a live offscreen `MainWindow` found two already partly
+worked (Save All, and Calibrate's "← Data Viewer" pull) and needed narrower
+fixes than first assumed — see DECISIONS for the full before/after per ask.
+Headline: `hydra_calib_page._calib_siblings()` (inverse of
+`_panel_tagged_path`) resolves `_ge<N>`-tagged sibling calibration files;
+`HydraViewerPage` gained a page-level "→ Send to Calibrate"/"← Get from
+Calibrate" pair (its 5 `DetectorGeometryCard`s' own per-panel Send/Get rows
+were dead code — never wired to anything — now hidden via new
+`show_calib_handoff=False`); `import_from_viewer`/new
+`import_from_calibrate` no longer claim success when there was nothing to
+transfer.
+**Verified:** `test_hydra_calib_ui.py`/`test_hydra_ui.py` (+assertions/+1
+test fn) plus the full touched-file sweep (`test_hydra_batch_ui.py`,
+`test_calibrate_panel_save.py`, `test_smoke.py`,
+`test_manual_dspacing_calib_ui.py`) green, 71/71, `--forked`; `pyflakes
+midas_gui/*.py` 39 (was 40, one pre-existing unused import now used).
+Offscreen screenshots confirmed both the new Calibrate footer buttons and
+the Data Viewer's new page-level Send/Get pair.
+**Not verified:** no real multi-panel beamline calibration output available
+locally to exercise against (synthetic fixtures only).
 
 **2026-10-14 — Fixed: Hydra/single-detector calibration subprocess crashed
 on the beamline (`ModuleNotFoundError: No module named 'midas_gui'`).**

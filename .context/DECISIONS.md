@@ -3,6 +3,99 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-16 — Hydra Calibrate: single-panel save, "Load calibration file…" cascades to siblings, bidirectional all-panel Data Viewer transfer
+
+**Requested directly**, three related asks, each verified against the live
+code before touching anything (research found two of the three already had
+real gaps, not just missing discoverability):
+
+1. **"Save Current Panel" buttons**, next to the existing "Save All
+   .json"/"Save All paramstest.txt" (landed 2026-10-08) in
+   `HydraCalibrationPage`'s footer. Save All already does one-operation
+   export for every fitted panel — confirmed working, not what needed
+   fixing — but there was no way to overwrite *just one* panel's file (e.g.
+   after re-fitting only that panel) without re-running Save All over all 4.
+   `_save_current_json`/`_save_current_paramstest` write only the active
+   panel, defaulting into the exact same dir/naming as the last Save All run
+   this session (`_last_save_all_dir`/`_last_save_all_ps_base`), reusing
+   `_panel_tagged_path` and the cards' existing `write_json`/
+   `write_paramstest`.
+2. **"Load calibration file…" (`HydraCalibPanelCard._load_calib_file`) now
+   cascades to sibling panels**, resolved by a new `_calib_siblings()` —
+   the formal inverse of `_panel_tagged_path`: matches `..._ge<N><suffix>`
+   (the Save All naming convention) and returns the other 3 panels' files
+   that exist on disk. Deliberately does NOT reuse `helpers.hydra_siblings`
+   — that one requires a `\bge<N>\b` *word*-boundary match (works for raw
+   data's `ge1/panel.ge1.h5` folder/infix convention), but every calibration
+   naming convention in this app (`_ge<N>.instr.json`, `ps_ge<N>.txt`)
+   prefixes with `_`, which is itself a word character in regex — `\bge\b`
+   never matches `_ge1`. New `HydraCalibPanelCard.calibFilePicked` signal
+   carries `(panel_number, path)` alongside the existing `calibFileLoaded`
+   (which only carried the parsed geometry dict, not the path a sibling
+   search needs). A file that doesn't match the convention still loads into
+   the one panel clicked — logged, not an error.
+3. **Data Viewer ↔ Calibrate Hydra geometry transfer, made bidirectional and
+   honest.** Research found Calibrate's existing "← Data Viewer" button
+   (`HydraCalibrationPage.import_from_viewer`) *already* pulls all 4
+   panels' geometry + the anchor path in one click — verified live against
+   a real offscreen `MainWindow` — but it unconditionally logged "Geometry
+   imported…" even when the Data Viewer's Hydra loader had nothing loaded
+   (the common case: a user loads data directly into Calibrate and never
+   visits Data Viewer), giving false confidence. Fixed by tracking whether
+   anything was actually applied. Separately, the Data Viewer's own Hydra
+   page had 5 `DetectorGeometryCard`s (ge1-4 + composite) each with their
+   own "Send →"/"← Get" buttons (`pushGeometry`/`pullGeometry` signals) —
+   **`HydraViewerPage` never connected these to anything; they were dead
+   UI**, and even if wired, one panel's button moving one panel's geometry
+   (or composite's, which is nonsensical) doesn't match how the Calibrate
+   side already works (one button, all 4 panels). Fix: new
+   `show_calib_handoff` flag on `DetectorGeometryCard` (default `True`,
+   keeping single-detector Data Viewer's own card unchanged) hides that row
+   for all 5 Hydra cards; one new page-level "→ Send to Calibrate"/"← Get
+   from Calibrate" pair on `HydraViewerPage` mirrors Calibrate's "← Data
+   Viewer" exactly. The push reuses `export_for_calibration()`'s existing
+   payload shape verbatim — `app.py` wires it straight into
+   `CalibrationTab.import_hydra_from_viewer`, no new Calibrate-side code.
+   The pull needed a new `HydraCalibrationPage.export_for_viewer()` +
+   `HydraCalibPanelCard.export_geometry()` (fitted result if one exists,
+   else the current seed fields — useful even pre-fit) and a new
+   `HydraViewerPage.import_from_calibrate()`; `DataViewerTab`'s wrapper
+   shows a `QMessageBox.warning` when nothing was applied, since this page
+   (unlike Calibrate's) has no log panel to write an honest message into.
+
+Root-caused by building a real offscreen `MainWindow`, loading
+`test_data/gui_synthetic/hydra/ge1/panel.ge1.h5`, and exercising every
+button's actual code path directly (`export_for_calibration()`,
+`import_hydra_from_viewer()`, the registry-based "Import from…" menus) before
+writing any code — two of the three user-reported "doesn't work" claims
+turned out to already work as coded; chasing down which third one didn't
+needed this before guessing what to build.
+
+**Verified:** `tests/test_hydra_calib_ui.py` (+3 test bodies' worth of new
+assertions in the existing 2 test functions — no new pyqtgraph-building test
+function, per that file's documented constraint): `_calib_siblings`
+resolution/no-match cases, cascading load via a monkeypatched
+`QFileDialog.getOpenFileName`, "Save Current Panel" writing only the active
+panel without touching siblings' mtimes and disabling for an unfitted panel,
+and `import_from_viewer({})`'s honest "nothing loaded" log line.
+`tests/test_hydra_ui.py` (+1 new test function — this file's existing
+pattern already builds a fresh `DataViewerTab` per test, unlike the calib
+file): per-card Send/Get attributes genuinely absent, the new page-level
+buttons' click → signal → payload shape, `import_from_calibrate` applying
+all 4 panels, and `DataViewerTab.import_from_calibrate`'s warning path via a
+monkeypatched `QMessageBox.warning`. Full touched-file sweep green
+(`test_hydra_calib_ui.py`/`test_hydra_ui.py`/`test_hydra_batch_ui.py`/
+`test_calibrate_panel_save.py`/`test_smoke.py`/
+`test_manual_dspacing_calib_ui.py`, 71/71, `--forked`); `pyflakes
+midas_gui/*.py` 39 (was 40 — fixed a pre-existing unused `re` import in
+`hydra_calib_page.py` along the way, now used by `_calib_siblings`).
+Offscreen screenshots confirmed the new footer buttons and the Data Viewer
+page-level Send/Get pair render correctly, with the old per-panel Send/Get
+row gone from every Hydra card.
+**Not verified:** no real multi-panel calibration files available locally to
+exercise "Save Current Panel"/cascading load against genuine (non-synthetic)
+beamline output.
+
 ## 2026-10-14 — Fixed: Hydra/single-detector calibration subprocess crashed on the beamline with `ModuleNotFoundError: No module named 'midas_gui'`
 
 **Problem.** User reported this exact error on a beamline deployment (every

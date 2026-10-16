@@ -180,7 +180,7 @@ def _pump(app, condition, max_iters=200):
     return False
 
 
-def test_hydra_calib_page_wiring_and_pick_isolation(app, fixture_available):
+def test_hydra_calib_page_wiring_and_pick_isolation(app, fixture_available, tmp_path, monkeypatch):
     """Toolbar has no Composite button, siblings load correctly, and Pick
     BC/Pick Ring in-progress state on the shared viewer is cleared when the
     active panel switches (the eadb14d regression shape)."""
@@ -344,6 +344,63 @@ def test_hydra_calib_page_wiring_and_pick_isolation(app, fixture_available):
     assert widgets.index(page._card_stack) < widgets.index(refine_card)
     assert page._run_btn not in widgets and page._out_ed not in widgets
 
+    # _calib_siblings (the Load-All naming resolver, inverse of
+    # _panel_tagged_path): only matches the Save All/Save Current Panel
+    # ``_ge<N>`` convention, and only returns files that actually exist.
+    sib_dir = tmp_path / "calib_siblings"; sib_dir.mkdir()
+    import json
+    for n in (1, 2, 3, 4):
+        (sib_dir / f"run_ge{n}.instr.json").write_text(json.dumps(
+            {"wavelength_A": 0.17, "Lsd": 3_300_000.0 + n,
+             "BC_y": 2000.0 + n, "BC_z": 2100.0 + n, "pxY": 200.0,
+             "NrPixelsY": 2048, "NrPixelsZ": 2048}))
+    found = hydra_calib_page_mod._calib_siblings(sib_dir / "run_ge2.instr.json")
+    assert set(found) == {1, 3, 4}
+    assert found[1] == sib_dir / "run_ge1.instr.json"
+    (sib_dir / "run_ge4.instr.json").unlink()
+    assert set(hydra_calib_page_mod._calib_siblings(sib_dir / "run_ge2.instr.json")) == {1, 3}
+    assert hydra_calib_page_mod._calib_siblings(sib_dir / "unrelated_name.json") == {}
+
+    # Picking a calibration file for ONE panel (via the existing "Load
+    # calibration file…" button) cascades to seed the sibling panels too,
+    # resolved the same way — mirroring how picking any one ge1-4 raw-data
+    # file already auto-discovers the other 3 panels' data.
+    (sib_dir / "run_ge4.instr.json").write_text(json.dumps(
+        {"wavelength_A": 0.17, "Lsd": 3_300_004.0,
+         "BC_y": 2004.0, "BC_z": 2104.0, "pxY": 200.0,
+         "NrPixelsY": 2048, "NrPixelsZ": 2048}))
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog, "getOpenFileName",
+        staticmethod(lambda *a, **k: (str(sib_dir / "run_ge2.instr.json"), "")))
+    page._cards[2]._load_calib_file()
+    for n in (1, 2, 3, 4):
+        assert page._cards[n]._seed_bcy.value() == pytest.approx(2000.0 + n)
+        assert page._cards[n]._seed_bcz.value() == pytest.approx(2100.0 + n)
+
+    # Picking a file that doesn't follow the _ge<N> convention only loads
+    # that one panel — no error, no change to the others.
+    lone = tmp_path / "lone_calibration.json"
+    lone.write_text(json.dumps(
+        {"wavelength_A": 0.17, "Lsd": 9_000_000.0, "BC_y": 9.0, "BC_z": 9.0, "pxY": 200.0,
+         "NrPixelsY": 2048, "NrPixelsZ": 2048}))
+    other_bcs_before = {n: page._cards[n]._seed_bcy.value() for n in (1, 3, 4)}
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog, "getOpenFileName",
+        staticmethod(lambda *a, **k: (str(lone), "")))
+    page._cards[2]._load_calib_file()
+    assert page._cards[2]._seed_bcy.value() == pytest.approx(9.0)
+    for n in (1, 3, 4):
+        assert page._cards[n]._seed_bcy.value() == pytest.approx(other_bcs_before[n])
+
+    # import_from_viewer must say plainly when there was nothing to pull
+    # (the Data Viewer's Hydra page not having loaded anything yet), rather
+    # than unconditionally logging success.
+    log_before = page._log.toPlainText()
+    page.import_from_viewer({})
+    new_text = page._log.toPlainText()[len(log_before):]
+    assert "nothing loaded" in new_text.lower()
+    assert "imported from data viewer" not in new_text.lower()
+
 
 def test_hydra_calib_run_orchestration_and_results_switching(app, fixture_available, tmp_path, monkeypatch):
     """Sequential run: independent per-panel BCs. Parallel run: all 4
@@ -414,6 +471,44 @@ def test_hydra_calib_run_orchestration_and_results_switching(app, fixture_availa
     base = Path(page._default_save_path(".instr.txt"))
     for n in (1, 2, 3, 4):
         assert hydra_calib_page_mod._panel_tagged_path(base, n).is_file()
+
+    # Save Current Panel: overwrites ONLY the active panel's own file, in the
+    # same _ge<N>-tagged location as the Save All runs just above, without
+    # touching the other 3 panels' files on disk.
+    assert page._toolbar.current() == "ge1"   # default — never changed above
+    assert page._save_cur_json_btn.isEnabled() and page._save_cur_ps_btn.isEnabled()
+    other_json_mtimes = {n: (json_dir / f"{stem}_ge{n}.instr.json").stat().st_mtime
+                         for n in (2, 3, 4)}
+    other_ps_mtimes = {n: hydra_calib_page_mod._panel_tagged_path(base, n).stat().st_mtime
+                       for n in (2, 3, 4)}
+    cur_json_path = json_dir / f"{stem}_ge1.instr.json"
+    cur_json_path.unlink()
+    save_calls = []
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog, "getSaveFileName",
+        staticmethod(lambda *a, **k: (save_calls.append(a), (str(cur_json_path), ""))[1]))
+    page._save_current_json()
+    assert cur_json_path.is_file()
+    # The dialog's offered default matches Save All's own dir + naming.
+    assert save_calls[0][2] == str(cur_json_path)
+    for n in (2, 3, 4):
+        assert (json_dir / f"{stem}_ge{n}.instr.json").stat().st_mtime == other_json_mtimes[n]
+
+    cur_ps_path = hydra_calib_page_mod._panel_tagged_path(base, 1)
+    cur_ps_path.unlink()
+    page._save_current_paramstest()
+    assert cur_ps_path.is_file()
+    for n in (2, 3, 4):
+        assert hydra_calib_page_mod._panel_tagged_path(base, n).stat().st_mtime == other_ps_mtimes[n]
+
+    # Switching the active panel toggles which one "Save Current Panel"
+    # targets, and disables it again for an unfitted panel.
+    page._cards[1].result = None
+    page._toolbar.set_current("ge2")   # leave ge1 first so the switch back is a real transition
+    page._toolbar.set_current("ge1")
+    assert not page._save_cur_json_btn.isEnabled()
+    page._toolbar.set_current("ge3")
+    assert page._save_cur_json_btn.isEnabled()
 
     with h5py.File(proj_path, "r") as f:
         for n in (1, 2, 3, 4):

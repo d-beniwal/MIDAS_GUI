@@ -43,6 +43,10 @@ _IMASK_MAX = 5_000_000_000
 class DataViewerTab(QtWidgets.QWidget):
     pushGeometry = QtCore.pyqtSignal(dict)   # λ/px/Lsd/BC → Calibrate tab
     pullGeometry = QtCore.pyqtSignal()       # "← Get": pull Calibrate's geometry
+    # Hydra mode's own all-4-panel equivalents (see HydraViewerPage's "→ Send
+    # to Calibrate"/"← Get from Calibrate").
+    pushHydraToCalibrate = QtCore.pyqtSignal(dict)
+    pullHydraFromCalibrate = QtCore.pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -157,6 +161,17 @@ class DataViewerTab(QtWidgets.QWidget):
         card = self._hydra_page._cards.get(f"ge{n}")
         if card is not None:
             card.set_geometry(g)
+
+    def import_from_calibrate(self, data: dict):
+        """Hydra page's "← Get from Calibrate" — apply the Calibrate tab's
+        exported anchor path + per-panel geometry, all 4 panels at once.
+        Warns plainly (rather than silently doing nothing) when the
+        Calibrate tab's Hydra page has nothing loaded yet."""
+        applied = self._hydra_page.import_from_calibrate(data)
+        if not applied:
+            QtWidgets.QMessageBox.warning(
+                self, "Nothing to import",
+                "Nothing loaded in Calibrate (Hydra) yet — load data there first.")
 
     # ── GUI state (Save/Load GUI State) ─────────────────────────────
     def _state_widgets(self) -> dict:
@@ -518,6 +533,8 @@ class DataViewerTab(QtWidgets.QWidget):
 
         # Page 1: Hydra (4-panel GE detector) view.
         self._hydra_page = HydraViewerPage()
+        self._hydra_page.pushToCalibrate.connect(self.pushHydraToCalibrate.emit)
+        self._hydra_page.pullFromCalibrate.connect(self.pullHydraFromCalibrate.emit)
         self._mode_stack.addWidget(self._hydra_page)
 
     # ── Loading ───────────────────────────────────────────────────

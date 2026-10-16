@@ -299,9 +299,11 @@ class DetectorGeometryCard(QtWidgets.QWidget):
     imTransChanged = QtCore.pyqtSignal()      # a Flip Y/Flip Z/Transpose checkbox toggled
     geometryChanged = QtCore.pyqtSignal()     # BC/tilt/calibration changed (edit, pick, or file load)
 
-    def __init__(self, parent=None, *, show_rotate: bool = False):
+    def __init__(self, parent=None, *, show_rotate: bool = False,
+                 show_calib_handoff: bool = True):
         super().__init__(parent)
         self._show_rotate = show_rotate
+        self._show_calib_handoff = show_calib_handoff
         self._materials: list = []
         self._ring_items: list = []
         self._label_items: list = []
@@ -697,23 +699,29 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         self._tz.setToolTip("Detector tilt about the Z axis — bends the simulated rings.")
         ring.body.addLayout(S.Form().row(("ty:", self._ty), ("tz:", self._tz)))
 
-        # Two-way geometry hand-off with the Calibrate tab.
-        calib_row = QtWidgets.QHBoxLayout(); calib_row.setSpacing(4)
-        calib_row.addWidget(S.LabelRight("Geometry:"))
-        self._to_calib_btn = QtWidgets.QPushButton("Send →")
-        self._to_calib_btn.setToolTip(
-            "Copy λ, pixel size, Lsd and beam centre from here into the Calibrate "
-            "tab's detector + seed fields.")
-        self._to_calib_btn.clicked.connect(
-            lambda: self.pushGeometry.emit(self.get_geometry()))
-        self._from_calib_btn = QtWidgets.QPushButton("← Get")
-        self._from_calib_btn.setToolTip(
-            "Pull the Calibrate tab's latest calibrated geometry (λ, pixel size, "
-            "Lsd, beam centre, tilts and distortion) into these fields.")
-        self._from_calib_btn.clicked.connect(self.pullGeometry.emit)
-        calib_row.addWidget(self._to_calib_btn, 1)
-        calib_row.addWidget(self._from_calib_btn, 1)
-        ring.body.addLayout(calib_row)
+        # Two-way geometry hand-off with the Calibrate tab — single-detector
+        # mode only. In Hydra mode this is a page-level action instead (one
+        # panel's own Send/Get would be ambiguous — which panel's geometry
+        # represents "the" transfer? — and nonsensical for the composite
+        # card), see HydraViewerPage's own "→ Send to Calibrate"/"← Get from
+        # Calibrate" buttons.
+        if self._show_calib_handoff:
+            calib_row = QtWidgets.QHBoxLayout(); calib_row.setSpacing(4)
+            calib_row.addWidget(S.LabelRight("Geometry:"))
+            self._to_calib_btn = QtWidgets.QPushButton("Send →")
+            self._to_calib_btn.setToolTip(
+                "Copy λ, pixel size, Lsd and beam centre from here into the Calibrate "
+                "tab's detector + seed fields.")
+            self._to_calib_btn.clicked.connect(
+                lambda: self.pushGeometry.emit(self.get_geometry()))
+            self._from_calib_btn = QtWidgets.QPushButton("← Get")
+            self._from_calib_btn.setToolTip(
+                "Pull the Calibrate tab's latest calibrated geometry (λ, pixel size, "
+                "Lsd, beam centre, tilts and distortion) into these fields.")
+            self._from_calib_btn.clicked.connect(self.pullGeometry.emit)
+            calib_row.addWidget(self._to_calib_btn, 1)
+            calib_row.addWidget(self._from_calib_btn, 1)
+            ring.body.addLayout(calib_row)
 
         ctl = QtWidgets.QHBoxLayout()
         self._show_rings = QtWidgets.QCheckBox("Rings"); self._show_rings.setChecked(True)

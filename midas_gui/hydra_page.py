@@ -63,6 +63,14 @@ class _ProfileSinkAdapter:
 
 
 class HydraViewerPage(QtWidgets.QWidget):
+    #: "→ Send to Calibrate" clicked — carries export_for_calibration()'s
+    #: own payload shape ({"anchor_path", "geometries"}), consumed as-is by
+    #: HydraCalibrationPage.import_from_viewer.
+    pushToCalibrate = QtCore.pyqtSignal(dict)
+    #: "← Get from Calibrate" clicked — the owner fetches the Calibrate
+    #: tab's export_for_viewer() and hands it to import_from_calibrate.
+    pullFromCalibrate = QtCore.pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._states: dict = {}                 # panel number -> hydra.DetectorState
@@ -85,14 +93,38 @@ class HydraViewerPage(QtWidgets.QWidget):
         split.setChildrenCollapsible(False); split.setHandleWidth(6)
         root.addWidget(split)
 
-        # ── LEFT: Hydra data loader ──
+        # ── LEFT: "→ Send to Calibrate"/"← Get from Calibrate" + the Hydra
+        #    data loader — mirrors HydraCalibrationPage's own "← Data
+        #    Viewer" button sitting above its loader, so the hand-off is a
+        #    single page-level action for all 4 panels at once rather than
+        #    each panel's own (now hidden — see show_calib_handoff=False
+        #    above) Send/Get, which would only move one panel at a time. ──
+        left = QtWidgets.QWidget()
+        ll = QtWidgets.QVBoxLayout(left); ll.setContentsMargins(0, 0, 0, 0); ll.setSpacing(4)
+        calib_row = QtWidgets.QHBoxLayout(); calib_row.setSpacing(4)
+        self._to_calib_btn = QtWidgets.QPushButton("→ Send to Calibrate")
+        self._to_calib_btn.setToolTip(
+            "Copy the data path and every present panel's geometry from here "
+            "into the Calibrate tab's Hydra page, all 4 panels at once.")
+        self._to_calib_btn.clicked.connect(
+            lambda: self.pushToCalibrate.emit(self.export_for_calibration()))
+        self._from_calib_btn = QtWidgets.QPushButton("← Get from Calibrate")
+        self._from_calib_btn.setToolTip(
+            "Pull the Calibrate tab's Hydra page's data path and every present "
+            "panel's best-known geometry (fitted result if one exists, else "
+            "its current seed), all 4 panels at once.")
+        self._from_calib_btn.clicked.connect(self.pullFromCalibrate.emit)
+        calib_row.addWidget(self._to_calib_btn, 1)
+        calib_row.addWidget(self._from_calib_btn, 1)
+        ll.addLayout(calib_row)
         self._loader = HydraLoaderPanel()
         self._loader.setMinimumWidth(200)
         self._loader.siblingsChanged.connect(self._on_siblings_changed)
         self._loader.frameChanged.connect(self._on_frame_changed)
         self._loader.fieldsChanged.connect(self._on_fields_changed)
         self._loader.projectionChanged.connect(self._on_fields_changed)
-        split.addWidget(self._loader)
+        ll.addWidget(self._loader)
+        split.addWidget(left)
 
         # ── MIDDLE: Projection card (top) + one geometry card per panel +
         #    one for the composite (below, same as the single-detector tab's
@@ -121,7 +153,8 @@ class HydraViewerPage(QtWidgets.QWidget):
 
         self._cards: dict = {}
         for key in ("ge1", "ge2", "ge3", "ge4", "composite"):
-            card = DetectorGeometryCard(show_rotate=(key != "composite"))
+            card = DetectorGeometryCard(show_rotate=(key != "composite"),
+                                        show_calib_handoff=False)
             card.set_image_source(self._make_image_provider(key), None)
             if key == "composite":
                 # The "Composite" curve on the shared plot is the DERIVED
@@ -486,6 +519,28 @@ class HydraViewerPage(QtWidgets.QWidget):
             "geometries": {n: self._cards[f"ge{n}"].get_full_geometry()
                           for n in siblings},
         }
+
+    def import_from_calibrate(self, data: dict) -> bool:
+        """Apply the Calibrate tab's Hydra page's exported anchor path +
+        per-panel geometry (``HydraCalibrationPage.export_for_viewer``) —
+        the "← Get from Calibrate" counterpart of ``export_for_calibration``.
+        Returns whether anything was actually applied, so the caller (see
+        ``DataViewerTab.import_from_calibrate``) can tell the user plainly
+        when there was nothing to pull, instead of a false success."""
+        data = data or {}
+        anchor = data.get("anchor_path")
+        applied = False
+        if anchor:
+            self._loader.set_path(anchor)
+            applied = True
+        for n_key, g in (data.get("geometries") or {}).items():
+            n = int(n_key)
+            card = self._cards.get(f"ge{n}")
+            if card is None or not g:
+                continue
+            card.set_geometry(g)
+            applied = True
+        return applied
 
     # ── GUI state ────────────────────────────────────────────────
 

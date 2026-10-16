@@ -224,6 +224,11 @@ class CalibrationTab(QtWidgets.QWidget):
     def import_hydra_from_viewer(self, data: dict):
         self._hydra_page.import_from_viewer(data)
 
+    def get_hydra_export_for_viewer(self) -> dict:
+        """Hydra page's anchor path + each present panel's best-known
+        geometry — for the Data Viewer's Hydra "← Get from Calibrate"."""
+        return self._hydra_page.export_for_viewer()
+
     def _on_mode_changed(self, mode: str):
         """Leftmost ribbon switched between "single" and "hydra" — swap the
         visible page, mirroring DataViewerTab's identical split."""

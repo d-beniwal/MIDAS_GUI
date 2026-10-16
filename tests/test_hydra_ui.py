@@ -414,3 +414,73 @@ def test_hydra_state_round_trips(app, fixture_available):
     assert tab2._hydra_page._toolbar.current() == "ge3"
 
 
+def test_hydra_page_send_get_calibrate_is_page_level_all_panels(app, fixture_available, monkeypatch):
+    """Each panel's own (and composite's) individual "Send ->"/"<- Get" row
+    is hidden in Hydra mode (show_calib_handoff=False — those were dead
+    signals, never connected to anything, and ambiguous/nonsensical for one
+    panel out of 4 or for composite). Instead HydraViewerPage has ONE
+    page-level "-> Send to Calibrate"/"<- Get from Calibrate" pair that
+    moves all 4 panels' geometry + the anchor path at once, mirroring
+    HydraCalibrationPage's existing "<- Data Viewer" button."""
+    tab = DataViewerTab()
+    tab._mode_ribbon.set_mode("hydra")
+    hp = tab._hydra_page
+    for key in ("ge1", "ge2", "ge3", "ge4", "composite"):
+        assert not hasattr(hp._cards[key], "_to_calib_btn")
+        assert not hasattr(hp._cards[key], "_from_calib_btn")
+    assert hp._to_calib_btn.text() == "→ Send to Calibrate"
+    assert hp._from_calib_btn.text() == "← Get from Calibrate"
+
+    # Nothing loaded yet: export has no anchor and no geometries, and
+    # import_from_calibrate reports nothing applied rather than pretending.
+    empty = hp.export_for_calibration()
+    assert not empty["anchor_path"] and not empty["geometries"]
+    assert hp.import_from_calibrate({}) is False
+    assert hp.import_from_calibrate({"anchor_path": "", "geometries": {}}) is False
+
+    hp._loader.set_path(str(fixture_available / "ge1" / "panel.ge1.h5"))
+    app.processEvents()
+    assert set(hp._loader.siblings()) == {1, 2, 3, 4}
+
+    # "-> Send to Calibrate": one click emits every present panel's geometry
+    # + the anchor path, ready for HydraCalibrationPage.import_from_viewer
+    # to consume as-is.
+    sent = []
+    hp.pushToCalibrate.connect(sent.append)
+    hp._to_calib_btn.click()
+    assert len(sent) == 1
+    payload = sent[0]
+    assert payload["anchor_path"] == hp._loader.current_path()
+    assert set(payload["geometries"]) == {1, 2, 3, 4}
+
+    # "<- Get from Calibrate": applies a Calibrate-shaped payload (anchor +
+    # per-panel geometry) to all 4 cards at once.
+    pulled = []
+    hp.pullFromCalibrate.connect(lambda: pulled.append(True))
+    hp._from_calib_btn.click()
+    assert pulled == [True]
+
+    fake_anchor = str(fixture_available / "ge2" / "panel.ge2.h5")
+    fake_payload = {
+        "anchor_path": fake_anchor,
+        "geometries": {n: {"Lsd": 1_000_000.0 + n, "BC_y": 300.0 + n, "BC_z": 400.0 + n,
+                           "tx": 0.0, "ty": 0.0, "tz": 0.0} for n in (1, 2, 3, 4)},
+    }
+    assert hp.import_from_calibrate(fake_payload) is True
+    assert hp._loader.current_path() == fake_anchor
+    for n in (1, 2, 3, 4):
+        g = hp._cards[f"ge{n}"].get_geometry()
+        assert g["BC_y"] == pytest.approx(300.0 + n)
+        assert g["BC_z"] == pytest.approx(400.0 + n)
+
+    # DataViewerTab.import_from_calibrate warns plainly instead of silently
+    # doing nothing when the Calibrate tab's Hydra page has nothing loaded.
+    warnings = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
+                        staticmethod(lambda *a, **k: warnings.append(a) or None))
+    tab.import_from_calibrate({})
+    assert len(warnings) == 1
+    tab.import_from_calibrate(fake_payload)
+    assert len(warnings) == 1   # no new warning — this one actually applied
+
+
