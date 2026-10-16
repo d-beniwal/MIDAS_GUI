@@ -1188,6 +1188,8 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             it.setVisible(vis_r)
         for it in self._label_items:
             it.setVisible(vis_l)
+        if self._pick_ring_item is not None:
+            self._pick_ring_item.setVisible(vis_r)
         self._refresh_profile_markers()
 
     # ── Beam-centre picking / radial integration ──────────────────
@@ -1248,6 +1250,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             ys, zs = bc_y + r * np.cos(th), bc_z + r * np.sin(th)
         self._pick_ring_item = pg.PlotDataItem(
             ys, zs, pen=pg.mkPen("#ff30ff", width=1.8))
+        self._pick_ring_item.setVisible(self._show_rings.isChecked())
         self._viewer._iv.addItem(self._pick_ring_item)
 
     def _on_rad_param_changed(self, *_):

@@ -1183,9 +1183,3 @@ Flip-Z/Multi-panel fix — trimmed here; full detail in
 - `test_smoke.py::test_app_builds_offscreen` has a pre-existing, unrelated
   local-config flake (stale `visible_tabs` count) — hit again this session,
   confirmed unrelated to the truncation fix.
-
-## Standing rules (from memory)
-
-- Commit history is the record of recent work — see `git log`. Docs
-  (`development_history.md`, `gui_documentation.md`) are updated only when
-  explicitly asked, not automatically per commit.
