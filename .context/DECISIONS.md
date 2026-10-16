@@ -3,6 +3,119 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-16 (branch `mcp`, latest) — Phase-1 MCP control layer for Data Viewer + Calibrate; built and self-tested by the agent
+
+**Requested directly**: a framework for LLM agents (not just this one) to
+drive midas-gui autonomously, scoped for now to the Data Viewer and Calibrate
+tabs, on a new `mcp` branch, in a new `midas_gui_mcp/` folder, with the agent
+testing it against the live app itself.
+
+**Shape (3 layers), and why.** `Agent → MCP server (separate process) →
+control socket → GuiController (inside the running midas_gui QApplication) →
+existing tabs`. In-process controller, not a headless reimplementation: the
+live PVA stream, cross-tab geometry handoff, and `get_state()` all live in
+the real `MainWindow`, so driving the real tabs keeps one source of truth
+instead of a second, divergent one. `bridge_server.BridgeServer` (the
+existing B-PILOT `QLocalServer` integration) was the proof this is safe on
+the GUI thread — generalized from its one-way fire-and-forget shape into a
+full request/response + event-push protocol in new `control_server.py`.
+`CalibrationWorker`/`BatchWorker` were already async via Qt signals
+(`QProcess`-backed), so "start a calibration, get a job_id, poll/wait" needed
+no new execution model, just a thin job registry in new `control_api.py`'s
+`GuiController`.
+
+**GuiController (`midas_gui/control_api.py`)** has one `op_<namespace>_<verb>`
+method per operation, dispatched by `dispatch(op, args)` from a flat
+`"namespace.verb"` string. Every method returns a plain JSON-safe dict
+(`{"ok": True, "result": ...}` / `{"ok": False, "error": {"message","type"}}`)
+and never raises to its caller or pops a dialog — it calls straight into
+existing tab/widget methods (`DetectorGeometryCard.set_geometry`/
+`radial_integrate`, `CalibrationTab._run`/`_seed_from_result`,
+`FieldSelector.set_state` for dark/bright/background, `apply_geometry`/
+`geometry_for_viewer` for the Data-Viewer↔Calibrate handoff) rather than
+reimplementing their logic. Large arrays (frames, profiles, residual maps)
+are never inlined as JSON — written to a temp `.npy`, returned as
+`{"path","shape","dtype"}`, matching the existing `_bg_job_results.npz`
+convention.
+
+**Blocking-dialog bypass, narrow by design.** `CalibrationTab._run()`'s three
+`QMessageBox.warning` guards (no image / pending fields / frozen_point +
+multi-panel) and `_on_fail`'s `show_error`, plus
+`DetectorGeometryCard._simulate()`'s "No image" warning, would hang an
+unattended run forever waiting for a click nobody can give (confirmed by
+reading `dialogs.show_error`: a plain `box.exec_()`, no timeout). Fixed with
+an explicit `set_agent_mode(True)` flag on just these two classes
+(`CalibrationTab`, `DetectorGeometryCard`), checked only at those specific
+call sites — `_warn_or_record`/`_last_agent_error` on the former, a new
+dialog-free `simulate_rings(require_image=False)` on the latter (wraps
+`_compute_material_rings()` + the same post-steps `_simulate()` does, minus
+the dialog). Off by default; interactive use is completely unaffected. This
+is deliberately NOT a global dialog suppression — every other dialog in the
+app is untouched, so a fully unattended run reaching one some other way would
+still hang; documented as a known limitation in `midas_gui_mcp/README.md`
+rather than papered over.
+
+**Three real bugs found by actually driving this through a live offscreen
+`MainWindow`, not by inspection** — the user asked for exactly this kind of
+self-test, and it earned its keep:
+1. `DetectorGeometryCard.materials_state()` deliberately strips every
+   `"_"`-prefixed key (it's the GUI-state save/restore shape) — which
+   includes `_rings`, the very thing `data_viewer.simulate_rings` exists to
+   return. Fixed by reading `self._geom._materials` directly in that one op
+   instead of going through `materials_state()`.
+2. An earlier `calibrate.wait` busy-waited with
+   `QCoreApplication.processEvents()` in a loop inside the request handler.
+   Driving a real calibration job through it and letting the client's own
+   read time out crashed the server: `RuntimeError: wrapped C/C++ object of
+   type QLocalSocket has been deleted`. Root cause: a nested `processEvents()`
+   call let Qt process the *same socket's* `disconnected` signal (fired by
+   the client's timeout) while the handler still meant to write a reply to
+   it — `deleteLater()`'s deferred delete fired during one of the nested
+   pumps. Fixed by moving all async waiting (`calibrate.wait`, the
+   `run_frozen_point_then_oneshot` composite) out of `GuiController` entirely
+   and into `control_server.py`, driven by `QTimer.singleShot` polling (never
+   nests the event loop) with every reply going through a `sip.isdeleted()`-
+   guarded `_safe_reply`. `GuiController` now only exposes the non-blocking
+   primitives (`run`, `get_job`); see that module's own comment for the full
+   trace of the crash.
+3. The control socket's discovery file (so a PyQt-free `midas_gui_mcp/
+   client.py` can find `QLocalServer`'s actual Unix-domain-socket path
+   without guessing it) was first written under `tempfile.gettempdir()`.
+   Driving it through a *real* MCP client (not just a raw socket test)
+   failed every tool call with "could not reach midas-gui's control socket."
+   Cause: `mcp.client.stdio`'s default subprocess environment is a small
+   fixed allowlist (`HOME, LOGNAME, PATH, SHELL, TERM, USER`) that excludes
+   `TMPDIR` — so on macOS, `tempfile.gettempdir()` resolved to a different
+   directory inside the spawned `server.py` than inside the GUI process.
+   Fixed by moving the discovery file under `$HOME` (`~/.midas_gui/
+   midas_gui_control_v1.sock_path`), which *is* in that allowlist — a
+   root-cause fix, not a per-launcher `env=` workaround.
+
+**Verification.** Built an offscring harness: a real offscreen `MainWindow`
+with `MIDAS_GUI_CONTROL=1`, driven first by a plain socket client (fast
+iteration) exercising every Data Viewer + Calibrate op including a real
+`one_shot` calibration run against the bundled synthetic CeO2 fixture
+end-to-end (job started → polled → `"status":"done"` with real refined
+Lsd/BC/tilt values); then by the actual `mcp` Python SDK's client
+(`ClientSession`/`stdio_client`) spawning the real `midas_gui_mcp/server.py`
+and calling real tools over real MCP — confirmed all 21 tools list correctly
+and round-trip through the full stack. Existing-suite regression check used
+the stash-compare method (run the same failing tests against the stashed,
+unmodified tree) rather than trusting a single run, since this repo's test
+suite has several already-documented `--forked`/CoreFoundation fork flakes on
+macOS (see STATE.md's "Known-failing baseline" section) — every failure seen
+while testing this change reproduced identically on unmodified `main`, so
+none of it is a regression. Touched-file sweep (`test_view_tab_controls.py`
+33/33, `test_ca_live_view.py` 22/22, `test_hydra_ui.py` 16/16,
+`test_hydra_calib_ui.py` 2/2, `test_workspace_ux.py`, `test_helpers.py` 97/97,
+every `test_calib*`/`test_calibrate*` file) all green per-file, unforked
+(the project's own documented reliable mode); `pyflakes` shows zero new
+warnings on any touched/new file.
+
+**Not done this pass:** Mask generation and Batch (radial) Integrate tabs
+(explicitly phase 2, per the scoping conversation); pushing `mcp` to origin
+or merging to `main`.
+
 ## 2026-10-16 (latest, 2) — Ring simulation: "max 2θ" → "N rings", hard-capped to the image's actual reach
 
 **Requested directly**: "change this to N_rings... which dictates the

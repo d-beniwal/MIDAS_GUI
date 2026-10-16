@@ -5,6 +5,7 @@ import faulthandler
 import hashlib
 import inspect
 import json
+import os
 import sys
 import tempfile
 import traceback
@@ -62,6 +63,7 @@ def _install_diagnostics() -> None:
 from midas_gui.helpers import _make_checkmark_svg, _make_arrow_svg
 from midas_gui import style as S
 from midas_gui import bridge_server
+from midas_gui import control_server
 from midas_gui.auto_attenuation import refresh_server as auto_att_refresh_server
 from midas_gui.tab_view import DataViewerTab
 from midas_gui.tab_mask import MaskTab
@@ -125,6 +127,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self._auto_att_refresh_server = auto_att_refresh_server.AutoAttenuationRefreshServer(
             self._on_auto_attenuation_refresh_request, log_fn=_log)
         self._auto_att_refresh_server.start()
+
+        # Lets an external agent/MCP server drive the Data Viewer and
+        # Calibrate tabs headlessly — see midas_gui/control_server.py and
+        # midas_gui_mcp/. Opt-in only (MIDAS_GUI_CONTROL=1): this opens a
+        # local control socket, so it stays off for every ordinary user.
+        self._control_server = None
+        if os.environ.get("MIDAS_GUI_CONTROL") == "1":
+            self._control_server = control_server.ControlServer(self, log_fn=_log)
+            if self._control_server.start():
+                self._view_tab.liveProfileUpdated.connect(self._on_live_profile_updated)
+            else:
+                self._control_server = None
+
+    def _on_live_profile_updated(self, r_px, profile) -> None:
+        self._control_server.broadcast_event(
+            "radial_profile_updated", {"has_profile": r_px is not None})
 
     def _resolve_and_start_live(self, prefix: str) -> None:
         resolved = bridge_server.resolve_pv(prefix, C.DEVICES)
@@ -1533,6 +1551,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._auto_att_refresh_server.stop()
         except Exception:
             _log(f"Auto Attenuation refresh server shutdown failed:\n{traceback.format_exc()}")
+        try:
+            if self._control_server is not None:
+                self._control_server.stop()
+        except Exception:
+            _log(f"Control server shutdown failed:\n{traceback.format_exc()}")
         super().closeEvent(event)
 
 

@@ -335,6 +335,9 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         #: Geometry the currently-drawn rings were simulated with (frozen, so
         #: a one-shot simulation does not follow later parameter edits).
         self._ring_draw_geom: Optional[dict] = None
+        # Set by a control API (see control_api.py) before driving this card
+        # headlessly — see set_agent_mode.
+        self._agent_mode = False
 
         self._viewer = None
         self._profile_view = None
@@ -1280,6 +1283,31 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             m["_rings"] = rings
             any_rings = any_rings or bool(rings)
         return errors, any_rings
+
+    def set_agent_mode(self, on: bool) -> None:
+        """Enable/disable the blocking-dialog bypass used when a control API
+        is driving this card — see ``simulate_rings``."""
+        self._agent_mode = bool(on)
+
+    def simulate_rings(self, *, require_image: bool = False) -> list:
+        """Headless equivalent of clicking "Simulate" — never pops a dialog,
+        regardless of ``_agent_mode`` (unlike ``_simulate``/
+        ``simulate_rings_without_image``, which are interactive-only). Returns
+        the list of per-material computation error strings (empty on
+        success); the materials' own ``_rings`` are updated in place exactly
+        as ``_simulate`` leaves them, so ``materials_state()`` reflects the
+        new rings either way. ``require_image=True`` fails instead of
+        simulating without one, matching ``_simulate``'s own precondition for
+        callers that specifically want the on-image overlay refreshed too."""
+        if require_image and self._image_provider() is None:
+            return ["No image loaded."]
+        errors, any_rings = self._compute_material_rings()
+        if self._image_provider() is not None:
+            self._ring_draw_geom = self._current_ring_geom() if any_rings else None
+            self._after_geometry_change()
+        self._refresh_ring_checklists()
+        self._refresh_profile_markers()
+        return errors
 
     def simulate_rings_without_image(self):
         """Compute every enabled material's rings and refresh the profile-view

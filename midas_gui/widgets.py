@@ -2160,6 +2160,20 @@ class ProfileViewer(QtWidgets.QWidget):
             self._xaxis.setEnabled(True)
         self._replot()
 
+    def get_profile(self) -> Optional[dict]:
+        """Read back the data last given to :meth:`set_profile`, or ``None``
+        if nothing has been plotted yet — the public counterpart to a
+        write-only widget, for callers (e.g. a control API) that need the
+        actual numbers rather than just the rendered plot."""
+        if self._r_px is None:
+            return None
+        return {
+            "r_px": self._r_px, "profile": self._prof,
+            "sigma": self._sigma, "wavelength_A": self._wl,
+            "lsd_um": self._lsd, "px_um": self._px,
+            "native_unit": self._native_unit,
+        }
+
     def set_ring_markers(self, groups, lsd_um=None, px_um=None, wl=None, width=1.5):
         """``groups``: list of ``{"radii": [r_px, ...], "color": "#rrggbb"}`` —
         one entry per material, each drawn in its own color.
@@ -3893,6 +3907,30 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
         vb.setXRange(xmin, xmax, padding=0)
         vb.setYRange(ymin, ymax, padding=0)
 
+    @staticmethod
+    def compute_stats(values) -> dict:
+        """N/min/max/mean/std plus p70/p90/p99/p99.9/p99.99 and each
+        percentile's above-count, over the finite values of ``values`` —
+        the single formula behind both this panel's text readout
+        (:meth:`set_data`) and a control API's ``get_statistics`` op, so the
+        two can never drift apart. Returns ``{"n": 0}`` for an empty/all-NaN
+        input."""
+        vals = np.asarray(values, dtype=np.float64).ravel()
+        vals = vals[np.isfinite(vals)]
+        if vals.size == 0:
+            return {"n": 0}
+        p70, p90, p99, p999, p9999 = np.percentile(vals, [70, 90, 99, 99.9, 99.99])
+        percentiles = {
+            "p70": float(p70), "p90": float(p90), "p99": float(p99),
+            "p99.9": float(p999), "p99.99": float(p9999),
+        }
+        above_count = {k: int(np.count_nonzero(vals > v)) for k, v in percentiles.items()}
+        return {
+            "n": int(vals.size), "min": float(vals.min()), "max": float(vals.max()),
+            "mean": float(vals.mean()), "std": float(vals.std()),
+            "percentiles": percentiles, "above_count": above_count,
+        }
+
     def set_data(self, values, scope: str = ""):
         vals = np.asarray(values, dtype=np.float64).ravel()
         vals = vals[np.isfinite(vals)]
@@ -3901,30 +3939,27 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
             self._fit_text_to_content()
             self._hist = None; self._curve.setData([], [])
             return
-        n = vals.size
-        vmin, vmax = float(vals.min()), float(vals.max())
-        p70, p90, p99, p999, p9999 = np.percentile(vals, [70, 90, 99, 99.9, 99.99])
+        stats = self.compute_stats(vals)
 
         def g(x):
             return f"{x:.6g}"
-
-        def cnt(p):
-            return int(np.count_nonzero(vals > p))
+        p, c = stats["percentiles"], stats["above_count"]
         lines = [
             scope,
-            f"N      = {n:,}",
-            f"min    = {g(vmin)}",
-            f"max    = {g(vmax)}",
-            f"mean   = {g(float(vals.mean()))}",
-            f"std    = {g(float(vals.std()))}",
-            f"p70    = {g(p70):<10} (>: {cnt(p70):,})",
-            f"p90    = {g(p90):<10} (>: {cnt(p90):,})",
-            f"p99    = {g(p99):<10} (>: {cnt(p99):,})",
-            f"p99.9  = {g(p999):<10} (>: {cnt(p999):,})",
-            f"p99.99 = {g(p9999):<10} (>: {cnt(p9999):,})",
+            f"N      = {stats['n']:,}",
+            f"min    = {g(stats['min'])}",
+            f"max    = {g(stats['max'])}",
+            f"mean   = {g(stats['mean'])}",
+            f"std    = {g(stats['std'])}",
+            f"p70    = {g(p['p70']):<10} (>: {c['p70']:,})",
+            f"p90    = {g(p['p90']):<10} (>: {c['p90']:,})",
+            f"p99    = {g(p['p99']):<10} (>: {c['p99']:,})",
+            f"p99.9  = {g(p['p99.9']):<10} (>: {c['p99.9']:,})",
+            f"p99.99 = {g(p['p99.99']):<10} (>: {c['p99.99']:,})",
         ]
         self._text.setPlainText("\n".join(lines))
         self._fit_text_to_content()
+        vmin, vmax = stats["min"], stats["max"]
 
         # Histogram over the FULL intensity range so high-intensity pixels appear.
         if vmax <= vmin:

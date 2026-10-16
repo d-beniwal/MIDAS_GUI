@@ -47,6 +47,12 @@ class DataViewerTab(QtWidgets.QWidget):
     # to Calibrate"/"← Get from Calibrate").
     pushHydraToCalibrate = QtCore.pyqtSignal(dict)
     pullHydraFromCalibrate = QtCore.pyqtSignal()
+    # Fires after every frame refresh (live or not) that produced a radial
+    # profile — a control API's closest approximation to a "radial
+    # integration stream", since there is no separate live-profile source
+    # today (the profile is just recomputed per frame). Args: (r_px, profile)
+    # numpy arrays, or (None, None) if no profile is available yet.
+    liveProfileUpdated = QtCore.pyqtSignal(object, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -111,10 +117,11 @@ class DataViewerTab(QtWidgets.QWidget):
         just-activated profile (see MainWindow.on_profile_changed)."""
         self._loader.refresh_devices()
 
-    def start_live_pv(self, pv: str) -> bool:
+    def start_live_pv(self, pv: str, backend: str = "pva") -> bool:
         """Programmatic equivalent of picking `pv` in the Live Data card and
-        clicking Start — used by the MIDAS-bridge QLocalServer (app.py)."""
-        return self._loader.start_live_pv(pv)
+        clicking Start — used by the MIDAS-bridge QLocalServer (app.py) and
+        the control API (control_api.py)."""
+        return self._loader.start_live_pv(pv, backend)
 
     def shutdown(self):
         """Called by MainWindow on app close to stop any live PV stream
@@ -636,6 +643,9 @@ class DataViewerTab(QtWidgets.QWidget):
             self._show_topn()   # re-locate brightest pixels + refresh their stats
         elif sp is None or sp.scope() != "all":
             self._update_stats()
+        prof = self._profile_view.get_profile()
+        self.liveProfileUpdated.emit(
+            prof["r_px"] if prof else None, prof["profile"] if prof else None)
 
     def _on_fields_changed(self):
         """Dark/bright/background/mask changed — recompute the corrected image and

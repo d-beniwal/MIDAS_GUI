@@ -1,11 +1,27 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-10-16 (Ring simulation: "max 2θ" replaced by "N rings" + a hard image-reach cap; ring-info text box removed — see DECISIONS)_
+_Last updated: 2026-10-16 (branch `mcp`: phase-1 MCP control layer for Data Viewer + Calibrate — see DECISIONS)_
 
 ## Now working on
 
-Nothing in progress.
+**Branch `mcp` (not merged to `main`): phase-1 MCP control layer, scoped to
+Data Viewer + Calibrate.** Lets an external agent (any MCP client, not just
+Claude) drive those two tabs headlessly. Three new pieces inside
+`midas_gui/`: `control_api.py` (`GuiController` — one method per operation,
+calls straight into existing tab methods, never raises/pops a dialog to its
+caller), `control_server.py` (`ControlServer` — a `QLocalServer` generalizing
+`bridge_server.py`'s pattern into full request/response + event push, opt-in
+via `MIDAS_GUI_CONTROL=1`), plus narrow `set_agent_mode(True)` additions on
+`CalibrationTab`/`DetectorGeometryCard` so their blocking `QMessageBox`
+guards become structured errors instead under agent control. New top-level
+`midas_gui_mcp/` package (separate venv, only depends on `mcp`) is the actual
+MCP server — a thin proxy over the control socket. Full design, the real bugs
+found while self-testing this (materials_state() stripping ring data, a
+nested-event-loop socket-deletion crash, TMPDIR not inherited by the MCP
+SDK's subprocess), and the verification method are in DECISIONS 2026-10-16
+(mcp, latest). **Not yet**: Mask/Batch-Integrate tabs (phase 2), pushed to
+origin, or merged to `main`.
 
 **2026-10-16 (latest, 2) — Data Viewer "Ring simulation": max 2θ field
 replaced by an N-rings count (default 10), and ring generation is now hard-

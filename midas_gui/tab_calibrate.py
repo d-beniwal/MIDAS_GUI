@@ -98,6 +98,13 @@ class CalibrationTab(QtWidgets.QWidget):
         self._pending_log_result = None   # result awaiting _log_to_project once integration finishes
         self._expid_provider = None       # set by app.py; see set_expid_provider
         self._wd_declined = ""            # last unwritable candidate, logged once
+        # Set by a control API (see control_api.py) before driving this tab
+        # headlessly: the Run-time guard checks below and _on_fail's error
+        # dialog would otherwise block the GUI event loop forever waiting
+        # for a click nobody can give it. Off by default — purely interactive
+        # use is completely unaffected.
+        self._agent_mode = False
+        self._last_agent_error: Optional[str] = None
         self._proj_active: bool = False               # a stack projection feeds the pipeline
         self._proj_image: Optional[np.ndarray] = None  # already dark/bright/background-corrected
         self._proj_worker: Optional[ProjectionWorker] = None
@@ -109,6 +116,22 @@ class CalibrationTab(QtWidgets.QWidget):
         # it autofill would propose a working directory next to the source
         # tree on every cold start — a path nobody asked to write to.
         self._loader.dataChanged.connect(self._maybe_autofill_working_dir)
+
+    def set_agent_mode(self, on: bool) -> None:
+        """Enable/disable the blocking-dialog bypass used when a control API
+        is driving this tab — see ``self._agent_mode``."""
+        self._agent_mode = bool(on)
+
+    def _warn_or_record(self, title: str, text: str, *, critical: bool = False) -> None:
+        """A blocking ``QMessageBox.warning``/``.critical`` in interactive
+        use; in agent mode, record the message instead so a control API can
+        report it as a structured error, with no dialog to hang on."""
+        if self._agent_mode:
+            self._last_agent_error = f"{title}: {text}"
+        elif critical:
+            QtWidgets.QMessageBox.critical(self, title, text)
+        else:
+            QtWidgets.QMessageBox.warning(self, title, text)
 
     def set_mask_from_tab1(self, mask: Optional[np.ndarray]):
         self._loader.set_tab1_mask(mask)
@@ -2147,14 +2170,14 @@ class CalibrationTab(QtWidgets.QWidget):
     def _run(self):
         self._image = self._source_image()
         if self._image is None:
-            QtWidgets.QMessageBox.warning(self, "No image", "Load a calibrant image first."); return
+            self._warn_or_record("No image", "Load a calibrant image first."); return
         if self._worker and self._worker.isRunning():
             return
         self._orphans = [o for o in self._orphans if o.isRunning()]   # drop finished ones
         # Dark / bright / background fields (from the loader)
         for sel in self._loader.has_pending_fields():
-            QtWidgets.QMessageBox.warning(
-                self, "Field not computed",
+            self._warn_or_record(
+                "Field not computed",
                 f"'{sel.title()}' is enabled but not computed. "
                 "Click 'Compute field' in that box first."); return
         self._dark = self._loader.dark()
@@ -2168,8 +2191,8 @@ class CalibrationTab(QtWidgets.QWidget):
 
         mode = self._pipeline.currentData()
         if mode == "frozen_point" and self._panel_grp.isChecked():
-            QtWidgets.QMessageBox.warning(
-                self, "Multi-panel not supported",
+            self._warn_or_record(
+                "Multi-panel not supported",
                 "'Frozen-point (high-tilt)' does not support Multi-panel "
                 "detectors yet. Uncheck 'Multi-panel' or choose a "
                 "different pipeline."); return
@@ -2185,8 +2208,7 @@ class CalibrationTab(QtWidgets.QWidget):
         try:
             scratch = scratch_dir(work_dir, run_id)
         except OSError as e:
-            QtWidgets.QMessageBox.critical(
-                self, "Working directory not writable", str(e))
+            self._warn_or_record("Working directory not writable", str(e), critical=True)
             return
 
         self._calib_cancelled = False
@@ -2499,7 +2521,11 @@ class CalibrationTab(QtWidgets.QWidget):
             return   # user aborted — ignore the late failure
         self._run_btn.setEnabled(True); self._abort_btn.setEnabled(False)
         self._prog.setVisible(False)
-        show_error(self, "Calibration failed", msg, log=self._log, log_prefix="\nERROR:\n")
+        if self._agent_mode:
+            self._last_agent_error = f"Calibration failed: {msg}"
+            self._log.append(f"\nERROR:\n{msg}")
+        else:
+            show_error(self, "Calibration failed", msg, log=self._log, log_prefix="\nERROR:\n")
 
     # ── Rings ──────────────────────────────────────────────────────
     # There is one overlay and it is always the accurate one. The old
