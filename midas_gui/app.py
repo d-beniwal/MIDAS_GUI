@@ -137,12 +137,21 @@ class MainWindow(QtWidgets.QMainWindow):
             self._control_server = control_server.ControlServer(self, log_fn=_log)
             if self._control_server.start():
                 self._view_tab.liveProfileUpdated.connect(self._on_live_profile_updated)
+                self._control_server.agentConnected.connect(self._on_agent_connected_changed)
             else:
                 self._control_server = None
 
     def _on_live_profile_updated(self, r_px, profile) -> None:
         self._control_server.broadcast_event(
             "radial_profile_updated", {"has_profile": r_px is not None})
+
+    def _on_agent_connected_changed(self, connected: bool) -> None:
+        """An agent connected to (or disconnected from) the control socket —
+        show/hide the header ribbon's high-visibility badge. Deliberately
+        tied to an actual connection, not just MIDAS_GUI_CONTROL=1 being set:
+        the socket can sit listening with nothing attached, which shouldn't
+        claim the GUI is under agent control."""
+        self._agent_control_lbl.setVisible(connected)
 
     def _resolve_and_start_live(self, prefix: str) -> None:
         resolved = bridge_server.resolve_pv(prefix, C.DEVICES)
@@ -207,17 +216,36 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_profile_combo()
         self._profile_combo.activated[str].connect(self._on_header_profile_changed)
 
-        # Active-project indicator, pinned to the opposite (top-right) corner
-        # of the same tab bar row — deliberately separate from the muted
-        # status-bar "Project: none" label (kept as-is), since this one needs
-        # to be prominent/high-contrast rather than a quiet status readout.
+        # Top-right corner: an "agent-controlled" badge (hidden until an
+        # agent is actually connected — see ControlServer.agentConnected /
+        # _on_agent_connected_changed below) beside the active-project
+        # indicator, deliberately separate from the muted status-bar
+        # "Project: none" label (kept as-is), since both of these need to be
+        # prominent/high-contrast rather than a quiet status readout.
+        right_corner = QtWidgets.QWidget()
+        right_row = QtWidgets.QHBoxLayout(right_corner)
+        right_row.setContentsMargins(0, 0, 0, 0)
+        right_row.setSpacing(10)
+
+        self._agent_control_lbl = QtWidgets.QLabel("\U0001f916 AGENT CONTROLLED")
+        agent_font = self._agent_control_lbl.font()
+        agent_font.setPointSize(agent_font.pointSize() + 2)
+        agent_font.setBold(True)
+        self._agent_control_lbl.setFont(agent_font)
+        self._agent_control_lbl.setStyleSheet(
+            "color: white; background-color: #ff3b30; padding: 2px 8px; "
+            "border-radius: 4px;")
+        self._agent_control_lbl.setVisible(False)
+        right_row.addWidget(self._agent_control_lbl)
+
         self._header_project_lbl = QtWidgets.QLabel("")
         proj_font = self._header_project_lbl.font()
         proj_font.setPointSize(proj_font.pointSize() + 2)
         proj_font.setBold(True)
         self._header_project_lbl.setFont(proj_font)
         self._header_project_lbl.setStyleSheet("color: #3ddc84; padding-right: 8px;")
-        tabs.setCornerWidget(self._header_project_lbl, QtCore.Qt.TopRightCorner)
+        right_row.addWidget(self._header_project_lbl)
+        tabs.setCornerWidget(right_corner, QtCore.Qt.TopRightCorner)
 
         # Build each tab in isolation: a single tab that fails on this platform
         # becomes an error placeholder instead of taking the whole window down.

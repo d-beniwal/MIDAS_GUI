@@ -112,6 +112,25 @@ class GuiController:
     def _cal(self):
         return self._win._cal_tab
 
+    # Namespace -> MainWindow attribute, for ensure_tab_visible below. Keeps
+    # "which attribute backs which tab" as GuiController's own domain
+    # knowledge rather than control_server.py's, even though the *call* to
+    # switch happens there (see that module's _handle_line).
+    _NAMESPACE_TABS = {"data_viewer": "_view_tab", "calibrate": "_cal_tab"}
+
+    def ensure_tab_visible(self, namespace: str) -> None:
+        """Bring the tab an op namespace operates on to the front, so a
+        human watching the GUI actually sees what the agent is doing instead
+        of it silently happening on a tab that isn't on screen — e.g.
+        starting a calibration run switches to the Calibrate tab. A no-op if
+        that tab is already showing (setCurrentWidget on the current widget
+        doesn't flicker/refocus)."""
+        attr = self._NAMESPACE_TABS.get(namespace)
+        tab_widget = getattr(self._win, attr, None) if attr else None
+        tabs = getattr(self._win, "_tabs", None)
+        if tab_widget is not None and tabs is not None:
+            tabs.setCurrentWidget(tab_widget)
+
     # ── dispatch ─────────────────────────────────────────────────────
     def dispatch(self, op: str, args: dict) -> dict:
         if not op:

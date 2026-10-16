@@ -55,6 +55,13 @@ DISCOVERY_FILE = Path.home() / ".midas_gui" / f"{SERVER_NAME}.sock_path"
 
 
 class ControlServer(QtCore.QObject):
+    #: Fires True on the first client connecting (agent control begins) and
+    #: False once the last one disconnects (agent control ends) — the signal
+    #: behind the header ribbon's "agent-controlled" badge in app.py. Not
+    #: just "the socket is listening": MIDAS_GUI_CONTROL=1 can be set with no
+    #: agent actually attached, which shouldn't claim control is active.
+    agentConnected = QtCore.pyqtSignal(bool)
+
     def __init__(self, main_window, log_fn=None, parent=None):
         super().__init__(parent)
         self._log = log_fn or (lambda _msg: None)
@@ -103,16 +110,21 @@ class ControlServer(QtCore.QObject):
         sock = self._server.nextPendingConnection()
         if sock is None:
             return
+        was_empty = not self._sockets
         self._sockets.append(sock)
         self._buffers[sock] = b""
         sock.readyRead.connect(lambda: self._on_data(sock))
         sock.disconnected.connect(lambda: self._on_disconnected(sock))
+        if was_empty:
+            self.agentConnected.emit(True)
 
     def _on_disconnected(self, sock) -> None:
         self._buffers.pop(sock, None)
         if sock in self._sockets:
             self._sockets.remove(sock)
         sock.deleteLater()
+        if not self._sockets:
+            self.agentConnected.emit(False)
 
     def _on_data(self, sock: QtNetwork.QLocalSocket) -> None:
         self._buffers[sock] = self._buffers.get(sock, b"") + bytes(sock.readAll())
@@ -133,6 +145,12 @@ class ControlServer(QtCore.QObject):
             self._reply(sock, {"id": req_id, "ok": False,
                                "error": {"message": str(e), "type": "malformed"}})
             return
+        # Bring the relevant tab to the front *before* dispatching, for both
+        # the sync and async paths below — a human watching should see what
+        # the agent is about to do, not have it happen off-screen on a tab
+        # that was never shown. Covers calibrate.wait/run_frozen_point_then_
+        # oneshot too, which bypass dispatch() below (see _ASYNC_OPS).
+        self.controller.ensure_tab_visible((op or "").split(".", 1)[0])
         if op in _ASYNC_OPS:
             self._dispatch_async(sock, req_id, op, args)
             return
