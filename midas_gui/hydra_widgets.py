@@ -621,6 +621,8 @@ class HydraLoaderPanel(QtWidgets.QWidget):
     def __init__(self, parent=None, *, mode="nav"):
         super().__init__(parent)
         self._mode = mode
+        self._pick_origin = None    # how the data was PICKED — see pick_origin()
+        self._pick_root = None      # the folder a traversal started from
         self._siblings: dict = {}
         self._detected: dict = {}        # last auto-detected pxY/wavelength_A (nav mode only)
         self._n_frames = 1
@@ -937,6 +939,17 @@ class HydraLoaderPanel(QtWidgets.QWidget):
                            if p.is_file())
         if not paths:
             return
+        # Same provenance DataLoaderPanel keeps, for the same reason: a
+        # recursive pick and a hand-picked set arrive here as one flat
+        # list, and the dark a run subtracts depends on which it was.
+        if dlg.mode() == "folder" and dlg.recursive():
+            self._pick_origin, self._pick_root = "folder_recursive", dlg.folder()
+        elif dlg.mode() == "folder":
+            self._pick_origin, self._pick_root = "folder", dlg.folder()
+        elif dlg.mode() == "file":
+            self._pick_origin, self._pick_root = "file", None
+        else:
+            self._pick_origin, self._pick_root = "files", None
         self.set_selection(paths)
 
     def set_selection(self, paths) -> None:
@@ -1243,6 +1256,51 @@ class HydraLoaderPanel(QtWidgets.QWidget):
 
     def current_path(self) -> str:
         return self._path_ed.text().strip()
+
+    def pick_origin(self) -> str:
+        """How the data was chosen — the same vocabulary
+        ``widgets.DataLoaderPanel.pick_origin`` uses, so ``dark_policy``
+        answers identically for Hydra and the single-detector tabs."""
+        from pathlib import Path as _P
+        if self._pick_origin:
+            return self._pick_origin
+        if len(self._selection) > 1:
+            return "files"
+        if self._selection:
+            return "file"
+        text = self._path_ed.text().strip()
+        try:
+            if text and _P(text).is_dir():
+                return "folder"
+        except OSError:
+            pass
+        return "file"
+
+    def dark_request(self, n: int, *, override=None):
+        """The dark question for ONE panel.
+
+        The panel scoping is the whole point. ``search_root`` is the
+        chosen folder with the panel token substituted, so picking
+        ``expid/ge1`` recursively searches ``expid/ge2`` for ge2's dark --
+        never ``expid/ge1``. Handing every panel the same root is exactly
+        how ge1's dark would end up on ge2 data, and that is the one
+        thing this must not do.
+
+        The explicit path is derived the same way, from the anchor the
+        user entered for whichever panel they happened to pick.
+        """
+        from midas_gui.dark_policy import DarkRequest, substitute_panel
+        sel = self._dark_sel
+        anchor = sel._path_ed.text().strip() or None
+        root = substitute_panel(self._pick_root, n) if self._pick_root else None
+        return DarkRequest(
+            origin=self.pick_origin(),
+            path=((substitute_panel(anchor, n) or anchor) if anchor else None),
+            dataset=(sel._dataset() or "exchange/data_dark"),
+            array=self.dark(n),
+            panel=int(n),
+            override=override,
+            search_root=root)
 
     def dark(self, n: int) -> Optional[np.ndarray]:
         return self._dark_sel.field(n)
