@@ -123,3 +123,81 @@ def test_a_plain_folder_pick_is_unchanged(app, tree):
     assert d.recursive() is False
     assert d.paths() == []
     assert d.folder() == str(tree)
+
+
+# ── the pick's provenance survives the flattening ────────────────────────
+
+def test_a_traversal_and_a_hand_picked_set_are_told_apart(app, tree):
+    """The regression this exists to prevent.
+
+    Recursion turns a folder pick into an explicit file list, so a
+    recursive "Full folder" pick and a hand-made "Multiple files" pick
+    arrive downstream as the SAME flat list. Nothing could tell them
+    apart — and the dark a run subtracts depends on which it was
+    (``dark_policy``: a traversal resolves a dark per file, an explicit
+    pick uses the Dark field). Same files, different answer.
+    """
+    from midas_gui import dark_policy as D
+    from midas_gui.widgets import DataLoaderPanel
+    paths = _find_frame_files(str(tree), recursive=True)
+
+    walked = DataLoaderPanel(mode="stream")
+    walked._set_explicit_paths(paths, origin="folder_recursive")
+    picked = DataLoaderPanel(mode="stream")
+    picked._set_explicit_paths(paths, origin="files")
+
+    assert walked.source_cfg()["paths"] == picked.source_cfg()["paths"]
+    assert walked.pick_origin() == "folder_recursive"
+    assert picked.pick_origin() == "files"
+    assert D.wants_auto(D.DarkRequest(origin=walked.pick_origin()))
+    assert not D.wants_auto(D.DarkRequest(origin=picked.pick_origin()))
+
+
+def test_the_origin_survives_a_state_round_trip(app, tree):
+    """A reloaded project that kept the file list but forgot the traversal
+    would silently drop to the Dark field for every file."""
+    from midas_gui.widgets import DataLoaderPanel
+    paths = _find_frame_files(str(tree), recursive=True)
+    src = DataLoaderPanel(mode="stream")
+    src._set_explicit_paths(paths, origin="folder_recursive")
+
+    dst = DataLoaderPanel(mode="stream")
+    dst.set_state(src.get_state())
+    assert dst.pick_origin() == "folder_recursive"
+
+
+def test_a_typed_path_is_classified_rather_than_guessed(app, tree):
+    """Typing a path into the box records no provenance, so it is
+    classified on read — a directory is a flat folder pick, not a
+    traversal."""
+    from midas_gui.widgets import DataLoaderPanel
+    p = DataLoaderPanel(mode="stream")
+    p._path_ed.setText(str(tree / "load_step_0"))
+    assert p.pick_origin() == "folder"
+    p._path_ed.setText(str(tree / "load_step_0" / "scan_0_0000.tif"))
+    assert p.pick_origin() == "file"
+
+
+def test_a_recursive_pick_does_not_feed_darks_in_as_data(app, tmp_path):
+    """Folder and stem picks strip dark-named files; that filter used to
+    be keyed on "raw is not a list", and a recursive pick resolves to a
+    list — so the one pick most likely to sweep up a scan's own
+    dark_before files was the one that escaped it."""
+    from midas_gui.widgets import DataLoaderPanel
+    d = tmp_path / "scan"
+    d.mkdir()
+    for n in ("scan_0001.tif", "scan_dark_before_0000.tif", "scan_0002.tif"):
+        (d / n).write_bytes(b"")
+    paths = _find_frame_files(str(tmp_path), recursive=True)
+    assert len(paths) == 3, paths
+
+    walked = DataLoaderPanel(mode="stream")
+    walked._set_explicit_paths(paths, origin="folder_recursive")
+    kept = walked.source_cfg()["paths"]
+    assert all("dark" not in p for p in kept), kept
+    assert len(kept) == 2
+
+    picked = DataLoaderPanel(mode="stream")
+    picked._set_explicit_paths(paths, origin="files")
+    assert len(picked.source_cfg()["paths"]) == 3, \
+        "naming a dark by hand is a deliberate choice and must be honoured"

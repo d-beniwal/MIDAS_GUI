@@ -25,7 +25,9 @@ def test_stem_filter_becomes_glob_pattern_in_source_cfg():
     W, _app = _make_app_and_module()
     panel = W.DataLoaderPanel(mode="stream")
     panel._set_stem_filter("/tmp/x", "scan_")
-    assert panel.source_cfg() == {"type": "tiff_glob", "path": "/tmp/x/**/scan_*"}
+    assert panel.source_cfg() == {"type": "tiff_glob",
+                                  "path": "/tmp/x/**/scan_*",
+                                  "pick_origin": "stem"}
 
 
 def test_explicit_multi_file_pick_becomes_tiff_list():
@@ -33,14 +35,16 @@ def test_explicit_multi_file_pick_becomes_tiff_list():
     panel = W.DataLoaderPanel(mode="stream")
     paths = ["/tmp/x/a.tif", "/tmp/x/b.tif"]
     panel._set_explicit_paths(paths)
-    assert panel.source_cfg() == {"type": "tiff_list", "paths": paths}
+    assert panel.source_cfg() == {"type": "tiff_list", "paths": paths,
+                                  "pick_origin": "files"}
 
 
 def test_plain_folder_is_still_tiff_glob():
     W, _app = _make_app_and_module()
     panel = W.DataLoaderPanel(mode="stream")
     panel._path_ed.setText("/tmp/x")
-    assert panel.source_cfg() == {"type": "tiff_glob", "path": "/tmp/x"}
+    assert panel.source_cfg() == {"type": "tiff_glob", "path": "/tmp/x",
+                                  "pick_origin": "file"}
 
 
 def test_checking_dark_prefills_from_data_path():
@@ -200,12 +204,14 @@ def test_manual_edit_clears_stem_filter_and_explicit_paths():
     panel._set_stem_filter("/tmp/x", "scan_")
     panel._path_ed.setText("/tmp/y")   # a real user edit, not a Browse… pick
     assert panel._stem_filter is None
-    assert panel.source_cfg() == {"type": "tiff_glob", "path": "/tmp/y"}
+    assert panel.source_cfg() == {"type": "tiff_glob", "path": "/tmp/y",
+                                  "pick_origin": "file"}
 
     panel._set_explicit_paths(["/tmp/x/a.tif"])
     panel._path_ed.setText("/tmp/z")
     assert panel._explicit_paths is None
-    assert panel.source_cfg() == {"type": "tiff_glob", "path": "/tmp/z"}
+    assert panel.source_cfg() == {"type": "tiff_glob", "path": "/tmp/z",
+                                  "pick_origin": "file"}
 
 
 def test_info_label_reports_filestem_and_file_count(tmp_path):
@@ -232,7 +238,9 @@ def test_stem_filter_roundtrips_through_get_set_state():
     restored = W.DataLoaderPanel(mode="stream")
     restored.set_state(state)
     assert restored._stem_filter == "scan_"
-    assert restored.source_cfg() == {"type": "tiff_glob", "path": "/tmp/x/**/scan_*"}
+    assert restored.source_cfg() == {"type": "tiff_glob",
+                                     "path": "/tmp/x/**/scan_*",
+                                     "pick_origin": "stem"}
 
 
 def test_explicit_tiff_source_reads_paths_in_order(tmp_path):
@@ -406,7 +414,8 @@ def test_unify_combine_off_by_default_matches_plain_panel():
     default = W.DataLoaderPanel(mode="stream", unify_combine=False)
     for panel in (plain, default):
         panel._path_ed.setText("/tmp/x")
-        assert panel.source_cfg() == {"type": "tiff_glob", "path": "/tmp/x"}
+        assert panel.source_cfg() == {"type": "tiff_glob", "path": "/tmp/x",
+                                  "pick_origin": "file"}
         assert not panel._unify_combine
 
 
