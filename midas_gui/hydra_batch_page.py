@@ -2377,7 +2377,12 @@ class HydraBatchPage(QtWidgets.QWidget):
             run_mode=self._frame_run_mode.currentData(), n_workers=self._n_workers.value(),
             multi_azimuth=self._multi_azimuth_chk.isChecked(),
             ion_csv_extras=list(self._ion_csv_extras()),
-            zarr_grouping=self._zarr_grouping.currentData() or "run")
+            zarr_grouping=self._zarr_grouping.currentData() or "run",
+            # PER PANEL. The request's search_root and explicit path both
+            # carry the panel token, so ge2 looks for ge2's dark in ge2's
+            # tree — applying ge1's dark to ge2 data is the one thing this
+            # must never do.
+            dark_request=self._loader.dark_request(n))
         worker.progress.connect(lambda done, total, n=n: self._cards[n].set_progress(done, total))
         worker.frame_done.connect(
             lambda fid, r_ax, prof, sigma, n=n: self._on_frame(n, fid, r_ax, prof, sigma))

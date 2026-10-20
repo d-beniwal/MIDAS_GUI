@@ -326,3 +326,30 @@ def test_the_frame_check_is_a_veto_not_a_classifier():
     weak = flat.copy()
     weak[20, :] += 2.0
     assert not H(weak)
+
+
+# ── Hydra: one panel's pick, every panel's own dark ─────────────────────
+
+def test_a_panel_request_is_scoped_to_that_panel_s_own_tree():
+    """The one thing Hydra must never do.
+
+    Picking expid/ge1 recursively must search expid/ge2 for ge2's dark.
+    Handing every panel the same search root is precisely how ge1's dark
+    ends up subtracted from ge2 data, and the panels are different
+    detectors with different offsets.
+    """
+    from midas_gui.dark_policy import substitute_panel
+    root = "/data/white_oct26/ge1"
+    assert substitute_panel(root, 2) == "/data/white_oct26/ge2"
+    assert substitute_panel(root, 4) == "/data/white_oct26/ge4"
+    anchor = "/data/white_oct26/ge1/Darks/Darks_005787.ge1.h5"
+    assert substitute_panel(anchor, 3) == \
+        "/data/white_oct26/ge3/Darks/Darks_005787.ge3.h5"
+
+
+def test_a_root_with_no_panel_token_scopes_to_nothing_rather_than_sharing():
+    """A pick that is not panel-specific (expid/, say) gives no per-panel
+    root. Returning the shared root instead would silently let every panel
+    search every other panel's folders."""
+    from midas_gui.dark_policy import substitute_panel
+    assert substitute_panel("/data/white_oct26", 2) is None
