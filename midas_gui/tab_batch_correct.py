@@ -930,10 +930,38 @@ class BatchCorrectionTab(QtWidgets.QWidget):
     def _on_finished(self, outputs):
         self._running = False
         self._prog.setVisible(False)
+        self._report_dark_skips(getattr(self._worker, "dark_skipped", ()))
         self._emit(f"Done — {len(outputs)} file(s) written.")
         self._close_screen_log()
         self._status.setText(f"Done — {len(outputs)} file(s) written.")
         self._refresh_enabled()
+
+    def _report_dark_skips(self, skipped):
+        """Say, loudly, which files ran without being corrected.
+
+        A skip is the deliberate outcome when no valid dark exists --
+        correcting a file with another scan's dark is the error the
+        policy prevents -- but that is only defensible if it is visible.
+        Mailed when an address is set (Preferences), always in the log.
+        """
+        skipped = list(skipped or ())
+        if not skipped:
+            return
+        from midas_gui import settings
+        from midas_gui.mail import dark_skip_report, send_mail
+        self._emit(f"{len(skipped)} file(s) SKIPPED — no valid dark:")
+        for path, why in skipped[:20]:
+            self._emit(f"    {path}: {why}")
+        if len(skipped) > 20:
+            self._emit(f"    ... and {len(skipped) - 20} more.")
+        try:
+            addr = settings.get_notify_email()
+        except Exception:
+            addr = ""
+        if addr:
+            subject, body = dark_skip_report(skipped, context="Batch Correction")
+            if send_mail(subject, body, addr):
+                self._emit(f"Skip report sent to {addr}.")
 
     def _on_failed(self, err):
         self._running = False

@@ -2709,7 +2709,36 @@ class BatchTab(QtWidgets.QWidget):
         except Exception as exc:
             self._log.append(f"[batch] Could not archive the job log: {exc}")
 
+    def _report_dark_skips(self, skipped):
+        """Say, loudly, which sources ran without being integrated.
+
+        Mirrors tab_batch_correct._report_dark_skips: a skip is the
+        deliberate outcome when no valid dark exists, and is only
+        defensible if it is visible. Mailed when an address is set in
+        Preferences, always written to the log.
+        """
+        skipped = list(skipped or ())
+        if not skipped:
+            return
+        from midas_gui import settings
+        from midas_gui.mail import dark_skip_report, send_mail
+        self._log.append(f"[batch] {len(skipped)} source(s) SKIPPED — "
+                         f"no valid dark:")
+        for path, why in skipped[:20]:
+            self._log.append(f"[batch]     {path}: {why}")
+        if len(skipped) > 20:
+            self._log.append(f"[batch]     ... and {len(skipped) - 20} more.")
+        try:
+            addr = settings.get_notify_email()
+        except Exception:
+            addr = ""
+        if addr:
+            subject, body = dark_skip_report(skipped, context="Batch Integrate")
+            if send_mail(subject, body, addr):
+                self._log.append(f"[batch] Skip report sent to {addr}.")
+
     def _on_done(self, data):
+        self._report_dark_skips(getattr(self._worker, "dark_skipped", ()))
         tally = self._group_tally
         if tally is not None:
             tally["done"] += 1

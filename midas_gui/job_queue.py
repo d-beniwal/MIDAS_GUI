@@ -267,14 +267,8 @@ def send_job_notification(job: "Job", address: str, *, _runner=None) -> bool:
         body += ["", f"Last {len(errs)} line(s) mentioning an error:"] + \
                 [f"  {e}" for e in errs]
     subject = f"MIDAS job {job.status}: {job.name}"
-    runner = _runner or subprocess.run
-    try:
-        runner(["mail", "-s", subject, address],
-               input="\n".join(body) + "\n", text=True,
-               timeout=30, capture_output=True)
-        return True
-    except Exception:
-        return False
+    from midas_gui.mail import send_mail
+    return send_mail(subject, body, address, _runner=_runner)
 
 
 class JobQueuePanel(QtWidgets.QWidget):
