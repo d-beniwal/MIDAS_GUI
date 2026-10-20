@@ -21,6 +21,22 @@ N_RAW = 12          # raw sub-frames per input file
 DARK_LEVEL = 10.0
 
 
+def _dark_stack(level, n=2, shape=SHAPE):
+    """A dark stack averaging to ``level`` but NOT a constant plane.
+
+    ``frame_correct.is_degenerate_dark`` rejects a constant plane as a
+    placeholder rather than a measurement, so an ``np.full`` dark is no
+    longer resolvable -- and a fixture built from one would quietly stop
+    testing dark subtraction at all while still passing some assertions.
+    The ripple is deterministic and mean-zero, so every arithmetic
+    expectation below is unchanged on the MEAN of the output plane.
+    """
+    ramp = np.linspace(-0.5, 0.5, int(np.prod(shape)),
+                       dtype=np.float32).reshape(shape)
+    ramp -= ramp.mean()
+    return np.full((n,) + shape, float(level), np.float32) + ramp[None, ...]
+
+
 @pytest.fixture(scope="module")
 def app():
     QtWidgets = pytest.importorskip("PyQt5.QtWidgets")
@@ -37,8 +53,7 @@ def _make_file(path, *, n=N_RAW, base=0.0, with_dark=True, meta=True):
     with h5py.File(str(path), "w") as f:
         f.create_dataset("exchange/data", data=data)
         if with_dark:
-            f.create_dataset("exchange/data_dark",
-                             data=np.full((2,) + SHAPE, DARK_LEVEL, np.float32))
+            f.create_dataset("exchange/data_dark", data=_dark_stack(DARK_LEVEL))
         if meta:
             # One sample per acquisition: n lights then n darks, as the real
             # files do — the light/dark split is what `n_aligned` recovers.
@@ -185,7 +200,8 @@ def test_sum_loses_one_dark_per_sub_frame(app, inputs, tmp_path):
     got = _run_worker(inputs, tmp_path / "out", app, chunk_size=4, op="sum",
                       clip_negatives=False)
     # File 1 is based at 100, so chunk 0 = 100,101,102,103 → 406, −4×10 = 366.
-    assert np.allclose(_read(got["outputs"][1])[0], 406.0 - 4 * DARK_LEVEL)
+    assert np.allclose(_read(got["outputs"][1])[0].mean(),
+                       406.0 - 4 * DARK_LEVEL)
 
 
 def test_unclipped_output_keeps_negative_pixels(app, inputs, tmp_path):
@@ -244,14 +260,13 @@ def test_sibling_dark_before_is_preferred_and_logged(app, tmp_path):
     import h5py
     folder.mkdir(parents=True)
     with h5py.File(str(folder / "scan_dark_before_000009.vrx.h5"), "w") as f:
-        f.create_dataset("exchange/data_dark",
-                         data=np.full((2,) + SHAPE, 40.0, np.float32))
+        f.create_dataset("exchange/data_dark", data=_dark_stack(40.0))
     data = _make_file(folder / "scan_000010.vrx.h5", base=1000.0)
     got = _run_worker([data], tmp_path / "out", app, chunk_size=None, op="mean",
                       clip_negatives=False)
     # Mean of 1000..1011 is 1005.5; the sibling dark (40) must win over the
     # file's own internal dark (10).
-    assert np.allclose(_read(got["outputs"][0])[0], 1005.5 - 40.0)
+    assert np.allclose(_read(got["outputs"][0])[0].mean(), 1005.5 - 40.0)
     assert any("dark_before_000009" in m for m in got["log"])
 
 
@@ -663,7 +678,7 @@ def test_preview_reduces_only_the_first_chunk(tab, inputs):
     assert tab._preview_raw is not None
     assert tab._preview_raw.shape == SHAPE
     # Sub-frames 0..3 → mean 1.5, internal dark 10.
-    assert np.allclose(tab._preview_raw, 1.5 - DARK_LEVEL)
+    assert np.allclose(tab._preview_raw.mean(), 1.5 - DARK_LEVEL)
 
 
 # ── folder mode: uneven sub-frame counts ────────────────────────────────

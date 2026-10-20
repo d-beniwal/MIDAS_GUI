@@ -47,8 +47,22 @@ def _write_vrx(path: Path, *, data=None, dark=None, shape=(4, 5)):
     return path
 
 
-def _const(value, n=2, shape=(4, 5)):
-    return np.full((n,) + shape, float(value), dtype=np.float32)
+def _plane(value, n=2, shape=(4, 5)):
+    """A dark/data stack whose mean plane averages to ``value`` but is NOT
+    constant.
+
+    The ripple is not decoration. ``frame_correct.is_degenerate_dark``
+    rejects a constant plane as a placeholder rather than a measurement --
+    a real detector dark has spatial structure -- so a fixture built from
+    ``np.full`` would be rejected by the very rule it is meant to exercise,
+    and would stop being evidence about the ladder at all. Deterministic,
+    mean-zero, so ``arr.mean()`` still identifies which dark was picked.
+    """
+    ramp = np.linspace(-0.5, 0.5, int(np.prod(shape)),
+                       dtype=np.float32).reshape(shape)
+    ramp -= ramp.mean()
+    return (np.full((n,) + shape, float(value), dtype=np.float32)
+            + ramp[None, ...])
 
 
 # ── 1. the ladder, rung by rung ──────────────────────────────────────────────
@@ -69,58 +83,58 @@ def test_nearest_preceding_dark_before_wins(tmp_path):
     the right dark for file N is the most recent one before it — NOT the
     scan's first."""
     for n in (10, 30):
-        _write_vrx(tmp_path / f"scan_{n:06d}_dark_before.vrx.h5", dark=_const(n))
+        _write_vrx(tmp_path / f"scan_{n:06d}_dark_before.vrx.h5", dark=_plane(n))
     # Name them the way the beamline does: <froot>_dark_before_<N>.
     for p in tmp_path.glob("*"):
         p.unlink()
-    _write_vrx(tmp_path / "scan_dark_before_000010.vrx.h5", dark=_const(1.0))
-    _write_vrx(tmp_path / "scan_dark_before_000030.vrx.h5", dark=_const(7.0))
-    data = _write_vrx(tmp_path / "scan_000035.vrx.h5", data=_const(100.0))
+    _write_vrx(tmp_path / "scan_dark_before_000010.vrx.h5", dark=_plane(1.0))
+    _write_vrx(tmp_path / "scan_dark_before_000030.vrx.h5", dark=_plane(7.0))
+    data = _write_vrx(tmp_path / "scan_000035.vrx.h5", data=_plane(100.0))
 
     arr, why = resolve_dark(data, dark_dataset=DARK_DS, shape=(4, 5))
-    assert np.allclose(arr, 7.0), "took the first dark of the scan, not the nearest"
+    assert np.allclose(arr.mean(), 7.0), "took the first dark of the scan, not the nearest"
     assert "dark_before_000030" in why
 
 
 def test_dark_after_used_when_no_dark_precedes(tmp_path):
-    _write_vrx(tmp_path / "scan_dark_after_000050.vrx.h5", dark=_const(3.0))
-    data = _write_vrx(tmp_path / "scan_000020.vrx.h5", data=_const(100.0))
+    _write_vrx(tmp_path / "scan_dark_after_000050.vrx.h5", dark=_plane(3.0))
+    data = _write_vrx(tmp_path / "scan_000020.vrx.h5", data=_plane(100.0))
     arr, why = resolve_dark(data, dark_dataset=DARK_DS, shape=(4, 5))
-    assert np.allclose(arr, 3.0) and "dark_after" in why
+    assert np.allclose(arr.mean(), 3.0) and "dark_after" in why
 
 
 def test_own_data_dark_when_no_sibling(tmp_path):
     """The self-dark convention — 102 of the 160 folders on disk use it."""
     data = _write_vrx(tmp_path / "scan_000020.vrx.h5",
-                      data=_const(100.0), dark=_const(5.0))
+                      data=_plane(100.0), dark=_plane(5.0))
     arr, why = resolve_dark(data, dark_dataset=DARK_DS, shape=(4, 5))
-    assert np.allclose(arr, 5.0) and "own" in why
+    assert np.allclose(arr.mean(), 5.0) and "own" in why
 
 
 def test_sibling_outranks_own_data_dark(tmp_path):
     """Both present: the explicitly-acquired bracketing dark wins, which is
     what the legacy pipeline did in every log that had one."""
-    _write_vrx(tmp_path / "scan_dark_before_000019.vrx.h5", dark=_const(2.0))
+    _write_vrx(tmp_path / "scan_dark_before_000019.vrx.h5", dark=_plane(2.0))
     data = _write_vrx(tmp_path / "scan_000020.vrx.h5",
-                      data=_const(100.0), dark=_const(5.0))
+                      data=_plane(100.0), dark=_plane(5.0))
     arr, _why = resolve_dark(data, dark_dataset=DARK_DS, shape=(4, 5))
-    assert np.allclose(arr, 2.0)
+    assert np.allclose(arr.mean(), 2.0)
 
 
 def test_prefixed_dark_outranks_folder_level_dark(tmp_path):
-    _write_vrx(tmp_path / "dark_before_000019.vrx.h5", dark=_const(9.0))
-    _write_vrx(tmp_path / "scan_dark_before_000018.vrx.h5", dark=_const(2.0))
-    data = _write_vrx(tmp_path / "scan_000020.vrx.h5", data=_const(100.0))
+    _write_vrx(tmp_path / "dark_before_000019.vrx.h5", dark=_plane(9.0))
+    _write_vrx(tmp_path / "scan_dark_before_000018.vrx.h5", dark=_plane(2.0))
+    data = _write_vrx(tmp_path / "scan_000020.vrx.h5", data=_plane(100.0))
     arr, why = resolve_dark(data, dark_dataset=DARK_DS, shape=(4, 5))
-    assert np.allclose(arr, 2.0), why
+    assert np.allclose(arr.mean(), 2.0), why
 
 
 def test_bare_folder_level_dark_is_still_found(tmp_path):
     """The one ``Dark root : dark_before`` outlier in the log corpus."""
-    _write_vrx(tmp_path / "dark_before_000019.vrx.h5", dark=_const(9.0))
-    data = _write_vrx(tmp_path / "scan_000020.vrx.h5", data=_const(100.0))
+    _write_vrx(tmp_path / "dark_before_000019.vrx.h5", dark=_plane(9.0))
+    data = _write_vrx(tmp_path / "scan_000020.vrx.h5", data=_plane(100.0))
     arr, _why = resolve_dark(data, dark_dataset=DARK_DS, shape=(4, 5))
-    assert np.allclose(arr, 9.0)
+    assert np.allclose(arr.mean(), 9.0)
 
 
 @pytest.mark.parametrize("odd", ["scan_real_dark_before_000019.vrx.h5",
@@ -129,53 +143,119 @@ def test_real_and_repeat_dark_variants_are_matched(tmp_path, odd):
     """``_real_dark_before`` / ``_repeat_dark_before`` — the other two log
     outliers. They rank as a plain dark (no ``dark_before`` direction match
     on the froot split), but they must still be FOUND."""
-    _write_vrx(tmp_path / odd, dark=_const(4.0))
-    data = _write_vrx(tmp_path / "scan_000020.vrx.h5", data=_const(100.0))
+    _write_vrx(tmp_path / odd, dark=_plane(4.0))
+    data = _write_vrx(tmp_path / "scan_000020.vrx.h5", data=_plane(100.0))
     arr, _why = resolve_dark(data, dark_dataset=DARK_DS, shape=(4, 5))
-    assert np.allclose(arr, 4.0)
+    assert np.allclose(arr.mean(), 4.0)
 
 
 def test_wrong_shape_sibling_falls_through_to_the_next_rung(tmp_path):
     _write_vrx(tmp_path / "scan_dark_before_000019.vrx.h5",
                dark=np.zeros((2, 9, 9), np.float32))
     data = _write_vrx(tmp_path / "scan_000020.vrx.h5",
-                      data=_const(100.0), dark=_const(5.0))
+                      data=_plane(100.0), dark=_plane(5.0))
     arr, why = resolve_dark(data, dark_dataset=DARK_DS, shape=(4, 5))
-    assert np.allclose(arr, 5.0), why
+    assert np.allclose(arr.mean(), 5.0), why
+
+
+# ── degenerate planes: a placeholder must not beat the user's own dark ──
+
+def test_an_all_zero_self_dark_falls_through_to_the_loader_field(tmp_path):
+    """The white_oct26 bug, in miniature.
+
+    Every raw file in that experiment carries an exchange/data_dark of
+    2048x2048 zeros. _mean_dark checked only ndim/size/shape, so rung 2
+    returned it as a valid dark -- and because a successful rung never
+    falls through, the Dark field the user had actually chosen was never
+    reached. The whole experiment was corrected with a dark of zero and
+    nothing said so.
+    """
+    data = _write_vrx(tmp_path / "scan_000020.vrx.h5", data=_plane(100.0),
+                      dark=np.zeros((2, 4, 5), np.float32))
+    arr, why = resolve_dark(data, dark_dataset=DARK_DS, shape=(4, 5),
+                            fallback=np.full((4, 5), 6.0, np.float32))
+    assert np.allclose(arr.mean(), 6.0), why
+    assert "loader" in why.lower()
+
+
+def test_a_constant_self_dark_falls_through_too(tmp_path):
+    """A uniform non-zero plane is as unphysical as a zero one -- a real
+    GE panel's offset has tens of counts of spatial structure -- and is
+    what a half-written placeholder looks like."""
+    data = _write_vrx(tmp_path / "scan_000020.vrx.h5", data=_plane(100.0),
+                      dark=np.full((2, 4, 5), 1755.0, np.float32))
+    arr, why = resolve_dark(data, dark_dataset=DARK_DS, shape=(4, 5),
+                            fallback=np.full((4, 5), 6.0, np.float32))
+    assert np.allclose(arr.mean(), 6.0), why
+
+
+def test_an_empty_dark_stack_is_not_an_all_nan_dark(tmp_path):
+    """average_field on a (0, H, W) stack means over an empty axis and
+    returns an all-NaN plane of the right shape and ndim. It passed every
+    check here, and would have turned every corrected frame into NaN."""
+    data = _write_vrx(tmp_path / "scan_000020.vrx.h5", data=_plane(100.0),
+                      dark=np.zeros((0, 4, 5), np.float32))
+    arr, why = resolve_dark(data, dark_dataset=DARK_DS, shape=(4, 5),
+                            fallback=np.full((4, 5), 6.0, np.float32))
+    assert arr is not None and np.isfinite(arr).all(), why
+    assert np.allclose(arr.mean(), 6.0)
+
+
+def test_a_degenerate_sibling_does_not_mask_a_good_one(tmp_path):
+    """Falling through must reach the next SIBLING, not jump to rung 2 --
+    the nearest dark_before being a placeholder is not a reason to prefer
+    the file's own dark over a real dark_before further away."""
+    _write_vrx(tmp_path / "scan_dark_before_000019.vrx.h5",
+               dark=np.zeros((2, 4, 5), np.float32))
+    _write_vrx(tmp_path / "scan_dark_before_000010.vrx.h5", dark=_plane(3.0))
+    data = _write_vrx(tmp_path / "scan_000020.vrx.h5", data=_plane(100.0),
+                      dark=_plane(5.0))
+    arr, why = resolve_dark(data, dark_dataset=DARK_DS, shape=(4, 5))
+    assert np.allclose(arr.mean(), 3.0), why
+    assert "dark_before_000010" in why
+
+
+def test_is_degenerate_dark_accepts_a_real_looking_plane():
+    from midas_gui.frame_correct import is_degenerate_dark
+    assert not is_degenerate_dark(_plane(1755.0)[0])
+    assert is_degenerate_dark(np.zeros((4, 5), np.float32))
+    assert is_degenerate_dark(np.full((4, 5), 7.0, np.float32))
+    assert is_degenerate_dark(np.full((4, 5), np.nan, np.float32))
+    assert is_degenerate_dark(np.array([[1.0, np.inf]], np.float32))
 
 
 def test_loader_fallback_used_when_nothing_else_resolves(tmp_path):
-    data = _write_vrx(tmp_path / "scan_000020.vrx.h5", data=_const(100.0))
+    data = _write_vrx(tmp_path / "scan_000020.vrx.h5", data=_plane(100.0))
     arr, why = resolve_dark(data, dark_dataset=DARK_DS, shape=(4, 5),
                             fallback=np.full((4, 5), 6.0, np.float32))
-    assert np.allclose(arr, 6.0) and "loader" in why.lower()
+    assert np.allclose(arr.mean(), 6.0) and "loader" in why.lower()
 
 
 def test_mismatched_loader_fallback_is_skipped_and_said_so(tmp_path):
-    data = _write_vrx(tmp_path / "scan_000020.vrx.h5", data=_const(100.0))
+    data = _write_vrx(tmp_path / "scan_000020.vrx.h5", data=_plane(100.0))
     arr, why = resolve_dark(data, dark_dataset=DARK_DS, shape=(4, 5),
                             fallback=np.zeros((9, 9), np.float32))
     assert arr is None and "skipped" in why
 
 
 def test_no_dark_anywhere_is_reported_not_raised(tmp_path):
-    data = _write_vrx(tmp_path / "scan_000020.vrx.h5", data=_const(100.0))
+    data = _write_vrx(tmp_path / "scan_000020.vrx.h5", data=_plane(100.0))
     arr, why = resolve_dark(data, dark_dataset=DARK_DS, shape=(4, 5))
     assert arr is None and why == NO_DARK
 
 
 def test_auto_off_ignores_siblings_entirely(tmp_path):
-    _write_vrx(tmp_path / "scan_dark_before_000019.vrx.h5", dark=_const(2.0))
-    data = _write_vrx(tmp_path / "scan_000020.vrx.h5", data=_const(100.0))
+    _write_vrx(tmp_path / "scan_dark_before_000019.vrx.h5", dark=_plane(2.0))
+    data = _write_vrx(tmp_path / "scan_000020.vrx.h5", data=_plane(100.0))
     arr, why = resolve_dark(data, dark_dataset=DARK_DS, shape=(4, 5), auto=False,
                             fallback=np.full((4, 5), 6.0, np.float32))
-    assert np.allclose(arr, 6.0) and "loader" in why.lower()
+    assert np.allclose(arr.mean(), 6.0) and "loader" in why.lower()
 
 
 def test_candidate_order_is_stable_regardless_of_directory_order(tmp_path):
     for n in (5, 12, 19):
-        _write_vrx(tmp_path / f"scan_dark_before_{n:06d}.vrx.h5", dark=_const(n))
-    data = _write_vrx(tmp_path / "scan_000020.vrx.h5", data=_const(100.0))
+        _write_vrx(tmp_path / f"scan_dark_before_{n:06d}.vrx.h5", dark=_plane(n))
+    data = _write_vrx(tmp_path / "scan_000020.vrx.h5", data=_plane(100.0))
     first = [p.name for p, _ in dark_candidates(data)]
     assert first == sorted(first, key=lambda n: -split_scan_name(n).num)
     assert first[0].endswith("000019.vrx.h5")
