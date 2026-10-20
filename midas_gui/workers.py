@@ -1054,6 +1054,26 @@ class ProjectionWorker(QtCore.QThread):
             self.failed.emit(traceback.format_exc())
 
 
+def _resolve_dark_for(path, shape, request, *, dark_dataset, fallback, auto):
+    """One dark decision, shared by Batch Correction and Batch Integrate.
+
+    ``request`` is a ``dark_policy.DarkRequest`` from
+    ``DataLoaderPanel.dark_request()``; the exposure is filled in here
+    because it belongs to the file being corrected, not to the selection.
+    ``request`` None keeps the pre-policy behaviour (``resolve_dark``
+    directly) so a bare-constructed worker in a test still works.
+    """
+    from midas_gui.dark_policy import DarkChoice, resolve
+    from midas_gui.frame_correct import acquisition_exposure, resolve_dark
+    if request is None:
+        arr, why = resolve_dark(path, dark_dataset=dark_dataset, shape=shape,
+                                fallback=fallback, auto=auto)
+        return DarkChoice(arr, why)
+    import dataclasses
+    req = dataclasses.replace(request, exposure=acquisition_exposure(path))
+    return resolve(path, req, shape=shape)
+
+
 class BatchCorrectionWorker(QtCore.QThread):
     """Reduce every selected HDF5 file's sub-frame stack and write the result
     back out as HDF5 — the engine of the Batch Correction tab.
@@ -1101,9 +1121,18 @@ class BatchCorrectionWorker(QtCore.QThread):
                  out_dtype: str = "float32",
                  ion_csv_extras=(),
                  raw_start=None, raw_end=None, write_monitor_csvs: bool = True,
+                 dark_request=None,
                  parent=None):
         super().__init__(parent)
         self._paths = [Path(p) for p in paths]
+        # dark_policy.DarkRequest, or None to keep the pre-policy ladder
+        # call. The GUI always supplies one; a bare-constructed worker in a
+        # test need not.
+        self._dark_request = dark_request
+        #: [(path, why)] for files autodetect could not find a dark for.
+        #: They are NOT corrected with someone else's dark — see
+        #: dark_policy — so the caller must report them.
+        self.dark_skipped = []
         self._dataset, self._out_dataset = dataset, out_dataset
         self._chunk_size = chunk_size
         # Accept a bare string or a list, so a single-op caller reads the
@@ -1293,10 +1322,18 @@ class BatchCorrectionWorker(QtCore.QThread):
                     # frame_correct.resolve_dark for the ladder and the real
                     # data it was derived from. `why` is logged so the choice
                     # can be audited afterwards instead of trusted.
-                    dark, why = resolve_dark(
-                        path, dark_dataset=self._dark_dataset, shape=shape,
+                    choice = _resolve_dark_for(
+                        path, shape, self._dark_request,
+                        dark_dataset=self._dark_dataset,
                         fallback=self._dark, auto=self._auto_dark)
+                    dark, why = choice.array, choice.why
                     self.progress.emit(done, total, f"{path.name}: dark = {why}")
+                    if choice.skipped:
+                        # Autodetect could not find this file's dark. Not a
+                        # fallback: correcting it with another scan's dark
+                        # is the error the policy exists to prevent.
+                        self.dark_skipped.append((str(path), why))
+                        continue
                     n_aligned = _HDF5StackGlobSource._metadata_frame_count(f, n_raw)
                     for lo, hi in ranges:
                         if self._cancel:
@@ -2219,8 +2256,13 @@ class BatchWorker(QtCore.QThread):
                  dark=None, bright=None, background=None, bright_mode="divide",
                  weighted=True, context=None, im_trans=(), multi_azimuth=False,
                  calibration_snapshot=None, zarr_grouping="frame",
-                 ion_csv_extras=()):
+                 ion_csv_extras=(), dark_request=None):
         super().__init__(parent)
+        #: dark_policy.DarkRequest, or None to keep the pre-policy behaviour
+        #: of applying whatever array the caller passed to every file.
+        self._dark_request = dark_request
+        #: [(path, why)] when autodetect could not resolve this source.
+        self.dark_skipped = []
         # Full calibration (helpers.full_calibration_snapshot), embedded
         # verbatim in cake-mode HDF5 output — see cake_hdf5.write_cake_h5.
         self._calibration_snapshot = calibration_snapshot
@@ -2367,6 +2409,22 @@ class BatchWorker(QtCore.QThread):
         if self._zarr_grouping == "file" and key_path.is_file():
             return zarr_dir / f"{key_path.stem}.ave.zarr.zip", False
         return zarr_dir / f"{self._run_out_stem()}.ave.zarr.zip.part", True
+
+    def _first_source_path(self):
+        """Any real input path from the source cfg, for dark resolution.
+
+        One per worker is enough, because a worker is one source folder:
+        tab_batch groups a recursive pick with group_paths_by_output_dir
+        and runs a batch per folder, and Hydra gives each scan its own.
+        """
+        cfg = self._src or {}
+        paths = cfg.get("paths")
+        if paths:
+            return paths[0]
+        one = cfg.get("path")
+        if one and os.path.isfile(str(one)):
+            return one
+        return None
 
     def _iter_frames(self, source):
         """Yield ``(abs_i, fid, img)`` for the frames this worker should process.
@@ -2517,6 +2575,30 @@ class BatchWorker(QtCore.QThread):
             # build time against the *transformed* pixel grid), so it alone is
             # pre-flipped here, once.
             dark, bright, background = self._dark, self._bright, self._background
+            # Batch Integrate used to apply whatever array the GUI handed it to
+            # every file, while Batch Correction resolved one per input file --
+            # the same selection corrected differently depending on which tab ran
+            # it. Both now ask dark_policy. Resolved once per WORKER, which is
+            # once per source folder; that is the "per subfolder" half of the
+            # rule, and it avoids threading per-frame file identity through the
+            # frame-stream abstraction, which does not carry it.
+            if self._dark_request is not None:
+                probe = self._first_source_path()
+                if probe is not None:
+                    choice = _resolve_dark_for(
+                        probe, None, self._dark_request,
+                        dark_dataset=self._dark_request.dataset,
+                        fallback=self._dark, auto=True)
+                    self.log_line.emit(f"[batch] dark = {choice.why}")
+                    if choice.skipped:
+                        self.dark_skipped.append((str(probe), choice.why))
+                        self.log_line.emit(
+                            "[batch] NOT integrating this source -- correcting it "
+                            "with another scan\'s dark is the error this check "
+                            "exists to prevent.")
+                        self.failed.emit(choice.why)
+                        return
+                    dark = choice.array
             mask = (self._mask if not self._im_trans or self._mask is None
                     else _apply_im_trans(self._mask.astype(np.float32), self._im_trans))
 
@@ -4264,7 +4346,7 @@ class BatchRunCoordinator(QtCore.QObject):
                  weighted=True, context=None, im_trans=(), multi_azimuth=False,
                  run_mode="sequential", n_workers=1, parent=None,
                  calibration_snapshot=None, zarr_grouping="frame",
-                 ion_csv_extras=()):
+                 ion_csv_extras=(), dark_request=None):
         super().__init__(parent)
         self._args = dict(
             spec=spec, source_cfg=source_cfg, mask=mask, out_dir=out_dir, fmts=fmts,
@@ -4274,7 +4356,8 @@ class BatchRunCoordinator(QtCore.QObject):
             drift_traj=drift_traj, dark=dark, bright=bright, background=background,
             bright_mode=bright_mode, weighted=weighted, im_trans=im_trans,
             multi_azimuth=multi_azimuth, calibration_snapshot=calibration_snapshot,
-            zarr_grouping=zarr_grouping, ion_csv_extras=ion_csv_extras)
+            zarr_grouping=zarr_grouping, ion_csv_extras=ion_csv_extras,
+            dark_request=dark_request)
         self._context = context
         self._run_mode = run_mode if run_mode == "batch_parallel" else "sequential"
         self._n_workers_requested = max(1, int(n_workers))

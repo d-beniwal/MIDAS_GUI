@@ -629,6 +629,10 @@ class BatchCorrectionTab(QtWidgets.QWidget):
             bright_mode=self._loader.bright_mode(),
             auto_dark=self._auto_dark_chk.isChecked(),
             dark_dataset=self._dark_ds_ed.text().strip() or "exchange/data_dark",
+            dark_request=self._loader.dark_request(
+                dataset=self._dark_ds_ed.text().strip() or None,
+                override=(None if self._auto_dark_chk.isChecked()
+                          else "always_explicit")),
             clip_negatives=self._clip_chk.isChecked(),
             compression=self._comp_combo.currentData(),
             level=self._comp_level.value(),

@@ -2354,6 +2354,9 @@ class BatchTab(QtWidgets.QWidget):
             multi_azimuth=multi_azimuth, calibration_snapshot=calib_snapshot,
             zarr_grouping=self._zarr_grouping_key(),
             ion_csv_extras=self._ion_csv_extras(),
+            # Same decision Batch Correction makes, from the same builder --
+            # the two tabs used to disagree about the dark and nothing said so.
+            dark_request=self._loader.dark_request(),
             run_mode=self._run_mode.currentData(), n_workers=self._n_workers.value())
         self._worker.progress.connect(self._on_progress)
         self._worker.frame_done.connect(self._on_frame)
