@@ -892,7 +892,22 @@ def list_h5_1d_datasets(path: str | Path) -> list:
     return sorted(items, key=_rank)
 
 
-_DARK_NAME_RE = re.compile(r'(^|[_.])dark([_.]|$)|_dark_(before|after)\b', re.IGNORECASE)
+# "dark" as a word, however the beamline glued it together. The original
+# pattern required a _ or . on BOTH sides, which is 20-ID-E's
+# ``_dark_before_`` / ``_dark_after_`` convention and nothing else. At
+# 1-ID-E the same thing is written ``_Darks_``, ``startingDarks_`` and
+# ``darkexp01s_``, so 10 of the 11 dark folders in a real experiment were
+# invisible to every caller of this function — including the ladder that
+# exists to find them. Verified against that experiment: all 11 matched
+# names are genuine dark acquisitions (10 dark frames, no data), so
+# widening costs no false positives there.
+_DARK_NAME_RE = re.compile(
+    r'(?:^|[_.\-])dark'          # a dark token, however prefixed
+    r'(?:s|ield|field)?'         # dark / darks / darkfield
+    r'(?:[_.\-]|exp|$)'          # ..._ or ...exp01s or end of the stem
+    r'|darks?(?=[_.\-]|$)'       # ...startingDarks_ (no separator before)
+    r'|_dark_(?:before|after)\b',
+    re.IGNORECASE)
 
 
 def is_dark_like_name(path) -> bool:
