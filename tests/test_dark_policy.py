@@ -203,3 +203,126 @@ def test_an_anchor_with_no_token_says_so_rather_than_guessing(tmp_path):
     path, why = D.panel_dark_path(str(p), 2)
     assert path is None
     assert "carries no ge1-ge4 token" in why
+
+
+# ── the recursive search covers the CHOSEN TREE ─────────────────────────
+
+def _h5(root, sub, name, *, exp, dark=None, data=None, rings=False,
+        shape=(32, 32)):
+    import h5py
+    d = root / sub
+    d.mkdir(parents=True, exist_ok=True)
+    ramp = np.linspace(-3, 3, shape[0] * shape[1],
+                       dtype=np.float32).reshape(shape)
+    ramp -= ramp.mean()
+    p = d / name
+    with h5py.File(str(p), "w") as f:
+        f.create_dataset("instrument/Detector/DetAcqTime",
+                         data=np.array([float(exp)]))
+        if dark is not None:
+            a = np.full((3,) + shape, float(dark), np.float32) + ramp[None]
+            if rings:
+                a[:, 8:10, :] += 5000      # a dark that is not one
+            f.create_dataset("exchange/data_dark", data=a)
+        if data is not None:
+            f.create_dataset("exchange/data",
+                             data=np.full((3,) + shape, float(data),
+                                          np.float32) + ramp[None])
+    return p
+
+
+def test_the_search_reaches_darks_in_sibling_folders(tmp_path):
+    """The rule as specified: choosing expid/ge1 with subfolders searches
+    the WHOLE tree. At 1-ID-E the darks live in their own sibling folders
+    (AlCaBa_S1_RT_Darks/) one level up from the scans they serve, so the
+    per-directory search this replaces found nothing at all.
+    """
+    _h5(tmp_path, "MySample_Darks", "MySample_Darks_000100.ge1.h5",
+        exp=10.0, dark=1778.0)
+    scan = _h5(tmp_path, "MySample_scan1", "MySample_scan1_000120.ge1.h5",
+               exp=10.0, data=2100.0)
+    got = D.resolve(scan, D.DarkRequest(origin="folder_recursive",
+                                        search_root=str(tmp_path),
+                                        exposure=10.0), shape=(32, 32))
+    assert not got.skipped, got.why
+    assert np.allclose(got.array.mean(), 1778.0)
+
+
+def test_a_wrong_exposure_dark_is_rejected_not_merely_ranked_low(tmp_path):
+    """The white_oct26 failure. Every dark there was taken at 0.1 s while
+    the data is at 1 s and 10 s, and a GE panel's offset grows with
+    exposure -- the 0.1 s dark is ~19 counts ABOVE the 1 s data, so
+    subtracting it drove the whole background negative and clipped it to
+    zero. Ranking it low is not enough: a wrong dark that is merely
+    unpreferred still gets used when it is the only one.
+    """
+    _h5(tmp_path, "Darks_short", "Darks_short_000100.ge1.h5",
+        exp=0.1, dark=1778.0)
+    scan = _h5(tmp_path, "scan1", "scan1_000120.ge1.h5", exp=10.0,
+               data=2100.0)
+    got = D.resolve(scan, D.DarkRequest(origin="folder_recursive",
+                                        search_root=str(tmp_path),
+                                        exposure=10.0), shape=(32, 32))
+    assert got.skipped
+    assert "exposure" in got.why and "0.1" in got.why
+
+
+def test_the_skip_message_names_what_it_rejected_and_why(tmp_path):
+    """A skip that just says "no dark" sends someone to go and look. This
+    one has to say which files it considered and what was wrong."""
+    _h5(tmp_path, "Darks_a", "Darks_a_000100.ge1.h5", exp=0.1, dark=1778.0)
+    _h5(tmp_path, "Darks_b", "Darks_b_000110.ge1.h5", exp=5.0, dark=1858.0)
+    scan = _h5(tmp_path, "s", "s_000120.ge1.h5", exp=10.0, data=2100.0)
+    got = D.resolve(scan, D.DarkRequest(origin="folder_recursive",
+                                        search_root=str(tmp_path),
+                                        exposure=10.0), shape=(32, 32))
+    assert got.skipped
+    assert "Darks_a_000100" in got.why and "Darks_b_000110" in got.why
+
+
+def test_the_nearest_preceding_dark_wins_across_the_tree(tmp_path):
+    """Scan numbers are global, so the rule the 192-log survey validated
+    inside one folder means the same thing across a tree."""
+    _h5(tmp_path, "d_far", "d_far_Darks_000100.ge1.h5", exp=10.0, dark=11.0)
+    _h5(tmp_path, "d_near", "d_near_Darks_000118.ge1.h5", exp=10.0, dark=22.0)
+    _h5(tmp_path, "d_after", "d_after_Darks_000130.ge1.h5", exp=10.0, dark=33.0)
+    scan = _h5(tmp_path, "s", "s_000120.ge1.h5", exp=10.0, data=2100.0)
+    got = D.resolve(scan, D.DarkRequest(origin="folder_recursive",
+                                        search_root=str(tmp_path),
+                                        exposure=10.0), shape=(32, 32))
+    assert np.allclose(got.array.mean(), 22.0), got.why
+
+
+def test_a_dark_whose_frames_show_diffraction_is_rejected(tmp_path):
+    """Name is a clue; the frames settle it. A file called a dark whose
+    dark plane carries rings is not a dark whatever it is called."""
+    _h5(tmp_path, "Bad_Darks", "Bad_Darks_000118.ge1.h5", exp=10.0,
+        dark=1778.0, rings=True)
+    _h5(tmp_path, "Good_Darks", "Good_Darks_000100.ge1.h5", exp=10.0,
+        dark=1778.0)
+    scan = _h5(tmp_path, "s", "s_000120.ge1.h5", exp=10.0, data=2100.0)
+    got = D.resolve(scan, D.DarkRequest(origin="folder_recursive",
+                                        search_root=str(tmp_path),
+                                        exposure=10.0), shape=(32, 32))
+    assert not got.skipped, got.why
+    assert "Good_Darks" in got.why, "the ringed candidate was not vetoed"
+
+
+def test_the_frame_check_is_a_veto_not_a_classifier():
+    """Stated because it bounds what the check may be used for. Across 15
+    real darks and 15 real data planes the distributions OVERLAP at the
+    low end -- a weak or blank data frame is indistinguishable from a
+    dark -- so this may reject a named candidate, never promote an
+    unnamed file into being one.
+    """
+    from midas_gui.frame_correct import has_diffraction_structure as H
+    flat = np.full((64, 64), 1778.0, np.float32)
+    flat += np.linspace(-3, 3, 64 * 64, dtype=np.float32).reshape(64, 64)
+    assert not H(flat)
+    ringed = flat.copy()
+    ringed[20:24, :] += 5000
+    assert H(ringed)
+    # a weak measurement reads like a dark, and that is why it is a veto
+    weak = flat.copy()
+    weak[20, :] += 2.0
+    assert not H(weak)

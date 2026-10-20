@@ -349,6 +349,61 @@ def is_degenerate_dark(arr) -> bool:
     return bool(a.min() == a.max())
 
 
+#: Fraction of pixels that may sit far above the local noise before a
+#: plane is called diffraction rather than a dark. Measured, not guessed:
+#: across 15 real darks on the 20-ID VAREX share the worst was 0.096% and
+#: the 1-ID darks are 0.01%, while data runs to 6.6%. 0.5% leaves a factor
+#: of five over the worst real dark.
+DIFFRACTION_PIXEL_FRACTION = 0.5
+
+
+def has_diffraction_structure(arr, threshold=DIFFRACTION_PIXEL_FRACTION) -> bool:
+    """Does this plane look like a measurement rather than a dark?
+
+    A VETO, not a classifier, and the distinction matters. Across the same
+    sample, data planes ranged from 0.0009% to 6.6% by this statistic --
+    the low end being weak, attenuated or blank frames -- so "looks like a
+    dark" is NOT evidence that something IS one. What the statistic can do
+    reliably is reject a plane carrying obvious diffraction, whatever its
+    filename claims.
+
+    Used to settle doubt about a name-matched candidate; never to promote
+    an unnamed file into being a dark.
+
+    Deliberately median/MAD rather than mean/std: every GE frame here
+    carries a stuck pixel at 16349, so max and std say the same thing
+    about a dark and a diffraction pattern.
+    """
+    a = np.asarray(arr, dtype=np.float64)
+    if a.size == 0:
+        return False
+    med = np.median(a)
+    mad = np.median(np.abs(a - med)) * 1.4826
+    hot = float((a > med + 10.0 * max(mad, 1e-9)).mean()) * 100.0
+    return hot > float(threshold)
+
+
+def acquisition_exposure(path) -> Optional[float]:
+    """Detector exposure in seconds, or None when the file does not say.
+
+    The dark must have been taken at the data's exposure: a GE panel's
+    offset grows with it (1778.5 / 1827.6 / 1858.6 counts at 0.1 / 4 / 5 s
+    in one real experiment), so a 0.1 s dark subtracted from a 10 s frame
+    removes a couple of hundred counts too few, and from a 1 s frame
+    removes ~19 too many -- which clips the whole background to zero and
+    is exactly how this check came to be written.
+    """
+    try:
+        import h5py
+        with h5py.File(str(path), "r") as f:
+            d = f.get("instrument/Detector/DetAcqTime")
+            if d is None or getattr(d, "size", 0) < 1:
+                return None
+            return float(np.asarray(d).ravel()[0])
+    except Exception:
+        return None
+
+
 def _mean_dark(path, dataset: str, shape) -> Optional[np.ndarray]:
     """Mean of ``dataset`` in ``path``, or None if it is not a usable dark.
 

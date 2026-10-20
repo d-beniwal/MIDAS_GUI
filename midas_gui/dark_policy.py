@@ -74,6 +74,14 @@ class DarkRequest:
     array: Optional[np.ndarray] = None   #: the Dark field, already averaged
     panel: Optional[int] = None          #: Hydra panel, for the message
     override: Optional[str] = None
+    #: In autodetect mode, the folder the user actually chose. The search
+    #: covers this WHOLE TREE, not just each file's own directory: at
+    #: 1-ID-E the darks live in sibling folders (``AlCaBa_S1_RT_Darks/``)
+    #: one level up from the scans they serve, so a per-directory search
+    #: finds nothing. None falls back to each file's own folder.
+    search_root: Optional[str] = None
+    #: Exposure the data was taken at; a candidate must match it.
+    exposure: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -121,6 +129,19 @@ def resolve(file_path, req: DarkRequest, *, shape=None) -> DarkChoice:
     from midas_gui.frame_correct import resolve_dark
 
     if wants_auto(req):
+        if req.search_root:
+            cands = tree_dark_candidates(file_path, req.search_root,
+                                         exposure=req.exposure,
+                                         dataset=req.dataset)
+            for path, why in cands:
+                if path is None:
+                    return DarkChoice(
+                        None, f"{_skip_reason(file_path, req)} — {why}",
+                        "skipped")
+                arr = _peek_shaped(path, req.dataset, shape)
+                if arr is not None:
+                    return DarkChoice(arr, why)
+            return DarkChoice(None, _skip_reason(file_path, req), "skipped")
         arr, why = resolve_dark(file_path, dark_dataset=req.dataset,
                                 shape=shape, fallback=None, auto=True)
         if arr is None:
@@ -134,6 +155,93 @@ def resolve(file_path, req: DarkRequest, *, shape=None) -> DarkChoice:
     arr, why = resolve_dark(file_path, dark_dataset=req.dataset, shape=shape,
                             fallback=req.array, auto=False)
     return DarkChoice(arr, why)
+
+
+#: Exposures this close (relative) count as the same acquisition setting.
+EXPOSURE_RTOL = 0.01
+
+
+def tree_dark_candidates(data_path, root, *, exposure=None, dataset=
+                         "exchange/data_dark") -> list:
+    """Dark files anywhere under ``root``, best first, for ``data_path``.
+
+    The tree generalisation of ``frame_correct.dark_candidates``, which
+    only ever lists one directory. Three things make it work:
+
+    * **Scan numbers are global.** A dark at ``..._005787.ge1.h5`` and a
+      scan at ``..._005826.ge1.h5`` are on one increasing sequence across
+      the whole experiment, so "the nearest dark measured BEFORE this
+      file" -- the rule the 192-log survey validated within a folder --
+      means the same thing across a tree without reinterpretation.
+    * **Exposure must match.** A GE panel's offset grows with exposure, so
+      a 0.1 s dark is not a dark for a 10 s frame. Mismatches are dropped
+      here rather than ranked low, because a wrong dark that is merely
+      unpreferred still gets used when it is the only one.
+    * **Frames settle doubt.** A name-matched candidate carrying obvious
+      diffraction is rejected whatever it is called.
+
+    Returns ``[(path, why)]``.
+    """
+    import os as _os
+    from midas_gui.frame_correct import (acquisition_exposure, split_scan_name,
+                                         has_diffraction_structure)
+    from midas_gui.helpers import is_dark_like_name, is_h5
+
+    num = split_scan_name(_os.path.basename(str(data_path))).num
+    ranked, rejected = [], []
+    for dirpath, _dirs, files in _os.walk(str(root)):
+        for name in files:
+            full = _os.path.join(dirpath, name)
+            if full == str(data_path) or not is_h5(full):
+                continue
+            if not (is_dark_like_name(name) or is_dark_like_name(dirpath)):
+                continue
+            if exposure is not None:
+                got = acquisition_exposure(full)
+                if got is None or abs(got - exposure) > EXPOSURE_RTOL * max(
+                        abs(exposure), 1e-9):
+                    rejected.append((full, f"exposure {got}s != {exposure}s"))
+                    continue
+            cand = split_scan_name(name).num
+            if cand is None or num is None:
+                direction, dist = 2, 10 ** 9
+            elif cand <= num:
+                direction, dist = 0, num - cand        # measured before it
+            else:
+                direction, dist = 1, cand - num        # measured after it
+            ranked.append(((direction, dist, full), full, name))
+    ranked.sort(key=lambda row: row[0])
+
+    out = []
+    for (direction, dist, _f), full, name in ranked:
+        arr = _peek(full, dataset)
+        if arr is not None and has_diffraction_structure(arr):
+            rejected.append((full, "frames show diffraction, not a dark"))
+            continue
+        when = ("preceding" if direction == 0 else
+                "following" if direction == 1 else "unnumbered")
+        out.append((full, f"{when} dark {name} ({dist} scans away)"))
+    return out or [(None, _why_none(rejected))]
+
+
+def _peek_shaped(path, dataset, shape):
+    from midas_gui.frame_correct import _mean_dark
+    return _mean_dark(path, dataset, shape)
+
+
+def _peek(path, dataset):
+    from midas_gui.frame_correct import _mean_dark
+    return _mean_dark(path, dataset, None)
+
+
+def _why_none(rejected) -> str:
+    if not rejected:
+        return "no dark-like file anywhere under the selected folder"
+    import os as _os
+    head = rejected[:3]
+    bits = "; ".join(f"{_os.path.basename(p)}: {r}" for p, r in head)
+    more = f" (+{len(rejected) - len(head)} more)" if len(rejected) > 3 else ""
+    return f"every candidate rejected — {bits}{more}"
 
 
 def _skip_reason(file_path, req: DarkRequest) -> str:
