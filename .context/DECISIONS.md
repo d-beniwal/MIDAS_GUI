@@ -5410,3 +5410,51 @@ solve in one LM call. 29,120 fits in 108 s on CPU. It also bounds peak
 memory by one eta column rather than by the scan — and only the ~55 R
 bins inside the fit window are read, not all 3,520, which is the
 difference between 14 MB and 820 MB for a scan this size.
+
+## Background jobs have to run on RHEL 7 too
+
+Found on `erkel` (RHEL 7.9), where launching a background caking job
+failed with nothing more informative than "`screen -dmS` exited -1".
+`acadia` and `copland` are RHEL 9 and neither problem is visible there.
+
+### `-Logfile` does not exist before screen 4.06
+
+erkel ships `screen 4.01.00devel` (2006). Passing `-Logfile` aborts with
+`Error: Unknown option Logfile` BEFORE the session is created, and
+screen's message goes to the terminal the GUI was launched from rather
+than to the dialog — so the user saw only a return code.
+
+Capability is PROBED (`screen --help`), not version-parsed:
+"4.01.00devel" is exactly the string that makes a numeric comparison
+wrong in an interesting way.
+
+Bare `-L` is dropped along with it. On 4.01 `-L` still logs, but to
+`screenlog.0` in the working directory, which for these jobs is the repo
+root. The fallback instead has the generated script log itself with
+`exec > >(tee -a <logfile>) 2>&1` — tee rather than a plain redirect so
+`Reattach` still shows live output, which is the whole point of running
+under screen. The `sleep 3` both script shapes already ended with is
+what gives tee time to flush the `DONE` line the panel waits for.
+
+### `wait -n` needs bash 4.3; RHEL 7 ships 4.2
+
+This was the worse of the two, and it was silent. The semaphore said
+`wait -n 2>/dev/null || break`. On bash 4.2 `wait -n` fails on the first
+poll, the `break` fires, the `while` exits, and `sem()` becomes a no-op
+— so every unit launches at once. Measured on erkel: a limit of 4,
+peak 12. On the 190-scan job that is ~760 processes.
+
+`|| sleep 1` instead: blocks efficiently on 4.3+, polls on 4.2. A
+one-word change, but the failure it prevents does not announce itself —
+it looks like the machine being slow.
+
+The lesson worth keeping: a fallback whose failure mode is "silently do
+nothing" is worse than no fallback. `break` was chosen so an old bash
+would not hang; what it actually did was remove the limit.
+
+### What was checked and is fine
+
+No other `wait -n`, and nothing else modern emitted into job scripts
+(`mapfile`, `declare -A`, `coproc`, `&>>` — none). The conda env runs on
+erkel: Python 3.12.14 against glibc 2.17, `midas_integrate_v2` and torch
+2.4.0 import. `mktemp`, `tee`, `pgrep` present.

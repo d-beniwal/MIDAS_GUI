@@ -45,6 +45,10 @@ def panel(qapp, monkeypatch, tmp_path):
     from PyQt5 import QtCore, QtWidgets
     from midas_gui import job_queue as J
     monkeypatch.setattr(J, "screen_available", lambda: True)
+    # Pinned, or every assertion below depends on the screen version of
+    # whatever machine runs the suite: on a screen older than 4.06 the
+    # launcher takes the self-logging branch and the argv differs.
+    monkeypatch.setattr(J, "screen_supports_logfile", lambda: True)
     monkeypatch.setattr(J, "JOBS_DIR", tmp_path)
     monkeypatch.setattr(J, "_screen_session_alive", lambda s: False)
     captured = {}
@@ -245,3 +249,112 @@ def test_units_announce_themselves_for_the_progress_bar(tmp_path):
         {"parallel": [["echo", "b"]], "then": []},
     ], 2)
     assert len(re.findall(r"\[launcher\] unit \d+/2 done", out)) == 2
+
+
+# ── old hosts: screen 4.01 and bash 4.2 (RHEL 7) ────────────────────────
+
+def test_the_logfile_probe_reads_screens_own_help(monkeypatch):
+    """Probed, not version-parsed. "4.01.00devel" is exactly the kind of
+    version string that makes a numeric comparison wrong in an
+    interesting way, and the help text answers the real question."""
+    import subprocess as sp
+    from midas_gui import job_queue as J
+
+    class _R:
+        def __init__(self, o="", e=""):
+            self.stdout, self.stderr = o, e
+
+    J.screen_supports_logfile.cache_clear()
+    monkeypatch.setattr(sp, "run", lambda *a, **k: _R("-L  log\n-Logfile f\n"))
+    assert J.screen_supports_logfile() is True
+
+    J.screen_supports_logfile.cache_clear()
+    monkeypatch.setattr(sp, "run", lambda *a, **k: _R(
+        "", "-L   Turn on output logging.\nError: Unknown option Logfile\n"))
+    assert J.screen_supports_logfile() is False
+    J.screen_supports_logfile.cache_clear()
+
+
+def test_an_old_screen_gets_neither_L_nor_Logfile(panel, monkeypatch,
+                                                   tmp_path):
+    """Regression, found on erkel (RHEL 7.9, screen 4.01.00devel).
+
+    -Logfile arrived in screen 4.06. On 4.01 it aborts with "Error:
+    Unknown option Logfile" BEFORE the session exists, and all the user
+    saw was "`screen -dmS` exited -1" -- screen's own message goes to the
+    terminal the GUI was launched from, not to the dialog.
+
+    Bare -L must go too: on 4.01 it writes "screenlog.0" into the working
+    directory, which for these jobs is the repo root.
+    """
+    from midas_gui import job_queue as J
+    monkeypatch.setattr(J, "screen_supports_logfile", lambda: False)
+    panel.launch(["echo", "hi"], name="old", total_frames=1,
+                 out_dir="/o")
+    args = panel.captured["args"]
+    assert "-Logfile" not in args
+    assert "-L" not in args, "bare -L litters the cwd with screenlog.0"
+    assert args[0] == "-dmS" and args[-2] == "bash"
+
+
+def test_an_old_screen_makes_the_script_log_itself(panel, monkeypatch):
+    """tee rather than a plain redirect, so Reattach still shows live
+    output -- the whole reason the screen session exists."""
+    from midas_gui import job_queue as J
+    monkeypatch.setattr(J, "screen_supports_logfile", lambda: False)
+    job = panel.launch(["echo", "hi"], name="old", total_frames=1,
+                 out_dir="/o")
+    txt = _wrapped(panel)
+    assert "tee -a" in txt and job.logfile in txt
+    assert txt.index("exec >") < txt.index("echo"), \
+        "the redirect must precede anything that writes"
+
+
+def test_a_new_screen_still_uses_Logfile(panel):
+    """The fixture pins the probe True, so this is the normal path."""
+    panel.launch(["echo", "hi"], name="new", total_frames=1,
+                 out_dir="/o")
+    args = panel.captured["args"]
+    assert "-Logfile" in args and "-L" in args
+
+
+def _peak_concurrency(stdout):
+    """Max overlap, from interleaved S/E markers."""
+    n = peak = 0
+    for ln in stdout.splitlines():
+        if ln.strip() == "S":
+            n += 1
+            peak = max(peak, n)
+        elif ln.strip() == "E":
+            n -= 1
+    return peak
+
+
+def test_the_semaphore_still_throttles_without_wait_dash_n(tmp_path):
+    """Regression, and the nastier of the two RHEL 7 bugs.
+
+    `wait -n` needs bash 4.3; RHEL 7 ships 4.2.46, where it fails
+    instantly. The semaphore used to say `wait -n 2>/dev/null || break`,
+    so on 4.2 the break fired on the first poll, the while loop exited,
+    and sem() became a NO-OP -- every unit launched at once. Silent, and
+    on a 190-scan job it would have put ~760 processes on the machine.
+    Measured on erkel: peak 12 against a limit of 4.
+
+    Simulated here by neutering the `wait -n` call in the generated
+    script, which is the only part bash 4.2 behaves differently on.
+    """
+    import subprocess
+    from midas_gui.job_queue import _parallel_script
+    units = [{"parallel": [["bash", "-c", "echo S; sleep 0.4; echo E"]],
+              "then": []} for _ in range(8)]
+    src = _parallel_script(str(tmp_path), units, 2)
+    assert "|| break" not in src, "the no-op semaphore is back"
+    assert "|| sleep 1" in src
+    old_bash = src.replace("wait -n 2>/dev/null", "false")
+    p = tmp_path / "old.sh"
+    p.write_text("#!/bin/bash\n" + old_bash + "\n")
+    out = subprocess.run(["bash", str(p)], capture_output=True, text=True,
+                         timeout=180).stdout
+    assert out.count("S") == 8
+    assert _peak_concurrency(out) <= 3, (
+        f"MAXJ=2 but {_peak_concurrency(out)} ran at once — sem() is a no-op")

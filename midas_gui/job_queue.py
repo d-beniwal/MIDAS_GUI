@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import functools
 import re
 import shlex
 import subprocess
@@ -110,6 +111,28 @@ def screen_available() -> bool:
     return shutil.which("screen") is not None
 
 
+@functools.lru_cache(maxsize=1)
+def screen_supports_logfile() -> bool:
+    """Does the installed ``screen`` take ``-Logfile``?
+
+    It arrived in screen 4.06 (2017). RHEL 7 ships 4.01.00devel, where
+    passing it aborts with ``Error: Unknown option Logfile`` before the
+    session is ever created -- and the only thing the user saw was
+    "`screen -dmS` exited -1", with screen's own message going to the
+    terminal the GUI was launched from rather than to the dialog.
+
+    Probed rather than version-parsed: "4.01.00devel" is the kind of
+    string that makes a version comparison wrong in an interesting way,
+    and the help text answers the actual question.
+    """
+    try:
+        out = subprocess.run(["screen", "--help"], capture_output=True,
+                             text=True, timeout=5)
+    except Exception:
+        return False
+    return "-Logfile" in ((out.stdout or "") + (out.stderr or ""))
+
+
 def _screen_session_alive(session: str) -> bool:
     try:
         out = subprocess.run(["screen", "-ls"], capture_output=True,
@@ -157,9 +180,12 @@ def _parallel_script(repo_root, units, max_parallel: int) -> str:
         'fail_file="$(mktemp)"',
         f"MAXJ={jobs}",
         "",
-        "# Block until a slot frees. `wait -n` needs bash 4.3+ (RHEL 9 is 5.x).",
+        "# Block until a slot frees. `wait -n` needs bash 4.3+; RHEL 7",
+        "# ships 4.2, where it fails instantly, so fall back to polling.",
+        "# Falling through instead would make this a no-op and launch",
+        "# every unit at once -- see tests/test_job_chained_folders.py.",
         "sem() {",
-        '  while [ "$(jobs -rp | wc -l)" -ge "$MAXJ" ]; do wait -n 2>/dev/null || break; done',
+        '  while [ "$(jobs -rp | wc -l)" -ge "$MAXJ" ]; do wait -n 2>/dev/null || sleep 1; done',
         "}",
         "",
     ]
@@ -398,20 +424,41 @@ class JobQueuePanel(QtWidgets.QWidget):
         # `screen -dmS` exited -2. A file has no such limit, and leaves the
         # exact commands on disk next to the log for inspection.
         script_path = JOBS_DIR / f"{session}.sh"
+        # On a screen too old for -Logfile the script logs ITSELF, and we
+        # pass neither -L nor -Logfile: 4.01's bare -L writes "screenlog.0"
+        # into the working directory, which here is the repo root.
+        # tee, not a plain redirect, so `Reattach` still shows live output;
+        # the trailing `sleep 3` both branches already end with is what
+        # gives tee time to flush the DONE line the panel waits for.
+        prologue = ""
+        if not screen_supports_logfile():
+            prologue = (
+                f'exec > >(tee -a {shlex.quote(logfile)}) 2>&1\n'
+                "echo '[launcher] screen has no -Logfile (added in 4.06); "
+                "this script is logging itself.'\n")
         try:
-            script_path.write_text("#!/bin/bash\n" + wrapped + "\n")
+            script_path.write_text("#!/bin/bash\n" + prologue + wrapped + "\n")
             script_path.chmod(0o755)
         except OSError as e:
             QtWidgets.QMessageBox.warning(
                 self, "Cannot write job script",
                 f"Could not write the job script:\n{e}")
             return None
-        screen_cmd = ["screen", "-dmS", session, "-L", "-Logfile", logfile,
-                      "bash", str(script_path)]
-        rc = QtCore.QProcess.execute("screen", screen_cmd[1:])
+        screen_args = ["-dmS", session]
+        if screen_supports_logfile():
+            screen_args += ["-L", "-Logfile", logfile]
+        screen_args += ["bash", str(script_path)]
+        rc = QtCore.QProcess.execute("screen", screen_args)
         if rc != 0:
             QtWidgets.QMessageBox.warning(
-                self, "Launch failed", f"`screen -dmS` exited {rc}.")
+                self, "Launch failed",
+                f"`screen -dmS` exited {rc}.\n\n"
+                f"screen writes its own reason to the terminal the GUI was "
+                f"launched from, not here. To see it, run:\n\n"
+                f"  screen -dmS probe bash {script_path}\n\n"
+                f"This screen "
+                + ("does" if screen_supports_logfile() else "does NOT")
+                + " support -Logfile.")
             return None
 
         job = Job(session=session, logfile=logfile, meta_path=meta_path,
