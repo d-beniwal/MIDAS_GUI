@@ -1471,6 +1471,19 @@ class BatchCorrectionCoordinator(QtCore.QObject):
     def isRunning(self) -> bool:
         return any(w.isRunning() for w in self._workers)
 
+    @property
+    def dark_skipped(self) -> list:
+        """Every file its workers skipped for want of a valid dark.
+
+        Aggregated here because the skip is the whole point of the policy
+        and a skip that only ever reaches a worker attribute is a silent
+        skip. The caller reports it.
+        """
+        out = []
+        for w in self._workers:
+            out.extend(getattr(w, "dark_skipped", ()) or ())
+        return out
+
     def cancel(self):
         for w in self._workers:
             w.cancel()
@@ -4383,6 +4396,16 @@ class BatchRunCoordinator(QtCore.QObject):
         if self._geom_worker is not None and self._geom_worker.isRunning():
             return True
         return any(w.isRunning() for w in self._chunk_workers)
+
+    @property
+    def dark_skipped(self) -> list:
+        """Sources skipped for want of a valid dark — see the same
+        property on BatchCorrectionCoordinator."""
+        out = []
+        for w in ([self._solo_worker] if self._solo_worker else []) + \
+                list(self._chunk_workers):
+            out.extend(getattr(w, "dark_skipped", ()) or ())
+        return out
 
     def start(self):
         if self._run_mode != "batch_parallel":

@@ -293,16 +293,23 @@ class PreferencesDialog(QtWidgets.QDialog):
         except Exception:
             pass
         self._notify_email.setToolTip(
-            "Email one short report when a background job ends — status, "
-            "exit code, how far it got, and the last few lines mentioning "
-            "an error.\n\n"
+            "Email one short report when something finishes that you may "
+            "not be watching:\n\n"
+            "  • a background job ends — status, exit code, how far it "
+            "got, and the last few lines mentioning an error\n"
+            "  • files were SKIPPED because no valid dark could be "
+            "resolved for them. They are skipped rather than corrected "
+            "with another scan's dark, which would look plausible and be "
+            "wrong — so the skip has to reach you.\n\n"
+            "Blank means no mail; skips still go to the Log either way."
+            "\n\n"
             "Sent through the local `mail` command, so it depends on this "
             "machine being able to relay to your address. Acceptance by the "
             "local mail system is not the same as delivery; check once that "
             "a message actually arrives.\n\n"
             "Best effort: a mail failure is logged and never affects the "
             "job, which has already finished by the time this is sent.")
-        f.addRow("Notify on job end:", self._notify_email)
+        f.addRow("Notify by email:", self._notify_email)
         self._tabs.addTab(w, "Algorithms")
 
     def _build_tabs_tab(self):
