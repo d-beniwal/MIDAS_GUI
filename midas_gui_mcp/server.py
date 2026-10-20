@@ -87,6 +87,15 @@ def data_viewer_get_geometry() -> Any:
 
 
 @mcp.tool()
+def data_viewer_load_calibration_file(path: str) -> Any:
+    """Load a calibration file (MIDAS paramstest.txt, calibration.json, or
+    pyFAI .poni — format is auto-detected) into the Data Viewer's geometry,
+    the same as typing its path into the Ring-simulation card's calibration
+    field. Returns the geometry found in the file."""
+    return _call("data_viewer.load_calibration_file", path=path)
+
+
+@mcp.tool()
 def data_viewer_set_materials(materials: list) -> Any:
     """Replace the Data Viewer's ring-simulation material list. Each material
     is a dict with ``name`` and either ``a,b,c,alpha,beta,gamma,sg`` (a
@@ -110,6 +119,18 @@ def data_viewer_get_radial_profile(mode: str = "fast") -> Any:
     integration). Returns file references for the r/profile arrays, not the
     arrays inline — read them with your own file-reading tool."""
     return _call("data_viewer.get_radial_profile", mode=mode)
+
+
+@mcp.tool()
+def data_viewer_get_cake(r_bin: Optional[float] = None, eta_bin: Optional[float] = None) -> Any:
+    """Compute and return the current frame's (eta, R) cake — always the
+    full/accurate integration pipeline (tilts + distortion honoured when a
+    calibration is loaded), same as clicking "Calculate" above the Eta vs R
+    Cake plot. Optionally set the R-bin (px) and eta-bin (deg) sizes first;
+    omit either to keep whatever is currently set in the GUI. Returns file
+    references for the 2-D cake array and its r/eta axis arrays, not the
+    arrays inline — read them with your own file-reading tool."""
+    return _call("data_viewer.get_cake", r_bin=r_bin, eta_bin=eta_bin)
 
 
 @mcp.tool()

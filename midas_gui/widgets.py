@@ -1482,6 +1482,20 @@ class CakeViewer(QtWidgets.QWidget):
         self._eta_axis = np.asarray(eta_axis_deg, dtype=np.float64)
         self._redisplay()
 
+    def get_cake(self) -> Optional[dict]:
+        """Read back the data last given to :meth:`set_cake` (plus whatever
+        geometry :meth:`set_axis_context` was given), or ``None`` if nothing
+        has been computed yet — the public counterpart to a write-only
+        widget, for callers (e.g. a control API) that need the actual numbers
+        rather than just the rendered heatmap. Mirrors
+        :meth:`ProfileViewer.get_profile`."""
+        if self._cake is None:
+            return None
+        return {
+            "cake_2d": self._cake, "r_axis_px": self._r_axis, "eta_axis_deg": self._eta_axis,
+            "wavelength_A": self._wl, "lsd_um": self._lsd, "px_um": self._px,
+        }
+
     def clear(self):
         self._cake = None
         self._iv.clear()

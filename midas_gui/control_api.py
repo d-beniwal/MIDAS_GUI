@@ -118,18 +118,36 @@ class GuiController:
     # switch happens there (see that module's _handle_line).
     _NAMESPACE_TABS = {"data_viewer": "_view_tab", "calibrate": "_cal_tab"}
 
-    def ensure_tab_visible(self, namespace: str) -> None:
-        """Bring the tab an op namespace operates on to the front, so a
+    # Specific op -> a no-arg method on that op's own namespace tab widget
+    # that brings the right *sub*-view to the front within it (e.g. the Data
+    # Viewer's own Radial Profile / Eta vs R Cake bottom tabs) — so a human
+    # watching sees not just "the agent is on the Data Viewer" but exactly
+    # which result it just produced, the same way switching the namespace tab
+    # already shows which top-level tab it's driving.
+    _OP_SUBFOCUS = {
+        "data_viewer.get_radial_profile": "show_radial_profile_tab",
+        "data_viewer.get_cake": "show_cake_tab",
+    }
+
+    def ensure_tab_visible(self, op: str) -> None:
+        """Bring the tab `op`'s namespace operates on to the front, so a
         human watching the GUI actually sees what the agent is doing instead
         of it silently happening on a tab that isn't on screen — e.g.
         starting a calibration run switches to the Calibrate tab. A no-op if
         that tab is already showing (setCurrentWidget on the current widget
-        doesn't flicker/refocus)."""
+        doesn't flicker/refocus). Also focuses the specific sub-view a
+        handful of ops produce (see ``_OP_SUBFOCUS``)."""
+        namespace = (op or "").split(".", 1)[0]
         attr = self._NAMESPACE_TABS.get(namespace)
         tab_widget = getattr(self._win, attr, None) if attr else None
         tabs = getattr(self._win, "_tabs", None)
         if tab_widget is not None and tabs is not None:
             tabs.setCurrentWidget(tab_widget)
+        subfocus = self._OP_SUBFOCUS.get(op)
+        if subfocus is not None and tab_widget is not None:
+            method = getattr(tab_widget, subfocus, None)
+            if method is not None:
+                method()
 
     # ── dispatch ─────────────────────────────────────────────────────
     def dispatch(self, op: str, args: dict) -> dict:
@@ -187,6 +205,15 @@ class GuiController:
         self._geom.set_geometry(params)
         return _ok(self._geom.get_geometry())
 
+    def op_data_viewer_load_calibration_file(self, path) -> dict:
+        try:
+            summary = self._geom.load_calibration_file(path)
+        except FileNotFoundError as e:
+            return _err(str(e), kind="no_data")
+        except ValueError as e:
+            return _err(str(e), kind="bad_args")
+        return _ok(_jsonable(summary, stem="calib_file"))
+
     def op_data_viewer_get_geometry(self) -> dict:
         return _ok(self._geom.get_geometry())
 
@@ -216,6 +243,23 @@ class GuiController:
             "profile": _array_ref(prof["profile"], "profile"),
             "wavelength_A": prof["wavelength_A"], "lsd_um": prof["lsd_um"],
             "px_um": prof["px_um"],
+        })
+
+    def op_data_viewer_get_cake(self, r_bin=None, eta_bin=None) -> dict:
+        if r_bin is not None and self._geom._cake_r_bin is not None:
+            self._geom._cake_r_bin.setValue(float(r_bin))
+        if eta_bin is not None and self._geom._cake_eta_bin is not None:
+            self._geom._cake_eta_bin.setValue(float(eta_bin))
+        self._geom.cake_integrate()
+        cake = self._view._cake_view.get_cake()
+        if cake is None:
+            return _err("no cake available — load data first", kind="no_data")
+        return _ok({
+            "cake": _array_ref(cake["cake_2d"], "cake"),
+            "r_axis_px": _array_ref(cake["r_axis_px"], "cake_r_axis"),
+            "eta_axis_deg": _array_ref(cake["eta_axis_deg"], "cake_eta_axis"),
+            "wavelength_A": cake["wavelength_A"], "lsd_um": cake["lsd_um"],
+            "px_um": cake["px_um"],
         })
 
     def op_data_viewer_get_statistics(self, scope: str = "current") -> dict:

@@ -8,6 +8,7 @@ child. Run plain, these pass — see ``.context/STATE.md``.
 """
 from __future__ import annotations
 
+import json
 import math
 
 import numpy as np
@@ -182,6 +183,27 @@ def test_radial_integrate_no_longer_overwrites_the_cake(framed):
     card.radial_integrate()
     assert np.array_equal(cv._cake, before_cake)
     assert np.array_equal(cv._r_axis, before_r)
+
+
+def test_cake_view_get_cake_is_none_before_any_integration():
+    """Read-back accessor for a control API — mirrors
+    ProfileViewer.get_profile()'s "nothing plotted yet" contract."""
+    from midas_gui.widgets import CakeViewer
+    assert CakeViewer().get_cake() is None
+
+
+def test_cake_view_get_cake_returns_what_set_cake_was_given(framed):
+    card = framed._geom_card
+    framed._cake_r_bin.setValue(2.0); framed._cake_eta_bin.setValue(10.0)
+    card.cake_integrate()
+    cv = framed._cake_view
+    out = cv.get_cake()
+    assert np.array_equal(out["cake_2d"], cv._cake)
+    assert np.array_equal(out["r_axis_px"], cv._r_axis)
+    assert np.array_equal(out["eta_axis_deg"], cv._eta_axis)
+    assert out["wavelength_A"] == pytest.approx(card._wl.value())
+    assert out["lsd_um"] == pytest.approx(card._lsd_um())
+    assert out["px_um"] == pytest.approx(card._px.value())
 
 
 # ── 3b) the engine result is what actually reaches the plots ─────────
@@ -522,3 +544,60 @@ def test_manual_levels_survive_next_prev_but_reset_on_a_new_load(tab):
 
     _load_frames(tab, 3, 32)  # a new dataset — different frame shape
     assert tab._viewer._manual_levels is None
+
+
+# ── Headless calibration-file load (control API's data_viewer.load_calibration_file) ──
+
+def test_load_calibration_file_missing_raises(tab):
+    card = tab._geom_card
+    with pytest.raises(FileNotFoundError):
+        card.load_calibration_file("/no/such/file.json")
+
+
+def test_load_calibration_file_json_applies_full_geometry(tab, tmp_path):
+    card = tab._geom_card
+    calib = {
+        "wavelength_A": 0.1729, "Lsd": 200000.0, "pxY": 200.0,
+        "BC_y": 1024.0, "BC_z": 1030.0, "NrPixelsY": 2048, "NrPixelsZ": 2048,
+        "tx": 0.0, "ty": 0.5, "tz": -0.3, "im_trans": [1],
+    }
+    path = tmp_path / "calibration.json"
+    path.write_text(json.dumps(calib))
+
+    summary = card.load_calibration_file(str(path))
+
+    assert card._wl.value() == pytest.approx(0.1729)
+    assert card._lsd.value() == pytest.approx(200.0)   # Lsd field displays mm
+    assert card._px.value() == pytest.approx(200.0)
+    assert card._bcy.value() == pytest.approx(1024.0)
+    assert card._bcz.value() == pytest.approx(1030.0)
+    assert card._bc_auto.isChecked() is False
+    assert card._flip_y.isChecked() is True
+    assert card.has_calibration()               # tilts present -> full geometry loaded
+    assert "full integration" in summary["mode"]
+    assert summary["BC_y"] == pytest.approx(1024.0)
+
+
+def test_load_calibration_file_paramstest_txt(tab, tmp_path):
+    card = tab._geom_card
+    path = tmp_path / "paramstest.txt"
+    path.write_text("Lsd 150000.0\nBC 1000.0 1005.0\nWavelength 0.2\npx 150.0\n")
+
+    summary = card.load_calibration_file(str(path))
+
+    assert card._wl.value() == pytest.approx(0.2)
+    assert card._lsd.value() == pytest.approx(150.0)
+    assert card._bcy.value() == pytest.approx(1000.0)
+    assert card._bcz.value() == pytest.approx(1005.0)
+    # No NrPixelsY/Z in the file -> geometry_fields_from_file can't build a
+    # full geometry, so this falls back to scalar circle binning.
+    assert not card.has_calibration()
+    assert summary["mode"] == "scalar geometry (circle binning)"
+
+
+def test_load_calibration_file_unrecognised_content_raises(tab, tmp_path):
+    card = tab._geom_card
+    path = tmp_path / "junk.txt"
+    path.write_text("not a calibration file at all\n")
+    with pytest.raises(ValueError):
+        card.load_calibration_file(str(path))

@@ -1929,55 +1929,78 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         pyFAI .poni, or calibration.json file and apply it to the ring overlay and
         the radial integration."""
         path = self._calib_ed.text().strip()
-        if not path or not Path(path).exists():
-            QtWidgets.QMessageBox.warning(self, "No file", "Select a calibration file first.")
-            return
         try:
-            geo = read_geometry(path)
-            wl, lsd, px = geo["wavelength_A"], geo["Lsd_um"], geo["px_um"]
-            bcy, bcz = geo["BC_y"], geo["BC_z"]
-            if all(v is None for k, v in geo.items() if k != "im_trans"):
-                self._calib_lbl.setText("No recognised geometry in file.")
-                return
-            self._bc_auto.setChecked(False)   # geometry now comes from the file
-            lsd_mm = (lsd / 1000.0) if lsd is not None else None
-            for w, v in ((self._wl, wl), (self._lsd, lsd_mm), (self._px, px),
-                         (self._bcy, bcy), (self._bcz, bcz)):
-                if v is not None:
-                    w.blockSignals(True); w.setValue(float(v)); w.blockSignals(False)
-            im_trans = geo.get("im_trans") or []
-            self._flip_y.setChecked(1 in im_trans)
-            self._flip_z.setChecked(2 in im_trans)
-            self._transp.setChecked(3 in im_trans)
-            parts = []
-            if lsd is not None: parts.append(f"Lsd={float(lsd)/1000:.2f} mm")
-            if bcy is not None and bcz is not None:
-                parts.append(f"BC=({float(bcy):.1f}, {float(bcz):.1f})")
-            if wl is not None: parts.append(f"λ={float(wl):.5g} Å")
-            if px is not None: parts.append(f"px={float(px):.4g} µm")
-            self._calib_ctx_cache.clear()
-            try:
-                self._calib_geom = geometry_fields_from_file(path)
-                d = self._calib_geom
-                for w, key in ((self._ty, "ty"), (self._tz, "tz")):
-                    v = d.get(key)
-                    if v is not None:
-                        w.blockSignals(True); w.setValue(float(v)); w.blockSignals(False)
-                tilt = any(abs(float(d.get(k) or 0.0)) > 1e-9 for k in ("tx", "ty", "tz"))
-                mode = ("full integration: tilts"
-                        + ("+distortion" if d.get("distortion") else "")
-                        if (tilt or d.get("distortion"))
-                        else "full integration (geometry-correct)")
-            except Exception:
-                self._calib_geom = None
-                mode = "scalar geometry (circle binning)"
-            self._calib_lbl.setText(
-                f"Loaded {Path(path).suffix or 'file'} — " + "  ".join(parts)
-                + f"  ·  {mode}")
-            self._after_geometry_change()
+            self._apply_calibration_file(path)
+        except FileNotFoundError:
+            QtWidgets.QMessageBox.warning(self, "No file", "Select a calibration file first.")
+        except ValueError as e:
+            self._calib_lbl.setText(str(e))
         except Exception:
             import traceback
             show_error(self, "Calibration load error", traceback.format_exc())
+
+    def load_calibration_file(self, path: str) -> dict:
+        """Headless equivalent of typing a path into the calibration-file
+        field and loading it — never pops a dialog, used by the control API
+        (``control_api.op_data_viewer_load_calibration_file``). Raises
+        ``FileNotFoundError``/``ValueError`` on a missing or unrecognised
+        file instead, so a control-API caller gets a structured error."""
+        return self._apply_calibration_file(path)
+
+    def _apply_calibration_file(self, path: str) -> dict:
+        """Shared core of ``_load_calibration``/``load_calibration_file``:
+        read geometry (BC, Lsd, pixel size, wavelength) from a MIDAS
+        paramstest.txt, pyFAI .poni, or calibration.json file, apply it to
+        the ring overlay and radial integration, and return a summary dict.
+        Raises rather than showing a dialog — each caller decides how to
+        surface that."""
+        path = (path or "").strip()
+        if not path or not Path(path).exists():
+            raise FileNotFoundError("Select a calibration file first.")
+        geo = read_geometry(path)
+        wl, lsd, px = geo["wavelength_A"], geo["Lsd_um"], geo["px_um"]
+        bcy, bcz = geo["BC_y"], geo["BC_z"]
+        if all(v is None for k, v in geo.items() if k != "im_trans"):
+            raise ValueError("No recognised geometry in file.")
+        self._calib_ed.setText(path)
+        self._bc_auto.setChecked(False)   # geometry now comes from the file
+        lsd_mm = (lsd / 1000.0) if lsd is not None else None
+        for w, v in ((self._wl, wl), (self._lsd, lsd_mm), (self._px, px),
+                     (self._bcy, bcy), (self._bcz, bcz)):
+            if v is not None:
+                w.blockSignals(True); w.setValue(float(v)); w.blockSignals(False)
+        im_trans = geo.get("im_trans") or []
+        self._flip_y.setChecked(1 in im_trans)
+        self._flip_z.setChecked(2 in im_trans)
+        self._transp.setChecked(3 in im_trans)
+        parts = []
+        if lsd is not None: parts.append(f"Lsd={float(lsd)/1000:.2f} mm")
+        if bcy is not None and bcz is not None:
+            parts.append(f"BC=({float(bcy):.1f}, {float(bcz):.1f})")
+        if wl is not None: parts.append(f"λ={float(wl):.5g} Å")
+        if px is not None: parts.append(f"px={float(px):.4g} µm")
+        self._calib_ctx_cache.clear()
+        try:
+            self._calib_geom = geometry_fields_from_file(path)
+            d = self._calib_geom
+            for w, key in ((self._ty, "ty"), (self._tz, "tz")):
+                v = d.get(key)
+                if v is not None:
+                    w.blockSignals(True); w.setValue(float(v)); w.blockSignals(False)
+            tilt = any(abs(float(d.get(k) or 0.0)) > 1e-9 for k in ("tx", "ty", "tz"))
+            mode = ("full integration: tilts"
+                    + ("+distortion" if d.get("distortion") else "")
+                    if (tilt or d.get("distortion"))
+                    else "full integration (geometry-correct)")
+        except Exception:
+            self._calib_geom = None
+            mode = "scalar geometry (circle binning)"
+        self._calib_lbl.setText(
+            f"Loaded {Path(path).suffix or 'file'} — " + "  ".join(parts)
+            + f"  ·  {mode}")
+        self._after_geometry_change()
+        return {"wavelength_A": wl, "Lsd_um": lsd, "px_um": px,
+                "BC_y": bcy, "BC_z": bcz, "mode": mode}
 
     def get_full_geometry(self) -> Optional[dict]:
         """Public alias for ``_export_geom`` — the best-available full

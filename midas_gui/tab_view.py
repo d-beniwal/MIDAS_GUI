@@ -180,6 +180,19 @@ class DataViewerTab(QtWidgets.QWidget):
                 self, "Nothing to import",
                 "Nothing loaded in Calibrate (Hydra) yet — load data there first.")
 
+    def show_radial_profile_tab(self) -> None:
+        """Bring the Radial Profile bottom tab to the front — called by the
+        control API after ``data_viewer.get_radial_profile`` so a human
+        watching the GUI sees where that result landed, not just that the
+        Data Viewer tab is active."""
+        self._bottom_tabs.setCurrentWidget(self._profile_view)
+
+    def show_cake_tab(self) -> None:
+        """Bring the Eta vs R Cake bottom tab to the front — the cake
+        counterpart of ``show_radial_profile_tab``, called after
+        ``data_viewer.get_cake``."""
+        self._bottom_tabs.setCurrentWidget(self._cake_view)
+
     # ── GUI state (Save/Load GUI State) ─────────────────────────────
     def _state_widgets(self) -> dict:
         widgets = {

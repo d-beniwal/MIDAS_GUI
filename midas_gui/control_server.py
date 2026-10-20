@@ -145,12 +145,14 @@ class ControlServer(QtCore.QObject):
             self._reply(sock, {"id": req_id, "ok": False,
                                "error": {"message": str(e), "type": "malformed"}})
             return
-        # Bring the relevant tab to the front *before* dispatching, for both
-        # the sync and async paths below — a human watching should see what
-        # the agent is about to do, not have it happen off-screen on a tab
-        # that was never shown. Covers calibrate.wait/run_frozen_point_then_
-        # oneshot too, which bypass dispatch() below (see _ASYNC_OPS).
-        self.controller.ensure_tab_visible((op or "").split(".", 1)[0])
+        # Bring the relevant tab (and, for a handful of ops, the specific
+        # sub-view within it — see GuiController._OP_SUBFOCUS) to the front
+        # *before* dispatching, for both the sync and async paths below — a
+        # human watching should see what the agent is about to do, not have
+        # it happen off-screen on a tab that was never shown. Covers
+        # calibrate.wait/run_frozen_point_then_oneshot too, which bypass
+        # dispatch() below (see _ASYNC_OPS).
+        self.controller.ensure_tab_visible(op or "")
         if op in _ASYNC_OPS:
             self._dispatch_async(sock, req_id, op, args)
             return
