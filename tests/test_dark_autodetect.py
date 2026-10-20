@@ -283,7 +283,12 @@ MANUAL_OVERRIDE_LOGS = {
 def _log_pairs():
     """``[(log name, data path, dark path, dark loc)]`` from every screenlog."""
     out = []
-    for log in sorted(SCREEN_LOGS.glob("*.screenlog")):
+    # rglob, not glob: the corpus was reorganised into <beamline>/<expid>/
+    # subfolders, and a top-level glob silently matched NOTHING -- so all
+    # three screenlog tests skipped with "no resolvable runs in the corpus"
+    # while 311 logs sat one level down. A skip reads like absence, which is
+    # why this went unnoticed; the ladder's own regression tests were off.
+    for log in sorted(SCREEN_LOGS.rglob("*.screenlog")):
         text = _ESC.sub("", log.read_bytes().decode("utf-8", "replace")).replace("\r", "\n")
         data, dark = _DATA_RE.search(text), _DARK_RE.search(text)
         if not (data and dark):
