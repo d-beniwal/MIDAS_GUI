@@ -402,3 +402,54 @@ Also note its `consolidate_xy_and_cleanup` sweeps EVERY file it finds in a
 per-detector folder into `logs/`. The background job's `_bg_job_*`
 sidecars are written to the SCAN ROOT, not inside `ge{n}/`, so that sweep
 does not relocate them — keep it that way.
+
+## Background jobs and the dark: resolve at CURATION, not in the CLI
+
+Decided 2026-10-20, replacing an earlier plan to teach `batch_cli`
+`--auto-dark`/`--dark-dataset`/`--pick-origin`. That plan was
+over-engineered; the question that killed it was "can the job curation
+find the appropriate darks and then send out the jobs?"
+
+It can, and it should. `hydra_batch_page._run_as_job` already fans out
+**one `batch_cli` invocation per (scan, panel)** — see the `units` loop.
+So the GUI, which already holds the policy code, can resolve each scan's
+dark in-process and hand each invocation the right `--dark`. No new CLI
+surface at all.
+
+Three reasons this is better than resolving inside the job:
+
+1. **One implementation of the policy.** Teaching `batch_cli` to resolve
+   darks means `dark_policy` runs in two places and they can drift. The
+   whole point of this series was that two code paths answered the dark
+   question differently.
+2. **Failures surface before the job starts.** Resolve at curation and
+   you learn at submit time that 318 scans have no 10 s dark. Resolve in
+   the job and you find out hours later in a screenlog — which is how the
+   original `white_oct26` problem stayed invisible.
+3. **Nothing new crosses the process boundary.** The dark already goes
+   over as a pre-averaged TIFF; this only changes WHICH TIFF, and where
+   the `--dark` flag is attached.
+
+### What to change
+
+`_run_as_job` currently writes `_bg_job_dark_ge{n}.tif` once per panel
+and puts `--dark` in `base[n]`, shared by every scan. Move it:
+
+- drop `--dark` from `base[n]` (bright/background stay — they are not
+  per-file);
+- in the per-scan loop, resolve with `dark_policy.resolve` using
+  `self._loader.dark_request(n)` and that scan's first file;
+- **dedupe by resolved source path** and write one TIFF per distinct
+  dark. Naively writing one per (scan, panel) would be 190x4 files of
+  16 MB — 12 GB. White_oct26 has 11 darks, so deduped it is at most
+  11x4 = 44 TIFFs;
+- a panel whose dark will not resolve is omitted from that scan's unit,
+  collected, and reported through `mail.dark_skip_report` at submit time
+  rather than after the run;
+- the single-detector `tab_batch._run_as_job` needs the same treatment.
+
+### What stays true
+
+`batch_cli --dark` keeps its current meaning (one pre-averaged field),
+so an existing job script and an older CLI still work. Nothing about the
+job protocol changes.
