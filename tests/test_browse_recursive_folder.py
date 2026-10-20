@@ -201,3 +201,44 @@ def test_a_recursive_pick_does_not_feed_darks_in_as_data(app, tmp_path):
     picked._set_explicit_paths(paths, origin="files")
     assert len(picked.source_cfg()["paths"]) == 3, \
         "naming a dark by hand is a deliberate choice and must be honoured"
+
+
+def test_both_tabs_ask_the_same_question_about_the_dark(app, tmp_path):
+    """The bug this whole change exists to close.
+
+    BatchCorrectionWorker resolved a dark per input file through the
+    sibling ladder; BatchWorker (caking) took whatever array the GUI
+    handed it and applied that to every file, never calling the ladder at
+    all. The same selection therefore produced different corrections
+    depending on which tab ran it, and nothing said so.
+
+    Both now take a dark_request built by the one loader method, so the
+    question they ask is identical by construction.
+    """
+    import inspect
+    from midas_gui import workers as W
+    from midas_gui.widgets import DataLoaderPanel
+
+    for cls in (W.BatchCorrectionWorker, W.BatchWorker, W.BatchRunCoordinator):
+        assert "dark_request" in inspect.signature(cls.__init__).parameters, cls
+
+    p = DataLoaderPanel(mode="stream")
+    p._set_explicit_paths([str(tmp_path / "a.tif")], origin="folder_recursive")
+    p._pick_root = str(tmp_path)
+    req = p.dark_request()
+    assert req.origin == "folder_recursive"
+    assert req.search_root == str(tmp_path)
+
+    from midas_gui import dark_policy as D
+    assert D.wants_auto(req), "a traversal must resolve per file in BOTH tabs"
+
+
+def test_an_unresolvable_dark_is_collected_rather_than_swallowed(app, tmp_path):
+    """Both workers expose dark_skipped so the caller can report it. A
+    skip that only appears in a log scrollback is a silent skip."""
+    import inspect
+    from midas_gui import workers as W
+    for cls in (W.BatchCorrectionWorker, W.BatchWorker):
+        src = inspect.getsource(cls.__init__)
+        assert "self.dark_skipped = []" in src, \
+            f"{cls.__name__} does not initialise dark_skipped"
