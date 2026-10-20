@@ -4277,6 +4277,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._registry_label = ""      # this panel's own label in the registry
         self._explicit_paths = None    # list[str], set by a Browse… "Multiple files"/"stem" pick
         self._stem_filter = None       # str, "stream" mode's live filestem filter (see _raw_source)
+        self._pick_origin = None       # how the source was PICKED — see pick_origin()
         self._external = None          # another DataLoaderPanel this one delegates to, or None
         self._buffer_snapshot_file = None  # temp .h5 path from importing an external buffer (stream mode)
         self._buffer = None            # deque(maxlen=N) once "Use Buffer" is on
@@ -4678,12 +4679,19 @@ class DataLoaderPanel(QtWidgets.QWidget):
             return str(Path(text) / "**" / (self._stem_filter + "*"))
         return text
 
-    def _set_explicit_paths(self, paths):
+    def _set_explicit_paths(self, paths, origin=None):
         """``paths`` is a resolved ``list[str]`` (Multiple files / stem
         match) or None to fall back to the plain path text. Uses
         blockSignals so the summary text it writes doesn't itself clear
-        ``_explicit_paths`` via ``_on_path_changed``."""
+        ``_explicit_paths`` via ``_on_path_changed``.
+
+        ``origin`` records WHICH pick produced the list. A recursive
+        "Full folder" pick and a hand-made "Multiple files" pick both
+        arrive here as a flat list and were, until this argument existed,
+        indistinguishable afterwards — see :meth:`pick_origin`.
+        """
         self._explicit_paths = paths
+        self._pick_origin = origin if paths else None
         self._path_ed.blockSignals(True)
         if paths:
             self._path_ed.setText(display_text_for_paths(paths))
@@ -4691,6 +4699,36 @@ class DataLoaderPanel(QtWidgets.QWidget):
         else:
             self._path_ed.setToolTip("")
         self._path_ed.blockSignals(False)
+
+    def pick_origin(self) -> str:
+        """How the current source was chosen: ``"file"``, ``"files"``,
+        ``"folder"``, ``"folder_recursive"`` or ``"stem"``.
+
+        This is a *provenance* answer, not a shape answer, and the two
+        differ in exactly the case that matters: a recursive folder pick
+        and a multi-file pick both resolve to a flat ``list[str]``, so
+        nothing downstream could tell a traversal from a hand-picked set.
+        ``dark_policy`` keys off this to decide whether a dark is resolved
+        per file or taken from the Dark field, so losing it silently
+        changes which dark is subtracted.
+
+        A path typed straight into the box has no recorded origin, so it
+        is classified on read rather than on every keystroke.
+        """
+        from pathlib import Path
+        if self._pick_origin:
+            return self._pick_origin
+        if self._stem_filter:
+            return "stem"
+        raw = self._raw_source()
+        if isinstance(raw, list):
+            return "files"
+        try:
+            if raw and Path(raw).is_dir():
+                return "folder"
+        except OSError:
+            pass
+        return "file"
 
     def _set_stem_filter(self, folder, stem):
         """"stream" mode (Batch Integrate) only: keep a filestem pick as a
@@ -4700,6 +4738,8 @@ class DataLoaderPanel(QtWidgets.QWidget):
         ``_set_explicit_paths`` so writing ``folder`` into the path field
         doesn't itself clear ``_stem_filter`` via ``_on_path_changed``."""
         self._stem_filter = stem or None
+        if stem:
+            self._pick_origin = "stem"
         self._path_ed.blockSignals(True)
         if stem:
             self._path_ed.setText(folder)
@@ -4727,7 +4767,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
             if not paths:
                 return
             self._set_stem_filter(None, None)
-            self._set_explicit_paths(paths)
+            self._set_explicit_paths(paths, origin="folder_recursive")
         elif mode == "folder":
             self._set_explicit_paths(None)
             self._set_stem_filter(None, None)
@@ -4745,7 +4785,12 @@ class DataLoaderPanel(QtWidgets.QWidget):
             if not paths:
                 return
             self._set_stem_filter(None, None)
-            self._set_explicit_paths(paths)
+            # Both resolve to a flat list, but they are not the same pick:
+            # a stem match globs <folder>/**/<stem>* and crosses subfolder
+            # boundaries whatever the "Include subfolders" box says, so it
+            # resolves a dark per file. A hand-picked set does not.
+            self._set_explicit_paths(
+                paths, origin=("stem" if mode == "stem" else "files"))
         self._update_combine_visibility()
         self._load()
 
@@ -4796,6 +4841,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
         # sets its own summary text via blockSignals, so this never races it.
         self._explicit_paths = None
         self._stem_filter = None
+        self._pick_origin = None
         h5 = is_h5(p)
         self._ds_row.setVisible(h5)
         if self._folder_format_filter:
@@ -5640,6 +5686,20 @@ class DataLoaderPanel(QtWidgets.QWidget):
         return self._live_frame_update
 
     def source_cfg(self) -> dict:
+        """The source descriptor, with the pick's provenance attached.
+
+        ``pick_origin`` rides along on every shape of cfg because the dark
+        a run subtracts depends on it (``dark_policy``), and the cfg is the
+        only thing that reaches a worker or a background job. Computing it
+        here rather than in each branch below keeps the five return paths
+        from drifting apart.
+        """
+        cfg = self._source_cfg_shape()
+        if cfg:
+            cfg["pick_origin"] = self.pick_origin()
+        return cfg
+
+    def _source_cfg_shape(self) -> dict:
         """Streaming source descriptor for BatchWorker (stream mode).
 
         An explicit "Multiple files" pick (an arbitrary list — see
@@ -5687,7 +5747,12 @@ class DataLoaderPanel(QtWidgets.QWidget):
         # beamline stores them alongside the scan they bracket) — see
         # helpers.is_dark_like_name. An explicit multi-file pick is left
         # alone: naming a dark file by hand is a deliberate choice.
-        if not isinstance(raw, list):
+        #
+        # Keyed on the PICK, not on whether raw happens to be a list: a
+        # recursive folder pick resolves to a list and so used to escape
+        # this filter entirely, feeding the scan's own dark_before files
+        # in as data. That is the one pick most likely to sweep them up.
+        if self.pick_origin() != "files":
             kept = [p for p in paths if not is_dark_like_name(p)]
             self._n_dark_skipped = len(paths) - len(kept)
             paths = kept
@@ -5705,7 +5770,10 @@ class DataLoaderPanel(QtWidgets.QWidget):
                 cfg["frame_start"], cfg["frame_end"] = self._frame_number_bounds(h5_paths)
             return cfg
         if isinstance(raw, list):
-            cfg = {"type": "tiff_list", "paths": list(raw)}
+            # `paths`, not `raw`: the dark-stripping above rebinds `paths`,
+            # and returning the original list here silently undid it. That
+            # was invisible while the filter only ran for non-list sources.
+            cfg = {"type": "tiff_list", "paths": list(paths)}
         else:
             cfg = {"type": "tiff_glob", "path": raw}
         if self._unify_combine:
@@ -6174,6 +6242,11 @@ class DataLoaderPanel(QtWidgets.QWidget):
         }
         if self._explicit_paths:
             st["explicit_paths"] = list(self._explicit_paths)
+        if self._pick_origin:
+            # Without this a reloaded project keeps the file list but
+            # forgets it came from a traversal, and silently drops from
+            # per-file dark resolution to the Dark field.
+            st["pick_origin"] = self._pick_origin
         if self._folder_format_filter and self._folder_format:
             st["folder_format"] = self._folder_format
         if self._mode == "stream" and self._stem_filter:
@@ -6199,12 +6272,13 @@ class DataLoaderPanel(QtWidgets.QWidget):
         if not state:
             return
         explicit = state.get("explicit_paths")
+        origin = state.get("pick_origin")
         stem_filter = state.get("stem_filter") if self._mode == "stream" else None
         path = state.get("path", "")
         if self._folder_format_filter:
             self._folder_format = state.get("folder_format")
         if explicit:
-            self._set_explicit_paths(list(explicit))
+            self._set_explicit_paths(list(explicit), origin=origin)
             if state.get("dataset"):
                 self._ds_combo.setEditText(state["dataset"])
             self._load()
