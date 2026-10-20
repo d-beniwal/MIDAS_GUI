@@ -319,12 +319,43 @@ def reduce_chunk(frames, op: str = "mean", *, dark=None, bright=None,
 NO_DARK = "no dark found — correcting without one"
 
 
+def is_degenerate_dark(arr) -> bool:
+    """Is this array a placeholder rather than a measurement?
+
+    Rejects three shapes of non-dark that used to be accepted, each of
+    which then WON over the user's own Dark field — because a successful
+    rung never falls through to the next one:
+
+    * **all zero.** Every raw file in the ``white_oct26`` set carries an
+      ``exchange/data_dark`` of 2048x2048 zeros, and so rung 2 silently
+      beat rung 3 for that whole experiment.
+    * **constant.** A uniform non-zero plane is equally unphysical for a
+      real detector dark (a GE panel's offset has structure; its own
+      spatial std is tens of counts), and it is what a half-written
+      placeholder looks like.
+    * **not finite.** ``average_field`` on an empty ``(0, H, W)`` stack
+      returns an all-NaN plane of the right shape and ndim, which passed
+      every check here and would have poisoned every corrected frame.
+
+    Deliberately NOT a plausibility test on the magnitude: a dark is
+    allowed to be unusual, it just has to be a measurement. The
+    "102 dark-less folders" self-dark convention the ladder relies on
+    (see the survey above) uses files whose ``data_dark`` holds real
+    pixels, so none of it is affected.
+    """
+    a = np.asarray(arr)
+    if a.size == 0 or not np.isfinite(a).all():
+        return True
+    return bool(a.min() == a.max())
+
+
 def _mean_dark(path, dataset: str, shape) -> Optional[np.ndarray]:
-    """Mean of ``dataset`` in ``path``, or None if unreadable/absent/wrong shape.
+    """Mean of ``dataset`` in ``path``, or None if it is not a usable dark.
 
     A shape mismatch drops to the next rung rather than raising — the same
     skip-and-warn contract ``apply_field_corrections`` applies to a field
-    left over from a different detector.
+    left over from a different detector. A DEGENERATE plane drops through
+    the same way, for the same reason: see :func:`is_degenerate_dark`.
     """
     try:
         arr = np.asarray(average_field("hdf5", str(path), dataset), dtype=np.float32)
@@ -333,6 +364,8 @@ def _mean_dark(path, dataset: str, shape) -> Optional[np.ndarray]:
     if arr.ndim != 2 or arr.size == 0:
         return None
     if shape is not None and tuple(arr.shape) != tuple(shape):
+        return None
+    if is_degenerate_dark(arr):
         return None
     return arr
 
