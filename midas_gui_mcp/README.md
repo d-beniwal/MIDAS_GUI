@@ -44,6 +44,105 @@ Python.
    (stdio transport, e.g. `claude mcp add --transport stdio midas-gui -- 
    /path/to/.venv/bin/python /path/to/midas_gui_mcp/server.py`).
 
+## Wiring this into APEXA
+
+[APEXA](https://github.com/d-beniwal/APEXA-APS-Beamline-Assistant) (the
+beamline-assistant orchestrator at
+`~/ANL-research/github/APEXA-APS-Beamline-Assistant`) already speaks MCP
+natively — every one of its existing capabilities (MIDAS CLI tools, GSAS-II,
+tomography, EPICS motors, filesystem) is itself a stdio MCP server spawned
+by `argo_mcp_client.py::APEXAClient` using the standard `mcp` SDK
+(`StdioServerParameters` / `stdio_client` / `ClientSession`, the same
+pattern this package's own `server.py` implements the other end of). There
+is no APEXA-specific adapter to write — `midas_gui_mcp/server.py` is a
+conformant MCP server and APEXA can spawn it exactly like any of its own
+servers.
+
+### 1. Add one line to APEXA's `servers.config`
+
+APEXA's server registry is a plain `name:path/to/server.py` text file at
+the repo root, parsed identically by `launch.py`, `web_server.py`,
+`gradio_ui.py`, and `trame_ui.py`. Add:
+
+```
+midas_gui:/Users/dbeniwal/ANL-research/github/midas-gui/midas_gui_mcp/server.py
+```
+
+**Use `midas_gui`, not `midas`** — APEXA already has a `midas` entry
+(`midas:midas_comprehensive_server.py`) wrapping the official MIDAS CLI
+executables for FF/NF/PF-HEDM. That is a different, lower-level tool
+surface than this package, which drives the *running GUI process*
+(Data Viewer + Calibrate tabs) via its control socket. Keeping the names
+distinct keeps the two apart in APEXA's tool list, where tools show up
+prefixed by server name, e.g. `[MIDAS_GUI] data_viewer_load_file` vs.
+`[MIDAS] ...`.
+
+An absolute path is required (and works — `servers.config` lines resolve
+relative paths against APEXA's own root, but accept absolute ones
+unchanged), since `midas_gui_mcp/server.py` lives in a sibling repo, not
+inside APEXA.
+
+### 2. No extra dependency install needed in APEXA's venv
+
+APEXA spawns every server script with its *own* interpreter —
+`argo_mcp_client.py`'s `_server_command()` resolves `.venv/bin/python3`
+relative to APEXA's own working directory (or `sys.executable` — the
+uv-managed venv — when run via `uv run`), not a per-server venv referenced
+in `servers.config`. That interpreter already has `mcp==2.2.0` (via APEXA's
+own `uv.lock`), which satisfies `midas_gui_mcp/requirements.txt`'s
+`mcp>=2.0.0`, and `client.py` (the only other import `server.py` makes) is
+pure standard library (`socket`/`json`/`pathlib`) — zero extra dependencies.
+So `midas_gui_mcp/.venv` (built in step 2 of "Running it" above) is **not**
+used when APEXA is the one spawning `server.py`; it only matters for
+standalone/manual runs or registration with a different MCP client.
+
+If this package ever gains a real third-party dependency beyond `mcp`,
+either `uv add <dep>` it into APEXA's own environment, or point
+`servers.config` at a tiny wrapper script that `exec`s
+`midas_gui_mcp/.venv/bin/python server.py` instead of the bare `.py` file —
+`_server_command()` only special-cases files ending in `.py`, so a wrapper
+with no `.py` suffix falls through to being run as `node`, which is wrong;
+the actual escape hatch is to make the wrapper itself end in `.py` and
+`os.execv()` the dedicated venv's interpreter on the real `server.py`.
+
+### 3. Environment is fine as-is
+
+`_connect_one_server()` spawns each server with `env=None`, which makes the
+`mcp` SDK fall back to a minimal inherited environment
+(`HOME, LOGNAME, PATH, SHELL, TERM, USER` on Unix) rather than APEXA's full
+`.env`-loaded process environment. That would be a problem for a server
+that reads a custom env var — but `client.py` only needs `HOME`, to locate
+the discovery file at `~/.midas_gui/midas_gui_control_v1.sock_path`, and
+`HOME` is one of the vars always passed through. No patch to
+`argo_mcp_client.py` is required.
+
+### 4. Startup order and failure mode
+
+APEXA can spawn `midas_gui_mcp/server.py` and complete the MCP handshake
+(`initialize`, `list_tools`) regardless of whether midas-gui itself is
+running yet — the control-socket connection is made lazily, on the first
+actual tool call (see `server.py`'s `_call()`). So:
+
+- Start `midas-gui` with `MIDAS_GUI_CONTROL=1` (step 1 above) before asking
+  the agent to actually drive it, but it's fine to start APEXA first.
+- If a tool is called before midas-gui is up (or after it's been closed),
+  every `data_viewer_*`/`calibrate_*` tool call returns a normal MCP tool
+  result — not a crash — with
+  `{"ok": false, "error": {"type": "connection_failed", "message": "..."}}`,
+  which APEXA's orchestrator sees like any other tool error and can
+  relay/retry.
+
+### 5. What APEXA's agent sees
+
+Once registered, APEXA's tool list gains one entry per `@mcp.tool()` in
+`server.py` (`data_viewer_load_file`, `data_viewer_start_live`,
+`calibrate_run`, `calibrate_wait`, etc. — see "Operations (phase 1)" below
+for the authoritative list), each described with its own docstring and
+prefixed `[MIDAS_GUI]` the same way APEXA prefixes every other server's
+tools. From the agent's perspective it's just more tools in the same
+registry as its MIDAS CLI, GSAS-II, and EPICS motor tools — nothing about
+the orchestration loop, planning, or tool-choice logic needs to change.
+
 ## Wire protocol (the actual contract)
 
 One JSON object per line, both directions, over the Unix domain socket
