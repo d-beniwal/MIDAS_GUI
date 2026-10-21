@@ -86,10 +86,19 @@ class DarkRequest:
 
 @dataclass(frozen=True)
 class DarkChoice:
-    """``status`` is ``"ok"`` or ``"skipped"``; ``why`` is always sayable."""
+    """``status`` is ``"ok"`` or ``"skipped"``; ``why`` is always sayable.
+
+    ``source`` is the file the pixels came from, when one is known. It is
+    separate from ``why`` on purpose: ``why`` is prose and embeds a
+    per-step distance ("3 scans away"), so it IDENTIFIES nothing and
+    cannot be used as a cache key. Keying on it wrote one TIFF per step
+    instead of one per dark — caught by
+    test_many_steps_sharing_one_dark_write_one_tiff.
+    """
     array: Optional[np.ndarray]
     why: str
     status: str = "ok"
+    source: Optional[str] = None
 
     @property
     def skipped(self) -> bool:
@@ -140,13 +149,13 @@ def resolve(file_path, req: DarkRequest, *, shape=None) -> DarkChoice:
                         "skipped")
                 arr = _peek_shaped(path, req.dataset, shape)
                 if arr is not None:
-                    return DarkChoice(arr, why)
+                    return DarkChoice(arr, why, source=str(path))
             return DarkChoice(None, _skip_reason(file_path, req), "skipped")
         arr, why = resolve_dark(file_path, dark_dataset=req.dataset,
                                 shape=shape, fallback=None, auto=True)
         if arr is None:
             return DarkChoice(None, _skip_reason(file_path, req), "skipped")
-        return DarkChoice(arr, why)
+        return DarkChoice(arr, why, source=why)
 
     if req.array is None:
         # Explicit mode with nothing chosen is a legitimate run — correcting
@@ -154,7 +163,7 @@ def resolve(file_path, req: DarkRequest, *, shape=None) -> DarkChoice:
         return DarkChoice(None, "no Dark field set — correcting without one")
     arr, why = resolve_dark(file_path, dark_dataset=req.dataset, shape=shape,
                             fallback=req.array, auto=False)
-    return DarkChoice(arr, why)
+    return DarkChoice(arr, why, source=(req.path or "loader Dark field"))
 
 
 #: Exposures this close (relative) count as the same acquisition setting.
@@ -301,3 +310,61 @@ def panel_dark_path(anchor, n) -> tuple:
     if not os.path.isfile(cand):
         return None, f"{panel_token(n)} dark not found: {cand}"
     return cand, f"{panel_token(n)} dark derived from the anchor: {cand}"
+
+
+class DarkTiffCache:
+    """Resolve a dark per job step and write one TIFF per DISTINCT dark.
+
+    A background job hands its dark across the process boundary as a
+    pre-averaged TIFF. Resolving per step means many steps, but not many
+    DARKS: a 190-scan four-panel run has at most a handful of distinct
+    darks between them, and writing one 16 MB file per (scan, panel)
+    would put ~12 GB of near-identical copies on a beamline share.
+
+    Lives here, rather than inline in each tab, because both the Hydra
+    and single-detector job builders need exactly this and a second copy
+    is how two code paths start answering the dark question differently
+    -- the bug this whole module exists to prevent.
+    """
+
+    def __init__(self, out_dir, prefix: str = "_bg_job_dark"):
+        self._dir = out_dir
+        self._prefix = prefix
+        self._by_dark: dict = {}
+        self.skipped: list = []
+
+    def written(self) -> int:
+        """How many TIFFs were actually written — the dedupe, measurable."""
+        return len(self._by_dark)
+
+    def arg_for(self, probe, request, *, fallback=None, tag: str = ""):
+        """``["--dark", path]`` for one step.
+
+        Returns ``[]`` when the step legitimately has no dark (explicit
+        mode with nothing chosen), and ``None`` when it could not be
+        resolved — the caller must then drop that step and report it,
+        never fall back to another scan's dark.
+        """
+        import numpy as _np
+        import tifffile as _tiff
+        from midas_gui.frame_correct import acquisition_exposure
+        import dataclasses
+        req = dataclasses.replace(request, exposure=acquisition_exposure(probe))
+        choice = resolve(probe, req)
+        if choice.skipped:
+            self.skipped.append((str(probe), choice.why))
+            return None
+        if choice.array is None:
+            return []
+        # Keyed on the resolved SOURCE, not on `why`: why is prose and
+        # embeds a per-step distance, so it identifies nothing. Keying on
+        # it wrote one TIFF per step rather than one per dark.
+        key = (tag, choice.source or choice.why)
+        path = self._by_dark.get(key)
+        if path is None:
+            name = f"{self._prefix}{('_' + tag) if tag else ''}" \
+                   f"_{len(self._by_dark):03d}.tif"
+            path = self._dir / name
+            _tiff.imwrite(str(path), _np.asarray(choice.array, dtype=_np.float32))
+            self._by_dark[key] = path
+        return ["--dark", str(path)]
