@@ -2550,8 +2550,11 @@ class BatchTab(QtWidgets.QWidget):
             mask_path = out_path / "_bg_job_mask.tif"
             tifffile.imwrite(str(mask_path), mask.astype("uint8"))
             argv += ["--mask", str(mask_path)]
-        for name, arr in (("dark", self._loader.dark()), ("bright", self._loader.bright()),
-                         ("background", self._loader.background())):
+        # Bright and background are properties of the RUN. The dark is not:
+        # it belongs to the source folder, and is attached per target below
+        # so a recursive pick spanning many folders gets each folder's own.
+        for name, arr in (("bright", self._loader.bright()),
+                          ("background", self._loader.background())):
             if arr is not None:
                 p = out_path / f"_bg_job_{name}.tif"
                 tifffile.imwrite(str(p), np.asarray(arr, dtype=np.float32))
@@ -2572,7 +2575,34 @@ class BatchTab(QtWidgets.QWidget):
         except Exception:
             total = self._loader.n_frames() or 1
 
-        argvs = [argv + _target_args(gp, gd) for gd, gp in targets]
+        # Resolved at curation rather than inside the job: the GUI holds
+        # the policy and already emits one batch_cli invocation per source
+        # folder, so resolving here keeps ONE implementation and surfaces
+        # an unresolvable dark now instead of in a screenlog hours later.
+        # See .context/ROADMAP.md, "Background jobs and the dark".
+        from midas_gui.dark_policy import DarkTiffCache
+        dark_cache, argvs = DarkTiffCache(out_path), []
+        for gd, gp in targets:
+            if not gp:
+                # An empty group carries no file to resolve a dark
+                # against. It was harmless before this loop existed and
+                # must stay harmless: pass it through untouched rather
+                # than indexing gp[0].
+                argvs.append(argv + _target_args(gp, gd))
+                continue
+            darg = dark_cache.arg_for(gp[0], self._loader.dark_request())
+            if darg is None:
+                continue          # no valid dark — this folder is skipped
+            argvs.append(argv + darg + _target_args(gp, gd))
+        if dark_cache.skipped and not self._confirm_dark_skips(
+                dark_cache.skipped):
+            return
+        if not argvs:
+            QtWidgets.QMessageBox.warning(
+                self, "Nothing to run",
+                "No selected folder has a usable dark, so there is nothing "
+                "to submit. See the Log for what was rejected and why.")
+            return
         # The results sidecar on the FIRST step only. JobQueuePanel records
         # one out_dir per job -- targets[0] -- so that is the only step whose
         # _bg_job_results.npz "Load results" can ever open. Writing one per
@@ -2708,6 +2738,27 @@ class BatchTab(QtWidgets.QWidget):
             self._log.append(f"[batch] Run log: {dest}")
         except Exception as exc:
             self._log.append(f"[batch] Could not archive the job log: {exc}")
+
+    def _confirm_dark_skips(self, skipped) -> bool:
+        """Show what will NOT be integrated, and let the user stop.
+
+        Submitting a job that quietly covers less than the selection
+        would be its own silent failure, which is the thing this whole
+        change is against.
+        """
+        self._report_dark_skips(skipped)
+        first = "\n".join(f"  {Path(p).name}: {w}" for p, w in skipped[:6])
+        more = f"\n  ... and {len(skipped) - 6} more." if len(skipped) > 6 else ""
+        btn = QtWidgets.QMessageBox.warning(
+            self, "Some folders have no valid dark",
+            f"{len(skipped)} source folder(s) will NOT be integrated because "
+            f"no valid dark could be resolved:\n\n{first}{more}\n\n"
+            f"They are skipped rather than corrected with another scan's "
+            f"dark, which would look plausible and be wrong.\n\n"
+            f"Submit the job for the remaining folders?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
+            QtWidgets.QMessageBox.Yes)
+        return btn == QtWidgets.QMessageBox.Yes
 
     def _report_dark_skips(self, skipped):
         """Say, loudly, which sources ran without being integrated.

@@ -50,6 +50,7 @@ from midas_gui.hydra_widgets import (HydraLoaderPanel, HydraDetectorToolbar,
 from midas_gui.hydra_batch_widgets import (HydraBatchPanelCard,
                                            HydraCakingSummary)
 from midas_gui.job_queue import JobQueuePanel
+from midas_gui.dark_policy import DarkTiffCache
 from midas_gui import hydra_zarr_combine
 from midas_gui.workers import BatchRunCoordinator, write_all_profiles, REBIN_UNITS
 from midas_gui import cake_params
@@ -1882,8 +1883,10 @@ class HydraBatchPage(QtWidgets.QWidget):
                 p = root / f"_bg_job_mask_ge{n}.tif"
                 tifffile.imwrite(str(p), mask.astype("uint8"))
                 a += ["--mask", str(p)]
-            for name, arr in (("dark", self._loader.dark(n)),
-                              ("bright", self._loader.bright(n)),
+            # Bright and background are properties of the RUN, so one per
+            # panel is right. The dark is not: it belongs to the scan, and
+            # is attached per (scan, panel) in the units loop below.
+            for name, arr in (("bright", self._loader.bright(n)),
                               ("background", self._loader.background(n))):
                 if arr is not None:
                     p = root / f"_bg_job_{name}_ge{n}.tif"
@@ -1901,6 +1904,16 @@ class HydraBatchPage(QtWidgets.QWidget):
         # That is the real dependency shape -- four independent panels, and
         # a merge that needs all four -- so the launcher can overlap them
         # without any ordering risk (job_queue._parallel_script).
+        # The dark is resolved HERE, at curation, rather than inside the
+        # job. The GUI already holds the policy code and already emits one
+        # batch_cli invocation per (scan, panel), so teaching batch_cli to
+        # resolve darks would put dark_policy in two places that can
+        # drift -- which is the bug this whole series fixed. Resolving now
+        # also means an unresolvable dark is reported at SUBMIT time
+        # instead of hours later in a screenlog. See .context/ROADMAP.md,
+        # "Background jobs and the dark".
+        dark_cache = DarkTiffCache(root)
+
         units, argvs = [], []
         for out_dir, panel_paths in scans:
             ran, par = [], []
@@ -1908,7 +1921,11 @@ class HydraBatchPage(QtWidgets.QWidget):
                 paths = list(panel_paths.get(n) or [])
                 if not paths or n not in base:
                     continue
-                par.append(base[n] + self._source_job_args(n, paths)
+                darg = dark_cache.arg_for(
+                    paths[0], self._loader.dark_request(n), tag=f"ge{n}")
+                if darg is None:
+                    continue          # no valid dark — this panel is skipped
+                par.append(base[n] + darg + self._source_job_args(n, paths)
                            + ["--out-dir", str(Path(out_dir) / f"ge{n}")])
                 ran.append(n)
             if not par:
@@ -1942,6 +1959,13 @@ class HydraBatchPage(QtWidgets.QWidget):
             ).n_frames) or 1
         except Exception:
             pass
+
+        # Before launching, not after: the whole reason the dark is
+        # resolved at curation is that an unresolvable one should cost a
+        # dialog now rather than a surprise in a screenlog in three hours.
+        if dark_cache.skipped and not self._confirm_dark_skips(
+                dark_cache.skipped):
+            return
 
         n_par = max(1, int(self._job_scans.value()))
         job = self._job_queue.launch(
@@ -2045,6 +2069,45 @@ class HydraBatchPage(QtWidgets.QWidget):
         except OSError as exc:
             self._log.append(f"[hydra] Note: could not write {root}/logs/ "
                              f"command log ({exc}); the job is unaffected.")
+
+    def _confirm_dark_skips(self, skipped) -> bool:
+        """Show what will NOT be integrated, and let the user stop.
+
+        Returns True to go ahead with the rest. A skip is the deliberate
+        outcome when no valid dark exists -- integrating with another
+        scan's dark produces a plausible and wrong answer -- but
+        submitting a job that quietly covers less than the selection
+        would be its own silent failure.
+        """
+        from midas_gui import settings
+        from midas_gui.mail import dark_skip_report, send_mail
+        self._log.append(f"[hydra] {len(skipped)} (scan, panel) step(s) have "
+                         f"no valid dark and will NOT be integrated:")
+        for path, why in skipped[:20]:
+            self._log.append(f"[hydra]     {Path(path).name}: {why}")
+        if len(skipped) > 20:
+            self._log.append(f"[hydra]     ... and {len(skipped) - 20} more.")
+        try:
+            addr = settings.get_notify_email()
+        except Exception:
+            addr = ""
+        if addr:
+            subject, body = dark_skip_report(skipped, context="Hydra batch job")
+            if send_mail(subject, body, addr):
+                self._log.append(f"[hydra] Skip report sent to {addr}.")
+        first = "\n".join(f"  {Path(p).name}: {w}" for p, w in skipped[:6])
+        more = (f"\n  ... and {len(skipped) - 6} more."
+                if len(skipped) > 6 else "")
+        btn = QtWidgets.QMessageBox.warning(
+            self, "Some steps have no valid dark",
+            f"{len(skipped)} step(s) will NOT be integrated because no valid "
+            f"dark could be resolved for them:\n\n{first}{more}\n\n"
+            f"They are skipped rather than corrected with another scan's "
+            f"dark, which would look plausible and be wrong.\n\n"
+            f"Submit the job for the remaining steps?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
+            QtWidgets.QMessageBox.Yes)
+        return btn == QtWidgets.QMessageBox.Yes
 
     def _shared_job_args(self) -> list:
         """The run settings that are the same for every panel and every scan
