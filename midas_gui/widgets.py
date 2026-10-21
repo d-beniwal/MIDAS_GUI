@@ -1007,11 +1007,24 @@ def _install_manual_axis_capture(plot_widget: "pg.PlotWidget", callback):
     caller mirror the result, e.g. to remember it as the range an Auto/Manual
     toggle button pair (see :func:`_add_auto_manual_buttons`) should hold and
     restore.
+
+    Reads the literal text out of the menu's own min/max fields rather than
+    the ViewBox's post-edit ``viewRange()`` — a caller that clamps pan/zoom to
+    the held manual range (see ``_apply_manual_range`` below) has already
+    locked in the *previous* range by the time pyqtgraph's own handler tries
+    to apply the newly typed one, so ``viewRange()`` here would just read back
+    that stale clamp instead of what the user actually typed.
     """
     vb = plot_widget.getViewBox()
 
     def _captured(*_):
-        (xmin, xmax), (ymin, ymax) = vb.viewRange()
+        try:
+            xmin = float(vb.menu.ctrl[0].minText.text())
+            xmax = float(vb.menu.ctrl[0].maxText.text())
+            ymin = float(vb.menu.ctrl[1].minText.text())
+            ymax = float(vb.menu.ctrl[1].maxText.text())
+        except ValueError:
+            (xmin, xmax), (ymin, ymax) = vb.viewRange()
         callback(xmin, xmax, ymin, ymax)
 
     for axis in (0, 1):
@@ -2114,6 +2127,7 @@ class ProfileViewer(QtWidgets.QWidget):
         # "Manual" min/max fields rather than a separate row of spin boxes.
         self._manual_mode = False
         self._manual_range: Optional[tuple] = None   # (xmin, xmax, ymin, ymax)
+        self._auto_limits: Optional[tuple] = None      # last auto-fit extent
 
         self._plot = pg.PlotWidget(background="k")
         self._plot.setLabel("left", "Mean intensity")
@@ -2243,10 +2257,15 @@ class ProfileViewer(QtWidgets.QWidget):
 
     def _on_manual_clicked(self):
         """"M" clicked — switch to Manual, or (on a reclick) snap back to the
-        exact limits held from the axes' native "Manual" min/max fields."""
+        exact limits held from the axes' native "Manual" min/max fields.
+        The first time Manual is engaged, its limits default to Auto's
+        current fit rather than some arbitrary range."""
         if self._manual_range is None:
-            (xmin, xmax), (ymin, ymax) = self._plot.getViewBox().viewRange()
-            self._manual_range = (xmin, xmax, ymin, ymax)
+            if self._auto_limits is not None:
+                self._manual_range = self._auto_limits
+            else:
+                (xmin, xmax), (ymin, ymax) = self._plot.getViewBox().viewRange()
+                self._manual_range = (xmin, xmax, ymin, ymax)
         self._manual_mode = True
         self._apply_manual_range()
 
@@ -2258,15 +2277,25 @@ class ProfileViewer(QtWidgets.QWidget):
         self._replot()
 
     def _apply_manual_range(self):
-        """Force the exact held manual limits, unclamped by any pan/zoom bound."""
+        """Force the held manual limits as the current view, and clamp
+        pan/zoom to them — the user can still zoom in within the limits, but
+        can't pan or zoom out past them."""
         if self._manual_range is None:
             return
         xmin, xmax, ymin, ymax = self._manual_range
+        if xmax <= xmin:
+            xmax = xmin + 1.0
+        if ymax <= ymin:
+            ymax = ymin + 1.0
         vb = self._plot.getPlotItem().getViewBox()
+        # Release any limits left over from a previous manual range first, so
+        # the range below can't be clamped by a now-stale bound.
         vb.setLimits(xMin=None, xMax=None, yMin=None, yMax=None,
                      maxXRange=None, maxYRange=None)
         self._plot.setXRange(xmin, xmax, padding=0)
         self._plot.setYRange(ymin, ymax, padding=0)
+        vb.setLimits(xMin=xmin, xMax=xmax, yMin=ymin, yMax=ymax,
+                     maxXRange=xmax - xmin, maxYRange=ymax - ymin)
 
     def _replot(self):
         if self._r_px is None:
@@ -2320,6 +2349,9 @@ class ProfileViewer(QtWidgets.QWidget):
             x_arr = np.asarray(x)
             xmin = max(0.0, float(x_arr.min())) if x_arr.size else None
             xmax = float(x_arr.max()) if x_arr.size else None
+
+            if xmin is not None and ymin is not None:
+                self._auto_limits = (xmin, xmax, ymin, ymax)
 
             if self._manual_mode:
                 # Manual mode is authoritative: never touch pan/zoom bounds or
@@ -3834,6 +3866,7 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
         # min/max fields rather than a separate row of spin boxes.
         self._manual_mode = False
         self._manual_range: Optional[tuple] = None   # (xmin, xmax, ymin, ymax)
+        self._auto_limits: Optional[tuple] = None     # last auto-fit extent
         self._btn_auto, self._btn_manual = _add_auto_manual_buttons(
             self._plot, self._on_auto_clicked, self._on_manual_clicked)
         _install_manual_axis_capture(self._plot, self._on_manual_range_edited)
@@ -3897,10 +3930,15 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
 
     def _on_manual_clicked(self):
         """"M" clicked — switch to Manual, or (on a reclick) snap back to the
-        exact limits held from the axes' native "Manual" min/max fields."""
+        exact limits held from the axes' native "Manual" min/max fields.
+        The first time Manual is engaged, its limits default to Auto's
+        current fit rather than some arbitrary range."""
         if self._manual_range is None:
-            (xmin, xmax), (ymin, ymax) = self._plot.getViewBox().viewRange()
-            self._manual_range = (xmin, xmax, ymin, ymax)
+            if self._auto_limits is not None:
+                self._manual_range = self._auto_limits
+            else:
+                (xmin, xmax), (ymin, ymax) = self._plot.getViewBox().viewRange()
+                self._manual_range = (xmin, xmax, ymin, ymax)
         self._manual_mode = True
         self._apply_manual_range()
 
@@ -3911,15 +3949,25 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
         self._redraw_hist()
 
     def _apply_manual_range(self):
-        """Force the exact held manual limits, unclamped by any pan/zoom bound."""
+        """Force the held manual limits as the current view, and clamp
+        pan/zoom to them — the user can still zoom in within the limits, but
+        can't pan or zoom out past them."""
         if self._manual_range is None:
             return
         xmin, xmax, ymin, ymax = self._manual_range
+        if xmax <= xmin:
+            xmax = xmin + 1.0
+        if ymax <= ymin:
+            ymax = ymin + 1.0
         vb = self._plot.getViewBox()
+        # Release any limits left over from a previous manual range first, so
+        # the range below can't be clamped by a now-stale bound.
         vb.setLimits(xMin=None, xMax=None, yMin=None, yMax=None,
                      maxXRange=None, maxYRange=None)
         vb.setXRange(xmin, xmax, padding=0)
         vb.setYRange(ymin, ymax, padding=0)
+        vb.setLimits(xMin=xmin, xMax=xmax, yMin=ymin, yMax=ymax,
+                     maxXRange=xmax - xmin, maxYRange=ymax - ymin)
 
     @staticmethod
     def compute_stats(values) -> dict:
@@ -4005,6 +4053,7 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
         xmax = float(edges[-1]) if edges.size else 1.0
         ymax = float(y.max()) if y.size else 1.0
         ymax = ymax * 1.08 if ymax > 0 else 1.0
+        self._auto_limits = (0.0, max(xmax, 1.0), -2.0, ymax)
         vb = self._plot.getViewBox()
         # xMax/maxXRange/maxYRange cap zoom-out at the natural full-data
         # view (same intent as ProfileViewer._apply_view_limits above) so
