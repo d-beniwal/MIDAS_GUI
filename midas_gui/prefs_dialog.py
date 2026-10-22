@@ -113,6 +113,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         self._build_algorithms_tab()
         self._build_tabs_tab()
         self._build_display_tab()
+        self._build_integrations_tab()
 
         # action row
         arow = QtWidgets.QHBoxLayout()
@@ -194,6 +195,35 @@ class PreferencesDialog(QtWidgets.QDialog):
             r = QtWidgets.QHBoxLayout(); r.setSpacing(4); r.addWidget(ed); r.addWidget(b)
             f.addRow(label, r)
         self._tabs.addTab(w, "Paths")
+
+    def _build_integrations_tab(self):
+        """Machine-local settings (not part of a beamline Profile) — saved
+        immediately on edit, like the profile actions above, rather than
+        gated behind this dialog's Save/Cancel."""
+        w = QtWidgets.QWidget(); f = QtWidgets.QFormLayout(w)
+        info = QtWidgets.QLabel(
+            "Per-machine, not saved with beamline Profiles — set once per "
+            "workstation. Applies immediately.")
+        info.setWordWrap(True); info.setStyleSheet("color:#aaa;font-size:11px")
+        f.addRow(info)
+
+        self._apexa_path = QtWidgets.QLineEdit(settings.get_apexa_repo_path())
+        self._apexa_path.editingFinished.connect(
+            lambda: settings.set_apexa_repo_path(self._apexa_path.text().strip()))
+        warn_if_path_missing(self._apexa_path, self)
+        b = QtWidgets.QPushButton("…"); b.setFixedWidth(28)
+        b.clicked.connect(lambda: self._browse_path(self._apexa_path, "dir"))
+        r = QtWidgets.QHBoxLayout(); r.setSpacing(4)
+        r.addWidget(self._apexa_path); r.addWidget(b)
+        f.addRow("APEXA repo path:", r)
+        hint = QtWidgets.QLabel(
+            "Local checkout of APEXA-APS-Beamline-Assistant. Used by "
+            "Tools ▸ APEXA Chat… to launch its desktop chat panel "
+            "alongside this GUI, driving it through midas_gui_mcp/.")
+        hint.setWordWrap(True); hint.setStyleSheet("color:#888;font-size:10px")
+        f.addRow(hint)
+
+        self._tabs.addTab(w, "Integrations")
 
     def _build_table_tab(self, title, headers):
         w = QtWidgets.QWidget(); v = QtWidgets.QVBoxLayout(w)

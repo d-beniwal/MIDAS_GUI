@@ -368,6 +368,21 @@ def set_last_expid(value: str) -> None:
     _write_json(_meta_path(), meta)
 
 
+# ── APEXA integration (machine-local, not per-profile) ───────────────────────
+# Deliberately global, same reasoning as last_expid above: which beamline
+# Profile is active says nothing about where a given machine's APEXA checkout
+# happens to live, so this lives in profile_meta.json rather than inside a
+# profile — set once per machine from Preferences ▸ Integrations.
+def get_apexa_repo_path() -> str:
+    return read_json(_meta_path()).get("apexa_repo_path", "")
+
+
+def set_apexa_repo_path(value: str) -> None:
+    meta = read_json(_meta_path())
+    meta["apexa_repo_path"] = value or ""
+    _write_json(_meta_path(), meta)
+
+
 # ── recent files (Projects / Workspaces) ─────────────────────────────────────
 # Deliberately global (not stored inside a profile) — a recently-opened
 # project/workspace should stay "recent" regardless of which beamline Profile

@@ -134,12 +134,22 @@ class MainWindow(QtWidgets.QMainWindow):
         # local control socket, so it stays off for every ordinary user.
         self._control_server = None
         if os.environ.get("MIDAS_GUI_CONTROL") == "1":
-            self._control_server = control_server.ControlServer(self, log_fn=_log)
-            if self._control_server.start():
-                self._view_tab.liveProfileUpdated.connect(self._on_live_profile_updated)
-                self._control_server.agentConnected.connect(self._on_agent_connected_changed)
-            else:
-                self._control_server = None
+            self._ensure_control_server()
+
+    def _ensure_control_server(self) -> bool:
+        """Start the control socket if it isn't already running. Idempotent —
+        a second call while it's already up is a no-op success. Shared by the
+        MIDAS_GUI_CONTROL=1 startup path above and Tools ▸ APEXA Chat…, which
+        requests control on demand rather than requiring the env var."""
+        if self._control_server is not None:
+            return True
+        self._control_server = control_server.ControlServer(self, log_fn=_log)
+        if self._control_server.start():
+            self._view_tab.liveProfileUpdated.connect(self._on_live_profile_updated)
+            self._control_server.agentConnected.connect(self._on_agent_connected_changed)
+            return True
+        self._control_server = None
+        return False
 
     def _on_live_profile_updated(self, r_px, profile) -> None:
         self._control_server.broadcast_event(
@@ -1345,6 +1355,8 @@ class MainWindow(QtWidgets.QMainWindow):
         m = self.menuBar().addMenu("&Tools")
         act = m.addAction("Auto Attenuation…")
         act.triggered.connect(self._open_auto_attenuation)
+        act_apexa = m.addAction("APEXA Chat…")
+        act_apexa.triggered.connect(self._open_apexa_chat)
 
     def _write_auto_attenuation_snapshot(self, path):
         """Gather the Data Viewer's current buffer/loaded-data/dark/mask/
@@ -1427,6 +1439,86 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(
                 self, "Auto Attenuation",
                 "Failed to launch Auto Attenuation — see log.")
+
+    def _open_apexa_chat(self):
+        """Launch APEXA's desktop chat panel (``apexa_desktop.py`` — a
+        pywebview window wrapping APEXA's own FastAPI+React UI) as a separate
+        process alongside this GUI, wired to drive this GUI's Data Viewer and
+        Calibrate tabs through ``midas_gui_mcp/`` — see that package's
+        README ("Wiring this into APEXA") for the full protocol. Needs
+        Preferences ▸ Integrations ▸ "APEXA repo path" set to a local
+        APEXA-APS-Beamline-Assistant checkout first (per-machine, like
+        recent-files/last-ExpID — not part of a beamline Profile)."""
+        apexa_dir = settings.get_apexa_repo_path().strip()
+        script = self._apexa_launch_script(apexa_dir) if apexa_dir else None
+        if not script or not script.is_file():
+            resp = QtWidgets.QMessageBox.question(
+                self, "APEXA Chat",
+                "No valid APEXA repo path is set.\n\n"
+                "Open Preferences ▸ Integrations to set it?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
+            if resp == QtWidgets.QMessageBox.Yes:
+                self._open_preferences()
+            return
+
+        # An explicit "APEXA Chat…" click is a deliberate request for agent
+        # control — start the socket on demand rather than requiring the
+        # MIDAS_GUI_CONTROL=1 env var too.
+        if not self._ensure_control_server():
+            QtWidgets.QMessageBox.critical(
+                self, "APEXA Chat",
+                "Could not start the control socket (see log) — APEXA would "
+                "have nothing to drive. Not launching.")
+            return
+
+        try:
+            self._sync_apexa_servers_config(Path(apexa_dir))
+        except Exception:
+            _log(f"APEXA servers.config sync failed:\n{traceback.format_exc()}")
+            QtWidgets.QMessageBox.warning(
+                self, "APEXA Chat",
+                "Could not update APEXA's servers.config automatically (see "
+                "log). Launching anyway — you may need to add the midas_gui "
+                "line by hand; see midas_gui_mcp/README.md.")
+
+        proc = QtCore.QProcess()
+        proc.setProgram(str(script))
+        proc.setWorkingDirectory(apexa_dir)
+        if not proc.startDetached():
+            QtWidgets.QMessageBox.critical(
+                self, "APEXA Chat", f"Failed to launch {script.name} in {apexa_dir}.")
+
+    @staticmethod
+    def _apexa_launch_script(apexa_dir: str) -> Optional[Path]:
+        name = "start_desktop_ui.bat" if sys.platform.startswith("win") else "start_desktop_ui.sh"
+        return Path(apexa_dir) / name
+
+    def _sync_apexa_servers_config(self, apexa_dir: Path) -> None:
+        """Make sure APEXA's ``servers.config`` has a ``midas_gui:`` line
+        pointing at *this* checkout's ``midas_gui_mcp/server.py``, so the
+        agent that's about to launch can actually drive this GUI — see
+        ``midas_gui_mcp/README.md``'s "Wiring this into APEXA". Adds the line
+        if missing, corrects it if it points somewhere else (e.g. a stale
+        path from a different machine), and otherwise leaves the file
+        untouched — this edits only that one line, never anything else a
+        user has configured there."""
+        cfg_path = apexa_dir / "servers.config"
+        if not cfg_path.is_file():
+            return  # doesn't look like an APEXA checkout — nothing to sync
+        mcp_server = str((Path(midas_gui.__file__).resolve().parent.parent
+                          / "midas_gui_mcp" / "server.py"))
+        wanted = f"midas_gui:{mcp_server}"
+        lines = cfg_path.read_text().splitlines()
+        for i, line in enumerate(lines):
+            if line.strip().startswith("midas_gui:"):
+                if line.strip() == wanted:
+                    return  # already correct
+                lines[i] = wanted
+                cfg_path.write_text("\n".join(lines) + "\n")
+                return
+        lines += ["", "# midas-gui GUI control (added by midas-gui's Tools ▸ APEXA Chat…)",
+                  wanted]
+        cfg_path.write_text("\n".join(lines) + "\n")
 
     def _open_preferences(self):
         try:
