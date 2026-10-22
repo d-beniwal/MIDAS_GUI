@@ -137,9 +137,13 @@ def _apply_stack_corrections(frames: np.ndarray, corr: dict) -> np.ndarray:
     return out
 
 
-def run_stage(stage: str, cfg: dict) -> dict:
+def run_stage(stage: str, cfg: dict, on_step=None) -> dict:
     """Dispatch to one pipeline stage -- the sole entry point a worker thread
-    calls (handoff §4.3's ``SolveCellWorker`` template)."""
+    calls (handoff §4.3's ``SolveCellWorker`` template). ``on_step`` is only
+    meaningful for (and only forwarded to) ``ingest``/``ingest_pooled`` --
+    see ``_stage_ingest``'s docstring; other stages ignore it, nothing in
+    this dispatcher hardcodes which stages support it beyond this one set
+    check."""
     stages = {
         "ingest": _stage_ingest,
         "ingest_pooled": _stage_ingest_pooled,
@@ -150,6 +154,8 @@ def run_stage(stage: str, cfg: dict) -> dict:
     }
     if stage not in stages:
         raise ValueError(f"unknown solve-cell stage {stage!r}")
+    if stage in ("ingest", "ingest_pooled"):
+        return stages[stage](cfg, on_step=on_step)
     return stages[stage](cfg)
 
 
@@ -157,7 +163,7 @@ def run_stage(stage: str, cfg: dict) -> dict:
 #  Stage 1: ingest -- raw frames -> background-subtracted 3-D blobs -> g-vectors
 # ═════════════════════════════════════════════════════════════════════════════
 
-def _stage_ingest(cfg: dict) -> dict:
+def _stage_ingest(cfg: dict, on_step=None) -> dict:
     """``cfg`` keys: ``frames`` (raw (n_loaded_frames, n_pix_z, n_pix_y)
     array), ``geometry`` (dict: Lsd, BC_y, BC_z, ty, tz, wavelength_A, px_um,
     nrpixels_y, nrpixels_z, omega_ref_frame_idx, omega_ref_deg,
@@ -210,10 +216,31 @@ def _stage_ingest(cfg: dict) -> dict:
     masks 80-99%+ of a single-crystal-in-DAC chip with no diffuse baseline to
     set a "low" plateau against, so this stage defaults to 0.0 instead --
     exposed, not silently hardcoded either way.
+
+    Optional ``on_step(name, {"preview": ..., "stats": ...})`` is called after
+    each major checkpoint (``omega_window``, ``live_frames``, ``mask``,
+    ``background_start``, ``background``, ``blobs``) so a caller can show
+    progress mid-run instead of only once this function returns -- ``preview``
+    is always this stage's full ``preview`` return shape (fields fill in as
+    they become available, the rest stay ``None``), ``stats`` a few plain
+    numbers specific to that step. Never raises and never required: a plain
+    callable is all this module -- Qt-free by design -- commits to.
     """
     import torch
     from midas_defect.ingest import build_mask, choose_sectors, find_blobs_3d, live_frames
     from midas_defect.geometry import Geometry, detector_angle_maps, pixel_to_qlab, qlab_to_qsample
+
+    # Filled in below as each step completes; handed to on_step as a shallow
+    # copy each time and returned verbatim (fully populated) at the end.
+    preview: dict = {
+        "frame_index": None, "loaded_frame_index": None,
+        "background_subtracted": None, "background_subtracted_max_projection": None,
+        "mask": None,
+    }
+
+    def _emit(name: str, **stats):
+        if on_step is not None:
+            on_step(name, {"preview": dict(preview), "stats": stats})
 
     geom_cfg = cfg["geometry"]
     frames_loaded = np.asarray(cfg["frames"])
@@ -238,6 +265,8 @@ def _stage_ingest(cfg: dict) -> dict:
     print(f"[solve-cell] ingest: {n_frames_total}/{n_frames_loaded} frames in omega window "
           f"[{ref_idx}, {last_idx}] ({n_outside_omega_window} excluded), "
           f"Lsd={geom_cfg['Lsd']:.2f} um, wavelength={geom_cfg['wavelength_A']:.6f} A")
+    _emit("omega_window", n_frames_loaded=n_frames_loaded, n_frames=n_frames_total,
+          n_outside_omega_window=n_outside_omega_window)
 
     frames = frames_raw.astype(np.float32)
     is_sentinel = frames_raw == sentinel
@@ -261,6 +290,7 @@ def _stage_ingest(cfg: dict) -> dict:
     # frame-nav scrub bar indexes into) -- needed so a Detector view can tell
     # which loaded frame a given spot is closest to.
     kept_loaded_idx = idx_loaded[omega_window_mask][live_mask]
+    _emit("live_frames", n_live=n_live, n_frames=n_frames_total)
 
     mask_cfg = cfg.get("mask", {})
     mres = build_mask(frames, low_count_threshold=mask_cfg.get(
@@ -276,6 +306,8 @@ def _stage_ingest(cfg: dict) -> dict:
     n_masked = int(mask.sum())
     print(f"[solve-cell] build_mask: {n_masked}/{mask.size} px masked "
           f"({100.0 * n_masked / mask.size:.3f}%)")
+    preview["mask"] = np.array(mask)
+    _emit("mask", n_masked=n_masked, n_masked_px_total=int(mask.size))
 
     geom = Geometry(
         lsd_um=geom_cfg["Lsd"], bcy_px=geom_cfg["BC_y"], bcz_px=geom_cfg["BC_z"],
@@ -291,6 +323,7 @@ def _stage_ingest(cfg: dict) -> dict:
     threshold = blob_cfg.get("threshold", BLOB_THRESHOLD_DEFAULT)
     min_vol = blob_cfg.get("min_vol", BLOB_MIN_VOL_DEFAULT)
     sector_candidates = tuple(blob_cfg.get("sector_candidates", SECTOR_CANDIDATES_DEFAULT))
+    _emit("background_start", sector_candidates=sector_candidates)
 
     # choose_sectors grid-searches `sector_candidates`, each a full per-frame
     # subtract_background + count_signed_blobs pass -- the dominant ingest
@@ -308,7 +341,7 @@ def _stage_ingest(cfg: dict) -> dict:
 
     preview_idx = int(cfg.get("preview_frame_index", 0))
     preview_idx = min(max(preview_idx, 0), len(sub) - 1) if len(sub) else 0
-    preview = {
+    preview.update({
         "frame_index": preview_idx,
         # The ORIGINALLY loaded-stack index this kept-stack frame corresponds
         # to -- lets a GUI compare against panel.loader.frame_index() on one
@@ -330,8 +363,8 @@ def _stage_ingest(cfg: dict) -> dict:
         # extra reduction over an array already in memory, not a new
         # full-stack copy.
         "background_subtracted_max_projection": np.asarray(sub.max(axis=0)) if len(sub) else None,
-        "mask": np.array(mask),
-    }
+    })
+    _emit("background", n_sectors=int(bg_choice.n_sectors))
 
     spots, counts = find_blobs_3d(
         sub, mask, threshold=threshold, min_vol=min_vol,
@@ -342,6 +375,7 @@ def _stage_ingest(cfg: dict) -> dict:
     print(f"[solve-cell] find_blobs_3d counts: {counts}")
     spots = spots[spots["n_frames"] >= 2].reset_index(drop=True)
     print(f"[solve-cell] {len(spots)} spots with n_frames>=2")
+    _emit("blobs", n_spots=len(spots), counts=counts)
 
     if len(spots):
         rows = spots["row"].to_numpy()
@@ -393,7 +427,7 @@ def _stage_ingest(cfg: dict) -> dict:
     return {"spots_df": spots, "summary": summary, "panel_dir": panel_dir, "preview": preview}
 
 
-def _stage_ingest_pooled(cfg: dict) -> dict:
+def _stage_ingest_pooled(cfg: dict, on_step=None) -> dict:
     """Multi-panel counterpart of :func:`_stage_ingest` (handoff §5.2/§10
     "multi-panel pooling"): run ingest independently on each configured
     panel, then concatenate every panel's own ``spots_df`` into one pooled
@@ -427,6 +461,11 @@ def _stage_ingest_pooled(cfg: dict) -> dict:
     why ``frames_loader`` resolution happens HERE, per panel, rather than
     once up front by the caller the way the single-panel ``ingest`` stage's
     GUI worker does it before calling ``run_stage``.
+
+    ``on_step``, if given, is forwarded to each panel's own ``_stage_ingest``
+    call with ``panel_id`` tagged onto every payload (``{"preview": ...,
+    "stats": ..., "panel_id": ...}``) so a GUI can route each panel's live
+    preview to that panel's own view instead of whichever panel ran last.
     """
     import pandas as pd
 
@@ -443,7 +482,12 @@ def _stage_ingest_pooled(cfg: dict) -> dict:
             print(f"[solve-cell] ingest_pooled: panel {panel_id} loading raw frames…")
             pcfg["frames"] = loader()
         print(f"[solve-cell] ingest_pooled: panel {panel_id} ingest starting")
-        result = dict(_stage_ingest(pcfg))
+
+        def _panel_on_step(name, payload, _pid=panel_id):
+            if on_step is not None:
+                on_step(name, {**payload, "panel_id": _pid})
+
+        result = dict(_stage_ingest(pcfg, on_step=_panel_on_step))
         pcfg.clear()   # drop the resolved frame-stack reference ASAP, before the next panel loads
         spots = result["spots_df"].copy()
         spots.insert(0, "panel_id", panel_id)

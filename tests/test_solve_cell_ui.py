@@ -124,6 +124,7 @@ class _CapturingWorker:
         self.stage = stage
         self.cfg = cfg
         self.log_line = _Signal()
+        self.step = _Signal()
         self.finished = _Signal()
         self.failed = _Signal()
         _CapturingWorker.instances.append(self)
@@ -453,9 +454,9 @@ def test_set_state_with_no_panels_key_leaves_default_panel_alone(tab):
 
 # ── Detector tab: renamed stage + zoom preserved across stage switch ────
 
-def test_detector_stage_background_label_says_calculated_background(tab):
+def test_detector_stage_background_label_says_background_corrected(tab):
     items = [tab._det_stage.itemText(i) for i in range(tab._det_stage.count())]
-    assert "Calculated background (after Ingest)" in items
+    assert "Background corrected (after ingest)" in items
     assert not any("Background-subtracted" in t for t in items)
 
 
@@ -476,7 +477,7 @@ def test_detector_max_projection_stage_shows_spot_absent_from_single_frame(tab):
         "mask": np.zeros((8, 8), dtype=bool),
     }
     items = [tab._det_stage.itemText(i) for i in range(tab._det_stage.count())]
-    max_proj_idx = next(i for i, t in enumerate(items) if "max over rotation" in t)
+    max_proj_idx = next(i for i, t in enumerate(items) if "Max projected" in t)
 
     seen = {}
 
@@ -599,6 +600,62 @@ def test_update_spot_overlay_filters_to_the_active_panel_when_pooled(tab):
     tab._update_spot_overlay(0, 2)
     assert len(tab._spot_scatter.data) == 1
     assert tab._spot_scatter.data["x"][0] == 90.0
+
+
+# ── live ingest progress (on_step) ───────────────────────────────────────
+
+def test_on_ingest_step_updates_active_panel_preview_and_status(tab):
+    import numpy as np
+    pid = tab._active_panel_id()
+    partial = {"frame_index": None, "loaded_frame_index": None,
+               "background_subtracted": None,
+               "background_subtracted_max_projection": None,
+               "mask": np.zeros((4, 4), dtype=bool)}
+    tab._on_ingest_step("mask", {"preview": partial, "stats": {"n_masked": 3}})
+
+    assert tab._ingest_preview is partial
+    assert tab._ingest_preview_by_panel[pid] is partial
+    assert "mask" in tab._ingest_status.text()
+    assert "n_masked=3" in tab._ingest_status.text()
+
+
+def test_on_ingest_step_routes_pooled_payload_to_its_own_panel_and_ignores_others(tab):
+    """A pooled run's steps carry panel_id -- only the panel currently shown
+    in the Detector tab should refresh; another panel's in-flight step must
+    still be recorded (for when its tab is later selected) without touching
+    the currently active panel's own preview."""
+    import numpy as np
+    first_id = tab._active_panel_id()
+    second = tab._add_panel()
+    second_id = sorted(tab._panels.keys())[-1]
+    assert second_id != first_id
+
+    own_preview = {"mask": np.zeros((2, 2), dtype=bool)}
+    tab._on_ingest_step("mask", {"preview": own_preview, "stats": {}, "panel_id": first_id})
+    assert tab._ingest_preview_by_panel[first_id] is own_preview
+    assert f"panel {first_id}" in tab._ingest_status.text()
+
+    other_preview = {"mask": np.ones((2, 2), dtype=bool)}
+    tab._on_ingest_step("mask", {"preview": other_preview, "stats": {}, "panel_id": second_id})
+    assert tab._ingest_preview_by_panel[second_id] is other_preview
+    # Still showing panel 1's own detector view -- its own preview is untouched.
+    assert tab._ingest_preview_by_panel[first_id] is own_preview
+
+
+def test_refresh_detector_preview_handles_fields_not_yet_populated(tab):
+    """Mid-run, keys fill in progressively (see pipeline._stage_ingest) --
+    selecting a stage whose field hasn't arrived yet must not raise, and
+    should say so rather than silently show stale/blank data."""
+    pid = tab._active_panel_id()
+    tab._ingest_preview_by_panel[pid] = {
+        "frame_index": None, "loaded_frame_index": None,
+        "background_subtracted": None,
+        "background_subtracted_max_projection": None,
+        "mask": None,
+    }
+    tab._det_stage.setCurrentIndex(4)   # "Mask"
+    tab._refresh_detector_preview()   # must not raise
+    assert "not available yet" in tab._det_frame_lbl.text()
 
 
 # ── multi-panel pooled ingest: completion handler + provenance ──────────

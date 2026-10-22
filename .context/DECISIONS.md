@@ -99,6 +99,74 @@ stash, that `tests/test_calib_file_load_fidelity.py`'s intermittent
 segfault — ~20% of runs, building 3 `CalibrationTab`s unforked — predates
 this change and is unaffected by it).
 
+## 2026-10-21 (branch `solve-cell`) — Solve Cell Ingest: live per-step progress via an `on_step` callback
+
+**Requested directly**: Ingest runs ~10 sequential operations (omega-window
+filter, corrections, live-frame filter, mask, geometry, background
+subtraction, blob find, q-conversion) but the GUI only ever showed output
+(the Detector tab's preview images, the status label) once the entire stage
+returned — the existing `print()` → `log_line` text stream gave running text
+but no visual/data feedback mid-run. User wanted to see output after each
+operation, not just at the end, and asked for a generator/callback design.
+
+**Chose a plain callback over a generator.** `_stage_ingest`'s body is
+already a long, linear sequence of in-place numpy mutations (frames, mask,
+sub-stack) — restructuring it into a generator that yields between every
+numpy step would have meant threading `yield` through loops and conditionals
+that don't naturally pause there, for no benefit over just calling a
+callback at the same checkpoints. `_stage_ingest(cfg, on_step=None)` now
+calls `on_step(name, {"preview": ..., "stats": ...})` after each of 6
+checkpoints (`omega_window`, `live_frames`, `mask`, `background_start`,
+`background`, `blobs`); `on_step` is optional and a plain callable, keeping
+`pipeline.py`'s Qt-free constraint (see its module docstring) fully intact.
+
+**Reused the existing `preview` dict shape instead of inventing a new one.**
+The stage already built a `preview` dict (`frame_index`,
+`loaded_frame_index`, `background_subtracted`,
+`background_subtracted_max_projection`, `mask`) once, at the very end, for
+the Detector tab's Stage combo (Raw/Corrected/Calculated background/max
+projection/Mask). That dict is now initialized up front with every field
+`None` and filled in as each field becomes available, with `on_step` handed
+a shallow copy each time — so the SAME Detector-tab rendering path
+(`_refresh_detector_preview`/`_set_detector_image`) that already existed
+just gets fed progressively instead of only once at completion. No new UI
+widgets were added. `_refresh_detector_preview`'s three `preview["..."]`
+accesses became `.get(...)` with a "not available yet" label, since a
+mid-run payload can have some fields still `None`.
+
+**Pooled (multi-panel) runs tag payloads by `panel_id`, not by mangling step
+names.** `_stage_ingest_pooled(cfg, on_step=None)` wraps `on_step` per panel
+to add `{"panel_id": panel_id}` onto every payload before forwarding it,
+rather than prefixing the step-name string — keeps the step-name set stable
+for whatever a GUI dispatches on. `tab_solve_cell._on_ingest_step` routes
+each payload to `self._ingest_preview_by_panel[pid]` and only refreshes the
+visible Detector tab when the payload's panel is the one currently shown.
+
+**`SolveCellWorker` gained one new signal, no new threading model.** `step =
+QtCore.pyqtSignal(str, object)`, emitted from inside `run()` via the same
+lambda-to-`on_step` pattern `run_stage(..., on_step=lambda n, p:
+self.step.emit(n, p))` — emitted from the worker thread exactly like
+`log_line` already is from `_LogStream.write`; Qt's auto cross-thread queued
+connection handles it the same way, no new race introduced.
+
+**Test coverage**: `tests/test_solve_cell_pipeline.py` gained a test
+asserting the exact checkpoint name/order and that each payload's `preview`
+only has the fields known by that point (`None` otherwise), plus a pooled
+test asserting `panel_id` tagging. `tests/test_solve_cell_ui.py`'s
+`_CapturingWorker` test double gained a `step` attribute (was missing it,
+broke two existing pooled-ingest tests that `monkeypatch` it in for
+`SolveCellWorker`); added tests for `_on_ingest_step`'s active-panel update,
+pooled per-panel routing, and `_refresh_detector_preview`'s None-safe
+handling of not-yet-populated fields. All of `test_solve_cell_pipeline.py`
+(35 tests, 3 pre-existing data-dependent skips) and `test_solve_cell_ui.py`
+(74 tests) pass under the per-file/offscreen/clean-`HOME` convention.
+
+**Not done / still open**: no live-app verification against a real
+detector/beamline dataset yet (see STATE.md next steps) — only unit-level
+coverage of the callback plumbing and the Qt signal/slot wiring.
+`diamond_filter`/`ab_initio`/`refine` were intentionally left untouched;
+`run_stage` only forwards `on_step` to `ingest`/`ingest_pooled`.
+
 ## 2026-10-16 (branch `mcp`, latest) — Phase-1 MCP control layer for Data Viewer + Calibrate; built and self-tested by the agent
 
 **Requested directly**: a framework for LLM agents (not just this one) to

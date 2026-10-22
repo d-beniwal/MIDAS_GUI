@@ -4458,6 +4458,10 @@ class SolveCellWorker(QtCore.QThread):
     ``cfg["frames"]`` to already be an array.
     """
     log_line = QtCore.pyqtSignal(str)
+    # (step_name, {"preview": ..., "stats": ..., optional "panel_id": ...}) --
+    # see pipeline.py's _stage_ingest docstring. Only ingest/ingest_pooled
+    # ever emit this; run_stage() ignores on_step for every other stage.
+    step     = QtCore.pyqtSignal(str, object)
     finished = QtCore.pyqtSignal(object)
     failed   = QtCore.pyqtSignal(str)
 
@@ -4476,7 +4480,9 @@ class SolveCellWorker(QtCore.QThread):
                 loader = self._cfg.pop("frames_loader")
                 self._cfg["frames"] = loader()
             from midas_gui.solve_cell import pipeline
-            result = pipeline.run_stage(self._stage, self._cfg)
+            result = pipeline.run_stage(
+                self._stage, self._cfg,
+                on_step=lambda name, payload: self.step.emit(name, payload))
             self.finished.emit(result)
         except Exception:
             self.failed.emit(traceback.format_exc())

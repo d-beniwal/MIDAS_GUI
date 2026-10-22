@@ -740,17 +740,17 @@ class SolveCellTab(QtWidgets.QWidget):
         toolbar.addWidget(QtWidgets.QLabel("Stage:"))
         self._det_stage = QtWidgets.QComboBox()
         self._det_stage.addItems([
-            "Raw", "Corrected", "Calculated background (after Ingest)",
-            "Calculated background -- max over rotation (after Ingest)",
-            "Mask (after Ingest)",
+            "Raw", "Corrected", "Background corrected (after ingest)",
+            "Max projected (after ingest)",
+            "Mask",
         ])
         self._det_stage.setToolTip(
             "Raw/Corrected update live from this panel's loaded data and "
             "dark/bright/background fields, no Ingest run needed. The "
-            "single-frame Calculated background view is usually near-empty "
+            "single-frame Background corrected view is usually near-empty "
             "-- a real reflection only satisfies the diffraction condition "
-            "for a handful of frames out of hundreds -- so prefer the max-"
-            "over-rotation view to actually judge whether the background "
+            "for a handful of frames out of hundreds -- so prefer the Max "
+            "projected view to actually judge whether the background "
             "model worked. Both (and Mask) show what the last Ingest run "
             "captured; the single-frame one uses the frame index from the "
             "scrub bar below at the moment Run Ingest was clicked.")
@@ -830,17 +830,28 @@ class SolveCellTab(QtWidgets.QWidget):
                 self._set_detector_image(None, stage)
                 self._update_spot_overlay(stage, None)
                 return
+            # Keys fill in progressively while Ingest is still running (see
+            # _on_ingest_step) -- a selected stage not computed yet just
+            # leaves the previous image up with a "not available yet" label,
+            # same as _set_detector_image(None, ...) already does for Raw/
+            # Corrected before any data is loaded.
             if stage == 2:
-                arr = preview["background_subtracted"]
+                arr = preview.get("background_subtracted")
                 self._det_frame_lbl.setText(
                     f"frame {preview['frame_index']} of the kept stack, from the last Ingest run "
-                    "-- a single frame is usually near-empty, see the max-projection view")
+                    "-- a single frame is usually near-empty, see the max-projection view"
+                    if arr is not None else "not available yet -- Ingest still running")
             elif stage == 3:
-                arr = preview["background_subtracted_max_projection"]
-                self._det_frame_lbl.setText("max over every kept/live frame, from the last Ingest run")
+                arr = preview.get("background_subtracted_max_projection")
+                self._det_frame_lbl.setText(
+                    "max over every kept/live frame, from the last Ingest run"
+                    if arr is not None else "not available yet -- Ingest still running")
             else:
-                arr = preview["mask"].astype(np.float32)
-                self._det_frame_lbl.setText("detector mask, from the last Ingest run")
+                mask_arr = preview.get("mask")
+                arr = mask_arr.astype(np.float32) if mask_arr is not None else None
+                self._det_frame_lbl.setText(
+                    "detector mask, from the last Ingest run"
+                    if arr is not None else "not available yet -- Ingest still running")
             self._set_detector_image(arr, stage)
             self._update_spot_overlay(stage, preview.get("loaded_frame_index"))
 
@@ -1100,8 +1111,9 @@ class SolveCellTab(QtWidgets.QWidget):
             self._log.append("─" * 40 + "\nRunning ingest…")
             self._worker = SolveCellWorker("ingest", cfg, parent=self)
             self._worker.log_line.connect(self._log.append)
+            self._worker.step.connect(self._on_ingest_step)
             self._worker.finished.connect(self._on_ingest_done)
-            self._worker.failed.connect(lambda msg: self._on_stage_fail("Ingest", msg, self._ingest_btn))
+            self._worker.failed.connect(self._on_ingest_fail)
             self._worker.start()
             return
 
@@ -1122,9 +1134,36 @@ class SolveCellTab(QtWidgets.QWidget):
             f"({', '.join(str(pid) for pid, _ in ready)})…")
         self._worker = SolveCellWorker("ingest_pooled", cfg, parent=self)
         self._worker.log_line.connect(self._log.append)
+        self._worker.step.connect(self._on_ingest_step)
         self._worker.finished.connect(self._on_ingest_pooled_done)
-        self._worker.failed.connect(lambda msg: self._on_stage_fail("Ingest", msg, self._ingest_btn))
+        self._worker.failed.connect(self._on_ingest_fail)
         self._worker.start()
+
+    def _on_ingest_fail(self, msg: str):
+        self._ingest_status.setText("Ingest failed -- see log.")
+        self._on_stage_fail("Ingest", msg, self._ingest_btn)
+
+    def _on_ingest_step(self, name: str, payload: dict):
+        """Live progress during a running Ingest -- ``payload`` is
+        ``pipeline._stage_ingest``'s ``on_step`` shape (see its docstring):
+        ``preview`` fills in the same keys the final result's ``preview``
+        carries, just progressively, so the Detector tab can show whatever
+        has been computed so far rather than only the finished result.
+        ``panel_id`` is only present for a pooled run (one worker thread,
+        many panels) -- routes the update to that panel's own preview slot
+        instead of clobbering whichever panel's step fired last."""
+        pid = payload.get("panel_id", self._active_panel_id())
+        preview = payload["preview"]
+        if pid is not None:
+            self._ingest_preview_by_panel[pid] = preview
+        self._ingest_preview = preview
+        stats = ", ".join(f"{k}={v}" for k, v in payload["stats"].items())
+        label = f"Ingest running — {name}" + (f" ({stats})" if stats else "") + "…"
+        if pid is not None:
+            label = f"panel {pid}: {label}"
+        self._ingest_status.setText(label)
+        if pid is None or pid == self._active_panel_id():
+            self._refresh_detector_preview()
 
     def _on_ingest_done(self, result: dict):
         self._ingest_btn.setEnabled(True); self._prog.setVisible(False)

@@ -224,6 +224,72 @@ def test_ingest_handles_zero_spots_without_crashing(tmp_path):
         assert col in out["spots_df"].columns
 
 
+def test_ingest_on_step_reports_checkpoints_in_order_with_progressive_preview():
+    """A GUI's SolveCellWorker relays on_step to show live progress (see
+    workers.py/tab_solve_cell.py) -- lock in the checkpoint names, their
+    order, and that each payload's preview dict only has the fields known by
+    that point filled in (the rest stay None until a later step sets them)."""
+    rng = np.random.default_rng(2)
+    n_frames, nz, ny = 20, 64, 64
+    frames = rng.poisson(2.0, size=(n_frames, nz, ny)).astype(np.uint32)
+    frames[8:12, 30:34, 30:34] += 500
+    geometry = {
+        "Lsd": 150000.0, "BC_y": 32.0, "BC_z": 32.0, "ty": 0.0, "tz": 0.0,
+        "wavelength_A": 0.5, "px_um": 75.0, "nrpixels_y": ny, "nrpixels_z": nz,
+        "omega_ref_frame_idx": 0, "omega_ref_deg": -10.0,
+        "omega_last_frame_idx": n_frames - 1, "omega_step_deg": 1.0,
+    }
+    steps = []
+    out = P._stage_ingest({
+        "frames": frames, "geometry": geometry,
+        "mask": {"low_count_threshold": 0.0, "grow": 1},
+        "blobs": {"threshold": 100.0, "min_vol": 4},
+    }, on_step=lambda name, payload: steps.append((name, payload)))
+
+    names = [name for name, _ in steps]
+    assert names == ["omega_window", "live_frames", "mask",
+                      "background_start", "background", "blobs"]
+
+    mask_payload = dict(steps)["mask"]["preview"]
+    assert mask_payload["mask"] is not None
+    assert mask_payload["background_subtracted"] is None
+    assert mask_payload["background_subtracted_max_projection"] is None
+
+    bg_payload = dict(steps)["background"]["preview"]
+    assert bg_payload["background_subtracted"] is not None
+    assert bg_payload["background_subtracted_max_projection"] is not None
+    assert bg_payload["mask"] is not None
+
+    # Final on_step preview must match the stage's own returned preview.
+    blobs_preview = dict(steps)["blobs"]["preview"]
+    assert np.array_equal(blobs_preview["mask"], out["preview"]["mask"])
+    assert dict(steps)["blobs"]["stats"]["n_spots"] == out["summary"]["n_spots"]
+
+
+def test_ingest_pooled_on_step_tags_each_payload_with_its_panel_id():
+    rng = np.random.default_rng(3)
+    n_frames, nz, ny = 10, 32, 32
+    geometry = {
+        "Lsd": 150000.0, "BC_y": 16.0, "BC_z": 16.0, "ty": 0.0, "tz": 0.0,
+        "wavelength_A": 0.5, "px_um": 75.0, "nrpixels_y": ny, "nrpixels_z": nz,
+        "omega_ref_frame_idx": 0, "omega_ref_deg": 0.0,
+        "omega_last_frame_idx": n_frames - 1, "omega_step_deg": 1.0,
+    }
+
+    def _panel(panel_id, seed):
+        frames = np.random.default_rng(seed).poisson(1.0, size=(n_frames, nz, ny)).astype(np.uint32)
+        return {
+            "panel_id": panel_id, "frames": frames, "geometry": geometry,
+            "mask": {"low_count_threshold": 0.0, "grow": 1},
+            "blobs": {"threshold": 1000.0, "min_vol": 4},
+        }
+
+    panel_ids_seen = []
+    P.run_stage("ingest_pooled", {"panels": [_panel(5, 10), _panel(7, 11)]},
+                on_step=lambda name, payload: panel_ids_seen.append(payload["panel_id"]))
+    assert set(panel_ids_seen) == {5, 7}
+
+
 def test_ingest_loaded_frame_idx_maps_kept_index_back_to_originally_loaded_index(tmp_path):
     """spots_df['frame'] indexes the KEPT stack (after the omega window +
     live_frames filtering); 'loaded_frame_idx' must map each spot back to
