@@ -108,3 +108,40 @@ def test_picked_bc_is_used_as_the_radial_threshold_origin_even_while_inactive(ap
     out = tab._calib_image()
     assert out[43, 42] == 0.0       # zeroed right at the picked BC
     assert out[0, 0] == 5.0         # untouched far away
+
+
+@pytest.mark.forked
+def test_calib_image_threshold_centre_tracks_bc_under_flip_z(app):
+    """Pick BC / Pick Ring read their coordinates off the DISPLAYED (Transforms-
+    applied) array, so the picked BC is in that same frame — but ``self._image``
+    stays raw. With Flip Z ticked, the threshold must zero pixels around the
+    BC's position in the displayed frame, not around its raw-pixel-index
+    mirror image (the bug: a flip not carried through to the threshold's
+    centre, so the "background" drawn after a ring pick sits on the wrong
+    side of the detector)."""
+    from midas_gui.helpers import _apply_im_trans
+    from midas_gui.tab_calibrate import CalibrationTab
+
+    tab = CalibrationTab()
+    img = np.full((100, 100), 5.0, dtype=np.float32)
+    tab._image = img
+    tab._flip_z.setChecked(True)
+
+    # Picked on the displayed (flipped) image at (bc_y=42, bc_z=43).
+    tab._on_bc_picked(42.0, 43.0)
+
+    tab._thr_editor.set_domain(100.0)
+    tab._thr_editor.set_points([0.0, 5.0], [10.0, 0.0])
+    tab._thr_check.setChecked(True)
+
+    out = tab._calib_image()   # raw-oriented; set_raw_frame flips it for display
+    disp = _apply_im_trans(out, (2,))
+    assert disp[43, 42] == 0.0        # zeroed at the picked BC, in display space
+    assert disp[0, 0] == 5.0          # far corner untouched
+
+    # The zeroed region sits at raw row (99 - 43) = 56 — what flips to the
+    # picked display row 43 — not at raw row 43 itself (where the pre-fix
+    # code, ignoring the flip, centred the threshold directly on the raw
+    # array using the display-space BC).
+    assert out[56, 42] == 0.0
+    assert out[43, 42] == 5.0

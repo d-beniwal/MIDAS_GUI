@@ -42,7 +42,8 @@ from midas_gui.helpers import (
     widgets_to_dict, apply_dict_to_widgets, _predict_ring_radii, refresh_combo_items,
     browse_start_dir, warn_if_path_missing, suggest_working_dir, rmax_corner_px,
     check_output_dir_writable, scratch_dir, SCRATCH_DIRNAME, apply_radial_threshold,
-    default_radial_threshold_points, median_intensity_near_bc, geometry_fields_from_file)
+    default_radial_threshold_points, median_intensity_near_bc, geometry_fields_from_file,
+    _apply_im_trans)
 from midas_gui.widgets import (PickableImageViewer, LogPanel, CakeViewer, _convert_radial,
                                OriginToolButton, RadialThresholdEditor)
 from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar, HydraProfileViewer
@@ -1084,7 +1085,13 @@ class HydraCalibrationPage(QtWidgets.QWidget):
 
     def _calib_image_for(self, img, n: int):
         """Radially-thresholded copy of panel ``n``'s raw image if enabled,
-        centred on that panel's own beam centre (its Seed BC spinboxes)."""
+        centred on that panel's own beam centre (its Seed BC spinboxes).
+
+        That BC is in the panel's Transforms-applied (displayed) frame, same
+        as ``CalibrationTab._calib_image`` — so ``img`` (raw) is transformed,
+        thresholded, then transformed back, keeping it raw-oriented for the
+        callers (preview/``CalibrationWorker``) that apply ``im_trans``
+        themselves (see that method's docstring for why)."""
         if img is None:
             return None
         if self._thr_check.isChecked():
@@ -1092,6 +1099,11 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             bc_y = card._seed_bcy.value() if card is not None else 0.0
             bc_z = card._seed_bcz.value() if card is not None else 0.0
             radii, values = self._thr_editor.points()
+            codes = tuple(card.im_trans_codes()) if card is not None else ()
+            if codes:
+                img_t = _apply_im_trans(img, codes)
+                img_t = apply_radial_threshold(img_t, bc_y, bc_z, radii, values)
+                return _apply_im_trans(img_t, tuple(reversed(codes)))
             return apply_radial_threshold(img, bc_y, bc_z, radii, values)
         return img
 

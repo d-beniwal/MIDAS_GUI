@@ -3,6 +3,39 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-22 — Radially-adaptive threshold background mis-centred under Flip Y/Z (Calibrate + Hydra Calibrate)
+
+**Reported**: with Flip Z ticked, picking a ring to get BC drew the radial-
+threshold "background" centred vertically opposite from the pick; unticking
+Flip Z moved both the image and the background, but they stayed out of sync
+either way.
+
+**Root cause**: `_seed_bcy`/`_seed_bcz` are, by this codebase's convention
+(see `widgets.PickableImageViewer.set_raw_frame`), always in the Transforms-
+applied (displayed) frame — Pick BC / Pick Ring read their click coordinates
+straight off the displayed array. But `CalibrationTab._calib_image()` (and
+`HydraCalibrationPage._calib_image_for`) applied `apply_radial_threshold`
+directly to `self._image`, which stays **raw** (untransformed) by design —
+`_show_calib_image`/`set_raw_frame` apply the flip only at display time, and
+`CalibrationWorker` applies it again internally for the real fit. With no
+flip active the two frames coincide, hiding the bug; with Flip Y/Z active,
+the threshold's centre and the image's displayed orientation disagreed, so
+the zeroed region appeared mirrored on screen — and, more importantly, the
+same mismatch fed a wrongly-centred threshold into the actual calibration
+fit via `CalibrationWorker`, not just the preview.
+
+**Fix**: `_calib_image()` and `_calib_image_for()` now transform the raw
+image into display space with the live `im_trans` codes, apply the
+threshold there (same frame as the BC), then transform back before
+returning — so every caller downstream (preview, `CalibrationWorker`) still
+gets a raw-oriented array, consistent with the existing convention
+(mirrors the `tuple(reversed(im_trans))` round-trip already used for masks
+in `workers.py`). `_reset_threshold_defaults` had the same mismatch for its
+`rmax`/brightness-reference sampling and got the same treatment. New
+regression test `test_calib_image_threshold_centre_tracks_bc_under_flip_z`
+in `tests/test_calib_radial_threshold.py` fails against the pre-fix code and
+passes after — verified both ways before considering this closed.
+
 ## 2026-10-16 (branch `mcp`, latest) — Phase-1 MCP control layer for Data Viewer + Calibrate; built and self-tested by the agent
 
 **Requested directly**: a framework for LLM agents (not just this one) to

@@ -27,7 +27,7 @@ from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _predict_ring_radii, _NoScrollComboBox,
     make_kedge_label, make_pixel_label, ring_xy_corrected, distortion_rho_d_um,
     ring_on_image_mask, refresh_combo_items, rmax_corner_px, apply_radial_threshold,
-    default_radial_threshold_points, median_intensity_near_bc,
+    default_radial_threshold_points, median_intensity_near_bc, _apply_im_trans,
     widgets_to_dict, apply_dict_to_widgets, im_trans_codes_from_checkboxes,
     paramstest_pairs, parse_dspacing_text, browse_start_dir, warn_if_path_missing,
     suggest_working_dir, check_output_dir_writable, scratch_dir, SCRATCH_DIRNAME)
@@ -1103,11 +1103,18 @@ class CalibrationTab(QtWidgets.QWidget):
         which can be a single saturated/hot pixel) to 0 by a fraction of the
         detector's corner radius from the current seed BC (see
         ``helpers.default_radial_threshold_points``). The same reference
-        also sets the curve editor's default Y-axis view ceiling."""
-        nz, ny = self._image.shape[:2]
+        also sets the curve editor's default Y-axis view ceiling.
+
+        The seed BC is in the Transforms-applied (displayed) frame (see
+        ``_calib_image``), so the reference image is transformed first —
+        otherwise a transpose would swap ny/nz and a flip would sample the
+        brightness reference from the wrong side of the frame."""
+        codes = self._im_trans_codes()
+        img_ref = _apply_im_trans(self._image, codes) if codes else self._image
+        nz, ny = img_ref.shape[:2]
         bc_y, bc_z = self._seed_bcy.value(), self._seed_bcz.value()
         rmax = rmax_corner_px(bc_y, bc_z, ny, nz)
-        y_ref = median_intensity_near_bc(self._image, bc_y, bc_z, r_max=10.0)
+        y_ref = median_intensity_near_bc(img_ref, bc_y, bc_z, r_max=10.0)
         radii, values = default_radial_threshold_points(y_ref, rmax)
         self._thr_editor.set_domain(rmax)
         self._thr_editor.set_points(radii, values)
@@ -1150,11 +1157,28 @@ class CalibrationTab(QtWidgets.QWidget):
     # ── Threshold (calibration image only) ────────────────────────
 
     def _calib_image(self):
-        """Image fed to the calibration pipeline: radially-thresholded copy if enabled."""
+        """Image fed to the calibration pipeline: radially-thresholded copy if enabled.
+
+        ``_seed_bcy``/``_seed_bcz`` are in the Transforms-applied (displayed)
+        frame — Pick BC/Pick Ring read their coordinates straight off the
+        displayed array (see ``widgets.PickableImageViewer.set_raw_frame``),
+        same convention as every other BC-based overlay. ``self._image``
+        itself stays raw (untransformed; see ``_show_calib_image``), so the
+        threshold must be computed in the transformed frame — else its
+        centre lands mirrored whenever a flip is active — then transformed
+        back to raw orientation, since every caller of ``_calib_image()``
+        (the preview and ``CalibrationWorker``) expects a raw-oriented array
+        and applies ``im_trans`` itself."""
         if self._image is None:
             return None
         if self._thr_check.isChecked():
             radii, values = self._thr_editor.points()
+            codes = self._im_trans_codes()
+            if codes:
+                img_t = _apply_im_trans(self._image, codes)
+                img_t = apply_radial_threshold(
+                    img_t, self._seed_bcy.value(), self._seed_bcz.value(), radii, values)
+                return _apply_im_trans(img_t, tuple(reversed(codes)))
             return apply_radial_threshold(
                 self._image, self._seed_bcy.value(), self._seed_bcz.value(), radii, values)
         return self._image
