@@ -178,14 +178,69 @@ def calibrate_set_field(role: str, path: str, checked: bool = True,
 
 
 @mcp.tool()
+def calibrate_set_projection(method: Optional[str] = None, skip: Optional[int] = None,
+                             n_frames: Optional[int] = None) -> Any:
+    """Set the Calibrate tab's stack-Projection controls: method is one of
+    max/sum/mean, skip is frames to skip at the start, n_frames is how many
+    frames to project (0 = all). Omit any argument to leave it as-is. Does
+    not itself run the projection — call calibrate_project to do that."""
+    return _call("calibrate.set_projection", method=method, skip=skip, n_frames=n_frames)
+
+
+@mcp.tool()
+def calibrate_project() -> Any:
+    """Run the stack projection (using whatever Method/Skip/N-frames is
+    currently set — see calibrate_set_projection) and feed the resulting
+    image into the calibration pipeline in place of the current raw frame.
+    Requires a multi-frame source. Async like calibrate_run: returns a
+    job_id — poll with calibrate_wait/calibrate_get_job."""
+    return _call("calibrate.project")
+
+
+@mcp.tool()
+def calibrate_clear_projection() -> Any:
+    """Drop the active projection — the pipeline reverts to using the
+    current raw frame as its input image."""
+    return _call("calibrate.clear_projection")
+
+
+@mcp.tool()
 def calibrate_run(mode: str, refine: Optional[dict] = None,
-                  manual_seed: Optional[dict] = None) -> Any:
+                  manual_seed: Optional[dict] = None, limits: Optional[dict] = None,
+                  build_residual_corr: Optional[bool] = None) -> Any:
     """Start a calibration run. mode is one of: one_shot, first_time,
-    four_stage, bayesian, joint, frozen_point. refine is a subset of
-    {Lsd,BC,tx,ty,tz,Wavelength: bool}. manual_seed is a subset of
-    {BC_y,BC_z,Lsd,tx,ty,tz: float} (Lsd in µm). Returns a job_id immediately
-    — poll with calibrate_wait/calibrate_get_job."""
-    return _call("calibrate.run", mode=mode, refine=refine, manual_seed=manual_seed)
+    four_stage, bayesian, joint, frozen_point.
+
+    refine is a subset of {Lsd,BC,tx,ty,tz,Wavelength,Distortion: bool} plus
+    (crystalline calibrants only) one of:
+      - distortion_mode: one of "None", "Isotropic only", "Iso + up to
+        2-fold", "Iso + up to 4-fold", "All (15)" — selects a preset set of
+        the 15 distortion coefficients to refine.
+      - distortion_coeffs: an explicit list of coefficient names (from
+        iso_R2, iso_R4, iso_R6, a1, phi1, a2, phi2, a3, phi3, a4, phi4, a5,
+        phi5, a6, phi6) — each fold's amplitude/phase must be given together.
+    Distortion itself still needs refine["Distortion"]=True to actually be
+    refined; distortion_mode/distortion_coeffs only choose which coefficients
+    that applies to.
+
+    manual_seed is a subset of {BC_y,BC_z,Lsd,tx,ty,tz: float} (Lsd in µm)
+    plus optionally "distortion": {coeff_name: value} to seed individual
+    distortion coefficients (enables Distortion seeding automatically).
+
+    limits is {row_name: {"on": bool, "value": float, "unit": str}} for rows
+    named Lsd/BC_y/BC_z/ty/tz/tx/wavelength_A (manual d-spacing fits: an
+    opt-in ± window around the seed) or Lsd/BC_y/ty/wavelength_A/distortion
+    (crystalline fits: the ± tolerance window always applied around the
+    seed/auto-seed — "on" is ignored there). Units: Lsd in "mm" or "%", BC_y/
+    BC_z in "px" or "%", tilts in "°" or "%", wavelength_A in "Å" or "%",
+    distortion has no unit (absolute only).
+
+    build_residual_corr toggles the "Residual map" checkbox (crystalline
+    fits only).
+
+    Returns a job_id immediately — poll with calibrate_wait/calibrate_get_job."""
+    return _call("calibrate.run", mode=mode, refine=refine, manual_seed=manual_seed,
+                 limits=limits, build_residual_corr=build_residual_corr)
 
 
 @mcp.tool()
@@ -232,6 +287,46 @@ def calibrate_export_to_data_viewer() -> Any:
     """Push the Calibrate tab's last completed result into the Data
     Viewer's manual geometry."""
     return _call("calibrate.export_to_data_viewer")
+
+
+@mcp.tool()
+def calibrate_get_working_dir() -> Any:
+    """Read the Calibrate tab's current working directory."""
+    return _call("calibrate.get_working_dir")
+
+
+@mcp.tool()
+def calibrate_set_working_dir(path: str) -> Any:
+    """Set the Calibrate tab's working directory — where a run's
+    intermediates (residual_corr.bin, etc.) and Save-button dialogs land."""
+    return _call("calibrate.set_working_dir", path=path)
+
+
+@mcp.tool()
+def calibrate_suggest_working_dir() -> Any:
+    """Fill in the working directory with the <expid>_bc analysis folder
+    derived from the currently loaded data path (same as clicking
+    "Suggest" next to the Working dir field)."""
+    return _call("calibrate.suggest_working_dir")
+
+
+@mcp.tool()
+def calibrate_save_json(path: str) -> Any:
+    """Save the last completed calibration run's result as a calibration.json
+    at the given path (same content as the "Save .json" button, without the
+    file dialog). Requires a completed run."""
+    return _call("calibrate.save_json", path=path)
+
+
+@mcp.tool()
+def calibrate_save_paramstest(out_path: str, template_path: Optional[str] = None) -> Any:
+    """Save the last completed calibration run's result as a MIDAS
+    paramstest.txt at out_path (same as the "Save paramstest.txt" button,
+    without the dialog). template_path, if given, injects only the fitted
+    geometry/distortion into that existing paramstest.txt, keeping every
+    other parameter verbatim; omit it for a self-contained file. Requires a
+    completed run."""
+    return _call("calibrate.save_paramstest", out_path=out_path, template_path=template_path)
 
 
 @mcp.tool()

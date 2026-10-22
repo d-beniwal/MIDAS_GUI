@@ -33,6 +33,8 @@ from pathlib import Path
 
 import numpy as np
 
+from midas_gui.constants import DISTORTION_NAMES, DISTORTION_PRESETS
+
 _BRIGHT_MODE_INDEX = {"divide": 0, "subtract": 1}
 
 
@@ -317,14 +319,107 @@ class GuiController:
     def op_calibrate_set_field(self, role, path, checked: bool = True, mode=None) -> dict:
         return self._set_field(self._cal._loader, role, path, checked, mode)
 
-    def op_calibrate_run(self, mode, refine=None, manual_seed=None) -> dict:
+    # ── Calibrate: projection (reduce a stack to one image before fitting) ──
+    def op_calibrate_set_projection(self, method=None, skip=None, n_frames=None) -> dict:
+        tab = self._cal
+        if method is not None:
+            if method not in tab._proj_method:
+                return _err(f"unknown projection method {method!r} (max/sum/mean)",
+                           kind="bad_args")
+            tab._proj_method[method].setChecked(True)
+        if skip is not None:
+            tab._proj_skip.setValue(int(skip))
+        if n_frames is not None:
+            tab._proj_nframes.setValue(int(n_frames))
+        return _ok({"method": next(m for m, b in tab._proj_method.items() if b.isChecked()),
+                    "skip": tab._proj_skip.value(), "n_frames": tab._proj_nframes.value()})
+
+    def op_calibrate_project(self) -> dict:
+        """Run the stack projection (Method/Skip/N-frames as currently set —
+        see ``calibrate.set_projection``) and feed the result into the
+        pipeline as its input image. Async like a calibration run: returns a
+        job_id pollable with the same ``calibrate.get_job``/``calibrate.wait``
+        used for ``calibrate.run``.
+
+        Deliberately does NOT connect its own ``finished``/``failed`` handler
+        to the worker the way ``op_calibrate_run`` does for a
+        ``CalibrationWorker`` — ``ProjectionWorker`` is an in-process
+        ``QThread`` that can finish a small reduction in well under a
+        millisecond, and a connection made here (necessarily *after*
+        ``tab._project()`` has already called ``.start()``) can lose the race
+        against an already-emitted signal. ``CalibrationWorker`` is a
+        separate OS process, whose spawn latency alone makes that race
+        unobservable in practice. Instead, ``op_calibrate_get_job`` lazily
+        reads the tab's own canonical post-projection state (set by
+        ``CalibrationTab._on_project_done``/``_on_project_failed``, which
+        *are* connected before ``.start()`` and so always fire) once the
+        worker is no longer running — see that method."""
+        tab = self._cal
+        if tab._loader.n_frames() <= 1:
+            return _err("projection needs a multi-frame source", kind="precondition_failed")
+        if tab._proj_worker is not None and tab._proj_worker.isRunning():
+            return _err("a projection is already running", kind="precondition_failed")
+        tab._last_proj_error = None
+        tab._project()
+        worker = tab._proj_worker
+        if worker is None:
+            return _err("projection did not start for an unknown reason", kind="exception")
+        job_id = str(uuid.uuid4())
+        self._jobs[job_id] = {"status": "running", "result": None, "error": None,
+                              "_proj_worker": worker, "_keepalive": worker}
+        return _ok({"job_id": job_id})
+
+    def op_calibrate_clear_projection(self) -> dict:
+        """Drop the active projection — the pipeline reverts to the current
+        raw frame as its input image."""
+        self._cal._on_project_clear()
+        return _ok()
+
+    def op_calibrate_run(self, mode, refine=None, manual_seed=None, limits=None,
+                         build_residual_corr=None) -> dict:
         tab = self._cal
         idx = tab._pipeline.findData(mode)
         if idx < 0:
             return _err(f"unknown pipeline mode {mode!r}", kind="bad_args")
         tab._pipeline.setCurrentIndex(idx)
         if refine:
-            tab._set_refine_box_state(refine)
+            box_flags = {k: v for k, v in refine.items() if k in tab._REFINE_BOXES}
+            if box_flags:
+                tab._set_refine_box_state(box_flags)
+            if "Distortion" in refine:
+                tab._ref_dist.setChecked(bool(refine["Distortion"]))
+            dist_mode = refine.get("distortion_mode")
+            dist_coeffs = refine.get("distortion_coeffs")
+            if dist_mode is not None:
+                if dist_mode not in DISTORTION_PRESETS:
+                    return _err(f"unknown distortion_mode {dist_mode!r} "
+                               f"(one of {sorted(DISTORTION_PRESETS)})", kind="bad_args")
+                tab._dist_coeffs = set(DISTORTION_PRESETS[dist_mode])
+                tab._update_dist_label()
+            elif dist_coeffs is not None:
+                bad = sorted(set(dist_coeffs) - set(DISTORTION_NAMES))
+                if bad:
+                    return _err(f"unknown distortion coefficient(s): {bad}", kind="bad_args")
+                tab._dist_coeffs = set(dist_coeffs)
+                tab._update_dist_label()
+        if limits:
+            for name, row in limits.items():
+                widgets = tab._limit_widgets.get(name)
+                if widgets is None:
+                    return _err(f"unknown limit row {name!r}", kind="bad_args")
+                cb, spin, combo = widgets
+                if isinstance(row, dict):
+                    if row.get("value") is not None:
+                        spin.setValue(float(row["value"]))
+                    if row.get("unit"):
+                        ix = combo.findText(str(row["unit"]))
+                        if ix >= 0:
+                            combo.setCurrentIndex(ix)
+                    if "on" in row:
+                        cb.setChecked(bool(row["on"]))
+            tab._on_limits_changed()
+        if build_residual_corr is not None:
+            tab._build_rc.setChecked(bool(build_residual_corr))
         if manual_seed:
             spins = {"BC_y": tab._seed_bcy, "BC_z": tab._seed_bcz, "Lsd": tab._seed_lsd,
                      "tx": tab._seed_tx, "ty": tab._seed_ty, "tz": tab._seed_tz}
@@ -337,6 +432,11 @@ class GuiController:
             flags = {seed_flag[k]: True for k in manual_seed if k in seed_flag}
             if flags:
                 tab._enable_seed(**flags)
+            dist_seed = manual_seed.get("distortion")
+            if dist_seed:
+                tab._seed_dist = {k: float(v) for k, v in dist_seed.items()}
+                tab._enable_seed(Distortion=True)
+                tab._update_seed_dist_label()
         tab._last_agent_error = None
         tab._run()
         if tab._last_agent_error is not None:
@@ -363,7 +463,25 @@ class GuiController:
         job = self._jobs.get(job_id)
         if job is None:
             return _err(f"unknown job_id {job_id!r}", kind="bad_args")
+        worker = job.get("_proj_worker")
+        if worker is not None and job["status"] == "running" and not worker.isRunning():
+            job = self._jobs[job_id] = self._finalize_projection_job()
         return _ok({k: v for k, v in job.items() if not k.startswith("_")})
+
+    def _finalize_projection_job(self) -> dict:
+        """Read back a finished projection's outcome from the tab's own
+        canonical state — see ``op_calibrate_project``'s docstring for why
+        this is a lazy poll-and-read instead of a second signal connection."""
+        tab = self._cal
+        if tab._last_proj_error is not None:
+            return {"status": "failed", "result": None, "error": tab._last_proj_error}
+        if tab._proj_active and tab._proj_image is not None:
+            return {"status": "done",
+                    "result": {"info": tab._proj_note.text(),
+                              "shape": list(tab._proj_image.shape)},
+                    "error": None}
+        return {"status": "failed", "result": None,
+               "error": "projection finished with no result and no recorded error"}
 
     # NOTE: there is deliberately no blocking op_calibrate_wait here. An
     # earlier version busy-waited with QCoreApplication.processEvents() in a
@@ -398,6 +516,35 @@ class GuiController:
             return _err("no completed calibration run yet", kind="no_data")
         self._view.set_geometry(g)
         return _ok({"applied": g})
+
+    # ── Calibrate: working directory ────────────────────────────────
+    def op_calibrate_get_working_dir(self) -> dict:
+        return _ok({"path": self._cal._out_ed.text()})
+
+    def op_calibrate_set_working_dir(self, path) -> dict:
+        self._cal._out_ed.setText(path)
+        return _ok({"path": self._cal._out_ed.text()})
+
+    def op_calibrate_suggest_working_dir(self) -> dict:
+        """Fill in the ``<expid>_bc`` analysis folder derived from the
+        currently loaded data path — same as clicking "Suggest" next to the
+        Working dir field."""
+        self._cal._apply_suggested_working_dir()
+        return _ok({"path": self._cal._out_ed.text()})
+
+    # ── Calibrate: save ──────────────────────────────────────────────
+    def op_calibrate_save_json(self, path) -> dict:
+        tab = self._cal
+        if tab._result is None:
+            return _err("no completed calibration run yet", kind="no_data")
+        return _ok({"path": tab._save_json_to(path)})
+
+    def op_calibrate_save_paramstest(self, out_path, template_path=None) -> dict:
+        tab = self._cal
+        if tab._result is None:
+            return _err("no completed calibration run yet", kind="no_data")
+        tab._save_paramstest_to(out_path, template_path)
+        return _ok({"out_path": out_path})
 
     def op_calibrate_get_state(self) -> dict:
         return _ok(_jsonable(self._cal.get_state(), stem="cal_state"))

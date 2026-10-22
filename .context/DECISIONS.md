@@ -36,6 +36,69 @@ regression test `test_calib_image_threshold_centre_tracks_bc_under_flip_z`
 in `tests/test_calib_radial_threshold.py` fails against the pre-fix code and
 passes after — verified both ways before considering this closed.
 
+## 2026-10-21 — MCP control surface: Calibrate tab projection/seed/refine/tolerance/distortion-mode/residual-map/save/working-dir ops
+
+**Requested directly**: expose the Calibrate tab's projection (max/sum/mean,
+skip/N-frames), manual-seed (incl. distortion coefficients), refine flags +
+tolerances, distortion refinement mode, residual-map toggle, Save buttons,
+and working-directory controls through `midas_gui_mcp` — the phase-1 surface
+(`22dc151`) only covered load/run/seed-from-result/import-export/get_state.
+
+**New ops** (`midas_gui/control_api.py` + mirrored `midas_gui_mcp/server.py`
+tools): `calibrate.set_projection`/`.project`/`.clear_projection` (the last
+two reuse the existing `_jobs` job-id registry and `get_job`/`wait` polling —
+no new async machinery needed); `calibrate.get_working_dir`/`.set_working_dir`/
+`.suggest_working_dir`; `calibrate.save_json`/`.save_paramstest` (new
+`CalibrationTab._save_json_to`/`_save_paramstest_to`, factored out of the
+existing dialog-driven `_save_json`/`_save_paramstest` so a control API can
+pass an explicit path with no `QFileDialog` to hang on — guarded by
+`self._agent_mode`, same bypass flag phase-1 already uses for blocking
+`QMessageBox`es, so interactive Save-button behavior is unchanged). `calibrate.run`
+gained `limits` (sets `_limit_widgets` rows — the ± tolerance window, opt-in
+for manual d-spacing fits / always-applied for crystalline ones) and
+`build_residual_corr`, and its `refine` dict now also accepts `Distortion`,
+`distortion_mode` (one of `constants.DISTORTION_PRESETS`) and
+`distortion_coeffs` (explicit coefficient list), plus `manual_seed` now
+accepts a `"distortion": {coeff: value}` sub-dict (seeds `_seed_dist` +
+ticks `Distortion` seeding).
+
+**Real concurrency bug found by actually driving `calibrate.project`
+end-to-end** (small-stack test, not just inspection): the first
+implementation connected its own `job["status"]` `finished`/`failed`
+handlers to `ProjectionWorker` *after* `CalibrationTab._project()` had
+already called `.start()` — the same ordering `calibrate.run` already uses
+for `CalibrationWorker`, which is safe there only because `CalibrationWorker`
+is a separate OS process (`QProcess`-backed) whose spawn latency makes the
+race unobservable. `ProjectionWorker` is an in-process `QThread` reducing a
+tiny array, fast enough (sub-millisecond on a small stack) to finish and
+emit `finished` before the post-`.start()` `.connect()` call ever executes —
+losing the signal entirely and leaving the job stuck at `"running"` forever.
+Reproduced reliably (~80% of runs) with a 4-frame 6×6 stack once a real
+`QThread.wait()` + `processEvents()` end-to-end test was written instead of
+mocking the worker. Fixed by not connecting a second handler at all:
+`op_calibrate_project` stores the worker reference on the job dict and
+`op_calibrate_get_job` lazily reads `CalibrationTab._proj_active`/
+`_proj_image`/`_last_proj_error` (new attribute, set by `_on_project_failed`)
+once `worker.isRunning()` goes false — those are updated by
+`_on_project_done`/`_on_project_failed`, which **are** connected before
+`.start()` inside `_project()` itself and therefore always fire. Also made
+`_on_project_failed` agent-mode-safe (records to `_last_proj_error` + the
+log instead of popping `show_error`'s blocking dialog), mirroring the
+existing `_on_fail` pattern — an agent-driven projection failure would
+otherwise have hung the GUI event loop forever, the same class of bug
+phase-1's `set_agent_mode` bypass already fixed for `_run()`/`_simulate()`.
+
+**Verification**: new `tests/test_control_api_calibrate_mcp_ops.py` (16
+cases, each `@pytest.mark.forked` — building more than ~2 `CalibrationTab`s
+in one process is a known pre-existing pyqtgraph-teardown segfault risk, see
+`tests/test_calibrate_panel_save.py`), driven through `GuiController.dispatch`
+(the actual wire-protocol entry point) rather than calling `op_*` methods
+directly. Ran each touched calibrate test file individually (never a
+combined `pytest tests/` invocation — confirmed, by toggling this diff on a
+stash, that `tests/test_calib_file_load_fidelity.py`'s intermittent
+segfault — ~20% of runs, building 3 `CalibrationTab`s unforked — predates
+this change and is unaffected by it).
+
 ## 2026-10-16 (branch `mcp`, latest) — Phase-1 MCP control layer for Data Viewer + Calibrate; built and self-tested by the agent
 
 **Requested directly**: a framework for LLM agents (not just this one) to

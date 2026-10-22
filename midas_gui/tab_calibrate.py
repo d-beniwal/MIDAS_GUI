@@ -108,6 +108,10 @@ class CalibrationTab(QtWidgets.QWidget):
         self._proj_active: bool = False               # a stack projection feeds the pipeline
         self._proj_image: Optional[np.ndarray] = None  # already dark/bright/background-corrected
         self._proj_worker: Optional[ProjectionWorker] = None
+        # Set by _on_project_failed in agent mode — see that method and
+        # control_api.op_calibrate_get_job, which reads this (not a dialog)
+        # to report an async projection failure back to the caller.
+        self._last_proj_error: Optional[str] = None
         self._build_ui()
         self._loader.set_path(DEFAULT_CALIBRANT_TIF)
         # Connected after the bundled demo image loads above, deliberately
@@ -1244,6 +1248,10 @@ class CalibrationTab(QtWidgets.QWidget):
     def _on_project_failed(self, msg):
         self._proj_btn.setEnabled(True)
         self._proj_note.setText("Projection failed.")
+        if self._agent_mode:
+            self._last_proj_error = msg
+            self._log.append(f"[calibrate] Projection failed:\n{msg}")
+            return
         show_error(self, "Projection error", msg)
 
     def _on_project_clear(self):
@@ -2726,6 +2734,12 @@ class CalibrationTab(QtWidgets.QWidget):
             self, "Save calibration.json", self._default_save_path(".instr.json"),
             "JSON (*.json)")
         if not path: return
+        self._save_json_to(path)
+
+    def _save_json_to(self, path) -> str:
+        """Actual ``calibration.json`` save, factored out of ``_save_json``
+        so a control API (``control_api.op_calibrate_save_json``) can drive
+        it with an explicit path — no file dialog to hang on."""
         import json
         d = {k: v for k, v in vars(self._result).items()
              if not k.startswith("_") and not hasattr(v, "numpy")}
@@ -2758,8 +2772,10 @@ class CalibrationTab(QtWidgets.QWidget):
                                   f"panel_shifts_path):\n{traceback.format_exc()}")
         Path(path).write_text(json.dumps(d, indent=2, default=str))
         self._log.append(f"Saved: {path}")
-        QtWidgets.QMessageBox.information(
-            self, "Saved", f"calibration.json saved:\n{path}{ps_note}")
+        if not self._agent_mode:
+            QtWidgets.QMessageBox.information(
+                self, "Saved", f"calibration.json saved:\n{path}{ps_note}")
+        return path
 
     def _save_paramstest(self):
         if not self._result:
@@ -2770,7 +2786,15 @@ class CalibrationTab(QtWidgets.QWidget):
         out_path = dlg.out_path()
         if not out_path:
             QtWidgets.QMessageBox.warning(self, "No output", "Please specify an output file."); return
-        tmpl_path = dlg.template_path()
+        self._save_paramstest_to(out_path, dlg.template_path())
+
+    def _save_paramstest_to(self, out_path, tmpl_path=None) -> None:
+        """Actual ``paramstest.txt`` save, factored out of ``_save_paramstest``
+        so a control API (``control_api.op_calibrate_save_paramstest``) can
+        drive it with an explicit path/template — no dialog to hang on.
+        Raises instead of popping an error dialog while in agent mode (see
+        ``self._agent_mode``), so the control API's generic exception
+        handling in ``GuiController.dispatch`` can report the failure."""
         panel_u = getattr(self._result, "_panel_unpacked", None)
         panel_layout = getattr(self._result, "panel_layout", None)
         # <stem>_panelshifts.txt, not a generic "panel_shifts.txt" — saving
@@ -2863,12 +2887,15 @@ class CalibrationTab(QtWidgets.QWidget):
                 except Exception:
                     import traceback
                     self._log.append(f"Panel shifts save error:\n{traceback.format_exc()}")
-            QtWidgets.QMessageBox.information(
-                self, "Saved",
-                f"paramstest.txt saved ({mode}):\n{out_path}{ps_saved}")
+            if not self._agent_mode:
+                QtWidgets.QMessageBox.information(
+                    self, "Saved",
+                    f"paramstest.txt saved ({mode}):\n{out_path}{ps_saved}")
         except Exception as e:
             import traceback
             self._log.append(f"Save paramstest error:\n{traceback.format_exc()}")
+            if self._agent_mode:
+                raise
             QtWidgets.QMessageBox.critical(self, "Save failed", str(e))
 
     def get_result(self):
