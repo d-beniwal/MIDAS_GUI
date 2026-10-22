@@ -15,6 +15,34 @@ multi-phase/core-shell, anisotropic ADP, directional strain-PDF.
 Build-critical reference for maintaining the PDF tab:
 `.context/reference/midas_pdf/` (esp. `01_core_api.md`, `05_gui_integration.md`).
 
+## Follow-ups carried forward from STATE (2026-10-21)
+
+These were open in the prior snapshot; check current code before acting.
+
+- **MCP phase 2:** extend the current Data Viewer/Calibrate control surface
+  to Mask and Batch Integrate when requested. Phase 1 is already on `main`;
+  see `midas_gui_mcp/README.md` for operation coverage and APEXA integration.
+- **Solve Cell Phase 2+:** detector-stage geometry resolution tiers,
+  self-calibration fallback, bootstrap confidence intervals/axis doubling,
+  further domain separation, diagnostics; see
+  `documentation/solve_cell_handoff.md` §10. Multi-panel pooling currently
+  requires a calibration file for each panel. Numerically cross-check the
+  deliberately standalone pipeline's `_apply_stack_corrections` against
+  GUI field corrections beyond the synthetic unit test.
+- **Texture:** make `PoleFigureWorker` omega-aware across a series (currently
+  single-frame with cfg χ/φ); inspect cake HDF5 in a real viewer and continue
+  testing metadata provenance.
+- **Frozen-point calibration:** the high-tilt `_seed_and_v1` branch does not
+  forward `tols=tols`; the UI currently warns. See DECISIONS 2026-09-30.
+- **Calibrate UI unification:** see
+  `documentation/calibration_unification_plan.md`; recheck surface parity
+  after recent Hydra changes before choosing the next phase.
+- **Verification gaps:** no live end-to-end restart/relaunch check or recent
+  real multi-panel beamline calibration output; Windows `lheald` import
+  failure awaits direct tracebacks/version. `job_queue.py` and
+  `peak_fit_panel.py` still lack coverage; `test_batch_cli_omega.py` covers
+  only the omega argument/configuration round trip for `batch_cli.py`.
+
 ## Per-tab open items
 
 - **Calibrate:** multi-distance (`autocalibrate_multi`), doublet calibrants,

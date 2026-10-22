@@ -95,6 +95,8 @@ visual aid, not a real reduced structure function.
 - Expected FCC Ni G(r) peaks: 2.49, 3.52, 4.32, 4.98, 5.57 Å (NN = a/√2, a=3.524).
 - `…/midas_pdf_test/output/05_gr_Ni.csv` — reference Ni G(r) to compare against.
 
-## Keep docs in sync
-Per user memory `keep-gui-docs-updated`: update `documentation/gui_documentation.md` and
-`claude/gui_plan.md` (Implementation Status) when the PDF tab changes.
+## Keep project context in sync
+Follow `AGENTS.md`: update `.context/STATE.md` after significant work and
+record durable decisions in `.context/DECISIONS.md`. Track pending PDF work
+in `.context/ROADMAP.md`. Update shipped user/development documentation only
+when explicitly requested.

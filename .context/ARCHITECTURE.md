@@ -20,7 +20,7 @@ backends are separate deps) · `constants.py` · `helpers.py` · `style.py` ·
 
 **Tabs** (`tab_*.py`): view, mask, calibrate, refine, batch, corrections, pdf,
 texture, export, pumpprobe (TR-XRD). **Tab status:** 0–4 verified; 5–8 WIP —
-keep this note current in `documentation/gui_documentation.md`. Tab visibility
+update shipped user documentation only when explicitly requested. Tab visibility
 is user-configurable via Settings▸Preferences (`ui.visible_tabs`).
 
 ## Cross-tab wiring
@@ -186,7 +186,7 @@ becomes a placeholder; signal wiring guarded by `_connect`.
 
 ## Environment notes
 
-- **macOS TCC** blocks the Claude Code process from reading `~/Downloads`,
+- **macOS TCC** has blocked agent processes from reading `~/Downloads`,
   `~/Desktop`, `~/Documents` (`Operation not permitted` even with sandbox
   off) — keep any external source dirs (e.g. a package's source checkout
   used for reference) outside those three.
@@ -199,3 +199,25 @@ becomes a placeholder; signal wiring guarded by `_connect`.
   `development_history.md`, `implementation_details.md`,
   `pdf_calculation_explained.md`, `config_gui.md` — each with a `.pdf` rebuilt
   via pandoc + headless-Chrome.
+
+
+## Reliable Qt verification (carried forward from STATE)
+
+- Run affected test files separately. A combined `tests/` run can fail after
+  Qt/torch/numba/HDF5 have initialized threads and made later forks unsafe.
+- In new Qt test modules, import PyQt5 and GUI modules inside a fixture,
+  never at module scope: macOS CoreFoundation initialization in the pytest
+  parent can make forked children crash before their test bodies run.
+  `tests/test_set_raw_frame.py` is the reference pattern.
+- Respect each file's existing forked/non-forked setup. `--forked` can race
+  with `--basetemp`; multiple unforked CalibrationTabs can also crash.
+- Recheck suspicious failures with a fresh temporary `HOME`: saved
+  materials/calibrants/visible tabs can change smoke-test expectations.
+- Pyqtgraph teardown remains intermittently unsafe, including CakeViewer
+  ViewBoxes, module-scoped MainWindows, and
+  `test_apply_project_calibration_single_detector` (SIGABRT). Compare with
+  unmodified HEAD and repeat suspicious smoke runs before calling them
+  regressions. Do not try `gc.collect()`; it has made these crashes worse.
+- These are historical constraints, not a claim that today's suite was run
+  or is green. Detailed investigations are in DECISIONS (2026-08-26 through
+  2026-09-10).

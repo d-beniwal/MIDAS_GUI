@@ -167,6 +167,38 @@ coverage of the callback plumbing and the Qt signal/slot wiring.
 `diamond_filter`/`ab_initio`/`refine` were intentionally left untouched;
 `run_stage` only forwards `on_step` to `ingest`/`ingest_pooled`.
 
+## 2026-10-21 — Align project memory with the shared agent-neutral init/resume/save skills
+
+The shared skills repository now defines `AGENTS.md` as the canonical
+entrypoint and a near-one-page STATE with Now working on, Next steps,
+Open questions / blockers, and three to five Recent changes. Running its
+initializer found every scaffold file already present; no new scaffold was
+needed. The old STATE was 916 lines and incorrectly described MCP as an
+unmerged branch, although the current `main` contains that work and later
+commits through `a4f1b45`.
+
+Replaced STATE with the portable snapshot, moved still-open follow-ups into
+ROADMAP and durable Qt verification constraints into ARCHITECTURE. Prior
+implementation reasoning stays in the existing decisions below; the full
+previous STATE remains available in Git rather than a duplicate archive.
+Added the shared resume procedure directly to AGENTS so an agent can follow
+it even when its harness does not expose the shared skill. Slash-command
+registration remains a harness concern; no global skill installation was
+changed by this repository migration.
+
+Removed the ignored CLAUDE.md pointer and the local .claude directory,
+which contained only a stale scheduled_tasks.lock (its recorded PID was no
+longer running). These held no project knowledge. Replaced obsolete ignore
+rules with a provider-runtime ignore. Retained all substantive .context
+references and the calibration issue draft. Corrected the PDF reference's
+obsolete instruction to update claude/gui_plan.md and shipped docs on every
+change; AGENTS' explicit-request-only documentation policy takes precedence.
+
+Validation: checked scaffold idempotence, replayed the STATE + five newest
+decisions loading procedure, verified referenced project paths and diff
+whitespace, and confirmed only context/ignore files changed. No application
+code changed; no application test run was needed.
+
 ## 2026-10-16 (branch `mcp`, latest) — Phase-1 MCP control layer for Data Viewer + Calibrate; built and self-tested by the agent
 
 **Requested directly**: a framework for LLM agents (not just this one) to
