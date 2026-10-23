@@ -58,6 +58,20 @@ dependencies:
     - "torch==2.4.0"
     - "numba==0.59.1"            # NumPy-1.x compatible JIT (pin: newer numba needs NumPy>=2.1)
 
+    # VTK/PyVista — GPU-backed 3-D rendering for Solve Cell's detector/
+    # reciprocal views (2026-10-23, `pyvista` branch), replacing an earlier
+    # VisPy attempt that segfaulted under this project's
+    # QT_QPA_PLATFORM=offscreen test convention. Via pip, NOT conda-forge:
+    # conda-forge's vtk/pyvista pull a heavy dependency graph (ffmpeg, proj,
+    # libcurl, jpeg, c-blosc2, and current VTK's mesa-lavapipe floor needing
+    # macOS>=15) that conflicts with the pins above. The pip wheels are
+    # self-contained (same reasoning as the torch/numba pins above) and a
+    # dry-run against this exact pinned set resolves clean, no numpy/torch/
+    # numba movement.
+    - "vtk==9.7.1"
+    - "pyvista==0.49.1"
+    - "pyvistaqt==0.13.1"
+
     # pvapy backs the Data Viewer's "Live Data" card (subscribes to an EPICS PVA
     # image PV and renders frames straight in the Data Viewer's own image pane).
     # Pinned to 5.4.1, NOT latest: 5.5.0+ requires numpy>=2.0, which would

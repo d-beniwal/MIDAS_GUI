@@ -37,6 +37,14 @@ matplotlib==3.8.4             # supplies pyqtgraph's named colormaps (hot/viridi
 torch==2.4.0
 numba==0.59.1                 # NumPy-1.x compatible JIT (pin: newer numba needs NumPy>=2.1)
 
+# VTK/PyVista — GPU-backed 3-D rendering for Solve Cell's detector/reciprocal
+# views (2026-10-23, `pyvista` branch), replacing an earlier VisPy attempt
+# that segfaulted under QT_QPA_PLATFORM=offscreen. Self-contained wheels, no
+# numpy/torch/numba pin conflict.
+vtk==9.7.1
+pyvista==0.49.1
+pyvistaqt==0.13.1
+
 # pvapy backs the Data Viewer's "Live Data" card (subscribes to an EPICS PVA
 # image PV and renders frames straight in the Data Viewer's own image pane).
 # Pinned to 5.4.1, NOT latest: 5.5.0+ requires numpy>=2.0, which would
