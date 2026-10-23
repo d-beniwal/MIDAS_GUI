@@ -3,6 +3,84 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-22 — Fixed the hdf5plugin loading bug; upgraded the real env to the perf_solve_cell `midas_defect`/`midas_hkls` build
+
+**Fix for the bug found in the previous entry**: added `import hdf5plugin`
+to `midas_gui/__init__.py` (runs on any `import midas_gui`, before any tab
+or loader touches an h5py file). Verified: a clean process doing nothing but
+`import midas_gui; h5py.File(...)[...]` now reads the bitshuffle-compressed
+file that previously raised `OSError`. Confirmed via `git log --all -S
+"hdf5plugin"` across every `.py` file that this was never imported in this
+repo's history (not a regression) and that the same compression filter
+(id 32008) is universal across this cycle's raw files, not specific to one
+dataset — ruled out both as explanations before concluding it was a latent,
+never-before-exercised bug rather than something that "changed."
+
+**Found while verifying the fix with the test suite**: the earlier
+`a2acc78` commit (wiring `max_workers` through `pipeline.py`) broke real
+Ingest in the actual `midas-gui` conda env — all of
+`test_solve_cell_pipeline.py`'s ingest tests failed with `TypeError:
+choose_sectors() got an unexpected keyword argument 'max_workers'`. Root
+cause: that env still had `midas_defect 0.9.1` installed from *before*
+`perf_solve_cell` (version number unchanged by that branch — see ROADMAP
+P4-1), whose `choose_sectors`/`find_blobs_3d` don't accept `max_workers` at
+all. Only the throwaway cloned benchmark envs had been upgraded, by design,
+to avoid touching the working environment mid-benchmark — but that left the
+real env on an API `pipeline.py` no longer matched. This was a regression I
+introduced and should have caught by running tests right after `a2acc78`.
+
+**Resolved** by installing `midas_defect`/`midas_hkls` built from MIDAS's
+`perf_solve_cell` HEAD (`060f84c9`) into the real `midas-gui` env (`pip
+install --no-deps --force-reinstall` from the two package directories) and
+bumping `requirements.txt`'s `midas-defect` pin to `0.9.1` with a comment
+explaining the version-number ambiguity (see ROADMAP P4-1). Verified
+per-file (not combined — this repo's Qt tests leak state across files, see
+existing STATE.md note): `test_solve_cell_pipeline.py` (0 failures, 3
+skipped for missing reference data), `test_solve_cell_ui.py` (98 passed),
+`test_project.py` (46 passed), `test_smoke.py` (13 passed). The combined
+multi-file run that first showed `test_solve_cell_ui.py`/`test_project.py`
+failures was the same pre-existing Qt-teardown cross-contamination already
+documented, not a new issue — confirmed by running each file alone.
+
+## 2026-10-22 — Solve-cell ingest perf benchmark confirms 4.35x/9.42x; exposes an unrelated hdf5plugin loading bug
+
+**Benchmarked** MIDAS's `perf_solve_cell` branch (vectorized ingest hot
+loops + opt-in thread parallelism, commits `719f034d`..`060f84c9`) against
+`master`, on one real 642-frame spinel panel
+(`test6_spinel_orient1_25kev_exp0p02_det_-10_-15_0_000001.h5` +
+`xrds4_..._det_-10_-15_0...instr.json`). Used two cloned conda envs
+(`midas-gui-cmp-master`/`-new`) so neither touched the working `midas-gui`
+env; ran each config in isolation after discovering that running "previous"
+and "new" concurrently contaminated both timings via CPU contention (first
+attempt: 373s/119.56s; isolated: 324.13s/74.49s — a ~1.6x swing from
+contention alone, not a real difference). Isolated results: previous
+324.13s, new serial (`max_workers=1`) 74.49s (4.35x), new at
+`max_workers=12` on this 12-core machine 34.42s (9.42x total, 2.16x from
+threading alone). `spots_g.csv`/`ingest_summary.json` byte-identical across
+all three configurations.
+
+**Wired `max_workers` through** `midas_gui/solve_cell/pipeline.py`'s
+`_stage_ingest` (`cfg["blobs"]["max_workers"]`, forwarded to
+`choose_sectors`/`find_blobs_3d`; default 1, unchanged behaviour) —
+`a2acc78`. Not yet exposed in the Solve Cell tab's own UI (cfg-only so
+far).
+
+**Found, not yet fixed, while profiling frame loading for this benchmark:**
+`midas_gui` never imports `hdf5plugin` anywhere (confirmed by grepping the
+package and by checking `sys.modules` after importing `midas_gui.app`
+standalone). This beamline's raw Eiger files use the dynamically-loaded
+`bitshuffle` HDF5 filter (id 32008). Any h5py read of a raw frame — Data
+Viewer preview, solve-cell panel load, or Ingest's own frame-loading step —
+therefore crashes with `OSError: Can't synchronously read data (can't open
+directory .../lib/hdf5/plugin)` unless something else in-process happened
+to import `hdf5plugin` first; nothing in the GUI's own call paths does.
+Reproduced directly against the real `midas-gui` conda env and the real
+`h5py.File(...)[...]` call `_load_image` makes. See `.context/ROADMAP.md`
+("Solve Cell: ingest optimized, next bottlenecks + a loading bug") for the
+fix recommendation and the other downstream stages (`midas_hkls.ab_initio.
+select_basis`, `_stage_index_known_cell`'s random-orientation search) that
+the `perf_solve_cell` work did not touch.
+
 ## 2026-10-22 — Radially-adaptive threshold background mis-centred under Flip Y/Z (Calibrate + Hydra Calibrate)
 
 **Reported**: with Flip Z ticked, picking a ring to get BC drew the radial-

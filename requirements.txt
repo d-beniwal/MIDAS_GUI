@@ -124,7 +124,19 @@ psutil==7.2.2
 # to_conventional -- is confirmed present and working in 0.15.0). No numba
 # dependency at all (confirmed via pyproject.toml + source grep), and its
 # numpy>=1.20/torch>=2.0 floors are already satisfied by the pins above.
-midas-defect==0.9.0
+#
+# 2026-10-22: bumped 0.9.0 -> 0.9.1 and required a build from MIDAS's
+# `perf_solve_cell` branch (not yet a numbered release off master) --
+# `pipeline.py`'s `_stage_ingest` now passes `max_workers` to
+# `choose_sectors`/`find_blobs_3d`, which only `perf_solve_cell`'s
+# `midas_defect.ingest` accepts; master's (also version 0.9.1 -- the branch
+# did not bump its own version number) raises TypeError. Benchmarked
+# 4.35x/9.42x faster at max_workers=1/12 on a real 642-frame panel,
+# byte-identical spots_g.csv/ingest_summary.json at every setting -- see
+# .context/DECISIONS.md 2026-10-22. Package-side follow-up: ask MIDAS
+# maintainers to bump midas-defect's own version when this branch merges, so
+# a bare version pin can distinguish it from master again.
+midas-defect==0.9.1
 # midas-defect's own direct dependencies (pulled in transitively) -- pinned
 # explicitly for the same reproducibility reason as the block above.
 midas-ddd==0.1.2

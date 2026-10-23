@@ -16,10 +16,18 @@ full design/trace on each.
 
 ## Next steps
 
-- Push `main` to `origin`.
-- Live-app check for Solve Cell Ingest: run a real Ingest (beamline data)
-  and confirm the Detector tab visibly updates per step, not just via the
-  automated worker/tab unit tests already covering `_on_ingest_step`.
+- Push `main` to `origin` (now includes `a2acc78` max_workers wiring + the
+  hdf5plugin fix + the requirements.txt `midas-defect` pin bump).
+- Live-app check for Solve Cell Ingest: run a real Ingest (beamline data,
+  now that the hdf5plugin bug is fixed) and confirm the Detector tab
+  visibly updates per step, not just via the automated worker/tab unit
+  tests already covering `_on_ingest_step`.
+- Consider exposing `max_workers` in the Solve Cell tab's own UI (currently
+  cfg-only) and applying the same thread-pool treatment to
+  `_stage_index_known_cell`'s `_random_rotation_search` — see ROADMAP.
+- Flag ROADMAP P4-1 to MIDAS maintainers (midas-defect's `perf_solve_cell`
+  branch never bumped its own version number, so the requirements.txt pin
+  can't disambiguate it from master by version alone).
 - Consider extending the same `on_step` pattern to `diamond_filter`/
   `ab_initio`/`refine` if per-step visibility is wanted there too (not done
   — out of scope for this change).
@@ -48,12 +56,8 @@ full design/trace on each.
 
 ## Recent changes
 
+- 2026-10-22 — Fixed the hdf5plugin loading bug (import added to `midas_gui/__init__.py`) and upgraded the real env's `midas_defect`/`midas_hkls` to the `perf_solve_cell` build, resolving the `max_workers` TypeError `a2acc78` had introduced there; `requirements.txt` pin bumped with a version-ambiguity caveat (ROADMAP P4-1). Verified green per-file: `test_solve_cell_pipeline.py`, `test_solve_cell_ui.py`, `test_project.py`, `test_smoke.py`.
+- 2026-10-22 — Solve-cell ingest perf benchmark (MIDAS `perf_solve_cell` vs `master`): 4.35x serial / 9.42x at 12 workers, output byte-identical; wired `max_workers` into `pipeline.py` (`a2acc78`).
 - 2026-10-22 — Added Tools ▸ APEXA Chat… launcher, wired through `midas_gui_mcp` and a new Preferences ▸ Integrations APEXA-repo-path setting (`fcd5fbb`).
 - 2026-10-22 — Aligned context with shared init/resume/save skills; removed legacy provider files and corrected stale branch state (`042bb0e`).
 - 2026-10-22 — Solve Cell Ingest gained live per-step progress via a new `on_step` callback through `pipeline`/`SolveCellWorker`/`tab_solve_cell` (`f1da5e7`).
-- 2026-10-22 — MCP: Calibrate tab gained projection/seed/refine-tolerance/distortion-mode/residual-map/save/working-dir control ops; fixed a connect-after-start signal race in `calibrate.project` (`aaaeecc`).
-- 2026-10-22 — Fixed radially-adaptive threshold background mis-centring under Flip Y/Z in Calibrate + Hydra Calibrate (BC was read in display space, threshold applied to the raw array); added a regression test (`0458bcf`).
-- 2026-10-21 — Manual Profile/Intensity ranges now start from Auto fit and constrain pan/zoom (`a4f1b45`).
-- 2026-10-20 — Added MCP calibration-file/cake operations and APEXA setup documentation (`b3f14ca`, `3bb4660`).
-- 2026-10-16 — Added phase-1 MCP control, tab focus, and agent-control badge (`22dc151`, `c37e229`).
-- 2026-10-16 — Shipped N-ring limits, Hydra ring sync, restart/resume, and smarter Dark dataset defaults (`5562d72`).
