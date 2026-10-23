@@ -84,28 +84,49 @@ pyepics==3.5.10
 # calib.build_v1_params, which sets no ImTransOpt, so spec.im_trans is () and
 # the pipelines leave its arrays alone). Full rationale in pyproject.toml.
 # numpy 1.26.4 / torch 2.4.0 / numba 0.59.1 / zarr<3 all unchanged.
-midas-calibrate-v2==0.22.0
-midas-integrate-v2==0.7.1
-midas-calibrate==0.5.0
-midas-hkls==0.15.0
+#
+# 2026-10-22: this block had drifted from the real `midas-gui` conda env --
+# ad hoc `pip install --upgrade` of individual packages (done while chasing
+# the perf_solve_cell/Solve-Cell work) had moved the env ahead of these pins
+# without this file being updated, so `pip install -r requirements.txt` no
+# longer reproduced what was actually installed. Re-pinned every MIDAS
+# package here to the version importlib.metadata reports in the real env
+# (calibrate-v2 0.22.0->0.24.0, integrate-v2 0.7.1->0.9.0, calibrate
+# 0.5.0->0.6.0, hkls 0.15.0->0.16.0, pdf 0.3.0->0.4.0, integrate 0.8.0->0.9.0,
+# peakfit 0.6.0->0.8.0, zipper 0.2.1->0.4.0, params 0.12.0->0.14.0, saxs
+# 0.1.2->0.2.0, transforms 0.10.0->0.12.0, stress 0.14.1->0.15.0, diffract
+# 0.9.0->0.10.0; distortion/defect/ddd/index/invert were already current).
+# Checked every changed package's requires-dist via `pip show`/
+# importlib.metadata against the pins above: all numpy/torch/numba floors
+# (numpy>=1.22, torch>=2.0 or >=2.1, numba>=0.57/0.59 where present) are
+# already satisfied by numpy==1.26.4 / torch==2.4.0 / numba==0.59.1, so no
+# further compatibility work was needed -- this is a reproducibility fix,
+# not a functional upgrade. pyproject.toml and environment.yml still carry
+# the old pins (and, for pyproject.toml, are also missing the Solve Cell
+# block entirely) -- not touched here; flagged separately rather than
+# assumed in scope.
+midas-calibrate-v2==0.24.0
+midas-integrate-v2==0.9.0
+midas-calibrate==0.6.0
+midas-hkls==0.16.0
 midas-distortion==0.2.0
-midas-pdf==0.3.0                # Faber-Ziman PDF reduction used by the PDF tab
+midas-pdf==0.4.0                # Faber-Ziman PDF reduction used by the PDF tab
 
 # ── Transitive MIDAS deps pinned explicitly (pulled in by midas-calibrate-v2 /
 #    midas-pdf but not imported by midas_gui directly) — pinned for
 #    reproducible, verified-working installs rather than leaving them to float ─
-midas-integrate==0.8.0
-midas-peakfit==0.6.0
-midas-zipper==0.2.1
-midas-params==0.12.0            # new shared params-file registry/validator dep, first
+midas-integrate==0.9.0
+midas-peakfit==0.8.0
+midas-zipper==0.4.0
+midas-params==0.14.0            # new shared params-file registry/validator dep, first
                                  # required (>=0.9.0) by midas-calibrate/-v2, midas-hkls,
                                  # midas-integrate-v2 and midas-pdf as of this pin bump
 # Transitive chain introduced by midas-pdf 0.3.0: midas-saxs>=0.1.0 ->
 # midas-transforms>=0.10.0 -> midas-stress>=0.11.0. Not imported by midas_gui
 # directly; pinned for the same reproducibility reason as the rest of the block.
-midas-saxs==0.1.2
-midas-transforms==0.10.0
-midas-stress==0.14.1
+midas-saxs==0.2.0
+midas-transforms==0.12.0
+midas-stress==0.15.0
 zarr==2.18.7                    # required by midas-integrate/-peakfit/-zipper; was already
                                  # pulled in transitively before this pin bump (unpinned), so
                                  # this just makes an existing dependency explicit
@@ -117,11 +138,12 @@ psutil==7.2.2
 # ── Solve Cell tab backend (2026-10-04) ─────────────────────────────────────
 # midas-defect: raw-frame ingest (background subtraction, 3-D blob finding)
 # and detector forward/inverse geometry (pixel<->qlab<->qsample). Its own
-# pyproject.toml floor for midas-hkls is >=0.15.0 -- already satisfied by the
-# midas-hkls==0.15.0 pin above, so that pin is NOT bumped to >=0.16.0 here
-# (the original handoff doc asked for it, but every function the Solve Cell
-# tab calls -- index_ab_initio, refine_ub_from_gvectors, holohedry_from_fit,
-# to_conventional -- is confirmed present and working in 0.15.0). No numba
+# pyproject.toml floor for midas-hkls is >=0.15.0 -- satisfied by the
+# midas-hkls pin above (originally left at 0.15.0 on purpose, since every
+# function the Solve Cell tab calls -- index_ab_initio, refine_ub_from_gvectors,
+# holohedry_from_fit, to_conventional -- was confirmed present and working
+# there; the pin was later bumped to 0.16.0 regardless by the 2026-10-22
+# drift fix above, which re-pinned it to match the real env). No numba
 # dependency at all (confirmed via pyproject.toml + source grep), and its
 # numpy>=1.20/torch>=2.0 floors are already satisfied by the pins above.
 #
@@ -140,7 +162,7 @@ midas-defect==0.9.1
 # midas-defect's own direct dependencies (pulled in transitively) -- pinned
 # explicitly for the same reproducibility reason as the block above.
 midas-ddd==0.1.2
-midas-diffract==0.9.0
+midas-diffract==0.10.0
 midas-index==0.10.0
 midas-invert==0.2.0
 # Was previously unpinned/floating in this repo (no prior pandas line here or

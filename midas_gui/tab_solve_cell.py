@@ -26,6 +26,7 @@ tiers, self-cal) is still open future work.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -369,7 +370,25 @@ class SolveCellTab(QtWidgets.QWidget):
         iv.addRow("sector candidates:", self._sector_candidates_ed)
         self._ingest_btn = S.primary_btn("Run Ingest")
         self._ingest_btn.clicked.connect(self._run_ingest)
-        iv.addRow(self._ingest_btn)
+        self._ingest_max_workers = _NoScrollSpinBox()
+        self._ingest_max_workers.setRange(1, max(1, os.cpu_count() or 1))
+        self._ingest_max_workers.setValue(1)
+        self._ingest_max_workers.setToolTip(
+            "Thread-pool width for ingest's sector-search/blob-finding hot "
+            "loops (perf_solve_cell's opt-in parallelism). 1 = serial, "
+            "today's default. Output is bit-identical at every value -- "
+            "higher only trades CPU for wall-clock time.")
+        ingest_row = QtWidgets.QHBoxLayout()
+        ingest_row.setSpacing(6)
+        ingest_row.setContentsMargins(0, 0, 0, 0)
+        ingest_row.addWidget(self._ingest_btn)
+        ingest_row.addSpacing(12)
+        cpu_lbl = QtWidgets.QLabel("Nr. of CPUs:")
+        cpu_lbl.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        ingest_row.addWidget(cpu_lbl)
+        ingest_row.addWidget(self._ingest_max_workers)
+        ingest_row.addStretch(1)
+        iv.addRow(ingest_row)
         self._ingest_status = QtWidgets.QLabel("—")
         self._ingest_status.setStyleSheet(f"color:{S.MUTED};font-size:11px")
         self._ingest_status.setWordWrap(True)
@@ -1047,7 +1066,8 @@ class SolveCellTab(QtWidgets.QWidget):
                      "user_mask": panel.loader.composite_mask()},
             "blobs": {"threshold": self._blob_thresh.value(), "min_vol": self._blob_minvol.value(),
                       "split_ratio": self._split_ratio.value(), "gap_bridge": self._gap_bridge.value(),
-                      "sector_candidates": self._sector_candidates_cfg()},
+                      "sector_candidates": self._sector_candidates_cfg(),
+                      "max_workers": self._ingest_max_workers.value()},
             "panel_dir": panel_dir,
             # Best-effort: the loader's frame index is into the ORIGINALLY
             # loaded stack, while the pipeline's preview_frame_index is into
@@ -1209,7 +1229,8 @@ class SolveCellTab(QtWidgets.QWidget):
             "mask": {"low_count_threshold": self._low_count.value(), "grow": self._mask_grow.value()},
             "blobs": {"threshold": self._blob_thresh.value(), "min_vol": self._blob_minvol.value(),
                       "split_ratio": self._split_ratio.value(), "gap_bridge": self._gap_bridge.value(),
-                      "sector_candidates": self._sector_candidates_cfg()},
+                      "sector_candidates": self._sector_candidates_cfg(),
+                      "max_workers": self._ingest_max_workers.value()},
         }
 
     def _log_panel_ingest_attempt(self, panel: "PanelCard", spots_df, summary: dict,

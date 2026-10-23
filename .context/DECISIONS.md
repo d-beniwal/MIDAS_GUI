@@ -3,6 +3,77 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-22 — Exposed Ingest `max_workers` as a "Nr. of CPUs" field; `requirements.txt` drift fixed; a real-data Ingest crash found and flagged (not yet fixed)
+
+**Added** a "Nr. of CPUs" `QSpinBox` directly beside the Run Ingest button in
+`tab_solve_cell.py` (range `1..os.cpu_count()`, default 1 — unchanged
+behaviour), wired into `_panel_ingest_cfg`'s/`_panel_ingest_inputs`'s
+`blobs.max_workers`, which `pipeline.py`'s `_stage_ingest` already forwarded
+to `choose_sectors`/`find_blobs_3d` (`a2acc78`) but had no UI control for —
+the ROADMAP/STATE "next step" calling for this. `test_solve_cell_ui.py`
+(98 passed) confirms no regression.
+
+**`requirements.txt` MIDAS-pin drift fixed**: ad hoc `pip install --upgrade`
+during the perf_solve_cell work had moved the real `midas-gui` env ahead of
+most pins (calibrate-v2 0.22.0->0.24.0, integrate-v2 0.7.1->0.9.0, calibrate
+0.5.0->0.6.0, hkls 0.15.0->0.16.0, pdf 0.3.0->0.4.0, integrate 0.8.0->0.9.0,
+peakfit 0.6.0->0.8.0, zipper 0.2.1->0.4.0, params 0.12.0->0.14.0, saxs
+0.1.2->0.2.0, transforms 0.10.0->0.12.0, stress 0.14.1->0.15.0, diffract
+0.9.0->0.10.0) without the file being updated. Re-pinned every MIDAS package
+to exactly what `pip list`/`importlib.metadata` reports in the real env;
+verified every changed package's numpy/torch/numba floors are still
+satisfied by the numpy==1.26.4/torch==2.4.0/numba==0.59.1 pins (no
+functional change). `pyproject.toml` and `environment.yml` were NOT touched
+— they carry the same stale pins, and `pyproject.toml` is additionally
+missing the entire Solve Cell dependency block (`midas-defect`, `midas-ddd`,
+`midas-diffract`, `midas-index`, `midas-invert`, `pandas`) that
+`requirements.txt`/`environment.yml` already have. Flagged, not fixed, since
+it wasn't asked for.
+
+**Found, not yet fixed**: a live GUI session crashed (`Fatal Python error:
+Aborted`, not a catchable Python exception) at 2026-10-22T22:50:48 while
+running a real Ingest against beamline data
+(`/Users/dbeniwal/ANL-research/S3ID/data/2026-2/setup/June27/spinel/
+spinel_OmeFly_exp0p02_002_EigPos_-195_10_-40_000001.h5`, full 512x1028
+detector resolution, ~590 kept frames). The traceback
+(`~/midas_gui_error.log`) runs `_stage_ingest` -> `choose_sectors` ->
+`subtract_background` -> `_run_one` -> `_polar_median_background_from_bins`
+-> `_grouped_median` -> `pandas.Series.groupby(...).size()` ->
+`factorize_array`, aborting inside pandas' native hashtable code — not a
+threading issue (`max_workers` was still unreachable from the UI at that
+point, so `n_workers=1` throughout). The IDENTICAL traceback also appears
+once before, on 2026-10-04, so this is a recurring, data-triggered crash in
+`_grouped_median` (the perf_solve_cell `92a5274c` "hoisted polar bins,
+grouped ring median" commit's new pandas-groupby implementation), not a
+one-off. Prime suspect: `midas_defect`'s own `pyproject.toml` floors pandas
+at `>=1.5` with no ceiling, and this env's `requirements.txt` had pandas
+floating to whatever pip resolved (`3.0.6` — a 2-major-version jump from
+what this code was presumably developed/tested against). After the crash,
+the GUI was relaunched and the same Ingest completed on retry
+(~90s, see "why was Ingest slow" below) — so this is intermittent /
+data-path-dependent, not a hard reproducer yet. **Not investigated further
+this session** (out of scope for what was asked) — next step is either to
+pin pandas down to a known-2.x version and see if the crash stops
+reproducing, or to isolate a minimal repro and report it upstream against
+`midas_defect`'s `_grouped_median`.
+
+**Why the successful Ingest still took ~90s**: the project's Solve Cell
+state has `sector_candidates: "1,8,24,48,96"` (5 full per-frame passes
+over the whole stack — `choose_sectors`'s own grid search) over ~590 frames
+at full detector resolution, with `max_workers` defaulting to 1 (serial)
+because no UI control existed yet (see above). ~90s serial is in the same
+ballpark as the already-benchmarked perf_solve_cell serial number (74.49s
+for a comparable 642-frame panel, 4.35x faster than pre-perf_solve_cell's
+324s) — so this is NOT a performance regression, it is the expected serial
+cost of a 5-candidate sector search at full resolution. Two independent
+levers to cut it, both now usable: (1) the new "Nr. of CPUs" field — the
+benchmark measured 9.42x total (2.16x beyond the serial speedup) at
+`max_workers=12` on a 12-core machine, byte-identical output at every
+setting; (2) narrow `sector_candidates` to just the value the ingest log
+reports (`choose_sectors: n_sectors=N`) once known for this panel/geometry,
+per the tooltip already in the code — this skips 4 of the 5 full passes and
+is the bigger lever of the two.
+
 ## 2026-10-22 — Fixed the hdf5plugin loading bug; upgraded the real env to the perf_solve_cell `midas_defect`/`midas_hkls` build
 
 **Fix for the bug found in the previous entry**: added `import hdf5plugin`
