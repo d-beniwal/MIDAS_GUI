@@ -17,10 +17,18 @@ dependencies:
 
   # ── Scientific stack (pinned) ───────────────────────────────────────────────
   - numpy=1.26.4
-  - scipy=1.13.1
-  - h5py=3.11.0
-  - tifffile=2023.4.12
-  - scikit-image=0.23.2          # used by midas-calibrate-v2's auto_seed_calibrant
+  # 2026-10-23: scipy/h5py/tifffile/scikit-image bumped to the newest release
+  # of each that still declares/keeps numpy<2.x compatibility (scipy 1.17.1 is
+  # the last before 1.18.0's numpy>=2.0.0 floor; tifffile 2026.3.3 is the last
+  # before 2026.4.11's numpy>=2.0 floor; h5py 3.16.0 and scikit-image 0.26.0
+  # both declare numpy floors with no upper bound, so they're unaffected).
+  # Checked against the numpy 1.26.4 pin: scipy requires numpy<2.7,>=1.26.4;
+  # scikit-image requires numpy>=1.24, scipy>=1.11.4 (satisfied by scipy
+  # 1.17.1); h5py requires numpy>=1.21.2; tifffile declares a bare "numpy".
+  - scipy=1.17.1
+  - h5py=3.16.0
+  - tifffile=2026.3.3
+  - scikit-image=0.26.0          # used by midas-calibrate-v2's auto_seed_calibrant
                                  # (better ring seeding; without it calibration falls
                                  # back to a coarser arc seed)
 
@@ -36,8 +44,10 @@ dependencies:
   # Same root cause + fix as B-PILOT's bpilot_mpe_dev.yml (2026-08-10).
   - pyqt=5
   - qt=5
-  - pyqtgraph=0.14.0
-  - matplotlib-base=3.8.4        # supplies pyqtgraph's named colormaps (hot/viridis/…)
+  - pyqtgraph=0.14.0              # already current latest, unchanged
+  - matplotlib-base=3.11.2        # 2026-10-23: bumped to latest (requires numpy>=1.25,
+                                  # satisfied by the 1.26.4 pin); supplies pyqtgraph's
+                                  # named colormaps (hot/viridis/…)
   - pip
 
   - pip:
@@ -54,6 +64,9 @@ dependencies:
     # silently upgrade the numpy==1.26.4 pin above and break numba/torch
     # compatibility (see the file-top warning). 5.4.1 declares numpy<2.0,>=1.26,
     # already satisfied by the pin, so nothing else here moves.
+    # 2026-10-23: re-checked during the latest-versions pass below -- PyPI
+    # latest is still 5.5.0 (numpy>=2.0), so this pin is intentionally held,
+    # not an oversight.
     - "pvapy==5.4.1"
 
     # pyepics backs the Data Viewer's "Live Data" card's EPICS Channel Access
@@ -90,53 +103,83 @@ dependencies:
     # that pre-transform; midas_gui is unaffected because its specs come from
     # build_v1_params, which sets no ImTransOpt, so spec.im_trans is () and the
     # pipelines leave its arrays alone. See pyproject.toml for the full note.
-    - "midas-calibrate-v2==0.22.0"
-    - "midas-integrate-v2==0.7.1"
-    - "midas-calibrate==0.5.0"
-    - "midas-hkls==0.15.0"
+    # 2026-10-23: bumped to PyPI latest of each (calibrate-v2 0.22.0->0.24.0,
+    # calibrate 0.5.0->0.6.0, hkls 0.15.0->0.16.0, pdf 0.3.0->0.4.0;
+    # distortion already at latest). Matches requirements.txt's 2026-10-22
+    # drift-fix pins for these same packages. requires-dist checked against
+    # the numpy 1.26.4 / torch 2.4.0 pins: numpy>=1.22, torch>=2.1, scipy>=1.9
+    # across the bumped set, all satisfied.
+    - "midas-calibrate-v2==0.24.0"
+    - "midas-integrate-v2==0.9.0"
+    - "midas-calibrate==0.6.0"
+    - "midas-hkls==0.16.0"
     - "midas-distortion==0.2.0"
-    - "midas-pdf==0.3.0"          # public PyPI package (replaces the old midas_gui/_vendor
+    - "midas-pdf==0.4.0"          # public PyPI package (replaces the old midas_gui/_vendor
                                   # copy — see pdf_backend.py); Faber-Ziman PDF reduction
                                   # used by the PDF tab
 
     # ── Transitive MIDAS deps pinned explicitly (pulled in by midas-calibrate-v2 /
     #    midas-pdf but not imported by midas_gui directly) — pinned for reproducible,
     #    verified-working installs rather than leaving them to float ──────────────
-    - "midas-integrate==0.8.0"
-    - "midas-peakfit==0.6.0"
-    - "midas-zipper==0.2.1"
-    - "midas-params==0.12.0"     # new shared params-file registry/validator dep, first
+    # 2026-10-23: bumped to PyPI latest of each (integrate 0.8.0->0.9.0,
+    # peakfit 0.6.0->0.8.0, zipper 0.2.1->0.4.0, params 0.12.0->0.14.0, saxs
+    # 0.1.2->0.2.0, transforms 0.10.0->0.12.0, stress 0.14.1->0.15.0).
+    # requires-dist checked: integrate/peakfit/zipper all declare zarr<3 (see
+    # the zarr<3 note below) satisfied by zarr==2.18.7, and numcodecs>=0.11/
+    # 0.12 satisfied by the numcodecs pin below; numpy>=1.22, torch>=2.0/2.1,
+    # numba>=0.57/0.59 all satisfied by the pins at the top of this file.
+    - "midas-integrate==0.9.0"
+    - "midas-peakfit==0.8.0"
+    - "midas-zipper==0.4.0"
+    - "midas-params==0.14.0"     # new shared params-file registry/validator dep, first
                                   # required (>=0.9.0) by midas-calibrate/-v2, midas-hkls,
                                   # midas-integrate-v2 and midas-pdf as of this pin bump
     # 2026-09-08: new transitive chain introduced by midas-pdf 0.3.0 —
     # midas-saxs>=0.1.0 -> midas-transforms>=0.10.0 -> midas-stress>=0.11.0.
-    - "midas-saxs==0.1.2"
-    - "midas-transforms==0.10.0"
-    - "midas-stress==0.14.1"
+    - "midas-saxs==0.2.0"
+    - "midas-transforms==0.12.0"
+    - "midas-stress==0.15.0"
+    # zarr held at 2.18.7 (NOT the zarr 3.x line) on purpose: midas-integrate,
+    # midas-peakfit, and midas-zipper all declare `zarr<3` in their own
+    # requires-dist, and 2.18.7 is already the newest 2.x release on PyPI as
+    # of 2026-10-23 — this is "latest" within the constraint those packages
+    # impose, not an oversight.
     - "zarr==2.18.7"              # required by midas-integrate/-peakfit/-zipper; was already
                                   # pulled in transitively before this pin bump (unpinned), so
                                   # this just makes an existing dependency explicit
-    - "numcodecs==0.15.1"         # zarr's codec backend; same "already transitive, now
+    # numcodecs held at 0.15.2 (bumped from 0.15.1, its newest patch) rather
+    # than the PyPI-latest 0.17.1: zarr==2.18.7 itself declares
+    # `numcodecs<0.16,>=0.10.0`, and 0.16.0+ also raises numcodecs' own numpy
+    # floor to numpy>=2.0 — incompatible with the numpy==1.26.4 pin above.
+    - "numcodecs==0.15.2"         # zarr's codec backend; same "already transitive, now
                                   # explicit" situation as zarr above
-    - "hdf5plugin==7.0.0"
-    - "psutil==7.2.2"
+    - "hdf5plugin==7.1.0"         # 2026-10-23: bumped to PyPI latest; no numpy/torch/numba pin
+    - "psutil==7.2.2"             # already at PyPI latest
 
     # ── Solve Cell tab backend (2026-10-04) ──────────────────────────────────
     # midas-defect: raw-frame ingest (background subtraction, 3-D blob
     # finding) and detector forward/inverse geometry (pixel<->qlab<->qsample).
-    # Its own pyproject.toml floor for midas-hkls is >=0.15.0 -- already
-    # satisfied by the midas-hkls==0.15.0 pin above, so that pin is NOT bumped
-    # to >=0.16.0 here (the original handoff doc asked for it, but every
-    # function the Solve Cell tab calls -- index_ab_initio,
-    # refine_ub_from_gvectors, holohedry_from_fit, to_conventional -- is
-    # confirmed present and working in 0.15.0). No numba dependency at all
-    # (confirmed via pyproject.toml + source grep), and its numpy>=1.20/
-    # torch>=2.0 floors are already satisfied by the pins above.
+    # Its own pyproject.toml floor for midas-hkls is >=0.15.0 -- satisfied by
+    # the midas-hkls pin above regardless of whether that pin sits at 0.15.0
+    # or (as of the 2026-10-23 bump) 0.16.0; every function the Solve Cell tab
+    # calls -- index_ab_initio, refine_ub_from_gvectors, holohedry_from_fit,
+    # to_conventional -- is confirmed present and working in both. No numba
+    # dependency at all (confirmed via pyproject.toml + source grep), and its
+    # numpy>=1.20/torch>=2.0 floors are already satisfied by the pins above.
+    # 2026-10-23: deliberately held at 0.9.0 here, NOT bumped to PyPI's
+    # 0.9.1 and NOT matching the real dev conda env (which runs an unreleased
+    # perf_solve_cell-branch build also self-reporting 0.9.1 -- see
+    # requirements.txt's 2026-10-22 note and .context/DECISIONS.md). A fresh
+    # env built from this file is expected to diverge from the current dev
+    # env until perf_solve_cell merges and midas-defect cuts a numbered
+    # release past 0.9.1 that a plain version pin can target.
     - "midas-defect==0.9.0"
     # midas-defect's own direct dependencies (pulled in transitively) --
     # pinned explicitly for the same reproducibility reason as the block above.
+    # 2026-10-23: ddd/index/invert already at PyPI latest; diffract bumped
+    # 0.9.0->0.10.0 (numpy>=1.22, torch>=2.0, satisfied by the pins above).
     - "midas-ddd==0.1.2"
-    - "midas-diffract==0.9.0"
+    - "midas-diffract==0.10.0"
     - "midas-index==0.10.0"
     - "midas-invert==0.2.0"
     # Was previously unpinned/floating in this repo (no prior pandas line
@@ -145,6 +188,10 @@ dependencies:
     # (pandas-touching subset + full test_smoke.py, several runs). Pinned
     # explicitly now rather than left to float, matching every other
     # dependency in this file.
+    # 2026-10-23: held at 3.0.6, NOT bumped to PyPI's 3.1.0 -- pandas 3.1.0
+    # raises its own numpy floor to numpy>=2.0.2, incompatible with the
+    # numpy==1.26.4 pin above; 3.0.6 (numpy>=1.26.0, no upper bound) is
+    # already the newest release compatible with that pin.
     - "pandas==3.0.6"
 
     # midas-gui itself is NOT pip-installed here on purpose: `launch.py` imports
