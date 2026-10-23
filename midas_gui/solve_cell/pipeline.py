@@ -173,7 +173,11 @@ def _stage_ingest(cfg: dict, on_step=None) -> dict:
     ``choose_sectors`` as its azimuth-sector grid search, defaults to its own
     ``SECTOR_CANDIDATES_DEFAULT``; narrowing this once a panel/geometry's
     winning ``n_sectors`` is known skips the other candidates' full-stack
-    passes on later runs}), optional ``live_frames`` ({frac_of_median}),
+    passes on later runs, optional max_workers (default 1, serial -- forwarded
+    to ``choose_sectors``'s candidate loop and ``find_blobs_3d``'s
+    gap-bridging chunk loop; midas_defect.ingest guarantees bit-identical
+    output for any value, see that module's "Why max_workers means threads,
+    not processes")}), optional ``live_frames`` ({frac_of_median}),
     optional ``sentinel``, optional ``panel_dir`` (Path -- if given, writes
     ``spots_g.csv``/``ingest_summary.json`` there), optional
     ``preview_frame_index`` (int, default 0, clamped to the live/kept stack --
@@ -323,6 +327,14 @@ def _stage_ingest(cfg: dict, on_step=None) -> dict:
     threshold = blob_cfg.get("threshold", BLOB_THRESHOLD_DEFAULT)
     min_vol = blob_cfg.get("min_vol", BLOB_MIN_VOL_DEFAULT)
     sector_candidates = tuple(blob_cfg.get("sector_candidates", SECTOR_CANDIDATES_DEFAULT))
+    # Thread-based parallelism for choose_sectors' candidate loop and
+    # find_blobs_3d's gap-bridging chunk loop (midas_defect.ingest's own
+    # max_workers kwarg, default 1 = today's serial behaviour, bit-identical
+    # output for any value -- see that module's "Why max_workers means
+    # threads, not processes"). choose_sectors never forwards this down into
+    # its own internal subtract_background calls, so no pool nests inside
+    # another.
+    max_workers = int(blob_cfg.get("max_workers", 1))
     _emit("background_start", sector_candidates=sector_candidates)
 
     # choose_sectors grid-searches `sector_candidates`, each a full per-frame
@@ -334,7 +346,7 @@ def _stage_ingest(cfg: dict, on_step=None) -> dict:
     # reference scripts verbatim"; that rerun is redundant, not a behavior
     # difference, so it's gone. See DECISIONS 2026-10-04 (ingest performance).
     bg_choice = choose_sectors(frames, tth_deg, az_deg, mask, threshold=threshold, min_vol=min_vol,
-                               candidates=sector_candidates)
+                               candidates=sector_candidates, max_workers=max_workers)
     print(f"[solve-cell] choose_sectors: n_sectors={bg_choice.n_sectors} "
           f"(candidates={sector_candidates})")
     sub = bg_choice.stack
@@ -371,7 +383,7 @@ def _stage_ingest(cfg: dict, on_step=None) -> dict:
         split_ratio=blob_cfg.get("split_ratio", SPLIT_RATIO_DEFAULT),
         gap_bridge=blob_cfg.get("gap_bridge", GAP_BRIDGE_DEFAULT),
         core_frac=blob_cfg.get("core_frac", CORE_FRAC_DEFAULT),
-        return_counts=True)
+        return_counts=True, max_workers=max_workers)
     print(f"[solve-cell] find_blobs_3d counts: {counts}")
     spots = spots[spots["n_frames"] >= 2].reset_index(drop=True)
     print(f"[solve-cell] {len(spots)} spots with n_frames>=2")
