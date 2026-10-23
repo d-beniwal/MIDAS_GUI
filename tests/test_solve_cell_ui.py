@@ -24,7 +24,18 @@ def app():
 @pytest.fixture
 def tab(app):
     from midas_gui.tab_solve_cell import SolveCellTab
-    return SolveCellTab()
+    t = SolveCellTab()
+    yield t
+    # The Detector/Reciprocal views are now VTK-backed (pyvistaqt
+    # QtInteractor): under QT_QPA_PLATFORM=offscreen there is no real OpenGL
+    # context, and if Python's interpreter-exit GC is left to destroy a VTK
+    # render window instead of Qt's own deleteLater() + event loop, the
+    # native cleanup segfaults -- caught by pytest-forked as a CRASHED
+    # (not failed) test even when the test body itself passed. Explicit
+    # deleteLater()+processEvents() here lets Qt tear the widget down
+    # properly before this forked test process exits.
+    t.deleteLater()
+    app.processEvents()
 
 
 # Own tempdir rather than pytest's `tmp_path`: pyproject pins
@@ -346,17 +357,18 @@ def test_load_calib_file_shows_but_does_not_use_nonzero_tx(tab, monkeypatch):
 # ── reciprocal-space map (3-D) / Detector view ──────────────────────────
 
 def test_view_tabs_have_recip_map_and_detector(tab):
+    from midas_gui.pyvista_views import PyVistaScatter3DView
     titles = [tab._view_tabs.tabText(i) for i in range(tab._view_tabs.count())]
     assert "Reciprocal space map" in titles
     assert "Detector" in titles
-    assert tab._recip_ax.name == "3d"
+    assert isinstance(tab._recip_view, PyVistaScatter3DView)
 
 
 def test_update_recip_plot_accepts_xyz_tuples_without_raising(tab):
     import numpy as np
     x, y, z = np.array([0.1, 0.2]), np.array([0.3, 0.4]), np.array([0.5, 0.6])
-    tab._update_recip_plot(all_xyz=(x, y, z), diamond_xyz=(x, y, z), indexed_xyz=(x, y, z))
-    tab._update_recip_plot()   # all-None (e.g. zero spots) must not raise either
+    tab._recip_view.set_groups([((x, y, z), "#4da3ff", "Ab-initio indexed", [])])
+    tab._recip_view.set_groups([])   # all-empty (e.g. zero spots) must not raise either
 
 
 def test_detector_stage_switch_with_no_data_loaded_does_not_raise(tab):
@@ -518,24 +530,25 @@ def test_set_detector_image_preserves_zoom_across_stage_switch_same_shape(tab):
 # ── reciprocal-space map: red origin cross ──────────────────────────────
 
 def test_recip_axes_always_show_a_red_origin_cross(tab):
-    assert len(tab._recip_ax.collections) == 1
-    fc = tab._recip_ax.collections[0].get_facecolor()
-    assert fc[0][0] > 0.9 and fc[0][1] < 0.1 and fc[0][2] < 0.1
+    from midas_gui.pyvista_views import _ORIGIN_MARKER_COLOR
+    assert tab._recip_view._origin_actor is not None
+    assert tab._recip_view._origin_actor.prop.color.hex_rgb == _ORIGIN_MARKER_COLOR
 
 
 def test_update_recip_plot_keeps_origin_marker_alongside_data(tab):
     import numpy as np
     x, y, z = np.array([0.1]), np.array([0.2]), np.array([0.3])
-    tab._update_recip_plot(all_xyz=(x, y, z))
-    assert len(tab._recip_ax.collections) == 2
+    tab._recip_view.set_groups([((x, y, z), "#4da3ff", "Ab-initio indexed", [])])
+    assert tab._recip_view._origin_actor is not None
+    assert len(tab._recip_view._group_actors) == 1
 
 
 # ── Detector tab: spot overlay ───────────────────────────────────────────
 
 def test_spot_scatter_item_is_added_to_the_detector_view(tab):
-    import pyqtgraph as pg
-    assert isinstance(tab._spot_scatter, pg.ScatterPlotItem)
-    assert tab._spot_scatter.scene() is not None
+    from midas_gui.pyvista_views import PyVistaImageView
+    assert isinstance(tab._det_view, PyVistaImageView)
+    assert len(tab._det_view.spot_overlay["x"]) == 0
 
 
 def test_update_spot_overlay_shows_only_spots_on_the_matching_loaded_frame(tab):
@@ -545,15 +558,15 @@ def test_update_spot_overlay_shows_only_spots_on_the_matching_loaded_frame(tab):
         "loaded_frame_idx": [2, 2, 5],
     })
     tab._update_spot_overlay(0, 2)
-    assert len(tab._spot_scatter.data) == 2
-    assert sorted(tab._spot_scatter.data["x"]) == [10.0, 20.0]
+    assert len(tab._det_view.spot_overlay["x"]) == 2
+    assert sorted(tab._det_view.spot_overlay["x"]) == [10.0, 20.0]
 
     tab._update_spot_overlay(0, 5)
-    assert len(tab._spot_scatter.data) == 1
-    assert tab._spot_scatter.data["x"][0] == 30.0
+    assert len(tab._det_view.spot_overlay["x"]) == 1
+    assert tab._det_view.spot_overlay["x"][0] == 30.0
 
     tab._update_spot_overlay(1, 99)   # no spot at this frame
-    assert len(tab._spot_scatter.data) == 0
+    assert len(tab._det_view.spot_overlay["x"]) == 0
 
 
 def test_update_spot_overlay_shows_every_spot_on_max_projection_stage(tab):
@@ -562,7 +575,7 @@ def test_update_spot_overlay_shows_every_spot_on_max_projection_stage(tab):
         "row": [1.0, 2.0], "col": [10.0, 20.0], "loaded_frame_idx": [2, 5],
     })
     tab._update_spot_overlay(3, None)
-    assert len(tab._spot_scatter.data) == 2
+    assert len(tab._det_view.spot_overlay["x"]) == 2
 
 
 def test_update_spot_overlay_shows_nothing_on_mask_stage(tab):
@@ -571,13 +584,13 @@ def test_update_spot_overlay_shows_nothing_on_mask_stage(tab):
         "row": [1.0], "col": [10.0], "loaded_frame_idx": [2],
     })
     tab._update_spot_overlay(4, 2)
-    assert len(tab._spot_scatter.data) == 0
+    assert len(tab._det_view.spot_overlay["x"]) == 0
 
 
 def test_update_spot_overlay_handles_no_ingest_result_without_raising(tab):
     assert tab._spots_df is None
     tab._update_spot_overlay(0, 3)   # must not raise
-    assert len(tab._spot_scatter.data) == 0
+    assert len(tab._det_view.spot_overlay["x"]) == 0
 
 
 def test_update_spot_overlay_filters_to_the_active_panel_when_pooled(tab):
@@ -593,13 +606,13 @@ def test_update_spot_overlay_filters_to_the_active_panel_when_pooled(tab):
     })
     tab._panel_tabs.setCurrentWidget(tab._panels[first_id])
     tab._update_spot_overlay(0, 2)
-    assert len(tab._spot_scatter.data) == 1
-    assert tab._spot_scatter.data["x"][0] == 10.0
+    assert len(tab._det_view.spot_overlay["x"]) == 1
+    assert tab._det_view.spot_overlay["x"][0] == 10.0
 
     tab._panel_tabs.setCurrentWidget(second)
     tab._update_spot_overlay(0, 2)
-    assert len(tab._spot_scatter.data) == 1
-    assert tab._spot_scatter.data["x"][0] == 90.0
+    assert len(tab._det_view.spot_overlay["x"]) == 1
+    assert tab._det_view.spot_overlay["x"][0] == 90.0
 
 
 # ── live ingest progress (on_step) ───────────────────────────────────────
@@ -1156,19 +1169,21 @@ def test_run_index_remaining_known_structure_reads_ks5_fields_and_space_group(ta
 # ── reciprocal-space plot legend ──────────────────────────────────────
 
 def test_update_recip_plot_has_no_legend_when_nothing_drawn(tab):
-    tab._update_recip_plot()
-    assert tab._recip_ax.get_legend() is None
+    tab._recip_view.set_groups([])
+    assert tab._recip_view.interactor.legend is None
 
 
 def test_update_recip_plot_legend_names_each_drawn_group(tab):
     import numpy as np
     xyz = (np.array([0.1]), np.array([0.2]), np.array([0.3]))
-    tab._update_recip_plot(diamond_xyz=xyz, groups=[(xyz, "#4da3ff", "Domain 1 (free (ab-initio))")])
-    legend = tab._recip_ax.get_legend()
-    assert legend is not None
-    texts = {t.get_text() for t in legend.get_texts()}
-    assert "Diamond/gasket" in texts
-    assert "Domain 1 (free (ab-initio))" in texts
+    tab._recip_view.set_groups([
+        (xyz, "#ff3030", "Diamond/gasket", []),
+        (xyz, "#4da3ff", "Domain 1 (free (ab-initio))", []),
+    ])
+    assert tab._recip_view.interactor.legend is not None
+    labels = {label for label, _color in tab._recip_view.legend_entries}
+    assert "Diamond/gasket" in labels
+    assert "Domain 1 (free (ab-initio))" in labels
 
 
 def test_refresh_recip_view_crystal_mode_legend_names_domains(tab):
@@ -1178,10 +1193,9 @@ def test_refresh_recip_view_crystal_mode_legend_names_domains(tab):
     tab._add_domain("free (ab-initio)", _fake_refine_result(5.43), df.index[:4], xyz)
     tab._recip_mode.setCurrentIndex(1)
     tab._refresh_recip_view()
-    legend = tab._recip_ax.get_legend()
-    assert legend is not None
-    texts = {t.get_text() for t in legend.get_texts()}
-    assert "Domain 1 (free (ab-initio))" in texts
+    assert tab._recip_view.interactor.legend is not None
+    labels = {label for label, _color in tab._recip_view.legend_entries}
+    assert "Domain 1 (free (ab-initio))" in labels
 
 
 def _linked_spots(tab):
@@ -1210,49 +1224,56 @@ def test_spot_selection_keeps_source_id_and_fit_order_across_filtering(tab):
     assert rows[20]['hkl'] == [0, 1, 0]
     tab._select_spot(20)
     tab._update_spot_overlay(0, 1)
-    assert tab._spot_scatter.points()[0].data() == 20
-    assert tab._det_selected.points()[0].pos().x() == 6
+    assert tab._det_view.spot_overlay["ids"][0] == 20
+    assert tab._det_view.selected_xy[0] == 6
     assert 'hkl: (0, 1, 0)' in tab._spot_details.text()
     tab._update_spot_overlay(0, 0)
-    assert len(tab._det_selected.points()) == 0
+    assert tab._det_view.selected_xy is None
 
 
 def test_projected_spot_picking_tracks_camera_and_hidden_population(tab):
-    from types import SimpleNamespace
+    """VTK's own vtkPointPicker does the real screen-space hit-testing (not
+    re-tested here -- it has no usable viewport under this project's
+    offscreen Qt test convention, see tests/test_pyvista_spike.py); what
+    this test owns is that the right spot_ids actually reach the rendered
+    scene (so picking has something correct to find) and that hiding the
+    unindexed population removes exactly that population, with the camera
+    left untouched by either."""
     _linked_spots(tab)
-    tab._recip_ax.view_init(elev=12, azim=24, roll=3)
-    tab._recip_canvas.draw()
-    def hit(spot_id):
-        for pixels, rows in tab._recip_projected:
-            for pixel, row in zip(pixels, rows):
-                if row['spot_id'] == spot_id:
-                    return tab._recip_hit(SimpleNamespace(inaxes=tab._recip_ax, x=pixel[0], y=pixel[1]))
-    assert hit(40)['spot_id'] == 40
+    tab._recip_view.camera_position = [(1.0, 2.0, 3.0), (0.0, 0.0, 0.0), (0.0, 0.0, 1.0)]
+    camera = tab._recip_view.camera_position
+
+    def pickable_ids():
+        ids = set()
+        for actor in tab._recip_view._group_actors:
+            arr = actor.mapper.dataset.point_data.get("spot_id")
+            if arr is not None:
+                ids.update(int(v) for v in arr)
+        return ids
+
+    assert 40 in pickable_ids()
     tab._recip_mode.setCurrentIndex(1)
     tab._recip_show_unindexed.setChecked(False)
-    tab._recip_canvas.draw()
-    assert hit(30) is None
-    assert hit(20)['spot_id'] == 20
-    assert (tab._recip_ax.elev, tab._recip_ax.azim, tab._recip_ax.roll) == (12, 24, 3)
+    ids = pickable_ids()
+    assert 30 not in ids
+    assert 20 in ids
+    assert tab._recip_view.camera_position == camera
 
 
 def test_residual_mode_and_overlay_keep_one_colorbar_and_camera(tab):
-    import numpy as np
     _linked_spots(tab)
-    tab._recip_ax.view_init(elev=19, azim=37)
-    limits = tab._recip_ax.get_xlim3d()
+    tab._recip_view.camera_position = [(1.0, 2.0, 3.0), (0.0, 0.0, 0.0), (0.0, 0.0, 1.0)]
+    camera = tab._recip_view.camera_position
     tab._recip_mode.setCurrentIndex(2)
     tab._recip_predicted.setChecked(True)
     for _ in range(3):
         tab._refresh_recip_view()
-        tab._recip_canvas.draw()
-        assert len(tab._recip_fig.axes) == 2
-        assert len(tab._recip_artists) == 3
-        assert 'UB fitted' in tab._recip_ax.get_legend().get_texts()[-1].get_text()
-    np.testing.assert_allclose(tab._recip_ax.get_xlim3d(), limits)
-    assert (tab._recip_ax.elev, tab._recip_ax.azim) == (19, 37)
+        assert len(tab._recip_view.interactor.scalar_bars.keys()) == 1
+        assert len(tab._recip_view._fitted_actors) == 2   # cross points + connecting lines
+    assert tab._recip_view.camera_position == camera
     tab._recip_mode.setCurrentIndex(0)
-    assert len(tab._recip_fig.axes) == 1
+    tab._refresh_recip_view()
+    assert len(tab._recip_view.interactor.scalar_bars.keys()) == 0
 
 
 def test_link_navigation_switches_to_source_panel_and_original_frame(tab, monkeypatch):
@@ -1270,10 +1291,11 @@ def test_link_navigation_switches_to_source_panel_and_original_frame(tab, monkey
     assert tab._active_panel() is panel
     assert frame[0] == 3
     assert tab._view_tabs.currentIndex() == 1
-    assert len(tab._det_selected.points()) == 1
-    assert tab._det_selected.points()[0].pos().x() == 8
+    assert tab._det_view.selected_xy is not None
+    assert tab._det_view.selected_xy[0] == 8
     # Picking this detector marker retains the same reciprocal-space identity.
-    tab._on_detector_spot_clicked(tab._spot_scatter, tab._spot_scatter.points(), None)
+    assert list(tab._det_view.spot_overlay["ids"]) == [40]
+    tab._on_detector_spot_clicked(40)
     assert tab._selected_spot_id == 40
 
 
@@ -1290,45 +1312,47 @@ def test_new_ingest_invalidates_old_domains_and_selection(tab):
 
 
 def test_repeated_residual_refreshes_preserve_plot_area(tab):
-    import numpy as np
+    """Regression for the matplotlib-era colorbar-nesting shrink bug (see
+    .context/DECISIONS.md 2026-10-23, fixed on main before this branch):
+    the native VTK scalar bar this widget uses now has no such GridSpec-
+    nesting failure mode, but repeated refreshes must still not accumulate
+    duplicate scalar bars or disturb the camera."""
     _linked_spots(tab)
     tab._recip_mode.setCurrentIndex(2)
-    tab._recip_canvas.draw()
-    initial = tab._recip_ax.get_position().bounds
+    tab._recip_view.camera_position = [(1.0, 2.0, 3.0), (0.0, 0.0, 0.0), (0.0, 0.0, 1.0)]
+    camera = tab._recip_view.camera_position
     for _ in range(5):
         tab._refresh_recip_view()
-        tab._recip_canvas.draw()
-        np.testing.assert_allclose(tab._recip_ax.get_position().bounds, initial)
-    # Leaving and returning to residual mode must not shrink the plot either.
+        assert len(tab._recip_view.interactor.scalar_bars.keys()) == 1
+        assert tab._recip_view.camera_position == camera
+    # Leaving and returning to residual mode must not duplicate it either.
     tab._recip_mode.setCurrentIndex(0)
+    tab._refresh_recip_view()
     tab._recip_mode.setCurrentIndex(2)
-    tab._recip_canvas.draw()
-    np.testing.assert_allclose(tab._recip_ax.get_position().bounds, initial)
+    tab._refresh_recip_view()
+    assert len(tab._recip_view.interactor.scalar_bars.keys()) == 1
+    assert tab._recip_view.camera_position == camera
 
 
 def test_click_selection_preserves_scene_camera_and_plot_size(tab):
-    import numpy as np
-    from matplotlib.backend_bases import MouseEvent
+    """Regression for the matplotlib-era "selection rebuilds the whole
+    scene" bug (.context/DECISIONS.md 2026-10-23): a click must only swap
+    the selection actor, leaving every group actor, the scalar bar and the
+    camera untouched. The screen-to-spot_id resolution itself is VTK's own
+    vtkPointPicker (see _PickableInteractor.pick_spot_id) -- not testable
+    here since offscreen has no real viewport (see
+    tests/test_pyvista_spike.py) -- so this drives the same signal a real
+    pick emits, exercising exactly the glue code this project owns."""
     _linked_spots(tab)
     tab._recip_mode.setCurrentIndex(2)
     tab._recip_predicted.setChecked(True)
-    tab._recip_ax.view_init(elev=17, azim=29, roll=4)
-    tab._recip_ax.set_xlim3d(-0.3, 1.3)
-    tab._recip_canvas.draw()
-    artists = tuple(tab._recip_artists)
-    colorbar = tab._recip_colorbar
-    limits = tab._recip_ax.get_xlim3d()
-    bounds = tab._recip_ax.get_position().bounds
+    tab._recip_view.camera_position = [(1.0, 2.0, 3.0), (0.0, 0.0, 0.0), (0.0, 0.0, 1.0)]
+    camera = tab._recip_view.camera_position
+    group_actors = tuple(tab._recip_view._group_actors)
+    scalar_bar_count = len(tab._recip_view.interactor.scalar_bars.keys())
     for spot_id in (20, 40, 20, 40):
-        pixel = next(pixel for pixels, rows in tab._recip_projected
-                     for pixel, row in zip(pixels, rows) if row['spot_id'] == spot_id)
-        for name in ('button_press_event', 'button_release_event'):
-            event = MouseEvent(name, tab._recip_canvas, *pixel, button=1)
-            tab._recip_canvas.callbacks.process(name, event)
-        tab._recip_canvas.draw()
+        tab._recip_view.spotClicked.emit(spot_id)
         assert tab._selected_spot_id == spot_id
-        assert tuple(tab._recip_artists) == artists
-        assert tab._recip_colorbar is colorbar
-        assert (tab._recip_ax.elev, tab._recip_ax.azim, tab._recip_ax.roll) == (17, 29, 4)
-        np.testing.assert_allclose(tab._recip_ax.get_xlim3d(), limits)
-        np.testing.assert_allclose(tab._recip_ax.get_position().bounds, bounds)
+        assert tuple(tab._recip_view._group_actors) == group_actors
+        assert len(tab._recip_view.interactor.scalar_bars.keys()) == scalar_bar_count
+        assert tab._recip_view.camera_position == camera

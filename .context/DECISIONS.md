@@ -3,6 +3,146 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-23 — Solve Cell GPU rendering: VisPy tried and abandoned, PyVista adopted (`pyvista` branch)
+
+Asked to try VisPy (the GPU-rendering candidate flagged the same day, below)
+for both Solve Cell views. Added `vispy==0.17.0` (conda-forge, no PyOpenGL
+needed, no numpy conflict) on a new `vispy` branch and spiked it: with a
+real display, a `vispy.scene.SceneCanvas` embedded via PyQt5 constructs and
+renders correctly. Under `QT_QPA_PLATFORM=offscreen` — this project's whole
+test suite's platform — it **segfaults** (exit 139) the moment an actual
+draw happens; confirmed on both `offscreen` and `minimal` Qt platforms, and
+`QT_OPENGL=software`/`QT_QUICK_BACKEND=software` make no difference (this
+conda-forge Qt5/macOS build has no headless-GL path at all). Since
+`SolveCellTab.__init__` would construct that canvas, every one of the 81
+existing Solve Cell UI tests — not only rendering ones — would crash the
+test process, not merely fail. Abandoned; `vispy` branch deleted, dependency
+changes reverted, nothing from that attempt reached `main`.
+
+Tried PyVista/VTK instead (`pyvista` branch, off `main` @ `689282c`), same
+spike methodology, now in an isolated `pyvista-spike` conda env first so the
+check couldn't destabilize the real `midas-gui` env:
+- `pyvistaqt.QtInteractor` renders correctly with a real display, like VisPy.
+- Under `offscreen`, every scene-building/picking/camera operation the new
+  widgets need (`add_points`, `add_scalar_bar`, `add_legend`,
+  `camera_position` get/set, `enable_point_picking`, `remove_actor`) works
+  with **no crash at all**. Only pulling an actual rendered pixel buffer off
+  it (`.screenshot()`/`.image`) raises a catchable
+  `pyvista.plotting.errors.RenderWindowUnavailable` there — never a crash.
+- `pv.Plotter(off_screen=True)` — VTK's own off-screen render window,
+  independent of Qt's platform plugin entirely — renders real pixels under
+  `offscreen` with no crash at all. VisPy had no equivalent escape hatch.
+
+This is a second, independent de-risking success beyond "it doesn't
+segfault": automated tests that want genuine rendered-pixel verification
+have a safe path, which the plan budgeted for but the final widgets ended up
+not needing (see below — testing against stored actor/group state turned
+out sufficient, with one offscreen screenshot-based manual check instead).
+
+**Dependency: pip, not conda-forge.** `conda install -c conda-forge vtk
+pyvista pyvistaqt` into the real `midas-gui` env fails to solve: current
+VTK's `vtk-base` pulls `viskores`->`mesalib`->`mesa-lavapipe`, which needs
+`__osx>=15.0` (this machine is 14.8), and even avoiding that path, older
+`vtk`/`pyvista` combinations conflict with this repo's `libcurl`/
+`imagecodecs`/`c-blosc2` pins through `proj`/`ffmpeg`/`jpeg`. A
+`pip install --dry-run vtk==9.7.1 pyvista==0.49.1 pyvistaqt==0.13.1`
+resolves clean against the real pinned env, no numpy/torch/numba movement —
+same reasoning already used for `torch`/`numba` in `environment.yml`'s
+`pip:` section (self-contained wheels sidestep conda-forge's dependency
+graph). Installed for real and re-verified the three findings above in the
+actual `midas-gui` env, not just the throwaway spike env.
+
+**A second, independent native-crash trap, found only after wiring the
+widgets into the real tab.** Constructing a full `SolveCellTab` printed
+"TAB CONSTRUCTED OK" and then segfaulted (exit 139, no Python frame — native
+VTK module teardown) on interpreter exit. Isolated via elimination
+(`PanelCard` alone: fine; both new widgets alone: fine; both together:
+fine; only the full tab: crashes) to the destruction *path*, not the widget
+count: Python's interpreter-exit GC destroying a VTK render window — rather
+than Qt's own `deleteLater()` + a live event loop processing it — segfaults,
+because there is no real OpenGL context offscreen to tear down safely
+either way. `pytest-forked` reports this as the test CRASHED, even when
+every assertion in the test body already passed (confirmed with a minimal
+repro: a test that only constructs `SolveCellTab` and asserts `is not None`
+registers as CRASHED, not PASSED, without this fix). Fixed by having the
+`tab` fixture in `test_solve_cell_ui.py` (and `test_pyvista_spike.py`'s own
+widget-constructing tests) explicitly `widget.deleteLater();
+app.processEvents()` in teardown, letting Qt tear the widget down itself
+before the forked test process exits. The real running app isn't at this
+specific risk the same way — it has a live event loop for its whole
+lifetime — but any future short-lived script/test that constructs these
+widgets needs the same explicit teardown.
+
+**Implementation** (`midas_gui/pyvista_views.py`): `PyVistaImageView`
+(detector tab) and `PyVistaScatter3DView` (reciprocal tab), scoped to Solve
+Cell only — the shared `widgets.ImageViewer` used by the other 10 tabs is
+untouched. Both build on `pyvistaqt.QtInteractor` through a shared
+`_PickableInteractor`: left-click-vs-drag via a press/release pixel-distance
+threshold (same approach the matplotlib version used), hit-testing via
+VTK's own `vtkPointPicker` keyed off a `"spot_id"` point-data array on each
+point cloud — no manual screen-space projection/caching needed, unlike the
+matplotlib version's `_cache_recip_projection`/`_recip_hit`.
+
+Image origin: empirically verified (not assumed) that cell-C-order
+raveling of a 2-D frame onto `pv.ImageData(dimensions=(ncols+1, nrows+1,
+1))` + `view_xy()` renders array row 0 at the screen BOTTOM and col 0 at
+the LEFT by default — the MIDAS convention `ImageViewer` enforces today via
+one `vb.invertY(False)` call — so no flip was needed here. The first
+attempt at this check gave a false "row 0 is at the top" result from
+background-color bleed into an argmax-based pixel search; a clean quadrant
+test with an explicit black background and off-corner markers settled it.
+
+Native `add_scalar_bar()`/`add_legend()` replace the matplotlib colorbar-
+axes/`ax.legend()` combination entirely (this project's earlier GPU-
+renderer evaluation, below, only weighed VisPy's picking/camera/embedding
+maturity — PyVista/VTK's decades-old scalar bar and legend widgets are a
+further advantage neither matplotlib comparison considered). Caught by eye,
+not by any test: `add_scalar_bar()`'s title/tick text defaults to black,
+invisible against this widget's black background — a colorbar that
+*looked* present (gradient strip rendered fine) but was actually
+unreadable. Fixed with an explicit `color="white"`.
+
+Camera/selection/legend/scalar-bar lifecycle mirrors the already-landed
+matplotlib fix (above): selecting a spot swaps only the selection actor;
+`camera_position` (one atomic property) is saved/restored around
+`set_groups()` rebuilds, replacing matplotlib's separate elev/azim/roll
+plus three axis-limit tuples.
+
+**Tests.** Rewrote the 19 `test_solve_cell_ui.py` tests that touched
+matplotlib/pyqtgraph internals (`_recip_ax`, `_recip_colorbar`,
+`_spot_scatter.data`, etc.) against the new widgets' own introspectable
+state (`groups`, `_group_actors`, `legend_entries`,
+`interactor.scalar_bars.keys()`, `camera_position`, `spot_overlay`,
+`selected_xy`) — same test names/intent. Picking/click tests no longer
+fabricate screen pixel coordinates: `WorldToDisplay()` returns degenerate
+`(0, 0, z)` under `offscreen` on this machine (no real viewport exists to
+project through), confirmed directly, so there is nothing meaningful to
+fake a click at. These tests now drive the `spotClicked`/`spotHovered`
+signals directly and assert on the resulting selection/state — exercising
+this project's own glue code, not VTK's picker geometry (mature, not
+re-tested here). Added `tests/test_pyvista_spike.py` to lock in the
+offscreen-safety findings above as a regression, separate from the full UI
+suite.
+
+**Verification.** `test_solve_cell_ui.py` (81), `test_solve_cell_pipeline.py`
+(39 passed, 3 skipped), `test_pyvista_spike.py` (3) all pass individually.
+Running `test_solve_cell_pipeline.py` + `test_solve_cell_ui.py` together
+reproduces the project's known pre-existing cross-file pollution (STATE.md)
+plus, on this macOS machine, a genuine `fork()`-safety race (`objc[...]: may
+have been in progress in another thread when fork() was called`) —
+non-deterministic in severity (15 plain FAILED one run, 80 CRASHED with
+SIGABRT the next) and reproduced on unmodified `main` at the very start of
+this session too; unrelated to PyVista specifically, out of scope here.
+`widget.grab()`-based offscreen screenshots (the project's usual headless
+visual-check method) don't work for either new widget — a `QOpenGLWidget`
+with no real GL context can't paint into a grab buffer either — so manual
+visual verification used the widgets' own `.screenshot()` on a real
+display instead: synthetic detector frame + spot overlay + selection
+marker, and a synthetic multi-group reciprocal scatter with residual
+coloring, scalar bar, legend and fitted-position overlay, both inspected as
+PNGs. Interactive live-app use (actual mouse-driven orbit/zoom feel) has
+not been done in this environment — see STATE.md Next steps.
+
 ## 2026-10-23 — Fixed reciprocal-map shrink on selection; evaluated GPU renderer options
 
 Reproduced the reported progressive "zoom out" specifically with residual

@@ -31,22 +31,16 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-import pyqtgraph as pg
 from PyQt5 import QtCore, QtWidgets
 
 import matplotlib
-matplotlib.use("Qt5Agg")
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas  # noqa: E402
-from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavToolbar  # noqa: E402
-from mpl_toolkits.mplot3d import proj3d
 from matplotlib.colors import Normalize
-from matplotlib.cm import ScalarMappable
-from matplotlib.figure import Figure  # noqa: E402
 
 from midas_gui.helpers import (
     _fspin, _twocol, _NoScrollSpinBox, widgets_to_dict, apply_dict_to_widgets,
 )
-from midas_gui.widgets import DataLoaderPanel, ImageViewer, LogPanel
+from midas_gui.widgets import DataLoaderPanel, LogPanel
+from midas_gui.pyvista_views import PyVistaImageView, PyVistaScatter3DView
 from midas_gui.workers import SolveCellWorker
 from midas_gui.dialogs import show_error
 from midas_gui.solve_cell import pipeline as solve_pipeline
@@ -231,9 +225,7 @@ class SolveCellTab(QtWidgets.QWidget):
         super().__init__(parent)
         self._worker: Optional[SolveCellWorker] = None
         self._selected_spot_id = None
-        self._recip_artists = {}
         self._spot_rows_by_id = {}
-        self._recip_colorbar = None
         self._recip_has_data = False
         self._spots_df = None
         self._flagged_df = None
@@ -591,25 +583,18 @@ class SolveCellTab(QtWidgets.QWidget):
         self._panel_tabs.currentChanged.connect(self._refresh_detector_preview)
 
     def _build_recip_map_tab(self):
-        """3-D qx/qy/qz reciprocal-space scatter. pyqtgraph has no 3-D
-        equivalent without the ``PyOpenGL`` dependency (not installed, and a
-        new native dependency this project has reason to be cautious about --
-        see the unresolved Windows midas_calibrate_v2 import issue in
-        STATE.md); matplotlib is already pinned and already used this way
-        twice (``peak_fit_panel.py``, ``tab_zarrviewer.py``) -- this is the
-        third embedded matplotlib canvas, same pattern."""
-        self._recip_fig = Figure(figsize=(5, 4))
-        self._recip_fig.subplots_adjust(left=0.02, right=0.94, bottom=0.05, top=0.97)
-        self._recip_canvas = FigureCanvas(self._recip_fig)
-        self._recip_ax = self._recip_fig.add_subplot(111, projection="3d")
-        self._recip_axes_rect = self._recip_ax.get_position(original=True).frozen()
-        self._recip_selected_artist = None
-        self._reset_recip_axes()
-        toolbar = NavToolbar(self._recip_canvas, self)
+        """3-D qx/qy/qz reciprocal-space scatter, GPU-backed via PyVista/VTK
+        (``pyvista_views.PyVistaScatter3DView``) -- replaces an earlier
+        matplotlib ``Axes3D`` version (see .context/DECISIONS.md
+        2026-10-23). An even earlier VisPy attempt segfaulted under this
+        project's QT_QPA_PLATFORM=offscreen test convention; VTK's
+        ``QtInteractor`` does not have that problem."""
+        self._recip_view = PyVistaScatter3DView()
+        self._recip_view.spotClicked.connect(self._on_recip_spot_clicked)
+        self._recip_view.spotHovered.connect(self._on_recip_spot_hovered)
 
         tab = QtWidgets.QWidget()
         tv = QtWidgets.QVBoxLayout(tab); tv.setContentsMargins(0, 0, 0, 0); tv.setSpacing(0)
-        tv.addWidget(toolbar)
 
         mode_row = QtWidgets.QHBoxLayout()
         mode_row.setContentsMargins(6, 2, 6, 2)
@@ -648,7 +633,7 @@ class SolveCellTab(QtWidgets.QWidget):
         options.addWidget(fit_btn)
         options.addStretch(1)
         tv.addLayout(options)
-        tv.addWidget(self._recip_canvas, stretch=1)
+        tv.addWidget(self._recip_view, stretch=1)
         self._spot_details = QtWidgets.QLabel("Hover a spot for details; click to select.")
         self._spot_details.setWordWrap(True)
         self._spot_details.setTextFormat(QtCore.Qt.PlainText)
@@ -657,12 +642,6 @@ class SolveCellTab(QtWidgets.QWidget):
         self._show_detector_btn.setEnabled(False)
         self._show_detector_btn.clicked.connect(self._show_selected_on_detector)
         tv.addWidget(self._show_detector_btn)
-        self._recip_canvas.mpl_connect("motion_notify_event", self._on_recip_hover)
-        self._recip_canvas.mpl_connect("button_press_event", self._on_recip_press)
-        self._recip_canvas.mpl_connect("button_release_event", self._on_recip_release)
-        self._recip_canvas.mpl_connect("draw_event", self._cache_recip_projection)
-        self._recip_press = None
-        self._recip_projected = []
         self._recip_stats = QtWidgets.QLabel("—")
         self._recip_stats.setStyleSheet(f"color:{S.MUTED};font-size:11px")
         self._recip_stats.setWordWrap(True)
@@ -670,68 +649,10 @@ class SolveCellTab(QtWidgets.QWidget):
         tv.addWidget(self._recip_stats)
         self._view_tabs.addTab(tab, "Reciprocal space map")
 
-    def _reset_recip_axes(self):
-        ax = self._recip_ax
-        ax.clear()
-        ax.set_xlabel("qx (Å⁻¹)"); ax.set_ylabel("qy (Å⁻¹)"); ax.set_zlabel("qz (Å⁻¹)")
-        # Origin marker -- always drawn (even with no spots yet) so the q=0
-        # reference point is never ambiguous once real data is scattered on
-        # top of it.
-        ax.scatter([0], [0], [0], c="red", marker="+", s=160, linewidths=2, depthshade=False)
-
     # Cycled per domain once more than one exists (_update_multidomain_plot) --
     # kept well clear of the legacy "#ff3030"/"#4da3ff" diamond/indexed colors.
     _DOMAIN_COLORS = ["#4da3ff", "#ffa94d", "#69db7c", "#da77f2",
                       "#ffd43b", "#63e6be", "#ff8787", "#91a7ff"]
-
-    def _update_recip_plot(self, all_xyz=None, diamond_xyz=None, indexed_xyz=None, groups=None):
-        """Each ``*_xyz`` is an optional ``(x, y, z)`` tuple of 1-D arrays.
-        ``groups`` is an optional list of ``(xyz, color, label)`` triples
-        with optional fourth entry containing spot records for picking.
-        Camera and bounds survive updates; a new ingest resets the bounds.
-        """
-        ax = self._recip_ax
-        camera = (ax.elev, ax.azim, ax.roll)
-        limits = (ax.get_xlim3d(), ax.get_ylim3d(), ax.get_zlim3d())
-        if self._recip_colorbar is not None:
-            self._recip_colorbar.remove()
-            self._recip_colorbar = None
-        self._recip_ax.set_position(self._recip_axes_rect)
-        self._reset_recip_axes()
-        self._recip_selected_artist = None
-        self._recip_artists = {}
-        self._recip_projected = []
-        plot_groups = [
-            (all_xyz, "#969696", "Unindexed/spurious"),
-            (diamond_xyz, "#ff3030", "Diamond/gasket"),
-            (indexed_xyz, "#4da3ff", "Ab-initio indexed"),
-        ] + list(groups or [])
-        for group in plot_groups:
-            xyz, color, label = group[:3]
-            rows = group[3] if len(group) > 3 else []
-            if xyz is None or not len(xyz[0]):
-                continue
-            artist = ax.scatter(*xyz, c=color, s=14, depthshade=False, label=label)
-            if rows:
-                self._recip_artists[artist] = rows
-        handles, labels = ax.get_legend_handles_labels()
-        if handles:
-            ax.legend(handles, labels, loc="upper left", fontsize=8, framealpha=0.6)
-        ax.set_box_aspect((1, 1, 1))
-        # Equal physical scale on every axis; keep the user's camera/zoom
-        # through color/filter/selection updates, reset extent on new ingest.
-        if self._recip_has_data:
-            ax.set_xlim3d(limits[0]); ax.set_ylim3d(limits[1]); ax.set_zlim3d(limits[2])
-        elif handles:
-            bounds = np.array([ax.get_xlim3d(), ax.get_ylim3d(), ax.get_zlim3d()])
-            middle = bounds.mean(axis=1)
-            radius = max(np.ptp(bounds, axis=1)) / 2
-            ax.set_xlim3d(middle[0]-radius, middle[0]+radius)
-            ax.set_ylim3d(middle[1]-radius, middle[1]+radius)
-            ax.set_zlim3d(middle[2]-radius, middle[2]+radius)
-            self._recip_has_data = True
-        ax.view_init(*camera)
-        self._recip_canvas.draw_idle()
 
     def _update_multidomain_plot(self):
         """Kept for existing callers/tests -- delegates to the unified
@@ -852,24 +773,22 @@ class SolveCellTab(QtWidgets.QWidget):
                 color = [cmap(norm(r["q_residual"])) if np.isfinite(r.get("q_residual", np.nan))
                          else (0.59, 0.59, 0.59, 1) for r in bucket]
             groups.append((xyz, color, label, bucket))
-        self._update_recip_plot(groups=groups)
+        self._recip_view.set_groups(groups)
         if mode == 2 and finite:
-            # An explicit colorbar axes avoids repeatedly nesting GridSpecs
-            # and stealing another fraction of the plot on each refresh.
-            self._recip_ax.set_position((0.02, 0.05, 0.76, 0.92))
-            colorbar_ax = self._recip_fig.add_axes((0.84, 0.20, 0.025, 0.60))
-            self._recip_colorbar = self._recip_fig.colorbar(
-                ScalarMappable(norm=norm, cmap=cmap), cax=colorbar_ax)
-            self._recip_colorbar.set_label("|q observed − q fitted| (Å⁻¹; 2π/d)")
+            self._recip_view.set_scalar_bar(
+                "|q observed − q fitted| (Å⁻¹; 2π/d)", 0, norm.vmax)
+        else:
+            self._recip_view.clear_scalar_bar()
         if self._recip_predicted.isChecked():
-            from mpl_toolkits.mplot3d.art3d import Line3DCollection
             fitted = [r for r in visible if "q_predicted" in r]
             if fitted:
                 observed = np.array([[r[c] for c in ("qsample_x", "qsample_y", "qsample_z")] for r in fitted])
                 predicted = np.array([r["q_predicted"] for r in fitted])
-                self._recip_ax.scatter(*predicted.T, marker="x", c="#e64980", s=28, label="UB fitted (observed HKLs)")
-                self._recip_ax.add_collection3d(Line3DCollection(np.stack([observed, predicted], axis=1), colors="#e64980", linewidths=0.7))
-                self._recip_ax.legend(loc="upper left", fontsize=8)
+                self._recip_view.set_fitted_overlay(observed, predicted)
+            else:
+                self._recip_view.set_fitted_overlay(None, None)
+        else:
+            self._recip_view.set_fitted_overlay(None, None)
         self._update_recip_selection()
         if mode == 0:
             lines = [f"{self._panel_label(k)}: {len(buckets[k])} spots" for k in keys]
@@ -886,27 +805,6 @@ class SolveCellTab(QtWidgets.QWidget):
             if mode == 2:
                 lines.append("Grey: no refined fit available" if finite else "Run refinement to obtain per-spot residuals; grey: no fit available")
         self._recip_stats.setText("\n".join(lines))
-        self._recip_canvas.draw_idle()
-
-    def _cache_recip_projection(self, _event=None):
-        # Cache screen coordinates once per draw, not on every mouse move.
-        self._recip_projected = []
-        for rows in self._recip_artists.values():
-            xyz = np.array([[r[c] for c in ("qsample_x", "qsample_y", "qsample_z")] for r in rows])
-            projected = proj3d.proj_transform(*xyz.T, self._recip_ax.get_proj())
-            pixels = self._recip_ax.transData.transform(np.column_stack(projected[:2]))
-            self._recip_projected.append((pixels, rows))
-
-    def _recip_hit(self, event):
-        if event.inaxes != self._recip_ax or event.x is None or event.y is None:
-            return None
-        best, distance = None, 8.0
-        for pixels, rows in self._recip_projected:
-            distances = np.linalg.norm(pixels - [event.x, event.y], axis=1)
-            i = int(np.argmin(distances))
-            if distances[i] < distance:
-                best, distance = rows[i], distances[i]
-        return best
 
     @staticmethod
     def _spot_description(row):
@@ -921,43 +819,24 @@ class SolveCellTab(QtWidgets.QWidget):
             parts.append(f"Δhkl: {row['hkl_residual']:.5g}")
         return " | ".join(parts)
 
-    def _on_recip_hover(self, event):
-        if event.button is not None:
-            return
-        row = self._recip_hit(event)
-        if row:
-            self._spot_details.setText(self._spot_description(row))
-        else:
+    def _on_recip_spot_hovered(self, spot_id):
+        row = self._spot_rows_by_id.get(spot_id) if spot_id is not None else None
+        if row is None:
             row = self._spot_rows_by_id.get(self._selected_spot_id)
-            self._spot_details.setText(self._spot_description(row) if row else
-                                       "Hover a spot for details; click to select.")
+        self._spot_details.setText(self._spot_description(row) if row else
+                                   "Hover a spot for details; click to select.")
 
-    def _on_recip_press(self, event):
-        self._recip_press = (event.x, event.y) if event.button == 1 else None
-
-    def _on_recip_release(self, event):
-        press, self._recip_press = self._recip_press, None
-        if press is None or event.button != 1 or self._recip_canvas.toolbar.mode:
-            return
-        if event.x is None or event.y is None or np.hypot(event.x-press[0], event.y-press[1]) > 4:
-            return
-        row = self._recip_hit(event)
-        if row:
-            self._select_spot(row["spot_id"])
+    def _on_recip_spot_clicked(self, spot_id):
+        if spot_id is not None:
+            self._select_spot(spot_id)
 
     def _update_recip_selection(self):
         """Change only the selection marker; leave the scene/camera intact."""
-        if self._recip_selected_artist is not None:
-            self._recip_selected_artist.remove()
-            self._recip_selected_artist = None
         row = self._spot_rows_by_id.get(self._selected_spot_id)
-        if row is None or (row["category"] == "Unindexed/spurious"
-                           and not self._recip_show_unindexed.isChecked()):
-            return
-        self._recip_selected_artist = self._recip_ax.scatter(
-            *[[row[c]] for c in ("qsample_x", "qsample_y", "qsample_z")],
-            s=100, facecolors="none", edgecolors="#ff00cc", linewidths=2,
-            depthshade=False)
+        if row is not None and (row["category"] == "Unindexed/spurious"
+                                and not self._recip_show_unindexed.isChecked()):
+            row = None
+        self._recip_view.set_selected(row)
 
     def _select_spot(self, spot_id):
         self._selected_spot_id = spot_id
@@ -966,7 +845,6 @@ class SolveCellTab(QtWidgets.QWidget):
             self._spot_details.setText(self._spot_description(row))
         self._show_detector_btn.setEnabled(row is not None and "loaded_frame_idx" in row)
         self._update_recip_selection()
-        self._recip_canvas.draw_idle()
         self._refresh_detector_preview()
 
     def _show_selected_on_detector(self):
@@ -990,9 +868,9 @@ class SolveCellTab(QtWidgets.QWidget):
         self._refresh_detector_preview()
         self._view_tabs.setCurrentIndex(1)
 
-    def _on_detector_spot_clicked(self, _scatter, points, _event):
-        if points:
-            self._select_spot(points[0].data())
+    def _on_detector_spot_clicked(self, spot_id):
+        if spot_id is not None:
+            self._select_spot(spot_id)
 
     def _build_detector_tab(self):
         """Shows the active panel's actual 2-D detector frame at a chosen
@@ -1040,17 +918,8 @@ class SolveCellTab(QtWidgets.QWidget):
         toolbar.addStretch(1)
         dv.addLayout(toolbar)
 
-        self._det_view = ImageViewer(title="")
-        # Open circles (no fill) marking ingest-identified spot positions --
-        # updated by _update_spot_overlay, never rebuilt (unlike
-        # tab_calibrate.py's _draw_rings, there is only ever one overlay
-        # item here, so setData() in place is simpler than clear/rebuild).
-        self._spot_scatter = pg.ScatterPlotItem(
-            pen=pg.mkPen("#ffd400", width=2), brush=None, size=16, symbol="o")
-        self._spot_scatter.sigClicked.connect(self._on_detector_spot_clicked)
-        self._det_view._iv.addItem(self._spot_scatter)
-        self._det_selected = pg.ScatterPlotItem(pen=pg.mkPen("#ff00cc", width=3), brush=None, size=24)
-        self._det_view._iv.addItem(self._det_selected)
+        self._det_view = PyVistaImageView(title="")
+        self._det_view.interactor.spotClicked.connect(self._on_detector_spot_clicked)
         dv.addWidget(self._det_view, stretch=1)
         dv.addWidget(self._build_detector_scrub_bar())
         self._view_tabs.addTab(tab, "Detector")
@@ -1148,10 +1017,10 @@ class SolveCellTab(QtWidgets.QWidget):
         index); the max-over-rotation projection shows every spot since it
         already collapses the whole rotation into one image; the mask has no
         frame to match against at all."""
-        self._det_selected.setData([])
+        self._det_view.set_selected_point(None)
         df = self._spots_df
         if df is None or len(df) == 0 or "loaded_frame_idx" not in df.columns:
-            self._spot_scatter.setData([])
+            self._det_view.set_spot_overlay([], [], [])
             return
         if "panel_id" in df.columns:
             # Pooled ingest: row/col are per-panel pixel coordinates, so only
@@ -1161,20 +1030,21 @@ class SolveCellTab(QtWidgets.QWidget):
             sel = df
         elif stage in (0, 1, 2):
             if current_loaded_idx is None:
-                self._spot_scatter.setData([])
+                self._det_view.set_spot_overlay([], [], [])
                 return
             sel = df[df["loaded_frame_idx"] == current_loaded_idx]
         else:
-            self._spot_scatter.setData([])
+            self._det_view.set_spot_overlay([], [], [])
             return
         if len(sel) == 0:
-            self._spot_scatter.setData([])
+            self._det_view.set_spot_overlay([], [], [])
         else:
             ids = sel["spot_id"].to_numpy() if "spot_id" in sel else sel.index.to_numpy()
-            self._spot_scatter.setData(x=sel["col"].to_numpy(), y=sel["row"].to_numpy(), data=ids)
+            self._det_view.set_spot_overlay(sel["col"].to_numpy(), sel["row"].to_numpy(), ids)
             selected = sel[np.asarray(ids) == self._selected_spot_id]
             if len(selected):
-                self._det_selected.setData(x=selected["col"].to_numpy(), y=selected["row"].to_numpy())
+                self._det_view.set_selected_point(
+                    (float(selected["col"].iloc[0]), float(selected["row"].iloc[0])))
             if stage != 3:
                 self._det_frame_lbl.setText(f"{self._det_frame_lbl.text()} — {len(sel)} spot(s)")
 

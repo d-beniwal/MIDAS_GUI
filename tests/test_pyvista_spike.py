@@ -24,6 +24,17 @@ def app():
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
+def _teardown_qt_interactor(app, parent_widget):
+    """Qt's own deleteLater()+event-loop teardown, not Python's interpreter-
+    exit GC: a VTK render window destroyed by the latter (no real OpenGL
+    context exists offscreen to begin with) segfaults natively, which
+    pytest-forked reports as a CRASHED test even when the test body itself
+    passed. See the `tab` fixture in test_solve_cell_ui.py for the same
+    pattern applied to a real SolveCellTab."""
+    parent_widget.deleteLater()
+    app.processEvents()
+
+
 def test_qtinteractor_scene_building_works_offscreen(app):
     """Every operation the new widgets need -- construction, points, a
     scalar bar, a legend, camera get/set, point picking, actor removal --
@@ -49,6 +60,7 @@ def test_qtinteractor_scene_building_works_offscreen(app):
         plotter.remove_actor(actor)
     finally:
         plotter.close()
+        _teardown_qt_interactor(app, w)
 
 
 def test_qtinteractor_screenshot_raises_cleanly_offscreen(app):
@@ -70,6 +82,7 @@ def test_qtinteractor_screenshot_raises_cleanly_offscreen(app):
             plotter.screenshot(return_img=True)
     finally:
         plotter.close()
+        _teardown_qt_interactor(app, w)
 
 
 def test_off_screen_plotter_renders_real_pixels_offscreen(app):
