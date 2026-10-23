@@ -54,6 +54,11 @@ N_MC_DEFAULT = 200_000
 RNG_SEED_DEFAULT = 0
 SIGMA_G_DEFAULT = 5e-3
 MIN_REFLECTIONS_DEFAULT = 20
+AB_INITIO_TOL_DEFAULT = 0.15   # mirrors midas_hkls.ab_initio.index_ab_initio's
+                                 # own default; GUI-side only, for display --
+                                 # omitting the kwarg entirely (see
+                                 # _stage_ab_initio) would fall back to the
+                                 # same library value.
 
 # Stage "index_known_cell" (handoff §5.4.2/§5.6: re-index a leftover g-vector
 # pool against an already-known cell at an unknown orientation).
@@ -421,6 +426,7 @@ def _stage_ingest(cfg: dict, on_step=None) -> dict:
                     "qsample_x", "qsample_y", "qsample_z", "q_norm", "two_theta_deg"):
             spots[col] = np.array([], dtype=np.float64)
 
+    spots["spot_id"] = np.arange(len(spots))
     summary = {
         "n_frames_loaded": n_frames_loaded, "n_outside_omega_window": n_outside_omega_window,
         "n_frames": n_frames_total, "n_live": n_live,
@@ -509,6 +515,7 @@ def _stage_ingest_pooled(cfg: dict, on_step=None) -> dict:
         print(f"[solve-cell] ingest_pooled: panel {panel_id} done, {len(spots)} spots")
 
     spots_df = pd.concat(combined_frames, ignore_index=True)
+    spots_df["spot_id"] = np.arange(len(spots_df))
     n_total = len(spots_df)
     summary = {
         "n_panels": len(panels_cfg),
@@ -594,6 +601,10 @@ def _stage_diamond_filter(cfg: dict) -> dict:
 
     n_total = len(spots)
     n_diamond = int(spots["is_diamond"].sum())
+    # Keep ingest-row identity across candidate reindexing and later domain
+    # subsets. This ID is global within a pooled ingest, not a panel blob ID.
+    if "spot_id" not in spots:
+        spots["spot_id"] = np.arange(len(spots))
     candidate = spots[~spots["is_diamond"]].reset_index(drop=True)
 
     null_mean = null_std = z_score = float("nan")
@@ -683,6 +694,29 @@ def _to_inverse_d(g_2pi: np.ndarray, sigma_g_2pi: float):
     return g_2pi / TWO_PI, sigma_g_2pi / TWO_PI
 
 
+def _reflection_fit_data(UB, hkl, g_2pi):
+    """JSON-safe fit data, parallel to the indexed subset (input order).
+
+    UB uses 1/d; plotted q and its residual use 2π/d. Keep the assigned
+    HKLs rather than rounding again after refinement, which could silently
+    relabel a poor fit. These are fitted positions of observed reflections,
+    not an Ewald/coverage prediction of every allowed reflection.
+    """
+    UB = np.asarray(UB, dtype=float)
+    hkl = np.asarray(hkl, dtype=float)
+    predicted = TWO_PI * (hkl @ UB.T)
+    fractional = np.linalg.solve(UB, (np.asarray(g_2pi) / TWO_PI).T).T
+    return {
+        "UB": UB.tolist(), "UB_convention": "1/d; g = UB @ hkl",
+        "reflection_fit": {
+            "hkl": hkl.astype(int).tolist(),
+            "q_predicted": predicted.tolist(),
+            "q_residual": np.linalg.norm(g_2pi - predicted, axis=1).tolist(),
+            "hkl_residual": np.linalg.norm(fractional - hkl, axis=1).tolist(),
+        },
+    }
+
+
 def _stage_refine(cfg: dict) -> dict:
     """``cfg`` keys: ``ab_initio_raw`` (the ``AbInitioResult`` from
     ``_stage_ab_initio``), ``g_2pi`` (that stage's full candidate g array),
@@ -723,6 +757,7 @@ def _stage_refine(cfg: dict) -> dict:
         "conventional_is_standard": bool(conv.is_standard),
         "conventional_centring_index": int(conv.centring_index),
     }
+    result.update(_reflection_fit_data(fit.UB, ab.hkl, g_2pi))
     print(f"[solve-cell] refine: cell={tuple(round(v, 4) for v in result['cell'])} "
           f"rms_drlv={result['rms_drlv']:.5f} holohedry={holo.system}")
 
@@ -933,6 +968,7 @@ def _stage_index_known_cell(cfg: dict) -> dict:
         "conventional_centring_index": int(conv.centring_index),
         "diagnostics": diagnostics, "notes": [],
     }
+    result.update(_reflection_fit_data(fit.UB, hkl_int, g_2pi[indexed_mask]))
     space_group = cfg.get("space_group")
     if space_group is not None:
         sg_diag = _systematic_absence_diagnostics(hkl_int, space_group)

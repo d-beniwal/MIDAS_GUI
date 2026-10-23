@@ -684,7 +684,9 @@ def test_on_ingest_pooled_done_updates_combined_state(tab):
     }
     tab._on_ingest_pooled_done(result)
 
-    assert tab._spots_df is spots
+    assert tab._spots_df is not spots
+    assert tab._spots_df["spot_id"].tolist() == list(range(len(spots)))
+    assert tab._spots_df[spots.columns].equals(spots)
     assert "panel 2" in tab._ingest_status.text() or str(second_id) in tab._ingest_status.text()
     assert tab._diamond_btn.isEnabled()
     assert tab._ingest_preview_by_panel[first_id] is preview1
@@ -948,7 +950,7 @@ def test_on_diamond_done_resets_stale_domain_state(tab):
 # ── reciprocal-space map: Panel/Crystal color modes, unindexed toggle, stats ──
 
 def test_recip_mode_and_unindexed_checkbox_defaults(tab):
-    assert [tab._recip_mode.itemText(i) for i in range(tab._recip_mode.count())] == ["Panel", "Crystal"]
+    assert [tab._recip_mode.itemText(i) for i in range(tab._recip_mode.count())] == ["Panel", "Crystal", "Q residual"]
     assert tab._recip_mode.currentIndex() == 0
     assert tab._recip_show_unindexed.isChecked() is True
 
@@ -1180,3 +1182,153 @@ def test_refresh_recip_view_crystal_mode_legend_names_domains(tab):
     assert legend is not None
     texts = {t.get_text() for t in legend.get_texts()}
     assert "Domain 1 (free (ab-initio))" in texts
+
+
+def _linked_spots(tab):
+    from midas_gui.solve_cell.pipeline import _reflection_fit_data
+    import numpy as np
+    df = _fake_candidate_df(4, panel_ids=[1, 1, 2, 2]).assign(
+        spot_id=[10, 20, 30, 40], loaded_frame_idx=[0, 1, 2, 3],
+        row=[2., 3., 4., 5.], col=[5., 6., 7., 8.])
+    tab._spots_df = df
+    tab._flagged_df = df.assign(is_diamond=[True, False, False, False])
+    tab._candidate_df = tab._flagged_df.iloc[1:].reset_index(drop=True)
+    claimed = tab._candidate_df.iloc[[2, 0]]  # deliberately non-sorted
+    result = _fake_refine_result()
+    result.update(_reflection_fit_data(np.eye(3), [[1, 0, 0], [0, 1, 0]],
+                                     claimed[['qsample_x', 'qsample_y', 'qsample_z']].to_numpy()))
+    tab._add_domain('free (ab-initio)', result, claimed.index, tab._xyz_cols(claimed))
+    return df
+
+
+def test_spot_selection_keeps_source_id_and_fit_order_across_filtering(tab):
+    _linked_spots(tab)
+    rows = {r['spot_id']: r for r in tab._display_spot_rows()}
+    assert rows[10]['category'] == 'Diamond/gasket'
+    assert rows[30]['category'] == 'Unindexed/spurious'
+    assert rows[40]['hkl'] == [1, 0, 0]
+    assert rows[20]['hkl'] == [0, 1, 0]
+    tab._select_spot(20)
+    tab._update_spot_overlay(0, 1)
+    assert tab._spot_scatter.points()[0].data() == 20
+    assert tab._det_selected.points()[0].pos().x() == 6
+    assert 'hkl: (0, 1, 0)' in tab._spot_details.text()
+    tab._update_spot_overlay(0, 0)
+    assert len(tab._det_selected.points()) == 0
+
+
+def test_projected_spot_picking_tracks_camera_and_hidden_population(tab):
+    from types import SimpleNamespace
+    _linked_spots(tab)
+    tab._recip_ax.view_init(elev=12, azim=24, roll=3)
+    tab._recip_canvas.draw()
+    def hit(spot_id):
+        for pixels, rows in tab._recip_projected:
+            for pixel, row in zip(pixels, rows):
+                if row['spot_id'] == spot_id:
+                    return tab._recip_hit(SimpleNamespace(inaxes=tab._recip_ax, x=pixel[0], y=pixel[1]))
+    assert hit(40)['spot_id'] == 40
+    tab._recip_mode.setCurrentIndex(1)
+    tab._recip_show_unindexed.setChecked(False)
+    tab._recip_canvas.draw()
+    assert hit(30) is None
+    assert hit(20)['spot_id'] == 20
+    assert (tab._recip_ax.elev, tab._recip_ax.azim, tab._recip_ax.roll) == (12, 24, 3)
+
+
+def test_residual_mode_and_overlay_keep_one_colorbar_and_camera(tab):
+    import numpy as np
+    _linked_spots(tab)
+    tab._recip_ax.view_init(elev=19, azim=37)
+    limits = tab._recip_ax.get_xlim3d()
+    tab._recip_mode.setCurrentIndex(2)
+    tab._recip_predicted.setChecked(True)
+    for _ in range(3):
+        tab._refresh_recip_view()
+        tab._recip_canvas.draw()
+        assert len(tab._recip_fig.axes) == 2
+        assert len(tab._recip_artists) == 3
+        assert 'UB fitted' in tab._recip_ax.get_legend().get_texts()[-1].get_text()
+    np.testing.assert_allclose(tab._recip_ax.get_xlim3d(), limits)
+    assert (tab._recip_ax.elev, tab._recip_ax.azim) == (19, 37)
+    tab._recip_mode.setCurrentIndex(0)
+    assert len(tab._recip_fig.axes) == 1
+
+
+def test_link_navigation_switches_to_source_panel_and_original_frame(tab, monkeypatch):
+    import numpy as np
+    _linked_spots(tab)
+    panel = tab._add_panel()
+    monkeypatch.setattr(panel.loader, 'n_frames', lambda: 5)
+    frame = [0]
+    monkeypatch.setattr(panel.loader, 'frame_index', lambda: frame[0])
+    monkeypatch.setattr(panel.loader, 'set_frame', lambda i: frame.__setitem__(0, i))
+    monkeypatch.setattr(panel.loader, 'current_frame', lambda: np.zeros((10, 10)))
+    tab._panel_tabs.setCurrentIndex(0)
+    tab._select_spot(40)
+    tab._show_selected_on_detector()
+    assert tab._active_panel() is panel
+    assert frame[0] == 3
+    assert tab._view_tabs.currentIndex() == 1
+    assert len(tab._det_selected.points()) == 1
+    assert tab._det_selected.points()[0].pos().x() == 8
+    # Picking this detector marker retains the same reciprocal-space identity.
+    tab._on_detector_spot_clicked(tab._spot_scatter, tab._spot_scatter.points(), None)
+    assert tab._selected_spot_id == 40
+
+
+def test_new_ingest_invalidates_old_domains_and_selection(tab):
+    _linked_spots(tab)
+    tab._select_spot(40)
+    tab._on_ingest_done({'spots_df': _fake_candidate_df(2)})
+    assert tab._domains == []
+    assert tab._candidate_df is None
+    assert tab._selected_spot_id is None
+    assert not tab._show_detector_btn.isEnabled()
+    assert not tab._refine_btn.isEnabled()
+    assert len(tab._display_spot_rows()) == 2
+
+
+def test_repeated_residual_refreshes_preserve_plot_area(tab):
+    import numpy as np
+    _linked_spots(tab)
+    tab._recip_mode.setCurrentIndex(2)
+    tab._recip_canvas.draw()
+    initial = tab._recip_ax.get_position().bounds
+    for _ in range(5):
+        tab._refresh_recip_view()
+        tab._recip_canvas.draw()
+        np.testing.assert_allclose(tab._recip_ax.get_position().bounds, initial)
+    # Leaving and returning to residual mode must not shrink the plot either.
+    tab._recip_mode.setCurrentIndex(0)
+    tab._recip_mode.setCurrentIndex(2)
+    tab._recip_canvas.draw()
+    np.testing.assert_allclose(tab._recip_ax.get_position().bounds, initial)
+
+
+def test_click_selection_preserves_scene_camera_and_plot_size(tab):
+    import numpy as np
+    from matplotlib.backend_bases import MouseEvent
+    _linked_spots(tab)
+    tab._recip_mode.setCurrentIndex(2)
+    tab._recip_predicted.setChecked(True)
+    tab._recip_ax.view_init(elev=17, azim=29, roll=4)
+    tab._recip_ax.set_xlim3d(-0.3, 1.3)
+    tab._recip_canvas.draw()
+    artists = tuple(tab._recip_artists)
+    colorbar = tab._recip_colorbar
+    limits = tab._recip_ax.get_xlim3d()
+    bounds = tab._recip_ax.get_position().bounds
+    for spot_id in (20, 40, 20, 40):
+        pixel = next(pixel for pixels, rows in tab._recip_projected
+                     for pixel, row in zip(pixels, rows) if row['spot_id'] == spot_id)
+        for name in ('button_press_event', 'button_release_event'):
+            event = MouseEvent(name, tab._recip_canvas, *pixel, button=1)
+            tab._recip_canvas.callbacks.process(name, event)
+        tab._recip_canvas.draw()
+        assert tab._selected_spot_id == spot_id
+        assert tuple(tab._recip_artists) == artists
+        assert tab._recip_colorbar is colorbar
+        assert (tab._recip_ax.elev, tab._recip_ax.azim, tab._recip_ax.roll) == (17, 29, 4)
+        np.testing.assert_allclose(tab._recip_ax.get_xlim3d(), limits)
+        np.testing.assert_allclose(tab._recip_ax.get_position().bounds, bounds)

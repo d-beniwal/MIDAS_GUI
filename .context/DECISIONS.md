@@ -3,6 +3,73 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-23 — Fixed reciprocal-map shrink on selection; evaluated GPU renderer options
+
+Reproduced the reported progressive "zoom out" specifically with residual
+coloring: repeated Figure.colorbar(ax=...) calls nested new GridSpecs and
+reduced the plot's screen area on each refresh, although data limits and
+Euler camera angles stayed constant. Previous tests covered limits and
+colorbar counts but missed the axes rectangle, so they did not catch this.
+
+Colorbars now use an explicit fixed axes and the main axes returns to its
+saved full rectangle when residual coloring is disabled. Selecting a spot
+only replaces the selection marker and redraws the canvas; it no longer
+rebuilds observed/fitted artists or the colorbar. This fixes the cause and
+also avoids expensive scene reconstruction on clicks. Regression tests
+exercise actual mouse press/release callbacks, repeated selection, mode
+switches and refreshes, checking plot rectangle, scene/colorbar identity,
+limits and camera. The layout regression reproduced the shrink before the
+fix; the click regression also prevents unnecessary scene rebuilding.
+
+Evaluated alternatives from official documentation and the local runtime:
+pyqtgraph includes an OpenGL view but PyOpenGL is absent; VisPy and
+QtWebEngine/Plotly are also absent in the checked midas-gui environment.
+VisPy is the preferred candidate for a larger GPU rendering upgrade, with
+Qt embedding, interactive cameras and marker picking. pyqtgraph OpenGL is
+a smaller integration change but its docs flag the legacy rendering
+pipeline. No dependencies were installed and no renderer migration was
+made as part of answering the user's question about alternatives.
+
+Validation: all 81 Solve Cell UI tests passed with a fresh temporary HOME;
+inspected a rendered plot after repeated selection and refreshes.
+
+## 2026-10-23 — Solve Cell spot provenance and interactive fit inspection
+
+Retained the installed matplotlib 3-D renderer, adding projected-screen
+hover/picking, camera and zoom preservation, equal initial q-axis scales,
+and explicit Fit visible spots. This avoids making a graphics dependency
+change part of the first interaction slice; it does not provide OpenGL
+rendering or incremental artist updates. Projected point coordinates are
+cached per draw, so rotation updates picking without projecting on every
+mouse move. Click/drag discrimination keeps rotation from selecting spots.
+
+Added a global-within-ingest `spot_id` column (reassigned after panel
+concatenation), preserved through diamond filtering and candidate index
+reset. Candidate row labels alone cannot link back to detector spots:
+diamond filtering resets them. Selection uses spot IDs while existing
+domain bookkeeping continues to use candidate row labels. A new successful
+ingest clears old classifications, domains, refinement inputs and selection;
+rerunning diamond filtering also invalidates the previous ab-initio seed.
+Single-panel results retain source panel identity when the active tab changes.
+
+Both free refinement and accepted known-cell searches now export UB in
+1/d and parallel assigned HKLs, fitted q in 2π/d, |observed−fitted q| in
+Å⁻¹ (2π/d convention), and assigned-HKL residual norms. Preserve the
+original assignments rather than silently rounding again after refinement.
+The new residual color mode uses q residuals, with grey for missing fits;
+the fitted-position toggle shows only assigned observed reflections, not
+an Ewald/coverage/completeness prediction. Domain discovery thresholds,
+classification, geometry resolution, comparison tables and the full
+diagnostics suite remain separate work.
+
+Verification: Solve Cell UI 79 passed (including projected picking after
+rotation, fit ordering, hidden populations, colorbar lifecycle, camera
+preservation, panel/frame navigation and ingest invalidation); pipeline
+39 passed / 3 skipped for absent beamtime fixtures; app smoke 13 passed.
+UI and app smoke checks also passed with a fresh temporary HOME. Inspected an offscreen
+synthetic Qt render. Pre-existing tooltip/default edits were preserved;
+no development-history or user-manual update was made.
+
 ## 2026-10-22 — Exposed Ingest `max_workers` as a "Nr. of CPUs" field; `requirements.txt` drift fixed; a real-data Ingest crash found and flagged (not yet fixed)
 
 **Added** a "Nr. of CPUs" `QSpinBox` directly beside the Run Ingest button in

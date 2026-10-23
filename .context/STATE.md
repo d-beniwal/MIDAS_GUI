@@ -1,79 +1,55 @@
 # Project state
 
-Last updated: 2026-10-22
+Last updated: 2026-10-23
 
 ## Now working on
 
-Live-app verification of Solve Cell Ingest against real beamline data
-surfaced two things (see `.context/DECISIONS.md` today's newest entry):
-a "Nr. of CPUs" field is now exposed next to Run Ingest (was cfg-only
-before), and a real, unresolved `Fatal Python error: Aborted` crash in
-`midas_defect`'s `_grouped_median` (pandas groupby path) was found and
-flagged — not yet fixed, suspect is the unpinned `pandas>=1.5` floor
-floating to `3.0.6`. `requirements.txt`'s MIDAS pins were also re-synced to
-the real env (they had drifted from ad hoc upgrades). All four of
-`test_solve_cell_pipeline.py`/`test_solve_cell_ui.py`/`test_project.py`/
-`test_smoke.py` pass per-file, confirmed fresh this session.
+Solve Cell visualization: fixed progressive plot shrink on spot selection
+in residual mode. The colorbar repeatedly stole axes area; it now has a
+fixed axes, and clicks update only the selection marker. Added regressions
+for screen area and actual repeated click events. Evaluated GPU options:
+VisPy is the recommended larger upgrade; no graphics dependencies installed.
 
-Previously: five pieces sitting uncommitted were committed to `main` (the
-working copy ended up on `main` rather than `solve-cell` — that branch
-never held any commits of its own, so nothing was lost): the Calibrate
-flip-threshold bug fix (`0458bcf`), the MCP Calibrate control-surface
-extension (`aaaeecc`), Solve Cell Ingest live progress (`f1da5e7`), the
-agent-neutral context migration (`042bb0e`), the Tools ▸ APEXA Chat…
-launcher (`fcd5fbb`), and the hdf5plugin fix + defect pin bump (`d9083b0`).
-Not yet pushed to `origin`.
+Previously implemented a first interaction slice using the
+installed matplotlib 3-D canvas and pyqtgraph detector view. Hover/click
+exposes spot provenance and fit details; selection is shared across views,
+with explicit navigation to the source panel and original loaded frame.
+Added continuous q-residual colors, UB-fitted observed-reflection overlays,
+camera/zoom preservation, and a Fit visible spots control. New ingest
+invalidates old domain claims and selection. Changes remain uncommitted;
+pre-existing tooltip/indexing-default edits and `scratch/` were preserved.
 
 ## Next steps
 
-- Push `main` to `origin`.
-- Investigate the `_grouped_median` crash (today's DECISIONS.md entry):
-  try pinning `pandas` to a known-2.x version in the real env and re-running
-  the same Ingest that crashed, to see if it still reproduces; if so,
-  isolate a minimal repro and report upstream against `midas_defect`.
-- Live-app check for Solve Cell Ingest: now exercised once against real
-  beamline data (see above) — confirm the Detector tab visibly updates per
-  step on a longer/multi-panel run too, not just the automated tests.
-- Apply the same thread-pool treatment to `_stage_index_known_cell`'s
-  `_random_rotation_search` — see ROADMAP (the Ingest side is now done,
-  UI included).
-- Flag ROADMAP P4-1 to MIDAS maintainers (midas-defect's `perf_solve_cell`
-  branch never bumped its own version number, so the requirements.txt pin
-  can't disambiguate it from master by version alone).
-- Consider bringing `pyproject.toml`/`environment.yml` in sync with
-  `requirements.txt`'s re-pinned MIDAS versions (flagged, not done this
-  session — `pyproject.toml` is also missing the whole Solve Cell dep block).
-- Consider extending the same `on_step` pattern to `diamond_filter`/
-  `ab_initio`/`refine` if per-step visibility is wanted there too (not done
-  — out of scope for this change).
-- Live-app check for the new MCP ops: drive `calibrate.set_projection`/
-  `.project`/`.run` (with `limits`/`distortion_mode`/`build_residual_corr`)/
-  `.save_json`/`.save_paramstest`/`.set_working_dir` against a real running
-  GUI (`MIDAS_GUI_CONTROL=1`), not just the unit tests.
-- Live-app check for Tools ▸ APEXA Chat…: set Preferences ▸ Integrations ▸
-  APEXA repo path and confirm the launcher actually starts APEXA's desktop
-  UI wired to this GUI's control socket.
-- Consult `.context/ROADMAP.md` for outstanding calibration, Solve Cell,
-  Texture, and package-side work; verify older items against current code.
-- For GUI changes, use the per-file Qt verification guidance in
-  `.context/ARCHITECTURE.md` rather than trusting a combined suite run.
+- Verify the new interactions on real multi-panel data, including filtered
+  frame schedules and multiple domains. Offscreen synthetic visual QA and
+  automated tests do not replace beamline validation.
+- Continue Solve Cell: domain comparison/reduced cells/misorientation,
+  geometry resolution ladder, classification and diagnostics. Preserve the
+  documented restriction against blindly indexing pooled mixed domains.
+- If a new 3-D renderer is needed, evaluate that separately: this change
+  retains matplotlib and rebuilds artists on data/color/filter updates;
+  selection now updates only its marker.
+- Investigate the previously reported `midas_defect._grouped_median` abort;
+  it has not been root-caused or fixed here. Check current dependency pins
+  before pursuing the earlier pandas-version hypothesis.
+- Apply thread-pool treatment to the known-cell random rotation search;
+  consult ROADMAP for other Solve Cell and package-side work.
+- Live-app checks remain for MCP Calibrate operations, the APEXA launcher,
+  restart/relaunch and real multi-panel calibration output.
 
 ## Open questions / blockers
 
-- Windows user `lheald` calibration import failure remains unresolved;
-  awaiting direct import tracebacks and `midas_calibrate_v2` version details.
-- Live beamline verification is still needed for restart/relaunch, recent
-  Hydra UI changes, and real multi-panel calibration output.
-- Known local-config and Qt/pyqtgraph teardown failures can obscure test
-  results. Per-file runs with a clean temporary `HOME` are the reference;
-  see architecture guidance. No application tests were run for this
-  context-only migration.
+- Beamtime reference datasets are absent locally (three pipeline tests skip).
+- Windows `lheald` calibration import failure still needs direct tracebacks
+  and backend version details.
+- Qt teardown/local preferences can obscure test results; run affected files
+  separately and use a fresh temporary HOME as needed (ARCHITECTURE).
 
 ## Recent changes
 
-- 2026-10-22 — Added a "Nr. of CPUs" field next to Solve Cell's Run Ingest button (default 1, wired to `pipeline.py`'s existing `max_workers`); re-synced `requirements.txt`'s MIDAS pins to the real env (several had drifted via ad hoc upgrades); found and flagged (not fixed) a recurring `Fatal Python error: Aborted` crash in `midas_defect._grouped_median`'s pandas-groupby path during real Ingest — see DECISIONS.md.
-- 2026-10-22 — Fixed the hdf5plugin loading bug (import added to `midas_gui/__init__.py`) and upgraded the real env's `midas_defect`/`midas_hkls` to the `perf_solve_cell` build, resolving the `max_workers` TypeError `a2acc78` had introduced there; `requirements.txt` pin bumped with a version-ambiguity caveat (ROADMAP P4-1). Verified green per-file: `test_solve_cell_pipeline.py`, `test_solve_cell_ui.py`, `test_project.py`, `test_smoke.py`.
-- 2026-10-22 — Solve-cell ingest perf benchmark (MIDAS `perf_solve_cell` vs `master`): 4.35x serial / 9.42x at 12 workers, output byte-identical; wired `max_workers` into `pipeline.py` (`a2acc78`).
-- 2026-10-22 — Added Tools ▸ APEXA Chat… launcher, wired through `midas_gui_mcp` and a new Preferences ▸ Integrations APEXA-repo-path setting (`fcd5fbb`).
-- 2026-10-22 — Aligned context with shared init/resume/save skills; removed legacy provider files and corrected stale branch state (`042bb0e`).
-- 2026-10-22 — Solve Cell Ingest gained live per-step progress via a new `on_step` callback through `pipeline`/`SolveCellWorker`/`tab_solve_cell` (`f1da5e7`).
+- 2026-10-23 — Fixed residual-colorbar plot shrink; selection preserves existing scene/colorbar objects and plot area. 81 UI tests passed with a clean temporary HOME; rendered plot inspected.
+- 2026-10-23 — Added Solve Cell linked spot selection, hover details, residual coloring and fitted-position overlays; exported UB/assigned HKLs/per-reflection fit data with explicit q conventions and stable ingest spot IDs.
+- 2026-10-23 — New ingest clears stale domain assignments; diamond-filter reruns invalidate prior ab-initio refinement inputs. Solve Cell UI: 79 passed; pipeline: 39 passed, 3 skipped; app smoke: 13 passed; synthetic offscreen render inspected.
+- 2026-10-23 — Existing commit `54fc06d` synchronized environment.yml/pyproject.toml dependency pins; main matches origin/main at inspection.
+- 2026-10-22 — Exposed ingest CPU count and synced requirements pins; real-data grouped-median abort reported (unresolved).

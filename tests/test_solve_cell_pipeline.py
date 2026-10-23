@@ -629,8 +629,11 @@ def test_pooling_by_concatenation_recovers_known_cell_without_real_reference_dat
     refine_out = P._stage_refine({
         "ab_initio_raw": ab_out["ab_initio_raw"], "g_2pi": ab_out["g_2pi"], "sigma_g": 5e-3,
     })
-    a_conventional = max(refine_out["refine_result"]["conventional_cell"][:3])
+    refined = refine_out["refine_result"]
+    a_conventional = max(refined["conventional_cell"][:3])
     assert a_conventional == pytest.approx(5.43, rel=0.05)
+    assert len(refined["reflection_fit"]["hkl"]) == refined["n_reflections"]
+    assert max(refined["reflection_fit"]["q_residual"]) < 1e-8
 
 
 def test_run_stage_dispatches_ingest_pooled():
@@ -789,3 +792,29 @@ def test_run_stage_dispatches_and_rejects_unknown_stage():
 def test_panel_dir_name_matches_data_contract_convention():
     assert P.panel_dir_name(1) == "panel_01"
     assert P.panel_dir_name(12) == "panel_12"
+
+
+def test_reflection_fit_data_preserves_assignment_and_q_convention():
+    # Non-diagonal UB catches transposition mistakes. A deliberately poor
+    # reflection must retain its assigned HKL, even if re-rounding changes it.
+    UB = np.array([[0.2, 0.03, 0], [0, 0.25, 0.04], [0.01, 0, 0.3]])
+    hkl = np.array([[1, -2, 3], [2, 1, 0]])
+    delta_h = np.array([[0.01, -0.02, 0.03], [0.6, 0, 0]])
+    observed = P.TWO_PI * ((hkl + delta_h) @ UB.T)
+    result = P._reflection_fit_data(UB, hkl, observed)
+    fit = result['reflection_fit']
+    assert fit['hkl'] == hkl.tolist()
+    np.testing.assert_allclose(fit['q_predicted'], P.TWO_PI * (hkl @ UB.T))
+    np.testing.assert_allclose(fit['q_residual'], np.linalg.norm(P.TWO_PI * delta_h @ UB.T, axis=1))
+    np.testing.assert_allclose(fit['hkl_residual'], np.linalg.norm(delta_h, axis=1))
+    import json
+    json.dumps(result, allow_nan=False)
+
+
+def test_diamond_filter_preserves_ingest_identity_after_candidate_reindex():
+    lines = P._diamond_tth_lines_deg(WAVELENGTH_A, P.DIAMOND_A_ANGSTROM_DEFAULT)
+    spots = pd.DataFrame({'spot_id': [7, 42, 91], 'two_theta_deg': [0.01, lines[0], 0.02]})
+    result = P._stage_diamond_filter({'spots_df': spots, 'wavelength_A': WAVELENGTH_A, 'n_mc': 10})
+    assert result['candidate_df'].index.tolist() == [0, 1]
+    assert result['candidate_df']['spot_id'].tolist() == [7, 91]
+    assert result['flagged_df']['spot_id'].tolist() == [7, 42, 91]
