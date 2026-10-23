@@ -914,6 +914,39 @@ def list_h5_1d_datasets(path: str | Path) -> list:
     return sorted(items, key=_rank)
 
 
+def detect_omega_frame_range(path: str | Path, field: str,
+                              start_deg: float, end_deg: float) -> tuple[int, int, float]:
+    """First/last 0-based frame index whose *field* omega value lies within
+    the closed span between ``start_deg`` and ``end_deg`` (either order; the
+    scan direction doesn't matter since frame order is acquisition order,
+    not omega order), plus the measured omega at the first matching frame.
+
+    Used by Solve Cell's "auto-detect frame range" (``tab_solve_cell.py``)
+    in place of a user paging through frames by hand to find where their
+    omega range starts/ends in the raw stack. Deliberately a plain
+    value-in-range test, not a step-count/nearest-value search: a scan's
+    ramp-up/ramp-down segments make per-frame omega spacing uneven at both
+    ends, so independently nearest-matching ``start_deg`` and ``end_deg``
+    can disagree with the step size by a frame or more, while "which frames
+    actually carry an omega in this span" is unambiguous and matches what a
+    user paging through frames by hand would call the start/end frame.
+    """
+    import h5py
+    with h5py.File(str(path), "r") as f:
+        if field not in f:
+            raise KeyError(f"{field!r} not found in {path}")
+        omega = np.asarray(f[field][()], dtype=float).ravel()
+    lo, hi = (start_deg, end_deg) if start_deg <= end_deg else (end_deg, start_deg)
+    mask = (omega >= lo) & (omega <= hi)
+    idx = np.flatnonzero(mask)
+    if idx.size == 0:
+        raise ValueError(
+            f"No frames have {field!r} in [{lo:g}, {hi:g}]° "
+            f"(file range: [{omega.min():g}, {omega.max():g}]°).")
+    first_idx, last_idx = int(idx[0]), int(idx[-1])
+    return first_idx, last_idx, float(omega[first_idx])
+
+
 # "dark" as a word, however the beamline glued it together. The original
 # pattern required a _ or . on BOTH sides, which is 20-ID-E's
 # ``_dark_before_`` / ``_dark_after_`` convention and nothing else. At

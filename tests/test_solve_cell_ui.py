@@ -26,12 +26,12 @@ def tab(app):
     from midas_gui.tab_solve_cell import SolveCellTab
     t = SolveCellTab()
     yield t
-    # The Detector/Reciprocal views are now VTK-backed (pyvistaqt
-    # QtInteractor): under QT_QPA_PLATFORM=offscreen there is no real OpenGL
-    # context, and if Python's interpreter-exit GC is left to destroy a VTK
-    # render window instead of Qt's own deleteLater() + event loop, the
-    # native cleanup segfaults -- caught by pytest-forked as a CRASHED
-    # (not failed) test even when the test body itself passed. Explicit
+    # The Reciprocal view is VTK-backed (pyvistaqt QtInteractor): under
+    # QT_QPA_PLATFORM=offscreen there is no real OpenGL context, and if
+    # Python's interpreter-exit GC is left to destroy a VTK render window
+    # instead of Qt's own deleteLater() + event loop, the native cleanup
+    # segfaults -- caught by pytest-forked as a CRASHED (not failed) test
+    # even when the test body itself passed. Explicit
     # deleteLater()+processEvents() here lets Qt tear the widget down
     # properly before this forked test process exits.
     t.deleteLater()
@@ -52,12 +52,31 @@ def _clean_scratch():
         shutil.rmtree(_SCRATCH.pop(), ignore_errors=True)
 
 
+def _write_h5_stack_with_omega(omega, *, omega_field="entry/instrument/sample_stage/omega",
+                                data_field="exchange/data") -> str:
+    """A minimal HDF5 stack (one tiny frame per *omega* entry) plus a 1-D
+    omega dataset at *omega_field* -- enough for the omega-field combo and
+    ``detect_omega_frame_range`` to exercise against, without depending on a
+    real beamline file."""
+    import h5py
+    import numpy as np
+    tmpdir = Path(tempfile.mkdtemp(prefix="mg_solvecell_omega_"))
+    _SCRATCH.append(tmpdir)
+    p = tmpdir / "stack.h5"
+    with h5py.File(str(p), "w") as f:
+        n = len(omega)
+        f.create_dataset(data_field, data=np.zeros((n, 2, 2), dtype=np.uint16))
+        f.create_dataset(omega_field, data=np.asarray(omega, dtype=np.float64))
+    return str(p)
+
+
 def _write_calib_json(**overrides) -> str:
     d = {
         "wavelength_A": 0.17298, "pxY": 150.0, "pxZ": 150.0,
         "NrPixelsY": 2880, "NrPixelsZ": 2880,
         "Lsd": 1000473.93, "BC_y": 1430.433, "BC_z": 1342.486,
         "tx": 0.0, "ty": -0.4718, "tz": -0.2205,
+        "im_trans": [],   # declared-but-empty: "no transform", not "file doesn't say"
     }
     d.update(overrides)
     tmpdir = Path(tempfile.mkdtemp(prefix="mg_solvecell_calibload_"))
@@ -107,12 +126,12 @@ def test_run_ingest_warns_when_no_raw_data_loaded(tab, monkeypatch):
     assert tab._worker is None
 
 
-def _make_panel_ready(panel, monkeypatch, lsd=1000.0):
+def _make_panel_ready(panel, monkeypatch, lsd=1000.0, **calib_over):
     """Fakes 'this panel has calibration + raw data loaded + nothing
     pending' without a real DataLoaderPanel data source -- same technique
     test_live_stream.py's own data_source_kind tests use."""
     from PyQt5 import QtWidgets
-    path = _write_calib_json(Lsd=lsd)
+    path = _write_calib_json(Lsd=lsd, **calib_over)
     monkeypatch.setattr(
         QtWidgets.QFileDialog, "getOpenFileName",
         staticmethod(lambda *a, **k: (path, "")))
@@ -412,7 +431,7 @@ def test_load_calib_file_reports_error_on_bad_file(tab, monkeypatch):
 
 # ── GUI state (project save/restore) ────────────────────────────────────
 
-def test_get_state_set_state_round_trips_panels_and_stage_fields(tab, monkeypatch):
+def test_get_state_set_state_round_trips_panels_and_stage_fields(tab, app, monkeypatch):
     from PyQt5 import QtWidgets
     path1 = _write_calib_json(Lsd=111.0)
     monkeypatch.setattr(
@@ -436,24 +455,30 @@ def test_get_state_set_state_round_trips_panels_and_stage_fields(tab, monkeypatc
     state = tab.get_state()
 
     restored = type(tab)()
-    restored.set_state(state)
+    try:
+        restored.set_state(state)
 
-    assert restored._panel_tabs.count() == 2
-    ids = sorted(tab._panels.keys())
-    restored_ids = sorted(restored._panels.keys())
-    assert restored_ids == ids
-    restored_first = restored._panels[ids[0]]
-    restored_second = restored._panels[ids[1]]
-    assert restored_first.has_calibration() and restored_second.has_calibration()
-    assert restored_first.geometry_cfg()["Lsd"] == pytest.approx(111.0)
-    assert restored_second.geometry_cfg()["Lsd"] == pytest.approx(222.0)
-    assert restored_first._ome_first_deg.value() == pytest.approx(5.0)
-    assert restored._proj_ed.text() == "/tmp/some_solve_cell_project"
-    assert restored._low_count.value() == pytest.approx(12.5)
-    assert restored._sector_candidates_cfg() == (8, 24)
-    # `second` was the active panel when get_state() ran -- restore must
-    # reproduce that, not default back to the first tab.
-    assert restored._panel_tabs.currentWidget() is restored_second
+        assert restored._panel_tabs.count() == 2
+        ids = sorted(tab._panels.keys())
+        restored_ids = sorted(restored._panels.keys())
+        assert restored_ids == ids
+        restored_first = restored._panels[ids[0]]
+        restored_second = restored._panels[ids[1]]
+        assert restored_first.has_calibration() and restored_second.has_calibration()
+        assert restored_first.geometry_cfg()["Lsd"] == pytest.approx(111.0)
+        assert restored_second.geometry_cfg()["Lsd"] == pytest.approx(222.0)
+        assert restored_first._ome_first_deg.value() == pytest.approx(5.0)
+        assert restored._proj_ed.text() == "/tmp/some_solve_cell_project"
+        assert restored._low_count.value() == pytest.approx(12.5)
+        assert restored._sector_candidates_cfg() == (8, 24)
+        # `second` was the active panel when get_state() ran -- restore must
+        # reproduce that, not default back to the first tab.
+        assert restored._panel_tabs.currentWidget() is restored_second
+    finally:
+        # Own PyVista views too -- must be torn down via Qt, not interpreter-exit
+        # GC (see the `tab` fixture above and .context/STATE.md).
+        restored.deleteLater()
+        app.processEvents()
 
 
 def test_set_state_with_no_panels_key_leaves_default_panel_alone(tab):
@@ -543,12 +568,61 @@ def test_update_recip_plot_keeps_origin_marker_alongside_data(tab):
     assert len(tab._recip_view._group_actors) == 1
 
 
+# ── reciprocal-space map: spot size controls ─────────────────────────────
+
+def test_recip_point_size_control_defaults_to_the_view_widgets_own_default(tab):
+    from midas_gui.pyvista_views import _DEFAULT_POINT_SIZE, SIZE_MODE_EQUAL
+    assert tab._recip_point_size.value() == _DEFAULT_POINT_SIZE
+    assert tab._recip_size_mode.currentIndex() == 0
+    assert tab._recip_view._size_mode == SIZE_MODE_EQUAL
+
+
+def test_recip_point_size_spinbox_resizes_rendered_spots(tab):
+    _linked_spots(tab)
+    tab._refresh_recip_view()
+    assert tab._recip_view._group_actors[0].prop.point_size == tab._recip_point_size.value()
+    tab._recip_point_size.setValue(30)
+    assert tab._recip_view._group_actors[0].prop.point_size == 30
+
+
+def test_recip_size_mode_intensity_scales_spots_by_integrated_field(tab):
+    import numpy as np
+    x, y, z = np.array([0.1, 0.2]), np.array([0.3, 0.4]), np.array([0.5, 0.6])
+    rows = [{"spot_id": 1, "integrated": 10.0}, {"spot_id": 2, "integrated": 1000.0}]
+    view = tab._recip_view
+    view.set_groups([((x, y, z), "#4da3ff", "Ab-initio indexed", rows)],
+                     point_size=30, size_mode="intensity")
+    actor = view._group_actors[0]
+    assert actor.mapper.scale_array == "point_radius"
+    radii = actor.mapper.dataset.point_data["point_radius"]
+    assert radii[1] == 30.0   # the brightest visible spot renders at the full requested size
+    assert radii[0] < radii[1]   # a dimmer spot renders smaller, but not invisible
+    assert radii[0] > 0
+
+    # Switching back to equal size must not leave a stale scale array behind.
+    view.set_groups([((x, y, z), "#4da3ff", "Ab-initio indexed", rows)], size_mode="equal")
+    actor = view._group_actors[0]
+    assert "point_radius" not in actor.mapper.dataset.point_data
+    assert actor.prop.point_size == 30   # point_size itself is sticky across mode changes
+
+
+def test_recip_size_mode_intensity_falls_back_to_equal_size_without_integrated_data(tab):
+    """Older fixtures/spots_df without an "integrated" column (e.g. this
+    test file's own ``_fake_candidate_df``) must not crash intensity mode --
+    they just render at the uniform point size, same as equal mode."""
+    _linked_spots(tab)
+    tab._recip_size_mode.setCurrentIndex(1)
+    tab._refresh_recip_view()   # must not raise
+    actor = tab._recip_view._group_actors[0]
+    assert "point_radius" not in actor.mapper.dataset.point_data
+
+
 # ── Detector tab: spot overlay ───────────────────────────────────────────
 
 def test_spot_scatter_item_is_added_to_the_detector_view(tab):
-    from midas_gui.pyvista_views import PyVistaImageView
-    assert isinstance(tab._det_view, PyVistaImageView)
-    assert len(tab._det_view.spot_overlay["x"]) == 0
+    import pyqtgraph as pg
+    assert isinstance(tab._spot_scatter, pg.ScatterPlotItem)
+    assert tab._spot_scatter.scene() is not None
 
 
 def test_update_spot_overlay_shows_only_spots_on_the_matching_loaded_frame(tab):
@@ -558,15 +632,15 @@ def test_update_spot_overlay_shows_only_spots_on_the_matching_loaded_frame(tab):
         "loaded_frame_idx": [2, 2, 5],
     })
     tab._update_spot_overlay(0, 2)
-    assert len(tab._det_view.spot_overlay["x"]) == 2
-    assert sorted(tab._det_view.spot_overlay["x"]) == [10.0, 20.0]
+    assert len(tab._spot_scatter.data) == 2
+    assert sorted(tab._spot_scatter.data["x"]) == [10.0, 20.0]
 
     tab._update_spot_overlay(0, 5)
-    assert len(tab._det_view.spot_overlay["x"]) == 1
-    assert tab._det_view.spot_overlay["x"][0] == 30.0
+    assert len(tab._spot_scatter.data) == 1
+    assert tab._spot_scatter.data["x"][0] == 30.0
 
     tab._update_spot_overlay(1, 99)   # no spot at this frame
-    assert len(tab._det_view.spot_overlay["x"]) == 0
+    assert len(tab._spot_scatter.data) == 0
 
 
 def test_update_spot_overlay_shows_every_spot_on_max_projection_stage(tab):
@@ -575,7 +649,7 @@ def test_update_spot_overlay_shows_every_spot_on_max_projection_stage(tab):
         "row": [1.0, 2.0], "col": [10.0, 20.0], "loaded_frame_idx": [2, 5],
     })
     tab._update_spot_overlay(3, None)
-    assert len(tab._det_view.spot_overlay["x"]) == 2
+    assert len(tab._spot_scatter.data) == 2
 
 
 def test_update_spot_overlay_shows_nothing_on_mask_stage(tab):
@@ -584,13 +658,13 @@ def test_update_spot_overlay_shows_nothing_on_mask_stage(tab):
         "row": [1.0], "col": [10.0], "loaded_frame_idx": [2],
     })
     tab._update_spot_overlay(4, 2)
-    assert len(tab._det_view.spot_overlay["x"]) == 0
+    assert len(tab._spot_scatter.data) == 0
 
 
 def test_update_spot_overlay_handles_no_ingest_result_without_raising(tab):
     assert tab._spots_df is None
     tab._update_spot_overlay(0, 3)   # must not raise
-    assert len(tab._det_view.spot_overlay["x"]) == 0
+    assert len(tab._spot_scatter.data) == 0
 
 
 def test_update_spot_overlay_filters_to_the_active_panel_when_pooled(tab):
@@ -606,13 +680,13 @@ def test_update_spot_overlay_filters_to_the_active_panel_when_pooled(tab):
     })
     tab._panel_tabs.setCurrentWidget(tab._panels[first_id])
     tab._update_spot_overlay(0, 2)
-    assert len(tab._det_view.spot_overlay["x"]) == 1
-    assert tab._det_view.spot_overlay["x"][0] == 10.0
+    assert len(tab._spot_scatter.data) == 1
+    assert tab._spot_scatter.data["x"][0] == 10.0
 
     tab._panel_tabs.setCurrentWidget(second)
     tab._update_spot_overlay(0, 2)
-    assert len(tab._det_view.spot_overlay["x"]) == 1
-    assert tab._det_view.spot_overlay["x"][0] == 90.0
+    assert len(tab._spot_scatter.data) == 1
+    assert tab._spot_scatter.data["x"][0] == 90.0
 
 
 # ── live ingest progress (on_step) ───────────────────────────────────────
@@ -1224,11 +1298,11 @@ def test_spot_selection_keeps_source_id_and_fit_order_across_filtering(tab):
     assert rows[20]['hkl'] == [0, 1, 0]
     tab._select_spot(20)
     tab._update_spot_overlay(0, 1)
-    assert tab._det_view.spot_overlay["ids"][0] == 20
-    assert tab._det_view.selected_xy[0] == 6
+    assert tab._spot_scatter.points()[0].data() == 20
+    assert tab._det_selected.points()[0].pos().x() == 6
     assert 'hkl: (0, 1, 0)' in tab._spot_details.text()
     tab._update_spot_overlay(0, 0)
-    assert tab._det_view.selected_xy is None
+    assert len(tab._det_selected.points()) == 0
 
 
 def test_projected_spot_picking_tracks_camera_and_hidden_population(tab):
@@ -1291,11 +1365,10 @@ def test_link_navigation_switches_to_source_panel_and_original_frame(tab, monkey
     assert tab._active_panel() is panel
     assert frame[0] == 3
     assert tab._view_tabs.currentIndex() == 1
-    assert tab._det_view.selected_xy is not None
-    assert tab._det_view.selected_xy[0] == 8
+    assert len(tab._det_selected.points()) == 1
+    assert tab._det_selected.points()[0].pos().x() == 8
     # Picking this detector marker retains the same reciprocal-space identity.
-    assert list(tab._det_view.spot_overlay["ids"]) == [40]
-    tab._on_detector_spot_clicked(40)
+    tab._on_detector_spot_clicked(tab._spot_scatter, tab._spot_scatter.points(), None)
     assert tab._selected_spot_id == 40
 
 
@@ -1356,3 +1429,266 @@ def test_click_selection_preserves_scene_camera_and_plot_size(tab):
         assert tuple(tab._recip_view._group_actors) == group_actors
         assert len(tab._recip_view.interactor.scalar_bars.keys()) == scalar_bar_count
         assert tab._recip_view.camera_position == camera
+
+
+# ── Auto-detect frame range from omega metadata ─────────────────────────────
+
+def test_omega_field_combo_ranks_omega_named_dataset_first(tab):
+    panel = tab._active_panel()
+    path = _write_h5_stack_with_omega([0.0, 1.0, 2.0])
+    panel.loader.set_path(path, load=True)
+    assert panel._ome_field_combo.count() >= 1
+    assert panel._ome_field_combo.itemText(0) == "entry/instrument/sample_stage/omega"
+
+
+def test_ome_auto_checkbox_toggles_auto_box_visibility(tab):
+    panel = tab._active_panel()
+    assert panel._ome_auto_box.isHidden()
+    panel._ome_auto_chk.setChecked(True)
+    assert not panel._ome_auto_box.isHidden()
+    panel._ome_auto_chk.setChecked(False)
+    assert panel._ome_auto_box.isHidden()
+
+
+def test_detect_omega_frame_range_matches_worked_example(tab):
+    """Regression for the exact worked example this feature was built
+    against: a ramp-up/ramp-down scan where independently nearest-matching
+    the end omega disagrees with the step-derived frame by one (see
+    .context/DECISIONS.md) -- 'first/last frame whose omega is in range' is
+    the rule that gets frame 38/628 right."""
+    panel = tab._active_panel()
+    # 37 ramp-up frames outside the requested window, then a clean -30.0..29.0
+    # sweep at exactly 0.1 deg/frame (591 frames), then 20 ramp-down frames
+    # outside the window again -- mirrors a real scan's shape without
+    # depending on a real beamline file.
+    ramp = [-30.0 + 0.1 * i for i in range(591)]
+    omega = [-40.0] * 37 + ramp + [40.0] * 20
+    path = _write_h5_stack_with_omega(omega)
+    panel.loader.set_path(path, load=True)
+    panel._ome_auto_chk.setChecked(True)
+    panel._ome_field_combo.setCurrentIndex(0)
+    panel._ome_target_start.setValue(-30.0)
+    panel._ome_target_end.setValue(29.0)
+    panel._ome_step.setValue(0.1)   # a real user fills this in too -- see the
+    # dedicated zero-step tests below for what happens when they don't.
+    panel._detect_omega_frame_range()
+    assert panel._ome_first_idx.value() == 37
+    assert panel._ome_last_idx.value() == 627
+    assert panel._ome_first_deg.value() == pytest.approx(omega[37], abs=1e-6)
+
+
+def test_detect_omega_frame_range_shows_error_when_nothing_matches(tab, monkeypatch):
+    from PyQt5 import QtWidgets
+    panel = tab._active_panel()
+    path = _write_h5_stack_with_omega([0.0, 1.0, 2.0, 3.0])
+    panel.loader.set_path(path, load=True)
+    panel._ome_auto_chk.setChecked(True)
+    panel._ome_field_combo.setCurrentIndex(0)
+    panel._ome_target_start.setValue(100.0)
+    panel._ome_target_end.setValue(200.0)
+
+    errored = {}
+
+    def fake_critical(parent, title, text):
+        errored["title"] = title
+        return QtWidgets.QMessageBox.Ok
+
+    monkeypatch.setattr(QtWidgets.QMessageBox, "critical", staticmethod(fake_critical))
+    panel._detect_omega_frame_range()
+    assert errored.get("title") == "Detect failed"
+
+
+def test_detect_omega_frame_range_warns_when_step_still_zero(tab, monkeypatch):
+    """Regression: Detect only fills first/last frame idx -- a user who
+    forgets the separate 'omega step' field (exactly what happened across
+    two of three panels in a real project, see .context/DECISIONS.md) must
+    be told at Detect time, not left to discover a silently-collapsed omega
+    window only after Ingest."""
+    from PyQt5 import QtWidgets
+    panel = tab._active_panel()
+    ramp = [-30.0 + 0.1 * i for i in range(591)]
+    path = _write_h5_stack_with_omega(ramp)
+    panel.loader.set_path(path, load=True)
+    panel._ome_auto_chk.setChecked(True)
+    panel._ome_field_combo.setCurrentIndex(0)
+    panel._ome_target_start.setValue(-30.0)
+    panel._ome_target_end.setValue(29.0)
+    assert panel._ome_step.value() == 0.0   # never set -- the forgotten-step case
+
+    informed = {}
+
+    def fake_information(parent, title, text):
+        informed["title"] = title
+        return QtWidgets.QMessageBox.Ok
+
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information", staticmethod(fake_information))
+    panel._detect_omega_frame_range()
+    assert informed.get("title") == "Solve Cell"
+
+
+def test_detect_omega_frame_range_no_step_warning_once_step_is_set(tab, monkeypatch):
+    from PyQt5 import QtWidgets
+    panel = tab._active_panel()
+    ramp = [-30.0 + 0.1 * i for i in range(591)]
+    path = _write_h5_stack_with_omega(ramp)
+    panel.loader.set_path(path, load=True)
+    panel._ome_auto_chk.setChecked(True)
+    panel._ome_field_combo.setCurrentIndex(0)
+    panel._ome_target_start.setValue(-30.0)
+    panel._ome_target_end.setValue(29.0)
+    panel._ome_step.setValue(0.1)
+
+    informed = {}
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox, "information",
+        staticmethod(lambda *a: informed.setdefault("hit", True)))
+    panel._detect_omega_frame_range()
+    assert "hit" not in informed
+
+
+def test_run_ingest_warns_and_can_be_cancelled_when_omega_step_is_zero(tab, monkeypatch):
+    from PyQt5 import QtWidgets
+    from midas_gui import tab_solve_cell
+    panel = tab._active_panel()
+    _make_panel_ready(panel, monkeypatch)
+    panel._ome_first_idx.setValue(38)
+    panel._ome_last_idx.setValue(628)
+    panel._ome_step.setValue(0.0)
+
+    warned = {}
+
+    def fake_warning(parent, title, text, *buttons_and_default):
+        warned["title"] = title
+        return QtWidgets.QMessageBox.No
+
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", staticmethod(fake_warning))
+    _CapturingWorker.instances.clear()
+    monkeypatch.setattr(tab_solve_cell, "SolveCellWorker", _CapturingWorker)
+    tab._run_ingest()
+    assert warned.get("title") == "Omega step is 0°"
+    assert _CapturingWorker.instances == []   # cancelled -- nothing launched
+
+
+def test_run_ingest_proceeds_past_omega_step_warning_when_confirmed(tab, monkeypatch):
+    from PyQt5 import QtWidgets
+    from midas_gui import tab_solve_cell
+    panel = tab._active_panel()
+    _make_panel_ready(panel, monkeypatch)
+    panel._ome_first_idx.setValue(38)
+    panel._ome_last_idx.setValue(628)
+    panel._ome_step.setValue(0.0)
+
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox, "warning",
+        staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Yes))
+    _CapturingWorker.instances.clear()
+    monkeypatch.setattr(tab_solve_cell, "SolveCellWorker", _CapturingWorker)
+    tab._run_ingest()
+    assert len(_CapturingWorker.instances) == 1
+
+
+def test_run_ingest_no_omega_step_warning_when_step_is_set(tab, monkeypatch):
+    from PyQt5 import QtWidgets
+    from midas_gui import tab_solve_cell
+    panel = tab._active_panel()
+    _make_panel_ready(panel, monkeypatch)
+    panel._ome_first_idx.setValue(38)
+    panel._ome_last_idx.setValue(628)
+    panel._ome_step.setValue(0.1)
+
+    warned = {}
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox, "warning",
+        staticmethod(lambda *a, **k: warned.setdefault("hit", True)))
+    _CapturingWorker.instances.clear()
+    monkeypatch.setattr(tab_solve_cell, "SolveCellWorker", _CapturingWorker)
+    tab._run_ingest()
+    assert "hit" not in warned
+    assert len(_CapturingWorker.instances) == 1
+
+
+def test_get_state_set_state_round_trips_omega_auto_detect_fields(tab, app):
+    panel = tab._active_panel()
+    path = _write_h5_stack_with_omega([0.0, 1.0, 2.0])
+    panel.loader.set_path(path, load=True)
+    panel._ome_auto_chk.setChecked(True)
+    panel._ome_field_combo.setCurrentIndex(0)
+    panel._ome_target_start.setValue(-30.0)
+    panel._ome_target_end.setValue(29.0)
+
+    state = tab.get_state()
+    restored = type(tab)()
+    try:
+        restored.set_state(state)
+        restored_panel = restored._active_panel()
+        assert restored_panel._ome_auto_chk.isChecked()
+        assert not restored_panel._ome_auto_box.isHidden()
+        assert restored_panel._ome_field_combo.currentText() == "entry/instrument/sample_stage/omega"
+        assert restored_panel._ome_target_start.value() == pytest.approx(-30.0)
+        assert restored_panel._ome_target_end.value() == pytest.approx(29.0)
+    finally:
+        # Own PyVista views too -- must be torn down via Qt, not interpreter-exit
+        # GC (see the `tab` fixture above and .context/STATE.md).
+        restored.deleteLater()
+        app.processEvents()
+
+
+def test_detect_omega_frame_range_warns_without_a_loaded_file(tab, monkeypatch):
+    from PyQt5 import QtWidgets
+    panel = tab._active_panel()
+
+    warned = {}
+
+    def fake_warning(parent, title, text):
+        warned["title"] = title
+        return QtWidgets.QMessageBox.Ok
+
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", staticmethod(fake_warning))
+    panel._detect_omega_frame_range()
+    assert warned.get("title") == "Solve Cell"
+
+
+def test_calibration_im_trans_reaches_ingest_geometry(tab, monkeypatch):
+    panel = tab._active_panel()
+    _make_panel_ready(panel, monkeypatch, im_trans=[2])
+    g = panel.geometry_cfg()
+    assert g["im_trans"] == [2] and g["im_trans_in_file"] is True
+
+
+def test_run_ingest_warns_and_can_be_cancelled_when_im_trans_undeclared(tab, monkeypatch):
+    from PyQt5 import QtWidgets
+    from midas_gui import tab_solve_cell
+    panel = tab._active_panel()
+    _make_panel_ready(panel, monkeypatch)
+    # a calibration.json that records no im_trans at all ("file doesn't say")
+    path = _write_calib_json()
+    d = json.loads(Path(path).read_text()); d.pop("im_trans"); Path(path).write_text(json.dumps(d))
+    assert panel._load_calib_from_path(path)
+    assert panel.geometry_cfg()["im_trans_in_file"] is False
+
+    warned = {}
+
+    def fake_warning(parent, title, text, *rest):
+        warned["title"] = title
+        return QtWidgets.QMessageBox.No
+
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", staticmethod(fake_warning))
+    _CapturingWorker.instances.clear()
+    monkeypatch.setattr(tab_solve_cell, "SolveCellWorker", _CapturingWorker)
+    tab._run_ingest()
+    assert warned.get("title") == "Calibration image transform not declared"
+    assert _CapturingWorker.instances == []
+
+
+def test_run_ingest_no_im_trans_warning_when_declared(tab, monkeypatch):
+    from PyQt5 import QtWidgets
+    from midas_gui import tab_solve_cell
+    panel = tab._active_panel()
+    _make_panel_ready(panel, monkeypatch, im_trans=[2])
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox, "warning",
+        staticmethod(lambda *a, **k: (_ for _ in ()).throw(AssertionError("unexpected warning"))))
+    _CapturingWorker.instances.clear()
+    monkeypatch.setattr(tab_solve_cell, "SolveCellWorker", _CapturingWorker)
+    tab._run_ingest()
+    assert len(_CapturingWorker.instances) == 1

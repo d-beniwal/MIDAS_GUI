@@ -3,6 +3,165 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-23 — Solve Cell: multi-panel mis-calibration root-caused to ignored calibration `im_trans` (fixed same day, see 'Implemented')
+
+On `s3idc_oct8_spinel.h5` (omega step already corrected to 0.1) the pooled
+reciprocal map still looked mis-calibrated. The calibration `.instr.json`
+files all carry `im_trans: [2]` (flip Z), so `BC_z`/`ty`/`tz` live in the
+Z-flipped frame (BC_z 385.7/719.1/-14.7 px). `solve_cell/pipeline.py`
+`_stage_ingest` feeds raw (unflipped) blob rows to `pixel_to_qlab`, and the
+panel geometry stored in project metadata has no `im_trans` at all. Check
+(`scratch/spinel_overlay/spots_check.py`): fitting cubic spinel to each
+panel's spot 2theta, raw rows give a = 8.13/7.90/8.26 A with ~0.16 deg median
+residual (mutually inconsistent); `row -> 511-row` gives a = 7.974/7.975/7.976
+with 0.003-0.008 deg. Overlays: `scratch/spinel_overlay/panel{1,2,3}_overlay.png`.
+Fix direction: carry `im_trans` into `geometry_cfg`/ingest and map blob
+row/col through `helpers.im_trans_map_point` before `pixel_to_qlab` (the
+image itself need not be flipped). Calibrations were fine; not a calibration
+problem.
+
+**Implemented (same day).** `pipeline.py`: geometry carries `im_trans` (+
+`im_trans_in_file`) from the calibration file; ingest keeps frames/mask/spots RAW
+and carries the geometry instead -- blob centroids are mapped raw->calibration
+frame (`_map_index_points`, index form `n-1-x`) before `pixel_to_qlab`, and the
+(2theta, eta) maps are mapped calibration->raw (`_calib_map_to_raw`) before they
+drive background subtraction (flipping only spots would have left the polar
+background partition wrong). Always-on guard `check_im_trans()` on every ingest:
+no `im_trans` key, or a calibration file that doesn't declare it -> `ImTransWarning`
+(+ stdout log, `summary["warnings"]`, GUI log lines); transformed raw shape !=
+calibration (nz, ny) -> `ValueError`; pooled panels with differing codes ->
+warning. GUI: loading a calibration shows the transform in the calib note, and
+`_run_ingest` makes the user confirm when a panel's calibration doesn't declare
+it. Deliberately NOT an `on_step` event (checkpoint order is test-locked).
+
+## 2026-10-23 — Solve Cell: diagnosed a real multi-panel ingest bug (omega step left at 0°) exposed by the new auto-detect feature; added guard rails
+
+A real project (`s3idc_oct8_spinel.h5`, panels 1/3/4 for the spinel_orient1_r3
+beamtime) showed a badly distorted pooled reciprocal-space scatter after
+Ingest: panel_01 looked like scattered noise while panel_03/panel_04 looked
+like suspiciously clean arcs. Root cause, found by reading the saved project
+JSON (`gui_workspace/Solve Cell/state`): panels "3"/"4" had `ome_step: 0.0`
+while panel "1" had the correct `ome_step: 0.1` -- all three had used the new
+auto-detect checkbox (this session, same day) to fill `ome_first_idx`/
+`ome_last_idx`/`ome_first_deg` correctly (matching the worked example: frame
+38->628 for panel 1), but Detect never touches `ome_step` (reused as-is from
+the pre-existing, separately-positioned field -- by design, see the earlier
+entry above), and the user only filled it in for panel 1.
+
+`pipeline._stage_ingest`'s `omega_deg_all = ref_deg + arange(n_frames) *
+step` assigns every kept frame the identical `ref_deg` omega when step is
+0.0, across the whole window -- panel_01 (correct step) got each frame's
+real sample orientation and so reconstructed the genuine (to a user,
+"scattered"-looking) 3-D reciprocal lattice; panels 3/4 instead got every
+frame's spots placed as if the sample never rotated, which looks like a
+clean arc/ring because it is effectively one frame's 2-D detector geometry
+reprojected, not real 3-D Bragg peaks across a rotation. Confirmed purely by
+reading the saved config against the pipeline formula -- no need to re-run
+the (expensive, real ~1.3 GB/panel) ingest itself to diagnose it.
+
+Fixed by adding guard rails, not just fixing the one project by hand: (1)
+`PanelCard._detect_omega_frame_range` now pops an informational reminder
+immediately after a successful Detect if `omega_step` is still 0.0 across a
+real (first != last) window -- catches it the moment it's created; (2)
+`SolveCellTab._run_ingest` blocks (Yes/No confirm) before running if any
+*ready* panel has `omega_step_deg == 0.0` **and** a genuinely bounded window
+(`omega_last_frame_idx` below the "last frame idx" spinbox's own 1,000,000
+default/max sentinel, so a panel whose frame/omega mapping was simply never
+touched doesn't false-positive -- this exact false-positive was caught by
+re-running the full UI suite, which hung on real `QMessageBox.warning` calls
+with nothing to dismiss them: `_make_panel_ready`-based tests never touch
+the omega fields, so first-pass of this check fired on every one of them);
+(3) an inline note in the auto-detect box spells out that Detect doesn't
+touch `omega step`. Added 7 new tests covering both warning paths (shown/not
+shown, cancel/confirm) plus the false-positive-on-untouched-panel case. Full
+suite: 96/96 passed, confirmed stable across two consecutive runs.
+
+## 2026-10-23 — Solve Cell: auto-detect first/last frame idx from omega metadata; detection is a value-in-range test, not nearest-match/step-count
+
+Added an "Auto-detect first/last frame idx from omega metadata" checkbox to
+each `PanelCard`'s "Frame ↔ omega mapping" group (`tab_solve_cell.py`), so a
+user no longer has to page through frames by hand to find where their omega
+range starts/ends in the raw HDF5 stack. When checked, it shows an editable
+omega-field combo (auto-populated via the existing `list_h5_1d_datasets`/
+`_OMEGA_HINTS` ranking, same pattern as `tab_batch.py`'s omega-channel
+picker) plus start/end-omega spinboxes and a "Detect frame range" button;
+Detect fills the existing `first frame idx`/`its omega`/`last frame idx`
+fields (the `omega step` field is reused as-is for the pipeline's nominal
+`omega(frame)` model, not duplicated).
+
+New `helpers.detect_omega_frame_range(path, field, start_deg, end_deg)`
+implements detection as a **plain value-in-range test**: first/last 0-based
+array index whose omega value lies between `start_deg` and `end_deg`
+(whichever order), via `np.flatnonzero(mask)[0]`/`[-1]`. Two alternatives
+were considered and rejected after checking against a real file
+(spinel_orient1, Oct8 beamtime): independently nearest-matching `start_deg`
+and `end_deg` each to the closest omega value gets the start frame right but
+can be off by one frame at the end, because ramp-up/ramp-down segments at
+either end of a scan have uneven per-frame omega spacing (confirmed: nearest
+match to the file's real end omega landed one frame later than the
+value-in-range test and than the user's own manually-verified answer). A
+step-count formula (`start_idx + round((end-start)/step)`) also matches the
+worked example but needs the step to be exact; the range test needs no step
+input, and whatever `step` is still entered feeds only the pipeline's
+unrelated nominal-omega-per-frame model, not detection. Validated end-to-end
+against `.../test6_spinel_orient1_25kev_exp0p02_det_-185_10_0_000001.h5`:
+default-detected field `entry/instrument/sample_stage/omega`, start=-30°/
+end=29° → frame 38/628, matching the user's own manually-determined answer
+exactly.
+
+While adding a project-save/restore round-trip test for the new fields, hit
+the documented "second native-crash trap" (STATE.md, interpreter-exit GC
+destroying a VTK render window segfaults) for real: a second
+`SolveCellTab()` built inside a test and never `deleteLater()`'d crashed the
+*next* test's forked process with SIGSEGV when the whole file ran together,
+despite passing every time in isolation — order/fork-state-dependent, not
+caught by running the new test alone. Fixed by adding the same
+`deleteLater()`+`processEvents()` cleanup the `tab` fixture already uses to
+both the new test and the one pre-existing test with the same gap
+(`test_get_state_set_state_round_trips_panels_and_stage_fields`, which had
+been getting away with it by luck of run order). Confirmed stable: two
+consecutive full runs of `test_solve_cell_ui.py`, 91/91 passed both times,
+no crash.
+
+## 2026-10-23 — Solve Cell: keep PyVista only for the reciprocal-space map; Detector view reverted to pyqtgraph; adjustable/intensity-scaled spot size added
+
+After live-looking at the full PyVista port, the Detector view (2-D frame +
+spot overlay) looked worse than the previous pyqtgraph `widgets.ImageViewer`
+version -- the 3-D reciprocal-space scatter was the one view that actually
+benefited from PyVista/VTK (real GPU-backed 3-D, native scalar bar/legend).
+Reverted `tab_solve_cell.py`'s `_build_detector_tab`/`_update_spot_overlay`/
+`_set_detector_image`/`_on_detector_spot_clicked` back to the pre-`pyvista`-
+branch `ImageViewer` + `pg.ScatterPlotItem` implementation (byte-for-byte
+where possible), and deleted `pyvista_views.PyVistaImageView` entirely as
+dead code -- `PyVistaScatter3DView` (and the shared `_PickableInteractor` it
+needs) is the only piece of that module still in use. Detector <-> reciprocal
+spot linking (`_select_spot`/`_show_selected_on_detector`) is unaffected --
+it always went through `spot_id`/`_spot_rows_by_id`, never through either
+view's own internals, so this swap is transparent to it.
+
+Also added user-adjustable reciprocal-space spot size (`PyVistaScatter3DView`
+constants `_DEFAULT_POINT_SIZE`/`SIZE_MODE_EQUAL`/`SIZE_MODE_INTENSITY`,
+bumped the previous hardcoded `point_size=6` up to a default of 14) with two
+modes, picked via a new "Spot size"/"Size mode" row in the Reciprocal space
+map tab: equal size (uniform `point_size`, same `add_points` path as before),
+and size-by-total-intensity, which reads each spot's `"integrated"` field
+(`midas_defect.ingest.find_blobs_3d`'s per-spot summed blob intensity,
+already present on every row `_display_spot_rows` builds -- no pipeline
+change needed) and scales radius by `sqrt(intensity / max_intensity)` across
+every group drawn in that call (not per-group), with a 35% floor so faint
+spots stay visible rather than vanishing. Implemented via
+`vtkPointGaussianMapper` (pyvista's `style="points_gaussian"` +
+`actor.mapper.scale_array = "point_radius"`) since plain `vtkPoints`
+rendering has only one `point_size` per actor, not a per-point one;
+`vtkPointPicker`-based click/hover picking is unaffected since it resolves
+off the underlying point coordinates, independent of which mapper subclass
+renders them (verified both by the existing picking tests still passing and
+by a direct offscreen check of `actor.mapper.scale_array`/`point_radius`).
+The selection-highlight ring's size now tracks the current spot size
+(`max(22, point_size + 8)`) so it stays visibly larger than the spot it
+highlights at any slider setting, instead of the old fixed 22px potentially
+being smaller than a user-enlarged spot.
+
 ## 2026-10-23 — Solve Cell GPU rendering: VisPy tried and abandoned, PyVista adopted (`pyvista` branch)
 
 Asked to try VisPy (the GPU-rendering candidate flagged the same day, below)

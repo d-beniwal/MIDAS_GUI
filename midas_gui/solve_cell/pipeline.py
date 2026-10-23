@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import math
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -68,6 +69,112 @@ RANDOM_SEARCH_TOL_DEFAULT = 0.15
 RANDOM_SEARCH_MIN_ACCEPT_DEFAULT = 20
 RANDOM_SEARCH_N_NULL_DEFAULT = 20
 RANDOM_SEARCH_Z_THRESH_DEFAULT = 5.0
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Calibration image transform (``im_trans`` / MIDAS ``ImTransOpt``)
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# A calibration's BC_y/BC_z/ty/tz live in the frame AFTER its ``im_trans``
+# codes (1=flipY, 2=flipZ, 3=transpose, applied in order) were applied to the
+# raw detector image. Ingest keeps every frame/mask/spot in the RAW frame (the
+# GUI's Detector view shows raw frames), so the geometry has to be carried into
+# the raw frame instead: spot pixel coordinates are mapped INTO the calibration
+# frame before ``pixel_to_qlab``, and the (2theta, eta) maps are mapped back OUT
+# to the raw frame before they drive background subtraction. Ignoring this
+# mirrors every spot about the detector's flipped axis relative to the beam
+# centre -- a different, panel-dependent error on every panel (see DECISIONS
+# 2026-10-23, "ignored calibration im_trans").
+
+class ImTransWarning(UserWarning):
+    """Calibration image-transform (``im_trans``) was not declared/consistent."""
+
+
+def _codes(geom_cfg: dict) -> list:
+    return [int(c) for c in (geom_cfg.get("im_trans") or [])]
+
+
+def _transformed_shape(shape, codes) -> tuple:
+    n_rows, n_cols = int(shape[0]), int(shape[1])
+    for c in codes:
+        if c == 3:
+            n_rows, n_cols = n_cols, n_rows
+    return n_rows, n_cols
+
+
+def _map_index_points(col, row, shape, codes):
+    """Raw ``(col, row)`` pixel-INDEX coordinates (centroids; pixel centres at
+    integers, so a flip is ``n - 1 - x``) -> the calibration frame, vectorized.
+    Mirrors ``helpers.im_trans_map_point`` (kept separate: this module is
+    Qt-free/liftable)."""
+    n_rows, n_cols = int(shape[0]), int(shape[1])
+    col = np.asarray(col, dtype=float)
+    row = np.asarray(row, dtype=float)
+    for c in codes:
+        if c == 1:
+            col = (n_cols - 1) - col
+        elif c == 2:
+            row = (n_rows - 1) - row
+        elif c == 3:
+            col, row = row, col
+            n_rows, n_cols = n_cols, n_rows
+    return col, row
+
+
+def _calib_map_to_raw(img: np.ndarray, codes) -> np.ndarray:
+    """A per-pixel map defined in the calibration frame -> the raw frame
+    (flips and transpose are self-inverse, so undo = same ops in reverse)."""
+    for c in reversed(list(codes)):
+        if c == 1:
+            img = img[:, ::-1]
+        elif c == 2:
+            img = img[::-1, :]
+        elif c == 3:
+            img = img.T
+    return np.ascontiguousarray(img)
+
+
+def check_im_trans(geom_cfg: dict, raw_shape=None) -> list:
+    """Every ingest runs this. Returns human-readable warning strings (empty if
+    the calibration's image transform is declared and consistent) and raises on
+    an outright contradiction.
+
+    * no ``im_trans`` key in the geometry at all -> the transform may have been
+      dropped on the way here (old project, hand-built cfg): identity assumed.
+    * ``im_trans_in_file`` is False -> the calibration file itself does not say
+      (backend-written calibration.json, .poni): identity assumed.
+    * ``raw_shape`` transformed by the codes must equal the calibration's
+      ``(nrpixels_z, nrpixels_y)`` -- otherwise the codes (or the frames) are
+      wrong, and nothing downstream can be trusted -> ``ValueError``.
+    """
+    out = []
+    if "im_trans" not in geom_cfg:
+        out.append("geometry carries no 'im_trans' entry -- the calibration's image "
+                   "transform (ImTransOpt) may have been dropped; assuming none. If the "
+                   "calibration was made on a flipped/transposed image, every spot's "
+                   "position is wrong.")
+    elif geom_cfg.get("im_trans_in_file") is False:
+        out.append("calibration file does not declare 'im_trans'; assuming none. If it "
+                   "was calibrated on a flipped/transposed image, set the transform in the "
+                   "calibration file -- otherwise every spot's position is wrong.")
+    nz, ny = geom_cfg.get("nrpixels_z"), geom_cfg.get("nrpixels_y")
+    if raw_shape is not None and nz and ny:
+        got = _transformed_shape(raw_shape, _codes(geom_cfg))
+        if got != (int(nz), int(ny)):
+            raise ValueError(
+                f"im_trans {_codes(geom_cfg)} maps the raw frame shape {tuple(raw_shape)} to "
+                f"{got}, but the calibration is for {int(nz)}x{int(ny)} (rows x cols) -- "
+                "the calibration's image transform does not match these frames.")
+    return out
+
+
+def _warn_all(msgs):
+    # Not an on_step event: the checkpoint sequence is a contract with the GUI
+    # (locked by a test). Warnings reach the user via the worker's log
+    # (stdout), summary["warnings"], and warnings.warn.
+    for m in msgs:
+        print(f"[solve-cell] WARNING: {m}")
+        warnings.warn(m, ImTransWarning, stacklevel=3)
 
 
 def panel_dir_name(panel_id: int) -> str:
@@ -252,6 +359,7 @@ def _stage_ingest(cfg: dict, on_step=None) -> dict:
             on_step(name, {"preview": dict(preview), "stats": stats})
 
     geom_cfg = cfg["geometry"]
+    im_trans = _codes(geom_cfg)
     frames_loaded = np.asarray(cfg["frames"])
     sentinel = cfg.get("sentinel", SENTINEL)
     n_frames_loaded = frames_loaded.shape[0]
@@ -326,7 +434,13 @@ def _stage_ingest(cfg: dict, on_step=None) -> dict:
         n_frames=len(frames), tx_deg=0.0,
         ty_deg=geom_cfg.get("ty", 0.0), tz_deg=geom_cfg.get("tz", 0.0),
     )
+    # Geometry is in the calibration's (im_trans-transformed) frame; frames,
+    # mask and blobs are raw. Bring the angle maps into the raw frame.
+    ingest_warnings = check_im_trans(geom_cfg, raw_shape=frames.shape[1:])
+    _warn_all(ingest_warnings)
     tth_deg, az_deg = detector_angle_maps(geom)
+    tth_deg = _calib_map_to_raw(tth_deg, im_trans)
+    az_deg = _calib_map_to_raw(az_deg, im_trans)
 
     blob_cfg = cfg.get("blobs", {})
     threshold = blob_cfg.get("threshold", BLOB_THRESHOLD_DEFAULT)
@@ -407,7 +521,9 @@ def _stage_ingest(cfg: dict, on_step=None) -> dict:
             np.round(spot_frame).astype(int), 0, len(kept_loaded_idx) - 1)
         spots["loaded_frame_idx"] = kept_loaded_idx[spot_frame_round]
 
-        qlab = pixel_to_qlab(rows, cols, geom, device="cpu")
+        # raw blob centroid -> calibration frame (see "Calibration image transform")
+        cols_c, rows_c = _map_index_points(cols, rows, frames.shape[1:], im_trans)
+        qlab = pixel_to_qlab(rows_c, cols_c, geom, device="cpu")
         omega_rad = torch.deg2rad(torch.as_tensor(spot_omega_deg, dtype=qlab.dtype))
         qsample = qlab_to_qsample(qlab, omega_rad).detach().cpu().numpy()
         qlab_np = qlab.detach().cpu().numpy()
@@ -432,6 +548,7 @@ def _stage_ingest(cfg: dict, on_step=None) -> dict:
         "n_frames": n_frames_total, "n_live": n_live,
         "n_masked_px": n_masked, "n_masked_px_total": int(mask.size),
         "n_sectors": int(bg_choice.n_sectors), "counts": counts, "n_spots": len(spots),
+        "im_trans": im_trans, "warnings": list(ingest_warnings),
     }
 
     panel_dir = cfg.get("panel_dir")
@@ -517,7 +634,18 @@ def _stage_ingest_pooled(cfg: dict, on_step=None) -> dict:
     spots_df = pd.concat(combined_frames, ignore_index=True)
     spots_df["spot_id"] = np.arange(len(spots_df))
     n_total = len(spots_df)
+    pooled_warnings = []
+    trans_by_panel = {pid: tuple(r["summary"].get("im_trans", ())) for pid, r in per_panel.items()}
+    if len(set(trans_by_panel.values())) > 1:
+        m = ("panels use DIFFERENT calibration im_trans codes "
+             f"({ {pid: list(t) for pid, t in trans_by_panel.items()} }) -- panels of one "
+             "detector normally share the same image transform; check that none was missed.")
+        pooled_warnings.append(m)
+        _warn_all([m])
+    for pid, r in per_panel.items():
+        pooled_warnings += [f"panel {pid}: {w}" for w in r["summary"].get("warnings", [])]
     summary = {
+        "warnings": pooled_warnings,
         "n_panels": len(panels_cfg),
         "panel_ids": list(per_panel.keys()),
         "n_spots_total": n_total,

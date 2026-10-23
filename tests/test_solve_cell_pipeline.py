@@ -20,6 +20,10 @@ midas_hkls = pytest.importorskip("midas_hkls")
 
 from midas_gui.solve_cell import pipeline as P
 
+# Legacy synthetic geometries below predate the im_trans guard and omit the key;
+# the guard itself is exercised (with pytest.warns) in the im_trans section.
+pytestmark = pytest.mark.filterwarnings("ignore::midas_gui.solve_cell.pipeline.ImTransWarning")
+
 REF_ROOT = Path("/Users/dbeniwal/ANL-research/S3ID_data/2026-2/analysis/spinel_DAC_solve_cell")
 PANEL1_DIR = REF_ROOT / "panel_01_-195_10_-40" / "data"
 PANEL2_DIR = REF_ROOT / "panel_02_-70_10_-40" / "data"
@@ -818,3 +822,113 @@ def test_diamond_filter_preserves_ingest_identity_after_candidate_reindex():
     assert result['candidate_df'].index.tolist() == [0, 1]
     assert result['candidate_df']['spot_id'].tolist() == [7, 91]
     assert result['flagged_df']['spot_id'].tolist() == [7, 42, 91]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Calibration im_trans (ImTransOpt) -- carried into ingest + always checked
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _imtrans_frames(row, col, shape=(64, 64)):
+    rng = np.random.default_rng(3)
+    frames = rng.poisson(2.0, size=(20,) + tuple(shape)).astype(np.uint32)
+    frames[8:12, row - 2:row + 2, col - 2:col + 2] += 500
+    return frames
+
+
+def _imtrans_ingest(frames, **geo_over):
+    nz, ny = frames.shape[1:]
+    geometry = {
+        "Lsd": 150000.0, "BC_y": 20.0, "BC_z": 10.0, "ty": 0.0, "tz": 0.0,
+        "wavelength_A": 0.5, "px_um": 75.0, "nrpixels_y": ny, "nrpixels_z": nz,
+        "omega_ref_frame_idx": 0, "omega_ref_deg": -10.0,
+        "omega_last_frame_idx": 19, "omega_step_deg": 1.0,
+    }
+    geometry.update(geo_over)
+    return P._stage_ingest({
+        "frames": np.ascontiguousarray(frames), "geometry": geometry,
+        "mask": {"low_count_threshold": 0.0, "grow": 1},
+        "blobs": {"threshold": 100.0, "min_vol": 4}, "panel_dir": None,
+    })
+
+
+_QCOLS = ("qlab_x", "qlab_y", "qlab_z", "two_theta_deg", "qsample_x", "qsample_y")
+
+
+def _same_q(a, b):
+    assert len(a) == len(b) == 1
+    for c in _QCOLS:
+        assert a[c].iloc[0] == pytest.approx(b[c].iloc[0], abs=1e-6), c
+
+
+def test_ingest_applies_calibration_flipz_to_spot_positions():
+    """Raw frames under im_trans=[2] must give the same q as those frames
+    physically flipped and no transform -- i.e. geometry is in the flipped frame."""
+    f = _imtrans_frames(50, 40)
+    a = _imtrans_ingest(f, im_trans=[2], im_trans_in_file=True)["spots_df"]
+    b = _imtrans_ingest(f[:, ::-1, :], im_trans=[], im_trans_in_file=True)["spots_df"]
+    _same_q(a, b)
+    # ignoring it (the old behaviour) gives a materially different 2theta
+    c = _imtrans_ingest(f, im_trans=[], im_trans_in_file=True)["spots_df"]
+    assert abs(a["two_theta_deg"].iloc[0] - c["two_theta_deg"].iloc[0]) > 0.05
+
+
+def test_ingest_applies_transpose_and_flipy():
+    f = _imtrans_frames(50, 40, shape=(64, 96))     # calibration frame is 96x64
+    a = _imtrans_ingest(f, im_trans=[3], im_trans_in_file=True,
+                        nrpixels_z=96, nrpixels_y=64)["spots_df"]
+    b = _imtrans_ingest(f.transpose(0, 2, 1), im_trans=[], im_trans_in_file=True)["spots_df"]
+    _same_q(a, b)
+    f = _imtrans_frames(30, 50)
+    a = _imtrans_ingest(f, im_trans=[1], im_trans_in_file=True)["spots_df"]
+    b = _imtrans_ingest(f[:, :, ::-1], im_trans=[], im_trans_in_file=True)["spots_df"]
+    _same_q(a, b)
+    # composed codes apply in order: flipZ then transpose
+    f = _imtrans_frames(50, 40, shape=(64, 96))
+    a = _imtrans_ingest(f, im_trans=[2, 3], im_trans_in_file=True,
+                        nrpixels_z=96, nrpixels_y=64)["spots_df"]
+    b = _imtrans_ingest(f[:, ::-1, :].transpose(0, 2, 1), im_trans=[], im_trans_in_file=True)["spots_df"]
+    _same_q(a, b)
+
+
+def test_ingest_warns_when_im_trans_missing_from_geometry():
+    with pytest.warns(P.ImTransWarning, match="no 'im_trans' entry"):
+        out = _imtrans_ingest(_imtrans_frames(30, 30))
+    assert any("im_trans" in w for w in out["summary"]["warnings"])
+
+
+def test_ingest_warns_when_calibration_file_does_not_declare_im_trans():
+    with pytest.warns(P.ImTransWarning, match="does not declare"):
+        out = _imtrans_ingest(_imtrans_frames(30, 30), im_trans=[], im_trans_in_file=False)
+    assert out["summary"]["warnings"]
+
+
+def test_ingest_declared_im_trans_raises_no_warning():
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", P.ImTransWarning)
+        out = _imtrans_ingest(_imtrans_frames(30, 30), im_trans=[2], im_trans_in_file=True)
+    assert out["summary"]["warnings"] == [] and out["summary"]["im_trans"] == [2]
+
+
+def test_ingest_rejects_im_trans_inconsistent_with_frame_shape():
+    # transpose of 64x96 frames is 96x64, but the calibration says 64x96
+    with pytest.raises(ValueError, match="does not match these frames"):
+        _imtrans_ingest(_imtrans_frames(30, 30, shape=(64, 96)), im_trans=[3],
+                        im_trans_in_file=True, nrpixels_y=96, nrpixels_z=64)
+
+
+def test_pooled_ingest_warns_when_panels_disagree_on_im_trans():
+    def pcfg(pid, codes):
+        rng = np.random.default_rng(pid)
+        frames = rng.poisson(2.0, size=(20, 64, 64)).astype(np.uint32)
+        frames[8:12, 28:32, 28:32] += 500
+        return {"panel_id": pid, "frames": frames, "geometry": {
+            "Lsd": 150000.0, "BC_y": 20.0, "BC_z": 10.0, "ty": 0.0, "tz": 0.0,
+            "wavelength_A": 0.5, "px_um": 75.0, "nrpixels_y": 64, "nrpixels_z": 64,
+            "omega_ref_frame_idx": 0, "omega_ref_deg": -10.0, "omega_last_frame_idx": 19,
+            "omega_step_deg": 1.0, "im_trans": codes, "im_trans_in_file": True},
+            "mask": {"low_count_threshold": 0.0, "grow": 1},
+            "blobs": {"threshold": 100.0, "min_vol": 4}, "panel_dir": None}
+    with pytest.warns(P.ImTransWarning, match="DIFFERENT"):
+        out = P._stage_ingest_pooled({"panels": [pcfg(1, [2]), pcfg(2, [])]})
+    assert any("DIFFERENT" in w for w in out["summary"]["warnings"])

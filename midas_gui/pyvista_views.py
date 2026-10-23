@@ -1,16 +1,18 @@
-"""PyVista/VTK rendering widgets for Solve Cell's detector and reciprocal-
-space views (see .context/DECISIONS.md 2026-10-23) -- a GPU-backed
-replacement for the pyqtgraph ``ImageViewer`` + matplotlib ``Axes3D``
-combination used there previously. Scoped to this tab only: the shared
-``widgets.ImageViewer`` used by the other 10 tabs is unchanged.
+"""PyVista/VTK rendering widget for Solve Cell's reciprocal-space view (see
+.context/DECISIONS.md 2026-10-23) -- a GPU-backed replacement for the
+matplotlib ``Axes3D`` version used there previously. The Detector view was
+also ported to PyVista for a time, then reverted back to the shared
+pyqtgraph-based ``widgets.ImageViewer`` (see DECISIONS) once it proved the
+native version looked worse in practice; this module now only covers the
+reciprocal-space scatter.
 
 An earlier attempt used VisPy instead; its Qt-embedded canvas segfaults
 under this project's ``QT_QPA_PLATFORM=offscreen`` test convention (see the
 deleted ``vispy`` branch). ``pyvistaqt.QtInteractor`` does not have that
-problem: every scene-building/picking/camera operation these widgets need
+problem: every scene-building/picking/camera operation this widget needs
 works under ``offscreen`` with no crash (see tests/test_pyvista_spike.py) --
 only pulling an actual rendered pixel buffer off it raises a catchable
-``RenderWindowUnavailable``, which these widgets' own tests simply never do
+``RenderWindowUnavailable``, which this widget's own tests simply never do
 (they assert on stored group/actor state, the same way the matplotlib
 version's tests asserted on artist state).
 """
@@ -24,12 +26,19 @@ import vtk
 from PyQt5 import QtCore, QtWidgets
 from pyvistaqt import QtInteractor
 
-from midas_gui.helpers import _apply_im_trans
-
 _ORIGIN_MARKER_COLOR = "#ff3b3b"
 _SELECTION_COLOR = "#ff00cc"
 _FITTED_COLOR = "#e64980"
 _DEFAULT_CMAP = "viridis"
+
+SIZE_MODE_EQUAL = "equal"
+SIZE_MODE_INTENSITY = "intensity"
+_DEFAULT_POINT_SIZE = 14.0
+# A spot at the brightest visible intensity renders at the full requested
+# size; the faintest still renders at this fraction of it rather than
+# shrinking to invisible -- "size relative to intensity" should make bright
+# spots stand out, not make faint (but still real) ones disappear.
+_MIN_INTENSITY_RADIUS_FRACTION = 0.35
 
 
 class _PickableInteractor(QtInteractor):
@@ -100,107 +109,6 @@ def _point_cloud(xyz, spot_ids=None) -> pv.PolyData:
     return cloud
 
 
-class PyVistaImageView(QtWidgets.QWidget):
-    """2-D detector frame + ingest-spot overlay + selection highlight.
-
-    Narrower than the shared ``widgets.ImageViewer``: Solve Cell's Detector
-    tab only ever calls ``set_raw_frame``/overlay/selection, never the mask-
-    overlay/lab-rotation/radial-readout features ``ImageViewer`` also
-    carries for the other 10 tabs that use it.
-    """
-
-    def __init__(self, parent=None, title: str = ""):
-        super().__init__(parent)
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
-        if title:
-            layout.addWidget(QtWidgets.QLabel(f"<b>{title}</b>"))
-        self.interactor = _PickableInteractor(self)
-        self.interactor.set_background("black")
-        layout.addWidget(self.interactor, stretch=1)
-
-        self._image_actor = None
-        self._image_shape: Optional[tuple] = None
-        self._overlay_actor = None
-        self._selected_actor = None
-        self.spot_overlay = {"x": np.empty(0), "y": np.empty(0), "ids": np.empty(0)}
-        self.selected_xy: Optional[tuple] = None
-        self.interactor.view_xy()
-        self.interactor.camera.parallel_projection = True
-
-    # ── image ───────────────────────────────────────────────────────
-    def set_raw_frame(self, raw_frame: np.ndarray, im_trans, *,
-                       autorange: bool = True, reset_levels: bool = True) -> np.ndarray:
-        """Same contract as ``widgets.ImageViewer.set_raw_frame``: apply the
-        flip/transpose ``im_trans`` codes, display the result, and return
-        the transformed array so a caller can keep it as "the currently
-        displayed frame"."""
-        frame = _apply_im_trans(raw_frame, im_trans) if im_trans else np.ascontiguousarray(raw_frame)
-        self.set_image(frame, autorange=autorange, reset_levels=reset_levels)
-        return frame
-
-    def set_image(self, data: Optional[np.ndarray], autorange: bool = True, reset_levels: bool = True):
-        if data is None:
-            return
-        data = np.asarray(data, dtype=np.float32)
-        nrows, ncols = data.shape
-        shape_changed = (nrows, ncols) != self._image_shape
-        if self._image_actor is not None and not shape_changed:
-            # Same grid: mutate the existing cell array in place rather than
-            # rebuilding the mesh/actor -- same "don't rebuild the scene"
-            # principle as the selection-marker fix already landed on main.
-            mesh = self._image_actor.mapper.dataset
-            mesh.cell_data["intensity"] = data.ravel(order="C")
-        else:
-            if self._image_actor is not None:
-                self.interactor.remove_actor(self._image_actor)
-            image = pv.ImageData(dimensions=(ncols + 1, nrows + 1, 1))
-            image.cell_data["intensity"] = data.ravel(order="C")
-            # Cell C-order + view_xy(): array row 0 renders at the BOTTOM of
-            # the screen, col 0 at the LEFT -- the MIDAS bottom-left pixel
-            # convention widgets.ImageViewer enforces today via a single
-            # vb.invertY(False) call, verified empirically for this new,
-            # separate viewer (see .context/DECISIONS.md 2026-10-23).
-            self._image_actor = self.interactor.add_mesh(
-                image, scalars="intensity", cmap="gray", show_scalar_bar=False,
-                name="solve_cell_detector_image", reset_camera=False)
-            self._image_shape = (nrows, ncols)
-        if reset_levels:
-            self._image_actor.mapper.scalar_range = (float(data.min()), float(data.max()))
-        if autorange or shape_changed:
-            self.interactor.reset_camera()
-
-    # ── spot overlay / selection ───────────────────────────────────
-    def set_spot_overlay(self, x, y, ids):
-        x = np.asarray(x, dtype=np.float64)
-        y = np.asarray(y, dtype=np.float64)
-        ids = np.asarray(ids)
-        self.spot_overlay = {"x": x, "y": y, "ids": ids}
-        if self._overlay_actor is not None:
-            self.interactor.remove_actor(self._overlay_actor)
-            self._overlay_actor = None
-        if len(x):
-            z = np.zeros_like(x)
-            cloud = _point_cloud((x, y, z), spot_ids=ids)
-            self._overlay_actor = self.interactor.add_points(
-                cloud, color="#ffd400", point_size=12, render_points_as_spheres=False, name="solve_cell_detector_spots")
-
-    def set_selected_point(self, xy: Optional[tuple]):
-        """Swap only the selection-highlight actor -- never rebuilds the
-        image or the spot overlay."""
-        self.selected_xy = xy
-        if self._selected_actor is not None:
-            self.interactor.remove_actor(self._selected_actor)
-            self._selected_actor = None
-        if xy is not None:
-            x, y = xy
-            cloud = _point_cloud(([x], [y], [0.0]))
-            self._selected_actor = self.interactor.add_points(
-                cloud, color=_SELECTION_COLOR, point_size=20,
-                render_points_as_spheres=False, name="solve_cell_detector_selected")
-
-
 class PyVistaScatter3DView(QtWidgets.QWidget):
     """3-D qx/qy/qz reciprocal-space scatter: one point-cloud actor per
     color group, a dedicated selection actor, an optional fitted-position
@@ -231,6 +139,8 @@ class PyVistaScatter3DView(QtWidgets.QWidget):
         self._selected_actor = None
         self._fitted_actors: list = []
         self._has_data = False
+        self._point_size = _DEFAULT_POINT_SIZE
+        self._size_mode = SIZE_MODE_EQUAL
         self._origin_actor = self.interactor.add_points(
             _point_cloud(([0.0], [0.0], [0.0])), color=_ORIGIN_MARKER_COLOR,
             point_size=18, render_points_as_spheres=False,
@@ -246,23 +156,53 @@ class PyVistaScatter3DView(QtWidgets.QWidget):
         self.interactor.camera_position = value
 
     # ── groups ──────────────────────────────────────────────────────
-    def set_groups(self, groups: list):
+    def set_groups(self, groups: list, *, point_size: Optional[float] = None,
+                   size_mode: Optional[str] = None):
         """``groups`` is a list of ``(xyz, color, label, rows)`` -- ``xyz``
         an ``(x, y, z)`` tuple of 1-D arrays, ``color`` either a single hex
         string (uniform) or a per-point array of RGBA floats in 0..1
         (residual-coloring mode), ``rows`` the spot records used for
         picking (must each carry a stable ``spot_id``).
 
+        ``point_size``/``size_mode`` (one of ``SIZE_MODE_EQUAL``/
+        ``SIZE_MODE_INTENSITY``), if given, replace the widget's current
+        settings (sticky across calls that omit them, e.g. a camera-only
+        refresh). In ``SIZE_MODE_INTENSITY``, each row's ``"integrated"``
+        field (``midas_defect.ingest.find_blobs_3d``'s per-spot summed
+        intensity) scales that point's rendered size relative to the
+        brightest spot across every group in this call -- not per group --
+        so sizes stay comparable, e.g., between diamond/gasket and indexed
+        populations. Rendered via ``vtkPointGaussianMapper`` (pyvista's
+        ``style="points_gaussian"``) with a per-point ``"point_radius"``
+        scale array, since plain ``vtkPoints`` rendering has only one
+        point_size per actor; VTK's own point picker still resolves correctly
+        off the underlying point coordinates regardless of mapper style.
+
         Camera is preserved across calls once data has been shown once;
         the very first non-empty call fits the camera to the data, exactly
         mirroring ``_recip_has_data`` in the matplotlib version.
         """
+        if point_size is not None:
+            self._point_size = float(point_size)
+        if size_mode is not None:
+            if size_mode not in (SIZE_MODE_EQUAL, SIZE_MODE_INTENSITY):
+                raise ValueError(f"unknown spot size mode: {size_mode!r}")
+            self._size_mode = size_mode
+
         camera = self.interactor.camera_position
         for actor in self._group_actors:
             self.interactor.remove_actor(actor)
         self._group_actors = []
         self.clear_scalar_bar()
         self.groups = list(groups)
+
+        max_intensity = 0.0
+        if self._size_mode == SIZE_MODE_INTENSITY:
+            for _xyz, _color, _label, rows in self.groups:
+                for r in (rows or []):
+                    v = r.get("integrated")
+                    if v is not None and np.isfinite(v):
+                        max_intensity = max(max_intensity, float(v))
 
         legend_entries = []
         any_points = False
@@ -275,15 +215,25 @@ class PyVistaScatter3DView(QtWidgets.QWidget):
             cloud = _point_cloud(xyz, spot_ids=ids)
             color_arr = np.asarray(color) if not isinstance(color, str) else None
             if color_arr is not None and color_arr.ndim == 2:
-                actor = self.interactor.add_points(
-                    cloud, scalars=color_arr[:, :3], rgb=True, point_size=6,
-                    render_points_as_spheres=True, name=f"solve_cell_recip_group_{i}")
+                color_kwargs = dict(scalars=color_arr[:, :3], rgb=True)
                 legend_color = "white"
             else:
-                actor = self.interactor.add_points(
-                    cloud, color=color, point_size=6, render_points_as_spheres=True,
-                    name=f"solve_cell_recip_group_{i}")
+                color_kwargs = dict(color=color)
                 legend_color = color
+            if self._size_mode == SIZE_MODE_INTENSITY and rows and max_intensity > 0:
+                intensity = np.array([float(r.get("integrated") or 0.0) for r in rows])
+                norm = np.clip(intensity / max_intensity, 0.0, 1.0)
+                factor = _MIN_INTENSITY_RADIUS_FRACTION + (1.0 - _MIN_INTENSITY_RADIUS_FRACTION) * np.sqrt(norm)
+                cloud["point_radius"] = self._point_size * factor
+                actor = self.interactor.add_points(
+                    cloud, style="points_gaussian", point_size=self._point_size,
+                    render_points_as_spheres=True, name=f"solve_cell_recip_group_{i}",
+                    **color_kwargs)
+                actor.mapper.scale_array = "point_radius"
+            else:
+                actor = self.interactor.add_points(
+                    cloud, point_size=self._point_size, render_points_as_spheres=True,
+                    name=f"solve_cell_recip_group_{i}", **color_kwargs)
             self._group_actors.append(actor)
             if label:
                 legend_entries.append((label, legend_color))
@@ -327,8 +277,11 @@ class PyVistaScatter3DView(QtWidgets.QWidget):
             self._selected_actor = None
         if row is not None:
             xyz = ([row["qsample_x"]], [row["qsample_y"]], [row["qsample_z"]])
+            # Always noticeably bigger than the spot it rings, however large
+            # the user has turned the base spot size up.
             self._selected_actor = self.interactor.add_points(
-                _point_cloud(xyz), color=_SELECTION_COLOR, point_size=22,
+                _point_cloud(xyz), color=_SELECTION_COLOR,
+                point_size=max(22.0, self._point_size + 8.0),
                 render_points_as_spheres=False,
                 name="solve_cell_recip_selected")
         self.interactor.render()

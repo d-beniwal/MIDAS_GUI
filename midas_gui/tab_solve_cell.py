@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import pyqtgraph as pg
 from PyQt5 import QtCore, QtWidgets
 
 import matplotlib
@@ -38,9 +39,12 @@ from matplotlib.colors import Normalize
 
 from midas_gui.helpers import (
     _fspin, _twocol, _NoScrollSpinBox, widgets_to_dict, apply_dict_to_widgets,
+    is_h5, list_h5_1d_datasets, detect_omega_frame_range,
 )
-from midas_gui.widgets import DataLoaderPanel, LogPanel
-from midas_gui.pyvista_views import PyVistaImageView, PyVistaScatter3DView
+from midas_gui.widgets import DataLoaderPanel, ImageViewer, LogPanel
+from midas_gui.pyvista_views import (
+    PyVistaScatter3DView, SIZE_MODE_EQUAL, SIZE_MODE_INTENSITY,
+)
 from midas_gui.workers import SolveCellWorker
 from midas_gui.dialogs import show_error
 from midas_gui.solve_cell import pipeline as solve_pipeline
@@ -126,8 +130,104 @@ class PanelCard(QtWidgets.QWidget):
             "frames outside [first, last] are excluded from ingest.")
         note.setWordWrap(True); note.setStyleSheet(f"color:{S.MUTED};font-size:11px")
         of.addRow(note)
+
+        self._ome_auto_chk = QtWidgets.QCheckBox("Auto-detect first/last frame idx from omega metadata")
+        self._ome_auto_chk.setToolTip(
+            "Instead of paging through frames by hand to find 'first/last frame "
+            "idx' above, give the omega at the start and end of your scan (plus "
+            "its step, above) and Detect finds the matching frames from the "
+            "file's own per-frame omega metadata.")
+        self._ome_auto_chk.toggled.connect(self._on_ome_auto_toggled)
+        of.addRow(self._ome_auto_chk)
+
+        self._ome_auto_box = QtWidgets.QWidget()
+        af = QtWidgets.QFormLayout(self._ome_auto_box)
+        af.setContentsMargins(0, 0, 0, 0); af.setSpacing(4)
+        self._ome_field_combo = QtWidgets.QComboBox()
+        self._ome_field_combo.setEditable(True)
+        self._ome_field_combo.setToolTip(
+            "HDF5 field holding one omega value per raw frame, e.g. "
+            "entry/instrument/sample_stage/omega. Auto-populated from the "
+            "loaded file (omega-looking names first); edit to pick another.")
+        af.addRow("omega field:", self._ome_field_combo)
+        self._ome_target_start = _fspin(-7200.0, 7200.0, 4, 0.0, "°")
+        self._ome_target_start.setToolTip("Omega at the start of your scan, as run.")
+        self._ome_target_end = _fspin(-7200.0, 7200.0, 4, 0.0, "°")
+        self._ome_target_end.setToolTip("Omega at the end of your scan, as run.")
+        af.addRow(_twocol("start omega:", self._ome_target_start, "end omega:", self._ome_target_end))
+        self._ome_detect_btn = QtWidgets.QPushButton("Detect frame range")
+        self._ome_detect_btn.setToolTip(
+            "Find the loaded frames whose omega field value falls between "
+            "'start omega' and 'end omega', and fill 'first/last frame idx' "
+            "(and 'its omega') above with them.")
+        self._ome_detect_btn.clicked.connect(self._detect_omega_frame_range)
+        af.addRow(self._ome_detect_btn)
+        auto_note = QtWidgets.QLabel(
+            "Detect only fills 'first/last frame idx' and 'its omega' above -- "
+            "'omega step' (same row as 'last frame idx') still needs your "
+            "experiment's actual degrees/frame, per panel.")
+        auto_note.setWordWrap(True); auto_note.setStyleSheet(f"color:{S.MUTED};font-size:11px")
+        af.addRow(auto_note)
+        of.addRow(self._ome_auto_box)
+        self._ome_auto_box.setVisible(False)
+
         lv.addWidget(grp_ome)
         lv.addStretch(1)
+        self.loader.dataChanged.connect(self._refresh_omega_fields)
+
+    def _on_ome_auto_toggled(self, checked: bool):
+        self._ome_auto_box.setVisible(checked)
+        if checked:
+            self._refresh_omega_fields()
+
+    def _refresh_omega_fields(self):
+        """Repopulate the omega-field combo from whatever file is now loaded
+        -- called on every Data change, not just while auto-detect is shown,
+        so the list is already current the moment the checkbox is ticked."""
+        path = self.loader.data_path()
+        keep = self._ome_field_combo.currentText().strip()
+        self._ome_field_combo.blockSignals(True)
+        self._ome_field_combo.clear()
+        if path and is_h5(path) and Path(path).exists():
+            try:
+                for name, _n in list_h5_1d_datasets(path):
+                    self._ome_field_combo.addItem(name)
+            except Exception:
+                pass
+        idx = self._ome_field_combo.findText(keep)
+        if idx >= 0:
+            self._ome_field_combo.setCurrentIndex(idx)
+        elif self._ome_field_combo.count():
+            self._ome_field_combo.setCurrentIndex(0)
+        self._ome_field_combo.blockSignals(False)
+
+    def _detect_omega_frame_range(self):
+        path = self.loader.data_path()
+        if not path or not is_h5(path):
+            QtWidgets.QMessageBox.warning(
+                self, "Solve Cell", "Load an HDF5 data file for this panel first.")
+            return
+        field = self._ome_field_combo.currentText().strip()
+        if not field:
+            QtWidgets.QMessageBox.warning(self, "Solve Cell", "Pick an omega field first.")
+            return
+        try:
+            first_idx, last_idx, first_deg = detect_omega_frame_range(
+                path, field, self._ome_target_start.value(), self._ome_target_end.value())
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Detect failed", str(e)); return
+        self._ome_first_idx.setValue(first_idx)
+        self._ome_first_deg.setValue(first_deg)
+        self._ome_last_idx.setValue(last_idx)
+        if self._ome_step.value() == 0.0 and last_idx > first_idx:
+            QtWidgets.QMessageBox.information(
+                self, "Solve Cell",
+                f"Frame range detected: {first_idx} → {last_idx}.\n\n"
+                "'omega step' is still 0.0° -- Detect only finds the frame "
+                "range, it doesn't fill in the per-frame step. Set 'omega step' "
+                "(next to 'last frame idx' above) to your experiment's actual "
+                "degrees/frame before running Ingest, or every kept frame will "
+                "be assigned the same omega.")
 
     def _load_calib_file(self):
         from midas_gui.constants import DEFAULT_CALIB_FILE
@@ -157,6 +257,10 @@ class PanelCard(QtWidgets.QWidget):
             "ty": float(g.get("ty") or 0.0), "tz": float(g.get("tz") or 0.0),
             "wavelength_A": float(g["wavelength_A"]), "px_um": float(g["pxY"]),
             "nrpixels_y": nry, "nrpixels_z": nrz,
+            # The calibration's BC/tilts live in the frame AFTER these codes;
+            # ingest must carry them (pipeline.check_im_trans).
+            "im_trans": [int(c) for c in g.get("im_trans") or []],
+            "im_trans_in_file": bool(g.get("im_trans_in_file", False)),
         }
         self._calib_path = path
 
@@ -166,6 +270,10 @@ class PanelCard(QtWidgets.QWidget):
                 f"Lsd={g['Lsd']:.1f} µm, ty={g.get('ty') or 0.0:.3f}°, "
                 f"tz={g.get('tz') or 0.0:.3f}°"
                 + (f", {nry}×{nrz} px" if nry and nrz else "") + ".")
+        if self._geometry["im_trans"]:
+            note += f" Image transform (im_trans): {self._geometry['im_trans']} (applied at ingest)."
+        elif not self._geometry["im_trans_in_file"]:
+            note += " ⚠ File does not declare im_trans -- assuming none."
         if tx != 0.0:
             note += f" Note: file's tx={tx:.3f}° is not used by the Phase 1 pipeline (fixed at 0)."
         self._calib_note.setText(note)
@@ -202,6 +310,8 @@ class PanelCard(QtWidgets.QWidget):
             "panel_id": self._panel_id,
             "ome_first_idx": self._ome_first_idx, "ome_first_deg": self._ome_first_deg,
             "ome_last_idx": self._ome_last_idx, "ome_step": self._ome_step,
+            "ome_auto_chk": self._ome_auto_chk, "ome_field_combo": self._ome_field_combo,
+            "ome_target_start": self._ome_target_start, "ome_target_end": self._ome_target_end,
         }
 
     def get_state(self) -> dict:
@@ -214,6 +324,7 @@ class PanelCard(QtWidgets.QWidget):
         if not state:
             return
         apply_dict_to_widgets(self._state_widgets(), state.get("fields", {}))
+        self._on_ome_auto_toggled(self._ome_auto_chk.isChecked())
         self.loader.set_state(state.get("loader") or {})
         calib_path = state.get("calib_path")
         if calib_path and Path(calib_path).exists():
@@ -621,6 +732,29 @@ class SolveCellTab(QtWidgets.QWidget):
         mode_row.addStretch(1)
         tv.addLayout(mode_row)
 
+        size_row = QtWidgets.QHBoxLayout()
+        size_row.setContentsMargins(6, 2, 6, 2)
+        size_row.addWidget(QtWidgets.QLabel("Spot size:"))
+        self._recip_point_size = QtWidgets.QSpinBox()
+        self._recip_point_size.setRange(4, 40)
+        self._recip_point_size.setValue(14)
+        self._recip_point_size.setToolTip("Rendered diameter (px) of each reciprocal-space spot.")
+        self._recip_point_size.valueChanged.connect(lambda _=None: self._refresh_recip_view())
+        size_row.addWidget(self._recip_point_size)
+        size_row.addWidget(QtWidgets.QLabel("Size mode:"))
+        self._recip_size_mode = QtWidgets.QComboBox()
+        self._recip_size_mode.addItems(["Equal size", "By total intensity"])
+        self._recip_size_mode.setToolTip(
+            "Equal size: every spot rendered at the same size above. By "
+            "total intensity: each spot's size scales with its integrated "
+            "blob intensity (midas_defect's summed counts), relative to the "
+            "brightest spot currently visible; faint spots still render at "
+            "a reduced minimum size rather than disappearing.")
+        self._recip_size_mode.currentIndexChanged.connect(lambda _=None: self._refresh_recip_view())
+        size_row.addWidget(self._recip_size_mode)
+        size_row.addStretch(1)
+        tv.addLayout(size_row)
+
         self._recip_predicted = QtWidgets.QCheckBox("Show fitted positions")
         self._recip_predicted.setToolTip(
             "Crosses and connecting lines show UB-fitted positions for assigned "
@@ -653,6 +787,9 @@ class SolveCellTab(QtWidgets.QWidget):
     # kept well clear of the legacy "#ff3030"/"#4da3ff" diamond/indexed colors.
     _DOMAIN_COLORS = ["#4da3ff", "#ffa94d", "#69db7c", "#da77f2",
                       "#ffd43b", "#63e6be", "#ff8787", "#91a7ff"]
+
+    # Index into self._recip_size_mode -> PyVistaScatter3DView size mode.
+    _RECIP_SIZE_MODES = [SIZE_MODE_EQUAL, SIZE_MODE_INTENSITY]
 
     def _update_multidomain_plot(self):
         """Kept for existing callers/tests -- delegates to the unified
@@ -773,7 +910,9 @@ class SolveCellTab(QtWidgets.QWidget):
                 color = [cmap(norm(r["q_residual"])) if np.isfinite(r.get("q_residual", np.nan))
                          else (0.59, 0.59, 0.59, 1) for r in bucket]
             groups.append((xyz, color, label, bucket))
-        self._recip_view.set_groups(groups)
+        self._recip_view.set_groups(
+            groups, point_size=self._recip_point_size.value(),
+            size_mode=self._RECIP_SIZE_MODES[self._recip_size_mode.currentIndex()])
         if mode == 2 and finite:
             self._recip_view.set_scalar_bar(
                 "|q observed − q fitted| (Å⁻¹; 2π/d)", 0, norm.vmax)
@@ -868,9 +1007,9 @@ class SolveCellTab(QtWidgets.QWidget):
         self._refresh_detector_preview()
         self._view_tabs.setCurrentIndex(1)
 
-    def _on_detector_spot_clicked(self, spot_id):
-        if spot_id is not None:
-            self._select_spot(spot_id)
+    def _on_detector_spot_clicked(self, _scatter, points, _event):
+        if points:
+            self._select_spot(points[0].data())
 
     def _build_detector_tab(self):
         """Shows the active panel's actual 2-D detector frame at a chosen
@@ -918,8 +1057,17 @@ class SolveCellTab(QtWidgets.QWidget):
         toolbar.addStretch(1)
         dv.addLayout(toolbar)
 
-        self._det_view = PyVistaImageView(title="")
-        self._det_view.interactor.spotClicked.connect(self._on_detector_spot_clicked)
+        self._det_view = ImageViewer(title="")
+        # Open circles (no fill) marking ingest-identified spot positions --
+        # updated by _update_spot_overlay, never rebuilt (unlike
+        # tab_calibrate.py's _draw_rings, there is only ever one overlay
+        # item here, so setData() in place is simpler than clear/rebuild).
+        self._spot_scatter = pg.ScatterPlotItem(
+            pen=pg.mkPen("#ffd400", width=2), brush=None, size=16, symbol="o")
+        self._spot_scatter.sigClicked.connect(self._on_detector_spot_clicked)
+        self._det_view._iv.addItem(self._spot_scatter)
+        self._det_selected = pg.ScatterPlotItem(pen=pg.mkPen("#ff00cc", width=3), brush=None, size=24)
+        self._det_view._iv.addItem(self._det_selected)
         dv.addWidget(self._det_view, stretch=1)
         dv.addWidget(self._build_detector_scrub_bar())
         self._view_tabs.addTab(tab, "Detector")
@@ -1017,10 +1165,10 @@ class SolveCellTab(QtWidgets.QWidget):
         index); the max-over-rotation projection shows every spot since it
         already collapses the whole rotation into one image; the mask has no
         frame to match against at all."""
-        self._det_view.set_selected_point(None)
+        self._det_selected.setData([])
         df = self._spots_df
         if df is None or len(df) == 0 or "loaded_frame_idx" not in df.columns:
-            self._det_view.set_spot_overlay([], [], [])
+            self._spot_scatter.setData([])
             return
         if "panel_id" in df.columns:
             # Pooled ingest: row/col are per-panel pixel coordinates, so only
@@ -1030,21 +1178,20 @@ class SolveCellTab(QtWidgets.QWidget):
             sel = df
         elif stage in (0, 1, 2):
             if current_loaded_idx is None:
-                self._det_view.set_spot_overlay([], [], [])
+                self._spot_scatter.setData([])
                 return
             sel = df[df["loaded_frame_idx"] == current_loaded_idx]
         else:
-            self._det_view.set_spot_overlay([], [], [])
+            self._spot_scatter.setData([])
             return
         if len(sel) == 0:
-            self._det_view.set_spot_overlay([], [], [])
+            self._spot_scatter.setData([])
         else:
             ids = sel["spot_id"].to_numpy() if "spot_id" in sel else sel.index.to_numpy()
-            self._det_view.set_spot_overlay(sel["col"].to_numpy(), sel["row"].to_numpy(), ids)
+            self._spot_scatter.setData(x=sel["col"].to_numpy(), y=sel["row"].to_numpy(), data=ids)
             selected = sel[np.asarray(ids) == self._selected_spot_id]
             if len(selected):
-                self._det_view.set_selected_point(
-                    (float(selected["col"].iloc[0]), float(selected["row"].iloc[0])))
+                self._det_selected.setData(x=selected["col"].to_numpy(), y=selected["row"].to_numpy())
             if stage != 3:
                 self._det_frame_lbl.setText(f"{self._det_frame_lbl.text()} — {len(sel)} spot(s)")
 
@@ -1257,6 +1404,52 @@ class SolveCellTab(QtWidgets.QWidget):
                 f"Ingest: panel(s) {', '.join(str(p) for p in skipped)} not ready "
                 "(no calibration/data, or a pending field) -- excluded from this run.")
 
+        # omega_step_deg == 0.0 across a multi-frame window means every kept
+        # frame gets the SAME omega (pipeline.py: omega_deg_all = ref_deg +
+        # arange(n) * step) -- silently collapses the whole rotation to one
+        # orientation instead of raising, so catch it here before Ingest runs
+        # rather than leave a user to puzzle over a badly distorted
+        # reciprocal-space result (see .context/DECISIONS.md). Gated on
+        # omega_last_frame_idx < the "last frame idx" spinbox's own default/
+        # max sentinel (1_000_000, "through the end of the stack") so a panel
+        # whose frame/omega mapping was simply never touched -- first idx 0,
+        # last idx still at that sentinel -- doesn't trip this; only a window
+        # the user actually bounded does.
+        zero_step = [pid for pid, card in ready
+                     if card.geometry_cfg().get("omega_step_deg", 0.0) == 0.0
+                     and card.geometry_cfg().get("omega_last_frame_idx", 0) < 1_000_000
+                     and card.geometry_cfg().get("omega_last_frame_idx", 0)
+                         > card.geometry_cfg().get("omega_ref_frame_idx", 0)]
+        if zero_step:
+            resp = QtWidgets.QMessageBox.warning(
+                self, "Omega step is 0°",
+                f"Panel(s) {', '.join(str(p) for p in zero_step)} span more than one "
+                "frame but 'omega step' (Frame ↔ omega mapping) is 0.0° -- every kept "
+                "frame will be assigned the SAME omega, which badly distorts the "
+                "reciprocal-space result (each panel's own window still needs its own "
+                "step filled in, even when using auto-detect for the frame range).\n\n"
+                "Run ingest anyway?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
+            if resp != QtWidgets.QMessageBox.Yes:
+                return
+
+        # The calibration's image transform (ImTransOpt) can't be verified from
+        # the data alone; a calibration that doesn't declare it is the one way
+        # it gets silently dropped, so make the user confirm (pipeline.py also
+        # warns/records this on every ingest regardless).
+        undeclared = [pid for pid, card in ready
+                      if not card.geometry_cfg().get("im_trans_in_file", False)]
+        if undeclared:
+            resp = QtWidgets.QMessageBox.warning(
+                self, "Calibration image transform not declared",
+                f"The calibration file(s) for panel(s) {', '.join(str(p) for p in undeclared)} "
+                "don't declare 'im_trans' (flip/transpose applied to the image when "
+                "calibrating), so none will be applied. If they were calibrated on a "
+                "flipped image, every spot position will be wrong.\n\nRun ingest anyway?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
+            if resp != QtWidgets.QMessageBox.Yes:
+                return
+
         project_dir = self._project_dir()
         self._pooled_dir = project_dir / "pooled" if project_dir is not None else None
 
@@ -1354,6 +1547,8 @@ class SolveCellTab(QtWidgets.QWidget):
         n = len(self._spots_df)
         self._ingest_status.setText(f"{n} spots (n_frames≥2)")
         self._log.append(f"Ingest complete: {n} candidate spots.")
+        for w in result.get("summary", {}).get("warnings", []):
+            self._log.append(f"⚠ {w}")
         self._diamond_btn.setEnabled(n > 0)
         self._refresh_recip_view()
         self._ingest_preview = result.get("preview")
@@ -1381,6 +1576,8 @@ class SolveCellTab(QtWidgets.QWidget):
         self._ingest_status.setText(f"{n} spots across {summary['n_panels']} panels ({breakdown})")
         self._log.append(f"Ingest complete (pooled): {n} candidate spots across "
                          f"{summary['n_panels']} panels ({breakdown}).")
+        for w in summary.get("warnings", []):
+            self._log.append(f"⚠ {w}")
         self._diamond_btn.setEnabled(n > 0)
         self._refresh_recip_view()
         self._ingest_preview_by_panel = {pid: r.get("preview") for pid, r in per_panel.items()}
