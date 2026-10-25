@@ -781,91 +781,294 @@ def test_on_ingest_pooled_done_updates_combined_state(tab):
     assert "pooled" in tab._log.toPlainText().lower()
 
 
-# ── Project logging (FAIR provenance) ────────────────────────────────────
+# ── Project record: single latest analysis in the project file ───────────
 
-def test_log_ingest_to_project_is_a_noop_without_a_project_open(tab):
-    import pandas as pd
-    tab._spots_df = pd.DataFrame({"row": [1.0], "col": [2.0], "loaded_frame_idx": [0]})
-    tab._log_ingest_to_project({"summary": {"n_spots": 1}, "preview": {}})   # must not raise
-    assert "Logged ingest" not in tab._log.toPlainText()
-
-
-def test_log_ingest_to_project_writes_a_solve_cell_attempt(tab, monkeypatch):
-    import h5py
-    import pandas as pd
-    from PyQt5 import QtWidgets
+def _open_project(tab, name="proj.h5"):
     from midas_gui import project
-
-    calib_path = _write_calib_json()
-    monkeypatch.setattr(
-        QtWidgets.QFileDialog, "getOpenFileName",
-        staticmethod(lambda *a, **k: (calib_path, "")))
-    tab._active_panel()._load_calib_file()
-
     proj_dir = Path(tempfile.mkdtemp(prefix="mg_solvecell_project_"))
     _SCRATCH.append(proj_dir)
-    proj_path = str(proj_dir / "proj.h5")
-    project.create_project(proj_path)
+    path = str(proj_dir / name)
+    project.create_project(path)
     ctx = project.ProjectContext()
-    ctx.path = proj_path
+    ctx.path = path
     tab.set_project_context(ctx)
-
-    tab._spots_df = pd.DataFrame({"row": [1.0], "col": [2.0], "loaded_frame_idx": [3]})
-    tab._log_ingest_to_project({"summary": {"n_spots": 1}, "preview": {"mask": None}})
-
-    with h5py.File(proj_path, "r") as f:
-        assert "analysis/solve_cell" in f
-        panel_key = next(iter(f["analysis/solve_cell"].keys()))
-        att = f[f"analysis/solve_cell/{panel_key}/attempt_0001"]
-        assert att.attrs["n_spots"] == 1
-    assert "Logged ingest to project" in tab._log.toPlainText()
+    return path
 
 
-def test_log_pooled_ingest_to_project_writes_one_attempt_per_panel(tab, monkeypatch):
-    import h5py
+def _fake_spots(n=12, panel_id=1):
+    import numpy as np
     import pandas as pd
-    from PyQt5 import QtWidgets
-    from midas_gui import project
-    from midas_gui.solve_cell import pipeline as solve_pipeline
+    rng = np.random.default_rng(0)
+    return pd.DataFrame({
+        "panel_id": panel_id, "row": rng.uniform(0, 100, n), "col": rng.uniform(0, 100, n),
+        "frame": rng.uniform(0, 5, n), "loaded_frame_idx": np.arange(n) % 5,
+        "omega_deg": np.linspace(0, 10, n), "two_theta_deg": np.linspace(3, 9, n),
+        "qsample_x": np.linspace(0.1, 1.0, n), "qsample_y": np.linspace(0.2, 1.1, n),
+        "qsample_z": np.linspace(0.3, 1.2, n), "spot_id": np.arange(n),
+    })
 
-    first = tab._active_panel()
-    calib1 = _write_calib_json(Lsd=111.0)
-    monkeypatch.setattr(
-        QtWidgets.QFileDialog, "getOpenFileName",
-        staticmethod(lambda *a, **k: (calib1, "")))
-    first._load_calib_file()
-    second = tab._add_panel()
-    calib2 = _write_calib_json(Lsd=222.0)
-    monkeypatch.setattr(
-        QtWidgets.QFileDialog, "getOpenFileName",
-        staticmethod(lambda *a, **k: (calib2, "")))
-    second._load_calib_file()
-    first_id, second_id = sorted(tab._panels.keys())
 
-    proj_dir = Path(tempfile.mkdtemp(prefix="mg_solvecell_project_pooled_"))
-    _SCRATCH.append(proj_dir)
-    proj_path = str(proj_dir / "proj.h5")
-    project.create_project(proj_path)
-    ctx = project.ProjectContext()
-    ctx.path = proj_path
-    tab.set_project_context(ctx)
-
-    result = {
-        "per_panel": {
-            first_id: {"summary": {"n_spots": 2}, "preview": {"mask": None},
-                       "spots_df": pd.DataFrame({"row": [1.0], "col": [2.0]})},
-            second_id: {"summary": {"n_spots": 5}, "preview": {"mask": None},
-                       "spots_df": pd.DataFrame({"row": [3.0], "col": [4.0]})},
-        }
+def _fake_ingest_result(spots):
+    import numpy as np
+    mask = np.zeros((6, 6), dtype=bool)
+    mask[0, 0] = True
+    return {
+        "spots_df": spots, "summary": {"n_spots": len(spots), "n_sectors": 8, "warnings": [],
+                                        "counts": {"a": np.int64(3)}},
+        "preview": {"mask": mask, "frame_index": 2, "loaded_frame_index": 4,
+                    "background_subtracted": np.ones((6, 6), dtype=np.float32),
+                    "background_subtracted_max_projection": np.full((6, 6), 2.0, dtype=np.float32)},
     }
-    tab._log_pooled_ingest_to_project(result)
 
-    with h5py.File(proj_path, "r") as f:
-        key1 = solve_pipeline.panel_dir_name(first_id)
-        key2 = solve_pipeline.panel_dir_name(second_id)
-        assert f[f"analysis/solve_cell/{key1}/attempt_0001"].attrs["n_spots"] == 1
-        assert f[f"analysis/solve_cell/{key2}/attempt_0001"].attrs["n_spots"] == 1
-    assert tab._log.toPlainText().count("Logged ingest to project") == 2
+
+def _fake_diamond_result(spots, n_flagged=2):
+    flagged = spots.copy()
+    flagged["delta_to_diamond_deg"] = 1.0
+    flagged["is_diamond"] = [i < n_flagged for i in range(len(flagged))]
+    cand = flagged[~flagged["is_diamond"]].reset_index(drop=True)
+    return {"flagged_df": flagged, "candidate_df": cand,
+            "summary": {"n_spots": len(flagged), "n_diamond_flagged": n_flagged,
+                        "n_kept": len(cand), "z_score": float("nan")}}
+
+
+def _fake_ab_initio_result(n_cand, n_idx=6):
+    import numpy as np
+    from types import SimpleNamespace
+    mask = np.array([True] * n_idx + [False] * (n_cand - n_idx))
+    raw = SimpleNamespace(
+        success=True, cell=(5.43,) * 3 + (90.0,) * 3, cell_sigma=(0.01,) * 6,
+        UB=np.eye(3), UBI=np.eye(3), hkl=np.arange(n_idx * 3).reshape(n_idx, 3),
+        indexed_mask=mask, indexed_fraction=n_idx / n_cand, n_indexed=n_idx,
+        n_reflections=n_cand, candidates=[], diagnostics={"k": np.float64(1.5)}, notes=["ok"])
+    return {"ab_initio_result": {"success": True, "n_indexed": n_idx, "n_reflections": n_cand,
+                                  "indexed_fraction": n_idx / n_cand, "notes": ["ok"]},
+            "ab_initio_raw": raw, "g_2pi": np.zeros((n_cand, 3)), "sigma_g": 0.05}
+
+
+def _run_fake_analysis(tab, monkeypatch):
+    """Drive the tab through ingest -> diamond -> ab-initio -> refine using
+    the same completion handlers a real run ends in."""
+    spots = _fake_spots()
+    _make_panel_ready(tab._active_panel(), monkeypatch)
+    tab._ingest_source_panel_id = tab._active_panel_id()
+    tab._on_ingest_done(_fake_ingest_result(spots))
+    dia = _fake_diamond_result(tab._spots_df)
+    tab._on_diamond_done(dia)
+    ab = _fake_ab_initio_result(len(tab._candidate_df))
+    ab["g_2pi"] = tab._candidate_df[["qsample_x", "qsample_y", "qsample_z"]].to_numpy()
+    tab._on_ab_initio_done(ab)
+    refine = dict(_fake_refine_result(), reflection_fit={"hkl": [[1, 0, 0]], "q_residual": [0.01]})
+    tab._on_refine_done({"refine_result": refine})
+    return spots
+
+
+def test_ingest_without_a_project_open_writes_nothing_and_does_not_raise(tab, monkeypatch):
+    _run_fake_analysis(tab, monkeypatch)
+    assert tab._project_path() is None
+    assert "Solve Cell record updated" not in tab._log.toPlainText()
+
+
+def test_stages_write_a_single_latest_record_into_the_project(tab, monkeypatch):
+    import h5py
+    from midas_gui import project
+    path = _open_project(tab)
+    _run_fake_analysis(tab, monkeypatch)
+
+    with h5py.File(path, "r") as f:
+        root = f["analysis/solve_cell"]
+        assert set(root.keys()) == {"metadata", "ingest", "diamond", "index"}
+        assert root.attrs["last_stage"] == "index"
+        assert "attempt_0001" not in root          # no attempt history
+
+    rec = project.read_solve_cell(path)
+    assert len(rec["ingest"]["spots_df"]) == 12
+    assert len(rec["diamond"]["flagged_df"]) == 12
+    assert len(rec["index"]["domains"]) == 1
+    meta = rec["ingest"]["meta"]
+    (prec,) = meta["panels"].values()
+    # calibration + references needed to repeat the calculation
+    assert prec["calibration"]["geometry"]["Lsd"] == pytest.approx(1000.0)
+    assert prec["calibration"]["file_text"]
+    assert prec["calibration"]["path_hash"]["sha256"]
+    assert prec["geometry_cfg"]["omega_step_deg"] == 0.0
+    assert "loader" in prec["state"]
+    assert rec["ingest"]["panels"]["panel_01"]["mask"][0, 0]
+
+
+def test_rerunning_ingest_replaces_the_record_and_drops_downstream_results(tab, monkeypatch):
+    import h5py
+    from midas_gui import project
+    path = _open_project(tab)
+    _run_fake_analysis(tab, monkeypatch)
+    assert project.read_solve_cell(path)["index"] is not None
+
+    tab._on_ingest_done(_fake_ingest_result(_fake_spots(n=7)))
+
+    rec = project.read_solve_cell(path)
+    assert len(rec["ingest"]["spots_df"]) == 7
+    assert rec["diamond"] is None and rec["index"] is None
+    with h5py.File(path, "r") as f:
+        assert set(f["analysis/solve_cell"].keys()) == {"metadata", "ingest"}
+        assert list(f["analysis"].keys()).count("solve_cell") == 1
+
+
+def test_rerunning_diamond_filter_drops_index_results(tab, monkeypatch):
+    from midas_gui import project
+    path = _open_project(tab)
+    _run_fake_analysis(tab, monkeypatch)
+
+    tab._on_diamond_done(_fake_diamond_result(tab._spots_df, n_flagged=3))
+
+    rec = project.read_solve_cell(path)
+    assert rec["diamond"]["meta"]["summary"]["n_diamond_flagged"] == 3
+    assert rec["index"] is None
+
+
+def test_open_project_restores_the_whole_analysis_into_a_fresh_tab(tab, monkeypatch):
+    import numpy as np
+    from midas_gui import project
+    from midas_gui.tab_solve_cell import SolveCellTab
+    path = _open_project(tab)
+    _run_fake_analysis(tab, monkeypatch)
+    rec = project.read_solve_cell(path)
+
+    fresh = SolveCellTab()
+    try:
+        ctx = project.ProjectContext()
+        ctx.path = path
+        fresh.set_project_context(ctx)
+        fresh.apply_project_solve_cell(rec, restore_config=True)
+
+        assert fresh._spots_df.equals(tab._spots_df)
+        assert fresh._flagged_df.equals(tab._flagged_df)
+        assert fresh._candidate_df.equals(tab._candidate_df)
+        assert fresh._ingest_status.text() == tab._ingest_status.text()
+        assert fresh._diamond_status.text() == tab._diamond_status.text()
+        assert fresh._ab_status.text() == tab._ab_status.text()
+        assert fresh._refine_btn.isEnabled() and fresh._ab_btn.isEnabled()
+        # ab-initio state is rerunnable (Refine only needs these)
+        assert fresh._ab_initio_raw.success
+        assert fresh._ab_initio_raw.indexed_mask.tolist() == tab._ab_initio_raw.indexed_mask.tolist()
+        assert np.array_equal(fresh._ab_initio_raw.hkl, tab._ab_initio_raw.hkl)
+        assert np.allclose(fresh._g_2pi, tab._g_2pi)
+        # domains
+        assert len(fresh._domains) == 1 and fresh._domain_list.count() == 1
+        d, d0 = fresh._domains[0], tab._domains[0]
+        assert d["label"] == d0["label"] and d["method"] == d0["method"]
+        assert d["result"]["cell"] == d0["result"]["cell"]
+        assert d["result"]["reflection_fit"] == d0["result"]["reflection_fit"]
+        assert list(d["claimed_index"]) == list(d0["claimed_index"])
+        assert all(np.allclose(a, b) for a, b in zip(d["xyz"], d0["xyz"]))
+        assert fresh._round1_domain_index == tab._round1_domain_index
+        assert fresh._leftover_status.text() == tab._leftover_status.text()
+        # detector previews + panel/calibration config
+        pid = tab._active_panel_id()
+        assert fresh._ingest_preview_by_panel[pid]["mask"][0, 0]
+        assert fresh._ingest_preview_by_panel[pid]["loaded_frame_index"] == 4
+        assert fresh._panels[pid].has_calibration()
+        # restoring leaves nothing to rewrite
+        assert not fresh._sc_dirty and fresh._sc_record_path == path
+    finally:
+        fresh.deleteLater()
+
+
+def test_refine_after_restore_replaces_domain_one_instead_of_duplicating(tab, monkeypatch):
+    from midas_gui import project
+    from midas_gui.tab_solve_cell import SolveCellTab
+    path = _open_project(tab)
+    _run_fake_analysis(tab, monkeypatch)
+    rec = project.read_solve_cell(path)
+
+    fresh = SolveCellTab()
+    try:
+        fresh.apply_project_solve_cell(rec, restore_config=True)
+        fresh._on_refine_done({"refine_result": _fake_refine_result(5.5)})
+        assert fresh._domain_list.count() == 1
+        assert fresh._domains[0]["result"]["cell"][0] == 5.5
+    finally:
+        fresh.deleteLater()
+
+
+def test_restore_fills_in_calibration_from_the_record_when_the_file_is_gone(tab, monkeypatch):
+    from midas_gui import project
+    from midas_gui.tab_solve_cell import SolveCellTab
+    path = _open_project(tab)
+    _run_fake_analysis(tab, monkeypatch)
+    calib_path = Path(tab._active_panel()._calib_path)
+    rec = project.read_solve_cell(path)
+    calib_path.unlink()          # e.g. project opened on another machine
+
+    fresh = SolveCellTab()
+    try:
+        fresh.apply_project_solve_cell(rec, restore_config=True)
+        card = fresh._panels[tab._active_panel_id()]
+        assert card.has_calibration()
+        assert card.geometry_cfg()["Lsd"] == pytest.approx(1000.0)
+        assert "embedded copy" in card._calib_note.text()
+    finally:
+        fresh.deleteLater()
+
+
+def test_results_computed_before_a_project_exists_are_written_on_flush(tab, monkeypatch):
+    from midas_gui import project
+    _run_fake_analysis(tab, monkeypatch)          # no project open yet
+    path = _open_project(tab)                     # project created/saved later
+    assert not project.has_solve_cell(path)
+
+    tab.flush_project_record()                    # what MainWindow.save_project calls
+
+    rec = project.read_solve_cell(path)
+    assert len(rec["ingest"]["spots_df"]) == 12 and len(rec["index"]["domains"]) == 1
+
+
+def test_flush_rewrites_everything_when_the_project_file_changes(tab, monkeypatch):
+    from midas_gui import project
+    first = _open_project(tab, "a.h5")
+    _run_fake_analysis(tab, monkeypatch)
+    second = _open_project(tab, "b.h5")           # Save As
+    tab.flush_project_record()
+    for path in (first, second):
+        rec = project.read_solve_cell(path)
+        assert rec["index"] is not None and len(rec["ingest"]["spots_df"]) == 12
+
+
+def test_flush_is_a_noop_when_nothing_changed(tab, monkeypatch):
+    path = _open_project(tab)
+    _run_fake_analysis(tab, monkeypatch)
+    tab._log.clear()
+    tab.flush_project_record()
+    assert "Solve Cell record updated" not in tab._log.toPlainText()
+
+
+def test_pooled_ingest_records_every_panel(tab, monkeypatch):
+    import numpy as np
+    from midas_gui import project
+    path = _open_project(tab)
+    first = tab._active_panel()
+    _make_panel_ready(first, monkeypatch, lsd=111.0)
+    second = tab._add_panel()
+    _make_panel_ready(second, monkeypatch, lsd=222.0)
+    first_id, second_id = sorted(tab._panels.keys())
+    spots = _fake_spots(8)
+    spots["panel_id"] = [first_id] * 4 + [second_id] * 4
+    result = {
+        "spots_df": spots,
+        "summary": {"n_panels": 2, "panel_ids": [first_id, second_id], "n_spots_total": 8,
+                    "warnings": []},
+        "per_panel": {
+            first_id: {"summary": {"n_spots": 4}, "preview": {"mask": np.zeros((4, 4), bool)}},
+            second_id: {"summary": {"n_spots": 4}, "preview": {"mask": np.ones((4, 4), bool)}},
+        },
+    }
+    tab._on_ingest_pooled_done(result)
+
+    rec = project.read_solve_cell(path)
+    panels = rec["ingest"]["meta"]["panels"]
+    assert sorted(int(k) for k in panels) == [first_id, second_id]
+    assert panels[str(first_id)]["calibration"]["geometry"]["Lsd"] == pytest.approx(111.0)
+    assert panels[str(second_id)]["calibration"]["geometry"]["Lsd"] == pytest.approx(222.0)
+    assert rec["ingest"]["meta"]["pooled"] is True
+    assert rec["ingest"]["panels"][f"panel_{second_id:02d}"]["mask"].all()
 
 
 # ── multi-domain: "Index remaining spots" (leftover re-indexing) ──────────

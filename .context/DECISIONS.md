@@ -3,6 +3,148 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-25 — Pause new Solve Cell visualizations; refine the tab first
+
+User decision: stop adding views after V01–V05, V08–V13, V15 (partial) and V02, and spend the next
+work on refining the existing Solve Cell tab. Rationale: much of what was built was verified headlessly
+(offscreen Qt/VTK has no pixel buffer or picking), so live-display behaviour, usability and edge cases
+need a pass before more surface area is added. Branch `solve_cell_vis` is uncommitted; queued views and
+known gaps are listed in the 2026-10-24 entries and in `documentation/solve_cell_visualizations.md` §11.
+
+## 2026-10-24 — V02 frame patches + visualization documentation
+
+- **V02** (`solve_cell/frame_patch.py`, overlay "Frame patches"): cell corners at pixel EDGES (`i-0.5`), mapped to q-lab once per
+  panel and rotated per frame; cell value = block MAX of (frame − static median bg) so sparse peaks survive 8×8 pooling; fully
+  masked/sentinel blocks are NaN and REMOVED from the mesh (gap ≠ zero; partly masked blocks stay). Cache `frame_patches`
+  (stride 8, every in-window frame, 4.3 MB) so ω playback needs no raw files. Each panel shows its nearest loaded frame to the
+  slider ω (panels' ω_ref differ ≤0.027°); selecting a spot sets ω to its fractional ω. NOT done: clicking the patch to return to
+  a pixel (mapping exists: `pixel_to_cell`, `cell_pixel_ranges`) — patch actors are non-pickable so they cannot steal spot picks.
+- Measured correction: a covered 0.06 Å⁻¹ voxel holds a median 730 pixel samples over the whole scan (not ~10³ per frame).
+- HDF5 file grows more than the product sizes (3 swaps of replaced groups): 8.4 MB of products → 2.1→14.7 MB file; Save As compacts.
+- **Document**: `documentation/solve_cell_visualizations.md` + `.pdf` (figures in `documentation/figures/solve_cell_viz/`) explain
+  every Solve Cell view and its calculation. Built with pandoc → HTML (`scratch/doc.css`) → headless Chrome; update both when a view
+  changes. Not part of the auto-updated `gui_documentation.md`.
+
+## 2026-10-24 — V13 domain comparison: metric first, then orientation through the matching basis change
+
+`solve_cell/domain_compare.py` + "Compare domains" tab + cached `domain_comparison` / reviewer `domain_review` products.
+
+- **Method**: enumerate integer det=+1 bases (entries in [-2,2], 67,704) with `M^T G2 M ≈ G1` (3% of the
+  largest metric diagonal); misorientation = minimum polar-decomposition rotation over all matching M. The matching
+  M already contain every proper lattice automorphism (24 for the spinel fcc lattice), so no crystal point group is
+  assumed. det=-1 bases are skipped on purpose (−I is always an automorphism, so nothing is lost; improper
+  rotations are never reported). The doc's 24 signed-axis relabelings were NOT used: they only cover cubic-axis settings.
+- **Conclusions are suggestions**: same lattice relabeled (<1°) / compatible distinct orientation / different metric /
+  insufficient evidence (<8 reflections). Thresholds are module constants stored in the product metadata. Metric-only:
+  orientations related by a lattice symmetry the structure lacks are indistinguishable without intensities.
+- **Candidate vs accepted**: the unrefined ab-initio seed is listed as a separate "candidate" lattice. In the spinel
+  project it is the only second entry (one refined domain, 3 leftover spots), and compares at 0.00° — it is the same UB.
+- **Reviewer conclusions** are stored with both UB fingerprints; a re-index that changes a UB makes them (and the
+  cached comparison) stale and they are ignored. Nothing in this view changes `claimed_index` (tested).
+- Cross-fit evidence (`B∈A`, `A∈B`) counts spots of one lattice that index to integers (±0.1) under the other; it is
+  evidence for V14, not a claim. Camera link between the two scenes uses an EndInteraction observer (convenience only).
+- angle uses atan2 form (arccos lost digits near 0).
+
+## 2026-10-24 — Solve Cell visualization work (branch `solve_cell_vis`): cache every derived product in the project
+
+Implements the first increments of `scratch/solve_cell_visualization_research_and_implementation.md`
+(V01, V03–05, V08–V12, V15 partly) with the rule that **each view reads a cached
+product stored in the project**, so loading `s3idc_oct8_spinel.h5` shows them with no re-run.
+
+- **Where/what**: `/analysis/solve_cell/viz/<product>/` (JSON `metadata` + `tables/` + `arrays/`);
+  `project.write_solve_cell_viz` / `read_solve_cell_viz`; `read_solve_cell()["viz"]`. Products:
+  `frame_manifest`, `domain_NN_predictions` (predictions + residuals), `reciprocal_volume`
+  (sum/count/max), `spot_shoeboxes` (raw + bg-subtracted ROI cubes). A **new ingest drops them**
+  (whole-record swap); a **re-index does not** — each domain product records `ub_fingerprint` and the
+  tab recomputes when it no longer matches the domain's UB.
+- **Geometry adapter** (`solve_cell/geometry_adapter.py`) rebuilds panel geometry from the stored ingest
+  metadata only. Verified: reproduces stored spot q exactly, pixel↔q round-trips <1e-3 px through every
+  `im_trans` combo, and forward prediction (both Ewald roots, lifted into the scanned window) re-finds all 74
+  assigned reflections of Domain 1 (RMS Δrow/Δcol 0.43/0.65 px, Δω 0.09°). Residual sign = observed − predicted.
+- **Metadata gotcha**: `ingest/metadata.panels` is keyed by the SOURCE panel id (1,3,4) that spots'
+  `panel_id` carries; the inner `panel_id` (1,2,3) is the tab-card index — use the dict key.
+- **Volume approximations are declared, not hidden**: nearest voxel, nominal frame omega (same
+  convention as ingest spot omega, no half-step), static median background (ingest's sector background
+  is not retained), no dark/bright/polarization. Max channel is primary because a voxel (0.06 Å⁻¹)
+  holds a median 730 pixel samples over the scan (measured) and a mean washes out Bragg peaks. `count == 0` = unmeasured → NaN, drawn
+  grey in 2-D and excluded from the isosurface; display transforms never touch stored data.
+  Real data: 3 panels, 130×114×137 grid, 52% measured, 52 s; peaks coincide with all 86 spots.
+- **Ewald sphere drawn as a local cap** (radius 2π/λ = 12.7 Å⁻¹ ≫ data) in sample-frame q at the slider ω;
+  resolution shells are a separate (purple) object. All reference overlays are non-pickable and restore the camera.
+- **Known gaps / not done**: V02 frame patch, V06 stereographic maps, V07 DAC accessibility, V13 domain
+  comparison, V14, V16–V22; dead-frame (live filter) identities and null-search draws are not retained by
+  ingest/diamond so the timeline can only show the omega window and V17 cannot be built yet.
+- Pre-existing, unrelated: `tests/test_project.py::test_apply_project_calibration_single_detector`
+  SIGABRTs on clean HEAD too (Calibrate tab).
+
+## 2026-10-24 — Solve Cell joins the project file as ONE latest-analysis record
+
+Solve Cell results now persist in the project (`/analysis/solve_cell`) and
+auto-restore on open. Replaced the earlier ingest-only
+`append_solve_cell_ingest_attempt` (per-panel append-only attempts, no
+reader) — it was a day old and never restored anything.
+
+- **Single record, not attempt history** (user's call): Solve Cell has no
+  meaningful "attempt" list — a run is one evolving analysis. Re-running a
+  stage replaces its section *and everything downstream* (ingest wipes the
+  record; diamond drops index), mirroring the tab's own in-memory
+  invalidation, so the file can never hold a diamond/index result computed
+  from a different ingest than the one stored.
+- **Sections per stage** (`ingest/`, `diamond/`, `index/`), each swapped via
+  `_stage_and_swap`, instead of rewriting the whole record every stage: HDF5
+  does not reclaim deleted space, and ingest carries the heavy arrays
+  (spots, per-panel masks/previews). Later stages only rewrite small data.
+- **Reproducibility without raw data**: ingest meta stores, per panel, the
+  loader state (data/dark/bright/background/mask paths + `path_hash`), the
+  parsed calibration geometry AND the calibration file text, omega mapping,
+  stage parameters, environment snapshot. Raw frames are never embedded.
+  User masks are embedded (small, may not be file-backed).
+- **Derived data is rebuilt, not stored**: `candidate_df` is re-derived from
+  `flagged_df` (same expression as the pipeline) and `g_2pi` from
+  `candidate_df`; ab-initio is restored as a light namespace with only what
+  Refine needs (`success/hkl/indexed_mask/...`; `candidates` objects dropped).
+- **When written**: as each stage finishes if a project is open, plus
+  `flush_project_record()` from `MainWindow.save_project` — covers results
+  computed before any project existed and Save As to a new file (a changed
+  target path marks every section dirty). `copy_analysis_history` copies the
+  record under both scopes but never overwrites one already written from the
+  live session.
+- **Restore precedence**: if the saved GUI workspace's "Solve Cell" tab is
+  also restored it owns panel config/fields (may be newer than the analysis);
+  otherwise panels/params come from the analysis's as-run snapshot. A panel
+  whose calibration file is missing falls back to the embedded geometry.
+- Bug caught by the restore test: `_add_domain` flushed before the caller set
+  `_round1_domain_index`, so a restored project's Refine would have appended a
+  duplicate domain; now set inside `_add_domain(round1=True)`.
+- Not stored/restored: running workers, Reciprocal-view camera/selection,
+  diamond/pooled side files on disk (still written by the pipeline itself).
+
+## 2026-10-23 — Online visualization research handoff; retain PyVista and separate measured products
+
+Created `scratch/solve_cell_visualization_research_and_implementation.md`
+(~9,900 words): 22 prioritized visualization specifications, 37 annotated
+primary source entries, explicit current-code integration hooks, scientific
+contracts, streaming/cache design and acceptance tests. Research only: no
+application/dependency changes or new scientific validation runs. Inspected
+the current `pyvista` branch rather than relying on the earlier Matplotlib
+conversation; dirty changes at inspection became `5e99421` during research.
+
+Key design distinction: generated Ewald construction, a detector frame's
+measured Ewald patch, full-stack Cartesian-q intensity/coverage volume and
+spot-centroid scatter are different products. Geometry-only Cartesian
+reconstruction can precede a solved cell (explicit in DIALS rs_mapper);
+HKL labels/completeness require a domain model. Keep measured support,
+negative subtracted intensities and source-frame provenance rather than
+zero-filling unknown regions or claiming a full measured sphere.
+
+The handoff targets the existing PyVista/VTK reciprocal renderer and
+pyqtgraph detector/2-D views. It separates documented product behavior from
+MIDAS-specific proposals, covers Ewald sign/2π conventions and im_trans,
+and flags quantitative prerequisites for DAC coverage, absences, intensity
+validation and 3D-ΔPDF. No renderer swap or new software-suite dependency
+is recommended as a prerequisite. Internal QA checked all 22 feature IDs,
+37 source IDs, reference consistency and current integration-file paths.
+
 ## 2026-10-23 — Solve Cell: multi-panel mis-calibration root-caused to ignored calibration `im_trans` (fixed same day, see 'Implemented')
 
 On `s3idc_oct8_spinel.h5` (omega step already corrected to 0.1) the pooled

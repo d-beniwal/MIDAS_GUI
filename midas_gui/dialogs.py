@@ -545,6 +545,7 @@ class ProjectContentsPicker(QtWidgets.QWidget):
         self._error = None
         self._workspace_checks: dict = {}    # tab_name -> QCheckBox
         self._mask_row = None                # (QCheckBox, QComboBox) or None
+        self._solve_cell_check = None        # QCheckBox or None
         self._calib_rows: dict = {}          # panel_key -> (QCheckBox, QComboBox)
         self._integrate_rows: dict = {}      # panel_key -> (QCheckBox, QComboBox)
 
@@ -580,6 +581,7 @@ class ProjectContentsPicker(QtWidgets.QWidget):
         self._error = None
         self._workspace_checks = {}
         self._mask_row = None
+        self._solve_cell_check = None
         self._calib_rows = {}
         self._integrate_rows = {}
         _clear_layout(self._content_layout)
@@ -603,7 +605,10 @@ class ProjectContentsPicker(QtWidgets.QWidget):
         integrate_by_panel = {p: v for p in panels
                               if (v := project.list_attempts(path, p, "integrate"))}
 
-        if not tabs and not mask_attempts and not calib_by_panel and not integrate_by_panel:
+        solve_cell = project.solve_cell_overview(path)
+
+        if (not tabs and not mask_attempts and not calib_by_panel and not integrate_by_panel
+                and solve_cell is None):
             self._show_warning("This project has nothing recorded yet.")
             return False
 
@@ -628,7 +633,7 @@ class ProjectContentsPicker(QtWidgets.QWidget):
                 lambda checked: [cb.setChecked(checked) for cb in self._workspace_checks.values()])
             self._content_layout.addWidget(box)
 
-        if mask_attempts or calib_by_panel or integrate_by_panel:
+        if mask_attempts or calib_by_panel or integrate_by_panel or solve_cell:
             box = QtWidgets.QGroupBox("Analysis")
             outer_v = QtWidgets.QVBoxLayout(box)
             outer_v.setSpacing(10)
@@ -639,6 +644,14 @@ class ProjectContentsPicker(QtWidgets.QWidget):
                 grid.addWidget(QtWidgets.QLabel("Mask"), 0, 0)
                 self._mask_row = self._attempt_cell(grid, 0, 1, mask_attempts)
                 outer_v.addLayout(grid)
+
+            if solve_cell:
+                self._solve_cell_check = QtWidgets.QCheckBox(
+                    f"Solve Cell — latest analysis ({solve_cell['n_spots']} spots, "
+                    f"{solve_cell['n_domains']} domain(s), through {solve_cell['last_stage']}; "
+                    f"{str(solve_cell['timestamp_utc'])[:19]})")
+                self._solve_cell_check.setChecked(True)
+                outer_v.addWidget(self._solve_cell_check)
 
             single_panels = [p for p in panels if p == "single"]
             hydra_panels = [p for p in panels if p != "single"]
@@ -696,6 +709,7 @@ class ProjectContentsPicker(QtWidgets.QWidget):
 
     def selection(self) -> dict:
         """``workspace_tabs`` (list[str]), ``mask_ref`` (Optional[str]),
+        ``solve_cell`` (bool -- restore the single latest Solve Cell record),
         ``calib_refs``/``integrate_refs`` (``{panel_key: attempt_ref}``) —
         checked rows only."""
         mask_ref = None
@@ -706,6 +720,8 @@ class ProjectContentsPicker(QtWidgets.QWidget):
         return {
             "workspace_tabs": [name for name, cb in self._workspace_checks.items() if cb.isChecked()],
             "mask_ref": mask_ref,
+            "solve_cell": bool(self._solve_cell_check is not None
+                               and self._solve_cell_check.isChecked()),
             "calib_refs": {p: combo.currentData() for p, (check, combo) in self._calib_rows.items()
                            if check.isChecked()},
             "integrate_refs": {p: combo.currentData() for p, (check, combo) in self._integrate_rows.items()
@@ -880,6 +896,8 @@ class SaveAsHistoryDialog(QtWidgets.QDialog):
         lines = []
         if source_summary.get("mask"):
             lines.append(f"Mask: {source_summary['mask']} attempt(s)")
+        if source_summary.get("solve_cell"):
+            lines.append("Solve Cell: latest analysis")
         for key, label in (("calibrate", "Calibrate"), ("integrate", "Batch Integrate")):
             per_panel = source_summary.get(key) or {}
             if per_panel:
@@ -1348,6 +1366,13 @@ class ProjectHistoryDialog(QtWidgets.QDialog):
                     "timestamp": a.get("timestamp_utc", ""),
                     "ref": a["ref"],
                 })
+            sc = _project.solve_cell_overview(project_path)
+            if sc is not None:
+                rows.append({
+                    "panel": "—", "kind": "Solve Cell", "name": "latest",
+                    "timestamp": sc.get("timestamp_utc", ""),
+                    "ref": _project.SOLVE_CELL_REF,
+                })
             for panel_key in _project.discover_panels(project_path):
                 for kind, label in (("calib", "Calibrate"), ("integrate", "Batch Integrate")):
                     for a in _project.list_attempts(project_path, panel_key, kind):
@@ -1409,7 +1434,10 @@ class ProjectHistoryDialog(QtWidgets.QDialog):
         row = self._rows[selected[0].row()]
         from . import project as _project
         try:
-            meta = _project.read_attempt(self._project_path, row["ref"])
+            if row["ref"] == _project.SOLVE_CELL_REF:
+                meta = _project.solve_cell_metadata(self._project_path)
+            else:
+                meta = _project.read_attempt(self._project_path, row["ref"])
             self._detail.setPlainText(json.dumps(meta, indent=2, default=str))
         except Exception as e:
             self._detail.setPlainText(f"Could not read this attempt's metadata:\n{e}")

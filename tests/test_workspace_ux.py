@@ -510,3 +510,84 @@ def test_project_selection_dialog_wraps_picker_for_a_known_path(qapp, project_wi
         assert "single" in sel["calib_refs"]
     finally:
         dlg.close()
+
+
+# ── Solve Cell: single latest analysis record in the project ─────────────────
+def _solve_cell_spots(n=6):
+    import pandas as pd
+    return pd.DataFrame({
+        "panel_id": 1, "row": np.linspace(1, 50, n), "col": np.linspace(2, 60, n),
+        "frame": np.linspace(0, 4, n), "loaded_frame_idx": np.arange(n) % 3,
+        "omega_deg": np.linspace(0, 5, n), "two_theta_deg": np.linspace(3, 8, n),
+        "qsample_x": np.linspace(0.1, 1.0, n), "qsample_y": np.linspace(0.2, 1.1, n),
+        "qsample_z": np.linspace(0.3, 1.2, n), "spot_id": np.arange(n),
+    })
+
+
+def test_picker_history_and_save_as_dialogs_know_about_solve_cell(qapp, tmp_path):
+    import pandas as pd
+    from midas_gui.dialogs import (ProjectContentsPicker, ProjectHistoryDialog,
+                                    SaveAsHistoryDialog)
+    path = str(tmp_path / "sc.h5")
+    project.create_project(path)
+    project.write_solve_cell_ingest(path, meta={"summary": {"n_spots": 6}}, spots_df=_solve_cell_spots())
+
+    picker = ProjectContentsPicker()
+    assert picker.set_project(path) is True       # solve-cell-only project is openable
+    assert picker.selection()["solve_cell"] is True
+    picker._solve_cell_check.setChecked(False)
+    assert picker.selection()["solve_cell"] is False
+
+    dlg = ProjectHistoryDialog(path)
+    try:
+        assert [r["kind"] for r in dlg._rows] == ["Solve Cell"]
+        dlg._table.selectRow(0)
+        assert "n_spots" in dlg._detail.toPlainText()
+    finally:
+        dlg.deleteLater()
+
+    assert project.analysis_summary(path)["solve_cell"] == 1
+    sdlg = SaveAsHistoryDialog(project.analysis_summary(path))
+    try:
+        from PyQt5.QtWidgets import QLabel
+        assert any("Solve Cell" in lbl.text() for lbl in sdlg.findChildren(QLabel))
+    finally:
+        sdlg.deleteLater()
+
+
+def test_save_project_writes_solve_cell_results_and_open_restores_them(
+        win, tmp_path, no_modal_dialogs):
+    tab = win._solve_cell_tab
+    spots = _solve_cell_spots()
+    mask = np.zeros((4, 4), dtype=bool)
+    tab._on_ingest_done({"spots_df": spots, "summary": {"n_spots": len(spots)},
+                         "preview": {"mask": mask}})      # computed with no project open
+    path = str(tmp_path / "e2e.h5")
+    project.create_project(path)      # what the Save As dialog does before save_project
+    try:
+        win.save_project(path)
+        assert project.has_solve_cell(path)           # flushed by save_project
+
+        tab._reset_ingest_results()
+        tab._spots_df = None
+        tab._ingest_preview_by_panel.clear()
+        # restore from the analysis alone (workspace tab not selected)
+        win._open_project_selection(
+            path, {"workspace_tabs": [], "solve_cell": True, "calib_refs": {}, "integrate_refs": {}})
+        assert len(tab._spots_df) == len(spots)
+        assert tab._ingest_preview_by_panel[1]["mask"].shape == (4, 4)
+
+        # ...and alongside the saved workspace (which then owns the panel config)
+        tab._spots_df = None
+        win._open_project_selection(
+            path, {"workspace_tabs": ["Solve Cell"], "solve_cell": True,
+                   "calib_refs": {}, "integrate_refs": {}})
+        assert len(tab._spots_df) == len(spots)
+
+        # unchecked: the record is left alone
+        tab._spots_df = None
+        win._open_project_selection(
+            path, {"workspace_tabs": [], "solve_cell": False, "calib_refs": {}, "integrate_refs": {}})
+        assert tab._spots_df is None
+    finally:
+        win._set_project_path(None)

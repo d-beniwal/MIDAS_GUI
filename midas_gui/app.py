@@ -949,6 +949,17 @@ class MainWindow(QtWidgets.QMainWindow):
             if integrate_attempts:
                 self._batch_tab.apply_project_integration(integrate_attempts)
                 restored.append("Batch Integrate: " + ", ".join(sorted(integrate_attempts)))
+            if sel.get("solve_cell"):
+                sc_record = project.read_solve_cell(path)
+                if sc_record is not None:
+                    # The saved workspace (if restored) already rebuilt the
+                    # panel tabs/fields -- it may be newer than the analysis,
+                    # so only fall back to the analysis's own config without it.
+                    self._solve_cell_tab.apply_project_solve_cell(
+                        sc_record, restore_config="Solve Cell" not in tab_names)
+                    restored.append(
+                        f"Solve Cell: {len(sc_record['ingest']['spots_df'])} spots, "
+                        f"last stage {sc_record.get('last_stage')}")
             mask_ref = sel.get("mask_ref")
             if mask_ref:
                 mask_meta = project.read_attempt(path, mask_ref)
@@ -1075,6 +1086,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 lines = []
                 if copied.get("mask"):
                     lines.append(f"Mask: {copied['mask']} attempt(s)")
+                if copied.get("solve_cell"):
+                    lines.append("Solve Cell: latest analysis")
                 for key, label in (("calibrate", "Calibrate"), ("integrate", "Batch Integrate")):
                     per_panel = copied.get(key) or {}
                     if per_panel:
@@ -1272,6 +1285,9 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Save failed", str(e))
             return
         self._set_project_path(path)
+        # Results computed before a project existed (or before this Save As
+        # target did) are only in memory -- write them into the file too.
+        self._solve_cell_tab.flush_project_record()
         self._last_saved_hash = self._hash_workspace_state(state)
         self._set_workspace_dirty(False)
         self._update_window_title()

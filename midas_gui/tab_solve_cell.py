@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import pandas as pd
 import pyqtgraph as pg
 from PyQt5 import QtCore, QtWidgets
 
@@ -48,8 +49,21 @@ from midas_gui.pyvista_views import (
 from midas_gui.workers import SolveCellWorker
 from midas_gui.dialogs import show_error
 from midas_gui.solve_cell import pipeline as solve_pipeline
+from midas_gui.solve_cell import geometry_adapter as geom_adapter
+from midas_gui.solve_cell import viz_products
+from midas_gui.solve_cell_diagnostics import DiagnosticsView
+from midas_gui.solve_cell_volume import ReciprocalVolumeView, VolumeBuildWorker
+from midas_gui.solve_cell_inspector import SpotInspector
+from midas_gui.solve_cell_contamination import ContaminationView
+from midas_gui.solve_cell_compare import DomainCompareView
+from midas_gui.solve_cell import domain_compare
+from midas_gui.solve_cell import reciprocal_volume
 from midas_gui import project
 from midas_gui import style as S
+
+
+# Detector-view preview arrays stored per panel in the project record.
+_PREVIEW_ARRAYS = ("mask", "background_subtracted", "background_subtracted_max_projection")
 
 
 class PanelCard(QtWidgets.QWidget):
@@ -303,6 +317,42 @@ class PanelCard(QtWidgets.QWidget):
             "bright_mode": self.loader.bright_mode(), "background": self.loader.background(),
         }
 
+    # ── calibration record (project analysis provenance) ────────────
+
+    _CALIB_TEXT_MAX_BYTES = 1_000_000
+
+    def calibration_record(self) -> dict:
+        """Everything needed to rerun this panel's geometry without the
+        original calibration file: its path (hashed by the project writer),
+        the parsed geometry, and the file's own text when still readable."""
+        rec = {"path": self._calib_path, "geometry": dict(self._geometry) if self._geometry else None}
+        if self._calib_path:
+            try:
+                p = Path(self._calib_path)
+                if p.is_file() and p.stat().st_size <= self._CALIB_TEXT_MAX_BYTES:
+                    rec["file_name"] = p.name
+                    rec["file_text"] = p.read_text(errors="replace")
+            except OSError:
+                pass
+        return rec
+
+    def restore_calibration_record(self, rec: dict) -> bool:
+        """Adopt a recorded calibration whose original file is not available
+        (e.g. a project opened on another machine). Returns False if the
+        record carries no geometry."""
+        geom = (rec or {}).get("geometry")
+        if not geom:
+            return False
+        self._geometry = dict(geom)
+        self._calib_path = rec.get("path")
+        self._calib_note.setText(
+            f"Restored from the project's recorded calibration"
+            f"{' (' + rec['file_name'] + ')' if rec.get('file_name') else ''}: "
+            f"λ={geom['wavelength_A']:.5f} Å, px={geom['px_um']:.2f} µm, "
+            f"BC=({geom['BC_y']:.2f}, {geom['BC_z']:.2f}), Lsd={geom['Lsd']:.1f} µm. "
+            "The original file was not found, so this embedded copy is used.")
+        return True
+
     # ── GUI state (project save/restore) ───────────────────────────
 
     def _state_widgets(self) -> dict:
@@ -372,6 +422,22 @@ class SolveCellTab(QtWidgets.QWidget):
         self._det_view_shape = None
         self._ingest_source_panel_id = None
         self._project_ctx = None
+        # Project record bookkeeping (see flush_project_record): the as-run
+        # description of the last ingest (+ the user masks it ran with), each
+        # later stage's parameter snapshot, which record sections still need
+        # writing, and which
+        # project file the in-memory results were last written to / read from.
+        self._sc_ingest_meta: Optional[dict] = None
+        self._sc_user_masks: dict = {}
+        self._sc_stage_meta: dict = {}
+        self._sc_dirty: set = set()
+        self._sc_record_path: Optional[str] = None
+        # Cached visualization products (viz_products.*), keyed by product
+        # name; ``_viz_unsaved`` are those computed since the project last
+        # stored them. Derived from ingest+index, so a new ingest drops them.
+        self._viz_products: dict = {}
+        self._viz_unsaved: set = set()
+        self._vol_worker: Optional[VolumeBuildWorker] = None
         self._build_ui()
         self._refresh_detector_preview()
 
@@ -676,6 +742,26 @@ class SolveCellTab(QtWidgets.QWidget):
         self._view_tabs = QtWidgets.QTabWidget()
         self._build_recip_map_tab()
         self._build_detector_tab()
+        self._diag_view = DiagnosticsView()
+        self._diag_view.spotClicked.connect(self._on_recip_spot_clicked)
+        self._view_tabs.addTab(self._diag_view, "Diagnostics")
+        self._volume_view = ReciprocalVolumeView()
+        self._volume_view.buildRequested.connect(self._start_volume_build)
+        self._volume_view.cancelRequested.connect(lambda: self._vol_worker and self._vol_worker.cancel())
+        self._volume_view.spotClicked.connect(self._on_recip_spot_clicked)
+        self._view_tabs.addTab(self._volume_view, "Volume")
+        self._compare_view = DomainCompareView()
+        self._compare_view.reviewChanged.connect(self._on_compare_review)
+        self._compare_view.spotClicked.connect(self._on_recip_spot_clicked)
+        self._view_tabs.addTab(self._compare_view, "Compare domains")
+        self._view_tabs.currentChanged.connect(self._refresh_compare)
+        self._contam_view = ContaminationView()
+        self._contam_view.spotClicked.connect(self._on_recip_spot_clicked)
+        self._view_tabs.addTab(self._contam_view, "Contamination")
+        self._view_tabs.currentChanged.connect(self._refresh_contamination)
+        self._inspector = SpotInspector()
+        self._view_tabs.addTab(self._inspector, "Spot inspector")
+        self._view_tabs.currentChanged.connect(self._refresh_diagnostics)
         right.addWidget(self._view_tabs)
 
         self._log = LogPanel()
@@ -767,6 +853,7 @@ class SolveCellTab(QtWidgets.QWidget):
         options.addWidget(fit_btn)
         options.addStretch(1)
         tv.addLayout(options)
+        tv.addLayout(self._build_overlay_controls())
         tv.addWidget(self._recip_view, stretch=1)
         self._spot_details = QtWidgets.QLabel("Hover a spot for details; click to select.")
         self._spot_details.setWordWrap(True)
@@ -782,6 +869,315 @@ class SolveCellTab(QtWidgets.QWidget):
         self._recip_stats.setContentsMargins(6, 2, 6, 4)
         tv.addWidget(self._recip_stats)
         self._view_tabs.addTab(tab, "Reciprocal space map")
+
+    # ── reference overlays: Ewald cap (V01), basis/cell (V15), predictions (V08) ──
+    def _build_overlay_controls(self) -> QtWidgets.QLayout:
+        box = QtWidgets.QVBoxLayout()
+        box.setContentsMargins(6, 0, 6, 0)
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel("Overlays:"))
+        self._ov_ewald = QtWidgets.QCheckBox("Ewald sphere (cap)")
+        self._ov_ewald.setToolTip(
+            "The Ewald sphere through q=0 at the ω below, in sample-frame q "
+            "(centre −R(ω)ᵀ·kᵢ, radius 2π/λ), drawn only as a local cap. Yellow "
+            "arrow: incident beam kᵢ ending at q=0; pink line: ω rotation axis. "
+            "Not a resolution shell.")
+        self._ov_basis = QtWidgets.QCheckBox("a*, b*, c* + cell")
+        self._ov_basis.setToolTip("Reciprocal basis (red/green/blue = a*/b*/c*) and unit cell of the selected domain (2π·UB columns).")
+        self._ov_pred = QtWidgets.QCheckBox("Predicted lattice points")
+        self._ov_pred.setToolTip(
+            "Every lattice point of the selected domain that crosses the Ewald "
+            "sphere inside the scanned ω range. Green: explained by an assigned "
+            "spot; orange: lands on a panel but no assigned spot; grey (optional): "
+            "never lands on an active panel. Cached in the project.")
+        self._ov_pred_hidden = QtWidgets.QCheckBox("incl. off-panel")
+        self._ov_patch = QtWidgets.QCheckBox("Frame patches")
+        self._ov_patch.setToolTip(
+            "Each panel's frame at the ω below painted onto its measured patch of the Ewald "
+            "sphere (sample-frame q). Colour = block-max background-subtracted counts (asinh); "
+            "missing cells = masked / sentinel pixels, never zero. Panels outside their ω "
+            "window are skipped. Selecting a spot moves ω to that spot's own ω.")
+        self._ov_shells = QtWidgets.QCheckBox("|q| shells")
+        self._ov_shells.setToolTip("Constant-|q| shells (centred on q=0) at 0.5, 1.0, 1.5… Å⁻¹ — distinct from the Ewald sphere.")
+        for w in (self._ov_ewald, self._ov_basis, self._ov_pred, self._ov_pred_hidden, self._ov_patch, self._ov_shells):
+            w.toggled.connect(lambda _=None: self._refresh_overlays())
+            row.addWidget(w)
+        row.addStretch(1)
+        box.addLayout(row)
+        row2 = QtWidgets.QHBoxLayout()
+        row2.addWidget(QtWidgets.QLabel("ω:"))
+        self._ov_omega = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self._ov_omega.setRange(-1800, 1800)       # tenths of a degree; re-ranged to the scan
+        self._ov_omega.valueChanged.connect(lambda _=None: self._refresh_overlays())
+        row2.addWidget(self._ov_omega, stretch=1)
+        self._ov_omega_label = QtWidgets.QLabel("0.0°")
+        self._ov_omega_label.setMinimumWidth(60)
+        row2.addWidget(self._ov_omega_label)
+        self._ov_now = QtWidgets.QCheckBox("highlight diffracting now (±0.5°)")
+        self._ov_now.setChecked(True)
+        self._ov_now.toggled.connect(lambda _=None: self._refresh_overlays())
+        row2.addWidget(self._ov_now)
+        box.addLayout(row2)
+        self._ov_status = QtWidgets.QLabel("")
+        self._ov_status.setStyleSheet(f"color:{S.MUTED};font-size:11px")
+        self._ov_status.setWordWrap(True)
+        box.addWidget(self._ov_status)
+        return box
+
+    def _current_domain_index(self) -> Optional[int]:
+        if not self._domains:
+            return None
+        row = self._domain_list.currentRow()
+        return row if 0 <= row < len(self._domains) else len(self._domains) - 1
+
+    def _ingest_snapshots(self) -> dict:
+        if not self._sc_ingest_meta or not self._sc_ingest_meta.get("panels"):
+            return {}
+        return geom_adapter.snapshots_from_ingest_meta(self._sc_ingest_meta)
+
+    def _domain_viz(self, idx: int) -> Optional[dict]:
+        """Prediction/residual product of domain ``idx`` -- the cached one if its
+        UB fingerprint still matches, else (re)computed and queued for saving."""
+        d = self._domains[idx]
+        res = d["result"]
+        fit = res.get("reflection_fit") or {}
+        if res.get("UB") is None or fit.get("hkl") is None or self._candidate_df is None:
+            return None
+        name = f"domain_{idx + 1:02d}_predictions"
+        fp = viz_products.ub_fingerprint(res["UB"])
+        prod = self._viz_products.get(name)
+        if prod is not None and prod["meta"]["inputs"].get("ub_fingerprint") == fp:
+            return prod
+        snaps = self._ingest_snapshots()
+        if not snaps:
+            return None
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            rows = viz_products.domain_rows(self._candidate_df, d["claimed_index"], fit["hkl"])
+            prod = viz_products.build_domain_predictions(d["label"], res["UB"], rows, snaps)
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        self._viz_products[name] = prod
+        self._viz_unsaved.add(name)
+        return prod
+
+    def _frame_manifest(self) -> Optional[pd.DataFrame]:
+        prod = self._viz_products.get("frame_manifest")
+        if prod is None and self._sc_ingest_meta and self._sc_ingest_meta.get("panels"):
+            prod = viz_products.build_frame_manifest(self._sc_ingest_meta)
+            self._viz_products["frame_manifest"] = prod
+            self._viz_unsaved.add("frame_manifest")
+        return prod["tables"]["frames"] if prod else None
+
+    def _scan_omega_span(self) -> tuple:
+        snaps = self._ingest_snapshots()
+        if not snaps:
+            return (-180.0, 180.0)
+        spans = viz_products.omega_ranges(snaps).values()
+        return (min(a for a, _ in spans), max(b for _, b in spans))
+
+    def _refresh_overlays(self):
+        lo, hi = self._scan_omega_span()
+        v = self._ov_omega
+        if (v.minimum(), v.maximum()) != (int(np.floor(lo * 10)), int(np.ceil(hi * 10))):
+            v.blockSignals(True)
+            cur = v.value()
+            v.setRange(int(np.floor(lo * 10)), int(np.ceil(hi * 10)))
+            v.setValue(min(max(cur, v.minimum()), v.maximum()))
+            v.blockSignals(False)
+        omega = v.value() / 10.0
+        self._ov_omega_label.setText(f"{omega:.1f}°")
+        idx = self._current_domain_index()
+        snaps = self._ingest_snapshots()
+        notes = []
+        view = self._recip_view
+        # Ewald cap -- needs only wavelength + omega, no cell
+        if self._ov_ewald.isChecked() and snaps:
+            snap = next(iter(snaps.values()))
+            q_cap = float(np.nanmax(self._spots_df["q_norm"])) * 1.15 if (
+                self._spots_df is not None and len(self._spots_df)) else 1.5
+            cap = viz_products.ewald_cap(snap.wavelength_A, omega, q_cap)
+            view.set_ewald(cap["patch"], ki=cap["ki"], axis=cap["axis"], extent=q_cap)
+            notes.append(f"Ewald sphere: R=2π/λ={cap['k0']:.3f} Å⁻¹ (centre {np.round(cap['center'], 2).tolist()}), cap |q|≤{q_cap:.2f}")
+        else:
+            view.set_ewald(None)
+        domain_UB = None
+        if idx is not None and self._domains[idx]["result"].get("UB") is not None:
+            domain_UB = np.asarray(self._domains[idx]["result"]["UB"], float)
+        view.set_basis(viz_products.basis_matrix(domain_UB) if (self._ov_basis.isChecked() and domain_UB is not None) else None)
+        if self._ov_basis.isChecked() and domain_UB is None:
+            notes.append("a*, b*, c*: needs a solved domain")
+        if self._ov_pred.isChecked() and idx is not None:
+            prod = self._domain_viz(idx)
+            if prod is not None:
+                pred = prod["tables"]["predictions"]
+                cls = viz_products.classify_lattice_points(pred)
+                groups = [(cls["observed"], "#38d9a9", "predicted · observed"),
+                          (cls["missing"], "#ffa94d", "predicted · not observed")]
+                if self._ov_pred_hidden.isChecked():
+                    groups.append((cls["hidden"], "#6b6b6b", "predicted · off panel"))
+                if self._ov_now.isChecked():
+                    groups.append((viz_products.lattice_points_near_omega(pred, omega, 0.5), "#ffffff", "diffracting now"))
+                view.set_predicted(groups)
+                st = prod["meta"]["stats"]
+                notes.append(f"{self._domains[idx]['label']}: {len(cls['observed'])} observed / {len(cls['missing'])} "
+                             f"visible-unobserved / {len(cls['hidden'])} off-panel lattice points; RMS Δrow/Δcol "
+                             f"{st.get('rms_d_row', float('nan')):.2f}/{st.get('rms_d_col', float('nan')):.2f} px")
+            else:
+                view.set_predicted(None)
+                notes.append("Predicted points: needs a refined domain with a UB")
+        else:
+            view.set_predicted(None)
+        if self._ov_patch.isChecked():
+            notes.extend(self._refresh_frame_patches(omega))
+        else:
+            view.set_frame_patches(None)
+        view.set_shells([0.5, 1.0, 1.5] if self._ov_shells.isChecked() else None)
+        self._ov_status.setText(" · ".join(notes))
+        self._refresh_diagnostics()
+        if self._project_path():
+            self._persist_viz()
+
+    # ── reciprocal volume (V03/V04/V05) ─────────────────────────────
+    def _volume_source_cfgs(self) -> tuple:
+        """Per-panel source descriptions from the as-run ingest record, or
+        ``(None, reason)``. Only plain HDF5 stacks are supported."""
+        import os
+        cfgs = []
+        for key, prec in ((self._sc_ingest_meta or {}).get("panels") or {}).items():
+            pid = int(key)
+            ld = (prec.get("state") or {}).get("loader") or {}
+            path = ld.get("path") or ""
+            ds = (ld.get("dataset") or "").split()[0] if ld.get("dataset") else ""
+            if not (path and ds and os.path.exists(path)):
+                return None, f"panel {pid}: source file {path or '(none)'} is not available"
+            if not is_h5(path):
+                return None, f"panel {pid}: only HDF5 sources are supported"
+            mask = (self._ingest_preview_by_panel.get(pid) or {}).get("mask")
+            cfgs.append({"panel_id": pid, "path": path, "dataset": ds, "mask": mask})
+        return (cfgs, "") if cfgs else (None, "run ingest first")
+
+    def _start_volume_build(self, pitch: float):
+        if self._vol_worker is not None and self._vol_worker.isRunning():
+            return
+        cfgs, why = self._volume_source_cfgs()
+        if cfgs is None:
+            self._volume_view.info.setText(f"Cannot build volume: {why}.")
+            return
+        spec = reciprocal_volume.auto_grid(
+            {c["panel_id"]: s for c in cfgs for s in [self._ingest_snapshots()[c["panel_id"]]]}, pitch)
+        mb = reciprocal_volume.estimate_memory_mb(spec)
+        if mb > 1500:
+            self._volume_view.info.setText(
+                f"Grid {spec.shape} would need ~{mb:.0f} MB of accumulators; raise the voxel pitch.")
+            return
+        self._volume_view.info.setText(f"Building {spec.shape} grid (~{mb:.0f} MB accumulators)…")
+        self._volume_view.set_building(True)
+        w = VolumeBuildWorker(cfgs, self._ingest_snapshots(), pitch, self)
+        w.progress.connect(self._volume_view.set_progress)
+        w.finished_ok.connect(self._on_volume_built)
+        w.failed.connect(lambda tb: (self._volume_view.set_building(False),
+                                     self._volume_view.info.setText("Volume build failed — see log."),
+                                     self._log.append(tb)))
+        w.cancelled.connect(lambda: (self._volume_view.set_building(False),
+                                     self._volume_view.info.setText("Volume build cancelled; previous volume kept.")))
+        self._vol_worker = w
+        w.start()
+
+    def _on_volume_built(self, vol: dict, spec):
+        self._volume_view.set_building(False)
+        prod = viz_products.volume_product(vol, spec, self._sc_ingest_meta)
+        self._viz_products["reciprocal_volume"] = prod
+        self._viz_unsaved.add("reciprocal_volume")
+        self._show_cached_volume()
+        self._persist_viz()
+
+    def _show_cached_volume(self):
+        prod = self._viz_products.get("reciprocal_volume")
+        if prod is None:
+            self._volume_view.set_volume(None, None)
+            return
+        vol, spec = viz_products.volume_from_product(prod)
+        self._volume_view.set_volume(vol, spec, prod["meta"])
+
+    def _frame_patch_product(self) -> Optional[dict]:
+        prod = self._viz_products.get("frame_patches")
+        if prod is not None or not self._sc_ingest_meta or not self._sc_ingest_meta.get("panels"):
+            return prod
+        cfgs, why = self._volume_source_cfgs()
+        if cfgs is None:
+            return None
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            masks = {c["panel_id"]: c["mask"] for c in cfgs}
+            prod = viz_products.build_frame_patches(self._sc_ingest_meta, masks)
+        except Exception as exc:
+            self._log.append(f"Frame patch cache could not be built: {exc}")
+            return None
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        self._viz_products["frame_patches"] = prod
+        self._viz_unsaved.add("frame_patches")
+        return prod
+
+    def _refresh_frame_patches(self, omega: float) -> list:
+        from midas_gui.solve_cell import frame_patch as fp
+        prod = self._frame_patch_product()
+        if prod is None:
+            self._recip_view.set_frame_patches(None)
+            return ["Frame patches: need the original frames (or a project that stores the cache)"]
+        stride, snaps = int(prod["meta"]["stride"]), self._ingest_snapshots()
+        geom = getattr(self, "_patch_geom", {})
+        self._patch_geom = geom
+        patches, notes, cof = [], [], 10.0
+        for pid, snap in sorted(snaps.items()):
+            f = fp.loaded_frame_for_omega(snap, omega)
+            idx = prod["arrays"].get(f"loaded_idx_p{pid}")
+            if f is None or idx is None:
+                notes.append(f"panel {pid}: ω outside its window")
+                continue
+            slot = int(np.searchsorted(idx, f))
+            if slot >= len(idx) or idx[slot] != f:
+                continue
+            if (pid, stride) not in geom:
+                geom[(pid, stride)] = fp.corner_qlab(snap, stride)
+            om = float(snap.omega_of_loaded_frame(f))
+            lo, hi = prod["meta"]["clim"][str(pid)]
+            patches.append({"corners": fp.corners_at_omega(geom[(pid, stride)], om),
+                            "cells": np.arcsinh(prod["arrays"][f"cells_p{pid}"][slot] / cof)})
+            notes.append(f"panel {pid}: frame {f} @ ω {om:+.2f}°")
+        top = max([np.arcsinh(max(h, 200.0) / cof) for _l, h in prod["meta"]["clim"].values()] or [1.0])
+        self._recip_view.set_frame_patches(patches, clim=(0.0, float(top)))
+        return ["Patches: " + "; ".join(notes)]
+
+    def _persist_viz(self):
+        """Store newly computed products in the open project (best-effort)."""
+        path = self._project_path()
+        if not path or not self._viz_unsaved:
+            return
+        try:
+            for name in sorted(self._viz_unsaved):
+                prod = self._viz_products[name]
+                project.write_solve_cell_viz(path, name, meta=prod["meta"],
+                                             tables=prod.get("tables"), arrays=prod.get("arrays"))
+            self._log.append(f"Visualization data stored in project: {', '.join(sorted(self._viz_unsaved))}.")
+            self._viz_unsaved.clear()
+        except Exception as exc:        # the record may not be flushed yet; retried at the next flush
+            self._log.append(f"Visualization data kept in memory only ({exc}).")
+
+    def _refresh_diagnostics(self, *_args, force: bool = False):
+        # Computing predictions is the slow part; only do it while the tab is shown.
+        if not force and self._view_tabs.currentWidget() is not self._diag_view:
+            return
+        idx = self._current_domain_index()
+        frames = self._frame_manifest()
+        prod = self._domain_viz(idx) if idx is not None else None
+        shapes = {pid: s.raw_shape for pid, s in self._ingest_snapshots().items()}
+        self._diag_view.set_data(
+            residuals=prod["tables"]["residuals"] if prod else None,
+            predictions=prod["tables"]["predictions"] if prod else None,
+            frames=frames, spots=self._spots_df, panel_shapes=shapes,
+            label=self._domains[idx]["label"] if idx is not None else "")
 
     # Cycled per domain once more than one exists (_update_multidomain_plot) --
     # kept well clear of the legacy "#ff3030"/"#4da3ff" diamond/indexed colors.
@@ -884,6 +1280,8 @@ class SolveCellTab(QtWidgets.QWidget):
     def _refresh_recip_view(self):
         rows = self._display_spot_rows()
         self._spot_rows_by_id = {r["spot_id"]: r for r in rows}
+        if getattr(self, "_volume_view", None) is not None:
+            self._volume_view.set_spots(rows)
         show = self._recip_show_unindexed.isChecked()
         n_unindexed = sum(r["category"] == "Unindexed/spurious" for r in rows)
         visible = [r for r in rows if show or r["category"] != "Unindexed/spurious"]
@@ -977,13 +1375,117 @@ class SolveCellTab(QtWidgets.QWidget):
             row = None
         self._recip_view.set_selected(row)
 
+    def _cached_residual_for(self, spot_id) -> Optional[dict]:
+        """Observed−predicted record of a spot from any cached domain product."""
+        for name, prod in self._viz_products.items():
+            if name.endswith("_predictions"):
+                res = prod["tables"]["residuals"]
+                hit = res[res.spot_id == spot_id] if len(res) else res
+                if len(hit):
+                    return hit.iloc[0].to_dict()
+        return None
+
+    # ── domain comparison (V13) ─────────────────────────────────────
+    def _comparison_entries(self) -> list:
+        return domain_compare.entries_from_state(self._domains, self._ab_initio_raw, self._candidate_df)
+
+    def _comparison_product(self, entries: list) -> dict:
+        """Cached comparison if every lattice's UB fingerprint still matches, else recomputed."""
+        want = {e["key"]: viz_products.ub_fingerprint(e["UB"]) for e in entries}
+        prod = self._viz_products.get("domain_comparison")
+        if prod is not None and prod["meta"]["inputs"].get("entries") == want:
+            return prod
+        prod = viz_products.build_domain_comparison(self._domains, self._ab_initio_raw, self._candidate_df)
+        self._viz_products["domain_comparison"] = prod
+        self._viz_unsaved.add("domain_comparison")
+        return prod
+
+    def _refresh_compare(self, *_args):
+        if self._view_tabs.currentWidget() is not self._compare_view:
+            return
+        entries = self._comparison_entries() if self._candidate_df is not None else []
+        if not entries:
+            self._compare_view.set_data([], None, None, lambda k: ([], None))
+            return
+        prod = self._comparison_product(entries)
+        fps = prod["meta"]["inputs"]["entries"]
+        rev = self._viz_products.get("domain_review")
+        reviews = {}
+        if rev is not None:
+            for r in rev["tables"]["reviews"].itertuples(index=False):
+                if fps.get(r.a) == r.fp_a and fps.get(r.b) == r.fp_b:      # stale reviews are ignored
+                    reviews[(r.a, r.b)] = r.conclusion
+        by_key = {e["key"]: e for e in entries}
+
+        def scene(key):
+            e = by_key[key]
+            df = self._candidate_df.loc[e["claimed_index"]]
+            groups = []
+            for k, (pid, g) in enumerate(df.groupby("panel_id")):
+                rows = g.to_dict("records")
+                groups.append((tuple(g[c].to_numpy() for c in ("qsample_x", "qsample_y", "qsample_z")),
+                               self._DOMAIN_COLORS[k % len(self._DOMAIN_COLORS)], self._panel_label(pid), rows))
+            return groups, e["UB"]
+
+        self._compare_view.set_data(entries, prod["tables"], reviews, scene)
+        self._persist_viz()
+
+    def _on_compare_review(self, a: str, b: str, conclusion: str):
+        """Store the reviewer's call (never touches claims) with the fingerprints it applies to."""
+        fps = self._viz_products["domain_comparison"]["meta"]["inputs"]["entries"]
+        old = self._viz_products.get("domain_review")
+        rows = [] if old is None else [r._asdict() for r in old["tables"]["reviews"].itertuples(index=False)
+                                       if (r.a, r.b) != (a, b)]
+        if conclusion:
+            from datetime import datetime, timezone
+            rows.append({"a": a, "b": b, "fp_a": fps[a], "fp_b": fps[b], "conclusion": conclusion,
+                         "reviewed_utc": datetime.now(timezone.utc).isoformat()})
+        df = pd.DataFrame(rows, columns=["a", "b", "fp_a", "fp_b", "conclusion", "reviewed_utc"])
+        self._viz_products["domain_review"] = {"meta": {"inputs": {"kind": "review"},
+                                                        "note": "reviewer conclusions; do not change domain claims"},
+                                               "tables": {"reviews": df}}
+        self._viz_unsaved.add("domain_review")
+        self._persist_viz()
+
+    def _refresh_contamination(self, *_args):
+        if self._view_tabs.currentWidget() is not self._contam_view:
+            return
+        snaps = self._ingest_snapshots()
+        fields = (self._sc_stage_meta.get("diamond") or {}).get("fields") or {}
+        summ = (self._sc_stage_meta.get("diamond") or {}).get("summary") or {}
+        wl = next(iter(snaps.values())).wavelength_A if snaps else None
+        self._contam_view.set_data(
+            self._flagged_df, wl, diamond_a=float(summ.get("diamond_a_angstrom", fields.get("diamond_a", 3.5667))),
+            tol_deg=float(summ.get("tolerance_deg", fields.get("contam_tol", 0.07))))
+        self._contam_view.select_spot(self._selected_spot_id)
+
+    def _update_inspector(self):
+        row = self._spot_rows_by_id.get(self._selected_spot_id)
+        self._inspector.show_spot(row, self._cached_residual_for(self._selected_spot_id) if row else None)
+
+    def _inspector_omega_of(self, panel_id, loaded_idx):
+        snap = self._ingest_snapshots().get(int(panel_id))
+        return snap.omega_of_loaded_frame(loaded_idx) if snap else np.asarray(loaded_idx, float)
+
+    def _show_cached_shoeboxes(self):
+        prod = self._viz_products.get("spot_shoeboxes")
+        if prod is None:
+            self._inspector.set_cache(None, None, self._inspector_omega_of)
+        else:
+            self._inspector.set_cache(prod["arrays"], prod["tables"]["index"], self._inspector_omega_of)
+
     def _select_spot(self, spot_id):
         self._selected_spot_id = spot_id
         row = next((r for r in self._display_spot_rows() if r["spot_id"] == spot_id), None)
         if row:
             self._spot_details.setText(self._spot_description(row))
         self._show_detector_btn.setEnabled(row is not None and "loaded_frame_idx" in row)
+        if row and self._ov_patch.isChecked() and np.isfinite(row.get("omega_deg", np.nan)):
+            self._ov_omega.setValue(int(round(row["omega_deg"] * 10)))   # patch and centroid at the spot's own omega
         self._update_recip_selection()
+        self._update_inspector()
+        if self._view_tabs.currentWidget() is self._contam_view:
+            self._contam_view.select_spot(spot_id)
         self._refresh_detector_preview()
 
     def _show_selected_on_detector(self):
@@ -1522,6 +2024,9 @@ class SolveCellTab(QtWidgets.QWidget):
     def _reset_ingest_results(self):
         """A new ingest invalidates all assignments into the old spot table."""
         self._flagged_df = self._candidate_df = self._ab_initio_raw = None
+        self._viz_products, self._viz_unsaved = {}, set()
+        if getattr(self, "_volume_view", None) is not None:
+            self._volume_view.set_volume(None, None)
         self._g_2pi = None
         self._domains = []
         self._claimed_index = None
@@ -1555,7 +2060,8 @@ class SolveCellTab(QtWidgets.QWidget):
         if pid is not None:
             self._ingest_preview_by_panel[pid] = self._ingest_preview
         self._refresh_detector_preview()
-        self._log_ingest_to_project(result)
+        self._record_ingest(
+            result, {pid: result.get("summary", {})} if pid is not None else {}, pooled=False)
 
     def _on_ingest_pooled_done(self, result: dict):
         """Multi-panel counterpart of :meth:`_on_ingest_done` -- ``result``
@@ -1582,63 +2088,288 @@ class SolveCellTab(QtWidgets.QWidget):
         self._refresh_recip_view()
         self._ingest_preview_by_panel = {pid: r.get("preview") for pid, r in per_panel.items()}
         self._refresh_detector_preview()
-        self._log_pooled_ingest_to_project(result)
+        self._record_ingest(result, {pid: r["summary"] for pid, r in per_panel.items()}, pooled=True)
 
-    def _panel_ingest_inputs(self, panel: "PanelCard") -> dict:
-        """The ``inputs`` metadata dict logged alongside a panel's own ingest
-        attempt -- shared by the single-panel and pooled provenance loggers
-        below."""
+    # ── project record: latest analysis stored in the open project ──────
+    #
+    # Solve Cell keeps ONE record in the project file (``/analysis/solve_cell``,
+    # see project.py) holding the latest analysis: ingest inputs as run
+    # (calibrations, data references + hashes, omega mapping, parameters) and
+    # every result (spots, diamond flags, ab-initio, domains), so reopening
+    # the project restores the whole analysis and each stage can be rerun.
+    # Re-running a stage replaces its section and everything downstream.
+    # Writes happen as each stage finishes while a project is open, and again
+    # on project save for results computed before one was open.
+
+    def _project_path(self) -> Optional[str]:
+        return getattr(self._project_ctx, "path", None) if self._project_ctx else None
+
+    def _panel_record(self, panel: "PanelCard", summary: dict, preview: Optional[dict]) -> dict:
+        """One panel's as-run description: its GUI state (data/dark/bright/
+        background/mask references, omega fields), the geometry the ingest
+        used, and the calibration itself (parsed + file text)."""
         return {
-            "panel_id": panel.panel_id(), "geometry": panel.geometry_cfg(),
-            "corrections": {k: (v is not None) for k, v in panel.corrections_cfg().items()},
-            "mask": {"low_count_threshold": self._low_count.value(), "grow": self._mask_grow.value()},
-            "blobs": {"threshold": self._blob_thresh.value(), "min_vol": self._blob_minvol.value(),
-                      "split_ratio": self._split_ratio.value(), "gap_bridge": self._gap_bridge.value(),
-                      "sector_candidates": self._sector_candidates_cfg(),
-                      "max_workers": self._ingest_max_workers.value()},
+            "panel_id": panel.panel_id(), "state": panel.get_state(),
+            "geometry_cfg": panel.geometry_cfg() if panel.has_calibration() else None,
+            "calibration": panel.calibration_record(),
+            "summary": summary,
+            "preview_meta": {k: (preview or {}).get(k) for k in ("frame_index", "loaded_frame_index")},
         }
 
-    def _log_panel_ingest_attempt(self, panel: "PanelCard", spots_df, summary: dict,
-                                   preview: Optional[dict]):
-        panel_key = solve_pipeline.panel_dir_name(panel.panel_id())
+    def _record_ingest(self, result: dict, panel_summaries: dict, *, pooled: bool):
+        """Snapshot a just-finished ingest as the new record's ``ingest``
+        section and write it. ``panel_summaries`` maps panel_id -> that
+        panel's own ingest summary."""
         try:
-            ref = project.append_solve_cell_ingest_attempt(
-                self._project_ctx.path, panel_key, inputs=self._panel_ingest_inputs(panel),
-                summary=summary, spots_df=spots_df, mask=(preview or {}).get("mask"))
-            self._log.append(f"Logged ingest to project: {ref}")
+            self._snapshot_ingest(result, panel_summaries, pooled=pooled)
         except Exception:
             import traceback as _tb
-            self._log.append("Could not log ingest to project file:\n" + _tb.format_exc())
-
-    def _log_ingest_to_project(self, result: dict):
-        """FAIR provenance: append this ingest run to the open project's
-        ``.h5`` (``project.append_solve_cell_ingest_attempt``), same guarded,
-        best-effort pattern as ``tab_batch.py``'s own ``_log_to_project``.
-        Diamond filter/ab-initio/refine are not logged -- ingest only, per
-        the request this follows. ``inputs`` is rebuilt fresh from the
-        panel/widgets here rather than reusing the ``cfg`` dict handed to
-        ``SolveCellWorker``: that dict is mutated in place by the worker
-        thread (its ``frames_loader`` callable is popped and replaced with
-        the fully materialized raw stack array), so logging it directly
-        would risk dragging a multi-GB array into the metadata path."""
-        if not self._project_ctx or not getattr(self._project_ctx, "path", None):
+            self._log.append("Could not snapshot Solve Cell ingest for the project record:\n"
+                             + _tb.format_exc())
             return
-        self._log_panel_ingest_attempt(
-            self._active_panel(), self._spots_df, result["summary"], result.get("preview"))
+        self._sc_stage_meta = {}
+        self._sc_dirty = {"ingest"}
+        self.flush_project_record()
 
-    def _log_pooled_ingest_to_project(self, result: dict):
-        """Pooled counterpart of :meth:`_log_ingest_to_project` -- a pooled
-        run is just every ready panel's own ingest executed back to back, so
-        its provenance is logged the same way: one attempt per panel, under
-        that panel's own ``panel_key``, exactly as a single-panel run would
-        have logged it."""
-        if not self._project_ctx or not getattr(self._project_ctx, "path", None):
-            return
-        for panel_id, pres in result.get("per_panel", {}).items():
-            panel = self._panels.get(panel_id)
-            if panel is None:
+    def _snapshot_ingest(self, result: dict, panel_summaries: dict, *, pooled: bool):
+        panels = {}
+        self._sc_user_masks = {}
+        for pid, summary in panel_summaries.items():
+            card = self._panels.get(pid)
+            if card is None:
                 continue
-            self._log_panel_ingest_attempt(panel, pres["spots_df"], pres["summary"], pres.get("preview"))
+            panels[str(pid)] = self._panel_record(
+                card, summary, self._ingest_preview_by_panel.get(pid))
+            try:
+                um = card.loader.composite_mask()
+            except Exception:
+                um = None
+            if um is not None:
+                self._sc_user_masks[pid] = np.asarray(um) != 0
+        self._sc_ingest_meta = {
+            "pooled": pooled, "summary": result.get("summary", {}), "panels": panels,
+            "fields": widgets_to_dict(self._stage_state_widgets()),
+            "active_panel": self._active_panel_id(), "next_panel_id": self._next_panel_id,
+            "source_panel_id": None if pooled else self._ingest_source_panel_id,
+            "panel_dir": str(self._panel_dir) if self._panel_dir else None,
+            "pooled_dir": str(self._pooled_dir) if self._pooled_dir else None,
+            "status_text": self._ingest_status.text(),
+        }
+
+    def _mark_sc_dirty(self, stage: str):
+        """A diamond/index stage changed in memory: snapshot the parameters it
+        ran with and write the record if a project is open."""
+        self._sc_stage_meta.setdefault(stage, {})["fields"] = widgets_to_dict(self._stage_state_widgets())
+        self._sc_dirty.add(stage)
+        self.flush_project_record()
+
+    def flush_project_record(self):
+        """Write whichever record sections are out of date to the open
+        project (no-op without a project or results). Called as each stage
+        completes and by ``MainWindow.save_project`` -- the latter covers
+        results computed before a project existed, and a Save As to a new
+        file (every section is rewritten whenever the target file changes).
+        Never raises: a failed write is logged and retried on the next call."""
+        path = self._project_path()
+        if not path or self._spots_df is None or self._sc_ingest_meta is None:
+            return
+        if path != self._sc_record_path:
+            self._sc_dirty = set(project.SOLVE_CELL_STAGES)
+        if not self._sc_dirty:
+            return
+        dirty = set(self._sc_dirty)
+        try:
+            if "ingest" in dirty:
+                self._write_sc_ingest(path)
+                dirty |= {"diamond", "index"}   # the swap replaced the whole record
+            if "diamond" in dirty:
+                self._write_sc_diamond(path)
+                dirty.add("index")              # built on the candidate pool
+            if "index" in dirty:
+                self._write_sc_index(path)
+        except Exception:
+            import traceback as _tb
+            self._log.append("Could not write Solve Cell record to project file:\n" + _tb.format_exc())
+            return
+        self._sc_dirty.clear()
+        self._sc_record_path = path
+        self._persist_viz()
+        self._log.append(f"Solve Cell record updated in project ({', '.join(sorted(dirty))}).")
+
+    def _write_sc_ingest(self, path: str):
+        panels = {}
+        for k in self._sc_ingest_meta["panels"]:
+            pid = int(k)
+            arrays = {}
+            preview = self._ingest_preview_by_panel.get(pid) or {}
+            for name in _PREVIEW_ARRAYS:
+                if preview.get(name) is not None:
+                    arrays[name] = np.asarray(preview[name])
+            if pid in self._sc_user_masks:
+                arrays["user_mask"] = self._sc_user_masks[pid]
+            panels[solve_pipeline.panel_dir_name(pid)] = arrays
+        project.write_solve_cell_ingest(
+            path, meta=self._sc_ingest_meta, spots_df=self._spots_df, panels=panels)
+
+    def _write_sc_diamond(self, path: str):
+        if self._flagged_df is None:
+            project.clear_solve_cell_section(path, "diamond")
+            return
+        meta = dict(self._sc_stage_meta.get("diamond") or {})
+        meta["status_text"] = self._diamond_status.text()
+        project.write_solve_cell_diamond(path, meta=meta, flagged_df=self._flagged_df)
+
+    def _write_sc_index(self, path: str):
+        if self._ab_initio_raw is None and not self._domains:
+            project.clear_solve_cell_section(path, "index")
+            return
+        ab_meta, ab_arrays = None, None
+        raw = self._ab_initio_raw
+        if raw is not None:
+            ab_meta = {"success": bool(raw.success), "cell": raw.cell, "cell_sigma": raw.cell_sigma,
+                       "indexed_fraction": float(raw.indexed_fraction),
+                       "n_indexed": int(raw.n_indexed), "n_reflections": int(raw.n_reflections),
+                       "notes": list(raw.notes), "diagnostics": dict(raw.diagnostics or {})}
+            ab_arrays = {name: getattr(raw, name, None) for name in ("hkl", "indexed_mask", "UB", "UBI")}
+        domains_meta, domain_arrays = [], []
+        for d in self._domains:
+            domains_meta.append({
+                "label": d["label"], "method": d["method"],
+                # the claimed rows are stored as an array; the mask is redundant
+                "result": {k: v for k, v in d["result"].items() if k != "indexed_mask"}})
+            arrays = {"claimed_index": np.asarray(d["claimed_index"]),
+                      "xyz": np.column_stack([np.asarray(c) for c in d["xyz"]])}
+            if d.get("panel_ids") is not None:
+                arrays["panel_ids"] = np.asarray(d["panel_ids"])
+            domain_arrays.append(arrays)
+        meta = dict(self._sc_stage_meta.get("index") or {})
+        meta.update({
+            "ab_initio": ab_meta, "domains": domains_meta,
+            "sigma_g_used": self._sigma_g_used,
+            "round1_domain_index": self._round1_domain_index,
+            "ab_status_text": self._ab_status.text(),
+            "leftover_run_status_text": self._leftover_run_status.text(),
+        })
+        project.write_solve_cell_index(path, meta=meta, ab_initio=ab_arrays, domains=domain_arrays)
+
+    def apply_project_solve_cell(self, record: dict, *, restore_config: bool = True):
+        """Restore the whole recorded analysis (``project.read_solve_cell``)
+        into the tab: results, domains, previews and status text, so each
+        stage can be rerun from where it left off. ``restore_config`` also
+        rebuilds the panel tabs and stage parameters exactly as they were
+        when the analysis ran; pass False when the saved GUI workspace has
+        already restored them (it then wins -- it may be newer), in which
+        case only a panel with no calibration is filled in, from the
+        record's embedded copy."""
+        import pandas as pd
+        from types import SimpleNamespace
+
+        ing = record["ingest"]
+        imeta = ing["meta"]
+        dia, idx = record.get("diamond"), record.get("index")
+        panels_rec = imeta.get("panels") or {}
+
+        if restore_config:
+            fields = {}
+            for m in (imeta, (dia or {}).get("meta"), (idx or {}).get("meta")):
+                fields.update((m or {}).get("fields") or {})
+            self.set_state({
+                "fields": fields,
+                "panels": {k: v["state"] for k, v in panels_rec.items()},
+                "active_panel": imeta.get("active_panel"),
+                "next_panel_id": imeta.get("next_panel_id", 1),
+            })
+        for k, prec in panels_rec.items():
+            card = self._panels.get(int(k))
+            if card is not None and not card.has_calibration():
+                card.restore_calibration_record(prec.get("calibration"))
+
+        # ── ingest ──
+        self._reset_ingest_results()
+        spots = ing["spots_df"].copy()
+        if "spot_id" not in spots:
+            spots["spot_id"] = np.arange(len(spots))
+        self._spots_df = spots
+        self._selected_spot_id = None
+        self._show_detector_btn.setEnabled(False)
+        self._recip_has_data = False
+        self._ingest_source_panel_id = imeta.get("source_panel_id")
+        self._panel_dir = Path(imeta["panel_dir"]) if imeta.get("panel_dir") else None
+        self._pooled_dir = Path(imeta["pooled_dir"]) if imeta.get("pooled_dir") else None
+        self._ingest_status.setText(imeta.get("status_text") or f"{len(spots)} spots")
+        self._diamond_btn.setEnabled(len(spots) > 0)
+        self._ingest_preview_by_panel = {}
+        self._sc_user_masks = {}
+        for k, prec in panels_rec.items():
+            pid = int(k)
+            arrays = ing["panels"].get(solve_pipeline.panel_dir_name(pid), {})
+            preview = {name: arrays[name] for name in _PREVIEW_ARRAYS if name in arrays}
+            if preview:
+                preview.update(prec.get("preview_meta") or {})
+                self._ingest_preview_by_panel[pid] = preview
+            if "user_mask" in arrays:
+                self._sc_user_masks[pid] = arrays["user_mask"].astype(bool)
+        self._ingest_preview = self._ingest_preview_by_panel.get(
+            self._ingest_source_panel_id,
+            next(iter(self._ingest_preview_by_panel.values()), None))
+
+        # ── diamond filter ──
+        dmeta = (dia or {}).get("meta") or {}
+        if dia:
+            flagged = dia["flagged_df"]
+            self._flagged_df = flagged
+            # same derivation as pipeline._stage_diamond_filter, so the
+            # restored row labels match the saved domains' claimed_index
+            self._candidate_df = flagged[~flagged["is_diamond"]].reset_index(drop=True)
+            self._diamond_status.setText(dmeta.get("status_text") or "")
+            self._ab_btn.setEnabled(len(self._candidate_df) > 0)
+
+        # ── indexing + domains ──
+        xmeta = (idx or {}).get("meta") or {}
+        if idx and self._candidate_df is not None:
+            ab = xmeta.get("ab_initio")
+            if ab:
+                arrs = idx["ab_initio"]
+                self._ab_initio_raw = SimpleNamespace(
+                    **ab, candidates=[], hkl=arrs.get("hkl"), indexed_mask=arrs.get("indexed_mask"),
+                    UB=arrs.get("UB"), UBI=arrs.get("UBI"))
+                self._g_2pi = self._candidate_df[["qsample_x", "qsample_y", "qsample_z"]].to_numpy()
+                self._refine_btn.setEnabled(bool(ab["success"]))
+            self._sigma_g_used = xmeta.get("sigma_g_used")
+            self._ab_status.setText(xmeta.get("ab_status_text") or "—")
+            self._leftover_run_status.setText(xmeta.get("leftover_run_status_text") or "—")
+            for dm, arrs in zip(xmeta.get("domains") or [], idx["domains"]):
+                claimed = pd.Index(arrs["claimed_index"])
+                d = {"label": dm["label"], "method": dm["method"], "result": dm["result"],
+                     "xyz": tuple(arrs["xyz"][:, i] for i in range(3)),
+                     "claimed_index": claimed, "panel_ids": arrs.get("panel_ids")}
+                self._domains.append(d)
+                self._claimed_index = (claimed if self._claimed_index is None
+                                       else self._claimed_index.union(claimed))
+                self._domain_list.addItem(self._domain_text(d))
+            self._round1_domain_index = xmeta.get("round1_domain_index")
+            if self._domains:
+                self._domain_list.setCurrentRow(len(self._domains) - 1)
+            self._update_leftover_status()
+            self._update_multidomain_plot()
+
+        self._sc_ingest_meta = imeta
+        self._viz_products = dict(record.get("viz") or {})
+        self._viz_unsaved = set()
+        self._show_cached_volume()
+        self._show_cached_shoeboxes()
+        self._refresh_recip_view()
+        self._refresh_detector_preview()
+        self._refresh_overlays()
+
+        self._sc_ingest_meta = imeta
+        self._sc_stage_meta = {"diamond": {k: dmeta[k] for k in ("fields", "summary") if k in dmeta},
+                               "index": {k: xmeta[k] for k in ("fields",) if k in xmeta}}
+        self._sc_dirty = set()
+        self._sc_record_path = self._project_path()
+        self._log.append(
+            f"Restored Solve Cell analysis from project ({len(spots)} spots, "
+            f"{len(self._domains)} domain(s), last stage: {record.get('last_stage')}).")
 
     # ── stage 2: diamond filter ─────────────────────────────────────
 
@@ -1689,6 +2420,8 @@ class SolveCellTab(QtWidgets.QWidget):
                          f"{summary['n_kept']} candidates kept.")
         self._ab_btn.setEnabled(len(self._candidate_df) > 0)
         self._refresh_recip_view()
+        self._sc_stage_meta["diamond"] = {"summary": summary}
+        self._mark_sc_dirty("diamond")
 
     # ── stage 3: index (blind ab-initio, or a user-supplied known cell) ──
 
@@ -1859,8 +2592,8 @@ class SolveCellTab(QtWidgets.QWidget):
             self._replace_domain(self._round1_domain_index, "known structure (manual)",
                                   result, claimed_index, xyz, panel_ids)
         else:
-            self._round1_domain_index = self._add_domain(
-                "known structure (manual)", result, claimed_index, xyz, panel_ids)
+            self._add_domain("known structure (manual)", result, claimed_index, xyz, panel_ids,
+                             round1=True)
 
     def _on_ab_initio_done(self, result: dict):
         self._ab_btn.setEnabled(True); self._prog.setVisible(False)
@@ -1877,6 +2610,7 @@ class SolveCellTab(QtWidgets.QWidget):
         for note in res["notes"]:
             self._log.append(f"  note: {note}")
         self._refine_btn.setEnabled(bool(res["success"]))
+        self._mark_sc_dirty("index")
 
         if not res["success"]:
             return
@@ -1917,7 +2651,7 @@ class SolveCellTab(QtWidgets.QWidget):
         if self._round1_domain_index is not None:
             self._replace_domain(self._round1_domain_index, "free (ab-initio)", r, claimed_index, xyz, panel_ids)
         else:
-            self._round1_domain_index = self._add_domain("free (ab-initio)", r, claimed_index, xyz, panel_ids)
+            self._add_domain("free (ab-initio)", r, claimed_index, xyz, panel_ids, round1=True)
 
     def _populate_result_grid(self, r: dict):
         grid = self._param_grid
@@ -1952,24 +2686,31 @@ class SolveCellTab(QtWidgets.QWidget):
         if row < 0 or row >= len(self._domains):
             return
         self._populate_result_grid(self._domains[row]["result"])
+        self._refresh_overlays()
 
-    def _add_domain(self, method: str, result: dict, claimed_index, xyz, panel_ids=None) -> int:
+    def _add_domain(self, method: str, result: dict, claimed_index, xyz, panel_ids=None,
+                    *, round1: bool = False) -> int:
         """Append a new solved domain and return its index in
         ``self._domains``. ``claimed_index`` is the set of ``candidate_df``
         row labels this domain claims (never overlapping an earlier domain's
         claim -- see ``_leftover_df``). ``panel_ids`` is an optional array
         parallel to ``xyz`` (``None`` when the source had no ``panel_id``
-        column), used by the Panel color mode."""
+        column), used by the Panel color mode. ``round1`` marks it as the
+        domain a re-run of round 1 (Refine / known-structure index) replaces;
+        set here, before the project record is written, so a restored project
+        replaces it too instead of appending a duplicate."""
         label = f"Domain {len(self._domains) + 1}"
         self._domains.append({"label": label, "method": method, "result": result,
                               "xyz": xyz, "claimed_index": claimed_index, "panel_ids": panel_ids})
         self._claimed_index = (claimed_index if self._claimed_index is None
                                else self._claimed_index.union(claimed_index))
-        self._domain_list.addItem(
-            f"{label} ({method}): {len(claimed_index)} spots, a={result['cell'][0]:.4g} Å")
+        self._domain_list.addItem(self._domain_text(self._domains[-1]))
         self._domain_list.setCurrentRow(len(self._domains) - 1)
+        if round1:
+            self._round1_domain_index = len(self._domains) - 1
         self._update_leftover_status()
         self._update_multidomain_plot()
+        self._mark_sc_dirty("index")
         return len(self._domains) - 1
 
     def _replace_domain(self, idx: int, method: str, result: dict, claimed_index, xyz, panel_ids=None):
@@ -1984,11 +2725,16 @@ class SolveCellTab(QtWidgets.QWidget):
         for d in self._domains:
             self._claimed_index = (d["claimed_index"] if self._claimed_index is None
                                    else self._claimed_index.union(d["claimed_index"]))
-        self._domain_list.item(idx).setText(
-            f"{label} ({method}): {len(claimed_index)} spots, a={result['cell'][0]:.4g} Å")
+        self._domain_list.item(idx).setText(self._domain_text(self._domains[idx]))
         self._domain_list.setCurrentRow(idx)
         self._update_leftover_status()
         self._update_multidomain_plot()
+        self._mark_sc_dirty("index")
+
+    @staticmethod
+    def _domain_text(d: dict) -> str:
+        return (f"{d['label']} ({d['method']}): {len(d['claimed_index'])} spots, "
+                f"a={d['result']['cell'][0]:.4g} Å")
 
     def _leftover_df(self):
         """``candidate_df`` rows no domain has claimed yet -- ``None`` before

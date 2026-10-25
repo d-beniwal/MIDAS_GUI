@@ -323,51 +323,152 @@ def test_append_integration_attempt_embeds_profiles_and_links_calibration(tmp_pa
         assert meta["out_paths"] == ["/tmp/out/frame_0.csv"]
 
 
-def test_append_solve_cell_ingest_attempt_embeds_spots_and_round_trips(tmp_path):
+def _sc_spots(n=3):
     import pandas as pd
+    return pd.DataFrame({
+        "row": np.arange(n, dtype=float), "col": np.arange(n, dtype=float) + 5,
+        "loaded_frame_idx": np.arange(n), "two_theta_deg": np.linspace(5, 6, n),
+    })
+
+
+def _sc_flagged(n=3):
+    df = _sc_spots(n)
+    df["is_diamond"] = [i == 0 for i in range(n)]
+    return df
+
+
+def test_solve_cell_ingest_round_trips_spots_meta_and_panel_arrays(tmp_path):
     path = str(tmp_path / "proj.h5")
     project.create_project(path)
-
-    spots_df = pd.DataFrame({
-        "row": [10.0, 20.0], "col": [5.0, 15.0], "frame": [1.0, 3.0],
-        "loaded_frame_idx": [1, 3], "two_theta_deg": [5.0, 6.0],
-    })
+    data = tmp_path / "raw.h5"
+    data.write_bytes(b"raw frames")
     mask = np.zeros((4, 4), dtype=bool)
     mask[0, 0] = True
 
-    ref = project.append_solve_cell_ingest_attempt(
-        path, "panel_01", inputs={"geometry": {"Lsd": 150000.0}},
-        summary={"n_spots": 2, "n_sectors": 8}, spots_df=spots_df, mask=mask)
+    ref = project.write_solve_cell_ingest(
+        path, meta={"summary": {"n_spots": 3}, "panels": {"1": {"state": {"loader": {"path": str(data)}}}}},
+        spots_df=_sc_spots(), panels={"panel_01": {"mask": mask}})
 
-    assert ref == "/analysis/solve_cell/panel_01/attempt_0001"
-    with h5py.File(path, "r") as f:
-        att = f["analysis/solve_cell/panel_01/attempt_0001"]
-        assert att.attrs["n_spots"] == 2
-        assert bool(att["mask"][0, 0])
-        meta = json.loads(att["metadata"][()])
-        assert meta["summary"]["n_sectors"] == 8
-        assert meta["panel_key"] == "panel_01"
+    assert ref == project.SOLVE_CELL_REF
+    rec = project.read_solve_cell(path)
+    assert rec["last_stage"] == "ingest"
+    assert rec["diamond"] is None and rec["index"] is None
+    assert rec["ingest"]["spots_df"]["two_theta_deg"].tolist() == pytest.approx([5.0, 5.5, 6.0])
+    assert bool(rec["ingest"]["panels"]["panel_01"]["mask"][0, 0])
+    meta = rec["ingest"]["meta"]
+    assert meta["summary"]["n_spots"] == 3
+    # raw data is referenced + hashed, never embedded
+    ref_entry = meta["panels"]["1"]["state"]["loader"]
+    assert ref_entry["path"] == str(data) and ref_entry["path_hash"]["sha256"]
+    assert rec["metadata"]["environment"]["python_version"]
 
-    out = project.read_solve_cell_ingest_results(path, ref)
-    restored = out["spots_df"]
-    assert list(restored["loaded_frame_idx"]) == [1, 3]
-    assert restored["two_theta_deg"].tolist() == pytest.approx([5.0, 6.0])
 
-
-def test_append_solve_cell_ingest_attempt_handles_empty_spots_df(tmp_path):
+def test_solve_cell_ingest_handles_empty_spots(tmp_path):
     import pandas as pd
     path = str(tmp_path / "proj.h5")
     project.create_project(path)
-    spots_df = pd.DataFrame({
-        "row": pd.Series(dtype=float), "col": pd.Series(dtype=float),
-        "loaded_frame_idx": pd.Series(dtype="int64"),
-    })
+    empty = pd.DataFrame({"row": pd.Series(dtype=float), "loaded_frame_idx": pd.Series(dtype="int64")})
+    project.write_solve_cell_ingest(path, meta={}, spots_df=empty)
+    assert len(project.read_solve_cell(path)["ingest"]["spots_df"]) == 0
 
-    ref = project.append_solve_cell_ingest_attempt(
-        path, "panel_01", inputs={}, summary={"n_spots": 0}, spots_df=spots_df)
 
-    out = project.read_solve_cell_ingest_results(path, ref)
-    assert len(out["spots_df"]) == 0
+def test_solve_cell_stages_layer_on_one_record_and_downstream_is_dropped(tmp_path):
+    path = str(tmp_path / "proj.h5")
+    project.create_project(path)
+    project.write_solve_cell_ingest(path, meta={}, spots_df=_sc_spots())
+    project.write_solve_cell_diamond(path, meta={"summary": {"n_kept": 2}}, flagged_df=_sc_flagged())
+    project.write_solve_cell_index(
+        path, meta={"ab_initio": {"success": True}, "domains": [{"label": "Domain 1"}]},
+        ab_initio={"hkl": np.ones((2, 3)), "indexed_mask": np.array([True, False])},
+        domains=[{"claimed_index": np.array([1, 2]), "xyz": np.zeros((2, 3))}])
+
+    rec = project.read_solve_cell(path)
+    assert rec["last_stage"] == "index"
+    assert rec["diamond"]["flagged_df"]["is_diamond"].tolist() == [True, False, False]
+    assert rec["index"]["ab_initio"]["hkl"].shape == (2, 3)
+    assert rec["index"]["domains"][0]["claimed_index"].tolist() == [1, 2]
+    assert project.solve_cell_overview(path)["n_domains"] == 1
+
+    # re-running diamond invalidates the index built on it
+    project.write_solve_cell_diamond(path, meta={}, flagged_df=_sc_flagged())
+    rec = project.read_solve_cell(path)
+    assert rec["index"] is None and rec["last_stage"] == "diamond"
+
+    # a new ingest replaces the entire record
+    project.write_solve_cell_ingest(path, meta={}, spots_df=_sc_spots(2))
+    rec = project.read_solve_cell(path)
+    assert rec["diamond"] is None and len(rec["ingest"]["spots_df"]) == 2
+    with h5py.File(path, "r") as f:
+        assert list(f["analysis/solve_cell"].keys()).count("ingest") == 1
+        assert not any(k.startswith("attempt_") for k in f["analysis/solve_cell"].keys())
+
+
+def test_solve_cell_later_stage_requires_an_ingest_record(tmp_path):
+    path = str(tmp_path / "proj.h5")
+    project.create_project(path)
+    with pytest.raises(ValueError, match="ingest"):
+        project.write_solve_cell_diamond(path, meta={}, flagged_df=_sc_flagged())
+    with pytest.raises(ValueError, match="ingest"):
+        project.write_solve_cell_index(path, meta={})
+
+
+def test_clear_solve_cell_section(tmp_path):
+    path = str(tmp_path / "proj.h5")
+    project.create_project(path)
+    project.clear_solve_cell_section(path, "index")       # no record: fine
+    project.write_solve_cell_ingest(path, meta={}, spots_df=_sc_spots())
+    project.write_solve_cell_diamond(path, meta={}, flagged_df=_sc_flagged())
+    project.write_solve_cell_index(path, meta={"domains": []})
+    project.clear_solve_cell_section(path, "index")
+    rec = project.read_solve_cell(path)
+    assert rec["index"] is None and rec["diamond"] is not None and rec["last_stage"] == "diamond"
+    project.clear_solve_cell_section(path, "diamond")
+    assert project.read_solve_cell(path)["diamond"] is None
+    with pytest.raises(ValueError):
+        project.clear_solve_cell_section(path, "ingest")
+
+
+def test_read_solve_cell_is_none_without_a_record_and_legacy_layout_is_ignored(tmp_path):
+    path = str(tmp_path / "proj.h5")
+    project.create_project(path)
+    assert project.read_solve_cell(path) is None
+    assert not project.has_solve_cell(path)
+    assert project.solve_cell_overview(path) is None
+    with h5py.File(path, "a") as f:        # earlier per-panel attempt layout
+        f.require_group("analysis/solve_cell/panel_01/attempt_0001")
+    assert project.read_solve_cell(path) is None
+
+
+def test_solve_cell_in_analysis_summary_metadata_and_copy(tmp_path):
+    src, dest = str(tmp_path / "src.h5"), str(tmp_path / "dest.h5")
+    project.create_project(src)
+    assert "solve_cell" not in project.analysis_summary(src)
+    project.write_solve_cell_ingest(src, meta={"summary": {"n_spots": 3}}, spots_df=_sc_spots())
+    project.write_solve_cell_diamond(src, meta={"summary": {}}, flagged_df=_sc_flagged())
+    assert project.analysis_summary(src)["solve_cell"] == 1
+    md = project.solve_cell_metadata(src)
+    assert md["ingest"]["summary"]["n_spots"] == 3 and "diamond" in md
+
+    for scope in ("all", "latest"):
+        d = str(tmp_path / f"dest_{scope}.h5")
+        project.create_project(d)
+        copied = project.copy_analysis_history(src, d, scope)
+        assert copied["solve_cell"] == 1
+        assert project.read_solve_cell(d)["diamond"] is not None
+    none_dest = str(tmp_path / "dest_none.h5")
+    project.create_project(none_dest)
+    assert project.copy_analysis_history(src, none_dest, "none") == {}
+    assert not project.has_solve_cell(none_dest)
+
+
+def test_copy_keeps_a_destination_solve_cell_record_written_from_the_live_session(tmp_path):
+    src, dest = str(tmp_path / "src.h5"), str(tmp_path / "dest.h5")
+    project.create_project(src)
+    project.create_project(dest)
+    project.write_solve_cell_ingest(src, meta={}, spots_df=_sc_spots(3))
+    project.write_solve_cell_ingest(dest, meta={}, spots_df=_sc_spots(9))   # fresher
+    project.copy_analysis_history(src, dest, "all")
+    assert len(project.read_solve_cell(dest)["ingest"]["spots_df"]) == 9
 
 
 def test_create_project_overwrite_backs_up_and_replaces(tmp_path):
