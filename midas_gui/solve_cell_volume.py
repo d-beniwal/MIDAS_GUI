@@ -22,6 +22,8 @@ import pyvista as pv
 from PyQt5 import QtCore, QtGui, QtWidgets
 from pyvistaqt import QtInteractor
 
+from midas_gui.pyvista_views import close_interactor_at_quit
+
 from midas_gui.solve_cell import reciprocal_volume as rv
 
 _AXES = ("qx", "qy", "qz")
@@ -172,6 +174,7 @@ class ReciprocalVolumeView(QtWidgets.QWidget):
         rvl.addLayout(r3)
         self.iv = QtInteractor(right)
         self.iv.set_background("black")
+        close_interactor_at_quit(self.iv)
         rvl.addWidget(self.iv, stretch=1)
         split.addWidget(right)
         split.setSizes([620, 520])

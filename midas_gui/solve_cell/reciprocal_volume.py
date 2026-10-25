@@ -25,6 +25,7 @@ import math
 from dataclasses import dataclass, asdict
 from typing import Callable, Iterable, Optional
 
+import warnings
 import numpy as np
 import torch
 
@@ -235,7 +236,9 @@ def axis_slab(field: np.ndarray, count: np.ndarray, axis: int, index: int, half_
     f = np.take(field, range(lo, hi), axis=axis).astype(np.float64)
     c = np.take(count, range(lo, hi), axis=axis)
     f = np.where(c > 0, f, np.nan)
-    with np.errstate(all="ignore"):
+    with np.errstate(all="ignore"), warnings.catch_warnings():
+        # nanmax/nanmean raise RuntimeWarning (not an FP error) on all-NaN columns
+        warnings.simplefilter("ignore", RuntimeWarning)
         if reduce == "max":
             img = np.nanmax(f, axis=axis)
         elif reduce == "sum":

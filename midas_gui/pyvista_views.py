@@ -50,6 +50,20 @@ _DEFAULT_POINT_SIZE = 14.0
 _MIN_INTENSITY_RADIUS_FRACTION = 0.35
 
 
+def close_interactor_at_quit(interactor):
+    """Finalize a ``QtInteractor`` before Qt tears down its offscreen GL
+    surface; otherwise pyvistaqt's make-current observer fires on the deleted
+    ``QOffscreenSurface`` during shutdown and spams RuntimeError tracebacks."""
+    def _close():
+        try:
+            interactor.close()
+        except RuntimeError:
+            pass  # C++ side already gone
+    app = QtWidgets.QApplication.instance()
+    if app is not None:
+        app.aboutToQuit.connect(_close)
+
+
 class _PickableInteractor(QtInteractor):
     """``QtInteractor`` with left-click-to-select and hover-for-details on
     top of VTK's default trackball camera, via its own ``vtkPointPicker``.
@@ -138,6 +152,7 @@ class PyVistaScatter3DView(QtWidgets.QWidget):
         layout.setSpacing(0)
         self.interactor = _PickableInteractor(self)
         self.interactor.set_background("black")
+        close_interactor_at_quit(self.interactor)
         layout.addWidget(self.interactor, stretch=1)
         self.interactor.spotClicked.connect(self.spotClicked)
         self.interactor.spotHovered.connect(self.spotHovered)
