@@ -36,7 +36,8 @@ _POLL_INTERVAL_MS = 100
 # forwarded to GuiController.dispatch() like every other op — see
 # _dispatch_async and its docstring for why a nested event-loop wait inside
 # a single dispatch() call is unsafe.
-_ASYNC_OPS = frozenset({"calibrate.wait", "calibrate.run_frozen_point_then_oneshot"})
+_ASYNC_OPS = frozenset({"calibrate.wait", "calibrate.run_frozen_point_then_oneshot",
+                        "solve_cell.wait"})
 
 # QLocalServer's underlying Unix-domain-socket path is a Qt implementation
 # detail (and varies by platform/version), so rather than have
@@ -180,17 +181,24 @@ class ControlServer(QtCore.QObject):
             job_id = args.get("job_id")
             deadline = time.monotonic() + float(args.get("timeout", 120.0))
             self._poll_job(sock, req_id, job_id, deadline)
+        elif op == "solve_cell.wait":
+            job_id = args.get("job_id")
+            deadline = time.monotonic() + float(args.get("timeout", 600.0))
+            self._poll_job(sock, req_id, job_id, deadline,
+                           getter=self.controller.op_solve_cell_get_job)
         elif op == "calibrate.run_frozen_point_then_oneshot":
             self._run_frozen_point_then_oneshot(sock, req_id, args)
 
-    def _poll_job(self, sock, req_id, job_id, deadline: float) -> None:
+    def _poll_job(self, sock, req_id, job_id, deadline: float, getter=None) -> None:
         if sip.isdeleted(sock):
             return
-        job = self.controller.op_calibrate_get_job(job_id=job_id)
+        getter = getter or self.controller.op_calibrate_get_job
+        job = getter(job_id=job_id)
         status = (job.get("result") or {}).get("status") if job.get("ok") else None
         if job.get("ok") and status == "running" and time.monotonic() < deadline:
-            QtCore.QTimer.singleShot(_POLL_INTERVAL_MS,
-                                     lambda: self._poll_job(sock, req_id, job_id, deadline))
+            QtCore.QTimer.singleShot(
+                _POLL_INTERVAL_MS,
+                lambda: self._poll_job(sock, req_id, job_id, deadline, getter))
             return
         job["id"] = req_id
         self._safe_reply(sock, job)

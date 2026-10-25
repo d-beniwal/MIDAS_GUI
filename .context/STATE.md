@@ -40,7 +40,7 @@ Backup of the example project before edits: `scratch/s3idc_oct8_spinel.pre_vis_b
 - Decide whether/when to merge `pyvista` into main after live verification.
 - Investigate the reported midas_defect grouped-median abort; apply thread
   parallelism to known-cell search; consult ROADMAP for other pending work.
-- Live-app checks remain for MCP Calibrate, APEXA, relaunch and real
+- Live-app checks remain for MCP Calibrate + Solve Cell (real socket, real ingest), APEXA, relaunch and real
   multi-panel calibration output.
 
 ## Open questions / blockers
@@ -57,6 +57,8 @@ Backup of the example project before edits: `scratch/s3idc_oct8_spinel.pre_vis_b
 
 ## Recent changes
 
+- 2026-10-25 — Reciprocal map: removed fitted-positions/Fit-visible controls, renamed/separated overlays, fixed click picking (own screen-space projection, HiDPI-safe) and Detector view now follows a click. User-verified live.
+- 2026-10-25 — MCP: all Solve Cell workflows exposed as `solve_cell.*` control ops / 37 `solve_cell_*` tools (`control_api.py`, `server.py`, `SolveCellTab.stageFinished` + agent mode; `tests/test_control_api_solve_cell_ops.py`). Uncommitted. Live-GUI check over the real socket still to do.
 - 2026-10-25 — Global Data/Controls/Results terminology; Solve Cell Data/Controls panels minimise to a bottom ribbon (`panel_toggle.py`); also Data Viewer, Calibrate, Batch Integrate, Pump Probe (`tests/test_panel_toggle_tabs.py`). Committed `2ddc492`.
 - 2026-10-25 — Solve Cell left-panel refinement: Panels ribbon (number = id), start/end/step/first-idx omega mapping with derived last idx + click-to-detect, size-only Data info, calibration filename link + popup, right-click About (see DECISIONS). Committed `2ddc492`.
 - 2026-10-24 — `solve_cell_vis`: V02 frame patches (`frame_patch.py`) + visualization document (md+pdf); V13 domain comparison (`domain_compare.py`, `solve_cell_compare.py`); geometry adapter, viz products + project cache, overlays, Diagnostics/Volume/Spot-inspector/Contamination tabs (`tests/test_solve_cell_viz*.py`).

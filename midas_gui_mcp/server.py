@@ -1,4 +1,4 @@
-"""MCP server for midas-gui's Data Viewer and Calibrate tabs.
+"""MCP server for midas-gui's Data Viewer, Calibrate and Solve Cell tabs.
 
 A thin proxy: every tool here does nothing but serialize its arguments,
 send them to the running midas-gui instance's control socket (via
@@ -333,6 +333,326 @@ def calibrate_save_paramstest(out_path: str, template_path: Optional[str] = None
 def calibrate_get_state() -> Any:
     """Full Calibrate tab state snapshot."""
     return _call("calibrate.get_state")
+
+
+# ── Solve Cell ───────────────────────────────────────────────────────
+#
+# The tab's pipeline is: configure panels (data + calibration + omega
+# mapping) → 1 Ingest → 2 Diamond filter → 3 Index → 4 Refine (free mode
+# only; known-structure indexing refines in the same run) → 5 Index
+# remaining spots (repeat for further domains). Every run_* tool is async:
+# it returns a job_id — block on it with solve_cell_wait (or poll
+# solve_cell_get_job). Only one stage runs at a time.
+
+@mcp.tool()
+def solve_cell_get_state() -> Any:
+    """Full Solve Cell snapshot: every panel (data path, n_frames, calibration,
+    omega mapping), every stage's parameters, whether a stage is running, and
+    result counts (spots, diamond-flagged, candidates, remaining, solved
+    domains with cell/UB/rms). Call this first to see what is already done."""
+    return _call("solve_cell.get_state")
+
+
+@mcp.tool()
+def solve_cell_get_log(tail: int = 80) -> Any:
+    """The last ``tail`` lines of the Solve Cell log panel (stage progress,
+    warnings, indexing notes) — read this when a stage fails or finds nothing."""
+    return _call("solve_cell.get_log", tail=tail)
+
+
+@mcp.tool()
+def solve_cell_set_project_dir(path: str) -> Any:
+    """Set the Solve Cell project folder where panel_NN/ and pooled/ stage
+    outputs are written ("" = keep everything in memory only)."""
+    return _call("solve_cell.set_project_dir", path=path)
+
+
+@mcp.tool()
+def solve_cell_add_panel() -> Any:
+    """Add a detector panel (a new numbered tab, becomes the active panel).
+    Multi-panel setups ingest all fully-configured panels together."""
+    return _call("solve_cell.add_panel")
+
+
+@mcp.tool()
+def solve_cell_remove_panel(panel_id: int) -> Any:
+    """Remove a panel. Removing a non-last panel renumbers the later ones and
+    would invalidate an existing ingest, so that case is refused when results
+    exist — remove from the end, or start a fresh ingest state first."""
+    return _call("solve_cell.remove_panel", panel_id=panel_id)
+
+
+@mcp.tool()
+def solve_cell_select_panel(panel_id: int) -> Any:
+    """Make a panel the active one (the one Detector view / run guards use)."""
+    return _call("solve_cell.select_panel", panel_id=panel_id)
+
+
+@mcp.tool()
+def solve_cell_panel_load_data(path: str, dataset: Optional[str] = None,
+                               panel_id: Optional[int] = None) -> Any:
+    """Load a panel's raw frame stack (HDF5 dataset optional). panel_id
+    defaults to the active panel."""
+    return _call("solve_cell.panel_load_data", path=path, dataset=dataset, panel_id=panel_id)
+
+
+@mcp.tool()
+def solve_cell_panel_set_field(role: str, path: str, checked: bool = True,
+                               mode: Optional[str] = None,
+                               panel_id: Optional[int] = None) -> Any:
+    """Set a panel's dark/bright/background field (role "dark"/"bright"/
+    "background"; mode "divide"/"subtract" applies to bright only)."""
+    return _call("solve_cell.panel_set_field", role=role, path=path, checked=checked,
+                 mode=mode, panel_id=panel_id)
+
+
+@mcp.tool()
+def solve_cell_panel_load_calibration(path: str, panel_id: Optional[int] = None) -> Any:
+    """Load a panel's calibration (MIDAS paramstest.txt / calibration.json /
+    pyFAI .poni, auto-detected). Required before Ingest. Returns the geometry
+    and notes (e.g. a file that does not declare im_trans)."""
+    return _call("solve_cell.panel_load_calibration", path=path, panel_id=panel_id)
+
+
+@mcp.tool()
+def solve_cell_panel_set_omega(start: Optional[float] = None, end: Optional[float] = None,
+                               step: Optional[float] = None, first_idx: Optional[int] = None,
+                               panel_id: Optional[int] = None) -> Any:
+    """Set a panel's frame↔omega mapping (degrees): omega(frame) = start +
+    (frame − first_idx) × step; frames outside [first_idx, last] are excluded.
+    Omit an argument to leave it as-is. A step of 0 with start != end makes
+    every frame share one omega — ingest refuses that unless acknowledged."""
+    return _call("solve_cell.panel_set_omega", start=start, end=end, step=step,
+                 first_idx=first_idx, panel_id=panel_id)
+
+
+@mcp.tool()
+def solve_cell_panel_list_omega_fields(panel_id: Optional[int] = None) -> Any:
+    """List the HDF5 1-D datasets in the panel's data file (omega-looking
+    names first) — candidates for solve_cell_panel_detect_first_idx."""
+    return _call("solve_cell.panel_list_omega_fields", panel_id=panel_id)
+
+
+@mcp.tool()
+def solve_cell_panel_detect_first_idx(field: str, panel_id: Optional[int] = None) -> Any:
+    """Auto-fill the panel's first frame idx from an HDF5 per-frame omega
+    field: the first loaded frame whose omega lies between start and end
+    omega (set those first with solve_cell_panel_set_omega)."""
+    return _call("solve_cell.panel_detect_first_idx", field=field, panel_id=panel_id)
+
+
+@mcp.tool()
+def solve_cell_set_ingest_params(
+    low_count_threshold: Optional[float] = None, mask_grow: Optional[int] = None,
+    blob_threshold: Optional[float] = None, blob_min_vol: Optional[int] = None,
+    split_ratio: Optional[float] = None, gap_bridge: Optional[int] = None,
+    sector_candidates: Optional[list] = None, max_workers: Optional[int] = None,
+) -> Any:
+    """Stage 1 (Ingest) tuning — the "Parameters…" dialog. gap_bridge is the
+    closing-kernel size in px (0 disables bridging, for single-sensor
+    detectors); sector_candidates is a list of azimuth-sector counts to
+    grid-search (narrow it to one value once a prior run's log reports
+    choose_sectors); max_workers is the thread-pool width. Omit to keep."""
+    return _call("solve_cell.set_ingest_params", low_count_threshold=low_count_threshold,
+                 mask_grow=mask_grow, blob_threshold=blob_threshold, blob_min_vol=blob_min_vol,
+                 split_ratio=split_ratio, gap_bridge=gap_bridge,
+                 sector_candidates=sector_candidates, max_workers=max_workers)
+
+
+@mcp.tool()
+def solve_cell_run_ingest(acknowledge_warnings: bool = False) -> Any:
+    """Stage 1: ingest every fully-configured panel (calibration + data, no
+    pending field) — pooled if more than one. Async: returns a job_id for
+    solve_cell_wait. Refuses (precondition_failed) on a 0° omega step with a
+    non-zero omega span, or a calibration that declares no im_trans; pass
+    acknowledge_warnings=True only once you have checked those are intended."""
+    return _call("solve_cell.run_ingest", acknowledge_warnings=acknowledge_warnings)
+
+
+@mcp.tool()
+def solve_cell_set_diamond_params(diamond_a: Optional[float] = None,
+                                  tol_deg: Optional[float] = None) -> Any:
+    """Stage 2 settings: diamond cubic cell edge (Å) and the 2θ window (°)
+    around each predicted diamond ring within which a spot is flagged."""
+    return _call("solve_cell.set_diamond_params", diamond_a=diamond_a, tol_deg=tol_deg)
+
+
+@mcp.tool()
+def solve_cell_run_diamond_filter() -> Any:
+    """Stage 2: flag diamond-ring spots and build the candidate pool for
+    indexing. Needs a finished ingest. Async (job_id → solve_cell_wait). A new
+    diamond filter clears all solved domains."""
+    return _call("solve_cell.run_diamond_filter")
+
+
+@mcp.tool()
+def solve_cell_set_index_params(
+    method: Optional[str] = None, sigma_g: Optional[float] = None,
+    min_reflections: Optional[int] = None, tol: Optional[float] = None,
+    known_structure: Optional[dict] = None,
+) -> Any:
+    """Stage 3 settings. method: "free" (blind ab-initio, then run refine) or
+    "known_structure" (index + refine in one run against a cell you supply).
+    sigma_g (Å⁻¹), min_reflections and tol (fractional-HKL) apply to free mode.
+    known_structure is a subset of {a,b,c,alpha,beta,gamma (Å/°), sg (space-group
+    number, a post-hoc absence check only), n_search, tol, min_accept}."""
+    return _call("solve_cell.set_index_params", method=method, sigma_g=sigma_g,
+                 min_reflections=min_reflections, tol=tol, known_structure=known_structure)
+
+
+@mcp.tool()
+def solve_cell_run_index() -> Any:
+    """Stage 3: index the candidate pool using the method set by
+    solve_cell_set_index_params. Async. Free mode ends at an unrefined
+    ab-initio result — then call solve_cell_run_refine. Known-structure mode
+    produces Domain 1 directly (a negative result is ok with a note)."""
+    return _call("solve_cell.run_index")
+
+
+@mcp.tool()
+def solve_cell_run_refine() -> Any:
+    """Stage 4: refine the successful ab-initio index into Domain 1 (re-running
+    replaces Domain 1). Async."""
+    return _call("solve_cell.run_refine")
+
+
+@mcp.tool()
+def solve_cell_set_remaining_params(method: Optional[str] = None,
+                                    known_structure: Optional[dict] = None) -> Any:
+    """Stage 5 settings for indexing the spots no domain has claimed. method:
+    "free" (new unknown structure) or "known_structure" (e.g. a second grain of
+    the same material; fields as in solve_cell_set_index_params)."""
+    return _call("solve_cell.set_remaining_params", method=method,
+                 known_structure=known_structure)
+
+
+@mcp.tool()
+def solve_cell_fill_remaining_from_latest_domain() -> Any:
+    """Copy the latest solved domain's refined cell into the stage-5 known-
+    structure fields (space group is left as-is)."""
+    return _call("solve_cell.fill_remaining_from_latest_domain")
+
+
+@mcp.tool()
+def solve_cell_run_index_remaining() -> Any:
+    """Stage 5: search the still-unassigned spots for a further domain (free:
+    ab-initio then refine in one go; known structure: a null-tested orientation
+    search). Async. A clean "no new domain" is ok=true with a note, not an
+    error; a found domain is appended to the domain list."""
+    return _call("solve_cell.run_index_remaining")
+
+
+@mcp.tool()
+def solve_cell_wait(job_id: str, timeout: float = 600.0) -> Any:
+    """Block (up to timeout s) until a Solve Cell job finishes; returns
+    status ("done"/"failed"/"running" if timed out), the results summary
+    (counts + domains) and a note, or the error."""
+    return _call("solve_cell.wait", job_id=job_id, timeout=timeout)
+
+
+@mcp.tool()
+def solve_cell_get_job(job_id: str) -> Any:
+    """Check a Solve Cell job's status without blocking."""
+    return _call("solve_cell.get_job", job_id=job_id)
+
+
+@mcp.tool()
+def solve_cell_get_domains() -> Any:
+    """Every solved domain: label, method, spot count, refined cell (+sigma),
+    UB, rms_drlv, holohedry/conventional cell."""
+    return _call("solve_cell.get_domains")
+
+
+@mcp.tool()
+def solve_cell_select_domain(index: int) -> Any:
+    """Select a domain (0-based) — drives the overlays (a*,b*,c*, predicted
+    lattice points), Diagnostics and Compare views."""
+    return _call("solve_cell.select_domain", index=index)
+
+
+@mcp.tool()
+def solve_cell_get_spots(which: str = "all") -> Any:
+    """Write a spot table to a temp CSV and return its path/columns/row count
+    (read it with your own file tool). which: "all" ingested spots,
+    "candidates" (diamond-filtered pool), "diamond" (flagged spots)."""
+    return _call("solve_cell.get_spots", which=which)
+
+
+@mcp.tool()
+def solve_cell_set_view(view: str) -> Any:
+    """Bring a result view to the front: reciprocal, detector, diagnostics,
+    volume, compare, contamination, inspector."""
+    return _call("solve_cell.set_view", view=view)
+
+
+@mcp.tool()
+def solve_cell_set_reciprocal_options(
+    color_by: Optional[str] = None, show_unindexed: Optional[bool] = None,
+    point_size: Optional[int] = None, size_mode: Optional[str] = None,
+) -> Any:
+    """Reciprocal-space map options. color_by: panel/crystal/q_residual;
+    size_mode: equal/intensity."""
+    return _call("solve_cell.set_reciprocal_options", color_by=color_by,
+                 show_unindexed=show_unindexed, point_size=point_size,
+                 size_mode=size_mode)
+
+
+@mcp.tool()
+def solve_cell_set_overlays(
+    omega_deg: Optional[float] = None, ewald: Optional[bool] = None,
+    basis: Optional[bool] = None, predicted: Optional[bool] = None,
+    predicted_offpanel: Optional[bool] = None, frame_patches: Optional[bool] = None,
+    shells: Optional[bool] = None, highlight_now: Optional[bool] = None,
+) -> Any:
+    """Reciprocal-map overlays: Ewald-sphere cap, a*/b*/c*+cell, predicted
+    lattice points (+ off-panel ones), frame patches, |q| shells, and the ω (°)
+    that the Ewald cap/patches/"diffracting now" highlight use. Most need a
+    solved domain / finished ingest; the status field says what was skipped."""
+    return _call("solve_cell.set_overlays", omega_deg=omega_deg, ewald=ewald, basis=basis,
+                 predicted=predicted, predicted_offpanel=predicted_offpanel,
+                 frame_patches=frame_patches, shells=shells, highlight_now=highlight_now)
+
+
+@mcp.tool()
+def solve_cell_build_volume(pitch: Optional[float] = None) -> Any:
+    """Start the Volume tab's reciprocal-space volume build (voxel pitch in
+    Å⁻¹; default the tab's current value). Needs a finished ingest from plain
+    HDF5 sources. Poll solve_cell_get_volume_status."""
+    return _call("solve_cell.build_volume", pitch=pitch)
+
+
+@mcp.tool()
+def solve_cell_get_volume_status() -> Any:
+    """Whether the volume build is running, a volume is cached, and the tab's info text."""
+    return _call("solve_cell.get_volume_status")
+
+
+@mcp.tool()
+def solve_cell_select_spot(spot_id: int) -> Any:
+    """Select a spot (as a click would) — updates the reciprocal map marker,
+    Spot inspector and Detector view; returns its description (panel, frame,
+    ω, hkl, residuals)."""
+    return _call("solve_cell.select_spot", spot_id=spot_id)
+
+
+@mcp.tool()
+def solve_cell_show_selected_on_detector() -> Any:
+    """Jump the Detector view to the selected spot's source panel and frame."""
+    return _call("solve_cell.show_selected_on_detector")
+
+
+@mcp.tool()
+def solve_cell_review_domains(a: str, b: str, conclusion: str) -> Any:
+    """Record a reviewer conclusion for a domain pair from the Compare domains
+    tab (a/b are its comparison keys; "" clears it). Never alters domain claims."""
+    return _call("solve_cell.review_domains", a=a, b=b, conclusion=conclusion)
+
+
+@mcp.tool()
+def solve_cell_save_project(path: Optional[str] = None) -> Any:
+    """Save the project (the open one, or to ``path``) including the Solve
+    Cell analysis record, same as File ▸ Save Project."""
+    return _call("solve_cell.save_project", path=path)
 
 
 if __name__ == "__main__":

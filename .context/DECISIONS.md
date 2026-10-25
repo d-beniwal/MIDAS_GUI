@@ -3,6 +3,39 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-25 — Reciprocal-map overlay cleanup; spot picking via own screen-space projection
+
+- **Removed** "Show fitted positions" and "Fit visible spots" (the latter only re-rendered; the former duplicated the lattice-points/Δq views) plus their control/MCP ops (`fit_visible_spots`, `show_fitted_positions`). Overlay labels: Ewald sphere, *cell, lattice points, panel outline; vertical separators between overlays.
+- **Click picking was broken** because `vtkPointPicker` got Qt logical pixels while VTK uses physical pixels (ratio 2 on Retina), and ray-casting could also hit non-spot actors. `_PickableInteractor.pick_spot_id` now projects the visible spots itself (`project_to_display`, vectorised, verified equal to `WorldToDisplay`) and takes the nearest within the marker radius, scaling by renderer-size/widget-width. Offscreen Qt has no GL context, so only the projection math is unit-checked; the click itself was confirmed by the user on a real display.
+- **Detector link:** `_select_spot` now calls `_sync_detector_to_spot` so the Detector view follows a click (panel + frame, Raw/Corrected stages) without switching tabs; the "Show selected spot on detector" button still switches tab.
+
+## 2026-10-25 — Solve Cell pipelines exposed to agents through the MCP control API
+
+- **Decision:** every Solve Cell workflow (panel setup, stages 1–5, domains/spots, views/overlays, volume
+  build, review, project save) is a `solve_cell.*` op in `control_api.py` (mixin `_SolveCellOps`) with a
+  matching `solve_cell_*` tool in `midas_gui_mcp/server.py` (37 tools). The ops call the tab's own `_run_*`
+  methods and widgets — no second implementation of the pipeline.
+- **Job completion = new `SolveCellTab.stageFinished(stage, outcome)` signal**, emitted at the *end* of each
+  result handler (after chained follow-ups: free "index remaining" = ab-initio → refine). Tracking the worker
+  thread instead would resolve jobs before the tab state (domains, candidates) is updated, and mid-chain.
+  Clean negative searches are `ok=True` with a note; only exceptions are `failed`.
+- **Agent mode on `SolveCellTab`/`PanelCard`** (`set_agent_mode`, `_warn_or_record`) turns guard
+  `QMessageBox`es and the failure `show_error` into recorded errors (`precondition_failed`), same pattern as
+  `CalibrationTab`. The two ingest *confirmations* (omega step 0°, calibration without `im_trans`) are
+  **refused unless `acknowledge_warnings=True`** — they guard silent wrong-geometry results, so an agent
+  must opt in knowingly rather than have them auto-accepted. Removing a non-last panel with results is
+  refused outright (it renumbers panels and would silently discard the ingest).
+- `solve_cell.wait` joins `_ASYNC_OPS` (QTimer polling, no nested event loop — see control_server notes).
+- Diamond filter now has an explicit "no calibration on active panel" guard (it previously raised a bare
+  RuntimeError from `geometry_cfg()`).
+- **Not covered:** opening a project (dialog-driven in `app.py`), camera/widgets inside Diagnostics /
+  Contamination / Inspector beyond `set_view`. Observation: `_fit_visible_spots` sets the vestigial
+  `_recip_has_data` (never read); the PyVista view's own `_has_data` decides camera refit, so "Fit visible spots"
+  only re-renders — left unchanged, awaiting the user's call.
+- Known test-isolation quirk (pre-existing, reproduced on the unmodified tree): running
+  `test_control_api_calibrate_mcp_ops.py` and `test_control_api_tab_focus.py` in one pytest invocation fails
+  the former; each passes alone.
+
 ## 2026-10-25 — Global panel terminology + minimisable Data/Controls panels (Solve Cell first)
 
 - **Terminology (GUI-wide):** *Data* panel = left-most (loads data); *Controls* panel = middle (analysis

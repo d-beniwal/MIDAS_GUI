@@ -42,7 +42,7 @@ _PRED_NOW_COLOR = "#ffffff"
 
 SIZE_MODE_EQUAL = "equal"
 SIZE_MODE_INTENSITY = "intensity"
-_DEFAULT_POINT_SIZE = 14.0
+_DEFAULT_POINT_SIZE = 18.0
 # A spot at the brightest visible intensity renders at the full requested
 # size; the faintest still renders at this fraction of it rather than
 # shrinking to invisible -- "size relative to intensity" should make bright
@@ -64,9 +64,22 @@ def close_interactor_at_quit(interactor):
         app.aboutToQuit.connect(_close)
 
 
+def project_to_display(renderer, xyz, size):
+    """World points ``(n, 3)`` -> display pixels ``(x, y, in_front)`` (origin
+    bottom-left, ``size`` = the renderer's pixel size), vectorised."""
+    cam = renderer.GetActiveCamera()
+    m = cam.GetCompositeProjectionTransformMatrix(size[0] / size[1], -1, 1)
+    mat = np.array([[m.GetElement(i, j) for j in range(4)] for i in range(4)])
+    pts = np.column_stack([np.asarray(xyz, float), np.ones(len(xyz))]) @ mat.T
+    w = pts[:, 3]
+    ok = w > 1e-12
+    w = np.where(ok, w, 1.0)
+    return (pts[:, 0] / w + 1) / 2 * size[0], (pts[:, 1] / w + 1) / 2 * size[1], ok
+
+
 class _PickableInteractor(QtInteractor):
     """``QtInteractor`` with left-click-to-select and hover-for-details on
-    top of VTK's default trackball camera, via its own ``vtkPointPicker``.
+    top of VTK's default trackball camera, via screen-space nearest-point picking.
 
     Mirrors the click/drag discrimination the matplotlib reciprocal view
     used (``_on_recip_press``/``_on_recip_release``: a left-button press and
@@ -83,27 +96,37 @@ class _PickableInteractor(QtInteractor):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._picker = vtk.vtkPointPicker()
-        self._picker.SetTolerance(0.02)
+        self._pick_targets: list = []
         self._press_pos: Optional[tuple] = None
 
+    def set_pick_targets(self, targets: list):
+        """``[(xyz (n, 3) array, spot_ids (n,) array, radius_px), ...]`` -- the
+        visible, selectable spots, resolved by :meth:`pick_spot_id`."""
+        self._pick_targets = targets
+
     def pick_spot_id(self, x: int, y: int):
-        """Nearest pickable point under widget-local pixel ``(x, y)`` that
-        carries a ``"spot_id"`` point-data array, or ``None``. Qt's y grows
-        downward; VTK's display coordinates grow upward from the bottom of
-        the render window."""
+        """Spot id nearest widget-local pixel ``(x, y)`` (Qt: logical pixels,
+        y down) within its marker radius, or ``None``.
+
+        Done by projecting the points ourselves rather than with VTK's picker:
+        VTK works in *physical* pixels (Qt's ratio is 2 on Retina, so a raw Qt
+        position lands on the wrong spot) and ray-casting also hits the
+        unrelated actors in the scene."""
         renderer = self.renderer
-        height = self.size().height()
-        if not self._picker.Pick(x, height - y, 0, renderer):
+        size = renderer.GetSize()
+        if not self._pick_targets or not size[0] or not size[1]:
             return None
-        dataset = self._picker.GetDataSet()
-        if dataset is None:
-            return None
-        arr = dataset.GetPointData().GetArray("spot_id")
-        point_id = self._picker.GetPointId()
-        if arr is None or point_id < 0:
-            return None
-        return arr.GetValue(point_id)
+        ratio = size[0] / max(self.width(), 1)
+        px, py = x * ratio, size[1] - y * ratio
+        best, best_d2 = None, np.inf
+        for xyz, ids, radius in self._pick_targets:
+            sx, sy, ok = project_to_display(renderer, xyz, size)
+            d2 = (sx - px) ** 2 + (sy - py) ** 2
+            d2[~ok] = np.inf
+            i = int(np.argmin(d2))
+            if d2[i] < best_d2 and d2[i] <= (radius * ratio) ** 2:
+                best, best_d2 = ids[i], d2[i]
+        return best
 
     def mousePressEvent(self, event):
         self._press_pos = (event.x(), event.y()) if event.button() == QtCore.Qt.LeftButton else None
@@ -233,6 +256,7 @@ class PyVistaScatter3DView(QtWidgets.QWidget):
                         max_intensity = max(max_intensity, float(v))
 
         legend_entries = []
+        pick_targets = []
         any_points = False
         for i, (xyz, color, label, rows) in enumerate(self.groups):
             x = np.asarray(xyz[0])
@@ -263,10 +287,13 @@ class PyVistaScatter3DView(QtWidgets.QWidget):
                     cloud, point_size=self._point_size, render_points_as_spheres=True,
                     name=f"solve_cell_recip_group_{i}", **color_kwargs)
             self._group_actors.append(actor)
+            if ids is not None:
+                pick_targets.append((cloud.points, np.asarray(ids), max(8.0, 0.6 * self._point_size)))
             if label:
                 legend_entries.append((label, legend_color))
 
         self.legend_entries = legend_entries
+        self.interactor.set_pick_targets(pick_targets)
         if legend_entries:
             self.interactor.add_legend(legend_entries, bcolor=None, size=(0.2, 0.2))
         else:

@@ -1542,11 +1542,9 @@ def test_residual_mode_and_overlay_keep_one_colorbar_and_camera(tab):
     tab._recip_view.camera_position = [(1.0, 2.0, 3.0), (0.0, 0.0, 0.0), (0.0, 0.0, 1.0)]
     camera = tab._recip_view.camera_position
     tab._recip_mode.setCurrentIndex(2)
-    tab._recip_predicted.setChecked(True)
     for _ in range(3):
         tab._refresh_recip_view()
         assert len(tab._recip_view.interactor.scalar_bars.keys()) == 1
-        assert len(tab._recip_view._fitted_actors) == 2   # cross points + connecting lines
     assert tab._recip_view.camera_position == camera
     tab._recip_mode.setCurrentIndex(0)
     tab._refresh_recip_view()
@@ -1621,7 +1619,6 @@ def test_click_selection_preserves_scene_camera_and_plot_size(tab):
     pick emits, exercising exactly the glue code this project owns."""
     _linked_spots(tab)
     tab._recip_mode.setCurrentIndex(2)
-    tab._recip_predicted.setChecked(True)
     tab._recip_view.camera_position = [(1.0, 2.0, 3.0), (0.0, 0.0, 0.0), (0.0, 0.0, 1.0)]
     camera = tab._recip_view.camera_position
     group_actors = tuple(tab._recip_view._group_actors)

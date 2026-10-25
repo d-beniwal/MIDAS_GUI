@@ -1,4 +1,4 @@
-"""In-process control API for midas-gui's Data Viewer and Calibrate tabs.
+"""In-process control API for midas-gui's Data Viewer, Calibrate and Solve Cell tabs.
 
 ``GuiController`` is the thing a control channel (``control_server.py``, or
 a direct Python caller in a test) dispatches operation requests to. It is
@@ -14,8 +14,8 @@ Every public ``op_*`` method:
     or ``{"ok": False, "error": {"message", "type"}}`` — and never raises or
     pops a modal dialog, regardless of what the underlying GUI call does.
 
-Two tabs enable an explicit ``agent_mode`` flag (``CalibrationTab``,
-``DetectorGeometryCard``) so their normal blocking `QMessageBox` guards
+Three tabs enable an explicit ``agent_mode`` flag (``CalibrationTab``,
+``DetectorGeometryCard``, ``SolveCellTab``) so their normal blocking `QMessageBox` guards
 become structured errors instead of a dialog nothing can click — see each
 class's own ``set_agent_mode`` docstring. Interactive use (agent mode off,
 the default) is completely unaffected.
@@ -92,7 +92,472 @@ def _serialize_calib_result(r) -> dict:
     return out
 
 
-class GuiController:
+# ── Solve Cell ───────────────────────────────────────────────────────
+# Mixed into GuiController below (kept in this module so the dispatch
+# ``op_<namespace>_<verb>`` lookup finds it). Every op drives the same tab
+# methods/widgets a click would, never a re-implementation of the pipeline.
+
+_SC_VIEW_TABS = {"reciprocal": 0, "detector": 1, "diagnostics": 2, "volume": 3,
+                 "compare": 4, "contamination": 5, "inspector": 6}
+_SC_COLOR_MODES = {"panel": 0, "crystal": 1, "q_residual": 2}
+_SC_SIZE_MODES = {"equal": 0, "intensity": 1}
+_SC_OVERLAYS = {"ewald": "_ov_ewald", "basis": "_ov_basis", "predicted": "_ov_pred",
+                "predicted_offpanel": "_ov_pred_hidden", "frame_patches": "_ov_patch",
+                "shells": "_ov_shells", "highlight_now": "_ov_now"}
+_SC_KS_KEYS = ("a", "b", "c", "alpha", "beta", "gamma", "sg", "n_search", "tol", "min_accept")
+
+
+def _sc_set_known_structure(ks: dict, params: dict) -> None:
+    """Fill a known-structure form (``_build_known_structure_form`` dict)
+    from ``{a,b,c,alpha,beta,gamma,sg,n_search,tol,min_accept}``."""
+    bad = sorted(set(params) - set(_SC_KS_KEYS))
+    if bad:
+        raise ValueError(f"unknown known-structure field(s) {bad} (allowed: {list(_SC_KS_KEYS)})")
+    for key, val in params.items():
+        w = ks[key]
+        w.setValue(int(val) if key in ("sg", "n_search", "min_accept") else float(val))
+
+
+def _sc_ks_state(ks: dict) -> dict:
+    return {k: ks[k].value() for k in _SC_KS_KEYS}
+
+
+class _SolveCellOps:
+    @property
+    def _sc(self):
+        return self._win._solve_cell_tab
+
+    def _sc_panel(self, panel_id):
+        """The PanelCard for ``panel_id`` (the active one when None); raises
+        ValueError (turned into a bad_args error by the caller) if absent."""
+        sc = self._sc
+        if panel_id is None:
+            return sc._active_panel()
+        card = sc._panels.get(int(panel_id))
+        if card is None:
+            raise ValueError(f"no panel {panel_id} (panels: {sorted(sc._panels)})")
+        return card
+
+    # ── job tracking ─────────────────────────────────────────────────
+    def _sc_start(self, stage: str, starter) -> dict:
+        """Run ``starter()`` (a tab ``_run_*`` method), converting a recorded
+        guard failure / no-worker outcome into a structured error, else
+        register the job that ``stageFinished`` will resolve."""
+        sc = self._sc
+        if sc._worker is not None and sc._worker.isRunning():
+            return _err("a Solve Cell stage is already running; wait for it first",
+                        kind="precondition_failed")
+        sc._last_agent_error = None
+        for card in sc._panels.values():
+            card._last_agent_error = None
+        before = sc._worker
+        starter()
+        if sc._last_agent_error is not None:
+            err, sc._last_agent_error = sc._last_agent_error, None
+            return _err(err, kind="precondition_failed")
+        if sc._worker is None or sc._worker is before:
+            return _err(f"{stage} did not start for an unknown reason", kind="exception")
+        job_id = str(uuid.uuid4())
+        self._jobs[job_id] = {"status": "running", "stage": stage, "result": None, "error": None}
+        self._sc_job_id = job_id
+        return _ok({"job_id": job_id, "stage": stage})
+
+    def _on_sc_stage_finished(self, stage: str, outcome: dict) -> None:
+        job_id = self._sc_job_id
+        job = self._jobs.get(job_id) if job_id else None
+        if job is None or job["status"] != "running":
+            return
+        self._sc_job_id = None
+        if outcome.get("ok"):
+            try:
+                result = self._sc_results_summary()
+            except Exception:
+                result = {}
+            result["note"] = outcome.get("note", "")
+            self._jobs[job_id] = {"status": "done", "stage": stage, "result": result, "error": None}
+        else:
+            self._jobs[job_id] = {"status": "failed", "stage": stage, "result": None,
+                                  "error": outcome.get("error")}
+
+    def op_solve_cell_get_job(self, job_id) -> dict:
+        job = self._jobs.get(job_id)
+        if job is None:
+            return _err(f"unknown job_id {job_id!r}", kind="bad_args")
+        return _ok({k: v for k, v in job.items() if not k.startswith("_")})
+
+    # ── state / results ──────────────────────────────────────────────
+    def _sc_domain_summary(self, i: int, d: dict) -> dict:
+        r = d["result"]
+        keep = {k: r[k] for k in ("cell", "cell_sigma", "rms_drlv", "holohedry_system",
+                                  "conventional_cell", "conventional_system", "UB", "notes",
+                                  "n_reflections", "diagnostics") if k in r}
+        return {"index": i, "label": d["label"], "method": d["method"],
+                "n_spots": int(len(d["claimed_index"])),
+                "selected": i == self._sc._current_domain_index(),
+                **_jsonable(keep, stem=f"domain{i}")}
+
+    def _sc_results_summary(self) -> dict:
+        sc = self._sc
+        leftover = sc._leftover_df()
+        return {
+            "n_spots": None if sc._spots_df is None else int(len(sc._spots_df)),
+            "n_diamond_flagged": None if sc._flagged_df is None else int(sc._flagged_df["is_diamond"].sum()),
+            "n_candidates": None if sc._candidate_df is None else int(len(sc._candidate_df)),
+            "ab_initio_success": None if sc._ab_initio_raw is None else bool(sc._ab_initio_raw.success),
+            "n_remaining": None if leftover is None else int(len(leftover)),
+            "domains": [self._sc_domain_summary(i, d) for i, d in enumerate(sc._domains)],
+        }
+
+    def op_solve_cell_get_state(self) -> dict:
+        sc = self._sc
+        panels = {}
+        for pid, card in sc._panels.items():
+            panels[pid] = {
+                "active": card is sc._active_panel(),
+                "data_path": card.loader.data_path(), "n_frames": card.loader.n_frames(),
+                "calibration": card._calib_path, "has_calibration": card.has_calibration(),
+                "omega": {"start": card._ome_start.value(), "end": card._ome_end.value(),
+                          "step": card._ome_step.value(), "first_idx": card._ome_first_idx.value(),
+                          "last_idx": card._last_idx() if card._last_idx() < card._LAST_IDX_OPEN else None},
+            }
+        params = {
+            "project_dir": sc._proj_ed.text().strip() or None,
+            "ingest": {"low_count_threshold": sc._low_count.value(), "mask_grow": sc._mask_grow.value(),
+                       "blob_threshold": sc._blob_thresh.value(), "blob_min_vol": sc._blob_minvol.value(),
+                       "split_ratio": sc._split_ratio.value(),
+                       "gap_bridge": sc._gap_bridge.value() if sc._gap_bridge_on.isChecked() else 0,
+                       "sector_candidates": list(sc._sector_candidates_cfg()),
+                       "max_workers": sc._ingest_max_workers.value()},
+            "diamond": {"diamond_a": sc._diamond_a.value(), "tol_deg": sc._contam_tol.value()},
+            "index": {"method": "known_structure" if sc._index_method.currentIndex() else "free",
+                      "sigma_g": sc._sigma_g.value(), "min_reflections": sc._min_refl.value(),
+                      "tol": sc._tol_override.value(), "known_structure": _sc_ks_state(sc._ks3)},
+            "index_remaining": {"method": "known_structure" if sc._leftover_method.currentIndex() else "free",
+                                "known_structure": _sc_ks_state(sc._ks5)},
+        }
+        running = sc._worker is not None and sc._worker.isRunning()
+        return _ok({"panels": panels, "params": params, "running": running,
+                    "results": self._sc_results_summary(),
+                    "view": next((k for k, v in _SC_VIEW_TABS.items()
+                                  if v == sc._view_tabs.currentIndex()), None)})
+
+    def op_solve_cell_get_log(self, tail: int = 80) -> dict:
+        text = self._sc._log.toPlainText()
+        return _ok({"log": "\n".join(text.splitlines()[-int(tail):])})
+
+    # ── panels ───────────────────────────────────────────────────────
+    def op_solve_cell_add_panel(self) -> dict:
+        card = self._sc._add_panel()
+        return _ok({"panel_id": card.panel_id(), "panels": sorted(self._sc._panels)})
+
+    def op_solve_cell_remove_panel(self, panel_id) -> dict:
+        sc = self._sc
+        if int(panel_id) not in sc._panels:
+            return _err(f"no panel {panel_id}", kind="bad_args")
+        sc._last_agent_error = None
+        sc._close_panel_tab(int(panel_id) - 1)
+        if sc._last_agent_error is not None:
+            err, sc._last_agent_error = sc._last_agent_error, None
+            return _err(err, kind="precondition_failed")
+        return _ok({"panels": sorted(sc._panels)})
+
+    def op_solve_cell_select_panel(self, panel_id) -> dict:
+        sc = self._sc
+        if int(panel_id) not in sc._panels:
+            return _err(f"no panel {panel_id}", kind="bad_args")
+        sc._panel_tabs.setCurrentWidget(sc._panels[int(panel_id)])
+        return _ok({"active_panel": int(panel_id)})
+
+    def op_solve_cell_panel_load_data(self, path, dataset=None, panel_id=None) -> dict:
+        try:
+            card = self._sc_panel(panel_id)
+        except ValueError as e:
+            return _err(e, kind="bad_args")
+        card.loader.set_path(path, dataset=dataset)
+        return _ok({"panel_id": card.panel_id(), "path": card.loader.data_path(),
+                    "n_frames": card.loader.n_frames()})
+
+    def op_solve_cell_panel_set_field(self, role, path, checked: bool = True, mode=None,
+                                      panel_id=None) -> dict:
+        try:
+            card = self._sc_panel(panel_id)
+        except ValueError as e:
+            return _err(e, kind="bad_args")
+        return self._set_field(card.loader, role, path, checked, mode)
+
+    def op_solve_cell_panel_load_calibration(self, path, panel_id=None) -> dict:
+        try:
+            card = self._sc_panel(panel_id)
+        except ValueError as e:
+            return _err(e, kind="bad_args")
+        card._last_agent_error = None
+        if not card._load_calib_from_path(path):
+            return _err(card._last_agent_error or f"could not load calibration {path!r}",
+                        kind="precondition_failed")
+        return _ok({"panel_id": card.panel_id(),
+                    "geometry": _jsonable(card.geometry_cfg(), stem="geometry"),
+                    "notes": (card._calib_info or {}).get("notes", [])})
+
+    def op_solve_cell_panel_set_omega(self, start=None, end=None, step=None, first_idx=None,
+                                      panel_id=None) -> dict:
+        try:
+            card = self._sc_panel(panel_id)
+        except ValueError as e:
+            return _err(e, kind="bad_args")
+        for value, widget in ((start, card._ome_start), (end, card._ome_end),
+                              (step, card._ome_step)):
+            if value is not None:
+                widget.setValue(float(value))
+        if first_idx is not None:
+            card._ome_first_idx.setValue(int(first_idx))
+        return _ok({"panel_id": card.panel_id(), "start": card._ome_start.value(),
+                    "end": card._ome_end.value(), "step": card._ome_step.value(),
+                    "first_idx": card._ome_first_idx.value(),
+                    "omega_span_without_step": card.omega_span_without_step()})
+
+    def op_solve_cell_panel_detect_first_idx(self, field, panel_id=None) -> dict:
+        try:
+            card = self._sc_panel(panel_id)
+        except ValueError as e:
+            return _err(e, kind="bad_args")
+        card._last_agent_error = None
+        if not card.detect_first_idx(field):
+            return _err(card._last_agent_error or "detection failed", kind="precondition_failed")
+        return _ok({"panel_id": card.panel_id(), "first_idx": card._ome_first_idx.value()})
+
+    def op_solve_cell_panel_list_omega_fields(self, panel_id=None) -> dict:
+        try:
+            card = self._sc_panel(panel_id)
+        except ValueError as e:
+            return _err(e, kind="bad_args")
+        return _ok({"fields": card._omega_fields()})
+
+    # ── stage parameters ─────────────────────────────────────────────
+    def op_solve_cell_set_project_dir(self, path) -> dict:
+        self._sc._proj_ed.setText(path or "")
+        return _ok({"project_dir": self._sc._proj_ed.text().strip() or None})
+
+    def op_solve_cell_set_ingest_params(self, low_count_threshold=None, mask_grow=None,
+                                        blob_threshold=None, blob_min_vol=None, split_ratio=None,
+                                        gap_bridge=None, sector_candidates=None,
+                                        max_workers=None) -> dict:
+        sc = self._sc
+        for value, widget, cast in (
+                (low_count_threshold, sc._low_count, float), (mask_grow, sc._mask_grow, int),
+                (blob_threshold, sc._blob_thresh, float), (blob_min_vol, sc._blob_minvol, int),
+                (split_ratio, sc._split_ratio, float), (max_workers, sc._ingest_max_workers, int)):
+            if value is not None:
+                widget.setValue(cast(value))
+        if gap_bridge is not None:
+            sc._gap_bridge_on.setChecked(int(gap_bridge) > 0)
+            if int(gap_bridge) > 0:
+                sc._gap_bridge.setValue(int(gap_bridge))
+        if sector_candidates is not None:
+            sc._sector_candidates_ed.setText(",".join(str(int(n)) for n in sector_candidates))
+        return _ok({"ingest": self.op_solve_cell_get_state()["result"]["params"]["ingest"]})
+
+    def op_solve_cell_set_diamond_params(self, diamond_a=None, tol_deg=None) -> dict:
+        sc = self._sc
+        if diamond_a is not None:
+            sc._diamond_a.setValue(float(diamond_a))
+        if tol_deg is not None:
+            sc._contam_tol.setValue(float(tol_deg))
+        return _ok({"diamond_a": sc._diamond_a.value(), "tol_deg": sc._contam_tol.value()})
+
+    def op_solve_cell_set_index_params(self, method=None, sigma_g=None, min_reflections=None,
+                                       tol=None, known_structure=None) -> dict:
+        sc = self._sc
+        if method is not None:
+            if method not in ("free", "known_structure"):
+                return _err("method must be 'free' or 'known_structure'", kind="bad_args")
+            sc._index_method.setCurrentIndex(1 if method == "known_structure" else 0)
+        if sigma_g is not None:
+            sc._sigma_g.setValue(float(sigma_g))
+        if min_reflections is not None:
+            sc._min_refl.setValue(int(min_reflections))
+        if tol is not None:
+            sc._tol_override.setValue(float(tol))
+        if known_structure:
+            try:
+                _sc_set_known_structure(sc._ks3, known_structure)
+            except ValueError as e:
+                return _err(e, kind="bad_args")
+        return _ok({"method": "known_structure" if sc._index_method.currentIndex() else "free",
+                    "sigma_g": sc._sigma_g.value(), "min_reflections": sc._min_refl.value(),
+                    "tol": sc._tol_override.value(), "known_structure": _sc_ks_state(sc._ks3)})
+
+    def op_solve_cell_set_remaining_params(self, method=None, known_structure=None) -> dict:
+        sc = self._sc
+        if method is not None:
+            if method not in ("free", "known_structure"):
+                return _err("method must be 'free' or 'known_structure'", kind="bad_args")
+            sc._leftover_method.setCurrentIndex(1 if method == "known_structure" else 0)
+        if known_structure:
+            try:
+                _sc_set_known_structure(sc._ks5, known_structure)
+            except ValueError as e:
+                return _err(e, kind="bad_args")
+        return _ok({"method": "known_structure" if sc._leftover_method.currentIndex() else "free",
+                    "known_structure": _sc_ks_state(sc._ks5)})
+
+    def op_solve_cell_fill_remaining_from_latest_domain(self) -> dict:
+        sc = self._sc
+        if not sc._domains:
+            return _err("no solved domain yet", kind="precondition_failed")
+        sc._fill_ks5_from_latest_domain()
+        return _ok({"known_structure": _sc_ks_state(sc._ks5)})
+
+    # ── stage runs (async: poll solve_cell.wait / get_job) ───────────
+    def op_solve_cell_run_ingest(self, acknowledge_warnings: bool = False) -> dict:
+        sc = self._sc
+        sc._agent_ack_warnings = bool(acknowledge_warnings)
+        try:
+            return self._sc_start("ingest", sc._run_ingest)
+        finally:
+            sc._agent_ack_warnings = False
+
+    def op_solve_cell_run_diamond_filter(self) -> dict:
+        return self._sc_start("diamond", self._sc._run_diamond_filter)
+
+    def op_solve_cell_run_index(self) -> dict:
+        return self._sc_start("index", self._sc._run_index)
+
+    def op_solve_cell_run_refine(self) -> dict:
+        return self._sc_start("refine", self._sc._run_refine)
+
+    def op_solve_cell_run_index_remaining(self) -> dict:
+        return self._sc_start("index_remaining", self._sc._run_index_remaining)
+
+    # ── domains / spots ──────────────────────────────────────────────
+    def op_solve_cell_get_domains(self) -> dict:
+        return _ok({"domains": self._sc_results_summary()["domains"]})
+
+    def op_solve_cell_select_domain(self, index) -> dict:
+        sc = self._sc
+        if not 0 <= int(index) < len(sc._domains):
+            return _err(f"no domain {index} ({len(sc._domains)} solved)", kind="bad_args")
+        sc._domain_list.setCurrentRow(int(index))
+        return _ok({"selected": int(index), "label": sc._domains[int(index)]["label"]})
+
+    def op_solve_cell_get_spots(self, which: str = "all") -> dict:
+        """Write a spot table to a temp CSV and return its path + shape.
+        which: all (every ingested spot), candidates (diamond-filtered
+        pool), diamond (flagged spots only)."""
+        import pandas as pd  # noqa: F401  (frames below are DataFrames)
+        sc = self._sc
+        df = {"all": sc._spots_df,
+              "candidates": sc._candidate_df,
+              "diamond": None if sc._flagged_df is None else sc._flagged_df[sc._flagged_df["is_diamond"]],
+              }.get(which, "bad")
+        if isinstance(df, str):
+            return _err("which must be all/candidates/diamond", kind="bad_args")
+        if df is None:
+            return _err(f"no {which!r} spots yet — run the earlier stages first",
+                        kind="precondition_failed")
+        path = Path(tempfile.gettempdir()) / f"midas_gui_control_spots_{which}_{uuid.uuid4().hex}.csv"
+        df.to_csv(path, index=False)
+        return _ok({"path": str(path), "n_rows": int(len(df)), "columns": list(df.columns)})
+
+    def op_solve_cell_select_spot(self, spot_id) -> dict:
+        sc = self._sc
+        sc._select_spot(int(spot_id))
+        row = sc._spot_rows_by_id.get(int(spot_id))
+        return _ok({"spot_id": int(spot_id), "found": row is not None,
+                    "description": sc._spot_description(row) if row else None})
+
+    def op_solve_cell_show_selected_on_detector(self) -> dict:
+        sc = self._sc
+        if sc._selected_spot_id is None:
+            return _err("no spot selected — call solve_cell.select_spot first",
+                        kind="precondition_failed")
+        sc._show_selected_on_detector()
+        return _ok({"spot_id": sc._selected_spot_id, "active_panel": sc._active_panel_id(),
+                    "details": sc._spot_details.text()})
+
+    # ── views ────────────────────────────────────────────────────────
+    def op_solve_cell_set_view(self, view) -> dict:
+        idx = _SC_VIEW_TABS.get(view)
+        if idx is None:
+            return _err(f"unknown view {view!r} (one of {sorted(_SC_VIEW_TABS)})", kind="bad_args")
+        self._sc._view_tabs.setCurrentIndex(idx)
+        return _ok({"view": view})
+
+    def op_solve_cell_set_reciprocal_options(self, color_by=None, show_unindexed=None,
+                                             point_size=None, size_mode=None) -> dict:
+        sc = self._sc
+        if color_by is not None:
+            if color_by not in _SC_COLOR_MODES:
+                return _err(f"color_by must be one of {sorted(_SC_COLOR_MODES)}", kind="bad_args")
+            sc._recip_mode.setCurrentIndex(_SC_COLOR_MODES[color_by])
+        if size_mode is not None:
+            if size_mode not in _SC_SIZE_MODES:
+                return _err(f"size_mode must be one of {sorted(_SC_SIZE_MODES)}", kind="bad_args")
+            sc._recip_size_mode.setCurrentIndex(_SC_SIZE_MODES[size_mode])
+        if show_unindexed is not None:
+            sc._recip_show_unindexed.setChecked(bool(show_unindexed))
+        if point_size is not None:
+            sc._recip_point_size.setValue(int(point_size))
+        return _ok({"stats": sc._recip_stats.text()})
+
+    def op_solve_cell_set_overlays(self, omega_deg=None, **flags) -> dict:
+        sc = self._sc
+        bad = sorted(set(flags) - set(_SC_OVERLAYS))
+        if bad:
+            return _err(f"unknown overlay(s) {bad} (allowed: {sorted(_SC_OVERLAYS)}, omega_deg)",
+                        kind="bad_args")
+        for key, value in flags.items():
+            if value is not None:
+                getattr(sc, _SC_OVERLAYS[key]).setChecked(bool(value))
+        if omega_deg is not None:
+            sc._refresh_overlays()   # re-ranges the slider to the scan first
+            sc._ov_omega.setValue(int(round(float(omega_deg) * 10)))
+        return _ok({"omega_deg": sc._ov_omega.value() / 10.0, "status": sc._ov_status.text(),
+                    "overlays": {k: getattr(sc, a).isChecked() for k, a in _SC_OVERLAYS.items()}})
+
+    def op_solve_cell_build_volume(self, pitch: float = None) -> dict:
+        """Start the reciprocal-volume build (Volume tab; pitch defaults to
+        the tab's own voxel-pitch field). Async: poll
+        solve_cell.get_volume_status."""
+        sc = self._sc
+        if pitch is None:
+            pitch = sc._volume_view.pitch.value()
+        sc._start_volume_build(float(pitch))
+        if sc._vol_worker is None or not sc._vol_worker.isRunning():
+            return _err(sc._volume_view.info.text() or "volume build did not start",
+                        kind="precondition_failed")
+        return _ok({"started": True, "info": sc._volume_view.info.text()})
+
+    def op_solve_cell_get_volume_status(self) -> dict:
+        sc = self._sc
+        building = sc._vol_worker is not None and sc._vol_worker.isRunning()
+        return _ok({"building": building, "has_volume": "reciprocal_volume" in sc._viz_products,
+                    "info": sc._volume_view.info.text()})
+
+    def op_solve_cell_review_domains(self, a, b, conclusion) -> dict:
+        """Record a reviewer conclusion for a domain pair (Compare domains
+        tab). ``a``/``b`` are the comparison keys shown in that tab; an empty
+        conclusion clears it. Never changes domain claims."""
+        sc = self._sc
+        entries = sc._comparison_entries() if sc._candidate_df is not None else []
+        keys = [e["key"] for e in entries]
+        if a not in keys or b not in keys:
+            return _err(f"unknown comparison key(s); available: {keys}", kind="bad_args")
+        sc._comparison_product(entries)
+        sc._on_compare_review(a, b, conclusion)
+        return _ok({"a": a, "b": b, "conclusion": conclusion})
+
+    def op_solve_cell_save_project(self, path=None) -> dict:
+        """Save the open project (or to ``path``), including the Solve Cell
+        analysis record — same as File ▸ Save Project."""
+        win = self._win
+        target = path or getattr(getattr(win, "_project_ctx", None), "path", None)
+        if not target:
+            return _err("no project is open — pass path", kind="precondition_failed")
+        win.save_project(target)
+        return _ok({"path": str(target)})
+
+
+class GuiController(_SolveCellOps):
     """Dispatches ``"namespace.verb"`` ops (see the module docstring) against
     the live ``main_window``'s Data Viewer and Calibrate tabs."""
 
@@ -101,6 +566,11 @@ class GuiController:
         self._jobs: dict = {}   # job_id -> {"status","result","error"}
         self._cal.set_agent_mode(True)
         self._geom.set_agent_mode(True)
+        sc = getattr(main_window, "_solve_cell_tab", None)
+        if sc is not None:
+            sc.set_agent_mode(True)
+            sc.stageFinished.connect(self._on_sc_stage_finished)
+        self._sc_job_id = None   # the one in-flight Solve Cell job, if any
 
     @property
     def _view(self):
@@ -118,7 +588,8 @@ class GuiController:
     # "which attribute backs which tab" as GuiController's own domain
     # knowledge rather than control_server.py's, even though the *call* to
     # switch happens there (see that module's _handle_line).
-    _NAMESPACE_TABS = {"data_viewer": "_view_tab", "calibrate": "_cal_tab"}
+    _NAMESPACE_TABS = {"data_viewer": "_view_tab", "calibrate": "_cal_tab",
+                       "solve_cell": "_solve_cell_tab"}
 
     # Specific op -> a no-arg method on that op's own namespace tab widget
     # that brings the right *sub*-view to the front within it (e.g. the Data
@@ -548,3 +1019,4 @@ class GuiController:
 
     def op_calibrate_get_state(self) -> dict:
         return _ok(_jsonable(self._cal.get_state(), stem="cal_state"))
+

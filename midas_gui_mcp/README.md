@@ -1,8 +1,8 @@
-# midas-gui MCP server (phase 1: Data Viewer + Calibrate)
+# midas-gui MCP server (Data Viewer + Calibrate + Solve Cell)
 
 Lets an LLM agent — this one, or any other framework that speaks MCP —
 drive the live midas-gui application instead of a human clicking through
-it. Scoped for now to the Data Viewer and Calibrate tabs.
+it. Covers the Data Viewer, Calibrate and Solve Cell tabs.
 
 ```
 Agent  →  MCP server (this folder, separate process)  →  control socket
@@ -188,7 +188,40 @@ Poll with `calibrate.get_job` (non-blocking) or `calibrate.wait` (blocks, up
 to a timeout, pumping the GUI event loop so the GUI stays responsive while
 you wait).
 
-### Operations (phase 1)
+`solve_cell.run_ingest` / `run_diamond_filter` / `run_index` / `run_refine` /
+`run_index_remaining` follow the same pattern: each returns a `job_id`, and
+`solve_cell.wait` (blocking, timeout default 600 s) / `solve_cell.get_job`
+resolve it. Only one Solve Cell stage runs at a time. A job resolves when the
+tab's own result handler has finished (and, for "index remaining" in free mode,
+after its chained ab-initio → refine), not merely when the worker thread ends.
+A clean negative search ("no new domain", "no known-structure match") is
+`status: done` with an explanatory `note`; only an exception is `failed`.
+
+### Solve Cell workflow
+
+Pipeline order, each stage an op pair (`set_*_params` + `run_*`):
+
+| Stage | Config ops | Run op |
+|---|---|---|
+| Panels | `add_panel`, `select_panel`, `remove_panel`, `panel_load_data`, `panel_set_field`, `panel_load_calibration`, `panel_set_omega`, `panel_list_omega_fields`, `panel_detect_first_idx`, `set_project_dir` | — |
+| 1 Ingest | `set_ingest_params` | `run_ingest` |
+| 2 Diamond filter | `set_diamond_params` | `run_diamond_filter` |
+| 3 Index | `set_index_params` (free / known_structure) | `run_index` |
+| 4 Refine (free mode) | — | `run_refine` |
+| 5 Index remaining | `set_remaining_params`, `fill_remaining_from_latest_domain` | `run_index_remaining` |
+
+Results/inspection: `get_state`, `get_log`, `get_domains`, `select_domain`,
+`get_spots` (CSV file reference), `select_spot`, `show_selected_on_detector`,
+`set_view`, `set_reciprocal_options`, `set_overlays`, `build_volume` / `get_volume_status`,
+`review_domains`, `save_project`.
+
+Dialogs the GUI would show become structured errors (`precondition_failed`)
+in agent mode. Two interactive confirmations — "omega step is 0°" and
+"calibration doesn't declare im_trans" — are refused with an explanatory
+message unless `run_ingest` is passed `acknowledge_warnings=True`; check the
+mapping/calibration before acknowledging.
+
+### Operations
 
 See `midas_gui/control_api.py`'s `op_*` methods for the authoritative list
 and exact argument names — each MCP tool in `server.py` is named after one
@@ -197,14 +230,18 @@ docstring restates what it does.
 
 ## Known limitations (phase 1)
 
-- **Scope**: only Data Viewer and Calibrate. Mask generation and Batch
-  (radial) Integrate are a later phase.
+- **Scope**: Data Viewer, Calibrate and Solve Cell. Mask generation and Batch
+  (radial) Integrate are a later phase. Solve Cell does not yet expose
+  opening a project (`File ▸ Open Project` is dialog-driven) or the
+  interactive 3-D camera / per-view widgets of the Diagnostics, Contamination
+  and Inspector tabs beyond `set_view`; `solve_cell.save_project` is the one
+  project-level op.
 - **No true live radial-integration stream**: midas-gui recomputes the
   radial profile per live frame rather than maintaining a separate stream,
   so `radial_profile_updated` is a lightweight "something changed, go pull
   it" notification, not a data-bearing stream.
 - **Dialog bypass is narrow by design**: `CalibrationTab`/
-  `DetectorGeometryCard` skip their blocking dialogs only on the specific
+  `DetectorGeometryCard`/`SolveCellTab` (+ its `PanelCard`s) skip their blocking dialogs only on the specific
   call paths the control API uses (via `set_agent_mode`); any other dialog
   in the app is untouched and would still block a fully unattended run if
   reached some other way.

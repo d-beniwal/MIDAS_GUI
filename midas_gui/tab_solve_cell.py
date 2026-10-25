@@ -196,7 +196,19 @@ class PanelCard(QtWidgets.QWidget):
         self._calib_info: Optional[dict] = None
         self._ome_field = ""
         self._panel_id = int(panel_id)
+        # Set by SolveCellTab.set_agent_mode (control API): guard dialogs
+        # become recorded errors instead of a modal nobody can click.
+        self._agent_mode = False
+        self._last_agent_error: Optional[str] = None
         self._build_ui()
+
+    def _warn_or_record(self, title: str, text: str, *, critical: bool = False) -> None:
+        if self._agent_mode:
+            self._last_agent_error = f"{title}: {text}"
+        elif critical:
+            QtWidgets.QMessageBox.critical(self, title, text)
+        else:
+            QtWidgets.QMessageBox.warning(self, title, text)
 
     def _build_ui(self):
         lv = QtWidgets.QVBoxLayout(self)
@@ -224,6 +236,7 @@ class PanelCard(QtWidgets.QWidget):
         lv.addWidget(grp_calib)
 
         lv.addWidget(self.loader)
+        lv.addStretch(1)      # frame <-> omega stays pinned to the bottom
 
         grp_ome = QtWidgets.QGroupBox("Frame ↔ omega")
         of = QtWidgets.QFormLayout(grp_ome); of.setSpacing(4)
@@ -275,7 +288,6 @@ class PanelCard(QtWidgets.QWidget):
         self._update_last_idx()
 
         lv.addWidget(grp_ome)
-        lv.addStretch(1)
         self.loader.dataChanged.connect(self._update_last_idx)
 
     def _last_idx(self) -> int:
@@ -318,8 +330,7 @@ class PanelCard(QtWidgets.QWidget):
     def _auto_detect_first_idx(self):
         path = self.loader.data_path()
         if not path or not is_h5(path):
-            QtWidgets.QMessageBox.warning(
-                self, "Solve Cell", "Load an HDF5 data file for this panel first.")
+            self._warn_or_record("Solve Cell", "Load an HDF5 data file for this panel first.")
             return
         dlg = QtWidgets.QDialog(self)
         dlg.setWindowTitle("Auto-detect first frame idx")
@@ -356,17 +367,16 @@ class PanelCard(QtWidgets.QWidget):
         """Fill 'first frame idx' from *field*'s per-frame omega values."""
         path = self.loader.data_path()
         if not path or not is_h5(path):
-            QtWidgets.QMessageBox.warning(
-                self, "Solve Cell", "Load an HDF5 data file for this panel first.")
+            self._warn_or_record("Solve Cell", "Load an HDF5 data file for this panel first.")
             return False
         if not field:
-            QtWidgets.QMessageBox.warning(self, "Solve Cell", "Pick an omega field first.")
+            self._warn_or_record("Solve Cell", "Pick an omega field first.")
             return False
         try:
             first_idx, _last, _deg = detect_omega_frame_range(
                 path, field, self._ome_start.value(), self._ome_end.value())
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Detect failed", str(e)); return False
+            self._warn_or_record("Detect failed", str(e), critical=True); return False
         self._ome_field = field
         self._ome_first_idx.setValue(first_idx)
         return True
@@ -393,7 +403,7 @@ class PanelCard(QtWidgets.QWidget):
         try:
             g = geometry_fields_from_file(path)
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Load failed", str(e)); return False
+            self._warn_or_record("Load failed", str(e), critical=True); return False
 
         nry = int(g["NrPixelsY"]) if g.get("NrPixelsY") else None
         nrz = int(g["NrPixelsZ"]) if g.get("NrPixelsZ") else None
@@ -550,9 +560,22 @@ class PanelCard(QtWidgets.QWidget):
 
 
 class SolveCellTab(QtWidgets.QWidget):
+    #: (stage, outcome) when a Run action has completely finished -- after the
+    #: tab's own result handler ran, and after any chained follow-up (e.g.
+    #: "Index remaining spots" free mode = ab-initio then refine). ``stage`` is
+    #: one of ingest/diamond/index/refine/index_remaining; ``outcome`` is
+    #: ``{"ok": bool, "error": str|None, "note": str}`` (``ok`` is False only
+    #: for a failure; a clean negative search result is ok=True with a note).
+    stageFinished = QtCore.pyqtSignal(str, object)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._worker: Optional[SolveCellWorker] = None
+        # Control-API support (see control_api.py): in agent mode guard
+        # dialogs/confirmations/error boxes are recorded, not shown.
+        self._agent_mode = False
+        self._last_agent_error: Optional[str] = None
+        self._agent_ack_warnings = False
         self._selected_spot_id = None
         self._spot_rows_by_id = {}
         self._recip_has_data = False
@@ -607,6 +630,27 @@ class SolveCellTab(QtWidgets.QWidget):
         self._vol_worker: Optional[VolumeBuildWorker] = None
         self._build_ui()
         self._refresh_detector_preview()
+
+    # ── agent (control API) support ─────────────────────────────────
+
+    def set_agent_mode(self, on: bool) -> None:
+        """Enable/disable the blocking-dialog bypass used when a control API
+        drives this tab (also applied to every panel card)."""
+        self._agent_mode = bool(on)
+        for card in self._panels.values():
+            card._agent_mode = self._agent_mode
+
+    def _warn_or_record(self, title: str, text: str, *, critical: bool = False) -> None:
+        if self._agent_mode:
+            self._last_agent_error = f"{title}: {text}"
+        elif critical:
+            QtWidgets.QMessageBox.critical(self, title, text)
+        else:
+            QtWidgets.QMessageBox.warning(self, title, text)
+
+    def _finish_stage(self, stage: str, *, ok: bool = True, error: Optional[str] = None,
+                      note: str = "") -> None:
+        self.stageFinished.emit(stage, {"ok": ok, "error": error, "note": note})
 
     # ── UI ──────────────────────────────────────────────────────────
 
@@ -764,15 +808,9 @@ class SolveCellTab(QtWidgets.QWidget):
         ingest_row.addWidget(self._ingest_btn)
         ingest_row.addWidget(self._ingest_params_btn)
         ingest_row.addStretch(1)
-        cpu_row = QtWidgets.QHBoxLayout()
-        cpu_row.setSpacing(6); cpu_row.setContentsMargins(0, 0, 0, 0)
-        cpu_lbl = QtWidgets.QLabel("Nr. of CPUs:")
-        cpu_lbl.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-        cpu_row.addWidget(cpu_lbl)
-        cpu_row.addWidget(self._ingest_max_workers)
-        cpu_row.addStretch(1)
+        ingest_row.addWidget(QtWidgets.QLabel("CPUs:"))
+        ingest_row.addWidget(self._ingest_max_workers)
         iv.addRow(ingest_row)
-        iv.addRow(cpu_row)
         self._ingest_status = QtWidgets.QLabel("—")
         self._ingest_status.setStyleSheet(f"color:{S.MUTED};font-size:11px")
         self._ingest_status.setWordWrap(True)
@@ -1007,6 +1045,11 @@ class SolveCellTab(QtWidgets.QWidget):
         tab = QtWidgets.QWidget()
         tv = QtWidgets.QVBoxLayout(tab); tv.setContentsMargins(0, 0, 0, 0); tv.setSpacing(0)
 
+        def _vsep():
+            sep = QtWidgets.QFrame()
+            sep.setFrameShape(QtWidgets.QFrame.VLine)
+            sep.setFrameShadow(QtWidgets.QFrame.Sunken)
+            return sep
         mode_row = QtWidgets.QHBoxLayout()
         mode_row.setContentsMargins(6, 2, 6, 2)
         mode_row.addWidget(QtWidgets.QLabel("Color by:"))
@@ -1020,6 +1063,7 @@ class SolveCellTab(QtWidgets.QWidget):
             "of observed minus UB-fitted q (Å⁻¹, 2π/d); grey means no fit.")
         self._recip_mode.currentIndexChanged.connect(lambda _=None: self._refresh_recip_view())
         mode_row.addWidget(self._recip_mode)
+        mode_row.addSpacing(8); mode_row.addWidget(_vsep()); mode_row.addSpacing(8)
         self._recip_show_unindexed = QtWidgets.QCheckBox("Show unindexed/spurious spots")
         self._recip_show_unindexed.setChecked(True)
         self._recip_show_unindexed.setToolTip(
@@ -1029,19 +1073,16 @@ class SolveCellTab(QtWidgets.QWidget):
             "indexed.")
         self._recip_show_unindexed.stateChanged.connect(lambda _=None: self._refresh_recip_view())
         mode_row.addWidget(self._recip_show_unindexed)
-        mode_row.addStretch(1)
-        tv.addLayout(mode_row)
-
-        size_row = QtWidgets.QHBoxLayout()
-        size_row.setContentsMargins(6, 2, 6, 2)
-        size_row.addWidget(QtWidgets.QLabel("Spot size:"))
+        mode_row.addSpacing(8); mode_row.addWidget(_vsep()); mode_row.addSpacing(8)
+        mode_row.addWidget(QtWidgets.QLabel("Spot size:"))
         self._recip_point_size = QtWidgets.QSpinBox()
         self._recip_point_size.setRange(4, 40)
-        self._recip_point_size.setValue(14)
+        self._recip_point_size.setValue(18)
         self._recip_point_size.setToolTip("Rendered diameter (px) of each reciprocal-space spot.")
         self._recip_point_size.valueChanged.connect(lambda _=None: self._refresh_recip_view())
-        size_row.addWidget(self._recip_point_size)
-        size_row.addWidget(QtWidgets.QLabel("Size mode:"))
+        mode_row.addWidget(self._recip_point_size)
+        mode_row.addSpacing(8); mode_row.addWidget(_vsep()); mode_row.addSpacing(8)
+        mode_row.addWidget(QtWidgets.QLabel("Size mode:"))
         self._recip_size_mode = QtWidgets.QComboBox()
         self._recip_size_mode.addItems(["Equal size", "By total intensity"])
         self._recip_size_mode.setToolTip(
@@ -1051,22 +1092,10 @@ class SolveCellTab(QtWidgets.QWidget):
             "brightest spot currently visible; faint spots still render at "
             "a reduced minimum size rather than disappearing.")
         self._recip_size_mode.currentIndexChanged.connect(lambda _=None: self._refresh_recip_view())
-        size_row.addWidget(self._recip_size_mode)
-        size_row.addStretch(1)
-        tv.addLayout(size_row)
+        mode_row.addWidget(self._recip_size_mode)
+        mode_row.addStretch(1)
+        tv.addLayout(mode_row)
 
-        self._recip_predicted = QtWidgets.QCheckBox("Show fitted positions")
-        self._recip_predicted.setToolTip(
-            "Crosses and connecting lines show UB-fitted positions for assigned "
-            "observed reflections only; this does not predict unobserved reflections.")
-        self._recip_predicted.toggled.connect(lambda: self._refresh_recip_view())
-        options = QtWidgets.QHBoxLayout()
-        options.addWidget(self._recip_predicted)
-        fit_btn = QtWidgets.QPushButton("Fit visible spots")
-        fit_btn.clicked.connect(self._fit_visible_spots)
-        options.addWidget(fit_btn)
-        options.addStretch(1)
-        tv.addLayout(options)
         tv.addLayout(self._build_overlay_controls())
         tv.addWidget(self._recip_view, stretch=1)
         self._spot_details = QtWidgets.QLabel("Hover a spot for details; click to select.")
@@ -1090,22 +1119,28 @@ class SolveCellTab(QtWidgets.QWidget):
         box.setContentsMargins(6, 0, 6, 0)
         row = QtWidgets.QHBoxLayout()
         row.addWidget(QtWidgets.QLabel("Overlays:"))
-        self._ov_ewald = QtWidgets.QCheckBox("Ewald sphere (cap)")
+
+        def _ov_sep():
+            f = QtWidgets.QFrame()
+            f.setFrameShape(QtWidgets.QFrame.VLine)
+            f.setFrameShadow(QtWidgets.QFrame.Sunken)
+            return f
+        self._ov_ewald = QtWidgets.QCheckBox("Ewald sphere")
         self._ov_ewald.setToolTip(
             "The Ewald sphere through q=0 at the ω below, in sample-frame q "
             "(centre −R(ω)ᵀ·kᵢ, radius 2π/λ), drawn only as a local cap. Yellow "
             "arrow: incident beam kᵢ ending at q=0; pink line: ω rotation axis. "
             "Not a resolution shell.")
-        self._ov_basis = QtWidgets.QCheckBox("a*, b*, c* + cell")
+        self._ov_basis = QtWidgets.QCheckBox("*cell")
         self._ov_basis.setToolTip("Reciprocal basis (red/green/blue = a*/b*/c*) and unit cell of the selected domain (2π·UB columns).")
-        self._ov_pred = QtWidgets.QCheckBox("Predicted lattice points")
+        self._ov_pred = QtWidgets.QCheckBox("lattice points")
         self._ov_pred.setToolTip(
             "Every lattice point of the selected domain that crosses the Ewald "
             "sphere inside the scanned ω range. Green: explained by an assigned "
             "spot; orange: lands on a panel but no assigned spot; grey (optional): "
             "never lands on an active panel. Cached in the project.")
         self._ov_pred_hidden = QtWidgets.QCheckBox("incl. off-panel")
-        self._ov_patch = QtWidgets.QCheckBox("Frame patches")
+        self._ov_patch = QtWidgets.QCheckBox("panel outline")
         self._ov_patch.setToolTip(
             "Each panel's frame at the ω below painted onto its measured patch of the Ewald "
             "sphere (sample-frame q). Colour = block-max background-subtracted counts (asinh); "
@@ -1115,6 +1150,8 @@ class SolveCellTab(QtWidgets.QWidget):
         self._ov_shells.setToolTip("Constant-|q| shells (centred on q=0) at 0.5, 1.0, 1.5… Å⁻¹ — distinct from the Ewald sphere.")
         for w in (self._ov_ewald, self._ov_basis, self._ov_pred, self._ov_pred_hidden, self._ov_patch, self._ov_shells):
             w.toggled.connect(lambda _=None: self._refresh_overlays())
+            if w is not self._ov_ewald:
+                row.addSpacing(6); row.addWidget(_ov_sep()); row.addSpacing(6)
             row.addWidget(w)
         row.addStretch(1)
         box.addLayout(row)
@@ -1487,10 +1524,6 @@ class SolveCellTab(QtWidgets.QWidget):
         append(unindexed, "Unindexed/spurious")
         return rows
 
-    def _fit_visible_spots(self):
-        self._recip_has_data = False
-        self._refresh_recip_view()
-
     def _refresh_recip_view(self):
         rows = self._display_spot_rows()
         self._spot_rows_by_id = {r["spot_id"]: r for r in rows}
@@ -1530,16 +1563,7 @@ class SolveCellTab(QtWidgets.QWidget):
                 "|q observed − q fitted| (Å⁻¹; 2π/d)", 0, norm.vmax)
         else:
             self._recip_view.clear_scalar_bar()
-        if self._recip_predicted.isChecked():
-            fitted = [r for r in visible if "q_predicted" in r]
-            if fitted:
-                observed = np.array([[r[c] for c in ("qsample_x", "qsample_y", "qsample_z")] for r in fitted])
-                predicted = np.array([r["q_predicted"] for r in fitted])
-                self._recip_view.set_fitted_overlay(observed, predicted)
-            else:
-                self._recip_view.set_fitted_overlay(None, None)
-        else:
-            self._recip_view.set_fitted_overlay(None, None)
+        self._recip_view.set_fitted_overlay(None, None)
         self._update_recip_selection()
         if mode == 0:
             lines = [f"{self._panel_label(k)}: {len(buckets[k])} spots" for k in keys]
@@ -1697,31 +1721,43 @@ class SolveCellTab(QtWidgets.QWidget):
         if row and self._ov_patch.isChecked() and np.isfinite(row.get("omega_deg", np.nan)):
             self._ov_omega.setValue(int(round(row["omega_deg"] * 10)))   # patch and centroid at the spot's own omega
         self._update_recip_selection()
+        self._sync_detector_to_spot(row, explain=False)   # Detector view follows the click
         self._update_inspector()
         if self._view_tabs.currentWidget() is self._contam_view:
             self._contam_view.select_spot(spot_id)
         self._refresh_detector_preview()
 
-    def _show_selected_on_detector(self):
-        row = next((r for r in self._display_spot_rows() if r["spot_id"] == self._selected_spot_id), None)
+    def _sync_detector_to_spot(self, row, *, explain: bool) -> bool:
+        """Point the Detector view's panel + frame at ``row``'s source. Returns
+        whether the frame is loaded; ``explain`` reports why not in the details line."""
         if row is None or "loaded_frame_idx" not in row:
-            return
+            return False
         pid = row.get("panel_id")
         if pid is not None:
             panel = self._panels.get(int(pid))
             if panel is None:
-                self._spot_details.setText("Source panel is no longer loaded.")
-                return
+                if explain:
+                    self._spot_details.setText("Source panel is no longer loaded.")
+                return False
             self._panel_tabs.setCurrentWidget(panel)
         panel = self._active_panel()
         frame = int(row["loaded_frame_idx"])
         if panel is None or not 0 <= frame < panel.loader.n_frames():
-            self._spot_details.setText("Source frame is not loaded; load this panel's original data to navigate.")
+            if explain:
+                self._spot_details.setText("Source frame is not loaded; load this panel's original data to navigate.")
+            return False
+        if self._det_stage.currentIndex() in (0, 1) and panel.loader.frame_index() != frame:
+            panel.loader.set_frame(frame)
+        return True
+
+    def _show_selected_on_detector(self):
+        row = next((r for r in self._display_spot_rows() if r["spot_id"] == self._selected_spot_id), None)
+        if row is None or "loaded_frame_idx" not in row:
             return
-        self._det_stage.setCurrentIndex(0)
-        panel.loader.set_frame(frame)
-        self._refresh_detector_preview()
-        self._view_tabs.setCurrentIndex(1)
+        if self._sync_detector_to_spot(row, explain=True):
+            self._det_stage.setCurrentIndex(0)
+            self._refresh_detector_preview()
+            self._view_tabs.setCurrentIndex(1)
 
     def _on_detector_spot_clicked(self, _scatter, points, _event):
         if points:
@@ -1937,6 +1973,7 @@ class SolveCellTab(QtWidgets.QWidget):
         """Append a panel. Its number is its id and is always the next one in
         the 1, 2, 3, … sequence."""
         card = PanelCard(self._panel_tabs.count() + 1)
+        card._agent_mode = self._agent_mode
         # Live-refresh the Detector tab (Raw/Corrected only) as this panel's
         # data/frame-index or dark/bright/background/mask fields change --
         # same signals tab_batch.py's own Detector view refreshes from.
@@ -1961,10 +1998,16 @@ class SolveCellTab(QtWidgets.QWidget):
         discarded in that case (after asking)."""
         n = self._panel_tabs.count()
         if n <= 1:
-            QtWidgets.QMessageBox.information(
-                self, "Solve Cell", "At least one panel is required.")
+            self._warn_or_record("Solve Cell", "At least one panel is required.")
             return
         shifts = index < n - 1
+        if shifts and self._spots_df is not None and self._agent_mode:
+            self._warn_or_record(
+                "Remove panel",
+                f"Removing panel {index + 1} renumbers the later panels, which invalidates "
+                "the current ingest results (spots, domains); remove the last panel instead, "
+                "or re-run ingest after removal is not possible without discarding them.")
+            return
         if shifts and self._spots_df is not None:
             resp = QtWidgets.QMessageBox.question(
                 self, "Remove panel",
@@ -2082,10 +2125,17 @@ class SolveCellTab(QtWidgets.QWidget):
     def _geometry_cfg(self) -> dict:
         return self._active_panel().geometry_cfg()
 
+    _STAGE_KEYS = {"Ingest": "ingest", "Diamond filter": "diamond", "Ab-initio index": "index",
+                   "Index": "index", "Refine": "refine", "Index remaining spots": "index_remaining"}
+
     def _on_stage_fail(self, stage_label: str, msg: str, btn: QtWidgets.QPushButton):
         btn.setEnabled(True)
         self._prog.setVisible(False)
-        show_error(self, f"Solve Cell: {stage_label} failed", msg, log=self._log, log_prefix="\nERROR:\n")
+        if self._agent_mode:
+            self._log.append("\nERROR:\n" + msg)
+        else:
+            show_error(self, f"Solve Cell: {stage_label} failed", msg, log=self._log, log_prefix="\nERROR:\n")
+        self._finish_stage(self._STAGE_KEYS.get(stage_label, stage_label), ok=False, error=msg)
 
     # ── GUI state (project save/restore) ───────────────────────────
 
@@ -2183,18 +2233,17 @@ class SolveCellTab(QtWidgets.QWidget):
             return
         active_panel = self._active_panel()
         if not active_panel.has_calibration():
-            QtWidgets.QMessageBox.warning(
-                self, "No calibration loaded",
-                "Load a calibration file for this panel first."); return
+            self._warn_or_record(
+                "No calibration loaded", "Load a calibration file for this panel first."); return
         # Cheap, metadata-only check -- the real read (full_stack(), ~10 GB for
         # an HDF5-backed stack at full detector resolution) happens inside the
         # worker thread below, not here on the GUI thread, so the window
         # doesn't freeze with no progress shown while it runs.
         if active_panel.loader.data_source_kind() == "none":
-            QtWidgets.QMessageBox.warning(self, "No raw data", "Load raw frames first."); return
+            self._warn_or_record("No raw data", "Load raw frames first."); return
         for sel in active_panel.loader.has_pending_fields():
-            QtWidgets.QMessageBox.warning(
-                self, "Field not computed",
+            self._warn_or_record(
+                "Field not computed",
                 f"'{sel.title()}' is enabled but not computed. "
                 "Click 'Compute field' in that box first."); return
 
@@ -2226,7 +2275,15 @@ class SolveCellTab(QtWidgets.QWidget):
         # from them, so a mapping the user actually filled in lacks its step;
         # one never touched (start == end) doesn't trip this.
         zero_step = [pid for pid, card in ready if card.omega_span_without_step()]
-        if zero_step:
+        if zero_step and self._agent_mode:
+            if not self._agent_ack_warnings:
+                self._warn_or_record(
+                    "Omega step is 0°",
+                    f"Panel(s) {', '.join(str(p) for p in zero_step)} have different start/end "
+                    "omega but omega step 0.0° -- every frame would get the SAME omega. Set the "
+                    "omega step, or pass acknowledge_warnings=True to run anyway.")
+                return
+        elif zero_step:
             resp = QtWidgets.QMessageBox.warning(
                 self, "Omega step is 0°",
                 f"Panel(s) {', '.join(str(p) for p in zero_step)} have different "
@@ -2244,7 +2301,16 @@ class SolveCellTab(QtWidgets.QWidget):
         # warns/records this on every ingest regardless).
         undeclared = [pid for pid, card in ready
                       if not card.geometry_cfg().get("im_trans_in_file", False)]
-        if undeclared:
+        if undeclared and self._agent_mode:
+            if not self._agent_ack_warnings:
+                self._warn_or_record(
+                    "Calibration image transform not declared",
+                    f"The calibration file(s) for panel(s) {', '.join(str(p) for p in undeclared)} "
+                    "don't declare 'im_trans', so no flip/transpose will be applied; if they were "
+                    "calibrated on a flipped image every spot position will be wrong. Pass "
+                    "acknowledge_warnings=True to run anyway.")
+                return
+        elif undeclared:
             resp = QtWidgets.QMessageBox.warning(
                 self, "Calibration image transform not declared",
                 f"The calibration file(s) for panel(s) {', '.join(str(p) for p in undeclared)} "
@@ -2365,6 +2431,7 @@ class SolveCellTab(QtWidgets.QWidget):
         self._refresh_detector_preview()
         self._record_ingest(
             result, {pid: result.get("summary", {})} if pid is not None else {}, pooled=False)
+        self._finish_stage("ingest", note=f"{n} spots")
 
     def _on_ingest_pooled_done(self, result: dict):
         """Multi-panel counterpart of :meth:`_on_ingest_done` -- ``result``
@@ -2392,6 +2459,7 @@ class SolveCellTab(QtWidgets.QWidget):
         self._ingest_preview_by_panel = {pid: r.get("preview") for pid, r in per_panel.items()}
         self._refresh_detector_preview()
         self._record_ingest(result, {pid: r["summary"] for pid, r in per_panel.items()}, pooled=True)
+        self._finish_stage("ingest", note=f"{n} spots across {summary['n_panels']} panels")
 
     # ── project record: latest analysis stored in the open project ──────
     #
@@ -2680,7 +2748,12 @@ class SolveCellTab(QtWidgets.QWidget):
         if self._worker is not None and self._worker.isRunning():
             return
         if self._spots_df is None or len(self._spots_df) == 0:
-            QtWidgets.QMessageBox.warning(self, "No ingest output", "Run Ingest first."); return
+            self._warn_or_record("No ingest output", "Run Ingest first."); return
+        if not self._active_panel().has_calibration():
+            self._warn_or_record(
+                "No calibration loaded",
+                "The active panel has no calibration loaded; the diamond filter needs its "
+                "wavelength. Select a calibrated panel."); return
         cfg = {
             "spots_df": self._spots_df, "wavelength_A": self._active_panel().geometry_cfg()["wavelength_A"],
             "diamond_a_angstrom": self._diamond_a.value(), "contam_tol_deg": self._contam_tol.value(),
@@ -2725,6 +2798,7 @@ class SolveCellTab(QtWidgets.QWidget):
         self._refresh_recip_view()
         self._sc_stage_meta["diamond"] = {"summary": summary}
         self._mark_sc_dirty("diamond")
+        self._finish_stage("diamond", note=f"{summary['n_kept']} candidates kept")
 
     # ── stage 3: index (blind ab-initio, or a user-supplied known cell) ──
 
@@ -2824,7 +2898,7 @@ class SolveCellTab(QtWidgets.QWidget):
         if self._worker is not None and self._worker.isRunning():
             return
         if self._candidate_df is None or len(self._candidate_df) == 0:
-            QtWidgets.QMessageBox.warning(self, "No candidates", "Run Diamond Filter first."); return
+            self._warn_or_record("No candidates", "Run Diamond Filter first."); return
         cfg = {
             "candidate_df": self._candidate_df, "sigma_g": self._sigma_g.value(),
             "min_reflections": self._min_refl.value(), "pooled_dir": self._pooled_dir,
@@ -2843,7 +2917,7 @@ class SolveCellTab(QtWidgets.QWidget):
         if self._worker is not None and self._worker.isRunning():
             return
         if self._candidate_df is None or len(self._candidate_df) == 0:
-            QtWidgets.QMessageBox.warning(self, "No candidates", "Run Diamond Filter first."); return
+            self._warn_or_record("No candidates", "Run Diamond Filter first."); return
         known_cell = self._known_structure_cell(self._ks3)
         self._known_structure_g_2pi = self._candidate_df[
             ["qsample_x", "qsample_y", "qsample_z"]].to_numpy()
@@ -2877,6 +2951,7 @@ class SolveCellTab(QtWidgets.QWidget):
                 self._log.append(
                     f"  best_n={diag.get('best_n')} null_mean={diag.get('null_mean', 0):.1f} "
                     f"z={diag.get('z_score', float('nan')):.2f}")
+            self._finish_stage("index", note=f"no match: {notes}")
             return
         mask = result["indexed_mask"]
         claimed_index = self._candidate_df.index[mask]
@@ -2898,6 +2973,7 @@ class SolveCellTab(QtWidgets.QWidget):
         else:
             self._add_domain("known structure (manual)", result, claimed_index, xyz, panel_ids,
                              round1=True)
+        self._finish_stage("index", note="known-structure match; Domain 1 refined")
 
     def _on_ab_initio_done(self, result: dict):
         self._ab_btn.setEnabled(True); self._prog.setVisible(False)
@@ -2917,9 +2993,11 @@ class SolveCellTab(QtWidgets.QWidget):
         self._mark_sc_dirty("index")
 
         if not res["success"]:
+            self._finish_stage("index", note="ab-initio did not succeed: " + "; ".join(res["notes"]))
             return
 
         self._refresh_recip_view()
+        self._finish_stage("index", note="ab-initio succeeded; run refine next")
 
     # ── stage 4: refine ─────────────────────────────────────────────
 
@@ -2927,7 +3005,7 @@ class SolveCellTab(QtWidgets.QWidget):
         if self._worker is not None and self._worker.isRunning():
             return
         if self._ab_initio_raw is None or not self._ab_initio_raw.success:
-            QtWidgets.QMessageBox.warning(self, "No ab-initio result", "Run Ab-initio Index first."); return
+            self._warn_or_record("No ab-initio result", "Run Ab-initio Index first."); return
         cfg = {
             "ab_initio_raw": self._ab_initio_raw, "g_2pi": self._g_2pi,
             "sigma_g": self._sigma_g_used, "pooled_dir": self._pooled_dir,
@@ -2956,6 +3034,7 @@ class SolveCellTab(QtWidgets.QWidget):
             self._replace_domain(self._round1_domain_index, "free (ab-initio)", r, claimed_index, xyz, panel_ids)
         else:
             self._add_domain("free (ab-initio)", r, claimed_index, xyz, panel_ids, round1=True)
+        self._finish_stage("refine")
 
     def _populate_result_grid(self, r: dict):
         grid = self._param_grid
@@ -3074,8 +3153,8 @@ class SolveCellTab(QtWidgets.QWidget):
             return
         leftover = self._leftover_df()
         if leftover is None or len(leftover) == 0:
-            QtWidgets.QMessageBox.warning(
-                self, "No remaining spots", "No unassigned spots left to index."); return
+            self._warn_or_record(
+                "No remaining spots", "No unassigned spots left to index."); return
         self._leftover_pending_df = leftover
         self._leftover_btn.setEnabled(False)
         self._prog.setVisible(True)
@@ -3123,6 +3202,7 @@ class SolveCellTab(QtWidgets.QWidget):
             notes = "; ".join(res["notes"]) or "no notes"
             self._leftover_run_status.setText(f"No new domain found: {notes}")
             self._log.append(f"Index remaining spots: ab-initio did not succeed ({notes}).")
+            self._finish_stage("index_remaining", note=f"no new domain: {notes}")
             return
         self._pending_leftover_ab = (result["ab_initio_raw"], result["g_2pi"], self._leftover_pending_df)
         cfg = {
@@ -3149,6 +3229,7 @@ class SolveCellTab(QtWidgets.QWidget):
             f"New domain: {int(mask.sum())} spots, a={r['cell'][0]:.4g} Å, rms_drlv={r['rms_drlv']:.4g}")
         self._log.append(f"Index remaining spots: new domain, cell={tuple(round(v, 4) for v in r['cell'])}")
         self._add_domain("free (ab-initio)", r, claimed_index, xyz, panel_ids)
+        self._finish_stage("index_remaining", note="new domain")
 
     def _on_leftover_known_cell_done(self, result: dict):
         self._leftover_btn.setEnabled(True); self._prog.setVisible(False)
@@ -3161,6 +3242,7 @@ class SolveCellTab(QtWidgets.QWidget):
                 self._log.append(
                     f"  best_n={diag.get('best_n')} null_mean={diag.get('null_mean', 0):.1f} "
                     f"z={diag.get('z_score', float('nan')):.2f}")
+            self._finish_stage("index_remaining", note=f"no new domain: {notes}")
             return
         leftover_df = self._leftover_pending_df
         mask = result["indexed_mask"]
@@ -3178,3 +3260,4 @@ class SolveCellTab(QtWidgets.QWidget):
         for note in result.get("notes", []):
             self._log.append(f"  note: {note}")
         self._add_domain("known structure", result, claimed_index, xyz, panel_ids)
+        self._finish_stage("index_remaining", note="new domain (known structure)")
