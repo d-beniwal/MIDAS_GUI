@@ -1929,3 +1929,45 @@ def test_run_ingest_no_im_trans_warning_when_declared(tab, monkeypatch):
     monkeypatch.setattr(tab_solve_cell, "SolveCellWorker", _CapturingWorker)
     tab._run_ingest()
     assert len(_CapturingWorker.instances) == 1
+
+
+def test_path_and_dataset_fields_show_full_path_tooltips(tab):
+    panel = tab._active_panel()
+    path = _write_h5_stack_with_omega([0.0, 1.0, 2.0])
+    panel.loader.set_path(path, load=True)
+    assert panel.loader._path_ed.toolTip() == path
+    tip = panel.loader._ds_combo.toolTip()
+    assert path in tip and "exchange/data" in tip and "(3," in tip
+    tab._proj_ed.setText("/some/long/project/folder")
+    assert tab._proj_ed.toolTip() == "/some/long/project/folder"
+
+
+def test_first_frame_idx_field_matches_omega_field_width(tab):
+    p = tab._active_panel()
+    assert (p._ome_first_idx.maximumWidth() == p._ome_start.maximumWidth()
+            == p._ome_end.maximumWidth() == p._ome_step.maximumWidth())
+
+
+def test_panel_minimize_to_bottom_ribbon(tab, app):
+    """Minimising Data / Controls hides them, shows ribbon tabs, Results grows."""
+    tab.resize(1500, 800)
+    tab.show(); app.processEvents()
+    split = tab._hsplit
+    pt = split.panel_toggles
+    before = split.sizes()
+    assert not pt.ribbon.isVisible()
+
+    pt.set_minimized("data", True); app.processEvents()
+    s = split.sizes()
+    assert s[0] == 0 and s[2] >= before[2] + before[0] and abs(sum(s) - sum(before)) <= 12
+    assert pt.ribbon.isVisible() and pt._tabs["data"].isVisible()
+    assert not pt._tabs["controls"].isVisible()
+
+    pt.set_minimized("controls", True); app.processEvents()
+    s2 = split.sizes()
+    assert s2[1] == 0 and s2[2] > s[2]
+
+    pt._tabs["controls"].click(); pt._tabs["data"].click(); app.processEvents()
+    after = split.sizes()
+    assert abs(after[0] - before[0]) <= 2 and abs(after[1] - before[1]) <= 2
+    assert not pt.ribbon.isVisible()

@@ -57,6 +57,7 @@ Backup of the example project before edits: `scratch/s3idc_oct8_spinel.pre_vis_b
 
 ## Recent changes
 
+- 2026-10-25 — Global Data/Controls/Results terminology; Solve Cell Data/Controls panels minimise to a bottom ribbon (`panel_toggle.py`); also Data Viewer, Calibrate, Batch Integrate, Pump Probe (`tests/test_panel_toggle_tabs.py`). Uncommitted.
 - 2026-10-25 — Solve Cell left-panel refinement: Panels ribbon (number = id), start/end/step/first-idx omega mapping with derived last idx + click-to-detect, size-only Data info, calibration filename link + popup, right-click About (see DECISIONS). Uncommitted.
 - 2026-10-24 — `solve_cell_vis`: V02 frame patches (`frame_patch.py`) + visualization document (md+pdf); V13 domain comparison (`domain_compare.py`, `solve_cell_compare.py`); geometry adapter, viz products + project cache, overlays, Diagnostics/Volume/Spot-inspector/Contamination tabs (`tests/test_solve_cell_viz*.py`).
 - 2026-10-24 — Solve Cell results persist in the project as a single latest record and auto-load on open (`project.write_solve_cell_*`/`read_solve_cell`, `SolveCellTab.apply_project_solve_cell`).

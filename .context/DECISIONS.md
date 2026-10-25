@@ -3,6 +3,21 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-25 — Global panel terminology + minimisable Data/Controls panels (Solve Cell first)
+
+- **Terminology (GUI-wide):** *Data* panel = left-most (loads data); *Controls* panel = middle (analysis
+  controls + run buttons); *Results* panel = right-most (all plots/visualisations). Use these names in UI
+  text, docs and code. Recorded in ARCHITECTURE "UI / UX conventions" and `panel_toggle.py`.
+- **Minimise to a bottom ribbon:** Data and Controls each get a slim header with a "—" button
+  (`midas_gui/panel_toggle.py`, `install_panel_toggles`). Minimising *hides* the panel (not a 0-width
+  collapse, so no stray handle) and adds a restore tab to a ribbon under the splitter; the freed width is
+  given to Results (the only stretch child). Results has no minimise button. Restore returns the prior width.
+- **Scope:** Solve Cell first, then Data Viewer, Calibrate, Batch Integrate and Pump Probe (same day). In the
+  stack-based tabs `_hsplit` is now the stack *page* (splitter + ribbon), not the splitter. Still pending:
+  `tab_batch_correct`, `tab_refine`, hydra pages (same `QSplitter` shape: one `install_panel_toggles` call + ribbon slot). Two-panel tabs
+  (corrections, texture, mask, pdf, export) use a fixed-width Controls column with no splitter — would need a
+  splitter conversion first.
+
 ## 2026-10-25 — Solve Cell left-panel refinement (panel ribbon, omega mapping, calibration popup)
 
 - **Panel number is the panel id.** Panels live in a vertical "Panels" ribbon at the window's left edge
@@ -22,7 +37,7 @@ to reconstruct later). Never rewrite history; add a new entry to supersede.
 - **Loaded calibration = filename link** → popup table of every panel's parameters (one column per panel,
   `SolveCellTab._show_calibrations`); warnings (no `im_trans`, unused `tx`, embedded copy) live in the popup.
 - **"About Solve Cell"** is a right-click menu on the main window's Solve Cell tab (`MainWindow._on_tab_bar_context_menu`,
-  plain-text dialog); the inline blurb was removed. Left column min width 260 / initial 286 like other tabs.
+  plain-text dialog); the inline blurb was removed. Left column min width 208 / initial 229 (20% under the other tabs' 286, per user); to fit, the omega group uses 90% type, no ° suffix (units in the note), 3/4-decimal spins and four equal fixed-width (78 px) fields, and the calibration button reads "Load calibration…". Path fields (data, dark/bright/background, project folder, mask rows) show the full path as a tooltip; the Dataset combo's tooltip is file + dataset + shape.
 
 ## 2026-10-25 — Pause new Solve Cell visualizations; refine the tab first
 

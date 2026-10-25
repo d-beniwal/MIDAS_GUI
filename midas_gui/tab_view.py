@@ -18,6 +18,7 @@ import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
+from midas_gui.panel_toggle import install_panel_toggles
 from midas_gui.constants import DEFAULT_NICKEL_H5
 from midas_gui.helpers import (_fspin, _NoScrollSpinBox, _NoScrollComboBox,
                          widgets_to_dict, apply_dict_to_widgets, _apply_im_trans,
@@ -337,7 +338,13 @@ class DataViewerTab(QtWidgets.QWidget):
 
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         split.setChildrenCollapsible(False); split.setHandleWidth(6)
-        self._mode_stack.addWidget(split); self._hsplit = split
+        # Page = splitter on top + bottom ribbon holding minimised Data/Controls tabs.
+        # (_hsplit is the stack page, which is what the mode switch selects.)
+        _body = QtWidgets.QWidget()
+        self._body_lay = QtWidgets.QVBoxLayout(_body)
+        self._body_lay.setContentsMargins(0, 0, 0, 0); self._body_lay.setSpacing(2)
+        self._body_lay.addWidget(split, 1)
+        self._mode_stack.addWidget(_body); self._hsplit = _body
 
         # ── LEFT: data loader (stack mode) ──
         # hide_frame_field=True: this tab shows its own scrubber under the
@@ -638,6 +645,8 @@ class DataViewerTab(QtWidgets.QWidget):
         split.addWidget(right)
         split.setStretchFactor(0, 0); split.setStretchFactor(1, 0); split.setStretchFactor(2, 1)
         split.setSizes([286, 361, 950])
+        # Data | Controls | Results: minimise Data/Controls to the bottom ribbon.
+        self._body_lay.addWidget(install_panel_toggles(split).ribbon)
 
         # Page 1: Hydra (4-panel GE detector) view.
         self._hydra_page = HydraViewerPage()

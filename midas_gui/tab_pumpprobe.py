@@ -28,6 +28,7 @@ import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
+from midas_gui.panel_toggle import install_panel_toggles
 from midas_gui.constants import (KERNELS, DEFAULT_KERNEL, DEFAULT_TRXRD_DIR,
                                  DEFAULT_TRXRD_PREFIX, DEFAULT_TRXRD_CALIB,
                                  DEFAULT_TRXRD_MASK)
@@ -210,7 +211,11 @@ class PumpProbeTab(QtWidgets.QWidget):
         root.setContentsMargins(6, 6, 6, 6); root.setSpacing(0)
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         split.setChildrenCollapsible(False); split.setHandleWidth(6)
-        root.addWidget(split)
+        _body = QtWidgets.QWidget()
+        self._body_lay = QtWidgets.QVBoxLayout(_body)
+        self._body_lay.setContentsMargins(0, 0, 0, 0); self._body_lay.setSpacing(2)
+        self._body_lay.addWidget(split, 1)
+        root.addWidget(_body)
 
         # ── LEFT: data loader (folder + dark/bright/background + mask) ──
         self._loader = DataLoaderPanel(mode="stream")
@@ -382,6 +387,8 @@ class PumpProbeTab(QtWidgets.QWidget):
         split.addWidget(right)
         split.setStretchFactor(0, 0); split.setStretchFactor(1, 0); split.setStretchFactor(2, 1)
         split.setSizes([260, 380, 960])
+        # Data | Controls | Results: minimise Data/Controls to the bottom ribbon.
+        self._body_lay.addWidget(install_panel_toggles(split).ribbon)
 
     # ── shared plot-style toolbar + chrome helpers ─────────────────
     def _build_style_toolbar(self):

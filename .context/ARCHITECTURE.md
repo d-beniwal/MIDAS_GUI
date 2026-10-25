@@ -122,6 +122,8 @@ becomes a placeholder; signal wiring guarded by `_connect`.
 
 ## UI / UX conventions (user-mandated — see also DECISIONS)
 
+- **Panel terminology:** *Data* (left, loads data) | *Controls* (middle, analysis controls + run buttons) | *Results* (right, plots). Data/Controls minimise to a bottom ribbon via `panel_toggle.install_panel_toggles` (Solve Cell only so far).
+
 - **Dioptas-inspired dark theme** (Fusion + dark QPalette, charcoal panels,
   off-white text); **single orange primary action per tab**; **no emojis**
   anywhere (UI or code). Inspiration repo: `~/ANL-research/github/Dioptas`.

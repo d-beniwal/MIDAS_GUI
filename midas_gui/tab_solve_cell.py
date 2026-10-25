@@ -47,6 +47,7 @@ from midas_gui.pyvista_views import (
     PyVistaScatter3DView, SIZE_MODE_EQUAL, SIZE_MODE_INTENSITY,
 )
 from midas_gui.workers import SolveCellWorker
+from midas_gui.panel_toggle import install_panel_toggles
 from midas_gui.dialogs import show_error
 from midas_gui.solve_cell import pipeline as solve_pipeline
 from midas_gui.solve_cell import geometry_adapter as geom_adapter
@@ -60,6 +61,26 @@ from midas_gui.solve_cell import domain_compare
 from midas_gui.solve_cell import reciprocal_volume
 from midas_gui import project
 from midas_gui import style as S
+
+
+def _tight2(lbl1, w1, lbl2, w2):
+    """_twocol with a narrower (8 px) gap between the pairs, for the compact
+    middle controls column."""
+    h = _twocol(lbl1, w1, lbl2, w2)
+    for i in range(h.count()):
+        it = h.itemAt(i)
+        if it.spacerItem() is not None and it.spacerItem().sizeHint().width() == 20:
+            h.removeItem(it); h.insertSpacing(i, 6); break
+    return h
+
+
+def _left(w: QtWidgets.QWidget) -> QtWidgets.QHBoxLayout:
+    """Row layout that keeps a width-capped widget flush left instead of
+    letting a QFormLayout spanning row centre or stretch it."""
+    h = QtWidgets.QHBoxLayout()
+    h.setContentsMargins(0, 0, 0, 0)
+    h.addWidget(w); h.addStretch(1)
+    return h
 
 
 # Detector-view preview arrays stored per panel in the project record.
@@ -183,7 +204,7 @@ class PanelCard(QtWidgets.QWidget):
 
         grp_calib = QtWidgets.QGroupBox("Calibration")
         cv = QtWidgets.QVBoxLayout(grp_calib)
-        self._load_calib_btn = QtWidgets.QPushButton("Load calibration file…")
+        self._load_calib_btn = QtWidgets.QPushButton("Load calibration…")
         self._load_calib_btn.setToolTip(
             "Load Lsd/BC/tilts/wavelength/pixel size/detector size from a "
             "calibration file written by the Calibrate tab (.json/.txt/.poni). "
@@ -204,17 +225,19 @@ class PanelCard(QtWidgets.QWidget):
 
         lv.addWidget(self.loader)
 
-        grp_ome = QtWidgets.QGroupBox("Frame ↔ omega mapping")
+        grp_ome = QtWidgets.QGroupBox("Frame ↔ omega")
         of = QtWidgets.QFormLayout(grp_ome); of.setSpacing(4)
-        self._ome_start = _fspin(-7200.0, 7200.0, 4, 0.0, "°")
+        # Slightly smaller type keeps the rows inside the narrow left column.
+        f = grp_ome.font(); f.setPointSizeF(f.pointSizeF() * 0.9); grp_ome.setFont(f)
+        self._ome_start = _fspin(-7200.0, 7200.0, 3, 0.0)
         self._ome_start.setToolTip(
             "Omega (degrees) at 'first frame idx'. Every other kept frame's "
             "omega is this value plus (frame − first idx) × omega step.")
-        self._ome_end = _fspin(-7200.0, 7200.0, 4, 0.0, "°")
+        self._ome_end = _fspin(-7200.0, 7200.0, 3, 0.0)
         self._ome_end.setToolTip(
             "Omega (degrees) at the last frame of the scan, as run. Together "
             "with start omega and omega step it fixes the last frame idx.")
-        self._ome_step = _fspin(-10.0, 10.0, 5, 0.0, "°")
+        self._ome_step = _fspin(-10.0, 10.0, 4, 0.0)
         self._ome_step.setToolTip(
             "Degrees of rotation per frame, used to extend omega away from "
             "the first frame in both directions. Default: 0.0°.")
@@ -236,15 +259,15 @@ class PanelCard(QtWidgets.QWidget):
         self._ome_last_lbl = QtWidgets.QLabel()
         self._ome_last_lbl.setWordWrap(True)
         for w in (self._ome_start, self._ome_end, self._ome_step, self._ome_first_idx):
-            w.setMinimumWidth(100)
+            w.setFixedWidth(78)
         of.addRow("start omega:", self._ome_start)
         of.addRow("end omega:", self._ome_end)
         of.addRow("omega step:", self._ome_step)
         of.addRow(self._ome_first_btn, self._ome_first_idx)
         of.addRow("last frame idx:", self._ome_last_lbl)
         note = QtWidgets.QLabel(
-            "omega(frame) = start omega + (frame − first idx) × step. Frames "
-            "outside [first, last] are excluded from ingest.")
+            "Angles in degrees. omega(frame) = start omega + (frame − first idx) "
+            "× step. Frames outside [first, last] are excluded from ingest.")
         note.setWordWrap(True); note.setStyleSheet(f"color:{S.MUTED};font-size:11px")
         of.addRow(note)
         for w in (self._ome_start, self._ome_end, self._ome_step, self._ome_first_idx):
@@ -592,7 +615,12 @@ class SolveCellTab(QtWidgets.QWidget):
         root.setContentsMargins(6, 6, 6, 6); root.setSpacing(0)
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         split.setChildrenCollapsible(False); split.setHandleWidth(6)
-        root.addWidget(split)
+        # Splitter on top, bottom ribbon (minimised Data / Controls tabs) below.
+        body = QtWidgets.QWidget()
+        self._body_lay = QtWidgets.QVBoxLayout(body)
+        self._body_lay.setContentsMargins(0, 0, 0, 0); self._body_lay.setSpacing(2)
+        self._body_lay.addWidget(split, 1)
+        root.addWidget(body)
 
         # ── LEFT EDGE: vertical "Panels" ribbon ──
         self._panel_ribbon = PanelRibbon()
@@ -603,8 +631,9 @@ class SolveCellTab(QtWidgets.QWidget):
 
         # ── LEFT: project folder + the selected panel's card ──
         left_scroll = QtWidgets.QScrollArea()
-        left_scroll.setWidgetResizable(True); left_scroll.setMinimumWidth(260)
+        left_scroll.setWidgetResizable(True); left_scroll.setMinimumWidth(208)
         left = QtWidgets.QWidget(); lv = QtWidgets.QVBoxLayout(left); lv.setSpacing(6)
+        lv.setContentsMargins(4, 4, 4, 4)
         left_scroll.setWidget(left)
 
         grp_proj = QtWidgets.QGroupBox("Project folder")
@@ -616,6 +645,7 @@ class SolveCellTab(QtWidgets.QWidget):
             "pooled/ combined outputs are written as stages run. Optional -- "
             "default is blank, meaning results stay in memory only and "
             "nothing is written to disk.")
+        self._proj_ed.textChanged.connect(self._proj_ed.setToolTip)
         pf.addWidget(self._proj_ed, stretch=1)
         proj_btn = QtWidgets.QPushButton("Browse…")
         proj_btn.clicked.connect(self._browse_project_dir)
@@ -630,12 +660,18 @@ class SolveCellTab(QtWidgets.QWidget):
 
         # ── MIDDLE: stage parameters + run buttons ──
         mid_scroll = QtWidgets.QScrollArea()
-        mid_scroll.setWidgetResizable(True); mid_scroll.setMinimumWidth(340)
+        mid_scroll.setWidgetResizable(True); mid_scroll.setMinimumWidth(345)
         mid = QtWidgets.QWidget(); mv = QtWidgets.QVBoxLayout(mid); mv.setSpacing(6)
         mid_scroll.setWidget(mid)
 
         grp_ing = QtWidgets.QGroupBox("1. Ingest")
         iv = QtWidgets.QFormLayout(grp_ing); iv.setSpacing(4)
+        # The tuning parameters live in a dialog opened by "Parameters…" (the
+        # widgets persist while it is closed, so get_state/_panel_ingest_cfg
+        # read them as before); only Run + Nr. of CPUs stay on the panel.
+        self._ingest_params_dlg = QtWidgets.QDialog(self)
+        self._ingest_params_dlg.setWindowTitle("Ingest parameters")
+        pv = QtWidgets.QFormLayout(self._ingest_params_dlg); pv.setSpacing(6)
         self._low_count = _fspin(0.0, 1e6, 2, solve_pipeline.LOW_COUNT_THRESHOLD_DEFAULT)
         self._low_count.setToolTip(
             "midas_defect's own default (20) can mask 80-99%+ of a "
@@ -649,7 +685,7 @@ class SolveCellTab(QtWidgets.QWidget):
             "background subtraction, produce spurious negative structures -- "
             "growing removes them at negligible cost to real signal. "
             f"Default: {solve_pipeline.MASK_GROW_DEFAULT} px.")
-        iv.addRow(_twocol("low_count_threshold:", self._low_count, "mask grow:", self._mask_grow))
+        pv.addRow(_twocol("low_count_threshold:", self._low_count, "mask grow:", self._mask_grow))
         self._blob_thresh = _fspin(0.0, 1e7, 2, solve_pipeline.BLOB_THRESHOLD_DEFAULT)
         self._blob_thresh.setToolTip(
             "Intensity cut above which a background-subtracted voxel counts "
@@ -663,7 +699,7 @@ class SolveCellTab(QtWidgets.QWidget):
             "frame) for a blob to survive -- smaller connected components "
             "are dropped as noise. "
             f"Default: {solve_pipeline.BLOB_MIN_VOL_DEFAULT} voxels.")
-        iv.addRow(_twocol("blob threshold:", self._blob_thresh, "blob min_vol:", self._blob_minvol))
+        pv.addRow(_twocol("blob threshold:", self._blob_thresh, "blob min_vol:", self._blob_minvol))
         self._split_ratio = _fspin(1.0, 100.0, 2, solve_pipeline.SPLIT_RATIO_DEFAULT)
         self._split_ratio.setToolTip(
             "Watershed sensitivity for splitting one connected blob into "
@@ -672,6 +708,12 @@ class SolveCellTab(QtWidgets.QWidget):
             "intensity h-maxima). Values <=1 disable splitting (plain "
             "local-maximum seeding). "
             f"Default: {solve_pipeline.SPLIT_RATIO_DEFAULT:g}.")
+        self._gap_bridge_on = QtWidgets.QCheckBox("gap_bridge:")
+        self._gap_bridge_on.setChecked(True)
+        self._gap_bridge_on.setToolTip(
+            "Enable gap bridging. Only needed for tiled detectors with gaps "
+            "between sensors; uncheck for a single-sensor detector (passes "
+            "gap_bridge=0, i.e. no bridging).")
         self._gap_bridge = _NoScrollSpinBox(); self._gap_bridge.setRange(0, 1000)
         self._gap_bridge.setValue(solve_pipeline.GAP_BRIDGE_DEFAULT)
         self._gap_bridge.setToolTip(
@@ -680,7 +722,8 @@ class SolveCellTab(QtWidgets.QWidget):
             "bridges where signal is masked and continuous on both sides -- "
             "nothing is invented in blank regions. <=1 disables bridging. "
             f"Default: {solve_pipeline.GAP_BRIDGE_DEFAULT} px.")
-        iv.addRow(_twocol("split_ratio:", self._split_ratio, "gap_bridge:", self._gap_bridge))
+        self._gap_bridge_on.toggled.connect(self._gap_bridge.setEnabled)
+        pv.addRow(_twocol("split_ratio:", self._split_ratio, self._gap_bridge_on, self._gap_bridge))
         self._sector_candidates_ed = QtWidgets.QLineEdit(
             ",".join(str(n) for n in solve_pipeline.SECTOR_CANDIDATES_DEFAULT))
         self._sector_candidates_ed.setToolTip(
@@ -693,28 +736,43 @@ class SolveCellTab(QtWidgets.QWidget):
             "skip the other candidates on every later ingest. Blank or "
             "unparseable falls back to the default search. "
             f"Default: {', '.join(str(n) for n in solve_pipeline.SECTOR_CANDIDATES_DEFAULT)}.")
-        iv.addRow("sector candidates:", self._sector_candidates_ed)
+        pv.addRow("sector candidates:", self._sector_candidates_ed)
+        _close = QtWidgets.QPushButton("Close")
+        _close.clicked.connect(self._ingest_params_dlg.accept)
+        pv.addRow(_close)
+        self._ingest_params_btn = QtWidgets.QPushButton("Parameters…")
+        self._ingest_params_btn.setToolTip(
+            "Open the ingest parameters (mask, blob finding, gap bridging, "
+            "sector candidates). Defaults are pre-filled.")
+        self._ingest_params_btn.clicked.connect(self._ingest_params_dlg.exec_)
         self._ingest_btn = S.primary_btn("Run Ingest")
         self._ingest_btn.clicked.connect(self._run_ingest)
         self._ingest_max_workers = _NoScrollSpinBox()
         self._ingest_max_workers.setRange(1, max(1, os.cpu_count() or 1))
-        self._ingest_max_workers.setValue(1)
+        self._ingest_max_workers.setValue(self._ingest_max_workers.maximum())
+        self._ingest_max_workers.setMaximumWidth(56)
         self._ingest_max_workers.setToolTip(
             "Thread-pool width for ingest's sector-search/blob-finding hot "
-            "loops (perf_solve_cell's opt-in parallelism). 1 = serial, "
-            "today's default. Output is bit-identical at every value -- "
+            "loops (perf_solve_cell's opt-in parallelism). 1 = serial; "
+            "default is every CPU detected on this machine. Output is "
+            "bit-identical at every value -- "
             "higher only trades CPU for wall-clock time.")
         ingest_row = QtWidgets.QHBoxLayout()
         ingest_row.setSpacing(6)
         ingest_row.setContentsMargins(0, 0, 0, 0)
+        self._ingest_btn.setMaximumWidth(100)
         ingest_row.addWidget(self._ingest_btn)
-        ingest_row.addSpacing(12)
+        ingest_row.addWidget(self._ingest_params_btn)
+        ingest_row.addStretch(1)
+        cpu_row = QtWidgets.QHBoxLayout()
+        cpu_row.setSpacing(6); cpu_row.setContentsMargins(0, 0, 0, 0)
         cpu_lbl = QtWidgets.QLabel("Nr. of CPUs:")
         cpu_lbl.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-        ingest_row.addWidget(cpu_lbl)
-        ingest_row.addWidget(self._ingest_max_workers)
-        ingest_row.addStretch(1)
+        cpu_row.addWidget(cpu_lbl)
+        cpu_row.addWidget(self._ingest_max_workers)
+        cpu_row.addStretch(1)
         iv.addRow(ingest_row)
+        iv.addRow(cpu_row)
         self._ingest_status = QtWidgets.QLabel("—")
         self._ingest_status.setStyleSheet(f"color:{S.MUTED};font-size:11px")
         self._ingest_status.setWordWrap(True)
@@ -735,11 +793,13 @@ class SolveCellTab(QtWidgets.QWidget):
             f"closer than this to any ring is flagged 'is_diamond' and "
             f"removed from the candidate pool passed to indexing. "
             f"Default: {solve_pipeline.CONTAM_TOL_DEG_DEFAULT:g}°.")
-        dv.addRow(_twocol("diamond a:", self._diamond_a, "tol:", self._contam_tol))
+        self._diamond_a.setMaximumWidth(88); self._contam_tol.setMaximumWidth(80)
+        dv.addRow(_tight2("diamond a:", self._diamond_a, "tol:", self._contam_tol))
         self._diamond_btn = S.primary_btn("Run Diamond Filter")
         self._diamond_btn.setEnabled(False)
         self._diamond_btn.clicked.connect(self._run_diamond_filter)
-        dv.addRow(self._diamond_btn)
+        self._diamond_btn.setMaximumWidth(165)
+        dv.addRow(_left(self._diamond_btn))
         self._diamond_status = QtWidgets.QLabel("—")
         self._diamond_status.setStyleSheet(f"color:{S.MUTED};font-size:11px")
         self._diamond_status.setWordWrap(True)
@@ -760,7 +820,7 @@ class SolveCellTab(QtWidgets.QWidget):
             "systematic-absence sanity check, never to constrain the "
             "search itself. Default: Free (ab-initio).")
         self._index_method.currentIndexChanged.connect(self._on_index_method_changed)
-        av.addRow("method:", self._index_method)
+        self._index_method.setMaximumWidth(118)
 
         self._ab_free_params = QtWidgets.QWidget()
         afp = QtWidgets.QFormLayout(self._ab_free_params)
@@ -776,7 +836,6 @@ class SolveCellTab(QtWidgets.QWidget):
             f"Minimum number of diamond-filtered candidate reflections "
             f"required before ab-initio indexing will even attempt a search. "
             f"Default: {solve_pipeline.MIN_REFLECTIONS_DEFAULT}.")
-        afp.addRow(_twocol("sigma_g:", self._sigma_g, "min_reflections:", self._min_refl))
         self._tol_override = _fspin(0.01, 1.0, 3, solve_pipeline.AB_INITIO_TOL_DEFAULT)
         self._tol_override.setToolTip(
             "Match tolerance (in fractional-HKL units) for ab-initio indexing: "
@@ -787,7 +846,21 @@ class SolveCellTab(QtWidgets.QWidget):
             f"({solve_pipeline.AB_INITIO_TOL_DEFAULT:g}) -- adjust up to accept "
             "looser matches or down to tighten them; too tight a tolerance can "
             "make indexing fail outright.")
-        afp.addRow("tol override:", self._tol_override)
+        for w in (self._sigma_g, self._min_refl, self._tol_override):
+            w.setMaximumWidth(60)
+        # Row 1: method + sigma_g (sigma_g only applies to the free mode);
+        # row 2: min_reflections + tol_override.
+        self._sigma_g_box = QtWidgets.QWidget()
+        sgl = QtWidgets.QHBoxLayout(self._sigma_g_box)
+        sgl.setContentsMargins(0, 0, 0, 0); sgl.setSpacing(4)
+        sgl.addWidget(QtWidgets.QLabel("sigma_g:")); sgl.addWidget(self._sigma_g)
+        mrow = QtWidgets.QHBoxLayout(); mrow.setSpacing(4); mrow.setContentsMargins(0, 0, 0, 0)
+        mlbl = QtWidgets.QLabel("method:")
+        mlbl.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        mrow.addWidget(mlbl); mrow.addWidget(self._index_method)
+        mrow.addSpacing(6); mrow.addWidget(self._sigma_g_box); mrow.addStretch(1)
+        av.addRow(mrow)
+        afp.addRow(_tight2("min_refl:", self._min_refl, "tol_override:", self._tol_override))
         av.addRow(self._ab_free_params)
 
         self._ks3 = self._build_known_structure_form()
@@ -797,7 +870,8 @@ class SolveCellTab(QtWidgets.QWidget):
         self._ab_btn = S.primary_btn("Run Indexing")
         self._ab_btn.setEnabled(False)
         self._ab_btn.clicked.connect(self._run_index)
-        av.addRow(self._ab_btn)
+        self._ab_btn.setMaximumWidth(120)
+        av.addRow(_left(self._ab_btn))
         self._ab_status = QtWidgets.QLabel("—")
         self._ab_status.setStyleSheet(f"color:{S.MUTED};font-size:11px")
         self._ab_status.setWordWrap(True)
@@ -809,7 +883,8 @@ class SolveCellTab(QtWidgets.QWidget):
         self._refine_btn = S.primary_btn("Run Refine")
         self._refine_btn.setEnabled(False)
         self._refine_btn.clicked.connect(self._run_refine)
-        rv.addWidget(self._refine_btn)
+        self._refine_btn.setMaximumWidth(120)
+        rv.addWidget(self._refine_btn, 0, QtCore.Qt.AlignLeft)
         self._domain_list = QtWidgets.QListWidget()
         self._domain_list.setToolTip(
             "Every solved domain so far -- round 1's refine result is "
@@ -817,7 +892,8 @@ class SolveCellTab(QtWidgets.QWidget):
             "appends another. Select one to see its full cell/refine detail.")
         self._domain_list.setMaximumHeight(90)
         self._domain_list.currentRowChanged.connect(self._on_domain_selected)
-        rv.addWidget(self._domain_list)
+        self._domain_list.setMaximumWidth(170)
+        rv.addWidget(self._domain_list, 0, QtCore.Qt.AlignLeft)
         self._param_grid = QtWidgets.QGridLayout()
         self._param_grid.setHorizontalSpacing(20); self._param_grid.setVerticalSpacing(6)
         _pg_host = QtWidgets.QWidget(); _pg_host.setLayout(self._param_grid)
@@ -843,6 +919,7 @@ class SolveCellTab(QtWidgets.QWidget):
             "null test against scrambled spots; a negative result just "
             "means no further domain was found. Default: Free (ab-initio).")
         self._leftover_method.currentIndexChanged.connect(self._on_leftover_method_changed)
+        self._leftover_method.setMaximumWidth(130)
         lv2.addRow("method:", self._leftover_method)
         self._ks5 = self._build_known_structure_form()
         self._ks5_fill_btn = QtWidgets.QPushButton("Fill from latest domain")
@@ -858,7 +935,8 @@ class SolveCellTab(QtWidgets.QWidget):
         self._leftover_btn = S.primary_btn("Index Remaining Spots")
         self._leftover_btn.setEnabled(False)
         self._leftover_btn.clicked.connect(self._run_index_remaining)
-        lv2.addRow(self._leftover_btn)
+        self._leftover_btn.setMaximumWidth(190)
+        lv2.addRow(_left(self._leftover_btn))
         self._leftover_run_status = QtWidgets.QLabel("—")
         self._leftover_run_status.setStyleSheet(f"color:{S.MUTED};font-size:11px")
         self._leftover_run_status.setWordWrap(True)
@@ -904,7 +982,10 @@ class SolveCellTab(QtWidgets.QWidget):
         right.setMinimumWidth(320)
         split.addWidget(right)
         split.setStretchFactor(0, 0); split.setStretchFactor(1, 0); split.setStretchFactor(2, 1)
-        split.setSizes([286, 400, 900])
+        split.setSizes([229, 350, 1000])
+        # Data | Controls | Results — minimise Data / Controls for more Results room.
+        self._hsplit = split
+        self._body_lay.addWidget(install_panel_toggles(split).ribbon)
 
         # Connected last, once self._det_stage/_det_view etc. already exist --
         # setCurrentIndex() below fires this synchronously, and the first
@@ -2014,6 +2095,7 @@ class SolveCellTab(QtWidgets.QWidget):
             "low_count": self._low_count, "mask_grow": self._mask_grow,
             "blob_thresh": self._blob_thresh, "blob_minvol": self._blob_minvol,
             "split_ratio": self._split_ratio, "gap_bridge": self._gap_bridge,
+            "gap_bridge_on": self._gap_bridge_on, "ingest_max_workers": self._ingest_max_workers,
             "sector_candidates": self._sector_candidates_ed,
             "diamond_a": self._diamond_a, "contam_tol": self._contam_tol,
             "sigma_g": self._sigma_g, "min_refl": self._min_refl, "tol_override": self._tol_override,
@@ -2082,7 +2164,7 @@ class SolveCellTab(QtWidgets.QWidget):
             "mask": {"low_count_threshold": self._low_count.value(), "grow": self._mask_grow.value(),
                      "user_mask": panel.loader.composite_mask()},
             "blobs": {"threshold": self._blob_thresh.value(), "min_vol": self._blob_minvol.value(),
-                      "split_ratio": self._split_ratio.value(), "gap_bridge": self._gap_bridge.value(),
+                      "split_ratio": self._split_ratio.value(), "gap_bridge": self._gap_bridge.value() if self._gap_bridge_on.isChecked() else 0,
                       "sector_candidates": self._sector_candidates_cfg(),
                       "max_workers": self._ingest_max_workers.value()},
             "panel_dir": panel_dir,
@@ -2729,6 +2811,7 @@ class SolveCellTab(QtWidgets.QWidget):
 
     def _on_index_method_changed(self, index: int):
         self._ab_free_params.setVisible(index == 0)
+        self._sigma_g_box.setVisible(index == 0)
         self._ks3["widget"].setVisible(index == 1)
 
     def _run_index(self):
