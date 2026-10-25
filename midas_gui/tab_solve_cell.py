@@ -66,37 +66,123 @@ from midas_gui import style as S
 _PREVIEW_ARRAYS = ("mask", "background_subtracted", "background_subtracted_max_projection")
 
 
+class _VerticalTag(QtWidgets.QLabel):
+    """Text rotated to read bottom-to-top, for the ribbon's "Panels" tag."""
+
+    def sizeHint(self):
+        fm = self.fontMetrics()
+        return QtCore.QSize(fm.height() + 4, fm.horizontalAdvance(self.text()) + 8)
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
+
+    def paintEvent(self, _event):
+        from PyQt5 import QtGui
+        p = QtGui.QPainter(self)
+        p.setPen(QtGui.QColor(S.MUTED))
+        p.translate(0, self.height())
+        p.rotate(-90)
+        p.drawText(QtCore.QRect(0, 0, self.height(), self.width()), QtCore.Qt.AlignCenter, self.text())
+
+
+class PanelRibbon(QtWidgets.QFrame):
+    """Slim vertical ribbon at the window's left edge: a "Panels" tag over
+    one numbered button per detector panel (1, 2, 3, …) and a "+" button.
+    Right-click a number to remove that panel."""
+
+    panelSelected = QtCore.pyqtSignal(int)    # zero-based index
+    addRequested = QtCore.pyqtSignal()
+    removeRequested = QtCore.pyqtSignal(int)  # zero-based index
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedWidth(34)
+        self.setObjectName("panelRibbon")
+        self.setStyleSheet(
+            f"#panelRibbon {{ border-right: 1px solid {S.MUTED}; }}"
+            "#panelRibbon QToolButton { min-width:24px; max-width:24px; min-height:24px; "
+            "max-height:24px; border:1px solid transparent; border-radius:3px }"
+            f"#panelRibbon QToolButton:checked {{ background:{S.ACCENT}; color:white }}")
+        v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(3, 6, 3, 6); v.setSpacing(4)
+        tag = _VerticalTag("Panels")
+        tag.setAlignment(QtCore.Qt.AlignHCenter)
+        v.addWidget(tag, alignment=QtCore.Qt.AlignHCenter)
+        self._btn_box = QtWidgets.QVBoxLayout(); self._btn_box.setSpacing(4)
+        v.addLayout(self._btn_box)
+        add = QtWidgets.QToolButton(); add.setText("+")
+        add.setToolTip("Add another detector panel")
+        add.clicked.connect(self.addRequested)
+        v.addWidget(add, alignment=QtCore.Qt.AlignHCenter)
+        v.addStretch(1)
+        self._buttons: list = []
+        self._group = QtWidgets.QButtonGroup(self)
+        self._group.setExclusive(True)
+
+    def set_count(self, n: int):
+        while len(self._buttons) > n:
+            b = self._buttons.pop()
+            self._group.removeButton(b)
+            self._btn_box.removeWidget(b)
+            b.deleteLater()
+        while len(self._buttons) < n:
+            i = len(self._buttons)
+            b = QtWidgets.QToolButton()
+            b.setText(str(i + 1)); b.setCheckable(True)
+            b.setToolTip(f"Panel {i + 1} (right-click to remove)")
+            b.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+            b.clicked.connect(lambda _c=False, k=i: self.panelSelected.emit(k))
+            b.customContextMenuRequested.connect(lambda _pos, k=i, btn=b: self._menu(k, btn))
+            self._group.addButton(b)
+            self._btn_box.addWidget(b, alignment=QtCore.Qt.AlignHCenter)
+            self._buttons.append(b)
+
+    def set_current(self, index: int):
+        if 0 <= index < len(self._buttons):
+            self._buttons[index].setChecked(True)
+
+    def _menu(self, index: int, btn):
+        m = QtWidgets.QMenu(self)
+        act = m.addAction(f"Remove panel {index + 1}")
+        if m.exec_(btn.mapToGlobal(btn.rect().bottomLeft())) is act:
+            self.removeRequested.emit(index)
+
+
 class PanelCard(QtWidgets.QWidget):
     """One detector panel's calibration + data + frame/omega mapping.
 
     ``geometry_cfg()`` returns the dict ``solve_pipeline._stage_ingest``
     expects under its ``geometry`` key; ``corrections_cfg()``/``mask_cfg()``
-    pull straight from the embedded ``DataLoaderPanel``.
+    pull straight from the embedded ``DataLoaderPanel``. The panel's number
+    *is* its id (output folder ``panel_NN/``, ``panel_id`` column in the spot
+    table); the owning tab keeps the numbers a gap-free 1, 2, 3, … sequence
+    via :meth:`set_panel_id`.
     """
+
+    # Emitted with this panel's number when its loaded-calibration link is clicked.
+    calibrationClicked = QtCore.pyqtSignal(int)
+
+    # "last frame idx" when the omega step is 0 -- no span can be derived, so
+    # the range runs through the end of the stack (ingest clamps it).
+    _LAST_IDX_OPEN = 1_000_000
 
     def __init__(self, panel_id: int, parent=None):
         super().__init__(parent)
-        self.loader = DataLoaderPanel(mode="stack")
+        self.loader = DataLoaderPanel(mode="stack", hide_frame_field=True, compact_info=True)
         self.loader.setMinimumWidth(200)
         self._geometry: Optional[dict] = None
         self._calib_path: Optional[str] = None
-        self._build_ui(panel_id)
+        self._calib_info: Optional[dict] = None
+        self._ome_field = ""
+        self._panel_id = int(panel_id)
+        self._build_ui()
 
-    def _build_ui(self, panel_id: int):
+    def _build_ui(self):
         lv = QtWidgets.QVBoxLayout(self)
         lv.setContentsMargins(0, 4, 0, 0); lv.setSpacing(6)
 
         grp_calib = QtWidgets.QGroupBox("Calibration")
         cv = QtWidgets.QVBoxLayout(grp_calib)
-        hdr = QtWidgets.QHBoxLayout()
-        self._panel_id = _NoScrollSpinBox(); self._panel_id.setRange(1, 99); self._panel_id.setValue(panel_id)
-        self._panel_id.setToolTip(
-            "Numeric ID for this detector panel -- used in output folder "
-            "names (panel_NN/) and to tell panels apart in a pooled multi-"
-            "panel ingest. Auto-assigned to the next free number when a "
-            "panel tab is added; change only if you need specific numbering.")
-        hdr.addWidget(QtWidgets.QLabel("panel id:")); hdr.addWidget(self._panel_id)
-        hdr.addStretch(1)
         self._load_calib_btn = QtWidgets.QPushButton("Load calibration file…")
         self._load_calib_btn.setToolTip(
             "Load Lsd/BC/tilts/wavelength/pixel size/detector size from a "
@@ -104,144 +190,166 @@ class PanelCard(QtWidgets.QWidget):
             "Required before Ingest can run for this panel -- Phase 1 takes "
             "geometry only from a loaded calibration file, never typed in.")
         self._load_calib_btn.clicked.connect(self._load_calib_file)
-        hdr.addWidget(self._load_calib_btn)
-        cv.addLayout(hdr)
-        self._calib_note = QtWidgets.QLabel(
-            "No calibration file loaded — required before Ingest can run.")
-        self._calib_note.setWordWrap(True)
-        self._calib_note.setStyleSheet(f"color:{S.MUTED};font-size:11px")
-        cv.addWidget(self._calib_note)
+        cv.addWidget(self._load_calib_btn)
+        self._calib_link = QtWidgets.QPushButton("No calibration loaded")
+        self._calib_link.setFlat(True)
+        self._calib_link.setEnabled(False)
+        self._calib_link.setCursor(QtCore.Qt.PointingHandCursor)
+        self._calib_link.setStyleSheet(
+            f"QPushButton {{ text-align:left; border:none; padding:0; color:{S.MUTED}; font-size:11px }}"
+            f"QPushButton:enabled {{ color:{S.ACCENT}; text-decoration:underline }}")
+        self._calib_link.clicked.connect(lambda: self.calibrationClicked.emit(self._panel_id))
+        cv.addWidget(self._calib_link)
         lv.addWidget(grp_calib)
 
         lv.addWidget(self.loader)
 
         grp_ome = QtWidgets.QGroupBox("Frame ↔ omega mapping")
         of = QtWidgets.QFormLayout(grp_ome); of.setSpacing(4)
-        self._ome_first_idx = _NoScrollSpinBox(); self._ome_first_idx.setRange(0, 1_000_000)
-        self._ome_first_idx.setToolTip(
-            "Loaded-frame index used as the omega reference point. Frames "
-            "before this index have no defined omega and are dropped, not "
-            "extrapolated. Default: 0 (first loaded frame).")
-        self._ome_first_deg = _fspin(-7200.0, 7200.0, 4, 0.0, "°")
-        self._ome_first_deg.setToolTip(
-            "Omega (degrees) assigned to 'first frame idx'. Every other kept "
-            "frame's omega is this value plus (frame − first idx) × omega step. "
-            "Default: 0.0°.")
-        self._ome_last_idx = _NoScrollSpinBox(); self._ome_last_idx.setRange(0, 1_000_000)
-        self._ome_last_idx.setValue(1_000_000)
-        self._ome_last_idx.setToolTip(
-            "Last loaded-frame index whose omega is defined. Clamped to the "
-            "last frame actually loaded when Ingest runs, so the default "
-            "(maximum, 1,000,000) means 'through the end of the stack'.")
+        self._ome_start = _fspin(-7200.0, 7200.0, 4, 0.0, "°")
+        self._ome_start.setToolTip(
+            "Omega (degrees) at 'first frame idx'. Every other kept frame's "
+            "omega is this value plus (frame − first idx) × omega step.")
+        self._ome_end = _fspin(-7200.0, 7200.0, 4, 0.0, "°")
+        self._ome_end.setToolTip(
+            "Omega (degrees) at the last frame of the scan, as run. Together "
+            "with start omega and omega step it fixes the last frame idx.")
         self._ome_step = _fspin(-10.0, 10.0, 5, 0.0, "°")
         self._ome_step.setToolTip(
             "Degrees of rotation per frame, used to extend omega away from "
-            "the reference frame in both directions. Default: 0.0°.")
-        of.addRow(_twocol("first frame idx:", self._ome_first_idx, "its omega:", self._ome_first_deg))
-        of.addRow(_twocol("last frame idx:", self._ome_last_idx, "omega step:", self._ome_step))
+            "the first frame in both directions. Default: 0.0°.")
+        self._ome_first_idx = _NoScrollSpinBox(); self._ome_first_idx.setRange(0, 1_000_000)
+        self._ome_first_idx.setToolTip(
+            "Loaded-frame index that carries 'start omega'. Frames before it "
+            "have no defined omega and are dropped, not extrapolated. "
+            "Default: 0 (first loaded frame).")
+        self._ome_first_btn = QtWidgets.QPushButton("first frame idx:")
+        self._ome_first_btn.setFlat(True)
+        self._ome_first_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self._ome_first_btn.setStyleSheet(
+            f"QPushButton {{ text-align:left; border:none; padding:0; color:{S.ACCENT}; "
+            "text-decoration:underline }")
+        self._ome_first_btn.setToolTip(
+            "Click to auto-detect the first frame idx from the file's own "
+            "per-frame omega values (pick the omega field in the dialog).")
+        self._ome_first_btn.clicked.connect(self._auto_detect_first_idx)
+        self._ome_last_lbl = QtWidgets.QLabel()
+        self._ome_last_lbl.setWordWrap(True)
+        for w in (self._ome_start, self._ome_end, self._ome_step, self._ome_first_idx):
+            w.setMinimumWidth(100)
+        of.addRow("start omega:", self._ome_start)
+        of.addRow("end omega:", self._ome_end)
+        of.addRow("omega step:", self._ome_step)
+        of.addRow(self._ome_first_btn, self._ome_first_idx)
+        of.addRow("last frame idx:", self._ome_last_lbl)
         note = QtWidgets.QLabel(
-            "omega(frame) = <its omega> + (frame − <first idx>) × <step>. Loaded "
-            "frames outside [first, last] are excluded from ingest.")
+            "omega(frame) = start omega + (frame − first idx) × step. Frames "
+            "outside [first, last] are excluded from ingest.")
         note.setWordWrap(True); note.setStyleSheet(f"color:{S.MUTED};font-size:11px")
         of.addRow(note)
-
-        self._ome_auto_chk = QtWidgets.QCheckBox("Auto-detect first/last frame idx from omega metadata")
-        self._ome_auto_chk.setToolTip(
-            "Instead of paging through frames by hand to find 'first/last frame "
-            "idx' above, give the omega at the start and end of your scan (plus "
-            "its step, above) and Detect finds the matching frames from the "
-            "file's own per-frame omega metadata.")
-        self._ome_auto_chk.toggled.connect(self._on_ome_auto_toggled)
-        of.addRow(self._ome_auto_chk)
-
-        self._ome_auto_box = QtWidgets.QWidget()
-        af = QtWidgets.QFormLayout(self._ome_auto_box)
-        af.setContentsMargins(0, 0, 0, 0); af.setSpacing(4)
-        self._ome_field_combo = QtWidgets.QComboBox()
-        self._ome_field_combo.setEditable(True)
-        self._ome_field_combo.setToolTip(
-            "HDF5 field holding one omega value per raw frame, e.g. "
-            "entry/instrument/sample_stage/omega. Auto-populated from the "
-            "loaded file (omega-looking names first); edit to pick another.")
-        af.addRow("omega field:", self._ome_field_combo)
-        self._ome_target_start = _fspin(-7200.0, 7200.0, 4, 0.0, "°")
-        self._ome_target_start.setToolTip("Omega at the start of your scan, as run.")
-        self._ome_target_end = _fspin(-7200.0, 7200.0, 4, 0.0, "°")
-        self._ome_target_end.setToolTip("Omega at the end of your scan, as run.")
-        af.addRow(_twocol("start omega:", self._ome_target_start, "end omega:", self._ome_target_end))
-        self._ome_detect_btn = QtWidgets.QPushButton("Detect frame range")
-        self._ome_detect_btn.setToolTip(
-            "Find the loaded frames whose omega field value falls between "
-            "'start omega' and 'end omega', and fill 'first/last frame idx' "
-            "(and 'its omega') above with them.")
-        self._ome_detect_btn.clicked.connect(self._detect_omega_frame_range)
-        af.addRow(self._ome_detect_btn)
-        auto_note = QtWidgets.QLabel(
-            "Detect only fills 'first/last frame idx' and 'its omega' above -- "
-            "'omega step' (same row as 'last frame idx') still needs your "
-            "experiment's actual degrees/frame, per panel.")
-        auto_note.setWordWrap(True); auto_note.setStyleSheet(f"color:{S.MUTED};font-size:11px")
-        af.addRow(auto_note)
-        of.addRow(self._ome_auto_box)
-        self._ome_auto_box.setVisible(False)
+        for w in (self._ome_start, self._ome_end, self._ome_step, self._ome_first_idx):
+            w.valueChanged.connect(self._update_last_idx)
+        self._update_last_idx()
 
         lv.addWidget(grp_ome)
         lv.addStretch(1)
-        self.loader.dataChanged.connect(self._refresh_omega_fields)
+        self.loader.dataChanged.connect(self._update_last_idx)
 
-    def _on_ome_auto_toggled(self, checked: bool):
-        self._ome_auto_box.setVisible(checked)
-        if checked:
-            self._refresh_omega_fields()
+    def _last_idx(self) -> int:
+        """Last frame idx implied by start/end omega, step and first idx
+        (closed span, matching the auto-detect's in-range test)."""
+        step = self._ome_step.value()
+        first = self._ome_first_idx.value()
+        if step == 0.0:
+            return self._LAST_IDX_OPEN
+        n = int(round((self._ome_end.value() - self._ome_start.value()) / step))
+        return first + max(n, 0)
 
-    def _refresh_omega_fields(self):
-        """Repopulate the omega-field combo from whatever file is now loaded
-        -- called on every Data change, not just while auto-detect is shown,
-        so the list is already current the moment the checkbox is ticked."""
+    def omega_span_without_step(self) -> bool:
+        return self._ome_step.value() == 0.0 and self._ome_end.value() != self._ome_start.value()
+
+    def _update_last_idx(self, *_args):
+        step = self._ome_step.value()
+        n_loaded = self.loader.n_frames()
+        if step == 0.0:
+            text = "end of stack (set omega step)"
+        else:
+            span = (self._ome_end.value() - self._ome_start.value()) / step
+            last = self._last_idx()
+            text = str(last)
+            if span < -0.5:
+                text += "  ⚠ end omega is before start omega for this step sign"
+            elif n_loaded and last > n_loaded - 1:
+                text += f"  (stack ends at {n_loaded - 1})"
+        self._ome_last_lbl.setText(text)
+
+    def _omega_fields(self) -> list:
         path = self.loader.data_path()
-        keep = self._ome_field_combo.currentText().strip()
-        self._ome_field_combo.blockSignals(True)
-        self._ome_field_combo.clear()
         if path and is_h5(path) and Path(path).exists():
             try:
-                for name, _n in list_h5_1d_datasets(path):
-                    self._ome_field_combo.addItem(name)
+                return [name for name, _n in list_h5_1d_datasets(path)]
             except Exception:
                 pass
-        idx = self._ome_field_combo.findText(keep)
-        if idx >= 0:
-            self._ome_field_combo.setCurrentIndex(idx)
-        elif self._ome_field_combo.count():
-            self._ome_field_combo.setCurrentIndex(0)
-        self._ome_field_combo.blockSignals(False)
+        return []
 
-    def _detect_omega_frame_range(self):
+    def _auto_detect_first_idx(self):
         path = self.loader.data_path()
         if not path or not is_h5(path):
             QtWidgets.QMessageBox.warning(
                 self, "Solve Cell", "Load an HDF5 data file for this panel first.")
             return
-        field = self._ome_field_combo.currentText().strip()
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Auto-detect first frame idx")
+        dv = QtWidgets.QVBoxLayout(dlg)
+        form = QtWidgets.QFormLayout()
+        combo = QtWidgets.QComboBox(); combo.setEditable(True)
+        combo.setToolTip(
+            "HDF5 field holding one omega value per raw frame, e.g. "
+            "entry/instrument/sample_stage/omega. Omega-looking names are listed first.")
+        combo.addItems(self._omega_fields())
+        if self._ome_field:
+            i = combo.findText(self._ome_field)
+            if i >= 0:
+                combo.setCurrentIndex(i)
+            else:
+                combo.setEditText(self._ome_field)
+        form.addRow("omega field:", combo)
+        dv.addLayout(form)
+        info = QtWidgets.QLabel(
+            "Sets first frame idx to the first loaded frame whose omega lies "
+            "between start omega and end omega.")
+        info.setWordWrap(True); info.setStyleSheet(f"color:{S.MUTED};font-size:11px")
+        dv.addWidget(info)
+        bb = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+        dv.addWidget(bb)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        self._ome_field = combo.currentText().strip()
+        self.detect_first_idx(self._ome_field)
+
+    def detect_first_idx(self, field: str) -> bool:
+        """Fill 'first frame idx' from *field*'s per-frame omega values."""
+        path = self.loader.data_path()
+        if not path or not is_h5(path):
+            QtWidgets.QMessageBox.warning(
+                self, "Solve Cell", "Load an HDF5 data file for this panel first.")
+            return False
         if not field:
             QtWidgets.QMessageBox.warning(self, "Solve Cell", "Pick an omega field first.")
-            return
+            return False
         try:
-            first_idx, last_idx, first_deg = detect_omega_frame_range(
-                path, field, self._ome_target_start.value(), self._ome_target_end.value())
+            first_idx, _last, _deg = detect_omega_frame_range(
+                path, field, self._ome_start.value(), self._ome_end.value())
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Detect failed", str(e)); return
+            QtWidgets.QMessageBox.critical(self, "Detect failed", str(e)); return False
+        self._ome_field = field
         self._ome_first_idx.setValue(first_idx)
-        self._ome_first_deg.setValue(first_deg)
-        self._ome_last_idx.setValue(last_idx)
-        if self._ome_step.value() == 0.0 and last_idx > first_idx:
-            QtWidgets.QMessageBox.information(
-                self, "Solve Cell",
-                f"Frame range detected: {first_idx} → {last_idx}.\n\n"
-                "'omega step' is still 0.0° -- Detect only finds the frame "
-                "range, it doesn't fill in the per-frame step. Set 'omega step' "
-                "(next to 'last frame idx' above) to your experiment's actual "
-                "degrees/frame before running Ingest, or every kept frame will "
-                "be assigned the same omega.")
+        return True
+
+    def set_panel_id(self, panel_id: int):
+        self._panel_id = int(panel_id)
 
     def _load_calib_file(self):
         from midas_gui.constants import DEFAULT_CALIB_FILE
@@ -279,22 +387,52 @@ class PanelCard(QtWidgets.QWidget):
         self._calib_path = path
 
         tx = float(g.get("tx") or 0.0)
-        note = (f"Loaded {Path(path).name}: λ={g['wavelength_A']:.5f} Å, "
-                f"px={g['pxY']:.2f} µm, BC=({g['BC_y']:.2f}, {g['BC_z']:.2f}), "
-                f"Lsd={g['Lsd']:.1f} µm, ty={g.get('ty') or 0.0:.3f}°, "
-                f"tz={g.get('tz') or 0.0:.3f}°"
-                + (f", {nry}×{nrz} px" if nry and nrz else "") + ".")
-        if self._geometry["im_trans"]:
-            note += f" Image transform (im_trans): {self._geometry['im_trans']} (applied at ingest)."
-        elif not self._geometry["im_trans_in_file"]:
-            note += " ⚠ File does not declare im_trans -- assuming none."
-        if tx != 0.0:
-            note += f" Note: file's tx={tx:.3f}° is not used by the Phase 1 pipeline (fixed at 0)."
-        self._calib_note.setText(note)
+        self._calib_info = {
+            "file": Path(path).name, "source": "file", "tx": tx,
+            "notes": ([] if self._geometry["im_trans"] or self._geometry["im_trans_in_file"]
+                      else ["File does not declare im_trans -- assuming none."])
+                     + ([f"File's tx={tx:.3f}° is not used by the Phase 1 pipeline (fixed at 0)."]
+                        if tx != 0.0 else []),
+        }
+        self._show_calib_link()
         return True
 
+    def _show_calib_link(self):
+        info = self._calib_info or {}
+        self._calib_link.setText(info.get("file") or "calibration")
+        self._calib_link.setToolTip("Click to show this calibration's parameters.")
+        self._calib_link.setEnabled(True)
+
+    def calibration_summary(self) -> Optional[list]:
+        """``(label, value)`` rows describing the loaded calibration, for the
+        parameters popup; None when nothing is loaded."""
+        g = self._geometry
+        if g is None:
+            return None
+        info = self._calib_info or {}
+        rows = [
+            ("file", info.get("file") or "—"),
+            ("source", "calibration file" if info.get("source", "file") == "file"
+             else "project's embedded copy"),
+            ("wavelength (Å)", f"{g['wavelength_A']:.5f}"),
+            ("pixel size (µm)", f"{g['px_um']:.3f}"),
+            ("Lsd (µm)", f"{g['Lsd']:.2f}"),
+            ("BC y (px)", f"{g['BC_y']:.3f}"),
+            ("BC z (px)", f"{g['BC_z']:.3f}"),
+            ("ty (°)", f"{g.get('ty', 0.0):.4f}"),
+            ("tz (°)", f"{g.get('tz', 0.0):.4f}"),
+        ]
+        if info.get("tx"):
+            rows.append(("tx (°, file only)", f"{info['tx']:.4f}"))
+        ny, nz = g.get("nrpixels_y"), g.get("nrpixels_z")
+        rows.append(("detector (px)", f"{ny} × {nz}" if ny and nz else "—"))
+        rows.append(("im_trans", str(g["im_trans"]) if g.get("im_trans") else "none"))
+        for n in info.get("notes", []):
+            rows.append(("note", n))
+        return rows
+
     def panel_id(self) -> int:
-        return self._panel_id.value()
+        return self._panel_id
 
     def has_calibration(self) -> bool:
         return self._geometry is not None
@@ -305,8 +443,8 @@ class PanelCard(QtWidgets.QWidget):
         cfg = dict(self._geometry)
         cfg.update({
             "omega_ref_frame_idx": self._ome_first_idx.value(),
-            "omega_ref_deg": self._ome_first_deg.value(),
-            "omega_last_frame_idx": self._ome_last_idx.value(),
+            "omega_ref_deg": self._ome_start.value(),
+            "omega_last_frame_idx": self._last_idx(),
             "omega_step_deg": self._ome_step.value(),
         })
         return cfg
@@ -345,27 +483,23 @@ class PanelCard(QtWidgets.QWidget):
             return False
         self._geometry = dict(geom)
         self._calib_path = rec.get("path")
-        self._calib_note.setText(
-            f"Restored from the project's recorded calibration"
-            f"{' (' + rec['file_name'] + ')' if rec.get('file_name') else ''}: "
-            f"λ={geom['wavelength_A']:.5f} Å, px={geom['px_um']:.2f} µm, "
-            f"BC=({geom['BC_y']:.2f}, {geom['BC_z']:.2f}), Lsd={geom['Lsd']:.1f} µm. "
-            "The original file was not found, so this embedded copy is used.")
+        self._calib_info = {"file": rec.get("file_name") or "embedded calibration",
+                            "source": "embedded", "tx": 0.0,
+                            "notes": ["The original file was not found, so this embedded copy is used."]}
+        self._show_calib_link()
         return True
 
     # ── GUI state (project save/restore) ───────────────────────────
 
     def _state_widgets(self) -> dict:
         return {
-            "panel_id": self._panel_id,
-            "ome_first_idx": self._ome_first_idx, "ome_first_deg": self._ome_first_deg,
-            "ome_last_idx": self._ome_last_idx, "ome_step": self._ome_step,
-            "ome_auto_chk": self._ome_auto_chk, "ome_field_combo": self._ome_field_combo,
-            "ome_target_start": self._ome_target_start, "ome_target_end": self._ome_target_end,
+            "ome_start": self._ome_start, "ome_end": self._ome_end,
+            "ome_step": self._ome_step, "ome_first_idx": self._ome_first_idx,
         }
 
     def get_state(self) -> dict:
         state = {"fields": widgets_to_dict(self._state_widgets()), "loader": self.loader.get_state()}
+        state["fields"]["ome_field"] = self._ome_field
         if self._calib_path:
             state["calib_path"] = self._calib_path
         return state
@@ -373,8 +507,19 @@ class PanelCard(QtWidgets.QWidget):
     def set_state(self, state: dict):
         if not state:
             return
-        apply_dict_to_widgets(self._state_widgets(), state.get("fields", {}))
-        self._on_ome_auto_toggled(self._ome_auto_chk.isChecked())
+        fields = dict(state.get("fields", {}))
+        # Projects saved before the start/end omega layout: "its omega" was
+        # the omega at first idx, and the span was given as a last frame idx.
+        if "ome_start" not in fields and "ome_first_deg" in fields:
+            fields["ome_start"] = fields["ome_first_deg"]
+            last = fields.get("ome_last_idx")
+            step = fields.get("ome_step") or 0.0
+            if last is not None and last < self._LAST_IDX_OPEN and step:
+                fields["ome_end"] = (fields["ome_first_deg"]
+                                     + (last - fields.get("ome_first_idx", 0)) * step)
+        apply_dict_to_widgets(self._state_widgets(), fields)
+        self._ome_field = str(fields.get("ome_field") or fields.get("ome_field_combo") or "")
+        self._update_last_idx()
         self.loader.set_state(state.get("loader") or {})
         calib_path = state.get("calib_path")
         if calib_path and Path(calib_path).exists():
@@ -409,7 +554,6 @@ class SolveCellTab(QtWidgets.QWidget):
         self._leftover_g_2pi: Optional[np.ndarray] = None
         self._pending_leftover_ab = None
         self._panels: dict[int, PanelCard] = {}
-        self._next_panel_id = 1
         self._ingest_preview: Optional[dict] = None
         # Per-panel Detector-view preview (Calculated background/mask), keyed
         # by panel_id -- lets switching the active panel tab after a pooled
@@ -450,23 +594,18 @@ class SolveCellTab(QtWidgets.QWidget):
         split.setChildrenCollapsible(False); split.setHandleWidth(6)
         root.addWidget(split)
 
-        # ── LEFT: project folder + per-panel tabs ──
+        # ── LEFT EDGE: vertical "Panels" ribbon ──
+        self._panel_ribbon = PanelRibbon()
+        self._panel_ribbon.panelSelected.connect(self._on_ribbon_selected)
+        self._panel_ribbon.addRequested.connect(lambda: self._add_panel())
+        self._panel_ribbon.removeRequested.connect(self._close_panel_tab)
+        root.insertWidget(0, self._panel_ribbon)
+
+        # ── LEFT: project folder + the selected panel's card ──
         left_scroll = QtWidgets.QScrollArea()
-        left_scroll.setWidgetResizable(True); left_scroll.setMinimumWidth(360)
+        left_scroll.setWidgetResizable(True); left_scroll.setMinimumWidth(260)
         left = QtWidgets.QWidget(); lv = QtWidgets.QVBoxLayout(left); lv.setSpacing(6)
         left_scroll.setWidget(left)
-
-        note = QtWidgets.QLabel(
-            "<b>Solve Cell</b> (work in progress) — each panel tab below "
-            "supplies its own calibration (loaded from a file — required "
-            "before Ingest can run), Data/Dark/Bright/Background/Mask, and "
-            "frame↔omega mapping. With one panel configured, Ingest runs "
-            "against it alone; with more than one panel ready (its own "
-            "calibration + data loaded), Run Ingest pools them — each is "
-            "ingested against its own geometry, then combined for Diamond "
-            "Filter/Ab-initio/Refine. See documentation/solve_cell_handoff.md.")
-        note.setWordWrap(True); note.setStyleSheet(f"color:{S.MUTED};font-size:11px")
-        lv.addWidget(note)
 
         grp_proj = QtWidgets.QGroupBox("Project folder")
         pf = QtWidgets.QHBoxLayout(grp_proj)
@@ -483,14 +622,8 @@ class SolveCellTab(QtWidgets.QWidget):
         pf.addWidget(proj_btn)
         lv.addWidget(grp_proj)
 
-        self._panel_tabs = QtWidgets.QTabWidget()
-        self._panel_tabs.setTabsClosable(True)
-        self._panel_tabs.tabCloseRequested.connect(self._close_panel_tab)
-        add_btn = QtWidgets.QToolButton()
-        add_btn.setText("+")
-        add_btn.setToolTip("Add another detector panel")
-        add_btn.clicked.connect(lambda: self._add_panel())
-        self._panel_tabs.setCornerWidget(add_btn, QtCore.Qt.TopRightCorner)
+        self._panel_tabs = QtWidgets.QStackedWidget()
+        self._panel_tabs.currentChanged.connect(self._panel_ribbon.set_current)
         self._add_panel()
         lv.addWidget(self._panel_tabs, stretch=1)
         split.addWidget(left_scroll)
@@ -771,7 +904,7 @@ class SolveCellTab(QtWidgets.QWidget):
         right.setMinimumWidth(320)
         split.addWidget(right)
         split.setStretchFactor(0, 0); split.setStretchFactor(1, 0); split.setStretchFactor(2, 1)
-        split.setSizes([360, 400, 900])
+        split.setSizes([286, 400, 900])
 
         # Connected last, once self._det_stage/_det_view etc. already exist --
         # setCurrentIndex() below fires this synchronously, and the first
@@ -1715,36 +1848,132 @@ class SolveCellTab(QtWidgets.QWidget):
 
     # ── panel management ───────────────────────────────────────────
 
-    def _add_panel(self, panel_id: Optional[int] = None) -> PanelCard:
-        """``panel_id`` is normally auto-assigned (the "+" button); project
-        restore (:meth:`set_state`) passes the saved id explicitly so a
-        reopened project's panel numbering matches what was saved."""
-        if panel_id is None:
-            panel_id = self._next_panel_id
-        self._next_panel_id = max(self._next_panel_id, panel_id + 1)
-        card = PanelCard(panel_id)
+    @property
+    def _next_panel_id(self) -> int:
+        return self._panel_tabs.count() + 1
+
+    def _add_panel(self) -> PanelCard:
+        """Append a panel. Its number is its id and is always the next one in
+        the 1, 2, 3, … sequence."""
+        card = PanelCard(self._panel_tabs.count() + 1)
         # Live-refresh the Detector tab (Raw/Corrected only) as this panel's
         # data/frame-index or dark/bright/background/mask fields change --
         # same signals tab_batch.py's own Detector view refreshes from.
         card.loader.dataChanged.connect(self._refresh_detector_preview)
         card.loader.fieldsChanged.connect(self._refresh_detector_preview)
-        self._panels[panel_id] = card
-        idx = self._panel_tabs.addTab(card, f"Panel {panel_id}")
+        card.calibrationClicked.connect(self._show_calibrations)
+        idx = self._panel_tabs.addWidget(card)
+        self._panels[idx + 1] = card
+        self._panel_ribbon.set_count(self._panel_tabs.count())
         self._panel_tabs.setCurrentIndex(idx)
+        self._panel_ribbon.set_current(idx)
         return card
 
+    def _on_ribbon_selected(self, index: int):
+        if 0 <= index < self._panel_tabs.count():
+            self._panel_tabs.setCurrentIndex(index)
+
     def _close_panel_tab(self, index: int):
-        if self._panel_tabs.count() <= 1:
+        """Remove panel number ``index + 1``; later panels shift down so the
+        numbering stays 1, 2, 3, …. Shifting changes their ids, which the
+        spot table and previews are keyed by, so an existing ingest is
+        discarded in that case (after asking)."""
+        n = self._panel_tabs.count()
+        if n <= 1:
             QtWidgets.QMessageBox.information(
                 self, "Solve Cell", "At least one panel is required.")
             return
+        shifts = index < n - 1
+        if shifts and self._spots_df is not None:
+            resp = QtWidgets.QMessageBox.question(
+                self, "Remove panel",
+                f"Removing panel {index + 1} renumbers the later panels, which "
+                "invalidates the current ingest results (spots, domains). "
+                "Discard them and remove the panel?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
+            if resp != QtWidgets.QMessageBox.Yes:
+                return
         card = self._panel_tabs.widget(index)
-        panel_id = next((pid for pid, c in self._panels.items() if c is card), None)
-        self._panel_tabs.removeTab(index)
-        if panel_id is not None:
-            del self._panels[panel_id]
+        self._panel_tabs.removeWidget(card)
         card.deleteLater()
+        self._panels = {}
+        for i in range(self._panel_tabs.count()):
+            c = self._panel_tabs.widget(i)
+            c.set_panel_id(i + 1)
+            self._panels[i + 1] = c
+        if shifts:
+            self._ingest_preview_by_panel.clear()
+            self._ingest_preview = None
+            self._spots_df = None
+            self._reset_ingest_results()
+            self._ingest_status.setText("")
+            self._diamond_btn.setEnabled(False)
+            self._refresh_recip_view()
+        else:
+            self._ingest_preview_by_panel.pop(index + 1, None)
+        self._panel_ribbon.set_count(self._panel_tabs.count())
+        self._panel_ribbon.set_current(self._panel_tabs.currentIndex())
         self._refresh_detector_preview()
+
+    def _show_calibrations(self, selected_panel_id: int = 0):
+        """Popup listing every panel's loaded calibration parameters."""
+        cols = [(pid, c.calibration_summary()) for pid, c in sorted(self._panels.items())]
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Loaded calibrations")
+        dv = QtWidgets.QVBoxLayout(dlg)
+        labels = []
+        for _pid, rows in cols:
+            for lab, _v in rows or []:
+                if lab != "note" and lab not in labels:
+                    labels.append(lab)
+        notes = {pid: [v for lab, v in (rows or []) if lab == "note"] for pid, rows in cols}
+        table = QtWidgets.QTableWidget(len(labels), len(cols))
+        table.setHorizontalHeaderLabels([f"Panel {pid}" for pid, _ in cols])
+        table.setVerticalHeaderLabels(labels)
+        for c, (_pid, rows) in enumerate(cols):
+            vals = dict(rows or [])
+            for r, lab in enumerate(labels):
+                text = vals.get(lab, "—") if rows else ("no calibration loaded" if r == 0 else "")
+                table.setItem(r, c, QtWidgets.QTableWidgetItem(text))
+        table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        table.resizeColumnsToContents()
+        dv.addWidget(table)
+        lines = [f"Panel {pid}: {n}" for pid, ns in notes.items() for n in ns]
+        if lines:
+            nl = QtWidgets.QLabel("\n".join(lines))
+            nl.setWordWrap(True); nl.setStyleSheet(f"color:{S.MUTED};font-size:11px")
+            dv.addWidget(nl)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        bb.rejected.connect(dlg.reject)
+        dv.addWidget(bb)
+        if selected_panel_id and 1 <= selected_panel_id <= len(cols):
+            table.selectColumn(selected_panel_id - 1)
+        dlg.resize(min(900, 160 + 170 * len(cols)), 420)
+        dlg.exec_()
+
+    ABOUT_TEXT = (
+        "Solve Cell determines an unknown crystal lattice from raw diffraction "
+        "frames. For each detector panel you load a calibration file, the raw "
+        "frames (with optional dark, bright, background and mask), and the "
+        "frame-to-omega mapping. Run Ingest finds diffraction spots in every "
+        "frame and converts them to reciprocal-space g-vectors using each "
+        "panel's own geometry; with more than one panel ready, the panels are "
+        "ingested independently and their g-vectors are pooled. The diamond "
+        "filter then removes spots from the diamond anvils, ab-initio indexing "
+        "searches for a lattice that explains the remaining spots, and the "
+        "refinement step fits that lattice freely to the data. Index Remaining "
+        "Spots repeats the search on whatever is left, so several crystal "
+        "domains in one sample can be solved one after another. The Detector, "
+        "Reciprocal, Diagnostics, Volume, Inspector, Contamination and Compare "
+        "views help you check each stage. This tab is a work in progress.")
+
+    def show_about(self):
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("About Solve Cell")
+        box.setIcon(QtWidgets.QMessageBox.NoIcon)
+        box.setTextFormat(QtCore.Qt.PlainText)
+        box.setText(self.ABOUT_TEXT)
+        box.exec_()
 
     def _active_panel(self) -> PanelCard:
         return self._panel_tabs.currentWidget()
@@ -1816,22 +2045,21 @@ class SolveCellTab(QtWidgets.QWidget):
         panels_state = state.get("panels") or {}
         if panels_state:
             for card in list(self._panels.values()):
-                idx = self._panel_tabs.indexOf(card)
-                if idx >= 0:
-                    self._panel_tabs.removeTab(idx)
+                self._panel_tabs.removeWidget(card)
                 card.deleteLater()
             self._panels.clear()
-            for pid_key, pstate in sorted(panels_state.items(), key=lambda kv: int(kv[0])):
-                pid = int(pid_key)
-                card = self._add_panel(panel_id=pid)
-                card.set_state(pstate)
-        if "next_panel_id" in state:
-            self._next_panel_id = max(self._next_panel_id, int(state["next_panel_id"]))
+            # Panels are numbered 1..N in order; a project saved with gaps in
+            # its ids is renumbered by rank (active_panel follows below).
+            saved_ids = sorted(int(k) for k in panels_state)
+            for pid in saved_ids:
+                self._add_panel().set_state(panels_state[str(pid)])
+        else:
+            saved_ids = []
         active = state.get("active_panel")
-        if active is not None and int(active) in self._panels:
-            idx = self._panel_tabs.indexOf(self._panels[int(active)])
-            if idx >= 0:
-                self._panel_tabs.setCurrentIndex(idx)
+        if active is not None and saved_ids and int(active) in saved_ids:
+            self._panel_tabs.setCurrentIndex(saved_ids.index(int(active)))
+        elif active is not None and not saved_ids and int(active) in self._panels:
+            self._panel_tabs.setCurrentIndex(int(active) - 1)
         self._refresh_detector_preview()
 
     # ── stage 1: ingest ─────────────────────────────────────────────
@@ -1906,30 +2134,23 @@ class SolveCellTab(QtWidgets.QWidget):
                 f"Ingest: panel(s) {', '.join(str(p) for p in skipped)} not ready "
                 "(no calibration/data, or a pending field) -- excluded from this run.")
 
-        # omega_step_deg == 0.0 across a multi-frame window means every kept
-        # frame gets the SAME omega (pipeline.py: omega_deg_all = ref_deg +
-        # arange(n) * step) -- silently collapses the whole rotation to one
-        # orientation instead of raising, so catch it here before Ingest runs
-        # rather than leave a user to puzzle over a badly distorted
-        # reciprocal-space result (see .context/DECISIONS.md). Gated on
-        # omega_last_frame_idx < the "last frame idx" spinbox's own default/
-        # max sentinel (1_000_000, "through the end of the stack") so a panel
-        # whose frame/omega mapping was simply never touched -- first idx 0,
-        # last idx still at that sentinel -- doesn't trip this; only a window
-        # the user actually bounded does.
-        zero_step = [pid for pid, card in ready
-                     if card.geometry_cfg().get("omega_step_deg", 0.0) == 0.0
-                     and card.geometry_cfg().get("omega_last_frame_idx", 0) < 1_000_000
-                     and card.geometry_cfg().get("omega_last_frame_idx", 0)
-                         > card.geometry_cfg().get("omega_ref_frame_idx", 0)]
+        # omega_step_deg == 0.0 means every kept frame gets the SAME omega
+        # (pipeline.py: omega_deg_all = ref_deg + arange(n) * step) --
+        # silently collapses the whole rotation to one orientation instead of
+        # raising, so catch it here before Ingest runs rather than leave a
+        # user to puzzle over a badly distorted reciprocal-space result (see
+        # .context/DECISIONS.md). Only a panel whose start and end omega
+        # differ is flagged: with step 0 the last frame idx can't be derived
+        # from them, so a mapping the user actually filled in lacks its step;
+        # one never touched (start == end) doesn't trip this.
+        zero_step = [pid for pid, card in ready if card.omega_span_without_step()]
         if zero_step:
             resp = QtWidgets.QMessageBox.warning(
                 self, "Omega step is 0°",
-                f"Panel(s) {', '.join(str(p) for p in zero_step)} span more than one "
-                "frame but 'omega step' (Frame ↔ omega mapping) is 0.0° -- every kept "
+                f"Panel(s) {', '.join(str(p) for p in zero_step)} have different "
+                "start and end omega but 'omega step' (Frame ↔ omega mapping) is 0.0° -- every kept "
                 "frame will be assigned the SAME omega, which badly distorts the "
-                "reciprocal-space result (each panel's own window still needs its own "
-                "step filled in, even when using auto-detect for the frame range).\n\n"
+                "reciprocal-space result (each panel needs its own step filled in).\n\n"
                 "Run ingest anyway?",
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
             if resp != QtWidgets.QMessageBox.Yes:

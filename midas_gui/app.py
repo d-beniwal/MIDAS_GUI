@@ -321,6 +321,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # tabs have their button stripped in apply_tab_visibility.
         tabs.setTabsClosable(True)
         tabs.tabCloseRequested.connect(self._close_optional_tab)
+        tabs.tabBar().setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        tabs.tabBar().customContextMenuRequested.connect(self._on_tab_bar_context_menu)
         self.apply_tab_visibility()
         self.apply_hydra_visibility()
 
@@ -527,6 +529,17 @@ class MainWindow(QtWidgets.QMainWindow):
         idx = self._tabs.indexOf(current) if current is not None else -1
         if idx >= 0:
             self._tabs.setCurrentIndex(idx)
+
+    def _on_tab_bar_context_menu(self, pos) -> None:
+        """Right-click on the Solve Cell tab: a one-item menu with "About"."""
+        bar = self._tabs.tabBar()
+        idx = bar.tabAt(pos)
+        if idx < 0 or self._tabs.widget(idx) is not self._solve_cell_tab:
+            return
+        menu = QtWidgets.QMenu(bar)
+        about = menu.addAction("About")
+        if menu.exec_(bar.mapToGlobal(pos)) is about:
+            self._solve_cell_tab.show_about()
 
     def _strip_close_button(self, index: int) -> None:
         """Take the ✕ off a pinned tab, so the four ALWAYS_TABS can't be closed.

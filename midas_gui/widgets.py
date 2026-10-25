@@ -4361,10 +4361,13 @@ class DataLoaderPanel(QtWidgets.QWidget):
     def __init__(self, parent=None, *, mode="single", data_dataset="exchange/data",
                  dark_dataset="exchange/data_dark", allow_live=False,
                  hide_frame_field=False, folder_format_filter=False,
-                 unify_combine=False):
+                 unify_combine=False, compact_info=False):
         super().__init__(parent)
         from midas_gui import style as S
         self._mode = mode
+        # Report a loaded dataset as just "frames × width × height" instead of
+        # the source kind + raw shape (Solve Cell's narrow left panel).
+        self._compact_info = bool(compact_info)
         # "stream" mode only — Batch Integrate opts into a single unified
         # start/end + "Combine sub-frames" control that applies the same way
         # to HDF5 and TIFF-family sources, replacing "stride" entirely (see
@@ -5246,6 +5249,9 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._info.setText(f"Loaded: {kind}")
             self._setup_navigator()
             self._set_frame(0)
+            if self._compact_info and self._cur is not None:
+                h, w = np.shape(self._cur)[-2:]
+                self._info.setText(f"{self._nframes} × {w} × {h}  (frames × width × height)")
             detect_path = self._paths[0] if self._paths else raw
             detected = detect_geometry_from_path(detect_path)
             if detected:

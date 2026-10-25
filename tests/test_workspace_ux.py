@@ -591,3 +591,22 @@ def test_save_project_writes_solve_cell_results_and_open_restores_them(
         assert tab._spots_df is None
     finally:
         win._set_project_path(None)
+
+
+def test_solve_cell_tab_right_click_offers_about(win, monkeypatch):
+    from PyQt5 import QtCore, QtWidgets
+    from midas_gui import constants as C
+    win.apply_tab_visibility(list(C.OPTIONAL_TABS))
+    bar = win._tabs.tabBar()
+    idx = win._tabs.indexOf(win._solve_cell_tab)
+    assert idx >= 0
+    shown = {}
+    monkeypatch.setattr(win._solve_cell_tab, "show_about", lambda: shown.setdefault("about", True))
+    monkeypatch.setattr(QtWidgets.QMenu, "exec_",
+                        lambda menu, *a: next(x for x in menu.actions() if x.text() == "About"))
+    win._on_tab_bar_context_menu(bar.tabRect(idx).center())
+    assert shown.get("about") is True
+    shown.clear()
+    other = next(i for i in range(win._tabs.count()) if i != idx)
+    win._on_tab_bar_context_menu(bar.tabRect(other).center())
+    assert not shown

@@ -3,6 +3,27 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-25 — Solve Cell left-panel refinement (panel ribbon, omega mapping, calibration popup)
+
+- **Panel number is the panel id.** Panels live in a vertical "Panels" ribbon at the window's left edge
+  (`PanelRibbon`, buttons 1, 2, 3…; right-click a number → Remove) over a `QStackedWidget`
+  (`SolveCellTab._panel_tabs`). The separate `panel id` spinbox is gone. Numbers stay gap-free, so removing a
+  non-last panel renumbers the rest; because spot tables/previews are keyed by panel id, that discards any
+  existing ingest (after a confirmation). Removing the last panel discards nothing. Old projects saved with
+  id gaps are renumbered by rank on restore.
+- **Frame↔omega mapping = start omega, end omega, omega step, first frame idx**; last frame idx is derived
+  (`first + round((end − start)/step)`, closed span, same convention as the auto-detect's in-range test).
+  Step 0 ⇒ open-ended ("end of stack", ingest clamps). The old "omega step is 0" ingest warning now fires only
+  when start ≠ end with step 0 (an untouched mapping is still silent). Clicking "first frame idx" opens a
+  dialog with the omega-field dropdown and sets only the first idx (start omega stays as typed). Legacy saved
+  state (`ome_first_deg`/`ome_last_idx`) is mapped to start/end on restore.
+- **Data panel shows only `frames × width × height`**: `DataLoaderPanel(compact_info=True, hide_frame_field=True)`;
+  the Detector tab's own slider is the only frame control.
+- **Loaded calibration = filename link** → popup table of every panel's parameters (one column per panel,
+  `SolveCellTab._show_calibrations`); warnings (no `im_trans`, unused `tx`, embedded copy) live in the popup.
+- **"About Solve Cell"** is a right-click menu on the main window's Solve Cell tab (`MainWindow._on_tab_bar_context_menu`,
+  plain-text dialog); the inline blurb was removed. Left column min width 260 / initial 286 like other tabs.
+
 ## 2026-10-25 — Pause new Solve Cell visualizations; refine the tab first
 
 User decision: stop adding views after V01–V05, V08–V13, V15 (partial) and V02, and spend the next

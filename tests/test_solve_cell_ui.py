@@ -356,7 +356,7 @@ def test_load_calib_file_populates_panel_geometry_fields(tab, monkeypatch):
     assert g["tz"] == pytest.approx(-0.2205)
     assert g["nrpixels_y"] == 2880
     assert g["nrpixels_z"] == 2880
-    assert "Loaded" in panel._calib_note.text()
+    assert panel._calib_link.isEnabled() and panel._calib_link.text().endswith(".json")
 
 
 def test_load_calib_file_shows_but_does_not_use_nonzero_tx(tab, monkeypatch):
@@ -367,7 +367,7 @@ def test_load_calib_file_shows_but_does_not_use_nonzero_tx(tab, monkeypatch):
         staticmethod(lambda *a, **k: (path, "")))
     panel = tab._active_panel()
     panel._load_calib_file()
-    assert "not used" in panel._calib_note.text()
+    assert any("not used" in v for k, v in panel.calibration_summary() if k == "note")
     # tx is still fixed at 0 for the Phase 1 pipeline regardless of display.
     assert "omega_ref_frame_idx" in panel.geometry_cfg()
     assert "tx" not in panel.geometry_cfg()
@@ -439,7 +439,7 @@ def test_get_state_set_state_round_trips_panels_and_stage_fields(tab, app, monke
         staticmethod(lambda *a, **k: (path1, "")))
     first = tab._active_panel()
     first._load_calib_file()
-    first._ome_first_deg.setValue(5.0)
+    first._ome_start.setValue(5.0)
 
     path2 = _write_calib_json(Lsd=222.0)
     second = tab._add_panel()
@@ -467,7 +467,7 @@ def test_get_state_set_state_round_trips_panels_and_stage_fields(tab, app, monke
         assert restored_first.has_calibration() and restored_second.has_calibration()
         assert restored_first.geometry_cfg()["Lsd"] == pytest.approx(111.0)
         assert restored_second.geometry_cfg()["Lsd"] == pytest.approx(222.0)
-        assert restored_first._ome_first_deg.value() == pytest.approx(5.0)
+        assert restored_first._ome_start.value() == pytest.approx(5.0)
         assert restored._proj_ed.text() == "/tmp/some_solve_cell_project"
         assert restored._low_count.value() == pytest.approx(12.5)
         assert restored._sector_candidates_cfg() == (8, 24)
@@ -1004,7 +1004,7 @@ def test_restore_fills_in_calibration_from_the_record_when_the_file_is_gone(tab,
         card = fresh._panels[tab._active_panel_id()]
         assert card.has_calibration()
         assert card.geometry_cfg()["Lsd"] == pytest.approx(1000.0)
-        assert "embedded copy" in card._calib_note.text()
+        assert any("embedded copy" in v for k, v in card.calibration_summary() if k == "note")
     finally:
         fresh.deleteLater()
 
@@ -1636,117 +1636,157 @@ def test_click_selection_preserves_scene_camera_and_plot_size(tab):
 
 # ── Auto-detect frame range from omega metadata ─────────────────────────────
 
-def test_omega_field_combo_ranks_omega_named_dataset_first(tab):
+def test_last_frame_idx_is_derived_from_start_end_step_and_first_idx(tab):
     panel = tab._active_panel()
-    path = _write_h5_stack_with_omega([0.0, 1.0, 2.0])
-    panel.loader.set_path(path, load=True)
-    assert panel._ome_field_combo.count() >= 1
-    assert panel._ome_field_combo.itemText(0) == "entry/instrument/sample_stage/omega"
+    panel._ome_start.setValue(-30.0)
+    panel._ome_end.setValue(29.0)
+    panel._ome_step.setValue(0.1)
+    panel._ome_first_idx.setValue(37)
+    assert panel._last_idx() == 37 + 590
+    panel._geometry = {"Lsd": 1.0}
+    assert panel.geometry_cfg()["omega_last_frame_idx"] == 627
+    assert panel.geometry_cfg()["omega_ref_deg"] == pytest.approx(-30.0)
+    assert "627" in panel._ome_last_lbl.text()
 
 
-def test_ome_auto_checkbox_toggles_auto_box_visibility(tab):
+def test_last_frame_idx_open_ended_when_step_is_zero(tab):
     panel = tab._active_panel()
-    assert panel._ome_auto_box.isHidden()
-    panel._ome_auto_chk.setChecked(True)
-    assert not panel._ome_auto_box.isHidden()
-    panel._ome_auto_chk.setChecked(False)
-    assert panel._ome_auto_box.isHidden()
+    panel._ome_step.setValue(0.0)
+    assert panel._last_idx() == panel._LAST_IDX_OPEN
+    assert "end of stack" in panel._ome_last_lbl.text()
 
 
-def test_detect_omega_frame_range_matches_worked_example(tab):
-    """Regression for the exact worked example this feature was built
-    against: a ramp-up/ramp-down scan where independently nearest-matching
-    the end omega disagrees with the step-derived frame by one (see
-    .context/DECISIONS.md) -- 'first/last frame whose omega is in range' is
-    the rule that gets frame 38/628 right."""
+def test_detect_first_idx_matches_worked_example(tab):
+    """A ramp-up/ramp-down scan: 'first frame whose omega is in range' is the
+    rule that gets frame 37 right (see .context/DECISIONS.md)."""
     panel = tab._active_panel()
-    # 37 ramp-up frames outside the requested window, then a clean -30.0..29.0
-    # sweep at exactly 0.1 deg/frame (591 frames), then 20 ramp-down frames
-    # outside the window again -- mirrors a real scan's shape without
-    # depending on a real beamline file.
     ramp = [-30.0 + 0.1 * i for i in range(591)]
     omega = [-40.0] * 37 + ramp + [40.0] * 20
     path = _write_h5_stack_with_omega(omega)
     panel.loader.set_path(path, load=True)
-    panel._ome_auto_chk.setChecked(True)
-    panel._ome_field_combo.setCurrentIndex(0)
-    panel._ome_target_start.setValue(-30.0)
-    panel._ome_target_end.setValue(29.0)
-    panel._ome_step.setValue(0.1)   # a real user fills this in too -- see the
-    # dedicated zero-step tests below for what happens when they don't.
-    panel._detect_omega_frame_range()
+    panel._ome_start.setValue(-30.0)
+    panel._ome_end.setValue(29.0)
+    panel._ome_step.setValue(0.1)
+    assert panel._omega_fields()[0] == "entry/instrument/sample_stage/omega"
+    assert panel.detect_first_idx("entry/instrument/sample_stage/omega")
     assert panel._ome_first_idx.value() == 37
-    assert panel._ome_last_idx.value() == 627
-    assert panel._ome_first_deg.value() == pytest.approx(omega[37], abs=1e-6)
+    assert panel._last_idx() == 627
 
 
-def test_detect_omega_frame_range_shows_error_when_nothing_matches(tab, monkeypatch):
+def test_detect_first_idx_shows_error_when_nothing_matches(tab, monkeypatch):
     from PyQt5 import QtWidgets
     panel = tab._active_panel()
     path = _write_h5_stack_with_omega([0.0, 1.0, 2.0, 3.0])
     panel.loader.set_path(path, load=True)
-    panel._ome_auto_chk.setChecked(True)
-    panel._ome_field_combo.setCurrentIndex(0)
-    panel._ome_target_start.setValue(100.0)
-    panel._ome_target_end.setValue(200.0)
-
+    panel._ome_start.setValue(100.0)
+    panel._ome_end.setValue(200.0)
     errored = {}
-
-    def fake_critical(parent, title, text):
-        errored["title"] = title
-        return QtWidgets.QMessageBox.Ok
-
-    monkeypatch.setattr(QtWidgets.QMessageBox, "critical", staticmethod(fake_critical))
-    panel._detect_omega_frame_range()
+    monkeypatch.setattr(QtWidgets.QMessageBox, "critical",
+                        staticmethod(lambda p, title, text: errored.setdefault("title", title)))
+    assert not panel.detect_first_idx("entry/instrument/sample_stage/omega")
     assert errored.get("title") == "Detect failed"
 
 
-def test_detect_omega_frame_range_warns_when_step_still_zero(tab, monkeypatch):
-    """Regression: Detect only fills first/last frame idx -- a user who
-    forgets the separate 'omega step' field (exactly what happened across
-    two of three panels in a real project, see .context/DECISIONS.md) must
-    be told at Detect time, not left to discover a silently-collapsed omega
-    window only after Ingest."""
+def test_first_frame_idx_label_is_clickable_and_opens_the_detect_dialog(tab, monkeypatch):
     from PyQt5 import QtWidgets
     panel = tab._active_panel()
-    ramp = [-30.0 + 0.1 * i for i in range(591)]
-    path = _write_h5_stack_with_omega(ramp)
+    path = _write_h5_stack_with_omega([0.0, 1.0, 2.0, 3.0, 4.0])
     panel.loader.set_path(path, load=True)
-    panel._ome_auto_chk.setChecked(True)
-    panel._ome_field_combo.setCurrentIndex(0)
-    panel._ome_target_start.setValue(-30.0)
-    panel._ome_target_end.setValue(29.0)
-    assert panel._ome_step.value() == 0.0   # never set -- the forgotten-step case
+    panel._ome_start.setValue(2.0)
+    panel._ome_end.setValue(4.0)
+    seen = {}
 
-    informed = {}
+    def fake_exec(dlg):
+        seen["combo"] = dlg.findChild(QtWidgets.QComboBox).itemText(0)
+        return QtWidgets.QDialog.Accepted
 
-    def fake_information(parent, title, text):
-        informed["title"] = title
-        return QtWidgets.QMessageBox.Ok
-
-    monkeypatch.setattr(QtWidgets.QMessageBox, "information", staticmethod(fake_information))
-    panel._detect_omega_frame_range()
-    assert informed.get("title") == "Solve Cell"
+    monkeypatch.setattr(QtWidgets.QDialog, "exec_", fake_exec)
+    panel._ome_first_btn.click()
+    assert seen["combo"] == "entry/instrument/sample_stage/omega"
+    assert panel._ome_first_idx.value() == 2
 
 
-def test_detect_omega_frame_range_no_step_warning_once_step_is_set(tab, monkeypatch):
+def test_loaded_dataset_info_is_just_frames_width_height(tab):
+    panel = tab._active_panel()
+    path = _write_h5_stack_with_omega([0.0, 1.0, 2.0])
+    panel.loader.set_path(path, load=True)
+    h, w = panel.loader.current_frame().shape
+    assert panel.loader._info.text().startswith(f"3 × {w} × {h}")
+    assert panel.loader._nav_row.isHidden()
+
+
+def test_calibration_link_shows_filename_and_opens_popup(tab, monkeypatch):
     from PyQt5 import QtWidgets
     panel = tab._active_panel()
-    ramp = [-30.0 + 0.1 * i for i in range(591)]
-    path = _write_h5_stack_with_omega(ramp)
-    panel.loader.set_path(path, load=True)
-    panel._ome_auto_chk.setChecked(True)
-    panel._ome_field_combo.setCurrentIndex(0)
-    panel._ome_target_start.setValue(-30.0)
-    panel._ome_target_end.setValue(29.0)
-    panel._ome_step.setValue(0.1)
+    assert not panel._calib_link.isEnabled()
+    path = _write_calib_json(Lsd=1234.5)
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName",
+                        staticmethod(lambda *a, **k: (path, "")))
+    panel._load_calib_file()
+    assert panel._calib_link.text() == Path(path).name
+    shown = {}
 
-    informed = {}
-    monkeypatch.setattr(
-        QtWidgets.QMessageBox, "information",
-        staticmethod(lambda *a: informed.setdefault("hit", True)))
-    panel._detect_omega_frame_range()
-    assert "hit" not in informed
+    def fake_exec(dlg):
+        table = dlg.findChild(QtWidgets.QTableWidget)
+        shown["cols"] = table.columnCount()
+        shown["lsd"] = table.item(
+            [table.verticalHeaderItem(r).text() for r in range(table.rowCount())].index("Lsd (µm)"), 0).text()
+        return 0
+
+    monkeypatch.setattr(QtWidgets.QDialog, "exec_", fake_exec)
+    panel._calib_link.click()
+    assert shown == {"cols": 1, "lsd": "1234.50"}
+
+
+def test_panels_are_numbered_in_sequence_and_ids_follow_numbers(tab):
+    tab._add_panel(); tab._add_panel()
+    assert sorted(tab._panels) == [1, 2, 3]
+    assert [tab._panel_tabs.widget(i).panel_id() for i in range(3)] == [1, 2, 3]
+    assert [b.text() for b in tab._panel_ribbon._buttons] == ["1", "2", "3"]
+    tab._close_panel_tab(0)          # remove panel 1 -> old 2, 3 become 1, 2
+    assert sorted(tab._panels) == [1, 2]
+    assert [tab._panel_tabs.widget(i).panel_id() for i in range(2)] == [1, 2]
+    assert [b.text() for b in tab._panel_ribbon._buttons] == ["1", "2"]
+
+
+def test_ribbon_click_switches_panel(tab):
+    first = tab._active_panel()
+    second = tab._add_panel()
+    assert tab._panel_ribbon._buttons[1].isChecked()
+    tab._panel_ribbon._buttons[0].click()
+    assert tab._active_panel() is first
+    tab._panel_tabs.setCurrentWidget(second)
+    assert tab._panel_ribbon._buttons[1].isChecked()
+
+
+def test_removing_a_middle_panel_with_results_asks_and_discards(tab, monkeypatch):
+    from PyQt5 import QtWidgets
+    tab._add_panel()
+    tab._spots_df = _fake_spots(3)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QtWidgets.QMessageBox.No))
+    tab._close_panel_tab(0)
+    assert tab._panel_tabs.count() == 2 and tab._spots_df is not None
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Yes))
+    tab._close_panel_tab(0)
+    assert tab._panel_tabs.count() == 1 and tab._spots_df is None
+
+
+def test_about_text_is_plain_and_solve_cell_tab_has_no_inline_blurb(tab):
+    from PyQt5 import QtWidgets
+    assert "<b>" not in tab.ABOUT_TEXT
+    texts = [l.text() for l in tab.findChildren(QtWidgets.QLabel)]
+    assert not any("work in progress) — each panel" in t for t in texts)
+
+
+def test_legacy_omega_state_maps_to_start_end(tab):
+    panel = tab._active_panel()
+    panel.set_state({"fields": {"ome_first_idx": 10, "ome_first_deg": 5.0,
+                                "ome_last_idx": 110, "ome_step": 0.5}})
+    assert panel._ome_start.value() == pytest.approx(5.0)
+    assert panel._ome_end.value() == pytest.approx(55.0)
+    assert panel._last_idx() == 110
 
 
 def test_run_ingest_warns_and_can_be_cancelled_when_omega_step_is_zero(tab, monkeypatch):
@@ -1755,7 +1795,7 @@ def test_run_ingest_warns_and_can_be_cancelled_when_omega_step_is_zero(tab, monk
     panel = tab._active_panel()
     _make_panel_ready(panel, monkeypatch)
     panel._ome_first_idx.setValue(38)
-    panel._ome_last_idx.setValue(628)
+    panel._ome_end.setValue(62.8)
     panel._ome_step.setValue(0.0)
 
     warned = {}
@@ -1778,7 +1818,7 @@ def test_run_ingest_proceeds_past_omega_step_warning_when_confirmed(tab, monkeyp
     panel = tab._active_panel()
     _make_panel_ready(panel, monkeypatch)
     panel._ome_first_idx.setValue(38)
-    panel._ome_last_idx.setValue(628)
+    panel._ome_end.setValue(62.8)
     panel._ome_step.setValue(0.0)
 
     monkeypatch.setattr(
@@ -1796,7 +1836,7 @@ def test_run_ingest_no_omega_step_warning_when_step_is_set(tab, monkeypatch):
     panel = tab._active_panel()
     _make_panel_ready(panel, monkeypatch)
     panel._ome_first_idx.setValue(38)
-    panel._ome_last_idx.setValue(628)
+    panel._ome_end.setValue(62.8)
     panel._ome_step.setValue(0.1)
 
     warned = {}
@@ -1810,33 +1850,27 @@ def test_run_ingest_no_omega_step_warning_when_step_is_set(tab, monkeypatch):
     assert len(_CapturingWorker.instances) == 1
 
 
-def test_get_state_set_state_round_trips_omega_auto_detect_fields(tab, app):
+def test_get_state_set_state_round_trips_omega_fields(tab, app):
     panel = tab._active_panel()
-    path = _write_h5_stack_with_omega([0.0, 1.0, 2.0])
-    panel.loader.set_path(path, load=True)
-    panel._ome_auto_chk.setChecked(True)
-    panel._ome_field_combo.setCurrentIndex(0)
-    panel._ome_target_start.setValue(-30.0)
-    panel._ome_target_end.setValue(29.0)
-
-    state = tab.get_state()
+    panel._ome_start.setValue(-30.0)
+    panel._ome_end.setValue(29.0)
+    panel._ome_step.setValue(0.1)
+    panel._ome_first_idx.setValue(37)
+    panel._ome_field = "entry/instrument/sample_stage/omega"
     restored = type(tab)()
     try:
-        restored.set_state(state)
-        restored_panel = restored._active_panel()
-        assert restored_panel._ome_auto_chk.isChecked()
-        assert not restored_panel._ome_auto_box.isHidden()
-        assert restored_panel._ome_field_combo.currentText() == "entry/instrument/sample_stage/omega"
-        assert restored_panel._ome_target_start.value() == pytest.approx(-30.0)
-        assert restored_panel._ome_target_end.value() == pytest.approx(29.0)
+        restored.set_state(tab.get_state())
+        rp = restored._active_panel()
+        assert rp._ome_start.value() == pytest.approx(-30.0)
+        assert rp._ome_end.value() == pytest.approx(29.0)
+        assert rp._ome_first_idx.value() == 37
+        assert rp._ome_field == "entry/instrument/sample_stage/omega"
     finally:
-        # Own PyVista views too -- must be torn down via Qt, not interpreter-exit
-        # GC (see the `tab` fixture above and .context/STATE.md).
         restored.deleteLater()
-        app.processEvents()
 
 
-def test_detect_omega_frame_range_warns_without_a_loaded_file(tab, monkeypatch):
+
+def test_detect_first_idx_warns_without_a_loaded_file(tab, monkeypatch):
     from PyQt5 import QtWidgets
     panel = tab._active_panel()
 
@@ -1847,7 +1881,7 @@ def test_detect_omega_frame_range_warns_without_a_loaded_file(tab, monkeypatch):
         return QtWidgets.QMessageBox.Ok
 
     monkeypatch.setattr(QtWidgets.QMessageBox, "warning", staticmethod(fake_warning))
-    panel._detect_omega_frame_range()
+    assert not panel.detect_first_idx("entry/omega")
     assert warned.get("title") == "Solve Cell"
 
 
