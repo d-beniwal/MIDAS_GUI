@@ -17,6 +17,8 @@ from typing import Callable, Optional
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
+
+from midas_gui.plot_limits import AspectFit, frame_outline, limit_all
 from PyQt5 import QtCore, QtWidgets
 
 _MORPH_FIELDS = ("integrated", "peak_counts", "n_frames", "volume_vox", "length_px", "width_px", "aspect",
@@ -127,6 +129,8 @@ class SpotInspector(QtWidgets.QWidget):
         p.addItem(self._roi_img)
         p.setLabel("bottom", "col (px)"); p.setLabel("left", "row (px)")
         self._roi_rect = QtCore.QRectF(c0 - 0.5, r0 - 0.5, nC, nR)   # applied after setImage (needs a size)
+        p.addItem(frame_outline(c0 - 0.5, c0 - 0.5 + nC, r0 - 0.5, r0 - 0.5 + nR))
+        AspectFit(p.getViewBox()).set_bounds(c0 - 0.5, c0 - 0.5 + nC, r0 - 0.5, r0 - 0.5 + nR)
         p.addItem(pg.ScatterPlotItem(x=[row["col"]], y=[row["row"]], symbol="+", size=16,
                                      pen=pg.mkPen("#ff3b8d", width=2), brush=pg.mkBrush(None), name="centroid"))
         if self._pred:
@@ -179,6 +183,7 @@ class SpotInspector(QtWidgets.QWidget):
 
         self._write_info(row, om, in_win, roi_sum, pk)
         self._redraw_roi()
+        limit_all({k: v for k, v in self.plots.items() if k != "roi"})
 
     def _redraw_roi(self):
         if self._k is None or not hasattr(self, "_roi_img"):

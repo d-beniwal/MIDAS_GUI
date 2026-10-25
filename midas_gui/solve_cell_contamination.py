@@ -14,6 +14,7 @@ import pandas as pd
 import pyqtgraph as pg
 from PyQt5 import QtCore, QtWidgets
 
+from midas_gui.plot_limits import limit_all
 from midas_gui.solve_cell import viz_products
 
 _FLAG = "#ff5c5c"
@@ -128,6 +129,7 @@ class ContaminationView(QtWidgets.QWidget):
                                              pen=pg.mkPen("#ff3b8d", width=2), brush=pg.mkBrush(None)))
                 w.addItem(pg.ScatterPlotItem(x=[r.omega_deg], y=[r.two_theta_deg], size=16, symbol="o",
                                              pen=pg.mkPen("#ff3b8d", width=2), brush=pg.mkBrush(None)))
+        limit_all(self.plots)
 
     def _write_evidence(self):
         f, L = self.flagged, self.lines

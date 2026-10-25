@@ -231,6 +231,9 @@ class ImageViewer(QtWidgets.QWidget):
         #: Panel-pixel -> lab-frame display map, or None for "unrolled".
         #: See :meth:`set_lab_rotation`.
         self._lab_tf = None
+        #: AspectFit + yellow outline when enabled via :meth:`enable_frame_fit`.
+        self._frame_fit = None
+        self._frame_outline = None
         self._data: Optional[np.ndarray] = None
         # Last cursor position, in image (col, row) coordinates, or None when
         # the cursor is not over this viewer. Remembered so the readout can be
@@ -249,6 +252,32 @@ class ImageViewer(QtWidgets.QWidget):
         self._iv.getHistogramWidget().sigLevelsChanged.connect(self._on_hist_levels_changed)
         self._iv.getHistogramWidget().item.vb.sigRangeChanged.connect(self._on_hist_range_changed)
         self._set_cmap(_DEFAULT_CMAP)
+        self.enable_frame_fit()
+
+    def enable_frame_fit(self) -> None:
+        """Outline the frame in yellow and bound pan/zoom to it (aspect kept).
+
+        Zoom-out stops where the frame fits the widget along its tighter
+        dimension; the other dimension gets spare room.
+        """
+        from midas_gui.plot_limits import AspectFit
+        if self._frame_fit is not None:
+            return
+        self._frame_fit = AspectFit(self._iv.getView().getViewBox())
+
+    def _fit_frame(self, w: int, h: int, reset: bool) -> None:
+        from midas_gui.plot_limits import frame_outline
+        if self._frame_outline is None:
+            self._frame_outline = frame_outline(0, w, 0, h)
+            self._iv.addItem(self._frame_outline)
+        else:
+            frame_outline(0, w, 0, h, item=self._frame_outline)
+        self.apply_lab_transform(self._frame_outline)
+        # A lab-rotated panel is drawn rotated: fit its rotated bounding box.
+        r = QtCore.QRectF(0, 0, w, h)
+        if self._lab_tf is not None:
+            r = self._lab_tf.mapRect(r)
+        self._frame_fit.set_bounds(r.left(), r.right(), r.top(), r.bottom(), reset=reset)
 
     def set_image(self, data: np.ndarray, autorange: bool = True, reset_levels: bool = True):
         """`reset_levels`: drop any manual color-scale/histogram-zoom window and
@@ -262,7 +291,10 @@ class ImageViewer(QtWidgets.QWidget):
         self._redisplay()
         self._apply_view_limits(data.shape[1], data.shape[0])
         if autorange:
-            self._iv.getView().getViewBox().autoRange()
+            if self._frame_fit is not None:
+                self._fit_frame(data.shape[1], data.shape[0], reset=True)
+            else:
+                self._iv.getView().getViewBox().autoRange()
         self._refresh_coord_bar()
 
     def set_raw_frame(self, raw_frame: np.ndarray, im_trans, *,
@@ -351,6 +383,9 @@ class ImageViewer(QtWidgets.QWidget):
         # before the rotation would pin the view to where the image USED to
         # be; see _apply_view_limits.
         self.refresh_view_limits()
+        wh = getattr(self, "_limit_img_wh", None)
+        if wh and self._frame_fit is not None:
+            self._fit_frame(*wh, reset=True)      # the picture moved: re-fit to it
         self.labRotationChanged.emit()
 
     def lab_transform(self):
@@ -497,6 +532,9 @@ class ImageViewer(QtWidgets.QWidget):
         if w <= 0 or h <= 0:
             return
         self._limit_img_wh = (int(w), int(h))
+        if self._frame_fit is not None:
+            self._fit_frame(int(w), int(h), reset=False)
+            return
         span = max(w, h)
         x_lo, y_lo, x_hi, y_hi = 0.0, 0.0, float(w), float(h)
         vb = self._iv.getView().getViewBox()

@@ -16,6 +16,7 @@ import pandas as pd
 import pyqtgraph as pg
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+from midas_gui.plot_limits import limit_to_data
 from midas_gui.pyvista_views import PyVistaScatter3DView
 from midas_gui.solve_cell import domain_compare as dc
 
@@ -174,6 +175,7 @@ class DomainCompareView(QtWidgets.QWidget):
                 txt = "0" if i == j else ("n/a" if not np.isfinite(ang[i, j]) else f"{ang[i, j]:.1f}°")
                 ti = pg.TextItem(txt, color="w", anchor=(0.5, 0.5)); ti.setPos(j + 0.5, i + 0.5)
                 self.heat_plot.addItem(ti); self._heat_text.append(ti)
+        limit_to_data(self.heat_plot)
 
     def _on_review(self, a, b, txt):
         self.reviews[(a, b)] = None if txt == _REVIEW_CHOICES[0] else txt

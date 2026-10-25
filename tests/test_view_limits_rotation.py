@@ -61,10 +61,12 @@ def _limits(v):
 
 
 def test_an_unrotated_frame_keeps_the_original_limits(viewer):
-    """Every detector that ever worked here is unrolled, and must be
-    byte-identical: image rect padded by half its span."""
-    pad = N * 0.5
-    assert _limits(viewer) == ([-pad, N + pad], [-pad, N + pad])
+    """Unrolled detector: limits are the frame + 1% margin, fitted along the
+    tighter widget dimension (spare room on the other)."""
+    (x_lo, x_hi), (y_lo, y_hi) = _limits(viewer)
+    assert x_lo <= -0.01 * N + 1e-6 and x_hi >= N * 1.01 - 1e-6
+    assert y_lo <= -0.01 * N + 1e-6 and y_hi >= N * 1.01 - 1e-6
+    assert min(x_hi - x_lo, y_hi - y_lo) == pytest.approx(N * 1.02)
 
 
 def test_the_rotated_image_is_entirely_reachable(viewer):
@@ -85,10 +87,10 @@ def test_the_old_limits_would_not_have_reached_it(viewer):
 
 
 def test_unrotating_restores_the_plain_limits(viewer):
-    pad = N * 0.5
+    before = _limits(viewer)
     viewer.set_lab_rotation(TX, BCY, BCZ)
     viewer.set_lab_rotation(0.0, BCY, BCZ)
-    assert _limits(viewer) == ([-pad, N + pad], [-pad, N + pad])
+    assert _limits(viewer) == pytest.approx(before)
 
 
 def test_a_new_frame_does_not_undo_the_rotated_limits(viewer):

@@ -16,6 +16,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
+
+from midas_gui.plot_limits import AspectFit, frame_outline, limit_all
 from PyQt5 import QtCore, QtWidgets
 
 _PANEL_COLORS = ["#4da3ff", "#ffa94d", "#69db7c", "#da77f2", "#ffd43b", "#63e6be"]
@@ -79,6 +81,7 @@ class DiagnosticsView(QtWidgets.QWidget):
     def _redraw(self):
         self.glw.clear()
         self.plots = {}
+        self._fitted = set()
         res, pred, frames = self._residuals, self._predictions, self._frames
         has_res = res is not None and len(res) > 0
         if not has_res and (frames is None or not len(frames)):
@@ -95,6 +98,7 @@ class DiagnosticsView(QtWidgets.QWidget):
             self._draw_vector_fields(res, panels)
             self._draw_histograms(res)
         self._draw_timeline(res if has_res else None, pred, frames, panels)
+        limit_all({k: v for k, v in self.plots.items() if k not in self._fitted})
 
     def _draw_vector_fields(self, res, panels):
         scale = float(self.arrow_scale.value())
@@ -107,9 +111,9 @@ class DiagnosticsView(QtWidgets.QWidget):
             shape = self._panel_shapes.get(pid)
             if shape:
                 n_rows, n_cols = shape
-                p.addItem(pg.PlotCurveItem([-0.5, n_cols - .5, n_cols - .5, -0.5, -0.5],
-                                           [-0.5, -0.5, n_rows - .5, n_rows - .5, -0.5],
-                                           pen=pg.mkPen("#666666", width=1)))
+                p.addItem(frame_outline(-0.5, n_cols - 0.5, -0.5, n_rows - 0.5))
+                AspectFit(p.getViewBox()).set_bounds(-0.5, n_cols - 0.5, -0.5, n_rows - 0.5)
+                self._fitted.add(f"vectors_{pid}")
             m = _finite(d.pred_col.to_numpy(), d.pred_row.to_numpy(), d.d_col.to_numpy(), d.d_row.to_numpy())
             d = d[m]
             if len(d):

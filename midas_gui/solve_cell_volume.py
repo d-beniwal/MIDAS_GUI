@@ -22,6 +22,7 @@ import pyvista as pv
 from PyQt5 import QtCore, QtGui, QtWidgets
 from pyvistaqt import QtInteractor
 
+from midas_gui.plot_limits import limit_to_data
 from midas_gui.pyvista_views import close_interactor_at_quit
 
 from midas_gui.solve_cell import reciprocal_volume as rv
@@ -288,6 +289,9 @@ class ReciprocalVolumeView(QtWidgets.QWidget):
                                    data=[r["spot_id"] for r in sel])
         else:
             self.spot_item.setData([])
+        key = (ax, tuple(s.shape))
+        limit_to_data(self.plot, set_range=key != getattr(self, "_limit_key", None))
+        self._limit_key = key
         self._redraw_3d_plane(ax, c)
 
     def _on_hover(self, pos):
