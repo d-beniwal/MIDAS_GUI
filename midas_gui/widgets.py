@@ -3398,6 +3398,7 @@ class FieldSelector(QtWidgets.QGroupBox):
         self._path_ed = QtWidgets.QLineEdit()
         self._path_ed.setPlaceholderText("file / folder / .h5")
         self._path_ed.textChanged.connect(self._on_path_changed)
+        self._path_ed.textChanged.connect(self._path_ed.setToolTip)   # full path on hover
         self._path_ed.editingFinished.connect(self._update_frame_limit)
         warn_if_path_missing(self._path_ed, self)
         browse = QtWidgets.QToolButton()
@@ -3483,7 +3484,7 @@ class FieldSelector(QtWidgets.QGroupBox):
             self._path_ed.setText(display_text_for_paths(paths))
             self._path_ed.setToolTip("\n".join(paths))
         else:
-            self._path_ed.setToolTip("")
+            self._path_ed.setToolTip(self._path_ed.text())
         self._path_ed.blockSignals(False)
 
     def set_data_path_provider(self, fn):
@@ -3915,6 +3916,8 @@ class MaskSelector(QtWidgets.QGroupBox):
                         "list without deleting it).")
         chk.toggled.connect(lambda checked, e=entry: self._on_enabled_toggled(e, checked))
         lbl = QtWidgets.QLabel(label); lbl.setStyleSheet("font-size:10px")
+        if entry.get("path"):
+            lbl.setToolTip(str(entry["path"]))
         x = QtWidgets.QToolButton(); x.setText("✕"); x.setFixedWidth(22)
         x.clicked.connect(lambda: self._remove(entry))
         h.addWidget(chk); h.addWidget(lbl, 1); h.addWidget(x)
@@ -4519,6 +4522,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._path_ed = QtWidgets.QLineEdit()
         self._path_ed.setPlaceholderText("file / folder / .h5")
         self._path_ed.textChanged.connect(self._on_path_changed)
+        self._path_ed.textChanged.connect(self._path_ed.setToolTip)   # full path on hover
         self._path_ed.returnPressed.connect(self._on_return_pressed)
         browse = QtWidgets.QToolButton(); browse.setText("⋯"); browse.setFixedWidth(28)
         browse.setPopupMode(QtWidgets.QToolButton.InstantPopup)
@@ -5210,6 +5214,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
             return
         try:
             self._stack = self._paths = self._h5 = None; self._nframes = 0
+            self._ds_combo.setToolTip("")
             self._reset_buffer()
             if self._folder_format_filter:
                 self._fmt_row.setVisible(False)
@@ -5237,6 +5242,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
                 n = shape[0] if len(shape) >= 3 else 1
                 self._h5 = (raw, dset, n); self._nframes = n
                 kind = f"HDF5 [{dset}] {shape}"
+                self._ds_combo.setToolTip(f"{raw}\n{dset}   shape {tuple(shape)}")
             else:
                 import tifffile
                 arr = np.asarray(tifffile.imread(raw))

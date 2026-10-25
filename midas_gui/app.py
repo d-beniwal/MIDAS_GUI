@@ -230,10 +230,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Top-right corner: an "agent-controlled" badge (hidden until an
         # agent is actually connected — see ControlServer.agentConnected /
-        # _on_agent_connected_changed below) beside the active-project
-        # indicator, deliberately separate from the muted status-bar
-        # "Project: none" label (kept as-is), since both of these need to be
-        # prominent/high-contrast rather than a quiet status readout.
+        # _on_agent_connected_changed below) (the
+        # active-project indicator now lives in the bottom status bar).
         right_corner = QtWidgets.QWidget()
         right_row = QtWidgets.QHBoxLayout(right_corner)
         right_row.setContentsMargins(0, 0, 0, 0)
@@ -250,13 +248,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._agent_control_lbl.setVisible(False)
         right_row.addWidget(self._agent_control_lbl)
 
-        self._header_project_lbl = QtWidgets.QLabel("")
-        proj_font = self._header_project_lbl.font()
-        proj_font.setPointSize(proj_font.pointSize() + 2)
-        proj_font.setBold(True)
-        self._header_project_lbl.setFont(proj_font)
-        self._header_project_lbl.setStyleSheet("color: #3ddc84; padding-right: 8px;")
-        right_row.addWidget(self._header_project_lbl)
         tabs.setCornerWidget(right_corner, QtCore.Qt.TopRightCorner)
 
         # Build each tab in isolation: a single tab that fails on this platform
@@ -475,6 +466,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(
             "Tip: mask → calibrate → (refine) → batch integrate")
         self._project_lbl = QtWidgets.QLabel("Project: none")
+        proj_font = self._project_lbl.font()
+        proj_font.setBold(True)
+        self._project_lbl.setFont(proj_font)
+        self._project_lbl.setStyleSheet("color: #3ddc84; padding-right: 8px;")
         self._project_lbl.setToolTip(
             "The currently-open FAIR provenance project file (File → New/Open Project…).\n"
             "Calibrate and Batch Integrate runs are logged to it automatically while open.")
@@ -787,7 +782,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def _set_project_path(self, path) -> None:
         self._project_ctx.path = path
         self._project_lbl.setText(f"Project: {Path(path).name}" if path else "Project: none")
-        self._header_project_lbl.setText(f"● Project: {Path(path).name}" if path else "")
         self._close_proj_act.setEnabled(path is not None)
         self._project_history_act.setEnabled(path is not None)
 
