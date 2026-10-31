@@ -56,6 +56,8 @@ from midas_gui.solve_cell_diagnostics import DiagnosticsView
 from midas_gui.solve_cell_volume import ReciprocalVolumeView, VolumeBuildWorker
 from midas_gui.solve_cell_inspector import SpotInspector
 from midas_gui.solve_cell_contamination import ContaminationView
+from midas_gui.solve_cell_material_panel import MaterialFilterPanel
+from midas_gui.solve_cell import material_filter
 from midas_gui.solve_cell_compare import DomainCompareView
 from midas_gui.solve_cell import domain_compare
 from midas_gui.solve_cell import reciprocal_volume
@@ -578,6 +580,10 @@ class SolveCellTab(QtWidgets.QWidget):
         self._agent_ack_warnings = False
         self._selected_spot_id = None
         self._spot_rows_by_id = {}
+        self._lattice_rows: Optional[list] = None      # pickable lattice-point rows while "lattice points" is on
+        self._lattice_key = None
+        self._missing_sig = None
+        self._missing_rows: list = []
         self._recip_has_data = False
         self._spots_df = None
         self._flagged_df = None
@@ -744,6 +750,14 @@ class SolveCellTab(QtWidgets.QWidget):
             "are dropped as noise. "
             f"Default: {solve_pipeline.BLOB_MIN_VOL_DEFAULT} voxels.")
         pv.addRow(_twocol("blob threshold:", self._blob_thresh, "blob min_vol:", self._blob_minvol))
+        self._blob_minframes = _NoScrollSpinBox(); self._blob_minframes.setRange(1, 1000)
+        self._blob_minframes.setValue(solve_pipeline.BLOB_MIN_FRAMES_DEFAULT)
+        self._blob_minframes.setToolTip(
+            "Minimum number of omega frames a detected blob must span to be kept "
+            "as a spot (applied after blob detection). Set to 1 to keep peaks "
+            "narrower than one omega step. "
+            f"Default: {solve_pipeline.BLOB_MIN_FRAMES_DEFAULT} frames.")
+        pv.addRow("blob min_frames:", self._blob_minframes)
         self._split_ratio = _fspin(1.0, 100.0, 2, solve_pipeline.SPLIT_RATIO_DEFAULT)
         self._split_ratio.setToolTip(
             "Watershed sensitivity for splitting one connected blob into "
@@ -817,31 +831,20 @@ class SolveCellTab(QtWidgets.QWidget):
         iv.addRow(self._ingest_status)
         mv.addWidget(grp_ing)
 
-        grp_dia = QtWidgets.QGroupBox("2. Diamond filter")
-        dv = QtWidgets.QFormLayout(grp_dia); dv.setSpacing(4)
-        self._diamond_a = _fspin(1.0, 10.0, 4, solve_pipeline.DIAMOND_A_ANGSTROM_DEFAULT, "Å")
-        self._diamond_a.setToolTip(
-            f"Diamond anvil cubic cell edge, used to predict where diamond's "
-            f"own powder rings fall in 2θ so those spots can be flagged and "
-            f"excluded from indexing — advanced override. "
-            f"Default: {solve_pipeline.DIAMOND_A_ANGSTROM_DEFAULT:g} Å.")
-        self._contam_tol = _fspin(0.001, 5.0, 4, solve_pipeline.CONTAM_TOL_DEG_DEFAULT, "°")
-        self._contam_tol.setToolTip(
-            f"2θ window (degrees) around each predicted diamond ring: a spot "
-            f"closer than this to any ring is flagged 'is_diamond' and "
-            f"removed from the candidate pool passed to indexing. "
-            f"Default: {solve_pipeline.CONTAM_TOL_DEG_DEFAULT:g}°.")
-        self._diamond_a.setMaximumWidth(88); self._contam_tol.setMaximumWidth(80)
-        dv.addRow(_tight2("diamond a:", self._diamond_a, "tol:", self._contam_tol))
-        self._diamond_btn = S.primary_btn("Run Diamond Filter")
+        grp_dia = QtWidgets.QGroupBox("2. Material filter")
+        dv = QtWidgets.QVBoxLayout(grp_dia); dv.setSpacing(4)
+        self._material_panel = MaterialFilterPanel()
+        self._material_panel.enabledChanged.connect(self._on_material_filter_toggled)
+        dv.addWidget(self._material_panel)
+        self._diamond_btn = S.primary_btn("Run Material Filter")
         self._diamond_btn.setEnabled(False)
         self._diamond_btn.clicked.connect(self._run_diamond_filter)
         self._diamond_btn.setMaximumWidth(165)
-        dv.addRow(_left(self._diamond_btn))
+        dv.addLayout(_left(self._diamond_btn))
         self._diamond_status = QtWidgets.QLabel("—")
         self._diamond_status.setStyleSheet(f"color:{S.MUTED};font-size:11px")
         self._diamond_status.setWordWrap(True)
-        dv.addRow(self._diamond_status)
+        dv.addWidget(self._diamond_status)
         mv.addWidget(grp_dia)
 
         grp_ab = QtWidgets.QGroupBox("3. Index")
@@ -930,7 +933,7 @@ class SolveCellTab(QtWidgets.QWidget):
             "appends another. Select one to see its full cell/refine detail.")
         self._domain_list.setMaximumHeight(90)
         self._domain_list.currentRowChanged.connect(self._on_domain_selected)
-        self._domain_list.setMaximumWidth(170)
+        self._domain_list.setMaximumWidth(289)   # 170% of the former 170 px
         rv.addWidget(self._domain_list, 0, QtCore.Qt.AlignLeft)
         self._param_grid = QtWidgets.QGridLayout()
         self._param_grid.setHorizontalSpacing(20); self._param_grid.setVerticalSpacing(6)
@@ -1039,6 +1042,8 @@ class SolveCellTab(QtWidgets.QWidget):
         project's QT_QPA_PLATFORM=offscreen test convention; VTK's
         ``QtInteractor`` does not have that problem."""
         self._recip_view = PyVistaScatter3DView()
+        self._recip_view.set_beam_view(
+            geom_adapter.qlab_to_sample(np.array([[1.0, 0.0, 0.0]]), 0.0)[0], geom_adapter.rotation_axis_in_sample())
         self._recip_view.spotClicked.connect(self._on_recip_spot_clicked)
         self._recip_view.spotHovered.connect(self._on_recip_spot_hovered)
 
@@ -1096,11 +1101,25 @@ class SolveCellTab(QtWidgets.QWidget):
         mode_row.addStretch(1)
         tv.addLayout(mode_row)
 
+        self._beam_btn = QtWidgets.QPushButton("Beam view")
+        self._beam_btn.setToolTip("Reset the camera to look down the beam, rotation axis up (the default view).")
+        self._beam_btn.clicked.connect(self._on_beam_view_clicked)
+        self._recip_pin = QtWidgets.QComboBox()
+        self._recip_pin.addItems(["Free (3-D)", "+X  (Y–Z plane)", "−X  (Y–Z plane)",
+                                  "+Y  (X–Z plane)", "−Y  (X–Z plane)",
+                                  "+Z  (X–Y plane)", "−Z  (X–Y plane)"])
+        self._recip_pin.setToolTip(
+            "Pin the camera to an orthogonal projection looking down a plotted q axis "
+            "(qx/qy/qz, sample frame), so the screen shows the perpendicular plane. "
+            "Pinned views are parallel (no perspective) and cannot rotate: drag pans, "
+            "wheel zooms. Free (3-D) or 'Beam view' releases the pin.")
+        self._recip_pin.currentIndexChanged.connect(self._on_recip_pin_changed)
         tv.addLayout(self._build_overlay_controls())
         tv.addWidget(self._recip_view, stretch=1)
         self._spot_details = QtWidgets.QLabel("Hover a spot for details; click to select.")
         self._spot_details.setWordWrap(True)
         self._spot_details.setTextFormat(QtCore.Qt.PlainText)
+        self._spot_details.setMinimumHeight(2 * self._spot_details.fontMetrics().lineSpacing() + 4)
         tv.addWidget(self._spot_details)
         self._show_detector_btn = QtWidgets.QPushButton("Show selected spot on detector")
         self._show_detector_btn.setEnabled(False)
@@ -1110,8 +1129,21 @@ class SolveCellTab(QtWidgets.QWidget):
         self._recip_stats.setStyleSheet(f"color:{S.MUTED};font-size:11px")
         self._recip_stats.setWordWrap(True)
         self._recip_stats.setContentsMargins(6, 2, 6, 4)
-        tv.addWidget(self._recip_stats)
+        self._recip_stats.setParent(tab)
+        self._recip_stats.hide()      # summary now lives in the 4. Refine domain box
         self._view_tabs.addTab(tab, "Reciprocal space map")
+
+    def _on_recip_pin_changed(self, idx: int):
+        if idx <= 0:
+            self._recip_view.pin_view(None)
+        else:
+            self._recip_view.pin_view((idx - 1) // 2, 1 if idx % 2 else -1)
+
+    def _on_beam_view_clicked(self):
+        self._recip_view.view_along_beam()
+        self._recip_pin.blockSignals(True)
+        self._recip_pin.setCurrentIndex(0)
+        self._recip_pin.blockSignals(False)
 
     # ── reference overlays: Ewald cap (V01), basis/cell (V15), predictions (V08) ──
     def _build_overlay_controls(self) -> QtWidgets.QLayout:
@@ -1135,24 +1167,29 @@ class SolveCellTab(QtWidgets.QWidget):
         self._ov_basis.setToolTip("Reciprocal basis (red/green/blue = a*/b*/c*) and unit cell of the selected domain (2π·UB columns).")
         self._ov_pred = QtWidgets.QCheckBox("lattice points")
         self._ov_pred.setToolTip(
-            "Every lattice point of the selected domain that crosses the Ewald "
-            "sphere inside the scanned ω range. Green: explained by an assigned "
-            "spot; orange: lands on a panel but no assigned spot; grey (optional): "
-            "never lands on an active panel. Cached in the project.")
-        self._ov_pred_hidden = QtWidgets.QCheckBox("incl. off-panel")
-        self._ov_patch = QtWidgets.QCheckBox("panel outline")
+            "Replaces the observed-spot cloud with the selected domain's predicted "
+            "lattice points that land on a panel inside the scanned ω range. Green: "
+            "explained by an assigned spot (position = the observed spot); orange: no "
+            "assigned spot (position = the prediction). Each point carries its panel, "
+            "frame, ω, row/col; clicking one selects it and shows it on the Detector "
+            "view. Uncheck to return to the indexed-spot view. Cached in the project.")
+        self._ov_patch = QtWidgets.QCheckBox("panel maps")
         self._ov_patch.setToolTip(
             "Each panel's frame at the ω below painted onto its measured patch of the Ewald "
             "sphere (sample-frame q). Colour = block-max background-subtracted counts (asinh); "
             "missing cells = masked / sentinel pixels, never zero. Panels outside their ω "
             "window are skipped. Selecting a spot moves ω to that spot's own ω.")
-        self._ov_shells = QtWidgets.QCheckBox("|q| shells")
-        self._ov_shells.setToolTip("Constant-|q| shells (centred on q=0) at 0.5, 1.0, 1.5… Å⁻¹ — distinct from the Ewald sphere.")
-        for w in (self._ov_ewald, self._ov_basis, self._ov_pred, self._ov_pred_hidden, self._ov_patch, self._ov_shells):
+        self._ov_patch_cmap = QtWidgets.QComboBox()
+        self._ov_patch_cmap.addItems(self._PATCH_CMAPS)
+        self._ov_patch_cmap.setToolTip("Colour map of the panel maps (block-max background-subtracted counts, asinh).")
+        self._ov_patch_cmap.currentIndexChanged.connect(lambda _=None: self._refresh_overlays())
+        for w in (self._ov_ewald, self._ov_basis, self._ov_pred, self._ov_patch):
             w.toggled.connect(lambda _=None: self._refresh_overlays())
             if w is not self._ov_ewald:
                 row.addSpacing(6); row.addWidget(_ov_sep()); row.addSpacing(6)
             row.addWidget(w)
+            if w is self._ov_patch:
+                row.addWidget(self._ov_patch_cmap)
         row.addStretch(1)
         box.addLayout(row)
         row2 = QtWidgets.QHBoxLayout()
@@ -1164,10 +1201,12 @@ class SolveCellTab(QtWidgets.QWidget):
         self._ov_omega_label = QtWidgets.QLabel("0.0°")
         self._ov_omega_label.setMinimumWidth(60)
         row2.addWidget(self._ov_omega_label)
-        self._ov_now = QtWidgets.QCheckBox("highlight diffracting now (±0.5°)")
-        self._ov_now.setChecked(True)
-        self._ov_now.toggled.connect(lambda _=None: self._refresh_overlays())
-        row2.addWidget(self._ov_now)
+        row2.addSpacing(8); row2.addWidget(_ov_sep()); row2.addSpacing(8)
+        row2.addWidget(self._beam_btn)
+        row2.addSpacing(8)
+        row2.addWidget(QtWidgets.QLabel("Pin view:"))
+        row2.addWidget(self._recip_pin)
+        row2.addStretch(1)       # equal stretch with the slider: slider is half its former width
         box.addLayout(row2)
         self._ov_status = QtWidgets.QLabel("")
         self._ov_status.setStyleSheet(f"color:{S.MUTED};font-size:11px")
@@ -1227,6 +1266,56 @@ class SolveCellTab(QtWidgets.QWidget):
         spans = viz_products.omega_ranges(snaps).values()
         return (min(a for a, _ in spans), max(b for _, b in spans))
 
+    def _on_masked_pixel(self, panel_id: int, row: float, col: float) -> bool:
+        """True if the raw pixel under (row, col) is masked on that panel's detector mask."""
+        mask = (self._ingest_preview_by_panel.get(panel_id) or {}).get("mask")
+        if mask is None:
+            return False
+        mask = np.asarray(mask)
+        r, c = int(round(row)), int(round(col))
+        return bool(0 <= r < mask.shape[0] and 0 <= c < mask.shape[1] and mask[r, c])
+
+    def _lattice_point_rows(self, idx: int, notes: list, prefix: str = "lp") -> Optional[list]:
+        """Pickable rows for the selected domain's on-panel lattice points: one per
+        visible crossing, tied to its panel, loaded frame, ω and row/col. Green rows
+        sit at the assigned spot's actual position, orange ones at the prediction
+        (``pred_*`` always keeps the prediction). ``None`` if no prediction exists."""
+        from midas_gui.solve_cell import frame_patch as fp
+        prod = self._domain_viz(idx)
+        if prod is None:
+            notes.append("Lattice points: needs a refined domain with a UB")
+            return None
+        pred = prod["tables"]["predictions"]
+        snaps = self._ingest_snapshots()
+        spots = {r["spot_id"]: r for r in self._display_spot_rows()}
+        rows = []
+        for n, p in enumerate(pred[pred.visibility == "visible"].itertuples()):
+            if self._on_masked_pixel(int(p.panel_id), p.row, p.col):
+                continue                  # dead/gap/masked area: never a measurable spot
+            sid = int(p.observed_spot_id)
+            obs = spots.get(sid) if sid >= 0 else None
+            row = {"spot_id": f"{prefix}:{n}", "lattice": True,
+                   "category": "Lattice point · observed" if obs else "Lattice point · not observed",
+                   "hkl": (int(p.h), int(p.k), int(p.l)), "panel_id": int(p.panel_id),
+                   "qsample_x": float(p.qx), "qsample_y": float(p.qy), "qsample_z": float(p.qz),
+                   "pred_omega": float(p.omega_deg), "pred_row": float(p.row), "pred_col": float(p.col),
+                   "observed_spot_id": sid if obs else None}
+            src = obs or {"omega_deg": p.omega_deg, "row": p.row, "col": p.col}
+            row.update(omega_deg=float(src["omega_deg"]), row=float(src["row"]), col=float(src["col"]))
+            if obs is not None and "loaded_frame_idx" in obs:
+                row["loaded_frame_idx"] = int(obs["loaded_frame_idx"])
+            elif int(p.panel_id) in snaps:
+                f = fp.loaded_frame_for_omega(snaps[int(p.panel_id)], row["omega_deg"])
+                if f is not None:
+                    row["loaded_frame_idx"] = int(f)
+            rows.append(row)
+        st = prod["meta"]["stats"]
+        n_obs = sum(r["observed_spot_id"] is not None for r in rows)
+        notes.append(f"{self._domains[idx]['label']}: {n_obs} observed / {len(rows) - n_obs} unobserved on-panel "
+                     f"lattice crossings; RMS Δrow/Δcol {st.get('rms_d_row', float('nan')):.2f}/"
+                     f"{st.get('rms_d_col', float('nan')):.2f} px")
+        return rows
+
     def _refresh_overlays(self):
         lo, hi = self._scan_omega_span()
         v = self._ov_omega
@@ -1258,32 +1347,18 @@ class SolveCellTab(QtWidgets.QWidget):
         view.set_basis(viz_products.basis_matrix(domain_UB) if (self._ov_basis.isChecked() and domain_UB is not None) else None)
         if self._ov_basis.isChecked() and domain_UB is None:
             notes.append("a*, b*, c*: needs a solved domain")
-        if self._ov_pred.isChecked() and idx is not None:
-            prod = self._domain_viz(idx)
-            if prod is not None:
-                pred = prod["tables"]["predictions"]
-                cls = viz_products.classify_lattice_points(pred)
-                groups = [(cls["observed"], "#38d9a9", "predicted · observed"),
-                          (cls["missing"], "#ffa94d", "predicted · not observed")]
-                if self._ov_pred_hidden.isChecked():
-                    groups.append((cls["hidden"], "#6b6b6b", "predicted · off panel"))
-                if self._ov_now.isChecked():
-                    groups.append((viz_products.lattice_points_near_omega(pred, omega, 0.5), "#ffffff", "diffracting now"))
-                view.set_predicted(groups)
-                st = prod["meta"]["stats"]
-                notes.append(f"{self._domains[idx]['label']}: {len(cls['observed'])} observed / {len(cls['missing'])} "
-                             f"visible-unobserved / {len(cls['hidden'])} off-panel lattice points; RMS Δrow/Δcol "
-                             f"{st.get('rms_d_row', float('nan')):.2f}/{st.get('rms_d_col', float('nan')):.2f} px")
-            else:
-                view.set_predicted(None)
-                notes.append("Predicted points: needs a refined domain with a UB")
-        else:
-            view.set_predicted(None)
+        # Lattice points replace the observed-spot cloud (see _refresh_recip_view).
+        lattice = self._lattice_point_rows(idx, notes) if (self._ov_pred.isChecked() and idx is not None) else None
+        key = None if lattice is None else (idx, len(lattice), round(sum(r["pred_row"] for r in lattice), 6))
+        if key != self._lattice_key or (lattice is None) != (self._lattice_rows is None):
+            self._lattice_key, self._lattice_rows = key, lattice
+            self._refresh_recip_view()
+            self._refresh_detector_preview()
+        view.set_predicted(None)
         if self._ov_patch.isChecked():
             notes.extend(self._refresh_frame_patches(omega))
         else:
             view.set_frame_patches(None)
-        view.set_shells([0.5, 1.0, 1.5] if self._ov_shells.isChecked() else None)
         self._ov_status.setText(" · ".join(notes))
         self._refresh_diagnostics()
         if self._project_path():
@@ -1398,7 +1473,7 @@ class SolveCellTab(QtWidgets.QWidget):
                             "cells": np.arcsinh(prod["arrays"][f"cells_p{pid}"][slot] / cof)})
             notes.append(f"panel {pid}: frame {f} @ ω {om:+.2f}°")
         top = max([np.arcsinh(max(h, 200.0) / cof) for _l, h in prod["meta"]["clim"].values()] or [1.0])
-        self._recip_view.set_frame_patches(patches, clim=(0.0, float(top)))
+        self._recip_view.set_frame_patches(patches, clim=(0.0, float(top)), cmap=self._ov_patch_cmap.currentText())
         return ["Patches: " + "; ".join(notes)]
 
     def _persist_viz(self):
@@ -1434,6 +1509,15 @@ class SolveCellTab(QtWidgets.QWidget):
     # kept well clear of the legacy "#ff3030"/"#4da3ff" diamond/indexed colors.
     _DOMAIN_COLORS = ["#4da3ff", "#ffa94d", "#69db7c", "#da77f2",
                       "#ffd43b", "#63e6be", "#ff8787", "#91a7ff"]
+
+    # Detector-view circle terminology: observed + unassigned = orange, observed +
+    # assigned to a domain = green, predicted by a domain but absent = red.
+    _DET_UNASSIGNED_COLOR = "#ffa94d"
+    _DET_ASSIGNED_COLOR = "#38d9a9"
+    _DET_MISSING_COLOR = "#ff4d4d"
+
+    # Panel-map colour maps offered in the Overlays row (matplotlib names).
+    _PATCH_CMAPS = ["viridis", "magma", "inferno", "plasma", "cividis", "turbo", "gray", "hot"]
 
     # Index into self._recip_size_mode -> PyVistaScatter3DView size mode.
     _RECIP_SIZE_MODES = [SIZE_MODE_EQUAL, SIZE_MODE_INTENSITY]
@@ -1526,9 +1610,16 @@ class SolveCellTab(QtWidgets.QWidget):
 
     def _refresh_recip_view(self):
         rows = self._display_spot_rows()
-        self._spot_rows_by_id = {r["spot_id"]: r for r in rows}
         if getattr(self, "_volume_view", None) is not None:
             self._volume_view.set_spots(rows)
+        if self._lattice_rows is not None:
+            return self._show_lattice_points()
+        self._spot_rows_by_id = {r["spot_id"]: r for r in rows}
+        sig = tuple((d["label"], len(d["claimed_index"])) for d in self._domains)
+        if sig != getattr(self, "_det_assign_sig", sig) and hasattr(self, "_spot_scatter"):
+            self._det_assign_sig = sig
+            self._refresh_detector_preview()           # recolour the detector circles
+        self._det_assign_sig = sig
         show = self._recip_show_unindexed.isChecked()
         n_unindexed = sum(r["category"] == "Unindexed/spurious" for r in rows)
         visible = [r for r in rows if show or r["category"] != "Unindexed/spurious"]
@@ -1581,18 +1672,45 @@ class SolveCellTab(QtWidgets.QWidget):
                 lines.append("Grey: no refined fit available" if finite else "Run refinement to obtain per-spot residuals; grey: no fit available")
         self._recip_stats.setText("\n".join(lines))
 
+    def _show_lattice_points(self):
+        """Lattice-points mode: the reciprocal view shows only the green/orange
+        lattice points (observed spots hidden); unchecking restores the spot view."""
+        rows = self._lattice_rows
+        self._spot_rows_by_id = {r["spot_id"]: r for r in rows}
+        groups = []
+        for obs, color, label in ((True, "#38d9a9", "predicted · observed"), (False, "#ffa94d", "predicted · not observed")):
+            sel = [r for r in rows if (r["observed_spot_id"] is not None) == obs]
+            xyz = tuple(np.array([r[c] for r in sel], float) for c in ("qsample_x", "qsample_y", "qsample_z"))
+            groups.append((xyz, color, label, sel))
+        self._recip_view.set_groups(groups, point_size=self._recip_point_size.value(), size_mode=SIZE_MODE_EQUAL)
+        self._recip_view.clear_scalar_bar()
+        self._recip_view.set_fitted_overlay(None, None)
+        self._update_recip_selection()
+        self._recip_stats.setText(f"Lattice points: {len(groups[0][3])} observed (green), "
+                                  f"{len(groups[1][3])} not observed (orange) — uncheck to return to the indexed spots")
+
     @staticmethod
     def _spot_description(row):
-        parts = [f"Spot {row['spot_id']}", row['category']]
-        for key, label in (("panel_id", "panel"), ("loaded_frame_idx", "frame"),
-                           ("omega_deg", "ω (°)"), ("row", "row"), ("col", "col")):
-            if key in row:
-                parts.append(f"{label}: {row[key]:.5g}")
-        if "hkl" in row:
-            parts.append(f"hkl: {tuple(row['hkl'])}")
-            parts.append(f"Δq: {row['q_residual']:.5g} Å⁻¹ (2π/d)")
-            parts.append(f"Δhkl: {row['hkl_residual']:.5g}")
-        return " | ".join(parts)
+        """Always two lines: identity + detector position (ends at ``col``), then the
+        indexing detail (hkl and residuals / the observed-spot match)."""
+        loc = [f"panel: {row['panel_id']}" if "panel_id" in row else None,
+               f"frame: {row['loaded_frame_idx']}" if "loaded_frame_idx" in row else
+               ("frame: not loaded" if row.get("lattice") else None)]
+        loc += [f"{label}: {row[key]:.5g}" for key, label in (("omega_deg", "ω (°)"), ("row", "row"), ("col", "col"))
+                if key in row]
+        if row.get("lattice"):
+            head = [f"Lattice point · {row['category'].split(' · ')[1]}"]
+            detail = [f"hkl: {tuple(row['hkl'])}"]
+            if row["observed_spot_id"] is not None:
+                detail.append(f"spot {row['observed_spot_id']} (predicted ω {row['pred_omega']:.5g}, "
+                              f"row {row['pred_row']:.5g}, col {row['pred_col']:.5g})")
+        else:
+            head = [f"Spot {row['spot_id']}", row["category"]]
+            detail = []
+            if "hkl" in row:
+                detail = [f"hkl: {tuple(row['hkl'])}", f"Δq: {row['q_residual']:.5g} Å⁻¹ (2π/d)",
+                          f"Δhkl: {row['hkl_residual']:.5g}"]
+        return " | ".join(head + [x for x in loc if x]) + "\n" + (" | ".join(detail) if detail else "hkl: —")
 
     def _on_recip_spot_hovered(self, spot_id):
         row = self._spot_rows_by_id.get(spot_id) if spot_id is not None else None
@@ -1605,9 +1723,16 @@ class SolveCellTab(QtWidgets.QWidget):
         if spot_id is not None:
             self._select_spot(spot_id)
 
+    def _row_for(self, spot_id) -> Optional[dict]:
+        """Selectable row by id: an observed spot, a lattice point, or a missing peak."""
+        row = self._spot_rows_by_id.get(spot_id)
+        if row is None and isinstance(spot_id, str) and spot_id.startswith("miss:"):
+            row = next((r for r in self._missing_peak_rows() if r["spot_id"] == spot_id), None)
+        return row
+
     def _update_recip_selection(self):
         """Change only the selection marker; leave the scene/camera intact."""
-        row = self._spot_rows_by_id.get(self._selected_spot_id)
+        row = self._row_for(self._selected_spot_id)
         if row is not None and (row["category"] == "Unindexed/spurious"
                                 and not self._recip_show_unindexed.isChecked()):
             row = None
@@ -1689,16 +1814,21 @@ class SolveCellTab(QtWidgets.QWidget):
         if self._view_tabs.currentWidget() is not self._contam_view:
             return
         snaps = self._ingest_snapshots()
-        fields = (self._sc_stage_meta.get("diamond") or {}).get("fields") or {}
         summ = (self._sc_stage_meta.get("diamond") or {}).get("summary") or {}
         wl = next(iter(snaps.values())).wavelength_A if snaps else None
-        self._contam_view.set_data(
-            self._flagged_df, wl, diamond_a=float(summ.get("diamond_a_angstrom", fields.get("diamond_a", 3.5667))),
-            tol_deg=float(summ.get("tolerance_deg", fields.get("contam_tol", 0.07))))
+        mats = summ.get("materials")
+        if mats is None:                       # a record saved before the multi-material filter
+            fields = (self._sc_stage_meta.get("diamond") or {}).get("fields") or {}
+            a = float(summ.get("diamond_a_angstrom", fields.get("diamond_a", 3.5667)))
+            mats = [material_filter.preset("Diamond", cell=(a, a, a, 90.0, 90.0, 90.0),
+                                           tol_deg=float(summ.get("tolerance_deg", fields.get("contam_tol", 0.07)))).to_dict()]
+        self._contam_view.set_data(self._flagged_df if summ.get("enabled", True) else None, wl, materials=mats)
         self._contam_view.select_spot(self._selected_spot_id)
 
     def _update_inspector(self):
-        row = self._spot_rows_by_id.get(self._selected_spot_id)
+        row = self._row_for(self._selected_spot_id)
+        if row is not None and row.get("lattice"):
+            row = None                       # lattice points have no shoebox/residual record
         self._inspector.show_spot(row, self._cached_residual_for(self._selected_spot_id) if row else None)
 
     def _inspector_omega_of(self, panel_id, loaded_idx):
@@ -1714,7 +1844,7 @@ class SolveCellTab(QtWidgets.QWidget):
 
     def _select_spot(self, spot_id):
         self._selected_spot_id = spot_id
-        row = next((r for r in self._display_spot_rows() if r["spot_id"] == spot_id), None)
+        row = self._row_for(spot_id)
         if row:
             self._spot_details.setText(self._spot_description(row))
         self._show_detector_btn.setEnabled(row is not None and "loaded_frame_idx" in row)
@@ -1723,7 +1853,7 @@ class SolveCellTab(QtWidgets.QWidget):
         self._update_recip_selection()
         self._sync_detector_to_spot(row, explain=False)   # Detector view follows the click
         self._update_inspector()
-        if self._view_tabs.currentWidget() is self._contam_view:
+        if self._view_tabs.currentWidget() is self._contam_view and not (row or {}).get("lattice"):
             self._contam_view.select_spot(spot_id)
         self._refresh_detector_preview()
 
@@ -1751,7 +1881,7 @@ class SolveCellTab(QtWidgets.QWidget):
         return True
 
     def _show_selected_on_detector(self):
-        row = next((r for r in self._display_spot_rows() if r["spot_id"] == self._selected_spot_id), None)
+        row = self._row_for(self._selected_spot_id)
         if row is None or "loaded_frame_idx" not in row:
             return
         if self._sync_detector_to_spot(row, explain=True):
@@ -1815,9 +1945,14 @@ class SolveCellTab(QtWidgets.QWidget):
         # tab_calibrate.py's _draw_rings, there is only ever one overlay
         # item here, so setData() in place is simpler than clear/rebuild).
         self._spot_scatter = pg.ScatterPlotItem(
-            pen=pg.mkPen("#ffd400", width=2), brush=None, size=16, symbol="o")
+            pen=pg.mkPen(self._DET_UNASSIGNED_COLOR, width=2), brush=None, size=16, symbol="o")
         self._spot_scatter.sigClicked.connect(self._on_detector_spot_clicked)
         self._det_view._iv.addItem(self._spot_scatter)
+        # Lattice-point markers (green observed / orange not observed) replace the
+        # spot circles while "lattice points" is checked on the Reciprocal tab.
+        self._lattice_scatter = pg.ScatterPlotItem(brush=None, size=16, symbol="o")
+        self._lattice_scatter.sigClicked.connect(self._on_detector_spot_clicked)
+        self._det_view._iv.addItem(self._lattice_scatter)
         self._det_selected = pg.ScatterPlotItem(pen=pg.mkPen("#ff00cc", width=3), brush=None, size=24)
         self._det_view._iv.addItem(self._det_selected)
         dv.addWidget(self._det_view, stretch=1)
@@ -1918,6 +2053,15 @@ class SolveCellTab(QtWidgets.QWidget):
         already collapses the whole rotation into one image; the mask has no
         frame to match against at all."""
         self._det_selected.setData([])
+        self._lattice_scatter.setData([])
+        if self._lattice_rows is not None:
+            self._update_lattice_overlay(stage, current_loaded_idx, self._lattice_rows)
+            self._spot_scatter.setData([])
+            return
+        self._update_observed_overlay(stage, current_loaded_idx)
+        self._update_lattice_overlay(stage, current_loaded_idx, self._missing_peak_rows())
+
+    def _update_observed_overlay(self, stage: int, current_loaded_idx: Optional[int]):
         df = self._spots_df
         if df is None or len(df) == 0 or "loaded_frame_idx" not in df.columns:
             self._spot_scatter.setData([])
@@ -1940,12 +2084,60 @@ class SolveCellTab(QtWidgets.QWidget):
             self._spot_scatter.setData([])
         else:
             ids = sel["spot_id"].to_numpy() if "spot_id" in sel else sel.index.to_numpy()
-            self._spot_scatter.setData(x=sel["col"].to_numpy(), y=sel["row"].to_numpy(), data=ids)
+            self._spot_scatter.setData(x=sel["col"].to_numpy(), y=sel["row"].to_numpy(), data=ids,
+                                       pen=self._detector_spot_pens(ids))
             selected = sel[np.asarray(ids) == self._selected_spot_id]
             if len(selected):
                 self._det_selected.setData(x=selected["col"].to_numpy(), y=selected["row"].to_numpy())
             if stage != 3:
                 self._det_frame_lbl.setText(f"{self._det_frame_lbl.text()} — {len(sel)} spot(s)")
+
+    def _assigned_spot_ids(self) -> set:
+        """Ids of every spot claimed by a refined domain."""
+        out = set()
+        if self._candidate_df is not None:
+            for d in self._domains:
+                sub = self._candidate_df.loc[d["claimed_index"]]
+                out.update(sub["spot_id"] if "spot_id" in sub else sub.index)
+        return out
+
+    def _detector_spot_pens(self, ids) -> list:
+        assigned = self._assigned_spot_ids()
+        return [pg.mkPen(self._DET_ASSIGNED_COLOR if sid in assigned else self._DET_UNASSIGNED_COLOR, width=2)
+                for sid in ids]
+
+    def _missing_peak_rows(self) -> list:
+        """Peaks a refined domain predicts on a panel (inside the scan) with no assigned
+        spot, over all domains; cached per domain set. Ids are ``miss:<domain>:<n>``."""
+        sig = tuple((d["label"], len(d["claimed_index"]), viz_products.ub_fingerprint(d["result"]["UB"]))
+                    for d in self._domains if d["result"].get("UB") is not None)
+        if sig != self._missing_sig:
+            rows = []
+            for j, d in enumerate(self._domains):
+                if d["result"].get("UB") is not None:
+                    got = self._lattice_point_rows(j, [], prefix=f"miss:{j}")
+                    rows += [r for r in (got or []) if r["observed_spot_id"] is None]
+            self._missing_sig, self._missing_rows = sig, rows
+        return self._missing_rows
+
+    def _update_lattice_overlay(self, stage: int, current_loaded_idx: Optional[int], rows: list):
+        """Lattice points of the active panel on the detector: at the current frame for
+        Raw/Corrected/Background, every frame on the max projection (same rule as spots)."""
+        pid = self._active_panel_id()
+        sel = [r for r in rows if r["panel_id"] == pid and "loaded_frame_idx" in r
+               and (stage == 3 or (stage in (0, 1, 2) and r["loaded_frame_idx"] == current_loaded_idx))]
+        if not sel:
+            return
+        pens = [pg.mkPen(self._DET_ASSIGNED_COLOR if r["observed_spot_id"] is not None else self._DET_MISSING_COLOR,
+                         width=2) for r in sel]
+        self._lattice_scatter.setData(x=[r["col"] for r in sel], y=[r["row"] for r in sel],
+                                      data=[r["spot_id"] for r in sel], pen=pens)
+        chosen = [r for r in sel if r["spot_id"] == self._selected_spot_id]
+        if chosen:
+            self._det_selected.setData(x=[chosen[0]["col"]], y=[chosen[0]["row"]])
+        if stage != 3:
+            self._det_frame_lbl.setText(f"{self._det_frame_lbl.text()} — {len(sel)} "
+                                        f"{'predicted' if self._lattice_rows is not None else 'missing'}")
 
     def _set_detector_image(self, frame, stage: int):
         """``autorange`` (pan/zoom) only resets when the frame *shape*
@@ -2125,7 +2317,7 @@ class SolveCellTab(QtWidgets.QWidget):
     def _geometry_cfg(self) -> dict:
         return self._active_panel().geometry_cfg()
 
-    _STAGE_KEYS = {"Ingest": "ingest", "Diamond filter": "diamond", "Ab-initio index": "index",
+    _STAGE_KEYS = {"Ingest": "ingest", "Material filter": "diamond", "Diamond filter": "diamond", "Ab-initio index": "index",
                    "Index": "index", "Refine": "refine", "Index remaining spots": "index_remaining"}
 
     def _on_stage_fail(self, stage_label: str, msg: str, btn: QtWidgets.QPushButton):
@@ -2139,15 +2331,34 @@ class SolveCellTab(QtWidgets.QWidget):
 
     # ── GUI state (project save/restore) ───────────────────────────
 
+    def _stage_fields(self) -> dict:
+        """Every stage parameter as a JSON-able dict: the plain widgets plus the
+        material filter's dynamic state (its materials list is not a widget map)."""
+        out = widgets_to_dict(self._stage_state_widgets())
+        out["material_filter"] = self._material_panel.get_state()
+        return out
+
+    def _apply_stage_fields(self, fields: dict):
+        apply_dict_to_widgets(self._stage_state_widgets(), fields or {})
+        mf_state = (fields or {}).get("material_filter")
+        if mf_state is None and ("diamond_a" in (fields or {}) or "contam_tol" in (fields or {})):
+            # a project saved before the multi-material filter: its single diamond entry
+            a = float(fields.get("diamond_a", 3.5667))
+            mf_state = {"enabled": True, "materials": [material_filter.preset(
+                "Diamond", cell=(a, a, a, 90.0, 90.0, 90.0),
+                tol_deg=float(fields.get("contam_tol", solve_pipeline.CONTAM_TOL_DEG_DEFAULT))).to_dict()]}
+        if mf_state is not None:
+            self._material_panel.set_state(mf_state)
+
     def _stage_state_widgets(self) -> dict:
         widgets = {
             "proj_dir": self._proj_ed,
             "low_count": self._low_count, "mask_grow": self._mask_grow,
             "blob_thresh": self._blob_thresh, "blob_minvol": self._blob_minvol,
+            "blob_minframes": self._blob_minframes,
             "split_ratio": self._split_ratio, "gap_bridge": self._gap_bridge,
             "gap_bridge_on": self._gap_bridge_on, "ingest_max_workers": self._ingest_max_workers,
             "sector_candidates": self._sector_candidates_ed,
-            "diamond_a": self._diamond_a, "contam_tol": self._contam_tol,
             "sigma_g": self._sigma_g, "min_refl": self._min_refl, "tol_override": self._tol_override,
             "index_method": self._index_method, "leftover_method": self._leftover_method,
         }
@@ -2164,7 +2375,7 @@ class SolveCellTab(QtWidgets.QWidget):
         of each stage's own Run button reproduces them."""
         active_id = self._active_panel_id()
         return {
-            "fields": widgets_to_dict(self._stage_state_widgets()),
+            "fields": self._stage_fields(),
             "panels": {str(pid): card.get_state() for pid, card in self._panels.items()},
             "active_panel": active_id,
             "next_panel_id": self._next_panel_id,
@@ -2173,7 +2384,7 @@ class SolveCellTab(QtWidgets.QWidget):
     def set_state(self, state: dict):
         if not state:
             return
-        apply_dict_to_widgets(self._stage_state_widgets(), state.get("fields", {}))
+        self._apply_stage_fields(state.get("fields", {}))
         panels_state = state.get("panels") or {}
         if panels_state:
             for card in list(self._panels.values()):
@@ -2213,7 +2424,7 @@ class SolveCellTab(QtWidgets.QWidget):
             "corrections": panel.corrections_cfg(),
             "mask": {"low_count_threshold": self._low_count.value(), "grow": self._mask_grow.value(),
                      "user_mask": panel.loader.composite_mask()},
-            "blobs": {"threshold": self._blob_thresh.value(), "min_vol": self._blob_minvol.value(),
+            "blobs": {"threshold": self._blob_thresh.value(), "min_vol": self._blob_minvol.value(), "min_frames": self._blob_minframes.value(),
                       "split_ratio": self._split_ratio.value(), "gap_bridge": self._gap_bridge.value() if self._gap_bridge_on.isChecked() else 0,
                       "sector_candidates": self._sector_candidates_cfg(),
                       "max_workers": self._ingest_max_workers.value()},
@@ -2419,7 +2630,7 @@ class SolveCellTab(QtWidgets.QWidget):
         if pid is not None and "panel_id" not in self._spots_df:
             self._spots_df["panel_id"] = pid
         n = len(self._spots_df)
-        self._ingest_status.setText(f"{n} spots (n_frames≥2)")
+        self._ingest_status.setText(f"{n} spots (n_frames≥{self._blob_minframes.value()})")
         self._log.append(f"Ingest complete: {n} candidate spots.")
         for w in result.get("summary", {}).get("warnings", []):
             self._log.append(f"⚠ {w}")
@@ -2431,6 +2642,8 @@ class SolveCellTab(QtWidgets.QWidget):
         self._refresh_detector_preview()
         self._record_ingest(
             result, {pid: result.get("summary", {})} if pid is not None else {}, pooled=False)
+        if n > 0 and not self._material_panel.filter_enabled():
+            self._ensure_candidate_pool()      # filter skipped: every spot is a candidate
         self._finish_stage("ingest", note=f"{n} spots")
 
     def _on_ingest_pooled_done(self, result: dict):
@@ -2459,6 +2672,8 @@ class SolveCellTab(QtWidgets.QWidget):
         self._ingest_preview_by_panel = {pid: r.get("preview") for pid, r in per_panel.items()}
         self._refresh_detector_preview()
         self._record_ingest(result, {pid: r["summary"] for pid, r in per_panel.items()}, pooled=True)
+        if n > 0 and not self._material_panel.filter_enabled():
+            self._ensure_candidate_pool()      # filter skipped: every spot is a candidate
         self._finish_stage("ingest", note=f"{n} spots across {summary['n_panels']} panels")
 
     # ── project record: latest analysis stored in the open project ──────
@@ -2519,7 +2734,7 @@ class SolveCellTab(QtWidgets.QWidget):
                 self._sc_user_masks[pid] = np.asarray(um) != 0
         self._sc_ingest_meta = {
             "pooled": pooled, "summary": result.get("summary", {}), "panels": panels,
-            "fields": widgets_to_dict(self._stage_state_widgets()),
+            "fields": self._stage_fields(),
             "active_panel": self._active_panel_id(), "next_panel_id": self._next_panel_id,
             "source_panel_id": None if pooled else self._ingest_source_panel_id,
             "panel_dir": str(self._panel_dir) if self._panel_dir else None,
@@ -2530,7 +2745,7 @@ class SolveCellTab(QtWidgets.QWidget):
     def _mark_sc_dirty(self, stage: str):
         """A diamond/index stage changed in memory: snapshot the parameters it
         ran with and write the record if a project is open."""
-        self._sc_stage_meta.setdefault(stage, {})["fields"] = widgets_to_dict(self._stage_state_widgets())
+        self._sc_stage_meta.setdefault(stage, {})["fields"] = self._stage_fields()
         self._sc_dirty.add(stage)
         self.flush_project_record()
 
@@ -2744,37 +2959,82 @@ class SolveCellTab(QtWidgets.QWidget):
 
     # ── stage 2: diamond filter ─────────────────────────────────────
 
+    def _on_material_filter_toggled(self, on: bool):
+        self._diamond_btn.setText("Run Material Filter" if on else "Use all spots")
+        if not on:
+            self._diamond_status.setText("Filter off -- every ingested spot goes on to indexing "
+                                         "(click 'Use all spots' to apply).")
+            if self._spots_df is not None and len(self._spots_df) and not self._worker_running():
+                self._ensure_candidate_pool()
+
+    def _worker_running(self) -> bool:
+        return self._worker is not None and self._worker.isRunning()
+
+    def _filter_cfg(self) -> dict:
+        """The material-filter stage config for the current panel state."""
+        panel = self._material_panel
+        mats = panel.materials()
+        protecting = panel.filter_enabled() and any(m["enabled"] and m["protect_if_indexed"] for m in mats)
+        return {
+            "spots_df": self._spots_df, "materials": mats, "filter_enabled": panel.filter_enabled(),
+            "n_mc": panel.n_mc_value(), "rng_seed": panel.seed_value(),
+            "known_domains": list(self._domains) if (protecting and self._domains) else None,
+            "panel_dir": self._panel_dir, "pooled_dir": self._pooled_dir,
+        }
+
+    def _ensure_candidate_pool(self) -> bool:
+        """With the filter off, the candidate pool is simply every spot; build it
+        (synchronously -- nothing to compute) so indexing is never blocked on a
+        stage the user chose to skip. Returns True when a pool exists."""
+        if self._candidate_df is not None:
+            return True
+        if self._material_panel.filter_enabled() or self._spots_df is None or len(self._spots_df) == 0:
+            return False
+        cfg = self._filter_cfg()
+        cfg["wavelength_A"] = float("nan")
+        self._on_diamond_done(solve_pipeline.run_stage("diamond_filter", cfg))
+        return self._candidate_df is not None
+
     def _run_diamond_filter(self):
         if self._worker is not None and self._worker.isRunning():
             return
         if self._spots_df is None or len(self._spots_df) == 0:
             self._warn_or_record("No ingest output", "Run Ingest first."); return
-        if not self._active_panel().has_calibration():
+        enabled = self._material_panel.filter_enabled()
+        if enabled and not any(m["enabled"] for m in self._material_panel.materials()):
+            self._warn_or_record("No materials selected",
+                                 "Tick at least one material, or untick 'Filter contaminant materials' "
+                                 "to skip the filter."); return
+        if enabled and not self._active_panel().has_calibration():
             self._warn_or_record(
                 "No calibration loaded",
-                "The active panel has no calibration loaded; the diamond filter needs its "
+                "The active panel has no calibration loaded; the material filter needs its "
                 "wavelength. Select a calibrated panel."); return
-        cfg = {
-            "spots_df": self._spots_df, "wavelength_A": self._active_panel().geometry_cfg()["wavelength_A"],
-            "diamond_a_angstrom": self._diamond_a.value(), "contam_tol_deg": self._contam_tol.value(),
-            "panel_dir": self._panel_dir, "pooled_dir": self._pooled_dir,
-        }
+        cfg = self._filter_cfg()
+        cfg["wavelength_A"] = (self._active_panel().geometry_cfg()["wavelength_A"]
+                               if self._active_panel().has_calibration() else float("nan"))
         self._diamond_btn.setEnabled(False)
         self._prog.setVisible(True)
-        self._log.append("─" * 40 + "\nRunning diamond filter…")
+        self._log.append("─" * 40 + ("\nRunning material filter…" if enabled else "\nMaterial filter off: using all spots…"))
         self._worker = SolveCellWorker("diamond_filter", cfg, parent=self)
         self._worker.log_line.connect(self._log.append)
         self._worker.finished.connect(self._on_diamond_done)
-        self._worker.failed.connect(lambda msg: self._on_stage_fail("Diamond filter", msg, self._diamond_btn))
+        self._worker.failed.connect(lambda msg: self._on_stage_fail("Material filter", msg, self._diamond_btn))
         self._worker.start()
 
     def _on_diamond_done(self, result: dict):
         self._diamond_btn.setEnabled(True); self._prog.setVisible(False)
+        old_candidate, old_domains = self._candidate_df, list(self._domains)
+        summary = result["summary"]
+        mats_used = summary.get("materials") or []
+        keep_domains = bool(old_domains) and bool(summary.get("enabled", True)) and any(
+            m.get("enabled") and m.get("protect_if_indexed") for m in mats_used)
         # A new candidate_df means every domain claim so far (row labels into
         # the OLD candidate_df, which _stage_diamond_filter always rebuilds
         # with a fresh 0..N-1 index) is stale and would misapply to the new
-        # one -- clear the whole domain list rather than risk silently
-        # claiming the wrong rows.
+        # one. Domains are therefore cleared -- unless a material is set to keep
+        # spots that index on a solved domain, in which case each claim is
+        # carried across by its stable spot_id (see _remap_domains_after_refilter).
         self._domains = []
         self._claimed_index = None
         self._round1_domain_index = None
@@ -2788,17 +3048,82 @@ class SolveCellTab(QtWidgets.QWidget):
         self._refine_btn.setEnabled(False)
         self._candidate_df = result["candidate_df"]
         self._flagged_df = result["flagged_df"]
-        summary = result["summary"]
-        self._diamond_status.setText(
-            f"{summary['n_diamond_flagged']}/{summary['n_spots']} flagged, "
-            f"{summary['n_kept']} candidates remain")
-        self._log.append(f"Diamond filter complete: {summary['n_diamond_flagged']} flagged, "
-                         f"{summary['n_kept']} candidates kept.")
+        n_flagged = summary.get("n_flagged", summary.get("n_diamond_flagged", 0))
+        n_prot = int(summary.get("n_protected", 0) or 0)
+        note = ""
+        if keep_domains:
+            note = self._remap_domains_after_refilter(old_candidate, old_domains)
+        if not summary.get("enabled", True):
+            text = f"Filter off: all {summary['n_spots']} spots are candidates"
+        else:
+            text = f"{n_flagged}/{summary['n_spots']} flagged, {summary['n_kept']} candidates remain"
+            if n_prot:
+                text += f" ({n_prot} kept: they index on a solved domain)"
+        self._diamond_status.setText(text)
+        self._log.append(f"Material filter complete: {text}." + (f" {note}" if note else ""))
         self._ab_btn.setEnabled(len(self._candidate_df) > 0)
         self._refresh_recip_view()
         self._sc_stage_meta["diamond"] = {"summary": summary}
         self._mark_sc_dirty("diamond")
         self._finish_stage("diamond", note=f"{summary['n_kept']} candidates kept")
+
+    def _remap_domains_after_refilter(self, old_candidate, old_domains: list) -> str:
+        """Carry solved domains across a re-filter. Row labels are re-derived, so
+        each claim is re-expressed through ``spot_id``; spots the filter now keeps
+        because they index on a domain are added to it and the domain is re-fit.
+        Returns a one-line note for the log."""
+        new = self._candidate_df
+        if old_candidate is None or new is None or "spot_id" not in new or "spot_id" not in old_candidate:
+            return "Solved domains could not be carried over (no spot ids) and were cleared."
+        sid_to_new = pd.Series(new.index.to_numpy(), index=new["spot_id"].to_numpy())
+        prot = (self._flagged_df.set_index("spot_id")["protected_by"]
+                if "protected_by" in self._flagged_df else None)
+        notes = []
+        for k, d in enumerate(old_domains, start=1):
+            res = d["result"]
+            old_ids = old_candidate.loc[d["claimed_index"], "spot_id"].to_numpy()
+            old_hkl = np.asarray((res.get("reflection_fit") or {}).get("hkl", []), float)
+            hkl_by_id = {int(i): h for i, h in zip(old_ids, np.rint(old_hkl))} if len(old_hkl) == len(old_ids) else {}
+            keep_ids = [int(i) for i in old_ids if int(i) in sid_to_new.index]
+            add_ids = [] if prot is None else [int(i) for i in prot.index[prot.to_numpy() == k]
+                                               if int(i) in sid_to_new.index and int(i) not in keep_ids]
+            ids = keep_ids + add_ids
+            if len(ids) < 4 or len(hkl_by_id) != len(old_ids):
+                notes.append(f"{d['label']} cleared (needs the original hkl assignment and >= 4 spots)")
+                continue
+            rows = sid_to_new.loc[ids].to_numpy()
+            g = new.loc[rows, ["qsample_x", "qsample_y", "qsample_z"]].to_numpy(float)
+            UB = np.asarray(res["UB"], float)
+            hkl = np.array([hkl_by_id[i] if i in hkl_by_id
+                            else np.rint(np.linalg.inv(UB) @ (gi / (2.0 * np.pi))) for i, gi in zip(ids, g)])
+            result = res
+            if len(ids) != len(old_ids) or add_ids:
+                try:
+                    result = solve_pipeline.refit_domain(hkl, g, self._sigma_g.value())
+                except Exception as exc:        # a failed re-fit keeps the old fit, never loses the domain
+                    result = res
+                    notes.append(f"{d['label']}: re-fit failed ({exc}); kept the previous cell")
+            claimed = pd.Index(rows)
+            panel_ids = (new.loc[rows, "panel_id"].to_numpy() if "panel_id" in new.columns else None)
+            xyz = (g[:, 0], g[:, 1], g[:, 2])
+            self._domains.append({"label": d["label"], "method": d["method"], "result": result,
+                                  "xyz": xyz, "claimed_index": claimed, "panel_ids": panel_ids})
+            if add_ids:
+                notes.append(f"{d['label']}: +{len(add_ids)} spot(s) that index on it")
+        self._claimed_index = None
+        for d in self._domains:
+            self._claimed_index = (d["claimed_index"] if self._claimed_index is None
+                                   else self._claimed_index.union(d["claimed_index"]))
+        self._domain_list.clear()
+        for d in self._domains:
+            self._domain_list.addItem(self._domain_text(d))
+        if self._domains:
+            self._round1_domain_index = 0
+            self._domain_list.setCurrentRow(len(self._domains) - 1)
+        self._update_leftover_status()
+        self._update_multidomain_plot()
+        self._mark_sc_dirty("index")
+        return "; ".join(notes)
 
     # ── stage 3: index (blind ab-initio, or a user-supplied known cell) ──
 
@@ -2897,8 +3222,10 @@ class SolveCellTab(QtWidgets.QWidget):
     def _run_ab_initio(self):
         if self._worker is not None and self._worker.isRunning():
             return
+        if self._candidate_df is None:
+            self._ensure_candidate_pool()
         if self._candidate_df is None or len(self._candidate_df) == 0:
-            self._warn_or_record("No candidates", "Run Diamond Filter first."); return
+            self._warn_or_record("No candidates", "Run the Material Filter first (or untick it to use all spots)."); return
         cfg = {
             "candidate_df": self._candidate_df, "sigma_g": self._sigma_g.value(),
             "min_reflections": self._min_refl.value(), "pooled_dir": self._pooled_dir,
@@ -2916,8 +3243,10 @@ class SolveCellTab(QtWidgets.QWidget):
     def _run_known_structure_index(self):
         if self._worker is not None and self._worker.isRunning():
             return
+        if self._candidate_df is None:
+            self._ensure_candidate_pool()
         if self._candidate_df is None or len(self._candidate_df) == 0:
-            self._warn_or_record("No candidates", "Run Diamond Filter first."); return
+            self._warn_or_record("No candidates", "Run the Material Filter first (or untick it to use all spots)."); return
         known_cell = self._known_structure_cell(self._ks3)
         self._known_structure_g_2pi = self._candidate_df[
             ["qsample_x", "qsample_y", "qsample_z"]].to_numpy()

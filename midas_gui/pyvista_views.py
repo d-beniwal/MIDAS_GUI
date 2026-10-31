@@ -23,7 +23,7 @@ from typing import Optional
 import numpy as np
 import pyvista as pv
 import vtk
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets
 from pyvistaqt import QtInteractor
 
 _ORIGIN_MARKER_COLOR = "#ff3b3b"
@@ -98,6 +98,14 @@ class _PickableInteractor(QtInteractor):
         super().__init__(parent)
         self._pick_targets: list = []
         self._press_pos: Optional[tuple] = None
+        self.pinned = False     # pinned orthogonal view: left-drag pans instead of rotating
+
+    def _pan_if_pinned(self, event):
+        """VTK's trackball pans on shift+left; when pinned, present left-drag as that."""
+        if not self.pinned or not (event.buttons() | event.button()) & QtCore.Qt.LeftButton:
+            return event
+        return QtGui.QMouseEvent(event.type(), event.localPos(), event.button(), event.buttons(),
+                                 event.modifiers() | QtCore.Qt.ShiftModifier)
 
     def set_pick_targets(self, targets: list):
         """``[(xyz (n, 3) array, spot_ids (n,) array, radius_px), ...]`` -- the
@@ -130,11 +138,11 @@ class _PickableInteractor(QtInteractor):
 
     def mousePressEvent(self, event):
         self._press_pos = (event.x(), event.y()) if event.button() == QtCore.Qt.LeftButton else None
-        super().mousePressEvent(event)
+        super().mousePressEvent(self._pan_if_pinned(event))
 
     def mouseReleaseEvent(self, event):
         press, self._press_pos = self._press_pos, None
-        super().mouseReleaseEvent(event)
+        super().mouseReleaseEvent(self._pan_if_pinned(event))
         if press is None or event.button() != QtCore.Qt.LeftButton:
             return
         if np.hypot(event.x() - press[0], event.y() - press[1]) > self._DRAG_THRESHOLD_PX:
@@ -142,7 +150,7 @@ class _PickableInteractor(QtInteractor):
         self.spotClicked.emit(self.pick_spot_id(event.x(), event.y()))
 
     def mouseMoveEvent(self, event):
-        super().mouseMoveEvent(event)
+        super().mouseMoveEvent(self._pan_if_pinned(event))
         if event.buttons() == QtCore.Qt.NoButton:
             self.spotHovered.emit(self.pick_spot_id(event.x(), event.y()))
 
@@ -186,10 +194,12 @@ class PyVistaScatter3DView(QtWidgets.QWidget):
         self._selected_actor = None
         self._fitted_actors: list = []
         # Named, unpickable reference overlays (Ewald cap, basis, predicted
-        # lattice points, shells) -- keyed so each can be swapped alone without
+        # lattice-point highlight) -- keyed so each can be swapped alone without
         # touching the observed-spot actors, camera, legend or scalar bar.
         self._overlay_actors: dict = {}
         self._has_data = False
+        self._beam_view: Optional[tuple] = None     # (ki direction, rotation axis) in the plotted frame
+        self._pin: Optional[tuple] = None           # (axis index, sign) of a pinned orthogonal view
         self._point_size = _DEFAULT_POINT_SIZE
         self._size_mode = SIZE_MODE_EQUAL
         self._origin_actor = self.interactor.add_points(
@@ -205,6 +215,55 @@ class PyVistaScatter3DView(QtWidgets.QWidget):
     @camera_position.setter
     def camera_position(self, value):
         self.interactor.camera_position = value
+
+    def set_beam_view(self, ki, axis):
+        """Beam direction ``ki`` and rotation ``axis`` (plotted frame) defining the default view."""
+        ki, axis = np.asarray(ki, float), np.asarray(axis, float)
+        self._beam_view = (ki / np.linalg.norm(ki), axis / np.linalg.norm(axis))
+
+    def pin_view(self, axis: Optional[int], sign: int = 1):
+        """Pin the camera to an orthogonal projection looking down the plotted
+        ``axis`` (0=qx, 1=qy, 2=qz) from its ``sign`` side, so the screen shows
+        the perpendicular plane (e.g. axis 0 -> the qy-qz plane). Pinned views
+        use a parallel projection and cannot rotate -- left-drag pans, wheel
+        zooms. ``axis=None`` unpins: back to the free perspective view."""
+        if axis is None:
+            self._pin = None
+            self.interactor.pinned = False
+            self.interactor.disable_parallel_projection()
+            self.interactor.render()
+            return
+        self._pin = (int(axis), 1 if sign >= 0 else -1)
+        self.interactor.pinned = True
+        self.interactor.enable_parallel_projection()
+        self.interactor.reset_camera()
+        n = np.zeros(3)
+        n[self._pin[0]] = self._pin[1]
+        up = np.array([0.0, 0.0, 1.0]) if self._pin[0] != 2 else np.array([0.0, 1.0, 0.0])
+        pos, fp, _up = self.interactor.camera_position
+        dist = float(np.linalg.norm(np.asarray(pos, float) - np.asarray(fp, float))) or 1.0
+        self.interactor.camera_position = [tuple(np.asarray(fp, float) + n * dist), tuple(fp), tuple(up)]
+        self.interactor.reset_camera()
+        self.interactor.reset_camera_clipping_range()
+        self.interactor.render()
+
+    @property
+    def pinned_view(self) -> Optional[tuple]:
+        return self._pin
+
+    def view_along_beam(self):
+        """Fit the data, then look down the beam (camera upstream, looking along ki)
+        with the rotation axis pointing up on screen. Unpins any pinned view."""
+        if self._pin is not None:
+            self.pin_view(None)
+        self.interactor.reset_camera()
+        if self._beam_view is not None:
+            ki, axis = self._beam_view
+            pos, fp, _up = self.interactor.camera_position
+            dist = float(np.linalg.norm(np.asarray(pos, float) - np.asarray(fp, float)))
+            self.interactor.camera_position = [tuple(np.asarray(fp, float) - ki * dist), tuple(fp), tuple(axis)]
+            self.interactor.reset_camera_clipping_range()
+        self.interactor.render()
 
     # ── groups ──────────────────────────────────────────────────────
     def set_groups(self, groups: list, *, point_size: Optional[float] = None,
@@ -299,7 +358,10 @@ class PyVistaScatter3DView(QtWidgets.QWidget):
         else:
             self.interactor.remove_legend()
         if any_points and not self._has_data:
-            self.interactor.reset_camera()
+            if self._pin is not None:
+                self.pin_view(*self._pin)
+            else:
+                self.view_along_beam()
             self._has_data = True
         elif self._has_data:
             self.interactor.camera_position = camera
@@ -494,22 +556,6 @@ class PyVistaScatter3DView(QtWidgets.QWidget):
                                            manifold_edges=False, non_manifold_edges=False),
                 color="#9aa7b4", line_width=1, reset_camera=False, name=f"solve_cell_recip_patch_edge_{i}"))
         self._put_overlay("patches", actors)
-        self.interactor.camera_position = camera
-        self.interactor.render()
-
-    def set_shells(self, radii: Optional[list]):
-        """Resolution shells: constant-|q| spheres centred on q=0 (NOT the
-        Ewald sphere -- different object, different color)."""
-        self._clear_overlay("shells")
-        if not radii:
-            self.interactor.render()
-            return
-        camera = self.interactor.camera_position
-        actors = [self.interactor.add_mesh(
-            pv.Sphere(radius=float(r), theta_resolution=48, phi_resolution=48),
-            color="#b197fc", style="wireframe", opacity=0.18, line_width=1,
-            reset_camera=False, name=f"solve_cell_recip_shell_{i}") for i, r in enumerate(radii)]
-        self._put_overlay("shells", actors)
         self.interactor.camera_position = camera
         self.interactor.render()
 

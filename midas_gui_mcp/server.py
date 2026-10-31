@@ -21,7 +21,16 @@ from mcp.server.mcpserver import MCPServer
 
 from client import ControlClient, ControlError
 
-mcp = MCPServer("midas-gui")
+_INSTRUCTIONS = """\
+Drives the live midas-gui app (Data Viewer, Calibrate, Solve Cell tabs).
+Before driving a tab, read the matching skill under midas_gui_mcp/skills/
+(in the midas-gui repo): midas-gui-mcp-setup (launch, register, socket
+troubleshooting) and midas-gui-mcp-calibrate (calibration gotchas: calibrant,
+wavelength/pixel size, seeds, polling, abort) and midas-gui-mcp-project (save/
+open project .h5 files). Tools are thin proxies; state
+persists in the GUI between calls, so check it with *_get_state."""
+
+mcp = MCPServer("midas-gui", instructions=_INSTRUCTIONS)
 
 _client: Optional[ControlClient] = None
 
@@ -207,9 +216,14 @@ def calibrate_clear_projection() -> Any:
 @mcp.tool()
 def calibrate_run(mode: str, refine: Optional[dict] = None,
                   manual_seed: Optional[dict] = None, limits: Optional[dict] = None,
-                  build_residual_corr: Optional[bool] = None) -> Any:
+                  build_residual_corr: Optional[bool] = None,
+                  clear_seed: bool = False) -> Any:
     """Start a calibration run. mode is one of: one_shot, first_time,
     four_stage, bayesian, joint, frozen_point.
+
+    Manual-seed ticks persist between runs (a seed given to an earlier run is
+    reused). Pass clear_seed=True to untick every seed first, for a fully
+    automatic run; a manual_seed given with it is applied after the clear.
 
     refine is a subset of {Lsd,BC,tx,ty,tz,Wavelength,Distortion: bool} plus
     (crystalline calibrants only) one of:
@@ -240,7 +254,8 @@ def calibrate_run(mode: str, refine: Optional[dict] = None,
 
     Returns a job_id immediately — poll with calibrate_wait/calibrate_get_job."""
     return _call("calibrate.run", mode=mode, refine=refine, manual_seed=manual_seed,
-                 limits=limits, build_residual_corr=build_residual_corr)
+                 limits=limits, build_residual_corr=build_residual_corr,
+                 clear_seed=clear_seed)
 
 
 @mcp.tool()
@@ -254,6 +269,15 @@ def calibrate_wait(job_id: str, timeout: float = 120.0) -> Any:
     """Block (up to timeout seconds) until a calibration job finishes, then
     return its status/result/error."""
     return _call("calibrate.wait", job_id=job_id, timeout=timeout)
+
+
+@mcp.tool()
+def calibrate_abort() -> Any:
+    """Abort the running calibration (same as the Calibrate tab's Abort
+    button). Frees the tab immediately so a new calibrate_run can start; the
+    aborted job's status becomes "aborted". A no-op ({"aborted": false}) if
+    nothing is running. Does not reset manual-seed settings."""
+    return _call("calibrate.abort")
 
 
 @mcp.tool()
@@ -445,7 +469,7 @@ def solve_cell_panel_detect_first_idx(field: str, panel_id: Optional[int] = None
 def solve_cell_set_ingest_params(
     low_count_threshold: Optional[float] = None, mask_grow: Optional[int] = None,
     blob_threshold: Optional[float] = None, blob_min_vol: Optional[int] = None,
-    split_ratio: Optional[float] = None, gap_bridge: Optional[int] = None,
+    blob_min_frames: Optional[int] = None, split_ratio: Optional[float] = None, gap_bridge: Optional[int] = None,
     sector_candidates: Optional[list] = None, max_workers: Optional[int] = None,
 ) -> Any:
     """Stage 1 (Ingest) tuning — the "Parameters…" dialog. gap_bridge is the
@@ -455,7 +479,7 @@ def solve_cell_set_ingest_params(
     choose_sectors); max_workers is the thread-pool width. Omit to keep."""
     return _call("solve_cell.set_ingest_params", low_count_threshold=low_count_threshold,
                  mask_grow=mask_grow, blob_threshold=blob_threshold, blob_min_vol=blob_min_vol,
-                 split_ratio=split_ratio, gap_bridge=gap_bridge,
+                 blob_min_frames=blob_min_frames,                 split_ratio=split_ratio, gap_bridge=gap_bridge,
                  sector_candidates=sector_candidates, max_workers=max_workers)
 
 
@@ -470,18 +494,37 @@ def solve_cell_run_ingest(acknowledge_warnings: bool = False) -> Any:
 
 
 @mcp.tool()
+def solve_cell_set_material_filter(enabled: Optional[bool] = None, materials: Optional[list] = None,
+                                   n_mc: Optional[int] = None, rng_seed: Optional[int] = None) -> Any:
+    """Stage 2 (material filter) settings. enabled=False skips the filter entirely (every spot
+    is a candidate). materials REPLACES the list; each entry is a preset name ("Diamond",
+    "Rhenium (gasket)", "Tungsten (gasket)", "Gold (marker)", "Platinum (marker)",
+    "MgO (medium)") or a dict: name, cell [a,b,c,alpha,beta,gamma], space_group (1-230),
+    extinction (space_group|none|diamond_basis), tol_deg (2θ window), hkl_max, mode
+    ("2theta" = radial test only; "orientation" = spots must also fit one crystal orientation
+    of the material: orient_tol_deg, min_spots, max_crystals), min_peak_counts (fainter spots
+    are never flagged), protect_if_indexed/protect_tol (on a re-run after a domain is solved,
+    keep flagged spots that index on it and add them to it), enabled. Omitted keys keep
+    their defaults. n_mc/rng_seed control the chance-coincidence Monte-Carlo."""
+    return _call("solve_cell.set_material_filter", enabled=enabled, materials=materials,
+                 n_mc=n_mc, rng_seed=rng_seed)
+
+
+@mcp.tool()
 def solve_cell_set_diamond_params(diamond_a: Optional[float] = None,
                                   tol_deg: Optional[float] = None) -> Any:
-    """Stage 2 settings: diamond cubic cell edge (Å) and the 2θ window (°)
-    around each predicted diamond ring within which a spot is flagged."""
+    """Older shortcut: edit the "Diamond" material only (cubic cell edge Å, 2θ window °).
+    Prefer solve_cell_set_material_filter."""
     return _call("solve_cell.set_diamond_params", diamond_a=diamond_a, tol_deg=tol_deg)
 
 
 @mcp.tool()
 def solve_cell_run_diamond_filter() -> Any:
-    """Stage 2: flag diamond-ring spots and build the candidate pool for
-    indexing. Needs a finished ingest. Async (job_id → solve_cell_wait). A new
-    diamond filter clears all solved domains."""
+    """Stage 2: flag contaminant-material spots (diamond by default) and build the
+    candidate pool for indexing; with the filter disabled it passes every spot through.
+    Needs a finished ingest. Async (job_id → solve_cell_wait). Re-running clears all solved
+    domains, except when a material has protect_if_indexed: then each domain is kept and
+    gains the flagged spots that index on it."""
     return _call("solve_cell.run_diamond_filter")
 
 
@@ -601,16 +644,15 @@ def solve_cell_set_reciprocal_options(
 def solve_cell_set_overlays(
     omega_deg: Optional[float] = None, ewald: Optional[bool] = None,
     basis: Optional[bool] = None, predicted: Optional[bool] = None,
-    predicted_offpanel: Optional[bool] = None, frame_patches: Optional[bool] = None,
-    shells: Optional[bool] = None, highlight_now: Optional[bool] = None,
+    frame_patches: Optional[bool] = None,
 ) -> Any:
     """Reciprocal-map overlays: Ewald-sphere cap, a*/b*/c*+cell, predicted
-    lattice points (+ off-panel ones), frame patches, |q| shells, and the ω (°)
-    that the Ewald cap/patches/"diffracting now" highlight use. Most need a
+    lattice points (replace the spot cloud; pickable), panel maps, and the ω (°)
+    that the Ewald cap/patches use. Most need a
     solved domain / finished ingest; the status field says what was skipped."""
     return _call("solve_cell.set_overlays", omega_deg=omega_deg, ewald=ewald, basis=basis,
-                 predicted=predicted, predicted_offpanel=predicted_offpanel,
-                 frame_patches=frame_patches, shells=shells, highlight_now=highlight_now)
+                 predicted=predicted,
+                 frame_patches=frame_patches)
 
 
 @mcp.tool()
@@ -653,6 +695,38 @@ def solve_cell_save_project(path: Optional[str] = None) -> Any:
     """Save the project (the open one, or to ``path``) including the Solve
     Cell analysis record, same as File ▸ Save Project."""
     return _call("solve_cell.save_project", path=path)
+
+
+# ── Project (File ▸ Open / Save Project) ─────────────────────────────
+
+@mcp.tool()
+def project_get_info() -> Any:
+    """The open project's path/name, whether the session has unsaved changes,
+    and a count of its recorded analysis attempts. path is null if none open."""
+    return _call("project.get_info")
+
+
+@mcp.tool()
+def project_save(path: Optional[str] = None, overwrite: bool = False,
+                 history: str = "none") -> Any:
+    """Save the session into a project .h5. With no path, overwrite the open
+    project (Ctrl+S). With a path, Save As: a fresh project file there; an
+    existing file is refused unless overwrite=True (a .bak copy is kept).
+    history (none/latest/all) is how much of the previously open project's
+    analysis history a Save As carries into the new file."""
+    return _call("project.save", path=path, overwrite=overwrite, history=history)
+
+
+@mcp.tool()
+def project_open(path: str, discard_unsaved: bool = False,
+                 exclude: Optional[list] = None) -> Any:
+    """Open a project .h5 and restore everything in it (File ▸ Open Project,
+    all boxes ticked). exclude leaves parts out: any of workspace_tabs,
+    calib_refs, integrate_refs, solve_cell, mask_ref. Refused while the
+    session has unsaved changes unless discard_unsaved=True — project_save
+    first to keep them."""
+    return _call("project.open", path=path, discard_unsaved=discard_unsaved,
+                 exclude=exclude)
 
 
 if __name__ == "__main__":

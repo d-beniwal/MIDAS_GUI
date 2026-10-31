@@ -33,9 +33,12 @@ def test_overlays_and_diagnostics_from_cached_viz(tab):
     tab.apply_project_solve_cell(rec)
     assert "domain_01_predictions" in tab._viz_products
     assert not tab._viz_unsaved                       # cache hit, nothing recomputed
-    for w in (tab._ov_ewald, tab._ov_basis, tab._ov_pred, tab._ov_shells):
+    for w in (tab._ov_ewald, tab._ov_basis, tab._ov_pred):
         w.setChecked(True)
-    assert tab._recip_view.overlay_names() == ["basis", "ewald", "predicted", "shells"]
+    assert {"basis", "ewald"} <= set(tab._recip_view.overlay_names())
+    assert tab._lattice_rows and all(r["spot_id"] in tab._spot_rows_by_id for r in tab._lattice_rows)
+    tab._ov_pred.setChecked(False)
+    assert tab._lattice_rows is None and not any(str(k).startswith("lp:") for k in tab._spot_rows_by_id)
     # reference overlays must never be pickable
     for actors in tab._recip_view._overlay_actors.values():
         assert all(not a.GetPickable() for a in actors)
@@ -149,3 +152,17 @@ def test_frame_patch_overlay_coincides_with_selected_spot(tab):
     q = np.array([row["qsample_x"], row["qsample_y"], row["qsample_z"]])
     assert np.linalg.norm(q - corners.mean(axis=0)) < 0.02 * stride
     tab._recip_view.interactor.close(); tab._volume_view.iv.close()
+
+
+def test_reciprocal_pin_view_is_orthogonal_parallel_and_released_by_beam_view(tab):
+    import numpy as np
+    view = tab._recip_view
+    tab._recip_pin.setCurrentIndex(4)            # -Y (X-Z plane)
+    pos, fp, up = view.camera_position
+    d = np.array(pos) - np.array(fp)
+    assert np.allclose(d / np.linalg.norm(d), [0, -1, 0])
+    assert tuple(up) == (0.0, 0.0, 1.0)
+    assert view.interactor.camera.GetParallelProjection() and view.interactor.pinned
+    tab._on_beam_view_clicked()
+    assert view.pinned_view is None and tab._recip_pin.currentIndex() == 0
+    assert not view.interactor.camera.GetParallelProjection()

@@ -15,7 +15,7 @@ import pyqtgraph as pg
 from PyQt5 import QtCore, QtWidgets
 
 from midas_gui.plot_limits import limit_all
-from midas_gui.solve_cell import viz_products
+from midas_gui.solve_cell import material_filter, viz_products
 
 _FLAG = "#ff5c5c"
 _KEEP = "#4da3ff"
@@ -36,7 +36,7 @@ class ContaminationView(QtWidgets.QWidget):
                             "flags and domain claims are never changed from here.")
         self.tol.valueChanged.connect(lambda _=None: self._redraw())
         bar.addWidget(self.tol)
-        self.status = QtWidgets.QLabel("Run the diamond filter (or open a project that has) to see its evidence.")
+        self.status = QtWidgets.QLabel("Run the material filter (or open a project that has) to see its evidence.")
         self.status.setWordWrap(True)
         bar.addWidget(self.status, stretch=1)
         lay.addLayout(bar)
@@ -52,11 +52,17 @@ class ContaminationView(QtWidgets.QWidget):
         self._selected = None
 
     def set_data(self, flagged: Optional[pd.DataFrame], wavelength_A: Optional[float],
-                 diamond_a: float = 3.5667, tol_deg: float = 0.07):
+                 materials: Optional[list] = None, diamond_a: float = 3.5667, tol_deg: float = 0.07):
+        """``materials`` = the filter's material dicts (enabled ones are drawn); without
+        it the old single-diamond arguments apply."""
         self.flagged = flagged
-        self.orig_tol = float(tol_deg)
-        self.lines = (viz_products.diamond_line_table(wavelength_A, diamond_a)
-                      if flagged is not None and wavelength_A else None)
+        if materials is None:
+            materials = [material_filter.preset(
+                "Diamond", cell=(diamond_a, diamond_a, diamond_a, 90.0, 90.0, 90.0), tol_deg=tol_deg).to_dict()]
+        active = [m for m in materials if m.get("enabled", True)]
+        self.orig_tol = float(active[0]["tol_deg"]) if active else float(tol_deg)
+        self.lines = (viz_products.material_line_table(wavelength_A, active)
+                      if flagged is not None and wavelength_A and active else None)
         self.tol.blockSignals(True); self.tol.setValue(self.orig_tol); self.tol.blockSignals(False)
         self._redraw()
 
@@ -87,7 +93,7 @@ class ContaminationView(QtWidgets.QWidget):
             f"{int(prev.sum())} would be flagged ({len(flips)} spot ID(s) change: "
             f"{', '.join(map(str, f.spot_id.to_numpy()[flips][:12])) or 'none'})")
         # 1: 2θ histogram with line markers and tolerance bands
-        h = self.glw.addPlot(row=0, col=0, colspan=2, title="2θ distribution vs allowed diamond lines")
+        h = self.glw.addPlot(row=0, col=0, colspan=2, title="2θ distribution vs allowed contaminant lines")
         edges = np.linspace(tth.min() - 0.1, tth.max() + 0.1, 80)
         for mask, color, nm in ((~orig, _KEEP, "kept"), (orig, _FLAG, "flagged")):
             c, e = np.histogram(tth[mask], bins=edges)
@@ -101,7 +107,7 @@ class ContaminationView(QtWidgets.QWidget):
         h.setLabel("bottom", "2θ (°)"); h.setLabel("left", "spots")
         self.plots["hist"] = h
         # 2: distance to nearest line vs 2θ
-        d = self.glw.addPlot(row=1, col=0, title="Distance to nearest diamond line")
+        d = self.glw.addPlot(row=1, col=0, title="Distance to nearest contaminant line")
         for mask, color in ((~orig, _KEEP), (orig, _FLAG)):
             s = pg.ScatterPlotItem(x=tth[mask], y=self._log_delta(f.delta_to_diamond_deg.to_numpy()[mask]), size=7,
                                    brush=pg.mkBrush(color), pen=pg.mkPen(None), data=f.spot_id.to_numpy()[mask])
@@ -142,9 +148,13 @@ class ContaminationView(QtWidgets.QWidget):
         r = row.iloc[0]
         j = int(np.argmin(np.abs(L.tth_deg.to_numpy() - r.two_theta_deg)))
         ln = L.iloc[j]
-        verdict = "FLAGGED as diamond/gasket candidate" if r.is_diamond else "kept as a sample candidate"
+        who = f"{ln.material} " if "material" in L.columns else ""
+        verdict = "FLAGGED as a contaminant candidate" if r.is_diamond else "kept as a sample candidate"
+        prot = int(r.protected_by) if "protected_by" in row.columns else 0
+        if prot:
+            verdict = f"kept: it indexes on solved domain {prot} although it matches a contaminant line"
         self.evidence.setText(
-            f"Spot {int(r.spot_id)} (panel {int(r.panel_id)}): 2θ {r.two_theta_deg:.4f}° · nearest allowed diamond line "
+            f"Spot {int(r.spot_id)} (panel {int(r.panel_id)}): 2θ {r.two_theta_deg:.4f}° · nearest allowed {who}line "
             f"({ln.hkl}) at {ln.tth_deg:.4f}° → Δ {abs(r.two_theta_deg - ln.tth_deg):.4f}° vs tolerance {self.orig_tol:g}° → {verdict}. "
-            "A radial match alone does not prove the spot belongs to diamond: a sample reflection at the same radius "
-            "would be flagged too.")
+            "A radial match alone does not prove the spot belongs to the contaminant: a sample reflection at the same "
+            "radius would be flagged too (orientation mode and 'keep spots that index' address this).")

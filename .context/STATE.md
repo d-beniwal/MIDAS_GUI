@@ -1,6 +1,6 @@
 # Project state
 
-Last updated: 2026-10-25
+Last updated: 2026-10-27 (MCP abort/clear_seed + skills)
 
 ## Now working on
 
@@ -13,8 +13,7 @@ Merged to `main` and pushed 2026-10-25 (branch `solve_cell_vis` deleted): Solve 
 improvements from `scratch/solve_cell_visualization_research_and_implementation.md`,
 all backed by products cached in the project (`/analysis/solve_cell/viz/`) —
 open `test_data/projects/s3idc_oct8_spinel.h5` (pre-populated) to see them with
-no re-run. Done: Ewald cap + a*/b*/c*/cell + predicted lattice points + |q|
-shells (Reciprocal tab overlays, V01/V08/V15); Diagnostics tab with residual
+no re-run. Done: Ewald cap + a*/b*/c*/cell + predicted lattice points (now a pickable mode replacing the spot cloud) (Reciprocal tab overlays, V01/V08/V15); Diagnostics tab with residual
 vector fields/histograms/omega timeline (V09/V11); Volume tab with build
 worker, 2-D slabs, isosurface + coverage outline (V03–V05); Spot inspector
 (V10); Contamination tab (V12); Compare domains tab (V13: metric→basis→misorientation, reviewer conclusions); Frame patches overlay (V02). Documentation: `documentation/solve_cell_visualizations.{md,pdf}`. See DECISIONS 2026-10-24 (viz entry).
@@ -56,7 +55,11 @@ Backup of the example project before edits: `scratch/s3idc_oct8_spinel.pre_vis_b
   remain unresolved; no new conclusion about their cause in this task.
 
 ## Recent changes
+- 2026-10-27: MCP `project_get_info/save/open` (File ▸ Open/Save Project without dialogs) + `midas-gui-mcp-project` skill; tests in `tests/test_control_api_project_ops.py`.
+- 2026-10-27: MCP `calibrate_abort` + `clear_seed` on `calibrate_run`; skills in `midas_gui_mcp/skills/` (setup, calibrate), pointed to from the MCP README and server `instructions`.
 
+- 2026-10-25 — Material filter: stage 2 is now optional and multi-material (per-material lattice/space group/extinction, 2θ or orientation mode, min counts, keep-if-indexes); `solve_cell/material_filter.py`, `solve_cell_material_panel.py`, `tests/test_material_filter.py`, `tests/test_solve_cell_material_ui.py`. Uncommitted; live-GUI check pending. See DECISIONS.
+- 2026-10-25 — Probe (no code change) of unmatched predictions on `s3idc_oct8_spinel_newlayout.h5`: 9 diamond overlaps, 22 real peaks dropped by `min_vol`/`n_frames>=2`, 25 empty (mostly Fd-3m-forbidden); see DECISIONS + `scratch/_probe_missing_peaks/`.
 - 2026-10-25 — Reciprocal map: removed fitted-positions/Fit-visible controls, renamed/separated overlays, fixed click picking (own screen-space projection, HiDPI-safe) and Detector view now follows a click. User-verified live.
 - 2026-10-25 — MCP: all Solve Cell workflows exposed as `solve_cell.*` control ops / 37 `solve_cell_*` tools (`control_api.py`, `server.py`, `SolveCellTab.stageFinished` + agent mode; `tests/test_control_api_solve_cell_ops.py`). Uncommitted. Live-GUI check over the real socket still to do.
 - 2026-10-25 — Global Data/Controls/Results terminology; Solve Cell Data/Controls panels minimise to a bottom ribbon (`panel_toggle.py`); also Data Viewer, Calibrate, Batch Integrate, Pump Probe (`tests/test_panel_toggle_tabs.py`). Committed `2ddc492`.

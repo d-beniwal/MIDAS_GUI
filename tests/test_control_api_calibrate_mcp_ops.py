@@ -298,3 +298,56 @@ def test_run_rejects_unknown_limit_row(app):
                         {"mode": "one_shot", "limits": {"bogus_row": {"on": True}}})
     assert res["ok"] is False
     assert res["error"]["type"] == "bad_args"
+
+
+# ── Abort ───────────────────────────────────────────────────────────────
+
+@pytest.mark.forked
+def test_abort_is_a_noop_when_nothing_is_running(app):
+    ctrl, tab = _make_controller()
+    res = ctrl.dispatch("calibrate.abort", {})
+    assert res["ok"] is True
+    assert res["result"]["aborted"] is False
+
+
+@pytest.mark.forked
+def test_abort_frees_the_tab_and_marks_the_job_aborted(app):
+    ctrl, tab = _make_controller()
+
+    class _RunningWorker:
+        log_line, finished, failed = _FakeSignal(), _FakeSignal(), _FakeSignal()
+        interrupted = False
+
+        def isRunning(self):
+            return True
+
+        def requestInterruption(self):
+            self.interrupted = True
+
+    w = _RunningWorker()
+    for sig in (w.log_line, w.finished, w.failed):
+        sig.disconnect = lambda: None
+    tab._worker = w
+    ctrl._jobs["j1"] = {"status": "running", "result": None, "error": None}
+    ctrl._cal_run_job_id = "j1"
+
+    res = ctrl.dispatch("calibrate.abort", {})
+    assert res["ok"] is True
+    assert res["result"] == {"aborted": True, "job_id": "j1"}
+    assert w.interrupted is True
+    assert tab._worker is None
+    job = ctrl.dispatch("calibrate.get_job", {"job_id": "j1"})["result"]
+    assert job["status"] == "aborted"
+
+
+# ── clear_seed ──────────────────────────────────────────────────────────
+
+@pytest.mark.forked
+def test_clear_seed_unticks_every_seed_flag_before_run(app):
+    ctrl, tab = _make_controller()
+    tab._enable_seed(BC=True, Lsd=True, tx=True, ty=True, tz=True)
+    assert tab._manual_seed_check.checkState() != 0
+    tab._run = lambda: None   # don't spawn a real worker; only the clear matters
+    ctrl.dispatch("calibrate.run", {"mode": "one_shot", "clear_seed": True})
+    assert not any(cb.isChecked() for cb in tab._seed_enables)
+    assert tab._manual_seed_kwargs() == {}

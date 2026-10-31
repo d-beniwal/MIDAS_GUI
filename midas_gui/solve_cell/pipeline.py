@@ -46,6 +46,7 @@ LOW_COUNT_THRESHOLD_DEFAULT = 0.0   # NOT midas_defect's own default of 20 --
 MASK_GROW_DEFAULT = 2
 BLOB_THRESHOLD_DEFAULT = 15.0
 BLOB_MIN_VOL_DEFAULT = 6
+BLOB_MIN_FRAMES_DEFAULT = 2   # post-filter on detected blobs' omega extent (n_frames)
 SPLIT_RATIO_DEFAULT = 3.0
 GAP_BRIDGE_DEFAULT = 21
 CORE_FRAC_DEFAULT = 0.5
@@ -260,6 +261,7 @@ def run_stage(stage: str, cfg: dict, on_step=None) -> dict:
         "ingest": _stage_ingest,
         "ingest_pooled": _stage_ingest_pooled,
         "diamond_filter": _stage_diamond_filter,
+        "material_filter": _stage_diamond_filter,
         "ab_initio": _stage_ab_initio,
         "refine": _stage_refine,
         "index_known_cell": _stage_index_known_cell,
@@ -280,7 +282,7 @@ def _stage_ingest(cfg: dict, on_step=None) -> dict:
     array), ``geometry`` (dict: Lsd, BC_y, BC_z, ty, tz, wavelength_A, px_um,
     nrpixels_y, nrpixels_z, omega_ref_frame_idx, omega_ref_deg,
     omega_last_frame_idx, omega_step_deg), ``mask`` ({low_count_threshold,
-    grow, optional user_mask}), ``blobs`` ({threshold, min_vol, split_ratio,
+    grow, optional user_mask}), ``blobs`` ({threshold, min_vol, min_frames, split_ratio,
     gap_bridge, core_frac, optional sector_candidates -- passed to
     ``choose_sectors`` as its azimuth-sector grid search, defaults to its own
     ``SECTOR_CANDIDATES_DEFAULT``; narrowing this once a panel/geometry's
@@ -445,6 +447,7 @@ def _stage_ingest(cfg: dict, on_step=None) -> dict:
     blob_cfg = cfg.get("blobs", {})
     threshold = blob_cfg.get("threshold", BLOB_THRESHOLD_DEFAULT)
     min_vol = blob_cfg.get("min_vol", BLOB_MIN_VOL_DEFAULT)
+    min_frames = int(blob_cfg.get("min_frames", BLOB_MIN_FRAMES_DEFAULT))
     sector_candidates = tuple(blob_cfg.get("sector_candidates", SECTOR_CANDIDATES_DEFAULT))
     # Thread-based parallelism for choose_sectors' candidate loop and
     # find_blobs_3d's gap-bridging chunk loop (midas_defect.ingest's own
@@ -504,8 +507,8 @@ def _stage_ingest(cfg: dict, on_step=None) -> dict:
         core_frac=blob_cfg.get("core_frac", CORE_FRAC_DEFAULT),
         return_counts=True, max_workers=max_workers)
     print(f"[solve-cell] find_blobs_3d counts: {counts}")
-    spots = spots[spots["n_frames"] >= 2].reset_index(drop=True)
-    print(f"[solve-cell] {len(spots)} spots with n_frames>=2")
+    spots = spots[spots["n_frames"] >= min_frames].reset_index(drop=True)
+    print(f"[solve-cell] {len(spots)} spots with n_frames>={min_frames}")
     _emit("blobs", n_spots=len(spots), counts=counts)
 
     if len(spots):
@@ -713,46 +716,41 @@ def _nearest_line_distance(values: np.ndarray, lines: np.ndarray) -> np.ndarray:
 
 
 def _stage_diamond_filter(cfg: dict) -> dict:
-    """``cfg`` keys: ``spots_df``, ``wavelength_A``, optional
-    ``diamond_a_angstrom``, ``contam_tol_deg``, ``n_mc``, ``rng_seed``,
-    optional ``panel_dir`` / ``pooled_dir`` for writing outputs."""
-    spots = cfg["spots_df"].copy()
+    """Contaminant-material filter (stage 2; the historical name stays because
+    saved projects, the worker and the control API all key on it).
+
+    ``cfg`` keys: ``spots_df``, ``wavelength_A``; the materials to filter as
+    ``materials`` (list of ``material_filter.Material`` dicts) -- or, for older
+    callers, ``diamond_a_angstrom`` / ``contam_tol_deg`` describing the single
+    default diamond; ``filter_enabled`` (False = pass every spot through);
+    optional ``n_mc``, ``rng_seed``, ``known_domains`` (solved domains, used by a
+    material's ``protect_if_indexed``), ``panel_dir`` / ``pooled_dir``."""
+    from . import material_filter as mf
+
+    spots_in = cfg["spots_df"]
     wavelength_A = cfg["wavelength_A"]
-    a_angstrom = cfg.get("diamond_a_angstrom", DIAMOND_A_ANGSTROM_DEFAULT)
-    tol_deg = cfg.get("contam_tol_deg", CONTAM_TOL_DEG_DEFAULT)
-
-    lines = _diamond_tth_lines_deg(wavelength_A, a_angstrom)
-    tth = spots["two_theta_deg"].to_numpy()
-    delta = _nearest_line_distance(tth, lines)
-    spots["delta_to_diamond_deg"] = delta
-    spots["is_diamond"] = delta < tol_deg
-
-    n_total = len(spots)
-    n_diamond = int(spots["is_diamond"].sum())
+    if "materials" in cfg:
+        materials = cfg["materials"]
+    else:
+        materials = [mf.preset(
+            "Diamond", cell=(cfg.get("diamond_a_angstrom", DIAMOND_A_ANGSTROM_DEFAULT),) * 3 + (90.0,) * 3,
+            tol_deg=cfg.get("contam_tol_deg", CONTAM_TOL_DEG_DEFAULT))]
+    spots, summary = mf.apply_material_filter(
+        spots_in, wavelength_A, materials, enabled=cfg.get("filter_enabled", True),
+        n_mc=cfg.get("n_mc", N_MC_DEFAULT), rng_seed=cfg.get("rng_seed", RNG_SEED_DEFAULT),
+        known_domains=cfg.get("known_domains"))
     # Keep ingest-row identity across candidate reindexing and later domain
     # subsets. This ID is global within a pooled ingest, not a panel blob ID.
-    if "spot_id" not in spots:
-        spots["spot_id"] = np.arange(len(spots))
     candidate = spots[~spots["is_diamond"]].reset_index(drop=True)
 
-    null_mean = null_std = z_score = float("nan")
-    if n_total and len(lines):
-        n_mc = cfg.get("n_mc", N_MC_DEFAULT)
-        rng = np.random.default_rng(cfg.get("rng_seed", RNG_SEED_DEFAULT))
-        tth_lo, tth_hi = float(tth.min()), float(tth.max())
-        draws = rng.uniform(tth_lo, tth_hi, size=(n_mc, n_total))
-        null_delta = _nearest_line_distance(draws, lines)
-        null_match = (null_delta < tol_deg).sum(axis=1)
-        null_mean, null_std = float(null_match.mean()), float(null_match.std())
-        z_score = (n_diamond - null_mean) / null_std if null_std > 0 else float("nan")
-
-    summary = {
-        "n_spots": n_total, "n_diamond_flagged": n_diamond, "n_kept": len(candidate),
-        "null_mean": null_mean, "null_std": null_std, "z_score": z_score,
-        "tolerance_deg": tol_deg, "diamond_a_angstrom": a_angstrom,
-    }
-    z_text = f"{z_score:.1f}" if z_score == z_score else "n/a"
-    print(f"[solve-cell] diamond_filter: {n_diamond}/{n_total} flagged (z={z_text})")
+    if not summary["enabled"]:
+        print(f"[solve-cell] material filter: off -- all {len(spots)} spots are candidates")
+    else:
+        z = summary["z_score"]
+        z_text = f"{z:.1f}" if z == z else "n/a"
+        names = ", ".join(m["name"] for m in summary["materials"] if m["enabled"]) or "none enabled"
+        print(f"[solve-cell] material filter ({names}): {summary['n_flagged']}/{summary['n_spots']} flagged "
+              f"(z={z_text}, {summary['n_protected']} kept because they index on a solved domain)")
 
     panel_dir = cfg.get("panel_dir")
     if panel_dir is not None:
@@ -763,8 +761,9 @@ def _stage_diamond_filter(cfg: dict) -> dict:
     if pooled_dir is not None:
         pooled_dir = Path(pooled_dir)
         pooled_dir.mkdir(parents=True, exist_ok=True)
-        (pooled_dir / "diamond_filter_summary.json").write_text(json.dumps(summary, indent=2))
+        (pooled_dir / "diamond_filter_summary.json").write_text(json.dumps(summary, indent=2, default=float))
 
+    summary = dict(summary, n_kept=len(candidate))
     return {"flagged_df": spots, "candidate_df": candidate, "summary": summary}
 
 
@@ -845,25 +844,20 @@ def _reflection_fit_data(UB, hkl, g_2pi):
     }
 
 
-def _stage_refine(cfg: dict) -> dict:
-    """``cfg`` keys: ``ab_initio_raw`` (the ``AbInitioResult`` from
-    ``_stage_ab_initio``), ``g_2pi`` (that stage's full candidate g array),
-    optional ``sigma_g``, optional ``pooled_dir``."""
+def refit_domain(hkl, g_2pi, sigma_g_2pi: float = None) -> dict:
+    """Free-refine a UB from assigned reflections and classify the cell: the
+    ``refine_result`` dict (cell, sigma, symmetry, UB + per-reflection residuals)
+    for ``hkl`` (N, 3) integer indices against ``g_2pi`` (N, 3) sample-frame
+    vectors. Shared by the Refine stage and by a re-filter that adds rescued
+    spots to an already-solved domain."""
     from midas_hkls.ub_refine import refine_ub_from_gvectors
     from midas_hkls.lattice_symmetry import holohedry_from_fit
     from midas_hkls.conventional import to_conventional
 
-    ab = cfg["ab_initio_raw"]
-    if not ab.success:
-        notes = "; ".join(ab.notes) if ab.notes else "no notes"
-        raise ValueError(f"Cannot refine: ab-initio indexing did not succeed ({notes})")
-
-    g_2pi = cfg["g_2pi"][ab.indexed_mask]
-    sigma_g_2pi = cfg.get("sigma_g", SIGMA_G_DEFAULT)
-    g_1d, sigma_g_1d = _to_inverse_d(g_2pi, sigma_g_2pi)
-
-    print(f"[solve-cell] refine: free-refining UB from {len(ab.hkl)} indexed reflections")
-    fit = refine_ub_from_gvectors(ab.hkl, g_1d, sigma_g=sigma_g_1d)
+    if sigma_g_2pi is None:
+        sigma_g_2pi = SIGMA_G_DEFAULT
+    g_1d, sigma_g_1d = _to_inverse_d(np.asarray(g_2pi, float), sigma_g_2pi)
+    fit = refine_ub_from_gvectors(hkl, g_1d, sigma_g=sigma_g_1d)
     holo = holohedry_from_fit(fit)
     # Matches the validated reference scripts' own call exactly
     # (to_conventional(fit.cell), not the fit-covariance-aware
@@ -872,7 +866,6 @@ def _stage_refine(cfg: dict) -> dict:
     # here, missing the cubic symmetry the plain default-window search
     # correctly detects.
     conv = to_conventional(fit.cell)
-
     result = {
         "n_reflections": int(fit.n_reflections),
         "cell": [float(v) for v in fit.cell],
@@ -885,9 +878,24 @@ def _stage_refine(cfg: dict) -> dict:
         "conventional_is_standard": bool(conv.is_standard),
         "conventional_centring_index": int(conv.centring_index),
     }
-    result.update(_reflection_fit_data(fit.UB, ab.hkl, g_2pi))
+    result.update(_reflection_fit_data(fit.UB, hkl, np.asarray(g_2pi, float)))
+    return result
+
+
+def _stage_refine(cfg: dict) -> dict:
+    """``cfg`` keys: ``ab_initio_raw`` (the ``AbInitioResult`` from
+    ``_stage_ab_initio``), ``g_2pi`` (that stage's full candidate g array),
+    optional ``sigma_g``, optional ``pooled_dir``."""
+    ab = cfg["ab_initio_raw"]
+    if not ab.success:
+        notes = "; ".join(ab.notes) if ab.notes else "no notes"
+        raise ValueError(f"Cannot refine: ab-initio indexing did not succeed ({notes})")
+
+    g_2pi = cfg["g_2pi"][ab.indexed_mask]
+    print(f"[solve-cell] refine: free-refining UB from {len(ab.hkl)} indexed reflections")
+    result = refit_domain(ab.hkl, g_2pi, cfg.get("sigma_g", SIGMA_G_DEFAULT))
     print(f"[solve-cell] refine: cell={tuple(round(v, 4) for v in result['cell'])} "
-          f"rms_drlv={result['rms_drlv']:.5f} holohedry={holo.system}")
+          f"rms_drlv={result['rms_drlv']:.5f} holohedry={result['holohedry_system']}")
 
     pooled_dir = cfg.get("pooled_dir")
     if pooled_dir is not None:

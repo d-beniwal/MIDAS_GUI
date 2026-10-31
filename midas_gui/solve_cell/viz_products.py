@@ -309,6 +309,20 @@ def diamond_line_table(wavelength_A: float, a_angstrom: float, hkl_max: int = 8)
     return pd.DataFrame(rows)
 
 
+def material_line_table(wavelength_A: float, materials: list) -> pd.DataFrame:
+    """Allowed lines of every given material dict, merged and sorted by 2-theta:
+    ``tth_deg, d_A, hkl, q, material``. Diamond alone equals ``diamond_line_table``."""
+    from . import material_filter as mf
+    parts = []
+    for m in materials:
+        t = mf.material_lines(mf.Material.from_dict(m), wavelength_A)
+        if len(t):
+            parts.append(t.assign(material=m.get("name", "")))
+    if not parts:
+        return pd.DataFrame(columns=["tth_deg", "d_A", "hkl", "q", "material"])
+    return pd.concat(parts, ignore_index=True).sort_values("tth_deg").reset_index(drop=True)
+
+
 def flag_preview(spots: pd.DataFrame, lines_tth: np.ndarray, tol_deg: float) -> np.ndarray:
     """Boolean flag each spot WOULD get at ``tol_deg`` (no state is changed)."""
     from .pipeline import _nearest_line_distance

@@ -3,6 +3,59 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-27 — MCP project ops (`project.get_info/save/open`): quiet dialogs via `MainWindow._project_msg`
+
+`save_project`, `_open_project_selection` and `_apply_workspace_state` ended in modal `QMessageBox`es, which would hang the control socket, so those sites now go through `_project_msg`, which records instead of showing while `_agent_quiet` is set (the ops set it for the call). The ops reuse the existing methods, not a second implementation. Open selects everything via `ProjectContentsPicker` (no dialog) with an `exclude` list; it refuses on unsaved changes unless `discard_unsaved`, and Save As onto an existing file unless `overwrite`, matching the dialogs' confirmations. Skill: `midas-gui-mcp-project`.
+
+## 2026-10-27 — MCP: calibrate abort/clear_seed ops; agent skills live in `midas_gui_mcp/skills/`
+
+Added `calibrate.abort` (Abort button) and `calibrate.run(clear_seed=True)`. Why: an agent could not stop a run or untick seeds, and seeds persist between runs, so an "unseeded" run silently reused an earlier seed. `tab._abort()` disconnects the worker signals, so the op marks the tracked run job `aborted` itself (else `calibrate.wait` hangs). Agent skills (`midas-gui-mcp-setup`, `-calibrate`) sit in the repo next to the ops they describe, are advertised in the server's MCP `instructions`, and are symlinked into the gitignored `.claude/skills/` for Claude Code auto-load. Update the matching skill when an op changes.
+
+## 2026-10-25 — Audit (no code change): backend solve-cell parameters not exposed in the GUI
+
+Read `midas_defect` 0.9.1 (`ingest`, `geometry`) and `midas_hkls` (`ab_initio`, `ub_refine`, `lattice_symmetry`, `conventional`) against `pipeline.py`/`tab_solve_cell.py`. Findings, highest value first:
+- **Silently dropped geometry:** `Geometry(...)` is built with `tx_deg=0`, no `wedge_deg`, no `p_coeffs`/`rho_d_um`, and `qlab_to_qsample` is called without wedge. `geometry_fields_from_file` returns `distortion`, but `SolveCellTab._geometry` discards it (tx at least gets a note; distortion gets none). Zero on the spinel calibration, so no effect there.
+- **Diamond filter is 2-theta-only** (diamond cell + Fd-3m, `tol`); no orientation check, no off switch other than tol->0, no other anvil/gasket materials, `hkl_max=8`, `n_mc`, `rng_seed` fixed.
+- **Candidate quality filters** (faint/edge/degenerate-shape/low-volume, handoff 5.7) are not implemented; with `min_vol=1`/`min_frames=1` more junk reaches indexing. The 3 unclaimed spots on the spinel file sit at col ~4.5 (panel edge).
+- **ab-initio** only gets `tol`, `min_reflections`, `sigma_g`. Unexposed: `n_grid` (128; caps longest axis ~50 A, resolution 0.39 A), `q_max`, `min_subset`, `min_excess_sigma`, `n_peaks`, `min_length`, `subset_tolerance`, `max_supercell_ratio`, `min_volume`, `min_noncoplanarity`. Domain claim = ab-initio `indexed_mask` (initial basis), not re-assigned with the refined UB.
+- **Symmetry/conventional-cell:** `determined_ratio`, holohedry `n_sigma`, `to_conventional` tolerances fixed. Known-structure: `n_null_draws`, `z_thresh`, `rng_seed`, `chunk` fixed.
+- **Ingest internals:** `SENTINEL=4294967295` (uint32 only; uint16/float gap values unhandled), `live_frames` fraction 0.002, `core_frac` 0.5, `tth_bin` 0.02, absolute (not noise-relative) blob threshold, omega taken as `ref + i*step` although the file stores per-frame omega (jitter +-0.16 deg here) and frame-start vs centre convention is implicit.
+- **Predictions:** no systematic-absence rules (17/25 empty predictions were Fd-3m-forbidden); match gate 1.0 deg fixed.
+
+## 2026-10-25 — Material filter replaces the diamond filter (optional, multi-material)
+
+Why: the 2-theta-only diamond test flagged 9 spinel reflections that coincide in radius with diamond {220}/{400}; the filter could not be turned off, knew only diamond, and had no orientation or lattice awareness (see the probe/audit entries below).
+- **Backend `solve_cell/material_filter.py`** (pure numpy): `Material` = name, enabled, cell (a b c alpha beta gamma), space group + `extinction` (`space_group` | `none` | `diamond_basis` = Fd-3m plus the diamond-atom absences, which reproduces the old line table exactly), `tol_deg`, `hkl_max`, `mode`, `min_peak_counts`, `protect_if_indexed`/`protect_tol`. Presets: Diamond, Re, W, Au, Pt, MgO (ambient lattices, all editable). Any number of materials; earlier list entries win a shared spot.
+- **`mode="orientation"`**: among 2-theta matches, seed-and-extend (pairs of the 25 brightest spots x allowed hkl, `Rotation.align_vectors`, count spots on rotated lattice within `orient_tol_deg` and the 2-theta-equivalent radial window) finds orientations owning >= `min_spots` spots; up to `max_crystals` are peeled off (two anvils). Spots matching in 2-theta but fitting no orientation are kept. On the spinel project: 2-theta flags 9, orientation flags 4 (one crystal, 0.13 deg rms) and keeps 5.
+- **`protect_if_indexed`** (the "keep spots that index on a solved domain" option) acts when the filter is re-run with domains present: a flagged spot whose fractional hkl on a domain's UB is within `protect_tol` is unflagged (`protected_by` = 1-based domain). The tab then carries each domain across the re-filter **by `spot_id`** (candidate row labels are re-derived), adds the rescued spots and re-fits the domain with `pipeline.refit_domain` (factored out of `_stage_refine`, same result dict). Without the option, a re-filter still clears domains as before. All 9 spinel spots index on Domain 1, so with the option on they are all rescued.
+- **GUI**: stage 2 group has a checkbox; off = filter skipped, every spot is a candidate (pool is built automatically after ingest and when the box is toggled; button reads "Use all spots"); on = materials list (tick = enabled, Add presets/custom, Remove) + per-material editor + MC draws/seed. State is saved as `fields["material_filter"]`; projects saved with `diamond_a`/`contam_tol` convert to a single Diamond entry.
+- **Compatibility**: stage key stays `diamond_filter` (alias `material_filter`); flagged table keeps `is_diamond` (= flagged by any material) and `delta_to_diamond_deg` (nearest enabled-material line), and gains `contaminant_id` (index into `summary["materials"]`, -1 none; ints, not strings, so the project writer needs no text column) and `protected_by`. Defaults unchanged: one Diamond material, 2-theta mode, tol 0.07, protect off. Control/MCP: `set_material_filter`; `set_diamond_params` edits the Diamond entry; `run_material_filter` aliases `run_diamond_filter`.
+- Not done: the Contamination view's tolerance preview is still a uniform 2-theta preview (not orientation-aware); no per-material colours.
+
+## 2026-10-25 — `min_frames` ingest setting (default 2, unchanged behaviour)
+
+The pipeline-only `n_frames >= 2` post-filter was hard-coded; with `min_vol=1` it still dropped real single-frame peaks (see probe entry below). It is now `blobs.min_frames` (`BLOB_MIN_FRAMES_DEFAULT = 2`), a "blob min_frames" spinbox in the Ingest Parameters, `blob_min_frames` in the control/MCP `set_ingest_params`, and saved in the stage state. Default left at 2 so existing results are unchanged; the user picks 1 to keep peaks narrower than one omega step.
+
+## 2026-10-25 — Probe (no code change): why predicted peaks are "missing" on s3idc_oct8_spinel_newlayout.h5
+
+Read-only investigation; scripts in `scratch/_probe_missing_peaks/` (01 reproduces ingest bit-exactly: max-projection identical, blob counts 60/54/50 labelled -> 28/29/29 spots). Domain 1 predicts 130 visible reflections; 74 matched, **56 unmatched**:
+- **9 = diamond-flagged spots** (the only detected spots <1.1 px / 0.1 deg from a prediction). They index at integer hkl on Domain 1 (diamond {220}/{400} = spinel (620)/(840); a_spinel ~ sqrt(5)*a_diamond within 0.3%), so they sit on the Domain 1 lattice. **Correction (parameter audit, same day):** the filter is 2-theta-only, and only 4 of the 9 are mutually consistent with ONE diamond orientation (0.3 deg), so most are probably spinel (620)/(840) reflections false-flagged by the 2-theta coincidence, not true diamond. The only 3 unclaimed candidates are >110 px from any prediction (not near-misses).
+- **22 = real signal dropped by blob filters** (positions match predictions with the same rms as claimed spots: 0.4/0.7 px, 0.09 deg): 16 fail `min_vol=6` (vol 1-5 voxels, 17-228 counts), 6 are kept blobs rejected by the pipeline-only `n_frames >= 2` cut (single-frame, 66-1296 counts; rocking curve narrower than the 0.1 deg step). Chance coincidence ~0.003 expected, so not noise.
+- **25 = no signal** (<=3 counts): 17 are Fd-3m d-glide-forbidden, 8 allowed but N=h2+k2+l2 >= 51 (weak/high-q). `predict_reflections` applies no extinction rules; all 74 claimed are F-allowed/Fd-3m-allowed.
+- Sensitivity (probe only): `n_frames>=1` recovers the 6 with 0 new unexplained blobs; `min_vol=3` +15 blobs near-prediction-or-not (100/115 near); `min_vol=1` 164 blobs, 58 unexplained.
+- Side note: file omega jitters +-0.16 deg vs nominal 0.1 deg/frame (step median 0.105); small vs spot width, not a cause.
+
+## 2026-10-25 — Detector peak terminology; default reciprocal view down the beam
+
+- **Detector circles:** orange = observed, unassigned; green = observed, assigned to a domain; red = predicted by a domain but absent (`_missing_peak_rows`, ids `miss:<domain>:<n>`, selectable like spots, cached per domain set). This supersedes the per-domain palette added earlier the same day. Lattice-points mode on the detector now shows green/red; the 3-D lattice-points colours (green/orange) are unchanged.
+- **Default reciprocal camera:** looks down the beam (camera upstream, direction = ki, rotation axis up) via `PyVistaScatter3DView.view_along_beam`, used on first data and by a "Beam view" button. Assumed upstream→downstream and ω-axis up; flip if the user's reference image was the opposite handedness.
+
+## 2026-10-25 — Lattice points become a pickable mode; |q| shells / off-panel / panel-outline cleanup
+
+- **Removed** the "|q| shells" and "incl. off-panel" checkboxes (and `shells`/`predicted_offpanel` control + MCP args, `PyVistaScatter3DView.set_shells`): not useful. "panel outline" is now **panel maps** with a colour-map dropdown (`_PATCH_CMAPS`).
+- **Lattice points replace the observed-spot cloud** (not an overlay any more): one pickable point per *visible crossing* (not per unique hkl), green = assigned spot (placed at the spot's actual frame/ω/row/col, `pred_*` keeps the prediction), orange = prediction. Rows (`spot_id` = `"lp:N"`, `lattice=True`) go into `_spot_rows_by_id`, so selection, the 3-D marker and the Detector sync reuse the spot path; the Detector view circles the active panel's lattice points (`_lattice_scatter`). Unchecking clears `_lattice_rows` and the indexed-spot view returns. Only the unpickable "diffracting now" highlight remains an overlay.
+- **Why per crossing:** a lattice point must be tied to a frame/ω/row/col, which belong to crossings. Caveat: crossings of one hkl share an xyz, so a click picks the first of them.
+
 ## 2026-10-25 — Reciprocal-map overlay cleanup; spot picking via own screen-space projection
 
 - **Removed** "Show fitted positions" and "Fit visible spots" (the latter only re-rendered; the former duplicated the lattice-points/Δq views) plus their control/MCP ops (`fit_visible_spots`, `show_fitted_positions`). Overlay labels: Ewald sphere, *cell, lattice points, panel outline; vertical separators between overlays.

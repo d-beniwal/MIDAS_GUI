@@ -102,8 +102,7 @@ _SC_VIEW_TABS = {"reciprocal": 0, "detector": 1, "diagnostics": 2, "volume": 3,
 _SC_COLOR_MODES = {"panel": 0, "crystal": 1, "q_residual": 2}
 _SC_SIZE_MODES = {"equal": 0, "intensity": 1}
 _SC_OVERLAYS = {"ewald": "_ov_ewald", "basis": "_ov_basis", "predicted": "_ov_pred",
-                "predicted_offpanel": "_ov_pred_hidden", "frame_patches": "_ov_patch",
-                "shells": "_ov_shells", "highlight_now": "_ov_now"}
+                "frame_patches": "_ov_patch"}
 _SC_KS_KEYS = ("a", "b", "c", "alpha", "beta", "gamma", "sg", "n_search", "tol", "min_accept")
 
 
@@ -224,11 +223,12 @@ class _SolveCellOps:
             "project_dir": sc._proj_ed.text().strip() or None,
             "ingest": {"low_count_threshold": sc._low_count.value(), "mask_grow": sc._mask_grow.value(),
                        "blob_threshold": sc._blob_thresh.value(), "blob_min_vol": sc._blob_minvol.value(),
+                       "blob_min_frames": sc._blob_minframes.value(),
                        "split_ratio": sc._split_ratio.value(),
                        "gap_bridge": sc._gap_bridge.value() if sc._gap_bridge_on.isChecked() else 0,
                        "sector_candidates": list(sc._sector_candidates_cfg()),
                        "max_workers": sc._ingest_max_workers.value()},
-            "diamond": {"diamond_a": sc._diamond_a.value(), "tol_deg": sc._contam_tol.value()},
+            "material_filter": sc._material_panel.get_state(),
             "index": {"method": "known_structure" if sc._index_method.currentIndex() else "free",
                       "sigma_g": sc._sigma_g.value(), "min_reflections": sc._min_refl.value(),
                       "tol": sc._tol_override.value(), "known_structure": _sc_ks_state(sc._ks3)},
@@ -338,13 +338,15 @@ class _SolveCellOps:
         return _ok({"project_dir": self._sc._proj_ed.text().strip() or None})
 
     def op_solve_cell_set_ingest_params(self, low_count_threshold=None, mask_grow=None,
-                                        blob_threshold=None, blob_min_vol=None, split_ratio=None,
+                                        blob_threshold=None, blob_min_vol=None, blob_min_frames=None,
+                                        split_ratio=None,
                                         gap_bridge=None, sector_candidates=None,
                                         max_workers=None) -> dict:
         sc = self._sc
         for value, widget, cast in (
                 (low_count_threshold, sc._low_count, float), (mask_grow, sc._mask_grow, int),
                 (blob_threshold, sc._blob_thresh, float), (blob_min_vol, sc._blob_minvol, int),
+                (blob_min_frames, sc._blob_minframes, int),
                 (split_ratio, sc._split_ratio, float), (max_workers, sc._ingest_max_workers, int)):
             if value is not None:
                 widget.setValue(cast(value))
@@ -356,13 +358,45 @@ class _SolveCellOps:
             sc._sector_candidates_ed.setText(",".join(str(int(n)) for n in sector_candidates))
         return _ok({"ingest": self.op_solve_cell_get_state()["result"]["params"]["ingest"]})
 
+    def op_solve_cell_set_material_filter(self, enabled=None, materials=None, n_mc=None, rng_seed=None) -> dict:
+        """Stage 2 inputs. ``materials`` replaces the whole list: dicts with ``name``, ``cell``
+        [a,b,c,alpha,beta,gamma], ``space_group``, ``extinction`` (space_group|none|diamond_basis),
+        ``tol_deg``, ``hkl_max``, ``mode`` (2theta|orientation), ``orient_tol_deg``, ``min_spots``,
+        ``max_crystals``, ``min_peak_counts``, ``protect_if_indexed``, ``protect_tol``, ``enabled``
+        (omitted keys keep their defaults); a string entry names a preset."""
+        from midas_gui.solve_cell import material_filter as mf
+        panel = self._sc._material_panel
+        if materials is not None:
+            try:
+                mats = [(mf.preset(m).to_dict() if isinstance(m, str) else mf.Material.from_dict(m).to_dict())
+                        for m in materials]
+            except (KeyError, ValueError, TypeError) as exc:
+                return _err(f"bad material: {exc}", kind="bad_args")
+            panel.set_materials(mats)
+        state = panel.get_state()
+        if n_mc is not None:
+            state["n_mc"] = int(n_mc)
+        if rng_seed is not None:
+            state["rng_seed"] = int(rng_seed)
+        if enabled is not None:
+            state["enabled"] = bool(enabled)
+        panel.set_state(state)
+        return _ok({"material_filter": panel.get_state()})
+
     def op_solve_cell_set_diamond_params(self, diamond_a=None, tol_deg=None) -> dict:
-        sc = self._sc
+        """Kept for older callers: edits the entry named "Diamond" (adds the default one if absent)."""
+        from midas_gui.solve_cell import material_filter as mf
+        panel = self._sc._material_panel
+        mats = panel.materials()
+        i = next((k for k, m in enumerate(mats) if m["name"] == "Diamond"), None)
+        if i is None:
+            mats.insert(0, mf.preset("Diamond").to_dict()); i = 0
         if diamond_a is not None:
-            sc._diamond_a.setValue(float(diamond_a))
+            mats[i]["cell"] = [float(diamond_a)] * 3 + [90.0] * 3
         if tol_deg is not None:
-            sc._contam_tol.setValue(float(tol_deg))
-        return _ok({"diamond_a": sc._diamond_a.value(), "tol_deg": sc._contam_tol.value()})
+            mats[i]["tol_deg"] = float(tol_deg)
+        panel.set_materials(mats)
+        return _ok({"diamond_a": mats[i]["cell"][0], "tol_deg": mats[i]["tol_deg"]})
 
     def op_solve_cell_set_index_params(self, method=None, sigma_g=None, min_reflections=None,
                                        tol=None, known_structure=None) -> dict:
@@ -418,6 +452,9 @@ class _SolveCellOps:
 
     def op_solve_cell_run_diamond_filter(self) -> dict:
         return self._sc_start("diamond", self._sc._run_diamond_filter)
+
+    def op_solve_cell_run_material_filter(self) -> dict:
+        return self.op_solve_cell_run_diamond_filter()
 
     def op_solve_cell_run_index(self) -> dict:
         return self._sc_start("index", self._sc._run_index)
@@ -557,13 +594,129 @@ class _SolveCellOps:
         return _ok({"path": str(target)})
 
 
-class GuiController(_SolveCellOps):
+class _ProjectOps:
+    """``project.*`` ops: File ▸ Open Project / Save Project (As) without the
+    dialogs. ``MainWindow._project_msg`` records its message boxes instead of
+    showing them while ``_agent_quiet`` is set, so nothing here can block."""
+
+    #: ``project.open`` ``exclude`` key -> the value that un-selects it.
+    _OPEN_EXCLUDABLE = {"workspace_tabs": [], "calib_refs": {}, "integrate_refs": {},
+                        "solve_cell": False, "mask_ref": None}
+
+    def _project_quiet(self, fn):
+        """Run ``fn()`` with the window's project dialogs recorded, not shown.
+        Returns ``(errors, infos)`` — the recorded message texts by kind."""
+        win = self._win
+        win._agent_quiet, win._agent_messages = True, []
+        try:
+            fn()
+            msgs = list(win._agent_messages)
+        finally:
+            win._agent_quiet, win._agent_messages = False, []
+        return ([f"{t}: {x}" for k, t, x in msgs if k == "error"],
+                [x for k, _t, x in msgs if k == "info"])
+
+    def op_project_get_info(self) -> dict:
+        from midas_gui import project
+        win = self._win
+        path = getattr(getattr(win, "_project_ctx", None), "path", None)
+        info = {"path": str(path) if path else None,
+                "name": Path(path).name if path else None,
+                "unsaved_changes": bool(getattr(win, "_workspace_dirty", False))}
+        if path and Path(path).exists():
+            info["analysis_summary"] = project.analysis_summary(path)
+        return _ok(info)
+
+    def op_project_save(self, path=None, overwrite=False, history="none") -> dict:
+        """Save the session. No ``path``: overwrite the open project (same as
+        Ctrl+S). With ``path``: Save As — a fresh project file there (an
+        existing file is refused unless ``overwrite``, which keeps a ``.bak``).
+        ``history`` (none/latest/all) is how much of the previously open
+        project's analysis history a Save As carries over."""
+        from midas_gui import project
+        win = self._win
+        current = getattr(getattr(win, "_project_ctx", None), "path", None)
+        if history not in ("none", "latest", "all"):
+            return _err(f"unknown history {history!r} (none/latest/all)", kind="bad_args")
+        if path is not None:
+            path = str(path)
+            if not path.lower().endswith(".h5"):
+                path += ".h5"
+        target = path or current
+        if not target:
+            return _err("no project is open — pass path", kind="precondition_failed")
+        is_save_as = bool(path) and str(path) != str(current)
+        if is_save_as:
+            exists = Path(path).exists()
+            if exists and not overwrite:
+                return _err(f"{path} already exists — pass overwrite=true to replace it",
+                            kind="precondition_failed")
+            try:
+                project.create_project(path, overwrite=exists)
+            except Exception as e:
+                return _err(f"could not create {path}: {e}", kind="precondition_failed")
+        errors, infos = self._project_quiet(lambda: win.save_project(target))
+        if errors:
+            return _err("; ".join(errors), kind="precondition_failed")
+        copied = {}
+        if is_save_as and current and history != "none" and Path(current).exists():
+            try:
+                copied = project.copy_analysis_history(current, path, history)
+            except Exception as e:
+                return _err(f"saved, but copying analysis history failed: {e}",
+                            kind="exception")
+        return _ok({"path": str(target), "save_as": is_save_as, "history_copied": copied,
+                    "note": infos[-1] if infos else None})
+
+    def op_project_open(self, path, discard_unsaved=False, exclude=None) -> dict:
+        """Open a project ``.h5`` and restore everything in it (workspace
+        tabs, calibrate/integrate attempts, Solve Cell, mask) — same as File ▸
+        Open Project with every box ticked. ``exclude`` lists parts to leave
+        out: workspace_tabs, calib_refs, integrate_refs, solve_cell, mask_ref.
+        Refused while the session has unsaved changes unless
+        ``discard_unsaved`` (save first with ``project.save`` to keep them)."""
+        from midas_gui.dialogs import ProjectContentsPicker
+        win = self._win
+        path = str(path)
+        if not Path(path).is_file():
+            return _err(f"no such file: {path}", kind="bad_args")
+        exclude = list(exclude or [])
+        bad = [k for k in exclude if k not in self._OPEN_EXCLUDABLE]
+        if bad:
+            return _err(f"unknown exclude key(s) {bad} (one of "
+                        f"{sorted(self._OPEN_EXCLUDABLE)})", kind="bad_args")
+        if getattr(win, "_workspace_dirty", False):
+            if not discard_unsaved:
+                return _err("the session has unsaved changes — save them with "
+                            "project.save, or pass discard_unsaved=true",
+                            kind="precondition_failed")
+            win._clear_autosave_draft()
+        picker = ProjectContentsPicker()
+        try:
+            if not (picker.set_project(path) and picker.has_content()):
+                return _err(picker.error_message()
+                            or f"{path} has nothing this version can restore",
+                            kind="precondition_failed")
+            sel = picker.selection()
+        finally:
+            picker.deleteLater()
+        for key in exclude:
+            sel[key] = self._OPEN_EXCLUDABLE[key]
+        errors, infos = self._project_quiet(lambda: win._open_project_selection(path, sel))
+        if errors:
+            return _err("; ".join(errors), kind="precondition_failed")
+        return _ok({"path": path, "restored": infos,
+                    "selection": {k: bool(v) for k, v in sel.items()}})
+
+
+class GuiController(_SolveCellOps, _ProjectOps):
     """Dispatches ``"namespace.verb"`` ops (see the module docstring) against
     the live ``main_window``'s Data Viewer and Calibrate tabs."""
 
     def __init__(self, main_window):
         self._win = main_window
         self._jobs: dict = {}   # job_id -> {"status","result","error"}
+        self._cal_run_job_id = None   # latest calibrate.run job, for calibrate.abort
         self._cal.set_agent_mode(True)
         self._geom.set_agent_mode(True)
         sc = getattr(main_window, "_solve_cell_tab", None)
@@ -847,8 +1000,13 @@ class GuiController(_SolveCellOps):
         return _ok()
 
     def op_calibrate_run(self, mode, refine=None, manual_seed=None, limits=None,
-                         build_residual_corr=None) -> dict:
+                         build_residual_corr=None, clear_seed=False) -> dict:
         tab = self._cal
+        if clear_seed:
+            # Untick every seed-enable flag (spin values are kept but unused);
+            # a manual_seed given alongside is applied afterwards.
+            from PyQt5 import QtCore
+            tab._manual_seed_check.setCheckState(QtCore.Qt.Unchecked)
         idx = tab._pipeline.findData(mode)
         if idx < 0:
             return _err(f"unknown pipeline mode {mode!r}", kind="bad_args")
@@ -918,6 +1076,7 @@ class GuiController(_SolveCellOps):
             return _err("calibration did not start for an unknown reason", kind="exception")
         job_id = str(uuid.uuid4())
         self._jobs[job_id] = {"status": "running", "result": None, "error": None}
+        self._cal_run_job_id = job_id
 
         def _done(result):
             self._jobs[job_id] = {"status": "done",
@@ -938,6 +1097,23 @@ class GuiController(_SolveCellOps):
         if worker is not None and job["status"] == "running" and not worker.isRunning():
             job = self._jobs[job_id] = self._finalize_projection_job()
         return _ok({k: v for k, v in job.items() if not k.startswith("_")})
+
+    def op_calibrate_abort(self) -> dict:
+        """Same as the Calibrate tab's Abort button. ``tab._abort`` disconnects
+        the worker's signals, so the ``_done``/``_fail`` hooks ``op_calibrate_run``
+        attached never fire — mark the in-flight run job ``aborted`` here or it
+        would stay ``running`` forever (and ``calibrate.wait`` would hang to its
+        timeout). Projection jobs are not affected."""
+        tab = self._cal
+        w = tab._worker
+        if not (w and w.isRunning()):
+            return _ok({"aborted": False, "note": "no calibration run in progress"})
+        tab._abort()
+        job_id = self._cal_run_job_id
+        if job_id and self._jobs.get(job_id, {}).get("status") == "running":
+            self._jobs[job_id] = {"status": "aborted", "result": None,
+                                  "error": "aborted by calibrate.abort"}
+        return _ok({"aborted": True, "job_id": job_id})
 
     def _finalize_projection_job(self) -> dict:
         """Read back a finished projection's outcome from the tab's own

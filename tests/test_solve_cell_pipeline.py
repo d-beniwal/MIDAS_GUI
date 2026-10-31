@@ -180,6 +180,31 @@ def test_refine_raises_clear_error_when_ab_initio_did_not_succeed():
 #  Ingest plumbing (synthetic frames -- no real raw HDF5 available locally)
 # ═════════════════════════════════════════════════════════════════════════════
 
+def test_ingest_min_frames_setting_keeps_single_frame_blob():
+    """A one-frame spot is dropped at the default min_frames (2) and kept at 1."""
+    rng = np.random.default_rng(0)
+    n_frames, nz, ny = 20, 64, 64
+    frames = rng.poisson(2.0, size=(n_frames, nz, ny)).astype(np.uint32)
+    frames[10, 30:34, 30:34] += 500          # single-frame spot
+
+    geometry = {
+        "Lsd": 150000.0, "BC_y": 32.0, "BC_z": 32.0, "ty": 0.0, "tz": 0.0,
+        "wavelength_A": 0.5, "px_um": 75.0, "nrpixels_y": ny, "nrpixels_z": nz,
+        "omega_ref_frame_idx": 0, "omega_ref_deg": -10.0,
+        "omega_last_frame_idx": n_frames - 1, "omega_step_deg": 1.0,
+    }
+    def run(**blobs):
+        return P._stage_ingest({
+            "frames": frames, "geometry": geometry,
+            "mask": {"low_count_threshold": 0.0, "grow": 1},
+            "blobs": {"threshold": 100.0, "min_vol": 4, **blobs}, "panel_dir": None,
+        })["spots_df"]
+    assert P.BLOB_MIN_FRAMES_DEFAULT == 2
+    assert len(run()) == 0
+    kept = run(min_frames=1)
+    assert len(kept) >= 1 and (kept["n_frames"] == 1).all()
+
+
 def test_ingest_runs_end_to_end_on_synthetic_frames_and_writes_outputs(tmp_path):
     rng = np.random.default_rng(0)
     n_frames, nz, ny = 20, 64, 64

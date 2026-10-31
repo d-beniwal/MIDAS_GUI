@@ -779,6 +779,20 @@ class MainWindow(QtWidgets.QMainWindow):
             act.setToolTip(entry["path"])
             act.triggered.connect(lambda checked=False, p=entry["path"]: open_fn(p))
 
+    def _project_msg(self, kind: str, title: str, text: str) -> None:
+        """Project save/open feedback box. While ``_agent_quiet`` is set (the
+        MCP control API's project ops) the message is recorded in
+        ``_agent_messages`` instead of shown: a modal ``QMessageBox`` would
+        block the GUI event loop, and the control socket with it."""
+        if getattr(self, "_agent_quiet", False):
+            self._agent_messages.append((kind, title, text))
+            return
+        box = QtWidgets.QMessageBox.critical if kind == "error" else QtWidgets.QMessageBox.information
+        box(self, title, text)
+
+    _agent_quiet = False
+    _agent_messages: list = []
+
     def _set_project_path(self, path) -> None:
         self._project_ctx.path = path
         self._project_lbl.setText(f"Project: {Path(path).name}" if path else "Project: none")
@@ -864,7 +878,7 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             project.open_project(path)
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Open Project failed", str(e))
+            self._project_msg("error", "Open Project failed", str(e))
             return
         self._set_project_path(path)
         settings.record_recent(path, "project")
@@ -975,15 +989,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 restored.append(f"Mask: {mask_ref.rsplit('/', 1)[-1]}")
         except Exception:
             _log(f"Populate from project failed:\n{traceback.format_exc()}")
-            QtWidgets.QMessageBox.critical(
-                self, "Populate from project failed",
+            self._project_msg(
+                "error", "Populate from project failed",
                 f"Could not populate the GUI from this project's records.\n"
                 f"See the error log:\n{_LOG_FILE}")
             return
 
         if restored:
-            QtWidgets.QMessageBox.information(
-                self, "Open Project",
+            self._project_msg(
+                "info", "Open Project",
                 "Restored from this project's recorded analysis:\n\n" + "\n".join(restored))
 
     def _restore_active_profile(self, name) -> None:
@@ -1289,7 +1303,7 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             project.write_gui_workspace(path, tabs=state["tabs"], sidecars=sidecars, meta=meta)
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Save failed", str(e))
+            self._project_msg("error", "Save failed", str(e))
             return
         self._set_project_path(path)
         # Results computed before a project existed (or before this Save As
@@ -1303,7 +1317,7 @@ class MainWindow(QtWidgets.QMainWindow):
         msg = f"Saved project to:\n{path}"
         if errors:
             msg += "\n\nThe following tabs could not be saved:\n" + "\n".join(errors)
-        QtWidgets.QMessageBox.information(self, "Save Project", msg)
+        self._project_msg("info", "Save Project", msg)
 
     def _apply_workspace_state(self, data: dict, sidecars: Optional[dict] = None) -> None:
         """Restore every tab's fields from a previously saved session
@@ -1319,8 +1333,8 @@ class MainWindow(QtWidgets.QMainWindow):
         re-run — their inputs are restored so a single click of the tab's
         own Run/Fit button reproduces the result."""
         if not data.get("__midas_gui_state__"):
-            QtWidgets.QMessageBox.critical(
-                self, "Load failed", "This is not a valid MIDAS GUI session snapshot.")
+            self._project_msg(
+                "error", "Load failed", "This is not a valid MIDAS GUI session snapshot.")
             return
         try:
             self._restore_active_profile(data.get("active_profile"))
@@ -1380,7 +1394,7 @@ class MainWindow(QtWidgets.QMainWindow):
             msg += "\n\nTabs in the file no longer present:\n" + "\n".join(skipped)
         if errors:
             msg += "\n\nThe following tabs failed to restore:\n" + "\n".join(errors)
-        QtWidgets.QMessageBox.information(self, "Open Project", msg)
+        self._project_msg("info", "Open Project", msg)
 
     def _build_menu(self):
         """Settings menu: preferences, open config folder, reload."""

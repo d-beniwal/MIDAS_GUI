@@ -77,8 +77,7 @@ The latest Solve Cell analysis is one record at `/analysis/solve_cell`, with an 
 | Ewald sphere cap | Reciprocal, Overlays | V01 | none (wavelength, ω) | no |
 | a\*, b\*, c\* arrows and reciprocal cell | Reciprocal, Overlays | V15 | none (UB) | no |
 | Predicted lattice points | Reciprocal, Overlays | V08 | `domain_NN_predictions` | no |
-| \|q\| shells | Reciprocal, Overlays | – | none | no |
-| Frame patches | Reciprocal, Overlays | V02 | `frame_patches` | only to build the cache |
+| Panel maps (colour-map dropdown) | Reciprocal, Overlays | V02 | `frame_patches` | only to build the cache |
 | Residual vector fields, histograms | Diagnostics | V09 | `domain_NN_predictions` | no |
 | Acquisition timeline, predicted vs observed per ω bin | Diagnostics | V11 | `frame_manifest`, predictions | no |
 | Volume: 2-D slabs and 3-D isosurface | Volume | V03, V04, V05 | `reciprocal_volume` | only to build the cache |
@@ -102,7 +101,7 @@ q_lab(θ, φ) = k0 · n − ki             θ ∈ [0, θ_max],   φ ∈ [0, 2π)
 q_sample    = Rᵀ(ω) · q_lab
 ```
 
-which is a surface through q = 0 whose farthest point is at `|q| = q_cap` (chosen as 1.15 × the largest observed |q|). The ω slider rotates the cap in the sample frame; as a consequence, the lattice points and spots stay fixed and the cap sweeps through them. A yellow arrow shows `ki` ending at q = 0, and a pink line shows the rotation axis. The cap is the *Ewald* sphere; the optional purple wireframe spheres at 0.5, 1.0 and 1.5 Å⁻¹ are constant-|q| *resolution shells* centred on q = 0 and are a different object, which is why they use a different colour and a separate checkbox.
+which is a surface through q = 0 whose farthest point is at `|q| = q_cap` (chosen as 1.15 × the largest observed |q|). The ω slider rotates the cap in the sample frame; as a consequence, the lattice points and spots stay fixed and the cap sweeps through them. A yellow arrow shows `ki` ending at q = 0, and a pink line shows the rotation axis.
 
 ![Reciprocal-space map at ω = 0° with the Ewald cap (light blue), incident-beam arrow (yellow), rotation axis (pink), the reciprocal basis and cell of Domain 1, observed spots (blue), predicted-but-unobserved lattice points (orange) and reflections diffracting within ±0.5° of the slider ω (black).](figures/solve_cell_viz/fig_overlays.png){width=85%}
 
@@ -122,7 +121,7 @@ The prediction is a forward calculation from a refined UB, independent of what w
 
 The stored table has one row per `(panel, hkl, crossing)` with `h, k, l, panel_id, omega_deg, row, col, crossing (0/1), qx, qy, qz, visibility, observed_spot_id`. An observed spot is matched to a prediction only when it has an assigned hkl, is on the same panel, has the same hkl, and lies within 1° of the prediction in ω (wrapped to ±180°); the match is *reported* and never reassigns a claim.
 
-In the view, each unique hkl is one point (a lattice point does not depend on ω or panel). *Green* points have at least one crossing explained by an assigned spot; *orange* points land on a panel inside the scan but have no assigned spot (the candidates to inspect if a domain is thought to be incomplete); *grey* points never land on any active panel (optional, "incl. off-panel"). The *diffracting now* highlight marks every crossing within ±0.5° of the slider ω. These actors are small and non-pickable, so that they cannot intercept the picking of observed spots. For Domain 1, with `q_max = 8.20 Å⁻¹`, the table has 1154 crossings, of which 130 are visible and 1024 are off-panel; the unique lattice points split into 64 observed, 44 visible-but-unobserved and 277 off-panel. It should be noted that "visible but not observed" does not mean "missing": the spotfinder threshold and the DAC aperture have not been modelled (§11).
+Checking *lattice points* replaces the observed-spot cloud with one point per on-panel crossing. *Green* crossings are explained by an assigned spot (the point carries that spot's actual frame, ω and row/col, plus the prediction); *orange* crossings land on a panel inside the scan but have no assigned spot (the candidates to inspect if a domain is thought to be incomplete). Off-panel crossings are not drawn. Clicking a point selects it and moves the Detector view to its panel and frame, where the lattice points of that frame are circled in green/orange; unchecking restores the indexed-spot view. The *diffracting now* highlight (unpickable) marks every crossing within ±0.5° of the slider ω. For Domain 1, with `q_max = 8.20 Å⁻¹`, the table has 1154 crossings, of which 130 are visible and 1024 are off-panel; the unique lattice points split into 64 observed, 44 visible-but-unobserved and 277 off-panel. It should be noted that "visible but not observed" does not mean "missing": the spotfinder threshold and the DAC aperture have not been modelled (§11).
 
 ## 4.5 Frame patches on the Ewald surface (V02)
 

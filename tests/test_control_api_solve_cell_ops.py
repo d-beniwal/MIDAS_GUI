@@ -145,8 +145,9 @@ def test_bad_panel_and_bad_calibration_are_errors_not_dialogs(ctrl):
 
 
 def test_stage_parameters_round_trip(ctrl):
-    r = _ok(ctrl, "solve_cell.set_ingest_params", blob_threshold=33.0, blob_min_vol=7,
+    r = _ok(ctrl, "solve_cell.set_ingest_params", blob_threshold=33.0, blob_min_vol=7, blob_min_frames=1,
             gap_bridge=0, sector_candidates=[4, 8])
+    assert r["ingest"]["blob_min_frames"] == 1
     assert r["ingest"]["blob_threshold"] == 33.0 and r["ingest"]["gap_bridge"] == 0
     assert r["ingest"]["sector_candidates"] == [4, 8]
     assert _ok(ctrl, "solve_cell.set_diamond_params", diamond_a=3.6, tol_deg=0.1)["diamond_a"] == 3.6
@@ -291,8 +292,8 @@ def test_view_and_overlay_controls(ctrl):
     assert ctrl._sc._recip_mode.currentIndex() == 1
     assert _call(ctrl, "solve_cell.set_reciprocal_options",
                  color_by="x")["error"]["type"] == "bad_args"
-    ov = _ok(ctrl, "solve_cell.set_overlays", shells=True, ewald=False)
-    assert ov["overlays"]["shells"] and not ov["overlays"]["ewald"]
+    ov = _ok(ctrl, "solve_cell.set_overlays", frame_patches=False, ewald=False)
+    assert not ov["overlays"]["frame_patches"] and not ov["overlays"]["ewald"]
     assert _call(ctrl, "solve_cell.set_overlays", bogus=True)["error"]["type"] == "bad_args"
     sel = _ok(ctrl, "solve_cell.select_spot", spot_id=3)
     assert sel["found"] and "Spot 3" in sel["description"]

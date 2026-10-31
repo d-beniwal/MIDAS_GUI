@@ -44,6 +44,22 @@ Python.
    (stdio transport, e.g. `claude mcp add --transport stdio midas-gui -- 
    /path/to/.venv/bin/python /path/to/midas_gui_mcp/server.py`).
 
+## Agent skills
+
+Instructions for agents driving this server live in `skills/` (each folder is
+a Claude Code-style `SKILL.md`, readable by any agent). The server also
+advertises them in its MCP `instructions` field.
+
+- `skills/midas-gui-mcp-setup/` — launch with the control socket, register the
+  server, diagnose a dead socket.
+- `skills/midas-gui-mcp-calibrate/` — calibration recipe and gotchas (seeds,
+  wavelength/pixel size, polling, abort).
+- `skills/midas-gui-mcp-project/` — saving and opening project `.h5` files.
+
+To make them auto-load in Claude Code, symlink each folder into
+`.claude/skills/` (this repo, untracked) or `~/.claude/skills/` (every project).
+Update the matching skill when you add or change an op.
+
 ## Wiring this into APEXA
 
 [APEXA](https://github.com/d-beniwal/APEXA-APS-Beamline-Assistant) (the
@@ -186,7 +202,10 @@ protocol transfers large binary payloads inline.
 return `{"job_id": ...}` immediately — the actual fit runs in a subprocess.
 Poll with `calibrate.get_job` (non-blocking) or `calibrate.wait` (blocks, up
 to a timeout, pumping the GUI event loop so the GUI stays responsive while
-you wait).
+you wait). `calibrate.abort` (MCP tool `calibrate_abort`) is the Abort button:
+it frees the tab at once and the job's status becomes `aborted`; it does not
+reset manual-seed settings. Seeds persist between runs; pass `clear_seed=true` to
+`calibrate.run` to untick every seed first.
 
 `solve_cell.run_ingest` / `run_diamond_filter` / `run_index` / `run_refine` /
 `run_index_remaining` follow the same pattern: each returns a `job_id`, and
@@ -205,7 +224,7 @@ Pipeline order, each stage an op pair (`set_*_params` + `run_*`):
 |---|---|---|
 | Panels | `add_panel`, `select_panel`, `remove_panel`, `panel_load_data`, `panel_set_field`, `panel_load_calibration`, `panel_set_omega`, `panel_list_omega_fields`, `panel_detect_first_idx`, `set_project_dir` | — |
 | 1 Ingest | `set_ingest_params` | `run_ingest` |
-| 2 Diamond filter | `set_diamond_params` | `run_diamond_filter` |
+| 2 Material filter | `set_material_filter` (`set_diamond_params` = Diamond shortcut) | `run_diamond_filter` (alias `run_material_filter`) |
 | 3 Index | `set_index_params` (free / known_structure) | `run_index` |
 | 4 Refine (free mode) | — | `run_refine` |
 | 5 Index remaining | `set_remaining_params`, `fill_remaining_from_latest_domain` | `run_index_remaining` |
@@ -220,6 +239,18 @@ in agent mode. Two interactive confirmations — "omega step is 0°" and
 "calibration doesn't declare im_trans" — are refused with an explanatory
 message unless `run_ingest` is passed `acknowledge_warnings=True`; check the
 mapping/calibration before acknowledging.
+
+### Projects
+
+`project.get_info`, `project.save` and `project.open` (MCP tools `project_*`)
+are File ▸ Open Project / Save Project (As) without the dialogs. `save` with
+no `path` overwrites the open project; with a `path` it is Save As (`.h5`
+appended, an existing file refused unless `overwrite`, `history` =
+none/latest/all). `open` restores every part of the project; `exclude` skips
+`workspace_tabs`, `calib_refs`, `integrate_refs`, `solve_cell` or `mask_ref`.
+It is refused while the session has unsaved changes unless `discard_unsaved`.
+The window's message boxes are recorded instead of shown while these run, so a
+dialog cannot block the control socket.
 
 ### Operations
 
