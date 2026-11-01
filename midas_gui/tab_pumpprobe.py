@@ -531,7 +531,7 @@ class PumpProbeTab(QtWidgets.QWidget):
         histogram = pg.HistogramLUTWidget()
         histogram.setBackground("w")
         histogram.setImageItem(self._hm_img)
-        self._hm_scale = ColorScaleControls(histogram)
+        self._hm_scale = ColorScaleControls(histogram, integer=False)
         map_container = QtWidgets.QWidget()
         map_row = QtWidgets.QHBoxLayout(map_container)
         map_row.setContentsMargins(0, 0, 0, 0)

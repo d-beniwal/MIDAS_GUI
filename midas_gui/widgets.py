@@ -2041,6 +2041,8 @@ class RingResidualViewer(CakeViewer):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._color_scale.integer = False  # signed/fractional residual map
+        self._color_scale.reset()
         self._log.setVisible(False)
         self._cmap.insertItem(0, "coolwarm")
         self._cmap.setCurrentIndex(0)

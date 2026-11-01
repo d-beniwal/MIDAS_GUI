@@ -1,8 +1,10 @@
 # Project state
 
-Last updated: 2026-10-31 (absolute image color limits + bounded histogram navigation)
+Last updated: 2026-11-01 (integer color limits, Min=1 default, Reset button, sliders leave fields fixed)
 
 ## Now working on
+
+2026-11-01: Min/Max are whole numbers, auto Min = 1, button is "Reset", and histogram sliders only adjust contrast (`contrast`) without touching the fields. Signed/fractional maps (residual, pump-probe) opt out via `integer=False`.
 
 Shared image color scales now have Max/Min fields above/below the histogram,
 defaulting to finite image extrema. Typed limits stay linear in the fields,

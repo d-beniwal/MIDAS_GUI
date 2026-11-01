@@ -40,14 +40,14 @@ def edit(scale, lo, hi):
     scale.maximum.editingFinished.emit()
 
 
-def test_defaults_are_exact_image_extrema_and_follow_frames(view):
-    fill(view, np.array([[0., 10.], [100., np.nan]]))
+def test_defaults_are_min_one_integers_and_follow_frames(view):
+    fill(view, np.array([[0., 10.], [100.4, np.nan]]))
     scale = view._color_scale
-    assert float(scale.minimum.text()) == 0
-    assert float(scale.maximum.text()) == 100
+    assert scale.minimum.text() == "1"
+    assert scale.maximum.text() == "100"
     assert scale.manual_limits is None
     fill(view, np.array([[-5., 20.], [1000., np.inf]]))
-    assert scale.limits == (-5., 1000.)
+    assert scale.limits == (1., 1000.)
     assert scale.manual_limits is None
 
 
@@ -68,14 +68,15 @@ def test_typed_limits_survive_new_frames_log_switches_and_zoom(view, app):
         vb.setYRange(lo - 10000, hi + 10000, padding=0)
         app.processEvents()
         actual = vb.viewRange()[1]
-        assert actual[0] >= lo - 1e-8 and actual[1] <= hi + 1e-8
+        pad = (hi - lo) * scale.EDGE_PAD + 1e-8
+        assert actual[0] >= lo - pad and actual[1] <= hi + pad
         vb.setYRange(lo + (hi-lo)*.2, lo + (hi-lo)*.6, padding=0)
         zoomed = vb.viewRange()[1]
         fill(view, np.ones((3, 4)) * 9)
         np.testing.assert_allclose(vb.viewRange()[1], zoomed)
     scale.auto_button.click()
     assert scale.manual_limits is None
-    assert scale.limits == (9., 9.)
+    assert scale.limits == (1., 9.)
 
 
 def test_zero_and_negative_limits_survive_a_log_round_trip(view):
@@ -98,13 +99,21 @@ def test_invalid_edits_do_not_change_the_scale(view, lo, hi):
     assert view._color_scale.manual_limits == (2., 50.)
 
 
-def test_histogram_drag_updates_absolute_fields_in_log_mode(view):
+def test_histogram_drag_leaves_fields_and_range_fixed(view):
     fill(view, np.array([[1., 10.], [100., 1000.]]))
+    scale = view._color_scale
+    view._log.setChecked(False)
+    edit(scale, 1, 1000)
+    scale.histogram.setLevels(10., 500.)
+    assert (scale.minimum.text(), scale.maximum.text()) == ("1", "1000")
+    assert scale.limits == scale.manual_limits == (1., 1000.)
+    assert scale.contrast == (10., 500.)
     view._log.setChecked(True)
-    view._color_scale.histogram.setLevels(1., 2.)
-    assert view._color_scale.limits == (10., 100.)
-    assert float(view._color_scale.minimum.text()) == 10
-    assert float(view._color_scale.maximum.text()) == 100
+    scale.histogram.setLevels(1., 2.)
+    assert (scale.minimum.text(), scale.maximum.text()) == ("1", "1000")
+    assert scale.limits == (1., 1000.)
+    scale.auto_button.click()
+    assert scale.contrast is None
 
 
 def test_display_state_stores_absolute_limits(view):
@@ -123,7 +132,7 @@ def test_auto_releases_a_legacy_percentile_style(view):
     fill(view, np.arange(12.).reshape(3, 4))
     view.set_display_state({"vmin": 30, "vmax": 99})
     view._color_scale.auto_button.click()
-    assert view._color_scale.limits == (0., 11.)
+    assert view._color_scale.limits == (1., 11.)
     state = view.display_state()
     assert state.get("vmin", 0) == 0
     assert state.get("vmax", 100) == 100
