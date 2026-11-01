@@ -1246,9 +1246,9 @@ def _add_auto_manual_buttons(plot_widget: "pg.PlotWidget", on_auto, on_manual):
 
 
 def _install_manual_axis_capture(plot_widget: "pg.PlotWidget", callback):
-    """Call ``callback(xmin, xmax, ymin, ymax)`` with the ViewBox's current
-    view range whenever the user commits a value into the PlotWidget's own
-    native right-click "X axis" / "Y axis" > Manual min/max fields.
+    """Call ``callback(axis, lo, hi)`` (axis 0 = X, 1 = Y) whenever the user
+    commits a value into the PlotWidget's own native right-click "X axis" /
+    "Y axis" > Manual min/max fields.
 
     pyqtgraph already applies a typed value to the view itself (see
     ``ViewBoxMenu.xRangeTextChanged``/``yRangeTextChanged``); this just lets a
@@ -1256,29 +1256,49 @@ def _install_manual_axis_capture(plot_widget: "pg.PlotWidget", callback):
     toggle button pair (see :func:`_add_auto_manual_buttons`) should hold and
     restore.
 
-    Reads the literal text out of the menu's own min/max fields rather than
-    the ViewBox's post-edit ``viewRange()`` — a caller that clamps pan/zoom to
-    the held manual range (see ``_apply_manual_range`` below) has already
-    locked in the *previous* range by the time pyqtgraph's own handler tries
-    to apply the newly typed one, so ``viewRange()`` here would just read back
-    that stale clamp instead of what the user actually typed.
+    Reports ONLY the axis that was edited, read from that axis's own min/max
+    text: the menu mirrors the view as ``"%0.5g"``, so reading the untouched
+    axis back from its text would silently round (and, after a clamp, stale)
+    the limits the user set earlier. The caller keeps the other axis's held
+    value. Text is read rather than ``viewRange()`` because a caller that clamps
+    pan/zoom to the held range has already locked in the *previous* range by the
+    time pyqtgraph's own handler tries to apply the newly typed one.
     """
     vb = plot_widget.getViewBox()
 
-    def _captured(*_):
-        try:
-            xmin = float(vb.menu.ctrl[0].minText.text())
-            xmax = float(vb.menu.ctrl[0].maxText.text())
-            ymin = float(vb.menu.ctrl[1].minText.text())
-            ymax = float(vb.menu.ctrl[1].maxText.text())
-        except ValueError:
-            (xmin, xmax), (ymin, ymax) = vb.viewRange()
-        callback(xmin, xmax, ymin, ymax)
+    def _make(axis):
+        def _captured(*_):
+            ctrl = vb.menu.ctrl[axis]
+            try:
+                lo = float(ctrl.minText.text())
+                hi = float(ctrl.maxText.text())
+            except ValueError:
+                lo, hi = vb.viewRange()[axis]
+            if math.isfinite(lo) and math.isfinite(hi):
+                callback(axis, lo, hi)
+        return _captured
 
     for axis in (0, 1):
         ctrl = vb.menu.ctrl[axis]
-        ctrl.minText.editingFinished.connect(_captured)
-        ctrl.maxText.editingFinished.connect(_captured)
+        cb = _make(axis)
+        ctrl.minText.editingFinished.connect(cb)
+        ctrl.maxText.editingFinished.connect(cb)
+
+
+def _merged_manual_range(held, view_range, axis, lo, hi):
+    """New ``(xmin, xmax, ymin, ymax)`` after the user edited one axis.
+
+    The edited axis takes ``(lo, hi)``; the other keeps its held value, or the
+    view's current range when nothing is held yet."""
+    if held is None:
+        (x0, x1), (y0, y1) = view_range
+        held = (x0, x1, y0, y1)
+    xmin, xmax, ymin, ymax = held
+    if axis == 0:
+        xmin, xmax = lo, hi
+    else:
+        ymin, ymax = lo, hi
+    return (xmin, xmax, ymin, ymax)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -2534,15 +2554,18 @@ class ProfileViewer(QtWidgets.QWidget):
         self._user_yrange = None
         self._replot()
 
-    def _on_manual_range_edited(self, xmin, xmax, ymin, ymax):
-        """The user set exact limits via an axis's native right-click
-        "Manual" min/max fields (pyqtgraph already applied it to the view) —
-        remember it as the held manual range: what "M" reapplies on a
-        reclick, and what every live-acquisition redraw holds to while
-        Manual is active."""
-        self._manual_range = (xmin, xmax, ymin, ymax)
-        if self._manual_mode:
-            self._apply_manual_range()
+    def _on_manual_range_edited(self, axis, lo, hi):
+        """The user typed exact limits into an axis's native right-click
+        "Manual" min/max fields (pyqtgraph already applied it to the view).
+        Typing limits IS choosing manual mode, whichever of "A"/"M" was lit:
+        left in Auto, the next live frame would re-fit the plot and throw the
+        typed values away. So switch to Manual, hold the range, and re-apply it
+        on every redraw until "A" is clicked."""
+        self._manual_range = _merged_manual_range(
+            self._manual_range, self._plot.getViewBox().viewRange(), axis, lo, hi)
+        self._manual_mode = True
+        self._btn_manual.setChecked(True)
+        self._apply_manual_range()
 
     def _on_manual_clicked(self):
         """"M" clicked — switch to Manual, or (on a reclick) snap back to the
@@ -4220,15 +4243,18 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
     def set_scope_enabled(self, on: bool):
         self._scope.setEnabled(on)
 
-    def _on_manual_range_edited(self, xmin, xmax, ymin, ymax):
-        """The user set exact limits via an axis's native right-click
-        "Manual" min/max fields (pyqtgraph already applied it to the view) —
-        remember it as the held manual range: what "M" reapplies on a
-        reclick, and what every live-acquisition redraw holds to while
-        Manual is active."""
-        self._manual_range = (xmin, xmax, ymin, ymax)
-        if self._manual_mode:
-            self._apply_manual_range()
+    def _on_manual_range_edited(self, axis, lo, hi):
+        """The user typed exact limits into an axis's native right-click
+        "Manual" min/max fields (pyqtgraph already applied it to the view).
+        Typing limits IS choosing manual mode, whichever of "A"/"M" was lit:
+        left in Auto, the next live frame would re-fit the plot and throw the
+        typed values away. So switch to Manual, hold the range, and re-apply it
+        on every redraw until "A" is clicked."""
+        self._manual_range = _merged_manual_range(
+            self._manual_range, self._plot.getViewBox().viewRange(), axis, lo, hi)
+        self._manual_mode = True
+        self._btn_manual.setChecked(True)
+        self._apply_manual_range()
 
     def _on_manual_clicked(self):
         """"M" clicked — switch to Manual, or (on a reclick) snap back to the
