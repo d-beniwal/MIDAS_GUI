@@ -3,6 +3,10 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-31 — Calibrate parameters panel streamlined (name colour replaces status text)
+
+Panel was too tall/wide. (1) The "n/15" button is gone: the "Distortion" row name is itself the button that opens the coefficient picker, with a small "n/15" line beneath (`CalibrationParameterTable.dist_count_lbl`, still reachable as `tab._dist_btn`). (2) The per-row "refined, auto-seeded / held at…" sub-rows (`OUTCOME`, `_status_lbls`) are removed; a row name turns green (`REFINED_COLOR`) while its Refine tick is on — seed and refine stay independent, so seeding alone never colours. (3) The ± glyph column and the separate units column are gone: the spin and unit combo share the "± range" cell. (4) Rows read BC_Y / BC_Z with tooltips (MIDAS convention, origin bottom-left). Distortion refinement and Residual map now default to unchecked. Tests updated (`_name_widgets` stylesheet replaces `_status_lbls`); Hydra page untouched.
+
 ## 2026-10-31 — Calibrate: send the GUI's lattice dict to midas_calibrate_v2, not the calibrant name
 
 Root cause (user report, beamline machine): `KeyError: Unknown calibrant 'CeO2(SRM674b)'`. `calibrate()` / `make_seed()` resolved the name string against the backend's own `CALIBRANTS` (CeO2/LaB6/Si/Al2O3 only), so GUI-defined names failed and edited lattice values for built-in names were silently ignored (a-error is exactly degenerate with Lsd). Both accept `Union[str, dict]`, so `calib.backend_calibrant(name)` builds `{name,a,b,c,alpha,beta,gamma,sg}` from `constants._LATT` (Preferences ▸ Calibrants) and is used at the two by-name call sites (`make_seed_safe`, v2 `calibrate`). Other pipelines already used `_LC`/`_SG`. Consequence: built-ins now use GUI values (LaB6 4.15692, Si 5.43102 vs backend 4.1569/5.4310); custom lattices must match their space-group system or the backend raises ValueError. `make_seed_safe` still swallows exceptions (bad calibrant shows as "auto-seed failed").

@@ -66,14 +66,14 @@ def test_pick_bc_sets_value_but_does_not_activate_manual_seed(app):
     # This fork replaced the "Manual seed..." button with
     # CalibrationParameterTable, so the equivalent "did picking a BC
     # quietly promote it into the seed?" readout is that row's status.
-    status_before = tab._param_table._status_lbls["BC"].text()
+    status_before = tab._param_table._name_widgets["BC_y"].styleSheet()
 
     tab._on_bc_picked(123.4, 56.7)
 
     assert tab._seed_bcy.value() == pytest.approx(123.4)
     assert tab._seed_bcz.value() == pytest.approx(56.7)
     assert tab._seed_en_bc.isChecked() is False
-    assert tab._param_table._status_lbls["BC"].text() == status_before   # still not "active" (green)
+    assert tab._param_table._name_widgets["BC_y"].styleSheet() == status_before   # still not "active" (green)
 
 
 @pytest.mark.forked
@@ -84,14 +84,14 @@ def test_ring_fit_bc_sets_value_but_does_not_activate_manual_seed(app):
     # This fork replaced the "Manual seed..." button with
     # CalibrationParameterTable, so the equivalent "did picking a BC
     # quietly promote it into the seed?" readout is that row's status.
-    status_before = tab._param_table._status_lbls["BC"].text()
+    status_before = tab._param_table._name_widgets["BC_y"].styleSheet()
 
     tab._on_ring_fit_bc(10.0, 20.0, 99.0)
 
     assert tab._seed_bcy.value() == pytest.approx(10.0)
     assert tab._seed_bcz.value() == pytest.approx(20.0)
     assert tab._seed_en_bc.isChecked() is False
-    assert tab._param_table._status_lbls["BC"].text() == status_before
+    assert tab._param_table._name_widgets["BC_y"].styleSheet() == status_before
 
 
 @pytest.mark.forked

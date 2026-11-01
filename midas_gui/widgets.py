@@ -37,7 +37,8 @@ _DEFAULT_CMAP = DEFAULT_COLORMAP if DEFAULT_COLORMAP in COLORMAPS else COLORMAPS
 # tab fits) is bottom-left, which stays the default everywhere.
 ORIGIN_BOTTOM_LEFT = "bottom-left"
 ORIGIN_TOP_LEFT = "top-left"
-ORIGIN_LABELS = {ORIGIN_BOTTOM_LEFT: "Bottom-left", ORIGIN_TOP_LEFT: "Top-left"}
+ORIGIN_LABELS = {ORIGIN_BOTTOM_LEFT: "Bottom-Left (MIDAS)",
+                ORIGIN_TOP_LEFT: "Top-Left (ImageJ)"}
 # Abbreviated form for the toolbar button itself: the image toolbar is already
 # over-full at the app's default window size (every control in it elides), so a
 # full "Origin: Bottom-left" button would render as "Ori...eft". The dropdown

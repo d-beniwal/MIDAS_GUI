@@ -105,14 +105,14 @@ def test_origin_button_tracks_and_drives_the_viewer(viewer):
     btn = OriginToolButton(viewer)
     assert btn.text() == "Origin: BL"
     assert "Bottom-Left" in btn.toolTip()          # the MIDAS-calibration hint
-    assert "Currently: Bottom-left" in btn.toolTip()
-    assert [a.text() for a in btn._actions.values()] == ["Bottom-left", "Top-left"]
+    assert "Currently: Bottom-Left (MIDAS)" in btn.toolTip()
+    assert [a.text() for a in btn._actions.values()] == ["Bottom-Left (MIDAS)", "Top-Left (ImageJ)"]
 
     top_left_action = btn._actions[ORIGIN_TOP_LEFT]
     top_left_action.trigger()
     assert viewer.origin() == ORIGIN_TOP_LEFT
     assert btn.text() == "Origin: TL"
-    assert "Currently: Top-left" in btn.toolTip()
+    assert "Currently: Top-Left (ImageJ)" in btn.toolTip()
     assert top_left_action.isChecked()
 
     # Changed behind the button's back (project-state restore) → sync() catches up.

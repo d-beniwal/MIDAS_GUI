@@ -681,8 +681,8 @@ class CalibrationTab(QtWidgets.QWidget):
         self._ref_tz = QtWidgets.QCheckBox("tz"); self._ref_tz.setChecked(True)
         self._ref_tx = QtWidgets.QCheckBox("tx")
         self._ref_wl = QtWidgets.QCheckBox("Wavelength")
-        self._ref_dist = QtWidgets.QCheckBox("Distortion"); self._ref_dist.setChecked(True)
-        self._build_rc = QtWidgets.QCheckBox("Residual map"); self._build_rc.setChecked(True)
+        self._ref_dist = QtWidgets.QCheckBox("Distortion"); self._ref_dist.setChecked(False)
+        self._build_rc = QtWidgets.QCheckBox("Residual map"); self._build_rc.setChecked(False)
         for w in (self._ref_lsd, self._ref_bc, self._ref_ty, self._ref_tz,
                   self._ref_tx, self._ref_wl):
             w.toggled.connect(self._on_refine_flags_changed)
@@ -703,14 +703,13 @@ class CalibrationTab(QtWidgets.QWidget):
         # dialog. Held in a container widget (not a bare layout) so the whole
         # thing can be hidden as one unit for calibrants with no distortion
         # refinement. Built before the table, which places it.
-        self._dist_btn = QtWidgets.QToolButton(); self._dist_btn.setText("…")
-        self._dist_btn.setToolTip("Choose which distortion coefficients to refine "
-                                  "(η-fold presets available).")
-        self._dist_btn.clicked.connect(self._edit_distortion_coeffs)
+        # The "Distortion" name in the table is the button that opens the
+        # picker; this label is the small "n/15" line under it (the table
+        # owns the widget, which keeps the name _dist_btn).
         self._dist_row = QtWidgets.QWidget()
         drow = QtWidgets.QHBoxLayout(self._dist_row)
         drow.setContentsMargins(0, 0, 0, 0); drow.setSpacing(4)
-        drow.addWidget(self._ref_dist); drow.addWidget(self._dist_btn)
+        drow.addWidget(self._ref_dist)
         drow.addStretch(1)
 
         self._param_table = CalibrationParameterTable(
@@ -727,9 +726,11 @@ class CalibrationTab(QtWidgets.QWidget):
             # dist_refine_row, with the selector that belongs to it.
             dist_seed_btn=self._seed_dist_btn,
             dist_refine_row=self._dist_row,
+            on_distortion_clicked=self._edit_distortion_coeffs,
             on_limits_changed=self._on_limits_changed, parent=self)
+        self._dist_btn = self._param_table.dist_count_lbl
         self._param_table.set_refine_boxes(
-            {"BC": self._ref_bc, "Lsd": self._ref_lsd, "tx": self._ref_tx,
+            {"Wavelength": self._ref_wl, "BC": self._ref_bc, "Lsd": self._ref_lsd, "tx": self._ref_tx,
              "ty": self._ref_ty, "tz": self._ref_tz,
              "Distortion": self._ref_dist})
         # Same dict objects the table built, so the limits machinery
@@ -1404,8 +1405,8 @@ class CalibrationTab(QtWidgets.QWidget):
         self._ref_dist.setText("")
         self._dist_btn.setText(f"{n}/15")
         self._dist_btn.setToolTip(
-            f"Refining {n} of 15 distortion coefficients — click to choose "
-            "which (η-fold presets available).")
+            f"Refining {n} of 15 distortion coefficients — click "
+            "\"Distortion\" to choose which (η-fold presets available).")
         self._update_refine_summary()
 
     def _on_refine_flags_changed(self, *_args):
@@ -2457,6 +2458,7 @@ class CalibrationTab(QtWidgets.QWidget):
         self._refc_card.setVisible(True)
         self._sync_limits_mode(is_dsp)
         self._dist_row.setVisible(not is_dsp)
+        self._dist_btn.setVisible(not is_dsp)
         self._build_rc.setVisible(not is_dsp)
         self._refc_card.setToolTip(
             "Distortion and residual-map refinement need a full-image forward "
