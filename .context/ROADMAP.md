@@ -19,6 +19,17 @@ Build-critical reference for maintaining the PDF tab:
 
 These were open in the prior snapshot; check current code before acting.
 
+- **Calibration pipeline comparison (deferred by user, 2026-10-31):** the GUI
+  now offers only One-shot (default), Frozen-point (fast/high-tilts), and
+  Frozen-point + One-shot. Systematically probe First-time, Four-stage,
+  Bayesian MAP+Laplace, Joint cake, and the multi-distance workflow later
+  before deciding which to reintroduce. Retain backend adapters for research.
+  Compare geometry/pixel residuals, tilt recovery, convergence/basin failures,
+  runtime, seeds/refine/window fidelity, masks/transforms, multi-panel support,
+  uncertainty and residual-map export on representative real/synthetic data.
+  Live-check the new two-stage option on beamline data; stage 2 uses all fitted
+  Frozen-point seeds through One-shot's lower-level seeded refinement path.
+
 - **MCP phase 2:** extend the current Data Viewer/Calibrate control surface
   to Mask and Batch Integrate when requested. Phase 1 is already on `main`;
   see `midas_gui_mcp/README.md` for operation coverage and APEXA integration.
@@ -33,7 +44,11 @@ These were open in the prior snapshot; check current code before acting.
   single-frame with cfg χ/φ); inspect cake HDF5 in a real viewer and continue
   testing metadata provenance.
 - **Frozen-point calibration:** the high-tilt `_seed_and_v1` branch does not
-  forward `tols=tols`; the UI currently warns. See DECISIONS 2026-09-30.
+  forward `tols=tols`, and the backend iterative wrapper also replaces geometry
+  bounds with its own `bounds_*` windows. Wire both layers before claiming GUI
+  ranges apply; define per-stage vs whole-run cap semantics for the combined
+  pipeline. The GUI currently explains that its windows apply only to the
+  combined pipeline's One-shot stage, around the Frozen-point result.
 - **Calibrate UI unification:** see
   `documentation/calibration_unification_plan.md`; recheck surface parity
   after recent Hydra changes before choosing the next phase.

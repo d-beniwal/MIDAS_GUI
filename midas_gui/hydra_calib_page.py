@@ -34,7 +34,7 @@ import numpy as np
 from PyQt5 import QtCore, QtWidgets
 
 from midas_gui.constants import (
-    CALIBRANTS, PIPELINES, DEFAULT_PIPELINE, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM,
+    CALIBRANTS, PIPELINES, DEFAULT_PIPELINE, restored_pipeline_label, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM,
     DISTORTION_NAMES)
 from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _NoScrollComboBox, make_kedge_label, make_pixel_label,
@@ -603,6 +603,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         rfl_bottom.addWidget(self._build_rc, 0, 2)
         self._ref_dist.toggled.connect(lambda _=0: self._update_dist_label())
         self._ref_dist.toggled.connect(self._update_limits_note)
+        self._pipeline.currentIndexChanged.connect(self._update_limits_note)
         refc.body.addLayout(rfl_bottom)
         lv.addWidget(refc)
         self._update_dist_label()
@@ -1408,6 +1409,13 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         tail = "" if tols else "  — backend defaults; edit any to tighten or loosen"
         self._limits_note.setText("Always applied, centred on the seed: "
                                   + "   ".join(bits) + tail)
+        mode = self._pipeline.currentData()
+        if mode == "frozen_point":
+            self._limits_note.setText("Frozen-point uses backend search windows; "
+                                      "these GUI ± ranges are not applied.")
+        elif mode == "frozen_point_one_shot":
+            self._limits_note.setText("One-shot stage only (around the Frozen-point "
+                                      "result): " + "   ".join(bits) + tail)
 
     # ── Run ────────────────────────────────────────────────────────
 
@@ -1892,7 +1900,10 @@ class HydraCalibrationPage(QtWidgets.QWidget):
     def set_state(self, state: dict):
         if not state:
             return
-        apply_dict_to_widgets(self._state_widgets(), state.get("fields", {}))
+        fields = dict(state.get("fields", {}))
+        if "pipeline" in fields:
+            fields["pipeline"] = restored_pipeline_label(fields["pipeline"])
+        apply_dict_to_widgets(self._state_widgets(), fields)
         # apply_dict_to_widgets restores with signals blocked, so neither the
         # threshold editor's editable/visual state nor the Limits note
         # resyncs on its own — do both explicitly (same precedent as

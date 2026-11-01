@@ -218,8 +218,8 @@ def calibrate_run(mode: str, refine: Optional[dict] = None,
                   manual_seed: Optional[dict] = None, limits: Optional[dict] = None,
                   build_residual_corr: Optional[bool] = None,
                   clear_seed: bool = False) -> Any:
-    """Start a calibration run. mode is one of: one_shot, first_time,
-    four_stage, bayesian, joint, frozen_point.
+    """Start a calibration run. mode is one of: one_shot, frozen_point,
+    frozen_point_one_shot (both stages in one abortable job).
 
     Manual-seed ticks persist between runs (a seed given to an earlier run is
     reused). Pass clear_seed=True to untick every seed first, for a fully

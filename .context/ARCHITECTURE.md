@@ -128,8 +128,16 @@ becomes a placeholder; signal wiring guarded by `_connect`.
   off-white text); **single orange primary action per tab**; **no emojis**
   anywhere (UI or code). Inspiration repo: `~/ANL-research/github/Dioptas`.
 - Green checkboxes AND radio buttons (white SVG tick via global stylesheet).
-- Colormap default **"hot"**; vmin% default **30**; Y lower-limit −1000 linear /
-  1 log.
+- Colormap default **"hot"**. Image color limits default to the finite image
+  min/max (including zero), with **Max above / Min below** the right-hand
+  histogram; edits are absolute linear data values even in Log mode.
+  `color_scale.ColorScaleControls` owns canonical linear limits, data-to-log
+  conversion, bounded histogram pan/zoom and Auto reset. Shared by detector
+  viewers (including ROI/pickable), Cake/Stack/Residual, Waterfall and Pump Probe
+  heatmap. Manual limits/zoom persist across frame redraws; a fresh dataset or
+  Auto resets them. Persist `color_limits` via viewer display state. Hidden
+  percentile widgets remain only for compatibility with older saved styles.
+- Profile Y lower-limit −1000 linear / 1 log.
 - Compact left panels: pair related fields per row via `_twocol()`; advanced
   options in collapsible checkable QGroupBox; scrollable fixed-width panels.
 - **No mouse-wheel value changes** on spinboxes (`_fspin`/`_NoScrollSpinBox`).

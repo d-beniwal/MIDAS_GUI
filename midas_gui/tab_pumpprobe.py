@@ -40,6 +40,7 @@ from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, DataLoaderPanel,
 from midas_gui.workers import PumpProbeWorker
 from midas_gui.dialogs import show_error
 from midas_gui import style as S
+from midas_gui.color_scale import ColorScaleControls
 
 
 # ── TRR filename parsing ─────────────────────────────────────────────────────────
@@ -197,12 +198,15 @@ class PumpProbeTab(QtWidgets.QWidget):
             "fields": widgets_to_dict(self._state_widgets()),
             "corr": self._corr_widget.get_state(),
             "loader": self._loader.get_state(),
+            "heatmap_color": self._hm_scale.display_state(),
         }
 
     def set_state(self, state: dict):
         self._loader.set_state(state.get("loader") or {})
         apply_dict_to_widgets(self._state_widgets(), state.get("fields", {}))
         self._corr_widget.set_state(state.get("corr") or {})
+        self._on_heatmap_range_changed()
+        self._hm_scale.restore_state(state.get("heatmap_color") or {})
         self._scan()
 
     # ── UI ─────────────────────────────────────────────────────────
@@ -339,14 +343,13 @@ class PumpProbeTab(QtWidgets.QWidget):
         nf = S.Form(); nf.row(("q lo:", self._norm_lo), ("q hi:", self._norm_hi))
         pp.body.addLayout(nf)
         self._auto_v = QtWidgets.QCheckBox("Auto colour range (ΔI)"); self._auto_v.setChecked(True)
-        pp.body.addWidget(self._auto_v)
+        self._auto_v.hide()  # legacy state; absolute controls live beside the map
         self._vrange = _fspin(0.0, 1e9, 4, 0.12)
         self._vrange.setEnabled(False)
         self._auto_v.toggled.connect(lambda c: self._vrange.setEnabled(not c))
-        self._auto_v.toggled.connect(self._replot)
-        self._vrange.valueChanged.connect(self._replot)
-        vf = S.Form(); vf.row(("±ΔI range:", self._vrange))
-        pp.body.addLayout(vf)
+        self._auto_v.toggled.connect(self._on_heatmap_range_changed)
+        self._vrange.valueChanged.connect(self._on_heatmap_range_changed)
+        self._vrange.hide()
         self._cmap = _NoScrollComboBox()
         self._cmap.addItems(["bwr", "CET-D1", "CET-D9", "seismic"])
         self._cmap.currentIndexChanged.connect(self._replot)
@@ -524,9 +527,17 @@ class PumpProbeTab(QtWidgets.QWidget):
         self._hm_plot = pg.PlotWidget(background="w", axisItems={"left": self._hm_yaxis})
         self._hm_img = pg.ImageItem()
         self._hm_plot.addItem(self._hm_img)
-        self._hm_bar = None
         self._chrome(self._hm_plot, title="ΔI(q, delay)", xlabel="delay (s)", ylabel="Q (Å⁻¹)")
-        hsplit.addWidget(self._hm_plot)
+        histogram = pg.HistogramLUTWidget()
+        histogram.setBackground("w")
+        histogram.setImageItem(self._hm_img)
+        self._hm_scale = ColorScaleControls(histogram)
+        map_container = QtWidgets.QWidget()
+        map_row = QtWidgets.QHBoxLayout(map_container)
+        map_row.setContentsMargins(0, 0, 0, 0)
+        map_row.addWidget(self._hm_plot, 1)
+        map_row.addWidget(self._hm_scale)
+        hsplit.addWidget(map_container)
         # Reference pattern I(q) beside the map, sharing the (radial) y-axis.
         self._ref_plot = pg.PlotWidget(background="w")
         self._ref_plot.setYLink(self._hm_plot)
@@ -745,11 +756,12 @@ class PumpProbeTab(QtWidgets.QWidget):
             return d["tth_axis"], "2θ (°)"
         return d["r_axis_px"], "R (px)"
 
-    def _vrange_value(self):
-        if self._auto_v.isChecked() and self._data is not None:
-            v = float(np.nanpercentile(np.abs(self._data["dI"]), 99.0))
-            return v if v > 0 else 1.0
-        return max(1e-9, self._vrange.value())
+    def _on_heatmap_range_changed(self, *_):
+        if not hasattr(self, "_hm_scale"):
+            return
+        self._hm_scale.manual_limits = (None if self._auto_v.isChecked()
+                                        else (-self._vrange.value(), self._vrange.value()))
+        self._replot()
 
     @staticmethod
     def _reset_limits(vb):
@@ -801,27 +813,15 @@ class PumpProbeTab(QtWidgets.QWidget):
         r_px = np.asarray(d["r_axis_px"], dtype=float)   # uniform native radial grid
         n_d, n_r = len(delays), len(r_px)
         r0, r1 = float(r_px[0]), float(r_px[-1])
-        v = self._vrange_value()
         cm = _diverging_cmap(self._cmap.currentText())
         # image: x = delay column index (delays are irregular); y = radial in real R-px
-        self._hm_img.setImage(dI, autoLevels=False, levels=(-v, v))
+        self._hm_scale.render(dI, image_item=self._hm_img)
         try:
             self._hm_img.setColorMap(cm)
         except Exception:
             self._hm_img.setLookupTable(cm.getLookupTable(0.0, 1.0, 256))
         self._hm_img.setRect(QtCore.QRectF(0.0, r0, float(n_d), r1 - r0))
-        # colour bar (create lazily), with readable black chrome + a ΔI label
-        if self._hm_bar is None:
-            try:
-                self._hm_bar = pg.ColorBarItem(values=(-v, v), colorMap=cm, label="ΔI (a.u.)")
-                self._hm_bar.setImageItem(self._hm_img, insert_in=self._hm_plot.getPlotItem())
-            except Exception:
-                self._hm_bar = None
-        else:
-            try:
-                self._hm_bar.setColorMap(cm); self._hm_bar.setLevels((-v, v))
-            except Exception:
-                pass
+        self._hm_scale.histogram.gradient.setColorMap(cm)
         self._style_colorbar()
         # axis titles + ticks. x: real delay values on discrete columns (delays span
         # ~5 decades incl. sign-flipped negatives → not uniformly mappable). y: a true
@@ -991,10 +991,10 @@ class PumpProbeTab(QtWidgets.QWidget):
                 "#000000", width=max(1.5, self._line_width), style=QtCore.Qt.DashLine))
 
     def _style_colorbar(self):
-        if self._hm_bar is None:
+        if not hasattr(self, "_hm_scale"):
             return
         try:
-            ax = getattr(self._hm_bar, "axis", None)
+            ax = self._hm_scale.histogram.item.axis
             if ax is not None:
                 pen = pg.mkPen(_FG)
                 ax.setPen(pen); ax.setTextPen(pen)

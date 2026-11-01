@@ -53,6 +53,7 @@ from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollDoubleSpinBox, _fspin,
                                path_is_missing, _folder_format_groups, radial_spline_values,
                                best_default_dataset_index)
 from midas_gui import style as S
+from midas_gui.color_scale import ColorScaleControls
 
 
 def _mono_font(size: float) -> QtGui.QFont:
@@ -170,19 +171,14 @@ class ImageViewer(QtWidgets.QWidget):
         self._cmap.currentTextChanged.connect(self._set_cmap)
         self._cmap.setFixedWidth(90)
         bar.addWidget(self._cmap)
-        # vmin%/vmax% define the auto-level percentile window that
-        # ``_redisplay`` reads fresh on every redraw. They are deliberately
-        # *not* on the toolbar: the histogram/LUT handles beside the image are
-        # the direct way to set a colour window, and the row is short of space.
-        # They stay real (hidden) spin boxes rather than plain attributes so
-        # ``display_state``/``set_display_state``, the valueChanged wiring and
-        # any caller driving them keep working unchanged.
+        # Hidden compatibility fields for older percentile-based styles.
+        # New views use image extrema and absolute edits beside the LUT.
         self._vmin = _NoScrollSpinBox(self)
-        self._vmin.setRange(0, 99); self._vmin.setValue(30)
+        self._vmin.setRange(0, 99); self._vmin.setValue(0)
         self._vmin.valueChanged.connect(self._on_percentile_changed)
         self._vmin.hide()
         self._vmax = _NoScrollSpinBox(self)
-        self._vmax.setRange(1, 100); self._vmax.setValue(99)
+        self._vmax.setRange(1, 100); self._vmax.setValue(100)
         self._vmax.valueChanged.connect(self._on_percentile_changed)
         self._vmax.hide()
         bar.addStretch(1)
@@ -246,12 +242,7 @@ class ImageViewer(QtWidgets.QWidget):
         # Optional owner-supplied fn(col, row) -> str appended to the readout.
         # See set_radial_readout_fn.
         self._radial_readout_fn = None
-        self._manual_levels: Optional[tuple] = None
-        self._manual_hist_range: Optional[tuple] = None
-        self._suspend_level_track = False
-        self._suspend_hist_range_track = False
-        self._iv.getHistogramWidget().sigLevelsChanged.connect(self._on_hist_levels_changed)
-        self._iv.getHistogramWidget().item.vb.sigRangeChanged.connect(self._on_hist_range_changed)
+        self._color_scale = ColorScaleControls.install(self._iv)
         self._set_cmap(_DEFAULT_CMAP)
         self.enable_frame_fit()
 
@@ -281,14 +272,13 @@ class ImageViewer(QtWidgets.QWidget):
         self._frame_fit.set_bounds(r.left(), r.right(), r.top(), r.bottom(), reset=reset)
 
     def set_image(self, data: np.ndarray, autorange: bool = True, reset_levels: bool = True):
-        """`reset_levels`: drop any manual color-scale/histogram-zoom window and
-        go back to the vmin%/vmax% percentile auto-levels. Pass False for a
+        """`reset_levels`: drop manual color limits and use image min/max.
+        Pass False for a
         live-streaming frame update, where the window should stay put across
         incoming frames until the user chooses to move it."""
         self._data = data.astype(np.float32)
         if reset_levels:
-            self._manual_levels = None
-            self._manual_hist_range = None
+            self._color_scale.reset(preserve_restored=True)
         self._redisplay()
         self._apply_view_limits(data.shape[1], data.shape[0])
         if autorange:
@@ -297,6 +287,15 @@ class ImageViewer(QtWidgets.QWidget):
             else:
                 self._iv.getView().getViewBox().autoRange()
         self._refresh_coord_bar()
+
+    @property
+    def _manual_levels(self):
+        """Compatibility for callers holding a manual window (linear units)."""
+        return self._color_scale.manual_limits
+
+    @_manual_levels.setter
+    def _manual_levels(self, levels):
+        self._color_scale.manual_limits = levels
 
     def set_raw_frame(self, raw_frame: np.ndarray, im_trans, *,
                        autorange: bool = True, reset_levels: bool = True) -> np.ndarray:
@@ -459,8 +458,9 @@ class ImageViewer(QtWidgets.QWidget):
         tab's project-state save) should read from, instead of reaching
         into ``_cmap``/``_log``/``_vmin``/``_vmax`` directly."""
         return {"cmap": self._cmap.currentText(), "log": self._log.isChecked(),
-                "vmin": self._vmin.value(), "vmax": self._vmax.value(),
-                "origin": self._origin}
+                "vmin": (self._color_scale.percentiles or (0, 100))[0],
+                "vmax": (self._color_scale.percentiles or (0, 100))[1],
+                "origin": self._origin, **self._color_scale.display_state()}
 
     def set_display_state(self, state: Optional[dict]) -> None:
         """Inverse of :meth:`display_state`. Restoring ``log``/``vmin``/
@@ -494,6 +494,9 @@ class ImageViewer(QtWidgets.QWidget):
                 spin.blockSignals(False)
         if state.get("origin"):
             self.set_origin(state["origin"])
+        if "vmin" in state or "vmax" in state:
+            self._color_scale.set_percentiles(self._vmin.value(), self._vmax.value())
+        self._color_scale.restore_state(state)
         if self._data is not None:
             self._redisplay()
 
@@ -592,89 +595,15 @@ class ImageViewer(QtWidgets.QWidget):
     def _redisplay(self):
         if self._data is None:
             return
-        d = self._data
-        if self._log.isChecked():
-            disp = np.log10(np.clip(d, 1e-10, None)).T
-        else:
-            disp = d.T
-        if self._manual_levels is not None:
-            lo, hi = self._manual_levels
-        else:
-            # Exclude exact-zero pixels from the percentile calc — on a
-            # mostly-empty canvas (e.g. the Hydra composite's unfilled
-            # BigDet background) they'd otherwise dominate and skew the
-            # auto-level window. Masked on the raw (pre-log) data, since
-            # log10(0) isn't 0. Falls back to the unfiltered set if the
-            # whole frame is exactly zero (nothing loaded yet).
-            nonzero = d.T != 0
-            candidates = disp[np.isfinite(disp) & nonzero]
-            fin = candidates if candidates.size else disp[np.isfinite(disp)]
-            if fin.size:
-                lo = float(np.percentile(fin, self._vmin.value()))
-                hi = float(np.percentile(fin, self._vmax.value()))
-            else:
-                lo, hi = 0.0, 1.0
-        # autoRange/autoHistogramRange default to True in pyqtgraph and would reset
-        # the view on every redraw; set_image() handles framing explicitly via its
-        # `autorange` flag, so the zoom/pan is preserved across frames and re-levels.
-        # Levels are likewise pinned to `lo`/`hi` rather than pyqtgraph's autoLevels
-        # so a manual histogram drag survives subsequent live frames.
-        self._suspend_level_track = True
-        self._suspend_hist_range_track = True
-        self._iv.setImage(disp.astype(np.float32), autoLevels=False, levels=(lo, hi),
-                          autoRange=False, autoHistogramRange=False)
-        if self._manual_hist_range is None:
-            # Zoom the colorbar/histogram's own axis to the percentile window by
-            # default (bad pixels can otherwise stretch the full-range histogram
-            # down to an unreadable sliver); a manual zoom/pan overrides this.
-            self._iv.getHistogramWidget().item.setHistogramRange(lo, hi, padding=0.1)
-        self._suspend_level_track = False
-        self._suspend_hist_range_track = False
-
-    def _on_hist_levels_changed(self, *_args):
-        """User dragged the histogram LUT region — remember it across future frames."""
-        if self._suspend_level_track:
-            return
-        self._manual_levels = tuple(self._iv.getHistogramWidget().getLevels())
-
-    def _on_hist_range_changed(self, *_args):
-        """User zoomed/panned the histogram's own axis — remember it across frames."""
-        if self._suspend_hist_range_track:
-            return
-        self._manual_hist_range = tuple(self._iv.getHistogramWidget().item.getHistogramRange())
+        self._color_scale.render(self._data.T, log=self._log.isChecked(), image_view=self._iv)
 
     def _on_percentile_changed(self, *_args):
-        """User edited vmin%/vmax% — that's an explicit request to go back to auto levels."""
-        self._manual_levels = None
-        self._manual_hist_range = None
+        """Compatibility with older percentile-based display styles."""
+        self._color_scale.set_percentiles(self._vmin.value(), self._vmax.value())
         self._redisplay()
 
     def _on_log_toggled(self, checked: bool):
-        """Log/linear toggled — convert manual levels along with the display,
-        so a manually-set color window keeps pointing at the same underlying
-        data instead of the same raw numbers reinterpreted in the other scale
-        (e.g. a log-space level of 2.0 becoming a linear level of 2.0 instead
-        of 100.0)."""
-        def convert(lo, hi):
-            if checked:   # was linear, now log
-                return (float(np.log10(max(lo, 1e-10))), float(np.log10(max(hi, 1e-10))))
-            else:         # was log, now linear
-                # A manual level can sit anywhere in a histogram view that was
-                # itself dragged out to values far beyond any real data (e.g.
-                # hi=400) — clamp before 10**x since float exponentiation
-                # raises OverflowError rather than saturating at inf.
-                lo = min(max(lo, -300.0), 300.0)
-                hi = min(max(hi, -300.0), 300.0)
-                return (float(10 ** lo), float(10 ** hi))
-        if self._manual_levels is not None:
-            self._manual_levels = convert(*self._manual_levels)
-        # Don't carry a manually-panned/zoomed histogram window through the
-        # same nonlinear transform: containment of the levels is preserved
-        # mathematically, but they can end up squeezed into an imperceptible
-        # sliver of the transformed window. Drop the pin instead so
-        # _redisplay() reframes the view tightly around the (converted)
-        # levels, same as it does for a fresh percentile-based window.
-        self._manual_hist_range = None
+        """Canonical absolute limits stay unchanged; only rendering converts."""
         self._redisplay()
 
     def _set_cmap(self, name: str):
@@ -1688,20 +1617,15 @@ class CakeViewer(QtWidgets.QWidget):
         self._xunit.setVisible(False)
         self._xunit.currentIndexChanged.connect(self._refresh_xaxis)
         bar.addWidget(self._xunit)
-        # vmin%/vmax% define the auto-level percentile window that
-        # ``_redisplay`` reads fresh on every redraw. They are deliberately
-        # *not* on the toolbar: the histogram/LUT handles beside the image are
-        # the direct way to set a colour window, and the row is short of space.
-        # They stay real (hidden) spin boxes rather than plain attributes so
-        # ``display_state``/``set_display_state``, the valueChanged wiring and
-        # any caller driving them keep working unchanged.
+        # Hidden compatibility fields for older percentile-based styles.
+        # New views use image extrema and absolute edits beside the LUT.
         self._vmin = _NoScrollSpinBox(self)
-        self._vmin.setRange(0, 99); self._vmin.setValue(30)
-        self._vmin.valueChanged.connect(self._redisplay)
+        self._vmin.setRange(0, 99); self._vmin.setValue(0)
+        self._vmin.valueChanged.connect(self._on_percentile_changed)
         self._vmin.hide()
         self._vmax = _NoScrollSpinBox(self)
-        self._vmax.setRange(1, 100); self._vmax.setValue(99)
-        self._vmax.valueChanged.connect(self._redisplay)
+        self._vmax.setRange(1, 100); self._vmax.setValue(100)
+        self._vmax.valueChanged.connect(self._on_percentile_changed)
         self._vmax.hide()
         bar.addStretch(1)
         self._toolbar_layout = bar   # exposed so subclasses/callers can append widgets
@@ -1753,6 +1677,7 @@ class CakeViewer(QtWidgets.QWidget):
         # step. Not a _redisplay argument because _redisplay is a slot wired to
         # toggled/valueChanged, which pass their own payload.
         self._preserve_view = False
+        self._color_scale = ColorScaleControls.install(self._iv)
         self._set_cmap(_DEFAULT_CMAP)
 
     # ── x-axis units (R / 2θ / d / Q) ─────────────────────────────────
@@ -1828,23 +1753,7 @@ class CakeViewer(QtWidgets.QWidget):
         if self._cake is None or self._cake.size == 0:
             return
         cake = self._cake
-        disp = np.log10(np.clip(cake, 1e-6, None)) if self._log.isChecked() else cake
-        # Exclude exact-zero bins from the percentile calc (masked on the
-        # pre-log data, like ImageViewer) — unfilled η/R bins would otherwise
-        # skew the auto-level window toward zero.
-        nonzero = cake != 0
-        candidates = disp[np.isfinite(disp) & nonzero]
-        finite = candidates if candidates.size else disp[np.isfinite(disp)]
-        if finite.size:
-            lo = float(np.percentile(finite, self._vmin.value()))
-            hi = float(np.percentile(finite, self._vmax.value()))
-            if hi <= lo:
-                hi = lo + 1.0
-        else:
-            lo, hi = 0.0, 1.0
-        img = disp.T   # (n_eta, n_r) -> (n_r, n_eta): pyqtgraph's first axis is X
-        self._iv.setImage(img.astype(np.float32), autoLevels=False, levels=(lo, hi),
-                          autoRange=False, autoHistogramRange=False)
+        self._color_scale.render(cake.T, log=self._log.isChecked(), image_view=self._iv)
         r0, r1 = float(self._r_axis[0]), float(self._r_axis[-1])
         e0, e1 = float(self._eta_axis[0]), float(self._eta_axis[-1])
         self._iv.getImageItem().setRect(
@@ -1855,7 +1764,6 @@ class CakeViewer(QtWidgets.QWidget):
             # extent with a hair of padding, η shown in full.
             self._iv.getView().setXRange(min(r0, r1), max(r0, r1), padding=0.02)
             self._iv.getView().setYRange(min(e0, e1), max(e0, e1), padding=0)
-        self._iv.getHistogramWidget().item.setHistogramRange(lo, hi, padding=0.1)
         n_eta, n_r = cake.shape
         self._coord_bar.setText(
             f"cake {n_r} R-bins × {n_eta} η-bins  |  "
@@ -1898,6 +1806,10 @@ class CakeViewer(QtWidgets.QWidget):
     def _set_cmap(self, name: str):
         self._iv.setColorMap(_resolve_cmap(name))
 
+    def _on_percentile_changed(self, *_args):
+        self._color_scale.set_percentiles(self._vmin.value(), self._vmax.value())
+        self._redisplay()
+
     def display_state(self) -> dict:
         """Same contract as ``ImageViewer.display_state`` — see there for why
         this exists as its own method rather than reading the widgets
@@ -1905,8 +1817,9 @@ class CakeViewer(QtWidgets.QWidget):
         toolbar rather than subclassing it, since its axes are physical
         (R, η) bin coordinates rather than detector row/column indices)."""
         return {"cmap": self._cmap.currentText(), "log": self._log.isChecked(),
-                "vmin": self._vmin.value(), "vmax": self._vmax.value(),
-                "xunit": self.x_unit()}
+                "vmin": (self._color_scale.percentiles or (0, 100))[0],
+                "vmax": (self._color_scale.percentiles or (0, 100))[1],
+                "xunit": self.x_unit(), **self._color_scale.display_state()}
 
     def set_display_state(self, state: Optional[dict]) -> None:
         """See ``ImageViewer.set_display_state`` — identical reasoning
@@ -1929,6 +1842,9 @@ class CakeViewer(QtWidgets.QWidget):
                 spin.blockSignals(True)
                 spin.setValue(state[key])
                 spin.blockSignals(False)
+        if "vmin" in state or "vmax" in state:
+            self._color_scale.set_percentiles(self._vmin.value(), self._vmax.value())
+        self._color_scale.restore_state(state)
         xunit = state.get("xunit")
         if xunit is not None:
             idx = self._xunit.findData(str(xunit))
@@ -2271,16 +2187,7 @@ class RingResidualViewer(CakeViewer):
             self._iv.clear()
             return
         disp = self._display_cake(cake, x_axis)
-        finite = disp[np.isfinite(disp)]
-        if finite.size:
-            v = float(np.percentile(np.abs(finite), self._vmax.value()))
-            v = max(v, 1e-9)
-        else:
-            v = 1.0
-        lo, hi = -v, v
-        img = disp.T   # (n_eta, n_x) -> (n_x, n_eta): pyqtgraph's first axis is X
-        self._iv.setImage(img.astype(np.float32), autoLevels=False, levels=(lo, hi),
-                          autoRange=False, autoHistogramRange=False)
+        self._color_scale.render(disp.T, image_view=self._iv)
         x0, x1 = (float(x_axis[0]), float(x_axis[-1])) if x_axis.size else (0.0, 1.0)
         e0, e1 = float(self._eta_axis[0]), float(self._eta_axis[-1])
         # Ring mode: centre each ring's column on its index (bar-chart-style),
@@ -2291,13 +2198,13 @@ class RingResidualViewer(CakeViewer):
             QtCore.QRectF(rect_x0, e0, rect_w, max(e1 - e0, 1e-6)))
         self._apply_view_limits(rect_x0, rect_x0 + rect_w, e0, e1)
         self._iv.getView().getViewBox().autoRange()
-        self._iv.getHistogramWidget().item.setHistogramRange(lo, hi, padding=0.1)
         n_eta, n_x = disp.shape
         unit = "µε" if self._mode.currentData() == "strain" else "px"
         src = "ring" if self._source.currentData() == "ring" else "R"
         self._coord_bar.setText(
             f"strain cake {n_x} {src}-bins × {n_eta} η-bins  |  "
-            f"η ∈ [{e0:.1f}, {e1:.1f}]°   (±{v:.3g} {unit} shown)")
+            f"η ∈ [{e0:.1f}, {e1:.1f}]°   "
+            f"[{self._color_scale.limits[0]:.3g}, {self._color_scale.limits[1]:.3g}] {unit} shown")
 
     def _redisplay_1d(self):
         is_ring = self._source.currentData() == "ring"
@@ -6657,10 +6564,11 @@ class WaterfallViewer(QtWidgets.QWidget):
         # wired in by hand.
         self._hist = pg.HistogramLUTWidget()
         self._hist.setImageItem(self._img)
+        self._color_scale = ColorScaleControls(self._hist, self)
         row = QtWidgets.QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0); row.setSpacing(2)
         row.addWidget(self._plot, stretch=1)
-        row.addWidget(self._hist)
+        row.addWidget(self._color_scale)
         layout.addLayout(row, stretch=1)
 
         # Rows are written into a growing pre-allocated buffer (no per-frame vstack),
@@ -6701,6 +6609,7 @@ class WaterfallViewer(QtWidgets.QWidget):
         self._nrows = 0
         self._r_axis = None if r_axis is None else np.asarray(r_axis, dtype=float)
         self._img.clear()
+        self._color_scale.reset()
         self._stat.setText("")
 
     def add_profile(self, profile):
@@ -6724,21 +6633,7 @@ class WaterfallViewer(QtWidgets.QWidget):
         if self._buf is None or self._nrows == 0 or self._r_axis is None:
             return
         arr = self._buf[:self._nrows]                     # (n_frames, n_r) view — no copy
-        disp = np.log10(np.clip(arr, 1e-6, None)) if self._log.isChecked() else arr
-        # Exclude exact-zero pixels from the level calc (masked pre-log, like
-        # ImageViewer) — unfilled/zero-padded rows would otherwise skew the
-        # auto-level window toward zero.
-        nonzero = arr != 0
-        candidates = disp[np.isfinite(disp) & nonzero]
-        fin = candidates if candidates.size else disp[np.isfinite(disp)]
-        # Level from a strided sample (fast + stable) rather than sorting every pixel.
-        if fin.size > 200_000:
-            fin = fin[:: fin.size // 200_000]
-        lo, hi = (float(np.percentile(fin, 30)), float(np.percentile(fin, 99))) if fin.size else (0.0, 1.0)
-        if hi <= lo:
-            hi = lo + 1.0
-        # ImageItem (col-major): pass (n_r, n_frames) so x=R, y=frame
-        self._img.setImage(disp.T, autoLevels=False, levels=(lo, hi))
+        self._color_scale.render(arr.T, log=self._log.isChecked(), image_item=self._img)
         r0, r1 = float(self._r_axis[0]), float(self._r_axis[-1])
         self._img.setRect(QtCore.QRectF(r0, 0.0, r1 - r0, self._nrows))
         self._apply_view_limits(r0, r1, self._nrows)
@@ -6771,7 +6666,8 @@ class WaterfallViewer(QtWidgets.QWidget):
         """Same contract/reasoning as ``ImageViewer.display_state`` —
         WaterfallViewer has no vmin%/vmax% (its color window is a plain
         pyqtgraph HistogramLUTWidget, not a percentile pair), just cmap/log."""
-        return {"cmap": self._cmap.currentText(), "log": self._log.isChecked()}
+        return {"cmap": self._cmap.currentText(), "log": self._log.isChecked(),
+                **self._color_scale.display_state()}
 
     def set_display_state(self, state: Optional[dict]) -> None:
         if not state:
@@ -6786,6 +6682,7 @@ class WaterfallViewer(QtWidgets.QWidget):
             self._log.blockSignals(True)
             self._log.setChecked(bool(state["log"]))
             self._log.blockSignals(False)
+        self._color_scale.restore_state(state)
         self._redraw()
 
 

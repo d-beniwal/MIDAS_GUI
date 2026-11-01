@@ -548,6 +548,23 @@ def test_manual_levels_survive_next_prev_but_reset_on_a_new_load(tab):
 
 # ── Headless calibration-file load (control API's data_viewer.load_calibration_file) ──
 
+def test_absolute_color_limits_hold_during_live_refresh_and_corrections(tab):
+    _load_frames(tab, 3, 16)
+    scale = tab._viewer._color_scale
+    scale.minimum.setText("2")
+    scale.maximum.setText("500")
+    scale.maximum.editingFinished.emit()
+    for index in (1, 2, 0):
+        tab._loader._stack[index].fill(1000 * (index + 1))
+        tab._loader._set_frame(index)
+        tab._on_loader_data()
+        tab._on_fields_changed()
+        assert scale.limits == (2., 500.)
+        assert float(scale.minimum.text()) == 2
+        assert float(scale.maximum.text()) == 500
+    tab._viewer._log.setChecked(False)
+    assert tab._viewer._iv.getHistogramWidget().getLevels() == (2., 500.)
+
 def test_load_calibration_file_missing_raises(tab):
     card = tab._geom_card
     with pytest.raises(FileNotFoundError):

@@ -24,6 +24,7 @@ import math
 import os
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 import numpy as np
@@ -202,6 +203,9 @@ def tols_are_default(tols: Optional[dict]) -> bool:
 _RECENTRE_ROUNDS_NOTE = {
     "first_time":   "takes no bounds arguments at all",
     "frozen_point": "is not yet handed the window settings",
+    "frozen_point_one_shot": "uses backend windows in Frozen-point; GUI windows "
+                             "apply only to the subsequent One-shot stage, "
+                             "centred on its Frozen-point seed",
     "joint":        "seeds with a bounded loop and then runs an unbounded "
                     "joint optimisation, so the total is not knowable up front",
 }
@@ -242,6 +246,8 @@ def limit_recentre_rounds(mode: str, n_iter: int) -> Optional[int]:
     mode = str(mode or "")
     if mode in ("first_time", "frozen_point"):
         return 0
+    if mode == "frozen_point_one_shot":
+        return None  # a cap cannot bound the initial Frozen-point search
     if mode == "joint":
         return None
     if mode == "one_shot":
@@ -472,6 +478,16 @@ def _normalize_result_impl(raw, mode: str, *, NY, NZ, pxY, pxZ, wavelength,
                            panel_layout: Optional[dict] = None,
                            scratch: Optional[str] = None, stem: str = ""):
     """The per-mode conversion itself; see :func:`normalize_result`."""
+    if mode == "frozen_point_one_shot":
+        result = _normalize_result_impl(
+            raw.one_shot, "one_shot", NY=NY, NZ=NZ, pxY=pxY, pxZ=pxZ,
+            wavelength=float(raw.one_shot.unpacked.get("Wavelength", raw.wavelength)),
+            panel_layout=panel_layout,
+            scratch=scratch, stem=stem)
+        result._frozen_point_converged = raw.frozen_point.converged
+        result._frozen_point_n_iter = raw.frozen_point.n_iter
+        result._one_shot_seed = dict(raw.seed, wavelength_A=raw.wavelength)
+        return result
     # one_shot+panel_layout was re-routed through four_stage to expose unpacked
     if mode == "one_shot" and hasattr(raw, "stage2"):
         effective_mode = "four_stage"
@@ -620,7 +636,7 @@ def tilt_seed_effective(mode: str, *, panel_layout=None, refine: Optional[dict] 
       genuinely used here, unlike ``first_time``, even though tx itself
       never moves.
     """
-    if mode in ("four_stage", "bayesian", "joint", "frozen_point"):
+    if mode in ("four_stage", "bayesian", "joint", "frozen_point", "frozen_point_one_shot"):
         return True
     if mode == "first_time":
         return False
@@ -712,6 +728,26 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
     NZ, NY     = image.shape
     panel_layout = _build_panel_layout(cfg.get("panel_layout"))
 
+    if mode == "frozen_point_one_shot":
+        print("[calib] Stage 1/2: Frozen-point", flush=True)
+        frozen = run_pipeline("frozen_point", image, dark, cfg)
+        if not frozen.converged:
+            raise RuntimeError(
+                "Frozen-point did not converge; One-shot stage was not started.")
+        u = frozen.res.unpacked
+        seed = {k: float(u[k]) for k in ("Lsd", "BC_y", "BC_z", "tx", "ty", "tz")}
+        seed["distortion"] = {n: float(u[n]) for n in DISTORTION_NAMES if n in u}
+        # Both stages receive the same raw frame/dark and transform codes.
+        # Frozen-point's fitted values already live in transformed coordinates.
+        next_cfg = dict(cfg, manual_seed=seed,
+                        wavelength=float(u.get("Wavelength", wavelength)),
+                        _seeded_refinement=True)
+        print("[calib] Stage 2/2: One-shot seeded from Frozen-point "
+              "(geometry and distortion)", flush=True)
+        final = run_pipeline("one_shot", image, dark, next_cfg)
+        return SimpleNamespace(frozen_point=frozen, one_shot=final,
+                               wavelength=next_cfg["wavelength"], seed=seed)
+
     if mode == "one_shot":
         if panel_layout is not None:
             # calibrate() runs panel refinement internally but drops panel_delta_*
@@ -740,6 +776,10 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
         # CalibrationParams.
         coeffs = _distortion_coeffs(refine)
         reroute = []
+        if cfg.get("_seeded_refinement"):
+            reroute.append("refinement from the Frozen-point solution")
+        elif manual and manual.get("distortion"):
+            reroute.append("distortion seed")
         # A distortion subset used to be rerouted too, on the grounds that
         # refine_distortion was an all-or-nothing bool. It is not: the kwarg is
         # Union[bool, str, Sequence[str]], so a partial selection reaches
@@ -942,22 +982,15 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
             # subtract it here — every other branch above hands dark to the
             # backend natively instead.
             img = np.clip(img - dk.astype(np.float32), 0, None)
-        # v1.Refine (from build_v1_params, inside _seed_and_v1) already carries
-        # the GUI's Distortion checkboxes for p0..p14 — iterate_frozen_point_
-        # until_stable defers to it exactly like four_stage/bayesian/joint do,
-        # so no separate refine_distortion override is passed here.
-        #
-        # tols is deliberately NOT forwarded here yet (unlike the identical
-        # bayesian/joint call above) — tracked as a follow-up, not a backend
-        # limitation: spec_from_v1_params() reads v1.tol* the same way for
-        # every pipeline, so wiring it through is a one-line fix. Until then,
-        # warn instead of silently running on CalibrationParams' hardcoded
-        # defaults, mirroring first_time's disclosure above.
+        # Distortion Refine flags reach the backend's final refit after its
+        # geometry search. The iterative search replaces geometry bounds
+        # with its own bounds_* windows; forwarding v1.tol* alone would not
+        # make GUI windows apply. Keep this gap explicit until both are wired.
         if not tols_are_default(tols):
             print("[calib] WARNING: the parameter-window (±) settings are "
                   "not yet forwarded to the 'Frozen-point (high-tilt)' "
                   "pipeline — it runs with default bounds instead. Use "
-                  "One-shot, Four-stage, Bayesian or Joint-cake for a "
+                  "One-shot for a "
                   "bounded refinement with your chosen window.")
         v1 = _seed_and_v1(img, wavelength, pxY, pxZ, calibrant, pNY, pNZ,
                           refine, n_iter, device, manual)

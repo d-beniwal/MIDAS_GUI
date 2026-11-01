@@ -33,12 +33,18 @@ disagree.
    beamline information says the detector is strongly tilted, do not start
    with one-shot. Run `frozen_point` first (unseeded, per rule 1), feed its
    result into the seed, then run `one_shot` seeded by it.
-   `calibrate_run_frozen_point_then_oneshot` does this chain in one call;
-   pass no seed in either cfg. Do not decide "high tilt" from a guess. If
+   `calibrate_run(mode="frozen_point_one_shot", clear_seed=True)` runs both
+   stages in one abortable job, passing all fitted geometry and distortion
+   into One-shot. GUI limits apply only to One-shot around the intermediate
+   seed; Frozen-point retains its backend windows. Do not decide "high tilt" from a guess. If
    nothing says so, run the normal flow, and if the first result shows large
    tilts, tell the user and offer the frozen-point chain.
 
 ## Recipe
+
+The GUI/MCP run choices are `one_shot` (default), `frozen_point`, and
+`frozen_point_one_shot`. Other algorithms are deferred pending systematic
+comparison and are not selectable.
 
 1. **Inputs:** gather wavelength/energy and pixel size (above), the calibrant
    and the image path.

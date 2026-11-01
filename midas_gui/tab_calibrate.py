@@ -1,7 +1,7 @@
 """Tab 2 — Calibrate.
 
 Ports the v3 calibration tab and adds Phase-1 features:
-  - pipeline dropdown (one-shot / first-time / four-stage)
+  - pipeline dropdown (one-shot / frozen-point / frozen-point + one-shot)
   - refine-flags group (Lsd, BC, ty, tz, tx, Wavelength, Distortion)
   - read-only distortion-coefficient table
   - per-ring radial-residual bar chart (new bottom tab)
@@ -20,7 +20,7 @@ import pyqtgraph as pg
 
 from midas_gui.panel_toggle import install_panel_toggles
 from midas_gui.constants import (
-    CALIBRANTS, PIPELINES, DEFAULT_PIPELINE, _SG, _LC, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM,
+    CALIBRANTS, PIPELINES, DEFAULT_PIPELINE, restored_pipeline_label, _SG, _LC, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM,
     DEFAULT_LSD_UM, DEFAULT_BC_Y, DEFAULT_BC_Z, DEFAULT_CALIBRANT_TIF,
     DEFAULT_STEP_BC, DEFAULT_STEP_LSD_MM, DEFAULT_STEP_TILT,
     DISTORTION_NAMES, MATERIALS, calibrant_combo_items, is_dspacing_calibrant)
@@ -334,24 +334,22 @@ class CalibrationTab(QtWidgets.QWidget):
         # ── Pipeline ──
         pipe = S.make_card("Pipeline")
         self._pipeline = _NoScrollComboBox()
-        self._pipeline.setMaximumWidth(208)   # ~50% of the unconstrained width
+        self._pipeline.setMaximumWidth(280)
         for label, key, enabled in PIPELINES:
             self._pipeline.addItem(label, key)
             if not enabled:
                 self._pipeline.model().item(self._pipeline.count() - 1).setEnabled(False)
-        # Each pipeline re-centres its windows a different number of times
-        # (one_shot honours "E-M iters", four_stage/bayesian run their own
-        # counts, first_time/frozen_point ignore the windows entirely), so the
-        # limits note and the hard cap's divisor both go stale on a switch.
+        # One-shot uses E-M iters; Frozen-point has its own windows, and the
+        # combined mode applies GUI windows only after its Frozen-point stage.
         self._pipeline.currentIndexChanged.connect(self._update_limits_label)
         _pi = self._pipeline.findData(DEFAULT_PIPELINE)
         if _pi >= 0 and self._pipeline.model().item(_pi).isEnabled():
             self._pipeline.setCurrentIndex(_pi)
         self._pipeline.setToolTip(
-            "Lsd & beam-centre are recovered well by every pipeline.\n"
-            "For trustworthy TILTS / strain, prefer Four-stage or First-time —\n"
-            "validation found One-shot / Bayesian can report a spurious tilt on\n"
-            "weakly-tilted data (it is self-compensated, so integration is still fine).")
+            "One-shot: default calibration.\n"
+            "Frozen-point: fast / high-tilt calibration.\n"
+            "Frozen-point + One-shot: use the Frozen-point solution to seed "
+            "One-shot refinement. GUI ± ranges apply to the One-shot stage only.")
         pipe.body.addWidget(self._pipeline)
         lv.addWidget(pipe)
 
@@ -1175,9 +1173,11 @@ class CalibrationTab(QtWidgets.QWidget):
     def _update_mask_overlay(self):
         """Paint the excluded pixels over the calibration image.
 
-        Shape-checked against what is actually on screen rather than assumed:
-        a mask built on a differently-shaped frame (a different detector, or
-        a file reloaded after the mask was made) would otherwise either throw
+        Mask sources stay in raw detector space, matching the array handed to
+        the calibration backend.  The preview image, however, is displayed
+        after the current MIDAS image transforms, so the overlay must apply
+        those same transforms before it is painted.  Shape-check in raw space
+        first: a mask built on another detector would otherwise either throw
         inside pyqtgraph or, worse, paint a plausible-looking overlay that
         lines up with nothing. Says so in the status label instead.
         """
@@ -1201,7 +1201,9 @@ class CalibrationTab(QtWidgets.QWidget):
         self._mask_status.setText(
             f"{n:,} px ({100.0 * n / mask.size:.1f}%) excluded")
         if self._show_mask_check.isChecked():
-            self._img_view.set_mask_overlay(mask)
+            codes = tuple(self._im_trans_codes())
+            display_mask = _apply_im_trans(mask, codes) if codes else mask
+            self._img_view.set_mask_overlay(display_mask)
             self._img_view.set_overlay_visible(True)
         else:
             self._img_view.clear_overlay()
@@ -1726,6 +1728,12 @@ class CalibrationTab(QtWidgets.QWidget):
                       self._XTAL_CAP_PREFIX if capped else
                       self._XTAL_NOTE_PREFIX)
             self._limits_note.setText(prefix + "   ".join(bits) + tail + drift)
+            if self._pipeline.currentData() == "frozen_point_one_shot":
+                self._limits_note.setText(
+                    "One-shot stage only (around the Frozen-point result): "
+                    + "   ".join(bits)
+                    + ". Frozen-point uses backend search windows; the hard cap "
+                    "cannot bound the combined run.")
             return
         bounds, skipped = self._limit_bounds()
         if not bounds and not skipped:
@@ -2147,6 +2155,10 @@ class CalibrationTab(QtWidgets.QWidget):
         transformed here, picks land in transformed-pixel space automatically."""
         if self._image is not None:
             self._show_calib_image(autorange=False)
+        # The composite mask deliberately remains in raw detector space for
+        # the backend.  Its display copy therefore has to be rebuilt whenever
+        # the preview's transform changes, including while the overlay is on.
+        self._update_mask_overlay()
 
     def _show_calib_image(self, autorange: bool = False):
         """Render the preview: dark/bright/background-corrected and Transforms-
@@ -2644,7 +2656,7 @@ class CalibrationTab(QtWidgets.QWidget):
             self._dark = bright = background = None
 
         mode = self._pipeline.currentData()
-        if mode == "frozen_point" and self._panel_grp.isChecked():
+        if mode in ("frozen_point", "frozen_point_one_shot") and self._panel_grp.isChecked():
             self._warn_or_record(
                 "Multi-panel not supported",
                 "'Frozen-point (high-tilt)' does not support Multi-panel "
@@ -2680,14 +2692,12 @@ class CalibrationTab(QtWidgets.QWidget):
             for pre in self._xtal_note_prefixes:
                 line = line.replace(pre, "")
             self._log.append("Limits: " + line)
-        if mode == "frozen_point":
+        if mode in ("frozen_point", "frozen_point_one_shot"):
             self._log.append(
-                "ℹ Frozen-point (high-tilt) always refines Lsd/BC/ty/tz; "
-                "Distortion is refined too if ticked (less-validated for "
-                "this pipeline than geometry-only — check results against "
-                "a separate refit). tx is never refined (not identifiable "
-                "from a single image). Runs on CPU regardless of the "
-                "Device setting.")
+                "ℹ Frozen-point uses the selected geometry seeds/refine flags "
+                "and backend search windows. Selected distortion coefficients "
+                "are refined after geometry convergence. tx is held fixed. "
+                "The Frozen-point stage runs on CPU.")
 
         trans = im_trans_codes_from_checkboxes(self._flip_y, self._flip_z, self._transp)
 
@@ -2752,8 +2762,7 @@ class CalibrationTab(QtWidgets.QWidget):
                     f"⚠ Tilt seed ({tilt_bits}) will NOT be used: the "
                     f"'{self._pipeline.currentText()}' pipeline with these settings "
                     "ignores an initial tilt guess — tilts start from 0° instead. "
-                    "Four-stage / Bayesian / Joint pipelines (or One-shot with "
-                    "Multi-panel) do honour a tilt seed.")
+                    "Frozen-point and Frozen-point + One-shot honour tilt seeds.")
 
         self._last_cfg = dict(cfg)
         self._last_bright = bright
@@ -2903,6 +2912,12 @@ class CalibrationTab(QtWidgets.QWidget):
         result.im_trans = im_trans_codes_from_checkboxes(
             self._flip_y, self._flip_z, self._transp)
         self._result = result
+        if getattr(result, "_one_shot_seed", None) is not None:
+            # Stage 2's windows start at the intermediate solution, which
+            # differs from the initial GUI seed captured before Stage 1.
+            self._last_limit_ctx = dict(
+                self._last_limit_ctx or {}, centre=result._one_shot_seed,
+                seeded=True, cap_n=1)
         if self._feedback_check.isChecked():
             try:
                 self._seed_from_result(result)
@@ -3573,7 +3588,9 @@ class CalibrationTab(QtWidgets.QWidget):
             self._restoring_state = False
 
     def _set_state(self, state: dict, sidecar_stem: Optional[str] = None) -> None:
-        fields = state.get("fields", {})
+        fields = dict(state.get("fields", {}))
+        if "pipeline" in fields:
+            fields["pipeline"] = restored_pipeline_label(fields["pipeline"])
         apply_dict_to_widgets(self._state_widgets(), fields)
         # apply_dict_to_widgets restores "thr_check" with signals blocked, so
         # the threshold editor's editable/visual state never resyncs on its

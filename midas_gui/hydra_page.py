@@ -748,7 +748,7 @@ class HydraViewerPage(QtWidgets.QWidget):
         disp_key = (img.shape, key)
         fresh = (self._disp_key != disp_key)
         self._disp_key = disp_key
-        self._viewer.set_image(img, autorange=fresh)
+        self._viewer.set_image(img, autorange=fresh, reset_levels=fresh)
         if self._active_card is not None:
             self._active_card.refresh_rings_and_radial()
         # The compass is anchored to the shown detector's beam centre, so a

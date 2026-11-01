@@ -53,13 +53,16 @@ KERNELS = {
 # Calibration pipelines (label → key, enabled?)
 PIPELINES = [
     ("One-shot (default)",       "one_shot",   True),
-    ("First-time (no prior)",    "first_time", True),
-    ("Four-stage (patchy det.)", "four_stage", True),
-    ("Bayesian MAP+Laplace",     "bayesian",   True),    # Phase 2
-    ("Joint cake",               "joint",      True),    # Phase 3
-    ("Frozen-point (high-tilt)", "frozen_point", True),
-    ("Multi-distance",           "multi",      False),   # multi-image, deferred
+    ("Frozen-point (fast/high-tilts)", "frozen_point", True),
+    ("Frozen-point + One-shot", "frozen_point_one_shot", True),
 ]
+
+
+def restored_pipeline_label(label):
+    """Migrate text-based project state after simplifying the pipeline list."""
+    if label == "Frozen-point (high-tilt)":
+        return PIPELINES[1][0]
+    return label if label in {p[0] for p in PIPELINES} else PIPELINES[0][0]
 
 ERROR_MODELS = ["poisson", "azimuthal", "hybrid"]
 

@@ -766,7 +766,8 @@ class DataViewerTab(QtWidgets.QWidget):
         if raw is None:
             return
         self._cur = self._viewer.set_raw_frame(
-            self._loader.corrected(raw), self._im_trans_codes(), autorange=False)
+            self._loader.corrected(raw), self._im_trans_codes(), autorange=False,
+            reset_levels=False)
         self._redraw_lab_axes_if_on()
         self._update_intensity_overlay()
         if getattr(self, "_topn_btn", None) is not None and self._topn_btn.isChecked():
