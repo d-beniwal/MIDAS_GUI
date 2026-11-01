@@ -3,6 +3,14 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-31 — Calibrate: send the GUI's lattice dict to midas_calibrate_v2, not the calibrant name
+
+Root cause (user report, beamline machine): `KeyError: Unknown calibrant 'CeO2(SRM674b)'`. `calibrate()` / `make_seed()` resolved the name string against the backend's own `CALIBRANTS` (CeO2/LaB6/Si/Al2O3 only), so GUI-defined names failed and edited lattice values for built-in names were silently ignored (a-error is exactly degenerate with Lsd). Both accept `Union[str, dict]`, so `calib.backend_calibrant(name)` builds `{name,a,b,c,alpha,beta,gamma,sg}` from `constants._LATT` (Preferences ▸ Calibrants) and is used at the two by-name call sites (`make_seed_safe`, v2 `calibrate`). Other pipelines already used `_LC`/`_SG`. Consequence: built-ins now use GUI values (LaB6 4.15692, Si 5.43102 vs backend 4.1569/5.4310); custom lattices must match their space-group system or the backend raises ValueError. `make_seed_safe` still swallows exceptions (bad calibrant shows as "auto-seed failed").
+
+## 2026-10-31 — Typing axis limits engages Manual mode (live-frame fix)
+
+Root cause: limits typed into the native right-click Manual min/max fields only took effect when "M" was already lit; in Auto the next live frame re-fit the plot. Fix (`widgets.py`, IntensityStatsPanel + ProfileViewer, the only plots with the A/M pair): the edit handler now sets manual mode, checks "M" and re-applies the held range on every redraw until "A". Capture reports only the edited axis (`_merged_manual_range`) so the other axis keeps its exact held value instead of the menu's `%0.5g` rounding. Regression: `tests/test_manual_axis_limits_live.py` (run without `--forked` flag on the CLI; the file marks itself forked).
+
 ## 2026-10-27 — MCP project ops (`project.get_info/save/open`): quiet dialogs via `MainWindow._project_msg`
 
 `save_project`, `_open_project_selection` and `_apply_workspace_state` ended in modal `QMessageBox`es, which would hang the control socket, so those sites now go through `_project_msg`, which records instead of showing while `_agent_quiet` is set (the ops set it for the call). The ops reuse the existing methods, not a second implementation. Open selects everything via `ProjectContentsPicker` (no dialog) with an `exclude` list; it refuses on unsaved changes unless `discard_unsaved`, and Save As onto an existing file unless `overwrite`, matching the dialogs' confirmations. Skill: `midas-gui-mcp-project`.

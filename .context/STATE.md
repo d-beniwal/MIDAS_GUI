@@ -1,6 +1,6 @@
 # Project state
 
-Last updated: 2026-10-27 (MCP abort/clear_seed + skills)
+Last updated: 2026-10-31 (custom calibrant names/lattices reach the v2 backend)
 
 ## Now working on
 
@@ -55,6 +55,8 @@ Backup of the example project before edits: `scratch/s3idc_oct8_spinel.pre_vis_b
   remain unresolved; no new conclusion about their cause in this task.
 
 ## Recent changes
+- 2026-10-31: Calibrate: custom calibrant names/edited lattices no longer fail/ignored — `calib.backend_calibrant()` passes the GUI lattice dict to v2 `calibrate()`/`make_seed()`. Needs deploying to the beamline install; not yet live-tested in the GUI.
+- 2026-10-31: Manual axis limits (Data Viewer Statistics histogram + radial ProfileViewer, the only two A/M plots) now hold across live frames; typing limits engages Manual; `tests/test_manual_axis_limits_live.py`.
 - 2026-10-27: MCP `project_get_info/save/open` (File ▸ Open/Save Project without dialogs) + `midas-gui-mcp-project` skill; tests in `tests/test_control_api_project_ops.py`.
 - 2026-10-27: MCP `calibrate_abort` + `clear_seed` on `calibrate_run`; skills in `midas_gui_mcp/skills/` (setup, calibrate), pointed to from the MCP README and server `instructions`.
 

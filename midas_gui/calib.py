@@ -29,7 +29,7 @@ from typing import Optional
 import numpy as np
 
 import midas_gui._paths  # noqa: F401  (sys.path setup must run before MIDAS imports)
-from midas_gui.constants import _SG, _LC, _V2_TO_V1, DISTORTION_NAMES, DEFAULT_LSD_UM
+from midas_gui.constants import _SG, _LC, _LATT, _V2_TO_V1, DISTORTION_NAMES, DEFAULT_LSD_UM
 
 
 def _supported_kwargs(fn, kwargs: dict) -> dict:
@@ -79,6 +79,25 @@ def _prep_transformed(image: np.ndarray, dark, im_trans: tuple):
     return img, dk, NY, NZ
 
 
+def backend_calibrant(name: str):
+    """Calibrant argument for midas_calibrate_v2 (``calibrate()``/``make_seed()``).
+
+    The backend only knows CeO2/LaB6/Si/Al2O3 by name, so a GUI-defined
+    calibrant (custom name or edited lattice) raised ``KeyError: Unknown
+    calibrant``. Both entry points also accept a lattice dict, so send the
+    GUI's own lattice (Preferences > Calibrants) — one source of truth, custom
+    names and values honoured. Unknown-to-GUI names pass through unchanged.
+    """
+    m = _LATT.get(name)
+    if not m:
+        return name
+    d = {"name": name, "a": m["a"], "sg": int(m["sg"])}
+    for k in ("b", "c", "alpha", "beta", "gamma"):
+        if k in m:
+            d[k] = m[k]
+    return d
+
+
 def make_seed_safe(image: np.ndarray, wavelength: float, pxY: float,
                    calibrant: str):
     """Run the automatic seeder; return a Seed or None on failure.
@@ -90,7 +109,8 @@ def make_seed_safe(image: np.ndarray, wavelength: float, pxY: float,
     try:
         from midas_calibrate_v2.seed.auto_seed import make_seed
         return make_seed(image.astype(np.float32), wavelength_A=wavelength,
-                         px_um=pxY, calibrant=calibrant, use_diplib=False)
+                         px_um=pxY, calibrant=backend_calibrant(calibrant),
+                         use_diplib=False)
     except Exception:
         return None
 
@@ -783,7 +803,8 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
 
         from midas_calibrate_v2 import calibrate
         kwargs = dict(
-            wavelength=wavelength, pxY=pxY, dark=dark, calibrant=calibrant,
+            wavelength=wavelength, pxY=pxY, dark=dark,
+            calibrant=backend_calibrant(calibrant),
             # Scratch, not the working directory: calibrate() writes both
             # residual_corr.bin and a generically-named calibration.json here
             # (pipelines/auto.py:680-683, :921-955), neither of them asked for.
