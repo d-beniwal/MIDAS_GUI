@@ -9,7 +9,16 @@ from __future__ import annotations
 import os
 
 CALIBRANTS = ["CeO2", "LaB6", "Si", "Al2O3"]
-COLORMAPS  = ["hot", "gray", "viridis", "inferno", "plasma", "turbo"]
+COLORMAPS  = ["hot", "gray", "reverse_gray", "viridis", "inferno", "plasma", "turbo"]
+
+# GUI colormap names that are not matplotlib names -> the matplotlib equivalent
+# (used by matplotlib / pyvista consumers; pyqtgraph viewers build it natively).
+_MPL_CMAP_ALIAS = {"reverse_gray": "gray_r"}
+
+
+def mpl_cmap_name(name):
+    """Matplotlib/VTK-compatible name for a GUI colormap name."""
+    return _MPL_CMAP_ALIAS.get(name, name)
 
 # Azimuth of the polarization plane, in MIDAS η (degrees).
 #

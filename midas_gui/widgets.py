@@ -80,7 +80,12 @@ def _resolve_cmap(name):
     installed, and passing that None into pyqtgraph crashes viewer construction (see
     the Linux/Windows fresh-env bug). Fall back through matplotlib, then a
     pyqtgraph-native map, then a plain grayscale ramp, so a missing matplotlib can
-    never take the tabs down."""
+    never take the tabs down.
+
+    ``reverse_gray`` (white -> black) is built natively so it needs neither
+    matplotlib nor any platform-specific lookup."""
+    if name == "reverse_gray":
+        return pg.ColorMap([0.0, 1.0], [(255, 255, 255, 255), (0, 0, 0, 255)])
     for attempt in (
         lambda: pg.colormap.get(name),
         lambda: pg.colormap.get(name, source="matplotlib"),

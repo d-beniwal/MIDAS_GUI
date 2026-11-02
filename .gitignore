@@ -101,3 +101,6 @@ test_data/out_temp.txt
 # Internal-only documentation (kept local, not published to GitHub)
 documentation/pdf_calculation_explained.md
 documentation/pdf_calculation_explained.pdf
+
+# Local scratch work
+scratch/

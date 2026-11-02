@@ -26,6 +26,8 @@ import vtk
 from PyQt5 import QtCore, QtGui, QtWidgets
 from pyvistaqt import QtInteractor
 
+from midas_gui.constants import mpl_cmap_name
+
 _ORIGIN_MARKER_COLOR = "#ff3b3b"
 _SELECTION_COLOR = "#ff00cc"
 _FITTED_COLOR = "#e64980"
@@ -373,7 +375,7 @@ class PyVistaScatter3DView(QtWidgets.QWidget):
         ``set_groups`` -- independent of which actor/mapper it's attached
         to, since those colors are pre-resolved RGBA, not VTK scalar-mapped."""
         self.clear_scalar_bar()
-        lut = pv.LookupTable(cmap=cmap, n_values=256)
+        lut = pv.LookupTable(cmap=mpl_cmap_name(cmap), n_values=256)
         lut.SetRange(vmin, vmax)
         # VTK's scalar-bar title/label text defaults to black, invisible
         # against this widget's black background -- explicit white avoids
@@ -549,7 +551,7 @@ class PyVistaScatter3DView(QtWidgets.QWidget):
             keep = np.flatnonzero(np.isfinite(grid.cell_data["disp"]))
             if len(keep):
                 actors.append(self.interactor.add_mesh(
-                    grid.extract_cells(keep), scalars="disp", cmap=cmap, clim=clim, show_scalar_bar=False,
+                    grid.extract_cells(keep), scalars="disp", cmap=mpl_cmap_name(cmap), clim=clim, show_scalar_bar=False,
                     opacity=0.9, reset_camera=False, name=f"solve_cell_recip_patch_{i}"))
             actors.append(self.interactor.add_mesh(
                 grid.extract_feature_edges(boundary_edges=True, feature_edges=False,

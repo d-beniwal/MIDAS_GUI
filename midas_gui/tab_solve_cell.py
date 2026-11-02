@@ -1517,7 +1517,7 @@ class SolveCellTab(QtWidgets.QWidget):
     _DET_MISSING_COLOR = "#ff4d4d"
 
     # Panel-map colour maps offered in the Overlays row (matplotlib names).
-    _PATCH_CMAPS = ["viridis", "magma", "inferno", "plasma", "cividis", "turbo", "gray", "hot"]
+    _PATCH_CMAPS = ["viridis", "magma", "inferno", "plasma", "cividis", "turbo", "gray", "reverse_gray", "hot"]
 
     # Index into self._recip_size_mode -> PyVistaScatter3DView size mode.
     _RECIP_SIZE_MODES = [SIZE_MODE_EQUAL, SIZE_MODE_INTENSITY]
