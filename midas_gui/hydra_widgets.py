@@ -743,16 +743,22 @@ class HydraLoaderPanel(QtWidgets.QWidget):
                 self._combine_op.addItem(lbl, key)
             self._combine_op.setToolTip(
                 "How the sub-frames in a chunk are reduced to one image.")
+            # Laid out like the single-detector Batch tab's Data card: a
+            # start/end row, a stride row, a rule, then "Combine sub-frames:
+            # [n] op: [Mean]" as one left-aligned row (not a right-aligned
+            # form pair, which pushed the card's minimum width past 500 px).
+            sf = S.Form()
+            sf.row(("start:", self._fr_start), ("end(0=all):", self._fr_end))
+            sf.row(("stride:", self._fr_stride))
+            card.body.addLayout(sf)
+            card.body.addWidget(S.hline())
             cr = QtWidgets.QHBoxLayout(); cr.setSpacing(4)
+            cr.addWidget(QtWidgets.QLabel("Combine sub-frames:"))
             cr.addWidget(self._combine_chunk)
             cr.addWidget(QtWidgets.QLabel("op:"))
             cr.addWidget(self._combine_op)
             cr.addStretch(1)
-            sf = S.Form()
-            sf.row(("start:", self._fr_start), ("end(0=all):", self._fr_end))
-            sf.row(("stride:", self._fr_stride))
-            sf.row(("combine sub-frames:", cr))
-            card.body.addLayout(sf)
+            card.body.addLayout(cr)
             for w in (self._combine_chunk, self._combine_op):
                 sig = (w.valueChanged if hasattr(w, "valueChanged")
                        else w.currentIndexChanged)
@@ -783,7 +789,7 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         if self._mode == "stream":
             mask_card = S.make_card("Mask  (independent per panel)")
             for n in (1, 2, 3, 4):
-                sel = MaskSelector()
+                sel = MaskSelector(compact=True)
                 sel.setTitle(f"ge{n} mask")
                 sel.maskChanged.connect(self.fieldsChanged)
                 self._mask_sels[n] = sel

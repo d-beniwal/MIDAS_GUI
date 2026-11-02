@@ -3860,7 +3860,10 @@ class MaskSelector(QtWidgets.QGroupBox):
     """
     maskChanged = QtCore.pyqtSignal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, compact=False):
+        """``compact`` shrinks the Add buttons and puts the status text on
+        the same row, for stacks of several selectors (Hydra: one per panel)
+        where the default full-width buttons made the Data panel very wide."""
         super().__init__("Mask", parent)
         self._sources: list = []          # dicts: {kind, path, mask(cache), row(QWidget)}
         self._tab1_mask = None
@@ -3870,10 +3873,17 @@ class MaskSelector(QtWidgets.QGroupBox):
         self._list = QtWidgets.QVBoxLayout(); self._list.setSpacing(2)
         v.addLayout(self._list)
         row = QtWidgets.QHBoxLayout(); row.setSpacing(4)
-        bf = QtWidgets.QPushButton("Add file…"); bf.clicked.connect(self._add_file)
-        bd = QtWidgets.QPushButton("Add folder…"); bd.clicked.connect(self._add_folder)
+        bf = QtWidgets.QPushButton("File…" if compact else "Add file…")
+        bf.clicked.connect(self._add_file)
+        bd = QtWidgets.QPushButton("Folder…" if compact else "Add folder…")
+        bd.clicked.connect(self._add_folder)
+        if compact:
+            bf.setToolTip("Add a mask file"); bd.setToolTip("Add a mask folder")
+            for b in (bf, bd):
+                b.setFixedHeight(22)
+                b.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+                b.setStyleSheet("padding:0 8px;font-size:11px")
         row.addWidget(bf); row.addWidget(bd)
-        v.addLayout(row)
         self._status = QtWidgets.QLabel("No mask.")
         self._status.setStyleSheet(f"color:{S.MUTED};font-size:10px"); self._status.setWordWrap(True)
         if compact:
