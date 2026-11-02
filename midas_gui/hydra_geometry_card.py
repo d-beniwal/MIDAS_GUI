@@ -1855,6 +1855,16 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         if r_bin is None:
             r_bin = self._rad_r_bin.value() if self._rad_r_bin is not None else 1.0
         r_bin = max(float(r_bin), 0.1)
+        # K=2 at certain R bin sizes (notably the 1 px default) sits on a
+        # sampling-aliasing resonance: ring positions scatter by tens of
+        # microstrain between sectors. The polygon kernel is exact, so use it.
+        if kernel == "subpixel2":
+            try:
+                from midas_integrate_v2.binning.subpixel import resonant_bin_width
+                if resonant_bin_width(2, r_bin) is not None:
+                    kernel = "polygon"
+            except ImportError:
+                pass
         eta_bin = max(float(eta_bin), 0.05)
         im_trans = tuple(g.get("im_trans") or ())
         if im_trans:
