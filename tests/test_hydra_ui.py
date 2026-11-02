@@ -608,8 +608,12 @@ def test_hydra_composite_shows_read_only_table_and_cake_follows_panel(app):
     hp._toolbar.set_current("composite")
     assert hp._card_stack.currentWidget() is hp._comp_page
     assert hp._comp_table.rowCount() == len(hp._COMP_ROWS)
+    # Cake display is chosen by exclusive checkboxes, independent of the toolbar.
     hp._toolbar.set_current("ge3")
+    assert hp._cake_stack.currentIndex() == 0
+    hp._cake_checks[3].setChecked(True)
     assert hp._cake_stack.currentIndex() == 2
+    assert [n for n, c in hp._cake_checks.items() if c.isChecked()] == [3]
 
 
 def test_hydra_cakes_and_profiles_round_trip_through_sidecar(app, tmp_path):

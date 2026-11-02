@@ -598,8 +598,6 @@ class HydraViewerPage(QtWidgets.QWidget):
             self._card_stack.setCurrentWidget(self._comp_page)
         else:
             self._card_stack.setCurrentWidget(self._cards[key])
-            self._cake_stack.setCurrentIndex(int(key[2]) - 1)
-            self._cake_panel_lbl.setText(f"  Cake: {key}")
         # The composite card stays the active card even though it is hidden,
         # so the ring overlay on the composite image keeps working.
         self._active_card = self._cards[key]
@@ -900,11 +898,8 @@ class HydraViewerPage(QtWidgets.QWidget):
         lv.setContentsMargins(0, 0, 0, 0); lv.setSpacing(2)
         bar = QtWidgets.QHBoxLayout()
         self._cake_btn = QtWidgets.QPushButton("Calculate")
-        self._cake_btn.setToolTip("Compute the (η, R) cake of the panel shown (ge1–ge4).")
-        self._cake_btn.clicked.connect(self._calculate_active_cake)
-        self._cake_all_btn = QtWidgets.QPushButton("Calculate all")
-        self._cake_all_btn.setToolTip("Compute the (η, R) cake of every loaded panel.")
-        self._cake_all_btn.clicked.connect(self._calculate_all_cakes)
+        self._cake_btn.setToolTip("Compute the (η, R) cake of every loaded panel (ge1–ge4).")
+        self._cake_btn.clicked.connect(self._calculate_all_cakes)
         self._cake_r_bin = _fspin(0.1, 50.0, 2, 1.0, "px"); self._cake_r_bin.setFixedWidth(64)
         self._cake_r_bin.setToolTip("Radial (R) bin size for the cakes, in detector pixels "
                                     "(shared by all panels).")
@@ -912,10 +907,20 @@ class HydraViewerPage(QtWidgets.QWidget):
         self._cake_eta_bin.setFixedWidth(64)
         self._cake_eta_bin.setToolTip("Azimuthal (η) bin size for the cakes, in degrees "
                                       "(shared by all panels).")
-        self._cake_panel_lbl = QtWidgets.QLabel("  Cake: ge1")
-        for w in (self._cake_btn, self._cake_all_btn, QtWidgets.QLabel("  R bin:"),
+        # One checkbox per panel, mutually exclusive: picks which cake is shown.
+        self._cake_group = QtWidgets.QButtonGroup(page)
+        self._cake_group.setExclusive(True)
+        self._cake_checks: dict = {}
+        for n in (1, 2, 3, 4):
+            cb = QtWidgets.QCheckBox(f"ge{n}")
+            cb.setToolTip(f"Show the ge{n} cake (only one panel at a time).")
+            self._cake_group.addButton(cb, n)
+            self._cake_checks[n] = cb
+        self._cake_checks[1].setChecked(True)
+        self._cake_group.idToggled.connect(self._on_cake_panel_toggled)
+        for w in (self._cake_btn, QtWidgets.QLabel("  R bin:"),
                   self._cake_r_bin, QtWidgets.QLabel("η bin:"), self._cake_eta_bin,
-                  self._cake_panel_lbl):
+                  QtWidgets.QLabel("  Show:"), *self._cake_checks.values()):
             bar.addWidget(w)
         bar.addStretch(1)
         lv.addLayout(bar)
@@ -931,8 +936,9 @@ class HydraViewerPage(QtWidgets.QWidget):
         lv.addWidget(self._cake_stack, 1)
         return page
 
-    def _cake_target_panel(self) -> int:
-        return self._cake_stack.currentIndex() + 1
+    def _on_cake_panel_toggled(self, n: int, checked: bool):
+        if checked:
+            self._cake_stack.setCurrentIndex(n - 1)
 
     def _calculate_cake(self, n: int) -> bool:
         if self._raw_frames.get(n) is None:
@@ -941,9 +947,6 @@ class HydraViewerPage(QtWidgets.QWidget):
             return False
         self._cards[f"ge{n}"].cake_integrate()
         return self._cake_views[n].get_cake() is not None
-
-    def _calculate_active_cake(self):
-        self._calculate_cake(self._cake_target_panel())
 
     def _calculate_all_cakes(self):
         for n in sorted(self._loader.siblings()):
