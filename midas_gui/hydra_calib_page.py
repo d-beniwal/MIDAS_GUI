@@ -399,7 +399,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         afm = S.Form(); afm.row(("start:", self._avg_start), ("end(0=all):", self._avg_end))
         avgc.body.addLayout(afm)
         self._avg_note = QtWidgets.QLabel("")
-        self._avg_note.setStyleSheet("color:#9a9a9a;font-size:10px"); self._avg_note.setWordWrap(True)
+        self._avg_note.setStyleSheet(f"color:{S.MUTED};font-size:10px"); self._avg_note.setWordWrap(True)
         avgc.body.addWidget(self._avg_note)
         self._avg_card = avgc
         self._avg_check.toggled.connect(self._on_avg_toggled)
@@ -906,7 +906,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         bits = []
         for n in sorted(found):
             if n not in selected:
-                bits.append(f"<span style='color:#777'>ge{n} excluded</span>")
+                bits.append(f"<span style='color:{S.MUTED}'>ge{n} excluded</span>")
                 continue
             tx = self._cards[n].seed_tx_value()
             mark = " ▶ fitting" if running == n else ""

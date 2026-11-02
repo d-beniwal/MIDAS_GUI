@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 from PyQt5 import QtCore, QtWidgets
+from midas_gui import style as S
 
 DATA = "data"
 CONTROLS = "controls"
@@ -43,13 +44,13 @@ def _content_width(panel: QtWidgets.QWidget) -> int:
         return panel.widget().minimumSizeHint().width() + extra
     return panel.minimumSizeHint().width()
 
-_HEADER_STYLE = "background:#262626; border-bottom:1px solid #3a3a3a;"
+_HEADER_STYLE = f"background:{S.STRIP_BG}; border-bottom:1px solid {S.STRIP_BORDER};"
 _MIN_BTN_STYLE = (
-    "QToolButton { border:none; color:#aaa; padding:0 6px; font-size:12px; }"
+    f"QToolButton {{ border:none; color:{S.SUBTLE}; padding:0 6px; font-size:12px; }}"
     "QToolButton:hover { background:#3d5a80; color:#fff; }"
 )
 _TAB_STYLE = (
-    "QToolButton { background:#2b2b2b; color:#ccc; border:1px solid #444;"
+    f"QToolButton {{ background:{S.STRIP_TAB_BG}; color:{S.STRIP_TAB_FG}; border:1px solid {S.STRIP_TAB_BORDER};"
     " border-bottom:none; border-top-left-radius:4px; border-top-right-radius:4px;"
     " padding:2px 12px; font-size:11px; }"
     "QToolButton:hover { background:#3d5a80; color:#fff; }"
@@ -139,7 +140,7 @@ class PanelToggles(QtCore.QObject):
         hl = QtWidgets.QHBoxLayout(hdr)
         hl.setContentsMargins(6, 0, 0, 0); hl.setSpacing(0)
         lbl = QtWidgets.QLabel(_TITLES[key])
-        lbl.setStyleSheet("color:#999; font-size:10px; font-weight:bold;"
+        lbl.setStyleSheet(f"color:{S.MUTED}; font-size:10px; font-weight:bold;"
                           " letter-spacing:1px; border:none;")
         hl.addWidget(lbl, 1)
         rst = QtWidgets.QToolButton()

@@ -630,9 +630,9 @@ class DataViewerTab(QtWidgets.QWidget):
         self._radial_help_btn.setFixedSize(18, 18)
         self._radial_help_btn.setToolTip("How is this profile calculated?")
         self._radial_help_btn.setStyleSheet(
-            "QToolButton { border-radius: 9px; border: 1px solid #777; "
-            "background: #333; color: #ddd; font-weight: bold; }"
-            "QToolButton:hover { background: #444; }")
+            f"QToolButton {{ border-radius: 9px; border: 1px solid {S.HOVER}; "
+            f"background: {S.MINI_BG}; color: {S.MINI_FG}; font-weight: bold; }}"
+            f"QToolButton:hover {{ background: {S.BTN_BOT}; }}")
         self._radial_help_btn.clicked.connect(self._geom_card.show_radial_help)
         ptb.insertWidget(ptb.indexOf(self._rad_btn) + 1, self._radial_help_btn)
         # Exclude-out-of-range-pixels controls (moved here from the left panel

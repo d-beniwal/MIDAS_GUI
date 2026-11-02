@@ -315,7 +315,7 @@ class HydraBatchPage(QtWidgets.QWidget):
         ome_v.addWidget(self._ome_collapse)
         self._ome_lbl = QtWidgets.QLabel("")
         self._ome_lbl.setWordWrap(True)
-        self._ome_lbl.setStyleSheet("color:#8AB4F8;font-size:10px")
+        self._ome_lbl.setStyleSheet(f"color:{S.INFO};font-size:10px")
         ome_v.addWidget(self._ome_lbl)
         for w in (self._ome_start, self._ome_step):
             w.valueChanged.connect(lambda *_: self._refresh_omega_note())
@@ -674,7 +674,7 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._load4_btn.clicked.connect(self._load_four_calibrations)
         self._cake_summary.top_extras_layout().addWidget(self._load4_btn)
         self._load4_lbl = QtWidgets.QLabel("")
-        self._load4_lbl.setStyleSheet("color:#9a9a9a;font-size:10px")
+        self._load4_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         self._load4_lbl.setWordWrap(True)
         self._cake_summary.top_extras_layout().addWidget(self._load4_lbl)
         # The table forwards edits rather than holding values: the panel's

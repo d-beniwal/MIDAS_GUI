@@ -255,6 +255,7 @@ DEFAULT_COLORMAP      = "gray"        # value in COLORMAPS — every image/cake
 # Qt's QT_SCALE_FACTOR, so the entire layout + fonts scale uniformly. 1.0 suits a
 # 1080p display; try ~1.5 for 1440p and ~2.0 for 4K. Overridable via ui.ui_scale.
 DEFAULT_UI_SCALE      = 1.0           # multiplier, clamped to [0.5, 4.0] at startup
+DEFAULT_THEME         = "dark"        # "dark" | "light" colour theme (Preferences ▸ Display)
 
 # ── Modular tabs ────────────────────────────────────────────────────────────────
 # ALWAYS_TABS are pinned (cannot be hidden); OPTIONAL_TABS can be toggled from
@@ -482,6 +483,12 @@ def _apply(cfg: dict) -> None:
             g["DEFAULT_UI_SCALE"] = float(ui["ui_scale"])
     except Exception:
         pass
+    # colour theme: "dark" (default) or "light"
+    try:
+        if str(ui.get("theme", "")).lower() in ("dark", "light"):
+            g["DEFAULT_THEME"] = str(ui["theme"]).lower()
+    except Exception:
+        pass
 
 
 # Pristine snapshot of the shipped defaults (captured BEFORE any overlay), so the
@@ -515,7 +522,7 @@ _SHIPPED = {
         "integration_kernel": DEFAULT_KERNEL, "calibration_pipeline": DEFAULT_PIPELINE,
         "output_format": DEFAULT_OUTPUT_FORMAT, "azimuthal_method": DEFAULT_ERROR_MODEL,
         "plot_theme": DEFAULT_COLORMAP, "visible_tabs": list(DEFAULT_VISIBLE_TABS),
-        "ui_scale": DEFAULT_UI_SCALE,
+        "ui_scale": DEFAULT_UI_SCALE, "theme": DEFAULT_THEME,
     },
 }
 

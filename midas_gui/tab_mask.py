@@ -409,7 +409,7 @@ class MaskTab(QtWidgets.QWidget):
         _update_auto_visibility()
         auto.body.addWidget(self._auto_widget)
         self._stat_prog = QtWidgets.QLabel("")
-        self._stat_prog.setStyleSheet("color:#7fb8ff;font-size:10px"); self._stat_prog.setWordWrap(True)
+        self._stat_prog.setStyleSheet(f"color:{S.INFO2};font-size:10px"); self._stat_prog.setWordWrap(True)
         auto.body.addWidget(self._stat_prog)
         lv.addWidget(auto)
 

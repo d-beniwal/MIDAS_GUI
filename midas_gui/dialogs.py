@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from PyQt5 import QtCore, QtWidgets
+from midas_gui import style as S
 
 from .constants import DISTORTION_NAMES, DISTORTION_ISO, DISTORTION_PRESETS, H5_EXTS, PROJECT_ROOT
 
@@ -77,7 +78,7 @@ class DistortionRefineDialog(QtWidgets.QDialog):
             "ticking one ticks the other, since the backend refuses one "
             "without the other.")
         info.setWordWrap(True)
-        info.setStyleSheet("color:#bbb;font-size:11px;padding-bottom:6px;")
+        info.setStyleSheet(f"color:{S.SUBTLE};font-size:11px;padding-bottom:6px;")
         layout.addWidget(info)
 
         # ── Preset buttons ──
@@ -173,7 +174,7 @@ class DistortionSeedDialog(QtWidgets.QDialog):
             "fitted previously. Anything left unticked starts at 0, the "
             "way it always has.")
         info.setWordWrap(True)
-        info.setStyleSheet("color:#bbb;font-size:11px;padding-bottom:6px;")
+        info.setStyleSheet(f"color:{S.SUBTLE};font-size:11px;padding-bottom:6px;")
         layout.addWidget(info)
 
         grid = QtWidgets.QGridLayout(); grid.setSpacing(4)
@@ -267,7 +268,7 @@ class ManualSeedDialog(QtWidgets.QDialog):
             "always has been — ticking only Lsd, say, leaves the beam centre "
             "on the auto-seeder.")
         info.setWordWrap(True)
-        info.setStyleSheet("color:#bbb;font-size:11px;padding-bottom:6px;")
+        info.setStyleSheet(f"color:{S.SUBTLE};font-size:11px;padding-bottom:6px;")
         layout.addWidget(info)
         self._refine_boxes: dict = {}
         self._status_lbls: dict = {}
@@ -359,7 +360,7 @@ class ManualSeedDialog(QtWidgets.QDialog):
             seeded = self._seed_boxes[key].isChecked()
             lbl.setText(self._OUTCOME[(refined, seeded)])
             lbl.setStyleSheet(
-                "font-size:10px;color:" + ("#d7861f" if refined else "#8a8a8a"))
+                "font-size:10px;color:" + ("#d7861f" if refined else S.MUTED))
 
     def showEvent(self, event):
         """The Refine card stays editable while this non-modal dialog is
@@ -454,7 +455,7 @@ class _SaveParamstestDialog(QtWidgets.QDialog):
             "line (scan range, omega step, RingThresh, MinNrSpots, …) is "
             "carried verbatim.")
         info.setWordWrap(True)
-        info.setStyleSheet("color:#bbb;font-size:11px;padding-bottom:8px;")
+        info.setStyleSheet(f"color:{S.SUBTLE};font-size:11px;padding-bottom:8px;")
         layout.addWidget(info)
 
         form = QtWidgets.QFormLayout(); form.setSpacing(8)
@@ -563,7 +564,7 @@ class ProjectContentsPicker(QtWidgets.QWidget):
         outer.addStretch(1)
 
         placeholder = QtWidgets.QLabel("Click a project (.h5) file to preview its contents.")
-        placeholder.setStyleSheet("color:#888;padding:12px;")
+        placeholder.setStyleSheet(f"color:{S.MUTED};padding:12px;")
         placeholder.setWordWrap(True)
         self._content_layout.addWidget(placeholder)
 
@@ -915,7 +916,7 @@ class SaveAsHistoryDialog(QtWidgets.QDialog):
         layout.addWidget(info)
         summary_lbl = QtWidgets.QLabel(summary_text)
         summary_lbl.setWordWrap(True)
-        summary_lbl.setStyleSheet("color:#bbb;font-size:11px;padding:6px 0;")
+        summary_lbl.setStyleSheet(f"color:{S.SUBTLE};font-size:11px;padding:6px 0;")
         layout.addWidget(summary_lbl)
 
         self._group = QtWidgets.QButtonGroup(self)
@@ -1122,7 +1123,7 @@ class BrowseFilesDialog(QtWidgets.QDialog):
         layout.addWidget(self._recursive_chk)
 
         self._info = QtWidgets.QLabel("")
-        self._info.setStyleSheet("color:#9a9a9a;font-size:10px")
+        self._info.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         self._info.setWordWrap(True)
         layout.addWidget(self._info)
 
@@ -1623,7 +1624,7 @@ class AddSamplesDialog(QtWidgets.QDialog):
         layout.addWidget(split, 1)
 
         self._info = QtWidgets.QLabel("")
-        self._info.setStyleSheet("color:#9a9a9a;font-size:10px")
+        self._info.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         self._info.setWordWrap(True)
         layout.addWidget(self._info)
 

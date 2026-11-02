@@ -503,7 +503,7 @@ class CalibrationTab(QtWidgets.QWidget):
         self._proj_clear_btn.clicked.connect(self._on_project_clear)
         projc.body.addLayout(S.button_grid([self._proj_btn, self._proj_clear_btn], 2))
         self._proj_note = QtWidgets.QLabel("")
-        self._proj_note.setStyleSheet("color:#9a9a9a;font-size:10px"); self._proj_note.setWordWrap(True)
+        self._proj_note.setStyleSheet(f"color:{S.MUTED};font-size:10px"); self._proj_note.setWordWrap(True)
         projc.body.addWidget(self._proj_note)
         self._proj_card = projc
         projc.setEnabled(False)

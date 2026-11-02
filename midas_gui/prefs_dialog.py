@@ -15,6 +15,7 @@ from PyQt5 import QtWidgets
 
 from midas_gui import settings
 from midas_gui import constants as C
+from midas_gui import style as S
 from midas_gui.helpers import browse_start_dir, warn_if_path_missing
 
 _PATH_ROWS = [
@@ -68,7 +69,7 @@ def _effective_cfg() -> dict:
             "integration_kernel": C.DEFAULT_KERNEL, "calibration_pipeline": C.DEFAULT_PIPELINE,
             "output_format": C.DEFAULT_OUTPUT_FORMAT, "azimuthal_method": C.DEFAULT_ERROR_MODEL,
             "plot_theme": C.DEFAULT_COLORMAP, "visible_tabs": list(C.DEFAULT_VISIBLE_TABS),
-            "ui_scale": C.DEFAULT_UI_SCALE,
+            "ui_scale": C.DEFAULT_UI_SCALE, "theme": C.DEFAULT_THEME,
         },
     }
 
@@ -84,7 +85,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         info = QtWidgets.QLabel(
             "Your local defaults. Lists below start from the shipped defaults — "
             "add / remove / modify as you like. Changes apply on the next launch.")
-        info.setWordWrap(True); info.setStyleSheet("color:#aaa;font-size:11px")
+        info.setWordWrap(True); info.setStyleSheet(f"color:{S.SUBTLE};font-size:11px")
         root.addWidget(info)
 
         # ── profile selector ─────────────────────────────────────────────
@@ -133,7 +134,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         root.addLayout(arow)
 
         self._loc_label = QtWidgets.QLabel()
-        self._loc_label.setStyleSheet("color:#888;font-size:10px"); self._loc_label.setWordWrap(True)
+        self._loc_label.setStyleSheet(f"color:{S.MUTED};font-size:10px"); self._loc_label.setWordWrap(True)
         root.addWidget(self._loc_label)
         self._update_profile_label()
 
@@ -204,7 +205,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         info = QtWidgets.QLabel(
             "Per-machine, not saved with beamline Profiles — set once per "
             "workstation. Applies immediately.")
-        info.setWordWrap(True); info.setStyleSheet("color:#aaa;font-size:11px")
+        info.setWordWrap(True); info.setStyleSheet(f"color:{S.SUBTLE};font-size:11px")
         f.addRow(info)
 
         self._apexa_path = QtWidgets.QLineEdit(settings.get_apexa_repo_path())
@@ -220,7 +221,7 @@ class PreferencesDialog(QtWidgets.QDialog):
             "Local checkout of APEXA-APS-Beamline-Assistant. Used by "
             "Tools ▸ APEXA Chat… to launch its desktop chat panel "
             "alongside this GUI, driving it through midas_gui_mcp/.")
-        hint.setWordWrap(True); hint.setStyleSheet("color:#888;font-size:10px")
+        hint.setWordWrap(True); hint.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         f.addRow(hint)
 
         self._tabs.addTab(w, "Integrations")
@@ -357,10 +358,21 @@ class PreferencesDialog(QtWidgets.QDialog):
 
     def _build_display_tab(self):
         w = QtWidgets.QWidget(); v = QtWidgets.QVBoxLayout(w)
-        v.addWidget(QtWidgets.QLabel(
-            "Interface scale — a whole-application zoom for the layout AND fonts, for "
-            "use on HiDPI / 4K monitors where the default looks too small."))
+        intro = QtWidgets.QLabel(
+            "Colour theme and interface scale. The scale is a whole-application zoom for "
+            "the layout AND fonts, for use on HiDPI / 4K monitors where the default looks "
+            "too small.")
+        intro.setWordWrap(True)
+        v.addWidget(intro)
         form = QtWidgets.QFormLayout()
+        self._ui_theme = QtWidgets.QComboBox()
+        self._ui_theme.addItem("Dark", "dark")
+        self._ui_theme.addItem("Light", "light")
+        self._ui_theme.setFixedWidth(110)
+        self._ui_theme.setToolTip(
+            "Colour theme for the interface. Image and plot canvases stay dark in both "
+            "themes. Takes effect after a restart.")
+        form.addRow("Theme:", self._ui_theme)
         self._ui_scale = QtWidgets.QDoubleSpinBox()
         self._ui_scale.setRange(0.5, 4.0); self._ui_scale.setSingleStep(0.05)
         self._ui_scale.setDecimals(2); self._ui_scale.setSuffix("  ×")
@@ -380,7 +392,7 @@ class PreferencesDialog(QtWidgets.QDialog):
             "Applied via Qt's QT_SCALE_FACTOR, so the whole layout scales uniformly. "
             "Takes effect after a restart — use “Save as my defaults”, then relaunch "
             "(you'll be offered a restart if the scale changed).")
-        note.setWordWrap(True); note.setStyleSheet("color:#aaa;font-size:10px")
+        note.setWordWrap(True); note.setStyleSheet(f"color:{S.SUBTLE};font-size:10px")
         v.addWidget(note)
         v.addStretch(1)
         self._tabs.addTab(w, "Display")
@@ -500,6 +512,8 @@ class PreferencesDialog(QtWidgets.QDialog):
             for name, cb in self._tab_checks.items():
                 if cb.isEnabled():           # skip the always-on (disabled) boxes
                     cb.setChecked(name in vis)
+        i = self._ui_theme.findData(str(ui.get("theme", "dark")).lower())
+        self._ui_theme.setCurrentIndex(i if i >= 0 else 0)
         try:
             self._ui_scale.setValue(float(ui.get("ui_scale", 1.0) or 1.0))
         except Exception:
@@ -568,6 +582,7 @@ class PreferencesDialog(QtWidgets.QDialog):
                 "visible_tabs": [name for name, cb in self._tab_checks.items()
                                  if cb.isChecked()],
                 "ui_scale": round(self._ui_scale.value(), 3),
+                "theme": self._ui_theme.currentData(),
             },
         }
 
@@ -769,7 +784,13 @@ class PreferencesDialog(QtWidgets.QDialog):
         # startup-only setting — QT_SCALE_FACTOR is read before the QApplication).
         scale_changed = abs(float(cfg["ui"].get("ui_scale", 1.0))
                             - float(getattr(C, "DEFAULT_UI_SCALE", 1.0) or 1.0)) > 1e-6
-        if scale_changed:
+        theme_changed = (str(cfg["ui"].get("theme", "dark"))
+                         != str(getattr(C, "DEFAULT_THEME", "dark")))
+        if theme_changed:
+            note = (f"Theme set to {cfg['ui']['theme']}. Restart to apply"
+                    + (f"; interface scale set to {cfg['ui']['ui_scale']:g}×."
+                       if scale_changed else "."))
+        elif scale_changed:
             note = f"Interface scale set to {cfg['ui']['ui_scale']:g}×."
         elif applied_live:
             note = "Tab visibility applied now; other changes still need a restart."

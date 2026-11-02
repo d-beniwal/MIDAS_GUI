@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Optional
 
 from PyQt5 import QtCore, QtWidgets
+from midas_gui import style as S
 
 # Every job's screenlog + JSON sidecar lives here, regardless of the job's
 # own --out-dir — so adoption (after a GUI restart) can scan one fixed
@@ -334,7 +335,7 @@ class JobQueuePanel(QtWidgets.QWidget):
         v.addWidget(scroll)
 
         self._empty_lbl = QtWidgets.QLabel("No background jobs.")
-        self._empty_lbl.setStyleSheet("color:#888;font-size:10px;")
+        self._empty_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px;")
         self._jobs_layout.insertWidget(0, self._empty_lbl)
 
     def _refresh_empty_label(self):
@@ -535,7 +536,7 @@ class JobQueuePanel(QtWidgets.QWidget):
 
         label = QtWidgets.QLabel(job.name)
         label.setMinimumWidth(160)
-        label.setStyleSheet("font-weight:bold;color:#eee;")
+        label.setStyleSheet(f"font-weight:bold;color:{S.TEXT};")
         label.setToolTip(f"session: {job.session}\nlogfile: {job.logfile}")
 
         progress = QtWidgets.QProgressBar()

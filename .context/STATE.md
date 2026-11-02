@@ -1,8 +1,10 @@
 # Project state
 
-Last updated: 2026-11-01 (Hydra: mode sync, composite table, cakes, results sidecar)
+Last updated: 2026-11-02 (light/dark theme)
 
 ## Now working on
+
+2026-11-02: Light/dark theme — Preferences ▸ Display ▸ Theme (`ui.theme`, restart to apply). Chrome + pyqtgraph canvases theme via `style.py` tokens; pyvista/matplotlib canvases still unthemed (DECISIONS 2026-11-02). Checked via offscreen screenshots of 4 tabs + prefs; not yet reviewed on every tab/dialog.
 
 2026-11-01: Hydra Data Viewer — mode ribbon synced across Data Viewer/Calibrate/Batch; composite view shows a read-only per-panel parameter table; new per-panel Eta-vs-R cakes; profiles+cakes saved/restored via a Data Viewer project sidecar (DECISIONS 2026-11-01). Not live-checked with real Hydra data.
 
@@ -69,6 +71,7 @@ View details: DECISIONS 2026-10-24 and `documentation/solve_cell_visualizations.
   remain unresolved; no new conclusion about their cause in this task.
 
 ## Recent changes
+- 2026-11-02: Light theme added (`style.DARK`/`LIGHT` tokens, `set_mode`, `ui.theme` pref); inline muted greys/links tokenised across tabs. Follow-ups: light pyvista/matplotlib canvases; audit remaining dialogs/tabs (Solve Cell, PDF, Batch, Mask) in light mode.
 - 2026-11-01: Hydra mode sync + composite parameter table + per-panel cakes + `_hydra_results.npz` sidecar; 2 new tests in `test_hydra_ui.py` (pre-existing `test_hydra_composite_builds_with_matched_calibration` failure unchanged).
 - 2026-11-01: Panel widths: content-derived minimum (capped 520 px, re-checked every 1 s while visible), saved on drag, restored next launch, ⟲ header button resets; 5 tabs + 3 Hydra pages pass `key=` and the Hydra pages gain Data/Controls minimise + ribbon. Tests in `test_panel_toggle_tabs.py` (9 pass); Hydra test files match clean-HEAD results (pre-existing segfault/failures in 5 files).
 - 2026-10-31: Absolute image color-limit fields + Auto; bounded LUT zoom/pan, stable live-frame/log behavior, display-state persistence; tests in `test_color_scale_controls.py` and Data Viewer control regression. See ARCHITECTURE.

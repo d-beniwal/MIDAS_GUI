@@ -3252,7 +3252,7 @@ def _clickable_menu_label(text, entries, parent=None):
     btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
     btn.setCursor(QtCore.Qt.PointingHandCursor)
     btn.setStyleSheet(
-        "QToolButton { border: none; padding: 0 2px; color: #4da3ff; }"
+        f"QToolButton {{ border: none; padding: 0 2px; color: {S.LINK}; }}"
         "QToolButton::menu-indicator { image: none; }")
     f = btn.font(); f.setUnderline(True); btn.setFont(f)
     menu = QtWidgets.QMenu(btn)
@@ -3282,7 +3282,7 @@ def make_kedge_label(wl_spin, text="λ:", parent=None):
     btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
     btn.setCursor(QtCore.Qt.PointingHandCursor)
     btn.setStyleSheet(
-        "QToolButton { border: none; padding: 0 2px; color: #4da3ff; }"
+        f"QToolButton {{ border: none; padding: 0 2px; color: {S.LINK}; }}"
         "QToolButton::menu-indicator { image: none; }")
     f = btn.font(); f.setUnderline(True); btn.setFont(f)
 
@@ -3379,7 +3379,7 @@ def make_calib_values_button(fields_getter, text="View calibration ▾", parent=
     btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
     btn.setCursor(QtCore.Qt.PointingHandCursor)
     btn.setStyleSheet(
-        "QToolButton { border: none; padding: 0 2px; color: #4da3ff; }"
+        f"QToolButton {{ border: none; padding: 0 2px; color: {S.LINK}; }}"
         "QToolButton::menu-indicator { image: none; }")
     f = btn.font(); f.setUnderline(True); btn.setFont(f)
     btn.setToolTip("Click to view the calibration geometry currently in use.")

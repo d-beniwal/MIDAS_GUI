@@ -3,6 +3,10 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-11-02 — Light/dark colour theme (startup setting, canvases stay dark)
+
+The existing look is now the **dark** theme and a **light** theme was added. `style.py` holds two token dicts (`DARK`, `LIGHT`); `set_mode()` rebinds the module globals (`S.BG`, `S.MUTED`, …) and `style.set_mode(configured_mode())` runs at import, so module-level uses of `S.*` already see the right palette. Every grey/blue literal in the stylesheet and the common inline `color:#aaa/#9a9a9a/#888` label styles became a token; the dark stylesheet is character-identical to before (checked by diffing against HEAD, only `#555`→`#555555` spelling). Choice lives in config `ui.theme` (`constants.DEFAULT_THEME`, Preferences ▸ Display ▸ Theme) and, like `ui_scale`, **needs a restart**: hundreds of inline stylesheets are baked at widget construction, so a live swap would leave a half-themed UI. **Canvases (same day, supersedes the first cut):** pyqtgraph canvases follow the theme too — `S.CANVAS_BG/FG` feed `pg.setConfigOptions` and every `PlotWidget(background=…)`; `CANVAS_PANEL/DEEP`, `AXIS_TEXT/TICK`, `LOG_BG/FG`(+`READOUT_BORDER`) cover the ROI/histogram plots, axis labels and pixel-readout bars. Not themed: pyvista/VTK 3D views and matplotlib canvases (Zarr Viewer, Real-space, Data Explorer, 3D pole figure) — audit those next; Pump Probe and the waterfall "White" theme were already white in both. Remaining unthemed literals are accent/status colours (greens, ambers, plot pens) that read on both backgrounds.
+
 ## 2026-11-02 — Hydra cake tab: one Calculate + exclusive panel checkboxes
 
 Replaced "Calculate"/"Calculate all" with a single Calculate that computes every loaded panel's cake. A `QButtonGroup` of exclusive ge1–ge4 checkboxes (unlike the radial-profile tab's multi-select) picks which cake is displayed; it is independent of the toolbar panel (supersedes point (3) of 2026-11-01 "cake follows the toolbar panel").

@@ -162,7 +162,7 @@ class HydraViewerPage(QtWidgets.QWidget):
         self._load4_btn.clicked.connect(self._load_four_calibrations)
         inner_lv.addWidget(self._load4_btn)
         self._load4_lbl = QtWidgets.QLabel("")
-        self._load4_lbl.setStyleSheet("color:#9a9a9a;font-size:10px")
+        self._load4_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         self._load4_lbl.setWordWrap(True)
         inner_lv.addWidget(self._load4_lbl)
         self._card_stack = QtWidgets.QStackedWidget()
@@ -840,7 +840,7 @@ class HydraViewerPage(QtWidgets.QWidget):
             "Composite: each panel is placed with its own geometry (below, "
             "read-only). Edit parameters on the ge1–ge4 views.")
         note.setWordWrap(True)
-        note.setStyleSheet("color:#9a9a9a;font-size:10px")
+        note.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         lv.addWidget(note)
         t = QtWidgets.QTableWidget(len(self._COMP_ROWS), 4)
         t.setHorizontalHeaderLabels([f"ge{n}" for n in (1, 2, 3, 4)])

@@ -151,7 +151,7 @@ class ImageViewer(QtWidgets.QWidget):
 
     def __init__(self, parent=None, title=""):
         super().__init__(parent)
-        pg.setConfigOptions(background="k", foreground="w")
+        pg.setConfigOptions(background=S.CANVAS_BG, foreground=S.CANVAS_FG)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
@@ -221,8 +221,8 @@ class ImageViewer(QtWidgets.QWidget):
         # Bottom status bar — pixel coordinates and raw value on hover
         self._coord_bar = QtWidgets.QLabel("Move cursor over image to inspect pixel values")
         self._coord_bar.setStyleSheet(
-            f"color:#dddddd; background:#1a1a1a; font-family:{S.MONO_CSS};"
-            "font-size:12px; padding:2px 6px; border-top:1px solid #444;")
+            f"color:{S.LOG_FG}; background:{S.LOG_BG}; font-family:{S.MONO_CSS};"
+            f"font-size:12px; padding:2px 6px; border-top:1px solid {S.READOUT_BORDER};")
         layout.addWidget(self._coord_bar)
 
         #: Panel-pixel -> lab-frame display map, or None for "unrolled".
@@ -1141,8 +1141,8 @@ def _add_auto_manual_buttons(plot_widget: "pg.PlotWidget", on_auto, on_manual):
         b.setCheckable(True)
         b.setFixedSize(18, 18)
         b.setStyleSheet(
-            "QPushButton { font-size:9px; padding:0; background:#333; color:#ccc; "
-            "border:1px solid #555; } "
+            f"QPushButton {{ font-size:9px; padding:0; background:{S.MINI_BG}; color:{S.MINI_FG}; "
+            f"border:1px solid {S.BORDER}; }} "
             "QPushButton:checked { background:#4a7; color:#000; }")
         grp.addButton(b)
     btn_a.setToolTip("Auto-range: fit the view to the data automatically.\n"
@@ -1348,7 +1348,7 @@ def build_lab_frame_axes_items(iv, image_shape, bc_y: float, bc_z: float,
     L = max(0.03 * min(ny, nz), min(0.5 * min(ny, nz), 80.0 * px_iso))
     head = max(15.0, L * 0.20)
 
-    text_pen = pg.mkPen("w")
+    text_pen = pg.mkPen(S.CANVAS_FG)
     text_fill = pg.mkBrush(0, 0, 0, 200)
     xl_pen = pg.mkPen(xl_color, width=3.5)
     yl_pen = pg.mkPen(yl_color, width=3.5)
@@ -1583,7 +1583,7 @@ class CakeViewer(QtWidgets.QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        pg.setConfigOptions(background="k", foreground="w")
+        pg.setConfigOptions(background=S.CANVAS_BG, foreground=S.CANVAS_FG)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
@@ -1661,8 +1661,8 @@ class CakeViewer(QtWidgets.QWidget):
 
         self._coord_bar = QtWidgets.QLabel("Run an integration to see the (η, R) cake")
         self._coord_bar.setStyleSheet(
-            f"color:#dddddd; background:#1a1a1a; font-family:{S.MONO_CSS};"
-            "font-size:12px; padding:2px 6px; border-top:1px solid #444;")
+            f"color:{S.LOG_FG}; background:{S.LOG_BG}; font-family:{S.MONO_CSS};"
+            f"font-size:12px; padding:2px 6px; border-top:1px solid {S.READOUT_BORDER};")
         layout.addWidget(self._coord_bar)
         self._mouse_proxy = pg.SignalProxy(self._iv.scene.sigMouseMoved, rateLimit=60, slot=self._mouse)
 
@@ -2085,7 +2085,7 @@ class RingResidualViewer(CakeViewer):
 
         # 1-D view: a sibling plot, stacked with the 2-D image view so
         # toggling View swaps which one is visible.
-        self._plot1d = pg.PlotWidget(background="k")
+        self._plot1d = pg.PlotWidget(background=S.CANVAS_BG)
         self._plot1d.showGrid(x=True, y=True, alpha=0.2)
         self._zero1d = pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen("#888", width=1))
         self._plot1d.addItem(self._zero1d)
@@ -2336,7 +2336,7 @@ class ProfileViewer(QtWidgets.QWidget):
         bar.addWidget(self._logy)
         bar.addStretch(1)
         self._stat = QtWidgets.QLabel("")
-        self._stat.setStyleSheet("color:#aaa;font-size:10px")
+        self._stat.setStyleSheet(f"color:{S.SUBTLE};font-size:10px")
         bar.addWidget(self._stat)
         self._toolbar_layout = bar   # exposed for external widget insertion
         layout.addLayout(bar)
@@ -2348,7 +2348,7 @@ class ProfileViewer(QtWidgets.QWidget):
         self._manual_range: Optional[tuple] = None   # (xmin, xmax, ymin, ymax)
         self._auto_limits: Optional[tuple] = None      # last auto-fit extent
 
-        self._plot = pg.PlotWidget(background="k")
+        self._plot = pg.PlotWidget(background=S.CANVAS_BG)
         self._plot.setLabel("left", "Mean intensity")
         self._plot.setLabel("bottom", "R (px)")
         self._plot.showGrid(x=True, y=True, alpha=0.2)
@@ -2867,7 +2867,7 @@ class RadialThresholdEditor(QtWidgets.QWidget):
         super().__init__(parent)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        self._plot = pg.PlotWidget(background="k")
+        self._plot = pg.PlotWidget(background=S.CANVAS_BG)
         self._plot.setLabel("bottom", "R (px)")
         self._plot.setLabel("left", "Threshold intensity")
         self._plot.showGrid(x=True, y=True, alpha=0.2)
@@ -3075,11 +3075,11 @@ class ResidualBarChart(QtWidgets.QWidget):
         bar.addWidget(QtWidgets.QLabel("Per-ring radial residual  Δr = r_obs − r_pred"))
         bar.addStretch(1)
         self._stat = QtWidgets.QLabel("")
-        self._stat.setStyleSheet("color:#aaa;font-size:10px")
+        self._stat.setStyleSheet(f"color:{S.SUBTLE};font-size:10px")
         bar.addWidget(self._stat)
         layout.addLayout(bar)
 
-        self._plot = pg.PlotWidget(background="k")
+        self._plot = pg.PlotWidget(background=S.CANVAS_BG)
         self._plot.setLabel("left", "Δr (px)")
         self._plot.setLabel("bottom", "ring index")
         self._plot.showGrid(x=True, y=True, alpha=0.2)
@@ -3252,7 +3252,7 @@ class OutputFormatSelector(QtWidgets.QWidget):
         self._btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         self._btn.setCursor(QtCore.Qt.PointingHandCursor)
         self._btn.setStyleSheet(
-            "QToolButton { border: none; padding: 0 2px; color: #4da3ff; }"
+            f"QToolButton {{ border: none; padding: 0 2px; color: {S.LINK}; }}"
             "QToolButton::menu-indicator { image: none; }")
         f = self._btn.font(); f.setUnderline(True); self._btn.setFont(f)
 
@@ -3400,7 +3400,7 @@ class FieldSelector(QtWidgets.QGroupBox):
         self._end = _NoScrollSpinBox(); self._end.setRange(0, 0); self._end.setFixedWidth(50)
         self._end.setToolTip("Last frame index in the mean (inclusive).")
         self._nfr_lbl = QtWidgets.QLabel("")
-        self._nfr_lbl.setStyleSheet("color:#9a9a9a;font-size:10px")
+        self._nfr_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         ir = QtWidgets.QHBoxLayout(); ir.setSpacing(4)
         ir.addWidget(QtWidgets.QLabel("mean")); ir.addWidget(self._start)
         ir.addWidget(QtWidgets.QLabel("–")); ir.addWidget(self._end)
@@ -3428,7 +3428,7 @@ class FieldSelector(QtWidgets.QGroupBox):
         self._compute_btn.clicked.connect(self._compute)
         v.addWidget(self._compute_btn)
         self._status = QtWidgets.QLabel("Not computed.")
-        self._status.setStyleSheet("color:#9a9a9a;font-size:10px"); self._status.setWordWrap(True)
+        self._status.setStyleSheet(f"color:{S.MUTED};font-size:10px"); self._status.setWordWrap(True)
         v.addWidget(self._status)
 
     # ── helpers ───────────────────────────────────────────────────
@@ -3790,7 +3790,7 @@ class FieldSelector(QtWidgets.QGroupBox):
             self._status.setStyleSheet("color:#e0a030;font-size:10px")
         else:
             self._status.setText(base)
-            self._status.setStyleSheet("color:#9a9a9a;font-size:10px")
+            self._status.setStyleSheet(f"color:{S.MUTED};font-size:10px")
 
     def get_mode(self) -> str:
         if self._mode is None:
@@ -3875,8 +3875,13 @@ class MaskSelector(QtWidgets.QGroupBox):
         row.addWidget(bf); row.addWidget(bd)
         v.addLayout(row)
         self._status = QtWidgets.QLabel("No mask.")
-        self._status.setStyleSheet("color:#9a9a9a;font-size:10px"); self._status.setWordWrap(True)
-        v.addWidget(self._status)
+        self._status.setStyleSheet(f"color:{S.MUTED};font-size:10px"); self._status.setWordWrap(True)
+        if compact:
+            row.addWidget(self._status, 1)
+            v.addLayout(row)
+        else:
+            v.addLayout(row)
+            v.addWidget(self._status)
 
     def _add_row(self, entry, label, at_top=False):
         rw = QtWidgets.QWidget()
@@ -4034,7 +4039,7 @@ class MaskSelector(QtWidgets.QGroupBox):
             self._status.setStyleSheet("color:#e0a030;font-size:10px")
         else:
             self._status.setText(f"{n} mask source(s)" if n else "No mask.")
-            self._status.setStyleSheet("color:#9a9a9a;font-size:10px")
+            self._status.setStyleSheet(f"color:{S.MUTED};font-size:10px")
 
     # ── GUI state (Save/Load GUI State) ─────────────────────────────
     def get_state(self) -> dict:
@@ -4081,17 +4086,17 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
         top.addWidget(self._logchk)
         v.addLayout(top)
 
-        self._plot = pg.PlotWidget(background="#2b2e35")
+        self._plot = pg.PlotWidget(background=S.CANVAS_PANEL)
         # Min height only (no max) so the splitter above can grow the histogram.
         self._plot.setMinimumHeight(90)
         # Axis titles sized in px off the app's base font (S.axis_label_css) —
         # a "12pt" here rendered ~1.6x the surrounding UI at scale 1.0 and grew
         # further with the interface scale, because pt goes through a logical
         # DPI that QT_SCALE_FACTOR has already moved. See style.font_px.
-        self._plot.setLabel("bottom", "intensity", **S.axis_label_css("#d0d0d0"))
-        self._plot.setLabel("left", "log(count+1)", **S.axis_label_css("#d0d0d0"))
+        self._plot.setLabel("bottom", "intensity", **S.axis_label_css(S.AXIS_TEXT))
+        self._plot.setLabel("left", "log(count+1)", **S.axis_label_css(S.AXIS_TEXT))
         for ax in ("bottom", "left"):
-            self._plot.getAxis(ax).setTextPen("#c8c8c8")
+            self._plot.getAxis(ax).setTextPen(S.AXIS_TICK)
             self._plot.getAxis(ax).setPen("#8a8a8a")
         self._curve = self._plot.plot(
             [], [], stepMode="center", fillLevel=0,
@@ -4119,7 +4124,7 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
         self._text.setSizePolicy(QtWidgets.QSizePolicy.Fixed,
                                  QtWidgets.QSizePolicy.Fixed)
         self._text.setStyleSheet(
-            "QPlainTextEdit { background:#23252b; color:#d6d6d6; border:1px solid #444; }")
+            f"QPlainTextEdit {{ background:{S.SURFACE}; color:{S.SURFACE_FG}; border:1px solid {S.BORDER}; }}")
         # Histogram and numbers side by side: the readout is a fixed, narrow
         # block of short lines, so stacking it under the plot spent the panel's
         # width on nothing and its height twice over. The plot takes all the
@@ -4281,7 +4286,7 @@ class IntensityStatsPanel(QtWidgets.QGroupBox):
             y = np.log10(y + 1.0)
         self._curve.setData(edges, y)
         self._plot.setLabel("left", "log(count+1)" if log else "count",
-                            **S.axis_label_css("#d0d0d0"))
+                            **S.axis_label_css(S.AXIS_TEXT))
         if self._manual_mode:
             # Manual mode is authoritative — hold the user's limits regardless
             # of how the histogram data changed (e.g. a new live frame).
@@ -4415,7 +4420,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self.setStyleSheet(
             f"#dataLoaderPanel {{ border: none; border-right: 2px solid {S.ACCENT}; }}"
             f"#dataLoaderScroll {{ border: none; }}"
-            f"#dataLoaderViewport, #dataLoaderInner {{ background: #2b2e35; }}")
+            f"#dataLoaderViewport, #dataLoaderInner {{ background: {S.LOADER_BG}; }}")
 
         # ── Live Data card (collapsible via its own checkbox; above Data) ──
         if allow_live:
@@ -4699,7 +4704,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._combine_op_combo.currentIndexChanged.connect(self._on_combine_changed)
 
         self._info = QtWidgets.QLabel("No data loaded.")
-        self._info.setStyleSheet("color:#9a9a9a;font-size:10px"); self._info.setWordWrap(True)
+        self._info.setStyleSheet(f"color:{S.MUTED};font-size:10px"); self._info.setWordWrap(True)
         card.body.addWidget(self._info)
         lv.addWidget(card)
 
@@ -6496,7 +6501,7 @@ class LossCurveViewer(QtWidgets.QWidget):
         super().__init__(parent)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(2)
-        self._plot = pg.PlotWidget(background="k")
+        self._plot = pg.PlotWidget(background=S.CANVAS_BG)
         self._plot.setLabel("left", ylabel)
         self._plot.setLabel("bottom", "iteration")
         self._plot.showGrid(x=True, y=True, alpha=0.2)
@@ -6549,12 +6554,12 @@ class WaterfallViewer(QtWidgets.QWidget):
         self._xunit_combo.currentIndexChanged.connect(self._on_xunit_changed)
         bar.addWidget(self._xunit_combo)
         bar.addStretch(1)
-        self._stat = QtWidgets.QLabel(""); self._stat.setStyleSheet("color:#aaa;font-size:10px")
+        self._stat = QtWidgets.QLabel(""); self._stat.setStyleSheet(f"color:{S.SUBTLE};font-size:10px")
         bar.addWidget(self._stat)
         layout.addLayout(bar)
 
         self._xaxis = _UnitAxis(orientation="bottom")
-        self._plot = pg.PlotWidget(background="k", axisItems={"bottom": self._xaxis})
+        self._plot = pg.PlotWidget(background=S.CANVAS_BG, axisItems={"bottom": self._xaxis})
         self._plot.setLabel("left", "frame #")
         self._plot.setLabel("bottom", "R (px)")
         self._img = pg.ImageItem()
@@ -6829,7 +6834,7 @@ class StackedProfileViewer(QtWidgets.QWidget):
             b.setAutoRaise(True); b.clicked.connect(slot); return b
 
         def _sep():
-            s = QtWidgets.QLabel("|"); s.setStyleSheet("color:#888;")
+            s = QtWidgets.QLabel("|"); s.setStyleSheet(f"color:{S.MUTED};")
             return s
 
         def _group(label, tip_minus, on_minus, tip_plus, on_plus):
@@ -6846,7 +6851,7 @@ class StackedProfileViewer(QtWidgets.QWidget):
         _group("font", "Smaller labels", lambda: self._adjust_fontsize(-1),
                "Larger labels", lambda: self._adjust_fontsize(1))
         self._stat = QtWidgets.QLabel("")
-        self._stat.setStyleSheet("color:#aaa;font-size:10px")
+        self._stat.setStyleSheet(f"color:{S.SUBTLE};font-size:10px")
         bar.addWidget(self._stat)
         layout.addLayout(bar)
 

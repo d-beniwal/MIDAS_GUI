@@ -208,7 +208,7 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
         self._end = _NoScrollSpinBox(); self._end.setRange(0, 0); self._end.setFixedWidth(50)
         self._end.setToolTip("Last frame index in the mean (inclusive), applied to every panel.")
         self._nfr_lbl = QtWidgets.QLabel("")
-        self._nfr_lbl.setStyleSheet("color:#9a9a9a;font-size:10px")
+        self._nfr_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         ir = QtWidgets.QHBoxLayout(); ir.setSpacing(4)
         ir.addWidget(QtWidgets.QLabel("mean")); ir.addWidget(self._start)
         ir.addWidget(QtWidgets.QLabel("–")); ir.addWidget(self._end)
@@ -235,7 +235,7 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
         self._compute_btn.clicked.connect(self._compute_all)
         v.addWidget(self._compute_btn)
         self._status = QtWidgets.QLabel("Not computed.")
-        self._status.setStyleSheet("color:#9a9a9a;font-size:10px"); self._status.setWordWrap(True)
+        self._status.setStyleSheet(f"color:{S.MUTED};font-size:10px"); self._status.setWordWrap(True)
         v.addWidget(self._status)
 
     @staticmethod
@@ -664,7 +664,7 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         # selection and a 1-scan selection look identical.
         self._scan_lbl = QtWidgets.QLabel("")
         self._scan_lbl.setWordWrap(True)
-        self._scan_lbl.setStyleSheet("color:#8AB4F8;font-size:10px")
+        self._scan_lbl.setStyleSheet(f"color:{S.INFO};font-size:10px")
         self._scan_lbl.setVisible(False)
         card.body.addWidget(self._scan_lbl)
         self._selection: list = []
@@ -1583,7 +1583,7 @@ class HydraProfileViewer(QtWidgets.QWidget):
         self._toolbar_layout = bar
         layout.addLayout(bar)
 
-        self._plot = pg.PlotWidget(background="k")
+        self._plot = pg.PlotWidget(background=S.CANVAS_BG)
         self._plot.setLabel("left", "Mean intensity")
         self._plot.setLabel("bottom", _XUNIT_LABEL["2th"])
         self._plot.showGrid(x=True, y=True, alpha=0.2)

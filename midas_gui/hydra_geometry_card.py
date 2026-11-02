@@ -993,7 +993,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         name_btn.setFlat(True)
         name_btn.setCursor(QtCore.Qt.PointingHandCursor)
         name_btn.setStyleSheet(
-            "QPushButton{text-align:left; color:#8ecdf7; text-decoration:underline; "
+            f"QPushButton{{text-align:left; color:{S.LINK2}; text-decoration:underline; "
             "border:none; padding:0;}")
         name_btn.setToolTip("Edit this material's lattice, space group, and name")
         name_btn.clicked.connect(lambda _, m=material, nb=name_btn: self._edit_material(m, nb))
@@ -1073,7 +1073,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         rings = material.get("_rings") or []
         if not rings:
             placeholder = QtWidgets.QLabel("Simulate rings to list them here.")
-            placeholder.setStyleSheet("color:#888; font-size:10px;")
+            placeholder.setStyleSheet(f"color:{S.MUTED}; font-size:10px;")
             layout.addWidget(placeholder)
         for r in rings:
             label = f"n{r['order']}" if r["hkl"] is None else str(tuple(r["hkl"]))

@@ -50,6 +50,7 @@ import os
 
 import numpy as np
 from PyQt5 import QtCore, QtWidgets
+from midas_gui import style as S
 
 from midas_gui.helpers import browse_start_dir
 
@@ -546,7 +547,7 @@ class ZarrViewerTab(QtWidgets.QWidget):
         line_layout.addWidget(self._eta_edit, stretch=1)
 
         lbl_eta_hint = QtWidgets.QLabel("(eta bin indices or 'all')")
-        lbl_eta_hint.setStyleSheet("color: #777777;")
+        lbl_eta_hint.setStyleSheet(f"color: {S.MUTED};")
         line_layout.addWidget(lbl_eta_hint)
 
         right_layout.addWidget(line_box)

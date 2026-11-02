@@ -412,7 +412,7 @@ class PumpProbeTab(QtWidgets.QWidget):
             b.setAutoRaise(True); b.clicked.connect(slot); return b
 
         def _sep():
-            s = QtWidgets.QLabel("|"); s.setStyleSheet("color:#888;"); return s
+            s = QtWidgets.QLabel("|"); s.setStyleSheet(f"color:{S.MUTED};"); return s
 
         def _group(label, tip_minus, on_minus, tip_plus, on_plus):
             bar.addWidget(_tbtn("−", tip_minus, on_minus))
