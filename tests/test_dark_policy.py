@@ -541,3 +541,73 @@ def test_an_explicit_dark_survives_a_probe_that_does_not_exist(tmp_path):
     got = b.arg_for("/no/such/file.h5", req)
     assert got and got[0] == "--dark", got
     assert b.skipped == []
+
+
+# ── darks taken INSIDE the scan ─────────────────────────────────────────
+
+def test_a_scan_with_its_own_darks_resolves_without_a_sibling(tmp_path):
+    """Reported from 20-ID: 109 scans refused as having no dark at their
+    exposure, while every one of them carried 10 real dark frames.
+
+    Two Varex dark workflows exist and they are the reverse of each
+    other. Darks taken as their own exposure produce *_dark_before_*
+    files and leave the scan's own data_dark all zeros; darks taken
+    INSIDE the scan (ndarks) land in the scan's own data_dark and write
+    no separate file at all. tree_dark_candidates replaced the whole
+    resolve_dark ladder and dropped its rung 2 -- the file's own dark --
+    so the second workflow became invisible.
+    """
+    tree = tmp_path / "t"
+    scan = _scan(tree, "s", "s_001128.vrx.h5", exp=1.0, data=2100.0,
+                 dark=2005.0)                      # darks inside the scan
+    got = D.resolve(scan, D.DarkRequest(origin="folder_recursive",
+                                        search_root=str(tree), exposure=1.0))
+    assert not got.skipped, got.why
+    assert "own" in got.why
+    assert np.allclose(got.array.mean(), 2005.0)
+
+
+def test_the_own_dark_needs_no_exposure_check(tmp_path):
+    """It is in the same file as the data, so it is at the data's
+    exposure by construction. Demanding a match would re-refuse exactly
+    the scans this fixes."""
+    tree = tmp_path / "t"
+    scan = _scan(tree, "s", "s_000190.vrx.h5", exp=3.0, data=2100.0,
+                 dark=2005.0)
+    for asked in (3.0, None):
+        got = D.resolve(scan, D.DarkRequest(origin="folder_recursive",
+                                            search_root=str(tree),
+                                            exposure=asked))
+        assert not got.skipped, (asked, got.why)
+
+
+def test_an_all_zero_own_dark_still_falls_through_to_the_sibling(tmp_path):
+    """The other workflow. Both groups show a 10-frame data_dark; only
+    the CONTENT distinguishes them, so restoring the own-dark rung must
+    not start using the placeholders."""
+    import h5py
+    tree = tmp_path / "t"
+    _scan(tree, "d", "d_dark_before_000338.vrx.h5", exp=0.1, dark=2007.0)
+    scan = _scan(tree, "s", "s_000339.vrx.h5", exp=0.1, data=2100.0)
+    with h5py.File(str(scan), "a") as f:
+        f.create_dataset("exchange/data_dark",
+                         data=np.zeros((10, 16, 16), np.float32))
+    got = D.resolve(scan, D.DarkRequest(origin="folder_recursive",
+                                        search_root=str(tree), exposure=0.1))
+    assert not got.skipped, got.why
+    assert "dark_before_000338" in got.why, got.why
+
+
+def test_no_dark_anywhere_still_skips_and_says_both_things_it_tried(tmp_path):
+    """The skip must not regress into silence now that there are two
+    places a dark can come from."""
+    import h5py
+    tree = tmp_path / "t"
+    scan = _scan(tree, "s", "s_000500.vrx.h5", exp=7.0, data=2100.0)
+    with h5py.File(str(scan), "a") as f:
+        f.create_dataset("exchange/data_dark",
+                         data=np.zeros((10, 16, 16), np.float32))
+    got = D.resolve(scan, D.DarkRequest(origin="folder_recursive",
+                                        search_root=str(tree), exposure=7.0))
+    assert got.skipped
+    assert "own exchange/data_dark" in got.why

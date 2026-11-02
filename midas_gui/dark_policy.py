@@ -140,14 +140,14 @@ def resolve(file_path, req: DarkRequest, *, shape=None, cache=None,
 
     if wants_auto(req):
         if req.search_root:
+            tree_why = None
             cands = tree_dark_candidates(file_path, req.search_root,
                                          exposure=req.exposure,
                                          dataset=req.dataset, cache=cache)
             for path, why in cands:
                 if path is None:
-                    return DarkChoice(
-                        None, f"{_skip_reason(file_path, req)} — {why}",
-                        "skipped")
+                    tree_why = why
+                    break
                 if vetoed(path, req.dataset, cache):
                     continue
                 if not load:
@@ -158,7 +158,36 @@ def resolve(file_path, req: DarkRequest, *, shape=None, cache=None,
                 arr = _peek_shaped(path, req.dataset, shape)
                 if arr is not None:
                     return DarkChoice(arr, why, source=str(path))
-            return DarkChoice(None, _skip_reason(file_path, req), "skipped")
+
+            # The file's OWN dark, which the sibling search cannot see.
+            # Restores rung 2 of frame_correct.resolve_dark's ladder: the
+            # tree search replaced the whole ladder and silently dropped
+            # it. Two Varex dark workflows exist and they are the reverse
+            # of each other -- darks taken as separate exposures land in
+            # *_dark_before_* files and leave the scan's own data_dark
+            # all zeros, while darks taken INSIDE the scan (ndarks) land
+            # in the scan's own data_dark and write no separate file at
+            # all. Searching only for siblings refused 109 scans on
+            # mjohn_oct26 that each carried 10 real dark frames.
+            #
+            # No exposure check is needed or possible here: the darks are
+            # in the same file as the data, so they are at the data's
+            # exposure by construction. An all-zero placeholder -- the
+            # other workflow's signature -- is rejected by
+            # is_degenerate_dark, so this cannot resurrect those.
+            own = _peek_shaped(file_path, req.dataset, shape)
+            if own is not None and not has_structure(own):
+                why_own = (f"own {req.dataset} in "
+                           f"{os.path.basename(str(file_path))} "
+                           f"(darks taken inside the scan)")
+                return DarkChoice(own if load else None, why_own,
+                                  source=str(file_path))
+            return DarkChoice(
+                None,
+                f"{_skip_reason(file_path, req)}"
+                + (f" — {tree_why}" if tree_why else "")
+                + "; its own " + req.dataset + " is not a usable dark either",
+                "skipped")
         arr, why = resolve_dark(file_path, dark_dataset=req.dataset,
                                 shape=shape, fallback=None, auto=True)
         if arr is None:
@@ -221,6 +250,16 @@ def tree_dark_candidates(data_path, root, *, exposure=None, dataset=
             f" dark {name} ({dist} scans away)")
            for (d, dist, _f), full, name in ranked]
     return out or [(None, _why_none(rejected))]
+
+
+def has_structure(arr) -> bool:
+    """Does this plane look like diffraction rather than a dark?
+
+    Thin wrapper so the own-dark path and the sibling path apply the
+    same veto without the sibling path's per-file memoisation.
+    """
+    from midas_gui.frame_correct import has_diffraction_structure
+    return bool(has_diffraction_structure(arr))
 
 
 def vetoed(path, dataset, cache=None) -> bool:
