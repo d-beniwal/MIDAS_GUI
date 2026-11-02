@@ -289,7 +289,15 @@ class DataViewerTab(QtWidgets.QWidget):
         widgets.update(self._geom_card.state_widgets())
         return widgets
 
-    def get_state(self) -> dict:
+    #: Sidecar holding the Hydra page's computed profiles + cakes (written
+    #: only on a real project save, when the app passes ``sidecar_stem``).
+    _HYDRA_RESULTS_SUFFIX = "_hydra_results.npz"
+
+    def get_state(self, sidecar_stem: Optional[str] = None) -> dict:
+        if sidecar_stem:
+            arrs = self._hydra_page.results_arrays()
+            if arrs:
+                np.savez_compressed(sidecar_stem + self._HYDRA_RESULTS_SUFFIX, **arrs)
         fields = widgets_to_dict(self._state_widgets())
         fields["materials"] = self._geom_card.materials_state()
         return {"fields": fields, "loader": self._loader.get_state(),
@@ -298,7 +306,7 @@ class DataViewerTab(QtWidgets.QWidget):
                 "hydra": {"active_mode": self._mode_ribbon.mode(),
                           "page": self._hydra_page.get_state()}}
 
-    def set_state(self, state: dict):
+    def set_state(self, state: dict, sidecar_stem: Optional[str] = None):
         """Restores the loader (which re-triggers its own data reload) and any
         calibration file (re-triggering the card's own calibration load) *before*
         applying the saved field values, so an explicitly saved value always wins
@@ -320,6 +328,16 @@ class DataViewerTab(QtWidgets.QWidget):
         apply_dict_to_widgets(self._state_widgets(), fields)
         self._geom_card.refresh_geometry()
         self._redraw_lab_axes_if_on()
+        # Last, so saved cakes/profiles are not wiped by the reloads above.
+        if sidecar_stem:
+            f = Path(sidecar_stem + self._HYDRA_RESULTS_SUFFIX)
+            if f.exists():
+                try:
+                    with np.load(f) as z:
+                        self._hydra_page.apply_results_arrays({k: z[k] for k in z.files})
+                except Exception:
+                    import logging
+                    logging.getLogger(__name__).exception("Hydra results restore failed")
 
     # ── UI ────────────────────────────────────────────────────────
 

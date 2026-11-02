@@ -599,3 +599,34 @@ def test_hydra_per_ring_checkbox_hides_just_that_ring(app, fixture_available):
     assert hp._cards["ge2"]._materials[0]["ring_enabled"].get(key) is False
 
 
+
+
+def test_hydra_composite_shows_read_only_table_and_cake_follows_panel(app):
+    """Composite view shows a per-panel parameter table (not the averaged
+    composite card); the cake stack follows the active panel."""
+    hp = DataViewerTab()._hydra_page
+    hp._toolbar.set_current("composite")
+    assert hp._card_stack.currentWidget() is hp._comp_page
+    assert hp._comp_table.rowCount() == len(hp._COMP_ROWS)
+    hp._toolbar.set_current("ge3")
+    assert hp._cake_stack.currentIndex() == 2
+
+
+def test_hydra_cakes_and_profiles_round_trip_through_sidecar(app, tmp_path):
+    """Computed per-panel cakes/profiles are written to the Data Viewer's
+    project sidecar and restored by set_state."""
+    a = DataViewerTab()
+    hp = a._hydra_page
+    hp._cake_views[2].set_cake(np.random.rand(10, 20), np.arange(20.0),
+                               np.linspace(-180, 180, 10))
+    hp._profile_view.set_curve("ge2", np.arange(50.0), np.random.rand(50),
+                               lsd_um=3e5, px_um=200.0, wavelength_A=0.17)
+    hp._cake_r_bin.setValue(2.5)
+    stem = str(tmp_path / "sidecar")
+    st = a.get_state(sidecar_stem=stem)
+    b = DataViewerTab()
+    b.set_state(st, sidecar_stem=stem)
+    hb = b._hydra_page
+    assert hb._cake_views[2].get_cake()["cake_2d"].shape == (10, 20)
+    assert hb._profile_view.get_native("ge2") is not None
+    assert hb._cake_r_bin.value() == 2.5

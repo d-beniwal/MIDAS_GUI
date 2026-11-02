@@ -34,12 +34,12 @@ from PyQt5 import QtCore, QtWidgets
 from midas_gui import hydra
 from midas_gui.helpers import (_load_image, _apply_im_trans, _fspin, apply_field_corrections,
                          geometry_fields_from_file, widgets_to_dict, apply_dict_to_widgets)
-from midas_gui.hydra_geometry_card import DetectorGeometryCard
+from midas_gui.hydra_geometry_card import DetectorGeometryCard, CAKE_ETA_BIN_DEG
 from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar, HydraProfileViewer
 from midas_gui.roi_tools import ROIImageViewer, ROIRibbon
 from midas_gui.helpers import browse_start_dir
 from midas_gui.widgets import (_convert_radial, OriginToolButton,
-                               build_lab_frame_axes_items)
+                               build_lab_frame_axes_items, CakeViewer)
 from midas_gui import style as S
 from midas_gui.panel_toggle import install_panel_toggles
 
@@ -167,6 +167,12 @@ class HydraViewerPage(QtWidgets.QWidget):
         inner_lv.addWidget(self._load4_lbl)
         self._card_stack = QtWidgets.QStackedWidget()
         inner_lv.addWidget(self._card_stack, 1)
+        # The composite has no geometry of its own to edit: it is the four
+        # panels placed by *their* geometries. Its card only holds a derived
+        # mean (Lsd) and a canvas-centre BC, which describe nothing physical,
+        # so the composite view shows a read-only per-panel table instead.
+        self._comp_page = self._build_composite_table_page()
+        self._card_stack.addWidget(self._comp_page)
         scroll.setWidget(inner)
         # The multi-curve radial plot and shared R-bin/Auto controls are
         # built below (right side) before this loop's set_profile_view/
@@ -274,7 +280,10 @@ class HydraViewerPage(QtWidgets.QWidget):
         self._rad_r_bin.valueChanged.connect(lambda *_: self._refresh_composite_curve())
         self._profile_view.compositeVisibilityChanged.connect(
             lambda *_: self._refresh_composite_curve())
-        right.addWidget(self._profile_view)
+        self._bottom_tabs = QtWidgets.QTabWidget()
+        self._bottom_tabs.addTab(self._profile_view, "Radial Profile")
+        self._bottom_tabs.addTab(self._build_cake_page(), "Eta vs R Cake")
+        right.addWidget(self._bottom_tabs)
         right.setStretchFactor(0, 3); right.setStretchFactor(1, 1)
         right.setMinimumWidth(320)
         split.addWidget(right)
@@ -584,7 +593,15 @@ class HydraViewerPage(QtWidgets.QWidget):
         live regardless of which panel is currently displayed."""
         if self._active_card is not None:
             self._active_card.set_viewer(None)
-        self._card_stack.setCurrentWidget(self._cards[key])
+        if key == "composite":
+            self._refresh_composite_table()
+            self._card_stack.setCurrentWidget(self._comp_page)
+        else:
+            self._card_stack.setCurrentWidget(self._cards[key])
+            self._cake_stack.setCurrentIndex(int(key[2]) - 1)
+            self._cake_panel_lbl.setText(f"  Cake: {key}")
+        # The composite card stays the active card even though it is hidden,
+        # so the ring overlay on the composite image keeps working.
         self._active_card = self._cards[key]
         self._active_card.set_viewer(self._viewer)
         self._refresh_display()
@@ -611,6 +628,7 @@ class HydraViewerPage(QtWidgets.QWidget):
         if self._toolbar.current() in ("composite", f"ge{n}"):
             self._refresh_display()
         self._refresh_composite_curve()
+        self._refresh_composite_table()
 
     def _on_composite_geometry_changed(self):
         """The Composite card's own geometry changed — only λ/max2θ/px are
@@ -798,6 +816,175 @@ class HydraViewerPage(QtWidgets.QWidget):
             self._viewer._iv.addItem(it)
         self._axis_items.extend(items)
 
+    # ── Composite parameter table (read-only) ─────────────────────
+
+    _COMP_ROWS = (
+        ("Wavelength (Å)", "wavelength_A", "{:.6f}"),
+        ("Lsd (mm)", "Lsd_mm", "{:.3f}"),
+        ("BC_y (px)", "BC_y", "{:.2f}"),
+        ("BC_z (px)", "BC_z", "{:.2f}"),
+        ("tx (°)", "tx", "{:.3f}"),
+        ("ty (°)", "ty", "{:.4f}"),
+        ("tz (°)", "tz", "{:.4f}"),
+        ("Pixel size (µm)", "pxY", "{:.2f}"),
+        ("Pixels (Y × Z)", "npix", "{}"),
+        ("Rotate (°)", "rotate", "{:.1f}"),
+        ("ImTransOpt", "im_trans", "{}"),
+        ("Distortion coeffs", "ndist", "{}"),
+        ("Calibration file", "calib", "{}"),
+    )
+
+    def _build_composite_table_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        lv = QtWidgets.QVBoxLayout(page)
+        lv.setContentsMargins(0, 0, 0, 0); lv.setSpacing(4)
+        note = QtWidgets.QLabel(
+            "Composite: each panel is placed with its own geometry (below, "
+            "read-only). Edit parameters on the ge1–ge4 views.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#9a9a9a;font-size:10px")
+        lv.addWidget(note)
+        t = QtWidgets.QTableWidget(len(self._COMP_ROWS), 4)
+        t.setHorizontalHeaderLabels([f"ge{n}" for n in (1, 2, 3, 4)])
+        t.setVerticalHeaderLabels([r[0] for r in self._COMP_ROWS])
+        t.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        t.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        t.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        t.verticalHeader().setDefaultSectionSize(22)
+        lv.addWidget(t, 1)
+        self._comp_table = t
+        return page
+
+    def _panel_param_values(self, n: int) -> Optional[dict]:
+        """Display values for one panel, or None when that panel isn't loaded."""
+        if n not in self._loader.siblings() and n not in self._states:
+            return None
+        card = self._cards[f"ge{n}"]
+        g = card.get_geometry() or {}
+        full = card.get_full_geometry() or {}
+        calib_w = card.state_widgets().get("calib_ed")
+        calib = ""
+        if calib_w is not None and hasattr(calib_w, "text"):
+            calib = Path(calib_w.text()).name if calib_w.text() else ""
+        ny, nz = full.get("NrPixelsY"), full.get("NrPixelsZ")
+        return {
+            "wavelength_A": g.get("wavelength_A"),
+            "Lsd_mm": (g["Lsd"] / 1000.0) if g.get("Lsd") is not None else None,
+            "BC_y": g.get("BC_y"), "BC_z": g.get("BC_z"),
+            "tx": g.get("tx"), "ty": g.get("ty"), "tz": g.get("tz"),
+            "pxY": g.get("pxY"),
+            "npix": f"{ny} × {nz}" if ny and nz else None,
+            "rotate": card.rotate_deg(),
+            "im_trans": ",".join(str(c) for c in g.get("im_trans", [])) or "none",
+            "ndist": len(g.get("distortion") or {}),
+            "calib": calib or None,
+        }
+
+    def _refresh_composite_table(self):
+        t = getattr(self, "_comp_table", None)
+        if t is None:
+            return
+        for col, n in enumerate((1, 2, 3, 4)):
+            vals = self._panel_param_values(n)
+            for row, (_label, key, fmt) in enumerate(self._COMP_ROWS):
+                v = None if vals is None else vals.get(key)
+                item = QtWidgets.QTableWidgetItem("—" if v is None else fmt.format(v))
+                item.setTextAlignment(QtCore.Qt.AlignCenter)
+                t.setItem(row, col, item)
+
+    # ── Eta vs R cakes (one per panel) ────────────────────────────
+
+    def _build_cake_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        lv = QtWidgets.QVBoxLayout(page)
+        lv.setContentsMargins(0, 0, 0, 0); lv.setSpacing(2)
+        bar = QtWidgets.QHBoxLayout()
+        self._cake_btn = QtWidgets.QPushButton("Calculate")
+        self._cake_btn.setToolTip("Compute the (η, R) cake of the panel shown (ge1–ge4).")
+        self._cake_btn.clicked.connect(self._calculate_active_cake)
+        self._cake_all_btn = QtWidgets.QPushButton("Calculate all")
+        self._cake_all_btn.setToolTip("Compute the (η, R) cake of every loaded panel.")
+        self._cake_all_btn.clicked.connect(self._calculate_all_cakes)
+        self._cake_r_bin = _fspin(0.1, 50.0, 2, 1.0, "px"); self._cake_r_bin.setFixedWidth(64)
+        self._cake_r_bin.setToolTip("Radial (R) bin size for the cakes, in detector pixels "
+                                    "(shared by all panels).")
+        self._cake_eta_bin = _fspin(0.05, 45.0, 2, CAKE_ETA_BIN_DEG, "°")
+        self._cake_eta_bin.setFixedWidth(64)
+        self._cake_eta_bin.setToolTip("Azimuthal (η) bin size for the cakes, in degrees "
+                                      "(shared by all panels).")
+        self._cake_panel_lbl = QtWidgets.QLabel("  Cake: ge1")
+        for w in (self._cake_btn, self._cake_all_btn, QtWidgets.QLabel("  R bin:"),
+                  self._cake_r_bin, QtWidgets.QLabel("η bin:"), self._cake_eta_bin,
+                  self._cake_panel_lbl):
+            bar.addWidget(w)
+        bar.addStretch(1)
+        lv.addLayout(bar)
+        self._cake_stack = QtWidgets.QStackedWidget()
+        self._cake_views: dict = {}
+        for n in (1, 2, 3, 4):
+            cv = CakeViewer()
+            self._cake_views[n] = cv
+            self._cake_stack.addWidget(cv)
+            card = self._cards[f"ge{n}"]
+            card.set_cake_view(cv)
+            card.set_cake_controls(self._cake_r_bin, self._cake_eta_bin)
+        lv.addWidget(self._cake_stack, 1)
+        return page
+
+    def _cake_target_panel(self) -> int:
+        return self._cake_stack.currentIndex() + 1
+
+    def _calculate_cake(self, n: int) -> bool:
+        if self._raw_frames.get(n) is None:
+            self._load_panel_frame(n)
+        if self._raw_frames.get(n) is None:
+            return False
+        self._cards[f"ge{n}"].cake_integrate()
+        return self._cake_views[n].get_cake() is not None
+
+    def _calculate_active_cake(self):
+        self._calculate_cake(self._cake_target_panel())
+
+    def _calculate_all_cakes(self):
+        for n in sorted(self._loader.siblings()):
+            self._calculate_cake(n)
+
+    # ── Results persistence (profiles + cakes, saved as a project sidecar) ──
+
+    def results_arrays(self) -> dict:
+        out: dict = {}
+        for n in (1, 2, 3, 4):
+            nat = self._profile_view.get_native(f"ge{n}")
+            if nat is not None and None not in nat[2:]:
+                r, p, lsd, px, wl = nat
+                out[f"prof_{n}_r"] = np.asarray(r, dtype=np.float64)
+                out[f"prof_{n}_p"] = np.asarray(p, dtype=np.float64)
+                out[f"prof_{n}_ctx"] = np.array([lsd, px, wl], dtype=np.float64)
+            ck = self._cake_views[n].get_cake()
+            if ck is not None:
+                out[f"cake_{n}_2d"] = ck["cake_2d"]
+                out[f"cake_{n}_r"] = ck["r_axis_px"]
+                out[f"cake_{n}_eta"] = ck["eta_axis_deg"]
+                ctx = [ck.get("lsd_um"), ck.get("px_um"), ck.get("wavelength_A")]
+                if None not in ctx:
+                    out[f"cake_{n}_ctx"] = np.array(ctx, dtype=np.float64)
+        return out
+
+    def apply_results_arrays(self, arrs: dict) -> None:
+        for n in (1, 2, 3, 4):
+            if f"cake_{n}_2d" in arrs:
+                cv = self._cake_views[n]
+                ctx = arrs.get(f"cake_{n}_ctx")
+                if ctx is not None:
+                    cv.set_axis_context(float(ctx[0]), float(ctx[1]), float(ctx[2]))
+                cv.set_cake(arrs[f"cake_{n}_2d"], arrs[f"cake_{n}_r"], arrs[f"cake_{n}_eta"])
+            if f"prof_{n}_r" in arrs:
+                ctx = arrs[f"prof_{n}_ctx"]
+                self._profile_view.set_curve(
+                    f"ge{n}", arrs[f"prof_{n}_r"], arrs[f"prof_{n}_p"],
+                    lsd_um=float(ctx[0]), px_um=float(ctx[1]), wavelength_A=float(ctx[2]))
+        self._refresh_composite_curve()
+
     # ── Export (Calibrate tab's Hydra "← Data Viewer" import) ───────
 
     def export_for_calibration(self) -> dict:
@@ -847,6 +1034,12 @@ class HydraViewerPage(QtWidgets.QWidget):
             "rad_auto": self._rad_auto.isChecked(),
             "viewer": self._viewer.display_state(),
             "cards": cards,
+            "cake_r_bin": self._cake_r_bin.value(),
+            "cake_eta_bin": self._cake_eta_bin.value(),
+            # Cheap fingerprint of what the results sidecar holds, so computing
+            # a cake marks the workspace modified.
+            "results": {str(n): list(self._cake_views[n].get_cake()["cake_2d"].shape)
+                        for n in (1, 2, 3, 4) if self._cake_views[n].get_cake() is not None},
         }
 
     def set_state(self, state: dict):
@@ -868,6 +1061,8 @@ class HydraViewerPage(QtWidgets.QWidget):
             card.refresh_geometry()
         self._rad_r_bin.setValue(state.get("rad_r_bin", self._rad_r_bin.value()))
         self._rad_auto.setChecked(state.get("rad_auto", self._rad_auto.isChecked()))
+        self._cake_r_bin.setValue(state.get("cake_r_bin", self._cake_r_bin.value()))
+        self._cake_eta_bin.setValue(state.get("cake_eta_bin", self._cake_eta_bin.value()))
         anchor = state.get("anchor_path")
         if anchor and Path(anchor).exists():
             self._loader.set_path(anchor)

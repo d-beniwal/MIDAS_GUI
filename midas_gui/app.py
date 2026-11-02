@@ -357,6 +357,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 except Exception:
                     _log(f"Hydra registry bind failed for {label}:\n{traceback.format_exc()}")
 
+        # Single/Hydra mode is one app-wide choice: flipping the leftmost
+        # ribbon on any tab flips it on the others too. set_mode() on an
+        # already-checked button emits nothing, so this cannot ping-pong.
+        ribbons = [t._mode_ribbon for t in (self._view_tab, self._cal_tab, self._batch_tab)
+                   if getattr(t, "_mode_ribbon", None) is not None]
+        for src in ribbons:
+            src.modeChanged.connect(
+                lambda mode, src=src: [r.set_mode(mode) for r in ribbons if r is not src])
+
         # Header Exp ID field: any tab that wants it for output-path
         # suggestions reads it live via this callback rather than keeping its
         # own copy — Batch Integrate names its output folder from it, Calibrate

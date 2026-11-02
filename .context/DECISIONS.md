@@ -3,6 +3,10 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-11-01 — Hydra: app-wide mode sync, composite parameter table, per-panel cakes, results sidecar
+
+(1) Single/Hydra is one app-wide choice: `MainWindow` connects each tab's `HydraModeRibbon.modeChanged` to `set_mode` on the other two (Data Viewer/Calibrate/Batch). `set_mode` on an already-checked button emits nothing, so there is no ping-pong. (2) The composite card's Lsd/BC were a mean/canvas-centre that describe nothing physical, so the composite view now shows a read-only ge1-ge4 parameter table (`_comp_table`); the hidden composite card stays the active card so the ring overlay still works. (3) Hydra Data Viewer gained an "Eta vs R Cake" bottom tab: one `CakeViewer` per panel bound to that panel's card (`set_cake_view`), shared R/η bins, Calculate (shown panel) / Calculate all; the cake follows the toolbar panel (composite keeps the last panel). No composite cake: it would integrate the decimated windmill image. (4) Persistence: `DataViewerTab.get_state/set_state` now take `sidecar_stem` and write `<stem>_hydra_results.npz` (per-panel profiles + cakes) only on a real project save; restored last in `set_state` so reloads don't wipe it. A `results` shape fingerprint in the page state marks the workspace dirty when a cake is computed. Calibrate/Batch Hydra pages already log `ge1..ge4` attempts and restore them via `apply_project_*`; not changed.
+
 ## 2026-11-01 — Data/Controls widths fit content and are remembered (in PanelToggles)
 
 User kept re-dragging the Data/Controls splitter handles. Root cause, measured offscreen: the tabs' `setSizes([286, 361, 950])` never took effect before the window was shown (the splitter reported 200/260 px, the panels' hard minimums), while Controls actually needs ~390-480 px. So every tab started too narrow and nothing was remembered.
