@@ -198,10 +198,16 @@ class ColorScaleControls(QtWidgets.QWidget):
         clo, chi = max(clo, lo), min(chi, hi)
         return (clo, chi) if clo < chi else (lo, hi)
 
-    def _apply(self):
+    def _apply(self, keep_zoom=False):
         self._updating = True
         try:
             lo, hi = self._mapped_limits()
+            if keep_zoom and self._display_bounds is not None:
+                # Slider release: only re-sync levels/fields. Leave the LUT
+                # view limits and zoom exactly as the user set them.
+                self.histogram.setLevels(*self._mapped_levels())
+                self._sync_fields()
+                return
             span = hi - lo
             vb = self.histogram.item.vb
             self.histogram.item.region.setBounds((None, None))
@@ -240,11 +246,11 @@ class ColorScaleControls(QtWidgets.QWidget):
                 self._sync_fields()
 
     def _levels_finished(self, *_):
-        # Reframe only after release. Changing the histogram coordinates
-        # under a moving handle makes dragging jump around unpredictably.
+        # Re-apply limits only after release (changing the histogram coordinates
+        # under a moving handle makes dragging jump). Keep the user's zoom:
+        # moving a slider must never reframe the histogram.
         if not self._updating:
-            self.hist_range = None
-            self._apply()
+            self._apply(keep_zoom=True)
 
     def _range_changed(self, *_):
         if not self._updating:
