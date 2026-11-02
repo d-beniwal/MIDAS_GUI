@@ -1,8 +1,10 @@
 # Project state
 
-Last updated: 2026-11-01 (integer color limits, Min=1 default, Reset button, sliders leave fields fixed)
+Last updated: 2026-11-01 (Data/Controls panel widths: content-fit minimums + remembered widths)
 
 ## Now working on
+
+2026-11-01: Data/Controls panel widths (`panel_toggle.py`) fit their content and are remembered per tab (QSettings `MIDAS/midas-gui`, `layout/<tab>/<panel>_width`); the ⟲ button in each panel header resets. The three Hydra pages (view/calibrate/batch) now use the same helper, including minimise-to-ribbon.
 
 2026-11-01: Min/Max are whole numbers, auto Min = 1, button is "Reset", and histogram sliders only adjust contrast (`contrast`) without touching the fields. Signed/fractional maps (residual, pump-probe) opt out via `integer=False`.
 
@@ -65,6 +67,7 @@ View details: DECISIONS 2026-10-24 and `documentation/solve_cell_visualizations.
   remain unresolved; no new conclusion about their cause in this task.
 
 ## Recent changes
+- 2026-11-01: Panel widths: content-derived minimum (capped 520 px, re-checked every 1 s while visible), saved on drag, restored next launch, ⟲ header button resets; 5 tabs + 3 Hydra pages pass `key=` and the Hydra pages gain Data/Controls minimise + ribbon. Tests in `test_panel_toggle_tabs.py` (9 pass); Hydra test files match clean-HEAD results (pre-existing segfault/failures in 5 files).
 - 2026-10-31: Absolute image color-limit fields + Auto; bounded LUT zoom/pan, stable live-frame/log behavior, display-state persistence; tests in `test_color_scale_controls.py` and Data Viewer control regression. See ARCHITECTURE.
 - 2026-10-31: Three calibration choices; `frozen_point_one_shot` chains fitted seeds into One-shot refinement, with legacy migration and stage-specific limits text. Focused tests pass; controlled synthetic check recovered geometry but One-shot increased residual strain (DECISIONS). Real-data comparison queued in ROADMAP.
 - 2026-10-31: Calibrate Mask overlay now applies the preview's Flip Y / Flip Z / Transpose while the backend mask remains in raw detector space; transform changes repaint an enabled overlay. Focused tests pass; not live-checked visually.

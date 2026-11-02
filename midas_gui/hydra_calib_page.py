@@ -54,6 +54,7 @@ from midas_gui.dialogs import (DistortionRefineDialog, _SaveParamstestDialog,
 from midas_gui import project
 from midas_gui import settings
 from midas_gui import style as S
+from midas_gui.panel_toggle import install_panel_toggles
 
 
 _KNOWN_CALIB_SUFFIXES = (".instr.txt", ".instr.json", ".txt", ".json")
@@ -256,11 +257,12 @@ class HydraCalibrationPage(QtWidgets.QWidget):
     # ── UI ────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        root = QtWidgets.QHBoxLayout(self)
-        root.setContentsMargins(6, 6, 6, 6); root.setSpacing(0)
+        # Splitter on top, bottom ribbon (minimised Data / Controls tabs) below.
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(6, 6, 6, 6); root.setSpacing(2)
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         split.setChildrenCollapsible(False); split.setHandleWidth(6)
-        root.addWidget(split)
+        root.addWidget(split, 1)
 
         # ── LEFT: "← Data Viewer" + the Hydra data loader ──
         left = QtWidgets.QWidget()
@@ -819,6 +821,8 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         split.addWidget(right)
         split.setStretchFactor(0, 0); split.setStretchFactor(1, 0); split.setStretchFactor(2, 1)
         split.setSizes([286, 361, 950])
+        # Data | Controls | Results: minimise Data/Controls to the bottom ribbon.
+        root.addWidget(install_panel_toggles(split, key="hydra_calibrate").ribbon)
 
     # ── Loader signal handlers ──────────────────────────────────────
 

@@ -3,6 +3,14 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-11-01 — Data/Controls widths fit content and are remembered (in PanelToggles)
+
+User kept re-dragging the Data/Controls splitter handles. Root cause, measured offscreen: the tabs' `setSizes([286, 361, 950])` never took effect before the window was shown (the splitter reported 200/260 px, the panels' hard minimums), while Controls actually needs ~390-480 px. So every tab started too narrow and nothing was remembered.
+
+Fix lives in `PanelToggles` so all five three-panel tabs get it via `install_panel_toggles(split, key=...)`: (1) minimum width = max(tab's hard minimum, panel content width capped at 520 px); content width is the inner widget's `minimumSizeHint` plus frame/scrollbar allowance, re-checked by a 1 s timer while the tab is visible so later content changes are followed; (2) widths saved (debounced) after a handle drag to QSettings("MIDAS","midas-gui") under `layout/<tab>/<panel>_width`, restored at startup, clamped to >= content minimum and <= 45% of screen width; minimised panels never overwrite their saved width; (3) a ⟲ button in each panel header calls `reset_widths()` (content-fit defaults, saved values cleared). The tab-supplied initial sizes are now effectively irrelevant defaults.
+
+Hydra pages (`hydra_page`, `hydra_calib_page`, `hydra_batch_page`) got the same treatment: root layout changed HBox->VBox (splitter + bottom ribbon) and `install_panel_toggles(split, key="hydra_view"|"hydra_calibrate"|"hydra_batch")`. **No Python `eventFilter` on panels/handles:** the first version used LayoutRequest + handle double-click filters and made `test_hydra_omega.py` segfault intermittently (4 of 32; unshown pages torn down), so content tracking is a slow timer and reset is a header button. Tabs that host a Hydra page contain two toggled splitters; look them up by `panel_toggles._key`, not `next(...)`. Tests: `tests/test_panel_toggle_tabs.py` (persist/reset, content minimum) use an isolated QSettings path; real-settings pollution is possible if other tests drag splitters without it.
+
 ## 2026-10-31 — Image color scales use absolute linear Max/Min fields and bounded histograms
 
 User requested editable Max above / Min below each image color scale, image extrema by default, manual values held during Data Viewer live acquisition, histogram zoom constrained to those values, and automatic log/linear conversion while fields always show actual linear intensities. Added `color_scale.ColorScaleControls` as the common histogram wrapper for ImageViewer (inherited by ROI/Pickable), CakeViewer/CakeStackViewer/RingResidualViewer, WaterfallViewer and the Pump Probe heatmap (replaces its separate colorbar and visible symmetric-range control; old fields still migrate saved state).

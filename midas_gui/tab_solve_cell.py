@@ -1026,7 +1026,7 @@ class SolveCellTab(QtWidgets.QWidget):
         split.setSizes([229, 350, 1000])
         # Data | Controls | Results — minimise Data / Controls for more Results room.
         self._hsplit = split
-        self._body_lay.addWidget(install_panel_toggles(split).ribbon)
+        self._body_lay.addWidget(install_panel_toggles(split, key="solve_cell").ribbon)
 
         # Connected last, once self._det_stage/_det_view etc. already exist --
         # setCurrentIndex() below fires this synchronously, and the first

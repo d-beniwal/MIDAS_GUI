@@ -640,19 +640,101 @@ class DataViewerTab(QtWidgets.QWidget):
         bot.addTab(self._cake_view, "Eta vs R Cake")
         bot.setCurrentIndex(0)
         right.addWidget(bot)
+        self._right_split = right
+        self._build_bottom_corner(bot)
         right.setStretchFactor(0, 3); right.setStretchFactor(1, 1)
         right.setMinimumWidth(320)
         split.addWidget(right)
         split.setStretchFactor(0, 0); split.setStretchFactor(1, 0); split.setStretchFactor(2, 1)
         split.setSizes([286, 361, 950])
         # Data | Controls | Results: minimise Data/Controls to the bottom ribbon.
-        self._body_lay.addWidget(install_panel_toggles(split).ribbon)
+        _toggles = install_panel_toggles(split, key="view")
+        self._body_lay.addWidget(_toggles.ribbon)
+        self._results_toggles = _toggles
+        _toggles.add_ribbon_tab("Plots", lambda: self.set_plots_hidden(False))
 
         # Page 1: Hydra (4-panel GE detector) view.
         self._hydra_page = HydraViewerPage()
         self._hydra_page.pushToCalibrate.connect(self.pushHydraToCalibrate.emit)
         self._hydra_page.pullFromCalibrate.connect(self.pullHydraFromCalibrate.emit)
         self._mode_stack.addWidget(self._hydra_page)
+
+    # ── Plots panel (Statistics / Radial Profile / Cake) layout ──────
+
+    def _build_bottom_corner(self, bot: QtWidgets.QTabWidget):
+        """Right-most corner of the plots tab header: a Layout dropdown
+        (Bottom default / Side) and a hide button."""
+        self._plots_layout = "bottom"
+        self._plots_sizes = {}
+        corner = QtWidgets.QWidget()
+        cl = QtWidgets.QHBoxLayout(corner)
+        cl.setContentsMargins(0, 0, 0, 0); cl.setSpacing(2)
+        btn = QtWidgets.QToolButton()
+        btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        menu = QtWidgets.QMenu(btn)
+        group = QtWidgets.QActionGroup(btn); group.setExclusive(True)
+        self._plots_layout_actions = {}
+        for key, label in (("bottom", "Layout: Bottom"), ("side", "Layout: Side")):
+            act = menu.addAction(label); act.setCheckable(True)
+            group.addAction(act)
+            act.triggered.connect(lambda _c=False, k=key: self.set_plots_layout(k))
+            self._plots_layout_actions[key] = act
+        btn.setMenu(menu)
+        self._plots_layout_btn = btn
+        cl.addWidget(btn)
+        hide = QtWidgets.QToolButton()
+        hide.setText("—")
+        hide.setToolTip("Hide this panel to the bottom ribbon (click its tab to restore)")
+        hide.clicked.connect(lambda _=False: self.set_plots_hidden(True))
+        cl.addWidget(hide)
+        bot.setCornerWidget(corner, QtCore.Qt.TopRightCorner)
+        self._sync_plots_layout_btn()
+
+    def _sync_plots_layout_btn(self):
+        side = self._plots_layout == "side"
+        self._plots_layout_btn.setText("Layout: Side" if side else "Layout: Bottom")
+        self._plots_layout_btn.setToolTip(
+            "Place the Statistics / Radial Profile / Cake panel below the image "
+            "(Bottom, default) or to its right (Side).")
+        self._plots_layout_actions[self._plots_layout].setChecked(True)
+
+    def plots_layout(self) -> str:
+        return self._plots_layout
+
+    def set_plots_layout(self, layout: str):
+        """Switch the plots panel between "bottom" and "side"."""
+        if layout not in ("bottom", "side") or layout == self._plots_layout:
+            return
+        sp = self._right_split
+        hidden = self._bottom_tabs.isHidden()
+        if not hidden:
+            self._plots_sizes[self._plots_layout] = sp.sizes()
+        self._plots_layout = layout
+        sp.setOrientation(QtCore.Qt.Horizontal if layout == "side"
+                          else QtCore.Qt.Vertical)
+        if not hidden:
+            saved = self._plots_sizes.get(layout)
+            if saved and all(saved):
+                sp.setSizes(saved)
+            else:
+                total = max(sum(sp.sizes()), 2)
+                a = total // 2 if layout == "side" else total * 3 // 4
+                sp.setSizes([a, total - a])
+        self._sync_plots_layout_btn()
+
+    def set_plots_hidden(self, hidden: bool):
+        if hidden == self._bottom_tabs.isHidden():
+            return
+        sp = self._right_split
+        if hidden:
+            self._plots_sizes[self._plots_layout] = sp.sizes()
+        self._bottom_tabs.setVisible(not hidden)
+        if not hidden:
+            saved = self._plots_sizes.get(self._plots_layout)
+            if saved and all(saved):
+                sp.setSizes(saved)
+        self._results_toggles.set_extra_tab_visible("Plots", hidden)
 
     # ── Loading ───────────────────────────────────────────────────
 

@@ -391,7 +391,7 @@ class PumpProbeTab(QtWidgets.QWidget):
         split.setStretchFactor(0, 0); split.setStretchFactor(1, 0); split.setStretchFactor(2, 1)
         split.setSizes([260, 380, 960])
         # Data | Controls | Results: minimise Data/Controls to the bottom ribbon.
-        self._body_lay.addWidget(install_panel_toggles(split).ribbon)
+        self._body_lay.addWidget(install_panel_toggles(split, key="pumpprobe").ribbon)
 
     # ── shared plot-style toolbar + chrome helpers ─────────────────
     def _build_style_toolbar(self):

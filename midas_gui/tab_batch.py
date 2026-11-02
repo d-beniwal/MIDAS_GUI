@@ -1973,7 +1973,7 @@ class BatchTab(QtWidgets.QWidget):
         split.setStretchFactor(0, 0); split.setStretchFactor(1, 0); split.setStretchFactor(2, 1)
         split.setSizes([286, 361, 950])
         # Data | Controls | Results: minimise Data/Controls to the bottom ribbon.
-        self._body_lay.addWidget(install_panel_toggles(split).ribbon)
+        self._body_lay.addWidget(install_panel_toggles(split, key="batch").ribbon)
 
     # ── Run ────────────────────────────────────────────────────────
 
