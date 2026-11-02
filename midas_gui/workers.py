@@ -1763,6 +1763,11 @@ class CalibrationWorker(QtCore.QObject):
         # might resolve.
         env = QtCore.QProcessEnvironment.systemEnvironment()
         env.insert("PYTHONPATH", _pythonpath_with_repo_root(env.value("PYTHONPATH", "")))
+        # Backends print non-ASCII (e.g. "µm", "─"); on Windows the child's
+        # stdout defaults to cp1252 and raises UnicodeEncodeError mid-run.
+        # _on_stdout decodes as UTF-8, so force UTF-8 on the child.
+        env.insert("PYTHONUTF8", "1")
+        env.insert("PYTHONIOENCODING", "utf-8")
         proc.setProcessEnvironment(env)
         proc.setProcessChannelMode(QtCore.QProcess.MergedChannels)
         # `-m midas_gui.calib_cli` only resolves the `midas_gui` package when

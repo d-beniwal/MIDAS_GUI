@@ -80,6 +80,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    # Belt and braces with the env vars set by the spawner: never let a
+    # non-ASCII character in backend output (cp1252 on Windows) kill a run.
+    for _s in (sys.stdout, sys.stderr):
+        try:
+            _s.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     args = _build_arg_parser().parse_args(argv)
     job_dir = Path(args.job_dir)
 
