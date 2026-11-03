@@ -3,6 +3,17 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-11-03 — Pump Probe: reference-peak q-alignment (branch `qshift_pump`)
+
+Drift (mono energy, sample height, beam centre) shifts integrated patterns in q without any material change. The user picks a peak the pump does not move; each frame is shifted so that peak stays pinned. Logic is Qt-free in `qshift.py`; the tab keeps the untouched payload in `_data_raw` and plots `_data` (aligned copy), so every existing view works unchanged. Rationale for the choices:
+- **Per-frame, not per-delay**: the worker now also returns `profiles`/`frame_delays` (acquisition order) so drift is removed before repeats are averaged and the reference is subtracted.
+- **Fitted centre (pseudo-Voigt + linear bg), not cross-correlation**: the pump can change width/asymmetry, which biases a correlation shift. Centroid fallback for low S/N; frames with a vanished peak (<10% of mean amplitude), edge-pinned or failed fits are flagged and interpolated.
+- **Scale (default) or offset**: one peak fixes one parameter; scale matches λ/distance drift. Both pin the picked peak exactly.
+- **Optional "reference frames only" drift curve + running-median smoothing**: keeps pump-induced peak changes and fit noise out of the correction.
+- **Stationarity guard**: Spearman ρ between per-delay peak position and delay; |ρ|>0.7 warns. Caveat: a monotonic delay scan confounds delay with clock drift, so the warning can be a false alarm there (wording says so).
+- Resampling clamps edge bins (never NaN) to keep pyqtgraph autorange safe. Isotropic scale drift is degenerate with real isotropic expansion — only an independent anchor (the pump-invariant peak) separates them.
+Not done / open: multi-peak (scale+offset) fit, 2D re-integration, per-sector shifts. Not yet checked on real TRR data.
+
 ## 2026-11-02 — Light/dark colour theme (startup setting, canvases stay dark)
 
 The existing look is now the **dark** theme and a **light** theme was added. `style.py` holds two token dicts (`DARK`, `LIGHT`); `set_mode()` rebinds the module globals (`S.BG`, `S.MUTED`, …) and `style.set_mode(configured_mode())` runs at import, so module-level uses of `S.*` already see the right palette. Every grey/blue literal in the stylesheet and the common inline `color:#aaa/#9a9a9a/#888` label styles became a token; the dark stylesheet is character-identical to before (checked by diffing against HEAD, only `#555`→`#555555` spelling). Choice lives in config `ui.theme` (`constants.DEFAULT_THEME`, Preferences ▸ Display ▸ Theme) and, like `ui_scale`, **needs a restart**: hundreds of inline stylesheets are baked at widget construction, so a live swap would leave a half-themed UI. **Canvases (same day, supersedes the first cut):** pyqtgraph canvases follow the theme too — `S.CANVAS_BG/FG` feed `pg.setConfigOptions` and every `PlotWidget(background=…)`; `CANVAS_PANEL/DEEP`, `AXIS_TEXT/TICK`, `LOG_BG/FG`(+`READOUT_BORDER`) cover the ROI/histogram plots, axis labels and pixel-readout bars. Not themed: pyvista/VTK 3D views and matplotlib canvases (Zarr Viewer, Real-space, Data Explorer, 3D pole figure) — audit those next; Pump Probe and the waterfall "White" theme were already white in both. Remaining unthemed literals are accent/status colours (greens, ambers, plot pens) that read on both backgrounds.

@@ -1,8 +1,10 @@
 # Project state
 
-Last updated: 2026-11-02 (light/dark theme)
+Last updated: 2026-11-03 (Pump Probe q-alignment, branch qshift_pump)
 
 ## Now working on
+
+2026-11-03: Pump Probe reference-peak q-alignment on branch `qshift_pump` (uncommitted): `qshift.py`, "Q alignment" card + tab in `tab_pumpprobe.py`, per-frame profiles from `PumpProbeWorker`, `tests/test_qshift.py` (DECISIONS 2026-11-03). Synthetic + offscreen checked; needs a live check on real TRR data. Pre-existing failure on main: `test_hydra_minimize_restore_and_persist[hydra_view]`.
 
 2026-11-02: Light/dark theme — Preferences ▸ Display ▸ Theme (`ui.theme`, restart to apply). Chrome + pyqtgraph canvases theme via `style.py` tokens; pyvista/matplotlib canvases still unthemed (DECISIONS 2026-11-02). Checked via offscreen screenshots of 4 tabs + prefs; not yet reviewed on every tab/dialog.
 

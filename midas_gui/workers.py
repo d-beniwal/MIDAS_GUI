@@ -3289,7 +3289,11 @@ class PumpProbeWorker(QtCore.QThread):
             result = self._group_and_difference(
                 np.asarray(profiles), np.asarray(delays), self._ref_delays)
             result.update({"r_axis_px": r_ax, "q_axis": q_ax, "tth_axis": two_theta,
-                           "lsd": lsd, "px": px, "wl": wl})
+                           "lsd": lsd, "px": px, "wl": wl,
+                           # per-frame (acquisition order) — lets the tab re-group
+                           # after a q-alignment (see qshift.py)
+                           "profiles": np.asarray(profiles, dtype=float),
+                           "frame_delays": np.asarray(delays, dtype=float)})
             self.finished.emit(result)
         except Exception:
             self.failed.emit(traceback.format_exc())
