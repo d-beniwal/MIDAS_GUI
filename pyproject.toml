@@ -43,6 +43,7 @@ dependencies = [
     "pyvista==0.49.1",             # Solve Cell's detector/reciprocal views, replacing an earlier
     "pyvistaqt==0.13.1",           # VisPy attempt that segfaulted under QT_QPA_PLATFORM=offscreen.
                                    # Self-contained wheels, no numpy/torch/numba pin conflict.
+    "pyte==0.8.2",                 # embedded terminal for the APEXA dock (apexa_terminal.py)
     "numpy==1.26.4",
     "scipy==1.17.1",               # 2026-10-23: bumped to the newest scipy that still declares
                                    # numpy<2.x compat (numpy<2.7,>=1.26.4); 1.18.0 requires

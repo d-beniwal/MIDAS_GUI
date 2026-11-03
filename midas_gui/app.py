@@ -64,6 +64,7 @@ from midas_gui.helpers import _make_checkmark_svg, _make_arrow_svg
 from midas_gui import style as S
 from midas_gui import bridge_server
 from midas_gui import control_server
+from midas_gui import apexa_terminal
 from midas_gui.auto_attenuation import refresh_server as auto_att_refresh_server
 from midas_gui.tab_view import DataViewerTab
 from midas_gui.tab_mask import MaskTab
@@ -1549,10 +1550,27 @@ class MainWindow(QtWidgets.QMainWindow):
                 "log). Launching anyway — you may need to add the midas_gui "
                 "line by hand; see midas_gui_mcp/README.md.")
 
+        if apexa_terminal.available():
+            self._show_apexa_dock(script, apexa_dir)
+            return
         if not self._launch_apexa_cli(script, apexa_dir):
             QtWidgets.QMessageBox.critical(
                 self, "APEXA",
                 f"Failed to open a terminal running {script.name} in {apexa_dir}.")
+
+    def _show_apexa_dock(self, script: Path, apexa_dir: str) -> None:
+        """Run APEXA's CLI inside a dockable panel attached to this window
+        (docked on the right by default; drag its title bar to float/re-dock).
+        Re-clicking the menu item re-shows a hidden panel, or restarts the CLI
+        if it has exited."""
+        first = getattr(self, "_apexa_dock", None) is None
+        if first:
+            self._apexa_dock = apexa_terminal.ApexaDock(self)
+            self.addDockWidget(QtCore.Qt.RightDockWidgetArea, self._apexa_dock)
+        self._apexa_dock.run(["/bin/bash", str(script)], apexa_dir)
+        if first:
+            self.resizeDocks([self._apexa_dock], [max(480, self.width() // 3)],
+                             QtCore.Qt.Horizontal)
 
     @staticmethod
     def _apexa_launch_script(apexa_dir: str) -> Optional[Path]:
@@ -1767,6 +1785,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._auto_att_refresh_server.stop()
         except Exception:
             _log(f"Auto Attenuation refresh server shutdown failed:\n{traceback.format_exc()}")
+        try:
+            if getattr(self, "_apexa_dock", None) is not None:
+                self._apexa_dock.shutdown()
+        except Exception:
+            _log(f"APEXA dock shutdown failed:\n{traceback.format_exc()}")
         try:
             if self._control_server is not None:
                 self._control_server.stop()

@@ -44,6 +44,7 @@ numba==0.59.1                 # NumPy-1.x compatible JIT (pin: newer numba needs
 vtk==9.7.1
 pyvista==0.49.1
 pyvistaqt==0.13.1
+pyte==0.8.2                    # embedded terminal emulator for the APEXA dock (apexa_terminal.py)
 
 # pvapy backs the Data Viewer's "Live Data" card (subscribes to an EPICS PVA
 # image PV and renders frames straight in the Data Viewer's own image pane).

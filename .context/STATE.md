@@ -6,6 +6,8 @@ Last updated: 2026-11-03 (Calibrate ring selection)
 
 2026-11-03: Calibrate "Rings…" button (next to Calibrant) — tick/untick calibrant rings to use in the fit; wired through `rings_to_exclude` (DECISIONS 2026-11-03). Backend path and widget state verified offscreen; not run through the full GUI Run button or live data. Ignored by First-time/Frozen-point (backend takes no spec). Uncommitted on main.
 
+2026-11-03: APEXA CLI now runs in an embedded dockable terminal (`midas_gui/apexa_terminal.py`, Tools ▸ APEXA (CLI)…); verified offscreen against a fake script (I/O, colour, resize, float/re-dock) but not yet against the real APEXA CLI or on cocoa (fonts, Cmd+C/V, Ctrl-C). Uncommitted on main.
+
 2026-11-02: Light/dark theme — Preferences ▸ Display ▸ Theme (`ui.theme`, restart to apply). Chrome + pyqtgraph canvases theme via `style.py` tokens; pyvista/matplotlib canvases still unthemed (DECISIONS 2026-11-02). Checked via offscreen screenshots of 4 tabs + prefs; not yet reviewed on every tab/dialog.
 
 2026-11-01: Hydra Data Viewer — mode ribbon synced across Data Viewer/Calibrate/Batch; composite view shows a read-only per-panel parameter table; new per-panel Eta-vs-R cakes; profiles+cakes saved/restored via a Data Viewer project sidecar (DECISIONS 2026-11-01). Not live-checked with real Hydra data.
