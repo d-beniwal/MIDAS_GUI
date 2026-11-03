@@ -141,7 +141,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _ensure_control_server(self) -> bool:
         """Start the control socket if it isn't already running. Idempotent —
         a second call while it's already up is a no-op success. Shared by the
-        MIDAS_GUI_CONTROL=1 startup path above and Tools ▸ APEXA Chat…, which
+        MIDAS_GUI_CONTROL=1 startup path above and Tools ▸ APEXA (CLI)…, which
         requests control on demand rather than requiring the env var."""
         if self._control_server is not None:
             return True
@@ -1424,7 +1424,7 @@ class MainWindow(QtWidgets.QMainWindow):
         m = self.menuBar().addMenu("&Tools")
         act = m.addAction("Auto Attenuation…")
         act.triggered.connect(self._open_auto_attenuation)
-        act_apexa = m.addAction("APEXA Chat…")
+        act_apexa = m.addAction("APEXA (CLI)…")
         act_apexa.triggered.connect(self._open_apexa_chat)
 
     def _write_auto_attenuation_snapshot(self, path):
@@ -1510,9 +1510,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Failed to launch Auto Attenuation — see log.")
 
     def _open_apexa_chat(self):
-        """Launch APEXA's desktop chat panel (``apexa_desktop.py`` — a
-        pywebview window wrapping APEXA's own FastAPI+React UI) as a separate
-        process alongside this GUI, wired to drive this GUI's Data Viewer and
+        """Launch APEXA's command-line interface (``start_beamline_assistant``)
+        in a new terminal window alongside this GUI, wired to drive this GUI's Data Viewer and
         Calibrate tabs through ``midas_gui_mcp/`` — see that package's
         README ("Wiring this into APEXA") for the full protocol. Needs
         Preferences ▸ Integrations ▸ "APEXA repo path" set to a local
@@ -1522,7 +1521,7 @@ class MainWindow(QtWidgets.QMainWindow):
         script = self._apexa_launch_script(apexa_dir) if apexa_dir else None
         if not script or not script.is_file():
             resp = QtWidgets.QMessageBox.question(
-                self, "APEXA Chat",
+                self, "APEXA",
                 "No valid APEXA repo path is set.\n\n"
                 "Open Preferences ▸ Integrations to set it?",
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
@@ -1530,12 +1529,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._open_preferences()
             return
 
-        # An explicit "APEXA Chat…" click is a deliberate request for agent
+        # An explicit "APEXA (CLI)…" click is a deliberate request for agent
         # control — start the socket on demand rather than requiring the
         # MIDAS_GUI_CONTROL=1 env var too.
         if not self._ensure_control_server():
             QtWidgets.QMessageBox.critical(
-                self, "APEXA Chat",
+                self, "APEXA",
                 "Could not start the control socket (see log) — APEXA would "
                 "have nothing to drive. Not launching.")
             return
@@ -1545,22 +1544,50 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             _log(f"APEXA servers.config sync failed:\n{traceback.format_exc()}")
             QtWidgets.QMessageBox.warning(
-                self, "APEXA Chat",
+                self, "APEXA",
                 "Could not update APEXA's servers.config automatically (see "
                 "log). Launching anyway — you may need to add the midas_gui "
                 "line by hand; see midas_gui_mcp/README.md.")
 
-        proc = QtCore.QProcess()
-        proc.setProgram(str(script))
-        proc.setWorkingDirectory(apexa_dir)
-        if not proc.startDetached():
+        if not self._launch_apexa_cli(script, apexa_dir):
             QtWidgets.QMessageBox.critical(
-                self, "APEXA Chat", f"Failed to launch {script.name} in {apexa_dir}.")
+                self, "APEXA",
+                f"Failed to open a terminal running {script.name} in {apexa_dir}.")
 
     @staticmethod
     def _apexa_launch_script(apexa_dir: str) -> Optional[Path]:
-        name = "start_desktop_ui.bat" if sys.platform.startswith("win") else "start_desktop_ui.sh"
+        name = ("start_beamline_assistant.bat" if sys.platform.startswith("win")
+                else "start_beamline_assistant.sh")
         return Path(apexa_dir) / name
+
+    @staticmethod
+    def _launch_apexa_cli(script: Path, apexa_dir: str) -> bool:
+        """Run APEXA's interactive CLI (``APEXA>`` prompt) in a new terminal
+        window — it needs a TTY, so it can't be spawned headless."""
+        import shlex
+        import shutil
+        import subprocess
+        try:
+            if sys.platform.startswith("win"):
+                subprocess.Popen(["cmd", "/c", "start", "", str(script)],
+                                 cwd=apexa_dir)
+                return True
+            cmd = f"cd {shlex.quote(apexa_dir)} && {shlex.quote(str(script))}"
+            if sys.platform == "darwin":
+                esc = cmd.replace("\\", "\\\\").replace('"', '\\"')
+                subprocess.Popen(["osascript",
+                                  "-e", 'tell application "Terminal" to activate',
+                                  "-e", f'tell application "Terminal" to do script "{esc}"'])
+                return True
+            for term, flag in (("x-terminal-emulator", "-e"), ("gnome-terminal", "--"),
+                               ("konsole", "-e"), ("xfce4-terminal", "-e"),
+                               ("xterm", "-e")):
+                if shutil.which(term):
+                    subprocess.Popen([term, flag, "bash", "-c", f"{cmd}; exec bash"])
+                    return True
+        except Exception:
+            _log(f"APEXA CLI launch failed:\n{traceback.format_exc()}")
+        return False
 
     def _sync_apexa_servers_config(self, apexa_dir: Path) -> None:
         """Make sure APEXA's ``servers.config`` has a ``midas_gui:`` line
@@ -1585,7 +1612,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 lines[i] = wanted
                 cfg_path.write_text("\n".join(lines) + "\n")
                 return
-        lines += ["", "# midas-gui GUI control (added by midas-gui's Tools ▸ APEXA Chat…)",
+        lines += ["", "# midas-gui GUI control (added by midas-gui's Tools ▸ APEXA (CLI)…)",
                   wanted]
         cfg_path.write_text("\n".join(lines) + "\n")
 

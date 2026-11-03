@@ -219,8 +219,8 @@ class PreferencesDialog(QtWidgets.QDialog):
         f.addRow("APEXA repo path:", r)
         hint = QtWidgets.QLabel(
             "Local checkout of APEXA-APS-Beamline-Assistant. Used by "
-            "Tools ▸ APEXA Chat… to launch its desktop chat panel "
-            "alongside this GUI, driving it through midas_gui_mcp/.")
+            "Tools ▸ APEXA (CLI)… to launch its command-line interface "
+            "in a terminal alongside this GUI, driving it through midas_gui_mcp/.")
         hint.setWordWrap(True); hint.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         f.addRow(hint)
 
