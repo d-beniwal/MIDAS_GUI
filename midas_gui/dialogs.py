@@ -212,6 +212,109 @@ class DistortionSeedDialog(QtWidgets.QDialog):
                 if cb.isChecked()}
 
 
+class RingSelectDialog(QtWidgets.QDialog):
+    """Pick which of the calibrant's rings the calibration may use.
+
+    One row per ring the backend would build (see
+    ``calib.calibrant_ring_rows``): a checkbox, the backend's ``Ring #``, hkl,
+    d, 2θ and radius. Ticked = used, unticked = excluded. Everything starts
+    ticked. :meth:`excluded` returns the unticked ring numbers, which is what
+    ``spec.rings_to_exclude`` takes.
+
+    ``Ring #`` is the backend's label, not a row count, so it can skip numbers
+    (radius-identical reflections are merged into one row).
+    """
+
+    _COLS = ("Use", "Ring #", "hkl", "d (Å)", "2θ (°)", "R (px)")
+
+    def __init__(self, rows, excluded=(), calibrant="", note="", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Rings — {calibrant}" if calibrant else "Rings")
+        self.setMinimumSize(520, 460)
+        excluded = {int(r) for r in excluded}
+        layout = QtWidgets.QVBoxLayout(self)
+        info = QtWidgets.QLabel(
+            "Untick a ring to leave it out of the calibration (e.g. one that "
+            "is blended with another phase, shadowed, or saturated)." +
+            (f"\n{note}" if note else ""))
+        info.setWordWrap(True)
+        info.setStyleSheet(f"color:{S.SUBTLE};font-size:11px;padding-bottom:4px;")
+        layout.addWidget(info)
+
+        self._rows = list(rows)
+        self._table = QtWidgets.QTableWidget(len(self._rows), len(self._COLS))
+        self._table.setHorizontalHeaderLabels(self._COLS)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self._table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self._table.horizontalHeader().setStretchLastSection(True)
+        for i, r in enumerate(self._rows):
+            use = QtWidgets.QTableWidgetItem()
+            use.setFlags(QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsEnabled)
+            use.setCheckState(QtCore.Qt.Unchecked if r["ring_nr"] in excluded
+                              else QtCore.Qt.Checked)
+            self._table.setItem(i, 0, use)
+            h, k, l = r["hkl"]
+            cells = (str(r["ring_nr"]), f"({h} {k} {l})", f"{r['d']:.4f}",
+                     f"{r['two_theta']:.3f}", f"{r['radius_px']:.1f}")
+            for j, txt in enumerate(cells, start=1):
+                it = QtWidgets.QTableWidgetItem(txt)
+                it.setFlags(QtCore.Qt.ItemIsEnabled)
+                it.setTextAlignment(QtCore.Qt.AlignCenter)
+                self._table.setItem(i, j, it)
+        self._table.resizeColumnsToContents()
+        self._table.itemChanged.connect(lambda *_: self._update_count())
+        layout.addWidget(self._table, 1)
+
+        brow = QtWidgets.QHBoxLayout()
+        all_b = QtWidgets.QPushButton("Select all")
+        none_b = QtWidgets.QPushButton("Select none")
+        all_b.clicked.connect(lambda: self._set_all(True))
+        none_b.clicked.connect(lambda: self._set_all(False))
+        self._count = QtWidgets.QLabel()
+        self._count.setStyleSheet(f"color:{S.MUTED};font-size:11px")
+        brow.addWidget(all_b); brow.addWidget(none_b)
+        brow.addStretch(1); brow.addWidget(self._count)
+        layout.addLayout(brow)
+
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        btns.accepted.connect(self._accept_checked)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+        self._update_count()
+
+    def _set_all(self, on: bool) -> None:
+        state = QtCore.Qt.Checked if on else QtCore.Qt.Unchecked
+        self._table.blockSignals(True)
+        for i in range(self._table.rowCount()):
+            self._table.item(i, 0).setCheckState(state)
+        self._table.blockSignals(False)
+        self._update_count()
+
+    def _n_used(self) -> int:
+        return sum(self._table.item(i, 0).checkState() == QtCore.Qt.Checked
+                   for i in range(self._table.rowCount()))
+
+    def _update_count(self) -> None:
+        self._count.setText(f"{self._n_used()} of {len(self._rows)} rings used")
+
+    def _accept_checked(self) -> None:
+        # Zero rings left makes the backend raise ("ring filtering removed
+        # every ring"), so refuse here where the reason is obvious.
+        if self._rows and self._n_used() == 0:
+            QtWidgets.QMessageBox.warning(
+                self, "No rings selected",
+                "At least one ring must stay selected for the calibration.")
+            return
+        self.accept()
+
+    def excluded(self) -> list:
+        """Ring numbers left unticked, ascending."""
+        return sorted(r["ring_nr"] for i, r in enumerate(self._rows)
+                      if self._table.item(i, 0).checkState() != QtCore.Qt.Checked)
+
+
 class ManualSeedDialog(QtWidgets.QDialog):
     """Per-parameter "include in seed" panel behind a "Manual seed…" button.
 

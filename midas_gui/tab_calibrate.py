@@ -40,7 +40,7 @@ from midas_gui.widgets import (
 from midas_gui.workers import (CalibrationWorker, IntegrationWorker,
                                ManualDspacingCalibWorker, ProjectionWorker)
 from midas_gui.dialogs import (_SaveParamstestDialog, DistortionRefineDialog,
-                                DistortionSeedDialog,
+                                DistortionSeedDialog, RingSelectDialog,
                                 PARAMETER_LIMIT_ROWS, limit_window, show_error)
 from midas_gui.calib_param_table import CalibrationParameterTable
 from midas_gui.hydra_widgets import HydraModeRibbon
@@ -379,6 +379,18 @@ class CalibrationTab(QtWidgets.QWidget):
         wl_row.addWidget(make_kedge_label(self._wl, "λ:")); wl_row.addWidget(self._wl)
         wl_row.addSpacing(10)
         wl_row.addWidget(S.LabelRight("Calibrant:")); wl_row.addWidget(self._cal)
+        # Ring numbers (backend ``ring_nr``) the user has unticked; empty = every
+        # ring is used, which is the default and what every run did before.
+        self._rings_excluded: list = []
+        self._rings_btn = QtWidgets.QPushButton("Rings…")
+        self._rings_btn.clicked.connect(self._edit_rings)
+        wl_row.addWidget(self._rings_btn)
+        # currentTextChanged, not _on_calibrant_changed: set_state restores the
+        # combo with signals blocked and then calls _on_calibrant_changed itself,
+        # which must not wipe the exclusions it is about to restore. Ring numbers
+        # belong to one calibrant, so a real change resets them to "all".
+        self._cal.currentTextChanged.connect(self._reset_rings_for_calibrant)
+        self._sync_rings_btn()
         wl_row.addStretch(1)
         det.body.addLayout(wl_row)
         self._pxY = _fspin(1.0, 5000.0, 2, DEFAULT_PIXEL_UM, "µm")
@@ -2082,6 +2094,57 @@ class CalibrationTab(QtWidgets.QWidget):
             manual["distortion"] = dict(self._seed_dist)
         return manual
 
+    def _sync_rings_btn(self) -> None:
+        """Caption/tooltip/enabled state of the "Rings…" button."""
+        n = len(self._rings_excluded)
+        dsp = is_dspacing_calibrant(self._cal.currentText())
+        self._rings_btn.setEnabled(not dsp)
+        self._rings_btn.setText(f"Rings ({n} off)…" if n else "Rings…")
+        if dsp:
+            self._rings_btn.setToolTip(
+                "Not available for d-spacing calibrants — their rings are "
+                "picked by hand ('Pick d-spacing pts').")
+        elif n:
+            self._rings_btn.setToolTip(
+                "Excluded from the fit: ring " +
+                ", ".join(str(r) for r in self._rings_excluded) + ".")
+        else:
+            self._rings_btn.setToolTip(
+                "Choose which of the calibrant's rings the calibration uses. "
+                "All rings are used by default.")
+
+    def _reset_rings_for_calibrant(self, _text: str = "") -> None:
+        self._rings_excluded = []
+        self._sync_rings_btn()
+
+    def _edit_rings(self) -> None:
+        name = self._cal.currentText()
+        if is_dspacing_calibrant(name):
+            return
+        from midas_gui.calib import calibrant_ring_rows
+        img = self._image
+        NZ, NY = img.shape[:2] if img is not None else (2048, 2048)
+        lsd_um = self._seed_lsd.value() * 1000.0
+        try:
+            rows = calibrant_ring_rows(
+                name, wavelength=self._wl.value(), pxY=self._pxY.value(),
+                pxZ=self._pxZ_spin.value() if self._pxZ_check.isChecked() else None,
+                NY=int(NY), NZ=int(NZ), lsd_um=lsd_um,
+                bc_y=self._seed_bcy.value(), bc_z=self._seed_bcz.value())
+        except Exception as e:
+            show_error(self, "Could not build the ring list",
+                       f"{type(e).__name__}: {e}", log=self._log)
+            return
+        note = (f"Rings that reach the detector at λ = {self._wl.value():.5g} Å, "
+                f"Lsd = {self._seed_lsd.value():.1f} mm"
+                + ("" if img is not None else " (no image loaded — assuming 2048×2048)")
+                + ". Ring # is the backend's label, so it can skip numbers.")
+        dlg = RingSelectDialog(rows, self._rings_excluded, calibrant=name,
+                               note=note, parent=self)
+        if dlg.exec_():
+            self._rings_excluded = dlg.excluded()
+            self._sync_rings_btn()
+
     def _edit_seed_distortion(self):
         dlg = DistortionSeedDialog(self._seed_dist, self)
         if dlg.exec_():
@@ -2461,6 +2524,7 @@ class CalibrationTab(QtWidgets.QWidget):
         is_dsp = is_dspacing_calibrant(text)
         self._sync_refine_mode(is_dsp)
         self._dsp_custom_ed.setVisible(text == "Custom d-spacings…")
+        self._sync_rings_btn()
         self._manual_card.setVisible(is_dsp)
         # "Pick d-spacing pts" + "Ring #" only mean anything for a calibrant
         # given as a d-spacing list (AgBH, Custom d-spacings…) — a crystalline
@@ -2684,6 +2748,9 @@ class CalibrationTab(QtWidgets.QWidget):
         self._log.append("─" * 40 + f"\nStarting calibration ({mode})…")
         self._log.append(self._refine_summary_text())
         self._log.append(self._mask_log_line())
+        if self._rings_excluded and not is_dspacing_calibrant(self._cal.currentText()):
+            self._log.append("Rings excluded: " +
+                             ", ".join(str(r) for r in self._rings_excluded))
         # The windows shape the answer, so they belong in the run's own record
         # next to what was refined — not only on the card, which shows whatever
         # is set now rather than what this run used.
@@ -2732,6 +2799,8 @@ class CalibrationTab(QtWidgets.QWidget):
             # run_pipeline on the plain calibrate() path.
             "tols": self._crystalline_tols(),
         }
+        if self._rings_excluded and not is_dspacing_calibrant(cfg["calibrant"]):
+            cfg["rings_to_exclude"] = list(self._rings_excluded)
         self._last_dist_coeffs = cfg["refine"]["distortion_coeffs"]
         self._last_refine_flags = cfg["refine"]
         # Freeze what the windows are being taken around, before the run can
@@ -3567,6 +3636,8 @@ class CalibrationTab(QtWidgets.QWidget):
                  # its own — so without this a reopened project came back
                  # refining all 15 whatever the user had picked.
                  "dist_coeffs": sorted(self._dist_coeffs),
+                 # Ring numbers unticked under "Rings…" — no widget of its own.
+                 "rings_excluded": list(self._rings_excluded),
                  "result": project.sanitize_result_dict(self._result)}
         if self._result is not None and sidecar_stem:
             try:
@@ -3626,6 +3697,9 @@ class CalibrationTab(QtWidgets.QWidget):
         # would otherwise keep whatever the freshly built tab defaulted to and
         # contradict the tick right next to it.
         self._update_dist_label()
+        # Absent in older projects -> every ring, the old behaviour.
+        self._rings_excluded = sorted(
+            int(r) for r in (state.get("rings_excluded") or ()))
         modes = state.get("refine_modes") or {}
         if isinstance(modes.get("xtal"), dict):
             self._refine_state_xtal = dict(modes["xtal"])
