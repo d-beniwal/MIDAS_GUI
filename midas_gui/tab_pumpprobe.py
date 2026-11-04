@@ -6,7 +6,12 @@ prefix glob, the pump-probe **delay** (seconds) is parsed from each filename, ev
 frame is integrated to I(q) with the MIDAS engine (the same core as Batch Integrate,
 driven by a calibration), repeats per delay are combined into a mean, and a
 reference (mean of
-the pre-time-zero / negative delays) is subtracted → ΔI(q, delay).  Four views:
+the pre-time-zero / negative delays) is subtracted → ΔI(q, delay).  An optional
+"Calculate background" card (left panel) builds a 2-D background from a projection
+of the pooled frames or a single image (``bkg_estimate``) that is subtracted from
+every frame before integration.  Views:
+
+  0. Detector          — the pooled raw frames (raw / corrected / background)
 
   1. ΔI heatmap        — q (or 2θ / R) vs delay, diverging colour, + reference lineout
   2. ΔI vs q lines     — one curve per delay (rainbow)
@@ -32,15 +37,16 @@ from midas_gui.panel_toggle import install_panel_toggles
 from midas_gui.constants import (KERNELS, DEFAULT_KERNEL, DEFAULT_TRXRD_DIR,
                                  DEFAULT_TRXRD_PREFIX, DEFAULT_TRXRD_CALIB,
                                  DEFAULT_TRXRD_MASK)
-from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_file,
+from midas_gui.helpers import (_fspin, _browse, _load_image, apply_field_corrections, _build_spec, spec_from_geometry_file,
                                geometry_fields_from_file,
                                _NoScrollComboBox, widgets_to_dict, apply_dict_to_widgets)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, DataLoaderPanel,
-                               _convert_radial, _UnitAxis)
-from midas_gui.workers import PumpProbeWorker
+                               ImageViewer, _convert_radial, _UnitAxis)
+from midas_gui.workers import PumpProbeWorker, PumpBackgroundWorker
 from midas_gui.dialogs import show_error
 from midas_gui import style as S
 from midas_gui import qshift
+from midas_gui import bkg_estimate
 from midas_gui.color_scale import ColorScaleControls
 
 
@@ -146,6 +152,11 @@ class PumpProbeTab(QtWidgets.QWidget):
         self._kin_curves = []               # [(curve, color)] for kinetics
         self._means_curves = []             # [(curve, color)] for mean patterns
         self._qa_items = []                 # transient items on the Q-alignment plots
+        self._bkg_ref = None                # projected/single reference image (before refine)
+        self._bkg_final = None              # refined background, before scale/offset
+        self._bkg_worker = None
+        self._bkg_desc = ""
+        self._det_cache = (None, None)      # (path, raw frame) for the Detector tab
         self._build_ui()
         # Default the data loader to the shipped TRR folder + auto-scan if present.
         self._loader.set_path(DEFAULT_TRXRD_DIR)
@@ -205,6 +216,20 @@ class PumpProbeTab(QtWidgets.QWidget):
             "qa_fixed": self._qa_fixed,
             "qa_smooth": self._qa_smooth,
             "qa_fit_on": self._qa_fit_on,
+            "bkg_on": self._bkg_card,
+            "bkg_src_proj": self._bkg_src_proj,
+            "bkg_src_single": self._bkg_src_single,
+            "bkg_op": self._bkg_op,
+            "bkg_subset": self._bkg_subset,
+            "bkg_frame": self._bkg_frame,
+            "bkg_file": self._bkg_file,
+            "bkg_refine": self._bkg_refine,
+            "bkg_snip": self._bkg_snip,
+            "bkg_sigma": self._bkg_sigma,
+            "bkg_mkernel": self._bkg_mkernel,
+            "bkg_miters": self._bkg_miters,
+            "bkg_scale": self._bkg_scale,
+            "bkg_offset": self._bkg_offset,
         }
 
     def get_state(self) -> dict:
@@ -219,6 +244,8 @@ class PumpProbeTab(QtWidgets.QWidget):
         self._loader.set_state(state.get("loader") or {})
         apply_dict_to_widgets(self._state_widgets(), state.get("fields", {}))
         self._corr_widget.set_state(state.get("corr") or {})
+        self._bkg_body.setVisible(self._bkg_card.isChecked())   # signals were blocked
+        self._bkg_sync_enabled()
         self._on_heatmap_range_changed()
         self._hm_scale.restore_state(state.get("heatmap_color") or {})
         self._scan()
@@ -241,7 +268,24 @@ class PumpProbeTab(QtWidgets.QWidget):
         # Live folder monitoring is not part of the pump-probe workflow.
         if getattr(self._loader, "_monitor_btn", None) is not None:
             self._loader._monitor_btn.setVisible(False)
-        split.addWidget(self._loader)
+        self._loader.fieldsChanged.connect(self._det_refresh)
+        left = QtWidgets.QWidget()
+        left_lay = QtWidgets.QVBoxLayout(left)
+        left_lay.setContentsMargins(0, 0, 0, 0); left_lay.setSpacing(4)
+        left_lay.addWidget(self._loader, 1)
+        # The card scrolls inside a height-capped area so opening it never squeezes
+        # the loader's own Data / Dark / Bright / Mask rows out of view.
+        bkg_scroll = QtWidgets.QScrollArea()
+        bkg_scroll.setWidgetResizable(True)
+        bkg_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        bkg_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        bkg_scroll.setWidget(self._build_bkg_card())
+        bkg_scroll.setMaximumHeight(300)
+        left_lay.addWidget(bkg_scroll)
+        self._bkg_card.toggled.connect(
+            lambda on: bkg_scroll.setMinimumHeight(230 if on else 0))
+        left.setMinimumWidth(200)
+        split.addWidget(left)
 
         # ── MIDDLE: scrollable parameter column ──
         scroll = QtWidgets.QScrollArea()
@@ -393,12 +437,14 @@ class PumpProbeTab(QtWidgets.QWidget):
         pv.setContentsMargins(0, 0, 0, 0); pv.setSpacing(2)
         pv.addLayout(self._build_style_toolbar())
         self._views = QtWidgets.QTabWidget()
+        self._build_detector_view()
         self._build_heatmap_view()
         self._build_lines_view()
         self._build_kinetics_view()
         self._build_means_view()
         self._build_qalign_view()
         pv.addWidget(self._views, 1)
+        self._ref_list.itemSelectionChanged.connect(self._bkg_invalidate)
         right.addWidget(plot_box)
         self._log = LogPanel()
         right.addWidget(self._log)
@@ -660,6 +706,300 @@ class PumpProbeTab(QtWidgets.QWidget):
             + (f"  ({self._delays[0]:.2g} … {self._delays[-1]:.2g} s)" if self._delays else ""))
         self._log.append(f"[pump] scanned {folder}: {len(frames)} frames, "
                          f"{len(self._delays)} delays")
+        self._bkg_ref = self._bkg_final = None      # frame list changed
+        self._det_set_range()
+
+    # ── Calculate background (left panel) ──────────────────────────
+    def _build_bkg_card(self):
+        """Checkable "Calculate background" card — body hidden until enabled."""
+        from midas_gui.helpers import _NoScrollSpinBox
+        card = QtWidgets.QGroupBox("Calculate background")
+        card.setCheckable(True); card.setChecked(False)
+        self._bkg_card = card
+        outer = QtWidgets.QVBoxLayout(card)
+        outer.setContentsMargins(6, 2, 6, 4); outer.setSpacing(2)
+        body = QtWidgets.QWidget(); body.setVisible(False)
+        self._bkg_body = body
+        outer.addWidget(body)
+        v = QtWidgets.QVBoxLayout(body)
+        v.setContentsMargins(0, 0, 0, 0); v.setSpacing(4)
+
+        def _hint(text):
+            lb = QtWidgets.QLabel(text); lb.setWordWrap(True)
+            lb.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+            return lb
+
+        # Source
+        self._bkg_src_proj = QtWidgets.QRadioButton("Projection of loaded data")
+        self._bkg_src_single = QtWidgets.QRadioButton("Single image")
+        self._bkg_src_proj.setChecked(True)
+        v.addWidget(self._bkg_src_proj)
+        self._bkg_op = _NoScrollComboBox()
+        for key, label in bkg_estimate.PROJECTIONS.items():
+            self._bkg_op.addItem(label, key)
+        self._bkg_op.setToolTip(
+            "Per-pixel reduction over the pooled frames. Median / Minimum are the "
+            "robust choices for a background; Maximum / Sum mirror the Data Viewer "
+            "projections.")
+        self._bkg_subset = _NoScrollComboBox()
+        self._bkg_subset.addItem("All pooled frames", "all")
+        self._bkg_subset.addItem("Reference delays only", "ref")
+        self._bkg_subset.setToolTip(
+            "'Reference delays only' uses the delays selected under Pump-probe "
+            "options (default: negative delays, i.e. pre-pump frames).")
+        pf = S.Form(); pf.row(("Reduce:", self._bkg_op)); pf.row(("Frames:", self._bkg_subset))
+        v.addLayout(pf)
+        v.addWidget(self._bkg_src_single)
+        self._bkg_frame = _NoScrollSpinBox(); self._bkg_frame.setRange(0, 0)
+        self._bkg_frame.setToolTip("Index into the pooled frame list (Detector tab slider).")
+        self._bkg_use_cur = QtWidgets.QToolButton(); self._bkg_use_cur.setText("current")
+        self._bkg_use_cur.setToolTip("Use the frame shown in the Detector tab.")
+        self._bkg_use_cur.clicked.connect(
+            lambda: (self._bkg_file.clear(), self._bkg_frame.setValue(self._det_slider.value())))
+        fr = QtWidgets.QHBoxLayout(); fr.setSpacing(4)
+        fr.addWidget(QtWidgets.QLabel("Frame #:")); fr.addWidget(self._bkg_frame)
+        fr.addWidget(self._bkg_use_cur); fr.addStretch(1)
+        v.addLayout(fr)
+        self._bkg_file = QtWidgets.QLineEdit()
+        self._bkg_file.setPlaceholderText("or a separate image file (overrides frame #)")
+        fb = QtWidgets.QToolButton(); fb.setText("…")
+        fb.clicked.connect(lambda: self._bkg_file.setText(
+            _browse(self, "Background image", "Images (*.tif *.tiff *.h5 *.hdf5);;All (*)") or ""))
+        fl = QtWidgets.QHBoxLayout(); fl.setSpacing(4)
+        fl.addWidget(self._bkg_file, 1); fl.addWidget(fb)
+        v.addLayout(fl)
+
+        # Estimation / refinement
+        self._bkg_refine = _NoScrollComboBox()
+        for key, label in bkg_estimate.REFINEMENTS.items():
+            self._bkg_refine.addItem(label, key)
+        self._bkg_refine.setToolTip(
+            "SNIP: the MIDAS clipping baseline (utils/extract_lineouts.py) in 2-D — "
+            "follows smooth diffuse scatter, clips rings and spots.")
+        self._bkg_snip = _NoScrollSpinBox(); self._bkg_snip.setRange(1, 500); self._bkg_snip.setValue(30)
+        self._bkg_snip.setToolTip("Clipping iterations ≈ half-width (px) of the widest signal feature.")
+        self._bkg_sigma = _fspin(0.5, 200.0, 1, 5.0, "px")
+        self._bkg_mkernel = _NoScrollSpinBox(); self._bkg_mkernel.setRange(3, 501)
+        self._bkg_mkernel.setValue(51); self._bkg_mkernel.setSingleStep(2)
+        self._bkg_mkernel.setToolTip(
+            "Median window in detector pixels (odd). MIDAS seeding uses 51 "
+            "(101 in AutoCalibrateZarr). Must exceed the width of rings/spots.")
+        self._bkg_miters = _NoScrollSpinBox(); self._bkg_miters.setRange(1, 20)
+        self._bkg_miters.setValue(3)
+        self._bkg_miters.setToolTip("Successive median passes (MIDAS default 3).")
+        self._bkg_scale = _fspin(-1e6, 1e6, 3, 1.0)
+        self._bkg_scale.setToolTip("B_eff = scale × B + offset (MIDAS EmptySubtraction model).")
+        self._bkg_offset = _fspin(-1e9, 1e9, 2, 0.0, "cts")
+        ef = S.Form()
+        ef.row(("Refine:", self._bkg_refine))
+        ef.row(("SNIP iter:", self._bkg_snip), ("σ:", self._bkg_sigma))
+        ef.row(("Median k:", self._bkg_mkernel), ("passes:", self._bkg_miters))
+        ef.row(("Scale:", self._bkg_scale), ("Offset:", self._bkg_offset))
+        v.addLayout(ef)
+
+        self._bkg_btn = QtWidgets.QPushButton("Compute background")
+        self._bkg_btn.clicked.connect(self._bkg_compute)
+        v.addWidget(self._bkg_btn)
+        self._bkg_status = _hint("(not computed)")
+        v.addWidget(self._bkg_status)
+
+        card.toggled.connect(body.setVisible)
+        card.toggled.connect(self._bkg_on_toggled)
+        # Source / method changes make the computed field stale; scale/offset are live.
+        for sig in (self._bkg_src_proj.toggled, self._bkg_op.currentIndexChanged,
+                    self._bkg_subset.currentIndexChanged, self._bkg_frame.valueChanged,
+                    self._bkg_file.textChanged, self._bkg_refine.currentIndexChanged,
+                    self._bkg_snip.valueChanged, self._bkg_sigma.valueChanged,
+                    self._bkg_mkernel.valueChanged, self._bkg_miters.valueChanged):
+            sig.connect(self._bkg_invalidate)
+        self._bkg_src_proj.toggled.connect(self._bkg_sync_enabled)
+        self._bkg_refine.currentIndexChanged.connect(self._bkg_sync_enabled)
+        self._bkg_scale.valueChanged.connect(self._bkg_scale_changed)
+        self._bkg_offset.valueChanged.connect(self._bkg_scale_changed)
+        self._bkg_sync_enabled()
+        return card
+
+    def _bkg_sync_enabled(self, *_):
+        proj = self._bkg_src_proj.isChecked()
+        for w in (self._bkg_op, self._bkg_subset):
+            w.setEnabled(proj)
+        for w in (self._bkg_frame, self._bkg_use_cur, self._bkg_file):
+            w.setEnabled(not proj)
+        method = self._bkg_refine.currentData()
+        self._bkg_snip.setEnabled(method == "snip")
+        self._bkg_sigma.setEnabled(method == "gauss")
+        for w in (self._bkg_mkernel, self._bkg_miters):
+            w.setEnabled(method == "median")
+
+    def _bkg_set_status(self, text, *, bad=False):
+        self._bkg_status.setText(text)
+        self._bkg_status.setStyleSheet(
+            f"color:{'#c0392b' if bad else S.MUTED};font-size:10px")
+
+    def _bkg_invalidate(self, *_):
+        """Settings or frame list changed — the computed field no longer matches."""
+        if self._bkg_final is not None:
+            self._bkg_ref = self._bkg_final = None
+            self._bkg_set_status("(settings changed — compute again)")
+            self._det_refresh()
+
+    def _bkg_on_toggled(self, on):
+        self._det_refresh()
+
+    def _bkg_scale_changed(self, *_):
+        if self._bkg_final is not None:
+            self._det_refresh(fresh=False)
+
+    def _bkg_paths(self) -> list:
+        if not self._frames:
+            raise RuntimeError("Scan the folder first — no pooled frames.")
+        if self._bkg_src_single.isChecked():
+            f = self._bkg_file.text().strip()
+            if f:
+                if not Path(f).exists():
+                    raise FileNotFoundError(f"Background image not found: {f}")
+                return [f]
+            return [self._frames[min(self._bkg_frame.value(), len(self._frames) - 1)][0]]
+        frames = self._frames
+        if self._bkg_subset.currentData() == "ref":
+            sel = {self._ref_list.item(i).data(QtCore.Qt.UserRole)
+                   for i in range(self._ref_list.count())
+                   if self._ref_list.item(i).isSelected()}
+            frames = [f for f in frames if f[1] in sel]
+            if not frames:
+                raise RuntimeError("No frames at the selected reference delays.")
+        return [f[0] for f in frames]
+
+    def _bkg_compute(self):
+        if self._bkg_worker and self._bkg_worker.isRunning():
+            return
+        try:
+            paths = self._bkg_paths()
+        except Exception as e:
+            self._bkg_set_status(str(e), bad=True); return
+        single = self._bkg_src_single.isChecked()
+        op = "mean" if single else self._bkg_op.currentData()
+        self._bkg_desc = ("single image" if single else
+                          f"{bkg_estimate.PROJECTIONS[op].lower()} of {len(paths)} frame(s)")
+        self._bkg_btn.setEnabled(False)
+        self._bkg_set_status("computing…")
+        self._bkg_worker = PumpBackgroundWorker(
+            paths, op, self._bkg_refine.currentData(),
+            snip_iter=self._bkg_snip.value(), sigma=self._bkg_sigma.value(),
+            median_kernel=self._bkg_mkernel.value(), median_iters=self._bkg_miters.value(),
+            mask=self._loader.composite_mask(), parent=self)
+        self._bkg_worker.progress.connect(
+            lambda i, n: self._bkg_set_status(f"reading frames… {i}/{n}"))
+        self._bkg_worker.finished.connect(self._bkg_on_done)
+        self._bkg_worker.failed.connect(self._bkg_on_fail)
+        self._bkg_worker.start()
+
+    def _bkg_on_done(self, ref, final):
+        self._bkg_btn.setEnabled(True)
+        self._bkg_ref, self._bkg_final = ref, final
+        desc = f"{self._bkg_desc}, refine: {self._bkg_refine.currentText()}"
+        self._bkg_set_status(f"{desc} — mean {float(np.mean(final)):.4g} cts")
+        self._log.append(f"[pump] background computed: {desc} "
+                         f"(mean {float(np.mean(final)):.4g}, max {float(np.max(final)):.4g})")
+        self._det_refresh()
+
+    def _bkg_on_fail(self, msg):
+        self._bkg_btn.setEnabled(True)
+        if not msg:
+            self._bkg_set_status("(aborted)"); return
+        self._bkg_set_status("failed — see error", bad=True)
+        show_error(self, "Background failed", msg, log=self._log, log_prefix="\n[pump] ERROR:\n")
+
+    def _bkg_effective(self):
+        """scale × B + offset when the card is enabled and computed, else None."""
+        if not self._bkg_card.isChecked() or self._bkg_final is None:
+            return None
+        return bkg_estimate.effective_background(
+            self._bkg_final, self._bkg_scale.value(), self._bkg_offset.value())
+
+    def _field_background(self):
+        """The background field subtracted from every frame: the calculated one when
+        enabled, otherwise the loader's own Background field (or None)."""
+        eff = self._bkg_effective()
+        return eff if eff is not None else self._loader.background()
+
+    # ── Detector view ──────────────────────────────────────────────
+    def _build_detector_view(self):
+        from midas_gui.helpers import _NoScrollSpinBox
+        w = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(w); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(2)
+        row = QtWidgets.QHBoxLayout(); row.setSpacing(6)
+        self._det_mode = _NoScrollComboBox()
+        self._det_mode.addItem("Raw", "raw")
+        self._det_mode.addItem("Corrected (dark / bright / background)", "corr")
+        self._det_mode.addItem("Calculated background", "bkg")
+        self._det_mode.currentIndexChanged.connect(lambda *_: self._det_refresh())
+        row.addWidget(QtWidgets.QLabel("Show:")); row.addWidget(self._det_mode)
+        self._det_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self._det_slider.setRange(0, 0)
+        self._det_spin = _NoScrollSpinBox(); self._det_spin.setRange(0, 0)
+        self._det_spin.valueChanged.connect(self._det_slider.setValue)
+        self._det_slider.valueChanged.connect(self._det_spin.setValue)
+        self._det_slider.valueChanged.connect(lambda *_: self._det_refresh())
+        row.addWidget(self._det_slider, 1); row.addWidget(self._det_spin)
+        v.addLayout(row)
+        self._det_lbl = QtWidgets.QLabel("(scan a folder to browse frames)")
+        self._det_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        v.addWidget(self._det_lbl)
+        # Same widget + origin convention as the Data Viewer; raw frames go through
+        # set_raw_frame with the calibration's ImTransOpt codes.
+        self._det_view = ImageViewer()
+        v.addWidget(self._det_view, 1)
+        self._views.addTab(w, "Detector")
+
+    def _det_set_range(self):
+        n = len(self._frames)
+        for wdg in (self._det_slider, self._det_spin, self._bkg_frame):
+            wdg.blockSignals(True)
+            wdg.setRange(0, max(0, n - 1))
+            if wdg.value() > max(0, n - 1):
+                wdg.setValue(0)
+            wdg.blockSignals(False)
+        self._det_cache = (None, None)
+        self._det_refresh()
+
+    def _det_raw(self, path):
+        if self._det_cache[0] != path:
+            self._det_cache = (path, _load_image(path))
+        return self._det_cache[1]
+
+    def _det_refresh(self, *_, fresh: bool = True):
+        if not hasattr(self, "_det_view"):
+            return
+        mode = self._det_mode.currentData()
+        try:
+            if mode == "bkg":
+                img = self._bkg_effective()
+                if img is None:
+                    self._det_lbl.setText(
+                        "No calculated background — enable 'Calculate background' "
+                        "(left) and click Compute.")
+                    return
+                self._det_lbl.setText("Calculated background  (scale × B + offset)")
+            else:
+                if not self._frames:
+                    self._det_lbl.setText("(scan a folder to browse frames)")
+                    return
+                i = min(self._det_slider.value(), len(self._frames) - 1)
+                path, delay, _fshw = self._frames[i]
+                img = self._det_raw(path)
+                if mode == "corr":
+                    img = apply_field_corrections(
+                        img, dark=self._loader.dark(), bright=self._loader.bright(),
+                        bright_mode=self._loader.bright_mode(),
+                        background=self._field_background())
+                self._det_lbl.setText(
+                    f"{Path(path).name}   delay {delay:.4g} s   "
+                    f"[{i + 1}/{len(self._frames)}]")
+            self._det_view.set_raw_frame(np.asarray(img), self._resolved_im_trans(),
+                                         autorange=fresh, reset_levels=fresh)
+        except Exception as e:
+            self._det_lbl.setText(f"Could not show frame: {e}")
 
     # ── run integration ────────────────────────────────────────────
     def _build_spec(self):
@@ -707,6 +1047,12 @@ class PumpProbeTab(QtWidgets.QWidget):
                 f"'{sel.title()}' is enabled but not computed. "
                 "Click 'Compute field' in that box first."); return
 
+        if self._bkg_card.isChecked() and self._bkg_final is None:
+            QtWidgets.QMessageBox.warning(
+                self, "Background not computed",
+                "'Calculate background' is enabled but not computed. "
+                "Click 'Compute background' in that box first."); return
+
         # Optional index-range subset of the pooled frames (start, end, stride).
         start, end, stride = self._loader.frame_range()
         frames = self._frames[start:end:max(1, stride)]
@@ -726,12 +1072,16 @@ class PumpProbeTab(QtWidgets.QWidget):
 
         self._run_btn.setEnabled(False); self._abort_btn.setEnabled(True)
         self._prog.setVisible(True); self._prog.setValue(0)
+        if self._bkg_effective() is not None:
+            self._log.append("[pump] subtracting the calculated background"
+                             + (" (replaces the loader's Background field)"
+                                if self._loader.background() is not None else ""))
         self._log.append("─" * 40 + f"\n[pump] integrating {len(frames)} frames…")
         self._worker = PumpProbeWorker(
             spec, frames, self._loader.composite_mask(), kernel, corrections,
             weighted=True, q_cfg=q_cfg, ref_delays=ref_delays, norm_range=norm_range,
             dark=self._loader.dark(), bright=self._loader.bright(),
-            background=self._loader.background(), bright_mode=self._loader.bright_mode(),
+            background=self._field_background(), bright_mode=self._loader.bright_mode(),
             parent=self, im_trans=self._resolved_im_trans())
         self._worker.progress.connect(self._on_progress)
         self._worker.log_line.connect(self._log.append)

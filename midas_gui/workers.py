@@ -3328,6 +3328,42 @@ class PumpProbeWorker(QtCore.QThread):
                 "n": int(profiles.shape[0])}
 
 
+class PumpBackgroundWorker(QtCore.QThread):
+    """Compute the Pump Probe tab's 2-D background off the GUI thread.
+
+    ``paths`` are the frames to reduce with ``op`` (a single path = "single image");
+    the reference is then ``refine``d (see ``bkg_estimate``).  Emits
+    ``finished(reference, final)`` — the projected image before / after refinement,
+    both 2-D float64, *before* scale/offset (the tab applies those live).
+    """
+    progress = QtCore.pyqtSignal(int, int)
+    finished = QtCore.pyqtSignal(object, object)
+    failed = QtCore.pyqtSignal(str)
+
+    def __init__(self, paths, op="mean", refinement="none", *, snip_iter=30,
+                 sigma=5.0, mask=None, median_kernel=51, median_iters=3, parent=None):
+        super().__init__(parent)
+        self._paths = list(paths)
+        self._op = op
+        self._refinement = refinement
+        self._kw = dict(snip_iter=snip_iter, sigma=sigma, mask=mask,
+                        median_kernel=median_kernel, median_iters=median_iters)
+
+    def run(self):
+        from midas_gui import bkg_estimate as be
+        try:
+            ref = be.project_frames(
+                self._paths, self._op,
+                progress=lambda i, n: self.progress.emit(i, n),
+                should_stop=self.isInterruptionRequested)
+            final = be.refine(ref, self._refinement, **self._kw)
+            self.finished.emit(ref, final)
+        except be.Cancelled:
+            self.failed.emit("")           # silent: user aborted
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
 def _list_tiff_files(path: str) -> list:
     """Files a TIFFGlobSource would see for ``path`` (glob, folder, or file)."""
     p = Path(path)

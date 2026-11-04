@@ -1,8 +1,10 @@
 # Project state
 
-Last updated: 2026-11-03 (Calibrate rings, APEXA dock, Pump Probe q-alignment)
+Last updated: 2026-11-04 (Pump Probe background + Detector tab)
 
 ## Now working on
+
+2026-11-04: Pump Probe "Calculate background" card + Detector tab on branch `bkg_pump` (uncommitted; `bkg_estimate.py`, `PumpBackgroundWorker`, `tests/test_bkg_estimate.py`; DECISIONS 2026-11-04). Needs a live check on real TRR data (SNIP iterations, pre-pump median). `qshift_pump` was merged to main (ff) and deleted locally 2026-11-04; `origin/qshift_pump` not yet deleted.
 
 2026-11-03: Calibrate "Rings…" button (next to Calibrant) — tick/untick calibrant rings to use in the fit; wired through `rings_to_exclude` (DECISIONS 2026-11-03). Backend path and widget state verified offscreen; not run through the full GUI Run button or live data. Ignored by First-time/Frozen-point (backend takes no spec). Committed on main.
 
