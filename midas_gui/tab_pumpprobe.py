@@ -1261,8 +1261,7 @@ class PumpProbeTab(QtWidgets.QWidget):
         lo, hi = self._qa_window()
         if hi <= lo:
             lo, hi = float(q.min()), float(q.max())
-        pad = 0.5 * (hi - lo)
-        x0, x1 = lo - pad, hi + pad
+        x0, x1 = lo, hi          # zoom shows exactly the selected window
         for plot, src, title in (
                 (self._qa_before, raw, "Window — before (raw)"),
                 (self._qa_after, self._data,
@@ -1290,7 +1289,10 @@ class PumpProbeTab(QtWidgets.QWidget):
             ys = I[:, sel]
             ylo, yhi = float(np.nanmin(ys)), float(np.nanmax(ys))
             if np.isfinite(ylo) and np.isfinite(yhi):
-                self._bound(plot, float(q[sel].min()), float(q[sel].max()), ylo, yhi)
+                self._bound(plot, x0, x1, ylo, yhi)
+                # _bound pads x by 3 %; pin x to the window exactly
+                plot.getViewBox().setLimits(xMin=x0, xMax=x1, maxXRange=x1 - x0)
+                plot.setXRange(x0, x1, padding=0)
 
     def _replot_qalign_positions(self):
         info = self._qa_info
