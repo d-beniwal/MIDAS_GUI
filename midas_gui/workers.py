@@ -191,6 +191,28 @@ def frame_output_base(out_dir, fid, fallback_idx: int, used: set):
     return Path(out_dir) / frame_output_stem(fid, fallback_idx, used)
 
 
+def _write_h5_atomic(h5_path, writer) -> None:
+    """Run ``writer(tmp_path)`` then ``os.replace`` it onto ``h5_path``.
+
+    Writing straight onto an existing ``.h5`` truncates it, which HDF5
+    refuses ("unable to truncate a file which is already open") whenever
+    anything — a viewer, an earlier run, another process — still holds the
+    previous output open. Replacing the directory entry works regardless
+    (POSIX keeps the old inode alive for whoever has it open).
+    """
+    import os
+    h5_path = Path(h5_path)
+    tmp = h5_path.with_name(f".{h5_path.stem}.tmp{os.getpid()}.h5")
+    try:
+        writer(tmp)
+        os.replace(tmp, h5_path)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
 def stamp_h5_provenance(h5_path, entry: dict) -> None:
     """Reopen ``h5_path`` (already written by ``midas_integrate_v2.write_h5``)
     and append a provenance entry to its root attrs (``provenance_history``,
@@ -3118,8 +3140,8 @@ class BatchWorker(QtCore.QThread):
                     h5_path = h5_dir / f"{combined_stem}.h5"
                     try:
                         from midas_gui.cake_hdf5 import write_cake_h5
-                        write_cake_h5(
-                            h5_path, cake=np.array(all_profiles),
+                        _write_h5_atomic(h5_path, lambda t: write_cake_h5(
+                            t, cake=np.array(all_profiles),
                             cake_sigma=np.array(all_sigmas),
                             collapsed_profiles=(np.array(all_cake_profiles)
                                                 if all_cake_profiles else None),
@@ -3134,7 +3156,7 @@ class BatchWorker(QtCore.QThread):
                                 'RBinSize': float(spec.RBinSize),
                                 'EtaMin': float(spec.EtaMin), 'EtaMax': float(spec.EtaMax),
                                 'EtaBinSize': float(spec.EtaBinSize),
-                            })
+                            }))
                         try:
                             # out_paths is only fully known here (every zarr
                             # sibling from this run, plus this h5's own path).
@@ -3152,16 +3174,17 @@ class BatchWorker(QtCore.QThread):
                     h5_dir = self._out_dir / "h5"
                     h5_dir.mkdir(parents=True, exist_ok=True)
                     h5_path = h5_dir / f"{combined_stem}.h5"
-                    m.write_h5(str(h5_path),
-                               profiles=np.array(all_profiles),
-                               r_axis=r_ax,
-                               frame_ids=frame_ids,
-                               sigmas=np.array(all_sigmas),
-                               # One rotation angle per profile, same order —
-                               # see write_all_profiles for why this is an
-                               # extra dataset rather than a metadata field.
-                               extra_datasets={"omegas": np.asarray(
-                                   all_omegas, dtype=np.float64)})
+                    _write_h5_atomic(h5_path, lambda t: m.write_h5(
+                        str(t),
+                        profiles=np.array(all_profiles),
+                        r_axis=r_ax,
+                        frame_ids=frame_ids,
+                        sigmas=np.array(all_sigmas),
+                        # One rotation angle per profile, same order —
+                        # see write_all_profiles for why this is an
+                        # extra dataset rather than a metadata field.
+                        extra_datasets={"omegas": np.asarray(
+                            all_omegas, dtype=np.float64)}))
                     try:
                         prov_entry['extra']['out_paths'] = out_paths + [str(h5_path)]
                         stamp_h5_provenance(h5_path, prov_entry)
@@ -4272,9 +4295,9 @@ def write_all_profiles(out_dir, fmts, r_axis, profiles, sigmas, frame_ids,
         extras = None
         if omegas is not None and len(omegas) == len(frame_ids):
             extras = {"omegas": np.asarray(omegas, dtype=np.float64)}
-        m.write_h5(str(h5_path), profiles=profiles, r_axis=r_axis,
-                   frame_ids=frame_ids, sigmas=sigmas,
-                   extra_datasets=extras)
+        _write_h5_atomic(h5_path, lambda t: m.write_h5(
+            str(t), profiles=profiles, r_axis=r_axis,
+            frame_ids=frame_ids, sigmas=sigmas, extra_datasets=extras))
         try:
             entry = provenance.build_entry(
                 'midas_gui.batch_integrate.save',
