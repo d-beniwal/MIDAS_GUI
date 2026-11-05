@@ -3,6 +3,13 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-11-05 — Caking parameters recorded in / forwarded to Batch Integrate outputs
+
+- **Bug 1:** "Run as job" (`tab_batch._run_as_job`) never sent `--eta-min/--eta-max` and dropped `--r-min` when it was 0 (backend then used RMin=10), so a detached job ignored the η window.
+- **Bug 2:** the 1-D combined HDF5 (`midas_integrate_v2.write_h5`) stored only profiles + R axis — no R/η parameters at all, though the file is named `*.cake.h5`. Now `workers.stamp_cake_params_h5` writes RMin/RMax/RBinSize/EtaMin/EtaMax/EtaBinSize, n_r_bins, n_eta_bins and a note as root attrs (BatchWorker, Save, Batch-Parallel combine). Runs also log the cake line at start.
+- **Not reproduced:** the reporter's 750 R bins (expected 420 for 240–450 @ 0.5). In-process path builds the right spec (tested); suspect job path or an un-applied cake dialog (Close discards edits, only Apply commits). Need the run log's `[batch] cake:` line from a new run.
+- The per-η cake is only kept with "Multi-azimuth output"; otherwise the profile is the η-collapse over [EtaMin, EtaMax].
+
 ## 2026-11-04 — Heavy workers run in their own OS process (`proc_worker.process_isolated`)
 
 A native fault (segfault/abort/OOM-kill) inside an in-process QThread worker takes the whole GUI down — and the calibration child with it, since `CalibrationWorker`'s QProcess dies with the GUI. Create-mask (torch/OpenMP + whole frame stacks, first-time `import torch` off the main thread) was the reported trigger; root cause of that specific crash was *not* found in any log (no crash report for the GUI process).

@@ -2470,10 +2470,15 @@ class BatchTab(QtWidgets.QWidget):
         argv = [sys.executable, "-m", "midas_gui.batch_cli",
                "--calib-file", str(calib_path),
                "--r-bin", str(self._r_bin.value()), "--eta-bin", str(self._e_bin.value())]
-        if self._r_min.value():
-            argv += ["--r-min", str(self._r_min.value())]
+        # R min is sent even at 0 (0 is a real value; omitting it made the
+        # backend fall back to its own RMin=10). Rmax 0 = auto, so omitted.
+        argv += ["--r-min", str(self._r_min.value())]
         if self._r_max.value():
             argv += ["--r-max", str(self._r_max.value())]
+        # The azimuthal window was never forwarded, so a detached job always
+        # integrated the full circle whatever η min/max said.
+        argv += ["--eta-min", str(self._eta_min.value()),
+                 "--eta-max", str(self._eta_max.value())]
 
         # The source files and the output dir are the ONLY per-folder parts;
         # everything else below is shared, so these are appended last, once

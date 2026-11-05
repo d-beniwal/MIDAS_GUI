@@ -233,6 +233,40 @@ def stamp_h5_provenance(h5_path, entry: dict) -> None:
         ds.attrs['format'] = 'JSON list of provenance entries (see midas_gui/provenance.py)'
 
 
+def cake_params_of(spec) -> dict:
+    """The six R/η binning values a run was ASKED for, as plain floats."""
+    return {
+        'RMin': float(spec.RMin), 'RMax': float(spec.RMax),
+        'RBinSize': float(spec.RBinSize),
+        'EtaMin': float(spec.EtaMin), 'EtaMax': float(spec.EtaMax),
+        'EtaBinSize': float(spec.EtaBinSize),
+    }
+
+
+def stamp_cake_params_h5(h5_path, spec) -> None:
+    """Record the caking parameters in a 1-D ``write_h5`` file's root attrs.
+
+    ``midas_integrate_v2.write_h5`` stores only the finished ``(N, n_r)``
+    profile stack and its R axis, so nothing in the file said which R range,
+    R bin, or η window/bin the profiles were built with — the R axis alone
+    could not tell an η-restricted run from a full-circle one. The 1-D
+    profile is the η-collapse over [EtaMin, EtaMax]; EtaBinSize only shapes
+    the wedges that were averaged (it is kept in the file only with
+    Multi-azimuth output, which writes the full η axis)."""
+    import h5py
+    with h5py.File(str(h5_path), 'a') as h5:
+        for k, v in cake_params_of(spec).items():
+            h5.attrs[k] = v
+        h5.attrs['n_r_bins'] = int(spec.n_r_bins)
+        h5.attrs['n_eta_bins'] = int(spec.n_eta_bins)
+        h5.attrs['multi_azimuth'] = False
+        h5.attrs['eta_collapsed'] = True
+        h5.attrs['note'] = (
+            "profiles are the 1-D lineout eta-collapsed over "
+            "[EtaMin, EtaMax]; enable Multi-azimuth output to keep the "
+            "per-eta cake.")
+
+
 def build_geom(spec, kernel: str, mask):
     from midas_integrate_v2 import (
         SubpixelBinGeometry, HardBinGeometry, PolygonBinGeometry)
@@ -2729,6 +2763,12 @@ class BatchWorker(QtCore.QThread):
             # into its zarr and HDF5, including runs whose user never opened
             # the cake dialog, so what it used should not have to be inferred.
             self.log_line.emit(f"[batch] omega: {omega_desc}")
+            self.log_line.emit(
+                f"[batch] cake: R {spec.RMin:g}–{spec.RMax:g} px step "
+                f"{spec.RBinSize:g} ({spec.n_r_bins} bins) | η {spec.EtaMin:g}–"
+                f"{spec.EtaMax:g}° step {spec.EtaBinSize:g} "
+                f"({spec.n_eta_bins} bins) | "
+                f"{'multi-azimuth cake' if self._multi_azimuth else 'η-collapsed 1-D'}")
             if self._drift_traj is not None:
                 self.log_line.emit(
                     f"[batch] drift trajectory: {len(self._drift_traj.frame_indices)} knots  "
@@ -3196,6 +3236,7 @@ class BatchWorker(QtCore.QThread):
                         extra_datasets={"omegas": np.asarray(
                             all_omegas, dtype=np.float64)}))
                     try:
+                        stamp_cake_params_h5(h5_path, spec)
                         prov_entry['extra']['out_paths'] = out_paths + [str(h5_path)]
                         stamp_h5_provenance(h5_path, prov_entry)
                     except Exception:
@@ -4308,6 +4349,11 @@ def write_all_profiles(out_dir, fmts, r_axis, profiles, sigmas, frame_ids,
         _write_h5_atomic(h5_path, lambda t: m.write_h5(
             str(t), profiles=profiles, r_axis=r_axis,
             frame_ids=frame_ids, sigmas=sigmas, extra_datasets=extras))
+        if spec is not None:
+            try:
+                stamp_cake_params_h5(h5_path, spec)
+            except Exception:
+                pass   # best-effort, like the provenance stamp below
         try:
             entry = provenance.build_entry(
                 'midas_gui.batch_integrate.save',
@@ -4608,12 +4654,7 @@ class BatchRunCoordinator(QtCore.QObject):
                     # Through bin_area_for, so a wrapped eta range gets a
                     # real area for the bins past the cut instead of zeros.
                     bin_area = bin_area_for(spec, kernel, self._args["mask"])
-                    cake_params = {
-                        'RMin': float(spec.RMin), 'RMax': float(spec.RMax),
-                        'RBinSize': float(spec.RBinSize),
-                        'EtaMin': float(spec.EtaMin), 'EtaMax': float(spec.EtaMax),
-                        'EtaBinSize': float(spec.EtaBinSize),
-                    }
+                    cake_params = cake_params_of(spec)
                 h5_paths = write_all_profiles(
                     out_dir, ["h5"], r_axis, merged_profiles, merged_sigmas, merged_ids,
                     float(spec.Lsd), float(spec.pxY), float(spec.Wavelength),
