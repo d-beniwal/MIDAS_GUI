@@ -1,8 +1,10 @@
 # Project state
 
-Last updated: 2026-11-03 (Calibrate rings, APEXA dock, Pump Probe q-alignment)
+Last updated: 2026-11-04 (process-isolated workers)
 
 ## Now working on
+
+2026-11-04: Heavy QThread workers now run in a child process (`proc_worker.py`/`proc_cli.py`; Mask, Integration, Refine, Corrections, PDF, Texture, Drift, Manual d-spacing) so a native crash can't kill the GUI or a running calibration (DECISIONS 2026-11-04). Unit-tested with a fake worker + real mask run offscreen; not yet exercised from the live GUI tabs. Not converted: SolveCell, PumpProbe, Batch*, FolderMonitor, Projection/AllFrameStats (reasons in DECISIONS). Committed on main. Targeted tests (calibrate/hydra/mask/project/smoke/manual-dspacing) pass; test_hydra_ui, test_calibrate_mask_overlay and test_mask_display_transform fail identically with and without it. A full-suite run hung ~30 min on one forked test (not identified).
 
 2026-11-03: Calibrate "Rings…" button (next to Calibrant) — tick/untick calibrant rings to use in the fit; wired through `rings_to_exclude` (DECISIONS 2026-11-03). Backend path and widget state verified offscreen; not run through the full GUI Run button or live data. Ignored by First-time/Frozen-point (backend takes no spec). Committed on main.
 

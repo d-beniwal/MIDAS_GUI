@@ -28,6 +28,7 @@ from PyQt5 import QtCore
 
 import midas_gui._paths  # noqa: F401  (sys.path setup before MIDAS imports)
 from midas_gui import calib_cli
+from midas_gui.proc_worker import process_isolated
 from midas_gui.constants import PROJECT_ROOT
 from midas_gui import h5_metadata
 from midas_gui import ion_csv
@@ -842,7 +843,7 @@ def temporal_constancy_mask(stack: np.ndarray, frozen_frac: float) -> tuple:
     return frozen, f"frozen: {int(frozen.sum()):,} (ref_std={ref:.2g})"
 
 
-class MaskComputeWorker(QtCore.QThread):
+class _MaskComputeWorkerImpl(QtCore.QThread):
     """Compute the combined bad-pixel mask: base threshold OR'd with any enabled
     advanced method (statistical outlier, spatial spike, azimuthal clip, learnable).
 
@@ -1026,6 +1027,11 @@ class MaskComputeWorker(QtCore.QThread):
         except Exception:
             self.failed.emit(traceback.format_exc())
 
+
+# Runs in its own OS process (see proc_worker.py): this worker loads whole frame
+# stacks and calls torch/OpenMP, and a native fault there must not take the GUI —
+# and any calibration running beside it — down.
+MaskComputeWorker = process_isolated(_MaskComputeWorkerImpl)
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  Calibration worker (pipeline-aware)
@@ -1845,7 +1851,7 @@ class CalibrationWorker(QtCore.QObject):
         self.finished.emit(result)
 
 
-class ManualDspacingCalibWorker(QtCore.QThread):
+class _ManualDspacingCalibWorkerImpl(QtCore.QThread):
     """Fit detector geometry from user-picked ring points and known d-spacings
     (Bragg's law), entirely bypassing ``calib.run_pipeline``/``midas_calibrate_v2``
     — used for non-crystalline calibrants (e.g. AgBH) that have no space group.
@@ -1979,12 +1985,14 @@ class ManualDspacingCalibWorker(QtCore.QThread):
                 f"via Limits…")
         return lines
 
+ManualDspacingCalibWorker = process_isolated(_ManualDspacingCalibWorkerImpl)   # own OS process — see proc_worker.py
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  Single-frame integration worker (Tab 2 post-calibration preview)
 # ═════════════════════════════════════════════════════════════════════════════
 
-class IntegrationWorker(QtCore.QThread):
+class _IntegrationWorkerImpl(QtCore.QThread):
     log_line = QtCore.pyqtSignal(str)
     finished = QtCore.pyqtSignal(object)
     failed   = QtCore.pyqtSignal(str)
@@ -2066,6 +2074,8 @@ class IntegrationWorker(QtCore.QThread):
             })
         except Exception:
             self.failed.emit(traceback.format_exc())
+
+IntegrationWorker = process_isolated(_IntegrationWorkerImpl)   # own OS process — see proc_worker.py
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -4650,7 +4660,7 @@ class BatchRunCoordinator(QtCore.QObject):
 #  Tab 4 — Calibration refinement (autograd against integrated profile)
 # ═════════════════════════════════════════════════════════════════════════════
 
-class RefinementWorker(QtCore.QThread):
+class _RefinementWorkerImpl(QtCore.QThread):
     """Refine geometry by minimising an integrated-profile loss via autograd.
 
     Default loss is EtaUniformityLoss (rings should be flat in η).  The image is
@@ -4857,12 +4867,14 @@ class RefinementWorker(QtCore.QThread):
         except Exception:
             self.failed.emit(traceback.format_exc())
 
+RefinementWorker = process_isolated(_RefinementWorkerImpl)   # own OS process — see proc_worker.py
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  Tab 4b — Profile comparison (before/after refinement)
 # ═════════════════════════════════════════════════════════════════════════════
 
-class RefineCompareWorker(QtCore.QThread):
+class _RefineCompareWorkerImpl(QtCore.QThread):
     """Integrate one frame with both the original and refined calibration results.
 
     Returns profiles on a common R axis so the tab can overlay them and show
@@ -4928,6 +4940,8 @@ class RefineCompareWorker(QtCore.QThread):
         except Exception:
             self.failed.emit(traceback.format_exc())
 
+RefineCompareWorker = process_isolated(_RefineCompareWorkerImpl)   # own OS process — see proc_worker.py
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  Tab 5 — Corrections & Physics preview (single frame)
@@ -4948,7 +4962,7 @@ def _parse_composition(text: str) -> dict:
     return out
 
 
-class CorrectionPreviewWorker(QtCore.QThread):
+class _CorrectionPreviewWorkerImpl(QtCore.QThread):
     """Integrate one frame with and without the selected corrections so the user
     can see the effect of each before committing to a batch run.
 
@@ -5039,6 +5053,8 @@ class CorrectionPreviewWorker(QtCore.QThread):
         except Exception:
             self.failed.emit(traceback.format_exc())
 
+CorrectionPreviewWorker = process_isolated(_CorrectionPreviewWorkerImpl)   # own OS process — see proc_worker.py
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  Tab 6 — PDF analysis (image → I(Q) → G(r))
@@ -5118,7 +5134,7 @@ def _flatten_sq_tail(q, S, window, poly_deg=3, mad_k=3.0, n_iter=3):
     return S_flat, poly
 
 
-class PDFWorker(QtCore.QThread):
+class _PDFWorkerImpl(QtCore.QThread):
     """Polyatomic total-scattering PDF: I(Q) → Faber-Ziman S(Q) → G(r).
 
     Uses the ``midas_pdf`` backend (via :mod:`midas_gui.pdf_backend`): real
@@ -5379,8 +5395,10 @@ class PDFWorker(QtCore.QThread):
         except Exception:
             self.failed.emit(traceback.format_exc())
 
+PDFWorker = process_isolated(_PDFWorkerImpl)   # own OS process — see proc_worker.py
 
-class PDFStructureFitWorker(QtCore.QThread):
+
+class _PDFStructureFitWorkerImpl(QtCore.QThread):
     """CIF-driven small-box structure refinement (PDFfit-style) against a
     previously computed G(r) snapshot.
 
@@ -5469,12 +5487,14 @@ class PDFStructureFitWorker(QtCore.QThread):
         except Exception:
             self.failed.emit(traceback.format_exc())
 
+PDFStructureFitWorker = process_isolated(_PDFStructureFitWorkerImpl)   # own OS process — see proc_worker.py
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  Tab 7 — Texture / pole figure (per-ring azimuthal extraction)
 # ═════════════════════════════════════════════════════════════════════════════
 
-class PoleFigureWorker(QtCore.QThread):
+class _PoleFigureWorkerImpl(QtCore.QThread):
     """Integrate one frame to an (η, R) cake, then map a selected ring to a
     stereographic pole figure and extract its azimuthal intensity I(η)."""
     log_line = QtCore.pyqtSignal(str)
@@ -5521,12 +5541,14 @@ class PoleFigureWorker(QtCore.QThread):
         except Exception:
             self.failed.emit(traceback.format_exc())
 
+PoleFigureWorker = process_isolated(_PoleFigureWorkerImpl)   # own OS process — see proc_worker.py
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  Learnable gain worker (Tab 5 — per-pixel spatial gain drift recovery)
 # ═════════════════════════════════════════════════════════════════════════════
 
-class LearnableGainWorker(QtCore.QThread):
+class _LearnableGainWorkerImpl(QtCore.QThread):
     """Train a per-pixel LearnableGain module against a reference profile.
 
     Workflow (notebook 16):
@@ -5624,6 +5646,8 @@ class LearnableGainWorker(QtCore.QThread):
         except Exception:
             self.failed.emit(traceback.format_exc())
 
+LearnableGainWorker = process_isolated(_LearnableGainWorkerImpl)   # own OS process — see proc_worker.py
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  Drift trajectory worker (Tab 3 — long-scan geometry drift correction)
@@ -5646,7 +5670,7 @@ def _spec_from_trajectory(base_spec, traj, frame_abs_idx: int):
     return s
 
 
-class DriftWorker(QtCore.QThread):
+class _DriftWorkerImpl(QtCore.QThread):
     """Fit a per-frame geometry drift trajectory from calibrant anchor frames.
 
     The function ``fit_drift_trajectory`` (midas_integrate_v2.pipelines.drift)
@@ -5700,6 +5724,8 @@ class DriftWorker(QtCore.QThread):
             self.finished.emit(traj)
         except Exception:
             self.failed.emit(traceback.format_exc())
+
+DriftWorker = process_isolated(_DriftWorkerImpl)   # own OS process — see proc_worker.py
 
 
 class SolveCellWorker(QtCore.QThread):

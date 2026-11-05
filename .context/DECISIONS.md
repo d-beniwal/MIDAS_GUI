@@ -3,6 +3,14 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-11-04 — Heavy workers run in their own OS process (`proc_worker.process_isolated`)
+
+A native fault (segfault/abort/OOM-kill) inside an in-process QThread worker takes the whole GUI down — and the calibration child with it, since `CalibrationWorker`'s QProcess dies with the GUI. Create-mask (torch/OpenMP + whole frame stacks, first-time `import torch` off the main thread) was the reported trigger; root cause of that specific crash was *not* found in any log (no crash report for the GUI process).
+
+Decision: generic `proc_worker.process_isolated(_XImpl)` returns a proxy with the same ctor args, signals (types recovered from the signal repr), `start/isRunning/requestInterruption/wait/run`; the child (`proc_cli.py`) instantiates the original class, runs `run()` synchronously and ships each signal as a pickle file + a framed stdout line. Crash/non-zero exit → the worker's own `failed` signal with the log tail. Abort = SIGKILL (like `CalibrationWorker`). `MIDAS_GUI_INPROCESS_WORKERS=1` restores in-process classes.
+
+Converted: MaskCompute, Integration, Refinement, RefineCompare, CorrectionPreview, PDF, PDFStructureFit, PoleFigure, LearnableGain, Drift, ManualDspacingCalib. **Deliberately not converted:** SolveCellWorker (takes a GUI-bound `frames_loader` callable; was the h5py segfault site 2026-10-27), ProjectionWorker/AllFrameStatsWorker (closure args), PumpProbeWorker (cooperative abort delivers a partial result), BatchWorker/BatchCorrectionWorker/FolderMonitorWorker (cooperative cancel, live loops; Batch has the `batch_cli` background-job route), StreamPreview/FieldAverage/_GeomBuild/VolumeBuild/auto-attenuation (light or GUI-coupled). Still open: calibration dies if the GUI itself dies (not detached).
+
 ## 2026-11-03 — Calibrate: per-ring include/exclude via a "Rings…" button
 
 A "Rings…" button beside Calibrant opens `dialogs.RingSelectDialog` (checkbox, Ring #, hkl, d, 2θ, R). All rings start ticked; unticked ring numbers go to `cfg["rings_to_exclude"]` → backend `spec.rings_to_exclude`. Rows come from the backend's own `build_ring_table` (`calib.calibrant_ring_rows`), **not** a GUI-side hkl expansion, because `ring_nr` is the hkl generator's label and skips numbers where radius-identical reflections merge (CeO2: 11, 15, 21…). The rings listed depend on the seed λ/Lsd/BC/image size; the labels do not.
