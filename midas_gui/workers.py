@@ -89,6 +89,16 @@ def axis_conversions(r_px, lsd, px, wl):
     return two_theta, two_theta * 100.0, q
 
 
+def radial_axis_datasets(r_px, lsd, px, wl) -> dict:
+    """``R_px`` / ``TTH`` (2θ, deg) / ``Q`` (Å⁻¹) bin-centre axes for a 1-D
+    HDF5 — always all three, whatever Bin type the run used (the bin grid
+    only decides which of them is uniform)."""
+    tth, _, q = axis_conversions(r_px, lsd, px, wl)
+    return {"R_px": np.asarray(r_px, dtype=np.float64),
+            "TTH": np.asarray(tth, dtype=np.float64),
+            "Q": np.asarray(q, dtype=np.float64)}
+
+
 # The tag excludes '_' but NOT digits: '_' is what forces the match onto
 # the LAST underscore-number group, while barring digits made a detector
 # tag that ends in one unparseable. '..._1s_003502.ge1' then matched
@@ -3233,8 +3243,9 @@ class BatchWorker(QtCore.QThread):
                         # One rotation angle per profile, same order —
                         # see write_all_profiles for why this is an
                         # extra dataset rather than a metadata field.
-                        extra_datasets={"omegas": np.asarray(
-                            all_omegas, dtype=np.float64)}))
+                        extra_datasets={
+                            "omegas": np.asarray(all_omegas, dtype=np.float64),
+                            **radial_axis_datasets(r_ax, lsd, px, wl)}))
                     try:
                         stamp_cake_params_h5(h5_path, spec)
                         prov_entry['extra']['out_paths'] = out_paths + [str(h5_path)]
@@ -4343,9 +4354,9 @@ def write_all_profiles(out_dir, fmts, r_axis, profiles, sigmas, frame_ids,
         # own, and a downstream peak fit or pole figure needs one value per
         # profile, in the same order. Skipped rather than padded when the
         # lengths disagree — a misaligned angle is worse than none.
-        extras = None
+        extras = dict(radial_axis_datasets(r_axis, lsd, px, wl))
         if omegas is not None and len(omegas) == len(frame_ids):
-            extras = {"omegas": np.asarray(omegas, dtype=np.float64)}
+            extras["omegas"] = np.asarray(omegas, dtype=np.float64)
         _write_h5_atomic(h5_path, lambda t: m.write_h5(
             str(t), profiles=profiles, r_axis=r_axis,
             frame_ids=frame_ids, sigmas=sigmas, extra_datasets=extras))

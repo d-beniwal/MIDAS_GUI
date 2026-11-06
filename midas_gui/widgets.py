@@ -165,8 +165,7 @@ class ImageViewer(QtWidgets.QWidget):
         bar = QtWidgets.QHBoxLayout()
         if title:
             bar.addWidget(QtWidgets.QLabel(f"<b>{title}</b>"))
-        self._log = QtWidgets.QCheckBox("Log")
-        self._log.setChecked(True)
+        self._log = QtWidgets.QCheckBox("Log")   # linear by default
         self._log.toggled.connect(self._on_log_toggled)
         bar.addWidget(self._log)
         bar.addWidget(QtWidgets.QLabel("cmap:"))
@@ -6565,7 +6564,7 @@ class WaterfallViewer(QtWidgets.QWidget):
         self._cmap.setCurrentText(_DEFAULT_CMAP)
         self._cmap.currentTextChanged.connect(self._apply_cmap)
         bar.addWidget(self._cmap)
-        self._log = QtWidgets.QCheckBox("Log"); self._log.setChecked(True)
+        self._log = QtWidgets.QCheckBox("Log")   # linear by default
         self._log.toggled.connect(self._redraw)
         bar.addWidget(self._log)
         bar.addWidget(QtWidgets.QLabel("  x:"))
