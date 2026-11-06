@@ -1533,6 +1533,15 @@ def _convert_radial(x, lsd, px, wl, native, target):
 _XUNIT_LABEL = {"R": "R (px)", "2th": "2θ (°)", "d": "d (Å)", "Q": "Q (Å⁻¹)"}
 
 
+def _select_xunit(combo, unit) -> None:
+    """Preselect an x-unit combo by its item data; unknown/None leaves it."""
+    if unit is None:
+        return
+    i = combo.findData(unit)
+    if i >= 0 and i != combo.currentIndex():
+        combo.setCurrentIndex(i)
+
+
 class _UnitAxis(pg.AxisItem):
     """Bottom axis that relabels R-pixel tick positions in a chosen radial unit.
 
@@ -6608,10 +6617,16 @@ class WaterfallViewer(QtWidgets.QWidget):
 
     # ── x-axis units (R / 2θ / Q) ─────────────────────────────────────
 
-    def set_axis_context(self, lsd_um, px_um, wavelength_A, native_unit="R"):
-        """Provide the run's geometry so the x-axis can be labelled in R / 2θ / Q."""
+    def set_axis_context(self, lsd_um, px_um, wavelength_A, native_unit="R",
+                         display_unit=None):
+        """Provide the run's geometry so the x-axis can be labelled in R / 2θ / Q.
+
+        ``display_unit`` ("R"/"2th"/"Q") preselects the x-axis combo — the
+        run's output unit, so a Q/2θ-rebinned run is labelled as such by
+        default. The user can still change it afterwards."""
         self._lsd, self._px, self._wl = lsd_um, px_um, wavelength_A
         self._native_unit = native_unit if native_unit in ("R", "Q") else "R"
+        _select_xunit(self._xunit_combo, display_unit)
         self._refresh_xaxis()
 
     def _refresh_xaxis(self):
@@ -6951,13 +6966,16 @@ class StackedProfileViewer(QtWidgets.QWidget):
 
     # ── x-axis units (R / 2θ / Q) ─────────────────────────────────────
 
-    def set_axis_context(self, lsd_um, px_um, wavelength_A, native_unit="R"):
+    def set_axis_context(self, lsd_um, px_um, wavelength_A, native_unit="R",
+                         display_unit=None):
         """Provide the run's geometry so the x-axis can be shown in R / 2θ / Q.
 
         ``native_unit`` is the unit the profiles arrive in ("R" px, or "Q" when
-        Q-uniform binning is active)."""
+        Q-uniform binning is active). ``display_unit`` preselects the x-axis
+        combo (the run's output unit); the user can change it afterwards."""
         self._lsd, self._px, self._wl = lsd_um, px_um, wavelength_A
         self._native_unit = native_unit if native_unit in ("R", "Q") else "R"
+        _select_xunit(self._xunit_combo, display_unit)
         self._restack()
         self._plot.setLabel("bottom", self._xlabel(),
                             **S.axis_label_css(self._theme_cfg["fg"]))

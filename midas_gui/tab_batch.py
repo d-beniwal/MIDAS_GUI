@@ -2260,7 +2260,7 @@ class BatchTab(QtWidgets.QWidget):
         # converts back to R = Lsd·tan(180°)/px ≈ -2.26e-11. That is the
         # flat-line waterfall and the 2θ = 180 lineout reported from the
         # beamline, and the profiles themselves were never wrong.
-        _axctx = (lsd, px, wl, "R")
+        _axctx = (lsd, px, wl, "R", self._rebin_unit() or "R")
 
         # Dark / bright / background fields (from the loader)
         for sel in self._loader.has_pending_fields():
@@ -3093,7 +3093,8 @@ class BatchTab(QtWidgets.QWidget):
             variance_cfg = None
         q_cfg = self._rebin_cfg()
         # "R" in both modes — see the note at the other set_axis_context site.
-        _axctx = (float(spec.Lsd), float(spec.pxY), float(spec.Wavelength), "R")
+        _axctx = (float(spec.Lsd), float(spec.pxY), float(spec.Wavelength), "R",
+                  self._rebin_unit() or "R")
         self._stack_view.set_axis_context(*_axctx)
         self._waterfall.set_axis_context(*_axctx)
         weighted = bool(self._azim.currentData())

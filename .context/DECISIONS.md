@@ -3,6 +3,12 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-11-05 — Batch results x-axis defaults to the run's rebin unit
+
+- **Root cause of the "always 750 R bins" report:** Bin type was Q (Q 0.5–8 @ 0.01 = 750 bins). Q/2θ runs integrate on the R grid, then resample onto the Q grid, so R_MIN/R_MAX/R_STEP never changed the output; the viewers still said "R (px)", hiding it.
+- `WaterfallViewer`/`StackedProfileViewer.set_axis_context(..., display_unit=)` preselects the x-axis combo; BatchTab passes `_rebin_unit() or "R"` at run start (both run paths). The user can still switch unit afterwards. The native unit stays "R" (profiles carry px).
+- Not covered: replaying a past attempt (`tab_batch` ~L1277) — the unit isn't stored with the arrays.
+
 ## 2026-11-05 — Caking parameters recorded in / forwarded to Batch Integrate outputs
 
 - **Bug 1:** "Run as job" (`tab_batch._run_as_job`) never sent `--eta-min/--eta-max` and dropped `--r-min` when it was 0 (backend then used RMin=10), so a detached job ignored the η window.
