@@ -262,8 +262,7 @@ def _load_image(path: str | Path, data_loc: str = "exchange/data",
         import tifffile
         return np.asarray(tifffile.imread(str(p)), dtype=np.float32)
     if ext in H5_EXTS:
-        import h5py
-        with h5py.File(str(p), "r") as f:
+        with open_h5_read(p) as f:
             dset = f[data_loc]
             data = dset[frame] if dset.ndim >= 3 else dset[...]
         return np.asarray(data, dtype=np.float32)
@@ -523,20 +522,17 @@ def detect_wavelength_from_h5(path: str) -> Optional[float]:
     if not is_h5(path):
         return None
     try:
-        import h5py
-        with h5py.File(path, "r") as f:
-            ds = f.get(_ENERGY_DATASET)
-            if ds is None:
-                return None
-            energy_kev = float(np.atleast_1d(ds[()])[0])
-        if energy_kev <= 0:
-            return None
-        return HC_KEV_A / energy_kev
+        with open_h5_read(path) as f:
+            return _wavelength_from_file(f)
     except Exception:
         return None
 
 
-def detect_geometry_from_path(path: str, *, profile: Optional[str] = None) -> dict:
+_UNSET = object()
+
+
+def detect_geometry_from_path(path: str, *, profile: Optional[str] = None,
+                              wavelength=_UNSET) -> dict:
     """Best-effort auto-detected geometry hints from a just-loaded file's name
     ('pxY' from a known detector-file naming convention) and, for an HDF5
     frame file, its beam-energy metadata ('wavelength_A') — gated to the
@@ -554,7 +550,9 @@ def detect_geometry_from_path(path: str, *, profile: Optional[str] = None) -> di
     px = _DETECTOR_PIXEL_UM.get(detect_detector_from_filename(path))
     if px is not None:
         out["pxY"] = px
-    wl = detect_wavelength_from_h5(path)
+    # ``wavelength``: already read by the caller's own open of the file (the
+    # Data loader's probe) — skips a separate re-open just for one scalar.
+    wl = detect_wavelength_from_h5(path) if wavelength is _UNSET else wavelength
     if wl is not None:
         out["wavelength_A"] = wl
     return out
@@ -965,9 +963,200 @@ def list_h5_datasets(path: str | Path) -> list:
         if isinstance(obj, h5py.Dataset) and obj.ndim >= 2:
             items.append((name, tuple(obj.shape)))
 
-    with h5py.File(str(path), "r") as f:
+    with open_h5_read(path) as f:
         f.visititems(_visit)
     return items
+
+
+# ── Fast HDF5 access for large / network-mounted files ─────────────────────────
+# Opening an HDF5 file over a slow share costs several metadata round trips, and
+# every re-open pays that again.  The pieces below keep the number of opens per
+# user action low (``probe_h5``), remember what an open learned for as long as
+# the file is unchanged (``h5_probe_cached``), and bound the RAM spent on frames
+# already read (``FrameCache``).  All pure h5py/numpy/threading, so identical on
+# Linux, macOS and Windows.  No file handle is kept open between reads on
+# purpose: an open handle blocks deleting/replacing the file on Windows and can
+# trip HDF5 file locking against a writer on a live acquisition.
+
+_H5_RDCC = {"rdcc_nbytes": 64 * 1024 * 1024, "rdcc_nslots": 100003}
+
+
+def open_h5_read(path):
+    """``h5py.File(path, "r")`` with a larger chunk cache, so chunks that span
+    several frames (or are re-read) aren't fetched again.  Falls back to a plain
+    open if this h5py build rejects the cache keywords."""
+    import h5py
+    try:
+        return h5py.File(str(path), "r", **_H5_RDCC)
+    except TypeError:
+        return h5py.File(str(path), "r")
+
+
+def _wavelength_from_file(f) -> Optional[float]:
+    """Wavelength (Å) from the beam-energy dataset of an *open* HDF5 file."""
+    try:
+        ds = f.get(_ENERGY_DATASET)
+        if ds is None:
+            return None
+        energy_kev = float(np.atleast_1d(ds[()])[0])
+        return HC_KEV_A / energy_kev if energy_kev > 0 else None
+    except Exception:
+        return None
+
+
+def read_h5_frame_native(dset, frame: int = 0) -> np.ndarray:
+    """One frame of an open dataset in its on-disk dtype (same indexing rule as
+    :func:`_load_image`: ``dset[frame]`` for a stack, the whole 2-D array else)."""
+    return np.asarray(dset[frame] if dset.ndim >= 3 else dset[...])
+
+
+class H5Probe(NamedTuple):
+    """What a single open of an HDF5 file learned (see :func:`probe_h5`)."""
+    shape: Optional[tuple]        # shape of the requested dataset (None: absent)
+    frame: Optional[np.ndarray]   # its first frame, native dtype (None: not read)
+    wavelength: Optional[float]   # Å from the energy dataset (None: absent)
+    items: Optional[list]         # [(name, shape), …] of ≥2-D datasets, if listed
+
+
+def probe_h5(path, dataset: Optional[str] = None, *, first_frame: bool = True,
+             listing: bool = False) -> H5Probe:
+    """Everything the Data loader needs from an HDF5 file, in ONE open.
+
+    ``dataset``: read its shape and (``first_frame``) its first frame.  The
+    dataset list (a full tree walk — the slow part on big files) is only built
+    when ``listing`` is set.  Raises ``OSError`` if the file can't be opened.
+    """
+    import h5py
+    shape = frame = items = None
+    with open_h5_read(path) as f:
+        if dataset:
+            d = f.get(dataset)
+            if isinstance(d, h5py.Dataset):
+                shape = tuple(d.shape)
+                if first_frame:
+                    frame = read_h5_frame_native(d, 0)
+        wl = _wavelength_from_file(f)
+        if listing:
+            items = []
+
+            def _visit(name, obj):
+                if isinstance(obj, h5py.Dataset) and obj.ndim >= 2:
+                    items.append((name, tuple(obj.shape)))
+
+            f.visititems(_visit)
+    return H5Probe(shape, frame, wl, items)
+
+
+_H5_PROBE_CACHE: dict = {}
+_H5_PROBE_CACHE_MAX = 32
+_H5_PROBE_LOCK = None
+
+
+def _probe_lock():
+    global _H5_PROBE_LOCK
+    if _H5_PROBE_LOCK is None:
+        import threading
+        _H5_PROBE_LOCK = threading.Lock()
+    return _H5_PROBE_LOCK
+
+
+def _stat_key(path) -> Optional[tuple]:
+    try:
+        st = Path(path).stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def h5_probe_cached(path, *, listing: bool = True) -> Optional[dict]:
+    """``{"items": [...], "wavelength": float|None}`` for *path*, from a cache
+    keyed on the file's (mtime, size) so an unchanged file is never walked twice
+    and a rewritten one is re-read.  ``None`` if the file doesn't exist.
+    ``listing=False`` returns whatever is cached without opening the file."""
+    key = _stat_key(path)
+    if key is None:
+        return None
+    p = str(path)
+    with _probe_lock():
+        hit = _H5_PROBE_CACHE.get(p)
+    if hit is not None and hit["key"] == key and hit["items"] is not None:
+        return hit
+    if not listing:
+        return None
+    pr = probe_h5(p, None, first_frame=False, listing=True)
+    entry = {"key": key, "items": pr.items, "wavelength": pr.wavelength}
+    with _probe_lock():
+        if len(_H5_PROBE_CACHE) >= _H5_PROBE_CACHE_MAX:
+            _H5_PROBE_CACHE.pop(next(iter(_H5_PROBE_CACHE)))
+        _H5_PROBE_CACHE[p] = entry
+    return entry
+
+
+def h5_dataset_shape_cached(path, dataset: str) -> Optional[tuple]:
+    """Shape of ``dataset`` if a prior listing of the unchanged file saw it
+    (no I/O); ``None`` otherwise — the caller then opens the file itself."""
+    hit = h5_probe_cached(path, listing=False)
+    if hit:
+        for name, shape in hit["items"]:
+            if name == dataset:
+                return tuple(shape)
+    return None
+
+
+class FrameCache:
+    """Thread-safe LRU of already-read frames, bounded by bytes (always keeps at
+    least ``min_items``).  Stored arrays are read-only; callers copy on the way
+    out.  ``clear()`` bumps ``gen`` so a background read that started before a
+    source change can't insert a stale frame (``put(..., gen=)`` drops it)."""
+
+    def __init__(self, max_bytes: int = 256 * 1024 * 1024, min_items: int = 4):
+        import threading
+        from collections import OrderedDict
+        self._d = OrderedDict()
+        self._bytes = 0
+        self._lock = threading.Lock()
+        self.max_bytes = int(max_bytes)
+        self.min_items = int(min_items)
+        self.gen = 0
+
+    def get(self, key):
+        with self._lock:
+            a = self._d.get(key)
+            if a is not None:
+                self._d.move_to_end(key)
+            return a
+
+    def __contains__(self, key) -> bool:
+        with self._lock:
+            return key in self._d
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._d)
+
+    def put(self, key, arr: np.ndarray, gen: Optional[int] = None) -> None:
+        arr = np.asarray(arr)
+        with self._lock:
+            if gen is not None and gen != self.gen:
+                return
+            old = self._d.pop(key, None)
+            if old is not None:
+                self._bytes -= old.nbytes
+            try:
+                arr.setflags(write=False)
+            except ValueError:
+                pass
+            self._d[key] = arr
+            self._bytes += arr.nbytes
+            while self._bytes > self.max_bytes and len(self._d) > self.min_items:
+                _, v = self._d.popitem(last=False)
+                self._bytes -= v.nbytes
+
+    def clear(self) -> None:
+        with self._lock:
+            self._d.clear()
+            self._bytes = 0
+            self.gen += 1
 
 
 def best_default_dataset_index(items: list, prefer_max_frames: bool = False) -> int:

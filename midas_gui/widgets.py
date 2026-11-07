@@ -51,7 +51,10 @@ from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollDoubleSpinBox, _fspin,
                                source_kind, display_text_for_paths, _apply_im_trans,
                                is_dark_like_name, warn_if_path_missing,
                                path_is_missing, _folder_format_groups, radial_spline_values,
-                               best_default_dataset_index)
+                               best_default_dataset_index, FrameCache,
+                               probe_h5, h5_probe_cached, h5_dataset_shape_cached,
+                               read_h5_frame_native, open_h5_read)
+from midas_gui.async_io import AdaptiveCall
 from midas_gui import style as S
 from midas_gui.color_scale import ColorScaleControls
 
@@ -3716,7 +3719,10 @@ class FieldSelector(QtWidgets.QGroupBox):
         self._ds_row.setVisible(h5)
         if h5 and Path(p).exists():
             try:
-                items = list_h5_datasets(p)
+                # Cached per unchanged file (same walk the Data loader may have
+                # just done for this very file) — see helpers.h5_probe_cached.
+                hit = h5_probe_cached(p)
+                items = hit["items"] if hit else []
             except Exception:
                 items = []
             if items:
@@ -3745,6 +3751,9 @@ class FieldSelector(QtWidgets.QGroupBox):
                 import h5py
                 if not Path(raw).exists():
                     return 0
+                shp = h5_dataset_shape_cached(raw, self._dataset())
+                if shp is not None:           # known from a listing of this unchanged file
+                    return int(shp[0]) if len(shp) >= 3 else 1
                 with h5py.File(raw, "r") as f:
                     d = f[self._dataset()]
                     return int(d.shape[0]) if d.ndim >= 3 else 1
@@ -4418,6 +4427,11 @@ class DataLoaderPanel(QtWidgets.QWidget):
     metadataDetected = QtCore.pyqtSignal(dict)  # auto-detected pxY/wavelength_A from a new Data load
     previewFrameReady = QtCore.pyqtSignal()   # "stream" mode: an async preview frame finished (or failed)
 
+    _IO_BUDGET_S = 0.25                    # max GUI wait on a file probe before going async
+    _FRAME_CACHE_BYTES = 256 * 1024 * 1024  # RAM bound for already-read frames
+    _PREFETCH_FRAMES = 2                   # frames read ahead when storage is slow
+    _SLOW_READ_S = 0.03                    # a frame read slower than this triggers prefetch
+
     def __init__(self, parent=None, *, mode="single", data_dataset="exchange/data",
                  dark_dataset="exchange/data_dark", allow_live=False,
                  hide_frame_field=False, folder_format_filter=False,
@@ -4449,6 +4463,17 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._folder_format = None   # selected group label, or None = "All"
         self._stack = self._paths = self._h5 = None
         self._nframes = 0
+        # Slow-storage handling (see async_io.AdaptiveCall / helpers.FrameCache):
+        # file probes run on a worker thread and the GUI waits at most this long
+        # for them (so local files behave synchronously); ``None`` = always wait.
+        self._io_budget = self._IO_BUDGET_S
+        self._list_seq = 0            # newest dropdown-listing request wins
+        self._load_seq = 0            # newest load request wins
+        self._pending_calls = set()   # keep in-flight AdaptiveCalls alive
+        self._fcache = FrameCache(self._FRAME_CACHE_BYTES)
+        self._prefetching = False
+        self._last_nav = 0
+        self._last_read_s = 0.0
         self._cur = None
         self._stream_preview_dirty = True   # "stream" mode only — see current_frame()
         self._preview_sum_n = 1             # "stream" mode only — see set_preview_sum
@@ -5065,22 +5090,47 @@ class DataLoaderPanel(QtWidgets.QWidget):
         if self._folder_format_filter:
             self._fmt_row.setVisible(False)
         self._update_combine_visibility()
-        if h5 and Path(p).exists():
-            try:
-                items = list_h5_datasets(p)
-            except Exception:
-                items = []
-            if items:
-                keep = self._ds_combo.currentText().strip()
-                self._ds_combo.blockSignals(True); self._ds_combo.clear()
-                for name, shape in items:
-                    self._ds_combo.addItem(f"{name}   {tuple(shape)}", name)
-                idx = next((i for i in range(self._ds_combo.count())
-                            if self._ds_combo.itemData(i) == keep), -1)
-                if idx < 0:
-                    idx = next((i for i, (n, s) in enumerate(items) if len(s) >= 3), 0)
-                self._ds_combo.setCurrentIndex(idx)
-                self._ds_combo.blockSignals(False)
+        if h5:
+            self._request_listing(p)
+
+    def _request_listing(self, p: str) -> None:
+        """Fill the dataset dropdown for HDF5 file ``p``.  The tree walk runs on
+        a worker thread (cached per unchanged file, so it happens once); a fast
+        file finishes inside the GUI's wait budget and is applied right here,
+        a slow one is applied when it arrives."""
+        self._list_seq += 1
+        seq = self._list_seq
+
+        def _list():
+            hit = h5_probe_cached(p)            # None when the file doesn't exist
+            return hit["items"] if hit else []
+
+        call = AdaptiveCall(_list, self)
+        res = call.run(self._io_budget)
+        if res is not None:
+            self._apply_listing(p, [] if res[1] else res[0], seq)
+            return
+        self._pending_calls.add(call)
+
+        def _arrived(result, exc, _c=call):
+            self._pending_calls.discard(_c)
+            self._apply_listing(p, [] if exc else result, seq)
+        call.finished.connect(_arrived)
+
+    def _apply_listing(self, p: str, items: list, seq: int) -> None:
+        # Stale (path edited again / newer request) → drop.
+        if seq != self._list_seq or self._path_ed.text() != p or not items:
+            return
+        keep = self._ds_combo.currentText().strip()
+        self._ds_combo.blockSignals(True); self._ds_combo.clear()
+        for name, shape in items:
+            self._ds_combo.addItem(f"{name}   {tuple(shape)}", name)
+        idx = next((i for i in range(self._ds_combo.count())
+                    if self._ds_combo.itemData(i) == keep), -1)
+        if idx < 0:
+            idx = next((i for i, (n, s) in enumerate(items) if len(s) >= 3), 0)
+        self._ds_combo.setCurrentIndex(idx)
+        self._ds_combo.blockSignals(False)
 
     def _collect_paths(self, raw) -> list:
         ext_group = self._folder_format if self._folder_format_filter else None
@@ -5187,6 +5237,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
         `_get_frame`/`full_stack` forward to it as long as `self._external`
         is set."""
         self._clear_external()
+        self._load_seq += 1             # drop any in-flight HDF5 probe
         self._stack = self._paths = self._h5 = None
         self._reset_buffer()
         self._external = provider
@@ -5273,6 +5324,8 @@ class DataLoaderPanel(QtWidgets.QWidget):
             return
         try:
             self._stack = self._paths = self._h5 = None; self._nframes = 0
+            self._load_seq += 1           # supersedes any in-flight HDF5 probe
+            self._fcache.clear()          # frames of the previous source
             self._ds_combo.setToolTip("")
             self._reset_buffer()
             if self._folder_format_filter:
@@ -5292,16 +5345,8 @@ class DataLoaderPanel(QtWidgets.QWidget):
                 self._paths = paths; self._nframes = len(paths)
                 kind = f"folder/glob ({self._nframes} files)"
             elif is_h5(raw):
-                import h5py
-                dset = self._dataset()
-                with h5py.File(raw, "r") as f:
-                    if dset not in f:
-                        raise KeyError(f"dataset '{dset}' not in file")
-                    shape = f[dset].shape
-                n = shape[0] if len(shape) >= 3 else 1
-                self._h5 = (raw, dset, n); self._nframes = n
-                kind = f"HDF5 [{dset}] {shape}"
-                self._ds_combo.setToolTip(f"{raw}\n{dset}   shape {tuple(shape)}")
+                self._load_h5(raw)
+                return
             else:
                 import tifffile
                 arr = np.asarray(tifffile.imread(raw))
@@ -5311,6 +5356,16 @@ class DataLoaderPanel(QtWidgets.QWidget):
                 else:
                     self._stack = arr[None, ...]; self._nframes = 1
                     kind = f"TIFF {arr.shape}"
+            self._finish_load(raw, kind)
+        except Exception:
+            import traceback
+            show_error(self, "Load error", traceback.format_exc())
+
+    def _finish_load(self, raw, kind, geom_kw=None):
+        """Common tail of a successful load: navigator, first frame, detected
+        geometry.  ``geom_kw`` forwards values the loader already read (the
+        HDF5 probe's wavelength) so detection doesn't re-open the file."""
+        try:
             self._info.setText(f"Loaded: {kind}")
             self._setup_navigator()
             self._set_frame(0)
@@ -5318,12 +5373,57 @@ class DataLoaderPanel(QtWidgets.QWidget):
                 h, w = np.shape(self._cur)[-2:]
                 self._info.setText(f"{self._nframes} × {w} × {h}  (frames × width × height)")
             detect_path = self._paths[0] if self._paths else raw
-            detected = detect_geometry_from_path(detect_path)
+            detected = detect_geometry_from_path(detect_path, **(geom_kw or {}))
             if detected:
                 self.metadataDetected.emit(detected)
         except Exception:
             import traceback
             show_error(self, "Load error", traceback.format_exc())
+
+    def _load_h5(self, raw):
+        """HDF5 load: ONE open yields shape, first frame and beam energy (instead
+        of four separate opens).  Runs on a worker thread; a fast file completes
+        inside the wait budget and finishes synchronously, a slow one (network
+        share) lets the GUI keep running with a "Loading…" label."""
+        dset = self._dataset()
+        seq = self._load_seq
+        self._info.setText("Loading…")
+
+        def _probe():
+            pr = probe_h5(raw, dset, first_frame=True, listing=False)
+            if pr.shape is None:
+                raise KeyError(f"dataset '{dset}' not in file")
+            return pr
+
+        call = AdaptiveCall(_probe, self)
+        res = call.run(self._io_budget)
+        if res is not None:
+            self._h5_loaded(raw, dset, seq, *res)
+            return
+        self._pending_calls.add(call)
+
+        def _arrived(result, exc, _c=call):
+            self._pending_calls.discard(_c)
+            self._h5_loaded(raw, dset, seq, result, exc)
+        call.finished.connect(_arrived)
+
+    def _h5_loaded(self, raw, dset, seq, probe, exc):
+        if seq != self._load_seq:
+            return                      # another load started meanwhile
+        if exc is not None:
+            import traceback
+            self._info.setText("")
+            show_error(self, "Load error", "".join(
+                traceback.format_exception(type(exc), exc, exc.__traceback__)))
+            return
+        shape = probe.shape
+        n = shape[0] if len(shape) >= 3 else 1
+        self._h5 = (raw, dset, n); self._nframes = n
+        if probe.frame is not None:
+            self._fcache.put(("h5", raw, dset, 0), probe.frame)   # frame 0 is free now
+        self._ds_combo.setToolTip(f"{raw}\n{dset}   shape {tuple(shape)}")
+        self._finish_load(raw, f"HDF5 [{dset}] {shape}",
+                          {"wavelength": probe.wavelength})
 
     def _on_combine_changed(self, *_args):
         """A "Combine sub-frames" control (chunk size/op) changed — the
@@ -5497,11 +5597,62 @@ class DataLoaderPanel(QtWidgets.QWidget):
         widgets = [self._frame_spin] + ([self._slider] if self._mode == "stack" else [])
         for w in widgets:
             w.blockSignals(True); w.setValue(i); w.blockSignals(False)
-        self._cur = self._get_frame(i)
+        self._cur = self._get_frame(i, cache=True)
         self._live_frame_update = False
         self.dataChanged.emit()
+        self._maybe_prefetch(i)
 
-    def _get_frame(self, i: int) -> np.ndarray:
+    def _maybe_prefetch(self, i: int) -> None:
+        """Read the next few frames in the background, in the direction the user
+        is stepping — but only when storage is evidently slow (the frame just
+        read took ``_SLOW_READ_S``+), so local disks never pay for read-ahead.
+        One worker at a time; a source change (``FrameCache.gen``) aborts it."""
+        if (self._mode != "stack" or self._prefetching or self._nframes <= 1
+                or (self._h5 is None and self._paths is None)
+                or self._last_read_s < self._SLOW_READ_S):
+            return
+        step = 1 if i >= self._last_nav else -1
+        self._last_nav = i
+        idxs = [j for j in (i + step * k for k in range(1, self._PREFETCH_FRAMES + 1))
+                if 0 <= j < self._nframes and self._frame_key(j) not in self._fcache]
+        if not idxs:
+            return
+        self._prefetching = True
+        import threading
+        threading.Thread(target=self._prefetch_worker,
+                         args=(self._fcache.gen, self._h5, self._paths, idxs),
+                         daemon=True).start()
+
+    def _frame_key(self, i: int):
+        if self._h5 is not None:
+            return ("h5", self._h5[0], self._h5[1], i)
+        return ("p", self._paths[i])
+
+    def _prefetch_worker(self, gen, h5, paths, idxs) -> None:
+        try:
+            if h5 is not None:
+                path, dset, _ = h5
+                with open_h5_read(path) as f:          # one open for the whole window
+                    d = f[dset]
+                    for j in idxs:
+                        if gen != self._fcache.gen:
+                            break
+                        self._fcache.put(("h5", path, dset, j),
+                                         read_h5_frame_native(d, j), gen=gen)
+            else:
+                for j in idxs:
+                    if gen != self._fcache.gen:
+                        break
+                    self._fcache.put(("p", paths[j]), _load_image(paths[j]), gen=gen)
+        except Exception:
+            pass                                        # read-ahead is best-effort only
+        finally:
+            self._prefetching = False
+
+    def _get_frame(self, i: int, cache: bool = False) -> np.ndarray:
+        """Frame ``i`` as a fresh float32 array.  ``cache=True`` (interactive
+        navigation) also remembers the raw read for re-visits/prefetch; bulk
+        callers (``full_stack``, batch loops) read through without filling it."""
         if self._external is not None:
             return self._external._get_frame(i)
         i = max(0, min(i, self._nframes - 1))
@@ -5511,12 +5662,25 @@ class DataLoaderPanel(QtWidgets.QWidget):
             return np.asarray(frame, dtype=np.float32)
         if self._stack is not None:
             return np.asarray(self._stack[i], dtype=np.float32)
-        if self._paths is not None:
-            arr = _load_image(self._paths[i]).astype(np.float32)
-            return arr[0] if arr.ndim == 3 else arr
-        if self._h5 is not None:
-            path, dset, _ = self._h5
-            return _load_image(path, data_loc=dset, frame=i).astype(np.float32)
+        if self._paths is not None or self._h5 is not None:
+            key = self._frame_key(i)
+            raw = self._fcache.get(key)
+            if raw is None:
+                import time
+                t0 = time.perf_counter()
+                if self._h5 is not None:
+                    path, dset, _ = self._h5
+                    with open_h5_read(path) as f:
+                        raw = read_h5_frame_native(f[dset], i)
+                else:
+                    raw = _load_image(self._paths[i])
+                self._last_read_s = time.perf_counter() - t0
+                if cache:
+                    self._fcache.put(key, raw)
+            arr = raw.astype(np.float32)        # fresh, writable copy (cache is read-only)
+            if self._paths is not None:
+                return arr[0] if arr.ndim == 3 else arr
+            return arr
         raise RuntimeError("No data loaded")
 
     # ── live PV stream (Live Data card, allow_live=True only) ───────
@@ -5611,6 +5775,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._live_src.frameReady.connect(self._on_live_frame)
             self._live_src.connectionChanged.connect(self._on_live_connection)
             self._live_src.error.connect(self._on_live_error)
+        self._load_seq += 1             # drop any in-flight HDF5 probe
         self._stack = self._paths = self._h5 = None
         self._nframes = 0
         if self._buffer_active:
@@ -5881,13 +6046,20 @@ class DataLoaderPanel(QtWidgets.QWidget):
     # ── public API ────────────────────────────────────────────────
     def set_path(self, path, dataset=None, *, load=True):
         """Preset the data path (and HDF5 dataset); optionally load immediately."""
-        self._path_ed.setText(str(path))
-        if dataset is not None and is_h5(str(path)):
-            self._ds_combo.setEditText(dataset)
-        if load:
-            from pathlib import Path
-            if self._mode == "stream" or Path(str(path)).exists():
-                self._load()
+        # Programmatic callers (control API / MCP, "Import from…", defaults) read
+        # n_frames()/current_frame() right after this returns, so the file probes
+        # always run to completion here — only interactive loads go async.
+        saved, self._io_budget = self._io_budget, None
+        try:
+            self._path_ed.setText(str(path))
+            if dataset is not None and is_h5(str(path)):
+                self._ds_combo.setEditText(dataset)
+            if load:
+                from pathlib import Path
+                if self._mode == "stream" or Path(str(path)).exists():
+                    self._load()
+        finally:
+            self._io_budget = saved
 
     def data_path(self) -> str:
         """The path currently typed in the Data card, stripped (may be "").

@@ -4,6 +4,8 @@ Last updated: 2026-11-04 (process-isolated workers)
 
 ## Now working on
 
+2026-11-08: Fast HDF5 load for big/network files — single-open probe, cached dataset listing, worker-thread probes with a 0.25 s GUI wait budget, byte-bounded frame cache + slow-storage read-ahead (DECISIONS 2026-11-08). Unit/offscreen-tested with simulated slow I/O (`tests/test_h5_fast_load.py`); **not tried on a real slow share or on Windows/Linux hosts**. Uncommitted.
+
 2026-11-07: Batch Integrate result plots (waterfall/stacked) — x ticks/zoom floored at the bin width (DECISIONS 2026-11-07). Uncommitted. Detector-view flip issue not yet reproduced (see DECISIONS).
 
 2026-11-07: File-info ⓘ icon + hover tooltip (size, dates, owner, perms) on all input path fields via `helpers.attach_file_info` (DECISIONS 2026-11-07). Offscreen-verified (32 fields in the live window, `tests/test_file_info.py`); not hand-checked on cocoa. Uncommitted.
