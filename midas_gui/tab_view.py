@@ -961,6 +961,8 @@ class DataViewerTab(QtWidgets.QWidget):
         self._loaded_profile = (x, y, sigma, profile_file_axis_kind(path))
         self._profile_file_mode = True
         self._prof_source_lbl.setText(Path(path).name)
+        from midas_gui.helpers import file_info_text
+        self._prof_source_lbl.setToolTip(file_info_text(path) or path)
         # No image in this mode — blank the viewer (pyqtgraph's own
         # ImageView.clear(), which only touches the displayed image, not the
         # overlay/crosshair items added separately) and clear self._cur so

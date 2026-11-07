@@ -6,6 +6,10 @@
 (view, mask, calibrate, integrate, corrections, PDF, texture). Drives the
 `midas-*` analysis backends. Entry: `midas-gui` → `midas_gui.app:main`.
 
+**Qt version:** this repo is the PyQt5 line. The PyQt6 port is complete and
+lives in a separate app folder; work requested here applies to the Qt5 version
+only (keep PyQt5 APIs, no Qt6-only code).
+
 **Dev history:** tracked via `git log`/commit messages, not a hand-maintained
 doc. `documentation/development_history.md` and `gui_documentation.md` are
 updated only when explicitly asked (e.g. before a release), never

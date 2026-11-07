@@ -1541,6 +1541,21 @@ def _select_xunit(combo, unit) -> None:
         combo.setCurrentIndex(i)
 
 
+#: Deepest zoom allowed on a profile x-axis, in data bins across the view.
+_MIN_ZOOM_BINS = 3
+
+
+def _median_step(x) -> Optional[float]:
+    """Median spacing between consecutive finite x values, or ``None``."""
+    x = np.asarray(x, dtype=float)
+    x = x[np.isfinite(x)]
+    if x.size < 2:
+        return None
+    d = np.abs(np.diff(x))
+    d = d[d > 0]
+    return float(np.median(d)) if d.size else None
+
+
 class _UnitAxis(pg.AxisItem):
     """Bottom axis that relabels R-pixel tick positions in a chosen radial unit.
 
@@ -1550,11 +1565,51 @@ class _UnitAxis(pg.AxisItem):
     def __init__(self, *a, **k):
         super().__init__(*a, **k)
         self._convert = None
+        self._min_step = None       # smallest tick spacing, in DISPLAYED units
 
     def set_convert(self, fn):
         self._convert = fn
         self.picture = None
         self.update()
+
+    def set_min_step(self, step) -> None:
+        """Never draw ticks closer together than ``step`` (displayed units) —
+        the data's own bin width. Zooming past it only invents positions
+        (2.167, 2.169, …) that no integrated point sits at."""
+        step = float(step) if step is not None and np.isfinite(step) and step > 0 else None
+        if step == self._min_step:
+            return
+        self._min_step = step
+        self.picture = None
+        self.update()
+
+    def tickValues(self, minVal, maxVal, size):
+        step = self._min_step
+        if step is None or getattr(self, "logMode", False) or not (maxVal > minVal):
+            return super().tickValues(minVal, maxVal, size)
+        # Work in displayed units: tick positions are chosen there, then
+        # (when the axis relabels a native coordinate) mapped back.
+        grid = back = None
+        lo, hi = minVal, maxVal
+        if self._convert is not None:
+            grid = np.linspace(minVal, maxVal, 4096)
+            disp = np.asarray(self._convert(grid), dtype=float)
+            fin = np.isfinite(disp)
+            if fin.sum() < 2 or not (np.all(np.diff(disp[fin]) > 0)
+                                     or np.all(np.diff(disp[fin]) < 0)):
+                return super().tickValues(minVal, maxVal, size)
+            order = np.argsort(disp[fin])
+            back = (disp[fin][order], grid[fin][order])
+            lo, hi = float(back[0][0]), float(back[0][-1])
+        levels = super().tickValues(lo, hi, size)
+        keep = [(sp, vals) for sp, vals in levels if sp >= step * (1 - 1e-9)]
+        if not keep:
+            first = np.ceil(lo / step) * step
+            keep = [(step, list(np.arange(first, hi + step * 0.5, step)))]
+        if back is None:
+            return keep
+        return [(sp, [float(v) for v in np.interp(vals, back[0], back[1])])
+                for sp, vals in keep]
 
     def tickStrings(self, values, scale, spacing):
         if self._convert is None or not len(values):
@@ -4525,6 +4580,8 @@ class DataLoaderPanel(QtWidgets.QWidget):
         self._path_ed.setPlaceholderText("file / folder / .h5")
         self._path_ed.textChanged.connect(self._on_path_changed)
         self._path_ed.textChanged.connect(self._path_ed.setToolTip)   # full path on hover
+        from midas_gui.helpers import attach_file_info
+        attach_file_info(self._path_ed)   # ⓘ icon + hover: size/dates/owner
         self._path_ed.returnPressed.connect(self._on_return_pressed)
         browse = QtWidgets.QToolButton(); browse.setText("⋯"); browse.setFixedWidth(28)
         browse.setPopupMode(QtWidgets.QToolButton.InstantPopup)
@@ -6634,6 +6691,15 @@ class WaterfallViewer(QtWidgets.QWidget):
             lambda vals: _convert_radial(vals, self._lsd, self._px, self._wl,
                                          self._native_unit, target))
         self._plot.setLabel("bottom", _XUNIT_LABEL[target])
+        self._xaxis.set_min_step(self._display_step())
+
+    def _display_step(self):
+        """Bin width of the x-axis in the unit being displayed."""
+        if self._r_axis is None or len(self._r_axis) < 2:
+            return None
+        return _median_step(_convert_radial(
+            self._r_axis, self._lsd, self._px, self._wl, self._native_unit,
+            self._xunit_combo.currentData()))
 
     def _on_xunit_changed(self, _=0):
         self._refresh_xaxis()
@@ -6672,6 +6738,7 @@ class WaterfallViewer(QtWidgets.QWidget):
         self._color_scale.render(arr.T, log=self._log.isChecked(), image_item=self._img)
         r0, r1 = float(self._r_axis[0]), float(self._r_axis[-1])
         self._img.setRect(QtCore.QRectF(r0, 0.0, r1 - r0, self._nrows))
+        self._xaxis.set_min_step(self._display_step())
         self._apply_view_limits(r0, r1, self._nrows)
 
     def _apply_view_limits(self, r0: float, r1: float, nrows: int):
@@ -6689,7 +6756,10 @@ class WaterfallViewer(QtWidgets.QWidget):
         vb.setLimits(
             xMin=max(0.0, rmin - rpad), xMax=rmax + rpad,
             yMin=-npad, yMax=nrows + npad,
-            minXRange=max((rmax - rmin) * 0.01, 1e-6),
+            # Never zoom in to fewer than a few bins: finer than the step
+            # the run integrated with shows positions that hold no data.
+            minXRange=max((rmax - rmin) * 0.01, 1e-6,
+                          _MIN_ZOOM_BINS * (_median_step(self._r_axis) or 0.0)),
             minYRange=max(nrows * 0.01, 1.0),
             maxXRange=(rmax - rmin) + 2 * rpad,
             maxYRange=nrows + 2 * npad,
@@ -6890,11 +6960,13 @@ class StackedProfileViewer(QtWidgets.QWidget):
         self._labels: list = []          # inline pg.TextItem per curve
         self._fontsize = 9
         self._data_bounds = None         # running (xmin, xmax, ymin, ymax) across all curves
+        self._x_step = None              # data bin width in the displayed x unit
         # Axis conversion context (from the run's calibration).
         self._lsd = self._px = self._wl = None
         self._native_unit = "R"          # unit the stored x arrays are already in
 
-        self._plot = pg.PlotWidget()
+        self._xaxis = _UnitAxis(orientation="bottom")
+        self._plot = pg.PlotWidget(axisItems={"bottom": self._xaxis})
         self._plot.setLabel("bottom", "R (px)")
         self._plot.setLabel("left", "Intensity + offset")
         self._legend = self._plot.addLegend(offset=(10, 10), labelTextSize="8pt")
@@ -6924,6 +6996,7 @@ class StackedProfileViewer(QtWidgets.QWidget):
             self._legend.clear()
         self._stat.setText("")
         self._data_bounds = None
+        self._x_step = None
 
     def add_profile(self, r_axis, profile, label=None):
         """Append one frame's 1-D profile; draws it at its stacked offset.
@@ -6939,6 +7012,7 @@ class StackedProfileViewer(QtWidgets.QWidget):
         color = self._curve_color(i)
         offset = i * float(self._spacing.value())
         xd = self._x_display(r)
+        self._note_x_step(xd)
         curve = self._plot.plot(xd, p + offset, name=(str(label) if label else None))
         self._style_curve(curve, i)
         self._curves.append(curve)
@@ -7135,6 +7209,9 @@ class StackedProfileViewer(QtWidgets.QWidget):
         """Redraw all curves + inline labels (offsets, spacing, x-unit)."""
         spacing = float(self._spacing.value())
         xmins, xmaxs, ymins, ymaxs = [], [], [], []
+        self._x_step = None
+        for r in self._r_axes:
+            self._note_x_step(self._x_display(r))
         for i, (curve, r, p) in enumerate(
                 zip(self._curves, self._r_axes, self._profiles)):
             xd = self._x_display(r)
@@ -7167,6 +7244,14 @@ class StackedProfileViewer(QtWidgets.QWidget):
             self._data_bounds = (min(xmins), max(xmaxs), min(ymins), max(ymaxs))
             self._show_finite_range(*self._data_bounds)
             self._apply_view_limits(*self._data_bounds)
+
+    def _note_x_step(self, xd) -> None:
+        """Track the finest bin width among the stacked profiles (displayed
+        unit) and hand it to the axis, so ticks never get finer than it."""
+        step = _median_step(xd)
+        if step is not None and (self._x_step is None or step < self._x_step):
+            self._x_step = step
+        self._xaxis.set_min_step(None if self._logx_chk.isChecked() else self._x_step)
 
     def _show_finite_range(self, xmin, xmax, ymin, ymax):
         """Frame the finite data directly, instead of via ``autoRange``.
@@ -7206,8 +7291,13 @@ class StackedProfileViewer(QtWidgets.QWidget):
         # would pin the view to the wrong end of the data.
         x_floor = (xmin - xpad if self._logx_chk.isChecked()
                    else max(0.0, xmin - xpad))
+        # Not finer than a few bins (linear x only; in log x the ViewBox
+        # coordinate is log10, where a bin width is not a constant).
+        min_x = (0.0 if self._logx_chk.isChecked() or not self._x_step
+                 else _MIN_ZOOM_BINS * self._x_step)
         vb.setLimits(xMin=x_floor, xMax=xmax + xpad,
                      yMin=ymin - ypad, yMax=ymax + ypad,
+                     minXRange=min(min_x, (xmax - xmin) + 2 * xpad) or None,
                      maxXRange=(xmax - xmin) + 2 * xpad,
                      maxYRange=(ymax - ymin) + 2 * ypad)
 

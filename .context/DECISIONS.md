@@ -3,6 +3,18 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-11-07 — File-info icon/tooltip on every input path field
+
+Loaded-file fields now show an inline ⓘ icon and a hover tooltip (name, folder, type, size, created, modified, accessed, owner, permissions; folders show item count). Implemented once in `helpers.attach_file_info()` / `file_info_text()` and hooked into `warn_if_path_missing()` for non-output fields, so every existing input path field got it for free; explicit calls cover fields that never used that helper (Data Loader, Hydra geometry card, Pump Probe calib, Data Explorer, corrections template). Zarr viewer and profile-file labels get a static tooltip at load. Why a ToolTip event filter: several fields already set a static path tooltip on `textChanged`; the filter re-stats on hover so size/mtime are current and it overrides the stale text. Output-folder fields are excluded (nothing to inspect yet). "Created" uses `st_birthtime` (macOS/Windows); Linux has none, so it says n/a and shows ctime. Not covered: in-app file browsers (dialogs.py address bars) and multi-file selections shown as "N files" text (no single file to describe). Test: `tests/test_file_info.py`.
+
+## 2026-11-07 — Batch results x-axis: ticks and zoom never finer than the data's bin width
+
+Zooming a waterfall/stacked-profile plot used to produce ticks like 2.167, 2.169 even for a 0.01 Q step. `_UnitAxis.set_min_step()` now drops tick levels below the data's median bin width (measured in the *displayed* unit from the profile axis) and, for the waterfall, picks tick positions in displayed units then maps them back to native coords. `minXRange` is 3 bins on both viewers (`_MIN_ZOOM_BINS`); stacked log-x skips the floor (bin width isn't constant there). Step is data-derived, so it also covers R and 2θ runs. Test: `tests/test_profile_axis_step.py`. Detector-view flip (Batch Integrate) investigated: Tab-2 calibrations with `im_trans` are already flipped via `set_raw_frame` (repro offscreen); the unflipped case is a calibration source that carries no `im_trans` (e.g. backend calibration.json) — awaiting which source the user hit.
+
+## 2026-11-07 — This repo is the Qt5 (PyQt5) line; the Qt6 port lives in a separate app folder
+
+The PyQt6 port is done and is developed in its own folder (separate from this checkout). From now on, work requested here targets this PyQt5 version only: keep PyQt5 imports/APIs, don't introduce Qt6-only code, and don't assume changes here are mirrored in the Qt6 app automatically. Why: two independent codebases now exist; mixing Qt5 and Qt6 idioms in this one would break it. Any change that should exist in both must be applied to each folder separately.
+
 ## 2026-11-05 — Batch results x-axis defaults to the run's rebin unit
 
 - **Root cause of the "always 750 R bins" report:** Bin type was Q (Q 0.5–8 @ 0.01 = 750 bins). Q/2θ runs integrate on the R grid, then resample onto the Q grid, so R_MIN/R_MAX/R_STEP never changed the output; the viewers still said "R (px)", hiding it.

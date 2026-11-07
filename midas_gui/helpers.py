@@ -132,6 +132,124 @@ def warn_if_path_missing(line_edit: QtWidgets.QLineEdit,
     """
     line_edit.returnPressed.connect(
         lambda: path_is_missing(line_edit, parent, is_output_dir=is_output_dir))
+    if not is_output_dir:
+        attach_file_info(line_edit)
+
+
+# ── File-info tooltip ────────────────────────────────────────────────────────
+
+def _fmt_size(n: int) -> str:
+    v = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if v < 1024 or unit == "TB":
+            return f"{int(v)} B" if unit == "B" else f"{v:.2f} {unit}"
+        v /= 1024.0
+    return f"{n} B"
+
+
+def _owner_of(st) -> str:
+    try:
+        import pwd
+        return pwd.getpwuid(st.st_uid).pw_name
+    except Exception:
+        return "unknown (owner lookup unavailable on this OS)"
+
+
+def file_info_text(path_text: str) -> str:
+    """Multi-line summary of the file/folder at ``path_text`` for a tooltip.
+
+    Returns "" if the text is empty or not an existing path (so callers can
+    hide the info affordance). Never raises.
+    """
+    import datetime as _dt
+    import stat as _stat
+    text = (path_text or "").strip()
+    if not text:
+        return ""
+    try:
+        p = Path(text).expanduser()
+        if not p.exists():
+            return ""
+        st = p.stat()
+    except Exception:
+        return ""
+
+    def _t(ts):
+        return _dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+
+    is_dir = p.is_dir()
+    rows = [("Name", p.name or str(p)), ("Folder", str(p.parent)),
+            ("Type", "Folder" if is_dir else (p.suffix.lstrip(".").upper() + " file"
+                                               if p.suffix else "File"))]
+    if is_dir:
+        try:
+            rows.append(("Items", str(sum(1 for _ in p.iterdir()))))
+        except Exception:
+            pass
+    else:
+        rows.append(("Size", f"{_fmt_size(st.st_size)}  ({st.st_size:,} bytes)"))
+    birth = getattr(st, "st_birthtime", None)
+    if birth is not None:
+        rows.append(("Created", _t(birth)))
+    else:                                   # Linux: true creation time is unavailable
+        rows.append(("Created", f"n/a on this OS (metadata changed {_t(st.st_ctime)})"))
+    rows.append(("Modified", _t(st.st_mtime)))
+    rows.append(("Accessed", _t(st.st_atime)))
+    rows.append(("Owner", _owner_of(st)))
+    rows.append(("Permissions", _stat.filemode(st.st_mode)))
+    if p.is_symlink():
+        try:
+            rows.append(("Link to", str(p.resolve())))
+        except Exception:
+            pass
+    w = max(len(k) for k, _ in rows)
+    return "\n".join(f"{k:<{w}}  {v}" for k, v in rows)
+
+
+class _FileInfoFilter(QtCore.QObject):
+    """Event filter: show fresh file info as the tooltip of a path field."""
+
+    def __init__(self, edit: QtWidgets.QLineEdit, action: QtWidgets.QAction):
+        super().__init__(edit)
+        self._edit, self._action = edit, action
+        edit.installEventFilter(self)
+        edit.textChanged.connect(self.refresh)
+        self.refresh()
+
+    def refresh(self, *_):
+        info = file_info_text(self._edit.text())
+        self._action.setVisible(bool(info))
+        self._action.setToolTip(info)
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QtCore.QEvent.ToolTip:
+            info = file_info_text(self._edit.text())   # re-stat: always current
+            if info:
+                QtWidgets.QToolTip.showText(ev.globalPos(), info, self._edit)
+                return True
+        return False
+
+
+def attach_file_info(line_edit: QtWidgets.QLineEdit) -> None:
+    """Give a file/folder path field an inline ⓘ icon and a hover tooltip
+    with size, created/modified/accessed times, owner and permissions.
+
+    Safe to call more than once on the same field; the icon only shows while
+    the text names an existing path. Applied to every input path field.
+    """
+    if getattr(line_edit, "_file_info_filter", None) is not None:
+        return
+    icon = line_edit.style().standardIcon(QtWidgets.QStyle.SP_MessageBoxInformation)
+    act = line_edit.addAction(icon, QtWidgets.QLineEdit.TrailingPosition)
+    act.setVisible(False)
+
+    def _show():
+        info = file_info_text(line_edit.text())
+        if info:
+            QtWidgets.QToolTip.showText(
+                line_edit.mapToGlobal(line_edit.rect().bottomLeft()), info, line_edit)
+    act.triggered.connect(_show)
+    line_edit._file_info_filter = _FileInfoFilter(line_edit, act)
 
 
 # ── Image IO ──────────────────────────────────────────────────────────────────

@@ -4,6 +4,12 @@ Last updated: 2026-11-04 (process-isolated workers)
 
 ## Now working on
 
+2026-11-07: Batch Integrate result plots (waterfall/stacked) — x ticks/zoom floored at the bin width (DECISIONS 2026-11-07). Uncommitted. Detector-view flip issue not yet reproduced (see DECISIONS).
+
+2026-11-07: File-info ⓘ icon + hover tooltip (size, dates, owner, perms) on all input path fields via `helpers.attach_file_info` (DECISIONS 2026-11-07). Offscreen-verified (32 fields in the live window, `tests/test_file_info.py`); not hand-checked on cocoa. Uncommitted.
+
+**Scope (2026-11-07):** this repo is the **Qt5/PyQt5** version. The Qt6 port is finished and is developed separately in another app folder; all work here applies to the Qt5 version only (DECISIONS 2026-11-07).
+
 2026-11-05: Batch Integrate caking params — job path now forwards η min/max and R min=0; 1-D HDF5 stamps R/η params as attrs (DECISIONS 2026-11-05). Uncommitted. Reporter's 750-bin R axis not reproduced; awaiting the new `[batch] cake:` log line.
 
 2026-11-04: Heavy QThread workers now run in a child process (`proc_worker.py`/`proc_cli.py`; Mask, Integration, Refine, Corrections, PDF, Texture, Drift, Manual d-spacing) so a native crash can't kill the GUI or a running calibration (DECISIONS 2026-11-04). Unit-tested with a fake worker + real mask run offscreen; not yet exercised from the live GUI tabs. Not converted: SolveCell, PumpProbe, Batch*, FolderMonitor, Projection/AllFrameStats (reasons in DECISIONS). Committed on main. Targeted tests (calibrate/hydra/mask/project/smoke/manual-dspacing) pass; test_hydra_ui, test_calibrate_mask_overlay and test_mask_display_transform fail identically with and without it. A full-suite run hung ~30 min on one forked test (not identified).

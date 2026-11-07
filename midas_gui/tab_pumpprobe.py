@@ -268,6 +268,8 @@ class PumpProbeTab(QtWidgets.QWidget):
         cal.body.addWidget(self._calib_lbl)
         self._calib_ed = QtWidgets.QLineEdit()
         self._calib_ed.setPlaceholderText("calibration.json / paramstest.txt / .poni…")
+        from midas_gui.helpers import attach_file_info
+        attach_file_info(self._calib_ed)
         cr = QtWidgets.QHBoxLayout(); cr.setSpacing(4); cr.addWidget(self._calib_ed, 1)
         bc = _br(); bc.clicked.connect(lambda: self._calib_ed.setText(
             _browse(self, "Open calibration file",

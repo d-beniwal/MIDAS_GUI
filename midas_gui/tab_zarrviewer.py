@@ -630,6 +630,8 @@ class ZarrViewerTab(QtWidgets.QWidget):
             self._attr_text.setPlainText(f"ERROR opening file:\n{exc}")
             return
         self._lbl_path.setText(path)
+        from midas_gui.helpers import file_info_text
+        self._lbl_path.setToolTip(file_info_text(path) or path)   # size/dates/owner
         self._last_dir = path
         # Cache REtaMap and wavelength for axis conversions
         self._retamap = None

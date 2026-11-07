@@ -576,6 +576,8 @@ class _SaveParamstestDialog(QtWidgets.QDialog):
         self._tmpl_edit = QtWidgets.QLineEdit()
         self._tmpl_edit.setPlaceholderText(
             "(leave blank for standalone — only calibration parameters written)")
+        from midas_gui.helpers import attach_file_info
+        attach_file_info(self._tmpl_edit)
         tmpl_row.addWidget(self._tmpl_edit)
         b_tmpl = QtWidgets.QPushButton("Browse…"); b_tmpl.setFixedWidth(80)
         b_tmpl.clicked.connect(self._browse_tmpl)

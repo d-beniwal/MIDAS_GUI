@@ -910,6 +910,8 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         self._calib_ed.setPlaceholderText("calibration.json / paramstest.txt / .poni…")
         calc.body.addLayout(_frow(self._calib_ed, self._browse_calib))
         self._calib_ed.returnPressed.connect(self._load_calibration)
+        from midas_gui.helpers import attach_file_info
+        attach_file_info(self._calib_ed)
         self._calib_lbl = QtWidgets.QLabel("No calibration loaded — using manual geometry / BC.")
         self._calib_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         self._calib_lbl.setWordWrap(True)
