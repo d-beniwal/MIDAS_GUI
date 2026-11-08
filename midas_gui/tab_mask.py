@@ -330,7 +330,15 @@ class MaskTab(QtWidgets.QWidget):
             "threshold mask from a projection across every frame instead of only\n"
             "the frame shown by the Frame navigator. 'Current frame' (the only\n"
             "choice for a plain single image) uses just that one frame.")
-        thr.body.addLayout(S.Form().row(("Projection:", self._thresh_proj_combo)))
+        self._thresh_skip = _NoScrollSpinBox(); self._thresh_skip.setRange(0, 1_000_000)
+        self._thresh_skip.setValue(0)
+        self._thresh_skip.setEnabled(False)
+        self._thresh_skip.setToolTip(
+            "Ignore this many leading frames before projecting\n"
+            "(1 = skip the first frame, 4 = skip the first four).\n"
+            "Only applies to Average / Sum / Max projections.")
+        thr.body.addLayout(S.Form().row(("Projection:", self._thresh_proj_combo),
+                                        ("Skip frames:", self._thresh_skip)))
         lv.addWidget(thr)
 
         # ── 2 · Statistical auto-mask (spatial + temporal, independent) ──
@@ -849,8 +857,10 @@ class MaskTab(QtWidgets.QWidget):
         # Projection only means something across >1 frame — otherwise force
         # (and lock) "Current frame" so the threshold step is unambiguous.
         self._thresh_proj_combo.setEnabled(multi)
+        self._thresh_skip.setEnabled(multi)
         if not multi:
             self._thresh_proj_combo.setCurrentText("Current frame")
+            self._thresh_skip.setValue(0)
 
     def _on_frame_spin_changed(self, val: int):
         if self._img_frames is None:
@@ -890,16 +900,21 @@ class MaskTab(QtWidgets.QWidget):
         proj = self._thresh_proj_combo.currentText()
         if self._img_frames is None or proj == "Current frame" or self._img_frames["n"] <= 1:
             return self._image
-        n = self._img_frames["n"]
-        self._stat_prog.setText(f"Building {proj.lower()} projection across {n} frames…")
+        total = self._img_frames["n"]
+        # Always keep at least the last frame so a large skip can't empty the stack.
+        start = min(max(0, self._thresh_skip.value()), total - 1)
+        n = total - start
+        skip_note = f" (skipping first {start})" if start else ""
+        self._stat_prog.setText(
+            f"Building {proj.lower()} projection across {n} frames{skip_note}…")
         QtWidgets.QApplication.processEvents()
         if proj == "Max":
-            acc = np.asarray(self._get_frame_array(0), dtype=np.float32).copy()
-            for i in range(1, n):
+            acc = np.asarray(self._get_frame_array(start), dtype=np.float32).copy()
+            for i in range(start + 1, total):
                 np.maximum(acc, self._get_frame_array(i), out=acc)
             return acc
         acc = np.zeros(self._image.shape, dtype=np.float64)
-        for i in range(n):
+        for i in range(start, total):
             acc += self._get_frame_array(i)
         if proj == "Average":
             acc /= n
@@ -1399,6 +1414,7 @@ class MaskTab(QtWidgets.QWidget):
             "lower": self._lower,
             "upper": self._upper,
             "thresh_proj_combo": self._thresh_proj_combo,
+            "thresh_skip": self._thresh_skip,
             "spatial_check": self._spatial_check,
             "temporal_check": self._temporal_check,
             "k_sigma": self._k_sigma,
