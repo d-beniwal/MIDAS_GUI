@@ -18,6 +18,7 @@ from typing import Optional
 import numpy as np
 from PyQt5 import QtCore, QtWidgets
 
+from midas_gui.panel_toggle import install_panel_toggles
 from midas_gui.constants import (KERNELS, ERROR_MODELS,
                            DEFAULT_NICKEL_DIR, DEFAULT_KERNEL,
                            DEFAULT_ERROR_MODEL)
@@ -1387,7 +1388,13 @@ class BatchTab(QtWidgets.QWidget):
 
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         split.setChildrenCollapsible(False); split.setHandleWidth(6)
-        self._mode_stack.addWidget(split); self._hsplit = split
+        # Page = splitter on top + bottom ribbon holding minimised Data/Controls tabs.
+        # (_hsplit is the stack page, which is what the mode switch selects.)
+        _body = QtWidgets.QWidget()
+        self._body_lay = QtWidgets.QVBoxLayout(_body)
+        self._body_lay.setContentsMargins(0, 0, 0, 0); self._body_lay.setSpacing(2)
+        self._body_lay.addWidget(split, 1)
+        self._mode_stack.addWidget(_body); self._hsplit = _body
 
         # ── LEFT: data loader (streaming source + dark/bright/bg + mask) ──
         # unify_combine=True: start/end + "Combine sub-frames" apply the same
@@ -1965,6 +1972,8 @@ class BatchTab(QtWidgets.QWidget):
         split.addWidget(right)
         split.setStretchFactor(0, 0); split.setStretchFactor(1, 0); split.setStretchFactor(2, 1)
         split.setSizes([286, 361, 950])
+        # Data | Controls | Results: minimise Data/Controls to the bottom ribbon.
+        self._body_lay.addWidget(install_panel_toggles(split, key="batch").ribbon)
 
     # ── Run ────────────────────────────────────────────────────────
 
@@ -2251,7 +2260,7 @@ class BatchTab(QtWidgets.QWidget):
         # converts back to R = Lsd·tan(180°)/px ≈ -2.26e-11. That is the
         # flat-line waterfall and the 2θ = 180 lineout reported from the
         # beamline, and the profiles themselves were never wrong.
-        _axctx = (lsd, px, wl, "R")
+        _axctx = (lsd, px, wl, "R", self._rebin_unit() or "R")
 
         # Dark / bright / background fields (from the loader)
         for sel in self._loader.has_pending_fields():
@@ -2461,10 +2470,15 @@ class BatchTab(QtWidgets.QWidget):
         argv = [sys.executable, "-m", "midas_gui.batch_cli",
                "--calib-file", str(calib_path),
                "--r-bin", str(self._r_bin.value()), "--eta-bin", str(self._e_bin.value())]
-        if self._r_min.value():
-            argv += ["--r-min", str(self._r_min.value())]
+        # R min is sent even at 0 (0 is a real value; omitting it made the
+        # backend fall back to its own RMin=10). Rmax 0 = auto, so omitted.
+        argv += ["--r-min", str(self._r_min.value())]
         if self._r_max.value():
             argv += ["--r-max", str(self._r_max.value())]
+        # The azimuthal window was never forwarded, so a detached job always
+        # integrated the full circle whatever η min/max said.
+        argv += ["--eta-min", str(self._eta_min.value()),
+                 "--eta-max", str(self._eta_max.value())]
 
         # The source files and the output dir are the ONLY per-folder parts;
         # everything else below is shared, so these are appended last, once
@@ -3081,7 +3095,8 @@ class BatchTab(QtWidgets.QWidget):
             variance_cfg = None
         q_cfg = self._rebin_cfg()
         # "R" in both modes — see the note at the other set_axis_context site.
-        _axctx = (float(spec.Lsd), float(spec.pxY), float(spec.Wavelength), "R")
+        _axctx = (float(spec.Lsd), float(spec.pxY), float(spec.Wavelength), "R",
+                  self._rebin_unit() or "R")
         self._stack_view.set_axis_context(*_axctx)
         self._waterfall.set_axis_context(*_axctx)
         weighted = bool(self._azim.currentData())

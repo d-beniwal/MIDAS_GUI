@@ -5,6 +5,7 @@ import faulthandler
 import hashlib
 import inspect
 import json
+import os
 import sys
 import tempfile
 import traceback
@@ -62,6 +63,8 @@ def _install_diagnostics() -> None:
 from midas_gui.helpers import _make_checkmark_svg, _make_arrow_svg
 from midas_gui import style as S
 from midas_gui import bridge_server
+from midas_gui import control_server
+from midas_gui import apexa_terminal
 from midas_gui.auto_attenuation import refresh_server as auto_att_refresh_server
 from midas_gui.tab_view import DataViewerTab
 from midas_gui.tab_mask import MaskTab
@@ -77,6 +80,7 @@ from midas_gui.tab_pdf import PDFTab
 from midas_gui.tab_texture import TextureTab
 from midas_gui.tab_pumpprobe import PumpProbeTab
 from midas_gui.tab_export import ExportTab
+from midas_gui.tab_solve_cell import SolveCellTab
 from midas_gui import constants as C
 from midas_gui import project
 from midas_gui import settings
@@ -126,6 +130,41 @@ class MainWindow(QtWidgets.QMainWindow):
         self._auto_att_refresh_server = auto_att_refresh_server.AutoAttenuationRefreshServer(
             self._on_auto_attenuation_refresh_request, log_fn=_log)
         self._auto_att_refresh_server.start()
+
+        # Lets an external agent/MCP server drive the Data Viewer and
+        # Calibrate tabs headlessly — see midas_gui/control_server.py and
+        # midas_gui_mcp/. Opt-in only (MIDAS_GUI_CONTROL=1): this opens a
+        # local control socket, so it stays off for every ordinary user.
+        self._control_server = None
+        if os.environ.get("MIDAS_GUI_CONTROL") == "1":
+            self._ensure_control_server()
+
+    def _ensure_control_server(self) -> bool:
+        """Start the control socket if it isn't already running. Idempotent —
+        a second call while it's already up is a no-op success. Shared by the
+        MIDAS_GUI_CONTROL=1 startup path above and Tools ▸ APEXA (CLI)…, which
+        requests control on demand rather than requiring the env var."""
+        if self._control_server is not None:
+            return True
+        self._control_server = control_server.ControlServer(self, log_fn=_log)
+        if self._control_server.start():
+            self._view_tab.liveProfileUpdated.connect(self._on_live_profile_updated)
+            self._control_server.agentConnected.connect(self._on_agent_connected_changed)
+            return True
+        self._control_server = None
+        return False
+
+    def _on_live_profile_updated(self, r_px, profile) -> None:
+        self._control_server.broadcast_event(
+            "radial_profile_updated", {"has_profile": r_px is not None})
+
+    def _on_agent_connected_changed(self, connected: bool) -> None:
+        """An agent connected to (or disconnected from) the control socket —
+        show/hide the header ribbon's high-visibility badge. Deliberately
+        tied to an actual connection, not just MIDAS_GUI_CONTROL=1 being set:
+        the socket can sit listening with nothing attached, which shouldn't
+        claim the GUI is under agent control."""
+        self._agent_control_lbl.setVisible(connected)
 
     def _resolve_and_start_live(self, prefix: str) -> None:
         resolved = bridge_server.resolve_pv(prefix, C.DEVICES)
@@ -190,17 +229,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_profile_combo()
         self._profile_combo.activated[str].connect(self._on_header_profile_changed)
 
-        # Active-project indicator, pinned to the opposite (top-right) corner
-        # of the same tab bar row — deliberately separate from the muted
-        # status-bar "Project: none" label (kept as-is), since this one needs
-        # to be prominent/high-contrast rather than a quiet status readout.
-        self._header_project_lbl = QtWidgets.QLabel("")
-        proj_font = self._header_project_lbl.font()
-        proj_font.setPointSize(proj_font.pointSize() + 2)
-        proj_font.setBold(True)
-        self._header_project_lbl.setFont(proj_font)
-        self._header_project_lbl.setStyleSheet("color: #3ddc84; padding-right: 8px;")
-        tabs.setCornerWidget(self._header_project_lbl, QtCore.Qt.TopRightCorner)
+        # Top-right corner: an "agent-controlled" badge (hidden until an
+        # agent is actually connected — see ControlServer.agentConnected /
+        # _on_agent_connected_changed below) (the
+        # active-project indicator now lives in the bottom status bar).
+        right_corner = QtWidgets.QWidget()
+        right_row = QtWidgets.QHBoxLayout(right_corner)
+        right_row.setContentsMargins(0, 0, 0, 0)
+        right_row.setSpacing(10)
+
+        self._agent_control_lbl = QtWidgets.QLabel("\U0001f916 AGENT CONTROLLED")
+        agent_font = self._agent_control_lbl.font()
+        agent_font.setPointSize(agent_font.pointSize() + 2)
+        agent_font.setBold(True)
+        self._agent_control_lbl.setFont(agent_font)
+        self._agent_control_lbl.setStyleSheet(
+            "color: white; background-color: #ff3b30; padding: 2px 8px; "
+            "border-radius: 4px;")
+        self._agent_control_lbl.setVisible(False)
+        right_row.addWidget(self._agent_control_lbl)
+
+        tabs.setCornerWidget(right_corner, QtCore.Qt.TopRightCorner)
 
         # Build each tab in isolation: a single tab that fails on this platform
         # becomes an error placeholder instead of taking the whole window down.
@@ -232,6 +281,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._tex_tab    = _tab(TextureTab,      "Texture")
         self._pump_tab   = _tab(PumpProbeTab,    "Pump Probe")
         self._export_tab = _tab(ExportTab,       "Results & Export")
+        self._solve_cell_tab = _tab(SolveCellTab, "Solve Cell")
 
         # All tabs are always CONSTRUCTED (cross-tab wiring below relies on the
         # attributes existing); modular visibility only controls which are ADDED to
@@ -253,6 +303,7 @@ class MainWindow(QtWidgets.QMainWindow):
             (self._tex_tab,    "Texture",           False),
             (self._pump_tab,   "Pump Probe",        False),
             (self._export_tab, "Results & Export",  False),
+            (self._solve_cell_tab, "Solve Cell",     False),
         ]
         # An ✕ on every optional tab. Closing one is the same act as unchecking
         # it in Preferences ▸ Tabs: the widget survives (cross-tab wiring holds
@@ -262,6 +313,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # tabs have their button stripped in apply_tab_visibility.
         tabs.setTabsClosable(True)
         tabs.tabCloseRequested.connect(self._close_optional_tab)
+        tabs.tabBar().setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        tabs.tabBar().customContextMenuRequested.connect(self._on_tab_bar_context_menu)
         self.apply_tab_visibility()
         self.apply_hydra_visibility()
 
@@ -304,6 +357,15 @@ class MainWindow(QtWidgets.QMainWindow):
                     bind_hydra(registry, label)
                 except Exception:
                     _log(f"Hydra registry bind failed for {label}:\n{traceback.format_exc()}")
+
+        # Single/Hydra mode is one app-wide choice: flipping the leftmost
+        # ribbon on any tab flips it on the others too. set_mode() on an
+        # already-checked button emits nothing, so this cannot ping-pong.
+        ribbons = [t._mode_ribbon for t in (self._view_tab, self._cal_tab, self._batch_tab)
+                   if getattr(t, "_mode_ribbon", None) is not None]
+        for src in ribbons:
+            src.modeChanged.connect(
+                lambda mode, src=src: [r.set_mode(mode) for r in ribbons if r is not src])
 
         # Header Exp ID field: any tab that wants it for output-path
         # suggestions reads it live via this callback rather than keeping its
@@ -372,6 +434,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self._cal_tab.pullHydraFromViewer.connect(
                 lambda: self._cal_tab.import_hydra_from_viewer(self._view_tab.get_hydra_export()))
             self._cal_tab.sendHydraGeometryToViewer.connect(self._view_tab.set_hydra_panel_geometry)
+            # Same hand-off, the other direction: the Data Viewer's own Hydra
+            # page's "→ Send to Calibrate"/"← Get from Calibrate" (all 4
+            # panels at once, mirroring the above pair rather than each
+            # panel's now-removed individual Send/Get).
+            self._view_tab.pushHydraToCalibrate.connect(self._cal_tab.import_hydra_from_viewer)
+            self._view_tab.pullHydraFromCalibrate.connect(
+                lambda: self._view_tab.import_from_calibrate(self._cal_tab.get_hydra_export_for_viewer()))
             # Calibrate (Hydra mode) → Batch Integrate (Hydra mode): a panel's
             # fit auto-populates that panel's calibration source as soon as it
             # finishes, mirroring the single-detector calibrationDone wiring.
@@ -393,7 +462,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # tabs that log attempts to it. Defensive, like the wiring above —
         # a placeholder tab (failed to build) simply has no such method.
         for tab in (self._cal_tab, self._batch_tab, self._queue_tab, self._mask_tab,
-                    self._export_tab):
+                    self._export_tab, self._solve_cell_tab):
             setter = getattr(tab, "set_project_context", None)
             if setter is not None:
                 try:
@@ -407,6 +476,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(
             "Tip: mask → calibrate → (refine) → batch integrate")
         self._project_lbl = QtWidgets.QLabel("Project: none")
+        proj_font = self._project_lbl.font()
+        proj_font.setBold(True)
+        self._project_lbl.setFont(proj_font)
+        self._project_lbl.setStyleSheet("color: #3ddc84; padding-right: 8px;")
         self._project_lbl.setToolTip(
             "The currently-open FAIR provenance project file (File → New/Open Project…).\n"
             "Calibrate and Batch Integrate runs are logged to it automatically while open.")
@@ -461,6 +534,17 @@ class MainWindow(QtWidgets.QMainWindow):
         idx = self._tabs.indexOf(current) if current is not None else -1
         if idx >= 0:
             self._tabs.setCurrentIndex(idx)
+
+    def _on_tab_bar_context_menu(self, pos) -> None:
+        """Right-click on the Solve Cell tab: a one-item menu with "About"."""
+        bar = self._tabs.tabBar()
+        idx = bar.tabAt(pos)
+        if idx < 0 or self._tabs.widget(idx) is not self._solve_cell_tab:
+            return
+        menu = QtWidgets.QMenu(bar)
+        about = menu.addAction("About")
+        if menu.exec_(bar.mapToGlobal(pos)) is about:
+            self._solve_cell_tab.show_about()
 
     def _strip_close_button(self, index: int) -> None:
         """Take the ✕ off a pinned tab, so the four ALWAYS_TABS can't be closed.
@@ -598,6 +682,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         C.reload_from_config()
         self.on_profile_changed()
+        self._offer_restart(
+            f"Now using profile '{name}'. Most values apply immediately; a few "
+            "(e.g. spin-box step sizes) only take effect after a restart.")
 
     def on_profile_changed(self):
         """Common tail for any profile switch, whichever UI triggered it
@@ -702,10 +789,23 @@ class MainWindow(QtWidgets.QMainWindow):
             act.setToolTip(entry["path"])
             act.triggered.connect(lambda checked=False, p=entry["path"]: open_fn(p))
 
+    def _project_msg(self, kind: str, title: str, text: str) -> None:
+        """Project save/open feedback box. While ``_agent_quiet`` is set (the
+        MCP control API's project ops) the message is recorded in
+        ``_agent_messages`` instead of shown: a modal ``QMessageBox`` would
+        block the GUI event loop, and the control socket with it."""
+        if getattr(self, "_agent_quiet", False):
+            self._agent_messages.append((kind, title, text))
+            return
+        box = QtWidgets.QMessageBox.critical if kind == "error" else QtWidgets.QMessageBox.information
+        box(self, title, text)
+
+    _agent_quiet = False
+    _agent_messages: list = []
+
     def _set_project_path(self, path) -> None:
         self._project_ctx.path = path
         self._project_lbl.setText(f"Project: {Path(path).name}" if path else "Project: none")
-        self._header_project_lbl.setText(f"● Project: {Path(path).name}" if path else "")
         self._close_proj_act.setEnabled(path is not None)
         self._project_history_act.setEnabled(path is not None)
 
@@ -788,7 +888,7 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             project.open_project(path)
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Open Project failed", str(e))
+            self._project_msg("error", "Open Project failed", str(e))
             return
         self._set_project_path(path)
         settings.record_recent(path, "project")
@@ -880,6 +980,17 @@ class MainWindow(QtWidgets.QMainWindow):
             if integrate_attempts:
                 self._batch_tab.apply_project_integration(integrate_attempts)
                 restored.append("Batch Integrate: " + ", ".join(sorted(integrate_attempts)))
+            if sel.get("solve_cell"):
+                sc_record = project.read_solve_cell(path)
+                if sc_record is not None:
+                    # The saved workspace (if restored) already rebuilt the
+                    # panel tabs/fields -- it may be newer than the analysis,
+                    # so only fall back to the analysis's own config without it.
+                    self._solve_cell_tab.apply_project_solve_cell(
+                        sc_record, restore_config="Solve Cell" not in tab_names)
+                    restored.append(
+                        f"Solve Cell: {len(sc_record['ingest']['spots_df'])} spots, "
+                        f"last stage {sc_record.get('last_stage')}")
             mask_ref = sel.get("mask_ref")
             if mask_ref:
                 mask_meta = project.read_attempt(path, mask_ref)
@@ -888,15 +999,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 restored.append(f"Mask: {mask_ref.rsplit('/', 1)[-1]}")
         except Exception:
             _log(f"Populate from project failed:\n{traceback.format_exc()}")
-            QtWidgets.QMessageBox.critical(
-                self, "Populate from project failed",
+            self._project_msg(
+                "error", "Populate from project failed",
                 f"Could not populate the GUI from this project's records.\n"
                 f"See the error log:\n{_LOG_FILE}")
             return
 
         if restored:
-            QtWidgets.QMessageBox.information(
-                self, "Open Project",
+            self._project_msg(
+                "info", "Open Project",
                 "Restored from this project's recorded analysis:\n\n" + "\n".join(restored))
 
     def _restore_active_profile(self, name) -> None:
@@ -1006,6 +1117,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 lines = []
                 if copied.get("mask"):
                     lines.append(f"Mask: {copied['mask']} attempt(s)")
+                if copied.get("solve_cell"):
+                    lines.append("Solve Cell: latest analysis")
                 for key, label in (("calibrate", "Calibrate"), ("integrate", "Batch Integrate")):
                     per_panel = copied.get(key) or {}
                     if per_panel:
@@ -1139,6 +1252,22 @@ class MainWindow(QtWidgets.QMainWindow):
         if not draft.is_file():
             return
         try:
+            data = json.loads(draft.read_text())
+        except Exception:
+            data = None
+        if data is not None and data.get("__auto_resume__"):
+            # An intentional restart_app(resume=True) (a Preferences/profile
+            # change the user chose to apply now) — the user already opted
+            # in when they clicked "Restart now", so resume silently instead
+            # of asking "Restore unsaved session?" again.
+            self._apply_workspace_state(data, sidecars={})
+            project_path = data.get("project_path")
+            if project_path:
+                self._set_project_path(project_path)
+            self._update_window_title()
+            self._clear_autosave_draft()
+            return
+        try:
             when = datetime.fromtimestamp(draft.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
             when = "an earlier session"
@@ -1184,9 +1313,12 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             project.write_gui_workspace(path, tabs=state["tabs"], sidecars=sidecars, meta=meta)
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Save failed", str(e))
+            self._project_msg("error", "Save failed", str(e))
             return
         self._set_project_path(path)
+        # Results computed before a project existed (or before this Save As
+        # target did) are only in memory -- write them into the file too.
+        self._solve_cell_tab.flush_project_record()
         self._last_saved_hash = self._hash_workspace_state(state)
         self._set_workspace_dirty(False)
         self._update_window_title()
@@ -1195,7 +1327,7 @@ class MainWindow(QtWidgets.QMainWindow):
         msg = f"Saved project to:\n{path}"
         if errors:
             msg += "\n\nThe following tabs could not be saved:\n" + "\n".join(errors)
-        QtWidgets.QMessageBox.information(self, "Save Project", msg)
+        self._project_msg("info", "Save Project", msg)
 
     def _apply_workspace_state(self, data: dict, sidecars: Optional[dict] = None) -> None:
         """Restore every tab's fields from a previously saved session
@@ -1211,8 +1343,8 @@ class MainWindow(QtWidgets.QMainWindow):
         re-run — their inputs are restored so a single click of the tab's
         own Run/Fit button reproduces the result."""
         if not data.get("__midas_gui_state__"):
-            QtWidgets.QMessageBox.critical(
-                self, "Load failed", "This is not a valid MIDAS GUI session snapshot.")
+            self._project_msg(
+                "error", "Load failed", "This is not a valid MIDAS GUI session snapshot.")
             return
         try:
             self._restore_active_profile(data.get("active_profile"))
@@ -1272,7 +1404,7 @@ class MainWindow(QtWidgets.QMainWindow):
             msg += "\n\nTabs in the file no longer present:\n" + "\n".join(skipped)
         if errors:
             msg += "\n\nThe following tabs failed to restore:\n" + "\n".join(errors)
-        QtWidgets.QMessageBox.information(self, "Open Project", msg)
+        self._project_msg("info", "Open Project", msg)
 
     def _build_menu(self):
         """Settings menu: preferences, open config folder, reload."""
@@ -1293,6 +1425,8 @@ class MainWindow(QtWidgets.QMainWindow):
         m = self.menuBar().addMenu("&Tools")
         act = m.addAction("Auto Attenuation…")
         act.triggered.connect(self._open_auto_attenuation)
+        act_apexa = m.addAction("APEXA (CLI)…")
+        act_apexa.triggered.connect(self._open_apexa_chat)
 
     def _write_auto_attenuation_snapshot(self, path):
         """Gather the Data Viewer's current buffer/loaded-data/dark/mask/
@@ -1376,6 +1510,130 @@ class MainWindow(QtWidgets.QMainWindow):
                 self, "Auto Attenuation",
                 "Failed to launch Auto Attenuation — see log.")
 
+    def _open_apexa_chat(self):
+        """Launch APEXA's command-line interface (``start_beamline_assistant``)
+        in a new terminal window alongside this GUI, wired to drive this GUI's Data Viewer and
+        Calibrate tabs through ``midas_gui_mcp/`` — see that package's
+        README ("Wiring this into APEXA") for the full protocol. Needs
+        Preferences ▸ Integrations ▸ "APEXA repo path" set to a local
+        APEXA-APS-Beamline-Assistant checkout first (per-machine, like
+        recent-files/last-ExpID — not part of a beamline Profile)."""
+        apexa_dir = settings.get_apexa_repo_path().strip()
+        script = self._apexa_launch_script(apexa_dir) if apexa_dir else None
+        if not script or not script.is_file():
+            resp = QtWidgets.QMessageBox.question(
+                self, "APEXA",
+                "No valid APEXA repo path is set.\n\n"
+                "Open Preferences ▸ Integrations to set it?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
+            if resp == QtWidgets.QMessageBox.Yes:
+                self._open_preferences()
+            return
+
+        # An explicit "APEXA (CLI)…" click is a deliberate request for agent
+        # control — start the socket on demand rather than requiring the
+        # MIDAS_GUI_CONTROL=1 env var too.
+        if not self._ensure_control_server():
+            QtWidgets.QMessageBox.critical(
+                self, "APEXA",
+                "Could not start the control socket (see log) — APEXA would "
+                "have nothing to drive. Not launching.")
+            return
+
+        try:
+            self._sync_apexa_servers_config(Path(apexa_dir))
+        except Exception:
+            _log(f"APEXA servers.config sync failed:\n{traceback.format_exc()}")
+            QtWidgets.QMessageBox.warning(
+                self, "APEXA",
+                "Could not update APEXA's servers.config automatically (see "
+                "log). Launching anyway — you may need to add the midas_gui "
+                "line by hand; see midas_gui_mcp/README.md.")
+
+        if apexa_terminal.available():
+            self._show_apexa_dock(script, apexa_dir)
+            return
+        if not self._launch_apexa_cli(script, apexa_dir):
+            QtWidgets.QMessageBox.critical(
+                self, "APEXA",
+                f"Failed to open a terminal running {script.name} in {apexa_dir}.")
+
+    def _show_apexa_dock(self, script: Path, apexa_dir: str) -> None:
+        """Run APEXA's CLI inside a dockable panel attached to this window
+        (docked on the right by default; drag its title bar to float/re-dock).
+        Re-clicking the menu item re-shows a hidden panel, or restarts the CLI
+        if it has exited."""
+        first = getattr(self, "_apexa_dock", None) is None
+        if first:
+            self._apexa_dock = apexa_terminal.ApexaDock(self)
+            self.addDockWidget(QtCore.Qt.RightDockWidgetArea, self._apexa_dock)
+        self._apexa_dock.run(["/bin/bash", str(script)], apexa_dir)
+        if first:
+            self.resizeDocks([self._apexa_dock], [max(480, self.width() // 3)],
+                             QtCore.Qt.Horizontal)
+
+    @staticmethod
+    def _apexa_launch_script(apexa_dir: str) -> Optional[Path]:
+        name = ("start_beamline_assistant.bat" if sys.platform.startswith("win")
+                else "start_beamline_assistant.sh")
+        return Path(apexa_dir) / name
+
+    @staticmethod
+    def _launch_apexa_cli(script: Path, apexa_dir: str) -> bool:
+        """Run APEXA's interactive CLI (``APEXA>`` prompt) in a new terminal
+        window — it needs a TTY, so it can't be spawned headless."""
+        import shlex
+        import shutil
+        import subprocess
+        try:
+            if sys.platform.startswith("win"):
+                subprocess.Popen(["cmd", "/c", "start", "", str(script)],
+                                 cwd=apexa_dir)
+                return True
+            cmd = f"cd {shlex.quote(apexa_dir)} && {shlex.quote(str(script))}"
+            if sys.platform == "darwin":
+                esc = cmd.replace("\\", "\\\\").replace('"', '\\"')
+                subprocess.Popen(["osascript",
+                                  "-e", 'tell application "Terminal" to activate',
+                                  "-e", f'tell application "Terminal" to do script "{esc}"'])
+                return True
+            for term, flag in (("x-terminal-emulator", "-e"), ("gnome-terminal", "--"),
+                               ("konsole", "-e"), ("xfce4-terminal", "-e"),
+                               ("xterm", "-e")):
+                if shutil.which(term):
+                    subprocess.Popen([term, flag, "bash", "-c", f"{cmd}; exec bash"])
+                    return True
+        except Exception:
+            _log(f"APEXA CLI launch failed:\n{traceback.format_exc()}")
+        return False
+
+    def _sync_apexa_servers_config(self, apexa_dir: Path) -> None:
+        """Make sure APEXA's ``servers.config`` has a ``midas_gui:`` line
+        pointing at *this* checkout's ``midas_gui_mcp/server.py``, so the
+        agent that's about to launch can actually drive this GUI — see
+        ``midas_gui_mcp/README.md``'s "Wiring this into APEXA". Adds the line
+        if missing, corrects it if it points somewhere else (e.g. a stale
+        path from a different machine), and otherwise leaves the file
+        untouched — this edits only that one line, never anything else a
+        user has configured there."""
+        cfg_path = apexa_dir / "servers.config"
+        if not cfg_path.is_file():
+            return  # doesn't look like an APEXA checkout — nothing to sync
+        mcp_server = str((Path(midas_gui.__file__).resolve().parent.parent
+                          / "midas_gui_mcp" / "server.py"))
+        wanted = f"midas_gui:{mcp_server}"
+        lines = cfg_path.read_text().splitlines()
+        for i, line in enumerate(lines):
+            if line.strip().startswith("midas_gui:"):
+                if line.strip() == wanted:
+                    return  # already correct
+                lines[i] = wanted
+                cfg_path.write_text("\n".join(lines) + "\n")
+                return
+        lines += ["", "# midas-gui GUI control (added by midas-gui's Tools ▸ APEXA (CLI)…)",
+                  wanted]
+        cfg_path.write_text("\n".join(lines) + "\n")
+
     def _open_preferences(self):
         try:
             from midas_gui.prefs_dialog import PreferencesDialog
@@ -1402,18 +1660,44 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Save failed", str(e)); return
         self._offer_restart(f"Interface scale set to {val:g}×.")
 
-    def _offer_restart(self, msg):
-        """Ask to relaunch now so a startup-only setting (e.g. UI scale) applies."""
+    def _offer_restart(self, msg, *, resume: bool = True):
+        """Ask to relaunch now so a startup-only setting (e.g. UI scale, a
+        saved Preferences change, a profile switch) applies. When `resume`
+        (the default), the current session's full state is snapshotted
+        before relaunch and silently reapplied on the new instance — see
+        `restart_app`/`maybe_offer_restore_autosave`."""
+        tail = ("\n\nRestart the GUI now to apply? Your current session will "
+                "be restored automatically." if resume else
+                "\n\nRestart the GUI now to apply?")
         if QtWidgets.QMessageBox.question(
-                self, "Restart to apply",
-                f"{msg}\n\nRestart the GUI now to apply?",
+                self, "Restart to apply", f"{msg}{tail}",
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
                 QtWidgets.QMessageBox.Yes) == QtWidgets.QMessageBox.Yes:
-            self.restart_app()
+            self.restart_app(resume=resume)
 
-    def restart_app(self):
-        """Relaunch a fresh instance (which re-reads the scale) and close this one.
-        Uses QProcess so the new process is detached from this one."""
+    def _save_autosave_draft_for_restart(self) -> None:
+        """Snapshot the full session (every tab, like `_autosave_tick`) and
+        mark it for silent auto-resume on the next launch — used by an
+        intentional `restart_app(resume=True)`, as opposed to the crash-
+        recovery draft `_autosave_tick` writes periodically."""
+        state, _errors = self._serialize_workspace(quiet=True)
+        state["__auto_resume__"] = True
+        state["project_path"] = self._project_ctx.path
+        draft = settings.autosave_draft_path()
+        try:
+            draft.parent.mkdir(parents=True, exist_ok=True)
+            draft.write_text(json.dumps(state, indent=2))
+        except Exception:
+            _log(f"Pre-restart session save failed:\n{traceback.format_exc()}")
+
+    def restart_app(self, *, resume: bool = False):
+        """Relaunch a fresh instance (which re-reads the scale/config) and
+        close this one. Uses QProcess so the new process is detached from
+        this one. When `resume`, the current session is snapshotted first so
+        the new instance comes back with the same tabs/data loaded instead
+        of starting blank — see `_save_autosave_draft_for_restart`."""
+        if resume:
+            self._save_autosave_draft_for_restart()
         try:
             self._stop_all_workers()
         except Exception:
@@ -1437,9 +1721,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _reload_config(self):
         settings.reload()
-        QtWidgets.QMessageBox.information(
-            self, "Config reloaded",
-            "Config re-read from disk. Restart the GUI for changes to take full effect.")
+        self._offer_restart("Config re-read from disk.")
 
     # ── clean shutdown ─────────────────────────────────────────────
     def _stop_all_workers(self):
@@ -1566,6 +1848,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self._auto_att_refresh_server.stop()
         except Exception:
             _log(f"Auto Attenuation refresh server shutdown failed:\n{traceback.format_exc()}")
+        try:
+            if getattr(self, "_apexa_dock", None) is not None:
+                self._apexa_dock.shutdown()
+        except Exception:
+            _log(f"APEXA dock shutdown failed:\n{traceback.format_exc()}")
+        try:
+            if self._control_server is not None:
+                self._control_server.stop()
+        except Exception:
+            _log(f"Control server shutdown failed:\n{traceback.format_exc()}")
         super().closeEvent(event)
 
 

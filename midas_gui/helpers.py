@@ -6,6 +6,7 @@ the established conventions in context/design_rules.md are preserved exactly.
 """
 from __future__ import annotations
 
+import io
 import math
 import re
 from pathlib import Path
@@ -131,6 +132,124 @@ def warn_if_path_missing(line_edit: QtWidgets.QLineEdit,
     """
     line_edit.returnPressed.connect(
         lambda: path_is_missing(line_edit, parent, is_output_dir=is_output_dir))
+    if not is_output_dir:
+        attach_file_info(line_edit)
+
+
+# ── File-info tooltip ────────────────────────────────────────────────────────
+
+def _fmt_size(n: int) -> str:
+    v = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if v < 1024 or unit == "TB":
+            return f"{int(v)} B" if unit == "B" else f"{v:.2f} {unit}"
+        v /= 1024.0
+    return f"{n} B"
+
+
+def _owner_of(st) -> str:
+    try:
+        import pwd
+        return pwd.getpwuid(st.st_uid).pw_name
+    except Exception:
+        return "unknown (owner lookup unavailable on this OS)"
+
+
+def file_info_text(path_text: str) -> str:
+    """Multi-line summary of the file/folder at ``path_text`` for a tooltip.
+
+    Returns "" if the text is empty or not an existing path (so callers can
+    hide the info affordance). Never raises.
+    """
+    import datetime as _dt
+    import stat as _stat
+    text = (path_text or "").strip()
+    if not text:
+        return ""
+    try:
+        p = Path(text).expanduser()
+        if not p.exists():
+            return ""
+        st = p.stat()
+    except Exception:
+        return ""
+
+    def _t(ts):
+        return _dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+
+    is_dir = p.is_dir()
+    rows = [("Name", p.name or str(p)), ("Folder", str(p.parent)),
+            ("Type", "Folder" if is_dir else (p.suffix.lstrip(".").upper() + " file"
+                                               if p.suffix else "File"))]
+    if is_dir:
+        try:
+            rows.append(("Items", str(sum(1 for _ in p.iterdir()))))
+        except Exception:
+            pass
+    else:
+        rows.append(("Size", f"{_fmt_size(st.st_size)}  ({st.st_size:,} bytes)"))
+    birth = getattr(st, "st_birthtime", None)
+    if birth is not None:
+        rows.append(("Created", _t(birth)))
+    else:                                   # Linux: true creation time is unavailable
+        rows.append(("Created", f"n/a on this OS (metadata changed {_t(st.st_ctime)})"))
+    rows.append(("Modified", _t(st.st_mtime)))
+    rows.append(("Accessed", _t(st.st_atime)))
+    rows.append(("Owner", _owner_of(st)))
+    rows.append(("Permissions", _stat.filemode(st.st_mode)))
+    if p.is_symlink():
+        try:
+            rows.append(("Link to", str(p.resolve())))
+        except Exception:
+            pass
+    w = max(len(k) for k, _ in rows)
+    return "\n".join(f"{k:<{w}}  {v}" for k, v in rows)
+
+
+class _FileInfoFilter(QtCore.QObject):
+    """Event filter: show fresh file info as the tooltip of a path field."""
+
+    def __init__(self, edit: QtWidgets.QLineEdit, action: QtWidgets.QAction):
+        super().__init__(edit)
+        self._edit, self._action = edit, action
+        edit.installEventFilter(self)
+        edit.textChanged.connect(self.refresh)
+        self.refresh()
+
+    def refresh(self, *_):
+        info = file_info_text(self._edit.text())
+        self._action.setVisible(bool(info))
+        self._action.setToolTip(info)
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QtCore.QEvent.ToolTip:
+            info = file_info_text(self._edit.text())   # re-stat: always current
+            if info:
+                QtWidgets.QToolTip.showText(ev.globalPos(), info, self._edit)
+                return True
+        return False
+
+
+def attach_file_info(line_edit: QtWidgets.QLineEdit) -> None:
+    """Give a file/folder path field an inline ⓘ icon and a hover tooltip
+    with size, created/modified/accessed times, owner and permissions.
+
+    Safe to call more than once on the same field; the icon only shows while
+    the text names an existing path. Applied to every input path field.
+    """
+    if getattr(line_edit, "_file_info_filter", None) is not None:
+        return
+    icon = line_edit.style().standardIcon(QtWidgets.QStyle.SP_MessageBoxInformation)
+    act = line_edit.addAction(icon, QtWidgets.QLineEdit.TrailingPosition)
+    act.setVisible(False)
+
+    def _show():
+        info = file_info_text(line_edit.text())
+        if info:
+            QtWidgets.QToolTip.showText(
+                line_edit.mapToGlobal(line_edit.rect().bottomLeft()), info, line_edit)
+    act.triggered.connect(_show)
+    line_edit._file_info_filter = _FileInfoFilter(line_edit, act)
 
 
 # ── Image IO ──────────────────────────────────────────────────────────────────
@@ -143,8 +262,7 @@ def _load_image(path: str | Path, data_loc: str = "exchange/data",
         import tifffile
         return np.asarray(tifffile.imread(str(p)), dtype=np.float32)
     if ext in H5_EXTS:
-        import h5py
-        with h5py.File(str(p), "r") as f:
+        with open_h5_read(p) as f:
             dset = f[data_loc]
             data = dset[frame] if dset.ndim >= 3 else dset[...]
         return np.asarray(data, dtype=np.float32)
@@ -404,20 +522,17 @@ def detect_wavelength_from_h5(path: str) -> Optional[float]:
     if not is_h5(path):
         return None
     try:
-        import h5py
-        with h5py.File(path, "r") as f:
-            ds = f.get(_ENERGY_DATASET)
-            if ds is None:
-                return None
-            energy_kev = float(np.atleast_1d(ds[()])[0])
-        if energy_kev <= 0:
-            return None
-        return HC_KEV_A / energy_kev
+        with open_h5_read(path) as f:
+            return _wavelength_from_file(f)
     except Exception:
         return None
 
 
-def detect_geometry_from_path(path: str, *, profile: Optional[str] = None) -> dict:
+_UNSET = object()
+
+
+def detect_geometry_from_path(path: str, *, profile: Optional[str] = None,
+                              wavelength=_UNSET) -> dict:
     """Best-effort auto-detected geometry hints from a just-loaded file's name
     ('pxY' from a known detector-file naming convention) and, for an HDF5
     frame file, its beam-energy metadata ('wavelength_A') — gated to the
@@ -435,7 +550,9 @@ def detect_geometry_from_path(path: str, *, profile: Optional[str] = None) -> di
     px = _DETECTOR_PIXEL_UM.get(detect_detector_from_filename(path))
     if px is not None:
         out["pxY"] = px
-    wl = detect_wavelength_from_h5(path)
+    # ``wavelength``: already read by the caller's own open of the file (the
+    # Data loader's probe) — skips a separate re-open just for one scalar.
+    wl = detect_wavelength_from_h5(path) if wavelength is _UNSET else wavelength
     if wl is not None:
         out["wavelength_A"] = wl
     return out
@@ -846,9 +963,221 @@ def list_h5_datasets(path: str | Path) -> list:
         if isinstance(obj, h5py.Dataset) and obj.ndim >= 2:
             items.append((name, tuple(obj.shape)))
 
-    with h5py.File(str(path), "r") as f:
+    with open_h5_read(path) as f:
         f.visititems(_visit)
     return items
+
+
+# ── Fast HDF5 access for large / network-mounted files ─────────────────────────
+# Opening an HDF5 file over a slow share costs several metadata round trips, and
+# every re-open pays that again.  The pieces below keep the number of opens per
+# user action low (``probe_h5``), remember what an open learned for as long as
+# the file is unchanged (``h5_probe_cached``), and bound the RAM spent on frames
+# already read (``FrameCache``).  All pure h5py/numpy/threading, so identical on
+# Linux, macOS and Windows.  No file handle is kept open between reads on
+# purpose: an open handle blocks deleting/replacing the file on Windows and can
+# trip HDF5 file locking against a writer on a live acquisition.
+
+_H5_RDCC = {"rdcc_nbytes": 64 * 1024 * 1024, "rdcc_nslots": 100003}
+
+
+def open_h5_read(path):
+    """``h5py.File(path, "r")`` with a larger chunk cache, so chunks that span
+    several frames (or are re-read) aren't fetched again.  Falls back to a plain
+    open if this h5py build rejects the cache keywords."""
+    import h5py
+    try:
+        return h5py.File(str(path), "r", **_H5_RDCC)
+    except TypeError:
+        return h5py.File(str(path), "r")
+
+
+def _wavelength_from_file(f) -> Optional[float]:
+    """Wavelength (Å) from the beam-energy dataset of an *open* HDF5 file."""
+    try:
+        ds = f.get(_ENERGY_DATASET)
+        if ds is None:
+            return None
+        energy_kev = float(np.atleast_1d(ds[()])[0])
+        return HC_KEV_A / energy_kev if energy_kev > 0 else None
+    except Exception:
+        return None
+
+
+def read_h5_frame_native(dset, frame: int = 0) -> np.ndarray:
+    """One frame of an open dataset in its on-disk dtype (same indexing rule as
+    :func:`_load_image`: ``dset[frame]`` for a stack, the whole 2-D array else)."""
+    return np.asarray(dset[frame] if dset.ndim >= 3 else dset[...])
+
+
+class H5Probe(NamedTuple):
+    """What a single open of an HDF5 file learned (see :func:`probe_h5`)."""
+    shape: Optional[tuple]        # shape of the requested dataset (None: absent)
+    frame: Optional[np.ndarray]   # its first frame, native dtype (None: not read)
+    wavelength: Optional[float]   # Å from the energy dataset (None: absent)
+    items: Optional[list]         # [(name, shape), …] of ≥2-D datasets, if listed
+
+
+def probe_h5(path, dataset: Optional[str] = None, *, first_frame: bool = True,
+             listing: bool = False) -> H5Probe:
+    """Everything the Data loader needs from an HDF5 file, in ONE open.
+
+    ``dataset``: read its shape and (``first_frame``) its first frame.  The
+    dataset list (a full tree walk — the slow part on big files) is only built
+    when ``listing`` is set.  Raises ``OSError`` if the file can't be opened.
+    """
+    import h5py
+    shape = frame = items = None
+    with open_h5_read(path) as f:
+        if dataset:
+            d = f.get(dataset)
+            if isinstance(d, h5py.Dataset):
+                shape = tuple(d.shape)
+                if first_frame:
+                    frame = read_h5_frame_native(d, 0)
+        wl = _wavelength_from_file(f)
+        if listing:
+            items = []
+
+            def _visit(name, obj):
+                if isinstance(obj, h5py.Dataset) and obj.ndim >= 2:
+                    items.append((name, tuple(obj.shape)))
+
+            f.visititems(_visit)
+    return H5Probe(shape, frame, wl, items)
+
+
+_H5_PROBE_CACHE: dict = {}
+_H5_PROBE_CACHE_MAX = 32
+_H5_PROBE_LOCK = None
+
+
+def _probe_lock():
+    global _H5_PROBE_LOCK
+    if _H5_PROBE_LOCK is None:
+        import threading
+        _H5_PROBE_LOCK = threading.Lock()
+    return _H5_PROBE_LOCK
+
+
+def _stat_key(path) -> Optional[tuple]:
+    try:
+        st = Path(path).stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def h5_probe_cached(path, *, listing: bool = True) -> Optional[dict]:
+    """``{"items": [...], "wavelength": float|None}`` for *path*, from a cache
+    keyed on the file's (mtime, size) so an unchanged file is never walked twice
+    and a rewritten one is re-read.  ``None`` if the file doesn't exist.
+    ``listing=False`` returns whatever is cached without opening the file."""
+    key = _stat_key(path)
+    if key is None:
+        return None
+    p = str(path)
+    with _probe_lock():
+        hit = _H5_PROBE_CACHE.get(p)
+    if hit is not None and hit["key"] == key and hit["items"] is not None:
+        return hit
+    if not listing:
+        return None
+    pr = probe_h5(p, None, first_frame=False, listing=True)
+    entry = {"key": key, "items": pr.items, "wavelength": pr.wavelength}
+    with _probe_lock():
+        if len(_H5_PROBE_CACHE) >= _H5_PROBE_CACHE_MAX:
+            _H5_PROBE_CACHE.pop(next(iter(_H5_PROBE_CACHE)))
+        _H5_PROBE_CACHE[p] = entry
+    return entry
+
+
+def h5_dataset_shape_cached(path, dataset: str) -> Optional[tuple]:
+    """Shape of ``dataset`` if a prior listing of the unchanged file saw it
+    (no I/O); ``None`` otherwise — the caller then opens the file itself."""
+    hit = h5_probe_cached(path, listing=False)
+    if hit:
+        for name, shape in hit["items"]:
+            if name == dataset:
+                return tuple(shape)
+    return None
+
+
+class FrameCache:
+    """Thread-safe LRU of already-read frames, bounded by bytes (always keeps at
+    least ``min_items``).  Stored arrays are read-only; callers copy on the way
+    out.  ``clear()`` bumps ``gen`` so a background read that started before a
+    source change can't insert a stale frame (``put(..., gen=)`` drops it)."""
+
+    def __init__(self, max_bytes: int = 256 * 1024 * 1024, min_items: int = 4):
+        import threading
+        from collections import OrderedDict
+        self._d = OrderedDict()
+        self._bytes = 0
+        self._lock = threading.Lock()
+        self.max_bytes = int(max_bytes)
+        self.min_items = int(min_items)
+        self.gen = 0
+
+    def get(self, key):
+        with self._lock:
+            a = self._d.get(key)
+            if a is not None:
+                self._d.move_to_end(key)
+            return a
+
+    def __contains__(self, key) -> bool:
+        with self._lock:
+            return key in self._d
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._d)
+
+    def put(self, key, arr: np.ndarray, gen: Optional[int] = None) -> None:
+        arr = np.asarray(arr)
+        with self._lock:
+            if gen is not None and gen != self.gen:
+                return
+            old = self._d.pop(key, None)
+            if old is not None:
+                self._bytes -= old.nbytes
+            try:
+                arr.setflags(write=False)
+            except ValueError:
+                pass
+            self._d[key] = arr
+            self._bytes += arr.nbytes
+            while self._bytes > self.max_bytes and len(self._d) > self.min_items:
+                _, v = self._d.popitem(last=False)
+                self._bytes -= v.nbytes
+
+    def clear(self) -> None:
+        with self._lock:
+            self._d.clear()
+            self._bytes = 0
+            self.gen += 1
+
+
+def best_default_dataset_index(items: list, prefer_max_frames: bool = False) -> int:
+    """Pick a sensible default dataset index among ``items`` (``[(name,
+    shape), …]``, e.g. from :func:`list_h5_datasets`), used when the
+    caller's remembered dataset name isn't present in the newly-loaded file.
+
+    Eligible datasets are those with ``ndim >= 3`` (a per-frame stack).
+    ``prefer_max_frames=False`` keeps the original behaviour of picking the
+    first eligible entry in file order. ``prefer_max_frames=True`` instead
+    picks the eligible entry with the largest frame count (``shape[0]``) —
+    for a Dark field pointed at a different file than the main data, where
+    "first in file order" risks landing on a near-empty calibration dataset
+    instead of the real dark-frame stack. Falls back to index 0 if no
+    dataset is eligible."""
+    eligible = [i for i, (_, shape) in enumerate(items) if len(shape) >= 3]
+    if not eligible:
+        return 0
+    if prefer_max_frames:
+        return max(eligible, key=lambda i: items[i][1][0])
+    return eligible[0]
 
 
 # Name fragments that mark a 1-D dataset as the measured rotation angle,
@@ -890,6 +1219,39 @@ def list_h5_1d_datasets(path: str | Path) -> list:
         return (len(_OMEGA_HINTS), item[0])
 
     return sorted(items, key=_rank)
+
+
+def detect_omega_frame_range(path: str | Path, field: str,
+                              start_deg: float, end_deg: float) -> tuple[int, int, float]:
+    """First/last 0-based frame index whose *field* omega value lies within
+    the closed span between ``start_deg`` and ``end_deg`` (either order; the
+    scan direction doesn't matter since frame order is acquisition order,
+    not omega order), plus the measured omega at the first matching frame.
+
+    Used by Solve Cell's "auto-detect frame range" (``tab_solve_cell.py``)
+    in place of a user paging through frames by hand to find where their
+    omega range starts/ends in the raw stack. Deliberately a plain
+    value-in-range test, not a step-count/nearest-value search: a scan's
+    ramp-up/ramp-down segments make per-frame omega spacing uneven at both
+    ends, so independently nearest-matching ``start_deg`` and ``end_deg``
+    can disagree with the step size by a frame or more, while "which frames
+    actually carry an omega in this span" is unambiguous and matches what a
+    user paging through frames by hand would call the start/end frame.
+    """
+    import h5py
+    with h5py.File(str(path), "r") as f:
+        if field not in f:
+            raise KeyError(f"{field!r} not found in {path}")
+        omega = np.asarray(f[field][()], dtype=float).ravel()
+    lo, hi = (start_deg, end_deg) if start_deg <= end_deg else (end_deg, start_deg)
+    mask = (omega >= lo) & (omega <= hi)
+    idx = np.flatnonzero(mask)
+    if idx.size == 0:
+        raise ValueError(
+            f"No frames have {field!r} in [{lo:g}, {hi:g}]° "
+            f"(file range: [{omega.min():g}, {omega.max():g}]°).")
+    first_idx, last_idx = int(idx[0]), int(idx[-1])
+    return first_idx, last_idx, float(omega[first_idx])
 
 
 # "dark" as a word, however the beamline glued it together. The original
@@ -1215,6 +1577,10 @@ def apply_field_corrections(img: np.ndarray, *, dark=None, bright=None,
     left over from reusing a session saved against a different detector) is
     skipped rather than raising — mirrors ``MaskSelector.composite_mask()``'s
     "skip + warn" handling of a mismatched mask source.
+
+    ``img`` may also be a stack ``(B,H,W)`` — each field is still 2-D and is
+    broadcast across the batch axis (checked against ``img``'s trailing two
+    dimensions, not its full shape).
     """
     import warnings
     out = np.asarray(img, dtype=np.float64)
@@ -1223,10 +1589,10 @@ def apply_field_corrections(img: np.ndarray, *, dark=None, bright=None,
         if field is None:
             return None
         arr = np.asarray(field, dtype=np.float64)
-        if arr.shape != out.shape:
+        if arr.shape != out.shape[-2:]:
             warnings.warn(
                 f"apply_field_corrections: {label} shape {arr.shape} != "
-                f"image shape {out.shape} — skipped", RuntimeWarning, stacklevel=2)
+                f"image shape {out.shape[-2:]} — skipped", RuntimeWarning, stacklevel=2)
             return None
         return arr
 
@@ -1248,6 +1614,50 @@ def apply_field_corrections(img: np.ndarray, *, dark=None, bright=None,
     if clip_negative:
         out = np.clip(out, 0.0, None)
     return out
+
+
+def reduce_frames_batched(batch_iter, method: str, *, dark=None, bright=None,
+                          background=None, bright_mode: str = "divide"):
+    """Project a frame stack (max/sum/mean) with each frame corrected
+    BEFORE it's folded into the reduction, one batch at a time so peak
+    memory is one batch, not the whole stack.
+
+    ``batch_iter`` yields ``(B,H,W)`` raw arrays (e.g. from
+    ``DataLoaderPanel.iter_raw_batches``/``hydra.iter_stack_batches``).
+    Correction is applied per batch via ``apply_field_corrections``
+    (vectorized across the batch), then each corrected batch is folded into
+    a running accumulator — ``max`` via ``np.maximum``, ``sum``/``mean`` via
+    a running sum (never an average of per-batch means, which would be wrong
+    once the final batch is a different size) divided by the true total
+    frame count once at the end for ``mean``.
+
+    Returns ``(result: np.ndarray float32 2-D, n_used: int)``. Raises
+    ``ValueError`` if ``batch_iter`` yields no frames.
+    """
+    method = "mean" if method == "average" else method
+    corrected_fields = dark is not None or bright is not None or background is not None
+    acc = None
+    n_used = 0
+    for batch in batch_iter:
+        batch = np.asarray(batch)
+        if batch.ndim != 3 or batch.shape[0] == 0:
+            continue
+        if corrected_fields:
+            batch = apply_field_corrections(
+                batch, dark=dark, bright=bright, bright_mode=bright_mode,
+                background=background)
+        if method == "max":
+            reduced = _COMBINE_OPS["max"](batch)
+            acc = reduced if acc is None else np.maximum(acc, reduced)
+        else:
+            reduced = _COMBINE_OPS["sum"](batch)
+            acc = reduced if acc is None else acc + reduced
+        n_used += batch.shape[0]
+    if acc is None or n_used == 0:
+        raise ValueError("No frames to reduce")
+    if method == "mean":
+        acc = acc / n_used
+    return acc.astype(np.float32), n_used
 
 
 # ── Ring prediction (calibrant → ring radii in px) ──────────────────────────────
@@ -3059,6 +3469,20 @@ def apply_dict_to_widgets(widgets: dict, data: dict) -> None:
             w.blockSignals(False)
 
 
+class _LogStream(io.TextIOBase):
+    def __init__(self, sig):
+        super().__init__()
+        self._sig = sig
+
+    def write(self, s):
+        if s.strip():
+            self._sig.emit(s.rstrip())
+        return len(s)
+
+    def flush(self):
+        pass
+
+
 # ── No-scroll spinboxes (prevent accidental wheel value changes) ────────────────
 
 class _NoScrollSpinBox(QtWidgets.QSpinBox):
@@ -3135,7 +3559,7 @@ def _clickable_menu_label(text, entries, parent=None):
     btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
     btn.setCursor(QtCore.Qt.PointingHandCursor)
     btn.setStyleSheet(
-        "QToolButton { border: none; padding: 0 2px; color: #4da3ff; }"
+        f"QToolButton {{ border: none; padding: 0 2px; color: {S.LINK}; }}"
         "QToolButton::menu-indicator { image: none; }")
     f = btn.font(); f.setUnderline(True); btn.setFont(f)
     menu = QtWidgets.QMenu(btn)
@@ -3165,7 +3589,7 @@ def make_kedge_label(wl_spin, text="λ:", parent=None):
     btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
     btn.setCursor(QtCore.Qt.PointingHandCursor)
     btn.setStyleSheet(
-        "QToolButton { border: none; padding: 0 2px; color: #4da3ff; }"
+        f"QToolButton {{ border: none; padding: 0 2px; color: {S.LINK}; }}"
         "QToolButton::menu-indicator { image: none; }")
     f = btn.font(); f.setUnderline(True); btn.setFont(f)
 
@@ -3262,7 +3686,7 @@ def make_calib_values_button(fields_getter, text="View calibration ▾", parent=
     btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
     btn.setCursor(QtCore.Qt.PointingHandCursor)
     btn.setStyleSheet(
-        "QToolButton { border: none; padding: 0 2px; color: #4da3ff; }"
+        f"QToolButton {{ border: none; padding: 0 2px; color: {S.LINK}; }}"
         "QToolButton::menu-indicator { image: none; }")
     f = btn.font(); f.setUnderline(True); btn.setFont(f)
     btn.setToolTip("Click to view the calibration geometry currently in use.")

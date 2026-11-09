@@ -92,9 +92,12 @@ def test_stepping_back_onto_the_blank_frame_is_respected(tab, tmp_path, app):
     assert tab._loader.frame_index() == 0, "the user asked for this frame"
     assert not np.any(tab._image)
     # ...and falls back to naming the problem rather than saying nothing.
+    # ("Mean of frames" is now the "Projection" card — see the
+    # parameter-table-unification commit — with "Project stack"/"Skip
+    # frames" replacing the old checkbox/start-end spins.)
     txt = tab._blank_note.text()
     assert "Frame 1 of 3 is entirely zero" in txt
-    assert "Mean of frames" in txt and "start=1" in txt
+    assert "Project stack" in txt and "Skip frames=1" in txt
 
 
 def test_a_wholly_empty_stack_is_not_chased_frame_by_frame(tab, tmp_path, app):
@@ -108,15 +111,21 @@ def test_a_wholly_empty_stack_is_not_chased_frame_by_frame(tab, tmp_path, app):
     assert "entirely zero" in tab._blank_note.text()
 
 
-def test_the_frame_mean_is_left_alone(tab, tmp_path, app):
-    """With the mean on, what is displayed is not a frame at all and the
-    start/end boxes are the control that matters -- moving the frame index
-    underneath it would change nothing visible and confuse the readout."""
-    tab._loader.set_path(_stack(tmp_path, "s_00004.h5", [_live(), _live()]))
+def test_a_stack_projection_is_left_alone(tab, tmp_path, app):
+    """While a stack projection is active, what is displayed is not a single
+    frame at all and the Projection card's own controls are what matters --
+    stepping the frame index underneath it would change nothing visible and
+    confuse the readout. ("Mean of frames" is now the "Projection" card —
+    see the parameter-table-unification commit. Unlike the old sticky
+    checkbox, a projection is cleared on every new file load (see
+    _sync_proj_controls), so this guard is exercised directly rather than
+    across a file switch.)"""
+    tab._loader.set_path(_pixirad_like(tmp_path))
     app.processEvents()
-    tab._avg_check.setChecked(True)
-    app.processEvents()
-    at = tab._loader.frame_index()
-    tab._loader.set_path(_pixirad_like(tmp_path, "s_00005.pixi.h5"))
-    app.processEvents()
-    assert tab._loader.frame_index() == at
+    assert tab._loader.frame_index() == 1   # already stepped past the blank frame
+    tab._loader.set_frame(0)                # back on the blank frame, as if mid-inspection
+    tab._proj_active = True
+    tab._blank_skip_path = None             # allow the guard to reconsider this file
+    tab._skip_blank_opening_frame()
+    assert tab._loader.frame_index() == 0, \
+        "a stack projection in progress must not be overridden"

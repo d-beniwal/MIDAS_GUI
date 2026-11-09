@@ -37,27 +37,33 @@ from __future__ import annotations
 
 from typing import Callable, Mapping, Optional
 
-from PyQt5 import QtWidgets
+from PyQt5 import QtCore, QtWidgets
 
 from midas_gui.dialogs import PARAMETER_LIMIT_ROWS
 from midas_gui.helpers import _fspin, _NoScrollComboBox
 from midas_gui import style as S
 
 
-#: (refined?, seeded?) -> what the fit does with the parameter. Phrased as an
-#: outcome rather than echoing the ticks, because the pairing is the part that
-#: is not obvious. Carried over verbatim from the dialog this replaces.
-OUTCOME = {
-    (True, True): "refined, from this value",
-    (True, False): "refined, auto-seeded",
-    (False, True): "held at this value",
-    (False, False): "held at default",
+#: Name colour of a row whose parameter is selected to refine.
+REFINED_COLOR = "#2e9d4f"
+
+#: limit-row slot -> the Refine tick that colours its name green.
+_REFINE_KEY_FOR = {
+    "Lsd": "Lsd", "BC_y": "BC", "BC_z": "BC", "tx": "tx", "ty": "ty",
+    "tz": "tz", "wavelength_A": "Wavelength", "distortion": "Distortion",
 }
 
 #: limit-row slot -> the seed tick that governs it. ``BC_y``/``BC_z`` share
 #: one tick (the backend takes the pair or neither -- see
 #: ``calib._resolve_seed``), so the tick spans both rows and ``BC_z`` is
 #: marked as continuing the span rather than owning one.
+_BC_TIPS = {
+    "BC_y": "BC_Y: Beam Center Y (horizontal) coordinate in MIDAS "
+            "convention, with (0,0) at the left-bottom corner.",
+    "BC_z": "BC_Z: Beam Center Z (vertical) coordinate in MIDAS "
+            "convention, with (0,0) at the left-bottom corner.",
+}
+
 _SEED_TICK_FOR = {
     "Lsd": "Lsd", "BC_y": "BC", "BC_z": None,
     "tx": "tx", "ty": "ty", "tz": "tz",
@@ -95,13 +101,17 @@ class CalibrationParameterTable(QtWidgets.QWidget):
 
     def __init__(self, *, seed_ticks: Mapping, seed_values: Mapping,
                  refine_ticks: Mapping, dist_seed_btn=None,
-                 dist_refine_row=None,
+                 dist_refine_row=None, on_distortion_clicked=None,
                  on_limits_changed: Optional[Callable] = None, parent=None):
         super().__init__(parent)
         self._on_limits_changed = on_limits_changed
 
-        #: seed key -> the label saying what the fit will do with that row.
-        self._status_lbls: dict = {}
+        #: slot -> its name widget, coloured green while it is refined.
+        self._name_widgets: dict = {}
+        #: small "n/15" line under the Distortion button.
+        self.dist_count_lbl = QtWidgets.QLabel("")
+        self.dist_count_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        self._on_distortion_clicked = on_distortion_clicked
         #: seed key -> its "include in seed" tick (what _sync_status reads).
         self._seed_boxes: dict = dict(seed_ticks)
         #: seed key -> its Refine tick. Filled by set_refine_boxes, which the
@@ -164,7 +174,7 @@ class CalibrationParameterTable(QtWidgets.QWidget):
         outer.addLayout(grid)
 
         for text, col in (("Seed", 1), ("Refine", 2), ("start value", 3),
-                          ("\u00b1 range", 4), ("units", 5)):
+                          ("\u00b1 range", 4)):
             lbl = QtWidgets.QLabel(text)
             lbl.setStyleSheet(f"color:{S.MUTED};font-size:9px")
             grid.addWidget(lbl, 0, col)
@@ -174,7 +184,7 @@ class CalibrationParameterTable(QtWidgets.QWidget):
         order = tuple(row[0] for row in PARAMETER_LIMIT_ROWS)
 
         #: the name column, so no tick has to repeat it
-        _NAME = {"Lsd": "Lsd", "BC_y": "Beam centre", "BC_z": "BC_z",
+        _NAME = {"Lsd": "Lsd", "BC_y": "BC_Y", "BC_z": "BC_Z",
                  "tx": "tx", "ty": "ty", "tz": "tz",
                  "wavelength_A": "Wavelength", "distortion": "Distortion"}
 
@@ -183,9 +193,21 @@ class CalibrationParameterTable(QtWidgets.QWidget):
             unit0, win0, abs_unit, dec = rows[name]
             tick_key = _SEED_TICK_FOR.get(name)
 
-            lbl0 = QtWidgets.QLabel(_NAME[name])
-            if tick_key is None:
-                lbl0.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+            if name == "distortion":
+                lbl0 = QtWidgets.QPushButton(_NAME[name])
+                lbl0.setFlat(True)
+                lbl0.setCursor(QtCore.Qt.PointingHandCursor)
+                lbl0.setStyleSheet("text-align:left;padding:0;border:none;")
+                lbl0.setToolTip("Click to choose which distortion "
+                                "coefficients to refine.")
+                if on_distortion_clicked is not None:
+                    lbl0.clicked.connect(on_distortion_clicked)
+            else:
+                lbl0 = QtWidgets.QLabel(_NAME[name])
+                tip = _BC_TIPS.get(name)
+                if tip:
+                    lbl0.setToolTip(tip)
+            self._name_widgets[name] = lbl0
             grid.addWidget(lbl0, gr, 0)
             self.row_name_lbls[name] = lbl0
 
@@ -239,31 +261,25 @@ class CalibrationParameterTable(QtWidgets.QWidget):
             crow = QtWidgets.QHBoxLayout(inner)
             crow.setContentsMargins(0, 0, 0, 0); crow.setSpacing(2)
             crow.addWidget(cb); crow.addWidget(lbl)
-            crow.addWidget(QtWidgets.QLabel("\u00b1")); crow.addWidget(spin)
+            crow.addWidget(spin); crow.addWidget(combo)
             grid.addWidget(inner, gr, 4)
-            grid.addWidget(combo, gr, 5)
 
             self.limit_widgets[name] = (cb, spin, combo)
             self.limit_name_lbls[name] = lbl
             self.limit_row_sub[name] = ""
-            self.limit_row_cells[name] = [inner, combo]
+            self.limit_row_cells[name] = [inner]
             self.limit_row_index[name] = gr
-            self.limit_cells.extend([inner, combo])
+            self.limit_cells.append(inner)
 
-            # what the fit will do with this row, spanning underneath
-            if tick_key is not None and tick_key in self._seed_boxes:
-                status = QtWidgets.QLabel("")
-                status.setWordWrap(True)
-                grid.addWidget(status, gr + 1, 0, 1, 6)
-                self._status_lbls[tick_key] = status
-                self._seed_boxes[tick_key].toggled.connect(self._sync_status)
+            if name == "distortion":
+                grid.addWidget(self.dist_count_lbl, gr + 1, 0)
                 gr += 1
             gr += 1
 
         self._limits_note = QtWidgets.QLabel("")
         self._limits_note.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         self._limits_note.setWordWrap(True)
-        grid.addWidget(self._limits_note, gr, 0, 1, 6)
+        grid.addWidget(self._limits_note, gr, 0, 1, 5)
         self.limit_cells.append(self._limits_note)
         self._sync_status()
 
@@ -288,42 +304,32 @@ class CalibrationParameterTable(QtWidgets.QWidget):
         neighbouring rows staying put.
         """
         lbl = self.limit_name_lbls[name]
-        lbl.setText("ty + tz" if covers else self.limit_row_sub[name])
+        lbl.setText("" if covers else self.limit_row_sub[name])
+        lbl.setToolTip("One window bounds both ty and tz." if covers else "")
         lbl.setVisible(bool(lbl.text()))
 
-    # ── what the fit will do with each row ──────────────────────────
+    # ── refined parameters read green ───────────────────────────────
 
     def set_refine_boxes(self, boxes: Mapping):
-        """Attach the Refine ticks so each row can say what the fit will do.
-
-        Deliberately one-way: the two tick columns are independent choices
-        and all four pairings mean something different. They are reported
-        together, never wired together.
-        """
-        self._refine_boxes = {k: v for k, v in boxes.items()
-                              if k in self._status_lbls}
+        """Attach the Refine ticks so each row's name turns green while its
+        parameter is selected to refine."""
+        self._refine_boxes = dict(boxes)
         for box in self._refine_boxes.values():
             box.toggled.connect(self._sync_status)
         self._sync_status()
 
     def sync_status(self):
-        """Recompute every row's outcome.
-
-        Needed because the labels are driven by ``toggled``, and a signal
-        only fires when something *changes*: ``apply_dict_to_widgets``
-        restores every tick with signals BLOCKED, so a reopened project
-        showed whatever the labels happened to say before. The same trap
-        ``_sync_seed_enabled`` already exists to work around.
-        """
+        """Recompute every name colour. Needed because project restore sets
+        the ticks with signals blocked, so ``toggled`` never fires."""
         self._sync_status()
 
     def _sync_status(self, *_args):
-        for key, lbl in self._status_lbls.items():
-            box = self._refine_boxes.get(key)
-            if box is None:
-                continue
-            refined = box.isChecked()
-            seeded = self._seed_boxes[key].isChecked()
-            lbl.setText(OUTCOME[(refined, seeded)])
-            lbl.setStyleSheet(
-                "font-size:10px;color:" + ("#d7861f" if refined else "#8a8a8a"))
+        for name, w in self._name_widgets.items():
+            box = self._refine_boxes.get(_REFINE_KEY_FOR.get(name, ""))
+            refined = box is not None and box.isChecked()
+            w.setStyleSheet(
+                f"color:{REFINED_COLOR};" if refined else "")
+            if name == "distortion":
+                w.setStyleSheet(
+                    "text-align:left;padding:0;border:none;"
+                    + (f"color:{REFINED_COLOR};" if refined else ""))

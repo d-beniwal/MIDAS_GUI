@@ -363,9 +363,13 @@ def test_batch_parallel_frame_done_reorders_out_of_completion_order():
 
 def _make_h5_stack(path, n_raw=10, size=4):
     h5py = pytest.importorskip("h5py")
+    # Non-zero: an all-zero frame 0 would trip the Dark-curation epic's
+    # "start at 1 when frame 0 is a blank arming frame" default (see
+    # widgets.py's _first_raw_frame_is_blank / _autofill_frame_range),
+    # which this file's tests are not about.
     with h5py.File(str(path), "w") as f:
         f.create_dataset("exchange/data",
-                          data=np.zeros((n_raw, size, size), dtype=np.float32))
+                          data=np.full((n_raw, size, size), 500.0, dtype=np.float32))
 
 
 def test_frame_range_multi_file_hdf5_spans_all_files_with_combine_chunk(tmp_path):

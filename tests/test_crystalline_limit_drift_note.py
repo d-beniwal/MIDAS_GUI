@@ -129,12 +129,11 @@ def test_feeding_the_result_back_does_not_silence_the_warning(tab):
     bad = _result(tab, Lsd=2_382_051.0)
     assert tab._crystalline_at_limit(bad) == {"Lsd"}
 
-    # ...now the feedback lands, exactly as _on_done does it.
+    # ...now the feedback lands, exactly as _on_done does it. Since the
+    # upstream merge, _seed_from_result promotes only what the last run
+    # actually refined, read from _last_refine_flags. The premise of this
+    # test is that the feedback DOES land on Lsd, so the flags have to say so.
     tab._feedback_check.setChecked(True)
-    # Since the upstream merge, _seed_from_result promotes only what the
-    # last run actually refined, read from _last_refine_flags. The
-    # premise of this test is that the feedback DOES land on Lsd, so
-    # the flags have to say so.
     tab._last_refine_flags = {"BC": True, "Lsd": True, "ty": True, "tz": True}
     tab._seed_from_result(bad)
     assert tab._seed_lsd.value() == pytest.approx(2382.051)   # seed is gone
@@ -241,7 +240,7 @@ def _mode(tab, key):
     tab._pipeline.setCurrentIndex(tab._pipeline.findData(key))
 
 
-def test_four_stage_ignores_the_em_iters_box(tab):
+def test_legacy_four_stage_round_count_and_one_shot_cap(tab):
     """The defect this file's cap shipped with.
 
     autocalibrate_four_stage does not take n_iter at all -- it runs
@@ -262,33 +261,29 @@ def test_four_stage_ignores_the_em_iters_box(tab):
 
     _mode(tab, "one_shot")
     assert _tol_lsd(tab) == pytest.approx(1250.0)         # 5 mm / 4
-    _mode(tab, "four_stage")
-    assert _tol_lsd(tab) == pytest.approx(1000.0)         # 5 mm / 5
-    # Either way the product is the cap the user asked for -- that is the
-    # whole invariant.
+    # The product is the cap the user asked for.
     assert _tol_lsd(tab) * tab._recentre_rounds() == pytest.approx(5000.0)
 
 
 def test_a_cap_is_not_promised_where_it_cannot_be_kept(tab):
-    """first_time takes no bounds at all and joint's round count is not
-    knowable up front. Dividing there would hand the backend a tighter
-    window while still claiming a bound it cannot enforce."""
+    """Frozen-point search is not bounded by the GUI's ranges."""
     cb, spin, combo = tab._limit_widgets["Lsd"]
     combo.setCurrentText("mm"); spin.setValue(5.0); cb.setChecked(True)
     tab._hard_cap.setChecked(True)
 
-    for key in ("first_time", "joint"):
+    for key in ("frozen_point", "frozen_point_one_shot"):
         _mode(tab, key)
         assert tab._cap_divisor() == 1, key
         assert _tol_lsd(tab) == pytest.approx(5000.0), key
         assert "cannot be honoured" in tab._limits_note.text() \
-            or "not used by this pipeline" in tab._limits_note.text(), key
+            or "not used by this pipeline" in tab._limits_note.text() \
+            or "cannot bound the combined run" in tab._limits_note.text(), key
 
 
 def test_a_pipeline_that_ignores_the_windows_says_so(tab):
-    """"Always applied" is false for first_time/frozen_point, and a reader
+    """"Always applied" is false for frozen_point, and a reader
     who believes it tightens a window that was never consulted."""
-    for key in ("first_time", "frozen_point"):
+    for key in ("frozen_point",):
         _mode(tab, key)
         txt = tab._limits_note.text()
         assert txt.startswith("Set, but not used by this pipeline: "), key
@@ -308,5 +303,14 @@ def test_switching_pipeline_refreshes_the_note(tab):
     tab._n_iter.setValue(4)
     _mode(tab, "one_shot")
     assert "4 rounds" in tab._limits_note.text()
-    _mode(tab, "four_stage")
-    assert "5 rounds" in tab._limits_note.text()
+    _mode(tab, "frozen_point_one_shot")
+    assert "One-shot stage only" in tab._limits_note.text()
+    assert "around the Frozen-point result" in tab._limits_note.text()
+
+
+def test_both_calibration_pages_offer_only_the_three_pipelines(tab):
+    expected = ["one_shot", "frozen_point", "frozen_point_one_shot"]
+    for page in (tab, tab._hydra_page):
+        combo = page._pipeline
+        assert [combo.itemData(i) for i in range(combo.count())] == expected
+        assert combo.currentData() == "one_shot"

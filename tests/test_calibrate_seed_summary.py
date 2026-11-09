@@ -167,48 +167,32 @@ def test_the_three_tilt_boxes_are_the_same_width(tab):
 # parameter you are not refining is how you pin it to a measured value. So
 # each row states the OUTCOME of the pairing instead.
 
-def _status(tab):
-    return {k: l.text() for k, l in tab._param_table._status_lbls.items()}
+def _green(tab, slot):
+    """True while the row's name is coloured as 'selected to refine'."""
+    return "color:#2e9d4f" in tab._param_table._name_widgets[slot].styleSheet()
 
 
-def test_every_seed_row_says_what_the_fit_will_do(tab):
-    assert set(_status(tab)) == {"BC", "Lsd", "tx", "ty", "tz", "Distortion"}
-
-
-def test_refined_but_unseeded_reads_as_auto_seeded(tab):
+def test_a_row_name_is_green_exactly_while_it_is_refined(tab):
+    tab._ref_lsd.setChecked(False)
+    assert not _green(tab, "Lsd")
     tab._ref_lsd.setChecked(True)
-    tab._seed_en_lsd.setChecked(False)
-    assert _status(tab)["Lsd"] == "refined, auto-seeded"
+    assert _green(tab, "Lsd")
 
 
-def test_refined_and_seeded_reads_as_starting_from_the_value(tab):
-    tab._ref_lsd.setChecked(True)
-    tab._seed_en_lsd.setChecked(True)
-    assert _status(tab)["Lsd"] == "refined, from this value"
-
-
-def test_seeded_but_not_refined_reads_as_pinned(tab):
-    """The combination that looked like a contradiction: the seed dialog
-    shows tx ticked while the Refine card calls tx fixed. Both are right —
-    it means hold tx at this value."""
+def test_seeding_alone_does_not_turn_a_name_green(tab):
+    """Seed and refine stay independent: seeded-but-not-refined pins a value."""
     tab._ref_tx.setChecked(False)
     tab._seed_en_tx.setChecked(True)
-    assert _status(tab)["tx"] == "held at this value"
+    assert not _green(tab, "tx")
 
 
-def test_neither_reads_as_held_at_default(tab):
-    tab._ref_tx.setChecked(False)
-    tab._seed_en_tx.setChecked(False)
-    assert _status(tab)["tx"] == "held at default"
-
-
-def test_the_labels_follow_the_refine_card_live(tab):
-    """The Refine card stays editable while this non-modal dialog is open."""
-    tab._seed_en_ty.setChecked(True)
-    tab._ref_ty.setChecked(True)
-    assert _status(tab)["ty"] == "refined, from this value"
-    tab._ref_ty.setChecked(False)
-    assert _status(tab)["ty"] == "held at this value"
+def test_beam_centre_pair_and_distortion_follow_their_refine_ticks(tab):
+    tab._ref_bc.setChecked(True)
+    assert _green(tab, "BC_y") and _green(tab, "BC_z")
+    tab._ref_bc.setChecked(False)
+    assert not _green(tab, "BC_y") and not _green(tab, "BC_z")
+    tab._ref_dist.setChecked(True)
+    assert _green(tab, "distortion")
 
 
 # ── the two parameter lists read in the same order ──────────────────────
@@ -233,9 +217,9 @@ def _table_order(tab):
 
 def test_the_table_follows_the_canonical_parameter_order(tab):
     """Every parameter, in PARAMETER_LIMIT_ROWS order, named once in
-    column 0. "Beam centre" captions the pair's first row because one seed
+    column 0. BC_Y/BC_Z name the pair because one seed
     tick gates both (the backend takes BC_y/BC_z together)."""
-    assert _table_order(tab) == ["Lsd", "Beam centre", "BC_z", "tx", "ty",
+    assert _table_order(tab) == ["Lsd", "BC_Y", "BC_Z", "tx", "ty",
                                  "tz", "Wavelength", "Distortion"]
 
 

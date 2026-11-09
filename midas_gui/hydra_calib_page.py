@@ -34,7 +34,7 @@ import numpy as np
 from PyQt5 import QtCore, QtWidgets
 
 from midas_gui.constants import (
-    CALIBRANTS, PIPELINES, DEFAULT_PIPELINE, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM,
+    CALIBRANTS, PIPELINES, DEFAULT_PIPELINE, restored_pipeline_label, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM,
     DISTORTION_NAMES)
 from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _NoScrollComboBox, make_kedge_label, make_pixel_label,
@@ -42,7 +42,8 @@ from midas_gui.helpers import (
     widgets_to_dict, apply_dict_to_widgets, _predict_ring_radii, refresh_combo_items,
     browse_start_dir, warn_if_path_missing, suggest_working_dir, rmax_corner_px,
     check_output_dir_writable, scratch_dir, SCRATCH_DIRNAME, apply_radial_threshold,
-    default_radial_threshold_points, median_intensity_near_bc)
+    default_radial_threshold_points, median_intensity_near_bc, geometry_fields_from_file,
+    _apply_im_trans)
 from midas_gui.widgets import (PickableImageViewer, LogPanel, CakeViewer, _convert_radial,
                                OriginToolButton, RadialThresholdEditor)
 from midas_gui.hydra_widgets import (HydraLoaderPanel, HydraDetectorToolbar,
@@ -50,10 +51,11 @@ from midas_gui.hydra_widgets import (HydraLoaderPanel, HydraDetectorToolbar,
 from midas_gui.hydra_calib_widgets import HydraCalibPanelCard
 from midas_gui.workers import CalibrationWorker, IntegrationWorker
 from midas_gui.dialogs import (DistortionRefineDialog, _SaveParamstestDialog,
-                               PARAMETER_LIMIT_ROWS, limit_window)
+                               PARAMETER_LIMIT_ROWS, limit_window, show_error)
 from midas_gui import project
 from midas_gui import settings
 from midas_gui import style as S
+from midas_gui.panel_toggle import install_panel_toggles
 
 
 _KNOWN_CALIB_SUFFIXES = (".instr.txt", ".instr.json", ".txt", ".json")
@@ -74,6 +76,36 @@ def _panel_tagged_path(base: Path, n: int) -> Path:
         if name.endswith(suf):
             return base.with_name(f"{name[:-len(suf)]}_ge{n}{suf}")
     return base.with_name(f"{base.stem}_ge{n}{base.suffix}")
+
+
+_GE_SUFFIX_RE = re.compile(
+    r"_ge([1-4])(" + "|".join(re.escape(s) for s in _KNOWN_CALIB_SUFFIXES) + r")$",
+    re.IGNORECASE)
+
+
+def _calib_siblings(path) -> dict:
+    """Inverse of ``_panel_tagged_path``: if *path*'s filename matches
+    ``..._ge<N><suffix>`` (the "Save All"/"Save Current Panel" naming
+    convention), return the OTHER 3 panels' calibration files that exist on
+    disk, keyed by panel number — *N* itself is never included, since the
+    caller already knows which panel *path* was picked for. Returns ``{}``
+    if *path*'s name doesn't match that convention at all (e.g. a file
+    saved some other way, or one that was never Hydra-tagged)."""
+    p = Path(path)
+    m = _GE_SUFFIX_RE.search(p.name)
+    if not m:
+        return {}
+    n = int(m.group(1))
+    suffix = m.group(2)
+    prefix = p.name[:m.start()]
+    out = {}
+    for other in (1, 2, 3, 4):
+        if other == n:
+            continue
+        cand = p.with_name(f"{prefix}_ge{other}{suffix}")
+        if cand.exists():
+            out[other] = cand
+    return out
 
 
 def _resample_rows_to_eta_grid(cake: np.ndarray, src_eta: np.ndarray,
@@ -206,6 +238,12 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._expid_provider = None     # forwarded by CalibrationTab; see there
         self._run_scratch_id = ""       # one per Run All, shared by its panels
         self._wd_declined = ""          # last unwritable candidate, logged once
+        # Remembered from the last successful Save All, so "Save Current
+        # Panel" defaults into the exact same location/naming — see
+        # _save_all_json/_save_all_paramstest/_save_current_json/
+        # _save_current_paramstest.
+        self._last_save_all_dir: Optional[str] = None        # json's out_dir
+        self._last_save_all_ps_base: Optional[Path] = None   # paramstest's pre-tag out_path
         self._build_ui()
         self._on_panel_changed(self._toolbar.current())
 
@@ -220,11 +258,12 @@ class HydraCalibrationPage(QtWidgets.QWidget):
     # ── UI ────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        root = QtWidgets.QHBoxLayout(self)
-        root.setContentsMargins(6, 6, 6, 6); root.setSpacing(0)
+        # Splitter on top, bottom ribbon (minimised Data / Controls tabs) below.
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(6, 6, 6, 6); root.setSpacing(2)
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         split.setChildrenCollapsible(False); split.setHandleWidth(6)
-        root.addWidget(split)
+        root.addWidget(split, 1)
 
         # ── LEFT: "← Data Viewer" + the Hydra data loader ──
         left = QtWidgets.QWidget()
@@ -360,7 +399,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         afm = S.Form(); afm.row(("start:", self._avg_start), ("end(0=all):", self._avg_end))
         avgc.body.addLayout(afm)
         self._avg_note = QtWidgets.QLabel("")
-        self._avg_note.setStyleSheet("color:#9a9a9a;font-size:10px"); self._avg_note.setWordWrap(True)
+        self._avg_note.setStyleSheet(f"color:{S.MUTED};font-size:10px"); self._avg_note.setWordWrap(True)
         avgc.body.addWidget(self._avg_note)
         self._avg_card = avgc
         self._avg_check.toggled.connect(self._on_avg_toggled)
@@ -390,21 +429,22 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._seed_status_lbl.setWordWrap(True)
         lv.addWidget(self._seed_status_lbl)
 
-        self._panel_hdr = QtWidgets.QLabel("")
-        self._panel_hdr.setStyleSheet(
-            f"color:{S.ACCENT};font-size:11px;font-weight:bold;padding-top:4px;")
-        lv.addWidget(self._panel_hdr)
 
         # Per-panel: Transforms + Initial seed, switched with the active
         # panel — positioned here (between Mean of frames and Refine
         # parameters) to match where tab_calibrate.CalibrationTab's own
         # "Initial seed" card sits, rather than after Run.
+        self._panel_hdr = QtWidgets.QLabel("")
+        self._panel_hdr.setStyleSheet(
+            f"color:{S.ACCENT};font-size:11px;font-weight:bold;padding-top:4px;")
+        lv.addWidget(self._panel_hdr)
         self._card_stack = QtWidgets.QStackedWidget()
         for n in (1, 2, 3, 4):
             card = HydraCalibPanelCard(n)
             card.set_log_fn(self._log_append_raw)
             card.imTransChanged.connect(lambda n=n: self._on_card_transform_changed(n))
             card.calibFileLoaded.connect(self._on_card_calib_file_loaded)
+            card.calibFilePicked.connect(self._on_card_calib_file_picked)
             card.sendToViewer.connect(self.sendGeometryToViewer.emit)
             card._manual_seed_check.toggled.connect(
                 lambda checked, n=n: self._sync_seed_checkbox("_manual_seed_check", n, checked))
@@ -434,7 +474,6 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         ref_note.setWordWrap(True)
         ref_note.setStyleSheet(f"color:{S.MUTED};font-size:10px;padding-bottom:3px;")
         refc.body.addWidget(ref_note)
-        rfl = QtWidgets.QGridLayout(); rfl.setSpacing(4)
         self._ref_lsd = QtWidgets.QCheckBox("Lsd"); self._ref_lsd.setChecked(True)
         self._ref_bc = QtWidgets.QCheckBox("BC"); self._ref_bc.setChecked(True)
         self._ref_ty = QtWidgets.QCheckBox("ty"); self._ref_ty.setChecked(True)
@@ -463,6 +502,29 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._ref_wl = QtWidgets.QCheckBox("Wavelength")
         self._ref_dist = QtWidgets.QCheckBox("Distortion"); self._ref_dist.setChecked(True)
         self._build_rc = QtWidgets.QCheckBox("Residual map"); self._build_rc.setChecked(True)
+
+        # Let each Manual seed row say what the fit will actually do with
+        # that parameter -- the same wiring tab_calibrate does, and the
+        # reason the single-detector dialog explains itself while this one
+        # came up blank. Reported twice: "the manual seed selections about
+        # what to refine information do not get translated to the
+        # mainwindow."
+        #
+        # Deliberately NOT a two-way sync. Seeding and refining are separate
+        # decisions (seeding something you do NOT refine is how you pin it
+        # to a measured value -- which is exactly what tx is for here).
+        # Showing the refine state on each row is what stops the two panels
+        # merely LOOKING like they disagree.
+        #
+        # All four cards get the page's own boxes because the Refine choice
+        # is one setting for all four fits. Wired here, after the Refine
+        # checkboxes above exist, rather than inside the per-panel card loop
+        # above (which runs before this card is built).
+        for card in self._cards.values():
+            card._seed_dialog.set_refine_boxes(
+                {"BC": self._ref_bc, "Lsd": self._ref_lsd, "tx": self._ref_tx,
+                 "ty": self._ref_ty, "tz": self._ref_tz,
+                 "Distortion": self._ref_dist})
 
         # One row per parameter: the refine checkbox on the left, and the
         # backend's always-applied ± tolerance window on the right — Hydra is
@@ -544,6 +606,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         rfl_bottom.addWidget(self._build_rc, 0, 2)
         self._ref_dist.toggled.connect(lambda _=0: self._update_dist_label())
         self._ref_dist.toggled.connect(self._update_limits_note)
+        self._pipeline.currentIndexChanged.connect(self._update_limits_note)
         refc.body.addLayout(rfl_bottom)
         lv.addWidget(refc)
 
@@ -655,6 +718,24 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             "Write one paramstest.txt per panel with a fitted result.")
         self._save_all_ps_btn.clicked.connect(self._save_all_paramstest)
         fv.addLayout(S.button_grid([self._save_all_json_btn, self._save_all_ps_btn], 2))
+        # Save Current Panel — overwrite just the active panel's own
+        # _ge<N>-tagged file (same naming/location as the last Save All, if
+        # one has run this session) without touching the other 3 panels'
+        # files, for the common "re-fit one panel, replace just its file"
+        # workflow.
+        self._save_cur_json_btn = QtWidgets.QPushButton("Save Current Panel .json")
+        self._save_cur_json_btn.setEnabled(False)
+        self._save_cur_json_btn.setToolTip(
+            "Write only the active panel's calibration.json, without touching "
+            "the other panels' saved files.")
+        self._save_cur_json_btn.clicked.connect(self._save_current_json)
+        self._save_cur_ps_btn = QtWidgets.QPushButton("Save Current Panel paramstest.txt")
+        self._save_cur_ps_btn.setEnabled(False)
+        self._save_cur_ps_btn.setToolTip(
+            "Write only the active panel's paramstest.txt, without touching "
+            "the other panels' saved files.")
+        self._save_cur_ps_btn.clicked.connect(self._save_current_paramstest)
+        fv.addLayout(S.button_grid([self._save_cur_json_btn, self._save_cur_ps_btn], 2))
 
         mid_col = QtWidgets.QWidget()
         mid_v = QtWidgets.QVBoxLayout(mid_col); mid_v.setContentsMargins(0, 0, 0, 0); mid_v.setSpacing(0)
@@ -754,6 +835,8 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         split.addWidget(right)
         split.setStretchFactor(0, 0); split.setStretchFactor(1, 0); split.setStretchFactor(2, 1)
         split.setSizes([286, 361, 950])
+        # Data | Controls | Results: minimise Data/Controls to the bottom ribbon.
+        root.addWidget(install_panel_toggles(split, key="hydra_calibrate").ribbon)
 
     # ── Loader signal handlers ──────────────────────────────────────
 
@@ -837,7 +920,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         bits = []
         for n in sorted(found):
             if n not in selected:
-                bits.append(f"<span style='color:#777'>ge{n} excluded</span>")
+                bits.append(f"<span style='color:{S.MUTED}'>ge{n} excluded</span>")
                 continue
             tx = self._cards[n].seed_tx_value()
             mark = " ▶ fitting" if running == n else ""
@@ -847,6 +930,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         head = (f"<b>Fitting {n_sel} panel{'' if n_sel == 1 else 's'} "
                 f"independently</b> — ")
         self._panels_lbl.setText(head + " &nbsp;·&nbsp; ".join(bits))
+
     # ── Save All (one file per panel) ────────────────────────────────
 
     def _default_save_stem(self) -> str:
@@ -886,6 +970,9 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         enabled = bool(self._fitted_panels())
         self._save_all_json_btn.setEnabled(enabled)
         self._save_all_ps_btn.setEnabled(enabled)
+        cur_enabled = self._active_card is not None and self._active_card.result is not None
+        self._save_cur_json_btn.setEnabled(cur_enabled)
+        self._save_cur_ps_btn.setEnabled(cur_enabled)
 
     def _save_all_json(self):
         panels = self._fitted_panels()
@@ -896,6 +983,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             browse_start_dir(self._out_ed.text().strip() or self._loader.current_path()))
         if not out_dir:
             return
+        self._last_save_all_dir = out_dir
         stem = self._default_save_stem()
         saved, errors = [], []
         for n in panels:
@@ -925,6 +1013,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "No output", "Please specify an output file."); return
         tmpl_path = dlg.template_path()
         base = Path(out_path)
+        self._last_save_all_ps_base = base
         saved, errors = [], []
         for n in panels:
             path_n = _panel_tagged_path(base, n)
@@ -940,6 +1029,49 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         if errors:
             msg += "\n\nFailed:\n" + "\n".join(errors)
         QtWidgets.QMessageBox.information(self, "Save All paramstest.txt", msg)
+
+    def _save_current_json(self):
+        card = self._active_card
+        if card is None or card.result is None:
+            return
+        n = card.panel_number
+        out_dir = self._last_save_all_dir or browse_start_dir(
+            self._out_ed.text().strip() or self._loader.current_path())
+        default_path = str(Path(out_dir) / f"{self._default_save_stem()}_ge{n}.instr.json") \
+            if out_dir else f"{self._default_save_stem()}_ge{n}.instr.json"
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, f"Save ge{n} calibration.json", default_path, "JSON (*.json)")
+        if not path:
+            return
+        try:
+            card.write_json(path)
+            self._log.append(f"[ge{n}] saved {path}")
+        except Exception:
+            import traceback
+            QtWidgets.QMessageBox.critical(self, "Save failed", traceback.format_exc())
+            self._log.append(f"[ge{n}] save calibration.json error:\n{traceback.format_exc()}")
+
+    def _save_current_paramstest(self):
+        card = self._active_card
+        if card is None or card.result is None:
+            return
+        n = card.panel_number
+        base = self._last_save_all_ps_base or Path(self._default_save_path(".instr.txt"))
+        default_path = _panel_tagged_path(base, n)
+        dlg = _SaveParamstestDialog(self, default_out=str(default_path))
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        out_path = dlg.out_path()
+        if not out_path:
+            QtWidgets.QMessageBox.warning(self, "No output", "Please specify an output file."); return
+        tmpl_path = dlg.template_path()
+        try:
+            card.write_paramstest(out_path, tmpl_path)
+            self._log.append(f"[ge{n}] paramstest.txt saved: {out_path}")
+        except Exception:
+            import traceback
+            show_error(self, "Save failed", traceback.format_exc(), log=self._log,
+                       log_prefix=f"[ge{n}] save paramstest error:\n")
 
     def _on_siblings_changed(self, siblings: dict):
         self._toolbar.set_available(siblings.keys())
@@ -987,6 +1119,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         chk.blockSignals(False)
         self._reset_threshold_defaults_for_active_panel()
         self._update_limits_note()
+        self._update_save_all_enabled()
         self._refresh_display()
 
     def _on_card_transform_changed(self, n: int):
@@ -998,6 +1131,39 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             self._wl.setValue(float(g["wavelength_A"]))
         if g.get("pxY"):
             self._pxY.setValue(float(g["pxY"]))
+
+    def _on_card_calib_file_picked(self, n: int, path: str):
+        """A calibration file was picked for panel *n* — resolve its
+        ``_ge<N>``-tagged siblings (the Save All/Save Current Panel naming
+        convention, see ``_calib_siblings``) and seed the OTHER 3 panels
+        from them too, mirroring how picking any one ge1-4 raw-data file
+        already auto-discovers the other 3 panels' data."""
+        siblings = _calib_siblings(path)
+        if not siblings:
+            self._log.append(
+                f"[ge{n}] calibration file name doesn't follow the _ge<N> "
+                "convention (or no sibling files were found) — only this "
+                "panel was loaded.")
+            return
+        loaded = []
+        for m, sib_path in siblings.items():
+            try:
+                g = geometry_fields_from_file(str(sib_path))
+            except Exception as e:
+                self._log.append(f"[ge{m}] could not load sibling {sib_path}: {e}")
+                continue
+            self._cards[m].seed_from_geometry(g)
+            self._on_card_calib_file_loaded(g)
+            loaded.append(m)
+        missing = [m for m in (1, 2, 3, 4) if m != n and m not in siblings]
+        if loaded:
+            self._log.append(
+                f"[ge{n}] also loaded sibling calibration files for "
+                + ", ".join(f"ge{m}" for m in loaded) + ".")
+        if missing:
+            self._log.append(
+                "No sibling calibration file found for "
+                + ", ".join(f"ge{m}" for m in missing) + ".")
 
     def _sync_seed_checkbox(self, attr: str, src_panel: int, checked: bool,
                             block: bool = True):
@@ -1078,7 +1244,13 @@ class HydraCalibrationPage(QtWidgets.QWidget):
 
     def _calib_image_for(self, img, n: int):
         """Radially-thresholded copy of panel ``n``'s raw image if enabled,
-        centred on that panel's own beam centre (its Seed BC spinboxes)."""
+        centred on that panel's own beam centre (its Seed BC spinboxes).
+
+        That BC is in the panel's Transforms-applied (displayed) frame, same
+        as ``CalibrationTab._calib_image`` — so ``img`` (raw) is transformed,
+        thresholded, then transformed back, keeping it raw-oriented for the
+        callers (preview/``CalibrationWorker``) that apply ``im_trans``
+        themselves (see that method's docstring for why)."""
         if img is None:
             return None
         if self._thr_check.isChecked():
@@ -1086,6 +1258,11 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             bc_y = card._seed_bcy.value() if card is not None else 0.0
             bc_z = card._seed_bcz.value() if card is not None else 0.0
             radii, values = self._thr_editor.points()
+            codes = tuple(card.im_trans_codes()) if card is not None else ()
+            if codes:
+                img_t = _apply_im_trans(img, codes)
+                img_t = apply_radial_threshold(img_t, bc_y, bc_z, radii, values)
+                return _apply_im_trans(img_t, tuple(reversed(codes)))
             return apply_radial_threshold(img, bc_y, bc_z, radii, values)
         return img
 
@@ -1250,6 +1427,13 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         tail = "" if tols else "  — backend defaults; edit any to tighten or loosen"
         self._limits_note.setText("Always applied, centred on the seed: "
                                   + "   ".join(bits) + tail)
+        mode = self._pipeline.currentData()
+        if mode == "frozen_point":
+            self._limits_note.setText("Frozen-point uses backend search windows; "
+                                      "these GUI ± ranges are not applied.")
+        elif mode == "frozen_point_one_shot":
+            self._limits_note.setText("One-shot stage only (around the Frozen-point "
+                                      "result): " + "   ".join(bits) + tail)
 
     # ── Run ────────────────────────────────────────────────────────
 
@@ -1650,13 +1834,32 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         else:
             self._run_integration(n, result)
 
-    # ── Import from Data Viewer ──────────────────────────────────────
+    # ── Import from / export to Data Viewer ───────────────────────────
+
+    def export_for_viewer(self) -> dict:
+        """Anchor path + each present panel's best-known geometry (fitted
+        result if present, else current seed) — mirrors
+        ``HydraViewerPage.export_for_calibration``, for the Data Viewer's
+        Hydra page's "← Get from Calibrate" pull."""
+        siblings = self._loader.siblings()
+        geometries = {}
+        for n in siblings:
+            card = self._cards.get(n)
+            if card is None:
+                continue
+            g = dict(card.export_geometry())
+            g.setdefault("wavelength_A", self._wl.value())
+            g.setdefault("pxY", self._pxY.value())
+            geometries[n] = g
+        return {"anchor_path": self._loader.current_path(), "geometries": geometries}
 
     def import_from_viewer(self, data: dict):
         data = data or {}
         anchor = data.get("anchor_path")
+        applied = False
         if anchor:
             self._loader.set_path(anchor)
+            applied = True
         for n_key, g in (data.get("geometries") or {}).items():
             n = int(n_key)
             card = self._cards.get(n)
@@ -1667,7 +1870,12 @@ class HydraCalibrationPage(QtWidgets.QWidget):
                 self._wl.setValue(float(g["wavelength_A"]))
             if g.get("pxY"):
                 self._pxY.setValue(float(g["pxY"]))
-        self._log.append("Geometry imported from Data Viewer (Hydra).")
+            applied = True
+        if applied:
+            self._log.append("Geometry imported from Data Viewer (Hydra).")
+        else:
+            self._log.append(
+                "Nothing loaded in Data Viewer (Hydra) yet — load data there first.")
 
     # ── GUI state ────────────────────────────────────────────────────
 
@@ -1710,7 +1918,10 @@ class HydraCalibrationPage(QtWidgets.QWidget):
     def set_state(self, state: dict):
         if not state:
             return
-        apply_dict_to_widgets(self._state_widgets(), state.get("fields", {}))
+        fields = dict(state.get("fields", {}))
+        if "pipeline" in fields:
+            fields["pipeline"] = restored_pipeline_label(fields["pipeline"])
+        apply_dict_to_widgets(self._state_widgets(), fields)
         # apply_dict_to_widgets restores with signals blocked, so neither the
         # threshold editor's editable/visual state nor the Limits note
         # resyncs on its own — do both explicitly (same precedent as

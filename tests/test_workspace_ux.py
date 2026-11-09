@@ -207,6 +207,40 @@ def test_maybe_offer_restore_autosave_decline_and_accept(
     win._project_ctx.path = None
 
 
+def test_restart_resume_draft_applies_silently_without_prompting(
+        win, tmp_path, monkeypatch, no_modal_dialogs):
+    """restart_app(resume=True)'s draft (written by
+    _save_autosave_draft_for_restart, marked __auto_resume__) is applied by
+    maybe_offer_restore_autosave immediately, with NO "Restore unsaved
+    session?" confirmation — the user already opted in by clicking "Restart
+    now" in _offer_restart — unlike the genuine crash-recovery draft path
+    covered by test_maybe_offer_restore_autosave_decline_and_accept."""
+    MB = no_modal_dialogs
+    draft = tmp_path / "restart_draft.json"
+    monkeypatch.setattr(settings, "autosave_draft_path", lambda: draft)
+
+    asked = []
+    monkeypatch.setattr(MB, "question",
+                         staticmethod(lambda *a, **k: asked.append(True) or MB.No))
+
+    save_path = str(tmp_path / "proj_for_restart.h5")
+    project.create_project(save_path)
+    win._set_project_path(save_path)
+
+    win._save_autosave_draft_for_restart()
+    assert draft.is_file()
+
+    win._set_project_path(None)   # simulate the fresh relaunched instance
+    win.maybe_offer_restore_autosave()
+
+    assert asked == []                            # no confirmation prompt
+    assert win._project_ctx.path == save_path     # restored, not left "Untitled"
+    assert not draft.exists()
+
+    win._set_project_path(None)
+    win._set_workspace_dirty(False)   # leave a clean baseline for later tests
+
+
 # ── Open-Project unsaved-changes guard (_confirm_ok_to_switch_project) ───────
 def test_confirm_ok_to_switch_project_clean_state_is_ok(win):
     win._set_workspace_dirty(False)
@@ -476,3 +510,103 @@ def test_project_selection_dialog_wraps_picker_for_a_known_path(qapp, project_wi
         assert "single" in sel["calib_refs"]
     finally:
         dlg.close()
+
+
+# ── Solve Cell: single latest analysis record in the project ─────────────────
+def _solve_cell_spots(n=6):
+    import pandas as pd
+    return pd.DataFrame({
+        "panel_id": 1, "row": np.linspace(1, 50, n), "col": np.linspace(2, 60, n),
+        "frame": np.linspace(0, 4, n), "loaded_frame_idx": np.arange(n) % 3,
+        "omega_deg": np.linspace(0, 5, n), "two_theta_deg": np.linspace(3, 8, n),
+        "qsample_x": np.linspace(0.1, 1.0, n), "qsample_y": np.linspace(0.2, 1.1, n),
+        "qsample_z": np.linspace(0.3, 1.2, n), "spot_id": np.arange(n),
+    })
+
+
+def test_picker_history_and_save_as_dialogs_know_about_solve_cell(qapp, tmp_path):
+    import pandas as pd
+    from midas_gui.dialogs import (ProjectContentsPicker, ProjectHistoryDialog,
+                                    SaveAsHistoryDialog)
+    path = str(tmp_path / "sc.h5")
+    project.create_project(path)
+    project.write_solve_cell_ingest(path, meta={"summary": {"n_spots": 6}}, spots_df=_solve_cell_spots())
+
+    picker = ProjectContentsPicker()
+    assert picker.set_project(path) is True       # solve-cell-only project is openable
+    assert picker.selection()["solve_cell"] is True
+    picker._solve_cell_check.setChecked(False)
+    assert picker.selection()["solve_cell"] is False
+
+    dlg = ProjectHistoryDialog(path)
+    try:
+        assert [r["kind"] for r in dlg._rows] == ["Solve Cell"]
+        dlg._table.selectRow(0)
+        assert "n_spots" in dlg._detail.toPlainText()
+    finally:
+        dlg.deleteLater()
+
+    assert project.analysis_summary(path)["solve_cell"] == 1
+    sdlg = SaveAsHistoryDialog(project.analysis_summary(path))
+    try:
+        from PyQt5.QtWidgets import QLabel
+        assert any("Solve Cell" in lbl.text() for lbl in sdlg.findChildren(QLabel))
+    finally:
+        sdlg.deleteLater()
+
+
+def test_save_project_writes_solve_cell_results_and_open_restores_them(
+        win, tmp_path, no_modal_dialogs):
+    tab = win._solve_cell_tab
+    spots = _solve_cell_spots()
+    mask = np.zeros((4, 4), dtype=bool)
+    tab._on_ingest_done({"spots_df": spots, "summary": {"n_spots": len(spots)},
+                         "preview": {"mask": mask}})      # computed with no project open
+    path = str(tmp_path / "e2e.h5")
+    project.create_project(path)      # what the Save As dialog does before save_project
+    try:
+        win.save_project(path)
+        assert project.has_solve_cell(path)           # flushed by save_project
+
+        tab._reset_ingest_results()
+        tab._spots_df = None
+        tab._ingest_preview_by_panel.clear()
+        # restore from the analysis alone (workspace tab not selected)
+        win._open_project_selection(
+            path, {"workspace_tabs": [], "solve_cell": True, "calib_refs": {}, "integrate_refs": {}})
+        assert len(tab._spots_df) == len(spots)
+        assert tab._ingest_preview_by_panel[1]["mask"].shape == (4, 4)
+
+        # ...and alongside the saved workspace (which then owns the panel config)
+        tab._spots_df = None
+        win._open_project_selection(
+            path, {"workspace_tabs": ["Solve Cell"], "solve_cell": True,
+                   "calib_refs": {}, "integrate_refs": {}})
+        assert len(tab._spots_df) == len(spots)
+
+        # unchecked: the record is left alone
+        tab._spots_df = None
+        win._open_project_selection(
+            path, {"workspace_tabs": [], "solve_cell": False, "calib_refs": {}, "integrate_refs": {}})
+        assert tab._spots_df is None
+    finally:
+        win._set_project_path(None)
+
+
+def test_solve_cell_tab_right_click_offers_about(win, monkeypatch):
+    from PyQt5 import QtCore, QtWidgets
+    from midas_gui import constants as C
+    win.apply_tab_visibility(list(C.OPTIONAL_TABS))
+    bar = win._tabs.tabBar()
+    idx = win._tabs.indexOf(win._solve_cell_tab)
+    assert idx >= 0
+    shown = {}
+    monkeypatch.setattr(win._solve_cell_tab, "show_about", lambda: shown.setdefault("about", True))
+    monkeypatch.setattr(QtWidgets.QMenu, "exec_",
+                        lambda menu, *a: next(x for x in menu.actions() if x.text() == "About"))
+    win._on_tab_bar_context_menu(bar.tabRect(idx).center())
+    assert shown.get("about") is True
+    shown.clear()
+    other = next(i for i in range(win._tabs.count()) if i != idx)
+    win._on_tab_bar_context_menu(bar.tabRect(other).center())
+    assert not shown

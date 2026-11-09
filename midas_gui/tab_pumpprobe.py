@@ -28,6 +28,7 @@ import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
+from midas_gui.panel_toggle import install_panel_toggles
 from midas_gui.constants import (KERNELS, DEFAULT_KERNEL, DEFAULT_TRXRD_DIR,
                                  DEFAULT_TRXRD_PREFIX, DEFAULT_TRXRD_CALIB,
                                  DEFAULT_TRXRD_MASK)
@@ -39,6 +40,8 @@ from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, DataLoaderPanel,
 from midas_gui.workers import PumpProbeWorker
 from midas_gui.dialogs import show_error
 from midas_gui import style as S
+from midas_gui import qshift
+from midas_gui.color_scale import ColorScaleControls
 
 
 # ── TRR filename parsing ─────────────────────────────────────────────────────────
@@ -127,7 +130,10 @@ class PumpProbeTab(QtWidgets.QWidget):
         self._worker = None
         self._frames = []                   # [(path, delay, fshw)]
         self._delays = []                   # unique parsed delays (pre-integration)
-        self._data = None                   # last finished() payload
+        self._data = None                   # payload the views plot (aligned if enabled)
+        self._data_raw = None               # last finished() payload, never modified
+        self._qa_info = None                # last q-alignment result (see qshift.py)
+        self._qa_syncing = False            # guards spin <-> region feedback
         self._bands = []                    # [(q_lo, q_hi)] kinetics q-bands
         # Shared plot-style state (draw mode + sizes), like the Batch tab.
         # Publication-quality defaults: large readable labels, bold-ish lines.
@@ -139,6 +145,7 @@ class PumpProbeTab(QtWidgets.QWidget):
         self._lines_curves = []             # [(curve, color)] for ΔI vs q
         self._kin_curves = []               # [(curve, color)] for kinetics
         self._means_curves = []             # [(curve, color)] for mean patterns
+        self._qa_items = []                 # transient items on the Q-alignment plots
         self._build_ui()
         # Default the data loader to the shipped TRR folder + auto-scan if present.
         self._loader.set_path(DEFAULT_TRXRD_DIR)
@@ -189,6 +196,15 @@ class PumpProbeTab(QtWidgets.QWidget):
             "kin_xmode": self._kin_xmode,
             "means_band": self._means_band,
             "means_logy": self._means_logy,
+            "qa_check": self._qa_check,
+            "qa_lo": self._qa_lo,
+            "qa_hi": self._qa_hi,
+            "qa_method": self._qa_method,
+            "qa_shift": self._qa_shift,
+            "qa_target": self._qa_target,
+            "qa_fixed": self._qa_fixed,
+            "qa_smooth": self._qa_smooth,
+            "qa_fit_on": self._qa_fit_on,
         }
 
     def get_state(self) -> dict:
@@ -196,12 +212,15 @@ class PumpProbeTab(QtWidgets.QWidget):
             "fields": widgets_to_dict(self._state_widgets()),
             "corr": self._corr_widget.get_state(),
             "loader": self._loader.get_state(),
+            "heatmap_color": self._hm_scale.display_state(),
         }
 
     def set_state(self, state: dict):
         self._loader.set_state(state.get("loader") or {})
         apply_dict_to_widgets(self._state_widgets(), state.get("fields", {}))
         self._corr_widget.set_state(state.get("corr") or {})
+        self._on_heatmap_range_changed()
+        self._hm_scale.restore_state(state.get("heatmap_color") or {})
         self._scan()
 
     # ── UI ─────────────────────────────────────────────────────────
@@ -210,7 +229,11 @@ class PumpProbeTab(QtWidgets.QWidget):
         root.setContentsMargins(6, 6, 6, 6); root.setSpacing(0)
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         split.setChildrenCollapsible(False); split.setHandleWidth(6)
-        root.addWidget(split)
+        _body = QtWidgets.QWidget()
+        self._body_lay = QtWidgets.QVBoxLayout(_body)
+        self._body_lay.setContentsMargins(0, 0, 0, 0); self._body_lay.setSpacing(2)
+        self._body_lay.addWidget(split, 1)
+        root.addWidget(_body)
 
         # ── LEFT: data loader (folder + dark/bright/background + mask) ──
         self._loader = DataLoaderPanel(mode="stream")
@@ -245,6 +268,8 @@ class PumpProbeTab(QtWidgets.QWidget):
         cal.body.addWidget(self._calib_lbl)
         self._calib_ed = QtWidgets.QLineEdit()
         self._calib_ed.setPlaceholderText("calibration.json / paramstest.txt / .poni…")
+        from midas_gui.helpers import attach_file_info
+        attach_file_info(self._calib_ed)
         cr = QtWidgets.QHBoxLayout(); cr.setSpacing(4); cr.addWidget(self._calib_ed, 1)
         bc = _br(); bc.clicked.connect(lambda: self._calib_ed.setText(
             _browse(self, "Open calibration file",
@@ -334,20 +359,21 @@ class PumpProbeTab(QtWidgets.QWidget):
         nf = S.Form(); nf.row(("q lo:", self._norm_lo), ("q hi:", self._norm_hi))
         pp.body.addLayout(nf)
         self._auto_v = QtWidgets.QCheckBox("Auto colour range (ΔI)"); self._auto_v.setChecked(True)
-        pp.body.addWidget(self._auto_v)
+        self._auto_v.hide()  # legacy state; absolute controls live beside the map
         self._vrange = _fspin(0.0, 1e9, 4, 0.12)
         self._vrange.setEnabled(False)
         self._auto_v.toggled.connect(lambda c: self._vrange.setEnabled(not c))
-        self._auto_v.toggled.connect(self._replot)
-        self._vrange.valueChanged.connect(self._replot)
-        vf = S.Form(); vf.row(("±ΔI range:", self._vrange))
-        pp.body.addLayout(vf)
+        self._auto_v.toggled.connect(self._on_heatmap_range_changed)
+        self._vrange.valueChanged.connect(self._on_heatmap_range_changed)
+        self._vrange.hide()
         self._cmap = _NoScrollComboBox()
         self._cmap.addItems(["bwr", "CET-D1", "CET-D9", "seismic"])
         self._cmap.currentIndexChanged.connect(self._replot)
         cf = S.Form(); cf.row(("ΔI colormap:", self._cmap))
         pp.body.addLayout(cf)
         lv.addWidget(pp)
+
+        lv.addWidget(self._build_qalign_card())
 
         # Run
         self._run_btn = S.primary_btn("Integrate + build ΔI")
@@ -373,6 +399,7 @@ class PumpProbeTab(QtWidgets.QWidget):
         self._build_lines_view()
         self._build_kinetics_view()
         self._build_means_view()
+        self._build_qalign_view()
         pv.addWidget(self._views, 1)
         right.addWidget(plot_box)
         self._log = LogPanel()
@@ -382,6 +409,8 @@ class PumpProbeTab(QtWidgets.QWidget):
         split.addWidget(right)
         split.setStretchFactor(0, 0); split.setStretchFactor(1, 0); split.setStretchFactor(2, 1)
         split.setSizes([260, 380, 960])
+        # Data | Controls | Results: minimise Data/Controls to the bottom ribbon.
+        self._body_lay.addWidget(install_panel_toggles(split, key="pumpprobe").ribbon)
 
     # ── shared plot-style toolbar + chrome helpers ─────────────────
     def _build_style_toolbar(self):
@@ -402,7 +431,7 @@ class PumpProbeTab(QtWidgets.QWidget):
             b.setAutoRaise(True); b.clicked.connect(slot); return b
 
         def _sep():
-            s = QtWidgets.QLabel("|"); s.setStyleSheet("color:#888;"); return s
+            s = QtWidgets.QLabel("|"); s.setStyleSheet(f"color:{S.MUTED};"); return s
 
         def _group(label, tip_minus, on_minus, tip_plus, on_plus):
             bar.addWidget(_tbtn("−", tip_minus, on_minus))
@@ -517,9 +546,17 @@ class PumpProbeTab(QtWidgets.QWidget):
         self._hm_plot = pg.PlotWidget(background="w", axisItems={"left": self._hm_yaxis})
         self._hm_img = pg.ImageItem()
         self._hm_plot.addItem(self._hm_img)
-        self._hm_bar = None
         self._chrome(self._hm_plot, title="ΔI(q, delay)", xlabel="delay (s)", ylabel="Q (Å⁻¹)")
-        hsplit.addWidget(self._hm_plot)
+        histogram = pg.HistogramLUTWidget()
+        histogram.setBackground("w")
+        histogram.setImageItem(self._hm_img)
+        self._hm_scale = ColorScaleControls(histogram, integer=False)
+        map_container = QtWidgets.QWidget()
+        map_row = QtWidgets.QHBoxLayout(map_container)
+        map_row.setContentsMargins(0, 0, 0, 0)
+        map_row.addWidget(self._hm_plot, 1)
+        map_row.addWidget(self._hm_scale)
+        hsplit.addWidget(map_container)
         # Reference pattern I(q) beside the map, sharing the (radial) y-axis.
         self._ref_plot = pg.PlotWidget(background="w")
         self._ref_plot.setYLink(self._hm_plot)
@@ -717,10 +754,13 @@ class PumpProbeTab(QtWidgets.QWidget):
         self._run_btn.setEnabled(True); self._abort_btn.setEnabled(False)
         self._prog.setVisible(False)
         self._data = data
+        self._data_raw = data
+        self._qa_info = None
         self._log.append(
             f"[pump] done — {data['n']} frames, {len(data['delays'])} delays; "
             f"reference = {len(data['ref_delays'])} delay(s)")
-        self._replot()
+        self._qa_seed_window()
+        self._qa_update()                   # re-aligns if enabled, else just replots
 
     def _on_fail(self, msg):
         self._run_btn.setEnabled(True); self._abort_btn.setEnabled(False)
@@ -738,11 +778,12 @@ class PumpProbeTab(QtWidgets.QWidget):
             return d["tth_axis"], "2θ (°)"
         return d["r_axis_px"], "R (px)"
 
-    def _vrange_value(self):
-        if self._auto_v.isChecked() and self._data is not None:
-            v = float(np.nanpercentile(np.abs(self._data["dI"]), 99.0))
-            return v if v > 0 else 1.0
-        return max(1e-9, self._vrange.value())
+    def _on_heatmap_range_changed(self, *_):
+        if not hasattr(self, "_hm_scale"):
+            return
+        self._hm_scale.manual_limits = (None if self._auto_v.isChecked()
+                                        else (-self._vrange.value(), self._vrange.value()))
+        self._replot()
 
     @staticmethod
     def _reset_limits(vb):
@@ -794,27 +835,15 @@ class PumpProbeTab(QtWidgets.QWidget):
         r_px = np.asarray(d["r_axis_px"], dtype=float)   # uniform native radial grid
         n_d, n_r = len(delays), len(r_px)
         r0, r1 = float(r_px[0]), float(r_px[-1])
-        v = self._vrange_value()
         cm = _diverging_cmap(self._cmap.currentText())
         # image: x = delay column index (delays are irregular); y = radial in real R-px
-        self._hm_img.setImage(dI, autoLevels=False, levels=(-v, v))
+        self._hm_scale.render(dI, image_item=self._hm_img)
         try:
             self._hm_img.setColorMap(cm)
         except Exception:
             self._hm_img.setLookupTable(cm.getLookupTable(0.0, 1.0, 256))
         self._hm_img.setRect(QtCore.QRectF(0.0, r0, float(n_d), r1 - r0))
-        # colour bar (create lazily), with readable black chrome + a ΔI label
-        if self._hm_bar is None:
-            try:
-                self._hm_bar = pg.ColorBarItem(values=(-v, v), colorMap=cm, label="ΔI (a.u.)")
-                self._hm_bar.setImageItem(self._hm_img, insert_in=self._hm_plot.getPlotItem())
-            except Exception:
-                self._hm_bar = None
-        else:
-            try:
-                self._hm_bar.setColorMap(cm); self._hm_bar.setLevels((-v, v))
-            except Exception:
-                pass
+        self._hm_scale.histogram.gradient.setColorMap(cm)
         self._style_colorbar()
         # axis titles + ticks. x: real delay values on discrete columns (delays span
         # ~5 decades incl. sign-flipped negatives → not uniformly mappable). y: a true
@@ -964,6 +993,341 @@ class PumpProbeTab(QtWidgets.QWidget):
         else:
             self._bound(self._means_plot, float(np.min(rad)), float(np.max(rad)), lo, hi)
 
+    # ── Q alignment (reference-peak drift correction) ──────────────
+    def _build_qalign_card(self):
+        card = S.make_card("Q alignment (drift correction)")
+        self._qa_check = QtWidgets.QCheckBox("Align patterns to a reference peak")
+        self._qa_check.setToolTip(
+            "Shift every frame in q so the chosen peak stays at one position. Correct\n"
+            "ONLY if that peak is not moved by the pump (substrate, holder, an unpumped\n"
+            "phase) — otherwise real signal is removed. The raw data are never modified.")
+        card.body.addWidget(self._qa_check)
+        note = QtWidgets.QLabel(
+            "Drag the shaded window on the “Q alignment” tab (or type it) around a peak "
+            "the pump does not move.")
+        note.setWordWrap(True); note.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        card.body.addWidget(note)
+
+        self._qa_lo = _fspin(0.0, 100.0, 4, 0.0, "Å⁻¹")
+        self._qa_hi = _fspin(0.0, 100.0, 4, 0.0, "Å⁻¹")
+        self._qa_method = _NoScrollComboBox()
+        self._qa_method.addItem("Pseudo-Voigt fit", "pvoigt")
+        self._qa_method.addItem("Centroid (low S/N)", "centroid")
+        self._qa_shift = _NoScrollComboBox()
+        self._qa_shift.addItem("Scale  (q × k)", "scale")
+        self._qa_shift.addItem("Offset  (q + δ)", "offset")
+        self._qa_shift.setToolTip("Scale matches wavelength / distance drift; offset matches a\n"
+                                  "constant q shift. Both pin the reference peak exactly.")
+        self._qa_target = _NoScrollComboBox()
+        self._qa_target.addItem("Reference-delay mean", "reference")
+        self._qa_target.addItem("First frame", "first")
+        self._qa_target.addItem("Fixed value", "fixed")
+        self._qa_fixed = _fspin(0.0, 100.0, 5, 0.0, "Å⁻¹")
+        self._qa_fixed.setEnabled(False)
+        self._qa_target.currentIndexChanged.connect(
+            lambda *_: self._qa_fixed.setEnabled(self._qa_target.currentData() == "fixed"))
+        self._qa_smooth = _fspin(0, 99, 0, 0, "frames", step=1)
+        self._qa_smooth.setToolTip("Running-median window along acquisition order (0 = off).\n"
+                                   "Keeps fit noise out of the data; drift is slow.")
+        self._qa_fit_on = _NoScrollComboBox()
+        self._qa_fit_on.addItem("All frames", "all")
+        self._qa_fit_on.addItem("Reference frames only (interpolate)", "ref")
+        self._qa_fit_on.setToolTip("Reference frames only: the drift curve ignores frames after\n"
+                                   "the pump, so pump-induced peak changes cannot leak in.")
+        f = S.Form()
+        f.row(("Window:", self._qa_lo), ("to", self._qa_hi))
+        f.row(("Peak:", self._qa_method))
+        f.row(("Correction:", self._qa_shift))
+        f.row(("Pin to:", self._qa_target))
+        f.row(("Value:", self._qa_fixed))
+        f.row(("Smooth:", self._qa_smooth))
+        f.row(("Drift from:", self._qa_fit_on))
+        card.body.addLayout(f)
+
+        btns = QtWidgets.QHBoxLayout(); btns.setSpacing(6)
+        self._qa_apply_btn = QtWidgets.QPushButton("Update alignment")
+        self._qa_apply_btn.clicked.connect(self._qa_update)
+        pick = QtWidgets.QPushButton("Show picker")
+        pick.clicked.connect(lambda: self._views.setCurrentWidget(self._qa_view))
+        btns.addWidget(self._qa_apply_btn, 1); btns.addWidget(pick)
+        card.body.addLayout(btns)
+        self._qa_status = QtWidgets.QLabel("")
+        self._qa_status.setWordWrap(True)
+        self._qa_status.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        card.body.addWidget(self._qa_status)
+
+        self._qa_check.toggled.connect(self._qa_update)
+        for w in (self._qa_lo, self._qa_hi):
+            w.valueChanged.connect(self._qa_on_spin)
+        return card
+
+    def _build_qalign_view(self):
+        w = QtWidgets.QWidget(); v = QtWidgets.QVBoxLayout(w)
+        v.setContentsMargins(0, 0, 0, 0); v.setSpacing(2)
+        split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        # 1. picker: all raw mean patterns + draggable window
+        self._qa_pick = pg.PlotWidget(background="w")
+        self._grid(self._qa_pick)
+        self._chrome(self._qa_pick, title="Pick a pump-invariant peak: drag the shaded window",
+                     xlabel="Q (Å⁻¹)", ylabel="I (a.u.)")
+        self._qa_region = pg.LinearRegionItem(
+            values=(0.0, 0.0), brush=pg.mkBrush(255, 165, 0, 50),
+            pen=pg.mkPen("#e08a00", width=1.5))
+        self._qa_region.setZValue(10)
+        self._qa_region.setVisible(False)
+        self._qa_pick.addItem(self._qa_region, ignoreBounds=True)
+        self._qa_region.sigRegionChangeFinished.connect(self._qa_on_region)
+        split.addWidget(self._qa_pick)
+        # 2. before / after zoom
+        zoom = QtWidgets.QWidget(); zl = QtWidgets.QHBoxLayout(zoom)
+        zl.setContentsMargins(0, 0, 0, 0); zl.setSpacing(2)
+        self._qa_before = pg.PlotWidget(background="w")
+        self._qa_after = pg.PlotWidget(background="w")
+        for pl, t in ((self._qa_before, "Window — before"), (self._qa_after, "Window — after")):
+            self._grid(pl)
+            self._chrome(pl, title=t, xlabel="Q (Å⁻¹)", ylabel="I (a.u.)")
+            zl.addWidget(pl)
+        split.addWidget(zoom)
+        # 3. position vs frame
+        self._qa_pos = pg.PlotWidget(background="w")
+        self._grid(self._qa_pos)
+        self._chrome(self._qa_pos, title="Reference-peak position vs frame",
+                     xlabel="frame (acquisition order)", ylabel="shift (ppm)")
+        self._qa_pos_legend = self._add_legend(self._qa_pos)
+        split.addWidget(self._qa_pos)
+        split.setSizes([260, 260, 220])
+        v.addWidget(split)
+        self._qa_view = w
+        self._views.addTab(w, "Q alignment")
+
+    # -- window <-> spins ---------------------------------------------------
+    def _qa_window(self):
+        return float(self._qa_lo.value()), float(self._qa_hi.value())
+
+    def _qa_seed_window(self):
+        """First time data arrive with no window set: centre one on the strongest peak."""
+        d = self._data_raw
+        lo, hi = self._qa_window()
+        if d is None or hi > lo:
+            return
+        q = np.asarray(d["q_axis"], dtype=float); ref = np.asarray(d["reference"], dtype=float)
+        if q.size < 10 or not np.isfinite(ref).any():
+            return
+        i = int(np.nanargmax(ref)); half = 0.015 * float(q[-1] - q[0])
+        self._qa_syncing = True
+        try:
+            self._qa_lo.setValue(max(float(q[0]), float(q[i]) - half))
+            self._qa_hi.setValue(min(float(q[-1]), float(q[i]) + half))
+        finally:
+            self._qa_syncing = False
+
+    def _qa_on_spin(self, *_):
+        if self._qa_syncing:
+            return
+        lo, hi = self._qa_window()
+        self._qa_syncing = True
+        try:
+            self._qa_region.setVisible(self._data_raw is not None and hi > lo)
+            if hi > lo:
+                self._qa_region.setRegion((lo, hi))
+        finally:
+            self._qa_syncing = False
+        self._replot_qalign_zoom()
+
+    def _qa_on_region(self):
+        if self._qa_syncing:
+            return
+        lo, hi = self._qa_region.getRegion()
+        self._qa_syncing = True
+        try:
+            self._qa_lo.setValue(float(lo)); self._qa_hi.setValue(float(hi))
+        finally:
+            self._qa_syncing = False
+        self._replot_qalign_zoom()
+
+    # -- compute -------------------------------------------------------------
+    def _qa_set_status(self, text, *, bad=False):
+        col = "#c0392b" if bad else S.MUTED
+        self._qa_status.setStyleSheet(f"color:{col};font-size:10px")
+        self._qa_status.setText(text)
+
+    def _qa_update(self, *_):
+        """(Re)build ``self._data`` from the raw payload — aligned if enabled."""
+        raw = self._data_raw
+        if raw is None:
+            self._qa_set_status("")
+            return
+        self._qa_info = None
+        self._data = raw
+        if self._qa_check.isChecked():
+            self._qa_run(raw)
+        else:
+            self._qa_set_status("Alignment off — plotting raw patterns.")
+        self._replot()
+        self._replot_qalign()
+
+    def _qa_run(self, raw):
+        if "profiles" not in raw:
+            self._qa_set_status("Per-frame profiles unavailable — re-run the integration.",
+                                bad=True)
+            return
+        lo, hi = self._qa_window()
+        if hi <= lo:
+            self._qa_set_status("Set a window (drag the shaded region on the Q alignment tab).",
+                                bad=True)
+            return
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            corrected, info = qshift.align_profiles(
+                raw["q_axis"], raw["profiles"], raw["frame_delays"], window=(lo, hi),
+                ref_delays=raw["ref_delays"], method=self._qa_method.currentData(),
+                shift_mode=self._qa_shift.currentData(),
+                target_mode=self._qa_target.currentData(),
+                target_value=self._qa_fixed.value(),
+                smooth=int(self._qa_smooth.value()),
+                fit_on_reference_only=(self._qa_fit_on.currentData() == "ref"))
+        except Exception as e:
+            self._qa_set_status(f"Alignment failed: {e}", bad=True)
+            self._log.append(f"[pump] q-alignment failed: {e}")
+            return
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        res = PumpProbeWorker._group_and_difference(
+            corrected, np.asarray(raw["frame_delays"], dtype=float), raw["ref_delays"])
+        data = dict(raw)
+        for k in ("I_by_delay", "reference", "dI"):
+            data[k] = res[k]
+        data["qalign"] = info
+        self._data = data
+        self._qa_info = info
+        rel = info["curve"] / info["target"] - 1.0
+        n_bad = int((~info["ok"]).sum())
+        msg = (f"Pinned to Q = {info['target']:.5f} Å⁻¹.  Drift removed: "
+               f"{rel.min() * 1e6:+.0f} … {rel.max() * 1e6:+.0f} ppm.  "
+               f"{n_bad} of {len(info['ok'])} frames flagged (interpolated).")
+        warn = False
+        rho = info["delay_corr"]
+        if np.isfinite(rho) and abs(rho) > 0.7:
+            msg += (f"  ⚠ The peak position tracks delay (ρ = {rho:+.2f}). Either it responds "
+                    "to the pump (aligning on it would remove real signal) or the delay "
+                    "order and clock drift are confounded (monotonic delay scan) — "
+                    "check the window and consider “Reference frames only”.")
+            warn = True
+        self._qa_set_status(msg, bad=warn)
+        self._log.append(f"[pump] q-aligned to {info['target']:.5f} Å⁻¹ "
+                         f"({self._qa_shift.currentData()}), window {lo:.4f}–{hi:.4f}")
+
+    # -- plots ---------------------------------------------------------------
+    def _qa_clear(self):
+        for pl, it in self._qa_items:
+            try:
+                pl.removeItem(it)
+            except Exception:
+                pass
+        self._qa_items = []
+        self._qa_pos_legend.clear()
+
+    def _qa_add(self, plot, *args, **kw):
+        it = plot.plot(*args, **kw)
+        self._qa_items.append((plot, it))
+        return it
+
+    def _replot_qalign(self):
+        raw = self._data_raw
+        self._qa_clear()
+        if raw is None:
+            return
+        q = np.asarray(raw["q_axis"], dtype=float)
+        I = np.asarray(raw["I_by_delay"], dtype=float)
+        colors = _rainbow_colors(len(I))
+        for i in range(len(I)):
+            self._qa_add(self._qa_pick, q, I[i], pen=pg.mkPen(colors[i], width=1.2))
+        lo, hi = self._qa_window()
+        self._qa_syncing = True
+        try:
+            self._qa_region.setVisible(hi > lo)
+            if hi > lo:
+                self._qa_region.setRegion((lo, hi))
+        finally:
+            self._qa_syncing = False
+        self._bound(self._qa_pick, float(q.min()), float(q.max()),
+                    float(np.nanmin(I)), float(np.nanmax(I)))
+        self._replot_qalign_zoom()
+        self._replot_qalign_positions()
+
+    def _replot_qalign_zoom(self):
+        raw = self._data_raw
+        if raw is None:
+            return
+        q = np.asarray(raw["q_axis"], dtype=float)
+        lo, hi = self._qa_window()
+        if hi <= lo:
+            lo, hi = float(q.min()), float(q.max())
+        x0, x1 = lo, hi          # zoom shows exactly the selected window
+        for plot, src, title in (
+                (self._qa_before, raw, "Window — before (raw)"),
+                (self._qa_after, self._data,
+                 "Window — after (aligned)" if self._qa_info is not None
+                 else "Window — after (alignment off)")):
+            # drop only this plot's previous zoom curves (picker/pos handled elsewhere)
+            keep = []
+            for pl, it in self._qa_items:
+                if pl is plot:
+                    try:
+                        pl.removeItem(it)
+                    except Exception:
+                        pass
+                else:
+                    keep.append((pl, it))
+            self._qa_items = keep
+            I = np.asarray(src["I_by_delay"], dtype=float)
+            colors = _rainbow_colors(len(I))
+            sel = (q >= x0) & (q <= x1)
+            if not sel.any():
+                continue
+            for i in range(len(I)):
+                self._qa_add(plot, q[sel], I[i][sel], pen=pg.mkPen(colors[i], width=1.5))
+            self._chrome(plot, title=title)
+            ys = I[:, sel]
+            ylo, yhi = float(np.nanmin(ys)), float(np.nanmax(ys))
+            if np.isfinite(ylo) and np.isfinite(yhi):
+                self._bound(plot, x0, x1, ylo, yhi)
+                # _bound pads x by 3 %; pin x to the window exactly
+                plot.getViewBox().setLimits(xMin=x0, xMax=x1, maxXRange=x1 - x0)
+                plot.setXRange(x0, x1, padding=0)
+
+    def _replot_qalign_positions(self):
+        info = self._qa_info
+        pl = self._qa_pos
+        # remove the old target line, if any
+        for it in getattr(self, "_qa_target_line", []) or []:
+            try:
+                pl.removeItem(it)
+            except Exception:
+                pass
+        self._qa_target_line = []
+        if info is None:
+            return
+        x = np.arange(len(info["pos"]), dtype=float)
+        ok = info["ok"]
+        t = float(info["target"])
+        ppm = lambda v: (np.asarray(v, dtype=float) / t - 1.0) * 1e6     # noqa: E731
+        pos = ppm(info["pos"]); curve = ppm(info["curve"])
+        self._qa_add(pl, x[ok], pos[ok], pen=None, symbol="o", symbolSize=5,
+                     symbolBrush=pg.mkBrush(120, 120, 120, 180), symbolPen=None,
+                     name="measured")
+        if (~ok).any():
+            self._qa_add(pl, x[~ok], curve[~ok], pen=None, symbol="x",
+                         symbolSize=9, symbolPen=pg.mkPen("#c0392b", width=2),
+                         name="flagged (interpolated)")
+        self._qa_add(pl, x, curve, pen=pg.mkPen("#1f77b4", width=2.5), name="drift curve")
+        line = pg.InfiniteLine(pos=0.0, angle=0,
+                               pen=pg.mkPen("#000000", width=1.5, style=QtCore.Qt.DashLine))
+        pl.addItem(line); self._qa_target_line.append(line)
+        vals = np.r_[pos[ok], curve, 0.0]
+        self._bound(pl, 0.0, float(max(1, len(x) - 1)), float(np.nanmin(vals)),
+                    float(np.nanmax(vals)))
+
     # ── style controls (draw mode / line / symbol / font) ──────────
     def _style_line_curve(self, curve, color):
         m = self._draw_mode
@@ -984,10 +1348,10 @@ class PumpProbeTab(QtWidgets.QWidget):
                 "#000000", width=max(1.5, self._line_width), style=QtCore.Qt.DashLine))
 
     def _style_colorbar(self):
-        if self._hm_bar is None:
+        if not hasattr(self, "_hm_scale"):
             return
         try:
-            ax = getattr(self._hm_bar, "axis", None)
+            ax = self._hm_scale.histogram.item.axis
             if ax is not None:
                 pen = pg.mkPen(_FG)
                 ax.setPen(pen); ax.setTextPen(pen)

@@ -102,7 +102,7 @@ class TextureTab(QtWidgets.QWidget):
         grp_src = QtWidgets.QGroupBox("Calibration source")
         sv = QtWidgets.QVBoxLayout(grp_src)
         self._src_lbl = QtWidgets.QLabel("(run Tab 2 calibration first)")
-        self._src_lbl.setStyleSheet("color:#aaa;font-size:10px"); self._src_lbl.setWordWrap(True)
+        self._src_lbl.setStyleSheet(f"color:{S.SUBTLE};font-size:10px"); self._src_lbl.setWordWrap(True)
         sv.addWidget(self._src_lbl)
         lv.addWidget(grp_src)
 
@@ -142,7 +142,7 @@ class TextureTab(QtWidgets.QWidget):
 
         right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         # Pole figure image
-        self._pf_view = pg.PlotWidget(background="k")
+        self._pf_view = pg.PlotWidget(background=S.CANVAS_BG)
         self._pf_view.setLabel("left", "β (pole declination)"); self._pf_view.setLabel("bottom", "α (azimuth)")
         self._pf_view.setTitle("Pole figure")
         self._pf_img = pg.ImageItem()
@@ -151,7 +151,7 @@ class TextureTab(QtWidgets.QWidget):
         self._pf_img.setColorMap(_resolve_cmap(DEFAULT_COLORMAP))
         right.addWidget(self._pf_view)
         # I(eta)
-        self._eta_view = pg.PlotWidget(background="k")
+        self._eta_view = pg.PlotWidget(background=S.CANVAS_BG)
         self._eta_view.setLabel("left", "I(η)"); self._eta_view.setLabel("bottom", "η (°)")
         self._eta_view.showGrid(x=True, y=True, alpha=0.2)
         self._c_eta = self._eta_view.plot([], [], pen=pg.mkPen("#88ccff", width=2))

@@ -15,13 +15,128 @@ multi-phase/core-shell, anisotropic ADP, directional strain-PDF.
 Build-critical reference for maintaining the PDF tab:
 `.context/reference/midas_pdf/` (esp. `01_core_api.md`, `05_gui_integration.md`).
 
+## Follow-ups carried forward from STATE (2026-10-21)
+
+These were open in the prior snapshot; check current code before acting.
+
+- **Calibration pipeline comparison (deferred by user, 2026-10-31):** the GUI
+  now offers only One-shot (default), Frozen-point (fast/high-tilts), and
+  Frozen-point + One-shot. Systematically probe First-time, Four-stage,
+  Bayesian MAP+Laplace, Joint cake, and the multi-distance workflow later
+  before deciding which to reintroduce. Retain backend adapters for research.
+  Compare geometry/pixel residuals, tilt recovery, convergence/basin failures,
+  runtime, seeds/refine/window fidelity, masks/transforms, multi-panel support,
+  uncertainty and residual-map export on representative real/synthetic data.
+  Live-check the new two-stage option on beamline data; stage 2 uses all fitted
+  Frozen-point seeds through One-shot's lower-level seeded refinement path.
+
+- **MCP phase 2:** extend the current Data Viewer/Calibrate control surface
+  to Mask and Batch Integrate when requested. Phase 1 is already on `main`;
+  see `midas_gui_mcp/README.md` for operation coverage and APEXA integration.
+- **Solve Cell Phase 2+:** detector-stage geometry resolution tiers,
+  self-calibration fallback, bootstrap confidence intervals/axis doubling,
+  further domain separation, diagnostics; see
+  `documentation/solve_cell_handoff.md` §10. Multi-panel pooling currently
+  requires a calibration file for each panel. Numerically cross-check the
+  deliberately standalone pipeline's `_apply_stack_corrections` against
+  GUI field corrections beyond the synthetic unit test.
+- **Texture:** make `PoleFigureWorker` omega-aware across a series (currently
+  single-frame with cfg χ/φ); inspect cake HDF5 in a real viewer and continue
+  testing metadata provenance.
+- **Frozen-point calibration:** the high-tilt `_seed_and_v1` branch does not
+  forward `tols=tols`, and the backend iterative wrapper also replaces geometry
+  bounds with its own `bounds_*` windows. Wire both layers before claiming GUI
+  ranges apply; define per-stage vs whole-run cap semantics for the combined
+  pipeline. The GUI currently explains that its windows apply only to the
+  combined pipeline's One-shot stage, around the Frozen-point result.
+- **Calibrate UI unification:** see
+  `documentation/calibration_unification_plan.md`; recheck surface parity
+  after recent Hydra changes before choosing the next phase.
+- **Verification gaps:** no live end-to-end restart/relaunch check or recent
+  real multi-panel beamline calibration output; Windows `lheald` import
+  failure awaits direct tracebacks/version. `job_queue.py` and
+  `peak_fit_panel.py` still lack coverage; `test_batch_cli_omega.py` covers
+  only the omega argument/configuration round trip for `batch_cli.py`.
+
+## Solve Cell: ingest optimized, next bottlenecks + a loading bug (2026-10-22)
+
+Benchmarked MIDAS's `perf_solve_cell` branch against `master` on a real
+642-frame spinel panel (`test6_..._det_-10_-15_0_...h5`): ingest is 4.35x
+faster at the new default (`max_workers=1`, wired into `pipeline.py` in
+`a2acc78`), 9.42x at `max_workers=12` on this 12-core machine, with
+byte-identical `spots_g.csv`/`ingest_summary.json` at every setting.
+`_stage_ingest`'s own hot loops (`build_mask`, `live_frames`,
+`subtract_background`, `choose_sectors`, `find_blobs_3d`) are now all
+vectorized and/or thread-pool-capable — nothing left to optimize inside
+that stage itself.
+
+**Bug found while investigating this, not yet fixed:** `midas_gui` never
+imports `hdf5plugin` anywhere (confirmed by grepping the whole package and
+by importing `midas_gui.app` standalone and checking `sys.modules`). This
+beamline's raw Eiger files use the dynamically-loaded `bitshuffle` HDF5
+filter (id 32008, confirmed via `h5py`'s own filter introspection), so
+**any h5py read of a raw frame — a Data Viewer preview (`_load_image`/
+`_get_frame`/`full_stack` in `helpers.py`/`widgets.py`), a solve-cell panel
+load, or the Ingest stage's own `frames_loader()` resolution in
+`workers.py`'s `SolveCellWorker` — crashes with `OSError: Can't
+synchronously read data (can't open directory .../lib/hdf5/plugin)`**,
+unless something else in the same process happened to import `hdf5plugin`
+first. Nothing in the GUI currently does that: only `midas_defect.
+persistence` imports it, and nothing in the solve-cell call path touches
+that module. Reproduced directly against the real `midas-gui` conda env and
+the real `h5py.File(...)[...]` call `_load_image` makes, not just a scratch
+script. **Fix:** import `hdf5plugin` once, early, at `midas_gui` startup
+(e.g. `midas_gui/__init__.py` or `app.py`) so it is registered before any
+h5py read, regardless of which tab/path touches a file first. Once
+registered, the read itself is fast and not a bottleneck (2.39s measured to
+load a 1.35 GB / 642-frame stack).
+
+**Downstream solve-cell stages not yet touched by the perf_solve_cell work**
+(ranked by how often each is hit):
+- `midas_hkls.ab_initio.select_basis`
+  (`packages/midas_hkls/midas_hkls/ab_initio.py:477`) — triple-nested Python
+  loop over up to `max_try=12` candidate vectors (≤220 triples), each
+  running up to 8 `_find_finer_lattice` refinement cycles (its own
+  `m³`-scan, up to 96 combos x 3 basis-vector swaps ≈ 288
+  `_index_fraction` calls per cycle). Runs on every ab-initio solve
+  (`pipeline.py` stage 3), not a rare path.
+- `_stage_index_known_cell`'s `_random_rotation_search`
+  (`midas_gui/solve_cell/pipeline.py:757`) — default `n_search=200,000`
+  random orientations for the real data PLUS `n_null_draws=20` more full
+  200k-orientation null searches = up to 4.2M orientation trials per call,
+  single-threaded. Used for second/third-domain search, which per the
+  `s3_midas` skill is the *common* case at this facility (multi-crystal
+  DACs), not an edge case. Same "many independent trials, no shared mutable
+  state" shape as the ingest `max_workers` work — directly portable to a
+  thread pool.
+- `_stage_diamond_filter`'s Monte Carlo null test (`pipeline.py:596`) —
+  scales with pooled spot count; lower priority since `n_total` is
+  typically small (tens of spots).
+- `_stage_ingest_pooled` still processes panels strictly serially by design
+  (memory-bound, see its own docstring) — matters less now that each
+  panel's ingest is 4-9x faster, but still N x per-panel wall time for this
+  facility's typically many-panel tiled coverage.
+- `midas_hkls.ub_refine.refine_ub_from_gvectors` not deeply profiled;
+  reflection counts going in are modest, unlikely to be the bottleneck.
+
 ## Per-tab open items
 
 - **Calibrate:** multi-distance (`autocalibrate_multi`), doublet calibrants,
   NN-residual augmenter, per-ring δr_k JSON sidecar export, full custom-calibrant UI.
 - **Batch:** per-frame outlier rejection (cosmic-ray / azimuthal σ-clip in
   batch), Compton/empty/absorption in batch, Zarr/GE/EDF sources, soft
-  (autograd) kernel.
+  (autograd) kernel. **Multi-azimuth + Q-uniform bins** (2026-10-05): still
+  blocked (`workers.py:1510-1516` raises; `tab_batch.py` warns pre-run) —
+  not a hard limitation, just unimplemented. `rebin_R_to_Q` only rebins a
+  1-D profile; every eta row of the cake shares the same `r_ax`, so the same
+  interpolation could run per-row to produce a `(n_eta, n_q)` cake. Would
+  also need: `cake_sigma`'s per-bin weighting to survive the interpolation,
+  the "true engine-collapsed" 1-D profile re-derived post-rebin (currently
+  captured separately from the raw cake sum), `write_cake_h5`'s stored
+  r/Q axis labeling updated, and the `tab_batch.py` guard dialog + its test
+  removed. Note `write_cake_h5` already stores Q as a non-uniform companion
+  axis today regardless (`radial_axes_from_r_px`) — this item is only about
+  making the bin *spacing* uniform in Q.
 - **Corrections:** empty-scale LBFGS refine, absorption-param refine.
 - **Refinement:** ProfileMSE / PeakPosition losses, multi-distance, in-tab
   Laplace UQ, energy-sweep drift.
@@ -66,6 +181,16 @@ P0-1 normalize corrections cake · P0-2 wire Q-uniform into kernels · P1-1 fini
 autograd geometry grads · P1-2 robuster tilt in one_shot/bayesian · P2-1 smooth
 absorption at μR=1.5 · P2-3 fold `analyze_workflows/` round-trips into package CI.
 (GUI already works around P0-1/P0-2/P1-1/P1-2 — see DECISIONS.)
+
+**P4-1 — `midas-defect`'s `perf_solve_cell` branch never bumped its own
+version number** (stayed `0.9.1` across `master` and every perf commit
+through `060f84c9`), so `requirements.txt`'s `midas-defect==0.9.1` pin
+cannot by itself distinguish "has `max_workers`" from "doesn't" — a bare
+`pip install midas-defect==0.9.1` from a future registry build could land
+either API depending what commit it was built from. Ask MIDAS maintainers
+to bump the version (e.g. 0.9.2 or 0.10.0 per semver, since `max_workers`
+is a new public kwarg) when `perf_solve_cell` merges to `master`, so this
+pin becomes unambiguous again. See DECISIONS 2026-10-22.
 
 **P3-1 — ~~`im_trans`/`ImTransOpt` not accepted by most calibration pipeline
 entry points~~ RESOLVED UPSTREAM in `midas-calibrate-v2` 0.15.0, verified on

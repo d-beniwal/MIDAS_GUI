@@ -507,7 +507,7 @@ def test_limits_column_is_shaped_per_calibrant_kind(app):
     assert tab._param_table.row_name_lbls["distortion"].text() == "Distortion"
     # The crystalline tilt window is one value for ty AND tz, so the row
     # says so rather than appearing to bound ty alone.
-    assert tab._limit_name_lbls["ty"].text() == "ty + tz"
+    assert tab._limit_name_lbls["ty"].text() == ""
     assert all(tab._limit_widgets[n][0].isChecked()
                for n in ("Lsd", "BC_y", "ty", "wavelength_A", "distortion"))
 
@@ -517,8 +517,8 @@ def test_limits_column_is_shaped_per_calibrant_kind(app):
     # The manual fit's own rows do get a live box, and BC_y/BC_z keep the
     # sub-labels that tell the two apart under the single "BC" refine box.
     assert not tab._limit_widgets["BC_y"][0].isHidden()
-    assert tab._param_table.row_name_lbls["BC_y"].text() == "Beam centre"
-    assert tab._param_table.row_name_lbls["BC_z"].text() == "BC_z"
+    assert tab._param_table.row_name_lbls["BC_y"].text() == "BC_Y"
+    assert tab._param_table.row_name_lbls["BC_z"].text() == "BC_Z"
     # ty bounds only ty again once each parameter has its own window.
     assert tab._limit_name_lbls["ty"].text() == ""
     # ...and opt-in again, so an untouched card leaves the manual fit unbounded.
@@ -953,7 +953,9 @@ def test_each_parameter_reads_on_one_line(app):
     for name in order:
         r = table.limit_row_index[name]
         _cb, spin, combo = table.limit_widgets[name]
-        assert combo in rows[r], f"{name}'s unit is off its own line"
+        assert any(combo in w.findChildren(type(combo)) for w in rows[r]
+                   if hasattr(w, "findChildren")), \
+            f"{name}'s unit is off its own line"
         assert table.row_name_lbls[name] in rows[r], f"{name} is unnamed"
         # the ± spin is inside the window cell, not a direct grid child
         assert any(spin in w.findChildren(type(spin)) for w in rows[r]

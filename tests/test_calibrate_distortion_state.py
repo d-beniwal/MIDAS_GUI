@@ -47,7 +47,7 @@ class TestWorkspaceRoundTrip:
     def test_an_unticked_distortion_row_stays_unticked(self, make_tab):
         state = _saved(make_tab, False, {"iso_R2", "a1", "phi1"})
         t = make_tab()
-        assert t._ref_dist.isChecked()            # the default it must overwrite
+        t._ref_dist.setChecked(True)              # the state it must overwrite
         t.set_state(state)
         assert not t._ref_dist.isChecked()
         assert "Fixed:" in t._refine_summary_text()
@@ -59,6 +59,7 @@ class TestWorkspaceRoundTrip:
         fired and the caption contradicted the tick beside it."""
         state = _saved(make_tab, False, {"iso_R2", "a1", "phi1"})
         t = make_tab()
+        t._ref_dist.setChecked(True)
         assert t._dist_btn.text() == "15/15"
         t.set_state(state)
         assert t._dist_btn.text() == "0/15"

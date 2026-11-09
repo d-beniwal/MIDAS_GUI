@@ -97,6 +97,8 @@ class _SourcesPanel(QtWidgets.QWidget):
             row = QtWidgets.QHBoxLayout()
             edit = QtWidgets.QLineEdit()
             edit.setPlaceholderText(ph)
+            from midas_gui.helpers import attach_file_info
+            attach_file_info(edit)
             edit.editingFinished.connect(
                 lambda s=slug, e=edit: self._on_path_changed(s, e.text()))
             browse = QtWidgets.QPushButton('Browse…')

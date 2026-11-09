@@ -282,7 +282,7 @@ class HydraCakingSummary(QtWidgets.QWidget):
         problem = eta_tiling_problem(per, order)
         if problem:
             # Informational blue, not warning orange: nothing is broken.
-            self._coverage.setStyleSheet("color:#8AB4F8;font-size:11px")
+            self._coverage.setStyleSheet(f"color:{S.INFO};font-size:11px")
             return (f"{problem}. Total azimuth {total:g}° across "
                     f"{len(order)} panels — integration and the combined "
                     f"zarr are unaffected (eta travels per column); "

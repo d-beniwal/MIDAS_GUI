@@ -18,6 +18,7 @@ import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
+from midas_gui.panel_toggle import install_panel_toggles
 from midas_gui.constants import DEFAULT_NICKEL_H5
 from midas_gui.helpers import (_fspin, _NoScrollSpinBox, _NoScrollComboBox,
                          widgets_to_dict, apply_dict_to_widgets, _apply_im_trans,
@@ -45,6 +46,16 @@ _IMASK_MAX = 5_000_000_000
 class DataViewerTab(QtWidgets.QWidget):
     pushGeometry = QtCore.pyqtSignal(dict)   # λ/px/Lsd/BC → Calibrate tab
     pullGeometry = QtCore.pyqtSignal()       # "← Get": pull Calibrate's geometry
+    # Hydra mode's own all-4-panel equivalents (see HydraViewerPage's "→ Send
+    # to Calibrate"/"← Get from Calibrate").
+    pushHydraToCalibrate = QtCore.pyqtSignal(dict)
+    pullHydraFromCalibrate = QtCore.pyqtSignal()
+    # Fires after every frame refresh (live or not) that produced a radial
+    # profile — a control API's closest approximation to a "radial
+    # integration stream", since there is no separate live-profile source
+    # today (the profile is just recomputed per frame). Args: (r_px, profile)
+    # numpy arrays, or (None, None) if no profile is available yet.
+    liveProfileUpdated = QtCore.pyqtSignal(object, object)
     imTransChanged = QtCore.pyqtSignal(list)  # ImTransOpt codes → Mask Builder
 
     def __init__(self, parent=None):
@@ -110,10 +121,11 @@ class DataViewerTab(QtWidgets.QWidget):
         just-activated profile (see MainWindow.on_profile_changed)."""
         self._loader.refresh_devices()
 
-    def start_live_pv(self, pv: str) -> bool:
+    def start_live_pv(self, pv: str, backend: str = "pva") -> bool:
         """Programmatic equivalent of picking `pv` in the Live Data card and
-        clicking Start — used by the MIDAS-bridge QLocalServer (app.py)."""
-        return self._loader.start_live_pv(pv)
+        clicking Start — used by the MIDAS-bridge QLocalServer (app.py) and
+        the control API (control_api.py)."""
+        return self._loader.start_live_pv(pv, backend)
 
     def shutdown(self):
         """Called by MainWindow on app close to stop any live PV stream
@@ -234,6 +246,30 @@ class DataViewerTab(QtWidgets.QWidget):
         if card is not None:
             card.set_geometry(g)
 
+    def import_from_calibrate(self, data: dict):
+        """Hydra page's "← Get from Calibrate" — apply the Calibrate tab's
+        exported anchor path + per-panel geometry, all 4 panels at once.
+        Warns plainly (rather than silently doing nothing) when the
+        Calibrate tab's Hydra page has nothing loaded yet."""
+        applied = self._hydra_page.import_from_calibrate(data)
+        if not applied:
+            QtWidgets.QMessageBox.warning(
+                self, "Nothing to import",
+                "Nothing loaded in Calibrate (Hydra) yet — load data there first.")
+
+    def show_radial_profile_tab(self) -> None:
+        """Bring the Radial Profile bottom tab to the front — called by the
+        control API after ``data_viewer.get_radial_profile`` so a human
+        watching the GUI sees where that result landed, not just that the
+        Data Viewer tab is active."""
+        self._bottom_tabs.setCurrentWidget(self._profile_view)
+
+    def show_cake_tab(self) -> None:
+        """Bring the Eta vs R Cake bottom tab to the front — the cake
+        counterpart of ``show_radial_profile_tab``, called after
+        ``data_viewer.get_cake``."""
+        self._bottom_tabs.setCurrentWidget(self._cake_view)
+
     # ── GUI state (Save/Load GUI State) ─────────────────────────────
     def _state_widgets(self) -> dict:
         widgets = {
@@ -253,7 +289,15 @@ class DataViewerTab(QtWidgets.QWidget):
         widgets.update(self._geom_card.state_widgets())
         return widgets
 
-    def get_state(self) -> dict:
+    #: Sidecar holding the Hydra page's computed profiles + cakes (written
+    #: only on a real project save, when the app passes ``sidecar_stem``).
+    _HYDRA_RESULTS_SUFFIX = "_hydra_results.npz"
+
+    def get_state(self, sidecar_stem: Optional[str] = None) -> dict:
+        if sidecar_stem:
+            arrs = self._hydra_page.results_arrays()
+            if arrs:
+                np.savez_compressed(sidecar_stem + self._HYDRA_RESULTS_SUFFIX, **arrs)
         fields = widgets_to_dict(self._state_widgets())
         fields["materials"] = self._geom_card.materials_state()
         return {"fields": fields, "loader": self._loader.get_state(),
@@ -262,7 +306,7 @@ class DataViewerTab(QtWidgets.QWidget):
                 "hydra": {"active_mode": self._mode_ribbon.mode(),
                           "page": self._hydra_page.get_state()}}
 
-    def set_state(self, state: dict):
+    def set_state(self, state: dict, sidecar_stem: Optional[str] = None):
         """Restores the loader (which re-triggers its own data reload) and any
         calibration file (re-triggering the card's own calibration load) *before*
         applying the saved field values, so an explicitly saved value always wins
@@ -284,6 +328,16 @@ class DataViewerTab(QtWidgets.QWidget):
         apply_dict_to_widgets(self._state_widgets(), fields)
         self._geom_card.refresh_geometry()
         self._redraw_lab_axes_if_on()
+        # Last, so saved cakes/profiles are not wiped by the reloads above.
+        if sidecar_stem:
+            f = Path(sidecar_stem + self._HYDRA_RESULTS_SUFFIX)
+            if f.exists():
+                try:
+                    with np.load(f) as z:
+                        self._hydra_page.apply_results_arrays({k: z[k] for k in z.files})
+                except Exception:
+                    import logging
+                    logging.getLogger(__name__).exception("Hydra results restore failed")
 
     # ── UI ────────────────────────────────────────────────────────
 
@@ -302,7 +356,13 @@ class DataViewerTab(QtWidgets.QWidget):
 
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         split.setChildrenCollapsible(False); split.setHandleWidth(6)
-        self._mode_stack.addWidget(split); self._hsplit = split
+        # Page = splitter on top + bottom ribbon holding minimised Data/Controls tabs.
+        # (_hsplit is the stack page, which is what the mode switch selects.)
+        _body = QtWidgets.QWidget()
+        self._body_lay = QtWidgets.QVBoxLayout(_body)
+        self._body_lay.setContentsMargins(0, 0, 0, 0); self._body_lay.setSpacing(2)
+        self._body_lay.addWidget(split, 1)
+        self._mode_stack.addWidget(_body); self._hsplit = _body
 
         # ── LEFT: data loader (stack mode) ──
         # hide_frame_field=True: this tab shows its own scrubber under the
@@ -570,9 +630,9 @@ class DataViewerTab(QtWidgets.QWidget):
         self._radial_help_btn.setFixedSize(18, 18)
         self._radial_help_btn.setToolTip("How is this profile calculated?")
         self._radial_help_btn.setStyleSheet(
-            "QToolButton { border-radius: 9px; border: 1px solid #777; "
-            "background: #333; color: #ddd; font-weight: bold; }"
-            "QToolButton:hover { background: #444; }")
+            f"QToolButton {{ border-radius: 9px; border: 1px solid {S.HOVER}; "
+            f"background: {S.MINI_BG}; color: {S.MINI_FG}; font-weight: bold; }}"
+            f"QToolButton:hover {{ background: {S.BTN_BOT}; }}")
         self._radial_help_btn.clicked.connect(self._geom_card.show_radial_help)
         ptb.insertWidget(ptb.indexOf(self._rad_btn) + 1, self._radial_help_btn)
         # Exclude-out-of-range-pixels controls (moved here from the left panel
@@ -598,15 +658,101 @@ class DataViewerTab(QtWidgets.QWidget):
         bot.addTab(self._cake_view, "Eta vs R Cake")
         bot.setCurrentIndex(0)
         right.addWidget(bot)
+        self._right_split = right
+        self._build_bottom_corner(bot)
         right.setStretchFactor(0, 3); right.setStretchFactor(1, 1)
         right.setMinimumWidth(320)
         split.addWidget(right)
         split.setStretchFactor(0, 0); split.setStretchFactor(1, 0); split.setStretchFactor(2, 1)
         split.setSizes([286, 361, 950])
+        # Data | Controls | Results: minimise Data/Controls to the bottom ribbon.
+        _toggles = install_panel_toggles(split, key="view")
+        self._body_lay.addWidget(_toggles.ribbon)
+        self._results_toggles = _toggles
+        _toggles.add_ribbon_tab("Plots", lambda: self.set_plots_hidden(False))
 
         # Page 1: Hydra (4-panel GE detector) view.
         self._hydra_page = HydraViewerPage()
+        self._hydra_page.pushToCalibrate.connect(self.pushHydraToCalibrate.emit)
+        self._hydra_page.pullFromCalibrate.connect(self.pullHydraFromCalibrate.emit)
         self._mode_stack.addWidget(self._hydra_page)
+
+    # ── Plots panel (Statistics / Radial Profile / Cake) layout ──────
+
+    def _build_bottom_corner(self, bot: QtWidgets.QTabWidget):
+        """Right-most corner of the plots tab header: a Layout dropdown
+        (Bottom default / Side) and a hide button."""
+        self._plots_layout = "bottom"
+        self._plots_sizes = {}
+        corner = QtWidgets.QWidget()
+        cl = QtWidgets.QHBoxLayout(corner)
+        cl.setContentsMargins(0, 0, 0, 0); cl.setSpacing(2)
+        btn = QtWidgets.QToolButton()
+        btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        menu = QtWidgets.QMenu(btn)
+        group = QtWidgets.QActionGroup(btn); group.setExclusive(True)
+        self._plots_layout_actions = {}
+        for key, label in (("bottom", "Layout: Bottom"), ("side", "Layout: Side")):
+            act = menu.addAction(label); act.setCheckable(True)
+            group.addAction(act)
+            act.triggered.connect(lambda _c=False, k=key: self.set_plots_layout(k))
+            self._plots_layout_actions[key] = act
+        btn.setMenu(menu)
+        self._plots_layout_btn = btn
+        cl.addWidget(btn)
+        hide = QtWidgets.QToolButton()
+        hide.setText("—")
+        hide.setToolTip("Hide this panel to the bottom ribbon (click its tab to restore)")
+        hide.clicked.connect(lambda _=False: self.set_plots_hidden(True))
+        cl.addWidget(hide)
+        bot.setCornerWidget(corner, QtCore.Qt.TopRightCorner)
+        self._sync_plots_layout_btn()
+
+    def _sync_plots_layout_btn(self):
+        side = self._plots_layout == "side"
+        self._plots_layout_btn.setText("Layout: Side" if side else "Layout: Bottom")
+        self._plots_layout_btn.setToolTip(
+            "Place the Statistics / Radial Profile / Cake panel below the image "
+            "(Bottom, default) or to its right (Side).")
+        self._plots_layout_actions[self._plots_layout].setChecked(True)
+
+    def plots_layout(self) -> str:
+        return self._plots_layout
+
+    def set_plots_layout(self, layout: str):
+        """Switch the plots panel between "bottom" and "side"."""
+        if layout not in ("bottom", "side") or layout == self._plots_layout:
+            return
+        sp = self._right_split
+        hidden = self._bottom_tabs.isHidden()
+        if not hidden:
+            self._plots_sizes[self._plots_layout] = sp.sizes()
+        self._plots_layout = layout
+        sp.setOrientation(QtCore.Qt.Horizontal if layout == "side"
+                          else QtCore.Qt.Vertical)
+        if not hidden:
+            saved = self._plots_sizes.get(layout)
+            if saved and all(saved):
+                sp.setSizes(saved)
+            else:
+                total = max(sum(sp.sizes()), 2)
+                a = total // 2 if layout == "side" else total * 3 // 4
+                sp.setSizes([a, total - a])
+        self._sync_plots_layout_btn()
+
+    def set_plots_hidden(self, hidden: bool):
+        if hidden == self._bottom_tabs.isHidden():
+            return
+        sp = self._right_split
+        if hidden:
+            self._plots_sizes[self._plots_layout] = sp.sizes()
+        self._bottom_tabs.setVisible(not hidden)
+        if not hidden:
+            saved = self._plots_sizes.get(self._plots_layout)
+            if saved and all(saved):
+                sp.setSizes(saved)
+        self._results_toggles.set_extra_tab_visible("Plots", hidden)
 
     # ── Loading ───────────────────────────────────────────────────
 
@@ -707,6 +853,9 @@ class DataViewerTab(QtWidgets.QWidget):
             self._show_topn()   # re-locate brightest pixels + refresh their stats
         elif sp is None or sp.scope() != "all":
             self._update_stats()
+        prof = self._profile_view.get_profile()
+        self.liveProfileUpdated.emit(
+            prof["r_px"] if prof else None, prof["profile"] if prof else None)
 
     def _on_fields_changed(self):
         """Dark/bright/background/mask changed — recompute the corrected image and
@@ -717,7 +866,8 @@ class DataViewerTab(QtWidgets.QWidget):
         if raw is None:
             return
         self._cur = self._viewer.set_raw_frame(
-            self._loader.corrected(raw), self._im_trans_codes(), autorange=False)
+            self._loader.corrected(raw), self._im_trans_codes(), autorange=False,
+            reset_levels=False)
         self._redraw_lab_axes_if_on()
         self._update_intensity_overlay()
         if getattr(self, "_topn_btn", None) is not None and self._topn_btn.isChecked():
@@ -748,7 +898,7 @@ class DataViewerTab(QtWidgets.QWidget):
         self._info_lbl.setText("Projecting stack…")
         self._proj_btn.setEnabled(False)
         self._proj_worker = ProjectionWorker(
-            self._loader.full_stack, method, 0, skip, nframes,
+            self._loader.iter_raw_batches, self._loader.n_frames(), method, skip, nframes,
             dark=self._loader.dark(), bright=self._loader.bright(),
             background=self._loader.background(), bright_mode=self._loader.bright_mode(),
             parent=self)
@@ -811,6 +961,8 @@ class DataViewerTab(QtWidgets.QWidget):
         self._loaded_profile = (x, y, sigma, profile_file_axis_kind(path))
         self._profile_file_mode = True
         self._prof_source_lbl.setText(Path(path).name)
+        from midas_gui.helpers import file_info_text
+        self._prof_source_lbl.setToolTip(file_info_text(path) or path)
         # No image in this mode — blank the viewer (pyqtgraph's own
         # ImageView.clear(), which only touches the displayed image, not the
         # overlay/crosshair items added separately) and clear self._cur so

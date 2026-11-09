@@ -154,3 +154,20 @@ def test_single_frame_source_projection_equals_current_frame(tab, tmp_path):
     tab._img_edit.setText(str(p)); tab._load_image()
     src = tab._threshold_source_image()
     np.testing.assert_allclose(src, 42.0)
+
+
+@pytest.mark.parametrize("skip,label,expected", [
+    (1, "Max", 5.0),        # the 500 spike is in frame 0 only
+    (1, "Sum", 10.0),
+    (1, "Average", 5.0),
+    (99, "Max", 5.0),       # clamped: always keeps at least the last frame
+])
+def test_threshold_projection_skip_frames(tab, tmp_path, skip, label, expected):
+    frames = [np.full((4, 5), 500.0, dtype=np.float32),
+              np.full((4, 5), 5.0, dtype=np.float32),
+              np.full((4, 5), 5.0, dtype=np.float32)]
+    _load_folder(tab, tmp_path, frames)
+    assert tab._thresh_skip.isEnabled()
+    tab._thresh_proj_combo.setCurrentText(label)
+    tab._thresh_skip.setValue(skip)
+    np.testing.assert_allclose(tab._threshold_source_image(), expected)

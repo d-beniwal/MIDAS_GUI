@@ -12,6 +12,8 @@ called it.
 import numpy as np
 import pytest
 
+from midas_gui.helpers import _apply_im_trans
+
 pytestmark = pytest.mark.forked
 
 
@@ -58,6 +60,28 @@ def test_ticking_the_box_paints_the_overlay(tab):
     # transposed, so the masked columns land in rows of the overlay.
     assert rgba[:10, :, 3].min() > 0        # excluded -> opaque
     assert rgba[10:, :, 3].max() == 0       # kept     -> fully transparent
+
+
+@pytest.mark.parametrize("codes", [
+    (1,), (2,), (3,), (1, 2), (1, 3), (2, 3), (1, 2, 3),
+])
+def test_mask_follows_the_image_transforms(tab, codes):
+    """The backend mask stays raw, but its picture must move with the
+    transformed preview -- including a transform changed while Mask is on."""
+    mask = np.zeros(np.asarray(tab._image).shape, dtype=np.uint8)
+    mask[2:7, 11:23] = 1
+    tab.set_mask_from_tab1(mask)
+    tab._show_mask_check.setChecked(True)
+
+    tab._flip_y.setChecked(1 in codes)
+    tab._flip_z.setChecked(2 in codes)
+    tab._transp.setChecked(3 in codes)
+
+    expected = _apply_im_trans(mask, codes).astype(bool)
+    shown = np.asarray(tab._img_view._overlay.image)[:, :, 3] != 0
+    # ImageViewer transposes arrays into pyqtgraph's x/y storage order.
+    np.testing.assert_array_equal(shown, expected.T)
+    np.testing.assert_array_equal(tab._loader.composite_mask(), mask)
 
 
 def test_unticking_clears_it_but_keeps_the_count(tab):

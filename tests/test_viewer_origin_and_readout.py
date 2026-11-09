@@ -10,11 +10,9 @@ Two behaviours that are easy to break silently:
   cursor** — during live acquisition ``set_image`` is called continuously while
   the mouse never moves, and it used to overwrite the readout with its
   "Move cursor over image" placeholder on every single frame.
-* **vmin%/vmax% are off the toolbar but still live.** They were removed from
-  the visible row, not from the viewer: ``_redisplay`` still reads them for the
-  auto-level window and they still round-trip through the project state, so
-  hiding them must not have quietly reverted the 30/99 default or unhooked the
-  percentile recompute.
+* **Legacy vmin%/vmax% remain off the toolbar.** They still round-trip through
+  old display styles; new views default to full image min/max and expose
+  absolute intensity controls beside the histogram.
 
 Builds pyqtgraph widgets, hence forked, with every Qt-pulling import deferred
 into a fixture — see STATE.md.
@@ -105,14 +103,14 @@ def test_origin_button_tracks_and_drives_the_viewer(viewer):
     btn = OriginToolButton(viewer)
     assert btn.text() == "Origin: BL"
     assert "Bottom-Left" in btn.toolTip()          # the MIDAS-calibration hint
-    assert "Currently: Bottom-left" in btn.toolTip()
-    assert [a.text() for a in btn._actions.values()] == ["Bottom-left", "Top-left"]
+    assert "Currently: Bottom-Left (MIDAS)" in btn.toolTip()
+    assert [a.text() for a in btn._actions.values()] == ["Bottom-Left (MIDAS)", "Top-Left (ImageJ)"]
 
     top_left_action = btn._actions[ORIGIN_TOP_LEFT]
     top_left_action.trigger()
     assert viewer.origin() == ORIGIN_TOP_LEFT
     assert btn.text() == "Origin: TL"
-    assert "Currently: Top-left" in btn.toolTip()
+    assert "Currently: Top-Left (ImageJ)" in btn.toolTip()
     assert top_left_action.isChecked()
 
     # Changed behind the button's back (project-state restore) → sync() catches up.
@@ -194,10 +192,10 @@ def test_percentile_spinboxes_are_off_the_toolbar(app, factory):
 
 
 @pytest.mark.parametrize("factory", ["ImageViewer", "CakeViewer"])
-def test_percentile_defaults_still_30_and_99(app, factory):
+def test_default_color_window_is_full_image_range(app, factory):
     import midas_gui.widgets as W
     v = getattr(W, factory)()
-    assert (v._vmin.value(), v._vmax.value()) == (30, 99)
+    assert (v._vmin.value(), v._vmax.value()) == (0, 100)
 
 
 def test_percentiles_still_drive_the_auto_levels(viewer):

@@ -21,7 +21,8 @@ import pyqtgraph as pg
 
 from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollComboBox, _fspin, hydra_siblings,
                          hydra_panel_index, is_h5, list_h5_datasets, source_kind,
-                         detect_geometry_from_path, warn_if_path_missing)
+                         detect_geometry_from_path, warn_if_path_missing,
+                         best_default_dataset_index)
 from midas_gui.workers import FieldAverageWorker, ProjectionWorker
 from midas_gui import hydra
 from midas_gui.hydra import panel_for_file
@@ -144,11 +145,12 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
     fieldsReady = QtCore.pyqtSignal()
 
     def __init__(self, title, parent=None, *, with_mode=False, with_scale=False,
-                 default_dataset="exchange/data"):
+                 default_dataset="exchange/data", prefer_most_frames=False):
         super().__init__(title, parent)
         self.setCheckable(True)
         self.setChecked(False)
         self._default_dataset = default_dataset
+        self._prefer_most_frames = prefer_most_frames
         self._fields: dict = {}          # panel -> np.ndarray
         self._sibling_paths: dict = {}   # panel -> path
         self._workers: dict = {}         # panel -> FieldAverageWorker (kept alive)
@@ -208,7 +210,7 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
         self._end = _NoScrollSpinBox(); self._end.setRange(0, 0); self._end.setFixedWidth(50)
         self._end.setToolTip("Last frame index in the mean (inclusive), applied to every panel.")
         self._nfr_lbl = QtWidgets.QLabel("")
-        self._nfr_lbl.setStyleSheet("color:#9a9a9a;font-size:10px")
+        self._nfr_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         ir = QtWidgets.QHBoxLayout(); ir.setSpacing(4)
         ir.addWidget(QtWidgets.QLabel("mean")); ir.addWidget(self._start)
         ir.addWidget(QtWidgets.QLabel("–")); ir.addWidget(self._end)
@@ -235,7 +237,7 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
         self._compute_btn.clicked.connect(self._compute_all)
         v.addWidget(self._compute_btn)
         self._status = QtWidgets.QLabel("Not computed.")
-        self._status.setStyleSheet("color:#9a9a9a;font-size:10px"); self._status.setWordWrap(True)
+        self._status.setStyleSheet(f"color:{S.MUTED};font-size:10px"); self._status.setWordWrap(True)
         v.addWidget(self._status)
 
     @staticmethod
@@ -317,6 +319,21 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
         dialog's starting folder while this field has no path of its own —
         mirrors ``widgets.FieldSelector.set_data_path_provider``."""
         self._data_path_provider = fn
+
+    def _is_data_path(self, p: str) -> bool:
+        """Mirrors ``widgets.FieldSelector._is_data_path``: is *p* the same
+        file as the owning panel's current Data path?"""
+        if self._data_path_provider is None:
+            return False
+        data_path = self._data_path_provider() or ""
+        if not data_path:
+            return False
+        import os
+        try:
+            return os.path.normpath(os.path.abspath(p)) == \
+                os.path.normpath(os.path.abspath(data_path))
+        except Exception:
+            return False
 
     def _prefill_from_data(self, checked: bool):
         """On first check, default this field to the same file/folder as
@@ -419,7 +436,8 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
                 idx = next((i for i in range(self._ds_combo.count())
                             if self._ds_combo.itemData(i) == keep), -1)
                 if idx < 0:
-                    idx = next((i for i, (n, s) in enumerate(items) if len(s) >= 3), 0)
+                    prefer_max = self._prefer_most_frames and not self._is_data_path(path)
+                    idx = best_default_dataset_index(items, prefer_max)
                 self._ds_combo.setCurrentIndex(idx)
                 self._ds_combo.blockSignals(False)
         self._update_frame_limit()
@@ -672,7 +690,7 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         # selection and a 1-scan selection look identical.
         self._scan_lbl = QtWidgets.QLabel("")
         self._scan_lbl.setWordWrap(True)
-        self._scan_lbl.setStyleSheet("color:#8AB4F8;font-size:10px")
+        self._scan_lbl.setStyleSheet(f"color:{S.INFO};font-size:10px")
         self._scan_lbl.setVisible(False)
         card.body.addWidget(self._scan_lbl)
         self._selection: list = []
@@ -751,16 +769,22 @@ class HydraLoaderPanel(QtWidgets.QWidget):
                 self._combine_op.addItem(lbl, key)
             self._combine_op.setToolTip(
                 "How the sub-frames in a chunk are reduced to one image.")
+            # Laid out like the single-detector Batch tab's Data card: a
+            # start/end row, a stride row, a rule, then "Combine sub-frames:
+            # [n] op: [Mean]" as one left-aligned row (not a right-aligned
+            # form pair, which pushed the card's minimum width past 500 px).
+            sf = S.Form()
+            sf.row(("start:", self._fr_start), ("end(0=all):", self._fr_end))
+            sf.row(("stride:", self._fr_stride))
+            card.body.addLayout(sf)
+            card.body.addWidget(S.hline())
             cr = QtWidgets.QHBoxLayout(); cr.setSpacing(4)
+            cr.addWidget(QtWidgets.QLabel("Combine sub-frames:"))
             cr.addWidget(self._combine_chunk)
             cr.addWidget(QtWidgets.QLabel("op:"))
             cr.addWidget(self._combine_op)
             cr.addStretch(1)
-            sf = S.Form()
-            sf.row(("start:", self._fr_start), ("end(0=all):", self._fr_end))
-            sf.row(("stride:", self._fr_stride))
-            sf.row(("combine sub-frames:", cr))
-            card.body.addLayout(sf)
+            card.body.addLayout(cr)
             for w in (self._combine_chunk, self._combine_op):
                 sig = (w.valueChanged if hasattr(w, "valueChanged")
                        else w.currentIndexChanged)
@@ -775,7 +799,8 @@ class HydraLoaderPanel(QtWidgets.QWidget):
 
         # ── Dark / Bright / Background (sibling-aware, one pick per field) ──
         fld = S.make_card("Dark / Bright / Background")
-        self._dark_sel = HydraFieldSelector("Dark", default_dataset="exchange/data_dark")
+        self._dark_sel = HydraFieldSelector("Dark", default_dataset="exchange/data_dark",
+                                            prefer_most_frames=True)
         self._bright_sel = HydraFieldSelector("Bright", with_mode=True)
         self._bg_sel = HydraFieldSelector("Background", with_scale=True)
         for w in (self._dark_sel, self._bright_sel, self._bg_sel):
@@ -790,7 +815,7 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         if self._mode == "stream":
             mask_card = S.make_card("Mask  (independent per panel)")
             for n in (1, 2, 3, 4):
-                sel = MaskSelector()
+                sel = MaskSelector(compact=True)
                 sel.setTitle(f"ge{n} mask")
                 sel.maskChanged.connect(self.fieldsChanged)
                 self._mask_sels[n] = sel
@@ -1186,7 +1211,8 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         self._proj_workers = {}
         for n, path in self._siblings.items():
             w = ProjectionWorker(
-                lambda p=path: hydra.load_full_stack(p, self.DATASET), method, 0, skip, nframes,
+                lambda s, e, p=path: hydra.iter_stack_batches(p, self.DATASET, s, e),
+                hydra.n_frames_in(path, self.DATASET), method, skip, nframes,
                 dark=self.dark(n), bright=self.bright(n), background=self.background(n),
                 bright_mode=self.bright_mode(), parent=self)
             w.finished.connect(lambda img, info, n=n: self._on_one_projected(n, img, info))
@@ -1607,7 +1633,7 @@ class HydraProfileViewer(QtWidgets.QWidget):
         self._toolbar_layout = bar
         layout.addLayout(bar)
 
-        self._plot = pg.PlotWidget(background="k")
+        self._plot = pg.PlotWidget(background=S.CANVAS_BG)
         self._plot.setLabel("left", "Mean intensity")
         self._plot.setLabel("bottom", _XUNIT_LABEL["2th"])
         self._plot.showGrid(x=True, y=True, alpha=0.2)

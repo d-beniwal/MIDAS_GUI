@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import pickle
 import re
 import sys
@@ -27,14 +28,16 @@ from PyQt5 import QtCore
 
 import midas_gui._paths  # noqa: F401  (sys.path setup before MIDAS imports)
 from midas_gui import calib_cli
+from midas_gui.proc_worker import process_isolated
+from midas_gui.constants import PROJECT_ROOT
 from midas_gui import h5_metadata
 from midas_gui import ion_csv
 from midas_gui import provenance
 from midas_gui import settings
 from midas_gui.helpers import (_load_image, _apply_im_trans, _build_spec,
                                _spec_from_json, average_field, apply_field_corrections,
-                               read_hdf5_stack_chunk, load_profile_file,
-                               CORRECTION_SUFFIX, CORRECTION_EXT)
+                               read_hdf5_stack_chunk, load_profile_file, _LogStream,
+                               reduce_frames_batched, CORRECTION_SUFFIX, CORRECTION_EXT)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -84,6 +87,16 @@ def axis_conversions(r_px, lsd, px, wl):
     two_theta = np.degrees(np.arctan(r_px * px / lsd))
     q = 4 * math.pi * np.sin(np.radians(two_theta) / 2) / wl
     return two_theta, two_theta * 100.0, q
+
+
+def radial_axis_datasets(r_px, lsd, px, wl) -> dict:
+    """``R_px`` / ``TTH`` (2θ, deg) / ``Q`` (Å⁻¹) bin-centre axes for a 1-D
+    HDF5 — always all three, whatever Bin type the run used (the bin grid
+    only decides which of them is uniform)."""
+    tth, _, q = axis_conversions(r_px, lsd, px, wl)
+    return {"R_px": np.asarray(r_px, dtype=np.float64),
+            "TTH": np.asarray(tth, dtype=np.float64),
+            "Q": np.asarray(q, dtype=np.float64)}
 
 
 # The tag excludes '_' but NOT digits: '_' is what forces the match onto
@@ -189,6 +202,28 @@ def frame_output_base(out_dir, fid, fallback_idx: int, used: set):
     return Path(out_dir) / frame_output_stem(fid, fallback_idx, used)
 
 
+def _write_h5_atomic(h5_path, writer) -> None:
+    """Run ``writer(tmp_path)`` then ``os.replace`` it onto ``h5_path``.
+
+    Writing straight onto an existing ``.h5`` truncates it, which HDF5
+    refuses ("unable to truncate a file which is already open") whenever
+    anything — a viewer, an earlier run, another process — still holds the
+    previous output open. Replacing the directory entry works regardless
+    (POSIX keeps the old inode alive for whoever has it open).
+    """
+    import os
+    h5_path = Path(h5_path)
+    tmp = h5_path.with_name(f".{h5_path.stem}.tmp{os.getpid()}.h5")
+    try:
+        writer(tmp)
+        os.replace(tmp, h5_path)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
 def stamp_h5_provenance(h5_path, entry: dict) -> None:
     """Reopen ``h5_path`` (already written by ``midas_integrate_v2.write_h5``)
     and append a provenance entry to its root attrs (``provenance_history``,
@@ -206,6 +241,40 @@ def stamp_h5_provenance(h5_path, entry: dict) -> None:
             del h5['provenance_history']
         ds = h5.create_dataset('provenance_history', data=history_json)
         ds.attrs['format'] = 'JSON list of provenance entries (see midas_gui/provenance.py)'
+
+
+def cake_params_of(spec) -> dict:
+    """The six R/η binning values a run was ASKED for, as plain floats."""
+    return {
+        'RMin': float(spec.RMin), 'RMax': float(spec.RMax),
+        'RBinSize': float(spec.RBinSize),
+        'EtaMin': float(spec.EtaMin), 'EtaMax': float(spec.EtaMax),
+        'EtaBinSize': float(spec.EtaBinSize),
+    }
+
+
+def stamp_cake_params_h5(h5_path, spec) -> None:
+    """Record the caking parameters in a 1-D ``write_h5`` file's root attrs.
+
+    ``midas_integrate_v2.write_h5`` stores only the finished ``(N, n_r)``
+    profile stack and its R axis, so nothing in the file said which R range,
+    R bin, or η window/bin the profiles were built with — the R axis alone
+    could not tell an η-restricted run from a full-circle one. The 1-D
+    profile is the η-collapse over [EtaMin, EtaMax]; EtaBinSize only shapes
+    the wedges that were averaged (it is kept in the file only with
+    Multi-azimuth output, which writes the full η axis)."""
+    import h5py
+    with h5py.File(str(h5_path), 'a') as h5:
+        for k, v in cake_params_of(spec).items():
+            h5.attrs[k] = v
+        h5.attrs['n_r_bins'] = int(spec.n_r_bins)
+        h5.attrs['n_eta_bins'] = int(spec.n_eta_bins)
+        h5.attrs['multi_azimuth'] = False
+        h5.attrs['eta_collapsed'] = True
+        h5.attrs['note'] = (
+            "profiles are the 1-D lineout eta-collapsed over "
+            "[EtaMin, EtaMax]; enable Multi-azimuth output to keep the "
+            "per-eta cake.")
 
 
 def build_geom(spec, kernel: str, mask):
@@ -818,7 +887,7 @@ def temporal_constancy_mask(stack: np.ndarray, frozen_frac: float) -> tuple:
     return frozen, f"frozen: {int(frozen.sum()):,} (ref_std={ref:.2g})"
 
 
-class MaskComputeWorker(QtCore.QThread):
+class _MaskComputeWorkerImpl(QtCore.QThread):
     """Compute the combined bad-pixel mask: base threshold OR'd with any enabled
     advanced method (statistical outlier, spatial spike, azimuthal clip, learnable).
 
@@ -1003,59 +1072,57 @@ class MaskComputeWorker(QtCore.QThread):
             self.failed.emit(traceback.format_exc())
 
 
+# Runs in its own OS process (see proc_worker.py): this worker loads whole frame
+# stacks and calls torch/OpenMP, and a native fault there must not take the GUI —
+# and any calibration running beside it — down.
+MaskComputeWorker = process_isolated(_MaskComputeWorkerImpl)
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  Calibration worker (pipeline-aware)
 # ═════════════════════════════════════════════════════════════════════════════
 
 class ProjectionWorker(QtCore.QThread):
-    """Load a frame stack and reduce it (max/sum/mean) off the GUI thread.
+    """Reduce a frame stack (max/sum/mean) off the GUI thread, batched and
+    with each frame corrected BEFORE it's folded into the reduction.
 
-    Loading a multi-GB stack + the reduction can take seconds-to-minutes; doing it
-    here keeps the Data Viewer responsive. Field corrections (dark/bright/background)
-    are captured on the GUI thread and applied to the projected image.
+    ``batch_iter_fn(start, end)`` must return an iterable of raw ``(b,H,W)``
+    batches (e.g. ``DataLoaderPanel.iter_raw_batches``/
+    ``hydra.iter_stack_batches``) — reading/correcting one batch at a time
+    keeps peak memory bounded to one batch instead of the whole stack, while
+    still being vectorized (not a per-frame Python loop). See
+    ``helpers.reduce_frames_batched`` for the actual correct-then-reduce
+    logic this worker just drives off the GUI thread.
     """
     finished = QtCore.pyqtSignal(object, str)   # corrected 2-D image, info string
     failed   = QtCore.pyqtSignal(str)
 
-    def __init__(self, full_stack_fn, method, axis, skip, nframes=0, *, dark=None, bright=None,
-                 background=None, bright_mode="divide", parent=None):
+    def __init__(self, batch_iter_fn, total_frames, method, skip, nframes=0, *,
+                 dark=None, bright=None, background=None, bright_mode="divide", parent=None):
         super().__init__(parent)
-        self._full_stack = full_stack_fn
-        self._method, self._axis, self._skip, self._nframes = method, axis, skip, nframes
+        self._batch_iter_fn = batch_iter_fn
+        self._total_frames = total_frames
+        self._method, self._skip, self._nframes = method, skip, nframes
         self._dark, self._bright, self._background = dark, bright, background
         self._bright_mode = bright_mode
 
     def run(self):
         try:
-            data = np.asarray(self._full_stack())
-            if self._axis >= data.ndim:
-                raise ValueError(f"Axis {self._axis} invalid for {data.ndim}-D data.")
-            if self._skip > 0:
-                if self._skip >= data.shape[0]:
-                    raise ValueError(f"Skip frames ({self._skip}) ≥ stack size "
-                                     f"({data.shape[0]}).")
-                data = data[self._skip:]
-            if self._nframes and self._nframes > 0:
-                data = data[:self._nframes]
-            n_used = data.shape[self._axis]
-            # "average" kept as an alias so an older caller's method string
-            # still resolves; the UI only ever sends "mean".
-            fn = {"max": np.max, "sum": np.sum,
-                  "mean": np.mean, "average": np.mean}[self._method]
-            proj = np.squeeze(fn(data, axis=self._axis))
+            start = max(0, self._skip)
+            if start >= self._total_frames:
+                raise ValueError(f"Skip frames ({start}) ≥ stack size "
+                                 f"({self._total_frames}).")
+            end = (self._total_frames if not self._nframes or self._nframes <= 0
+                  else min(start + self._nframes, self._total_frames))
+            proj, n_used = reduce_frames_batched(
+                self._batch_iter_fn(start, end), self._method,
+                dark=self._dark, bright=self._bright,
+                background=self._background, bright_mode=self._bright_mode)
             if proj.ndim != 2:
-                raise ValueError(f"Result is {proj.ndim}-D after projecting axis "
-                                 f"{self._axis}; pick an axis that leaves a 2-D image.")
-            if self._dark is not None or self._bright is not None or self._background is not None:
-                out = apply_field_corrections(
-                    proj, dark=self._dark, bright=self._bright,
-                    bright_mode=self._bright_mode, background=self._background).astype(np.float32)
-            else:
-                out = proj.astype(np.float32)
+                raise ValueError(f"Result is {proj.ndim}-D; expected a 2-D image.")
             info = (f"{self._method.capitalize()} projection ({n_used} frames"
                     f"{f', skipped {self._skip}' if self._skip else ''}) → {proj.shape}  "
                     f"[{np.nanmin(proj):.3g}, {np.nanmax(proj):.3g}]")
-            self.finished.emit(out, info)
+            self.finished.emit(proj, info)
         except Exception:
             self.failed.emit(traceback.format_exc())
 
@@ -1769,8 +1836,20 @@ class CalibrationWorker(QtCore.QObject):
         # might resolve.
         env = QtCore.QProcessEnvironment.systemEnvironment()
         env.insert("PYTHONPATH", _pythonpath_with_repo_root(env.value("PYTHONPATH", "")))
+        # Backends print non-ASCII (e.g. "µm", "─"); on Windows the child's
+        # stdout defaults to cp1252 and raises UnicodeEncodeError mid-run.
+        # _on_stdout decodes as UTF-8, so force UTF-8 on the child.
+        env.insert("PYTHONUTF8", "1")
+        env.insert("PYTHONIOENCODING", "utf-8")
         proc.setProcessEnvironment(env)
         proc.setProcessChannelMode(QtCore.QProcess.MergedChannels)
+        # `-m midas_gui.calib_cli` only resolves the `midas_gui` package when
+        # the process's cwd is the repo root (that's what puts the repo root
+        # on sys.path[0] for `-m`) on an install where midas_gui isn't a
+        # pip-installed package — otherwise this inherits whatever cwd the
+        # GUI itself happens to have. Same fix as job_queue.py's background
+        # jobs, which hit this for the identical reason.
+        proc.setWorkingDirectory(str(PROJECT_ROOT))
         proc.readyReadStandardOutput.connect(self._on_stdout)
         proc.finished.connect(self._on_process_finished)
         proc.errorOccurred.connect(self._on_process_error)
@@ -1816,7 +1895,7 @@ class CalibrationWorker(QtCore.QObject):
         self.finished.emit(result)
 
 
-class ManualDspacingCalibWorker(QtCore.QThread):
+class _ManualDspacingCalibWorkerImpl(QtCore.QThread):
     """Fit detector geometry from user-picked ring points and known d-spacings
     (Bragg's law), entirely bypassing ``calib.run_pipeline``/``midas_calibrate_v2``
     — used for non-crystalline calibrants (e.g. AgBH) that have no space group.
@@ -1950,12 +2029,14 @@ class ManualDspacingCalibWorker(QtCore.QThread):
                 f"via Limits…")
         return lines
 
+ManualDspacingCalibWorker = process_isolated(_ManualDspacingCalibWorkerImpl)   # own OS process — see proc_worker.py
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  Single-frame integration worker (Tab 2 post-calibration preview)
 # ═════════════════════════════════════════════════════════════════════════════
 
-class IntegrationWorker(QtCore.QThread):
+class _IntegrationWorkerImpl(QtCore.QThread):
     log_line = QtCore.pyqtSignal(str)
     finished = QtCore.pyqtSignal(object)
     failed   = QtCore.pyqtSignal(str)
@@ -2037,6 +2118,8 @@ class IntegrationWorker(QtCore.QThread):
             })
         except Exception:
             self.failed.emit(traceback.format_exc())
+
+IntegrationWorker = process_isolated(_IntegrationWorkerImpl)   # own OS process — see proc_worker.py
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -2434,15 +2517,8 @@ class BatchWorker(QtCore.QThread):
         if paths:
             return paths[0]
         one = cfg.get("path")
-        # Path, not os.path: this module has no module-level `import os`
-        # (the one other use imports it locally), and reaching for it here
-        # was a NameError that only fired on the "path" branch -- a single
-        # file or a glob -- which no test covered.
-        try:
-            if one and Path(str(one)).is_file():
-                return one
-        except OSError:
-            pass
+        if one and os.path.isfile(str(one)):
+            return one
         return None
 
     def _iter_frames(self, source):
@@ -2697,6 +2773,12 @@ class BatchWorker(QtCore.QThread):
             # into its zarr and HDF5, including runs whose user never opened
             # the cake dialog, so what it used should not have to be inferred.
             self.log_line.emit(f"[batch] omega: {omega_desc}")
+            self.log_line.emit(
+                f"[batch] cake: R {spec.RMin:g}–{spec.RMax:g} px step "
+                f"{spec.RBinSize:g} ({spec.n_r_bins} bins) | η {spec.EtaMin:g}–"
+                f"{spec.EtaMax:g}° step {spec.EtaBinSize:g} "
+                f"({spec.n_eta_bins} bins) | "
+                f"{'multi-azimuth cake' if self._multi_azimuth else 'η-collapsed 1-D'}")
             if self._drift_traj is not None:
                 self.log_line.emit(
                     f"[batch] drift trajectory: {len(self._drift_traj.frame_indices)} knots  "
@@ -2775,7 +2857,7 @@ class BatchWorker(QtCore.QThread):
             if want_zarr:
                 zarr_dir = self._out_dir / "zarr"
                 zarr_dir.mkdir(parents=True, exist_ok=True)
-                zarr_bin_area = cake_bin_area
+                zarr_bin_area = cake_bin_area   # see the comment where it's built
                 if self._zarr_grouping == "file":
                     zarr_group_key_fn = getattr(source, "zarr_group_key", None)
                     if zarr_group_key_fn is None:
@@ -3118,8 +3200,8 @@ class BatchWorker(QtCore.QThread):
                     h5_path = h5_dir / f"{combined_stem}.h5"
                     try:
                         from midas_gui.cake_hdf5 import write_cake_h5
-                        write_cake_h5(
-                            h5_path, cake=np.array(all_profiles),
+                        _write_h5_atomic(h5_path, lambda t: write_cake_h5(
+                            t, cake=np.array(all_profiles),
                             cake_sigma=np.array(all_sigmas),
                             collapsed_profiles=(np.array(all_cake_profiles)
                                                 if all_cake_profiles else None),
@@ -3134,7 +3216,7 @@ class BatchWorker(QtCore.QThread):
                                 'RBinSize': float(spec.RBinSize),
                                 'EtaMin': float(spec.EtaMin), 'EtaMax': float(spec.EtaMax),
                                 'EtaBinSize': float(spec.EtaBinSize),
-                            })
+                            }))
                         try:
                             # out_paths is only fully known here (every zarr
                             # sibling from this run, plus this h5's own path).
@@ -3152,17 +3234,20 @@ class BatchWorker(QtCore.QThread):
                     h5_dir = self._out_dir / "h5"
                     h5_dir.mkdir(parents=True, exist_ok=True)
                     h5_path = h5_dir / f"{combined_stem}.h5"
-                    m.write_h5(str(h5_path),
-                               profiles=np.array(all_profiles),
-                               r_axis=r_ax,
-                               frame_ids=frame_ids,
-                               sigmas=np.array(all_sigmas),
-                               # One rotation angle per profile, same order —
-                               # see write_all_profiles for why this is an
-                               # extra dataset rather than a metadata field.
-                               extra_datasets={"omegas": np.asarray(
-                                   all_omegas, dtype=np.float64)})
+                    _write_h5_atomic(h5_path, lambda t: m.write_h5(
+                        str(t),
+                        profiles=np.array(all_profiles),
+                        r_axis=r_ax,
+                        frame_ids=frame_ids,
+                        sigmas=np.array(all_sigmas),
+                        # One rotation angle per profile, same order —
+                        # see write_all_profiles for why this is an
+                        # extra dataset rather than a metadata field.
+                        extra_datasets={
+                            "omegas": np.asarray(all_omegas, dtype=np.float64),
+                            **radial_axis_datasets(r_ax, lsd, px, wl)}))
                     try:
+                        stamp_cake_params_h5(h5_path, spec)
                         prov_entry['extra']['out_paths'] = out_paths + [str(h5_path)]
                         stamp_h5_provenance(h5_path, prov_entry)
                     except Exception:
@@ -3289,7 +3374,11 @@ class PumpProbeWorker(QtCore.QThread):
             result = self._group_and_difference(
                 np.asarray(profiles), np.asarray(delays), self._ref_delays)
             result.update({"r_axis_px": r_ax, "q_axis": q_ax, "tth_axis": two_theta,
-                           "lsd": lsd, "px": px, "wl": wl})
+                           "lsd": lsd, "px": px, "wl": wl,
+                           # per-frame (acquisition order) — lets the tab re-group
+                           # after a q-alignment (see qshift.py)
+                           "profiles": np.asarray(profiles, dtype=float),
+                           "frame_delays": np.asarray(delays, dtype=float)})
             self.finished.emit(result)
         except Exception:
             self.failed.emit(traceback.format_exc())
@@ -4265,12 +4354,17 @@ def write_all_profiles(out_dir, fmts, r_axis, profiles, sigmas, frame_ids,
         # own, and a downstream peak fit or pole figure needs one value per
         # profile, in the same order. Skipped rather than padded when the
         # lengths disagree — a misaligned angle is worse than none.
-        extras = None
+        extras = dict(radial_axis_datasets(r_axis, lsd, px, wl))
         if omegas is not None and len(omegas) == len(frame_ids):
-            extras = {"omegas": np.asarray(omegas, dtype=np.float64)}
-        m.write_h5(str(h5_path), profiles=profiles, r_axis=r_axis,
-                   frame_ids=frame_ids, sigmas=sigmas,
-                   extra_datasets=extras)
+            extras["omegas"] = np.asarray(omegas, dtype=np.float64)
+        _write_h5_atomic(h5_path, lambda t: m.write_h5(
+            str(t), profiles=profiles, r_axis=r_axis,
+            frame_ids=frame_ids, sigmas=sigmas, extra_datasets=extras))
+        if spec is not None:
+            try:
+                stamp_cake_params_h5(h5_path, spec)
+            except Exception:
+                pass   # best-effort, like the provenance stamp below
         try:
             entry = provenance.build_entry(
                 'midas_gui.batch_integrate.save',
@@ -4571,12 +4665,7 @@ class BatchRunCoordinator(QtCore.QObject):
                     # Through bin_area_for, so a wrapped eta range gets a
                     # real area for the bins past the cut instead of zeros.
                     bin_area = bin_area_for(spec, kernel, self._args["mask"])
-                    cake_params = {
-                        'RMin': float(spec.RMin), 'RMax': float(spec.RMax),
-                        'RBinSize': float(spec.RBinSize),
-                        'EtaMin': float(spec.EtaMin), 'EtaMax': float(spec.EtaMax),
-                        'EtaBinSize': float(spec.EtaBinSize),
-                    }
+                    cake_params = cake_params_of(spec)
                 h5_paths = write_all_profiles(
                     out_dir, ["h5"], r_axis, merged_profiles, merged_sigmas, merged_ids,
                     float(spec.Lsd), float(spec.pxY), float(spec.Wavelength),
@@ -4623,7 +4712,7 @@ class BatchRunCoordinator(QtCore.QObject):
 #  Tab 4 — Calibration refinement (autograd against integrated profile)
 # ═════════════════════════════════════════════════════════════════════════════
 
-class RefinementWorker(QtCore.QThread):
+class _RefinementWorkerImpl(QtCore.QThread):
     """Refine geometry by minimising an integrated-profile loss via autograd.
 
     Default loss is EtaUniformityLoss (rings should be flat in η).  The image is
@@ -4830,12 +4919,14 @@ class RefinementWorker(QtCore.QThread):
         except Exception:
             self.failed.emit(traceback.format_exc())
 
+RefinementWorker = process_isolated(_RefinementWorkerImpl)   # own OS process — see proc_worker.py
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  Tab 4b — Profile comparison (before/after refinement)
 # ═════════════════════════════════════════════════════════════════════════════
 
-class RefineCompareWorker(QtCore.QThread):
+class _RefineCompareWorkerImpl(QtCore.QThread):
     """Integrate one frame with both the original and refined calibration results.
 
     Returns profiles on a common R axis so the tab can overlay them and show
@@ -4901,6 +4992,8 @@ class RefineCompareWorker(QtCore.QThread):
         except Exception:
             self.failed.emit(traceback.format_exc())
 
+RefineCompareWorker = process_isolated(_RefineCompareWorkerImpl)   # own OS process — see proc_worker.py
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  Tab 5 — Corrections & Physics preview (single frame)
@@ -4921,7 +5014,7 @@ def _parse_composition(text: str) -> dict:
     return out
 
 
-class CorrectionPreviewWorker(QtCore.QThread):
+class _CorrectionPreviewWorkerImpl(QtCore.QThread):
     """Integrate one frame with and without the selected corrections so the user
     can see the effect of each before committing to a batch run.
 
@@ -5012,6 +5105,8 @@ class CorrectionPreviewWorker(QtCore.QThread):
         except Exception:
             self.failed.emit(traceback.format_exc())
 
+CorrectionPreviewWorker = process_isolated(_CorrectionPreviewWorkerImpl)   # own OS process — see proc_worker.py
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  Tab 6 — PDF analysis (image → I(Q) → G(r))
@@ -5091,7 +5186,7 @@ def _flatten_sq_tail(q, S, window, poly_deg=3, mad_k=3.0, n_iter=3):
     return S_flat, poly
 
 
-class PDFWorker(QtCore.QThread):
+class _PDFWorkerImpl(QtCore.QThread):
     """Polyatomic total-scattering PDF: I(Q) → Faber-Ziman S(Q) → G(r).
 
     Uses the ``midas_pdf`` backend (via :mod:`midas_gui.pdf_backend`): real
@@ -5352,8 +5447,10 @@ class PDFWorker(QtCore.QThread):
         except Exception:
             self.failed.emit(traceback.format_exc())
 
+PDFWorker = process_isolated(_PDFWorkerImpl)   # own OS process — see proc_worker.py
 
-class PDFStructureFitWorker(QtCore.QThread):
+
+class _PDFStructureFitWorkerImpl(QtCore.QThread):
     """CIF-driven small-box structure refinement (PDFfit-style) against a
     previously computed G(r) snapshot.
 
@@ -5442,12 +5539,14 @@ class PDFStructureFitWorker(QtCore.QThread):
         except Exception:
             self.failed.emit(traceback.format_exc())
 
+PDFStructureFitWorker = process_isolated(_PDFStructureFitWorkerImpl)   # own OS process — see proc_worker.py
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  Tab 7 — Texture / pole figure (per-ring azimuthal extraction)
 # ═════════════════════════════════════════════════════════════════════════════
 
-class PoleFigureWorker(QtCore.QThread):
+class _PoleFigureWorkerImpl(QtCore.QThread):
     """Integrate one frame to an (η, R) cake, then map a selected ring to a
     stereographic pole figure and extract its azimuthal intensity I(η)."""
     log_line = QtCore.pyqtSignal(str)
@@ -5494,12 +5593,14 @@ class PoleFigureWorker(QtCore.QThread):
         except Exception:
             self.failed.emit(traceback.format_exc())
 
+PoleFigureWorker = process_isolated(_PoleFigureWorkerImpl)   # own OS process — see proc_worker.py
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  Learnable gain worker (Tab 5 — per-pixel spatial gain drift recovery)
 # ═════════════════════════════════════════════════════════════════════════════
 
-class LearnableGainWorker(QtCore.QThread):
+class _LearnableGainWorkerImpl(QtCore.QThread):
     """Train a per-pixel LearnableGain module against a reference profile.
 
     Workflow (notebook 16):
@@ -5597,6 +5698,8 @@ class LearnableGainWorker(QtCore.QThread):
         except Exception:
             self.failed.emit(traceback.format_exc())
 
+LearnableGainWorker = process_isolated(_LearnableGainWorkerImpl)   # own OS process — see proc_worker.py
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  Drift trajectory worker (Tab 3 — long-scan geometry drift correction)
@@ -5619,7 +5722,7 @@ def _spec_from_trajectory(base_spec, traj, frame_abs_idx: int):
     return s
 
 
-class DriftWorker(QtCore.QThread):
+class _DriftWorkerImpl(QtCore.QThread):
     """Fit a per-frame geometry drift trajectory from calibrant anchor frames.
 
     The function ``fit_drift_trajectory`` (midas_integrate_v2.pipelines.drift)
@@ -5673,3 +5776,55 @@ class DriftWorker(QtCore.QThread):
             self.finished.emit(traj)
         except Exception:
             self.failed.emit(traceback.format_exc())
+
+DriftWorker = process_isolated(_DriftWorkerImpl)   # own OS process — see proc_worker.py
+
+
+class SolveCellWorker(QtCore.QThread):
+    """Runs one Solve Cell pipeline stage (ingest/diamond_filter/ab_initio/
+    refine) off the GUI thread. See midas_gui/solve_cell/pipeline.py — this
+    worker is a thin dispatcher, no pipeline logic lives here.
+
+    ``cfg["frames_loader"]`` (a zero-arg callable, e.g. a ``DataLoaderPanel``'s
+    ``full_stack`` bound method) is resolved into ``cfg["frames"]`` here, on
+    this thread, rather than by the GUI caller before starting the worker —
+    for an HDF5-backed stack that read can be ~10 GB of synchronous disk I/O,
+    and doing it on the GUI thread froze the window with no progress shown
+    for the whole read before "Running ingest…" even had a chance to mean
+    anything. ``pipeline.py`` itself is untouched: it still just expects
+    ``cfg["frames"]`` to already be an array.
+    """
+    log_line = QtCore.pyqtSignal(str)
+    # (step_name, {"preview": ..., "stats": ..., optional "panel_id": ...}) --
+    # see pipeline.py's _stage_ingest docstring. Only ingest/ingest_pooled
+    # ever emit this; run_stage() ignores on_step for every other stage.
+    step     = QtCore.pyqtSignal(str, object)
+    finished = QtCore.pyqtSignal(object)
+    failed   = QtCore.pyqtSignal(str)
+
+    def __init__(self, stage: str, cfg: dict, parent=None):
+        super().__init__(parent)
+        self._stage = stage
+        self._cfg = cfg
+
+    def run(self):
+        import sys
+        old_out, old_err = sys.stdout, sys.stderr
+        stream = _LogStream(self.log_line)
+        sys.stdout = sys.stderr = stream
+        try:
+            if "frames_loader" in self._cfg and "frames" not in self._cfg:
+                loader = self._cfg.pop("frames_loader")
+                self._cfg["frames"] = loader()
+            from midas_gui.solve_cell import pipeline
+            result = pipeline.run_stage(
+                self._stage, self._cfg,
+                on_step=lambda name, payload: self.step.emit(name, payload))
+            self.finished.emit(result)
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+        finally:
+            if sys.stdout is stream:
+                sys.stdout = old_out
+            if sys.stderr is stream:
+                sys.stderr = old_err
