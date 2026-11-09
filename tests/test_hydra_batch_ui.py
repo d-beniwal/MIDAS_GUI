@@ -339,17 +339,22 @@ def test_a_narrow_window_scrolls_the_loader_instead_of_clipping_it(app):
 
     assert loader.minimumWidth() == 0, \
         "an explicit minimum would again let Qt squeeze past the hint"
-    assert loader.minimumSizeHint().width() > 400
-
     area = loader.parentWidget()
     while area is not None and not isinstance(area, QtWidgets.QScrollArea):
         area = area.parentWidget()
     assert area is not None, "the loader is not scrollable"
-    assert area.minimumWidth() < loader.minimumSizeHint().width(), \
-        "the scroll area must be allowed narrower than its contents"
 
+    # Two mechanisms now guard this, and either is enough: the fork's
+    # scroll wrap (a viewport narrower than the loader scrolls), and
+    # upstream's panel_toggle (46424ed), which raises the panel minimum
+    # to its content width so it is never squeezed in the first place.
+    # So assert what the user sees, not which mechanism delivered it:
+    # at a narrow window the loader is never laid out narrower than its
+    # own hint, which is what clipping its children means.
     page.resize(700, 800)
     page.show()
     QtWidgets.QApplication.processEvents()
+    assert loader.width() >= loader.minimumSizeHint().width(), \
+        "the loader was squeezed below its hint, so its controls clip"
     assert page._loader._combine_op.width() > 0, "the op combo collapsed"
     page.hide()
