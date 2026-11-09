@@ -118,7 +118,8 @@ def chunk_ranges(n_raw: int, *, chunk_size: Optional[int] = None,
 
 def reduce_chunk_multi(frames, ops, *, dark=None, bright=None,
                        bright_mode: str = "divide", background=None,
-                       clip_negatives: bool = True) -> dict:
+                       clip_negatives: bool = True,
+                       skip_blank: bool = False, stats: Optional[dict] = None) -> dict:
     """``{op: frame}`` for several ops over ONE pass of ``frames``.
 
     Correcting a sub-frame is the same work whichever op consumes it, and
@@ -131,6 +132,42 @@ def reduce_chunk_multi(frames, ops, *, dark=None, bright=None,
     Only ``median`` needs the corrected stack kept — the others accumulate
     one frame at a time — so the memory cost is a single plane per op
     unless median is asked for.
+
+    ``skip_blank`` drops raw sub-frames that are entirely zero before they
+    reach the combine. A Pixirad arms one frame before it starts counting,
+    so frame 1 of every ``.pixi.h5`` is all zeros -- and averaging it in
+    scales every pixel by ``(n-1)/n``. Measured on 1-ID-E
+    ``air_80p725keV_3s_003512.pixi.h5``: 10 raw frames, frame 0 blank, and
+    the written output matched ``mean(frames 0..9)`` at 100% of pixels,
+    i.e. exactly 10/9 low. Silent, and it scales with how few frames you
+    combine -- 10% over ten frames, 33% over three.
+
+    The test is the RAW frame, before correction: a corrected frame can be
+    legitimately all-zero (a flat field that cancels, or a clip), and that
+    is real data, not a missing exposure. A frame that was zero as it came
+    off the detector never recorded anything, so it is not an observation
+    of zero for any of the four ops -- it is the absence of an observation.
+
+    ``sum`` and ``max`` are unaffected either way (adding or maximising
+    against zero changes nothing), so this only moves ``mean`` and
+    ``median``.
+
+    **Off by default, and that is a retraction.** It shipped on by default
+    and was wrong to: an all-zero raw frame is NOT reliably an arming frame.
+    It broke three ``test_batch_correction_tab`` cases whose synthetic stack
+    ramps ``base + i`` from 0, so sub-frame 0 is legitimately all-zero data
+    and dropping it moved a mean from 1.5 to 2.0. Nothing in the pixel values
+    distinguishes "the detector had not started counting" from "this exposure
+    really was zero" -- position does not either, since the Pixirad's dud and
+    that ramp's first frame are both frame 0. The caller has to say, from
+    something outside the array (the detector, or the user). A chunk that is ENTIRELY blank keeps
+    its frames: there is no good answer there, and raising "no frames to
+    combine" for a run that legitimately contains a dead chunk would be
+    worse than returning the zeros the detector actually produced.
+
+    ``stats``, when given, is filled with ``{"blank_skipped": n}`` so a
+    caller can report the drop instead of it being invisible -- the whole
+    point being that the old behaviour was wrong *quietly*.
     """
     names = []
     for op in ops:
@@ -151,8 +188,14 @@ def reduce_chunk_multi(frames, ops, *, dark=None, bright=None,
     total = None
     running_max = None
     n = 0
+    blank = 0
+    blank_like = None
     for frame in frames:
         arr = np.asarray(frame)
+        if skip_blank and not arr.any():
+            blank += 1
+            blank_like = arr            # all-zero, so one stands for all
+            continue
         if has_fields:
             # clip_negative=False — clipped once per op at the end. See the
             # module docstring for why the clip cannot move earlier.
@@ -169,8 +212,26 @@ def reduce_chunk_multi(frames, ops, *, dark=None, bright=None,
         if "max" in names:
             running_max = cur.copy() if running_max is None else \
                 np.maximum(running_max, cur, out=running_max)
+    if n == 0 and blank:
+        # Every frame in this chunk was blank. Returning the detector's own
+        # zeros beats failing the whole run over a dead chunk, so redo the
+        # pass without the skip rather than raise. Rebuilt from a stand-in
+        # rather than re-iterating `frames`: that may be a one-shot
+        # iterator, and every frame here is all-zero by definition, so
+        # `blank` copies of one of them is the same input exactly.
+        out = reduce_chunk_multi(
+            [blank_like] * blank, ops, dark=dark, bright=bright,
+            bright_mode=bright_mode, background=background,
+            clip_negatives=clip_negatives, skip_blank=False)
+        if stats is not None:
+            stats["blank_skipped"] = 0
+            stats["all_blank"] = True
+        return out
     if n == 0:
         raise ValueError("reduce_chunk: no frames to combine.")
+    if stats is not None:
+        stats["blank_skipped"] = blank
+        stats["all_blank"] = False
 
     raw_out = {}
     if "mean" in names:
@@ -191,7 +252,8 @@ def reduce_chunk_multi(frames, ops, *, dark=None, bright=None,
 
 def reduce_chunk(frames, op: str = "mean", *, dark=None, bright=None,
                  bright_mode: str = "divide", background=None,
-                 clip_negatives: bool = True) -> np.ndarray:
+                 clip_negatives: bool = True,
+                 skip_blank: bool = False, stats: Optional[dict] = None) -> np.ndarray:
     """Correct every frame, combine them with ``op``, clip once. Returns float32.
 
     See the module docstring for why that order, and why it is the same order
@@ -203,9 +265,10 @@ def reduce_chunk(frames, op: str = "mean", *, dark=None, bright=None,
     streaming form and does materialise, in float32.
     """
     name = "mean" if str(op).lower() == "average" else str(op).lower()
-    return reduce_chunk_multi(
+    return reduce_chunk_multi(  # skip_blank/stats: see reduce_chunk_multi
         frames, [name], dark=dark, bright=bright, bright_mode=bright_mode,
-        background=background, clip_negatives=clip_negatives)[name]
+        background=background, clip_negatives=clip_negatives,
+        skip_blank=skip_blank, stats=stats)[name]
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -256,12 +319,98 @@ def reduce_chunk(frames, op: str = "mean", *, dark=None, bright=None,
 NO_DARK = "no dark found — correcting without one"
 
 
+def is_degenerate_dark(arr) -> bool:
+    """Is this array a placeholder rather than a measurement?
+
+    Rejects three shapes of non-dark that used to be accepted, each of
+    which then WON over the user's own Dark field — because a successful
+    rung never falls through to the next one:
+
+    * **all zero.** Every raw file in the ``white_oct26`` set carries an
+      ``exchange/data_dark`` of 2048x2048 zeros, and so rung 2 silently
+      beat rung 3 for that whole experiment.
+    * **constant.** A uniform non-zero plane is equally unphysical for a
+      real detector dark (a GE panel's offset has structure; its own
+      spatial std is tens of counts), and it is what a half-written
+      placeholder looks like.
+    * **not finite.** ``average_field`` on an empty ``(0, H, W)`` stack
+      returns an all-NaN plane of the right shape and ndim, which passed
+      every check here and would have poisoned every corrected frame.
+
+    Deliberately NOT a plausibility test on the magnitude: a dark is
+    allowed to be unusual, it just has to be a measurement. The
+    "102 dark-less folders" self-dark convention the ladder relies on
+    (see the survey above) uses files whose ``data_dark`` holds real
+    pixels, so none of it is affected.
+    """
+    a = np.asarray(arr)
+    if a.size == 0 or not np.isfinite(a).all():
+        return True
+    return bool(a.min() == a.max())
+
+
+#: Fraction of pixels that may sit far above the local noise before a
+#: plane is called diffraction rather than a dark. Measured, not guessed:
+#: across 15 real darks on the 20-ID VAREX share the worst was 0.096% and
+#: the 1-ID darks are 0.01%, while data runs to 6.6%. 0.5% leaves a factor
+#: of five over the worst real dark.
+DIFFRACTION_PIXEL_FRACTION = 0.5
+
+
+def has_diffraction_structure(arr, threshold=DIFFRACTION_PIXEL_FRACTION) -> bool:
+    """Does this plane look like a measurement rather than a dark?
+
+    A VETO, not a classifier, and the distinction matters. Across the same
+    sample, data planes ranged from 0.0009% to 6.6% by this statistic --
+    the low end being weak, attenuated or blank frames -- so "looks like a
+    dark" is NOT evidence that something IS one. What the statistic can do
+    reliably is reject a plane carrying obvious diffraction, whatever its
+    filename claims.
+
+    Used to settle doubt about a name-matched candidate; never to promote
+    an unnamed file into being a dark.
+
+    Deliberately median/MAD rather than mean/std: every GE frame here
+    carries a stuck pixel at 16349, so max and std say the same thing
+    about a dark and a diffraction pattern.
+    """
+    a = np.asarray(arr, dtype=np.float64)
+    if a.size == 0:
+        return False
+    med = np.median(a)
+    mad = np.median(np.abs(a - med)) * 1.4826
+    hot = float((a > med + 10.0 * max(mad, 1e-9)).mean()) * 100.0
+    return hot > float(threshold)
+
+
+def acquisition_exposure(path) -> Optional[float]:
+    """Detector exposure in seconds, or None when the file does not say.
+
+    The dark must have been taken at the data's exposure: a GE panel's
+    offset grows with it (1778.5 / 1827.6 / 1858.6 counts at 0.1 / 4 / 5 s
+    in one real experiment), so a 0.1 s dark subtracted from a 10 s frame
+    removes a couple of hundred counts too few, and from a 1 s frame
+    removes ~19 too many -- which clips the whole background to zero and
+    is exactly how this check came to be written.
+    """
+    try:
+        import h5py
+        with h5py.File(str(path), "r") as f:
+            d = f.get("instrument/Detector/DetAcqTime")
+            if d is None or getattr(d, "size", 0) < 1:
+                return None
+            return float(np.asarray(d).ravel()[0])
+    except Exception:
+        return None
+
+
 def _mean_dark(path, dataset: str, shape) -> Optional[np.ndarray]:
-    """Mean of ``dataset`` in ``path``, or None if unreadable/absent/wrong shape.
+    """Mean of ``dataset`` in ``path``, or None if it is not a usable dark.
 
     A shape mismatch drops to the next rung rather than raising — the same
     skip-and-warn contract ``apply_field_corrections`` applies to a field
-    left over from a different detector.
+    left over from a different detector. A DEGENERATE plane drops through
+    the same way, for the same reason: see :func:`is_degenerate_dark`.
     """
     try:
         arr = np.asarray(average_field("hdf5", str(path), dataset), dtype=np.float32)
@@ -270,6 +419,8 @@ def _mean_dark(path, dataset: str, shape) -> Optional[np.ndarray]:
     if arr.ndim != 2 or arr.size == 0:
         return None
     if shape is not None and tuple(arr.shape) != tuple(shape):
+        return None
+    if is_degenerate_dark(arr):
         return None
     return arr
 

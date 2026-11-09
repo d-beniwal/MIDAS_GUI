@@ -15,13 +15,128 @@ multi-phase/core-shell, anisotropic ADP, directional strain-PDF.
 Build-critical reference for maintaining the PDF tab:
 `.context/reference/midas_pdf/` (esp. `01_core_api.md`, `05_gui_integration.md`).
 
+## Follow-ups carried forward from STATE (2026-10-21)
+
+These were open in the prior snapshot; check current code before acting.
+
+- **Calibration pipeline comparison (deferred by user, 2026-10-31):** the GUI
+  now offers only One-shot (default), Frozen-point (fast/high-tilts), and
+  Frozen-point + One-shot. Systematically probe First-time, Four-stage,
+  Bayesian MAP+Laplace, Joint cake, and the multi-distance workflow later
+  before deciding which to reintroduce. Retain backend adapters for research.
+  Compare geometry/pixel residuals, tilt recovery, convergence/basin failures,
+  runtime, seeds/refine/window fidelity, masks/transforms, multi-panel support,
+  uncertainty and residual-map export on representative real/synthetic data.
+  Live-check the new two-stage option on beamline data; stage 2 uses all fitted
+  Frozen-point seeds through One-shot's lower-level seeded refinement path.
+
+- **MCP phase 2:** extend the current Data Viewer/Calibrate control surface
+  to Mask and Batch Integrate when requested. Phase 1 is already on `main`;
+  see `midas_gui_mcp/README.md` for operation coverage and APEXA integration.
+- **Solve Cell Phase 2+:** detector-stage geometry resolution tiers,
+  self-calibration fallback, bootstrap confidence intervals/axis doubling,
+  further domain separation, diagnostics; see
+  `documentation/solve_cell_handoff.md` §10. Multi-panel pooling currently
+  requires a calibration file for each panel. Numerically cross-check the
+  deliberately standalone pipeline's `_apply_stack_corrections` against
+  GUI field corrections beyond the synthetic unit test.
+- **Texture:** make `PoleFigureWorker` omega-aware across a series (currently
+  single-frame with cfg χ/φ); inspect cake HDF5 in a real viewer and continue
+  testing metadata provenance.
+- **Frozen-point calibration:** the high-tilt `_seed_and_v1` branch does not
+  forward `tols=tols`, and the backend iterative wrapper also replaces geometry
+  bounds with its own `bounds_*` windows. Wire both layers before claiming GUI
+  ranges apply; define per-stage vs whole-run cap semantics for the combined
+  pipeline. The GUI currently explains that its windows apply only to the
+  combined pipeline's One-shot stage, around the Frozen-point result.
+- **Calibrate UI unification:** see
+  `documentation/calibration_unification_plan.md`; recheck surface parity
+  after recent Hydra changes before choosing the next phase.
+- **Verification gaps:** no live end-to-end restart/relaunch check or recent
+  real multi-panel beamline calibration output; Windows `lheald` import
+  failure awaits direct tracebacks/version. `job_queue.py` and
+  `peak_fit_panel.py` still lack coverage; `test_batch_cli_omega.py` covers
+  only the omega argument/configuration round trip for `batch_cli.py`.
+
+## Solve Cell: ingest optimized, next bottlenecks + a loading bug (2026-10-22)
+
+Benchmarked MIDAS's `perf_solve_cell` branch against `master` on a real
+642-frame spinel panel (`test6_..._det_-10_-15_0_...h5`): ingest is 4.35x
+faster at the new default (`max_workers=1`, wired into `pipeline.py` in
+`a2acc78`), 9.42x at `max_workers=12` on this 12-core machine, with
+byte-identical `spots_g.csv`/`ingest_summary.json` at every setting.
+`_stage_ingest`'s own hot loops (`build_mask`, `live_frames`,
+`subtract_background`, `choose_sectors`, `find_blobs_3d`) are now all
+vectorized and/or thread-pool-capable — nothing left to optimize inside
+that stage itself.
+
+**Bug found while investigating this, not yet fixed:** `midas_gui` never
+imports `hdf5plugin` anywhere (confirmed by grepping the whole package and
+by importing `midas_gui.app` standalone and checking `sys.modules`). This
+beamline's raw Eiger files use the dynamically-loaded `bitshuffle` HDF5
+filter (id 32008, confirmed via `h5py`'s own filter introspection), so
+**any h5py read of a raw frame — a Data Viewer preview (`_load_image`/
+`_get_frame`/`full_stack` in `helpers.py`/`widgets.py`), a solve-cell panel
+load, or the Ingest stage's own `frames_loader()` resolution in
+`workers.py`'s `SolveCellWorker` — crashes with `OSError: Can't
+synchronously read data (can't open directory .../lib/hdf5/plugin)`**,
+unless something else in the same process happened to import `hdf5plugin`
+first. Nothing in the GUI currently does that: only `midas_defect.
+persistence` imports it, and nothing in the solve-cell call path touches
+that module. Reproduced directly against the real `midas-gui` conda env and
+the real `h5py.File(...)[...]` call `_load_image` makes, not just a scratch
+script. **Fix:** import `hdf5plugin` once, early, at `midas_gui` startup
+(e.g. `midas_gui/__init__.py` or `app.py`) so it is registered before any
+h5py read, regardless of which tab/path touches a file first. Once
+registered, the read itself is fast and not a bottleneck (2.39s measured to
+load a 1.35 GB / 642-frame stack).
+
+**Downstream solve-cell stages not yet touched by the perf_solve_cell work**
+(ranked by how often each is hit):
+- `midas_hkls.ab_initio.select_basis`
+  (`packages/midas_hkls/midas_hkls/ab_initio.py:477`) — triple-nested Python
+  loop over up to `max_try=12` candidate vectors (≤220 triples), each
+  running up to 8 `_find_finer_lattice` refinement cycles (its own
+  `m³`-scan, up to 96 combos x 3 basis-vector swaps ≈ 288
+  `_index_fraction` calls per cycle). Runs on every ab-initio solve
+  (`pipeline.py` stage 3), not a rare path.
+- `_stage_index_known_cell`'s `_random_rotation_search`
+  (`midas_gui/solve_cell/pipeline.py:757`) — default `n_search=200,000`
+  random orientations for the real data PLUS `n_null_draws=20` more full
+  200k-orientation null searches = up to 4.2M orientation trials per call,
+  single-threaded. Used for second/third-domain search, which per the
+  `s3_midas` skill is the *common* case at this facility (multi-crystal
+  DACs), not an edge case. Same "many independent trials, no shared mutable
+  state" shape as the ingest `max_workers` work — directly portable to a
+  thread pool.
+- `_stage_diamond_filter`'s Monte Carlo null test (`pipeline.py:596`) —
+  scales with pooled spot count; lower priority since `n_total` is
+  typically small (tens of spots).
+- `_stage_ingest_pooled` still processes panels strictly serially by design
+  (memory-bound, see its own docstring) — matters less now that each
+  panel's ingest is 4-9x faster, but still N x per-panel wall time for this
+  facility's typically many-panel tiled coverage.
+- `midas_hkls.ub_refine.refine_ub_from_gvectors` not deeply profiled;
+  reflection counts going in are modest, unlikely to be the bottleneck.
+
 ## Per-tab open items
 
 - **Calibrate:** multi-distance (`autocalibrate_multi`), doublet calibrants,
   NN-residual augmenter, per-ring δr_k JSON sidecar export, full custom-calibrant UI.
 - **Batch:** per-frame outlier rejection (cosmic-ray / azimuthal σ-clip in
   batch), Compton/empty/absorption in batch, Zarr/GE/EDF sources, soft
-  (autograd) kernel.
+  (autograd) kernel. **Multi-azimuth + Q-uniform bins** (2026-10-05): still
+  blocked (`workers.py:1510-1516` raises; `tab_batch.py` warns pre-run) —
+  not a hard limitation, just unimplemented. `rebin_R_to_Q` only rebins a
+  1-D profile; every eta row of the cake shares the same `r_ax`, so the same
+  interpolation could run per-row to produce a `(n_eta, n_q)` cake. Would
+  also need: `cake_sigma`'s per-bin weighting to survive the interpolation,
+  the "true engine-collapsed" 1-D profile re-derived post-rebin (currently
+  captured separately from the raw cake sum), `write_cake_h5`'s stored
+  r/Q axis labeling updated, and the `tab_batch.py` guard dialog + its test
+  removed. Note `write_cake_h5` already stores Q as a non-uniform companion
+  axis today regardless (`radial_axes_from_r_px`) — this item is only about
+  making the bin *spacing* uniform in Q.
 - **Corrections:** empty-scale LBFGS refine, absorption-param refine.
 - **Refinement:** ProfileMSE / PeakPosition losses, multi-distance, in-tab
   Laplace UQ, energy-sweep drift.
@@ -66,6 +181,16 @@ P0-1 normalize corrections cake · P0-2 wire Q-uniform into kernels · P1-1 fini
 autograd geometry grads · P1-2 robuster tilt in one_shot/bayesian · P2-1 smooth
 absorption at μR=1.5 · P2-3 fold `analyze_workflows/` round-trips into package CI.
 (GUI already works around P0-1/P0-2/P1-1/P1-2 — see DECISIONS.)
+
+**P4-1 — `midas-defect`'s `perf_solve_cell` branch never bumped its own
+version number** (stayed `0.9.1` across `master` and every perf commit
+through `060f84c9`), so `requirements.txt`'s `midas-defect==0.9.1` pin
+cannot by itself distinguish "has `max_workers`" from "doesn't" — a bare
+`pip install midas-defect==0.9.1` from a future registry build could land
+either API depending what commit it was built from. Ask MIDAS maintainers
+to bump the version (e.g. 0.9.2 or 0.10.0 per semver, since `max_workers`
+is a new public kwarg) when `perf_solve_cell` merges to `master`, so this
+pin becomes unambiguous again. See DECISIONS 2026-10-22.
 
 **P3-1 — ~~`im_trans`/`ImTransOpt` not accepted by most calibration pipeline
 entry points~~ RESOLVED UPSTREAM in `midas-calibrate-v2` 0.15.0, verified on
@@ -206,3 +331,211 @@ unreachable through `calibrate()` even though `forward/geometry.py` models it.
 additive/backward-compatible: `initial_tx/ty/tz` on `calibrate()`, an `im_trans`
 field on `CalibrationSpec` (or the kwarg on all pipelines), one shared transform
 helper factored out of `auto.py:418-439`, and `im_trans` recorded on the result.
+
+## Hydra Batch Integrate: background jobs, naming, dark provenance
+
+Three pieces of work in the same code (`workers.py` / `batch_cli.py` /
+`hydra_batch_page.py`), found during the connolly_oct26 beamtime
+(2026-10-12). Listed in the order they should be done — the first is what
+makes a long run SAFE, the others make it correct.
+
+### 1. `batch_cli` learns Hydra, so the Hydra page gets "Run as background job"
+
+**DONE 2026-10-12.** Built as designed below. What the design did not
+anticipate, recorded here because both were found the hard way:
+
+* **A panel that cannot resolve its calibration is SKIPPED, not fatal.**
+  Loading one panel's file pulls in all four siblings, so two uncalibrated
+  panels is the ordinary state of a two-panel run. The in-process path has
+  always skipped them (`_start_panel_worker` -> `_skip_panel`); the first
+  cut of `_run_as_job` showed a modal error and refused the whole job, so
+  the two paths disagreed about the identical setup. Only "no usable panel
+  at all" is an error. The combine step then names ONLY the panels that
+  actually ran — naming a skipped one makes `find_panel_zarr_sets` wait for
+  an archive nobody writes, every frame looks incomplete, and the merge
+  reports "wrote 0/0", which reads like success.
+* **`eta_min`/`eta_max` had no CLI flag at all**, because the
+  single-detector tab integrates the full circle and never needed them. A
+  Hydra job without them silently integrates all 360° on every panel and
+  looks plausible. Same class of bug as the omega one on `tab_batch`. Also
+  added `--frame-range-*`, kept deliberately distinct from the existing
+  `--frame-start/--frame-end` file-number filter.
+* **A `QMessageBox` in a test hangs forked pytest forever** at 0% CPU with
+  no output — it does not fail. `tests/test_hydra_batch_job.py` has a
+  `dialogs` fixture for this; the hang cost 12 min to diagnose once.
+* `Rmax = 0.0` (the documented "auto" sentinel) is unreachable on this page
+  once a calibration is set — the card re-derives it from that panel's own
+  geometry, overriding both `set_caking` and a direct `setValue(0)`.
+
+Also wired: commands are recorded to the run-log tree AND to
+`<root>/logs/<session>.commands.log` beside the data, the latter following
+the MPE SAXS/WAXS workflow's convention (a scan folder ends as
+`xy/ zarr/ mat/ logs/`). `~/.midas_gui/jobs/<session>.sh` already held the
+chain but is keyed by session name in a directory nobody browses.
+
+Original design, kept because it is still what the code does:
+
+Decided 2026-10-12: **use the same job deployment interface as the
+single-detector tab, with panels always SEQUENTIAL.**
+
+Today the Hydra page has no background option, and nothing in DECISIONS
+explains the omission — it was never built, not ruled out. The button on
+`tab_batch.py:1856` is only a launcher for `python -m midas_gui.batch_cli`
+in a detached `screen` session; `batch_cli` has no concept of panels
+(grep it for `panel`/`hydra`/`ge1` — nothing), so there is nothing for a
+Hydra button to launch.
+
+This matters beyond convenience. A 189-folder run is ~17 h in-process, so
+the GUI's own Qt/pyqtgraph code sits on the critical path of the job: that
+is exactly how commit 1db9d31's `Cannot set range [nan, nan]` stopped a
+real run after ONE folder. Headless there is no view to update and that
+whole class of failure cannot occur — and the run survives closing the
+GUI, logging out, or X dropping.
+
+The mechanism is already there and needs no new concurrency. `_run_as_job`
+ALREADY chains one `batch_cli` invocation per source folder into a single
+screen session (a selection spanning folders maps to one `--out-dir`
+each). Sequential panels makes Hydra the same shape:
+
+    per scan:  batch_cli --out-dir <out>/ge1 ... (ge1 calib, ge1 eta range)
+               batch_cli ... ge2
+               batch_cli ... ge3
+               batch_cli ... ge4
+               <combine step>            -> hydra_zarr_combine.combine_panel_zarrs
+
+all chained into ONE screen session, as the multi-folder case already is.
+The combine needs a CLI entry of its own; `combine_panel_zarrs` is already
+a clean function taking `{panel: path}`.
+
+Everything the detached process needs must be on disk first — the job has
+no access to live GUI state. The single-detector path already writes a
+calibration snapshot, mask and dark/bright; Hydra needs four of each, plus
+the per-panel caking ranges (which are per panel, not shared — see
+`hydra_batch_widgets`).
+
+### 2. Archive naming
+
+Wanted (decided 2026-10-12, modelled on the pixirad output, which is one
+archive per raw file holding one lineout per frame):
+
+    4130_D_load_step_0_005120.ge1234.h5.ave.zarr.zip
+
+Raw filename kept INCLUDING `.h5`, panel token -> `ge1234`, no frame range
+and no chunk suffix (both redundant once grouping is per source file), and
+the `ave` segment derived from `combine_op` rather than hardcoded.
+
+`.ave.` is hardcoded at `workers.py` 2332, 2335, 2336, 2694 while the UI
+offers Max and Median (`widgets.py` 4585-4586) — so a median or max
+combine is written today into a file named `.ave.`. The op IS recorded
+inside as `midas_gui_combine_op`, so nothing is lost, but the NAME LIES.
+
+`workers.py:2918`'s `.cake` sibling shares this convention deliberately
+(see `_run_out_stem`) and must change with it. ~13 name assertions in
+tests/{test_batch_zarr_output,test_batch_zarr_gsas,test_h5_metadata_copy,
+test_tab_zarrviewer}.py; the 112 in test_hydra_zarr_combine.py are
+hand-built and unaffected.
+
+Note the content is ALREADY right — this is purely the filename. The
+combined archive holds `OmegaSumFrame/LastFrameNumber_<i>` per frame, each
+(nR, n_eta summed over panels), exactly like pixirad's (nR, 1).
+
+### 3. Record which dark was applied
+
+`resolve_dark`/`dark_candidates` pick the nearest PRECEDING `dark_before`
+(then a following `dark_after` for a file that precedes every
+`dark_before`), a ladder derived from the 198-file screenlog corpus and
+replayed by `test_dark_autodetect`. The logic is sound.
+
+But the resolved dark is NOT recorded anywhere in the output: the run log
+says only `field corrections: dark=y`, and a search of a real archive's
+whole `provenance_history` for any dark reference finds nothing. So
+"was the appropriate dark applied?" cannot be answered after the fact —
+across 189 folders a single mis-selection is invisible.
+
+`dark_candidates` already computes a `why` string ("preceding
+dark_before"). Record the resolved path AND that reason in the provenance
+entry, which turns an assumption into something checkable per scan.
+
+### 4. Two things worth taking from `mpe_wf_saxs_waxs`
+
+Compared 2026-10-12, prompted by "a lot of this question about paths have
+been sorted out there". The headline is reassuring: **the output path
+convention already agrees.** `mpe_paths.get_output_dir()` is
+`<root>/<expid>_bc/<froot>/<detector>/`, which is exactly what this GUI
+writes. The two codebases arrived at it independently; neither needs to
+change.
+
+`/home/beams3/PARKJS/opt/mpe_wf_saxs_waxs/combine_hydra_zarr.py` is a
+SECOND, independent four-panel combine. It is not a duplicate of
+`midas_gui/hydra_zarr_combine.py` and the two should not be merged
+casually — the GUI's background path must produce byte-identical output to
+its in-process path, which is why `hydra_combine_cli` wraps the GUI's own
+module. But two things it records are strictly better:
+
+* **`InstrumentParameters` stacked as a length-N array**, one entry per
+  panel, with the order in `attrs['panels']`. `Distance` legitimately
+  differs per panel on a hydra — and on 2026-10-12 ge1 turned out to have
+  been physically moved ~24 px between the Oct 6 calibration and the Oct 8
+  data, which a per-panel record in the merged file would have made
+  obvious at a glance.
+* **Per-panel provenance carry-forward** — all four panels' prior
+  histories kept, each entry tagged `source_panel`, with
+  `extra.cake_params_per_panel` / `extra.instrument_params_per_panel`
+  alongside an honest aggregate. Ours keeps an `eta_sorted` flag and the
+  per-panel cake_params but drops the upstream histories.
+
+Also note its `consolidate_xy_and_cleanup` sweeps EVERY file it finds in a
+per-detector folder into `logs/`. The background job's `_bg_job_*`
+sidecars are written to the SCAN ROOT, not inside `ge{n}/`, so that sweep
+does not relocate them — keep it that way.
+
+## Background jobs and the dark: resolve at CURATION, not in the CLI
+
+Decided 2026-10-20, replacing an earlier plan to teach `batch_cli`
+`--auto-dark`/`--dark-dataset`/`--pick-origin`. That plan was
+over-engineered; the question that killed it was "can the job curation
+find the appropriate darks and then send out the jobs?"
+
+It can, and it should. `hydra_batch_page._run_as_job` already fans out
+**one `batch_cli` invocation per (scan, panel)** — see the `units` loop.
+So the GUI, which already holds the policy code, can resolve each scan's
+dark in-process and hand each invocation the right `--dark`. No new CLI
+surface at all.
+
+Three reasons this is better than resolving inside the job:
+
+1. **One implementation of the policy.** Teaching `batch_cli` to resolve
+   darks means `dark_policy` runs in two places and they can drift. The
+   whole point of this series was that two code paths answered the dark
+   question differently.
+2. **Failures surface before the job starts.** Resolve at curation and
+   you learn at submit time that 318 scans have no 10 s dark. Resolve in
+   the job and you find out hours later in a screenlog — which is how the
+   original `white_oct26` problem stayed invisible.
+3. **Nothing new crosses the process boundary.** The dark already goes
+   over as a pre-averaged TIFF; this only changes WHICH TIFF, and where
+   the `--dark` flag is attached.
+
+### What to change
+
+`_run_as_job` currently writes `_bg_job_dark_ge{n}.tif` once per panel
+and puts `--dark` in `base[n]`, shared by every scan. Move it:
+
+- drop `--dark` from `base[n]` (bright/background stay — they are not
+  per-file);
+- in the per-scan loop, resolve with `dark_policy.resolve` using
+  `self._loader.dark_request(n)` and that scan's first file;
+- **dedupe by resolved source path** and write one TIFF per distinct
+  dark. Naively writing one per (scan, panel) would be 190x4 files of
+  16 MB — 12 GB. White_oct26 has 11 darks, so deduped it is at most
+  11x4 = 44 TIFFs;
+- a panel whose dark will not resolve is omitted from that scan's unit,
+  collected, and reported through `mail.dark_skip_report` at submit time
+  rather than after the run;
+- the single-detector `tab_batch._run_as_job` needs the same treatment.
+
+### What stays true
+
+`batch_cli --dark` keeps its current meaning (one pre-averaged field),
+so an existing job script and an older CLI still work. Nothing about the
+job protocol changes.

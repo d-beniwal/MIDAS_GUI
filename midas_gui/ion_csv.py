@@ -9,10 +9,18 @@ archive open. This is the export, not new acquisition.
 **Why this module exists rather than living in one of the two tabs.** The two
 batch paths reach the same numbers by different routes:
 
-* Batch Integrate already has them resolved per frame, via
-  ``workers._HDF5StackGlobSource.metadata_for_index`` — see :func:`rows_from_metas`.
-* Batch Correction never calls that. It has the aligned instrument tree from
-  ``h5_metadata.align``, keyed by raw HDF5 path — see :func:`rows_from_aligned`.
+Both tabs now build their rows with :func:`rows_from_tree`, so the two
+sidecars differ only in the ``_bi``/``_bc`` tail of the filename. Batch
+Integrate reaches it through ``workers._HDF5StackGlobSource.monitor_inputs``,
+which hands over the same ``(path, ranges, n_light, n_dark)`` that Batch
+Correction's ``_collect_monitor_rows`` already assembled.
+
+It was not always so, and the divergence was expensive: Batch Integrate used
+to build rows from ``metadata_for_index`` dicts, which resolve ion chambers
+through :data:`ION_CHAMBER_H5_PATHS` — ``US_IC``/``D2PD`` for hutch E. A
+1-ID file carries neither, so the ``_bi.csv`` had NO ion-chamber columns at
+all while the ``_bc.csv`` beside it carried 29 channels and 23 gains. Two
+builders that merely agree is how that happens; there is one now.
 
 What they genuinely share is the *per-hutch monitor mapping*, which used to be
 private to ``_HDF5StackGlobSource``. It lives here now and ``workers`` imports
@@ -109,12 +117,50 @@ DARK_SUFFIX = "_dark"
 
 _SCALERS_PREFIX = "instrument/Scalers/"
 
+#: Scaler groups written to the CSV, in header order. Every hutch in the beam
+#: path is a real monitor of the SAME beam, so a run is normalised against
+#: whichever one was live -- writing only the station you happen to be sitting
+#: in throws away the upstream readings you need to do that. A 2026-10 1-ID
+#: file carries B (IC1-IC9, S1, S2, T), C (IC1-IC6) and E (IC1-IC8, S1, S2, T),
+#: all ten samples long for a ten-frame scan; the CSV used to contain only E's
+#: eleven of those twenty-nine channels.
+#:
+#: Station A stays out, for the reason it always has: no sample sits in its
+#: beam path, so however I0/I1-suggestive its channel names are, it is not a
+#: per-sample monitor.
+#:
+#: An explicit list rather than "whatever groups the file has", by choice --
+#: but a group that is present and NOT listed here is reported in the note
+#: rather than dropped in silence. Silence is how 1-ID-E came to have no CSV
+#: at all for weeks (see _PROFILE_HUTCH).
+SCALER_GROUPS = ("B", "C", "D", "E")
+
+#: Separator between a scaler group and its channel: ``E:IC1``. Needed because
+#: the channel names collide -- IC1 exists in B, C and E and means a different
+#: ion chamber in each.
+GROUP_SEP = ":"
+
 
 #: Profiles that name a 20-ID station, and the hutch each one means. Used
 #: only as a fallback — and deliberately NOT a prefix match: "1-ID-E" ends in
 #: E but is a different beamline entirely, and reading its scalers as 20-ID's
 #: would invent a monitor rather than report none.
-_PROFILE_HUTCH = {"20-id-e": "E", "20-id-d": "D"}
+#: Profile name -> the ``instrument/Scalers/<letter>`` group that profile's
+#: station writes into. Only the hutch LETTER is needed: ``scaler_channels``
+#: then reads whichever channels the file actually carries, so a station with
+#: different hardware (1-ID-E records IC1/IC2/IC3 where 20-ID-E records
+#: US_IC/DS_IC) needs no entry of its own beyond this.
+#:
+#: 1-ID-E was missing, and the cost was silent: ``resolve_hutch`` returned
+#: None, ``scaler_channels`` returned nothing, no rows were built and **no
+#: beam-monitor CSV was written at all** for anyone on that profile. The run
+#: reported success and simply had no sidecar. Confirmed against 2026-10
+#: 1-ID files, which carry instrument/Scalers/{B,C,E} with IC1-IC3 under E.
+#:
+#: Stations are added here only once their scaler group has been seen in a
+#: real file -- 17-BM has no entry because nobody has checked, and guessing
+#: a letter would write a CSV of the wrong channels rather than none.
+_PROFILE_HUTCH = {"20-id-e": "E", "20-id-d": "D", "1-id-e": "E"}
 
 
 def resolve_hutch(path, profile: Optional[str] = None) -> Optional[str]:
@@ -176,26 +222,83 @@ def _fmt(v) -> str:
 
 # ── which acquisitions were the light frames ─────────────────────────────────
 
-def scaler_channels(tree: dict, hutch: Optional[str]) -> list:
-    """Every per-acquisition scaler channel for ``hutch``, in file order.
+def _group_of(path: str) -> Optional[str]:
+    """The scaler group letter in ``instrument/Scalers/<G>/<channel>``."""
+    if not path.startswith(_SCALERS_PREFIX):
+        return None
+    rest = path[len(_SCALERS_PREFIX):].split("/")
+    return rest[0] if len(rest) >= 2 else None
+
+
+def column_name(path: str) -> str:
+    """``E:IC1`` for ``instrument/Scalers/E/IC1`` -- group-qualified, because
+    IC1 exists in B, C and E and is a different ion chamber in each."""
+    group = _group_of(path)
+    leaf = path.rsplit("/", 1)[-1]
+    return f"{group}{GROUP_SEP}{leaf}" if group else leaf
+
+
+def scaler_channels(tree: dict, hutch: Optional[str] = None) -> list:
+    """Every per-acquisition scaler channel in every known group, in
+    :data:`SCALER_GROUPS` order then channel order.
 
     Read from the file rather than from a mapping, because no mapping would
     stay honest: the E group alone carries US/DS ion chambers, four blade
     readings each, a pin diode and a TetrAMM, and which of them is wired to
-    what changes between setups. The ``*_sensitivity`` companions are
-    scalars, not per-acquisition, so they are not columns here.
+    what changes between setups.
+
+    ``hutch`` is accepted and ignored for selection -- it used to restrict
+    this to one group, which is what limited the CSV to the station the user
+    happened to be sitting in. Every hutch along the beam path monitors the
+    same beam, and you normalise against whichever was live, so they all
+    belong in the file. The parameter stays so existing callers (and
+    :func:`split_light_dark`, which still uses the hutch to pick its probe)
+    need no change.
+
+    The ``*_sensitivity`` companions are scalars, not per-acquisition, so
+    they are not channels -- :func:`scaler_sensitivities` handles those.
     """
-    if not hutch:
-        return []
-    prefix = f"{_SCALERS_PREFIX}{hutch}/"
     out = []
-    for path, arr in tree.items():
-        if not path.startswith(prefix) or path.endswith("_sensitivity"):
-            continue
-        arr = np.atleast_1d(np.asarray(arr))
-        if arr.ndim == 1 and arr.dtype.kind in "fiub" and arr.size > 1:
-            out.append(path)
-    return sorted(out)
+    for group in SCALER_GROUPS:
+        prefix = f"{_SCALERS_PREFIX}{group}/"
+        found = []
+        for path, arr in tree.items():
+            if not path.startswith(prefix) or path.endswith("_sensitivity"):
+                continue
+            arr = np.atleast_1d(np.asarray(arr))
+            if arr.ndim == 1 and arr.dtype.kind in "fiub" and arr.size > 1:
+                found.append(path)
+        out.extend(sorted(found))
+    return out
+
+
+def scaler_sensitivities(tree: dict) -> list:
+    """The ``*_sensitivity`` scalars, in the same group order.
+
+    One value per file, not per acquisition, so they are written as a
+    constant repeated down the column. That is deliberate width: the
+    sensitivity is the gain the raw counts were taken at, so without it the
+    counts cannot be turned into a current and the CSV is not self-contained
+    for normalisation.
+    """
+    out = []
+    for group in SCALER_GROUPS:
+        prefix = f"{_SCALERS_PREFIX}{group}/"
+        found = [path for path in tree
+                 if path.startswith(prefix) and path.endswith("_sensitivity")]
+        out.extend(sorted(found))
+    return out
+
+
+def unknown_scaler_groups(tree: dict) -> list:
+    """Scaler groups present in the file but not in :data:`SCALER_GROUPS`.
+
+    Reported, never written. The list is deliberately explicit, but a group
+    nobody has declared must still announce itself -- a monitor silently
+    absent from the CSV is the 1-ID-E failure over again.
+    """
+    seen = {g for g in (_group_of(p) for p in tree) if g}
+    return sorted(seen - set(SCALER_GROUPS))
 
 
 def split_light_dark(tree: dict, *, n_light: int, n_dark: int,
@@ -279,30 +382,9 @@ def _gap_index(tree: dict) -> Optional[int]:
 
 # ── adapters: two paths, same rows ───────────────────────────────────────────
 
-def rows_from_metas(metas) -> list:
-    """Rows from Batch Integrate's per-frame ``metadata_for_index`` dicts.
-
-    Keys arrive already resolved (``ion_chamber_i0``/``ion_chamber_i``/
-    ``current``/``temperature``/``pressure``/``motor:<leaf>/<channel>``), so
-    this is a rename into the CSV's own column names and nothing more.
-    """
-    rows = []
-    for n, meta in enumerate(metas):
-        meta = meta or {}
-        row = {"frame": n, "source_file": "",
-               "I0": meta.get("ion_chamber_i0"),
-               "I": meta.get("ion_chamber_i")}
-        for key, _header in _ENV_COLUMNS:
-            row[key] = meta.get(key)
-        for key, value in meta.items():
-            if key.startswith(MOTOR_PREFIX):
-                row[key] = value
-        rows.append(row)
-    return rows
-
-
 def rows_from_tree(tree: dict, hutch: Optional[str], *, frame_ranges,
-                   n_light: int, n_dark: int = 0, source: str = "") -> tuple:
+                   n_light: int, n_dark: int = 0, source: str = "",
+                   subtracted_dark: str = "") -> tuple:
     """``(rows, note)`` straight from an unaligned :func:`h5_metadata.read_tree`.
 
     Does its own slicing and chunk-averaging rather than taking
@@ -325,6 +407,17 @@ def rows_from_tree(tree: dict, hutch: Optional[str], *, frame_ranges,
     gets one row, ``kind="dark"``, carrying the mean over the whole dark
     block under the SAME column names the lights use — directly comparable,
     and the table stays half as wide.
+
+    ``subtracted_dark`` closes the gap that entry left open. The dark row is
+    a monitor measurement of the dark block **inside this file**; the dark
+    actually subtracted from the images is picked by
+    ``frame_correct.resolve_dark``, whose ladder prefers the nearest
+    ``_dark_before`` sibling and so is often a different acquisition. The
+    two were both called "the dark" and only one of them was in the CSV, so
+    a reader comparing a chunk against the baseline row could be comparing
+    it against a dark that was never subtracted. Passing the resolver's own
+    ``why`` string writes it into a ``subtracted_dark`` column on the dark
+    row, so the file states both facts instead of implying they are one.
     """
     light_off, dark_off, note = split_light_dark(
         tree, n_light=n_light, n_dark=n_dark, hutch=hutch)
@@ -360,9 +453,21 @@ def rows_from_tree(tree: dict, hutch: Optional[str], *, frame_ranges,
     series: dict = {}        # per-chunk light values
     dark_values: dict = {}   # one value per column, over the whole dark block
     for path in scaler_channels(tree, hutch):
-        name = path.rsplit("/", 1)[-1]
+        name = column_name(path)          # group-qualified: IC1 is not unique
         series[name] = chunked(path, light_off)
         dark_values[name] = block_mean(path, dark_off, n_dark)
+    # Gain settings: one value per file, repeated down the column so the raw
+    # counts beside them can be converted without opening the HDF5. Written
+    # on the dark row too -- the gain applied to the baseline is the same
+    # gain, and a blank there would read as "unknown" rather than "same".
+    for path in scaler_sensitivities(tree):
+        try:
+            value = float(np.atleast_1d(np.asarray(tree[path])).ravel()[0])
+        except (TypeError, ValueError, IndexError):
+            continue
+        name = column_name(path)
+        series[name] = np.full(len(ranges), value, dtype=np.float64)
+        dark_values[name] = value
     for key, _header in _ENV_COLUMNS:
         series[key] = chunked(METADATA_H5_PATHS[key], light_off)
         dark_values[key] = block_mean(METADATA_H5_PATHS[key], dark_off, n_dark)
@@ -385,6 +490,11 @@ def rows_from_tree(tree: dict, hutch: Optional[str], *, frame_ranges,
             v is not None for v in dark_values.values()):
         row = {"kind": "dark", "source_file": source,
                "frame_start": 0, "frame_end": n_dark - 1}
+        if subtracted_dark:
+            # Named on the dark row only: it is a statement about what the
+            # baseline is, and repeating it on every chunk row would be the
+            # same width-doubling the companion columns were removed for.
+            row["subtracted_dark"] = subtracted_dark
         row.update({key: dark_values.get(key) for key in series})
         rows.append(row)
     # A row is identified by its file and the raw sub-frame range it was
@@ -397,6 +507,13 @@ def rows_from_tree(tree: dict, hutch: Optional[str], *, frame_ranges,
         for key, arr in series.items():
             row[key] = None if arr is None else arr[n]
         rows.append(row)
+    # A declared-but-unlisted scaler group is reported, not dropped quietly.
+    # SCALER_GROUPS is an explicit allow-list by choice, which means a new
+    # station is invisible until someone adds it -- so it has to say so.
+    extra = unknown_scaler_groups(tree)
+    if extra:
+        note = (f"{note}; scaler group(s) {', '.join(extra)} present but not "
+                f"written (add to ion_csv.SCALER_GROUPS)").lstrip("; ")
     return rows, note
 
 
@@ -411,11 +528,13 @@ def rows_from_tree(tree: dict, hutch: Optional[str], *, frame_ranges,
 #:   ``frame_start``, ``frame_end``. One CSV can hold rows from several
 #:   source files, so the file name plus the raw sub-frame range IS the
 #:   identity; a bare ordinal would not be unique across files.
-#: * :func:`rows_from_metas` (Batch Integrate) → ``frame``, ``source_file``.
-#:   It has one row per output frame and no raw range to report.
+#: Both producers now go through :func:`rows_from_tree`, so both identify a
+#: row the same way; ``frame`` survives only for a caller that still builds
+#: rows by hand.
 _INDEX_COLUMNS = (("kind", "kind"), ("frame", "frame"),
                   ("source_file", "source_file"),
-                  ("frame_start", "frame_start"), ("frame_end", "frame_end"))
+                  ("frame_start", "frame_start"), ("frame_end", "frame_end"),
+                  ("subtracted_dark", "subtracted_dark"))
 
 
 def _columns(rows, extras) -> list:

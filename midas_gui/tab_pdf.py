@@ -264,7 +264,7 @@ class PDFTab(QtWidgets.QWidget):
         self._load_calib_btn.clicked.connect(self._load_calib_file)
         ssv.addRow("Calibration:", self._load_calib_btn)
         self._calib_status = QtWidgets.QLabel("(from Tab 2, or load a file)")
-        self._calib_status.setStyleSheet("color:#aaa;font-size:10px")
+        self._calib_status.setStyleSheet(f"color:{S.SUBTLE};font-size:10px")
         self._calib_status.setWordWrap(True)
         ssv.addRow("", self._calib_status)
         lv.addWidget(grp_src_sel)
@@ -285,7 +285,7 @@ class PDFTab(QtWidgets.QWidget):
         self._img_h5_ed.editingFinished.connect(
             lambda: self._image is not None and self._load_img())
         self._src_lbl = QtWidgets.QLabel("(run Tab 2 calibration first)")
-        self._src_lbl.setStyleSheet("color:#aaa;font-size:10px"); self._src_lbl.setWordWrap(True)
+        self._src_lbl.setStyleSheet(f"color:{S.SUBTLE};font-size:10px"); self._src_lbl.setWordWrap(True)
         gf.addRow("Calib:", self._src_lbl)
         self._mask_ed = QtWidgets.QLineEdit("")
         self._mask_ed.setPlaceholderText("Optional mask .tif (nonzero = masked)…")
@@ -617,14 +617,14 @@ class PDFTab(QtWidgets.QWidget):
         save_a_btn.clicked.connect(lambda: self._save_state("a"))
         lv.addWidget(save_a_btn)
         self._state_a_lbl = QtWidgets.QLabel("State A: (empty)")
-        self._state_a_lbl.setStyleSheet("color:#aaa;font-size:10px")
+        self._state_a_lbl.setStyleSheet(f"color:{S.SUBTLE};font-size:10px")
         lv.addWidget(self._state_a_lbl)
 
         save_b_btn = QtWidgets.QPushButton("Save current result as State B")
         save_b_btn.clicked.connect(lambda: self._save_state("b"))
         lv.addWidget(save_b_btn)
         self._state_b_lbl = QtWidgets.QLabel("State B: (empty)")
-        self._state_b_lbl.setStyleSheet("color:#aaa;font-size:10px")
+        self._state_b_lbl.setStyleSheet(f"color:{S.SUBTLE};font-size:10px")
         lv.addWidget(self._state_b_lbl)
 
         compute_btn = S.primary_btn("Compute ΔG(r) = B − A")
@@ -638,7 +638,7 @@ class PDFTab(QtWidgets.QWidget):
         w = QtWidgets.QWidget()
         pv = QtWidgets.QVBoxLayout(w); pv.setContentsMargins(4, 4, 4, 4)
 
-        self._top = pg.PlotWidget(background="k")
+        self._top = pg.PlotWidget(background=S.CANVAS_BG)
         self._top.setLabel("left", "I(Q)"); self._top.setLabel("bottom", "Q (Å⁻¹)")
         self._top.showGrid(x=True, y=True, alpha=0.2); self._top.addLegend()
         self._c_iq = self._top.plot([], [], pen=pg.mkPen("#88ccff", width=2), name="I(Q)")
@@ -652,7 +652,7 @@ class PDFTab(QtWidgets.QWidget):
         mid_toolbar.addWidget(self._tf_show_chk); mid_toolbar.addStretch(1)
         pv.addLayout(mid_toolbar)
 
-        self._mid = pg.PlotWidget(background="k")
+        self._mid = pg.PlotWidget(background=S.CANVAS_BG)
         self._mid.setLabel("left", "S(Q)"); self._mid.setLabel("bottom", "Q (Å⁻¹)")
         self._mid.showGrid(x=True, y=True, alpha=0.2)
         self._c_mid = self._mid.plot([], [], pen=pg.mkPen("#ff8844", width=1.5))
@@ -661,7 +661,7 @@ class PDFTab(QtWidgets.QWidget):
         self._mid.addItem(self._s1_line)
         pv.addWidget(self._mid, stretch=1)
 
-        self._bot = pg.PlotWidget(background="k")
+        self._bot = pg.PlotWidget(background=S.CANVAS_BG)
         self._bot.setLabel("left", "G(r)"); self._bot.setLabel("bottom", "r (Å)")
         self._bot.showGrid(x=True, y=True, alpha=0.2)
         self._gr_up = self._bot.plot([], [], pen=None)
@@ -677,7 +677,7 @@ class PDFTab(QtWidgets.QWidget):
         w = QtWidgets.QWidget()
         pv = QtWidgets.QVBoxLayout(w); pv.setContentsMargins(4, 4, 4, 4)
 
-        self._fit_plot = pg.PlotWidget(background="k")
+        self._fit_plot = pg.PlotWidget(background=S.CANVAS_BG)
         self._fit_plot.setLabel("left", "G(r)"); self._fit_plot.setLabel("bottom", "r (Å)")
         self._fit_plot.showGrid(x=True, y=True, alpha=0.2); self._fit_plot.addLegend()
         self._fit_up = self._fit_plot.plot([], [], pen=None)
@@ -690,7 +690,7 @@ class PDFTab(QtWidgets.QWidget):
                                              style=QtCore.Qt.DashLine), name="model")
         pv.addWidget(self._fit_plot, stretch=3)
 
-        self._fit_resid_plot = pg.PlotWidget(background="k")
+        self._fit_resid_plot = pg.PlotWidget(background=S.CANVAS_BG)
         self._fit_resid_plot.setLabel("left", "(obs−calc)/σ"); self._fit_resid_plot.setLabel("bottom", "r (Å)")
         self._fit_resid_plot.showGrid(x=True, y=True, alpha=0.2)
         self._fit_resid = self._fit_resid_plot.plot([], [], pen=pg.mkPen("#4da3ff", width=1))
@@ -713,7 +713,7 @@ class PDFTab(QtWidgets.QWidget):
         w = QtWidgets.QWidget()
         pv = QtWidgets.QVBoxLayout(w); pv.setContentsMargins(4, 4, 4, 4)
 
-        self._dpdf_plot = pg.PlotWidget(background="k")
+        self._dpdf_plot = pg.PlotWidget(background=S.CANVAS_BG)
         self._dpdf_plot.setLabel("left", "ΔG(r)"); self._dpdf_plot.setLabel("bottom", "r (Å)")
         self._dpdf_plot.showGrid(x=True, y=True, alpha=0.2)
         self._dpdf_up = self._dpdf_plot.plot([], [], pen=None)

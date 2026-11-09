@@ -55,13 +55,12 @@ htmlcov/
 .loglogin
 .smoke_test_log.txt
 
-# Scratch space for ad-hoc verification scripts/output (Claude's and pytest's
+# Scratch space for ad-hoc verification scripts/output (agents and pytest
 # --basetemp both land here) — never anything worth keeping, safe to wipe.
 .scratch/
 
-# Local Claude working context (plans, ported context, notes)
-claude/
-CLAUDE.md
+# Provider runtime state is local; portable project memory lives in .context/.
+/.claude/
 
 # ── Shipped sample data ──────────────────────────────────────────────────────
 # Only test_data/gui_synthetic/ ships with the repo so the GUI works out of the
@@ -92,9 +91,16 @@ test_data/out_temp.txt
 /test_data/s1ide_bc/
 /test_data/test_out/
 /test_data/projects/
-/test_data/s20idd_tz14/
 /test_data_bc/
+# Solve Cell tab: raw DAC frames + calibration used for local smoke-testing
+# ingest, not referenced by the committed regression tests (those point at
+# an external path) -- too large to ship (~320 MB).
+/test_data/s20idd_tz14/
+/test_data/s3idc_bc/
 
 # Internal-only documentation (kept local, not published to GitHub)
 documentation/pdf_calculation_explained.md
 documentation/pdf_calculation_explained.pdf
+
+# Local scratch work
+scratch/

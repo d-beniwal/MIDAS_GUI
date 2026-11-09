@@ -65,6 +65,12 @@ class BatchCorrectionTab(QtWidgets.QWidget):
         self._outputs: list = []
         self._im_trans: list = []
         self._expid_provider = None   # () -> str, wired by app.py
+        #: The exact Output-folder string this tab last filled in by itself.
+        #: Same provenance rule as Batch Integrate's -- see
+        #: BatchTab._maybe_autofill_output_dir for why emptiness is not the
+        #: test. Set before _build_ui: loading data during construction fires
+        #: dataChanged, which auto-fills.
+        self._autofilled_out: Optional[str] = None
         # Open only while a run is in flight — see _emit / _run / _close_log.
         self._screen_log: Optional[run_log.ScreenLog] = None
         self._build_ui()
@@ -481,15 +487,23 @@ class BatchCorrectionTab(QtWidgets.QWidget):
         suffix = self._suffix_ed.text().strip() or CORRECTION_SUFFIX
         return f"{base}{suffix}{ext}"
 
+    def _set_output_dir_suggested(self, suggested) -> None:
+        """Write a path WE derived into the Output field, and remember it, so
+        a later data load can tell it from one the user chose. The … browse
+        button and project/session restore deliberately bypass this."""
+        self._out_ed.setText(str(suggested))
+        self._autofilled_out = str(suggested)
+        reason = check_output_dir_writable(suggested)
+        if reason:
+            self._log.append(f"Warning: {reason}")
+
     def _apply_suggested_output_dir(self):
+        """The Suggest button: overwrite whatever is there, on request."""
         suggested = self._suggest_output_dir()
         if suggested is None:
             self._log.append("No data source loaded yet — nothing to suggest.")
             return
-        self._out_ed.setText(str(suggested))
-        reason = check_output_dir_writable(suggested)
-        if reason:
-            self._log.append(f"Warning: {reason}")
+        self._set_output_dir_suggested(suggested)
 
     def _suggest_output_dir(self) -> Optional[Path]:
         cfg = self._loader.source_cfg()
@@ -503,14 +517,19 @@ class BatchCorrectionTab(QtWidgets.QWidget):
         return suggest_correction_output_dir(rep, expid_fallback=expid)
 
     def _maybe_autofill_output_dir(self):
-        """Fill the Output folder once a source loads, unless something is
-        already there — same live auto-fill as Batch Integrate, which has no
-        separate confirm-and-launch step to catch a wrong guess either."""
-        if self._out_ed.text().strip():
-            return
+        """Keep the Output folder following the loaded source, without ever
+        discarding a folder the user chose — the provenance rule is Batch
+        Integrate's, and the reasoning is written out in
+        ``BatchTab._maybe_autofill_output_dir``. Same live auto-fill, since
+        this tab has no separate confirm-and-launch step to catch a wrong
+        guess either."""
+        current = self._out_ed.text().strip()
+        if current and current != (self._autofilled_out or ""):
+            return                      # the user's own choice -- never touch
         suggested = self._suggest_output_dir()
-        if suggested is not None:
-            self._out_ed.setText(str(suggested))
+        if suggested is None or str(suggested) == current:
+            return
+        self._set_output_dir_suggested(suggested)
 
     def _selected_ops(self) -> list:
         return [op for op in FC.OPS if self._op_chks[op].isChecked()]
@@ -610,6 +629,10 @@ class BatchCorrectionTab(QtWidgets.QWidget):
             bright_mode=self._loader.bright_mode(),
             auto_dark=self._auto_dark_chk.isChecked(),
             dark_dataset=self._dark_ds_ed.text().strip() or "exchange/data_dark",
+            dark_request=self._loader.dark_request(
+                dataset=self._dark_ds_ed.text().strip() or None,
+                override=(None if self._auto_dark_chk.isChecked()
+                          else "always_explicit")),
             clip_negatives=self._clip_chk.isChecked(),
             compression=self._comp_combo.currentData(),
             level=self._comp_level.value(),
@@ -907,10 +930,38 @@ class BatchCorrectionTab(QtWidgets.QWidget):
     def _on_finished(self, outputs):
         self._running = False
         self._prog.setVisible(False)
+        self._report_dark_skips(getattr(self._worker, "dark_skipped", ()))
         self._emit(f"Done — {len(outputs)} file(s) written.")
         self._close_screen_log()
         self._status.setText(f"Done — {len(outputs)} file(s) written.")
         self._refresh_enabled()
+
+    def _report_dark_skips(self, skipped):
+        """Say, loudly, which files ran without being corrected.
+
+        A skip is the deliberate outcome when no valid dark exists --
+        correcting a file with another scan's dark is the error the
+        policy prevents -- but that is only defensible if it is visible.
+        Mailed when an address is set (Preferences), always in the log.
+        """
+        skipped = list(skipped or ())
+        if not skipped:
+            return
+        from midas_gui import settings
+        from midas_gui.mail import dark_skip_report, send_mail
+        self._emit(f"{len(skipped)} file(s) SKIPPED — no valid dark:")
+        for path, why in skipped[:20]:
+            self._emit(f"    {path}: {why}")
+        if len(skipped) > 20:
+            self._emit(f"    ... and {len(skipped) - 20} more.")
+        try:
+            addr = settings.get_notify_email()
+        except Exception:
+            addr = ""
+        if addr:
+            subject, body = dark_skip_report(skipped, context="Batch Correction")
+            if send_mail(subject, body, addr):
+                self._emit(f"Skip report sent to {addr}.")
 
     def _on_failed(self, err):
         self._running = False

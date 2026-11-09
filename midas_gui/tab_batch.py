@@ -18,6 +18,7 @@ from typing import Optional
 import numpy as np
 from PyQt5 import QtCore, QtWidgets
 
+from midas_gui.panel_toggle import install_panel_toggles
 from midas_gui.constants import (KERNELS, ERROR_MODELS,
                            DEFAULT_NICKEL_DIR, DEFAULT_KERNEL,
                            DEFAULT_ERROR_MODEL)
@@ -30,7 +31,7 @@ from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_
                                rmax_corner_px, rmax_edge_px, draw_polar_bin_overlay,
                                _NoScrollSpinBox, _NoScrollComboBox,
                                widgets_to_dict, apply_dict_to_widgets,
-                               check_output_dir_writable,
+                               check_output_dir_writable, group_paths_by_output_dir,
                                suggest_integration_output_dir,
                                suggest_working_dir, bc_path_parts,
                                browse_start_dir, warn_if_path_missing,
@@ -390,6 +391,11 @@ class BatchTab(QtWidgets.QWidget):
         super().__init__(parent)
         self._worker = None
         self._orphans: list = []       # aborted workers kept alive until they wind down
+        # A recursive pick spans several source folders, each implying its
+        # own output dir; they run as a queue of separate batches. Empty for
+        # every single-folder run, which is what keeps that path unchanged.
+        self._pending_groups: list = []
+        self._group_tally = None
         self._drift_worker = None
         self._drift_traj = None
         self._calib_result = None
@@ -441,6 +447,12 @@ class BatchTab(QtWidgets.QWidget):
         self._omega_span_timer.setInterval(150)
         self._omega_span_timer.timeout.connect(self._recompute_omega_span)
         self._project_ctx: Optional[project.ProjectContext] = None
+        #: The exact Output-folder string this tab last filled in by itself
+        #: (auto-fill or the Suggest button). Lets _maybe_autofill_output_dir
+        #: tell its own leftover from a path the user chose -- see there.
+        #: Must exist before _build_ui: the loader opens the bundled sample
+        #: data during construction, which fires dataChanged, which auto-fills.
+        self._autofilled_out: Optional[str] = None
         self._build_ui()
         self._loader.monitorToggled.connect(self._toggle_monitor)
         self._loader.dataChanged.connect(self._refresh_detector_preview)
@@ -1050,6 +1062,13 @@ class BatchTab(QtWidgets.QWidget):
     def _ensure_hydra_page(self) -> HydraBatchPage:
         if self._hydra_page is None:
             self._hydra_page = HydraBatchPage()
+            # app.py wires the Exp ID provider onto this tab at startup, but
+            # the Hydra page is built lazily and so cannot be in that loop.
+            # Forward it here, or its output suggestion falls back to reading
+            # the expid positionally off the path -- right in the common
+            # layout, wrong wherever that layout is not 4 deep.
+            if self._expid_provider is not None:
+                self._hydra_page.set_expid_provider(self._expid_provider)
             self._mode_stack.addWidget(self._hydra_page)
             if self._project_ctx is not None:
                 self._hydra_page.set_project_context(self._project_ctx)
@@ -1369,7 +1388,13 @@ class BatchTab(QtWidgets.QWidget):
 
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         split.setChildrenCollapsible(False); split.setHandleWidth(6)
-        self._mode_stack.addWidget(split); self._hsplit = split
+        # Page = splitter on top + bottom ribbon holding minimised Data/Controls tabs.
+        # (_hsplit is the stack page, which is what the mode switch selects.)
+        _body = QtWidgets.QWidget()
+        self._body_lay = QtWidgets.QVBoxLayout(_body)
+        self._body_lay.setContentsMargins(0, 0, 0, 0); self._body_lay.setSpacing(2)
+        self._body_lay.addWidget(split, 1)
+        self._mode_stack.addWidget(_body); self._hsplit = _body
 
         # ── LEFT: data loader (streaming source + dark/bright/bg + mask) ──
         # unify_combine=True: start/end + "Combine sub-frames" apply the same
@@ -1718,6 +1743,15 @@ class BatchTab(QtWidgets.QWidget):
         self._suggest_out_btn.clicked.connect(self._apply_suggested_output_dir)
         orow.addWidget(self._suggest_out_btn)
         out.body.addLayout(S.Form().row(("Folder:", orow)))
+        # A multi-folder selection does not write here; it writes to one
+        # directory per source folder. Leaving a single load step's path in
+        # the box said the opposite, which is how the flattening went
+        # unnoticed in the first place.
+        self._out_multi_lbl = QtWidgets.QLabel("")
+        self._out_multi_lbl.setWordWrap(True)
+        self._out_multi_lbl.setStyleSheet("color:#e0a030;font-size:10px")
+        self._out_multi_lbl.setVisible(False)
+        out.body.addWidget(self._out_multi_lbl)
         self._fmt = OutputFormatSelector()
         out.body.addWidget(self._fmt)
         # How many output frames share one .zarr.zip. A rotation's worth of
@@ -1906,23 +1940,40 @@ class BatchTab(QtWidgets.QWidget):
         self._view_tabs.addTab(self._waterfall, "Waterfall")
         self._view_tabs.addTab(self._stack_view, "Stacked profiles")
         self._view_tabs.addTab(self._cake_stack_view, "Eta-R cakes")
-        # Logs tab: background-job rows (JobQueuePanel) above one shared log
-        # surface, used by both the in-process run and the currently-focused
+        # Background-job rows (JobQueuePanel) above one shared log surface,
+        # used by both the in-process run and the currently-focused
         # background job's tailed output.
+        #
+        # PERMANENTLY VISIBLE beneath the view tabs rather than being a
+        # "Logs" tab of its own (which is what this was until 2026-10-12).
+        # A tab hides exactly the thing you want in view while watching a
+        # run: the log is where every warning, skip and failure is reported,
+        # and a background job's progress row is only actionable — Reattach,
+        # Cancel — if you can see it without first leaving the plot you are
+        # looking at. The Hydra page has always laid it out this way; this
+        # makes the two pages match.
         self._log = LogPanel()
         self._log.setMaximumHeight(16_777_215)   # let the layout size it
         self._job_queue = JobQueuePanel(self._log, on_job_done=self._on_job_done)
-        self._logs_tab = QtWidgets.QWidget()
-        logs_tab_layout = QtWidgets.QVBoxLayout(self._logs_tab)
-        logs_tab_layout.setContentsMargins(4, 4, 4, 4)
-        logs_tab_layout.setSpacing(4)
-        logs_tab_layout.addWidget(self._job_queue)
-        logs_tab_layout.addWidget(self._log, 1)
-        self._view_tabs.addTab(self._logs_tab, "Logs")
         self._view_tabs.setMinimumWidth(320)
-        split.addWidget(self._view_tabs)
+        right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        right.addWidget(self._view_tabs)
+        log_host = QtWidgets.QWidget()
+        log_box = QtWidgets.QVBoxLayout(log_host)
+        log_box.setContentsMargins(0, 0, 0, 0)
+        log_box.setSpacing(4)
+        log_box.addWidget(self._job_queue)
+        log_box.addWidget(self._log, 1)
+        right.addWidget(log_host)
+        # A splitter, not a fixed layout: the log is permanent but its share
+        # is the user's call — dragged tall to read a traceback, or down to
+        # a sliver while watching the plots.
+        right.setStretchFactor(0, 4); right.setStretchFactor(1, 1)
+        split.addWidget(right)
         split.setStretchFactor(0, 0); split.setStretchFactor(1, 0); split.setStretchFactor(2, 1)
         split.setSizes([286, 361, 950])
+        # Data | Controls | Results: minimise Data/Controls to the bottom ribbon.
+        self._body_lay.addWidget(install_panel_toggles(split, key="batch").ribbon)
 
     # ── Run ────────────────────────────────────────────────────────
 
@@ -1978,39 +2029,153 @@ class BatchTab(QtWidgets.QWidget):
         data that's actually loaded. Returns None when no source is loaded.
         """
         src_cfg = self._loader.source_cfg()
+        expid = self._expid_provider().strip() if self._expid_provider else ""
+        # Spanning folders, there is no single answer -- suggest the root they
+        # share. group_paths_by_output_dir rebases onto it and reproduces the
+        # per-folder dirs exactly, so the field stays both honest and usable.
+        dirs = self._output_group_dirs()
+        if len(dirs) > 1:
+            import os
+            return Path(os.path.commonpath([str(d) for d in dirs]))
         rep = src_cfg.get("path")
         if not rep:
             paths = src_cfg.get("paths") or []
             rep = paths[0] if paths else None
         if not rep:
             return None
-        expid = self._expid_provider().strip() if self._expid_provider else ""
         return suggest_integration_output_dir(rep, expid_fallback=expid)
 
+    def _output_group_dirs(self) -> list:
+        """The output directories the current selection implies -- one per
+        source folder, empty when nothing is loaded. More than one means a
+        run will fan out rather than write to the Output field itself."""
+        try:
+            src_cfg = self._loader.source_cfg()
+        except Exception:
+            return []
+        paths = src_cfg.get("paths") or []
+        if len(paths) < 2:
+            return []
+        expid = self._expid_provider().strip() if self._expid_provider else ""
+        groups = group_paths_by_output_dir(paths, out_dir=None, expid_fallback=expid)
+        return [d for d, _f in groups if d is not None]
+
+    def _update_output_multi_hint(self) -> None:
+        """Say, next to the Output field, when the run will fan out."""
+        lbl = getattr(self, "_out_multi_lbl", None)
+        if lbl is None:
+            return
+        dirs = self._output_group_dirs()
+        if len(dirs) > 1:
+            lbl.setText(
+                f"Selection spans {len(dirs)} source folders — output does NOT "
+                f"go to this folder. Each source folder gets its own "
+                f"&lt;froot&gt;/&lt;detector&gt; directory under it, e.g. "
+                f"{Path(dirs[0]).parent.name}/{Path(dirs[0]).name}. "
+                f"A background job runs them in order within one session.")
+            lbl.setVisible(True)
+        else:
+            lbl.setVisible(False)
+
+    def _set_output_dir_suggested(self, suggested) -> None:
+        """Write a path WE derived into the Output field, and remember it.
+
+        Recording it is what lets a later data load tell this tab's own
+        leftover from a folder the user typed or browsed to (see
+        :meth:`_maybe_autofill_output_dir`). Everything that fills the field
+        on the GUI's own initiative goes through here; the … browse button
+        and project/session restore deliberately do not, so what they put
+        there is treated as the user's and never overwritten.
+        """
+        self._out_ed.setText(str(suggested))
+        self._autofilled_out = str(suggested)
+        reason = check_output_dir_writable(suggested)
+        if reason:
+            self._log.append(f"[batch] Warning: {reason}")
+
     def _apply_suggested_output_dir(self):
+        """The Suggest button: overwrite whatever is there, on request."""
         suggested = self._suggest_output_dir()
         if suggested is not None:
-            self._out_ed.setText(str(suggested))
-            reason = check_output_dir_writable(suggested)
-            if reason:
-                self._log.append(f"[batch] Warning: {reason}")
+            self._set_output_dir_suggested(suggested)
         else:
             self._log.append("[batch] No data source loaded yet — nothing to suggest.")
 
     def _maybe_autofill_output_dir(self):
-        """Auto-fill the Output folder once a source loads, unless the user
-        already typed/picked one — unlike mpe_wf's own GUIs (which only ever
-        hint via placeholder text and never auto-fill), MIDAS_GUI fills this
-        in live since there's no separate confirm-and-launch step to catch
-        a wrong guess."""
-        if self._out_ed.text().strip():
-            return
+        """Keep the Output folder pointing at the loaded source's own
+        ``<outroot>/<expid>_bc/<froot>/<detector>``, without ever discarding a
+        folder the user chose.
+
+        This used to fill only while the field was empty, which in practice
+        meant never: the loader opens the bundled sample data during
+        construction, so by the time any real data was loaded the field
+        already held the sample's path and the guard returned early. Measured
+        on a fresh tab -- the field read
+        ``…/MIDAS_GUI_bc/nickel_tifs/test_data`` and stayed there through
+        every subsequent load, so results went to whatever folder the last
+        run (or the sample data) had named.
+
+        So the test is now provenance, not emptiness: replace the value when
+        it is still the one we put there, leave it alone the moment the user
+        has typed or browsed to something of their own. Clearing the field by
+        hand asks for a fresh suggestion, which is the obvious reading of an
+        emptied box.
+
+        Unlike mpe_wf's own GUIs (which only hint via placeholder text and
+        never auto-fill), MIDAS_GUI fills this in live since there's no
+        separate confirm-and-launch step to catch a wrong guess.
+        """
+        current = self._out_ed.text().strip()
+        if current and current != (self._autofilled_out or ""):
+            return                      # the user's own choice -- never touch
         suggested = self._suggest_output_dir()
-        if suggested is not None:
-            self._out_ed.setText(str(suggested))
-            reason = check_output_dir_writable(suggested)
-            if reason:
-                self._log.append(f"[batch] Warning: {reason}")
+        if suggested is None or str(suggested) == current:
+            self._update_output_multi_hint()
+            return
+        self._set_output_dir_suggested(suggested)
+        self._update_output_multi_hint()
+
+    def _confirm_detector_size(self, spec) -> bool:
+        """Catch a calibration whose detector size does not match the data
+        BEFORE the run starts. Returns False to cancel.
+
+        Without this the mismatch surfaces as a bare backend exception part
+        way into the batch -- "image shape (402, 1024) does not match geometry
+        (2048, 2048)" out of midas_integrate_v2.binning.subpixel -- which says
+        nothing about which of the two is wrong or where to fix it. The
+        Detector-view tab already logs a warning when it has a frame to
+        compare, but that is a line in the Logs pane, not something that stops
+        a run being launched.
+
+        Only advisory: a transposed non-square detector can legitimately read
+        either way round, so both orientations are accepted, and an
+        unreadable/absent preview frame never blocks the run.
+        """
+        try:
+            frame = self._loader.current_frame()
+            if frame is None:
+                return True
+            shape = tuple(int(v) for v in frame.shape[-2:])
+            NY, NZ = int(spec.NrPixelsY), int(spec.NrPixelsZ)
+        except Exception:
+            return True       # a preflight check must never be what breaks a run
+        if shape in ((NZ, NY), (NY, NZ)):
+            return True
+        btn = QtWidgets.QMessageBox.warning(
+            self, "Detector size mismatch",
+            f"The calibration describes a {NY}x{NZ} px detector, but the data "
+            f"is {shape[1]}x{shape[0]} px.\n\n"
+            f"Integration will fail in the backend with \"image shape {shape} "
+            f"does not match geometry ({NZ}, {NY})\".\n\n"
+            f"This usually means the geometry was saved while a calibration "
+            f"for a different detector was loaded \u2014 the detector size "
+            f"(and the RhoD the distortion terms are normalised by) came from "
+            f"that calibration rather than from this data. Re-save the "
+            f"geometry in the Data Viewer with this data loaded, or pick a "
+            f"calibration that matches.",
+            QtWidgets.QMessageBox.Cancel | QtWidgets.QMessageBox.Ignore,
+            QtWidgets.QMessageBox.Cancel)
+        return btn == QtWidgets.QMessageBox.Ignore
 
     def _run(self):
         if self._worker and self._worker.isRunning():
@@ -2031,6 +2196,9 @@ class BatchTab(QtWidgets.QWidget):
                 self, "No data",
                 "Select a data folder/glob, HDF5 file, or file selection."); return
 
+        if not self._confirm_detector_size(spec):
+            return
+
         kernel = self._kernel.currentData()
         corrections = self._corr_widget.build_corrections()
         variance_cfg = ({"error_model": self._err_model.currentText()}
@@ -2040,6 +2208,30 @@ class BatchTab(QtWidgets.QWidget):
             variance_cfg = None
 
         out_dir = self._out_ed.text().strip() or None
+        # The <expid>_bc/<froot>/<detector> convention reads froot off each
+        # file's OWN path, so a selection spanning folders implies several
+        # output dirs. Applying it once sent every load step's output to the
+        # first file's folder; run one batch per folder instead, which is the
+        # layout picking each folder by hand already produces. A selection
+        # implying one dir yields one group and the original code path.
+        if not self._pending_groups:
+            groups = group_paths_by_output_dir(
+                src_cfg.get("paths") or [], out_dir=out_dir)
+            if len(groups) > 1:
+                self._pending_groups = list(groups)
+                self._group_tally = {"total": len(groups), "done": 0, "frames": 0}
+                self._log.append(
+                    f"[batch] Selection spans {len(groups)} source folders — "
+                    f"running one batch per folder, each to its own output dir.")
+        if self._pending_groups:
+            gdir, gpaths = self._pending_groups.pop(0)
+            src_cfg = dict(src_cfg)
+            src_cfg["paths"] = list(gpaths)
+            if gdir:
+                out_dir = str(gdir)
+            done = self._group_tally["total"] - len(self._pending_groups)
+            self._log.append(f"[batch] folder {done}/{self._group_tally['total']}: "
+                             f"{len(gpaths)} file(s) → {out_dir}")
         if out_dir:
             reason = check_output_dir_writable(out_dir)
             if reason:
@@ -2068,7 +2260,7 @@ class BatchTab(QtWidgets.QWidget):
         # converts back to R = Lsd·tan(180°)/px ≈ -2.26e-11. That is the
         # flat-line waterfall and the 2θ = 180 lineout reported from the
         # beamline, and the profiles themselves were never wrong.
-        _axctx = (lsd, px, wl, "R")
+        _axctx = (lsd, px, wl, "R", self._rebin_unit() or "R")
 
         # Dark / bright / background fields (from the loader)
         for sel in self._loader.has_pending_fields():
@@ -2171,6 +2363,9 @@ class BatchTab(QtWidgets.QWidget):
             multi_azimuth=multi_azimuth, calibration_snapshot=calib_snapshot,
             zarr_grouping=self._zarr_grouping_key(),
             ion_csv_extras=self._ion_csv_extras(),
+            # Same decision Batch Correction makes, from the same builder --
+            # the two tabs used to disagree about the dark and nothing said so.
+            dark_request=self._loader.dark_request(),
             run_mode=self._run_mode.currentData(), n_workers=self._n_workers.value())
         self._worker.progress.connect(self._on_progress)
         self._worker.frame_done.connect(self._on_frame)
@@ -2187,11 +2382,12 @@ class BatchTab(QtWidgets.QWidget):
         disk first: the background process (a fresh `python -m
         midas_gui.batch_cli`) has no access to this GUI's live state."""
         try:
-            # Called for validation only — the background process rebuilds its
-            # own spec from the snapshot on disk, so the result is discarded.
-            # Keep the call: it is what reports a bad calibration up front,
-            # rather than letting the detached job fail where nobody sees it.
-            self._build_spec()
+            # Called for validation — the background process rebuilds its own
+            # spec from the snapshot on disk, so this one never reaches the
+            # job itself; it is only what reports a bad calibration (and, just
+            # below, a detector-size mismatch) up front, rather than letting
+            # the detached job fail where nobody sees it.
+            spec = self._build_spec()
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Calibration error", str(e)); return
 
@@ -2200,6 +2396,12 @@ class BatchTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(
                 self, "No data",
                 "Select a data folder/glob, HDF5 file, or file selection."); return
+
+        # Same up-front check as the foreground run -- more important here,
+        # not less: a detached job that dies on frame 1 fails where nobody is
+        # watching for it.
+        if not self._confirm_detector_size(spec):
+            return
 
         out_dir = self._out_ed.text().strip()
         if not out_dir:
@@ -2211,6 +2413,21 @@ class BatchTab(QtWidgets.QWidget):
         if reason:
             QtWidgets.QMessageBox.critical(self, "Output folder not writable", reason)
             return
+        # A selection spanning source folders maps to one output dir per
+        # folder (see _run / group_paths_by_output_dir). batch_cli takes a
+        # single --out-dir, so each folder needs its own invocation; they are
+        # chained into ONE screen session rather than launched as N competing
+        # jobs. out_dir itself stays the root for the job's shared sidecar
+        # files (calibration snapshot, mask, dark/bright) and its queue entry.
+        groups = group_paths_by_output_dir(
+            src_cfg.get("paths") or [], out_dir=out_dir)
+        if len(groups) > 1:
+            targets = list(groups)
+        else:
+            # One folder, or a glob/single-file source with no path list:
+            # exactly the single-run command this has always produced.
+            targets = [(Path(out_dir), src_cfg.get("paths") or [])]
+
         out_path = Path(out_dir)
         out_path.mkdir(parents=True, exist_ok=True)
 
@@ -2253,24 +2470,35 @@ class BatchTab(QtWidgets.QWidget):
         argv = [sys.executable, "-m", "midas_gui.batch_cli",
                "--calib-file", str(calib_path),
                "--r-bin", str(self._r_bin.value()), "--eta-bin", str(self._e_bin.value())]
-        if self._r_min.value():
-            argv += ["--r-min", str(self._r_min.value())]
+        # R min is sent even at 0 (0 is a real value; omitting it made the
+        # backend fall back to its own RMin=10). Rmax 0 = auto, so omitted.
+        argv += ["--r-min", str(self._r_min.value())]
         if self._r_max.value():
             argv += ["--r-max", str(self._r_max.value())]
+        # The azimuthal window was never forwarded, so a detached job always
+        # integrated the full circle whatever η min/max said.
+        argv += ["--eta-min", str(self._eta_min.value()),
+                 "--eta-max", str(self._eta_max.value())]
 
-        if src_cfg["type"] == "tiff_glob":
-            argv += ["--source-type", "tiff_glob", "--source-path", src_cfg["path"]]
-        elif src_cfg["type"] == "hdf5":
-            argv += ["--source-type", "hdf5", "--source-path", src_cfg["path"],
-                     "--dataset", src_cfg.get("dataset", "frames")]
-        elif src_cfg["type"] == "hdf5_stack_glob":
-            argv += ["--source-type", "hdf5_stack_glob", "--source-paths", *src_cfg["paths"],
-                     "--dataset", src_cfg.get("dataset", "exchange/data")]
-        else:
-            argv += ["--source-type", "tiff_list", "--source-paths", *src_cfg["paths"]]
+        # The source files and the output dir are the ONLY per-folder parts;
+        # everything else below is shared, so these are appended last, once
+        # per target. A glob/single-file source has no per-folder split and
+        # ignores gpaths entirely.
+        def _target_args(gpaths, gdir):
+            a = []
+            if src_cfg["type"] == "tiff_glob":
+                a += ["--source-type", "tiff_glob", "--source-path", src_cfg["path"]]
+            elif src_cfg["type"] == "hdf5":
+                a += ["--source-type", "hdf5", "--source-path", src_cfg["path"],
+                      "--dataset", src_cfg.get("dataset", "frames")]
+            elif src_cfg["type"] == "hdf5_stack_glob":
+                a += ["--source-type", "hdf5_stack_glob", "--source-paths", *gpaths,
+                      "--dataset", src_cfg.get("dataset", "exchange/data")]
+            else:
+                a += ["--source-type", "tiff_list", "--source-paths", *gpaths]
+            return a + ["--out-dir", str(gdir)]
 
-        argv += ["--out-dir", str(out_path), "--fmts", ",".join(fmts),
-                 "--kernel", self._kernel.currentData()]
+        argv += ["--fmts", ",".join(fmts), "--kernel", self._kernel.currentData()]
         # Output rebin (Bin type = Q or 2theta). The underlying integration
         # grid is still R-uniform in every case -- these only resample the
         # finished profile, exactly as the in-process run does.
@@ -2336,8 +2564,11 @@ class BatchTab(QtWidgets.QWidget):
             mask_path = out_path / "_bg_job_mask.tif"
             tifffile.imwrite(str(mask_path), mask.astype("uint8"))
             argv += ["--mask", str(mask_path)]
-        for name, arr in (("dark", self._loader.dark()), ("bright", self._loader.bright()),
-                         ("background", self._loader.background())):
+        # Bright and background are properties of the RUN. The dark is not:
+        # it belongs to the source folder, and is attached per target below
+        # so a recursive pick spanning many folders gets each folder's own.
+        for name, arr in (("bright", self._loader.bright()),
+                          ("background", self._loader.background())):
             if arr is not None:
                 p = out_path / f"_bg_job_{name}.tif"
                 tifffile.imwrite(str(p), np.asarray(arr, dtype=np.float32))
@@ -2358,18 +2589,64 @@ class BatchTab(QtWidgets.QWidget):
         except Exception:
             total = self._loader.n_frames() or 1
 
-        job = self._job_queue.launch(argv, name=out_path.name or "batch", total_frames=total,
-                                     out_dir=str(out_path))
+        # Resolved at curation rather than inside the job: the GUI holds
+        # the policy and already emits one batch_cli invocation per source
+        # folder, so resolving here keeps ONE implementation and surfaces
+        # an unresolvable dark now instead of in a screenlog hours later.
+        # See .context/ROADMAP.md, "Background jobs and the dark".
+        from midas_gui.dark_policy import DarkTiffCache
+        dark_cache, argvs = DarkTiffCache(out_path), []
+        for gd, gp in targets:
+            if not gp:
+                # An empty group carries no file to resolve a dark
+                # against. It was harmless before this loop existed and
+                # must stay harmless: pass it through untouched rather
+                # than indexing gp[0].
+                argvs.append(argv + _target_args(gp, gd))
+                continue
+            darg = dark_cache.arg_for(gp[0], self._loader.dark_request())
+            if darg is None:
+                continue          # no valid dark — this folder is skipped
+            argvs.append(argv + darg + _target_args(gp, gd))
+        if dark_cache.skipped and not self._confirm_dark_skips(
+                dark_cache.skipped):
+            return
+        if not argvs:
+            QtWidgets.QMessageBox.warning(
+                self, "Nothing to run",
+                "No selected folder has a usable dark, so there is nothing "
+                "to submit. See the Log for what was rejected and why.")
+            return
+        # The results sidecar on the FIRST step only. JobQueuePanel records
+        # one out_dir per job -- targets[0] -- so that is the only step whose
+        # _bg_job_results.npz "Load results" can ever open. Writing one per
+        # step put 196 of them (826 MB) on a beamline share for a 196-folder
+        # sweep, 195 of which were unreachable from the UI.
+        argvs[0] = argvs[0] + ["--results-sidecar"]
+        job = self._job_queue.launch(
+            argvs[0], name=out_path.name or "batch", total_frames=total,
+            out_dir=str(targets[0][0]), extra_argvs=argvs[1:])
         if job is not None:
             self._log.append(f"[batch] Launched background job: {job.session} "
-                             f"(see the Logs tab)")
-            self._view_tabs.setCurrentWidget(self._logs_tab)
+                             f"(see the Background jobs panel below)")
+            if len(targets) > 1:
+                self._log.append(
+                    f"[batch] Selection spans {len(targets)} source folders — "
+                    f"the job runs one integration per folder, in order, "
+                    f"each to its own output dir:")
+                for gd, gp in targets:
+                    self._log.append(f"[batch]     {len(gp):>4} file(s) → {gd}")
+            # No tab to switch to any more — the job row and the log are
+            # both permanently visible below the view tabs.
 
     def _abort(self):
         """Stop the run. First ask the worker to stop cooperatively (clean finish
         with a summary); if it does not stop quickly, detach + terminate it and free
         the slot so a new run can start immediately (the orphaned thread winds down
         on its own). Frames already integrated were written to disk as the run went."""
+        # Abort means the sweep, not just the folder in flight -- otherwise
+        # the next group would start the moment this one stopped.
+        self._pending_groups = []
         w = self._worker
         if not (w and w.isRunning()):
             return
@@ -2476,19 +2753,99 @@ class BatchTab(QtWidgets.QWidget):
         except Exception as exc:
             self._log.append(f"[batch] Could not archive the job log: {exc}")
 
+    def _confirm_dark_skips(self, skipped) -> bool:
+        """Show what will NOT be integrated, and let the user stop.
+
+        Submitting a job that quietly covers less than the selection
+        would be its own silent failure, which is the thing this whole
+        change is against.
+        """
+        self._report_dark_skips(skipped)
+        first = "\n".join(f"  {Path(p).name}: {w}" for p, w in skipped[:6])
+        more = f"\n  ... and {len(skipped) - 6} more." if len(skipped) > 6 else ""
+        btn = QtWidgets.QMessageBox.warning(
+            self, "Some folders have no valid dark",
+            f"{len(skipped)} source folder(s) will NOT be integrated because "
+            f"no valid dark could be resolved:\n\n{first}{more}\n\n"
+            f"They are skipped rather than corrected with another scan's "
+            f"dark, which would look plausible and be wrong.\n\n"
+            f"Submit the job for the remaining folders?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
+            QtWidgets.QMessageBox.Yes)
+        return btn == QtWidgets.QMessageBox.Yes
+
+    def _report_dark_skips(self, skipped):
+        """Say, loudly, which sources ran without being integrated.
+
+        Mirrors tab_batch_correct._report_dark_skips: a skip is the
+        deliberate outcome when no valid dark exists, and is only
+        defensible if it is visible. Mailed when an address is set in
+        Preferences, always written to the log.
+        """
+        skipped = list(skipped or ())
+        if not skipped:
+            return
+        from midas_gui import settings
+        from midas_gui.mail import dark_skip_report, send_mail
+        self._log.append(f"[batch] {len(skipped)} source(s) SKIPPED — "
+                         f"no valid dark:")
+        for path, why in skipped[:20]:
+            self._log.append(f"[batch]     {path}: {why}")
+        if len(skipped) > 20:
+            self._log.append(f"[batch]     ... and {len(skipped) - 20} more.")
+        try:
+            addr = settings.get_notify_email()
+        except Exception:
+            addr = ""
+        if addr:
+            subject, body = dark_skip_report(skipped, context="Batch Integrate")
+            if send_mail(subject, body, addr):
+                self._log.append(f"[batch] Skip report sent to {addr}.")
+
     def _on_done(self, data):
+        self._report_dark_skips(getattr(self._worker, "dark_skipped", ()))
+        tally = self._group_tally
+        if tally is not None:
+            tally["done"] += 1
+            tally["frames"] += int(data.get("n") or 0)
+            if self._pending_groups and not data.get("aborted", False):
+                self._log.append(
+                    f"[batch] folder {tally['done']}/{tally['total']} done — "
+                    f"{data.get('n')} frames")
+                self._update_cake_stack(data)
+                self._log_to_project(data)
+                # Through the event loop, not directly: this is the finishing
+                # worker's own signal, and _run() reassigns self._worker.
+                QtCore.QTimer.singleShot(0, self._run)
+                return
+            # Last folder, or an abort that ends the sweep: fall through and
+            # report the whole sweep rather than just this folder.
+            self._pending_groups = []
+            self._group_tally = None
+            data = dict(data)
+            data["n"] = tally["frames"]
+            data["_n_folders"] = tally["total"]
         self._reset_run_buttons(); self._prog.setVisible(False)
         self._close_screen_log()
         n = data["n"]; out = data.get("out_paths", [])
         aborted = data.get("aborted", False)
         verb = "aborted after" if aborted else "Done —"
         msg = f"{verb} {n} frames integrated"
+        # The sweep's shape belongs in the summary whether or not the run
+        # handed back any paths -- it is the thing that distinguishes this
+        # from a single-folder run.
+        if data.get("_n_folders"):
+            msg += f" across {data['_n_folders']} folders"
         if out:
             # Output is now split into per-format subfolders (csv/xye/.../h5/zarr)
             # under the chosen Output dir — report that dir, not one file's
             # own parent, so the message doesn't just name whichever format
             # happened to run last.
-            msg += f"\nSaved to: {self._out_ed.text().strip() or Path(out[0]).parent}"
+            if data.get("_n_folders"):
+                msg += ("\nSaved to one output dir per source folder "
+                        "(see the log for each).")
+            else:
+                msg += f"\nSaved to: {self._out_ed.text().strip() or Path(out[0]).parent}"
         if (self._last_run_inputs.get("multi_azimuth")
                 and "h5" in (self._last_run_inputs.get("fmt") or [])):
             msg += ("\nNote: HDF5 wasn't written — it isn't supported in "
@@ -2736,7 +3093,8 @@ class BatchTab(QtWidgets.QWidget):
             variance_cfg = None
         q_cfg = self._rebin_cfg()
         # "R" in both modes — see the note at the other set_axis_context site.
-        _axctx = (float(spec.Lsd), float(spec.pxY), float(spec.Wavelength), "R")
+        _axctx = (float(spec.Lsd), float(spec.pxY), float(spec.Wavelength), "R",
+                  self._rebin_unit() or "R")
         self._stack_view.set_axis_context(*_axctx)
         self._waterfall.set_axis_context(*_axctx)
         weighted = bool(self._azim.currentData())

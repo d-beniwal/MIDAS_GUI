@@ -24,6 +24,7 @@ panel overlap and mix registration error into the profile).
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -33,29 +34,21 @@ from PyQt5 import QtCore, QtWidgets
 from midas_gui import hydra
 from midas_gui.helpers import (_load_image, _apply_im_trans, _fspin, apply_field_corrections,
                          geometry_fields_from_file, widgets_to_dict, apply_dict_to_widgets)
-from midas_gui.hydra_geometry_card import DetectorGeometryCard
+from midas_gui.hydra_geometry_card import DetectorGeometryCard, CAKE_ETA_BIN_DEG
 from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar, HydraProfileViewer
 from midas_gui.roi_tools import ROIImageViewer, ROIRibbon
-from midas_gui.widgets import _convert_radial, OriginToolButton
+from midas_gui.helpers import browse_start_dir
+from midas_gui.widgets import (_convert_radial, OriginToolButton,
+                               build_lab_frame_axes_items, CakeViewer)
 from midas_gui import style as S
+from midas_gui.panel_toggle import install_panel_toggles
 
-#: Decimation factor for the composite built for the Data Viewer.
-#:
-#: The windmill canvas for a real four-panel GE array is 6656x6656 -- 44.3
-#: megapixels, several times any screen, rebuilt synchronously on the GUI
-#: thread. Building it every second pixel costs a quarter of the work
-#: (remap 2.09 s -> ~0.5 s, composite max 1.61 s -> ~0.4 s, autolevel
-#: 0.49 s -> ~0.12 s) for an image still larger than the widget showing it.
-#:
-#: This is display resolution only, and it is NOT a shortcut taken behind a
-#: measurement's back: the "Composite" radial curve sums the per-panel
-#: profiles rather than integrating this image (see _refresh_composite_curve),
-#: and Calibrate imports per-panel geometries, not this canvas (see
-#: export_for_calibration). What does read it -- the composite card's own
-#: overlays and radial integration -- is kept correct by scaling that card's
-#: pixel size, beam centre and NrPixels to match, in
-#: _reseed_composite_card_if_needed. Set to 1 for a full-resolution canvas.
-COMPOSITE_DISPLAY_STEP = 2
+#: Re-exported from :mod:`midas_gui.hydra`, where it now lives so the Batch
+#: Integrate Hydra page can share it without importing this module (page ->
+#: page would be new coupling; both already import hydra). Kept as a
+#: module-level name here because callers import it from this module --
+#: tests/test_hydra_composite_perf.py does.
+COMPOSITE_DISPLAY_STEP = hydra.COMPOSITE_DISPLAY_STEP
 
 
 class _ProfileSinkAdapter:
@@ -81,36 +74,72 @@ class _ProfileSinkAdapter:
 
 
 class HydraViewerPage(QtWidgets.QWidget):
+    #: "→ Send to Calibrate" clicked — carries export_for_calibration()'s
+    #: own payload shape ({"anchor_path", "geometries"}), consumed as-is by
+    #: HydraCalibrationPage.import_from_viewer.
+    pushToCalibrate = QtCore.pyqtSignal(dict)
+    #: "← Get from Calibrate" clicked — the owner fetches the Calibrate
+    #: tab's export_for_viewer() and hands it to import_from_calibrate.
+    pullFromCalibrate = QtCore.pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._states: dict = {}                 # panel number -> hydra.DetectorState
         self._raw_frames: dict = {}              # panel number -> last-loaded frame (post ImTrans)
         self._composite_img: Optional[np.ndarray] = None
         self._big_det_size: Optional[int] = None
-        self._composite_seeded_size: Optional[int] = None
+        #: (canvas size, mean Lsd, px, per-panel Lsd) the composite card was
+        #: last seeded for -- see _reseed_composite_card_if_needed.
+        self._composite_seeded_key: Optional[tuple] = None
         self._disp_key = None                    # (shape, active key) — fresh-display detection
         self._active_card: Optional[DetectorGeometryCard] = None
         self._syncing_shared = False             # re-entrancy guard for _sync_shared_fields
+        self._syncing_ring_settings = False      # re-entrancy guard for _sync_ring_settings
         self._build_ui()
         self._on_panel_changed(self._toolbar.current())
 
     # ── UI ────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        root = QtWidgets.QHBoxLayout(self)
-        root.setContentsMargins(6, 6, 6, 6); root.setSpacing(0)
+        # Splitter on top, bottom ribbon (minimised Data / Controls tabs) below.
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(6, 6, 6, 6); root.setSpacing(2)
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         split.setChildrenCollapsible(False); split.setHandleWidth(6)
-        root.addWidget(split)
+        root.addWidget(split, 1)
 
-        # ── LEFT: Hydra data loader ──
+        # ── LEFT: "→ Send to Calibrate"/"← Get from Calibrate" + the Hydra
+        #    data loader — mirrors HydraCalibrationPage's own "← Data
+        #    Viewer" button sitting above its loader, so the hand-off is a
+        #    single page-level action for all 4 panels at once rather than
+        #    each panel's own (now hidden — see show_calib_handoff=False
+        #    above) Send/Get, which would only move one panel at a time. ──
+        left = QtWidgets.QWidget()
+        ll = QtWidgets.QVBoxLayout(left); ll.setContentsMargins(0, 0, 0, 0); ll.setSpacing(4)
+        calib_row = QtWidgets.QHBoxLayout(); calib_row.setSpacing(4)
+        self._to_calib_btn = QtWidgets.QPushButton("→ Send to Calibrate")
+        self._to_calib_btn.setToolTip(
+            "Copy the data path and every present panel's geometry from here "
+            "into the Calibrate tab's Hydra page, all 4 panels at once.")
+        self._to_calib_btn.clicked.connect(
+            lambda: self.pushToCalibrate.emit(self.export_for_calibration()))
+        self._from_calib_btn = QtWidgets.QPushButton("← Get from Calibrate")
+        self._from_calib_btn.setToolTip(
+            "Pull the Calibrate tab's Hydra page's data path and every present "
+            "panel's best-known geometry (fitted result if one exists, else "
+            "its current seed), all 4 panels at once.")
+        self._from_calib_btn.clicked.connect(self.pullFromCalibrate.emit)
+        calib_row.addWidget(self._to_calib_btn, 1)
+        calib_row.addWidget(self._from_calib_btn, 1)
+        ll.addLayout(calib_row)
         self._loader = HydraLoaderPanel()
         self._loader.setMinimumWidth(200)
         self._loader.siblingsChanged.connect(self._on_siblings_changed)
         self._loader.frameChanged.connect(self._on_frame_changed)
         self._loader.fieldsChanged.connect(self._on_fields_changed)
         self._loader.projectionChanged.connect(self._on_fields_changed)
-        split.addWidget(self._loader)
+        ll.addWidget(self._loader)
+        split.addWidget(left)
 
         # ── MIDDLE: Projection card (top) + one geometry card per panel +
         #    one for the composite (below, same as the single-detector tab's
@@ -121,8 +150,29 @@ class HydraViewerPage(QtWidgets.QWidget):
         inner_lv = QtWidgets.QVBoxLayout(inner)
         inner_lv.setContentsMargins(0, 0, 0, 0); inner_lv.setSpacing(8)
         inner_lv.addWidget(self._loader.projection_card())
+        # Per-panel calibration is the whole point of the composite, and the
+        # only way to set it was to switch panel, browse, load, four times
+        # over -- with the card showing one panel at a time, so you could not
+        # see what the other three were on. One pick, matched by filename.
+        self._load4_btn = QtWidgets.QPushButton("Load 4 panel calibrations…")
+        self._load4_btn.setToolTip(
+            "Pick the calibration files for ge1-ge4 in one go. Each file is "
+            "matched to a panel by 'ge<n>' in its name; anything unmatched is "
+            "reported rather than guessed at.")
+        self._load4_btn.clicked.connect(self._load_four_calibrations)
+        inner_lv.addWidget(self._load4_btn)
+        self._load4_lbl = QtWidgets.QLabel("")
+        self._load4_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        self._load4_lbl.setWordWrap(True)
+        inner_lv.addWidget(self._load4_lbl)
         self._card_stack = QtWidgets.QStackedWidget()
         inner_lv.addWidget(self._card_stack, 1)
+        # The composite has no geometry of its own to edit: it is the four
+        # panels placed by *their* geometries. Its card only holds a derived
+        # mean (Lsd) and a canvas-centre BC, which describe nothing physical,
+        # so the composite view shows a read-only per-panel table instead.
+        self._comp_page = self._build_composite_table_page()
+        self._card_stack.addWidget(self._comp_page)
         scroll.setWidget(inner)
         # The multi-curve radial plot and shared R-bin/Auto controls are
         # built below (right side) before this loop's set_profile_view/
@@ -139,8 +189,14 @@ class HydraViewerPage(QtWidgets.QWidget):
 
         self._cards: dict = {}
         for key in ("ge1", "ge2", "ge3", "ge4", "composite"):
-            card = DetectorGeometryCard(show_rotate=(key != "composite"))
+            card = DetectorGeometryCard(show_rotate=(key != "composite"),
+                                        show_calib_handoff=False)
             card.set_image_source(self._make_image_provider(key), None)
+            # Four panels plus a composite all saving "paramstest.txt" into
+            # the launch directory is four chances to overwrite the wrong
+            # one, so each proposes a name carrying which panel it is.
+            card.set_save_name_provider(
+                lambda suffix, k=key: self._default_save_path(k, suffix))
             if key == "composite":
                 # The "Composite" curve on the shared plot is the DERIVED
                 # resample-and-sum of ge1-4's own curves (see
@@ -165,6 +221,10 @@ class HydraViewerPage(QtWidgets.QWidget):
                 n = int(key[2])
                 card.geometryChanged.connect(lambda n=n: self._on_card_geometry_changed(n))
                 card.imTransChanged.connect(lambda n=n: self._on_card_geometry_changed(n))
+            # Materials/Rings/Labels/thickness are mirrored across all 5
+            # cards (including composite — symmetric, unlike the geometry
+            # sync above) — see _sync_ring_settings.
+            card.ringSettingsChanged.connect(lambda key=key: self._sync_ring_settings(key))
             self._cards[key] = card
             self._card_stack.addWidget(card)
         split.addWidget(scroll)
@@ -179,6 +239,19 @@ class HydraViewerPage(QtWidgets.QWidget):
         self._toolbar = HydraDetectorToolbar()
         self._toolbar.panelChanged.connect(self._on_panel_changed)
         self._viewer._toolbar_layout.addWidget(self._toolbar)
+        # Same overlay and the same control as the single-detector Data
+        # Viewer. It matters more here: the composite is built by rotating
+        # four panels about the beam, so "which way is the hutch" is the one
+        # thing a windmill picture makes hard to answer by eye.
+        self._axis_items: list = []
+        self._lab_axes_on = QtWidgets.QCheckBox("Lab-frame axes")
+        self._lab_axes_on.setToolTip(
+            "Overlay MIDAS lab-frame axes (X_Lab/Y_Lab), the beam-direction ⊗ "
+            "glyph, and an η sweep arc, anchored at the beam centre of "
+            "whichever panel (or the composite) is shown.")
+        self._lab_axes_on.toggled.connect(self._on_lab_axes_toggled)
+        self._viewer._toolbar_layout.addWidget(self._lab_axes_on)
+        self._viewer.originChanged.connect(self._redraw_lab_axes_if_on)
         self._roi_ribbon = ROIRibbon()
         self._viewer.set_ribbon(self._roi_ribbon)
         viewer_container = QtWidgets.QWidget()
@@ -207,12 +280,17 @@ class HydraViewerPage(QtWidgets.QWidget):
         self._rad_r_bin.valueChanged.connect(lambda *_: self._refresh_composite_curve())
         self._profile_view.compositeVisibilityChanged.connect(
             lambda *_: self._refresh_composite_curve())
-        right.addWidget(self._profile_view)
+        self._bottom_tabs = QtWidgets.QTabWidget()
+        self._bottom_tabs.addTab(self._profile_view, "Radial Profile")
+        self._bottom_tabs.addTab(self._build_cake_page(), "Eta vs R Cake")
+        right.addWidget(self._bottom_tabs)
         right.setStretchFactor(0, 3); right.setStretchFactor(1, 1)
         right.setMinimumWidth(320)
         split.addWidget(right)
         split.setStretchFactor(0, 0); split.setStretchFactor(1, 0); split.setStretchFactor(2, 1)
         split.setSizes([286, 361, 950])
+        # Data | Controls | Results: minimise Data/Controls to the bottom ribbon.
+        root.addWidget(install_panel_toggles(split, key="hydra_view").ribbon)
 
     # ── Per-panel / composite frame sourcing ────────────────────────
 
@@ -225,6 +303,127 @@ class HydraViewerPage(QtWidgets.QWidget):
             return lambda: self._composite_img
         n = int(key[2])
         return lambda: self._raw_frames.get(n)
+
+    #: A panel number in a filename, e.g. "…_ge3.instr.txt" or "ge3/…".
+    _PANEL_IN_NAME = re.compile(r"ge\s*([1-4])\b", re.IGNORECASE)
+
+    @classmethod
+    def _panel_for_file(cls, path) -> Optional[int]:
+        """Which panel a calibration file belongs to, or None.
+
+        Read from the *last* ``ge<n>`` in the full path, so a per-panel
+        folder (``…/ge3/calib.txt``) and a per-panel filename
+        (``…_ge3.instr.txt``) both work, and a run folder that happens to
+        contain "ge1" does not out-vote the file's own name.
+        """
+        from midas_gui.hydra import panel_for_file
+        return panel_for_file(path)
+
+    def _load_four_calibrations(self):
+        """Pick up to four panel calibrations at once and apply each to its
+        own card.
+
+        Matched by filename rather than by pick order: a file dialog returns
+        its selection sorted, not in the order they were clicked, so trusting
+        order would silently cross-assign panels -- and a calibration on the
+        wrong panel is a composite that looks plausible and is wrong.
+        Anything unmatched is reported, never guessed at.
+        """
+        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self, "Select calibration files for ge1–ge4",
+            browse_start_dir(self._loader.data_path()
+                             if hasattr(self._loader, "data_path") else ""),
+            "Calibration (*.json *.poni *.txt);;All (*)")
+        if not paths:
+            return
+        chosen: dict = {}
+        unmatched, clashes = [], []
+        for p in paths:
+            n = self._panel_for_file(p)
+            if n is None:
+                unmatched.append(Path(p).name)
+            elif n in chosen:
+                clashes.append(f"ge{n}")
+            else:
+                chosen[n] = p
+        found_by_name = self._fill_in_sibling_calibrations(chosen)
+        for n, p in sorted(chosen.items()):
+            card = self._cards.get(f"ge{n}")
+            if card is not None:
+                card.set_calib_path(p)
+        bits = []
+        if found_by_name:
+            bits.append("matched by name: "
+                        + ", ".join(f"ge{n}" for n in sorted(found_by_name)))
+        if chosen:
+            bits.append("loaded " + ", ".join(f"ge{n}" for n in sorted(chosen)))
+        if unmatched:
+            bits.append("no ge1–4 in: " + ", ".join(unmatched))
+        if clashes:
+            bits.append("more than one file for " + ", ".join(sorted(set(clashes)))
+                        + " — kept the first")
+        missing = [f"ge{n}" for n in (1, 2, 3, 4) if n not in chosen]
+        if missing and chosen:
+            bits.append("unchanged: " + ", ".join(missing))
+        self._load4_lbl.setText("  ·  ".join(bits))
+
+    def _fill_in_sibling_calibrations(self, chosen: dict) -> set:
+        """Complete a partial pick from the files sitting next to it.
+
+        The button promises four calibrations and then hands over a
+        multi-select dialog, so picking one file and pressing Open loads one
+        panel -- reported as "I loaded 4x calibration files and I still see
+        only 1x set". Panel calibrations are written as a set and named
+        alike (``..._ge1.instr.txt`` beside ``..._ge2.instr.txt``), so the
+        other three are usually right there.
+
+        Only ever fills panels the pick did not cover, and only from a file
+        that actually exists on disk, so an explicit choice is never
+        overridden and nothing is invented. Returns the panels filled in, to
+        be named in the summary -- a calibration that arrived without being
+        clicked should say so.
+        """
+        if not chosen:
+            return set()
+        filled = set()
+        for n in (1, 2, 3, 4):
+            if n in chosen:
+                continue
+            from midas_gui.hydra import sibling_for_panel
+            for have_n, have_p in sorted(chosen.items()):
+                cand = sibling_for_panel(have_p, n)
+                if cand and Path(cand).exists():
+                    chosen[n] = cand
+                    filled.add(n)
+                    break
+        return filled
+
+    def _default_save_path(self, key: str, suffix: str) -> str:
+        """``<expid>_<data stem>_<panel><suffix>``, beside the data.
+
+        Same rule as ``CalibrationTab._default_save_path`` and the Data
+        Viewer's, with the panel key appended because these five cards
+        describe five different detectors and would otherwise all propose
+        the same filename.
+        """
+        from midas_gui.helpers import browse_start_dir
+        parts = []
+        try:
+            provider = getattr(self, "_expid_provider", None)
+            expid = (provider() or "").strip() if provider else ""
+        except Exception:
+            expid = ""
+        if expid:
+            parts.append(expid)
+        data_path = self._loader.data_path() if hasattr(self._loader, "data_path") else ""
+        if data_path:
+            stem = Path(data_path).name.rsplit(".", 1)[0]
+            if stem:
+                parts.append(stem)
+        parts.append(key)
+        name = "_".join(parts) + suffix
+        start = browse_start_dir(data_path) if data_path else ""
+        return str(Path(start) / name) if start else name
 
     def _ensure_states_for_siblings(self, siblings: dict):
         for n in siblings:
@@ -319,10 +518,30 @@ class HydraViewerPage(QtWidgets.QWidget):
         this only fires once per distinct canvas size."""
         step = max(1, int(COMPOSITE_DISPLAY_STEP))
         n_out = (int(big_det_size) + step - 1) // step
-        if self._composite_seeded_size == n_out or not active_panels:
+        if not active_panels:
             return
-        self._composite_seeded_size = n_out
         states = [self._states[n] for n in active_panels]
+        # Keyed on the panels' actual geometry, not just the canvas size --
+        # the same rule hydra._big_det_size_cache already uses, and for the
+        # same reason it names: "loading a different calibration file for
+        # one panel".
+        #
+        # Canvas size alone was wrong, and silently. Loading four panel
+        # calibrations changes every panel's Lsd but usually not the canvas
+        # extent, so the composite kept whatever it was seeded with partway
+        # through that load. Reported from 1-ID-E WAXS: the composite card
+        # read Lsd 3071.610 mm, which is exactly the mean of ge1's real
+        # 2392.223 and three bundled ~3298 defaults -- it had been seeded
+        # after ge1 landed and never revisited. Every simulated ring then
+        # sat at the wrong radius and the integrated 2-theta axis was scaled
+        # by 28%, with nothing on screen saying so.
+        seed_key = (n_out, round(sum(s.lsd for s in states) / len(states), 3),
+                    round(states[0].px, 4),
+                    tuple(sorted((n, round(self._states[n].lsd, 3))
+                                 for n in active_panels)))
+        if self._composite_seeded_key == seed_key:
+            return
+        self._composite_seeded_key = seed_key
         lsd = sum(s.lsd for s in states) / len(states)
         px = states[0].px * step          # a built pixel spans `step` detector pixels
         wl = 0.172973
@@ -351,7 +570,7 @@ class HydraViewerPage(QtWidgets.QWidget):
             self._sync_shared_fields(source_key)
         self._toolbar.set_available(siblings.keys())
         self._composite_img = None
-        self._composite_seeded_size = None
+        self._composite_seeded_key = None
         self._refresh_display()
         self._refresh_profile_curves()
 
@@ -374,7 +593,13 @@ class HydraViewerPage(QtWidgets.QWidget):
         live regardless of which panel is currently displayed."""
         if self._active_card is not None:
             self._active_card.set_viewer(None)
-        self._card_stack.setCurrentWidget(self._cards[key])
+        if key == "composite":
+            self._refresh_composite_table()
+            self._card_stack.setCurrentWidget(self._comp_page)
+        else:
+            self._card_stack.setCurrentWidget(self._cards[key])
+        # The composite card stays the active card even though it is hidden,
+        # so the ring overlay on the composite image keeps working.
         self._active_card = self._cards[key]
         self._active_card.set_viewer(self._viewer)
         self._refresh_display()
@@ -401,6 +626,7 @@ class HydraViewerPage(QtWidgets.QWidget):
         if self._toolbar.current() in ("composite", f"ge{n}"):
             self._refresh_display()
         self._refresh_composite_curve()
+        self._refresh_composite_table()
 
     def _on_composite_geometry_changed(self):
         """The Composite card's own geometry changed — only λ/max2θ/px are
@@ -421,6 +647,21 @@ class HydraViewerPage(QtWidgets.QWidget):
         if src is None:
             return
         shared = src.get_shared_fields()
+        # Pixel size is NOT shared with the composite in either direction.
+        # The composite canvas is decimated by COMPOSITE_DISPLAY_STEP and its
+        # card's px is deliberately panel_px * step so that NrPixels * px --
+        # the physical extent -- stays the same (see
+        # _reseed_composite_card_if_needed). Mirroring that number onto the
+        # panels tells each one its pixels are `step` times larger than they
+        # are; mirroring a panel's back over it undoes the scaling the
+        # decimated canvas depends on. Wavelength and max 2theta are genuinely
+        # common to every panel, so those still propagate.
+        #
+        # This was latent until the panel cards' own geometry fields started
+        # being read (DetectorGeometryCard._export_geom no longer returns the
+        # loaded calibration wholesale), at which point the inflated px
+        # reached each panel's DetectorState and moved the composite.
+        shared_no_px = {k: v for k, v in shared.items() if k != "pxY"}
         self._syncing_shared = True
         try:
             for key in self._SHARED_FIELD_KEYS:
@@ -428,9 +669,35 @@ class HydraViewerPage(QtWidgets.QWidget):
                     continue
                 card = self._cards.get(key)
                 if card is not None:
-                    card.apply_shared_fields(shared)
+                    card.apply_shared_fields(
+                        shared_no_px
+                        if "composite" in (key, source_key) else shared)
         finally:
             self._syncing_shared = False
+
+    def _sync_ring_settings(self, source_key: str):
+        """Mirror the materials list + Rings/Labels/thickness from the card
+        at `source_key` onto every other card (ge1-4 + composite) — see
+        DetectorGeometryCard.get_ring_settings/apply_ring_settings. Guarded
+        by `_syncing_ring_settings` so applying the value to a sibling
+        (which itself would otherwise re-emit ringSettingsChanged) doesn't
+        recurse into another sync."""
+        if self._syncing_ring_settings:
+            return
+        src = self._cards.get(source_key)
+        if src is None:
+            return
+        ring_settings = src.get_ring_settings()
+        self._syncing_ring_settings = True
+        try:
+            for key in self._SHARED_FIELD_KEYS:
+                if key == source_key:
+                    continue
+                card = self._cards.get(key)
+                if card is not None:
+                    card.apply_ring_settings(ring_settings)
+        finally:
+            self._syncing_ring_settings = False
 
     def _refresh_profile_curves(self, force: bool = False):
         """(Re)load every available panel's frame and — if Auto is on (or
@@ -501,9 +768,225 @@ class HydraViewerPage(QtWidgets.QWidget):
         disp_key = (img.shape, key)
         fresh = (self._disp_key != disp_key)
         self._disp_key = disp_key
-        self._viewer.set_image(img, autorange=fresh)
+        self._viewer.set_image(img, autorange=fresh, reset_levels=fresh)
         if self._active_card is not None:
             self._active_card.refresh_rings_and_radial()
+        # The compass is anchored to the shown detector's beam centre, so a
+        # panel switch moves it even when nothing about the geometry changed.
+        self._redraw_lab_axes_if_on()
+
+    # ── Lab-frame axes overlay ───────────────────────────
+    # Port of the Data Viewer's overlay (tab_view._draw_lab_axes). The one
+    # difference is the anchor: this page shows a different detector
+    # depending on the toolbar, so the compass follows whichever card is
+    # active rather than a single geometry card.
+
+    def _on_lab_axes_toggled(self, checked: bool):
+        if checked:
+            self._draw_lab_axes()
+        else:
+            self._clear_lab_axes()
+
+    def _redraw_lab_axes_if_on(self, *_args):
+        if getattr(self, "_lab_axes_on", None) is not None \
+                and self._lab_axes_on.isChecked():
+            self._draw_lab_axes()
+
+    def _clear_lab_axes(self):
+        for it in self._axis_items:
+            self._viewer._iv.removeItem(it)
+        self._axis_items.clear()
+
+    def _draw_lab_axes(self):
+        self._clear_lab_axes()
+        img = getattr(self._viewer, "_data", None)
+        card = self._cards.get(self._toolbar.current())
+        if img is None or card is None:
+            return
+        geo = card.get_geometry() or {}
+        bcy, bcz = geo.get("BC_y"), geo.get("BC_z")
+        if bcy is None or bcz is None:
+            return
+        items = build_lab_frame_axes_items(
+            self._viewer._iv, img.shape, float(bcy), float(bcz),
+            tx=float(geo.get("tx") or 0.0))
+        for it in items:
+            self._viewer._iv.addItem(it)
+        self._axis_items.extend(items)
+
+    # ── Composite parameter table (read-only) ─────────────────────
+
+    _COMP_ROWS = (
+        ("Wavelength (Å)", "wavelength_A", "{:.6f}"),
+        ("Lsd (mm)", "Lsd_mm", "{:.3f}"),
+        ("BC_y (px)", "BC_y", "{:.2f}"),
+        ("BC_z (px)", "BC_z", "{:.2f}"),
+        ("tx (°)", "tx", "{:.3f}"),
+        ("ty (°)", "ty", "{:.4f}"),
+        ("tz (°)", "tz", "{:.4f}"),
+        ("Pixel size (µm)", "pxY", "{:.2f}"),
+        ("Pixels (Y × Z)", "npix", "{}"),
+        ("Rotate (°)", "rotate", "{:.1f}"),
+        ("ImTransOpt", "im_trans", "{}"),
+        ("Distortion coeffs", "ndist", "{}"),
+        ("Calibration file", "calib", "{}"),
+    )
+
+    def _build_composite_table_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        lv = QtWidgets.QVBoxLayout(page)
+        lv.setContentsMargins(0, 0, 0, 0); lv.setSpacing(4)
+        note = QtWidgets.QLabel(
+            "Composite: each panel is placed with its own geometry (below, "
+            "read-only). Edit parameters on the ge1–ge4 views.")
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        lv.addWidget(note)
+        t = QtWidgets.QTableWidget(len(self._COMP_ROWS), 4)
+        t.setHorizontalHeaderLabels([f"ge{n}" for n in (1, 2, 3, 4)])
+        t.setVerticalHeaderLabels([r[0] for r in self._COMP_ROWS])
+        t.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        t.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        t.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        t.verticalHeader().setDefaultSectionSize(22)
+        lv.addWidget(t, 1)
+        self._comp_table = t
+        return page
+
+    def _panel_param_values(self, n: int) -> Optional[dict]:
+        """Display values for one panel, or None when that panel isn't loaded."""
+        if n not in self._loader.siblings() and n not in self._states:
+            return None
+        card = self._cards[f"ge{n}"]
+        g = card.get_geometry() or {}
+        full = card.get_full_geometry() or {}
+        calib_w = card.state_widgets().get("calib_ed")
+        calib = ""
+        if calib_w is not None and hasattr(calib_w, "text"):
+            calib = Path(calib_w.text()).name if calib_w.text() else ""
+        ny, nz = full.get("NrPixelsY"), full.get("NrPixelsZ")
+        return {
+            "wavelength_A": g.get("wavelength_A"),
+            "Lsd_mm": (g["Lsd"] / 1000.0) if g.get("Lsd") is not None else None,
+            "BC_y": g.get("BC_y"), "BC_z": g.get("BC_z"),
+            "tx": g.get("tx"), "ty": g.get("ty"), "tz": g.get("tz"),
+            "pxY": g.get("pxY"),
+            "npix": f"{ny} × {nz}" if ny and nz else None,
+            "rotate": card.rotate_deg(),
+            "im_trans": ",".join(str(c) for c in g.get("im_trans", [])) or "none",
+            "ndist": len(g.get("distortion") or {}),
+            "calib": calib or None,
+        }
+
+    def _refresh_composite_table(self):
+        t = getattr(self, "_comp_table", None)
+        if t is None:
+            return
+        for col, n in enumerate((1, 2, 3, 4)):
+            vals = self._panel_param_values(n)
+            for row, (_label, key, fmt) in enumerate(self._COMP_ROWS):
+                v = None if vals is None else vals.get(key)
+                item = QtWidgets.QTableWidgetItem("—" if v is None else fmt.format(v))
+                item.setTextAlignment(QtCore.Qt.AlignCenter)
+                t.setItem(row, col, item)
+
+    # ── Eta vs R cakes (one per panel) ────────────────────────────
+
+    def _build_cake_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        lv = QtWidgets.QVBoxLayout(page)
+        lv.setContentsMargins(0, 0, 0, 0); lv.setSpacing(2)
+        bar = QtWidgets.QHBoxLayout()
+        self._cake_btn = QtWidgets.QPushButton("Calculate")
+        self._cake_btn.setToolTip("Compute the (η, R) cake of every loaded panel (ge1–ge4).")
+        self._cake_btn.clicked.connect(self._calculate_all_cakes)
+        self._cake_r_bin = _fspin(0.1, 50.0, 2, 1.0, "px"); self._cake_r_bin.setFixedWidth(64)
+        self._cake_r_bin.setToolTip("Radial (R) bin size for the cakes, in detector pixels "
+                                    "(shared by all panels).")
+        self._cake_eta_bin = _fspin(0.05, 45.0, 2, CAKE_ETA_BIN_DEG, "°")
+        self._cake_eta_bin.setFixedWidth(64)
+        self._cake_eta_bin.setToolTip("Azimuthal (η) bin size for the cakes, in degrees "
+                                      "(shared by all panels).")
+        # One checkbox per panel, mutually exclusive: picks which cake is shown.
+        self._cake_group = QtWidgets.QButtonGroup(page)
+        self._cake_group.setExclusive(True)
+        self._cake_checks: dict = {}
+        for n in (1, 2, 3, 4):
+            cb = QtWidgets.QCheckBox(f"ge{n}")
+            cb.setToolTip(f"Show the ge{n} cake (only one panel at a time).")
+            self._cake_group.addButton(cb, n)
+            self._cake_checks[n] = cb
+        self._cake_checks[1].setChecked(True)
+        self._cake_group.idToggled.connect(self._on_cake_panel_toggled)
+        for w in (self._cake_btn, QtWidgets.QLabel("  R bin:"),
+                  self._cake_r_bin, QtWidgets.QLabel("η bin:"), self._cake_eta_bin,
+                  QtWidgets.QLabel("  Show:"), *self._cake_checks.values()):
+            bar.addWidget(w)
+        bar.addStretch(1)
+        lv.addLayout(bar)
+        self._cake_stack = QtWidgets.QStackedWidget()
+        self._cake_views: dict = {}
+        for n in (1, 2, 3, 4):
+            cv = CakeViewer()
+            self._cake_views[n] = cv
+            self._cake_stack.addWidget(cv)
+            card = self._cards[f"ge{n}"]
+            card.set_cake_view(cv)
+            card.set_cake_controls(self._cake_r_bin, self._cake_eta_bin)
+        lv.addWidget(self._cake_stack, 1)
+        return page
+
+    def _on_cake_panel_toggled(self, n: int, checked: bool):
+        if checked:
+            self._cake_stack.setCurrentIndex(n - 1)
+
+    def _calculate_cake(self, n: int) -> bool:
+        if self._raw_frames.get(n) is None:
+            self._load_panel_frame(n)
+        if self._raw_frames.get(n) is None:
+            return False
+        self._cards[f"ge{n}"].cake_integrate()
+        return self._cake_views[n].get_cake() is not None
+
+    def _calculate_all_cakes(self):
+        for n in sorted(self._loader.siblings()):
+            self._calculate_cake(n)
+
+    # ── Results persistence (profiles + cakes, saved as a project sidecar) ──
+
+    def results_arrays(self) -> dict:
+        out: dict = {}
+        for n in (1, 2, 3, 4):
+            nat = self._profile_view.get_native(f"ge{n}")
+            if nat is not None and None not in nat[2:]:
+                r, p, lsd, px, wl = nat
+                out[f"prof_{n}_r"] = np.asarray(r, dtype=np.float64)
+                out[f"prof_{n}_p"] = np.asarray(p, dtype=np.float64)
+                out[f"prof_{n}_ctx"] = np.array([lsd, px, wl], dtype=np.float64)
+            ck = self._cake_views[n].get_cake()
+            if ck is not None:
+                out[f"cake_{n}_2d"] = ck["cake_2d"]
+                out[f"cake_{n}_r"] = ck["r_axis_px"]
+                out[f"cake_{n}_eta"] = ck["eta_axis_deg"]
+                ctx = [ck.get("lsd_um"), ck.get("px_um"), ck.get("wavelength_A")]
+                if None not in ctx:
+                    out[f"cake_{n}_ctx"] = np.array(ctx, dtype=np.float64)
+        return out
+
+    def apply_results_arrays(self, arrs: dict) -> None:
+        for n in (1, 2, 3, 4):
+            if f"cake_{n}_2d" in arrs:
+                cv = self._cake_views[n]
+                ctx = arrs.get(f"cake_{n}_ctx")
+                if ctx is not None:
+                    cv.set_axis_context(float(ctx[0]), float(ctx[1]), float(ctx[2]))
+                cv.set_cake(arrs[f"cake_{n}_2d"], arrs[f"cake_{n}_r"], arrs[f"cake_{n}_eta"])
+            if f"prof_{n}_r" in arrs:
+                ctx = arrs[f"prof_{n}_ctx"]
+                self._profile_view.set_curve(
+                    f"ge{n}", arrs[f"prof_{n}_r"], arrs[f"prof_{n}_p"],
+                    lsd_um=float(ctx[0]), px_um=float(ctx[1]), wavelength_A=float(ctx[2]))
+        self._refresh_composite_curve()
 
     # ── Export (Calibrate tab's Hydra "← Data Viewer" import) ───────
 
@@ -516,6 +999,28 @@ class HydraViewerPage(QtWidgets.QWidget):
             "geometries": {n: self._cards[f"ge{n}"].get_full_geometry()
                           for n in siblings},
         }
+
+    def import_from_calibrate(self, data: dict) -> bool:
+        """Apply the Calibrate tab's Hydra page's exported anchor path +
+        per-panel geometry (``HydraCalibrationPage.export_for_viewer``) —
+        the "← Get from Calibrate" counterpart of ``export_for_calibration``.
+        Returns whether anything was actually applied, so the caller (see
+        ``DataViewerTab.import_from_calibrate``) can tell the user plainly
+        when there was nothing to pull, instead of a false success."""
+        data = data or {}
+        anchor = data.get("anchor_path")
+        applied = False
+        if anchor:
+            self._loader.set_path(anchor)
+            applied = True
+        for n_key, g in (data.get("geometries") or {}).items():
+            n = int(n_key)
+            card = self._cards.get(f"ge{n}")
+            if card is None or not g:
+                continue
+            card.set_geometry(g)
+            applied = True
+        return applied
 
     # ── GUI state ────────────────────────────────────────────────
 
@@ -532,6 +1037,12 @@ class HydraViewerPage(QtWidgets.QWidget):
             "rad_auto": self._rad_auto.isChecked(),
             "viewer": self._viewer.display_state(),
             "cards": cards,
+            "cake_r_bin": self._cake_r_bin.value(),
+            "cake_eta_bin": self._cake_eta_bin.value(),
+            # Cheap fingerprint of what the results sidecar holds, so computing
+            # a cake marks the workspace modified.
+            "results": {str(n): list(self._cake_views[n].get_cake()["cake_2d"].shape)
+                        for n in (1, 2, 3, 4) if self._cake_views[n].get_cake() is not None},
         }
 
     def set_state(self, state: dict):
@@ -553,6 +1064,8 @@ class HydraViewerPage(QtWidgets.QWidget):
             card.refresh_geometry()
         self._rad_r_bin.setValue(state.get("rad_r_bin", self._rad_r_bin.value()))
         self._rad_auto.setChecked(state.get("rad_auto", self._rad_auto.isChecked()))
+        self._cake_r_bin.setValue(state.get("cake_r_bin", self._cake_r_bin.value()))
+        self._cake_eta_bin.setValue(state.get("cake_eta_bin", self._cake_eta_bin.value()))
         anchor = state.get("anchor_path")
         if anchor and Path(anchor).exists():
             self._loader.set_path(anchor)

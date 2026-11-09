@@ -6,7 +6,7 @@ seeded, and the Limits note must re-centre when one of those values moves.
 The seed spin boxes live inside ``ManualSeedDialog``, which is non-modal and
 normally closed, so from the tab itself the starting Lsd / BC / tilts were
 invisible — while the Refine card right below promised "± a window around its
-seed value" and the crystalline footer "centred on the seed", neither of which
+seed value" and the crystalline footer its window "centred on the seed", neither of which
 showed the value they meant. Reported from the beamline on an AgBH fit.
 
 ``forked`` per .context/DECISIONS.md — builds a CalibrationTab (pyqtgraph).
@@ -102,8 +102,9 @@ def test_limits_note_recentres_when_the_seed_moves(tab):
 
 
 def test_crystalline_limits_note_recentres_too(tab):
-    """Same wiring, the other note — "Always applied, centred on the seed"
-    is just as wrong when it is centred on a stale one."""
+    """Same wiring, the other note. A %-width window is a fraction of the
+    seed, so the crystalline footer has to recompute when the seed moves —
+    otherwise it quotes a width the run will not use."""
     tab._cal.setCurrentText("CeO2")
     tab._limit_widgets["Lsd"][2].setCurrentText("%")
     tab._limit_widgets["Lsd"][1].setValue(50.0)
@@ -166,48 +167,32 @@ def test_the_three_tilt_boxes_are_the_same_width(tab):
 # parameter you are not refining is how you pin it to a measured value. So
 # each row states the OUTCOME of the pairing instead.
 
-def _status(tab):
-    return {k: l.text() for k, l in tab._seed_dialog._status_lbls.items()}
+def _green(tab, slot):
+    """True while the row's name is coloured as 'selected to refine'."""
+    return "color:#2e9d4f" in tab._param_table._name_widgets[slot].styleSheet()
 
 
-def test_every_seed_row_says_what_the_fit_will_do(tab):
-    assert set(_status(tab)) == {"BC", "Lsd", "tx", "ty", "tz", "Distortion"}
-
-
-def test_refined_but_unseeded_reads_as_auto_seeded(tab):
+def test_a_row_name_is_green_exactly_while_it_is_refined(tab):
+    tab._ref_lsd.setChecked(False)
+    assert not _green(tab, "Lsd")
     tab._ref_lsd.setChecked(True)
-    tab._seed_en_lsd.setChecked(False)
-    assert _status(tab)["Lsd"] == "refined, auto-seeded"
+    assert _green(tab, "Lsd")
 
 
-def test_refined_and_seeded_reads_as_starting_from_the_value(tab):
-    tab._ref_lsd.setChecked(True)
-    tab._seed_en_lsd.setChecked(True)
-    assert _status(tab)["Lsd"] == "refined, from this value"
-
-
-def test_seeded_but_not_refined_reads_as_pinned(tab):
-    """The combination that looked like a contradiction: the seed dialog
-    shows tx ticked while the Refine card calls tx fixed. Both are right —
-    it means hold tx at this value."""
+def test_seeding_alone_does_not_turn_a_name_green(tab):
+    """Seed and refine stay independent: seeded-but-not-refined pins a value."""
     tab._ref_tx.setChecked(False)
     tab._seed_en_tx.setChecked(True)
-    assert _status(tab)["tx"] == "held at this value"
+    assert not _green(tab, "tx")
 
 
-def test_neither_reads_as_held_at_default(tab):
-    tab._ref_tx.setChecked(False)
-    tab._seed_en_tx.setChecked(False)
-    assert _status(tab)["tx"] == "held at default"
-
-
-def test_the_labels_follow_the_refine_card_live(tab):
-    """The Refine card stays editable while this non-modal dialog is open."""
-    tab._seed_en_ty.setChecked(True)
-    tab._ref_ty.setChecked(True)
-    assert _status(tab)["ty"] == "refined, from this value"
-    tab._ref_ty.setChecked(False)
-    assert _status(tab)["ty"] == "held at this value"
+def test_beam_centre_pair_and_distortion_follow_their_refine_ticks(tab):
+    tab._ref_bc.setChecked(True)
+    assert _green(tab, "BC_y") and _green(tab, "BC_z")
+    tab._ref_bc.setChecked(False)
+    assert not _green(tab, "BC_y") and not _green(tab, "BC_z")
+    tab._ref_dist.setChecked(True)
+    assert _green(tab, "distortion")
 
 
 # ── the two parameter lists read in the same order ──────────────────────
@@ -219,48 +204,45 @@ def test_the_labels_follow_the_refine_card_live(tab):
 # choices (seeding says where the fit starts, refining whether it may move),
 # which is exactly why they have to be read side by side.
 
-def _grid_order(layout, QtWidgets):
-    """Row labels of a QGridLayout, top to bottom — the checkbox text in
-    column 0 where there is one, else the "name:" label in column 1."""
-    rows = {}
+def _table_order(tab):
+    """Row names top to bottom, read from the table's own column-0 labels.
+
+    Column 0 names every row now. It used to be read off whichever
+    checkbox happened to carry the caption, which is exactly the coupling
+    that let the two panels drift into different orders."""
+    t = tab._param_table
+    return [t.row_name_lbls[n].text()
+            for n in sorted(t.row_name_lbls, key=lambda n: t.limit_row_index[n])]
+
+
+def test_the_table_follows_the_canonical_parameter_order(tab):
+    """Every parameter, in PARAMETER_LIMIT_ROWS order, named once in
+    column 0. BC_Y/BC_Z name the pair because one seed
+    tick gates both (the backend takes BC_y/BC_z together)."""
+    assert _table_order(tab) == ["Lsd", "BC_Y", "BC_Z", "tx", "ty",
+                                 "tz", "Wavelength", "Distortion"]
+
+
+def test_seeding_and_refining_are_read_on_one_row(tab):
+    """They used to be two grids that had to be kept in the same order, in
+    two panels that could not be seen at once. One grid is what retires that
+    whole class of drift -- so assert the pairing is per row, not that two
+    orders happen to agree."""
+    table = tab._param_table
+    for key, seed_box, value in (("Lsd", tab._seed_en_lsd, tab._seed_lsd),
+                                 ("tx", tab._seed_en_tx, tab._seed_tx)):
+        line = table.limit_row_index[key]
+        for w in (seed_box, table._refine_boxes[key], value):
+            assert table.grid.getItemPosition(
+                _index_of(table.grid, w))[0] == line, \
+                f"{key}: {w} is not on its parameter's line"
+
+
+def _index_of(layout, widget):
     for i in range(layout.count()):
-        r, c, *_ = layout.getItemPosition(i)
-        w = layout.itemAt(i).widget()
-        if w is None:
-            continue
-        if c == 0 and isinstance(w, QtWidgets.QCheckBox) and w.text():
-            rows[r] = w.text()
-        elif c == 1 and r not in rows and isinstance(w, QtWidgets.QLabel) \
-                and w.text().endswith(":"):
-            rows[r] = w.text().rstrip(":")
-    return [rows[k] for k in sorted(rows)]
-
-
-def test_the_refine_card_follows_the_canonical_parameter_order(tab):
-    QtWidgets = pytest.importorskip("PyQt5.QtWidgets")
-    assert _grid_order(tab._refine_grid, QtWidgets) == \
-        ["Lsd", "BC", "tx", "ty", "tz", "Wavelength"]
-
-
-def test_the_seed_dialog_follows_the_same_order(tab):
-    QtWidgets = pytest.importorskip("PyQt5.QtWidgets")
-    grid = tab._seed_dialog.findChild(QtWidgets.QGridLayout)
-    # "Beam centre" is the seed dialog's label for the BC pair (the backend
-    # takes BC_y/BC_z together), and Distortion is seedable but has no
-    # Wavelength counterpart — the shared parameters must still line up.
-    assert _grid_order(grid, QtWidgets) == \
-        ["Lsd", "Beam centre", "tx", "ty", "tz", "Distortion"]
-
-
-def test_both_panels_order_their_shared_parameters_identically(tab):
-    QtWidgets = pytest.importorskip("PyQt5.QtWidgets")
-    refine = _grid_order(tab._refine_grid, QtWidgets)
-    seed = [("BC" if n == "Beam centre" else n)
-            for n in _grid_order(tab._seed_dialog.findChild(QtWidgets.QGridLayout),
-                                 QtWidgets)]
-    shared = set(refine) & set(seed)
-    assert len(shared) >= 5
-    assert [n for n in refine if n in shared] == [n for n in seed if n in shared]
+        if layout.itemAt(i).widget() is widget:
+            return i
+    raise AssertionError(f"{widget} is not in the grid")
 
 
 def test_the_order_comes_from_one_place(tab):

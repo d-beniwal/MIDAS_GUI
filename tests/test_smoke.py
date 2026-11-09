@@ -43,8 +43,24 @@ def test_app_builds_offscreen():
         pytest.skip(f"midas_gui.app needs the full MIDAS stack: {exc}")
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     win = app_mod.MainWindow()
-    # 4 always-on + the default-visible optional tabs.
-    assert win.centralWidget().count() == len(C.ALWAYS_TABS) + len(C.DEFAULT_VISIBLE_TABS)
+    # apply_tab_visibility shows a tab when "always or name in visible", so
+    # the count is the UNION of the pinned tabs and the visible optional
+    # ones -- not the sum. Summing double-counted, because
+    # DEFAULT_VISIBLE_TABS is not reliably "optional tabs only": a profile
+    # that has ever saved Preferences > Tabs writes its whole visible set,
+    # pinned tabs included, and constants.reload_from_config() replaces the
+    # global with that list wholesale. On this machine it holds all 9, so
+    # the old assertion read 9 == 4 + 9 and failed for a reason that had
+    # nothing to do with the window.
+    #
+    # Intersecting with OPTIONAL_TABS makes the arithmetic right either way
+    # -- shipped default (4 optional) or a saved config that repeats the
+    # pinned ones -- so this no longer depends on whose machine runs it.
+    expected = set(C.ALWAYS_TABS) | (set(C.OPTIONAL_TABS) & set(C.DEFAULT_VISIBLE_TABS))
+    assert win.centralWidget().count() == len(expected)
+    labels = {win.centralWidget().tabText(i).split("  ", 1)[-1]
+              for i in range(win.centralWidget().count())}
+    assert labels == expected
 
 
 def test_tab_visibility_toggle():
@@ -63,17 +79,15 @@ def test_tab_visibility_toggle():
     win.apply_tab_visibility(C.OPTIONAL_TABS)
     assert win.centralWidget().count() == len(C.ALWAYS_TABS) + len(C.OPTIONAL_TABS)
 
-    # Header project-name indicator (top-right corner of the tab bar,
-    # separate from the muted status-bar "Project: none" label) — reused
-    # from this same window rather than constructing another MainWindow,
-    # since each one adds several pyqtgraph widgets to the same process
-    # (see .context/STATE.md's interpreter-teardown crash-risk note).
-    assert win._header_project_lbl.text() == ""
+    # Active-project indicator lives in the bottom status bar (bold green
+    # "Project: <name>" label) — reused from this same window rather than
+    # constructing another MainWindow, since each one adds several pyqtgraph
+    # widgets to the same process (see .context/STATE.md's interpreter-teardown
+    # crash-risk note).
+    assert win._project_lbl.text() == "Project: none"
     win._set_project_path("/tmp/my_experiment.h5")
-    assert "my_experiment.h5" in win._header_project_lbl.text()
     assert win._project_lbl.text() == "Project: my_experiment.h5"
     win._set_project_path(None)
-    assert win._header_project_lbl.text() == ""
     assert win._project_lbl.text() == "Project: none"
 
 

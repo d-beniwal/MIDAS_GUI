@@ -79,10 +79,18 @@ def _load_qt():
         MIN_FRAMES_PER_WORKER = 10   # duck-typed to match BatchRunCoordinator
 
         def __init__(self, spec, source_cfg, mask, out_dir, fmts, kernel, corrections,
-                     variance_cfg, q_cfg=None, frame_range=None, monitor_file=None,
+                     variance_cfg, q_cfg=None, omega_cfg=None, frame_range=None,
+                     monitor_file=None,
                      drift_traj=None, parent=None, dark=None, bright=None, background=None,
                      bright_mode="divide", weighted=True, context=None, im_trans=(),
-                     run_mode="sequential", n_workers=1):
+                     run_mode="sequential", n_workers=1, zarr_grouping="frame",
+                     **kw):
+            # **kw, not a fixed list: BatchRunCoordinator keeps gaining
+            # options (multi_azimuth and ion_csv_extras arrived with the
+            # Hydra/single-detector parity work), and a stub that models a
+            # NARROWER signature than the thing it replaces fails the caller
+            # for a reason that has nothing to do with the caller -- the
+            # same trap _stub_spec_builders already carries a note about.
             super().__init__(parent)
             self.out_dir = out_dir
             _FakeBatchWorker.calls.append(out_dir)
@@ -149,12 +157,17 @@ def _stub_spec_builders(app, monkeypatch):   # `app` so _load_qt() has run first
     IntegrationWorker rather than exercise a real fit). Stub it with a
     lightweight object carrying just the attributes ``_start_panel_worker``
     reads (``Lsd``, ``pxY``, ``Wavelength``)."""
+    # **kw rather than the four named optionals the stub used to list: the
+    # real builders have always taken eta_min/eta_max too, and the card
+    # started passing them when caking went per panel. A stub that models a
+    # narrower signature than the thing it replaces fails the caller for a
+    # reason that has nothing to do with the caller.
     monkeypatch.setattr(hydra_batch_widgets_mod, "_build_spec",
-                        lambda result, r_bin, e_bin, r_min=None, r_max=None: _fake_spec(
+                        lambda result, r_bin, e_bin, **kw: _fake_spec(
                             getattr(result, "Lsd", 200_000.0), getattr(result, "pxY", 200.0),
                             getattr(result, "wavelength_A", 0.1729)))
     monkeypatch.setattr(hydra_batch_widgets_mod, "spec_from_geometry_file",
-                        lambda path, r_bin, e_bin, r_min=None, r_max=None: _fake_spec())
+                        lambda path, r_bin, e_bin, **kw: _fake_spec())
 
 
 @pytest.fixture(autouse=True)

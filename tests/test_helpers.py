@@ -17,6 +17,88 @@ def app():
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
+def test_best_default_dataset_index_first_eligible_by_default():
+    from midas_gui.helpers import best_default_dataset_index
+
+    items = [("meta/info", (3,)), ("exchange/data", (50, 8, 8)),
+             ("exchange/data_dark", (5, 8, 8))]
+    assert best_default_dataset_index(items) == 1   # first ndim>=3 entry
+
+
+def test_best_default_dataset_index_prefers_most_frames_when_asked():
+    from midas_gui.helpers import best_default_dataset_index
+
+    # The first-in-file-order eligible entry ("calib/tiny") is NOT the one
+    # with the most frames — exactly the case a Dark file pointed at an
+    # arbitrary, separate HDF5 can hit.
+    items = [("meta/info", (3,)), ("calib/tiny", (2, 8, 8)),
+             ("exchange/data_dark", (500, 8, 8))]
+    assert best_default_dataset_index(items, prefer_max_frames=True) == 2
+    # Without the flag, keeps the original first-eligible behaviour.
+    assert best_default_dataset_index(items, prefer_max_frames=False) == 1
+
+
+def test_best_default_dataset_index_falls_back_to_zero_when_none_eligible():
+    from midas_gui.helpers import best_default_dataset_index
+
+    items = [("meta/a", (3,)), ("meta/b", (8,))]
+    assert best_default_dataset_index(items) == 0
+    assert best_default_dataset_index(items, prefer_max_frames=True) == 0
+
+
+def test_field_selector_dark_prefers_most_frames_when_file_differs_from_data(app, tmp_path):
+    """FieldSelector("Dark", prefer_most_frames=True): when the dark file is
+    a different file than Data, the default dataset picked is the one with
+    the most frames, not the first one found — see
+    helpers.best_default_dataset_index."""
+    import h5py
+    from midas_gui.widgets import FieldSelector
+
+    data_path = tmp_path / "data.h5"
+    with h5py.File(data_path, "w") as f:
+        f.create_dataset("exchange/data", data=np.zeros((20, 4, 4), dtype=np.float32))
+
+    other_path = tmp_path / "other_dark.h5"
+    with h5py.File(other_path, "w") as f:
+        f.create_dataset("calib/tiny", data=np.zeros((2, 4, 4), dtype=np.float32))
+        f.create_dataset("exchange/data_dark", data=np.zeros((500, 4, 4), dtype=np.float32))
+
+    sel = FieldSelector("Dark", default_dataset="exchange/data_dark", prefer_most_frames=True)
+    sel.set_data_path_provider(lambda: str(data_path))
+    sel._path_ed.setText(str(other_path))
+    assert sel._ds_combo.currentText().split("   ")[0].strip() == "exchange/data_dark"
+
+    # A dataset NOT named after default_dataset still prefers the one with
+    # the most frames (the fallback path this feature actually targets).
+    other_path2 = tmp_path / "other_dark2.h5"
+    with h5py.File(other_path2, "w") as f:
+        f.create_dataset("calib/tiny", data=np.zeros((2, 4, 4), dtype=np.float32))
+        f.create_dataset("raw/big_stack", data=np.zeros((500, 4, 4), dtype=np.float32))
+    sel._path_ed.setText(str(other_path2))
+    assert sel._ds_combo.currentText().split("   ")[0].strip() == "raw/big_stack"
+
+
+def test_field_selector_dark_keeps_first_eligible_when_same_file_as_data(app, tmp_path):
+    """The common case — dark lives in the same file as the data (e.g. a
+    companion exchange/data_dark dataset) — keeps the original "first
+    eligible dataset" behaviour, not the most-frames one."""
+    import h5py
+    from midas_gui.widgets import FieldSelector
+
+    shared_path = tmp_path / "shared.h5"
+    with h5py.File(shared_path, "w") as f:
+        f.create_dataset("calib/tiny", data=np.zeros((2, 4, 4), dtype=np.float32))
+        f.create_dataset("exchange/data", data=np.zeros((500, 4, 4), dtype=np.float32))
+
+    sel = FieldSelector("Dark", default_dataset="no_such_dataset", prefer_most_frames=True)
+    sel.set_data_path_provider(lambda: str(shared_path))
+    sel._path_ed.setText(str(shared_path))
+    # First eligible (ndim>=3) dataset in file order is calib/tiny, even
+    # though exchange/data has far more frames — this is the same file as
+    # Data, so the most-frames preference does not apply.
+    assert sel._ds_combo.currentText().split("   ")[0].strip() == "calib/tiny"
+
+
 def test_refresh_combo_items_preserves_existing_selection(app):
     from midas_gui.helpers import _NoScrollComboBox, refresh_combo_items
 
@@ -94,6 +176,8 @@ def test_kedge_label_menu_rebuilds_from_current_constants(app, monkeypatch):
     ("scan.ge1", "ge"), ("scan.GE3.h5", "ge"), ("scan_ge4_001.ge4", "ge"),
     ("scan.vrx", "vrx"), ("scan.VRX.h5", "vrx"),
     ("scan.pxrd", "pxrd"),
+    # 1-ID-E writes Pixirad frames as ".pixi", not ".pxrd".
+    ("scan.pixi", "pxrd"), ("AgBeh_80p725keV_3s_003510.pixi.h5", "pxrd"),
     ("silver_behenate_72keV_001027.pmg.h5", "pimega"), ("scan.PMG", "pimega"),
     ("scan.tif", None), ("scan.h5", None),
 ])
@@ -116,8 +200,11 @@ def test_detect_geometry_pixel_size_from_filename(profile):
     assert detect_geometry_from_path("scan.ge1", profile=profile) == {"pxY": 200.0}
     assert detect_geometry_from_path("scan.vrx", profile=profile) == {"pxY": 150.0}
     assert detect_geometry_from_path("scan.pmg.h5", profile=profile) == {"pxY": 55.0}
-    # Pixirad is identified but has no known pixel size to auto-populate.
-    assert detect_geometry_from_path("scan.pxrd", profile=profile) == {}
+    # Pixirad used to be identified without a pixel size, so loading one left
+    # the px box holding whatever the previously-loaded calibration had put
+    # there -- a GE's 200 um, in the 1-ID-E SAXS case that surfaced this.
+    assert detect_geometry_from_path("scan.pxrd", profile=profile) == {"pxY": 62.0}
+    assert detect_geometry_from_path("scan.pixi", profile=profile) == {"pxY": 62.0}
     assert detect_geometry_from_path("scan.tif", profile=profile) == {}
 
 
@@ -770,6 +857,104 @@ def test_apply_field_corrections_skips_mismatched_shape_instead_of_raising():
 
     out2 = apply_field_corrections(img, dark=matching_dark)
     assert np.allclose(out2, 9.0)   # matching-shape dark still applies normally
+
+
+def test_apply_field_corrections_broadcasts_2d_fields_over_a_batch():
+    """``reduce_frames_batched`` calls ``apply_field_corrections`` on a
+    ``(B,H,W)`` batch with 2-D dark/bright/background fields — the shape
+    guard must compare against the image's trailing two dims, not its full
+    shape, or every batched call is skipped as "mismatched"."""
+    from midas_gui.helpers import apply_field_corrections
+
+    batch = np.full((4, 10, 10), 5.0)
+    dark = np.full((10, 10), 1.0)
+    background = np.full((10, 10), 0.5)
+
+    out = apply_field_corrections(batch, dark=dark, background=background)
+    assert out.shape == (4, 10, 10)
+    assert np.allclose(out, 5.0 - 1.0 - 0.5)
+
+
+def test_reduce_frames_batched_max_matches_numpy_max_across_batches():
+    from midas_gui.helpers import reduce_frames_batched
+
+    frames = np.arange(5 * 4 * 4, dtype=np.float32).reshape(5, 4, 4)
+
+    def batches():
+        yield frames[0:2]
+        yield frames[2:5]
+
+    out, n_used = reduce_frames_batched(batches(), "max")
+    assert n_used == 5
+    assert np.array_equal(out, frames.max(axis=0))
+
+
+def test_reduce_frames_batched_sum_and_mean_not_averaged_of_batch_means():
+    """A naive "average the per-batch reductions" is wrong once the final
+    batch is a different size — this must accumulate a running sum and
+    divide by the TRUE total count once at the end."""
+    from midas_gui.helpers import reduce_frames_batched
+
+    frames = np.arange(5 * 3 * 3, dtype=np.float32).reshape(5, 3, 3)
+
+    def batches(bs):
+        for lo in range(0, 5, bs):
+            yield frames[lo:lo + bs]
+
+    out_sum, n_sum = reduce_frames_batched(batches(2), "sum")
+    assert n_sum == 5
+    assert np.allclose(out_sum, frames.sum(axis=0))
+
+    out_mean, n_mean = reduce_frames_batched(batches(2), "mean")
+    assert n_mean == 5
+    assert np.allclose(out_mean, frames.mean(axis=0))
+
+
+def test_reduce_frames_batched_raises_on_no_frames():
+    from midas_gui.helpers import reduce_frames_batched
+
+    with pytest.raises(ValueError):
+        reduce_frames_batched(iter(()), "max")
+
+
+def test_reduce_frames_batched_corrects_each_frame_before_reducing():
+    """The whole point of this refactor: each frame is corrected BEFORE
+    being folded into the reduction, not once after. For ``sum`` this
+    produces a very different (and physically correct) result than
+    correcting the final reduced image once — the background offset must
+    appear once per frame, not once total."""
+    from midas_gui.helpers import reduce_frames_batched, apply_field_corrections
+
+    n = 4
+    frames = np.stack([np.full((3, 3), 10.0 + i) for i in range(n)], axis=0)
+    background = np.full((3, 3), 2.0)
+
+    out_sum, n_used = reduce_frames_batched(iter([frames]), "sum", background=background)
+    assert n_used == n
+    # Correct-then-reduce: sum of (frame_i - background) for each frame.
+    expected = sum((f - background) for f in frames)
+    assert np.allclose(out_sum, expected)
+
+    # This must differ from the old "reduce raw, correct once" order, which
+    # applied the background offset exactly once regardless of frame count.
+    old_order = apply_field_corrections(frames.sum(axis=0), background=background)
+    assert not np.allclose(out_sum, old_order)
+
+
+def test_reduce_frames_batched_max_is_order_invariant():
+    """Unlike sum, max under a monotone per-pixel correction (affine, same
+    for every frame) commutes with the reduction — correcting each frame
+    first and taking max must equal taking max first and correcting once."""
+    from midas_gui.helpers import reduce_frames_batched, apply_field_corrections
+
+    rng = np.random.default_rng(0)
+    frames = rng.uniform(0, 100, size=(6, 5, 5)).astype(np.float32)
+    dark = rng.uniform(0, 5, size=(5, 5)).astype(np.float32)
+    background = rng.uniform(0, 5, size=(5, 5)).astype(np.float32)
+
+    out_new, _ = reduce_frames_batched(iter([frames]), "max", dark=dark, background=background)
+    out_old = apply_field_corrections(frames.max(axis=0), dark=dark, background=background)
+    assert np.allclose(out_new, out_old)
 
 
 # ── browse_start_dir / warn_if_path_missing ──────────────────────────────

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import functools
 import re
 import shlex
 import subprocess
@@ -31,6 +32,7 @@ from pathlib import Path
 from typing import Optional
 
 from PyQt5 import QtCore, QtWidgets
+from midas_gui import style as S
 
 # Every job's screenlog + JSON sidecar lives here, regardless of the job's
 # own --out-dir — so adoption (after a GUI restart) can scan one fixed
@@ -42,6 +44,13 @@ _SESSION_PREFIX = "midasgui_batch_"
 #: [batch], correct_cli tags them [correct]. One regex serves both so a
 #: Batch Correction job gets a progress bar too.
 _PROGRESS_RE = re.compile(r"\[(?:batch|correct)\] PROGRESS (\d+)/(\d+)")
+#: Emitted by JobQueuePanel.launch between chained per-folder runs.
+_STEP_RE = re.compile(r"\[launcher\] step (\d+)/(\d+)")
+# A parallel job reports units finishing, not steps starting -- and they
+# finish out of order, so the LAST line seen is not the highest. Progress
+# counts how many "done" lines have appeared rather than trusting their
+# numbering (see JobQueuePanel._update_job_progress).
+_UNIT_DONE_RE = re.compile(r"\[launcher\] unit (\d+)/(\d+) done")
 _DONE_RE = re.compile(r"\[launcher\] DONE exit=(\d+)")
 
 _LOG_RULES = [
@@ -69,6 +78,17 @@ class Job:
     meta_path: str
     name: str
     total_frames: int = 1
+    #: Chained per-folder runs (see JobQueuePanel.launch). step/n_steps come
+    #: from the launcher's markers; step_total is the CURRENT step's frame
+    #: count, which is not the job's total once there is more than one step.
+    step: int = 0
+    n_steps: int = 1
+    step_total: int = 1
+    #: Set when the launcher ran units CONCURRENTLY (see _parallel_script).
+    #: Units finish out of order, so progress counts completions in
+    #: units_done rather than reading the last unit number off the log.
+    parallel: bool = False
+    units_done: int = 0
     out_dir: str = ""                # where the job writes results — see
                                       # batch_cli._write_results_sidecar and
                                       # JobQueuePanel's on_job_done callback
@@ -92,6 +112,28 @@ def screen_available() -> bool:
     return shutil.which("screen") is not None
 
 
+@functools.lru_cache(maxsize=1)
+def screen_supports_logfile() -> bool:
+    """Does the installed ``screen`` take ``-Logfile``?
+
+    It arrived in screen 4.06 (2017). RHEL 7 ships 4.01.00devel, where
+    passing it aborts with ``Error: Unknown option Logfile`` before the
+    session is ever created -- and the only thing the user saw was
+    "`screen -dmS` exited -1", with screen's own message going to the
+    terminal the GUI was launched from rather than to the dialog.
+
+    Probed rather than version-parsed: "4.01.00devel" is the kind of
+    string that makes a version comparison wrong in an interesting way,
+    and the help text answers the actual question.
+    """
+    try:
+        out = subprocess.run(["screen", "--help"], capture_output=True,
+                             text=True, timeout=5)
+    except Exception:
+        return False
+    return "-Logfile" in ((out.stdout or "") + (out.stderr or ""))
+
+
 def _screen_session_alive(session: str) -> bool:
     try:
         out = subprocess.run(["screen", "-ls"], capture_output=True,
@@ -105,6 +147,129 @@ def _screen_session_alive(session: str) -> bool:
 def _sanitize(name: str) -> str:
     name = re.sub(r"[^A-Za-z0-9._-]", "_", name.strip()) or "job"
     return name[:80]
+
+
+
+def _parallel_script(repo_root, units, max_parallel: int) -> str:
+    """Bash for ``units`` run with real process-level concurrency.
+
+    A *unit* is ``{"parallel": [argv, ...], "then": [argv, ...]}``: the
+    ``parallel`` commands all start at once, a barrier waits for them, then
+    the ``then`` commands run in order. That is exactly a Hydra scan -- four
+    panels that are independent, followed by a combine that needs all four.
+    ``max_parallel`` bounds how many UNITS are in flight, so the real process
+    count is roughly ``max_parallel * len(parallel)``.
+
+    PROCESSES, not threads, and generated in the shell rather than inside
+    Python. The alternative was to teach batch_cli to drive
+    BatchRunCoordinator, which needs a Qt event loop in a process that
+    deliberately has none -- and in a detached screen session a signal that
+    never arrives is a job that hangs forever instead of failing, which is
+    strictly worse than one that is slow. Here every step is the same
+    single-threaded batch_cli invocation that already works, one step
+    crashing cannot wedge the others, and there is no GIL in the picture.
+
+    Failures are collected in a temp file rather than a variable: each unit
+    runs in a background subshell, so an `rc=$?` inside it would be set in a
+    child and lost. The file is removed on the way out; its existence at the
+    end is what makes the exit code non-zero.
+    """
+    jobs = max(1, int(max_parallel or 1))
+    total = len(units)
+    out = [
+        f"cd {shlex.quote(str(repo_root))} || exit 1",
+        'fail_file="$(mktemp)"',
+        f"MAXJ={jobs}",
+        "",
+        "# Block until a slot frees. `wait -n` needs bash 4.3+; RHEL 7",
+        "# ships 4.2, where it fails instantly, so fall back to polling.",
+        "# Falling through instead would make this a no-op and launch",
+        "# every unit at once -- see tests/test_job_chained_folders.py.",
+        "sem() {",
+        '  while [ "$(jobs -rp | wc -l)" -ge "$MAXJ" ]; do wait -n 2>/dev/null || sleep 1; done',
+        "}",
+        "",
+    ]
+    for i, unit in enumerate(units, 1):
+        par = list(unit.get("parallel") or [])
+        tail = list(unit.get("then") or [])
+        body = [f'  echo "[launcher] unit {i}/{total} start"']
+        for a in par:
+            line = " ".join(shlex.quote(str(c)) for c in a)
+            body.append('  { ' + line + ' ; } || echo 1 >> "$fail_file" &')
+        if par:
+            body.append("  wait")
+        for a in tail:
+            line = " ".join(shlex.quote(str(c)) for c in a)
+            body.append('  { ' + line + ' ; } || echo 1 >> "$fail_file"')
+        body.append(f'  echo "[launcher] unit {i}/{total} done"')
+        out.append(f"unit_{i}() {{")
+        out.extend(body)
+        out.append("}")
+    out.append("")
+    for i in range(1, total + 1):
+        out.append(f"sem; unit_{i} &")
+    out += [
+        "wait",
+        'rc=0; [ -s "$fail_file" ] && rc=1',
+        'rm -f "$fail_file"',
+        'echo "[launcher] DONE exit=$rc"',
+        "sleep 3",
+    ]
+    return "\n".join(out)
+
+
+
+def _tail_errors(logfile: str, limit: int = 8) -> list:
+    """The last few lines that look like trouble, for the notification body.
+
+    Grepped out of the screenlog rather than tracked as the job runs: the
+    launcher is a detached shell and this panel only ever sees the log, so
+    the log is the single source of truth about what went wrong.
+    """
+    try:
+        text = Path(logfile).read_text(errors="replace")
+    except OSError:
+        return []
+    hits = [ln.strip() for ln in text.splitlines()
+            if re.search(r"error|traceback|exception|failed", ln, re.I)]
+    return hits[-limit:]
+
+
+def send_job_notification(job: "Job", address: str, *, _runner=None) -> bool:
+    """Mail one line about a finished job. Returns True if it was handed off.
+
+    Best effort by contract: a mail system that is missing, misconfigured or
+    slow must cost a log line and nothing else. The job has already finished
+    by the time this runs -- there is no outcome left to protect, and a
+    notifier that could wedge the GUI would be worse than no notifier.
+
+    Delivery is NOT confirmed. ``mail`` returning 0 means the local MTA
+    accepted the message, not that it reached the recipient; a lab host
+    relaying to an external domain may still be dropped at the far end.
+    The wording in the log says "sent" rather than "delivered" for that
+    reason.
+    """
+    address = (address or "").strip()
+    if not address:
+        return False
+    errs = _tail_errors(job.logfile)
+    body = [
+        f"Job:      {job.name}",
+        f"Session:  {job.session}",
+        f"Status:   {job.status}",
+        f"Exit:     {job.exit_code if job.exit_code is not None else 'unknown'}",
+        f"Progress: {job.step}/{job.n_steps} "
+        + ("units" if job.parallel else "steps"),
+        f"Output:   {job.out_dir or '(not recorded)'}",
+        f"Log:      {job.logfile}",
+    ]
+    if errs:
+        body += ["", f"Last {len(errs)} line(s) mentioning an error:"] + \
+                [f"  {e}" for e in errs]
+    subject = f"MIDAS job {job.status}: {job.name}"
+    from midas_gui.mail import send_mail
+    return send_mail(subject, body, address, _runner=_runner)
 
 
 class JobQueuePanel(QtWidgets.QWidget):
@@ -170,7 +335,7 @@ class JobQueuePanel(QtWidgets.QWidget):
         v.addWidget(scroll)
 
         self._empty_lbl = QtWidgets.QLabel("No background jobs.")
-        self._empty_lbl.setStyleSheet("color:#888;font-size:10px;")
+        self._empty_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px;")
         self._jobs_layout.insertWidget(0, self._empty_lbl)
 
     def _refresh_empty_label(self):
@@ -179,14 +344,24 @@ class JobQueuePanel(QtWidgets.QWidget):
     # ── Launch ───────────────────────────────────────────────────────
 
     def launch(self, argv: list, *, name: str, total_frames: int,
-              out_dir: str = "") -> Optional[Job]:
+              out_dir: str = "", extra_argvs: Optional[list] = None,
+              units: Optional[list] = None,
+              max_parallel: int = 1) -> Optional[Job]:
         """Launch ``argv`` (e.g. ``[sys.executable, "-m", "midas_gui.batch_cli", ...]``)
         in a fresh detached ``screen`` session. Returns the new ``Job``, or
         ``None`` if ``screen`` isn't available or a same-named session is
         already running (both cases show a message box). ``out_dir`` is the
         job's own ``--out-dir`` — recorded so ``on_job_done`` (and a later
         "Load results" click) knows where to find whatever results sidecar
-        the job leaves behind."""
+        the job leaves behind.
+
+        ``extra_argvs`` are further command lines run SEQUENTIALLY in the same
+        session, after ``argv``. That is how a Batch Integrate selection
+        spanning several source folders runs as one job: the CLI takes a
+        single ``--out-dir``, so each folder needs its own invocation, and
+        one session keeps it one entry in this panel and one log rather than
+        N sessions competing for the same disk. A failing folder does not
+        stop the rest; the reported exit code is non-zero if any failed."""
         if not screen_available():
             QtWidgets.QMessageBox.warning(
                 self, "screen not found",
@@ -221,15 +396,64 @@ class JobQueuePanel(QtWidgets.QWidget):
         # GUI itself happened to have, so pin it explicitly here rather
         # than relying on that.
         repo_root = Path(__file__).resolve().parent.parent
-        inner = " ".join(shlex.quote(str(c)) for c in argv)
-        wrapped = (f'cd {shlex.quote(str(repo_root))} && {inner}; '
-                   f'rc=$?; echo "[launcher] DONE exit=$rc"; sleep 3')
-        screen_cmd = ["screen", "-dmS", session, "-L", "-Logfile", logfile,
-                      "bash", "-c", wrapped]
-        rc = QtCore.QProcess.execute("screen", screen_cmd[1:])
+        if units:
+            wrapped = _parallel_script(repo_root, units, max_parallel)
+        else:
+            argvs = [argv] + list(extra_argvs or [])
+            # `|| rc=$?` rather than `&&`: one folder failing must not silently
+            # cancel the folders after it, but the job must still report failure.
+            steps = []
+            for _i, _a in enumerate(argvs, 1):
+                _line = " ".join(shlex.quote(str(c)) for c in _a)
+                if len(argvs) > 1:
+                    steps.append(f'echo "[launcher] step {_i}/{len(argvs)}"')
+                steps.append("{ " + _line + " ; } || rc=$?")
+            inner = "; ".join(steps)
+            wrapped = (f'cd {shlex.quote(str(repo_root))} && rc=0; {inner}; '
+                       f'echo "[launcher] DONE exit=$rc"; sleep 3')
+        # Hand the script to bash as a FILE, not as a -c string. Linux caps a
+        # single argv element at MAX_ARG_STRLEN (128 KiB), and the command is
+        # one element: an 877-file selection is ~80 KB of paths and fit, but
+        # the same selection split across 83 folders repeats the shared flags
+        # 83 times, blew past the cap, and execve failed -- surfacing only as
+        # `screen -dmS` exited -2. A file has no such limit, and leaves the
+        # exact commands on disk next to the log for inspection.
+        script_path = JOBS_DIR / f"{session}.sh"
+        # On a screen too old for -Logfile the script logs ITSELF, and we
+        # pass neither -L nor -Logfile: 4.01's bare -L writes "screenlog.0"
+        # into the working directory, which here is the repo root.
+        # tee, not a plain redirect, so `Reattach` still shows live output;
+        # the trailing `sleep 3` both branches already end with is what
+        # gives tee time to flush the DONE line the panel waits for.
+        prologue = ""
+        if not screen_supports_logfile():
+            prologue = (
+                f'exec > >(tee -a {shlex.quote(logfile)}) 2>&1\n'
+                "echo '[launcher] screen has no -Logfile (added in 4.06); "
+                "this script is logging itself.'\n")
+        try:
+            script_path.write_text("#!/bin/bash\n" + prologue + wrapped + "\n")
+            script_path.chmod(0o755)
+        except OSError as e:
+            QtWidgets.QMessageBox.warning(
+                self, "Cannot write job script",
+                f"Could not write the job script:\n{e}")
+            return None
+        screen_args = ["-dmS", session]
+        if screen_supports_logfile():
+            screen_args += ["-L", "-Logfile", logfile]
+        screen_args += ["bash", str(script_path)]
+        rc = QtCore.QProcess.execute("screen", screen_args)
         if rc != 0:
             QtWidgets.QMessageBox.warning(
-                self, "Launch failed", f"`screen -dmS` exited {rc}.")
+                self, "Launch failed",
+                f"`screen -dmS` exited {rc}.\n\n"
+                f"screen writes its own reason to the terminal the GUI was "
+                f"launched from, not here. To see it, run:\n\n"
+                f"  screen -dmS probe bash {script_path}\n\n"
+                f"This screen "
+                + ("does" if screen_supports_logfile() else "does NOT")
+                + " support -Logfile.")
             return None
 
         job = Job(session=session, logfile=logfile, meta_path=meta_path,
@@ -312,7 +536,7 @@ class JobQueuePanel(QtWidgets.QWidget):
 
         label = QtWidgets.QLabel(job.name)
         label.setMinimumWidth(160)
-        label.setStyleSheet("font-weight:bold;color:#eee;")
+        label.setStyleSheet(f"font-weight:bold;color:{S.TEXT};")
         label.setToolTip(f"session: {job.session}\nlogfile: {job.logfile}")
 
         progress = QtWidgets.QProgressBar()
@@ -473,17 +697,61 @@ class JobQueuePanel(QtWidgets.QWidget):
         if not data:
             return
         text = data.decode("utf-8", errors="replace")
+        for m in _STEP_RE.finditer(text):
+            job.step, job.n_steps = int(m.group(1)), int(m.group(2))
+        # Parallel units complete out of order, so count completions rather
+        # than reading the last number -- "unit 7/40 done" arriving after
+        # "unit 12/40 done" must not move the bar backwards.
+        for m in _UNIT_DONE_RE.finditer(text):
+            job.units_done += 1
+            job.n_steps = int(m.group(2))
+            job.step = job.units_done
+            job.parallel = True
         last_done = last_total = None
         for m in _PROGRESS_RE.finditer(text):
             last_done, last_total = int(m.group(1)), int(m.group(2))
         if last_done is not None:
             job.seen_frames = last_done
-            if last_total and last_total != job.total_frames:
-                job.total_frames = last_total
-                if job.progress is not None:
-                    job.progress.setRange(0, max(1, job.total_frames))
-            if job.progress is not None:
-                job.progress.setValue(job.seen_frames)
+            if last_total:
+                job.step_total = last_total
+                # Only a single-step job's per-run total IS the job's total.
+                if job.n_steps <= 1:
+                    job.total_frames = last_total
+        if last_done is not None or job.n_steps > 1:
+            self._apply_progress(job)
+
+    @staticmethod
+    def _apply_progress(job: Job) -> None:
+        """Render progress for the whole job, not one step of it.
+
+        A chained multi-folder job reports ``PROGRESS k/15`` per folder, so a
+        bar driven straight off those counts fills up and resets once per
+        folder -- reading "15 / 15 frames, Running" at folder 3 of 84, which
+        looks finished and says nothing about the 81 still to come. With more
+        than one step the bar spans the chain and names the folder instead.
+        """
+        bar = job.progress
+        if bar is None:
+            return
+        if job.n_steps > 1:
+            frac = (job.seen_frames / job.step_total) if job.step_total else 0.0
+            done = max(0, job.step - 1) + min(1.0, max(0.0, frac))
+            bar.setRange(0, job.n_steps * 100)
+            bar.setValue(int(round(done * 100)))
+            noun = "unit" if job.parallel else "folder"
+            if job.parallel:
+                # Frame counts from concurrent units interleave in one log,
+                # so "n/total frames" would be a mix of several scans.
+                bar.setRange(0, max(1, job.n_steps))
+                bar.setValue(job.step)
+                bar.setFormat(f"unit {job.step}/{job.n_steps} (%p%)")
+                return
+            bar.setFormat(f"{noun} {job.step}/{job.n_steps} \u2014 "
+                          f"{job.seen_frames}/{job.step_total} frames (%p%)")
+        else:
+            bar.setRange(0, max(1, job.total_frames))
+            bar.setValue(job.seen_frames)
+            bar.setFormat("%v / %m frames")
 
     def _finalize_job(self, job: Job) -> None:
         was_cancelling = job.status == "Cancelling"
@@ -509,6 +777,24 @@ class JobQueuePanel(QtWidgets.QWidget):
             self._append_log(f"[launcher] session ended ({job.status}).")
         if job.status == "Done" and self._on_job_done is not None:
             self._on_job_done(job)
+        self._notify_job_ended(job)
+
+    def _notify_job_ended(self, job: Job) -> None:
+        """Mail the configured address, if there is one. Never raises --
+        a background job that has already finished must not be reported as
+        broken because the mail system is."""
+        try:
+            from midas_gui import settings
+            address = settings.get_notify_email()
+        except Exception:
+            return
+        if not address:
+            return
+        ok = send_job_notification(job, address)
+        self._append_log(
+            f"[launcher] notification sent to {address}" if ok else
+            f"[launcher] could not send the notification to {address} "
+            f"(the job itself is unaffected)")
 
     def _parse_exit_from_logfile(self, logfile: str) -> Optional[int]:
         if not logfile or not os.path.isfile(logfile):

@@ -13,7 +13,8 @@ Prints two kinds of structured lines to stdout, unbuffered:
                                           command after this process exits,
                                           not by this module itself.
 
-On success, also writes ``_bg_job_results.npz`` into ``--out-dir`` — the
+With ``--results-sidecar``, also writes ``_bg_job_results.npz`` into
+``--out-dir`` — the
 arrays ``BatchTab._populate_plots_from_attempt`` needs to fill the
 Waterfall/Stacked-profiles/Eta-R cakes tabs. This process has no Qt signals
 reaching the GUI that launched it (it's a detached `screen` session), and
@@ -45,6 +46,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--eta-bin", type=float, default=5.0, help="eta bin size (deg)")
     p.add_argument("--r-min", type=float, default=None, help="Rmin (px); default backend auto")
     p.add_argument("--r-max", type=float, default=None, help="Rmax (px); default backend auto")
+    # Azimuthal wedge. The single-detector tab integrates the full circle and
+    # never passes these, but a Hydra panel covers one wedge of it (ge1 at
+    # 1-ID-E straddles the +/-180 branch cut), and that range is per panel --
+    # it is the one piece of a panel's caking with no flag until now, so a
+    # background Hydra job that omitted it silently integrated all 360 deg.
+    p.add_argument("--eta-min", type=float, default=None,
+                   help="Low edge of the azimuthal range (deg); default full circle")
+    p.add_argument("--eta-max", type=float, default=None,
+                   help="High edge of the azimuthal range (deg); default full circle")
 
     # Output rebin (Batch Integrate's "Bin type"). The integration grid is
     # always R-uniform -- these resample the finished 1-D profile onto a
@@ -83,6 +93,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     # selected into one frame, 1 (default) = no combining.
     p.add_argument("--frame-start", type=int, default=None)
     p.add_argument("--frame-end", type=int, default=None)
+    # A SECOND, different range, and deliberately so: the three above filter
+    # the SOURCE by file/scan number before it is opened, while these subset
+    # the stream of output frames the source yields (BatchWorker's
+    # `frame_range`, applied with a stride). The Hydra page has a Frames
+    # start/end/stride control that means the latter; the single-detector tab
+    # has no such control and never passes these, so it keeps the default
+    # (0, None, 1) = "every frame" it has always had.
+    p.add_argument("--frame-range-start", type=int, default=None,
+                   help="First output frame index to keep (default 0)")
+    p.add_argument("--frame-range-end", type=int, default=None,
+                   help="Stop before this output frame index (default: no limit)")
+    p.add_argument("--frame-range-stride", type=int, default=None,
+                   help="Keep every Nth output frame (default 1)")
     p.add_argument("--chunk-size", type=int, default=1)
     p.add_argument("--combine-op", default="mean",
                    choices=["mean", "sum", "max", "median"])
@@ -140,6 +163,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--monitor-file", default=None,
                    help="Text file, one monitor value per line")
+
+    # Off by default. It is a GUI artefact -- the arrays the Background jobs
+    # panel's "Load results" button needs -- and useless to anyone running
+    # this CLI directly. More to the point, JobQueuePanel records ONE out_dir
+    # per job (the first step's), so in a chained multi-folder job only that
+    # step's sidecar is ever reachable: a 196-folder sweep wrote 196 of them,
+    # 826 MB, of which 195 could not be opened from the UI at all. The GUI
+    # now passes this for the first step only.
+    p.add_argument("--results-sidecar", action="store_true",
+                   help="Write _bg_job_results.npz into --out-dir for the "
+                        "GUI's 'Load results' button (default: off)")
     return p
 
 
@@ -264,7 +298,8 @@ def main(argv=None) -> int:
     from midas_gui.workers import BatchWorker
 
     spec = spec_from_geometry_file(args.calib_file, args.r_bin, args.eta_bin,
-                                   r_min=args.r_min, r_max=args.r_max)
+                                   r_min=args.r_min, r_max=args.r_max,
+                                   eta_min=args.eta_min, eta_max=args.eta_max)
     # (None, True, path) is the "file-only, no live CalibrationResult" call
     # pattern full_calibration_snapshot already supports (it builds a
     # duck-typed result via helpers.result_ns_from_geometry_file itself).
@@ -279,15 +314,22 @@ def main(argv=None) -> int:
     fmts = [f.strip() for f in args.fmts.split(",") if f.strip()]
     corrections = _build_corrections(args)
     variance_cfg = {"error_model": args.error_model} if args.variance else None
-    # No frame_range kwarg: start/end/chunk_size filtering is baked into
-    # src_cfg itself (see _source_cfg) and applied by workers._open_source_cfg
-    # before the source is opened — BatchWorker defaults frame_range to
+    # --frame-start/--frame-end/--chunk-size filtering is baked into src_cfg
+    # itself (see _source_cfg) and applied by workers._open_source_cfg before
+    # the source is opened. The separate --frame-range-* trio subsets what the
+    # source then yields; left unset it stays BatchWorker's own default of
     # (0, None, 1), i.e. "process everything the source yields."
+    frame_range = None
+    if (args.frame_range_start is not None or args.frame_range_end is not None
+            or args.frame_range_stride is not None):
+        frame_range = (int(args.frame_range_start or 0),
+                       args.frame_range_end,
+                       max(1, int(args.frame_range_stride or 1)))
 
     worker = BatchWorker(
         spec, src_cfg, mask, args.out_dir, fmts, args.kernel,
         corrections, variance_cfg,
-        monitor_file=args.monitor_file,
+        frame_range=frame_range, monitor_file=args.monitor_file,
         dark=dark, bright=bright, background=background, bright_mode=args.bright_mode,
         weighted=args.weighted, multi_azimuth=args.multi_azimuth,
         q_cfg=_rebin_cfg(args), omega_cfg=_omega_cfg(args),
@@ -311,7 +353,7 @@ def main(argv=None) -> int:
         n = data.get("n", 0)
         out = data.get("out_paths") or []
         print(f"[batch] FINISHED n={n} out_paths={len(out)}", flush=True)
-        if not data.get("aborted") and exit_code[0] == 0:
+        if args.results_sidecar and not data.get("aborted") and exit_code[0] == 0:
             try:
                 _write_results_sidecar(args.out_dir, data)
             except Exception as e:

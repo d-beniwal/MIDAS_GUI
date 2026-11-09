@@ -17,6 +17,7 @@ numbers), used only until a real per-panel calibration file is loaded.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -28,6 +29,27 @@ from midas_gui.helpers import (_load_image, _apply_im_trans, geometry_fields_fro
                          apply_field_corrections)
 
 _GEOMETRY_DIR = Path(__file__).parent / "hydra_default_geometry"
+
+
+#: Decimation factor for a composite built for DISPLAY.
+#:
+#: The windmill canvas for a real four-panel GE array is 6656x6656 -- 44.3
+#: megapixels, several times any screen, rebuilt synchronously on the GUI
+#: thread. Building it every second pixel costs a quarter of the work
+#: (remap 2.09 s -> ~0.5 s, composite max 1.61 s -> ~0.4 s, autolevel
+#: 0.49 s -> ~0.12 s) for an image still larger than the widget showing it.
+#:
+#: Shared by the Data Viewer's Hydra page and Batch Integrate's.
+#:
+#: This is display resolution only, and it is NOT a shortcut taken behind a
+#: measurement's back: the "Composite" radial curve sums the per-panel
+#: profiles rather than integrating this image (see _refresh_composite_curve),
+#: and Calibrate imports per-panel geometries, not this canvas (see
+#: export_for_calibration). What does read it -- the composite card's own
+#: overlays and radial integration -- is kept correct by scaling that card's
+#: pixel size, beam centre and NrPixels to match, in
+#: _reseed_composite_card_if_needed. Set to 1 for a full-resolution canvas.
+COMPOSITE_DISPLAY_STEP = 2
 
 
 def default_param_file(panel: int) -> Path:
@@ -77,6 +99,60 @@ def compute_inv_coords(bc_y: float, bc_z: float, tx_deg: float,
     y_pix = bc_y - Y_det / px
     z_pix = bc_z + Z_det / px
     return z_pix.astype(np.float32), y_pix.astype(np.float32)
+
+
+#: ``ge<n>`` anywhere in a path. Panel calibrations are written as a set and
+#: named alike, so one file names its siblings.
+PANEL_IN_NAME = re.compile(r"ge\s*([1-4])\b", re.IGNORECASE)
+
+
+def panel_for_file(path) -> Optional[int]:
+    """Which panel a file belongs to, or ``None``.
+
+    Read from the LAST ``ge<n>`` in the full path, so a per-panel folder
+    (``.../ge3/calib.txt``) and a per-panel filename (``..._ge3.instr.txt``)
+    both work, and a run folder that happens to contain "ge1" does not
+    out-vote the file's own name.
+    """
+    hits = PANEL_IN_NAME.findall(str(path))
+    return int(hits[-1]) if hits else None
+
+
+def sibling_for_panel(path, n: int) -> Optional[str]:
+    """``path`` with its panel token rewritten to ``n``, or ``None`` if it
+    carries no token (or already is that panel's).
+
+    Every occurrence is rewritten, not just the last, so a layout that puts
+    the panel in BOTH the folder and the filename
+    (``.../ge3/scan_ge3.instr.txt``) comes out consistent.
+
+    Says nothing about whether the result exists; callers check, because a
+    name that can be formed and a file that is there are different claims.
+    """
+    out = PANEL_IN_NAME.sub(
+        lambda m, _n=n: m.group(0)[:-len(m.group(1))] + str(_n), str(path))
+    return None if out == str(path) else out
+
+
+def split_by_panel(paths) -> dict:
+    """``{panel: [paths]}`` for one source folder's files.
+
+    A Hydra batch is a FOLDER, not a file: every ge1 file in it is a frame
+    of the same scan, and the four panels are four parallel frame lists.
+    Files with no ge token are ignored; they cannot belong to a panel.
+
+    This replaced a per-FILE grouping that treated each ge1/ge2/ge3/ge4
+    quartet as its own scan. On a load step holding thirteen frame files
+    that produced thirteen output directories where one was wanted -- and
+    the names, disambiguated against each other, came out as
+    ``APS_4130_C_load_step_0_APS_4130_C_load_step_0_APS_4130_C_load_step_0_004057.ge1``.
+    """
+    out: dict = {}
+    for p in sorted(str(x) for x in (paths or ())):
+        n = panel_for_file(p)
+        if n is not None:
+            out.setdefault(n, []).append(p)
+    return out
 
 
 def inv_coord_base(tx_deg: float, big_det_size: int, px: float, step: int = 1):
@@ -149,6 +225,32 @@ def load_full_stack(path: str, dataset: str) -> np.ndarray:
     import h5py
     with h5py.File(str(path), "r") as f:
         return np.asarray(f[dataset][()], dtype=np.float32)
+
+
+def iter_stack_batches(path: str, dataset: str, start: int = 0, end=None,
+                       batch_size=None):
+    """Memory-bounded batched read of one Hydra panel's HDF5 stack —
+    ``load_full_stack``'s streaming counterpart, for ``workers.
+    ProjectionWorker`` via ``helpers.reduce_frames_batched``. Opens the file
+    once and slices ``dataset[lo:hi]`` per batch instead of reading the whole
+    stack into memory."""
+    import h5py
+    with h5py.File(str(path), "r") as f:
+        dset = f[dataset]
+        n = int(dset.shape[0]) if dset.ndim >= 3 else 1
+        end = n if end is None else min(end, n)
+        start = max(0, start)
+        if start >= end:
+            return
+        if batch_size is None:
+            frame_nbytes = dset.dtype.itemsize * dset.shape[-1] * dset.shape[-2]
+            batch_size = max(8, min(256, (256 * 1024 * 1024) // max(1, frame_nbytes)))
+        if dset.ndim < 3:
+            yield np.asarray(dset[...], dtype=np.float32)[None, ...]
+            return
+        for lo in range(start, end, batch_size):
+            hi = min(lo + batch_size, end)
+            yield np.asarray(dset[lo:hi], dtype=np.float32)
 
 
 def remap_to_composite(image: np.ndarray, row_coords: np.ndarray,

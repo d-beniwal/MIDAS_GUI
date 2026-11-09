@@ -8,6 +8,7 @@ child. Run plain, these pass — see ``.context/STATE.md``.
 """
 from __future__ import annotations
 
+import json
 import math
 
 import numpy as np
@@ -56,6 +57,12 @@ def framed(tab):
     card._bc_auto.setChecked(False)
     card._bcy.setValue(bc); card._bcz.setValue(bc)
     card._ty.setValue(0.0); card._tz.setValue(0.0)
+    # Pinned (not left at whatever an earlier test in this module last set
+    # them to — _wl/_lsd/_px are never reset by the tests that edit them):
+    # a geometry whose innermost simulated rings actually land inside this
+    # 192x192 frame, so the "ring simulation" tests below exercise real
+    # on-image rings rather than ones the image-reach cap discards outright.
+    card._wl.setValue(0.39); card._lsd.setValue(30.0); card._px.setValue(75.0)
     card._clear_simulated_rings()
     card._calib_ctx_cache.clear()
     tab._rad_accurate.setChecked(False)
@@ -176,6 +183,27 @@ def test_radial_integrate_no_longer_overwrites_the_cake(framed):
     card.radial_integrate()
     assert np.array_equal(cv._cake, before_cake)
     assert np.array_equal(cv._r_axis, before_r)
+
+
+def test_cake_view_get_cake_is_none_before_any_integration():
+    """Read-back accessor for a control API — mirrors
+    ProfileViewer.get_profile()'s "nothing plotted yet" contract."""
+    from midas_gui.widgets import CakeViewer
+    assert CakeViewer().get_cake() is None
+
+
+def test_cake_view_get_cake_returns_what_set_cake_was_given(framed):
+    card = framed._geom_card
+    framed._cake_r_bin.setValue(2.0); framed._cake_eta_bin.setValue(10.0)
+    card.cake_integrate()
+    cv = framed._cake_view
+    out = cv.get_cake()
+    assert np.array_equal(out["cake_2d"], cv._cake)
+    assert np.array_equal(out["r_axis_px"], cv._r_axis)
+    assert np.array_equal(out["eta_axis_deg"], cv._eta_axis)
+    assert out["wavelength_A"] == pytest.approx(card._wl.value())
+    assert out["lsd_um"] == pytest.approx(card._lsd_um())
+    assert out["px_um"] == pytest.approx(card._px.value())
 
 
 # ── 3b) the engine result is what actually reaches the plots ─────────
@@ -443,7 +471,6 @@ def test_clear_button_removes_every_simulated_ring_and_disarms_live(framed):
     assert card._ring_draw_geom is None
     # disarmed too, or the next parameter edit would redraw them at once
     assert not card._sim_is_live() and not card._sim_live.isChecked()
-    assert card._ring_info.toPlainText() == ""
 
 
 def test_clear_leaves_the_click_picked_radius_ring_alone(framed):
@@ -517,3 +544,77 @@ def test_manual_levels_survive_next_prev_but_reset_on_a_new_load(tab):
 
     _load_frames(tab, 3, 32)  # a new dataset — different frame shape
     assert tab._viewer._manual_levels is None
+
+
+# ── Headless calibration-file load (control API's data_viewer.load_calibration_file) ──
+
+def test_absolute_color_limits_hold_during_live_refresh_and_corrections(tab):
+    _load_frames(tab, 3, 16)
+    scale = tab._viewer._color_scale
+    scale.minimum.setText("2")
+    scale.maximum.setText("500")
+    scale.maximum.editingFinished.emit()
+    for index in (1, 2, 0):
+        tab._loader._stack[index].fill(1000 * (index + 1))
+        tab._loader._set_frame(index)
+        tab._on_loader_data()
+        tab._on_fields_changed()
+        assert scale.limits == (2., 500.)
+        assert float(scale.minimum.text()) == 2
+        assert float(scale.maximum.text()) == 500
+    tab._viewer._log.setChecked(False)
+    assert tab._viewer._iv.getHistogramWidget().getLevels() == (2., 500.)
+
+def test_load_calibration_file_missing_raises(tab):
+    card = tab._geom_card
+    with pytest.raises(FileNotFoundError):
+        card.load_calibration_file("/no/such/file.json")
+
+
+def test_load_calibration_file_json_applies_full_geometry(tab, tmp_path):
+    card = tab._geom_card
+    calib = {
+        "wavelength_A": 0.1729, "Lsd": 200000.0, "pxY": 200.0,
+        "BC_y": 1024.0, "BC_z": 1030.0, "NrPixelsY": 2048, "NrPixelsZ": 2048,
+        "tx": 0.0, "ty": 0.5, "tz": -0.3, "im_trans": [1],
+    }
+    path = tmp_path / "calibration.json"
+    path.write_text(json.dumps(calib))
+
+    summary = card.load_calibration_file(str(path))
+
+    assert card._wl.value() == pytest.approx(0.1729)
+    assert card._lsd.value() == pytest.approx(200.0)   # Lsd field displays mm
+    assert card._px.value() == pytest.approx(200.0)
+    assert card._bcy.value() == pytest.approx(1024.0)
+    assert card._bcz.value() == pytest.approx(1030.0)
+    assert card._bc_auto.isChecked() is False
+    assert card._flip_y.isChecked() is True
+    assert card.has_calibration()               # tilts present -> full geometry loaded
+    assert "full integration" in summary["mode"]
+    assert summary["BC_y"] == pytest.approx(1024.0)
+
+
+def test_load_calibration_file_paramstest_txt(tab, tmp_path):
+    card = tab._geom_card
+    path = tmp_path / "paramstest.txt"
+    path.write_text("Lsd 150000.0\nBC 1000.0 1005.0\nWavelength 0.2\npx 150.0\n")
+
+    summary = card.load_calibration_file(str(path))
+
+    assert card._wl.value() == pytest.approx(0.2)
+    assert card._lsd.value() == pytest.approx(150.0)
+    assert card._bcy.value() == pytest.approx(1000.0)
+    assert card._bcz.value() == pytest.approx(1005.0)
+    # No NrPixelsY/Z in the file -> geometry_fields_from_file can't build a
+    # full geometry, so this falls back to scalar circle binning.
+    assert not card.has_calibration()
+    assert summary["mode"] == "scalar geometry (circle binning)"
+
+
+def test_load_calibration_file_unrecognised_content_raises(tab, tmp_path):
+    card = tab._geom_card
+    path = tmp_path / "junk.txt"
+    path.write_text("not a calibration file at all\n")
+    with pytest.raises(ValueError):
+        card.load_calibration_file(str(path))

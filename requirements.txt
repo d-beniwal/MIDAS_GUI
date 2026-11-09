@@ -37,6 +37,15 @@ matplotlib==3.8.4             # supplies pyqtgraph's named colormaps (hot/viridi
 torch==2.4.0
 numba==0.59.1                 # NumPy-1.x compatible JIT (pin: newer numba needs NumPy>=2.1)
 
+# VTK/PyVista — GPU-backed 3-D rendering for Solve Cell's detector/reciprocal
+# views (2026-10-23, `pyvista` branch), replacing an earlier VisPy attempt
+# that segfaulted under QT_QPA_PLATFORM=offscreen. Self-contained wheels, no
+# numpy/torch/numba pin conflict.
+vtk==9.7.1
+pyvista==0.49.1
+pyvistaqt==0.13.1
+pyte==0.8.2                    # embedded terminal emulator for the APEXA dock (apexa_terminal.py)
+
 # pvapy backs the Data Viewer's "Live Data" card (subscribes to an EPICS PVA
 # image PV and renders frames straight in the Data Viewer's own image pane).
 # Pinned to 5.4.1, NOT latest: 5.5.0+ requires numpy>=2.0, which would
@@ -84,28 +93,49 @@ pyepics==3.5.10
 # calib.build_v1_params, which sets no ImTransOpt, so spec.im_trans is () and
 # the pipelines leave its arrays alone). Full rationale in pyproject.toml.
 # numpy 1.26.4 / torch 2.4.0 / numba 0.59.1 / zarr<3 all unchanged.
-midas-calibrate-v2==0.22.0
-midas-integrate-v2==0.7.1
-midas-calibrate==0.5.0
-midas-hkls==0.15.0
+#
+# 2026-10-22: this block had drifted from the real `midas-gui` conda env --
+# ad hoc `pip install --upgrade` of individual packages (done while chasing
+# the perf_solve_cell/Solve-Cell work) had moved the env ahead of these pins
+# without this file being updated, so `pip install -r requirements.txt` no
+# longer reproduced what was actually installed. Re-pinned every MIDAS
+# package here to the version importlib.metadata reports in the real env
+# (calibrate-v2 0.22.0->0.24.0, integrate-v2 0.7.1->0.9.0, calibrate
+# 0.5.0->0.6.0, hkls 0.15.0->0.16.0, pdf 0.3.0->0.4.0, integrate 0.8.0->0.9.0,
+# peakfit 0.6.0->0.8.0, zipper 0.2.1->0.4.0, params 0.12.0->0.14.0, saxs
+# 0.1.2->0.2.0, transforms 0.10.0->0.12.0, stress 0.14.1->0.15.0, diffract
+# 0.9.0->0.10.0; distortion/defect/ddd/index/invert were already current).
+# Checked every changed package's requires-dist via `pip show`/
+# importlib.metadata against the pins above: all numpy/torch/numba floors
+# (numpy>=1.22, torch>=2.0 or >=2.1, numba>=0.57/0.59 where present) are
+# already satisfied by numpy==1.26.4 / torch==2.4.0 / numba==0.59.1, so no
+# further compatibility work was needed -- this is a reproducibility fix,
+# not a functional upgrade. pyproject.toml and environment.yml still carry
+# the old pins (and, for pyproject.toml, are also missing the Solve Cell
+# block entirely) -- not touched here; flagged separately rather than
+# assumed in scope.
+midas-calibrate-v2==0.24.0
+midas-integrate-v2==0.9.0
+midas-calibrate==0.6.0
+midas-hkls==0.16.0
 midas-distortion==0.2.0
-midas-pdf==0.3.0                # Faber-Ziman PDF reduction used by the PDF tab
+midas-pdf==0.4.0                # Faber-Ziman PDF reduction used by the PDF tab
 
 # ── Transitive MIDAS deps pinned explicitly (pulled in by midas-calibrate-v2 /
 #    midas-pdf but not imported by midas_gui directly) — pinned for
 #    reproducible, verified-working installs rather than leaving them to float ─
-midas-integrate==0.8.0
-midas-peakfit==0.6.0
-midas-zipper==0.2.1
-midas-params==0.12.0            # new shared params-file registry/validator dep, first
+midas-integrate==0.9.0
+midas-peakfit==0.8.0
+midas-zipper==0.4.0
+midas-params==0.14.0            # new shared params-file registry/validator dep, first
                                  # required (>=0.9.0) by midas-calibrate/-v2, midas-hkls,
                                  # midas-integrate-v2 and midas-pdf as of this pin bump
 # Transitive chain introduced by midas-pdf 0.3.0: midas-saxs>=0.1.0 ->
 # midas-transforms>=0.10.0 -> midas-stress>=0.11.0. Not imported by midas_gui
 # directly; pinned for the same reproducibility reason as the rest of the block.
-midas-saxs==0.1.2
-midas-transforms==0.10.0
-midas-stress==0.14.1
+midas-saxs==0.2.0
+midas-transforms==0.12.0
+midas-stress==0.15.0
 zarr==2.18.7                    # required by midas-integrate/-peakfit/-zipper; was already
                                  # pulled in transitively before this pin bump (unpinned), so
                                  # this just makes an existing dependency explicit
@@ -113,3 +143,40 @@ numcodecs==0.15.1                # zarr's codec backend; same "already transitiv
                                   # explicit" situation as zarr above
 hdf5plugin==7.0.0
 psutil==7.2.2
+
+# ── Solve Cell tab backend (2026-10-04) ─────────────────────────────────────
+# midas-defect: raw-frame ingest (background subtraction, 3-D blob finding)
+# and detector forward/inverse geometry (pixel<->qlab<->qsample). Its own
+# pyproject.toml floor for midas-hkls is >=0.15.0 -- satisfied by the
+# midas-hkls pin above (originally left at 0.15.0 on purpose, since every
+# function the Solve Cell tab calls -- index_ab_initio, refine_ub_from_gvectors,
+# holohedry_from_fit, to_conventional -- was confirmed present and working
+# there; the pin was later bumped to 0.16.0 regardless by the 2026-10-22
+# drift fix above, which re-pinned it to match the real env). No numba
+# dependency at all (confirmed via pyproject.toml + source grep), and its
+# numpy>=1.20/torch>=2.0 floors are already satisfied by the pins above.
+#
+# 2026-10-22: bumped 0.9.0 -> 0.9.1 and required a build from MIDAS's
+# `perf_solve_cell` branch (not yet a numbered release off master) --
+# `pipeline.py`'s `_stage_ingest` now passes `max_workers` to
+# `choose_sectors`/`find_blobs_3d`, which only `perf_solve_cell`'s
+# `midas_defect.ingest` accepts; master's (also version 0.9.1 -- the branch
+# did not bump its own version number) raises TypeError. Benchmarked
+# 4.35x/9.42x faster at max_workers=1/12 on a real 642-frame panel,
+# byte-identical spots_g.csv/ingest_summary.json at every setting -- see
+# .context/DECISIONS.md 2026-10-22. Package-side follow-up: ask MIDAS
+# maintainers to bump midas-defect's own version when this branch merges, so
+# a bare version pin can distinguish it from master again.
+midas-defect==0.9.1
+# midas-defect's own direct dependencies (pulled in transitively) -- pinned
+# explicitly for the same reproducibility reason as the block above.
+midas-ddd==0.1.2
+midas-diffract==0.10.0
+midas-index==0.10.0
+midas-invert==0.2.0
+# Was previously unpinned/floating in this repo (no prior pandas line here or
+# in environment.yml) -- installing midas-defect pulled latest (3.0.6) with
+# no regressions found against this repo's own test suite (pandas-touching
+# subset + full test_smoke.py, several runs). Pinned explicitly now rather
+# than left to float, matching every other dependency in this file.
+pandas==3.0.6

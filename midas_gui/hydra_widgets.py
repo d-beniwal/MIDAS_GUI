@@ -19,9 +19,11 @@ import pyqtgraph as pg
 
 from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollComboBox, _fspin, hydra_siblings,
                          hydra_panel_index, is_h5, list_h5_datasets, source_kind,
-                         detect_geometry_from_path, warn_if_path_missing)
+                         detect_geometry_from_path, warn_if_path_missing,
+                         best_default_dataset_index)
 from midas_gui.workers import FieldAverageWorker, ProjectionWorker
 from midas_gui import hydra
+from midas_gui.hydra import panel_for_file
 from midas_gui import style as S
 from midas_gui.dialogs import BrowseFilesDialog
 from midas_gui.widgets import _convert_radial, _XUNIT_LABEL, MaskSelector, _fmt_source_desc
@@ -141,11 +143,12 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
     fieldsReady = QtCore.pyqtSignal()
 
     def __init__(self, title, parent=None, *, with_mode=False, with_scale=False,
-                 default_dataset="exchange/data"):
+                 default_dataset="exchange/data", prefer_most_frames=False):
         super().__init__(title, parent)
         self.setCheckable(True)
         self.setChecked(False)
         self._default_dataset = default_dataset
+        self._prefer_most_frames = prefer_most_frames
         self._fields: dict = {}          # panel -> np.ndarray
         self._sibling_paths: dict = {}   # panel -> path
         self._workers: dict = {}         # panel -> FieldAverageWorker (kept alive)
@@ -205,7 +208,7 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
         self._end = _NoScrollSpinBox(); self._end.setRange(0, 0); self._end.setFixedWidth(50)
         self._end.setToolTip("Last frame index in the mean (inclusive), applied to every panel.")
         self._nfr_lbl = QtWidgets.QLabel("")
-        self._nfr_lbl.setStyleSheet("color:#9a9a9a;font-size:10px")
+        self._nfr_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         ir = QtWidgets.QHBoxLayout(); ir.setSpacing(4)
         ir.addWidget(QtWidgets.QLabel("mean")); ir.addWidget(self._start)
         ir.addWidget(QtWidgets.QLabel("–")); ir.addWidget(self._end)
@@ -232,7 +235,7 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
         self._compute_btn.clicked.connect(self._compute_all)
         v.addWidget(self._compute_btn)
         self._status = QtWidgets.QLabel("Not computed.")
-        self._status.setStyleSheet("color:#9a9a9a;font-size:10px"); self._status.setWordWrap(True)
+        self._status.setStyleSheet(f"color:{S.MUTED};font-size:10px"); self._status.setWordWrap(True)
         v.addWidget(self._status)
 
     @staticmethod
@@ -247,12 +250,88 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
     def _dataset(self) -> str:
         return self._ds_combo.currentText().split("   ")[0].strip() or self._default_dataset
 
+    def get_state(self) -> dict:
+        """Everything needed to put this field back, mirroring
+        ``widgets.FieldSelector.get_state``.
+
+        The Hydra loader saved the frame range, the masks and the panel
+        ticks and NOT this, so a project reopened with Dark ticked and a
+        file chosen came back with neither -- reported as "dark file
+        settings are not getting saved in the integrator". The computed
+        field itself is not saved: it is four arrays derived from a file
+        that is still on disk, so it is recomputed on restore.
+        """
+        st = {
+            "checked": self.isChecked(),
+            "path": self._path_ed.text(),
+            # `is not None`, NOT truthiness: PyQt5's QComboBox implements
+            # __len__, so a combo with no items yet is FALSY and the plain
+            # `if self._ds_combo` dropped the dataset on exactly the case
+            # that matters -- a path whose datasets have not been probed.
+            "dataset": (self._ds_combo.currentText()
+                        if self._ds_combo is not None else ""),
+            "start": self._start.value(),
+            "end": self._end.value(),
+        }
+        if self._mode_combo is not None:
+            st["mode"] = self._mode_combo.currentIndex()
+        if self._scale is not None:
+            st["scale"] = self._scale.value()
+        return st
+
+    def set_state(self, state: dict) -> None:
+        """Restore and, if it was on, recompute -- the same "re-trigger the
+        tab's own pipeline" rule the single-detector selector follows. A
+        checkbox that comes back ticked over an uncomputed field would claim
+        a correction that is not being applied."""
+        if not state:
+            return
+        path = (state.get("path") or "").strip()
+        if path:
+            self._set_path(path)
+        ds = state.get("dataset")
+        if ds and self._ds_combo is not None:
+            self._ds_combo.setEditText(ds)
+        # Widen before setting: the range caps come from probing the file,
+        # which may not have been possible yet, and a saved value silently
+        # clamped to 0 would quietly average the wrong frames.
+        hi = max(self._start.maximum(), int(state.get("start", 0) or 0),
+                 int(state.get("end", 0) or 0))
+        self._start.setMaximum(hi)
+        self._end.setMaximum(hi)
+        if "start" in state:
+            self._start.setValue(int(state["start"]))
+        if "end" in state:
+            self._end.setValue(int(state["end"]))
+        if self._mode_combo is not None and "mode" in state:
+            self._mode_combo.setCurrentIndex(int(state["mode"]))
+        if self._scale is not None and "scale" in state:
+            self._scale.setValue(float(state["scale"]))
+        self.setChecked(bool(state.get("checked", False)))
+        if self.isChecked() and path:
+            self._compute_all()
+
     def set_data_path_provider(self, fn):
         """`fn()` returns the owning panel's current Data path (str). Used to
         prefill this field the first time it's checked, and as the Browse…
         dialog's starting folder while this field has no path of its own —
         mirrors ``widgets.FieldSelector.set_data_path_provider``."""
         self._data_path_provider = fn
+
+    def _is_data_path(self, p: str) -> bool:
+        """Mirrors ``widgets.FieldSelector._is_data_path``: is *p* the same
+        file as the owning panel's current Data path?"""
+        if self._data_path_provider is None:
+            return False
+        data_path = self._data_path_provider() or ""
+        if not data_path:
+            return False
+        import os
+        try:
+            return os.path.normpath(os.path.abspath(p)) == \
+                os.path.normpath(os.path.abspath(data_path))
+        except Exception:
+            return False
 
     def _prefill_from_data(self, checked: bool):
         """On first check, default this field to the same file/folder as
@@ -355,7 +434,8 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
                 idx = next((i for i in range(self._ds_combo.count())
                             if self._ds_combo.itemData(i) == keep), -1)
                 if idx < 0:
-                    idx = next((i for i, (n, s) in enumerate(items) if len(s) >= 3), 0)
+                    prefer_max = self._prefer_most_frames and not self._is_data_path(path)
+                    idx = best_default_dataset_index(items, prefer_max)
                 self._ds_combo.setCurrentIndex(idx)
                 self._ds_combo.blockSignals(False)
         self._update_frame_limit()
@@ -541,6 +621,8 @@ class HydraLoaderPanel(QtWidgets.QWidget):
     def __init__(self, parent=None, *, mode="nav"):
         super().__init__(parent)
         self._mode = mode
+        self._pick_origin = None    # how the data was PICKED — see pick_origin()
+        self._pick_root = None      # the folder a traversal started from
         self._siblings: dict = {}
         self._detected: dict = {}        # last auto-detected pxY/wavelength_A (nav mode only)
         self._n_frames = 1
@@ -577,6 +659,15 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         browse.setMenu(menu)
         row.addWidget(browse)
         card.body.addLayout(row)
+        # Says so when the pick was a TREE rather than one scan. The path
+        # box can only ever show the anchor, so without this a 23-scan
+        # selection and a 1-scan selection look identical.
+        self._scan_lbl = QtWidgets.QLabel("")
+        self._scan_lbl.setWordWrap(True)
+        self._scan_lbl.setStyleSheet(f"color:{S.INFO};font-size:10px")
+        self._scan_lbl.setVisible(False)
+        card.body.addWidget(self._scan_lbl)
+        self._selection: list = []
 
         # One tick per panel: which GE files make up this Hydra array.
         # Checkboxes rather than a dropdown because the four choices are
@@ -631,10 +722,47 @@ class HydraLoaderPanel(QtWidgets.QWidget):
             self._fr_end.setToolTip("Last frame (exclusive). 0 = all frames.")
             self._fr_stride = _NoScrollSpinBox(); self._fr_stride.setRange(1, 100000)
             self._fr_stride.setValue(1); self._fr_stride.setFixedWidth(64)
+            # Chunking. The single-detector loader has had this since the
+            # beginning and Hydra never did, so a Hydra rotation could only
+            # ever be integrated one raw sub-frame at a time: source_cfg
+            # carried no chunk_size, and OME_SUM out of a cake_parameters
+            # CSV had nowhere to land. Same widget, same meaning, same
+            # mpe_wf key.
+            self._combine_chunk = _NoScrollSpinBox()
+            self._combine_chunk.setRange(0, 999999)
+            self._combine_chunk.setValue(1); self._combine_chunk.setFixedWidth(64)
+            self._combine_chunk.setToolTip(
+                "How many consecutive raw sub-frames make ONE integrated "
+                "frame (mpe_wf's OME_SUM). 1 = no combining.\n\n"
+                "0 = combine every frame in the file into one.\n\n"
+                "Applies to all four panels: they are synchronised frames "
+                "of one scan, so a chunk is a chunk for every panel.")
+            self._combine_op = _NoScrollComboBox()
+            for lbl, key in (("Mean", "mean"), ("Sum", "sum"),
+                             ("Max", "max"), ("Median", "median")):
+                self._combine_op.addItem(lbl, key)
+            self._combine_op.setToolTip(
+                "How the sub-frames in a chunk are reduced to one image.")
+            # Laid out like the single-detector Batch tab's Data card: a
+            # start/end row, a stride row, a rule, then "Combine sub-frames:
+            # [n] op: [Mean]" as one left-aligned row (not a right-aligned
+            # form pair, which pushed the card's minimum width past 500 px).
             sf = S.Form()
             sf.row(("start:", self._fr_start), ("end(0=all):", self._fr_end))
             sf.row(("stride:", self._fr_stride))
             card.body.addLayout(sf)
+            card.body.addWidget(S.hline())
+            cr = QtWidgets.QHBoxLayout(); cr.setSpacing(4)
+            cr.addWidget(QtWidgets.QLabel("Combine sub-frames:"))
+            cr.addWidget(self._combine_chunk)
+            cr.addWidget(QtWidgets.QLabel("op:"))
+            cr.addWidget(self._combine_op)
+            cr.addStretch(1)
+            card.body.addLayout(cr)
+            for w in (self._combine_chunk, self._combine_op):
+                sig = (w.valueChanged if hasattr(w, "valueChanged")
+                       else w.currentIndexChanged)
+                sig.connect(lambda *_: self.fieldsChanged.emit())
 
         self._info_lbl = QtWidgets.QLabel("")
         self._info_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
@@ -645,7 +773,8 @@ class HydraLoaderPanel(QtWidgets.QWidget):
 
         # ── Dark / Bright / Background (sibling-aware, one pick per field) ──
         fld = S.make_card("Dark / Bright / Background")
-        self._dark_sel = HydraFieldSelector("Dark", default_dataset="exchange/data_dark")
+        self._dark_sel = HydraFieldSelector("Dark", default_dataset="exchange/data_dark",
+                                            prefer_most_frames=True)
         self._bright_sel = HydraFieldSelector("Bright", with_mode=True)
         self._bg_sel = HydraFieldSelector("Background", with_scale=True)
         for w in (self._dark_sel, self._bright_sel, self._bg_sel):
@@ -660,7 +789,7 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         if self._mode == "stream":
             mask_card = S.make_card("Mask  (independent per panel)")
             for n in (1, 2, 3, 4):
-                sel = MaskSelector()
+                sel = MaskSelector(compact=True)
                 sel.setTitle(f"ge{n} mask")
                 sel.maskChanged.connect(self.fieldsChanged)
                 self._mask_sels[n] = sel
@@ -747,7 +876,35 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         else:
             extra = "" if sel == found else f"  \u00b7  {sel} selected"
             self._info_lbl.setText(
-                f"Found {found}/4 panels{extra}  \u00b7  {self._n_frames} frame(s)")
+                f"Found {found}/4 panels{extra}  \u00b7  "
+                f"{self._selection_summary()}")
+
+    def _selection_summary(self) -> str:
+        """Frames the RUN will read, not frames in the anchor file.
+
+        ``_n_frames`` is ``hydra.n_frames_in(anchor)`` -- one file's own
+        sub-frame count, which is what drives the frame slider and is the
+        right number for it. As the status line it is wrong the moment a
+        pick covers more than one file per panel: choosing a folder of
+        fourteen 3-frame files reported "3 frame(s)", which reads exactly
+        like the other thirteen were ignored.
+
+        Counted per PANEL, because the four panels are the same frames
+        seen four times; the run integrates each panel over its own files.
+        Unreadable files are skipped rather than failing the label -- a
+        status line must not be the thing that breaks the loader.
+        """
+        mine = [p for p in (getattr(self, "_selection", None) or [])
+                if panel_for_file(p) == panel_for_file(self.current_path())]
+        if len(mine) <= 1:
+            return f"{self._n_frames} frame(s)"
+        total = 0
+        for p in mine:
+            try:
+                total += int(hydra.n_frames_in(p, self.DATASET))
+            except Exception:
+                continue
+        return f"{len(mine)} files  \u00b7  {total} frame(s) per panel"
 
     @staticmethod
     def _status_style(found: bool) -> str:
@@ -760,16 +917,102 @@ class HydraLoaderPanel(QtWidgets.QWidget):
             w.setEnabled(enabled)
 
     def _open_browse_dialog(self):
-        # Single file only — this panel's frame index comes from one anchor
-        # file's own internal frame count (hydra.n_frames_in), not separate
-        # per-frame files, so folder/multi/stem selection doesn't apply.
-        dlg = BrowseFilesDialog(self, title="Select Hydra data", modes=("file",),
+        """Pick one scan, or a tree of them.
+
+        A single Hydra scan is ONE anchor file -- its frames come from that
+        file's own internal count (hydra.n_frames_in), not from separate
+        per-frame files -- which is why this offered "file" and nothing
+        else. But a beamline root is often nothing but per-load-step
+        subfolders, each holding its own ge1-ge4 set, and there was no way
+        to say "all of them": reported as "in hydra mode, I do not get an
+        option to look at all the subfolders like in the case of single
+        panel mode".
+
+        "files" is in the modes purely so the dialog offers "Include
+        subfolders" (it gates the checkbox on a caller that can consume a
+        file list). What comes back flat is regrouped into scans here --
+        four files per scan, not four scans -- and the first becomes the
+        anchor the previews and the dark fields work against.
+        """
+        dlg = BrowseFilesDialog(self, title="Select Hydra data",
+                                modes=("file", "files", "folder"),
                                 start_dir=self._path_ed.text().strip())
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return
-        paths = dlg.paths()
-        if paths:
-            self._set_path(paths[0])
+        paths = list(dlg.paths())
+        if not paths and dlg.mode() == "folder" and not dlg.recursive():
+            paths = sorted(str(p) for p in Path(dlg.folder()).iterdir()
+                           if p.is_file())
+        if not paths:
+            return
+        # Same provenance DataLoaderPanel keeps, for the same reason: a
+        # recursive pick and a hand-picked set arrive here as one flat
+        # list, and the dark a run subtracts depends on which it was.
+        if dlg.mode() == "folder" and dlg.recursive():
+            self._pick_origin, self._pick_root = "folder_recursive", dlg.folder()
+        elif dlg.mode() == "folder":
+            self._pick_origin, self._pick_root = "folder", dlg.folder()
+        elif dlg.mode() == "file":
+            self._pick_origin, self._pick_root = "file", None
+        else:
+            self._pick_origin, self._pick_root = "files", None
+        self.set_selection(paths)
+
+    def set_selection(self, paths) -> None:
+        """Adopt a flat file selection; its first panel file is the anchor.
+
+        Deliberately NOT grouped here. How a selection splits into batches
+        is the <expid>_bc/<froot> convention's question, answered by
+        ``helpers.group_paths_by_output_dir`` -- by SOURCE FOLDER, so one
+        run covers exactly what picking that folder by hand covers, darks
+        included. The loader's job is to say what was picked.
+        """
+        paths = sorted(str(p) for p in (paths or []))
+        self._selection = [p for p in paths if panel_for_file(p) is not None]
+        if not self._selection:
+            self._scan_lbl.setText(""); self._scan_lbl.setVisible(False)
+            return
+        self._set_path(self._selection[0])
+        folders = {str(Path(p).parent) for p in self._selection}
+        if len(folders) > 1:
+            self._scan_lbl.setText(
+                f"{len(self._selection)} files across {len(folders)} folders "
+                f"— each folder is integrated as one scan, to its own output "
+                f"directory. Showing the first.")
+            self._scan_lbl.setVisible(True)
+        else:
+            self._scan_lbl.setText(""); self._scan_lbl.setVisible(False)
+
+    def selected_files(self) -> list:
+        """Every file the run should read, one entry per FILE, ungrouped.
+
+        EXPANDED to siblings. A pick of one ge1 file is still a four-panel
+        scan -- that is the whole premise of Hydra mode, and the loader has
+        always done the expansion. Returning the raw selection instead gave
+        the run a plan containing only ge1, which came out as
+
+            [ge1] no data — skipped
+            [combine] no frame had an archive from every panel
+
+        because the other three were never in it. A recursive pick already
+        contains all four, and re-expanding it is idempotent.
+
+        Narrowed to the TICKED panels, so unticking ge3 means ge3 is not
+        read -- the same contract ``siblings()`` has.
+        """
+        want = set(self.siblings() or {})
+        picked = [p for p in (getattr(self, "_selection", None) or [])]
+        if not picked:
+            picked = sorted((self.siblings() or {}).values())
+        out = set()
+        for p in picked:
+            fam = hydra_siblings(p) or {}
+            if not fam:
+                continue
+            for n, q in fam.items():
+                if not want or n in want:
+                    out.add(str(q))
+        return sorted(out)
 
     # ── cross-tab data sharing (data_bridge.DataSourceRegistry) ─────
     def bind_registry(self, registry, label: str):
@@ -924,7 +1167,8 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         self._proj_workers = {}
         for n, path in self._siblings.items():
             w = ProjectionWorker(
-                lambda p=path: hydra.load_full_stack(p, self.DATASET), method, 0, skip, nframes,
+                lambda s, e, p=path: hydra.iter_stack_batches(p, self.DATASET, s, e),
+                hydra.n_frames_in(path, self.DATASET), method, skip, nframes,
                 dark=self.dark(n), bright=self.bright(n), background=self.background(n),
                 bright_mode=self.bright_mode(), parent=self)
             w.finished.connect(lambda img, info, n=n: self._on_one_projected(n, img, info))
@@ -1019,6 +1263,51 @@ class HydraLoaderPanel(QtWidgets.QWidget):
     def current_path(self) -> str:
         return self._path_ed.text().strip()
 
+    def pick_origin(self) -> str:
+        """How the data was chosen — the same vocabulary
+        ``widgets.DataLoaderPanel.pick_origin`` uses, so ``dark_policy``
+        answers identically for Hydra and the single-detector tabs."""
+        from pathlib import Path as _P
+        if self._pick_origin:
+            return self._pick_origin
+        if len(self._selection) > 1:
+            return "files"
+        if self._selection:
+            return "file"
+        text = self._path_ed.text().strip()
+        try:
+            if text and _P(text).is_dir():
+                return "folder"
+        except OSError:
+            pass
+        return "file"
+
+    def dark_request(self, n: int, *, override=None):
+        """The dark question for ONE panel.
+
+        The panel scoping is the whole point. ``search_root`` is the
+        chosen folder with the panel token substituted, so picking
+        ``expid/ge1`` recursively searches ``expid/ge2`` for ge2's dark --
+        never ``expid/ge1``. Handing every panel the same root is exactly
+        how ge1's dark would end up on ge2 data, and that is the one
+        thing this must not do.
+
+        The explicit path is derived the same way, from the anchor the
+        user entered for whichever panel they happened to pick.
+        """
+        from midas_gui.dark_policy import DarkRequest, substitute_panel
+        sel = self._dark_sel
+        anchor = sel._path_ed.text().strip() or None
+        root = substitute_panel(self._pick_root, n) if self._pick_root else None
+        return DarkRequest(
+            origin=self.pick_origin(),
+            path=((substitute_panel(anchor, n) or anchor) if anchor else None),
+            dataset=(sel._dataset() or "exchange/data_dark"),
+            array=self.dark(n),
+            panel=int(n),
+            override=override,
+            search_root=root)
+
     def dark(self, n: int) -> Optional[np.ndarray]:
         return self._dark_sel.field(n)
 
@@ -1037,9 +1326,30 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         """Streaming source descriptor for ``BatchWorker``, for panel ``n`` —
         mirrors ``widgets.DataLoaderPanel.source_cfg()``."""
         path = self._siblings.get(n, "")
+        chunk = (self._combine_chunk.value()
+                 if hasattr(self, "_combine_chunk") else None)
+        op = (self._combine_op.currentData()
+              if hasattr(self, "_combine_op") else "mean")
+        # `chunk or None` EXACTLY as DataLoaderPanel.source_cfg writes it,
+        # not a mapping of my own: 0 is the "combine everything" sentinel
+        # and reaches _open_source_cfg as None, whose meaning differs
+        # between an HDF5 pick and a TIFF/.ge* one (see the Combine
+        # sub-frames tooltip). Mirroring the verified path is what keeps
+        # Hydra and single-detector chunking the same thing.
         if source_kind(path) == "hdf5":
-            return {"type": "hdf5", "path": path, "dataset": self.DATASET}
-        return {"type": "tiff_glob", "path": path}
+            return {"type": "hdf5", "path": path, "dataset": self.DATASET,
+                    "chunk_size": (chunk or None), "combine_op": op}
+        return {"type": "tiff_glob", "path": path,
+                "chunk_size": (chunk or None), "combine_op": op}
+
+    def combine_chunk(self) -> int:
+        """Raw sub-frames per integrated frame (mpe_wf's OME_SUM)."""
+        return (self._combine_chunk.value()
+                if hasattr(self, "_combine_chunk") else 1)
+
+    def set_combine_chunk(self, n) -> None:
+        if hasattr(self, "_combine_chunk") and n is not None:
+            self._combine_chunk.setValue(int(n))
 
     def frame_range(self) -> tuple:
         """Shared (start, end_or_None, stride) — Hydra panels are
@@ -1063,9 +1373,20 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         return {
             "fr_start": self._fr_start.value(), "fr_end": self._fr_end.value(),
             "fr_stride": self._fr_stride.value(),
+            "combine_chunk": self._combine_chunk.value(),
+            # The KEY ("mean"/"sum"/...), not the index: an index is
+            # meaningless if the item order ever changes, and the single-
+            # detector tab already stores this key under the same name --
+            # so a state written by either side must be readable by both.
+            "combine_op": self._combine_op.currentData(),
             "masks": {n: sel.get_state() for n, sel in self._mask_sels.items()},
             "panels": sorted(n for n, cb in self._status_lbls.items()
                              if cb.isChecked()),
+            # Dark / bright / background were simply absent here, so they
+            # were not in any project or session this page ever saved.
+            "fields": {k: sel.get_state() for k, sel in
+                       (("dark", self._dark_sel), ("bright", self._bright_sel),
+                        ("background", self._bg_sel))},
         }
 
     def set_state(self, state: dict):
@@ -1077,10 +1398,31 @@ class HydraLoaderPanel(QtWidgets.QWidget):
             self._fr_end.setValue(int(state["fr_end"]))
         if "fr_stride" in state:
             self._fr_stride.setValue(int(state["fr_stride"]))
+        if "combine_chunk" in state:
+            self._combine_chunk.setValue(int(state["combine_chunk"]))
+        if "combine_op" in state:
+            # Accepts the key OR a legacy index. A project written before
+            # this stored an index, and the single-detector tab's state --
+            # which reaches here through a shared integrate attempt --
+            # stores the key, so int() on it raised
+            # ValueError: invalid literal for int() with base 10: 'mean'
+            # and took the whole "populate from project" down with it.
+            want = state["combine_op"]
+            idx = self._combine_op.findData(str(want))
+            if idx < 0:
+                try:
+                    idx = int(want)
+                except (TypeError, ValueError):
+                    idx = -1
+            if 0 <= idx < self._combine_op.count():
+                self._combine_op.setCurrentIndex(idx)
         for n_key, mstate in (state.get("masks") or {}).items():
             sel = self._mask_sels.get(int(n_key))
             if sel is not None:
                 sel.set_state(mstate)
+        for key, sel in (("dark", self._dark_sel), ("bright", self._bright_sel),
+                         ("background", self._bg_sel)):
+            sel.set_state((state.get("fields") or {}).get(key))
         # Panel selection. This can only ever NARROW what the current path
         # actually has: a saved tick for a panel not on disk must not
         # re-enable a box no file can back, so the found set still gates it.
@@ -1168,6 +1510,26 @@ _HYDRA_CURVE_COLORS = {
 _HYDRA_CURVE_KEYS = ("ge1", "ge2", "ge3", "ge4", "composite")
 
 
+def panel_color(panel) -> str:
+    """This panel's colour, as a hex string. Accepts ``"ge3"``, ``3`` or
+    ``"composite"``.
+
+    Public accessor for :data:`_HYDRA_CURVE_COLORS` so that a panel is the
+    same colour everywhere it appears -- its radial curve, its checkbox, and
+    (since caking became per panel) its caking overlay. Four overlays drawn
+    on one composite canvas are only readable if the colour that says "this
+    is ge3" is the colour ge3 already has in the plot beside it; a second
+    palette invented for the overlay would drift from this one the first
+    time either changed.
+
+    Unknown keys fall back to the composite's near-white rather than
+    raising: a missing colour must not be what stops an overlay drawing.
+    """
+    if isinstance(panel, int):
+        panel = f"ge{panel}"
+    return _HYDRA_CURVE_COLORS.get(str(panel), _HYDRA_CURVE_COLORS["composite"])
+
+
 class HydraProfileViewer(QtWidgets.QWidget):
     """Radial-integration plot for Hydra mode: one independently-computed
     curve per panel (ge1-4), each converted from its own native R-pixel
@@ -1227,7 +1589,7 @@ class HydraProfileViewer(QtWidgets.QWidget):
         self._toolbar_layout = bar
         layout.addLayout(bar)
 
-        self._plot = pg.PlotWidget(background="k")
+        self._plot = pg.PlotWidget(background=S.CANVAS_BG)
         self._plot.setLabel("left", "Mean intensity")
         self._plot.setLabel("bottom", _XUNIT_LABEL["2th"])
         self._plot.showGrid(x=True, y=True, alpha=0.2)

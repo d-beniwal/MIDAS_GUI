@@ -170,3 +170,60 @@ def test_device_list_ca_backend_round_trips():
                         "backend": "ca", "ca_suffix": "image1:"}]
     finally:
         dlg.close()
+
+
+# ── "Restart now and resume" offer wiring (see MainWindow._offer_restart) ───
+class _FakeMainWindow:
+    """Minimal stand-in for MainWindow — just enough attributes for
+    PreferencesDialog to detect and call, without building a real window."""
+    def __init__(self):
+        self.restart_offers = []
+
+    def on_profile_changed(self):
+        pass
+
+    def _offer_restart(self, msg):
+        self.restart_offers.append(msg)
+
+
+def test_profile_switch_offers_restart_via_main_window(monkeypatch):
+    """_on_profile_switch no longer just informs the user a restart is
+    needed — it calls the main window's _offer_restart (which, since 2026,
+    can also save + silently resume the session on relaunch)."""
+    PD, _app = _make_prefs_dialog()
+    from midas_gui import settings
+    monkeypatch.setattr(settings, "active_profile", lambda: "current")
+    monkeypatch.setattr(settings, "set_active_profile", lambda name: None)
+    monkeypatch.setattr(PD.QtWidgets.QMessageBox, "question",
+                         staticmethod(lambda *a, **k: PD.QtWidgets.QMessageBox.Yes))
+
+    dlg = PD.PreferencesDialog()
+    mw = _FakeMainWindow()
+    dlg._mw = mw
+    try:
+        dlg._profile_combo.blockSignals(True)
+        dlg._profile_combo.clear()
+        dlg._profile_combo.addItems(["current", "other"])
+        dlg._profile_combo.blockSignals(False)
+        dlg._on_profile_switch(1)   # switch to "other"
+    finally:
+        dlg.close()
+
+    assert len(mw.restart_offers) == 1
+    assert "other" in mw.restart_offers[0]
+
+
+def test_save_offers_restart_via_main_window(monkeypatch):
+    """Preferences ▸ "Save as my defaults" also routes its "restart to
+    apply" through _offer_restart now, instead of a plain info box."""
+    PD, _app = _make_prefs_dialog()
+    from midas_gui import settings
+    monkeypatch.setattr(settings, "save_user_config", lambda cfg: "/fake/config.json")
+
+    dlg = PD.PreferencesDialog()
+    mw = _FakeMainWindow()
+    dlg._mw = mw
+    dlg._save()   # calls self.accept() internally
+
+    assert len(mw.restart_offers) == 1
+    assert "Saved as your defaults" in mw.restart_offers[0]

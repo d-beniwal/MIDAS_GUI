@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from PyQt5 import QtCore, QtWidgets
+from midas_gui import style as S
 
 from .constants import DISTORTION_NAMES, DISTORTION_ISO, DISTORTION_PRESETS, H5_EXTS, PROJECT_ROOT
 
@@ -77,7 +78,7 @@ class DistortionRefineDialog(QtWidgets.QDialog):
             "ticking one ticks the other, since the backend refuses one "
             "without the other.")
         info.setWordWrap(True)
-        info.setStyleSheet("color:#bbb;font-size:11px;padding-bottom:6px;")
+        info.setStyleSheet(f"color:{S.SUBTLE};font-size:11px;padding-bottom:6px;")
         layout.addWidget(info)
 
         # ── Preset buttons ──
@@ -173,7 +174,7 @@ class DistortionSeedDialog(QtWidgets.QDialog):
             "fitted previously. Anything left unticked starts at 0, the "
             "way it always has.")
         info.setWordWrap(True)
-        info.setStyleSheet("color:#bbb;font-size:11px;padding-bottom:6px;")
+        info.setStyleSheet(f"color:{S.SUBTLE};font-size:11px;padding-bottom:6px;")
         layout.addWidget(info)
 
         grid = QtWidgets.QGridLayout(); grid.setSpacing(4)
@@ -209,6 +210,109 @@ class DistortionSeedDialog(QtWidgets.QDialog):
         """``{coefficient_name: value}`` for every ticked row only."""
         return {nm: spin.value() for nm, (cb, spin) in self._boxes.items()
                 if cb.isChecked()}
+
+
+class RingSelectDialog(QtWidgets.QDialog):
+    """Pick which of the calibrant's rings the calibration may use.
+
+    One row per ring the backend would build (see
+    ``calib.calibrant_ring_rows``): a checkbox, the backend's ``Ring #``, hkl,
+    d, 2θ and radius. Ticked = used, unticked = excluded. Everything starts
+    ticked. :meth:`excluded` returns the unticked ring numbers, which is what
+    ``spec.rings_to_exclude`` takes.
+
+    ``Ring #`` is the backend's label, not a row count, so it can skip numbers
+    (radius-identical reflections are merged into one row).
+    """
+
+    _COLS = ("Use", "Ring #", "hkl", "d (Å)", "2θ (°)", "R (px)")
+
+    def __init__(self, rows, excluded=(), calibrant="", note="", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Rings — {calibrant}" if calibrant else "Rings")
+        self.setMinimumSize(520, 460)
+        excluded = {int(r) for r in excluded}
+        layout = QtWidgets.QVBoxLayout(self)
+        info = QtWidgets.QLabel(
+            "Untick a ring to leave it out of the calibration (e.g. one that "
+            "is blended with another phase, shadowed, or saturated)." +
+            (f"\n{note}" if note else ""))
+        info.setWordWrap(True)
+        info.setStyleSheet(f"color:{S.SUBTLE};font-size:11px;padding-bottom:4px;")
+        layout.addWidget(info)
+
+        self._rows = list(rows)
+        self._table = QtWidgets.QTableWidget(len(self._rows), len(self._COLS))
+        self._table.setHorizontalHeaderLabels(self._COLS)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self._table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self._table.horizontalHeader().setStretchLastSection(True)
+        for i, r in enumerate(self._rows):
+            use = QtWidgets.QTableWidgetItem()
+            use.setFlags(QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsEnabled)
+            use.setCheckState(QtCore.Qt.Unchecked if r["ring_nr"] in excluded
+                              else QtCore.Qt.Checked)
+            self._table.setItem(i, 0, use)
+            h, k, l = r["hkl"]
+            cells = (str(r["ring_nr"]), f"({h} {k} {l})", f"{r['d']:.4f}",
+                     f"{r['two_theta']:.3f}", f"{r['radius_px']:.1f}")
+            for j, txt in enumerate(cells, start=1):
+                it = QtWidgets.QTableWidgetItem(txt)
+                it.setFlags(QtCore.Qt.ItemIsEnabled)
+                it.setTextAlignment(QtCore.Qt.AlignCenter)
+                self._table.setItem(i, j, it)
+        self._table.resizeColumnsToContents()
+        self._table.itemChanged.connect(lambda *_: self._update_count())
+        layout.addWidget(self._table, 1)
+
+        brow = QtWidgets.QHBoxLayout()
+        all_b = QtWidgets.QPushButton("Select all")
+        none_b = QtWidgets.QPushButton("Select none")
+        all_b.clicked.connect(lambda: self._set_all(True))
+        none_b.clicked.connect(lambda: self._set_all(False))
+        self._count = QtWidgets.QLabel()
+        self._count.setStyleSheet(f"color:{S.MUTED};font-size:11px")
+        brow.addWidget(all_b); brow.addWidget(none_b)
+        brow.addStretch(1); brow.addWidget(self._count)
+        layout.addLayout(brow)
+
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        btns.accepted.connect(self._accept_checked)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+        self._update_count()
+
+    def _set_all(self, on: bool) -> None:
+        state = QtCore.Qt.Checked if on else QtCore.Qt.Unchecked
+        self._table.blockSignals(True)
+        for i in range(self._table.rowCount()):
+            self._table.item(i, 0).setCheckState(state)
+        self._table.blockSignals(False)
+        self._update_count()
+
+    def _n_used(self) -> int:
+        return sum(self._table.item(i, 0).checkState() == QtCore.Qt.Checked
+                   for i in range(self._table.rowCount()))
+
+    def _update_count(self) -> None:
+        self._count.setText(f"{self._n_used()} of {len(self._rows)} rings used")
+
+    def _accept_checked(self) -> None:
+        # Zero rings left makes the backend raise ("ring filtering removed
+        # every ring"), so refuse here where the reason is obvious.
+        if self._rows and self._n_used() == 0:
+            QtWidgets.QMessageBox.warning(
+                self, "No rings selected",
+                "At least one ring must stay selected for the calibration.")
+            return
+        self.accept()
+
+    def excluded(self) -> list:
+        """Ring numbers left unticked, ascending."""
+        return sorted(r["ring_nr"] for i, r in enumerate(self._rows)
+                      if self._table.item(i, 0).checkState() != QtCore.Qt.Checked)
 
 
 class ManualSeedDialog(QtWidgets.QDialog):
@@ -267,7 +371,7 @@ class ManualSeedDialog(QtWidgets.QDialog):
             "always has been — ticking only Lsd, say, leaves the beam centre "
             "on the auto-seeder.")
         info.setWordWrap(True)
-        info.setStyleSheet("color:#bbb;font-size:11px;padding-bottom:6px;")
+        info.setStyleSheet(f"color:{S.SUBTLE};font-size:11px;padding-bottom:6px;")
         layout.addWidget(info)
         self._refine_boxes: dict = {}
         self._status_lbls: dict = {}
@@ -359,7 +463,7 @@ class ManualSeedDialog(QtWidgets.QDialog):
             seeded = self._seed_boxes[key].isChecked()
             lbl.setText(self._OUTCOME[(refined, seeded)])
             lbl.setStyleSheet(
-                "font-size:10px;color:" + ("#d7861f" if refined else "#8a8a8a"))
+                "font-size:10px;color:" + ("#d7861f" if refined else S.MUTED))
 
     def showEvent(self, event):
         """The Refine card stays editable while this non-modal dialog is
@@ -454,7 +558,7 @@ class _SaveParamstestDialog(QtWidgets.QDialog):
             "line (scan range, omega step, RingThresh, MinNrSpots, …) is "
             "carried verbatim.")
         info.setWordWrap(True)
-        info.setStyleSheet("color:#bbb;font-size:11px;padding-bottom:8px;")
+        info.setStyleSheet(f"color:{S.SUBTLE};font-size:11px;padding-bottom:8px;")
         layout.addWidget(info)
 
         form = QtWidgets.QFormLayout(); form.setSpacing(8)
@@ -472,6 +576,8 @@ class _SaveParamstestDialog(QtWidgets.QDialog):
         self._tmpl_edit = QtWidgets.QLineEdit()
         self._tmpl_edit.setPlaceholderText(
             "(leave blank for standalone — only calibration parameters written)")
+        from midas_gui.helpers import attach_file_info
+        attach_file_info(self._tmpl_edit)
         tmpl_row.addWidget(self._tmpl_edit)
         b_tmpl = QtWidgets.QPushButton("Browse…"); b_tmpl.setFixedWidth(80)
         b_tmpl.clicked.connect(self._browse_tmpl)
@@ -545,6 +651,7 @@ class ProjectContentsPicker(QtWidgets.QWidget):
         self._error = None
         self._workspace_checks: dict = {}    # tab_name -> QCheckBox
         self._mask_row = None                # (QCheckBox, QComboBox) or None
+        self._solve_cell_check = None        # QCheckBox or None
         self._calib_rows: dict = {}          # panel_key -> (QCheckBox, QComboBox)
         self._integrate_rows: dict = {}      # panel_key -> (QCheckBox, QComboBox)
 
@@ -562,7 +669,7 @@ class ProjectContentsPicker(QtWidgets.QWidget):
         outer.addStretch(1)
 
         placeholder = QtWidgets.QLabel("Click a project (.h5) file to preview its contents.")
-        placeholder.setStyleSheet("color:#888;padding:12px;")
+        placeholder.setStyleSheet(f"color:{S.MUTED};padding:12px;")
         placeholder.setWordWrap(True)
         self._content_layout.addWidget(placeholder)
 
@@ -580,6 +687,7 @@ class ProjectContentsPicker(QtWidgets.QWidget):
         self._error = None
         self._workspace_checks = {}
         self._mask_row = None
+        self._solve_cell_check = None
         self._calib_rows = {}
         self._integrate_rows = {}
         _clear_layout(self._content_layout)
@@ -603,7 +711,10 @@ class ProjectContentsPicker(QtWidgets.QWidget):
         integrate_by_panel = {p: v for p in panels
                               if (v := project.list_attempts(path, p, "integrate"))}
 
-        if not tabs and not mask_attempts and not calib_by_panel and not integrate_by_panel:
+        solve_cell = project.solve_cell_overview(path)
+
+        if (not tabs and not mask_attempts and not calib_by_panel and not integrate_by_panel
+                and solve_cell is None):
             self._show_warning("This project has nothing recorded yet.")
             return False
 
@@ -628,7 +739,7 @@ class ProjectContentsPicker(QtWidgets.QWidget):
                 lambda checked: [cb.setChecked(checked) for cb in self._workspace_checks.values()])
             self._content_layout.addWidget(box)
 
-        if mask_attempts or calib_by_panel or integrate_by_panel:
+        if mask_attempts or calib_by_panel or integrate_by_panel or solve_cell:
             box = QtWidgets.QGroupBox("Analysis")
             outer_v = QtWidgets.QVBoxLayout(box)
             outer_v.setSpacing(10)
@@ -639,6 +750,14 @@ class ProjectContentsPicker(QtWidgets.QWidget):
                 grid.addWidget(QtWidgets.QLabel("Mask"), 0, 0)
                 self._mask_row = self._attempt_cell(grid, 0, 1, mask_attempts)
                 outer_v.addLayout(grid)
+
+            if solve_cell:
+                self._solve_cell_check = QtWidgets.QCheckBox(
+                    f"Solve Cell — latest analysis ({solve_cell['n_spots']} spots, "
+                    f"{solve_cell['n_domains']} domain(s), through {solve_cell['last_stage']}; "
+                    f"{str(solve_cell['timestamp_utc'])[:19]})")
+                self._solve_cell_check.setChecked(True)
+                outer_v.addWidget(self._solve_cell_check)
 
             single_panels = [p for p in panels if p == "single"]
             hydra_panels = [p for p in panels if p != "single"]
@@ -696,6 +815,7 @@ class ProjectContentsPicker(QtWidgets.QWidget):
 
     def selection(self) -> dict:
         """``workspace_tabs`` (list[str]), ``mask_ref`` (Optional[str]),
+        ``solve_cell`` (bool -- restore the single latest Solve Cell record),
         ``calib_refs``/``integrate_refs`` (``{panel_key: attempt_ref}``) —
         checked rows only."""
         mask_ref = None
@@ -706,6 +826,8 @@ class ProjectContentsPicker(QtWidgets.QWidget):
         return {
             "workspace_tabs": [name for name, cb in self._workspace_checks.items() if cb.isChecked()],
             "mask_ref": mask_ref,
+            "solve_cell": bool(self._solve_cell_check is not None
+                               and self._solve_cell_check.isChecked()),
             "calib_refs": {p: combo.currentData() for p, (check, combo) in self._calib_rows.items()
                            if check.isChecked()},
             "integrate_refs": {p: combo.currentData() for p, (check, combo) in self._integrate_rows.items()
@@ -880,6 +1002,8 @@ class SaveAsHistoryDialog(QtWidgets.QDialog):
         lines = []
         if source_summary.get("mask"):
             lines.append(f"Mask: {source_summary['mask']} attempt(s)")
+        if source_summary.get("solve_cell"):
+            lines.append("Solve Cell: latest analysis")
         for key, label in (("calibrate", "Calibrate"), ("integrate", "Batch Integrate")):
             per_panel = source_summary.get(key) or {}
             if per_panel:
@@ -897,7 +1021,7 @@ class SaveAsHistoryDialog(QtWidgets.QDialog):
         layout.addWidget(info)
         summary_lbl = QtWidgets.QLabel(summary_text)
         summary_lbl.setWordWrap(True)
-        summary_lbl.setStyleSheet("color:#bbb;font-size:11px;padding:6px 0;")
+        summary_lbl.setStyleSheet(f"color:{S.SUBTLE};font-size:11px;padding:6px 0;")
         layout.addWidget(summary_lbl)
 
         self._group = QtWidgets.QButtonGroup(self)
@@ -939,16 +1063,28 @@ _NON_H5_NAME_FILTERS = ["*.tif", "*.tiff", "*.ge*", "*.cbf", "*.edf"]
 _ALL_NAME_FILTERS = _NON_H5_NAME_FILTERS + _H5_NAME_FILTERS
 
 
-def _count_frame_files(folder: str) -> int:
-    """How many frame files (TIFF-family or HDF5, see ``_ALL_NAME_FILTERS``)
-    sit directly in ``folder`` — used for the Full-folder/Filestem preview."""
+def _find_frame_files(folder: str, recursive: bool = False) -> list:
+    """Frame files (TIFF-family or HDF5, see ``_ALL_NAME_FILTERS``) in
+    ``folder`` — directly in it, or anywhere beneath it when ``recursive``.
+
+    A beamline folder is often nothing but per-load-step subfolders, with no
+    frame directly in it at all; recursing is how "Full folder" reaches those.
+    The result is a sorted, de-duplicated list, so a file matching two
+    patterns is not processed twice.
+    """
     p = Path(folder)
     if not p.is_dir():
-        return 0
-    n = 0
+        return []
+    glob = p.rglob if recursive else p.glob
+    out = set()
     for pat in _ALL_NAME_FILTERS:
-        n += sum(1 for _ in p.glob(pat))
-    return n
+        out.update(str(m) for m in glob(pat) if m.is_file())
+    return sorted(out)
+
+
+def _count_frame_files(folder: str, recursive: bool = False) -> int:
+    """How many frame files ``_find_frame_files`` would return."""
+    return len(_find_frame_files(folder, recursive))
 
 
 def _froot_of(path) -> str:
@@ -1015,11 +1151,15 @@ class BrowseFilesDialog(QtWidgets.QDialog):
         self.setWindowTitle(title)
         self.resize(760, 520)
         modes = tuple(modes)
+        self._modes = modes
         self._mode = modes[0]
         self._current_dir = ""
         self._folder = ""
         self._stem = ""
         self._paths: list = []
+        self._recursive_result = False
+        self._sweep_key = None          # memo for the recursive sweep only
+        self._sweep: list = []
 
         layout = QtWidgets.QVBoxLayout(self)
 
@@ -1071,8 +1211,24 @@ class BrowseFilesDialog(QtWidgets.QDialog):
         self._stem_row.setVisible(False)
         layout.addWidget(self._stem_row)
 
+        # Recursion turns a folder pick into an explicit file list, so it is
+        # only offered where the caller can actually consume one -- i.e. where
+        # "files" is among the modes on offer. The Hydra panel cards take a
+        # single path or a stem and pass modes without "files", so they never
+        # see this box.
+        self._recursive_chk = QtWidgets.QCheckBox("Include subfolders")
+        self._recursive_chk.setToolTip(
+            "Find frame files anywhere beneath this folder, not just directly "
+            "in it.\n\nThe result is a fixed list of the files present when "
+            "you press OK, so a folder still being written to by a running "
+            "scan is not picked up live.")
+        self._recursive_chk.toggled.connect(
+            lambda *_: (self._update_info(), self._update_ok_enabled()))
+        self._recursive_chk.setVisible(False)
+        layout.addWidget(self._recursive_chk)
+
         self._info = QtWidgets.QLabel("")
-        self._info.setStyleSheet("color:#9a9a9a;font-size:10px")
+        self._info.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         self._info.setWordWrap(True)
         layout.addWidget(self._info)
 
@@ -1132,6 +1288,8 @@ class BrowseFilesDialog(QtWidgets.QDialog):
             self._tree.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self._model.setNameFilterDisables(False)
         self._stem_row.setVisible(self._mode == "stem")
+        self._recursive_chk.setVisible(
+            self._mode == "folder" and "files" in self._modes)
         self._tree.clearSelection()
         self._update_info()
         self._update_ok_enabled()
@@ -1168,6 +1326,31 @@ class BrowseFilesDialog(QtWidgets.QDialog):
         self._update_info()
         self._update_ok_enabled()
 
+    def _recursive(self) -> bool:
+        """Is the recursive sweep active right now? Checked against the mode
+        and the offered modes rather than widget visibility, which is False
+        until the dialog is actually shown (and in offscreen tests)."""
+        return (self._mode == "folder" and "files" in self._modes
+                and self._recursive_chk.isChecked())
+
+    def _frame_files(self) -> list:
+        """Frame files for the current folder under the current recursion
+        setting. The recursive sweep walks a whole tree over NFS, so it is
+        memoised per (folder, recursive); the plain glob is cheap and stays
+        live so a folder being written to still reports a growing count."""
+        if not self._recursive():
+            return _find_frame_files(self._current_dir, False)
+        key = (self._current_dir, True)
+        if self._sweep_key != key:
+            self._sweep_key, self._sweep = key, _find_frame_files(*key)
+        return self._sweep
+
+    def _n_subfolders(self) -> int:
+        try:
+            return sum(1 for c in Path(self._current_dir).iterdir() if c.is_dir())
+        except OSError:
+            return 0
+
     def _update_info(self):
         if self._mode == "file":
             files = self._selected_files()
@@ -1181,8 +1364,22 @@ class BrowseFilesDialog(QtWidgets.QDialog):
                 "treated as one detector-frame source, not unpacked into "
                 "all its own internal frames.)")
         elif self._mode == "folder":
-            n = _count_frame_files(self._current_dir)
-            self._info.setText(f"{n} frame file(s) found in this folder.")
+            n = len(self._frame_files())
+            if self._recursive():
+                self._info.setText(
+                    f"{n} frame file(s) found in this folder and everything "
+                    f"beneath it. They are taken as one fixed list, read when "
+                    f"you press OK — a folder still filling up is not followed.")
+            else:
+                msg = f"{n} frame file(s) found in this folder."
+                # A beamline folder is often only per-load-step subfolders, so
+                # "0 found" here is the normal case rather than a mistake; say
+                # where the frames actually are instead of leaving a dead end.
+                n_sub = self._n_subfolders()
+                if not n and n_sub and "files" in self._modes:
+                    msg += (f" It holds {n_sub} subfolder(s) — tick "
+                            f"\u201cInclude subfolders\u201d to search those too.")
+                self._info.setText(msg)
         elif self._mode == "stem":
             n = len(self._stem_matches())
             self._info.setText(
@@ -1196,6 +1393,11 @@ class BrowseFilesDialog(QtWidgets.QDialog):
             ok = len(self._selected_files()) >= 1
         elif self._mode == "folder":
             ok = bool(self._current_dir) and Path(self._current_dir).is_dir()
+            # A plain folder pick may legitimately be empty -- it can be watched
+            # as a run fills it. A recursive pick freezes the list at OK, so an
+            # empty one can only ever process nothing.
+            if ok and self._recursive():
+                ok = bool(self._frame_files())
         else:  # stem
             ok = len(self._stem_matches()) >= 1
         self._ok_btn.setEnabled(ok)
@@ -1205,6 +1407,9 @@ class BrowseFilesDialog(QtWidgets.QDialog):
             self._paths = self._selected_files()
         elif self._mode == "folder":
             self._folder = self._current_dir
+            self._recursive_result = self._recursive()
+            if self._recursive_result:
+                self._paths = self._frame_files()
         elif self._mode == "stem":
             self._paths = self._stem_matches()
             self._stem = self._stem_ed.text().strip()
@@ -1222,6 +1427,16 @@ class BrowseFilesDialog(QtWidgets.QDialog):
     def folder(self) -> str:
         """The chosen directory, for "folder" mode."""
         return self._folder
+
+    def recursive(self) -> bool:
+        """True when "Full folder" was confirmed with "Include subfolders".
+
+        ``mode()`` is still ``"folder"`` -- the user did pick a folder -- but
+        the caller must consume ``paths()`` rather than ``folder()``, because a
+        single-directory glob cannot express a tree. The list is frozen at the
+        moment OK was pressed.
+        """
+        return self._recursive_result
 
     def stem(self) -> tuple:
         """(folder, stem) for "stem" mode — Hydra callers re-run sibling
@@ -1256,6 +1471,13 @@ class ProjectHistoryDialog(QtWidgets.QDialog):
                     "name": a["name"],
                     "timestamp": a.get("timestamp_utc", ""),
                     "ref": a["ref"],
+                })
+            sc = _project.solve_cell_overview(project_path)
+            if sc is not None:
+                rows.append({
+                    "panel": "—", "kind": "Solve Cell", "name": "latest",
+                    "timestamp": sc.get("timestamp_utc", ""),
+                    "ref": _project.SOLVE_CELL_REF,
                 })
             for panel_key in _project.discover_panels(project_path):
                 for kind, label in (("calib", "Calibrate"), ("integrate", "Batch Integrate")):
@@ -1318,7 +1540,10 @@ class ProjectHistoryDialog(QtWidgets.QDialog):
         row = self._rows[selected[0].row()]
         from . import project as _project
         try:
-            meta = _project.read_attempt(self._project_path, row["ref"])
+            if row["ref"] == _project.SOLVE_CELL_REF:
+                meta = _project.solve_cell_metadata(self._project_path)
+            else:
+                meta = _project.read_attempt(self._project_path, row["ref"])
             self._detail.setPlainText(json.dumps(meta, indent=2, default=str))
         except Exception as e:
             self._detail.setPlainText(f"Could not read this attempt's metadata:\n{e}")
@@ -1504,7 +1729,7 @@ class AddSamplesDialog(QtWidgets.QDialog):
         layout.addWidget(split, 1)
 
         self._info = QtWidgets.QLabel("")
-        self._info.setStyleSheet("color:#9a9a9a;font-size:10px")
+        self._info.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         self._info.setWordWrap(True)
         layout.addWidget(self._info)
 

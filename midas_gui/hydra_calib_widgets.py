@@ -44,6 +44,10 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
     #: shared Detector & Calibrant fields (same precedent as
     #: ``CalibrationTab.apply_geometry``).
     calibFileLoaded = QtCore.pyqtSignal(dict)
+    #: same event, carrying (panel_number, path) instead of the parsed
+    #: geometry — the owning page uses this to resolve + load the OTHER 3
+    #: panels' sibling calibration files (see hydra_calib_page._calib_siblings).
+    calibFilePicked = QtCore.pyqtSignal(int, str)
     #: Flip Y/Flip Z/Transpose toggled — the owning page refreshes the
     #: preview if this panel is currently displayed.
     imTransChanged = QtCore.pyqtSignal()
@@ -348,10 +352,6 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
             tx_note = ("tx 0° (not set). This panel will land at the same "
                        "azimuth as every other panel left at 0.")
         self._seed_summary_lbl.setText(head + "\n" + tx_note)
-        # Styling and the signal are upstream's (cda7336); the two-line body
-        # above is ours. Not a pick between them: upstream made the summary
-        # noticeable and made the page able to react to it, we made it say
-        # what tx will actually do. Both survive.
         self._seed_summary_lbl.setStyleSheet(
             f"color:{S.ACCENT if on else S.MUTED};font-size:10px")
         self.seedStateChanged.emit()
@@ -407,18 +407,7 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
         on every panel (``_sync_seed_checkbox`` mirrors the enable flags
         across all 4 panels by design) — see DECISIONS for the
         connoly_oct26 run this broke, where tx ended up locked at a
-        different nonsense value per panel.
-
-        ``tx`` is the sharpest case, and worth keeping the local finding
-        for: no Hydra pipeline refines it today, so ``result.tx`` can only
-        repeat the seed or -- where the pipeline does not carry it, as
-        ``first_time`` does not -- report 0 for a panel that is physically
-        at 296.885 deg. Writing that back silently replaced the measured
-        azimuth with 0 on every Run, and because the tx tick then read as
-        "not set", the next fit ran at the wrong azimuth without saying so.
-        The ``refine``-driven rule above covers it along with every other
-        parameter, which is why the earlier tx-only guard
-        (``helpers.result_refined_tx``) is not needed here."""
+        different nonsense value per panel."""
         promoted = []
         if refine.get("BC"):
             self._enable_seed(BC=True)
@@ -455,6 +444,7 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
             f"Loaded {Path(path).name}: BC=({g['BC_y']:.2f}, {g['BC_z']:.2f}), "
             f"Lsd={g['Lsd']/1000:.3f} mm.")
         self.calibFileLoaded.emit(g)
+        self.calibFilePicked.emit(self.panel_number, path)
 
     # ── Pick BC / Pick Ring ──────────────────────────────────────────
 
@@ -593,11 +583,8 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
             grid.addWidget(v, row, col * 2 + 1, QtCore.Qt.AlignVCenter)
         grid.setColumnStretch(ncols * 2 + 1, 1)
 
-    def _send_to_viewer(self):
-        r = self.result
-        if r is None:
-            return
-        self.sendToViewer.emit(self.panel_number, {
+    def _result_geometry(self, r) -> dict:
+        return {
             "wavelength_A": float(r.wavelength_A), "pxY": float(r.pxY),
             "pxZ": float(getattr(r, "pxZ", r.pxY) or r.pxY),
             "Lsd": float(r.Lsd), "BC_y": float(r.BC_y), "BC_z": float(r.BC_z),
@@ -607,7 +594,27 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
             "NrPixelsY": int(getattr(r, "NrPixelsY", 0) or 0),
             "NrPixelsZ": int(getattr(r, "NrPixelsZ", 0) or 0),
             "distortion": dict(getattr(r, "distortion", {}) or {}),
-            "im_trans": list(getattr(r, "im_trans", []) or [])})
+            "im_trans": list(getattr(r, "im_trans", []) or [])}
+
+    def _send_to_viewer(self):
+        if self.result is None:
+            return
+        self.sendToViewer.emit(self.panel_number, self._result_geometry(self.result))
+
+    def export_geometry(self) -> dict:
+        """Best-known full geometry for this panel — the fitted result's
+        if one exists, else the current manual seed fields (even if not
+        individually ticked "include in seed") — for the Data Viewer's
+        bulk "← Get from Calibrate" pull, which should show something
+        useful even before a fit has run."""
+        if self.result is not None:
+            return self._result_geometry(self.result)
+        return {
+            "Lsd": self._seed_lsd.value() * 1000.0,   # mm display -> µm
+            "BC_y": self._seed_bcy.value(), "BC_z": self._seed_bcz.value(),
+            "tx": self._seed_tx.value(), "ty": self._seed_ty.value(),
+            "tz": self._seed_tz.value(),
+        }
 
     def write_json(self, path) -> None:
         """Write this panel's result to *path* as calibration.json — same

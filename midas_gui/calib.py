@@ -24,12 +24,13 @@ import math
 import os
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 import numpy as np
 
 import midas_gui._paths  # noqa: F401  (sys.path setup must run before MIDAS imports)
-from midas_gui.constants import _SG, _LC, _V2_TO_V1, DISTORTION_NAMES, DEFAULT_LSD_UM
+from midas_gui.constants import _SG, _LC, _LATT, _V2_TO_V1, DISTORTION_NAMES, DEFAULT_LSD_UM
 
 
 def _supported_kwargs(fn, kwargs: dict) -> dict:
@@ -79,6 +80,68 @@ def _prep_transformed(image: np.ndarray, dark, im_trans: tuple):
     return img, dk, NY, NZ
 
 
+def backend_calibrant(name: str):
+    """Calibrant argument for midas_calibrate_v2 (``calibrate()``/``make_seed()``).
+
+    The backend only knows CeO2/LaB6/Si/Al2O3 by name, so a GUI-defined
+    calibrant (custom name or edited lattice) raised ``KeyError: Unknown
+    calibrant``. Both entry points also accept a lattice dict, so send the
+    GUI's own lattice (Preferences > Calibrants) — one source of truth, custom
+    names and values honoured. Unknown-to-GUI names pass through unchanged.
+    """
+    m = _LATT.get(name)
+    if not m:
+        return name
+    d = {"name": name, "a": m["a"], "sg": int(m["sg"])}
+    for k in ("b", "c", "alpha", "beta", "gamma"):
+        if k in m:
+            d[k] = m[k]
+    return d
+
+
+def calibrant_ring_rows(calibrant: str, *, wavelength: float, pxY: float,
+                        pxZ: Optional[float], NY: int, NZ: int,
+                        lsd_um: float, bc_y: float, bc_z: float) -> list:
+    """The calibrant's ring table exactly as the backend builds it, for the
+    "Rings…" picker. One dict per row: ``ring_nr``, ``hkl``, ``d``, ``two_theta``,
+    ``radius_px``, ``mult``.
+
+    Built with the backend's own ``build_ring_table`` (not a GUI-side hkl
+    expansion) so ``ring_nr`` is the very label ``spec.rings_to_exclude``
+    filters on. That label is not a row index: radius-identical reflections are
+    merged (CeO2 (333)/(511)), which leaves gaps in the numbering, so a
+    re-derived list would disagree with the filter.
+
+    The set of rings depends on the geometry (rings past the detector edge are
+    not generated), the labels do not.
+    """
+    from midas_calibrate.rings import build_ring_table
+    v1 = build_v1_params(
+        {"BC_y": bc_y, "BC_z": bc_z, "Lsd": lsd_um}, wavelength=wavelength,
+        pxY=pxY, pxZ=pxZ, calibrant=calibrant, NY=NY, NZ=NZ, refine={},
+        n_iter=1, device="cpu")
+    rt = build_ring_table(v1)
+    return [dict(ring_nr=int(rt.ring_nr[i]),
+                 hkl=(int(rt.h[i]), int(rt.k[i]), int(rt.l[i])),
+                 d=float(rt.d_spacing[i]), two_theta=float(rt.two_theta_deg[i]),
+                 radius_px=float(rt.r_ideal_px[i]), mult=int(rt.multiplicity[i]))
+            for i in range(len(rt))]
+
+
+def _with_ring_exclusions(spec, v1, rings):
+    """``spec`` with ``rings_to_exclude`` set. With no exclusions the spec is
+    returned untouched (``None`` stays ``None``, so the backend builds its own
+    exactly as before). With some and no spec yet, build the one the backend
+    would have built from ``v1`` itself (``spec_from_v1_params``)."""
+    if not rings:
+        return spec
+    if spec is None:
+        from midas_calibrate_v2.compat.from_v1 import spec_from_v1_params
+        spec = spec_from_v1_params(v1)
+    spec.rings_to_exclude = sorted({int(r) for r in rings})
+    return spec
+
+
 def make_seed_safe(image: np.ndarray, wavelength: float, pxY: float,
                    calibrant: str):
     """Run the automatic seeder; return a Seed or None on failure.
@@ -90,7 +153,8 @@ def make_seed_safe(image: np.ndarray, wavelength: float, pxY: float,
     try:
         from midas_calibrate_v2.seed.auto_seed import make_seed
         return make_seed(image.astype(np.float32), wavelength_A=wavelength,
-                         px_um=pxY, calibrant=calibrant, use_diplib=False)
+                         px_um=pxY, calibrant=backend_calibrant(calibrant),
+                         use_diplib=False)
     except Exception:
         return None
 
@@ -172,6 +236,73 @@ def tols_are_default(tols: Optional[dict]) -> bool:
     defaults = tol_defaults()
     return all(abs(float(v) - defaults[k]) <= 1e-12
                for k, v in tols.items() if k in defaults)
+
+
+#: How many times a pipeline re-centres its ± windows, as a function of the
+#: GUI's "E-M iters". ``None`` where the count is not statically knowable and
+#: ``0`` where the windows are not applied at all. See
+#: :func:`limit_recentre_rounds`, which resolves these against the *installed*
+#: backend rather than trusting the numbers written here.
+_RECENTRE_ROUNDS_NOTE = {
+    "first_time":   "takes no bounds arguments at all",
+    "frozen_point": "is not yet handed the window settings",
+    "frozen_point_one_shot": "uses backend windows in Frozen-point; GUI windows "
+                             "apply only to the subsequent One-shot stage, "
+                             "centred on its Frozen-point seed",
+    "joint":        "seeds with a bounded loop and then runs an unbounded "
+                    "joint optimisation, so the total is not knowable up front",
+}
+
+
+def _sig_default(fn, name, fallback):
+    """One keyword default off an installed backend function's signature."""
+    import inspect
+    try:
+        p = inspect.signature(fn).parameters.get(name)
+        if p is not None and p.default is not inspect.Parameter.empty:
+            return int(p.default)
+    except (TypeError, ValueError):
+        pass
+    return fallback
+
+
+def limit_recentre_rounds(mode: str, n_iter: int) -> Optional[int]:
+    """How many times ``mode`` re-centres each ± window on the running fit.
+
+    The windows are a per-iteration trust region, not a bound on the answer:
+    ``pipelines/single.py`` rebuilds each parameter's bounds around that
+    iteration's result before the next LM call ("Bounds move with the
+    value"), so a fit that rails travels one full window per round and the
+    run's total excursion from the seed is ``rounds × tol``. This is the
+    ``rounds``.
+
+    It is emphatically **not** always the GUI's "E-M iters" box. Only
+    ``one_shot`` passes that through. ``four_stage`` and ``bayesian`` ignore
+    it entirely and run counts fixed in their own signatures, which is why
+    those are read off the installed functions here rather than hardcoded —
+    the same reasoning as :func:`tol_defaults`.
+
+    Returns ``0`` when the windows are not applied at all, and ``None`` when
+    the count cannot be known ahead of the run. Callers must not promise a
+    hard cap in either case; :data:`_RECENTRE_ROUNDS_NOTE` says why.
+    """
+    mode = str(mode or "")
+    if mode in ("first_time", "frozen_point"):
+        return 0
+    if mode == "frozen_point_one_shot":
+        return None  # a cap cannot bound the initial Frozen-point search
+    if mode == "joint":
+        return None
+    if mode == "one_shot":
+        return max(1, int(n_iter or 1))
+    if mode == "four_stage":
+        from midas_calibrate_v2.pipelines import autocalibrate_four_stage as f
+        return (_sig_default(f, "n_iter_stage1", 2)
+                + _sig_default(f, "n_iter_stage2", 3))
+    if mode == "bayesian":
+        from midas_calibrate_v2.pipelines import autocalibrate_bayesian as f
+        return _sig_default(f, "n_iter_map", 5)
+    return max(1, int(n_iter or 1))        # unknown mode: the honest guess
 
 
 def _refine_dict(refine: dict) -> dict:
@@ -390,6 +521,16 @@ def _normalize_result_impl(raw, mode: str, *, NY, NZ, pxY, pxZ, wavelength,
                            panel_layout: Optional[dict] = None,
                            scratch: Optional[str] = None, stem: str = ""):
     """The per-mode conversion itself; see :func:`normalize_result`."""
+    if mode == "frozen_point_one_shot":
+        result = _normalize_result_impl(
+            raw.one_shot, "one_shot", NY=NY, NZ=NZ, pxY=pxY, pxZ=pxZ,
+            wavelength=float(raw.one_shot.unpacked.get("Wavelength", raw.wavelength)),
+            panel_layout=panel_layout,
+            scratch=scratch, stem=stem)
+        result._frozen_point_converged = raw.frozen_point.converged
+        result._frozen_point_n_iter = raw.frozen_point.n_iter
+        result._one_shot_seed = dict(raw.seed, wavelength_A=raw.wavelength)
+        return result
     # one_shot+panel_layout was re-routed through four_stage to expose unpacked
     if mode == "one_shot" and hasattr(raw, "stage2"):
         effective_mode = "four_stage"
@@ -538,7 +679,7 @@ def tilt_seed_effective(mode: str, *, panel_layout=None, refine: Optional[dict] 
       genuinely used here, unlike ``first_time``, even though tx itself
       never moves.
     """
-    if mode in ("four_stage", "bayesian", "joint", "frozen_point"):
+    if mode in ("four_stage", "bayesian", "joint", "frozen_point", "frozen_point_one_shot"):
         return True
     if mode == "first_time":
         return False
@@ -556,6 +697,56 @@ def tilt_seed_effective(mode: str, *, panel_layout=None, refine: Optional[dict] 
 
 
 # ── Dispatch ─────────────────────────────────────────────────────────────────────
+
+def _first_time_max_ring_rad(manual: Optional[dict], NY, NZ) -> Optional[float]:
+    """``max_ring_rad_px`` for ``first_time_calibrate``, or ``None`` to leave
+    the backend's own default alone.
+
+    That default is the beam-centre-to-*nearest-edge* distance
+    (``pipelines/first_time.py``: ``min(bc_y, ny-bc_y, bc_z, nz-bc_z) * 0.95``),
+    which silently assumes the beam lands **on** the detector. A panel offset
+    from the beam — the normal arrangement when the rings of interest are
+    corner arcs, and every Hydra panel — puts the centre outside the frame, so
+    one of those terms is negative and ``CalibrationParams.validate()`` raises
+    ``ValueError: MaxRingRad must be positive (px)`` before the fit begins.
+    Measured at 1-ID: BC (2384.7, 2182.7) on a 2048x2048 frame gives
+    ``2048 - 2384.7 = -336.7``.
+
+    Substituted only when the backend's default would be unusable, so every
+    on-detector geometry keeps the value it has always had. The replacement is
+    the BC-to-farthest-*corner* distance, which is the only meaningful maximum
+    once the centre is off-frame and is already what the integration path uses
+    for an automatic RMax.
+
+    A centre just *inside* an edge is the same hazard without the exception —
+    a tiny positive window that quietly searches almost no rings — so that is
+    warned about rather than overridden.
+    """
+    if not manual or "BC_y" not in manual or "BC_z" not in manual:
+        return None          # auto-seeded: the backend picks its own BC too
+    try:
+        bc_y, bc_z = float(manual["BC_y"]), float(manual["BC_z"])
+        ny, nz = int(NY or 0), int(NZ or 0)
+    except (TypeError, ValueError):
+        return None
+    if ny <= 0 or nz <= 0:
+        return None
+    backend_default = min(bc_y, ny - bc_y, bc_z, nz - bc_z) * 0.95
+    if backend_default > 0:
+        if backend_default < 0.1 * max(ny, nz):
+            print(f"[calib] NOTE: the beam centre is {backend_default / 0.95:.0f} px "
+                  f"from the nearest detector edge, so 'First-time' will search "
+                  f"rings only out to {backend_default:.0f} px. If the rings you "
+                  f"need lie beyond that, use One-shot or Four-stage.")
+        return None
+    from midas_gui.helpers import rmax_corner_px
+    rr = rmax_corner_px(bc_y, bc_z, ny, nz)
+    print(f"[calib] NOTE: beam centre ({bc_y:.1f}, {bc_z:.1f}) lies outside the "
+          f"{ny}x{nz} frame, so 'First-time' default MaxRingRad "
+          f"(BC-to-nearest-edge) is negative. Using BC-to-farthest-corner "
+          f"= {rr:.0f} px instead.")
+    return rr
+
 
 def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
     """Run the requested calibration pipeline.
@@ -577,8 +768,31 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
     im_trans   = tuple(cfg.get("im_trans", ()))
     manual     = cfg.get("manual_seed")   # None or {"BC_y","BC_z","Lsd"}
     tols       = cfg.get("tols")          # None or a subset of TOL_FIELDS
+    # Ring numbers (backend ``ring_nr``) the user unticked in "Rings…". Empty =
+    # every ring, which leaves every branch below byte-for-byte as it was.
+    rings_excl = sorted({int(r) for r in (cfg.get("rings_to_exclude") or ())})
     NZ, NY     = image.shape
     panel_layout = _build_panel_layout(cfg.get("panel_layout"))
+
+    if mode == "frozen_point_one_shot":
+        print("[calib] Stage 1/2: Frozen-point", flush=True)
+        frozen = run_pipeline("frozen_point", image, dark, cfg)
+        if not frozen.converged:
+            raise RuntimeError(
+                "Frozen-point did not converge; One-shot stage was not started.")
+        u = frozen.res.unpacked
+        seed = {k: float(u[k]) for k in ("Lsd", "BC_y", "BC_z", "tx", "ty", "tz")}
+        seed["distortion"] = {n: float(u[n]) for n in DISTORTION_NAMES if n in u}
+        # Both stages receive the same raw frame/dark and transform codes.
+        # Frozen-point's fitted values already live in transformed coordinates.
+        next_cfg = dict(cfg, manual_seed=seed,
+                        wavelength=float(u.get("Wavelength", wavelength)),
+                        _seeded_refinement=True)
+        print("[calib] Stage 2/2: One-shot seeded from Frozen-point "
+              "(geometry and distortion)", flush=True)
+        final = run_pipeline("one_shot", image, dark, next_cfg)
+        return SimpleNamespace(frozen_point=frozen, one_shot=final,
+                               wavelength=next_cfg["wavelength"], seed=seed)
 
     if mode == "one_shot":
         if panel_layout is not None:
@@ -600,7 +814,9 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
             from midas_calibrate_v2.pipelines import autocalibrate_four_stage
             return autocalibrate_four_stage(
                 v1, img, dark=dk, device=device, panel_layout=panel_layout,
-                spec=_panel_spec(v1, panel_layout), verbose=True)
+                spec=_with_ring_exclusions(
+                    _panel_spec(v1, panel_layout), v1, rings_excl),
+                verbose=True)
 
         # Three things calibrate() structurally cannot express, all fixed the
         # same way: route through the lower-level single-pass routine that
@@ -608,6 +824,10 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
         # CalibrationParams.
         coeffs = _distortion_coeffs(refine)
         reroute = []
+        if cfg.get("_seeded_refinement"):
+            reroute.append("refinement from the Frozen-point solution")
+        elif manual and manual.get("distortion"):
+            reroute.append("distortion seed")
         # A distortion subset used to be rerouted too, on the grounds that
         # refine_distortion was an all-or-nothing bool. It is not: the kwarg is
         # Union[bool, str, Sequence[str]], so a partial selection reaches
@@ -628,6 +848,9 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
             # calibrate() builds its own CalibrationParams, so its tol* windows
             # are always the dataclass defaults.
             reroute.append("non-default parameter limits")
+        if rings_excl:
+            # calibrate() has no rings_to_exclude kwarg; only a spec carries it.
+            reroute.append("ring exclusions")
         if reroute:
             print(f"[calib] note: routing one_shot through "
                   f"pipelines.single.autocalibrate — calibrate() cannot express "
@@ -655,7 +878,8 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
                 v1, img, dark=dk, n_iter=n_iter, lm_max_iter=lm_iter,
                 device=device, verbose=True,
                 build_residual_corr=build_rc,
-                residual_corr_path=bin_path)
+                residual_corr_path=bin_path,
+                spec=_with_ring_exclusions(None, v1, rings_excl))
             # bin_path is only where autocalibrate would *put* a residual map,
             # decided before it runs. It writes one only if it actually builds
             # one, and it gives up quietly on too few non-outlier fits
@@ -671,7 +895,8 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
 
         from midas_calibrate_v2 import calibrate
         kwargs = dict(
-            wavelength=wavelength, pxY=pxY, dark=dark, calibrant=calibrant,
+            wavelength=wavelength, pxY=pxY, dark=dark,
+            calibrant=backend_calibrant(calibrant),
             # Scratch, not the working directory: calibrate() writes both
             # residual_corr.bin and a generically-named calibration.json here
             # (pipelines/auto.py:680-683, :921-955), neither of them asked for.
@@ -726,6 +951,11 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
                   "'First-time' pipeline — it takes no bounds arguments. Use "
                   "One-shot, Four-stage, Bayesian or Joint-cake for bounded "
                   "refinement.")
+        if rings_excl:
+            print("[calib] WARNING: ring exclusions are ignored by the "
+                  "'First-time' pipeline — it builds its own ring list and "
+                  "takes no spec. Use One-shot, Four-stage, Bayesian or "
+                  "Joint-cake to exclude rings.")
         a, b, c, alpha, beta, gamma = _LC.get(calibrant, _LC["CeO2"])
         kwargs = dict(
             lattice=(a, b, c, alpha, beta, gamma),
@@ -743,6 +973,9 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
             # an explicit panel-aware spec) — it just needs the layout passed.
             panel_layout=panel_layout,
         )
+        rr = _first_time_max_ring_rad(manual, NY, NZ)
+        if rr is not None:
+            kwargs["max_ring_rad_px"] = rr
         # Native im_trans since midas_calibrate_v2 0.15.0: the backend flips
         # image, dark and panel_mask together and re-derives n_pixels_y/z from
         # the transformed shape, so this branch hands over the RAW frame and
@@ -772,7 +1005,9 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
             seed, wavelength=wavelength, pxY=pxY, pxZ=pxZ, calibrant=calibrant,
             NY=pNY, NZ=pNZ, refine=refine, n_iter=n_iter, device=device,
             tols=tols)
-        spec = _panel_spec(v1, panel_layout) if panel_layout is not None else None
+        spec = _with_ring_exclusions(
+            _panel_spec(v1, panel_layout) if panel_layout is not None else None,
+            v1, rings_excl)
         return autocalibrate_four_stage(v1, img, dark=dk, device=device,
                                         panel_layout=panel_layout, spec=spec,
                                         verbose=True)
@@ -781,7 +1016,9 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
         img, dk, pNY, pNZ = _prep_transformed(image, dark, im_trans)
         v1 = _seed_and_v1(img, wavelength, pxY, pxZ, calibrant, pNY, pNZ,
                           refine, n_iter, device, manual, tols=tols)
-        spec = _panel_spec(v1, panel_layout) if panel_layout is not None else None
+        spec = _with_ring_exclusions(
+            _panel_spec(v1, panel_layout) if panel_layout is not None else None,
+            v1, rings_excl)
         if mode == "bayesian":
             from midas_calibrate_v2.pipelines import autocalibrate_bayesian
             return autocalibrate_bayesian(v1, img, mode="laplace", dark=dk,
@@ -806,23 +1043,22 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
             # subtract it here — every other branch above hands dark to the
             # backend natively instead.
             img = np.clip(img - dk.astype(np.float32), 0, None)
-        # v1.Refine (from build_v1_params, inside _seed_and_v1) already carries
-        # the GUI's Distortion checkboxes for p0..p14 — iterate_frozen_point_
-        # until_stable defers to it exactly like four_stage/bayesian/joint do,
-        # so no separate refine_distortion override is passed here.
-        #
-        # tols is deliberately NOT forwarded here yet (unlike the identical
-        # bayesian/joint call above) — tracked as a follow-up, not a backend
-        # limitation: spec_from_v1_params() reads v1.tol* the same way for
-        # every pipeline, so wiring it through is a one-line fix. Until then,
-        # warn instead of silently running on CalibrationParams' hardcoded
-        # defaults, mirroring first_time's disclosure above.
+        # Distortion Refine flags reach the backend's final refit after its
+        # geometry search. The iterative search replaces geometry bounds
+        # with its own bounds_* windows; forwarding v1.tol* alone would not
+        # make GUI windows apply. Keep this gap explicit until both are wired.
         if not tols_are_default(tols):
             print("[calib] WARNING: the parameter-window (±) settings are "
                   "not yet forwarded to the 'Frozen-point (high-tilt)' "
                   "pipeline — it runs with default bounds instead. Use "
-                  "One-shot, Four-stage, Bayesian or Joint-cake for a "
+                  "One-shot for a "
                   "bounded refinement with your chosen window.")
+        if rings_excl:
+            print("[calib] WARNING: ring exclusions are not forwarded to the "
+                  "'Frozen-point (high-tilt)' pipeline — "
+                  "iterate_frozen_point_until_stable builds its own spec each "
+                  "iteration and takes none, so every ring is used. Use "
+                  "One-shot to exclude rings.")
         v1 = _seed_and_v1(img, wavelength, pxY, pxZ, calibrant, pNY, pNZ,
                           refine, n_iter, device, manual)
         if device != "cpu":

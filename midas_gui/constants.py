@@ -9,7 +9,16 @@ from __future__ import annotations
 import os
 
 CALIBRANTS = ["CeO2", "LaB6", "Si", "Al2O3"]
-COLORMAPS  = ["hot", "gray", "viridis", "inferno", "plasma", "turbo"]
+COLORMAPS  = ["hot", "gray", "reverse_gray", "viridis", "inferno", "plasma", "turbo"]
+
+# GUI colormap names that are not matplotlib names -> the matplotlib equivalent
+# (used by matplotlib / pyvista consumers; pyqtgraph viewers build it natively).
+_MPL_CMAP_ALIAS = {"reverse_gray": "gray_r"}
+
+
+def mpl_cmap_name(name):
+    """Matplotlib/VTK-compatible name for a GUI colormap name."""
+    return _MPL_CMAP_ALIAS.get(name, name)
 
 # Azimuth of the polarization plane, in MIDAS η (degrees).
 #
@@ -53,13 +62,16 @@ KERNELS = {
 # Calibration pipelines (label → key, enabled?)
 PIPELINES = [
     ("One-shot (default)",       "one_shot",   True),
-    ("First-time (no prior)",    "first_time", True),
-    ("Four-stage (patchy det.)", "four_stage", True),
-    ("Bayesian MAP+Laplace",     "bayesian",   True),    # Phase 2
-    ("Joint cake",               "joint",      True),    # Phase 3
-    ("Frozen-point (high-tilt)", "frozen_point", True),
-    ("Multi-distance",           "multi",      False),   # multi-image, deferred
+    ("Frozen-point (fast/high-tilts)", "frozen_point", True),
+    ("Frozen-point + One-shot", "frozen_point_one_shot", True),
 ]
+
+
+def restored_pipeline_label(label):
+    """Migrate text-based project state after simplifying the pipeline list."""
+    if label == "Frozen-point (high-tilt)":
+        return PIPELINES[1][0]
+    return label if label in {p[0] for p in PIPELINES} else PIPELINES[0][0]
 
 ERROR_MODELS = ["poisson", "azimuthal", "hybrid"]
 
@@ -133,12 +145,12 @@ DEFAULT_LSD_UM     = 121_000.0 # µm
 DEFAULT_BC_Y       = 10.0      # px (test data beam centre)
 DEFAULT_BC_Z       = 10.0      # px
 DEFAULT_RING_WIDTH = 2.0       # px (simulated-ring pen width on the image)
+DEFAULT_N_RINGS    = 10        # max rings simulated per material
 
 # Data Viewer ▸ Ring simulation card: spin-box step size (up/down-arrow increment)
 # per field. Overridable via the per-user config key "viewer_steps"
 # (Preferences ▸ Data Viewer).
 DEFAULT_STEP_WAVELENGTH = 0.01   # Å      (λ)
-DEFAULT_STEP_TWO_THETA  = 1.0    # deg    (max 2θ)
 DEFAULT_STEP_LSD_MM     = 1.0    # mm     (Lsd)
 DEFAULT_STEP_PIXEL      = 0.1    # µm     (pixel size)
 DEFAULT_STEP_BC         = 1.0    # px     (BC_y / BC_z)
@@ -150,6 +162,7 @@ HC_KEV_A = 12.398420
 # Common detector pixel sizes (label, pixel size in µm) for the clickable "px" menu.
 PIXEL_PRESETS = [
     ("GE", 200.0), ("Varex", 150.0), ("Pilatus", 172.0), ("Eiger", 75.0),
+    ("Pixirad", 62.0),
 ]
 
 # Common K-edge foil energies (element symbol, K absorption-edge energy in keV).
@@ -251,6 +264,7 @@ DEFAULT_COLORMAP      = "gray"        # value in COLORMAPS — every image/cake
 # Qt's QT_SCALE_FACTOR, so the entire layout + fonts scale uniformly. 1.0 suits a
 # 1080p display; try ~1.5 for 1440p and ~2.0 for 4K. Overridable via ui.ui_scale.
 DEFAULT_UI_SCALE      = 1.0           # multiplier, clamped to [0.5, 4.0] at startup
+DEFAULT_THEME         = "dark"        # "dark" | "light" colour theme (Preferences ▸ Display)
 
 # ── Modular tabs ────────────────────────────────────────────────────────────────
 # ALWAYS_TABS are pinned (cannot be hidden); OPTIONAL_TABS can be toggled from
@@ -259,15 +273,18 @@ DEFAULT_UI_SCALE      = 1.0           # multiplier, clamped to [0.5, 4.0] at sta
 # it is overridable via the per-user config key ``ui.visible_tabs``.
 ALWAYS_TABS = ["Data Viewer", "Mask Builder", "Calibrate", "Batch Integrate"]
 OPTIONAL_TABS = ["Calib. Refinement", "Batch Correction", "Batch Queue",
-                 "Zarr Viewer", "Corrections", "PDF Analysis", "Texture",
-                 "Pump Probe", "Results & Export"]
+                 "Zarr Viewer", "Data Explorer", "Corrections", "PDF Analysis",
+                 "Texture", "Pump Probe", "Results & Export", "Solve Cell"]
 # Optional tabs shown by default. Batch Correction / Corrections / PDF Analysis /
-# Texture / Results & Export ship hidden (turn them on in Settings ▸
+# Texture / Results & Export / Solve Cell ship hidden (turn them on in Settings ▸
 # Preferences ▸ Tabs). Zarr Viewer
 # ships visible, right next to Batch Integrate in app.py's _tab_specs — verified
 # live (see .context/DECISIONS.md) — but is still a toggleable OPTIONAL_TAB, not
 # one of the four hard-pinned ALWAYS_TABS, so it can still be hidden from
-# Preferences ▸ Tabs like any other optional tab.
+# Preferences ▸ Tabs like any other optional tab. Data Explorer sits beside it
+# (both answer "open what the pipeline wrote") but ships HIDDEN: Zarr Viewer
+# earned its default slot by being verified against live data, and this one
+# has not been yet.
 DEFAULT_VISIBLE_TABS = ["Calib. Refinement", "Batch Queue", "Zarr Viewer", "Pump Probe"]
 
 # ── Beamline devices (Data Viewer ▸ Live Data PV dropdown) ──────────────────────
@@ -353,7 +370,6 @@ def _apply(cfg: dict) -> None:
     # Data Viewer spin-box step sizes
     steps = cfg.get("viewer_steps", {}) or {}
     _set_num(steps, "wavelength", "DEFAULT_STEP_WAVELENGTH")
-    _set_num(steps, "two_theta", "DEFAULT_STEP_TWO_THETA")
     _set_num(steps, "lsd_mm", "DEFAULT_STEP_LSD_MM")
     _set_num(steps, "pixel", "DEFAULT_STEP_PIXEL")
     _set_num(steps, "bc", "DEFAULT_STEP_BC")
@@ -476,6 +492,12 @@ def _apply(cfg: dict) -> None:
             g["DEFAULT_UI_SCALE"] = float(ui["ui_scale"])
     except Exception:
         pass
+    # colour theme: "dark" (default) or "light"
+    try:
+        if str(ui.get("theme", "")).lower() in ("dark", "light"):
+            g["DEFAULT_THEME"] = str(ui["theme"]).lower()
+    except Exception:
+        pass
 
 
 # Pristine snapshot of the shipped defaults (captured BEFORE any overlay), so the
@@ -490,7 +512,7 @@ _SHIPPED = {
         "k_edge_foils": [list(k) for k in K_EDGE_FOILS],
     },
     "viewer_steps": {
-        "wavelength": DEFAULT_STEP_WAVELENGTH, "two_theta": DEFAULT_STEP_TWO_THETA,
+        "wavelength": DEFAULT_STEP_WAVELENGTH,
         "lsd_mm": DEFAULT_STEP_LSD_MM, "pixel": DEFAULT_STEP_PIXEL,
         "bc": DEFAULT_STEP_BC, "tilt": DEFAULT_STEP_TILT,
     },
@@ -509,7 +531,7 @@ _SHIPPED = {
         "integration_kernel": DEFAULT_KERNEL, "calibration_pipeline": DEFAULT_PIPELINE,
         "output_format": DEFAULT_OUTPUT_FORMAT, "azimuthal_method": DEFAULT_ERROR_MODEL,
         "plot_theme": DEFAULT_COLORMAP, "visible_tabs": list(DEFAULT_VISIBLE_TABS),
-        "ui_scale": DEFAULT_UI_SCALE,
+        "ui_scale": DEFAULT_UI_SCALE, "theme": DEFAULT_THEME,
     },
 }
 

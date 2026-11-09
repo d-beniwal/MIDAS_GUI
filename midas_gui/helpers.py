@@ -6,6 +6,7 @@ the established conventions in context/design_rules.md are preserved exactly.
 """
 from __future__ import annotations
 
+import io
 import math
 import re
 from pathlib import Path
@@ -131,6 +132,124 @@ def warn_if_path_missing(line_edit: QtWidgets.QLineEdit,
     """
     line_edit.returnPressed.connect(
         lambda: path_is_missing(line_edit, parent, is_output_dir=is_output_dir))
+    if not is_output_dir:
+        attach_file_info(line_edit)
+
+
+# ── File-info tooltip ────────────────────────────────────────────────────────
+
+def _fmt_size(n: int) -> str:
+    v = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if v < 1024 or unit == "TB":
+            return f"{int(v)} B" if unit == "B" else f"{v:.2f} {unit}"
+        v /= 1024.0
+    return f"{n} B"
+
+
+def _owner_of(st) -> str:
+    try:
+        import pwd
+        return pwd.getpwuid(st.st_uid).pw_name
+    except Exception:
+        return "unknown (owner lookup unavailable on this OS)"
+
+
+def file_info_text(path_text: str) -> str:
+    """Multi-line summary of the file/folder at ``path_text`` for a tooltip.
+
+    Returns "" if the text is empty or not an existing path (so callers can
+    hide the info affordance). Never raises.
+    """
+    import datetime as _dt
+    import stat as _stat
+    text = (path_text or "").strip()
+    if not text:
+        return ""
+    try:
+        p = Path(text).expanduser()
+        if not p.exists():
+            return ""
+        st = p.stat()
+    except Exception:
+        return ""
+
+    def _t(ts):
+        return _dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+
+    is_dir = p.is_dir()
+    rows = [("Name", p.name or str(p)), ("Folder", str(p.parent)),
+            ("Type", "Folder" if is_dir else (p.suffix.lstrip(".").upper() + " file"
+                                               if p.suffix else "File"))]
+    if is_dir:
+        try:
+            rows.append(("Items", str(sum(1 for _ in p.iterdir()))))
+        except Exception:
+            pass
+    else:
+        rows.append(("Size", f"{_fmt_size(st.st_size)}  ({st.st_size:,} bytes)"))
+    birth = getattr(st, "st_birthtime", None)
+    if birth is not None:
+        rows.append(("Created", _t(birth)))
+    else:                                   # Linux: true creation time is unavailable
+        rows.append(("Created", f"n/a on this OS (metadata changed {_t(st.st_ctime)})"))
+    rows.append(("Modified", _t(st.st_mtime)))
+    rows.append(("Accessed", _t(st.st_atime)))
+    rows.append(("Owner", _owner_of(st)))
+    rows.append(("Permissions", _stat.filemode(st.st_mode)))
+    if p.is_symlink():
+        try:
+            rows.append(("Link to", str(p.resolve())))
+        except Exception:
+            pass
+    w = max(len(k) for k, _ in rows)
+    return "\n".join(f"{k:<{w}}  {v}" for k, v in rows)
+
+
+class _FileInfoFilter(QtCore.QObject):
+    """Event filter: show fresh file info as the tooltip of a path field."""
+
+    def __init__(self, edit: QtWidgets.QLineEdit, action: QtWidgets.QAction):
+        super().__init__(edit)
+        self._edit, self._action = edit, action
+        edit.installEventFilter(self)
+        edit.textChanged.connect(self.refresh)
+        self.refresh()
+
+    def refresh(self, *_):
+        info = file_info_text(self._edit.text())
+        self._action.setVisible(bool(info))
+        self._action.setToolTip(info)
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QtCore.QEvent.ToolTip:
+            info = file_info_text(self._edit.text())   # re-stat: always current
+            if info:
+                QtWidgets.QToolTip.showText(ev.globalPos(), info, self._edit)
+                return True
+        return False
+
+
+def attach_file_info(line_edit: QtWidgets.QLineEdit) -> None:
+    """Give a file/folder path field an inline ⓘ icon and a hover tooltip
+    with size, created/modified/accessed times, owner and permissions.
+
+    Safe to call more than once on the same field; the icon only shows while
+    the text names an existing path. Applied to every input path field.
+    """
+    if getattr(line_edit, "_file_info_filter", None) is not None:
+        return
+    icon = line_edit.style().standardIcon(QtWidgets.QStyle.SP_MessageBoxInformation)
+    act = line_edit.addAction(icon, QtWidgets.QLineEdit.TrailingPosition)
+    act.setVisible(False)
+
+    def _show():
+        info = file_info_text(line_edit.text())
+        if info:
+            QtWidgets.QToolTip.showText(
+                line_edit.mapToGlobal(line_edit.rect().bottomLeft()), info, line_edit)
+    act.triggered.connect(_show)
+    line_edit._file_info_filter = _FileInfoFilter(line_edit, act)
 
 
 # ── Image IO ──────────────────────────────────────────────────────────────────
@@ -143,8 +262,7 @@ def _load_image(path: str | Path, data_loc: str = "exchange/data",
         import tifffile
         return np.asarray(tifffile.imread(str(p)), dtype=np.float32)
     if ext in H5_EXTS:
-        import h5py
-        with h5py.File(str(p), "r") as f:
+        with open_h5_read(p) as f:
             dset = f[data_loc]
             data = dset[frame] if dset.ndim >= 3 else dset[...]
         return np.asarray(data, dtype=np.float32)
@@ -365,12 +483,20 @@ _AUTO_DETECT_PROFILES = {"1-ID-E", "20-ID-D", "20-ID-E"}
 _DETECTOR_FILENAME_TAGS = (
     (".ge1", "ge"), (".ge2", "ge"), (".ge3", "ge"), (".ge4", "ge"), (".ge5", "ge"),
     (".vrx", "vrx"),
-    (".pxrd", "pxrd"),
+    (".pxrd", "pxrd"), (".pixi", "pxrd"),
     (".pmg", "pimega"),
 )
-# Pixel size (µm) for each recognized detector tag. No entry for "pxrd" —
-# Pixirad is identified but its pixel size isn't auto-populated (not given).
-_DETECTOR_PIXEL_UM = {"ge": 200.0, "vrx": 150.0, "pimega": 55.0}
+# Pixel size (µm) for each recognized detector tag.
+#
+# "pxrd" was long listed without a size, so a Pixirad was identified but its
+# pixel size never auto-populated. Both halves of that bit the 1-ID-E SAXS
+# setup on 2026-10-08: files there are written ".pixi", which this table did
+# not match at all, so loading one left the px box holding whatever the
+# previously-loaded calibration had put there (200 µm, from a GE) — and a
+# geometry saved from that card described the GE's pixel, not the Pixirad's.
+# 62 µm is the PIXIRAD CdTe pitch and is already what constants.PIXEL_PRESETS
+# offers under "Pixirad".
+_DETECTOR_PIXEL_UM = {"ge": 200.0, "vrx": 150.0, "pimega": 55.0, "pxrd": 62.0}
 # HDF5 dataset holding the beam energy (keV) used to derive wavelength, on the
 # beamlines above — confirmed as the authoritative source over the other
 # energy-like datasets present in these files (HRM/IDEnergy readbacks, which
@@ -396,20 +522,17 @@ def detect_wavelength_from_h5(path: str) -> Optional[float]:
     if not is_h5(path):
         return None
     try:
-        import h5py
-        with h5py.File(path, "r") as f:
-            ds = f.get(_ENERGY_DATASET)
-            if ds is None:
-                return None
-            energy_kev = float(np.atleast_1d(ds[()])[0])
-        if energy_kev <= 0:
-            return None
-        return HC_KEV_A / energy_kev
+        with open_h5_read(path) as f:
+            return _wavelength_from_file(f)
     except Exception:
         return None
 
 
-def detect_geometry_from_path(path: str, *, profile: Optional[str] = None) -> dict:
+_UNSET = object()
+
+
+def detect_geometry_from_path(path: str, *, profile: Optional[str] = None,
+                              wavelength=_UNSET) -> dict:
     """Best-effort auto-detected geometry hints from a just-loaded file's name
     ('pxY' from a known detector-file naming convention) and, for an HDF5
     frame file, its beam-energy metadata ('wavelength_A') — gated to the
@@ -427,7 +550,9 @@ def detect_geometry_from_path(path: str, *, profile: Optional[str] = None) -> di
     px = _DETECTOR_PIXEL_UM.get(detect_detector_from_filename(path))
     if px is not None:
         out["pxY"] = px
-    wl = detect_wavelength_from_h5(path)
+    # ``wavelength``: already read by the caller's own open of the file (the
+    # Data loader's probe) — skips a separate re-open just for one scalar.
+    wl = detect_wavelength_from_h5(path) if wavelength is _UNSET else wavelength
     if wl is not None:
         out["wavelength_A"] = wl
     return out
@@ -514,6 +639,106 @@ def suggest_integration_output_dir(data_path, *, expid_fallback: str = "") -> Op
             else parts.root / parts.froot)
 
 
+def _folder_output_dir(files, expid_fallback: str = "", derive=None):
+    """The one output dir a SOURCE FOLDER's files imply.
+
+    ``suggest_integration_output_dir`` reads the froot off each file's own
+    NAME, so one folder yields several: a load step's darks are
+    ``..._dark_before``/``..._dark_after`` and derive directories of their
+    own. Picking a folder by hand puts all of them in one place, so grouping
+    must too. Cannot be answered by passing the folder itself -- the
+    positional parse assumes the last component is a file, and a directory
+    path comes back scrambled (``s1c_bc/Faber_A_restart4_load_step/
+    connolly_oct26``).
+
+    Chosen by agreement: the directory most of the folder's files imply,
+    breaking a tie on the shortest path. Scan frames outnumber the two
+    darks, and a dark's froot is the scan's froot plus a suffix, so both
+    rules point the same way -- and a 1-scan-plus-2-darks folder, where the
+    count is a three-way tie, still lands on the scan.
+    """
+    counts = {}
+    derive = derive or suggest_integration_output_dir
+    for f in files:
+        d = derive(f, expid_fallback=expid_fallback)
+        if d is not None:
+            counts[str(d)] = counts.get(str(d), 0) + 1
+    if not counts:
+        return None
+    return Path(min(counts, key=lambda k: (-counts[k], len(k), k)))
+
+
+def group_paths_by_output_dir(paths, *, out_dir=None, expid_fallback: str = "",
+                              derive=None) -> list:
+    """Split a file selection into ``[(out_dir, [paths]), ...]`` -- one entry
+    per SOURCE FOLDER, each with the output directory that folder implies.
+
+    A recursive "Full folder" pick spans many source folders, and the
+    ``<expid>_bc/<froot>/<detector>`` convention derives the output dir from
+    each file's own path, so the selection maps to many dirs rather than
+    one. Applying it once writes every subfolder's output into whichever
+    folder the first file implied -- reported from 1-ID-E as every load step
+    landing in one directory.
+
+    Grouping is by containing folder, not by derived directory, so one run
+    covers exactly what picking that folder by hand covers (its darks
+    included -- see :func:`_folder_output_dir`).
+
+    ``out_dir`` is the Output field as it stands:
+
+    * unset, or equal to a directory one of the groups already derives (i.e.
+      the value the field auto-filled to from one file), it is a stale
+      single-folder guess and each group uses its own derived directory.
+    * anything else is a deliberate choice of root, and the groups are placed
+      under it at the same relative positions they have to each other, so a
+      custom root fans out rather than collapsing.
+
+    A selection inside ONE folder returns a single entry -- every
+    non-recursive pick -- which is the caller's existing one-run path.
+
+    ``derive`` picks which convention names a folder's directory, defaulting
+    to :func:`suggest_integration_output_dir` (``<expid>_bc/<froot>/<det>``).
+    Hydra passes :func:`suggest_panel_base_output_dir` instead, because each
+    of its four panels appends its OWN ``ge{n}/`` segment -- and the hook
+    matters for more than the name: the "is this Output box a stale autofill
+    or a chosen root" test compares the box against the derived dirs, so a
+    caller deriving one convention while the grouper assumed another never
+    matches, is read as a custom root, and nests every folder's output
+    inside the first one's.
+    """
+    paths = [str(x) for x in paths or []]
+    if not paths:
+        return []
+
+    by_folder = {}
+    for f in paths:
+        by_folder.setdefault(str(Path(f).parent), []).append(f)
+    if len(by_folder) == 1:
+        only = next(iter(by_folder.values()))
+        return [(_folder_output_dir(only, expid_fallback, derive)
+                 or (Path(out_dir) if out_dir else None), only)]
+
+    resolved = []          # (derived_dir_or_None, files)
+    for folder in sorted(by_folder):
+        files = by_folder[folder]
+        resolved.append((_folder_output_dir(files, expid_fallback, derive), files))
+
+    keys = [str(d) for d, _ in resolved if d is not None]
+    custom = bool(out_dir) and str(out_dir) not in keys
+    if custom and keys:
+        import os
+        common = Path(os.path.commonpath(keys)) if len(keys) > 1 else Path(keys[0]).parent
+        rebase = lambda d: Path(out_dir) / Path(str(d)).relative_to(common)
+    else:
+        rebase = lambda d: Path(str(d))
+
+    groups = [((rebase(d) if d is not None
+                else (Path(out_dir) if out_dir else None)), files)
+              for d, files in resolved]
+    groups.sort(key=lambda g: str(g[0]))
+    return groups
+
+
 #: Batch Correction's per-op subfolder under the integration output dir —
 #: ``dark_subtracted_mean``, ``dark_subtracted_max``, … Named for what the
 #: files in it are, the same way Batch Integrate's output is split into
@@ -536,6 +761,37 @@ def correction_subdir(op: str) -> str:
 #: Both are editable per run; these are only the defaults.
 CORRECTION_SUFFIX = "_cor"
 CORRECTION_EXT = ".h5"
+
+
+def suggest_panel_base_output_dir(data_path, *, expid_fallback: str = "") -> Optional[Path]:
+    """``<outroot>/<expid>_bc/<froot>`` — the SHARED base for a Hydra run.
+
+    Deliberately :func:`suggest_integration_output_dir` minus its
+    ``<detector>`` tail. The Hydra page's Output field is one directory for
+    all four panels and each panel appends its own ``ge{n}/`` (see
+    ``HydraBatchPage._run_panel``), so including the detector segment here
+    would produce ``…/<froot>/ge1/ge1``.
+
+    The representative path is any one panel's file: every panel of a Hydra
+    set shares a froot and an outroot, and differs only in the detector.
+
+    The detector tag is also stripped off the END of the froot when it is
+    there. ``bc_path_parts`` reads the froot off the file name, which at
+    1-ID carries it -- ``test_chamber_003516.ge1`` -- and a *shared* base
+    called ``…/test_chamber_003516.ge1/`` holding ge2, ge3 and ge4 names the
+    whole set after one panel. Single-detector output keeps the tag, which
+    is right there: it has exactly one detector and the tag says which.
+    """
+    parts = bc_path_parts(data_path, expid_fallback=expid_fallback)
+    if parts is None:
+        return None
+    froot = parts.froot
+    if parts.detector and froot.lower().endswith("." + parts.detector.lower()):
+        froot = froot[: -(len(parts.detector) + 1)]
+    if parts.positional:
+        return parts.root / froot
+    return (parts.root if parts.root.name == froot
+            else parts.root / froot)
 
 
 def suggest_correction_output_dir(data_path, *, expid_fallback: str = "") -> Optional[Path]:
@@ -707,9 +963,221 @@ def list_h5_datasets(path: str | Path) -> list:
         if isinstance(obj, h5py.Dataset) and obj.ndim >= 2:
             items.append((name, tuple(obj.shape)))
 
-    with h5py.File(str(path), "r") as f:
+    with open_h5_read(path) as f:
         f.visititems(_visit)
     return items
+
+
+# ── Fast HDF5 access for large / network-mounted files ─────────────────────────
+# Opening an HDF5 file over a slow share costs several metadata round trips, and
+# every re-open pays that again.  The pieces below keep the number of opens per
+# user action low (``probe_h5``), remember what an open learned for as long as
+# the file is unchanged (``h5_probe_cached``), and bound the RAM spent on frames
+# already read (``FrameCache``).  All pure h5py/numpy/threading, so identical on
+# Linux, macOS and Windows.  No file handle is kept open between reads on
+# purpose: an open handle blocks deleting/replacing the file on Windows and can
+# trip HDF5 file locking against a writer on a live acquisition.
+
+_H5_RDCC = {"rdcc_nbytes": 64 * 1024 * 1024, "rdcc_nslots": 100003}
+
+
+def open_h5_read(path):
+    """``h5py.File(path, "r")`` with a larger chunk cache, so chunks that span
+    several frames (or are re-read) aren't fetched again.  Falls back to a plain
+    open if this h5py build rejects the cache keywords."""
+    import h5py
+    try:
+        return h5py.File(str(path), "r", **_H5_RDCC)
+    except TypeError:
+        return h5py.File(str(path), "r")
+
+
+def _wavelength_from_file(f) -> Optional[float]:
+    """Wavelength (Å) from the beam-energy dataset of an *open* HDF5 file."""
+    try:
+        ds = f.get(_ENERGY_DATASET)
+        if ds is None:
+            return None
+        energy_kev = float(np.atleast_1d(ds[()])[0])
+        return HC_KEV_A / energy_kev if energy_kev > 0 else None
+    except Exception:
+        return None
+
+
+def read_h5_frame_native(dset, frame: int = 0) -> np.ndarray:
+    """One frame of an open dataset in its on-disk dtype (same indexing rule as
+    :func:`_load_image`: ``dset[frame]`` for a stack, the whole 2-D array else)."""
+    return np.asarray(dset[frame] if dset.ndim >= 3 else dset[...])
+
+
+class H5Probe(NamedTuple):
+    """What a single open of an HDF5 file learned (see :func:`probe_h5`)."""
+    shape: Optional[tuple]        # shape of the requested dataset (None: absent)
+    frame: Optional[np.ndarray]   # its first frame, native dtype (None: not read)
+    wavelength: Optional[float]   # Å from the energy dataset (None: absent)
+    items: Optional[list]         # [(name, shape), …] of ≥2-D datasets, if listed
+
+
+def probe_h5(path, dataset: Optional[str] = None, *, first_frame: bool = True,
+             listing: bool = False) -> H5Probe:
+    """Everything the Data loader needs from an HDF5 file, in ONE open.
+
+    ``dataset``: read its shape and (``first_frame``) its first frame.  The
+    dataset list (a full tree walk — the slow part on big files) is only built
+    when ``listing`` is set.  Raises ``OSError`` if the file can't be opened.
+    """
+    import h5py
+    shape = frame = items = None
+    with open_h5_read(path) as f:
+        if dataset:
+            d = f.get(dataset)
+            if isinstance(d, h5py.Dataset):
+                shape = tuple(d.shape)
+                if first_frame:
+                    frame = read_h5_frame_native(d, 0)
+        wl = _wavelength_from_file(f)
+        if listing:
+            items = []
+
+            def _visit(name, obj):
+                if isinstance(obj, h5py.Dataset) and obj.ndim >= 2:
+                    items.append((name, tuple(obj.shape)))
+
+            f.visititems(_visit)
+    return H5Probe(shape, frame, wl, items)
+
+
+_H5_PROBE_CACHE: dict = {}
+_H5_PROBE_CACHE_MAX = 32
+_H5_PROBE_LOCK = None
+
+
+def _probe_lock():
+    global _H5_PROBE_LOCK
+    if _H5_PROBE_LOCK is None:
+        import threading
+        _H5_PROBE_LOCK = threading.Lock()
+    return _H5_PROBE_LOCK
+
+
+def _stat_key(path) -> Optional[tuple]:
+    try:
+        st = Path(path).stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def h5_probe_cached(path, *, listing: bool = True) -> Optional[dict]:
+    """``{"items": [...], "wavelength": float|None}`` for *path*, from a cache
+    keyed on the file's (mtime, size) so an unchanged file is never walked twice
+    and a rewritten one is re-read.  ``None`` if the file doesn't exist.
+    ``listing=False`` returns whatever is cached without opening the file."""
+    key = _stat_key(path)
+    if key is None:
+        return None
+    p = str(path)
+    with _probe_lock():
+        hit = _H5_PROBE_CACHE.get(p)
+    if hit is not None and hit["key"] == key and hit["items"] is not None:
+        return hit
+    if not listing:
+        return None
+    pr = probe_h5(p, None, first_frame=False, listing=True)
+    entry = {"key": key, "items": pr.items, "wavelength": pr.wavelength}
+    with _probe_lock():
+        if len(_H5_PROBE_CACHE) >= _H5_PROBE_CACHE_MAX:
+            _H5_PROBE_CACHE.pop(next(iter(_H5_PROBE_CACHE)))
+        _H5_PROBE_CACHE[p] = entry
+    return entry
+
+
+def h5_dataset_shape_cached(path, dataset: str) -> Optional[tuple]:
+    """Shape of ``dataset`` if a prior listing of the unchanged file saw it
+    (no I/O); ``None`` otherwise — the caller then opens the file itself."""
+    hit = h5_probe_cached(path, listing=False)
+    if hit:
+        for name, shape in hit["items"]:
+            if name == dataset:
+                return tuple(shape)
+    return None
+
+
+class FrameCache:
+    """Thread-safe LRU of already-read frames, bounded by bytes (always keeps at
+    least ``min_items``).  Stored arrays are read-only; callers copy on the way
+    out.  ``clear()`` bumps ``gen`` so a background read that started before a
+    source change can't insert a stale frame (``put(..., gen=)`` drops it)."""
+
+    def __init__(self, max_bytes: int = 256 * 1024 * 1024, min_items: int = 4):
+        import threading
+        from collections import OrderedDict
+        self._d = OrderedDict()
+        self._bytes = 0
+        self._lock = threading.Lock()
+        self.max_bytes = int(max_bytes)
+        self.min_items = int(min_items)
+        self.gen = 0
+
+    def get(self, key):
+        with self._lock:
+            a = self._d.get(key)
+            if a is not None:
+                self._d.move_to_end(key)
+            return a
+
+    def __contains__(self, key) -> bool:
+        with self._lock:
+            return key in self._d
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._d)
+
+    def put(self, key, arr: np.ndarray, gen: Optional[int] = None) -> None:
+        arr = np.asarray(arr)
+        with self._lock:
+            if gen is not None and gen != self.gen:
+                return
+            old = self._d.pop(key, None)
+            if old is not None:
+                self._bytes -= old.nbytes
+            try:
+                arr.setflags(write=False)
+            except ValueError:
+                pass
+            self._d[key] = arr
+            self._bytes += arr.nbytes
+            while self._bytes > self.max_bytes and len(self._d) > self.min_items:
+                _, v = self._d.popitem(last=False)
+                self._bytes -= v.nbytes
+
+    def clear(self) -> None:
+        with self._lock:
+            self._d.clear()
+            self._bytes = 0
+            self.gen += 1
+
+
+def best_default_dataset_index(items: list, prefer_max_frames: bool = False) -> int:
+    """Pick a sensible default dataset index among ``items`` (``[(name,
+    shape), …]``, e.g. from :func:`list_h5_datasets`), used when the
+    caller's remembered dataset name isn't present in the newly-loaded file.
+
+    Eligible datasets are those with ``ndim >= 3`` (a per-frame stack).
+    ``prefer_max_frames=False`` keeps the original behaviour of picking the
+    first eligible entry in file order. ``prefer_max_frames=True`` instead
+    picks the eligible entry with the largest frame count (``shape[0]``) —
+    for a Dark field pointed at a different file than the main data, where
+    "first in file order" risks landing on a near-empty calibration dataset
+    instead of the real dark-frame stack. Falls back to index 0 if no
+    dataset is eligible."""
+    eligible = [i for i, (_, shape) in enumerate(items) if len(shape) >= 3]
+    if not eligible:
+        return 0
+    if prefer_max_frames:
+        return max(eligible, key=lambda i: items[i][1][0])
+    return eligible[0]
 
 
 # Name fragments that mark a 1-D dataset as the measured rotation angle,
@@ -753,7 +1221,55 @@ def list_h5_1d_datasets(path: str | Path) -> list:
     return sorted(items, key=_rank)
 
 
-_DARK_NAME_RE = re.compile(r'(^|[_.])dark([_.]|$)|_dark_(before|after)\b', re.IGNORECASE)
+def detect_omega_frame_range(path: str | Path, field: str,
+                              start_deg: float, end_deg: float) -> tuple[int, int, float]:
+    """First/last 0-based frame index whose *field* omega value lies within
+    the closed span between ``start_deg`` and ``end_deg`` (either order; the
+    scan direction doesn't matter since frame order is acquisition order,
+    not omega order), plus the measured omega at the first matching frame.
+
+    Used by Solve Cell's "auto-detect frame range" (``tab_solve_cell.py``)
+    in place of a user paging through frames by hand to find where their
+    omega range starts/ends in the raw stack. Deliberately a plain
+    value-in-range test, not a step-count/nearest-value search: a scan's
+    ramp-up/ramp-down segments make per-frame omega spacing uneven at both
+    ends, so independently nearest-matching ``start_deg`` and ``end_deg``
+    can disagree with the step size by a frame or more, while "which frames
+    actually carry an omega in this span" is unambiguous and matches what a
+    user paging through frames by hand would call the start/end frame.
+    """
+    import h5py
+    with h5py.File(str(path), "r") as f:
+        if field not in f:
+            raise KeyError(f"{field!r} not found in {path}")
+        omega = np.asarray(f[field][()], dtype=float).ravel()
+    lo, hi = (start_deg, end_deg) if start_deg <= end_deg else (end_deg, start_deg)
+    mask = (omega >= lo) & (omega <= hi)
+    idx = np.flatnonzero(mask)
+    if idx.size == 0:
+        raise ValueError(
+            f"No frames have {field!r} in [{lo:g}, {hi:g}]° "
+            f"(file range: [{omega.min():g}, {omega.max():g}]°).")
+    first_idx, last_idx = int(idx[0]), int(idx[-1])
+    return first_idx, last_idx, float(omega[first_idx])
+
+
+# "dark" as a word, however the beamline glued it together. The original
+# pattern required a _ or . on BOTH sides, which is 20-ID-E's
+# ``_dark_before_`` / ``_dark_after_`` convention and nothing else. At
+# 1-ID-E the same thing is written ``_Darks_``, ``startingDarks_`` and
+# ``darkexp01s_``, so 10 of the 11 dark folders in a real experiment were
+# invisible to every caller of this function — including the ladder that
+# exists to find them. Verified against that experiment: all 11 matched
+# names are genuine dark acquisitions (10 dark frames, no data), so
+# widening costs no false positives there.
+_DARK_NAME_RE = re.compile(
+    r'(?:^|[_.\-])dark'          # a dark token, however prefixed
+    r'(?:s|ield|field)?'         # dark / darks / darkfield
+    r'(?:[_.\-]|exp|$)'          # ..._ or ...exp01s or end of the stem
+    r'|darks?(?=[_.\-]|$)'       # ...startingDarks_ (no separator before)
+    r'|_dark_(?:before|after)\b',
+    re.IGNORECASE)
 
 
 def is_dark_like_name(path) -> bool:
@@ -1061,6 +1577,10 @@ def apply_field_corrections(img: np.ndarray, *, dark=None, bright=None,
     left over from reusing a session saved against a different detector) is
     skipped rather than raising — mirrors ``MaskSelector.composite_mask()``'s
     "skip + warn" handling of a mismatched mask source.
+
+    ``img`` may also be a stack ``(B,H,W)`` — each field is still 2-D and is
+    broadcast across the batch axis (checked against ``img``'s trailing two
+    dimensions, not its full shape).
     """
     import warnings
     out = np.asarray(img, dtype=np.float64)
@@ -1069,10 +1589,10 @@ def apply_field_corrections(img: np.ndarray, *, dark=None, bright=None,
         if field is None:
             return None
         arr = np.asarray(field, dtype=np.float64)
-        if arr.shape != out.shape:
+        if arr.shape != out.shape[-2:]:
             warnings.warn(
                 f"apply_field_corrections: {label} shape {arr.shape} != "
-                f"image shape {out.shape} — skipped", RuntimeWarning, stacklevel=2)
+                f"image shape {out.shape[-2:]} — skipped", RuntimeWarning, stacklevel=2)
             return None
         return arr
 
@@ -1094,6 +1614,50 @@ def apply_field_corrections(img: np.ndarray, *, dark=None, bright=None,
     if clip_negative:
         out = np.clip(out, 0.0, None)
     return out
+
+
+def reduce_frames_batched(batch_iter, method: str, *, dark=None, bright=None,
+                          background=None, bright_mode: str = "divide"):
+    """Project a frame stack (max/sum/mean) with each frame corrected
+    BEFORE it's folded into the reduction, one batch at a time so peak
+    memory is one batch, not the whole stack.
+
+    ``batch_iter`` yields ``(B,H,W)`` raw arrays (e.g. from
+    ``DataLoaderPanel.iter_raw_batches``/``hydra.iter_stack_batches``).
+    Correction is applied per batch via ``apply_field_corrections``
+    (vectorized across the batch), then each corrected batch is folded into
+    a running accumulator — ``max`` via ``np.maximum``, ``sum``/``mean`` via
+    a running sum (never an average of per-batch means, which would be wrong
+    once the final batch is a different size) divided by the true total
+    frame count once at the end for ``mean``.
+
+    Returns ``(result: np.ndarray float32 2-D, n_used: int)``. Raises
+    ``ValueError`` if ``batch_iter`` yields no frames.
+    """
+    method = "mean" if method == "average" else method
+    corrected_fields = dark is not None or bright is not None or background is not None
+    acc = None
+    n_used = 0
+    for batch in batch_iter:
+        batch = np.asarray(batch)
+        if batch.ndim != 3 or batch.shape[0] == 0:
+            continue
+        if corrected_fields:
+            batch = apply_field_corrections(
+                batch, dark=dark, bright=bright, bright_mode=bright_mode,
+                background=background)
+        if method == "max":
+            reduced = _COMBINE_OPS["max"](batch)
+            acc = reduced if acc is None else np.maximum(acc, reduced)
+        else:
+            reduced = _COMBINE_OPS["sum"](batch)
+            acc = reduced if acc is None else acc + reduced
+        n_used += batch.shape[0]
+    if acc is None or n_used == 0:
+        raise ValueError("No frames to reduce")
+    if method == "mean":
+        acc = acc / n_used
+    return acc.astype(np.float32), n_used
 
 
 # ── Ring prediction (calibrant → ring radii in px) ──────────────────────────────
@@ -1710,23 +2274,36 @@ def _pixel_to_two_theta_deg(Y_px, Z_px, Lsd_um: float, bc_y: float, bc_z: float,
 
 
 def pixel_eta_deg(Y_px, Z_px, bc_y: float, bc_z: float,
-                  pxY_um: float, pxZ_um: float):
+                  pxY_um: float, pxZ_um: float, tx: float = 0.0):
     """Azimuth η (degrees) of pixel(s) about the beam centre.
 
-    Matches the backend's ``pixel_to_REta`` exactly — ``atan2(-Yc, Zc)``
-    with ``Yc = (bc_y - Y) * pxY`` and ``Zc = (Z - bc_z) * pxZ`` — so η = 0
-    is straight **up** (+Z), not along +Y, and η increases towards +Y. The
-    same convention the η spokes are drawn in (see the note in
-    ``draw_bin_grid``); swapping the arguments puts every value 90° out.
+    Matches the backend's ``pixel_to_REta`` — ``atan2(-Yc, Zc)`` with
+    ``Yc = (bc_y - Y) * pxY`` and ``Zc = (Z - bc_z) * pxZ`` — so η = 0 is
+    straight **up** (+Z), not along +Y, and η increases towards +Y. The same
+    convention the η spokes are drawn in (see the note in ``draw_bin_grid``);
+    swapping the arguments puts every value 90° out.
 
-    Deliberately flat (no tilt): η names which spoke of the cake a pixel
-    falls in, and the cake's own η binning is this detector-plane angle.
-    2θ is the quantity that must be tilt-corrected, and
+    ``tx`` is the panel's installation roll about the beam. It is a pure
+    offset here: MEASURED against ``midas_calibrate_v2.forward.geometry.
+    pixel_to_REta`` at five pixels and three rolls, the backend's η is
+    exactly this detector-plane angle plus tx, wrapped to (-180, 180].
+    It defaults to 0 because η was flat for a long time and most detectors
+    are unrolled, but a rolled panel binned without it is reported a full tx
+    away from the cake axis it actually lands in — at 1-ID with tx=120° the
+    status bar read η = -120.28° for a pixel the integration puts at
+    -0.28°.
+
+    Still deliberately flat in ty/tz: η names which spoke of the cake a pixel
+    falls in, and the cake's η binning is this in-plane angle. 2θ is the
+    quantity that must be tilt-corrected, and
     :func:`_pixel_to_two_theta_deg` is where that happens.
     """
     Yc = (bc_y - np.asarray(Y_px, dtype=float)) * pxY_um
     Zc = (np.asarray(Z_px, dtype=float) - bc_z) * pxZ_um
-    return np.degrees(np.arctan2(-Yc, Zc))
+    eta = np.degrees(np.arctan2(-Yc, Zc))
+    if tx:
+        eta = (eta + float(tx) + 180.0) % 360.0 - 180.0
+    return eta
 
 
 def im_trans_map_point(col, row, shape, codes):
@@ -1860,7 +2437,8 @@ def pixel_readout_text(col, row, geom: dict) -> str:
         float(geom.get("tx") or 0.0), float(geom.get("ty") or 0.0),
         float(geom.get("tz") or 0.0), float(pxY), float(pxZ)))
     eta = float(pixel_eta_deg(col, row, float(bc_y), float(bc_z),
-                              float(pxY), float(pxZ)))
+                              float(pxY), float(pxZ),
+                              float(geom.get("tx") or 0.0)))
     parts = [f"2θ = {_fmt_g(tt, 4)}°"]
     wl = geom.get("wavelength_A")
     if wl and float(wl) > 0:
@@ -2154,7 +2732,9 @@ def draw_polar_bin_overlay(viewer, items: list, *, bc_y: float, bc_z: float,
                            tx: float = 0.0, ty: float = 0.0, tz: float = 0.0,
                            lsd_um: Optional[float] = None,
                            pxY_um: Optional[float] = None,
-                           pxZ_um: Optional[float] = None) -> None:
+                           pxZ_um: Optional[float] = None,
+                           color: Optional[str] = None,
+                           clear: bool = True) -> None:
     """If ``show_grid``, draw the Rmin/Rmax boundaries plus the polar
     (R, η) bin grid — arcs at each radial-bin edge plus spokes at each
     η-bin edge, both thinned to at most ``max_rings``/``max_spokes`` — onto
@@ -2186,9 +2766,19 @@ def draw_polar_bin_overlay(viewer, items: list, *, bc_y: float, bc_z: float,
     uses for calibration rings.
     """
     import pyqtgraph as pg
-    for it in items:
-        viewer._iv.removeItem(it)
-    items.clear()
+    if clear:
+        for it in items:
+            viewer._iv.removeItem(it)
+        items.clear()
+    # ``color`` keys the whole overlay to one detector. Four panels' caking
+    # regions on one composite canvas are only readable if each is drawn in
+    # the colour that panel already has everywhere else (see
+    # hydra_widgets.panel_color); ``clear=False`` is what lets them stack
+    # into a single `items` list that one later call still tears down.
+    # Default stays the original orange/blue so every existing caller is
+    # pixel-identical.
+    bound_color = color or "orange"
+    grid_color = color or (120, 180, 255)
     if r_max <= 0:
         return
     tilt_aware = (bool(lsd_um) and bool(pxY_um) and bool(pxZ_um)
@@ -2224,9 +2814,42 @@ def draw_polar_bin_overlay(viewer, items: list, *, bc_y: float, bc_z: float,
         return
 
     if r_min > 0:
-        _circle(r_min, pg.mkPen("orange", width=1.2, style=QtCore.Qt.DashLine))
-    _circle(r_max, pg.mkPen("orange", width=1.5))
-    grid_pen = pg.mkPen((120, 180, 255), width=0.8)
+        _circle(r_min, pg.mkPen(bound_color, width=1.2, style=QtCore.Qt.DashLine))
+    _circle(r_max, pg.mkPen(bound_color, width=1.5))
+    def _spoke_xy(eta):
+        if tilt_aware:
+            tt_lo = math.degrees(math.atan(r_min * pxY_um / lsd_um))
+            tt_hi = math.degrees(math.atan(r_max * pxY_um / lsd_um))
+            return tilted_spoke_xy(tt_lo, tt_hi, float(eta), tx, ty, tz,
+                                   lsd_um, bc_y, bc_z, pxY_um, pxZ_um)
+        # bc + r*(sin η, cos η) — same convention tilted_spoke_xy reduces
+        # to at zero tilt (and pixel_to_REta's eta=atan2(-Yc,Zc)): η=0 is
+        # straight up (+Z), not along +Y. cos/sin here (not sin/cos)
+        # would draw each η spoke 90° off from where it actually is.
+        th_r = math.radians(float(eta))
+        return ([bc_y + r_min * math.sin(th_r), bc_y + r_max * math.sin(th_r)],
+                [bc_z + r_min * math.cos(th_r), bc_z + r_max * math.cos(th_r)])
+
+    def _spoke(eta, pen):
+        Y, Z = _spoke_xy(eta)
+        item = pg.PlotDataItem(Y, Z, pen=pen)
+        viewer._iv.addItem(item); items.append(item)
+
+    # The two ends of the azimuth, told apart by line style. A caked region
+    # is directional -- eta runs from start to end -- and with both edges
+    # drawn identically there is nothing to say which way round it goes, or
+    # which edge you just moved. Same grammar as the radial pair above:
+    # the LOWER bound dashes, the UPPER is solid. Drawn in the boundary
+    # colour at boundary width so they read as limits, not as grid lines.
+    #
+    # Only when the sweep is actually limited: at a full turn the two
+    # coincide and a "start" marker would be an arbitrary ray across the
+    # image.
+    if 0.0 < (float(eta_max) - float(eta_min)) < 360.0 - 1e-9:
+        _spoke(eta_min, pg.mkPen(bound_color, width=1.2, style=QtCore.Qt.DashLine))
+        _spoke(eta_max, pg.mkPen(bound_color, width=1.5))
+
+    grid_pen = pg.mkPen(grid_color, width=0.8)
     for r in _thinned_bin_edges(r_min, r_max, r_bin, max_rings):
         if r_min < r < r_max:
             _circle(r, grid_pen)
@@ -2234,21 +2857,7 @@ def draw_polar_bin_overlay(viewer, items: list, *, bc_y: float, bc_z: float,
     if eta_max - eta_min >= 360.0 - 1e-6:
         eta_edges = eta_edges[eta_edges < eta_max - 1e-9]   # drop the wraparound duplicate
     for eta in eta_edges:
-        if tilt_aware:
-            tt_lo = math.degrees(math.atan(r_min * pxY_um / lsd_um))
-            tt_hi = math.degrees(math.atan(r_max * pxY_um / lsd_um))
-            Y, Z = tilted_spoke_xy(tt_lo, tt_hi, float(eta), tx, ty, tz,
-                                    lsd_um, bc_y, bc_z, pxY_um, pxZ_um)
-        else:
-            # bc + r*(sin η, cos η) — same convention tilted_spoke_xy reduces
-            # to at zero tilt (and pixel_to_REta's eta=atan2(-Yc,Zc)): η=0 is
-            # straight up (+Z), not along +Y. cos/sin here (not sin/cos)
-            # would draw each η spoke 90° off from where it actually is.
-            th_r = math.radians(float(eta))
-            Y = [bc_y + r_min * math.sin(th_r), bc_y + r_max * math.sin(th_r)]
-            Z = [bc_z + r_min * math.cos(th_r), bc_z + r_max * math.cos(th_r)]
-        item = pg.PlotDataItem(Y, Z, pen=grid_pen)
-        viewer._iv.addItem(item); items.append(item)
+        _spoke(eta, grid_pen)
 
 
 def _drop_missing_residual_map(spec):
@@ -2323,6 +2932,43 @@ def _spec_from_json(path: str, r_bin: float, eta_bin: float):
 _PARAMSTEST_DISTORTION = {v1: v2 for v2, v1 in _V2_TO_V1.items()}
 
 
+def _crystallography(cal) -> dict:
+    """``SpaceGroup``/``LatticeConstant`` kwargs for a calibrant, or ``{}``.
+
+    A d-spacing calibrant (AgBH, ``Custom d-spacings…``) is not a crystal and
+    has no cell to report. This used to be ``_SG.get(cal, 225)`` /
+    ``_LC.get(cal, _LC["CeO2"])``, which filled both fields with *ceria's*
+    values — so calibrating on silver behenate wrote ``SpaceGroup 225`` and
+    ``LatticeConstant 5.4116 …`` into paramstest.txt, and the Results panel
+    (which reads that same file back) displayed a ceria structure for a run
+    that never saw any ceria. Returning ``{}`` leaves both at
+    ``CalibrationParams``' own unset defaults instead of asserting a structure
+    that does not exist; see ``_record_dspacing_calibrant`` for what is
+    reported in their place.
+    """
+    from midas_gui.constants import _SG, _LC
+    lattice = _LC.get(cal)
+    if lattice is None:
+        return {}
+    return dict(SpaceGroup=_SG.get(cal, 225), LatticeConstant=lattice)
+
+
+def _record_dspacing_calibrant(p, cal, result) -> None:
+    """Name the calibrant and report the d-spacings the fit used, for a
+    calibrant with no crystal structure. No-op for a crystalline one, whose
+    SpaceGroup/LatticeConstant already say what it was."""
+    from midas_gui.constants import _LC
+    if _LC.get(cal) is not None:
+        return
+    p.extra["Calibrant"] = cal
+    # Prefer the rings actually picked over the material's full table: a
+    # 10-entry AgBH list fitted from 3 rings should report the 3.
+    d_used = (getattr(result, "_d_used", None)
+              or getattr(result, "_d_list", None) or [])
+    if len(d_used):
+        p.extra["DSpacings"] = " ".join(f"{float(d):.6f}" for d in d_used)
+
+
 def write_standalone_paramstest(result, path, *, extra=None):
     """Write a v1 ``paramstest.txt`` from an AutoCalibrationResult (no geometry
     dependency on a live pipeline). Single implementation shared by the Calibrate
@@ -2338,8 +2984,9 @@ def write_standalone_paramstest(result, path, *, extra=None):
     p = CalibrationParams(
         NrPixelsY=NY, NrPixelsZ=NZ, pxY=pxY, pxZ=pxZ, Lsd=result.Lsd,
         BC_y=result.BC_y, BC_z=result.BC_z, tx=result.tx, ty=result.ty, tz=result.tz,
-        Wavelength=result.wavelength_A, SpaceGroup=_SG.get(cal, 225),
-        LatticeConstant=_LC.get(cal, _LC["CeO2"]), RhoD=RhoD, MaxRingRad=RhoD * 0.97)
+        Wavelength=result.wavelength_A, **_crystallography(cal),
+        RhoD=RhoD, MaxRingRad=RhoD * 0.97)
+    _record_dspacing_calibrant(p, cal, result)
     for v2n, v1n in _V2_TO_V1.items():
         val = (result.distortion or {}).get(v2n)
         if val is not None:
@@ -2822,6 +3469,20 @@ def apply_dict_to_widgets(widgets: dict, data: dict) -> None:
             w.blockSignals(False)
 
 
+class _LogStream(io.TextIOBase):
+    def __init__(self, sig):
+        super().__init__()
+        self._sig = sig
+
+    def write(self, s):
+        if s.strip():
+            self._sig.emit(s.rstrip())
+        return len(s)
+
+    def flush(self):
+        pass
+
+
 # ── No-scroll spinboxes (prevent accidental wheel value changes) ────────────────
 
 class _NoScrollSpinBox(QtWidgets.QSpinBox):
@@ -2898,7 +3559,7 @@ def _clickable_menu_label(text, entries, parent=None):
     btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
     btn.setCursor(QtCore.Qt.PointingHandCursor)
     btn.setStyleSheet(
-        "QToolButton { border: none; padding: 0 2px; color: #4da3ff; }"
+        f"QToolButton {{ border: none; padding: 0 2px; color: {S.LINK}; }}"
         "QToolButton::menu-indicator { image: none; }")
     f = btn.font(); f.setUnderline(True); btn.setFont(f)
     menu = QtWidgets.QMenu(btn)
@@ -2928,7 +3589,7 @@ def make_kedge_label(wl_spin, text="λ:", parent=None):
     btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
     btn.setCursor(QtCore.Qt.PointingHandCursor)
     btn.setStyleSheet(
-        "QToolButton { border: none; padding: 0 2px; color: #4da3ff; }"
+        f"QToolButton {{ border: none; padding: 0 2px; color: {S.LINK}; }}"
         "QToolButton::menu-indicator { image: none; }")
     f = btn.font(); f.setUnderline(True); btn.setFont(f)
 
@@ -3025,7 +3686,7 @@ def make_calib_values_button(fields_getter, text="View calibration ▾", parent=
     btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
     btn.setCursor(QtCore.Qt.PointingHandCursor)
     btn.setStyleSheet(
-        "QToolButton { border: none; padding: 0 2px; color: #4da3ff; }"
+        f"QToolButton {{ border: none; padding: 0 2px; color: {S.LINK}; }}"
         "QToolButton::menu-indicator { image: none; }")
     f = btn.font(); f.setUnderline(True); btn.setFont(f)
     btn.setToolTip("Click to view the calibration geometry currently in use.")

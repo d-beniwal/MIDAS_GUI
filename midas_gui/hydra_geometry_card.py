@@ -24,7 +24,7 @@ import pyqtgraph as pg
 
 from midas_gui.constants import (MATERIALS, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM,
                            DEFAULT_LSD_UM, DEFAULT_BC_Y, DEFAULT_BC_Z, DEFAULT_RING_WIDTH,
-                           DEFAULT_STEP_WAVELENGTH, DEFAULT_STEP_TWO_THETA,
+                           DEFAULT_N_RINGS, DEFAULT_STEP_WAVELENGTH,
                            DEFAULT_STEP_LSD_MM, DEFAULT_STEP_PIXEL, DEFAULT_STEP_BC,
                            DEFAULT_STEP_TILT)
 from midas_gui.dialogs import show_error
@@ -36,7 +36,7 @@ from midas_gui.helpers import (_fspin, _NoScrollSpinBox, _browse,
                          write_poni, write_standalone_paramstest,
                          im_trans_codes_from_checkboxes, _apply_im_trans,
                          parse_dspacing_text, ring_on_image_mask as _ring_on_image_mask,
-                         browse_start_dir)
+                         max_two_theta_deg, browse_start_dir)
 from midas_gui.workers import build_integration_context, integrate_frame
 from midas_gui import style as S
 
@@ -298,13 +298,32 @@ class DetectorGeometryCard(QtWidgets.QWidget):
     pullGeometry = QtCore.pyqtSignal()        # "← Get" (geometry ← Calibrate) clicked
     imTransChanged = QtCore.pyqtSignal()      # a Flip Y/Flip Z/Transpose checkbox toggled
     geometryChanged = QtCore.pyqtSignal()     # BC/tilt/calibration changed (edit, pick, or file load)
+    #: Materials list (add/remove/enable/color/lattice/per-ring visibility) or
+    #: the Rings/Labels/thickness controls changed interactively — an owner
+    #: with several cards (HydraViewerPage) mirrors this onto its other cards,
+    #: see get_ring_settings/apply_ring_settings. Not emitted by
+    #: set_materials() itself (used for both GUI-state restore and applying a
+    #: sync from an owner) to avoid feedback loops.
+    ringSettingsChanged = QtCore.pyqtSignal()
 
-    def __init__(self, parent=None, *, show_rotate: bool = False):
+    def __init__(self, parent=None, *, show_rotate: bool = False,
+                 show_calib_handoff: bool = True):
         super().__init__(parent)
         self._show_rotate = show_rotate
+        self._show_calib_handoff = show_calib_handoff
         self._materials: list = []
+        self._loading_materials = False   # True while set_materials() runs
+        #: What a calibration load wrote into the geometry boxes; see
+        #: _snapshot_calib_baseline.
+        self._calib_widget_baseline: Optional[dict] = None
         self._ring_items: list = []
         self._label_items: list = []
+        #: Parallel to _ring_items/_label_items — whether each item's own
+        #: ring is individually enabled (see ring_enabled/_ring_key), so
+        #: _set_rings_visible can combine it with the master Rings/Labels
+        #: checkboxes without a full _redraw_rings.
+        self._ring_item_enabled: list = []
+        self._label_item_enabled: list = []
         self._pick_ring_item = None
         self._picked_r: Optional[float] = None
         self._calib_geom: Optional[dict] = None
@@ -319,11 +338,18 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         #: Geometry the currently-drawn rings were simulated with (frozen, so
         #: a one-shot simulation does not follow later parameter edits).
         self._ring_draw_geom: Optional[dict] = None
+        # Set by a control API (see control_api.py) before driving this card
+        # headlessly — see set_agent_mode.
+        self._agent_mode = False
 
         self._viewer = None
         self._profile_view = None
         self._cake_view = None
         self._image_provider: Callable[[], Optional[np.ndarray]] = lambda: None
+        self._detected_px: Optional[float] = None   # px size the data implies
+        #: ``fn(suffix) -> full path`` for the Save dialogs; see
+        #: set_save_name_provider.
+        self._save_name_provider: Optional[Callable[[str], Optional[str]]] = None
         self._mask_provider: Optional[Callable[[np.ndarray], Optional[np.ndarray]]] = None
         self._rad_r_bin: Optional[QtWidgets.QDoubleSpinBox] = None
         self._rad_auto: Optional[QtWidgets.QCheckBox] = None
@@ -339,6 +365,21 @@ class DetectorGeometryCard(QtWidgets.QWidget):
                           mask_provider: Optional[Callable[[np.ndarray], Optional[np.ndarray]]] = None):
         self._image_provider = image_provider
         self._mask_provider = mask_provider
+
+    def set_save_name_provider(self, fn: Optional[Callable[[str], Optional[str]]]):
+        """Supply ``fn(suffix) -> full default path`` for the Save dialogs.
+
+        Without it the dialogs open on bare names (``paramstest.txt``) in
+        whatever directory the app was launched from, so every save is a
+        navigate-and-type. The Calibrate tab has named its files
+        ``<expid>_<data stem><suffix>`` beside the data for a while
+        (``CalibrationTab._default_save_path``); this lets the Data Viewer and
+        the Hydra panels do the same instead of each inventing one.
+
+        Optional, and failures fall back to the bare name, so a card with no
+        provider behaves exactly as before.
+        """
+        self._save_name_provider = fn
 
     def set_profile_view(self, profile_view):
         self._profile_view = profile_view
@@ -479,10 +520,26 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         return self._calib_geom is not None
 
     def get_geometry(self) -> dict:
-        """Current manual geometry — λ (Å), pixel (µm), Lsd (µm), beam centre (px).
+        """Current geometry — λ (Å), pixel (µm), Lsd (µm), beam centre (px).
 
-        Lsd is entered in mm (display) but always returned/used in µm."""
-        return {
+        Lsd is entered in mm (display) but always returned/used in µm.
+
+        ``tx`` and the distortion coefficients have no field on this card, so
+        they come from the loaded calibration file if there is one. They used
+        to be dropped here, which meant "Send →" quietly delivered a geometry
+        missing the panel's installation azimuth: load a Hydra paramstest at
+        tx=300 with 13 refined coefficients, press Send, and the Calibrate
+        tab received neither. The values were on screen in the summary line
+        the whole time, which is what made it read as Send having done
+        nothing.
+
+        A key is included only when it is actually known. The receiver
+        (``tab_calibrate.apply_geometry``) treats a present key as a value to
+        seed and tick, so sending a fabricated 0 would pin the fit to the
+        wrong azimuth -- the same failure that erased tx on result feedback.
+        Absent means unknown, and the auto-seeder handles it.
+        """
+        g = {
             "wavelength_A": self._wl.value(),
             "pxY": self._px.value(),
             "Lsd": self._lsd_um(),
@@ -492,20 +549,25 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             "tz": self._tz.value(),
             "im_trans": self.im_trans_codes(),
         }
+        g["tx"] = self._tx.value()
+        cal = self._calib_geom or {}
+        if cal.get("distortion"):
+            g["distortion"] = dict(cal["distortion"])
+        return g
 
     def _lsd_um(self) -> float:
         """Lsd in µm (internal unit) from the mm display field."""
         return self._lsd.value() * 1000.0
 
-    # ── Shared-field sync (Hydra: λ / max 2θ / px mirrored across panels) ──
+    # ── Shared-field sync (Hydra: λ / N rings / px mirrored across panels) ──
 
     def get_shared_fields(self) -> dict:
-        """λ, max 2θ, and pixel size — the 3 fields an owner (the Hydra page)
+        """λ, N rings, and pixel size — the 3 fields an owner (the Hydra page)
         may mirror across several cards, since the same X-ray beam and GE
         detector model make them physically identical for every panel."""
         return {
             "wavelength_A": self._wl.value(),
-            "max2theta": self._max2t.value(),
+            "n_rings": self._n_rings.value(),
             "pxY": self._px.value(),
         }
 
@@ -514,17 +576,67 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         this card's own change signals (the owner already knows it's
         propagating a sync) — then refresh exactly as ``_on_sim_param_changed``
         would for a direct edit: resimulate if live ring simulation is on
-        (ring radii themselves depend on λ/px/max2θ, not just their on-image
+        (ring radii themselves depend on λ/px/N rings, not just their on-image
         position), otherwise redraw/reintegrate with the new values."""
-        for w, key in ((self._wl, "wavelength_A"), (self._max2t, "max2theta"),
+        for w, key in ((self._wl, "wavelength_A"), (self._n_rings, "n_rings"),
                        (self._px, "pxY")):
             v = fields.get(key)
             if v is not None:
-                w.blockSignals(True); w.setValue(float(v)); w.blockSignals(False)
+                w.blockSignals(True); w.setValue(type(w.value())(v)); w.blockSignals(False)
+        # What the DATA says the pixel size is, kept separately from the box:
+        # loading a calibration afterwards overwrites the box, and a geometry
+        # saved from that card would then describe the calibration's detector
+        # rather than the one on screen. Only used to warn at save time --
+        # detection covers a handful of detectors and a refined pixel size is
+        # legitimately not the nominal one, so it must not override anything.
+        if fields.get("pxY") is not None:
+            self._detected_px = float(fields["pxY"])
         if self._sim_btn.isChecked() and self._image_provider() is not None:
             self._simulate()
         else:
             self._after_geometry_change()
+
+    # ── Ring-settings sync (Hydra: materials/Rings/Labels/thickness mirrored
+    #    across panels — same broadcast shape as the shared-field sync above,
+    #    driven by ``ringSettingsChanged`` instead of ``geometryChanged``) ──
+
+    def get_ring_settings(self) -> dict:
+        """Materials list + Rings/Labels/thickness — the ring-visual state an
+        owner (the Hydra page) may mirror across several cards."""
+        return {
+            "materials": self.materials_state(),
+            "show_rings": self._show_rings.isChecked(),
+            "show_labels": self._show_labels.isChecked(),
+            "ring_width": self._ring_width.value(),
+        }
+
+    def apply_ring_settings(self, settings: dict):
+        """Apply a ring-settings dict from another card without re-emitting
+        this card's own ``ringSettingsChanged`` (the owner already knows it's
+        propagating a sync). If this card already had a ring overlay, its
+        rings are recomputed (pure geometry — this card's own λ/Lsd/px/BC/
+        tilt are untouched) and redrawn/reintegrated with the new materials;
+        a card with no overlay yet just gets the new materials/checkbox
+        state silently, matching today's per-card "nothing to show until
+        Simulate" behaviour."""
+        had_rings = self._any_material_rings()
+        materials = settings.get("materials")
+        if materials is not None:
+            self.set_materials(materials)
+        for w, key in ((self._show_rings, "show_rings"), (self._show_labels, "show_labels")):
+            v = settings.get(key)
+            if v is not None:
+                w.blockSignals(True); w.setChecked(bool(v)); w.blockSignals(False)
+        if settings.get("ring_width") is not None:
+            self._ring_width.blockSignals(True)
+            self._ring_width.setValue(float(settings["ring_width"]))
+            self._ring_width.blockSignals(False)
+        if had_rings or self._sim_is_live():
+            self._compute_material_rings()
+            self._refresh_ring_checklists()
+        self._redraw_rings()
+        self._refresh_profile_markers()
+        self._maybe_auto_radial()
 
     def set_geometry(self, g: dict):
         """Replace the manual-geometry fields from a geometry dict (e.g. the Calibrate
@@ -533,8 +645,8 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             return
         for w, key, scale in ((self._wl, "wavelength_A", 1.0), (self._px, "pxY", 1.0),
                               (self._lsd, "Lsd", 0.001), (self._bcy, "BC_y", 1.0),
-                              (self._bcz, "BC_z", 1.0), (self._ty, "ty", 1.0),
-                              (self._tz, "tz", 1.0)):
+                              (self._bcz, "BC_z", 1.0), (self._tx, "tx", 1.0),
+                              (self._ty, "ty", 1.0), (self._tz, "tz", 1.0)):
             v = g.get(key)
             if v is not None:
                 w.blockSignals(True); w.setValue(float(v) * scale); w.blockSignals(False)
@@ -550,6 +662,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             or (g.get("NrPixelsY") and g.get("NrPixelsZ"))
         if has_full:
             self._apply_full_geometry_dict(g)
+            self._snapshot_calib_baseline()
         self._after_geometry_change()
 
     def _apply_full_geometry_dict(self, g: dict):
@@ -569,8 +682,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         }
         img = self._image_provider()
         if not (geom["NrPixelsY"] and geom["NrPixelsZ"]) and img is not None:
-            nz, ny = img.shape
-            geom["NrPixelsY"], geom["NrPixelsZ"] = ny, nz
+            geom["NrPixelsY"], geom["NrPixelsZ"] = self._raw_pixel_counts(img)
         required = ("wavelength_A", "Lsd", "BC_y", "BC_z", "pxY",
                     "NrPixelsY", "NrPixelsZ")
         if any(not geom.get(k) for k in required):
@@ -591,7 +703,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             "wl": self._wl,
             "lsd": self._lsd,
             "px": self._px,
-            "max2t": self._max2t,
+            "n_rings": self._n_rings,
             "bc_auto": self._bc_auto,
             "bcy": self._bcy,
             "bcz": self._bcz,
@@ -651,9 +763,16 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         self._lsd = _fspin(0.001, 1e6, 3, DEFAULT_LSD_UM / 1000.0, " mm", step=DEFAULT_STEP_LSD_MM)
         self._lsd.setFixedWidth(120)
         self._px = _fspin(0.1, 1e6, 2, DEFAULT_PIXEL_UM, "µm", step=DEFAULT_STEP_PIXEL)
-        self._max2t = _fspin(0.001, 180.0, 1, 25.0, "°", step=DEFAULT_STEP_TWO_THETA)
+        self._n_rings = _NoScrollSpinBox()
+        self._n_rings.setRange(1, 200)
+        self._n_rings.setValue(DEFAULT_N_RINGS)
+        self._n_rings.setMaximumWidth(104)
+        self._n_rings.setToolTip(
+            "Maximum number of rings simulated per material (innermost first). "
+            "Rings that would fall entirely outside the current image are never "
+            "drawn, no matter how high this is set.")
         geo = S.Form()
-        geo.row((make_kedge_label(self._wl, "λ:"), self._wl), ("max 2θ:", self._max2t))
+        geo.row((make_kedge_label(self._wl, "λ:"), self._wl), ("N rings:", self._n_rings))
         geo.row(("Lsd:", self._lsd), (make_pixel_label(self._px, "px:"), self._px))
         ring.body.addLayout(geo)
 
@@ -691,40 +810,63 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         self._bc_auto.toggled.connect(lambda c: (self._bcy.setEnabled(not c), self._bcz.setEnabled(not c)))
         ring.body.addLayout(S.Form().row(("BC_y:", self._bcy), ("BC_z:", self._bcz)))
 
+        # tx is the panel's installation azimuth ABOUT THE BEAM, not a small
+        # alignment tilt like ty/tz -- hence the full circle, and hence it
+        # does not bend the rings at all: rotating about the beam maps a ring
+        # (a circle centred on the beam) onto itself. What it does set is
+        # where the panel sits in the lab frame, so the image is drawn
+        # rotated by it and the eta readout agrees with the integration.
+        # Without it the display was a detector-plane view labelled with lab
+        # axes, and every eta was out by exactly tx.
+        self._tx = _fspin(-360.0, 360.0, 2, 0.0, "°", step=DEFAULT_STEP_TILT)
+        self._tx.setToolTip(
+            "Installation azimuth of the panel about the beam (0-360°). "
+            "Rotates the displayed image into the lab frame; the ring "
+            "radii are unchanged by it.")
         self._ty = _fspin(-180.0, 180.0, 2, 0.0, "°", step=DEFAULT_STEP_TILT)
         self._tz = _fspin(-180.0, 180.0, 2, 0.0, "°", step=DEFAULT_STEP_TILT)
         self._ty.setToolTip("Detector tilt about the Y axis — bends the simulated rings.")
         self._tz.setToolTip("Detector tilt about the Z axis — bends the simulated rings.")
+        ring.body.addLayout(S.Form().row(("tx:", self._tx)))
         ring.body.addLayout(S.Form().row(("ty:", self._ty), ("tz:", self._tz)))
 
-        # Two-way geometry hand-off with the Calibrate tab.
-        calib_row = QtWidgets.QHBoxLayout(); calib_row.setSpacing(4)
-        calib_row.addWidget(S.LabelRight("Geometry:"))
-        self._to_calib_btn = QtWidgets.QPushButton("Send →")
-        self._to_calib_btn.setToolTip(
-            "Copy λ, pixel size, Lsd and beam centre from here into the Calibrate "
-            "tab's detector + seed fields.")
-        self._to_calib_btn.clicked.connect(
-            lambda: self.pushGeometry.emit(self.get_geometry()))
-        self._from_calib_btn = QtWidgets.QPushButton("← Get")
-        self._from_calib_btn.setToolTip(
-            "Pull the Calibrate tab's latest calibrated geometry (λ, pixel size, "
-            "Lsd, beam centre, tilts and distortion) into these fields.")
-        self._from_calib_btn.clicked.connect(self.pullGeometry.emit)
-        calib_row.addWidget(self._to_calib_btn, 1)
-        calib_row.addWidget(self._from_calib_btn, 1)
-        ring.body.addLayout(calib_row)
+        # Two-way geometry hand-off with the Calibrate tab — single-detector
+        # mode only. In Hydra mode this is a page-level action instead (one
+        # panel's own Send/Get would be ambiguous — which panel's geometry
+        # represents "the" transfer? — and nonsensical for the composite
+        # card), see HydraViewerPage's own "→ Send to Calibrate"/"← Get from
+        # Calibrate" buttons.
+        if self._show_calib_handoff:
+            calib_row = QtWidgets.QHBoxLayout(); calib_row.setSpacing(4)
+            calib_row.addWidget(S.LabelRight("Geometry:"))
+            self._to_calib_btn = QtWidgets.QPushButton("Send →")
+            self._to_calib_btn.setToolTip(
+                "Copy λ, pixel size, Lsd and beam centre from here into the Calibrate "
+                "tab's detector + seed fields.")
+            self._to_calib_btn.clicked.connect(
+                lambda: self.pushGeometry.emit(self.get_geometry()))
+            self._from_calib_btn = QtWidgets.QPushButton("← Get")
+            self._from_calib_btn.setToolTip(
+                "Pull the Calibrate tab's latest calibrated geometry (λ, pixel size, "
+                "Lsd, beam centre, tilts and distortion) into these fields.")
+            self._from_calib_btn.clicked.connect(self.pullGeometry.emit)
+            calib_row.addWidget(self._to_calib_btn, 1)
+            calib_row.addWidget(self._from_calib_btn, 1)
+            ring.body.addLayout(calib_row)
 
         ctl = QtWidgets.QHBoxLayout()
         self._show_rings = QtWidgets.QCheckBox("Rings"); self._show_rings.setChecked(True)
         self._show_rings.toggled.connect(self._set_rings_visible)
+        self._show_rings.toggled.connect(self.ringSettingsChanged.emit)
         self._show_labels = QtWidgets.QCheckBox("Labels"); self._show_labels.setChecked(True)
         self._show_labels.toggled.connect(self._set_rings_visible)
+        self._show_labels.toggled.connect(self.ringSettingsChanged.emit)
         self._ring_width = _fspin(0.5, 10.0, 1, DEFAULT_RING_WIDTH, "px")
         self._ring_width.setToolTip("Line thickness of the simulated rings on the image.")
         self._ring_width.setMaximumWidth(80)
         self._ring_width.valueChanged.connect(self._redraw_rings)
         self._ring_width.valueChanged.connect(self._refresh_profile_markers)
+        self._ring_width.valueChanged.connect(self.ringSettingsChanged.emit)
         ctl.addWidget(self._show_rings); ctl.addWidget(self._show_labels)
         ctl.addSpacing(8)
         ctl.addWidget(QtWidgets.QLabel("thickness:"))
@@ -753,12 +895,8 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         sim_row.addWidget(self._sim_live)
         sim_row.addWidget(self._sim_clear_btn)
         ring.body.addLayout(sim_row)
-        for w in (self._wl, self._lsd, self._px, self._max2t):
+        for w in (self._wl, self._lsd, self._px, self._n_rings):
             w.valueChanged.connect(self._on_sim_param_changed)
-        self._ring_info = QtWidgets.QPlainTextEdit(); self._ring_info.setReadOnly(True)
-        self._ring_info.setMaximumHeight(140)
-        self._ring_info.setStyleSheet(f"font-family:{S.MONO_CSS};font-size:10px")
-        ring.body.addWidget(self._ring_info)
         # Transforms sits above Ring simulation: in the Data Viewer the card
         # column is Projection → this card, so this puts Transforms between
         # Projection and Ring simulation, where it belongs (it describes the
@@ -772,6 +910,8 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         self._calib_ed.setPlaceholderText("calibration.json / paramstest.txt / .poni…")
         calc.body.addLayout(_frow(self._calib_ed, self._browse_calib))
         self._calib_ed.returnPressed.connect(self._load_calibration)
+        from midas_gui.helpers import attach_file_info
+        attach_file_info(self._calib_ed)
         self._calib_lbl = QtWidgets.QLabel("No calibration loaded — using manual geometry / BC.")
         self._calib_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         self._calib_lbl.setWordWrap(True)
@@ -802,6 +942,12 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         self._bcz.valueChanged.connect(self._on_bc_changed)
         self._ty.valueChanged.connect(self._on_bc_changed)
         self._tz.valueChanged.connect(self._on_bc_changed)
+        # tx was added to this card without this line, so it fed
+        # get_geometry() while notifying nobody: editing the roll left the
+        # pixel readout's η, the lab-frame compass, the radial profile and
+        # (once the viewer gained one) the lab-frame image rotation all
+        # sitting on the previous value until some *other* field was touched.
+        self._tx.valueChanged.connect(self._on_bc_changed)
 
     # ── Materials list ───────────────────────────────────────────
 
@@ -829,6 +975,10 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         return m
 
     def _build_material_row(self, material: dict) -> QtWidgets.QWidget:
+        outer = QtWidgets.QWidget()
+        ov = QtWidgets.QVBoxLayout(outer)
+        ov.setContentsMargins(0, 0, 0, 0); ov.setSpacing(2)
+
         row = QtWidgets.QWidget()
         h = QtWidgets.QHBoxLayout(row)
         h.setContentsMargins(0, 0, 0, 0); h.setSpacing(4)
@@ -845,17 +995,46 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         name_btn.setFlat(True)
         name_btn.setCursor(QtCore.Qt.PointingHandCursor)
         name_btn.setStyleSheet(
-            "QPushButton{text-align:left; color:#8ecdf7; text-decoration:underline; "
+            f"QPushButton{{text-align:left; color:{S.LINK2}; text-decoration:underline; "
             "border:none; padding:0;}")
         name_btn.setToolTip("Edit this material's lattice, space group, and name")
         name_btn.clicked.connect(lambda _, m=material, nb=name_btn: self._edit_material(m, nb))
+        # Collapsible per-ring show/hide checklist — collapsed by default so
+        # several materials stay compact; expands to one checkbox per
+        # simulated ring (populated by _refresh_ring_checklist once rings
+        # exist — see _simulate/apply_ring_settings).
+        expand_btn = QtWidgets.QToolButton()
+        expand_btn.setCheckable(True)
+        expand_btn.setAutoRaise(True)
+        expand_btn.setText("▸")
+        expand_btn.setToolTip("Show/hide this material's individual rings")
         del_btn = QtWidgets.QPushButton("✕")
         del_btn.setFixedSize(20, 20)
         del_btn.setToolTip("Remove this material")
-        del_btn.clicked.connect(lambda _, m=material, r=row: self._delete_material(m, r))
-        h.addWidget(chk); h.addWidget(swatch); h.addWidget(name_btn, 1); h.addWidget(del_btn)
-        row._del_btn = del_btn
-        return row
+        del_btn.clicked.connect(lambda _, m=material: self._delete_material(m, outer))
+        h.addWidget(chk); h.addWidget(swatch); h.addWidget(name_btn, 1)
+        h.addWidget(expand_btn); h.addWidget(del_btn)
+
+        ring_list = QtWidgets.QWidget()
+        ring_list_layout = QtWidgets.QVBoxLayout(ring_list)
+        ring_list_layout.setContentsMargins(22, 0, 0, 2); ring_list_layout.setSpacing(1)
+        ring_list.setVisible(False)
+        expand_btn.toggled.connect(
+            lambda on, rl=ring_list, b=expand_btn: self._set_ring_list_expanded(rl, b, on))
+
+        ov.addWidget(row)
+        ov.addWidget(ring_list)
+        outer._del_btn = del_btn
+        outer._expand_btn = expand_btn
+        outer._ring_list_layout = ring_list_layout
+        return outer
+
+    @staticmethod
+    def _set_ring_list_expanded(ring_list: QtWidgets.QWidget,
+                                btn: QtWidgets.QToolButton, on: bool):
+        ring_list.setVisible(on)
+        count = ring_list.layout().count()
+        btn.setText(f"▾ {count}" if on else f"▸ {count}")
 
     def _update_material_delete_buttons(self):
         many = len(self._materials) > 1
@@ -865,33 +1044,114 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             if row is not None:
                 row._del_btn.setEnabled(many)
 
+    def _refresh_ring_checklists(self):
+        """Rebuild every material's per-ring checklist from its freshly
+        computed ``_rings`` — call after anything that runs
+        ``_compute_material_rings`` (``_simulate``,
+        ``simulate_rings_without_image``, ``apply_ring_settings``). Relies on
+        ``self._materials`` and ``self._materials_box``'s widgets staying in
+        the same order (true throughout — both are only ever appended/removed
+        together, see ``_add_material``/``_delete_material``/``set_materials``)."""
+        for i, m in enumerate(self._materials):
+            item = self._materials_box.itemAt(i)
+            row = item.widget() if item is not None else None
+            if row is not None:
+                self._refresh_ring_checklist(m, row)
+
+    def _refresh_ring_checklist(self, material: dict, row: QtWidgets.QWidget):
+        layout = row._ring_list_layout
+        while layout.count():
+            w = layout.takeAt(0).widget()
+            if w is not None:
+                # setParent(None) immediately detaches it from the visible
+                # widget tree — deleteLater() alone only unschedules it from
+                # this layout; the actual C++ object (and its on-screen
+                # presence) survives until the event loop gets around to the
+                # deferred delete, which can leave a stale row visible for a
+                # moment if this runs again before that happens (it does,
+                # often, once ring settings sync across panels).
+                w.setParent(None)
+                w.deleteLater()
+        rings = material.get("_rings") or []
+        if not rings:
+            placeholder = QtWidgets.QLabel("Simulate rings to list them here.")
+            placeholder.setStyleSheet(f"color:{S.MUTED}; font-size:10px;")
+            layout.addWidget(placeholder)
+        for r in rings:
+            label = f"n{r['order']}" if r["hkl"] is None else str(tuple(r["hkl"]))
+            chk = QtWidgets.QCheckBox(
+                f"{label}   2θ={r['two_theta_deg']:.2f}°   d={r['d_spacing']:.4f} Å")
+            chk.setChecked(r.get("enabled", True))
+            key = self._ring_key(r)
+            chk.toggled.connect(
+                lambda checked, m=material, k=key: self._on_ring_enabled_toggled(m, k, checked))
+            layout.addWidget(chk)
+        self._set_ring_list_expanded(row._ring_list_layout.parentWidget(),
+                                     row._expand_btn, row._expand_btn.isChecked())
+
+    def _on_ring_enabled_toggled(self, material: dict, key: str, checked: bool):
+        """One ring's checkbox toggled — persist the flag on the material
+        (survives the next ``_compute_material_rings``), update the matching
+        already-computed ring in place (no resimulate needed), and refresh
+        both the image overlay and the radial-profile markers. Emits
+        ``ringSettingsChanged`` so the preference rides along in the
+        cross-panel sync (Task 1) — it's just another ``materials_state()``
+        field."""
+        material.setdefault("ring_enabled", {})[key] = checked
+        for r in material.get("_rings") or []:
+            if self._ring_key(r) == key:
+                r["enabled"] = checked
+        self._redraw_rings()
+        self._refresh_profile_markers()
+        self.ringSettingsChanged.emit()
+
     def _add_material(self, name: Optional[str] = None):
         material = self._new_material_defaults(name)
         self._materials.append(material)
         self._materials_box.addWidget(self._build_material_row(material))
         self._update_material_delete_buttons()
+        self._refresh_ring_checklists()
         self._on_sim_param_changed()
+        if not self._loading_materials:
+            self.ringSettingsChanged.emit()
 
     def set_materials(self, materials: list):
-        """Replace the whole materials list (e.g. from a loaded GUI state)."""
-        for i in reversed(range(self._materials_box.count())):
-            item = self._materials_box.takeAt(i)
-            w = item.widget() if item is not None else None
-            if w is not None:
-                w.deleteLater()
-        self._materials = []
-        for md in materials:
-            m = dict(md)
-            m.setdefault("preset", "Custom")
-            m.setdefault("cubic", False)
-            m.setdefault("enabled", True)
-            m.setdefault("color", _MATERIAL_COLORS[len(self._materials) % len(_MATERIAL_COLORS)])
-            self._materials.append(m)
-            self._materials_box.addWidget(self._build_material_row(m))
-        if not self._materials:
-            self._add_material("Ni (FCC)")
-        self._update_material_delete_buttons()
-        self._sync_dspacing_picking()
+        """Replace the whole materials list (e.g. from a loaded GUI state, or
+        an owner applying another card's settings — see
+        ``apply_ring_settings``). Deliberately does not emit
+        ``ringSettingsChanged`` itself (``_loading_materials`` suppresses it
+        from ``_add_material``'s fallback call below) — both callers decide
+        for themselves whether a sync/notification is appropriate."""
+        self._loading_materials = True
+        try:
+            for i in reversed(range(self._materials_box.count())):
+                item = self._materials_box.takeAt(i)
+                w = item.widget() if item is not None else None
+                if w is not None:
+                    # setParent(None) immediately detaches it from the
+                    # visible widget tree, instead of leaving a stale row
+                    # on screen until deleteLater()'s deferred delete runs —
+                    # this now fires on every cross-panel ring-settings sync
+                    # (apply_ring_settings), not just an occasional GUI-state
+                    # restore, so a lingering old row became visible.
+                    w.setParent(None)
+                    w.deleteLater()
+            self._materials = []
+            for md in materials:
+                m = dict(md)
+                m.setdefault("preset", "Custom")
+                m.setdefault("cubic", False)
+                m.setdefault("enabled", True)
+                m.setdefault("color", _MATERIAL_COLORS[len(self._materials) % len(_MATERIAL_COLORS)])
+                self._materials.append(m)
+                self._materials_box.addWidget(self._build_material_row(m))
+            if not self._materials:
+                self._add_material("Ni (FCC)")
+            self._update_material_delete_buttons()
+            self._refresh_ring_checklists()
+            self._sync_dspacing_picking()
+        finally:
+            self._loading_materials = False
 
     def _on_material_enabled(self, material: dict, checked: bool):
         """A material's enabled tick only changes which already-simulated
@@ -903,6 +1163,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         if self._any_material_rings():
             self._redraw_rings()
         self._on_sim_param_changed()
+        self.ringSettingsChanged.emit()
 
     def _pick_material_color(self, material: dict, swatch_btn: QtWidgets.QPushButton):
         col = QtWidgets.QColorDialog.getColor(QtGui.QColor(material["color"]), self, "Ring color")
@@ -912,6 +1173,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         swatch_btn.setStyleSheet(self._swatch_style(material["color"]))
         self._redraw_rings()
         self._refresh_profile_markers()
+        self.ringSettingsChanged.emit()
 
     def _edit_material(self, material: dict, name_btn: QtWidgets.QPushButton):
         dlg = MaterialDialog(material, self)
@@ -919,15 +1181,18 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             dlg.apply_to(material)
             name_btn.setText(material["name"])
             self._on_sim_param_changed()
+            self.ringSettingsChanged.emit()
 
     def _delete_material(self, material: dict, row: QtWidgets.QWidget):
         if len(self._materials) <= 1:
             return
         self._materials.remove(material)
         self._materials_box.removeWidget(row)
+        row.setParent(None)
         row.deleteLater()
         self._update_material_delete_buttons()
         self._on_sim_param_changed()
+        self.ringSettingsChanged.emit()
 
     def _any_material_rings(self) -> bool:
         return any(m.get("_rings") for m in self._materials)
@@ -992,7 +1257,6 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         self._ring_draw_geom = None
         self._clear_rings()
         self._refresh_profile_markers()
-        self._ring_info.setPlainText("")
 
     def _on_sim_param_changed(self, *_):
         """Material/lattice/geometry field edited — resimulate while live mode is on.
@@ -1015,14 +1279,57 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             self._maybe_auto_radial()
             self.geometryChanged.emit()
 
+    @staticmethod
+    def _ring_key(r: dict) -> str:
+        """Stable identity for one ring across recomputation (hkl/order are
+        unchanged by a geometry edit) — used to persist per-ring show/hide
+        across ``_compute_material_rings`` calls (see ``ring_enabled``).
+        A plain string, not a tuple, so it round-trips through the
+        JSON/HDF5-backed saved GUI state the same as every other material
+        field."""
+        if r.get("hkl") is not None:
+            return ",".join(str(x) for x in r["hkl"])
+        return f"order{r['order']}"
+
+    def _ring_generation_max_two_theta(self) -> float:
+        """Hard 2θ ceiling for ring generation: the farthest point the
+        current image actually reaches, so a ring that would fall entirely
+        outside the frame is never generated — and so never spends one of
+        the N-rings slots — no matter how high N rings is set. Falls back
+        to 180° (every Bragg-reachable ring) when there's no image yet to
+        bound against."""
+        img = self._image_provider()
+        if img is None:
+            return 180.0
+        nz, ny = img.shape[:2]
+        try:
+            return max_two_theta_deg(self._bcy.value(), self._bcz.value(), ny, nz,
+                                     self._lsd_um(), self._px.value())
+        except Exception:
+            return 180.0
+
     def _compute_material_rings(self):
         """(Re)compute every enabled material's ring positions (``_rings``)
-        from the current wavelength/Lsd/pixel-size/max-2θ — pure geometry
+        from the current wavelength/Lsd/pixel-size — pure geometry
         (d-spacing + wavelength + detector distance/pixel size), no image
         needed. Returns ``(errors, any_rings)``. Split out of ``_simulate``
         so ``simulate_rings_without_image`` can reuse the same computation
         without that method's image requirement (which exists only for the
-        on-image overlay ``_redraw_rings`` draws afterwards)."""
+        on-image overlay ``_redraw_rings`` draws afterwards).
+
+        Rings are generated out to ``_ring_generation_max_two_theta()`` (the
+        image's physical reach, when an image is bound) and then truncated
+        to the innermost ``N rings`` — so N rings never pulls in a ring
+        that's completely off the current frame, and the per-material
+        dropdown never lists more than N rings either.
+
+        Each ring also gets an ``enabled`` flag from the material's
+        persistent ``ring_enabled`` map (keyed by ``_ring_key``, default
+        True — all rings shown) — the per-ring show/hide checkbox toggles
+        that map, not anything on these (recomputed-from-scratch) ring
+        dicts themselves."""
+        max_2theta = self._ring_generation_max_two_theta()
+        n_rings = self._n_rings.value()
         errors, any_rings = [], False
         for m in self._materials:
             m["_rings"] = []
@@ -1032,19 +1339,48 @@ class DetectorGeometryCard(QtWidgets.QWidget):
                 if m.get("kind") == "dspacing":
                     rings = simulate_rings_from_dspacings(
                         m["d_list"], self._wl.value(), self._lsd_um(),
-                        self._px.value(), self._max2t.value())
+                        self._px.value(), max_2theta)
                 else:
                     lattice = dict(a=m["a"], b=m["b"], c=m["c"],
                                    alpha=m["alpha"], beta=m["beta"], gamma=m["gamma"])
                     rings = simulate_rings(lattice, m["sg"], self._wl.value(),
-                                           self._lsd_um(), self._px.value(), self._max2t.value())
+                                           self._lsd_um(), self._px.value(), max_2theta)
             except Exception:
                 import traceback
                 errors.append(f"{m['name']}: {traceback.format_exc().splitlines()[-1]}")
                 continue
+            rings = rings[:n_rings]
+            ring_enabled = m.get("ring_enabled") or {}
+            for r in rings:
+                r["enabled"] = ring_enabled.get(self._ring_key(r), True)
             m["_rings"] = rings
-            any_rings = True
+            any_rings = any_rings or bool(rings)
         return errors, any_rings
+
+    def set_agent_mode(self, on: bool) -> None:
+        """Enable/disable the blocking-dialog bypass used when a control API
+        is driving this card — see ``simulate_rings``."""
+        self._agent_mode = bool(on)
+
+    def simulate_rings(self, *, require_image: bool = False) -> list:
+        """Headless equivalent of clicking "Simulate" — never pops a dialog,
+        regardless of ``_agent_mode`` (unlike ``_simulate``/
+        ``simulate_rings_without_image``, which are interactive-only). Returns
+        the list of per-material computation error strings (empty on
+        success); the materials' own ``_rings`` are updated in place exactly
+        as ``_simulate`` leaves them, so ``materials_state()`` reflects the
+        new rings either way. ``require_image=True`` fails instead of
+        simulating without one, matching ``_simulate``'s own precondition for
+        callers that specifically want the on-image overlay refreshed too."""
+        if require_image and self._image_provider() is None:
+            return ["No image loaded."]
+        errors, any_rings = self._compute_material_rings()
+        if self._image_provider() is not None:
+            self._ring_draw_geom = self._current_ring_geom() if any_rings else None
+            self._after_geometry_change()
+        self._refresh_ring_checklists()
+        self._refresh_profile_markers()
+        return errors
 
     def simulate_rings_without_image(self):
         """Compute every enabled material's rings and refresh the profile-view
@@ -1055,44 +1391,31 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         materials/wavelength/Lsd/pixel size."""
         self._compute_material_rings()
         self._refresh_profile_markers()
+        self._refresh_ring_checklists()
 
     def _simulate(self):
         img = self._image_provider()
         if img is None:
             QtWidgets.QMessageBox.warning(self, "No image", "Load data first."); return
         errors, any_rings = self._compute_material_rings()
-        lines = []
-        for m in self._materials:
-            if not m["enabled"] or not m.get("_rings"):
-                continue
-            rings = m["_rings"]
-            lines.append(f"{m['name']}: {len(rings)} rings")
-            lines.append(f"{'hkl':>10}  {'2θ(°)':>7}  {'d(Å)':>7}  {'R(px)':>8}")
-            for r in rings:
-                label = f"n{r['order']}" if r["hkl"] is None else str(tuple(r["hkl"]))
-                lines.append(f"{label:>10}  {r['two_theta_deg']:7.3f}  "
-                             f"{r['d_spacing']:7.4f}  {r['radius_px']:8.1f}")
-            lines.append("")
         # Freeze the placement parameters this simulation was run with, so a
         # later BC/tilt edit cannot silently move rings that are no longer
         # being recomputed (only live mode re-runs _simulate).
         self._ring_draw_geom = self._current_ring_geom() if any_rings else None
         self._after_geometry_change()
+        self._refresh_ring_checklists()
         if errors:
-            lines.append("Errors:"); lines.extend(errors)
-        if not any_rings and not errors:
-            lines = ["No enabled materials."]
-        self._ring_info.setPlainText("\n".join(lines).rstrip())
-        if errors and not any_rings:
             show_error(self, "Simulation error", "\n".join(errors))
 
     def _clear_rings(self):
         if self._viewer is None:
             self._ring_items.clear(); self._label_items.clear()
+            self._ring_item_enabled.clear(); self._label_item_enabled.clear()
             return
         for it in self._ring_items + self._label_items:
             self._viewer._iv.removeItem(it)
         self._ring_items.clear(); self._label_items.clear()
+        self._ring_item_enabled.clear(); self._label_item_enabled.clear()
 
     def _current_ring_geom(self) -> dict:
         """The placement parameters the ring overlay is drawn with."""
@@ -1164,30 +1487,37 @@ class DetectorGeometryCard(QtWidgets.QWidget):
                 on = _ring_on_image_mask(ys, zs, img.shape)
                 ys_clip = np.where(on, ys, np.nan)
                 zs_clip = np.where(on, zs, np.nan)
+                ring_on = r.get("enabled", True)
                 item = pg.PlotDataItem(ys_clip, zs_clip, pen=pen, connect="finite")
-                item.setVisible(vis_r)
-                self._viewer._iv.addItem(item); self._ring_items.append(item)
+                item.setVisible(vis_r and ring_on)
+                self._viewer._iv.addItem(item)
+                self._ring_items.append(item); self._ring_item_enabled.append(ring_on)
                 label_y, label_z, anchor = placement
                 txt = pg.TextItem(label, color=m["color"], anchor=anchor)
                 txt.setFont(label_font)
                 txt.setPos(label_y, label_z)
-                txt.setVisible(vis_l)
-                self._viewer._iv.addItem(txt); self._label_items.append(txt)
+                txt.setVisible(vis_l and ring_on)
+                self._viewer._iv.addItem(txt)
+                self._label_items.append(txt); self._label_item_enabled.append(ring_on)
         # Beam-centre marker — always the *live* beam centre, not the frozen
         # one the rings were drawn with, so a BC edit is visibly reflected.
+        # Not tied to any one ring, so always individually "enabled".
         bc = pg.ScatterPlotItem([self._bcy.value()], [self._bcz.value()],
                                 symbol="+", size=16,
                                 pen=pg.mkPen("#00cfff", width=2), brush=pg.mkBrush(0, 0, 0, 0))
         bc.setVisible(vis_r)
-        self._viewer._iv.addItem(bc); self._ring_items.append(bc)
+        self._viewer._iv.addItem(bc)
+        self._ring_items.append(bc); self._ring_item_enabled.append(True)
 
     def _set_rings_visible(self, *_):
         vis_r = self._show_rings.isChecked()
         vis_l = self._show_labels.isChecked() and vis_r
-        for it in self._ring_items:
-            it.setVisible(vis_r)
-        for it in self._label_items:
-            it.setVisible(vis_l)
+        for it, on in zip(self._ring_items, self._ring_item_enabled):
+            it.setVisible(vis_r and on)
+        for it, on in zip(self._label_items, self._label_item_enabled):
+            it.setVisible(vis_l and on)
+        if self._pick_ring_item is not None:
+            self._pick_ring_item.setVisible(vis_r)
         self._refresh_profile_markers()
 
     # ── Beam-centre picking / radial integration ──────────────────
@@ -1266,6 +1596,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             ys, zs = bc_y + r * np.cos(th), bc_z + r * np.sin(th)
         self._pick_ring_item = pg.PlotDataItem(
             ys, zs, pen=pg.mkPen("#ff30ff", width=1.8))
+        self._pick_ring_item.setVisible(self._show_rings.isChecked())
         self._viewer._iv.addItem(self._pick_ring_item)
 
     def _on_rad_param_changed(self, *_):
@@ -1276,14 +1607,17 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             return
         # Same hkl/order text as the on-image ring labels, so a peak in the
         # profile and the arc it came from carry the identical name. Hidden
-        # together with the image overlay: unchecking "Rings" should clear
-        # the profile markers too, not just the on-image arcs.
-        groups = [{"radii": [r["radius_px"] for r in m["_rings"]],
+        # together with the image overlay: unchecking "Rings" (or an
+        # individual ring's own checkbox) should clear the profile markers
+        # too, not just the on-image arcs.
+        def _visible_rings(m):
+            return [r for r in (m.get("_rings") or []) if r.get("enabled", True)]
+        groups = [{"radii": [r["radius_px"] for r in _visible_rings(m)],
                    "labels": [f"n{r['order']}" if r["hkl"] is None
                               else "".join(str(x) for x in r["hkl"])
-                              for r in m["_rings"]],
+                              for r in _visible_rings(m)],
                    "color": m["color"]}
-                  for m in self._materials if m["enabled"] and m.get("_rings")
+                  for m in self._materials if m["enabled"] and _visible_rings(m)
                   ] if self._show_rings.isChecked() else []
         self._profile_view.set_ring_markers(
             groups, self._lsd_um(), self._px.value(), self._wl.value(),
@@ -1325,7 +1659,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         return {
             "wavelength_A": self._wl.value(), "Lsd": self._lsd_um(),
             "BC_y": self._bcy.value(), "BC_z": self._bcz.value(),
-            "tx": 0.0, "ty": ty, "tz": tz,
+            "tx": self._tx.value(), "ty": ty, "tz": tz,
             "pxY": px, "pxZ": px,
             "NrPixelsY": ny, "NrPixelsZ": nz, "distortion": {},
             "im_trans": list(self.im_trans_codes()),
@@ -1362,7 +1696,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         return {
             "wavelength_A": self._wl.value(), "Lsd": self._lsd_um(),
             "BC_y": self._bcy.value(), "BC_z": self._bcz.value(),
-            "tx": 0.0, "ty": self._ty.value(), "tz": self._tz.value(),
+            "tx": self._tx.value(), "ty": self._ty.value(), "tz": self._tz.value(),
             "pxY": px, "pxZ": px,
             "NrPixelsY": ny, "NrPixelsZ": nz, "distortion": {},
             "im_trans": list(self.im_trans_codes()),
@@ -1523,6 +1857,16 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         if r_bin is None:
             r_bin = self._rad_r_bin.value() if self._rad_r_bin is not None else 1.0
         r_bin = max(float(r_bin), 0.1)
+        # K=2 at certain R bin sizes (notably the 1 px default) sits on a
+        # sampling-aliasing resonance: ring positions scatter by tens of
+        # microstrain between sectors. The polygon kernel is exact, so use it.
+        if kernel == "subpixel2":
+            try:
+                from midas_integrate_v2.binning.subpixel import resonant_bin_width
+                if resonant_bin_width(2, r_bin) is not None:
+                    kernel = "polygon"
+            except ImportError:
+                pass
         eta_bin = max(float(eta_bin), 0.05)
         im_trans = tuple(g.get("im_trans") or ())
         if im_trans:
@@ -1560,10 +1904,15 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         # path silently fell back to circle binning (see radial_integrate /
         # cake_integrate) — which drops the tilt correction and splits every
         # peak on a tilted geometry.
+        # bin_spec / eta_take, not the bare spec: when the requested eta
+        # range crosses +/-180 the geometry above was built for the whole
+        # circle, and the cake has to be cut back down to the bins that were
+        # asked for -- otherwise this gets 36 rows where it expects 9 (see
+        # midas_gui.eta_wrap).
         prof, _, cake_2d, _ = integrate_frame(
-            img_t, spec, ctx["geom"], kernel, (None, None), None, False,
-            corr_counts=ctx["corr_counts"], return_cake=True,
-            weighted=True, cnt_cake=ctx["cnt"])
+            img_t, ctx["bin_spec"], ctx["geom"], kernel, (None, None), None,
+            False, corr_counts=ctx["corr_counts"], return_cake=True,
+            weighted=True, cnt_cake=ctx["cnt"], eta_take=ctx["eta_take"])
         if set_cake and self._cake_view is not None:
             n_eta = spec.n_eta_bins
             eta_ax = float(spec.EtaMin) + float(spec.EtaBinSize) * (np.arange(n_eta) + 0.5)
@@ -1686,55 +2035,102 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         pyFAI .poni, or calibration.json file and apply it to the ring overlay and
         the radial integration."""
         path = self._calib_ed.text().strip()
-        if not path or not Path(path).exists():
-            QtWidgets.QMessageBox.warning(self, "No file", "Select a calibration file first.")
-            return
         try:
-            geo = read_geometry(path)
-            wl, lsd, px = geo["wavelength_A"], geo["Lsd_um"], geo["px_um"]
-            bcy, bcz = geo["BC_y"], geo["BC_z"]
-            if all(v is None for k, v in geo.items() if k != "im_trans"):
-                self._calib_lbl.setText("No recognised geometry in file.")
-                return
-            self._bc_auto.setChecked(False)   # geometry now comes from the file
-            lsd_mm = (lsd / 1000.0) if lsd is not None else None
-            for w, v in ((self._wl, wl), (self._lsd, lsd_mm), (self._px, px),
-                         (self._bcy, bcy), (self._bcz, bcz)):
-                if v is not None:
-                    w.blockSignals(True); w.setValue(float(v)); w.blockSignals(False)
-            im_trans = geo.get("im_trans") or []
-            self._flip_y.setChecked(1 in im_trans)
-            self._flip_z.setChecked(2 in im_trans)
-            self._transp.setChecked(3 in im_trans)
-            parts = []
-            if lsd is not None: parts.append(f"Lsd={float(lsd)/1000:.2f} mm")
-            if bcy is not None and bcz is not None:
-                parts.append(f"BC=({float(bcy):.1f}, {float(bcz):.1f})")
-            if wl is not None: parts.append(f"λ={float(wl):.5g} Å")
-            if px is not None: parts.append(f"px={float(px):.4g} µm")
-            self._calib_ctx_cache.clear()
-            try:
-                self._calib_geom = geometry_fields_from_file(path)
-                d = self._calib_geom
-                for w, key in ((self._ty, "ty"), (self._tz, "tz")):
-                    v = d.get(key)
-                    if v is not None:
-                        w.blockSignals(True); w.setValue(float(v)); w.blockSignals(False)
-                tilt = any(abs(float(d.get(k) or 0.0)) > 1e-9 for k in ("tx", "ty", "tz"))
-                mode = ("full integration: tilts"
-                        + ("+distortion" if d.get("distortion") else "")
-                        if (tilt or d.get("distortion"))
-                        else "full integration (geometry-correct)")
-            except Exception:
-                self._calib_geom = None
-                mode = "scalar geometry (circle binning)"
-            self._calib_lbl.setText(
-                f"Loaded {Path(path).suffix or 'file'} — " + "  ".join(parts)
-                + f"  ·  {mode}")
-            self._after_geometry_change()
+            self._apply_calibration_file(path)
+        except FileNotFoundError:
+            QtWidgets.QMessageBox.warning(self, "No file", "Select a calibration file first.")
+        except ValueError as e:
+            self._calib_lbl.setText(str(e))
         except Exception:
             import traceback
             show_error(self, "Calibration load error", traceback.format_exc())
+
+    def load_calibration_file(self, path: str) -> dict:
+        """Headless equivalent of typing a path into the calibration-file
+        field and loading it — never pops a dialog, used by the control API
+        (``control_api.op_data_viewer_load_calibration_file``). Raises
+        ``FileNotFoundError``/``ValueError`` on a missing or unrecognised
+        file instead, so a control-API caller gets a structured error."""
+        return self._apply_calibration_file(path)
+
+    def _apply_calibration_file(self, path: str) -> dict:
+        """Shared core of ``_load_calibration``/``load_calibration_file``:
+        read geometry (BC, Lsd, pixel size, wavelength) from a MIDAS
+        paramstest.txt, pyFAI .poni, or calibration.json file, apply it to
+        the ring overlay and radial integration, and return a summary dict.
+        Raises rather than showing a dialog — each caller decides how to
+        surface that."""
+        path = (path or "").strip()
+        if not path or not Path(path).exists():
+            raise FileNotFoundError("Select a calibration file first.")
+        geo = read_geometry(path)
+        wl, lsd, px = geo["wavelength_A"], geo["Lsd_um"], geo["px_um"]
+        bcy, bcz = geo["BC_y"], geo["BC_z"]
+        if all(v is None for k, v in geo.items() if k != "im_trans"):
+            raise ValueError("No recognised geometry in file.")
+        self._calib_ed.setText(path)
+        self._bc_auto.setChecked(False)   # geometry now comes from the file
+        lsd_mm = (lsd / 1000.0) if lsd is not None else None
+        for w, v in ((self._wl, wl), (self._lsd, lsd_mm), (self._px, px),
+                     (self._bcy, bcy), (self._bcz, bcz)):
+            if v is not None:
+                w.blockSignals(True); w.setValue(float(v)); w.blockSignals(False)
+        im_trans = geo.get("im_trans") or []
+        self._flip_y.setChecked(1 in im_trans)
+        self._flip_z.setChecked(2 in im_trans)
+        self._transp.setChecked(3 in im_trans)
+        parts = []
+        if lsd is not None: parts.append(f"Lsd={float(lsd)/1000:.2f} mm")
+        if bcy is not None and bcz is not None:
+            parts.append(f"BC=({float(bcy):.1f}, {float(bcz):.1f})")
+        if wl is not None: parts.append(f"λ={float(wl):.5g} Å")
+        if px is not None: parts.append(f"px={float(px):.4g} µm")
+        self._calib_ctx_cache.clear()
+        try:
+            self._calib_geom = geometry_fields_from_file(path)
+            d = self._calib_geom
+            for w, key in ((self._tx, "tx"), (self._ty, "ty"), (self._tz, "tz")):
+                v = d.get(key)
+                if v is not None:
+                    w.blockSignals(True); w.setValue(float(v)); w.blockSignals(False)
+            tilt = any(abs(float(d.get(k) or 0.0)) > 1e-9 for k in ("tx", "ty", "tz"))
+            mode = ("full integration: tilts"
+                    + ("+distortion" if d.get("distortion") else "")
+                    if (tilt or d.get("distortion"))
+                    else "full integration (geometry-correct)")
+        except Exception:
+            self._calib_geom = None
+            mode = "scalar geometry (circle binning)"
+        self._calib_lbl.setText(
+            f"Loaded {Path(path).suffix or 'file'} — " + "  ".join(parts)
+            + f"  ·  {mode}")
+        self._snapshot_calib_baseline()
+        self._after_geometry_change()
+        return {"wavelength_A": wl, "Lsd_um": lsd, "px_um": px,
+                "BC_y": bcy, "BC_z": bcz, "mode": mode}
+
+    def _raw_pixel_counts(self, img) -> Optional[tuple]:
+        """``(NrPixelsY, NrPixelsZ)`` of the *raw* detector frame behind ``img``.
+
+        ``image_provider`` hands back the display-oriented frame (this card's
+        Transforms checkboxes already applied), but every geometry dict here
+        pairs raw-frame pixel counts with a separate ``im_trans`` the backend
+        applies itself — see the un-transform in :meth:`_radial_from_geometry`
+        before it builds a spec. Only opcode 3 (transpose) changes the shape,
+        and it swaps Y and Z, so an odd number of them flips the pair; the
+        mirrors (1, 2) leave it alone. Same rule as
+        :func:`calib.effective_pixel_counts`, in the opposite direction.
+
+        Silent on a square detector, which is why it went unnoticed: it only
+        bites on a non-square one (e.g. a 1024x402 Pixirad) with a transpose
+        active.
+        """
+        if img is None:
+            return None
+        nz, ny = np.asarray(img).shape
+        if tuple(self.im_trans_codes() or ()).count(3) % 2:
+            ny, nz = nz, ny
+        return int(ny), int(nz)
 
     def get_full_geometry(self) -> Optional[dict]:
         """Public alias for ``_export_geom`` — the best-available full
@@ -1745,25 +2141,82 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         return self._export_geom()
 
     def _export_geom(self) -> Optional[dict]:
-        """Full geometry dict for calibration export: the loaded calibration's
-        geometry if present (carries tilts/distortion/detector size from the
-        file), otherwise one built from the current manual / Ring-simulation
-        fields (tx=0, distortion empty)."""
-        if self._calib_geom is not None:
-            geom = dict(self._calib_geom)
-            geom["im_trans"] = self.im_trans_codes()   # current checkboxes win
-            return geom
+        """Full geometry dict for calibration export and for whoever owns this
+        card (the Hydra page syncs it into a ``hydra.DetectorState``).
+
+        A loaded calibration supplies what no widget can -- distortion
+        coefficients and the detector size -- and the **live fields win over
+        it**, because the fields are what the user can see and edit.
+
+        This used to return ``self._calib_geom`` wholesale, which made every
+        geometry box on the card inert the moment a calibration was loaded.
+        On the Hydra page that is always: each panel loads a bundled
+        ``ps_ge{n}.txt`` at startup, so editing tx/ty/tz or the beam centre
+        there changed nothing at all and the boxes displayed values the
+        composite was not using. Measured before the fix: panel 1's box read
+        0.00 while the composite placed it at 296.885 deg, and typing 138 into
+        the box left both numbers untouched.
+
+        Loading writes the file's values into those same widgets (see
+        :meth:`set_geometry` and :meth:`_load_calibration`), so straight after
+        a load the override is a no-op and only a deliberate edit diverges.
+        """
+        base = dict(self._calib_geom) if self._calib_geom is not None else None
         img = self._image_provider()
-        if img is None:
+        if base is None and img is None:
             return None
-        nz, ny = img.shape
         px = self._px.value()
-        return {
+        live = {
             "wavelength_A": self._wl.value(), "Lsd": self._lsd_um(),
             "BC_y": self._bcy.value(), "BC_z": self._bcz.value(),
-            "tx": 0.0, "ty": self._ty.value(), "tz": self._tz.value(),
-            "pxY": px, "pxZ": px, "NrPixelsY": ny, "NrPixelsZ": nz,
-            "distortion": {}, "im_trans": self.im_trans_codes(),
+            "tx": self._tx.value(), "ty": self._ty.value(), "tz": self._tz.value(),
+            "pxY": px, "im_trans": self.im_trans_codes(),
+        }
+        counts = self._raw_pixel_counts(img)
+        if base is None:
+            ny, nz = counts
+            return {**live, "pxZ": px, "NrPixelsY": ny, "NrPixelsZ": nz,
+                    "distortion": {}}
+        # Override only the fields the user has actually MOVED since the
+        # calibration was loaded, compared against what the load itself wrote
+        # into each box -- not against the file's value. The boxes are
+        # fixed-decimal (tx has 2), so a file's 296.885 displays as 296.88 and
+        # "the widget always wins" would quietly round a calibrated roll by
+        # 0.005 deg, about 0.15 px out at the edge of a Hydra panel. Comparing
+        # against the baseline makes an untouched box mean exactly nothing.
+        baseline = self._calib_widget_baseline or {}
+        geom = dict(base)
+        for key, val in live.items():
+            if key not in baseline or baseline[key] != val:
+                geom[key] = val
+        # One px box against a file that may carry a non-square pair: only a
+        # changed box means "square pixels, this size". An untouched one must
+        # not flatten pxZ onto pxY behind the user's back.
+        if "pxY" in geom and abs(float(base.get("pxY") or px) - px) > 1e-9:
+            geom["pxZ"] = px
+        # The detector SIZE is the one field that must follow the data rather
+        # than the loaded calibration. It has no live widget, so the loop above
+        # can never override it, and a geometry loaded from another detector
+        # used to be exported with that detector's size -- a CeO2 GE
+        # calibration (2048x2048, 200 um) loaded here and re-saved against
+        # Pixirad frames wrote "NrPixelsY/Z 2048" beside the edited 62 um
+        # pixel, and Batch Integrate then died inside the backend with
+        # "image shape (402, 1024) does not match geometry (2048, 2048)".
+        # The on-screen frame is ground truth about how big the detector is;
+        # the file can only be stale about it.
+        if counts is not None and (geom.get("NrPixelsY"), geom.get("NrPixelsZ")) != counts:
+            geom["NrPixelsY"], geom["NrPixelsZ"] = counts
+        return geom
+
+    def _snapshot_calib_baseline(self) -> None:
+        """Remember what a calibration load just put into each geometry box,
+        so :meth:`_export_geom` can tell an untouched box from an edited one
+        without fighting the boxes' display precision."""
+        self._calib_widget_baseline = {
+            "wavelength_A": self._wl.value(), "Lsd": self._lsd_um(),
+            "BC_y": self._bcy.value(), "BC_z": self._bcz.value(),
+            "tx": self._tx.value(), "ty": self._ty.value(), "tz": self._tz.value(),
+            "pxY": self._px.value(), "im_trans": self.im_trans_codes(),
         }
 
     def _save_calibration(self, kind: str):
@@ -1774,11 +2227,19 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "No geometry", "Load data first.")
             return
         specs = {
-            "json": ("Save calibration.json", "calibration.json", "JSON (*.json)"),
-            "paramstest": ("Save MIDAS parameter file", "paramstest.txt", "Text (*.txt)"),
-            "poni": ("Save calibration.poni", "calibration.poni", "PONI (*.poni)"),
+            "json": ("Save calibration.json", "calibration.json",
+                     ".instr.json", "JSON (*.json)"),
+            "paramstest": ("Save MIDAS parameter file", "paramstest.txt",
+                           ".instr.txt", "Text (*.txt)"),
+            "poni": ("Save calibration.poni", "calibration.poni",
+                     ".poni", "PONI (*.poni)"),
         }
-        title, default_name, filt = specs[kind]
+        title, default_name, suffix, filt = specs[kind]
+        if self._save_name_provider is not None:
+            try:
+                default_name = self._save_name_provider(suffix) or default_name
+            except Exception:
+                pass      # naming is a convenience; never block a save
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, title, default_name, filt)
         if not path:
             return
@@ -1804,4 +2265,29 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             import traceback
             show_error(self, "Save failed", traceback.format_exc())
             return
-        QtWidgets.QMessageBox.information(self, "Saved", f"Calibration saved to:\n{path}")
+        # A saved geometry must describe the detector on screen, not the one
+        # whose calibration happens to be loaded on the card. The array size
+        # is corrected automatically (see _export_geom) because the frame is
+        # unarguable about it; the pixel size is only flagged, because
+        # detection knows a handful of detectors and a refined pixel is
+        # legitimately not the nominal one. Both are reported, so re-using one
+        # detector's geometry for another is never silent.
+        notes = []
+        loaded = self._calib_geom or {}
+        if loaded and (loaded.get("NrPixelsY"), loaded.get("NrPixelsZ")) != \
+                (geom.get("NrPixelsY"), geom.get("NrPixelsZ")):
+            notes.append(
+                f"Array size written as {geom['NrPixelsY']}x{geom['NrPixelsZ']} px, "
+                f"taken from the loaded frame — the calibration on this card is for "
+                f"a {loaded.get('NrPixelsY')}x{loaded.get('NrPixelsZ')} px detector. "
+                f"Its distortion terms (and the RhoD they are normalised by) were "
+                f"fit on that detector; check they belong to this one.")
+        written_px = float(geom.get("pxY") or 0.0)
+        if self._detected_px and abs(written_px - self._detected_px) > 1e-6:
+            notes.append(
+                f"Pixel size written as {written_px:g} µm, but this data's detector "
+                f"reads as {self._detected_px:g} µm. Set the px box to the right "
+                f"value and save again if that is not deliberate.")
+        note = ("\n\n" + "\n\n".join(notes)) if notes else ""
+        QtWidgets.QMessageBox.information(
+            self, "Saved", f"Calibration saved to:\n{path}{note}")

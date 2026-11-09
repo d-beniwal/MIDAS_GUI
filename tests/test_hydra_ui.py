@@ -165,6 +165,38 @@ def test_hydra_field_selector_background_scale(app, tmp_path):
         assert np.allclose(sel.field(n), float(n) * 10.0 * 2.0)
 
 
+def test_hydra_field_selector_dark_prefers_most_frames_when_file_differs_from_data(app, tmp_path):
+    """Mirrors the single-detector FieldSelector test in test_helpers.py:
+    HydraFieldSelector("Dark", prefer_most_frames=True) defaults to the
+    dataset with the most frames when the dark file differs from Data, but
+    keeps the original first-eligible-dataset pick when it's the same file."""
+    import h5py
+
+    data_path = tmp_path / "data.h5"
+    with h5py.File(data_path, "w") as f:
+        f.create_dataset("exchange/data", data=np.zeros((20, 4, 4), dtype=np.float32))
+
+    other_path = tmp_path / "other_dark.h5"
+    with h5py.File(other_path, "w") as f:
+        f.create_dataset("calib/tiny", data=np.zeros((2, 4, 4), dtype=np.float32))
+        f.create_dataset("raw/big_stack", data=np.zeros((500, 4, 4), dtype=np.float32))
+
+    sel = HydraFieldSelector("Dark", default_dataset="no_such_dataset", prefer_most_frames=True)
+    sel.set_data_path_provider(lambda: str(data_path))
+    sel._set_path(str(other_path))
+    assert sel._ds_combo.currentText().split("   ")[0].strip() == "raw/big_stack"
+
+    # Same file as Data -> original first-eligible behaviour, not most-frames.
+    shared_path = tmp_path / "shared.h5"
+    with h5py.File(shared_path, "w") as f:
+        f.create_dataset("calib/tiny", data=np.zeros((2, 4, 4), dtype=np.float32))
+        f.create_dataset("exchange/data", data=np.zeros((500, 4, 4), dtype=np.float32))
+    sel2 = HydraFieldSelector("Dark", default_dataset="no_such_dataset", prefer_most_frames=True)
+    sel2.set_data_path_provider(lambda: str(shared_path))
+    sel2._set_path(str(shared_path))
+    assert sel2._ds_combo.currentText().split("   ")[0].strip() == "calib/tiny"
+
+
 def test_hydra_field_selector_enter_on_a_missing_path_warns(app, monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
@@ -329,21 +361,21 @@ def test_hydra_composite_builds_with_matched_calibration(app, fixture_available)
     assert r_before.shape != r_after.shape or not np.allclose(
         np.nan_to_num(prof_before), np.nan_to_num(prof_after))
 
-    # (2) shared λ/max2θ/px sync across ge1-4 + composite
+    # (2) shared λ/N rings/px sync across ge1-4 + composite
     src = hp._cards["ge2"]
     new_wl = src._wl.value() + 0.01
     new_px = src._px.value() + 5.0
-    new_max2t = src._max2t.value() + 2.0
+    new_n_rings = src._n_rings.value() + 2
     src._wl.setValue(new_wl)
     src._px.setValue(new_px)
-    src._max2t.setValue(new_max2t)
+    src._n_rings.setValue(new_n_rings)
     app.processEvents()
 
     for key in ("ge1", "ge3", "ge4", "composite"):
         c = hp._cards[key]
         assert c._wl.value() == pytest.approx(new_wl)
         assert c._px.value() == pytest.approx(new_px)
-        assert c._max2t.value() == pytest.approx(new_max2t)
+        assert c._n_rings.value() == new_n_rings
 
 
 def test_hydra_profile_plot_shows_all_four_curves_plus_composite(app, fixture_available):
@@ -420,3 +452,185 @@ def test_hydra_state_round_trips(app, fixture_available):
     assert tab2._hydra_page._toolbar.current() == "ge3"
 
 
+def test_hydra_page_send_get_calibrate_is_page_level_all_panels(app, fixture_available, monkeypatch):
+    """Each panel's own (and composite's) individual "Send ->"/"<- Get" row
+    is hidden in Hydra mode (show_calib_handoff=False — those were dead
+    signals, never connected to anything, and ambiguous/nonsensical for one
+    panel out of 4 or for composite). Instead HydraViewerPage has ONE
+    page-level "-> Send to Calibrate"/"<- Get from Calibrate" pair that
+    moves all 4 panels' geometry + the anchor path at once, mirroring
+    HydraCalibrationPage's existing "<- Data Viewer" button."""
+    tab = DataViewerTab()
+    tab._mode_ribbon.set_mode("hydra")
+    hp = tab._hydra_page
+    for key in ("ge1", "ge2", "ge3", "ge4", "composite"):
+        assert not hasattr(hp._cards[key], "_to_calib_btn")
+        assert not hasattr(hp._cards[key], "_from_calib_btn")
+    assert hp._to_calib_btn.text() == "→ Send to Calibrate"
+    assert hp._from_calib_btn.text() == "← Get from Calibrate"
+
+    # Nothing loaded yet: export has no anchor and no geometries, and
+    # import_from_calibrate reports nothing applied rather than pretending.
+    empty = hp.export_for_calibration()
+    assert not empty["anchor_path"] and not empty["geometries"]
+    assert hp.import_from_calibrate({}) is False
+    assert hp.import_from_calibrate({"anchor_path": "", "geometries": {}}) is False
+
+    hp._loader.set_path(str(fixture_available / "ge1" / "panel.ge1.h5"))
+    app.processEvents()
+    assert set(hp._loader.siblings()) == {1, 2, 3, 4}
+
+    # "-> Send to Calibrate": one click emits every present panel's geometry
+    # + the anchor path, ready for HydraCalibrationPage.import_from_viewer
+    # to consume as-is.
+    sent = []
+    hp.pushToCalibrate.connect(sent.append)
+    hp._to_calib_btn.click()
+    assert len(sent) == 1
+    payload = sent[0]
+    assert payload["anchor_path"] == hp._loader.current_path()
+    assert set(payload["geometries"]) == {1, 2, 3, 4}
+
+    # "<- Get from Calibrate": applies a Calibrate-shaped payload (anchor +
+    # per-panel geometry) to all 4 cards at once.
+    pulled = []
+    hp.pullFromCalibrate.connect(lambda: pulled.append(True))
+    hp._from_calib_btn.click()
+    assert pulled == [True]
+
+    fake_anchor = str(fixture_available / "ge2" / "panel.ge2.h5")
+    fake_payload = {
+        "anchor_path": fake_anchor,
+        "geometries": {n: {"Lsd": 1_000_000.0 + n, "BC_y": 300.0 + n, "BC_z": 400.0 + n,
+                           "tx": 0.0, "ty": 0.0, "tz": 0.0} for n in (1, 2, 3, 4)},
+    }
+    assert hp.import_from_calibrate(fake_payload) is True
+    assert hp._loader.current_path() == fake_anchor
+    for n in (1, 2, 3, 4):
+        g = hp._cards[f"ge{n}"].get_geometry()
+        assert g["BC_y"] == pytest.approx(300.0 + n)
+        assert g["BC_z"] == pytest.approx(400.0 + n)
+
+    # DataViewerTab.import_from_calibrate warns plainly instead of silently
+    # doing nothing when the Calibrate tab's Hydra page has nothing loaded.
+    warnings = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
+                        staticmethod(lambda *a, **k: warnings.append(a) or None))
+    tab.import_from_calibrate({})
+    assert len(warnings) == 1
+    tab.import_from_calibrate(fake_payload)
+    assert len(warnings) == 1   # no new warning — this one actually applied
+
+
+def test_hydra_material_and_ring_visuals_sync_across_panels(app, fixture_available):
+    """Picking a material / toggling Rings, Labels, thickness on one Hydra
+    panel mirrors onto every other panel (ge1-4 + composite) — the ring-
+    visual counterpart of the shared λ/max2θ/px sync, see
+    DetectorGeometryCard.get_ring_settings/apply_ring_settings and
+    HydraViewerPage._sync_ring_settings."""
+    tab = DataViewerTab()
+    tab._mode_ribbon.set_mode("hydra")
+    hp = tab._hydra_page
+    hp._loader.set_path(str(fixture_available / "ge1" / "panel.ge1.h5"))
+    app.processEvents()
+
+    src = hp._cards["ge2"]
+    src._add_material("BCC steel (α-Fe)")
+    src._show_rings.setChecked(False)
+    src._show_labels.setChecked(False)
+    src._ring_width.setValue(src._ring_width.value() + 1.0)
+    app.processEvents()
+
+    expected_names = [m["name"] for m in src._materials]
+    for key in ("ge1", "ge3", "ge4", "composite"):
+        c = hp._cards[key]
+        assert [m["name"] for m in c._materials] == expected_names
+        assert c._show_rings.isChecked() is False
+        assert c._show_labels.isChecked() is False
+        assert c._ring_width.value() == pytest.approx(src._ring_width.value())
+
+    # Re-enabling Rings on a different panel mirrors back onto ge2 as well.
+    hp._cards["ge1"]._show_rings.setChecked(True)
+    app.processEvents()
+    assert src._show_rings.isChecked() is True
+
+
+def test_hydra_per_ring_checkbox_hides_just_that_ring(app, fixture_available):
+    """Each simulated ring gets its own show/hide checkbox (default: all
+    shown) — toggling one off only hides that ring's arc/label/profile
+    marker, persists through a materials_state()/set_materials() round
+    trip, and mirrors across panels via the same ring-settings sync as
+    materials/Rings/Labels (see _ring_key/_on_ring_enabled_toggled)."""
+    tab = DataViewerTab()
+    tab._mode_ribbon.set_mode("hydra")
+    hp = tab._hydra_page
+    hp._loader.set_path(str(fixture_available / "ge1" / "panel.ge1.h5"))
+    app.processEvents()
+
+    card = hp._cards["ge1"]
+    card._simulate()
+    app.processEvents()
+    material = card._materials[0]
+    rings = material["_rings"]
+    assert len(rings) > 1, "fixture geometry should predict more than one ring"
+    assert all(r["enabled"] for r in rings)   # default: all rings shown
+
+    key = card._ring_key(rings[0])
+    card._on_ring_enabled_toggled(material, key, False)
+    app.processEvents()
+
+    assert material["ring_enabled"][key] is False
+    toggled = next(r for r in material["_rings"] if card._ring_key(r) == key)
+    assert toggled["enabled"] is False
+    others = [r for r in material["_rings"] if card._ring_key(r) != key]
+    assert all(r["enabled"] for r in others)
+
+    # Round-trips through materials_state()/set_materials() (saved GUI state).
+    state = card.materials_state()
+    card2 = hp._cards["ge3"]
+    card2.set_materials(state)
+    card2._simulate()
+    app.processEvents()
+    m2 = card2._materials[0]
+    toggled2 = next(r for r in m2["_rings"] if card2._ring_key(r) == key)
+    assert toggled2["enabled"] is False
+
+    # The toggle also rode along in the cross-panel ring-settings sync.
+    assert hp._cards["ge2"]._materials[0]["ring_enabled"].get(key) is False
+
+
+
+
+def test_hydra_composite_shows_read_only_table_and_cake_follows_panel(app):
+    """Composite view shows a per-panel parameter table (not the averaged
+    composite card); the cake stack follows the active panel."""
+    hp = DataViewerTab()._hydra_page
+    hp._toolbar.set_current("composite")
+    assert hp._card_stack.currentWidget() is hp._comp_page
+    assert hp._comp_table.rowCount() == len(hp._COMP_ROWS)
+    # Cake display is chosen by exclusive checkboxes, independent of the toolbar.
+    hp._toolbar.set_current("ge3")
+    assert hp._cake_stack.currentIndex() == 0
+    hp._cake_checks[3].setChecked(True)
+    assert hp._cake_stack.currentIndex() == 2
+    assert [n for n, c in hp._cake_checks.items() if c.isChecked()] == [3]
+
+
+def test_hydra_cakes_and_profiles_round_trip_through_sidecar(app, tmp_path):
+    """Computed per-panel cakes/profiles are written to the Data Viewer's
+    project sidecar and restored by set_state."""
+    a = DataViewerTab()
+    hp = a._hydra_page
+    hp._cake_views[2].set_cake(np.random.rand(10, 20), np.arange(20.0),
+                               np.linspace(-180, 180, 10))
+    hp._profile_view.set_curve("ge2", np.arange(50.0), np.random.rand(50),
+                               lsd_um=3e5, px_um=200.0, wavelength_A=0.17)
+    hp._cake_r_bin.setValue(2.5)
+    stem = str(tmp_path / "sidecar")
+    st = a.get_state(sidecar_stem=stem)
+    b = DataViewerTab()
+    b.set_state(st, sidecar_stem=stem)
+    hb = b._hydra_page
+    assert hb._cake_views[2].get_cake()["cake_2d"].shape == (10, 20)
+    assert hb._profile_view.get_native("ge2") is not None
+    assert hb._cake_r_bin.value() == 2.5

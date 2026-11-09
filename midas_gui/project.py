@@ -18,6 +18,10 @@ the single-``/workspace``-blob v1/v2 layout):
     single shared tab, not per-detector) of mask-creation attempts: full
     parameters + the resulting compressed mask array. See
     ``append_mask_attempt``/``list_mask_attempts``/``read_mask_attempt_array``.
+  - ``/analysis/solve_cell`` — ONE record holding only the latest Solve Cell
+    analysis (inputs as run, calibrations, spots, filter/index results — no
+    attempt history; re-running replaces it). See ``write_solve_cell_ingest``
+    and ``read_solve_cell``.
   - ``/analysis/calibrate/<panel_key>/attempt_NNNN`` and
     ``/analysis/integrate/<panel_key>/attempt_NNNN`` — one per Calibrate or
     Batch-Integrate run that finishes (single-detector under ``single``,
@@ -430,15 +434,47 @@ def _hash_paths_in(obj):
     return obj
 
 
+def _jsonable(v):
+    """Sets to sorted lists, recursively; everything else untouched.
+
+    JSON has no set, and neither do HDF5 attributes, so a set-valued result
+    field breaks every consumer of this dict at once. ``fit_at_limit`` is
+    one (``workers.py`` builds it with ``set(fit["at_limit"])``), and it
+    made session autosave fail silently every few minutes -- 1724 logged
+    "Object of type set is not JSON serializable" tracebacks from a single
+    run of experiments, each one a crash-recovery draft that was never
+    written.
+
+    Fixed at the serialization boundary rather than at that one field: the
+    result object comes from the backend and grows attributes between
+    releases, so the next set-valued one would reintroduce exactly this.
+    Sorted, not arbitrary order, so a saved project does not churn between
+    runs that fitted the same thing.
+    """
+    if isinstance(v, (set, frozenset)):
+        return sorted(v, key=str)
+    if isinstance(v, dict):
+        return {k: _jsonable(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_jsonable(x) for x in v]
+    return v
+
+
 def sanitize_result_dict(result) -> Optional[dict]:
     """Full result fields, including the underscore-prefixed extras the
     GUI bolts on (_calibrant_name, _panel_unpacked, ...) — unlike the
     existing GUI-state sidecar JSON, nothing is dropped here except
     torch-tensor fields (duck-typed via a '.numpy' attribute), which are
-    large and already referenced separately (residual_corr_bin_path)."""
+    large and already referenced separately (residual_corr_bin_path).
+
+    Sets are converted to sorted lists on the way out (see
+    :func:`_jsonable`) — they are the one common Python type with no JSON
+    or HDF5 representation, and a single one anywhere in the result takes
+    the whole autosave down."""
     if result is None:
         return None
-    return {k: v for k, v in vars(result).items() if not hasattr(v, "numpy")}
+    return {k: _jsonable(v) for k, v in vars(result).items()
+            if not hasattr(v, "numpy")}
 
 
 def _write_array(group, name, arr):
@@ -981,9 +1017,324 @@ def append_integration_attempt(project_path, panel_key, *, inputs, finished_payl
     return f"/analysis/integrate/{panel_key}/{name}"
 
 
+def _text_columns(df) -> list:
+    """Columns holding strings (object dtype or a pandas string extension dtype)."""
+    return [c for c in df.columns
+            if df[c].dtype == object or not isinstance(df[c].dtype, np.dtype)]
+
+
+def _write_dataframe(group, name: str, df) -> None:
+    """Embed a pandas DataFrame whole as one compound HDF5 dataset, rather
+    than column-by-column — a Solve Cell ``spots_df``'s schema comes from
+    ``midas_defect`` and can grow, so this stays correct without edits here."""
+    # HDF5 has no object dtype: string columns become fixed-width bytes
+    # (``_decode_bytes_columns`` undoes it on read).
+    coldt = {}
+    for col in _text_columns(df):
+        width = max([len(str(v).encode("utf-8")) for v in df[col]] + [1])
+        coldt[col] = f"S{width}"
+        df = df.assign(**{col: df[col].astype(str)})
+    arr = np.asarray(df.to_records(index=False, column_dtypes=coldt))
+    kwargs = dict(compression="gzip", compression_opts=4, chunks=True) if arr.size > 0 else {}
+    group.create_dataset(name, data=arr, **kwargs)
+
+
+def _read_dataframe(group, name: str):
+    import pandas as pd
+    return pd.DataFrame(np.asarray(group[name][()]))
+
+
+# ── Solve Cell: one record, latest analysis only ─────────────────────────────
+#
+# Unlike calibrate/integrate (append-only attempt history), Solve Cell keeps a
+# SINGLE record under ``/analysis/solve_cell`` that always holds the latest
+# analysis. Re-running a stage replaces that stage's section and everything
+# downstream of it (a new ingest invalidates the diamond filter and indexing
+# results, exactly as the tab itself invalidates them in memory):
+#
+#   /analysis/solve_cell            attrs: schema, timestamp_utc, last_stage
+#       metadata                    JSON: schema, environment, timestamp
+#       ingest/                     JSON ``metadata`` = inputs as run (per-panel
+#           spots                     calibration + loader state with path hashes,
+#           panels/panel_NN/<array>   omega mapping, stage params) + summaries;
+#                                     spots table; per-panel mask/preview arrays
+#       diamond/                    JSON ``metadata`` (params, summary), ``flagged``
+#       index/                      JSON ``metadata`` (params, ab-initio scalars,
+#           ab_initio/<array>         per-domain refine results), ab-initio and
+#           domains/domain_NN/<arr>   per-domain arrays (claimed rows, xyz, ...)
+#
+# Raw detector data is never embedded -- only path + hash references (see
+# ``_hash_paths_in``) -- so the record stays small while every calculation
+# remains reproducible from the references + embedded calibration.
+
+SOLVE_CELL_SCHEMA = 1
+SOLVE_CELL_REF = "/analysis/solve_cell"
+_SOLVE_CELL_GROUP = SOLVE_CELL_REF.lstrip("/")
+SOLVE_CELL_STAGES = ("ingest", "diamond", "index")
+
+
+def _write_json(group, name: str, obj) -> None:
+    group.create_dataset(name, data=json.dumps(obj, indent=2, default=_json_default))
+
+
+def _read_json(group, name: str):
+    return json.loads(group[name][()])
+
+
+def _write_arrays(group, arrays: Optional[dict]) -> None:
+    for name, arr in (arrays or {}).items():
+        if arr is not None:
+            _write_array(group, name, arr)
+
+
+def _read_arrays(group) -> dict:
+    return {k: group[k][()] for k in group.keys() if isinstance(group[k], h5py.Dataset)}
+
+
+def _solve_cell_root_for_update(f, stage: str):
+    """The existing record group, for a stage that builds on an ingest."""
+    root = f.get(_SOLVE_CELL_GROUP)
+    if root is None or "ingest" not in root:
+        raise ValueError(
+            f"cannot record Solve Cell {stage!r}: this project has no Solve Cell "
+            "ingest record yet (ingest must be recorded first)")
+    return root
+
+
+def _touch_solve_cell_root(root, last_stage: str) -> None:
+    root.attrs["timestamp_utc"] = _now_iso()
+    root.attrs["last_stage"] = last_stage
+
+
+def write_solve_cell_ingest(project_path, *, meta: dict, spots_df,
+                             panels: Optional[dict] = None) -> str:
+    """Replace the whole Solve Cell record with a fresh ingest-stage result.
+
+    ``meta`` is the JSON-able as-run description (per-panel calibration and
+    loader state, stage parameters, summaries — see ``SolveCellTab``); path
+    entries get a sibling ``path_hash`` like every other analysis record.
+    ``panels`` is ``{"panel_01": {array_name: ndarray}}`` (detector mask, user
+    mask, previews). Everything downstream (diamond/index) is dropped: it was
+    computed from the ingest this replaces."""
+    meta = _hash_paths_in(_jsonable(dict(meta or {})))
+
+    def _build(root):
+        _touch_solve_cell_root(root, "ingest")
+        root.attrs["schema"] = SOLVE_CELL_SCHEMA
+        _write_json(root, "metadata", {
+            "schema": SOLVE_CELL_SCHEMA, "timestamp_utc": root.attrs["timestamp_utc"],
+            "environment": environment_snapshot(),
+        })
+        ing = root.create_group("ingest")
+        _write_json(ing, "metadata", meta)
+        ing.attrs["n_spots"] = int(len(spots_df)) if spots_df is not None else 0
+        if spots_df is not None:
+            _write_dataframe(ing, "spots", spots_df)
+        for key, arrays in (panels or {}).items():
+            _write_arrays(ing.require_group(f"panels/{key}"), arrays)
+
+    with h5py.File(str(project_path), "a") as f:
+        _stage_and_swap(f.require_group("analysis"), "solve_cell", _build)
+    return SOLVE_CELL_REF
+
+
+def write_solve_cell_diamond(project_path, *, meta: dict, flagged_df) -> str:
+    """Replace the diamond-filter section; the index section (built on the
+    candidate pool this changes) is dropped."""
+    def _build(g):
+        _write_json(g, "metadata", _jsonable(dict(meta or {})))
+        _write_dataframe(g, "flagged", flagged_df)
+
+    with h5py.File(str(project_path), "a") as f:
+        root = _solve_cell_root_for_update(f, "diamond")
+        _stage_and_swap(root, "diamond", _build)
+        if "index" in root:
+            del root["index"]
+        _touch_solve_cell_root(root, "diamond")
+    return SOLVE_CELL_REF
+
+
+def write_solve_cell_index(project_path, *, meta: dict, ab_initio: Optional[dict] = None,
+                            domains: Optional[list] = None) -> str:
+    """Replace the indexing section. ``ab_initio`` is the arrays of the round-1
+    ab-initio result (``hkl``, ``indexed_mask``, ...); ``domains`` is a list
+    of array dicts parallel to ``meta["domains"]`` (``claimed_index``, ``xyz``,
+    ``panel_ids``)."""
+    def _build(g):
+        _write_json(g, "metadata", _jsonable(dict(meta or {})))
+        if ab_initio:
+            _write_arrays(g.create_group("ab_initio"), ab_initio)
+        for i, arrays in enumerate(domains or []):
+            _write_arrays(g.create_group(f"domains/domain_{i + 1:02d}"), arrays)
+
+    with h5py.File(str(project_path), "a") as f:
+        root = _solve_cell_root_for_update(f, "index")
+        _stage_and_swap(root, "index", _build)
+        _touch_solve_cell_root(root, "index")
+    return SOLVE_CELL_REF
+
+
+# ── Solve Cell visualization products ────────────────────────────────────────
+# ``/analysis/solve_cell/viz/<product>/`` holds derived data behind the
+# visualization views (frame manifest, forward predictions, residuals, ...),
+# one group per product with JSON ``metadata`` + ``tables/`` (compound
+# datasets) + ``arrays/``. They are derived from the ingest/index sections, so
+# a new ingest (which swaps the whole record) drops them; a re-index does NOT
+# -- each product records what it was computed from (``meta["inputs"]``) and
+# consumers compare that against the current analysis to flag staleness.
+
+SOLVE_CELL_VIZ_SCHEMA = 1
+
+
+def write_solve_cell_viz(project_path, product: str, *, meta: dict,
+                          tables: Optional[dict] = None,
+                          arrays: Optional[dict] = None) -> str:
+    """Replace one visualization product under the Solve Cell record."""
+    def _build(g):
+        _write_json(g, "metadata", _jsonable({"schema": SOLVE_CELL_VIZ_SCHEMA,
+                                              "timestamp_utc": _now_iso(), **dict(meta or {})}))
+        for name, df in (tables or {}).items():
+            _write_dataframe(g.require_group("tables"), name, df)
+        if arrays:
+            _write_arrays(g.require_group("arrays"), arrays)
+
+    with h5py.File(str(project_path), "a") as f:
+        root = _solve_cell_root_for_update(f, "viz")
+        viz = root.require_group("viz")
+        _stage_and_swap(viz, product, _build)
+    return f"{SOLVE_CELL_REF}/viz/{product}"
+
+
+def _decode_bytes_columns(df):
+    for col in _text_columns(df):
+        df[col] = df[col].map(lambda v: v.decode("utf-8") if isinstance(v, bytes) else v)
+    return df
+
+
+def read_solve_cell_viz(project_path) -> dict:
+    """``{product: {"meta", "tables": {name: DataFrame}, "arrays": {name: ndarray}}}``
+    (empty dict if none)."""
+    out = {}
+    with h5py.File(str(project_path), "r") as f:
+        viz = f.get(f"{_SOLVE_CELL_GROUP}/viz")
+        if viz is None:
+            return out
+        for name in viz.keys():
+            g = viz[name]
+            if not isinstance(g, h5py.Group) or "metadata" not in g:
+                continue
+            tabs = g.get("tables")
+            arrs = g.get("arrays")
+            out[name] = {
+                "meta": _read_json(g, "metadata"),
+                "tables": ({k: _decode_bytes_columns(_read_dataframe(tabs, k)) for k in tabs.keys()}
+                           if tabs is not None else {}),
+                "arrays": (_read_arrays(arrs) if arrs is not None else {}),
+            }
+    return out
+
+
+def clear_solve_cell_section(project_path, stage: str) -> None:
+    """Drop a diamond/index section (and, for diamond, the index built on it)
+    after the tab invalidated it in memory. A missing record/section is fine."""
+    if stage not in ("diamond", "index"):
+        raise ValueError(f"only 'diamond'/'index' sections can be cleared, not {stage!r}")
+    drop = ("diamond", "index") if stage == "diamond" else ("index",)
+    with h5py.File(str(project_path), "a") as f:
+        root = f.get(_SOLVE_CELL_GROUP)
+        if root is None:
+            return
+        for name in drop:
+            if name in root:
+                del root[name]
+        _touch_solve_cell_root(root, "ingest" if stage == "diamond" else
+                               ("diamond" if "diamond" in root else "ingest"))
+
+
+def has_solve_cell(project_path) -> bool:
+    with h5py.File(str(project_path), "r") as f:
+        root = f.get(_SOLVE_CELL_GROUP)
+        return root is not None and "ingest" in root
+
+
+def solve_cell_overview(project_path) -> Optional[dict]:
+    """Cheap description of the Solve Cell record for pickers/dialogs —
+    ``{"timestamp_utc", "last_stage", "n_spots", "n_domains"}`` — or ``None``
+    if there is no (usable) record. Reads attrs/shapes only."""
+    with h5py.File(str(project_path), "r") as f:
+        root = f.get(_SOLVE_CELL_GROUP)
+        if root is None or "ingest" not in root:
+            return None
+        idx = root.get("index")
+        doms = idx.get("domains") if idx is not None else None
+        return {"timestamp_utc": root.attrs.get("timestamp_utc", ""),
+                "last_stage": root.attrs.get("last_stage", "ingest"),
+                "n_spots": int(root["ingest"].attrs.get("n_spots", 0)),
+                "n_domains": len(doms) if doms is not None else 0}
+
+
+def solve_cell_metadata(project_path) -> Optional[dict]:
+    """All JSON metadata of the record merged into one dict (no arrays), for
+    the Project History viewer."""
+    with h5py.File(str(project_path), "r") as f:
+        root = f.get(_SOLVE_CELL_GROUP)
+        if root is None:
+            return None
+        out = _read_json(root, "metadata") if "metadata" in root else {}
+        for stage in SOLVE_CELL_STAGES:
+            if stage in root and "metadata" in root[stage]:
+                out[stage] = _read_json(root[stage], "metadata")
+        return out
+
+
+def read_solve_cell(project_path) -> Optional[dict]:
+    """The whole Solve Cell record, or ``None`` if the project has none::
+
+        {"timestamp_utc", "last_stage", "metadata",
+         "ingest":  {"meta", "spots_df", "panels": {key: {name: ndarray}}},
+         "diamond": {"meta", "flagged_df"} | None,
+         "index":   {"meta", "ab_initio": {name: ndarray},
+                     "domains": [{name: ndarray}, ...]} | None}
+    """
+    with h5py.File(str(project_path), "r") as f:
+        root = f.get(_SOLVE_CELL_GROUP)
+        if root is None or "ingest" not in root:
+            return None
+        ing = root["ingest"]
+        panels_grp = ing.get("panels")
+        rec = {
+            "timestamp_utc": root.attrs.get("timestamp_utc", ""),
+            "last_stage": root.attrs.get("last_stage", "ingest"),
+            "metadata": _read_json(root, "metadata") if "metadata" in root else {},
+            "ingest": {
+                "meta": _read_json(ing, "metadata"),
+                "spots_df": _read_dataframe(ing, "spots") if "spots" in ing else None,
+                "panels": ({k: _read_arrays(panels_grp[k]) for k in panels_grp.keys()}
+                           if panels_grp is not None else {}),
+            },
+            "diamond": None, "index": None, "viz": None,
+        }
+        dia = root.get("diamond")
+        if dia is not None:
+            rec["diamond"] = {"meta": _read_json(dia, "metadata"),
+                              "flagged_df": _read_dataframe(dia, "flagged")}
+        idx = root.get("index")
+        if idx is not None:
+            doms = idx.get("domains")
+            rec["index"] = {
+                "meta": _read_json(idx, "metadata"),
+                "ab_initio": _read_arrays(idx["ab_initio"]) if "ab_initio" in idx else {},
+                "domains": ([_read_arrays(doms[k]) for k in sorted(doms.keys())]
+                            if doms is not None else []),
+            }
+    rec["viz"] = read_solve_cell_viz(project_path) or None
+    return rec
+
+
 def analysis_summary(project_path) -> dict:
     """Attempt counts per kind/panel: ``{"mask": n, "calibrate": {panel:
-    n}, "integrate": {panel: n}}``. Empty kinds/panels are omitted, so a
+    n}, "integrate": {panel: n}, "solve_cell": 1}`` (Solve Cell keeps a single
+    latest record, so it is ``1`` or absent). Empty kinds/panels are omitted, so a
     caller can cheaply check ``bool(analysis_summary(path))`` for "does
     this project have any provenance to offer copying" — used by both the
     Save-As history-scope dialog and :func:`copy_analysis_history`."""
@@ -1000,6 +1351,8 @@ def analysis_summary(project_path) -> dict:
                 per_panel[panel] = n
         if per_panel:
             summary[key] = per_panel
+    if has_solve_cell(project_path):
+        summary["solve_cell"] = 1
     return summary
 
 
@@ -1015,7 +1368,10 @@ def copy_analysis_history(src_path, dest_path, scope: str = "all") -> dict:
     ``scope``:
       - ``"none"``   -- no-op, returns ``{}``.
       - ``"all"``    -- every attempt, every kind/panel, plus the mask
-        history.
+        history. Solve Cell's single latest record is copied under both
+        ``"all"`` and ``"latest"`` (it has no history), unless the destination
+        already holds one (written from the live session just before this
+        copy -- fresher than the source's).
       - ``"latest"`` -- each kind/panel's ``"latest"`` attempt only, plus
         (for integrate) whichever calibrate attempt it references — even if
         that isn't itself the calibrate panel's own latest — so a copied
@@ -1098,6 +1454,12 @@ def copy_analysis_history(src_path, dest_path, scope: str = "all") -> dict:
                 panel_counts[panel] = len(names)
             if panel_counts:
                 copied[key] = panel_counts
+
+        src_sc = src.get(_SOLVE_CELL_GROUP)
+        if src_sc is not None and "ingest" in src_sc and _SOLVE_CELL_GROUP not in dest:
+            dest.require_group("analysis")
+            src.copy(src_sc, dest["analysis"], name="solve_cell")
+            copied["solve_cell"] = 1
 
         dest.attrs["forked_from_path"] = str(src_path)
         dest.attrs["forked_from_project_name"] = src.attrs.get("project_name", "")

@@ -1,14 +1,18 @@
 # MIDAS GUI
 
 A modular PyQt5 desktop application for the **MIDAS** X-ray diffraction suite —
-a Dioptas-inspired, dark-themed workflow that takes you from raw detector
-frames to publication-ready results: view and mask images, calibrate detector
-geometry, integrate stacks (including live/streaming data), apply physics
-corrections, and reduce total-scattering data to a pair-distribution function
-or a texture pole figure. It drives the `midas-calibrate-v2` and
-`midas-integrate-v2` analysis backends (plus `midas-calibrate`, `midas-hkls`,
-`midas-distortion`) so you get their full numerical capability behind an
-interactive, threaded GUI instead of scripting each step by hand.
+a dark-themed workflow that takes you from raw detector frames to
+publication-ready results: view and mask images, calibrate detector geometry
+(single detectors or multi-panel Hydra arrays), integrate stacks (including
+live/streaming data), apply physics corrections, reduce total-scattering data
+to a pair-distribution function or a texture pole figure, and solve unknown
+unit cells from diamond-anvil-cell diffraction frames. It drives the
+`midas-calibrate-v2` and `midas-integrate-v2` analysis backends (plus
+`midas-calibrate`, `midas-integrate`, `midas-peakfit`, `midas-hkls`,
+`midas-distortion`, `midas-pdf` and `midas-zipper`) so you get their full
+numerical capability behind an interactive, threaded GUI instead of scripting
+each step by hand. Work is saved in a single HDF5 **project** file that carries
+the session state and a FAIR provenance record.
 
 ## Installation & Running
 
@@ -118,11 +122,13 @@ calibration values between steps):
 
 ```
 Data Viewer (inspect) → Mask Builder → Calibrate → [Refine] → Batch Integrate
+                                                              → Batch Correction / Queue
                                                               → Corrections preview
                                                               → PDF Analysis
                                                               → Texture / Pole Figure
                                                               → Pump Probe (TR-XRD)
                                                               → Results & Export
+Solve Cell (unknown-cell indexing from DAC frames) — standalone chain
 ```
 
 Typical use cases:
@@ -144,37 +150,67 @@ Typical use cases:
   traces, and mean patterns.
 - **Texture** — extract per-ring azimuthal intensity and project it as a
   stereographic pole figure for preferred-orientation analysis.
+- **Unknown-cell solving** — filter diamond/anvil and known-material spots from
+  DAC frames, index the remainder ab initio, refine the cell, and inspect the
+  result in 2-D/3-D reciprocal space (Ewald sphere, lattice points, volumes,
+  residual diagnostics, domain comparison).
 
 All heavy computation (calibration, integration, mask training, PDF
 transforms, gain training) runs on background threads, so the GUI stays
 responsive and streams log output in real time. Tab visibility is
 configurable from **Settings ▸ Preferences ▸ Tabs** — the four core tabs are
-always shown, the rest can be toggled on as you need them.
+always shown, the rest can be toggled on as you need them (each optional tab
+also has an ✕ to close it). The Data/Controls panels on most tabs can be
+minimized to a bottom ribbon for more image space.
 
 ## Tabs
 
 | # | Tab | Capability |
 |---|-----|------------|
-| 0 | **Data Viewer** | TIFF / HDF5-stack / folder / live-PVA-stream viewer; projections; geometry-free or full-geometry radial integration; simulated multi-material ring overlay |
+| 0 | **Data Viewer** | TIFF / HDF5-stack / folder / live-PVA-stream viewer; projections; geometry-free or full-geometry radial integration; simulated multi-material ring overlay; peak fitting |
 | 1 | **Mask Builder** | Threshold, statistical auto-mask (spatial outlier, temporal constancy), drawn shapes (rect/oval/annulus/polygon/freeform), cosmic-ray rejection, calibration-based azimuthal σ-clip, learnable mask |
-| 2 | **Calibrate** | One-shot / first-time / four-stage / Bayesian / joint-cake pipelines; multi-panel detector; per-coefficient distortion refinement; ring residuals |
+| 2 | **Calibrate** | One-shot / first-time / four-stage / Bayesian / joint-cake pipelines; single detector or multi-panel Hydra; per-coefficient distortion refinement; ring residuals |
 | 3 | **Calib. Refinement** | Derivative-free Nelder-Mead optimization against an η-uniformity loss |
-| 4 | **Batch Integrate** | Hard / subpixel / polygon kernels; monitor normalisation; frame stride; drift correction; live folder monitoring; auto-suggested per-format output folders; publication-quality waterfall/stacked-profile plots |
-| 5 | **Zarr Viewer** | Browse/plot any `.zarr.zip` — tree of groups/arrays; 1-D/2-D/3-D plots with colormap/scale/clim controls; R bin/2θ/Q/d axis conversion via the file's own REtaMap; metadata/attributes inspector |
-| 6 | **Corrections & Physics** | Polarization, solid-angle, absorption, Compton preview; per-pixel learnable gain training |
-| 7 | **PDF Analysis** | Composition-weighted I(Q) → S(Q) → F(Q) → G(r) total-scattering reduction with σ propagation and optional scale/background refinement |
-| 8 | **Texture** | Per-ring azimuthal extraction and stereographic pole-figure projection (POPLA export) |
-| 9 | **Pump Probe** | Time-resolved (TR-XRD) delay pooling, ΔI(q, delay) heatmaps, kinetics, and mean-pattern views |
-| 10 | **Results & Export** | One-click export of calibration/mask/profiles/G(r)/pole figures + a provenance block for methods sections |
+| 4 | **Batch Correction** | Dark/bright/gain frame correction of image stacks ahead of integration |
+| 5 | **Batch Integrate** | Hard / subpixel / polygon kernels; monitor normalisation; frame stride; drift correction; live folder monitoring; auto-suggested per-format output folders; publication-quality waterfall/stacked-profile plots |
+| 6 | **Batch Queue** | Queue and run multiple integration/correction jobs in sequence |
+| 7 | **Zarr Viewer** | Browse/plot any `.zarr.zip` — group/array tree; 1-D/2-D/3-D plots with colormap/scale/clim controls; R bin/2θ/Q/d axis conversion via the file's own REtaMap; metadata inspector |
+| 8 | **Data Explorer** | Open and inspect what the pipeline wrote |
+| 9 | **Corrections** | Polarization, solid-angle, absorption, Compton preview; per-pixel learnable gain training |
+| 10 | **PDF Analysis** | Composition-weighted I(Q) → S(Q) → F(Q) → G(r) total-scattering reduction with σ propagation and optional scale/background refinement |
+| 11 | **Texture** | Per-ring azimuthal extraction and stereographic pole-figure projection (POPLA export) |
+| 12 | **Pump Probe** | Time-resolved (TR-XRD) delay pooling, ΔI(q, delay) heatmaps, kinetics, and mean-pattern views |
+| 13 | **Results & Export** | One-click export of calibration/mask/profiles/G(r)/pole figures + a provenance block for methods sections |
+| 14 | **Solve Cell** | Unit-cell solving from DAC diffraction frames: ingest → diamond/anvil and optional multi-material filter → blind ab-initio indexing → free UB/cell refinement; PyVista 3-D reciprocal-space views, diagnostics, spot inspector, contamination and domain-comparison tabs |
 
-> **Status:** Tabs **0–5** (Data Viewer, Mask Builder, Calibrate, Calib.
-> Refinement, Batch Integrate, Zarr Viewer) are verified and ready to use.
-> Tabs **6–10** (Corrections & Physics, PDF Analysis, Texture, Pump Probe,
-> Results & Export) are a **work in progress** and continue to be refined.
+Tab numbers shift with Preferences ▸ Tabs visibility. Out of the box, Data
+Viewer, Mask Builder, Calibrate, Batch Integrate, Calib. Refinement, Batch
+Queue, Zarr Viewer and Pump Probe are shown; the others ship hidden.
+
+> **Status:** Data Viewer, Mask Builder, Calibrate, Calib. Refinement, Batch
+> Integrate and Zarr Viewer are verified and ready to use. Batch Correction,
+> Data Explorer, Corrections, PDF Analysis, Texture, Pump Probe, Results &
+> Export and Solve Cell are a **work in progress** and continue to be refined.
+
+## Projects
+
+**File ▸ Project** saves and reopens a whole session (paths, calibration,
+masks, integration settings, and for Solve Cell the cached visualization
+products) in one HDF5 file, with a FAIR provenance history of every calibrate
+and integrate run. The active project name is shown in the status bar.
+
+## Scripting and agent control (MCP)
+
+Setting `MIDAS_GUI_CONTROL=1` when launching opens a local control socket so a
+script or LLM agent can drive the live app (Data Viewer, Calibrate, Solve
+Cell). The proxy and protocol are documented in
+[`midas_gui_mcp/README.md`](midas_gui_mcp/README.md). It is off by default.
 
 The full user manual — every field, tool tip, and configuration option — is
 in [`documentation/gui_documentation.md`](documentation/gui_documentation.md)
-(also built as a PDF). A running log of every change is kept in
+(also built as a PDF). Solve Cell's 3-D views are described in
+[`documentation/solve_cell_visualizations.md`](documentation/solve_cell_visualizations.md).
+Change history lives in `git log`; a longer narrative is in
 [`documentation/development_history.md`](documentation/development_history.md).
 
 ## Development
@@ -184,7 +220,8 @@ git clone https://github.com/d-beniwal/MIDAS_GUI.git
 cd MIDAS_GUI
 pip install -e ".[dev]"
 
-# Run the (headless) test suite
+# Run the (headless) test suite. Some Qt test files can crash when run in the
+# same process, so if a combined run aborts, run those files separately.
 QT_QPA_PLATFORM=offscreen pytest -q
 ```
 

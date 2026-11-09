@@ -3,6 +3,1841 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-11-08 — Fast loading of large / network-mounted HDF5
+
+Reported: initial load of a ~20 GB HDF5 over a slow share feels frozen. Code reading showed no whole-file read (only `dset.shape`), but a load opened the file ~4× on the GUI thread (dropdown tree walk, shape, frame 0, energy) and each open costs several network round trips. Changes (Data loader, `DataLoaderPanel`): (1) `helpers.probe_h5` gets shape + first frame + beam energy in ONE open; `_load_h5` uses it and primes the frame cache with frame 0, wavelength is passed to `detect_geometry_from_path(wavelength=)`. (2) The dataset-dropdown tree walk is cached per file by (mtime_ns, size) (`h5_probe_cached`), shared with Dark/Bright `FieldSelector` and `_count_frames`; the load itself never walks the tree. (3) `async_io.AdaptiveCall`: the probe runs on a worker thread and the GUI waits ≤0.25 s (`_IO_BUDGET_S`); fast/local files finish inside that and behave exactly as before (existing tests assume synchronous load), slow ones return immediately ("Loading…") and apply on a queued signal; `_load_seq`/`_list_seq` drop superseded results. `set_path()` (control API/MCP/“Import from…”/defaults) forces budget=None so callers can read `n_frames()` right after. (4) `helpers.open_h5_read` = bigger chunk cache (`rdcc_nbytes` 64 MB), used by frame reads; `FrameCache` = byte-bounded (256 MB) LRU, native dtype, read-only entries, `_get_frame` still returns a fresh float32 copy (callers correct in place); read-ahead of 2 frames in the stepping direction only when the last read took >30 ms, one open per window, aborted by `FrameCache.gen` on source change. `cache=True` only from `_set_frame`, so `full_stack`/batch loops don't churn the cache. **Deliberately not done:** keeping an HDF5 handle open between reads — it blocks deleting/replacing the file on Windows and can trip HDF5 file locking against a writer on a live acquisition; frame cache + one-open prefetch windows capture most of the benefit. Not changed: single multi-page TIFF still loads whole (`tifffile.imread`); `full_stack()` callers (Auto Attenuation, Solve Cell, ProjectionWorker), `read_frame_range`, `average_field` still read whole ranges. Not tested against a real slow share — simulated with gated probes (`tests/test_h5_fast_load.py`).
+
+## 2026-11-07 — File-info icon/tooltip on every input path field
+
+Loaded-file fields now show an inline ⓘ icon and a hover tooltip (name, folder, type, size, created, modified, accessed, owner, permissions; folders show item count). Implemented once in `helpers.attach_file_info()` / `file_info_text()` and hooked into `warn_if_path_missing()` for non-output fields, so every existing input path field got it for free; explicit calls cover fields that never used that helper (Data Loader, Hydra geometry card, Pump Probe calib, Data Explorer, corrections template). Zarr viewer and profile-file labels get a static tooltip at load. Why a ToolTip event filter: several fields already set a static path tooltip on `textChanged`; the filter re-stats on hover so size/mtime are current and it overrides the stale text. Output-folder fields are excluded (nothing to inspect yet). "Created" uses `st_birthtime` (macOS/Windows); Linux has none, so it says n/a and shows ctime. Not covered: in-app file browsers (dialogs.py address bars) and multi-file selections shown as "N files" text (no single file to describe). Test: `tests/test_file_info.py`.
+
+## 2026-11-07 — Batch results x-axis: ticks and zoom never finer than the data's bin width
+
+Zooming a waterfall/stacked-profile plot used to produce ticks like 2.167, 2.169 even for a 0.01 Q step. `_UnitAxis.set_min_step()` now drops tick levels below the data's median bin width (measured in the *displayed* unit from the profile axis) and, for the waterfall, picks tick positions in displayed units then maps them back to native coords. `minXRange` is 3 bins on both viewers (`_MIN_ZOOM_BINS`); stacked log-x skips the floor (bin width isn't constant there). Step is data-derived, so it also covers R and 2θ runs. Test: `tests/test_profile_axis_step.py`. Detector-view flip (Batch Integrate) investigated: Tab-2 calibrations with `im_trans` are already flipped via `set_raw_frame` (repro offscreen); the unflipped case is a calibration source that carries no `im_trans` (e.g. backend calibration.json) — awaiting which source the user hit.
+
+## 2026-11-07 — This repo is the Qt5 (PyQt5) line; the Qt6 port lives in a separate app folder
+
+The PyQt6 port is done and is developed in its own folder (separate from this checkout). From now on, work requested here targets this PyQt5 version only: keep PyQt5 imports/APIs, don't introduce Qt6-only code, and don't assume changes here are mirrored in the Qt6 app automatically. Why: two independent codebases now exist; mixing Qt5 and Qt6 idioms in this one would break it. Any change that should exist in both must be applied to each folder separately.
+
+## 2026-11-05 — Batch results x-axis defaults to the run's rebin unit
+
+- **Root cause of the "always 750 R bins" report:** Bin type was Q (Q 0.5–8 @ 0.01 = 750 bins). Q/2θ runs integrate on the R grid, then resample onto the Q grid, so R_MIN/R_MAX/R_STEP never changed the output; the viewers still said "R (px)", hiding it.
+- `WaterfallViewer`/`StackedProfileViewer.set_axis_context(..., display_unit=)` preselects the x-axis combo; BatchTab passes `_rebin_unit() or "R"` at run start (both run paths). The user can still switch unit afterwards. The native unit stays "R" (profiles carry px).
+- Not covered: replaying a past attempt (`tab_batch` ~L1277) — the unit isn't stored with the arrays.
+
+## 2026-11-05 — Caking parameters recorded in / forwarded to Batch Integrate outputs
+
+- **Bug 1:** "Run as job" (`tab_batch._run_as_job`) never sent `--eta-min/--eta-max` and dropped `--r-min` when it was 0 (backend then used RMin=10), so a detached job ignored the η window.
+- **Bug 2:** the 1-D combined HDF5 (`midas_integrate_v2.write_h5`) stored only profiles + R axis — no R/η parameters at all, though the file is named `*.cake.h5`. Now `workers.stamp_cake_params_h5` writes RMin/RMax/RBinSize/EtaMin/EtaMax/EtaBinSize, n_r_bins, n_eta_bins and a note as root attrs (BatchWorker, Save, Batch-Parallel combine). Runs also log the cake line at start.
+- **Not reproduced:** the reporter's 750 R bins (expected 420 for 240–450 @ 0.5). In-process path builds the right spec (tested); suspect job path or an un-applied cake dialog (Close discards edits, only Apply commits). Need the run log's `[batch] cake:` line from a new run.
+- The per-η cake is only kept with "Multi-azimuth output"; otherwise the profile is the η-collapse over [EtaMin, EtaMax].
+
+## 2026-11-04 — Heavy workers run in their own OS process (`proc_worker.process_isolated`)
+
+A native fault (segfault/abort/OOM-kill) inside an in-process QThread worker takes the whole GUI down — and the calibration child with it, since `CalibrationWorker`'s QProcess dies with the GUI. Create-mask (torch/OpenMP + whole frame stacks, first-time `import torch` off the main thread) was the reported trigger; root cause of that specific crash was *not* found in any log (no crash report for the GUI process).
+
+Decision: generic `proc_worker.process_isolated(_XImpl)` returns a proxy with the same ctor args, signals (types recovered from the signal repr), `start/isRunning/requestInterruption/wait/run`; the child (`proc_cli.py`) instantiates the original class, runs `run()` synchronously and ships each signal as a pickle file + a framed stdout line. Crash/non-zero exit → the worker's own `failed` signal with the log tail. Abort = SIGKILL (like `CalibrationWorker`). `MIDAS_GUI_INPROCESS_WORKERS=1` restores in-process classes.
+
+Converted: MaskCompute, Integration, Refinement, RefineCompare, CorrectionPreview, PDF, PDFStructureFit, PoleFigure, LearnableGain, Drift, ManualDspacingCalib. **Deliberately not converted:** SolveCellWorker (takes a GUI-bound `frames_loader` callable; was the h5py segfault site 2026-10-27), ProjectionWorker/AllFrameStatsWorker (closure args), PumpProbeWorker (cooperative abort delivers a partial result), BatchWorker/BatchCorrectionWorker/FolderMonitorWorker (cooperative cancel, live loops; Batch has the `batch_cli` background-job route), StreamPreview/FieldAverage/_GeomBuild/VolumeBuild/auto-attenuation (light or GUI-coupled). Still open: calibration dies if the GUI itself dies (not detached).
+
+## 2026-11-03 — Calibrate: per-ring include/exclude via a "Rings…" button
+
+A "Rings…" button beside Calibrant opens `dialogs.RingSelectDialog` (checkbox, Ring #, hkl, d, 2θ, R). All rings start ticked; unticked ring numbers go to `cfg["rings_to_exclude"]` → backend `spec.rings_to_exclude`. Rows come from the backend's own `build_ring_table` (`calib.calibrant_ring_rows`), **not** a GUI-side hkl expansion, because `ring_nr` is the hkl generator's label and skips numbers where radius-identical reflections merge (CeO2: 11, 15, 21…). The rings listed depend on the seed λ/Lsd/BC/image size; the labels do not.
+
+Backend reach (midas_calibrate_v2 0.24.0): `calibrate()` has **no** exclusion kwarg, so a run with exclusions reroutes one_shot through `autocalibrate(spec=…)` like the other "calibrate() cannot express X" cases (skips its STAGE-1 Lsd search; seed used as given). Panel one_shot, four_stage, bayesian and joint take `spec` and honour it. `first_time_calibrate` and `iterate_frozen_point_until_stable` build their own spec and take none, so they log a WARNING and use every ring (same pattern as the ignored parameter windows). Verified end to end: excluding rings 1, 2, 5 logs `[e-step] ring table: 8 -> 5 rings`.
+
+State: exclusions reset on a real calibrant change (ring numbers belong to one calibrant; `set_state` restores the combo with signals blocked so it does not wipe them), saved in the project as `rings_excluded`, disabled for d-spacing calibrants (manual picking has its own Ring #). Not done: Hydra pages, the MCP `calibrate_*` tools, dimming excluded rings in the overlay, and auto-seed still sees every ring.
+
+## 2026-11-03 — APEXA CLI runs in an embedded, dockable terminal panel
+
+Tools ▸ APEXA (CLI)… now opens a `QDockWidget` (`apexa_terminal.ApexaDock`, right side by default; floatable, re-dockable left/right/bottom) hosting `TerminalWidget` — a child process on a pty (`pty.openpty` + `TIOCSCTTY` so Ctrl-C works) rendered from a `pyte.HistoryScreen`. Chosen over QWebEngine+xterm.js (QtWebEngine isn't installed) and QTermWidget (no PyQt5 wheel); cost is one small pure-Python dep, `pyte==0.8.2` (requirements/environment/pyproject). Closing the panel only hides it (CLI keeps running); re-clicking the menu re-shows it or restarts an exited CLI; the process group is hung up on main-window close. Windows or missing pyte falls back to the earlier external-terminal launch (`_launch_apexa_cli`). Gotcha: `pyte` shrinks by deleting rows from the *top*, wiping fresh output when the panel gets shorter — `_resize_screen` drops blank rows below the cursor first.
+
+## 2026-11-03 — Pump Probe: reference-peak q-alignment (branch `qshift_pump`)
+
+Drift (mono energy, sample height, beam centre) shifts integrated patterns in q without any material change. The user picks a peak the pump does not move; each frame is shifted so that peak stays pinned. Logic is Qt-free in `qshift.py`; the tab keeps the untouched payload in `_data_raw` and plots `_data` (aligned copy), so every existing view works unchanged. Rationale for the choices:
+- **Per-frame, not per-delay**: the worker now also returns `profiles`/`frame_delays` (acquisition order) so drift is removed before repeats are averaged and the reference is subtracted.
+- **Fitted centre (pseudo-Voigt + linear bg), not cross-correlation**: the pump can change width/asymmetry, which biases a correlation shift. Centroid fallback for low S/N; frames with a vanished peak (<10% of mean amplitude), edge-pinned or failed fits are flagged and interpolated.
+- **Scale (default) or offset**: one peak fixes one parameter; scale matches λ/distance drift. Both pin the picked peak exactly.
+- **Optional "reference frames only" drift curve + running-median smoothing**: keeps pump-induced peak changes and fit noise out of the correction.
+- **Stationarity guard**: Spearman ρ between per-delay peak position and delay; |ρ|>0.7 warns. Caveat: a monotonic delay scan confounds delay with clock drift, so the warning can be a false alarm there (wording says so).
+- Resampling clamps edge bins (never NaN) to keep pyqtgraph autorange safe. Isotropic scale drift is degenerate with real isotropic expansion — only an independent anchor (the pump-invariant peak) separates them.
+Not done / open: multi-peak (scale+offset) fit, 2D re-integration, per-sector shifts. Not yet checked on real TRR data.
+
+## 2026-11-02 — Light/dark colour theme (startup setting, canvases stay dark)
+
+The existing look is now the **dark** theme and a **light** theme was added. `style.py` holds two token dicts (`DARK`, `LIGHT`); `set_mode()` rebinds the module globals (`S.BG`, `S.MUTED`, …) and `style.set_mode(configured_mode())` runs at import, so module-level uses of `S.*` already see the right palette. Every grey/blue literal in the stylesheet and the common inline `color:#aaa/#9a9a9a/#888` label styles became a token; the dark stylesheet is character-identical to before (checked by diffing against HEAD, only `#555`→`#555555` spelling). Choice lives in config `ui.theme` (`constants.DEFAULT_THEME`, Preferences ▸ Display ▸ Theme) and, like `ui_scale`, **needs a restart**: hundreds of inline stylesheets are baked at widget construction, so a live swap would leave a half-themed UI. **Canvases (same day, supersedes the first cut):** pyqtgraph canvases follow the theme too — `S.CANVAS_BG/FG` feed `pg.setConfigOptions` and every `PlotWidget(background=…)`; `CANVAS_PANEL/DEEP`, `AXIS_TEXT/TICK`, `LOG_BG/FG`(+`READOUT_BORDER`) cover the ROI/histogram plots, axis labels and pixel-readout bars. Not themed: pyvista/VTK 3D views and matplotlib canvases (Zarr Viewer, Real-space, Data Explorer, 3D pole figure) — audit those next; Pump Probe and the waterfall "White" theme were already white in both. Remaining unthemed literals are accent/status colours (greens, ambers, plot pens) that read on both backgrounds.
+
+## 2026-11-02 — Hydra cake tab: one Calculate + exclusive panel checkboxes
+
+Replaced "Calculate"/"Calculate all" with a single Calculate that computes every loaded panel's cake. A `QButtonGroup` of exclusive ge1–ge4 checkboxes (unlike the radial-profile tab's multi-select) picks which cake is displayed; it is independent of the toolbar panel (supersedes point (3) of 2026-11-01 "cake follows the toolbar panel").
+
+## 2026-11-01 — Hydra: app-wide mode sync, composite parameter table, per-panel cakes, results sidecar
+
+(1) Single/Hydra is one app-wide choice: `MainWindow` connects each tab's `HydraModeRibbon.modeChanged` to `set_mode` on the other two (Data Viewer/Calibrate/Batch). `set_mode` on an already-checked button emits nothing, so there is no ping-pong. (2) The composite card's Lsd/BC were a mean/canvas-centre that describe nothing physical, so the composite view now shows a read-only ge1-ge4 parameter table (`_comp_table`); the hidden composite card stays the active card so the ring overlay still works. (3) Hydra Data Viewer gained an "Eta vs R Cake" bottom tab: one `CakeViewer` per panel bound to that panel's card (`set_cake_view`), shared R/η bins, Calculate (shown panel) / Calculate all; the cake follows the toolbar panel (composite keeps the last panel). No composite cake: it would integrate the decimated windmill image. (4) Persistence: `DataViewerTab.get_state/set_state` now take `sidecar_stem` and write `<stem>_hydra_results.npz` (per-panel profiles + cakes) only on a real project save; restored last in `set_state` so reloads don't wipe it. A `results` shape fingerprint in the page state marks the workspace dirty when a cake is computed. Calibrate/Batch Hydra pages already log `ge1..ge4` attempts and restore them via `apply_project_*`; not changed.
+
+## 2026-11-01 — Data/Controls widths fit content and are remembered (in PanelToggles)
+
+User kept re-dragging the Data/Controls splitter handles. Root cause, measured offscreen: the tabs' `setSizes([286, 361, 950])` never took effect before the window was shown (the splitter reported 200/260 px, the panels' hard minimums), while Controls actually needs ~390-480 px. So every tab started too narrow and nothing was remembered.
+
+Fix lives in `PanelToggles` so all five three-panel tabs get it via `install_panel_toggles(split, key=...)`: (1) minimum width = max(tab's hard minimum, panel content width capped at 520 px); content width is the inner widget's `minimumSizeHint` plus frame/scrollbar allowance, re-checked by a 1 s timer while the tab is visible so later content changes are followed; (2) widths saved (debounced) after a handle drag to QSettings("MIDAS","midas-gui") under `layout/<tab>/<panel>_width`, restored at startup, clamped to >= content minimum and <= 45% of screen width; minimised panels never overwrite their saved width; (3) a ⟲ button in each panel header calls `reset_widths()` (content-fit defaults, saved values cleared). The tab-supplied initial sizes are now effectively irrelevant defaults.
+
+Hydra pages (`hydra_page`, `hydra_calib_page`, `hydra_batch_page`) got the same treatment: root layout changed HBox->VBox (splitter + bottom ribbon) and `install_panel_toggles(split, key="hydra_view"|"hydra_calibrate"|"hydra_batch")`. **No Python `eventFilter` on panels/handles:** the first version used LayoutRequest + handle double-click filters and made `test_hydra_omega.py` segfault intermittently (4 of 32; unshown pages torn down), so content tracking is a slow timer and reset is a header button. Tabs that host a Hydra page contain two toggled splitters; look them up by `panel_toggles._key`, not `next(...)`. Tests: `tests/test_panel_toggle_tabs.py` (persist/reset, content minimum) use an isolated QSettings path; real-settings pollution is possible if other tests drag splitters without it.
+
+## 2026-10-31 — Image color scales use absolute linear Max/Min fields and bounded histograms
+
+User requested editable Max above / Min below each image color scale, image extrema by default, manual values held during Data Viewer live acquisition, histogram zoom constrained to those values, and automatic log/linear conversion while fields always show actual linear intensities. Added `color_scale.ColorScaleControls` as the common histogram wrapper for ImageViewer (inherited by ROI/Pickable), CakeViewer/CakeStackViewer/RingResidualViewer, WaterfallViewer and the Pump Probe heatmap (replaces its separate colorbar and visible symmetric-range control; old fields still migrate saved state).
+
+Canonical limits are linear values, including zero/negative endpoints. Only pixels and LUT coordinates use log10 with a 1e-10 positive floor; toggling back recovers exact endpoints, so zero never silently becomes 1e-10. Default range is finite image min/max including zeros, replacing the 30/99 percentile default. Constant or wholly nonpositive log images retain exact extrema in the fields but use a tiny nonzero internal interval for navigability. Invalid/reversed/nonfinite manual input is rejected inline without changing the active scale; scientific notation works. Auto releases manual limits and follows current-frame extrema. Manual limits serialize as `color_limits` in display state; legacy hidden percentiles remain readable.
+
+Histogram ViewBox bounds, maximum zoom-out span and LUT handle bounds use the mapped field values; zoom-in has a small finite minimum span. Dragging handles updates linear fields, but the axis reframes only on release to avoid changing coordinates under the pointer. A narrower histogram zoom persists over redraws; log switches reframe within converted endpoints. Data Viewer correction refresh and Hydra frame refresh explicitly preserve levels. New datasets can reset levels, with restored limits protected until the first image arrives.
+
+Verification: 40 color-scale tests plus Data Viewer controls and existing viewer tests cover typed/dragged limits, live refresh/corrections, log round trips (including nonpositive endpoints), zoom bounds/preservation, state restoration, extrema/nonfinite/constant data, cake-stack scrubbing, residual/Pump Probe maps and field placement. Offscreen rendered detector/cake preview visually checked. Run large Qt test files separately per existing isolation guidance; mixed files can retain stale pyqtgraph registry objects. Broader Hydra UI: 15 pass; `test_hydra_composite_builds_with_matched_calibration` fails on composite pixel size (410 vs 205), reproduced with original HEAD widgets/hydra_page/tab_view code loaded in memory, unrelated to color controls.
+
+## 2026-10-31 — Three GUI calibration choices; Frozen-point seeds One-shot in one job
+
+User decision: expose only One-shot (default), Frozen-point (fast/high-tilts), and Frozen-point + One-shot. Remove First-time, Four-stage, Bayesian, Joint cake and the disabled Multi-distance placeholder from the shared GUI list (single detector, Hydra, preferences, MCP run selector). Keep backend adapters for a later systematic probe; the comparison is on ROADMAP. Old saved Frozen-point labels migrate; removed selections fall back to One-shot.
+
+New mode `frozen_point_one_shot` runs both stages inside the existing abortable CalibrationWorker subprocess. It requires Frozen-point convergence, then passes fitted Lsd, BC, tx/ty/tz, distortion and wavelength as the next stage's seed. Both stages receive the same corrected RAW image/dark and im_trans codes, independently transforming/subtracting once. Only One-shot's final result is normalized/published, with Frozen-point convergence/iteration metadata and the intermediate seed retained for correct at-limit reporting.
+
+One-shot's high-level `calibrate()` has no distortion-seed argument; stage 2 deliberately uses its existing `pipelines.single.autocalibrate` seeded refinement route to preserve all fitted values and GUI refine/windows without another distance search. A user-supplied distortion seed also takes this route, fixing the same omission for ordinary One-shot feedback. Frozen-point keeps backend windows; GUI ± settings apply only to stage 2 around the intermediate seed, and a cap is not promised over the combined run. Merely forwarding `v1.tol*` would be insufficient: the backend wrapper explicitly replaces the geometry bounds with `bounds_*` each iteration. Scope here is pipeline simplification/composition, not changing those semantics. Existing MCP two-job composite remains available for clients with per-stage configurations; the new mode is the recommended single-job path.
+
+Verification: focused dispatch/seed/normalization and GUI-limit tests cover order, complete handoff, transforms/dark, fixed distortion, tolerances, non-convergence, final wavelength and legacy labels. A real-backend synthetic run (existing vendor fixture and its required point-pick settings, nearby seed, one One-shot iteration) recovered Lsd=200075 µm, ty=2.066°, tz=4.999° versus true 200000 µm/2°/5°. Its strain metric increased from ~202 to ~2413 µϵ after One-shot; chaining does not guarantee improvement and should be compared systematically on real data. The fixture found no points with the backend's default picker, so this is a controlled numerical handoff check, not validation of default picking. Hydra, MCP and subprocess checks pass when test invocations run separately: pyproject uses one fixed `.scratch` basetemp, so concurrent pytest runs can delete each other's temporary outputs.
+
+## 2026-10-31 — Calibrate mask stays raw for analysis, transforms only for display
+
+Root cause of the misplaced Mask overlay: `_show_calib_image()` applies the current MIDAS Flip Y / Flip Z / Transpose codes through `PickableImageViewer.set_raw_frame`, but `_update_mask_overlay()` painted the raw composite mask unchanged. Mask sources must remain in raw detector space because the calibration backend applies `im_trans` itself. The display copy now applies the same ordered codes before `set_mask_overlay`, and `_on_im_trans_changed()` rebuilds an already-enabled overlay so it cannot remain stale after a checkbox change. Raw-shape validation still happens before the display transform, preserving the wrong-detector guard. `tests/test_calibrate_mask_overlay.py` covers all non-empty ordered transform combinations and verifies the backend composite is unchanged.
+
+## 2026-10-31 — Calibrate parameters panel streamlined (name colour replaces status text)
+
+Panel was too tall/wide. (1) The "n/15" button is gone: the "Distortion" row name is itself the button that opens the coefficient picker, with a small "n/15" line beneath (`CalibrationParameterTable.dist_count_lbl`, still reachable as `tab._dist_btn`). (2) The per-row "refined, auto-seeded / held at…" sub-rows (`OUTCOME`, `_status_lbls`) are removed; a row name turns green (`REFINED_COLOR`) while its Refine tick is on — seed and refine stay independent, so seeding alone never colours. (3) The ± glyph column and the separate units column are gone: the spin and unit combo share the "± range" cell. (4) Rows read BC_Y / BC_Z with tooltips (MIDAS convention, origin bottom-left). Distortion refinement and Residual map now default to unchecked. Tests updated (`_name_widgets` stylesheet replaces `_status_lbls`); Hydra page untouched.
+
+## 2026-10-31 — Calibrate: send the GUI's lattice dict to midas_calibrate_v2, not the calibrant name
+
+Root cause (user report, beamline machine): `KeyError: Unknown calibrant 'CeO2(SRM674b)'`. `calibrate()` / `make_seed()` resolved the name string against the backend's own `CALIBRANTS` (CeO2/LaB6/Si/Al2O3 only), so GUI-defined names failed and edited lattice values for built-in names were silently ignored (a-error is exactly degenerate with Lsd). Both accept `Union[str, dict]`, so `calib.backend_calibrant(name)` builds `{name,a,b,c,alpha,beta,gamma,sg}` from `constants._LATT` (Preferences ▸ Calibrants) and is used at the two by-name call sites (`make_seed_safe`, v2 `calibrate`). Other pipelines already used `_LC`/`_SG`. Consequence: built-ins now use GUI values (LaB6 4.15692, Si 5.43102 vs backend 4.1569/5.4310); custom lattices must match their space-group system or the backend raises ValueError. `make_seed_safe` still swallows exceptions (bad calibrant shows as "auto-seed failed").
+
+## 2026-10-31 — Typing axis limits engages Manual mode (live-frame fix)
+
+Root cause: limits typed into the native right-click Manual min/max fields only took effect when "M" was already lit; in Auto the next live frame re-fit the plot. Fix (`widgets.py`, IntensityStatsPanel + ProfileViewer, the only plots with the A/M pair): the edit handler now sets manual mode, checks "M" and re-applies the held range on every redraw until "A". Capture reports only the edited axis (`_merged_manual_range`) so the other axis keeps its exact held value instead of the menu's `%0.5g` rounding. Regression: `tests/test_manual_axis_limits_live.py` (run without `--forked` flag on the CLI; the file marks itself forked).
+
+## 2026-10-27 — MCP project ops (`project.get_info/save/open`): quiet dialogs via `MainWindow._project_msg`
+
+`save_project`, `_open_project_selection` and `_apply_workspace_state` ended in modal `QMessageBox`es, which would hang the control socket, so those sites now go through `_project_msg`, which records instead of showing while `_agent_quiet` is set (the ops set it for the call). The ops reuse the existing methods, not a second implementation. Open selects everything via `ProjectContentsPicker` (no dialog) with an `exclude` list; it refuses on unsaved changes unless `discard_unsaved`, and Save As onto an existing file unless `overwrite`, matching the dialogs' confirmations. Skill: `midas-gui-mcp-project`.
+
+## 2026-10-27 — MCP: calibrate abort/clear_seed ops; agent skills live in `midas_gui_mcp/skills/`
+
+Added `calibrate.abort` (Abort button) and `calibrate.run(clear_seed=True)`. Why: an agent could not stop a run or untick seeds, and seeds persist between runs, so an "unseeded" run silently reused an earlier seed. `tab._abort()` disconnects the worker signals, so the op marks the tracked run job `aborted` itself (else `calibrate.wait` hangs). Agent skills (`midas-gui-mcp-setup`, `-calibrate`) sit in the repo next to the ops they describe, are advertised in the server's MCP `instructions`, and are symlinked into the gitignored `.claude/skills/` for Claude Code auto-load. Update the matching skill when an op changes.
+
+## 2026-10-25 — Audit (no code change): backend solve-cell parameters not exposed in the GUI
+
+Read `midas_defect` 0.9.1 (`ingest`, `geometry`) and `midas_hkls` (`ab_initio`, `ub_refine`, `lattice_symmetry`, `conventional`) against `pipeline.py`/`tab_solve_cell.py`. Findings, highest value first:
+- **Silently dropped geometry:** `Geometry(...)` is built with `tx_deg=0`, no `wedge_deg`, no `p_coeffs`/`rho_d_um`, and `qlab_to_qsample` is called without wedge. `geometry_fields_from_file` returns `distortion`, but `SolveCellTab._geometry` discards it (tx at least gets a note; distortion gets none). Zero on the spinel calibration, so no effect there.
+- **Diamond filter is 2-theta-only** (diamond cell + Fd-3m, `tol`); no orientation check, no off switch other than tol->0, no other anvil/gasket materials, `hkl_max=8`, `n_mc`, `rng_seed` fixed.
+- **Candidate quality filters** (faint/edge/degenerate-shape/low-volume, handoff 5.7) are not implemented; with `min_vol=1`/`min_frames=1` more junk reaches indexing. The 3 unclaimed spots on the spinel file sit at col ~4.5 (panel edge).
+- **ab-initio** only gets `tol`, `min_reflections`, `sigma_g`. Unexposed: `n_grid` (128; caps longest axis ~50 A, resolution 0.39 A), `q_max`, `min_subset`, `min_excess_sigma`, `n_peaks`, `min_length`, `subset_tolerance`, `max_supercell_ratio`, `min_volume`, `min_noncoplanarity`. Domain claim = ab-initio `indexed_mask` (initial basis), not re-assigned with the refined UB.
+- **Symmetry/conventional-cell:** `determined_ratio`, holohedry `n_sigma`, `to_conventional` tolerances fixed. Known-structure: `n_null_draws`, `z_thresh`, `rng_seed`, `chunk` fixed.
+- **Ingest internals:** `SENTINEL=4294967295` (uint32 only; uint16/float gap values unhandled), `live_frames` fraction 0.002, `core_frac` 0.5, `tth_bin` 0.02, absolute (not noise-relative) blob threshold, omega taken as `ref + i*step` although the file stores per-frame omega (jitter +-0.16 deg here) and frame-start vs centre convention is implicit.
+- **Predictions:** no systematic-absence rules (17/25 empty predictions were Fd-3m-forbidden); match gate 1.0 deg fixed.
+
+## 2026-10-25 — Material filter replaces the diamond filter (optional, multi-material)
+
+Why: the 2-theta-only diamond test flagged 9 spinel reflections that coincide in radius with diamond {220}/{400}; the filter could not be turned off, knew only diamond, and had no orientation or lattice awareness (see the probe/audit entries below).
+- **Backend `solve_cell/material_filter.py`** (pure numpy): `Material` = name, enabled, cell (a b c alpha beta gamma), space group + `extinction` (`space_group` | `none` | `diamond_basis` = Fd-3m plus the diamond-atom absences, which reproduces the old line table exactly), `tol_deg`, `hkl_max`, `mode`, `min_peak_counts`, `protect_if_indexed`/`protect_tol`. Presets: Diamond, Re, W, Au, Pt, MgO (ambient lattices, all editable). Any number of materials; earlier list entries win a shared spot.
+- **`mode="orientation"`**: among 2-theta matches, seed-and-extend (pairs of the 25 brightest spots x allowed hkl, `Rotation.align_vectors`, count spots on rotated lattice within `orient_tol_deg` and the 2-theta-equivalent radial window) finds orientations owning >= `min_spots` spots; up to `max_crystals` are peeled off (two anvils). Spots matching in 2-theta but fitting no orientation are kept. On the spinel project: 2-theta flags 9, orientation flags 4 (one crystal, 0.13 deg rms) and keeps 5.
+- **`protect_if_indexed`** (the "keep spots that index on a solved domain" option) acts when the filter is re-run with domains present: a flagged spot whose fractional hkl on a domain's UB is within `protect_tol` is unflagged (`protected_by` = 1-based domain). The tab then carries each domain across the re-filter **by `spot_id`** (candidate row labels are re-derived), adds the rescued spots and re-fits the domain with `pipeline.refit_domain` (factored out of `_stage_refine`, same result dict). Without the option, a re-filter still clears domains as before. All 9 spinel spots index on Domain 1, so with the option on they are all rescued.
+- **GUI**: stage 2 group has a checkbox; off = filter skipped, every spot is a candidate (pool is built automatically after ingest and when the box is toggled; button reads "Use all spots"); on = materials list (tick = enabled, Add presets/custom, Remove) + per-material editor + MC draws/seed. State is saved as `fields["material_filter"]`; projects saved with `diamond_a`/`contam_tol` convert to a single Diamond entry.
+- **Compatibility**: stage key stays `diamond_filter` (alias `material_filter`); flagged table keeps `is_diamond` (= flagged by any material) and `delta_to_diamond_deg` (nearest enabled-material line), and gains `contaminant_id` (index into `summary["materials"]`, -1 none; ints, not strings, so the project writer needs no text column) and `protected_by`. Defaults unchanged: one Diamond material, 2-theta mode, tol 0.07, protect off. Control/MCP: `set_material_filter`; `set_diamond_params` edits the Diamond entry; `run_material_filter` aliases `run_diamond_filter`.
+- Not done: the Contamination view's tolerance preview is still a uniform 2-theta preview (not orientation-aware); no per-material colours.
+
+## 2026-10-25 — `min_frames` ingest setting (default 2, unchanged behaviour)
+
+The pipeline-only `n_frames >= 2` post-filter was hard-coded; with `min_vol=1` it still dropped real single-frame peaks (see probe entry below). It is now `blobs.min_frames` (`BLOB_MIN_FRAMES_DEFAULT = 2`), a "blob min_frames" spinbox in the Ingest Parameters, `blob_min_frames` in the control/MCP `set_ingest_params`, and saved in the stage state. Default left at 2 so existing results are unchanged; the user picks 1 to keep peaks narrower than one omega step.
+
+## 2026-10-25 — Probe (no code change): why predicted peaks are "missing" on s3idc_oct8_spinel_newlayout.h5
+
+Read-only investigation; scripts in `scratch/_probe_missing_peaks/` (01 reproduces ingest bit-exactly: max-projection identical, blob counts 60/54/50 labelled -> 28/29/29 spots). Domain 1 predicts 130 visible reflections; 74 matched, **56 unmatched**:
+- **9 = diamond-flagged spots** (the only detected spots <1.1 px / 0.1 deg from a prediction). They index at integer hkl on Domain 1 (diamond {220}/{400} = spinel (620)/(840); a_spinel ~ sqrt(5)*a_diamond within 0.3%), so they sit on the Domain 1 lattice. **Correction (parameter audit, same day):** the filter is 2-theta-only, and only 4 of the 9 are mutually consistent with ONE diamond orientation (0.3 deg), so most are probably spinel (620)/(840) reflections false-flagged by the 2-theta coincidence, not true diamond. The only 3 unclaimed candidates are >110 px from any prediction (not near-misses).
+- **22 = real signal dropped by blob filters** (positions match predictions with the same rms as claimed spots: 0.4/0.7 px, 0.09 deg): 16 fail `min_vol=6` (vol 1-5 voxels, 17-228 counts), 6 are kept blobs rejected by the pipeline-only `n_frames >= 2` cut (single-frame, 66-1296 counts; rocking curve narrower than the 0.1 deg step). Chance coincidence ~0.003 expected, so not noise.
+- **25 = no signal** (<=3 counts): 17 are Fd-3m d-glide-forbidden, 8 allowed but N=h2+k2+l2 >= 51 (weak/high-q). `predict_reflections` applies no extinction rules; all 74 claimed are F-allowed/Fd-3m-allowed.
+- Sensitivity (probe only): `n_frames>=1` recovers the 6 with 0 new unexplained blobs; `min_vol=3` +15 blobs near-prediction-or-not (100/115 near); `min_vol=1` 164 blobs, 58 unexplained.
+- Side note: file omega jitters +-0.16 deg vs nominal 0.1 deg/frame (step median 0.105); small vs spot width, not a cause.
+
+## 2026-10-25 — Detector peak terminology; default reciprocal view down the beam
+
+- **Detector circles:** orange = observed, unassigned; green = observed, assigned to a domain; red = predicted by a domain but absent (`_missing_peak_rows`, ids `miss:<domain>:<n>`, selectable like spots, cached per domain set). This supersedes the per-domain palette added earlier the same day. Lattice-points mode on the detector now shows green/red; the 3-D lattice-points colours (green/orange) are unchanged.
+- **Default reciprocal camera:** looks down the beam (camera upstream, direction = ki, rotation axis up) via `PyVistaScatter3DView.view_along_beam`, used on first data and by a "Beam view" button. Assumed upstream→downstream and ω-axis up; flip if the user's reference image was the opposite handedness.
+
+## 2026-10-25 — Lattice points become a pickable mode; |q| shells / off-panel / panel-outline cleanup
+
+- **Removed** the "|q| shells" and "incl. off-panel" checkboxes (and `shells`/`predicted_offpanel` control + MCP args, `PyVistaScatter3DView.set_shells`): not useful. "panel outline" is now **panel maps** with a colour-map dropdown (`_PATCH_CMAPS`).
+- **Lattice points replace the observed-spot cloud** (not an overlay any more): one pickable point per *visible crossing* (not per unique hkl), green = assigned spot (placed at the spot's actual frame/ω/row/col, `pred_*` keeps the prediction), orange = prediction. Rows (`spot_id` = `"lp:N"`, `lattice=True`) go into `_spot_rows_by_id`, so selection, the 3-D marker and the Detector sync reuse the spot path; the Detector view circles the active panel's lattice points (`_lattice_scatter`). Unchecking clears `_lattice_rows` and the indexed-spot view returns. Only the unpickable "diffracting now" highlight remains an overlay.
+- **Why per crossing:** a lattice point must be tied to a frame/ω/row/col, which belong to crossings. Caveat: crossings of one hkl share an xyz, so a click picks the first of them.
+
+## 2026-10-25 — Reciprocal-map overlay cleanup; spot picking via own screen-space projection
+
+- **Removed** "Show fitted positions" and "Fit visible spots" (the latter only re-rendered; the former duplicated the lattice-points/Δq views) plus their control/MCP ops (`fit_visible_spots`, `show_fitted_positions`). Overlay labels: Ewald sphere, *cell, lattice points, panel outline; vertical separators between overlays.
+- **Click picking was broken** because `vtkPointPicker` got Qt logical pixels while VTK uses physical pixels (ratio 2 on Retina), and ray-casting could also hit non-spot actors. `_PickableInteractor.pick_spot_id` now projects the visible spots itself (`project_to_display`, vectorised, verified equal to `WorldToDisplay`) and takes the nearest within the marker radius, scaling by renderer-size/widget-width. Offscreen Qt has no GL context, so only the projection math is unit-checked; the click itself was confirmed by the user on a real display.
+- **Detector link:** `_select_spot` now calls `_sync_detector_to_spot` so the Detector view follows a click (panel + frame, Raw/Corrected stages) without switching tabs; the "Show selected spot on detector" button still switches tab.
+
+## 2026-10-25 — Solve Cell pipelines exposed to agents through the MCP control API
+
+- **Decision:** every Solve Cell workflow (panel setup, stages 1–5, domains/spots, views/overlays, volume
+  build, review, project save) is a `solve_cell.*` op in `control_api.py` (mixin `_SolveCellOps`) with a
+  matching `solve_cell_*` tool in `midas_gui_mcp/server.py` (37 tools). The ops call the tab's own `_run_*`
+  methods and widgets — no second implementation of the pipeline.
+- **Job completion = new `SolveCellTab.stageFinished(stage, outcome)` signal**, emitted at the *end* of each
+  result handler (after chained follow-ups: free "index remaining" = ab-initio → refine). Tracking the worker
+  thread instead would resolve jobs before the tab state (domains, candidates) is updated, and mid-chain.
+  Clean negative searches are `ok=True` with a note; only exceptions are `failed`.
+- **Agent mode on `SolveCellTab`/`PanelCard`** (`set_agent_mode`, `_warn_or_record`) turns guard
+  `QMessageBox`es and the failure `show_error` into recorded errors (`precondition_failed`), same pattern as
+  `CalibrationTab`. The two ingest *confirmations* (omega step 0°, calibration without `im_trans`) are
+  **refused unless `acknowledge_warnings=True`** — they guard silent wrong-geometry results, so an agent
+  must opt in knowingly rather than have them auto-accepted. Removing a non-last panel with results is
+  refused outright (it renumbers panels and would silently discard the ingest).
+- `solve_cell.wait` joins `_ASYNC_OPS` (QTimer polling, no nested event loop — see control_server notes).
+- Diamond filter now has an explicit "no calibration on active panel" guard (it previously raised a bare
+  RuntimeError from `geometry_cfg()`).
+- **Not covered:** opening a project (dialog-driven in `app.py`), camera/widgets inside Diagnostics /
+  Contamination / Inspector beyond `set_view`. Observation: `_fit_visible_spots` sets the vestigial
+  `_recip_has_data` (never read); the PyVista view's own `_has_data` decides camera refit, so "Fit visible spots"
+  only re-renders — left unchanged, awaiting the user's call.
+- Known test-isolation quirk (pre-existing, reproduced on the unmodified tree): running
+  `test_control_api_calibrate_mcp_ops.py` and `test_control_api_tab_focus.py` in one pytest invocation fails
+  the former; each passes alone.
+
+## 2026-10-25 — Global panel terminology + minimisable Data/Controls panels (Solve Cell first)
+
+- **Terminology (GUI-wide):** *Data* panel = left-most (loads data); *Controls* panel = middle (analysis
+  controls + run buttons); *Results* panel = right-most (all plots/visualisations). Use these names in UI
+  text, docs and code. Recorded in ARCHITECTURE "UI / UX conventions" and `panel_toggle.py`.
+- **Minimise to a bottom ribbon:** Data and Controls each get a slim header with a "—" button
+  (`midas_gui/panel_toggle.py`, `install_panel_toggles`). Minimising *hides* the panel (not a 0-width
+  collapse, so no stray handle) and adds a restore tab to a ribbon under the splitter; the freed width is
+  given to Results (the only stretch child). Results has no minimise button. Restore returns the prior width.
+- **Scope:** Solve Cell first, then Data Viewer, Calibrate, Batch Integrate and Pump Probe (same day). In the
+  stack-based tabs `_hsplit` is now the stack *page* (splitter + ribbon), not the splitter. Still pending:
+  `tab_batch_correct`, `tab_refine`, hydra pages (same `QSplitter` shape: one `install_panel_toggles` call + ribbon slot). Two-panel tabs
+  (corrections, texture, mask, pdf, export) use a fixed-width Controls column with no splitter — would need a
+  splitter conversion first.
+
+## 2026-10-25 — Solve Cell left-panel refinement (panel ribbon, omega mapping, calibration popup)
+
+- **Panel number is the panel id.** Panels live in a vertical "Panels" ribbon at the window's left edge
+  (`PanelRibbon`, buttons 1, 2, 3…; right-click a number → Remove) over a `QStackedWidget`
+  (`SolveCellTab._panel_tabs`). The separate `panel id` spinbox is gone. Numbers stay gap-free, so removing a
+  non-last panel renumbers the rest; because spot tables/previews are keyed by panel id, that discards any
+  existing ingest (after a confirmation). Removing the last panel discards nothing. Old projects saved with
+  id gaps are renumbered by rank on restore.
+- **Frame↔omega mapping = start omega, end omega, omega step, first frame idx**; last frame idx is derived
+  (`first + round((end − start)/step)`, closed span, same convention as the auto-detect's in-range test).
+  Step 0 ⇒ open-ended ("end of stack", ingest clamps). The old "omega step is 0" ingest warning now fires only
+  when start ≠ end with step 0 (an untouched mapping is still silent). Clicking "first frame idx" opens a
+  dialog with the omega-field dropdown and sets only the first idx (start omega stays as typed). Legacy saved
+  state (`ome_first_deg`/`ome_last_idx`) is mapped to start/end on restore.
+- **Data panel shows only `frames × width × height`**: `DataLoaderPanel(compact_info=True, hide_frame_field=True)`;
+  the Detector tab's own slider is the only frame control.
+- **Loaded calibration = filename link** → popup table of every panel's parameters (one column per panel,
+  `SolveCellTab._show_calibrations`); warnings (no `im_trans`, unused `tx`, embedded copy) live in the popup.
+- **"About Solve Cell"** is a right-click menu on the main window's Solve Cell tab (`MainWindow._on_tab_bar_context_menu`,
+  plain-text dialog); the inline blurb was removed. Left column min width 208 / initial 229 (20% under the other tabs' 286, per user); to fit, the omega group uses 90% type, no ° suffix (units in the note), 3/4-decimal spins and four equal fixed-width (78 px) fields, and the calibration button reads "Load calibration…". Path fields (data, dark/bright/background, project folder, mask rows) show the full path as a tooltip; the Dataset combo's tooltip is file + dataset + shape.
+
+## 2026-10-25 — Pause new Solve Cell visualizations; refine the tab first
+
+User decision: stop adding views after V01–V05, V08–V13, V15 (partial) and V02, and spend the next
+work on refining the existing Solve Cell tab. Rationale: much of what was built was verified headlessly
+(offscreen Qt/VTK has no pixel buffer or picking), so live-display behaviour, usability and edge cases
+need a pass before more surface area is added. Branch `solve_cell_vis` is uncommitted; queued views and
+known gaps are listed in the 2026-10-24 entries and in `documentation/solve_cell_visualizations.md` §11.
+
+## 2026-10-24 — V02 frame patches + visualization documentation
+
+- **V02** (`solve_cell/frame_patch.py`, overlay "Frame patches"): cell corners at pixel EDGES (`i-0.5`), mapped to q-lab once per
+  panel and rotated per frame; cell value = block MAX of (frame − static median bg) so sparse peaks survive 8×8 pooling; fully
+  masked/sentinel blocks are NaN and REMOVED from the mesh (gap ≠ zero; partly masked blocks stay). Cache `frame_patches`
+  (stride 8, every in-window frame, 4.3 MB) so ω playback needs no raw files. Each panel shows its nearest loaded frame to the
+  slider ω (panels' ω_ref differ ≤0.027°); selecting a spot sets ω to its fractional ω. NOT done: clicking the patch to return to
+  a pixel (mapping exists: `pixel_to_cell`, `cell_pixel_ranges`) — patch actors are non-pickable so they cannot steal spot picks.
+- Measured correction: a covered 0.06 Å⁻¹ voxel holds a median 730 pixel samples over the whole scan (not ~10³ per frame).
+- HDF5 file grows more than the product sizes (3 swaps of replaced groups): 8.4 MB of products → 2.1→14.7 MB file; Save As compacts.
+- **Document**: `documentation/solve_cell_visualizations.md` + `.pdf` (figures in `documentation/figures/solve_cell_viz/`) explain
+  every Solve Cell view and its calculation. Built with pandoc → HTML (`scratch/doc.css`) → headless Chrome; update both when a view
+  changes. Not part of the auto-updated `gui_documentation.md`.
+
+## 2026-10-24 — V13 domain comparison: metric first, then orientation through the matching basis change
+
+`solve_cell/domain_compare.py` + "Compare domains" tab + cached `domain_comparison` / reviewer `domain_review` products.
+
+- **Method**: enumerate integer det=+1 bases (entries in [-2,2], 67,704) with `M^T G2 M ≈ G1` (3% of the
+  largest metric diagonal); misorientation = minimum polar-decomposition rotation over all matching M. The matching
+  M already contain every proper lattice automorphism (24 for the spinel fcc lattice), so no crystal point group is
+  assumed. det=-1 bases are skipped on purpose (−I is always an automorphism, so nothing is lost; improper
+  rotations are never reported). The doc's 24 signed-axis relabelings were NOT used: they only cover cubic-axis settings.
+- **Conclusions are suggestions**: same lattice relabeled (<1°) / compatible distinct orientation / different metric /
+  insufficient evidence (<8 reflections). Thresholds are module constants stored in the product metadata. Metric-only:
+  orientations related by a lattice symmetry the structure lacks are indistinguishable without intensities.
+- **Candidate vs accepted**: the unrefined ab-initio seed is listed as a separate "candidate" lattice. In the spinel
+  project it is the only second entry (one refined domain, 3 leftover spots), and compares at 0.00° — it is the same UB.
+- **Reviewer conclusions** are stored with both UB fingerprints; a re-index that changes a UB makes them (and the
+  cached comparison) stale and they are ignored. Nothing in this view changes `claimed_index` (tested).
+- Cross-fit evidence (`B∈A`, `A∈B`) counts spots of one lattice that index to integers (±0.1) under the other; it is
+  evidence for V14, not a claim. Camera link between the two scenes uses an EndInteraction observer (convenience only).
+- angle uses atan2 form (arccos lost digits near 0).
+
+## 2026-10-24 — Solve Cell visualization work (branch `solve_cell_vis`): cache every derived product in the project
+
+Implements the first increments of `scratch/solve_cell_visualization_research_and_implementation.md`
+(V01, V03–05, V08–V12, V15 partly) with the rule that **each view reads a cached
+product stored in the project**, so loading `s3idc_oct8_spinel.h5` shows them with no re-run.
+
+- **Where/what**: `/analysis/solve_cell/viz/<product>/` (JSON `metadata` + `tables/` + `arrays/`);
+  `project.write_solve_cell_viz` / `read_solve_cell_viz`; `read_solve_cell()["viz"]`. Products:
+  `frame_manifest`, `domain_NN_predictions` (predictions + residuals), `reciprocal_volume`
+  (sum/count/max), `spot_shoeboxes` (raw + bg-subtracted ROI cubes). A **new ingest drops them**
+  (whole-record swap); a **re-index does not** — each domain product records `ub_fingerprint` and the
+  tab recomputes when it no longer matches the domain's UB.
+- **Geometry adapter** (`solve_cell/geometry_adapter.py`) rebuilds panel geometry from the stored ingest
+  metadata only. Verified: reproduces stored spot q exactly, pixel↔q round-trips <1e-3 px through every
+  `im_trans` combo, and forward prediction (both Ewald roots, lifted into the scanned window) re-finds all 74
+  assigned reflections of Domain 1 (RMS Δrow/Δcol 0.43/0.65 px, Δω 0.09°). Residual sign = observed − predicted.
+- **Metadata gotcha**: `ingest/metadata.panels` is keyed by the SOURCE panel id (1,3,4) that spots'
+  `panel_id` carries; the inner `panel_id` (1,2,3) is the tab-card index — use the dict key.
+- **Volume approximations are declared, not hidden**: nearest voxel, nominal frame omega (same
+  convention as ingest spot omega, no half-step), static median background (ingest's sector background
+  is not retained), no dark/bright/polarization. Max channel is primary because a voxel (0.06 Å⁻¹)
+  holds a median 730 pixel samples over the scan (measured) and a mean washes out Bragg peaks. `count == 0` = unmeasured → NaN, drawn
+  grey in 2-D and excluded from the isosurface; display transforms never touch stored data.
+  Real data: 3 panels, 130×114×137 grid, 52% measured, 52 s; peaks coincide with all 86 spots.
+- **Ewald sphere drawn as a local cap** (radius 2π/λ = 12.7 Å⁻¹ ≫ data) in sample-frame q at the slider ω;
+  resolution shells are a separate (purple) object. All reference overlays are non-pickable and restore the camera.
+- **Known gaps / not done**: V02 frame patch, V06 stereographic maps, V07 DAC accessibility, V13 domain
+  comparison, V14, V16–V22; dead-frame (live filter) identities and null-search draws are not retained by
+  ingest/diamond so the timeline can only show the omega window and V17 cannot be built yet.
+- Pre-existing, unrelated: `tests/test_project.py::test_apply_project_calibration_single_detector`
+  SIGABRTs on clean HEAD too (Calibrate tab).
+
+## 2026-10-24 — Solve Cell joins the project file as ONE latest-analysis record
+
+Solve Cell results now persist in the project (`/analysis/solve_cell`) and
+auto-restore on open. Replaced the earlier ingest-only
+`append_solve_cell_ingest_attempt` (per-panel append-only attempts, no
+reader) — it was a day old and never restored anything.
+
+- **Single record, not attempt history** (user's call): Solve Cell has no
+  meaningful "attempt" list — a run is one evolving analysis. Re-running a
+  stage replaces its section *and everything downstream* (ingest wipes the
+  record; diamond drops index), mirroring the tab's own in-memory
+  invalidation, so the file can never hold a diamond/index result computed
+  from a different ingest than the one stored.
+- **Sections per stage** (`ingest/`, `diamond/`, `index/`), each swapped via
+  `_stage_and_swap`, instead of rewriting the whole record every stage: HDF5
+  does not reclaim deleted space, and ingest carries the heavy arrays
+  (spots, per-panel masks/previews). Later stages only rewrite small data.
+- **Reproducibility without raw data**: ingest meta stores, per panel, the
+  loader state (data/dark/bright/background/mask paths + `path_hash`), the
+  parsed calibration geometry AND the calibration file text, omega mapping,
+  stage parameters, environment snapshot. Raw frames are never embedded.
+  User masks are embedded (small, may not be file-backed).
+- **Derived data is rebuilt, not stored**: `candidate_df` is re-derived from
+  `flagged_df` (same expression as the pipeline) and `g_2pi` from
+  `candidate_df`; ab-initio is restored as a light namespace with only what
+  Refine needs (`success/hkl/indexed_mask/...`; `candidates` objects dropped).
+- **When written**: as each stage finishes if a project is open, plus
+  `flush_project_record()` from `MainWindow.save_project` — covers results
+  computed before any project existed and Save As to a new file (a changed
+  target path marks every section dirty). `copy_analysis_history` copies the
+  record under both scopes but never overwrites one already written from the
+  live session.
+- **Restore precedence**: if the saved GUI workspace's "Solve Cell" tab is
+  also restored it owns panel config/fields (may be newer than the analysis);
+  otherwise panels/params come from the analysis's as-run snapshot. A panel
+  whose calibration file is missing falls back to the embedded geometry.
+- Bug caught by the restore test: `_add_domain` flushed before the caller set
+  `_round1_domain_index`, so a restored project's Refine would have appended a
+  duplicate domain; now set inside `_add_domain(round1=True)`.
+- Not stored/restored: running workers, Reciprocal-view camera/selection,
+  diamond/pooled side files on disk (still written by the pipeline itself).
+
+## 2026-10-23 — Online visualization research handoff; retain PyVista and separate measured products
+
+Created `scratch/solve_cell_visualization_research_and_implementation.md`
+(~9,900 words): 22 prioritized visualization specifications, 37 annotated
+primary source entries, explicit current-code integration hooks, scientific
+contracts, streaming/cache design and acceptance tests. Research only: no
+application/dependency changes or new scientific validation runs. Inspected
+the current `pyvista` branch rather than relying on the earlier Matplotlib
+conversation; dirty changes at inspection became `5e99421` during research.
+
+Key design distinction: generated Ewald construction, a detector frame's
+measured Ewald patch, full-stack Cartesian-q intensity/coverage volume and
+spot-centroid scatter are different products. Geometry-only Cartesian
+reconstruction can precede a solved cell (explicit in DIALS rs_mapper);
+HKL labels/completeness require a domain model. Keep measured support,
+negative subtracted intensities and source-frame provenance rather than
+zero-filling unknown regions or claiming a full measured sphere.
+
+The handoff targets the existing PyVista/VTK reciprocal renderer and
+pyqtgraph detector/2-D views. It separates documented product behavior from
+MIDAS-specific proposals, covers Ewald sign/2π conventions and im_trans,
+and flags quantitative prerequisites for DAC coverage, absences, intensity
+validation and 3D-ΔPDF. No renderer swap or new software-suite dependency
+is recommended as a prerequisite. Internal QA checked all 22 feature IDs,
+37 source IDs, reference consistency and current integration-file paths.
+
+## 2026-10-23 — Solve Cell: multi-panel mis-calibration root-caused to ignored calibration `im_trans` (fixed same day, see 'Implemented')
+
+On `s3idc_oct8_spinel.h5` (omega step already corrected to 0.1) the pooled
+reciprocal map still looked mis-calibrated. The calibration `.instr.json`
+files all carry `im_trans: [2]` (flip Z), so `BC_z`/`ty`/`tz` live in the
+Z-flipped frame (BC_z 385.7/719.1/-14.7 px). `solve_cell/pipeline.py`
+`_stage_ingest` feeds raw (unflipped) blob rows to `pixel_to_qlab`, and the
+panel geometry stored in project metadata has no `im_trans` at all. Check
+(`scratch/spinel_overlay/spots_check.py`): fitting cubic spinel to each
+panel's spot 2theta, raw rows give a = 8.13/7.90/8.26 A with ~0.16 deg median
+residual (mutually inconsistent); `row -> 511-row` gives a = 7.974/7.975/7.976
+with 0.003-0.008 deg. Overlays: `scratch/spinel_overlay/panel{1,2,3}_overlay.png`.
+Fix direction: carry `im_trans` into `geometry_cfg`/ingest and map blob
+row/col through `helpers.im_trans_map_point` before `pixel_to_qlab` (the
+image itself need not be flipped). Calibrations were fine; not a calibration
+problem.
+
+**Implemented (same day).** `pipeline.py`: geometry carries `im_trans` (+
+`im_trans_in_file`) from the calibration file; ingest keeps frames/mask/spots RAW
+and carries the geometry instead -- blob centroids are mapped raw->calibration
+frame (`_map_index_points`, index form `n-1-x`) before `pixel_to_qlab`, and the
+(2theta, eta) maps are mapped calibration->raw (`_calib_map_to_raw`) before they
+drive background subtraction (flipping only spots would have left the polar
+background partition wrong). Always-on guard `check_im_trans()` on every ingest:
+no `im_trans` key, or a calibration file that doesn't declare it -> `ImTransWarning`
+(+ stdout log, `summary["warnings"]`, GUI log lines); transformed raw shape !=
+calibration (nz, ny) -> `ValueError`; pooled panels with differing codes ->
+warning. GUI: loading a calibration shows the transform in the calib note, and
+`_run_ingest` makes the user confirm when a panel's calibration doesn't declare
+it. Deliberately NOT an `on_step` event (checkpoint order is test-locked).
+
+## 2026-10-23 — Solve Cell: diagnosed a real multi-panel ingest bug (omega step left at 0°) exposed by the new auto-detect feature; added guard rails
+
+A real project (`s3idc_oct8_spinel.h5`, panels 1/3/4 for the spinel_orient1_r3
+beamtime) showed a badly distorted pooled reciprocal-space scatter after
+Ingest: panel_01 looked like scattered noise while panel_03/panel_04 looked
+like suspiciously clean arcs. Root cause, found by reading the saved project
+JSON (`gui_workspace/Solve Cell/state`): panels "3"/"4" had `ome_step: 0.0`
+while panel "1" had the correct `ome_step: 0.1` -- all three had used the new
+auto-detect checkbox (this session, same day) to fill `ome_first_idx`/
+`ome_last_idx`/`ome_first_deg` correctly (matching the worked example: frame
+38->628 for panel 1), but Detect never touches `ome_step` (reused as-is from
+the pre-existing, separately-positioned field -- by design, see the earlier
+entry above), and the user only filled it in for panel 1.
+
+`pipeline._stage_ingest`'s `omega_deg_all = ref_deg + arange(n_frames) *
+step` assigns every kept frame the identical `ref_deg` omega when step is
+0.0, across the whole window -- panel_01 (correct step) got each frame's
+real sample orientation and so reconstructed the genuine (to a user,
+"scattered"-looking) 3-D reciprocal lattice; panels 3/4 instead got every
+frame's spots placed as if the sample never rotated, which looks like a
+clean arc/ring because it is effectively one frame's 2-D detector geometry
+reprojected, not real 3-D Bragg peaks across a rotation. Confirmed purely by
+reading the saved config against the pipeline formula -- no need to re-run
+the (expensive, real ~1.3 GB/panel) ingest itself to diagnose it.
+
+Fixed by adding guard rails, not just fixing the one project by hand: (1)
+`PanelCard._detect_omega_frame_range` now pops an informational reminder
+immediately after a successful Detect if `omega_step` is still 0.0 across a
+real (first != last) window -- catches it the moment it's created; (2)
+`SolveCellTab._run_ingest` blocks (Yes/No confirm) before running if any
+*ready* panel has `omega_step_deg == 0.0` **and** a genuinely bounded window
+(`omega_last_frame_idx` below the "last frame idx" spinbox's own 1,000,000
+default/max sentinel, so a panel whose frame/omega mapping was simply never
+touched doesn't false-positive -- this exact false-positive was caught by
+re-running the full UI suite, which hung on real `QMessageBox.warning` calls
+with nothing to dismiss them: `_make_panel_ready`-based tests never touch
+the omega fields, so first-pass of this check fired on every one of them);
+(3) an inline note in the auto-detect box spells out that Detect doesn't
+touch `omega step`. Added 7 new tests covering both warning paths (shown/not
+shown, cancel/confirm) plus the false-positive-on-untouched-panel case. Full
+suite: 96/96 passed, confirmed stable across two consecutive runs.
+
+## 2026-10-23 — Solve Cell: auto-detect first/last frame idx from omega metadata; detection is a value-in-range test, not nearest-match/step-count
+
+Added an "Auto-detect first/last frame idx from omega metadata" checkbox to
+each `PanelCard`'s "Frame ↔ omega mapping" group (`tab_solve_cell.py`), so a
+user no longer has to page through frames by hand to find where their omega
+range starts/ends in the raw HDF5 stack. When checked, it shows an editable
+omega-field combo (auto-populated via the existing `list_h5_1d_datasets`/
+`_OMEGA_HINTS` ranking, same pattern as `tab_batch.py`'s omega-channel
+picker) plus start/end-omega spinboxes and a "Detect frame range" button;
+Detect fills the existing `first frame idx`/`its omega`/`last frame idx`
+fields (the `omega step` field is reused as-is for the pipeline's nominal
+`omega(frame)` model, not duplicated).
+
+New `helpers.detect_omega_frame_range(path, field, start_deg, end_deg)`
+implements detection as a **plain value-in-range test**: first/last 0-based
+array index whose omega value lies between `start_deg` and `end_deg`
+(whichever order), via `np.flatnonzero(mask)[0]`/`[-1]`. Two alternatives
+were considered and rejected after checking against a real file
+(spinel_orient1, Oct8 beamtime): independently nearest-matching `start_deg`
+and `end_deg` each to the closest omega value gets the start frame right but
+can be off by one frame at the end, because ramp-up/ramp-down segments at
+either end of a scan have uneven per-frame omega spacing (confirmed: nearest
+match to the file's real end omega landed one frame later than the
+value-in-range test and than the user's own manually-verified answer). A
+step-count formula (`start_idx + round((end-start)/step)`) also matches the
+worked example but needs the step to be exact; the range test needs no step
+input, and whatever `step` is still entered feeds only the pipeline's
+unrelated nominal-omega-per-frame model, not detection. Validated end-to-end
+against `.../test6_spinel_orient1_25kev_exp0p02_det_-185_10_0_000001.h5`:
+default-detected field `entry/instrument/sample_stage/omega`, start=-30°/
+end=29° → frame 38/628, matching the user's own manually-determined answer
+exactly.
+
+While adding a project-save/restore round-trip test for the new fields, hit
+the documented "second native-crash trap" (STATE.md, interpreter-exit GC
+destroying a VTK render window segfaults) for real: a second
+`SolveCellTab()` built inside a test and never `deleteLater()`'d crashed the
+*next* test's forked process with SIGSEGV when the whole file ran together,
+despite passing every time in isolation — order/fork-state-dependent, not
+caught by running the new test alone. Fixed by adding the same
+`deleteLater()`+`processEvents()` cleanup the `tab` fixture already uses to
+both the new test and the one pre-existing test with the same gap
+(`test_get_state_set_state_round_trips_panels_and_stage_fields`, which had
+been getting away with it by luck of run order). Confirmed stable: two
+consecutive full runs of `test_solve_cell_ui.py`, 91/91 passed both times,
+no crash.
+
+## 2026-10-23 — Solve Cell: keep PyVista only for the reciprocal-space map; Detector view reverted to pyqtgraph; adjustable/intensity-scaled spot size added
+
+After live-looking at the full PyVista port, the Detector view (2-D frame +
+spot overlay) looked worse than the previous pyqtgraph `widgets.ImageViewer`
+version -- the 3-D reciprocal-space scatter was the one view that actually
+benefited from PyVista/VTK (real GPU-backed 3-D, native scalar bar/legend).
+Reverted `tab_solve_cell.py`'s `_build_detector_tab`/`_update_spot_overlay`/
+`_set_detector_image`/`_on_detector_spot_clicked` back to the pre-`pyvista`-
+branch `ImageViewer` + `pg.ScatterPlotItem` implementation (byte-for-byte
+where possible), and deleted `pyvista_views.PyVistaImageView` entirely as
+dead code -- `PyVistaScatter3DView` (and the shared `_PickableInteractor` it
+needs) is the only piece of that module still in use. Detector <-> reciprocal
+spot linking (`_select_spot`/`_show_selected_on_detector`) is unaffected --
+it always went through `spot_id`/`_spot_rows_by_id`, never through either
+view's own internals, so this swap is transparent to it.
+
+Also added user-adjustable reciprocal-space spot size (`PyVistaScatter3DView`
+constants `_DEFAULT_POINT_SIZE`/`SIZE_MODE_EQUAL`/`SIZE_MODE_INTENSITY`,
+bumped the previous hardcoded `point_size=6` up to a default of 14) with two
+modes, picked via a new "Spot size"/"Size mode" row in the Reciprocal space
+map tab: equal size (uniform `point_size`, same `add_points` path as before),
+and size-by-total-intensity, which reads each spot's `"integrated"` field
+(`midas_defect.ingest.find_blobs_3d`'s per-spot summed blob intensity,
+already present on every row `_display_spot_rows` builds -- no pipeline
+change needed) and scales radius by `sqrt(intensity / max_intensity)` across
+every group drawn in that call (not per-group), with a 35% floor so faint
+spots stay visible rather than vanishing. Implemented via
+`vtkPointGaussianMapper` (pyvista's `style="points_gaussian"` +
+`actor.mapper.scale_array = "point_radius"`) since plain `vtkPoints`
+rendering has only one `point_size` per actor, not a per-point one;
+`vtkPointPicker`-based click/hover picking is unaffected since it resolves
+off the underlying point coordinates, independent of which mapper subclass
+renders them (verified both by the existing picking tests still passing and
+by a direct offscreen check of `actor.mapper.scale_array`/`point_radius`).
+The selection-highlight ring's size now tracks the current spot size
+(`max(22, point_size + 8)`) so it stays visibly larger than the spot it
+highlights at any slider setting, instead of the old fixed 22px potentially
+being smaller than a user-enlarged spot.
+
+## 2026-10-23 — Solve Cell GPU rendering: VisPy tried and abandoned, PyVista adopted (`pyvista` branch)
+
+Asked to try VisPy (the GPU-rendering candidate flagged the same day, below)
+for both Solve Cell views. Added `vispy==0.17.0` (conda-forge, no PyOpenGL
+needed, no numpy conflict) on a new `vispy` branch and spiked it: with a
+real display, a `vispy.scene.SceneCanvas` embedded via PyQt5 constructs and
+renders correctly. Under `QT_QPA_PLATFORM=offscreen` — this project's whole
+test suite's platform — it **segfaults** (exit 139) the moment an actual
+draw happens; confirmed on both `offscreen` and `minimal` Qt platforms, and
+`QT_OPENGL=software`/`QT_QUICK_BACKEND=software` make no difference (this
+conda-forge Qt5/macOS build has no headless-GL path at all). Since
+`SolveCellTab.__init__` would construct that canvas, every one of the 81
+existing Solve Cell UI tests — not only rendering ones — would crash the
+test process, not merely fail. Abandoned; `vispy` branch deleted, dependency
+changes reverted, nothing from that attempt reached `main`.
+
+Tried PyVista/VTK instead (`pyvista` branch, off `main` @ `689282c`), same
+spike methodology, now in an isolated `pyvista-spike` conda env first so the
+check couldn't destabilize the real `midas-gui` env:
+- `pyvistaqt.QtInteractor` renders correctly with a real display, like VisPy.
+- Under `offscreen`, every scene-building/picking/camera operation the new
+  widgets need (`add_points`, `add_scalar_bar`, `add_legend`,
+  `camera_position` get/set, `enable_point_picking`, `remove_actor`) works
+  with **no crash at all**. Only pulling an actual rendered pixel buffer off
+  it (`.screenshot()`/`.image`) raises a catchable
+  `pyvista.plotting.errors.RenderWindowUnavailable` there — never a crash.
+- `pv.Plotter(off_screen=True)` — VTK's own off-screen render window,
+  independent of Qt's platform plugin entirely — renders real pixels under
+  `offscreen` with no crash at all. VisPy had no equivalent escape hatch.
+
+This is a second, independent de-risking success beyond "it doesn't
+segfault": automated tests that want genuine rendered-pixel verification
+have a safe path, which the plan budgeted for but the final widgets ended up
+not needing (see below — testing against stored actor/group state turned
+out sufficient, with one offscreen screenshot-based manual check instead).
+
+**Dependency: pip, not conda-forge.** `conda install -c conda-forge vtk
+pyvista pyvistaqt` into the real `midas-gui` env fails to solve: current
+VTK's `vtk-base` pulls `viskores`->`mesalib`->`mesa-lavapipe`, which needs
+`__osx>=15.0` (this machine is 14.8), and even avoiding that path, older
+`vtk`/`pyvista` combinations conflict with this repo's `libcurl`/
+`imagecodecs`/`c-blosc2` pins through `proj`/`ffmpeg`/`jpeg`. A
+`pip install --dry-run vtk==9.7.1 pyvista==0.49.1 pyvistaqt==0.13.1`
+resolves clean against the real pinned env, no numpy/torch/numba movement —
+same reasoning already used for `torch`/`numba` in `environment.yml`'s
+`pip:` section (self-contained wheels sidestep conda-forge's dependency
+graph). Installed for real and re-verified the three findings above in the
+actual `midas-gui` env, not just the throwaway spike env.
+
+**A second, independent native-crash trap, found only after wiring the
+widgets into the real tab.** Constructing a full `SolveCellTab` printed
+"TAB CONSTRUCTED OK" and then segfaulted (exit 139, no Python frame — native
+VTK module teardown) on interpreter exit. Isolated via elimination
+(`PanelCard` alone: fine; both new widgets alone: fine; both together:
+fine; only the full tab: crashes) to the destruction *path*, not the widget
+count: Python's interpreter-exit GC destroying a VTK render window — rather
+than Qt's own `deleteLater()` + a live event loop processing it — segfaults,
+because there is no real OpenGL context offscreen to tear down safely
+either way. `pytest-forked` reports this as the test CRASHED, even when
+every assertion in the test body already passed (confirmed with a minimal
+repro: a test that only constructs `SolveCellTab` and asserts `is not None`
+registers as CRASHED, not PASSED, without this fix). Fixed by having the
+`tab` fixture in `test_solve_cell_ui.py` (and `test_pyvista_spike.py`'s own
+widget-constructing tests) explicitly `widget.deleteLater();
+app.processEvents()` in teardown, letting Qt tear the widget down itself
+before the forked test process exits. The real running app isn't at this
+specific risk the same way — it has a live event loop for its whole
+lifetime — but any future short-lived script/test that constructs these
+widgets needs the same explicit teardown.
+
+**Implementation** (`midas_gui/pyvista_views.py`): `PyVistaImageView`
+(detector tab) and `PyVistaScatter3DView` (reciprocal tab), scoped to Solve
+Cell only — the shared `widgets.ImageViewer` used by the other 10 tabs is
+untouched. Both build on `pyvistaqt.QtInteractor` through a shared
+`_PickableInteractor`: left-click-vs-drag via a press/release pixel-distance
+threshold (same approach the matplotlib version used), hit-testing via
+VTK's own `vtkPointPicker` keyed off a `"spot_id"` point-data array on each
+point cloud — no manual screen-space projection/caching needed, unlike the
+matplotlib version's `_cache_recip_projection`/`_recip_hit`.
+
+Image origin: empirically verified (not assumed) that cell-C-order
+raveling of a 2-D frame onto `pv.ImageData(dimensions=(ncols+1, nrows+1,
+1))` + `view_xy()` renders array row 0 at the screen BOTTOM and col 0 at
+the LEFT by default — the MIDAS convention `ImageViewer` enforces today via
+one `vb.invertY(False)` call — so no flip was needed here. The first
+attempt at this check gave a false "row 0 is at the top" result from
+background-color bleed into an argmax-based pixel search; a clean quadrant
+test with an explicit black background and off-corner markers settled it.
+
+Native `add_scalar_bar()`/`add_legend()` replace the matplotlib colorbar-
+axes/`ax.legend()` combination entirely (this project's earlier GPU-
+renderer evaluation, below, only weighed VisPy's picking/camera/embedding
+maturity — PyVista/VTK's decades-old scalar bar and legend widgets are a
+further advantage neither matplotlib comparison considered). Caught by eye,
+not by any test: `add_scalar_bar()`'s title/tick text defaults to black,
+invisible against this widget's black background — a colorbar that
+*looked* present (gradient strip rendered fine) but was actually
+unreadable. Fixed with an explicit `color="white"`.
+
+Camera/selection/legend/scalar-bar lifecycle mirrors the already-landed
+matplotlib fix (above): selecting a spot swaps only the selection actor;
+`camera_position` (one atomic property) is saved/restored around
+`set_groups()` rebuilds, replacing matplotlib's separate elev/azim/roll
+plus three axis-limit tuples.
+
+**Tests.** Rewrote the 19 `test_solve_cell_ui.py` tests that touched
+matplotlib/pyqtgraph internals (`_recip_ax`, `_recip_colorbar`,
+`_spot_scatter.data`, etc.) against the new widgets' own introspectable
+state (`groups`, `_group_actors`, `legend_entries`,
+`interactor.scalar_bars.keys()`, `camera_position`, `spot_overlay`,
+`selected_xy`) — same test names/intent. Picking/click tests no longer
+fabricate screen pixel coordinates: `WorldToDisplay()` returns degenerate
+`(0, 0, z)` under `offscreen` on this machine (no real viewport exists to
+project through), confirmed directly, so there is nothing meaningful to
+fake a click at. These tests now drive the `spotClicked`/`spotHovered`
+signals directly and assert on the resulting selection/state — exercising
+this project's own glue code, not VTK's picker geometry (mature, not
+re-tested here). Added `tests/test_pyvista_spike.py` to lock in the
+offscreen-safety findings above as a regression, separate from the full UI
+suite.
+
+**Verification.** `test_solve_cell_ui.py` (81), `test_solve_cell_pipeline.py`
+(39 passed, 3 skipped), `test_pyvista_spike.py` (3) all pass individually.
+Running `test_solve_cell_pipeline.py` + `test_solve_cell_ui.py` together
+reproduces the project's known pre-existing cross-file pollution (STATE.md)
+plus, on this macOS machine, a genuine `fork()`-safety race (`objc[...]: may
+have been in progress in another thread when fork() was called`) —
+non-deterministic in severity (15 plain FAILED one run, 80 CRASHED with
+SIGABRT the next) and reproduced on unmodified `main` at the very start of
+this session too; unrelated to PyVista specifically, out of scope here.
+`widget.grab()`-based offscreen screenshots (the project's usual headless
+visual-check method) don't work for either new widget — a `QOpenGLWidget`
+with no real GL context can't paint into a grab buffer either — so manual
+visual verification used the widgets' own `.screenshot()` on a real
+display instead: synthetic detector frame + spot overlay + selection
+marker, and a synthetic multi-group reciprocal scatter with residual
+coloring, scalar bar, legend and fitted-position overlay, both inspected as
+PNGs. Interactive live-app use (actual mouse-driven orbit/zoom feel) has
+not been done in this environment — see STATE.md Next steps.
+
+## 2026-10-23 — Fixed reciprocal-map shrink on selection; evaluated GPU renderer options
+
+Reproduced the reported progressive "zoom out" specifically with residual
+coloring: repeated Figure.colorbar(ax=...) calls nested new GridSpecs and
+reduced the plot's screen area on each refresh, although data limits and
+Euler camera angles stayed constant. Previous tests covered limits and
+colorbar counts but missed the axes rectangle, so they did not catch this.
+
+Colorbars now use an explicit fixed axes and the main axes returns to its
+saved full rectangle when residual coloring is disabled. Selecting a spot
+only replaces the selection marker and redraws the canvas; it no longer
+rebuilds observed/fitted artists or the colorbar. This fixes the cause and
+also avoids expensive scene reconstruction on clicks. Regression tests
+exercise actual mouse press/release callbacks, repeated selection, mode
+switches and refreshes, checking plot rectangle, scene/colorbar identity,
+limits and camera. The layout regression reproduced the shrink before the
+fix; the click regression also prevents unnecessary scene rebuilding.
+
+Evaluated alternatives from official documentation and the local runtime:
+pyqtgraph includes an OpenGL view but PyOpenGL is absent; VisPy and
+QtWebEngine/Plotly are also absent in the checked midas-gui environment.
+VisPy is the preferred candidate for a larger GPU rendering upgrade, with
+Qt embedding, interactive cameras and marker picking. pyqtgraph OpenGL is
+a smaller integration change but its docs flag the legacy rendering
+pipeline. No dependencies were installed and no renderer migration was
+made as part of answering the user's question about alternatives.
+
+Validation: all 81 Solve Cell UI tests passed with a fresh temporary HOME;
+inspected a rendered plot after repeated selection and refreshes.
+
+## 2026-10-23 — Solve Cell spot provenance and interactive fit inspection
+
+Retained the installed matplotlib 3-D renderer, adding projected-screen
+hover/picking, camera and zoom preservation, equal initial q-axis scales,
+and explicit Fit visible spots. This avoids making a graphics dependency
+change part of the first interaction slice; it does not provide OpenGL
+rendering or incremental artist updates. Projected point coordinates are
+cached per draw, so rotation updates picking without projecting on every
+mouse move. Click/drag discrimination keeps rotation from selecting spots.
+
+Added a global-within-ingest `spot_id` column (reassigned after panel
+concatenation), preserved through diamond filtering and candidate index
+reset. Candidate row labels alone cannot link back to detector spots:
+diamond filtering resets them. Selection uses spot IDs while existing
+domain bookkeeping continues to use candidate row labels. A new successful
+ingest clears old classifications, domains, refinement inputs and selection;
+rerunning diamond filtering also invalidates the previous ab-initio seed.
+Single-panel results retain source panel identity when the active tab changes.
+
+Both free refinement and accepted known-cell searches now export UB in
+1/d and parallel assigned HKLs, fitted q in 2π/d, |observed−fitted q| in
+Å⁻¹ (2π/d convention), and assigned-HKL residual norms. Preserve the
+original assignments rather than silently rounding again after refinement.
+The new residual color mode uses q residuals, with grey for missing fits;
+the fitted-position toggle shows only assigned observed reflections, not
+an Ewald/coverage/completeness prediction. Domain discovery thresholds,
+classification, geometry resolution, comparison tables and the full
+diagnostics suite remain separate work.
+
+Verification: Solve Cell UI 79 passed (including projected picking after
+rotation, fit ordering, hidden populations, colorbar lifecycle, camera
+preservation, panel/frame navigation and ingest invalidation); pipeline
+39 passed / 3 skipped for absent beamtime fixtures; app smoke 13 passed.
+UI and app smoke checks also passed with a fresh temporary HOME. Inspected an offscreen
+synthetic Qt render. Pre-existing tooltip/default edits were preserved;
+no development-history or user-manual update was made.
+
+## 2026-10-22 — Exposed Ingest `max_workers` as a "Nr. of CPUs" field; `requirements.txt` drift fixed; a real-data Ingest crash found and flagged (not yet fixed)
+
+**Added** a "Nr. of CPUs" `QSpinBox` directly beside the Run Ingest button in
+`tab_solve_cell.py` (range `1..os.cpu_count()`, default 1 — unchanged
+behaviour), wired into `_panel_ingest_cfg`'s/`_panel_ingest_inputs`'s
+`blobs.max_workers`, which `pipeline.py`'s `_stage_ingest` already forwarded
+to `choose_sectors`/`find_blobs_3d` (`a2acc78`) but had no UI control for —
+the ROADMAP/STATE "next step" calling for this. `test_solve_cell_ui.py`
+(98 passed) confirms no regression.
+
+**`requirements.txt` MIDAS-pin drift fixed**: ad hoc `pip install --upgrade`
+during the perf_solve_cell work had moved the real `midas-gui` env ahead of
+most pins (calibrate-v2 0.22.0->0.24.0, integrate-v2 0.7.1->0.9.0, calibrate
+0.5.0->0.6.0, hkls 0.15.0->0.16.0, pdf 0.3.0->0.4.0, integrate 0.8.0->0.9.0,
+peakfit 0.6.0->0.8.0, zipper 0.2.1->0.4.0, params 0.12.0->0.14.0, saxs
+0.1.2->0.2.0, transforms 0.10.0->0.12.0, stress 0.14.1->0.15.0, diffract
+0.9.0->0.10.0) without the file being updated. Re-pinned every MIDAS package
+to exactly what `pip list`/`importlib.metadata` reports in the real env;
+verified every changed package's numpy/torch/numba floors are still
+satisfied by the numpy==1.26.4/torch==2.4.0/numba==0.59.1 pins (no
+functional change). `pyproject.toml` and `environment.yml` were NOT touched
+— they carry the same stale pins, and `pyproject.toml` is additionally
+missing the entire Solve Cell dependency block (`midas-defect`, `midas-ddd`,
+`midas-diffract`, `midas-index`, `midas-invert`, `pandas`) that
+`requirements.txt`/`environment.yml` already have. Flagged, not fixed, since
+it wasn't asked for.
+
+**Found, not yet fixed**: a live GUI session crashed (`Fatal Python error:
+Aborted`, not a catchable Python exception) at 2026-10-22T22:50:48 while
+running a real Ingest against beamline data
+(`/Users/dbeniwal/ANL-research/S3ID/data/2026-2/setup/June27/spinel/
+spinel_OmeFly_exp0p02_002_EigPos_-195_10_-40_000001.h5`, full 512x1028
+detector resolution, ~590 kept frames). The traceback
+(`~/midas_gui_error.log`) runs `_stage_ingest` -> `choose_sectors` ->
+`subtract_background` -> `_run_one` -> `_polar_median_background_from_bins`
+-> `_grouped_median` -> `pandas.Series.groupby(...).size()` ->
+`factorize_array`, aborting inside pandas' native hashtable code — not a
+threading issue (`max_workers` was still unreachable from the UI at that
+point, so `n_workers=1` throughout). The IDENTICAL traceback also appears
+once before, on 2026-10-04, so this is a recurring, data-triggered crash in
+`_grouped_median` (the perf_solve_cell `92a5274c` "hoisted polar bins,
+grouped ring median" commit's new pandas-groupby implementation), not a
+one-off. Prime suspect: `midas_defect`'s own `pyproject.toml` floors pandas
+at `>=1.5` with no ceiling, and this env's `requirements.txt` had pandas
+floating to whatever pip resolved (`3.0.6` — a 2-major-version jump from
+what this code was presumably developed/tested against). After the crash,
+the GUI was relaunched and the same Ingest completed on retry
+(~90s, see "why was Ingest slow" below) — so this is intermittent /
+data-path-dependent, not a hard reproducer yet. **Not investigated further
+this session** (out of scope for what was asked) — next step is either to
+pin pandas down to a known-2.x version and see if the crash stops
+reproducing, or to isolate a minimal repro and report it upstream against
+`midas_defect`'s `_grouped_median`.
+
+**Why the successful Ingest still took ~90s**: the project's Solve Cell
+state has `sector_candidates: "1,8,24,48,96"` (5 full per-frame passes
+over the whole stack — `choose_sectors`'s own grid search) over ~590 frames
+at full detector resolution, with `max_workers` defaulting to 1 (serial)
+because no UI control existed yet (see above). ~90s serial is in the same
+ballpark as the already-benchmarked perf_solve_cell serial number (74.49s
+for a comparable 642-frame panel, 4.35x faster than pre-perf_solve_cell's
+324s) — so this is NOT a performance regression, it is the expected serial
+cost of a 5-candidate sector search at full resolution. Two independent
+levers to cut it, both now usable: (1) the new "Nr. of CPUs" field — the
+benchmark measured 9.42x total (2.16x beyond the serial speedup) at
+`max_workers=12` on a 12-core machine, byte-identical output at every
+setting; (2) narrow `sector_candidates` to just the value the ingest log
+reports (`choose_sectors: n_sectors=N`) once known for this panel/geometry,
+per the tooltip already in the code — this skips 4 of the 5 full passes and
+is the bigger lever of the two.
+
+## 2026-10-22 — Fixed the hdf5plugin loading bug; upgraded the real env to the perf_solve_cell `midas_defect`/`midas_hkls` build
+
+**Fix for the bug found in the previous entry**: added `import hdf5plugin`
+to `midas_gui/__init__.py` (runs on any `import midas_gui`, before any tab
+or loader touches an h5py file). Verified: a clean process doing nothing but
+`import midas_gui; h5py.File(...)[...]` now reads the bitshuffle-compressed
+file that previously raised `OSError`. Confirmed via `git log --all -S
+"hdf5plugin"` across every `.py` file that this was never imported in this
+repo's history (not a regression) and that the same compression filter
+(id 32008) is universal across this cycle's raw files, not specific to one
+dataset — ruled out both as explanations before concluding it was a latent,
+never-before-exercised bug rather than something that "changed."
+
+**Found while verifying the fix with the test suite**: the earlier
+`a2acc78` commit (wiring `max_workers` through `pipeline.py`) broke real
+Ingest in the actual `midas-gui` conda env — all of
+`test_solve_cell_pipeline.py`'s ingest tests failed with `TypeError:
+choose_sectors() got an unexpected keyword argument 'max_workers'`. Root
+cause: that env still had `midas_defect 0.9.1` installed from *before*
+`perf_solve_cell` (version number unchanged by that branch — see ROADMAP
+P4-1), whose `choose_sectors`/`find_blobs_3d` don't accept `max_workers` at
+all. Only the throwaway cloned benchmark envs had been upgraded, by design,
+to avoid touching the working environment mid-benchmark — but that left the
+real env on an API `pipeline.py` no longer matched. This was a regression I
+introduced and should have caught by running tests right after `a2acc78`.
+
+**Resolved** by installing `midas_defect`/`midas_hkls` built from MIDAS's
+`perf_solve_cell` HEAD (`060f84c9`) into the real `midas-gui` env (`pip
+install --no-deps --force-reinstall` from the two package directories) and
+bumping `requirements.txt`'s `midas-defect` pin to `0.9.1` with a comment
+explaining the version-number ambiguity (see ROADMAP P4-1). Verified
+per-file (not combined — this repo's Qt tests leak state across files, see
+existing STATE.md note): `test_solve_cell_pipeline.py` (0 failures, 3
+skipped for missing reference data), `test_solve_cell_ui.py` (98 passed),
+`test_project.py` (46 passed), `test_smoke.py` (13 passed). The combined
+multi-file run that first showed `test_solve_cell_ui.py`/`test_project.py`
+failures was the same pre-existing Qt-teardown cross-contamination already
+documented, not a new issue — confirmed by running each file alone.
+
+## 2026-10-22 — Solve-cell ingest perf benchmark confirms 4.35x/9.42x; exposes an unrelated hdf5plugin loading bug
+
+**Benchmarked** MIDAS's `perf_solve_cell` branch (vectorized ingest hot
+loops + opt-in thread parallelism, commits `719f034d`..`060f84c9`) against
+`master`, on one real 642-frame spinel panel
+(`test6_spinel_orient1_25kev_exp0p02_det_-10_-15_0_000001.h5` +
+`xrds4_..._det_-10_-15_0...instr.json`). Used two cloned conda envs
+(`midas-gui-cmp-master`/`-new`) so neither touched the working `midas-gui`
+env; ran each config in isolation after discovering that running "previous"
+and "new" concurrently contaminated both timings via CPU contention (first
+attempt: 373s/119.56s; isolated: 324.13s/74.49s — a ~1.6x swing from
+contention alone, not a real difference). Isolated results: previous
+324.13s, new serial (`max_workers=1`) 74.49s (4.35x), new at
+`max_workers=12` on this 12-core machine 34.42s (9.42x total, 2.16x from
+threading alone). `spots_g.csv`/`ingest_summary.json` byte-identical across
+all three configurations.
+
+**Wired `max_workers` through** `midas_gui/solve_cell/pipeline.py`'s
+`_stage_ingest` (`cfg["blobs"]["max_workers"]`, forwarded to
+`choose_sectors`/`find_blobs_3d`; default 1, unchanged behaviour) —
+`a2acc78`. Not yet exposed in the Solve Cell tab's own UI (cfg-only so
+far).
+
+**Found, not yet fixed, while profiling frame loading for this benchmark:**
+`midas_gui` never imports `hdf5plugin` anywhere (confirmed by grepping the
+package and by checking `sys.modules` after importing `midas_gui.app`
+standalone). This beamline's raw Eiger files use the dynamically-loaded
+`bitshuffle` HDF5 filter (id 32008). Any h5py read of a raw frame — Data
+Viewer preview, solve-cell panel load, or Ingest's own frame-loading step —
+therefore crashes with `OSError: Can't synchronously read data (can't open
+directory .../lib/hdf5/plugin)` unless something else in-process happened
+to import `hdf5plugin` first; nothing in the GUI's own call paths does.
+Reproduced directly against the real `midas-gui` conda env and the real
+`h5py.File(...)[...]` call `_load_image` makes. See `.context/ROADMAP.md`
+("Solve Cell: ingest optimized, next bottlenecks + a loading bug") for the
+fix recommendation and the other downstream stages (`midas_hkls.ab_initio.
+select_basis`, `_stage_index_known_cell`'s random-orientation search) that
+the `perf_solve_cell` work did not touch.
+
+## 2026-10-22 — Radially-adaptive threshold background mis-centred under Flip Y/Z (Calibrate + Hydra Calibrate)
+
+**Reported**: with Flip Z ticked, picking a ring to get BC drew the radial-
+threshold "background" centred vertically opposite from the pick; unticking
+Flip Z moved both the image and the background, but they stayed out of sync
+either way.
+
+**Root cause**: `_seed_bcy`/`_seed_bcz` are, by this codebase's convention
+(see `widgets.PickableImageViewer.set_raw_frame`), always in the Transforms-
+applied (displayed) frame — Pick BC / Pick Ring read their click coordinates
+straight off the displayed array. But `CalibrationTab._calib_image()` (and
+`HydraCalibrationPage._calib_image_for`) applied `apply_radial_threshold`
+directly to `self._image`, which stays **raw** (untransformed) by design —
+`_show_calib_image`/`set_raw_frame` apply the flip only at display time, and
+`CalibrationWorker` applies it again internally for the real fit. With no
+flip active the two frames coincide, hiding the bug; with Flip Y/Z active,
+the threshold's centre and the image's displayed orientation disagreed, so
+the zeroed region appeared mirrored on screen — and, more importantly, the
+same mismatch fed a wrongly-centred threshold into the actual calibration
+fit via `CalibrationWorker`, not just the preview.
+
+**Fix**: `_calib_image()` and `_calib_image_for()` now transform the raw
+image into display space with the live `im_trans` codes, apply the
+threshold there (same frame as the BC), then transform back before
+returning — so every caller downstream (preview, `CalibrationWorker`) still
+gets a raw-oriented array, consistent with the existing convention
+(mirrors the `tuple(reversed(im_trans))` round-trip already used for masks
+in `workers.py`). `_reset_threshold_defaults` had the same mismatch for its
+`rmax`/brightness-reference sampling and got the same treatment. New
+regression test `test_calib_image_threshold_centre_tracks_bc_under_flip_z`
+in `tests/test_calib_radial_threshold.py` fails against the pre-fix code and
+passes after — verified both ways before considering this closed.
+
+## 2026-10-21 — MCP control surface: Calibrate tab projection/seed/refine/tolerance/distortion-mode/residual-map/save/working-dir ops
+
+**Requested directly**: expose the Calibrate tab's projection (max/sum/mean,
+skip/N-frames), manual-seed (incl. distortion coefficients), refine flags +
+tolerances, distortion refinement mode, residual-map toggle, Save buttons,
+and working-directory controls through `midas_gui_mcp` — the phase-1 surface
+(`22dc151`) only covered load/run/seed-from-result/import-export/get_state.
+
+**New ops** (`midas_gui/control_api.py` + mirrored `midas_gui_mcp/server.py`
+tools): `calibrate.set_projection`/`.project`/`.clear_projection` (the last
+two reuse the existing `_jobs` job-id registry and `get_job`/`wait` polling —
+no new async machinery needed); `calibrate.get_working_dir`/`.set_working_dir`/
+`.suggest_working_dir`; `calibrate.save_json`/`.save_paramstest` (new
+`CalibrationTab._save_json_to`/`_save_paramstest_to`, factored out of the
+existing dialog-driven `_save_json`/`_save_paramstest` so a control API can
+pass an explicit path with no `QFileDialog` to hang on — guarded by
+`self._agent_mode`, same bypass flag phase-1 already uses for blocking
+`QMessageBox`es, so interactive Save-button behavior is unchanged). `calibrate.run`
+gained `limits` (sets `_limit_widgets` rows — the ± tolerance window, opt-in
+for manual d-spacing fits / always-applied for crystalline ones) and
+`build_residual_corr`, and its `refine` dict now also accepts `Distortion`,
+`distortion_mode` (one of `constants.DISTORTION_PRESETS`) and
+`distortion_coeffs` (explicit coefficient list), plus `manual_seed` now
+accepts a `"distortion": {coeff: value}` sub-dict (seeds `_seed_dist` +
+ticks `Distortion` seeding).
+
+**Real concurrency bug found by actually driving `calibrate.project`
+end-to-end** (small-stack test, not just inspection): the first
+implementation connected its own `job["status"]` `finished`/`failed`
+handlers to `ProjectionWorker` *after* `CalibrationTab._project()` had
+already called `.start()` — the same ordering `calibrate.run` already uses
+for `CalibrationWorker`, which is safe there only because `CalibrationWorker`
+is a separate OS process (`QProcess`-backed) whose spawn latency makes the
+race unobservable. `ProjectionWorker` is an in-process `QThread` reducing a
+tiny array, fast enough (sub-millisecond on a small stack) to finish and
+emit `finished` before the post-`.start()` `.connect()` call ever executes —
+losing the signal entirely and leaving the job stuck at `"running"` forever.
+Reproduced reliably (~80% of runs) with a 4-frame 6×6 stack once a real
+`QThread.wait()` + `processEvents()` end-to-end test was written instead of
+mocking the worker. Fixed by not connecting a second handler at all:
+`op_calibrate_project` stores the worker reference on the job dict and
+`op_calibrate_get_job` lazily reads `CalibrationTab._proj_active`/
+`_proj_image`/`_last_proj_error` (new attribute, set by `_on_project_failed`)
+once `worker.isRunning()` goes false — those are updated by
+`_on_project_done`/`_on_project_failed`, which **are** connected before
+`.start()` inside `_project()` itself and therefore always fire. Also made
+`_on_project_failed` agent-mode-safe (records to `_last_proj_error` + the
+log instead of popping `show_error`'s blocking dialog), mirroring the
+existing `_on_fail` pattern — an agent-driven projection failure would
+otherwise have hung the GUI event loop forever, the same class of bug
+phase-1's `set_agent_mode` bypass already fixed for `_run()`/`_simulate()`.
+
+**Verification**: new `tests/test_control_api_calibrate_mcp_ops.py` (16
+cases, each `@pytest.mark.forked` — building more than ~2 `CalibrationTab`s
+in one process is a known pre-existing pyqtgraph-teardown segfault risk, see
+`tests/test_calibrate_panel_save.py`), driven through `GuiController.dispatch`
+(the actual wire-protocol entry point) rather than calling `op_*` methods
+directly. Ran each touched calibrate test file individually (never a
+combined `pytest tests/` invocation — confirmed, by toggling this diff on a
+stash, that `tests/test_calib_file_load_fidelity.py`'s intermittent
+segfault — ~20% of runs, building 3 `CalibrationTab`s unforked — predates
+this change and is unaffected by it).
+
+## 2026-10-21 (branch `solve-cell`) — Solve Cell Ingest: live per-step progress via an `on_step` callback
+
+**Requested directly**: Ingest runs ~10 sequential operations (omega-window
+filter, corrections, live-frame filter, mask, geometry, background
+subtraction, blob find, q-conversion) but the GUI only ever showed output
+(the Detector tab's preview images, the status label) once the entire stage
+returned — the existing `print()` → `log_line` text stream gave running text
+but no visual/data feedback mid-run. User wanted to see output after each
+operation, not just at the end, and asked for a generator/callback design.
+
+**Chose a plain callback over a generator.** `_stage_ingest`'s body is
+already a long, linear sequence of in-place numpy mutations (frames, mask,
+sub-stack) — restructuring it into a generator that yields between every
+numpy step would have meant threading `yield` through loops and conditionals
+that don't naturally pause there, for no benefit over just calling a
+callback at the same checkpoints. `_stage_ingest(cfg, on_step=None)` now
+calls `on_step(name, {"preview": ..., "stats": ...})` after each of 6
+checkpoints (`omega_window`, `live_frames`, `mask`, `background_start`,
+`background`, `blobs`); `on_step` is optional and a plain callable, keeping
+`pipeline.py`'s Qt-free constraint (see its module docstring) fully intact.
+
+**Reused the existing `preview` dict shape instead of inventing a new one.**
+The stage already built a `preview` dict (`frame_index`,
+`loaded_frame_index`, `background_subtracted`,
+`background_subtracted_max_projection`, `mask`) once, at the very end, for
+the Detector tab's Stage combo (Raw/Corrected/Calculated background/max
+projection/Mask). That dict is now initialized up front with every field
+`None` and filled in as each field becomes available, with `on_step` handed
+a shallow copy each time — so the SAME Detector-tab rendering path
+(`_refresh_detector_preview`/`_set_detector_image`) that already existed
+just gets fed progressively instead of only once at completion. No new UI
+widgets were added. `_refresh_detector_preview`'s three `preview["..."]`
+accesses became `.get(...)` with a "not available yet" label, since a
+mid-run payload can have some fields still `None`.
+
+**Pooled (multi-panel) runs tag payloads by `panel_id`, not by mangling step
+names.** `_stage_ingest_pooled(cfg, on_step=None)` wraps `on_step` per panel
+to add `{"panel_id": panel_id}` onto every payload before forwarding it,
+rather than prefixing the step-name string — keeps the step-name set stable
+for whatever a GUI dispatches on. `tab_solve_cell._on_ingest_step` routes
+each payload to `self._ingest_preview_by_panel[pid]` and only refreshes the
+visible Detector tab when the payload's panel is the one currently shown.
+
+**`SolveCellWorker` gained one new signal, no new threading model.** `step =
+QtCore.pyqtSignal(str, object)`, emitted from inside `run()` via the same
+lambda-to-`on_step` pattern `run_stage(..., on_step=lambda n, p:
+self.step.emit(n, p))` — emitted from the worker thread exactly like
+`log_line` already is from `_LogStream.write`; Qt's auto cross-thread queued
+connection handles it the same way, no new race introduced.
+
+**Test coverage**: `tests/test_solve_cell_pipeline.py` gained a test
+asserting the exact checkpoint name/order and that each payload's `preview`
+only has the fields known by that point (`None` otherwise), plus a pooled
+test asserting `panel_id` tagging. `tests/test_solve_cell_ui.py`'s
+`_CapturingWorker` test double gained a `step` attribute (was missing it,
+broke two existing pooled-ingest tests that `monkeypatch` it in for
+`SolveCellWorker`); added tests for `_on_ingest_step`'s active-panel update,
+pooled per-panel routing, and `_refresh_detector_preview`'s None-safe
+handling of not-yet-populated fields. All of `test_solve_cell_pipeline.py`
+(35 tests, 3 pre-existing data-dependent skips) and `test_solve_cell_ui.py`
+(74 tests) pass under the per-file/offscreen/clean-`HOME` convention.
+
+**Not done / still open**: no live-app verification against a real
+detector/beamline dataset yet (see STATE.md next steps) — only unit-level
+coverage of the callback plumbing and the Qt signal/slot wiring.
+`diamond_filter`/`ab_initio`/`refine` were intentionally left untouched;
+`run_stage` only forwards `on_step` to `ingest`/`ingest_pooled`.
+
+## 2026-10-21 — Align project memory with the shared agent-neutral init/resume/save skills
+
+The shared skills repository now defines `AGENTS.md` as the canonical
+entrypoint and a near-one-page STATE with Now working on, Next steps,
+Open questions / blockers, and three to five Recent changes. Running its
+initializer found every scaffold file already present; no new scaffold was
+needed. The old STATE was 916 lines and incorrectly described MCP as an
+unmerged branch, although the current `main` contains that work and later
+commits through `a4f1b45`.
+
+Replaced STATE with the portable snapshot, moved still-open follow-ups into
+ROADMAP and durable Qt verification constraints into ARCHITECTURE. Prior
+implementation reasoning stays in the existing decisions below; the full
+previous STATE remains available in Git rather than a duplicate archive.
+Added the shared resume procedure directly to AGENTS so an agent can follow
+it even when its harness does not expose the shared skill. Slash-command
+registration remains a harness concern; no global skill installation was
+changed by this repository migration.
+
+Removed the ignored CLAUDE.md pointer and the local .claude directory,
+which contained only a stale scheduled_tasks.lock (its recorded PID was no
+longer running). These held no project knowledge. Replaced obsolete ignore
+rules with a provider-runtime ignore. Retained all substantive .context
+references and the calibration issue draft. Corrected the PDF reference's
+obsolete instruction to update claude/gui_plan.md and shipped docs on every
+change; AGENTS' explicit-request-only documentation policy takes precedence.
+
+Validation: checked scaffold idempotence, replayed the STATE + five newest
+decisions loading procedure, verified referenced project paths and diff
+whitespace, and confirmed only context/ignore files changed. No application
+code changed; no application test run was needed.
+
+## 2026-10-16 (branch `mcp`, latest) — Phase-1 MCP control layer for Data Viewer + Calibrate; built and self-tested by the agent
+
+**Requested directly**: a framework for LLM agents (not just this one) to
+drive midas-gui autonomously, scoped for now to the Data Viewer and Calibrate
+tabs, on a new `mcp` branch, in a new `midas_gui_mcp/` folder, with the agent
+testing it against the live app itself.
+
+**Shape (3 layers), and why.** `Agent → MCP server (separate process) →
+control socket → GuiController (inside the running midas_gui QApplication) →
+existing tabs`. In-process controller, not a headless reimplementation: the
+live PVA stream, cross-tab geometry handoff, and `get_state()` all live in
+the real `MainWindow`, so driving the real tabs keeps one source of truth
+instead of a second, divergent one. `bridge_server.BridgeServer` (the
+existing B-PILOT `QLocalServer` integration) was the proof this is safe on
+the GUI thread — generalized from its one-way fire-and-forget shape into a
+full request/response + event-push protocol in new `control_server.py`.
+`CalibrationWorker`/`BatchWorker` were already async via Qt signals
+(`QProcess`-backed), so "start a calibration, get a job_id, poll/wait" needed
+no new execution model, just a thin job registry in new `control_api.py`'s
+`GuiController`.
+
+**GuiController (`midas_gui/control_api.py`)** has one `op_<namespace>_<verb>`
+method per operation, dispatched by `dispatch(op, args)` from a flat
+`"namespace.verb"` string. Every method returns a plain JSON-safe dict
+(`{"ok": True, "result": ...}` / `{"ok": False, "error": {"message","type"}}`)
+and never raises to its caller or pops a dialog — it calls straight into
+existing tab/widget methods (`DetectorGeometryCard.set_geometry`/
+`radial_integrate`, `CalibrationTab._run`/`_seed_from_result`,
+`FieldSelector.set_state` for dark/bright/background, `apply_geometry`/
+`geometry_for_viewer` for the Data-Viewer↔Calibrate handoff) rather than
+reimplementing their logic. Large arrays (frames, profiles, residual maps)
+are never inlined as JSON — written to a temp `.npy`, returned as
+`{"path","shape","dtype"}`, matching the existing `_bg_job_results.npz`
+convention.
+
+**Blocking-dialog bypass, narrow by design.** `CalibrationTab._run()`'s three
+`QMessageBox.warning` guards (no image / pending fields / frozen_point +
+multi-panel) and `_on_fail`'s `show_error`, plus
+`DetectorGeometryCard._simulate()`'s "No image" warning, would hang an
+unattended run forever waiting for a click nobody can give (confirmed by
+reading `dialogs.show_error`: a plain `box.exec_()`, no timeout). Fixed with
+an explicit `set_agent_mode(True)` flag on just these two classes
+(`CalibrationTab`, `DetectorGeometryCard`), checked only at those specific
+call sites — `_warn_or_record`/`_last_agent_error` on the former, a new
+dialog-free `simulate_rings(require_image=False)` on the latter (wraps
+`_compute_material_rings()` + the same post-steps `_simulate()` does, minus
+the dialog). Off by default; interactive use is completely unaffected. This
+is deliberately NOT a global dialog suppression — every other dialog in the
+app is untouched, so a fully unattended run reaching one some other way would
+still hang; documented as a known limitation in `midas_gui_mcp/README.md`
+rather than papered over.
+
+**Three real bugs found by actually driving this through a live offscreen
+`MainWindow`, not by inspection** — the user asked for exactly this kind of
+self-test, and it earned its keep:
+1. `DetectorGeometryCard.materials_state()` deliberately strips every
+   `"_"`-prefixed key (it's the GUI-state save/restore shape) — which
+   includes `_rings`, the very thing `data_viewer.simulate_rings` exists to
+   return. Fixed by reading `self._geom._materials` directly in that one op
+   instead of going through `materials_state()`.
+2. An earlier `calibrate.wait` busy-waited with
+   `QCoreApplication.processEvents()` in a loop inside the request handler.
+   Driving a real calibration job through it and letting the client's own
+   read time out crashed the server: `RuntimeError: wrapped C/C++ object of
+   type QLocalSocket has been deleted`. Root cause: a nested `processEvents()`
+   call let Qt process the *same socket's* `disconnected` signal (fired by
+   the client's timeout) while the handler still meant to write a reply to
+   it — `deleteLater()`'s deferred delete fired during one of the nested
+   pumps. Fixed by moving all async waiting (`calibrate.wait`, the
+   `run_frozen_point_then_oneshot` composite) out of `GuiController` entirely
+   and into `control_server.py`, driven by `QTimer.singleShot` polling (never
+   nests the event loop) with every reply going through a `sip.isdeleted()`-
+   guarded `_safe_reply`. `GuiController` now only exposes the non-blocking
+   primitives (`run`, `get_job`); see that module's own comment for the full
+   trace of the crash.
+3. The control socket's discovery file (so a PyQt-free `midas_gui_mcp/
+   client.py` can find `QLocalServer`'s actual Unix-domain-socket path
+   without guessing it) was first written under `tempfile.gettempdir()`.
+   Driving it through a *real* MCP client (not just a raw socket test)
+   failed every tool call with "could not reach midas-gui's control socket."
+   Cause: `mcp.client.stdio`'s default subprocess environment is a small
+   fixed allowlist (`HOME, LOGNAME, PATH, SHELL, TERM, USER`) that excludes
+   `TMPDIR` — so on macOS, `tempfile.gettempdir()` resolved to a different
+   directory inside the spawned `server.py` than inside the GUI process.
+   Fixed by moving the discovery file under `$HOME` (`~/.midas_gui/
+   midas_gui_control_v1.sock_path`), which *is* in that allowlist — a
+   root-cause fix, not a per-launcher `env=` workaround.
+
+**Verification.** Built an offscring harness: a real offscreen `MainWindow`
+with `MIDAS_GUI_CONTROL=1`, driven first by a plain socket client (fast
+iteration) exercising every Data Viewer + Calibrate op including a real
+`one_shot` calibration run against the bundled synthetic CeO2 fixture
+end-to-end (job started → polled → `"status":"done"` with real refined
+Lsd/BC/tilt values); then by the actual `mcp` Python SDK's client
+(`ClientSession`/`stdio_client`) spawning the real `midas_gui_mcp/server.py`
+and calling real tools over real MCP — confirmed all 21 tools list correctly
+and round-trip through the full stack. Existing-suite regression check used
+the stash-compare method (run the same failing tests against the stashed,
+unmodified tree) rather than trusting a single run, since this repo's test
+suite has several already-documented `--forked`/CoreFoundation fork flakes on
+macOS (see STATE.md's "Known-failing baseline" section) — every failure seen
+while testing this change reproduced identically on unmodified `main`, so
+none of it is a regression. Touched-file sweep (`test_view_tab_controls.py`
+33/33, `test_ca_live_view.py` 22/22, `test_hydra_ui.py` 16/16,
+`test_hydra_calib_ui.py` 2/2, `test_workspace_ux.py`, `test_helpers.py` 97/97,
+every `test_calib*`/`test_calibrate*` file) all green per-file, unforked
+(the project's own documented reliable mode); `pyflakes` shows zero new
+warnings on any touched/new file.
+
+**Not done this pass:** Mask generation and Batch (radial) Integrate tabs
+(explicitly phase 2, per the scoping conversation); pushing `mcp` to origin
+or merging to `main`.
+
+## 2026-10-16 (latest, 2) — Ring simulation: "max 2θ" → "N rings", hard-capped to the image's actual reach
+
+**Requested directly**: "change this to N_rings... which dictates the
+maximum number of lines that will be drawn for each material. This should
+also cut down the number of rings generated in the dropdown for each
+material. Also, we never want rings that are completely out of the image
+view even if the Nr of rings is set to a large value."
+
+**Design.** Two independent constraints compose into one generation step
+(`DetectorGeometryCard._compute_material_rings`):
+1. A hard 2θ ceiling from the *image itself* — `_ring_generation_max_two_theta()`
+   calls the existing `helpers.max_two_theta_deg(bc_y, bc_z, ny, nz, lsd_um,
+   px_um)` (already used by `_predict_ring_radii` for the calibration-result
+   ring overlay) to get the true farthest-corner 2θ the bound image can
+   reach. Any ring beyond this is geometrically guaranteed to miss the
+   rectangle entirely (the whole rectangle lies within that corner distance
+   of the beam centre), so capping generation here is exact, not a heuristic
+   — and it was already the correct bound for the *drawing* step's own
+   per-ring "misses the detector entirely" skip (`_ring_label_pos` returning
+   `None` in `_redraw_rings`); this just moves the same test earlier, into
+   generation, so it also governs the per-material ring-checklist dropdown
+   (which iterates `material["_rings"]` directly with no visibility filter
+   of its own) and the N-rings count itself. No image bound yet → 180°
+   (every Bragg-reachable ring), matching `_predict_ring_radii`'s own
+   fallback.
+2. `rings[:n_rings]` after that cap — rings are already sorted ascending by
+   radius, so this keeps the innermost N regardless of how far out #2 above
+   would otherwise allow generation to run.
+
+Order matters: capping by image reach *before* truncating to N means N never
+"spends" a slot on a ring nobody could ever see, and a geometry whose first
+reflection is already off-frame correctly reports zero rings rather than N
+unviewable ones.
+
+**Field removal, not repurposing.** `_max2t` (angle spinbox) is fully
+replaced by `_n_rings` (`_NoScrollSpinBox`, int, default
+`constants.DEFAULT_N_RINGS=10`) rather than reusing the old widget/key with
+new semantics — a stale saved GUI state's `max2t: 25.0` restored into an
+`n_rings` field would be meaningless (and `QSpinBox.setValue` wants an int).
+The Preferences "max 2θ step (°)" row/`DEFAULT_STEP_TWO_THETA` constant went
+with it: an integer ring count has no useful per-click step to configure.
+
+**Removed the `_ring_info` plain-text ring report** (`QPlainTextEdit` under
+the Simulate button) in the same session, on request — it was listing every
+material's computed rings as text, now fully superseded by the per-material
+collapsible ring checklist dropdown from the 2026-10-16 (earlier) entry
+below. `_simulate()` keeps surfacing computation *errors* via the existing
+`show_error` dialog; it no longer builds a success-case report string at all.
+
+**Test fixture fragility uncovered, fixed at the root.**
+`tests/test_view_tab_controls.py`'s `framed` fixture resets `_bcy`/`_bcz`/
+`_ty`/`_tz` every test but never touched `_wl`/`_lsd`/`_px` — harmless before
+today because the fixed-angle `max2t` field made ring *generation*
+independent of the image/beam-centre entirely (only *drawing* checked image
+bounds). Once generation itself became image-bound, the ring-simulation
+tests started failing: the shared module-scoped `tab` fixture carries state
+across tests in file order, and an earlier test
+(`test_an_unedited_widget_keeps_the_calibrations_full_precision`) parks
+`_wl`/`_lsd`/`_px` at an exotic loaded-calibration's values
+(0.173 Å / 1068.6 mm / 150 µm) and never restores them. Against the
+fixture's tiny 192×192 synthetic frame, that leaked geometry's farthest-
+corner 2θ is ~1.09° — smaller than Ni(FCC)'s very first reflection (~4.87° at
+that wavelength) — so every material ring was correctly (if unhelpfully)
+generation-capped to nothing, and `_any_material_rings()` went false.
+Verified by temporarily printing the live widget values mid-suite (not
+guessing) before concluding this was fixture leakage rather than a cap bug.
+Fixed by pinning `_wl=0.39`/`_lsd=30.0 mm`/`_px=75.0` in `framed` itself —
+chosen so Ni(FCC)'s innermost rings genuinely land inside the 192 px frame
+across every bc/Lsd value the ring-simulation tests exercise — which also
+closes the latent fragility for good (every test using `framed` now starts
+from a fully clean geometry, not whatever a `framed`-using test two hundred
+lines earlier happened to leave behind).
+
+**Verified:** `tests/test_view_tab_controls.py` 33/33, `tests/test_hydra_ui.py`
+16/16 (`--forked`, shared-field-sync test updated for the renamed
+`max2theta`→`n_rings` key), `tests/test_helpers.py`, `tests/test_ca_live_view.py`
+(exercises `prefs_dialog`, which lost the "max 2θ step" row) — all green.
+`pyflakes` unchanged (one pre-existing, unrelated `hydra_geometry_card.py`
+warning, confirmed present on unmodified HEAD too).
+**Not verified:** no live beamline session to eyeball the renamed field,
+tooltip, or dropdown row count against a real detector frame/geometry.
+
+## 2026-10-16 — Data Viewer Hydra: cross-panel ring-visual sync + per-ring checkboxes; app-wide restart-and-resume; Dark default-container fix
+
+**Requested directly**, four independent asks in one session.
+
+1. **Material/ring-visual settings (materials list, Rings/Labels checkboxes,
+   ring thickness) now sync across all 5 Hydra Data Viewer panels (ge1-4 +
+   composite).** Previously each of `HydraViewerPage`'s 5
+   `DetectorGeometryCard` instances held fully independent state — exactly
+   the problem the existing `get_shared_fields`/`apply_shared_fields`/
+   `_sync_shared_fields` machinery already solved for λ/max2θ/px, so this
+   reuses that shape verbatim rather than inventing a new one: a new
+   `ringSettingsChanged` signal (deliberately separate from `geometryChanged`
+   so the two syncs can't false-trigger each other), `get_ring_settings()`/
+   `apply_ring_settings()` on the card, and `_sync_ring_settings()` on the
+   page with its own `_syncing_ring_settings` re-entrancy guard. Scoped to
+   the Data Viewer tab only — `HydraCalibrationPage`/`HydraCalibPanelCard`
+   use an intentionally separate, simpler ring mechanism (single calibrant,
+   no material list) and weren't touched. GUI-state restore
+   (`get_state`/`set_state`) deliberately keeps restoring each card's saved
+   materials independently, exactly as before — a project saved before this
+   change may have diverged per-card, and restore shouldn't silently
+   collapse that; the new sync only applies going forward from the next
+   interactive edit.
+2. **Per-ring show/hide checkboxes, default all-shown.** Each material gained
+   a persistent `ring_enabled: dict[str, bool]` (plain, non-underscore field
+   so it rides along in `materials_state()`/`set_materials()` and therefore
+   the sync above, unlike the transient `_rings` list which is recomputed
+   from scratch on every geometry edit). Rings are keyed by a stable
+   `_ring_key(r)` (hkl string, or `order<N>` for d-spacing materials) so the
+   flag survives recomputation. UI is a collapsible per-material checklist
+   (▸/▾ toggle, collapsed by default) rather than always-expanded, to keep
+   the Ring simulation card usable with several materials loaded — user's
+   explicit choice over an always-expanded list.
+   - **Bug found and fixed along the way:** `DetectorGeometryCard.
+     set_materials()`'s widget-clearing loop (`QVBoxLayout.takeAt()` +
+     `widget.deleteLater()`) only detaches the widget from the layout's
+     bookkeeping — `deleteLater()`'s actual C++ destruction is deferred to
+     the next event-loop pass, so a widget can remain visibly on screen
+     (just unmanaged by the layout) until then. Harmless when `set_materials`
+     was called rarely (GUI-state restore only); became visibly broken
+     (duplicate-looking material rows) once ring-visual sync (above) started
+     calling it on every cross-panel update. Fixed everywhere this pattern
+     appears (`set_materials`, `_refresh_ring_checklist`, `_delete_material`)
+     by calling `widget.setParent(None)` before `deleteLater()`, which
+     detaches it from the visible tree immediately. Caught by an offscreen
+     screenshot during manual verification, not by the unit tests (which
+     only checked `self._materials`/`materials_state()`, not the actual
+     widget tree) — worth remembering for future Qt layout-rebuild code.
+3. **"Restart now and resume" for Preferences/profile changes.** Several
+   places already said "restart to apply" but just left it there
+   (`prefs_dialog._on_profile_switch`'s info box, `_save`'s generic restart
+   note, `app._reload_config`) or said nothing at all (`app.
+   _on_header_profile_changed`). Rather than build new persistence, this
+   reuses the existing autosave-draft/crash-recovery machinery wholesale:
+   `restart_app(resume=True)` calls a new `_save_autosave_draft_for_restart`
+   (same `_serialize_workspace` call `_autosave_tick` already makes, same
+   `settings.autosave_draft_path()` destination) and marks the draft
+   `__auto_resume__` + `project_path`; `maybe_offer_restore_autosave()`
+   checks for that marker first and applies it immediately with **no**
+   "Restore unsaved session?" prompt (the user already opted in by clicking
+   "Restart now" in `_offer_restart`) before falling through to the
+   unchanged genuine-crash-recovery path. Scope question (asked the user):
+   "profile switching only" vs. "any Preferences change that needs a
+   restart" — chose the broader one (user's pick), so `_save`'s generic
+   branch and `_reload_config` got the same treatment, not just the two
+   profile-switch call sites. Deliberately did NOT add the offer to the
+   shared `on_profile_changed()` tail itself — it's also called from
+   `_restore_active_profile()` during non-interactive project/workspace load
+   and directly by `tests/test_smoke.py`, where a modal restart prompt would
+   be wrong (and would hang the test). The offer lives only at the four
+   interactive call sites. `restart_app()` itself (the actual
+   `QProcess.startDetached`/`QApplication.quit()`) was deliberately never
+   invoked in a test — it would quit the shared test `QApplication` — only
+   the draft-writing half and the silent-resume read-back are covered.
+4. **Dark-file default HDF5 container = most frames, when the dark file
+   differs from the data file.** `FieldSelector`/`HydraFieldSelector`'s
+   dataset-combo default (on first load, when the remembered dataset name
+   isn't present) was "first dataset in file order with ndim>=3" — fine for
+   the common case of a companion `exchange/data_dark` inside the same file
+   as the data, risky for a genuinely separate dark file with an arbitrary
+   layout (could silently pick a near-empty calibration dataset instead of
+   the real dark stack). New `helpers.best_default_dataset_index(items,
+   prefer_max_frames)` picks the eligible entry with the largest `shape[0]`
+   when asked; a new `prefer_most_frames` constructor flag (Dark only — the
+   user asked specifically about dark, not Bright/Background) combined with
+   the already-existing `_data_path_provider` callable (previously used only
+   to prefill the field) decides at the single shared call site in each
+   class whether the dark path equals the Data path (keep old behaviour) or
+   differs (prefer most frames). Exactly two construction sites in the whole
+   app (`DataLoaderPanel`/`HydraLoaderPanel`), so this one change covers
+   every tab that loads a dark file (Data Viewer, Calibrate, Batch Integrate,
+   Pump-Probe, Refine, Solve Cell single-detector; Data Viewer/Calibrate/
+   Batch Integrate Hydra) without touching each tab.
+
+**Verified:** new tests — `test_hydra_ui.py` (cross-panel material/ring-visual
+sync, per-ring toggle + `materials_state()`/`set_materials()` round-trip +
+sync, Dark-container preference for `HydraFieldSelector`), `test_helpers.py`
+(`best_default_dataset_index`, single-detector `FieldSelector` dark
+preference), `test_workspace_ux.py` (silent auto-resume draft vs. the
+existing crash-recovery prompt path), `test_ca_live_view.py` (restart-offer
+wiring for both `prefs_dialog` call sites) — all green. Full touched-file
+sweep (`test_hydra_calib_ui`, `test_hydra_batch_ui`, `test_hydra_chirality`,
+`test_hydra_geometry`, `test_hydra_overall_cake`, `test_smoke`,
+`test_set_raw_frame`, `test_project`, `test_ca_live_view`) re-run per-file on
+a clean `HOME`; three already-pre-existing flakes reconfirmed identical on
+unmodified `main` before concluding they weren't regressions
+(`test_hydra_chirality::test_composite_markers_render_at_correct_chirality`
+and `test_ca_live_view`'s two device-list tests SIGSEGV only when forced
+through `--forked`, which isn't this file's normal mode;
+`test_project::test_apply_project_calibration_single_detector` SIGABRT).
+`pyflakes` shows no new warnings over the baseline. Offscreen screenshots
+confirmed the per-ring checklist renders/expands correctly and that the
+duplicate-row bug (found during this same verification pass) is fixed.
+**Not verified:** no live beamline session to exercise the actual
+`QProcess`-based relaunch end-to-end.
+
+**STATE.md housekeeping (same session):** trimmed ~400 lines of
+2026-09-09–09-30 dated "Recently completed" entries that were pure
+changelog duplication of this same content already in this file
+(append-only, newest-first) — per the global STATE.md size convention nothing
+was lost, just de-duplicated.
+
+## 2026-10-16 — Hydra Calibrate: single-panel save, "Load calibration file…" cascades to siblings, bidirectional all-panel Data Viewer transfer
+
+**Requested directly**, three related asks, each verified against the live
+code before touching anything (research found two of the three already had
+real gaps, not just missing discoverability):
+
+1. **"Save Current Panel" buttons**, next to the existing "Save All
+   .json"/"Save All paramstest.txt" (landed 2026-10-08) in
+   `HydraCalibrationPage`'s footer. Save All already does one-operation
+   export for every fitted panel — confirmed working, not what needed
+   fixing — but there was no way to overwrite *just one* panel's file (e.g.
+   after re-fitting only that panel) without re-running Save All over all 4.
+   `_save_current_json`/`_save_current_paramstest` write only the active
+   panel, defaulting into the exact same dir/naming as the last Save All run
+   this session (`_last_save_all_dir`/`_last_save_all_ps_base`), reusing
+   `_panel_tagged_path` and the cards' existing `write_json`/
+   `write_paramstest`.
+2. **"Load calibration file…" (`HydraCalibPanelCard._load_calib_file`) now
+   cascades to sibling panels**, resolved by a new `_calib_siblings()` —
+   the formal inverse of `_panel_tagged_path`: matches `..._ge<N><suffix>`
+   (the Save All naming convention) and returns the other 3 panels' files
+   that exist on disk. Deliberately does NOT reuse `helpers.hydra_siblings`
+   — that one requires a `\bge<N>\b` *word*-boundary match (works for raw
+   data's `ge1/panel.ge1.h5` folder/infix convention), but every calibration
+   naming convention in this app (`_ge<N>.instr.json`, `ps_ge<N>.txt`)
+   prefixes with `_`, which is itself a word character in regex — `\bge\b`
+   never matches `_ge1`. New `HydraCalibPanelCard.calibFilePicked` signal
+   carries `(panel_number, path)` alongside the existing `calibFileLoaded`
+   (which only carried the parsed geometry dict, not the path a sibling
+   search needs). A file that doesn't match the convention still loads into
+   the one panel clicked — logged, not an error.
+3. **Data Viewer ↔ Calibrate Hydra geometry transfer, made bidirectional and
+   honest.** Research found Calibrate's existing "← Data Viewer" button
+   (`HydraCalibrationPage.import_from_viewer`) *already* pulls all 4
+   panels' geometry + the anchor path in one click — verified live against
+   a real offscreen `MainWindow` — but it unconditionally logged "Geometry
+   imported…" even when the Data Viewer's Hydra loader had nothing loaded
+   (the common case: a user loads data directly into Calibrate and never
+   visits Data Viewer), giving false confidence. Fixed by tracking whether
+   anything was actually applied. Separately, the Data Viewer's own Hydra
+   page had 5 `DetectorGeometryCard`s (ge1-4 + composite) each with their
+   own "Send →"/"← Get" buttons (`pushGeometry`/`pullGeometry` signals) —
+   **`HydraViewerPage` never connected these to anything; they were dead
+   UI**, and even if wired, one panel's button moving one panel's geometry
+   (or composite's, which is nonsensical) doesn't match how the Calibrate
+   side already works (one button, all 4 panels). Fix: new
+   `show_calib_handoff` flag on `DetectorGeometryCard` (default `True`,
+   keeping single-detector Data Viewer's own card unchanged) hides that row
+   for all 5 Hydra cards; one new page-level "→ Send to Calibrate"/"← Get
+   from Calibrate" pair on `HydraViewerPage` mirrors Calibrate's "← Data
+   Viewer" exactly. The push reuses `export_for_calibration()`'s existing
+   payload shape verbatim — `app.py` wires it straight into
+   `CalibrationTab.import_hydra_from_viewer`, no new Calibrate-side code.
+   The pull needed a new `HydraCalibrationPage.export_for_viewer()` +
+   `HydraCalibPanelCard.export_geometry()` (fitted result if one exists,
+   else the current seed fields — useful even pre-fit) and a new
+   `HydraViewerPage.import_from_calibrate()`; `DataViewerTab`'s wrapper
+   shows a `QMessageBox.warning` when nothing was applied, since this page
+   (unlike Calibrate's) has no log panel to write an honest message into.
+
+Root-caused by building a real offscreen `MainWindow`, loading
+`test_data/gui_synthetic/hydra/ge1/panel.ge1.h5`, and exercising every
+button's actual code path directly (`export_for_calibration()`,
+`import_hydra_from_viewer()`, the registry-based "Import from…" menus) before
+writing any code — two of the three user-reported "doesn't work" claims
+turned out to already work as coded; chasing down which third one didn't
+needed this before guessing what to build.
+
+**Verified:** `tests/test_hydra_calib_ui.py` (+3 test bodies' worth of new
+assertions in the existing 2 test functions — no new pyqtgraph-building test
+function, per that file's documented constraint): `_calib_siblings`
+resolution/no-match cases, cascading load via a monkeypatched
+`QFileDialog.getOpenFileName`, "Save Current Panel" writing only the active
+panel without touching siblings' mtimes and disabling for an unfitted panel,
+and `import_from_viewer({})`'s honest "nothing loaded" log line.
+`tests/test_hydra_ui.py` (+1 new test function — this file's existing
+pattern already builds a fresh `DataViewerTab` per test, unlike the calib
+file): per-card Send/Get attributes genuinely absent, the new page-level
+buttons' click → signal → payload shape, `import_from_calibrate` applying
+all 4 panels, and `DataViewerTab.import_from_calibrate`'s warning path via a
+monkeypatched `QMessageBox.warning`. Full touched-file sweep green
+(`test_hydra_calib_ui.py`/`test_hydra_ui.py`/`test_hydra_batch_ui.py`/
+`test_calibrate_panel_save.py`/`test_smoke.py`/
+`test_manual_dspacing_calib_ui.py`, 71/71, `--forked`); `pyflakes
+midas_gui/*.py` 39 (was 40 — fixed a pre-existing unused `re` import in
+`hydra_calib_page.py` along the way, now used by `_calib_siblings`).
+Offscreen screenshots confirmed the new footer buttons and the Data Viewer
+page-level Send/Get pair render correctly, with the old per-panel Send/Get
+row gone from every Hydra card.
+**Not verified:** no real multi-panel calibration files available locally to
+exercise "Save Current Panel"/cascading load against genuine (non-synthetic)
+beamline output.
+
+## 2026-10-14 — Fixed: Hydra/single-detector calibration subprocess crashed on the beamline with `ModuleNotFoundError: No module named 'midas_gui'`
+
+**Problem.** User reported this exact error on a beamline deployment (every
+Hydra panel's calibration subprocess failing): `.../envs/midas-gui/bin/
+python: Error while finding module specification for 'midas_gui.calib_cli'
+(ModuleNotFoundError: No module named 'midas_gui')`. The 2026-10-07 move of
+calibration to a subprocess (`workers.CalibrationWorker`, see that date's
+entry) launches it as `QProcess(sys.executable, ["-m",
+"midas_gui.calib_cli", ...])` with no explicit working directory.
+
+**Root cause.** On an install where `midas_gui` is run from a source
+checkout rather than pip-installed into the env, `python -m
+midas_gui.calib_cli` only resolves the package because `-m` inserts the
+*current working directory* onto `sys.path[0]` — it needs cwd to be the repo
+root. `QProcess` with no `setWorkingDirectory()` call inherits whatever cwd
+the GUI process happens to have, which is not guaranteed to be the repo
+root (and evidently isn't, on this beamline deployment). `job_queue.py`'s
+background Batch Integrate jobs hit this exact issue already and fixed it
+(`cd {repo_root} && ...` in the wrapped shell command it hands to `screen`,
+with a comment explaining why) — `CalibrationWorker` was the one caller of
+this pattern that never got the same fix, because it predates nothing: it
+was simply missed when the subprocess move landed on 2026-10-07.
+
+**Fix.** `CalibrationWorker.start()` now calls
+`proc.setWorkingDirectory(str(constants.PROJECT_ROOT))` before `proc.start(
+...)` — `constants.PROJECT_ROOT` is the exact same `Path(__file__).resolve()
+.parent.parent` computation `job_queue.py` duplicates inline, so this reuses
+it instead of adding a third copy. No change needed to `calib_cli.py` itself
+or to Hydra/single-detector calling code — this is purely how the subprocess
+is launched.
+
+**Verified:** `tests/test_calibration_subprocess.py` (10/10),
+`tests/test_hydra_calib_ui.py`, `tests/test_smoke.py` green on a clean
+`HOME`; `pyflakes workers.py` unchanged (same 5 pre-existing warnings, none
+on the touched lines).
+**Not verified:** no access to the actual beamline machine from here — the
+fix is confirmed correct by code inspection + matching `job_queue.py`'s
+already-working equivalent, not by reproducing the failure locally (this
+machine's own `midas-gui` conda env does have the package pip-installed, so
+the bug doesn't reproduce here at all).
+
+## 2026-10-13 — Calibrate tab: "Mean of frames" replaced with a Projection card; ProjectionWorker corrects each frame before reducing, everywhere it's used
+
+**Problem.** The Calibrate tab's "Mean of frames in single image" card only
+offered a mean over a frame range (`DataLoaderPanel.mean_frames`), unlike the
+Data Viewer's "Projection" card (max/sum/mean). Requested: replace it with
+the same Projection mechanics, output feeding the calibration pipeline the
+way the mean used to. Separately requested: whenever dark/bright/background
+correction is applied, projection should happen *after* each frame is
+corrected individually, not once after reducing.
+
+**Scope, per explicit user choices (asked via clarifying questions):**
+(1) single-detector `tab_calibrate.py` only — Hydra's own "Mean of frames
+(shared range)" card (`hydra_calib_page.py`, built on `helpers.average_field`
+rather than `DataLoaderPanel.mean_frames`) is untouched, a separate future
+task if ever wanted; (2) the correction-order fix applies everywhere the
+shared `workers.ProjectionWorker` is used — i.e. it also changes Data
+Viewer's and Hydra Viewer's existing Projection features as a side effect of
+fixing the one worker class they share, not just the new Calibrate card;
+(3) batching is vectorized per-batch (not a per-frame Python loop), bounded
+in memory, not a full-stack eager load — the user noted corrections are
+broadcastable 2-D fields applied to a whole batch at once, so per-frame
+streaming would be "very inefficient."
+
+**Why the correction order matters, and why it affects each method
+differently (verified algebraically, not just asserted).** Dark/bright/
+background correction is a per-pixel, per-frame-identical affine map
+`out = a·raw + b` (a>0), optionally followed by one `clip(·, 0, None)`.
+A monotonic transform commutes with `max` exactly, clip included — so `max`
+projections are **numerically unchanged** by this refactor; it was never
+actually a bug for `max`, only for `sum` (and a narrow case of `mean`).
+`sum`: summing `n` already-corrected frames applies the background/dark
+offset once per frame (physically correct — each real frame really did
+carry that offset); correcting the raw sum once (today's old order) applies
+it exactly once regardless of `n` — a real, large, guaranteed-wrong-by-a-
+factor-of-`n` bug for background/dark terms specifically (bright's
+multiplicative term is unaffected by sum/mean order, only by clipping).
+`mean` is identical to the old order algebraically (`mean(a·x+b) = a·mean(x)+b`)
+*unless* at least one individual frame's corrected value would go negative
+and get clipped — the old order never had a chance to clip per-frame, so
+this is the subtle divergence case. Test suite pins all three: `max` as a
+no-regression check against the old order, `sum` as the headline
+"must differ, and differ by exactly this much" regression, `mean` with a
+deliberately-dim synthetic frame for the clip-divergence case.
+
+**New shared primitives, reused by all three `ProjectionWorker` call sites
+(Data Viewer, Hydra Viewer, Calibrate).**
+- `helpers.reduce_frames_batched(batch_iter, method, *, dark=, bright=,
+  background=, bright_mode=)` — consumes `(B,H,W)` batches, applies
+  `apply_field_corrections` per batch (vectorized), folds each corrected
+  batch into a running accumulator (`max`→`np.maximum`; `sum`/`mean`→always
+  a running **sum**, divided by the true total frame count once at the end
+  — never an average-of-batch-means, which breaks the moment the final batch
+  is a different size). Reuses the existing `_COMBINE_OPS` dict rather than
+  adding a third hardcoded max/sum dispatch table.
+- Fixed a real, previously-latent bug found while building this:
+  `apply_field_corrections`'s shape guard compared `arr.shape != out.shape`,
+  which is correct for a single 2-D frame but breaks the instant `out` is a
+  batch `(B,H,W)` — every batched correction would have been silently
+  skipped as "mismatched shape". Changed to compare against
+  `out.shape[-2:]`; a no-op for every pre-existing 2-D caller (confirmed by
+  grep — every other caller in the repo only ever passes single frames).
+- `DataLoaderPanel.iter_raw_batches(start, end, batch_size=None)` (new,
+  `widgets.py`) and `hydra.iter_stack_batches(path, dataset, start, end,
+  batch_size=None)` (new) — memory-bounded batched reads, dispatching on the
+  same source "kinds" `full_stack()`/`load_full_stack()` already use. The
+  HDF5 branch is the one with a real win: opens `h5py.File` **once** for the
+  generator's lifetime and slices `dset[lo:hi]` per batch, instead of
+  `full_stack()`'s `f[dset][()]` (whole dataset into RAM) or `_get_frame()`'s
+  open-close-per-frame. Default batch size: peek one frame's `nbytes`,
+  target ~256 MiB/batch, clamped to [8, 256] frames — no existing
+  memory-fraction-based auto-sizing convention in this codebase to reuse
+  (the batch/integrate pipeline's `chunk_size` is always user-specified),
+  and deliberately NOT based on live `psutil` memory (would make summation
+  order, and so floating-point results, depend on system load).
+  `DataLoaderPanel.mean_frames()` is now dead code (confirmed single caller
+  was `tab_calibrate.py`) — deleted.
+- `ProjectionWorker` (`workers.py`) constructor changed from
+  `(full_stack_fn, method, axis, skip, nframes, ...)` to `(batch_iter_fn,
+  total_frames, method, skip, nframes, ...)` — `axis` was always `0` at
+  both pre-existing call sites, so dropped; `total_frames` is needed up
+  front (no more eager load to read `.shape[0]` off of). No test anywhere
+  constructed/mocked `ProjectionWorker` (confirmed by repo-wide grep), so
+  this was a free signature change.
+
+**Calibrate tab wiring (`tab_calibrate.py`).** New state: `_proj_active`,
+`_proj_image` (always fully corrected once set), `_proj_worker`. `_source_
+image()` returns the projection when active, else the raw current frame —
+same contract shape as the old mean-of-frames branch. Because the
+projection is pre-corrected, both consumers that separately apply dark/
+bright/background must skip doing so again when `_proj_active`:
+`_run()` (the actual `CalibrationWorker` fit) and, easy to miss,
+`_run_integration()` (the post-fit profile/cake preview and "Re-integrate" —
+an independent second consumer of `self._dark`/`self._loader.bright()`/
+`.background()` that would otherwise double-correct the preview even though
+the fit itself was correct). `_show_calib_image()` likewise skips
+`self._loader.corrected(...)` when showing an active projection, for the
+same reason. Not persisted across project save/restore: `_proj_active`/
+`_proj_image` — same precedent as the Data Viewer not persisting its own
+projected result; the Method radios and skip/n-frames values ARE persisted
+(each radio registered individually under its own key in `_state_widgets()`,
+following the existing precedent in `tab_refine.py` for persisting a
+radio-button group — `widgets_to_dict`/`apply_dict_to_widgets` already
+handle `QRadioButton` with no changes needed, since it's a `QAbstractButton`).
+A stale projection is dropped on any new data load or frame-navigation event
+(`_sync_proj_controls`, called from `_on_loader_data` where `_sync_avg_
+controls` used to be) — mirrors the Data Viewer's own `_on_loader_data`
+unconditionally resetting its projection state.
+
+**Verified:** see STATE.md 2026-10-13 for the full test-file sweep and
+screenshot confirmation.
+
+## 2026-10-09 — Solve Cell: user-supplied known-structure indexing at stage 3 and stage 5; space group is diagnostic-only; reciprocal-space plot gets a legend
+
+**Problem.** The only "known structure" path anywhere in Solve Cell was
+stage 5's narrow "reuse latest domain's cell" option
+(`_stage_index_known_cell`) -- there was no way to type in a literature/
+expected lattice cell + space group at the *main* indexing stage (stage 3
+was blind ab-initio only), and no way to re-enter a cell manually at stage 5
+either. Separately, the 3-D reciprocal-space plot's colors were only ever
+explained in a side text label, never on the plot itself.
+
+**Space group: diagnostic-only, not search-integrated (user's explicit
+choice).** `midas_hkls.ub_refine.refine_ub_from_gvectors` and the existing
+random-orientation search have no notion of space group at all; the two
+options put to the user were (a) use the declared space group only as a
+post-hoc systematic-absence sanity check on the accepted match, leaving the
+validated cell-only search/refine untouched, or (b) integrate it into the
+search itself (filter/score orientations by systematic absence), which is
+more rigorous but a materially more invasive, harder-to-validate change.
+User picked (a). Implemented as `_systematic_absence_diagnostics` in
+`solve_cell/pipeline.py`: given the accepted integer `hkl`s and a
+`SpaceGroup.from_number(...)`, counts what fraction are systematically
+absent for that space group and appends a note above a 5% threshold. Wired
+into `_stage_index_known_cell` via a new optional `space_group` cfg key
+(backward compatible -- omitting it adds none of the new result fields, so
+stage 5's original "Free"/leftover-cell behavior is unaffected when no
+space group is given). An unresolvable space-group number degrades to a
+note rather than raising.
+
+**No materials-preset dropdown (user's explicit choice).** `constants.
+MATERIALS` already has the right `{a,b,c,alpha,beta,gamma,sg}` shape and was
+the obvious reuse candidate (flagged as an open question in handoff §9.4),
+but a Solve Cell "known structure" is normally the user's own sample, not a
+calibration standard -- manual entry only, no preset wiring.
+
+**Reused `_stage_index_known_cell` as-is for stage 3, not a new stage.** The
+function already only cares about whatever `g_2pi` pool it's handed -- it
+was written for a *leftover* pool but has no leftover-specific logic -- so
+stage 3's "Known structure" mode (a first, round-1 solve) dispatches the
+exact same `"index_known_cell"` stage against the full diamond-filtered
+`candidate_df`'s g-vectors instead. `_stage_ab_initio`/`_stage_refine`
+(the "Free" path) are completely untouched. Since known-structure indexing
+already includes its own refine internally, stage 3's known-structure
+success handler (`_on_index_known_structure_done`) feeds straight into
+`_add_domain`/`_replace_domain` the same way `_on_refine_done` does for
+Free mode -- stage 4 ("Refine") is simply not needed for this path and its
+button is explicitly disabled when a known-structure run starts.
+
+**Shared lattice+space-group+search-tuning form, two independent
+instances.** `_build_known_structure_form()` builds a fresh widget set per
+call (`self._ks3`, `self._ks5` dicts) -- same pattern as the pre-existing
+`_kc_*` spinboxes it replaces, just factored out since stage 3 and stage 5
+now both need it. Stage 5 additionally gets a "Fill from latest domain"
+button (`_fill_ks5_from_latest_domain`) that copies the most recently
+solved domain's own refined cell into the six lattice fields on click --
+this replaces the old combo item "Known structure (reuse latest domain's
+cell)", which did this same copy *implicitly and automatically* with no way
+to override the cell. The explicit button directly matches what was asked:
+"the choice to fill the crystal using result from previous refinement" --
+a choice, not an automatic default. Space group is left untouched by the
+fill (a free refinement carries no space-group information).
+
+**Cosmetic bug caught and fixed while building the shared form**: a bare
+`QFormLayout.addRow("label:", spinbox)` with no `setMaximumWidth` stretches
+the field to fill the whole column; combined with `_NoScrollSpinBox`'s
+right-aligned text, the value rendered pixels past the visible edge of the
+scrollable middle column (confirmed via an offscreen screenshot -- the
+space-group and min-accept fields were blank until capped to the same
+104px `_fspin()` uses). This same unconstrained-width pattern already
+existed on the pre-existing `_kc_min_accept`/`_kc_n_search` fields this form
+replaces; worth knowing if a similar blank-spinbox report ever comes up
+elsewhere in this tab.
+
+**Legend added directly to the matplotlib 3-D plot**, not just the stats
+text: every `ax.scatter(...)` call in `_update_recip_plot` now carries a
+`label=`, and `ax.legend(...)` is called once at the end only if at least
+one labeled artist was actually drawn (avoids matplotlib's empty-legend
+warning on a blank plot). The origin `+` marker is deliberately left
+unlabeled -- it is a fixed reference point, not a spot category, consistent
+with the stats label already not mentioning q=0.
+
+**Verified:** `tests/test_solve_cell_pipeline.py` (42/42, +4 new: P1/no-
+violation, SG225/significant-violation, invalid-SG-number-degrades,
+space_group-key-omitted-is-unaffected), `tests/test_solve_cell_ui.py`
+(73/73, +10 new + 1 updated for the renamed `_ks5` widget: method-combo
+visibility toggling at both stages, known-structure dispatch cfg, round-1
+domain replace-not-duplicate for the known-structure path, systematic-
+absence note logged, "Fill from latest domain" populates/enables correctly,
+stage-5 known-structure cfg now reads the spinboxes + space_group, legend
+presence/absence/contents in both empty and populated cases), `test_smoke.py`
+(13/13). `pyflakes` unchanged on both touched source files (the two
+pre-existing unused-variable warnings in `test_solve_cell_ui.py` predate
+this change, confirmed via `git stash`). Offscreen screenshots confirmed:
+stage 3's method combo + known-structure form, stage 5's "Fill from latest
+domain" button + form, and a visible, correctly-labeled legend in both
+Panel and Crystal color modes on synthetic multi-domain/multi-panel data --
+plus catching and fixing the blank-spinbox rendering bug above.
+**Not verified with real data**: no raw HDF5 dataset available locally to
+run a true end-to-end known-structure solve (same longstanding gap as every
+other Solve Cell entry in this file).
+
+## 2026-10-08 (latest) — Hydra calibration page's layout matched to the single-detector Calibrate tab, scope negotiated up front
+
+**Problem.** `HydraCalibrationPage` was built as a parallel implementation of
+`CalibrationTab`, and drifted from it over time: different card order,
+different widget conventions (checkbox-in-card vs. checkable-card-title),
+and one whole feature (the Refine card's per-parameter ± tolerance "Limits"
+controls) missing outright. Reported directly: "I want the hydra calibration
+tab layout to be exactly the same as single detector except hydra-specific
+features should stay as they are."
+
+**Scoping, before touching code.** A full section-by-section diff turned up
+more differences than the user had named, several of which are genuinely
+ambiguous between "bug to fix" and "forced by Hydra's 4-panel structure."
+Rather than guess, four judgment calls were put back to the user:
+- **Refine Limits grid** — confirmed in scope (explicitly named).
+- **Non-crystalline/d-spacing calibrant support** (manual ring-picking,
+  which single-detector has and Hydra lacks) — **declined**. This is a
+  materially bigger feature (ring-picking per panel, d-spacing fit math),
+  not a layout parity fix, and was never asked for.
+- **Per-coefficient Distortion seeding** in the per-panel Manual-seed dialog
+  (`dialogs.py` already documents this omission as deliberate, not an
+  oversight) — **declined**, for the same reason.
+- **Footer/Advanced restructuring** (Working dir trapped in collapsed
+  Advanced; Run/Save in a scrollable card instead of a fixed footer) vs.
+  **frame-nav/Transforms-card unification** (Hydra's loader has its own
+  frame slider instead of a scrub bar under the viewer; Transforms is a
+  per-panel card instead of folded into Detector & Calibrant) — the first
+  pair are straightforward bugs, the second pair are forced by Hydra
+  actually having 4 independent frame sources/mountings. User chose: fix
+  the footer, leave the forced differences alone.
+
+**Why the Limits grid needed no dsp/xtal mode-switching.** `CalibrationTab`
+carries `_sync_limits_mode`/`_LIMIT_ROWS_DSP`/`_LIMIT_ROWS_XTAL` because it
+supports both a manual/d-spacing fit (opt-in, per-axis windows) and a
+crystalline one (always-on, coarser windows). Hydra is crystalline-only by
+the scoping decision above, so only the xtal shape was ported: one row per
+refine parameter (Lsd/BC/ty+tz-merged/Wavelength), always on, no opt-in
+checkbox, plus a standalone Distortion row — `tx` gets no window at all
+(the crystalline backend never refines or bounds it). Reused
+`dialogs.PARAMETER_LIMIT_ROWS`/`limit_window` and
+`calib.tol_defaults`/`tols_are_default` as-is; no backend-facing code
+changed.
+
+**Why `_crystalline_tols` takes the panel card as a parameter.**
+`CalibrationTab`'s version reads its own seed widgets directly — there's
+only one seed. Hydra shares the tolerance *windows* across all 4 panels (one
+Refine card) but each panel's fit must be centred on *its own* seed
+(BC/Lsd/tilts genuinely differ panel to panel), so `_crystalline_tols(card)`
+reads `card._seed_lsd`/`_seed_bcy`/`_seed_ty` for the centre and the
+page's own shared spin/combo for the window. `card=None` (used only by
+`_update_limits_note` for the live note label, never by an actual run)
+falls back to a 0.0 centre, which `limit_window`'s own degenerate-value
+handling already treats safely for a "%" unit.
+
+**Why the per-panel card stack moved instead of being split in two.**
+`HydraCalibPanelCard` bundles Transforms + Initial seed as one widget
+(deliberately — see that module's docstring). Splitting it so Transforms
+could live inline with Detector & Calibrant (matching single-detector's
+exact sub-structure) would be a bigger refactor for a cosmetic win; instead
+the whole card stack's *position* in the page moved up, from after
+Run/Advanced to between Mean-of-frames and Refine — the same slot
+`CalibrationTab`'s own "Initial seed" card occupies. This was the concrete
+shape of "positioning of manual is very different": previously you had to
+scroll past Threshold/Mean/Refine/Advanced/Run to reach it.
+
+**The Working-dir-inside-Advanced issue was a real bug, not a style
+mismatch.** A checkable `QGroupBox` disables its children when unchecked, so
+with "Advanced" collapsed by default (as it always has been), Working dir —
+and by extension Run, which depends on it being set or defaulted — read as
+disabled on first open of the Hydra page. Moving it to the new fixed footer
+(mirroring `CalibrationTab`'s `mid_col`/footer split) fixes this as a side
+effect of the positioning work, not as a separate patch.
+
+**Verified:** `test_hydra_calib_ui.py` (both existing test functions
+extended — no new pyqtgraph-building test, per that file's module
+docstring), `test_hydra_ui.py`, `test_hydra_batch_ui.py`,
+`test_calibrate_panel_save.py`, `test_smoke.py`,
+`test_manual_dspacing_calib_ui.py` all green per-file on a clean `HOME`;
+`pyflakes` unchanged; offscreen screenshots of both the Hydra and
+single-detector pages side-by-side (same window, same size) confirm matching
+card order top-to-bottom and that Working dir/Run/Save render enabled on
+first open.
 
 ## 2026-10-08 (later) — Hydra calibration gets a page-level "Save All", one file per panel
 
@@ -514,306 +2349,737 @@ docstring — so new coverage goes into the existing ones, not new functions).
 — all unaffected); `pyflakes` identical to baseline (same pre-existing
 warnings only, confirmed via `git stash`); offscreen screenshots of both new
 threshold cards confirmed the 3-spinbox layout renders correctly.
+## 2026-10-05 (latest, 3) — Solve Cell: reciprocal-space viewer Panel/Crystal
+color modes, unindexed toggle, stats
 
-## 2026-10-06 (latest) — One output rebin, two units; Q and 2θ are not backend modes
+User-requested: a Panel color mode (spots colored by detector panel), a
+Crystal color mode (each domain plus diamond/gasket spots shown separately),
+a show/hide toggle for unindexed/spurious spots, and a stats breakdown that
+updates on every mode/toggle change.
 
-Two asks: "Q-uniform bins aren't wired into background jobs yet" (a guard in
-``_run_as_job``) and "I think we also want even 2theta case."
+- **Diamond/gasket is not "unindexed/spurious" and is never hidden by the
+  toggle.** The request names them as separate concepts ("diamond or Re
+  gasket spots... shown separately" vs. "unindexed/spurious spots... option
+  to hide/show") — diamond is a *known*, physically-identified category
+  (`is_diamond`), whereas "unindexed/spurious" means genuinely unclassified
+  (not diamond, not claimed by any solved domain). The toggle therefore only
+  ever gates the leftover/unclaimed population.
+- **Diamond spots needed a new persistent `self._flagged_df`.** Before this
+  change, `_on_diamond_done` only kept a local `flagged` variable and
+  `self._candidate_df` — so diamond-flagged spots vanished from the plot the
+  moment Ab-initio or Refine ran (those redraw from `g_2pi`/domain data,
+  which never included diamond rows). Persisting the full post-filter table
+  is the one real data-model gap this closes; it costs nothing extra since
+  it's the same dataframe `_stage_diamond_filter` already returns.
+- **Panel-mode coloring reuses whatever dataframe/array already carries
+  `panel_id`, rather than mapping back through `spots_df`'s original index.**
+  `_stage_diamond_filter`'s `candidate_df = spots[~is_diamond].reset_index(
+  drop=True)` deliberately resets the index (so `claimed_index` values are
+  `candidate_df`-local positions, not `spots_df` row labels) — but
+  `panel_id` is a plain column that survives that reset untouched. So rather
+  than reconstructing a `candidate_df`-position → `spots_df`-original-index
+  mapping (which would've been needed to join back to `self._spots_df`),
+  every category (diamond rows, each domain's claimed rows, leftover rows)
+  just carries its own `panel_id` values directly: domains gained a new
+  `"panel_ids"` array alongside their existing `"xyz"`, fetched once at
+  domain-creation time via `candidate_df.loc[claimed_index, "panel_id"]`.
+  Simpler and avoids a second index-bookkeeping scheme alongside the
+  existing `_claimed_index` union.
+- **Panel mode defaults to index 0 (shown before Crystal) in the combo** —
+  it's useful immediately after Ingest, before any crystal has been solved,
+  unlike Crystal mode which has nothing interesting to show until at least a
+  diamond filter has run.
+- **No `pipeline.py` changes.** Every column needed (`panel_id`,
+  `is_diamond`, `qsample_x/y/z`) already existed; this is purely a
+  `tab_solve_cell.py` display-layer change. `_update_recip_plot`'s own
+  signature/behavior is untouched — the new `_refresh_recip_view()` sits one
+  layer above it, replacing the ad hoc `_update_recip_plot(...)` call sites
+  after Ingest/pooled-Ingest/Diamond Filter; `_update_multidomain_plot()` is
+  kept as a thin delegating wrapper so existing callers/tests needed no
+  changes.
 
-**Q-uniform was never a backend binning mode in this GUI.**
-``IntegrationSpec`` genuinely carries ``QMin``/``QMax``/``QBinSize`` and a
-``q_mode_active`` property that redefines ``n_r_bins``, and
-``workers.apply_q_uniform`` is the hook for it — but nothing has ever called
-it. Every Q run integrates R-uniform and resamples the finished 1-D profile.
-The backend has no 2θ equivalent at all, so 2θ could only ever be a rebin
-too. That makes the two units *the same operation with different grid math*,
-which is why this is one generalised pair (``rebin_grid_and_r`` /
-``rebin_R_to_grid``) rather than a second parallel path beside the Q one.
-The four worker call sites kept their shape; only the grid construction and
-the forward/inverse unit conversion differ.
+## 2026-10-05 (latest, 2) — Solve Cell: multi-panel pooled ingest
 
-``apply_q_uniform`` is kept, not deleted — the native mode is real and may
-be worth revisiting — but it now raises on a non-Q config and carries a
-warning. The two routes **disagree about what the axis travelling with a
-profile is**: the rebin route carries R in pixels, the native route would
-carry Q, and every downstream consumer (writers, waterfall, stack view, the
-GSAS-II guard) assumes pixels. Confusing those is exactly what produced the
-2θ = 180° plots fixed in 4cb7aaa. Anyone wiring up the native mode has to
-fix all of them at once.
+User-requested: "implement the combination of multiple panels together in
+the ingest stage when multiple panels are provided along with their
+independent calibration" — the Phase 2 "multi-panel pooling" item STATE.md/
+`solve_cell_handoff.md` §10 had been carrying as open since Phase 1 landed.
 
-**The config dict gained a unit; the transport keyword did not get renamed.**
-Canonical form is ``{"unit": "Q"|"2th", "min", "max", "step"}``, with the
-legacy Q-only spelling (``QMin``/``QMax``/``QBinSize``, no ``unit``) still
-read as Q so saved projects keep loading. ``rebin_cfg_parts`` is the only
-place that knows either shape. The *keyword* is still ``q_cfg=`` in the
-worker signatures and ``inputs["q_cfg"]`` in saved projects: renaming it
-reaches a ``queue_runner`` dataclass field, ~15 keyword call sites across 8
-modules and the on-disk project schema, all for naming alone, with a missed
-site surfacing as a ``TypeError`` in a path as rarely exercised as
-Pump-probe. The dict is what gets logged and inspected, and it now says
-``'unit': '2th'`` plainly.
+- **Why plain concatenation of independently-ingested panels is correct,
+  not an approximation.** `_stage_ingest` already converts each panel's own
+  blobs to `qsample` via `qlab_to_qsample` at that panel's own geometry and
+  the shared omega axis — i.e. into the ONE sample-frame coordinate system
+  every panel of the same rotation series shares, regardless of where that
+  panel physically sits. So pooling needs no new geometry math: ingest each
+  panel on its own, then concatenate. This isn't a new hypothesis — the
+  existing two-panel spinel regression test
+  (`test_ab_initio_and_refine_reproduce_known_spinel_cell_two_panels`)
+  already demonstrated exactly this, one stage downstream, by concatenating
+  two panels' own post-ingest `spots_g_candidate.csv` files and recovering a
+  cell closer to the known 6-panel pooled result than either panel alone.
+  New `test_pooling_by_concatenation_recovers_known_cell_without_real_
+  reference_data` pins the same invariant with synthetic data so it isn't
+  only checked when gated real reference files happen to be present locally.
+- **New `pipeline._stage_ingest_pooled` stage, not new logic in the GUI
+  worker.** Considered having `tab_solve_cell.py`/`workers.SolveCellWorker`
+  loop over panels and call the existing single-panel `"ingest"` stage N
+  times, combining results in the GUI. Rejected: `run_stage` is documented
+  as "the sole entry point a worker thread calls," and a pure pipeline
+  function keeps the combine logic unit-testable without Qt (see the new
+  tests in `test_solve_cell_pipeline.py`) and keeps `workers.py` completely
+  unchanged — no new branching there at all, since `cfg["panels"]` has no
+  top-level `frames_loader` key, so the existing single-panel resolution
+  code path in `SolveCellWorker.run()` naturally no-ops for the pooled case.
+- **Per-panel raw-frame loading is sequential and discarded between panels,
+  not resolved eagerly up front.** A pooled cfg's `frames_loader` callables
+  are resolved ONE AT A TIME inside `_stage_ingest_pooled` itself (a
+  deliberate, documented deviation from the single-panel stage's contract,
+  where the caller resolves `frames_loader` before calling `run_stage`) —
+  resolving every panel's loader before starting would hold every
+  configured panel's full raw stack in memory simultaneously, multiplying
+  by panel count the exact memory pressure the 2026-10-04 single-panel
+  ingest performance fix already had to solve (a 587-frame 2880² float64
+  stack alone was ~39 GB on a 36 GB machine). New
+  `test_ingest_pooled_drops_each_panels_frame_stack_before_loading_the_next`
+  pins this by confirming each panel's cfg dict no longer references its
+  resolved frame array once that panel's own `_stage_ingest` call returns.
+- **A not-ready panel tab is skipped, not blocking.** `_run_ingest` checks
+  every configured panel (not just the active one) for its own calibration +
+  data + no pending fields; panels missing one of those are logged and
+  excluded rather than raising a blocking dialog — a user can keep an extra
+  scratch/unconfigured panel tab around without it breaking the main run.
+  With exactly one ready panel the single-panel `"ingest"` stage is used
+  unchanged (same cfg shape as before Phase 2, verified by the pre-existing
+  test suite staying green with no edits).
+- **Diamond filter/ab-initio/refine/index-remaining-spots needed ZERO
+  changes.** They were already panel-agnostic, operating purely on whatever
+  `spots_df`/`candidate_df` ingest handed them — pooling only had to happen
+  once, at the ingest boundary.
+- **The Detector tab had one real latent bug this surfaced**: it kept a
+  single `self._ingest_preview`/implicit "last ingest run" preview with no
+  per-panel awareness, so switching panel tabs after ingesting panel A and
+  looking at "Calculated background" would have silently shown panel A's
+  preview mislabeled as panel B's. Fixed as part of this work (not a separate
+  task) since per-panel preview correctness is central to what multi-panel
+  support means: new `_ingest_preview_by_panel` dict keyed by panel id,
+  consulted first by `_refresh_detector_preview`, with the old single
+  `_ingest_preview` kept as a fallback (and still directly settable, as an
+  existing test does). The spot overlay (`_update_spot_overlay`) similarly
+  now filters a pooled `spots_df` to the active panel's own `panel_id`
+  before drawing — `row`/`col` are per-panel pixel coordinates, so pooled
+  rows from another panel must never be drawn on this panel's frame.
+- **Provenance logging**: a pooled run logs one ingest attempt per panel,
+  under that panel's own `panel_key`, exactly as a single-panel run would
+  have — a pooled run is just every ready panel's own ingest executed back
+  to back, so its FAIR provenance record reads the same way. No schema
+  change to `project.append_solve_cell_ingest_attempt` was needed (it
+  already writes whatever columns a `spots_df` carries, so the new
+  `panel_id` column is harmless there too).
 
-**``hydra_batch_page`` carried the same axis bug as ``tab_batch``** and was
-fixed with it — same ``BatchRunCoordinator``, same rebin, same R-px axis.
-4cb7aaa only caught one of the two. The source guard in
-``tests/test_batch_cake_stack.py`` now scans both files, because the thing
-that let this sit was that the expression was greppable but nobody grepped
-past the first hit.
+**Verified**: `tests/test_solve_cell_pipeline.py` 34/34 (+6: tagging/
+concatenation, per-panel-dir + pooled-dir writing, sequential frame-loading
+discipline, empty-panel-list error, synthetic two-panel cell recovery,
+`run_stage` dispatch), `tests/test_solve_cell_ui.py` 52/52 (+8: pooled vs.
+single-panel dispatch routing, not-ready-panel skip, pooled completion
+handler, panel-filtered spot overlay, per-panel pooled provenance write),
+`tests/test_project.py` 29/30 (the one known pre-existing
+`test_apply_project_calibration_single_detector` SIGABRT),
+`tests/test_smoke.py` 13/13 — all per-file on a clean `HOME` (a combined
+`tests/` run hit the documented `--forked`/`--basetemp` race, not a
+regression — confirmed by rerunning the affected files individually, all
+green). `pyflakes` clean on every touched file. A real, non-mocked two-panel
+run through an actual `QThread`-backed `SolveCellWorker` (offscreen Qt,
+synthetic frames, each panel its own calibration file) confirmed the
+combined `spots_df` carries both panel ids with the right per-panel spot
+counts and the correct "N spots across 2 panels" status text.
+**One hazard found and fixed while writing the UI tests**: `_add_panel()`
+switches the active panel tab to the newly-added one, so a test that adds a
+second (deliberately unconfigured) panel and then calls `_run_ingest()`
+without switching back hits `_run_ingest`'s own active-panel calibration
+guard against that unconfigured panel — which opens a REAL, blocking
+`QtWidgets.QMessageBox.warning` dialog if the test didn't also monkeypatch
+it, hanging the forked test process indefinitely. Not a product bug (a real
+user would simply be looking at the tab they meant to configure), but worth
+remembering for any future test that adds a panel and then drives ingest.
 
-**Scope.** Batch Integrate gets the three-way Bin type dropdown; Hydra and
-Pump-probe keep their Q-only checkbox. The shared helpers are unit-generic,
-so adding 2θ there later is a combo swap, not plumbing. Multi-azimuth is
-still refused with either unit (the rebin handles a 1-D profile only), and
-GSAS-II export still refuses a rebinned attempt — both messages now name
-whichever unit is selected.
+## 2026-10-05 — Solve Cell: repeatable leftover-spot re-indexing (multi-domain), scope decisions
 
-One deliberate numerical change: the old ``rebin_R_to_Q`` computed
-``radians(degrees(arctan(...)))``, a round-trip that cancels mathematically
-but not in floating point. The generalised form stays in radians. Q results
-move by ~1 ulp (rel. 2.6e-16 across a full axis) and are, if anything,
-slightly more accurate; ``test_radial_rebin`` pins the agreement.
+User-requested: round 1 only ever produces one refined cell, discarding
+whatever `index_ab_initio` doesn't assign (`AbInitioResult.indexed_mask`) —
+in real DAC data this leftover pool can be large (54% in the Ge-oP32
+reference case) and often a second diffracting domain, not noise. Added a
+repeatable "Index remaining spots" step. Scope was narrowed with the user
+via explicit questions before implementation (handoff §9.3 had flagged this
+exact multi-domain UX as an open question not to default silently on):
 
-## 2026-10-06 (later) — A CSV row is identified by file + raw frame range
+- **Known-cell method = from-scratch random-orientation search, not a
+  cheaper "test against round 1's own UB."** Confirmed first, by reading
+  `midas_hkls.cell_constrained`/`cell_series` in full, that no existing
+  function does "known cell, unknown orientation, find the match" —
+  everything in both modules requires `hkl` already assigned per g-vector.
+  So this is genuinely new code: `pipeline._stage_index_known_cell`
+  implements the handoff's §5.4.2 pseudocode close to verbatim
+  (`_random_rotation_search`: chunked `Rotation.random` + vectorized hkl
+  residual check), gated by a null test (identical search against
+  direction-scrambled g-vectors — same `|g|`, randomized direction) that
+  must be cleared by both an absolute floor (`min_accept`, default 20) and a
+  z-score (default 5.0) before the match is trusted, then a free refine
+  (cell **and** orientation both open — the seed is a hypothesis per the
+  handoff, never a constraint) from the winning seed. A negative result
+  (`success=False`) is a normal, reported outcome, not an exception —
+  verified both directions on synthetic data (recovers a planted second
+  domain's cell; correctly refuses a pure-noise leftover pool).
+- **B-matrix built from `midas_hkls`'s public `Lattice.
+  reciprocal_cartesian_vectors()`, not a locally re-derived formula.**
+  `cell_constrained.py`'s own `_B_of` does exactly this (private, so not
+  imported directly) — reusing the public `Lattice` class gets the same
+  validated crystallography without a second unvalidated copy of the
+  triclinic B-matrix math, and without depending on a private API.
+- **Known cell = always the most recently solved domain's own refined
+  cell** (not a materials-list picker, not manual entry) — the smallest
+  useful version first, confirmed with the user; a materials-list source
+  would be natural future work if asked for, not implied here.
+- **Fully repeatable, one unified domain list — not a single second
+  result slot.** Round 1's own refine result becomes "Domain 1" in a new
+  `QListWidget` (`tab_solve_cell.py`), not kept specially separate from
+  later rounds; each further "Index Remaining Spots" success appends
+  another domain. Re-running Refine (round 1) **replaces** Domain 1 rather
+  than appending a duplicate (`_replace_domain` recomputes the claimed-index
+  union from scratch across every domain) — otherwise two button clicks of
+  an existing control would silently double-claim the same reflections.
+- **Session-only — no new `project.py` persistence for any round**,
+  matching today's diamond-filter/ab-initio/refine (only ingest is
+  persisted, per the 2026-10-05 (earlier) entry below). Persisting every
+  round's result would touch `project.py` meaningfully and was explicitly
+  deferred as a separate, larger follow-up rather than bundled in here.
+- **Leftover tracking lives entirely in the GUI tab, not in `pipeline.py`.**
+  The approved plan called for echoing a `candidate_index` array out of
+  `_stage_ab_initio`'s return dict so leftover rows could be recovered by
+  label — dropped during implementation as unnecessary: the GUI already
+  holds the exact `candidate_df`/`leftover_df` object it hands to any
+  ab-initio call (round 1 or a later "free" round), and `_stage_ab_initio`
+  performs no row reordering/filtering, so `leftover_df.index` already *is*
+  the correspondence without the pipeline needing to say so again.
+  `self._claimed_index` (a growing `pd.Index`, built via `.union()` without
+  ever importing `pandas` directly in `tab_solve_cell.py`) is the single
+  source of truth for "already spoken for"; `_on_diamond_done` resets it
+  along with the whole domain list whenever a new `candidate_df` is
+  produced, since `_stage_diamond_filter` always rebuilds that frame with a
+  fresh `0..N-1` index — a stale `_claimed_index` from a previous run could
+  otherwise silently claim the wrong rows of the new one.
 
-Follow-up to the entry below: "instead of chunk, let's do file name,
-frame#start, frame#end in the csv file output."
+**Verified:** `tests/test_solve_cell_pipeline.py` (+3: known-cell search
+recovers a synthetic second domain's cell, rejects a pure-noise pool,
+refuses below its `min_accept` floor without searching — 32/32 green
+per-file), `tests/test_solve_cell_ui.py` (+12: domain bookkeeping/leftover
+exclusion, no double-claiming across domains, round-1 rerun replaces rather
+than duplicates, negative/positive "index remaining" outcomes, multi-domain
+3-D plot update, diamond-filter rerun resets stale domain state — 47/47
+green per-file). `pyflakes` clean on every touched file. Offscreen
+screenshot of a real (non-mocked) two-round run — synthetic two-domain pool,
+actual `pipeline.run_stage` calls for ab_initio/refine/index_known_cell —
+confirmed the domain list shows two entries and the 3-D plot renders them in
+two distinct colors (blue/orange) plus grey leftover.
+**Not verified:** no real multi-domain DAC dataset available locally to
+confirm the known-cell search's default `n_search`/`min_accept`/`z_thresh`
+are well-tuned against real (not synthetic) leftover-pool statistics — the
+Ge-oP32 c1 reference run that motivated this feature has not itself been
+re-run with "Index Remaining Spots" against its own large leftover pool.
 
-``rows_from_tree`` identified a row by a bare ordinal (``frame``). That is
-not unique: ``workers`` accumulates rows per FROOT, so one CSV holds rows
-from several source files and ``frame 0`` appears once per file. The row's
-real identity is its file plus the raw sub-frame range it was built from —
-which is also exactly what the output HDF5 records in ``frame_ranges``, so
-the CSV and the image stack now say the same thing in the same terms.
+## 2026-10-05 — Solve Cell: spot-circle semantics (nearest frame only, not blob-width span), and ingest-only project persistence (not diamond/ab-initio/refine)
 
-So Batch Correction's index columns are ``kind, source_file, frame_start,
-frame_end``.
+Two scope decisions made while implementing "circle ingest spots on the
+Detector view as you scrub frames" + "save ingest results into the project":
 
-``kind`` is kept rather than folded away, for a correctness reason rather
-than a cosmetic one: the dark row's range and a light chunk's range can
-coincide (a whole-file chunk of a 10-light/10-dark file is 0–9 for both),
-so without ``kind`` the two rows would be indistinguishable. The dark row's
-range is over the dark acquisition block's own sub-frames — the dark images
-are not written out, so there is no output frame for it to index against.
+**Spot visibility = exact nearest-frame match, not a blob-width window.**
+Each ingest spot is a 3-D blob with an `n_frames` width (it can genuinely
+span a few consecutive frames), and its `frame` column is a fractional
+centroid. Asked the user directly whether a spot's circle should render only
+on its single nearest frame (rounded centroid) or stay visible across its
+whole blob span (`frame ± n_frames/2`). Chose nearest-frame-only: simpler,
+and literally what "closest frame" means per spot — each spot's rounded
+centroid frame already *is* its closest frame, no extra windowing logic
+needed. A spot's circle appears and disappears as the scrub bar crosses that
+one frame, which is the expected behavior for a rotation series (a given
+reflection is only "on" a detector frame for a narrow angular range).
 
-Batch Integrate is deliberately untouched: ``rows_from_metas`` still emits
-``frame, source_file`` and has no raw range to report. ``_INDEX_COLUMNS``
-is now a fixed header order from which each column is included only when
-some row actually carries it, so neither producer grows the other's blank
-columns. Both headers are pinned by tests.
+**`loaded_frame_idx` added to `spots_df` rather than doing the frame-index
+conversion in the GUI via an omega round-trip.** `spots_df["frame"]` indexes
+the *kept* stack (after the omega-window + `live_frames` filtering
+`_stage_ingest` already does), while a GUI's `DataLoaderPanel.frame_index()`
+indexes the *originally loaded* stack — two different axes. The omega
+column alone (`omega = omega_ref_deg + (loaded_idx − omega_ref_frame_idx) ×
+omega_step_deg`) is in principle enough to invert back to a loaded index,
+but that's fragile (breaks at `omega_step_deg == 0`, a real case — a
+stationary/still exposure) and duplicates logic `_stage_ingest` already has
+inline as `omega_window_mask`/`live_mask`. Instead `_stage_ingest` computes
+`kept_loaded_idx = idx_loaded[omega_window_mask][live_mask]` — pure index
+bookkeeping over arrays it already holds, no new computation — and uses it
+to add `spots_df["loaded_frame_idx"]` and `preview["loaded_frame_index"]`.
+One robust, explicit mapping instead of an implicit affine assumption
+re-derived in two places.
 
----
+**Project persistence scoped to the ingest stage only.** The user's request
+named "the solve-cell ingest results" specifically, matching how Batch
+Integrate logs its own results via `project.append_integration_attempt`.
+Diamond filter/ab-initio/refine stay session-only (as they already were) —
+not an oversight, a deliberate scope cut; extending the same
+`append_*_attempt` pattern to the later stages is natural future work if
+asked for, not implied by this request.
 
-## 2026-10-06 — The beam-monitor CSV puts the dark on its own row
+**`inputs` for the new `project.append_solve_cell_ingest_attempt` call is
+rebuilt fresh from panel/widget state in `_log_ingest_to_project`, not
+reused from the `cfg` dict handed to `SolveCellWorker`.** That dict is
+mutated in place by `SolveCellWorker.run()` (`cfg.pop("frames_loader")` /
+`cfg["frames"] = loader()`, resolving the lazy loader into the fully
+materialized raw stack array, on the worker thread) — by the time
+`_on_ingest_done` runs, the tab's own reference to that same dict object
+would carry a multi-GB array if reused for logging. Geometry/corrections/
+mask/blob-param values are all still trivially re-readable straight off
+`PanelCard`/the stage-param widgets at that point, so there's no need to
+thread a separate "loggable inputs" snapshot through the worker at all.
 
-Asked for directly: "let's have the dark on one row and other chunk
-separated to separate rows."
+**`spots_df` embedded whole as one compound HDF5 dataset** (new
+`project._write_dataframe`/`_read_dataframe`, `df.to_records(index=False)`)
+rather than one dataset per column, unlike `append_integration_attempt`'s
+column-by-column `results/profiles`/`results/r_axis_px`/etc. `spots_df`'s
+schema comes from `midas_defect.ingest.find_blobs_3d`'s `SPOT_COLUMNS` plus
+columns `_stage_ingest` appends itself — both can grow over time, and a
+whole-dataframe embed stays correct without touching `project.py` when they
+do, at the cost of a slightly less self-describing HDF5 layout (a reader
+needs `np.asarray(dset)`'s field names, not a flat list of sibling
+datasets).
 
-``ion_csv.rows_from_tree`` already emitted one row per output chunk. What it
-also did was give every scaler channel a ``<channel>_dark`` companion
-COLUMN, so a 12-channel source produced 24 measurement columns and each
-chunk row repeated the same shutter-closed reading. That reads as though
-the dark varied per chunk. It does not: the dark block is one acquisition.
+## 2026-10-04 (latest, 2) — Solve Cell: "background almost non-existent" was a Detector-view diagnostic gap, not an ingest bug; added a max-over-rotation projection
 
-So the dark is now one row, ``kind="dark"``, carrying the mean over the
-WHOLE dark block under the same column names the lights use — directly
-comparable down a column instead of across a row, and the table halves in
-width (27 columns to 15 on a real E-hutch file). It leads the file, so the
-baseline is the first thing read rather than something to scroll right for.
+User-reported after running Ingest for real on
+`DAC_Ge_op32_c1/LaB6_exp0p02_slit0p3_002_EigPos_-75_10_30_000001.h5` (frame
+window from `frame_omega_pairing_calculated.csv`, calibration
+`ceria_25p5kev_-75_10_30.txt`): "the background it generated was almost
+non-existent." Investigated by actually running the GUI's own
+`pipeline._stage_ingest` against this exact raw file/calibration (this
+dataset happens to be panel 6 of the already-validated
+`Ge_oP32_c1_solve_cell` reference analysis, whose `01_ingest.py` script
+reference-run reproduced a known-good result against it) rather than reading
+code and guessing.
 
-Two details worth keeping:
+**Conclusion: the ingest math is correct, not a bug.** The GUI pipeline
+reproduced the reference analysis closely on this real file: `n_sectors=1`
+(matches), 583 kept blobs / 719 final spots vs. the reference's 584 kept
+blobs (the handful-of-blobs difference is consistent with float32 vs.
+float64 and the live-frame-scoped vs. whole-window-scoped persistent-sentinel
+mask — not investigated further, not the reported symptom). The real cause
+is the Detector tab's "Calculated background" preview: it only ever shows
+ONE arbitrary frame of the subtracted stack (`preview_frame_index`, taken
+from wherever the loader's scrub bar happened to sit when Run Ingest was
+clicked — frame 0 by default). Measured directly on this real data: frame
+300 of the kept stack has an unmasked-pixel median of 0.0 and a 90th
+percentile of only 3.0 counts, with a single ~1800-count spot a few pixels
+wide — autoscaled, that reads to the eye as "nothing here" even though the
+subtraction worked and real signal exists. This isn't a corner case: a given
+Bragg reflection only satisfies the diffraction condition for a handful of
+frames out of hundreds, so an arbitrary single frame is, more often than
+not, at the background floor by construction, regardless of whether the
+background model is any good.
 
-* The dark is averaged over its whole block, not chunk-averaged. Chunk
-  boundaries are a property of the light frames; splitting the dark along
-  them would invent structure the acquisition does not have.
-* ``kind`` appears only when some row has one. ``rows_from_metas`` (the
-  Batch Integrate path) has no dark row, and a column of blanks there would
-  read as a missing value rather than an absent concept.
+**Fix: a max-intensity projection across the kept/live stack**, computed
+once in `pipeline._stage_ingest` as `sub.max(axis=0)` right after
+`choose_sectors` returns (`sub = bg_choice.stack` is already the full
+subtracted stack, fully materialized in memory at that point — this is one
+reduction over an array that already exists, not a new full-stack copy, so
+it doesn't reintroduce the memory pressure the 2026-10-04 ingest-performance
+fixes removed). New preview key `background_subtracted_max_projection`.
+Detector tab gained a new combo entry, "Calculated background -- max over
+rotation (after Ingest)", between the existing single-frame entry and Mask;
+tooltip now steers the user toward the projection as the one that actually
+answers "did the background subtraction work," with the single-frame view
+kept only for per-frame/per-pixel detail. Verified visually offscreen with a
+synthetic case shaped like the real data (Poisson noise floor + sparse
+spots): the single-frame view autoscales to ~0.6 counts and shows pure
+noise, the max-projection view autoscales to the real spot amplitude and
+shows all four spots clearly.
 
-``DARK_SUFFIX`` is retained as a module constant but is no longer used by
-anything, so an external importer still resolves.
+**Verified:** `tests/test_solve_cell_pipeline.py` (+2: the max projection
+sees a spot absent from the requested single frame; the existing preview
+shape test extended to the new key) and `tests/test_solve_cell_ui.py` (+1:
+selecting the new combo stage renders the projection array, not the single
+frame) both green per-file (27/27, 29/29). `pyflakes` clean on both touched
+files. `tests/test_smoke.py` 13/13 on a clean `HOME`.
+**Not verified:** no screenshot against the real Ge-oP32 c1 data itself (the
+offscreen check used a synthetic stand-in shaped like the measured real
+statistics, not the real array, to avoid re-running the multi-minute
+real-data ingest a second time just for a screenshot) — the real-data run's
+printed diagnostics (`n_sectors=1`, 583/719 counts, the frame-300 percentile
+numbers above) are the actual evidence this fix is aimed at the right
+problem.
 
-**Not done, and worth knowing.** The CSV's dark row is the dark block
-*inside the same file*. Batch Correction's SUBTRACTED dark may be a
-different acquisition entirely — the ladder prefers the nearest
-``_dark_before`` sibling (DECISIONS 2026-10-05). When those differ, the CSV
-is describing the file's own dark, not the one that was subtracted. The
-subtracted one is named in the Log and in the output's ``midas_gui_dark``
-attribute. Reconciling the two is a real follow-up, not an oversight.
+## 2026-10-04 (latest) — Solve Cell: project save/restore, Detector tab rename + zoom-preserving stage switch, origin cross on the 3-D map
 
----
+Three small follow-ups from actually using the Phase 1 tab after the
+ingest-performance session below.
 
-## 2026-10-05 (later) — Batch Correction: per-op folders, and the MATLAB cross-check
+- **Project save/restore wired up.** `SolveCellTab`/`PanelCard` had no
+  `get_state`/`set_state` at all — `app.py`'s per-tab save loop
+  (`_serialize_workspace`/`_apply_workspace_state`) silently skips any tab
+  missing those two methods, so Solve Cell's panel configuration was never
+  written into a saved `.h5` project and reopening one always came back to a
+  single empty default panel. Added both, following the same contract (and
+  `widgets_to_dict`/`apply_dict_to_widgets` helpers) every other tab already
+  uses. Restores configuration only, not computed results — Ingest/Diamond
+  filter/Ab-initio/Refine outputs are not recomputed, matching the
+  documented convention for every other tab (`MainWindow.
+  _apply_workspace_state`'s own docstring: re-click the stage's own button
+  to reproduce them). `PanelCard`'s calibration is file-path-loaded rather
+  than typed in (2026-10-04 entry below), so its state just remembers the
+  loaded path and replays it through new `_load_calib_from_path` (factored
+  out of `_load_calib_file` so the dialog handler and the restore path share
+  one implementation) — a project saved before that calibration file was
+  moved or deleted degrades to "no calibration loaded" (the same state a
+  fresh panel starts in), not a crash. Panels are user-added/removed
+  (unlike `HydraCalibrationPage`'s fixed panel-card set), so there is no
+  existing by-index slot to restore into — `set_state` tears down every
+  current panel tab and rebuilds from the saved panel-id-keyed dict instead.
+- **Detector tab: "Background-subtracted" renamed to "Calculated
+  background."** User-reported after looking at a real run's rendered
+  preview: what's shown reads as a single background image, not a
+  subtracted signal. Confirmed from `midas_defect.ingest.
+  subtract_background`'s own source that the underlying array
+  (`pipeline._stage_ingest`'s `bg_choice.stack`) genuinely is
+  frame-minus-background, not the background map itself — but the UI label
+  was still misleading regardless of what's technically correct, so renamed
+  it. Combo text + tooltip only; the internal `preview[
+  "background_subtracted"]` dict key is untouched (tests and `pipeline.py`
+  both key off it, and that name is still accurate there).
+- **Detector tab: pan/zoom no longer resets on a Stage combo switch.**
+  `_set_detector_image`'s one "is this a fresh frame" flag folded `stage`
+  into its identity tuple, so switching Raw↔Corrected (same detector, same
+  zoom) looked exactly like loading a brand-new image and `autorange()`'d
+  every time — undoing a zoom the user had just set up to compare stages.
+  Split into two independent flags: `autorange` now keys only on frame
+  *shape* (a zoom reset only makes sense when the detector size actually
+  changes), while `reset_levels` still keys on `(shape, stage)` as before —
+  the color window SHOULD still reset per stage, since Background-subtracted/
+  Mask carry genuinely different data ranges than Raw/Corrected and reusing
+  a stale level window would just render blank.
+- **Reciprocal-space map: red cross at q=0.** Drawn inside
+  `_reset_recip_axes` (not `_update_recip_plot`) so it persists across every
+  replot, including the empty pre-Ingest state — one
+  `ax.scatter([0],[0],[0], marker="+", c="red")` call, no new state to track.
 
-Three follow-ups the same day, all from beamline feedback.
+**Verified:** `tests/test_solve_cell_ui.py` (+6, 28/28 green per-file): a
+`get_state`/`set_state` round trip across two panels with different loaded
+calibrations and stage-widget values (including which panel was active),
+an empty-state no-op, the renamed combo label, the autorange/reset_levels
+split via a monkeypatched `set_raw_frame` spy, and two origin-cross
+presence checks (axes-reset state, and alongside real scattered data).
+`tests/test_solve_cell_pipeline.py` (24/24, unaffected). `test_smoke.py`:
+first run showed 11 SIGABRTs, all in tests unrelated to this change
+(pump-probe, tab-closing, colormap, …) — re-ran green 13/13 on a fresh
+`HOME`, confirming the documented pre-existing non-deterministic
+interpreter-teardown flake (STATE.md), not a regression. `pyflakes` clean
+on `tab_solve_cell.py`. Offscreen screenshots confirmed the red origin
+cross renders among real scattered points and the Detector combo now reads
+"Calculated background (after Ingest)".
+**Not verified:** no real Ingest run available locally to eyeball the
+renamed stage's actual preview image against a real background (same
+raw-HDF5 availability gap as the ingest-performance entry below); the
+save/restore fix is exercised via the `get_state`/`set_state` round trip
+directly rather than through an actual `.h5` project file write/read —
+`project.write_gui_workspace`/`read_workspace_tab` are generic and already
+covered by other tabs' own tests (same convention every other tab's state
+test follows, e.g. `test_calibrate_state_restore.py`), so this isn't
+considered a gap the way the ingest one is.
 
-### Several methods per run, one folder each
+## 2026-10-04 — Solve Cell ingest performance; 3-D q-map via matplotlib not pyqtgraph.opengl; new Detector view design
 
-The method is now chosen by checkboxes on the tab, not by the loader's
-single-choice "op:" dropdown. That dropdown is HIDDEN here
-(``DataLoaderPanel.set_combine_op_visible(False)``) rather than merely
-ignored: the first cut left it on screen, and a dead control sitting
-immediately beside the live one is indistinguishable from a second,
-contradictory setting — it was asked about within the hour. The chunk-size
-spin beside it stays, since that genuinely is the panel's to own.
-``_chunk_settings()`` no longer returns ``combine_op`` either, for the same
-reason: a value nobody consumes is how the dropdown came to look
-meaningful. Batch Integrate is untouched — the dropdown is live there. Each selected method
-writes a full set of outputs into
-``<out_dir>/dark_subtracted_<op>/``, a leaf of Batch Integrate's own output
-folder — so reduced frames sit beside the cakes, and a mean and a max of the
-same scan cannot overwrite each other. ``helpers.suggest_correction_output_dir``
-therefore returns the integration folder itself rather than appending a
-segment; ``helpers.correction_subdir(op)`` supplies the leaf.
+**Performance root cause, found by profiling (not guessing).** The intuitive
+suspect for slow `Run Ingest` was the full-stack `float64` upcast. Measuring
+on a real 2880×2880, ~587-frame dataset showed the actual dominant cost is
+`choose_sectors()` (`midas_defect.ingest`): it grid-searches 5 azimuth-sector
+candidates `(1,8,24,48,96)`, each a full per-frame `subtract_background` +
+`count_signed_blobs` pass (measured ~660ms–1.4s/frame depending on sector
+count → ~50+ minutes total for the search alone). On top of that,
+`_stage_ingest` was **redundantly rerunning `subtract_background` a 6th
+time** at the winning `n_sectors`, even though `choose_sectors` already
+computed and threw away that exact result as `BackgroundChoice.stack` — a
+leftover comment claimed this matched "the reference scripts verbatim," but
+the two calls have identical arguments to a deterministic function, so the
+claim implies they're identical, not that the duplication is load-bearing.
+**Verified bit-identical** (`np.array_equal`) on synthetic data before
+removing it — not assumed from reading the code.
 
-Several methods cost ONE pass, not one each
-(``frame_correct.reduce_chunk_multi``): reading a sub-frame off disk and
-correcting it is the same work whichever op consumes it, and it dominates
-the arithmetic. Only ``median`` forces the corrected stack to be kept, so
-memory is one plane per op otherwise. ``reduce_chunk`` is now a thin wrapper
-over it, which keeps a single implementation of the ordering rule.
+- Fixed in-repo: `sub = bg_choice.stack` (removes the redundant pass);
+  `blobs.sector_candidates` GUI/cfg override (lets a narrowed search skip
+  candidates once a panel/geometry's winning count is known); `float64` →
+  `float32` + in-place arithmetic in `_apply_stack_corrections` (the old
+  float64 stack alone was ~39 GB for this dataset size, exceeding this
+  machine's 36 GB RAM); the `DataLoaderPanel.full_stack()` disk read (~10 GB
+  for an HDF5 source) moved from the GUI thread into
+  `SolveCellWorker.run()`, via a new `cfg["frames_loader"]` convention
+  (worker resolves it into `cfg["frames"]` on its own thread) rather than
+  changing `pipeline.py`'s contract.
+- **Explicitly NOT fixed**: `subtract_background`'s per-frame Python loop is
+  embarrassingly parallel and would gain ~8–10x on a 12-core machine, but
+  that loop lives inside `midas_defect`, not this repo — out of scope right
+  now per explicit user instruction ("can't do anything there right now").
+  Worth an upstream feature request later, same pattern as the
+  `midas_integrate_backend_limitations` memory tracks for other backends.
 
-### "end(0=all)" was a lie for this panel
+**3-D reciprocal-space map: matplotlib `mplot3d`, not `pyqtgraph.opengl`.**
+`documentation/solve_cell_handoff.md` §9.2 had already named both options as
+an open question and deferred the decision to Phase 5. Decided now (feature
+was explicitly requested) in favor of matplotlib because: (a) `PyOpenGL`
+(required by `pyqtgraph.opengl.GLScatterPlotItem`) is not installed in this
+environment and would be a new native-extension dependency — this project
+already has one open, unresolved native-dependency/Windows import failure
+(the `lheald` `midas_calibrate_v2` issue in STATE.md), so a new native dep
+for a visualization feature is a worse risk/reward trade than necessary; (b)
+matplotlib is already a pinned dependency and already used for exactly this
+"pyqtgraph can't do it" situation twice in this codebase
+(`peak_fit_panel.py`, `tab_zarrviewer.py`), so this is the third instance of
+an established pattern, not a new one; (c) `mplot3d` gives free mouse-drag
+rotation with zero extra code. Verified matplotlib 3.8.4 (the pinned
+version) auto-registers the `'3d'` projection on import — no explicit
+`mpl_toolkits.mplot3d` import needed, confirmed by testing rather than
+assumed, which also meant dropping that import avoided a new pyflakes
+warning for an otherwise-legitimate side-effect import.
 
-Reported as "how come this is only yielding 1 frame?" — a 20-sub-frame file
-with Combine sub-frames = 5 produced one output frame. Cause: for a
-``unify_combine`` panel, ``start``/``end`` are baked straight into
-``source_cfg()`` and taken LITERALLY (raw sub-frame indices for a single
-HDF5 file, file numbers for a multi-file pick). "0 = all" is only true for a
-NON-unify panel, where ``frame_range()`` special-cases ``hi > 0``. So
-``end = 0`` clamped the window to sub-frame 0 alone and the combine had
-nothing to combine.
+**Detector view: no existing spec, designed to match `tab_batch.py`'s own
+"Detector view" precedent rather than inventing a new pattern.** The handoff
+doc has zero mention of a detector-frame preview (confirmed by search before
+designing). `midas_gui/tab_batch.py` already has an almost identically-named
+feature (`self._det_view = ImageViewer()`, added to its own `self._view_tabs`
+`QTabWidget`) wired to `DataLoaderPanel.dataChanged`/`fieldsChanged` for live
+refresh — reused that exact pattern rather than building a bespoke one or
+falling back to a manual "Refresh" button (the original plan's fallback,
+written before this precedent was found; upgraded once `dataChanged`/
+`fieldsChanged` were confirmed to exist on `DataLoaderPanel`). Raw/Corrected
+read live from the loader (no Ingest run needed, matching Batch's own
+"preview before you commit to a real run" philosophy); Background-subtracted/
+Mask can only come from an actual Ingest run (the background model needs the
+whole stack), so `_stage_ingest` gained a `preview_frame_index` cfg key and
+returns a `preview` dict holding exactly **one** frame's subtracted image +
+the mask — deliberately not the whole subtracted stack, which would
+reintroduce the memory pressure this same change was fixing. The frame index
+requested is the loader's own current frame index (into the *originally
+loaded* stack); the pipeline clamps it into the *kept* stack (post omega-
+window + live-frame filtering) and reports which index it actually used, so
+when frames are dropped the Detector tab's label is still honest ("frame N
+of the kept stack") rather than silently wrong.
 
-The label is shared, so the fix is in ``widgets.DataLoaderPanel``: it now
-reads plain ``end:`` for a unify_combine panel and keeps ``end(0=all):``
-only where that is actually true. Batch Integrate benefits identically — it
-had the same trap. Batch Correction additionally prints "N raw sub-frame(s)
-→ M output frame(s)" under the Output card and flags a window that
-collapses to one frame, because a silently-correct-looking run is the
-failure mode here.
+Two related simplifications to `PanelCard` (`midas_gui/tab_solve_cell.py`),
+both user-requested after reviewing the just-landed per-panel calibration
+loader:
 
-### Cross-checked against the beamline's own MATLAB
+- **The editable "Panel geometry" `QGroupBox`** (Lsd/BC_y/BC_z/ty/tz/tx/
+  wavelength/px size/nrpixels_y/nrpixels_z spinboxes) is gone. Geometry now
+  comes *only* from "Load calibration file…" — `PanelCard._geometry` is
+  `None` until a file is loaded, `geometry_cfg()` raises `RuntimeError` if
+  called before that, and `has_calibration()` lets the tab pre-flight-check
+  before running Ingest (`QtWidgets.QMessageBox.warning("No calibration
+  loaded", ...)`, same pattern as the existing "no raw data" check). The
+  loaded-file summary note (`_calib_note`) is now the only way to see the
+  loaded values — it already showed them in prose, just gained the
+  NrPixelsY/Z pair it was missing. No manual-entry fallback was requested or
+  kept — Phase 1's design is "every panel always has its own calibration
+  file," so a typed-in-geometry escape hatch would just be an unused, never-
+  validated code path.
+- **`det_x`/`eiger_y`/`eiger_z` dropped entirely** (`PanelCard.det_coords()`
+  removed; `solve_pipeline.panel_dir_name(panel_id, det_x, eiger_y, eiger_z)`
+  → `panel_dir_name(panel_id)`, output folder name
+  `panel_01_-195_10_30` → `panel_01`). These are detector **stage/motor**
+  positions, not geometry — they only have a use in the handoff's §5.1
+  Phase 2+ geometry-*resolution* tiers (tier 1: exact lookup of a stage
+  position in a ceria/LaB6 `batch_summary.csv`-style calibration table; tier
+  2: OLS regression of Lsd/BC vs. stage position when no exact anchor
+  exists; tier 3: self-calibration fallback) — i.e. they exist to let a
+  panel's geometry be *inferred* when no calibration was taken at that exact
+  position. Phase 1's actual design is "every panel always loads its own
+  full calibration file," which makes tier 1 trivially and always satisfied
+  and tiers 2/3 structurally unreachable — so the stage-position bookkeeping
+  they'd key off of has no present use. If a future phase adds a mode where
+  a panel runs *without* its own calibration file (interpolating one
+  instead), `det_x`/`eiger_y`/`eiger_z` (or whatever stage-position fields
+  that mode needs) would need to be reintroduced then, scoped to that
+  feature specifically — not kept speculatively now. `documentation/
+  solve_cell_handoff.md` is left as-is (it documents the full multi-phase
+  spec, including this now-explicitly-deferred Phase 2+ direction).
 
-``~/matlab/matlab_tools/image-processing/BatchCorrection.m`` (driven by
-``~/mnt/s1b/__eval/projects_parkjs/BatchCorrection_*.m``) is the
-long-standing reference implementation. It independently confirms the
-ordering decision recorded in the entry below:
+**Verified**: `tests/test_solve_cell_ui.py` (17, up from 16 — added a
+dedicated "no calibration loaded" preflight-warning test, reworked 3 others
+that touched now-removed spinboxes to go through `_load_calib_file`/
+`has_calibration()`/`geometry_cfg()` instead) and `tests/test_solve_cell_
+pipeline.py` (21, `panel_dir_name` test updated to the new 1-arg signature)
+both green per-file on a clean `HOME`; `tests/test_smoke.py` unaffected
+(13/13). `pyflakes` clean on both touched files, no leftover references to
+any removed attribute (`_det_x`/`_eiger_y`/`_eiger_z`/`_lsd`/`_bcy`/`_bcz`/
+`_ty`/`_tz`/`_tx`/`_wavelength`/`_pxum`/`_nry`/`_nrz`/`det_coords` all grep
+clean). Offscreen screenshots confirm the Calibration box now reads directly
+into the Data loader with no geometry box between them, both before and
+after loading a file (the note's prose summary, including pixel dimensions,
+renders correctly).
 
-```matlab
-im_bkg = (sum of all background frames) ./ ct      % dark = MEAN
-...
-sum_data = sum_data - im_bkg*length(FramesToCorrect);   % N x dark
-ave_data = sum_data./length(FramesToCorrect);
-```
+## 2026-10-04 (later) — Solve Cell: per-panel calibration-file load, real dark/bright/background/mask, frame↔omega window
 
-So: dark is the mean over the dark file's frames (as ours is), and a summed
-output loses ``N × dark``, not one (as ours does). It writes ``.sum`` and
-``.ave`` — our Sum and Mean — encoding the op in the extension where we
-encode it in the folder.
+Four changes to the Phase 1 tab, all still single-active-panel scope (Phase 2
+multi-panel pooling untouched):
 
-Four differences, deliberately not closed here, recorded so they are not
-rediscovered as bugs:
+- **Panel geometry is now a `PanelCard` per detector panel**
+  (`midas_gui/tab_solve_cell.py`), held in a `QTabWidget` (`self._panel_tabs`)
+  with a "+" corner button to add another and ✕ to close one (refused below
+  one panel). Mirrors `HydraCalibrationPage`'s `_cards` dict pattern
+  (`hydra_calib_page.py`). Only one panel is used today — the stage buttons
+  (Ingest/Diamond/Ab-initio/Refine) always run against
+  `self._panel_tabs.currentWidget()` — but the data model and UI are already
+  shaped for several, per the handoff's Phase 2 direction. User confirmed
+  tabs (not a list+single-editor) as the UI shape.
+- **"Load calibration file…" reuses `helpers.geometry_fields_from_file`**
+  (the same loader every other tab already uses — Calibrate, Hydra, Batch,
+  PDF, Pump Probe, Queue) rather than a new parser. `tx` stays fixed at 0 for
+  the pipeline (unchanged Phase 1 scope — handoff §5.1.1) even when the file
+  carries a non-zero value; that value is now shown read-only with a log note
+  rather than silently dropped, so a user loading a tilted-tx calibration
+  isn't misled into thinking it's in effect.
+- **Dark/Bright/Background/Mask are now actually applied.** They were always
+  present on the tab's `DataLoaderPanel` but `_stage_ingest` never read them —
+  `cfg["frames"]` was `full_stack()`'s raw output, period. Fixed by passing
+  the raw dark/bright/background 2-D fields (`loader.dark()`/`bright()`/
+  `bright_mode()`/`background()`) through `cfg["corrections"]`, applied by a
+  new `pipeline._apply_stack_corrections` **after** sentinel-pixel zeroing —
+  order matters: the raw sentinel marker (`SENTINEL = 4294967295`) must be
+  detected and zeroed before any correction arithmetic touches it, and
+  separately, routing frames through a dark/bright-corrected float32 cast
+  *before* that check breaks the sentinel's exact-integer-equality test
+  (float32 cannot represent `2**32 - 1` exactly — it rounds to `2**32`).
+  `_apply_stack_corrections` is a deliberate duplicate of
+  `midas_gui.helpers.apply_field_corrections` (same dark→bright→background→
+  clip order), not an import of it — `solve_cell/pipeline.py`'s own docstring
+  requires zero `midas_gui` imports so it stays liftable into a standalone
+  `midas_solve_cell` package by a plain directory move; importing a GUI
+  module's helper would defeat that. `loader.composite_mask()` is similarly
+  now unioned into `_stage_ingest`'s internal mask via a new
+  `mask.user_mask` cfg key.
+- **Frame↔omega mapping replaced the flat ramp.** The old
+  `omega_first_deg`/`omega_step_deg` pair assumed frame index 0 of whatever
+  was loaded was always `omega_first` — wrong whenever a loaded stack doesn't
+  start exactly at the rotation's first frame. Replaced (clean rename, no
+  back-compat alias — Phase 1 has no external consumers of the old keys
+  besides this repo's own tests) with `omega_ref_frame_idx`/`omega_ref_deg`/
+  `omega_last_frame_idx`/`omega_step_deg`: frame `omega_ref_frame_idx` is
+  defined to be at `omega_ref_deg`, stepping by `omega_step_deg`; loaded
+  frames outside `[omega_ref_frame_idx, omega_last_frame_idx]` are **excluded
+  from ingest entirely** (user-confirmed — no extrapolation), via a boolean
+  window mask applied to the raw stack before any other processing in
+  `_stage_ingest`. `summary["n_outside_omega_window"]`/`n_frames_loaded`
+  record how many were dropped, printed during a run.
 
-1. **The MATLAB does not clip at zero.** Ours defaults to clipping, matching
-   ``apply_field_corrections`` and the rest of this GUI, and exposes a
-   checkbox. Worth a beamline decision about which default is right.
-2. **``CorrectBadPixels``** is applied to the combined frame there. We have
-   no bad-pixel step in this tab (masking lives in the Mask Builder).
-3. **``FramesToIgnore``** drops arbitrary individual frames; our start/end
-   window is contiguous only.
-4. **The SAXS real-time variant normalises by exposure time**
-   (``.../saxs-waxs/BatchCorrection_RT_function.m``:
-   ``imdata_per_sec = imdata_ave / exptime``) and counts the frames that
-   actually exist rather than those promised by metadata. We do neither.
+**Verified**: `tests/test_solve_cell_pipeline.py` (21 tests: the 2 pre-existing
+ingest tests updated to the new geometry keys, 3 new — omega-window exclusion,
+user_mask union, dark correction) and `tests/test_solve_cell_ui.py` (16 tests:
+8 new — default single panel, add/remove panel refusing-below-one,
+active-panel switch changing `_geometry_cfg()`, calibration-file load
+populating fields, non-zero-tx display-only note, bad-file error path) both
+green per-file. `pyflakes` clean on both touched files. Offscreen screenshots
+confirmed the panel tabs, the embedded Data/Dark/Bright/Background/Mask
+loader, the omega-mapping group's note, and a loaded calibration file's
+summary note all render as intended.
+**Not verified**: `_apply_stack_corrections` against real raw frames (only a
+synthetic dark-offset unit test); no live run with a real detector's raw
+dark/bright/background fields.
 
----
+## 2026-10-04 — Solve Cell tab, Phase 1: scope and architecture decisions
 
-## 2026-10-05 — Batch Correction: correct per sub-frame, and pick the dark per file
+Context: `documentation/solve_cell_handoff.md` specifies turning two
+already-validated interactive analyses (`spinel_DAC_solve_cell`,
+`Ge_oP32_c1_solve_cell`, at `/Users/dbeniwal/ANL-research/S3ID_data/2026-2/
+analysis/` on this machine) into a deterministic GUI pipeline. The handoff
+explicitly lists open questions not to silently guess on (§9) and proposes a
+5-phase build order (§10); user confirmed two of those before any code was
+written:
 
-New feature (asked for at the beamline): reduce each HDF5 file's sub-frame
-stack to one frame per group of N sub-frames — mean/median/sum/max — with
-dark/bright/background correction, written back out as HDF5, one output file
-per input file. New `midas_gui/frame_correct.py` + `tab_batch_correct.py` +
-`workers.BatchCorrectionWorker`. Two decisions are worth the ink.
+1. **Backend shape: embedded in `midas_gui/`, not a standalone package** —
+   but `midas_gui/solve_cell/pipeline.py` has zero `midas_gui.*`/PyQt5
+   imports by design (only numpy/pandas/torch/midas_defect/midas_hkls/
+   stdlib), specifically so a future `midas_solve_cell` package extraction is
+   a plain directory move, not a rewrite. User's own framing: push real
+   computation into existing MIDAS packages, keep new code to the minimum
+   needed to wire them together.
+2. **Scope: Phase 1 only this round** — single detector panel, geometry
+   supplied directly (no 3-tier geometry resolution), blind ab-initio +
+   free refinement, basic result display. No multi-panel pooling, no
+   multi-domain separation, no diagnostics suite beyond refined cell +
+   holohedry verdict. Phases 2–5 are explicitly future work.
 
-### 1. Corrections are applied per raw sub-frame, and the clip is deferred
+**g-vector convention boundary** (handoff §5.0, confirmed by direct source
+reads of both packages before writing any pipeline code): `midas_defect`'s
+`pixel_to_qlab`/`qlab_to_qsample` produce `q = 2π/d` natively.
+`midas_hkls.ab_initio.index_ab_initio` accepts `two_pi=True` but *always*
+returns `.UB`/`.cell` in `1/d` regardless of the flag — confirmed from its
+source, not just the docstring. `midas_hkls.ub_refine.refine_ub_from_gvectors`
+has **no** `two_pi` parameter at all and returns whatever convention its
+input carries. One helper, `_to_inverse_d`, does the `g / 2π` conversion
+(and `sigma_g / 2π`) at the single point this matters: immediately before the
+refine call. Getting this wrong was the handoff's own documented
+most-common bug class (a cell wrong by exactly 2π, false triclinic verdict).
 
-The order is: correct each sub-frame with `clip_negative=False`, combine,
-then clip the combined frame once.
+**Bug caught during implementation, not before it**: the refine stage
+initially called `midas_hkls.conventional.to_conventional_from_fit` (a
+fit-covariance-aware variant) instead of the validated reference scripts'
+own plain `to_conventional(fit.cell)` call. On real 2-panel spinel data this
+produced a wrong "triclinic, no centering" verdict — the covariance-derived
+tolerance was tighter than the data could support and missed the cubic
+symmetry the plain 2%-default-window search correctly finds (reproducing
+`a≈7.9672 Å`). Lesson, stated plainly: when a newer/fancier library function
+exists alongside the one an already-validated reference pipeline actually
+calls, match the reference's own call exactly rather than assuming the newer
+one is strictly better — verify against real data before trusting either.
+Fixed by reverting to `to_conventional(fit.cell)`; both single-panel and
+2-panel real-data regression tests pass with this fix.
 
-The obvious alternative — combine, then correct — is wrong for `sum` and
-only for `sum`: an N-frame sum must lose `N × dark`, and correcting
-afterwards loses one. This is the same bug `workers.StreamPreviewWorker`
-already documents avoiding for its preview sum. For `mean`/`max`/`median`
-the two orders agree exactly, because dark subtraction and a flat-field
-divide are monotone per-pixel maps and `max`/`median` commute with any such
-map. So the per-sub-frame rule is correct for all four and there is no
-per-op branching in `reduce_chunk`.
+**Diamond-line table: computed, not reused from another experiment's CSV.**
+The reference scripts filtered diamond contamination against a precomputed
+2θ-line CSV built for a *different* experiment's wavelength. This
+implementation instead computes diamond's allowed-reflection 2θ lines
+on the fly from its known cubic cell (`a=3.5667 Å`, exposed as an override)
+and the standard Fd-3m selection rule (h,k,l all odd, or all even with
+h+k+l ≡ 0 mod 4), verified against textbook lines ((111)/(220)/(311)/(400)
+allowed, (200)/(222) forbidden) and cross-checked against the real reference
+panel 1 diamond-flagged CSV (close agreement, not byte-identical — expected,
+since the reference's table came from a different wavelength's precomputed
+list). This makes the "physics only, reusable across any dataset" property
+the handoff wanted actually hold for an arbitrary wavelength, rather than
+only for the exact experiment the reference CSV was built for.
 
-The clip is separated out because it is *not* linear: clipping each
-sub-frame at zero before summing discards the negative half of the read
-noise and biases the sum upward, while clipping once at the end is unbiased
-for `sum`/`mean` and (clip being monotone) identical for `max`/`median`.
-Clipping once at the end is therefore uniformly right, and is also what
-makes an "untick to see negative pixels" option meaningful for checking
-whether a dark over-subtracts.
+**Dependency fallout: `pandas` was unpinned in this repo and nobody had
+noticed.** `grep` found no `pandas` line in `requirements.txt` or
+`environment.yml` before this change — it was only ever a transitive
+dependency of the already-pinned MIDAS backends, floating at whatever
+version happened to resolve. Installing `midas-defect==0.9.0` (whose own
+floor is `pandas>=1.5`) pulled in the current PyPI latest, **3.0.6** — a
+major version bump. Verified no regression before accepting it: a
+pandas-heavy existing-test subset (`test_project.py`, `test_batch_data_
+source.py`, `test_batch_cake_h5.py`, `test_batch_queue_model.py`,
+`test_2d_csv_output.py`, `test_queue_policy.py`, `test_batch_job_results.py`)
+plus `test_smoke.py` ×3 all green except the one known pre-existing
+`test_apply_project_calibration_single_detector` SIGABRT. Pinned explicitly
+now (`pandas==3.0.6`) in both files rather than left floating, matching this
+repo's own stated pinning discipline for every other dependency.
+**Not bumping `midas-hkls` past the already-pinned 0.15.0**: the handoff
+doc asked for `>=0.16.0`, but `midas_defect`'s own `pyproject.toml` floor is
+`>=0.15.0`, and every function Phase 1 calls (`index_ab_initio`,
+`refine_ub_from_gvectors`, `holohedry_from_fit`, `to_conventional`) is
+confirmed present and working in the installed 0.15.0 — the stricter floor
+in the handoff isn't load-bearing for anything this phase actually calls.
 
-`mean`/`sum`/`max` accumulate one frame at a time rather than materialising
-a corrected stack — a 10-frame chunk of 2880² in float64 is 660 MB, paid on
-every chunk of a long run. `median` has no streaming form and does
-materialise, in float32.
-
-### 2. The dark is resolved PER FILE, as the nearest preceding `dark_before`
-
-The first design (from the screenlog corpus alone) was "the bracketing dark:
-`<froot>_dark_before_<first data number − 1>`". Surveying the real data
-proved that wrong, and the correction matters:
-
-* The 198 caking screenlogs in `~/midas_runs/midas_screen_logs` gave 192
-  resolved runs, and **192/192 read the dark from `exchange/data_dark`** —
-  so there is no separate dark image format to support, only the question of
-  which file holds it. Two patterns, ~50/50: a `<froot>_dark_before` sibling,
-  or the data file's own `data_dark`.
-* The 160 VAREX scan folders still on
-  `/home/beams/S20IDUSER/mnt/s20a/*/varex*/` showed what the logs could not:
-  **darks are re-measured throughout a scan.** A folder is a series of
-  segments, each of the form `dark_before … data … dark_after`.
-  `Fe9Cr_KGT6038_load1_waxs` alone holds 11 `dark_before` and 8 `dark_after`
-  files among its data. Of the 936 data files in the 56 dark-bearing
-  folders, **936 have a preceding `dark_before`**, at a median distance of 8
-  files and a maximum of 121. The other 102 folders carry none at all (the
-  self-dark convention).
-
-So a folder-wide rule would be right only for a scan's first segment and
-would hand a stale dark to the ~900 files after it. The per-file rule —
-nearest preceding `dark_before`, then nearest following `dark_after`, then
-the file's own `data_dark`, then the loader's Dark field — reproduces the
-logged choice whenever a scan has one segment, so it is compatible with the
-log corpus rather than a departure from it. `dark_after` never appears in
-the logs but is common on disk; it is handled anyway.
-
-Both corpora are replayed as tests (`tests/test_dark_autodetect.py`), which
-skip when the share isn't mounted. They currently pass at 936/936 real files
-and 191/192 logged runs. The one exception is named explicitly in
-`MANUAL_OVERRIDE_LOGS` rather than hidden behind a loosened assertion: that
-operator passed an explicit `-P` override pointing at a *different scan's*
-folder, at a file with no dark marker in its name. No filesystem rule can
-recover that, and none should guess — a deliberate cross-scan dark is what
-the loader's own Dark field (`resolve_dark(auto=False)`) is for. A second
-such case will fail the test rather than pass unnoticed.
-
-The chosen dark is named in the Log per file and stored in the output's
-`midas_gui_dark` attribute, so a run is auditable afterwards rather than
-trusted.
-
-### Scope
-
-HDF5 input only. "Chunks restart at every file" has no meaning for TIFF/GE,
-where a file holds exactly one frame and there is no sub-frame stack to
-group; a TIFF selection says so rather than silently applying the
-consecutive-*file* grouping `workers._ChunkCombinedFileSource` implements
-for Batch Integrate. That remains available if it is ever wanted here.
-
----
+**Testing without raw data**: the raw HDF5 frames referenced by the
+reference `panels.json` live only on the beamline cluster, not on this
+machine — confirmed by checking `raw_path` existence directly. The ingest
+stage is therefore only smoke-tested against small synthetic frame stacks
+(proves the shape/schema plumbing, not the science). The diamond-filter →
+ab-initio → refine portion *is* regression-tested against real,
+already-computed spinel panel 1 and panel 1+2 `spots_g*.csv` files that ARE
+present locally, reproducing the known `a≈7.9672 Å` cell — real-data
+coverage for most of the pipeline despite no raw-frame access.
 
 ## 2026-10-01 — Ring prediction bound by detector geometry, not a flat 30°
 
@@ -877,81 +3143,6 @@ _Condensed 2026-08-31 (~2150 → ~500 lines): cut verification transcripts,
 file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this
 date for the full uncondensed entries if ever needed._
-
-## 2026-09-30 — One zarr per rotation, not one per frame
-
-Batch Integrate wrote the `zarr` format one archive per combined output
-frame. That was deliberate — mpe_wf writes one zarr per scan point, and we
-extended it so a file split by "Combine sub-frames" got one per chunk — but
-it was parity with a convention, not a requirement, and it does not scale.
-The folder that prompted this (three 1442-sub-frame VAREX files at
-`OME_SUM 10`) would have produced **435 single-cake archives**. Asked for one
-per source HDF5 instead.
-
-Nothing downstream forced per-frame. GSAS-II's `readMidas` validates only
-`InstrumentParameters` / `REtaMap` / `OmegaSumFrame` (see the 2026-09-26
-entry), all multi-frame by construction; the Zarr Viewer slices any leading
-axis; MIDAS's own native output is multi-frame. Per-frame was a default
-nobody had chosen.
-
-**Grouping reuses the rotation key rather than inventing a second one.**
-A group is one rotation — the same unit ω is measured from — so
-`_HDF5StackGlobSource.zarr_group_key` is defined as
-`omega_channel_window(idx)[0]`, exactly as `raw_window_for_index` is defined
-as `omega_channel_window(idx)[1:]`. One walk decides which rotation a frame
-belongs to, and both the angle and the archive read it. Had grouping done
-its own file walk, a future change to one would silently desynchronise an
-archive from the angles inside it. `_ChunkCombinedFileSource` returns a
-constant for the same reason its ω window counts across the selection:
-one-frame-per-file data only becomes a rotation as a series.
-
-**Streaming, not buffering.** The obvious implementation — collect a
-rotation's cakes and hand `write_gsas_zarr_zip` a list — would have cost
-~830 MB for a 1442-frame group at 72x1000 float64. The backend already
-exposes `GSASZarrWriter` (context manager, `add_frame`/`close`), which
-`write_gsas_zarr_zip` is itself a thin wrapper over and whose docstring
-promises "a long scan never has to be held in memory". Holding one open
-writer per group keeps peak memory identical to the per-frame path. This is
-why the work is a `_ZarrGroupWriter` owning a writer rather than a list.
-
-`omega_sum_frames` is deliberately left at 1. It chunks ALREADY-INTEGRATED
-frames inside the archive; `OME_SUM` collapses raw sub-frames before
-integration. They are different axes and feeding one from the other would
-collapse the same data twice. Noted because the names invite exactly that
-mistake.
-
-**Provenance moved from per frame to per group**, which is strictly cheaper
-(one extract/repack per archive, not per frame) and is what
-`h5_metadata.align` was built for — it already reduced "one entry per output
-frame" from a *sequence* of frame ranges and needed no change, only to be
-handed the whole group's ranges. `storage_ring_current_mA`/`sample_motors`
-stay scalars for a single-frame group so a "frame"-grouped archive is
-byte-comparable with what shipped before, and become per-frame lists
-otherwise. A "run" group spanning several source files has no single
-`instrument/` tree to align, so the copy is skipped and logged rather than
-guessing which file's tree to use.
-
-**Batch Parallel splits on group boundaries** (`_split_into_chunks_on_groups`).
-The count-based splitter would hand two workers halves of one source file and
-they would open the same `.zarr.zip` path. Alignment caps parallelism at the
-number of groups — a 3-file folder uses 3 workers, not 8 — which is a real
-throughput cost, accepted because the alternatives were worse: forcing
-sequential loses all cores, and refusing the combination is a dead end. Groups
-are formed from CONSECUTIVE equal keys, not by gathering every index with a
-given key: reordering frames to suit the writer would be a worse bug than
-writing two archives for an interleaved source.
-
-**Default stays "frame".** Every project file and script written so far ran
-under it, and a silent change to what a re-run produces is not worth the
-convenience. The combo is in `_state_widgets` so it persists with the rest of
-the GUI state, and `project.integrate_attempt_gui_fields` falls back to
-"frame" for attempts recorded before it existed — which is what those
-attempts actually ran.
-
-The CLI flag (`--zarr-grouping`) and the argv emission went in with the
-feature, not after it. That is the direct lesson of the 2026-09-29 omega
-entry below: a setting wired into only the in-process path is invisible, not
-an error — the background job just quietly does something else.
 
 ## 2026-09-30 — PR #11 (junspark) merged into `main`: 8 staged checkpoints, not one big merge
 
@@ -3917,3 +6108,248 @@ metadata (`_json_default` sorts sets to lists), just never read back.
 Not done: the same precedence question applies to Batch Integrate's
 `apply_project_integration`, which has the identical shape. Left alone — no
 report against it, and the fix belongs with evidence of the symptom.
+
+## 2026-10-09/10 — Hydra Batch Integrate: a batch is a FOLDER, and eta wraps
+
+A long beamline session at 1-ID-E (connolly_oct26). Four decisions worth
+keeping; the rest is in `git log` for the ~25 commits on
+`calibrate-parameter-table-and-limits`.
+
+### An eta range may cross ±180, and the backend cannot bin one
+
+`midas_calibrate_v2`'s `pixel_to_REta` types its output
+`eta_deg: azimuth (deg, [-180, 180))`, and every `midas_integrate_v2`
+kernel assigns a pixel with a bare `floor((Eta - EtaMin)/EtaBinSize)` plus
+a range test. None of them wraps — `polygon`'s `wraparound` is a different
+thing, one PIXEL whose corners straddle the seam.
+
+So ge1's 120..210, which is the azimuth that panel physically subtends,
+asked for bins centred at 185/195/205 that no pixel can land in. They came
+back identically zero and their pixels were not accumulated anywhere:
+**1,027,309 of 3,091,116 in-range pixels, 33.2% of the panel**, silently
+discarded. Only ge1 crossed the cut, so only ge1 was affected — which is
+exactly how it presented ("ge1 eta range is odd", ge2/ge3/ge4 "look ok").
+
+`midas_gui.eta_wrap` bins the WHOLE CIRCLE and lifts the requested bins out
+of it in the requested order, relabelling with the caller's unwrapped
+centres. Verified bit-identical against integrating the two halves
+separately, on all three kernels. `plan_eta` returns `take=None` for every
+range that does not cross, and on that path nothing changes.
+
+It will NOT serve a bin that straddles the seam (a 10° bin centred on 180
+spans 175..185); that needs two sub-bins recombined by pixel count. It is
+declined by name rather than returned half empty. **This matters for
+cardinal-direction caking**: 0/90/−90 are fine, 180 must be asked for with
+an edge on the seam (170..180 and −180..−170).
+
+Anything derived alongside the cake must take the same `eta_take` — the
+bin area did not, and a 36-row area against a 9-row cake made
+`GSASZarrWriter` reject the pair, leaving a 136-byte empty ge1 archive that
+then took the four-panel combine down with it. One `bin_area_for` now owns
+that question.
+
+### A Hydra batch is a source FOLDER, not a ge1–ge4 quartet
+
+The first fan-out grouped by sibling-set, so every frame file became its
+own scan: thirteen output directories for one load step, names repeated
+three times over (`APS_4130_C_load_step_0_APS_4130_C_load_step_0_...ge1`),
+and load_step_1's output nested inside load_step_0.
+
+`helpers.group_paths_by_output_dir` had solved all three for the
+single-detector tab in 9302e64 — its docstring names the nesting bug as the
+thing it exists to prevent — and a parallel, worse version was written
+instead. The lesson is the general one: when the convention already has an
+answer, reuse it rather than re-deriving it.
+
+Hydra cannot reuse it wholesale, though, because **both layouts are real**:
+
+    .../APS_4130_C_load_step_0/..._004057.ge1.h5   (panels together)
+    .../ge1/APS_4130_C_load_step_0/..._004057.ge1.h5   (panel above scan)
+
+Grouping on a file's own parent is right for the first and splits one scan
+into four for the second. Grouping is therefore by the parent of the
+**ge1-normalised** path, which collapses both to one key per scan.
+
+Two contracts that are easy to break and are now pinned by tests:
+
+* a pick of ONE file is still a four-panel scan — the selection is expanded
+  through `hydra_siblings`, narrowed to the ticked panels.
+* the **Output box is authoritative for a single scan** (each panel appends
+  its own `ge{n}/`). `group_paths_by_output_dir` prefers the DERIVED dir for
+  a single group, which is right for the single-detector tab — whose box
+  auto-fills from that same derivation — and turns a typed `.../out` into
+  `.../out/panel.ge1/ge1` here. Only a multi-scan selection fans out, and
+  it keeps the stale-autofill rule.
+
+Hydra passes `derive=suggest_panel_base_output_dir` (`<expid>_bc/<froot>`)
+rather than the default `suggest_integration_output_dir`
+(`<expid>_bc/<froot>/<det>`). That hook is not cosmetic: the
+"stale autofill or chosen root" test compares the Output box against the
+derived dirs, so a caller deriving one convention while the grouper assumes
+another can never match, is read as a custom root, and nests.
+
+### The combiner must not have a hardcoded list of what to carry
+
+`hydra_zarr_combine` reproduced the reference script's group list and wrote
+exactly those names, dropping anything else without a word — so every
+merged archive was missing `SumFrames`, an `(nR, nEta)` array, i.e. primary
+data, plus `active_instrument/`. The two names were the symptom; the silent
+list was the bug. `_carry_unhandled` now takes everything not written by
+name and REPORTS what it did, because carrying something silently is the
+same bug in a new coat.
+
+Its shape test leans deliberately: declining to concatenate something that
+really was caked costs a copy and a log line, while concatenating something
+that was not invents an array. At one eta bin per panel the trailing-axis
+test says nothing (widths are `[1,1,1,1]`), so the array must also share
+leading dims with the known caked arrays.
+
+A non-contiguous eta axis is NOT a defect — the merge concatenates and
+REtaMap carries every column's own eta, so an uncovered wedge is absent
+rather than misindexed. The only thing it rules out is summarising the
+result with one `(EtaMin, EtaMax)` pair.
+
+### Process note
+
+Three consecutive full suite runs were killed mid-flight to turn around
+urgent fixes. Each kill was individually defensible; the aggregate was not.
+`test_hydra_batch_ui` had been red since the omega commit for about an hour
+without anyone knowing. `--forked` re-imports the package per test
+subprocess, so a mid-run edit invalidates the whole run — if a fix cannot
+wait, kill the suite deliberately and re-run after, rather than editing
+under it.
+
+Three of this session's bugs survived a passing suite because the fixtures
+used invented key names (`ETA_MIN` where every writer emits `EtaMin`) or
+geometry that tiles nothing. A fixture that does not look like real data is
+not evidence.
+
+## Fitting the same peak twice, on purpose
+
+`peak_fit_midas.py` + `peak_fit_cli.py` fit one pseudo-Voigt per
+(frame, eta) lineout with `midas_peakfit.lm_generic` and write the
+GSAS-II sequential peak-fit CSV format.
+
+The format choice is the whole point: `peak_fit_data.parse_peak_fit_csv`
+reads it unchanged, so a MIDAS fit and a GSAS-II fit of the same scan
+load into the same Data Explorer view and can be differenced row by row.
+
+### Why a second fitter at all
+
+A fitted peak position is a model's answer, not a measurement. On
+`connolly_oct26/4130_D_load_step_4` the GSAS-II 2theta map carried hard
+vertical stripes at frames 12, 23, 34, 45, 56 of every file and every
+eta — +6.6 mdeg, 4.9 sigma, perfectly reproducible. Refitting the same
+lineouts here gave -0.05 mdeg (-0.1 sigma). A model-free centroid gave
++0.08 mdeg against 3.2 mdeg of scatter, and the raw lineouts at those
+frames differ from their neighbours by +0.33 sigma — i.e. not at all.
+
+At those frames GSAS-II's peak is also 40% narrower in `sig`, its
+background 25% more tilted, and its esds SMALLER, while Rwp and GOF
+medians are normal. That is a second local minimum of the same model,
+not a bad data point, which is why no quality column flags it: a GOF>15
+cut catches 7% of the bad rows and 4,279 good ones.
+
+The conclusion that matters for the tab: a peak-fit CSV cannot be
+audited from inside itself. The only check that worked was an
+independent fit of the same lineouts.
+
+### The unit convention is load-bearing
+
+`sig` is a Gaussian VARIANCE in centidegrees**2, `gam` a Lorentzian FWHM
+in centidegrees, the offset is converted to centidegrees, and the
+profile is unit-area with Thompson-Cox-Hastings mixing. Get any of that
+wrong and every fit still converges and still reports a plausible
+position while every width is out by a factor of 10^4.
+`test_the_profile_reproduces_a_published_gsas_ii_peak_height` pins it
+against a real GSAS-II row rather than against our own arithmetic.
+
+### What may and may not be compared across codes
+
+`pos`/`int`/`sig`/`gam` parameterise the same function and are
+comparable. `Rwp`, `GOF` and every `esd-*` depend on the WEIGHTS, and
+the weights are not a property of the data — GSAS-II takes them from
+the ESD array in its project file, which we cannot see. Here they are
+Poisson, `w = 1/max(y,1)`.
+
+This is why `write_peak_fit_csv` also writes a `.meta.json`: fit window
+and weighting are not columns in this format, and without them two
+peak-fit CSVs cannot honestly be differenced. Reading a MIDAS GOF of
+0.26 as "30x better than GSAS-II's 7.9" is the specific mistake the
+sidecar exists to prevent.
+
+### Two seeding bugs worth remembering
+
+Both produced `rc = 0` — converged — with wrong answers.
+
+* The width was seeded from the second moment of the
+  background-subtracted lineout. In a window seven FWHM wide that is a
+  property of the window, not the peak: it came out 11x too wide and
+  the solver settled into a local minimum with 0.04 deg of position
+  scatter. It is now seeded by counting points above half maximum.
+* Bounds were fixed decade-wide boxes (`sig in [1e-4, 5000]`). Under the
+  sigmoid reparam the solver's step in a parameter scales with its box
+  width, so an absurd box makes every step in that parameter absurd.
+  Width and intensity bounds are now a factor of 30 either side of the
+  data-derived seed.
+
+The round-trip test that caught both is the one that asserts GOF ~ 1 on
+synthetic Poisson data — it validates the weighting and the degrees of
+freedom together, and neither failure mode moved Rwp enough to notice.
+
+### Batched by eta, not by file
+
+Every archive in a scan shares one REtaMap, so a given eta column has a
+single 2theta grid and all `n_files x n_frames` lineouts at that eta
+solve in one LM call. 29,120 fits in 108 s on CPU. It also bounds peak
+memory by one eta column rather than by the scan — and only the ~55 R
+bins inside the fit window are read, not all 3,520, which is the
+difference between 14 MB and 820 MB for a scan this size.
+
+## Background jobs have to run on RHEL 7 too
+
+Found on `erkel` (RHEL 7.9), where launching a background caking job
+failed with nothing more informative than "`screen -dmS` exited -1".
+`acadia` and `copland` are RHEL 9 and neither problem is visible there.
+
+### `-Logfile` does not exist before screen 4.06
+
+erkel ships `screen 4.01.00devel` (2006). Passing `-Logfile` aborts with
+`Error: Unknown option Logfile` BEFORE the session is created, and
+screen's message goes to the terminal the GUI was launched from rather
+than to the dialog — so the user saw only a return code.
+
+Capability is PROBED (`screen --help`), not version-parsed:
+"4.01.00devel" is exactly the string that makes a numeric comparison
+wrong in an interesting way.
+
+Bare `-L` is dropped along with it. On 4.01 `-L` still logs, but to
+`screenlog.0` in the working directory, which for these jobs is the repo
+root. The fallback instead has the generated script log itself with
+`exec > >(tee -a <logfile>) 2>&1` — tee rather than a plain redirect so
+`Reattach` still shows live output, which is the whole point of running
+under screen. The `sleep 3` both script shapes already ended with is
+what gives tee time to flush the `DONE` line the panel waits for.
+
+### `wait -n` needs bash 4.3; RHEL 7 ships 4.2
+
+This was the worse of the two, and it was silent. The semaphore said
+`wait -n 2>/dev/null || break`. On bash 4.2 `wait -n` fails on the first
+poll, the `break` fires, the `while` exits, and `sem()` becomes a no-op
+— so every unit launches at once. Measured on erkel: a limit of 4,
+peak 12. On the 190-scan job that is ~760 processes.
+
+`|| sleep 1` instead: blocks efficiently on 4.3+, polls on 4.2. A
+one-word change, but the failure it prevents does not announce itself —
+it looks like the machine being slow.
+
+The lesson worth keeping: a fallback whose failure mode is "silently do
+nothing" is worse than no fallback. `break` was chosen so an old bash
+would not hang; what it actually did was remove the limit.
+
+### What was checked and is fine
+
+No other `wait -n`, and nothing else modern emitted into job scripts
+(`mapfile`, `declare -A`, `coproc`, `&>>` — none). The conda env runs on
+erkel: Python 3.12.14 against glibc 2.17, `midas_integrate_v2` and torch
+2.4.0 import. `mktemp`, `tee`, `pgrep` present.

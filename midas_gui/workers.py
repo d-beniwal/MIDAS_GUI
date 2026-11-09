@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import pickle
 import re
 import sys
@@ -27,14 +28,16 @@ from PyQt5 import QtCore
 
 import midas_gui._paths  # noqa: F401  (sys.path setup before MIDAS imports)
 from midas_gui import calib_cli
+from midas_gui.proc_worker import process_isolated
+from midas_gui.constants import PROJECT_ROOT
 from midas_gui import h5_metadata
 from midas_gui import ion_csv
 from midas_gui import provenance
 from midas_gui import settings
 from midas_gui.helpers import (_load_image, _apply_im_trans, _build_spec,
                                _spec_from_json, average_field, apply_field_corrections,
-                               read_hdf5_stack_chunk, load_profile_file,
-                               CORRECTION_SUFFIX, CORRECTION_EXT)
+                               read_hdf5_stack_chunk, load_profile_file, _LogStream,
+                               reduce_frames_batched, CORRECTION_SUFFIX, CORRECTION_EXT)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -86,7 +89,25 @@ def axis_conversions(r_px, lsd, px, wl):
     return two_theta, two_theta * 100.0, q
 
 
-_FID_NUM_RE = re.compile(r'^(?P<froot>.+?)_(?P<num>\d+)(?P<tag>[^_\d]*)$')
+def radial_axis_datasets(r_px, lsd, px, wl) -> dict:
+    """``R_px`` / ``TTH`` (2θ, deg) / ``Q`` (Å⁻¹) bin-centre axes for a 1-D
+    HDF5 — always all three, whatever Bin type the run used (the bin grid
+    only decides which of them is uniform)."""
+    tth, _, q = axis_conversions(r_px, lsd, px, wl)
+    return {"R_px": np.asarray(r_px, dtype=np.float64),
+            "TTH": np.asarray(tth, dtype=np.float64),
+            "Q": np.asarray(q, dtype=np.float64)}
+
+
+# The tag excludes '_' but NOT digits: '_' is what forces the match onto
+# the LAST underscore-number group, while barring digits made a detector
+# tag that ends in one unparseable. '..._1s_003502.ge1' then matched
+# nothing at all and fell back to (whole stem, fallback_idx, '') -- so
+# every .geN output folder and filename carried the file number that
+# should have been split off, while .pixi/.vrx (no digit) were fine.
+from midas_gui import eta_wrap
+
+_FID_NUM_RE = re.compile(r'^(?P<froot>.+?)_(?P<num>\d+)(?P<tag>[^_]*)$')
 # A trailing "_c<NN>" chunk suffix, as minted by _HDF5StackGlobSource when one
 # multi-frame HDF5 file is split into several combined chunks.
 _FID_CHUNK_RE = re.compile(r'^(?P<rest>.+)_c(?P<chunk>\d+)$')
@@ -181,6 +202,28 @@ def frame_output_base(out_dir, fid, fallback_idx: int, used: set):
     return Path(out_dir) / frame_output_stem(fid, fallback_idx, used)
 
 
+def _write_h5_atomic(h5_path, writer) -> None:
+    """Run ``writer(tmp_path)`` then ``os.replace`` it onto ``h5_path``.
+
+    Writing straight onto an existing ``.h5`` truncates it, which HDF5
+    refuses ("unable to truncate a file which is already open") whenever
+    anything — a viewer, an earlier run, another process — still holds the
+    previous output open. Replacing the directory entry works regardless
+    (POSIX keeps the old inode alive for whoever has it open).
+    """
+    import os
+    h5_path = Path(h5_path)
+    tmp = h5_path.with_name(f".{h5_path.stem}.tmp{os.getpid()}.h5")
+    try:
+        writer(tmp)
+        os.replace(tmp, h5_path)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
 def stamp_h5_provenance(h5_path, entry: dict) -> None:
     """Reopen ``h5_path`` (already written by ``midas_integrate_v2.write_h5``)
     and append a provenance entry to its root attrs (``provenance_history``,
@@ -200,6 +243,40 @@ def stamp_h5_provenance(h5_path, entry: dict) -> None:
         ds.attrs['format'] = 'JSON list of provenance entries (see midas_gui/provenance.py)'
 
 
+def cake_params_of(spec) -> dict:
+    """The six R/η binning values a run was ASKED for, as plain floats."""
+    return {
+        'RMin': float(spec.RMin), 'RMax': float(spec.RMax),
+        'RBinSize': float(spec.RBinSize),
+        'EtaMin': float(spec.EtaMin), 'EtaMax': float(spec.EtaMax),
+        'EtaBinSize': float(spec.EtaBinSize),
+    }
+
+
+def stamp_cake_params_h5(h5_path, spec) -> None:
+    """Record the caking parameters in a 1-D ``write_h5`` file's root attrs.
+
+    ``midas_integrate_v2.write_h5`` stores only the finished ``(N, n_r)``
+    profile stack and its R axis, so nothing in the file said which R range,
+    R bin, or η window/bin the profiles were built with — the R axis alone
+    could not tell an η-restricted run from a full-circle one. The 1-D
+    profile is the η-collapse over [EtaMin, EtaMax]; EtaBinSize only shapes
+    the wedges that were averaged (it is kept in the file only with
+    Multi-azimuth output, which writes the full η axis)."""
+    import h5py
+    with h5py.File(str(h5_path), 'a') as h5:
+        for k, v in cake_params_of(spec).items():
+            h5.attrs[k] = v
+        h5.attrs['n_r_bins'] = int(spec.n_r_bins)
+        h5.attrs['n_eta_bins'] = int(spec.n_eta_bins)
+        h5.attrs['multi_azimuth'] = False
+        h5.attrs['eta_collapsed'] = True
+        h5.attrs['note'] = (
+            "profiles are the 1-D lineout eta-collapsed over "
+            "[EtaMin, EtaMax]; enable Multi-azimuth output to keep the "
+            "per-eta cake.")
+
+
 def build_geom(spec, kernel: str, mask):
     from midas_integrate_v2 import (
         SubpixelBinGeometry, HardBinGeometry, PolygonBinGeometry)
@@ -209,6 +286,28 @@ def build_geom(spec, kernel: str, mask):
         return PolygonBinGeometry.from_spec(spec, mask=mask, n_jobs=-1)
     K = 4 if kernel == "subpixel4" else 2
     return SubpixelBinGeometry.from_spec(spec, K=K, mask=mask)
+
+
+def bin_area_for(spec, kernel: str, mask=None, geom=None) -> np.ndarray:
+    """Pixel-count ("bin area") cake with the same eta rows as the DATA cake.
+
+    Not simply ``count_cake(build_geom(spec, ...))``: when the requested eta
+    range crosses +/-180 the data is binned on the whole circle and cut back
+    down (see :mod:`midas_gui.eta_wrap`), so an area built straight from the
+    request has the wrong number of rows -- 36 against 9 for a 120..210
+    request at 10 deg. GSASZarrWriter rejects that pair, which is how a ge1
+    archive came out as a 136-byte empty zip and took the four-panel combine
+    with it.
+
+    ``geom`` is the already-built binning geometry when the caller has one;
+    it must be the geometry for the PLAN, not for the bare spec.
+    """
+    plan = eta_wrap.plan_eta(spec.EtaMin, spec.EtaMax, spec.EtaBinSize)
+    bspec = (spec if plan.take is None
+             else replace_spec_eta(spec, plan.bin_min, plan.bin_max))
+    g = geom if geom is not None else build_geom(bspec, kernel, mask)
+    return eta_wrap.apply_take(
+        count_cake(g, kernel, bspec.NrPixelsZ, bspec.NrPixelsY), plan.take)
 
 
 def _profile_from_cake(cake_np: np.ndarray, count_cake: Optional[np.ndarray] = None) -> np.ndarray:
@@ -351,7 +450,7 @@ def corrections_counts(spec):
 
 def integrate_frame(img_t, spec, geom, kernel, corrections, variance_cfg,
                     need_sigma: bool, corr_counts=None, return_cake=False,
-                    weighted: bool = False, cnt_cake=None):
+                    weighted: bool = False, cnt_cake=None, eta_take=None):
     """Integrate one frame, returning (profile, sigma_or_None) or
     (profile, sigma, cake_2d, cake_sigma_2d).
 
@@ -360,6 +459,13 @@ def integrate_frame(img_t, spec, geom, kernel, corrections, variance_cfg,
         cake (pass corr_counts to avoid recomputing it per frame)
       - variance enabled     → integrate_<kernel>_with_variance (σ from error model)
       - otherwise            → plain kernel integration
+
+    ``eta_take`` selects eta rows out of the binned cake before anything is
+    derived from it — the whole-circle detour that
+    :func:`midas_gui.eta_wrap.plan_eta` uses to serve a range crossing
+    ±180. It is applied to the CAKE, so the 1-D profile, the σ and the
+    2-D output all see only the bins that were asked for. ``None`` (every
+    range that does not cross) is a straight pass-through.
 
     ``weighted`` collapses the (η, R) cake to 1-D with a pixel-count-weighted mean
     (robust to partial azimuthal coverage / off-detector beam centres) instead of the
@@ -380,7 +486,9 @@ def integrate_frame(img_t, spec, geom, kernel, corrections, variance_cfg,
     if pol is not None or sa is not None:
         int2d = m.integrate_with_corrections(
             img_t, spec, polarization=pol, solid_angle=sa).detach().cpu().numpy()
-        counts = corr_counts if corr_counts is not None else corrections_counts(spec)
+        int2d = eta_wrap.apply_take(int2d, eta_take)
+        counts = corr_counts if corr_counts is not None else eta_wrap.apply_take(
+            corrections_counts(spec), eta_take)
         with np.errstate(invalid="ignore", divide="ignore"):
             norm = np.where(counts > 0.5, int2d / counts, np.nan)
         prof = _profile_from_cake(norm, count_cake=counts if weighted else None)
@@ -397,8 +505,8 @@ def integrate_frame(img_t, spec, geom, kernel, corrections, variance_cfg,
             "polygon":   m.integrate_polygon_with_variance,
         }.get(kernel, m.integrate_subpixel_with_variance)
         mean2d, sig2d = fn(img_t, geom, error_model=em)
-        mean_np = mean2d.detach().cpu().numpy()
-        sig_np  = sig2d.detach().cpu().numpy()
+        mean_np = eta_wrap.apply_take(mean2d.detach().cpu().numpy(), eta_take)
+        sig_np = eta_wrap.apply_take(sig2d.detach().cpu().numpy(), eta_take)
         prof = _profile_from_cake(mean_np, count_cake=cnt_cake if weighted else None)
         # σ of the η-mean: sqrt(Σσ²)/N over valid η bins
         var = np.nansum(sig_np ** 2, axis=0)
@@ -416,7 +524,7 @@ def integrate_frame(img_t, spec, geom, kernel, corrections, variance_cfg,
         "polygon": m.integrate_polygon,
     }.get(kernel, m.integrate_subpixel)
     int2d = fn(img_t, geom, normalize=True)
-    cake_np = int2d.detach().cpu().numpy()
+    cake_np = eta_wrap.apply_take(int2d.detach().cpu().numpy(), eta_take)
     prof = _profile_from_cake(cake_np, count_cake=cnt_cake if weighted else None)
     sigma = np.sqrt(np.maximum(prof, 0.0)) if need_sigma else None
     if return_cake:
@@ -436,16 +544,84 @@ def build_integration_context(spec, kernel: str, mask, corrections, weighted: bo
     lsd, px, wl = float(spec.Lsd), float(spec.pxY), float(spec.Wavelength)
     pol, sa = corrections
     corr_on = pol is not None or sa is not None
-    geom = None if corr_on else build_geom(spec, kernel, mask)
-    r_ax = compute_r_axis(spec)
-    corr_counts = corrections_counts(spec) if corr_on else None
-    cnt = (count_cake(geom, kernel, spec.NrPixelsZ, spec.NrPixelsY)
+    # An eta range crossing +/-180 cannot be binned directly: no kernel wraps,
+    # so every bin centred past the cut comes back empty and its pixels are
+    # dropped. eta_wrap.plan_eta turns it into a whole-circle binning plus the
+    # columns to lift out, which is exact. `take` is None for everything that
+    # does not cross -- the ordinary case -- and then nothing below changes.
+    plan = eta_wrap.plan_eta(spec.EtaMin, spec.EtaMax, spec.EtaBinSize)
+    bin_spec = spec
+    if plan.take is not None:
+        bin_spec = replace_spec_eta(spec, plan.bin_min, plan.bin_max)
+        bin_spec.validate()
+    geom = None if corr_on else build_geom(bin_spec, kernel, mask)
+    r_ax = compute_r_axis(bin_spec)
+    corr_counts = corrections_counts(bin_spec) if corr_on else None
+    cnt = (count_cake(geom, kernel, bin_spec.NrPixelsZ, bin_spec.NrPixelsY)
            if (weighted and not corr_on) else None)
-    n_eta = spec.n_eta_bins
-    eta_ax = float(spec.EtaMin) + float(spec.EtaBinSize) * (np.arange(n_eta) + 0.5)
-    return {"spec": spec, "geom": geom, "r_ax": r_ax, "corr_counts": corr_counts,
+    # The count cakes are consumed alongside a cake that has ALREADY been cut
+    # down to the requested columns, so they have to be cut the same way.
+    corr_counts = eta_wrap.apply_take(corr_counts, plan.take)
+    cnt = eta_wrap.apply_take(cnt, plan.take)
+    # The axis is the caller's own request, unwrapped: 125..205, not
+    # 125..175 then -175..-155. The data is in that order; so is this.
+    eta_ax = plan.centres
+    return {"spec": spec, "bin_spec": bin_spec, "eta_take": plan.take,
+            "eta_plan_problem": plan.problem,
+            "geom": geom, "r_ax": r_ax, "corr_counts": corr_counts,
             "cnt": cnt, "eta_ax": eta_ax, "lsd": lsd, "px": px, "wl": wl,
             "corr_on": corr_on}
+
+
+def replace_spec_eta(spec, eta_min: float, eta_max: float):
+    """``spec`` with a different eta range and nothing else touched.
+
+    A shallow copy rather than a mutation: the caller's spec is the record of
+    what was ASKED for -- it is what labels the output and what the run's
+    provenance quotes -- while the copy is only what the binner is told.
+    """
+    import copy
+    out = copy.copy(spec)
+    out.EtaMin = float(eta_min)
+    out.EtaMax = float(eta_max)
+    return out
+
+
+class _GsasHeader:
+    """Header stand-in for ``midas_integrate_v2``'s ``ProfileMetadata``.
+
+    The backend writers only ever call ``to_header_lines()`` on whatever is
+    passed as ``metadata=``, and ``ProfileMetadata``'s own rendering is a JSON
+    blob — which GSAS-II cannot read. Its SAXS reader
+    (``G2sad_xye.txt_XRayReaderClass``) recovers the wavelength by scanning for
+    a line containing ``=`` whose key half contains ``wave``, then doing
+    ``float(line.split("=")[1])``; failing that it silently keeps its default
+    of 1.5428 A (Cu Ka). So a ``.dat`` written with no such line loads into
+    GSAS-II as a lab-source pattern regardless of the energy it was taken at,
+    and every Q-dependent quantity downstream of it is wrong.
+
+    That parse dictates the format: exactly one ``=`` on the line, and a bare
+    number after it with no units appended.
+    """
+
+    def __init__(self, lines):
+        self._lines = list(lines)
+
+    def to_header_lines(self, prefix: str = "# "):
+        return [prefix + line for line in self._lines]
+
+
+def _dat_header(wl):
+    """Header lines for a ``.dat``, or ``None`` when there is nothing to say."""
+    try:
+        wl_f = float(wl)
+    except (TypeError, ValueError):
+        return None
+    # A zero/garbage wavelength written out would read back as a real one; let
+    # GSAS-II fall back to its own default instead of asserting a wrong number.
+    if not np.isfinite(wl_f) or wl_f <= 0.0:
+        return None
+    return _GsasHeader([f"wavelength = {wl_f:.8g}"])
 
 
 def write_profile(base, fmt, r_px, prof, sigma, lsd, px, wl,
@@ -461,7 +637,8 @@ def write_profile(base, fmt, r_px, prof, sigma, lsd, px, wl,
     elif fmt == "fxye":
         m.write_fxye(str(base) + ".fxye", r_axis=two_theta_cd, intensity=prof, sigma=sig)
     elif fmt == "dat":
-        m.write_dat(str(base) + ".dat", q_axis_invA=q, intensity=prof, sigma=sig)
+        m.write_dat(str(base) + ".dat", q_axis_invA=q, intensity=prof,
+                    sigma=sig, metadata=_dat_header(wl))
     elif fmt == "2d_csv":
         if cake_2d is None:
             # Was a silent no-op, and cost a real run its 2D CSVs: the caller
@@ -572,6 +749,12 @@ class FieldAverageWorker(QtCore.QThread):
             self.failed.emit(traceback.format_exc())
 
 
+#: How many leading frames StreamPreviewWorker will step over looking for
+#: a non-blank one. Small on purpose: it exists for detectors that arm a
+#: frame or two (Pixirad arms exactly one), not to hunt through a dark run.
+_PREVIEW_BLANK_SCAN = 8
+
+
 class StreamPreviewWorker(QtCore.QThread):
     """Fetch and dark/bright/background-correct the "stream"-mode preview sum
     off the GUI thread — the file-reading half of what
@@ -620,9 +803,35 @@ class StreamPreviewWorker(QtCore.QThread):
             if total == 0:
                 self.finished.emit(None)
                 return
-            n = min(self._preview_sum_n, total)
+            # Step over leading all-zero frames. A Pixirad arms one frame
+            # before it starts counting, so frame 0 of every .pixi.h5 is
+            # identically zero -- and the preview read it unconditionally,
+            # so the Detector view showed a picture of nothing, autoscaled
+            # to a degenerate ~1e-6 range that looks like corrupt data
+            # rather than a blank frame. (widgets._first_raw_frame_is_blank
+            # already knew this, but only the single-HDF5 sub-frame range
+            # consulted it; a multi-file stream never did.)
+            #
+            # DISPLAY ONLY -- it does not change which frames the run
+            # integrates. That stays opt-in, deliberately: an all-zero frame
+            # is not reliably an arming frame (see DECISIONS 2026-10-08), and
+            # silently dropping a real observation of zero from the DATA
+            # would be a different and much worse bug than a dull preview.
+            # Skipping it from a PICTURE costs nothing either way.
+            #
+            # Bounded: a genuinely dark dataset must not turn one preview
+            # into a scan of the whole stream over NFS.
+            start = 0
+            for probe in range(min(_PREVIEW_BLANK_SCAN, total)):
+                _fid, img = source.get(probe)
+                if np.any(np.asarray(img)):
+                    start = probe
+                    break
+            else:
+                start = 0          # all blank within the bound -- show frame 0
+            n = min(self._preview_sum_n, total - start)
             acc = None
-            for i in range(n):
+            for i in range(start, start + n):
                 _fid, img = source.get(i)
                 img = np.asarray(img, dtype=np.float64)
                 if self._dark is not None or self._bright is not None or self._background is not None:
@@ -678,7 +887,7 @@ def temporal_constancy_mask(stack: np.ndarray, frozen_frac: float) -> tuple:
     return frozen, f"frozen: {int(frozen.sum()):,} (ref_std={ref:.2g})"
 
 
-class MaskComputeWorker(QtCore.QThread):
+class _MaskComputeWorkerImpl(QtCore.QThread):
     """Compute the combined bad-pixel mask: base threshold OR'd with any enabled
     advanced method (statistical outlier, spatial spike, azimuthal clip, learnable).
 
@@ -863,61 +1072,79 @@ class MaskComputeWorker(QtCore.QThread):
             self.failed.emit(traceback.format_exc())
 
 
+# Runs in its own OS process (see proc_worker.py): this worker loads whole frame
+# stacks and calls torch/OpenMP, and a native fault there must not take the GUI —
+# and any calibration running beside it — down.
+MaskComputeWorker = process_isolated(_MaskComputeWorkerImpl)
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  Calibration worker (pipeline-aware)
 # ═════════════════════════════════════════════════════════════════════════════
 
 class ProjectionWorker(QtCore.QThread):
-    """Load a frame stack and reduce it (max/sum/mean) off the GUI thread.
+    """Reduce a frame stack (max/sum/mean) off the GUI thread, batched and
+    with each frame corrected BEFORE it's folded into the reduction.
 
-    Loading a multi-GB stack + the reduction can take seconds-to-minutes; doing it
-    here keeps the Data Viewer responsive. Field corrections (dark/bright/background)
-    are captured on the GUI thread and applied to the projected image.
+    ``batch_iter_fn(start, end)`` must return an iterable of raw ``(b,H,W)``
+    batches (e.g. ``DataLoaderPanel.iter_raw_batches``/
+    ``hydra.iter_stack_batches``) — reading/correcting one batch at a time
+    keeps peak memory bounded to one batch instead of the whole stack, while
+    still being vectorized (not a per-frame Python loop). See
+    ``helpers.reduce_frames_batched`` for the actual correct-then-reduce
+    logic this worker just drives off the GUI thread.
     """
     finished = QtCore.pyqtSignal(object, str)   # corrected 2-D image, info string
     failed   = QtCore.pyqtSignal(str)
 
-    def __init__(self, full_stack_fn, method, axis, skip, nframes=0, *, dark=None, bright=None,
-                 background=None, bright_mode="divide", parent=None):
+    def __init__(self, batch_iter_fn, total_frames, method, skip, nframes=0, *,
+                 dark=None, bright=None, background=None, bright_mode="divide", parent=None):
         super().__init__(parent)
-        self._full_stack = full_stack_fn
-        self._method, self._axis, self._skip, self._nframes = method, axis, skip, nframes
+        self._batch_iter_fn = batch_iter_fn
+        self._total_frames = total_frames
+        self._method, self._skip, self._nframes = method, skip, nframes
         self._dark, self._bright, self._background = dark, bright, background
         self._bright_mode = bright_mode
 
     def run(self):
         try:
-            data = np.asarray(self._full_stack())
-            if self._axis >= data.ndim:
-                raise ValueError(f"Axis {self._axis} invalid for {data.ndim}-D data.")
-            if self._skip > 0:
-                if self._skip >= data.shape[0]:
-                    raise ValueError(f"Skip frames ({self._skip}) ≥ stack size "
-                                     f"({data.shape[0]}).")
-                data = data[self._skip:]
-            if self._nframes and self._nframes > 0:
-                data = data[:self._nframes]
-            n_used = data.shape[self._axis]
-            # "average" kept as an alias so an older caller's method string
-            # still resolves; the UI only ever sends "mean".
-            fn = {"max": np.max, "sum": np.sum,
-                  "mean": np.mean, "average": np.mean}[self._method]
-            proj = np.squeeze(fn(data, axis=self._axis))
+            start = max(0, self._skip)
+            if start >= self._total_frames:
+                raise ValueError(f"Skip frames ({start}) ≥ stack size "
+                                 f"({self._total_frames}).")
+            end = (self._total_frames if not self._nframes or self._nframes <= 0
+                  else min(start + self._nframes, self._total_frames))
+            proj, n_used = reduce_frames_batched(
+                self._batch_iter_fn(start, end), self._method,
+                dark=self._dark, bright=self._bright,
+                background=self._background, bright_mode=self._bright_mode)
             if proj.ndim != 2:
-                raise ValueError(f"Result is {proj.ndim}-D after projecting axis "
-                                 f"{self._axis}; pick an axis that leaves a 2-D image.")
-            if self._dark is not None or self._bright is not None or self._background is not None:
-                out = apply_field_corrections(
-                    proj, dark=self._dark, bright=self._bright,
-                    bright_mode=self._bright_mode, background=self._background).astype(np.float32)
-            else:
-                out = proj.astype(np.float32)
+                raise ValueError(f"Result is {proj.ndim}-D; expected a 2-D image.")
             info = (f"{self._method.capitalize()} projection ({n_used} frames"
                     f"{f', skipped {self._skip}' if self._skip else ''}) → {proj.shape}  "
                     f"[{np.nanmin(proj):.3g}, {np.nanmax(proj):.3g}]")
-            self.finished.emit(out, info)
+            self.finished.emit(proj, info)
         except Exception:
             self.failed.emit(traceback.format_exc())
+
+
+def _resolve_dark_for(path, shape, request, *, dark_dataset, fallback, auto):
+    """One dark decision, shared by Batch Correction and Batch Integrate.
+
+    ``request`` is a ``dark_policy.DarkRequest`` from
+    ``DataLoaderPanel.dark_request()``; the exposure is filled in here
+    because it belongs to the file being corrected, not to the selection.
+    ``request`` None keeps the pre-policy behaviour (``resolve_dark``
+    directly) so a bare-constructed worker in a test still works.
+    """
+    from midas_gui.dark_policy import DarkChoice, resolve
+    from midas_gui.frame_correct import acquisition_exposure, resolve_dark
+    if request is None:
+        arr, why = resolve_dark(path, dark_dataset=dark_dataset, shape=shape,
+                                fallback=fallback, auto=auto)
+        return DarkChoice(arr, why)
+    import dataclasses
+    req = dataclasses.replace(request, exposure=acquisition_exposure(path))
+    return resolve(path, req, shape=shape)
 
 
 class BatchCorrectionWorker(QtCore.QThread):
@@ -967,9 +1194,18 @@ class BatchCorrectionWorker(QtCore.QThread):
                  out_dtype: str = "float32",
                  ion_csv_extras=(),
                  raw_start=None, raw_end=None, write_monitor_csvs: bool = True,
+                 dark_request=None,
                  parent=None):
         super().__init__(parent)
         self._paths = [Path(p) for p in paths]
+        # dark_policy.DarkRequest, or None to keep the pre-policy ladder
+        # call. The GUI always supplies one; a bare-constructed worker in a
+        # test need not.
+        self._dark_request = dark_request
+        #: [(path, why)] for files autodetect could not find a dark for.
+        #: They are NOT corrected with someone else's dark — see
+        #: dark_policy — so the caller must report them.
+        self.dark_skipped = []
         self._dataset, self._out_dataset = dataset, out_dataset
         self._chunk_size = chunk_size
         # Accept a bare string or a list, so a single-op caller reads the
@@ -1008,7 +1244,8 @@ class BatchCorrectionWorker(QtCore.QThread):
         self._cancel = False
 
     def _collect_monitor_rows(self, acc: dict, path, tree, ranges, *,
-                              n_light: int, n_dark: int) -> None:
+                              n_light: int, n_dark: int,
+                              subtracted_dark: str = "") -> None:
         """Add one file's per-frame monitor rows to its froot's bucket.
 
         Grouped by froot rather than per file because a froot is the unit a
@@ -1028,7 +1265,8 @@ class BatchCorrectionWorker(QtCore.QThread):
             pass
         rows, note = ion_csv.rows_from_tree(
             csv_tree, hutch, frame_ranges=ranges, n_light=n_light,
-            n_dark=n_dark, source=Path(path).name)
+            n_dark=n_dark, source=Path(path).name,
+            subtracted_dark=subtracted_dark)
         froot = split_scan_name(Path(path).name).froot or Path(path).stem
         bucket = acc.setdefault(froot, {"rows": [], "notes": []})
         bucket["rows"].extend(rows)
@@ -1157,10 +1395,18 @@ class BatchCorrectionWorker(QtCore.QThread):
                     # frame_correct.resolve_dark for the ladder and the real
                     # data it was derived from. `why` is logged so the choice
                     # can be audited afterwards instead of trusted.
-                    dark, why = resolve_dark(
-                        path, dark_dataset=self._dark_dataset, shape=shape,
+                    choice = _resolve_dark_for(
+                        path, shape, self._dark_request,
+                        dark_dataset=self._dark_dataset,
                         fallback=self._dark, auto=self._auto_dark)
+                    dark, why = choice.array, choice.why
                     self.progress.emit(done, total, f"{path.name}: dark = {why}")
+                    if choice.skipped:
+                        # Autodetect could not find this file's dark. Not a
+                        # fallback: correcting it with another scan's dark
+                        # is the error the policy exists to prevent.
+                        self.dark_skipped.append((str(path), why))
+                        continue
                     n_aligned = _HDF5StackGlobSource._metadata_frame_count(f, n_raw)
                     for lo, hi in ranges:
                         if self._cancel:
@@ -1168,19 +1414,33 @@ class BatchCorrectionWorker(QtCore.QThread):
                         raw = (np.asarray(dset[lo:hi + 1], dtype=np.float32)
                                if dset.ndim == 3 else
                                np.asarray(dset[...], dtype=np.float32)[None])
+                        # stats: blank sub-frames are dropped from the
+                        # combine (see frame_correct.reduce_chunk_multi) and
+                        # that has to be said, not just done -- the whole
+                        # reason it is a fix is that averaging them in was
+                        # wrong silently.
+                        cstats: dict = {}
                         combined = reduce_chunk_multi(
                             raw, self._ops, dark=dark, bright=self._bright,
                             bright_mode=self._bright_mode,
                             background=self._background,
-                            clip_negatives=self._clip)
+                            clip_negatives=self._clip, stats=cstats)
                         for op, plane in combined.items():
                             frames[op].append(plane)
                         done += 1
+                        n_blank = cstats.get("blank_skipped") or 0
+                        if cstats.get("all_blank"):
+                            note = "  — every raw frame blank, output is zeros"
+                        elif n_blank:
+                            note = (f"  — skipped {n_blank} blank raw "
+                                    f"frame(s) of {hi - lo + 1}")
+                        else:
+                            note = ""
                         self.progress.emit(
                             done, total,
                             f"{path.name}  chunk "
                             f"{len(frames[self._ops[0]])}/{len(ranges)} "
-                            f"(raw {lo}–{hi})")
+                            f"(raw {lo}–{hi}){note}")
                 if self._cancel:
                     break
                 aligned = h5_metadata.align(tree, ranges, n_aligned)
@@ -1189,7 +1449,10 @@ class BatchCorrectionWorker(QtCore.QThread):
                 try:
                     self._collect_monitor_rows(
                         metadata_rows, path, tree, ranges, n_light=n_raw,
-                        n_dark=n_dark_frames)
+                        n_dark=n_dark_frames,
+                        # The dark the IMAGES were corrected with, which the
+                        # resolver may well have taken from a sibling file.
+                        subtracted_dark=why)
                 except Exception:
                     # A sidecar must never cost the user the reduction that
                     # already succeeded.
@@ -1274,6 +1537,19 @@ class BatchCorrectionCoordinator(QtCore.QObject):
     # ── the same surface BatchCorrectionWorker offers ───────────────────
     def isRunning(self) -> bool:
         return any(w.isRunning() for w in self._workers)
+
+    @property
+    def dark_skipped(self) -> list:
+        """Every file its workers skipped for want of a valid dark.
+
+        Aggregated here because the skip is the whole point of the policy
+        and a skip that only ever reaches a worker attribute is a silent
+        skip. The caller reports it.
+        """
+        out = []
+        for w in self._workers:
+            out.extend(getattr(w, "dark_skipped", ()) or ())
+        return out
 
     def cancel(self):
         for w in self._workers:
@@ -1442,6 +1718,22 @@ def _json_default(obj):
     raise TypeError(f"not JSON-serializable in a calibration cfg: {type(obj)!r}")
 
 
+def _pythonpath_with_repo_root(existing: str = "") -> str:
+    """``existing`` with this package's parent directory prepended.
+
+    What lets a spawned ``python -m midas_gui.<mod>`` find the package from
+    any working directory. Already-present entries are not duplicated, and an
+    empty ``existing`` yields just the root (no stray separator, which the
+    interpreter would read as "the current directory").
+    """
+    import os
+    root = str(Path(__file__).resolve().parent.parent)
+    parts = [p for p in (existing or "").split(os.pathsep) if p]
+    if root in parts:
+        return os.pathsep.join(parts)
+    return os.pathsep.join([root] + parts)
+
+
 def _write_calib_job(job_dir: Path, mode: str, image, dark, cfg: dict,
                      bright=None, background=None, bright_mode: str = "divide") -> None:
     """Write ``calib_job.json``/``calib_job.npz`` into ``job_dir`` for
@@ -1531,7 +1823,33 @@ class CalibrationWorker(QtCore.QObject):
         self._job_dir = job_dir
 
         proc = QtCore.QProcess(self)
+        # `-m midas_gui.calib_cli` resolves the package off sys.path[0], which
+        # for -m is the CURRENT DIRECTORY -- the GUI's cwd, inherited here.
+        # Launching the GUI by absolute path from anywhere but the repo root
+        # (e.g. `python /opt/MIDAS_GUI/launch.py` run from a data folder, which
+        # works fine for the GUI itself because launch.py's own directory goes
+        # on sys.path) therefore killed every calibration with
+        # "No module named 'midas_gui'". job_queue.launch already pins this for
+        # background jobs with an explicit cd; this spawn site did not.
+        # PYTHONPATH rather than setWorkingDirectory: it fixes the import
+        # without moving the cwd out from under any relative path the backend
+        # might resolve.
+        env = QtCore.QProcessEnvironment.systemEnvironment()
+        env.insert("PYTHONPATH", _pythonpath_with_repo_root(env.value("PYTHONPATH", "")))
+        # Backends print non-ASCII (e.g. "µm", "─"); on Windows the child's
+        # stdout defaults to cp1252 and raises UnicodeEncodeError mid-run.
+        # _on_stdout decodes as UTF-8, so force UTF-8 on the child.
+        env.insert("PYTHONUTF8", "1")
+        env.insert("PYTHONIOENCODING", "utf-8")
+        proc.setProcessEnvironment(env)
         proc.setProcessChannelMode(QtCore.QProcess.MergedChannels)
+        # `-m midas_gui.calib_cli` only resolves the `midas_gui` package when
+        # the process's cwd is the repo root (that's what puts the repo root
+        # on sys.path[0] for `-m`) on an install where midas_gui isn't a
+        # pip-installed package — otherwise this inherits whatever cwd the
+        # GUI itself happens to have. Same fix as job_queue.py's background
+        # jobs, which hit this for the identical reason.
+        proc.setWorkingDirectory(str(PROJECT_ROOT))
         proc.readyReadStandardOutput.connect(self._on_stdout)
         proc.finished.connect(self._on_process_finished)
         proc.errorOccurred.connect(self._on_process_error)
@@ -1577,7 +1895,7 @@ class CalibrationWorker(QtCore.QObject):
         self.finished.emit(result)
 
 
-class ManualDspacingCalibWorker(QtCore.QThread):
+class _ManualDspacingCalibWorkerImpl(QtCore.QThread):
     """Fit detector geometry from user-picked ring points and known d-spacings
     (Bragg's law), entirely bypassing ``calib.run_pipeline``/``midas_calibrate_v2``
     — used for non-crystalline calibrants (e.g. AgBH) that have no space group.
@@ -1659,6 +1977,10 @@ class ManualDspacingCalibWorker(QtCore.QThread):
                 NrPixelsY=self._NY, NrPixelsZ=self._NZ,
                 wavelength_A=fit["wavelength_A"], post_residual_strain_uE=None,
                 _calibrant_name=self._material_name, _d_list=list(self._d_list),
+                # The d-spacings the fit actually consumed -- the picked rings,
+                # not the material's whole table. Reported in paramstest.txt for
+                # a calibrant that has no crystal structure to report instead.
+                _d_used=sorted({float(pk[2]) for pk in self._picks}, reverse=True),
             )
             result.fit_sigma = dict(fit["sigma"])
             result.fit_at_limit = set(fit["at_limit"])
@@ -1707,12 +2029,14 @@ class ManualDspacingCalibWorker(QtCore.QThread):
                 f"via Limits…")
         return lines
 
+ManualDspacingCalibWorker = process_isolated(_ManualDspacingCalibWorkerImpl)   # own OS process — see proc_worker.py
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  Single-frame integration worker (Tab 2 post-calibration preview)
 # ═════════════════════════════════════════════════════════════════════════════
 
-class IntegrationWorker(QtCore.QThread):
+class _IntegrationWorkerImpl(QtCore.QThread):
     log_line = QtCore.pyqtSignal(str)
     finished = QtCore.pyqtSignal(object)
     failed   = QtCore.pyqtSignal(str)
@@ -1794,6 +2118,8 @@ class IntegrationWorker(QtCore.QThread):
             })
         except Exception:
             self.failed.emit(traceback.format_exc())
+
+IntegrationWorker = process_isolated(_IntegrationWorkerImpl)   # own OS process — see proc_worker.py
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -2025,8 +2351,13 @@ class BatchWorker(QtCore.QThread):
                  dark=None, bright=None, background=None, bright_mode="divide",
                  weighted=True, context=None, im_trans=(), multi_azimuth=False,
                  calibration_snapshot=None, zarr_grouping="frame",
-                 ion_csv_extras=()):
+                 ion_csv_extras=(), dark_request=None):
         super().__init__(parent)
+        #: dark_policy.DarkRequest, or None to keep the pre-policy behaviour
+        #: of applying whatever array the caller passed to every file.
+        self._dark_request = dark_request
+        #: [(path, why)] when autodetect could not resolve this source.
+        self.dark_skipped = []
         # Full calibration (helpers.full_calibration_snapshot), embedded
         # verbatim in cake-mode HDF5 output — see cake_hdf5.write_cake_h5.
         self._calibration_snapshot = calibration_snapshot
@@ -2084,6 +2415,46 @@ class BatchWorker(QtCore.QThread):
     def _open_source(self):
         return _open_source_cfg(self._src)
 
+    def _monitor_rows_for_run(self, source) -> list:
+        """Beam-monitor rows for this run, built by the SAME function Batch
+        Correction uses (:func:`ion_csv.rows_from_tree`).
+
+        The two tabs write the same kind of sidecar about the same scan, so
+        the files should differ only in the ``_bi``/``_bc`` tail. They did
+        not: this path used ``rows_from_metas``, which resolved ion chambers
+        through ``ION_CHAMBER_H5_PATHS[hutch]`` -- ``US_IC``/``D2PD`` for
+        hutch E -- and a 1-ID file carries neither, so the _bi.csv came out
+        with no ion-chamber columns at all beside a _bc.csv holding 29
+        channels and 23 gains. It also keyed rows by a bare ordinal and
+        never wrote the shutter-closed dark row.
+
+        Only ``_HDF5StackGlobSource`` offers ``monitor_inputs`` (it is also
+        the only source with per-frame metadata at all, so no other source
+        ever produced one of these files); anything else yields no rows and
+        ``write_ion_csv`` then writes nothing, as before.
+        """
+        inputs = getattr(source, "monitor_inputs", None)
+        if inputs is None:
+            return []
+        rows = []
+        for path, ranges, n_light, n_dark in inputs():
+            hutch = ion_csv.resolve_hutch(path, settings.active_profile())
+            # Acquisition timestamps live outside instrument/ and are the
+            # cross-check on which block of scaler entries is the lights --
+            # same read Batch Correction does for the same reason.
+            tree = h5_metadata.read_tree(path)
+            try:
+                tree.update(h5_metadata.read_tree(path, groups=("NDArray",)))
+            except Exception:
+                pass
+            got, note = ion_csv.rows_from_tree(
+                tree, hutch, frame_ranges=ranges, n_light=n_light,
+                n_dark=n_dark, source=Path(path).name)
+            rows.extend(got)
+            if note:
+                self.log_line.emit(f"[batch] monitors {Path(path).name}: {note}")
+        return rows
+
     def _ion_csv_name(self) -> str:
         """``<froot>_<detector>_bi.csv`` — the same shape Batch Correction
         uses for its own monitor sidecar, differing only in the tag.
@@ -2133,6 +2504,22 @@ class BatchWorker(QtCore.QThread):
         if self._zarr_grouping == "file" and key_path.is_file():
             return zarr_dir / f"{key_path.stem}.ave.zarr.zip", False
         return zarr_dir / f"{self._run_out_stem()}.ave.zarr.zip.part", True
+
+    def _first_source_path(self):
+        """Any real input path from the source cfg, for dark resolution.
+
+        One per worker is enough, because a worker is one source folder:
+        tab_batch groups a recursive pick with group_paths_by_output_dir
+        and runs a batch per folder, and Hydra gives each scan its own.
+        """
+        cfg = self._src or {}
+        paths = cfg.get("paths")
+        if paths:
+            return paths[0]
+        one = cfg.get("path")
+        if one and os.path.isfile(str(one)):
+            return one
+        return None
 
     def _iter_frames(self, source):
         """Yield ``(abs_i, fid, img)`` for the frames this worker should process.
@@ -2283,6 +2670,30 @@ class BatchWorker(QtCore.QThread):
             # build time against the *transformed* pixel grid), so it alone is
             # pre-flipped here, once.
             dark, bright, background = self._dark, self._bright, self._background
+            # Batch Integrate used to apply whatever array the GUI handed it to
+            # every file, while Batch Correction resolved one per input file --
+            # the same selection corrected differently depending on which tab ran
+            # it. Both now ask dark_policy. Resolved once per WORKER, which is
+            # once per source folder; that is the "per subfolder" half of the
+            # rule, and it avoids threading per-frame file identity through the
+            # frame-stream abstraction, which does not carry it.
+            if self._dark_request is not None:
+                probe = self._first_source_path()
+                if probe is not None:
+                    choice = _resolve_dark_for(
+                        probe, None, self._dark_request,
+                        dark_dataset=self._dark_request.dataset,
+                        fallback=self._dark, auto=True)
+                    self.log_line.emit(f"[batch] dark = {choice.why}")
+                    if choice.skipped:
+                        self.dark_skipped.append((str(probe), choice.why))
+                        self.log_line.emit(
+                            "[batch] NOT integrating this source -- correcting it "
+                            "with another scan\'s dark is the error this check "
+                            "exists to prevent.")
+                        self.failed.emit(choice.why)
+                        return
+                    dark = choice.array
             mask = (self._mask if not self._im_trans or self._mask is None
                     else _apply_im_trans(self._mask.astype(np.float32), self._im_trans))
 
@@ -2310,6 +2721,7 @@ class BatchWorker(QtCore.QThread):
                                                 self._corrections, self._weighted)
             self.geom_ready.emit(ctx)
             geom = ctx["geom"]; corr_on = ctx["corr_on"]
+            eta_take = ctx["eta_take"]; bin_spec = ctx["bin_spec"]
             corr_counts = ctx["corr_counts"]; cnt = ctx["cnt"]
             r_ax = ctx["r_ax"]; eta_ax = ctx["eta_ax"]
             want_zarr = "zarr" in self._fmts and self._out_dir is not None
@@ -2361,6 +2773,12 @@ class BatchWorker(QtCore.QThread):
             # into its zarr and HDF5, including runs whose user never opened
             # the cake dialog, so what it used should not have to be inferred.
             self.log_line.emit(f"[batch] omega: {omega_desc}")
+            self.log_line.emit(
+                f"[batch] cake: R {spec.RMin:g}–{spec.RMax:g} px step "
+                f"{spec.RBinSize:g} ({spec.n_r_bins} bins) | η {spec.EtaMin:g}–"
+                f"{spec.EtaMax:g}° step {spec.EtaBinSize:g} "
+                f"({spec.n_eta_bins} bins) | "
+                f"{'multi-azimuth cake' if self._multi_azimuth else 'η-collapsed 1-D'}")
             if self._drift_traj is not None:
                 self.log_line.emit(
                     f"[batch] drift trajectory: {len(self._drift_traj.frame_indices)} knots  "
@@ -2426,13 +2844,20 @@ class BatchWorker(QtCore.QThread):
             # count_cake(None, ...) crashes identically for want_h5_cake.
             cake_bin_area = None
             if want_zarr or want_h5_cake:
-                cake_geom = geom if geom is not None else build_geom(spec, self._kernel, mask)
-                cake_bin_area = count_cake(cake_geom, self._kernel, spec.NrPixelsZ, spec.NrPixelsY)
+                # bin_spec / eta_take, exactly as the cake itself is made.
+                # This read `spec`/`geom` and so produced a bin area with the
+                # BINNING's eta rows, which for a range crossing +/-180 is the
+                # whole circle: 36 rows of area against a 9-row cake.
+                # GSASZarrWriter rejected the pair, the handler below dropped
+                # the writer, and ge1 came out a 136-byte empty archive --
+                # which then took the four-panel combine down with it.
+                cake_bin_area = bin_area_for(spec, self._kernel, mask,
+                                             geom=geom)
             h5_trees: dict = {}   # source path -> its instrument/ tree, read once
             if want_zarr:
                 zarr_dir = self._out_dir / "zarr"
                 zarr_dir.mkdir(parents=True, exist_ok=True)
-                zarr_bin_area = cake_bin_area
+                zarr_bin_area = cake_bin_area   # see the comment where it's built
                 if self._zarr_grouping == "file":
                     zarr_group_key_fn = getattr(source, "zarr_group_key", None)
                     if zarr_group_key_fn is None:
@@ -2508,10 +2933,18 @@ class BatchWorker(QtCore.QThread):
                 if self._drift_traj is not None:
                     cur_spec = _spec_from_trajectory(self._spec, self._drift_traj, abs_i)
                     cur_lsd  = float(cur_spec.Lsd)
-                    cur_geom = None if corr_on else build_geom(cur_spec, self._kernel, mask)
-                    cur_cc   = corrections_counts(cur_spec) if corr_on else None
-                    cur_cnt  = (count_cake(cur_geom, self._kernel, cur_spec.NrPixelsZ,
-                                           cur_spec.NrPixelsY)
+                    # Same eta range as the context's, so the same plan: bin
+                    # the circle and take the requested columns. Without this
+                    # the drift path would quietly undo the fix per frame.
+                    cur_bin  = (cur_spec if eta_take is None else
+                                replace_spec_eta(cur_spec, eta_wrap.ETA_LO,
+                                                 eta_wrap.ETA_HI))
+                    cur_geom = None if corr_on else build_geom(cur_bin, self._kernel, mask)
+                    cur_cc   = (eta_wrap.apply_take(corrections_counts(cur_bin), eta_take)
+                                if corr_on else None)
+                    cur_cnt  = (eta_wrap.apply_take(
+                                    count_cake(cur_geom, self._kernel, cur_bin.NrPixelsZ,
+                                               cur_bin.NrPixelsY), eta_take)
                                 if (self._weighted and not corr_on) else None)
                 else:
                     cur_spec = spec
@@ -2525,12 +2958,14 @@ class BatchWorker(QtCore.QThread):
                     prof, sigma, cake_2d, cake_sigma = integrate_frame(
                         img_t, cur_spec, cur_geom, self._kernel, self._corrections,
                         self._variance_cfg, need_sigma, corr_counts=cur_cc,
+                        eta_take=eta_take,
                         return_cake=True, weighted=self._weighted, cnt_cake=cur_cnt)
                 else:
                     cake_2d = None; cake_sigma = None
                     prof, sigma = integrate_frame(
                         img_t, cur_spec, cur_geom, self._kernel, self._corrections,
                         self._variance_cfg, need_sigma, corr_counts=cur_cc,
+                        eta_take=eta_take,
                         weighted=self._weighted, cnt_cake=cur_cnt)
 
                 if sigma is None:
@@ -2712,7 +3147,7 @@ class BatchWorker(QtCore.QThread):
                 try:
                     written = ion_csv.write_ion_csv(
                         self._out_dir.parent / self._ion_csv_name(),
-                        ion_csv.rows_from_metas([m for _i, m in ion_meta]),
+                        self._monitor_rows_for_run(source),
                         extras=self._ion_csv_extras)
                     if written:
                         out_paths.append(written)
@@ -2765,8 +3200,8 @@ class BatchWorker(QtCore.QThread):
                     h5_path = h5_dir / f"{combined_stem}.h5"
                     try:
                         from midas_gui.cake_hdf5 import write_cake_h5
-                        write_cake_h5(
-                            h5_path, cake=np.array(all_profiles),
+                        _write_h5_atomic(h5_path, lambda t: write_cake_h5(
+                            t, cake=np.array(all_profiles),
                             cake_sigma=np.array(all_sigmas),
                             collapsed_profiles=(np.array(all_cake_profiles)
                                                 if all_cake_profiles else None),
@@ -2781,7 +3216,7 @@ class BatchWorker(QtCore.QThread):
                                 'RBinSize': float(spec.RBinSize),
                                 'EtaMin': float(spec.EtaMin), 'EtaMax': float(spec.EtaMax),
                                 'EtaBinSize': float(spec.EtaBinSize),
-                            })
+                            }))
                         try:
                             # out_paths is only fully known here (every zarr
                             # sibling from this run, plus this h5's own path).
@@ -2799,17 +3234,20 @@ class BatchWorker(QtCore.QThread):
                     h5_dir = self._out_dir / "h5"
                     h5_dir.mkdir(parents=True, exist_ok=True)
                     h5_path = h5_dir / f"{combined_stem}.h5"
-                    m.write_h5(str(h5_path),
-                               profiles=np.array(all_profiles),
-                               r_axis=r_ax,
-                               frame_ids=frame_ids,
-                               sigmas=np.array(all_sigmas),
-                               # One rotation angle per profile, same order —
-                               # see write_all_profiles for why this is an
-                               # extra dataset rather than a metadata field.
-                               extra_datasets={"omegas": np.asarray(
-                                   all_omegas, dtype=np.float64)})
+                    _write_h5_atomic(h5_path, lambda t: m.write_h5(
+                        str(t),
+                        profiles=np.array(all_profiles),
+                        r_axis=r_ax,
+                        frame_ids=frame_ids,
+                        sigmas=np.array(all_sigmas),
+                        # One rotation angle per profile, same order —
+                        # see write_all_profiles for why this is an
+                        # extra dataset rather than a metadata field.
+                        extra_datasets={
+                            "omegas": np.asarray(all_omegas, dtype=np.float64),
+                            **radial_axis_datasets(r_ax, lsd, px, wl)}))
                     try:
+                        stamp_cake_params_h5(h5_path, spec)
                         prov_entry['extra']['out_paths'] = out_paths + [str(h5_path)]
                         stamp_h5_provenance(h5_path, prov_entry)
                     except Exception:
@@ -2890,6 +3328,7 @@ class PumpProbeWorker(QtCore.QThread):
                 ctx = build_integration_context(spec, self._kernel, mask,
                                                 self._corrections, self._weighted)
             geom = ctx["geom"]; corr_counts = ctx["corr_counts"]; cnt = ctx["cnt"]
+            eta_take = ctx["eta_take"]
             r_ax = ctx["r_ax"]
 
             rebin_unit = rebin_cfg_parts(self._q_cfg)[0]
@@ -2919,7 +3358,7 @@ class PumpProbeWorker(QtCore.QThread):
                 img_t = torch.from_numpy(img.astype(np.float64))
                 prof, _ = integrate_frame(
                     img_t, spec, geom, self._kernel, self._corrections,
-                    None, False, corr_counts=corr_counts,
+                    None, False, corr_counts=corr_counts, eta_take=eta_take,
                     weighted=self._weighted, cnt_cake=cnt)
                 if self._q_cfg:
                     prof, _ = rebin_R_to_grid(compute_r_axis(spec), prof, None,
@@ -2935,7 +3374,11 @@ class PumpProbeWorker(QtCore.QThread):
             result = self._group_and_difference(
                 np.asarray(profiles), np.asarray(delays), self._ref_delays)
             result.update({"r_axis_px": r_ax, "q_axis": q_ax, "tth_axis": two_theta,
-                           "lsd": lsd, "px": px, "wl": wl})
+                           "lsd": lsd, "px": px, "wl": wl,
+                           # per-frame (acquisition order) — lets the tab re-group
+                           # after a q-alignment (see qshift.py)
+                           "profiles": np.asarray(profiles, dtype=float),
+                           "frame_delays": np.asarray(delays, dtype=float)})
             self.finished.emit(result)
         except Exception:
             self.failed.emit(traceback.format_exc())
@@ -3493,6 +3936,48 @@ class _HDF5StackGlobSource:
         grouping must not get to disagree with the angle."""
         return self.omega_channel_window(idx)[0]
 
+    def monitor_inputs(self) -> list:
+        """Per source file, ``(path, ranges, n_light, n_dark)`` -- exactly the
+        shape :func:`ion_csv.rows_from_tree` takes, and exactly what
+        ``BatchCorrectionWorker._collect_monitor_rows`` already builds.
+
+        Exists so Batch Integrate's sidecar comes out of the SAME row builder
+        as Batch Correction's rather than a second one that merely agrees.
+        They had diverged badly: ``rows_from_metas`` resolved ion chambers
+        through ``ION_CHAMBER_H5_PATHS[hutch]`` -- ``US_IC``/``D2PD`` for
+        hutch E -- and a 1-ID file carries neither, so the _bi.csv had no
+        ion-chamber columns at all while the _bc.csv beside it had 29
+        channels. It also keyed rows by a bare ordinal and never wrote the
+        dark row.
+
+        ``ranges`` are the same raw sub-frame spans ``_fid`` embeds in each
+        frame id, so a CSV row and the output frame it describes name the
+        same thing. ``n_dark`` is read from the dark dataset rather than
+        inferred, since ``split_light_dark`` uses it to decide which block of
+        a flat metadata array is the lights.
+        """
+        self._ensure_stats()
+        out = []
+        for i, path in enumerate(self._paths):
+            n_raw = int(self._raw_ns[i])
+            ranges = [self._chunk_range(k, n_raw) for k in range(int(self._counts[i]))]
+            n_dark = 0
+            try:
+                import h5py
+                with h5py.File(str(path), "r") as f:
+                    # "<dataset>_dark" is the VAREX/Eiger convention; the
+                    # literal fallback covers a source pointed at a
+                    # differently-named light dataset in the same file.
+                    for cand in (f"{self._dataset}_dark", "exchange/data_dark"):
+                        dk = f.get(cand)
+                        if dk is not None and getattr(dk, "ndim", 0) == 3:
+                            n_dark = int(dk.shape[0])
+                            break
+            except Exception:
+                n_dark = 0
+            out.append((path, ranges, n_raw, n_dark))
+        return out
+
     def metadata_for_index(self, idx: int) -> dict:
         """Chunk-mean metadata (Temperature/Pressure/StorageRing current)
         for combined frame ``idx``, in the same flattened index space as
@@ -3615,6 +4100,7 @@ class FolderMonitorWorker(QtCore.QThread):
                                                 self._corrections, self._weighted)
             self.geom_ready.emit(ctx)
             geom = ctx["geom"]; corr_counts = ctx["corr_counts"]; cnt = ctx["cnt"]
+            eta_take = ctx["eta_take"]
             lsd, px, wl = ctx["lsd"], ctx["px"], ctx["wl"]
             r_ax = ctx["r_ax"]
             out_grid = None
@@ -3660,6 +4146,7 @@ class FolderMonitorWorker(QtCore.QThread):
                     prof, sigma = integrate_frame(
                         img_t, spec, geom, self._kernel, self._corrections,
                         self._variance_cfg, True, corr_counts=corr_counts,
+                        eta_take=eta_take,
                         weighted=self._weighted, cnt_cake=cnt)
                     if sigma is None:
                         sigma = np.sqrt(np.maximum(prof, 0.0))
@@ -3867,12 +4354,17 @@ def write_all_profiles(out_dir, fmts, r_axis, profiles, sigmas, frame_ids,
         # own, and a downstream peak fit or pole figure needs one value per
         # profile, in the same order. Skipped rather than padded when the
         # lengths disagree — a misaligned angle is worse than none.
-        extras = None
+        extras = dict(radial_axis_datasets(r_axis, lsd, px, wl))
         if omegas is not None and len(omegas) == len(frame_ids):
-            extras = {"omegas": np.asarray(omegas, dtype=np.float64)}
-        m.write_h5(str(h5_path), profiles=profiles, r_axis=r_axis,
-                   frame_ids=frame_ids, sigmas=sigmas,
-                   extra_datasets=extras)
+            extras["omegas"] = np.asarray(omegas, dtype=np.float64)
+        _write_h5_atomic(h5_path, lambda t: m.write_h5(
+            str(t), profiles=profiles, r_axis=r_axis,
+            frame_ids=frame_ids, sigmas=sigmas, extra_datasets=extras))
+        if spec is not None:
+            try:
+                stamp_cake_params_h5(h5_path, spec)
+            except Exception:
+                pass   # best-effort, like the provenance stamp below
         try:
             entry = provenance.build_entry(
                 'midas_gui.batch_integrate.save',
@@ -3967,7 +4459,7 @@ class BatchRunCoordinator(QtCore.QObject):
                  weighted=True, context=None, im_trans=(), multi_azimuth=False,
                  run_mode="sequential", n_workers=1, parent=None,
                  calibration_snapshot=None, zarr_grouping="frame",
-                 ion_csv_extras=()):
+                 ion_csv_extras=(), dark_request=None):
         super().__init__(parent)
         self._args = dict(
             spec=spec, source_cfg=source_cfg, mask=mask, out_dir=out_dir, fmts=fmts,
@@ -3977,7 +4469,8 @@ class BatchRunCoordinator(QtCore.QObject):
             drift_traj=drift_traj, dark=dark, bright=bright, background=background,
             bright_mode=bright_mode, weighted=weighted, im_trans=im_trans,
             multi_azimuth=multi_azimuth, calibration_snapshot=calibration_snapshot,
-            zarr_grouping=zarr_grouping, ion_csv_extras=ion_csv_extras)
+            zarr_grouping=zarr_grouping, ion_csv_extras=ion_csv_extras,
+            dark_request=dark_request)
         self._context = context
         self._run_mode = run_mode if run_mode == "batch_parallel" else "sequential"
         self._n_workers_requested = max(1, int(n_workers))
@@ -4004,6 +4497,16 @@ class BatchRunCoordinator(QtCore.QObject):
         if self._geom_worker is not None and self._geom_worker.isRunning():
             return True
         return any(w.isRunning() for w in self._chunk_workers)
+
+    @property
+    def dark_skipped(self) -> list:
+        """Sources skipped for want of a valid dark — see the same
+        property on BatchCorrectionCoordinator."""
+        out = []
+        for w in ([self._solo_worker] if self._solo_worker else []) + \
+                list(self._chunk_workers):
+            out.extend(getattr(w, "dark_skipped", ()) or ())
+        return out
 
     def start(self):
         if self._run_mode != "batch_parallel":
@@ -4159,14 +4662,10 @@ class BatchRunCoordinator(QtCore.QObject):
                     # Not carried over from any one chunk worker (each built its
                     # own geometry independently) — rebuilt once here so the
                     # combined cake HDF5 still gets a real, non-zero BinArea row.
-                    geom = build_geom(spec, kernel, self._args["mask"])
-                    bin_area = count_cake(geom, kernel, spec.NrPixelsZ, spec.NrPixelsY)
-                    cake_params = {
-                        'RMin': float(spec.RMin), 'RMax': float(spec.RMax),
-                        'RBinSize': float(spec.RBinSize),
-                        'EtaMin': float(spec.EtaMin), 'EtaMax': float(spec.EtaMax),
-                        'EtaBinSize': float(spec.EtaBinSize),
-                    }
+                    # Through bin_area_for, so a wrapped eta range gets a
+                    # real area for the bins past the cut instead of zeros.
+                    bin_area = bin_area_for(spec, kernel, self._args["mask"])
+                    cake_params = cake_params_of(spec)
                 h5_paths = write_all_profiles(
                     out_dir, ["h5"], r_axis, merged_profiles, merged_sigmas, merged_ids,
                     float(spec.Lsd), float(spec.pxY), float(spec.Wavelength),
@@ -4213,7 +4712,7 @@ class BatchRunCoordinator(QtCore.QObject):
 #  Tab 4 — Calibration refinement (autograd against integrated profile)
 # ═════════════════════════════════════════════════════════════════════════════
 
-class RefinementWorker(QtCore.QThread):
+class _RefinementWorkerImpl(QtCore.QThread):
     """Refine geometry by minimising an integrated-profile loss via autograd.
 
     Default loss is EtaUniformityLoss (rings should be flat in η).  The image is
@@ -4420,12 +4919,14 @@ class RefinementWorker(QtCore.QThread):
         except Exception:
             self.failed.emit(traceback.format_exc())
 
+RefinementWorker = process_isolated(_RefinementWorkerImpl)   # own OS process — see proc_worker.py
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  Tab 4b — Profile comparison (before/after refinement)
 # ═════════════════════════════════════════════════════════════════════════════
 
-class RefineCompareWorker(QtCore.QThread):
+class _RefineCompareWorkerImpl(QtCore.QThread):
     """Integrate one frame with both the original and refined calibration results.
 
     Returns profiles on a common R axis so the tab can overlay them and show
@@ -4491,6 +4992,8 @@ class RefineCompareWorker(QtCore.QThread):
         except Exception:
             self.failed.emit(traceback.format_exc())
 
+RefineCompareWorker = process_isolated(_RefineCompareWorkerImpl)   # own OS process — see proc_worker.py
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  Tab 5 — Corrections & Physics preview (single frame)
@@ -4511,7 +5014,7 @@ def _parse_composition(text: str) -> dict:
     return out
 
 
-class CorrectionPreviewWorker(QtCore.QThread):
+class _CorrectionPreviewWorkerImpl(QtCore.QThread):
     """Integrate one frame with and without the selected corrections so the user
     can see the effect of each before committing to a batch run.
 
@@ -4602,6 +5105,8 @@ class CorrectionPreviewWorker(QtCore.QThread):
         except Exception:
             self.failed.emit(traceback.format_exc())
 
+CorrectionPreviewWorker = process_isolated(_CorrectionPreviewWorkerImpl)   # own OS process — see proc_worker.py
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  Tab 6 — PDF analysis (image → I(Q) → G(r))
@@ -4681,7 +5186,7 @@ def _flatten_sq_tail(q, S, window, poly_deg=3, mad_k=3.0, n_iter=3):
     return S_flat, poly
 
 
-class PDFWorker(QtCore.QThread):
+class _PDFWorkerImpl(QtCore.QThread):
     """Polyatomic total-scattering PDF: I(Q) → Faber-Ziman S(Q) → G(r).
 
     Uses the ``midas_pdf`` backend (via :mod:`midas_gui.pdf_backend`): real
@@ -4942,8 +5447,10 @@ class PDFWorker(QtCore.QThread):
         except Exception:
             self.failed.emit(traceback.format_exc())
 
+PDFWorker = process_isolated(_PDFWorkerImpl)   # own OS process — see proc_worker.py
 
-class PDFStructureFitWorker(QtCore.QThread):
+
+class _PDFStructureFitWorkerImpl(QtCore.QThread):
     """CIF-driven small-box structure refinement (PDFfit-style) against a
     previously computed G(r) snapshot.
 
@@ -5032,12 +5539,14 @@ class PDFStructureFitWorker(QtCore.QThread):
         except Exception:
             self.failed.emit(traceback.format_exc())
 
+PDFStructureFitWorker = process_isolated(_PDFStructureFitWorkerImpl)   # own OS process — see proc_worker.py
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  Tab 7 — Texture / pole figure (per-ring azimuthal extraction)
 # ═════════════════════════════════════════════════════════════════════════════
 
-class PoleFigureWorker(QtCore.QThread):
+class _PoleFigureWorkerImpl(QtCore.QThread):
     """Integrate one frame to an (η, R) cake, then map a selected ring to a
     stereographic pole figure and extract its azimuthal intensity I(η)."""
     log_line = QtCore.pyqtSignal(str)
@@ -5084,12 +5593,14 @@ class PoleFigureWorker(QtCore.QThread):
         except Exception:
             self.failed.emit(traceback.format_exc())
 
+PoleFigureWorker = process_isolated(_PoleFigureWorkerImpl)   # own OS process — see proc_worker.py
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  Learnable gain worker (Tab 5 — per-pixel spatial gain drift recovery)
 # ═════════════════════════════════════════════════════════════════════════════
 
-class LearnableGainWorker(QtCore.QThread):
+class _LearnableGainWorkerImpl(QtCore.QThread):
     """Train a per-pixel LearnableGain module against a reference profile.
 
     Workflow (notebook 16):
@@ -5187,6 +5698,8 @@ class LearnableGainWorker(QtCore.QThread):
         except Exception:
             self.failed.emit(traceback.format_exc())
 
+LearnableGainWorker = process_isolated(_LearnableGainWorkerImpl)   # own OS process — see proc_worker.py
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  Drift trajectory worker (Tab 3 — long-scan geometry drift correction)
@@ -5209,7 +5722,7 @@ def _spec_from_trajectory(base_spec, traj, frame_abs_idx: int):
     return s
 
 
-class DriftWorker(QtCore.QThread):
+class _DriftWorkerImpl(QtCore.QThread):
     """Fit a per-frame geometry drift trajectory from calibrant anchor frames.
 
     The function ``fit_drift_trajectory`` (midas_integrate_v2.pipelines.drift)
@@ -5263,3 +5776,55 @@ class DriftWorker(QtCore.QThread):
             self.finished.emit(traj)
         except Exception:
             self.failed.emit(traceback.format_exc())
+
+DriftWorker = process_isolated(_DriftWorkerImpl)   # own OS process — see proc_worker.py
+
+
+class SolveCellWorker(QtCore.QThread):
+    """Runs one Solve Cell pipeline stage (ingest/diamond_filter/ab_initio/
+    refine) off the GUI thread. See midas_gui/solve_cell/pipeline.py — this
+    worker is a thin dispatcher, no pipeline logic lives here.
+
+    ``cfg["frames_loader"]`` (a zero-arg callable, e.g. a ``DataLoaderPanel``'s
+    ``full_stack`` bound method) is resolved into ``cfg["frames"]`` here, on
+    this thread, rather than by the GUI caller before starting the worker —
+    for an HDF5-backed stack that read can be ~10 GB of synchronous disk I/O,
+    and doing it on the GUI thread froze the window with no progress shown
+    for the whole read before "Running ingest…" even had a chance to mean
+    anything. ``pipeline.py`` itself is untouched: it still just expects
+    ``cfg["frames"]`` to already be an array.
+    """
+    log_line = QtCore.pyqtSignal(str)
+    # (step_name, {"preview": ..., "stats": ..., optional "panel_id": ...}) --
+    # see pipeline.py's _stage_ingest docstring. Only ingest/ingest_pooled
+    # ever emit this; run_stage() ignores on_step for every other stage.
+    step     = QtCore.pyqtSignal(str, object)
+    finished = QtCore.pyqtSignal(object)
+    failed   = QtCore.pyqtSignal(str)
+
+    def __init__(self, stage: str, cfg: dict, parent=None):
+        super().__init__(parent)
+        self._stage = stage
+        self._cfg = cfg
+
+    def run(self):
+        import sys
+        old_out, old_err = sys.stdout, sys.stderr
+        stream = _LogStream(self.log_line)
+        sys.stdout = sys.stderr = stream
+        try:
+            if "frames_loader" in self._cfg and "frames" not in self._cfg:
+                loader = self._cfg.pop("frames_loader")
+                self._cfg["frames"] = loader()
+            from midas_gui.solve_cell import pipeline
+            result = pipeline.run_stage(
+                self._stage, self._cfg,
+                on_step=lambda name, payload: self.step.emit(name, payload))
+            self.finished.emit(result)
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+        finally:
+            if sys.stdout is stream:
+                sys.stdout = old_out
+            if sys.stderr is stream:
+                sys.stderr = old_err

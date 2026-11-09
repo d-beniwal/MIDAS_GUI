@@ -156,12 +156,12 @@ class ROIStatsPopup(QtWidgets.QDialog):
         v.addLayout(head)
 
         if kind == "line":
-            self._plot = pg.PlotWidget(background="#2b2e35")
+            self._plot = pg.PlotWidget(background=S.CANVAS_PANEL)
             self._plot.setMinimumSize(110, 65)
-            self._plot.setLabel("bottom", "distance (px)", **S.axis_label_css("#d0d0d0"))
-            self._plot.setLabel("left", "intensity", **S.axis_label_css("#d0d0d0"))
+            self._plot.setLabel("bottom", "distance (px)", **S.axis_label_css(S.AXIS_TEXT))
+            self._plot.setLabel("left", "intensity", **S.axis_label_css(S.AXIS_TEXT))
             for ax in ("bottom", "left"):
-                self._plot.getAxis(ax).setTextPen("#c8c8c8")
+                self._plot.getAxis(ax).setTextPen(S.AXIS_TICK)
                 self._plot.getAxis(ax).setPen("#8a8a8a")
             self._curve = self._plot.plot([], [], pen=pg.mkPen(color, width=2))
             v.addWidget(self._plot)
@@ -177,7 +177,7 @@ class ROIStatsPopup(QtWidgets.QDialog):
 
             self._stats_lbl = QtWidgets.QLabel("")
             self._stats_lbl.setFont(_mono_font(9))
-            self._stats_lbl.setStyleSheet("color:#d6d6d6;")
+            self._stats_lbl.setStyleSheet(f"color:{S.SURFACE_FG};")
             v.addWidget(self._stats_lbl)
             self._hist_plot = None
             self._crop_vb = None
@@ -185,12 +185,12 @@ class ROIStatsPopup(QtWidgets.QDialog):
             row = QtWidgets.QHBoxLayout(); row.setSpacing(6)
 
             hist_col = QtWidgets.QVBoxLayout(); hist_col.setSpacing(2)
-            self._hist_plot = pg.PlotWidget(background="#2b2e35")
+            self._hist_plot = pg.PlotWidget(background=S.CANVAS_PANEL)
             self._hist_plot.setMinimumSize(85, 55)
-            self._hist_plot.setLabel("bottom", "intensity", **S.axis_label_css("#d0d0d0"))
-            self._hist_plot.setLabel("left", "count", **S.axis_label_css("#d0d0d0"))
+            self._hist_plot.setLabel("bottom", "intensity", **S.axis_label_css(S.AXIS_TEXT))
+            self._hist_plot.setLabel("left", "count", **S.axis_label_css(S.AXIS_TEXT))
             for ax in ("bottom", "left"):
-                self._hist_plot.getAxis(ax).setTextPen("#c8c8c8")
+                self._hist_plot.getAxis(ax).setTextPen(S.AXIS_TICK)
                 self._hist_plot.getAxis(ax).setPen("#8a8a8a")
             self._curve = self._hist_plot.plot(
                 [], [], stepMode="center", fillLevel=0,
@@ -202,7 +202,7 @@ class ROIStatsPopup(QtWidgets.QDialog):
             hist_col.addWidget(self._logy_chk)
             row.addLayout(hist_col, 1)
 
-            crop_view = pg.PlotWidget(background="#2b2e35")
+            crop_view = pg.PlotWidget(background=S.CANVAS_PANEL)
             crop_view.setMinimumSize(90, 90)
             crop_view.setSizePolicy(QtWidgets.QSizePolicy.Expanding,
                                      QtWidgets.QSizePolicy.Expanding)
@@ -299,7 +299,7 @@ class ROIStatsPopup(QtWidgets.QDialog):
             y = np.log10(y + 1.0)
         self._curve.setData(edges, y)
         self._hist_plot.setLabel("left", "log(count+1)" if log else "count",
-                                 **S.axis_label_css("#d0d0d0"))
+                                 **S.axis_label_css(S.AXIS_TEXT))
         if edges.size:
             _apply_view_limits(self._hist_plot, float(edges[0]), float(edges[-1]),
                                 0.0, float(y.max()) if y.size else 1.0,
