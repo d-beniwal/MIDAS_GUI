@@ -410,3 +410,70 @@ Questions:
 - Failing that: would you accept the per-iteration meaning being documented on
   `autocalibrate`'s docstring? Nothing currently says the window moves, and the
   natural reading of "tolerance" is a bound on the result.
+
+---
+
+## 9. Transpose (`ImTransOpt 3`) is rejected by every integrator on a non-square detector, but calibration handles it — can integrate do the same?
+
+**Status: open — to raise with the MIDAS developer** (found 2026-11-08, `midas-integrate-v2` 0.9.0, `midas-calibrate-v2` 0.24.0).
+
+A user doing Calibrate → Integrate on a non-square detector with Transpose ticked got an
+integration that broke. Reading the packages: calibration copes, integration cannot.
+
+* `midas_calibrate_v2.io.transforms.apply_im_trans` transposes image, dark and mask
+  together and reads `NrPixelsY/Z` from the *transformed* shape.
+* `midas_integrate_v2/binning/trans_opt.py:52-57` raises
+  `TransOpt=3 (transpose) requires NrPixelsY == NrPixelsZ`. v1
+  `midas_integrate/detector_mapper.py` and C `FF_HEDM/src/ImageUtils.c` say the same.
+  Even if that guard were lifted, `hard.py:137` demands the raw image be
+  `(n_pixels_z, n_pixels_y)` while the geometry is built on the untransformed grid, so
+  the single `NrPixelsY/Z` pair would have to be both the raw and the transformed shape.
+* Consequence: every rotation by 90° (`ImTransOpt 2,3` clockwise, `1,3` anticlockwise —
+  checked against `numpy.rot90` on a 3×4 array) and a plain transpose cannot be
+  integrated on a non-square detector. 180° (`1,2`) and single flips work everywhere.
+
+Questions:
+- Is the square-only restriction intentional, or a carry-over from v1's in-place C swap?
+- Would you accept building `*BinGeometry.from_spec` in the transformed frame (swap Y/Z
+  counts when the number of `3`s is odd), checking the raw image against the unswapped
+  shape, and giving `_inverse_transform_pixel_arrays` both shapes? `apply_im_trans` in
+  `midas_calibrate_v2` is a working reference.
+- The C `midas_image_transform` swaps in place and cannot do non-square; it needs an
+  out-of-place buffer with swapped dimensions. Is that in scope?
+
+Until then the GUI cannot integrate such a detector with a 90° rotation. A GUI-side
+workaround (pre-transform every input in Python, hand over `TransOpt=[]` and the
+transformed counts) is possible but touches every integration worker; see ROADMAP P3-5.
+
+---
+
+## 10. Multi-operation `ImTransOpt` in a paramstest is read three different ways — which is canonical?
+
+**Status: open — to raise with the MIDAS developer** (found 2026-11-08; Python readers
+run, C readers read from source only).
+
+The GUI now lets the user pick an arbitrary `ImTransOpt` sequence (tick order) and
+writes it as one `ImTransOpt <code>` line per op, in order. Reading that file back:
+
+| Reader | `ImTransOpt 3` / `ImTransOpt 1` (per line) | `ImTransOpt 3 1` (one line) |
+|---|---|---|
+| `midas_integrate.parse_params`, `midas_integrate_v2.spec_from_v1_paramstest` | `[3, 1]` ✔ | `[3]` ✘ |
+| C `MIDAS_ParamParser.c`, `DetectorMapper.c`, `findSingleSolutionPFRefactored.c`, `IntegratorFitPeaksGPUStream.cu` | both ✔ | first only ✘ |
+| `midas_calibrate.params` → `midas_calibrate_v2` `im_trans_from_v1`, `ff_calibrate._im_trans_from_template` | **last line only → `(1,)`** ✘ | `(3, 1)` ✔ |
+| C `IntegratorZarrOMP.c` | **last line only** ✘ (count reset per line) | ✔ |
+
+No single file spelling satisfies every reader, and the two failures are silent (the
+calibration or integration just runs with the wrong transform).
+
+Questions:
+- Which spelling is canonical? The per-line form is what most readers and
+  `DetectorMapper.c` assume.
+- Could `midas_calibrate.params` accumulate a repeated key instead of keeping the last
+  one, and `IntegratorZarrOMP.c` append instead of reset — and could every reader accept
+  both spellings (tokens on a line *and* repeated lines)?
+- `ff_paramstest_from_auto_result` keeps the template's `ImTransOpt` lines verbatim and
+  never writes `result.im_trans`. That is how the GUI ended up with `3,1,3,1` (fixed
+  GUI-side, DECISIONS 2026-11-08). Should it emit the result's codes itself and drop the
+  template's?
+
+See ROADMAP P3-6.

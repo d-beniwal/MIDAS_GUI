@@ -35,6 +35,7 @@ from midas_gui.helpers import (_fspin, _NoScrollSpinBox, _browse,
                          make_kedge_label, make_pixel_label, tilted_ring_xy,
                          write_poni, write_standalone_paramstest,
                          im_trans_codes_from_checkboxes, _apply_im_trans,
+                         link_im_trans_checkboxes, set_im_trans_codes,
                          parse_dspacing_text, ring_on_image_mask as _ring_on_image_mask,
                          max_two_theta_deg, browse_start_dir)
 from midas_gui.workers import build_integration_context, integrate_frame
@@ -654,9 +655,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             self._bc_auto.setChecked(False)   # use the supplied beam centre
         if g.get("im_trans") is not None:
             im_trans = g["im_trans"] or []
-            self._flip_y.setChecked(1 in im_trans)
-            self._flip_z.setChecked(2 in im_trans)
-            self._transp.setChecked(3 in im_trans)
+            set_im_trans_codes(self._flip_y, self._flip_z, self._transp, im_trans)
         has_full = any(g.get(k) not in (None, 0, 0.0) for k in ("tx", "ty", "tz")) \
             or bool(g.get("distortion")) \
             or (g.get("NrPixelsY") and g.get("NrPixelsZ"))
@@ -781,6 +780,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         self._flip_y.setToolTip(
             "MIDAS ImTransOpt image transform, applied to the raw detector\n"
             "image before display/integration and saved into calibration files.")
+        link_im_trans_checkboxes(self._flip_y, self._flip_z, self._transp)
         tb_trans = QtWidgets.QHBoxLayout(); tb_trans.setSpacing(8)
         tb_trans.addWidget(self._flip_y); tb_trans.addWidget(self._flip_z)
         tb_trans.addWidget(self._transp)
@@ -2076,9 +2076,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             if v is not None:
                 w.blockSignals(True); w.setValue(float(v)); w.blockSignals(False)
         im_trans = geo.get("im_trans") or []
-        self._flip_y.setChecked(1 in im_trans)
-        self._flip_z.setChecked(2 in im_trans)
-        self._transp.setChecked(3 in im_trans)
+        set_im_trans_codes(self._flip_y, self._flip_z, self._transp, im_trans)
         parts = []
         if lsd is not None: parts.append(f"Lsd={float(lsd)/1000:.2f} mm")
         if bcy is not None and bcz is not None:

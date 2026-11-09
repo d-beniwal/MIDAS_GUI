@@ -4,6 +4,8 @@ Last updated: 2026-11-04 (process-isolated workers)
 
 ## Now working on
 
+2026-11-08: Transforms checkboxes record tick order and show it as a number ("Flip Y (2)"); order persisted in GUI state/projects (DECISIONS 2026-11-08). Offscreen-tested (`tests/test_im_trans_order.py`); not hand-checked on cocoa. **Also fixed:** template-based paramstest output doubled ImTransOpt lines. **Open:** midas_calibrate/IntegratorZarrOMP.c read multi-op ImTransOpt differently from the rest (DECISIONS); non-square 90° rotation/transpose still fails in Integrate (backend gap; GUI-side pre-transform workaround not built). Uncommitted.
+
 2026-11-08: Fast HDF5 load for big/network files — single-open probe, cached dataset listing, worker-thread probes with a 0.25 s GUI wait budget, byte-bounded frame cache + slow-storage read-ahead (DECISIONS 2026-11-08). Unit/offscreen-tested with simulated slow I/O (`tests/test_h5_fast_load.py`); **not tried on a real slow share or on Windows/Linux hosts**. Uncommitted.
 
 2026-11-07: Batch Integrate result plots (waterfall/stacked) — x ticks/zoom floored at the bin width (DECISIONS 2026-11-07). Uncommitted. Detector-view flip issue not yet reproduced (see DECISIONS).
@@ -54,6 +56,7 @@ View details: DECISIONS 2026-10-24 and `documentation/solve_cell_visualizations.
 
 ## Next steps
 
+- Ask backend (midas_calibrate_v2) to forward `rings_to_exclude` through `iterate_frozen_point_until_stable` and `first_time_calibrate`; then drop the two GUI warnings in `calib.run_pipeline` (DECISIONS 2026-11-07).
 - Live-check the combined calibration on representative beamline data; later
   systematically compare the deferred pipelines (ROADMAP). Connect Frozen-point
   windows at both adapter and iterative-backend layers before promising bounds.
@@ -87,6 +90,11 @@ View details: DECISIONS 2026-10-24 and `documentation/solve_cell_visualizations.
   ARCHITECTURE and DECISIONS for details. VisPy segfaulted in this setup.
 - Windows `lheald` calibration-import failure and grouped-median crash
   remain unresolved; no new conclusion about their cause in this task.
+
+- **To raise with the MIDAS developer (2026-11-08):** (1) non-square transpose / 90° rotation is
+  rejected by every integrator but handled by calibrate; (2) multi-op `ImTransOpt` is read per-line,
+  last-line-only, or one-line depending on the reader. Details: QUESTIONS_FOR_COLLEAGUES.md #9/#10,
+  ROADMAP P3-5/P3-6.
 
 ## Recent changes
 - 2026-11-02: Light theme added (`style.DARK`/`LIGHT` tokens, `set_mode`, `ui.theme` pref); inline muted greys/links tokenised across tabs. Follow-ups: light pyvista/matplotlib canvases; audit remaining dialogs/tabs (Solve Cell, PDF, Batch, Mask) in light mode.

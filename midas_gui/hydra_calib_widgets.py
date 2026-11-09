@@ -28,6 +28,7 @@ from midas_gui.constants import DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM, DEFAULT_LS
     DEFAULT_BC_Y, DEFAULT_BC_Z
 from midas_gui.helpers import (
     _fspin, im_trans_codes_from_checkboxes, geometry_fields_from_file,
+    link_im_trans_checkboxes, set_im_trans_codes, set_paramstest_im_trans,
     _predict_ring_radii, ring_xy_corrected, distortion_rho_d_um, paramstest_pairs,
     write_standalone_paramstest, apply_dict_to_widgets, rmax_corner_px,
     _PARAMSTEST_DISTORTION)
@@ -114,6 +115,7 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
         self._flip_y = QtWidgets.QCheckBox("Flip Y")
         self._flip_z = QtWidgets.QCheckBox("Flip Z")
         self._transp = QtWidgets.QCheckBox("Transpose")
+        link_im_trans_checkboxes(self._flip_y, self._flip_z, self._transp)
         for cb in (self._flip_y, self._flip_z, self._transp):
             cb.toggled.connect(self.imTransChanged.emit)
         tb = QtWidgets.QHBoxLayout(); tb.setSpacing(8)
@@ -394,9 +396,7 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
             self._enable_seed(tz=True)
         if g.get("im_trans") is not None:
             im_trans = g["im_trans"] or []
-            self._flip_y.setChecked(1 in im_trans)
-            self._flip_z.setChecked(2 in im_trans)
-            self._transp.setChecked(3 in im_trans)
+            set_im_trans_codes(self._flip_y, self._flip_z, self._transp, im_trans)
 
     def seed_from_result(self, result, refine: dict):
         """Copy optimized geometry into the seed fields — but only the
@@ -651,11 +651,8 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
                 raise FileNotFoundError(f"Template not found: {tmpl_path}")
             from midas_calibrate_v2.compat.to_v1 import ff_paramstest_from_auto_result
             ff_paramstest_from_auto_result(self.result, tmpl_path, out_path)
-            im_trans = getattr(self.result, "im_trans", None)
-            if im_trans:
-                with open(out_path, "a") as _f:
-                    for code in im_trans:
-                        _f.write(f"ImTransOpt {int(code)}\n")
+            # Replace (not append to) any ImTransOpt the template carried.
+            set_paramstest_im_trans(out_path, getattr(self.result, "im_trans", None))
         else:
             write_standalone_paramstest(self.result, out_path)
 

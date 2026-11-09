@@ -780,6 +780,8 @@ def calib_attempt_gui_fields(meta: dict) -> dict:
         "cal": cfg.get("calibrant"),
         "pxY": cfg.get("pxY"),
         "flip_y": 1 in im_trans, "flip_z": 2 in im_trans, "transp": 3 in im_trans,
+        # tick order is part of the transform (see helpers.link_im_trans_checkboxes)
+        "im_trans_seq": list(dict.fromkeys(cfg.get("im_trans") or [])),
         "manual_seed_check": True,
         "seed_bcy": result.get("BC_y"), "seed_bcz": result.get("BC_z"),
         "seed_tx": result.get("tx", 0.0), "seed_ty": result.get("ty", 0.0),

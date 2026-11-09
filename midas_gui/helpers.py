@@ -437,17 +437,96 @@ def hydra_siblings(path: str) -> dict:
     return out
 
 
+_IM_TRANS_LABELS = {1: "Flip Y", 2: "Flip Z", 3: "Transpose"}
+_IM_TRANS_ORDER_HINT = ("Transforms are applied in the order you tick them — the number "
+                        "beside a ticked box is its position in the sequence.")
+
+
+def _im_trans_refresh(boxes: dict, seq: list) -> None:
+    """Reconcile the shared click-order list with the boxes' checked state
+    (drop unticked codes; append any ticked code not yet in the list, in fixed
+    1,2,3 order) and write each ticked box's position into its label."""
+    seq[:] = [c for c in seq if c in boxes and boxes[c].isChecked()]
+    for c, cb in boxes.items():
+        if cb.isChecked() and c not in seq:
+            seq.append(c)
+    for c, cb in boxes.items():
+        want = f"{_IM_TRANS_LABELS[c]} ({seq.index(c) + 1})" if c in seq \
+            else _IM_TRANS_LABELS[c]
+        if cb.text() != want:
+            cb.setText(want)
+
+
+def link_im_trans_checkboxes(flip_y, flip_z, transp) -> None:
+    """Make the 3 Transforms checkboxes record the *order* they are ticked in.
+
+    The backend applies ``ImTransOpt`` codes sequentially in list order, so the
+    order is part of the transform (``Flip Y → Transpose`` is not
+    ``Transpose → Flip Y``). Call this right after creating the boxes and
+    BEFORE connecting any other ``toggled`` slot, so the sequence is already
+    up to date when those slots read it. Each ticked box then shows its
+    position, e.g. "Flip Y (2)". Boxes that were never linked keep the old
+    fixed Flip Y → Flip Z → Transpose order.
+    """
+    boxes = {1: flip_y, 2: flip_z, 3: transp}
+    seq: list = []
+    for c, cb in boxes.items():
+        cb._im_trans_code, cb._im_trans_boxes, cb._im_trans_seq = c, boxes, seq
+        tip = cb.toolTip()
+        cb.setToolTip(f"{tip}\n{_IM_TRANS_ORDER_HINT}" if tip else _IM_TRANS_ORDER_HINT)
+        cb.toggled.connect(lambda _checked, b=boxes, s=seq: _im_trans_refresh(b, s))
+    _im_trans_refresh(boxes, seq)
+
+
 def im_trans_codes_from_checkboxes(flip_y, flip_z, transp) -> list:
     """Ordered MIDAS ``ImTransOpt`` codes from the 3 Transforms checkboxes.
 
-    Fixed composition order (flips, then transpose) — matches
-    ``_apply_im_trans`` and is what every tab's "Transforms:" row emits.
+    Boxes wired with :func:`link_im_trans_checkboxes` yield the order they
+    were ticked in. Unlinked boxes fall back to the fixed composition order
+    (flips, then transpose). Either way the list is what ``_apply_im_trans``
+    and the backend apply, element by element.
     """
+    seq = getattr(flip_y, "_im_trans_seq", None)
+    if seq is not None:
+        _im_trans_refresh(flip_y._im_trans_boxes, seq)  # heal after blocked-signal restores
+        return list(seq)
     codes = []
     if flip_y.isChecked(): codes.append(1)
     if flip_z.isChecked(): codes.append(2)
     if transp.isChecked(): codes.append(3)
     return codes
+
+
+def set_im_trans_codes(flip_y, flip_z, transp, codes) -> None:
+    """Tick exactly ``codes`` (in that order) on the Transforms checkboxes.
+
+    Replaces the per-box ``setChecked(c in codes)`` pattern, which cannot carry
+    an order. A code listed twice keeps its first position (a checkbox can't
+    express a repeat). Notifies the boxes' ``toggled`` listeners once, and only
+    if the resulting sequence actually changed — including a pure re-order
+    where every box keeps its checked state.
+    """
+    boxes = {1: flip_y, 2: flip_z, 3: transp}
+    wanted: list = []
+    for c in codes or ():
+        c = int(c)
+        if c in boxes and c not in wanted:
+            wanted.append(c)
+    linked = getattr(flip_y, "_im_trans_seq", None) is not None
+    before = im_trans_codes_from_checkboxes(flip_y, flip_z, transp)
+    for cb in boxes.values():
+        cb.blockSignals(True)
+    try:
+        for c, cb in boxes.items():
+            cb.setChecked(c in wanted)
+        if linked:
+            flip_y._im_trans_seq[:] = wanted
+            _im_trans_refresh(boxes, flip_y._im_trans_seq)
+    finally:
+        for cb in boxes.values():
+            cb.blockSignals(False)
+    if im_trans_codes_from_checkboxes(flip_y, flip_z, transp) != before:
+        flip_y.toggled.emit(flip_y.isChecked())
 
 
 def parse_im_trans(text: str) -> list:
@@ -2994,12 +3073,27 @@ def write_standalone_paramstest(result, path, *, extra=None):
     for k, v in (extra or {}).items():
         p.extra[k] = v
     p.write(str(path))
-    im_trans = getattr(result, "im_trans", None)
-    if im_trans:
-        with open(path, "a") as f:
-            for code in im_trans:
-                f.write(f"ImTransOpt {int(code)}\n")
+    set_paramstest_im_trans(path, getattr(result, "im_trans", None))
     return p
+
+
+def set_paramstest_im_trans(path, codes) -> None:
+    """Make ``path``'s ``ImTransOpt`` lines exactly ``codes``, one line per op,
+    in order — replacing any already there.
+
+    Every paramstest writer used to *append* the lines. A template-based write
+    (``ff_paramstest_from_auto_result``) carries the template's own
+    ``ImTransOpt`` lines through verbatim, so appending the calibration's codes
+    on top applied the transform twice (template ``3, 1`` + result ``3, 1`` →
+    ``3, 1, 3, 1``; a lone flip doubled into a no-op). The calibration result's
+    codes are the ones its geometry was fitted in, so they are the only ones
+    that belong in the file.
+    """
+    p = Path(path)
+    kept = [ln for ln in p.read_text().splitlines()
+            if not (ln.split()[:1] == ["ImTransOpt"])]
+    kept += [f"ImTransOpt {int(c)}" for c in (codes or ())]
+    p.write_text("\n".join(kept) + "\n")
 
 
 def paramstest_pairs(result, selected=None) -> list:
@@ -3434,6 +3528,13 @@ def widgets_to_dict(widgets: dict) -> dict:
             out[key] = w.isChecked()
         elif isinstance(w, QtWidgets.QGroupBox) and w.isCheckable():
             out[key] = w.isChecked()
+    # Transforms checkboxes: the tick *order* is part of the transform, and the
+    # per-box booleans can't carry it.
+    for w in widgets.values():
+        seq = getattr(w, "_im_trans_seq", None)
+        if seq is not None:
+            out["im_trans_seq"] = list(seq)
+            break
     return out
 
 
@@ -3467,6 +3568,18 @@ def apply_dict_to_widgets(widgets: dict, data: dict) -> None:
             pass
         finally:
             w.blockSignals(False)
+    # Restore the Transforms tick order (the loop above ran with signals
+    # blocked, so the click-order list hasn't seen the new checked states).
+    # A state saved before the order was recorded has no key — the refresh
+    # then falls back to the fixed Flip Y → Flip Z → Transpose order.
+    for w in widgets.values():
+        seq = getattr(w, "_im_trans_seq", None)
+        if seq is not None:
+            saved = data.get("im_trans_seq")
+            if isinstance(saved, (list, tuple)):
+                seq[:] = [int(c) for c in saved if c in (1, 2, 3)]
+            _im_trans_refresh(w._im_trans_boxes, seq)
+            break
 
 
 class _LogStream(io.TextIOBase):

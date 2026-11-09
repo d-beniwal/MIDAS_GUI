@@ -31,6 +31,7 @@ from midas_gui.helpers import (
     default_radial_threshold_points, median_intensity_near_bc, _apply_im_trans,
     pixel_readout_text,
     widgets_to_dict, apply_dict_to_widgets, im_trans_codes_from_checkboxes,
+    link_im_trans_checkboxes, set_im_trans_codes, set_paramstest_im_trans,
     paramstest_pairs, parse_dspacing_text, browse_start_dir, warn_if_path_missing,
     suggest_working_dir, check_output_dir_writable, scratch_dir, SCRATCH_DIRNAME)
 from midas_gui.widgets import (
@@ -409,6 +410,7 @@ class CalibrationTab(QtWidgets.QWidget):
             (make_pixel_label(self._pxY, "Pixel:", also=self._pxZ_spin), prow)))
         self._flip_y = QtWidgets.QCheckBox("Flip Y"); self._flip_z = QtWidgets.QCheckBox("Flip Z")
         self._transp = QtWidgets.QCheckBox("Transpose")
+        link_im_trans_checkboxes(self._flip_y, self._flip_z, self._transp)
         for cb in (self._flip_y, self._flip_z, self._transp):
             cb.toggled.connect(self._on_im_trans_changed)
 
@@ -2349,9 +2351,7 @@ class CalibrationTab(QtWidgets.QWidget):
         self._seed_tz.setValue(float(g.get("tz") or 0.0))
         im_trans = g.get("im_trans") or []
         if g.get("im_trans_in_file", True):
-            self._flip_y.setChecked(1 in im_trans)
-            self._flip_z.setChecked(2 in im_trans)
-            self._transp.setChecked(3 in im_trans)
+            set_im_trans_codes(self._flip_y, self._flip_z, self._transp, im_trans)
         # else: the file is silent on the transform (a backend-written
         # calibration.json records none; a .poni has no such concept). The
         # geometry in it is only meaningful in the frame it was fitted in, so
@@ -2383,11 +2383,12 @@ class CalibrationTab(QtWidgets.QWidget):
                 "Note: this file records no image transform, so Flip Y / Flip Z / "
                 "Transpose were left as they are. The loaded geometry is only valid "
                 "in the frame it was fitted in — check them against that run.")
-        if im_trans and im_trans != [c for c in (1, 2, 3) if c in im_trans]:
+        if im_trans and (len(set(im_trans)) != len(im_trans)
+                         or any(c not in (1, 2, 3) for c in im_trans)):
             self._log.append(
-                f"Note: ImTransOpt order in file ({im_trans}) differs from the "
-                "fixed Flip Y → Flip Z → Transpose order used here; checkboxes "
-                "were set but may not exactly reproduce the file's composition.")
+                f"Note: ImTransOpt in file ({im_trans}) repeats or contains a code "
+                "the Transforms checkboxes can't express; each code was ticked at "
+                "most once, so the composition may not exactly match the file's.")
 
     def apply_geometry(self, g: dict):
         """Set λ / pixel size / seed BC + Lsd from a geometry dict (Data Viewer)."""
@@ -2419,9 +2420,7 @@ class CalibrationTab(QtWidgets.QWidget):
             # the Data Viewer builds its dict from live checkboxes, so it has
             # no such key and keeps overriding exactly as before.
             im_trans = g["im_trans"] or []
-            self._flip_y.setChecked(1 in im_trans)
-            self._flip_z.setChecked(2 in im_trans)
-            self._transp.setChecked(3 in im_trans)
+            set_im_trans_codes(self._flip_y, self._flip_z, self._transp, im_trans)
         if g.get("tz") is not None:
             self._seed_tz.setValue(float(g["tz"]))
             self._enable_seed(tz=True)
@@ -3472,11 +3471,8 @@ class CalibrationTab(QtWidgets.QWidget):
                 if ps_path:
                     with open(out_path, "a") as _f:
                         _f.write(f"PanelShiftsFile {ps_path}\n")
-                im_trans = getattr(self._result, "im_trans", None)
-                if im_trans:
-                    with open(out_path, "a") as _f:
-                        for code in im_trans:
-                            _f.write(f"ImTransOpt {int(code)}\n")
+                # Replace (not append to) any ImTransOpt the template carried.
+                set_paramstest_im_trans(out_path, getattr(self._result, "im_trans", None))
                 mode = "from template"
             else:
                 from midas_calibrate.params import CalibrationParams
