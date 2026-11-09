@@ -355,7 +355,7 @@ def test_a_root_with_no_panel_token_scopes_to_nothing_rather_than_sharing():
     assert substitute_panel("/data/white_oct26", 2) is None
 
 
-# ── the background-job TIFF cache ───────────────────────────────────────
+# ── background-job --dark arguments ────────────────────────────────────
 
 def _scan(root, sub, name, *, exp, dark=None, data=None, shape=(16, 16)):
     import h5py
@@ -379,85 +379,235 @@ def _scan(root, sub, name, *, exp, dark=None, data=None, shape=(16, 16)):
     return p
 
 
-def test_many_steps_sharing_one_dark_write_one_tiff(tmp_path):
-    """The trap. A background job resolves a dark per step, but the steps
-    share darks: writing one 16 MB TIFF per (scan, panel) would put ~12 GB
-    of near-identical copies on a beamline share for a 190-scan run.
+def test_autodetect_passes_the_source_path_and_copies_nothing(tmp_path):
+    """The fix for what a real run exposed.
+
+    The first version wrote each resolved dark out as a pre-averaged
+    TIFF: 17 MB per (scan, panel), 816 MB and a visibly blocked GUI
+    before a 48-step job had launched -- to duplicate a file already on
+    disk. The job reads the original instead.
     """
-    pytest.importorskip("tifffile")
     tree = tmp_path / "tree"
-    _scan(tree, "Darks", "Darks_000100.ge1.h5", exp=10.0, dark=1778.0)
+    dark = _scan(tree, "Darks", "Darks_000100.ge1.h5", exp=10.0, dark=1778.0)
     scans = [_scan(tree, f"s{i}", f"s{i}_0001{i:02d}.ge1.h5", exp=10.0,
                    data=2100.0) for i in range(8)]
-    out = tmp_path / "out"
-    out.mkdir()
-    cache = D.DarkTiffCache(out)
+    out = tmp_path / "out"; out.mkdir()
+    b = D.DarkArgBuilder(out)
     req = D.DarkRequest(origin="folder_recursive", search_root=str(tree))
-    args = [cache.arg_for(s, req) for s in scans]
+    args = [b.arg_for(s, req) for s in scans]
 
-    assert all(a and a[0] == "--dark" for a in args), args
-    assert len({a[1] for a in args}) == 1, "the same dark was written twice"
-    assert cache.written() == 1
-    assert len(list(out.glob("*.tif"))) == 1
+    assert all(a[:2] == ["--dark", str(dark)] for a in args), args
+    assert all("--dark-dataset" in a for a in args)
+    assert b.written() == 0, "a TIFF was written for a dark already on disk"
+    assert list(out.glob("*.tif")) == []
 
 
-def test_steps_with_different_darks_each_get_their_own(tmp_path):
-    """Dedupe must not over-merge: two scans whose nearest preceding dark
-    differs must not share a TIFF."""
-    pytest.importorskip("tifffile")
+def test_each_scan_gets_the_dark_that_resolved_for_it(tmp_path):
+    """Passing paths must not blur which dark belongs to which scan."""
     tree = tmp_path / "tree"
-    _scan(tree, "d1", "d1_Darks_000100.ge1.h5", exp=10.0, dark=11.0)
-    _scan(tree, "d2", "d2_Darks_000200.ge1.h5", exp=10.0, dark=22.0)
+    d1 = _scan(tree, "d1", "d1_Darks_000100.ge1.h5", exp=10.0, dark=11.0)
+    d2 = _scan(tree, "d2", "d2_Darks_000200.ge1.h5", exp=10.0, dark=22.0)
     early = _scan(tree, "a", "a_000150.ge1.h5", exp=10.0, data=2100.0)
     late = _scan(tree, "b", "b_000250.ge1.h5", exp=10.0, data=2100.0)
     out = tmp_path / "out"; out.mkdir()
-    cache = D.DarkTiffCache(out)
+    b = D.DarkArgBuilder(out)
     req = D.DarkRequest(origin="folder_recursive", search_root=str(tree))
-    a, b = cache.arg_for(early, req), cache.arg_for(late, req)
-    assert a[1] != b[1], "two different darks collapsed into one file"
-    assert cache.written() == 2
+    assert b.arg_for(early, req)[1] == str(d1)
+    assert b.arg_for(late, req)[1] == str(d2)
+
+
+def test_an_explicit_dark_field_is_still_written_once_per_panel(tmp_path):
+    """The one case with no source file behind it: the loader hands us an
+    array, which may already honour a frame range the user set on it, so
+    re-reading the path would quietly ignore that. One TIFF per panel,
+    not per step."""
+    pytest.importorskip("tifffile")
+    scan = _scan(tmp_path / "t", "s", "s_000150.ge1.h5", exp=10.0, data=2100.0)
+    out = tmp_path / "out"; out.mkdir()
+    b = D.DarkArgBuilder(out)
+    req = D.DarkRequest(origin="files", array=np.full((16, 16), 7.0, np.float32))
+    a1 = b.arg_for(scan, req, tag="ge1")
+    a2 = b.arg_for(scan, req, tag="ge1")
+    a3 = b.arg_for(scan, req, tag="ge2")
+    assert a1 == a2 and a1[1] != a3[1]
+    assert b.written() == 2
+    assert "--dark-dataset" not in a1, "an explicit array has no dataset"
 
 
 def test_a_step_with_no_resolvable_dark_returns_none_and_is_recorded(tmp_path):
     """None, not an empty list: the caller must DROP the step. Returning
     [] would silently integrate it with no dark at all, and returning
     some other scan's dark is the error the policy exists to prevent."""
-    pytest.importorskip("tifffile")
     tree = tmp_path / "tree"
     _scan(tree, "Darks", "Darks_000100.ge1.h5", exp=0.1, dark=1778.0)
     scan = _scan(tree, "s", "s_000150.ge1.h5", exp=10.0, data=2100.0)
     out = tmp_path / "out"; out.mkdir()
-    cache = D.DarkTiffCache(out)
+    b = D.DarkArgBuilder(out)
     req = D.DarkRequest(origin="folder_recursive", search_root=str(tree))
-    assert cache.arg_for(scan, req) is None
-    assert len(cache.skipped) == 1
-    assert "exposure" in cache.skipped[0][1]
-    assert cache.written() == 0
+    assert b.arg_for(scan, req) is None
+    assert len(b.skipped) == 1 and "exposure" in b.skipped[0][1]
+    assert b.written() == 0
 
 
 def test_explicit_mode_with_no_dark_set_is_an_empty_arg_not_a_skip(tmp_path):
     """Running without a dark is legitimate when the user chose none; it
     must not be confused with failing to find one."""
-    pytest.importorskip("tifffile")
     scan = _scan(tmp_path / "t", "s", "s_000150.ge1.h5", exp=10.0, data=2100.0)
     out = tmp_path / "out"; out.mkdir()
-    cache = D.DarkTiffCache(out)
-    assert cache.arg_for(scan, D.DarkRequest(origin="files")) == []
-    assert cache.skipped == []
+    b = D.DarkArgBuilder(out)
+    assert b.arg_for(scan, D.DarkRequest(origin="files")) == []
+    assert b.skipped == []
 
 
-def test_panels_do_not_share_a_tiff_even_for_an_identical_dark(tmp_path):
-    """``tag`` keys the cache per panel. Two panels' darks can be
-    numerically identical by chance; sharing the file would make a later
-    reader believe ge2 was corrected with ge1's dark."""
-    pytest.importorskip("tifffile")
-    tree = tmp_path / "tree"
-    _scan(tree, "Darks", "Darks_000100.ge1.h5", exp=10.0, dark=1778.0)
-    scan = _scan(tree, "s", "s_000150.ge1.h5", exp=10.0, data=2100.0)
-    out = tmp_path / "out"; out.mkdir()
-    cache = D.DarkTiffCache(out)
-    req = D.DarkRequest(origin="folder_recursive", search_root=str(tree))
-    a = cache.arg_for(scan, req, tag="ge1")
-    b = cache.arg_for(scan, req, tag="ge2")
-    assert a[1] != b[1]
-    assert cache.written() == 2
+# ── the worker's source probe ───────────────────────────────────────────
+
+@pytest.mark.parametrize("cfg,want_kind", [
+    ({"paths": ["/a/b.h5", "/a/c.h5"]}, "first"),
+    ({"path": "__REAL__"}, "real"),
+    ({"path": "/nope/missing.h5"}, None),
+    ({}, None),
+    (None, None),
+])
+def test_the_source_probe_handles_every_cfg_shape(tmp_path, cfg, want_kind):
+    """Regression: this raised NameError on the "path" branch.
+
+    `os` has no module-level import in workers.py -- the one other use
+    imports it locally -- so `os.path.isfile` here was a crash the moment
+    a source cfg carried `path` rather than `paths`, i.e. a single file
+    or a glob. Every existing test used `paths`, so the whole branch was
+    uncovered and the failure reached a live run.
+    """
+    from midas_gui.workers import BatchWorker
+
+    real = tmp_path / "scan.h5"
+    real.write_bytes(b"x")
+    if cfg and cfg.get("path") == "__REAL__":
+        cfg = {"path": str(real)}
+
+    class _Probe:
+        _src = cfg
+        _first_source_path = BatchWorker._first_source_path
+
+    got = _Probe()._first_source_path()
+    if want_kind == "first":
+        assert got == "/a/b.h5"
+    elif want_kind == "real":
+        assert got == str(real)
+    else:
+        assert got is None
+
+
+def test_a_single_file_source_still_gets_its_dark(tmp_path):
+    """The bug a live run caught: a background job silently integrated
+    with NO dark at all.
+
+    source_cfg() returns "path" for a single HDF5 file, not "paths", so
+    _run_as_job builds targets = [(out_dir, [])] -- one target with an
+    EMPTY file list. The empty-group guard added to stop an IndexError
+    then passed that case straight through without a dark, and nothing
+    said so: the profile simply kept its ~2000-count pedestal.
+
+    The probe falls back to the cfg's own path.
+    """
+    import numpy as _np
+    data = _scan(tmp_path / "t", "s", "s_000192.vrx.h5", exp=1.0, data=2100.0)
+    src_cfg = {"type": "hdf5", "path": str(data), "dataset": "exchange/data"}
+    targets = [(tmp_path / "out", [])]          # what _run_as_job builds
+    (tmp_path / "out").mkdir()
+
+    req = D.DarkRequest(origin="file", path=str(data),
+                        dataset="exchange/data_dark",
+                        array=_np.full((16, 16), 2000.0, _np.float32))
+    b = D.DarkArgBuilder(tmp_path / "out")
+    args = []
+    for _gd, gp in targets:
+        probe = gp[0] if gp else (src_cfg.get("path") or "")
+        args.append(b.arg_for(probe, req))
+
+    assert args[0] and args[0][0] == "--dark", \
+        "a single-file source was integrated with no dark"
+    assert b.written() == 1
+
+
+def test_an_explicit_dark_survives_a_probe_that_does_not_exist(tmp_path):
+    """Explicit mode already holds the array, so it must not depend on
+    the probe being readable — a glob source may have no single file to
+    point at."""
+    import numpy as _np
+    req = D.DarkRequest(origin="folder", path=None,
+                        dataset="exchange/data_dark",
+                        array=_np.full((8, 8), 7.0, _np.float32))
+    b = D.DarkArgBuilder(tmp_path)
+    got = b.arg_for("/no/such/file.h5", req)
+    assert got and got[0] == "--dark", got
+    assert b.skipped == []
+
+
+# ── darks taken INSIDE the scan ─────────────────────────────────────────
+
+def test_a_scan_with_its_own_darks_resolves_without_a_sibling(tmp_path):
+    """Reported from 20-ID: 109 scans refused as having no dark at their
+    exposure, while every one of them carried 10 real dark frames.
+
+    Two Varex dark workflows exist and they are the reverse of each
+    other. Darks taken as their own exposure produce *_dark_before_*
+    files and leave the scan's own data_dark all zeros; darks taken
+    INSIDE the scan (ndarks) land in the scan's own data_dark and write
+    no separate file at all. tree_dark_candidates replaced the whole
+    resolve_dark ladder and dropped its rung 2 -- the file's own dark --
+    so the second workflow became invisible.
+    """
+    tree = tmp_path / "t"
+    scan = _scan(tree, "s", "s_001128.vrx.h5", exp=1.0, data=2100.0,
+                 dark=2005.0)                      # darks inside the scan
+    got = D.resolve(scan, D.DarkRequest(origin="folder_recursive",
+                                        search_root=str(tree), exposure=1.0))
+    assert not got.skipped, got.why
+    assert "own" in got.why
+    assert np.allclose(got.array.mean(), 2005.0)
+
+
+def test_the_own_dark_needs_no_exposure_check(tmp_path):
+    """It is in the same file as the data, so it is at the data's
+    exposure by construction. Demanding a match would re-refuse exactly
+    the scans this fixes."""
+    tree = tmp_path / "t"
+    scan = _scan(tree, "s", "s_000190.vrx.h5", exp=3.0, data=2100.0,
+                 dark=2005.0)
+    for asked in (3.0, None):
+        got = D.resolve(scan, D.DarkRequest(origin="folder_recursive",
+                                            search_root=str(tree),
+                                            exposure=asked))
+        assert not got.skipped, (asked, got.why)
+
+
+def test_an_all_zero_own_dark_still_falls_through_to_the_sibling(tmp_path):
+    """The other workflow. Both groups show a 10-frame data_dark; only
+    the CONTENT distinguishes them, so restoring the own-dark rung must
+    not start using the placeholders."""
+    import h5py
+    tree = tmp_path / "t"
+    _scan(tree, "d", "d_dark_before_000338.vrx.h5", exp=0.1, dark=2007.0)
+    scan = _scan(tree, "s", "s_000339.vrx.h5", exp=0.1, data=2100.0)
+    with h5py.File(str(scan), "a") as f:
+        f.create_dataset("exchange/data_dark",
+                         data=np.zeros((10, 16, 16), np.float32))
+    got = D.resolve(scan, D.DarkRequest(origin="folder_recursive",
+                                        search_root=str(tree), exposure=0.1))
+    assert not got.skipped, got.why
+    assert "dark_before_000338" in got.why, got.why
+
+
+def test_no_dark_anywhere_still_skips_and_says_both_things_it_tried(tmp_path):
+    """The skip must not regress into silence now that there are two
+    places a dark can come from."""
+    import h5py
+    tree = tmp_path / "t"
+    scan = _scan(tree, "s", "s_000500.vrx.h5", exp=7.0, data=2100.0)
+    with h5py.File(str(scan), "a") as f:
+        f.create_dataset("exchange/data_dark",
+                         data=np.zeros((10, 16, 16), np.float32))
+    got = D.resolve(scan, D.DarkRequest(origin="folder_recursive",
+                                        search_root=str(tree), exposure=7.0))
+    assert got.skipped
+    assert "own exchange/data_dark" in got.why

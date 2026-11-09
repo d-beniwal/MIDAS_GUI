@@ -104,6 +104,75 @@ def _build_tree(node, parent_item: QtWidgets.QTreeWidgetItem):
 # Matplotlib canvas widget
 # ─────────────────────────────────────────────────────────────────────────
 
+def _draw_eta_bands(ax, x_coords, y_coords, z, eta_width, *, cmap, norm,
+                    pack=False):
+    """Draw the cake with each eta row at its TRUE height.
+
+    ``pcolormesh`` treats its coordinates as cell CENTRES and infers the
+    edges from the spacing between them. That is right for a contiguous
+    caking, and badly wrong for a sparse one: four panels caked 10 deg
+    wide but centred 90 deg apart were drawn as four 90-deg bands, so the
+    eta axis ran -225 to +135 and the picture claimed nine times the
+    azimuthal coverage actually measured. An axis reading -220 deg on a
+    detector that spans +-180 was how it got noticed.
+
+    With a known ``eta_width`` narrower than the spacing the rows are
+    drawn one at a time at their real extent, leaving the gaps visibly
+    empty -- which is the honest picture of what was collected. A
+    contiguous caking takes the single-quadmesh path as before, because
+    it is both correct there and much faster for 35+ rows.
+    """
+    import numpy as _np
+    y = _np.asarray(y_coords, dtype=float)
+    if eta_width and y.size > 1:
+        gaps = _np.abs(_np.diff(y))
+        spacing = float(_np.median(gaps)) if gaps.size else 0.0
+        sparse = spacing > float(eta_width) * 1.5
+    else:
+        sparse = False
+
+    def _edges(c):
+        """Cell edges from centres. Flat shading needs n+1 on BOTH axes;
+        giving y as edges and x as centres is a TypeError, and it is the
+        one mistake this function invites twice."""
+        c = _np.asarray(c, dtype=float)
+        if c.size < 2:
+            return _np.array([c[0] - 0.5, c[0] + 0.5])
+        mid = 0.5 * (c[1:] + c[:-1])
+        return _np.concatenate(([c[0] - (mid[0] - c[0])], mid,
+                                [c[-1] + (c[-1] - mid[-1])]))
+
+    if sparse and pack:
+        # Rows adjacent, one per caked wedge. The y-axis is no longer
+        # linear in eta, so it is ticked with the real angles and SAYS so
+        # -- a packed axis that still claimed to be degrees would be the
+        # same lie as the stretched bands, just in the other direction.
+        im = ax.pcolormesh(_edges(x_coords), _np.arange(y.size + 1) - 0.5,
+                           z, cmap=cmap, norm=norm, shading="flat")
+        ax.set_yticks(_np.arange(y.size))
+        ax.set_yticklabels([f"{v:g}" for v in y])
+        # The caller styles the axes afterwards and would overwrite a
+        # label set here, so hand it back instead of setting it.
+        return im, "Eta (deg) — rows packed, gaps removed"
+
+    if not sparse:
+        return ax.pcolormesh(x_coords, y, z, cmap=cmap, norm=norm,
+                             shading="auto"), None
+
+    # Explicit EDGES on both axes: giving y as two edges selects flat
+    # shading, which then requires x as edges too (n+1), not centres.
+    xe = _edges(x_coords)
+
+    half = float(eta_width) / 2.0
+    im = None
+    for i, c in enumerate(y):
+        im = ax.pcolormesh(xe, _np.array([c - half, c + half]),
+                           z[i:i + 1, :], cmap=cmap, norm=norm,
+                           shading="flat")
+    ax.set_ylim(float(y.min()) - half * 3, float(y.max()) + half * 3)
+    return im, None
+
+
 def _unwrap_eta(y):
     """``(axis, was_unwrapped)`` — an eta axis matplotlib can derive cell
     edges from.
@@ -324,7 +393,8 @@ class PlotCanvas(QtWidgets.QWidget):
                 clim_lo: float = None, clim_hi: float = None,
                 xlabel: str = "column", ylabel: str = "row",
                 x_coords: np.ndarray = None, y_coords: np.ndarray = None,
-                xlim=None):
+                xlim=None, eta_width: float = None,
+                pack_eta: bool = False):
         """Plot 2-D array.  If x_coords/y_coords are given, use pcolormesh with
         physical axis values; otherwise fall back to imshow with bin indices."""
         self.fig.clear()
@@ -347,10 +417,11 @@ class PlotCanvas(QtWidgets.QWidget):
             y_coords, unwrapped = _unwrap_eta(y_coords)
             if unwrapped:
                 ylabel = f"{ylabel} (unwrapped)"
-            self._im = ax.pcolormesh(
-                x_coords, y_coords, d.T,
-                cmap=cmap, norm=norm, shading="auto",
-            )
+            self._im, _relabel = _draw_eta_bands(
+                ax, x_coords, y_coords, d.T, eta_width,
+                cmap=cmap, norm=norm, pack=pack_eta)
+            if _relabel:
+                ylabel = _relabel
         else:
             self._im = ax.imshow(
                 d.T, aspect="auto", origin="lower", cmap=cmap, norm=norm,
@@ -511,6 +582,20 @@ class ZarrViewerTab(QtWidgets.QWidget):
         self._rmap_cb.addItems(["REtaMap"])   # may gain "REtaMap_corrected" on load
         self._rmap_cb.currentTextChanged.connect(self._refresh_plot)
         ctrl_layout.addWidget(self._rmap_cb)
+
+        self._pack_eta = QtWidgets.QCheckBox("Pack eta")
+        self._pack_eta.setToolTip(
+            "Draw the eta rows adjacent to each other instead of at their "
+            "true angular positions.\n\n"
+            "A sparse caking -- four panels 10° wide but 90° apart -- leaves "
+            "most of the plot empty, and the rows are too thin to read. This "
+            "closes the gaps so the data fills the axis.\n\n"
+            "The y-axis is then NOT linear in eta: each row is one caked "
+            "wedge, labelled with its own angle, and the spacing between "
+            "labels means nothing. The axis says so while this is on.\n\n"
+            "No effect on a contiguous caking, where there are no gaps.")
+        self._pack_eta.stateChanged.connect(self._refresh_plot)
+        ctrl_layout.addWidget(self._pack_eta)
 
         btn_replot = QtWidgets.QPushButton("Apply")
         btn_replot.clicked.connect(self._refresh_plot)
@@ -1088,6 +1173,8 @@ class ZarrViewerTab(QtWidgets.QWidget):
                 clim_lo=clim_lo, clim_hi=clim_hi,
                 xlabel=xlabel, ylabel="Eta (deg)" if y_coords is not None else "Eta bin",
                 x_coords=x_coords_arg, y_coords=y_coords, xlim=xlim,
+                eta_width=self._eta_bin_width(),
+                pack_eta=self._pack_eta.isChecked(),
             )
             self._last_plot_signature = plot_signature
             self._last_plot_x = plot_x
@@ -1137,6 +1224,8 @@ class ZarrViewerTab(QtWidgets.QWidget):
                 xlabel=xlabel,
                 ylabel="Eta (deg)" if y_coords is not None else "Eta bin",
                 x_coords=x_coords_arg, y_coords=y_coords, xlim=xlim,
+                eta_width=self._eta_bin_width(),
+                pack_eta=self._pack_eta.isChecked(),
             )
             self._last_plot_signature = plot_signature
             self._last_plot_x = plot_x
@@ -1212,6 +1301,32 @@ class ZarrViewerTab(QtWidgets.QWidget):
         new_lo = np.interp(lo_idx, idx_for_new, new_sorted, left=new_sorted[0], right=new_sorted[-1])
         new_hi = np.interp(hi_idx, idx_for_new, new_sorted, left=new_sorted[0], right=new_sorted[-1])
         return (new_lo, new_hi)
+
+    def _eta_bin_width(self):
+        """``EtaBinSize`` this archive was caked with, or None.
+
+        Read from the archive's own provenance rather than inferred from
+        the axis: the spacing between eta columns is NOT the bin width
+        when the caking is sparse, and conflating the two is what drew
+        four 10-degree bands as four 90-degree ones. A combined archive
+        carries one entry per panel; they are normally equal, and the
+        widest is the safe choice if they are not, since drawing a band
+        too tall is the failure being fixed.
+        """
+        try:
+            hist = (self._root.attrs.get("provenance_history") or []
+                    if self._root is not None else [])
+        except Exception:
+            return None
+        widths = []
+        for entry in hist:
+            try:
+                w = (entry.get("cake_params") or {}).get("EtaBinSize")
+            except AttributeError:
+                continue
+            if w:
+                widths.append(float(w))
+        return max(widths) if widths else None
 
     def _get_integration_axes(self, shape):
         """Return (x_coords, xlabel, y_coords) for an integration result array.

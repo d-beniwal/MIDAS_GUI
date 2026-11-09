@@ -8,6 +8,8 @@ viewer is added to this module in a later phase.
 """
 from __future__ import annotations
 
+import os
+
 from pathlib import Path
 from typing import Optional
 
@@ -594,6 +596,30 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
             self._update_frame_limit()
 
 
+def in_scroll_area(widget, *, minimum_width: int = 220):
+    """Wrap a side panel so a narrow splitter SCROLLS it, not clips it.
+
+    The three Hydra pages each put this loader straight into a splitter
+    under ``setMinimumWidth(200)``. An explicitly set minimum overrides
+    ``minimumSizeHint`` -- which is 542 px here -- so that line told Qt
+    the panel could be squeezed to 200 and Qt obliged by clipping its
+    children. Reported from the beamline: at a narrow width the combine
+    row's "op:" dropdown simply was not there, and "Add folder" read as
+    "dd folder".
+
+    Scrolling rather than a bigger minimum, because the minimum is what
+    makes the whole window unusable on a small screen: the panel keeps
+    its real width and the viewport scrolls to reach it.
+    """
+    area = QtWidgets.QScrollArea()
+    area.setWidgetResizable(True)
+    area.setWidget(widget)
+    area.setMinimumWidth(minimum_width)
+    area.setFrameShape(QtWidgets.QFrame.NoFrame)
+    area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+    return area
+
+
 class HydraLoaderPanel(QtWidgets.QWidget):
     """Left-hand loader for the Hydra page. One path field — point it at any
     single GE panel's file — auto-discovers the other panels via
@@ -968,6 +994,24 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         included. The loader's job is to say what was picked.
         """
         paths = sorted(str(p) for p in (paths or []))
+        # Drop dark acquisitions, exactly as widgets.DataLoaderPanel's
+        # source_cfg does. Hydra never did, which was survivable while a
+        # dark was just an extra frame or two -- but a recursive pick over
+        # an expid tree sweeps in every dark FOLDER as a scan to
+        # integrate, and with per-scan dark resolution each of those then
+        # resolved its own dark. Observed on white_oct26: 13 dark folders
+        # became 13 phantom scans. An explicit hand-picked list is left
+        # alone, same rule as the single-detector loader: naming a dark
+        # by hand is a deliberate choice.
+        from midas_gui.helpers import is_dark_like_name
+        if self.pick_origin() != "files":
+            kept = [p for p in paths
+                    if not (is_dark_like_name(p)
+                            or is_dark_like_name(os.path.dirname(p)))]
+            self._n_dark_skipped = len(paths) - len(kept)
+            paths = kept
+        else:
+            self._n_dark_skipped = 0
         self._selection = [p for p in paths if panel_for_file(p) is not None]
         if not self._selection:
             self._scan_lbl.setText(""); self._scan_lbl.setVisible(False)
