@@ -4,6 +4,8 @@ Last updated: 2026-11-04 (process-isolated workers)
 
 ## Now working on
 
+2026-11-09: Headless Solve Cell runner added (`midas_gui/solve_cell/headless.py`, tests `tests/test_solve_cell_headless*.py`; DECISIONS 2026-11-09). Synthetic-crystal + CLI + concurrent-process + `project.open` offscreen tests pass; one real spinel panel trialled by hand (cubic a~7.9 A). Uncommitted.
+
 2026-11-09: Solve Cell project-save audit — round trip verified exact except viz products lost on Save As; fixed in `flush_project_record` (DECISIONS 2026-11-09). Offscreen test vs local spinel project; not live-checked in the GUI. Uncommitted.
 
 2026-11-08: Transforms checkboxes record tick order and show it as a number ("Flip Y (2)"); order persisted in GUI state/projects (DECISIONS 2026-11-08). Offscreen-tested (`tests/test_im_trans_order.py`); not hand-checked on cocoa. **Also fixed:** template-based paramstest output doubled ImTransOpt lines. **Open:** midas_calibrate/IntegratorZarrOMP.c read multi-op ImTransOpt differently from the rest (DECISIONS); non-square 90° rotation/transpose still fails in Integrate (backend gap; GUI-side pre-transform workaround not built). Uncommitted.
