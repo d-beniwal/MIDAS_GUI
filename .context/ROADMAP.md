@@ -119,6 +119,20 @@ load a 1.35 GB / 642-frame stack).
 - `midas_hkls.ub_refine.refine_ub_from_gvectors` not deeply profiled;
   reflection counts going in are modest, unlikely to be the bottleneck.
 
+## Solve Cell: from lattice to phase identification (2026-11-09)
+
+Aim: proper phase analysis, not just a cell. **Current state:** refine reports a holohedry (`holohedry_from_fit`, metric symmetry only); `_systematic_absence_diagnostics` (`solve_cell/pipeline.py`) counts absence violations but only for a space group the user *declares* (known-structure path, material filter). No ab-initio space-group search, no intensities, no phase matching. Build in this order (1-3 are self-contained and use data already held; 4-5 depend on 3; do not call a space group from spot presence/absence alone — overconfident):
+
+1. **Bravais type + centering** from the reduced cell: test P/I/F/C/R against indexed hkl (e.g. only h+k+l=2n -> I). Cheapest, narrows everything after.
+2. **Absence scan over all compatible space groups** for the indexed hkl. Score three cases separately: observed-but-forbidden (disqualifying), allowed-but-unobserved, never-measurable. The third needs the DAC/detector accessibility map = queued **V07**; real dependency (in a DAC a missing reflection often means nothing).
+3. **Integrated intensities + uncertainties per hkl** from the shoeboxes, so "absent" (consistent with zero) is distinguishable from "weak" (dim spots fall below the blob threshold).
+4. **Laue class + merging** of equivalents/Friedel pairs across domains and panels; merging R per candidate Laue group (e.g. cubic vs tetragonal when metric is near-special). Current domain comparison is metric-only (`domain_compare.py`) and cannot do this.
+5. **Phase matching**: search ICSD/COD/Materials Project by cell (allow pressure-scaled volume), compare observed vs calculated intensities (structure factors), account for texture and few-grain sampling (not powder-averaged), use EOS/pressure as a prior.
+6. **Structure solution/refinement for a new phase** (charge flipping/direct methods, then Rietveld/single-crystal e.g. via GSAS-II) — separate pipeline.
+7. **Multi-phase bookkeeping**: phase label + volume fraction per domain; leftover spots "unindexed" vs "second phase"; gasket/medium/marker contaminants (material filter covers part).
+
+Proposed first deliverable: a **"Symmetry" stage after Refine** reporting centering, ranked space-group candidates and per-candidate evidence (items 1-3). Not started; Solve Cell is in refinement-first mode (STATE, 2026-10-25) so confirm with the user before adding stages.
+
 ## Per-tab open items
 
 - **Calibrate:** multi-distance (`autocalibrate_multi`), doublet calibrants,

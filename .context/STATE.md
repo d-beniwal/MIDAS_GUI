@@ -4,6 +4,8 @@ Last updated: 2026-11-04 (process-isolated workers)
 
 ## Now working on
 
+2026-11-09: Solve Cell project-save audit — round trip verified exact except viz products lost on Save As; fixed in `flush_project_record` (DECISIONS 2026-11-09). Offscreen test vs local spinel project; not live-checked in the GUI. Uncommitted.
+
 2026-11-08: Transforms checkboxes record tick order and show it as a number ("Flip Y (2)"); order persisted in GUI state/projects (DECISIONS 2026-11-08). Offscreen-tested (`tests/test_im_trans_order.py`); not hand-checked on cocoa. **Also fixed:** template-based paramstest output doubled ImTransOpt lines. **Open:** midas_calibrate/IntegratorZarrOMP.c read multi-op ImTransOpt differently from the rest (DECISIONS); non-square 90° rotation/transpose still fails in Integrate (backend gap; GUI-side pre-transform workaround not built). Uncommitted.
 
 2026-11-08: Fast HDF5 load for big/network files — single-open probe, cached dataset listing, worker-thread probes with a 0.25 s GUI wait budget, byte-bounded frame cache + slow-storage read-ahead (DECISIONS 2026-11-08). Unit/offscreen-tested with simulated slow I/O (`tests/test_h5_fast_load.py`); **not tried on a real slow share or on Windows/Linux hosts**. Uncommitted.
@@ -56,6 +58,7 @@ View details: DECISIONS 2026-10-24 and `documentation/solve_cell_visualizations.
 
 ## Next steps
 
+- (Planned, not started) Solve Cell phase identification: Symmetry stage -> intensities -> Laue merging -> phase matching; full plan in ROADMAP "Solve Cell: from lattice to phase identification".
 - Ask backend (midas_calibrate_v2) to forward `rings_to_exclude` through `iterate_frozen_point_until_stable` and `first_time_calibrate`; then drop the two GUI warnings in `calib.run_pipeline` (DECISIONS 2026-11-07).
 - Live-check the combined calibration on representative beamline data; later
   systematically compare the deferred pipelines (ROADMAP). Connect Frozen-point

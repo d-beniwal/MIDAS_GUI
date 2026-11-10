@@ -166,3 +166,28 @@ def test_reciprocal_pin_view_is_orthogonal_parallel_and_released_by_beam_view(ta
     tab._on_beam_view_clicked()
     assert view.pinned_view is None and tab._recip_pin.currentIndex() == 0
     assert not view.interactor.camera.GetParallelProjection()
+
+
+@pytest.mark.skipif(not PROJECT.exists(), reason="local spinel project not present")
+def test_save_as_keeps_every_record_section_and_viz_product(tab, tmp_path):
+    """Restore -> flush into a different project file -> read back: ingest,
+    diamond, index and every cached viz product must survive (the ingest swap
+    replaces the whole record, viz/ included)."""
+    from types import SimpleNamespace
+    from midas_gui import project
+    rec = project.read_solve_cell(PROJECT)
+    tab.apply_project_solve_cell(rec)
+    dst = tmp_path / "saved_as.h5"
+    project.create_project(str(dst))
+    tab._project_ctx = SimpleNamespace(path=str(dst))
+    tab.flush_project_record()
+    back = project.read_solve_cell(dst)
+    assert back is not None and back["last_stage"] == rec["last_stage"]
+    assert set(back["viz"] or {}) == set(rec["viz"] or {})
+    assert len(back["index"]["domains"]) == len(rec["index"]["domains"])
+    assert len(back["ingest"]["spots_df"]) == len(rec["ingest"]["spots_df"])
+    # computed after the last write, with nothing dirty: still stored on the next flush
+    tab._viz_products["extra"] = {"meta": {"inputs": {}}, "tables": {}, "arrays": {}}
+    tab._viz_unsaved.add("extra")
+    tab.flush_project_record()
+    assert "extra" in project.read_solve_cell(dst)["viz"]

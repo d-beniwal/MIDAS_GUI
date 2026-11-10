@@ -457,6 +457,12 @@ def _stage_ingest(cfg: dict, on_step=None) -> dict:
     # its own internal subtract_background calls, so no pool nests inside
     # another.
     max_workers = int(blob_cfg.get("max_workers", 1))
+    # master's midas-defect (0.9.1) predates the max_workers kwarg (only the
+    # perf_solve_cell build has it) -- forward it only when supported, so an
+    # older install runs serially instead of raising TypeError.
+    import inspect
+    def _mw(fn):
+        return {"max_workers": max_workers} if "max_workers" in inspect.signature(fn).parameters else {}
     _emit("background_start", sector_candidates=sector_candidates)
 
     # choose_sectors grid-searches `sector_candidates`, each a full per-frame
@@ -468,7 +474,7 @@ def _stage_ingest(cfg: dict, on_step=None) -> dict:
     # reference scripts verbatim"; that rerun is redundant, not a behavior
     # difference, so it's gone. See DECISIONS 2026-10-04 (ingest performance).
     bg_choice = choose_sectors(frames, tth_deg, az_deg, mask, threshold=threshold, min_vol=min_vol,
-                               candidates=sector_candidates, max_workers=max_workers)
+                               candidates=sector_candidates, **_mw(choose_sectors))
     print(f"[solve-cell] choose_sectors: n_sectors={bg_choice.n_sectors} "
           f"(candidates={sector_candidates})")
     sub = bg_choice.stack
@@ -505,7 +511,7 @@ def _stage_ingest(cfg: dict, on_step=None) -> dict:
         split_ratio=blob_cfg.get("split_ratio", SPLIT_RATIO_DEFAULT),
         gap_bridge=blob_cfg.get("gap_bridge", GAP_BRIDGE_DEFAULT),
         core_frac=blob_cfg.get("core_frac", CORE_FRAC_DEFAULT),
-        return_counts=True, max_workers=max_workers)
+        return_counts=True, **_mw(find_blobs_3d))
     print(f"[solve-cell] find_blobs_3d counts: {counts}")
     spots = spots[spots["n_frames"] >= min_frames].reset_index(drop=True)
     print(f"[solve-cell] {len(spots)} spots with n_frames>={min_frames}")

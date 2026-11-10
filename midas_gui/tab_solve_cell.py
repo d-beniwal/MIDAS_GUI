@@ -2762,12 +2762,17 @@ class SolveCellTab(QtWidgets.QWidget):
         if path != self._sc_record_path:
             self._sc_dirty = set(project.SOLVE_CELL_STAGES)
         if not self._sc_dirty:
+            self._persist_viz()     # products computed since the last write (e.g. frame patches)
             return
         dirty = set(self._sc_dirty)
         try:
             if "ingest" in dirty:
                 self._write_sc_ingest(path)
                 dirty |= {"diamond", "index"}   # the swap replaced the whole record
+                # ...including its viz/ products (Save As, or the project file
+                # changed): every product still held in memory must be rewritten.
+                # A genuinely new ingest already emptied _viz_products.
+                self._viz_unsaved |= set(self._viz_products)
             if "diamond" in dirty:
                 self._write_sc_diamond(path)
                 dirty.add("index")              # built on the candidate pool
