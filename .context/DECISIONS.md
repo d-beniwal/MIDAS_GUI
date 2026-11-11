@@ -3,6 +3,18 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-11-11 — Batch progress "stuck at 99%": rounding + explicit finalizing message
+
+**Cause.** The Batch tab bar was `int(100*done/total)` (truncates), so it read 99% until the very last frame (or the slowest chunk of a
+parallel run) was counted. After the last frame, `BatchWorker.run` also does unreported work (close zarr group, monitor CSV, combined
+HDF5; the parallel coordinator repeats the HDF5 merge), which looks like a hang. **Fix:** `tab_batch.progress_percent` rounds, caps at 99
+while any frame is outstanding, 100 only when `done >= total`; label adds "finalizing outputs…" at 100%. One log line
+`[batch] all frames integrated — finalizing outputs…` (sequential/solo worker) or `all chunks integrated — merging…` (parallel; chunk
+workers stay quiet so it appears once). Tests: `tests/test_batch_progress.py` (both paths). A genuinely slow last frame still holds the
+bar below 100 -- not fixable by display. Also fixed hanging `test_closing_the_last_panel_tab_is_refused` (patched `information`, code
+calls `warning` -> real modal blocked). Known pre-existing: `test_batch_zarr_gsas::test_the_profile_resolves_a_hutch_the_path_cannot`
+fails at 0d5dc02 too (profile-dependent); running many tab tests in ONE pytest process segfaults in pyqtgraph (run files separately).
+
 ## 2026-11-11 — Ruby: why indexing was poor, phase screening, per-panel omega alignment; domain delete/hide/re-assign
 
 **Findings on `s3idc_oct8_ruby.h5` (6 panels, 337 candidate spots).** (1) The saved free ab-initio domain owns 193 spots but they collapse to 65 distinct (panel, hkl) pairs and its own diagnostics put chance at ~162 -- on a 77-91 A^3 cell with tol 0.15 almost any spot has a lattice node nearby, so it was close to noise. (2) The scrambled-direction null used by `index_known_cell` is far too easy (corundum z=92, but quartz and spinel also z~50); random lattices of the SAME volume match 86+-15 spots (max 131). The honest control is same-volume decoys. (3) Root cause of the poor fit: **each panel needs its own omega offset** (relative to panel 2: -1.2, 0, -1.9, -5.9, -4.9, -2.7 deg). The files' per-frame omega record is linear (slope 0.0998 deg/frame) and the GUI's first-frame index agrees with it, so the offsets are NOT a frame-mapping error visible in the files; their physical cause is unknown (stage/trigger offset between scans?). A first hypothesis -- step 0.1 vs 0.1048 -- was measured and rejected (the 0.1048 was a median skewed by repeated readouts). (4) Same-orientation fit with ideal corundum: panels 2 and 5 carried a constant ~0.017 1/A shift, panel 4 matched nothing.

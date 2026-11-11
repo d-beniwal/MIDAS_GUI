@@ -1,8 +1,10 @@
 # Project state
 
-Last updated: 2026-11-11 (Unit cell tab, path-reload fix)
+Last updated: 2026-11-11 (batch progress finalizing; solve-cell + bkg_pump merged to main)
 
 ## Now working on
+
+2026-11-11 (latest): `solve-cell-tuning-and-path-sync` and `bkg_pump` merged into `main` and pushed. Batch progress bar rounds + "finalizing outputs" log/label (sequential and parallel; DECISIONS 2026-11-11). Not live-checked in the GUI.
 
 2026-11-11 (later): **Ruby identified as corundum** (phase screen vs same-volume decoys z=12.6; per-panel omega offsets found and applied; known-cell refine within 1.5%; blind ab-initio then returns a corundum-like cell). New: Identify phase / Align panels (Index box), domain delete / hide / re-assign, lattice-point classes (spot nearby unassigned / other domain), CLI `python -m midas_gui.solve_cell.identify`, report `.context/reference/solve_cell_ruby_identification.md` (DECISIONS 2026-11-11). Unit/offscreen-tested; not live-checked in the GUI; not in the control API/MCP. **Open:** physical cause of the per-panel omega offsets; Run Ingest stays disabled while Suggest runs. All of this and the Unit cell tab are uncommitted.
 

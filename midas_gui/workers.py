@@ -3110,6 +3110,17 @@ class BatchWorker(QtCore.QThread):
                             cake_2d=cake_2d, cake_sigma=cake_sigma,
                             eta_axis=eta_ax, per_eta=self._multi_azimuth))
 
+            # Every frame is counted by now, so the progress bar already reads
+            # 100%; what follows (closing the zarr group, monitor CSV, combined
+            # HDF5) reports no progress and can take minutes on big runs.
+            # Say so, or the run looks hung. A chunk worker of a parallel run
+            # stays quiet: the coordinator logs once, for the merge.
+            if self._frame_indices is None:
+                self.log_line.emit(
+                    "[batch] all frames integrated — finalizing outputs "
+                    "(zarr close, monitor CSV, combined HDF5); no per-frame "
+                    "progress until done…")
+
             # The last group has no following frame to close it — including
             # when the loop broke on an abort, where the frames already
             # integrated still belong in a readable archive.
@@ -4667,6 +4678,9 @@ class BatchRunCoordinator(QtCore.QObject):
             return
         # All chunks reported — merge, preserving overall frame order (each
         # chunk is a contiguous slice of the sorted index list).
+        self.log_line.emit(
+            "[batch] all chunks integrated — merging and finalizing outputs "
+            "(combined HDF5); no per-frame progress until done…")
         merged_profiles, merged_sigmas, merged_ids, merged_out = [], [], [], []
         aborted = False
         r_axis = None

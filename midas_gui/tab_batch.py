@@ -54,6 +54,20 @@ from midas_gui import settings
 from midas_gui import style as S
 
 
+def progress_percent(done, total) -> int:
+    """Bar value for ``done`` of ``total`` frames.
+
+    Rounded, not truncated: ``int()`` held the bar at 99% for the whole last
+    frame (or the whole slowest chunk of a parallel run). Capped at 99 while
+    any frame is outstanding so 100% always means every frame is counted.
+    """
+    if not total:
+        return 0
+    if done >= total:
+        return 100
+    return min(99, int(round(100.0 * done / total)))
+
+
 class _RadialBinsDialog(QtWidgets.QDialog):
     """Δ/min/max for one radial-axis mode (R in px, Q in Å⁻¹, or 2θ in
     degrees), opened from Batch Integrate's mode-dependent
@@ -2670,8 +2684,12 @@ class BatchTab(QtWidgets.QWidget):
                          "current frame). Completed frames were saved.")
 
     def _on_progress(self, done, total):
-        self._prog.setValue(int(100 * done / total) if total else 0)
-        self._prog_lbl.setText(f"Integrated {done} / {total} frames")
+        self._prog.setValue(progress_percent(done, total))
+        msg = f"Integrated {done} / {total} frames"
+        if total and done >= total:
+            # Frames are all in; the run is writing its combined outputs.
+            msg += " — finalizing outputs…"
+        self._prog_lbl.setText(msg)
 
     def _on_frame(self, fid, r_ax, prof, sigma):
         if not getattr(self, "_wf_started", False):
