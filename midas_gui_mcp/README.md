@@ -55,6 +55,8 @@ advertises them in its MCP `instructions` field.
 - `skills/midas-gui-mcp-calibrate/` — calibration recipe and gotchas (seeds,
   wavelength/pixel size, polling, abort).
 - `skills/midas-gui-mcp-project/` — saving and opening project `.h5` files.
+- `skills/midas-gui-mcp-solve-cell/` — the whole Solve Cell sequence: inputs → suggest/apply
+  parameters → ingest → material filter → index/refine → domain loop.
 
 To make them auto-load in Claude Code, symlink each folder into
 `.claude/skills/` (this repo, untracked) or `~/.claude/skills/` (every project).
@@ -208,7 +210,7 @@ reset manual-seed settings. Seeds persist between runs; pass `clear_seed=true` t
 `calibrate.run` to untick every seed first.
 
 `solve_cell.run_ingest` / `run_diamond_filter` / `run_index` / `run_refine` /
-`run_index_remaining` follow the same pattern: each returns a `job_id`, and
+`run_index_remaining` / `suggest_parameters` / `run_domain_loop` follow the same pattern: each returns a `job_id`, and
 `solve_cell.wait` (blocking, timeout default 600 s) / `solve_cell.get_job`
 resolve it. Only one Solve Cell stage runs at a time. A job resolves when the
 tab's own result handler has finished (and, for "index remaining" in free mode,
@@ -222,12 +224,33 @@ Pipeline order, each stage an op pair (`set_*_params` + `run_*`):
 
 | Stage | Config ops | Run op |
 |---|---|---|
-| Panels | `add_panel`, `select_panel`, `remove_panel`, `panel_load_data`, `panel_set_field`, `panel_load_calibration`, `panel_set_omega`, `panel_list_omega_fields`, `panel_detect_first_idx`, `set_project_dir` | — |
+| Panels (inputs) | `add_panel`, `select_panel`, `remove_panel`, `panel_load_data`, `panel_set_field` (dark/bright/background: path, dataset, mean range, mode, scale), `panel_set_masks`, `panel_load_calibration`, `panel_set_omega` (start, end, step, first idx, omega field, auto first idx), `panel_list_omega_fields`, `panel_detect_first_idx`, `set_project_dir`; read everything back with `panel_get_inputs` | — |
+| 0 Suggest parameters (optional) | `apply_suggested_parameters`, `get_suggestion` | `suggest_parameters` |
 | 1 Ingest | `set_ingest_params` | `run_ingest` |
 | 2 Material filter | `set_material_filter` (`set_diamond_params` = Diamond shortcut) | `run_diamond_filter` (alias `run_material_filter`) |
 | 3 Index | `set_index_params` (free / known_structure) | `run_index` |
 | 4 Refine (free mode) | — | `run_refine` |
 | 5 Index remaining | `set_remaining_params`, `fill_remaining_from_latest_domain` | `run_index_remaining` |
+| 3-5 as one job | `set_index_params`, `set_remaining_params` | `run_domain_loop` (`cancel_domain_loop`) |
+
+**Parameter suggestion.** `suggest_parameters` analyses the active panel (or `panel_id`) with its
+own omega window, dark/bright/background and masks, and returns in its job result a `suggestion`
+(low_count_threshold, sector_candidates, blob_threshold, min_vol, min_frames), a `confidence`
+(`high` = a clear spot-count plateau; `low` = app defaults returned), `warnings`, a text `report`
+and the `evidence` tables. It changes nothing until `apply_suggested_parameters` (the tab's "Set
+suggested" button). It runs worker processes, so it is not instantaneous on a full stack.
+
+**Domain loop.** `run_domain_loop` is one async job: with no domain yet it indexes and refines
+Domain 1, then repeats "index remaining" (free mode refines each found domain inside that stage)
+until `no_new_domain`, `max_domains_reached` or `too_few_remaining_spots`
+(`first_domain_not_found` if Domain 1 could not be solved; `cancelled` after
+`cancel_domain_loop`, which takes effect once the stage in flight finishes). With a
+known-structure "remaining" method, `fill_from_latest` copies the latest cell in before each pass.
+The result lists every step (`stage`, `n_domains_before/after`, `n_remaining`, `note`) and all
+domains; a failed stage makes the job `failed` but the partial result is kept.
+
+**Input fields are computed in the background.** After `panel_set_field`, poll
+`panel_get_inputs` until that field's `pending` is false; `run_ingest` refuses a pending field.
 
 Results/inspection: `get_state`, `get_log`, `get_domains`, `select_domain`,
 `get_spots` (CSV file reference), `select_spot`, `show_selected_on_detector`,

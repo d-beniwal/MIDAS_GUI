@@ -27,6 +27,8 @@ task actually needs that background — do not bulk-read them:
 - `.context/ARCHITECTURE.md` — system shape, components, data flow, UI conventions
 - `.context/DOMAIN.md`       — domain knowledge, MIDAS API specifics, terminology
 - `.context/ROADMAP.md`      — open/pending work items (per-tab, package-side fixes)
+- `.context/reference/solve_cell_ingest_tuning.md` — step-by-step procedure to pick
+  solve-cell ingest parameters (mask, sectors, blob cuts) for a new dataset
 - `.context/reference/midas_pdf/` — build-critical PDF knowledge stack (00–05)
 
 ## Resuming work (`/resume` / `resume-context`)

@@ -825,6 +825,28 @@ class SolveCellTab(QtWidgets.QWidget):
         ingest_row.addWidget(QtWidgets.QLabel("CPUs:"))
         ingest_row.addWidget(self._ingest_max_workers)
         iv.addRow(ingest_row)
+        # Advisory parameter search (solve_cell/tuning.py): characterises the
+        # active panel's frames and suggests the Parameters-dialog values;
+        # nothing is changed until "Set suggested" is pressed.
+        self._tune_result: Optional[dict] = None
+        self._tune_dlg: Optional[QtWidgets.QDialog] = None
+        self._tune_btn = QtWidgets.QPushButton("Suggest parameters")
+        self._tune_btn.setToolTip(
+            "Analyse the ACTIVE panel's frames and suggest ingest parameters "
+            "(mask, azimuth sectors, blob threshold/min_vol/min_frames) from the "
+            "data. Takes a few minutes on a full stack and uses the 'CPUs' value. "
+            "Nothing is changed until you press 'Set suggested'.")
+        self._tune_btn.clicked.connect(self._run_tune)
+        self._tune_apply_btn = QtWidgets.QPushButton("Set suggested")
+        self._tune_apply_btn.setEnabled(False)
+        self._tune_apply_btn.setToolTip("Run 'Suggest parameters' first.")
+        self._tune_apply_btn.clicked.connect(self.apply_suggested_parameters)
+        tune_row = QtWidgets.QHBoxLayout()
+        tune_row.setSpacing(6); tune_row.setContentsMargins(0, 0, 0, 0)
+        tune_row.addWidget(self._tune_btn)
+        tune_row.addWidget(self._tune_apply_btn)
+        tune_row.addStretch(1)
+        iv.addRow(tune_row)
         self._ingest_status = QtWidgets.QLabel("—")
         self._ingest_status.setStyleSheet(f"color:{S.MUTED};font-size:11px")
         self._ingest_status.setWordWrap(True)
@@ -2318,7 +2340,8 @@ class SolveCellTab(QtWidgets.QWidget):
         return self._active_panel().geometry_cfg()
 
     _STAGE_KEYS = {"Ingest": "ingest", "Material filter": "diamond", "Diamond filter": "diamond", "Ab-initio index": "index",
-                   "Index": "index", "Refine": "refine", "Index remaining spots": "index_remaining"}
+                   "Index": "index", "Refine": "refine", "Index remaining spots": "index_remaining",
+                   "Suggest parameters": "tune"}
 
     def _on_stage_fail(self, stage_label: str, msg: str, btn: QtWidgets.QPushButton):
         btn.setEnabled(True)
@@ -2439,9 +2462,18 @@ class SolveCellTab(QtWidgets.QWidget):
             "preview_frame_index": panel.loader.frame_index(),
         }
 
+    def _sync_panel_data(self):
+        """Reload any panel whose data path was edited but never loaded (the field
+        only loads on Enter/Browse), so Ingest/Suggest never read a stale file."""
+        for pid, card in sorted(self._panels.items()):
+            if card.loader.reload_if_path_changed():
+                self._log.append(f"Panel {pid}: data path changed -- reloaded "
+                                 f"{card.loader.data_path()}")
+
     def _run_ingest(self):
         if self._worker is not None and self._worker.isRunning():
             return
+        self._sync_panel_data()
         active_panel = self._active_panel()
         if not active_panel.has_calibration():
             self._warn_or_record(
@@ -2574,6 +2606,144 @@ class SolveCellTab(QtWidgets.QWidget):
         self._worker.finished.connect(self._on_ingest_pooled_done)
         self._worker.failed.connect(self._on_ingest_fail)
         self._worker.start()
+
+    # ── advisory ingest-parameter search ─────────────────────────────
+
+    def _run_tune(self):
+        """Start the parameter search on the active panel (see solve_cell/tuning.py)."""
+        if self._worker is not None and self._worker.isRunning():
+            return
+        self._sync_panel_data()
+        panel = self._active_panel()
+        if not panel.has_calibration():
+            self._warn_or_record(
+                "No calibration loaded", "Load a calibration file for this panel first."); return
+        if panel.loader.data_source_kind() == "none":
+            self._warn_or_record("No raw data", "Load raw frames first."); return
+        for sel in panel.loader.has_pending_fields():
+            self._warn_or_record(
+                "Field not computed",
+                f"'{sel.title()}' is enabled but not computed. "
+                "Click 'Compute field' in that box first."); return
+        cfg = {"frames_loader": panel.loader.full_stack, "geometry": panel.geometry_cfg(),
+               "corrections": panel.corrections_cfg(),
+               "mask": {"user_mask": panel.loader.composite_mask()},
+               "workers": self._ingest_max_workers.value()}
+        self._tune_btn.setEnabled(False); self._ingest_btn.setEnabled(False)
+        self._prog.setVisible(True)
+        self._log.append("─" * 40 + "\nSuggesting ingest parameters (active panel only)…")
+        self._worker = SolveCellWorker("tune_ingest", cfg, parent=self)
+        self._worker.log_line.connect(self._log.append)
+        self._worker.finished.connect(self._on_tune_done)
+        self._worker.failed.connect(self._on_tune_fail)
+        self._worker.start()
+
+    def _on_tune_fail(self, msg: str):
+        self._tune_btn.setEnabled(True)
+        self._on_stage_fail("Suggest parameters", msg, self._ingest_btn)
+
+    def _tune_current_values(self) -> dict:
+        return {"low_count_threshold": self._low_count.value(), "mask_grow": self._mask_grow.value(),
+                "sector_candidates": self._sector_candidates_ed.text().strip(),
+                "blob_thresh": self._blob_thresh.value(), "blob_minvol": self._blob_minvol.value(),
+                "blob_minframes": self._blob_minframes.value()}
+
+    def _on_tune_done(self, result: dict):
+        from midas_gui.solve_cell import tuning as solve_tuning
+        self._tune_btn.setEnabled(True); self._ingest_btn.setEnabled(True)
+        self._prog.setVisible(False)
+        self._tune_result = result
+        sg = result["suggestion"]
+        summary = (f"sectors {sg['sector_candidates']}, threshold {sg['blob_thresh']:g}, "
+                   f"min_vol {sg['blob_minvol']}, min_frames {sg['blob_minframes']}, "
+                   f"low_count {sg['low_count_threshold']:g} ({result['confidence']} confidence)")
+        self._tune_apply_btn.setEnabled(True)
+        self._tune_apply_btn.setToolTip("Set the Parameters dialog to: " + summary)
+        self._ingest_status.setText("Suggested: " + summary)
+        self._log.append("Suggested parameters: " + summary)
+        self._log.append(solve_tuning.format_report(result))
+        self._finish_stage("tune", note=summary)
+        if not self._agent_mode:
+            self._show_tune_dialog(result)
+
+    def _show_tune_dialog(self, result: dict):
+        from midas_gui.solve_cell import tuning as solve_tuning
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Suggested ingest parameters")
+        dlg.setAttribute(QtCore.Qt.WA_DeleteOnClose)
+        dlg.resize(760, 640)
+        lv = QtWidgets.QVBoxLayout(dlg)
+        high = result["confidence"] == "high"
+        head = QtWidgets.QLabel(
+            f"Confidence: <b>{result['confidence']}</b>" +
+            ("" if high else " — the blob cuts below are the app defaults, not a data-derived choice."))
+        head.setWordWrap(True)
+        lv.addWidget(head)
+        rows = [("low_count_threshold", "low_count_threshold"), ("mask grow", "mask_grow"),
+                ("sector candidates", "sector_candidates"), ("blob threshold", "blob_thresh"),
+                ("blob min_vol", "blob_minvol"), ("blob min_frames", "blob_minframes")]
+        cur, sug = self._tune_current_values(), result["suggestion"]
+        tbl = QtWidgets.QTableWidget(len(rows), 3)
+        tbl.setHorizontalHeaderLabels(["Parameter", "Current", "Suggested"])
+        tbl.verticalHeader().setVisible(False)
+        tbl.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        for i, (label, key) in enumerate(rows):
+            tbl.setItem(i, 0, QtWidgets.QTableWidgetItem(label))
+            tbl.setItem(i, 1, QtWidgets.QTableWidgetItem(f"{cur[key]:g}" if not isinstance(cur[key], str) else cur[key]))
+            tbl.setItem(i, 2, QtWidgets.QTableWidgetItem(f"{sug[key]:g}" if not isinstance(sug[key], str) else sug[key]))
+        hh = tbl.horizontalHeader()
+        hh.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(2, QtWidgets.QHeaderView.Stretch)
+        tbl.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        tbl.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        tbl.resizeRowsToContents()
+        tbl.setFixedHeight(hh.height() + sum(tbl.rowHeight(i) for i in range(len(rows))) + 2 * tbl.frameWidth() + 2)
+        lv.addWidget(tbl)
+        if result["warnings"]:
+            warn = QtWidgets.QLabel("<br>".join("⚠ " + w for w in result["warnings"]))
+            warn.setWordWrap(True)
+            lv.addWidget(warn)
+        note = QtWidgets.QLabel(
+            "Suggested from the active panel only. Split ratio, gap bridging and the "
+            "material filter are not changed. Pooled runs share one set of parameters.")
+        note.setWordWrap(True); note.setStyleSheet(f"color:{S.MUTED};font-size:11px")
+        lv.addWidget(note)
+        ev = QtWidgets.QPlainTextEdit(solve_tuning.format_report(result))
+        ev.setReadOnly(True)
+        ev.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
+        from PyQt5 import QtGui
+        ev.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont))
+        lv.addWidget(ev, stretch=1)
+        btns = QtWidgets.QHBoxLayout()
+        set_btn = S.primary_btn("Set as parameters")
+        set_btn.clicked.connect(lambda: (self.apply_suggested_parameters(), dlg.accept()))
+        close_btn = QtWidgets.QPushButton("Close")
+        close_btn.clicked.connect(dlg.reject)
+        btns.addStretch(1); btns.addWidget(set_btn); btns.addWidget(close_btn)
+        lv.addLayout(btns)
+        self._tune_dlg = dlg
+        dlg.show()
+
+    def apply_suggested_parameters(self) -> dict:
+        """Write the last suggestion into the Parameters-dialog widgets (so it is
+        saved with the project like any hand-typed value). Returns what was set;
+        {} when there is no suggestion yet. Public: also the entry point for the
+        control API."""
+        r = self._tune_result
+        if not r:
+            return {}
+        sg = r["suggestion"]
+        self._low_count.setValue(float(sg["low_count_threshold"]))
+        self._mask_grow.setValue(int(sg["mask_grow"]))
+        self._sector_candidates_ed.setText(str(sg["sector_candidates"]))
+        self._blob_thresh.setValue(float(sg["blob_thresh"]))
+        self._blob_minvol.setValue(int(sg["blob_minvol"]))
+        self._blob_minframes.setValue(int(sg["blob_minframes"]))
+        self._log.append("Ingest parameters set from the suggestion: " +
+                         ", ".join(f"{k}={v}" for k, v in sg.items()))
+        self._ingest_status.setText("Parameters set from suggestion — run Ingest.")
+        return dict(sg)
 
     def _on_ingest_fail(self, msg: str):
         self._ingest_status.setText("Ingest failed -- see log.")

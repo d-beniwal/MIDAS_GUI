@@ -306,3 +306,293 @@ def test_domain_ops_without_domains(ctrl):
     assert _call(ctrl, "solve_cell.select_domain", index=0)["error"]["type"] == "bad_args"
     assert _call(ctrl, "solve_cell.fill_remaining_from_latest_domain")["error"]["type"] == "precondition_failed"
     assert _call(ctrl, "solve_cell.save_project")["error"]["type"] == "precondition_failed"
+
+
+# ── data inputs: fields, masks, omega, read-back ────────────────────
+
+def _wait_fields(app, c, roles, timeout=20.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        app.processEvents()
+        f = _ok(c, "solve_cell.panel_get_inputs")["fields"]
+        if all(not f[r]["pending"] for r in roles):
+            return f
+        time.sleep(0.02)
+    raise AssertionError("field did not finish computing")
+
+
+def _tif_mask(shape, pixels) -> str:
+    import numpy as np
+    from PIL import Image
+    d = Path(tempfile.mkdtemp(prefix="mg_sc_mask_"))
+    _SCRATCH.append(d)
+    a = np.zeros(shape, dtype=np.uint8)
+    for r, col in pixels:
+        a[r, col] = 1
+    p = d / f"mask_{len(pixels)}.tif"
+    Image.fromarray(a).save(p)
+    return str(p)
+
+
+def test_dark_bright_background_are_settable_with_dataset_range_mode_scale(ctrl, app):
+    stack = _h5_stack(6)
+    _ok(ctrl, "solve_cell.panel_load_data", path=stack, dataset="exchange/data")
+    r = _ok(ctrl, "solve_cell.panel_set_field", role="dark", path=stack, dataset="exchange/data",
+            start=0, end=2)
+    assert r["field"]["checked"] and r["field"]["start"] == 0 and r["field"]["end"] == 2
+    _ok(ctrl, "solve_cell.panel_set_field", role="bright", path=stack, mode="subtract")
+    _ok(ctrl, "solve_cell.panel_set_field", role="background", path=stack, scale=2.5,
+        start=1, end=3)
+    f = _wait_fields(app, ctrl, ("dark", "bright", "background"))
+    assert f["dark"]["computed"] and f["bright"]["mode"] == 1       # 1 = subtract
+    assert f["background"]["scale"] == 2.5 and f["background"]["start"] == 1
+    # the same state is visible in get_state, and a field can be switched off
+    st = _ok(ctrl, "solve_cell.get_state")["panels"][1 if 1 in _ok(ctrl, "solve_cell.get_state")["panels"] else 0]
+    assert st["fields"]["background"]["checked"] and st["fields"]["dark"]["computed"]
+    _ok(ctrl, "solve_cell.panel_set_field", role="dark", path="", checked=False)
+    assert not _ok(ctrl, "solve_cell.panel_get_inputs")["fields"]["dark"]["checked"]
+    # bad arguments are structured errors
+    assert _call(ctrl, "solve_cell.panel_set_field", role="dark", path=stack,
+                 scale=2.0)["error"]["type"] == "bad_args"
+    assert _call(ctrl, "solve_cell.panel_set_field", role="nope", path=stack)["error"]["type"] == "bad_args"
+
+
+def test_masks_replace_append_disable_clear_and_report_the_composite(ctrl):
+    m1 = _tif_mask((8, 8), [(0, 0), (1, 1)])
+    m2 = _tif_mask((8, 8), [(1, 1), (5, 5), (6, 6)])
+    r = _ok(ctrl, "solve_cell.panel_set_masks", sources=[m1])
+    assert r["composite_masked_px"] == 2 and len(r["sources"]) == 1
+    r = _ok(ctrl, "solve_cell.panel_set_masks", sources=[{"kind": "file", "path": m2}], mode="append")
+    assert r["composite_masked_px"] == 4                              # union: (1,1) counted once
+    r = _ok(ctrl, "solve_cell.panel_set_masks", sources=[{"path": m2, "enabled": False}], mode="append")
+    assert r["composite_masked_px"] == 2 and [s["enabled"] for s in r["sources"]] == [True, False]
+    assert _ok(ctrl, "solve_cell.get_state")["panels"]  # masks listed per panel
+    assert _ok(ctrl, "solve_cell.panel_get_inputs")["masks"]["composite_masked_px"] == 2
+    r = _ok(ctrl, "solve_cell.panel_set_masks", sources=[m2])         # replace
+    assert r["composite_masked_px"] == 3 and len(r["sources"]) == 1
+    r = _ok(ctrl, "solve_cell.panel_set_masks", sources=[])
+    assert r["sources"] == [] and r["composite_masked_px"] is None
+    for bad in ([{"kind": "file", "path": "/no/such/mask.tif"}], [{"kind": "zip", "path": m1}], [{"kind": "file"}]):
+        assert _call(ctrl, "solve_cell.panel_set_masks", sources=bad)["error"]["type"] == "bad_args"
+    assert _call(ctrl, "solve_cell.panel_set_masks", sources=[m1], mode="x")["error"]["type"] == "bad_args"
+
+
+def test_omega_mapping_field_and_auto_first_idx(ctrl):
+    stack = _h5_stack(10)                               # entry/omega = 0..9
+    _ok(ctrl, "solve_cell.panel_load_data", path=stack)
+    r = _ok(ctrl, "solve_cell.panel_set_omega", start=3.0, end=7.0, step=1.0,
+            field="entry/omega", auto_first_idx=True)
+    assert r["first_idx"] == 3 and r["last_idx"] == 7 and r["field"] == "entry/omega"
+    assert r["start"] == 3.0 and r["end"] == 7.0 and r["step"] == 1.0
+    omega = _ok(ctrl, "solve_cell.panel_get_inputs")["omega"]
+    assert omega["first_idx"] == 3 and omega["last_idx"] == 7 and omega["field"] == "entry/omega"
+    # auto-detect without a field is a structured error, not a dialog
+    ctrl._sc._active_panel()._ome_field = ""
+    r = _call(ctrl, "solve_cell.panel_set_omega", auto_first_idx=True)
+    assert r["error"]["type"] == "precondition_failed"
+    # setting the first idx directly still works and updates last_idx
+    r = _ok(ctrl, "solve_cell.panel_set_omega", first_idx=2)
+    assert r["first_idx"] == 2 and r["last_idx"] == 6
+
+
+def test_panel_get_inputs_reports_data_calibration_and_omega(ctrl):
+    stack = _h5_stack(5)
+    _ok(ctrl, "solve_cell.panel_load_data", path=stack, dataset="exchange/data")
+    _ok(ctrl, "solve_cell.panel_load_calibration", path=_calib_json())
+    inp = _ok(ctrl, "solve_cell.panel_get_inputs")
+    assert inp["data"]["path"] == stack and inp["data"]["n_frames"] == 5
+    assert inp["data"]["dataset"] == "exchange/data"
+    assert inp["calibration"]["loaded"] and inp["calibration"]["geometry"]["Lsd"] > 0
+    assert set(inp["fields"]) == {"dark", "bright", "background"}
+    assert _call(ctrl, "solve_cell.panel_get_inputs", panel_id=9)["error"]["type"] == "bad_args"
+
+
+# ── ingest-parameter suggestion ─────────────────────────────────────
+
+def _tune_result():
+    cuts = {"v2f1": [900, 0], "v2f3": [300, 4], "v4f3": [80, 2], "v8f3": [55, 1]}
+    return {"suggestion": {"low_count_threshold": 0.0, "mask_grow": 2, "sector_candidates": "24",
+                           "blob_thresh": 12.0, "blob_minvol": 4, "blob_minframes": 3},
+            "confidence": "high", "warnings": ["diffuse region"], "n_frames": 600,
+            "evidence": {"regime": "photon_counting", "median_percentiles": {"50": 4.0}, "sigma": 1.5,
+                         "masked_fraction": 1e-4, "thresholds": [8, 10, 12],
+                         "sectors": [{"n_sectors": 24, "cuts": cuts}],
+                         "sector_choice": {"n_sectors": 24, "noise_positives": 300, "rejected": []},
+                         "grid": {f"T{T}_v{mv}f3": [60, 1] for T in (8, 10, 12) for mv in (2, 4, 8)},
+                         "blob": {"n_real": 55.0, "plateau": True, "corner_counts": [55, 55],
+                                  "confidence": "high", "expected_spots": 60, "expected_negatives": 1},
+                         "diffuse": {"n_px": 0}},
+            "timings": {"total": 12.0, "workers": 2}}
+
+
+def test_suggest_then_apply_through_the_control_api(ctrl, app, monkeypatch):
+    from midas_gui.solve_cell import pipeline
+    _ok(ctrl, "solve_cell.panel_load_data", path=_h5_stack(4))
+    _ok(ctrl, "solve_cell.panel_load_calibration", path=_calib_json())
+    # nothing to get / apply yet
+    assert _call(ctrl, "solve_cell.get_suggestion")["error"]["type"] == "no_data"
+    assert _call(ctrl, "solve_cell.apply_suggested_parameters")["error"]["type"] == "no_data"
+    seen = {}
+
+    def fake_run_stage(stage, cfg, on_step=None):
+        seen["stage"], seen["cfg_keys"] = stage, sorted(cfg)
+        return _tune_result()
+    monkeypatch.setattr(pipeline, "run_stage", fake_run_stage)
+    before = _ok(ctrl, "solve_cell.get_state")["params"]["ingest"]
+    r = _ok(ctrl, "solve_cell.suggest_parameters")
+    assert r["stage"] == "tune"
+    job = _wait_job(app, ctrl, r["job_id"])
+    assert job["status"] == "done", job
+    res = job["result"]
+    assert res["suggestion"]["sector_candidates"] == "24" and res["confidence"] == "high"
+    assert "Regime" in res["report"] and res["evidence"]["sector_choice"]["n_sectors"] == 24
+    assert seen["stage"] == "tune_ingest" and {"frames", "geometry", "corrections", "workers"} <= set(seen["cfg_keys"])
+    # suggesting changed nothing
+    assert _ok(ctrl, "solve_cell.get_state")["params"]["ingest"] == before
+    assert _ok(ctrl, "solve_cell.get_state")["tuning"]["has_suggestion"]
+    assert _ok(ctrl, "solve_cell.get_suggestion")["confidence"] == "high"
+    out = _ok(ctrl, "solve_cell.apply_suggested_parameters")
+    ing = out["ingest"]
+    assert out["applied"]["blob_thresh"] == 12.0
+    assert ing["blob_threshold"] == 12.0 and ing["blob_min_vol"] == 4 and ing["blob_min_frames"] == 3
+    assert ing["sector_candidates"] == [24] and ing["low_count_threshold"] == 0.0
+
+
+def test_suggest_parameters_guards_are_structured_errors(ctrl):
+    r = _call(ctrl, "solve_cell.suggest_parameters")
+    assert r["error"]["type"] == "precondition_failed" and "calibration" in r["error"]["message"]
+    assert _call(ctrl, "solve_cell.suggest_parameters", panel_id=9)["error"]["type"] == "bad_args"
+
+
+# ── domain loop (sequential refinement) ─────────────────────────────
+
+class _IdleWorker:
+    def isRunning(self):
+        return False
+
+
+def _fake_stages(ctrl, app, script):
+    """Replace the tab's index/refine/index-remaining launchers with fakes that finish on the next
+    event-loop turn and mutate the tab like the real handlers do. ``script`` is a list of dicts,
+    one per expected stage call: {"stage", "adds_domain", "ok", "ab_success"}."""
+    import types
+    import pandas as pd
+    from PyQt5 import QtCore
+    sc = ctrl._sc
+    sc._candidate_df = pd.DataFrame({"x": range(40)})
+    calls = []
+
+    def remaining():
+        n = 40 - 10 * len(sc._domains)
+        return pd.DataFrame({"x": range(max(n, 0))}) if n > 0 else None
+    sc._leftover_df = remaining
+
+    def launcher(stage):
+        def run():
+            step = script[len(calls)]
+            assert step["stage"] == stage, (stage, step)
+            calls.append(stage)
+            sc._worker = _IdleWorker()
+
+            def finish():
+                if stage == "index" and sc._index_method.currentIndex() == 0:
+                    sc._ab_initio_raw = types.SimpleNamespace(success=step.get("ab_success", True))
+                if step.get("adds_domain"):
+                    sc._domains.append({"label": f"Domain {len(sc._domains) + 1}", "method": "free",
+                                        "claimed_index": list(range(10)),
+                                        "result": {"cell": (5.0 + len(sc._domains), 5.0, 5.0, 90.0, 90.0, 90.0),
+                                                   "rms_drlv": 0.01}})
+                sc._finish_stage(stage, ok=step.get("ok", True), error=None if step.get("ok", True) else "boom",
+                                 note=step.get("note", ""))
+            QtCore.QTimer.singleShot(0, finish)
+        return run
+    sc._run_index, sc._run_refine = launcher("index"), launcher("refine")
+    sc._run_index_remaining = launcher("index_remaining")
+    return calls
+
+
+def _loop(ctrl, app, **args):
+    r = _ok(ctrl, "solve_cell.run_domain_loop", **args)
+    assert r["stage"] == "domain_loop"
+    return _wait_job(app, ctrl, r["job_id"])
+
+
+def test_domain_loop_runs_index_refine_then_repeats_until_no_new_domain(ctrl, app):
+    calls = _fake_stages(ctrl, app, [
+        {"stage": "index"}, {"stage": "refine", "adds_domain": True},
+        {"stage": "index_remaining", "adds_domain": True}, {"stage": "index_remaining"}])
+    job = _loop(ctrl, app)
+    assert job["status"] == "done", job
+    assert calls == ["index", "refine", "index_remaining", "index_remaining"]
+    res = job["result"]
+    assert res["stop_reason"] == "no_new_domain" and res["n_new_domains"] == 2
+    assert [s["stage"] for s in res["steps"]] == calls
+    assert [s["n_domains_after"] for s in res["steps"]] == [0, 1, 2, 2]
+    assert len(res["domains"]) == 2 and "2 new domain" in res["note"]
+    assert ctrl._sc_chain is None and not _ok(ctrl, "solve_cell.get_state")["domain_loop"]
+
+
+def test_domain_loop_stops_at_max_domains(ctrl, app):
+    calls = _fake_stages(ctrl, app, [
+        {"stage": "index"}, {"stage": "refine", "adds_domain": True},
+        {"stage": "index_remaining", "adds_domain": True}])
+    job = _loop(ctrl, app, max_domains=2)
+    assert job["status"] == "done" and job["result"]["stop_reason"] == "max_domains_reached"
+    assert calls == ["index", "refine", "index_remaining"]
+
+
+def test_domain_loop_continues_from_existing_domains_without_reindexing(ctrl, app):
+    calls = _fake_stages(ctrl, app, [{"stage": "index_remaining"}])
+    ctrl._sc._domains.append({"label": "Domain 1", "method": "free", "claimed_index": list(range(10)),
+                              "result": {"cell": (5.0, 5.0, 5.0, 90.0, 90.0, 90.0), "rms_drlv": 0.01}})
+    job = _loop(ctrl, app)
+    assert calls == ["index_remaining"] and job["result"]["stop_reason"] == "no_new_domain"
+    assert job["result"]["n_new_domains"] == 0
+
+
+def test_domain_loop_reports_first_domain_not_found(ctrl, app):
+    calls = _fake_stages(ctrl, app, [{"stage": "index", "ab_success": False}])
+    job = _loop(ctrl, app)
+    assert calls == ["index"]
+    assert job["status"] == "done" and job["result"]["stop_reason"] == "first_domain_not_found"
+    assert job["result"]["domains"] == []
+
+
+def test_domain_loop_failed_stage_fails_the_job_but_keeps_partial_results(ctrl, app):
+    _fake_stages(ctrl, app, [{"stage": "index"}, {"stage": "refine", "adds_domain": True},
+                             {"stage": "index_remaining", "ok": False}])
+    job = _loop(ctrl, app)
+    assert job["status"] == "failed" and "index_remaining failed" in job["error"]
+    assert len(job["result"]["domains"]) == 1 and job["result"]["steps"][-1]["ok"] is False
+    assert ctrl._sc_chain is None
+
+
+def test_domain_loop_stops_when_too_few_spots_remain(ctrl, app):
+    calls = _fake_stages(ctrl, app, [{"stage": "index"}, {"stage": "refine", "adds_domain": True}])
+    job = _loop(ctrl, app, min_remaining_spots=35)      # only 30 left after Domain 1
+    assert calls == ["index", "refine"]
+    assert job["result"]["stop_reason"] == "too_few_remaining_spots"
+
+
+def test_domain_loop_cancel_stops_after_the_current_stage(ctrl, app):
+    _fake_stages(ctrl, app, [{"stage": "index"}, {"stage": "refine", "adds_domain": True}])
+    r = _ok(ctrl, "solve_cell.run_domain_loop")
+    assert "stage is already running" in _call(ctrl, "solve_cell.run_diamond_filter")["error"]["message"] \
+        or "domain loop is running" in _call(ctrl, "solve_cell.run_diamond_filter")["error"]["message"]
+    assert _ok(ctrl, "solve_cell.get_state")["domain_loop"]["job_id"] == r["job_id"]
+    c = _ok(ctrl, "solve_cell.cancel_domain_loop")
+    assert "after the current stage" in c["note"]
+    job = _wait_job(app, ctrl, r["job_id"])
+    assert job["status"] == "done" and job["result"]["stop_reason"] == "cancelled"
+    assert [s["stage"] for s in job["result"]["steps"]] == ["index"]
+    assert _call(ctrl, "solve_cell.cancel_domain_loop")["error"]["type"] == "precondition_failed"
+
+
+def test_domain_loop_preconditions(ctrl):
+    r = _call(ctrl, "solve_cell.run_domain_loop")
+    assert r["error"]["type"] == "precondition_failed" and "ingest" in r["error"]["message"]
+    import pandas as pd
+    ctrl._sc._candidate_df = pd.DataFrame({"x": range(5)})
+    assert _call(ctrl, "solve_cell.run_domain_loop", max_domains=0)["error"]["type"] == "bad_args"
+    assert _call(ctrl, "solve_cell.run_domain_loop",
+                 include_first_domain=False)["error"]["type"] == "bad_args"

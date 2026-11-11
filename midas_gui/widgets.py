@@ -5303,6 +5303,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
         raw = self._raw_source()
         if not raw:
             return
+        self._loaded_text = self._path_ed.text()   # what the loaded data came from
         if self._mode == "stream":
             # No in-memory load of the whole dataset (that's the point of
             # stream mode for large scans) — just mark the cached preview
@@ -6060,6 +6061,25 @@ class DataLoaderPanel(QtWidgets.QWidget):
                     self._load()
         finally:
             self._io_budget = saved
+
+    def reload_if_path_changed(self) -> bool:
+        """Load the path now in the field if it differs from what was last loaded.
+
+        Typing a path only loads on Enter/Browse, so a caller about to *use* the data
+        (``full_stack()``) would otherwise silently read the previous file. Synchronous,
+        like :meth:`set_path`. Returns True when a reload was done."""
+        from pathlib import Path
+        text = self._path_ed.text()
+        if (self._explicit_paths or not text.strip()
+                or text == getattr(self, "_loaded_text", text)
+                or not (self._mode == "stream" or Path(text.strip()).exists())):
+            return False
+        saved, self._io_budget = self._io_budget, None
+        try:
+            self._load()
+        finally:
+            self._io_budget = saved
+        return True
 
     def data_path(self) -> str:
         """The path currently typed in the Data card, stripped (may be "").

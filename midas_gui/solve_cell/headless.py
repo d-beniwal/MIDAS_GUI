@@ -43,7 +43,15 @@ Spec (all paths absolute or relative to the CWD)::
       # ... or several (pooled across panels, like the tab):
       "panels": [{"panel_id": 1, "data_path":..., "calibration":..., "omega": {...}, ...}, ...],
 
-      "mask":   {"low_count_threshold": 0.0, "grow": 2},
+      "mask":   {"low_count_threshold": 0.0, "grow": 2,
+                 "file": "bad_px_mask.tif",      # optional bad-pixel mask (non-zero = masked); .tif/.npy/.png
+                 "sources": ["m1.tif", "dir/"]}, # more masks (files or folders of images); all are unioned
+      "corrections": {                          # same fields as the GUI's dark / bright / background pickers
+          "dark":       "dark.tif" | {"path": "dark.h5", "dataset": "exchange/data_dark", "start": 0, "end": -1},
+          "bright":     {"path": "...", "dataset": "exchange/data", "start": 0, "end": -1},
+          "bright_mode": "divide" | "subtract",
+          "background": {"path": "...", "scale": 1.0}},   # file | folder | HDF5 dataset mean | .npy
+      # `mask` and `corrections` can also be given per panel (merged key by key over the top-level ones)
       "live_frames": {"frac_of_median": 0.002},
       "blobs":  {"threshold": 15.0, "min_vol": 6, "min_frames": 2, "split_ratio": 3.0,
                  "gap_bridge": 21 (0 = off), "sector_candidates": [1,8,24,48,96],
@@ -136,6 +144,111 @@ def _panel_specs(spec: dict) -> list:
                 raise SpecError(f"panel {pid}: omega.{req} is required")
         out.append(merged)
     return out
+
+
+def _load_mask_file(path: str, shape_zy: tuple) -> np.ndarray:
+    """Bad-pixel mask (non-zero = masked) from a .tif/.npy file; must match (n_pix_z, n_pix_y)."""
+    p = Path(path).expanduser()
+    if not p.is_file():
+        raise SpecError(f"mask.file: no such file {p}")
+    if p.suffix.lower() == ".npy":
+        m = np.load(p)
+    else:
+        from PIL import Image
+        m = np.array(Image.open(p))
+    m = np.asarray(m) != 0
+    if m.shape != tuple(shape_zy):
+        raise SpecError(f"mask.file {p.name} has shape {m.shape}, detector frames are {tuple(shape_zy)}")
+    return m
+
+
+def _mask_array(path: str, shape_zy: tuple) -> np.ndarray:
+    """One mask file or a folder of mask images (union): non-zero = masked."""
+    p = Path(path).expanduser()
+    if p.is_dir():
+        files = sorted(q for q in p.iterdir() if q.suffix.lower() in (".tif", ".tiff", ".npy", ".png"))
+        if not files:
+            raise SpecError(f"mask folder {p} has no .tif/.npy/.png files")
+        out = None
+        for q in files:
+            m = _mask_array(str(q), shape_zy)
+            out = m if out is None else (out | m)
+        return out
+    return _load_mask_file(str(p), shape_zy)
+
+
+def _build_user_mask(mask_cfg: dict, shape_zy: tuple):
+    """Union of ``mask.file`` and every ``mask.sources`` entry (files/folders). Returns
+    (bool array | None, [GUI MaskSelector source entries])."""
+    paths = ([mask_cfg["file"]] if mask_cfg.get("file") else []) + list(mask_cfg.get("sources") or [])
+    out, rec = None, []
+    for path in paths:
+        m = _mask_array(path, shape_zy)
+        out = m if out is None else (out | m)
+        rec.append({"kind": "folder" if Path(path).expanduser().is_dir() else "file",
+                    "path": str(Path(path).expanduser()), "enabled": True})
+    return out, rec
+
+
+_ARRAY_SUFFIX = (".npy",)
+_H5_SUFFIX = (".h5", ".hdf5", ".nxs", ".hdf")
+
+
+def _field_array(fs, frame_shape: tuple, label: str, pid) -> tuple:
+    """dark/bright/background field -> (float32 (z, y) array, GUI FieldSelector state).
+
+    ``fs`` is a path string or ``{"path", "dataset", "start", "end", "scale"}``. A single image file,
+    a folder of images, an HDF5 dataset (mean over frames start..end inclusive, end -1 = last) or a
+    ``.npy`` 2-D array -- the same reductions the GUI's field pickers use (``helpers.average_field``)."""
+    d = {"path": fs} if isinstance(fs, (str, os.PathLike)) else dict(fs or {})
+    path = d.get("path")
+    if not path:
+        raise SpecError(f"panel {pid}: {label}.path is required")
+    path = str(Path(path).expanduser())
+    if not os.path.exists(path):
+        raise SpecError(f"panel {pid}: {label}: no such file/folder {path}")
+    dataset = d.get("dataset") or ("exchange/data_dark" if label == "dark" else "exchange/data")
+    start, end = int(d.get("start", 0)), int(d.get("end", -1))
+    if os.path.isdir(path):
+        kind = "folder"
+    elif path.lower().endswith(_H5_SUFFIX):
+        kind = "hdf5"
+    else:
+        kind = "file"
+    if path.lower().endswith(_ARRAY_SUFFIX):
+        arr = np.asarray(np.load(path), dtype=np.float32)
+        arr = arr.mean(axis=0) if arr.ndim == 3 else arr
+    else:
+        from midas_gui.helpers import average_field
+        arr = np.asarray(average_field(kind, path, dataset, start, end), dtype=np.float32)
+    if arr.shape != tuple(frame_shape):
+        raise SpecError(f"panel {pid}: {label} shape {arr.shape} != frame shape {tuple(frame_shape)}")
+    scale = float(d.get("scale", 1.0))
+    state = {"path": path, "checked": True, "dataset": dataset, "start": start, "end": end}
+    return (arr * scale if label == "background" else arr), state, scale
+
+
+def _build_corrections(c: dict, frame_shape: tuple, pid):
+    """``corrections`` spec -> (pipeline corrections dict, loader-state records for the project)."""
+    unknown = set(c) - {"dark", "bright", "bright_mode", "background"}
+    if unknown:
+        raise SpecError(f"corrections: unknown key(s) {sorted(unknown)}")
+    mode = c.get("bright_mode", "divide")
+    if mode not in ("divide", "subtract"):
+        raise SpecError("corrections.bright_mode must be 'divide' or 'subtract'")
+    out, rec = {}, {}
+    for label in ("dark", "bright", "background"):
+        if c.get(label):
+            arr, state, scale = _field_array(c[label], frame_shape, label, pid)
+            out[label] = arr
+            if label == "bright":
+                state["mode"] = 0 if mode == "divide" else 1
+            if label == "background":
+                state["scale"] = scale
+            rec[label] = state
+    if "bright" in out:
+        out["bright_mode"] = mode
+    return out, rec
 
 
 def _load_calibration(path: str) -> dict:
@@ -351,6 +464,154 @@ def run_solve_cell_headless(spec: dict, log: Optional[Callable[[str], None]] = N
     return result
 
 
+def _build_panel(p: dict, spec: dict, mask_cfg: dict, live_cfg: dict, blobs_cfg: dict,
+                 out_root, result: dict):
+    """Calibration, omega mapping and the pipeline cfg of ONE panel (shared by solve-cell and tuning)."""
+    pid = p["panel_id"]
+    geometry, calib_record, tx = _load_calibration(p["calibration"])
+    shape = _h5_shape(p["data_path"], p["dataset"])
+    if len(shape) != 3:
+        raise SpecError(f"panel {pid}: dataset {p['dataset']} has shape {shape}, expected 3-D")
+    fr = p.get("frame_range")
+    lo, hi = (0, shape[0]) if not fr else (max(int(fr[0]), 0), min(int(fr[1]), shape[0]))
+    if hi <= lo:
+        raise SpecError(f"panel {pid}: empty frame_range {fr} for {shape[0]} frames")
+    om = resolve_omega(p["data_path"], p["omega"], None if not fr else (lo, hi), shape[0])
+    if not (lo <= om["first_idx"] < hi):
+        raise SpecError(f"panel {pid}: omega first_idx {om['first_idx']} lies outside the "
+                        f"loaded frames [{lo}, {hi})")
+    result["omega"][str(pid)] = om
+    if not geometry["im_trans_in_file"]:
+        result["warnings"].append(
+            f"panel {pid}: calibration does not declare im_trans; none applied")
+    # the pipeline sees the loaded sub-stack: shift file indices down by lo
+    geometry_run = dict(geometry)
+    geometry_run.update({
+        "omega_ref_frame_idx": om["first_idx"] - lo, "omega_ref_deg": om["ref_deg"],
+        "omega_last_frame_idx": om["last_idx"] - lo, "omega_step_deg": om["step"]})
+    # ...but the record keeps file indices (what the GUI would show/reload)
+    geometry_rec = dict(geometry)
+    geometry_rec.update({
+        "omega_ref_frame_idx": om["first_idx"], "omega_ref_deg": om["ref_deg"],
+        "omega_last_frame_idx": om["last_idx"], "omega_step_deg": om["step"]})
+    pdir = (out_root / solve_pipeline.panel_dir_name(pid) / "data") if out_root else None
+    cfg = {
+        "geometry": geometry_run, "corrections": {},
+        "mask": {"low_count_threshold": mask_cfg.get(
+            "low_count_threshold", solve_pipeline.LOW_COUNT_THRESHOLD_DEFAULT),
+            "grow": mask_cfg.get("grow", solve_pipeline.MASK_GROW_DEFAULT)},
+        "blobs": {"threshold": blobs_cfg.get("threshold", solve_pipeline.BLOB_THRESHOLD_DEFAULT),
+                  "min_vol": blobs_cfg.get("min_vol", solve_pipeline.BLOB_MIN_VOL_DEFAULT),
+                  "min_frames": blobs_cfg.get("min_frames", solve_pipeline.BLOB_MIN_FRAMES_DEFAULT),
+                  "split_ratio": blobs_cfg.get("split_ratio", solve_pipeline.SPLIT_RATIO_DEFAULT),
+                  "gap_bridge": blobs_cfg.get("gap_bridge", solve_pipeline.GAP_BRIDGE_DEFAULT),
+                  "sector_candidates": tuple(blobs_cfg.get(
+                      "sector_candidates", solve_pipeline.SECTOR_CANDIDATES_DEFAULT)),
+                  "max_workers": int(blobs_cfg["max_workers"])},
+        "panel_dir": pdir, "preview_frame_index": 0,
+    }
+    # mask sources / dark / bright / background: top-level values, overridden key by key per panel
+    pmask = {**mask_cfg, **(p.get("mask") or {})}
+    user_mask, mask_rec = _build_user_mask(pmask, shape[1:])
+    if user_mask is not None:
+        cfg["mask"]["user_mask"] = user_mask
+    cfg["corrections"], corr_rec = _build_corrections(
+        {**(spec.get("corrections") or {}), **(p.get("corrections") or {})}, shape[1:], pid)
+    loader_rec = {"mask": {"sources": mask_rec}, **corr_rec}
+    if live_cfg:
+        cfg["live_frames"] = live_cfg
+    cfg["_load"] = (p["data_path"], p["dataset"], lo, hi)
+    info = {"spec": p, "shape": shape, "lo": lo, "hi": hi, "om": om,
+            "geometry_rec": geometry_rec, "calib_record": calib_record, "tx": tx,
+            "geometry": geometry, "loader": loader_rec}
+    return pid, cfg, info
+
+
+_CONF_RANK = {"high": 2, "medium": 1, "low": 0}
+
+
+def run_tune_headless(spec: dict, log: Optional[Callable[[str], None]] = None) -> dict:
+    """Suggest ingest parameters (mask threshold, sectors, blob cuts) for the panels of ``spec``.
+
+    Same spec as :func:`run_solve_cell_headless` (data, calibration, omega, mask, corrections,
+    live_frames; ``project_path`` is NOT needed and nothing is written), plus::
+
+        "tune": {"sectors": [1, 24, 96], "workers": null, "panels": [1, 2]}   # all optional
+
+    Runs pipeline stage ``tune_ingest`` (``tuning.suggest_ingest_params``) on each panel -- the same
+    thing as Solve Cell tab -> Ingest -> Suggest parameters. Advisory: returns
+    ``{"status": "ok"|"error", "error", "suggestion", "confidence", "by_panel": {pid: {suggestion,
+    confidence, warnings, evidence, report, n_frames}}, "warnings", "omega", "timings", "log_tail"}``
+    where ``suggestion`` is the one from the most confident panel (feed it into ``mask`` / ``blobs``
+    of a solve-cell spec via :func:`suggestion_to_spec`). Never raises for analysis/spec problems."""
+    t_all = time.time()
+    log_lines: list = []
+    result = {"status": "error", "error": None, "suggestion": None, "confidence": None, "by_panel": {},
+              "n_panels": 0, "omega": {}, "timings": {}, "warnings": [], "log_tail": log_lines}
+    cap = _LogCapture(log_lines, log)
+    try:
+        with contextlib.redirect_stdout(cap), contextlib.redirect_stderr(cap):
+            _run_tune(spec, result)
+    except Exception as exc:
+        result["status"] = "error"
+        result["error"] = (f"{type(exc).__name__}: {exc}" if isinstance(exc, SpecError)
+                           else traceback.format_exc())
+    finally:
+        del log_lines[:-200]
+        result["timings"]["total"] = round(time.time() - t_all, 3)
+    return result
+
+
+def _run_tune(spec: dict, result: dict) -> None:
+    from .tuning import format_report
+    panels = _panel_specs(spec)
+    tune = dict(spec.get("tune") or {})
+    want = {int(i) for i in tune["panels"]} if tune.get("panels") else None
+    mask_cfg = dict(spec.get("mask") or {})
+    live_cfg = dict(spec.get("live_frames") or {})
+    blobs_cfg = dict(spec.get("blobs") or {})
+    blobs_cfg.setdefault("max_workers", 1)
+    if spec.get("torch_threads"):
+        import torch
+        torch.set_num_threads(int(spec["torch_threads"]))
+    panels = [p for p in panels if want is None or p["panel_id"] in want]
+    if not panels:
+        raise SpecError("tune.panels matches no panel")
+    result["n_panels"] = len(panels)
+    for p in panels:
+        t0 = time.time()
+        pid, cfg, _info = _build_panel(p, spec, mask_cfg, live_cfg, blobs_cfg, None, result)
+        _attach_frames(cfg)
+        if tune.get("sectors"):
+            cfg["sectors"] = [int(n) for n in tune["sectors"]]
+        cfg["workers"] = tune.get("workers")
+        res = solve_pipeline.run_stage("tune_ingest", cfg)
+        res["report"] = format_report(res)
+        res["seconds"] = round(time.time() - t0, 1)
+        result["by_panel"][str(pid)] = res
+        result["warnings"] += [f"panel {pid}: {w}" for w in res.get("warnings", [])]
+    best = max(result["by_panel"].values(), key=lambda r: _CONF_RANK.get(r.get("confidence"), -1))
+    result["suggestion"], result["confidence"] = best["suggestion"], best["confidence"]
+    result["status"] = "ok"
+
+
+def suggestion_to_spec(suggestion: dict) -> dict:
+    """Tuning ``suggestion`` (GUI field names) -> the ``mask`` / ``blobs`` parts of a solve-cell spec."""
+    s = suggestion or {}
+    out = {"mask": {}, "blobs": {}}
+    for k, dst in (("low_count_threshold", ("mask", "low_count_threshold")), ("mask_grow", ("mask", "grow")),
+                   ("blob_thresh", ("blobs", "threshold")), ("blob_threshold", ("blobs", "threshold")),
+                   ("blob_minvol", ("blobs", "min_vol")), ("blob_min_vol", ("blobs", "min_vol")),
+                   ("blob_minframes", ("blobs", "min_frames")), ("blob_min_frames", ("blobs", "min_frames"))):
+        if s.get(k) is not None:
+            out[dst[0]][dst[1]] = s[k]
+    if s.get("sector_candidates") not in (None, ""):
+        sc = s["sector_candidates"]
+        out["blobs"]["sector_candidates"] = ([int(x) for x in str(sc).split(",") if x.strip()]
+                                             if isinstance(sc, str) else [int(x) for x in sc])
+    return out
+
+
 def _run(spec: dict, result: dict, project) -> None:
     import pandas as pd
 
@@ -392,56 +653,9 @@ def _run(spec: dict, result: dict, project) -> None:
     # ── per-panel setup: calibration, omega mapping, ingest cfg ──────────
     panel_cfgs, panel_info = [], {}
     for p in panels:
-        pid = p["panel_id"]
-        geometry, calib_record, tx = _load_calibration(p["calibration"])
-        shape = _h5_shape(p["data_path"], p["dataset"])
-        if len(shape) != 3:
-            raise SpecError(f"panel {pid}: dataset {p['dataset']} has shape {shape}, expected 3-D")
-        fr = p.get("frame_range")
-        lo, hi = (0, shape[0]) if not fr else (max(int(fr[0]), 0), min(int(fr[1]), shape[0]))
-        if hi <= lo:
-            raise SpecError(f"panel {pid}: empty frame_range {fr} for {shape[0]} frames")
-        om = resolve_omega(p["data_path"], p["omega"], None if not fr else (lo, hi), shape[0])
-        if not (lo <= om["first_idx"] < hi):
-            raise SpecError(f"panel {pid}: omega first_idx {om['first_idx']} lies outside the "
-                            f"loaded frames [{lo}, {hi})")
-        result["omega"][str(pid)] = om
-        if not geometry["im_trans_in_file"]:
-            result["warnings"].append(
-                f"panel {pid}: calibration does not declare im_trans; none applied")
-        # the pipeline sees the loaded sub-stack: shift file indices down by lo
-        geometry_run = dict(geometry)
-        geometry_run.update({
-            "omega_ref_frame_idx": om["first_idx"] - lo, "omega_ref_deg": om["ref_deg"],
-            "omega_last_frame_idx": om["last_idx"] - lo, "omega_step_deg": om["step"]})
-        # ...but the record keeps file indices (what the GUI would show/reload)
-        geometry_rec = dict(geometry)
-        geometry_rec.update({
-            "omega_ref_frame_idx": om["first_idx"], "omega_ref_deg": om["ref_deg"],
-            "omega_last_frame_idx": om["last_idx"], "omega_step_deg": om["step"]})
-        pdir = (out_root / solve_pipeline.panel_dir_name(pid) / "data") if out_root else None
-        cfg = {
-            "geometry": geometry_run, "corrections": {},
-            "mask": {"low_count_threshold": mask_cfg.get(
-                "low_count_threshold", solve_pipeline.LOW_COUNT_THRESHOLD_DEFAULT),
-                "grow": mask_cfg.get("grow", solve_pipeline.MASK_GROW_DEFAULT)},
-            "blobs": {"threshold": blobs_cfg.get("threshold", solve_pipeline.BLOB_THRESHOLD_DEFAULT),
-                      "min_vol": blobs_cfg.get("min_vol", solve_pipeline.BLOB_MIN_VOL_DEFAULT),
-                      "min_frames": blobs_cfg.get("min_frames", solve_pipeline.BLOB_MIN_FRAMES_DEFAULT),
-                      "split_ratio": blobs_cfg.get("split_ratio", solve_pipeline.SPLIT_RATIO_DEFAULT),
-                      "gap_bridge": blobs_cfg.get("gap_bridge", solve_pipeline.GAP_BRIDGE_DEFAULT),
-                      "sector_candidates": tuple(blobs_cfg.get(
-                          "sector_candidates", solve_pipeline.SECTOR_CANDIDATES_DEFAULT)),
-                      "max_workers": int(blobs_cfg["max_workers"])},
-            "panel_dir": pdir, "preview_frame_index": 0,
-        }
-        if live_cfg:
-            cfg["live_frames"] = live_cfg
-        cfg["_load"] = (p["data_path"], p["dataset"], lo, hi)
+        pid, cfg, info = _build_panel(p, spec, mask_cfg, live_cfg, blobs_cfg, out_root, result)
         panel_cfgs.append((pid, cfg))
-        panel_info[pid] = {"spec": p, "shape": shape, "lo": lo, "hi": hi, "om": om,
-                           "geometry_rec": geometry_rec,
-                           "calib_record": calib_record, "tx": tx, "geometry": geometry}
+        panel_info[pid] = info
 
     fields = _stage_fields(spec, blobs_cfg, mask_cfg, index_cfg, mf_state, str(out_root) if out_root else None)
 
@@ -498,14 +712,16 @@ def _run(spec: dict, result: dict, project) -> None:
             info = panel_info[pid]
             preview = per_panel[pid].get("preview") or {}
             lpath = info["spec"]["data_path"]
+            lrec = info["loader"]
             loader_state = {
                 "path": lpath, "dataset": f"{info['spec']['dataset']}   {info['shape']}",
-                "dark": {"checked": False, "path": "", "dataset": "exchange/data_dark", "start": 0, "end": 0},
-                "bright": {"checked": False, "path": "", "dataset": "exchange/data",
-                           "start": 0, "end": 0, "mode": 0},
-                "background": {"checked": False, "path": "", "dataset": "exchange/data",
-                               "start": 0, "end": 0, "scale": 1.0},
-                "mask": {"sources": []}, "frame_index": 0,
+                "dark": lrec.get("dark") or {"checked": False, "path": "", "dataset": "exchange/data_dark",
+                                             "start": 0, "end": 0},
+                "bright": lrec.get("bright") or {"checked": False, "path": "", "dataset": "exchange/data",
+                                                 "start": 0, "end": 0, "mode": 0},
+                "background": lrec.get("background") or {"checked": False, "path": "", "dataset": "exchange/data",
+                                                         "start": 0, "end": 0, "scale": 1.0},
+                "mask": lrec["mask"], "frame_index": 0,
             }
             om = info["om"]
             state = {"fields": {"ome_start": om["ref_deg"], "ome_end": om["end"], "ome_step": om["step"],
@@ -684,13 +900,15 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--summary", help="also write the result JSON to this file")
     ap.add_argument("--overwrite", action="store_true", help="replace project_path if it exists")
     ap.add_argument("-q", "--quiet", action="store_true", help="no progress on stderr")
+    ap.add_argument("--tune", action="store_true",
+                    help="suggest ingest parameters for the spec's panels (advisory; writes no project)")
     args = ap.parse_args(argv)
     spec = json.loads(Path(args.spec).read_text())
     if args.overwrite:
         spec["overwrite"] = True
     real_err = sys.stderr      # run_solve_cell_headless redirects sys.stderr while it runs
-    res = run_solve_cell_headless(
-        spec, log=None if args.quiet else (lambda s: print(s, file=real_err, flush=True)))
+    run = run_tune_headless if args.tune else run_solve_cell_headless
+    res = run(spec, log=None if args.quiet else (lambda s: print(s, file=real_err, flush=True)))
     text = json.dumps(res, indent=2, default=lambda o: o.tolist() if hasattr(o, "tolist") else str(o))
     if args.summary:
         Path(args.summary).write_text(text)

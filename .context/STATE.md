@@ -1,8 +1,12 @@
 # Project state
 
-Last updated: 2026-11-04 (process-isolated workers)
+Last updated: 2026-11-10 (solve-cell MCP coverage)
 
 ## Now working on
+
+2026-11-10: Solve Cell MCP coverage completed: panel inputs (dark/bright/background with dataset/range/scale, masks, omega field/auto first idx, read-back `panel_get_inputs`), `suggest_parameters`/`apply_suggested_parameters`, and `run_domain_loop`/`cancel_domain_loop` (the "sequential refinements" pipeline). Control-API + coverage tests pass; two live MCP-over-socket runs on synthetic data pass (DECISIONS 2026-11-10). **Not tested: a real second domain via the loop, full-size data over MCP, the real GUI window.** Uncommitted. New skill `midas_gui_mcp/skills/midas-gui-mcp-solve-cell/`.
+
+2026-11-10: Solve Cell ingest-parameter tuning: `midas_gui/solve_cell/tuning.py` (Qt-free, advisory, deterministic, process-parallel; CLI `python -m midas_gui.solve_cell.tuning`) + procedure doc `.context/reference/solve_cell_ingest_tuning.md` + `tests/test_solve_cell_tuning.py` (rules only; DECISIONS 2026-11-10). Run on one real file (Ruby7, 634 frames): 300 s serial, 122 s with 4 workers, identical output. **Now in the Solve Cell tab: Ingest box -> "Suggest parameters" / "Set suggested" (stage `tune_ingest`; DECISIONS 2026-11-10). Rules validated on ONE dataset only; not yet run at full size through the GUI; no cancel.** Uncommitted. Known: `test_closing_the_last_panel_tab_is_refused` hangs without pytest-forked (pre-existing).
 
 2026-11-09: Headless Solve Cell runner added (`midas_gui/solve_cell/headless.py`, tests `tests/test_solve_cell_headless*.py`; DECISIONS 2026-11-09). Synthetic-crystal + CLI + concurrent-process + `project.open` offscreen tests pass; one real spinel panel trialled by hand (cubic a~7.9 A). Uncommitted.
 

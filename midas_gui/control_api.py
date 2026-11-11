@@ -27,9 +27,11 @@ style method names here (dots become underscores).
 from __future__ import annotations
 
 import tempfile
+import time
 import traceback
 import uuid
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -138,10 +140,10 @@ class _SolveCellOps:
         return card
 
     # ── job tracking ─────────────────────────────────────────────────
-    def _sc_start(self, stage: str, starter) -> dict:
-        """Run ``starter()`` (a tab ``_run_*`` method), converting a recorded
-        guard failure / no-worker outcome into a structured error, else
-        register the job that ``stageFinished`` will resolve."""
+    def _sc_launch(self, stage: str, starter) -> Optional[dict]:
+        """Run ``starter()`` (a tab ``_run_*`` method). Returns None when a worker
+        started, else a structured error (a recorded guard failure / no-worker
+        outcome / a stage already running)."""
         sc = self._sc
         if sc._worker is not None and sc._worker.isRunning():
             return _err("a Solve Cell stage is already running; wait for it first",
@@ -156,12 +158,27 @@ class _SolveCellOps:
             return _err(err, kind="precondition_failed")
         if sc._worker is None or sc._worker is before:
             return _err(f"{stage} did not start for an unknown reason", kind="exception")
+        return None
+
+    def _sc_start(self, stage: str, starter) -> dict:
+        """Launch one stage and register the job that ``stageFinished`` resolves."""
+        if self._sc_chain is not None:
+            return _err("a domain loop is running; wait for it (or cancel it) first",
+                        kind="precondition_failed")
+        err = self._sc_launch(stage, starter)
+        if err is not None:
+            return err
         job_id = str(uuid.uuid4())
         self._jobs[job_id] = {"status": "running", "stage": stage, "result": None, "error": None}
         self._sc_job_id = job_id
         return _ok({"job_id": job_id, "stage": stage})
 
     def _on_sc_stage_finished(self, stage: str, outcome: dict) -> None:
+        chain = self._sc_chain
+        if chain is not None and chain["awaiting"]:
+            chain["awaiting"] = False
+            self._sc_chain_after_stage(stage, outcome)
+            return
         job_id = self._sc_job_id
         job = self._jobs.get(job_id) if job_id else None
         if job is None or job["status"] != "running":
@@ -173,6 +190,8 @@ class _SolveCellOps:
             except Exception:
                 result = {}
             result["note"] = outcome.get("note", "")
+            if stage == "tune":
+                result.update(self._sc_tune_payload())
             self._jobs[job_id] = {"status": "done", "stage": stage, "result": result, "error": None}
         else:
             self._jobs[job_id] = {"status": "failed", "stage": stage, "result": None,
@@ -217,7 +236,12 @@ class _SolveCellOps:
                 "calibration": card._calib_path, "has_calibration": card.has_calibration(),
                 "omega": {"start": card._ome_start.value(), "end": card._ome_end.value(),
                           "step": card._ome_step.value(), "first_idx": card._ome_first_idx.value(),
-                          "last_idx": card._last_idx() if card._last_idx() < card._LAST_IDX_OPEN else None},
+                          "last_idx": card._last_idx() if card._last_idx() < card._LAST_IDX_OPEN else None,
+                          "field": card._ome_field or None},
+                "fields": {"dark": self._sc_field_state(card.loader._dark_sel),
+                           "bright": self._sc_field_state(card.loader._bright_sel),
+                           "background": self._sc_field_state(card.loader._bg_sel)},
+                "masks": self._sc_mask_state(card.loader, load=False)["sources"],
             }
         params = {
             "project_dir": sc._proj_ed.text().strip() or None,
@@ -236,7 +260,14 @@ class _SolveCellOps:
                                 "known_structure": _sc_ks_state(sc._ks5)},
         }
         running = sc._worker is not None and sc._worker.isRunning()
+        chain = self._sc_chain
         return _ok({"panels": panels, "params": params, "running": running,
+                    "tuning": {"has_suggestion": sc._tune_result is not None,
+                               "confidence": (sc._tune_result or {}).get("confidence"),
+                               "suggestion": (sc._tune_result or {}).get("suggestion")},
+                    "domain_loop": None if chain is None else {
+                        "job_id": chain["job_id"], "steps_done": len(chain["history"]),
+                        "cancel_requested": chain["cancel"]},
                     "results": self._sc_results_summary(),
                     "view": next((k for k, v in _SC_VIEW_TABS.items()
                                   if v == sc._view_tabs.currentIndex()), None)})
@@ -277,13 +308,126 @@ class _SolveCellOps:
         return _ok({"panel_id": card.panel_id(), "path": card.loader.data_path(),
                     "n_frames": card.loader.n_frames()})
 
-    def op_solve_cell_panel_set_field(self, role, path, checked: bool = True, mode=None,
-                                      panel_id=None) -> dict:
+    # ── data inputs: fields (dark/bright/background), masks, read-back ──
+    @staticmethod
+    def _sc_field_state(sel) -> dict:
+        """A FieldSelector's saved state plus whether its field is computed. Computing
+        runs in a background worker, so a caller polls ``pending`` (via
+        solve_cell.panel_get_inputs) until it is False before ingesting."""
+        st = sel.get_state()
+        st["pending"] = bool(sel.has_pending())
+        st["computed"] = bool(sel.isChecked() and not sel.has_pending())
+        st["status"] = sel._status.text()
+        return st
+
+    @staticmethod
+    def _sc_mask_state(loader, *, load: bool) -> dict:
+        ms = loader._mask_sel
+        out = {"sources": [{"kind": e["kind"], "path": e["path"],
+                            "enabled": bool(e.get("enabled", True))} for e in ms._sources]}
+        if load:   # composite_mask() loads every enabled file/folder: only when asked
+            m = loader.composite_mask()
+            out["composite_masked_px"] = None if m is None else int((m != 0).sum())
+            out["shape"] = None if m is None else list(m.shape)
+            out["warning"] = ms._mask_warning
+        return out
+
+    @staticmethod
+    def _sc_omega_state(card) -> dict:
+        last = card._last_idx()
+        return {"start": card._ome_start.value(), "end": card._ome_end.value(),
+                "step": card._ome_step.value(), "first_idx": card._ome_first_idx.value(),
+                "last_idx": last if last < card._LAST_IDX_OPEN else None,
+                "field": card._ome_field or None,
+                "span_without_step": bool(card.omega_span_without_step())}
+
+    def _sc_panel_inputs(self, card, *, load_mask: bool) -> dict:
+        loader = card.loader
+        st = loader.get_state()
+        return {
+            "panel_id": card.panel_id(),
+            "data": {"path": loader.data_path(), "dataset": str(st.get("dataset", "")).split("   ")[0].strip(),
+                     "n_frames": loader.n_frames(), "source_kind": loader.data_source_kind()},
+            "fields": {"dark": self._sc_field_state(loader._dark_sel),
+                       "bright": self._sc_field_state(loader._bright_sel),
+                       "background": self._sc_field_state(loader._bg_sel)},
+            "masks": self._sc_mask_state(loader, load=load_mask),
+            "calibration": {"path": card._calib_path, "loaded": card.has_calibration(),
+                            "geometry": _jsonable(card.geometry_cfg(), stem="geometry")
+                            if card.has_calibration() else None},
+            "omega": self._sc_omega_state(card),
+        }
+
+    def op_solve_cell_panel_get_inputs(self, panel_id=None) -> dict:
+        """Everything that feeds a panel's ingest: data file/dataset, dark/bright/
+        background (path, dataset, mean range, mode, scale, computed?), mask sources and the
+        composite mask size, calibration, and the frame↔omega mapping."""
         try:
             card = self._sc_panel(panel_id)
         except ValueError as e:
             return _err(e, kind="bad_args")
-        return self._set_field(card.loader, role, path, checked, mode)
+        return _ok(self._sc_panel_inputs(card, load_mask=True))
+
+    def op_solve_cell_panel_set_field(self, role, path, checked: bool = True, mode=None,
+                                      panel_id=None, dataset=None, start=None, end=None,
+                                      scale=None) -> dict:
+        try:
+            card = self._sc_panel(panel_id)
+        except ValueError as e:
+            return _err(e, kind="bad_args")
+        if scale is not None and role != "background":
+            return _err("scale applies to the background field only", kind="bad_args")
+        try:
+            extra = {"dataset": None if dataset is None else str(dataset),
+                     "start": None if start is None else int(start),
+                     "end": None if end is None else int(end),
+                     "scale": None if scale is None else float(scale)}
+        except (TypeError, ValueError) as e:
+            return _err(e, kind="bad_args")
+        res = self._set_field(card.loader, role, path, checked, mode, **extra)
+        if res.get("ok"):
+            sel = {"dark": card.loader._dark_sel, "bright": card.loader._bright_sel,
+                   "background": card.loader._bg_sel}[role]
+            res["result"].update({"panel_id": card.panel_id(), "field": self._sc_field_state(sel)})
+        return res
+
+    def op_solve_cell_panel_set_masks(self, sources, mode: str = "replace", panel_id=None) -> dict:
+        """Set a panel's detector-mask sources (OR-ed into one mask, as in the GUI).
+        ``sources``: list of {kind: "file"|"folder", path, enabled} (a bare string is a
+        file). ``mode`` "replace" (default; [] clears every mask) or "append"."""
+        try:
+            card = self._sc_panel(panel_id)
+        except ValueError as e:
+            return _err(e, kind="bad_args")
+        if mode not in ("replace", "append"):
+            return _err("mode must be 'replace' or 'append'", kind="bad_args")
+        if not isinstance(sources, (list, tuple)):
+            return _err("sources must be a list", kind="bad_args")
+        norm = []
+        for item in sources:
+            item = {"kind": "file", "path": item} if isinstance(item, str) else dict(item or {})
+            kind, path = item.get("kind", "file"), item.get("path")
+            if kind not in ("file", "folder") or not path:
+                return _err(f"bad mask source {item!r}: need kind 'file'|'folder' and a path",
+                            kind="bad_args")
+            p = Path(str(path)).expanduser()
+            if not (p.is_file() if kind == "file" else p.is_dir()):
+                return _err(f"mask {kind} not found: {path}", kind="bad_args")
+            norm.append({"kind": kind, "path": str(p), "enabled": bool(item.get("enabled", True))})
+        ms = card.loader._mask_sel
+        if mode == "replace":
+            for e in [e for e in ms._sources if e["kind"] != "tab1"]:
+                ms._remove(e)
+        for n in norm:
+            have = next((e for e in ms._sources
+                         if e["kind"] == n["kind"] and e["path"] == n["path"]), None)
+            if have is None:
+                ms._add_source(n["kind"], n["path"], enabled=n["enabled"])
+            elif bool(have.get("enabled", True)) != n["enabled"]:
+                have["checkbox"].setChecked(n["enabled"])
+        out = self._sc_mask_state(card.loader, load=True)
+        out["panel_id"] = card.panel_id()
+        return _ok(out)
 
     def op_solve_cell_panel_load_calibration(self, path, panel_id=None) -> dict:
         try:
@@ -299,7 +443,7 @@ class _SolveCellOps:
                     "notes": (card._calib_info or {}).get("notes", [])})
 
     def op_solve_cell_panel_set_omega(self, start=None, end=None, step=None, first_idx=None,
-                                      panel_id=None) -> dict:
+                                      panel_id=None, field=None, auto_first_idx=False) -> dict:
         try:
             card = self._sc_panel(panel_id)
         except ValueError as e:
@@ -310,10 +454,17 @@ class _SolveCellOps:
                 widget.setValue(float(value))
         if first_idx is not None:
             card._ome_first_idx.setValue(int(first_idx))
-        return _ok({"panel_id": card.panel_id(), "start": card._ome_start.value(),
-                    "end": card._ome_end.value(), "step": card._ome_step.value(),
-                    "first_idx": card._ome_first_idx.value(),
-                    "omega_span_without_step": card.omega_span_without_step()})
+        if field is not None:
+            card._ome_field = str(field)
+        if auto_first_idx:        # needs start/end omega (above) and the HDF5 omega field
+            card._last_agent_error = None
+            if not card.detect_first_idx(card._ome_field):
+                return _err(card._last_agent_error or "first-frame detection failed",
+                            kind="precondition_failed")
+        out = self._sc_omega_state(card)
+        out["panel_id"] = card.panel_id()
+        out["omega_span_without_step"] = out["span_without_step"]
+        return _ok(out)
 
     def op_solve_cell_panel_detect_first_idx(self, field, panel_id=None) -> dict:
         try:
@@ -464,6 +615,196 @@ class _SolveCellOps:
 
     def op_solve_cell_run_index_remaining(self) -> dict:
         return self._sc_start("index_remaining", self._sc._run_index_remaining)
+
+    # ── ingest-parameter suggestion (advisory; see solve_cell/tuning.py) ──
+    def _sc_tune_payload(self) -> dict:
+        r = self._sc._tune_result
+        if not r:
+            return {}
+        from midas_gui.solve_cell import tuning
+        return {"suggestion": r["suggestion"], "confidence": r["confidence"],
+                "warnings": list(r["warnings"]), "report": tuning.format_report(r),
+                "evidence": _jsonable(r["evidence"], stem="tune"), "timings": r["timings"],
+                "n_frames": r.get("n_frames")}
+
+    def op_solve_cell_suggest_parameters(self, panel_id=None) -> dict:
+        """Start the parameter search on a panel (the active one by default). Async: the job
+        result carries the suggestion, confidence, warnings, evidence and a text report.
+        Nothing is changed until solve_cell.apply_suggested_parameters."""
+        sc = self._sc
+        if panel_id is not None:
+            if int(panel_id) not in sc._panels:
+                return _err(f"no panel {panel_id}", kind="bad_args")
+            if not (sc._worker is not None and sc._worker.isRunning()):
+                sc._panel_tabs.setCurrentWidget(sc._panels[int(panel_id)])
+        return self._sc_start("tune", sc._run_tune)
+
+    def op_solve_cell_get_suggestion(self) -> dict:
+        payload = self._sc_tune_payload()
+        if not payload:
+            return _err("no suggestion yet — run solve_cell.suggest_parameters first", kind="no_data")
+        return _ok(payload)
+
+    def op_solve_cell_apply_suggested_parameters(self) -> dict:
+        sc = self._sc
+        applied = sc.apply_suggested_parameters()
+        if not applied:
+            return _err("no suggestion yet — run solve_cell.suggest_parameters first", kind="no_data")
+        return _ok({"applied": applied,
+                    "ingest": self.op_solve_cell_get_state()["result"]["params"]["ingest"]})
+
+    # ── domain loop: index -> refine Domain 1, then index-remaining until nothing new ──
+    _CHAIN_RETRY_S = 20.0
+
+    def op_solve_cell_run_domain_loop(self, max_domains: int = 5, include_first_domain: bool = True,
+                                      fill_from_latest: bool = True,
+                                      min_remaining_spots=None) -> dict:
+        """Run the solve sequence as ONE async job: (when no domain exists) index → refine
+        Domain 1, then repeat "index remaining spots" — each found domain is refined as part
+        of that stage — until no new domain is found, ``max_domains`` is reached, or too few
+        spots remain. With a known-structure "remaining" method, ``fill_from_latest`` copies the
+        latest domain's cell into it before each pass. Needs a finished ingest + material
+        filter. The job result lists every step and the stop reason."""
+        sc = self._sc
+        if self._sc_chain is not None:
+            return _err("a domain loop is already running", kind="precondition_failed")
+        try:
+            max_domains = int(max_domains)
+            floor = None if min_remaining_spots is None else int(min_remaining_spots)
+        except (TypeError, ValueError) as e:
+            return _err(e, kind="bad_args")
+        if max_domains < 1:
+            return _err("max_domains must be >= 1", kind="bad_args")
+        if sc._candidate_df is None:
+            return _err("no candidate pool: run ingest and the material filter first",
+                        kind="precondition_failed")
+        n0 = len(sc._domains)
+        if n0 == 0 and not include_first_domain:
+            return _err("no solved domain yet; set include_first_domain=True", kind="bad_args")
+        job_id = str(uuid.uuid4())
+        self._sc_chain = {"job_id": job_id, "max_domains": max_domains, "fill": bool(fill_from_latest),
+                          "min_remaining": floor, "need_first": n0 == 0 and bool(include_first_domain),
+                          "history": [], "awaiting": False, "cancel": False, "n_domains_start": n0,
+                          "retry_until": time.monotonic() + self._CHAIN_RETRY_S}
+        self._jobs[job_id] = {"status": "running", "stage": "domain_loop", "result": None, "error": None}
+        err = self._sc_chain_launch()
+        if err is not None:
+            self._sc_chain = None
+            self._jobs.pop(job_id, None)
+            return err
+        return _ok({"job_id": job_id, "stage": "domain_loop"})
+
+    def op_solve_cell_cancel_domain_loop(self) -> dict:
+        """Stop the domain loop after the stage in flight finishes (a running stage cannot
+        be interrupted)."""
+        c = self._sc_chain
+        if c is None:
+            return _err("no domain loop is running", kind="precondition_failed")
+        c["cancel"] = True
+        if not c["awaiting"]:
+            self._sc_chain_finish(stop_reason="cancelled")
+            return _ok({"job_id": c["job_id"], "note": "cancelled"})
+        return _ok({"job_id": c["job_id"], "note": "will stop after the current stage finishes"})
+
+    def _sc_chain_plan(self):
+        """-> (stage, None) to run next, or (None, stop_reason)."""
+        c, sc = self._sc_chain, self._sc
+        if c["cancel"]:
+            return None, "cancelled"
+        hist = c["history"]
+        last = hist[-1] if hist else None
+        n_dom = len(sc._domains)
+        if c["need_first"] and n_dom == 0:
+            if last is None:
+                return "index", None
+            ab = sc._ab_initio_raw
+            if (last["stage"] == "index" and sc._index_method.currentIndex() == 0
+                    and ab is not None and getattr(ab, "success", False)):
+                return "refine", None
+            return None, "first_domain_not_found"
+        if n_dom >= c["max_domains"]:
+            return None, "max_domains_reached"
+        if last is not None and last["stage"] == "index_remaining" and n_dom <= last["n_domains_before"]:
+            return None, "no_new_domain"
+        leftover = sc._leftover_df()
+        n_left = 0 if leftover is None else len(leftover)
+        floor = c["min_remaining"]
+        if floor is None:
+            floor = (sc._min_refl.value() if sc._leftover_method.currentIndex() == 0
+                     else sc._ks5["min_accept"].value())
+        if n_left < max(1, int(floor)):
+            return None, "too_few_remaining_spots"
+        return "index_remaining", None
+
+    def _sc_chain_launch(self) -> Optional[dict]:
+        """Start the next step. Returns an error dict if the launch was refused, else None
+        (a stage was started, or the loop ended and its job is already resolved)."""
+        c, sc = self._sc_chain, self._sc
+        stage, stop = self._sc_chain_plan()
+        if stage is None:
+            self._sc_chain_finish(stop_reason=stop)
+            return None
+        starters = {"index": sc._run_index, "refine": sc._run_refine,
+                    "index_remaining": sc._run_index_remaining}
+        if stage == "index_remaining" and c["fill"] and sc._leftover_method.currentIndex() == 1:
+            sc._fill_ks5_from_latest_domain()
+        c["history"].append({"stage": stage, "n_domains_before": len(sc._domains)})
+        c["awaiting"] = True
+        err = self._sc_launch(stage, starters[stage])
+        if err is not None:
+            c["awaiting"] = False
+            c["history"].pop()
+        return err
+
+    def _sc_chain_step(self) -> None:
+        """Timer-driven next step. The finished stage's thread may still be exiting when its
+        ``stageFinished`` arrives, so wait (bounded) for it instead of failing the launch."""
+        from PyQt5 import QtCore
+        c, sc = self._sc_chain, self._sc
+        if c is None:
+            return
+        if sc._worker is not None and sc._worker.isRunning():
+            if time.monotonic() < c["retry_until"]:
+                QtCore.QTimer.singleShot(50, self._sc_chain_step)
+            else:
+                self._sc_chain_finish(error="the previous stage's worker did not stop")
+            return
+        err = self._sc_chain_launch()
+        if err is not None:
+            self._sc_chain_finish(error=err["error"]["message"])
+
+    def _sc_chain_after_stage(self, stage: str, outcome: dict) -> None:
+        from PyQt5 import QtCore
+        c, sc = self._sc_chain, self._sc
+        h = c["history"][-1]
+        leftover = sc._leftover_df()
+        h.update({"ok": bool(outcome.get("ok")), "note": outcome.get("note", ""),
+                  "n_domains_after": len(sc._domains),
+                  "n_remaining": None if leftover is None else int(len(leftover))})
+        if not outcome.get("ok"):
+            h["error"] = outcome.get("error")
+            self._sc_chain_finish(error=f"{h['stage']} failed: {outcome.get('error')}")
+            return
+        c["retry_until"] = time.monotonic() + self._CHAIN_RETRY_S
+        QtCore.QTimer.singleShot(0, self._sc_chain_step)
+
+    def _sc_chain_finish(self, *, stop_reason: Optional[str] = None, error: Optional[str] = None) -> None:
+        c, self._sc_chain = self._sc_chain, None
+        if c is None:
+            return
+        try:
+            result = self._sc_results_summary()
+        except Exception:
+            result = {}
+        n_new = len(self._sc._domains) - c["n_domains_start"]
+        result.update({"stop_reason": stop_reason, "steps": c["history"], "n_new_domains": n_new})
+        if error:
+            self._jobs[c["job_id"]] = {"status": "failed", "stage": "domain_loop",
+                                       "result": result, "error": error}
+        else:
+            result["note"] = f"{n_new} new domain(s); stopped: {stop_reason}"
+            self._jobs[c["job_id"]] = {"status": "done", "stage": "domain_loop",
+                                       "result": result, "error": None}
 
     # ── domains / spots ──────────────────────────────────────────────
     def op_solve_cell_get_domains(self) -> dict:
@@ -724,6 +1065,7 @@ class GuiController(_SolveCellOps, _ProjectOps):
             sc.set_agent_mode(True)
             sc.stageFinished.connect(self._on_sc_stage_finished)
         self._sc_job_id = None   # the one in-flight Solve Cell job, if any
+        self._sc_chain = None    # the running domain loop (see op_solve_cell_run_domain_loop), if any
 
     @property
     def _view(self):
@@ -790,7 +1132,7 @@ class GuiController(_SolveCellOps, _ProjectOps):
             return _err(traceback.format_exc(), kind="exception")
 
     # ── shared: dark/bright/background field setters ───────────────────
-    def _set_field(self, loader, role: str, path: str, checked: bool, mode) -> dict:
+    def _set_field(self, loader, role: str, path: str, checked: bool, mode, **extra) -> dict:
         sel = {"dark": getattr(loader, "_dark_sel", None),
                "bright": getattr(loader, "_bright_sel", None),
                "background": getattr(loader, "_bg_sel", None)}.get(role)
@@ -801,6 +1143,7 @@ class GuiController(_SolveCellOps, _ProjectOps):
             if mode not in _BRIGHT_MODE_INDEX:
                 return _err(f"unknown mode {mode!r} (divide/subtract)", kind="bad_args")
             state["mode"] = _BRIGHT_MODE_INDEX[mode]
+        state.update({k: v for k, v in extra.items() if v is not None})
         sel.set_state(state)
         return _ok({"role": role, "path": path})
 

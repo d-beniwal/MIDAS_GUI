@@ -250,6 +250,42 @@ def _apply_stack_corrections(frames: np.ndarray, corr: dict) -> np.ndarray:
     return out
 
 
+def _stage_tune_ingest(cfg: dict) -> dict:
+    """Suggest ingest parameters for ONE panel (advisory; see ``tuning.py`` and
+    ``.context/reference/solve_cell_ingest_tuning.md``).
+
+    ``cfg``: ``frames`` (raw loaded stack, resolved from ``frames_loader`` by the
+    worker), ``geometry`` (same dict ``_stage_ingest`` takes), optional
+    ``corrections`` / ``mask.user_mask`` (same meaning as in ingest), optional
+    ``workers`` (None = auto). The omega window is applied exactly as ingest
+    applies it, so the tuning sees the frames ingest will see. Returns
+    ``tuning.suggest_ingest_params``'s dict plus ``n_frames``.
+    """
+    from .tuning import suggest_ingest_params
+    geom_cfg = cfg["geometry"]
+    frames_loaded = np.asarray(cfg["frames"])
+    n_loaded = frames_loaded.shape[0]
+    ref_idx = max(int(geom_cfg.get("omega_ref_frame_idx", 0)), 0)
+    last_idx = min(int(geom_cfg.get("omega_last_frame_idx", n_loaded - 1)), n_loaded - 1)
+    if ref_idx > last_idx:
+        raise ValueError(f"omega window invalid: first frame idx {ref_idx} > last frame idx {last_idx}")
+    window = frames_loaded[ref_idx:last_idx + 1]
+    print(f"[solve-cell] tune: {window.shape[0]}/{n_loaded} frames in omega window "
+          f"[{ref_idx}, {last_idx}]; sectors/thresholds are searched on this panel only", flush=True)
+    from .tuning import SECTORS_DEFAULT
+    res = suggest_ingest_params(
+        window, geom_cfg, sentinel=cfg.get("sentinel", SENTINEL),
+        sectors=tuple(cfg.get("sectors") or SECTORS_DEFAULT),
+        user_mask=(cfg.get("mask") or {}).get("user_mask"),
+        corrections=cfg.get("corrections") or None,
+        workers=cfg.get("workers"),
+        on_progress=lambda k, v: print(
+            f"[solve-cell] tune: {k} "
+            f"{ {kk: vv for kk, vv in v.items() if kk != 'cuts'} }", flush=True))
+    res["n_frames"] = int(window.shape[0])
+    return res
+
+
 def run_stage(stage: str, cfg: dict, on_step=None) -> dict:
     """Dispatch to one pipeline stage -- the sole entry point a worker thread
     calls (handoff §4.3's ``SolveCellWorker`` template). ``on_step`` is only
@@ -265,6 +301,7 @@ def run_stage(stage: str, cfg: dict, on_step=None) -> dict:
         "ab_initio": _stage_ab_initio,
         "refine": _stage_refine,
         "index_known_cell": _stage_index_known_cell,
+        "tune_ingest": _stage_tune_ingest,
     }
     if stage not in stages:
         raise ValueError(f"unknown solve-cell stage {stage!r}")

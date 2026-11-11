@@ -361,12 +361,14 @@ def calibrate_get_state() -> Any:
 
 # ── Solve Cell ───────────────────────────────────────────────────────
 #
-# The tab's pipeline is: configure panels (data + calibration + omega
-# mapping) → 1 Ingest → 2 Diamond filter → 3 Index → 4 Refine (free mode
-# only; known-structure indexing refines in the same run) → 5 Index
-# remaining spots (repeat for further domains). Every run_* tool is async:
-# it returns a job_id — block on it with solve_cell_wait (or poll
-# solve_cell_get_job). Only one stage runs at a time.
+# The tab's pipeline is: configure panels (data + dark/bright/background +
+# masks + calibration + omega mapping) → [Suggest parameters → apply] →
+# 1 Ingest → 2 Material filter → 3 Index → 4 Refine (free mode only;
+# known-structure indexing refines in the same run) → 5 Index remaining
+# spots (repeat for further domains — solve_cell_run_domain_loop does 3-5
+# in one job). Every run_*/suggest_*/domain_loop tool is async: it returns a
+# job_id — block on it with solve_cell_wait (or poll solve_cell_get_job).
+# Only one stage runs at a time. See the midas-gui-mcp-solve-cell skill.
 
 @mcp.tool()
 def solve_cell_get_state() -> Any:
@@ -423,11 +425,38 @@ def solve_cell_panel_load_data(path: str, dataset: Optional[str] = None,
 @mcp.tool()
 def solve_cell_panel_set_field(role: str, path: str, checked: bool = True,
                                mode: Optional[str] = None,
-                               panel_id: Optional[int] = None) -> Any:
-    """Set a panel's dark/bright/background field (role "dark"/"bright"/
-    "background"; mode "divide"/"subtract" applies to bright only)."""
+                               panel_id: Optional[int] = None,
+                               dataset: Optional[str] = None, start: Optional[int] = None,
+                               end: Optional[int] = None, scale: Optional[float] = None) -> Any:
+    """Set a panel's dark/bright/background field (role "dark"/"bright"/"background").
+    path is a file (TIFF/HDF5), a folder or a glob; for an HDF5 source, dataset names the
+    frame stack and start/end (inclusive frame indices) the range averaged into the field.
+    mode "divide"/"subtract" applies to bright only; scale (default 1) to background only.
+    checked=False (with path "") switches the field off. The field is computed in the
+    background: poll solve_cell_panel_get_inputs until its ``pending`` is false before
+    running ingest (which refuses a pending field). Omit an argument to keep it."""
     return _call("solve_cell.panel_set_field", role=role, path=path, checked=checked,
-                 mode=mode, panel_id=panel_id)
+                 mode=mode, panel_id=panel_id, dataset=dataset, start=start, end=end, scale=scale)
+
+
+@mcp.tool()
+def solve_cell_panel_set_masks(sources: list, mode: str = "replace",
+                               panel_id: Optional[int] = None) -> Any:
+    """Set a panel's detector-mask sources (their non-zero pixels are OR-ed into one mask).
+    sources: list of {kind: "file"|"folder", path, enabled} (a bare string means a file;
+    TIFF/HDF5). mode "replace" (default — pass [] to clear every mask) or "append". Returns
+    the source list, the composite mask's masked-pixel count and any source that failed to
+    load or had the wrong shape."""
+    return _call("solve_cell.panel_set_masks", sources=sources, mode=mode, panel_id=panel_id)
+
+
+@mcp.tool()
+def solve_cell_panel_get_inputs(panel_id: Optional[int] = None) -> Any:
+    """Read back everything that feeds a panel's ingest: data file/dataset/frame count;
+    dark/bright/background (path, dataset, mean range, mode, scale, ``pending``/``computed``);
+    mask sources and the composite mask size; the calibration and its geometry; and the
+    frame↔omega mapping (start, end, step, first/last frame idx, omega field)."""
+    return _call("solve_cell.panel_get_inputs", panel_id=panel_id)
 
 
 @mcp.tool()
@@ -441,13 +470,18 @@ def solve_cell_panel_load_calibration(path: str, panel_id: Optional[int] = None)
 @mcp.tool()
 def solve_cell_panel_set_omega(start: Optional[float] = None, end: Optional[float] = None,
                                step: Optional[float] = None, first_idx: Optional[int] = None,
-                               panel_id: Optional[int] = None) -> Any:
+                               panel_id: Optional[int] = None, field: Optional[str] = None,
+                               auto_first_idx: bool = False) -> Any:
     """Set a panel's frame↔omega mapping (degrees): omega(frame) = start +
-    (frame − first_idx) × step; frames outside [first_idx, last] are excluded.
-    Omit an argument to leave it as-is. A step of 0 with start != end makes
-    every frame share one omega — ingest refuses that unless acknowledged."""
+    (frame − first_idx) × step; frames outside [first_idx, last_idx] are excluded, where
+    last_idx = first_idx + round((end − start) / step). Omit an argument to leave it as-is.
+    field names the HDF5 per-frame omega dataset (see solve_cell_panel_list_omega_fields);
+    auto_first_idx=True then fills first_idx from it (using start/end). A step of 0 with
+    start != end makes every frame share one omega — ingest refuses that unless acknowledged.
+    Returns the resulting mapping including last_idx."""
     return _call("solve_cell.panel_set_omega", start=start, end=end, step=step,
-                 first_idx=first_idx, panel_id=panel_id)
+                 first_idx=first_idx, panel_id=panel_id, field=field,
+                 auto_first_idx=auto_first_idx or None)
 
 
 @mcp.tool()
@@ -491,6 +525,59 @@ def solve_cell_run_ingest(acknowledge_warnings: bool = False) -> Any:
     non-zero omega span, or a calibration that declares no im_trans; pass
     acknowledge_warnings=True only once you have checked those are intended."""
     return _call("solve_cell.run_ingest", acknowledge_warnings=acknowledge_warnings)
+
+
+@mcp.tool()
+def solve_cell_suggest_parameters(panel_id: Optional[int] = None) -> Any:
+    """Optional step BEFORE ingest: analyse a panel's frames (active panel by default) and
+    suggest the ingest parameters — low_count_threshold, azimuth-sector count, blob threshold,
+    min_vol, min_frames — from the data (noise level, background model, spot-count plateau).
+    Needs the panel's calibration, data and omega mapping (and uses its dark/bright/
+    background/mask). Async, a few minutes on a full stack: returns a job_id → solve_cell_wait,
+    whose result holds ``suggestion``, ``confidence`` ("high" = a clear spot-count plateau;
+    "low" = app defaults returned instead), ``warnings`` (e.g. diffuse scatter that survives
+    background subtraction), a text ``report`` and the ``evidence`` tables. Changes nothing
+    until solve_cell_apply_suggested_parameters."""
+    return _call("solve_cell.suggest_parameters", panel_id=panel_id)
+
+
+@mcp.tool()
+def solve_cell_get_suggestion() -> Any:
+    """The last suggestion from solve_cell_suggest_parameters (same payload as its job result)."""
+    return _call("solve_cell.get_suggestion")
+
+
+@mcp.tool()
+def solve_cell_apply_suggested_parameters() -> Any:
+    """Write the last suggestion into the ingest parameters (what the tab's "Set suggested"
+    button does). Returns what was applied and the resulting ingest parameters. Split ratio,
+    gap bridging and the material filter are never changed."""
+    return _call("solve_cell.apply_suggested_parameters")
+
+
+@mcp.tool()
+def solve_cell_run_domain_loop(max_domains: int = 5, include_first_domain: bool = True,
+                               fill_from_latest: bool = True,
+                               min_remaining_spots: Optional[int] = None) -> Any:
+    """Sequential domain refinement as ONE async job (→ solve_cell_wait): when no domain exists
+    yet, index then refine Domain 1; then repeat "index remaining spots" (each found domain is
+    refined inside that stage) until no new domain is found, max_domains is reached, or fewer
+    than min_remaining_spots spots remain (default: the stage's own minimum reflections).
+    With a known-structure "remaining" method (solve_cell_set_remaining_params),
+    fill_from_latest copies the latest domain's cell into it before each pass. Needs a finished
+    ingest + material filter. The job result lists every step (stage, domains before/after,
+    spots remaining, note), the stop_reason ("no_new_domain", "max_domains_reached",
+    "too_few_remaining_spots", "first_domain_not_found", "cancelled") and all domains."""
+    return _call("solve_cell.run_domain_loop", max_domains=max_domains,
+                 include_first_domain=include_first_domain, fill_from_latest=fill_from_latest,
+                 min_remaining_spots=min_remaining_spots)
+
+
+@mcp.tool()
+def solve_cell_cancel_domain_loop() -> Any:
+    """Stop a running domain loop after the stage in flight finishes (a running stage cannot be
+    interrupted); the job then resolves with stop_reason "cancelled" and the domains found."""
+    return _call("solve_cell.cancel_domain_loop")
 
 
 @mcp.tool()

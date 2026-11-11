@@ -1968,3 +1968,96 @@ def test_panel_minimize_to_bottom_ribbon(tab, app):
     after = split.sizes()
     assert abs(after[0] - before[0]) <= 2 and abs(after[1] - before[1]) <= 2
     assert not pt.ribbon.isVisible()
+
+
+# ── Suggest parameters (advisory ingest tuning) ─────────────────────────────
+
+def _fake_tune_result(**over):
+    cuts = {"v2f1": [900, 0], "v2f3": [300, 4], "v4f3": [80, 2], "v8f3": [55, 1]}
+    res = {
+        "suggestion": {"low_count_threshold": 0.0, "mask_grow": 2, "sector_candidates": "24",
+                       "blob_thresh": 12.0, "blob_minvol": 4, "blob_minframes": 3},
+        "confidence": "high", "warnings": ["1941 px keep a large positive residual"],
+        "n_frames": 600,
+        "evidence": {
+            "regime": "photon_counting", "median_percentiles": {"50": 4.0}, "sigma": 1.5,
+            "masked_fraction": 1e-4, "thresholds": [8, 10, 12],
+            "sectors": [{"n_sectors": 24, "cuts": cuts}],
+            "sector_choice": {"n_sectors": 24, "noise_positives": 300, "rejected": []},
+            "grid": {f"T{T}_v{mv}f3": [60, 1] for T in (8, 10, 12) for mv in (2, 4, 8)},
+            "blob": {"n_real": 55.0, "plateau": True, "corner_counts": [55, 55], "confidence": "high",
+                     "expected_spots": 60, "expected_negatives": 1},
+            "diffuse": {"n_px": 0}},
+        "timings": {"total": 12.0, "workers": 2}}
+    res.update(over)
+    return res
+
+
+def test_suggest_warns_when_no_calibration_loaded(tab, monkeypatch):
+    from PyQt5 import QtWidgets
+    warned = {}
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
+                        staticmethod(lambda p, t, x: warned.setdefault("title", t)))
+    tab._run_tune()
+    assert warned.get("title") == "No calibration loaded"
+    assert tab._worker is None
+
+
+def test_suggest_dispatches_the_tune_stage_for_the_active_panel(tab, monkeypatch):
+    from midas_gui import tab_solve_cell
+    panel = tab._active_panel()
+    _make_panel_ready(panel, monkeypatch)
+    tab._ingest_max_workers.setValue(1)
+    _CapturingWorker.instances.clear()
+    monkeypatch.setattr(tab_solve_cell, "SolveCellWorker", _CapturingWorker)
+    tab._run_tune()
+    assert len(_CapturingWorker.instances) == 1
+    w = _CapturingWorker.instances[0]
+    assert w.stage == "tune_ingest"
+    assert callable(w.cfg["frames_loader"]) and w.cfg["workers"] == 1
+    assert w.cfg["geometry"]["Lsd"] == panel.geometry_cfg()["Lsd"]
+    assert not tab._tune_btn.isEnabled() and not tab._ingest_btn.isEnabled()   # busy
+
+
+def test_set_suggested_is_a_noop_before_any_suggestion(tab):
+    before = tab._blob_thresh.value()
+    assert not tab._tune_apply_btn.isEnabled()
+    assert tab.apply_suggested_parameters() == {}
+    assert tab._blob_thresh.value() == before
+
+
+def test_suggestion_enables_set_button_and_sets_the_parameters(tab):
+    tab.set_agent_mode(True)                       # no dialog in agent mode
+    tab._tune_btn.setEnabled(False)
+    tab._on_tune_done(_fake_tune_result())
+    assert tab._tune_btn.isEnabled() and tab._tune_apply_btn.isEnabled()
+    assert tab._tune_dlg is None
+    # nothing is changed by merely getting a suggestion
+    assert tab._blob_minvol.value() != 4 or tab._blob_thresh.value() != 12.0
+    tab._tune_apply_btn.click()
+    assert tab._low_count.value() == 0.0 and tab._mask_grow.value() == 2
+    assert tab._blob_thresh.value() == 12.0 and tab._blob_minvol.value() == 4
+    assert tab._blob_minframes.value() == 3
+    assert tab._sector_candidates_cfg() == (24,)
+    # the values are ordinary widget state, so they are saved with the project
+    f = tab._stage_fields()
+    assert f["blob_thresh"] == 12.0 and f["sector_candidates"] == "24"
+
+
+def test_tune_dialog_has_set_button_that_applies(tab):
+    from PyQt5 import QtWidgets
+    tab._on_tune_done(_fake_tune_result())
+    dlg = tab._tune_dlg
+    assert dlg is not None and dlg.isVisible()
+    labels = [b.text() for b in dlg.findChildren(QtWidgets.QPushButton)]
+    assert "Set as parameters" in labels
+    next(b for b in dlg.findChildren(QtWidgets.QPushButton) if b.text() == "Set as parameters").click()
+    assert tab._blob_thresh.value() == 12.0 and tab._sector_candidates_cfg() == (24,)
+    assert not dlg.isVisible()
+
+
+def test_tune_failure_reenables_buttons(tab):
+    tab.set_agent_mode(True)
+    tab._tune_btn.setEnabled(False); tab._ingest_btn.setEnabled(False)
+    tab._on_tune_fail("boom")
+    assert tab._tune_btn.isEnabled() and tab._ingest_btn.isEnabled()
