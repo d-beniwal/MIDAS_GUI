@@ -59,6 +59,7 @@ from midas_gui.solve_cell_contamination import ContaminationView
 from midas_gui.solve_cell_material_panel import MaterialFilterPanel
 from midas_gui.solve_cell import material_filter
 from midas_gui.solve_cell_compare import DomainCompareView
+from midas_gui.solve_cell_cell_view import UnitCellView
 from midas_gui.solve_cell import domain_compare
 from midas_gui.solve_cell import reciprocal_volume
 from midas_gui import project
@@ -935,6 +936,24 @@ class SolveCellTab(QtWidgets.QWidget):
         self._ab_btn.clicked.connect(self._run_index)
         self._ab_btn.setMaximumWidth(120)
         av.addRow(_left(self._ab_btn))
+        self._phase_btn = QtWidgets.QPushButton("Identify phase…")
+        self._phase_btn.setToolTip(
+            "Test the built-in candidate phases (corundum, spinel, quartz, metals, …) against the candidate "
+            "spots: each lattice's best orientation match is compared with same-volume random lattices, so a "
+            "phase is only 'supported' if it beats chance. Lattice only (no intensities). Takes a few minutes.")
+        self._phase_btn.clicked.connect(self._run_phase_screen)
+        self._align_btn = QtWidgets.QPushButton("Align panels…")
+        self._align_btn.setToolTip(
+            "Fit one omega offset per panel for a lattice hypothesis (a phase from 'Identify phase', or the "
+            "selected domain), then optionally apply it to the panels' start/end omega and the spots. A pooled "
+            "run indexes badly when a panel's frame-to-omega mapping is off by a degree or two.")
+        self._align_btn.clicked.connect(lambda: self._run_align_panels_from_domain())
+        _pa_row = QtWidgets.QHBoxLayout(); _pa_row.setSpacing(6); _pa_row.setContentsMargins(0, 0, 0, 0)
+        _pa_row.addWidget(self._phase_btn); _pa_row.addWidget(self._align_btn); _pa_row.addStretch(1)
+        _pa_host = QtWidgets.QWidget(); _pa_host.setLayout(_pa_row)
+        av.addRow(_pa_host)
+        self._phase_rows: Optional[list] = None
+        self._align_result: Optional[dict] = None
         self._ab_status = QtWidgets.QLabel("—")
         self._ab_status.setStyleSheet(f"color:{S.MUTED};font-size:11px")
         self._ab_status.setWordWrap(True)
@@ -956,7 +975,27 @@ class SolveCellTab(QtWidgets.QWidget):
         self._domain_list.setMaximumHeight(90)
         self._domain_list.currentRowChanged.connect(self._on_domain_selected)
         self._domain_list.setMaximumWidth(289)   # 170% of the former 170 px
+        self._domain_list.itemChanged.connect(self._on_domain_item_changed)
+        self._domain_list.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self._domain_list.customContextMenuRequested.connect(self._domain_context_menu)
         rv.addWidget(self._domain_list, 0, QtCore.Qt.AlignLeft)
+        dom_btns = QtWidgets.QHBoxLayout(); dom_btns.setSpacing(6)
+        self._domain_delete_btn = QtWidgets.QPushButton("Delete")
+        self._domain_delete_btn.setToolTip("Delete the selected solution; its spots become unassigned again.")
+        self._domain_delete_btn.clicked.connect(lambda: self._delete_domain())
+        self._domain_reassign_btn = QtWidgets.QPushButton("Re-assign spots")
+        self._domain_reassign_btn.setToolTip(
+            "Re-test every spot not owned by another domain against this domain's refined orientation "
+            "(tolerance = the 'tol' value), refit from the enlarged set, repeat until stable.")
+        self._domain_reassign_btn.clicked.connect(lambda: self._reassign_domain())
+        dom_btns.addWidget(self._domain_delete_btn); dom_btns.addWidget(self._domain_reassign_btn)
+        dom_btns.addStretch(1)
+        dom_btn_host = QtWidgets.QWidget(); dom_btn_host.setLayout(dom_btns)
+        dom_btns.setContentsMargins(0, 0, 0, 0)
+        rv.addWidget(dom_btn_host, 0, QtCore.Qt.AlignLeft)
+        _hint = QtWidgets.QLabel("Tick = spots visible (right-click for more).")
+        _hint.setStyleSheet(f"color:{S.MUTED};font-size:11px")
+        rv.addWidget(_hint)
         self._param_grid = QtWidgets.QGridLayout()
         self._param_grid.setHorizontalSpacing(20); self._param_grid.setVerticalSpacing(6)
         _pg_host = QtWidgets.QWidget(); _pg_host.setLayout(self._param_grid)
@@ -1028,6 +1067,8 @@ class SolveCellTab(QtWidgets.QWidget):
         self._compare_view.reviewChanged.connect(self._on_compare_review)
         self._compare_view.spotClicked.connect(self._on_recip_spot_clicked)
         self._view_tabs.addTab(self._compare_view, "Compare domains")
+        self._cell_view = UnitCellView()
+        self._view_tabs.addTab(self._cell_view, "Unit cell")
         self._view_tabs.currentChanged.connect(self._refresh_compare)
         self._contam_view = ContaminationView()
         self._contam_view.spotClicked.connect(self._on_recip_spot_clicked)
@@ -1257,21 +1298,32 @@ class SolveCellTab(QtWidgets.QWidget):
             return None
         name = f"domain_{idx + 1:02d}_predictions"
         fp = viz_products.ub_fingerprint(res["UB"])
+        others = self._other_spot_rows(idx)
+        ctx = viz_products.context_fingerprint(others)
         prod = self._viz_products.get(name)
-        if prod is not None and prod["meta"]["inputs"].get("ub_fingerprint") == fp:
-            return prod
+        if prod is not None:
+            inp = prod["meta"]["inputs"]
+            if (inp.get("ub_fingerprint") == fp and inp.get("schema") == viz_products.PREDICTIONS_SCHEMA
+                    and inp.get("context_fp") == ctx):
+                return prod
         snaps = self._ingest_snapshots()
         if not snaps:
             return None
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
             rows = viz_products.domain_rows(self._candidate_df, d["claimed_index"], fit["hkl"])
-            prod = viz_products.build_domain_predictions(d["label"], res["UB"], rows, snaps)
+            prod = viz_products.build_domain_predictions(d["label"], res["UB"], rows, snaps, others=others)
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
         self._viz_products[name] = prod
         self._viz_unsaved.add(name)
         return prod
+
+    def _other_spot_rows(self, idx: int) -> list:
+        """Every candidate spot that domain ``idx`` has NOT claimed, tagged with its owner."""
+        return viz_products.other_spot_rows(
+            self._candidate_df, [d["claimed_index"] for d in self._domains],
+            [d["label"] for d in self._domains], idx)
 
     def _frame_manifest(self) -> Optional[pd.DataFrame]:
         prod = self._viz_products.get("frame_manifest")
@@ -1309,15 +1361,27 @@ class SolveCellTab(QtWidgets.QWidget):
             return None
         pred = prod["tables"]["predictions"]
         snaps = self._ingest_snapshots()
-        spots = {r["spot_id"]: r for r in self._display_spot_rows()}
+        spots = {r["spot_id"]: r for r in self._display_spot_rows(include_hidden=True)}
         rows = []
         for n, p in enumerate(pred[pred.visibility == "visible"].itertuples()):
             if self._on_masked_pixel(int(p.panel_id), p.row, p.col):
                 continue                  # dead/gap/masked area: never a measurable spot
             sid = int(p.observed_spot_id)
             obs = spots.get(sid) if sid >= 0 else None
-            row = {"spot_id": f"{prefix}:{n}", "lattice": True,
-                   "category": "Lattice point · observed" if obs else "Lattice point · not observed",
+            near_id = int(getattr(p, "nearby_spot_id", -1))
+            near_owner = str(getattr(p, "nearby_owner", "") or "")
+            if obs:
+                category = "Lattice point · observed"
+            elif near_id >= 0 and near_owner == "unassigned":
+                category = "Lattice point · spot nearby, unassigned"
+            elif near_id >= 0:
+                category = "Lattice point · spot nearby, other domain"
+            else:
+                category = "Lattice point · not observed"
+            row = {"spot_id": f"{prefix}:{n}", "lattice": True, "category": category,
+                   "nearby_spot_id": near_id if near_id >= 0 else None, "nearby_owner": near_owner,
+                   "nearby_delta": (float(p.nearby_d_row), float(p.nearby_d_col), float(p.nearby_d_omega))
+                   if near_id >= 0 else None,
                    "hkl": (int(p.h), int(p.k), int(p.l)), "panel_id": int(p.panel_id),
                    "qsample_x": float(p.qx), "qsample_y": float(p.qy), "qsample_z": float(p.qz),
                    "pred_omega": float(p.omega_deg), "pred_row": float(p.row), "pred_col": float(p.col),
@@ -1333,8 +1397,11 @@ class SolveCellTab(QtWidgets.QWidget):
             rows.append(row)
         st = prod["meta"]["stats"]
         n_obs = sum(r["observed_spot_id"] is not None for r in rows)
-        notes.append(f"{self._domains[idx]['label']}: {n_obs} observed / {len(rows) - n_obs} unobserved on-panel "
-                     f"lattice crossings; RMS Δrow/Δcol {st.get('rms_d_row', float('nan')):.2f}/"
+        n_un = sum(r["category"].endswith("unassigned") for r in rows)
+        n_oth = sum(r["category"].endswith("other domain") for r in rows)
+        notes.append(f"{self._domains[idx]['label']}: {n_obs} observed / {n_un} spot nearby but unassigned / "
+                     f"{n_oth} spot nearby in another domain / {len(rows) - n_obs - n_un - n_oth} nothing there "
+                     f"(on-panel lattice crossings); RMS Δrow/Δcol {st.get('rms_d_row', float('nan')):.2f}/"
                      f"{st.get('rms_d_col', float('nan')):.2f} px")
         return rows
 
@@ -1537,6 +1604,7 @@ class SolveCellTab(QtWidgets.QWidget):
     _DET_UNASSIGNED_COLOR = "#ffa94d"
     _DET_ASSIGNED_COLOR = "#38d9a9"
     _DET_MISSING_COLOR = "#ff4d4d"
+    _DET_NEARBY_COLOR = "#ffd43b"      # predicted point with a not-assigned spot close by
 
     # Panel-map colour maps offered in the Overlays row (matplotlib names).
     _PATCH_CMAPS = ["viridis", "magma", "inferno", "plasma", "cividis", "turbo", "gray", "reverse_gray", "hot"]
@@ -1599,8 +1667,9 @@ class SolveCellTab(QtWidgets.QWidget):
     def _panel_label(key) -> str:
         return "(single panel)" if key is None else solve_pipeline.panel_dir_name(key)
 
-    def _display_spot_rows(self):
-        """Observed rows with stable ingest identity and optional fit data."""
+    def _display_spot_rows(self, include_hidden: bool = False):
+        """Observed rows with stable ingest identity and optional fit data. Spots of a domain the
+        user has hidden are left out unless ``include_hidden`` (lookups by id need them)."""
         rows = []
         def append(df, category, fit=None):
             if df is None:
@@ -1617,6 +1686,8 @@ class SolveCellTab(QtWidgets.QWidget):
             append(self._flagged_df[self._flagged_df["is_diamond"]], "Diamond/gasket")
         if self._candidate_df is not None:
             for d in self._domains:
+                if d.get("hidden") and not include_hidden:
+                    continue
                 append(self._candidate_df.loc[d["claimed_index"]],
                        f"{d['label']} ({d['method']})", d["result"].get("reflection_fit"))
         unindexed = self._unindexed_df()
@@ -1684,7 +1755,8 @@ class SolveCellTab(QtWidgets.QWidget):
             if not show and n_unindexed:
                 lines.append(f"({n_unindexed} unindexed hidden)")
         else:
-            lines = [f"{d['label']} ({d['method']}): {len(d['claimed_index'])} spots, a={d['result']['cell'][0]:.4g} Å" for d in self._domains]
+            lines = [f"{d['label']} ({d['method']}): {len(d['claimed_index'])} spots, a={d['result']['cell'][0]:.4g} Å"
+                     + (" — hidden" if d.get("hidden") else "") for d in self._domains]
             if "Ab-initio indexed (unrefined)" in buckets:
                 lines.append(f"Ab-initio indexed (unrefined): {len(buckets['Ab-initio indexed (unrefined)'])} spots")
             if self._flagged_df is not None:
@@ -1700,16 +1772,21 @@ class SolveCellTab(QtWidgets.QWidget):
         rows = self._lattice_rows
         self._spot_rows_by_id = {r["spot_id"]: r for r in rows}
         groups = []
-        for obs, color, label in ((True, "#38d9a9", "predicted · observed"), (False, "#ffa94d", "predicted · not observed")):
-            sel = [r for r in rows if (r["observed_spot_id"] is not None) == obs]
+        for cat, color, label in (("observed", "#38d9a9", "predicted · observed"),
+                                  ("spot nearby, unassigned", "#ffd43b", "predicted · spot nearby, unassigned"),
+                                  ("spot nearby, other domain", "#da77f2", "predicted · spot nearby, other domain"),
+                                  ("not observed", "#ffa94d", "predicted · nothing there")):
+            sel = [r for r in rows if r["category"] == f"Lattice point · {cat}"]
             xyz = tuple(np.array([r[c] for r in sel], float) for c in ("qsample_x", "qsample_y", "qsample_z"))
             groups.append((xyz, color, label, sel))
         self._recip_view.set_groups(groups, point_size=self._recip_point_size.value(), size_mode=SIZE_MODE_EQUAL)
         self._recip_view.clear_scalar_bar()
         self._recip_view.set_fitted_overlay(None, None)
         self._update_recip_selection()
-        self._recip_stats.setText(f"Lattice points: {len(groups[0][3])} observed (green), "
-                                  f"{len(groups[1][3])} not observed (orange) — uncheck to return to the indexed spots")
+        self._recip_stats.setText(
+            f"Lattice points: {len(groups[0][3])} observed (green), {len(groups[1][3])} spot nearby but "
+            f"unassigned (yellow), {len(groups[2][3])} spot nearby in another domain (purple), "
+            f"{len(groups[3][3])} nothing there (orange) — uncheck to return to the indexed spots")
 
     @staticmethod
     def _spot_description(row):
@@ -1726,6 +1803,10 @@ class SolveCellTab(QtWidgets.QWidget):
             if row["observed_spot_id"] is not None:
                 detail.append(f"spot {row['observed_spot_id']} (predicted ω {row['pred_omega']:.5g}, "
                               f"row {row['pred_row']:.5g}, col {row['pred_col']:.5g})")
+            elif row.get("nearby_spot_id") is not None:
+                dr, dc, do = row["nearby_delta"]
+                detail.append(f"spot {row['nearby_spot_id']} ({row['nearby_owner']}) is nearby: "
+                              f"Δrow {dr:+.1f}, Δcol {dc:+.1f} px, Δω {do:+.2f}° from the prediction")
         else:
             head = [f"Spot {row['spot_id']}", row["category"]]
             detail = []
@@ -2092,6 +2173,9 @@ class SolveCellTab(QtWidgets.QWidget):
             # Pooled ingest: row/col are per-panel pixel coordinates, so only
             # the ACTIVE panel's own spots belong on its detector frame.
             df = df[df["panel_id"] == self._active_panel_id()]
+        hidden_ids = self._hidden_spot_ids()
+        if hidden_ids and "spot_id" in df.columns:
+            df = df[~df["spot_id"].isin(hidden_ids)]
         if stage == 3:
             sel = df
         elif stage in (0, 1, 2):
@@ -2132,11 +2216,11 @@ class SolveCellTab(QtWidgets.QWidget):
         """Peaks a refined domain predicts on a panel (inside the scan) with no assigned
         spot, over all domains; cached per domain set. Ids are ``miss:<domain>:<n>``."""
         sig = tuple((d["label"], len(d["claimed_index"]), viz_products.ub_fingerprint(d["result"]["UB"]))
-                    for d in self._domains if d["result"].get("UB") is not None)
+                    for d in self._domains if d["result"].get("UB") is not None and not d.get("hidden"))
         if sig != self._missing_sig:
             rows = []
             for j, d in enumerate(self._domains):
-                if d["result"].get("UB") is not None:
+                if d["result"].get("UB") is not None and not d.get("hidden"):
                     got = self._lattice_point_rows(j, [], prefix=f"miss:{j}")
                     rows += [r for r in (got or []) if r["observed_spot_id"] is None]
             self._missing_sig, self._missing_rows = sig, rows
@@ -2150,8 +2234,13 @@ class SolveCellTab(QtWidgets.QWidget):
                and (stage == 3 or (stage in (0, 1, 2) and r["loaded_frame_idx"] == current_loaded_idx))]
         if not sel:
             return
-        pens = [pg.mkPen(self._DET_ASSIGNED_COLOR if r["observed_spot_id"] is not None else self._DET_MISSING_COLOR,
-                         width=2) for r in sel]
+        def _pen(r):
+            if r["observed_spot_id"] is not None:
+                return pg.mkPen(self._DET_ASSIGNED_COLOR, width=2)
+            if r.get("nearby_spot_id") is not None:
+                return pg.mkPen(self._DET_NEARBY_COLOR, width=2)
+            return pg.mkPen(self._DET_MISSING_COLOR, width=2)
+        pens = [_pen(r) for r in sel]
         self._lattice_scatter.setData(x=[r["col"] for r in sel], y=[r["row"] for r in sel],
                                       data=[r["spot_id"] for r in sel], pen=pens)
         chosen = [r for r in sel if r["spot_id"] == self._selected_spot_id]
@@ -2341,7 +2430,7 @@ class SolveCellTab(QtWidgets.QWidget):
 
     _STAGE_KEYS = {"Ingest": "ingest", "Material filter": "diamond", "Diamond filter": "diamond", "Ab-initio index": "index",
                    "Index": "index", "Refine": "refine", "Index remaining spots": "index_remaining",
-                   "Suggest parameters": "tune"}
+                   "Suggest parameters": "tune", "Identify phase": "phase", "Align panels": "align"}
 
     def _on_stage_fail(self, stage_label: str, msg: str, btn: QtWidgets.QPushButton):
         btn.setEnabled(True)
@@ -2782,6 +2871,8 @@ class SolveCellTab(QtWidgets.QWidget):
         self._claimed_index = None
         self._round1_domain_index = None
         self._domain_list.clear()
+        if getattr(self, "_cell_view", None) is not None:
+            self._cell_view.set_result("", None)
         self._ab_btn.setEnabled(False)
         self._refine_btn.setEnabled(False)
         self._update_leftover_status()
@@ -2995,7 +3086,7 @@ class SolveCellTab(QtWidgets.QWidget):
         domains_meta, domain_arrays = [], []
         for d in self._domains:
             domains_meta.append({
-                "label": d["label"], "method": d["method"],
+                "label": d["label"], "method": d["method"], "hidden": bool(d.get("hidden")),
                 # the claimed rows are stored as an array; the mask is redundant
                 "result": {k: v for k, v in d["result"].items() if k != "indexed_mask"}})
             arrays = {"claimed_index": np.asarray(d["claimed_index"]),
@@ -3103,11 +3194,12 @@ class SolveCellTab(QtWidgets.QWidget):
                 claimed = pd.Index(arrs["claimed_index"])
                 d = {"label": dm["label"], "method": dm["method"], "result": dm["result"],
                      "xyz": tuple(arrs["xyz"][:, i] for i in range(3)),
-                     "claimed_index": claimed, "panel_ids": arrs.get("panel_ids")}
+                     "claimed_index": claimed, "panel_ids": arrs.get("panel_ids"),
+                     "hidden": bool(dm.get("hidden"))}
                 self._domains.append(d)
                 self._claimed_index = (claimed if self._claimed_index is None
                                        else self._claimed_index.union(claimed))
-                self._domain_list.addItem(self._domain_text(d))
+                self._add_domain_item(d)
             self._round1_domain_index = xmeta.get("round1_domain_index")
             if self._domains:
                 self._domain_list.setCurrentRow(len(self._domains) - 1)
@@ -3282,7 +3374,8 @@ class SolveCellTab(QtWidgets.QWidget):
             panel_ids = (new.loc[rows, "panel_id"].to_numpy() if "panel_id" in new.columns else None)
             xyz = (g[:, 0], g[:, 1], g[:, 2])
             self._domains.append({"label": d["label"], "method": d["method"], "result": result,
-                                  "xyz": xyz, "claimed_index": claimed, "panel_ids": panel_ids})
+                                  "xyz": xyz, "claimed_index": claimed, "panel_ids": panel_ids,
+                                  "hidden": bool(d.get("hidden"))})
             if add_ids:
                 notes.append(f"{d['label']}: +{len(add_ids)} spot(s) that index on it")
         self._claimed_index = None
@@ -3291,7 +3384,7 @@ class SolveCellTab(QtWidgets.QWidget):
                                    else self._claimed_index.union(d["claimed_index"]))
         self._domain_list.clear()
         for d in self._domains:
-            self._domain_list.addItem(self._domain_text(d))
+            self._add_domain_item(d)
         if self._domains:
             self._round1_domain_index = 0
             self._domain_list.setCurrentRow(len(self._domains) - 1)
@@ -3558,6 +3651,10 @@ class SolveCellTab(QtWidgets.QWidget):
         pairs.append(("holohedry", f"{r['holohedry_system']} (order {r['holohedry_order']})"))
         pairs.append(("rms_drlv", f"{r['rms_drlv']:.5g}"))
         pairs.append(("n_reflections", str(r["n_reflections"])))
+        from midas_gui.solve_cell import cell_report as cell_rep
+        pairs.insert(6, ("volume", f"{cell_rep.cell_volume(r['cell']):.2f} Å³"))
+        pairs.append(("more", "see the Unit cell tab: reduced cell, closest known lattices, "
+                              "symmetry vs tolerance, 3D cell"))
         for row, (key, val) in enumerate(pairs):
             k = QtWidgets.QLabel(f"{key}:")
             k.setStyleSheet("font-weight:600;font-size:12px")
@@ -3573,7 +3670,16 @@ class SolveCellTab(QtWidgets.QWidget):
         if row < 0 or row >= len(self._domains):
             return
         self._populate_result_grid(self._domains[row]["result"])
+        self._refresh_cell_view(row)
         self._refresh_overlays()
+
+    def _refresh_cell_view(self, row: int):
+        """Feed the Unit cell tab (and its phase comparison) with domain ``row``'s fit."""
+        from midas_gui.solve_cell import cell_report as cell_rep
+        d = self._domains[row]
+        self._cell_view.set_result(
+            d["label"], d["result"],
+            cell_rep.extra_refs_from_materials(self._material_panel.materials()))
 
     def _add_domain(self, method: str, result: dict, claimed_index, xyz, panel_ids=None,
                     *, round1: bool = False) -> int:
@@ -3591,7 +3697,7 @@ class SolveCellTab(QtWidgets.QWidget):
                               "xyz": xyz, "claimed_index": claimed_index, "panel_ids": panel_ids})
         self._claimed_index = (claimed_index if self._claimed_index is None
                                else self._claimed_index.union(claimed_index))
-        self._domain_list.addItem(self._domain_text(self._domains[-1]))
+        self._add_domain_item(self._domains[-1])
         self._domain_list.setCurrentRow(len(self._domains) - 1)
         if round1:
             self._round1_domain_index = len(self._domains) - 1
@@ -3607,7 +3713,8 @@ class SolveCellTab(QtWidgets.QWidget):
         correctly releases rows it no longer claims."""
         label = self._domains[idx]["label"]
         self._domains[idx] = {"label": label, "method": method, "result": result,
-                              "xyz": xyz, "claimed_index": claimed_index, "panel_ids": panel_ids}
+                              "xyz": xyz, "claimed_index": claimed_index, "panel_ids": panel_ids,
+                              "hidden": bool(self._domains[idx].get("hidden"))}
         self._claimed_index = None
         for d in self._domains:
             self._claimed_index = (d["claimed_index"] if self._claimed_index is None
@@ -3617,6 +3724,379 @@ class SolveCellTab(QtWidgets.QWidget):
         self._update_leftover_status()
         self._update_multidomain_plot()
         self._mark_sc_dirty("index")
+
+    # ── phase identification / panel omega alignment ─────────────────
+
+    def _ensure_pool_for_tools(self) -> bool:
+        if self._candidate_df is None:
+            self._ensure_candidate_pool()
+        if self._candidate_df is None or len(self._candidate_df) == 0:
+            self._warn_or_record("No candidates", "Run Ingest (and the Material filter, or untick it) first.")
+            return False
+        return True
+
+    def _run_phase_screen(self):
+        if self._worker is not None and self._worker.isRunning():
+            return
+        if not self._ensure_pool_for_tools():
+            return
+        cfg = {"g_2pi": self._candidate_df[["qsample_x", "qsample_y", "qsample_z"]].to_numpy(),
+               "tol": 0.10, "n_decoys": 20}
+        self._phase_btn.setEnabled(False); self._ab_btn.setEnabled(False)
+        self._prog.setVisible(True)
+        self._log.append("─" * 40 + "\nIdentifying phase: every candidate vs same-volume random lattices…")
+        self._worker = SolveCellWorker("screen_phases", cfg, parent=self)
+        self._worker.log_line.connect(self._log.append)
+        self._worker.finished.connect(self._on_phase_screen_done)
+        self._worker.failed.connect(lambda msg: (self._phase_btn.setEnabled(True),
+                                                 self._on_stage_fail("Identify phase", msg, self._ab_btn)))
+        self._worker.start()
+
+    def _on_phase_screen_done(self, result: dict):
+        self._phase_btn.setEnabled(True); self._ab_btn.setEnabled(self._candidate_df is not None)
+        self._prog.setVisible(False)
+        self._phase_rows = result["rows"]
+        top = self._phase_rows[0] if self._phase_rows else None
+        note = (f"{top['name']}: {top['best_n']}/{top['n_spots']} spots vs decoys "
+                f"{top['decoy_mean']:.0f}±{top['decoy_sd']:.0f} (max {top['decoy_max']}), z={top['z']:.1f} "
+                f"-> {top['verdict']}") if top else "no phases"
+        self._ab_status.setText("Best phase: " + note)
+        self._log.append("Best phase: " + note)
+        self._finish_stage("phase", note=note)
+        if not self._agent_mode:
+            self._show_phase_dialog(self._phase_rows)
+
+    def _show_phase_dialog(self, rows: list):
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Identify phase")
+        dlg.setAttribute(QtCore.Qt.WA_DeleteOnClose)
+        dlg.resize(820, 520)
+        lv = QtWidgets.QVBoxLayout(dlg)
+        intro = QtWidgets.QLabel(
+            "Each candidate lattice is matched against the candidate spots over random orientations. The "
+            "<b>decoys</b> are random lattices of the same volume, which fit the same number of spots by "
+            "luck; a phase is <b>supported</b> only if it beats every decoy and is ≥4σ above their mean. "
+            "Lattice agreement only — no intensities or atoms.")
+        intro.setWordWrap(True)
+        lv.addWidget(intro)
+        tbl = QtWidgets.QTableWidget(len(rows), 6)
+        tbl.setHorizontalHeaderLabels(["Phase", "Spots matched", "Decoys mean ± sd (max)", "z", "Verdict", "Cell volume Å³"])
+        tbl.verticalHeader().setVisible(False)
+        tbl.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        tbl.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        tbl.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        colors = {"supported": "#38d9a9", "weak": "#ffa94d", "not distinguished": "#9a9a9a"}
+        from PyQt5 import QtGui
+        for r, row in enumerate(rows):
+            vals = [row["name"], f"{row['best_n']} / {row['n_spots']}",
+                    f"{row['decoy_mean']:.1f} ± {row['decoy_sd']:.1f} ({row['decoy_max']})",
+                    f"{row['z']:.1f}", row["verdict"], f"{row['volume']:.1f}"]
+            for c, v in enumerate(vals):
+                it = QtWidgets.QTableWidgetItem(v)
+                if c == 4:
+                    it.setForeground(QtGui.QColor(colors.get(row["verdict"], "#9a9a9a")))
+                tbl.setItem(r, c, it)
+        tbl.resizeColumnsToContents()
+        tbl.horizontalHeader().setStretchLastSection(True)
+        if rows:
+            tbl.selectRow(0)
+        lv.addWidget(tbl, stretch=1)
+        btns = QtWidgets.QHBoxLayout()
+        align = S.primary_btn("Align panels with selected phase")
+        known = QtWidgets.QPushButton("Use as known structure")
+        close = QtWidgets.QPushButton("Close")
+        sel = lambda: rows[tbl.currentRow()] if 0 <= tbl.currentRow() < len(rows) else None
+        align.clicked.connect(lambda: (self._run_align_panels(sel()["primitive_cell"], sel()["UB"], sel()["name"])
+                                       if sel() else None, dlg.accept()))
+        known.clicked.connect(lambda: (self.use_phase_as_known_structure(sel()["name"]) if sel() else None))
+        close.clicked.connect(dlg.reject)
+        btns.addStretch(1); btns.addWidget(align); btns.addWidget(known); btns.addWidget(close)
+        lv.addLayout(btns)
+        self._phase_dlg = dlg
+        dlg.show()
+
+    def use_phase_as_known_structure(self, name: str) -> bool:
+        """Fill the Known-structure form (step 3) with a screened phase's primitive cell and switch
+        the index method to it."""
+        row = next((r for r in (self._phase_rows or []) if r["name"] == name), None)
+        if row is None:
+            return False
+        for key, val in zip(("a", "b", "c", "alpha", "beta", "gamma"), row["primitive_cell"]):
+            self._ks3[key].setValue(float(val))
+        self._index_method.setCurrentIndex(1)
+        self._log.append(f"Known structure set to {name}'s primitive cell: "
+                         f"{', '.join(f'{v:.4f}' for v in row['primitive_cell'])}")
+        return True
+
+    def _run_align_panels_from_domain(self, row: Optional[int] = None):
+        row = self._current_domain_index() if row is None else row
+        if row is None:
+            self._warn_or_record("Align panels", "Solve a domain first (or use Identify phase…, which "
+                                                 "offers 'Align panels with selected phase')."); return
+        d = self._domains[row]
+        self._run_align_panels(tuple(d["result"]["cell"]), np.asarray(d["result"]["UB"], float),
+                               f"{d['label']}'s lattice")
+
+    def _run_align_panels(self, cell, UB0, what: str):
+        if self._worker is not None and self._worker.isRunning():
+            return
+        if not self._ensure_pool_for_tools():
+            return
+        df = self._candidate_df
+        need = ("qlab_x", "qlab_y", "qlab_z", "omega_deg", "panel_id")
+        if any(c not in df.columns for c in need):
+            self._warn_or_record("Align panels", "The spot table has no lab-frame q / panel ids; re-run Ingest."); return
+        if df["panel_id"].nunique() < 2:
+            self._warn_or_record("Align panels", "Only one panel has spots; there is nothing to align."); return
+        cfg = {"qlab": df[["qlab_x", "qlab_y", "qlab_z"]].to_numpy(), "omega_deg": df["omega_deg"].to_numpy(),
+               "panel_id": df["panel_id"].to_numpy(), "cell": tuple(float(v) for v in cell), "UB0": UB0, "tol": 0.08}
+        self._align_what = what
+        self._align_btn.setEnabled(False)
+        self._prog.setVisible(True)
+        self._log.append("─" * 40 + f"\nAligning panels' omega with {what}…")
+        self._worker = SolveCellWorker("align_panels", cfg, parent=self)
+        self._worker.log_line.connect(self._log.append)
+        self._worker.finished.connect(self._on_align_done)
+        self._worker.failed.connect(lambda msg: (self._align_btn.setEnabled(True),
+                                                 self._on_stage_fail("Align panels", msg, self._ab_btn)))
+        self._worker.start()
+
+    def _on_align_done(self, result: dict):
+        self._align_btn.setEnabled(True)
+        self._prog.setVisible(False)
+        self._align_result = result
+        offs = ", ".join(f"panel {p}: {v:+.2f}°" for p, v in sorted(result["offsets"].items()))
+        note = (f"matched {result['n_matched_before']} → {result['n_matched_after']} of {result['n_spots']} "
+                f"(tol {result['tol']:g}); rms {result['rms_before']:.4f} → {result['rms_after']:.4f} Å⁻¹; {offs}")
+        self._ab_status.setText("Panel alignment: " + note)
+        self._log.append("Panel alignment: " + note)
+        self._finish_stage("align", note=note)
+        if not self._agent_mode:
+            resp = QtWidgets.QMessageBox.question(
+                self, "Align panels",
+                f"With {self._align_what} the best per-panel omega offsets are:\n\n{offs}\n\n"
+                f"Spots matching the lattice: {result['n_matched_before']} → {result['n_matched_after']} of "
+                f"{result['n_spots']}; rms {result['rms_before']:.4f} → {result['rms_after']:.4f} Å⁻¹.\n\n"
+                "Apply these offsets? Each panel's start and end omega move by its offset, the existing spots "
+                "are re-expressed, and indexing results are cleared (the material filter must be re-run). "
+                "This assumes the lattice hypothesis is right.",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
+            if resp == QtWidgets.QMessageBox.Yes:
+                self.apply_panel_offsets()
+
+    def apply_panel_offsets(self, offsets: Optional[dict] = None) -> dict:
+        """Shift every panel's start/end omega by its offset and re-express the existing spots
+        (omega, q in the sample frame, the as-run geometry record). Clears indexing results, which
+        were computed at the old omegas. Returns the offsets applied ({} if none are available)."""
+        from midas_gui.solve_cell import panel_align
+        offsets = offsets or (self._align_result or {}).get("offsets")
+        if not offsets or self._spots_df is None:
+            return {}
+        offsets = {int(p): float(v) for p, v in offsets.items()}
+        for pid, card in self._panels.items():
+            dlt = offsets.get(pid, 0.0)
+            if dlt:
+                card._ome_start.setValue(card._ome_start.value() + dlt)
+                card._ome_end.setValue(card._ome_end.value() + dlt)
+        for attr in ("_spots_df", "_flagged_df", "_candidate_df"):
+            df = getattr(self, attr)
+            if df is None or "qlab_x" not in df.columns:
+                continue
+            om, qs = panel_align.apply_omega_offsets(
+                df[["qlab_x", "qlab_y", "qlab_z"]].to_numpy(), df["omega_deg"].to_numpy(),
+                df["panel_id"].to_numpy(), offsets)
+            df = df.copy()
+            df["omega_deg"] = om
+            df[["qsample_x", "qsample_y", "qsample_z"]] = qs
+            setattr(self, attr, df)
+        for key, prec in ((self._sc_ingest_meta or {}).get("panels") or {}).items():
+            dlt = offsets.get(int(key), 0.0)
+            if not dlt:
+                continue
+            if prec.get("geometry_cfg"):
+                prec["geometry_cfg"]["omega_ref_deg"] = float(prec["geometry_cfg"]["omega_ref_deg"]) + dlt
+            fields = ((prec.get("state") or {}).get("fields") or {})
+            for k in ("ome_start", "ome_end"):
+                if k in fields:
+                    fields[k] = float(fields[k]) + dlt
+        # everything downstream was computed at the old omegas
+        self._reset_ingest_results()
+        self._viz_products = {k: v for k, v in self._viz_products.items() if k == "frame_manifest"}
+        self._viz_unsaved = set()
+        if self._spots_df is not None and not self._material_panel.filter_enabled():
+            self._ensure_candidate_pool()
+        self._refresh_recip_view()
+        self._refresh_detector_preview()
+        self._mark_sc_dirty("ingest")
+        self._log.append("Applied panel omega offsets: " + ", ".join(
+            f"panel {p}: {v:+.2f}°" for p, v in sorted(offsets.items())) +
+            ". Indexing results were cleared; run the material filter and indexing again.")
+        return offsets
+
+    def _add_domain_item(self, d: dict):
+        """Append a list row for domain ``d``; its checkbox is the domain's visibility."""
+        item = QtWidgets.QListWidgetItem(self._domain_text(d))
+        item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
+        item.setCheckState(QtCore.Qt.Unchecked if d.get("hidden") else QtCore.Qt.Checked)
+        self._domain_list.blockSignals(True)
+        try:
+            self._domain_list.addItem(item)
+        finally:
+            self._domain_list.blockSignals(False)
+
+    def _on_domain_item_changed(self, item):
+        row = self._domain_list.row(item)
+        if not 0 <= row < len(self._domains):
+            return
+        hidden = item.checkState() != QtCore.Qt.Checked
+        if bool(self._domains[row].get("hidden")) == hidden:
+            return
+        self._domains[row]["hidden"] = hidden
+        self._after_visibility_change()
+
+    def _set_domain_visibility(self, visible_rows: set):
+        """Show exactly ``visible_rows`` (indices), hide the rest."""
+        self._domain_list.blockSignals(True)
+        try:
+            for i, d in enumerate(self._domains):
+                d["hidden"] = i not in visible_rows
+                self._domain_list.item(i).setCheckState(
+                    QtCore.Qt.Unchecked if d["hidden"] else QtCore.Qt.Checked)
+        finally:
+            self._domain_list.blockSignals(False)
+        self._after_visibility_change()
+
+    def _after_visibility_change(self):
+        self._mark_sc_dirty("index")
+        self._refresh_recip_view()
+        self._refresh_detector_preview()
+        self._update_multidomain_plot()
+
+    def _hidden_spot_ids(self) -> set:
+        """Spot ids of every domain the user has hidden."""
+        out = set()
+        if self._candidate_df is not None:
+            for d in self._domains:
+                if d.get("hidden"):
+                    sub = self._candidate_df.loc[d["claimed_index"]]
+                    out.update(sub["spot_id"] if "spot_id" in sub else sub.index)
+        return out
+
+    def _domain_context_menu(self, pos):
+        row = self._domain_list.row(self._domain_list.itemAt(pos)) if self._domain_list.itemAt(pos) else -1
+        menu = QtWidgets.QMenu(self)
+        if row >= 0:
+            menu.addAction("Re-assign spots to this domain", lambda: self._reassign_domain(row))
+            menu.addAction("Align panels using this domain's lattice", lambda: self._run_align_panels_from_domain(row))
+            menu.addAction("Delete this domain", lambda: self._delete_domain(row))
+            menu.addSeparator()
+            menu.addAction("Show only this domain", lambda: self._set_domain_visibility({row}))
+        if self._domains:
+            menu.addAction("Show all domains", lambda: self._set_domain_visibility(set(range(len(self._domains)))))
+            menu.addAction("Hide all domains", lambda: self._set_domain_visibility(set()))
+        if not menu.isEmpty():
+            menu.exec_(self._domain_list.viewport().mapToGlobal(pos))
+
+    def _rebuild_domain_list(self, select: Optional[int] = None):
+        self._domain_list.blockSignals(True)
+        try:
+            self._domain_list.clear()
+        finally:
+            self._domain_list.blockSignals(False)
+        for d in self._domains:
+            self._add_domain_item(d)
+        if self._domains:
+            self._domain_list.setCurrentRow(len(self._domains) - 1 if select is None
+                                            else min(max(select, 0), len(self._domains) - 1))
+
+    def _recompute_claims(self):
+        self._claimed_index = None
+        for d in self._domains:
+            self._claimed_index = (d["claimed_index"] if self._claimed_index is None
+                                   else self._claimed_index.union(d["claimed_index"]))
+
+    def _delete_domain(self, row: Optional[int] = None):
+        """Remove an indexed solution. Its spots go back to the unassigned pool."""
+        row = self._domain_list.currentRow() if row is None else row
+        if not 0 <= row < len(self._domains):
+            self._warn_or_record("Delete domain", "Select a domain first."); return
+        d = self._domains[row]
+        if not self._agent_mode:
+            resp = QtWidgets.QMessageBox.question(
+                self, "Delete domain",
+                f"Delete '{d['label']}' ({len(d['claimed_index'])} spots)? Its spots become unassigned "
+                "again. Other domains are not changed.",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
+            if resp != QtWidgets.QMessageBox.Yes:
+                return
+        del self._domains[row]
+        if self._round1_domain_index is not None:
+            if self._round1_domain_index == row:
+                self._round1_domain_index = None
+            elif self._round1_domain_index > row:
+                self._round1_domain_index -= 1
+        # per-domain products are keyed by list position: drop them, they rebuild on demand
+        for name in [k for k in self._viz_products if k.startswith("domain_") and k.endswith("_predictions")]:
+            self._viz_products.pop(name, None)
+            self._viz_unsaved.discard(name)
+        self._lattice_key, self._lattice_rows = None, None
+        self._missing_sig = None
+        self._recompute_claims()
+        self._rebuild_domain_list(select=min(row, len(self._domains) - 1))
+        if not self._domains:
+            self._cell_view.set_result("", None)
+            for i in reversed(range(self._param_grid.count())):
+                w = self._param_grid.takeAt(i).widget()
+                if w is not None:
+                    w.deleteLater()
+        self._log.append(f"Deleted {d['label']}; its {len(d['claimed_index'])} spots are unassigned again.")
+        self._update_leftover_status()
+        self._update_multidomain_plot()
+        self._refresh_recip_view()
+        self._refresh_detector_preview()
+        self._refresh_overlays()
+        self._mark_sc_dirty("index")
+
+    def _reassign_domain(self, row: Optional[int] = None):
+        """Re-test every spot this domain may own against its refined orientation, refit from the
+        enlarged set, repeat until stable (spots owned by other domains are left alone)."""
+        from midas_gui.solve_cell import assign
+        row = self._domain_list.currentRow() if row is None else row
+        if not 0 <= row < len(self._domains) or self._candidate_df is None:
+            self._warn_or_record("Re-assign spots", "Select a solved domain first."); return
+        d = self._domains[row]
+        UB = d["result"].get("UB")
+        if UB is None:
+            self._warn_or_record("Re-assign spots", "This domain has no orientation matrix."); return
+        cdf = self._candidate_df
+        g = cdf[["qsample_x", "qsample_y", "qsample_z"]].to_numpy(float)
+        others = set()
+        for j, o in enumerate(self._domains):
+            if j != row:
+                others.update(o["claimed_index"])
+        available = np.array([i not in others for i in cdf.index])
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            out = assign.reassign_spots(UB, g, available, tol=self._tol_override.value(),
+                                        sigma_g=self._sigma_g.value())
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        before = len(d["claimed_index"])
+        if out["result"] is None:
+            self._log.append(f"Re-assign {d['label']}: only {int(out['mask'].sum())} spots fit within "
+                             f"{self._tol_override.value():g}; kept the current assignment.")
+            return
+        claimed = cdf.index[out["mask"]]
+        xyz = (g[out["mask"], 0], g[out["mask"], 1], g[out["mask"], 2])
+        panel_ids = cdf.loc[claimed, "panel_id"].to_numpy() if "panel_id" in cdf.columns else None
+        hidden = d.get("hidden", False)
+        self._replace_domain(row, d["method"], out["result"], claimed, xyz, panel_ids)
+        self._domains[row]["hidden"] = hidden
+        self._log.append(
+            f"Re-assigned {d['label']}: {before} -> {len(claimed)} spots in {out['n_iter']} iteration(s) "
+            f"({'converged' if out['converged'] else 'not converged'}); tolerance {self._tol_override.value():g}. "
+            f"New cell: {', '.join(f'{v:.4g}' for v in out['result']['cell'])}")
+        self._refresh_overlays()
 
     @staticmethod
     def _domain_text(d: dict) -> str:

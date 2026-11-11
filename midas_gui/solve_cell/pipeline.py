@@ -286,6 +286,44 @@ def _stage_tune_ingest(cfg: dict) -> dict:
     return res
 
 
+def _stage_screen_phases(cfg: dict) -> dict:
+    """Rank candidate phases against the candidate pool with same-volume decoys (``phase_screen``).
+
+    ``cfg``: ``g_2pi`` (N, 3), optional ``phases`` (``cell_report.REFERENCE_PHASES``-style rows;
+    default: the built-in table), ``tol`` (0.10), ``n_search`` (100000), ``n_decoys`` (20).
+    Returns ``{"rows": [...]}`` best first; each row carries its fitted ``UB``."""
+    from .phase_screen import screen_phases
+    g = np.asarray(cfg["g_2pi"], float)
+    print(f"[solve-cell] screen_phases: {len(g)} spots, tol {cfg.get('tol', 0.10)}, "
+          f"{cfg.get('n_decoys', 20)} same-volume decoys per phase", flush=True)
+    rows = screen_phases(
+        g, cfg.get("phases") or (), tol=cfg.get("tol", 0.10), n_search=cfg.get("n_search", 100_000),
+        n_decoys=cfg.get("n_decoys", 20), seed=cfg.get("rng_seed", RNG_SEED_DEFAULT),
+        on_progress=lambda k, v: print(
+            f"[solve-cell] screen_phases: {v['name']}: matched {v['best_n']}/{v['n_spots']}, decoys "
+            f"{v['decoy_mean']:.1f}+-{v['decoy_sd']:.1f} (max {v['decoy_max']}), z={v['z']:.1f} -> {v['verdict']}",
+            flush=True))
+    return {"rows": rows}
+
+
+def _stage_align_panels(cfg: dict) -> dict:
+    """Per-panel omega offsets for a lattice hypothesis (``panel_align``).
+
+    ``cfg``: ``qlab`` (N, 3), ``omega_deg`` (N,), ``panel_id`` (N,), ``cell`` (primitive cell),
+    optional ``UB0`` (known orientation), ``tol`` (0.08). Returns the ``fit_panel_omega_offsets`` dict."""
+    from .panel_align import fit_panel_omega_offsets
+    B0 = _bmatrix_from_cell(cfg["cell"])
+    print(f"[solve-cell] align_panels: cell {tuple(round(float(v), 4) for v in cfg['cell'])}, "
+          f"{len(cfg['omega_deg'])} spots on {len(set(np.asarray(cfg['panel_id']).tolist()))} panels", flush=True)
+    res = fit_panel_omega_offsets(cfg["qlab"], cfg["omega_deg"], cfg["panel_id"], B0,
+                                  tol=cfg.get("tol", 0.08), UB0=cfg.get("UB0"),
+                                  seed=cfg.get("rng_seed", RNG_SEED_DEFAULT))
+    print(f"[solve-cell] align_panels: offsets {res['offsets']}; matched {res['n_matched_before']} -> "
+          f"{res['n_matched_after']} of {res['n_spots']}; rms {res['rms_before']:.4f} -> {res['rms_after']:.4f}",
+          flush=True)
+    return res
+
+
 def run_stage(stage: str, cfg: dict, on_step=None) -> dict:
     """Dispatch to one pipeline stage -- the sole entry point a worker thread
     calls (handoff §4.3's ``SolveCellWorker`` template). ``on_step`` is only
@@ -302,6 +340,8 @@ def run_stage(stage: str, cfg: dict, on_step=None) -> dict:
         "refine": _stage_refine,
         "index_known_cell": _stage_index_known_cell,
         "tune_ingest": _stage_tune_ingest,
+        "screen_phases": _stage_screen_phases,
+        "align_panels": _stage_align_panels,
     }
     if stage not in stages:
         raise ValueError(f"unknown solve-cell stage {stage!r}")

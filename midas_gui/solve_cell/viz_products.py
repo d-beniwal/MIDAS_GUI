@@ -17,6 +17,18 @@ import pandas as pd
 from . import geometry_adapter as ga
 
 PRED_Q_MARGIN = 0.05        # Å⁻¹ (2π/d) beyond the largest observed |q|
+#: A predicted crossing counts as "a spot is nearby" when some spot NOT assigned to the domain is
+#: within these gates (same panel). Generous on purpose: per-panel omega/geometry errors of a few
+#: pixels / a degree are the usual reason a real spot is not matched.
+NEARBY_PX = 10.0
+NEARBY_OMEGA_DEG = 2.5
+#: An assigned spot is paired with its own predicted crossing (same panel, same hkl) if their omega
+#: differs by less than this. It used to be 1 deg, which dropped most spots of a pooled run whose
+#: panels carry a per-panel omega offset of a degree or two (real ruby data: 68 of 193 paired at 1 deg,
+#: 180 of 193 at 5 deg), so their crossings were shown as "not observed". The residual table
+#: still reports the omega difference, so a large systematic offset stays visible.
+MATCH_GATE_DEG = 5.0
+PREDICTIONS_SCHEMA = 3      # bump when the predictions table gains/changes columns
 
 
 def ub_fingerprint(UB) -> str:
@@ -67,18 +79,86 @@ def domain_rows(candidate_df: pd.DataFrame, claimed_index, hkl) -> list:
     return rows
 
 
+def other_spot_rows(cand: pd.DataFrame, claims: list, labels: list, idx: int) -> list:
+    """Candidate spots NOT assigned to domain ``idx``, each tagged with its owner (another domain's
+    label, or ``"unassigned"``). ``claims[j]`` is domain j's claimed candidate index."""
+    cols = ["spot_id", "panel_id", "row", "col", "omega_deg"]
+    if cand is None or any(c not in cand.columns for c in cols):
+        return []
+    owner = {}
+    for j, cl in enumerate(claims):
+        if j != idx:
+            for i in cl:
+                owner[i] = labels[j]
+    mine = set(claims[idx])
+    sub = cand[[i not in mine for i in cand.index]]
+    recs = sub[cols].to_dict("records")
+    for i, r in zip(sub.index, recs):
+        r["owner"] = owner.get(i, "unassigned")
+    return recs
+
+
+def context_fingerprint(others: Optional[list]) -> str:
+    """Identity of the 'other spots' a predictions table was classified against."""
+    h = hashlib.sha1()
+    for r in sorted(others or [], key=lambda r: str(r["spot_id"])):
+        h.update(f"{r['spot_id']}|{r.get('owner', '')};".encode())
+    return h.hexdigest()[:16]
+
+
+def nearby_other_spots(pdf: pd.DataFrame, others: Optional[list], *, px: float = NEARBY_PX,
+                       omega_deg: float = NEARBY_OMEGA_DEG) -> pd.DataFrame:
+    """For every VISIBLE predicted crossing, the closest spot that is not assigned to this domain.
+
+    ``others``: rows with ``spot_id``, ``panel_id``, ``row``, ``col``, ``omega_deg`` and ``owner``
+    (``"unassigned"`` or the owning domain's label). Distance is Chebyshev in (row/px, col/px,
+    omega/omega_deg) so the gates are a box. Returns ``nearby_spot_id`` (-1 = none), ``nearby_owner``
+    and ``nearby_d_row/_d_col/_d_omega`` (observed - predicted), aligned with ``pdf``'s index.
+    """
+    from scipy.spatial import cKDTree
+    out = pd.DataFrame({"nearby_spot_id": -1, "nearby_owner": "", "nearby_d_row": np.nan,
+                        "nearby_d_col": np.nan, "nearby_d_omega": np.nan}, index=pdf.index)
+    if not others or not len(pdf):
+        return out
+    odf = pd.DataFrame(others)
+    scale = np.array([px, px, omega_deg])
+    for pid, grp in pdf[pdf.visibility == "visible"].groupby("panel_id"):
+        sub = odf[odf.panel_id == pid]
+        if not len(sub):
+            continue
+        tree = cKDTree(sub[["row", "col", "omega_deg"]].to_numpy(float) / scale)
+        dist, j = tree.query(grp[["row", "col", "omega_deg"]].to_numpy(float) / scale, k=1, p=np.inf,
+                             distance_upper_bound=1.0)
+        hit = np.isfinite(dist)
+        if not hit.any():
+            continue
+        picked = sub.iloc[j[hit]]
+        idx = grp.index[hit]
+        out.loc[idx, "nearby_spot_id"] = picked["spot_id"].to_numpy().astype(int)
+        out.loc[idx, "nearby_owner"] = picked["owner"].to_numpy()
+        out.loc[idx, "nearby_d_row"] = picked["row"].to_numpy() - grp.loc[idx, "row"].to_numpy()
+        out.loc[idx, "nearby_d_col"] = picked["col"].to_numpy() - grp.loc[idx, "col"].to_numpy()
+        out.loc[idx, "nearby_d_omega"] = picked["omega_deg"].to_numpy() - grp.loc[idx, "omega_deg"].to_numpy()
+    return out
+
+
 def build_domain_predictions(label: str, UB, rows: list, snaps: dict, *,
-                             q_max: Optional[float] = None) -> dict:
+                             q_max: Optional[float] = None, others: Optional[list] = None) -> dict:
     """V08 + V09 for one domain: every Ewald crossing the domain's UB implies on
     each panel inside the scanned omega window (``predictions``), plus
-    observed-minus-predicted residuals for its assigned spots (``residuals``)."""
+    observed-minus-predicted residuals for its assigned spots (``residuals``).
+
+    ``others`` (optional) are spots NOT assigned to this domain; each visible prediction that has
+    one within the :data:`NEARBY_PX` / :data:`NEARBY_OMEGA_DEG` gates is annotated
+    (``nearby_*`` columns) so "predicted but not observed" can be told apart from "a spot is
+    there but belongs to nobody / to another domain"."""
     UB = np.asarray(UB, float)
     if q_max is None:
         q_max = float(max(np.hypot.reduce([[r["qsample_x"], r["qsample_y"], r["qsample_z"]] for r in rows], axis=1))) \
             + PRED_Q_MARGIN if rows else 1.0
     pred = ga.predict_reflections(UB, snaps, omega_ranges(snaps), q_max=q_max)
     pdf = pd.DataFrame(pred)
-    res = pd.DataFrame(ga.match_predictions(rows, pred))
+    res = pd.DataFrame(ga.match_predictions(rows, pred, angular_gate_deg=MATCH_GATE_DEG))
     if len(res):
         res["hkl_h"], res["hkl_k"], res["hkl_l"] = (np.array(res["hkl"].tolist()) if len(res) else np.empty((0, 3))).T
         res = res.drop(columns="hkl")
@@ -89,13 +169,21 @@ def build_domain_predictions(label: str, UB, rows: list, snaps: dict, *,
                for r in res.itertuples()} if len(res) else {}
         pdf["observed_spot_id"] = [key.get((int(a), int(b), int(c), int(d), round(float(e), 6)), -1)
                                    for a, b, c, d, e in zip(pdf.panel_id, pdf.h, pdf.k, pdf.l, pdf.omega_deg)]
+    if len(pdf):
+        pdf = pdf.join(nearby_other_spots(pdf, others))
+        near = (pdf.observed_spot_id < 0) & (pdf.nearby_spot_id >= 0)
+    else:
+        near = pd.Series([], dtype=bool)
     st = {"n_predictions": int(len(pdf)),
+          "n_visible_with_unassigned_spot_nearby": int((near & (pdf.nearby_owner == "unassigned")).sum()) if len(pdf) else 0,
+          "n_visible_with_other_domain_spot_nearby": int((near & (pdf.nearby_owner != "unassigned")).sum()) if len(pdf) else 0,
           "n_visible": int((pdf.visibility == "visible").sum()) if len(pdf) else 0,
           "n_observed_matched": int(len(res)), "n_assigned": int(len(rows))}
     if len(res):
         st.update(rms_d_row=float(np.sqrt(np.mean(res.d_row ** 2))), rms_d_col=float(np.sqrt(np.mean(res.d_col ** 2))),
                   rms_d_omega_deg=float(np.sqrt(np.mean(res.d_omega_deg ** 2))))
-    return {"meta": {"inputs": {"kind": "domain", "label": label, "ub_fingerprint": ub_fingerprint(UB)},
+    return {"meta": {"inputs": {"kind": "domain", "label": label, "ub_fingerprint": ub_fingerprint(UB),
+                                "schema": PREDICTIONS_SCHEMA, "context_fp": context_fingerprint(others)},
                      "UB": UB.tolist(), "UB_convention": "1/d; q = 2*pi*UB@hkl", "q_max": q_max,
                      "sign_convention": "residual = observed - predicted (pixels; omega in degrees)",
                      "stats": st},
@@ -121,7 +209,10 @@ def build_all_from_record(record: dict) -> dict:
         if res.get("UB") is None or fit.get("hkl") is None:
             continue
         rows = domain_rows(cand, arrays["claimed_index"], fit["hkl"])
-        out[f"domain_{n:02d}_predictions"] = build_domain_predictions(dm["label"], res["UB"], rows, snaps)
+        claims = [a["claimed_index"] for a in idx["domains"]]
+        labels = [m["label"] for m in idx["meta"].get("domains") or []]
+        out[f"domain_{n:02d}_predictions"] = build_domain_predictions(
+            dm["label"], res["UB"], rows, snaps, others=other_spot_rows(cand, claims, labels, n - 1))
     return out
 
 

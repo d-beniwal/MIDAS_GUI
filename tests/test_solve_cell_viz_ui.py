@@ -32,7 +32,12 @@ def test_overlays_and_diagnostics_from_cached_viz(tab):
         pytest.skip("project has no cached viz products")
     tab.apply_project_solve_cell(rec)
     assert "domain_01_predictions" in tab._viz_products
-    assert not tab._viz_unsaved                       # cache hit, nothing recomputed
+    # A product stored by an older schema is rebuilt once (the predictions table gained the
+    # "spot nearby" columns); every other product is a cache hit, and re-asking is a hit.
+    assert tab._viz_unsaved <= {"domain_01_predictions"}
+    tab._viz_unsaved.clear()
+    tab._domain_viz(0)
+    assert not tab._viz_unsaved
     for w in (tab._ov_ewald, tab._ov_basis, tab._ov_pred):
         w.setChecked(True)
     assert {"basis", "ewald"} <= set(tab._recip_view.overlay_names())
@@ -110,7 +115,7 @@ def test_compare_tab_uses_cache_keeps_claims_and_records_review(tab):
     tab._view_tabs.setCurrentWidget(tab._compare_view)
     c = tab._compare_view
     assert [e["key"] for e in c.entries] == ["domain_01", "ab_initio_seed"]
-    assert not tab._viz_unsaved or tab._viz_unsaved == {"domain_comparison"} - {"domain_comparison"}  # cache hit
+    assert tab._viz_unsaved <= {"domain_01_predictions"}      # comparison is a cache hit (predictions may rebuild once)
     assert c.tables["pairs"].iloc[0].conclusion == "same lattice relabeled"
     assert len(c.view_a.groups) == 3 and len(c.view_b.groups) == 3     # one group per panel, both scenes
     c.pair_table.cellWidget(0, 8).setCurrentIndex(2)                   # reviewer: compatible distinct orientation

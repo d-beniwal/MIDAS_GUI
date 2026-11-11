@@ -297,7 +297,7 @@ def test_add_panel_creates_a_second_independent_tab(tab, monkeypatch):
 def test_closing_the_last_panel_tab_is_refused(tab, monkeypatch):
     from PyQt5 import QtWidgets
     informed = {}
-    monkeypatch.setattr(QtWidgets.QMessageBox, "information",
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
                         staticmethod(lambda *a: informed.setdefault("hit", True)))
     tab._close_panel_tab(0)
     assert informed.get("hit") is True

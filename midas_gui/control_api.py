@@ -209,10 +209,23 @@ class _SolveCellOps:
         keep = {k: r[k] for k in ("cell", "cell_sigma", "rms_drlv", "holohedry_system",
                                   "conventional_cell", "conventional_system", "UB", "notes",
                                   "n_reflections", "diagnostics") if k in r}
-        return {"index": i, "label": d["label"], "method": d["method"],
-                "n_spots": int(len(d["claimed_index"])),
-                "selected": i == self._sc._current_domain_index(),
-                **_jsonable(keep, stem=f"domain{i}")}
+        out = {"index": i, "label": d["label"], "method": d["method"],
+               "n_spots": int(len(d["claimed_index"])),
+               "selected": i == self._sc._current_domain_index(),
+               **_jsonable(keep, stem=f"domain{i}")}
+        try:
+            from midas_gui.solve_cell import cell_report as cell_rep
+            out["volume_A3"] = cell_rep.cell_volume(r["cell"])
+            best = cell_rep.closest_known(r["cell"])
+            if best:
+                out["closest_known_lattice"] = {
+                    "name": best["name"], "verdict": best["verdict"], "score_pct": best["score"],
+                    "d_len_pct": best["d_len_pct"], "d_ang_deg": best["d_ang_deg"],
+                    "d_vol_pct": best["d_vol_pct"],
+                    "note": "lattice agreement only (no intensities); deviations = refined - reference"}
+        except Exception:
+            pass
+        return out
 
     def _sc_results_summary(self) -> dict:
         sc = self._sc

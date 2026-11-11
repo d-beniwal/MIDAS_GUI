@@ -1,8 +1,12 @@
 # Project state
 
-Last updated: 2026-11-10 (solve-cell MCP coverage)
+Last updated: 2026-11-11 (Unit cell tab, path-reload fix)
 
 ## Now working on
+
+2026-11-11 (later): **Ruby identified as corundum** (phase screen vs same-volume decoys z=12.6; per-panel omega offsets found and applied; known-cell refine within 1.5%; blind ab-initio then returns a corundum-like cell). New: Identify phase / Align panels (Index box), domain delete / hide / re-assign, lattice-point classes (spot nearby unassigned / other domain), CLI `python -m midas_gui.solve_cell.identify`, report `.context/reference/solve_cell_ruby_identification.md` (DECISIONS 2026-11-11). Unit/offscreen-tested; not live-checked in the GUI; not in the control API/MCP. **Open:** physical cause of the per-panel omega offsets; Run Ingest stays disabled while Suggest runs. All of this and the Unit cell tab are uncommitted.
+
+2026-11-11: Solve Cell **Unit cell tab** (reduced cell, volume, closest known lattices with deviations, symmetry-vs-tolerance ladder, 3D cell with reference overlay) + `solve_cell/cell_report.py`; **fix:** edited panel data path not reloaded before Ingest/Suggest (`DataLoaderPanel.reload_if_path_changed`). Offscreen/unit-tested (121 UI + 31 control-API + report/view tests pass); 3D view checked via standalone render only, **not seen in the live window**. Ruby fit matches corundum at 2.5% (c edge 1.7% short -> likely geometry). Open: Run Ingest stays disabled while Suggest runs (no cancel/progress); user's "3 panels after re-ingest" not reproduced. Branch `solve-cell-tuning-and-path-sync` pushed; Unit cell work uncommitted.
 
 2026-11-10: Solve Cell MCP coverage completed: panel inputs (dark/bright/background with dataset/range/scale, masks, omega field/auto first idx, read-back `panel_get_inputs`), `suggest_parameters`/`apply_suggested_parameters`, and `run_domain_loop`/`cancel_domain_loop` (the "sequential refinements" pipeline). Control-API + coverage tests pass; two live MCP-over-socket runs on synthetic data pass (DECISIONS 2026-11-10). **Not tested: a real second domain via the loop, full-size data over MCP, the real GUI window.** Uncommitted. New skill `midas_gui_mcp/skills/midas-gui-mcp-solve-cell/`.
 
