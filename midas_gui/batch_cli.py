@@ -134,6 +134,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "rotation), or one for the whole run")
 
     p.add_argument("--multi-azimuth", action="store_true")
+    p.add_argument("--run-mode", default="sequential",
+                   choices=["sequential", "batch_parallel"],
+                   help="batch_parallel splits the frames across --n-workers "
+                        "concurrent workers sharing one detector map, then "
+                        "merges (same as the Batch tab's Batch Parallel).")
+    p.add_argument("--n-workers", type=int, default=1,
+                   help="Worker count for --run-mode batch_parallel")
     p.add_argument("--ion-csv-extras", default="",
                    help="Comma-separated optional column groups for the "
                         "per-frame beam-monitor CSV: 'env' (ring current, "
@@ -326,9 +333,7 @@ def main(argv=None) -> int:
                        args.frame_range_end,
                        max(1, int(args.frame_range_stride or 1)))
 
-    worker = BatchWorker(
-        spec, src_cfg, mask, args.out_dir, fmts, args.kernel,
-        corrections, variance_cfg,
+    kwargs = dict(
         frame_range=frame_range, monitor_file=args.monitor_file,
         dark=dark, bright=bright, background=background, bright_mode=args.bright_mode,
         weighted=args.weighted, multi_azimuth=args.multi_azimuth,
@@ -336,6 +341,17 @@ def main(argv=None) -> int:
         zarr_grouping=args.zarr_grouping,
         ion_csv_extras=[g for g in args.ion_csv_extras.split(",") if g],
         im_trans=tuple(spec.TransOpt or ()), calibration_snapshot=calib_snapshot)
+    parallel = args.run_mode == "batch_parallel" and args.n_workers > 1
+    if parallel:
+        from midas_gui.workers import BatchRunCoordinator
+        worker = BatchRunCoordinator(
+            spec, src_cfg, mask, args.out_dir, fmts, args.kernel,
+            corrections, variance_cfg, run_mode="batch_parallel",
+            n_workers=args.n_workers, **kwargs)
+    else:
+        worker = BatchWorker(
+            spec, src_cfg, mask, args.out_dir, fmts, args.kernel,
+            corrections, variance_cfg, **kwargs)
 
     exit_code = [0]
 
@@ -364,7 +380,17 @@ def main(argv=None) -> int:
     worker.log_line.connect(_on_log)
     worker.failed.connect(_on_failed)
     worker.finished.connect(_on_finished)
-    worker.run()
+    if parallel:
+        # The coordinator drives QThreads and needs a running event loop.
+        from PyQt5 import QtCore
+        loop = QtCore.QEventLoop()
+        worker.finished.connect(lambda _d: loop.quit())
+        worker.failed.connect(lambda _m: loop.quit())
+        worker.start()
+        loop.exec_()
+        worker.wait(30000)
+    else:
+        worker.run()
 
     del app
     return exit_code[0]

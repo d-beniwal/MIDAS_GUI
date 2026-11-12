@@ -2538,6 +2538,16 @@ class BatchTab(QtWidgets.QWidget):
 
         if multi_azimuth:
             argv += ["--multi-azimuth"]
+        # The job cannot see the run-mode combo: without these it always ran
+        # sequentially whatever Batch Parallel / worker count said.
+        argv += ["--run-mode", str(self._run_mode.currentData() or "sequential"),
+                 "--n-workers", str(int(self._n_workers.value()))]
+        if self._drift_chk.isChecked():
+            self._log.append(
+                "[batch] WARNING: drift correction is not carried into a "
+                "background job (the trajectory cannot be passed to it) — the "
+                "job integrates with the nominal geometry. Run in-process to "
+                "apply drift correction.")
         argv += ["--weighted"] if bool(self._azim.currentData()) else ["--no-weighted"]
 
         # Rotation angle. Emitted from the same _omega_cfg() the in-process
