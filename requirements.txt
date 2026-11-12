@@ -19,17 +19,17 @@
 
 # ── Scientific stack ────────────────────────────────────────────────────────
 numpy==1.26.4
-scipy==1.13.1
-h5py==3.11.0
-tifffile==2023.4.12
-scikit-image==0.23.2          # used by midas-calibrate-v2's auto_seed_calibrant
+scipy==1.17.1               # last scipy before 1.18.0's numpy>=2 floor
+h5py==3.16.0
+tifffile==2026.3.3           # newest before 2026.4.11 (numpy>=2.0 floor)
+scikit-image==0.26.0          # used by midas-calibrate-v2's auto_seed_calibrant
                                # (better ring seeding; without it calibration
                                # falls back to a coarser arc seed)
 
 # ── GUI ──────────────────────────────────────────────────────────────────────
-PyQt5==5.15.10
+PyQt5==5.15.11
 pyqtgraph==0.14.0
-matplotlib==3.8.4             # supplies pyqtgraph's named colormaps (hot/viridis/…)
+matplotlib==3.11.2             # supplies pyqtgraph's named colormaps (hot/viridis/…)
 
 # ── PyTorch — CPU build. 2.4.0 works with NumPy 1.26. On Linux/Windows this
 #    pulls the default PyPI wheel; for a smaller CPU-only download there, use
@@ -139,10 +139,11 @@ midas-stress==0.15.0
 zarr==2.18.7                    # required by midas-integrate/-peakfit/-zipper; was already
                                  # pulled in transitively before this pin bump (unpinned), so
                                  # this just makes an existing dependency explicit
-numcodecs==0.15.1                # zarr's codec backend; same "already transitive, now
+numcodecs==0.15.2                # zarr's codec backend; same "already transitive, now
                                   # explicit" situation as zarr above
-hdf5plugin==7.0.0
+hdf5plugin==7.1.0
 psutil==7.2.2
+pillow==13.0.0                  # imported directly by solve_cell/headless.py (also a matplotlib dep)
 
 # ── Solve Cell tab backend (2026-10-04) ─────────────────────────────────────
 # midas-defect: raw-frame ingest (background subtraction, 3-D blob finding)
@@ -156,18 +157,14 @@ psutil==7.2.2
 # dependency at all (confirmed via pyproject.toml + source grep), and its
 # numpy>=1.20/torch>=2.0 floors are already satisfied by the pins above.
 #
-# 2026-10-22: bumped 0.9.0 -> 0.9.1 and required a build from MIDAS's
-# `perf_solve_cell` branch (not yet a numbered release off master) --
-# `pipeline.py`'s `_stage_ingest` now passes `max_workers` to
-# `choose_sectors`/`find_blobs_3d`, which only `perf_solve_cell`'s
-# `midas_defect.ingest` accepts; master's (also version 0.9.1 -- the branch
-# did not bump its own version number) raises TypeError. Benchmarked
-# 4.35x/9.42x faster at max_workers=1/12 on a real 642-frame panel,
-# byte-identical spots_g.csv/ingest_summary.json at every setting -- see
-# .context/DECISIONS.md 2026-10-22. Package-side follow-up: ask MIDAS
-# maintainers to bump midas-defect's own version when this branch merges, so
-# a bare version pin can distinguish it from master again.
-midas-defect==0.9.1
+# 2026-11-11: pinned to 0.9.0, exactly what the verified env runs. (A
+# 2026-10-22 note here asked for a `perf_solve_cell` build labelled 0.9.1;
+# that build never shipped under that number -- PyPI's 0.9.1 and 0.10.0 are
+# master and lack ingest's `max_workers` kwarg.) solve_cell/pipeline.py
+# feature-detects `max_workers` by signature, so ingest just runs serially on
+# a released build. 0.10.0 is NOT taken: it needs midas-hkls>=0.17.0 and
+# midas-stress>=0.16.0, which would move this verified set.
+midas-defect==0.9.0
 # midas-defect's own direct dependencies (pulled in transitively) -- pinned
 # explicitly for the same reproducibility reason as the block above.
 midas-ddd==0.1.2
@@ -180,3 +177,10 @@ midas-invert==0.2.0
 # subset + full test_smoke.py, several runs). Pinned explicitly now rather
 # than left to float, matching every other dependency in this file.
 pandas==3.0.6
+
+# ── Test tooling (not needed to run the GUI) ────────────────────────────────
+# pytest-forked isolates the Qt/pyqtgraph test files that carry
+# `pytestmark = pytest.mark.forked`: without it the marker is inert and a
+# native crash (seen intermittently in test_batch_cli_rebin) takes pytest down.
+pytest==9.2.0
+pytest-forked==1.7.5

@@ -35,7 +35,7 @@ classifiers = [
 # on its own, without relying on environment.yml or on another package's
 # install_requires happening to pull the right version.
 dependencies = [
-    "PyQt5==5.15.10",
+    "PyQt5==5.15.11",
     "pyqtgraph==0.14.0",
     "matplotlib==3.11.2",          # 2026-10-23: bumped to PyPI latest (requires numpy>=1.25,
                                    # satisfied by the 1.26.4 pin below)
@@ -45,6 +45,7 @@ dependencies = [
                                    # Self-contained wheels, no numpy/torch/numba pin conflict.
     "pyte==0.8.2",                 # embedded terminal for the APEXA dock (apexa_terminal.py)
     "numpy==1.26.4",
+    "pillow==13.0.0",             # imported directly by solve_cell/headless.py (also a matplotlib dep)
     "scipy==1.17.1",               # 2026-10-23: bumped to the newest scipy that still declares
                                    # numpy<2.x compat (numpy<2.7,>=1.26.4); 1.18.0 requires
                                    # numpy>=2.0.0
@@ -180,10 +181,12 @@ dependencies = [
     #    added 2026-10-23 to match environment.yml / requirements.txt) ──────────
     # midas-defect: raw-frame ingest (background subtraction, 3-D blob
     # finding) and detector forward/inverse geometry (pixel<->qlab<->qsample).
-    # Held at 0.9.0, NOT bumped to PyPI's 0.9.1 and NOT matching the real dev
-    # conda env (which runs an unreleased perf_solve_cell-branch build also
-    # self-reporting 0.9.1 -- see requirements.txt's 2026-10-22 note and
-    # .context/DECISIONS.md). Its own pyproject.toml floor for midas-hkls is
+    # 2026-11-11: pinned to 0.9.0, which is what the verified env runs (the
+    # old note about an unreleased perf_solve_cell build is obsolete; PyPI's
+    # 0.9.1/0.10.0 lack ingest's max_workers kwarg, which solve_cell/
+    # pipeline.py feature-detects, so ingest simply runs serially). 0.10.0
+    # would also need midas-hkls>=0.17.0 / midas-stress>=0.16.0 -- not taken.
+    # Its own midas-hkls floor is
     # >=0.15.0, satisfied by the midas-hkls pin above; no numba dependency at
     # all, and its numpy>=1.20/torch>=2.0 floors are satisfied by the pins
     # above.
@@ -207,7 +210,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest==9.1.1",
+    "pytest==9.2.0",
     # Runs the known pyqtgraph-teardown-crash-prone test files (see
     # tests/test_smoke.py, test_hydra_ui.py, test_hydra_calib_ui.py,
     # test_project.py — each carries `pytestmark = pytest.mark.forked`) in a

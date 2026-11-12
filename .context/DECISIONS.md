@@ -3,6 +3,11 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-11-11 — Environment files re-synced to the verified `midas-gui` env
+
+Compared every pin in `environment.yml`, `requirements.txt`, `pyproject.toml` against `importlib.metadata` of the working env. `environment.yml` and `pyproject.toml` already matched; **`requirements.txt` was stale** (scipy 1.13.1, h5py 3.11.0, tifffile 2023.4.12, scikit-image 0.23.2, matplotlib 3.8.4, numcodecs 0.15.1, hdf5plugin 7.0.0, midas-defect 0.9.1). All three now agree with the env. Other changes: PyQt5 5.15.10 -> 5.15.11 (pip pins; conda `pyqt=5` already resolves 5.15.11); `pillow==13.0.0` declared (imported by `solve_cell/headless.py`; was only an implicit matplotlib dep); pytest 9.2.0; **`pytest-forked==1.7.5` added to the env/requirements files** (it was only in the pyproject dev extra and NOT installed, so every `pytest.mark.forked` was inert and native Qt crashes took pytest down — with the plugin `test_batch_cli_rebin` passed 4/4 vs intermittent segfaults). 
+**midas-defect:** the env runs **0.9.0**, not the "unreleased perf_solve_cell 0.9.1" the old notes claimed; PyPI 0.9.1/0.10.0 have no ingest `max_workers`, which `solve_cell/pipeline.py` feature-detects by signature (serial on released builds). 0.10.0 not taken (needs midas-hkls>=0.17.0, midas-stress>=0.16.0). **Open:** `imagecodecs 2026.10.10` is installed in the env but required by nothing and declared nowhere, and `pip check` flags it (needs numpy>=2.1, env has 1.26.4; import and LZW round-trip still work). A fresh env won't have it, so compressed-TIFF reads may differ; decide whether to pin a numpy-1 build (e.g. 2026.8.16) or uninstall. `pytest-forked` is not yet installed in the local env (`pip install pytest-forked==1.7.5`).
+
 ## 2026-11-11 — Batch Integrate combined-HDF5 audit: parallel collisions, filename range, missing run info
 
 Audited both layouts (1-D `write_h5`, multi-azimuth `write_cake_h5`) across sequential/parallel, R/Q/2θ bins, eta windows incl. wrap, kernels, corrections, drift, monitor file, Save button, `batch_cli`, and 20-ID-E / 20-ID-D / 1-ID-E-style HDF5 sources (synthetic stacks with each hutch's scaler tree).

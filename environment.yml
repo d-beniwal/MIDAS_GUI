@@ -170,6 +170,14 @@ dependencies:
                                   # explicit" situation as zarr above
     - "hdf5plugin==7.1.0"         # 2026-10-23: bumped to PyPI latest; no numpy/torch/numba pin
     - "psutil==7.2.2"             # already at PyPI latest
+    - "pillow==13.0.0"            # imported directly by solve_cell/headless.py (also a matplotlib dep)
+
+    # ── Test tooling (not needed to run the GUI) ───────────────────────────────
+    # pytest-forked isolates the Qt/pyqtgraph test files marked
+    # `pytest.mark.forked`; without it the marker is inert and a native crash
+    # (seen intermittently in test_batch_cli_rebin) takes the pytest run down.
+    - "pytest==9.2.0"
+    - "pytest-forked==1.7.5"
 
     # ── Solve Cell tab backend (2026-10-04) ──────────────────────────────────
     # midas-defect: raw-frame ingest (background subtraction, 3-D blob
@@ -181,13 +189,11 @@ dependencies:
     # to_conventional -- is confirmed present and working in both. No numba
     # dependency at all (confirmed via pyproject.toml + source grep), and its
     # numpy>=1.20/torch>=2.0 floors are already satisfied by the pins above.
-    # 2026-10-23: deliberately held at 0.9.0 here, NOT bumped to PyPI's
-    # 0.9.1 and NOT matching the real dev conda env (which runs an unreleased
-    # perf_solve_cell-branch build also self-reporting 0.9.1 -- see
-    # requirements.txt's 2026-10-22 note and .context/DECISIONS.md). A fresh
-    # env built from this file is expected to diverge from the current dev
-    # env until perf_solve_cell merges and midas-defect cuts a numbered
-    # release past 0.9.1 that a plain version pin can target.
+    # 2026-11-11: pinned to 0.9.0, which is what the verified env runs (the
+    # old note about an unreleased perf_solve_cell build is obsolete; PyPI's
+    # 0.9.1/0.10.0 lack ingest's max_workers kwarg, which solve_cell/
+    # pipeline.py feature-detects, so ingest simply runs serially). 0.10.0
+    # would also need midas-hkls>=0.17.0 / midas-stress>=0.16.0 -- not taken.
     - "midas-defect==0.9.0"
     # midas-defect's own direct dependencies (pulled in transitively) --
     # pinned explicitly for the same reproducibility reason as the block above.
