@@ -3025,7 +3025,9 @@ class BatchTab(QtWidgets.QWidget):
                 cake_params=cake_params,
                 # Same angles the run's own HDF5 got — Save must not produce
                 # a quietly omega-less copy of the same results.
-                omegas=self._last_results.get("omegas"))
+                omegas=self._last_results.get("omegas"),
+                mask=(getattr(self, "_last_run_fields", None) or {}).get("mask"),
+                q_cfg=(getattr(self, "_last_run_inputs", None) or {}).get("q_cfg"))
         except Exception as e:
             show_error(self, "Save failed", str(e), log=self._log, log_prefix="\nERROR:\n")
             return

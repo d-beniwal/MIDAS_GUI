@@ -1,8 +1,10 @@
 # Project state
 
-Last updated: 2026-11-11 (batch progress finalizing; solve-cell + bkg_pump merged to main)
+Last updated: 2026-11-11 (Batch combined-HDF5 audit; fixes uncommitted)
 
 ## Now working on
+
+2026-11-11 (latest): **Batch HDF5 audit** — fixed parallel per-chunk h5 collisions (run could fail after integrating), `000000_000000` filename in plain 1-D, wrong `n_r_bins` on Q/2θ files, parallel monitor offset, unweighted Save cake; added `/instrument`, `/frame_metadata`, `/monitor_values`, `/lsd_per_frame` (DECISIONS 2026-11-11). Synthetic 20-ID-E/D, 1-ID-E layouts + CLI tested; **uncommitted, not live-checked in the GUI; no real beamline data.** Open limits listed in the DECISIONS entry (1-ID-E IC1-3 not in h5, etc.).
 
 2026-11-11 (latest): `solve-cell-tuning-and-path-sync` and `bkg_pump` merged into `main` and pushed. Batch progress bar rounds + "finalizing outputs" log/label (sequential and parallel; DECISIONS 2026-11-11). Not live-checked in the GUI.
 

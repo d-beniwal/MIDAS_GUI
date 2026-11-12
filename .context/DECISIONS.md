@@ -3,6 +3,22 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-11-11 — Batch Integrate combined-HDF5 audit: parallel collisions, filename range, missing run info
+
+Audited both layouts (1-D `write_h5`, multi-azimuth `write_cake_h5`) across sequential/parallel, R/Q/2θ bins, eta windows incl. wrap, kernels, corrections, drift, monitor file, Save button, `batch_cli`, and 20-ID-E / 20-ID-D / 1-ID-E-style HDF5 sources (synthetic stacks with each hutch's scaler tree).
+
+**Bugs found and fixed**
+1. **Batch-Parallel wrote an h5 per chunk.** Chunk workers got `out_dir`/`fmts` and each wrote its own combined file; in plain 1-D mode they all got the same name (bug 2) and collided -> `FileNotFoundError` / "unable to truncate" failed the WHOLE run after integration. The coordinator then wrote a separate `out/integrated.h5` (different place and name than sequential). Now chunk workers skip the h5 (`frame_indices is not None`); the coordinator merges and writes the one `h5/<stem>.<lo>_<hi>.cake.h5` through the shared `workers.write_run_h5` (same code as sequential). Chunk results now also return `cake_profiles/cake_sigmas/frame_idx/frame_meta/monitor_used/lsd_used` so the merged cake file keeps the real engine-collapsed profile (it used to fall back to the masked eta-mean approximation).
+2. **Plain 1-D filename was always `...000000_000000.cake.h5`** (`all_frame_idx` only filled when a cake was built) -> different frame ranges overwrote each other. Now always filled.
+3. **Q/2θ-rebinned files carried the R grid's `n_r_bins`/RMin/RMax/RBinSize** (18 vs 90 stored bins). `n_r_bins` is now the stored axis length; `rebin_unit/min/max/step` + `r_grid_note` added.
+4. **Parallel monitor normalisation restarted at index 0 in every chunk** (chunk 2 divided by chunk 1's values). Chunk workers get `monitor_offset`.
+5. Save button, multi-azimuth: cake written unweighted (no `bin_area`) -> `cake.sum(eta) != profiles`, unlike the run's own file. Save now rebuilds `bin_area` from the spec (+ the run's mask); atomic write; same extras.
+6. Plain-layout h5 write was not in a try/except (a file error discarded the finished in-memory result); both layouts now log and carry on. Temp-file name now includes the thread id.
+
+**Added to the file** (`stamp_run_info_h5`): `/instrument` (geometry + distortion attrs), `/frame_metadata` (per-frame temperature/pressure/ring current/ion-chamber means, as zarr already had), `/monitor_values` (divisor applied), `/lsd_per_frame` (drift runs).
+
+**Not changed / known limits:** `/frame_metadata` only holds the keys the source's hutch table defines, so 1-ID-E's IC1-IC3 (in the monitor CSV via `rows_from_tree`) are NOT in the h5; monitor file is indexed by processed-frame position, not absolute frame index (ambiguous with a frame range / stride); Save from memory cannot restore the engine-collapsed profile (uses eta-mean); Save's `integrated.h5` still lands at the folder root, not `h5/`; with drift on, `two_theta/q/d` axes use the nominal Lsd; no real beamline data was available, so beamline coverage is synthetic stand-ins. Pre-existing, unrelated: `test_batch_zarr_gsas::test_the_profile_resolves_a_hutch_the_path_cannot` fails on a clean tree. Tests: `tests/test_batch_h5_runinfo.py` (new); `test_batch_cake_h5.py` updated for the new Save/merge contract.
+
 ## 2026-11-11 — Batch progress "stuck at 99%": rounding + explicit finalizing message
 
 **Cause.** The Batch tab bar was `int(100*done/total)` (truncates), so it read 99% until the very last frame (or the slowest chunk of a

@@ -213,7 +213,9 @@ def _write_h5_atomic(h5_path, writer) -> None:
     """
     import os
     h5_path = Path(h5_path)
-    tmp = h5_path.with_name(f".{h5_path.stem}.tmp{os.getpid()}.h5")
+    import threading
+    tmp = h5_path.with_name(
+        f".{h5_path.stem}.tmp{os.getpid()}_{threading.get_ident()}.h5")
     try:
         writer(tmp)
         os.replace(tmp, h5_path)
@@ -275,6 +277,182 @@ def stamp_cake_params_h5(h5_path, spec) -> None:
             "profiles are the 1-D lineout eta-collapsed over "
             "[EtaMin, EtaMax]; enable Multi-azimuth output to keep the "
             "per-eta cake.")
+
+
+def stamp_run_info_h5(h5_path, spec, r_axis, *, q_cfg=None, frame_meta=None,
+                      monitor_vals=None, monitor_file=None,
+                      lsd_per_frame=None) -> None:
+    """Record, in a finished Batch Integrate HDF5, what the run knew about
+    itself beyond the profiles (both the 1-D and the cake layout):
+
+    * ``n_r_bins`` = the length of the axis actually stored. The spec's
+      ``n_r_bins`` describes the R-uniform *integration* grid, which a Q /
+      2theta-uniform rebin replaces (18 vs 90 bins in a test run), so the
+      attr is overwritten here and ``rebin_*`` attrs say which grid it is.
+    * ``/instrument`` group: the geometry (Lsd, beam centre, tilts, pixel
+      size, wavelength, distortion...) as plain attrs, so it can be read
+      without parsing the provenance JSON.
+    * ``/frame_metadata``: per-frame temperature / pressure / ring current /
+      ion-chamber means (what the zarr output carries and the HDF5 did not).
+    * ``/monitor_values``: the per-frame divisor actually applied when a
+      monitor file was used.
+    * ``/lsd_per_frame``: the per-frame Lsd when drift correction was on
+      (the stored two_theta/q/d axes use the nominal Lsd).
+    """
+    import h5py
+    with h5py.File(str(h5_path), 'a') as h5:
+        h5.attrs['n_r_bins'] = int(len(r_axis))
+        if q_cfg:
+            unit, lo, hi, step = rebin_cfg_parts(q_cfg)
+            h5.attrs['rebin_unit'] = str(unit)
+            h5.attrs['rebin_min'] = float(lo)
+            h5.attrs['rebin_max'] = float(hi)
+            h5.attrs['rebin_step'] = float(step)
+            h5.attrs['r_grid_note'] = (
+                "RMin/RMax/RBinSize describe the R-uniform integration grid; "
+                "the stored axis is the rebin_* grid (uniform in rebin_unit), "
+                "with r_px giving where each bin sits on the detector.")
+        else:
+            h5.attrs['rebin_unit'] = 'R'
+        ip = provenance.instrument_params_from_spec(spec) or {}
+        if 'instrument' in h5:
+            del h5['instrument']
+        g = h5.create_group('instrument')
+        g.attrs['note'] = ("nominal geometry the run integrated with "
+                           "(see lsd_per_frame when drift correction was on)")
+        for k, v in ip.items():
+            if isinstance(v, dict):
+                sub = g.create_group(k)
+                for kk, vv in v.items():
+                    try:
+                        sub.attrs[kk] = vv
+                    except TypeError:
+                        sub.attrs[kk] = str(vv)
+            else:
+                try:
+                    g.attrs[k] = v
+                except TypeError:
+                    g.attrs[k] = str(v)
+        if lsd_per_frame is not None and len(lsd_per_frame):
+            ds = h5.create_dataset('lsd_per_frame',
+                                   data=np.asarray(lsd_per_frame, dtype=np.float64))
+            ds.attrs['units'] = 'micron'
+        if monitor_vals is not None and len(monitor_vals):
+            ds = h5.create_dataset('monitor_values',
+                                   data=np.asarray(monitor_vals, dtype=np.float64))
+            ds.attrs['long_name'] = ("per-frame monitor divisor applied to "
+                                     "profiles/cake/sigmas (1 = not normalised)")
+            if monitor_file:
+                ds.attrs['monitor_file'] = str(monitor_file)
+        if frame_meta:
+            idx = [int(i) for i, _ in frame_meta]
+            keys = []
+            for _, m in frame_meta:
+                for k in (m or {}):
+                    if k not in keys:
+                        keys.append(k)
+            if 'frame_metadata' in h5:
+                del h5['frame_metadata']
+            mg = h5.create_group('frame_metadata')
+            mg.attrs['note'] = ("mean over each combined frame's raw "
+                                "sub-frames; NaN = not available")
+            mg.create_dataset('frame_index', data=np.asarray(idx, dtype=np.int64))
+            for k in keys:
+                vals = []
+                for _, m in frame_meta:
+                    v = (m or {}).get(k)
+                    vals.append(float('nan') if v is None else float(v))
+                mg.create_dataset(str(k).replace('/', '_'),
+                                  data=np.asarray(vals, dtype=np.float64))
+
+
+def run_out_stem(src_cfg) -> str:
+    """Run-level output stem from a source descriptor: the source file's own
+    stem, or the shared file root of a multi-file pick."""
+    src_cfg = src_cfg or {}
+    src_path = src_cfg.get('path')
+    if src_path:
+        return Path(src_path).stem
+    src_paths = src_cfg.get('paths') or []
+    return (froot_and_frame_num(Path(src_paths[0]).stem, -1)[0]
+            if src_paths else "integrated")
+
+
+def run_provenance_entry(spec, src_cfg, *, kernel, weighted, multi_azimuth,
+                         n_frames, aborted, frame_range, calibration_snapshot,
+                         mask_present, bright_mode, monitor_file, q_cfg) -> dict:
+    """Run-level provenance entry stamped into the combined HDF5 — one
+    builder so the sequential write and the Batch-Parallel merge record the
+    same things."""
+    src_cfg = src_cfg or {}
+    return provenance.build_entry(
+        'midas_gui.batch_integrate',
+        inputs=[src_cfg.get('path')] if src_cfg.get('path') else [],
+        cake_params=cake_params_of(spec),
+        instrument_params=provenance.instrument_params_from_spec(spec),
+        extra={
+            'kernel': kernel, 'weighted': weighted,
+            'multi_azimuth': multi_azimuth, 'n_frames': n_frames,
+            'frame_range': list(frame_range or (0, None, 1)),
+            'calibration_snapshot': calibration_snapshot,
+            'mask_present': mask_present, 'bright_mode': bright_mode,
+            'monitor_file': monitor_file, 'q_cfg': q_cfg,
+            'src_cfg': src_cfg, 'active_profile': settings.active_profile(),
+            'aborted': aborted,
+        })
+
+
+def write_run_h5(out_dir, stem, *, multi, profiles, sigmas, r_ax, frame_ids,
+                 omegas, spec, kernel, weighted, prov_entry, out_paths,
+                 lsd, px, wl, eta_ax=None, cake_profiles=None,
+                 cake_sigmas=None, bin_area=None, q_cfg=None,
+                 frame_meta=None, monitor_vals=None, monitor_file=None,
+                 lsd_per_frame=None, log=None):
+    """Write the ONE combined ``h5/<stem>.h5`` of a Batch Integrate run
+    (1-D ``write_h5`` layout, or the cake layout when ``multi``), then stamp
+    cake params, run info and provenance. Shared by the sequential
+    ``BatchWorker`` and the Batch-Parallel merge so both produce the same
+    file under the same name. Returns the path."""
+    import midas_integrate_v2 as m
+    h5_dir = Path(out_dir) / "h5"
+    h5_dir.mkdir(parents=True, exist_ok=True)
+    h5_path = h5_dir / f"{stem}.h5"
+    if multi:
+        from midas_gui.cake_hdf5 import write_cake_h5
+        _write_h5_atomic(h5_path, lambda t: write_cake_h5(
+            t, cake=np.array(profiles), cake_sigma=np.array(sigmas),
+            collapsed_profiles=(np.array(cake_profiles)
+                                if cake_profiles is not None and len(cake_profiles) else None),
+            collapsed_sigmas=(np.array(cake_sigmas)
+                              if cake_sigmas is not None and len(cake_sigmas) else None),
+            r_axis=r_ax, eta_axis=eta_ax, frame_ids=frame_ids, omegas=omegas,
+            spec=spec, bin_area=bin_area, kernel=kernel, weighted=weighted,
+            cake_params=cake_params_of(spec)))
+    else:
+        _write_h5_atomic(h5_path, lambda t: m.write_h5(
+            str(t), profiles=np.array(profiles), r_axis=r_ax,
+            frame_ids=frame_ids, sigmas=np.array(sigmas),
+            extra_datasets={
+                "omegas": np.asarray(omegas, dtype=np.float64),
+                **radial_axis_datasets(r_ax, lsd, px, wl)}))
+        stamp_cake_params_h5(h5_path, spec)
+    try:
+        stamp_run_info_h5(h5_path, spec, r_ax, q_cfg=q_cfg,
+                          frame_meta=frame_meta, monitor_vals=monitor_vals,
+                          monitor_file=monitor_file, lsd_per_frame=lsd_per_frame)
+    except Exception:
+        # Never cost the user a finished file over the extras.
+        if log:
+            log(f"[batch] note: run-info stamp on {h5_path.name} failed "
+                "(non-fatal):\n" + traceback.format_exc())
+    try:
+        prov_entry['extra']['out_paths'] = list(out_paths) + [str(h5_path)]
+        stamp_h5_provenance(h5_path, prov_entry)
+    except Exception:
+        if log:
+            log(f"[batch] note: provenance stamp on {h5_path.name} "
+                "failed (non-fatal):\n" + traceback.format_exc())
+    return h5_path
 
 
 def build_geom(spec, kernel: str, mask):
@@ -2351,8 +2529,12 @@ class BatchWorker(QtCore.QThread):
                  dark=None, bright=None, background=None, bright_mode="divide",
                  weighted=True, context=None, im_trans=(), multi_azimuth=False,
                  calibration_snapshot=None, zarr_grouping="frame",
-                 ion_csv_extras=(), dark_request=None):
+                 ion_csv_extras=(), dark_request=None, monitor_offset=0):
         super().__init__(parent)
+        # Position of this worker's first frame within the WHOLE run's
+        # processed-frame order: a Batch-Parallel chunk indexes the monitor
+        # file from here (it used to restart at 0 in every chunk).
+        self._monitor_offset = int(monitor_offset)
         #: dark_policy.DarkRequest, or None to keep the pre-policy behaviour
         #: of applying whatever array the caller passed to every file.
         self._dark_request = dark_request
@@ -2471,17 +2653,21 @@ class BatchWorker(QtCore.QThread):
         stem = "_".join(p for p in (froot, det) if p) or "run"
         return stem + ion_csv.SUFFIX_BATCH_INTEGRATE
 
+    def _provenance_entry(self, spec, *, n_frames, aborted, frame_range) -> dict:
+        return run_provenance_entry(
+            spec, self._src, kernel=self._kernel, weighted=self._weighted,
+            multi_azimuth=self._multi_azimuth, n_frames=n_frames,
+            aborted=aborted, frame_range=frame_range,
+            calibration_snapshot=self._calibration_snapshot,
+            mask_present=self._mask is not None, bright_mode=self._bright_mode,
+            monitor_file=self._monitor_file, q_cfg=self._q_cfg)
+
     def _run_out_stem(self) -> str:
         """The run-level output stem: the source file's own stem, or the
         shared file root of a multi-file pick. Shared by the combined cake
         HDF5's ``<stem>.<lo>_<hi>.cake`` name and a "run"-grouped zarr, so
         the two name the same run the same way."""
-        src_path = self._src.get('path')
-        if src_path:
-            return Path(src_path).stem
-        src_paths = self._src.get('paths') or []
-        return (froot_and_frame_num(Path(src_paths[0]).stem, -1)[0]
-                if src_paths else "integrated")
+        return run_out_stem(self._src)
 
     def _zarr_group_path(self, zarr_dir: Path, fid: str, group_key) -> tuple:
         """``(path_to_open, rename_pending)`` for a new zarr group.
@@ -2803,6 +2989,7 @@ class BatchWorker(QtCore.QThread):
             # is the bug this splits.
             all_frame_idx = []
             all_omegas = []   # degrees, one per processed frame (like frame_ids)
+            all_monitor, all_lsd = [], []   # per frame: monitor divisor, Lsd used
             # (abs frame index, metadata dict|None) per processed frame, for
             # the run-level beam-monitor CSV written after the loop.
             ion_meta: list = []
@@ -2972,9 +3159,12 @@ class BatchWorker(QtCore.QThread):
                     sigma = np.sqrt(np.maximum(prof, 0.0))
 
                 # Apply monitor normalisation
-                if monitor_vals is not None and proc_idx < len(monitor_vals):
-                    mon = float(monitor_vals[proc_idx])
+                mon_applied = 1.0
+                mon_i = self._monitor_offset + proc_idx
+                if monitor_vals is not None and mon_i < len(monitor_vals):
+                    mon = float(monitor_vals[mon_i])
                     if mon != 0.0:
+                        mon_applied = mon
                         prof = prof / mon
                         sigma = sigma / abs(mon)
                         if cake_2d is not None:
@@ -3000,6 +3190,8 @@ class BatchWorker(QtCore.QThread):
                     all_sigmas.append(sigma)
                 frame_omega = float(omega_of(abs_i))
                 all_omegas.append(frame_omega)
+                all_monitor.append(mon_applied)
+                all_lsd.append(cur_lsd)
                 # Instrument metadata (temperature/pressure/ion-chamber/
                 # sample-motor positions), when the source can provide it
                 # (HDF5 stacks only — see
@@ -3019,11 +3211,11 @@ class BatchWorker(QtCore.QThread):
                     except Exception:
                         meta = None
                 ion_meta.append((abs_i, meta))
-                if (want_zarr or self._multi_azimuth) and cake_2d is not None:
-                    # Feeds the <lo>_<hi> token in the combined HDF5 stem,
-                    # which both the plain and the cake writer below use —
-                    # so it is not zarr-only.
-                    all_frame_idx.append(float(abs_i))
+                # Feeds the <lo>_<hi> token in the combined HDF5 stem, which
+                # both layouts use. Was gated on a cake having been built, so
+                # a plain 1-D run named every file ..000000_000000.cake.h5 and
+                # two runs over different ranges overwrote each other.
+                all_frame_idx.append(float(abs_i))
                 if want_zarr and cake_2d is not None:
                     # Which archive this frame belongs to. Under "frame"
                     # grouping (and for any source that cannot name a
@@ -3173,99 +3365,39 @@ class BatchWorker(QtCore.QThread):
                     self.log_line.emit("[batch] monitor CSV failed:\n"
                                        + traceback.format_exc())
 
-            prov_entry = provenance.build_entry(
-                'midas_gui.batch_integrate',
-                inputs=[self._src.get('path')] if self._src.get('path') else [],
-                cake_params={
-                    'RMin': float(spec.RMin), 'RMax': float(spec.RMax),
-                    'RBinSize': float(spec.RBinSize), 'EtaMin': float(spec.EtaMin),
-                    'EtaMax': float(spec.EtaMax), 'EtaBinSize': float(spec.EtaBinSize),
-                },
-                instrument_params=provenance.instrument_params_from_spec(spec),
-                extra={
-                    'kernel': self._kernel, 'weighted': self._weighted,
-                    'multi_azimuth': self._multi_azimuth,
-                    'n_frames': len(all_profiles), 'frame_range': list(self._frame_range),
-                    # Same widening as zarr_prov_entry above — see that
-                    # comment for why this is safe.
-                    'calibration_snapshot': self._calibration_snapshot,
-                    'mask_present': self._mask is not None,
-                    'bright_mode': self._bright_mode,
-                    'monitor_file': self._monitor_file,
-                    'q_cfg': self._q_cfg,
-                    'src_cfg': self._src,
-                    'active_profile': settings.active_profile(),
-                    # Known only now the frame loop has finished — the project's
-                    # own attempt record carries the same field.
-                    'aborted': aborted,
-                },
-            )
+            prov_entry = self._provenance_entry(
+                spec, n_frames=len(all_profiles), aborted=aborted,
+                frame_range=self._frame_range)
 
-            # HDF5: single file with the full stack. Multi-azimuth mode writes
-            # the cake-capable layout (cake_hdf5.write_cake_h5); otherwise the
-            # plain 1-D midas_integrate_v2.write_h5 path, unchanged.
-            if self._out_dir is not None and "h5" in self._fmts:
-                if self._multi_azimuth:
-                    h5_dir = self._out_dir / "h5"
-                    h5_dir.mkdir(parents=True, exist_ok=True)
-                    h5_path = h5_dir / f"{combined_stem}.h5"
-                    try:
-                        from midas_gui.cake_hdf5 import write_cake_h5
-                        _write_h5_atomic(h5_path, lambda t: write_cake_h5(
-                            t, cake=np.array(all_profiles),
-                            cake_sigma=np.array(all_sigmas),
-                            collapsed_profiles=(np.array(all_cake_profiles)
-                                                if all_cake_profiles else None),
-                            collapsed_sigmas=(np.array(all_cake_sigmas)
-                                              if all_cake_sigmas else None),
-                            r_axis=r_ax, eta_axis=eta_ax, frame_ids=frame_ids,
-                            omegas=all_omegas,
-                            spec=spec, bin_area=cake_bin_area,
-                            kernel=self._kernel, weighted=self._weighted,
-                            cake_params={
-                                'RMin': float(spec.RMin), 'RMax': float(spec.RMax),
-                                'RBinSize': float(spec.RBinSize),
-                                'EtaMin': float(spec.EtaMin), 'EtaMax': float(spec.EtaMax),
-                                'EtaBinSize': float(spec.EtaBinSize),
-                            }))
-                        try:
-                            # out_paths is only fully known here (every zarr
-                            # sibling from this run, plus this h5's own path).
-                            prov_entry['extra']['out_paths'] = out_paths + [str(h5_path)]
-                            stamp_h5_provenance(h5_path, prov_entry)
-                        except Exception:
-                            self.log_line.emit(
-                                f"[batch] note: provenance stamp on {h5_path.name} "
-                                "failed (non-fatal):\n" + traceback.format_exc())
-                        out_paths.append(str(h5_path))
-                    except Exception:
-                        self.log_line.emit(
-                            "[batch] cake HDF5 output failed:\n" + traceback.format_exc())
-                else:
-                    h5_dir = self._out_dir / "h5"
-                    h5_dir.mkdir(parents=True, exist_ok=True)
-                    h5_path = h5_dir / f"{combined_stem}.h5"
-                    _write_h5_atomic(h5_path, lambda t: m.write_h5(
-                        str(t),
-                        profiles=np.array(all_profiles),
-                        r_axis=r_ax,
-                        frame_ids=frame_ids,
-                        sigmas=np.array(all_sigmas),
-                        # One rotation angle per profile, same order —
-                        # see write_all_profiles for why this is an
-                        # extra dataset rather than a metadata field.
-                        extra_datasets={
-                            "omegas": np.asarray(all_omegas, dtype=np.float64),
-                            **radial_axis_datasets(r_ax, lsd, px, wl)}))
-                    try:
-                        stamp_cake_params_h5(h5_path, spec)
-                        prov_entry['extra']['out_paths'] = out_paths + [str(h5_path)]
-                        stamp_h5_provenance(h5_path, prov_entry)
-                    except Exception:
-                        self.log_line.emit(
-                            f"[batch] note: provenance stamp on {h5_path.name} "
-                            "failed (non-fatal):\n" + traceback.format_exc())
+            # HDF5: single file with the full stack (cake layout in
+            # multi-azimuth mode). A Batch-Parallel chunk worker does NOT write
+            # it -- the coordinator merges every chunk and writes the one file
+            # (write_run_h5), so chunks no longer collide on the name.
+            if (self._out_dir is not None and "h5" in self._fmts
+                    and self._frame_indices is None):
+                h5_stem = combined_stem
+                try:
+                    if not all_profiles:
+                        raise RuntimeError("no frames were integrated")
+                    h5_path = write_run_h5(
+                        self._out_dir, h5_stem, multi=self._multi_azimuth,
+                        profiles=all_profiles, sigmas=all_sigmas,
+                        cake_profiles=all_cake_profiles,
+                        cake_sigmas=all_cake_sigmas, r_ax=r_ax, eta_ax=eta_ax,
+                        frame_ids=frame_ids, omegas=all_omegas, spec=spec,
+                        bin_area=cake_bin_area, kernel=self._kernel,
+                        weighted=self._weighted, prov_entry=prov_entry,
+                        out_paths=out_paths, lsd=lsd, px=px, wl=wl,
+                        q_cfg=self._q_cfg, frame_meta=ion_meta,
+                        monitor_vals=(all_monitor if monitor_vals is not None else None),
+                        monitor_file=self._monitor_file,
+                        lsd_per_frame=(all_lsd if self._drift_traj is not None else None),
+                        log=self.log_line.emit)
                     out_paths.append(str(h5_path))
+                except Exception:
+                    # Never lose a finished run's in-memory result to a file error.
+                    self.log_line.emit(
+                        "[batch] combined HDF5 output failed:\n" + traceback.format_exc())
 
             # Zarr cake output is written per-frame inside the loop above
             # (see the `want_zarr and cake_2d is not None` branch) — nothing
@@ -3282,6 +3414,14 @@ class BatchWorker(QtCore.QThread):
                 "aborted": aborted,
                 "multi_azimuth": self._multi_azimuth,
                 "eta_axis": eta_ax if self._multi_azimuth else None,
+                # Carried for the Batch-Parallel merge, which writes the one
+                # combined HDF5 from the chunks' pieces.
+                "cake_profiles": all_cake_profiles,
+                "cake_sigmas": all_cake_sigmas,
+                "frame_idx": [int(i) for i in all_frame_idx],
+                "frame_meta": ion_meta,
+                "monitor_used": all_monitor,
+                "lsd_used": all_lsd,
             })
         except Exception:
             self.failed.emit(traceback.format_exc())
@@ -4351,7 +4491,8 @@ def _split_into_chunks(indices: list, n_chunks: int) -> list:
 def write_all_profiles(out_dir, fmts, r_axis, profiles, sigmas, frame_ids,
                        lsd, px, wl, eta_axis=None, spec=None, bin_area=None,
                        calibration_snapshot=None, kernel=None, weighted=None,
-                       cake_params=None, omegas=None) -> list:
+                       cake_params=None, omegas=None, mask=None,
+                       q_cfg=None) -> list:
     """Write every frame's already-computed lineout to disk, in every format
     in ``fmts``. Backs the batch tabs' **Save** button — writing results that
     already exist in memory, independent of whether an output directory was
@@ -4410,6 +4551,7 @@ def write_all_profiles(out_dir, fmts, r_axis, profiles, sigmas, frame_ids,
         if spec is not None:
             try:
                 stamp_cake_params_h5(h5_path, spec)
+                stamp_run_info_h5(h5_path, spec, r_axis, q_cfg=q_cfg)
             except Exception:
                 pass   # best-effort, like the provenance stamp below
         try:
@@ -4430,11 +4572,25 @@ def write_all_profiles(out_dir, fmts, r_axis, profiles, sigmas, frame_ids,
             h5_path = out_dir / "integrated.h5"
             try:
                 from midas_gui.cake_hdf5 import write_cake_h5
-                write_cake_h5(
-                    h5_path, cake=profiles, cake_sigma=sigmas, r_axis=r_axis,
+                if bin_area is None:
+                    # Without the pixel-count weights the stored cake is the
+                    # raw per-bin mean and cake.sum(eta) != profiles -- a
+                    # different quantity from the same run's own HDF5. The
+                    # geometry is cheap to rebuild from the spec.
+                    try:
+                        bin_area = bin_area_for(spec, kernel or "subpixel2", mask)
+                    except Exception:
+                        bin_area = None
+                _write_h5_atomic(h5_path, lambda t: write_cake_h5(
+                    t, cake=profiles, cake_sigma=sigmas, r_axis=r_axis,
                     eta_axis=eta_axis, frame_ids=frame_ids, spec=spec,
                     bin_area=bin_area, kernel=kernel, weighted=weighted,
-                    cake_params=cake_params, omegas=omegas)
+                    cake_params=cake_params or cake_params_of(spec),
+                    omegas=omegas))
+                try:
+                    stamp_run_info_h5(h5_path, spec, r_axis)
+                except Exception:
+                    pass
                 entry = provenance.build_entry(
                     'midas_gui.batch_integrate.save',
                     extra={'n_frames': len(frame_ids), 'multi_azimuth': True,
@@ -4639,8 +4795,11 @@ class BatchRunCoordinator(QtCore.QObject):
             return
         self.geom_ready.emit(ctx)
         self._live_order = [i for chunk in self._chunks for i in chunk]
+        offset = 0
         for chunk in self._chunks:
-            w = BatchWorker(context=ctx, frame_indices=chunk, parent=self, **self._args)
+            w = BatchWorker(context=ctx, frame_indices=chunk, parent=self,
+                            monitor_offset=offset, **self._args)
+            offset += len(chunk)
             self._chunk_workers.append(w)
             self._chunk_totals[id(w)] = len(chunk)
             self._chunk_done[id(w)] = 0
@@ -4682,6 +4841,8 @@ class BatchRunCoordinator(QtCore.QObject):
             "[batch] all chunks integrated — merging and finalizing outputs "
             "(combined HDF5); no per-frame progress until done…")
         merged_profiles, merged_sigmas, merged_ids, merged_out = [], [], [], []
+        merged_cake_p, merged_cake_s, merged_idx = [], [], []
+        merged_meta, merged_mon, merged_lsd = [], [], []
         aborted = False
         r_axis = None
         eta_axis = None
@@ -4695,6 +4856,12 @@ class BatchRunCoordinator(QtCore.QObject):
             merged_ids.extend(d.get("frame_ids") or [])
             merged_omegas.extend(d.get("omegas") or [])
             merged_out.extend(d.get("out_paths") or [])
+            merged_cake_p.extend(d.get("cake_profiles") or [])
+            merged_cake_s.extend(d.get("cake_sigmas") or [])
+            merged_idx.extend(d.get("frame_idx") or [])
+            merged_meta.extend(d.get("frame_meta") or [])
+            merged_mon.extend(d.get("monitor_used") or [])
+            merged_lsd.extend(d.get("lsd_used") or [])
             aborted = aborted or d.get("aborted", False)
             if r_axis is None:
                 r_axis = d.get("r_axis_px")
@@ -4707,23 +4874,41 @@ class BatchRunCoordinator(QtCore.QObject):
             try:
                 spec = self._args["spec"]
                 kernel = self._args["kernel"]
-                bin_area = cake_params = None
+                bin_area = None
                 if multi_azimuth:
-                    # Not carried over from any one chunk worker (each built its
-                    # own geometry independently) — rebuilt once here so the
-                    # combined cake HDF5 still gets a real, non-zero BinArea row.
-                    # Through bin_area_for, so a wrapped eta range gets a
-                    # real area for the bins past the cut instead of zeros.
+                    # Rebuilt once here (each chunk worker built its own
+                    # geometry); through bin_area_for so a wrapped eta range
+                    # gets a real area for the bins past the cut.
                     bin_area = bin_area_for(spec, kernel, self._args["mask"])
-                    cake_params = cake_params_of(spec)
-                h5_paths = write_all_profiles(
-                    out_dir, ["h5"], r_axis, merged_profiles, merged_sigmas, merged_ids,
-                    float(spec.Lsd), float(spec.pxY), float(spec.Wavelength),
-                    eta_axis=eta_axis, spec=spec, bin_area=bin_area,
-                    calibration_snapshot=self._args.get("calibration_snapshot"),
+                lo = int(min(merged_idx)) if merged_idx else 0
+                hi = int(max(merged_idx)) if merged_idx else 0
+                a_ = self._args
+                stem = f"{run_out_stem(a_.get('source_cfg'))}.{lo:06d}_{hi:06d}.cake"
+                prov_entry = run_provenance_entry(
+                    spec, a_.get("source_cfg"), kernel=kernel,
+                    weighted=a_.get("weighted"), multi_azimuth=multi_azimuth,
+                    n_frames=len(merged_profiles), aborted=aborted,
+                    frame_range=a_.get("frame_range"),
+                    calibration_snapshot=a_.get("calibration_snapshot"),
+                    mask_present=a_.get("mask") is not None,
+                    bright_mode=a_.get("bright_mode"),
+                    monitor_file=a_.get("monitor_file"), q_cfg=a_.get("q_cfg"))
+                h5_path = write_run_h5(
+                    out_dir, stem, multi=multi_azimuth,
+                    profiles=merged_profiles, sigmas=merged_sigmas,
+                    cake_profiles=merged_cake_p, cake_sigmas=merged_cake_s,
+                    r_ax=r_axis, eta_ax=eta_axis, frame_ids=merged_ids,
+                    omegas=merged_omegas, spec=spec, bin_area=bin_area,
                     kernel=kernel, weighted=self._args.get("weighted"),
-                    cake_params=cake_params, omegas=merged_omegas)
-                merged_out.extend(h5_paths)
+                    prov_entry=prov_entry, out_paths=merged_out,
+                    lsd=float(spec.Lsd), px=float(spec.pxY),
+                    wl=float(spec.Wavelength), q_cfg=self._args.get("q_cfg"),
+                    frame_meta=merged_meta,
+                    monitor_vals=(merged_mon if self._args.get("monitor_file") else None),
+                    monitor_file=self._args.get("monitor_file"),
+                    lsd_per_frame=(merged_lsd if self._args.get("drift_traj") is not None else None),
+                    log=self.log_line.emit)
+                merged_out.append(str(h5_path))
             except Exception:
                 self.log_line.emit(
                     "[batch] combined HDF5 write failed:\n" + traceback.format_exc())

@@ -221,21 +221,27 @@ def test_write_all_profiles_writes_cake_h5_when_spec_supplied(in_dir):
     eta_axis = np.linspace(-180, 180, n_eta)
 
     out_dir = in_dir / "save_out"
-    # No bin_area supplied (the Save button doesn't cheaply have one) — cake
-    # falls back to the unweighted per-bin mean, flagged via a warning.
-    with pytest.warns(UserWarning, match="no bin_area supplied"):
-        paths = wk.write_all_profiles(
-            out_dir, ["h5"], r_axis, profiles, sigmas, frame_ids,
-            float(spec.Lsd), float(spec.pxY), float(spec.Wavelength),
-            eta_axis=eta_axis, spec=spec)
+    # No bin_area passed: Save rebuilds it from the spec, so the stored cake
+    # is the same bin_area-weighted quantity a run writes (sum over eta ==
+    # profiles), not the raw per-bin mean.
+    paths = wk.write_all_profiles(
+        out_dir, ["h5"], r_axis, profiles, sigmas, frame_ids,
+        float(spec.Lsd), float(spec.pxY), float(spec.Wavelength),
+        eta_axis=eta_axis, spec=spec)
     assert paths == [str(out_dir / "integrated.h5")]
 
     with h5py.File(out_dir / "integrated.h5", "r") as f:
-        assert np.asarray(f["cake"]).shape == (3, n_eta, n_r)
-        np.testing.assert_array_equal(np.asarray(f["cake"]), profiles)
-        assert f["cake"].attrs["weighting"].startswith("unweighted")
-        expected_profile = collapse_cake_eta(profiles)
-        np.testing.assert_allclose(np.asarray(f["profiles"]), expected_profile)
+        cake = np.asarray(f["cake"])
+        assert cake.shape == (3, n_eta, n_r)
+        assert f["cake"].attrs["weighting"].startswith("bin_area-weighted")
+        assert "bin_area" in f
+        # profiles falls back to the eta-collapse of the raw cake (no engine
+        # profile exists for in-memory results).
+        np.testing.assert_allclose(np.asarray(f["profiles"]),
+                                   collapse_cake_eta(profiles))
+        # run-info group is present on the Save path too
+        assert "instrument" in f and float(f["instrument"].attrs["Lsd"]) == float(spec.Lsd)
+        assert int(f.attrs["n_r_bins"]) == n_r
 
 
 def test_write_all_profiles_skips_cake_h5_without_spec(in_dir):
@@ -291,8 +297,11 @@ def test_batch_run_coordinator_parallel_multi_azimuth_h5_has_bin_area(in_dir):
     coord._on_chunk_finished(w_b, coord._chunk_results[id(w_b)])
 
     assert finished and finished[0]["n"] == 3
-    h5_path = out_dir / "integrated.h5"
-    assert h5_path.is_file()
+    # The merge writes the same <h5>/<stem>.cake.h5 a sequential run does
+    # (it used to drop a differently-named integrated.h5 at the out root).
+    found = list((out_dir / "h5").glob("*.cake.h5"))
+    assert len(found) == 1, found
+    h5_path = found[0]
     with h5py.File(h5_path, "r") as f:
         assert np.asarray(f["cake"]).shape[0] == 3
         bin_area = np.asarray(f["bin_area"])
