@@ -90,13 +90,13 @@ def test_run_info_groups_and_rebin_attrs(app, tmp_path):
     res = _run_seq(_args(tmp_path, 3, q_cfg=cfg))
     (p,) = (tmp_path / "out" / "h5").glob("*.h5")
     with h5py.File(p) as f:
-        n_axis = len(f["r_axis_px"])
+        n_axis = len(f["entry/data/R_px"])
         assert n_axis == 90 and int(f.attrs["n_r_bins"]) == n_axis
         assert f.attrs["rebin_unit"] == "Q" and f.attrs["rebin_step"] == 0.05
         assert float(f["instrument"].attrs["Lsd"]) == 200000.0
         assert float(f["instrument"].attrs["tx"]) == pytest.approx(0.1)
         assert "distortion" in f["instrument"]
-        assert len(f["omegas"]) == len(res["frame_ids"]) == 3
+        assert len(f["entry/data/omegas"]) == len(res["frame_ids"]) == 3
 
 
 def test_monitor_values_recorded(app, tmp_path):
@@ -125,10 +125,10 @@ def test_parallel_writes_one_file_equal_to_sequential(app, tmp_path, multi):
     (b,) = (par_dir / "h5").glob("*.h5")           # exactly one, same place
     assert a.name == b.name
     with h5py.File(a) as fa, h5py.File(b) as fb:
-        assert fa["frame_ids"][()].tolist() == fb["frame_ids"][()].tolist()
-        np.testing.assert_allclose(fa["profiles"][()], fb["profiles"][()])
-        np.testing.assert_allclose(fa["omegas"][()], fb["omegas"][()])
+        assert fa["entry/data/frame_ids"][()].tolist() == fb["entry/data/frame_ids"][()].tolist()
+        np.testing.assert_allclose(fa["entry/data/profiles"][()], fb["entry/data/profiles"][()])
+        np.testing.assert_allclose(fa["entry/data/omegas"][()], fb["entry/data/omegas"][()])
         # chunk 2 must index the monitor file from its own offset, not 0
         np.testing.assert_array_equal(fb["monitor_values"][()], fa["monitor_values"][()])
         if multi:
-            np.testing.assert_allclose(fa["cake"][()], fb["cake"][()])
+            np.testing.assert_allclose(fa["entry/data/cake"][()], fb["entry/data/cake"][()])

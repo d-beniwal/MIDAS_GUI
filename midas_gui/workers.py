@@ -89,16 +89,6 @@ def axis_conversions(r_px, lsd, px, wl):
     return two_theta, two_theta * 100.0, q
 
 
-def radial_axis_datasets(r_px, lsd, px, wl) -> dict:
-    """``R_px`` / ``TTH`` (2θ, deg) / ``Q`` (Å⁻¹) bin-centre axes for a 1-D
-    HDF5 — always all three, whatever Bin type the run used (the bin grid
-    only decides which of them is uniform)."""
-    tth, _, q = axis_conversions(r_px, lsd, px, wl)
-    return {"R_px": np.asarray(r_px, dtype=np.float64),
-            "TTH": np.asarray(tth, dtype=np.float64),
-            "Q": np.asarray(q, dtype=np.float64)}
-
-
 # The tag excludes '_' but NOT digits: '_' is what forces the match onto
 # the LAST underscore-number group, while barring digits made a detector
 # tag that ends in one unparseable. '..._1s_003502.ge1' then matched
@@ -255,30 +245,6 @@ def cake_params_of(spec) -> dict:
     }
 
 
-def stamp_cake_params_h5(h5_path, spec) -> None:
-    """Record the caking parameters in a 1-D ``write_h5`` file's root attrs.
-
-    ``midas_integrate_v2.write_h5`` stores only the finished ``(N, n_r)``
-    profile stack and its R axis, so nothing in the file said which R range,
-    R bin, or η window/bin the profiles were built with — the R axis alone
-    could not tell an η-restricted run from a full-circle one. The 1-D
-    profile is the η-collapse over [EtaMin, EtaMax]; EtaBinSize only shapes
-    the wedges that were averaged (it is kept in the file only with
-    Multi-azimuth output, which writes the full η axis)."""
-    import h5py
-    with h5py.File(str(h5_path), 'a') as h5:
-        for k, v in cake_params_of(spec).items():
-            h5.attrs[k] = v
-        h5.attrs['n_r_bins'] = int(spec.n_r_bins)
-        h5.attrs['n_eta_bins'] = int(spec.n_eta_bins)
-        h5.attrs['multi_azimuth'] = False
-        h5.attrs['eta_collapsed'] = True
-        h5.attrs['note'] = (
-            "profiles are the 1-D lineout eta-collapsed over "
-            "[EtaMin, EtaMax]; enable Multi-azimuth output to keep the "
-            "per-eta cake.")
-
-
 def stamp_run_info_h5(h5_path, spec, r_axis, *, q_cfg=None, frame_meta=None,
                       monitor_vals=None, monitor_file=None,
                       lsd_per_frame=None) -> None:
@@ -429,13 +395,12 @@ def write_run_h5(out_dir, stem, *, multi, profiles, sigmas, r_ax, frame_ids,
             spec=spec, bin_area=bin_area, kernel=kernel, weighted=weighted,
             cake_params=cake_params_of(spec)))
     else:
-        _write_h5_atomic(h5_path, lambda t: m.write_h5(
-            str(t), profiles=np.array(profiles), r_axis=r_ax,
-            frame_ids=frame_ids, sigmas=np.array(sigmas),
-            extra_datasets={
-                "omegas": np.asarray(omegas, dtype=np.float64),
-                **radial_axis_datasets(r_ax, lsd, px, wl)}))
-        stamp_cake_params_h5(h5_path, spec)
+        from midas_gui.cake_hdf5 import write_profiles_h5
+        _write_h5_atomic(h5_path, lambda t: write_profiles_h5(
+            t, profiles=np.array(profiles), sigmas=np.array(sigmas),
+            r_axis=r_ax, frame_ids=frame_ids, lsd=lsd, px=px, wl=wl,
+            omegas=omegas, spec=spec, kernel=kernel, weighted=weighted,
+            cake_params=cake_params_of(spec)))
     try:
         stamp_run_info_h5(h5_path, spec, r_ax, q_cfg=q_cfg,
                           frame_meta=frame_meta, monitor_vals=monitor_vals,
@@ -4537,23 +4502,24 @@ def write_all_profiles(out_dir, fmts, r_axis, profiles, sigmas, frame_ids,
     if "h5" in fmts and len(frame_ids) and not multi:
         out_dir.mkdir(parents=True, exist_ok=True)
         h5_path = out_dir / "integrated.h5"
-        # The per-frame rotation angle rides along as an extra dataset
-        # rather than a ProfileMetadata field: write_h5 has no omega of its
-        # own, and a downstream peak fit or pole figure needs one value per
-        # profile, in the same order. Skipped rather than padded when the
-        # lengths disagree — a misaligned angle is worse than none.
-        extras = dict(radial_axis_datasets(r_axis, lsd, px, wl))
-        if omegas is not None and len(omegas) == len(frame_ids):
-            extras["omegas"] = np.asarray(omegas, dtype=np.float64)
-        _write_h5_atomic(h5_path, lambda t: m.write_h5(
-            str(t), profiles=profiles, r_axis=r_axis,
-            frame_ids=frame_ids, sigmas=sigmas, extra_datasets=extras))
+        from midas_gui.cake_hdf5 import write_profiles_h5
         if spec is not None:
+            # Skipped rather than padded when omega lengths disagree (done in
+            # the writer): a misaligned angle is worse than none.
+            _write_h5_atomic(h5_path, lambda t: write_profiles_h5(
+                t, profiles=profiles, sigmas=sigmas, r_axis=r_axis,
+                frame_ids=frame_ids, lsd=lsd, px=px, wl=wl, omegas=omegas,
+                spec=spec, kernel=kernel, weighted=weighted,
+                cake_params=cake_params or cake_params_of(spec)))
             try:
-                stamp_cake_params_h5(h5_path, spec)
                 stamp_run_info_h5(h5_path, spec, r_axis, q_cfg=q_cfg)
             except Exception:
                 pass   # best-effort, like the provenance stamp below
+        else:
+            _write_h5_atomic(h5_path, lambda t: write_profiles_h5(
+                t, profiles=profiles, sigmas=sigmas, r_axis=r_axis,
+                frame_ids=frame_ids, lsd=lsd, px=px, wl=wl, omegas=omegas,
+                kernel=kernel, weighted=weighted))
         try:
             entry = provenance.build_entry(
                 'midas_gui.batch_integrate.save',

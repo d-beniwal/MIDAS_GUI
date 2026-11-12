@@ -90,27 +90,30 @@ def test_single_frame_cake_h5_layout(app, in_dir):
 
     h5_path = next((out / "h5").glob("*.h5"))
     with h5py.File(h5_path, "r") as f:
-        # Flat, one-path-per-dataset layout — no entry/data/extra nesting,
-        # no root soft-links, no GSAS-II-flavored REtaMap/SumFrames/Omegas/
+        # Unified NeXus layout (same as the 1-D file): everything under
+        # entry/data, one path per dataset, no root soft-links, no GSAS-II-flavored REtaMap/SumFrames/Omegas/
         # InstrumentParameters (this file is never opened by GSAS-II; see
         # cake_hdf5.py's module docstring).
-        cake = np.asarray(f["cake"])
+        cake = np.asarray(f["entry/data/cake"])
         # (frame, eta, r) — cake[frame, eta_idx, :] is directly that wedge's
         # radial profile, and (being bin_area-weighted) summing over eta
         # reproduces the full profile exactly.
         assert cake.shape == (1, spec.n_eta_bins, spec.n_r_bins)
-        assert np.asarray(f["cake_sigma"]).shape == cake.shape
-        assert np.asarray(f["r_px"]).shape == (spec.n_r_bins,)
-        assert np.asarray(f["two_theta_deg"]).shape == (spec.n_r_bins,)
-        assert np.asarray(f["d_angstrom"]).shape == (spec.n_r_bins,)
-        assert np.asarray(f["q_invA"]).shape == (spec.n_r_bins,)
-        assert np.asarray(f["eta_deg"]).shape == (spec.n_eta_bins,)
+        assert np.asarray(f["entry/data/cake_sigma"]).shape == cake.shape
+        assert np.asarray(f["entry/data/R_px"]).shape == (spec.n_r_bins,)
+        assert np.asarray(f["entry/data/TTH"]).shape == (spec.n_r_bins,)
+        assert np.asarray(f["entry/data/Q"]).shape == (spec.n_r_bins,)
+        assert np.asarray(f["entry/data/eta_deg"]).shape == (spec.n_eta_bins,)
         assert "REtaMap" not in f and "SumFrames" not in f and "Omegas" not in f
-        assert "InstrumentParameters" not in f and "entry" not in f
-        profiles = np.asarray(f["profiles"])
+        assert "InstrumentParameters" not in f
+        # No root-level duplicates of the radial axes / profiles.
+        for dup in ("Q", "TTH", "R_px", "r_px", "profiles", "cake", "q_invA"):
+            assert dup not in f, dup
+        assert "extra" not in f["entry"]
+        profiles = np.asarray(f["entry/data/profiles"])
         assert profiles.shape == (1, spec.n_r_bins)
         np.testing.assert_allclose(cake.sum(axis=1), profiles, rtol=1e-8, atol=1e-8)
-        assert f["cake"].attrs["weighting"].startswith("bin_area-weighted")
+        assert f["entry/data/cake"].attrs["weighting"].startswith("bin_area-weighted")
         history = json.loads(f.attrs["provenance_history"])
         extra = history[-1]["extra"]
         assert extra["calibration_snapshot"]["_calibrant_name"] == "CeO2"
@@ -136,7 +139,7 @@ def test_single_frame_cake_h5_profile_matches_real_engine_collapse(app, in_dir):
 
     h5_path = next((out_cake / "h5").glob("*.h5"))
     with h5py.File(h5_path, "r") as f:
-        cake_profile = np.asarray(f["profiles"])[0]
+        cake_profile = np.asarray(f["entry/data/profiles"])[0]
     np.testing.assert_allclose(cake_profile, np.asarray(results_1d["profiles"])[0],
                                rtol=1e-6, atol=1e-8)
 
@@ -151,8 +154,8 @@ def test_multi_frame_tiff_folder_clubs_into_one_file(app, in_dir):
     h5_paths = list((out / "h5").glob("*.h5"))
     assert len(h5_paths) == 1
     with h5py.File(h5_paths[0], "r") as f:
-        assert np.asarray(f["cake"]).shape[0] == 3
-        assert len(f["frame_ids"]) == 3
+        assert np.asarray(f["entry/data/cake"]).shape[0] == 3
+        assert len(f["entry/data/frame_ids"]) == 3
 
 
 def test_combine_subframes_chunking_clubs_chunks_not_raw_frames(app, in_dir):
@@ -171,8 +174,8 @@ def test_combine_subframes_chunking_clubs_chunks_not_raw_frames(app, in_dir):
     h5_path = next((out / "h5").glob("*.h5"))
     with h5py.File(h5_path, "r") as f:
         frame_ids = [x.decode() if isinstance(x, bytes) else x
-                    for x in np.asarray(f["frame_ids"])]
-        assert np.asarray(f["cake"]).shape[0] == 2   # 6 raw frames / chunk_size 3
+                    for x in np.asarray(f["entry/data/frame_ids"])]
+        assert np.asarray(f["entry/data/cake"]).shape[0] == 2   # 6 raw frames / chunk_size 3
         assert frame_ids == ["scan_001.frame_0_2", "scan_001.frame_3_5"]
 
 
@@ -231,13 +234,13 @@ def test_write_all_profiles_writes_cake_h5_when_spec_supplied(in_dir):
     assert paths == [str(out_dir / "integrated.h5")]
 
     with h5py.File(out_dir / "integrated.h5", "r") as f:
-        cake = np.asarray(f["cake"])
+        cake = np.asarray(f["entry/data/cake"])
         assert cake.shape == (3, n_eta, n_r)
-        assert f["cake"].attrs["weighting"].startswith("bin_area-weighted")
-        assert "bin_area" in f
+        assert f["entry/data/cake"].attrs["weighting"].startswith("bin_area-weighted")
+        assert "bin_area" in f["entry/data"]
         # profiles falls back to the eta-collapse of the raw cake (no engine
         # profile exists for in-memory results).
-        np.testing.assert_allclose(np.asarray(f["profiles"]),
+        np.testing.assert_allclose(np.asarray(f["entry/data/profiles"]),
                                    collapse_cake_eta(profiles))
         # run-info group is present on the Save path too
         assert "instrument" in f and float(f["instrument"].attrs["Lsd"]) == float(spec.Lsd)
@@ -303,8 +306,8 @@ def test_batch_run_coordinator_parallel_multi_azimuth_h5_has_bin_area(in_dir):
     assert len(found) == 1, found
     h5_path = found[0]
     with h5py.File(h5_path, "r") as f:
-        assert np.asarray(f["cake"]).shape[0] == 3
-        bin_area = np.asarray(f["bin_area"])
+        assert np.asarray(f["entry/data/cake"]).shape[0] == 3
+        bin_area = np.asarray(f["entry/data/bin_area"])
         assert np.any(bin_area > 0), "bin_area should be populated, not left at zero"
 
 
@@ -371,13 +374,13 @@ def test_project_h5_zarr_axes_and_data_are_consistent(app, in_dir):
 
     h5_path = next((out / "h5").glob("*.h5"))
     with h5py.File(h5_path, "r") as f:
-        h5_cake = np.asarray(f["cake"])                       # (N, eta, r), bin_area-weighted
-        h5_profiles = np.asarray(f["profiles"])
-        h5_bin_area = np.asarray(f["bin_area"])                # (eta, r)
-        h5_r = np.asarray(f["r_px"])
-        h5_eta = np.asarray(f["eta_deg"])
-        h5_tth = np.asarray(f["two_theta_deg"])
-        h5_q = np.asarray(f["q_invA"])
+        h5_cake = np.asarray(f["entry/data/cake"])                       # (N, eta, r), bin_area-weighted
+        h5_profiles = np.asarray(f["entry/data/profiles"])
+        h5_bin_area = np.asarray(f["entry/data/bin_area"])                # (eta, r)
+        h5_r = np.asarray(f["entry/data/R_px"])
+        h5_eta = np.asarray(f["entry/data/eta_deg"])
+        h5_tth = np.asarray(f["entry/data/TTH"])
+        h5_q = np.asarray(f["entry/data/Q"])
 
     np.testing.assert_allclose(proj_r, h5_r)
 

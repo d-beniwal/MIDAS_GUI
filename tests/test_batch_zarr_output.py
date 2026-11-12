@@ -379,7 +379,7 @@ def test_the_combined_hdf5_carries_the_omegas_alongside_the_profiles(app, in_dir
                     "collapse": False})
     h5_path = next((out / "h5").glob("*.h5"))
     with h5py.File(h5_path, "r") as f:
-        key = next(k for k in f if k.lower() == "omegas")
+        key = "entry/data/omegas"
         np.testing.assert_allclose(np.asarray(f[key]).ravel(), [1.0, 3.0, 5.0])
 
 
@@ -395,9 +395,9 @@ def test_the_cake_hdf5_carries_the_omegas_too(app, in_dir):
                     "collapse": False})
     h5_path = next((out / "h5").glob("*.h5"))
     with h5py.File(h5_path, "r") as f:
-        assert f["cake"].ndim == 3, "not the cake layout"
-        np.testing.assert_allclose(np.asarray(f["omegas"]), [1.0, 3.0, 5.0])
-        assert f["omegas"].attrs["units"] == "degree"
+        assert f["entry/data/cake"].ndim == 3, "not the cake layout"
+        np.testing.assert_allclose(np.asarray(f["entry/data/omegas"]), [1.0, 3.0, 5.0])
+        assert f["entry/data/omegas"].attrs["units"] == "degree"
 
 
 def test_the_cake_hdf5_survives_physics_corrections(app, in_dir):
@@ -414,7 +414,7 @@ def test_the_cake_hdf5_survives_physics_corrections(app, in_dir):
         _run(app, in_dir, ["h5"], multi_azimuth=True, n_frames=1, out_dir=out,
              corrections=corrections)
         with h5py.File(next((out / "h5").glob("*.h5")), "r") as f:
-            return np.asarray(f["bin_area"])
+            return np.asarray(f["entry/data/bin_area"])
 
     on = _area(in_dir / "out_corr",
                (PolarizationCorrection(pol_fraction=0.99,

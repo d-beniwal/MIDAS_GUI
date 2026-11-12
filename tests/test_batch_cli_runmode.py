@@ -67,6 +67,6 @@ def test_parallel_cli_run_matches_sequential(tmp_path, extra):
     a, b = outs["sequential"], outs["batch_parallel"]
     assert a.name == b.name
     with h5py.File(a) as fa, h5py.File(b) as fb:
-        np.testing.assert_allclose(fa["profiles"][()], fb["profiles"][()])
-        assert fa["frame_ids"][()].tolist() == fb["frame_ids"][()].tolist()
+        np.testing.assert_allclose(fa["entry/data/profiles"][()], fb["entry/data/profiles"][()])
+        assert fa["entry/data/frame_ids"][()].tolist() == fb["entry/data/frame_ids"][()].tolist()
         assert "instrument" in fb and "frame_metadata" not in fb or True

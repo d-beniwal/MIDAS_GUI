@@ -97,14 +97,14 @@ def _check_outputs(res, out, fmts, multi, spec):
         with h5py.File(hs[0], "r") as f:
             assert "provenance_history" in f.attrs
             if multi:
-                assert np.asarray(f["cake"]).shape == (
-                    3 if "tiff" in hs[0] else np.asarray(f["cake"]).shape[0],
+                assert np.asarray(f["entry/data/cake"]).shape == (
+                    3 if "tiff" in hs[0] else np.asarray(f["entry/data/cake"]).shape[0],
                     spec.n_eta_bins, spec.n_r_bins) or True
-                assert np.asarray(f["cake"]).shape[1:] == (
+                assert np.asarray(f["entry/data/cake"]).shape[1:] == (
                     spec.n_eta_bins, spec.n_r_bins)
             else:
-                assert np.asarray(f["profiles"]).shape[1] == spec.n_r_bins
-            assert np.isfinite(np.asarray(f["profiles"])).all()
+                assert np.asarray(f["entry/data/profiles"]).shape[1] == spec.n_r_bins
+            assert np.isfinite(np.asarray(f["entry/data/profiles"])).all()
     if "zarr" in fmts:
         assert by_ext(".zarr.zip"), "no zarr output"
         import zipfile

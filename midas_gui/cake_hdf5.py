@@ -1,18 +1,27 @@
-"""Cake (multi-azimuth) HDF5 output for Batch Integrate.
+"""HDF5 output for Batch Integrate — ONE layout for 1-D and multi-azimuth.
 
-``midas_integrate_v2.write_h5`` only accepts a 2-D ``(N, n_r)`` profile stack
-— a full ``(N, n_eta, n_r)`` cake has nowhere to go in it — so this module
-writes its own file directly with h5py instead of riding on ``write_h5``'s
-NeXus ``entry/data``/``entry/extra`` nesting and root soft-link mechanism.
-Every dataset lives at exactly one root-level path.
+Both ``write_profiles_h5`` (plain 1-D) and ``write_cake_h5`` (multi-azimuth)
+write the same NeXus tree, with every dataset at exactly one path (no soft
+links, no root-level mirrors)::
+
+    /                      NXroot   (run attrs)
+      entry                NXentry
+        data               NXdata
+          frame_ids, profiles, sigmas, R_px, Q, TTH, [omegas]
+          [cake, cake_sigma, eta_deg, bin_area]    <- multi-azimuth only
+      instrument, frame_metadata, monitor_values, lsd_per_frame,
+      provenance_history   (stamped afterwards by ``workers.stamp_*``)
+
+``midas_integrate_v2.write_h5`` is deliberately NOT used: it nests the
+radial axes under ``entry/extra`` and re-exports them as root soft links,
+which is where the duplicated ``Q``/``R_px``/``TTH`` came from, and it only
+accepts a 2-D ``(N, n_r)`` stack.
 
 This file is a GUI-native archive, not a GSAS-II input: GSAS-II's own
 importer (``G2pwd_MIDAS.py``) only ever opens ``.zarr.zip`` and never an
 ``.h5``, so nothing here needs to mirror the zarr ``REtaMap``/``OmegaSumFrame``
-convention — that convention is reproduced faithfully elsewhere, by the
-external ``midas_integrate_v2.io.zarr_gsas.write_gsas_zarr_zip`` (inline
-per-frame zarr) and by this repo's own ``gsas_export.py`` (on-demand
-project-attempt export), neither of which this module touches.
+convention (that lives in ``midas_integrate_v2.io.zarr_gsas`` and
+``gsas_export.py``).
 
 Unlike the zarr writer, this bundles every processed frame (or "Combine
 sub-frames" chunk) from one run into a single file.
@@ -28,7 +37,105 @@ import numpy as np
 
 from midas_gui.helpers import collapse_cake_eta, radial_axes_from_r_px
 
-__all__ = ["write_cake_h5"]
+__all__ = ["write_cake_h5", "write_profiles_h5"]
+
+
+def _write_nx_core(f, *, profiles, sigmas, frame_ids, r_axis, axes, omegas,
+                   n_frames, signal_axes):
+    """Create ``entry/data`` (NXdata) on the open file ``f`` with the datasets
+    common to both layouts; returns the ``data`` group so the cake layout can
+    add its extras. ``axes`` is ``radial_axes_from_r_px``'s dict."""
+    f.attrs["NX_class"] = "NXroot"
+    f.attrs["default"] = "entry"
+    entry = f.create_group("entry")
+    entry.attrs["NX_class"] = "NXentry"
+    entry.attrs["default"] = "data"
+    g = entry.create_group("data")
+    g.attrs["NX_class"] = "NXdata"
+    g.attrs["signal"] = "profiles"
+    g.attrs["axes"] = signal_axes
+
+    ds = g.create_dataset("frame_ids", data=np.array(list(frame_ids), dtype="S"))
+    ds.attrs["long_name"] = "frame identifier"
+    if omegas is not None and len(omegas) == n_frames:
+        ds = g.create_dataset("omegas", data=np.asarray(omegas, dtype=np.float64))
+        ds.attrs["units"] = "degree"
+        ds.attrs["long_name"] = "rotation angle per frame"
+
+    ds = g.create_dataset("R_px", data=np.asarray(r_axis, dtype=np.float64))
+    ds.attrs["units"] = "pixel"
+    ds = g.create_dataset("Q", data=np.asarray(axes["q_invA"], dtype=np.float64))
+    ds.attrs["units"] = "1/angstrom"
+    ds = g.create_dataset("TTH", data=np.asarray(axes["two_theta_deg"], dtype=np.float64))
+    ds.attrs["units"] = "degree"
+    ds.attrs["long_name"] = "2-theta"
+
+    ds = g.create_dataset("profiles", data=profiles, compression="gzip")
+    ds.attrs["units"] = "counts"
+    ds.attrs["long_name"] = "1-D lineout per frame"
+    ds = g.create_dataset("sigmas", data=sigmas, compression="gzip")
+    ds.attrs["units"] = "counts"
+    ds.attrs["long_name"] = "1-sigma uncertainty per bin"
+    return g
+
+
+def _backend_attrs(f, m, kernel, weighted, multi, n_frames, n_r, n_eta, params):
+    f.attrs["package"] = "midas_gui.cake_hdf5"
+    f.attrs["integrate_backend"] = "midas_integrate_v2"
+    f.attrs["integrate_backend_version"] = getattr(m, "__version__", "unknown")
+    f.attrs["timestamp_iso"] = datetime.now(timezone.utc).isoformat()
+    f.attrs["integrate_mode"] = kernel or "subpixel2"
+    if weighted is not None:
+        f.attrs["weighted"] = bool(weighted)
+    f.attrs["multi_azimuth"] = multi
+    f.attrs["n_frames"] = n_frames
+    f.attrs["n_r_bins"] = n_r
+    f.attrs["n_eta_bins"] = n_eta
+    for k, v in (params or {}).items():
+        f.attrs[k] = v
+
+
+def write_profiles_h5(path, *, profiles, sigmas, r_axis, frame_ids, lsd, px,
+                      wl, omegas=None, spec=None, kernel: Optional[str] = None,
+                      weighted: Optional[bool] = None,
+                      cake_params: Optional[dict] = None) -> Path:
+    """Write the plain 1-D (``(N, n_r)``) Batch Integrate HDF5 in the unified
+    layout described in the module docstring. Run info / provenance are
+    stamped afterwards by the caller (``workers.stamp_*``)."""
+    import h5py
+    import midas_integrate_v2 as m
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    profiles = np.asarray(profiles, dtype=np.float64)
+    if profiles.ndim != 2:
+        raise ValueError(f"profiles must be 2-D (N, n_r); got shape {profiles.shape}")
+    n_frames, n_r = profiles.shape
+    r_axis = np.asarray(r_axis, dtype=np.float64)
+    if r_axis.shape[0] != n_r:
+        raise ValueError(f"r_axis length {r_axis.shape[0]} != n_r {n_r}")
+    if sigmas is None:
+        sigmas = np.zeros_like(profiles)
+    sigmas = np.asarray(sigmas, dtype=np.float64)
+    if sigmas.shape != profiles.shape:
+        raise ValueError(f"sigmas shape {sigmas.shape} != profiles shape {profiles.shape}")
+    frame_ids = (list(frame_ids) if frame_ids is not None
+                 else [f"frame_{i:05d}" for i in range(n_frames)])
+    if len(frame_ids) != n_frames:
+        raise ValueError("frame_ids length must match profiles axis 0")
+    axes = radial_axes_from_r_px(r_axis, float(lsd), float(px), float(wl))
+    with h5py.File(path, "w") as f:
+        _backend_attrs(f, m, kernel, weighted, False, n_frames, n_r,
+                       getattr(spec, "n_eta_bins", 1), cake_params)
+        f.attrs["eta_collapsed"] = True
+        f.attrs["note"] = (
+            "profiles are the 1-D lineout eta-collapsed over "
+            "[EtaMin, EtaMax]; enable Multi-azimuth output to keep the "
+            "per-eta cake (entry/data/cake).")
+        _write_nx_core(f, profiles=profiles, sigmas=sigmas, frame_ids=frame_ids,
+                       r_axis=r_axis, axes=axes, omegas=omegas,
+                       n_frames=n_frames, signal_axes=["frame_index", "R_px"])
+    return path
 
 
 def write_cake_h5(path, *, cake, cake_sigma, r_axis, eta_axis, frame_ids,
@@ -38,7 +145,7 @@ def write_cake_h5(path, *, cake, cake_sigma, r_axis, eta_axis, frame_ids,
                   collapsed_profiles: Optional[np.ndarray] = None,
                   collapsed_sigmas: Optional[np.ndarray] = None,
                   omegas=None) -> Path:
-    """Write one flat HDF5 file holding every frame's cake plus a real 1-D
+    """Write one HDF5 file (unified layout, see module docstring) holding every frame's cake plus a real 1-D
     profile. Calibration/run provenance is NOT written here — the caller
     stamps it afterward via ``provenance.build_entry``/``stamp_h5_provenance``
     (see ``workers.py``), the same attrs-only mechanism used for every other
@@ -146,61 +253,24 @@ def write_cake_h5(path, *, cake, cake_sigma, r_axis, eta_axis, frame_ids,
             "midas_gui Batch Integrate multi-azimuth ('cake') output. "
             "Not a GSAS-II input file — see gsas_export.py / the Zarr "
             "export for that.")
-        f.attrs["package"] = "midas_gui.cake_hdf5"
-        f.attrs["integrate_backend"] = "midas_integrate_v2"
-        f.attrs["integrate_backend_version"] = getattr(m, "__version__", "unknown")
-        f.attrs["timestamp_iso"] = datetime.now(timezone.utc).isoformat()
-        f.attrs["integrate_mode"] = kernel or "subpixel2"
-        if weighted is not None:
-            f.attrs["weighted"] = bool(weighted)
-        f.attrs["multi_azimuth"] = True
-        f.attrs["n_frames"] = n_frames
-        f.attrs["n_r_bins"] = n_r
-        f.attrs["n_eta_bins"] = n_eta
-        for k, v in (cake_params or {}).items():
-            f.attrs[k] = v
+        _backend_attrs(f, m, kernel, weighted, True, n_frames, n_r, n_eta,
+                       cake_params)
+        g = _write_nx_core(
+            f, profiles=collapsed_profiles, sigmas=collapsed_sigmas,
+            frame_ids=frame_ids, r_axis=r_axis, axes=axes, omegas=omegas,
+            n_frames=n_frames, signal_axes=["frame_index", "R_px"])
+        g["profiles"].attrs["long_name"] = "engine-collapsed 1-D lineout per frame"
 
-        ds = f.create_dataset("frame_ids", data=np.array(list(frame_ids), dtype="S"))
-        ds.attrs["long_name"] = "frame identifier"
-
-        ds = f.create_dataset("r_px", data=r_axis)
-        ds.attrs["units"] = "pixel"
-        ds = f.create_dataset("two_theta_deg", data=axes["two_theta_deg"])
+        ds = g.create_dataset("eta_deg", data=np.asarray(eta_axis, dtype=np.float64))
         ds.attrs["units"] = "degree"
-        if "d_angstrom" in axes:
-            ds = f.create_dataset("d_angstrom", data=axes["d_angstrom"])
-            ds.attrs["units"] = "angstrom"
-            ds.attrs["note"] = "+inf at r_px=0 (2-theta=0)"
-            ds = f.create_dataset("q_invA", data=axes["q_invA"])
-            ds.attrs["units"] = "1/angstrom"
-
-        ds = f.create_dataset("eta_deg", data=np.asarray(eta_axis, dtype=np.float64))
-        ds.attrs["units"] = "degree"
-
-        if omegas is not None and len(omegas) == n_frames:
-            ds = f.create_dataset("omegas", data=np.asarray(omegas, dtype=np.float64))
-            ds.attrs["units"] = "degree"
-            ds.attrs["long_name"] = "rotation angle per frame"
-
-        ds = f.create_dataset("profiles", data=collapsed_profiles, compression="gzip")
-        ds.attrs["units"] = "counts"
-        ds.attrs["long_name"] = "engine-collapsed 1-D lineout per frame"
-        ds = f.create_dataset("sigmas", data=collapsed_sigmas, compression="gzip")
-        ds.attrs["units"] = "counts"
-        ds.attrs["long_name"] = "1-sigma uncertainty per bin"
-
-        ds = f.create_dataset("cake", data=cake_store, compression="gzip")
-        ds.attrs["units"] = "counts"
-        ds.attrs["axes"] = ["frame_index", "eta_deg", "r_px"]
-        ds.attrs["weighting"] = cake_weighting
-        ds = f.create_dataset("cake_sigma", data=cake_sigma_store, compression="gzip")
-        ds.attrs["units"] = "counts"
-        ds.attrs["axes"] = ["frame_index", "eta_deg", "r_px"]
-        ds.attrs["weighting"] = cake_weighting
-
+        for name, arr in (("cake", cake_store), ("cake_sigma", cake_sigma_store)):
+            ds = g.create_dataset(name, data=arr, compression="gzip")
+            ds.attrs["units"] = "counts"
+            ds.attrs["axes"] = ["frame_index", "eta_deg", "R_px"]
+            ds.attrs["weighting"] = cake_weighting
         if area is not None:
-            ds = f.create_dataset("bin_area", data=area, compression="gzip")
+            ds = g.create_dataset("bin_area", data=area, compression="gzip")
             ds.attrs["long_name"] = "per-bin pixel-count weight"
-            ds.attrs["axes"] = ["eta_deg", "r_px"]
+            ds.attrs["axes"] = ["eta_deg", "R_px"]
 
     return path

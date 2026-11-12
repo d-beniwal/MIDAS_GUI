@@ -1,8 +1,10 @@
 # Project state
 
-Last updated: 2026-11-11 (Batch combined-HDF5 audit; fixes uncommitted)
+Last updated: 2026-11-12 (unified Batch HDF5 layout; uncommitted)
 
 ## Now working on
+
+2026-11-12: **Batch HDF5 layout unified** — 1-D and multi-azimuth files both use `entry/data/{frame_ids,profiles,sigmas,R_px,Q,TTH,omegas}`; cake adds `cake,cake_sigma,eta_deg,bin_area` there; no root duplicates/soft links (DECISIONS 2026-11-12). Batch/HDF5 tests pass; **uncommitted, not live-checked in the GUI; old files keep the old layout.** Stale multi-azimuth HDF5 message removed from `tab_batch.py`.
 
 2026-11-11 (env): env files re-synced to the working env (requirements.txt was stale; pytest-forked added; midas-defect is 0.9.0). Open: orphan `imagecodecs` (numpy>=2.1 vs 1.26.4) — DECISIONS 2026-11-11.
 

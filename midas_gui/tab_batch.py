@@ -2874,11 +2874,6 @@ class BatchTab(QtWidgets.QWidget):
                         "(see the log for each).")
             else:
                 msg += f"\nSaved to: {self._out_ed.text().strip() or Path(out[0]).parent}"
-        if (self._last_run_inputs.get("multi_azimuth")
-                and "h5" in (self._last_run_inputs.get("fmt") or [])):
-            msg += ("\nNote: HDF5 wasn't written — it isn't supported in "
-                    "multi-azimuth mode (use the text formats or the Zarr/"
-                    "GSAS-II export instead).")
         self._log.append(msg)
         self._prog_lbl.setText(f"{'Aborted' if aborted else 'Complete'}: {n} frames")
         if n and data.get("r_axis_px") is not None and self._last_axis_ctx is not None:
