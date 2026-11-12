@@ -3,6 +3,12 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-11-12 — Batch Integrate: "Live plots" toggle; end=0 means "to the last frame"
+
+**Live plots:** with ~100k frames the per-frame waterfall/stacked-profile updates (and one log line per frame) hang the GUI. New checkbox `_live_plot_chk` just above Start Integration (default on, saved in GUI state): when off, `_on_frame` only records the frame id, and `_update_cake_stack` clears instead of building the cake view at the end. Integration and file outputs are unaffected. Gate is GUI-side, so it also covers parallel runs.
+**end=0:** the single-file HDF5 `source_cfg` passed `frame_end=0` through as an inclusive raw index, so start 0 / end 0 integrated one frame. Now `0 -> None` (unbounded), matching the multi-file branch. Consequence: raw index 0 can't be selected as an end bound alone.
+Tests: `tests/test_batch_live_plot_and_end0.py`. `test_batch_zarr_gsas.py::test_the_profile_resolves_a_hutch_the_path_cannot` fails identically without these changes (pre-existing). Not live-checked in the GUI.
+
 ## 2026-11-12 — Batch Integrate HDF5: one NeXus layout for 1-D and multi-azimuth
 
 User saw two different trees: the 1-D file (upstream `midas_integrate_v2.write_h5`) had `entry/data`, `entry/extra` AND root soft-links `Q`/`R_px`/`TTH`/`profiles`/`r_axis_px` (so every axis appeared twice, plus `r_px` vs `R_px` naming); the cake file (`write_cake_h5`) was flat at root with `q_invA`/`two_theta_deg`/`r_px`/`d_angstrom`/`eta_deg`.

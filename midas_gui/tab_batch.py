@@ -1167,6 +1167,7 @@ class BatchTab(QtWidgets.QWidget):
             "out_ed": self._out_ed,
             "run_mode": self._run_mode,
             "n_workers": self._n_workers,
+            "live_plot_chk": self._live_plot_chk,
         }
 
     def get_state(self) -> dict:
@@ -1852,6 +1853,15 @@ class BatchTab(QtWidgets.QWidget):
         lv.addWidget(run_mode_card)
 
         # ── Run ──
+        self._live_plot_chk = QtWidgets.QCheckBox(
+            "Live plots (waterfall / stacked profiles / cakes) while running")
+        self._live_plot_chk.setChecked(True)
+        self._live_plot_chk.setToolTip(
+            "Untick for very long runs (tens of thousands of frames): the "
+            "waterfall, stacked-profile and cake plots are not updated or "
+            "computed during the run, and the per-frame log lines are "
+            "skipped. Integration and all file outputs are unaffected.")
+        lv.addWidget(self._live_plot_chk)
         self._run_btn = S.primary_btn("Start Integration")
         self._run_btn.clicked.connect(self._run)
         self._abort_btn = QtWidgets.QPushButton("Abort")
@@ -2702,6 +2712,9 @@ class BatchTab(QtWidgets.QWidget):
         self._prog_lbl.setText(msg)
 
     def _on_frame(self, fid, r_ax, prof, sigma):
+        if not self._live_plot_chk.isChecked():
+            self._integrated_fids.add(str(fid))
+            return
         if not getattr(self, "_wf_started", False):
             self._waterfall.reset(r_ax)
             self._stack_view.reset(r_ax)
@@ -2916,6 +2929,9 @@ class BatchTab(QtWidgets.QWidget):
         profiles = data.get("profiles")
         eta_axis = data.get("eta_axis")
         r_axis = data.get("r_axis_px")
+        if not self._live_plot_chk.isChecked():
+            self._cake_stack_view.clear()
+            return
         if (profiles is None or np.asarray(profiles).ndim != 3
                 or eta_axis is None or r_axis is None):
             self._cake_stack_view.clear()

@@ -6191,7 +6191,9 @@ class DataLoaderPanel(QtWidgets.QWidget):
                 # no "0 = unbounded" sentinel is needed — see
                 # _autofill_frame_range).
                 cfg["frame_start"] = self._fr_start.value()
-                cfg["frame_end"] = self._fr_end.value()
+                # 0 = "to the last frame" (same sentinel as the multi-file
+                # branch); passing it through meant end=0 -> one frame.
+                cfg["frame_end"] = self._fr_end.value() or None
             return cfg
         paths = raw if isinstance(raw, list) else (_collect_frame_paths(raw) if raw else [])
         # Drop dark acquisitions swept in by a folder/stem selection (the
