@@ -126,7 +126,8 @@ def describe(req: DarkRequest) -> str:
             f"Dark: the Dark field for every file, forced — {which}")
 
 
-def resolve(file_path, req: DarkRequest, *, shape=None) -> DarkChoice:
+def resolve(file_path, req: DarkRequest, *, shape=None, cache=None,
+            load: bool = True) -> DarkChoice:
     """The dark for one input file.
 
     In explicit mode the sibling ladder is skipped entirely
@@ -139,18 +140,54 @@ def resolve(file_path, req: DarkRequest, *, shape=None) -> DarkChoice:
 
     if wants_auto(req):
         if req.search_root:
+            tree_why = None
             cands = tree_dark_candidates(file_path, req.search_root,
                                          exposure=req.exposure,
-                                         dataset=req.dataset)
+                                         dataset=req.dataset, cache=cache)
             for path, why in cands:
                 if path is None:
-                    return DarkChoice(
-                        None, f"{_skip_reason(file_path, req)} — {why}",
-                        "skipped")
+                    tree_why = why
+                    break
+                if vetoed(path, req.dataset, cache):
+                    continue
+                if not load:
+                    # The caller only needs to know WHICH file. Averaging
+                    # the stack here was 168 MB of NFS per job step, for
+                    # pixels a background-job builder immediately drops.
+                    return DarkChoice(None, why, source=str(path))
                 arr = _peek_shaped(path, req.dataset, shape)
                 if arr is not None:
                     return DarkChoice(arr, why, source=str(path))
-            return DarkChoice(None, _skip_reason(file_path, req), "skipped")
+
+            # The file's OWN dark, which the sibling search cannot see.
+            # Restores rung 2 of frame_correct.resolve_dark's ladder: the
+            # tree search replaced the whole ladder and silently dropped
+            # it. Two Varex dark workflows exist and they are the reverse
+            # of each other -- darks taken as separate exposures land in
+            # *_dark_before_* files and leave the scan's own data_dark
+            # all zeros, while darks taken INSIDE the scan (ndarks) land
+            # in the scan's own data_dark and write no separate file at
+            # all. Searching only for siblings refused 109 scans on
+            # mjohn_oct26 that each carried 10 real dark frames.
+            #
+            # No exposure check is needed or possible here: the darks are
+            # in the same file as the data, so they are at the data's
+            # exposure by construction. An all-zero placeholder -- the
+            # other workflow's signature -- is rejected by
+            # is_degenerate_dark, so this cannot resurrect those.
+            own = _peek_shaped(file_path, req.dataset, shape)
+            if own is not None and not has_structure(own):
+                why_own = (f"own {req.dataset} in "
+                           f"{os.path.basename(str(file_path))} "
+                           f"(darks taken inside the scan)")
+                return DarkChoice(own if load else None, why_own,
+                                  source=str(file_path))
+            return DarkChoice(
+                None,
+                f"{_skip_reason(file_path, req)}"
+                + (f" — {tree_why}" if tree_why else "")
+                + "; its own " + req.dataset + " is not a usable dark either",
+                "skipped")
         arr, why = resolve_dark(file_path, dark_dataset=req.dataset,
                                 shape=shape, fallback=None, auto=True)
         if arr is None:
@@ -171,7 +208,7 @@ EXPOSURE_RTOL = 0.01
 
 
 def tree_dark_candidates(data_path, root, *, exposure=None, dataset=
-                         "exchange/data_dark") -> list:
+                         "exchange/data_dark", cache=None) -> list:
     """Dark files anywhere under ``root``, best first, for ``data_path``.
 
     The tree generalisation of ``frame_correct.dark_candidates``, which
@@ -192,16 +229,95 @@ def tree_dark_candidates(data_path, root, *, exposure=None, dataset=
     Returns ``[(path, why)]``.
     """
     import os as _os
-    from midas_gui.frame_correct import (acquisition_exposure, split_scan_name,
-                                         has_diffraction_structure)
+    from midas_gui.frame_correct import split_scan_name
+
+    usable, rejected = survey_tree(root, exposure=exposure, dataset=dataset,
+                                   cache=cache)
+    num = split_scan_name(_os.path.basename(str(data_path))).num
+    ranked = []
+    for full, name, cand in usable:
+        if full == str(data_path):
+            continue
+        if cand is None or num is None:
+            direction, dist = 2, 10 ** 9
+        elif cand <= num:
+            direction, dist = 0, num - cand            # measured before it
+        else:
+            direction, dist = 1, cand - num            # measured after it
+        ranked.append(((direction, dist, full), full, name))
+    ranked.sort(key=lambda row: row[0])
+    out = [(full, f"{'preceding' if d == 0 else 'following' if d == 1 else 'unnumbered'}"
+            f" dark {name} ({dist} scans away)")
+           for (d, dist, _f), full, name in ranked]
+    return out or [(None, _why_none(rejected))]
+
+
+def has_structure(arr) -> bool:
+    """Does this plane look like diffraction rather than a dark?
+
+    Thin wrapper so the own-dark path and the sibling path apply the
+    same veto without the sibling path's per-file memoisation.
+    """
+    from midas_gui.frame_correct import has_diffraction_structure
+    return bool(has_diffraction_structure(arr))
+
+
+def vetoed(path, dataset, cache=None) -> bool:
+    """Does this candidate's dark plane carry diffraction?
+
+    Applied to the candidate actually chosen, not to every candidate --
+    it needs pixels, and reading all of them is what made an eager
+    version unusable. Memoised per path, since one dark serves many
+    scans.
+    """
+    from midas_gui.frame_correct import has_diffraction_structure
+    if cache is not None and ("veto", path) in cache:
+        return cache[("veto", path)]
+    arr = _peek(path, dataset)
+    bad = bool(arr is not None and has_diffraction_structure(arr))
+    if cache is not None:
+        cache[("veto", path)] = bad
+    return bad
+
+
+def survey_tree(root, *, exposure=None, dataset="exchange/data_dark",
+                cache=None) -> tuple:
+    """``([(path, name, scan_number)], [(path, why_rejected)])`` for ``root``.
+
+    The expensive half of the search, split out so it can be done ONCE
+    per (root, exposure) instead of once per job step. It walks the tree,
+    opens every dark candidate to read its exposure scalar -- identical
+    for every scan sharing a root and an exposure. Done per step it was
+    760 tree walks over NFS for a 190-scan four-panel job, i.e. the GUI
+    blocked for minutes at curation.
+
+    It does NOT run the diffraction veto. Doing that here looked tidy
+    and was much worse: the veto needs pixels, and averaging every
+    candidate's full dark stack (10 x 2048^2 = 168 MB apiece) turned a
+    directory walk into gigabytes of NFS reads. The veto is applied
+    lazily to the candidate actually chosen, which is one read, not
+    thirteen.
+
+    The ranking stays per-step: it depends on the data file's own scan
+    number, and it is arithmetic on an in-memory list.
+
+    ``cache`` is a caller-owned dict, so its lifetime is the caller's. A
+    job builder wants one snapshot of the tree for the whole submission;
+    a longer-lived cache would go stale when a dark is acquired.
+    """
+    import os as _os
+    from midas_gui.frame_correct import acquisition_exposure, split_scan_name
     from midas_gui.helpers import is_dark_like_name, is_h5
 
-    num = split_scan_name(_os.path.basename(str(data_path))).num
-    ranked, rejected = [], []
+    key = (str(root), exposure, dataset)
+    if cache is not None and key in cache:
+        return cache[key]
+
+    usable, rejected = [], []
     for dirpath, _dirs, files in _os.walk(str(root)):
-        for name in files:
+        for name in sorted(files):
             full = _os.path.join(dirpath, name)
-            if full == str(data_path) or not is_h5(full):
+            if not is_h5(full):
                 continue
             if not (is_dark_like_name(name) or is_dark_like_name(dirpath)):
                 continue
@@ -211,26 +327,11 @@ def tree_dark_candidates(data_path, root, *, exposure=None, dataset=
                         abs(exposure), 1e-9):
                     rejected.append((full, f"exposure {got}s != {exposure}s"))
                     continue
-            cand = split_scan_name(name).num
-            if cand is None or num is None:
-                direction, dist = 2, 10 ** 9
-            elif cand <= num:
-                direction, dist = 0, num - cand        # measured before it
-            else:
-                direction, dist = 1, cand - num        # measured after it
-            ranked.append(((direction, dist, full), full, name))
-    ranked.sort(key=lambda row: row[0])
-
-    out = []
-    for (direction, dist, _f), full, name in ranked:
-        arr = _peek(full, dataset)
-        if arr is not None and has_diffraction_structure(arr):
-            rejected.append((full, "frames show diffraction, not a dark"))
-            continue
-        when = ("preceding" if direction == 0 else
-                "following" if direction == 1 else "unnumbered")
-        out.append((full, f"{when} dark {name} ({dist} scans away)"))
-    return out or [(None, _why_none(rejected))]
+            usable.append((full, name, split_scan_name(name).num))
+    result = (usable, rejected)
+    if cache is not None:
+        cache[key] = result
+    return result
 
 
 def _peek_shaped(path, dataset, shape):
@@ -239,8 +340,22 @@ def _peek_shaped(path, dataset, shape):
 
 
 def _peek(path, dataset):
-    from midas_gui.frame_correct import _mean_dark
-    return _mean_dark(path, dataset, None)
+    """ONE frame, for the diffraction veto.
+
+    Not the stack mean. The veto asks whether the plane has rings, which
+    one frame answers as well as ten -- and averaging a 10 x 2048^2 dark
+    is 168 MB of NFS per candidate.
+    """
+    try:
+        import h5py
+        import numpy as _np
+        with h5py.File(str(path), "r") as f:
+            d = f.get(dataset)
+            if d is None or getattr(d, "shape", None) is None or not d.shape:
+                return None
+            return _np.asarray(d[0] if d.ndim >= 3 else d[...], dtype="float32")
+    except Exception:
+        return None
 
 
 def _why_none(rejected) -> str:
@@ -312,59 +427,72 @@ def panel_dark_path(anchor, n) -> tuple:
     return cand, f"{panel_token(n)} dark derived from the anchor: {cand}"
 
 
-class DarkTiffCache:
-    """Resolve a dark per job step and write one TIFF per DISTINCT dark.
+class DarkArgBuilder:
+    """``--dark`` arguments for background-job steps, with no copying.
 
-    A background job hands its dark across the process boundary as a
-    pre-averaged TIFF. Resolving per step means many steps, but not many
-    DARKS: a 190-scan four-panel run has at most a handful of distinct
-    darks between them, and writing one 16 MB file per (scan, panel)
-    would put ~12 GB of near-identical copies on a beamline share.
+    Was ``DarkTiffCache``, which wrote each resolved dark out as a
+    pre-averaged TIFF. That cost 17 MB per step written during curation
+    -- 816 MB and a visibly blocked GUI before a 48-step job launched --
+    to duplicate a file already sitting on disk. The job can read the
+    original: ``batch_cli --dark <source.h5> --dark-dataset <path>``.
 
-    Lives here, rather than inline in each tab, because both the Hydra
-    and single-detector job builders need exactly this and a second copy
-    is how two code paths start answering the dark question differently
-    -- the bug this whole module exists to prevent.
+    A TIFF is still written for the one case with no source file behind
+    it: an explicitly chosen Dark field, which reaches us as an array.
+    That is one file per panel, not one per step.
     """
 
     def __init__(self, out_dir, prefix: str = "_bg_job_dark"):
         self._dir = out_dir
         self._prefix = prefix
-        self._by_dark: dict = {}
+        self._explicit: dict = {}
+        self._tree: dict = {}     # (root, exposure, dataset) -> survey
         self.skipped: list = []
 
     def written(self) -> int:
-        """How many TIFFs were actually written — the dedupe, measurable."""
-        return len(self._by_dark)
+        """TIFFs actually written — zero whenever every dark resolved to
+        a real file, which is the normal autodetect case."""
+        return len(self._explicit)
 
-    def arg_for(self, probe, request, *, fallback=None, tag: str = ""):
-        """``["--dark", path]`` for one step.
+    def arg_for(self, probe, request, *, tag: str = ""):
+        """``["--dark", path, "--dark-dataset", ds]`` for one step.
 
-        Returns ``[]`` when the step legitimately has no dark (explicit
-        mode with nothing chosen), and ``None`` when it could not be
-        resolved — the caller must then drop that step and report it,
-        never fall back to another scan's dark.
+        ``[]`` when the step legitimately has no dark; ``None`` when it
+        could not be resolved, in which case the caller must DROP the
+        step -- never substitute another scan's dark.
         """
-        import numpy as _np
-        import tifffile as _tiff
-        from midas_gui.frame_correct import acquisition_exposure
         import dataclasses
+        from midas_gui.frame_correct import acquisition_exposure
         req = dataclasses.replace(request, exposure=acquisition_exposure(probe))
-        choice = resolve(probe, req)
+        # load=False: in auto mode we hand the job the dark's PATH, so
+        # reading its pixels here would be pure waste.
+        choice = resolve(probe, req, cache=self._tree,
+                         load=not wants_auto(req))
         if choice.skipped:
             self.skipped.append((str(probe), choice.why))
             return None
-        if choice.array is None:
+        src = choice.source
+        if choice.array is None and not (wants_auto(req) and src
+                                         and os.path.isfile(src)):
             return []
-        # Keyed on the resolved SOURCE, not on `why`: why is prose and
-        # embeds a per-step distance, so it identifies nothing. Keying on
-        # it wrote one TIFF per step rather than one per dark.
-        key = (tag, choice.source or choice.why)
-        path = self._by_dark.get(key)
+        # Only in AUTO mode. An explicitly chosen Dark field may carry a
+        # frame-range the user set on it, and the array we were handed
+        # already honours that -- re-reading the whole stack from the
+        # path would quietly ignore it.
+        if wants_auto(req) and src and os.path.isfile(src):
+            return ["--dark", str(src), "--dark-dataset", req.dataset]
+        # No file behind it: the loader's own Dark field. One TIFF per
+        # tag, written once.
+        path = self._explicit.get(tag)
         if path is None:
-            name = f"{self._prefix}{('_' + tag) if tag else ''}" \
-                   f"_{len(self._by_dark):03d}.tif"
+            import numpy as _np
+            import tifffile as _tiff
+            name = f"{self._prefix}{('_' + tag) if tag else ''}.tif"
             path = self._dir / name
-            _tiff.imwrite(str(path), _np.asarray(choice.array, dtype=_np.float32))
-            self._by_dark[key] = path
+            _tiff.imwrite(str(path),
+                          _np.asarray(choice.array, dtype=_np.float32))
+            self._explicit[tag] = path
         return ["--dark", str(path)]
+
+
+#: Old name, kept so nothing breaks mid-edit.
+DarkTiffCache = DarkArgBuilder

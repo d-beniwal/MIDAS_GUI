@@ -261,3 +261,112 @@ def test_zoom_lock_captures_and_clears_the_view(tab, zarr_fixture):
     tab._zoom_lock.setChecked(False)
     assert tab._zoom_lock_xlim is None
     assert tab._zoom_lock_ylim is None
+
+
+# ── eta rows are drawn at their real height ─────────────────────────────
+
+def test_sparse_eta_rows_are_not_stretched_to_fill_the_gaps():
+    """Found on a real four-panel run at 1-ID-E.
+
+    pcolormesh treats coordinates as cell CENTRES and infers edges from
+    the spacing. Four panels caked 10 deg wide but centred 90 deg apart
+    were therefore drawn as four 90-deg bands: the eta axis ran -225 to
+    +135, and the picture claimed nine times the azimuthal coverage
+    actually collected. An axis reading -220 deg on a detector spanning
+    +-180 is how it was noticed.
+    """
+    import matplotlib
+    matplotlib.use("Agg", force=True)
+    import matplotlib.colors as mcolors
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from midas_gui.tab_zarrviewer import _draw_eta_bands
+
+    eta = np.array([-180.0, -90.0, 0.0, 90.0])
+    x = np.linspace(2.0, 10.0, 64)
+    z = np.random.default_rng(0).random((4, 64))
+    norm = mcolors.Normalize(0, 1)
+
+    fig = plt.figure(); ax = fig.add_subplot(111)
+    _draw_eta_bands(ax, x, eta, z, None, cmap="viridis", norm=norm)
+    lo, hi = ax.get_ylim()
+    assert lo < -200, "the old behaviour should still infer 90-deg cells"
+    plt.close(fig)
+
+    fig = plt.figure(); ax = fig.add_subplot(111)
+    _draw_eta_bands(ax, x, eta, z, 10.0, cmap="viridis", norm=norm)
+    lo, hi = ax.get_ylim()
+    assert lo > -200 and hi < 120, f"eta axis {lo}..{hi} still stretched"
+    assert lo < -185 and hi > 95, "the bands themselves must stay visible"
+    plt.close(fig)
+
+
+def test_a_contiguous_caking_still_takes_the_single_quadmesh_path():
+    """35 rows 10 deg apart and 10 deg wide ARE contiguous; drawing them
+    one at a time would be correct but much slower, so the fast path has
+    to survive."""
+    import matplotlib
+    matplotlib.use("Agg", force=True)
+    import matplotlib.colors as mcolors
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from midas_gui.tab_zarrviewer import _draw_eta_bands
+
+    eta = np.arange(-175.0, 176.0, 10.0)
+    x = np.linspace(2.0, 10.0, 32)
+    z = np.zeros((eta.size, 32))
+    fig = plt.figure(); ax = fig.add_subplot(111)
+    _draw_eta_bands(ax, x, eta, z, 10.0, cmap="viridis",
+                    norm=mcolors.Normalize(0, 1))
+    assert len(ax.collections) == 1, "contiguous rows were drawn one by one"
+    plt.close(fig)
+
+
+def test_pack_eta_closes_the_gaps_but_labels_the_real_angles():
+    """Requested after the band fix: four 10-deg rows spread over 300 deg
+    leaves the data too thin to read.
+
+    Packing is only safe if the axis stops claiming to be linear in eta,
+    so the rows carry their own angles as ticks and the label says the
+    gaps were removed. A packed axis still labelled plain "Eta (deg)"
+    would be the same lie as the stretched bands, in the other direction.
+    """
+    import matplotlib
+    matplotlib.use("Agg", force=True)
+    import matplotlib.colors as mcolors
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from midas_gui.tab_zarrviewer import _draw_eta_bands
+
+    eta = np.array([-180.0, -90.0, 0.0, 90.0])
+    x = np.linspace(2.0, 10.0, 48)
+    z = np.zeros((4, 48))
+    fig = plt.figure(); ax = fig.add_subplot(111)
+    _im, label = _draw_eta_bands(ax, x, eta, z, 10.0, cmap="viridis",
+                                 norm=mcolors.Normalize(0, 1), pack=True)
+    lo, hi = ax.get_ylim()
+    assert hi - lo < 6, "rows were not packed"
+    assert [t.get_text() for t in ax.get_yticklabels()] == \
+        ["-180", "-90", "0", "90"]
+    assert label and "packed" in label
+    plt.close(fig)
+
+
+def test_pack_eta_does_nothing_to_a_contiguous_caking():
+    """There are no gaps to close, so packing must not silently relabel a
+    perfectly good linear axis."""
+    import matplotlib
+    matplotlib.use("Agg", force=True)
+    import matplotlib.colors as mcolors
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from midas_gui.tab_zarrviewer import _draw_eta_bands
+
+    eta = np.arange(-175.0, 176.0, 10.0)
+    x = np.linspace(2.0, 10.0, 32)
+    fig = plt.figure(); ax = fig.add_subplot(111)
+    _im, label = _draw_eta_bands(ax, x, eta, np.zeros((eta.size, 32)), 10.0,
+                                 cmap="viridis",
+                                 norm=mcolors.Normalize(0, 1), pack=True)
+    assert label is None, "a contiguous caking was relabelled as packed"
+    plt.close(fig)

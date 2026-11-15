@@ -46,7 +46,8 @@ from midas_gui.helpers import (
     _apply_im_trans)
 from midas_gui.widgets import (PickableImageViewer, LogPanel, CakeViewer, _convert_radial,
                                OriginToolButton, RadialThresholdEditor)
-from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar, HydraProfileViewer
+from midas_gui.hydra_widgets import (HydraLoaderPanel, HydraDetectorToolbar,
+                                      HydraProfileViewer, in_scroll_area)
 from midas_gui.hydra_calib_widgets import HydraCalibPanelCard
 from midas_gui.workers import CalibrationWorker, IntegrationWorker
 from midas_gui.dialogs import (DistortionRefineDialog, _SaveParamstestDialog,
@@ -274,11 +275,10 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._from_view_btn.clicked.connect(self.pullFromViewer.emit)
         ll.addWidget(self._from_view_btn)
         self._loader = HydraLoaderPanel()
-        self._loader.setMinimumWidth(200)
         self._loader.siblingsChanged.connect(self._on_siblings_changed)
         self._loader.frameChanged.connect(self._on_frame_changed)
         self._loader.fieldsChanged.connect(self._on_fields_changed)
-        ll.addWidget(self._loader, 1)
+        ll.addWidget(in_scroll_area(self._loader), 1)
         split.addWidget(left)
 
         # ── MIDDLE: shared "recipe" cards + per-panel card stack ──
@@ -406,17 +406,6 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         for w in (self._avg_start, self._avg_end):
             w.valueChanged.connect(self._on_avg_changed)
         lv.addWidget(avgc)
-
-        # Always-visible seed-status banner — unlike each card's own seed
-        # summary (only visible for whichever one panel is currently shown),
-        # this reflects the shared seed-enable state across all 4 panels
-        # (mirrored by _sync_seed_checkbox) so it's never necessary to open
-        # the Manual seed… dialog, or switch panels, just to see whether a
-        # manual seed is about to be used in the next Run All.
-        self._seed_status_lbl = QtWidgets.QLabel("Seed: automatic")
-        self._seed_status_lbl.setWordWrap(True)
-        lv.addWidget(self._seed_status_lbl)
-
         # Which panels are in play, what tx each will use, and which one is
         # running. Asked for at the beamline in one breath: "it is unclear
         # what parameters are dedicated to each GE panel ... which panel is
@@ -428,6 +417,18 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._panels_lbl.setTextFormat(QtCore.Qt.RichText)
         self._panels_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px;")
         lv.addWidget(self._panels_lbl)
+
+
+        # Always-visible seed-status banner — unlike each card's own seed
+        # summary (only visible for whichever one panel is currently shown),
+        # this reflects the shared seed-enable state across all 4 panels
+        # (mirrored by _sync_seed_checkbox) so it's never necessary to open
+        # the Manual seed… dialog, or switch panels, just to see whether a
+        # manual seed is about to be used in the next Run All.
+        self._seed_status_lbl = QtWidgets.QLabel("Seed: automatic")
+        self._seed_status_lbl.setWordWrap(True)
+        lv.addWidget(self._seed_status_lbl)
+
 
         # Per-panel: Transforms + Initial seed, switched with the active
         # panel — positioned here (between Mean of frames and Refine
@@ -453,9 +454,9 @@ class HydraCalibrationPage(QtWidgets.QWidget):
                         "_seed_en_ty", "_seed_en_tz"):
                 getattr(card, attr).toggled.connect(
                     lambda checked, n=n, a=attr: self._sync_seed_checkbox(a, n, checked, block=False))
-            card.seedStateChanged.connect(self._refresh_seed_status)
             card._seed_tx.valueChanged.connect(lambda *_: self._update_panels_overview())
             card._seed_en_tx.toggled.connect(lambda *_: self._update_panels_overview())
+            card.seedStateChanged.connect(self._refresh_seed_status)
             self._cards[n] = card
             self._card_stack.addWidget(card)
         self._refresh_seed_status()
@@ -608,6 +609,19 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._pipeline.currentIndexChanged.connect(self._update_limits_note)
         refc.body.addLayout(rfl_bottom)
         lv.addWidget(refc)
+
+        # Let each Manual seed row say what the fit will actually do with
+        # that parameter. Deliberately AFTER the Refine card is built:
+        # upstream moved the per-panel stack ABOVE it, so self._ref_* do
+        # not exist yet while the cards are being constructed. Still
+        # one-way -- seeding and refining are separate decisions (seeding
+        # something you do NOT refine is how you pin tx to a measured
+        # value, which is exactly what tx is for here).
+        for _card in self._cards.values():
+            _card._seed_dialog.set_refine_boxes(
+                {"BC": self._ref_bc, "Lsd": self._ref_lsd, "tx": self._ref_tx,
+                 "ty": self._ref_ty, "tz": self._ref_tz,
+                 "Distortion": self._ref_dist})
         self._update_dist_label()
         self._update_limits_note()
 

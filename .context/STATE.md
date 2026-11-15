@@ -1,8 +1,10 @@
 # Project state
 
-Last updated: 2026-11-12 (unified Batch HDF5 layout; uncommitted)
+Last updated: 2026-11-15 (merged jsp PR #13)
 
 ## Now working on
+
+2026-11-15: **Merged jsp's PR #13** (dark resolution, Hydra cake-CSV/loader, Zarr Viewer Pack eta, thread-walk shutdown; DECISIONS 2026-11-15). Full suite per-file: only the 9 pre-existing failing files fail, identically to main. **Not live-checked:** real Varex in-scan darks, single-file background job, Hydra Composite CSV, close-mid-run.
 
 2026-11-12 (later): Batch Integrate **"Live plots" checkbox** (off = no waterfall/stack/cake/log updates during run, for 100k-frame jobs) and **end=0 now = to last frame** for single-file HDF5 (DECISIONS 2026-11-12). Tested offscreen; **uncommitted, not live-checked.**
 
