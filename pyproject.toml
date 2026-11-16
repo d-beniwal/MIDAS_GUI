@@ -255,3 +255,9 @@ testpaths = ["tests"]
 # exist — which is every fresh clone and every CI run, since `.scratch/`
 # is gitignored. `.scratch` alone is created fine.
 addopts = "-ra -q --basetemp=.scratch"
+# ``forked`` is provided by pytest-forked. That plugin is not installed in the
+# dev env on purpose: 1.7.5 cannot serialise pytest 9 reports, and forking a
+# process that already holds Qt/pyqtgraph state segfaults the children (see
+# .context/DECISIONS.md 2026-11-15), so the mark is inert here. Registering it
+# keeps the 78 files that carry it from emitting PytestUnknownMarkWarning.
+markers = ["forked: run in a forked subprocess (inert unless pytest-forked is installed)"]

@@ -110,9 +110,9 @@ def test_on_profile_changed_refreshes_devices_and_calibrants(monkeypatch):
     new_devices = [{"name": "newDevice", "prefix": "new:", "pva_suffix": "Pva1:Image"}]
     monkeypatch.setattr(W, "DEVICES", new_devices)
     monkeypatch.setattr(C, "CALIBRANTS", ["OnlyThisCalibrant"])
-    import midas_gui.tab_calibrate as tab_calibrate_mod
+    # tab_calibrate reads the list through constants.calibrant_combo_items(),
+    # so patching constants is enough; hydra_calib_page binds the name itself.
     import midas_gui.hydra_calib_page as hydra_calib_page_mod
-    monkeypatch.setattr(tab_calibrate_mod, "CALIBRANTS", C.CALIBRANTS)
     monkeypatch.setattr(hydra_calib_page_mod, "CALIBRANTS", C.CALIBRANTS)
 
     win.on_profile_changed()

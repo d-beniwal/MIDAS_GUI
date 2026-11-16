@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from pathlib import Path
 
 from midas_gui import ion_csv as IC
 
@@ -187,8 +188,9 @@ def test_no_dark_block_means_no_dark_row(tmp_path):
                                 n_light=2, n_dark=0)
     assert [r.get("kind") for r in rows] == ["chunk"]
     out = IC.write_ion_csv(tmp_path / "m.csv", rows)
-    assert open(out).readline().strip() == \
-        "kind,source_file,frame_start,frame_end,E:US_IC"
+    with open(out) as fh:
+        header = fh.readline().strip()
+    assert header == "kind,source_file,frame_start,frame_end,E:US_IC"
 
 
 def test_the_dark_row_leads_the_file(tmp_path):
@@ -297,7 +299,7 @@ def test_both_tabs_sidecars_are_the_same_file_but_for_the_name(tmp_path):
     bi, _ = IC.rows_from_tree(tree, "E", **args)      # Batch Integrate's route
     a = IC.write_ion_csv(tmp_path / ("x" + IC.SUFFIX_BATCH_CORRECTION), bc)
     b = IC.write_ion_csv(tmp_path / ("x" + IC.SUFFIX_BATCH_INTEGRATE), bi)
-    assert open(a).read() == open(b).read()
+    assert Path(a).read_text() == Path(b).read_text()
     assert str(a).endswith("_bc.csv") and str(b).endswith("_bi.csv")
 
 

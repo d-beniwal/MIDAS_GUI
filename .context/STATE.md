@@ -1,8 +1,10 @@
 # Project state
 
-Last updated: 2026-11-15 (hygiene pass, uncommitted)
+Last updated: 2026-11-15 (hygiene pass + test audit)
 
 ## Now working on
+
+2026-11-15 (test audit): full suite per-file = **3383 passed / 10 skipped / 0 failed** (was 11 failing files; all were stale tests, not product bugs). `pytest-forked` intentionally NOT installed (breaks on pytest 9 + segfaults Qt children; DECISIONS 2026-11-15). **Open:** Batch Integrate runs K=2 at resonant R bins (SubpixelResonanceWarning) unlike the Data Viewer, which swaps to polygon; the `pytest-forked` pins in the env files are misleading.
 
 2026-11-15 (later): **Code-hygiene pass** (uncommitted): fixed 2 latent NameErrors + missing `Optional`, removed ~60 unused imports and 17 dead functions (DECISIONS 2026-11-15). Per-file tests match clean HEAD. Big-module splits (`widgets.py`, `workers.py`) not attempted.
 

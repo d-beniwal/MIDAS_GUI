@@ -374,7 +374,11 @@ def test_hydra_composite_builds_with_matched_calibration(app, fixture_available)
     for key in ("ge1", "ge3", "ge4", "composite"):
         c = hp._cards[key]
         assert c._wl.value() == pytest.approx(new_wl)
-        assert c._px.value() == pytest.approx(new_px)
+        # The composite's px is panel_px * COMPOSITE_DISPLAY_STEP (a built
+        # pixel spans STEP detector pixels), so px is mirrored to the panels
+        # only; the composite is re-seeded from them instead.
+        expected_px = new_px * STEP if key == "composite" else new_px
+        assert c._px.value() == pytest.approx(expected_px)
         assert c._n_rings.value() == new_n_rings
 
 

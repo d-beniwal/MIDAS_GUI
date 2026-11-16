@@ -808,7 +808,7 @@ def test_the_overlay_follows_whichever_geometry_is_current(app):
     # on screen described a geometry that has just been replaced.
     tab._seed_ty.setValue(-82.0)
     assert "from the seed" in tab._ring_status.text()
-    assert _ring_extents(tab) != pytest.approx(rendered, rel=1e-9)
+    assert np.asarray(_ring_extents(tab)) != pytest.approx(np.asarray(rendered), rel=1e-9)
 
 
 def test_fitted_tilt_reaches_the_overlay_with_the_seed_card_on(app):

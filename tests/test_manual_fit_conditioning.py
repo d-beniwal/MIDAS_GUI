@@ -132,8 +132,14 @@ def test_tilt_is_reported_as_unconstrained_at_this_geometry():
                                        seed=(LSD_UM, BC_Y + 3, BC_Z - 3),
                                        refine=_LSD_BC_TILT)
     assert fit["success"]
-    assert fit["sigma"]["ty"] > 10.0        # degrees — nonsense, and says so
-    assert fit["sigma"]["tz"] > 10.0
+    # Degrees. Across seeds 1-5 (1 px pick noise) the reported sigma is
+    # ~0.7-6 deg, versus ~0.003 deg for noise-free picks and a normal tilt
+    # precision far below 0.1 deg. The exact value shifts with the
+    # scipy/BLAS stack (the earlier ``> 10`` bound did not survive scipy
+    # 1.17), so assert "orders of magnitude worse than a usable tilt"
+    # rather than a specific number.
+    assert fit["sigma"]["ty"] > 0.5         # nonsense, and says so
+    assert fit["sigma"]["tz"] > 0.5
     # ...even though the residual looks perfectly healthy.
     assert fit["residual_deg_rms"] < 1e-3
 

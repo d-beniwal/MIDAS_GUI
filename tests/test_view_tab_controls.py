@@ -75,6 +75,14 @@ def _kernels(card):
     return sorted({sig[_SIG_KERNEL] for sig in card._calib_ctx_cache})
 
 
+def _accurate_kernel_at(r_bin):
+    """The "accurate" kernel the card actually runs at this R bin: K=2 is
+    swapped for the exact polygon kernel at a sampling-resonant width (see
+    ``DetectorGeometryCard._midas_radial``); 1.0 and 2.0 px are both resonant."""
+    from midas_integrate_v2.binning.subpixel import resonant_bin_width
+    return "polygon" if resonant_bin_width(2, r_bin) is not None else ACCURATE_KERNEL
+
+
 # ── 1) Send / Get geometry ───────────────────────────────────────────
 
 def test_geometry_row_has_both_a_send_and_a_get_button(tab):
@@ -128,7 +136,7 @@ def test_accurate_forces_the_subpixel_engine_even_with_no_tilt(framed):
     framed._rad_accurate.setChecked(True)
     card._calib_ctx_cache.clear()
     card.radial_integrate()
-    assert _kernels(card) == [ACCURATE_KERNEL]
+    assert _kernels(card) == [_accurate_kernel_at(framed._rad_r_bin.value())]
     r_ax, prof = framed._profile_view._curve.getData()
     assert r_ax[int(np.nanargmax(prof))] == pytest.approx(30.0, abs=1.5)
 
@@ -143,7 +151,7 @@ def test_toggling_accurate_reintegrates_when_auto_is_on(framed):
     framed._rad_auto.setChecked(True)
     card._calib_ctx_cache.clear()
     framed._rad_accurate.setChecked(True)
-    assert _kernels(card) == [ACCURATE_KERNEL]
+    assert _kernels(card) == [_accurate_kernel_at(framed._rad_r_bin.value())]
     framed._rad_auto.setChecked(False)
 
 
@@ -156,7 +164,7 @@ def test_cake_uses_its_own_bin_sizes_and_the_subpixel_engine(framed):
     card._calib_ctx_cache.clear()
     card.cake_integrate()
     sigs = list(card._calib_ctx_cache)
-    assert [s[_SIG_KERNEL] for s in sigs] == [ACCURATE_KERNEL]
+    assert [s[_SIG_KERNEL] for s in sigs] == [_accurate_kernel_at(2.0)]
     assert [(s[_SIG_R_BIN], s[_SIG_ETA_BIN]) for s in sigs] == [(2.0, 10.0)]
     cv = framed._cake_view
     assert cv._cake.shape == (len(cv._eta_axis), len(cv._r_axis))

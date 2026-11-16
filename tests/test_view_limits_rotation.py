@@ -90,7 +90,7 @@ def test_unrotating_restores_the_plain_limits(viewer):
     before = _limits(viewer)
     viewer.set_lab_rotation(TX, BCY, BCZ)
     viewer.set_lab_rotation(0.0, BCY, BCZ)
-    assert _limits(viewer) == pytest.approx(before)
+    assert np.asarray(_limits(viewer)) == pytest.approx(np.asarray(before))
 
 
 def test_a_new_frame_does_not_undo_the_rotated_limits(viewer):

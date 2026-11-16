@@ -27,6 +27,14 @@ def _settle(app, n=30):
         app.processEvents()
 
 
+def _wait_until(app, cond, timeout_s=3.0):
+    import time
+    end = time.time() + timeout_s
+    while not cond() and time.time() < end:
+        app.processEvents()
+        time.sleep(0.02)
+
+
 def _toggles(tab, key):
     """The splitter + PanelToggles with this key (a tab may also host a Hydra
     page whose own, hidden, splitter carries a different key)."""
@@ -117,6 +125,10 @@ def test_hydra_minimize_restore_and_persist(app, isolated_settings, name):
     split, pt = _toggles(page, name)
     from midas_gui.panel_toggle import _content_width, _MAX_AUTO_MIN
     need = min(_content_width(pt._panel("controls")), _MAX_AUTO_MIN)
+    # PanelToggles re-checks content width on a 1 s timer while visible, and
+    # some Hydra pages widen after first layout, so wait on the condition
+    # (bounded) instead of a fixed number of event-loop passes.
+    _wait_until(app, lambda: split.sizes()[1] >= need)
     assert split.sizes()[1] >= need
 
     before = split.sizes()

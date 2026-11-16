@@ -213,9 +213,12 @@ def _save(tmp_path, n_frames=3, **kw):
 
 
 def _omegas_in_h5(path):
+    """``omegas`` lives in the unified NeXus group ``entry/data`` (layout
+    unified 2026-11-12; see ``cake_hdf5._write_nx_core``)."""
     with h5py.File(path, "r") as f:
-        key = next((k for k in f if k.lower() == "omegas"), None)
-        return None if key is None else np.asarray(f[key]).ravel().tolist()
+        grp = f["entry/data"]
+        key = next((k for k in grp if k.lower() == "omegas"), None)
+        return None if key is None else np.asarray(grp[key]).ravel().tolist()
 
 
 def test_save_writes_the_omegas_it_was_given(tmp_path):

@@ -70,16 +70,23 @@ def test_an_unknown_unit_is_rejected_by_the_parser():
 
 # ── the GUI half: the tab's own settings → argv ─────────────────────────
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def qapp():
     from PyQt5 import QtWidgets
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def tab(qapp):
+    """One BatchTab for the whole module. Building a fresh one per test piled
+    up pyqtgraph PlotItems until the process intermittently segfaulted in
+    ``PlotItem.__init__`` (DECISIONS 2026-08-23); every test here sets the
+    fields it needs, and its monkeypatches are undone per test."""
     from midas_gui.tab_batch import BatchTab
-    return BatchTab()
+    t = BatchTab()
+    yield t
+    t.deleteLater()
+    qapp.processEvents()
 
 
 def _launched_argv(tab, tmp_path, monkeypatch):

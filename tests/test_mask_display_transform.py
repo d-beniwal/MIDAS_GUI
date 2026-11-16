@@ -202,7 +202,7 @@ def test_mapped_roi_corners_match_the_point_map(app, codes, angle, kind):
     after.setAngle(new_angle)
     got = _corners(after, new_size)
 
-    assert got == pytest.approx(want, abs=1e-6), (
+    assert np.asarray(got) == pytest.approx(np.asarray(want), abs=1e-6), (
         f"{kind} angle={angle} codes={codes}")
 
 
@@ -237,7 +237,7 @@ def test_polygon_vertices_map_pointwise(codes):
     back_shape = (n_rows, n_cols)
     back = [map_point_xy(x, y, back_shape, tuple(reversed(codes)))[:2]
             for x, y in mapped]
-    assert back == pytest.approx(pts, abs=1e-9)
+    assert np.asarray(back) == pytest.approx(np.asarray(pts), abs=1e-9)
 
 
 # ── MaskTab: display follows, mask stays raw ─────────────────────────────

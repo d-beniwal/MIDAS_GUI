@@ -263,7 +263,9 @@ def test_the_profile_resolves_a_hutch_the_path_cannot(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "active_profile", lambda: "20-ID-E")
     assert wk._HDF5StackGlobSource(
         [tmp_path / "eiger2" / "scan.h5"], "exchange/data")._hutch == "E"
-    monkeypatch.setattr(settings, "active_profile", lambda: "1-ID-E")
+    # A station whose scaler group has not been seen in a real file has no
+    # _PROFILE_HUTCH entry (1-ID-E used to be the example; it now maps to E).
+    monkeypatch.setattr(settings, "active_profile", lambda: "17-BM")
     assert wk._HDF5StackGlobSource(
         [tmp_path / "eiger2" / "scan.h5"], "exchange/data")._hutch is None
 
