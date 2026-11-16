@@ -31,8 +31,6 @@ and would silently inherit it.
 from __future__ import annotations
 
 import math
-import os
-import re
 from typing import Optional
 
 import numpy as np
@@ -48,12 +46,10 @@ from mpl_toolkits.mplot3d import Axes3D  # noqa: F401, E402  (registers '3d')
 from PyQt5 import QtCore, QtWidgets  # noqa: E402
 
 from midas_gui.metadata_catalog import MetadataCatalog, StreamInfo  # noqa: E402
-from midas_gui.peak_fit_data import peak_fit_omega_eta_grid  # noqa: E402
 from midas_gui.stream_pickers import (  # noqa: E402
     ColorSourceRow, MetadataStreamPicker)
-from midas_gui.stream_sources import (  # noqa: E402
-    discover_cake_siblings, infer_frame_count, is_zarr, parse_cake_csv,
-    read_dataset_1d, source_exists)
+from midas_gui.stream_sources import (  # noqa: E402     discover_cake_siblings, infer_frame_count, is_zarr, parse_cake_csv,     read_dataset_1d, source_exists)
+    discover_cake_siblings, infer_frame_count, parse_cake_csv)
 
 try:
     import h5py
@@ -291,23 +287,6 @@ class PoleFigure3DPanel(QtWidgets.QWidget):
             return 1
 
     # ── External entry points (used by gui_caking_launcher) ─────────
-    def set_n_frames(self, n: int) -> None:
-        """Public setter for the frame-count field; turns off auto-detect."""
-        try:
-            n_int = max(1, int(n))
-        except (TypeError, ValueError):
-            return
-        self._nframes_auto = False
-        if self.nframes_auto_cb.isChecked():
-            # Block so the toggle doesn't re-enter _refresh before we set text.
-            blocker = QtCore.QSignalBlocker(self.nframes_auto_cb)
-            self.nframes_auto_cb.setChecked(False)
-            del blocker
-        self.nframes_edit.setReadOnly(False)
-        if self.nframes_edit.text().strip() != str(n_int):
-            self.nframes_edit.setText(str(n_int))
-        self._refresh()
-
     def set_cake_csv(self, path: str) -> None:
         """Public setter for the cake-CSV path (delegates to the catalog)."""
         self._catalog.set_cake_csv((path or '').strip())

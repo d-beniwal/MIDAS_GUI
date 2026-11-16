@@ -1258,9 +1258,6 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         if emit and was_on:
             self.projectionChanged.emit()
 
-    def is_projection(self) -> bool:
-        return self._is_projection
-
     def projected(self, n: int) -> Optional[np.ndarray]:
         return self._proj_raw.get(n) if self._is_projection else None
 

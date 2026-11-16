@@ -267,9 +267,6 @@ class PlotCanvas(QtWidgets.QWidget):
         except Exception:
             pass
 
-    def set_plot_font_size(self, size: int):
-        self._plot_font_size = max(8, int(size))
-
     @staticmethod
     def _needs_decimal_formatter(values: np.ndarray) -> bool:
         if values is None:

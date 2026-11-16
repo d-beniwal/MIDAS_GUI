@@ -42,7 +42,7 @@ except ImportError:                                  # pragma: no cover
     zarr = None
 
 # Re-exported, not re-implemented: cake_params owns these already.
-from midas_gui.cake_params import CAKE_KEYS, parse_cake_csv  # noqa: F401
+from midas_gui.cake_params import parse_cake_csv  # noqa: F401
 
 
 _MOTOR_HINT_RX = re.compile(

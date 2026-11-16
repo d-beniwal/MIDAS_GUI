@@ -150,7 +150,6 @@ class DiagnosticsView(QtWidgets.QWidget):
         p = self.glw.addPlot(row=2, col=0, colspan=max(3, len(panels)), title="Acquisition timeline")
         p.setLabel("bottom", "ω (°)")
         p.addLegend(offset=(10, 10))
-        n_pan = max(len(panels), 1)
         if frames is not None and len(frames):
             for i, pid in enumerate(panels):
                 f = frames[frames.panel_id == pid]

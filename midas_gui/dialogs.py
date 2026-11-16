@@ -9,7 +9,8 @@ from typing import Optional
 from PyQt5 import QtCore, QtWidgets
 from midas_gui import style as S
 
-from .constants import DISTORTION_NAMES, DISTORTION_ISO, DISTORTION_PRESETS, H5_EXTS, PROJECT_ROOT
+from .constants import (
+    DISTORTION_ISO, DISTORTION_PRESETS, H5_EXTS, PROJECT_ROOT)
 
 _PANEL_LABELS = {"single": "Single detector", "ge1": "ge1", "ge2": "ge2",
                  "ge3": "ge3", "ge4": "ge4", "hydra_composite": "Hydra Overall"}

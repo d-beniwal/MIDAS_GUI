@@ -10,12 +10,11 @@ This tab is purely for inspection — it produces no shared state for other tabs
 """
 from __future__ import annotations
 
-import math
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore, QtWidgets
 import pyqtgraph as pg
 
 from midas_gui.panel_toggle import install_panel_toggles

@@ -3,6 +3,13 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-11-15 — Code-hygiene pass: latent NameErrors, dead code, unused imports
+
+Static scan (pyflakes + vulture in a throwaway venv, not a project dep). **Fixed real bugs:** `real_space_panel` used `peak_fit_per_file_at_eta` and `metadata_catalog` used `read_h5_dataset` without importing them (NameError on those paths); `Optional` missing in `app.py`/`hydra_batch_page.py`; duplicate `zarr_grouping` key in the Hydra batch state dict. **De-duplicated:** `peak_fit_panel.read_h5_dataset` now imports the `stream_sources` one. **Removed:** ~60 unused top-level imports and 17 functions/methods with zero references anywhere (code, tests, docs, dynamic dispatch).
+**Deliberately kept:** side-effect imports (`_paths`, `hdf5plugin`, `torch`/`vtk`/`midas_integrate_v2` probes, `Axes3D`), `control_api.op_*` (dispatched by name via getattr), trivial getter/setter pairs, and re-exports (`stream_sources.parse_cake_csv`, `widgets.PvaLiveSource/CaLiveSource`, used by tests/callers; my first sweep removed the latter and broke `test_live_stream`, now restored with a noqa note). pyflakes "undefined name" in `style.py` is a false positive (`globals().update(THEMES[mode])`).
+Rule for future cleanups: grep tests/ for `module.name` before deleting an "unused" import; it may be a re-export.
+Tests: per-file full run; failures are the same pre-existing set as clean HEAD (test_smoke crashes on OpenGL in isolation on HEAD too). Not done: splitting the giant modules (`widgets.py` 7.5k, `workers.py` 6k lines), deliberately out of scope as too risky without live checks.
+
 ## 2026-11-15 — Merged jsp's PR #13 into main (keep our STATE.md)
 
 Merged `junspark:calibrate-parameter-table-and-limits` (18 files) with `--no-ff`. Only conflict was `.context/STATE.md`: the PR carried a stale 2026-11-04 snapshot, so ours was kept. `tab_batch.py`/`batch_cli.py` were edited on both sides on different lines (our `--run-mode`/`--n-workers` vs the PR's `--dark-dataset`); verified compatible. Trial merge ran every test file separately: failures were the same 9 files that fail on main (one extra `test_widths_persist_and_reset` failure did not reproduce in 3 reruns). Thread walk costs 0.08 s on the full 15-tab window. Dark/Hydra/Zarr behaviour on real beamline data not live-checked.

@@ -24,8 +24,7 @@ from typing import Callable, Optional
 from PyQt5 import QtCore, QtWidgets
 import pyqtgraph as pg
 
-from midas_gui.constants import DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM, DEFAULT_LSD_UM, \
-    DEFAULT_BC_Y, DEFAULT_BC_Z
+from midas_gui.constants import DEFAULT_LSD_UM, DEFAULT_BC_Y, DEFAULT_BC_Z
 from midas_gui.helpers import (
     _fspin, im_trans_codes_from_checkboxes, geometry_fields_from_file,
     link_im_trans_checkboxes, set_im_trans_codes, set_paramstest_im_trans,

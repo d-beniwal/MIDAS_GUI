@@ -12,7 +12,6 @@ from __future__ import annotations
 from typing import Callable, Optional
 
 import numpy as np
-import pandas as pd
 import pyqtgraph as pg
 from PyQt5 import QtCore, QtGui, QtWidgets
 

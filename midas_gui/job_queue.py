@@ -25,7 +25,6 @@ import functools
 import re
 import shlex
 import subprocess
-import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -580,21 +579,6 @@ class JobQueuePanel(QtWidgets.QWidget):
         else:
             QtWidgets.QMessageBox.information(
                 self, "No handler", "Nothing is registered to load this job's results.")
-
-    def _remove_job_row(self, job: Job) -> None:
-        if job.row_widget is not None:
-            self._jobs_layout.removeWidget(job.row_widget)
-            job.row_widget.deleteLater()
-            job.row_widget = None
-        if job in self._jobs:
-            self._jobs.remove(job)
-        if self._active_log_job is job:
-            self._active_log_job = None
-            if self._tail_proc is not None:
-                self._tail_proc.kill()
-                self._tail_proc.waitForFinished(500)
-                self._tail_proc = None
-        self._refresh_empty_label()
 
     # ── Log tailing ───────────────────────────────────────────────────
 

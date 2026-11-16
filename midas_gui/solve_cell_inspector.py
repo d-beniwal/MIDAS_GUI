@@ -64,9 +64,6 @@ class SpotInspector(QtWidgets.QWidget):
         self._cubes, self._index, self._omega_of = arrays, index, omega_of
         self.show_spot(self._row, self._pred)
 
-    def has_spot(self, spot_id) -> bool:
-        return self._index is not None and spot_id in set(self._index.spot_id)
-
     def show_spot(self, row: Optional[dict], pred: Optional[dict] = None):
         self._row, self._pred = row, pred
         self._k = None

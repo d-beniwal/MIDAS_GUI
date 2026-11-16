@@ -38,8 +38,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from midas_gui.metadata_catalog import (
     GROUP_BG_COLORS, MetadataCatalog, StreamInfo)
 from midas_gui.peak_fit_data import (
-    _PEAK_FIT_PARAM_LABELS,
-    peak_fit_eta_choices, peak_fit_omega_eta_grid, peak_fit_per_frame,
+    _PEAK_FIT_PARAM_LABELS, peak_fit_eta_choices, peak_fit_per_frame,
     peak_fit_per_frame_at_eta)
 
 

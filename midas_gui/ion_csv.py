@@ -422,7 +422,6 @@ def rows_from_tree(tree: dict, hutch: Optional[str], *, frame_ranges,
     light_off, dark_off, note = split_light_dark(
         tree, n_light=n_light, n_dark=n_dark, hutch=hutch)
     ranges = list(frame_ranges or [])
-    n_rows = len(ranges)
 
     def chunked(h5_path, offset):
         """One value per output frame, averaged over the same raw window the

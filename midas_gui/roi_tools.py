@@ -252,12 +252,6 @@ class ROIStatsPopup(QtWidgets.QDialog):
         self.setWindowTitle(text)
         self.labelChanged.emit(text)
 
-    def set_label(self, text: str):
-        self._label_ed.blockSignals(True)
-        self._label_ed.setText(text)
-        self._label_ed.blockSignals(False)
-        self.setWindowTitle(text)
-
     def set_area_data(self, values: np.ndarray, crop: Optional[np.ndarray],
                        cmap_name: str, log: bool, bad_crop: Optional[np.ndarray] = None):
         if self._hist_plot is None:

@@ -21,15 +21,13 @@ Deliberate simplifications vs. the source:
 """
 from __future__ import annotations
 
-import csv
 import os
-import re
-from typing import Optional
 
 import numpy as np
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtWidgets
 
 from midas_gui.helpers import browse_start_dir, warn_if_path_missing
+from midas_gui.stream_sources import read_h5_dataset
 
 import matplotlib
 matplotlib.use("Qt5Agg")
@@ -43,24 +41,8 @@ from matplotlib.figure import Figure  # noqa: E402
 # matplotlib.use at import). Re-exported here under the original names:
 # `from midas_gui.peak_fit_panel import parse_peak_fit_csv` still works,
 # and the two copies that briefly existed cannot drift apart.
-from midas_gui.peak_fit_data import (  # noqa: E402
-    parse_peak_fit_csv, _PEAK_FIT_NAME_RX, _PEAK_FIT_FILE_RX,
+from midas_gui.peak_fit_data import (  # noqa: E402     parse_peak_fit_csv, _PEAK_FIT_NAME_RX, _PEAK_FIT_FILE_RX,     _PEAK_FIT_PARAM_KEYS, _PEAK_FIT_PARAM_LABELS, _PEAK_FIT_EXTRA_COLS)
     _PEAK_FIT_PARAM_KEYS, _PEAK_FIT_PARAM_LABELS, _PEAK_FIT_EXTRA_COLS)
-
-def read_h5_dataset(h5_path: str, ds_path: str):
-    """Read a 1-D dataset by HDF5 path; return None on failure."""
-    if not (h5_path and ds_path and os.path.isfile(h5_path)):
-        return None
-    try:
-        import h5py
-        with h5py.File(h5_path, "r") as f:
-            obj = f[ds_path]
-            if not isinstance(obj, h5py.Dataset) or obj.ndim != 1:
-                return None
-            return np.asarray(obj[...])
-    except Exception:
-        return None
-
 
 # ── Minimal catalog adapter (replaces mpe_wf's much larger MetadataCatalog) ─
 

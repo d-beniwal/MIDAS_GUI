@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtWidgets
 
 from midas_gui import style as S
 from midas_gui.helpers import (widgets_to_dict, apply_dict_to_widgets,

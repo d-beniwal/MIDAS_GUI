@@ -15,7 +15,7 @@ from typing import NamedTuple, Optional
 import numpy as np
 from PyQt5 import QtCore, QtWidgets
 
-from midas_gui.constants import _SENTINELS, _LATT, H5_EXTS, _V2_TO_V1, HC_KEV_A
+from midas_gui.constants import _LATT, H5_EXTS, _V2_TO_V1, HC_KEV_A
 from midas_gui import style as S
 
 # checkmark SVG written to a temp file so the QSS image: property can use it
@@ -2996,14 +2996,6 @@ def _build_spec(result, r_bin: float, eta_bin: float,
     _apply_panel_fields(spec, getattr(result, "panel_layout", None),
                         getattr(result, "panel_shifts_path", None))
     return _drop_missing_residual_map(spec)
-
-
-def _spec_from_json(path: str, r_bin: float, eta_bin: float):
-    # compat.to_integrate copies the JSON's "residual_corr_bin" key straight
-    # into the spec, so a calibration.json outlives the .bin it points at.
-    from midas_calibrate_v2.compat.to_integrate import spec_from_calibration_json
-    return _drop_missing_residual_map(
-        spec_from_calibration_json(path, RBinSize=r_bin, EtaBinSize=eta_bin))
 
 
 # v1 paramstest index (p#) → v2 harmonic name — the inverse of the single source

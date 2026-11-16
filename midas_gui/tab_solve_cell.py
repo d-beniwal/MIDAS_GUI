@@ -1633,37 +1633,6 @@ class SolveCellTab(QtWidgets.QWidget):
         return (df["qsample_x"].to_numpy(), df["qsample_y"].to_numpy(), df["qsample_z"].to_numpy())
 
     @staticmethod
-    def _panel_ids_col(df):
-        if df is None or len(df) == 0 or "panel_id" not in df.columns:
-            return None
-        return df["panel_id"].to_numpy()
-
-    def _bucket_by_panel(self, sources):
-        """``sources`` is a list of ``(x, y, z, panel_ids_or_None)`` tuples.
-        Returns ``{panel_key: (x, y, z)}``, concatenated across every source
-        that shares the same panel id -- ``panel_key`` is ``None`` for points
-        with no panel_id info at all (single-panel data), rendered as one
-        shared '(single panel)' bucket."""
-        buckets: dict = {}
-
-        def _extend(key, x, y, z):
-            parts = buckets.setdefault(key, [[], [], []])
-            parts[0].append(x); parts[1].append(y); parts[2].append(z)
-
-        for x, y, z, pids in sources:
-            if x is None or len(x) == 0:
-                continue
-            if pids is None:
-                _extend(None, x, y, z)
-                continue
-            pids = np.asarray(pids)
-            for pid in np.unique(pids):
-                mask = pids == pid
-                _extend(int(pid), x[mask], y[mask], z[mask])
-        return {key: (np.concatenate(parts[0]), np.concatenate(parts[1]), np.concatenate(parts[2]))
-                for key, parts in buckets.items()}
-
-    @staticmethod
     def _panel_label(key) -> str:
         return "(single panel)" if key is None else solve_pipeline.panel_dir_name(key)
 

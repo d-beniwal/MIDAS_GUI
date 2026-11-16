@@ -14,7 +14,6 @@ the tab's lifetime) or several (rebound each time the active panel changes).
 from __future__ import annotations
 
 import math
-import re
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -464,9 +463,6 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         NOT part of im_trans_codes()/get_geometry(), so it never reaches
         DetectorState/composite geometry or calibration-file export."""
         return self._rotate.value() if self._rotate is not None else 0.0
-
-    def any_material_rings(self) -> bool:
-        return self._any_material_rings()
 
     def refresh_rings_and_radial(self):
         """Call after the bound image changes (new frame/file) — redraws any

@@ -27,7 +27,6 @@ import os
 import re
 from glob import glob
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets

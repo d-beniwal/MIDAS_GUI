@@ -28,7 +28,7 @@ solved domain (``known_domains``) even though the material claims it.
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, fields
 from typing import Optional, Sequence
 
 import numpy as np

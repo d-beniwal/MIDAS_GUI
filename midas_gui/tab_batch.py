@@ -22,26 +22,22 @@ from midas_gui.panel_toggle import install_panel_toggles
 from midas_gui.constants import (KERNELS, ERROR_MODELS,
                            DEFAULT_NICKEL_DIR, DEFAULT_KERNEL,
                            DEFAULT_ERROR_MODEL)
-from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_file,
-                               geometry_fields_from_file,
-                               resolve_calibration_fields, full_calibration_snapshot,
-                               pixel_readout_text,
-                               collapse_cake_eta,
-                               make_calib_values_button,
-                               rmax_corner_px, rmax_edge_px, draw_polar_bin_overlay,
-                               _NoScrollSpinBox, _NoScrollComboBox,
-                               widgets_to_dict, apply_dict_to_widgets,
-                               check_output_dir_writable, group_paths_by_output_dir,
-                               suggest_integration_output_dir,
-                               suggest_working_dir, bc_path_parts,
-                               browse_start_dir, warn_if_path_missing,
-                               is_h5, list_h5_1d_datasets)
+from midas_gui.helpers import (
+    _fspin, _browse, _build_spec, spec_from_geometry_file,
+    resolve_calibration_fields, full_calibration_snapshot,
+    pixel_readout_text, collapse_cake_eta, make_calib_values_button,
+    rmax_corner_px, rmax_edge_px, draw_polar_bin_overlay, _NoScrollSpinBox,
+    _NoScrollComboBox, widgets_to_dict, apply_dict_to_widgets,
+    check_output_dir_writable, group_paths_by_output_dir,
+    suggest_integration_output_dir, suggest_working_dir, bc_path_parts,
+    browse_start_dir, warn_if_path_missing, is_h5, list_h5_1d_datasets)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, DataLoaderPanel, OutputFormatSelector,
                                ImageViewer, OriginToolButton, build_lab_frame_axes_items,
                                CakeStackViewer)
-from midas_gui.workers import (BatchWorker, BatchRunCoordinator, REBIN_UNITS,
-                               DriftWorker, FolderMonitorWorker, write_all_profiles)
+from midas_gui.workers import (
+    BatchRunCoordinator, REBIN_UNITS, DriftWorker, FolderMonitorWorker,
+    write_all_profiles)
 from midas_gui.dialogs import show_error
 from midas_gui.hydra_widgets import HydraModeRibbon
 from midas_gui.hydra_batch_page import HydraBatchPage

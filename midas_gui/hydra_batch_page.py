@@ -26,6 +26,8 @@ tab and can be added later if needed; see ``.context/DECISIONS.md``.
 """
 from __future__ import annotations
 
+from typing import Optional
+
 import os
 import sys
 from pathlib import Path
@@ -35,12 +37,12 @@ from PyQt5 import QtCore, QtWidgets
 
 from midas_gui.constants import (KERNELS, ERROR_MODELS,
                                  DEFAULT_KERNEL, DEFAULT_ERROR_MODEL)
-from midas_gui.helpers import (collapse_cake_eta,
-    _fspin, _browse, _NoScrollComboBox, _NoScrollSpinBox,
-    widgets_to_dict, apply_dict_to_widgets,
-    _load_image, rmax_corner_px, rmax_edge_px, draw_polar_bin_overlay,
-    browse_start_dir, warn_if_path_missing, suggest_panel_base_output_dir, check_output_dir_writable,
-    suggest_working_dir, bc_path_parts, source_kind, is_h5,
+from midas_gui.helpers import (
+    collapse_cake_eta, _fspin, _browse, _NoScrollComboBox,
+    _NoScrollSpinBox, widgets_to_dict, apply_dict_to_widgets, _load_image,
+    rmax_corner_px, draw_polar_bin_overlay, browse_start_dir,
+    warn_if_path_missing, suggest_panel_base_output_dir,
+    check_output_dir_writable, suggest_working_dir, source_kind, is_h5,
     list_h5_1d_datasets, _folder_output_dir)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer, CakeStackViewer,
                                StackedProfileViewer, OutputFormatSelector, ImageViewer,
@@ -1046,12 +1048,12 @@ class HydraBatchPage(QtWidgets.QWidget):
                 card.set_calibration_file(p)
         self._load4_lbl.setText(
             f"from ge{picked}: loaded " + ", ".join(f"ge{n}" for n in sorted(found))
-            + (f"  ·  missing " + ", ".join(f"ge{n}" for n, _ in missing)
+            + ("  ·  missing " + ", ".join(f"ge{n}" for n, _ in missing)
                if missing else ""))
         self._log.append(
             f"[hydra batch] calibration from ge{picked}: loaded "
             + ", ".join(f"ge{n}" for n in sorted(found))
-            + (f"; no file for " + ", ".join(f"ge{n}" for n, _ in missing)
+            + ("; no file for " + ", ".join(f"ge{n}" for n, _ in missing)
                if missing else ""))
         if missing:
             lines = "\n".join(
@@ -2863,7 +2865,6 @@ class HydraBatchPage(QtWidgets.QWidget):
             "tth_min": self._tth_min, "tth_max": self._tth_max,
             "tth_bin": self._tth_bin,
             "q_bin": self._q_bin, "mon_ed": self._mon_ed, "out_ed": self._out_ed,
-            "zarr_grouping": self._zarr_grouping,
             "run_mode": self._run_mode_combo, "frame_run_mode": self._frame_run_mode,
             "n_workers": self._n_workers,
         }

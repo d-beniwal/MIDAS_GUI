@@ -44,7 +44,8 @@ from midas_gui.peak_fit_data import (
     peak_fit_per_frame_at_eta)
 from midas_gui.stream_sources import (
     discover_datasets, discover_motor_datasets, discover_zarr_2d_attrs,
-    is_zarr, read_dataset_1d, read_zarr_2d_reduced, source_exists)
+    is_zarr, read_dataset_1d, read_h5_dataset, read_zarr_2d_reduced,
+    source_exists)
 
 #: Cap on 2-D streams surfaced from one container. A MIDAS archive holds
 #: one (nR, nEta) array per frame under IntegrationResult/ and another

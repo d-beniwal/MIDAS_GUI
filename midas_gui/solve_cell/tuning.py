@@ -21,7 +21,6 @@ module constants so they can be re-tuned against a validation set.
 from __future__ import annotations
 
 import contextlib
-import math
 import multiprocessing as mp
 import os
 import shutil

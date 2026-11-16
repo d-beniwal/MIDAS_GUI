@@ -26,7 +26,8 @@ from midas_gui.constants import (COLORMAPS, DISTORTION_NAMES, DEFAULT_COLORMAP,
                                  DEVICES, POL_PLANE_HORIZONTAL_ETA_DEG)
 from midas_gui.dialogs import show_error, BrowseFilesDialog
 from midas_gui.helpers import fit_circle_algebraic
-from midas_gui.live_sources import PvaLiveSource, CaLiveSource, create_live_source
+from midas_gui.live_sources import (  # noqa: F401  (re-exported for tests/callers)
+    CaLiveSource, PvaLiveSource, create_live_source)
 from midas_gui.sim_detector import DEFAULT_CHANNEL_NAME as _SIM_CHANNEL_NAME
 
 # Default colormap: the configured one if it's a known option, else the first.
@@ -44,16 +45,15 @@ ORIGIN_LABELS = {ORIGIN_BOTTOM_LEFT: "Bottom-Left (MIDAS)",
 # full "Origin: Bottom-left" button would render as "Ori...eft". The dropdown
 # and the tooltip both spell the current choice out in full.
 ORIGIN_SHORT = {ORIGIN_BOTTOM_LEFT: "BL", ORIGIN_TOP_LEFT: "TL"}
-from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollDoubleSpinBox, _fspin, _twocol,
-                               _browse, is_h5, list_h5_datasets, _NoScrollComboBox,
-                               _load_image, _collect_frame_paths, apply_field_corrections,
-                               new_temp_h5_path, save_stack_h5, detect_geometry_from_path,
-                               source_kind, display_text_for_paths, _apply_im_trans,
-                               is_dark_like_name, warn_if_path_missing,
-                               path_is_missing, _folder_format_groups, radial_spline_values,
-                               best_default_dataset_index, FrameCache,
-                               probe_h5, h5_probe_cached, h5_dataset_shape_cached,
-                               read_h5_frame_native, open_h5_read)
+from midas_gui.helpers import (
+    _NoScrollSpinBox, _NoScrollDoubleSpinBox, _fspin, _twocol, _browse,
+    is_h5, _NoScrollComboBox, _load_image, _collect_frame_paths,
+    apply_field_corrections, new_temp_h5_path, save_stack_h5,
+    detect_geometry_from_path, source_kind, display_text_for_paths,
+    _apply_im_trans, is_dark_like_name, warn_if_path_missing,
+    path_is_missing, _folder_format_groups, radial_spline_values,
+    best_default_dataset_index, FrameCache, probe_h5, h5_probe_cached,
+    h5_dataset_shape_cached, read_h5_frame_native, open_h5_read)
 from midas_gui.async_io import AdaptiveCall
 from midas_gui import style as S
 from midas_gui.color_scale import ColorScaleControls
@@ -1048,14 +1048,6 @@ class PickableImageViewer(ImageViewer):
             for it in items:
                 self._iv.removeItem(it)
         self._dsp_pt_items.clear()
-
-    def _clear_dspacing_points(self):
-        self._remove_all_dspacing_items()
-        self._dsp_pts.clear()
-        self._undo_btn.setEnabled(False)
-        self._clear_ring_btn.setEnabled(False)
-        self._pick_status.setText("Click on a ring to pick points")
-        self.dspacingPicksChanged.emit()
 
     def dspacing_picks(self) -> list:
         """Read-only snapshot of picked (x, y, ring_idx) points."""
@@ -3200,13 +3192,6 @@ class DistortionTable(QtWidgets.QTableWidget):
         for i, name in enumerate(DISTORTION_NAMES):
             self.setItem(i, 0, QtWidgets.QTableWidgetItem(name))
             self.setItem(i, 1, QtWidgets.QTableWidgetItem("—"))
-
-    def set_distortion(self, distortion: dict):
-        for i, name in enumerate(DISTORTION_NAMES):
-            val = distortion.get(name)
-            txt = f"{val:.6g}" if val is not None else "—"
-            self.item(i, 1).setText(txt)
-
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  CorrectionFlagsWidget  (NEW — reusable physics-corrections panel)

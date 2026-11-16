@@ -28,9 +28,8 @@ grid is for.
 from __future__ import annotations
 
 import os
-from typing import Optional
 
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtWidgets
 
 from midas_gui import style as S
 from midas_gui.metadata_catalog import MetadataCatalog

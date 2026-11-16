@@ -9,7 +9,6 @@ Layout: [ Data Loader | Parameters | Loss/comparison/log ].
 """
 from __future__ import annotations
 
-from typing import Optional
 
 import numpy as np
 from PyQt5 import QtCore, QtWidgets

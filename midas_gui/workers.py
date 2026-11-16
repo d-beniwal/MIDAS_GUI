@@ -34,10 +34,10 @@ from midas_gui import h5_metadata
 from midas_gui import ion_csv
 from midas_gui import provenance
 from midas_gui import settings
-from midas_gui.helpers import (_load_image, _apply_im_trans, _build_spec,
-                               _spec_from_json, average_field, apply_field_corrections,
-                               read_hdf5_stack_chunk, load_profile_file, _LogStream,
-                               reduce_frames_batched, CORRECTION_SUFFIX, CORRECTION_EXT)
+from midas_gui.helpers import (
+    _load_image, _apply_im_trans, _build_spec, average_field,
+    apply_field_corrections, read_hdf5_stack_chunk, load_profile_file,
+    _LogStream, reduce_frames_batched, CORRECTION_SUFFIX, CORRECTION_EXT)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

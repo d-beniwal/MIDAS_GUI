@@ -13,7 +13,7 @@ import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
-from midas_gui.constants import _SENTINELS, H5_EXTS, DEFAULT_CALIBRANT_TIF
+from midas_gui.constants import _SENTINELS, DEFAULT_CALIBRANT_TIF
 from midas_gui.helpers import (_load_image, _fspin, _NoScrollSpinBox, _browse, is_h5,
                                _NoScrollComboBox, list_h5_datasets,
                                widgets_to_dict, apply_dict_to_widgets,

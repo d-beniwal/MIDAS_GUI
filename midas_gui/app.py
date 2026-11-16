@@ -1,6 +1,8 @@
 """Application shell: MainWindow, dark palette, Dioptas-inspired stylesheet, main()."""
 from __future__ import annotations
 
+from typing import Optional
+
 import faulthandler
 import hashlib
 import inspect

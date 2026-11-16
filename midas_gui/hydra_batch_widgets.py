@@ -602,10 +602,6 @@ class HydraBatchPanelCard(QtWidgets.QWidget):
     def set_status(self, text: str):
         self._status_lbl.setText(text)
 
-    def reset_progress(self):
-        self._prog.setValue(0)
-        self._status_lbl.setText("Idle")
-
     # ── GUI state ────────────────────────────────────────────────────
 
     def state_widgets(self) -> dict:

@@ -20,10 +20,11 @@ import pyqtgraph as pg
 
 from midas_gui.panel_toggle import install_panel_toggles
 from midas_gui.constants import (
-    CALIBRANTS, PIPELINES, DEFAULT_PIPELINE, restored_pipeline_label, _SG, _LC, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM,
-    DEFAULT_LSD_UM, DEFAULT_BC_Y, DEFAULT_BC_Z, DEFAULT_CALIBRANT_TIF,
-    DEFAULT_STEP_BC, DEFAULT_STEP_LSD_MM, DEFAULT_STEP_TILT,
-    DISTORTION_NAMES, MATERIALS, calibrant_combo_items, is_dspacing_calibrant)
+    PIPELINES, DEFAULT_PIPELINE, restored_pipeline_label,
+    DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM, DEFAULT_LSD_UM, DEFAULT_BC_Y,
+    DEFAULT_BC_Z, DEFAULT_CALIBRANT_TIF, DEFAULT_STEP_BC,
+    DEFAULT_STEP_LSD_MM, DEFAULT_STEP_TILT, DISTORTION_NAMES, MATERIALS,
+    calibrant_combo_items, is_dspacing_calibrant)
 from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _predict_ring_radii, _NoScrollComboBox,
     make_kedge_label, make_pixel_label, ring_xy_corrected, distortion_rho_d_um,
@@ -2267,8 +2268,8 @@ class CalibrationTab(QtWidgets.QWidget):
         n = self._loader.n_frames()
         if getattr(self, "_proj_active", False):
             lbl.setText(
-                f"This projection is entirely zero — every frame in the "
-                f"projected range is empty. Try Skip frames=1.")
+                "This projection is entirely zero — every frame in the "
+                "projected range is empty. Try Skip frames=1.")
         elif n > 1:
             lbl.setText(
                 f"Frame {self._loader.frame_index() + 1} of {n} is entirely "

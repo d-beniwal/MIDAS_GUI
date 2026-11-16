@@ -46,14 +46,13 @@ from matplotlib.figure import Figure  # noqa: E402
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401, E402  (registers '3d')
 from PyQt5 import QtCore, QtGui, QtWidgets  # noqa: E402
 
-from midas_gui.metadata_catalog import (  # noqa: E402
-    GROUP_BG_COLORS, MetadataCatalog, StreamInfo)
-from midas_gui.stream_pickers import (  # noqa: E402
-    ColorSourceRow, MetadataStreamPicker, apply_color_limits_to_mappable,
-    make_color_range_row, resolve_color_limits)
-from midas_gui.stream_sources import (  # noqa: E402
-    discover_datasets, infer_frame_count, is_zarr, read_dataset_1d,
-    read_h5_dataset, source_exists)
+from midas_gui.peak_fit_data import peak_fit_per_file_at_eta  # noqa: E402
+from midas_gui.metadata_catalog import GROUP_BG_COLORS, MetadataCatalog  # noqa: E402     GROUP_BG_COLORS, MetadataCatalog, StreamInfo)
+from midas_gui.stream_pickers import (  # noqa: E402     ColorSourceRow, MetadataStreamPicker, apply_color_limits_to_mappable,     make_color_range_row, resolve_color_limits)
+    ColorSourceRow, apply_color_limits_to_mappable, make_color_range_row,
+    resolve_color_limits)
+from midas_gui.stream_sources import (  # noqa: E402     discover_datasets, infer_frame_count, is_zarr, read_dataset_1d,     read_h5_dataset, source_exists)
+    infer_frame_count, read_dataset_1d, read_h5_dataset, source_exists)
 
 try:
     import h5py

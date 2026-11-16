@@ -21,16 +21,14 @@ plus one batch of frames.
 """
 from __future__ import annotations
 
-import math
-from dataclasses import dataclass, asdict
-from typing import Callable, Iterable, Optional
+from dataclasses import dataclass
+from typing import Callable, Optional
 
 import warnings
 import numpy as np
 import torch
 
 from . import geometry_adapter as ga
-from .pipeline import _map_index_points
 
 SENTINEL_U32 = 4294967295
 
@@ -135,14 +133,6 @@ class VolumeAccumulator:
         mx = self.max.numpy().reshape(shp).copy()
         mx[count == 0] = np.nan
         return {"sum": self.sum.numpy().reshape(shp).copy(), "count": count.copy(), "max": mx}
-
-
-def quick_background(frames: np.ndarray, in_window: np.ndarray, stride: int = 8) -> np.ndarray:
-    """Per-pixel temporal median over a strided subset of kept frames --
-    an explicitly APPROXIMATE static background (the ingest's sector model is
-    not retained), good enough to suppress the constant detector offset/scatter."""
-    sel = np.flatnonzero(in_window)[::stride]
-    return np.median(frames[sel].astype(np.float32), axis=0).astype(np.float32)
 
 
 def build_volume(sources: list, spec: GridSpec, *, progress: Optional[Callable] = None,

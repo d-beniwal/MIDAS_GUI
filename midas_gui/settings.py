@@ -263,12 +263,6 @@ def create_profile(name: str, seed_cfg: Optional[dict] = None) -> Path:
     return path
 
 
-def duplicate_profile(src: str, dst: str) -> Path:
-    """Copy an existing profile's contents into a new profile named ``dst``."""
-    cfg = read_json(profile_path(src))
-    return create_profile(dst, seed_cfg=cfg)
-
-
 def rename_profile(old: str, new: str) -> Path:
     """Rename a profile, keeping it active if it was the active one."""
     global _cache
@@ -344,11 +338,6 @@ def reset_user_config() -> None:
     """Reset the active profile to the built-in shipped defaults (an empty
     overlay) without removing the profile itself."""
     save_user_config({})
-
-
-def config_paths() -> dict:
-    up = user_config_path()
-    return {"user": up, "user_exists": up.is_file()}
 
 
 # ── last-used Exp ID ─────────────────────────────────────────────────────────

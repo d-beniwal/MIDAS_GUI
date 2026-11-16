@@ -19,7 +19,7 @@ from typing import Optional
 import numpy as np
 import pyqtgraph as pg
 import pyvista as pv
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore, QtWidgets
 from pyvistaqt import QtInteractor
 
 from midas_gui.plot_limits import limit_to_data
