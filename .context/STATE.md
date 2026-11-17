@@ -1,8 +1,10 @@
 # Project state
 
-Last updated: 2026-11-15 (hygiene pass + test audit)
+Last updated: 2026-11-17 (d-spacing x-axis + pixel R readout)
 
 ## Now working on
+
+2026-11-17: **d (Å) added to every radial-profile X dropdown** (ProfileViewer, Waterfall, Stacked, Hydra profile, Pump Probe; Cake/Zarr already had it) and the shared pixel readout now prints `R = … px` (all tabs using `pixel_readout_text`). Offscreen smoke + targeted tests pass; **uncommitted, not live-checked.**
 
 2026-11-15 (test audit): full suite per-file = **3383 passed / 10 skipped / 0 failed** (was 11 failing files; all were stale tests, not product bugs). `pytest-forked` intentionally NOT installed (breaks on pytest 9 + segfaults Qt children; DECISIONS 2026-11-15). **Open:** Batch Integrate runs K=2 at resonant R bins (SubpixelResonanceWarning) unlike the Data Viewer, which swaps to polygon; the `pytest-forked` pins in the env files are misleading.
 

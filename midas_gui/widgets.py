@@ -1503,9 +1503,13 @@ def _convert_radial(x, lsd, px, wl, native, target):
     expected to format non-finite entries (see :class:`_UnitAxis`).
     """
     x = np.asarray(x, dtype=float)
-    if target == native or None in (lsd, px, wl):
+    if target == native or None in (lsd, px):
         return x
-    lsd, px, wl = float(lsd), float(px), float(wl)
+    needs_wl = {native, target} & {"Q", "d"}
+    if wl is None and needs_wl:
+        return x
+    lsd, px = float(lsd), float(px)
+    wl = float(wl) if wl is not None else 1.0
     with np.errstate(divide="ignore", invalid="ignore"):
         if native == "Q":
             tth = 2.0 * np.degrees(np.arcsin(np.clip(x * wl / (4 * math.pi), -1, 1)))
@@ -1513,6 +1517,8 @@ def _convert_radial(x, lsd, px, wl, native, target):
             tth = 2.0 * np.degrees(np.arcsin(np.clip(wl / (2.0 * x), -1, 1)))
         elif native == "2th":
             tth = x
+        elif native == "Rmm":
+            tth = np.degrees(np.arctan(x * 1000.0 / lsd))
         else:  # R px
             tth = np.degrees(np.arctan(x * px / lsd))
         if target == "2th":
@@ -1521,10 +1527,13 @@ def _convert_radial(x, lsd, px, wl, native, target):
             return 4 * math.pi * np.sin(np.radians(tth) / 2) / wl
         if target == "d":
             return wl / (2.0 * np.sin(np.radians(tth) / 2))
+        if target == "Rmm":
+            return lsd * np.tan(np.radians(tth)) / 1000.0
         return lsd * np.tan(np.radians(tth)) / px   # target == "R"
 
 
-_XUNIT_LABEL = {"R": "R (px)", "2th": "2θ (°)", "d": "d (Å)", "Q": "Q (Å⁻¹)"}
+_XUNIT_LABEL = {"R": "R (px)", "2th": "2θ (°)", "d": "d (Å)", "Q": "Q (Å⁻¹)",
+                "Rmm": "R (mm)"}
 
 
 def _select_xunit(combo, unit) -> None:
@@ -1671,7 +1680,7 @@ class CakeViewer(QtWidgets.QWidget):
         self._xunit_lbl.setVisible(False)
         bar.addWidget(self._xunit_lbl)
         self._xunit = _NoScrollComboBox()
-        for _key in ("R", "2th", "d", "Q"):
+        for _key in ("R", "2th", "d", "Q", "Rmm"):
             self._xunit.addItem(_XUNIT_LABEL[_key], _key)
         self._xunit.setToolTip(
             "Label the x-axis in R (px), 2θ (deg), d-spacing (Å) or Q (Å⁻¹).\n"
@@ -1765,7 +1774,7 @@ class CakeViewer(QtWidgets.QWidget):
 
     def _refresh_xaxis(self, *_args):
         unit = self.x_unit()
-        if unit == "R" or None in (self._lsd, self._px, self._wl):
+        if unit == "R" or None in (self._lsd, self._px):
             self._xaxis_item.set_convert(None)
             self._iv.getView().setLabel("bottom", "R", units="px")
             return
@@ -1780,7 +1789,7 @@ class CakeViewer(QtWidgets.QWidget):
         """``r_px`` rendered in the selected unit, for the mouse readout —
         ``""`` when the selection is plain R (the readout already shows it)."""
         unit = self.x_unit()
-        if unit == "R" or None in (self._lsd, self._px, self._wl):
+        if unit == "R" or None in (self._lsd, self._px):
             return ""
         v = float(_convert_radial(np.asarray([r_px], dtype=float), self._lsd,
                                   self._px, self._wl, "R", unit)[0])
@@ -2382,6 +2391,7 @@ class ProfileViewer(QtWidgets.QWidget):
     # whatever unit an already-native-axis profile (e.g. a loaded 2θ/Q file
     # with no geometry available to convert it into r_px) was given in.
     _NATIVE_UNIT_IDX = {"two_theta_deg": 1, "q_invA": 2}
+    _AXIS_LABELS = ["R (px)", "2θ (°)", "Q (Å⁻¹)", "d (Å)", "R (mm)"]
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2391,7 +2401,7 @@ class ProfileViewer(QtWidgets.QWidget):
         bar = QtWidgets.QHBoxLayout()
         bar.addWidget(QtWidgets.QLabel("X:"))
         self._xaxis = _NoScrollComboBox()
-        self._xaxis.addItems(["R (px)", "2θ (°)", "Q (Å⁻¹)"])
+        self._xaxis.addItems(self._AXIS_LABELS)
         self._xaxis.currentIndexChanged.connect(self._on_xaxis_changed)
         bar.addWidget(self._xaxis)
         self._logy = QtWidgets.QCheckBox("Log Y")
@@ -2513,6 +2523,11 @@ class ProfileViewer(QtWidgets.QWidget):
             return math.degrees(two_theta)
         if idx == 2 and wl:
             return 4 * math.pi * math.sin(two_theta / 2) / wl
+        if idx == 3 and wl:
+            s = math.sin(two_theta / 2)
+            return wl / (2 * s) if s > 0 else float("nan")   # R=0 -> d=inf
+        if idx == 4:
+            return r_px * px / 1000.0
         return r_px
 
     def _on_xaxis_changed(self, *_):
@@ -2592,14 +2607,14 @@ class ProfileViewer(QtWidgets.QWidget):
             # combo onto the matching idx, so the ring-marker loop below
             # (which also reads `idx`) converts ring radii into the same unit.
             x = self._r_px
-            self._plot.setLabel("bottom", ["R (px)", "2θ (°)", "Q (Å⁻¹)"][idx])
+            self._plot.setLabel("bottom", self._AXIS_LABELS[idx])
         elif idx == 0 or self._lsd is None:
             x = self._r_px
             self._plot.setLabel("bottom", "R (px)")
         else:
             x = np.array([self._r_to_x(r, idx, self._lsd, self._px, self._wl)
                           for r in self._r_px])
-            self._plot.setLabel("bottom", ["R (px)", "2θ (°)", "Q (Å⁻¹)"][idx])
+            self._plot.setLabel("bottom", self._AXIS_LABELS[idx])
         y = self._prof
         log = self._logy.isChecked()
         if log:
@@ -2632,8 +2647,9 @@ class ProfileViewer(QtWidgets.QWidget):
                 ymax = float(fin.max()) * 1.05
 
             x_arr = np.asarray(x)
-            xmin = max(0.0, float(x_arr.min())) if x_arr.size else None
-            xmax = float(x_arr.max()) if x_arr.size else None
+            x_fin = x_arr[np.isfinite(x_arr)] if x_arr.size else x_arr
+            xmin = max(0.0, float(x_fin.min())) if x_fin.size else None
+            xmax = float(x_fin.max()) if x_fin.size else None
 
             if xmin is not None and ymin is not None:
                 self._auto_limits = (xmin, xmax, ymin, ymax)
@@ -2707,6 +2723,15 @@ class ProfileViewer(QtWidgets.QWidget):
                 return None
             two_theta = 2 * math.asin(s)
             return math.tan(two_theta) * lsd / px
+        if idx == 4:                                    # R (mm)
+            return x * 1000.0 / px
+        if idx == 3 and wl:                             # d (Å)
+            if not x or x <= 0:
+                return None
+            s = wl / (2 * x)
+            if s >= 1.0:
+                return None
+            return math.tan(2 * math.asin(s)) * lsd / px
         return x
 
     def _on_plot_clicked(self, event):
@@ -6808,6 +6833,8 @@ class WaterfallViewer(QtWidgets.QWidget):
         self._xunit_combo.addItem("R (px)", "R")
         self._xunit_combo.addItem("2θ (°)", "2th")
         self._xunit_combo.addItem("Q (Å⁻¹)", "Q")
+        self._xunit_combo.addItem("d (Å)", "d")
+        self._xunit_combo.addItem("R (mm)", "Rmm")
         self._xunit_combo.setToolTip("Label the x-axis in R (px), 2θ (deg) or Q (Å⁻¹). "
                                      "Needs the run's calibration for the conversion.")
         self._xunit_combo.currentIndexChanged.connect(self._on_xunit_changed)
@@ -7053,6 +7080,8 @@ class StackedProfileViewer(QtWidgets.QWidget):
         self._xunit_combo.addItem("R (px)", "R")
         self._xunit_combo.addItem("2θ (°)", "2th")
         self._xunit_combo.addItem("Q (Å⁻¹)", "Q")
+        self._xunit_combo.addItem("d (Å)", "d")
+        self._xunit_combo.addItem("R (mm)", "Rmm")
         self._xunit_combo.setToolTip("Plot the x-axis in R (px), 2θ (deg) or Q (Å⁻¹). "
                                      "Needs the run's calibration for the conversion.")
         self._xunit_combo.currentIndexChanged.connect(self._on_xunit_changed)

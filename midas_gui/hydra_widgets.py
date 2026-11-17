@@ -1600,7 +1600,7 @@ class HydraProfileViewer(QtWidgets.QWidget):
         bar = QtWidgets.QHBoxLayout()
         bar.addWidget(QtWidgets.QLabel("X:"))
         self._xaxis = _NoScrollComboBox()
-        self._xaxis.addItems(["R (px)", "2θ (°)", "Q (Å⁻¹)"])
+        self._xaxis.addItems(["R (px)", "2θ (°)", "Q (Å⁻¹)", "d (Å)", "R (mm)"])
         self._xaxis.setCurrentIndex(1)   # 2θ — the meaningful shared axis across panels
         self._xaxis.currentIndexChanged.connect(self._replot)
         bar.addWidget(self._xaxis)
@@ -1643,7 +1643,7 @@ class HydraProfileViewer(QtWidgets.QWidget):
         layout.addWidget(self._plot, stretch=1)
 
     def _unit_key(self) -> str:
-        return ("R", "2th", "Q")[self._xaxis.currentIndex()]
+        return ("R", "2th", "Q", "d", "Rmm")[self._xaxis.currentIndex()]
 
     def set_curve(self, key: str, r_px, profile, *, lsd_um=None, px_um=None,
                  wavelength_A=None):

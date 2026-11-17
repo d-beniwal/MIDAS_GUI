@@ -127,7 +127,7 @@ def _thin_ticks(values, n=8, fmt="{:.3g}"):
 
 
 class PumpProbeTab(QtWidgets.QWidget):
-    _AXES = [("Q (Å⁻¹)", "Q"), ("2θ (°)", "2th"), ("R (px)", "R")]
+    _AXES = [("Q (Å⁻¹)", "Q"), ("2θ (°)", "2th"), ("R (px)", "R"), ("d (Å)", "d"), ("R (mm)", "Rmm")]
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1125,6 +1125,12 @@ class PumpProbeTab(QtWidgets.QWidget):
             return d["q_axis"], "Q (Å⁻¹)"
         if target == "2th":
             return d["tth_axis"], "2θ (°)"
+        if target == "Rmm":
+            return (_convert_radial(d["r_axis_px"], d["lsd"], d["px"], d["wl"], "R", "Rmm"),
+                    "R (mm)")
+        if target == "d":
+            return (_convert_radial(d["r_axis_px"], d["lsd"], d["px"], d["wl"], "R", "d"),
+                    "d (Å)")
         return d["r_axis_px"], "R (px)"
 
     def _on_heatmap_range_changed(self, *_):

@@ -2486,7 +2486,7 @@ def _fmt_g(v: float, nd: int) -> str:
 
 
 def pixel_readout_text(col, row, geom: dict) -> str:
-    """One status-bar clause naming 2θ / Q / d / η at pixel ``(col, row)``.
+    """One status-bar clause naming 2θ / R / Q / d / η at pixel ``(col, row)``.
 
     ``geom`` is the geometry dict the tabs already build (``Lsd`` in µm,
     ``BC_y``/``BC_z`` in px, ``pxY``/optional ``pxZ`` in µm, optional
@@ -2519,6 +2519,12 @@ def pixel_readout_text(col, row, geom: dict) -> str:
                               float(pxY), float(pxZ),
                               float(geom.get("tx") or 0.0)))
     parts = [f"2θ = {_fmt_g(tt, 4)}°"]
+    # Ring radius in px -- the same R the integrator bins in (R = Lsd·tan 2θ / px),
+    # so it matches the "R (px)" axis of the radial profile.
+    r_px = (float(lsd) * math.tan(math.radians(tt)) / float(pxY)
+            if 0.0 <= tt < 90.0 else math.nan)
+    parts.append(f"R = {_fmt_g(r_px, 2)} px")
+    parts.append(f"R = {_fmt_g(r_px * float(pxY) / 1000.0, 3)} mm")
     wl = geom.get("wavelength_A")
     if wl and float(wl) > 0:
         wl = float(wl)
